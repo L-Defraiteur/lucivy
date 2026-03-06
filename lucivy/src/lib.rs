@@ -541,7 +541,8 @@ fn collect_results(
             .unwrap_or(0);
 
         let highlights = highlight_sink.and_then(|sink| {
-            let by_field = sink.get(doc_addr.segment_ord, doc_addr.doc_id)?;
+            let seg_id = searcher.segment_reader(doc_addr.segment_ord).segment_id();
+            let by_field = sink.get(seg_id, doc_addr.doc_id)?;
             let map: HashMap<String, Vec<(u32, u32)>> = by_field.into_iter()
                 .filter(|(name, _)| !name.ends_with(RAW_SUFFIX) && !name.ends_with(NGRAM_SUFFIX))
                 .map(|(name, offsets)| {
