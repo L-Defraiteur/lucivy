@@ -189,7 +189,7 @@ This is transparent to the user — you always reference the base field name.
 The `contains` query type uses trigram-accelerated substring search on stored text:
 
 1. **Candidate collection** — depends on mode:
-   - *Fuzzy*: exact lookup on `._raw` + trigram intersection on `._ngram`
+   - *Fuzzy*: term dictionary lookup on `._raw` (O(1) via FST), falling back to trigram intersection on `._ngram` if the exact term isn't found
    - *Regex*: trigram union on `._ngram` from extracted regex literals
    - *Short literals*: full segment scan when literals < 3 chars
 2. **Verification** — read stored text, dispatch to fuzzy or regex verifier
