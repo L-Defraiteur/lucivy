@@ -7,6 +7,7 @@ use crate::postings::Postings;
 use crate::query::bm25::Bm25Weight;
 use crate::query::phrase_query::scoring_utils::HighlightSink;
 use crate::query::{Intersection, Scorer};
+use crate::index::SegmentId;
 use crate::{DocId, Score};
 
 pub(crate) struct PostingsWithOffset<TPostings> {
@@ -64,7 +65,7 @@ pub struct PhraseScorer<TPostings: Postings> {
     slops_buffer: Vec<u8>,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
-    segment_ord: u32,
+    segment_id: SegmentId,
 }
 
 /// Returns true if and only if the two sorted arrays contain a common element
@@ -362,7 +363,7 @@ impl<TPostings: Postings> PhraseScorer<TPostings> {
         fieldnorm_reader: FieldNormReader,
         slop: u32,
     ) -> PhraseScorer<TPostings> {
-        Self::build(term_postings, similarity_weight_opt, fieldnorm_reader, slop, 0, None, String::new(), 0)
+        Self::build(term_postings, similarity_weight_opt, fieldnorm_reader, slop, 0, None, String::new(), SegmentId::generate_random())
     }
 
     pub(crate) fn new_with_offset(
@@ -380,7 +381,7 @@ impl<TPostings: Postings> PhraseScorer<TPostings> {
             offset,
             None,
             String::new(),
-            0,
+            SegmentId::generate_random(),
         )
     }
 
@@ -391,7 +392,7 @@ impl<TPostings: Postings> PhraseScorer<TPostings> {
         slop: u32,
         highlight_sink: Arc<HighlightSink>,
         highlight_field_name: String,
-        segment_ord: u32,
+        segment_id: SegmentId,
     ) -> PhraseScorer<TPostings> {
         Self::build(
             term_postings,
@@ -401,7 +402,7 @@ impl<TPostings: Postings> PhraseScorer<TPostings> {
             0,
             Some(highlight_sink),
             highlight_field_name,
-            segment_ord,
+            segment_id,
         )
     }
 
@@ -413,7 +414,7 @@ impl<TPostings: Postings> PhraseScorer<TPostings> {
         offset: usize,
         highlight_sink: Option<Arc<HighlightSink>>,
         highlight_field_name: String,
-        segment_ord: u32,
+        segment_id: SegmentId,
     ) -> PhraseScorer<TPostings> {
         let num_docs = fieldnorm_reader.num_docs();
         let max_offset = term_postings_with_offset
@@ -444,7 +445,7 @@ impl<TPostings: Postings> PhraseScorer<TPostings> {
             positions_buffer: Vec::with_capacity(100),
             highlight_sink,
             highlight_field_name,
-            segment_ord,
+            segment_id,
         };
         if scorer.doc() != TERMINATED {
             let matched = scorer.phrase_match();
@@ -587,7 +588,7 @@ impl<TPostings: Postings> PhraseScorer<TPostings> {
             if let Some(ref sink) = self.highlight_sink {
                 all_offsets.sort();
                 all_offsets.dedup();
-                sink.insert(self.segment_ord, doc, &self.highlight_field_name, all_offsets);
+                sink.insert(self.segment_id, doc, &self.highlight_field_name, all_offsets);
             }
         }
     }

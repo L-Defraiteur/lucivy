@@ -75,16 +75,11 @@ impl PhraseWeight {
             {
                 term_postings_list.push((offset, postings));
             } else {
-                // Term not found in this segment — still advance the sink counter
-                // to stay in sync with the real segment ordinals used by TopDocs.
-                if let Some(ref sink) = self.highlight_sink {
-                    sink.next_segment();
-                }
                 return Ok(None);
             }
         }
         if let Some(ref sink) = self.highlight_sink {
-            let segment_ord = sink.next_segment();
+            let segment_id = reader.segment_id();
             Ok(Some(PhraseScorer::new_with_highlight(
                 term_postings_list,
                 similarity_weight_opt,
@@ -92,7 +87,7 @@ impl PhraseWeight {
                 self.slop,
                 Arc::clone(sink),
                 self.highlight_field_name.clone(),
-                segment_ord,
+                segment_id,
             )))
         } else {
             Ok(Some(PhraseScorer::new(

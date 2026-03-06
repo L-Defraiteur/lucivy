@@ -107,7 +107,7 @@ where
         let mut term_stream = self.automaton_stream(term_dict)?;
 
         if let Some(ref sink) = self.highlight_sink {
-            let segment_ord = sink.next_segment();
+            let segment_id = reader.segment_id();
             while term_stream.advance() {
                 let term_info = term_stream.value().clone();
                 let mut segment_postings = inverted_index.read_postings_from_terminfo(
@@ -127,7 +127,7 @@ where
                             .iter()
                             .map(|&(from, to)| [from as usize, to as usize])
                             .collect();
-                        sink.insert(segment_ord, doc, &self.highlight_field_name, offsets);
+                        sink.insert(segment_id, doc, &self.highlight_field_name, offsets);
                     }
                     segment_postings.advance();
                 }

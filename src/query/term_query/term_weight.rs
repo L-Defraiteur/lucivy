@@ -282,20 +282,12 @@ impl TermWeight {
         let field = self.term.field();
         let inverted_index = reader.inverted_index(field)?;
         let Some(term_info) = inverted_index.get_term_info(&self.term)? else {
-            // The term was not found — still advance the sink counter to stay in
-            // sync with the real segment ordinals used by TopDocs.
-            if let Some(ref sink) = self.highlight_sink {
-                sink.next_segment();
-            }
             return Ok(TermOrEmptyOrAllScorer::Empty);
         };
 
         // If we don't care about scores, and our posting lists matches all doc, we can return the
         // AllMatch scorer.
         if !self.scoring_enabled && term_info.doc_freq == reader.max_doc() {
-            if let Some(ref sink) = self.highlight_sink {
-                sink.next_segment();
-            }
             return Ok(TermOrEmptyOrAllScorer::AllMatch(AllScorer::new(
                 reader.max_doc(),
             )));
@@ -315,8 +307,8 @@ impl TermWeight {
         let similarity_weight = self.similarity_weight.boost_by(boost);
         let mut scorer = TermScorer::new(segment_postings, fieldnorm_reader, similarity_weight);
         if let Some(ref sink) = self.highlight_sink {
-            let segment_ord = sink.next_segment();
-            scorer = scorer.with_highlight_sink(Arc::clone(sink), self.highlight_field_name.clone(), segment_ord);
+            let segment_id = reader.segment_id();
+            scorer = scorer.with_highlight_sink(Arc::clone(sink), self.highlight_field_name.clone(), segment_id);
         }
         Ok(TermOrEmptyOrAllScorer::TermScorer(Box::new(scorer)))
     }

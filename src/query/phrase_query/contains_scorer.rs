@@ -11,6 +11,7 @@ use crate::query::{BitSetDocSet, Intersection, Scorer};
 use crate::schema::document::Value;
 use crate::schema::Field;
 use crate::store::StoreReader;
+use crate::index::SegmentId;
 use crate::{DocId, Score, LucivyDocument};
 
 /// ContainsScorer: multi-token scorer with separator validation.
@@ -45,7 +46,7 @@ pub struct ContainsScorer<TPostings: Postings> {
     // Highlighting
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
-    segment_ord: u32,
+    segment_id: SegmentId,
 }
 
 impl<TPostings: Postings> ContainsScorer<TPostings> {
@@ -63,7 +64,7 @@ impl<TPostings: Postings> ContainsScorer<TPostings> {
         field: Field,
         highlight_sink: Option<Arc<HighlightSink>>,
         highlight_field_name: String,
-        segment_ord: u32,
+        segment_id: SegmentId,
     ) -> ContainsScorer<TPostings> {
         let num_docs = fieldnorm_reader.num_docs();
         let max_offset = term_postings_with_offset
@@ -98,7 +99,7 @@ impl<TPostings: Postings> ContainsScorer<TPostings> {
             phrase_count: 0,
             highlight_sink,
             highlight_field_name,
-            segment_ord,
+            segment_id,
         };
         if scorer.doc() != TERMINATED && !scorer.phrase_match() {
             scorer.advance();
@@ -366,7 +367,7 @@ impl<TPostings: Postings> ContainsScorer<TPostings> {
                     .map(|&(from, to)| [from, to])
                     .collect();
                 sink.insert(
-                    self.segment_ord,
+                    self.segment_id,
                     self.intersection_docset.doc(),
                     &self.highlight_field_name,
                     offsets,
@@ -436,7 +437,7 @@ pub struct ContainsSingleScorer {
     boost: Score,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
-    segment_ord: u32,
+    segment_id: SegmentId,
 }
 
 impl ContainsSingleScorer {
@@ -453,7 +454,7 @@ impl ContainsSingleScorer {
         boost: Score,
         highlight_sink: Option<Arc<HighlightSink>>,
         highlight_field_name: String,
-        segment_ord: u32,
+        segment_id: SegmentId,
     ) -> ContainsSingleScorer {
         let mut scorer = ContainsSingleScorer {
             bitset_docset,
@@ -468,7 +469,7 @@ impl ContainsSingleScorer {
             boost,
             highlight_sink,
             highlight_field_name,
-            segment_ord,
+            segment_id,
         };
         // Advance to the first valid doc
         if scorer.bitset_docset.doc() != TERMINATED && !scorer.validate_current() {
@@ -556,7 +557,7 @@ impl ContainsSingleScorer {
             }
 
             if let Some(ref sink) = self.highlight_sink {
-                sink.insert(self.segment_ord, self.bitset_docset.doc(), &self.highlight_field_name, vec![[start, end]]);
+                sink.insert(self.segment_id, self.bitset_docset.doc(), &self.highlight_field_name, vec![[start, end]]);
             }
             return true;
         }

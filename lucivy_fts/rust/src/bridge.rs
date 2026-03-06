@@ -608,7 +608,8 @@ fn collect_search_results_with_highlights(
 
         let highlights = highlight_sink
             .and_then(|sink| {
-                let by_field = sink.get(doc_addr.segment_ord, doc_addr.doc_id)?;
+                let seg_id = searcher.segment_reader(doc_addr.segment_ord).segment_id();
+                let by_field = sink.get(seg_id, doc_addr.doc_id)?;
                 let entries: Vec<ffi::FieldHighlights> = by_field
                     .into_iter()
                     .map(|(field_name, offsets)| ffi::FieldHighlights {

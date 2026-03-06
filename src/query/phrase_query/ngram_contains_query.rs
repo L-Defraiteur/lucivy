@@ -26,6 +26,7 @@ use crate::query::bm25::Bm25Weight;
 use crate::query::{EmptyScorer, EnableScoring, Explanation, Query, Scorer, Weight};
 use crate::schema::document::Value;
 use crate::schema::{Field, IndexRecordOption, Term};
+use crate::index::SegmentId;
 use crate::{DocId, DocSet, InvertedIndexReader, Score, SegmentReader, LucivyDocument, TERMINATED};
 
 // ─── Candidate Collection ──────────────────────────────────────────────────
@@ -238,11 +239,7 @@ struct NgramContainsWeight {
 
 impl Weight for NgramContainsWeight {
     fn scorer(&self, reader: &SegmentReader, boost: Score) -> crate::Result<Box<dyn Scorer>> {
-        let segment_ord = self
-            .highlight_sink
-            .as_ref()
-            .map(|s| s.next_segment())
-            .unwrap_or(0);
+        let segment_id = reader.segment_id();
         let raw_inverted = reader.inverted_index(self.raw_field)?;
         let ngram_inverted = reader.inverted_index(self.ngram_field)?;
 
@@ -319,7 +316,7 @@ impl Weight for NgramContainsWeight {
             fieldnorm_reader,
             self.highlight_sink.clone(),
             self.highlight_field_name.clone(),
-            segment_ord,
+            segment_id,
         )))
     }
 
@@ -343,7 +340,7 @@ fn count_single_token_fuzzy(
     params: &FuzzyParams,
     highlight_sink: &Option<Arc<HighlightSink>>,
     highlight_field_name: &str,
-    segment_ord: u32,
+    segment_id: SegmentId,
     doc_id: DocId,
 ) -> u32 {
     let query_token = &params.tokens[0];
@@ -405,7 +402,7 @@ fn count_single_token_fuzzy(
 
         count += 1;
         if let Some(sink) = highlight_sink {
-            sink.insert(segment_ord, doc_id, highlight_field_name, vec![[start, end]]);
+            sink.insert(segment_id, doc_id, highlight_field_name, vec![[start, end]]);
         }
     }
     count
@@ -418,7 +415,7 @@ fn count_multi_token_fuzzy(
     params: &FuzzyParams,
     highlight_sink: &Option<Arc<HighlightSink>>,
     highlight_field_name: &str,
-    segment_ord: u32,
+    segment_id: SegmentId,
     doc_id: DocId,
 ) -> u32 {
     let num_query = params.tokens.len();
@@ -435,7 +432,7 @@ fn count_multi_token_fuzzy(
             params,
             highlight_sink,
             highlight_field_name,
-            segment_ord,
+            segment_id,
             doc_id,
         ) {
             count += 1;
@@ -452,7 +449,7 @@ fn check_at_position_fuzzy(
     params: &FuzzyParams,
     highlight_sink: &Option<Arc<HighlightSink>>,
     highlight_field_name: &str,
-    segment_ord: u32,
+    segment_id: SegmentId,
     doc_id: DocId,
 ) -> bool {
     let mut total_distance = 0u32;
@@ -545,7 +542,7 @@ fn check_at_position_fuzzy(
                 [s, e]
             })
             .collect();
-        sink.insert(segment_ord, doc_id, highlight_field_name, offsets);
+        sink.insert(segment_id, doc_id, highlight_field_name, offsets);
     }
     true
 }
@@ -562,7 +559,7 @@ fn verify_regex(
     params: &RegexParams,
     highlight_sink: &Option<Arc<HighlightSink>>,
     highlight_field_name: &str,
-    segment_ord: u32,
+    segment_id: SegmentId,
     doc_id: DocId,
 ) -> u32 {
     // 1. Regex exact verification
@@ -605,7 +602,7 @@ fn verify_regex(
                     .iter()
                     .map(|m| [m.start(), m.end()])
                     .collect();
-                sink.insert(segment_ord, doc_id, highlight_field_name, offsets);
+                sink.insert(segment_id, doc_id, highlight_field_name, offsets);
             }
             // When only fuzzy matched (tf_regex == 0), we don't have precise byte offsets.
         }
@@ -627,7 +624,7 @@ struct NgramContainsScorer {
     last_tf: u32,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
-    segment_ord: u32,
+    segment_id: SegmentId,
 }
 
 impl NgramContainsScorer {
@@ -640,7 +637,7 @@ impl NgramContainsScorer {
         fieldnorm_reader: FieldNormReader,
         highlight_sink: Option<Arc<HighlightSink>>,
         highlight_field_name: String,
-        segment_ord: u32,
+        segment_id: SegmentId,
     ) -> Self {
         let mut scorer = NgramContainsScorer {
             candidates,
@@ -653,7 +650,7 @@ impl NgramContainsScorer {
             last_tf: 0,
             highlight_sink,
             highlight_field_name,
-            segment_ord,
+            segment_id,
         };
         // Advance to first valid doc.
         if scorer.doc() != TERMINATED && !scorer.verify() {
@@ -692,7 +689,7 @@ impl NgramContainsScorer {
                         params,
                         &self.highlight_sink,
                         &self.highlight_field_name,
-                        self.segment_ord,
+                        self.segment_id,
                         doc_id,
                     )
                 } else {
@@ -702,7 +699,7 @@ impl NgramContainsScorer {
                         params,
                         &self.highlight_sink,
                         &self.highlight_field_name,
-                        self.segment_ord,
+                        self.segment_id,
                         doc_id,
                     )
                 }
@@ -713,7 +710,7 @@ impl NgramContainsScorer {
                     params,
                     &self.highlight_sink,
                     &self.highlight_field_name,
-                    self.segment_ord,
+                    self.segment_id,
                     doc_id,
                 )
             }
@@ -769,6 +766,12 @@ impl Scorer for NgramContainsScorer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::SegmentId;
+
+    /// Dummy SegmentId for unit tests (all functions now require SegmentId instead of u32).
+    fn test_seg_id() -> SegmentId {
+        SegmentId::generate_random()
+    }
 
     fn make_regex_params(pattern: &str, literals: Vec<&str>, fuzzy_distance: u8) -> RegexParams {
         RegexParams {
@@ -783,14 +786,14 @@ mod tests {
     #[test]
     fn test_regex_pure_match() {
         let params = make_regex_params(r"program[a-z]+", vec!["program"], 0);
-        let tf = verify_regex("Rust is a systems programming language", &params, &None, "", 0, 0);
+        let tf = verify_regex("Rust is a systems programming language", &params, &None, "", test_seg_id(), 0);
         assert_eq!(tf, 1); // "programming" matches
     }
 
     #[test]
     fn test_regex_pure_no_match() {
         let params = make_regex_params(r"program[a-z]+", vec!["program"], 0);
-        let tf = verify_regex("the cat sat on the mat", &params, &None, "", 0, 0);
+        let tf = verify_regex("the cat sat on the mat", &params, &None, "", test_seg_id(), 0);
         assert_eq!(tf, 0);
     }
 
@@ -802,7 +805,7 @@ mod tests {
             &params,
             &None,
             "",
-            0,
+            test_seg_id(),
             0,
         );
         assert_eq!(tf, 3); // "Programming", "programmer", "programming"
@@ -811,7 +814,7 @@ mod tests {
     #[test]
     fn test_regex_case_insensitive() {
         let params = make_regex_params(r"rust", vec!["rust"], 0);
-        let tf = verify_regex("Rust is great", &params, &None, "", 0, 0);
+        let tf = verify_regex("Rust is great", &params, &None, "", test_seg_id(), 0);
         assert_eq!(tf, 1);
     }
 
@@ -822,7 +825,7 @@ mod tests {
         // Pattern has typo "programing" (one m) — regex won't match "programming"
         // but fuzzy on literal "programing" with distance=1 should match.
         let params = make_regex_params(r"programing[a-z]+", vec!["programing"], 1);
-        let tf = verify_regex("Rust is a systems programming language", &params, &None, "", 0, 0);
+        let tf = verify_regex("Rust is a systems programming language", &params, &None, "", test_seg_id(), 0);
         assert!(tf > 0, "hybrid should match via fuzzy on literal");
     }
 
@@ -831,14 +834,14 @@ mod tests {
         // Pattern is correct — regex matches directly, fuzzy also matches.
         // tf = max(regex, fuzzy).
         let params = make_regex_params(r"program[a-z]+", vec!["program"], 1);
-        let tf = verify_regex("Rust programming is fun", &params, &None, "", 0, 0);
+        let tf = verify_regex("Rust programming is fun", &params, &None, "", test_seg_id(), 0);
         assert!(tf > 0);
     }
 
     #[test]
     fn test_regex_hybrid_no_match() {
         let params = make_regex_params(r"python[a-z]+", vec!["python"], 1);
-        let tf = verify_regex("Rust is a systems programming language", &params, &None, "", 0, 0);
+        let tf = verify_regex("Rust is a systems programming language", &params, &None, "", test_seg_id(), 0);
         assert_eq!(tf, 0);
     }
 
@@ -847,11 +850,12 @@ mod tests {
     #[test]
     fn test_regex_highlights() {
         let sink = Arc::new(HighlightSink::new());
+        let sid = test_seg_id();
         let params = make_regex_params(r"program[a-z]+", vec!["program"], 0);
         let text = "Rust programming is fun";
-        let tf = verify_regex(text, &params, &Some(sink.clone()), "", 0, 42);
+        let tf = verify_regex(text, &params, &Some(sink.clone()), "", sid, 42);
         assert_eq!(tf, 1);
-        let by_field = sink.get(0, 42).expect("should have highlights");
+        let by_field = sink.get(sid, 42).expect("should have highlights");
         let offsets = by_field.get("").expect("should have field offsets");
         assert_eq!(offsets.len(), 1);
         // "programming" starts at index 5 in "Rust programming is fun"
@@ -863,28 +867,28 @@ mod tests {
     #[test]
     fn test_regex_empty_text() {
         let params = make_regex_params(r"program[a-z]+", vec!["program"], 0);
-        let tf = verify_regex("", &params, &None, "", 0, 0);
+        let tf = verify_regex("", &params, &None, "", test_seg_id(), 0);
         assert_eq!(tf, 0);
     }
 
     #[test]
     fn test_regex_dot_star() {
         let params = make_regex_params(r".*", vec![], 0);
-        let tf = verify_regex("anything", &params, &None, "", 0, 0);
+        let tf = verify_regex("anything", &params, &None, "", test_seg_id(), 0);
         assert!(tf > 0); // .* matches everything
     }
 
     #[test]
     fn test_regex_word_boundary() {
         let params = make_regex_params(r"\brust\b", vec!["rust"], 0);
-        let tf = verify_regex("Rust is great but rusty is not", &params, &None, "", 0, 0);
+        let tf = verify_regex("Rust is great but rusty is not", &params, &None, "", test_seg_id(), 0);
         assert_eq!(tf, 1); // "Rust" matches, "rusty" does not
     }
 
     #[test]
     fn test_regex_unicode() {
         let params = make_regex_params(r"café", vec!["café"], 0);
-        let tf = verify_regex("I love café au lait", &params, &None, "", 0, 0);
+        let tf = verify_regex("I love café au lait", &params, &None, "", test_seg_id(), 0);
         assert_eq!(tf, 1);
     }
 
@@ -893,7 +897,7 @@ mod tests {
         // Regex "xyz[0-9]+" won't match any text, but fuzzy on literal "database"
         // with distance=1 should match "databse" (typo).
         let params = make_regex_params(r"databse", vec!["databse"], 1);
-        let tf = verify_regex("Graph databases store data", &params, &None, "", 0, 0);
+        let tf = verify_regex("Graph databases store data", &params, &None, "", test_seg_id(), 0);
         // "databse" is distance 1 from "database" (substring of "databases")
         assert!(tf > 0, "hybrid should match via fuzzy on literal");
     }
@@ -901,11 +905,12 @@ mod tests {
     #[test]
     fn test_regex_multiple_highlights() {
         let sink = Arc::new(HighlightSink::new());
+        let sid = test_seg_id();
         let params = make_regex_params(r"[a-z]+ing", vec!["ing"], 0);
         let text = "programming and testing are fun";
-        let tf = verify_regex(text, &params, &Some(sink.clone()), "", 0, 99);
+        let tf = verify_regex(text, &params, &Some(sink.clone()), "", sid, 99);
         assert_eq!(tf, 2); // "programming" and "testing"
-        let by_field = sink.get(0, 99).expect("should have highlights");
+        let by_field = sink.get(sid, 99).expect("should have highlights");
         let offsets = by_field.get("").expect("should have field offsets");
         assert_eq!(offsets.len(), 2);
     }
@@ -937,7 +942,7 @@ mod tests {
         let tokens = tokenize_raw(text);
         let params = make_fuzzy_params(vec!["programming"], vec![], "", "", 1, 1);
         assert_eq!(
-            count_single_token_fuzzy(text, &tokens, &params, &None, "", 0, 0),
+            count_single_token_fuzzy(text, &tokens, &params, &None, "", test_seg_id(), 0),
             1
         );
     }
@@ -948,7 +953,7 @@ mod tests {
         let tokens = tokenize_raw(text);
         let params = make_fuzzy_params(vec!["programing"], vec![], "", "", 1, 1);
         assert_eq!(
-            count_single_token_fuzzy(text, &tokens, &params, &None, "", 0, 0),
+            count_single_token_fuzzy(text, &tokens, &params, &None, "", test_seg_id(), 0),
             1
         );
     }
@@ -959,7 +964,7 @@ mod tests {
         let tokens = tokenize_raw(text);
         let params = make_fuzzy_params(vec!["python"], vec![], "", "", 1, 1);
         assert_eq!(
-            count_single_token_fuzzy(text, &tokens, &params, &None, "", 0, 0),
+            count_single_token_fuzzy(text, &tokens, &params, &None, "", test_seg_id(), 0),
             0
         );
     }
@@ -971,7 +976,7 @@ mod tests {
         // "program" is a substring of both "programming" and "programmer"
         let params = make_fuzzy_params(vec!["program"], vec![], "", "", 1, 1);
         assert_eq!(
-            count_single_token_fuzzy(text, &tokens, &params, &None, "", 0, 0),
+            count_single_token_fuzzy(text, &tokens, &params, &None, "", test_seg_id(), 0),
             2
         );
     }
@@ -983,7 +988,7 @@ mod tests {
         // distance=0: "programing" is not exact, not a substring
         let params = make_fuzzy_params(vec!["programing"], vec![], "", "", 0, 0);
         assert_eq!(
-            count_single_token_fuzzy(text, &tokens, &params, &None, "", 0, 0),
+            count_single_token_fuzzy(text, &tokens, &params, &None, "", test_seg_id(), 0),
             0
         );
     }
@@ -991,13 +996,14 @@ mod tests {
     #[test]
     fn test_fuzzy_single_highlights() {
         let sink = Arc::new(HighlightSink::new());
+        let sid = test_seg_id();
         let text = "Rust programming is fun";
         let tokens = tokenize_raw(text);
         let params = make_fuzzy_params(vec!["programming"], vec![], "", "", 1, 1);
         let tf =
-            count_single_token_fuzzy(text, &tokens, &params, &Some(sink.clone()), "", 0, 42);
+            count_single_token_fuzzy(text, &tokens, &params, &Some(sink.clone()), "", sid, 42);
         assert_eq!(tf, 1);
-        let by_field = sink.get(0, 42).expect("should have highlights");
+        let by_field = sink.get(sid, 42).expect("should have highlights");
         let offsets = by_field.get("").expect("should have field offsets");
         assert_eq!(offsets.len(), 1);
         assert_eq!(offsets[0], [5, 16]); // "programming" at bytes 5..16
@@ -1012,7 +1018,7 @@ mod tests {
         let params =
             make_fuzzy_params(vec!["systems", "programming"], vec![" "], "", "", 1, 1);
         assert_eq!(
-            count_multi_token_fuzzy(text, &tokens, &params, &None, "", 0, 0),
+            count_multi_token_fuzzy(text, &tokens, &params, &None, "", test_seg_id(), 0),
             1
         );
     }
@@ -1024,7 +1030,7 @@ mod tests {
         let params =
             make_fuzzy_params(vec!["sistems", "programing"], vec![" "], "", "", 1, 2);
         assert_eq!(
-            count_multi_token_fuzzy(text, &tokens, &params, &None, "", 0, 0),
+            count_multi_token_fuzzy(text, &tokens, &params, &None, "", test_seg_id(), 0),
             1
         );
     }
@@ -1037,7 +1043,7 @@ mod tests {
         let params =
             make_fuzzy_params(vec!["sistems", "programing"], vec![" "], "", "", 1, 1);
         assert_eq!(
-            count_multi_token_fuzzy(text, &tokens, &params, &None, "", 0, 0),
+            count_multi_token_fuzzy(text, &tokens, &params, &None, "", test_seg_id(), 0),
             0
         );
     }
@@ -1049,7 +1055,7 @@ mod tests {
         let params =
             make_fuzzy_params(vec!["machine", "learning"], vec![" "], "", "", 1, 1);
         assert_eq!(
-            count_multi_token_fuzzy(text, &tokens, &params, &None, "", 0, 0),
+            count_multi_token_fuzzy(text, &tokens, &params, &None, "", test_seg_id(), 0),
             0
         );
     }
@@ -1061,7 +1067,7 @@ mod tests {
         let params =
             make_fuzzy_params(vec!["systems", "programming"], vec![" "], "", "", 1, 1);
         assert_eq!(
-            count_multi_token_fuzzy(text, &tokens, &params, &None, "", 0, 0),
+            count_multi_token_fuzzy(text, &tokens, &params, &None, "", test_seg_id(), 0),
             0
         );
     }
@@ -1069,17 +1075,215 @@ mod tests {
     #[test]
     fn test_fuzzy_multi_highlights() {
         let sink = Arc::new(HighlightSink::new());
+        let sid = test_seg_id();
         let text = "Rust is a systems programming language";
         let tokens = tokenize_raw(text);
         let params =
             make_fuzzy_params(vec!["systems", "programming"], vec![" "], "", "", 1, 1);
         let tf =
-            count_multi_token_fuzzy(text, &tokens, &params, &Some(sink.clone()), "", 0, 42);
+            count_multi_token_fuzzy(text, &tokens, &params, &Some(sink.clone()), "", sid, 42);
         assert_eq!(tf, 1);
-        let by_field = sink.get(0, 42).expect("should have highlights");
+        let by_field = sink.get(sid, 42).expect("should have highlights");
         let offsets = by_field.get("").expect("should have field offsets");
         assert_eq!(offsets.len(), 2);
         assert_eq!(offsets[0], [10, 17]); // "systems" at bytes 10..17
         assert_eq!(offsets[1], [18, 29]); // "programming" at bytes 18..29
+    }
+
+    // ─── Integration: BooleanQuery + multi-field highlights ──────────────
+    //
+    // These tests reproduce the segment_ord mismatch bug that caused
+    // highlights to be lost for the 2nd sub-query in a BooleanQuery.
+
+    use crate::collector::TopDocs;
+    use crate::query::boolean_query::BooleanQuery;
+    use crate::query::Occur;
+    use crate::schema::{Schema, TextFieldIndexing, TextOptions, STORED};
+    use crate::tokenizer::NgramTokenizer;
+    use crate::Index;
+
+    /// Build a 2-field index (_title + _content) with raw+ngram variants.
+    fn create_two_field_index(docs: &[(&str, &str)]) -> crate::Result<Index> {
+        let mut sb = Schema::builder();
+
+        let raw_opts = TextOptions::default()
+            .set_indexing_options(
+                TextFieldIndexing::default()
+                    .set_tokenizer("default")
+                    .set_index_option(crate::schema::IndexRecordOption::WithFreqsAndPositionsAndOffsets),
+            )
+            .set_stored();
+
+        let ngram_opts = TextOptions::default()
+            .set_indexing_options(
+                TextFieldIndexing::default()
+                    .set_tokenizer("ngram3")
+                    .set_index_option(crate::schema::IndexRecordOption::WithFreqs),
+            );
+
+        let title_raw = sb.add_text_field("_title", raw_opts.clone());
+        let title_ngram = sb.add_text_field("_title._ngram", ngram_opts.clone());
+        let content_raw = sb.add_text_field("_content", raw_opts);
+        let content_ngram = sb.add_text_field("_content._ngram", ngram_opts);
+
+        let schema = sb.build();
+        let index = Index::create_in_ram(schema);
+        index
+            .tokenizers()
+            .register("ngram3", NgramTokenizer::all_ngrams(3, 3).unwrap());
+        let mut writer = index.writer_for_tests()?;
+
+        for &(title, content) in docs {
+            let mut doc = crate::LucivyDocument::new();
+            doc.add_text(title_raw, title);
+            doc.add_text(title_ngram, title);
+            doc.add_text(content_raw, content);
+            doc.add_text(content_ngram, content);
+            writer.add_document(doc)?;
+        }
+        writer.commit()?;
+        Ok(index)
+    }
+
+    /// Regression test: BooleanQuery(should) with NgramContainsQuery on 2 fields.
+    /// Before the fix, the 2nd sub-query's highlights were lost because the
+    /// HighlightSink used a global counter (next_segment) as key, which gave
+    /// different ordinals to sub-queries on the same segment.
+    #[test]
+    fn test_boolean_multi_field_highlights_not_lost() -> crate::Result<()> {
+        let index = create_two_field_index(&[
+            ("login page", "authentication and authorization"),
+        ])?;
+        let schema = index.schema();
+        let title_raw = schema.get_field("_title").unwrap();
+        let title_ngram = schema.get_field("_title._ngram").unwrap();
+        let content_raw = schema.get_field("_content").unwrap();
+        let content_ngram = schema.get_field("_content._ngram").unwrap();
+
+        let sink = Arc::new(HighlightSink::new());
+
+        // Build regex-based NgramContainsQuery for "auth" on both fields
+        let q_title = NgramContainsQuery::new(
+            title_raw,
+            title_ngram,
+            None,
+            vec!["auth".into()],
+            VerificationMode::Regex(RegexParams {
+                compiled: Regex::new("(?i)auth").unwrap(),
+                literals: vec!["auth".into()],
+                fuzzy_distance: 0,
+            }),
+        )
+        .with_highlight_sink(sink.clone(), "_title".into());
+
+        let q_content = NgramContainsQuery::new(
+            content_raw,
+            content_ngram,
+            None,
+            vec!["auth".into()],
+            VerificationMode::Regex(RegexParams {
+                compiled: Regex::new("(?i)auth").unwrap(),
+                literals: vec!["auth".into()],
+                fuzzy_distance: 0,
+            }),
+        )
+        .with_highlight_sink(sink.clone(), "_content".into());
+
+        let bool_query = BooleanQuery::new(vec![
+            (Occur::Should, Box::new(q_title)),
+            (Occur::Should, Box::new(q_content)),
+        ]);
+
+        let reader = index.reader()?;
+        let searcher = reader.searcher();
+        let top_docs = searcher.search(&bool_query, &TopDocs::with_limit(10).order_by_score())?;
+
+        assert_eq!(top_docs.len(), 1, "should find 1 document");
+        let (_score, doc_addr) = top_docs[0];
+
+        // Key assertion: use the real SegmentId (same as what the scorer uses)
+        let seg_id = searcher.segment_reader(doc_addr.segment_ord).segment_id();
+        let by_field = sink.get(seg_id, doc_addr.doc_id)
+            .expect("highlights should exist for matching document");
+
+        // "auth" appears in _content ("authentication") but NOT in _title ("login page")
+        assert!(
+            by_field.contains_key("_content"),
+            "should have _content highlights, got: {:?}",
+            by_field.keys().collect::<Vec<_>>()
+        );
+        let content_offsets = &by_field["_content"];
+        assert!(!content_offsets.is_empty(), "content highlights should not be empty");
+        // "authentication" starts at byte 0 in "authentication and authorization"
+        assert_eq!(content_offsets[0][0], 0);
+
+        Ok(())
+    }
+
+    /// Test that both fields get highlights when the query matches in both.
+    #[test]
+    fn test_boolean_both_fields_highlighted() -> crate::Result<()> {
+        let index = create_two_field_index(&[
+            ("source code review", "the source of truth"),
+        ])?;
+        let schema = index.schema();
+        let title_raw = schema.get_field("_title").unwrap();
+        let title_ngram = schema.get_field("_title._ngram").unwrap();
+        let content_raw = schema.get_field("_content").unwrap();
+        let content_ngram = schema.get_field("_content._ngram").unwrap();
+
+        let sink = Arc::new(HighlightSink::new());
+
+        let q_title = NgramContainsQuery::new(
+            title_raw, title_ngram, None,
+            vec!["source".into()],
+            VerificationMode::Regex(RegexParams {
+                compiled: Regex::new("(?i)source").unwrap(),
+                literals: vec!["source".into()],
+                fuzzy_distance: 0,
+            }),
+        ).with_highlight_sink(sink.clone(), "_title".into());
+
+        let q_content = NgramContainsQuery::new(
+            content_raw, content_ngram, None,
+            vec!["source".into()],
+            VerificationMode::Regex(RegexParams {
+                compiled: Regex::new("(?i)source").unwrap(),
+                literals: vec!["source".into()],
+                fuzzy_distance: 0,
+            }),
+        ).with_highlight_sink(sink.clone(), "_content".into());
+
+        let bool_query = BooleanQuery::new(vec![
+            (Occur::Should, Box::new(q_title)),
+            (Occur::Should, Box::new(q_content)),
+        ]);
+
+        let reader = index.reader()?;
+        let searcher = reader.searcher();
+        let top_docs = searcher.search(&bool_query, &TopDocs::with_limit(10).order_by_score())?;
+
+        assert_eq!(top_docs.len(), 1);
+        let (_score, doc_addr) = top_docs[0];
+
+        let seg_id = searcher.segment_reader(doc_addr.segment_ord).segment_id();
+        let by_field = sink.get(seg_id, doc_addr.doc_id)
+            .expect("highlights should exist");
+
+        assert!(
+            by_field.contains_key("_title"),
+            "should have _title highlights, got: {:?}", by_field.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            by_field.contains_key("_content"),
+            "should have _content highlights, got: {:?}", by_field.keys().collect::<Vec<_>>()
+        );
+
+        // "source" in "_title" = "source code review" → offset [0, 6]
+        assert_eq!(by_field["_title"][0], [0, 6]);
+        // "source" in "_content" = "the source of truth" → offset [4, 10]
+        assert_eq!(by_field["_content"][0], [4, 10]);
+
+        Ok(())
     }
 }

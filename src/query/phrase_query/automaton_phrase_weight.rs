@@ -10,7 +10,7 @@ use super::regex_phrase_weight::RegexPhraseWeight;
 use super::scoring_utils::HighlightSink;
 use super::PhraseScorer;
 use crate::fieldnorm::FieldNormReader;
-use crate::index::SegmentReader;
+use crate::index::{SegmentId, SegmentReader};
 use crate::postings::TermInfo;
 use crate::query::bm25::Bm25Weight;
 use crate::query::explanation::does_not_match;
@@ -191,7 +191,7 @@ impl AutomatonPhraseWeight {
         &self,
         reader: &SegmentReader,
         boost: Score,
-        segment_ord: u32,
+        segment_id: SegmentId,
     ) -> crate::Result<Option<Box<dyn Scorer>>> {
         let similarity_weight_opt = self
             .similarity_weight_opt
@@ -239,7 +239,7 @@ impl AutomatonPhraseWeight {
                 text_field,
                 self.highlight_sink.clone(),
                 self.highlight_field_name.clone(),
-                segment_ord,
+                segment_id,
             ))))
         } else {
             Ok(Some(Box::new(PhraseScorer::new(
@@ -256,7 +256,7 @@ impl AutomatonPhraseWeight {
         &self,
         reader: &SegmentReader,
         boost: Score,
-        segment_ord: u32,
+        segment_id: SegmentId,
     ) -> crate::Result<Box<dyn Scorer>> {
         let inverted_index = reader.inverted_index(self.field)?;
         let token = &self.phrase_terms[0].1;
@@ -300,7 +300,7 @@ impl AutomatonPhraseWeight {
                 boost,
                 self.highlight_sink.clone(),
                 self.highlight_field_name.clone(),
-                segment_ord,
+                segment_id,
             )))
         } else {
             Ok(Box::new(ConstScorer::new(
@@ -313,15 +313,11 @@ impl AutomatonPhraseWeight {
 
 impl Weight for AutomatonPhraseWeight {
     fn scorer(&self, reader: &SegmentReader, boost: Score) -> crate::Result<Box<dyn Scorer>> {
-        let segment_ord = self
-            .highlight_sink
-            .as_ref()
-            .map(|s| s.next_segment())
-            .unwrap_or(0);
+        let segment_id = reader.segment_id();
         if self.phrase_terms.len() <= 1 {
-            return self.single_token_scorer(reader, boost, segment_ord);
+            return self.single_token_scorer(reader, boost, segment_id);
         }
-        if let Some(scorer) = self.phrase_scorer(reader, boost, segment_ord)? {
+        if let Some(scorer) = self.phrase_scorer(reader, boost, segment_id)? {
             Ok(scorer)
         } else {
             Ok(Box::new(EmptyScorer))

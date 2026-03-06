@@ -5,15 +5,19 @@
 
 use std::cmp::min;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
 use crate::DocId;
+use crate::index::SegmentId;
 
 // ─── Highlight Sink ─────────────────────────────────────────────────────────
 
-/// Key for highlight data: (segment_ord, doc_id).
-type HighlightKey = (u32, DocId);
+/// Key for highlight data: (segment_id, doc_id).
+///
+/// Uses `SegmentId` (UUID) instead of a counter-based ordinal so that
+/// multiple sub-queries (e.g. in a BooleanQuery) that score the same
+/// segment all share the same key space.
+type HighlightKey = (SegmentId, DocId);
 
 /// Side-channel for highlight byte offsets, shared between caller and scorers.
 ///
@@ -25,7 +29,6 @@ type HighlightKey = (u32, DocId);
 pub struct HighlightSink {
     #[allow(clippy::type_complexity)]
     data: Mutex<HashMap<HighlightKey, Vec<(String, usize, usize)>>>,
-    segment_counter: AtomicU32,
 }
 
 impl HighlightSink {
@@ -34,21 +37,14 @@ impl HighlightSink {
     pub fn new() -> Self {
         HighlightSink {
             data: Mutex::new(HashMap::new()),
-            segment_counter: AtomicU32::new(0),
         }
-    }
-
-    /// Called by `Weight::scorer()` — returns the segment ordinal for this segment.
-    /// Must be called exactly once per `Weight::scorer()` invocation.
-    pub fn next_segment(&self) -> u32 {
-        self.segment_counter.fetch_add(1, Ordering::SeqCst)
     }
 
     /// Called by scorers when a match is confirmed.
     /// Appends offsets tagged with `field_name` (does not overwrite previous entries).
     pub fn insert(
         &self,
-        segment_ord: u32,
+        segment_id: SegmentId,
         doc_id: DocId,
         field_name: &str,
         offsets: Vec<[usize; 2]>,
@@ -60,7 +56,7 @@ impl HighlightSink {
         self.data
             .lock()
             .unwrap()
-            .entry((segment_ord, doc_id))
+            .entry((segment_id, doc_id))
             .or_default()
             .extend(entries);
     }
@@ -68,11 +64,11 @@ impl HighlightSink {
     /// Called after search to retrieve offsets grouped by field name.
     pub fn get(
         &self,
-        segment_ord: u32,
+        segment_id: SegmentId,
         doc_id: DocId,
     ) -> Option<HashMap<String, Vec<[usize; 2]>>> {
         let data = self.data.lock().unwrap();
-        let entries = data.get(&(segment_ord, doc_id))?;
+        let entries = data.get(&(segment_id, doc_id))?;
         let mut by_field: HashMap<String, Vec<[usize; 2]>> = HashMap::new();
         for (field, start, end) in entries {
             by_field
@@ -242,6 +238,11 @@ pub(crate) fn intersect_sorted_vecs(mut vecs: Vec<Vec<DocId>>) -> Vec<DocId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::SegmentId;
+
+    fn sid() -> SegmentId {
+        SegmentId::generate_random()
+    }
 
     // ─── tokenize_raw ────────────────────────────────────────────────────
 
@@ -462,8 +463,9 @@ mod tests {
     #[test]
     fn test_highlight_sink_insert_get() {
         let sink = HighlightSink::new();
-        sink.insert(0, 42, "body", vec![[5, 10], [20, 30]]);
-        let by_field = sink.get(0, 42).unwrap();
+        let s = sid();
+        sink.insert(s, 42, "body", vec![[5, 10], [20, 30]]);
+        let by_field = sink.get(s, 42).unwrap();
         assert_eq!(by_field.len(), 1);
         assert_eq!(by_field["body"], vec![[5, 10], [20, 30]]);
     }
@@ -471,9 +473,10 @@ mod tests {
     #[test]
     fn test_highlight_sink_multi_field() {
         let sink = HighlightSink::new();
-        sink.insert(0, 42, "title", vec![[0, 5]]);
-        sink.insert(0, 42, "body", vec![[100, 200], [500, 550]]);
-        let by_field = sink.get(0, 42).unwrap();
+        let s = sid();
+        sink.insert(s, 42, "title", vec![[0, 5]]);
+        sink.insert(s, 42, "body", vec![[100, 200], [500, 550]]);
+        let by_field = sink.get(s, 42).unwrap();
         assert_eq!(by_field.len(), 2);
         assert_eq!(by_field["title"], vec![[0, 5]]);
         assert_eq!(by_field["body"], vec![[100, 200], [500, 550]]);
@@ -482,23 +485,26 @@ mod tests {
     #[test]
     fn test_highlight_sink_same_field_appends() {
         let sink = HighlightSink::new();
-        sink.insert(0, 42, "body", vec![[5, 10]]);
-        sink.insert(0, 42, "body", vec![[20, 30]]);
-        let by_field = sink.get(0, 42).unwrap();
+        let s = sid();
+        sink.insert(s, 42, "body", vec![[5, 10]]);
+        sink.insert(s, 42, "body", vec![[20, 30]]);
+        let by_field = sink.get(s, 42).unwrap();
         assert_eq!(by_field["body"], vec![[5, 10], [20, 30]]);
     }
 
     #[test]
     fn test_highlight_sink_get_missing() {
         let sink = HighlightSink::new();
-        assert!(sink.get(0, 99).is_none());
+        assert!(sink.get(sid(), 99).is_none());
     }
 
     #[test]
-    fn test_highlight_sink_next_segment() {
+    fn test_highlight_sink_same_segment_different_docs() {
         let sink = HighlightSink::new();
-        assert_eq!(sink.next_segment(), 0);
-        assert_eq!(sink.next_segment(), 1);
-        assert_eq!(sink.next_segment(), 2);
+        let s = sid();
+        sink.insert(s, 1, "body", vec![[0, 5]]);
+        sink.insert(s, 2, "body", vec![[10, 20]]);
+        assert_eq!(sink.get(s, 1).unwrap()["body"], vec![[0, 5]]);
+        assert_eq!(sink.get(s, 2).unwrap()["body"], vec![[10, 20]]);
     }
 }

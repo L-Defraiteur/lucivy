@@ -6,6 +6,7 @@ use crate::postings::{FreqReadingOption, Postings, SegmentPostings};
 use crate::query::bm25::Bm25Weight;
 use crate::query::phrase_query::scoring_utils::HighlightSink;
 use crate::query::{Explanation, Scorer};
+use crate::index::SegmentId;
 use crate::{DocId, Score};
 
 #[derive(Clone)]
@@ -15,7 +16,7 @@ pub struct TermScorer {
     similarity_weight: Bm25Weight,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
-    segment_ord: u32,
+    segment_id: SegmentId,
 }
 
 impl TermScorer {
@@ -30,7 +31,7 @@ impl TermScorer {
             similarity_weight,
             highlight_sink: None,
             highlight_field_name: String::new(),
-            segment_ord: 0,
+            segment_id: SegmentId::generate_random(),
         }
     }
 
@@ -38,11 +39,11 @@ impl TermScorer {
         mut self,
         sink: Arc<HighlightSink>,
         field_name: String,
-        segment_ord: u32,
+        segment_id: SegmentId,
     ) -> Self {
         self.highlight_sink = Some(sink);
         self.highlight_field_name = field_name;
-        self.segment_ord = segment_ord;
+        self.segment_id = segment_id;
         // Capture offsets for the initial document position (before any advance() call)
         let doc = self.postings.doc();
         self.capture_offsets(doc);
@@ -133,7 +134,7 @@ impl TermScorer {
                     .iter()
                     .map(|&(from, to)| [from as usize, to as usize])
                     .collect();
-                sink.insert(self.segment_ord, doc, &self.highlight_field_name, offsets);
+                sink.insert(self.segment_id, doc, &self.highlight_field_name, offsets);
             }
         }
     }
