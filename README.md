@@ -129,9 +129,7 @@ index.search({
 
 #### Per-token queries (legacy)
 
-These operate on **individual tokens** in the inverted index. They cannot match across token boundaries. **Prefer `contains` for all new code** — it handles everything these do, plus cross-token matching and substrings.
-
-The only per-token query that remains useful is `parse`, which provides Lucene-style query syntax (`AND`, `OR`, `NOT`, field selectors).
+These operate on **individual tokens** in the inverted index. They cannot match across token boundaries. **Prefer `contains` and `contains_split` for all new code** — they handle everything these do, plus cross-token matching, substrings, and fuzzy tolerance. Even `parse` (Lucene-style `AND`/`OR`/`NOT`) is better served by `boolean` + `contains` queries.
 
 | Type | Example |
 |------|---------|
