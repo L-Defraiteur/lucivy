@@ -22,14 +22,14 @@ use ld_lucivy::Index;
 
 // ─── Schema Config ──────────────────────────────────────────────────────────
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct SchemaConfig {
     pub fields: Vec<FieldDef>,
     pub tokenizer: Option<String>,
     pub stemmer: Option<String>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct FieldDef {
     pub name: String,
     #[serde(rename = "type")]
@@ -1122,4 +1122,3 @@ mod tests {
         assert_filter_err(&filter);
     }
 }
-

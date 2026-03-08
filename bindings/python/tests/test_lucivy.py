@@ -799,3 +799,129 @@ class TestEdgeCases:
         idx.commit()
         results = idx.search("lazy")
         assert len(results) >= 1
+
+
+# ─── Snapshot (LUCE format) ──────────────────────────────────────────────
+
+
+class TestSnapshot:
+    def test_export_import_roundtrip(self, tmp_dir):
+        """Export an index, import it at a new path, verify data is intact."""
+        path1 = os.path.join(tmp_dir, "snap_src")
+        idx = lucivy.Index.create(path1, FIELDS)
+        idx.add_many(SAMPLE_DOCS)
+        idx.commit()
+
+        blob = idx.export_snapshot()
+        assert isinstance(blob, bytes)
+        assert blob[:4] == b"LUCE"
+
+        path2 = os.path.join(tmp_dir, "snap_dst")
+        idx2 = lucivy.Index.import_snapshot(blob, dest_path=path2)
+        assert idx2.num_docs == 8
+        results = idx2.search("python")
+        assert len(results) >= 2
+
+    def test_export_to_file(self, tmp_dir):
+        """export_snapshot_to writes to disk, import_snapshot_from reads it."""
+        path1 = os.path.join(tmp_dir, "snap_file_src")
+        idx = lucivy.Index.create(path1, FIELDS)
+        idx.add_many(SAMPLE_DOCS)
+        idx.commit()
+
+        snap_file = os.path.join(tmp_dir, "snapshot.luce")
+        idx.export_snapshot_to(snap_file)
+        assert os.path.exists(snap_file)
+        assert os.path.getsize(snap_file) > 0
+
+        path2 = os.path.join(tmp_dir, "snap_file_dst")
+        idx2 = lucivy.Index.import_snapshot_from(snap_file, dest_path=path2)
+        assert idx2.num_docs == 8
+
+    def test_export_uncommitted_raises(self, tmp_dir):
+        """Export with uncommitted changes should raise ValueError."""
+        path = os.path.join(tmp_dir, "snap_uncommit")
+        idx = lucivy.Index.create(path, FIELDS)
+        idx.add(doc_id=1, title="Test", body="Test body")
+        with pytest.raises(ValueError, match="uncommitted"):
+            idx.export_snapshot()
+
+    def test_export_after_commit_ok(self, tmp_dir):
+        """After commit, export should work."""
+        path = os.path.join(tmp_dir, "snap_commit_ok")
+        idx = lucivy.Index.create(path, FIELDS)
+        idx.add(doc_id=1, title="Test", body="Test body")
+        idx.commit()
+        blob = idx.export_snapshot()
+        assert len(blob) > 12  # header at minimum
+
+    def test_multi_index_snapshot(self, tmp_dir):
+        """Export and import multiple indexes in one snapshot."""
+        path1 = os.path.join(tmp_dir, "multi_a")
+        path2 = os.path.join(tmp_dir, "multi_b")
+
+        idx1 = lucivy.Index.create(path1, FIELDS)
+        idx1.add(doc_id=1, title="Alpha", body="First index")
+        idx1.commit()
+
+        idx2 = lucivy.Index.create(path2, FIELDS)
+        idx2.add(doc_id=10, title="Beta", body="Second index")
+        idx2.commit()
+
+        blob = lucivy.export_snapshots([idx1, idx2])
+        assert blob[:4] == b"LUCE"
+
+        dst1 = os.path.join(tmp_dir, "restored_a")
+        dst2 = os.path.join(tmp_dir, "restored_b")
+        restored = lucivy.import_snapshots(blob, dest_paths=[dst1, dst2])
+        assert len(restored) == 2
+        assert restored[0].num_docs == 1
+        assert restored[1].num_docs == 1
+
+        r1 = restored[0].search("alpha")
+        assert any(r.doc_id == 1 for r in r1)
+        r2 = restored[1].search("beta")
+        assert any(r.doc_id == 10 for r in r2)
+
+    def test_import_preserves_search(self, tmp_dir):
+        """Imported index supports all search types."""
+        path1 = os.path.join(tmp_dir, "snap_search_src")
+        idx = lucivy.Index.create(path1, FIELDS, stemmer="english")
+        idx.add_many(SAMPLE_DOCS)
+        idx.commit()
+
+        blob = idx.export_snapshot()
+        path2 = os.path.join(tmp_dir, "snap_search_dst")
+        idx2 = lucivy.Index.import_snapshot(blob, dest_path=path2)
+
+        # Contains
+        r = idx2.search({"type": "contains", "field": "title", "value": "python"})
+        assert len(r) >= 1
+
+        # Highlights
+        r = idx2.search("python", highlights=True)
+        assert any(x.highlights is not None for x in r)
+
+        # Boolean
+        r = idx2.search({
+            "type": "boolean",
+            "must": [
+                {"type": "contains", "field": "body", "value": "web"},
+            ],
+            "must_not": [
+                {"type": "contains", "field": "title", "value": "javascript"},
+            ],
+        })
+        assert all(x.doc_id != 3 for x in r)
+
+    def test_rollback_clears_uncommitted_flag(self, tmp_dir):
+        """After rollback, export should work (no uncommitted)."""
+        path = os.path.join(tmp_dir, "snap_rollback")
+        idx = lucivy.Index.create(path, FIELDS)
+        idx.add(doc_id=1, title="Keep", body="Committed")
+        idx.commit()
+        idx.add(doc_id=2, title="Discard", body="Rolled back")
+        idx.rollback()
+        # Should not raise — rollback clears uncommitted
+        blob = idx.export_snapshot()
+        assert len(blob) > 12

@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Lucivy WASM Test</title></head>
+<body>
+<pre id="output"></pre>
+<script type="module">
+import { Lucivy } from './js/lucivy.js';
+
+const out = document.getElementById('output');
+function log(msg) { out.textContent += msg + '\n'; }
+
+try {
+    const lucivy = new Lucivy('./js/lucivy-worker.js', '/pkg/lucivy_wasm_bg.wasm');
+    await lucivy.ready;
+    log('WASM initialized');
+
+    const idx = await lucivy.create('/test-index', [
+        { name: 'title', type: 'text' },
+        { name: 'body', type: 'text' },
+    ], 'english');
+    log('Index created');
+
+    await idx.add(0, { title: 'Rust programming', body: 'Rust is a systems programming language' });
+    await idx.add(1, { title: 'Python scripting', body: 'Python is great for data science' });
+    await idx.add(2, { title: 'JavaScript', body: 'JS runs in browsers and servers' });
+    await idx.commit();
+
+    const numDocs = await idx.numDocs();
+    log('Num docs: ' + numDocs);
+    if (numDocs !== 3) throw new Error('Expected 3 docs, got ' + numDocs);
+
+    const r1 = await idx.search('rust programming');
+    log('Search "rust programming": ' + JSON.stringify(r1));
+    if (r1.length === 0) throw new Error('Expected results for "rust programming"');
+    if (r1[0].doc_id !== 0) throw new Error('Expected doc_id 0, got ' + r1[0].doc_id);
+
+    const r2 = await idx.search({ type: 'contains', field: 'body', value: 'science' }, { highlights: true });
+    log('Search contains "science" with highlights: ' + JSON.stringify(r2));
+    if (r2.length === 0) throw new Error('Expected results for "science"');
+    if (!r2[0].highlights) throw new Error('Expected highlights');
+
+    await idx.remove(1);
+    await idx.commit();
+    const numDocs2 = await idx.numDocs();
+    log('After delete, num docs: ' + numDocs2);
+    if (numDocs2 !== 2) throw new Error('Expected 2 docs after delete, got ' + numDocs2);
+
+    await idx.destroy();
+    lucivy.terminate();
+
+    log('ALL TESTS PASSED');
+    window.__TEST_RESULT__ = 'PASS';
+} catch (e) {
+    log('FAILED: ' + e.message);
+    window.__TEST_RESULT__ = 'FAIL: ' + e.message;
+}
+</script>
+</body>
+</html>

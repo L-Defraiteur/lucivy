@@ -1,0 +1,20 @@
+[package]
+name = "lucivy-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Core library for Lucivy full-text search: schema, query, handle, tokenizer"
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+ld-lucivy = { path = "..", default-features = false, features = [
+    "stopwords",
+    "lz4-compression",
+    "stemmer",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+regex-syntax = "0.8"

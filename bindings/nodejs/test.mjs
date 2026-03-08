@@ -73,6 +73,63 @@ try {
     const r7 = idx.search('node');
     console.log('Search "node":', r7);
 
+    // ── Snapshot tests ──────────────────────────────────────────────
+
+    console.log('\n--- Snapshot: export/import roundtrip ---');
+    const snapDir1 = join(testDir, 'snap_src');
+    mkdirSync(snapDir1, { recursive: true });
+    const si = Index.create(snapDir1, [
+        { name: 'title', type: 'text' },
+        { name: 'body', type: 'text' },
+    ], 'english');
+    si.add(0, { title: 'Snapshot test', body: 'This is a snapshot roundtrip test' });
+    si.add(1, { title: 'Second doc', body: 'Another document for testing' });
+    si.commit();
+
+    const blob = si.exportSnapshot();
+    if (blob[0] !== 0x4C || blob[1] !== 0x55 || blob[2] !== 0x43 || blob[3] !== 0x45) {
+        throw new Error('FAIL: bad LUCE magic');
+    }
+    console.log('Snapshot size:', blob.length, 'bytes');
+
+    const snapDir2 = join(testDir, 'snap_dst');
+    const si2 = Index.importSnapshot(blob, snapDir2);
+    if (si2.numDocs !== 2) {
+        throw new Error('FAIL: expected 2 docs after import, got ' + si2.numDocs);
+    }
+    const sr = si2.search('snapshot');
+    if (sr.length === 0) {
+        throw new Error('FAIL: search after import returned no results');
+    }
+    console.log('Import OK, numDocs:', si2.numDocs);
+
+    // Export to file
+    console.log('\n--- Snapshot: file export/import ---');
+    const snapFile = join(testDir, 'test.luce');
+    si.exportSnapshotTo(snapFile);
+    const snapDir3 = join(testDir, 'snap_file_dst');
+    const si3 = Index.importSnapshotFrom(snapFile, snapDir3);
+    if (si3.numDocs !== 2) {
+        throw new Error('FAIL: expected 2 docs from file import, got ' + si3.numDocs);
+    }
+    console.log('File import OK, numDocs:', si3.numDocs);
+
+    // Uncommitted export should throw
+    console.log('\n--- Snapshot: uncommitted export should throw ---');
+    const snapDir4 = join(testDir, 'snap_uncommit');
+    mkdirSync(snapDir4, { recursive: true });
+    const si4 = Index.create(snapDir4, [{ name: 'title', type: 'text' }]);
+    si4.add(0, { title: 'Uncommitted' });
+    try {
+        si4.exportSnapshot();
+        throw new Error('FAIL: should have thrown for uncommitted');
+    } catch (e) {
+        if (!e.message.includes('uncommitted')) {
+            throw new Error('FAIL: wrong error: ' + e.message);
+        }
+        console.log('Correctly threw for uncommitted:', e.message);
+    }
+
     console.log('\nAll tests passed!');
 } finally {
     rmSync(testDir, { recursive: true, force: true });

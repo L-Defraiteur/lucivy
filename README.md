@@ -4,15 +4,14 @@ BM25 search engine with cross-token fuzzy matching — it finds substrings, hand
 
 ## Install
 
-Official bindings are **MIT-licensed** — use them freely, no revenue restrictions.
+Everything is **MIT-licensed**.
 
-| Language | Install | License |
-|----------|---------|---------|
-| Python | `pip install lucivy` (or build from source) | MIT |
-| Node.js | `npm install lucivy` (or build from source) | MIT |
-| Rust | Direct dependency on `ld-lucivy` | LRSL |
-
-The core engine (`ld-lucivy`) is under LRSL v1.3 (source-available). See [License](#license) for details.
+| Language | Install |
+|----------|---------|
+| Python | `pip install lucivy` (or build from source) |
+| Node.js | `npm install lucivy` (or build from source) |
+| C++ | Static library via CXX bridge (build from source) |
+| Rust | Direct dependency on `ld-lucivy` |
 
 ## Node.js
 
@@ -94,6 +93,82 @@ const index2 = Index.open('./my_index');
 | `index.commit()` / `index.rollback()` | Flush / discard |
 | `index.search(query, options?)` | Search |
 | `index.numDocs` / `index.schema` / `index.path` | Properties |
+
+## C++
+
+```bash
+cargo build -p lucivy-cpp --release
+# Link against target/release/liblucivy_cpp.a
+```
+
+```cpp
+#include "lucivy-cpp/src/lib.rs.h"
+
+// Create an index with text + filter fields
+auto idx = lucivy::lucivy_create("./my_index",
+    R"([
+        {"name": "title", "type": "text"},
+        {"name": "body", "type": "text"},
+        {"name": "year", "type": "i64", "indexed": true, "fast": true}
+    ])",
+    "english"
+);
+
+// Add documents (fields as JSON)
+idx->add(1, R"({"title": "Rust programming guide", "body": "Learn systems programming", "year": 2024})");
+idx->add(2, R"({"title": "Python for data science", "body": "Data analysis with pandas", "year": 2023})");
+idx->commit();
+
+// String search (contains_split on all text fields)
+auto results = idx->search("\"rust programming\"", 10);
+
+// Contains with highlights
+auto r = idx->search_with_highlights(
+    R"({"type": "contains", "field": "body", "value": "programming"})", 10);
+
+// Contains with fuzzy (typo tolerance)
+auto r2 = idx->search(
+    R"({"type": "contains", "field": "body", "value": "programing", "distance": 1})", 10);
+
+// Contains with regex
+auto r3 = idx->search(
+    R"({"type": "contains", "field": "body", "value": "program[a-z]+", "regex": true})", 10);
+
+// Boolean: must + must_not
+auto r4 = idx->search(
+    R"({"type": "boolean",
+        "must": [{"type": "contains", "field": "body", "value": "programming"}],
+        "must_not": [{"type": "contains", "field": "body", "value": "python"}]})", 10);
+
+// Filtered by document IDs
+uint64_t ids[] = {1, 3};
+auto r5 = idx->search_filtered("\"programming\"", 10, rust::Slice<const uint64_t>(ids, 2));
+
+// Delete, update, batch add
+idx->remove(2);
+idx->update(1, R"({"title": "Updated title", "body": "Updated body", "year": 2025})");
+idx->add_many(R"([{"docId": 10, "title": "New doc", "body": "Content", "year": 2025}])");
+idx->commit();
+
+// Reopen from disk
+auto idx2 = lucivy::lucivy_open("./my_index");
+```
+
+### C++ API
+
+| Function | Description |
+|----------|-------------|
+| `lucivy::lucivy_create(path, fields_json, stemmer)` | Create a new index |
+| `lucivy::lucivy_open(path)` | Open an existing index |
+| `idx->add(doc_id, fields_json)` | Add a document |
+| `idx->add_many(docs_json)` | Batch add |
+| `idx->remove(doc_id)` | Delete a document |
+| `idx->update(doc_id, fields_json)` | Delete + re-add |
+| `idx->commit()` / `idx->rollback()` | Flush / discard |
+| `idx->search(query_json, limit)` | Search |
+| `idx->search_with_highlights(query_json, limit)` | Search with byte offsets |
+| `idx->search_filtered(query_json, limit, allowed_ids)` | Pre-filtered search |
+| `idx->num_docs()` / `idx->get_schema()` / `idx->get_path()` | Properties |
 
 ## Python
 
@@ -305,6 +380,10 @@ pytest tests/ -v  # 64 tests
 cargo build -p lucivy-napi --release
 cp target/release/liblucivy_napi.so bindings/nodejs/lucivy.linux-x64-gnu.node
 node bindings/nodejs/test.mjs
+
+# C++ bindings
+cargo build -p lucivy-cpp --release
+# Link against target/release/liblucivy_cpp.a
 ```
 
 ## Usage as a Rust dependency
@@ -323,13 +402,11 @@ Fork of [tantivy](https://github.com/quickwit-oss/tantivy) v0.26.0 (via [izihawa
 ```
 quickwit-oss/tantivy v0.22
   -> izihawa/tantivy v0.26.0 (regex phrase queries, FST improvements)
-    -> L-Defraiteur/lucivy (NgramContainsQuery, contains_split, fuzzy/regex/hybrid modes, HighlightSink, Python/Node.js bindings)
+    -> L-Defraiteur/lucivy (NgramContainsQuery, contains_split, fuzzy/regex/hybrid modes, HighlightSink, Python/Node.js/C++ bindings)
 ```
 
 ## License
 
-The core engine (`ld-lucivy`) is licensed under **LRSL v1.3** (Luciform Research Source License) — source-available. Free for research, personal, academic use and businesses under 100k EUR annual revenue. Commercial use above threshold requires a separate agreement. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
 
-**Official bindings (Python, Node.js) are MIT-licensed.** Per LRSL Section 4.3, you can use them freely regardless of your revenue — no commercial agreement needed. Each binding has its own MIT [LICENSE](bindings/nodejs/LICENSE) file.
-
-The original Tantivy code is MIT-licensed (see [NOTICE](NOTICE)).
+Fork of [tantivy](https://github.com/quickwit-oss/tantivy) v0.26.0, also MIT (see [NOTICE](NOTICE)).

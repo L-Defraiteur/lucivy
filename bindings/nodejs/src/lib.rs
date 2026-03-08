@@ -1,7 +1,7 @@
 //! lucivy — Node.js bindings for ld-lucivy BM25 full-text search.
 //!
 //! Provides a JS/TS API for creating, managing, and querying Lucivy indexes.
-//! This is an Official Binding under LRSL Section 4.3, distributed under MIT.
+//! Distributed under the MIT License.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -14,8 +14,10 @@ use ld_lucivy::{DocAddress, LucivyDocument, Searcher};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-use lucivy_fts::handle::{LucivyHandle, NGRAM_SUFFIX, NODE_ID_FIELD, RAW_SUFFIX};
-use lucivy_fts::query;
+use lucivy_core::handle::{LucivyHandle, NGRAM_SUFFIX, NODE_ID_FIELD, RAW_SUFFIX};
+use lucivy_core::directory::StdFsDirectory;
+use lucivy_core::query;
+use lucivy_core::snapshot;
 
 // ─── SearchResult ──────────────────────────────────────────────────────────
 
@@ -80,7 +82,9 @@ impl Index {
             stemmer,
         };
 
-        let handle = LucivyHandle::create(&path, &config)
+        let directory = StdFsDirectory::open(&path)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let handle = LucivyHandle::create(directory, &config)
             .map_err(|e| Error::from_reason(e))?;
 
         let (user_fields, text_fields) = extract_user_fields(&config);
@@ -96,18 +100,14 @@ impl Index {
     /// Open an existing index at the given path.
     #[napi(factory)]
     pub fn open(path: String) -> Result<Self> {
-        let handle = LucivyHandle::open(&path)
+        let directory = StdFsDirectory::open(&path)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let handle = LucivyHandle::open(directory)
             .map_err(|e| Error::from_reason(e))?;
 
-        let config_path = std::path::Path::new(&path).join("_config.json");
-        let (user_fields, text_fields) = if config_path.exists() {
-            let config_str = std::fs::read_to_string(&config_path)
-                .map_err(|e| Error::from_reason(format!("cannot read config: {e}")))?;
-            let config: query::SchemaConfig = serde_json::from_str(&config_str)
-                .map_err(|e| Error::from_reason(format!("cannot parse config: {e}")))?;
-            extract_user_fields(&config)
-        } else {
-            (Vec::new(), Vec::new())
+        let (user_fields, text_fields) = match &handle.config {
+            Some(config) => extract_user_fields(config),
+            None => (Vec::new(), Vec::new()),
         };
 
         Ok(Self {
@@ -133,6 +133,7 @@ impl Index {
             .map_err(|_| Error::from_reason("writer lock poisoned"))?;
         writer.add_document(doc)
             .map_err(|e| Error::from_reason(e.to_string()))?;
+        self.handle.mark_uncommitted();
         Ok(())
     }
 
@@ -165,6 +166,7 @@ impl Index {
             writer.add_document(doc)
                 .map_err(|e| Error::from_reason(e.to_string()))?;
         }
+        self.handle.mark_uncommitted();
         Ok(())
     }
 
@@ -177,6 +179,7 @@ impl Index {
         let writer = self.handle.writer.lock()
             .map_err(|_| Error::from_reason("writer lock poisoned"))?;
         writer.delete_term(term);
+        self.handle.mark_uncommitted();
         Ok(())
     }
 
@@ -197,6 +200,7 @@ impl Index {
             .map_err(|e| Error::from_reason(e.to_string()))?;
         self.handle.reader.reload()
             .map_err(|e| Error::from_reason(e.to_string()))?;
+        self.handle.mark_committed();
         Ok(())
     }
 
@@ -207,6 +211,7 @@ impl Index {
             .map_err(|_| Error::from_reason("writer lock poisoned"))?;
         writer.rollback()
             .map_err(|e| Error::from_reason(e.to_string()))?;
+        self.handle.mark_committed();
         Ok(())
     }
 
@@ -267,6 +272,72 @@ impl Index {
     #[napi(getter)]
     pub fn path(&self) -> &str {
         &self.index_path
+    }
+
+    /// Export this index as a LUCE snapshot (Buffer).
+    /// Throws if there are uncommitted changes.
+    #[napi]
+    pub fn export_snapshot(&self) -> Result<Buffer> {
+        snapshot::check_committed(&self.handle, &self.index_path)
+            .map_err(|e| Error::from_reason(e))?;
+
+        let files = snapshot::read_directory_files(std::path::Path::new(&self.index_path))
+            .map_err(|e| Error::from_reason(e))?;
+
+        let idx = snapshot::SnapshotIndex {
+            path: &self.index_path,
+            files,
+        };
+        let blob = snapshot::export_snapshot(&[idx]);
+        Ok(blob.into())
+    }
+
+    /// Export this index as a LUCE snapshot to a file.
+    #[napi]
+    pub fn export_snapshot_to(&self, path: String) -> Result<()> {
+        snapshot::check_committed(&self.handle, &self.index_path)
+            .map_err(|e| Error::from_reason(e))?;
+
+        let files = snapshot::read_directory_files(std::path::Path::new(&self.index_path))
+            .map_err(|e| Error::from_reason(e))?;
+
+        let idx = snapshot::SnapshotIndex {
+            path: &self.index_path,
+            files,
+        };
+        let blob = snapshot::export_snapshot(&[idx]);
+        std::fs::write(&path, &blob)
+            .map_err(|e| Error::from_reason(format!("cannot write snapshot: {e}")))?;
+        Ok(())
+    }
+
+    /// Import an index from a LUCE snapshot (Buffer).
+    /// The snapshot must contain exactly one index.
+    #[napi(factory)]
+    pub fn import_snapshot(data: Buffer, dest_path: Option<String>) -> Result<Self> {
+        let indexes = snapshot::import_snapshot(&data)
+            .map_err(|e| Error::from_reason(e))?;
+
+        if indexes.len() != 1 {
+            return Err(Error::from_reason(format!(
+                "expected 1 index in snapshot, got {}",
+                indexes.len()
+            )));
+        }
+
+        let imported = &indexes[0];
+        let target = dest_path.as_deref().unwrap_or(&imported.path);
+
+        write_imported_files(target, &imported.files)?;
+        Self::open(target.to_string())
+    }
+
+    /// Import an index from a LUCE snapshot file.
+    #[napi(factory)]
+    pub fn import_snapshot_from(path: String, dest_path: Option<String>) -> Result<Self> {
+        let data = std::fs::read(&path)
+            .map_err(|e| Error::from_reason(format!("cannot read snapshot: {e}")))?;
+        Self::import_snapshot(data.into(), dest_path)
     }
 
     /// Schema as a list of field definitions.
@@ -521,6 +592,17 @@ fn execute_top_docs_filtered(
     searcher
         .search(query, &collector)
         .map_err(|e| Error::from_reason(format!("filtered search error: {e}")))
+}
+
+fn write_imported_files(dest_path: &str, files: &[(String, Vec<u8>)]) -> Result<()> {
+    std::fs::create_dir_all(dest_path)
+        .map_err(|e| Error::from_reason(format!("cannot create directory '{}': {e}", dest_path)))?;
+    for (name, data) in files {
+        let file_path = std::path::Path::new(dest_path).join(name);
+        std::fs::write(&file_path, data)
+            .map_err(|e| Error::from_reason(format!("cannot write '{}': {e}", file_path.display())))?;
+    }
+    Ok(())
 }
 
 fn collect_results(

@@ -1,3 +1,3 @@
-const { Index } = require('./lucivy.linux-x64-gnu.node');
+const { Index } = require('./lucivy.node');
 
 module.exports = { Index };

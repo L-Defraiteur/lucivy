@@ -14,8 +14,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use lucivy_fts::handle::{LucivyHandle, NGRAM_SUFFIX, NODE_ID_FIELD, RAW_SUFFIX};
-use lucivy_fts::query;
+use lucivy_core::handle::{LucivyHandle, NGRAM_SUFFIX, NODE_ID_FIELD, RAW_SUFFIX};
+use lucivy_core::directory::StdFsDirectory;
+use lucivy_core::query;
+use lucivy_core::snapshot;
 
 // ─── SearchResult ──────────────────────────────────────────────────────────
 
@@ -90,7 +92,9 @@ impl Index {
             stemmer: stemmer.map(String::from),
         };
 
-        let handle = LucivyHandle::create(path, &config)
+        let directory = StdFsDirectory::open(path)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let handle = LucivyHandle::create(directory, &config)
             .map_err(|e| PyValueError::new_err(e))?;
 
         let (user_fields, text_fields) = extract_user_fields(&config);
@@ -106,19 +110,14 @@ impl Index {
     /// Open an existing index at the given path.
     #[staticmethod]
     fn open(path: &str) -> PyResult<Self> {
-        let handle = LucivyHandle::open(path)
+        let directory = StdFsDirectory::open(path)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let handle = LucivyHandle::open(directory)
             .map_err(|e| PyValueError::new_err(e))?;
 
-        // Read config to get user fields.
-        let config_path = std::path::Path::new(path).join("_config.json");
-        let (user_fields, text_fields) = if config_path.exists() {
-            let config_str = std::fs::read_to_string(&config_path)
-                .map_err(|e| PyValueError::new_err(format!("cannot read config: {e}")))?;
-            let config: query::SchemaConfig = serde_json::from_str(&config_str)
-                .map_err(|e| PyValueError::new_err(format!("cannot parse config: {e}")))?;
-            extract_user_fields(&config)
-        } else {
-            (Vec::new(), Vec::new())
+        let (user_fields, text_fields) = match &handle.config {
+            Some(config) => extract_user_fields(config),
+            None => (Vec::new(), Vec::new()),
         };
 
         Ok(Self {
@@ -147,6 +146,7 @@ impl Index {
             .map_err(|_| PyValueError::new_err("writer lock poisoned"))?;
         writer.add_document(doc)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        self.handle.mark_uncommitted();
         Ok(())
     }
 
@@ -179,6 +179,7 @@ impl Index {
             writer.add_document(doc)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
         }
+        self.handle.mark_uncommitted();
         Ok(())
     }
 
@@ -190,6 +191,7 @@ impl Index {
         let writer = self.handle.writer.lock()
             .map_err(|_| PyValueError::new_err("writer lock poisoned"))?;
         writer.delete_term(term);
+        self.handle.mark_uncommitted();
         Ok(())
     }
 
@@ -209,6 +211,7 @@ impl Index {
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         self.handle.reader.reload()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        self.handle.mark_committed();
         Ok(())
     }
 
@@ -218,6 +221,7 @@ impl Index {
             .map_err(|_| PyValueError::new_err("writer lock poisoned"))?;
         writer.rollback()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        self.handle.mark_committed();
         Ok(())
     }
 
@@ -286,6 +290,78 @@ impl Index {
             m.insert("type".to_string(), ft.clone());
             m
         }).collect()
+    }
+
+    /// Export this index as a LUCE snapshot (bytes).
+    ///
+    /// Raises ValueError if there are uncommitted changes.
+    fn export_snapshot<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        snapshot::check_committed(&self.handle, &self.index_path)
+            .map_err(|e| PyValueError::new_err(e))?;
+
+        let files = snapshot::read_directory_files(std::path::Path::new(&self.index_path))
+            .map_err(|e| PyValueError::new_err(e))?;
+
+        let idx = snapshot::SnapshotIndex {
+            path: &self.index_path,
+            files,
+        };
+        let blob = snapshot::export_snapshot(&[idx]);
+        Ok(pyo3::types::PyBytes::new(py, &blob))
+    }
+
+    /// Export this index as a LUCE snapshot to a file.
+    ///
+    /// Raises ValueError if there are uncommitted changes.
+    fn export_snapshot_to(&self, path: &str) -> PyResult<()> {
+        snapshot::check_committed(&self.handle, &self.index_path)
+            .map_err(|e| PyValueError::new_err(e))?;
+
+        let files = snapshot::read_directory_files(std::path::Path::new(&self.index_path))
+            .map_err(|e| PyValueError::new_err(e))?;
+
+        let idx = snapshot::SnapshotIndex {
+            path: &self.index_path,
+            files,
+        };
+        let blob = snapshot::export_snapshot(&[idx]);
+        std::fs::write(path, &blob)
+            .map_err(|e| PyValueError::new_err(format!("cannot write snapshot: {e}")))?;
+        Ok(())
+    }
+
+    /// Import an index from a LUCE snapshot (bytes).
+    ///
+    /// The snapshot must contain exactly one index.
+    /// The index is restored at `dest_path` (or at the original path if None).
+    #[staticmethod]
+    #[pyo3(signature = (data, dest_path=None))]
+    fn import_snapshot(data: &[u8], dest_path: Option<&str>) -> PyResult<Self> {
+        let indexes = snapshot::import_snapshot(data)
+            .map_err(|e| PyValueError::new_err(e))?;
+
+        if indexes.len() != 1 {
+            return Err(PyValueError::new_err(format!(
+                "expected 1 index in snapshot, got {}. Use lucivy.import_snapshots() for multi-index.",
+                indexes.len()
+            )));
+        }
+
+        let imported = &indexes[0];
+        let target_path = dest_path.unwrap_or(&imported.path);
+
+        write_imported_files(target_path, &imported.files)?;
+
+        Self::open(target_path)
+    }
+
+    /// Import an index from a LUCE snapshot file.
+    #[staticmethod]
+    #[pyo3(signature = (path, dest_path=None))]
+    fn import_snapshot_from(path: &str, dest_path: Option<&str>) -> PyResult<Self> {
+        let data = std::fs::read(path)
+            .map_err(|e| PyValueError::new_err(format!("cannot read snapshot: {e}")))?;
+        Self::import_snapshot(&data, dest_path)
     }
 
     fn __enter__(slf: Py<Self>) -> Py<Self> {
@@ -558,11 +634,75 @@ fn collect_results(
     Ok(results)
 }
 
+fn write_imported_files(dest_path: &str, files: &[(String, Vec<u8>)]) -> PyResult<()> {
+    std::fs::create_dir_all(dest_path)
+        .map_err(|e| PyValueError::new_err(format!("cannot create directory '{}': {e}", dest_path)))?;
+    for (name, data) in files {
+        let file_path = std::path::Path::new(dest_path).join(name);
+        std::fs::write(&file_path, data)
+            .map_err(|e| PyValueError::new_err(format!("cannot write '{}': {e}", file_path.display())))?;
+    }
+    Ok(())
+}
+
+// ─── Module-level functions ─────────────────────────────────────────────
+
+/// Export multiple indexes into a single LUCE snapshot.
+#[pyfunction]
+fn export_snapshots<'py>(py: Python<'py>, indexes: Vec<PyRef<'_, Index>>) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+    let mut files_storage = Vec::with_capacity(indexes.len());
+
+    for idx in &indexes {
+        snapshot::check_committed(&idx.handle, &idx.index_path)
+            .map_err(|e| PyValueError::new_err(e))?;
+        let files = snapshot::read_directory_files(std::path::Path::new(&idx.index_path))
+            .map_err(|e| PyValueError::new_err(e))?;
+        files_storage.push((idx.index_path.clone(), files));
+    }
+
+    let snapshot_indexes: Vec<snapshot::SnapshotIndex<'_>> = files_storage.iter()
+        .map(|(path, files)| snapshot::SnapshotIndex { path, files: files.clone() })
+        .collect();
+
+    let blob = snapshot::export_snapshot(&snapshot_indexes);
+    Ok(pyo3::types::PyBytes::new(py, &blob))
+}
+
+/// Import multiple indexes from a single LUCE snapshot.
+#[pyfunction]
+#[pyo3(signature = (data, dest_paths=None))]
+fn import_snapshots(data: &[u8], dest_paths: Option<Vec<String>>) -> PyResult<Vec<Index>> {
+    let indexes = snapshot::import_snapshot(data)
+        .map_err(|e| PyValueError::new_err(e))?;
+
+    if let Some(ref paths) = dest_paths {
+        if paths.len() != indexes.len() {
+            return Err(PyValueError::new_err(format!(
+                "dest_paths length ({}) doesn't match snapshot index count ({})",
+                paths.len(), indexes.len()
+            )));
+        }
+    }
+
+    let mut result = Vec::with_capacity(indexes.len());
+    for (i, imported) in indexes.iter().enumerate() {
+        let target = match &dest_paths {
+            Some(paths) => paths[i].as_str(),
+            None => &imported.path,
+        };
+        write_imported_files(target, &imported.files)?;
+        result.push(Index::open(target)?);
+    }
+    Ok(result)
+}
+
 // ─── Module ────────────────────────────────────────────────────────────────
 
 #[pymodule]
 fn lucivy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Index>()?;
     m.add_class::<SearchResult>()?;
+    m.add_function(wrap_pyfunction!(export_snapshots, m)?)?;
+    m.add_function(wrap_pyfunction!(import_snapshots, m)?)?;
     Ok(())
 }

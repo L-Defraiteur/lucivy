@@ -150,9 +150,13 @@ members = [
     "sstable",
     "tokenizer-api",
     "columnar",
+    "lucivy_core",
     "lucivy_fts/rust",
     "bindings/python",
     "bindings/nodejs",
+    "bindings/cpp",
+    "bindings/wasm",
+    "bindings/emscripten",
 ]
 
 # Following the "fail" crate best practises, we isolate

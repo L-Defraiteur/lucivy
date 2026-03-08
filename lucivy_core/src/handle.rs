@@ -1,7 +1,6 @@
 //! Index handle management.
 //!
 //! Each LucivyHandle holds an Index, an IndexWriter, and an IndexReader.
-//! Handles are identified by opaque pointers passed through the C FFI.
 //!
 //! Every "text" field gets a triple-field layout:
 //!   - `{name}` : tokenized (stemmed if stemmer configured, else lowercase)
@@ -10,14 +9,15 @@
 //! The routing is transparent — users always reference the base field name.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
+use ld_lucivy::directory::Directory;
 use ld_lucivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, INDEXED, STORED,
 };
 use ld_lucivy::{Index, IndexReader, IndexSettings, IndexWriter, ReloadPolicy};
 
-use crate::directory::StdFsDirectory;
 use crate::query::SchemaConfig;
 
 /// Reserved field name for Rag3db node IDs, used for filtered search.
@@ -35,7 +35,7 @@ const STEMMED_TOKENIZER: &str = "stemmed";
 /// Tokenizer name for n-gram (trigram) fields.
 const NGRAM_TOKENIZER: &str = "ngram";
 
-/// Opaque handle exposed through the C FFI.
+/// Opaque handle shared by all bindings.
 pub struct LucivyHandle {
     pub index: Index,
     pub writer: Mutex<IndexWriter>,
@@ -49,10 +49,17 @@ pub struct LucivyHandle {
     /// Maps user field names to their `._ngram` counterpart names.
     /// Always populated for "text" fields.
     pub ngram_field_pairs: Vec<(String, String)>,
+    /// Original schema config, available for bindings that need field metadata on open().
+    pub config: Option<SchemaConfig>,
+    /// True if there are uncommitted changes (add/remove/update without commit).
+    pub has_uncommitted: AtomicBool,
 }
 
 /// Default writer heap size (50MB).
 const WRITER_HEAP_SIZE: usize = 50_000_000;
+
+/// Config file stored alongside the index for reopening.
+const CONFIG_FILE: &str = "_config.json";
 
 /// Create an IndexWriter with a thread count appropriate for the target.
 /// On WASM, limit to 1 thread to avoid exhausting the emscripten pthread pool.
@@ -71,25 +78,24 @@ fn create_writer(index: &Index) -> Result<IndexWriter, String> {
     }
 }
 
-/// Config file stored alongside the index for reopening.
-const CONFIG_FILE: &str = "_config.json";
-
 impl LucivyHandle {
-    /// Create a new index at the given path.
-    pub fn create(path: &str, config: &SchemaConfig) -> Result<Self, String> {
+    /// Create a new index with the given directory and schema config.
+    pub fn create(dir: impl Directory, config: &SchemaConfig) -> Result<Self, String> {
         let (schema, field_map, raw_field_pairs, ngram_field_pairs) = build_schema(config)?;
-        let directory =
-            StdFsDirectory::open(path).map_err(|e| format!("cannot open directory: {e}"))?;
-        let index = Index::create(directory, schema.clone(), IndexSettings::default())
+
+        // Persist config BEFORE creating the index, so it bypasses ManagedDirectory's GC.
+        // ManagedDirectory.atomic_write registers files as "managed" and the GC deletes them
+        // on commit because they are not referenced by any segment. Writing directly on the
+        // underlying Directory avoids this.
+        let config_json =
+            serde_json::to_string(config).map_err(|e| format!("cannot serialize config: {e}"))?;
+        dir.atomic_write(Path::new(CONFIG_FILE), config_json.as_bytes())
+            .map_err(|e| format!("cannot write config: {e}"))?;
+
+        let index = Index::create(dir, schema.clone(), IndexSettings::default())
             .map_err(|e| format!("cannot create index: {e}"))?;
 
         configure_tokenizers(&index, config);
-
-        // Persist config so open() can re-register tokenizers and rebuild raw_field_pairs.
-        let config_json =
-            serde_json::to_string(config).map_err(|e| format!("cannot serialize config: {e}"))?;
-        std::fs::write(Path::new(path).join(CONFIG_FILE), config_json)
-            .map_err(|e| format!("cannot write config: {e}"))?;
 
         let writer = create_writer(&index)?;
         let reader = index
@@ -106,46 +112,51 @@ impl LucivyHandle {
             field_map,
             raw_field_pairs,
             ngram_field_pairs,
+            config: Some(config.clone()),
+            has_uncommitted: AtomicBool::new(false),
         })
     }
 
-    /// Open an existing index at the given path.
-    pub fn open(path: &str) -> Result<Self, String> {
-        let directory =
-            StdFsDirectory::open(path).map_err(|e| format!("cannot open directory: {e}"))?;
-        let index = Index::open(directory).map_err(|e| format!("cannot open index: {e}"))?;
+    /// Open an existing index from the given directory.
+    pub fn open(dir: impl Directory) -> Result<Self, String> {
+        // Read config BEFORE opening the index, on the raw Directory.
+        // After Index::open, index.directory() returns a ManagedDirectory wrapper
+        // which may not find files that were written outside its management.
+        let config_bytes = dir.atomic_read(Path::new(CONFIG_FILE)).ok();
 
-        // Load config to re-register tokenizers and rebuild raw_field_pairs.
-        let config_path = Path::new(path).join(CONFIG_FILE);
-        let (raw_field_pairs, ngram_field_pairs) = if config_path.exists() {
-            let config_str = std::fs::read_to_string(&config_path)
-                .map_err(|e| format!("cannot read config: {e}"))?;
-            let config: SchemaConfig = serde_json::from_str(&config_str)
-                .map_err(|e| format!("cannot parse config: {e}"))?;
-            configure_tokenizers(&index, &config);
-            let text_fields: Vec<_> = config
-                .fields
-                .iter()
-                .filter(|f| f.field_type == "text")
-                .collect();
-            let string_fields: Vec<_> = config
-                .fields
-                .iter()
-                .filter(|f| f.field_type == "string")
-                .collect();
-            let raw: Vec<_> = text_fields
-                .iter()
-                .map(|f| (f.name.clone(), format!("{}{RAW_SUFFIX}", f.name)))
-                .collect();
-            // Ngram pairs: text fields + string fields (both have ._ngram counterparts).
-            let ngram: Vec<_> = text_fields
-                .iter()
-                .chain(string_fields.iter())
-                .map(|f| (f.name.clone(), format!("{}{NGRAM_SUFFIX}", f.name)))
-                .collect();
-            (raw, ngram)
-        } else {
-            (Vec::new(), Vec::new())
+        let index = Index::open(dir).map_err(|e| format!("cannot open index: {e}"))?;
+
+        // Use the pre-read config to re-register tokenizers and rebuild field pairs.
+        let (config, raw_field_pairs, ngram_field_pairs) = match config_bytes {
+            Some(config_data) => {
+                match serde_json::from_slice::<SchemaConfig>(&config_data) {
+                    Ok(config) => {
+                        configure_tokenizers(&index, &config);
+                        let text_fields: Vec<_> = config
+                            .fields
+                            .iter()
+                            .filter(|f| f.field_type == "text")
+                            .collect();
+                        let string_fields: Vec<_> = config
+                            .fields
+                            .iter()
+                            .filter(|f| f.field_type == "string")
+                            .collect();
+                        let raw: Vec<_> = text_fields
+                            .iter()
+                            .map(|f| (f.name.clone(), format!("{}{RAW_SUFFIX}", f.name)))
+                            .collect();
+                        let ngram: Vec<_> = text_fields
+                            .iter()
+                            .chain(string_fields.iter())
+                            .map(|f| (f.name.clone(), format!("{}{NGRAM_SUFFIX}", f.name)))
+                            .collect();
+                        (Some(config), raw, ngram)
+                    }
+                    Err(_) => (None, Vec::new(), Vec::new()),
+                }
+            }
+            None => (None, Vec::new(), Vec::new()),
         };
 
         let schema = index.schema();
@@ -169,7 +180,24 @@ impl LucivyHandle {
             field_map,
             raw_field_pairs,
             ngram_field_pairs,
+            config,
+            has_uncommitted: AtomicBool::new(false),
         })
+    }
+
+    /// Mark that there are uncommitted changes.
+    pub fn mark_uncommitted(&self) {
+        self.has_uncommitted.store(true, Ordering::Relaxed);
+    }
+
+    /// Mark that all changes have been committed (or rolled back).
+    pub fn mark_committed(&self) {
+        self.has_uncommitted.store(false, Ordering::Relaxed);
+    }
+
+    /// Returns true if there are uncommitted changes.
+    pub fn has_uncommitted(&self) -> bool {
+        self.has_uncommitted.load(Ordering::Relaxed)
     }
 
     /// Get a field by name.
@@ -179,10 +207,9 @@ impl LucivyHandle {
             .find(|(n, _)| n == name)
             .map(|(_, f)| *f)
     }
-
 }
 
-fn build_schema(
+pub fn build_schema(
     config: &SchemaConfig,
 ) -> Result<(Schema, Vec<(String, Field)>, Vec<(String, String)>, Vec<(String, String)>), String> {
     let mut builder = Schema::builder();
@@ -305,7 +332,7 @@ fn build_schema(
     Ok((builder.build(), field_map, raw_field_pairs, ngram_field_pairs))
 }
 
-fn configure_tokenizers(index: &Index, config: &SchemaConfig) {
+pub fn configure_tokenizers(index: &Index, config: &SchemaConfig) {
     use ld_lucivy::tokenizer::{AsciiFoldingFilter, LowerCaser, SimpleTokenizer, TextAnalyzer};
 
     use crate::tokenizer::NgramFilter;
@@ -347,6 +374,7 @@ fn configure_tokenizers(index: &Index, config: &SchemaConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::directory::StdFsDirectory;
 
     #[derive(serde::Serialize)]
     struct SchemaField {
@@ -384,7 +412,8 @@ mod tests {
         let config_str = config_json.to_string();
         let config: SchemaConfig = serde_json::from_str(&config_str).unwrap();
 
-        let handle = LucivyHandle::create(path, &config).unwrap();
+        let directory = StdFsDirectory::open(path).unwrap();
+        let handle = LucivyHandle::create(directory, &config).unwrap();
 
         // Verify ngram pairs include "tag"
         assert!(

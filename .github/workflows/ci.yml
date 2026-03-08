@@ -185,3 +185,29 @@ jobs:
 
       - name: Test lucivy-nodejs
         run: node bindings/nodejs/test.mjs
+
+  lucivy-cpp:
+    runs-on: ubuntu-latest
+    name: lucivy-cpp
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build lucivy-cpp
+        run: cargo build -p lucivy-cpp --release
+
+      - name: Compile test
+        run: |
+          BUILD_DIR=$(find target/release/build -maxdepth 1 -name "lucivy-cpp-*" -type d | grep -v "\.d" | head -1)
+          g++ -std=c++17 -o /tmp/test_lucivy_cpp bindings/cpp/test.cpp \
+            -I "$BUILD_DIR/out/cxxbridge/include" \
+            -L target/release -llucivy_cpp \
+            -lpthread -ldl -lm
+
+      - name: Test lucivy-cpp
+        run: /tmp/test_lucivy_cpp

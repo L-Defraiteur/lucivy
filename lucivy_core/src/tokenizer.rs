@@ -1,4 +1,4 @@
-//! Custom tokenizers for lucivy_fts.
+//! Custom tokenizers for lucivy.
 //!
 //! Provides an n-gram (trigram) filter for substring search via n-gram index.
 

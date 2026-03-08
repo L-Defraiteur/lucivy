@@ -14,8 +14,10 @@ use ld_lucivy::query::HighlightSink;
 use ld_lucivy::schema::{Field, FieldType, Value as LucivyValue};
 use ld_lucivy::{DocAddress, Searcher, LucivyDocument};
 
-use crate::handle::{LucivyHandle, NGRAM_SUFFIX, NODE_ID_FIELD, RAW_SUFFIX};
-use crate::query;
+use lucivy_core::handle::{NGRAM_SUFFIX, NODE_ID_FIELD, RAW_SUFFIX};
+use lucivy_core::query;
+
+use crate::LucivyHandle;
 
 #[cxx::bridge]
 mod ffi {
@@ -153,13 +155,17 @@ mod ffi {
 fn create_index(path: &str, schema_json: &str) -> Result<Box<LucivyHandle>, String> {
     let config: query::SchemaConfig = serde_json::from_str(schema_json)
         .map_err(|e| format!("invalid schema JSON: {e}"))?;
-    let handle = LucivyHandle::create(path, &config)?;
-    Ok(Box::new(handle))
+    let directory = lucivy_core::directory::StdFsDirectory::open(path)
+        .map_err(|e| format!("cannot open directory: {e}"))?;
+    let inner = lucivy_core::handle::LucivyHandle::create(directory, &config)?;
+    Ok(Box::new(LucivyHandle(inner)))
 }
 
 fn open_index(path: &str) -> Result<Box<LucivyHandle>, String> {
-    let handle = LucivyHandle::open(path)?;
-    Ok(Box::new(handle))
+    let directory = lucivy_core::directory::StdFsDirectory::open(path)
+        .map_err(|e| format!("cannot open directory: {e}"))?;
+    let inner = lucivy_core::handle::LucivyHandle::open(directory)?;
+    Ok(Box::new(LucivyHandle(inner)))
 }
 
 // ── Schema introspection ───────────────────────────────────────────────────

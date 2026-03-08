@@ -1,13 +1,9 @@
 [package]
-name = "lucivy-fts"
+name = "lucivy-cpp"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "C FFI bindings for Lucivy full-text search, used as a rag3db extension"
-
-[features]
-default = ["cxx-bridge"]
-cxx-bridge = ["dep:cxx"]
+description = "C++ bindings for Lucivy full-text search, via CXX bridge"
 
 [lib]
 crate-type = ["staticlib", "lib"]
@@ -20,11 +16,7 @@ ld-lucivy = { path = "../..", default-features = false, features = [
     "stemmer",
 ] }
 serde_json = "1"
-cxx = { version = "1.0", optional = true }
+cxx = "1.0"
 
 [build-dependencies]
 cxx-build = "1.0"
-
-[profile.release]
-opt-level = "z"
-lto = "thin"

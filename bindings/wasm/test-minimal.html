@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Lucivy WASM Minimal Test</title></head>
+<body>
+<pre id="output"></pre>
+<script type="module">
+const out = document.getElementById('output');
+function log(msg) { out.textContent += msg + '\n'; console.log(msg); }
+
+const worker = new Worker('./test-worker-direct.js', {type: 'module'});
+worker.postMessage('start');
+worker.onmessage = (e) => {
+    const {type, msg, result, stack} = e.data;
+    if (type === 'log') log(msg);
+    if (type === 'done') {
+        log(result);
+        if (stack) log(stack);
+        window.__TEST_RESULT__ = result.startsWith('PASS') ? 'PASS' : result;
+    }
+};
+worker.onerror = (e) => {
+    log('Worker error: ' + e.message);
+    window.__TEST_RESULT__ = 'FAIL: worker error: ' + e.message;
+};
+</script>
+</body>
+</html>
