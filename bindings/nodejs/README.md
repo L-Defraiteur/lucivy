@@ -64,6 +64,12 @@ let results = index.search('rust async programming');
 
 // Options
 results = index.search('rust', { limit: 20, highlights: true, allowedIds: [1, 3] });
+
+// Retrieve stored field values with results
+results = index.search('rust', { fields: true });
+for (const r of results) {
+    console.log(r.docId, r.fields.title, r.fields.body);
+}
 ```
 
 #### contains — substring, fuzzy, regex (cross-token)

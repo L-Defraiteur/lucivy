@@ -26,6 +26,7 @@ pub struct SearchResult {
     pub doc_id: u32,
     pub score: f64,
     pub highlights: Option<HashMap<String, Vec<Vec<u32>>>>,
+    pub fields: Option<HashMap<String, String>>,
 }
 
 // ─── FieldDef (input) ──────────────────────────────────────────────────────
@@ -48,6 +49,7 @@ pub struct SearchOptions {
     pub limit: Option<u32>,
     pub highlights: Option<bool>,
     pub allowed_ids: Option<Vec<u32>>,
+    pub fields: Option<bool>,
 }
 
 // ─── Index ─────────────────────────────────────────────────────────────────
@@ -225,6 +227,7 @@ impl Index {
     ) -> Result<Vec<SearchResult>> {
         let limit = options.as_ref().and_then(|o| o.limit).unwrap_or(10);
         let want_highlights = options.as_ref().and_then(|o| o.highlights).unwrap_or(false);
+        let want_fields = options.as_ref().and_then(|o| o.fields).unwrap_or(false);
         let allowed_ids = options.as_ref().and_then(|o| o.allowed_ids.clone());
 
         let query_config = self.parse_query(&query)?;
@@ -259,6 +262,7 @@ impl Index {
             &top_docs,
             &self.handle.schema,
             highlight_sink.as_deref(),
+            want_fields,
         )
     }
 
@@ -610,6 +614,7 @@ fn collect_results(
     top_docs: &[(f32, DocAddress)],
     schema: &ld_lucivy::schema::Schema,
     highlight_sink: Option<&HighlightSink>,
+    include_fields: bool,
 ) -> Result<Vec<SearchResult>> {
     let nid_field = schema
         .get_field(NODE_ID_FIELD)
@@ -650,10 +655,37 @@ fn collect_results(
             }
         });
 
+        let fields = if include_fields {
+            let mut map = HashMap::new();
+            for (field, value) in doc.field_values() {
+                let name = schema.get_field_name(field);
+                if name == NODE_ID_FIELD || name.ends_with(RAW_SUFFIX) || name.ends_with(NGRAM_SUFFIX) {
+                    continue;
+                }
+                let rv = value.as_value();
+                let val_str = if let Some(s) = rv.as_str() {
+                    s.to_string()
+                } else if let Some(n) = rv.as_u64() {
+                    n.to_string()
+                } else if let Some(n) = rv.as_i64() {
+                    n.to_string()
+                } else if let Some(n) = rv.as_f64() {
+                    n.to_string()
+                } else {
+                    continue;
+                };
+                map.insert(name.to_string(), val_str);
+            }
+            if map.is_empty() { None } else { Some(map) }
+        } else {
+            None
+        };
+
         results.push(SearchResult {
             doc_id: doc_id as u32,
             score: score as f64,
             highlights,
+            fields,
         });
     }
     Ok(results)

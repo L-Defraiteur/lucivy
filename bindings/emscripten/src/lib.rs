@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use ld_lucivy::collector::{FilterCollector, TopDocs};
 use ld_lucivy::query::HighlightSink;
-use ld_lucivy::schema::{FieldType, Value as LucivyValue};
+use ld_lucivy::schema::{FieldType, Value};
 use ld_lucivy::{DocAddress, LucivyDocument, Searcher};
 
 use lucivy_core::handle::{LucivyHandle, NGRAM_SUFFIX, NODE_ID_FIELD, RAW_SUFFIX};
@@ -460,10 +460,12 @@ pub unsafe extern "C" fn lucivy_search(
     query_json: *const c_char,
     limit: u32,
     highlights: i32,
+    include_fields: i32,
 ) -> *const c_char {
     let ctx = &*ctx;
     let query_json = str_from_ptr(query_json);
     let want_highlights = highlights != 0;
+    let want_fields = include_fields != 0;
 
     let query_config = match parse_query(ctx, query_json) {
         Ok(q) => q,
@@ -493,7 +495,7 @@ pub unsafe extern "C" fn lucivy_search(
         Ok(d) => d,
         Err(e) => return return_error(&e),
     };
-    let results = match collect_results(&searcher, &top_docs, &ctx.handle.schema, highlight_sink.as_deref()) {
+    let results = match collect_results(&searcher, &top_docs, &ctx.handle.schema, highlight_sink.as_deref(), want_fields) {
         Ok(r) => r,
         Err(e) => return return_error(&e),
     };
@@ -513,10 +515,12 @@ pub unsafe extern "C" fn lucivy_search_filtered(
     allowed_ids: *const u32,
     ids_len: usize,
     highlights: i32,
+    include_fields: i32,
 ) -> *const c_char {
     let ctx = &*ctx;
     let query_json = str_from_ptr(query_json);
     let want_highlights = highlights != 0;
+    let want_fields = include_fields != 0;
 
     let id_slice = if allowed_ids.is_null() || ids_len == 0 {
         &[]
@@ -553,7 +557,7 @@ pub unsafe extern "C" fn lucivy_search_filtered(
         Ok(d) => d,
         Err(e) => return return_error(&e),
     };
-    let results = match collect_results(&searcher, &top_docs, &ctx.handle.schema, highlight_sink.as_deref()) {
+    let results = match collect_results(&searcher, &top_docs, &ctx.handle.schema, highlight_sink.as_deref(), want_fields) {
         Ok(r) => r,
         Err(e) => return return_error(&e),
     };
@@ -770,6 +774,8 @@ struct SearchResultJson {
     score: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     highlights: Option<HashMap<String, Vec<[u32; 2]>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fields: Option<HashMap<String, serde_json::Value>>,
 }
 
 fn collect_results(
@@ -777,6 +783,7 @@ fn collect_results(
     top_docs: &[(f32, DocAddress)],
     schema: &ld_lucivy::schema::Schema,
     highlight_sink: Option<&HighlightSink>,
+    include_fields: bool,
 ) -> Result<Vec<SearchResultJson>, String> {
     let nid_field = schema.get_field(NODE_ID_FIELD)
         .map_err(|_| "no _node_id field in schema".to_string())?;
@@ -804,10 +811,37 @@ fn collect_results(
             if map.is_empty() { None } else { Some(map) }
         });
 
+        let fields = if include_fields {
+            let mut map = HashMap::new();
+            for (field, value) in doc.field_values() {
+                let name = schema.get_field_name(field);
+                if name == NODE_ID_FIELD || name.ends_with(RAW_SUFFIX) || name.ends_with(NGRAM_SUFFIX) {
+                    continue;
+                }
+                let rv = value.as_value();
+                let json_val = if let Some(s) = rv.as_str() {
+                    serde_json::Value::String(String::from(s))
+                } else if let Some(n) = rv.as_u64() {
+                    serde_json::json!(n)
+                } else if let Some(n) = rv.as_i64() {
+                    serde_json::json!(n)
+                } else if let Some(n) = rv.as_f64() {
+                    serde_json::json!(n)
+                } else {
+                    continue;
+                };
+                map.insert(name.to_string(), json_val);
+            }
+            if map.is_empty() { None } else { Some(map) }
+        } else {
+            None
+        };
+
         results.push(SearchResultJson {
             doc_id: doc_id as u32,
             score,
             highlights,
+            fields,
         });
     }
     Ok(results)

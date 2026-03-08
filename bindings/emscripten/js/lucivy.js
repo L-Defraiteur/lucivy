@@ -98,6 +98,7 @@ export class LucivyIndex {
             query,
             limit: options.limit,
             highlights: options.highlights,
+            fields: options.fields,
         });
     }
 
@@ -108,6 +109,7 @@ export class LucivyIndex {
             allowedIds,
             limit: options.limit,
             highlights: options.highlights,
+            fields: options.fields,
         });
     }
 

@@ -73,6 +73,27 @@ try {
     const r7 = idx.search('node');
     console.log('Search "node":', r7);
 
+    // 10. Search with fields — retrieve stored field values
+    console.log('\n--- Search with fields: true ---');
+    const r8 = idx.search('node', { fields: true });
+    if (r8.length === 0) throw new Error('FAIL: fields search returned no results');
+    if (!r8[0].fields) throw new Error('FAIL: result missing fields');
+    if (!r8[0].fields.title) throw new Error('FAIL: result missing fields.title');
+    console.log('fields.title:', r8[0].fields.title);
+    console.log('fields.body:', r8[0].fields.body);
+
+    // 11. Search with highlights + fields together
+    console.log('\n--- Search with highlights + fields ---');
+    const r9 = idx.search(
+        { type: 'contains', field: 'body', value: 'server' },
+        { highlights: true, fields: true }
+    );
+    if (r9.length === 0) throw new Error('FAIL: highlights+fields returned no results');
+    if (!r9[0].highlights) throw new Error('FAIL: missing highlights');
+    if (!r9[0].fields) throw new Error('FAIL: missing fields with highlights');
+    console.log('highlights:', JSON.stringify(r9[0].highlights));
+    console.log('fields.title:', r9[0].fields.title);
+
     // ── Snapshot tests ──────────────────────────────────────────────
 
     console.log('\n--- Snapshot: export/import roundtrip ---');

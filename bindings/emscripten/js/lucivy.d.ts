@@ -1,7 +1,7 @@
 /** Field definition for creating an index. */
 export interface FieldDef {
     name: string;
-    type: 'text' | 'u64' | 'i64' | 'f64';
+    type: 'text' | 'string' | 'u64' | 'i64' | 'f64';
 }
 
 /** Search query — either a plain string or a structured query object. */
@@ -18,6 +18,8 @@ export type SearchQuery = string | {
 export interface SearchOptions {
     limit?: number;
     highlights?: boolean;
+    /** Include stored fields in results. */
+    fields?: boolean;
 }
 
 /** A single search result. */
@@ -25,6 +27,8 @@ export interface SearchResult {
     docId: number;
     score: number;
     highlights?: Record<string, [number, number][]>;
+    /** Stored field values (when `fields: true`). */
+    fields?: Record<string, string | number>;
 }
 
 /** Main-thread Promise API for lucivy-emscripten. */

@@ -1,0 +1,44 @@
+{
+  "name": "lucivy-wasm",
+  "version": "0.4.0",
+  "type": "module",
+  "description": "Fast BM25 full-text search for browsers — WASM build of Lucivy with threading, OPFS persistence, and LUCE snapshot support",
+  "license": "MIT",
+  "author": "Luciform Research",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/L-Defraiteur/lucivy",
+    "directory": "bindings/emscripten"
+  },
+  "keywords": [
+    "search",
+    "full-text",
+    "bm25",
+    "fuzzy",
+    "substring",
+    "wasm",
+    "browser",
+    "opfs",
+    "threading",
+    "snapshot"
+  ],
+  "files": [
+    "pkg/lucivy.js",
+    "pkg/lucivy.wasm",
+    "js/lucivy.js",
+    "js/lucivy-worker.js",
+    "js/lucivy.d.ts",
+    "README.md"
+  ],
+  "main": "js/lucivy.js",
+  "types": "js/lucivy.d.ts",
+  "exports": {
+    ".": {
+      "types": "./js/lucivy.d.ts",
+      "default": "./js/lucivy.js"
+    },
+    "./worker": "./js/lucivy-worker.js",
+    "./pkg/lucivy.js": "./pkg/lucivy.js",
+    "./pkg/lucivy.wasm": "./pkg/lucivy.wasm"
+  }
+}

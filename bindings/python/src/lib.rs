@@ -30,15 +30,24 @@ struct SearchResult {
     score: f32,
     #[pyo3(get)]
     highlights: Option<HashMap<String, Vec<(u32, u32)>>>,
+    #[pyo3(get)]
+    fields: Option<HashMap<String, String>>,
 }
 
 #[pymethods]
 impl SearchResult {
     fn __repr__(&self) -> String {
-        match &self.highlights {
-            Some(h) => format!("SearchResult(doc_id={}, score={:.4}, highlights={:?})", self.doc_id, self.score, h),
-            None => format!("SearchResult(doc_id={}, score={:.4})", self.doc_id, self.score),
+        let mut parts = vec![
+            format!("doc_id={}", self.doc_id),
+            format!("score={:.4}", self.score),
+        ];
+        if let Some(ref h) = self.highlights {
+            parts.push(format!("highlights={:?}", h));
         }
+        if let Some(ref f) = self.fields {
+            parts.push(format!("fields={:?}", f));
+        }
+        format!("SearchResult({})", parts.join(", "))
     }
 }
 
@@ -232,13 +241,14 @@ impl Index {
     ///     limit: Max number of results (default 10).
     ///     highlights: Whether to include highlight offsets (default False).
     ///     allowed_ids: Optional list of doc_ids to restrict search to.
-    #[pyo3(signature = (query, limit=10, highlights=false, allowed_ids=None))]
+    #[pyo3(signature = (query, limit=10, highlights=false, allowed_ids=None, fields=false))]
     fn search(
         &self,
         query: &Bound<'_, PyAny>,
         limit: u32,
         highlights: bool,
         allowed_ids: Option<Vec<u64>>,
+        fields: bool,
     ) -> PyResult<Vec<SearchResult>> {
         let query_config = self.parse_query(query)?;
 
@@ -266,7 +276,7 @@ impl Index {
             None => execute_top_docs(&searcher, lucivy_query.as_ref(), limit)?,
         };
 
-        collect_results(&searcher, &top_docs, &self.handle.schema, highlight_sink.as_deref())
+        collect_results(&searcher, &top_docs, &self.handle.schema, highlight_sink.as_deref(), fields)
     }
 
     /// Number of documents in the index.
@@ -604,6 +614,7 @@ fn collect_results(
     top_docs: &[(f32, DocAddress)],
     schema: &ld_lucivy::schema::Schema,
     highlight_sink: Option<&HighlightSink>,
+    include_fields: bool,
 ) -> PyResult<Vec<SearchResult>> {
     let nid_field = schema.get_field(NODE_ID_FIELD)
         .map_err(|_| PyValueError::new_err("no _node_id field in schema"))?;
@@ -629,7 +640,33 @@ fn collect_results(
             if map.is_empty() { None } else { Some(map) }
         });
 
-        results.push(SearchResult { doc_id, score, highlights });
+        let fields = if include_fields {
+            let mut map = HashMap::new();
+            for (field, value) in doc.field_values() {
+                let name = schema.get_field_name(field);
+                if name == NODE_ID_FIELD || name.ends_with(RAW_SUFFIX) || name.ends_with(NGRAM_SUFFIX) {
+                    continue;
+                }
+                let rv = value.as_value();
+                let val_str = if let Some(s) = rv.as_str() {
+                    s.to_string()
+                } else if let Some(n) = rv.as_u64() {
+                    n.to_string()
+                } else if let Some(n) = rv.as_i64() {
+                    n.to_string()
+                } else if let Some(n) = rv.as_f64() {
+                    n.to_string()
+                } else {
+                    continue;
+                };
+                map.insert(name.to_string(), val_str);
+            }
+            if map.is_empty() { None } else { Some(map) }
+        } else {
+            None
+        };
+
+        results.push(SearchResult { doc_id, score, highlights, fields });
     }
     Ok(results)
 }

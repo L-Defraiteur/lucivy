@@ -127,6 +127,16 @@ for r in results:
             print(f"  {field}: {offsets}")  # e.g. "body": [(5, 9), (20, 31)]
 ```
 
+### Fields (stored values)
+
+Retrieve stored field values alongside search results — useful for displaying file names, titles, or content excerpts.
+
+```python
+results = index.search("rust programming", fields=True)
+for r in results:
+    print(r.doc_id, r.score, r.fields['title'])
+```
+
 ### Snapshots (export / import)
 
 Export an index to a portable `.luce` binary blob, import it elsewhere.

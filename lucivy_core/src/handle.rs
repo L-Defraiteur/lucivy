@@ -483,4 +483,93 @@ mod tests {
         println!("Results for contains 'ystem' filter: {:?}", results);
         assert_eq!(results.len(), 1, "Should find 1 doc (tag=systems, body has programming)");
     }
+
+    /// Test that stored fields can be retrieved from search results.
+    #[test]
+    fn test_stored_fields_retrieval() {
+        use ld_lucivy::schema::Value;
+
+        let tmp = std::env::temp_dir().join("lucivy_test_stored_fields");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.to_str().unwrap();
+
+        let config_json = serde_json::json!({
+            "fields": [
+                {"name": "path", "type": "text", "stored": true},
+                {"name": "content", "type": "text", "stored": true}
+            ]
+        });
+        let config: SchemaConfig = serde_json::from_str(&config_json.to_string()).unwrap();
+        let directory = StdFsDirectory::open(path).unwrap();
+        let handle = LucivyHandle::create(directory, &config).unwrap();
+
+        let path_field = handle.field("path").unwrap();
+        let content_field = handle.field("content").unwrap();
+        let nid_field = handle.field(NODE_ID_FIELD).unwrap();
+
+        {
+            let mut writer = handle.writer.lock().unwrap();
+            let mut doc = ld_lucivy::LucivyDocument::new();
+            doc.add_u64(nid_field, 42);
+            doc.add_text(path_field, "src/main.rs");
+            doc.add_text(content_field, "fn main() { println!(\"hello\"); }");
+            // Add to raw/ngram fields
+            for (user, raw_name) in &handle.raw_field_pairs {
+                if let Some(f) = handle.field(raw_name) {
+                    if user == "path" { doc.add_text(f, "src/main.rs"); }
+                    if user == "content" { doc.add_text(f, "fn main() { println!(\"hello\"); }"); }
+                }
+            }
+            for (user, ngram_name) in &handle.ngram_field_pairs {
+                if let Some(f) = handle.field(ngram_name) {
+                    if user == "path" { doc.add_text(f, "src/main.rs"); }
+                    if user == "content" { doc.add_text(f, "fn main() { println!(\"hello\"); }"); }
+                }
+            }
+            writer.add_document(doc).unwrap();
+            writer.commit().unwrap();
+        }
+        handle.reader.reload().unwrap();
+
+        // Search
+        let query_config: crate::query::QueryConfig = serde_json::from_str(
+            r#"{"type": "contains", "field": "content", "value": "main"}"#
+        ).unwrap();
+        let query = crate::query::build_query(
+            &query_config, &handle.schema, &handle.index,
+            &handle.raw_field_pairs, &handle.ngram_field_pairs, None,
+        ).unwrap();
+
+        let searcher = handle.reader.searcher();
+        let collector = ld_lucivy::collector::TopDocs::with_limit(10).order_by_score();
+        let results = searcher.search(&*query, &collector).unwrap();
+        assert_eq!(results.len(), 1);
+
+        // Retrieve stored fields from the matched document
+        let (_score, doc_addr) = &results[0];
+        let doc: ld_lucivy::LucivyDocument = searcher.doc(*doc_addr).unwrap();
+
+        // Check _node_id
+        let nid = doc.get_first(nid_field)
+            .and_then(|v| v.as_value().as_u64())
+            .unwrap();
+        assert_eq!(nid, 42);
+
+        // Check stored text fields (skip internal _raw/_ngram)
+        let mut fields: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for (field, value) in doc.field_values() {
+            let name = handle.schema.get_field_name(field);
+            if name == NODE_ID_FIELD || name.ends_with(RAW_SUFFIX) || name.ends_with(NGRAM_SUFFIX) {
+                continue;
+            }
+            if let Some(s) = value.as_value().as_str() {
+                fields.insert(name.to_string(), s.to_string());
+            }
+        }
+
+        assert_eq!(fields.get("path").map(|s| s.as_str()), Some("src/main.rs"));
+        assert!(fields.get("content").unwrap().contains("println"));
+        println!("Stored fields: {:?}", fields);
+    }
 }

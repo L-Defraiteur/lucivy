@@ -265,7 +265,7 @@ self.onmessage = async (e) => {
                 const queryJson = typeof args.query === 'string' && !args.query.startsWith('{')
                     ? JSON.stringify(args.query)
                     : (typeof args.query === 'object' ? JSON.stringify(args.query) : args.query);
-                const json = callStr('lucivy_search', ctx, queryJson, args.limit || 10, args.highlights ? 1 : 0);
+                const json = callStr('lucivy_search', ctx, queryJson, args.limit || 10, args.highlights ? 1 : 0, args.fields ? 1 : 0);
                 result = JSON.parse(json);
                 if (result.error) throw new Error(result.error);
                 break;
@@ -282,8 +282,8 @@ self.onmessage = async (e) => {
                 Module.HEAPU8.set(new Uint8Array(ids.buffer), idsPtr);
 
                 const resPtr = Module.ccall('lucivy_search_filtered', 'number',
-                    ['number', 'string', 'number', 'number', 'number', 'number'],
-                    [ctx, queryJson, args.limit || 10, idsPtr, ids.length, args.highlights ? 1 : 0]);
+                    ['number', 'string', 'number', 'number', 'number', 'number', 'number'],
+                    [ctx, queryJson, args.limit || 10, idsPtr, ids.length, args.highlights ? 1 : 0, args.fields ? 1 : 0]);
                 const json = Module.UTF8ToString(resPtr);
                 Module._free(idsPtr);
 

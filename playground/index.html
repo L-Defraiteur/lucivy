@@ -146,6 +146,20 @@
     background: rgba(255, 166, 87, 0.15); color: var(--highlight); font-weight: 600;
     border-radius: 2px; padding: 0 1px;
   }
+  .snapshot-actions {
+    display: flex; gap: 8px; margin-top: 12px;
+  }
+  .snapshot-actions button {
+    padding: 6px 14px; font-size: 13px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--surface);
+    color: var(--text); cursor: pointer;
+  }
+  .snapshot-actions button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .snapshot-actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .result-body pre.snippets {
+    margin: 0; white-space: pre-wrap; word-break: break-word;
+    font: inherit; color: var(--text-dim);
+  }
 
   /* Footer */
   footer {
@@ -211,6 +225,11 @@
         </p>
         <input type="file" id="fileInput" multiple>
       </div>
+      <div class="snapshot-actions">
+        <button id="btnExportSnapshot" disabled title="Export the active index as a .luce snapshot">Export snapshot</button>
+        <button id="btnImportSnapshot" title="Import a .luce snapshot file">Import snapshot</button>
+        <input type="file" id="snapshotFileInput" accept=".luce" style="display:none">
+      </div>
     </div>
     <p class="import-info">
       Imported files are indexed in a separate index. Switch between indexes using the tabs above.
@@ -232,13 +251,16 @@
 </div>
 
 <script type="module">
-import init, { Index } from './lucivy_wasm.js';
+import { Lucivy } from './js/lucivy.js';
 
 // ── State ─────────────────────────────────────────────────────────
 
+let lucivy = null;
 let demoIndex = null;
 let userIndex = null;
 let activeTab = 'demo'; // 'demo' | 'user'
+let demoNumDocs = 0;
+let userNumDocs = 0;
 
 // For user-imported files: store content so we can render highlights
 const userFiles = new Map(); // doc_id -> { path, content }
@@ -256,6 +278,9 @@ const fileInput = document.getElementById('fileInput');
 const tabDemo = document.getElementById('tabDemo');
 const tabUser = document.getElementById('tabUser');
 const tabDemoCount = document.getElementById('tabDemoCount');
+const btnExportSnapshot = document.getElementById('btnExportSnapshot');
+const btnImportSnapshot = document.getElementById('btnImportSnapshot');
+const snapshotFileInput = document.getElementById('snapshotFileInput');
 const tabUserCount = document.getElementById('tabUserCount');
 
 function getActiveIndex() {
@@ -266,8 +291,9 @@ function getActiveIndex() {
 
 async function startup() {
   try {
-    statusEl.textContent = 'Loading WASM engine...';
-    await init();
+    statusEl.textContent = 'Loading WASM engine (threading)...';
+    lucivy = new Lucivy('./js/lucivy-worker.js');
+    await lucivy.ready;
 
     statusEl.textContent = 'Loading dataset (lucivy source code)...';
     const resp = await fetch('./dataset.luce');
@@ -276,10 +302,11 @@ async function startup() {
     const data = new Uint8Array(blob);
 
     statusEl.textContent = 'Importing snapshot...';
-    demoIndex = Index.importSnapshot(data, '/playground');
+    demoIndex = await lucivy.importSnapshot(data, '/playground');
+    demoNumDocs = await demoIndex.numDocs();
 
-    tabDemoCount.textContent = `(${demoIndex.numDocs})`;
-    setReady(`${demoIndex.numDocs} documents indexed (lucivy source code)`);
+    tabDemoCount.textContent = `(${demoNumDocs})`;
+    setReady(`${demoNumDocs} documents indexed (lucivy source code)`);
   } catch (e) {
     statusEl.className = 'status error';
     statusEl.textContent = `Error: ${e.message}`;
@@ -291,6 +318,7 @@ function setReady(msg) {
   statusEl.className = 'status ready';
   statusEl.textContent = msg;
   queryEl.disabled = false;
+  btnExportSnapshot.disabled = !getActiveIndex();
   queryEl.focus();
 }
 
@@ -302,11 +330,9 @@ function switchTab(tab) {
   tabDemo.classList.toggle('active', tab === 'demo');
   tabUser.classList.toggle('active', tab === 'user');
 
-  const idx = getActiveIndex();
-  if (idx) {
-    const label = tab === 'demo' ? 'lucivy source code' : 'your files';
-    setReady(`${idx.numDocs} documents indexed (${label})`);
-  }
+  const count = tab === 'demo' ? demoNumDocs : userNumDocs;
+  const label = tab === 'demo' ? 'lucivy source code' : 'your files';
+  setReady(`${count} documents indexed (${label})`);
 
   resultsEl.innerHTML = '';
   resultsHeaderEl.textContent = '';
@@ -322,20 +348,14 @@ function buildQuery(text) {
   const mode = modeEl.value;
   const distance = parseInt(distanceEl.value) || 0;
 
-  if (mode === 'auto') {
-    return JSON.stringify(text);
-  }
+  if (mode === 'auto') return text;
   if (mode === 'regex') {
-    return JSON.stringify({
-      type: 'contains', field: 'content', value: text, regex: true
-    });
+    return { type: 'contains', field: 'content', value: text, regex: true };
   }
-  return JSON.stringify({
-    type: 'contains', field: 'content', value: text, distance: distance
-  });
+  return { type: 'contains', field: 'content', value: text, distance };
 }
 
-function doSearch() {
+async function doSearch() {
   const text = queryEl.value.trim();
   resultsEl.innerHTML = '';
   resultsHeaderEl.textContent = '';
@@ -345,18 +365,17 @@ function doSearch() {
 
   const limit = parseInt(limitEl.value) || 20;
   const wantHighlights = highlightsEl.checked;
-  const queryJson = buildQuery(text);
+  const query = buildQuery(text);
 
   const t0 = performance.now();
-  let raw;
+  let results;
   try {
-    raw = idx.search(queryJson, limit, wantHighlights);
+    results = await idx.search(query, { limit, highlights: wantHighlights, fields: true });
   } catch (e) {
     resultsHeaderEl.textContent = `Error: ${e.message}`;
     return;
   }
   const elapsed = (performance.now() - t0).toFixed(1);
-  const results = JSON.parse(raw);
 
   resultsHeaderEl.textContent = `${results.length} result${results.length !== 1 ? 's' : ''} in ${elapsed}ms`;
 
@@ -364,10 +383,10 @@ function doSearch() {
     const div = document.createElement('div');
     div.className = 'result';
 
-    // Determine display path
-    let displayPath = `doc #${r.doc_id}`;
-    if (activeTab === 'user' && userFiles.has(r.doc_id)) {
-      displayPath = userFiles.get(r.doc_id).path;
+    // Resolve display path from stored fields or user files
+    let displayPath = r.fields?.path || `doc #${r.docId}`;
+    if (activeTab === 'user' && userFiles.has(r.docId)) {
+      displayPath = userFiles.get(r.docId).path;
     }
 
     const head = document.createElement('div');
@@ -377,15 +396,13 @@ function doSearch() {
       <span class="result-score">score: ${r.score.toFixed(4)}</span>
     `;
 
+    // Build snippet preview immediately
     const body = document.createElement('div');
-    body.className = 'result-body';
+    body.className = 'result-body open';
+    renderResultBody(r, body);
 
     head.addEventListener('click', () => {
       body.classList.toggle('open');
-      if (body.classList.contains('open') && !body.dataset.loaded) {
-        body.dataset.loaded = '1';
-        renderResultBody(r, body);
-      }
     });
 
     div.appendChild(head);
@@ -395,46 +412,36 @@ function doSearch() {
 }
 
 function renderResultBody(result, bodyEl) {
-  // For user files we have the stored content and can render highlights inline
-  if (activeTab === 'user' && userFiles.has(result.doc_id)) {
-    const content = userFiles.get(result.doc_id).content;
-    const offsets = result.highlights?.content || [];
-    if (offsets.length > 0) {
-      bodyEl.innerHTML = applyHighlights(content, offsets);
-    } else {
-      bodyEl.textContent = content;
-    }
+  // Get content text from stored fields or user files
+  const content = (activeTab === 'user' && userFiles.has(result.docId))
+    ? userFiles.get(result.docId).content
+    : (result.fields?.content || '');
+
+  if (!content) {
+    bodyEl.textContent = '(no content available)';
     return;
   }
 
-  // For demo index, show highlight info (we don't have stored text client-side)
-  const highlights = result.highlights || {};
-  const parts = [];
-  for (const [field, offsets] of Object.entries(highlights)) {
-    if (field.startsWith('_')) continue;
-    parts.push(`${escapeHtml(field)}: ${offsets.length} match${offsets.length > 1 ? 'es' : ''}`);
-    for (const [start, end] of offsets.slice(0, 10)) {
-      parts.push(`  byte [${start}..${end}]`);
-    }
-    if (offsets.length > 10) parts.push(`  ... and ${offsets.length - 10} more`);
+  const offsets = result.highlights?.content || [];
+  if (offsets.length > 0) {
+    bodyEl.innerHTML = buildSnippets(content, offsets);
+  } else {
+    // No highlights — show first 300 chars as preview
+    const preview = content.length > 300 ? content.slice(0, 300) + '...' : content;
+    bodyEl.textContent = preview;
   }
-  bodyEl.textContent = parts.join('\n') || '(no highlights)';
 }
 
-function applyHighlights(text, offsets) {
-  // offsets = [[startByte, endByte], ...] — need to convert byte offsets to char offsets
-  // Encode to UTF-8 to map byte offsets to string positions
+function buildSnippets(text, offsets, contextChars = 120) {
   const encoder = new TextEncoder();
   const bytes = encoder.encode(text);
 
-  // Build byte-to-char mapping
+  // Map byte offsets to char offsets
   const byteToChar = new Int32Array(bytes.length + 1);
-  let charIdx = 0;
-  let byteIdx = 0;
+  let charIdx = 0, byteIdx = 0;
   while (byteIdx < bytes.length) {
     byteToChar[byteIdx] = charIdx;
     const b = bytes[byteIdx];
-    // UTF-8 byte length
     const len = b < 0x80 ? 1 : b < 0xE0 ? 2 : b < 0xF0 ? 3 : 4;
     for (let k = 1; k < len && byteIdx + k < bytes.length; k++) {
       byteToChar[byteIdx + k] = charIdx;
@@ -444,25 +451,53 @@ function applyHighlights(text, offsets) {
   }
   byteToChar[bytes.length] = charIdx;
 
-  // Sort offsets and merge overlapping
-  const sorted = offsets
+  const charOffsets = offsets
     .map(([s, e]) => [
       byteToChar[Math.min(s, bytes.length)],
       byteToChar[Math.min(e, bytes.length)]
     ])
     .sort((a, b) => a[0] - b[0]);
 
-  // Build highlighted HTML
-  let html = '';
-  let pos = 0;
-  for (const [start, end] of sorted) {
-    if (start < pos) continue; // overlap
-    html += escapeHtml(text.slice(pos, start));
-    html += '<mark>' + escapeHtml(text.slice(start, end)) + '</mark>';
-    pos = end;
+  // Merge nearby offsets into snippet windows
+  const windows = [];
+  for (const [s, e] of charOffsets) {
+    const wStart = Math.max(0, s - contextChars);
+    const wEnd = Math.min(text.length, e + contextChars);
+    if (windows.length > 0 && wStart <= windows[windows.length - 1].end) {
+      // Merge with previous window
+      const prev = windows[windows.length - 1];
+      prev.end = Math.max(prev.end, wEnd);
+      prev.highlights.push([s, e]);
+    } else {
+      windows.push({ start: wStart, end: wEnd, highlights: [[s, e]] });
+    }
   }
-  html += escapeHtml(text.slice(pos));
-  return html;
+
+  // Render at most 5 snippet windows
+  const parts = [];
+  for (const win of windows.slice(0, 5)) {
+    const snippet = text.slice(win.start, win.end);
+    const prefix = win.start > 0 ? '...' : '';
+    const suffix = win.end < text.length ? '...' : '';
+
+    // Apply highlights within this window
+    let html = '';
+    let pos = win.start;
+    for (const [hs, he] of win.highlights) {
+      if (hs < pos) continue;
+      html += escapeHtml(text.slice(pos, hs));
+      html += '<mark>' + escapeHtml(text.slice(hs, he)) + '</mark>';
+      pos = he;
+    }
+    html += escapeHtml(text.slice(pos, win.end));
+    parts.push(prefix + html + suffix);
+  }
+
+  if (windows.length > 5) {
+    parts.push(`<em>... and ${windows.length - 5} more matches</em>`);
+  }
+
+  return '<pre class="snippets">' + parts.join('\n\n') + '</pre>';
 }
 
 function escapeHtml(s) {
@@ -480,8 +515,7 @@ async function importFiles(fileList) {
   resultsHeaderEl.textContent = '';
 
   try {
-    // Collect all text files (handle .zip and .tar.gz)
-    const textFiles = []; // { path, content }
+    const textFiles = [];
     statusEl.textContent = `Reading ${fileList.length} file(s)...`;
 
     for (const file of fileList) {
@@ -500,31 +534,28 @@ async function importFiles(fileList) {
       }
     }
 
-    if (textFiles.length === 0) {
-      throw new Error('No text files found');
-    }
+    if (textFiles.length === 0) throw new Error('No text files found');
 
     statusEl.textContent = `Indexing ${textFiles.length} file(s)...`;
 
-    // Free old user index
-    if (userIndex) { try { userIndex.free(); } catch(e) {} }
+    if (userIndex) { await userIndex.close().catch(() => {}); }
     userFiles.clear();
 
-    const schema = JSON.stringify([
+    userIndex = await lucivy.create('/user_index', [
       { name: 'path', type: 'text' },
       { name: 'content', type: 'text' },
     ]);
-    userIndex = new Index('/user_index', schema, '');
 
     for (let i = 0; i < textFiles.length; i++) {
       const { path, content } = textFiles[i];
-      userIndex.add(i, JSON.stringify({ path, content }));
+      await userIndex.add(i, { path, content });
       userFiles.set(i, { path, content });
     }
-    userIndex.commit();
+    await userIndex.commit();
+    userNumDocs = await userIndex.numDocs();
 
     tabUser.classList.remove('disabled');
-    tabUserCount.textContent = `(${userIndex.numDocs})`;
+    tabUserCount.textContent = `(${userNumDocs})`;
     switchTab('user');
   } catch (e) {
     statusEl.className = 'status error';
@@ -534,7 +565,7 @@ async function importFiles(fileList) {
   }
 }
 
-// ── ZIP extraction (using JSZip-like approach with DecompressionStream) ──
+// ── ZIP extraction (using DecompressionStream) ──
 
 async function extractZip(file) {
   const buf = await file.arrayBuffer();
@@ -544,11 +575,10 @@ async function extractZip(file) {
   let offset = 0;
   while (offset < buf.byteLength - 4) {
     const sig = view.getUint32(offset, true);
-    if (sig !== 0x04034b50) break; // local file header signature
+    if (sig !== 0x04034b50) break;
 
     const compMethod = view.getUint16(offset + 8, true);
     const compSize = view.getUint32(offset + 18, true);
-    const uncompSize = view.getUint32(offset + 22, true);
     const nameLen = view.getUint16(offset + 26, true);
     const extraLen = view.getUint16(offset + 28, true);
     const nameBytes = new Uint8Array(buf, offset + 30, nameLen);
@@ -560,10 +590,8 @@ async function extractZip(file) {
         let content;
         const rawData = new Uint8Array(buf, dataStart, compSize);
         if (compMethod === 0) {
-          // stored
           content = new TextDecoder('utf-8', { fatal: false }).decode(rawData);
         } else if (compMethod === 8) {
-          // deflated — use DecompressionStream
           const ds = new DecompressionStream('deflate-raw');
           const writer = ds.writable.getWriter();
           writer.write(rawData);
@@ -584,9 +612,7 @@ async function extractZip(file) {
         if (content && content.length > 0 && !isBinaryContent(content)) {
           entries.push({ path: name, content });
         }
-      } catch (e) {
-        // skip binary or corrupt files
-      }
+      } catch (e) { /* skip */ }
     }
     offset = dataStart + compSize;
   }
@@ -597,7 +623,6 @@ async function extractZip(file) {
 
 async function extractTarGz(file) {
   const buf = await file.arrayBuffer();
-  // Decompress gzip
   const ds = new DecompressionStream('gzip');
   const writer = ds.writable.getWriter();
   writer.write(new Uint8Array(buf));
@@ -614,12 +639,10 @@ async function extractTarGz(file) {
   let pos = 0;
   for (const c of chunks) { tar.set(c, pos); pos += c.length; }
 
-  // Parse tar
   const entries = [];
   let offset = 0;
   while (offset < tar.length - 512) {
     const header = tar.slice(offset, offset + 512);
-    // Check for empty block
     if (header.every(b => b === 0)) break;
 
     const name = new TextDecoder().decode(header.slice(0, 100)).replace(/\0.*/, '');
@@ -627,18 +650,15 @@ async function extractTarGz(file) {
     const size = parseInt(sizeOctal, 8) || 0;
     const typeFlag = header[156];
 
-    offset += 512; // move past header
+    offset += 512;
 
     if (size > 0 && (typeFlag === 0 || typeFlag === 48) && isTextFilename(name)) {
       try {
         const content = new TextDecoder('utf-8', { fatal: false }).decode(tar.slice(offset, offset + size));
-        if (!isBinaryContent(content)) {
-          entries.push({ path: name, content });
-        }
+        if (!isBinaryContent(content)) entries.push({ path: name, content });
       } catch(e) {}
     }
 
-    // Advance to next 512-byte boundary
     offset += Math.ceil(size / 512) * 512;
   }
   return entries;
@@ -658,16 +678,13 @@ const TEXT_EXTENSIONS = new Set([
 function isTextFilename(name) {
   const lower = name.toLowerCase();
   if (TEXT_EXTENSIONS.has(lower.slice(lower.lastIndexOf('.')))) return true;
-  // Common dotfiles and extensionless text files
   const base = lower.split('/').pop();
   return ['makefile', 'dockerfile', 'readme', 'license', 'changelog', 'authors', 'cargo.lock']
     .includes(base);
 }
 
 function isBinaryContent(text) {
-  // Quick heuristic: if first 512 chars have null bytes, it's binary
-  const sample = text.slice(0, 512);
-  return sample.includes('\0');
+  return text.slice(0, 512).includes('\0');
 }
 
 // ── Events ────────────────────────────────────────────────────────
@@ -685,7 +702,6 @@ distanceEl.addEventListener('change', doSearch);
 highlightsEl.addEventListener('change', doSearch);
 limitEl.addEventListener('change', doSearch);
 
-// Drag & drop
 dropZone.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', (e) => importFiles(e.target.files));
 dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('drag-over'); });
@@ -694,6 +710,61 @@ dropZone.addEventListener('drop', (e) => {
   e.preventDefault();
   dropZone.classList.remove('drag-over');
   importFiles(e.dataTransfer.files);
+});
+
+// ── Snapshot export/import ────────────────────────────────────────
+
+btnExportSnapshot.addEventListener('click', async () => {
+  const idx = getActiveIndex();
+  if (!idx) return;
+  try {
+    btnExportSnapshot.textContent = 'Exporting...';
+    btnExportSnapshot.disabled = true;
+    const data = await idx.exportSnapshot();
+    const blob = new Blob([data], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${activeTab === 'demo' ? 'lucivy-demo' : 'user-index'}.luce`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    statusEl.className = 'status error';
+    statusEl.textContent = `Export error: ${e.message}`;
+  } finally {
+    btnExportSnapshot.textContent = 'Export snapshot';
+    btnExportSnapshot.disabled = false;
+  }
+});
+
+btnImportSnapshot.addEventListener('click', () => snapshotFileInput.click());
+snapshotFileInput.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  snapshotFileInput.value = '';
+  try {
+    statusEl.className = 'status loading';
+    statusEl.textContent = `Importing snapshot: ${file.name}...`;
+    queryEl.disabled = true;
+
+    const buf = await file.arrayBuffer();
+    const data = new Uint8Array(buf);
+
+    if (userIndex) { await userIndex.close().catch(() => {}); }
+    userFiles.clear();
+
+    userIndex = await lucivy.importSnapshot(data, '/user_snapshot');
+    userNumDocs = await userIndex.numDocs();
+
+    tabUser.classList.remove('disabled');
+    tabUserCount.textContent = `(${userNumDocs})`;
+    switchTab('user');
+  } catch (e) {
+    statusEl.className = 'status error';
+    statusEl.textContent = `Snapshot import error: ${e.message}`;
+    console.error(e);
+    queryEl.disabled = false;
+  }
 });
 
 // ── Go ────────────────────────────────────────────────────────────
