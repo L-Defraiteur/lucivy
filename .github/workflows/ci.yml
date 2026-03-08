@@ -181,7 +181,7 @@ jobs:
 
       - name: Prepare .node binary
         run: |
-          cp target/release/liblucivy_napi.so bindings/nodejs/lucivy.linux-x64-gnu.node
+          cp target/release/liblucivy_napi.so bindings/nodejs/lucivy.node
 
       - name: Test lucivy-nodejs
         run: node bindings/nodejs/test.mjs
