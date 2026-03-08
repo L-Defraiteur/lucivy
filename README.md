@@ -40,7 +40,7 @@ for r in results:
 See the language-specific READMEs for full API docs:
 - [Python](bindings/python/README.md)
 - [Node.js](bindings/nodejs/README.md)
-- [WASM / browser](bindings/wasm/README.md)
+- [WASM / browser](bindings/emscripten/README.md)
 
 ## Query types
 
