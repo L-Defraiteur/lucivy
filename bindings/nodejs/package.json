@@ -1,10 +1,25 @@
 {
   "name": "lucivy",
   "version": "0.1.0",
-  "description": "Fast BM25 full-text search index for Node.js, powered by Lucivy",
+  "description": "Fast BM25 full-text search with substring matching, fuzzy search, and regex — powered by Rust",
   "main": "index.js",
   "types": "index.d.ts",
   "license": "MIT",
+  "author": "Luciform Research",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/L-Defraiteur/lucivy"
+  },
+  "keywords": [
+    "search",
+    "full-text",
+    "bm25",
+    "fuzzy",
+    "substring",
+    "fts",
+    "tantivy",
+    "rust"
+  ],
   "napi": {
     "name": "lucivy",
     "triples": {
@@ -13,7 +28,9 @@
   },
   "files": [
     "index.js",
-    "index.d.ts"
+    "index.d.ts",
+    "lucivy.node",
+    "README.md"
   ],
   "devDependencies": {
     "@napi-rs/cli": "^2.18.0"

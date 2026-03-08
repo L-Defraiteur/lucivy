@@ -4,12 +4,13 @@ build-backend = "maturin"
 
 [project]
 name = "lucivy"
-version = "0.1.0"
+version = "0.2.1"
 description = "Fast BM25 full-text search with substring matching, fuzzy search, and regex — powered by Rust"
+readme = "README-pypi.md"
 requires-python = ">=3.9"
 license = "MIT"
 authors = [
-    { name = "Luciform Research", email = "contact@luciformresearch.com" },
+    { name = "Luciform Research", email = "luciedefraiteur@luciformresearch.com" },
 ]
 keywords = ["search", "full-text", "bm25", "fuzzy", "substring", "fts", "tantivy"]
 classifiers = [

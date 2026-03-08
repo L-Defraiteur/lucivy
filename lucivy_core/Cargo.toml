@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "Core library for Lucivy full-text search: schema, query, handle, tokenizer"
+authors = ["Luciform Research <luciedefraiteur@luciformresearch.com>"]
 repository = "https://github.com/L-Defraiteur/lucivy"
+readme = "README.md"
+keywords = ["search", "full-text", "bm25", "lucivy"]
 
 [lib]
 crate-type = ["lib"]
