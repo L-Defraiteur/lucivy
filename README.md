@@ -2,6 +2,10 @@
 
 BM25 search engine with cross-token fuzzy matching — it finds substrings, handles typos, and matches across word boundaries. Built for code search, technical docs, and as a BM25 complement to vector databases.
 
+[**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
+
+![Lucivy Playground](docs/8-mars-2026-14h26/image.png)
+
 ## Install
 
 Everything is **MIT-licensed**.
