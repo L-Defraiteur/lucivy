@@ -7,7 +7,7 @@ description = "Expose data as static slice"
 license = "MIT"
 documentation = "https://docs.rs/ownedbytes/"
 homepage = "https://github.com/quickwit-oss/tantivy"
-repository = "https://github.com/quickwit-oss/tantivy"
+repository = "https://github.com/L-Defraiteur/lucivy"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

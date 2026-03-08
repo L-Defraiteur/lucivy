@@ -4,7 +4,7 @@ version = "0.26.0"
 edition = "2024"
 license = "MIT"
 homepage = "https://github.com/quickwit-oss/tantivy"
-repository = "https://github.com/quickwit-oss/tantivy"
+repository = "https://github.com/L-Defraiteur/lucivy"
 description = "column oriented storage for lucivy"
 categories = ["database-implementations", "data-structures", "compression"]
 
