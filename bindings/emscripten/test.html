@@ -74,6 +74,33 @@ try {
     const schema = await idx.schema();
     log('Schema: ' + JSON.stringify(schema));
 
+    // ── Snapshot export/import ──────────────────────────────────────
+    // Reuse the existing index (idx) to avoid thread pool exhaustion.
+    log('\n--- Snapshot tests ---');
+
+    // Re-add docs for snapshot (idx already has docs 0 and 2 after delete)
+    log('Exporting snapshot from existing index...');
+    const blob = await idx.exportSnapshot();
+    log('Snapshot size: ' + blob.length + ' bytes');
+    if (!(blob instanceof Uint8Array)) throw new Error('Expected Uint8Array, got ' + typeof blob);
+    if (blob[0] !== 0x4C || blob[1] !== 0x55 || blob[2] !== 0x43 || blob[3] !== 0x45) {
+        throw new Error('Bad LUCE magic: ' + blob.slice(0, 4));
+    }
+
+    log('Importing snapshot...');
+    const restored = await lucivy.importSnapshot(blob, '/snap-restored');
+    const restoredCount = await restored.numDocs();
+    log('Restored numDocs: ' + restoredCount);
+    if (restoredCount !== 2) throw new Error('Expected 2 docs after import, got ' + restoredCount);
+
+    const snapSearch = await restored.search('rust');
+    log('Search after import: ' + JSON.stringify(snapSearch));
+    if (snapSearch.length === 0) throw new Error('Expected results after snapshot import');
+
+    log('Snapshot tests passed');
+
+    // ── Cleanup ──────────────────────────────────────────────────────
+    await restored.destroy();
     await idx.destroy();
     lucivy.terminate();
 

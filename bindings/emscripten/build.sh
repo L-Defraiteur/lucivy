@@ -65,12 +65,14 @@ emcc "$STATIC_LIB" \
         "_lucivy_export_all",
         "_lucivy_search",
         "_lucivy_search_filtered",
+        "_lucivy_export_snapshot",
+        "_lucivy_import_snapshot",
         "_lucivy_num_docs",
         "_lucivy_schema_json",
         "_malloc",
         "_free"
     ]' \
-    -sEXPORTED_RUNTIME_METHODS='["ccall","cwrap","UTF8ToString","stringToUTF8","lengthBytesUTF8"]' \
+    -sEXPORTED_RUNTIME_METHODS='["ccall","cwrap","UTF8ToString","stringToUTF8","lengthBytesUTF8","getValue","HEAPU8"]' \
     -sWASM_BIGINT \
     -sEXPORT_ES6=1 \
     -fexceptions \

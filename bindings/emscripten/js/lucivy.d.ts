@@ -40,6 +40,9 @@ export declare class Lucivy {
     /** Open an existing index from OPFS. */
     open(path: string): Promise<LucivyIndex>;
 
+    /** Import an index from a LUCE snapshot blob. */
+    importSnapshot(data: Uint8Array, path: string): Promise<LucivyIndex>;
+
     /** Terminate the worker. */
     terminate(): void;
 }
@@ -77,6 +80,9 @@ export declare class LucivyIndex {
 
     /** Get the index schema. */
     schema(): Promise<FieldDef[] | null>;
+
+    /** Export the index as a LUCE snapshot blob (Uint8Array). */
+    exportSnapshot(): Promise<Uint8Array>;
 
     /** Close the index (keep OPFS files). */
     close(): Promise<boolean>;

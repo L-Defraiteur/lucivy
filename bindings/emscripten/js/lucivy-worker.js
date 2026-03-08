@@ -150,11 +150,15 @@ self.onmessage = async (e) => {
                 if (!ctx) throw new Error('lucivy_create returned null');
                 indexes.set(path, ctx);
 
-                // Export all files to OPFS for initial persistence.
-                const allJson = callStr('lucivy_export_all', ctx);
-                const allFiles = JSON.parse(allJson);
-                const modified = allFiles.map(([name, b64]) => [name, base64ToUint8Array(b64)]);
-                await writeFiles(path, modified, []);
+                // Export all files to OPFS for initial persistence (best-effort).
+                try {
+                    const allJson = callStr('lucivy_export_all', ctx);
+                    const allFiles = JSON.parse(allJson);
+                    const modified = allFiles.map(([name, b64]) => [name, base64ToUint8Array(b64)]);
+                    await writeFiles(path, modified, []);
+                } catch (e) {
+                    console.warn('[lucivy-worker] OPFS initial sync skipped:', e.message);
+                }
 
                 result = { path, numDocs: Module.ccall('lucivy_num_docs', 'number', ['number'], [ctx]) };
                 break;
@@ -237,8 +241,12 @@ self.onmessage = async (e) => {
                 const res = callStr('lucivy_commit', ctx);
                 checkResult(res);
 
-                // Sync dirty files to OPFS.
-                await syncDirtyToOpfs(args.path, ctx);
+                // Sync dirty files to OPFS (best-effort — may not be available in all contexts).
+                try {
+                    await syncDirtyToOpfs(args.path, ctx);
+                } catch (e) {
+                    console.warn('[lucivy-worker] OPFS sync skipped:', e.message);
+                }
 
                 result = { numDocs: Module.ccall('lucivy_num_docs', 'number', ['number'], [ctx]) };
                 break;
@@ -285,23 +293,49 @@ self.onmessage = async (e) => {
             }
 
             case 'close': {
-                const ctx = indexes.get(args.path);
-                if (ctx) {
-                    Module.ccall('lucivy_destroy', null, ['number'], [ctx]);
-                    indexes.delete(args.path);
-                }
+                // Remove from tracking. The Rust context is intentionally NOT destroyed
+                // here because lucivy_destroy can deadlock under emscripten pthreads
+                // (IndexWriter drop joins threads via the event loop).
+                // All WASM memory is fully reclaimed when the worker is terminated.
+                indexes.delete(args.path);
                 result = true;
                 break;
             }
 
             case 'destroy': {
-                const ctx = indexes.get(args.path);
-                if (ctx) {
-                    Module.ccall('lucivy_destroy', null, ['number'], [ctx]);
-                    indexes.delete(args.path);
-                }
-                await removeAllFiles(args.path);
+                indexes.delete(args.path);
+                // OPFS cleanup is best-effort (may hang if storage API unavailable)
+                removeAllFiles(args.path).catch(() => {});
                 result = true;
+                break;
+            }
+
+            case 'exportSnapshot': {
+                const ctx = getCtx(args.path);
+                const lenPtr = Module._malloc(4);
+                const dataPtr = Module.ccall('lucivy_export_snapshot', 'number',
+                    ['number', 'number'], [ctx, lenPtr]);
+                if (!dataPtr) {
+                    Module._free(lenPtr);
+                    throw new Error('export failed — index may have uncommitted changes');
+                }
+                const len = Module.getValue(lenPtr, 'i32');
+                Module._free(lenPtr);
+                result = Module.HEAPU8.slice(dataPtr, dataPtr + len);
+                break;
+            }
+
+            case 'importSnapshot': {
+                const { data, path } = args;
+                const dataArr = data instanceof Uint8Array ? data : new Uint8Array(data);
+                const ptr = Module._malloc(dataArr.length);
+                Module.HEAPU8.set(dataArr, ptr);
+                const ctx = Module.ccall('lucivy_import_snapshot', 'number',
+                    ['number', 'number', 'string'], [ptr, dataArr.length, path]);
+                Module._free(ptr);
+                if (!ctx) throw new Error('import_snapshot failed — invalid snapshot data');
+                indexes.set(path, ctx);
+                result = { path, numDocs: Module.ccall('lucivy_num_docs', 'number', ['number'], [ctx]) };
                 break;
             }
 

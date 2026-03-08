@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lucivy Playground</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --accent-dim: #1f6feb;
+    --highlight: #ffa657;
+    --green: #3fb950;
+    --red: #f85149;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  .container { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
+
+  /* Header */
+  header { text-align: center; margin-bottom: 32px; }
+  header h1 { font-size: 28px; font-weight: 600; margin-bottom: 6px; }
+  header h1 span { color: var(--accent); }
+  header p { color: var(--text-dim); font-size: 14px; }
+
+  /* Search bar */
+  .search-bar {
+    display: flex; gap: 8px; margin-bottom: 16px;
+  }
+  .search-bar input {
+    flex: 1; padding: 10px 14px; font-size: 16px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); outline: none;
+    font-family: "SF Mono", "Fira Code", monospace;
+  }
+  .search-bar input:focus { border-color: var(--accent); }
+  .search-bar input::placeholder { color: var(--text-dim); }
+
+  /* Options row */
+  .options {
+    display: flex; gap: 16px; align-items: center;
+    flex-wrap: wrap; margin-bottom: 16px; font-size: 13px;
+  }
+  .options label { color: var(--text-dim); cursor: pointer; display: flex; align-items: center; gap: 4px; }
+  .options select, .options input[type="number"] {
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--text); padding: 4px 8px; border-radius: 4px; font-size: 13px;
+  }
+  .options input[type="number"] { width: 50px; }
+
+  /* Index tabs */
+  .index-tabs {
+    display: flex; gap: 0; margin-bottom: 16px;
+  }
+  .index-tab {
+    padding: 8px 16px; font-size: 13px; cursor: pointer;
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--text-dim); user-select: none; transition: all 0.15s;
+  }
+  .index-tab:first-child { border-radius: 6px 0 0 6px; }
+  .index-tab:last-child { border-radius: 0 6px 6px 0; }
+  .index-tab:not(:first-child) { border-left: none; }
+  .index-tab.active {
+    background: var(--accent-dim); color: var(--text);
+    border-color: var(--accent); font-weight: 500;
+  }
+  .index-tab:hover:not(.active) { background: #1c2128; }
+  .index-tab .tab-count {
+    font-size: 11px; opacity: 0.7; margin-left: 4px;
+  }
+  .index-tab.disabled {
+    opacity: 0.4; cursor: default;
+  }
+
+  /* Status */
+  .status {
+    padding: 10px 14px; border-radius: 6px; font-size: 13px;
+    background: var(--surface); border: 1px solid var(--border);
+    margin-bottom: 16px; color: var(--text-dim);
+  }
+  .status.loading { border-color: var(--accent-dim); }
+  .status.ready { border-color: var(--green); color: var(--green); }
+  .status.error { border-color: var(--red); color: var(--red); }
+
+  /* Import */
+  .import-section {
+    margin-bottom: 16px; padding: 12px 14px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+  }
+  .import-section summary {
+    cursor: pointer; font-size: 13px; color: var(--text-dim); user-select: none;
+  }
+  .import-inner { margin-top: 10px; display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap; }
+  .drop-zone {
+    flex: 1; min-width: 200px;
+    border: 2px dashed var(--border); border-radius: 6px;
+    padding: 20px; text-align: center; color: var(--text-dim);
+    font-size: 13px; cursor: pointer; transition: border-color 0.15s;
+  }
+  .drop-zone.drag-over { border-color: var(--accent); color: var(--accent); }
+  .drop-zone input { display: none; }
+  .import-info {
+    font-size: 11px; color: var(--text-dim); margin-top: 8px; line-height: 1.5;
+  }
+
+  /* Results */
+  .results-header {
+    font-size: 13px; color: var(--text-dim); margin-bottom: 8px;
+  }
+  .result {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; margin-bottom: 8px; overflow: hidden;
+  }
+  .result-head {
+    padding: 10px 14px; display: flex; justify-content: space-between;
+    align-items: center; cursor: pointer; user-select: none;
+  }
+  .result-head:hover { background: #1c2128; }
+  .result-path {
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 13px; color: var(--accent);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .result-score {
+    font-size: 12px; color: var(--text-dim); white-space: nowrap; margin-left: 12px;
+  }
+  .result-body {
+    display: none; padding: 0 14px 14px;
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 12px; line-height: 1.5;
+    white-space: pre-wrap; word-break: break-all;
+    max-height: 400px; overflow-y: auto;
+    color: var(--text-dim);
+  }
+  .result-body.open { display: block; }
+  .result-body mark {
+    background: rgba(255, 166, 87, 0.15); color: var(--highlight); font-weight: 600;
+    border-radius: 2px; padding: 0 1px;
+  }
+
+  /* Footer */
+  footer {
+    margin-top: 40px; text-align: center;
+    font-size: 12px; color: var(--text-dim);
+  }
+  footer a { color: var(--accent); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1><span>lucivy</span> playground</h1>
+    <p>BM25 search with cross-token fuzzy matching &mdash; running in your browser via WASM</p>
+  </header>
+
+  <div class="search-bar">
+    <input type="text" id="query" placeholder='Try: "programing language", "std::collections", "NgramContains"...' disabled>
+  </div>
+
+  <div class="options">
+    <label>
+      Mode:
+      <select id="mode">
+        <option value="auto">auto (contains_split)</option>
+        <option value="contains">contains</option>
+        <option value="regex">contains + regex</option>
+      </select>
+    </label>
+    <label>
+      Fuzzy distance:
+      <input type="number" id="distance" value="1" min="0" max="3">
+    </label>
+    <label>
+      <input type="checkbox" id="highlights" checked> Highlights
+    </label>
+    <label>
+      Limit:
+      <input type="number" id="limit" value="20" min="1" max="100">
+    </label>
+  </div>
+
+  <div class="index-tabs">
+    <div class="index-tab active" id="tabDemo" data-index="demo">
+      Lucivy source code <span class="tab-count" id="tabDemoCount"></span>
+    </div>
+    <div class="index-tab disabled" id="tabUser" data-index="user">
+      Your files <span class="tab-count" id="tabUserCount"></span>
+    </div>
+  </div>
+
+  <details class="import-section">
+    <summary>Import your own files</summary>
+    <div class="import-inner">
+      <div class="drop-zone" id="dropZone">
+        <p>Drop files here or click to select</p>
+        <p style="margin-top:6px;font-size:12px;">
+          .txt, .md, .rs, .py, .js, .ts, .go, .java, .c, .cpp, .json, .toml, .yaml, .html, .css, .sh, .sql ...
+        </p>
+        <p style="margin-top:4px;font-size:12px;">
+          Also accepts <strong>.zip</strong> and <strong>.tar.gz</strong> archives
+        </p>
+        <input type="file" id="fileInput" multiple>
+      </div>
+    </div>
+    <p class="import-info">
+      Imported files are indexed in a separate index. Switch between indexes using the tabs above.
+      Everything runs locally in your browser &mdash; no data is uploaded.
+    </p>
+  </details>
+
+  <div class="status loading" id="status">Loading WASM + dataset...</div>
+
+  <div id="resultsHeader" class="results-header"></div>
+  <div id="results"></div>
+
+  <footer>
+    <a href="https://github.com/L-Defraiteur/lucivy">GitHub</a> &middot;
+    <a href="https://pypi.org/project/lucivy/">PyPI</a> &middot;
+    <a href="https://www.npmjs.com/package/lucivy">npm</a> &middot;
+    <a href="https://crates.io/crates/ld-lucivy">crates.io</a>
+  </footer>
+</div>
+
+<script type="module">
+import init, { Index } from './lucivy_wasm.js';
+
+// ── State ─────────────────────────────────────────────────────────
+
+let demoIndex = null;
+let userIndex = null;
+let activeTab = 'demo'; // 'demo' | 'user'
+
+// For user-imported files: store content so we can render highlights
+const userFiles = new Map(); // doc_id -> { path, content }
+
+const queryEl = document.getElementById('query');
+const modeEl = document.getElementById('mode');
+const distanceEl = document.getElementById('distance');
+const highlightsEl = document.getElementById('highlights');
+const limitEl = document.getElementById('limit');
+const statusEl = document.getElementById('status');
+const resultsEl = document.getElementById('results');
+const resultsHeaderEl = document.getElementById('resultsHeader');
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+const tabDemo = document.getElementById('tabDemo');
+const tabUser = document.getElementById('tabUser');
+const tabDemoCount = document.getElementById('tabDemoCount');
+const tabUserCount = document.getElementById('tabUserCount');
+
+function getActiveIndex() {
+  return activeTab === 'demo' ? demoIndex : userIndex;
+}
+
+// ── Init ──────────────────────────────────────────────────────────
+
+async function startup() {
+  try {
+    statusEl.textContent = 'Loading WASM engine...';
+    await init();
+
+    statusEl.textContent = 'Loading dataset (lucivy source code)...';
+    const resp = await fetch('./dataset.luce');
+    if (!resp.ok) throw new Error(`Failed to fetch dataset: ${resp.status}`);
+    const blob = await resp.arrayBuffer();
+    const data = new Uint8Array(blob);
+
+    statusEl.textContent = 'Importing snapshot...';
+    demoIndex = Index.importSnapshot(data, '/playground');
+
+    tabDemoCount.textContent = `(${demoIndex.numDocs})`;
+    setReady(`${demoIndex.numDocs} documents indexed (lucivy source code)`);
+  } catch (e) {
+    statusEl.className = 'status error';
+    statusEl.textContent = `Error: ${e.message}`;
+    console.error(e);
+  }
+}
+
+function setReady(msg) {
+  statusEl.className = 'status ready';
+  statusEl.textContent = msg;
+  queryEl.disabled = false;
+  queryEl.focus();
+}
+
+// ── Tabs ──────────────────────────────────────────────────────────
+
+function switchTab(tab) {
+  if (tab === 'user' && !userIndex) return;
+  activeTab = tab;
+  tabDemo.classList.toggle('active', tab === 'demo');
+  tabUser.classList.toggle('active', tab === 'user');
+
+  const idx = getActiveIndex();
+  if (idx) {
+    const label = tab === 'demo' ? 'lucivy source code' : 'your files';
+    setReady(`${idx.numDocs} documents indexed (${label})`);
+  }
+
+  resultsEl.innerHTML = '';
+  resultsHeaderEl.textContent = '';
+  if (queryEl.value.trim()) doSearch();
+}
+
+tabDemo.addEventListener('click', () => switchTab('demo'));
+tabUser.addEventListener('click', () => switchTab('user'));
+
+// ── Search ────────────────────────────────────────────────────────
+
+function buildQuery(text) {
+  const mode = modeEl.value;
+  const distance = parseInt(distanceEl.value) || 0;
+
+  if (mode === 'auto') {
+    return JSON.stringify(text);
+  }
+  if (mode === 'regex') {
+    return JSON.stringify({
+      type: 'contains', field: 'content', value: text, regex: true
+    });
+  }
+  return JSON.stringify({
+    type: 'contains', field: 'content', value: text, distance: distance
+  });
+}
+
+function doSearch() {
+  const text = queryEl.value.trim();
+  resultsEl.innerHTML = '';
+  resultsHeaderEl.textContent = '';
+
+  const idx = getActiveIndex();
+  if (!text || !idx) return;
+
+  const limit = parseInt(limitEl.value) || 20;
+  const wantHighlights = highlightsEl.checked;
+  const queryJson = buildQuery(text);
+
+  const t0 = performance.now();
+  let raw;
+  try {
+    raw = idx.search(queryJson, limit, wantHighlights);
+  } catch (e) {
+    resultsHeaderEl.textContent = `Error: ${e.message}`;
+    return;
+  }
+  const elapsed = (performance.now() - t0).toFixed(1);
+  const results = JSON.parse(raw);
+
+  resultsHeaderEl.textContent = `${results.length} result${results.length !== 1 ? 's' : ''} in ${elapsed}ms`;
+
+  for (const r of results) {
+    const div = document.createElement('div');
+    div.className = 'result';
+
+    // Determine display path
+    let displayPath = `doc #${r.doc_id}`;
+    if (activeTab === 'user' && userFiles.has(r.doc_id)) {
+      displayPath = userFiles.get(r.doc_id).path;
+    }
+
+    const head = document.createElement('div');
+    head.className = 'result-head';
+    head.innerHTML = `
+      <span class="result-path">${escapeHtml(displayPath)}</span>
+      <span class="result-score">score: ${r.score.toFixed(4)}</span>
+    `;
+
+    const body = document.createElement('div');
+    body.className = 'result-body';
+
+    head.addEventListener('click', () => {
+      body.classList.toggle('open');
+      if (body.classList.contains('open') && !body.dataset.loaded) {
+        body.dataset.loaded = '1';
+        renderResultBody(r, body);
+      }
+    });
+
+    div.appendChild(head);
+    div.appendChild(body);
+    resultsEl.appendChild(div);
+  }
+}
+
+function renderResultBody(result, bodyEl) {
+  // For user files we have the stored content and can render highlights inline
+  if (activeTab === 'user' && userFiles.has(result.doc_id)) {
+    const content = userFiles.get(result.doc_id).content;
+    const offsets = result.highlights?.content || [];
+    if (offsets.length > 0) {
+      bodyEl.innerHTML = applyHighlights(content, offsets);
+    } else {
+      bodyEl.textContent = content;
+    }
+    return;
+  }
+
+  // For demo index, show highlight info (we don't have stored text client-side)
+  const highlights = result.highlights || {};
+  const parts = [];
+  for (const [field, offsets] of Object.entries(highlights)) {
+    if (field.startsWith('_')) continue;
+    parts.push(`${escapeHtml(field)}: ${offsets.length} match${offsets.length > 1 ? 'es' : ''}`);
+    for (const [start, end] of offsets.slice(0, 10)) {
+      parts.push(`  byte [${start}..${end}]`);
+    }
+    if (offsets.length > 10) parts.push(`  ... and ${offsets.length - 10} more`);
+  }
+  bodyEl.textContent = parts.join('\n') || '(no highlights)';
+}
+
+function applyHighlights(text, offsets) {
+  // offsets = [[startByte, endByte], ...] — need to convert byte offsets to char offsets
+  // Encode to UTF-8 to map byte offsets to string positions
+  const encoder = new TextEncoder();
+  const bytes = encoder.encode(text);
+
+  // Build byte-to-char mapping
+  const byteToChar = new Int32Array(bytes.length + 1);
+  let charIdx = 0;
+  let byteIdx = 0;
+  while (byteIdx < bytes.length) {
+    byteToChar[byteIdx] = charIdx;
+    const b = bytes[byteIdx];
+    // UTF-8 byte length
+    const len = b < 0x80 ? 1 : b < 0xE0 ? 2 : b < 0xF0 ? 3 : 4;
+    for (let k = 1; k < len && byteIdx + k < bytes.length; k++) {
+      byteToChar[byteIdx + k] = charIdx;
+    }
+    byteIdx += len;
+    charIdx++;
+  }
+  byteToChar[bytes.length] = charIdx;
+
+  // Sort offsets and merge overlapping
+  const sorted = offsets
+    .map(([s, e]) => [
+      byteToChar[Math.min(s, bytes.length)],
+      byteToChar[Math.min(e, bytes.length)]
+    ])
+    .sort((a, b) => a[0] - b[0]);
+
+  // Build highlighted HTML
+  let html = '';
+  let pos = 0;
+  for (const [start, end] of sorted) {
+    if (start < pos) continue; // overlap
+    html += escapeHtml(text.slice(pos, start));
+    html += '<mark>' + escapeHtml(text.slice(start, end)) + '</mark>';
+    pos = end;
+  }
+  html += escapeHtml(text.slice(pos));
+  return html;
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ── File import ───────────────────────────────────────────────────
+
+async function importFiles(fileList) {
+  if (!fileList.length) return;
+
+  statusEl.className = 'status loading';
+  queryEl.disabled = true;
+  resultsEl.innerHTML = '';
+  resultsHeaderEl.textContent = '';
+
+  try {
+    // Collect all text files (handle .zip and .tar.gz)
+    const textFiles = []; // { path, content }
+    statusEl.textContent = `Reading ${fileList.length} file(s)...`;
+
+    for (const file of fileList) {
+      if (file.name.endsWith('.zip')) {
+        statusEl.textContent = `Extracting ${file.name}...`;
+        const entries = await extractZip(file);
+        textFiles.push(...entries);
+      } else if (file.name.endsWith('.tar.gz') || file.name.endsWith('.tgz')) {
+        statusEl.textContent = `Extracting ${file.name}...`;
+        const entries = await extractTarGz(file);
+        textFiles.push(...entries);
+      } else {
+        const content = await file.text();
+        const path = file.webkitRelativePath || file.name;
+        textFiles.push({ path, content });
+      }
+    }
+
+    if (textFiles.length === 0) {
+      throw new Error('No text files found');
+    }
+
+    statusEl.textContent = `Indexing ${textFiles.length} file(s)...`;
+
+    // Free old user index
+    if (userIndex) { try { userIndex.free(); } catch(e) {} }
+    userFiles.clear();
+
+    const schema = JSON.stringify([
+      { name: 'path', type: 'text' },
+      { name: 'content', type: 'text' },
+    ]);
+    userIndex = new Index('/user_index', schema, '');
+
+    for (let i = 0; i < textFiles.length; i++) {
+      const { path, content } = textFiles[i];
+      userIndex.add(i, JSON.stringify({ path, content }));
+      userFiles.set(i, { path, content });
+    }
+    userIndex.commit();
+
+    tabUser.classList.remove('disabled');
+    tabUserCount.textContent = `(${userIndex.numDocs})`;
+    switchTab('user');
+  } catch (e) {
+    statusEl.className = 'status error';
+    statusEl.textContent = `Import error: ${e.message}`;
+    console.error(e);
+    queryEl.disabled = false;
+  }
+}
+
+// ── ZIP extraction (using JSZip-like approach with DecompressionStream) ──
+
+async function extractZip(file) {
+  const buf = await file.arrayBuffer();
+  const view = new DataView(buf);
+  const entries = [];
+
+  let offset = 0;
+  while (offset < buf.byteLength - 4) {
+    const sig = view.getUint32(offset, true);
+    if (sig !== 0x04034b50) break; // local file header signature
+
+    const compMethod = view.getUint16(offset + 8, true);
+    const compSize = view.getUint32(offset + 18, true);
+    const uncompSize = view.getUint32(offset + 22, true);
+    const nameLen = view.getUint16(offset + 26, true);
+    const extraLen = view.getUint16(offset + 28, true);
+    const nameBytes = new Uint8Array(buf, offset + 30, nameLen);
+    const name = new TextDecoder().decode(nameBytes);
+    const dataStart = offset + 30 + nameLen + extraLen;
+
+    if (!name.endsWith('/') && compSize > 0 && isTextFilename(name)) {
+      try {
+        let content;
+        const rawData = new Uint8Array(buf, dataStart, compSize);
+        if (compMethod === 0) {
+          // stored
+          content = new TextDecoder('utf-8', { fatal: false }).decode(rawData);
+        } else if (compMethod === 8) {
+          // deflated — use DecompressionStream
+          const ds = new DecompressionStream('deflate-raw');
+          const writer = ds.writable.getWriter();
+          writer.write(rawData);
+          writer.close();
+          const reader = ds.readable.getReader();
+          const chunks = [];
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+          }
+          const total = chunks.reduce((s, c) => s + c.length, 0);
+          const merged = new Uint8Array(total);
+          let pos = 0;
+          for (const c of chunks) { merged.set(c, pos); pos += c.length; }
+          content = new TextDecoder('utf-8', { fatal: false }).decode(merged);
+        }
+        if (content && content.length > 0 && !isBinaryContent(content)) {
+          entries.push({ path: name, content });
+        }
+      } catch (e) {
+        // skip binary or corrupt files
+      }
+    }
+    offset = dataStart + compSize;
+  }
+  return entries;
+}
+
+// ── tar.gz extraction ──
+
+async function extractTarGz(file) {
+  const buf = await file.arrayBuffer();
+  // Decompress gzip
+  const ds = new DecompressionStream('gzip');
+  const writer = ds.writable.getWriter();
+  writer.write(new Uint8Array(buf));
+  writer.close();
+  const reader = ds.readable.getReader();
+  const chunks = [];
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+  }
+  const total = chunks.reduce((s, c) => s + c.length, 0);
+  const tar = new Uint8Array(total);
+  let pos = 0;
+  for (const c of chunks) { tar.set(c, pos); pos += c.length; }
+
+  // Parse tar
+  const entries = [];
+  let offset = 0;
+  while (offset < tar.length - 512) {
+    const header = tar.slice(offset, offset + 512);
+    // Check for empty block
+    if (header.every(b => b === 0)) break;
+
+    const name = new TextDecoder().decode(header.slice(0, 100)).replace(/\0.*/, '');
+    const sizeOctal = new TextDecoder().decode(header.slice(124, 136)).replace(/\0.*/, '').trim();
+    const size = parseInt(sizeOctal, 8) || 0;
+    const typeFlag = header[156];
+
+    offset += 512; // move past header
+
+    if (size > 0 && (typeFlag === 0 || typeFlag === 48) && isTextFilename(name)) {
+      try {
+        const content = new TextDecoder('utf-8', { fatal: false }).decode(tar.slice(offset, offset + size));
+        if (!isBinaryContent(content)) {
+          entries.push({ path: name, content });
+        }
+      } catch(e) {}
+    }
+
+    // Advance to next 512-byte boundary
+    offset += Math.ceil(size / 512) * 512;
+  }
+  return entries;
+}
+
+const TEXT_EXTENSIONS = new Set([
+  '.txt', '.md', '.rs', '.py', '.js', '.ts', '.jsx', '.tsx', '.json', '.toml',
+  '.yaml', '.yml', '.html', '.htm', '.css', '.scss', '.less', '.go', '.java',
+  '.c', '.cpp', '.cc', '.h', '.hpp', '.rb', '.sh', '.bash', '.zsh', '.fish',
+  '.sql', '.xml', '.csv', '.tsv', '.r', '.R', '.swift', '.kt', '.scala',
+  '.lua', '.vim', '.el', '.ex', '.exs', '.erl', '.hs', '.ml', '.mli',
+  '.clj', '.lisp', '.php', '.pl', '.pm', '.tcl', '.awk', '.sed',
+  '.makefile', '.cmake', '.dockerfile', '.gitignore', '.env',
+  '.cfg', '.ini', '.conf', '.properties', '.lock',
+]);
+
+function isTextFilename(name) {
+  const lower = name.toLowerCase();
+  if (TEXT_EXTENSIONS.has(lower.slice(lower.lastIndexOf('.')))) return true;
+  // Common dotfiles and extensionless text files
+  const base = lower.split('/').pop();
+  return ['makefile', 'dockerfile', 'readme', 'license', 'changelog', 'authors', 'cargo.lock']
+    .includes(base);
+}
+
+function isBinaryContent(text) {
+  // Quick heuristic: if first 512 chars have null bytes, it's binary
+  const sample = text.slice(0, 512);
+  return sample.includes('\0');
+}
+
+// ── Events ────────────────────────────────────────────────────────
+
+let searchTimeout;
+queryEl.addEventListener('input', () => {
+  clearTimeout(searchTimeout);
+  searchTimeout = setTimeout(doSearch, 150);
+});
+queryEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { clearTimeout(searchTimeout); doSearch(); }
+});
+modeEl.addEventListener('change', doSearch);
+distanceEl.addEventListener('change', doSearch);
+highlightsEl.addEventListener('change', doSearch);
+limitEl.addEventListener('change', doSearch);
+
+// Drag & drop
+dropZone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', (e) => importFiles(e.target.files));
+dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  importFiles(e.dataTransfer.files);
+});
+
+// ── Go ────────────────────────────────────────────────────────────
+startup();
+</script>
+</body>
+</html>

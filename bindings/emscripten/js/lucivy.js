@@ -52,6 +52,11 @@ export class Lucivy {
         return new LucivyIndex(this, path);
     }
 
+    async importSnapshot(data, path) {
+        const res = await this._call('importSnapshot', { data, path });
+        return new LucivyIndex(this, path);
+    }
+
     terminate() {
         this._worker.terminate();
     }
@@ -112,6 +117,10 @@ export class LucivyIndex {
 
     schema() {
         return this._lucivy._call('schema', { path: this.path });
+    }
+
+    exportSnapshot() {
+        return this._lucivy._call('exportSnapshot', { path: this.path });
     }
 
     close() {
