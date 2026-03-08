@@ -1,6 +1,6 @@
 [package]
 name = "lucivy-core"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 description = "Core library for Lucivy full-text search: schema, query, handle, tokenizer"
@@ -13,7 +13,7 @@ keywords = ["search", "full-text", "bm25", "lucivy"]
 crate-type = ["lib"]
 
 [dependencies]
-ld-lucivy = { version = "0.26.0", path = "..", default-features = false, features = [
+ld-lucivy = { version = "0.26.1", path = "..", default-features = false, features = [
     "stopwords",
     "lz4-compression",
     "stemmer",
