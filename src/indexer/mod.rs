@@ -55,8 +55,23 @@ pub type DefaultMergePolicy = LogMergePolicy;
 // - all operations in the group are committed at the same time, making the group
 // atomic.
 type AddBatch<D> = SmallVec<[AddOperation<D>; 4]>;
-type AddBatchSender<D> = channel::Sender<AddBatch<D>>;
-type AddBatchReceiver<D> = channel::Receiver<AddBatch<D>>;
+
+use crate::schema::document::Document;
+
+/// Messages sent to permanent indexing worker threads via the shared doc channel.
+pub(crate) enum WorkerMessage<D: Document> {
+    /// Batch of documents to index.
+    Docs(AddBatch<D>),
+    /// Shutdown: the worker must finalize and exit its loop.
+    Shutdown,
+}
+
+type WorkerSender<D> = channel::Sender<WorkerMessage<D>>;
+type WorkerReceiver<D> = channel::Receiver<WorkerMessage<D>>;
+
+/// Per-worker flush command: carries a oneshot sender for completion notification.
+pub(crate) type FlushSender = channel::Sender<oneshot::Sender<crate::Result<()>>>;
+pub(crate) type FlushReceiver = channel::Receiver<oneshot::Sender<crate::Result<()>>>;
 
 #[cfg(feature = "mmap")]
 #[cfg(test)]

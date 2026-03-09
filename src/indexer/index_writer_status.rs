@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
-use super::AddBatchReceiver;
+use super::WorkerReceiver;
 use crate::schema::document::Document;
 use crate::LucivyDocument;
 
@@ -16,9 +16,9 @@ impl<D: Document> IndexWriterStatus<D> {
         self.inner.as_ref().is_alive()
     }
 
-    /// Returns a copy of the operation receiver.
+    /// Returns a copy of the worker message receiver.
     /// If the index writer was killed, returns `None`.
-    pub fn operation_receiver(&self) -> Option<AddBatchReceiver<D>> {
+    pub fn operation_receiver(&self) -> Option<WorkerReceiver<D>> {
         let rlock = self
             .inner
             .receive_channel
@@ -38,7 +38,7 @@ impl<D: Document> IndexWriterStatus<D> {
 
 struct Inner<D: Document> {
     is_alive: AtomicBool,
-    receive_channel: RwLock<Option<AddBatchReceiver<D>>>,
+    receive_channel: RwLock<Option<WorkerReceiver<D>>>,
 }
 
 impl<D: Document> Inner<D> {
@@ -55,8 +55,8 @@ impl<D: Document> Inner<D> {
     }
 }
 
-impl<D: Document> From<AddBatchReceiver<D>> for IndexWriterStatus<D> {
-    fn from(receiver: AddBatchReceiver<D>) -> Self {
+impl<D: Document> From<WorkerReceiver<D>> for IndexWriterStatus<D> {
+    fn from(receiver: WorkerReceiver<D>) -> Self {
         IndexWriterStatus {
             inner: Arc::new(Inner {
                 is_alive: AtomicBool::new(true),
@@ -97,10 +97,12 @@ mod tests {
     use crossbeam_channel as channel;
 
     use super::IndexWriterStatus;
+    use crate::indexer::WorkerMessage;
+    use crate::LucivyDocument;
 
     #[test]
     fn test_bomb_goes_boom() {
-        let (_tx, rx) = channel::bounded(10);
+        let (_tx, rx) = channel::bounded::<WorkerMessage<LucivyDocument>>(10);
         let index_writer_status: IndexWriterStatus = IndexWriterStatus::from(rx);
         assert!(index_writer_status.operation_receiver().is_some());
         let bomb = index_writer_status.create_bomb();
@@ -112,7 +114,7 @@ mod tests {
 
     #[test]
     fn test_bomb_defused() {
-        let (_tx, rx) = channel::bounded(10);
+        let (_tx, rx) = channel::bounded::<WorkerMessage<LucivyDocument>>(10);
         let index_writer_status: IndexWriterStatus = IndexWriterStatus::from(rx);
         assert!(index_writer_status.operation_receiver().is_some());
         let bomb = index_writer_status.create_bomb();
