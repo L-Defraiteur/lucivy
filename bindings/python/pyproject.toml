@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "lucivy"
-version = "0.3.1"
+version = "0.3.2"
 description = "Fast BM25 full-text search with substring matching, fuzzy search, and regex — powered by Rust"
 readme = "README-pypi.md"
 requires-python = ">=3.9"

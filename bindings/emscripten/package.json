@@ -1,6 +1,6 @@
 {
   "name": "lucivy-wasm",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "description": "Fast BM25 full-text search for browsers — WASM build of Lucivy with threading, OPFS persistence, and LUCE snapshot support",
   "license": "MIT",

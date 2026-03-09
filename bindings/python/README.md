@@ -101,6 +101,9 @@ Like a string query but targeting a specific field.
 ```python
 # "rust safety" → contains("rust") OR contains("safety") on body
 index.search({"type": "contains_split", "field": "body", "value": "rust safety"})
+
+# With fuzzy distance — each word gets fuzzy tolerance
+index.search({"type": "contains_split", "field": "body", "value": "memry safty", "distance": 1})
 ```
 
 #### boolean — combine queries with must / should / must_not

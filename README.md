@@ -86,6 +86,9 @@ index.search("rust async programming")
 
 # Explicit dict query on a specific field
 index.search({"type": "contains_split", "field": "body", "value": "memory safety"})
+
+# With fuzzy distance — each word gets fuzzy tolerance
+index.search({"type": "contains_split", "field": "body", "value": "memry safty", "distance": 1})
 ```
 
 ### `boolean`

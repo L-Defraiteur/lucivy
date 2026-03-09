@@ -303,6 +303,39 @@ class TestFuzzy:
         doc_ids = {r.doc_id for r in results}
         assert 2 in doc_ids
 
+    def test_contains_split_distance_3_matches(self, index):
+        """contains_split with distance=3 matches 'ownshp' → 'ownership' (3 edits: e,r,i)."""
+        results = index.search({
+            "type": "contains_split",
+            "field": "body",
+            "value": "ownshp",
+            "distance": 3,
+        })
+        doc_ids = {r.doc_id for r in results}
+        assert 2 in doc_ids  # "ownership system"
+
+    def test_contains_split_distance_2_no_match(self, index):
+        """contains_split with distance=2 does NOT match 'ownshp' → 'ownership' (needs 3 edits)."""
+        results = index.search({
+            "type": "contains_split",
+            "field": "body",
+            "value": "ownshp",
+            "distance": 2,
+        })
+        doc_ids = {r.doc_id for r in results}
+        assert 2 not in doc_ids
+
+    def test_contains_split_distance_3_multi_word(self, index):
+        """contains_split with distance=3 propagates to each word in multi-word query."""
+        results = index.search({
+            "type": "contains_split",
+            "field": "body",
+            "value": "ownshp garbe",  # ownership(3 edits) + garbage(3 edits for "garbe")
+            "distance": 3,
+        })
+        doc_ids = {r.doc_id for r in results}
+        assert 2 in doc_ids  # "ownership" matches
+
 
 # ─── Regex search ────────────────────────────────────────────────────────────
 

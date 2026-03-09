@@ -93,6 +93,16 @@ const results2 = await index.search(
     { highlights: true }
 );
 
+// contains_split — each word becomes a separate contains query, OR'd together
+const results5 = await index.search(
+    { type: 'contains_split', field: 'body', value: 'rust safety' }
+);
+
+// contains_split with fuzzy distance — each word gets fuzzy tolerance
+const results6 = await index.search(
+    { type: 'contains_split', field: 'body', value: 'memry safty', distance: 1 }
+);
+
 // Return stored fields with results
 const results3 = await index.search('programming', { fields: true });
 for (const r of results3) {

@@ -69,6 +69,11 @@ results = index.search("rust async programming")
 
 # Options
 results = index.search("rust", limit=20, highlights=True, allowed_ids=[1, 3, 5])
+
+# Retrieve stored field values with results
+results = index.search("rust", fields=True)
+for r in results:
+    print(r.doc_id, r.fields['title'], r.fields['body'])
 ```
 
 #### contains — substring, fuzzy, regex (cross-token)
@@ -96,6 +101,9 @@ Like a string query but targeting a specific field.
 ```python
 # "rust safety" → contains("rust") OR contains("safety") on body
 index.search({"type": "contains_split", "field": "body", "value": "rust safety"})
+
+# With fuzzy distance — each word gets fuzzy tolerance
+index.search({"type": "contains_split", "field": "body", "value": "memry safty", "distance": 1})
 ```
 
 #### boolean — combine queries with must / should / must_not

@@ -1,6 +1,6 @@
 [package]
 name = "lucivy"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 license = "MIT"
 description = "Fast BM25 full-text search index for Python, powered by Lucivy"

@@ -403,7 +403,7 @@ impl Index {
             if self.text_fields.is_empty() {
                 return Err(PyValueError::new_err("no text fields in schema for string query"));
             }
-            Ok(build_contains_split_multi_field(&s, &self.text_fields))
+            Ok(build_contains_split_multi_field(&s, &self.text_fields, None))
         } else if let Ok(dict) = query.downcast::<PyDict>() {
             // Dict → serialize to JSON → parse as QueryConfig.
             let py = dict.py();
@@ -426,38 +426,27 @@ impl Index {
 ///
 /// For a single field: "rust safety" → boolean should [contains("rust"), contains("safety")]
 /// For multiple fields: each word becomes a boolean should across all fields.
-fn build_contains_split_multi_field(value: &str, text_fields: &[String]) -> query::QueryConfig {
+fn build_contains_split_multi_field(value: &str, text_fields: &[String], distance: Option<u8>) -> query::QueryConfig {
     let words: Vec<&str> = value.split_whitespace().collect();
 
     if text_fields.len() == 1 {
-        // Single text field: simple contains_split.
-        return expand_contains_split_for_field(value, &words, &text_fields[0]);
+        return expand_contains_split_for_field(value, &words, &text_fields[0], distance);
     }
 
-    // Multiple text fields: each word → should across fields, all words → should together.
     let word_queries: Vec<query::QueryConfig> = words.iter().map(|word| {
-        if text_fields.len() == 1 {
+        let field_queries: Vec<query::QueryConfig> = text_fields.iter().map(|f| {
             query::QueryConfig {
                 query_type: "contains".into(),
-                field: Some(text_fields[0].clone()),
+                field: Some(f.clone()),
                 value: Some(word.to_string()),
+                distance,
                 ..Default::default()
             }
-        } else {
-            // One word across multiple fields → boolean should.
-            let field_queries: Vec<query::QueryConfig> = text_fields.iter().map(|f| {
-                query::QueryConfig {
-                    query_type: "contains".into(),
-                    field: Some(f.clone()),
-                    value: Some(word.to_string()),
-                    ..Default::default()
-                }
-            }).collect();
-            query::QueryConfig {
-                query_type: "boolean".into(),
-                should: Some(field_queries),
-                ..Default::default()
-            }
+        }).collect();
+        query::QueryConfig {
+            query_type: "boolean".into(),
+            should: Some(field_queries),
+            ..Default::default()
         }
     }).collect();
 
@@ -472,21 +461,20 @@ fn build_contains_split_multi_field(value: &str, text_fields: &[String]) -> quer
     }
 }
 
-/// Expand a contains_split QueryConfig (from dict) into boolean should of contains.
-/// Mirrors bridge.rs build_typed_query_config "contains_split" logic.
 fn expand_contains_split(config: &query::QueryConfig) -> query::QueryConfig {
     let value = config.value.as_deref().unwrap_or("");
     let field = config.field.as_deref().unwrap_or("");
     let words: Vec<&str> = value.split_whitespace().collect();
-    expand_contains_split_for_field(value, &words, field)
+    expand_contains_split_for_field(value, &words, field, config.distance)
 }
 
-fn expand_contains_split_for_field(value: &str, words: &[&str], field: &str) -> query::QueryConfig {
+fn expand_contains_split_for_field(value: &str, words: &[&str], field: &str, distance: Option<u8>) -> query::QueryConfig {
     if words.len() <= 1 {
         return query::QueryConfig {
             query_type: "contains".into(),
             field: Some(field.to_string()),
             value: Some(value.to_string()),
+            distance,
             ..Default::default()
         };
     }
@@ -495,6 +483,7 @@ fn expand_contains_split_for_field(value: &str, words: &[&str], field: &str) -> 
             query_type: "contains".into(),
             field: Some(field.to_string()),
             value: Some(w.to_string()),
+            distance,
             ..Default::default()
         }
     }).collect();
@@ -742,4 +731,58 @@ fn lucivy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(export_snapshots, m)?)?;
     m.add_function(wrap_pyfunction!(import_snapshots, m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fields_one() -> Vec<String> { vec!["content".into()] }
+    fn fields_two() -> Vec<String> { vec!["title".into(), "body".into()] }
+
+    #[test]
+    fn build_contains_split_propagates_distance_single_field() {
+        let q = build_contains_split_multi_field("hello world", &fields_one(), Some(3));
+        assert_eq!(q.query_type, "boolean");
+        for sub in q.should.as_ref().unwrap() {
+            assert_eq!(sub.query_type, "contains");
+            assert_eq!(sub.distance, Some(3));
+        }
+    }
+
+    #[test]
+    fn build_contains_split_propagates_distance_multi_field() {
+        let q = build_contains_split_multi_field("hello", &fields_two(), Some(2));
+        assert_eq!(q.query_type, "boolean");
+        for sub in q.should.as_ref().unwrap() {
+            assert_eq!(sub.query_type, "contains");
+            assert_eq!(sub.distance, Some(2));
+        }
+    }
+
+    #[test]
+    fn build_contains_split_none_distance_stays_none() {
+        let q = build_contains_split_multi_field("hello world", &fields_one(), None);
+        assert_eq!(q.query_type, "boolean");
+        for sub in q.should.as_ref().unwrap() {
+            assert_eq!(sub.distance, None);
+        }
+    }
+
+    #[test]
+    fn expand_contains_split_propagates_distance() {
+        let config = query::QueryConfig {
+            query_type: "contains_split".into(),
+            field: Some("body".into()),
+            value: Some("hello world".into()),
+            distance: Some(3),
+            ..Default::default()
+        };
+        let q = expand_contains_split(&config);
+        assert_eq!(q.query_type, "boolean");
+        for sub in q.should.as_ref().unwrap() {
+            assert_eq!(sub.query_type, "contains");
+            assert_eq!(sub.distance, Some(3));
+        }
+    }
 }

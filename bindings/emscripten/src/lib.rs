@@ -659,7 +659,7 @@ fn parse_query(ctx: &LucivyContext, query_json: &str) -> Result<query::QueryConf
             if ctx.text_fields.is_empty() {
                 return Err("no text fields for string query".into());
             }
-            Ok(build_contains_split_multi_field(s, &ctx.text_fields))
+            Ok(build_contains_split_multi_field(s, &ctx.text_fields, None))
         }
         serde_json::Value::Object(_) => {
             let mut config: query::QueryConfig = serde_json::from_value(value)
@@ -675,10 +675,10 @@ fn parse_query(ctx: &LucivyContext, query_json: &str) -> Result<query::QueryConf
 
 // ── Contains split helpers ─────────────────────────────────────────────────
 
-fn build_contains_split_multi_field(value: &str, text_fields: &[String]) -> query::QueryConfig {
+fn build_contains_split_multi_field(value: &str, text_fields: &[String], distance: Option<u8>) -> query::QueryConfig {
     let words: Vec<&str> = value.split_whitespace().collect();
     if text_fields.len() == 1 {
-        return expand_contains_split_for_field(value, &words, &text_fields[0]);
+        return expand_contains_split_for_field(value, &words, &text_fields[0], distance);
     }
     let word_queries: Vec<query::QueryConfig> = words.iter()
         .map(|word| {
@@ -687,6 +687,7 @@ fn build_contains_split_multi_field(value: &str, text_fields: &[String]) -> quer
                     query_type: "contains".into(),
                     field: Some(f.clone()),
                     value: Some(word.to_string()),
+                    distance,
                     ..Default::default()
                 })
                 .collect();
@@ -712,15 +713,16 @@ fn expand_contains_split(config: &query::QueryConfig) -> query::QueryConfig {
     let value = config.value.as_deref().unwrap_or("");
     let field = config.field.as_deref().unwrap_or("");
     let words: Vec<&str> = value.split_whitespace().collect();
-    expand_contains_split_for_field(value, &words, field)
+    expand_contains_split_for_field(value, &words, field, config.distance)
 }
 
-fn expand_contains_split_for_field(value: &str, words: &[&str], field: &str) -> query::QueryConfig {
+fn expand_contains_split_for_field(value: &str, words: &[&str], field: &str, distance: Option<u8>) -> query::QueryConfig {
     if words.len() <= 1 {
         return query::QueryConfig {
             query_type: "contains".into(),
             field: Some(field.to_string()),
             value: Some(value.to_string()),
+            distance,
             ..Default::default()
         };
     }
@@ -729,6 +731,7 @@ fn expand_contains_split_for_field(value: &str, words: &[&str], field: &str) -> 
             query_type: "contains".into(),
             field: Some(field.to_string()),
             value: Some(w.to_string()),
+            distance,
             ..Default::default()
         })
         .collect();
@@ -871,4 +874,58 @@ fn base64_encode(data: &[u8]) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fields_one() -> Vec<String> { vec!["content".into()] }
+    fn fields_two() -> Vec<String> { vec!["title".into(), "body".into()] }
+
+    #[test]
+    fn build_contains_split_propagates_distance_single_field() {
+        let q = build_contains_split_multi_field("hello world", &fields_one(), Some(3));
+        assert_eq!(q.query_type, "boolean");
+        for sub in q.should.as_ref().unwrap() {
+            assert_eq!(sub.query_type, "contains");
+            assert_eq!(sub.distance, Some(3));
+        }
+    }
+
+    #[test]
+    fn build_contains_split_propagates_distance_multi_field() {
+        let q = build_contains_split_multi_field("hello", &fields_two(), Some(2));
+        assert_eq!(q.query_type, "boolean");
+        for sub in q.should.as_ref().unwrap() {
+            assert_eq!(sub.query_type, "contains");
+            assert_eq!(sub.distance, Some(2));
+        }
+    }
+
+    #[test]
+    fn build_contains_split_none_distance_stays_none() {
+        let q = build_contains_split_multi_field("hello world", &fields_one(), None);
+        assert_eq!(q.query_type, "boolean");
+        for sub in q.should.as_ref().unwrap() {
+            assert_eq!(sub.distance, None);
+        }
+    }
+
+    #[test]
+    fn expand_contains_split_propagates_distance() {
+        let config = query::QueryConfig {
+            query_type: "contains_split".into(),
+            field: Some("body".into()),
+            value: Some("hello world".into()),
+            distance: Some(3),
+            ..Default::default()
+        };
+        let q = expand_contains_split(&config);
+        assert_eq!(q.query_type, "boolean");
+        for sub in q.should.as_ref().unwrap() {
+            assert_eq!(sub.query_type, "contains");
+            assert_eq!(sub.distance, Some(3));
+        }
+    }
 }

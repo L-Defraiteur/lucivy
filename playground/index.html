@@ -349,7 +349,9 @@ function buildQuery(text) {
   const mode = modeEl.value;
   const distance = parseInt(distanceEl.value) || 0;
 
-  if (mode === 'auto') return text;
+  if (mode === 'auto') {
+    return { type: 'contains_split', field: 'content', value: text, distance };
+  }
   if (mode === 'regex') {
     return { type: 'contains', field: 'content', value: text, regex: true };
   }
