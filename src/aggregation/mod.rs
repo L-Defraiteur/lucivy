@@ -60,7 +60,7 @@
 //! Requests are compatible with the elasticsearch JSON request format.
 //!
 //! ```
-//! use lucivy::aggregation::agg_req::Aggregations;
+//! use ld_lucivy::aggregation::agg_req::Aggregations;
 //!
 //! let elasticsearch_compatible_json_req = r#"
 //! {
@@ -95,7 +95,7 @@
 //! Buckets can contain sub-aggregations. In this example we create buckets with the range
 //! aggregation and then calculate the average on each bucket.
 //! ```
-//! use lucivy::aggregation::agg_req::*;
+//! use ld_lucivy::aggregation::agg_req::*;
 //! use serde_json::json;
 //!
 //! let agg_req_1: Aggregations = serde_json::from_value(json!({

@@ -490,12 +490,12 @@ impl<D: Document> IndexWriter<D> {
     /// by clearing and resubmitting necessary documents
     ///
     /// ```rust
-    /// use lucivy::collector::TopDocs;
-    /// use lucivy::query::QueryParser;
-    /// use lucivy::schema::*;
-    /// use lucivy::{doc, Index};
+    /// use ld_lucivy::collector::TopDocs;
+    /// use ld_lucivy::query::QueryParser;
+    /// use ld_lucivy::schema::*;
+    /// use ld_lucivy::{doc, Index};
     ///
-    /// fn main() -> lucivy::Result<()> {
+    /// fn main() -> ld_lucivy::Result<()> {
     ///     let mut schema_builder = Schema::builder();
     ///     let title = schema_builder.add_text_field("title", TEXT | STORED);
     ///     let schema = schema_builder.build();

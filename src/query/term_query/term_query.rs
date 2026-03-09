@@ -21,11 +21,11 @@ use crate::Term;
 /// * `field norm` - number of tokens in the field.
 ///
 /// ```rust
-/// use lucivy::collector::{Count, TopDocs};
-/// use lucivy::query::TermQuery;
-/// use lucivy::schema::{Schema, TEXT, IndexRecordOption};
-/// use lucivy::{doc, Index, IndexWriter, Term};
-/// # fn test() -> lucivy::Result<()> {
+/// use ld_lucivy::collector::{Count, TopDocs};
+/// use ld_lucivy::query::TermQuery;
+/// use ld_lucivy::schema::{Schema, TEXT, IndexRecordOption};
+/// use ld_lucivy::{doc, Index, IndexWriter, Term};
+/// # fn test() -> ld_lucivy::Result<()> {
 /// let mut schema_builder = Schema::builder();
 /// let title = schema_builder.add_text_field("title", TEXT);
 /// let schema = schema_builder.build();

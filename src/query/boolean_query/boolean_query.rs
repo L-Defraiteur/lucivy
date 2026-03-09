@@ -13,15 +13,15 @@ use crate::schema::{IndexRecordOption, Term};
 /// You can combine other query types and their `Occur`ances into one `BooleanQuery`
 ///
 /// ```rust
-/// use lucivy::collector::Count;
-/// use lucivy::doc;
-/// use lucivy::query::{BooleanQuery, Occur, PhraseQuery, Query, TermQuery};
-/// use lucivy::schema::{IndexRecordOption, Schema, TEXT};
-/// use lucivy::Term;
-/// use lucivy::Index;
-/// use lucivy::IndexWriter;
+/// use ld_lucivy::collector::Count;
+/// use ld_lucivy::doc;
+/// use ld_lucivy::query::{BooleanQuery, Occur, PhraseQuery, Query, TermQuery};
+/// use ld_lucivy::schema::{IndexRecordOption, Schema, TEXT};
+/// use ld_lucivy::Term;
+/// use ld_lucivy::Index;
+/// use ld_lucivy::IndexWriter;
 ///
-/// fn main() -> lucivy::Result<()> {
+/// fn main() -> ld_lucivy::Result<()> {
 ///    let mut schema_builder = Schema::builder();
 ///    let title = schema_builder.add_text_field("title", TEXT);
 ///    let body = schema_builder.add_text_field("body", TEXT);

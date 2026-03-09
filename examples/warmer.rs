@@ -2,11 +2,11 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock, Weak};
 
-use lucivy::collector::TopDocs;
-use lucivy::index::SegmentId;
-use lucivy::query::QueryParser;
-use lucivy::schema::{Schema, FAST, TEXT};
-use lucivy::{
+use ld_lucivy::collector::TopDocs;
+use ld_lucivy::index::SegmentId;
+use ld_lucivy::query::QueryParser;
+use ld_lucivy::schema::{Schema, FAST, TEXT};
+use ld_lucivy::{
     doc, DocAddress, DocId, Index, IndexWriter, Opstamp, Searcher, SearcherGeneration,
     SegmentReader, Warmer,
 };
@@ -49,7 +49,7 @@ impl DynamicPriceColumn {
     }
 }
 impl Warmer for DynamicPriceColumn {
-    fn warm(&self, searcher: &Searcher) -> lucivy::Result<()> {
+    fn warm(&self, searcher: &Searcher) -> ld_lucivy::Result<()> {
         for segment in searcher.segment_readers() {
             let product_id_reader = segment
                 .fast_fields()
@@ -85,7 +85,7 @@ impl Warmer for DynamicPriceColumn {
     fn garbage_collect(&self, live_generations: &[&SearcherGeneration]) {
         let live_keys: HashSet<SegmentKey> = live_generations
             .iter()
-            .flat_map(|gen| gen.segments())
+            .flat_map(|generation| generation.segments())
             .map(|(&segment_id, &opstamp)| (segment_id, opstamp))
             .collect();
 
@@ -122,7 +122,7 @@ impl PriceFetcher for ExternalPriceTable {
     }
 }
 
-fn main() -> lucivy::Result<()> {
+fn main() -> ld_lucivy::Result<()> {
     // Declaring our schema.
     let mut schema_builder = Schema::builder();
     // The product id is assumed to be a primary id for our external price source.

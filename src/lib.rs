@@ -19,10 +19,10 @@
 //! # use std::path::Path;
 //! # use std::fs;
 //! # use tempfile::TempDir;
-//! # use lucivy::collector::TopDocs;
-//! # use lucivy::query::QueryParser;
-//! # use lucivy::schema::*;
-//! # use lucivy::{doc, DocAddress, Index, IndexWriter, Score};
+//! # use ld_lucivy::collector::TopDocs;
+//! # use ld_lucivy::query::QueryParser;
+//! # use ld_lucivy::schema::*;
+//! # use ld_lucivy::{doc, DocAddress, Index, IndexWriter, Score};
 //! #
 //! # fn main() {
 //! #     // Let's create a temporary directory for the
@@ -36,7 +36,7 @@
 //! #     }
 //! # }
 //! #
-//! # fn run_example(index_path: &Path) -> lucivy::Result<()> {
+//! # fn run_example(index_path: &Path) -> ld_lucivy::Result<()> {
 //! // First we need to define a schema ...
 //!
 //! // `TEXT` means the field should be tokenized and indexed,

@@ -34,13 +34,13 @@ use crate::{DocId, Score};
 /// # Example
 ///
 /// ```rust
-/// use lucivy::collector::Count;
-/// use lucivy::query::RangeQuery;
-/// use lucivy::Term;
-/// use lucivy::schema::{Schema, INDEXED};
-/// use lucivy::{doc, Index, IndexWriter};
+/// use ld_lucivy::collector::Count;
+/// use ld_lucivy::query::RangeQuery;
+/// use ld_lucivy::Term;
+/// use ld_lucivy::schema::{Schema, INDEXED};
+/// use ld_lucivy::{doc, Index, IndexWriter};
 /// use std::ops::Bound;
-/// # fn test() -> lucivy::Result<()> {
+/// # fn test() -> ld_lucivy::Result<()> {
 /// let mut schema_builder = Schema::builder();
 /// let year_field = schema_builder.add_u64_field("year", INDEXED);
 /// let schema = schema_builder.build();

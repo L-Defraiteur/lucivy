@@ -8,13 +8,13 @@
 // electronics + count of in-stock items".
 
 use serde_json::json;
-use lucivy::aggregation::agg_req::Aggregations;
-use lucivy::aggregation::AggregationCollector;
-use lucivy::query::AllQuery;
-use lucivy::schema::{Schema, FAST, INDEXED, TEXT};
-use lucivy::{doc, Index};
+use ld_lucivy::aggregation::agg_req::Aggregations;
+use ld_lucivy::aggregation::AggregationCollector;
+use ld_lucivy::query::AllQuery;
+use ld_lucivy::schema::{Schema, FAST, INDEXED, TEXT};
+use ld_lucivy::{doc, Index};
 
-fn main() -> lucivy::Result<()> {
+fn main() -> ld_lucivy::Result<()> {
     // Create a simple product schema
     let mut schema_builder = Schema::builder();
     schema_builder.add_text_field("category", TEXT | FAST);

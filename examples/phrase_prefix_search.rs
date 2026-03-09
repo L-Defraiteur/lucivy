@@ -1,7 +1,7 @@
-use lucivy::collector::TopDocs;
-use lucivy::query::QueryParser;
-use lucivy::schema::*;
-use lucivy::{doc, Index, IndexWriter, ReloadPolicy, Result};
+use ld_lucivy::collector::TopDocs;
+use ld_lucivy::query::QueryParser;
+use ld_lucivy::schema::*;
+use ld_lucivy::{doc, Index, IndexWriter, ReloadPolicy, Result};
 use tempfile::TempDir;
 
 fn main() -> Result<()> {

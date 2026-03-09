@@ -45,11 +45,11 @@ use crate::{DocId, SegmentReader, LucivyError};
 /// # Example
 ///
 /// ```rust
-/// use lucivy::aggregation::bucket::QueryBuilder;
-/// use lucivy::query::{Query, TermQuery};
-/// use lucivy::schema::{Schema, IndexRecordOption};
-/// use lucivy::tokenizer::TokenizerManager;
-/// use lucivy::Term;
+/// use ld_lucivy::aggregation::bucket::QueryBuilder;
+/// use ld_lucivy::query::{Query, TermQuery};
+/// use ld_lucivy::schema::{Schema, IndexRecordOption};
+/// use ld_lucivy::tokenizer::TokenizerManager;
+/// use ld_lucivy::Term;
 /// use serde::{Serialize, Deserialize};
 ///
 /// #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,7 +64,7 @@ use crate::{DocId, SegmentReader, LucivyError};
 ///         &self,
 ///         schema: &Schema,
 ///         _tokenizers: &TokenizerManager,
-///     ) -> lucivy::Result<Box<dyn Query>> {
+///     ) -> ld_lucivy::Result<Box<dyn Query>> {
 ///         let field = schema.get_field(&self.field_name)?;
 ///         let term = Term::from_field_text(field, &self.term_text);
 ///         Ok(Box::new(TermQuery::new(term, IndexRecordOption::Basic)))
@@ -117,7 +117,7 @@ pub trait QueryBuilder: Debug + Send + Sync {
 ///
 /// ## Query String (Recommended)
 /// ```rust
-/// use lucivy::aggregation::bucket::FilterAggregation;
+/// use ld_lucivy::aggregation::bucket::FilterAggregation;
 ///
 /// // Query strings are parsed using Lucivy's standard QueryParser
 /// let filter_agg = FilterAggregation::new("category:electronics AND price:[100 TO 500]".to_string());
@@ -125,11 +125,11 @@ pub trait QueryBuilder: Debug + Send + Sync {
 ///
 /// ## Custom Query Builder
 /// ```rust
-/// use lucivy::aggregation::bucket::{FilterAggregation, QueryBuilder};
-/// use lucivy::query::{Query, TermQuery};
-/// use lucivy::schema::{Schema, IndexRecordOption};
-/// use lucivy::tokenizer::TokenizerManager;
-/// use lucivy::Term;
+/// use ld_lucivy::aggregation::bucket::{FilterAggregation, QueryBuilder};
+/// use ld_lucivy::query::{Query, TermQuery};
+/// use ld_lucivy::schema::{Schema, IndexRecordOption};
+/// use ld_lucivy::tokenizer::TokenizerManager;
+/// use ld_lucivy::Term;
 /// use serde::{Serialize, Deserialize};
 ///
 /// #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,7 +144,7 @@ pub trait QueryBuilder: Debug + Send + Sync {
 ///         &self,
 ///         schema: &Schema,
 ///         _tokenizers: &TokenizerManager,
-///     ) -> lucivy::Result<Box<dyn Query>> {
+///     ) -> ld_lucivy::Result<Box<dyn Query>> {
 ///         let field = schema.get_field(&self.field_name)?;
 ///         let term = Term::from_field_text(field, &self.term_text);
 ///         Ok(Box::new(TermQuery::new(term, IndexRecordOption::Basic)))
@@ -229,11 +229,11 @@ impl FilterAggregation {
     ///
     /// # Example
     /// ```rust
-    /// use lucivy::aggregation::bucket::{FilterAggregation, QueryBuilder};
-    /// use lucivy::query::{Query, TermQuery};
-    /// use lucivy::schema::{Schema, IndexRecordOption};
-    /// use lucivy::tokenizer::TokenizerManager;
-    /// use lucivy::Term;
+    /// use ld_lucivy::aggregation::bucket::{FilterAggregation, QueryBuilder};
+    /// use ld_lucivy::query::{Query, TermQuery};
+    /// use ld_lucivy::schema::{Schema, IndexRecordOption};
+    /// use ld_lucivy::tokenizer::TokenizerManager;
+    /// use ld_lucivy::Term;
     /// use serde::{Serialize, Deserialize};
     ///
     /// #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,7 +248,7 @@ impl FilterAggregation {
     ///         &self,
     ///         schema: &Schema,
     ///         _tokenizers: &TokenizerManager,
-    ///     ) -> lucivy::Result<Box<dyn Query>> {
+    ///     ) -> ld_lucivy::Result<Box<dyn Query>> {
     ///         let field = schema.get_field(&self.field_name)?;
     ///         let term = Term::from_field_text(field, &self.term_text);
     ///         Ok(Box::new(TermQuery::new(term, IndexRecordOption::Basic)))

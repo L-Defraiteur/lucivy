@@ -1,9 +1,9 @@
-use lucivy::schema::*;
+use ld_lucivy::schema::*;
 
 // # Document from json
 //
 // For convenience, `Document` can be parsed directly from json.
-fn main() -> lucivy::Result<()> {
+fn main() -> ld_lucivy::Result<()> {
     // Let's first define a schema and an index.
     // Check out the basic example if this is confusing to you.
     //

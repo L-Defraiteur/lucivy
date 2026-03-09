@@ -4,10 +4,10 @@ use std::ops::Bound;
 //
 // Below is an example of creating an indexed integer field in your schema
 // You can use RangeQuery to get a Count of all occurrences in a given range.
-use lucivy::collector::Count;
-use lucivy::query::RangeQuery;
-use lucivy::schema::{Schema, INDEXED};
-use lucivy::{doc, Index, IndexWriter, Result, Term};
+use ld_lucivy::collector::Count;
+use ld_lucivy::query::RangeQuery;
+use ld_lucivy::schema::{Schema, INDEXED};
+use ld_lucivy::{doc, Index, IndexWriter, Result, Term};
 
 fn main() -> Result<()> {
     // For the sake of simplicity, this schema will only have 1 field

@@ -26,12 +26,12 @@ use crate::{DocId, Score, SegmentReader};
 ///
 ///
 /// ```rust
-/// use lucivy::collector::{TopDocs, FilterCollector};
-/// use lucivy::query::QueryParser;
-/// use lucivy::schema::{Schema, TEXT, FAST};
-/// use lucivy::{doc, DocAddress, Index};
+/// use ld_lucivy::collector::{TopDocs, FilterCollector};
+/// use ld_lucivy::query::QueryParser;
+/// use ld_lucivy::schema::{Schema, TEXT, FAST};
+/// use ld_lucivy::{doc, DocAddress, Index};
 ///
-/// # fn main() -> lucivy::Result<()> {
+/// # fn main() -> ld_lucivy::Result<()> {
 /// let mut schema_builder = Schema::builder();
 /// let title = schema_builder.add_text_field("title", TEXT);
 /// let price = schema_builder.add_u64_field("price", FAST);
@@ -215,12 +215,12 @@ where
 /// - documents with several values are accepted if at least one value matches the predicate.
 ///
 /// ```rust
-/// use lucivy::collector::{TopDocs, BytesFilterCollector};
-/// use lucivy::query::QueryParser;
-/// use lucivy::schema::{Schema, TEXT, FAST};
-/// use lucivy::{doc, DocAddress, Index};
+/// use ld_lucivy::collector::{TopDocs, BytesFilterCollector};
+/// use ld_lucivy::query::QueryParser;
+/// use ld_lucivy::schema::{Schema, TEXT, FAST};
+/// use ld_lucivy::{doc, DocAddress, Index};
 ///
-/// # fn main() -> lucivy::Result<()> {
+/// # fn main() -> ld_lucivy::Result<()> {
 /// let mut schema_builder = Schema::builder();
 /// let title = schema_builder.add_text_field("title", TEXT);
 /// let barcode = schema_builder.add_bytes_field("barcode", FAST);

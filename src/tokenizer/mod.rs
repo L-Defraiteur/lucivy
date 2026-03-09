@@ -5,7 +5,7 @@
 //! each of your fields :
 //!
 //! ```rust
-//! use lucivy::schema::*;
+//! use ld_lucivy::schema::*;
 //!
 //! let mut schema_builder = Schema::builder();
 //!
@@ -64,7 +64,7 @@
 //! For instance, the `en_stem` is defined as follows.
 //!
 //! ```rust
-//! use lucivy::tokenizer::*;
+//! use ld_lucivy::tokenizer::*;
 //!
 //! let en_stem = TextAnalyzer::builder(SimpleTokenizer::default())
 //!     .filter(RemoveLongFilter::limit(40))
@@ -77,9 +77,9 @@
 //! register it with a name in your index's [`TokenizerManager`].
 //!
 //! ```rust
-//! # use lucivy::schema::Schema;
-//! # use lucivy::tokenizer::*;
-//! # use lucivy::Index;
+//! # use ld_lucivy::schema::Schema;
+//! # use ld_lucivy::tokenizer::*;
+//! # use ld_lucivy::Index;
 //! #
 //! let custom_en_tokenizer = SimpleTokenizer::default();
 //! # let schema = Schema::builder().build();
@@ -97,9 +97,9 @@
 //! # Example
 //!
 //! ```rust
-//! use lucivy::schema::{Schema, IndexRecordOption, TextOptions, TextFieldIndexing};
-//! use lucivy::tokenizer::*;
-//! use lucivy::Index;
+//! use ld_lucivy::schema::{Schema, IndexRecordOption, TextOptions, TextFieldIndexing};
+//! use ld_lucivy::tokenizer::*;
+//! use ld_lucivy::Index;
 //!
 //! let mut schema_builder = Schema::builder();
 //! let text_field_indexing = TextFieldIndexing::default()

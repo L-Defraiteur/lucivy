@@ -9,12 +9,12 @@
 
 use std::collections::HashSet;
 
-use lucivy::collector::TopDocs;
-use lucivy::query::BooleanQuery;
-use lucivy::schema::*;
-use lucivy::{doc, DocId, Index, IndexWriter, Score, SegmentReader};
+use ld_lucivy::collector::TopDocs;
+use ld_lucivy::query::BooleanQuery;
+use ld_lucivy::schema::*;
+use ld_lucivy::{doc, DocId, Index, IndexWriter, Score, SegmentReader};
 
-fn main() -> lucivy::Result<()> {
+fn main() -> ld_lucivy::Result<()> {
     let mut schema_builder = Schema::builder();
 
     let title = schema_builder.add_text_field("title", STORED);

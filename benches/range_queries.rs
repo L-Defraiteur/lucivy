@@ -4,10 +4,10 @@ use binggan::{black_box, BenchGroup, BenchRunner};
 use rand::prelude::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-use lucivy::collector::{Count, DocSetCollector, TopDocs};
-use lucivy::query::RangeQuery;
-use lucivy::schema::{Schema, FAST, INDEXED};
-use lucivy::{doc, Index, Order, ReloadPolicy, Searcher, Term};
+use ld_lucivy::collector::{Count, DocSetCollector, TopDocs};
+use ld_lucivy::query::RangeQuery;
+use ld_lucivy::schema::{Schema, FAST, INDEXED};
+use ld_lucivy::{doc, Index, Order, ReloadPolicy, Searcher, Term};
 
 #[derive(Clone)]
 struct BenchIndex {
@@ -339,7 +339,7 @@ impl Top100AscSearchTask {
             TopDocs::with_limit(100).order_by_fast_field::<u64>(&self.field_name, Order::Asc);
         let result = self.searcher.search(&self.query, &collector).unwrap();
         for (_score, doc_address) in &result {
-            let _doc: lucivy::LucivyDocument = self.searcher.doc(*doc_address).unwrap();
+            let _doc: ld_lucivy::LucivyDocument = self.searcher.doc(*doc_address).unwrap();
         }
         result.len()
     }
@@ -358,7 +358,7 @@ impl Top100DescSearchTask {
             TopDocs::with_limit(100).order_by_fast_field::<u64>(&self.field_name, Order::Desc);
         let result = self.searcher.search(&self.query, &collector).unwrap();
         for (_score, doc_address) in &result {
-            let _doc: lucivy::LucivyDocument = self.searcher.doc(*doc_address).unwrap();
+            let _doc: ld_lucivy::LucivyDocument = self.searcher.doc(*doc_address).unwrap();
         }
         result.len()
     }

@@ -34,12 +34,12 @@
 //! in their respective position.
 //!
 //! ```rust
-//! # use lucivy::schema::*;
-//! # use lucivy::*;
-//! # use lucivy::query::*;
-//! use lucivy::collector::{Count, TopDocs};
+//! # use ld_lucivy::schema::*;
+//! # use ld_lucivy::*;
+//! # use ld_lucivy::query::*;
+//! use ld_lucivy::collector::{Count, TopDocs};
 //! #
-//! # fn main() -> lucivy::Result<()> {
+//! # fn main() -> ld_lucivy::Result<()> {
 //! # let mut schema_builder = Schema::builder();
 //! #     let title = schema_builder.add_text_field("title", TEXT);
 //! #     let schema = schema_builder.build();

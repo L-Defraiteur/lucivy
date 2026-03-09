@@ -21,7 +21,7 @@ use crate::LucivyError;
 /// # Example
 ///
 /// ```rust
-/// use lucivy::tokenizer::*;
+/// use ld_lucivy::tokenizer::*;
 ///
 /// let mut tokenizer = RegexTokenizer::new(r"'(?:\w*)'").unwrap();
 /// let mut stream = tokenizer.token_stream("'aaa' bbb 'ccc' 'ddd'");

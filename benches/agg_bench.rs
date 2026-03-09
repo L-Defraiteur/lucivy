@@ -6,11 +6,11 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rand_distr::Distribution;
 use serde_json::json;
-use lucivy::aggregation::agg_req::Aggregations;
-use lucivy::aggregation::AggregationCollector;
-use lucivy::query::{AllQuery, TermQuery};
-use lucivy::schema::{IndexRecordOption, Schema, TextFieldIndexing, FAST, STRING};
-use lucivy::{doc, Index, Term};
+use ld_lucivy::aggregation::agg_req::Aggregations;
+use ld_lucivy::aggregation::AggregationCollector;
+use ld_lucivy::query::{AllQuery, TermQuery};
+use ld_lucivy::schema::{IndexRecordOption, Schema, TextFieldIndexing, FAST, STRING};
+use ld_lucivy::{doc, Index, Term};
 
 #[global_allocator]
 pub static GLOBAL: &PeakMemAlloc<std::alloc::System> = &INSTRUMENTED_SYSTEM;
@@ -477,7 +477,7 @@ fn get_collector(agg_req: Aggregations) -> AggregationCollector {
     AggregationCollector::from_aggs(agg_req, Default::default())
 }
 
-fn get_test_index_bench(cardinality: Cardinality) -> lucivy::Result<Index> {
+fn get_test_index_bench(cardinality: Cardinality) -> ld_lucivy::Result<Index> {
     // Flag to use existing index
     let reuse_index = std::env::var("REUSE_AGG_BENCH_INDEX").is_ok();
     if reuse_index && std::path::Path::new("agg_bench").exists() {
@@ -486,7 +486,7 @@ fn get_test_index_bench(cardinality: Cardinality) -> lucivy::Result<Index> {
     // crreate dir
     std::fs::create_dir_all("agg_bench")?;
     let mut schema_builder = Schema::builder();
-    let text_fieldtype = lucivy::schema::TextOptions::default()
+    let text_fieldtype = ld_lucivy::schema::TextOptions::default()
         .set_indexing_options(
             TextFieldIndexing::default().set_index_option(IndexRecordOption::WithFreqs),
         )
@@ -500,7 +500,7 @@ fn get_test_index_bench(cardinality: Cardinality) -> lucivy::Result<Index> {
         schema_builder.add_text_field("text_few_terms_status", STRING | FAST);
     let text_field_1000_terms_zipf =
         schema_builder.add_text_field("text_1000_terms_zipf", STRING | FAST);
-    let score_fieldtype = lucivy::schema::NumericOptions::default().set_fast();
+    let score_fieldtype = ld_lucivy::schema::NumericOptions::default().set_fast();
     let score_field = schema_builder.add_u64_field("score", score_fieldtype.clone());
     let score_field_f64 = schema_builder.add_f64_field("score_f64", score_fieldtype.clone());
     let score_field_i64 = schema_builder.add_i64_field("score_i64", score_fieldtype);

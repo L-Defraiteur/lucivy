@@ -11,13 +11,13 @@
 
 // ---
 // Importing lucivy...
-use lucivy::collector::TopDocs;
-use lucivy::query::QueryParser;
-use lucivy::schema::*;
-use lucivy::tokenizer::*;
-use lucivy::{doc, Index, IndexWriter};
+use ld_lucivy::collector::TopDocs;
+use ld_lucivy::query::QueryParser;
+use ld_lucivy::schema::*;
+use ld_lucivy::tokenizer::*;
+use ld_lucivy::{doc, Index, IndexWriter};
 
-fn main() -> lucivy::Result<()> {
+fn main() -> ld_lucivy::Result<()> {
     // this example assumes you understand the content in `basic_search`
     let mut schema_builder = Schema::builder();
 

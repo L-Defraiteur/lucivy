@@ -11,8 +11,8 @@ use crate::DocAddress;
 /// # Examples
 ///
 /// ```
-/// use lucivy::DocAddress;
-/// use lucivy::query::MoreLikeThisQuery;
+/// use ld_lucivy::DocAddress;
+/// use ld_lucivy::query::MoreLikeThisQuery;
 ///
 /// let query = MoreLikeThisQuery::builder()
 ///     .with_min_doc_frequency(1)

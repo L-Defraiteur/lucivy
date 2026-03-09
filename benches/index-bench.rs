@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, BatchSize, Bencher, Criterion, Throughput};
-use lucivy::schema::{LucivyDocument, FAST, INDEXED, STORED, STRING, TEXT};
-use lucivy::{tokenizer, Index, IndexWriter};
+use ld_lucivy::schema::{LucivyDocument, FAST, INDEXED, STORED, STRING, TEXT};
+use ld_lucivy::{tokenizer, Index, IndexWriter};
 
 const HDFS_LOGS: &str = include_str!("hdfs.json");
 const GH_LOGS: &str = include_str!("gh.json");
@@ -9,7 +9,7 @@ const WIKI: &str = include_str!("wiki.json");
 fn benchmark(
     b: &mut Bencher,
     input: &str,
-    schema: lucivy::schema::Schema,
+    schema: ld_lucivy::schema::Schema,
     commit: bool,
     parse_json: bool,
     is_dynamic: bool,
@@ -23,7 +23,7 @@ fn benchmark(
     }
 }
 
-fn get_index(schema: lucivy::schema::Schema) -> Index {
+fn get_index(schema: ld_lucivy::schema::Schema) -> Index {
     let mut index = Index::create_in_ram(schema.clone());
     let ff_tokenizer_manager = tokenizer::TokenizerManager::default();
     ff_tokenizer_manager.register(
@@ -39,10 +39,10 @@ fn get_index(schema: lucivy::schema::Schema) -> Index {
 fn _benchmark(
     b: &mut Bencher,
     input: &str,
-    schema: lucivy::schema::Schema,
+    schema: ld_lucivy::schema::Schema,
     commit: bool,
     include_json_parsing: bool,
-    create_doc: impl Fn(&lucivy::schema::Schema, &str) -> LucivyDocument,
+    create_doc: impl Fn(&ld_lucivy::schema::Schema, &str) -> LucivyDocument,
 ) {
     if include_json_parsing {
         let lines: Vec<&str> = input.trim().split('\n').collect();
@@ -84,41 +84,41 @@ fn _benchmark(
 fn benchmark_dynamic_json(
     b: &mut Bencher,
     input: &str,
-    schema: lucivy::schema::Schema,
+    schema: ld_lucivy::schema::Schema,
     commit: bool,
     parse_json: bool,
 ) {
     let json_field = schema.get_field("json").unwrap();
     _benchmark(b, input, schema, commit, parse_json, |_schema, doc_json| {
         let json_val: serde_json::Value = serde_json::from_str(doc_json).unwrap();
-        lucivy::doc!(json_field=>json_val)
+        ld_lucivy::doc!(json_field=>json_val)
     })
 }
 
 pub fn hdfs_index_benchmark(c: &mut Criterion) {
     let schema = {
-        let mut schema_builder = lucivy::schema::SchemaBuilder::new();
+        let mut schema_builder = ld_lucivy::schema::SchemaBuilder::new();
         schema_builder.add_u64_field("timestamp", INDEXED);
         schema_builder.add_text_field("body", TEXT);
         schema_builder.add_text_field("severity", STRING);
         schema_builder.build()
     };
     let schema_only_fast = {
-        let mut schema_builder = lucivy::schema::SchemaBuilder::new();
+        let mut schema_builder = ld_lucivy::schema::SchemaBuilder::new();
         schema_builder.add_u64_field("timestamp", FAST);
         schema_builder.add_text_field("body", FAST);
         schema_builder.add_text_field("severity", FAST);
         schema_builder.build()
     };
     let _schema_with_store = {
-        let mut schema_builder = lucivy::schema::SchemaBuilder::new();
+        let mut schema_builder = ld_lucivy::schema::SchemaBuilder::new();
         schema_builder.add_u64_field("timestamp", INDEXED | STORED);
         schema_builder.add_text_field("body", TEXT | STORED);
         schema_builder.add_text_field("severity", STRING | STORED);
         schema_builder.build()
     };
     let dynamic_schema = {
-        let mut schema_builder = lucivy::schema::SchemaBuilder::new();
+        let mut schema_builder = ld_lucivy::schema::SchemaBuilder::new();
         schema_builder.add_json_field("json", TEXT | FAST);
         schema_builder.build()
     };
@@ -157,12 +157,12 @@ pub fn hdfs_index_benchmark(c: &mut Criterion) {
 
 pub fn gh_index_benchmark(c: &mut Criterion) {
     let dynamic_schema = {
-        let mut schema_builder = lucivy::schema::SchemaBuilder::new();
+        let mut schema_builder = ld_lucivy::schema::SchemaBuilder::new();
         schema_builder.add_json_field("json", TEXT | FAST);
         schema_builder.build()
     };
     let dynamic_schema_fast = {
-        let mut schema_builder = lucivy::schema::SchemaBuilder::new();
+        let mut schema_builder = ld_lucivy::schema::SchemaBuilder::new();
         schema_builder.add_json_field("json", FAST);
         schema_builder.build()
     };
@@ -184,7 +184,7 @@ pub fn gh_index_benchmark(c: &mut Criterion) {
 
 pub fn wiki_index_benchmark(c: &mut Criterion) {
     let dynamic_schema = {
-        let mut schema_builder = lucivy::schema::SchemaBuilder::new();
+        let mut schema_builder = ld_lucivy::schema::SchemaBuilder::new();
         schema_builder.add_json_field("json", TEXT | FAST);
         schema_builder.build()
     };

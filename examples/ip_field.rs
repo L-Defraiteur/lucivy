@@ -3,12 +3,12 @@
 // This example shows how the ip field can be used
 // with IpV6 and IpV4.
 
-use lucivy::collector::{Count, TopDocs};
-use lucivy::query::QueryParser;
-use lucivy::schema::{Schema, FAST, INDEXED, STORED, STRING};
-use lucivy::{Index, IndexWriter, LucivyDocument};
+use ld_lucivy::collector::{Count, TopDocs};
+use ld_lucivy::query::QueryParser;
+use ld_lucivy::schema::{Schema, FAST, INDEXED, STORED, STRING};
+use ld_lucivy::{Index, IndexWriter, LucivyDocument};
 
-fn main() -> lucivy::Result<()> {
+fn main() -> ld_lucivy::Result<()> {
     // # Defining the schema
     // We set the IP field as `INDEXED`, so it can be searched
     // `FAST` will create a fast field. The fast field will be used to execute search queries.

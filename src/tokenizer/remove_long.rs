@@ -1,6 +1,6 @@
 //! # Example
 //! ```rust
-//! use lucivy::tokenizer::*;
+//! use ld_lucivy::tokenizer::*;
 //!
 //! let mut tokenizer = TextAnalyzer::builder(SimpleTokenizer::default())
 //!   .filter(RemoveLongFilter::limit(5))

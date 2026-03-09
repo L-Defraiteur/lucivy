@@ -95,8 +95,8 @@ fn save_new_metas(
 /// # Examples
 ///
 /// ```
-/// use lucivy::schema::*;
-/// use lucivy::{Index, IndexSettings};
+/// use ld_lucivy::schema::*;
+/// use ld_lucivy::{Index, IndexSettings};
 ///
 /// let mut schema_builder = Schema::builder();
 /// let id_field = schema_builder.add_text_field("id", STRING);

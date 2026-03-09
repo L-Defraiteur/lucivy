@@ -23,8 +23,8 @@
 /// # Example
 ///
 /// ```rust
-/// use lucivy::schema::{Schema, TEXT, FAST};
-/// use lucivy::doc;
+/// use ld_lucivy::schema::{Schema, TEXT, FAST};
+/// use ld_lucivy::doc;
 ///
 /// //...
 ///

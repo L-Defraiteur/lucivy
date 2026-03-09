@@ -7,14 +7,14 @@
 // ---
 
 use serde_json::{Deserializer, Value};
-use lucivy::aggregation::agg_req::Aggregations;
-use lucivy::aggregation::agg_result::AggregationResults;
-use lucivy::aggregation::AggregationCollector;
-use lucivy::query::AllQuery;
-use lucivy::schema::{self, IndexRecordOption, Schema, TextFieldIndexing, FAST};
-use lucivy::{Index, IndexWriter, LucivyDocument};
+use ld_lucivy::aggregation::agg_req::Aggregations;
+use ld_lucivy::aggregation::agg_result::AggregationResults;
+use ld_lucivy::aggregation::AggregationCollector;
+use ld_lucivy::query::AllQuery;
+use ld_lucivy::schema::{self, IndexRecordOption, Schema, TextFieldIndexing, FAST};
+use ld_lucivy::{Index, IndexWriter, LucivyDocument};
 
-fn main() -> lucivy::Result<()> {
+fn main() -> ld_lucivy::Result<()> {
     // # Create Schema
     //
     // Lets create a schema for a footwear shop, with 4 fields: name, category, stock and price.

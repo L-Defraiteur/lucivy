@@ -1,8 +1,8 @@
 use std::path::Path;
 
-use lucivy::directory::{Directory, ManagedDirectory, RamDirectory, TerminatingWrite};
-use lucivy::schema::{Schema, TEXT};
-use lucivy::{doc, Index, IndexWriter, Term};
+use ld_lucivy::directory::{Directory, ManagedDirectory, RamDirectory, TerminatingWrite};
+use ld_lucivy::schema::{Schema, TEXT};
+use ld_lucivy::{doc, Index, IndexWriter, Term};
 
 #[test]
 fn test_failpoints_managed_directory_gc_if_delete_fails() {
@@ -39,7 +39,7 @@ fn test_failpoints_managed_directory_gc_if_delete_fails() {
 }
 
 #[test]
-fn test_write_commit_fails() -> lucivy::Result<()> {
+fn test_write_commit_fails() -> ld_lucivy::Result<()> {
     let _fail_scenario_guard = fail::FailScenario::setup();
     let mut schema_builder = Schema::builder();
     let text_field = schema_builder.add_text_field("text", TEXT);
@@ -70,7 +70,7 @@ fn test_write_commit_fails() -> lucivy::Result<()> {
 // Details at
 // - https://github.com/quickwit-oss/tantivy/issues/1198
 #[test]
-fn test_fail_on_flush_segment() -> lucivy::Result<()> {
+fn test_fail_on_flush_segment() -> ld_lucivy::Result<()> {
     let _fail_scenario_guard = fail::FailScenario::setup();
     let mut schema_builder = Schema::builder();
     let text_field = schema_builder.add_text_field("text", TEXT);
@@ -89,7 +89,7 @@ fn test_fail_on_flush_segment() -> lucivy::Result<()> {
 }
 
 #[test]
-fn test_fail_on_flush_segment_but_one_worker_remains() -> lucivy::Result<()> {
+fn test_fail_on_flush_segment_but_one_worker_remains() -> ld_lucivy::Result<()> {
     let _fail_scenario_guard = fail::FailScenario::setup();
     let mut schema_builder = Schema::builder();
     let text_field = schema_builder.add_text_field("text", TEXT);
@@ -108,7 +108,7 @@ fn test_fail_on_flush_segment_but_one_worker_remains() -> lucivy::Result<()> {
 }
 
 #[test]
-fn test_fail_on_commit_segment() -> lucivy::Result<()> {
+fn test_fail_on_commit_segment() -> ld_lucivy::Result<()> {
     let _fail_scenario_guard = fail::FailScenario::setup();
     let mut schema_builder = Schema::builder();
     let text_field = schema_builder.add_text_field("text", TEXT);

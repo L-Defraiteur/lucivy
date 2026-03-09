@@ -73,12 +73,12 @@ fn facet_depth(facet_bytes: &[u8]) -> usize {
 ///
 ///
 /// ```rust
-/// use lucivy::collector::FacetCollector;
-/// use lucivy::query::AllQuery;
-/// use lucivy::schema::{Facet, Schema, FacetOptions, TEXT};
-/// use lucivy::{doc, Index};
+/// use ld_lucivy::collector::FacetCollector;
+/// use ld_lucivy::query::AllQuery;
+/// use ld_lucivy::schema::{Facet, Schema, FacetOptions, TEXT};
+/// use ld_lucivy::{doc, Index};
 ///
-/// fn example() -> lucivy::Result<()> {
+/// fn example() -> ld_lucivy::Result<()> {
 ///     let mut schema_builder = Schema::builder();
 ///
 ///     // Facet have their own specific type.

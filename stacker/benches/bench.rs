@@ -2,7 +2,7 @@ use binggan::plugins::PeakMemAllocPlugin;
 use binggan::{BenchRunner, INSTRUMENTED_SYSTEM, PeakMemAlloc, black_box};
 use rand::SeedableRng;
 use rustc_hash::FxHashMap;
-use lucivy_stacker::{ArenaHashMap, ExpUnrolledLinkedList, MemoryArena};
+use ld_lucivy_stacker::{ArenaHashMap, ExpUnrolledLinkedList, MemoryArena};
 
 const ALICE: &str = include_str!("../../benches/alice.txt");
 

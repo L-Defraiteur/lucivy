@@ -131,12 +131,12 @@ impl<TFruit: Fruit> FruitHandle<TFruit> {
 /// documentation](./index.html#combining-several-collectors).
 ///
 /// ```rust
-/// use lucivy::collector::{Count, TopDocs, MultiCollector};
-/// use lucivy::query::QueryParser;
-/// use lucivy::schema::{Schema, TEXT};
-/// use lucivy::{doc, Index};
+/// use ld_lucivy::collector::{Count, TopDocs, MultiCollector};
+/// use ld_lucivy::query::QueryParser;
+/// use ld_lucivy::schema::{Schema, TEXT};
+/// use ld_lucivy::{doc, Index};
 ///
-/// # fn main() -> lucivy::Result<()> {
+/// # fn main() -> ld_lucivy::Result<()> {
 /// let mut schema_builder = Schema::builder();
 /// let title = schema_builder.add_text_field("title", TEXT);
 /// let schema = schema_builder.build();

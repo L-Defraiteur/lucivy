@@ -2,10 +2,10 @@ use binggan::{black_box, BenchGroup, BenchRunner};
 use rand::prelude::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-use lucivy::collector::{Collector, Count, DocSetCollector, TopDocs};
-use lucivy::query::{Query, QueryParser};
-use lucivy::schema::{Schema, FAST, INDEXED, TEXT};
-use lucivy::{doc, Index, Order, ReloadPolicy, Searcher};
+use ld_lucivy::collector::{Collector, Count, DocSetCollector, TopDocs};
+use ld_lucivy::query::{Query, QueryParser};
+use ld_lucivy::schema::{Schema, FAST, INDEXED, TEXT};
+use ld_lucivy::{doc, Index, Order, ReloadPolicy, Searcher};
 
 #[derive(Clone)]
 struct BenchIndex {
@@ -266,15 +266,15 @@ impl<C: Collector> SearchTask<C> {
         if let Some(count) = (&result as &dyn std::any::Any).downcast_ref::<usize>() {
             *count
         } else if let Some(top_docs) = (&result as &dyn std::any::Any)
-            .downcast_ref::<Vec<(Option<u64>, lucivy::DocAddress)>>()
+            .downcast_ref::<Vec<(Option<u64>, ld_lucivy::DocAddress)>>()
         {
             top_docs.len()
         } else if let Some(top_docs) =
-            (&result as &dyn std::any::Any).downcast_ref::<Vec<(u64, lucivy::DocAddress)>>()
+            (&result as &dyn std::any::Any).downcast_ref::<Vec<(u64, ld_lucivy::DocAddress)>>()
         {
             top_docs.len()
         } else if let Some(doc_set) = (&result as &dyn std::any::Any)
-            .downcast_ref::<std::collections::HashSet<lucivy::DocAddress>>()
+            .downcast_ref::<std::collections::HashSet<ld_lucivy::DocAddress>>()
         {
             doc_set.len()
         } else {

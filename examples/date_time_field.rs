@@ -2,18 +2,18 @@
 //
 // This example shows how the DateTime field can be used
 
-use lucivy::collector::TopDocs;
-use lucivy::query::QueryParser;
-use lucivy::schema::{DateOptions, Document, Schema, Value, INDEXED, STORED, STRING};
-use lucivy::{Index, IndexWriter, LucivyDocument};
+use ld_lucivy::collector::TopDocs;
+use ld_lucivy::query::QueryParser;
+use ld_lucivy::schema::{DateOptions, Document, Schema, Value, INDEXED, STORED, STRING};
+use ld_lucivy::{Index, IndexWriter, LucivyDocument};
 
-fn main() -> lucivy::Result<()> {
+fn main() -> ld_lucivy::Result<()> {
     // # Defining the schema
     let mut schema_builder = Schema::builder();
     let opts = DateOptions::from(INDEXED)
         .set_stored()
         .set_fast()
-        .set_precision(lucivy::schema::DateTimePrecision::Seconds);
+        .set_precision(ld_lucivy::schema::DateTimePrecision::Seconds);
     // Add `occurred_at` date field type
     let occurred_at = schema_builder.add_date_field("occurred_at", opts);
     let event_type = schema_builder.add_text_field("event", STRING | STORED);

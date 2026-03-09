@@ -1,4 +1,4 @@
-//! `lucivy_sstable` is a crate that provides a sorted string table data structure.
+//! `ld_lucivy_sstable` is a crate that provides a sorted string table data structure.
 //!
 //! It is used in `lucivy` to store the term dictionary.
 //!
@@ -13,7 +13,7 @@
 //!
 //! ```rust
 //! use common::OwnedBytes;
-//! use lucivy_sstable::{Dictionary, MonotonicU64SSTable};
+//! use ld_lucivy_sstable::{Dictionary, MonotonicU64SSTable};
 //!
 //! // Create a new sstable in memory.
 //! let mut builder = Dictionary::<MonotonicU64SSTable>::builder(Vec::new()).unwrap();

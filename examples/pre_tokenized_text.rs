@@ -9,11 +9,11 @@
 // - import tokenized text straight from json,
 // - perform a search on documents with pre-tokenized text
 
-use lucivy::collector::{Count, TopDocs};
-use lucivy::query::TermQuery;
-use lucivy::schema::*;
-use lucivy::tokenizer::{PreTokenizedString, SimpleTokenizer, Token, TokenStream, Tokenizer};
-use lucivy::{doc, Index, IndexWriter, ReloadPolicy};
+use ld_lucivy::collector::{Count, TopDocs};
+use ld_lucivy::query::TermQuery;
+use ld_lucivy::schema::*;
+use ld_lucivy::tokenizer::{PreTokenizedString, SimpleTokenizer, Token, TokenStream, Tokenizer};
+use ld_lucivy::{doc, Index, IndexWriter, ReloadPolicy};
 use tempfile::TempDir;
 
 fn pre_tokenize_text(text: &str) -> Vec<Token> {
@@ -26,7 +26,7 @@ fn pre_tokenize_text(text: &str) -> Vec<Token> {
     tokens
 }
 
-fn main() -> lucivy::Result<()> {
+fn main() -> ld_lucivy::Result<()> {
     let index_path = TempDir::new()?;
 
     let mut schema_builder = Schema::builder();

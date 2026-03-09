@@ -28,12 +28,12 @@ use crate::{DocAddress, DocId, Order, Score, SegmentReader};
 /// In case of a tie on the sort key, documents are always sorted by ascending `DocAddress`.
 ///
 /// ```rust
-/// use lucivy::collector::TopDocs;
-/// use lucivy::query::QueryParser;
-/// use lucivy::schema::{Schema, TEXT};
-/// use lucivy::{doc, DocAddress, Index};
+/// use ld_lucivy::collector::TopDocs;
+/// use ld_lucivy::query::QueryParser;
+/// use ld_lucivy::schema::{Schema, TEXT};
+/// use ld_lucivy::{doc, DocAddress, Index};
 ///
-/// # fn main() -> lucivy::Result<()> {
+/// # fn main() -> ld_lucivy::Result<()> {
 /// let mut schema_builder = Schema::builder();
 /// let title = schema_builder.add_text_field("title", TEXT);
 /// let schema = schema_builder.build();
@@ -103,12 +103,12 @@ impl TopDocs {
     /// # Example
     ///
     /// ```rust
-    /// use lucivy::collector::TopDocs;
-    /// use lucivy::query::QueryParser;
-    /// use lucivy::schema::{Schema, TEXT};
-    /// use lucivy::{doc, DocAddress, Index};
+    /// use ld_lucivy::collector::TopDocs;
+    /// use ld_lucivy::query::QueryParser;
+    /// use ld_lucivy::schema::{Schema, TEXT};
+    /// use ld_lucivy::{doc, DocAddress, Index};
     ///
-    /// # fn main() -> lucivy::Result<()> {
+    /// # fn main() -> ld_lucivy::Result<()> {
     /// let mut schema_builder = Schema::builder();
     /// let title = schema_builder.add_text_field("title", TEXT);
     /// let schema = schema_builder.build();
@@ -155,13 +155,13 @@ impl TopDocs {
     /// # Example
     ///
     /// ```rust
-    /// # use lucivy::schema::{Schema, FAST, TEXT};
-    /// # use lucivy::{doc, Index, DocAddress, Order};
-    /// # use lucivy::query::{Query, QueryParser};
-    /// use lucivy::Searcher;
-    /// use lucivy::collector::TopDocs;
+    /// # use ld_lucivy::schema::{Schema, FAST, TEXT};
+    /// # use ld_lucivy::{doc, Index, DocAddress, Order};
+    /// # use ld_lucivy::query::{Query, QueryParser};
+    /// use ld_lucivy::Searcher;
+    /// use ld_lucivy::collector::TopDocs;
     ///
-    /// # fn main() -> lucivy::Result<()> {
+    /// # fn main() -> ld_lucivy::Result<()> {
     /// #   let mut schema_builder = Schema::builder();
     /// #   let title = schema_builder.add_text_field("title", TEXT);
     /// #   let rating = schema_builder.add_u64_field("rating", FAST);
@@ -187,7 +187,7 @@ impl TopDocs {
     /// /// given in argument.
     /// fn docs_sorted_by_rating(searcher: &Searcher,
     ///                          query: &dyn Query)
-    ///     -> lucivy::Result<Vec<(Option<u64>, DocAddress)>> {
+    ///     -> ld_lucivy::Result<Vec<(Option<u64>, DocAddress)>> {
     ///
     ///     // This is where we build our topdocs collector
     ///     //
@@ -242,13 +242,13 @@ impl TopDocs {
     /// # Example
     ///
     /// ```rust
-    /// # use lucivy::schema::{Schema, FAST, TEXT};
-    /// # use lucivy::{doc, Index, DocAddress,Order};
-    /// # use lucivy::query::{Query, AllQuery};
-    /// use lucivy::Searcher;
-    /// use lucivy::collector::TopDocs;
+    /// # use ld_lucivy::schema::{Schema, FAST, TEXT};
+    /// # use ld_lucivy::{doc, Index, DocAddress,Order};
+    /// # use ld_lucivy::query::{Query, AllQuery};
+    /// use ld_lucivy::Searcher;
+    /// use ld_lucivy::collector::TopDocs;
     ///
-    /// # fn main() -> lucivy::Result<()> {
+    /// # fn main() -> ld_lucivy::Result<()> {
     /// #   let mut schema_builder = Schema::builder();
     /// #   let title = schema_builder.add_text_field("company", TEXT);
     /// #   let revenue = schema_builder.add_i64_field("revenue", FAST);
@@ -273,7 +273,7 @@ impl TopDocs {
     /// fn docs_sorted_by_revenue(searcher: &Searcher,
     ///                          query: &dyn Query,
     ///                          revenue_field: &str)
-    ///     -> lucivy::Result<Vec<(Option<i64>, DocAddress)>> {
+    ///     -> ld_lucivy::Result<Vec<(Option<i64>, DocAddress)>> {
     ///
     ///     // This is where we build our topdocs collector
     ///     //
@@ -355,12 +355,12 @@ impl TopDocs {
     /// learning-to-rank model over various features
     ///
     /// ```rust
-    /// # use lucivy::schema::{Schema, FAST, TEXT};
-    /// # use lucivy::{doc, Index, DocAddress, DocId, Score};
-    /// # use lucivy::query::QueryParser;
-    /// use lucivy::SegmentReader;
-    /// use lucivy::collector::TopDocs;
-    /// use lucivy::schema::Field;
+    /// # use ld_lucivy::schema::{Schema, FAST, TEXT};
+    /// # use ld_lucivy::{doc, Index, DocAddress, DocId, Score};
+    /// # use ld_lucivy::query::QueryParser;
+    /// use ld_lucivy::SegmentReader;
+    /// use ld_lucivy::collector::TopDocs;
+    /// use ld_lucivy::schema::Field;
     ///
     /// fn create_schema() -> Schema {
     ///    let mut schema_builder = Schema::builder();
@@ -369,7 +369,7 @@ impl TopDocs {
     ///    schema_builder.build()
     /// }
     ///
-    /// fn create_index() -> lucivy::Result<Index> {
+    /// fn create_index() -> ld_lucivy::Result<Index> {
     ///   let schema = create_schema();
     ///   let index = Index::create_in_ram(schema);
     ///   let mut index_writer = index.writer_with_num_threads(1, 20_000_000)?;

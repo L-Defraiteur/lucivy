@@ -1,10 +1,10 @@
 use binggan::plugins::PeakMemAllocPlugin;
 use binggan::{black_box, InputGroup, PeakMemAlloc, INSTRUMENTED_SYSTEM};
 use serde_json::json;
-use lucivy::collector::Count;
-use lucivy::query::ExistsQuery;
-use lucivy::schema::{Schema, FAST, TEXT};
-use lucivy::{doc, Index};
+use ld_lucivy::collector::Count;
+use ld_lucivy::query::ExistsQuery;
+use ld_lucivy::schema::{Schema, FAST, TEXT};
+use ld_lucivy::{doc, Index};
 
 #[global_allocator]
 pub static GLOBAL: &PeakMemAlloc<std::alloc::System> = &INSTRUMENTED_SYSTEM;

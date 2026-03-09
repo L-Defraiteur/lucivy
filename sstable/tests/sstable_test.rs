@@ -1,5 +1,5 @@
 use common::OwnedBytes;
-use lucivy_sstable::{Dictionary, MonotonicU64SSTable, VecU32ValueSSTable};
+use ld_lucivy_sstable::{Dictionary, MonotonicU64SSTable, VecU32ValueSSTable};
 
 #[test]
 fn test_create_and_search_sstable() {

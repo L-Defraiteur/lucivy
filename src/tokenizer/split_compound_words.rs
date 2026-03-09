@@ -18,7 +18,7 @@ use super::{Token, TokenFilter, TokenStream, Tokenizer};
 /// is not split in the following example.
 ///
 /// ```rust
-/// use lucivy::tokenizer::{SimpleTokenizer, SplitCompoundWords, TextAnalyzer};
+/// use ld_lucivy::tokenizer::{SimpleTokenizer, SplitCompoundWords, TextAnalyzer};
 ///
 /// let mut tokenizer =
 ///        TextAnalyzer::builder(SimpleTokenizer::default())

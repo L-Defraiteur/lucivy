@@ -7,13 +7,13 @@
 // the list of documents containing a term, getting
 // its term frequency, and accessing its positions.
 
-use lucivy::postings::Postings;
+use ld_lucivy::postings::Postings;
 // ---
 // Importing lucivy...
-use lucivy::schema::*;
-use lucivy::{doc, DocSet, Index, IndexWriter, TERMINATED};
+use ld_lucivy::schema::*;
+use ld_lucivy::{doc, DocSet, Index, IndexWriter, TERMINATED};
 
-fn main() -> lucivy::Result<()> {
+fn main() -> ld_lucivy::Result<()> {
     // We first create a schema for the sake of the
     // example. Check the `basic_search` example for more information.
     let mut schema_builder = Schema::builder();

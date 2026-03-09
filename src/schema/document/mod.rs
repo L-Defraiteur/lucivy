@@ -37,8 +37,8 @@
 //! ## A basic custom document
 //! ```
 //! use std::collections::{btree_map, BTreeMap};
-//! use lucivy::schema::{Document, Field};
-//! use lucivy::schema::document::{DeserializeError, DocumentDeserialize, DocumentDeserializer};
+//! use ld_lucivy::schema::{Document, Field};
+//! use ld_lucivy::schema::document::{DeserializeError, DocumentDeserialize, DocumentDeserializer};
 //!
 //! /// Our custom document to let us use a map of `serde_json::Values`.
 //! #[allow(dead_code)]
@@ -112,7 +112,7 @@
 //! on to the [ReferenceValue].
 //!
 //! This is why [Value] is implemented for `&'a serde_json::Value` and
-//! [&'a lucivy::schema::document::OwnedValue](OwnedValue) but not for their owned counterparts, as
+//! [&'a ld_lucivy::schema::document::OwnedValue](OwnedValue) but not for their owned counterparts, as
 //! we cannot satisfy the lifetime bounds necessary when indexing the documents.
 //!
 //! ### A note about returning values
@@ -121,9 +121,9 @@
 //! kept in the parent document, and the value passed into Lucivy.
 //!
 //! ```
-//! use lucivy::schema::document::ReferenceValue;
-//! use lucivy::schema::document::ReferenceValueLeaf;
-//! use lucivy::schema::{Value};
+//! use ld_lucivy::schema::document::ReferenceValue;
+//! use ld_lucivy::schema::document::ReferenceValueLeaf;
+//! use ld_lucivy::schema::{Value};
 //!
 //! #[derive(Debug)]
 //! /// Our custom value type which has 3 types, a string, float and bool.

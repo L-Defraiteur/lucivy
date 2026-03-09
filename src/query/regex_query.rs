@@ -16,12 +16,12 @@ use crate::schema::Field;
 /// by converting them to their regex counterparts.
 ///
 /// ```rust
-/// use lucivy::collector::Count;
-/// use lucivy::query::RegexQuery;
-/// use lucivy::schema::{Schema, TEXT};
-/// use lucivy::{doc, Index, IndexWriter, Term};
+/// use ld_lucivy::collector::Count;
+/// use ld_lucivy::query::RegexQuery;
+/// use ld_lucivy::schema::{Schema, TEXT};
+/// use ld_lucivy::{doc, Index, IndexWriter, Term};
 ///
-/// # fn test() -> lucivy::Result<()> {
+/// # fn test() -> ld_lucivy::Result<()> {
 /// let mut schema_builder = Schema::builder();
 /// let title = schema_builder.add_text_field("title", TEXT);
 /// let schema = schema_builder.build();

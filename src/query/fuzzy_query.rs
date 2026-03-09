@@ -38,12 +38,12 @@ impl Automaton for DfaWrapper {
 /// containing a specific term that is within
 /// Levenshtein distance
 /// ```rust
-/// use lucivy::collector::{Count, TopDocs};
-/// use lucivy::query::FuzzyTermQuery;
-/// use lucivy::schema::{Schema, TEXT};
-/// use lucivy::{doc, Index, IndexWriter, Term};
+/// use ld_lucivy::collector::{Count, TopDocs};
+/// use ld_lucivy::query::FuzzyTermQuery;
+/// use ld_lucivy::schema::{Schema, TEXT};
+/// use ld_lucivy::{doc, Index, IndexWriter, Term};
 ///
-/// fn example() -> lucivy::Result<()> {
+/// fn example() -> ld_lucivy::Result<()> {
 ///     let mut schema_builder = Schema::builder();
 ///     let title = schema_builder.add_text_field("title", TEXT);
 ///     let schema = schema_builder.build();

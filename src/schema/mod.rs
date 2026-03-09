@@ -27,7 +27,7 @@
 //! ### Example
 //!
 //! ```
-//! use lucivy::schema::*;
+//! use ld_lucivy::schema::*;
 //! let mut schema_builder = Schema::builder();
 //! let title_options = TextOptions::default()
 //!     .set_stored()
@@ -58,7 +58,7 @@
 //! ### Example
 //!
 //! ```
-//! use lucivy::schema::*;
+//! use ld_lucivy::schema::*;
 //! let mut schema_builder = Schema::builder();
 //! let num_stars_options = NumericOptions::default()
 //!     .set_stored()
@@ -84,7 +84,7 @@
 //! rewritten:
 //!
 //! ```
-//! use lucivy::schema::*;
+//! use ld_lucivy::schema::*;
 //! let mut schema_builder = Schema::builder();
 //! schema_builder.add_u64_field("num_stars", INDEXED | STORED);
 //! schema_builder.add_text_field("title", TEXT | STORED);
@@ -103,7 +103,7 @@
 //! generally much slower than searching in an index.
 //!
 //! ```
-//! use lucivy::schema::*;
+//! use ld_lucivy::schema::*;
 //! let mut schema_builder = Schema::builder();
 //! schema_builder.add_u64_field("population", STORED | FAST);
 //! schema_builder.add_text_field("zip_code", STRING | FAST);

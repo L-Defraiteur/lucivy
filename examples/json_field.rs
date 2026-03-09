@@ -4,12 +4,12 @@
 // to make lucivy partially schemaless by setting it as
 // default query parser field.
 
-use lucivy::collector::{Count, TopDocs};
-use lucivy::query::QueryParser;
-use lucivy::schema::{Schema, FAST, STORED, STRING, TEXT};
-use lucivy::{Index, IndexWriter, LucivyDocument};
+use ld_lucivy::collector::{Count, TopDocs};
+use ld_lucivy::query::QueryParser;
+use ld_lucivy::schema::{Schema, FAST, STORED, STRING, TEXT};
+use ld_lucivy::{Index, IndexWriter, LucivyDocument};
 
-fn main() -> lucivy::Result<()> {
+fn main() -> ld_lucivy::Result<()> {
     // # Defining the schema
     let mut schema_builder = Schema::builder();
     schema_builder.add_date_field("timestamp", FAST | STORED);

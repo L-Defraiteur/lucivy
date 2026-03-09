@@ -8,10 +8,10 @@
 //
 // ---
 // Importing lucivy...
-use lucivy::collector::TopDocs;
-use lucivy::query::TermQuery;
-use lucivy::schema::*;
-use lucivy::{doc, Index, IndexReader, IndexWriter};
+use ld_lucivy::collector::TopDocs;
+use ld_lucivy::query::TermQuery;
+use ld_lucivy::schema::*;
+use ld_lucivy::{doc, Index, IndexReader, IndexWriter};
 
 // A simple helper function to fetch a single document
 // given its id from our index.
@@ -19,7 +19,7 @@ use lucivy::{doc, Index, IndexReader, IndexWriter};
 fn extract_doc_given_isbn(
     reader: &IndexReader,
     isbn_term: &Term,
-) -> lucivy::Result<Option<LucivyDocument>> {
+) -> ld_lucivy::Result<Option<LucivyDocument>> {
     let searcher = reader.searcher();
 
     // This is the simplest query you can think of.
@@ -39,7 +39,7 @@ fn extract_doc_given_isbn(
     }
 }
 
-fn main() -> lucivy::Result<()> {
+fn main() -> ld_lucivy::Result<()> {
     // # Defining the schema
     //
     // Check out the *basic_search* example if this makes

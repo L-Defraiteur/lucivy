@@ -81,7 +81,7 @@ impl<T: Tokenizer> TextAnalyzerBuilder<T> {
     /// # Example
     ///
     /// ```rust
-    /// use lucivy::tokenizer::*;
+    /// use ld_lucivy::tokenizer::*;
     ///
     /// let en_stem = TextAnalyzer::builder(SimpleTokenizer::default())
     ///     .filter(RemoveLongFilter::limit(40))

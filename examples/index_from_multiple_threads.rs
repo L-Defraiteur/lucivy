@@ -29,10 +29,10 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 
-use lucivy::schema::{Schema, STORED, TEXT};
-use lucivy::{doc, Index, IndexWriter, Opstamp, LucivyError};
+use ld_lucivy::schema::{Schema, STORED, TEXT};
+use ld_lucivy::{doc, Index, IndexWriter, Opstamp, LucivyError};
 
-fn main() -> lucivy::Result<()> {
+fn main() -> ld_lucivy::Result<()> {
     // # Defining the schema
     let mut schema_builder = Schema::builder();
     let title = schema_builder.add_text_field("title", TEXT | STORED);

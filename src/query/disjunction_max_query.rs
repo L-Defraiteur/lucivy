@@ -9,15 +9,15 @@ use crate::{Score, Term};
 /// clause, plus a tie breaking increment for any additional matching subqueries.
 ///
 /// ```rust
-/// use lucivy::collector::TopDocs;
-/// use lucivy::doc;
-/// use lucivy::query::{DisjunctionMaxQuery, Query, QueryClone, TermQuery};
-/// use lucivy::schema::{IndexRecordOption, Schema, TEXT};
-/// use lucivy::Term;
-/// use lucivy::Index;
-/// use lucivy::IndexWriter;
+/// use ld_lucivy::collector::TopDocs;
+/// use ld_lucivy::doc;
+/// use ld_lucivy::query::{DisjunctionMaxQuery, Query, QueryClone, TermQuery};
+/// use ld_lucivy::schema::{IndexRecordOption, Schema, TEXT};
+/// use ld_lucivy::Term;
+/// use ld_lucivy::Index;
+/// use ld_lucivy::IndexWriter;
 ///
-/// fn main() -> lucivy::Result<()> {
+/// fn main() -> ld_lucivy::Result<()> {
 ///    let mut schema_builder = Schema::builder();
 ///    let title = schema_builder.add_text_field("title", TEXT);
 ///    let body = schema_builder.add_text_field("body", TEXT);

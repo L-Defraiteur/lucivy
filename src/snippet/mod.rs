@@ -12,12 +12,12 @@
 //! ## Example
 //!
 //! ```rust
-//! # use lucivy::query::QueryParser;
-//! # use lucivy::schema::{Schema, TEXT};
-//! # use lucivy::{doc, Index};
-//! use lucivy::snippet::SnippetGenerator;
+//! # use ld_lucivy::query::QueryParser;
+//! # use ld_lucivy::schema::{Schema, TEXT};
+//! # use ld_lucivy::{doc, Index};
+//! use ld_lucivy::snippet::SnippetGenerator;
 //!
-//! # fn main() -> lucivy::Result<()> {
+//! # fn main() -> ld_lucivy::Result<()> {
 //! #    let mut schema_builder = Schema::builder();
 //! #    let text_field = schema_builder.add_text_field("text", TEXT);
 //! #    let schema = schema_builder.build();
@@ -338,12 +338,12 @@ fn is_sorted(mut it: impl Iterator<Item = usize>) -> bool {
 /// # Example
 ///
 /// ```rust
-/// # use lucivy::query::QueryParser;
-/// # use lucivy::schema::{Schema, TEXT};
-/// # use lucivy::{doc, Index};
-/// use lucivy::snippet::SnippetGenerator;
+/// # use ld_lucivy::query::QueryParser;
+/// # use ld_lucivy::schema::{Schema, TEXT};
+/// # use ld_lucivy::{doc, Index};
+/// use ld_lucivy::snippet::SnippetGenerator;
 ///
-/// # fn main() -> lucivy::Result<()> {
+/// # fn main() -> ld_lucivy::Result<()> {
 /// #    let mut schema_builder = Schema::builder();
 /// #    let text_field = schema_builder.add_text_field("text", TEXT);
 /// #    let schema = schema_builder.build();

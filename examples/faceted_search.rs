@@ -14,12 +14,12 @@
 //
 // ---
 // Importing lucivy...
-use lucivy::collector::FacetCollector;
-use lucivy::query::{AllQuery, TermQuery};
-use lucivy::schema::*;
-use lucivy::{doc, Index, IndexWriter};
+use ld_lucivy::collector::FacetCollector;
+use ld_lucivy::query::{AllQuery, TermQuery};
+use ld_lucivy::schema::*;
+use ld_lucivy::{doc, Index, IndexWriter};
 
-fn main() -> lucivy::Result<()> {
+fn main() -> ld_lucivy::Result<()> {
     // Let's create a temporary directory for the sake of this example
     let mut schema_builder = Schema::builder();
 

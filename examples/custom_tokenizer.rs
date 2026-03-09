@@ -2,13 +2,13 @@
 //
 // In this example, we'll see how to define a tokenizer
 // by creating a custom `NgramTokenizer`.
-use lucivy::collector::TopDocs;
-use lucivy::query::QueryParser;
-use lucivy::schema::*;
-use lucivy::tokenizer::NgramTokenizer;
-use lucivy::{doc, Index, IndexWriter};
+use ld_lucivy::collector::TopDocs;
+use ld_lucivy::query::QueryParser;
+use ld_lucivy::schema::*;
+use ld_lucivy::tokenizer::NgramTokenizer;
+use ld_lucivy::{doc, Index, IndexWriter};
 
-fn main() -> lucivy::Result<()> {
+fn main() -> ld_lucivy::Result<()> {
     // # Defining the schema
     //
     // The Lucivy index requires a very strict schema.

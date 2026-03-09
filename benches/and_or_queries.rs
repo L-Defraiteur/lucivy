@@ -20,11 +20,11 @@ use binggan::{black_box, BenchGroup, BenchRunner};
 use rand::prelude::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-use lucivy::collector::sort_key::SortByStaticFastValue;
-use lucivy::collector::{Collector, Count, TopDocs};
-use lucivy::query::{Query, QueryParser};
-use lucivy::schema::{Schema, FAST, TEXT};
-use lucivy::{doc, Index, Order, ReloadPolicy, Searcher};
+use ld_lucivy::collector::sort_key::SortByStaticFastValue;
+use ld_lucivy::collector::{Collector, Count, TopDocs};
+use ld_lucivy::query::{Query, QueryParser};
+use ld_lucivy::schema::{Schema, FAST, TEXT};
+use ld_lucivy::{doc, Index, Order, ReloadPolicy, Searcher};
 
 #[derive(Clone)]
 struct BenchIndex {
