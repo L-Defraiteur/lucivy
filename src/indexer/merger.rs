@@ -633,7 +633,7 @@ mod tests {
                 .searchable_segment_ids()
                 .expect("Searchable segments failed.");
             let mut index_writer: IndexWriter = index.writer_for_tests()?;
-            index_writer.merge(&segment_ids).wait()?;
+            index_writer.merge(&segment_ids)?;
             index_writer.wait_merging_threads()?;
         }
         {
@@ -890,7 +890,7 @@ mod tests {
         {
             // merging the segments
             let segment_ids = index.searchable_segment_ids()?;
-            index_writer.merge(&segment_ids).wait()?;
+            index_writer.merge(&segment_ids)?;
             reader.reload()?;
             let searcher = reader.searcher();
             assert_eq!(searcher.segment_readers().len(), 1);
@@ -983,7 +983,7 @@ mod tests {
         {
             // Test merging a single segment in order to remove deletes.
             let segment_ids = index.searchable_segment_ids()?;
-            index_writer.merge(&segment_ids).wait()?;
+            index_writer.merge(&segment_ids)?;
             reader.reload()?;
 
             let searcher = reader.searcher();
@@ -1151,7 +1151,6 @@ mod tests {
             let mut index_writer: IndexWriter = index.writer_for_tests().unwrap();
             index_writer
                 .merge(&segment_ids)
-                .wait()
                 .expect("Merging failed");
             index_writer.wait_merging_threads().unwrap();
             reader.reload().unwrap();
@@ -1207,7 +1206,7 @@ mod tests {
         let segment_ids = index
             .searchable_segment_ids()
             .expect("Searchable segments failed.");
-        index_writer.merge(&segment_ids).wait()?;
+        index_writer.merge(&segment_ids)?;
         reader.reload()?;
         // commit has not been called yet. The document should still be
         // there.
@@ -1232,7 +1231,7 @@ mod tests {
             index_writer.commit()?;
             index_writer.delete_term(Term::from_field_u64(int_field, 1));
             let segment_ids = index.searchable_segment_ids()?;
-            index_writer.merge(&segment_ids).wait()?;
+            index_writer.merge(&segment_ids)?;
 
             // assert delete has not been committed
             reader.reload()?;
@@ -1322,7 +1321,7 @@ mod tests {
             let mut segment_ids = index.searchable_segment_ids()?;
             segment_ids.sort();
             let mut index_writer: IndexWriter = index.writer_for_tests()?;
-            index_writer.merge(&segment_ids).wait()?;
+            index_writer.merge(&segment_ids)?;
             index_writer.wait_merging_threads()?;
         }
         let reader = index.reader()?;
@@ -1437,7 +1436,7 @@ mod tests {
         {
             let segment_ids = index.searchable_segment_ids()?;
             let mut index_writer: IndexWriter = index.writer_for_tests()?;
-            index_writer.merge(&segment_ids).wait()?;
+            index_writer.merge(&segment_ids)?;
             index_writer.wait_merging_threads()?;
         }
         reader.reload()?;
@@ -1551,7 +1550,7 @@ mod tests {
             .iter()
             .map(|reader| reader.segment_id())
             .collect();
-        writer.merge(&segment_ids[..]).wait()?;
+        writer.merge(&segment_ids[..])?;
 
         reader.reload()?;
         let searcher = reader.searcher();

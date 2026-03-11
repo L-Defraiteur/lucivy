@@ -375,7 +375,7 @@ mod tests {
                 .collect();
             test_block_wand_aux(&term_query, &searcher)?;
         }
-        writer.merge(&segment_ids[..]).wait().unwrap();
+        writer.merge(&segment_ids[..]).unwrap();
         {
             reader.reload()?;
             let searcher = reader.searcher();

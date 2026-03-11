@@ -550,7 +550,7 @@ mod tests {
                 .expect("Searchable segments failed.");
             if segment_ids.len() > 1 {
                 let mut index_writer: IndexWriter = index.writer_for_tests()?;
-                index_writer.merge(&segment_ids).wait()?;
+                index_writer.merge(&segment_ids)?;
                 index_writer.wait_merging_threads()?;
             }
         }
@@ -664,7 +664,7 @@ mod tests {
                 .searchable_segment_ids()
                 .expect("Searchable segments failed.");
             let mut index_writer: IndexWriter = index.writer_for_tests()?;
-            index_writer.merge(&segment_ids).wait()?;
+            index_writer.merge(&segment_ids)?;
             index_writer.wait_merging_threads()?;
         }
 

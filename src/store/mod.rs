@@ -296,7 +296,7 @@ pub(crate) mod tests {
                 .searchable_segment_ids()
                 .expect("Searchable segments failed.");
             let mut index_writer: IndexWriter = index.writer_for_tests().unwrap();
-            assert!(index_writer.merge(&segment_ids).wait().is_ok());
+            assert!(index_writer.merge(&segment_ids).is_ok());
             assert!(index_writer.wait_merging_threads().is_ok());
         }
 
@@ -346,7 +346,7 @@ pub(crate) mod tests {
         {
             let segment_ids = index.searchable_segment_ids()?;
             let mut index_writer: IndexWriter = index.writer_for_tests()?;
-            index_writer.merge(&segment_ids).wait()?;
+            index_writer.merge(&segment_ids)?;
             index_writer.wait_merging_threads()?;
         }
 

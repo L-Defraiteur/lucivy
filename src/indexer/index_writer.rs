@@ -1,14 +1,15 @@
 use std::ops::Range;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::thread;
-use std::thread::JoinHandle;
 
 use common::BitSet;
 use smallvec::smallvec;
 
+use super::indexer_actor::{IndexerActor, IndexerMsg};
 use super::operation::{AddOperation, UserOperation};
 use super::segment_updater::SegmentUpdater;
-use super::{AddBatch, FlushReceiver, FlushSender, PreparedCommit, WorkerMessage, WorkerReceiver, WorkerSender};
+use super::{AddBatch, PreparedCommit};
+use crate::actor::{mailbox, reply, ActorRef, Scheduler, SchedulerHandle};
 use crate::directory::{DirectoryLock, GarbageCollectionResult, TerminatingWrite};
 use crate::error::LucivyError;
 use crate::fastfield::write_alive_bitset;
@@ -22,7 +23,7 @@ use crate::indexer::{MergePolicy, SegmentEntry, SegmentWriter};
 use crate::query::{EnableScoring, Query, TermQuery};
 use crate::schema::document::Document;
 use crate::schema::{IndexRecordOption, LucivyDocument, Term};
-use crate::{FutureResult, Opstamp};
+use crate::Opstamp;
 
 // Size of the margin for the `memory_arena`. A segment is closed when the remaining memory
 // in the `memory_arena` goes below MARGIN_IN_BYTES.
@@ -77,17 +78,21 @@ pub struct IndexWriter<D: Document = LucivyDocument> {
 
     options: IndexWriterOptions,
 
-    workers_join_handle: Vec<JoinHandle<crate::Result<()>>>,
+    /// ActorRef for each indexer worker.
+    worker_refs: Vec<ActorRef<IndexerMsg<D>>>,
+
+    /// Round-robin counter for distributing docs to workers.
+    next_worker: Arc<AtomicUsize>,
+
+    /// Scheduler managing the indexer actor threads.
+    scheduler: Arc<Scheduler>,
+
+    /// Handle to the scheduler threads. Drop = shutdown + join.
+    scheduler_handle: Option<SchedulerHandle>,
 
     index_writer_status: IndexWriterStatus<D>,
-    operation_sender: WorkerSender<D>,
-
-    /// Per-worker flush channels — one per worker thread.
-    worker_flush_senders: Vec<FlushSender>,
 
     segment_updater: SegmentUpdater,
-
-    worker_id: usize,
 
     delete_queue: DeleteQueue,
 
@@ -184,7 +189,7 @@ pub fn advance_deletes(
 
 /// Finalize a segment: flush to disk, apply deletes, register with segment_updater.
 /// Does nothing if the segment is empty (max_doc == 0).
-fn finalize_segment(
+pub(super) fn finalize_segment(
     segment: Segment,
     segment_writer: SegmentWriter,
     segment_updater: &SegmentUpdater,
@@ -201,158 +206,11 @@ fn finalize_segment(
     let meta = segment_with_max_doc.meta().clone();
     meta.untrack_temp_docstore();
     let segment_entry = SegmentEntry::new(meta, delete_cursor.clone(), alive_bitset_opt);
-    segment_updater.schedule_add_segment(segment_entry).wait()?;
+    segment_updater.schedule_add_segment(segment_entry)?;
     Ok(())
 }
 
-/// Permanent worker loop. Receives documents from the shared doc channel and flush
-/// commands from a dedicated per-worker flush channel. Uses `crossbeam::select!` to
-/// listen on both. The worker stays alive across commits — only `Shutdown` or channel
-/// closure exits the loop.
-fn worker_loop<D: Document>(
-    doc_receiver: WorkerReceiver<D>,
-    flush_receiver: FlushReceiver,
-    segment_updater: SegmentUpdater,
-    index: Index,
-    mem_budget: usize,
-    mut delete_cursor: DeleteCursor,
-    bomb: crate::indexer::index_writer_status::IndexWriterBomb<D>,
-) -> crate::Result<()> {
-    use crossbeam_channel as channel;
-
-    loop {
-        // Outer loop: wait for a doc batch or a flush (when idle, no segment in progress).
-        channel::select! {
-            recv(doc_receiver) -> msg => {
-                match msg {
-                    Ok(WorkerMessage::Docs(batch)) => {
-                        if batch.is_empty() { continue; }
-                        delete_cursor.skip_to(batch[0].opstamp);
-
-                        let segment = index.new_segment();
-                        let mut segment_writer =
-                            SegmentWriter::for_segment(mem_budget, segment.clone())?;
-
-                        for doc in batch {
-                            segment_writer.add_document(doc)?;
-                        }
-
-                        // Inner loop: keep indexing until flush, shutdown, or memory budget hit.
-                        let flush_done = loop {
-                            if segment_writer.mem_usage() >= mem_budget - MARGIN_IN_BYTES {
-                                info!(
-                                    "Buffer limit reached, flushing segment with maxdoc={}.",
-                                    segment_writer.max_doc()
-                                );
-                                break None;
-                            }
-
-                            channel::select! {
-                                recv(doc_receiver) -> msg => {
-                                    match msg {
-                                        Ok(WorkerMessage::Docs(batch)) => {
-                                            if batch.is_empty() { continue; }
-                                            for doc in batch {
-                                                segment_writer.add_document(doc)?;
-                                            }
-                                        }
-                                        Ok(WorkerMessage::Shutdown) => {
-                                            if segment_updater.is_alive() {
-                                                finalize_segment(segment, segment_writer, &segment_updater, &mut delete_cursor)?;
-                                            }
-                                            bomb.defuse();
-                                            return Ok(());
-                                        }
-                                        Err(_) => {
-                                            if segment_updater.is_alive() {
-                                                finalize_segment(segment, segment_writer, &segment_updater, &mut delete_cursor)?;
-                                            }
-                                            bomb.defuse();
-                                            return Ok(());
-                                        }
-                                    }
-                                }
-                                recv(flush_receiver) -> msg => {
-                                    match msg {
-                                        Ok(done_tx) => {
-                                            // Drain all remaining docs before flushing.
-                                            // crossbeam::select! picks randomly when both channels
-                                            // have messages, so the flush can arrive before all
-                                            // docs are consumed. We must drain to avoid data loss.
-                                            while let Ok(WorkerMessage::Docs(batch)) = doc_receiver.try_recv() {
-                                                if batch.is_empty() { continue; }
-                                                for doc in batch {
-                                                    segment_writer.add_document(doc)?;
-                                                }
-                                            }
-                                            break Some(done_tx);
-                                        }
-                                        Err(_) => {
-                                            if segment_updater.is_alive() {
-                                                finalize_segment(segment, segment_writer, &segment_updater, &mut delete_cursor)?;
-                                            }
-                                            bomb.defuse();
-                                            return Ok(());
-                                        }
-                                    }
-                                }
-                            }
-                        };
-
-                        if segment_updater.is_alive() {
-                            finalize_segment(segment, segment_writer, &segment_updater, &mut delete_cursor)?;
-                        }
-
-                        if let Some(done_tx) = flush_done {
-                            let _ = done_tx.send(Ok(()));
-                        }
-                    }
-                    Ok(WorkerMessage::Shutdown) => {
-                        bomb.defuse();
-                        return Ok(());
-                    }
-                    Err(_) => {
-                        bomb.defuse();
-                        return Ok(());
-                    }
-                }
-            }
-            recv(flush_receiver) -> msg => {
-                match msg {
-                    Ok(done_tx) => {
-                        // No segment in progress, but docs may be pending in the channel
-                        // due to select! random pick. Drain and index them if any.
-                        let mut drained = Vec::new();
-                        while let Ok(WorkerMessage::Docs(batch)) = doc_receiver.try_recv() {
-                            if !batch.is_empty() {
-                                drained.push(batch);
-                            }
-                        }
-                        if !drained.is_empty() {
-                            delete_cursor.skip_to(drained[0][0].opstamp);
-                            let segment = index.new_segment();
-                            let mut segment_writer =
-                                SegmentWriter::for_segment(mem_budget, segment.clone())?;
-                            for batch in drained {
-                                for doc in batch {
-                                    segment_writer.add_document(doc)?;
-                                }
-                            }
-                            if segment_updater.is_alive() {
-                                finalize_segment(segment, segment_writer, &segment_updater, &mut delete_cursor)?;
-                            }
-                        }
-                        let _ = done_tx.send(Ok(()));
-                    }
-                    Err(_) => {
-                        bomb.defuse();
-                        return Ok(());
-                    }
-                }
-            }
-        }
-    }
-}
+// worker_loop removed — replaced by IndexerActor (see indexer_actor.rs)
 
 /// `doc_opstamps` is required to be non-empty.
 fn apply_deletes(
@@ -429,44 +287,53 @@ impl<D: Document> IndexWriter<D> {
             return Err(LucivyError::InvalidArgument(err_msg));
         }
 
-        let (worker_sender, worker_receiver) =
-            crossbeam_channel::bounded(PIPELINE_MAX_SIZE_IN_DOCS);
-
         let delete_queue = DeleteQueue::default();
 
         let current_opstamp = index.load_metas()?.opstamp;
 
         let stamper = Stamper::new(current_opstamp);
 
+        let index_writer_status = IndexWriterStatus::new();
+        let scheduler = Arc::new(Scheduler::new(options.num_worker_threads));
+
         let segment_updater = SegmentUpdater::create(
             index.clone(),
             stamper.clone(),
             &delete_queue.cursor(),
-            options.num_merge_threads,
+            Arc::clone(&scheduler),
         )?;
 
-        let mut index_writer = Self {
-            _directory_lock: Some(directory_lock),
+        let mut worker_refs = Vec::with_capacity(options.num_worker_threads);
+        for _ in 0..options.num_worker_threads {
+            let (mbox, mut aref) = mailbox(PIPELINE_MAX_SIZE_IN_DOCS);
+            let bomb = index_writer_status.create_bomb();
+            let actor = IndexerActor::new(
+                segment_updater.clone(),
+                index.clone(),
+                options.memory_budget_per_thread,
+                delete_queue.cursor(),
+                bomb,
+            );
+            scheduler.spawn(actor, mbox, &mut aref, PIPELINE_MAX_SIZE_IN_DOCS);
+            worker_refs.push(aref);
+        }
 
+        let scheduler_handle = Some(scheduler.start());
+
+        Ok(Self {
+            _directory_lock: Some(directory_lock),
             options: options.clone(),
             index: index.clone(),
-            index_writer_status: IndexWriterStatus::from(worker_receiver),
-            operation_sender: worker_sender,
-            worker_flush_senders: Vec::new(),
-
+            worker_refs,
+            next_worker: Arc::new(AtomicUsize::new(0)),
+            scheduler,
+            scheduler_handle,
+            index_writer_status,
             segment_updater,
-
-            workers_join_handle: vec![],
-
             delete_queue,
-
             committed_opstamp: current_opstamp,
             stamper,
-
-            worker_id: 0,
-        };
-        index_writer.start_workers()?;
-        Ok(index_writer)
+        })
     }
 
     /// Accessor to the index.
@@ -477,19 +344,9 @@ impl<D: Document> IndexWriter<D> {
     /// If there are some merging threads, blocks until they all finish their work and
     /// then drop the `IndexWriter`.
     pub fn wait_merging_threads(mut self) -> crate::Result<()> {
-        // Send Shutdown to each worker.
-        for _ in 0..self.workers_join_handle.len() {
-            let _ = self.operation_sender.send(WorkerMessage::Shutdown);
-        }
-
-        let former_workers_handles = std::mem::take(&mut self.workers_join_handle);
-        for join_handle in former_workers_handles {
-            join_handle
-                .join()
-                .map_err(|_| error_in_index_worker_thread("Worker thread panicked."))?
-                .map_err(|_| error_in_index_worker_thread("Worker thread failed."))?;
-        }
-
+        // Les merges sont maintenant synchrones (inline dans le handler),
+        // donc l'inventaire devrait déjà être vide. On attend quand même
+        // par sécurité.
         let result = self
             .segment_updater
             .wait_merging_thread()
@@ -498,6 +355,12 @@ impl<D: Document> IndexWriter<D> {
         if let Err(ref e) = result {
             error!("Some merging thread failed {e:?}");
         }
+
+        // Shutdown les workers et le scheduler.
+        for worker in &self.worker_refs {
+            let _ = worker.send(IndexerMsg::Shutdown);
+        }
+        self.scheduler_handle.take();
 
         result
     }
@@ -508,7 +371,6 @@ impl<D: Document> IndexWriter<D> {
         let segment_entry = SegmentEntry::new(segment_meta, delete_cursor, None);
         self.segment_updater
             .schedule_add_segment(segment_entry)
-            .wait()
     }
 
     /// Creates a new segment.
@@ -523,48 +385,6 @@ impl<D: Document> IndexWriter<D> {
         self.index.new_segment()
     }
 
-    fn operation_receiver(&self) -> crate::Result<WorkerReceiver<D>> {
-        self.index_writer_status
-            .operation_receiver()
-            .ok_or_else(|| {
-                crate::LucivyError::ErrorInThread(
-                    "The index writer was killed. It can happen if an indexing worker encountered \
-                     an Io error for instance."
-                        .to_string(),
-                )
-            })
-    }
-
-    /// Spawns a permanent worker thread for indexing.
-    /// The thread stays alive across commits, processing `WorkerMessage`s.
-    fn add_indexing_worker(&mut self) -> crate::Result<()> {
-        let doc_receiver = self.operation_receiver()?;
-        let (flush_tx, flush_rx) = crossbeam_channel::bounded(1);
-        let bomb = self.index_writer_status.create_bomb();
-        let segment_updater = self.segment_updater.clone();
-        let delete_cursor = self.delete_queue.cursor();
-        let mem_budget = self.options.memory_budget_per_thread;
-        let index = self.index.clone();
-
-        let join_handle: JoinHandle<crate::Result<()>> = thread::Builder::new()
-            .name(format!("thrd-lucivy-index{}", self.worker_id))
-            .spawn(move || {
-                worker_loop(
-                    doc_receiver,
-                    flush_rx,
-                    segment_updater,
-                    index,
-                    mem_budget,
-                    delete_cursor,
-                    bomb,
-                )
-            })?;
-        self.worker_id += 1;
-        self.workers_join_handle.push(join_handle);
-        self.worker_flush_senders.push(flush_tx);
-        Ok(())
-    }
-
     /// Accessor to the merge policy.
     pub fn get_merge_policy(&self) -> Arc<dyn MergePolicy> {
         self.segment_updater.get_merge_policy()
@@ -575,15 +395,8 @@ impl<D: Document> IndexWriter<D> {
         self.segment_updater.set_merge_policy(merge_policy);
     }
 
-    fn start_workers(&mut self) -> crate::Result<()> {
-        for _ in 0..self.options.num_worker_threads {
-            self.add_indexing_worker()?;
-        }
-        Ok(())
-    }
-
     /// Detects and removes the files that are not used by the index anymore.
-    pub fn garbage_collect_files(&self) -> FutureResult<GarbageCollectionResult> {
+    pub fn garbage_collect_files(&self) -> crate::Result<GarbageCollectionResult> {
         self.segment_updater.schedule_garbage_collect()
     }
 
@@ -636,10 +449,9 @@ impl<D: Document> IndexWriter<D> {
     /// If all segments are empty no new segment will be created.
     ///
     /// `segment_ids` is required to be non-empty.
-    pub fn merge(&mut self, segment_ids: &[SegmentId]) -> FutureResult<Option<SegmentMeta>> {
+    pub fn merge(&mut self, segment_ids: &[SegmentId]) -> crate::Result<Option<SegmentMeta>> {
         let merge_operation = self.segment_updater.make_merge_operation(segment_ids);
-        let segment_updater = self.segment_updater.clone();
-        segment_updater.start_merge(merge_operation)
+        self.segment_updater.start_merge(merge_operation)
     }
 
     /// Rollback to the last commit
@@ -653,21 +465,12 @@ impl<D: Document> IndexWriter<D> {
     pub fn rollback(&mut self) -> crate::Result<Opstamp> {
         info!("Rolling back to opstamp {}", self.committed_opstamp);
 
-        // First, flush all workers so they finish any in-progress segments.
+        // Flush all workers so they finish any in-progress segments.
         // We ignore the results — those segments will be discarded anyway.
-        for flush_sender in &self.worker_flush_senders {
-            let (tx, _rx) = oneshot::channel();
-            let _ = flush_sender.send(tx);
-        }
-        // Wait for flush responses (ignore errors — workers may already be dead).
-        for flush_sender in &self.worker_flush_senders {
-            // Flush channel is bounded(1), sending a second item blocks until the
-            // first is consumed. We use this as a synchronization: send a dummy
-            // flush and wait for it to be consumed, meaning the previous flush completed.
-            let (tx, rx) = oneshot::channel();
-            if flush_sender.send(tx).is_ok() {
-                let _ = rx.recv();
-            }
+        for worker in &self.worker_refs {
+            let (reply_tx, reply_rx) = reply();
+            let _ = worker.send(IndexerMsg::Flush(reply_tx));
+            let _ = reply_rx.wait_blocking();
         }
 
         // Now all workers are idle. Kill the segment updater.
@@ -708,57 +511,24 @@ impl<D: Document> IndexWriter<D> {
     pub fn prepare_commit(&mut self) -> crate::Result<PreparedCommit<'_, D>> {
         info!("Preparing commit");
 
-        // Send Flush to each worker via its dedicated flush channel.
-        let mut flush_receivers = Vec::new();
-        for flush_sender in &self.worker_flush_senders {
-            let (tx, rx) = oneshot::channel();
-            if flush_sender.send(tx).is_err() {
-                // Worker thread died — join to get the real error.
-                return Err(self.harvest_worker_error());
-            }
-            flush_receivers.push(rx);
+        // Send Flush to each worker via its actor mailbox.
+        let mut receivers = Vec::new();
+        for worker in &self.worker_refs {
+            let (reply_tx, reply_rx) = reply();
+            worker.send(IndexerMsg::Flush(reply_tx))
+                .map_err(|_| error_in_index_worker_thread("Worker died"))?;
+            receivers.push(reply_rx);
         }
 
         // Wait for all workers to finish flushing their current segments.
-        for rx in flush_receivers {
-            match rx.recv() {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    return Err(LucivyError::ErrorInThread(format!(
-                        "Worker flush failed: {e}"
-                    )));
-                }
-                Err(_) => {
-                    // Worker thread died — join to get the real error.
-                    return Err(self.harvest_worker_error());
-                }
-            }
+        for rx in receivers {
+            rx.wait_blocking()?;
         }
 
         let commit_opstamp = self.stamper.stamp();
         let prepared_commit = PreparedCommit::new(self, commit_opstamp);
         info!("Prepared commit {commit_opstamp}");
         Ok(prepared_commit)
-    }
-
-    /// Send Shutdown to all workers, join them, and return the first error found.
-    fn harvest_worker_error(&mut self) -> LucivyError {
-        // Send Shutdown so live workers unblock from the doc channel.
-        for _ in 0..self.workers_join_handle.len() {
-            let _ = self.operation_sender.send(WorkerMessage::Shutdown);
-        }
-        for handle in self.workers_join_handle.drain(..) {
-            match handle.join() {
-                Ok(Err(e)) => return e,
-                Err(e) => {
-                    return LucivyError::ErrorInThread(format!("{e:?}"));
-                }
-                Ok(Ok(())) => {}
-            }
-        }
-        error_in_index_worker_thread(
-            "A worker thread terminated unexpectedly but reported no error",
-        )
     }
 
     /// Commits all of the pending changes
@@ -909,29 +679,25 @@ impl<D: Document> IndexWriter<D> {
     }
 
     fn send_add_documents_batch(&self, add_ops: AddBatch<D>) -> crate::Result<()> {
-        if self.index_writer_status.is_alive()
-            && self
-                .operation_sender
-                .send(WorkerMessage::Docs(add_ops))
-                .is_ok()
-        {
-            Ok(())
-        } else {
-            Err(error_in_index_worker_thread("An index writer was killed."))
+        if !self.index_writer_status.is_alive() {
+            return Err(error_in_index_worker_thread("An index writer was killed."));
         }
+        let idx = self.next_worker.fetch_add(1, Ordering::Relaxed) % self.worker_refs.len();
+        self.worker_refs[idx]
+            .send(IndexerMsg::Docs(add_ops))
+            .map_err(|_| error_in_index_worker_thread("An index writer was killed."))
     }
 }
 
 impl<D: Document> Drop for IndexWriter<D> {
     fn drop(&mut self) {
         self.segment_updater.kill();
-        // Send Shutdown to each worker so they exit cleanly.
-        for _ in 0..self.workers_join_handle.len() {
-            let _ = self.operation_sender.send(WorkerMessage::Shutdown);
+        // Send Shutdown to each worker actor so they exit cleanly.
+        for worker in &self.worker_refs {
+            let _ = worker.send(IndexerMsg::Shutdown);
         }
-        for work in self.workers_join_handle.drain(..) {
-            let _ = work.join();
-        }
+        // SchedulerHandle::drop() joins the threads automatically.
+        self.scheduler_handle.take();
     }
 }
 
@@ -1583,7 +1349,6 @@ mod tests {
         index_writer.commit().unwrap();
         index_writer
             .merge(&[segment_reader.segment_id()])
-            .wait()
             .unwrap();
         index_reader.reload().unwrap();
         let searcher = index_reader.searcher();
@@ -1878,7 +1643,7 @@ mod tests {
                         .expect("Searchable segments failed.");
                     segment_ids.sort();
                     if segment_ids.len() >= 2 {
-                        index_writer.merge(&segment_ids).wait().unwrap();
+                        index_writer.merge(&segment_ids).unwrap();
                         assert!(index_writer.segment_updater().wait_merging_thread().is_ok());
                     }
                 }
@@ -1895,7 +1660,7 @@ mod tests {
                 .searchable_segment_ids()
                 .expect("Searchable segments failed.");
             if segment_ids.len() >= 2 {
-                index_writer.merge(&segment_ids).wait().unwrap();
+                index_writer.merge(&segment_ids).unwrap();
                 assert!(index_writer.wait_merging_threads().is_ok());
             }
         }
@@ -2562,7 +2327,7 @@ mod tests {
             let segment_ids = index
                 .searchable_segment_ids()
                 .expect("Searchable segments failed.");
-            index_writer.merge(&segment_ids).wait().unwrap();
+            index_writer.merge(&segment_ids).unwrap();
             assert!(index_writer.wait_merging_threads().is_ok());
         }
         let searcher = index.reader()?.searcher();
@@ -2605,7 +2370,7 @@ mod tests {
             let segment_ids = index
                 .searchable_segment_ids()
                 .expect("Searchable segments failed.");
-            index_writer.merge(&segment_ids).wait().unwrap();
+            index_writer.merge(&segment_ids).unwrap();
             assert!(index_writer.wait_merging_threads().is_ok());
         }
         let searcher = index.reader()?.searcher();

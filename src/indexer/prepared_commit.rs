@@ -1,6 +1,6 @@
 use super::IndexWriter;
 use crate::schema::document::Document;
-use crate::{FutureResult, Opstamp, LucivyDocument};
+use crate::{Opstamp, LucivyDocument};
 
 /// A prepared commit
 pub struct PreparedCommit<'a, D: Document = LucivyDocument> {
@@ -34,17 +34,9 @@ impl<'a, D: Document> PreparedCommit<'a, D> {
     }
 
     /// Proceeds to commit.
-    /// See `.commit_future()`.
-    pub fn commit(self) -> crate::Result<Opstamp> {
-        self.commit_future().wait()
-    }
-
-    /// Proceeds to commit.
     ///
-    /// Unfortunately, contrary to what `PrepareCommit` may suggests,
-    /// this operation is not at all really light.
-    /// At this point deletes have not been flushed yet.
-    pub fn commit_future(self) -> FutureResult<Opstamp> {
+    /// This flushes deletes, saves metas, and runs garbage collection.
+    pub fn commit(self) -> crate::Result<Opstamp> {
         info!("committing {}", self.opstamp);
         self.index_writer
             .segment_updater()

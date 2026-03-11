@@ -78,7 +78,7 @@ mod tests {
         {
             let segment_ids = index.searchable_segment_ids()?;
             let mut index_writer: IndexWriter = index.writer_for_tests()?;
-            index_writer.merge(&segment_ids).wait()?;
+            index_writer.merge(&segment_ids)?;
             index_writer.wait_merging_threads()?;
         }
         Ok(index)

@@ -13,6 +13,7 @@ mod doc_opstamp_mapping;
 mod flat_map_with_buffer;
 pub(crate) mod index_writer;
 pub(crate) mod index_writer_status;
+pub(crate) mod indexer_actor;
 pub(crate) mod indexing_term;
 mod log_merge_policy;
 mod merge_index_test;
@@ -26,11 +27,11 @@ mod segment_manager;
 mod segment_register;
 pub(crate) mod segment_serializer;
 pub(crate) mod segment_updater;
+pub(crate) mod segment_updater_actor;
 pub(crate) mod segment_writer;
 pub(crate) mod single_segment_index_writer;
 mod stamper;
 
-use crossbeam_channel as channel;
 use smallvec::SmallVec;
 
 pub use self::index_writer::{advance_deletes, IndexWriter, IndexWriterOptions};
@@ -54,24 +55,7 @@ pub type DefaultMergePolicy = LogMergePolicy;
 // - all docs in the operation will happen on the same segment and continuous doc_ids.
 // - all operations in the group are committed at the same time, making the group
 // atomic.
-type AddBatch<D> = SmallVec<[AddOperation<D>; 4]>;
-
-use crate::schema::document::Document;
-
-/// Messages sent to permanent indexing worker threads via the shared doc channel.
-pub(crate) enum WorkerMessage<D: Document> {
-    /// Batch of documents to index.
-    Docs(AddBatch<D>),
-    /// Shutdown: the worker must finalize and exit its loop.
-    Shutdown,
-}
-
-type WorkerSender<D> = channel::Sender<WorkerMessage<D>>;
-type WorkerReceiver<D> = channel::Receiver<WorkerMessage<D>>;
-
-/// Per-worker flush command: carries a oneshot sender for completion notification.
-pub(crate) type FlushSender = channel::Sender<oneshot::Sender<crate::Result<()>>>;
-pub(crate) type FlushReceiver = channel::Receiver<oneshot::Sender<crate::Result<()>>>;
+pub(crate) type AddBatch<D> = SmallVec<[AddOperation<D>; 4]>;
 
 #[cfg(feature = "mmap")]
 #[cfg(test)]

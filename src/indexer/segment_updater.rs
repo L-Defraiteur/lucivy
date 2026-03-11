@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::borrow::BorrowMut;
 use std::collections::HashSet;
 use std::io::Write;
@@ -7,26 +6,25 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
-use rayon::{ThreadPool, ThreadPoolBuilder};
-
 use super::segment_manager::SegmentManager;
+use super::segment_updater_actor::{SegmentUpdaterActor, SegmentUpdaterMsg};
+use crate::actor::{mailbox, reply, ActorRef, Scheduler};
 use crate::core::META_FILEPATH;
 use crate::directory::{Directory, DirectoryClone, GarbageCollectionResult};
 use crate::fastfield::AliveBitSet;
 use crate::index::{Index, IndexMeta, IndexSettings, Segment, SegmentId, SegmentMeta};
 use crate::indexer::delete_queue::DeleteCursor;
-use crate::indexer::index_writer::advance_deletes;
 use crate::indexer::merge_operation::MergeOperationInventory;
 use crate::indexer::merger::IndexMerger;
-use crate::indexer::segment_manager::SegmentsStatus;
 use crate::indexer::stamper::Stamper;
 use crate::indexer::{
-    DefaultMergePolicy, MergeCandidate, MergeOperation, MergePolicy, SegmentEntry,
+    DefaultMergePolicy, MergeOperation, MergePolicy, SegmentEntry,
     SegmentSerializer,
 };
-use crate::{FutureResult, Opstamp, LucivyError};
+use crate::{Opstamp, LucivyError};
 
-const PANIC_CAUGHT: &str = "Panic caught in merge thread";
+/// Capacité de la mailbox du SegmentUpdaterActor.
+const SEGMENT_UPDATER_MAILBOX_CAPACITY: usize = 128;
 
 /// Save the index meta file.
 /// This operation is atomic:
@@ -52,39 +50,100 @@ pub(crate) fn save_metas(metas: &IndexMeta, directory: &dyn Directory) -> crate:
     Ok(())
 }
 
-// The segment update runner is in charge of processing all
-//  of the `SegmentUpdate`s.
-//
-// All this processing happens on a single thread
-// consuming a common queue.
-//
-// We voluntarily pass a merge_operation ref to guarantee that
-// the merge_operation is alive during the process
-#[derive(Clone)]
-pub(crate) struct SegmentUpdater(Arc<InnerSegmentUpdater>);
+/// État partagé entre le SegmentUpdater (facade) et le SegmentUpdaterActor.
+///
+/// Les champs utilisent de l'interior mutability (RwLock, AtomicBool)
+/// pour être accessibles depuis plusieurs threads.
+pub(crate) struct SegmentUpdaterShared {
+    pub(crate) active_index_meta: RwLock<Arc<IndexMeta>>,
+    pub(crate) index: Index,
+    pub(crate) segment_manager: SegmentManager,
+    pub(crate) merge_policy: RwLock<Arc<dyn MergePolicy>>,
+    pub(crate) killed: AtomicBool,
+    pub(crate) stamper: Stamper,
+    pub(crate) merge_operations: MergeOperationInventory,
+}
 
-impl Deref for SegmentUpdater {
-    type Target = InnerSegmentUpdater;
+impl SegmentUpdaterShared {
+    pub(crate) fn save_metas(
+        &self,
+        opstamp: Opstamp,
+        commit_message: Option<String>,
+    ) -> crate::Result<()> {
+        if self.is_alive() {
+            let index = &self.index;
+            let directory = index.directory();
+            let mut committed_segment_metas = self.segment_manager.committed_segment_metas();
+            committed_segment_metas.sort_by_key(|segment_meta| -(segment_meta.max_doc() as i32));
+            let index_meta = IndexMeta {
+                index_settings: index.settings().clone(),
+                segments: committed_segment_metas,
+                schema: index.schema(),
+                opstamp,
+                payload: commit_message,
+            };
+            save_metas(&index_meta, directory.box_clone().borrow_mut())?;
+            self.store_meta(&index_meta);
+        }
+        Ok(())
+    }
 
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.0
+    pub(crate) fn store_meta(&self, index_meta: &IndexMeta) {
+        *self.active_index_meta.write().unwrap() = Arc::new(index_meta.clone());
+    }
+
+    pub(crate) fn load_meta(&self) -> Arc<IndexMeta> {
+        self.active_index_meta.read().unwrap().clone()
+    }
+
+    pub fn is_alive(&self) -> bool {
+        !self.killed.load(Ordering::Acquire)
+    }
+
+    pub fn get_merge_policy(&self) -> Arc<dyn MergePolicy> {
+        self.merge_policy.read().unwrap().clone()
+    }
+
+    pub(crate) fn purge_deletes(&self, target_opstamp: Opstamp) -> crate::Result<Vec<SegmentEntry>> {
+        let mut segment_entries = self.segment_manager.segment_entries();
+        for segment_entry in &mut segment_entries {
+            let segment = self.index.segment(segment_entry.meta().clone());
+            crate::indexer::index_writer::advance_deletes(segment, segment_entry, target_opstamp)?;
+        }
+        Ok(segment_entries)
+    }
+
+    pub(crate) fn get_mergeable_segments(&self) -> (Vec<SegmentMeta>, Vec<SegmentMeta>) {
+        let merge_segment_ids: HashSet<SegmentId> = self.merge_operations.segment_in_merge();
+        self.segment_manager.get_mergeable_segments(&merge_segment_ids)
+    }
+
+    fn list_files(&self) -> HashSet<PathBuf> {
+        let mut files: HashSet<PathBuf> = self
+            .index
+            .list_all_segment_metas()
+            .into_iter()
+            .flat_map(|segment_meta| segment_meta.list_files())
+            .collect();
+        files.insert(META_FILEPATH.to_path_buf());
+        files
     }
 }
 
-fn garbage_collect_files(
-    segment_updater: SegmentUpdater,
+pub(crate) fn garbage_collect_files(
+    shared: &Arc<SegmentUpdaterShared>,
 ) -> crate::Result<GarbageCollectionResult> {
     info!("Running garbage collection");
-    let mut index = segment_updater.index.clone();
+    let shared_clone = shared.clone();
+    let mut index = shared.index.clone();
     index
         .directory_mut()
-        .garbage_collect(move || segment_updater.list_files())
+        .garbage_collect(move || shared_clone.list_files())
 }
 
 /// Merges a list of segments the list of segment givens in the `segment_entries`.
 /// This function happens in the calling thread and is computationally expensive.
-fn merge(
+pub(crate) fn merge(
     index: &Index,
     mut segment_entries: Vec<SegmentEntry>,
     target_opstamp: Opstamp,
@@ -97,13 +156,11 @@ fn merge(
         return Ok(None);
     }
 
-    // first we need to apply deletes to our segment.
     let merged_segment = index.new_segment();
 
-    // First we apply all of the delete to the merged segment, up to the target opstamp.
     for segment_entry in &mut segment_entries {
         let segment = index.segment(segment_entry.meta().clone());
-        advance_deletes(segment, segment_entry, target_opstamp)?;
+        crate::indexer::index_writer::advance_deletes(segment, segment_entry, target_opstamp)?;
     }
 
     let delete_cursor = segment_entries[0].delete_cursor().clone();
@@ -113,10 +170,8 @@ fn merge(
         .map(|segment_entry| index.segment(segment_entry.meta().clone()))
         .collect();
 
-    // An IndexMerger is like a "view" of our merged segments.
     let merger: IndexMerger = IndexMerger::open(index.schema(), &segments[..])?;
 
-    // ... we just serialize this index merger in our new segment to merge the segments.
     let segment_serializer = SegmentSerializer::for_segment(merged_segment.clone())?;
 
     let num_docs = merger.write(segment_serializer)?;
@@ -126,6 +181,172 @@ fn merge(
     let segment_meta = index.new_segment_meta(merged_segment_id, num_docs);
     Ok(Some(SegmentEntry::new(segment_meta, delete_cursor, None)))
 }
+
+// ---------------------------------------------------------------------------
+// SegmentUpdater — facade publique
+// ---------------------------------------------------------------------------
+
+/// Facade clonable pour interagir avec le SegmentUpdaterActor.
+///
+/// Remplace l'ancien `SegmentUpdater(Arc<InnerSegmentUpdater>)`.
+/// Les opérations séquentielles (add segment, commit, merge, GC) passent
+/// par l'acteur via des messages. Les opérations simples (is_alive, kill,
+/// get/set_merge_policy) accèdent directement à l'état partagé.
+#[derive(Clone)]
+pub(crate) struct SegmentUpdater {
+    shared: Arc<SegmentUpdaterShared>,
+    actor_ref: ActorRef<SegmentUpdaterMsg>,
+    scheduler: Arc<Scheduler>,
+}
+
+impl Deref for SegmentUpdater {
+    type Target = SegmentUpdaterShared;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.shared
+    }
+}
+
+impl SegmentUpdater {
+    pub fn create(
+        index: Index,
+        stamper: Stamper,
+        delete_cursor: &DeleteCursor,
+        scheduler: Arc<Scheduler>,
+    ) -> crate::Result<SegmentUpdater> {
+        let segments = index.searchable_segment_metas()?;
+        let segment_manager = SegmentManager::from_segments(segments, delete_cursor);
+        let index_meta = index.load_metas()?;
+
+        let shared = Arc::new(SegmentUpdaterShared {
+            active_index_meta: RwLock::new(Arc::new(index_meta)),
+            index,
+            segment_manager,
+            merge_policy: RwLock::new(Arc::new(DefaultMergePolicy::default())),
+            killed: AtomicBool::new(false),
+            stamper,
+            merge_operations: Default::default(),
+        });
+
+        let (mbox, mut aref) = mailbox(SEGMENT_UPDATER_MAILBOX_CAPACITY);
+        let actor = SegmentUpdaterActor::new(shared.clone());
+        scheduler.spawn(actor, mbox, &mut aref, SEGMENT_UPDATER_MAILBOX_CAPACITY);
+
+        Ok(SegmentUpdater {
+            shared,
+            actor_ref: aref,
+            scheduler,
+        })
+    }
+
+    pub fn set_merge_policy(&self, merge_policy: Box<dyn MergePolicy>) {
+        let arc_merge_policy = Arc::from(merge_policy);
+        *self.shared.merge_policy.write().unwrap() = arc_merge_policy;
+    }
+
+    pub fn schedule_add_segment(&self, segment_entry: SegmentEntry) -> crate::Result<()> {
+        if !self.is_alive() {
+            return Err(LucivyError::SystemError("Segment updater killed".to_string()));
+        }
+        let (reply_tx, reply_rx) = reply();
+        self.actor_ref
+            .send(SegmentUpdaterMsg::AddSegment {
+                entry: segment_entry,
+                reply: reply_tx,
+            })
+            .map_err(|_| {
+                LucivyError::SystemError("Segment updater actor died".to_string())
+            })?;
+        let scheduler = &self.scheduler;
+        reply_rx.wait_cooperative(|| scheduler.run_one_step())
+    }
+
+    /// Orders `SegmentManager` to remove all segments
+    pub(crate) fn remove_all_segments(&self) {
+        self.shared.segment_manager.remove_all_segments();
+    }
+
+    pub fn kill(&mut self) {
+        self.shared.killed.store(true, Ordering::Release);
+        let _ = self.actor_ref.send(SegmentUpdaterMsg::Kill);
+    }
+
+    pub(crate) fn schedule_commit(
+        &self,
+        opstamp: Opstamp,
+        payload: Option<String>,
+    ) -> crate::Result<Opstamp> {
+        if !self.is_alive() {
+            return Err(LucivyError::SystemError("Segment updater killed".to_string()));
+        }
+        let (reply_tx, reply_rx) = reply();
+        self.actor_ref
+            .send(SegmentUpdaterMsg::Commit {
+                opstamp,
+                payload,
+                reply: reply_tx,
+            })
+            .map_err(|_| {
+                LucivyError::SystemError("Segment updater actor died".to_string())
+            })?;
+        let scheduler = &self.scheduler;
+        reply_rx.wait_cooperative(|| scheduler.run_one_step())
+    }
+
+    pub fn schedule_garbage_collect(&self) -> crate::Result<GarbageCollectionResult> {
+        if !self.is_alive() {
+            return Err(LucivyError::SystemError("Segment updater killed".to_string()));
+        }
+        let (reply_tx, reply_rx) = reply();
+        self.actor_ref
+            .send(SegmentUpdaterMsg::GarbageCollect(reply_tx))
+            .map_err(|_| {
+                LucivyError::SystemError("Segment updater actor died".to_string())
+            })?;
+        let scheduler = &self.scheduler;
+        reply_rx.wait_cooperative(|| scheduler.run_one_step())
+    }
+
+    pub(crate) fn make_merge_operation(&self, segment_ids: &[SegmentId]) -> MergeOperation {
+        let commit_opstamp = self.load_meta().opstamp;
+        MergeOperation::new(&self.merge_operations, commit_opstamp, segment_ids.to_vec())
+    }
+
+    pub fn start_merge(
+        &self,
+        merge_operation: MergeOperation,
+    ) -> crate::Result<Option<SegmentMeta>> {
+        assert!(
+            !merge_operation.segment_ids().is_empty(),
+            "Segment_ids cannot be empty."
+        );
+
+        if !self.is_alive() {
+            return Err(LucivyError::SystemError("Segment updater killed".to_string()));
+        }
+        let (reply_tx, reply_rx) = reply();
+        self.actor_ref
+            .send(SegmentUpdaterMsg::StartMerge {
+                merge_operation,
+                reply: reply_tx,
+            })
+            .map_err(|_| {
+                LucivyError::SystemError("Segment updater actor died".to_string())
+            })?;
+        let scheduler = &self.scheduler;
+        reply_rx.wait_cooperative(|| scheduler.run_one_step())
+    }
+
+    pub fn wait_merging_thread(&self) -> crate::Result<()> {
+        self.merge_operations.wait_until_empty();
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public merge functions (unchanged)
+// ---------------------------------------------------------------------------
 
 /// Advanced: Merges a list of segments from different indices in a new index.
 ///
@@ -144,7 +365,6 @@ pub fn merge_indices<T: Into<Box<dyn Directory>>>(
     output_directory: T,
 ) -> crate::Result<Index> {
     if indices.is_empty() {
-        // If there are no indices to merge, there is no need to do anything.
         return Err(crate::LucivyError::InvalidArgument(
             "No indices given to merge".to_string(),
         ));
@@ -152,7 +372,6 @@ pub fn merge_indices<T: Into<Box<dyn Directory>>>(
 
     let target_settings = indices[0].settings().clone();
 
-    // let's check that all of the indices have the same index settings
     if indices
         .iter()
         .skip(1)
@@ -192,7 +411,6 @@ pub fn merge_filtered_segments<T: Into<Box<dyn Directory>>>(
     output_directory: T,
 ) -> crate::Result<Index> {
     if segments.is_empty() {
-        // If there are no indices to merge, there is no need to do anything.
         return Err(crate::LucivyError::InvalidArgument(
             "No segments given to merge".to_string(),
         ));
@@ -200,7 +418,6 @@ pub fn merge_filtered_segments<T: Into<Box<dyn Directory>>>(
 
     let target_schema = segments[0].schema();
 
-    // let's check that all of the indices have the same schema
     if segments
         .iter()
         .skip(1)
@@ -237,466 +454,16 @@ pub fn merge_filtered_segments<T: Into<Box<dyn Directory>>>(
     );
 
     let index_meta = IndexMeta {
-        index_settings: target_settings, // index_settings of all segments should be the same
+        index_settings: target_settings,
         segments: vec![segment_meta],
         schema: target_schema,
         opstamp: 0u64,
         payload: Some(stats),
     };
 
-    // save the meta.json
     save_metas(&index_meta, merged_index.directory_mut())?;
 
     Ok(merged_index)
-}
-
-pub(crate) struct InnerSegmentUpdater {
-    // we keep a copy of the current active IndexMeta to
-    // avoid loading the file every time we need it in the
-    // `SegmentUpdater`.
-    //
-    // This should be up to date as all update happen through
-    // the unique active `SegmentUpdater`.
-    active_index_meta: RwLock<Arc<IndexMeta>>,
-    pool: ThreadPool,
-    merge_thread_pool: ThreadPool,
-
-    index: Index,
-    segment_manager: SegmentManager,
-    merge_policy: RwLock<Arc<dyn MergePolicy>>,
-    killed: AtomicBool,
-    stamper: Stamper,
-    merge_operations: MergeOperationInventory,
-}
-
-impl SegmentUpdater {
-    pub fn create(
-        index: Index,
-        stamper: Stamper,
-        delete_cursor: &DeleteCursor,
-        num_merge_threads: usize,
-    ) -> crate::Result<SegmentUpdater> {
-        let segments = index.searchable_segment_metas()?;
-        let segment_manager = SegmentManager::from_segments(segments, delete_cursor);
-        let pool = ThreadPoolBuilder::new()
-            .thread_name(|_| "segment_updater".to_string())
-            .num_threads(1)
-            .build()
-            .map_err(|_| {
-                crate::LucivyError::SystemError(
-                    "Failed to spawn segment updater thread".to_string(),
-                )
-            })?;
-        let merge_thread_pool = ThreadPoolBuilder::new()
-            .thread_name(|i| format!("merge_thread_{i}"))
-            .num_threads(num_merge_threads)
-            .panic_handler(move |panic| {
-                // We don't print the panic content itself,
-                // it is already printed during the unwinding
-                if let Some(message) = panic.downcast_ref::<&str>() {
-                    if *message != PANIC_CAUGHT {
-                        error!("uncaught merge panic")
-                    }
-                }
-            })
-            .build()
-            .map_err(|_| {
-                crate::LucivyError::SystemError(
-                    "Failed to spawn segment merging thread".to_string(),
-                )
-            })?;
-        let index_meta = index.load_metas()?;
-        Ok(SegmentUpdater(Arc::new(InnerSegmentUpdater {
-            active_index_meta: RwLock::new(Arc::new(index_meta)),
-            pool,
-            merge_thread_pool,
-            index,
-            segment_manager,
-            merge_policy: RwLock::new(Arc::new(DefaultMergePolicy::default())),
-            killed: AtomicBool::new(false),
-            stamper,
-            merge_operations: Default::default(),
-        })))
-    }
-
-    pub fn get_merge_policy(&self) -> Arc<dyn MergePolicy> {
-        self.merge_policy.read().unwrap().clone()
-    }
-
-    pub fn set_merge_policy(&self, merge_policy: Box<dyn MergePolicy>) {
-        let arc_merge_policy = Arc::from(merge_policy);
-        *self.merge_policy.write().unwrap() = arc_merge_policy;
-    }
-
-    fn schedule_task<T: 'static + Send, F: FnOnce() -> crate::Result<T> + 'static + Send>(
-        &self,
-        task: F,
-    ) -> FutureResult<T> {
-        if !self.is_alive() {
-            return crate::LucivyError::SystemError("Segment updater killed".to_string()).into();
-        }
-        let (scheduled_result, sender) = FutureResult::create(
-            "A segment_updater future did not succeed. This should never happen.",
-        );
-        self.pool.spawn(|| {
-            let task_result = task();
-            let _ = sender.send(task_result);
-        });
-        scheduled_result
-    }
-
-    pub fn schedule_add_segment(&self, segment_entry: SegmentEntry) -> FutureResult<()> {
-        let segment_updater = self.clone();
-        self.schedule_task(move || {
-            segment_updater.segment_manager.add_segment(segment_entry);
-            segment_updater.consider_merge_options();
-            Ok(())
-        })
-    }
-
-    /// Orders `SegmentManager` to remove all segments
-    pub(crate) fn remove_all_segments(&self) {
-        self.segment_manager.remove_all_segments();
-    }
-
-    pub fn kill(&mut self) {
-        self.killed.store(true, Ordering::Release);
-    }
-
-    pub fn is_alive(&self) -> bool {
-        !self.killed.load(Ordering::Acquire)
-    }
-
-    /// Apply deletes up to the target opstamp to all segments.
-    ///
-    /// The method returns copies of the segment entries,
-    /// updated with the delete information.
-    fn purge_deletes(&self, target_opstamp: Opstamp) -> crate::Result<Vec<SegmentEntry>> {
-        let mut segment_entries = self.segment_manager.segment_entries();
-        for segment_entry in &mut segment_entries {
-            let segment = self.index.segment(segment_entry.meta().clone());
-            advance_deletes(segment, segment_entry, target_opstamp)?;
-        }
-        Ok(segment_entries)
-    }
-
-    pub fn save_metas(
-        &self,
-        opstamp: Opstamp,
-        commit_message: Option<String>,
-    ) -> crate::Result<()> {
-        if self.is_alive() {
-            let index = &self.index;
-            let directory = index.directory();
-            let mut committed_segment_metas = self.segment_manager.committed_segment_metas();
-
-            // We sort segment_readers by number of documents.
-            // This is an heuristic to make multithreading more efficient.
-            //
-            // This is not done at the searcher level because I had a strange
-            // use case in which I was dealing with a large static index,
-            // dispatched over 5 SSD drives.
-            //
-            // A `UnionDirectory` makes it possible to read from these
-            // 5 different drives and creates a meta.json on the fly.
-            // In order to optimize the throughput, it creates a lasagna of segments
-            // from the different drives.
-            //
-            // Segment 1 from disk 1, Segment 1 from disk 2, etc.
-            committed_segment_metas.sort_by_key(|segment_meta| -(segment_meta.max_doc() as i32));
-            let index_meta = IndexMeta {
-                index_settings: index.settings().clone(),
-                segments: committed_segment_metas,
-                schema: index.schema(),
-                opstamp,
-                payload: commit_message,
-            };
-            // TODO add context to the error.
-            save_metas(&index_meta, directory.box_clone().borrow_mut())?;
-            self.store_meta(&index_meta);
-        }
-        Ok(())
-    }
-
-    pub fn schedule_garbage_collect(&self) -> FutureResult<GarbageCollectionResult> {
-        let self_clone = self.clone();
-        self.schedule_task(move || garbage_collect_files(self_clone))
-    }
-
-    /// List the files that are useful to the index.
-    ///
-    /// This does not include lock files, or files that are obsolete
-    /// but have not yet been deleted by the garbage collector.
-    fn list_files(&self) -> HashSet<PathBuf> {
-        let mut files: HashSet<PathBuf> = self
-            .index
-            .list_all_segment_metas()
-            .into_iter()
-            .flat_map(|segment_meta| segment_meta.list_files())
-            .collect();
-        files.insert(META_FILEPATH.to_path_buf());
-        files
-    }
-
-    pub(crate) fn schedule_commit(
-        &self,
-        opstamp: Opstamp,
-        payload: Option<String>,
-    ) -> FutureResult<Opstamp> {
-        let segment_updater: SegmentUpdater = self.clone();
-        self.schedule_task(move || {
-            let segment_entries = segment_updater.purge_deletes(opstamp)?;
-            segment_updater.segment_manager.commit(segment_entries);
-            segment_updater.save_metas(opstamp, payload)?;
-            let _ = garbage_collect_files(segment_updater.clone());
-            segment_updater.consider_merge_options();
-            Ok(opstamp)
-        })
-    }
-
-    fn store_meta(&self, index_meta: &IndexMeta) {
-        *self.active_index_meta.write().unwrap() = Arc::new(index_meta.clone());
-    }
-
-    fn load_meta(&self) -> Arc<IndexMeta> {
-        self.active_index_meta.read().unwrap().clone()
-    }
-
-    pub(crate) fn make_merge_operation(&self, segment_ids: &[SegmentId]) -> MergeOperation {
-        let commit_opstamp = self.load_meta().opstamp;
-        MergeOperation::new(&self.merge_operations, commit_opstamp, segment_ids.to_vec())
-    }
-
-    // Starts a merge operation. This function will block until the merge operation is effectively
-    // started. Note that it does not wait for the merge to terminate.
-    // The calling thread should not be block for a long time, as this only involve waiting for the
-    // `SegmentUpdater` queue which in turns only contains lightweight operations.
-    //
-    // The merge itself happens on a different thread.
-    //
-    // When successful, this function returns a `Future` for a `Result<SegmentMeta>` that represents
-    // the actual outcome of the merge operation.
-    //
-    // It returns an error if for some reason the merge operation could not be started.
-    //
-    // At this point an error is not necessarily the sign of a malfunction.
-    // (e.g. A rollback could have happened, between the instant when the merge operation was
-    // suggested and the moment when it ended up being executed.)
-    //
-    // `segment_ids` is required to be non-empty.
-    pub fn start_merge(
-        &self,
-        merge_operation: MergeOperation,
-    ) -> FutureResult<Option<SegmentMeta>> {
-        assert!(
-            !merge_operation.segment_ids().is_empty(),
-            "Segment_ids cannot be empty."
-        );
-
-        let segment_updater = self.clone();
-        let segment_entries: Vec<SegmentEntry> = match self
-            .segment_manager
-            .start_merge(merge_operation.segment_ids())
-        {
-            Ok(segment_entries) => segment_entries,
-            Err(err) => {
-                warn!(
-                    "Starting the merge failed for the following reason. This is not fatal. {err}"
-                );
-                return err.into();
-            }
-        };
-
-        info!("Starting merge  - {:?}", merge_operation.segment_ids());
-
-        let (scheduled_result, merging_future_send) =
-            FutureResult::create("Merge operation failed.");
-
-        self.merge_thread_pool.spawn(move || {
-            // The fact that `merge_operation` is moved here is important.
-            // Its lifetime is used to track how many merging thread are currently running,
-            // as well as which segment is currently in merge and therefore should not be
-            // candidate for another merge.
-            let merge_panic_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                merge(
-                    &segment_updater.index,
-                    segment_entries,
-                    merge_operation.target_opstamp(),
-                )
-            }));
-            let merge_res = match merge_panic_res {
-                Ok(merge_res) => merge_res,
-                Err(panic_err) => {
-                    let panic_str = if let Some(msg) = panic_err.downcast_ref::<&str>() {
-                        *msg
-                    } else if let Some(msg) = panic_err.downcast_ref::<String>() {
-                        msg.as_str()
-                    } else {
-                        "UNKNOWN"
-                    };
-                    let _send_result = merging_future_send.send(Err(LucivyError::SystemError(
-                        format!("Merge thread panicked: {panic_str}"),
-                    )));
-                    // Resume unwinding because we forced unwind safety with
-                    // `std::panic::AssertUnwindSafe` Use a specific message so
-                    // the panic_handler can double check that we properly caught the panic.
-                    let boxed_panic_message: Box<dyn Any + Send> = Box::new(PANIC_CAUGHT);
-                    std::panic::resume_unwind(boxed_panic_message);
-                }
-            };
-            match merge_res {
-                Ok(after_merge_segment_entry) => {
-                    let res = segment_updater.end_merge(merge_operation, after_merge_segment_entry);
-                    let _send_result = merging_future_send.send(res);
-                }
-                Err(merge_error) => {
-                    warn!(
-                        "Merge of {:?} was cancelled: {:?}",
-                        merge_operation.segment_ids().to_vec(),
-                        merge_error
-                    );
-                    if cfg!(test) {
-                        panic!("{merge_error:?}");
-                    }
-                    let _send_result = merging_future_send.send(Err(merge_error));
-                }
-            }
-        });
-
-        scheduled_result
-    }
-
-    pub(crate) fn get_mergeable_segments(&self) -> (Vec<SegmentMeta>, Vec<SegmentMeta>) {
-        let merge_segment_ids: HashSet<SegmentId> = self.merge_operations.segment_in_merge();
-        self.segment_manager
-            .get_mergeable_segments(&merge_segment_ids)
-    }
-
-    fn consider_merge_options(&self) {
-        let (mut committed_segments, mut uncommitted_segments) = self.get_mergeable_segments();
-        if committed_segments.len() == 1 && committed_segments[0].num_deleted_docs() == 0 {
-            committed_segments.clear();
-        }
-        if uncommitted_segments.len() == 1 && uncommitted_segments[0].num_deleted_docs() == 0 {
-            uncommitted_segments.clear();
-        }
-
-        // Committed segments cannot be merged with uncommitted_segments.
-        // We therefore consider merges using these two sets of segments independently.
-        let merge_policy = self.get_merge_policy();
-
-        let current_opstamp = self.stamper.stamp();
-        let mut merge_candidates: Vec<MergeOperation> = merge_policy
-            .compute_merge_candidates(&uncommitted_segments)
-            .into_iter()
-            .map(|merge_candidate| {
-                MergeOperation::new(&self.merge_operations, current_opstamp, merge_candidate.0)
-            })
-            .collect();
-
-        let commit_opstamp = self.load_meta().opstamp;
-        let committed_merge_candidates = merge_policy
-            .compute_merge_candidates(&committed_segments)
-            .into_iter()
-            .map(|merge_candidate: MergeCandidate| {
-                MergeOperation::new(&self.merge_operations, commit_opstamp, merge_candidate.0)
-            });
-        merge_candidates.extend(committed_merge_candidates);
-
-        for merge_operation in merge_candidates {
-            // If a merge cannot be started this is not a fatal error.
-            // We do log a warning in `start_merge`.
-            drop(self.start_merge(merge_operation));
-        }
-    }
-
-    /// Queues a `end_merge` in the segment updater and blocks until it is successfully processed.
-    fn end_merge(
-        &self,
-        merge_operation: MergeOperation,
-        mut after_merge_segment_entry: Option<SegmentEntry>,
-    ) -> crate::Result<Option<SegmentMeta>> {
-        let segment_updater = self.clone();
-        let after_merge_segment_meta = after_merge_segment_entry
-            .as_ref()
-            .map(|after_merge_segment_entry| after_merge_segment_entry.meta().clone());
-        self.schedule_task(move || {
-            info!(
-                "End merge {:?}",
-                after_merge_segment_entry.as_ref().map(|entry| entry.meta())
-            );
-            {
-                if let Some(after_merge_segment_entry) = after_merge_segment_entry.as_mut() {
-                    // Deletes and commits could have happened as we were merging.
-                    // We need to make sure we are up to date with deletes before accepting the
-                    // segment.
-                    let mut delete_cursor = after_merge_segment_entry.delete_cursor().clone();
-                    if let Some(delete_operation) = delete_cursor.get() {
-                        let committed_opstamp = segment_updater.load_meta().opstamp;
-                        if delete_operation.opstamp < committed_opstamp {
-                            // We are not up to date! Let's create a new tombstone file for our
-                            // freshly create split.
-                            let index = &segment_updater.index;
-                            let segment = index.segment(after_merge_segment_entry.meta().clone());
-                            if let Err(advance_deletes_err) = advance_deletes(
-                                segment,
-                                after_merge_segment_entry,
-                                committed_opstamp,
-                            ) {
-                                error!(
-                                    "Merge of {:?} was cancelled (advancing deletes failed): {:?}",
-                                    merge_operation.segment_ids(),
-                                    advance_deletes_err
-                                );
-                                assert!(!cfg!(test), "Merge failed.");
-
-                                // ... cancel merge
-                                // `merge_operations` are tracked. As it is dropped, the
-                                // the segment_ids will be available again for merge.
-                                return Err(advance_deletes_err);
-                            }
-                        }
-                    }
-                }
-                let previous_metas = segment_updater.load_meta();
-                let segments_status = segment_updater
-                    .segment_manager
-                    .end_merge(merge_operation.segment_ids(), after_merge_segment_entry)?;
-
-                if segments_status == SegmentsStatus::Committed {
-                    segment_updater
-                        .save_metas(previous_metas.opstamp, previous_metas.payload.clone())?;
-                }
-
-                segment_updater.consider_merge_options();
-            } // we drop all possible handle to a now useless `SegmentMeta`.
-
-            let _ = garbage_collect_files(segment_updater);
-            Ok(())
-        })
-        .wait()?;
-        Ok(after_merge_segment_meta)
-    }
-
-    /// Wait for current merging threads.
-    ///
-    /// Upon termination of the current merging threads,
-    /// merge opportunity may appear.
-    ///
-    /// We keep waiting until the merge policy judges that
-    /// no opportunity is available.
-    ///
-    /// Note that it is not required to call this
-    /// method in your application.
-    /// Terminating your application without letting
-    /// merge terminate is perfectly safe.
-    ///
-    /// Obsolete files will eventually be cleaned up
-    /// by the directory garbage collector.
-    pub fn wait_merging_thread(&self) -> crate::Result<()> {
-        self.merge_operations.wait_until_empty();
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -718,7 +485,6 @@ mod tests {
         let text_field = schema_builder.add_text_field("text", TEXT);
         let index = Index::create_in_ram(schema_builder.build());
 
-        // writing the segment
         let mut index_writer = index.writer_for_tests()?;
         index_writer.set_merge_policy(Box::new(MergeWheneverPossible));
 
@@ -759,7 +525,6 @@ mod tests {
         let text_field = schema_builder.add_text_field("text", TEXT);
         let index = Index::create_in_ram(schema_builder.build());
 
-        // writing the segment
         let mut index_writer = index.writer_for_tests()?;
 
         for _ in 0..10 {
@@ -769,7 +534,6 @@ mod tests {
         index_writer.commit()?;
 
         let seg_ids = index.searchable_segment_ids()?;
-        // docs exist, should have at least 1 segment
         assert!(!seg_ids.is_empty());
 
         let term = Term::from_field_text(text_field, "a");
@@ -790,7 +554,6 @@ mod tests {
 
         reader.reload()?;
         assert_eq!(reader.searcher().num_docs(), 0);
-        // empty segments should be erased
         assert!(index.searchable_segment_metas()?.is_empty());
         assert!(reader.searcher().segment_readers().is_empty());
 
@@ -803,7 +566,6 @@ mod tests {
         let text_field = schema_builder.add_text_field("text", TEXT);
         let index = Index::create_in_ram(schema_builder.build());
 
-        // writing the segment
         let mut index_writer = index.writer_for_tests()?;
 
         for _ in 0..100 {
@@ -823,7 +585,6 @@ mod tests {
         index_writer.commit()?;
 
         let seg_ids = index.searchable_segment_ids()?;
-        // docs exist, should have at least 1 segment
         assert!(!seg_ids.is_empty());
 
         let term_vals = vec!["a", "b", "c", "d", "e", "f"];
@@ -843,7 +604,6 @@ mod tests {
 
         reader.reload()?;
         assert_eq!(reader.searcher().num_docs(), 0);
-        // empty segments should be erased
         assert!(index.searchable_segment_metas()?.is_empty());
         assert!(reader.searcher().segment_readers().is_empty());
 
@@ -856,7 +616,6 @@ mod tests {
         let text_field = schema_builder.add_text_field("text", TEXT);
         let index = Index::create_in_ram(schema_builder.build());
 
-        // writing the segment
         let mut index_writer = index.writer_for_tests()?;
         for _ in 0..100 {
             index_writer.add_document(doc!(text_field=>"a"))?;
@@ -883,7 +642,6 @@ mod tests {
         for _ in 0..3 {
             let index = Index::create_in_ram(schema.clone());
 
-            // writing two segments
             let mut index_writer = index.writer_for_tests()?;
             for _ in 0..100 {
                 index_writer.add_document(doc!(text_field=>"fizz"))?;
@@ -941,7 +699,6 @@ mod tests {
             index
         };
 
-        // mismatched schema index list
         let result = merge_indices(&[first_index, second_index], RamDirectory::default());
         assert!(result.is_err());
 

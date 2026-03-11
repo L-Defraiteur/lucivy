@@ -166,6 +166,7 @@ mod functional_test;
 
 #[macro_use]
 mod macros;
+mod actor;
 mod future_result;
 
 // Re-exports
@@ -1166,7 +1167,7 @@ pub mod tests {
             .iter()
             .map(|reader| reader.segment_id())
             .collect();
-        index_writer.merge(&segment_ids).wait()?;
+        index_writer.merge(&segment_ids)?;
         index_reader.reload()?;
         let searcher = index_reader.searcher();
         assert_eq!(searcher.search(&AllQuery, &Count)?, DOC_COUNT as usize);
@@ -1192,7 +1193,7 @@ pub mod tests {
         writer.delete_term(Term::from_field_text(body, "foo"));
         writer.commit()?;
         let segment_ids = index.searchable_segment_ids()?;
-        writer.merge(&segment_ids).wait()?;
+        writer.merge(&segment_ids)?;
         assert!(index.validate_checksum()?.is_empty());
         Ok(())
     }

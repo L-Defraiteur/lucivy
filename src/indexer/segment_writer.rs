@@ -934,7 +934,7 @@ mod tests {
         let segment_ids = index
             .searchable_segment_ids()
             .expect("Searchable segments failed.");
-        index_writer.merge(&segment_ids).wait().unwrap();
+        index_writer.merge(&segment_ids).unwrap();
         assert!(index_writer.wait_merging_threads().is_ok());
     }
 

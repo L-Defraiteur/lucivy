@@ -1,7 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
-use super::WorkerReceiver;
 use crate::schema::document::Document;
 use crate::LucivyDocument;
 
@@ -11,20 +10,18 @@ pub(crate) struct IndexWriterStatus<D: Document = LucivyDocument> {
 }
 
 impl<D: Document> IndexWriterStatus<D> {
-    /// Returns true iff the index writer is alive.
-    pub fn is_alive(&self) -> bool {
-        self.inner.as_ref().is_alive()
+    pub fn new() -> Self {
+        IndexWriterStatus {
+            inner: Arc::new(Inner {
+                is_alive: AtomicBool::new(true),
+                _phantom: std::marker::PhantomData,
+            }),
+        }
     }
 
-    /// Returns a copy of the worker message receiver.
-    /// If the index writer was killed, returns `None`.
-    pub fn operation_receiver(&self) -> Option<WorkerReceiver<D>> {
-        let rlock = self
-            .inner
-            .receive_channel
-            .read()
-            .expect("This lock should never be poisoned");
-        rlock.as_ref().cloned()
+    /// Returns true iff the index writer is alive.
+    pub fn is_alive(&self) -> bool {
+        self.inner.is_alive.load(Ordering::Relaxed)
     }
 
     /// Create an index writer bomb.
@@ -38,31 +35,12 @@ impl<D: Document> IndexWriterStatus<D> {
 
 struct Inner<D: Document> {
     is_alive: AtomicBool,
-    receive_channel: RwLock<Option<WorkerReceiver<D>>>,
+    _phantom: std::marker::PhantomData<D>,
 }
 
 impl<D: Document> Inner<D> {
-    fn is_alive(&self) -> bool {
-        self.is_alive.load(Ordering::Relaxed)
-    }
-
     fn kill(&self) {
         self.is_alive.store(false, Ordering::Relaxed);
-        self.receive_channel
-            .write()
-            .expect("This lock should never be poisoned")
-            .take();
-    }
-}
-
-impl<D: Document> From<WorkerReceiver<D>> for IndexWriterStatus<D> {
-    fn from(receiver: WorkerReceiver<D>) -> Self {
-        IndexWriterStatus {
-            inner: Arc::new(Inner {
-                is_alive: AtomicBool::new(true),
-                receive_channel: RwLock::new(Some(receiver)),
-            }),
-        }
     }
 }
 
@@ -74,9 +52,6 @@ pub(crate) struct IndexWriterBomb<D: Document> {
 
 impl<D: Document> IndexWriterBomb<D> {
     /// Defuses the bomb.
-    ///
-    /// This is the only way to drop the bomb without killing
-    /// the index writer.
     pub fn defuse(mut self) {
         self.inner = None;
     }
@@ -94,31 +69,26 @@ impl<D: Document> Drop for IndexWriterBomb<D> {
 mod tests {
     use std::mem;
 
-    use crossbeam_channel as channel;
-
     use super::IndexWriterStatus;
-    use crate::indexer::WorkerMessage;
     use crate::LucivyDocument;
 
     #[test]
     fn test_bomb_goes_boom() {
-        let (_tx, rx) = channel::bounded::<WorkerMessage<LucivyDocument>>(10);
-        let index_writer_status: IndexWriterStatus = IndexWriterStatus::from(rx);
-        assert!(index_writer_status.operation_receiver().is_some());
-        let bomb = index_writer_status.create_bomb();
-        assert!(index_writer_status.operation_receiver().is_some());
+        let status: IndexWriterStatus<LucivyDocument> = IndexWriterStatus::new();
+        assert!(status.is_alive());
+        let bomb = status.create_bomb();
+        assert!(status.is_alive());
         mem::drop(bomb);
         // boom!
-        assert!(index_writer_status.operation_receiver().is_none());
+        assert!(!status.is_alive());
     }
 
     #[test]
     fn test_bomb_defused() {
-        let (_tx, rx) = channel::bounded::<WorkerMessage<LucivyDocument>>(10);
-        let index_writer_status: IndexWriterStatus = IndexWriterStatus::from(rx);
-        assert!(index_writer_status.operation_receiver().is_some());
-        let bomb = index_writer_status.create_bomb();
+        let status: IndexWriterStatus<LucivyDocument> = IndexWriterStatus::new();
+        assert!(status.is_alive());
+        let bomb = status.create_bomb();
         bomb.defuse();
-        assert!(index_writer_status.operation_receiver().is_some());
+        assert!(status.is_alive());
     }
 }

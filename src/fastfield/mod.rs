@@ -433,7 +433,7 @@ mod tests {
             .map(SegmentReader::segment_id)
             .collect();
         assert_eq!(segment_ids.len(), 2);
-        index_writer.merge(&segment_ids[..]).wait().unwrap();
+        index_writer.merge(&segment_ids[..]).unwrap();
         reader.reload().unwrap();
         assert_eq!(reader.searcher().segment_readers().len(), 1);
     }
@@ -539,7 +539,7 @@ mod tests {
         {
             let segment_ids = index.searchable_segment_ids().unwrap();
             let mut index_writer: IndexWriter = index.writer_for_tests().unwrap();
-            index_writer.merge(&segment_ids).wait().unwrap();
+            index_writer.merge(&segment_ids).unwrap();
             index_writer.wait_merging_threads().unwrap();
         }
 
@@ -664,7 +664,7 @@ mod tests {
         {
             let segment_ids = index.searchable_segment_ids()?;
             let mut index_writer: IndexWriter = index.writer_for_tests()?;
-            index_writer.merge(&segment_ids).wait()?;
+            index_writer.merge(&segment_ids)?;
             index_writer.wait_merging_threads()?;
         }
 
