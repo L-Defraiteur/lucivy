@@ -60,6 +60,7 @@ emcc "$STATIC_LIB" \
         "_lucivy_remove",
         "_lucivy_update",
         "_lucivy_commit",
+        "_lucivy_commit_poll",
         "_lucivy_rollback",
         "_lucivy_export_dirty",
         "_lucivy_export_all",
@@ -70,11 +71,15 @@ emcc "$STATIC_LIB" \
         "_lucivy_num_docs",
         "_lucivy_schema_json",
         "_malloc",
-        "_free"
+        "_free",
+        "_main"
     ]' \
     -sEXPORTED_RUNTIME_METHODS='["ccall","cwrap","UTF8ToString","stringToUTF8","lengthBytesUTF8","getValue","HEAPU8"]' \
     -sWASM_BIGINT \
     -sEXPORT_ES6=1 \
+    -sPROXY_TO_PTHREAD \
+    -sASYNCIFY \
+    -sASYNCIFY_STACK_SIZE=65536 \
     -fexceptions \
     -sDISABLE_EXCEPTION_CATCHING=0 \
     -O2

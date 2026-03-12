@@ -1,22 +1,24 @@
 // lucivy-worker.js — Web Worker that runs lucivy-emscripten with OPFS persistence.
 //
+// Threading model: the Rust side uses a global actor scheduler with persistent
+// pthreads. ASYNCIFY lets blocking Rust calls (mutex, condvar) yield back to
+// the event loop so emscripten can coordinate pthreads.
+//
 // Usage from main thread:
 //   const worker = new Worker('lucivy-worker.js', { type: 'module' });
 //   worker.postMessage({ type: 'init', id: 1 });
 //
 // Or use lucivy.js for a Promise-based API.
 
-// The emscripten module must be in ../pkg/lucivy.js relative to this worker.
-// We use importScripts-compatible dynamic import.
 let Module = null;
 
 const indexes = new Map(); // path -> ctx pointer
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function callStr(fn, ...args) {
+async function callStr(fn, ...args) {
     const types = args.map(a => typeof a === 'number' ? 'number' : 'string');
-    const ptr = Module.ccall(fn, 'number', types, args);
+    const ptr = await Module.ccall(fn, 'number', types, args, { async: true });
     return Module.UTF8ToString(ptr);
 }
 
@@ -108,7 +110,7 @@ async function removeAllFiles(path) {
 // ── Sync dirty files from emscripten index to OPFS ──────────────────────────
 
 async function syncDirtyToOpfs(path, ctx) {
-    const dirtyJson = callStr('lucivy_export_dirty', ctx);
+    const dirtyJson = await callStr('lucivy_export_dirty', ctx);
     const dirty = JSON.parse(dirtyJson);
 
     const modified = (dirty.modified || []).map(([name, b64]) => [name, base64ToUint8Array(b64)]);
@@ -133,8 +135,6 @@ self.onmessage = async (e) => {
 
         switch (type) {
             case 'init': {
-                // Dynamic import of the emscripten module.
-                // The worker URL determines the base for relative imports.
                 const { default: createLucivy } = await import('../pkg/lucivy.js');
                 Module = await createLucivy();
                 result = true;
@@ -144,15 +144,19 @@ self.onmessage = async (e) => {
             case 'create': {
                 const { path, fields, stemmer } = args;
                 const fieldsJson = typeof fields === 'string' ? fields : JSON.stringify(fields);
-                const ctx = Module.ccall('lucivy_create', 'number',
+                const ctx = await Module.ccall('lucivy_create', 'number',
                     ['string', 'string', 'string'],
-                    [path, fieldsJson, stemmer || '']);
+                    [path, fieldsJson, stemmer || ''], { async: true });
                 if (!ctx) throw new Error('lucivy_create returned null');
                 indexes.set(path, ctx);
 
+                // Yield so the event loop can activate global scheduler pthreads
+                // spawned on first use. Only matters for the very first index.
+                await new Promise(r => setTimeout(r, 0));
+
                 // Export all files to OPFS for initial persistence (best-effort).
                 try {
-                    const allJson = callStr('lucivy_export_all', ctx);
+                    const allJson = await callStr('lucivy_export_all', ctx);
                     const allFiles = JSON.parse(allJson);
                     const modified = allFiles.map(([name, b64]) => [name, base64ToUint8Array(b64)]);
                     await writeFiles(path, modified, []);
@@ -160,7 +164,7 @@ self.onmessage = async (e) => {
                     console.warn('[lucivy-worker] OPFS initial sync skipped:', e.message);
                 }
 
-                result = { path, numDocs: Module.ccall('lucivy_num_docs', 'number', ['number'], [ctx]) };
+                result = { path, numDocs: await Module.ccall('lucivy_num_docs', 'number', ['number'], [ctx], { async: true }) };
                 break;
             }
 
@@ -171,30 +175,27 @@ self.onmessage = async (e) => {
                     throw new Error(`No index found at OPFS path: ${path}`);
                 }
 
-                // Two-phase open: begin → import files → finish.
-                const openCtx = Module.ccall('lucivy_open_begin', 'number', ['string'], [path]);
+                const openCtx = await Module.ccall('lucivy_open_begin', 'number', ['string'], [path], { async: true });
                 if (!openCtx) throw new Error('lucivy_open_begin returned null');
 
                 for (const [name, data] of files) {
-                    // Allocate memory and copy file data.
                     const ptr = Module._malloc(data.length);
                     Module.HEAPU8.set(data, ptr);
-                    // Write file name as UTF8.
                     const nameBytes = Module.lengthBytesUTF8(name) + 1;
                     const namePtr = Module._malloc(nameBytes);
                     Module.stringToUTF8(name, namePtr, nameBytes);
-                    Module.ccall('lucivy_import_file', null,
+                    await Module.ccall('lucivy_import_file', null,
                         ['number', 'number', 'number', 'number'],
-                        [openCtx, namePtr, ptr, data.length]);
+                        [openCtx, namePtr, ptr, data.length], { async: true });
                     Module._free(namePtr);
                     Module._free(ptr);
                 }
 
-                const ctx = Module.ccall('lucivy_open_finish', 'number', ['number'], [openCtx]);
+                const ctx = await Module.ccall('lucivy_open_finish', 'number', ['number'], [openCtx], { async: true });
                 if (!ctx) throw new Error('lucivy_open_finish returned null');
                 indexes.set(path, ctx);
 
-                result = { path, numDocs: Module.ccall('lucivy_num_docs', 'number', ['number'], [ctx]) };
+                result = { path, numDocs: await Module.ccall('lucivy_num_docs', 'number', ['number'], [ctx], { async: true }) };
                 break;
             }
 
@@ -202,7 +203,7 @@ self.onmessage = async (e) => {
                 const ctx = getCtx(args.path);
                 const fieldsJson = typeof args.fields === 'string'
                     ? args.fields : JSON.stringify(args.fields);
-                const res = callStr('lucivy_add', ctx, args.docId, fieldsJson);
+                const res = await callStr('lucivy_add', ctx, args.docId, fieldsJson);
                 checkResult(res);
                 result = true;
                 break;
@@ -212,7 +213,7 @@ self.onmessage = async (e) => {
                 const ctx = getCtx(args.path);
                 const docsJson = typeof args.docs === 'string'
                     ? args.docs : JSON.stringify(args.docs);
-                const res = callStr('lucivy_add_many', ctx, docsJson);
+                const res = await callStr('lucivy_add_many', ctx, docsJson);
                 checkResult(res);
                 result = true;
                 break;
@@ -220,7 +221,7 @@ self.onmessage = async (e) => {
 
             case 'remove': {
                 const ctx = getCtx(args.path);
-                const res = callStr('lucivy_remove', ctx, args.docId);
+                const res = await callStr('lucivy_remove', ctx, args.docId);
                 checkResult(res);
                 result = true;
                 break;
@@ -230,7 +231,7 @@ self.onmessage = async (e) => {
                 const ctx = getCtx(args.path);
                 const fieldsJson = typeof args.fields === 'string'
                     ? args.fields : JSON.stringify(args.fields);
-                const res = callStr('lucivy_update', ctx, args.docId, fieldsJson);
+                const res = await callStr('lucivy_update', ctx, args.docId, fieldsJson);
                 checkResult(res);
                 result = true;
                 break;
@@ -238,23 +239,32 @@ self.onmessage = async (e) => {
 
             case 'commit': {
                 const ctx = getCtx(args.path);
-                const res = callStr('lucivy_commit', ctx);
-                checkResult(res);
 
-                // Sync dirty files to OPFS (best-effort — may not be available in all contexts).
+                // Non-blocking commit: Rust spawns a thread, we poll until done.
+                // Yield first so pthreads created during create/add can activate.
+                await new Promise(r => setTimeout(r, 0));
+                const beginRes = await callStr('lucivy_commit', ctx);
+                checkResult(beginRes);
+                while (true) {
+                    await new Promise(r => setTimeout(r, 5));
+                    const pollRes = await callStr('lucivy_commit_poll', ctx);
+                    if (pollRes !== 'pending') { checkResult(pollRes); break; }
+                }
+
+                // Sync dirty files to OPFS (best-effort).
                 try {
                     await syncDirtyToOpfs(args.path, ctx);
                 } catch (e) {
                     console.warn('[lucivy-worker] OPFS sync skipped:', e.message);
                 }
 
-                result = { numDocs: Module.ccall('lucivy_num_docs', 'number', ['number'], [ctx]) };
+                result = { numDocs: await Module.ccall('lucivy_num_docs', 'number', ['number'], [ctx], { async: true }) };
                 break;
             }
 
             case 'rollback': {
                 const ctx = getCtx(args.path);
-                const res = callStr('lucivy_rollback', ctx);
+                const res = await callStr('lucivy_rollback', ctx);
                 checkResult(res);
                 result = true;
                 break;
@@ -265,7 +275,7 @@ self.onmessage = async (e) => {
                 const queryJson = typeof args.query === 'string' && !args.query.startsWith('{')
                     ? JSON.stringify(args.query)
                     : (typeof args.query === 'object' ? JSON.stringify(args.query) : args.query);
-                const json = callStr('lucivy_search', ctx, queryJson, args.limit || 10, args.highlights ? 1 : 0, args.fields ? 1 : 0);
+                const json = await callStr('lucivy_search', ctx, queryJson, args.limit || 10, args.highlights ? 1 : 0, args.fields ? 1 : 0);
                 result = JSON.parse(json);
                 if (result.error) throw new Error(result.error);
                 break;
@@ -281,9 +291,10 @@ self.onmessage = async (e) => {
                 const idsPtr = Module._malloc(ids.byteLength);
                 Module.HEAPU8.set(new Uint8Array(ids.buffer), idsPtr);
 
-                const resPtr = Module.ccall('lucivy_search_filtered', 'number',
+                const resPtr = await Module.ccall('lucivy_search_filtered', 'number',
                     ['number', 'string', 'number', 'number', 'number', 'number', 'number'],
-                    [ctx, queryJson, args.limit || 10, idsPtr, ids.length, args.highlights ? 1 : 0, args.fields ? 1 : 0]);
+                    [ctx, queryJson, args.limit || 10, idsPtr, ids.length, args.highlights ? 1 : 0, args.fields ? 1 : 0],
+                    { async: true });
                 const json = Module.UTF8ToString(resPtr);
                 Module._free(idsPtr);
 
@@ -293,10 +304,6 @@ self.onmessage = async (e) => {
             }
 
             case 'close': {
-                // Remove from tracking. The Rust context is intentionally NOT destroyed
-                // here because lucivy_destroy can deadlock under emscripten pthreads
-                // (IndexWriter drop joins threads via the event loop).
-                // All WASM memory is fully reclaimed when the worker is terminated.
                 indexes.delete(args.path);
                 result = true;
                 break;
@@ -304,7 +311,6 @@ self.onmessage = async (e) => {
 
             case 'destroy': {
                 indexes.delete(args.path);
-                // OPFS cleanup is best-effort (may hang if storage API unavailable)
                 removeAllFiles(args.path).catch(() => {});
                 result = true;
                 break;
@@ -313,8 +319,8 @@ self.onmessage = async (e) => {
             case 'exportSnapshot': {
                 const ctx = getCtx(args.path);
                 const lenPtr = Module._malloc(4);
-                const dataPtr = Module.ccall('lucivy_export_snapshot', 'number',
-                    ['number', 'number'], [ctx, lenPtr]);
+                const dataPtr = await Module.ccall('lucivy_export_snapshot', 'number',
+                    ['number', 'number'], [ctx, lenPtr], { async: true });
                 if (!dataPtr) {
                     Module._free(lenPtr);
                     throw new Error('export failed — index may have uncommitted changes');
@@ -330,24 +336,24 @@ self.onmessage = async (e) => {
                 const dataArr = data instanceof Uint8Array ? data : new Uint8Array(data);
                 const ptr = Module._malloc(dataArr.length);
                 Module.HEAPU8.set(dataArr, ptr);
-                const ctx = Module.ccall('lucivy_import_snapshot', 'number',
-                    ['number', 'number', 'string'], [ptr, dataArr.length, path]);
+                const ctx = await Module.ccall('lucivy_import_snapshot', 'number',
+                    ['number', 'number', 'string'], [ptr, dataArr.length, path], { async: true });
                 Module._free(ptr);
                 if (!ctx) throw new Error('import_snapshot failed — invalid snapshot data');
                 indexes.set(path, ctx);
-                result = { path, numDocs: Module.ccall('lucivy_num_docs', 'number', ['number'], [ctx]) };
+                result = { path, numDocs: await Module.ccall('lucivy_num_docs', 'number', ['number'], [ctx], { async: true }) };
                 break;
             }
 
             case 'numDocs': {
                 const ctx = getCtx(args.path);
-                result = Module.ccall('lucivy_num_docs', 'number', ['number'], [ctx]);
+                result = await Module.ccall('lucivy_num_docs', 'number', ['number'], [ctx], { async: true });
                 break;
             }
 
             case 'schema': {
                 const ctx = getCtx(args.path);
-                const json = callStr('lucivy_schema_json', ctx);
+                const json = await callStr('lucivy_schema_json', ctx);
                 result = json ? JSON.parse(json) : null;
                 break;
             }

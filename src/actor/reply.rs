@@ -1,33 +1,64 @@
-use crossbeam_channel as channel;
+use std::sync::{Arc, Condvar, Mutex};
+
+/// État interne partagé du oneshot.
+struct Inner<T> {
+    state: Mutex<State<T>>,
+    ready: Condvar,
+}
+
+struct State<T> {
+    value: Option<T>,
+    closed: bool,
+}
 
 /// Côté acteur : envoie la réponse (oneshot).
 pub(crate) struct Reply<T> {
-    sender: channel::Sender<T>,
+    inner: Arc<Inner<T>>,
 }
 
 /// Côté appelant : attend la réponse.
 pub(crate) struct ReplyReceiver<T> {
-    receiver: channel::Receiver<T>,
+    inner: Arc<Inner<T>>,
 }
 
 impl<T> Reply<T> {
     /// Envoie la réponse. Consomme le Reply.
     pub fn send(self, value: T) {
-        let _ = self.sender.send(value);
+        let mut state = self.inner.state.lock().unwrap();
+        state.value = Some(value);
+        state.closed = true;
+        self.inner.ready.notify_one();
+    }
+}
+
+impl<T> Drop for Reply<T> {
+    fn drop(&mut self) {
+        let mut state = self.inner.state.lock().unwrap();
+        state.closed = true;
+        self.inner.ready.notify_one();
     }
 }
 
 impl<T> ReplyReceiver<T> {
     /// Attente bloquante (mode multi-thread).
+    /// Utilise Mutex + Condvar — compatible ASYNCIFY en WASM.
     pub fn wait_blocking(self) -> T {
-        self.receiver
-            .recv()
-            .expect("actor died without replying")
+        let mut state = self.inner.state.lock().unwrap();
+        loop {
+            if let Some(value) = state.value.take() {
+                return value;
+            }
+            if state.closed {
+                panic!("actor died without replying");
+            }
+            state = self.inner.ready.wait(state).unwrap();
+        }
     }
 
     /// Attente non-bloquante. Retourne None si pas encore de réponse.
     pub fn try_recv(&self) -> Option<T> {
-        self.receiver.try_recv().ok()
+        let mut state = self.inner.state.lock().unwrap();
+        state.value.take()
     }
 
     /// Attente coopérative : pompe le scheduler entre chaque tentative.
@@ -41,17 +72,30 @@ impl<T> ReplyReceiver<T> {
         F: FnMut() -> bool,
     {
         loop {
-            match self.receiver.try_recv() {
-                Ok(value) => return value,
-                Err(_) => {
-                    if !run_step() {
-                        if let Ok(value) = self
-                            .receiver
-                            .recv_timeout(std::time::Duration::from_millis(1))
-                        {
-                            return value;
-                        }
-                    }
+            {
+                let mut state = self.inner.state.lock().unwrap();
+                if let Some(value) = state.value.take() {
+                    return value;
+                }
+                if state.closed {
+                    panic!("actor died without replying");
+                }
+            }
+            if !run_step() {
+                let mut state = self.inner.state.lock().unwrap();
+                if let Some(value) = state.value.take() {
+                    return value;
+                }
+                if state.closed {
+                    panic!("actor died without replying");
+                }
+                let (mut state, _) = self
+                    .inner
+                    .ready
+                    .wait_timeout(state, std::time::Duration::from_millis(1))
+                    .unwrap();
+                if let Some(value) = state.value.take() {
+                    return value;
                 }
             }
         }
@@ -59,10 +103,20 @@ impl<T> ReplyReceiver<T> {
 }
 
 /// Crée une paire (Reply, ReplyReceiver).
-/// Utilise un channel bounded(1) — une seule réponse.
 pub(crate) fn reply<T>() -> (Reply<T>, ReplyReceiver<T>) {
-    let (sender, receiver) = channel::bounded(1);
-    (Reply { sender }, ReplyReceiver { receiver })
+    let inner = Arc::new(Inner {
+        state: Mutex::new(State {
+            value: None,
+            closed: false,
+        }),
+        ready: Condvar::new(),
+    });
+    (
+        Reply {
+            inner: inner.clone(),
+        },
+        ReplyReceiver { inner },
+    )
 }
 
 #[cfg(test)]
@@ -92,15 +146,11 @@ mod tests {
     #[test]
     fn test_reply_cooperative() {
         let (tx, rx) = reply();
-        // Reply arrives after 10ms — wait_cooperative should park and wake.
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(10));
             tx.send(99);
         });
-        let val = rx.wait_cooperative(|| {
-            // Simulate no work available
-            false
-        });
+        let val = rx.wait_cooperative(|| false);
         assert_eq!(val, 99);
     }
 

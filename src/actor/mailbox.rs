@@ -38,6 +38,8 @@ pub(crate) struct WakeHandle {
     pub(super) notifier: SchedulerNotifier,
     pub(super) is_idle: AtomicBool,
     pub(super) events: Arc<EventBus<SchedulerEvent>>,
+    /// Nom de l'acteur — copié au spawn, zero-lock dans send().
+    pub(super) actor_name: &'static str,
 }
 
 // Manual Clone impl — don't require M: Clone (crossbeam Sender is Clone for any M).
@@ -57,19 +59,16 @@ impl<M> ActorRef<M> {
             if wh.is_idle.swap(false, Ordering::AcqRel) {
                 wh.events.emit(SchedulerEvent::MessageSentWithWake {
                     actor_id: wh.notifier.actor_id(),
-                    actor_name: wh.notifier.actor_name(),
+                    actor_name: wh.actor_name,
                 });
                 wh.notifier.wake();
             } else {
                 wh.events.emit(SchedulerEvent::MessageSentNoWake {
                     actor_id: wh.notifier.actor_id(),
-                    actor_name: wh.notifier.actor_name(),
+                    actor_name: wh.actor_name,
                     mailbox_depth: self.sender.len(),
                 });
             }
-        } else {
-            // Pas encore de notifier — ActorRef utilisé avant spawn.
-            // Normalement ne devrait pas arriver en production.
         }
         Ok(())
     }

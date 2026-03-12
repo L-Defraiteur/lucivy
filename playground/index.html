@@ -257,6 +257,8 @@ import { Lucivy } from './js/lucivy.js';
 // ── State ─────────────────────────────────────────────────────────
 
 let lucivy = null;
+// Expose for test automation
+window._lucivy = null;
 let demoIndex = null;
 let userIndex = null;
 let activeTab = 'demo'; // 'demo' | 'user'
@@ -294,6 +296,7 @@ async function startup() {
   try {
     statusEl.textContent = 'Loading WASM engine (threading)...';
     lucivy = new Lucivy('./js/lucivy-worker.js');
+    window._lucivy = lucivy;
     await lucivy.ready;
 
     statusEl.textContent = 'Loading dataset (lucivy source code)...';

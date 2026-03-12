@@ -192,11 +192,6 @@ impl SchedulerNotifier {
         self.actor_id
     }
 
-    pub fn actor_name(&self) -> &'static str {
-        let actors = self.shared.actors.lock().unwrap();
-        actors.get(&self.actor_id).map(|s| s.name).unwrap_or("dead")
-    }
-
     pub fn wake(&self) {
         // Récupérer la priorité et le nom en un seul lock.
         let (priority, name) = {
@@ -270,6 +265,7 @@ impl Scheduler {
             // donc pas idle. Le scheduler le mettra à true quand il passera idle.
             is_idle: AtomicBool::new(false),
             events: Arc::clone(&self.shared.events),
+            actor_name: name,
         });
         attach_wake_handle(actor_ref, Arc::clone(&wake_handle));
 
@@ -984,5 +980,251 @@ mod tests {
         }
 
         assert_eq!(done.load(Ordering::Relaxed), 5);
+    }
+
+    // -----------------------------------------------------------------------
+    // Stress tests — exercice des race conditions connues
+    // -----------------------------------------------------------------------
+
+    /// Stress test : N senders externes envoient en boucle vers un acteur
+    /// pendant que le scheduler le traite. Cible la race TOCTOU
+    /// has_pending() ↔ is_idle=true.
+    #[test]
+    fn stress_concurrent_sends_no_deadlock() {
+        let scheduler = Scheduler::new(4);
+        let (counter_ref, _id) = spawn_counter(&scheduler, 10_000);
+        let _handle = scheduler.start();
+
+        let num_senders = 8;
+        let msgs_per_sender = 5_000;
+        let total = num_senders * msgs_per_sender;
+
+        let handles: Vec<_> = (0..num_senders)
+            .map(|_| {
+                let r = counter_ref.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..msgs_per_sender {
+                        r.send(CounterMsg::Inc).unwrap();
+                        // Pas de sleep — on veut maximiser la contention.
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Attendre que tous les messages soient traités.
+        let (reply_tx, reply_rx) = reply();
+        counter_ref.send(CounterMsg::Get(reply_tx)).unwrap();
+        let count = reply_rx.wait_cooperative(|| scheduler.run_one_step());
+        assert_eq!(count, total as u32);
+    }
+
+    /// Stress test : spawn + send en boucle rapide.
+    /// Cible le notify_one manquant au spawn.
+    #[test]
+    fn stress_rapid_spawn_and_send() {
+        let scheduler = Scheduler::new(4);
+        let _handle = scheduler.start();
+
+        let total = Arc::new(AtomicU32::new(0));
+
+        for _ in 0..50 {
+            let (counter_ref, _id) = spawn_counter(&scheduler, 256);
+            let t = Arc::clone(&total);
+
+            // Envoie immédiatement après le spawn.
+            for _ in 0..100 {
+                counter_ref.send(CounterMsg::Inc).unwrap();
+            }
+
+            let (reply_tx, reply_rx) = reply();
+            counter_ref.send(CounterMsg::Get(reply_tx)).unwrap();
+            let count = reply_rx.wait_cooperative(|| scheduler.run_one_step());
+            assert_eq!(count, 100);
+            t.fetch_add(count, Ordering::Relaxed);
+
+            counter_ref.send(CounterMsg::Stop).unwrap();
+        }
+
+        assert_eq!(total.load(Ordering::Relaxed), 50 * 100);
+    }
+
+    /// Stress test : self-messages (acteur s'envoie N messages à lui-même).
+    /// Cible la race is_idle + self-message pendant handle().
+    #[test]
+    fn stress_self_messages() {
+        struct SelfSender {
+            remaining: u32,
+            done: Arc<AtomicU32>,
+            self_ref: Option<ActorRef<SelfMsg>>,
+        }
+
+        enum SelfMsg {
+            Start(u32),
+            Step,
+            GetDone(Reply<u32>),
+        }
+
+        impl Actor for SelfSender {
+            type Msg = SelfMsg;
+
+            fn name(&self) -> &'static str {
+                "self-sender"
+            }
+
+            fn handle(&mut self, msg: SelfMsg) -> ActorStatus {
+                match msg {
+                    SelfMsg::Start(n) => {
+                        self.remaining = n;
+                        if let Some(ref sr) = self.self_ref {
+                            let _ = sr.send(SelfMsg::Step);
+                        }
+                    }
+                    SelfMsg::Step => {
+                        if self.remaining > 0 {
+                            self.remaining -= 1;
+                            self.done.fetch_add(1, Ordering::Relaxed);
+                            if let Some(ref sr) = self.self_ref {
+                                let _ = sr.send(SelfMsg::Step);
+                            }
+                        }
+                    }
+                    SelfMsg::GetDone(reply) => {
+                        reply.send(self.done.load(Ordering::Relaxed));
+                    }
+                }
+                ActorStatus::Continue
+            }
+
+            fn priority(&self) -> Priority {
+                Priority::Medium
+            }
+
+            fn on_start(&mut self, self_ref: ActorRef<SelfMsg>) {
+                self.self_ref = Some(self_ref);
+            }
+        }
+
+        let scheduler = Scheduler::new(4);
+        let _handle = scheduler.start();
+        let done = Arc::new(AtomicU32::new(0));
+
+        let (mbox, mut aref) = mailbox::<SelfMsg>(1_000);
+        scheduler.spawn(
+            SelfSender {
+                remaining: 0,
+                done: Arc::clone(&done),
+                self_ref: None,
+            },
+            mbox,
+            &mut aref,
+            1_000,
+        );
+
+        let count = 10_000u32;
+        aref.send(SelfMsg::Start(count)).unwrap();
+
+        let (reply_tx, reply_rx) = reply();
+        // Les self-messages doivent tous être traités avant le GetDone
+        // (FIFO : Start, Step, Step, ..., GetDone).
+        // On envoie GetDone après un court délai pour laisser les Steps s'empiler.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        aref.send(SelfMsg::GetDone(reply_tx)).unwrap();
+        let result = reply_rx.wait_cooperative(|| scheduler.run_one_step());
+        assert_eq!(result, count);
+    }
+
+    /// Stress test : N acteurs communiquent entre eux en ping-pong.
+    /// Exerce le wake inter-acteur sous contention.
+    #[test]
+    fn stress_ping_pong_actors() {
+        struct PingPong {
+            partner: Option<ActorRef<PPMsg>>,
+            count: u32,
+        }
+
+        enum PPMsg {
+            SetPartner(ActorRef<PPMsg>),
+            Ping(u32),
+            GetCount(Reply<u32>),
+        }
+
+        impl Actor for PingPong {
+            type Msg = PPMsg;
+
+            fn name(&self) -> &'static str {
+                "ping-pong"
+            }
+
+            fn handle(&mut self, msg: PPMsg) -> ActorStatus {
+                match msg {
+                    PPMsg::SetPartner(p) => {
+                        self.partner = Some(p);
+                    }
+                    PPMsg::Ping(remaining) => {
+                        self.count += 1;
+                        if remaining > 0 {
+                            if let Some(ref p) = self.partner {
+                                let _ = p.send(PPMsg::Ping(remaining - 1));
+                            }
+                        }
+                    }
+                    PPMsg::GetCount(reply) => {
+                        reply.send(self.count);
+                    }
+                }
+                ActorStatus::Continue
+            }
+
+            fn priority(&self) -> Priority {
+                Priority::Medium
+            }
+        }
+
+        let scheduler = Scheduler::new(4);
+        let _handle = scheduler.start();
+
+        let (mbox_a, mut ref_a) = mailbox::<PPMsg>(1_000);
+        scheduler.spawn(
+            PingPong { partner: None, count: 0 },
+            mbox_a,
+            &mut ref_a,
+            1_000,
+        );
+
+        let (mbox_b, mut ref_b) = mailbox::<PPMsg>(1_000);
+        scheduler.spawn(
+            PingPong { partner: None, count: 0 },
+            mbox_b,
+            &mut ref_b,
+            1_000,
+        );
+
+        // Connecter les partenaires
+        ref_a.send(PPMsg::SetPartner(ref_b.clone())).unwrap();
+        ref_b.send(PPMsg::SetPartner(ref_a.clone())).unwrap();
+
+        // Lancer le ping-pong
+        let rounds = 5_000u32;
+        ref_a.send(PPMsg::Ping(rounds)).unwrap();
+
+        // Attendre la fin — total des pings = rounds + 1
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let (tx_a, rx_a) = reply();
+        ref_a.send(PPMsg::GetCount(tx_a)).unwrap();
+        let count_a = rx_a.wait_cooperative(|| scheduler.run_one_step());
+
+        let (tx_b, rx_b) = reply();
+        ref_b.send(PPMsg::GetCount(tx_b)).unwrap();
+        let count_b = rx_b.wait_cooperative(|| scheduler.run_one_step());
+
+        // a commence avec Ping(5000), envoie à b Ping(4999),
+        // b envoie à a Ping(4998), etc.
+        // Total pings traités = rounds + 1
+        assert_eq!(count_a + count_b, rounds + 1);
     }
 }

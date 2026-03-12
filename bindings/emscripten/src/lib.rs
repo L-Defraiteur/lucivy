@@ -2,13 +2,25 @@
 //!
 //! Provides extern "C" functions that emscripten exposes to JavaScript.
 //! All threading (rayon, std::thread) works natively via emscripten pthreads.
+//!
+//! Built with `-sPROXY_TO_PTHREAD` so that blocking calls (commit, search)
+//! don't deadlock the event loop needed for pthread coordination.
 
 mod directory;
+
+/// Dummy main required by emscripten's PROXY_TO_PTHREAD mode.
+/// The actual work is done via exported C functions called from JS.
+#[no_mangle]
+pub extern "C" fn __main_argc_argv(_argc: i32, _argv: *const *const c_char) -> i32 {
+    0
+}
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread::JoinHandle;
 
 use ld_lucivy::collector::{FilterCollector, TopDocs};
 use ld_lucivy::query::HighlightSink;
@@ -28,6 +40,10 @@ struct LucivyContext {
     text_fields: Vec<String>,
     directory: MemoryDirectory,
     index_path: String,
+    /// Background commit thread + done flag. Commit must run off the worker
+    /// thread so the event loop stays free for pthread coordination.
+    commit_thread: Option<JoinHandle<Result<(), String>>>,
+    commit_done: Arc<AtomicBool>,
 }
 
 // ── Thread-local return buffer ─────────────────────────────────────────────
@@ -94,6 +110,8 @@ pub unsafe extern "C" fn lucivy_create(
         text_fields,
         directory,
         index_path: path.to_string(),
+        commit_thread: None,
+        commit_done: Arc::new(AtomicBool::new(false)),
     }))
 }
 
@@ -157,6 +175,8 @@ pub unsafe extern "C" fn lucivy_open_finish(ctx: *mut LucivyContext) -> *mut Luc
         text_fields,
         directory: open_ctx.directory,
         index_path: open_ctx.path,
+        commit_thread: None,
+        commit_done: Arc::new(AtomicBool::new(false)),
     }))
 }
 
@@ -292,21 +312,57 @@ pub unsafe extern "C" fn lucivy_update(
 
 // ── Transaction ────────────────────────────────────────────────────────────
 
+/// Non-blocking commit: spawns a dedicated thread so the worker's event loop
+/// stays free for pthread coordination. JS polls `lucivy_commit_poll`.
 #[no_mangle]
 pub unsafe extern "C" fn lucivy_commit(ctx: *mut LucivyContext) -> *const c_char {
-    let ctx = &*ctx;
-    let mut writer = match ctx.handle.writer.lock() {
-        Ok(w) => w,
-        Err(_) => return return_error("writer lock poisoned"),
-    };
-    if let Err(e) = writer.commit() {
-        return return_error(&e.to_string());
+    let ctx = &mut *ctx;
+    if ctx.commit_thread.is_some() {
+        return return_error("commit already in progress");
     }
-    if let Err(e) = ctx.handle.reader.reload() {
-        return return_error(&e.to_string());
+    let handle_ptr = &ctx.handle as *const LucivyHandle as usize;
+    let done = ctx.commit_done.clone();
+    done.store(false, Ordering::Release);
+
+    let join = std::thread::Builder::new()
+        .name("lucivy-commit".into())
+        .spawn(move || {
+            let handle = &*(handle_ptr as *const LucivyHandle);
+            let mut writer = handle.writer.lock().map_err(|_| "writer lock poisoned".to_string())?;
+            writer.commit().map_err(|e| e.to_string())?;
+            drop(writer);
+            handle.reader.reload().map_err(|e| e.to_string())?;
+            handle.mark_committed();
+            done.store(true, Ordering::Release);
+            Ok(())
+        });
+
+    match join {
+        Ok(jh) => { ctx.commit_thread = Some(jh); return_str("ok".into()) }
+        Err(e) => return_error(&format!("cannot spawn commit thread: {e}")),
     }
-    ctx.handle.mark_committed();
-    return_str("ok".into())
+}
+
+/// Poll commit completion. Returns "pending", "ok", or {"error":"..."}.
+#[no_mangle]
+pub unsafe extern "C" fn lucivy_commit_poll(ctx: *mut LucivyContext) -> *const c_char {
+    let ctx = &mut *ctx;
+    if !ctx.commit_done.load(Ordering::Acquire) {
+        return if ctx.commit_thread.is_some() {
+            return_str("pending".into())
+        } else {
+            return_error("no commit in progress")
+        };
+    }
+    if let Some(jh) = ctx.commit_thread.take() {
+        match jh.join() {
+            Ok(Ok(())) => return_str("ok".into()),
+            Ok(Err(e)) => return_error(&e),
+            Err(_) => return_error("commit thread panicked"),
+        }
+    } else {
+        return_error("no commit in progress")
+    }
 }
 
 #[no_mangle]
@@ -448,6 +504,8 @@ pub unsafe extern "C" fn lucivy_import_snapshot(
         text_fields,
         directory,
         index_path: path.to_string(),
+        commit_thread: None,
+        commit_done: Arc::new(AtomicBool::new(false)),
     }))
 }
 
