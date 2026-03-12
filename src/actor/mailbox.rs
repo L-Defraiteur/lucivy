@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crossbeam_channel as channel;
+use flume as channel;
 
 use super::events::{EventBus, SchedulerEvent};
 use super::scheduler::SchedulerNotifier;

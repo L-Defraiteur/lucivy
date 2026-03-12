@@ -4,7 +4,21 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Lucivy Playground</title>
+<!-- coi-serviceworker: fallback for servers without COOP/COEP headers.
+     Prefer `node serve.mjs` which sets headers natively (no caching issues). -->
 <script src="coi-serviceworker.js"></script>
+<script>
+// Debug: capture all console output for inspection via window._allLogs
+window._allLogs = [];
+['log','warn','error'].forEach(level => {
+  const orig = console[level].bind(console);
+  console[level] = (...args) => {
+    const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+    window._allLogs.push({ t: Date.now(), level, msg });
+    orig(...args);
+  };
+});
+</script>
 <style>
   :root {
     --bg: #0d1117;
@@ -578,49 +592,68 @@ async function extractZip(file) {
   const view = new DataView(buf);
   const entries = [];
 
-  let offset = 0;
-  while (offset < buf.byteLength - 4) {
-    const sig = view.getUint32(offset, true);
-    if (sig !== 0x04034b50) break;
+  // Find End of Central Directory record (last 22+ bytes of file).
+  let eocdOffset = -1;
+  for (let i = buf.byteLength - 22; i >= Math.max(0, buf.byteLength - 65557); i--) {
+    if (view.getUint32(i, true) === 0x06054b50) { eocdOffset = i; break; }
+  }
+  if (eocdOffset < 0) return entries; // not a valid zip
 
-    const compMethod = view.getUint16(offset + 8, true);
-    const compSize = view.getUint32(offset + 18, true);
-    const nameLen = view.getUint16(offset + 26, true);
-    const extraLen = view.getUint16(offset + 28, true);
-    const nameBytes = new Uint8Array(buf, offset + 30, nameLen);
-    const name = new TextDecoder().decode(nameBytes);
-    const dataStart = offset + 30 + nameLen + extraLen;
+  const cdOffset = view.getUint32(eocdOffset + 16, true);
+  const cdCount = view.getUint16(eocdOffset + 10, true);
 
-    if (!name.endsWith('/') && compSize > 0 && isTextFilename(name)) {
-      try {
-        let content;
-        const rawData = new Uint8Array(buf, dataStart, compSize);
-        if (compMethod === 0) {
-          content = new TextDecoder('utf-8', { fatal: false }).decode(rawData);
-        } else if (compMethod === 8) {
-          const ds = new DecompressionStream('deflate-raw');
-          const writer = ds.writable.getWriter();
-          writer.write(rawData);
-          writer.close();
-          const reader = ds.readable.getReader();
-          const chunks = [];
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            chunks.push(value);
-          }
-          const total = chunks.reduce((s, c) => s + c.length, 0);
-          const merged = new Uint8Array(total);
-          let pos = 0;
-          for (const c of chunks) { merged.set(c, pos); pos += c.length; }
-          content = new TextDecoder('utf-8', { fatal: false }).decode(merged);
+  // Build a map of filename → { compMethod, compSize, localHeaderOffset } from central directory.
+  const cdEntries = [];
+  let pos = cdOffset;
+  for (let i = 0; i < cdCount && pos < buf.byteLength - 4; i++) {
+    if (view.getUint32(pos, true) !== 0x02014b50) break;
+    const compMethod = view.getUint16(pos + 10, true);
+    const compSize = view.getUint32(pos + 20, true);
+    const nameLen = view.getUint16(pos + 28, true);
+    const extraLen = view.getUint16(pos + 30, true);
+    const commentLen = view.getUint16(pos + 32, true);
+    const localOffset = view.getUint32(pos + 42, true);
+    const name = new TextDecoder().decode(new Uint8Array(buf, pos + 46, nameLen));
+    cdEntries.push({ name, compMethod, compSize, localOffset });
+    pos += 46 + nameLen + extraLen + commentLen;
+  }
+
+  // Extract files using central directory sizes (reliable even with data descriptors).
+  for (const cd of cdEntries) {
+    if (cd.name.endsWith('/') || cd.compSize === 0 || !isTextFilename(cd.name)) continue;
+
+    // Read local file header to find actual data start.
+    const lhNameLen = view.getUint16(cd.localOffset + 26, true);
+    const lhExtraLen = view.getUint16(cd.localOffset + 28, true);
+    const dataStart = cd.localOffset + 30 + lhNameLen + lhExtraLen;
+
+    try {
+      let content;
+      const rawData = new Uint8Array(buf, dataStart, cd.compSize);
+      if (cd.compMethod === 0) {
+        content = new TextDecoder('utf-8', { fatal: false }).decode(rawData);
+      } else if (cd.compMethod === 8) {
+        const ds = new DecompressionStream('deflate-raw');
+        const writer = ds.writable.getWriter();
+        writer.write(rawData);
+        writer.close();
+        const reader = ds.readable.getReader();
+        const chunks = [];
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
         }
-        if (content && content.length > 0 && !isBinaryContent(content)) {
-          entries.push({ path: name, content });
-        }
-      } catch (e) { /* skip */ }
-    }
-    offset = dataStart + compSize;
+        const total = chunks.reduce((s, c) => s + c.length, 0);
+        const merged = new Uint8Array(total);
+        let p = 0;
+        for (const c of chunks) { merged.set(c, p); p += c.length; }
+        content = new TextDecoder('utf-8', { fatal: false }).decode(merged);
+      }
+      if (content && content.length > 0 && !isBinaryContent(content)) {
+        entries.push({ path: cd.name, content });
+      }
+    } catch (e) { /* skip unreadable entries */ }
   }
   return entries;
 }

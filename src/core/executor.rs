@@ -61,7 +61,7 @@ impl Executor {
                 let args: Vec<A> = args.collect();
                 let num_fruits = args.len();
                 let fruit_receiver = {
-                    let (fruit_sender, fruit_receiver) = crossbeam_channel::unbounded();
+                    let (fruit_sender, fruit_receiver) = flume::unbounded();
                     pool.scope(|scope| {
                         for (idx, arg) in args.into_iter().enumerate() {
                             // We name references for f and fruit_sender_ref because we do not
@@ -195,7 +195,7 @@ mod tests {
         let mut futures = Vec::new();
         let mut other_futures = Vec::new();
 
-        let (tx, rx) = crossbeam_channel::bounded::<()>(0);
+        let (tx, rx) = flume::bounded::<()>(0);
         let rx = Arc::new(rx);
         let executor = Executor::multi_thread(3, "search-test").unwrap();
         for _ in 0..1000 {

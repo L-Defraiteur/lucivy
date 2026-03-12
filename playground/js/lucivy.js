@@ -21,7 +21,20 @@ export class Lucivy {
         this._nextId = 1;
         this._pending = new Map();
 
+        this._logRingInterval = null;
+
         this._worker.onmessage = (e) => {
+            // Relay worker debug logs to main thread console
+            if (e.data.type === 'log') {
+                console.log('[worker]', e.data.msg);
+                return;
+            }
+            // Set up SharedArrayBuffer log ring polling (reads Rust logs
+            // directly from WASM memory — works even during deadlocks).
+            if (e.data.type === 'logRing') {
+                this._startLogRingPoller(e.data.buffer, e.data.ringPtr, e.data.ringSize);
+                return;
+            }
             const { id, result, error } = e.data;
             const pending = this._pending.get(id);
             if (pending) {
@@ -32,6 +45,34 @@ export class Lucivy {
         };
 
         this.ready = this._call('init');
+    }
+
+    _startLogRingPoller(sab, ringPtr, ringSize) {
+        // Atomics views for the two u32 header fields
+        const writePosView = new Int32Array(sab, ringPtr, 1);
+        const wrapCountView = new Int32Array(sab, ringPtr + 4, 1);
+        const bytes = new Uint8Array(sab, ringPtr, ringSize);
+        let readPos = 8;
+        let lastWrap = 0;
+
+        this._logRingInterval = setInterval(() => {
+            try {
+                const wrap = Atomics.load(wrapCountView, 0);
+                if (wrap !== lastWrap) {
+                    readPos = 8;
+                    lastWrap = wrap;
+                }
+                const writePos = Atomics.load(writePosView, 0);
+                while (readPos + 2 <= writePos && readPos + 2 < ringSize) {
+                    const len = bytes[readPos] | (bytes[readPos + 1] << 8);
+                    if (len === 0 || readPos + 2 + len > ringSize) break;
+                    const msgBytes = bytes.slice(readPos + 2, readPos + 2 + len);
+                    const msg = new TextDecoder().decode(msgBytes);
+                    console.log('[rust]', msg);
+                    readPos += 2 + len;
+                }
+            } catch (e) { /* ignore read errors */ }
+        }, 50);
     }
 
     _call(type, args = {}) {

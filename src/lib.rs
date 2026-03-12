@@ -173,6 +173,8 @@ mod future_result;
 pub use common::{ByteCount, DateTime};
 pub use {columnar, query_grammar, time};
 
+pub use actor::scheduler::set_scheduler_log_hook;
+
 pub use crate::error::LucivyError;
 pub use crate::future_result::FutureResult;
 

@@ -50,6 +50,7 @@ emcc "$STATIC_LIB" \
     -sEXPORT_NAME=createLucivy \
     -sSTACK_SIZE=2MB \
     -sEXPORTED_FUNCTIONS='[
+        "_lucivy_configure",
         "_lucivy_create",
         "_lucivy_open_begin",
         "_lucivy_import_file",
@@ -59,8 +60,9 @@ emcc "$STATIC_LIB" \
         "_lucivy_add_many",
         "_lucivy_remove",
         "_lucivy_update",
-        "_lucivy_commit",
-        "_lucivy_commit_poll",
+        "_lucivy_commit_async",
+        "_lucivy_commit_status_ptr",
+        "_lucivy_commit_finish",
         "_lucivy_rollback",
         "_lucivy_export_dirty",
         "_lucivy_export_all",
@@ -70,6 +72,9 @@ emcc "$STATIC_LIB" \
         "_lucivy_import_snapshot",
         "_lucivy_num_docs",
         "_lucivy_schema_json",
+        "_lucivy_read_logs",
+        "_lucivy_log_ring_ptr",
+        "_lucivy_log_ring_size",
         "_malloc",
         "_free",
         "_main"
@@ -84,6 +89,13 @@ emcc "$STATIC_LIB" \
     -sDISABLE_EXCEPTION_CATCHING=0 \
     -O2
 
+echo "=== Step 3: Copy to playground ==="
+PLAYGROUND_PKG="$ROOT_DIR/playground/pkg"
+mkdir -p "$PLAYGROUND_PKG"
+cp "$OUT_DIR"/lucivy.* "$PLAYGROUND_PKG"/
+echo "Copied to $PLAYGROUND_PKG"
+
 echo "=== Done ==="
 echo "Output: $OUT_DIR/lucivy.js + $OUT_DIR/lucivy.wasm"
 ls -lh "$OUT_DIR"/lucivy.*
+ls -lh "$PLAYGROUND_PKG"/lucivy.*

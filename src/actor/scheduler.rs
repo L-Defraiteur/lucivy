@@ -14,6 +14,16 @@ use super::{Actor, ActorStatus, Priority};
 // Comme rayon::ThreadPool, initialisé lazy au premier usage.
 // ---------------------------------------------------------------------------
 
+/// Optional log hook — called for every scheduler debug event.
+/// Set by the emscripten binding to route events into the SAB ring buffer.
+static LOG_HOOK: Mutex<Option<Box<dyn Fn(&str) + Send>>> = Mutex::new(None);
+
+/// Register a log hook that receives formatted scheduler event strings.
+/// Called from the emscripten binding to route [sched] events into the ring buffer.
+pub fn set_scheduler_log_hook<F: Fn(&str) + Send + 'static>(f: F) {
+    *LOG_HOOK.lock().unwrap() = Some(Box::new(f));
+}
+
 struct GlobalSchedulerState {
     scheduler: Arc<Scheduler>,
     _handle: SchedulerHandle, // garde les threads en vie
@@ -29,9 +39,15 @@ static GLOBAL_SCHEDULER: OnceLock<GlobalSchedulerState> = OnceLock::new();
 pub(crate) fn global_scheduler() -> &'static Arc<Scheduler> {
     &GLOBAL_SCHEDULER
         .get_or_init(|| {
-            let num_threads = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(2);
+            let num_threads = std::env::var("LUCIVY_SCHEDULER_THREADS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or_else(|| {
+                    std::thread::available_parallelism()
+                        .map(|n| n.get())
+                        .unwrap_or(2)
+                });
+            eprintln!("[scheduler] starting with {num_threads} threads");
             let scheduler = Arc::new(Scheduler::new(num_threads));
             let handle = scheduler.start();
 
@@ -56,8 +72,15 @@ pub(crate) fn global_scheduler() -> &'static Arc<Scheduler> {
                             )
                         };
                         while let Some(event) = events.recv() {
-                            let _ = writeln!(out, "[sched] {event:?}");
+                            let msg = format!("[sched] {event:?}");
+                            let _ = writeln!(out, "{msg}");
                             let _ = out.flush();
+                            // Also route to the log hook (ring buffer in WASM)
+                            if let Ok(guard) = LOG_HOOK.lock() {
+                                if let Some(ref hook) = *guard {
+                                    hook(&msg);
+                                }
+                            }
                         }
                     })
                     .expect("failed to spawn scheduler debug thread");

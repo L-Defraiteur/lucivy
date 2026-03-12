@@ -8,19 +8,170 @@
 
 mod directory;
 
+// ── SharedArrayBuffer log ring buffer ─────────────────────────────
+// Readable directly from JS via SharedArrayBuffer — no ccall needed.
+// This is critical because during a deadlock the proxy pthread is blocked
+// and ccall-based log reading is impossible.
+//
+// Layout (64 KB):
+//   [0..4]  write_pos   (AtomicU32) — next byte offset to write at
+//   [4..8]  wrap_count  (AtomicU32) — incremented on each wrap-around
+//   [8..]   entries, each: [u16_le len][utf8 bytes...]
+//
+// JS reader tracks (readPos, lastWrap) and polls every 50ms via Atomics.
+
+use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+const RING_SIZE: usize = 65536;
+const RING_HEADER: usize = 8;
+
+#[repr(C, align(4))]
+struct LogRing(UnsafeCell<[u8; RING_SIZE]>);
+unsafe impl Sync for LogRing {}
+
+static LOG_RING: LogRing = LogRing(UnsafeCell::new([0u8; RING_SIZE]));
+static RING_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn ring_ptr() -> *mut u8 {
+    LOG_RING.0.get() as *mut u8
+}
+
+fn ring_write_pos() -> &'static AtomicU32 {
+    unsafe { &*(ring_ptr() as *const AtomicU32) }
+}
+
+fn ring_wrap_count() -> &'static AtomicU32 {
+    unsafe { &*(ring_ptr().add(4) as *const AtomicU32) }
+}
+
+fn ring_write(msg: &str) {
+    let bytes = msg.as_bytes();
+    let entry_size = 2 + bytes.len();
+    if entry_size > RING_SIZE - RING_HEADER {
+        return;
+    }
+
+    let _lock = RING_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let mut pos = ring_write_pos().load(Ordering::Relaxed) as usize;
+    if pos < RING_HEADER {
+        pos = RING_HEADER;
+    }
+
+    if pos + entry_size > RING_SIZE {
+        pos = RING_HEADER;
+        ring_wrap_count().fetch_add(1, Ordering::Release);
+    }
+
+    unsafe {
+        let p = ring_ptr();
+        let len = bytes.len() as u16;
+        *p.add(pos) = (len & 0xFF) as u8;
+        *p.add(pos + 1) = (len >> 8) as u8;
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), p.add(pos + 2), bytes.len());
+    }
+
+    ring_write_pos().store((pos + entry_size) as u32, Ordering::Release);
+}
+
+/// Return pointer to the log ring buffer (for JS to read via SharedArrayBuffer).
+#[no_mangle]
+pub extern "C" fn lucivy_log_ring_ptr() -> *const u8 {
+    ring_ptr()
+}
+
+/// Return size of the log ring buffer.
+#[no_mangle]
+pub extern "C" fn lucivy_log_ring_size() -> u32 {
+    RING_SIZE as u32
+}
+
+// ── Global log buffer (readable from JS via lucivy_read_logs) ───────────
+
+static LOG_BUF: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn rlog(msg: &str) {
+    ring_write(msg);
+    if let Ok(mut buf) = LOG_BUF.lock() {
+        buf.push(msg.to_string());
+    }
+    eprintln!("{msg}");
+}
+
+macro_rules! rlog {
+    ($($arg:tt)*) => { rlog(&format!($($arg)*)) };
+}
+
 /// Dummy main required by emscripten's PROXY_TO_PTHREAD mode.
 /// The actual work is done via exported C functions called from JS.
 #[no_mangle]
 pub extern "C" fn __main_argc_argv(_argc: i32, _argv: *const *const c_char) -> i32 {
+    // Default: limit scheduler to 4 threads (PTHREAD_POOL_SIZE=8 in build.sh).
+    // Can be overridden by calling lucivy_configure() before first index op.
+    std::env::set_var("LUCIVY_SCHEDULER_THREADS", "4");
+    std::env::set_var("LUCIVY_SCHEDULER_DEBUG", "1");
+
+    // Route scheduler events into the SAB ring buffer so they're visible
+    // from the main thread even during deadlocks.
+    ld_lucivy::set_scheduler_log_hook(|msg| ring_write(msg));
+
+    rlog!("[lucivy-wasm] main() started, default scheduler_threads=4, debug=on");
     0
+}
+
+/// Configure the scheduler before any index operation.
+/// Must be called before `lucivy_create` / `lucivy_open_begin`.
+///
+/// - `scheduler_threads`: number of threads for the actor scheduler.
+/// - `thread_pool_size`: total emscripten pthread pool size (PTHREAD_POOL_SIZE
+///   from build.sh). Used only to warn if the scheduler would exhaust the pool,
+///   leaving no room for commit threads.
+///
+/// If `scheduler_threads` is 0, the scheduler auto-detects (available_parallelism).
+#[no_mangle]
+pub unsafe extern "C" fn lucivy_configure(
+    scheduler_threads: u32,
+    thread_pool_size: u32,
+) {
+    if scheduler_threads > 0 {
+        std::env::set_var(
+            "LUCIVY_SCHEDULER_THREADS",
+            scheduler_threads.to_string(),
+        );
+        // The scheduler uses `scheduler_threads` persistent threads.
+        // Commit, warm-gc, and debug-logger each need one more.
+        // If the total leaves no headroom, warn loudly.
+        let reserved_for_others = 3; // commit + warm-gc + debug-logger
+        let total_needed = scheduler_threads + reserved_for_others;
+        if thread_pool_size > 0 && total_needed >= thread_pool_size {
+            rlog!(
+                "[lucivy-wasm] WARNING: scheduler_threads={scheduler_threads} + \
+                 {reserved_for_others} reserved = {total_needed} threads needed, \
+                 but PTHREAD_POOL_SIZE={thread_pool_size}. \
+                 Commit will not be able to spawn its processing thread. \
+                 Reduce scheduler_threads or increase PTHREAD_POOL_SIZE."
+            );
+        }
+        rlog!(
+            "[lucivy-wasm] configured: scheduler_threads={scheduler_threads}, \
+             pool_size={thread_pool_size}"
+        );
+    }
 }
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread::JoinHandle;
+
+/// Read and drain accumulated Rust-side logs. Returns JSON array of strings.
+#[no_mangle]
+pub unsafe extern "C" fn lucivy_read_logs() -> *const c_char {
+    let logs: Vec<String> = LOG_BUF.lock().map(|mut b| b.drain(..).collect()).unwrap_or_default();
+    let json = serde_json::to_string(&logs).unwrap_or_else(|_| "[]".into());
+    return_str(json)
+}
 
 use ld_lucivy::collector::{FilterCollector, TopDocs};
 use ld_lucivy::query::HighlightSink;
@@ -40,11 +191,8 @@ struct LucivyContext {
     text_fields: Vec<String>,
     directory: MemoryDirectory,
     index_path: String,
-    /// Background commit thread + done flag. Commit must run off the worker
-    /// thread so the event loop stays free for pthread coordination.
-    commit_thread: Option<JoinHandle<Result<(), String>>>,
-    commit_done: Arc<AtomicBool>,
 }
+
 
 // ── Thread-local return buffer ─────────────────────────────────────────────
 
@@ -110,8 +258,7 @@ pub unsafe extern "C" fn lucivy_create(
         text_fields,
         directory,
         index_path: path.to_string(),
-        commit_thread: None,
-        commit_done: Arc::new(AtomicBool::new(false)),
+
     }))
 }
 
@@ -175,8 +322,7 @@ pub unsafe extern "C" fn lucivy_open_finish(ctx: *mut LucivyContext) -> *mut Luc
         text_fields,
         directory: open_ctx.directory,
         index_path: open_ctx.path,
-        commit_thread: None,
-        commit_done: Arc::new(AtomicBool::new(false)),
+
     }))
 }
 
@@ -221,13 +367,17 @@ pub unsafe extern "C" fn lucivy_add(
         Ok(w) => w,
         Err(_) => return return_error("writer lock poisoned"),
     };
-    match writer.add_document(doc) {
+    let result = match writer.add_document(doc) {
         Ok(_) => {
             ctx.handle.mark_uncommitted();
-            return_str("ok".into())
+            "ok".into()
         }
-        Err(e) => return_error(&e.to_string()),
-    }
+        Err(e) => {
+            return return_error(&e.to_string());
+        }
+    };
+    drop(writer);
+    return_str(result)
 }
 
 #[no_mangle]
@@ -312,56 +462,81 @@ pub unsafe extern "C" fn lucivy_update(
 
 // ── Transaction ────────────────────────────────────────────────────────────
 
-/// Non-blocking commit: spawns a dedicated thread so the worker's event loop
-/// stays free for pthread coordination. JS polls `lucivy_commit_poll`.
+// ── Commit on dedicated pthread (bypasses ASYNCIFY entirely) ───────────────
+//
+// ASYNCIFY cannot handle the deep blocking call stack inside writer.commit().
+// Instead we spawn a real std::thread (from the PTHREAD_POOL), do the commit
+// there, and signal completion via an AtomicU32 that JS reads directly from
+// the SharedArrayBuffer with Atomics.load() — zero ccall for polling.
+//
+// Status: 0=idle, 1=running, 2=done_ok, 3=done_error
+
+static COMMIT_STATUS: AtomicU32 = AtomicU32::new(0);
+
+/// Return pointer to COMMIT_STATUS so JS can poll via Atomics.load() on the SAB.
 #[no_mangle]
-pub unsafe extern "C" fn lucivy_commit(ctx: *mut LucivyContext) -> *const c_char {
-    let ctx = &mut *ctx;
-    if ctx.commit_thread.is_some() {
-        return return_error("commit already in progress");
-    }
-    let handle_ptr = &ctx.handle as *const LucivyHandle as usize;
-    let done = ctx.commit_done.clone();
-    done.store(false, Ordering::Release);
-
-    let join = std::thread::Builder::new()
-        .name("lucivy-commit".into())
-        .spawn(move || {
-            let handle = &*(handle_ptr as *const LucivyHandle);
-            let mut writer = handle.writer.lock().map_err(|_| "writer lock poisoned".to_string())?;
-            writer.commit().map_err(|e| e.to_string())?;
-            drop(writer);
-            handle.reader.reload().map_err(|e| e.to_string())?;
-            handle.mark_committed();
-            done.store(true, Ordering::Release);
-            Ok(())
-        });
-
-    match join {
-        Ok(jh) => { ctx.commit_thread = Some(jh); return_str("ok".into()) }
-        Err(e) => return_error(&format!("cannot spawn commit thread: {e}")),
-    }
+pub extern "C" fn lucivy_commit_status_ptr() -> *const u32 {
+    &COMMIT_STATUS as *const AtomicU32 as *const u32
 }
 
-/// Poll commit completion. Returns "pending", "ok", or {"error":"..."}.
+/// Spawn commit on a dedicated pthread. Returns 0 on success, -1 if already running.
+/// JS should poll COMMIT_STATUS via the SAB pointer until it reads 2 (ok) or 3 (error).
+/// After reading 2 or 3, call lucivy_commit_finish() to get the result and reset status.
 #[no_mangle]
-pub unsafe extern "C" fn lucivy_commit_poll(ctx: *mut LucivyContext) -> *const c_char {
-    let ctx = &mut *ctx;
-    if !ctx.commit_done.load(Ordering::Acquire) {
-        return if ctx.commit_thread.is_some() {
-            return_str("pending".into())
-        } else {
-            return_error("no commit in progress")
-        };
+pub unsafe extern "C" fn lucivy_commit_async(ctx: *mut LucivyContext) -> i32 {
+    if COMMIT_STATUS.load(Ordering::Relaxed) == 1 {
+        ring_write("[commit] already running!");
+        return -1;
     }
-    if let Some(jh) = ctx.commit_thread.take() {
-        match jh.join() {
-            Ok(Ok(())) => return_str("ok".into()),
-            Ok(Err(e)) => return_error(&e),
-            Err(_) => return_error("commit thread panicked"),
+    COMMIT_STATUS.store(1, Ordering::Release);
+
+    let ctx_ptr = ctx as usize; // usize is Send
+    std::thread::spawn(move || {
+        let ctx = &mut *(ctx_ptr as *mut LucivyContext);
+        ring_write("[commit-thread] started");
+
+        ring_write("[commit-thread] acquiring writer lock...");
+        let mut writer = match ctx.handle.writer.lock() {
+            Ok(w) => w,
+            Err(_) => {
+                ring_write("[commit-thread] writer lock poisoned!");
+                COMMIT_STATUS.store(3, Ordering::Release);
+                return;
+            }
+        };
+        ring_write("[commit-thread] writer lock acquired, committing...");
+        if let Err(e) = writer.commit() {
+            ring_write(&format!("[commit-thread] commit error: {e}"));
+            drop(writer);
+            COMMIT_STATUS.store(3, Ordering::Release);
+            return;
         }
+        drop(writer);
+        ring_write("[commit-thread] committed, reloading reader...");
+        if let Err(e) = ctx.handle.reader.reload() {
+            ring_write(&format!("[commit-thread] reload error: {e}"));
+            COMMIT_STATUS.store(3, Ordering::Release);
+            return;
+        }
+        ctx.handle.mark_committed();
+        ring_write("[commit-thread] done OK");
+        COMMIT_STATUS.store(2, Ordering::Release);
+    });
+
+    ring_write("[commit] thread spawned");
+    0
+}
+
+/// Read and reset commit status. Returns "ok" or {"error":"..."}.
+/// Call this after COMMIT_STATUS reads 2 or 3 from JS.
+#[no_mangle]
+pub extern "C" fn lucivy_commit_finish() -> *const c_char {
+    let status = COMMIT_STATUS.load(Ordering::Acquire);
+    COMMIT_STATUS.store(0, Ordering::Release);
+    if status == 2 {
+        return_str("ok".into())
     } else {
-        return_error("no commit in progress")
+        return_error("commit failed (check ring buffer logs)")
     }
 }
 
@@ -504,8 +679,7 @@ pub unsafe extern "C" fn lucivy_import_snapshot(
         text_fields,
         directory,
         index_path: path.to_string(),
-        commit_thread: None,
-        commit_done: Arc::new(AtomicBool::new(false)),
+
     }))
 }
 

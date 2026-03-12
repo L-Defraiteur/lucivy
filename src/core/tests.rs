@@ -168,7 +168,7 @@ mod mmap_specific {
             .try_into()?;
         assert_eq!(reader.searcher().num_docs(), 0);
         writer.add_document(doc!(field=>1u64))?;
-        let (sender, receiver) = crossbeam_channel::unbounded();
+        let (sender, receiver) = flume::unbounded();
         let _handle = index.directory_mut().watch(WatchCallback::new(move || {
             let _ = sender.send(());
         }));
@@ -203,7 +203,7 @@ fn test_index_on_commit_reload_policy_aux(
     reader: &IndexReader,
 ) -> crate::Result<()> {
     let mut reader_index = reader.index();
-    let (sender, receiver) = crossbeam_channel::unbounded();
+    let (sender, receiver) = flume::unbounded();
     let _watch_handle = reader_index
         .directory_mut()
         .watch(WatchCallback::new(move || {

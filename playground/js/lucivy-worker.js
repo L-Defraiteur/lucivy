@@ -14,11 +14,63 @@ let Module = null;
 
 const indexes = new Map(); // path -> ctx pointer
 
+// ── Debug: relay worker logs to main thread ──────────────────────────────────
+
+function wlog(...args) {
+    const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+    self.postMessage({ type: 'log', msg });
+    console.log(msg);
+}
+
+// ── Rust log poller ──────────────────────────────────────────────────────────
+// Polls lucivy_read_logs() every 200ms and relays to main thread via wlog.
+
+function startLogPoller() {
+    setInterval(async () => {
+        if (!Module) return;
+        try {
+            const ptr = await Module.ccall('lucivy_read_logs', 'number', [], [], { async: true });
+            if (!ptr) return;
+            const json = Module.UTF8ToString(ptr);
+            const logs = JSON.parse(json);
+            for (const msg of logs) {
+                wlog('[rust] ' + msg);
+            }
+        } catch (e) { /* ignore */ }
+    }, 200);
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+async function drainRustLogs() {
+    try {
+        // Try direct call first (no ASYNCIFY overhead), fall back to ccall
+        let ptr;
+        if (Module._lucivy_read_logs) {
+            ptr = Module._lucivy_read_logs();
+        } else if (Module.asm && Module.asm._lucivy_read_logs) {
+            ptr = Module.asm._lucivy_read_logs();
+        } else {
+            // List available exports for debugging
+            const exports = Module.asm ? Object.keys(Module.asm).filter(k => k.includes('lucivy')).join(', ') : 'no asm';
+            wlog('[drain] lucivy_read_logs not found. exports: ' + exports);
+            return;
+        }
+        if (ptr) {
+            const json = Module.UTF8ToString(ptr);
+            const logs = JSON.parse(json);
+            for (const msg of logs) wlog('[rust] ' + msg);
+        }
+    } catch (e) { wlog('[drain] ERROR: ' + e.message); }
+}
+
 async function callStr(fn, ...args) {
+    // Drain Rust logs before each call for observability
+    await drainRustLogs();
+    wlog('[callStr] calling ' + fn);
     const types = args.map(a => typeof a === 'number' ? 'number' : 'string');
     const ptr = await Module.ccall(fn, 'number', types, args, { async: true });
+    wlog('[callStr] ' + fn + ' returned');
     return Module.UTF8ToString(ptr);
 }
 
@@ -137,6 +189,47 @@ self.onmessage = async (e) => {
             case 'init': {
                 const { default: createLucivy } = await import('../pkg/lucivy.js');
                 Module = await createLucivy();
+
+                // Scheduler is configured to 4 threads by default in main().
+                // Override with lucivy_configure() if needed.
+                startLogPoller();
+
+                // Send SharedArrayBuffer ring buffer info to main thread
+                // so it can read Rust logs directly (even during deadlocks).
+                try {
+                    const ringPtr = await Module.ccall(
+                        'lucivy_log_ring_ptr', 'number', [], [], { async: true });
+                    const ringSize = await Module.ccall(
+                        'lucivy_log_ring_size', 'number', [], [], { async: true });
+                    if (ringPtr && ringSize && Module.HEAPU8.buffer instanceof SharedArrayBuffer) {
+                        self.postMessage({
+                            type: 'logRing',
+                            buffer: Module.HEAPU8.buffer,
+                            ringPtr,
+                            ringSize,
+                        });
+                        wlog(`[init] log ring: offset=${ringPtr}, size=${ringSize}`);
+                    } else {
+                        wlog('[init] log ring: not available (no SAB or null ptr)');
+                    }
+                } catch (e) {
+                    wlog('[init] log ring setup failed: ' + e.message);
+                }
+
+                // Get commit status pointer for SAB-based polling (zero ccall).
+                try {
+                    const statusPtr = await Module.ccall(
+                        'lucivy_commit_status_ptr', 'number', [], [], { async: true });
+                    if (statusPtr && Module.HEAPU8.buffer instanceof SharedArrayBuffer) {
+                        self._commitStatusView = new Int32Array(
+                            Module.HEAPU8.buffer, statusPtr, 1);
+                        wlog(`[init] commit status ptr: offset=${statusPtr}`);
+                    }
+                } catch (e) {
+                    wlog('[init] commit status ptr failed: ' + e.message);
+                }
+
+                wlog('[init] module ready');
                 result = true;
                 break;
             }
@@ -240,16 +333,34 @@ self.onmessage = async (e) => {
             case 'commit': {
                 const ctx = getCtx(args.path);
 
-                // Non-blocking commit: Rust spawns a thread, we poll until done.
-                // Yield first so pthreads created during create/add can activate.
-                await new Promise(r => setTimeout(r, 0));
-                const beginRes = await callStr('lucivy_commit', ctx);
-                checkResult(beginRes);
-                while (true) {
-                    await new Promise(r => setTimeout(r, 5));
-                    const pollRes = await callStr('lucivy_commit_poll', ctx);
-                    if (pollRes !== 'pending') { checkResult(pollRes); break; }
-                }
+                // Spawn commit on a dedicated pthread (bypasses ASYNCIFY).
+                wlog('[commit] spawning commit thread...');
+                const rc = await Module.ccall('lucivy_commit_async', 'number',
+                    ['number'], [ctx], { async: true });
+                if (rc !== 0) throw new Error('commit already running');
+                wlog('[commit] thread spawned, polling status via SAB...');
+
+                // Poll COMMIT_STATUS directly from SharedArrayBuffer — zero ccall.
+                const statusView = self._commitStatusView;
+                if (!statusView) throw new Error('commit status view not initialized');
+                await new Promise((resolve, reject) => {
+                    const poll = setInterval(() => {
+                        const status = Atomics.load(statusView, 0);
+                        if (status >= 2) {
+                            clearInterval(poll);
+                            if (status === 2) {
+                                wlog('[commit] done OK (from SAB poll)');
+                                resolve();
+                            } else {
+                                wlog('[commit] FAILED (from SAB poll)');
+                                reject(new Error('commit failed — check [rust] ring buffer logs'));
+                            }
+                        }
+                    }, 50);
+                });
+
+                // Reset status via quick ccall.
+                await Module.ccall('lucivy_commit_finish', 'number', [], [], { async: true });
 
                 // Sync dirty files to OPFS (best-effort).
                 try {
