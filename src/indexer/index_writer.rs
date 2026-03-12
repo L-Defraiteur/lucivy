@@ -9,7 +9,7 @@ use super::indexer_actor::{IndexerActor, IndexerMsg};
 use super::operation::{AddOperation, UserOperation};
 use super::segment_updater::SegmentUpdater;
 use super::{AddBatch, PreparedCommit};
-use crate::actor::{mailbox, reply, ActorRef, Scheduler, SchedulerHandle};
+use crate::actor::{mailbox, reply, ActorRef};
 use crate::directory::{DirectoryLock, GarbageCollectionResult, TerminatingWrite};
 use crate::error::LucivyError;
 use crate::fastfield::write_alive_bitset;
@@ -83,12 +83,6 @@ pub struct IndexWriter<D: Document = LucivyDocument> {
 
     /// Round-robin counter for distributing docs to workers.
     next_worker: Arc<AtomicUsize>,
-
-    /// Scheduler managing the indexer actor threads.
-    scheduler: Arc<Scheduler>,
-
-    /// Handle to the scheduler threads. Drop = shutdown + join.
-    scheduler_handle: Option<SchedulerHandle>,
 
     index_writer_status: IndexWriterStatus<D>,
 
@@ -294,7 +288,7 @@ impl<D: Document> IndexWriter<D> {
         let stamper = Stamper::new(current_opstamp);
 
         let index_writer_status = IndexWriterStatus::new();
-        let scheduler = Arc::new(Scheduler::new(options.num_worker_threads));
+        let scheduler = Arc::clone(crate::actor::scheduler::global_scheduler());
 
         let segment_updater = SegmentUpdater::create(
             index.clone(),
@@ -318,16 +312,12 @@ impl<D: Document> IndexWriter<D> {
             worker_refs.push(aref);
         }
 
-        let scheduler_handle = Some(scheduler.start());
-
         Ok(Self {
             _directory_lock: Some(directory_lock),
             options: options.clone(),
             index: index.clone(),
             worker_refs,
             next_worker: Arc::new(AtomicUsize::new(0)),
-            scheduler,
-            scheduler_handle,
             index_writer_status,
             segment_updater,
             delete_queue,
@@ -356,11 +346,10 @@ impl<D: Document> IndexWriter<D> {
             error!("Some merging thread failed {e:?}");
         }
 
-        // Shutdown les workers et le scheduler.
+        // Shutdown les workers — les acteurs se retirent du scheduler global.
         for worker in &self.worker_refs {
             let _ = worker.send(IndexerMsg::Shutdown);
         }
-        self.scheduler_handle.take();
 
         result
     }
@@ -393,6 +382,14 @@ impl<D: Document> IndexWriter<D> {
     /// Setter for the merge policy.
     pub fn set_merge_policy(&self, merge_policy: Box<dyn MergePolicy>) {
         self.segment_updater.set_merge_policy(merge_policy);
+    }
+
+    /// S'abonner aux events métier de l'indexer (merge, commit).
+    /// Zero-cost quand personne n'écoute.
+    pub fn subscribe_index_events(
+        &self,
+    ) -> crate::actor::events::EventReceiver<super::events::IndexEvent> {
+        self.segment_updater.subscribe_index_events()
     }
 
     /// Detects and removes the files that are not used by the index anymore.
@@ -521,6 +518,8 @@ impl<D: Document> IndexWriter<D> {
         }
 
         // Wait for all workers to finish flushing their current segments.
+        // wait_blocking est sûr ici : on est sur le test/caller thread,
+        // pas sur un thread du scheduler. Les scheduler threads traitent les Flush.
         for rx in receivers {
             rx.wait_blocking()?;
         }
@@ -693,11 +692,10 @@ impl<D: Document> Drop for IndexWriter<D> {
     fn drop(&mut self) {
         self.segment_updater.kill();
         // Send Shutdown to each worker actor so they exit cleanly.
+        // Les acteurs se retirent du scheduler global — les threads persistent.
         for worker in &self.worker_refs {
             let _ = worker.send(IndexerMsg::Shutdown);
         }
-        // SchedulerHandle::drop() joins the threads automatically.
-        self.scheduler_handle.take();
     }
 }
 
@@ -2470,5 +2468,98 @@ mod tests {
             "Writer should reject options with too high memory size"
         );
         assert!(matches!(result, Err(LucivyError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn test_index_events_commit_and_merge() -> crate::Result<()> {
+        use crate::indexer::events::IndexEvent;
+        use crate::indexer::merge_policy::tests::MergeWheneverPossible;
+
+        let mut schema_builder = Schema::builder();
+        let text_field = schema_builder.add_text_field("text", TEXT);
+        let index = Index::create_in_ram(schema_builder.build());
+        let mut index_writer = index.writer_for_tests()?;
+        index_writer.set_merge_policy(Box::new(MergeWheneverPossible));
+
+        // Souscrire aux events AVANT toute opération.
+        let events_rx = index_writer.subscribe_index_events();
+
+        // Créer 2 segments puis commit pour déclencher un merge.
+        for _ in 0..100 {
+            index_writer.add_document(doc!(text_field => "hello world"))?;
+        }
+        index_writer.commit()?;
+
+        for _ in 0..100 {
+            index_writer.add_document(doc!(text_field => "foo bar"))?;
+        }
+        index_writer.commit()?;
+
+        // Attendre que les merges finissent.
+        index_writer.wait_merging_threads()?;
+
+        // Collecter tous les events reçus.
+        let mut events = Vec::new();
+        while let Some(event) = events_rx.try_recv() {
+            events.push(event);
+        }
+
+        // On doit avoir au moins CommitStarted + CommitCompleted pour les 2 commits.
+        let commit_started = events
+            .iter()
+            .filter(|e| matches!(e, IndexEvent::CommitStarted { .. }))
+            .count();
+        let commit_completed = events
+            .iter()
+            .filter(|e| matches!(e, IndexEvent::CommitCompleted { .. }))
+            .count();
+        assert!(
+            commit_started >= 2,
+            "Expected at least 2 CommitStarted, got {commit_started}. Events: {events:?}"
+        );
+        assert!(
+            commit_completed >= 2,
+            "Expected at least 2 CommitCompleted, got {commit_completed}. Events: {events:?}"
+        );
+
+        // Vérifier qu'on a reçu au moins un MergeStarted et MergeCompleted.
+        let merge_started = events
+            .iter()
+            .filter(|e| matches!(e, IndexEvent::MergeStarted { .. }))
+            .count();
+        let merge_completed = events
+            .iter()
+            .filter(|e| matches!(e, IndexEvent::MergeCompleted { .. }))
+            .count();
+        assert!(
+            merge_started >= 1,
+            "Expected at least 1 MergeStarted, got {merge_started}. Events: {events:?}"
+        );
+        assert!(
+            merge_completed >= 1,
+            "Expected at least 1 MergeCompleted, got {merge_completed}. Events: {events:?}"
+        );
+
+        // Pas de MergeFailed.
+        let merge_failed = events
+            .iter()
+            .filter(|e| matches!(e, IndexEvent::MergeFailed { .. }))
+            .count();
+        assert_eq!(
+            merge_failed, 0,
+            "Expected no MergeFailed, got {merge_failed}. Events: {events:?}"
+        );
+
+        // Vérifier que MergeCompleted a une duration > 0.
+        for event in &events {
+            if let IndexEvent::MergeCompleted { duration, .. } = event {
+                assert!(
+                    !duration.is_zero(),
+                    "MergeCompleted duration should be > 0"
+                );
+            }
+        }
+
+        Ok(())
     }
 }

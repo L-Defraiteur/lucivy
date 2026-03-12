@@ -1,6 +1,6 @@
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::task::Poll;
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -8,6 +8,68 @@ use std::time::Instant;
 use super::events::{EventBus, EventReceiver, SchedulerEvent, WakeReason};
 use super::mailbox::{attach_wake_handle, ActorRef, Mailbox, WakeHandle};
 use super::{Actor, ActorStatus, Priority};
+
+// ---------------------------------------------------------------------------
+// Global scheduler — un seul pool de threads pour tout le process.
+// Comme rayon::ThreadPool, initialisé lazy au premier usage.
+// ---------------------------------------------------------------------------
+
+struct GlobalSchedulerState {
+    scheduler: Arc<Scheduler>,
+    _handle: SchedulerHandle, // garde les threads en vie
+}
+
+static GLOBAL_SCHEDULER: OnceLock<GlobalSchedulerState> = OnceLock::new();
+
+/// Retourne le scheduler global partagé par tout le process.
+/// Initialisé lazy avec un nombre de threads = nombre de cores.
+///
+/// Si la variable d'environnement `LUCIVY_SCHEDULER_DEBUG=1` est définie,
+/// un thread logger affiche tous les events du scheduler sur stderr.
+pub(crate) fn global_scheduler() -> &'static Arc<Scheduler> {
+    &GLOBAL_SCHEDULER
+        .get_or_init(|| {
+            let num_threads = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(2);
+            let scheduler = Arc::new(Scheduler::new(num_threads));
+            let handle = scheduler.start();
+
+            // Debug logger — activé par env var.
+            // LUCIVY_SCHEDULER_DEBUG=1 → stderr
+            // LUCIVY_SCHEDULER_DEBUG=/path/to/file → fichier
+            if let Ok(debug_val) = std::env::var("LUCIVY_SCHEDULER_DEBUG") {
+                let events = scheduler.subscribe_events();
+                std::thread::Builder::new()
+                    .name("scheduler-debug".into())
+                    .spawn(move || {
+                        use std::io::Write;
+                        let mut out: Box<dyn Write + Send> = if debug_val == "1" {
+                            Box::new(std::io::stderr())
+                        } else {
+                            Box::new(
+                                std::fs::OpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open(&debug_val)
+                                    .expect("cannot open scheduler debug log"),
+                            )
+                        };
+                        while let Some(event) = events.recv() {
+                            let _ = writeln!(out, "[sched] {event:?}");
+                            let _ = out.flush();
+                        }
+                    })
+                    .expect("failed to spawn scheduler debug thread");
+            }
+
+            GlobalSchedulerState {
+                scheduler,
+                _handle: handle,
+            }
+        })
+        .scheduler
+}
 
 /// Identifiant unique d'un acteur dans le scheduler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -33,7 +95,7 @@ struct SharedState {
     actors: Mutex<HashMap<ActorId, ActorSlot>>,
     work_available: Condvar,
     shutdown: AtomicBool,
-    events: Arc<EventBus>,
+    events: Arc<EventBus<SchedulerEvent>>,
 }
 
 struct ActorSlot {
@@ -126,6 +188,15 @@ pub(super) struct SchedulerNotifier {
 }
 
 impl SchedulerNotifier {
+    pub fn actor_id(&self) -> ActorId {
+        self.actor_id
+    }
+
+    pub fn actor_name(&self) -> &'static str {
+        let actors = self.shared.actors.lock().unwrap();
+        actors.get(&self.actor_id).map(|s| s.name).unwrap_or("dead")
+    }
+
     pub fn wake(&self) {
         // Récupérer la priorité et le nom en un seul lock.
         let (priority, name) = {
@@ -198,10 +269,11 @@ impl Scheduler {
             // Commence à false : l'acteur est dans la ready queue au spawn,
             // donc pas idle. Le scheduler le mettra à true quand il passera idle.
             is_idle: AtomicBool::new(false),
+            events: Arc::clone(&self.shared.events),
         });
         attach_wake_handle(actor_ref, Arc::clone(&wake_handle));
 
-        actor.on_start();
+        actor.on_start(actor_ref.clone());
 
         let wrapper = ActorWrapper { actor, mailbox };
         let priority = wrapper.priority();
@@ -225,6 +297,7 @@ impl Scheduler {
                 actor_id: id,
             });
         }
+        self.shared.work_available.notify_one();
 
         self.shared.events.emit(SchedulerEvent::ActorSpawned {
             actor_id: id,
@@ -253,15 +326,16 @@ impl Scheduler {
         }
     }
 
-    pub fn run_one_step(&self) {
-        run_one_step_impl(&self.shared);
+    /// Exécute un step de travail. Retourne `true` si du travail a été fait.
+    pub fn run_one_step(&self) -> bool {
+        run_one_step_impl(&self.shared)
     }
 
     pub fn is_single_threaded(&self) -> bool {
         self.num_threads <= 1
     }
 
-    pub fn subscribe_events(&self) -> EventReceiver {
+    pub fn subscribe_events(&self) -> EventReceiver<SchedulerEvent> {
         self.shared.events.subscribe()
     }
 }
@@ -355,18 +429,45 @@ fn run_loop(shared: &SharedState, thread_index: usize) {
                 shared.work_available.notify_one();
             }
             BatchResult::Idle => {
+                let needs_rewake;
                 {
                     let mut actors = shared.actors.lock().unwrap();
                     if let Some(slot) = actors.get_mut(&actor_id) {
                         slot.actor = Some(actor_box);
                         // Remettre le flag idle → le prochain send() réveillera.
                         slot.wake_handle.is_idle.store(true, Ordering::Release);
+                        // RACE FIX: un send() a pu arriver entre has_pending()
+                        // (dans handle_batch) et le store(true) ci-dessus.
+                        // Ce send() a vu is_idle=false → pas de wake.
+                        // On re-vérifie la mailbox pour rattraper ce cas.
+                        needs_rewake = slot.actor.as_ref()
+                            .map(|a| a.has_pending())
+                            .unwrap_or(false);
+                    } else {
+                        needs_rewake = false;
                     }
                 }
-                shared.events.emit(SchedulerEvent::ActorIdle {
-                    actor_id,
-                    actor_name: name,
-                });
+                if needs_rewake {
+                    // Un message a glissé entre le check et le idle.
+                    // Re-enqueue l'acteur (doublon possible, géré par take → None).
+                    let priority = {
+                        let actors = shared.actors.lock().unwrap();
+                        actors.get(&actor_id)
+                            .and_then(|s| s.actor.as_ref())
+                            .map(|a| a.priority())
+                            .unwrap_or(Priority::Medium)
+                    };
+                    {
+                        let mut queue = shared.ready_queue.lock().unwrap();
+                        queue.push(ReadyEntry { priority, actor_id });
+                    }
+                    shared.work_available.notify_one();
+                } else {
+                    shared.events.emit(SchedulerEvent::ActorIdle {
+                        actor_id,
+                        actor_name: name,
+                    });
+                }
             }
         }
     }
@@ -407,6 +508,12 @@ fn handle_batch(
 ) -> BatchResult {
     let priority_before = actor.priority();
 
+    shared.events.emit(SchedulerEvent::BatchStarted {
+        actor_id,
+        actor_name,
+        mailbox_depth: actor.mailbox_len(),
+    });
+
     for _ in 0..BATCH_SIZE {
         let start = Instant::now();
 
@@ -427,8 +534,14 @@ fn handle_batch(
                 }
             }
             None => {
+                // Vérifier si un message est arrivé pendant le handler
+                // (ex: self-message MergeStep). Si oui, break → HasMore.
+                // On ne continue PAS la boucle pour ne pas monopoliser le thread.
+                if actor.has_pending() {
+                    break;
+                }
                 match actor.poll_idle() {
-                    Poll::Ready(()) => {} // Encore du travail interne
+                    Poll::Ready(()) => break,
                     Poll::Pending => {
                         emit_priority_change(shared, actor_id, actor_name, priority_before, actor);
                         return BatchResult::Idle;
@@ -440,11 +553,11 @@ fn handle_batch(
 
     emit_priority_change(shared, actor_id, actor_name, priority_before, actor);
 
-    if actor.has_pending() || actor.poll_idle().is_ready() {
-        BatchResult::HasMore
-    } else {
-        BatchResult::Idle
-    }
+    // On ne rappelle PAS poll_idle() ici — il a des side effects (merge step).
+    // On retourne toujours HasMore : soit il reste des messages (batch épuisé),
+    // soit on a break sur un poll_idle Ready (travail idle restant).
+    // Le prochain tour de run_loop vérifiera les autres acteurs d'abord.
+    BatchResult::HasMore
 }
 
 fn emit_priority_change(
@@ -469,15 +582,14 @@ fn emit_priority_change(
 // run_one_step — pour Reply::wait_cooperative en mode single-thread
 // ---------------------------------------------------------------------------
 
-fn run_one_step_impl(shared: &SharedState) {
+fn run_one_step_impl(shared: &SharedState) -> bool {
     let entry = {
         let mut queue = shared.ready_queue.lock().unwrap();
         queue.pop()
     };
 
     let Some(entry) = entry else {
-        std::thread::yield_now();
-        return;
+        return false;
     };
 
     let actor_id = entry.actor_id;
@@ -486,11 +598,11 @@ fn run_one_step_impl(shared: &SharedState) {
         let mut actors = shared.actors.lock().unwrap();
         let slot = match actors.get_mut(&actor_id) {
             Some(s) => s,
-            None => return,
+            None => return false,
         };
         match slot.actor.take() {
             Some(actor) => (actor, slot.name),
-            None => return,
+            None => return false,
         }
     };
 
@@ -524,16 +636,26 @@ fn run_one_step_impl(shared: &SharedState) {
             actor_name: name,
         });
     } else {
-        let mut actors = shared.actors.lock().unwrap();
-        if let Some(slot) = actors.get_mut(&actor_id) {
-            slot.actor = Some(actor_box);
-            if idle {
-                slot.wake_handle.is_idle.store(true, Ordering::Release);
+        let needs_rewake;
+        {
+            let mut actors = shared.actors.lock().unwrap();
+            if let Some(slot) = actors.get_mut(&actor_id) {
+                slot.actor = Some(actor_box);
+                if idle {
+                    slot.wake_handle.is_idle.store(true, Ordering::Release);
+                    // Même race fix que dans run_loop.
+                    needs_rewake = slot.actor.as_ref()
+                        .map(|a| a.has_pending())
+                        .unwrap_or(false);
+                } else {
+                    needs_rewake = false;
+                }
+            } else {
+                needs_rewake = false;
             }
         }
-        drop(actors);
 
-        if !idle {
+        if !idle || needs_rewake {
             let mut queue = shared.ready_queue.lock().unwrap();
             queue.push(ReadyEntry {
                 priority: entry.priority,
@@ -541,6 +663,7 @@ fn run_one_step_impl(shared: &SharedState) {
             });
         }
     }
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -607,7 +730,7 @@ mod tests {
 
         let (reply_tx, reply_rx) = reply();
         counter_ref.send(CounterMsg::Get(reply_tx)).unwrap();
-        assert_eq!(reply_rx.wait_blocking(), 3);
+        assert_eq!(reply_rx.wait_cooperative(|| scheduler.run_one_step()), 3);
     }
 
     #[test]
@@ -634,7 +757,7 @@ mod tests {
 
         let (reply_tx, reply_rx) = reply();
         counter_ref.send(CounterMsg::Get(reply_tx)).unwrap();
-        assert_eq!(reply_rx.wait_blocking(), 1000);
+        assert_eq!(reply_rx.wait_cooperative(|| scheduler.run_one_step()), 1000);
     }
 
     #[test]
@@ -667,11 +790,11 @@ mod tests {
 
         let (tx_a, rx_a) = reply();
         ref_a.send(CounterMsg::Get(tx_a)).unwrap();
-        assert_eq!(rx_a.wait_blocking(), 500);
+        assert_eq!(rx_a.wait_cooperative(|| scheduler.run_one_step()), 500);
 
         let (tx_b, rx_b) = reply();
         ref_b.send(CounterMsg::Get(tx_b)).unwrap();
-        assert_eq!(rx_b.wait_blocking(), 500);
+        assert_eq!(rx_b.wait_cooperative(|| scheduler.run_one_step()), 500);
     }
 
     #[test]
@@ -757,7 +880,7 @@ mod tests {
         counter_ref.send(CounterMsg::Inc).unwrap();
         let (reply_tx, reply_rx) = reply();
         counter_ref.send(CounterMsg::Get(reply_tx)).unwrap();
-        let _ = reply_rx.wait_blocking();
+        let _ = reply_rx.wait_cooperative(|| scheduler.run_one_step());
 
         std::thread::sleep(std::time::Duration::from_millis(50));
 
@@ -791,7 +914,7 @@ mod tests {
         }
         let (reply_tx, reply_rx) = reply();
         counter_ref.send(CounterMsg::Get(reply_tx)).unwrap();
-        assert_eq!(reply_rx.wait_blocking(), 10_000);
+        assert_eq!(reply_rx.wait_cooperative(|| scheduler.run_one_step()), 10_000);
     }
 
     #[test]

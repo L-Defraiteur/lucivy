@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crossbeam_channel as channel;
 
+use super::events::{EventBus, SchedulerEvent};
 use super::scheduler::SchedulerNotifier;
 
 /// Côté réception d'un acteur. FIFO strict.
@@ -36,6 +37,7 @@ pub(crate) struct ActorRef<M> {
 pub(crate) struct WakeHandle {
     pub(super) notifier: SchedulerNotifier,
     pub(super) is_idle: AtomicBool,
+    pub(super) events: Arc<EventBus<SchedulerEvent>>,
 }
 
 // Manual Clone impl — don't require M: Clone (crossbeam Sender is Clone for any M).
@@ -53,8 +55,21 @@ impl<M> ActorRef<M> {
         self.sender.send(msg)?;
         if let Some(wh) = &self.notifier {
             if wh.is_idle.swap(false, Ordering::AcqRel) {
+                wh.events.emit(SchedulerEvent::MessageSentWithWake {
+                    actor_id: wh.notifier.actor_id(),
+                    actor_name: wh.notifier.actor_name(),
+                });
                 wh.notifier.wake();
+            } else {
+                wh.events.emit(SchedulerEvent::MessageSentNoWake {
+                    actor_id: wh.notifier.actor_id(),
+                    actor_name: wh.notifier.actor_name(),
+                    mailbox_depth: self.sender.len(),
+                });
             }
+        } else {
+            // Pas encore de notifier — ActorRef utilisé avant spawn.
+            // Normalement ne devrait pas arriver en production.
         }
         Ok(())
     }

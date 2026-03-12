@@ -14,13 +14,14 @@ use crate::directory::{Directory, DirectoryClone, GarbageCollectionResult};
 use crate::fastfield::AliveBitSet;
 use crate::index::{Index, IndexMeta, IndexSettings, Segment, SegmentId, SegmentMeta};
 use crate::indexer::delete_queue::DeleteCursor;
-use crate::indexer::merge_operation::MergeOperationInventory;
 use crate::indexer::merger::IndexMerger;
 use crate::indexer::stamper::Stamper;
 use crate::indexer::{
     DefaultMergePolicy, MergeOperation, MergePolicy, SegmentEntry,
     SegmentSerializer,
 };
+use crate::actor::events::{EventBus, EventReceiver};
+use crate::indexer::events::IndexEvent;
 use crate::{Opstamp, LucivyError};
 
 /// Capacité de la mailbox du SegmentUpdaterActor.
@@ -61,7 +62,7 @@ pub(crate) struct SegmentUpdaterShared {
     pub(crate) merge_policy: RwLock<Arc<dyn MergePolicy>>,
     pub(crate) killed: AtomicBool,
     pub(crate) stamper: Stamper,
-    pub(crate) merge_operations: MergeOperationInventory,
+    pub(crate) event_bus: Arc<EventBus<IndexEvent>>,
 }
 
 impl SegmentUpdaterShared {
@@ -113,9 +114,11 @@ impl SegmentUpdaterShared {
         Ok(segment_entries)
     }
 
-    pub(crate) fn get_mergeable_segments(&self) -> (Vec<SegmentMeta>, Vec<SegmentMeta>) {
-        let merge_segment_ids: HashSet<SegmentId> = self.merge_operations.segment_in_merge();
-        self.segment_manager.get_mergeable_segments(&merge_segment_ids)
+    pub(crate) fn get_mergeable_segments(
+        &self,
+        segments_in_merge: &HashSet<SegmentId>,
+    ) -> (Vec<SegmentMeta>, Vec<SegmentMeta>) {
+        self.segment_manager.get_mergeable_segments(segments_in_merge)
     }
 
     fn list_files(&self) -> HashSet<PathBuf> {
@@ -196,7 +199,6 @@ pub(crate) fn merge(
 pub(crate) struct SegmentUpdater {
     shared: Arc<SegmentUpdaterShared>,
     actor_ref: ActorRef<SegmentUpdaterMsg>,
-    scheduler: Arc<Scheduler>,
 }
 
 impl Deref for SegmentUpdater {
@@ -226,7 +228,7 @@ impl SegmentUpdater {
             merge_policy: RwLock::new(Arc::new(DefaultMergePolicy::default())),
             killed: AtomicBool::new(false),
             stamper,
-            merge_operations: Default::default(),
+            event_bus: Arc::new(EventBus::new()),
         });
 
         let (mbox, mut aref) = mailbox(SEGMENT_UPDATER_MAILBOX_CAPACITY);
@@ -236,8 +238,11 @@ impl SegmentUpdater {
         Ok(SegmentUpdater {
             shared,
             actor_ref: aref,
-            scheduler,
         })
+    }
+
+    pub fn subscribe_index_events(&self) -> EventReceiver<IndexEvent> {
+        self.shared.event_bus.subscribe()
     }
 
     pub fn set_merge_policy(&self, merge_policy: Box<dyn MergePolicy>) {
@@ -249,17 +254,19 @@ impl SegmentUpdater {
         if !self.is_alive() {
             return Err(LucivyError::SystemError("Segment updater killed".to_string()));
         }
-        let (reply_tx, reply_rx) = reply();
+        // Fire-and-forget : on n'attend pas la reply.
+        // Cette méthode est appelée depuis IndexerActor::handle_flush,
+        // c'est-à-dire depuis un thread du scheduler. Attendre ici bloquerait
+        // le thread et provoquerait un deadlock quand tous les threads sont
+        // occupés (doc 08 — cause racine des tests bloqués).
         self.actor_ref
             .send(SegmentUpdaterMsg::AddSegment {
                 entry: segment_entry,
-                reply: reply_tx,
             })
             .map_err(|_| {
                 LucivyError::SystemError("Segment updater actor died".to_string())
             })?;
-        let scheduler = &self.scheduler;
-        reply_rx.wait_cooperative(|| scheduler.run_one_step())
+        Ok(())
     }
 
     /// Orders `SegmentManager` to remove all segments
@@ -290,8 +297,7 @@ impl SegmentUpdater {
             .map_err(|_| {
                 LucivyError::SystemError("Segment updater actor died".to_string())
             })?;
-        let scheduler = &self.scheduler;
-        reply_rx.wait_cooperative(|| scheduler.run_one_step())
+        reply_rx.wait_blocking()
     }
 
     pub fn schedule_garbage_collect(&self) -> crate::Result<GarbageCollectionResult> {
@@ -304,13 +310,12 @@ impl SegmentUpdater {
             .map_err(|_| {
                 LucivyError::SystemError("Segment updater actor died".to_string())
             })?;
-        let scheduler = &self.scheduler;
-        reply_rx.wait_cooperative(|| scheduler.run_one_step())
+        reply_rx.wait_blocking()
     }
 
     pub(crate) fn make_merge_operation(&self, segment_ids: &[SegmentId]) -> MergeOperation {
         let commit_opstamp = self.load_meta().opstamp;
-        MergeOperation::new(&self.merge_operations, commit_opstamp, segment_ids.to_vec())
+        MergeOperation::new(commit_opstamp, segment_ids.to_vec())
     }
 
     pub fn start_merge(
@@ -334,12 +339,20 @@ impl SegmentUpdater {
             .map_err(|_| {
                 LucivyError::SystemError("Segment updater actor died".to_string())
             })?;
-        let scheduler = &self.scheduler;
-        reply_rx.wait_cooperative(|| scheduler.run_one_step())
+        reply_rx.wait_blocking()
     }
 
     pub fn wait_merging_thread(&self) -> crate::Result<()> {
-        self.merge_operations.wait_until_empty();
+        if !self.is_alive() {
+            return Ok(());
+        }
+        let (reply_tx, reply_rx) = reply();
+        self.actor_ref
+            .send(SegmentUpdaterMsg::DrainMerges(reply_tx))
+            .map_err(|_| {
+                LucivyError::SystemError("Segment updater actor died".to_string())
+            })?;
+        reply_rx.wait_blocking();
         Ok(())
     }
 }

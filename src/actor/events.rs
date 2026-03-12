@@ -46,6 +46,26 @@ pub(crate) enum SchedulerEvent {
         actor_name: &'static str,
         mailbox_capacity: usize,
     },
+    /// Un message a été envoyé à un acteur qui n'était PAS idle.
+    /// Le scheduler ne sera pas réveillé — le message attend dans la mailbox.
+    MessageSentNoWake {
+        actor_id: ActorId,
+        actor_name: &'static str,
+        mailbox_depth: usize,
+    },
+    /// Un message a été envoyé et l'acteur a été réveillé.
+    MessageSentWithWake {
+        actor_id: ActorId,
+        actor_name: &'static str,
+    },
+    /// Le notifier n'est pas encore attaché (ActorRef avant spawn).
+    MessageSentNoNotifier,
+    /// handle_batch commence le traitement d'un acteur.
+    BatchStarted {
+        actor_id: ActorId,
+        actor_name: &'static str,
+        mailbox_depth: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -54,16 +74,16 @@ pub(crate) enum WakeReason {
     IdleWork,
 }
 
-/// Bus d'events du scheduler. Zero-cost quand personne n'écoute.
+/// Bus d'events générique. Zero-cost quand personne n'écoute.
 ///
 /// Utilise un vrai broadcast : chaque subscriber a son propre channel.
 /// `emit()` envoie une copie à chaque subscriber.
-pub(crate) struct EventBus {
+pub(crate) struct EventBus<E> {
     subscriber_count: AtomicUsize,
-    subscribers: Mutex<Vec<channel::Sender<SchedulerEvent>>>,
+    subscribers: Mutex<Vec<channel::Sender<E>>>,
 }
 
-impl EventBus {
+impl<E: Clone + Send + 'static> EventBus<E> {
     pub fn new() -> Self {
         EventBus {
             subscriber_count: AtomicUsize::new(0),
@@ -77,7 +97,7 @@ impl EventBus {
     }
 
     #[inline]
-    pub fn emit(&self, event: SchedulerEvent) {
+    pub fn emit(&self, event: E) {
         if !self.has_subscribers() {
             return;
         }
@@ -87,7 +107,7 @@ impl EventBus {
         }
     }
 
-    pub fn subscribe(self: &Arc<Self>) -> EventReceiver {
+    pub fn subscribe(self: &Arc<Self>) -> EventReceiver<E> {
         let (sender, receiver) = channel::unbounded();
         self.subscribers.lock().unwrap().push(sender);
         self.subscriber_count.fetch_add(1, Ordering::Relaxed);
@@ -98,41 +118,36 @@ impl EventBus {
     }
 }
 
-pub(crate) struct EventReceiver {
-    receiver: channel::Receiver<SchedulerEvent>,
-    bus: Arc<EventBus>,
+pub(crate) struct EventReceiver<E> {
+    receiver: channel::Receiver<E>,
+    bus: Arc<EventBus<E>>,
 }
 
-impl EventReceiver {
-    pub fn try_recv(&self) -> Option<SchedulerEvent> {
+impl<E> EventReceiver<E> {
+    pub fn try_recv(&self) -> Option<E> {
         self.receiver.try_recv().ok()
     }
 
-    pub fn recv(&self) -> Option<SchedulerEvent> {
+    pub fn recv(&self) -> Option<E> {
         self.receiver.recv().ok()
     }
 
-    pub fn recv_timeout(&self, timeout: Duration) -> Option<SchedulerEvent> {
+    pub fn recv_timeout(&self, timeout: Duration) -> Option<E> {
         self.receiver.recv_timeout(timeout).ok()
     }
 }
 
-impl Drop for EventReceiver {
+impl<E> Drop for EventReceiver<E> {
     fn drop(&mut self) {
         self.bus.subscriber_count.fetch_sub(1, Ordering::Relaxed);
-        // Nettoyer le sender déconnecté de la liste.
-        let mut subs = self.bus.subscribers.lock().unwrap();
-        subs.retain(|s| !s.is_empty() || s.send(SchedulerEvent::ThreadParked { thread_index: 0 }).is_ok());
-        // Approche simplifiée : on ne peut pas identifier "notre" sender facilement.
-        // On retire les senders dont le receiver est droppé (= send échoue).
-        // Le test ci-dessus envoie un event dummy puis check — pas idéal.
-        // Mieux : on utilise le compteur et on laisse les senders morts (ils seront no-op).
+        // Les senders morts sont des no-op silencieux dans crossbeam.
+        // Pas de dummy event — le compteur atomique suffit pour has_subscribers().
     }
 }
 
-impl Iterator for EventReceiver {
-    type Item = SchedulerEvent;
-    fn next(&mut self) -> Option<SchedulerEvent> {
+impl<E> Iterator for EventReceiver<E> {
+    type Item = E;
+    fn next(&mut self) -> Option<E> {
         self.receiver.recv().ok()
     }
 }
@@ -143,14 +158,14 @@ mod tests {
 
     #[test]
     fn test_no_subscriber_no_alloc() {
-        let bus = Arc::new(EventBus::new());
+        let bus: Arc<EventBus<SchedulerEvent>> = Arc::new(EventBus::new());
         assert!(!bus.has_subscribers());
         bus.emit(SchedulerEvent::ThreadParked { thread_index: 0 });
     }
 
     #[test]
     fn test_subscribe_receive() {
-        let bus = Arc::new(EventBus::new());
+        let bus: Arc<EventBus<SchedulerEvent>> = Arc::new(EventBus::new());
         let rx = bus.subscribe();
         assert!(bus.has_subscribers());
 
@@ -164,7 +179,7 @@ mod tests {
 
     #[test]
     fn test_unsubscribe_on_drop() {
-        let bus = Arc::new(EventBus::new());
+        let bus: Arc<EventBus<SchedulerEvent>> = Arc::new(EventBus::new());
         {
             let _rx = bus.subscribe();
             assert!(bus.has_subscribers());
@@ -174,7 +189,7 @@ mod tests {
 
     #[test]
     fn test_multiple_subscribers() {
-        let bus = Arc::new(EventBus::new());
+        let bus: Arc<EventBus<SchedulerEvent>> = Arc::new(EventBus::new());
         let rx1 = bus.subscribe();
         let rx2 = bus.subscribe();
         assert_eq!(bus.subscriber_count.load(Ordering::Relaxed), 2);

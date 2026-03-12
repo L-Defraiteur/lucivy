@@ -77,9 +77,9 @@ fn estimate_total_num_tokens(readers: &[SegmentReader], field: Field) -> crate::
 }
 
 pub struct IndexMerger {
-    schema: Schema,
+    pub(crate) schema: Schema,
     pub(crate) readers: Vec<SegmentReader>,
-    max_doc: u32,
+    pub(crate) max_doc: u32,
 }
 
 struct DeltaComputer {
@@ -192,7 +192,7 @@ impl IndexMerger {
         })
     }
 
-    fn write_fieldnorms(
+    pub(crate) fn write_fieldnorms(
         &self,
         mut fieldnorms_serializer: FieldNormsSerializer,
         doc_id_mapping: &SegmentDocIdMapping,
@@ -217,7 +217,7 @@ impl IndexMerger {
         Ok(())
     }
 
-    fn write_fast_fields(
+    pub(crate) fn write_fast_fields(
         &self,
         fast_field_wrt: &mut WritePtr,
         doc_id_mapping: SegmentDocIdMapping,
@@ -283,7 +283,7 @@ impl IndexMerger {
         ))
     }
 
-    fn write_postings_for_field(
+    pub(crate) fn write_postings_for_field(
         &self,
         indexed_field: Field,
         _field_type: &FieldType,
@@ -465,7 +465,7 @@ impl IndexMerger {
         Ok(())
     }
 
-    fn write_postings(
+    pub(crate) fn write_postings(
         &self,
         serializer: &mut InvertedIndexSerializer,
         fieldnorm_readers: FieldNormReaders,
@@ -486,7 +486,7 @@ impl IndexMerger {
         Ok(())
     }
 
-    fn write_storable_fields(&self, store_writer: &mut StoreWriter) -> crate::Result<()> {
+    pub(crate) fn write_storable_fields(&self, store_writer: &mut StoreWriter) -> crate::Result<()> {
         debug_time!("write-storable-fields");
         debug!("write-storable-field");
 

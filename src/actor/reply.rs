@@ -30,16 +30,29 @@ impl<T> ReplyReceiver<T> {
         self.receiver.try_recv().ok()
     }
 
-    /// Attente coopérative (mode single-thread).
-    /// Fait tourner le scheduler entre chaque tentative via `run_step`.
+    /// Attente coopérative : pompe le scheduler entre chaque tentative.
+    /// Utilisé quand le scheduler n'a pas de threads dédiés (tests unitaires,
+    /// mode single-thread sans start()).
+    ///
+    /// `run_step` retourne `true` si du travail a été effectué.
+    /// Quand il n'y a pas de travail, attend brièvement sur la reply.
     pub fn wait_cooperative<F>(self, mut run_step: F) -> T
     where
-        F: FnMut(),
+        F: FnMut() -> bool,
     {
         loop {
             match self.receiver.try_recv() {
                 Ok(value) => return value,
-                Err(_) => run_step(),
+                Err(_) => {
+                    if !run_step() {
+                        if let Ok(value) = self
+                            .receiver
+                            .recv_timeout(std::time::Duration::from_millis(1))
+                        {
+                            return value;
+                        }
+                    }
+                }
             }
         }
     }
@@ -79,18 +92,16 @@ mod tests {
     #[test]
     fn test_reply_cooperative() {
         let (tx, rx) = reply();
-        let mut steps = 0;
-        // Simulate: the reply arrives after 3 run_steps
+        // Reply arrives after 10ms — wait_cooperative should park and wake.
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(10));
             tx.send(99);
         });
         let val = rx.wait_cooperative(|| {
-            steps += 1;
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            // Simulate no work available
+            false
         });
         assert_eq!(val, 99);
-        assert!(steps > 0);
     }
 
     #[test]

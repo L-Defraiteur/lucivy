@@ -32,8 +32,9 @@ pub(crate) trait Actor: Send + 'static {
         Poll::Pending
     }
 
-    /// Appelé une seule fois quand l'acteur est spawné.
-    fn on_start(&mut self) {}
+    /// Appelé une seule fois après le spawn, quand le wake_handle est attaché.
+    /// Le self_ref permet à l'acteur de s'envoyer des messages (self-messages).
+    fn on_start(&mut self, _self_ref: ActorRef<Self::Msg>) {}
 }
 
 /// Status retourné par `Actor::handle()`.
