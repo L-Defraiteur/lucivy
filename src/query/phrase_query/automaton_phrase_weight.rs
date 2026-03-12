@@ -3,7 +3,6 @@ use std::sync::Arc;
 use common::BitSet;
 use levenshtein_automata::LevenshteinAutomatonBuilder;
 use once_cell::sync::OnceCell;
-use tantivy_fst::Regex;
 
 use super::contains_scorer::{ContainsScorer, ContainsSingleScorer};
 use super::regex_phrase_weight::RegexPhraseWeight;
@@ -15,7 +14,7 @@ use crate::postings::TermInfo;
 use crate::query::bm25::Bm25Weight;
 use crate::query::explanation::does_not_match;
 use crate::query::fuzzy_query::DfaWrapper;
-use crate::query::fuzzy_substring_automaton::FuzzySubstringAutomaton;
+use crate::query::phrase_prefix_query::prefix_end;
 use crate::query::{BitSetDocSet, ConstScorer, EmptyScorer, Explanation, Scorer, Weight};
 use crate::schema::{Field, IndexRecordOption, Term};
 use crate::{DocId, InvertedIndexReader, Score};
@@ -25,8 +24,6 @@ use crate::{DocId, InvertedIndexReader, Score};
 pub(crate) enum CascadeLevel {
     Exact,
     Fuzzy(u8),
-    Substring,
-    FuzzySubstring(u8),
 }
 
 impl CascadeLevel {
@@ -34,10 +31,19 @@ impl CascadeLevel {
         match self {
             CascadeLevel::Exact => 0,
             CascadeLevel::Fuzzy(d) => *d as u32,
-            CascadeLevel::Substring => 0,
-            CascadeLevel::FuzzySubstring(d) => *d as u32,
         }
     }
+}
+
+/// Cached LevenshteinAutomatonBuilder (transposition_cost_one = true).
+fn get_automaton_builder(distance: u8) -> &'static LevenshteinAutomatonBuilder {
+    static AUTOMATON_BUILDER: [OnceCell<LevenshteinAutomatonBuilder>; 3] = [
+        OnceCell::new(),
+        OnceCell::new(),
+        OnceCell::new(),
+    ];
+    AUTOMATON_BUILDER[distance as usize]
+        .get_or_init(|| LevenshteinAutomatonBuilder::new(distance, true))
 }
 
 /// Weight for `AutomatonPhraseQuery`. Implements the auto-cascade
@@ -57,6 +63,7 @@ pub struct AutomatonPhraseWeight {
     query_suffix: String,
     distance_budget: u32,
     strict_separators: bool,
+    last_token_is_prefix: bool,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
 }
@@ -74,6 +81,7 @@ impl AutomatonPhraseWeight {
         query_suffix: String,
         distance_budget: u32,
         strict_separators: bool,
+        last_token_is_prefix: bool,
         highlight_sink: Option<Arc<HighlightSink>>,
         highlight_field_name: String,
     ) -> Self {
@@ -89,6 +97,7 @@ impl AutomatonPhraseWeight {
             query_suffix,
             distance_budget,
             strict_separators,
+            last_token_is_prefix,
             highlight_sink,
             highlight_field_name,
         }
@@ -110,7 +119,7 @@ impl AutomatonPhraseWeight {
         Ok(FieldNormReader::constant(reader.max_doc(), 1))
     }
 
-    /// Auto-cascade for a single token: exact → fuzzy → substring → fuzzy substring.
+    /// Auto-cascade for a single token: exact → fuzzy.
     /// Returns (term_infos, cascade_level) from the first level that finds matches.
     fn cascade_term_infos(
         &self,
@@ -123,23 +132,11 @@ impl AutomatonPhraseWeight {
             return Ok((vec![term_info], CascadeLevel::Exact));
         }
 
-        let term_dict = inverted_index.terms();
-
-        // Cached LevenshteinAutomatonBuilder (shared between Fuzzy and FuzzySubstring).
-        static AUTOMATON_BUILDER: [[OnceCell<LevenshteinAutomatonBuilder>; 2]; 3] = [
-            [OnceCell::new(), OnceCell::new()],
-            [OnceCell::new(), OnceCell::new()],
-            [OnceCell::new(), OnceCell::new()],
-        ];
-
         // 2. FUZZY: Levenshtein DFA (if enabled and distance ≤ 2)
         if self.fuzzy_distance > 0 && self.fuzzy_distance <= 2 {
-            let builder = AUTOMATON_BUILDER[self.fuzzy_distance as usize][1]
-                .get_or_init(|| {
-                    LevenshteinAutomatonBuilder::new(self.fuzzy_distance, true)
-                });
+            let builder = get_automaton_builder(self.fuzzy_distance);
             let dfa = DfaWrapper(builder.build_dfa(token));
-            let mut stream = term_dict.search(&dfa).into_stream()?;
+            let mut stream = inverted_index.terms().search(&dfa).into_stream()?;
             let mut term_infos = Vec::new();
             while stream.advance() {
                 term_infos.push(stream.value().clone());
@@ -149,41 +146,50 @@ impl AutomatonPhraseWeight {
             }
         }
 
-        // 3. SUBSTRING: regex .*{escaped}.*
-        let escaped = regex::escape(token);
-        let pattern = format!(".*{escaped}.*");
-        let regex = Regex::new(&pattern).map_err(|e| {
-            crate::LucivyError::InvalidArgument(format!("Invalid contains regex: {e}"))
-        })?;
-        let mut stream = term_dict.search(&regex).into_stream()?;
+        // No matches
+        Ok((Vec::new(), CascadeLevel::Exact))
+    }
+
+    /// Cascade for a prefix token (last token in startsWith mode):
+    /// prefix range → prefix fuzzy DFA.
+    fn prefix_term_infos(
+        &self,
+        token: &str,
+        inverted_index: &InvertedIndexReader,
+    ) -> crate::Result<(Vec<TermInfo>, CascadeLevel)> {
+        let term_dict = inverted_index.terms();
+
+        // 1. PREFIX RANGE: all terms starting with `token`
+        let prefix_bytes = token.as_bytes();
+        let mut builder = term_dict.range();
+        builder = builder.ge(prefix_bytes);
+        if let Some(end) = prefix_end(prefix_bytes) {
+            builder = builder.lt(&end);
+        }
+        let mut stream = builder.into_stream()?;
         let mut term_infos = Vec::new();
-        while stream.advance() {
+        while stream.advance() && term_infos.len() < self.max_expansions as usize {
             term_infos.push(stream.value().clone());
         }
         if !term_infos.is_empty() {
-            return Ok((term_infos, CascadeLevel::Substring));
+            return Ok((term_infos, CascadeLevel::Exact));
         }
 
-        // 4. FUZZY SUBSTRING: NFA simulation .*{levenshtein(token, d)}.*
+        // 2. PREFIX FUZZY: Levenshtein prefix DFA
         if self.fuzzy_distance > 0 && self.fuzzy_distance <= 2 {
-            let builder = AUTOMATON_BUILDER[self.fuzzy_distance as usize][1]
-                .get_or_init(|| {
-                    LevenshteinAutomatonBuilder::new(self.fuzzy_distance, true)
-                });
-            let dfa = builder.build_dfa(token);
-            let automaton = FuzzySubstringAutomaton::new(dfa);
-            let mut stream = term_dict.search(&automaton).into_stream()?;
+            let automaton_builder = get_automaton_builder(self.fuzzy_distance);
+            let dfa = DfaWrapper(automaton_builder.build_prefix_dfa(token));
+            let mut stream = term_dict.search(&dfa).into_stream()?;
             let mut term_infos = Vec::new();
-            while stream.advance() {
+            while stream.advance() && term_infos.len() < self.max_expansions as usize {
                 term_infos.push(stream.value().clone());
             }
             if !term_infos.is_empty() {
-                return Ok((term_infos, CascadeLevel::FuzzySubstring(self.fuzzy_distance)));
+                return Ok((term_infos, CascadeLevel::Fuzzy(self.fuzzy_distance)));
             }
         }
 
-        // No matches at any level
-        Ok((Vec::new(), CascadeLevel::Substring))
+        Ok((Vec::new(), CascadeLevel::Exact))
     }
 
     /// Multi-token: cascade per position, then ContainsScorer or PhraseScorer.
@@ -203,8 +209,13 @@ impl AutomatonPhraseWeight {
         let mut num_terms = 0;
         let mut cascade_distances = Vec::new();
 
-        for &(offset, ref token) in &self.phrase_terms {
-            let (term_infos, level) = self.cascade_term_infos(token, &inverted_index)?;
+        let last_idx = self.phrase_terms.len() - 1;
+        for (i, &(offset, ref token)) in self.phrase_terms.iter().enumerate() {
+            let (term_infos, level) = if self.last_token_is_prefix && i == last_idx {
+                self.prefix_term_infos(token, &inverted_index)?
+            } else {
+                self.cascade_term_infos(token, &inverted_index)?
+            };
             if term_infos.is_empty() {
                 return Ok(None);
             }
@@ -260,7 +271,11 @@ impl AutomatonPhraseWeight {
     ) -> crate::Result<Box<dyn Scorer>> {
         let inverted_index = reader.inverted_index(self.field)?;
         let token = &self.phrase_terms[0].1;
-        let (term_infos, level) = self.cascade_term_infos(token, &inverted_index)?;
+        let (term_infos, level) = if self.last_token_is_prefix {
+            self.prefix_term_infos(token, &inverted_index)?
+        } else {
+            self.cascade_term_infos(token, &inverted_index)?
+        };
         if term_infos.is_empty() {
             return Ok(Box::new(EmptyScorer));
         }
@@ -383,23 +398,6 @@ mod tests {
     }
 
     #[test]
-    fn test_automaton_phrase_substring() -> crate::Result<()> {
-        // "ell" is a substring of "hello" → single token, substring regex fallback
-        let index = create_index(&["hello world", "foo bar"])?;
-        let schema = index.schema();
-        let text_field = schema.get_field("text").unwrap();
-        let searcher = index.reader()?.searcher();
-        let query = AutomatonPhraseQuery::new(text_field, vec![(0, "ell".into())], 1000, 1);
-        let weight = query
-            .automaton_phrase_weight(EnableScoring::disabled_from_schema(searcher.schema()))?;
-        let mut scorer = weight.scorer(searcher.segment_reader(0), 1.0)?;
-        // "hello" contains "ell", so doc 0 should match
-        assert_eq!(scorer.doc(), 0);
-        assert_eq!(scorer.advance(), TERMINATED);
-        Ok(())
-    }
-
-    #[test]
     fn test_automaton_phrase_no_match() -> crate::Result<()> {
         let index = create_index(&["hello world", "foo bar"])?;
         let schema = index.schema();
@@ -424,7 +422,6 @@ mod tests {
         let schema = index.schema();
         let text_field = schema.get_field("text").unwrap();
         let searcher = index.reader()?.searcher();
-        // Single token exact match — should find docs 0 and 2
         let query = AutomatonPhraseQuery::new(text_field, vec![(0, "hello".into())], 1000, 1);
         let weight = query
             .automaton_phrase_weight(EnableScoring::disabled_from_schema(searcher.schema()))?;
@@ -432,56 +429,15 @@ mod tests {
         assert_eq!(scorer.doc(), 0);
         assert_eq!(scorer.advance(), 2);
         assert_eq!(scorer.advance(), TERMINATED);
-        Ok(())
-    }
-
-    #[test]
-    fn test_automaton_phrase_fuzzy_substring() -> crate::Result<()> {
-        // "progam" (typo for "program") at d=1:
-        // - Exact: "progam" not in dict
-        // - Fuzzy d=1: "programming" is too far (distance >> 1)
-        // - Substring: ".*progam.*" → no term contains "progam" literally
-        // - FuzzySubstring: "programming" contains "program" (distance 1 from "progam") → match!
-        let index = create_index(&["programming language", "foo bar"])?;
-        let schema = index.schema();
-        let text_field = schema.get_field("text").unwrap();
-        let searcher = index.reader()?.searcher();
-        let query =
-            AutomatonPhraseQuery::new(text_field, vec![(0, "progam".into())], 1000, 1);
-        let weight = query
-            .automaton_phrase_weight(EnableScoring::disabled_from_schema(searcher.schema()))?;
-        let mut scorer = weight.scorer(searcher.segment_reader(0), 1.0)?;
-        assert_eq!(scorer.doc(), 0);
-        assert_eq!(scorer.advance(), TERMINATED);
-        Ok(())
-    }
-
-    #[test]
-    fn test_fuzzy_substring_no_false_positive() -> crate::Result<()> {
-        // "xyz" at d=1 should not match "programming" (no substring within distance 1)
-        let index = create_index(&["programming language", "foo bar"])?;
-        let schema = index.schema();
-        let text_field = schema.get_field("text").unwrap();
-        let searcher = index.reader()?.searcher();
-        let query = AutomatonPhraseQuery::new(text_field, vec![(0, "xyz".into())], 1000, 1);
-        let weight = query
-            .automaton_phrase_weight(EnableScoring::disabled_from_schema(searcher.schema()))?;
-        let mut scorer = weight.scorer(searcher.segment_reader(0), 1.0)?;
-        assert_eq!(scorer.doc(), TERMINATED);
         Ok(())
     }
 
     #[test]
     fn test_cascade_early_termination() -> crate::Result<()> {
-        // "hello" exists exactly → fuzzy and substring should not be needed.
-        // We verify by checking that the exact match returns only 2 docs (not more).
         let index = create_index(&["hello world", "shell game", "hello there"])?;
         let schema = index.schema();
         let text_field = schema.get_field("text").unwrap();
         let searcher = index.reader()?.searcher();
-        // "hello" exact match → only docs 0, 2
-        // If cascade fell through to substring ".*hello.*", it would still match only "hello"
-        // But if it fell to fuzzy, "shell" (distance 2 from "hello") would NOT match at distance 1
         let query = AutomatonPhraseQuery::new(text_field, vec![(0, "hello".into())], 1000, 1);
         let weight = query
             .automaton_phrase_weight(EnableScoring::disabled_from_schema(searcher.schema()))?;
@@ -489,6 +445,94 @@ mod tests {
         assert_eq!(scorer.doc(), 0);
         assert_eq!(scorer.advance(), 2);
         assert_eq!(scorer.advance(), TERMINATED);
+        Ok(())
+    }
+
+    // ─── startsWith tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_starts_with_single_token_prefix() -> crate::Result<()> {
+        // "hel" should match "hello" via prefix range
+        let index = create_index(&["hello world", "foo bar", "help me"])?;
+        let schema = index.schema();
+        let text_field = schema.get_field("text").unwrap();
+        let searcher = index.reader()?.searcher();
+        let query = AutomatonPhraseQuery::new_starts_with(
+            text_field,
+            vec![(0, "hel".into())],
+            50,
+            0,
+        );
+        let weight = query
+            .automaton_phrase_weight(EnableScoring::disabled_from_schema(searcher.schema()))?;
+        let mut scorer = weight.scorer(searcher.segment_reader(0), 1.0)?;
+        assert_eq!(scorer.doc(), 0); // "hello"
+        assert_eq!(scorer.advance(), 2); // "help"
+        assert_eq!(scorer.advance(), TERMINATED);
+        Ok(())
+    }
+
+    #[test]
+    fn test_starts_with_multi_token() -> crate::Result<()> {
+        // "hello wor" → ["hello", "wor"] — exact "hello" + prefix "wor" matching "world"
+        let index = create_index(&["hello world", "hello work", "hello there"])?;
+        let schema = index.schema();
+        let text_field = schema.get_field("text").unwrap();
+        let searcher = index.reader()?.searcher();
+        let query = AutomatonPhraseQuery::new_starts_with(
+            text_field,
+            vec![(0, "hello".into()), (1, "wor".into())],
+            50,
+            0,
+        );
+        let weight = query
+            .automaton_phrase_weight(EnableScoring::disabled_from_schema(searcher.schema()))?;
+        let mut scorer = weight.scorer(searcher.segment_reader(0), 1.0)?;
+        assert_eq!(scorer.doc(), 0); // "hello world"
+        assert_eq!(scorer.advance(), 1); // "hello work"
+        assert_eq!(scorer.advance(), TERMINATED); // "hello there" — no match
+        Ok(())
+    }
+
+    #[test]
+    fn test_starts_with_fuzzy_prefix() -> crate::Result<()> {
+        // "helo" (typo) at distance=1 should match "hello" via fuzzy,
+        // then "wor" prefix matches "world"
+        let index = create_index(&["hello world", "foo bar"])?;
+        let schema = index.schema();
+        let text_field = schema.get_field("text").unwrap();
+        let searcher = index.reader()?.searcher();
+        let query = AutomatonPhraseQuery::new_starts_with(
+            text_field,
+            vec![(0, "helo".into()), (1, "wor".into())],
+            50,
+            1,
+        );
+        let weight = query
+            .automaton_phrase_weight(EnableScoring::disabled_from_schema(searcher.schema()))?;
+        let mut scorer = weight.scorer(searcher.segment_reader(0), 1.0)?;
+        assert_eq!(scorer.doc(), 0);
+        assert_eq!(scorer.advance(), TERMINATED);
+        Ok(())
+    }
+
+    #[test]
+    fn test_starts_with_no_substring_fallback() -> crate::Result<()> {
+        // "ell" should NOT match "hello" in startsWith mode (it's a substring, not a prefix)
+        let index = create_index(&["hello world", "foo bar"])?;
+        let schema = index.schema();
+        let text_field = schema.get_field("text").unwrap();
+        let searcher = index.reader()?.searcher();
+        let query = AutomatonPhraseQuery::new_starts_with(
+            text_field,
+            vec![(0, "ell".into())],
+            50,
+            0,
+        );
+        let weight = query
+            .automaton_phrase_weight(EnableScoring::disabled_from_schema(searcher.schema()))?;
+        let mut scorer = weight.scorer(searcher.segment_reader(0), 1.0)?;
+        assert_eq!(scorer.doc(), TERMINATED);
         Ok(())
     }
 }

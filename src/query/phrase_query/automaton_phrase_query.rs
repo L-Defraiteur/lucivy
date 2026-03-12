@@ -29,6 +29,9 @@ pub struct AutomatonPhraseQuery {
     query_suffix: String,
     distance_budget: u32,
     strict_separators: bool,
+    /// When true, the last token is treated as a prefix (FST range / prefix DFA)
+    /// and non-last tokens skip substring cascade levels (exact + fuzzy only).
+    last_token_is_prefix: bool,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
 }
@@ -58,6 +61,35 @@ impl AutomatonPhraseQuery {
             query_suffix: String::new(),
             distance_budget: 0,
             strict_separators: true,
+            last_token_is_prefix: false,
+            highlight_sink: None,
+            highlight_field_name: String::new(),
+        }
+    }
+
+    /// Creates a new `AutomatonPhraseQuery` in startsWith mode.
+    ///
+    /// The last token is treated as a prefix (FST range + prefix DFA).
+    /// Non-last tokens use exact + fuzzy only (no substring cascade).
+    pub fn new_starts_with(
+        field: Field,
+        mut phrase_terms: Vec<(usize, String)>,
+        max_expansions: u32,
+        fuzzy_distance: u8,
+    ) -> AutomatonPhraseQuery {
+        phrase_terms.sort_by_key(|&(offset, _)| offset);
+        AutomatonPhraseQuery {
+            field,
+            stored_field: None,
+            phrase_terms,
+            max_expansions,
+            fuzzy_distance,
+            query_separators: Vec::new(),
+            query_prefix: String::new(),
+            query_suffix: String::new(),
+            distance_budget: 0,
+            strict_separators: true,
+            last_token_is_prefix: true,
             highlight_sink: None,
             highlight_field_name: String::new(),
         }
@@ -94,6 +126,7 @@ impl AutomatonPhraseQuery {
             query_suffix,
             distance_budget,
             strict_separators,
+            last_token_is_prefix: false,
             highlight_sink: None,
             highlight_field_name: String::new(),
         }
@@ -166,6 +199,7 @@ impl AutomatonPhraseQuery {
             self.query_suffix.clone(),
             self.distance_budget,
             self.strict_separators,
+            self.last_token_is_prefix,
             self.highlight_sink.clone(),
             self.highlight_field_name.clone(),
         ))

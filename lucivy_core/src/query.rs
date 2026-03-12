@@ -188,6 +188,7 @@ pub fn build_query(
         "contains" => {
             build_contains_query(config, schema, index, raw_pairs, ngram_pairs, highlight_sink)
         }
+        "startsWith" => build_starts_with_query(config, schema, index, raw_pairs, highlight_sink),
         "boolean" => build_boolean_query(config, schema, index, raw_pairs, ngram_pairs, highlight_sink),
         "parse" => build_parsed_query(config, schema, index),
         other => Err(format!("unknown query type: {other}")),
@@ -354,65 +355,35 @@ fn build_contains_fuzzy(
     let token_texts: Vec<String> = tokens.iter().map(|t| t.text.clone()).collect();
     let distance_budget = fuzzy_distance as u32;
 
-    let ngram_resolved = resolve_ngram_field(config, schema, ngram_pairs);
-    if let Some(ngram_field) = ngram_resolved {
-        let verification = VerificationMode::Fuzzy(FuzzyParams {
-            tokens: token_texts.clone(),
-            separators,
-            prefix,
-            suffix,
-            fuzzy_distance,
-            distance_budget,
-            strict_separators,
-        });
-        let mut query = NgramContainsQuery::new(
-            field,
-            ngram_field,
-            stored_field,
-            token_texts,
-            verification,
-        );
-        if let Some(sink) = highlight_sink {
-            query = query.with_highlight_sink(sink, config.field.clone().unwrap_or_default());
-        }
-        return Ok(Box::new(query));
-    }
+    let ngram_field = resolve_ngram_field(config, schema, ngram_pairs)
+        .ok_or_else(|| {
+            let name = config.field.as_deref().unwrap_or("?");
+            format!(
+                "contains query requires an ngram field for '{name}'. \
+                 Configure a _ngram field in your schema for substring search."
+            )
+        })?;
 
-    // Fallback: AutomatonPhraseQuery (FST walk cascade).
-    let phrase_terms: Vec<(usize, String)> = token_texts
-        .into_iter()
-        .enumerate()
-        .collect();
-
-    if !separators.is_empty() || !prefix.is_empty() || !suffix.is_empty() {
-        let mut query = AutomatonPhraseQuery::new_with_separators(
-            field,
-            stored_field,
-            phrase_terms,
-            1000,
-            fuzzy_distance,
-            separators,
-            prefix,
-            suffix,
-            distance_budget,
-            strict_separators,
-        );
-        if let Some(sink) = highlight_sink {
-            query = query.with_highlight_sink(sink, config.field.clone().unwrap_or_default());
-        }
-        Ok(Box::new(query))
-    } else {
-        let mut query = AutomatonPhraseQuery::new(
-            field,
-            phrase_terms,
-            1000,
-            fuzzy_distance,
-        );
-        if let Some(sink) = highlight_sink {
-            query = query.with_highlight_sink(sink, config.field.clone().unwrap_or_default());
-        }
-        Ok(Box::new(query))
+    let verification = VerificationMode::Fuzzy(FuzzyParams {
+        tokens: token_texts.clone(),
+        separators,
+        prefix,
+        suffix,
+        fuzzy_distance,
+        distance_budget,
+        strict_separators,
+    });
+    let mut query = NgramContainsQuery::new(
+        field,
+        ngram_field,
+        stored_field,
+        token_texts,
+        verification,
+    );
+    if let Some(sink) = highlight_sink {
+        query = query.with_highlight_sink(sink, config.field.clone().unwrap_or_default());
     }
+    Ok(Box::new(query))
 }
 
 /// Contains query in regex mode: parse pattern → extract literals → trigrams → regex verification → BM25.
@@ -478,6 +449,52 @@ fn build_contains_regex(
         query = query.with_highlight_sink(sink, config.field.clone().unwrap_or_default());
     }
     Ok(Box::new(query) as Box<dyn Query>)
+}
+
+/// StartsWith query: FST prefix search with optional fuzzy.
+///
+/// Tokenizes the value, then:
+/// - Non-last tokens: exact or fuzzy match (full terms, no substring)
+/// - Last token: treated as a prefix (FST range or prefix DFA)
+/// - All tokens validated at consecutive positions (phrase adjacency)
+fn build_starts_with_query(
+    config: &QueryConfig,
+    schema: &Schema,
+    index: &Index,
+    raw_pairs: &[(String, String)],
+    highlight_sink: Option<Arc<HighlightSink>>,
+) -> Result<Box<dyn Query>, String> {
+    let field = resolve_field(config, schema, raw_pairs, true)?;
+    let value = config.value.as_deref().ok_or("startsWith query requires 'value'")?;
+    let fuzzy_distance = config.distance.unwrap_or(0);
+
+    let tokens = tokenize_for_field(index, field, schema, value);
+    if tokens.is_empty() {
+        return Err("startsWith query produced no tokens".into());
+    }
+
+    // Single token: use FuzzyTermQuery in prefix mode directly.
+    if tokens.len() == 1 {
+        let term = Term::from_field_text(field, &tokens[0]);
+        let mut query = FuzzyTermQuery::new_prefix(term, fuzzy_distance, true);
+        if let Some(sink) = highlight_sink {
+            query = query.with_highlight_sink(sink, config.field.clone().unwrap_or_default());
+        }
+        return Ok(Box::new(query));
+    }
+
+    // Multi-token: AutomatonPhraseQuery in startsWith mode.
+    let phrase_terms: Vec<(usize, String)> = tokens.into_iter().enumerate().collect();
+    let mut query = AutomatonPhraseQuery::new_starts_with(
+        field,
+        phrase_terms,
+        50, // max_expansions for prefix
+        fuzzy_distance,
+    );
+    if let Some(sink) = highlight_sink {
+        query = query.with_highlight_sink(sink, config.field.clone().unwrap_or_default());
+    }
+    Ok(Box::new(query))
 }
 
 /// Escape regex special characters in a string.
