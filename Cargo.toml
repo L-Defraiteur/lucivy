@@ -201,3 +201,7 @@ harness = false
 [[bench]]
 name = "bool_queries_with_range"
 harness = false
+
+[[bench]]
+name = "ngram_bench"
+harness = false
