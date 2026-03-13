@@ -334,8 +334,7 @@ impl<D: Document> IndexWriter<D> {
 
     /// If there are some merging threads, blocks until they all finish their work and
     /// then drop the `IndexWriter`.
-    #[allow(unused_mut)]
-    pub fn wait_merging_threads(mut self) -> crate::Result<()> {
+    pub fn wait_merging_threads(self) -> crate::Result<()> {
         // Les merges sont maintenant synchrones (inline dans le handler),
         // donc l'inventaire devrait déjà être vide. On attend quand même
         // par sécurité.
@@ -388,7 +387,7 @@ impl<D: Document> IndexWriter<D> {
 
     /// S'abonner aux events métier de l'indexer (merge, commit).
     /// Zero-cost quand personne n'écoute.
-    #[allow(private_interfaces)]
+    #[allow(private_interfaces)] // EventReceiver is pub(crate) but this API is used externally.
     pub fn subscribe_index_events(
         &self,
     ) -> crate::actor::events::EventReceiver<super::events::IndexEvent> {
