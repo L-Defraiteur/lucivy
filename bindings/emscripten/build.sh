@@ -55,6 +55,7 @@ emcc "$STATIC_LIB" \
         "_lucivy_open_begin",
         "_lucivy_import_file",
         "_lucivy_open_finish",
+        "_lucivy_close",
         "_lucivy_destroy",
         "_lucivy_add",
         "_lucivy_add_many",

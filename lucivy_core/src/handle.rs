@@ -813,4 +813,95 @@ mod tests {
         assert_eq!(handle2.reader.searcher().num_docs(), 10,
             "all 10 docs should be visible after close+reopen");
     }
+
+    /// Regression test: multi-token startsWith must produce highlights.
+    /// Single-token startsWith goes through FuzzyTermQuery::new_prefix (has highlights).
+    /// Multi-token goes through AutomatonPhraseQuery::new_starts_with → PhraseScorer
+    /// which was missing highlight support (highlight_sink not forwarded).
+    #[test]
+    fn test_starts_with_multi_token_highlights() {
+        use std::sync::Arc;
+        use ld_lucivy::query::HighlightSink;
+
+        let tmp = std::env::temp_dir().join("lucivy_test_starts_with_highlights");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+            "fields": [
+                {"name": "body", "type": "text", "stored": true}
+            ]
+        })).unwrap();
+
+        let directory = StdFsDirectory::open(tmp.to_str().unwrap()).unwrap();
+        let handle = LucivyHandle::create(directory, &config).unwrap();
+
+        let body_field = handle.field("body").unwrap();
+        let nid_field = handle.field(NODE_ID_FIELD).unwrap();
+
+        {
+            let mut guard = handle.writer.lock().unwrap();
+            let writer = guard.as_mut().unwrap();
+            for (nid, text) in [
+                (0u64, "Rust is a systems programming language"),
+                (1, "Python is a programming language too"),
+                (2, "A guide to cooking Italian food"),
+            ] {
+                let mut doc = ld_lucivy::LucivyDocument::new();
+                doc.add_u64(nid_field, nid);
+                doc.add_text(body_field, text);
+                for (user, raw_name) in &handle.raw_field_pairs {
+                    if user == "body" {
+                        if let Some(f) = handle.field(raw_name) { doc.add_text(f, text); }
+                    }
+                }
+                for (user, ngram_name) in &handle.ngram_field_pairs {
+                    if user == "body" {
+                        if let Some(f) = handle.field(ngram_name) { doc.add_text(f, text); }
+                    }
+                }
+                writer.add_document(doc).unwrap();
+            }
+            writer.commit().unwrap();
+        }
+        handle.reader.reload().unwrap();
+
+        // Multi-token startsWith with highlights
+        let sink = Arc::new(HighlightSink::new());
+        let query_config = crate::query::QueryConfig {
+            query_type: "startsWith".into(),
+            field: Some("body".into()),
+            value: Some("programming language".into()),
+            ..Default::default()
+        };
+        let query = crate::query::build_query(
+            &query_config,
+            &handle.schema,
+            &handle.index,
+            &handle.raw_field_pairs,
+            &handle.ngram_field_pairs,
+            Some(sink.clone()),
+        ).unwrap();
+
+        let searcher = handle.reader.searcher();
+        let collector = ld_lucivy::collector::TopDocs::with_limit(10).order_by_score();
+        let results = searcher.search(&*query, &collector).unwrap();
+
+        // Should find docs 0 and 1 (both have "programming language")
+        assert!(results.len() >= 2, "expected >=2 results, got {}", results.len());
+
+        // Check highlights exist for at least one result
+        let mut found_highlights = false;
+        for &(_score, doc_addr) in &results {
+            let seg_id = searcher.segment_reader(doc_addr.segment_ord).segment_id();
+            if let Some(by_field) = sink.get(seg_id, doc_addr.doc_id) {
+                if !by_field.is_empty() {
+                    found_highlights = true;
+                    println!("Highlights for doc {}: {:?}", doc_addr.doc_id, by_field);
+                }
+            }
+        }
+        assert!(found_highlights,
+            "multi-token startsWith should produce highlights but none were found");
+    }
 }

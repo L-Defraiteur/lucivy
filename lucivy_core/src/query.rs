@@ -465,17 +465,18 @@ fn build_starts_with_query(
     highlight_sink: Option<Arc<HighlightSink>>,
 ) -> Result<Box<dyn Query>, String> {
     let field = resolve_field(config, schema, raw_pairs, true)?;
+    let stored_field = resolve_field(config, schema, raw_pairs, false).ok();
     let value = config.value.as_deref().ok_or("startsWith query requires 'value'")?;
     let fuzzy_distance = config.distance.unwrap_or(0);
 
-    let tokens = tokenize_for_field(index, field, schema, value);
+    let tokens = tokenize_with_offsets(index, field, schema, value);
     if tokens.is_empty() {
         return Err("startsWith query produced no tokens".into());
     }
 
     // Single token: use FuzzyTermQuery in prefix mode directly.
     if tokens.len() == 1 {
-        let term = Term::from_field_text(field, &tokens[0]);
+        let term = Term::from_field_text(field, &tokens[0].text);
         let mut query = FuzzyTermQuery::new_prefix(term, fuzzy_distance, true);
         if let Some(sink) = highlight_sink {
             query = query.with_highlight_sink(sink, config.field.clone().unwrap_or_default());
@@ -483,14 +484,33 @@ fn build_starts_with_query(
         return Ok(Box::new(query));
     }
 
-    // Multi-token: AutomatonPhraseQuery in startsWith mode.
-    let phrase_terms: Vec<(usize, String)> = tokens.into_iter().enumerate().collect();
-    let mut query = AutomatonPhraseQuery::new_starts_with(
+    // Extract separators between tokens (same as contains).
+    let separators: Vec<String> = tokens
+        .windows(2)
+        .map(|w| value[w[0].offset_to..w[1].offset_from].to_string())
+        .collect();
+    let prefix = value[..tokens.first().map(|t| t.offset_from).unwrap_or(0)].to_string();
+
+    let phrase_terms: Vec<(usize, String)> = tokens
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (i, t.text.clone()))
+        .collect();
+
+    // Multi-token: AutomatonPhraseQuery with separators + prefix mode.
+    let mut query = AutomatonPhraseQuery::new_with_separators(
         field,
+        stored_field,
         phrase_terms,
         50, // max_expansions for prefix
         fuzzy_distance,
-    );
+        separators,
+        prefix,
+        String::new(), // no suffix for startsWith
+        fuzzy_distance as u32,
+        true, // strict_separators
+    ).with_prefix_mode();
+
     if let Some(sink) = highlight_sink {
         query = query.with_highlight_sink(sink, config.field.clone().unwrap_or_default());
     }
@@ -955,20 +975,50 @@ mod tests {
         }
     }
 
-    fn make_filter_index() -> (Schema, Index) {
-        let schema = make_test_schema();
+    fn make_filter_index() -> (Schema, Index, Vec<(String, String)>, Vec<(String, String)>) {
+        use ld_lucivy::schema::{TextFieldIndexing, TextOptions};
+        use ld_lucivy::tokenizer::{LowerCaser, SimpleTokenizer, TextAnalyzer};
+        use crate::tokenizer::NgramFilter;
+
+        let mut builder = Schema::builder();
+        builder.add_u64_field("count", INDEXED | STORED);
+        builder.add_i64_field("offset", INDEXED | STORED);
+        builder.add_f64_field("score", INDEXED | STORED);
+        builder.add_text_field("name", STRING | STORED);
+        // Raw field for "name" (lowercase only, for contains/fuzzy precision)
+        let raw_indexing = TextFieldIndexing::default()
+            .set_tokenizer("default")
+            .set_index_option(ld_lucivy::schema::IndexRecordOption::WithFreqsAndPositionsAndOffsets);
+        builder.add_text_field("name._raw", TextOptions::default().set_indexing_options(raw_indexing));
+        // Ngram field for "name" (trigrams for contains candidate generation)
+        let ngram_indexing = TextFieldIndexing::default()
+            .set_tokenizer("ngram")
+            .set_index_option(ld_lucivy::schema::IndexRecordOption::Basic);
+        builder.add_text_field("name._ngram", TextOptions::default().set_indexing_options(ngram_indexing));
+
+        let schema = builder.build();
         let index = Index::create_in_ram(schema.clone());
-        (schema, index)
+
+        // Register ngram tokenizer
+        let ngram_tokenizer = TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter(LowerCaser)
+            .filter(NgramFilter)
+            .build();
+        index.tokenizers().register("ngram", ngram_tokenizer);
+
+        let raw_pairs = vec![("name".to_string(), "name._raw".to_string())];
+        let ngram_pairs = vec![("name".to_string(), "name._ngram".to_string())];
+        (schema, index, raw_pairs, ngram_pairs)
     }
 
     fn assert_filter_ok(filter: &FilterClause) {
-        let (schema, index) = make_filter_index();
-        assert!(build_filter_clause(filter, &schema, &index, &[], &[]).is_ok());
+        let (schema, index, raw_pairs, ngram_pairs) = make_filter_index();
+        assert!(build_filter_clause(filter, &schema, &index, &raw_pairs, &ngram_pairs).is_ok());
     }
 
     fn assert_filter_err(filter: &FilterClause) {
-        let (schema, index) = make_filter_index();
-        assert!(build_filter_clause(filter, &schema, &index, &[], &[]).is_err());
+        let (schema, index, raw_pairs, ngram_pairs) = make_filter_index();
+        assert!(build_filter_clause(filter, &schema, &index, &raw_pairs, &ngram_pairs).is_err());
     }
 
     #[test]
@@ -1043,22 +1093,21 @@ mod tests {
 
     #[test]
     fn test_filter_clause_starts_with() {
-        let (schema, index) = make_filter_index();
+        let (schema, index, raw_pairs, ngram_pairs) = make_filter_index();
         let filter = make_filter("name", "starts_with", json!("hel"));
-        let result = build_filter_clause(&filter, &schema, &index, &[], &[]);
+        let result = build_filter_clause(&filter, &schema, &index, &raw_pairs, &ngram_pairs);
         assert!(result.is_ok(), "starts_with failed: {:?}", result.err());
     }
 
     #[test]
     fn test_filter_clause_contains() {
-        // Contains dispatches to build_contains_query — needs an index with the field.
-        // With no ngram/raw pairs, falls back to AutomatonPhraseQuery or RegexQuery.
+        // Contains dispatches to build_contains_query — needs ngram pairs for trigram candidate generation.
         assert_filter_ok(&make_filter("name", "contains", json!("ell")));
     }
 
     #[test]
     fn test_filter_clause_contains_with_fuzzy() {
-        let (schema, index) = make_filter_index();
+        let (schema, index, raw_pairs, ngram_pairs) = make_filter_index();
         let filter = FilterClause {
             field: Some("name".into()),
             op: "contains".into(),
@@ -1066,7 +1115,7 @@ mod tests {
             distance: Some(2),
             clauses: None,
         };
-        assert!(build_filter_clause(&filter, &schema, &index, &[], &[]).is_ok());
+        assert!(build_filter_clause(&filter, &schema, &index, &raw_pairs, &ngram_pairs).is_ok());
     }
 
     // ─── Composite ops ────────────────────────────────────────────────

@@ -320,6 +320,19 @@ pub unsafe extern "C" fn lucivy_open_finish(ctx: *mut LucivyContext) -> *mut Luc
     }))
 }
 
+/// Close the index: commit pending writes and release the writer lock.
+/// After close, reads (search) continue but writes return errors.
+/// Returns "ok" or {"error":"..."}.
+#[no_mangle]
+pub unsafe extern "C" fn lucivy_close(ctx: *mut LucivyContext) -> *const c_char {
+    if ctx.is_null() { return return_error("null context"); }
+    let ctx = &*ctx;
+    match ctx.handle.close() {
+        Ok(()) => return_str("ok".into()),
+        Err(e) => return_error(&e),
+    }
+}
+
 /// Destroy an index context and free memory.
 #[no_mangle]
 pub unsafe extern "C" fn lucivy_destroy(ctx: *mut LucivyContext) {
@@ -357,9 +370,13 @@ pub unsafe extern "C" fn lucivy_add(
         }
     }
 
-    let writer = match ctx.handle.writer.lock() {
+    let mut guard = match ctx.handle.writer.lock() {
         Ok(w) => w,
         Err(_) => return return_error("writer lock poisoned"),
+    };
+    let writer = match guard.as_mut() {
+        Some(w) => w,
+        None => return return_error("index is closed"),
     };
     let result = match writer.add_document(doc) {
         Ok(_) => {
@@ -370,7 +387,7 @@ pub unsafe extern "C" fn lucivy_add(
             return return_error(&e.to_string());
         }
     };
-    drop(writer);
+    drop(guard);
     return_str(result)
 }
 
@@ -387,9 +404,13 @@ pub unsafe extern "C" fn lucivy_add_many(
         Err(e) => return return_error(&format!("invalid docs JSON: {e}")),
     };
 
-    let writer = match ctx.handle.writer.lock() {
+    let mut guard = match ctx.handle.writer.lock() {
         Ok(w) => w,
         Err(_) => return return_error("writer lock poisoned"),
+    };
+    let writer = match guard.as_mut() {
+        Some(w) => w,
+        None => return return_error("index is closed"),
     };
 
     let nid_field = match ctx.handle.field(NODE_ID_FIELD) {
@@ -435,9 +456,13 @@ pub unsafe extern "C" fn lucivy_remove(ctx: *mut LucivyContext, doc_id: u32) -> 
         None => return return_error("no _node_id field"),
     };
     let term = ld_lucivy::schema::Term::from_field_u64(field, doc_id as u64);
-    let writer = match ctx.handle.writer.lock() {
+    let mut guard = match ctx.handle.writer.lock() {
         Ok(w) => w,
         Err(_) => return return_error("writer lock poisoned"),
+    };
+    let writer = match guard.as_mut() {
+        Some(w) => w,
+        None => return return_error("index is closed"),
     };
     writer.delete_term(term);
     ctx.handle.mark_uncommitted();
@@ -490,7 +515,7 @@ pub unsafe extern "C" fn lucivy_commit_async(ctx: *mut LucivyContext) -> i32 {
         ring_write("[commit-thread] started");
 
         ring_write("[commit-thread] acquiring writer lock...");
-        let mut writer = match ctx.handle.writer.lock() {
+        let mut guard = match ctx.handle.writer.lock() {
             Ok(w) => w,
             Err(_) => {
                 ring_write("[commit-thread] writer lock poisoned!");
@@ -498,14 +523,22 @@ pub unsafe extern "C" fn lucivy_commit_async(ctx: *mut LucivyContext) -> i32 {
                 return;
             }
         };
+        let writer = match guard.as_mut() {
+            Some(w) => w,
+            None => {
+                ring_write("[commit-thread] index is closed!");
+                COMMIT_STATUS.store(3, Ordering::Release);
+                return;
+            }
+        };
         ring_write("[commit-thread] writer lock acquired, committing...");
         if let Err(e) = writer.commit() {
             ring_write(&format!("[commit-thread] commit error: {e}"));
-            drop(writer);
+            drop(guard);
             COMMIT_STATUS.store(3, Ordering::Release);
             return;
         }
-        drop(writer);
+        drop(guard);
         ring_write("[commit-thread] committed, reloading reader...");
         if let Err(e) = ctx.handle.reader.reload() {
             ring_write(&format!("[commit-thread] reload error: {e}"));
@@ -537,9 +570,13 @@ pub extern "C" fn lucivy_commit_finish() -> *const c_char {
 #[no_mangle]
 pub unsafe extern "C" fn lucivy_rollback(ctx: *mut LucivyContext) -> *const c_char {
     let ctx = &*ctx;
-    let mut writer = match ctx.handle.writer.lock() {
+    let mut guard = match ctx.handle.writer.lock() {
         Ok(w) => w,
         Err(_) => return return_error("writer lock poisoned"),
+    };
+    let writer = match guard.as_mut() {
+        Some(w) => w,
+        None => return return_error("index is closed"),
     };
     match writer.rollback() {
         Ok(_) => {

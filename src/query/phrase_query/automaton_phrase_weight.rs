@@ -231,7 +231,7 @@ impl AutomatonPhraseWeight {
             posting_lists.push((offset, union));
         }
 
-        if self.needs_validation() {
+        if self.needs_validation() || self.highlight_sink.is_some() {
             let store_reader = reader
                 .get_store_reader(50)
                 .map_err(crate::LucivyError::from)?;
@@ -253,6 +253,7 @@ impl AutomatonPhraseWeight {
                 segment_id,
             ))))
         } else {
+            // Fast path: no validation, no highlights → position-only PhraseScorer.
             Ok(Some(Box::new(PhraseScorer::new(
                 posting_lists,
                 similarity_weight_opt,
@@ -297,7 +298,7 @@ impl AutomatonPhraseWeight {
             }
         }
 
-        if self.needs_validation() {
+        if self.needs_validation() || self.highlight_sink.is_some() {
             let store_reader = reader
                 .get_store_reader(50)
                 .map_err(crate::LucivyError::from)?;

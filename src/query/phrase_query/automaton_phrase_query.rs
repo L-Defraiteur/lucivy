@@ -132,6 +132,12 @@ impl AutomatonPhraseQuery {
         }
     }
 
+    /// Enable prefix mode: the last token is treated as a prefix (FST range / prefix DFA).
+    pub fn with_prefix_mode(mut self) -> Self {
+        self.last_token_is_prefix = true;
+        self
+    }
+
     /// Attach a highlight sink to capture byte offsets during scoring.
     pub fn with_highlight_sink(mut self, sink: Arc<HighlightSink>, field_name: String) -> Self {
         self.highlight_sink = Some(sink);
