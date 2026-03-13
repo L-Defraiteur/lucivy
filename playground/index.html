@@ -200,7 +200,9 @@ window._allLogs = [];
     <label>
       Mode:
       <select id="mode">
-        <option value="auto">auto (contains_split)</option>
+        <option value="startsWith_split">startsWith (split)</option>
+        <option value="startsWith">startsWith</option>
+        <option value="contains_split">contains (split)</option>
         <option value="contains">contains</option>
         <option value="regex">contains + regex</option>
       </select>
@@ -246,9 +248,40 @@ window._allLogs = [];
         <input type="file" id="snapshotFileInput" accept=".luce" style="display:none">
       </div>
     </div>
+    <div style="margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <input type="text" id="gitUrl" placeholder="https://github.com/owner/repo" style="
+        flex:1; min-width:220px; padding:8px 12px; font-size:13px;
+        background:var(--surface); border:1px solid var(--border);
+        border-radius:6px; color:var(--text); outline:none;
+        font-family:'SF Mono','Fira Code',monospace;
+      ">
+      <input type="text" id="gitBranch" placeholder="branch (default: HEAD)" style="
+        width:140px; padding:8px 12px; font-size:13px;
+        background:var(--surface); border:1px solid var(--border);
+        border-radius:6px; color:var(--text); outline:none;
+      ">
+      <button id="btnCloneGit" style="
+        padding:8px 16px; font-size:13px; border-radius:6px;
+        border:1px solid var(--border); background:var(--surface);
+        color:var(--text); cursor:pointer; white-space:nowrap;
+      ">Clone repo</button>
+    </div>
+    <div style="margin-top:6px; display:flex; gap:8px; align-items:center;">
+      <input type="password" id="gitToken" placeholder="GitHub token (optional, increases rate limit)" style="
+        flex:1; padding:6px 10px; font-size:12px;
+        background:var(--surface); border:1px solid var(--border);
+        border-radius:4px; color:var(--text); outline:none;
+      ">
+      <label style="font-size:11px; color:var(--text-dim); cursor:pointer; display:flex; align-items:center; gap:4px;">
+        <input type="checkbox" id="gitTokenSave" checked> Save
+      </label>
+    </div>
     <p class="import-info">
       Imported files are indexed in a separate index. Switch between indexes using the tabs above.
       Everything runs locally in your browser &mdash; no data is uploaded.
+      If you hit a rate limit or want to index your private repos, you can use a
+      <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" style="color:var(--accent)">personal access token</a>.
+      This code runs entirely in your browser &mdash; nothing is saved or uploaded.
     </p>
   </details>
 
@@ -366,17 +399,17 @@ function buildQuery(text) {
   const mode = modeEl.value;
   const distance = parseInt(distanceEl.value) || 0;
 
-  if (mode === 'auto') {
-    return { type: 'contains_split', field: 'content', value: text, distance };
-  }
   if (mode === 'regex') {
     return { type: 'contains', field: 'content', value: text, regex: true };
   }
-  return { type: 'contains', field: 'content', value: text, distance };
+  return { type: mode, field: 'content', value: text, distance };
 }
+
+let searchGeneration = 0;
 
 async function doSearch() {
   const text = queryEl.value.trim();
+  const gen = ++searchGeneration;
   resultsEl.innerHTML = '';
   resultsHeaderEl.textContent = '';
 
@@ -392,9 +425,11 @@ async function doSearch() {
   try {
     results = await idx.search(query, { limit, highlights: wantHighlights, fields: true });
   } catch (e) {
-    resultsHeaderEl.textContent = `Error: ${e.message}`;
+    if (gen === searchGeneration) resultsHeaderEl.textContent = `Error: ${e.message}`;
     return;
   }
+  // Discard stale results from earlier keystrokes
+  if (gen !== searchGeneration) return;
   const elapsed = (performance.now() - t0).toFixed(1);
 
   resultsHeaderEl.textContent = `${results.length} result${results.length !== 1 ? 's' : ''} in ${elapsed}ms`;
@@ -725,6 +760,142 @@ function isTextFilename(name) {
 function isBinaryContent(text) {
   return text.slice(0, 512).includes('\0');
 }
+
+// ── GitHub clone ──────────────────────────────────────────────────
+
+const gitUrlEl = document.getElementById('gitUrl');
+const gitBranchEl = document.getElementById('gitBranch');
+const gitTokenEl = document.getElementById('gitToken');
+const gitTokenSaveEl = document.getElementById('gitTokenSave');
+const btnCloneGit = document.getElementById('btnCloneGit');
+
+// Restore saved token
+const savedToken = localStorage.getItem('lucivy_gh_token');
+if (savedToken) gitTokenEl.value = savedToken;
+
+function parseGitHubUrl(url) {
+  const m = url.trim().replace(/\/+$/, '').match(
+    /github\.com\/([^/]+)\/([^/]+)/
+  );
+  if (!m) return null;
+  return { owner: m[1], repo: m[2].replace(/\.git$/, '') };
+}
+
+function ghHeaders() {
+  const h = { 'Accept': 'application/vnd.github+json' };
+  const token = gitTokenEl.value.trim();
+  if (token) h['Authorization'] = `Bearer ${token}`;
+  return h;
+}
+
+async function cloneGitRepo() {
+  const parsed = parseGitHubUrl(gitUrlEl.value);
+  if (!parsed) {
+    statusEl.className = 'status error';
+    statusEl.textContent = 'Invalid GitHub URL. Expected: https://github.com/owner/repo';
+    return;
+  }
+  const { owner, repo } = parsed;
+  const branch = gitBranchEl.value.trim() || 'HEAD';
+  const headers = ghHeaders();
+
+  // Save token if checkbox checked
+  if (gitTokenSaveEl.checked && gitTokenEl.value.trim()) {
+    localStorage.setItem('lucivy_gh_token', gitTokenEl.value.trim());
+  } else {
+    localStorage.removeItem('lucivy_gh_token');
+  }
+
+  statusEl.className = 'status loading';
+  queryEl.disabled = true;
+  resultsEl.innerHTML = '';
+  resultsHeaderEl.textContent = '';
+  btnCloneGit.disabled = true;
+  btnCloneGit.textContent = 'Cloning...';
+
+  try {
+    // 1. Download entire repo as tarball via CORS proxy (single request)
+    let dotCount = 0;
+    const dotInterval = setInterval(() => {
+      dotCount = (dotCount + 1) % 4;
+      statusEl.textContent = `Downloading ${owner}/${repo}${'.'.repeat(dotCount || 1)}`;
+    }, 400);
+
+    const PROXY = 'https://lucivy-proxy.luciedefraiteur.workers.dev';
+    const tarballUrl = `${PROXY}/https://api.github.com/repos/${owner}/${repo}/tarball/${branch}`;
+    const fetchHeaders = {};
+    const token = gitTokenEl.value.trim();
+    if (token) fetchHeaders['Authorization'] = `Bearer ${token}`;
+    const resp = await fetch(tarballUrl, { headers: fetchHeaders });
+    if (!resp.ok) {
+      clearInterval(dotInterval);
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.message || `GitHub API error ${resp.status}`);
+    }
+
+    // 2. Extract tar.gz (reuse existing extractTarGz logic)
+    const blob = await resp.blob();
+    const textFiles = await extractTarGz(blob);
+    clearInterval(dotInterval);
+
+    // Strip the GitHub-generated prefix (e.g. "owner-repo-sha/")
+    for (const f of textFiles) {
+      const slash = f.path.indexOf('/');
+      if (slash > 0) f.path = f.path.slice(slash + 1);
+    }
+
+    // Skip files larger than 100KB to avoid WASM OOM
+    const MAX_FILE_SIZE = 100_000;
+    const skipped = textFiles.filter(f => f.content.length > MAX_FILE_SIZE).length;
+    const filtered = textFiles.filter(f => f.content.length <= MAX_FILE_SIZE);
+    if (skipped > 0) console.log(`Skipped ${skipped} files larger than ${MAX_FILE_SIZE} bytes`);
+    textFiles.length = 0;
+    textFiles.push(...filtered);
+
+    if (textFiles.length === 0) throw new Error('No text files found in repository');
+
+    // 3. Index
+    statusEl.textContent = `Indexing ${textFiles.length} files from ${owner}/${repo}...`;
+
+    if (userIndex) { await userIndex.close().catch(() => {}); }
+    userFiles.clear();
+
+    userIndex = await lucivy.create('/user_index', [
+      { name: 'path', type: 'text' },
+      { name: 'content', type: 'text' },
+    ]);
+
+    const BATCH = 200;
+    for (let i = 0; i < textFiles.length; i++) {
+      const { path, content } = textFiles[i];
+      await userIndex.add(i, { path, content });
+      userFiles.set(i, { path, content });
+      if ((i + 1) % BATCH === 0) {
+        statusEl.textContent = `Indexing ${owner}/${repo}... ${i + 1}/${textFiles.length}`;
+        await userIndex.commit();
+      }
+    }
+    await userIndex.commit();
+    userNumDocs = await userIndex.numDocs();
+
+    tabUser.classList.remove('disabled');
+    tabUserCount.textContent = `(${userNumDocs})`;
+    switchTab('user');
+  } catch (e) {
+    statusEl.className = 'status error';
+    statusEl.textContent = `Clone error: ${e.message}`;
+    console.error(e);
+    queryEl.disabled = false;
+  } finally {
+    btnCloneGit.disabled = false;
+    btnCloneGit.textContent = 'Clone repo';
+  }
+}
+
+btnCloneGit.addEventListener('click', cloneGitRepo);
+gitUrlEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') cloneGitRepo();
+});
 
 // ── Events ────────────────────────────────────────────────────────
 

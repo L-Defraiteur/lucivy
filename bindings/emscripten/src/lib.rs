@@ -110,13 +110,7 @@ pub extern "C" fn __main_argc_argv(_argc: i32, _argv: *const *const c_char) -> i
     // Default: limit scheduler to 4 threads (PTHREAD_POOL_SIZE=8 in build.sh).
     // Can be overridden by calling lucivy_configure() before first index op.
     std::env::set_var("LUCIVY_SCHEDULER_THREADS", "4");
-    std::env::set_var("LUCIVY_SCHEDULER_DEBUG", "1");
-
-    // Route scheduler events into the SAB ring buffer so they're visible
-    // from the main thread even during deadlocks.
-    ld_lucivy::set_scheduler_log_hook(|msg| ring_write(msg));
-
-    rlog!("[lucivy-wasm] main() started, default scheduler_threads=4, debug=on");
+    rlog!("[lucivy-wasm] main() started, default scheduler_threads=4");
     0
 }
 
@@ -898,6 +892,8 @@ fn parse_query(ctx: &LucivyContext, query_json: &str) -> Result<query::QueryConf
                 .map_err(|e| format!("invalid query object: {e}"))?;
             if config.query_type == "contains_split" {
                 config = expand_contains_split(&config);
+            } else if config.query_type == "startsWith_split" {
+                config = expand_starts_with_split(&config);
             }
             Ok(config)
         }
@@ -964,6 +960,37 @@ fn expand_contains_split_for_field(value: &str, words: &[&str], field: &str, dis
             field: Some(field.to_string()),
             value: Some(w.to_string()),
             distance,
+            ..Default::default()
+        })
+        .collect();
+    query::QueryConfig {
+        query_type: "boolean".into(),
+        should: Some(should),
+        ..Default::default()
+    }
+}
+
+// ── StartsWith split helpers ──────────────────────────────────────────────
+
+fn expand_starts_with_split(config: &query::QueryConfig) -> query::QueryConfig {
+    let value = config.value.as_deref().unwrap_or("");
+    let field = config.field.as_deref().unwrap_or("");
+    let words: Vec<&str> = value.split_whitespace().collect();
+    if words.len() <= 1 {
+        return query::QueryConfig {
+            query_type: "startsWith".into(),
+            field: Some(field.to_string()),
+            value: Some(value.to_string()),
+            distance: config.distance,
+            ..Default::default()
+        };
+    }
+    let should: Vec<query::QueryConfig> = words.iter()
+        .map(|w| query::QueryConfig {
+            query_type: "startsWith".into(),
+            field: Some(field.to_string()),
+            value: Some(w.to_string()),
+            distance: config.distance,
             ..Default::default()
         })
         .collect();

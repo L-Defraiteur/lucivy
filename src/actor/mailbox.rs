@@ -8,7 +8,7 @@ use super::scheduler::SchedulerNotifier;
 
 /// Côté réception d'un acteur. FIFO strict.
 pub(crate) struct Mailbox<M> {
-    receiver: channel::Receiver<M>,
+    pub(super) receiver: channel::Receiver<M>,
 }
 
 impl<M> Mailbox<M> {

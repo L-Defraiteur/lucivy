@@ -99,7 +99,7 @@ pub(crate) fn global_scheduler() -> &'static Arc<Scheduler> {
 pub(crate) struct ActorId(u64);
 
 /// Nombre max de messages traités par batch avant de yield au scheduler.
-const BATCH_SIZE: usize = 32;
+const BATCH_SIZE: usize = 1024;
 
 // ---------------------------------------------------------------------------
 // Scheduler
@@ -323,6 +323,55 @@ impl Scheduler {
             actor_name: name,
             mailbox_capacity: capacity,
         });
+
+        id
+    }
+
+    /// Spawn un acteur en mode "pinned" : thread dédié, recv direct sur la
+    /// mailbox flume, sans passer par la ready queue ni le HashMap.
+    /// L'acteur tourne en `loop { recv(); handle(); }` — zéro overhead scheduler.
+    ///
+    /// Utilisé pour les IndexerWorkers qui sont le hot path d'ingestion.
+    pub fn spawn_pinned<A: Actor>(
+        &self,
+        mut actor: A,
+        mailbox: Mailbox<A::Msg>,
+        actor_ref: &mut ActorRef<A::Msg>,
+        _capacity: usize,
+    ) -> ActorId {
+        let id = ActorId(self.next_actor_id.fetch_add(1, Ordering::Relaxed));
+        let name = actor.name();
+
+        // Pas de WakeHandle — le thread dédié se réveille via flume recv().
+        // On n'attache PAS de notifier à l'ActorRef : les sends ne passent
+        // pas par le scheduler, le thread dédié est bloqué sur recv().
+        // → ActorRef.notifier reste None → send() fait juste flume.send().
+
+        actor.on_start(actor_ref.clone());
+
+        let receiver = mailbox.receiver.clone();
+        let shared = Arc::clone(&self.shared);
+
+        std::thread::Builder::new()
+            .name(format!("pinned-{name}-{}", id.0))
+            .spawn(move || {
+                loop {
+                    if shared.shutdown.load(Ordering::Acquire) {
+                        return;
+                    }
+                    match receiver.recv() {
+                        Ok(msg) => {
+                            let status = actor.handle(msg);
+                            match status {
+                                ActorStatus::Stop => return,
+                                ActorStatus::Yield | ActorStatus::Continue => {}
+                            }
+                        }
+                        Err(_) => return, // Channel fermé
+                    }
+                }
+            })
+            .expect("failed to spawn pinned actor thread");
 
         id
     }

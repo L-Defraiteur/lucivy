@@ -293,6 +293,7 @@ impl IndexMerger {
     ) -> crate::Result<()> {
         debug_time!("write-postings-for-field");
         let mut positions_buffer: Vec<u32> = Vec::with_capacity(1_000);
+        let mut offsets_buffer: Vec<(u32, u32)> = Vec::new();
         let mut delta_computer = DeltaComputer::new();
 
         let mut max_term_ords: Vec<TermOrdinal> = Vec::new();
@@ -452,7 +453,31 @@ impl IndexMerger {
                         };
 
                         let delta_positions = delta_computer.compute_delta(&positions_buffer);
-                        field_serializer.write_doc(remapped_doc_id, term_freq, delta_positions);
+
+                        if segment_postings_option.has_offsets() && has_term_freq {
+                            segment_postings.offsets(&mut offsets_buffer);
+                            // Convert absolute offsets to deltas for serialization.
+                            let tf = term_freq as usize;
+                            let mut offset_from_deltas = Vec::with_capacity(tf);
+                            let mut offset_to_deltas = Vec::with_capacity(tf);
+                            let mut prev_from = 0u32;
+                            let mut prev_to = 0u32;
+                            for &(from, to) in &offsets_buffer {
+                                offset_from_deltas.push(from - prev_from);
+                                offset_to_deltas.push(to - prev_to);
+                                prev_from = from;
+                                prev_to = to;
+                            }
+                            field_serializer.write_doc_with_offsets(
+                                remapped_doc_id,
+                                term_freq,
+                                delta_positions,
+                                &offset_from_deltas,
+                                &offset_to_deltas,
+                            );
+                        } else {
+                            field_serializer.write_doc(remapped_doc_id, term_freq, delta_positions);
+                        }
                     }
 
                     doc = segment_postings.advance();
@@ -1577,5 +1602,81 @@ mod tests {
         // this is the first time I write a unit test for a constant.
         assert!(((super::MAX_DOC_LIMIT - 1) as i32) >= 0);
         assert!((super::MAX_DOC_LIMIT as i32) < 0);
+    }
+
+    #[test]
+    fn test_merge_preserves_offsets() -> crate::Result<()> {
+        use crate::postings::Postings;
+        use crate::schema::TextOptions;
+
+        // Create a field with offsets enabled.
+        let mut schema_builder = schema::Schema::builder();
+        let indexing = TextFieldIndexing::default()
+            .set_index_option(IndexRecordOption::WithFreqsAndPositionsAndOffsets);
+        let text_opts = TextOptions::default()
+            .set_indexing_options(indexing)
+            .set_stored();
+        let text_field = schema_builder.add_text_field("text", text_opts);
+        let schema = schema_builder.build();
+        let index = Index::create_in_ram(schema);
+
+        {
+            let mut index_writer: IndexWriter = index.writer_for_tests()?;
+            index_writer.set_merge_policy(Box::new(NoMergePolicy));
+
+            // Segment 1
+            index_writer.add_document(doc!(text_field => "hello world foo"))?;
+            index_writer.commit()?;
+
+            // Segment 2
+            index_writer.add_document(doc!(text_field => "hello bar baz"))?;
+            index_writer.commit()?;
+        }
+
+        // Force merge into a single segment.
+        {
+            let mut index_writer: IndexWriter = index.writer_for_tests()?;
+            let segment_ids: Vec<_> = index
+                .searchable_segment_ids()
+                .unwrap()
+                .into_iter()
+                .collect();
+            assert!(segment_ids.len() >= 2, "expected multiple segments before merge");
+            index_writer.merge(&segment_ids)?;
+            index_writer.wait_merging_threads()?;
+        }
+
+        // After merge, read postings with offsets for a term that exists in both docs.
+        let reader = index.reader()?;
+        let searcher = reader.searcher();
+        assert_eq!(searcher.segment_readers().len(), 1, "expected single merged segment");
+
+        let seg_reader = searcher.segment_reader(0);
+        let inverted_index = seg_reader.inverted_index(text_field)?;
+        let term = Term::from_field_text(text_field, "hello");
+        let term_info = inverted_index.get_term_info(&term)?.expect("term not found");
+
+        // This is the line that panicked before the fix: reading offsets from merged segment.
+        let mut postings = inverted_index.read_postings_from_terminfo(
+            &term_info,
+            IndexRecordOption::WithFreqsAndPositionsAndOffsets,
+        )?;
+
+        // Doc 0: "hello world foo" → "hello" at byte offsets [0, 5)
+        assert_ne!(postings.doc(), crate::TERMINATED);
+        let mut offsets = Vec::new();
+        postings.offsets(&mut offsets);
+        assert_eq!(offsets.len(), 1, "expected 1 occurrence in doc 0");
+        assert_eq!(offsets[0], (0, 5), "expected 'hello' at bytes 0..5");
+
+        // Doc 1: "hello bar baz" → "hello" at byte offsets [0, 5)
+        postings.advance();
+        assert_ne!(postings.doc(), crate::TERMINATED);
+        offsets.clear();
+        postings.offsets(&mut offsets);
+        assert_eq!(offsets.len(), 1, "expected 1 occurrence in doc 1");
+        assert_eq!(offsets[0], (0, 5), "expected 'hello' at bytes 0..5");
+
+        Ok(())
     }
 }
