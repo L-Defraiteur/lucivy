@@ -411,31 +411,27 @@ fn build_typed_query_config(
             value: Some(value.into()),
             ..Default::default()
         }),
-        "contains_split" => {
-            let words: Vec<&str> = value.split_whitespace().collect();
-            if words.len() <= 1 {
-                return Ok(query::QueryConfig {
-                    query_type: "contains".into(),
-                    field: Some(field.into()),
-                    value: Some(value.into()),
-                    ..Default::default()
-                });
-            }
-            let should: Vec<query::QueryConfig> = words
-                .iter()
-                .map(|w| query::QueryConfig {
-                    query_type: "contains".into(),
-                    field: Some(field.into()),
-                    value: Some(w.to_string()),
-                    ..Default::default()
-                })
-                .collect();
-            Ok(query::QueryConfig {
-                query_type: "boolean".into(),
-                should: Some(should),
-                ..Default::default()
-            })
-        }
+        "contains_split" => Ok(query::QueryConfig {
+            query_type: "contains_split".into(),
+            field: Some(field.into()),
+            value: Some(value.into()),
+            distance: if distance > 0 { Some(distance) } else { None },
+            ..Default::default()
+        }),
+        "startsWith" => Ok(query::QueryConfig {
+            query_type: "startsWith".into(),
+            field: Some(field.into()),
+            value: Some(value.into()),
+            distance: if distance > 0 { Some(distance) } else { None },
+            ..Default::default()
+        }),
+        "startsWith_split" => Ok(query::QueryConfig {
+            query_type: "startsWith_split".into(),
+            field: Some(field.into()),
+            value: Some(value.into()),
+            distance: if distance > 0 { Some(distance) } else { None },
+            ..Default::default()
+        }),
         "fuzzy" => Ok(query::QueryConfig {
             query_type: "contains".into(),
             field: Some(field.into()),
@@ -457,7 +453,7 @@ fn build_typed_query_config(
             ..Default::default()
         }),
         other => Err(format!(
-            "unknown search mode: {other}. Valid: contains, contains_split, fuzzy, regex, parse"
+            "unknown search mode: {other}. Valid: contains, contains_split, startsWith, startsWith_split, fuzzy, regex, parse"
         )),
     }
 }

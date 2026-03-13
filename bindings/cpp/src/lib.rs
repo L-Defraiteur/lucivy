@@ -64,6 +64,7 @@ mod ffi {
         // Transaction
         fn commit(self: &LucivyIndex) -> Result<()>;
         fn rollback(self: &LucivyIndex) -> Result<()>;
+        fn close(self: &LucivyIndex) -> Result<()>;
 
         // Search
         fn search(
@@ -176,11 +177,12 @@ impl LucivyIndex {
 
         add_fields_from_map(&self.handle, &mut doc, &fields)?;
 
-        let writer = self
+        let mut guard = self
             .handle
             .writer
             .lock()
             .map_err(|_| "writer lock poisoned".to_string())?;
+        let writer = guard.as_mut().ok_or("index is closed")?;
         writer
             .add_document(doc)
             .map_err(|e| e.to_string())?;
@@ -192,11 +194,12 @@ impl LucivyIndex {
         let docs: Vec<serde_json::Value> = serde_json::from_str(docs_json)
             .map_err(|e| format!("invalid docs JSON: {e}"))?;
 
-        let writer = self
+        let mut guard = self
             .handle
             .writer
             .lock()
             .map_err(|_| "writer lock poisoned".to_string())?;
+        let writer = guard.as_mut().ok_or("index is closed")?;
 
         let nid_field = self
             .handle
@@ -238,11 +241,12 @@ impl LucivyIndex {
             .field(NODE_ID_FIELD)
             .ok_or("no _node_id field in schema")?;
         let term = ld_lucivy::schema::Term::from_field_u64(field, doc_id);
-        let writer = self
+        let mut guard = self
             .handle
             .writer
             .lock()
             .map_err(|_| "writer lock poisoned".to_string())?;
+        let writer = guard.as_mut().ok_or("index is closed")?;
         writer.delete_term(term);
         self.handle.mark_uncommitted();
         Ok(())
@@ -255,11 +259,12 @@ impl LucivyIndex {
     }
 
     fn commit(&self) -> Result<(), String> {
-        let mut writer = self
+        let mut guard = self
             .handle
             .writer
             .lock()
             .map_err(|_| "writer lock poisoned".to_string())?;
+        let writer = guard.as_mut().ok_or("index is closed")?;
         writer.commit().map_err(|e| e.to_string())?;
         self.handle
             .reader
@@ -270,14 +275,19 @@ impl LucivyIndex {
     }
 
     fn rollback(&self) -> Result<(), String> {
-        let mut writer = self
+        let mut guard = self
             .handle
             .writer
             .lock()
             .map_err(|_| "writer lock poisoned".to_string())?;
+        let writer = guard.as_mut().ok_or("index is closed")?;
         writer.rollback().map_err(|e| e.to_string())?;
         self.handle.mark_committed();
         Ok(())
+    }
+
+    fn close(&self) -> Result<(), String> {
+        self.handle.close()
     }
 }
 
@@ -494,11 +504,8 @@ impl LucivyIndex {
                 Ok(build_contains_split_multi_field(s, &self.text_fields, None))
             }
             serde_json::Value::Object(_) => {
-                let mut config: query::QueryConfig = serde_json::from_value(value)
+                let config: query::QueryConfig = serde_json::from_value(value)
                     .map_err(|e| format!("invalid query object: {e}"))?;
-                if config.query_type == "contains_split" {
-                    config = expand_contains_split(&config);
-                }
                 Ok(config)
             }
             _ => Err("query must be a JSON string or object".into()),
@@ -509,11 +516,19 @@ impl LucivyIndex {
 // ── Contains split helpers ────────────────────────────────────────────────
 
 fn build_contains_split_multi_field(value: &str, text_fields: &[String], distance: Option<u8>) -> query::QueryConfig {
-    let words: Vec<&str> = value.split_whitespace().collect();
-
     if text_fields.len() == 1 {
-        return expand_contains_split_for_field(value, &words, &text_fields[0], distance);
+        return query::QueryConfig {
+            query_type: "contains_split".into(),
+            field: Some(text_fields[0].clone()),
+            value: Some(value.to_string()),
+            distance,
+            ..Default::default()
+        };
     }
+
+    let words: Vec<&str> = value.split_whitespace()
+        .filter(|w| w.chars().any(|c| c.is_alphanumeric()))
+        .collect();
 
     let word_queries: Vec<query::QueryConfig> = words
         .iter()
@@ -544,45 +559,6 @@ fn build_contains_split_multi_field(value: &str, text_fields: &[String], distanc
             should: Some(word_queries),
             ..Default::default()
         }
-    }
-}
-
-fn expand_contains_split(config: &query::QueryConfig) -> query::QueryConfig {
-    let value = config.value.as_deref().unwrap_or("");
-    let field = config.field.as_deref().unwrap_or("");
-    let words: Vec<&str> = value.split_whitespace().collect();
-    expand_contains_split_for_field(value, &words, field, config.distance)
-}
-
-fn expand_contains_split_for_field(
-    value: &str,
-    words: &[&str],
-    field: &str,
-    distance: Option<u8>,
-) -> query::QueryConfig {
-    if words.len() <= 1 {
-        return query::QueryConfig {
-            query_type: "contains".into(),
-            field: Some(field.to_string()),
-            value: Some(value.to_string()),
-            distance,
-            ..Default::default()
-        };
-    }
-    let should: Vec<query::QueryConfig> = words
-        .iter()
-        .map(|w| query::QueryConfig {
-            query_type: "contains".into(),
-            field: Some(field.to_string()),
-            value: Some(w.to_string()),
-            distance,
-            ..Default::default()
-        })
-        .collect();
-    query::QueryConfig {
-        query_type: "boolean".into(),
-        should: Some(should),
-        ..Default::default()
     }
 }
 
@@ -789,11 +765,9 @@ mod tests {
     #[test]
     fn build_contains_split_propagates_distance_single_field() {
         let q = build_contains_split_multi_field("hello world", &fields_one(), Some(3));
-        assert_eq!(q.query_type, "boolean");
-        for sub in q.should.as_ref().unwrap() {
-            assert_eq!(sub.query_type, "contains");
-            assert_eq!(sub.distance, Some(3));
-        }
+        // Single field delegates to core via "contains_split" query type
+        assert_eq!(q.query_type, "contains_split");
+        assert_eq!(q.distance, Some(3));
     }
 
     #[test]
@@ -809,26 +783,15 @@ mod tests {
     #[test]
     fn build_contains_split_none_distance_stays_none() {
         let q = build_contains_split_multi_field("hello world", &fields_one(), None);
-        assert_eq!(q.query_type, "boolean");
-        for sub in q.should.as_ref().unwrap() {
-            assert_eq!(sub.distance, None);
-        }
+        assert_eq!(q.query_type, "contains_split");
+        assert_eq!(q.distance, None);
     }
 
     #[test]
-    fn expand_contains_split_propagates_distance() {
-        let config = query::QueryConfig {
-            query_type: "contains_split".into(),
-            field: Some("body".into()),
-            value: Some("hello world".into()),
-            distance: Some(3),
-            ..Default::default()
-        };
-        let q = expand_contains_split(&config);
-        assert_eq!(q.query_type, "boolean");
-        for sub in q.should.as_ref().unwrap() {
-            assert_eq!(sub.query_type, "contains");
-            assert_eq!(sub.distance, Some(3));
-        }
+    fn build_contains_split_single_field_delegates_to_core() {
+        let q = build_contains_split_multi_field("hello world", &fields_one(), Some(3));
+        assert_eq!(q.query_type, "contains_split");
+        assert_eq!(q.field.as_deref(), Some("content"));
+        assert_eq!(q.distance, Some(3));
     }
 }

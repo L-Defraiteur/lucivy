@@ -41,7 +41,7 @@ pub struct FieldDef {
 
 // ─── Query Config ───────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct FilterClause {
     pub field: Option<String>,
     pub op: String, // "eq", "ne", "lt", "lte", "gt", "gte", "in", "between", "not_in", "starts_with", "contains", "must", "should", "must_not"
@@ -52,7 +52,7 @@ pub struct FilterClause {
     pub clauses: Option<Vec<FilterClause>>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Clone)]
 pub struct QueryConfig {
     #[serde(rename = "type")]
     pub query_type: String,
@@ -170,6 +170,47 @@ fn resolve_field(
         .map_err(|_| format!("unknown field: {actual_name}"))
 }
 
+// ─── Split Expansion ────────────────────────────────────────────────────────
+
+/// Returns true if the string contains at least one alphanumeric character.
+fn has_alnum(s: &str) -> bool {
+    s.chars().any(|c| c.is_alphanumeric())
+}
+
+/// Expand a `_split` query into a boolean should of per-word sub-queries.
+/// Filters out tokens with no alphanumeric characters (e.g. ":" "—").
+/// If only one word remains, returns a single sub-query (no boolean wrapper).
+fn expand_split(config: &QueryConfig, sub_type: &str) -> QueryConfig {
+    let value = config.value.as_deref().unwrap_or("");
+    let words: Vec<&str> = value.split_whitespace().filter(|w| has_alnum(w)).collect();
+
+    if words.len() <= 1 {
+        return QueryConfig {
+            query_type: sub_type.to_string(),
+            field: config.field.clone(),
+            value: Some(if words.is_empty() { value.to_string() } else { words[0].to_string() }),
+            distance: config.distance,
+            ..Default::default()
+        };
+    }
+
+    let should: Vec<QueryConfig> = words.iter()
+        .map(|w| QueryConfig {
+            query_type: sub_type.to_string(),
+            field: config.field.clone(),
+            value: Some(w.to_string()),
+            distance: config.distance,
+            ..Default::default()
+        })
+        .collect();
+
+    QueryConfig {
+        query_type: "boolean".into(),
+        should: Some(should),
+        ..Default::default()
+    }
+}
+
 // ─── Query Building ─────────────────────────────────────────────────────────
 
 pub fn build_query(
@@ -189,6 +230,16 @@ pub fn build_query(
             build_contains_query(config, schema, index, raw_pairs, ngram_pairs, highlight_sink)
         }
         "startsWith" => build_starts_with_query(config, schema, index, raw_pairs, highlight_sink),
+        "contains_split" => {
+            let expanded = expand_split(config, "contains");
+            build_query(&expanded, schema, index, raw_pairs, ngram_pairs, highlight_sink)
+                .map(|q| q as Box<dyn Query>)
+        }
+        "startsWith_split" => {
+            let expanded = expand_split(config, "startsWith");
+            build_query(&expanded, schema, index, raw_pairs, ngram_pairs, highlight_sink)
+                .map(|q| q as Box<dyn Query>)
+        }
         "boolean" => build_boolean_query(config, schema, index, raw_pairs, ngram_pairs, highlight_sink),
         "parse" => build_parsed_query(config, schema, index),
         other => Err(format!("unknown query type: {other}")),
