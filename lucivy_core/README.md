@@ -232,6 +232,61 @@ let data = snapshot::export_index(&handle, Path::new("./my_index")).unwrap();
 let restored = snapshot::import_index(&data, Path::new("./restored_index")).unwrap();
 ```
 
+## Directory backends
+
+`LucivyHandle::create(dir, &config)` accepts any `Directory` implementation. Choose the backend that fits your storage:
+
+| Directory | Module | Storage | Use case |
+|-----------|--------|---------|----------|
+| **StdFsDirectory** | `lucivy_core::directory` | Local filesystem (mmap) | Default for Node.js, Python, C++ bindings |
+| **BlobDirectory\<S\>** | `lucivy_core::blob_directory` | Any `BlobStore` (DB, S3, Postgres) + local mmap cache | Durable remote storage — data lives in the store, local cache is ephemeral |
+| **MemoryDirectory** | emscripten binding | In-memory (WASM) | Browser / WASM environments |
+| **RamDirectory** | `ld_lucivy::directory` | In-memory | Tests |
+| **MmapDirectory** | `ld_lucivy::directory` | Local filesystem (mmap) | Low-level, used internally by StdFsDirectory |
+
+### BlobDirectory — "DB stores, mmap serves"
+
+```rust
+use lucivy_core::blob_directory::BlobDirectory;
+use lucivy_core::blob_store::MemBlobStore; // or CypherBlobStore, S3BlobStore, etc.
+use std::sync::Arc;
+
+let store = Arc::new(MemBlobStore::new());
+let cache_base = std::env::temp_dir();
+let dir = BlobDirectory::new(store, "my_index", &cache_base).unwrap();
+let handle = LucivyHandle::create(dir, &config).unwrap();
+```
+
+All index files are synced to the `BlobStore` on write, and materialized from it on open. The local cache dir is reference-counted and cleaned up on drop. Index names are auto-prefixed with `Lucivy_` in the store to avoid collisions with other subsystems.
+
+### Implementing a custom BlobStore
+
+```rust
+use lucivy_core::blob_store::BlobStore;
+
+impl BlobStore for MyStore {
+    fn load(&self, index_name: &str, file_name: &str) -> io::Result<Vec<u8>> { ... }
+    fn save(&self, index_name: &str, file_name: &str, data: &[u8]) -> io::Result<()> { ... }
+    fn delete(&self, index_name: &str, file_name: &str) -> io::Result<()> { ... }
+    fn exists(&self, index_name: &str, file_name: &str) -> io::Result<bool> { ... }
+    fn list(&self, index_name: &str) -> io::Result<Vec<String>> { ... }
+}
+```
+
+## close() — releasing the writer lock
+
+```rust
+// Commit pending writes and release the writer lock.
+// After close, reads continue but writes return Err("index is closed").
+handle.close()?;
+
+// Reopen later (e.g. after process restart)
+let dir = StdFsDirectory::open("./my_index")?;
+let handle = LucivyHandle::open(dir)?;
+```
+
+Necessary when the host process doesn't drop the handle (e.g. rag3db C++ `~Database()` doesn't cascade destruction to extension indexes).
+
 ## How contains works
 
 Every text field gets 3 sub-fields automatically:

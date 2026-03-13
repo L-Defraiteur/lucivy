@@ -1138,7 +1138,7 @@ mod tests {
     use crate::collector::TopDocs;
     use crate::query::boolean_query::BooleanQuery;
     use crate::query::Occur;
-    use crate::schema::{Schema, TextFieldIndexing, TextOptions, STORED};
+    use crate::schema::{Schema, TextFieldIndexing, TextOptions};
     use crate::tokenizer::NgramTokenizer;
     use crate::Index;
 

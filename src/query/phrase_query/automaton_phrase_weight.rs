@@ -417,7 +417,7 @@ mod tests {
         );
         let weight = query
             .automaton_phrase_weight(EnableScoring::disabled_from_schema(searcher.schema()))?;
-        let mut scorer = weight.scorer(searcher.segment_reader(0), 1.0)?;
+        let scorer = weight.scorer(searcher.segment_reader(0), 1.0)?;
         assert_eq!(scorer.doc(), TERMINATED);
         Ok(())
     }
@@ -537,7 +537,7 @@ mod tests {
         );
         let weight = query
             .automaton_phrase_weight(EnableScoring::disabled_from_schema(searcher.schema()))?;
-        let mut scorer = weight.scorer(searcher.segment_reader(0), 1.0)?;
+        let scorer = weight.scorer(searcher.segment_reader(0), 1.0)?;
         assert_eq!(scorer.doc(), TERMINATED);
         Ok(())
     }

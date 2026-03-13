@@ -112,7 +112,7 @@ mod test {
     use super::RegexQuery;
     use crate::collector::TopDocs;
     use crate::schema::{Field, Schema, TEXT};
-    use crate::{assert_nearly_equals, Index, IndexReader, IndexWriter};
+    use crate::{Index, IndexReader, IndexWriter};
 
     fn build_test_index() -> crate::Result<(IndexReader, Field)> {
         let mut schema_builder = Schema::builder();

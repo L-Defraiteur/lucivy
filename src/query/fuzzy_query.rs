@@ -220,7 +220,7 @@ mod test {
     use crate::indexer::NoMergePolicy;
     use crate::query::QueryParser;
     use crate::schema::{Schema, STORED, TEXT};
-    use crate::{assert_nearly_equals, Index, IndexWriter, LucivyDocument, Term};
+    use crate::{Index, IndexWriter, LucivyDocument, Term};
 
     #[test]
     pub fn test_fuzzy_json_path() -> crate::Result<()> {

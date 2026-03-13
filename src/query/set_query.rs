@@ -117,7 +117,7 @@ mod tests {
     use crate::collector::TopDocs;
     use crate::query::{QueryParser, TermSetQuery};
     use crate::schema::{Schema, TEXT};
-    use crate::{assert_nearly_equals, Index, IndexWriter, Term};
+    use crate::{Index, IndexWriter, Term};
 
     #[test]
     pub fn test_term_set_query() -> crate::Result<()> {
