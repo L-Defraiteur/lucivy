@@ -60,6 +60,7 @@ pub struct IndexWriterOptions {
     num_worker_threads: usize,
     #[builder(default = 4)]
     /// Defines the number of merger threads to use.
+    #[allow(dead_code)]
     num_merge_threads: usize,
 }
 
@@ -333,6 +334,7 @@ impl<D: Document> IndexWriter<D> {
 
     /// If there are some merging threads, blocks until they all finish their work and
     /// then drop the `IndexWriter`.
+    #[allow(unused_mut)]
     pub fn wait_merging_threads(mut self) -> crate::Result<()> {
         // Les merges sont maintenant synchrones (inline dans le handler),
         // donc l'inventaire devrait déjà être vide. On attend quand même
@@ -386,6 +388,7 @@ impl<D: Document> IndexWriter<D> {
 
     /// S'abonner aux events métier de l'indexer (merge, commit).
     /// Zero-cost quand personne n'écoute.
+    #[allow(private_interfaces)]
     pub fn subscribe_index_events(
         &self,
     ) -> crate::actor::events::EventReceiver<super::events::IndexEvent> {

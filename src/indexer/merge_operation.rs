@@ -25,10 +25,12 @@ impl MergeOperation {
         }
     }
 
+    /// The opstamp that the merge is targeting.
     pub fn target_opstamp(&self) -> Opstamp {
         self.target_opstamp
     }
 
+    /// The segment IDs involved in this merge operation.
     pub fn segment_ids(&self) -> &[SegmentId] {
         &self.segment_ids[..]
     }

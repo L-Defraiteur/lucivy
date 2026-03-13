@@ -146,6 +146,7 @@ pub(crate) fn garbage_collect_files(
 
 /// Merges a list of segments the list of segment givens in the `segment_entries`.
 /// This function happens in the calling thread and is computationally expensive.
+#[allow(dead_code)]
 pub(crate) fn merge(
     index: &Index,
     mut segment_entries: Vec<SegmentEntry>,

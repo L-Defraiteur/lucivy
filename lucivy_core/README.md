@@ -117,6 +117,34 @@ let q = QueryConfig {
 };
 ```
 
+### startsWith — FST prefix search (faster than contains)
+
+```rust
+// Single token: direct prefix match via FST
+let q = QueryConfig {
+    query_type: "startsWith".into(),
+    field: Some("body".into()),
+    value: Some("program".into()),
+    ..Default::default()
+};
+
+// Multi-token: phrase prefix ("programming lang" matches "programming language")
+let q = QueryConfig {
+    query_type: "startsWith".into(),
+    field: Some("body".into()),
+    value: Some("programming lang".into()),
+    ..Default::default()
+};
+
+// Split mode: each word is a separate startsWith, OR'd together
+let q = QueryConfig {
+    query_type: "startsWith_split".into(),
+    field: Some("body".into()),
+    value: Some("rust program".into()),
+    ..Default::default()
+};
+```
+
 ### boolean — combine queries with must / should / must_not
 
 ```rust

@@ -9,12 +9,14 @@ use tantivy_fst::Automaton;
 /// at a different byte position. A new walk starts at every byte (the `.*`
 /// prefix). Once any walk reaches an accepting state, the automaton is
 /// permanently matched (the `.*` suffix).
+#[allow(dead_code)]
 pub(crate) struct FuzzySubstringAutomaton {
     dfa: DFA,
 }
 
 /// State for [`FuzzySubstringAutomaton`].
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct FuzzySubstringState {
     /// Active Levenshtein DFA states (sorted, deduplicated).
     active: Vec<u32>,
@@ -22,6 +24,7 @@ pub struct FuzzySubstringState {
     matched: bool,
 }
 
+#[allow(dead_code)]
 impl FuzzySubstringAutomaton {
     /// Build from a pre-built Levenshtein DFA (use the cached
     /// `LevenshteinAutomatonBuilder` to create it).

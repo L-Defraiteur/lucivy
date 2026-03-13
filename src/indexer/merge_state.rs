@@ -255,6 +255,7 @@ impl MergeState {
 /// C'est le wrapper synchrone qui remplace l'ancien `merge()` pour l'API
 /// existante (IndexWriter::merge). Le comportement est identique à l'ancien
 /// code, mais l'implémentation passe par la state machine.
+#[allow(dead_code)]
 pub(crate) fn merge_incremental(
     index: &Index,
     segment_entries: Vec<SegmentEntry>,

@@ -166,6 +166,7 @@ mod functional_test;
 
 #[macro_use]
 mod macros;
+#[allow(dead_code, unused_imports, clippy::type_complexity, clippy::borrowed_box)]
 mod actor;
 mod future_result;
 
