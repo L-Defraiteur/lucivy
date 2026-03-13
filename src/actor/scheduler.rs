@@ -16,7 +16,8 @@ use super::{Actor, ActorStatus, Priority};
 
 /// Optional log hook — called for every scheduler debug event.
 /// Set by the emscripten binding to route events into the SAB ring buffer.
-static LOG_HOOK: Mutex<Option<Box<dyn Fn(&str) + Send>>> = Mutex::new(None);
+type LogHookFn = Box<dyn Fn(&str) + Send>;
+static LOG_HOOK: Mutex<Option<LogHookFn>> = Mutex::new(None);
 
 /// Register a log hook that receives formatted scheduler event strings.
 /// Called from the emscripten binding to route [sched] events into the ring buffer.
@@ -611,7 +612,7 @@ fn handle_batch(
                 match actor.poll_idle() {
                     Poll::Ready(()) => break,
                     Poll::Pending => {
-                        emit_priority_change(shared, actor_id, actor_name, priority_before, actor);
+                        emit_priority_change(shared, actor_id, actor_name, priority_before, &**actor);
                         return BatchResult::Idle;
                     }
                 }
@@ -619,7 +620,7 @@ fn handle_batch(
         }
     }
 
-    emit_priority_change(shared, actor_id, actor_name, priority_before, actor);
+    emit_priority_change(shared, actor_id, actor_name, priority_before, &**actor);
 
     // On ne rappelle PAS poll_idle() ici — il a des side effects (merge step).
     // On retourne toujours HasMore : soit il reste des messages (batch épuisé),
@@ -633,7 +634,7 @@ fn emit_priority_change(
     actor_id: ActorId,
     actor_name: &'static str,
     priority_before: Priority,
-    actor: &Box<dyn AnyActor>,
+    actor: &dyn AnyActor,
 ) {
     let priority_after = actor.priority();
     if priority_before != priority_after {
