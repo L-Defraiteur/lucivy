@@ -128,6 +128,9 @@ window._allLogs = [];
   }
 
   /* Results */
+  .query-warning {
+    font-size: 12px; color: #b58900; margin-bottom: 6px; font-style: italic;
+  }
   .results-header {
     font-size: 13px; color: var(--text-dim); margin-bottom: 8px;
   }
@@ -200,8 +203,8 @@ window._allLogs = [];
     <label>
       Mode:
       <select id="mode">
-        <option value="startsWith_split">startsWith (split)</option>
         <option value="startsWith">startsWith</option>
+        <option value="startsWith_split">startsWith (split)</option>
         <option value="contains_split">contains (split)</option>
         <option value="contains">contains</option>
         <option value="regex">contains + regex</option>
@@ -287,6 +290,7 @@ window._allLogs = [];
 
   <div class="status loading" id="status">Loading WASM + dataset...</div>
 
+  <div id="queryWarning" class="query-warning" style="display:none"></div>
   <div id="resultsHeader" class="results-header"></div>
   <div id="results"></div>
 
@@ -407,14 +411,30 @@ function buildQuery(text) {
 
 let searchGeneration = 0;
 
+const queryWarningEl = document.getElementById('queryWarning');
+
 async function doSearch() {
   const text = queryEl.value.trim();
   const gen = ++searchGeneration;
   resultsEl.innerHTML = '';
   resultsHeaderEl.textContent = '';
+  queryWarningEl.style.display = 'none';
 
   const idx = getActiveIndex();
   if (!text || !idx) return;
+
+  // Warn about short terms that may produce too many results
+  const mode = modeEl.value;
+  const words = text.split(/\s+/).filter(w => w.length > 0);
+  const isSplit = mode.includes('split');
+  const hasShortTerm = words.some(w => w.length <= 2);
+  if (isSplit && hasShortTerm) {
+    queryWarningEl.textContent = '\u26a0 Short terms (\u22642 chars) in split mode can trigger too many results';
+    queryWarningEl.style.display = 'block';
+  } else if (!isSplit && words.length === 1 && text.length <= 2) {
+    queryWarningEl.textContent = '\u26a0 Short queries (\u22642 chars) can trigger too many results';
+    queryWarningEl.style.display = 'block';
+  }
 
   const limit = parseInt(limitEl.value) || 20;
   const wantHighlights = highlightsEl.checked;

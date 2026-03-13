@@ -974,10 +974,14 @@ fn build_contains_split_multi_field(value: &str, text_fields: &[String], distanc
     }
 }
 
+fn has_alnum(s: &str) -> bool {
+    s.chars().any(|c| c.is_alphanumeric())
+}
+
 fn expand_contains_split(config: &query::QueryConfig) -> query::QueryConfig {
     let value = config.value.as_deref().unwrap_or("");
     let field = config.field.as_deref().unwrap_or("");
-    let words: Vec<&str> = value.split_whitespace().collect();
+    let words: Vec<&str> = value.split_whitespace().filter(|w| has_alnum(w)).collect();
     expand_contains_split_for_field(value, &words, field, config.distance)
 }
 
@@ -1012,7 +1016,7 @@ fn expand_contains_split_for_field(value: &str, words: &[&str], field: &str, dis
 fn expand_starts_with_split(config: &query::QueryConfig) -> query::QueryConfig {
     let value = config.value.as_deref().unwrap_or("");
     let field = config.field.as_deref().unwrap_or("");
-    let words: Vec<&str> = value.split_whitespace().collect();
+    let words: Vec<&str> = value.split_whitespace().filter(|w| has_alnum(w)).collect();
     if words.len() <= 1 {
         return query::QueryConfig {
             query_type: "startsWith".into(),

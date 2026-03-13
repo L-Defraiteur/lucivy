@@ -207,6 +207,7 @@ impl AutomatonPhraseWeight {
         let inverted_index = reader.inverted_index(self.field)?;
         let mut posting_lists = Vec::new();
         let mut num_terms = 0;
+        let mut budget = self.max_expansions as usize;
         let mut cascade_distances = Vec::new();
 
         let last_idx = self.phrase_terms.len() - 1;
@@ -221,10 +222,14 @@ impl AutomatonPhraseWeight {
             }
             cascade_distances.push(level.distance());
             num_terms += term_infos.len();
-            if num_terms > self.max_expansions as usize {
-                return Err(crate::LucivyError::InvalidArgument(format!(
-                    "Contains query exceeded max expansions {num_terms}"
-                )));
+            if num_terms > budget {
+                // Grant extra headroom for this token, up to once per token.
+                budget += 20;
+                if num_terms > budget {
+                    return Err(crate::LucivyError::InvalidArgument(format!(
+                        "Contains query exceeded max expansions ({num_terms} > {budget})"
+                    )));
+                }
             }
             let union =
                 RegexPhraseWeight::get_union_from_term_infos(&term_infos, reader, &inverted_index)?;
