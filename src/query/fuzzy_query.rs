@@ -206,8 +206,10 @@ impl FuzzyTermQuery {
 }
 
 impl Query for FuzzyTermQuery {
-    fn weight(&self, _enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
-        Ok(Box::new(self.specialized_weight()?))
+    fn weight(&self, enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
+        let mut weight = self.specialized_weight()?;
+        weight = weight.with_scoring(enable_scoring.is_scoring_enabled());
+        Ok(Box::new(weight))
     }
 }
 
@@ -330,7 +332,7 @@ mod test {
                 searcher.search(&fuzzy_query, &TopDocs::with_limit(2).order_by_score())?;
             assert_eq!(top_docs.len(), 1, "Expected only 1 document");
             let (score, _) = top_docs[0];
-            assert_nearly_equals!(1.0, score);
+            assert!(score > 0.0, "Expected positive BM25 score, got {score}");
         }
 
         // fails because non-prefix Levenshtein distance is more than 1 (add 'a' and 'n')
@@ -351,7 +353,7 @@ mod test {
                 searcher.search(&fuzzy_query, &TopDocs::with_limit(2).order_by_score())?;
             assert_eq!(top_docs.len(), 1, "Expected only 1 document");
             let (score, _) = top_docs[0];
-            assert_nearly_equals!(1.0, score);
+            assert!(score > 0.0, "Expected positive BM25 score, got {score}");
         }
         Ok(())
     }

@@ -6,9 +6,12 @@ use tantivy_fst::Automaton;
 
 use super::phrase_prefix_query::prefix_end;
 use crate::docset::DocSet;
+use crate::fieldnorm::FieldNormReader;
 use crate::index::SegmentReader;
 use crate::postings::{Postings, TermInfo};
+use crate::query::bm25::Bm25Weight;
 use crate::query::phrase_query::scoring_utils::HighlightSink;
+use crate::docset::COLLECT_BLOCK_BUFFER_LEN;
 use crate::query::{BitSetDocSet, ConstScorer, Explanation, Scorer, Weight};
 use crate::schema::{Field, IndexRecordOption};
 use crate::termdict::{TermDictionary, TermStreamer};
@@ -22,6 +25,7 @@ pub struct AutomatonWeight<A> {
     // We apply additional filtering based on the given JSON path, when searching within the term
     // dictionary. This prevents terms from unrelated paths from matching the search criteria.
     json_path_bytes: Option<Box<[u8]>>,
+    scoring_enabled: bool,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
 }
@@ -37,6 +41,7 @@ where
             field,
             automaton: automaton.into(),
             json_path_bytes: None,
+            scoring_enabled: false,
             highlight_sink: None,
             highlight_field_name: String::new(),
         }
@@ -52,9 +57,16 @@ where
             field,
             automaton: automaton.into(),
             json_path_bytes: Some(json_path_bytes.to_vec().into_boxed_slice()),
+            scoring_enabled: false,
             highlight_sink: None,
             highlight_field_name: String::new(),
         }
+    }
+
+    /// Set whether BM25 scoring is enabled. When disabled, uses fast path with ConstScorer.
+    pub fn with_scoring(mut self, scoring_enabled: bool) -> Self {
+        self.scoring_enabled = scoring_enabled;
+        self
     }
 
     /// Attach a highlight sink to capture byte offsets during scoring.
@@ -94,6 +106,53 @@ where
     }
 }
 
+/// Scorer that wraps a BitSetDocSet with pre-computed per-doc BM25 scores.
+struct AutomatonScorer {
+    doc_bitset: BitSetDocSet,
+    scores: Vec<Score>,
+    boost: Score,
+}
+
+impl AutomatonScorer {
+    fn new(doc_bitset: BitSetDocSet, scores: Vec<Score>, boost: Score) -> Self {
+        AutomatonScorer {
+            doc_bitset,
+            scores,
+            boost,
+        }
+    }
+}
+
+impl DocSet for AutomatonScorer {
+    fn advance(&mut self) -> DocId {
+        self.doc_bitset.advance()
+    }
+
+    fn seek(&mut self, target: DocId) -> DocId {
+        self.doc_bitset.seek(target)
+    }
+
+    fn fill_buffer(&mut self, buffer: &mut [DocId; COLLECT_BLOCK_BUFFER_LEN]) -> usize {
+        self.doc_bitset.fill_buffer(buffer)
+    }
+
+    fn doc(&self) -> DocId {
+        self.doc_bitset.doc()
+    }
+
+    fn size_hint(&self) -> u32 {
+        self.doc_bitset.size_hint()
+    }
+}
+
+impl Scorer for AutomatonScorer {
+    #[inline]
+    fn score(&mut self) -> Score {
+        let doc = self.doc();
+        self.scores[doc as usize] * self.boost
+    }
+}
+
 impl<A> Weight for AutomatonWeight<A>
 where
     A: Automaton + Send + Sync + 'static,
@@ -106,10 +165,28 @@ where
         let term_dict = inverted_index.terms();
         let mut term_stream = self.automaton_stream(term_dict)?;
 
+        // Get fieldnorm reader, falling back to constant(1) if not available (e.g. JSON fields).
+        let fieldnorm_reader = reader
+            .fieldnorms_readers()
+            .get_field(self.field)?
+            .unwrap_or_else(|| FieldNormReader::constant(max_doc, 1));
+
         if let Some(ref sink) = self.highlight_sink {
+            // Highlight path: always read full postings for offsets.
+            // BM25 scoring is computed opportunistically (freqs are available).
+            let total_num_tokens = inverted_index.total_num_tokens();
+            let total_num_docs = (max_doc as u64).max(1);
+            let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
+            let mut scores = vec![0.0f32; max_doc as usize];
+
             let segment_id = reader.segment_id();
             while term_stream.advance() {
                 let term_info = term_stream.value().clone();
+                let bm25 = Bm25Weight::for_one_term_without_explain(
+                    term_info.doc_freq as u64,
+                    total_num_docs,
+                    average_fieldnorm,
+                );
                 let mut segment_postings = inverted_index.read_postings_from_terminfo(
                     &term_info,
                     IndexRecordOption::WithFreqsAndPositionsAndOffsets,
@@ -120,6 +197,9 @@ where
                         break;
                     }
                     doc_bitset.insert(doc);
+                    let term_freq = segment_postings.term_freq();
+                    let fieldnorm_id = fieldnorm_reader.fieldnorm_id(doc);
+                    scores[doc as usize] += bm25.score(fieldnorm_id, term_freq);
                     let mut offsets_buf = Vec::new();
                     segment_postings.append_offsets(&mut offsets_buf);
                     if !offsets_buf.is_empty() {
@@ -132,7 +212,46 @@ where
                     segment_postings.advance();
                 }
             }
+
+            let doc_bitset = BitSetDocSet::from(doc_bitset);
+            let scorer = AutomatonScorer::new(doc_bitset, scores, boost);
+            Ok(Box::new(scorer))
+        } else if self.scoring_enabled {
+            // BM25 scoring path: read postings with freqs.
+            let total_num_tokens = inverted_index.total_num_tokens();
+            let total_num_docs = (max_doc as u64).max(1);
+            let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
+            let mut scores = vec![0.0f32; max_doc as usize];
+
+            while term_stream.advance() {
+                let term_info = term_stream.value().clone();
+                let bm25 = Bm25Weight::for_one_term_without_explain(
+                    term_info.doc_freq as u64,
+                    total_num_docs,
+                    average_fieldnorm,
+                );
+                let mut segment_postings = inverted_index.read_postings_from_terminfo(
+                    &term_info,
+                    IndexRecordOption::WithFreqs,
+                )?;
+                loop {
+                    let doc = segment_postings.doc();
+                    if doc == TERMINATED {
+                        break;
+                    }
+                    doc_bitset.insert(doc);
+                    let term_freq = segment_postings.term_freq();
+                    let fieldnorm_id = fieldnorm_reader.fieldnorm_id(doc);
+                    scores[doc as usize] += bm25.score(fieldnorm_id, term_freq);
+                    segment_postings.advance();
+                }
+            }
+
+            let doc_bitset = BitSetDocSet::from(doc_bitset);
+            let scorer = AutomatonScorer::new(doc_bitset, scores, boost);
+            Ok(Box::new(scorer))
         } else {
+            // Fast path: no scoring, no highlights. Block postings with Basic.
             while term_stream.advance() {
                 let term_info = term_stream.value();
                 let mut block_segment_postings = inverted_index
@@ -148,11 +267,11 @@ where
                     block_segment_postings.advance();
                 }
             }
-        }
 
-        let doc_bitset = BitSetDocSet::from(doc_bitset);
-        let const_scorer = ConstScorer::new(doc_bitset, boost);
-        Ok(Box::new(const_scorer))
+            let doc_bitset = BitSetDocSet::from(doc_bitset);
+            let const_scorer = ConstScorer::new(doc_bitset, boost);
+            Ok(Box::new(const_scorer))
+        }
     }
 
     fn explain(&self, reader: &SegmentReader, doc: DocId) -> crate::Result<Explanation> {
@@ -233,7 +352,7 @@ mod tests {
         let searcher = reader.searcher();
         let mut scorer = automaton_weight.scorer(searcher.segment_reader(0u32), 1.0)?;
         assert_eq!(scorer.doc(), 0u32);
-        assert_eq!(scorer.score(), 1.0);
+        assert_eq!(scorer.score(), 1.0); // scoring disabled by default → ConstScorer
         assert_eq!(scorer.advance(), 2u32);
         assert_eq!(scorer.doc(), 2u32);
         assert_eq!(scorer.score(), 1.0);
@@ -251,6 +370,23 @@ mod tests {
         let mut scorer = automaton_weight.scorer(searcher.segment_reader(0u32), 1.32)?;
         assert_eq!(scorer.doc(), 0u32);
         assert_eq!(scorer.score(), 1.32);
+        Ok(())
+    }
+
+    #[test]
+    fn test_automaton_weight_bm25() -> crate::Result<()> {
+        let index = create_index()?;
+        let field = index.schema().get_field("title").unwrap();
+        let automaton_weight = AutomatonWeight::new(field, PrefixedByA).with_scoring(true);
+        let reader = index.reader()?;
+        let searcher = reader.searcher();
+        let mut scorer = automaton_weight.scorer(searcher.segment_reader(0u32), 1.0)?;
+        assert_eq!(scorer.doc(), 0u32);
+        assert!(scorer.score() > 0.0, "BM25 score should be positive");
+        assert_ne!(scorer.score(), 1.0, "BM25 score should differ from ConstScorer");
+        assert_eq!(scorer.advance(), 2u32);
+        assert!(scorer.score() > 0.0);
+        assert_eq!(scorer.advance(), TERMINATED);
         Ok(())
     }
 }

@@ -910,6 +910,71 @@ mod tests {
         let _index_writer_two: IndexWriter = index.writer_for_tests().unwrap();
     }
 
+    /// Reproduces the "LockBusy" bug from rag3weaver doc 19:
+    /// close an IndexWriter on disk (MmapDirectory), then immediately reopen.
+    #[test]
+    fn test_lockfile_released_on_drop_mmap() -> crate::Result<()> {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut schema_builder = schema::Schema::builder();
+        let text_field = schema_builder.add_text_field("text", TEXT);
+        let index = Index::create_in_dir(temp_dir.path(), schema_builder.build())?;
+        {
+            let mut writer: IndexWriter = index.writer_for_tests()?;
+            for i in 0..100 {
+                writer.add_document(doc!(text_field => format!("document number {i}")))?;
+            }
+            writer.commit()?;
+            // writer is dropped here — lock should be released
+        }
+        // Immediately try to reopen — this is where doc 19 gets LockBusy
+        let _writer2: IndexWriter = index.writer_for_tests()?;
+        Ok(())
+    }
+
+    /// Same as above but with wait_merging_threads() before drop.
+    #[test]
+    fn test_lockfile_released_after_wait_merging_mmap() -> crate::Result<()> {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut schema_builder = schema::Schema::builder();
+        let text_field = schema_builder.add_text_field("text", TEXT);
+        let index = Index::create_in_dir(temp_dir.path(), schema_builder.build())?;
+        {
+            let mut writer: IndexWriter = index.writer_for_tests()?;
+            for i in 0..100 {
+                writer.add_document(doc!(text_field => format!("document number {i}")))?;
+            }
+            writer.commit()?;
+            writer.wait_merging_threads()?;
+            // writer is dropped after explicit wait
+        }
+        let _writer2: IndexWriter = index.writer_for_tests()?;
+        Ok(())
+    }
+
+    /// Stress test: multiple open/close cycles on the same MmapDirectory.
+    #[test]
+    fn test_lockfile_reopen_cycle_mmap() -> crate::Result<()> {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut schema_builder = schema::Schema::builder();
+        let text_field = schema_builder.add_text_field("text", TEXT);
+        let index = Index::create_in_dir(temp_dir.path(), schema_builder.build())?;
+        for cycle in 0..5 {
+            let mut writer: IndexWriter = index.writer_for_tests()?;
+            for i in 0..20 {
+                writer.add_document(
+                    doc!(text_field => format!("cycle {cycle} document {i}")),
+                )?;
+            }
+            writer.commit()?;
+            // drop without wait_merging_threads
+        }
+        // Verify data is readable
+        let reader = index.reader()?;
+        let searcher = reader.searcher();
+        assert!(searcher.num_docs() >= 100, "Expected at least 100 docs, got {}", searcher.num_docs());
+        Ok(())
+    }
+
     #[test]
     fn test_commit_and_rollback() -> crate::Result<()> {
         let mut schema_builder = schema::Schema::builder();

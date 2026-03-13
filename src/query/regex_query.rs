@@ -97,8 +97,9 @@ impl RegexQuery {
 }
 
 impl Query for RegexQuery {
-    fn weight(&self, _enabled_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
-        Ok(Box::new(self.specialized_weight()))
+    fn weight(&self, enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
+        let weight = self.specialized_weight().with_scoring(enable_scoring.is_scoring_enabled());
+        Ok(Box::new(weight))
     }
 }
 
@@ -148,7 +149,7 @@ mod test {
                 .unwrap();
             assert_eq!(scored_docs.len(), 1, "Expected only 1 document");
             let (score, _) = scored_docs[0];
-            assert_nearly_equals!(1.0, score);
+            assert!(score > 0.0, "Expected positive BM25 score, got {score}");
         }
         let top_docs = searcher
             .search(

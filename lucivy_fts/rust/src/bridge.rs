@@ -79,6 +79,7 @@ mod ffi {
         fn create_index(path: &str, schema_json: &str) -> Result<Box<LucivyHandle>>;
         fn open_index(path: &str) -> Result<Box<LucivyHandle>>;
         // close = drop of Box<LucivyHandle> (automatic)
+        fn close_index(handle: &LucivyHandle) -> Result<()>;
 
         // Schema introspection
         fn get_field_ids(handle: &LucivyHandle) -> Vec<IndexFieldInfo>;
@@ -168,6 +169,10 @@ fn open_index(path: &str) -> Result<Box<LucivyHandle>, String> {
     Ok(Box::new(LucivyHandle(inner)))
 }
 
+fn close_index(handle: &LucivyHandle) -> Result<(), String> {
+    handle.0.close()
+}
+
 // ── Schema introspection ───────────────────────────────────────────────────
 
 fn get_field_ids(handle: &LucivyHandle) -> Vec<ffi::IndexFieldInfo> {
@@ -213,10 +218,11 @@ fn add_document_texts(
         auto_duplicate_field(&mut doc, handle, &field_name, &f.value);
     }
 
-    let writer = handle
+    let mut guard = handle
         .writer
         .lock()
         .map_err(|_| "writer lock poisoned".to_string())?;
+    let writer = guard.as_mut().ok_or("index is closed")?;
     writer
         .add_document(doc)
         .map(|o| o as i64)
@@ -255,10 +261,11 @@ fn add_document_mixed(
         doc.add_f64(Field::from_field_id(f.field_id), f.value);
     }
 
-    let writer = handle
+    let mut guard = handle
         .writer
         .lock()
         .map_err(|_| "writer lock poisoned".to_string())?;
+    let writer = guard.as_mut().ok_or("index is closed")?;
     writer
         .add_document(doc)
         .map(|o| o as i64)
@@ -300,20 +307,22 @@ fn delete_by_node_id(handle: &LucivyHandle, node_id: u64) -> Result<i64, String>
         .field(NODE_ID_FIELD)
         .ok_or("no _node_id field in schema")?;
     let term = ld_lucivy::schema::Term::from_field_u64(field, node_id);
-    let writer = handle
+    let mut guard = handle
         .writer
         .lock()
         .map_err(|_| "writer lock poisoned".to_string())?;
+    let writer = guard.as_mut().ok_or("index is closed")?;
     Ok(writer.delete_term(term) as i64)
 }
 
 // ── Transaction ────────────────────────────────────────────────────────────
 
 fn commit(handle: &LucivyHandle) -> Result<i64, String> {
-    let mut writer = handle
+    let mut guard = handle
         .writer
         .lock()
         .map_err(|_| "writer lock poisoned".to_string())?;
+    let writer = guard.as_mut().ok_or("index is closed")?;
     writer
         .commit()
         .map(|o| o as i64)
@@ -321,8 +330,10 @@ fn commit(handle: &LucivyHandle) -> Result<i64, String> {
 }
 
 fn rollback(handle: &LucivyHandle) {
-    if let Ok(mut writer) = handle.writer.lock() {
-        let _ = writer.rollback();
+    if let Ok(mut guard) = handle.writer.lock() {
+        if let Some(writer) = guard.as_mut() {
+            let _ = writer.rollback();
+        }
     }
 }
 

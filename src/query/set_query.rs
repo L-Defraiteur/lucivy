@@ -33,6 +33,7 @@ impl TermSetQuery {
     fn specialized_weight(
         &self,
         schema: &Schema,
+        scoring_enabled: bool,
     ) -> crate::Result<BooleanWeight<DoNothingCombiner>> {
         let mut sub_queries: Vec<(_, Box<dyn Weight>)> = Vec::with_capacity(self.terms_map.len());
 
@@ -56,7 +57,7 @@ impl TermSetQuery {
 
             sub_queries.push((
                 Occur::Should,
-                Box::new(AutomatonWeight::new(field, SetDfaWrapper(map))),
+                Box::new(AutomatonWeight::new(field, SetDfaWrapper(map)).with_scoring(scoring_enabled)),
             ));
         }
 
@@ -70,7 +71,7 @@ impl TermSetQuery {
 
 impl Query for TermSetQuery {
     fn weight(&self, enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
-        Ok(Box::new(self.specialized_weight(enable_scoring.schema())?))
+        Ok(Box::new(self.specialized_weight(enable_scoring.schema(), enable_scoring.is_scoring_enabled())?))
     }
 
     fn query_terms<'a>(&'a self, visitor: &mut dyn FnMut(&'a Term, bool)) {
@@ -157,7 +158,7 @@ mod tests {
                 searcher.search(&term_set_query, &TopDocs::with_limit(2).order_by_score())?;
             assert_eq!(top_docs.len(), 1, "Expected 1 document");
             let (score, _) = top_docs[0];
-            assert_nearly_equals!(1.0, score);
+            assert!(score > 0.0, "Expected positive BM25 score, got {score}");
         }
 
         {
@@ -182,7 +183,7 @@ mod tests {
                 searcher.search(&term_set_query, &TopDocs::with_limit(2).order_by_score())?;
             assert_eq!(top_docs.len(), 2, "Expected 2 documents");
             for (score, _) in top_docs {
-                assert_nearly_equals!(1.0, score);
+                assert!(score > 0.0, "Expected positive BM25 score, got {score}");
             }
         }
 
@@ -200,7 +201,7 @@ mod tests {
 
             assert_eq!(top_docs.len(), 2, "Expected 2 document");
             for (score, _) in top_docs {
-                assert_nearly_equals!(1.0, score);
+                assert!(score > 0.0, "Expected positive BM25 score, got {score}");
             }
         }
 

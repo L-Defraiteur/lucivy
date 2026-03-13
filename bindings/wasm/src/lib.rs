@@ -116,8 +116,10 @@ impl Index {
             self.add_field_value(&mut doc, key, value)?;
         }
 
-        let writer = self.handle.writer.lock()
+        let mut guard = self.handle.writer.lock()
             .map_err(|_| JsError::new("writer lock poisoned"))?;
+        let writer = guard.as_mut()
+            .ok_or_else(|| JsError::new("index is closed"))?;
         writer.add_document(doc)
             .map_err(|e| JsError::new(&e.to_string()))?;
         self.handle.mark_uncommitted();
@@ -129,8 +131,10 @@ impl Index {
         let docs: Vec<serde_json::Value> = serde_json::from_str(docs_json)
             .map_err(|e| JsError::new(&format!("invalid docs JSON: {e}")))?;
 
-        let writer = self.handle.writer.lock()
+        let mut guard = self.handle.writer.lock()
             .map_err(|_| JsError::new("writer lock poisoned"))?;
+        let writer = guard.as_mut()
+            .ok_or_else(|| JsError::new("index is closed"))?;
         let nid_field = self.handle.field(NODE_ID_FIELD)
             .ok_or_else(|| JsError::new("no _node_id field in schema"))?;
 
@@ -159,8 +163,10 @@ impl Index {
         let field = self.handle.field(NODE_ID_FIELD)
             .ok_or_else(|| JsError::new("no _node_id field in schema"))?;
         let term = ld_lucivy::schema::Term::from_field_u64(field, doc_id as u64);
-        let writer = self.handle.writer.lock()
+        let mut guard = self.handle.writer.lock()
             .map_err(|_| JsError::new("writer lock poisoned"))?;
+        let writer = guard.as_mut()
+            .ok_or_else(|| JsError::new("index is closed"))?;
         writer.delete_term(term);
         self.handle.mark_uncommitted();
         Ok(())
@@ -179,8 +185,10 @@ impl Index {
     /// After this, call `exportDirtyFiles()` to get files to persist to OPFS.
     #[wasm_bindgen]
     pub fn commit(&self) -> Result<(), JsError> {
-        let mut writer = self.handle.writer.lock()
+        let mut guard = self.handle.writer.lock()
             .map_err(|_| JsError::new("writer lock poisoned"))?;
+        let writer = guard.as_mut()
+            .ok_or_else(|| JsError::new("index is closed"))?;
         writer.commit()
             .map_err(|e| JsError::new(&e.to_string()))?;
         self.handle.reader.reload()
@@ -191,8 +199,10 @@ impl Index {
 
     #[wasm_bindgen]
     pub fn rollback(&self) -> Result<(), JsError> {
-        let mut writer = self.handle.writer.lock()
+        let mut guard = self.handle.writer.lock()
             .map_err(|_| JsError::new("writer lock poisoned"))?;
+        let writer = guard.as_mut()
+            .ok_or_else(|| JsError::new("index is closed"))?;
         writer.rollback()
             .map_err(|e| JsError::new(&e.to_string()))?;
         self.handle.mark_committed();

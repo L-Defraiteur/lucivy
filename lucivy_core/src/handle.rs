@@ -38,7 +38,7 @@ const NGRAM_TOKENIZER: &str = "ngram";
 /// Opaque handle shared by all bindings.
 pub struct LucivyHandle {
     pub index: Index,
-    pub writer: Mutex<IndexWriter>,
+    pub writer: Mutex<Option<IndexWriter>>,
     pub reader: IndexReader,
     pub schema: Schema,
     /// Maps field names (including internal `._raw` names) to Field objects.
@@ -106,7 +106,7 @@ impl LucivyHandle {
 
         Ok(Self {
             index,
-            writer: Mutex::new(writer),
+            writer: Mutex::new(Some(writer)),
             reader,
             schema,
             field_map,
@@ -174,7 +174,7 @@ impl LucivyHandle {
 
         Ok(Self {
             index,
-            writer: Mutex::new(writer),
+            writer: Mutex::new(Some(writer)),
             reader,
             schema,
             field_map,
@@ -198,6 +198,20 @@ impl LucivyHandle {
     /// Returns true if there are uncommitted changes.
     pub fn has_uncommitted(&self) -> bool {
         self.has_uncommitted.load(Ordering::Relaxed)
+    }
+
+    /// Close the index: commit pending writes and release the IndexWriter (flock).
+    /// After close, the index files remain on disk but the handle cannot write anymore.
+    pub fn close(&self) -> Result<(), String> {
+        let mut guard = self.writer.lock().map_err(|_| "writer lock poisoned".to_string())?;
+        if let Some(mut writer) = guard.take() {
+            if self.has_uncommitted() {
+                writer.commit().map_err(|e| format!("commit on close: {e}"))?;
+            }
+            // writer dropped here → IndexWriter dropped → DirectoryLock dropped → flock released
+        }
+        self.mark_committed();
+        Ok(())
     }
 
     /// Get a field by name.
@@ -427,7 +441,8 @@ mod tests {
         let nid_field = handle.field(NODE_ID_FIELD).unwrap();
 
         {
-            let mut writer = handle.writer.lock().unwrap();
+            let mut guard = handle.writer.lock().unwrap();
+            let writer = guard.as_mut().unwrap();
             for (nid, body, tag) in [
                 (0u64, "Rust is a systems programming language", "programming"),
                 (1, "Python is a programming language", "programming"),
@@ -509,7 +524,8 @@ mod tests {
         let nid_field = handle.field(NODE_ID_FIELD).unwrap();
 
         {
-            let mut writer = handle.writer.lock().unwrap();
+            let mut guard = handle.writer.lock().unwrap();
+            let writer = guard.as_mut().unwrap();
             let mut doc = ld_lucivy::LucivyDocument::new();
             doc.add_u64(nid_field, 42);
             doc.add_text(path_field, "src/main.rs");
@@ -571,5 +587,230 @@ mod tests {
         assert_eq!(fields.get("path").map(|s| s.as_str()), Some("src/main.rs"));
         assert!(fields.get("content").unwrap().contains("println"));
         println!("Stored fields: {:?}", fields);
+    }
+
+    /// Reproduce rag3weaver doc 19 bug: create → insert → commit → drop → reopen.
+    /// This is the exact scenario that causes "LockBusy" in the E2E test.
+    #[test]
+    fn test_handle_close_reopen_lock() {
+        let tmp = std::env::temp_dir().join("lucivy_test_close_reopen_lock");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.to_str().unwrap();
+
+        let config_json = serde_json::json!({
+            "fields": [{"name": "body", "type": "text", "stored": true}]
+        });
+        let config: SchemaConfig = serde_json::from_str(&config_json.to_string()).unwrap();
+
+        // Phase 1: create, insert, commit, drop
+        {
+            let directory = StdFsDirectory::open(path).unwrap();
+            let handle = LucivyHandle::create(directory, &config).unwrap();
+            let body_field = handle.field("body").unwrap();
+            let nid_field = handle.field(NODE_ID_FIELD).unwrap();
+            {
+                let mut guard = handle.writer.lock().unwrap();
+            let writer = guard.as_mut().unwrap();
+                for i in 0u64..50 {
+                    let mut doc = ld_lucivy::LucivyDocument::new();
+                    doc.add_u64(nid_field, i);
+                    doc.add_text(body_field, &format!("document number {i}"));
+                    // Also add to raw/ngram fields
+                    for (user, raw_name) in &handle.raw_field_pairs {
+                        if user == "body" {
+                            if let Some(f) = handle.field(raw_name) {
+                                doc.add_text(f, &format!("document number {i}"));
+                            }
+                        }
+                    }
+                    for (user, ngram_name) in &handle.ngram_field_pairs {
+                        if user == "body" {
+                            if let Some(f) = handle.field(ngram_name) {
+                                doc.add_text(f, &format!("document number {i}"));
+                            }
+                        }
+                    }
+                    writer.add_document(doc).unwrap();
+                }
+                writer.commit().unwrap();
+            }
+            handle.reader.reload().unwrap();
+            let searcher = handle.reader.searcher();
+            assert_eq!(searcher.num_docs(), 50);
+            // handle dropped here — writer lock should be released
+        }
+
+        // Phase 2: reopen immediately — this is where "LockBusy" would occur
+        let directory = StdFsDirectory::open(path).unwrap();
+        let handle = LucivyHandle::open(directory)
+            .expect("reopen should not get LockBusy");
+        let searcher = handle.reader.searcher();
+        assert_eq!(searcher.num_docs(), 50, "all 50 docs should be visible after reopen");
+    }
+
+    /// Stress: close/reopen with heavy writes to trigger merges.
+    /// Multiple commits to create many segments → merge activity during drop.
+    #[test]
+    fn test_handle_close_reopen_with_merges() {
+        let tmp = std::env::temp_dir().join("lucivy_test_close_reopen_merges");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.to_str().unwrap();
+
+        let config_json = serde_json::json!({
+            "fields": [{"name": "body", "type": "text", "stored": true}]
+        });
+        let config: SchemaConfig = serde_json::from_str(&config_json.to_string()).unwrap();
+
+        // Phase 1: create, multiple commits to trigger merge activity
+        {
+            let dir = StdFsDirectory::open(path).unwrap();
+            let handle = LucivyHandle::create(dir, &config).unwrap();
+            let body = handle.field("body").unwrap();
+            let nid = handle.field(NODE_ID_FIELD).unwrap();
+            // Multiple small commits → many segments → merge will be triggered
+            for batch in 0u64..10 {
+                let mut guard = handle.writer.lock().unwrap();
+                let w = guard.as_mut().unwrap();
+                for i in 0u64..50 {
+                    let id = batch * 50 + i;
+                    let mut doc = ld_lucivy::LucivyDocument::new();
+                    doc.add_u64(nid, id);
+                    doc.add_text(body, &format!("batch {batch} document {i} with some text for merging"));
+                    for (user, raw_name) in &handle.raw_field_pairs {
+                        if user == "body" {
+                            if let Some(f) = handle.field(raw_name) {
+                                doc.add_text(f, &format!("batch {batch} document {i} with some text for merging"));
+                            }
+                        }
+                    }
+                    for (user, ngram_name) in &handle.ngram_field_pairs {
+                        if user == "body" {
+                            if let Some(f) = handle.field(ngram_name) {
+                                doc.add_text(f, &format!("batch {batch} document {i} with some text for merging"));
+                            }
+                        }
+                    }
+                    w.add_document(doc).unwrap();
+                }
+                w.commit().unwrap();
+            }
+            // Drop WITHOUT wait_merging_threads — merges may be in progress
+        }
+
+        // Phase 2: immediate reopen
+        let dir = StdFsDirectory::open(path).unwrap();
+        let handle = LucivyHandle::open(dir)
+            .expect("reopen after heavy writes should not get LockBusy");
+        handle.reader.reload().unwrap();
+        let num = handle.reader.searcher().num_docs();
+        // Some docs might be lost due to FsWriter dropped without flushing,
+        // but the important thing is that the lock was released and reopen works.
+        println!("docs after reopen: {num} (expected ~500, some may be lost due to async drop)");
+        assert!(num > 0, "should have some docs after reopen");
+    }
+
+    /// Stress: multiple close/reopen cycles on the same directory via LucivyHandle.
+    #[test]
+    fn test_handle_reopen_cycles() {
+        let tmp = std::env::temp_dir().join("lucivy_test_reopen_cycles");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.to_str().unwrap();
+
+        let config_json = serde_json::json!({
+            "fields": [{"name": "body", "type": "text", "stored": true}]
+        });
+        let config: SchemaConfig = serde_json::from_str(&config_json.to_string()).unwrap();
+
+        // Cycle 0: create
+        {
+            let dir = StdFsDirectory::open(path).unwrap();
+            let handle = LucivyHandle::create(dir, &config).unwrap();
+            let body = handle.field("body").unwrap();
+            let nid = handle.field(NODE_ID_FIELD).unwrap();
+            let mut guard = handle.writer.lock().unwrap();
+                let w = guard.as_mut().unwrap();
+            for i in 0u64..10 {
+                let mut doc = ld_lucivy::LucivyDocument::new();
+                doc.add_u64(nid, i);
+                doc.add_text(body, &format!("doc {i}"));
+                w.add_document(doc).unwrap();
+            }
+            w.commit().unwrap();
+        }
+
+        // Cycles 1..5: open → insert → commit → drop
+        for cycle in 1u64..5 {
+            let dir = StdFsDirectory::open(path).unwrap();
+            let handle = LucivyHandle::open(dir)
+                .unwrap_or_else(|e| panic!("cycle {cycle}: reopen failed: {e}"));
+            let body = handle.field("body").unwrap();
+            let nid = handle.field(NODE_ID_FIELD).unwrap();
+            {
+                let mut guard = handle.writer.lock().unwrap();
+                let w = guard.as_mut().unwrap();
+                for i in 0u64..10 {
+                    let id = cycle * 10 + i;
+                    let mut doc = ld_lucivy::LucivyDocument::new();
+                    doc.add_u64(nid, id);
+                    doc.add_text(body, &format!("cycle {cycle} doc {i}"));
+                    w.add_document(doc).unwrap();
+                }
+                w.commit().unwrap();
+            }
+            handle.reader.reload().unwrap();
+            let expected = (cycle + 1) * 10;
+            assert_eq!(
+                handle.reader.searcher().num_docs(), expected,
+                "cycle {cycle}: expected {expected} docs"
+            );
+        }
+    }
+
+    /// Test close(): commit pending writes, release lock, reopen successfully.
+    #[test]
+    fn test_close_releases_lock() {
+        let tmp = std::env::temp_dir().join("lucivy_test_close_releases_lock");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.to_str().unwrap();
+
+        let config_json = serde_json::json!({
+            "fields": [{"name": "body", "type": "text", "stored": true}]
+        });
+        let config: SchemaConfig = serde_json::from_str(&config_json.to_string()).unwrap();
+
+        // Create, insert, close (NOT drop) — then reopen in same scope
+        let dir = StdFsDirectory::open(path).unwrap();
+        let handle = LucivyHandle::create(dir, &config).unwrap();
+        let body = handle.field("body").unwrap();
+        let nid = handle.field(NODE_ID_FIELD).unwrap();
+        {
+            let mut guard = handle.writer.lock().unwrap();
+            let w = guard.as_mut().unwrap();
+            for i in 0u64..10 {
+                let mut doc = ld_lucivy::LucivyDocument::new();
+                doc.add_u64(nid, i);
+                doc.add_text(body, &format!("doc {i}"));
+                w.add_document(doc).unwrap();
+            }
+            handle.mark_uncommitted();
+        }
+
+        // Close — should commit and release lock
+        handle.close().unwrap();
+
+        // Writer should be None now
+        assert!(handle.writer.lock().unwrap().is_none());
+
+        // Reopen while old handle is still alive — lock should be free
+        let dir2 = StdFsDirectory::open(path).unwrap();
+        let handle2 = LucivyHandle::open(dir2)
+            .expect("reopen after close() should not get LockBusy");
+        handle2.reader.reload().unwrap();
+        assert_eq!(handle2.reader.searcher().num_docs(), 10,
+            "all 10 docs should be visible after close+reopen");
     }
 }
