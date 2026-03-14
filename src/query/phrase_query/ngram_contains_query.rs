@@ -31,6 +31,7 @@ use crate::query::{EmptyScorer, EnableScoring, Explanation, Query, Scorer, Weigh
 use crate::schema::document::Value;
 use crate::schema::{Field, IndexRecordOption, Term};
 use crate::index::SegmentId;
+use crate::query::fuzzy_query::DfaWrapper;
 use crate::{DocId, DocSet, InvertedIndexReader, Score, SegmentReader, LucivyDocument, TERMINATED};
 
 // ─── Candidate Collection ──────────────────────────────────────────────────
@@ -56,6 +57,37 @@ fn collect_posting_docs(
         block_postings.advance();
     }
     Ok(docs)
+}
+
+/// Collect doc_ids from all terms within Levenshtein distance of a token, via FST walk.
+/// This is faster than stored text verification — no decompression, just posting list reads.
+fn collect_fuzzy_posting_docs(
+    inverted_index: &InvertedIndexReader,
+    _field: Field,
+    token: &str,
+    distance: u8,
+) -> crate::Result<Vec<DocId>> {
+    let builder = levenshtein_automata::LevenshteinAutomatonBuilder::new(distance, true);
+    let automaton = builder.build_dfa(&token.to_lowercase());
+    let term_dict = inverted_index.terms();
+    let dfa = DfaWrapper(automaton);
+    let mut stream = term_dict.search(&dfa).into_stream()?;
+
+    let mut all_docs = Vec::new();
+    while stream.advance() {
+        let term_info = stream.value().clone();
+        let mut block_postings = inverted_index
+            .read_block_postings_from_terminfo(&term_info, IndexRecordOption::Basic)?;
+        loop {
+            let block = block_postings.docs();
+            if block.is_empty() { break; }
+            all_docs.extend_from_slice(block);
+            block_postings.advance();
+        }
+    }
+    all_docs.sort_unstable();
+    all_docs.dedup();
+    Ok(all_docs)
 }
 
 /// Get candidate doc_ids for a query token via threshold-based trigram intersection.
@@ -247,17 +279,33 @@ impl Weight for NgramContainsWeight {
         let raw_inverted = reader.inverted_index(self.raw_field)?;
         let ngram_inverted = reader.inverted_index(self.ngram_field)?;
 
-        let final_candidates = match &self.verification {
+        // fst_verified: true if ALL tokens were resolved via FST (exact or fuzzy).
+        // When true, we can skip stored text verification entirely.
+        let (final_candidates, fst_verified) = match &self.verification {
             VerificationMode::Fuzzy(params) => {
-                // Fuzzy mode: exact lookup first, then ngram, intersect across tokens.
+                // Fuzzy mode: FST pre-filter first, then ngram fallback.
                 let mut per_token_candidates: Vec<Vec<DocId>> = Vec::new();
+                let mut all_fst = true; // track if all tokens resolved via FST
                 for source in &self.trigram_sources {
+                    // Level 1: exact term lookup on raw field.
                     let term = Term::from_field_text(self.raw_field, source);
                     let exact_docs = collect_posting_docs(&raw_inverted, &term)?;
                     if !exact_docs.is_empty() {
                         per_token_candidates.push(exact_docs);
                         continue;
                     }
+                    // Level 2: fuzzy FST walk on raw field (d=fuzzy_distance).
+                    if params.fuzzy_distance > 0 {
+                        let fuzzy_docs = collect_fuzzy_posting_docs(
+                            &raw_inverted, self.raw_field, source, params.fuzzy_distance,
+                        )?;
+                        if !fuzzy_docs.is_empty() {
+                            per_token_candidates.push(fuzzy_docs);
+                            continue;
+                        }
+                    }
+                    // Level 3: ngram trigram candidates (for true substrings).
+                    all_fst = false;
                     let candidates = ngram_candidates_for_token(
                         source,
                         self.ngram_field,
@@ -266,15 +314,15 @@ impl Weight for NgramContainsWeight {
                     )?;
                     per_token_candidates.push(candidates);
                 }
-                intersect_sorted_vecs(per_token_candidates)
+                // Only mark as fst_verified if no prefix/suffix validation needed.
+                let needs_prefix_suffix = !params.prefix.is_empty() || !params.suffix.is_empty();
+                (intersect_sorted_vecs(per_token_candidates), all_fst && !needs_prefix_suffix)
             }
             VerificationMode::Regex(params) => {
-                if self.trigram_sources.is_empty() {
-                    // No usable trigrams (literals < 3 chars): full segment scan.
-                    // All docs are candidates; regex verification will filter.
+                // Regex always needs stored text verification — can't skip.
+                let candidates = if self.trigram_sources.is_empty() {
                     (0..reader.max_doc()).collect()
                 } else {
-                    // Ngram lookup: union across literals (alternatives).
                     let mut all_candidates: Vec<DocId> = Vec::new();
                     for source in &self.trigram_sources {
                         let candidates = ngram_candidates_for_token(
@@ -288,12 +336,25 @@ impl Weight for NgramContainsWeight {
                     all_candidates.sort_unstable();
                     all_candidates.dedup();
                     all_candidates
-                }
+                };
+                (candidates, false)
             }
         };
 
         if final_candidates.is_empty() {
             return Ok(Box::new(EmptyScorer));
+        }
+
+        // If FST verified all tokens, skip stored text verification entirely.
+        if fst_verified && self.highlight_sink.is_none() {
+            let fieldnorm_reader = reader.fieldnorms_readers()
+                .get_field(self.raw_field)?
+                .unwrap_or_else(|| FieldNormReader::constant(reader.max_doc(), 1));
+            return Ok(Box::new(FstVerifiedScorer::new(
+                final_candidates,
+                self.bm25_weight.boost_by(boost),
+                fieldnorm_reader,
+            )));
         }
 
         // Create scorer that verifies each candidate via stored text.
@@ -332,6 +393,60 @@ impl Weight for NgramContainsWeight {
             )));
         }
         Ok(Explanation::new("NgramContainsScorer", scorer.score()))
+    }
+}
+
+// ─── FST-Verified Scorer (no stored text read) ─────────────────────────────
+
+/// Fast scorer for candidates fully resolved via FST lookup.
+/// No stored text decompression — just iterates pre-verified doc IDs with BM25 scoring.
+struct FstVerifiedScorer {
+    candidates: Vec<DocId>,
+    cursor: usize,
+    bm25_weight: Bm25Weight,
+    fieldnorm_reader: FieldNormReader,
+}
+
+impl FstVerifiedScorer {
+    fn new(
+        candidates: Vec<DocId>,
+        bm25_weight: Bm25Weight,
+        fieldnorm_reader: FieldNormReader,
+    ) -> Self {
+        Self { candidates, cursor: 0, bm25_weight, fieldnorm_reader }
+    }
+}
+
+impl DocSet for FstVerifiedScorer {
+    fn advance(&mut self) -> DocId {
+        self.cursor += 1;
+        if self.cursor < self.candidates.len() {
+            self.candidates[self.cursor]
+        } else {
+            TERMINATED
+        }
+    }
+
+    fn doc(&self) -> DocId {
+        if self.cursor < self.candidates.len() {
+            self.candidates[self.cursor]
+        } else {
+            TERMINATED
+        }
+    }
+
+    fn size_hint(&self) -> u32 {
+        self.candidates.len() as u32
+    }
+}
+
+impl Scorer for FstVerifiedScorer {
+    fn score(&mut self) -> Score {
+        let doc = self.doc();
+        if doc == TERMINATED { return 0.0; }
+        let fieldnorm_id = self.fieldnorm_reader.fieldnorm_id(doc);
+        // term_freq=1: the FST confirmed the term exists at least once.
+        self.bm25_weight.score(fieldnorm_id, 1)
     }
 }
 
