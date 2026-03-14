@@ -8,10 +8,23 @@ import shutil
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-EXTENSIONS = {".rs", ".md", ".toml", ".js", ".ts", ".mjs", ".py", ".json"}
-EXCLUDE_DIRS = {"target", "node_modules", "__pycache__", ".venv", "pkg", ".git", "playground"}
-EXCLUDE_FILES = {"package-lock.json"}
+EXCLUDE_DIRS = {"target", "node_modules", "__pycache__", ".venv", ".pytest_cache", "pkg", ".git", "playground"}
+EXCLUDE_FILES = {"package-lock.json", ".env", ".gitignore"}
 MAX_FILE_SIZE = 100_000  # skip files > 100KB (ascii_folding_filter.rs etc.)
+
+def is_text_file(path, sample_size=8192):
+    """Detect if a file is text by checking for null bytes and valid UTF-8."""
+    try:
+        with open(path, "rb") as f:
+            chunk = f.read(sample_size)
+        if not chunk:
+            return False
+        if b"\x00" in chunk:
+            return False
+        chunk.decode("utf-8")
+        return True
+    except (UnicodeDecodeError, OSError):
+        return False
 
 def collect_files():
     files = []
@@ -20,11 +33,10 @@ def collect_files():
         for fname in filenames:
             if fname in EXCLUDE_FILES:
                 continue
-            ext = os.path.splitext(fname)[1]
-            if ext not in EXTENSIONS:
-                continue
             full = os.path.join(root, fname)
             if os.path.getsize(full) > MAX_FILE_SIZE:
+                continue
+            if not is_text_file(full):
                 continue
             rel = os.path.relpath(full, REPO_ROOT)
             try:

@@ -223,8 +223,10 @@ impl AutomatonPhraseWeight {
             cascade_distances.push(level.distance());
             num_terms += term_infos.len();
             if num_terms > budget {
-                // Grant extra headroom for this token, up to once per token.
-                budget += 20;
+                if self.last_token_is_prefix {
+                    // startsWith: grant extra headroom per token (prefix can expand a lot).
+                    budget += 20;
+                }
                 if num_terms > budget {
                     return Err(crate::LucivyError::InvalidArgument(format!(
                         "Contains query exceeded max expansions ({num_terms} > {budget})"

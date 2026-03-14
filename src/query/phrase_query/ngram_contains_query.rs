@@ -14,21 +14,9 @@
 
 use std::cmp::{max, min};
 
-/// Round a byte index down to the nearest UTF-8 char boundary.
-fn floor_char_boundary(s: &str, idx: usize) -> usize {
-    if idx >= s.len() { return s.len(); }
-    let mut i = idx;
-    while i > 0 && !s.is_char_boundary(i) { i -= 1; }
-    i
-}
-
-/// Round a byte index up to the nearest UTF-8 char boundary.
-fn ceil_char_boundary(s: &str, idx: usize) -> usize {
-    if idx >= s.len() { return s.len(); }
-    let mut i = idx;
-    while i < s.len() && !s.is_char_boundary(i) { i += 1; }
-    i
-}
+// UTF-8 boundary clamping removed: token offsets from postings/tokenize_raw are
+// already on char boundaries. Prefix/suffix navigation uses char_indices() instead
+// of byte arithmetic.
 use std::sync::Arc;
 
 use regex::Regex;
@@ -363,10 +351,7 @@ fn count_single_token_fuzzy(
     let mut count = 0u32;
 
     for &(start, end) in doc_tokens {
-        // Clamp byte indices to char boundaries (token positions may fall inside
-        // multi-byte UTF-8 characters like ≥, →, é, etc.).
-        let start = floor_char_boundary(stored_text, start);
-        let end = ceil_char_boundary(stored_text, end);
+        // Token offsets from postings/tokenize_raw are already on char boundaries.
         if start >= end || end > stored_text.len() {
             continue;
         }
@@ -387,8 +372,11 @@ fn count_single_token_fuzzy(
         // Validate prefix.
         if !params.prefix.is_empty() {
             if params.strict_separators {
-                let prefix_len = params.prefix.len();
-                let doc_prefix_start = floor_char_boundary(stored_text, start.saturating_sub(prefix_len));
+                // Walk backward by N chars (not bytes) to find prefix slice start.
+                let prefix_chars = params.prefix.chars().count();
+                let doc_prefix_start = stored_text[..start].char_indices()
+                    .rev().nth(prefix_chars.saturating_sub(1))
+                    .map(|(i, _)| i).unwrap_or(0);
                 let doc_prefix = &stored_text[doc_prefix_start..start];
                 total_distance += edit_distance(&params.prefix, doc_prefix);
                 if total_distance > params.distance_budget {
@@ -407,8 +395,11 @@ fn count_single_token_fuzzy(
         // Validate suffix.
         if !params.suffix.is_empty() {
             if params.strict_separators {
-                let suffix_len = params.suffix.len();
-                let doc_suffix_end = ceil_char_boundary(stored_text, min(end + suffix_len, stored_text.len()));
+                // Walk forward by N chars (not bytes) to find suffix slice end.
+                let suffix_chars = params.suffix.chars().count();
+                let doc_suffix_end = stored_text[end..].char_indices()
+                    .nth(suffix_chars).map(|(i, _)| end + i)
+                    .unwrap_or(stored_text.len());
                 let doc_suffix = &stored_text[end..doc_suffix_end];
                 total_distance += edit_distance(&params.suffix, doc_suffix);
                 if total_distance > params.distance_budget {
@@ -480,9 +471,7 @@ fn check_at_position_fuzzy(
 
     // Check each query token matches the corresponding doc token.
     for (q_idx, query_token) in params.tokens.iter().enumerate() {
-        let (raw_start, raw_end) = doc_tokens[start_idx + q_idx];
-        let start = floor_char_boundary(stored_text, raw_start);
-        let end = ceil_char_boundary(stored_text, raw_end);
+        let (start, end) = doc_tokens[start_idx + q_idx];
         if start >= end || end > stored_text.len() { return false; }
         let doc_token = stored_text[start..end].to_lowercase();
 
@@ -498,10 +487,8 @@ fn check_at_position_fuzzy(
 
     // Validate separators between consecutive tokens.
     for (sep_idx, query_sep) in params.separators.iter().enumerate() {
-        let (_, raw_end_i) = doc_tokens[start_idx + sep_idx];
-        let (raw_start_next, _) = doc_tokens[start_idx + sep_idx + 1];
-        let end_i = ceil_char_boundary(stored_text, raw_end_i);
-        let start_next = floor_char_boundary(stored_text, raw_start_next);
+        let (_, end_i) = doc_tokens[start_idx + sep_idx];
+        let (start_next, _) = doc_tokens[start_idx + sep_idx + 1];
         if end_i > stored_text.len() || start_next > stored_text.len() || end_i > start_next {
             return false;
         }
@@ -518,11 +505,12 @@ fn check_at_position_fuzzy(
 
     // Validate prefix.
     if !params.prefix.is_empty() {
-        let (raw_first_start, _) = doc_tokens[start_idx];
-        let first_start = floor_char_boundary(stored_text, raw_first_start);
+        let (first_start, _) = doc_tokens[start_idx];
         if params.strict_separators {
-            let prefix_len = params.prefix.len();
-            let doc_prefix_start = floor_char_boundary(stored_text, first_start.saturating_sub(prefix_len));
+            let prefix_chars = params.prefix.chars().count();
+            let doc_prefix_start = stored_text[..first_start].char_indices()
+                .rev().nth(prefix_chars.saturating_sub(1))
+                .map(|(i, _)| i).unwrap_or(0);
             let doc_prefix = &stored_text[doc_prefix_start..first_start];
             total_distance += edit_distance(&params.prefix, doc_prefix);
             if total_distance > params.distance_budget {
@@ -546,11 +534,12 @@ fn check_at_position_fuzzy(
     // Validate suffix.
     if !params.suffix.is_empty() {
         let num_query = params.tokens.len();
-        let (_, raw_last_end) = doc_tokens[start_idx + num_query - 1];
-        let last_end = ceil_char_boundary(stored_text, raw_last_end);
+        let (_, last_end) = doc_tokens[start_idx + num_query - 1];
         if params.strict_separators {
-            let suffix_len = params.suffix.len();
-            let doc_suffix_end = ceil_char_boundary(stored_text, min(last_end + suffix_len, stored_text.len()));
+            let suffix_chars = params.suffix.chars().count();
+            let doc_suffix_end = stored_text[last_end..].char_indices()
+                .nth(suffix_chars).map(|(i, _)| last_end + i)
+                .unwrap_or(stored_text.len());
             let doc_suffix = &stored_text[last_end..doc_suffix_end];
             total_distance += edit_distance(&params.suffix, doc_suffix);
             if total_distance > params.distance_budget {
@@ -610,9 +599,7 @@ fn verify_regex(
             .map(|lit| {
                 let lit_lower = lit.to_lowercase();
                 let mut count = 0u32;
-                for &(raw_start, raw_end) in &doc_tokens {
-                    let start = floor_char_boundary(stored_text, raw_start);
-                    let end = ceil_char_boundary(stored_text, raw_end);
+                for &(start, end) in &doc_tokens {
                     if start >= end || end > stored_text.len() { continue; }
                     let doc_token = stored_text[start..end].to_lowercase();
                     if token_match_distance(&doc_token, &lit_lower, params.fuzzy_distance).is_some()

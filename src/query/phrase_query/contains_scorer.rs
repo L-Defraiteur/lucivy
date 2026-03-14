@@ -143,8 +143,8 @@ impl<TPostings: Postings> ContainsScorer<TPostings> {
             return false;
         }
 
-        if !self.needs_validation() && self.highlight_sink.is_none() {
-            // No separator validation needed, no highlights: fast count
+        if !self.needs_validation() {
+            // No separator validation needed: fast count (highlights collected via validate_separators when needed)
             let mut count = 0u32;
             let mut li = 0;
             let mut ri = 0;
