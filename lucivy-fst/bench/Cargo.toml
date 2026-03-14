@@ -1,0 +1,20 @@
+[package]
+name = "lucivy-fst-bench"
+version = "0.1.0"
+description = "Criterion benchmark suite for lucivy-fst."
+license = "MIT"
+edition = "2021"
+publish = false
+
+[lib]
+bench = false
+
+[[bench]]
+name = "fst"
+harness = false
+path = "src/bench.rs"
+
+[dependencies]
+criterion = "0.3.1"
+fnv = "1.0.6"
+lucivy-fst = { path = "..", features = ["levenshtein"] }

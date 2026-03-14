@@ -1,0 +1,28 @@
+[package]
+name = "lucivy-fst"
+version = "0.1.0"
+description = """
+Finite state transducers for lucivy search engine.
+Fork of BurntSushi/fst with multi-output support and code-source optimizations.
+"""
+license = "MIT"
+edition = "2021"
+
+[features]
+default = []
+levenshtein = ["utf8-ranges"]
+
+[dependencies]
+utf8-ranges = { version = "1.0.4", optional = true }
+
+[dev-dependencies]
+fnv = "1.0.6"
+memmap2 = "0.5.10"
+quickcheck = { version = "0.9.2", default-features = false }
+rand = "0.7.3"
+
+[profile.release]
+debug = true
+
+[profile.bench]
+debug = true

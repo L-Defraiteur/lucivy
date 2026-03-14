@@ -3,6 +3,8 @@ mod collector;
 pub(crate) mod gapmap;
 pub(crate) mod file;
 mod interceptor;
+#[cfg(test)]
+mod stress_tests;
 
 pub use builder::{SuffixFstBuilder, ParentEntry};
 pub use collector::SfxCollector;

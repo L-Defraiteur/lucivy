@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use tantivy_fst::MapBuilder;
+use lucivy_fst::{MapBuilder, OutputTableBuilder};
 
 /// Minimum suffix length to index. Suffixes shorter than this are skipped
 /// to avoid excessive multi-parent entries for common short suffixes like "s", "e", "a".
@@ -12,7 +12,7 @@ const DEFAULT_MIN_SUFFIX_LEN: usize = 3;
 //
 // For multi-parent:
 //   bit 63 = 1
-//   bits 0-31  = offset into parent_list bytes
+//   bits 0-31  = offset into OutputTable
 
 const MULTI_PARENT_FLAG: u64 = 1 << 63;
 const RAW_ORDINAL_MASK: u64 = 0x00FF_FFFF; // 24 bits
@@ -27,15 +27,15 @@ pub fn encode_single_parent(raw_ordinal: u64, si: u16) -> u64 {
 }
 
 /// Encode a multi-parent offset into u64.
-pub fn encode_multi_parent(offset: u32) -> u64 {
-    MULTI_PARENT_FLAG | (offset as u64)
+pub fn encode_multi_parent(offset: u64) -> u64 {
+    MULTI_PARENT_FLAG | offset
 }
 
 /// Decode a u64 FST output value.
 pub fn decode_output(value: u64) -> ParentRef {
     if value & MULTI_PARENT_FLAG != 0 {
         ParentRef::Multi {
-            offset: (value & 0xFFFF_FFFF) as u32,
+            offset: value & !MULTI_PARENT_FLAG,
         }
     } else {
         ParentRef::Single {
@@ -49,7 +49,7 @@ pub fn decode_output(value: u64) -> ParentRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParentRef {
     Single { raw_ordinal: u64, si: u16 },
-    Multi { offset: u32 },
+    Multi { offset: u64 },
 }
 
 /// A parent entry: which raw token this suffix comes from, and at what offset.
@@ -59,15 +59,47 @@ pub struct ParentEntry {
     pub si: u16,
 }
 
+/// Encode a list of parent entries into bytes for the OutputTable.
+pub fn encode_parent_entries(parents: &[ParentEntry]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(1 + parents.len() * 6);
+    buf.push(parents.len() as u8);
+    for p in parents {
+        buf.extend_from_slice(&(p.raw_ordinal as u32).to_le_bytes());
+        buf.extend_from_slice(&p.si.to_le_bytes());
+    }
+    buf
+}
+
+/// Decode parent entries from bytes read from the OutputTable.
+pub fn decode_parent_entries(data: &[u8]) -> Vec<ParentEntry> {
+    let num_parents = data[0] as usize;
+    let mut cursor = 1;
+    let mut entries = Vec::with_capacity(num_parents);
+    for _ in 0..num_parents {
+        let raw_ordinal = u32::from_le_bytes([
+            data[cursor],
+            data[cursor + 1],
+            data[cursor + 2],
+            data[cursor + 3],
+        ]) as u64;
+        cursor += 4;
+        let si = u16::from_le_bytes([data[cursor], data[cursor + 1]]);
+        cursor += 2;
+        entries.push(ParentEntry { raw_ordinal, si });
+    }
+    entries
+}
+
 /// Builds a suffix FST from unique tokens.
 ///
-/// The builder accumulates (suffix_term → parent list) mappings. Each token's
+/// The builder accumulates (suffix_term -> parent list) mappings. Each token's
 /// suffixes of length >= min_suffix_len are registered. The builder only stores
 /// unique terms and their parents, not per-document occurrences (those live in ._raw).
 ///
 /// At build time, produces:
-/// - FST bytes: suffix term → u64 output (encoded parent ref)
-/// - Parent list bytes: for multi-parent suffixes, packed array of (raw_ordinal, SI)
+/// - FST bytes: suffix term -> u64 output (encoded parent ref)
+/// - OutputTable bytes: for multi-parent suffixes, variable-length records
+///   containing packed (raw_ordinal, SI) entries
 pub struct SuffixFstBuilder {
     suffix_to_parents: BTreeMap<String, Vec<ParentEntry>>,
     min_suffix_len: usize,
@@ -109,33 +141,26 @@ impl SuffixFstBuilder {
         }
     }
 
-    /// Build the FST and parent list bytes.
-    /// Returns (fst_bytes, parent_list_bytes).
-    pub fn build(self) -> Result<(Vec<u8>, Vec<u8>), tantivy_fst::Error> {
+    /// Build the FST and output table bytes.
+    /// Returns (fst_bytes, output_table_bytes).
+    pub fn build(self) -> Result<(Vec<u8>, Vec<u8>), lucivy_fst::Error> {
         let mut fst_builder = MapBuilder::memory();
-        let mut parent_list_data: Vec<u8> = Vec::new();
+        let mut output_table = OutputTableBuilder::new();
 
         for (suffix, parents) in &self.suffix_to_parents {
             let output = if parents.len() == 1 {
                 let p = &parents[0];
                 encode_single_parent(p.raw_ordinal, p.si)
             } else {
-                let offset = parent_list_data.len() as u32;
-                // Write num_parents: u8
-                parent_list_data.push(parents.len() as u8);
-                for p in parents {
-                    // raw_ordinal: u32 LE
-                    parent_list_data.extend_from_slice(&(p.raw_ordinal as u32).to_le_bytes());
-                    // si: u16 LE
-                    parent_list_data.extend_from_slice(&p.si.to_le_bytes());
-                }
+                let record = encode_parent_entries(parents);
+                let offset = output_table.add(&record);
                 encode_multi_parent(offset)
             };
             fst_builder.insert(suffix.as_bytes(), output)?;
         }
 
         let fst_bytes = fst_builder.into_inner()?;
-        Ok((fst_bytes, parent_list_data))
+        Ok((fst_bytes, output_table.into_inner()))
     }
 
     /// Number of unique suffix terms accumulated so far.
@@ -144,25 +169,12 @@ impl SuffixFstBuilder {
     }
 }
 
-/// Read a multi-parent list from parent_list bytes at the given offset.
-pub fn read_parent_list(parent_list_data: &[u8], offset: u32) -> Vec<ParentEntry> {
-    let offset = offset as usize;
-    let num_parents = parent_list_data[offset] as usize;
-    let mut cursor = offset + 1;
-    let mut entries = Vec::with_capacity(num_parents);
-    for _ in 0..num_parents {
-        let raw_ordinal = u32::from_le_bytes([
-            parent_list_data[cursor],
-            parent_list_data[cursor + 1],
-            parent_list_data[cursor + 2],
-            parent_list_data[cursor + 3],
-        ]) as u64;
-        cursor += 4;
-        let si = u16::from_le_bytes([parent_list_data[cursor], parent_list_data[cursor + 1]]);
-        cursor += 2;
-        entries.push(ParentEntry { raw_ordinal, si });
-    }
-    entries
+/// Read a multi-parent list from OutputTable data at the given offset.
+/// Kept for backward compatibility — prefer using OutputTable::get() + decode_parent_entries().
+pub fn read_parent_list(output_table_data: &[u8], offset: u64) -> Vec<ParentEntry> {
+    let table = lucivy_fst::OutputTable::new(output_table_data);
+    let record = table.get(offset);
+    decode_parent_entries(record)
 }
 
 #[cfg(test)]
@@ -203,12 +215,23 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_decode_parent_entries() {
+        let entries = vec![
+            ParentEntry { raw_ordinal: 5, si: 1 },
+            ParentEntry { raw_ordinal: 12, si: 4 },
+        ];
+        let bytes = encode_parent_entries(&entries);
+        let decoded = decode_parent_entries(&bytes);
+        assert_eq!(decoded, entries);
+    }
+
+    #[test]
     fn test_builder_single_token() {
         let mut builder = SuffixFstBuilder::with_min_suffix_len(3);
         builder.add_token("rag3db", 0);
 
-        let (fst_bytes, parent_list) = builder.build().unwrap();
-        let fst = tantivy_fst::Map::from_bytes(fst_bytes).unwrap();
+        let (fst_bytes, _output_table) = builder.build().unwrap();
+        let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
         // "rag3db" SI=0
         let val = fst.get(b"rag3db").expect("rag3db should exist");
@@ -238,14 +261,14 @@ mod tests {
         builder.add_token("core", 0);      // "core" SI=0
         builder.add_token("hardcore", 1);  // "hardcore" has suffix "core" at SI=4
 
-        let (fst_bytes, parent_list) = builder.build().unwrap();
-        let fst = tantivy_fst::Map::from_bytes(fst_bytes).unwrap();
+        let (fst_bytes, output_table_data) = builder.build().unwrap();
+        let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
         // "core" has 2 parents: (0, SI=0) from "core" and (1, SI=4) from "hardcore"
         let val = fst.get(b"core").expect("core should exist");
         match decode_output(val) {
             ParentRef::Multi { offset } => {
-                let entries = read_parent_list(&parent_list, offset);
+                let entries = read_parent_list(&output_table_data, offset);
                 assert_eq!(entries.len(), 2);
                 assert!(entries.contains(&ParentEntry { raw_ordinal: 0, si: 0 }));
                 assert!(entries.contains(&ParentEntry { raw_ordinal: 1, si: 4 }));
@@ -260,14 +283,14 @@ mod tests {
 
     #[test]
     fn test_builder_prefix_walk() {
-        use tantivy_fst::{IntoStreamer, Streamer};
+        use lucivy_fst::{IntoStreamer, Streamer};
 
         let mut builder = SuffixFstBuilder::with_min_suffix_len(3);
         builder.add_token("rag3db", 0);
         builder.add_token("framework", 1);
 
         let (fst_bytes, _) = builder.build().unwrap();
-        let fst = tantivy_fst::Map::from_bytes(fst_bytes).unwrap();
+        let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
         // Prefix walk "g3d" should find "g3db"
         let mut stream = fst.range().ge(b"g3d").lt(b"g3e").into_stream();
@@ -290,7 +313,7 @@ mod tests {
         builder.add_token("café", 0);
 
         let (fst_bytes, _) = builder.build().unwrap();
-        let fst = tantivy_fst::Map::from_bytes(fst_bytes).unwrap();
+        let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
         // Should have "café" (SI=0) and "afé" (SI=1, but byte index varies)
         // "café" in lowercase is "café", 5 bytes: c(1) a(1) f(1) é(2)
@@ -313,7 +336,7 @@ mod tests {
         builder.add_token("rag3db", 0);
 
         let (fst_bytes, _) = builder.build().unwrap();
-        let fst = tantivy_fst::Map::from_bytes(fst_bytes).unwrap();
+        let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
         // Should still be single parent, not multi
         let val = fst.get(b"rag3db").unwrap();

@@ -16,7 +16,7 @@ mod fuzzy_substring_automaton;
 mod intersection;
 mod more_like_this;
 mod phrase_prefix_query;
-mod phrase_query;
+pub(crate) mod phrase_query;
 mod query;
 mod query_parser;
 mod range_query;

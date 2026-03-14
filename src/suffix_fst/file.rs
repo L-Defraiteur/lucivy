@@ -1,8 +1,8 @@
 use std::io::{self, Write};
 
-use tantivy_fst::{IntoStreamer, Map, Streamer};
+use lucivy_fst::{IntoStreamer, Map, OutputTable, Streamer};
 
-use super::builder::{decode_output, read_parent_list, ParentEntry, ParentRef};
+use super::builder::{decode_output, decode_parent_entries, read_parent_list, ParentEntry, ParentRef};
 use super::gapmap::GapMapReader;
 
 // .sfx file format:
@@ -117,7 +117,7 @@ impl<'a> SfxFileReader<'a> {
         let gapmap_offset = u64::from_le_bytes(data[45..53].try_into().unwrap()) as usize;
 
         let fst_bytes = data[fst_offset..fst_offset + fst_length].to_vec();
-        let fst = Map::from_bytes(fst_bytes).map_err(|e| SfxError::FstError(e.to_string()))?;
+        let fst = Map::new(fst_bytes).map_err(|e| SfxError::FstError(e.to_string()))?;
 
         let parent_list_data =
             &data[parent_list_offset..parent_list_offset + parent_list_length];
@@ -185,7 +185,11 @@ impl<'a> SfxFileReader<'a> {
             ParentRef::Single { raw_ordinal, si } => {
                 vec![ParentEntry { raw_ordinal, si }]
             }
-            ParentRef::Multi { offset } => read_parent_list(self.parent_list_data, offset),
+            ParentRef::Multi { offset } => {
+                let table = OutputTable::new(self.parent_list_data);
+                let record = table.get(offset);
+                decode_parent_entries(record)
+            }
         }
     }
 }

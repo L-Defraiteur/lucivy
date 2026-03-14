@@ -167,7 +167,7 @@ impl SfxCollector {
     }
 
     /// Build the .sfx file bytes from all collected data.
-    pub fn build(self) -> Result<Vec<u8>, tantivy_fst::Error> {
+    pub fn build(self) -> Result<Vec<u8>, lucivy_fst::Error> {
         let mut sfx_builder = SuffixFstBuilder::with_min_suffix_len(self.min_suffix_len);
         for (ordinal, token) in self.unique_tokens.iter().enumerate() {
             sfx_builder.add_token(token, ordinal as u64);
