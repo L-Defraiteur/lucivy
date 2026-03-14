@@ -223,6 +223,13 @@ impl SegmentWriter {
                 FieldType::Str(_) => {
                     let is_raw_field = self.sfx_collectors.contains_key(&field.field_id());
                     let mut indexing_position = IndexingPosition::default();
+
+                    // begin_doc once per document for sfx collector
+                    if is_raw_field {
+                        let collector = self.sfx_collectors.get_mut(&field.field_id()).unwrap();
+                        collector.begin_doc();
+                    }
+
                     for value in values {
                         let value = value.as_value();
 
@@ -232,6 +239,9 @@ impl SegmentWriter {
                         } else {
                             None
                         };
+
+                        // Record Ti before this value's tokenization (for multi-value tracking)
+                        let ti_before = indexing_position.end_position;
 
                         let mut token_stream = if let Some(text) = value.as_str() {
                             let text_analyzer =
@@ -256,14 +266,13 @@ impl SegmentWriter {
                                 ctx,
                                 &mut indexing_position,
                             );
-                            // Feed captured tokens to the collector
+                            // Feed captured tokens to the collector (per-value)
                             let collector = self.sfx_collectors.get_mut(&field.field_id()).unwrap();
-                            collector.begin_doc();
+                            collector.begin_value(raw_text, ti_before);
                             for tok in interceptor.take_captured() {
                                 collector.add_token(&tok.text, tok.offset_from, tok.offset_to);
                             }
-                            collector.end_doc(raw_text);
-                            self.sfx_fed_this_doc.push(field.field_id());
+                            collector.end_value();
                         } else {
                             postings_writer.index_text(
                                 doc_id,
@@ -273,6 +282,12 @@ impl SegmentWriter {
                                 &mut indexing_position,
                             );
                         }
+                    }
+                    // end_doc once per document for sfx collector
+                    if is_raw_field {
+                        let collector = self.sfx_collectors.get_mut(&field.field_id()).unwrap();
+                        collector.end_doc();
+                        self.sfx_fed_this_doc.push(field.field_id());
                     }
                     if field_entry.has_fieldnorms() {
                         self.fieldnorms_writer

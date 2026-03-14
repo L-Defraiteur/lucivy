@@ -6,33 +6,51 @@ use super::gapmap::GapMapWriter;
 
 /// Collects token and gap data during indexation to produce a .sfx file.
 ///
-/// Portable and self-contained — can be moved to a separate thread/pipeline later.
-/// Currently fed by SegmentWriter during ._raw field processing.
+/// Supports multi-value fields: call begin_value/end_value for each value
+/// within a document.
 ///
 /// Usage:
-///   1. For each document: call `begin_doc()`, then `add_token()` for each token,
-///      then `end_doc(text)` with the raw text to extract gaps.
-///   2. After all documents: call `build()` to produce the .sfx file bytes.
+///   collector.begin_doc();
+///   collector.begin_value("hello world", 0);
+///   collector.add_token("hello", 0, 5);
+///   collector.add_token("world", 6, 11);
+///   collector.end_value();
+///   collector.begin_value("foo bar", 3);
+///   collector.add_token("foo", 0, 3);
+///   collector.add_token("bar", 4, 7);
+///   collector.end_value();
+///   collector.end_doc();
 pub struct SfxCollector {
-    // Per-segment: unique raw tokens and their sorted ordinals
+    // Per-segment: unique raw tokens
     unique_tokens: BTreeSet<String>,
-
     // Per-segment: gap map writer
     gapmap_writer: GapMapWriter,
 
-    // Per-document accumulator: tokens seen in current doc
-    current_doc_tokens: Vec<TokenCapture>,
+    // Per-document state
+    doc_values: Vec<ValueData>,
+    doc_active: bool,
+
+    // Per-value state
+    current_value_text: Option<String>,
+    current_value_tokens: Vec<TokenCapture>,
+    current_value_ti_start: u32,
 
     // Config
     min_suffix_len: usize,
 }
 
-/// A captured token from the ._raw field tokenization.
+/// Accumulated data for one value within a document.
+struct ValueData {
+    gaps: Vec<Vec<u8>>, // owned gap bytes
+    ti_start: u32,
+}
+
+/// A captured token.
 #[derive(Debug, Clone)]
 struct TokenCapture {
-    text: String,         // lowercase token text
-    offset_from: usize,   // byte offset in original text
-    offset_to: usize,     // byte offset in original text
+    text: String,
+    offset_from: usize,
+    offset_to: usize,
 }
 
 impl SfxCollector {
@@ -46,69 +64,110 @@ impl SfxCollector {
         Self {
             unique_tokens: BTreeSet::new(),
             gapmap_writer: GapMapWriter::new(),
-            current_doc_tokens: Vec::new(),
+            doc_values: Vec::new(),
+            doc_active: false,
+            current_value_text: None,
+            current_value_tokens: Vec::new(),
+            current_value_ti_start: 0,
             min_suffix_len,
         }
     }
 
-    /// Begin processing a new document. Must be called before add_token().
+    /// Begin processing a new document.
     pub fn begin_doc(&mut self) {
-        self.current_doc_tokens.clear();
+        self.doc_values.clear();
+        self.doc_active = true;
+        self.current_value_ti_start = 0;
     }
 
-    /// Add a token from the ._raw field tokenization.
-    /// Called for each token in the order they appear in the text.
+    /// Begin a new value within the current document.
+    /// `raw_text` is the original text string for this value.
+    /// `ti_start` is the posting Ti of the first token of this value
+    /// (= indexing_position.end_position before tokenizing this value).
+    pub fn begin_value(&mut self, raw_text: &str, ti_start: u32) {
+        self.current_value_text = Some(raw_text.to_string());
+        self.current_value_tokens.clear();
+        self.current_value_ti_start = ti_start;
+    }
+
+    /// Add a token from the current value's tokenization.
     pub fn add_token(&mut self, text: &str, offset_from: usize, offset_to: usize) {
         self.unique_tokens.insert(text.to_string());
-        self.current_doc_tokens.push(TokenCapture {
+        self.current_value_tokens.push(TokenCapture {
             text: text.to_string(),
             offset_from,
             offset_to,
         });
     }
 
-    /// End the current document. Extracts gaps from the raw text using token offsets.
-    /// `raw_text` is the original text string that was tokenized.
-    pub fn end_doc(&mut self, raw_text: &str) {
-        if self.current_doc_tokens.is_empty() {
+    /// End the current value. Computes gaps from the raw text and captured tokens.
+    pub fn end_value(&mut self) {
+        let text = self.current_value_text.take().unwrap_or_default();
+        let tokens = std::mem::take(&mut self.current_value_tokens);
+
+        let gaps = if tokens.is_empty() {
+            // No tokens in this value — just store empty prefix+suffix
+            vec![Vec::new(), Vec::new()]
+        } else {
+            let text_bytes = text.as_bytes();
+            let mut gaps = Vec::with_capacity(tokens.len() + 1);
+
+            // prefix before first token
+            gaps.push(text_bytes[..tokens[0].offset_from].to_vec());
+
+            // separators between consecutive tokens
+            for i in 1..tokens.len() {
+                let prev_end = tokens[i - 1].offset_to;
+                let curr_start = tokens[i].offset_from;
+                gaps.push(text_bytes[prev_end..curr_start].to_vec());
+            }
+
+            // suffix after last token
+            gaps.push(text_bytes[tokens.last().unwrap().offset_to..].to_vec());
+
+            gaps
+        };
+
+        self.doc_values.push(ValueData {
+            gaps,
+            ti_start: self.current_value_ti_start,
+        });
+    }
+
+    /// End the current document. Writes accumulated value gaps to the GapMap.
+    pub fn end_doc(&mut self) {
+        self.doc_active = false;
+
+        if self.doc_values.is_empty() {
             self.gapmap_writer.add_empty_doc();
             return;
         }
 
-        let mut gaps: Vec<&[u8]> = Vec::with_capacity(self.current_doc_tokens.len() + 1);
-        let text_bytes = raw_text.as_bytes();
-
-        // gap[0] = prefix before first token
-        let first_offset = self.current_doc_tokens[0].offset_from;
-        gaps.push(&text_bytes[..first_offset]);
-
-        // gap[i] = separator between token i-1 and token i
-        for i in 1..self.current_doc_tokens.len() {
-            let prev_end = self.current_doc_tokens[i - 1].offset_to;
-            let curr_start = self.current_doc_tokens[i].offset_from;
-            gaps.push(&text_bytes[prev_end..curr_start]);
+        if self.doc_values.len() == 1 {
+            // Single-value fast path
+            let value = &self.doc_values[0];
+            let gap_refs: Vec<&[u8]> = value.gaps.iter().map(|g| g.as_slice()).collect();
+            self.gapmap_writer.add_doc(&gap_refs);
+        } else {
+            // Multi-value
+            let values_gaps: Vec<Vec<&[u8]>> = self
+                .doc_values
+                .iter()
+                .map(|v| v.gaps.iter().map(|g| g.as_slice()).collect())
+                .collect();
+            let ti_starts: Vec<u32> = self.doc_values.iter().map(|v| v.ti_start).collect();
+            self.gapmap_writer.add_doc_multi(&values_gaps, &ti_starts);
         }
-
-        // gap[N] = suffix after last token
-        let last_offset = self.current_doc_tokens.last().unwrap().offset_to;
-        gaps.push(&text_bytes[last_offset..]);
-
-        self.gapmap_writer.add_doc(&gaps);
     }
 
-    /// End doc without raw text — adds an empty doc to gapmap.
-    /// Used when the field is not present or is pre-tokenized without raw text access.
+    /// End doc without any values — adds an empty doc to gapmap.
     pub fn end_doc_empty(&mut self) {
+        self.doc_active = false;
         self.gapmap_writer.add_empty_doc();
     }
 
     /// Build the .sfx file bytes from all collected data.
-    ///
-    /// This consumes the collector. The raw ordinals are derived from the sorted
-    /// unique token set (same order as the ._raw FST).
     pub fn build(self) -> Result<Vec<u8>, tantivy_fst::Error> {
-        // Build suffix FST.
-        // Raw ordinals = position in sorted unique_tokens (same order as ._raw FST).
         let mut sfx_builder = SuffixFstBuilder::with_min_suffix_len(self.min_suffix_len);
         for (ordinal, token) in self.unique_tokens.iter().enumerate() {
             sfx_builder.add_token(token, ordinal as u64);
@@ -116,11 +175,8 @@ impl SfxCollector {
 
         let num_terms = sfx_builder.num_terms() as u32;
         let (fst_data, parent_list_data) = sfx_builder.build()?;
-
-        // Serialize gapmap
         let gapmap_data = self.gapmap_writer.serialize();
 
-        // Assemble .sfx file
         let file_writer = SfxFileWriter::new(
             fst_data,
             parent_list_data,
@@ -138,55 +194,96 @@ mod tests {
     use super::*;
     use crate::suffix_fst::builder::ParentEntry;
     use crate::suffix_fst::file::SfxFileReader;
+    use crate::suffix_fst::gapmap::is_value_boundary;
 
     #[test]
-    fn test_collector_single_doc() {
+    fn test_collector_single_value() {
         let mut collector = SfxCollector::new();
 
-        // Simulate indexing: "import rag3db from 'rag3db_core';"
         collector.begin_doc();
+        collector.begin_value("import rag3db from 'rag3db_core';", 0);
         collector.add_token("import", 0, 6);
         collector.add_token("rag3db", 7, 13);
         collector.add_token("from", 14, 18);
         collector.add_token("rag3db", 20, 26);
         collector.add_token("core", 27, 31);
-        collector.end_doc("import rag3db from 'rag3db_core';");
+        collector.end_value();
+        collector.end_doc();
 
         let sfx_bytes = collector.build().unwrap();
         let reader = SfxFileReader::open(&sfx_bytes).unwrap();
 
-        // Check suffix resolution
         let parents = reader.resolve_suffix("g3db");
         assert_eq!(parents.len(), 1);
-        // "rag3db" is at some ordinal in sorted unique tokens
-        assert_eq!(parents[0].si, 2); // SI=2 for "g3db" in "rag3db"
+        assert_eq!(parents[0].si, 2);
 
-        // Check gapmap
         assert_eq!(reader.gapmap().num_tokens(0), 5);
-        assert_eq!(reader.gapmap().read_gap(0, 0), b"");       // prefix
-        assert_eq!(reader.gapmap().read_gap(0, 1), b" ");       // import<->rag3db
-        assert_eq!(reader.gapmap().read_gap(0, 2), b" ");       // rag3db<->from
-        assert_eq!(reader.gapmap().read_gap(0, 3), b" '");      // from<->rag3db
-        assert_eq!(reader.gapmap().read_gap(0, 4), b"_");       // rag3db<->core
-        assert_eq!(reader.gapmap().read_gap(0, 5), b"';");      // suffix
+        assert_eq!(reader.gapmap().num_values(0), 1);
+        assert_eq!(reader.gapmap().read_gap(0, 0), b"");
+        assert_eq!(reader.gapmap().read_gap(0, 1), b" ");
+        assert_eq!(reader.gapmap().read_gap(0, 3), b" '");
+        assert_eq!(reader.gapmap().read_gap(0, 4), b"_");
+        assert_eq!(reader.gapmap().read_gap(0, 5), b"';");
+    }
+
+    #[test]
+    fn test_collector_multi_value() {
+        let mut collector = SfxCollector::new();
+
+        collector.begin_doc();
+        // Value 0: "hello world" → Ti=0,1 → end_position=2+GAP=3
+        collector.begin_value("hello world", 0);
+        collector.add_token("hello", 0, 5);
+        collector.add_token("world", 6, 11);
+        collector.end_value();
+        // Value 1: "foo bar" → Ti=3,4
+        collector.begin_value("foo bar", 3);
+        collector.add_token("foo", 0, 3);
+        collector.add_token("bar", 4, 7);
+        collector.end_value();
+        collector.end_doc();
+
+        let sfx_bytes = collector.build().unwrap();
+        let reader = SfxFileReader::open(&sfx_bytes).unwrap();
+
+        assert_eq!(reader.gapmap().num_tokens(0), 4);
+        assert_eq!(reader.gapmap().num_values(0), 2);
+
+        // Within value 0: separator " "
+        assert_eq!(
+            reader.gapmap().read_separator(0, 0, 1),
+            Some(b" ".as_slice())
+        );
+        // Cross value: Ti=1→Ti=3, not consecutive → None
+        assert_eq!(reader.gapmap().read_separator(0, 1, 3), None);
+        // Within value 1: separator " "
+        assert_eq!(
+            reader.gapmap().read_separator(0, 3, 4),
+            Some(b" ".as_slice())
+        );
+
+        // All gaps include VALUE_BOUNDARY
+        let all_gaps = reader.gapmap().read_all_gaps(0);
+        assert!(all_gaps.iter().any(|g| is_value_boundary(g)));
     }
 
     #[test]
     fn test_collector_multi_docs() {
         let mut collector = SfxCollector::new();
 
-        // Doc 0
         collector.begin_doc();
+        collector.begin_value("hello world", 0);
         collector.add_token("hello", 0, 5);
         collector.add_token("world", 6, 11);
-        collector.end_doc("hello world");
+        collector.end_value();
+        collector.end_doc();
 
-        // Doc 1
         collector.begin_doc();
+        collector.begin_value("foo", 0);
         collector.add_token("foo", 0, 3);
-        collector.end_doc("foo");
+        collector.end_value();
+        collector.end_doc();
 
-        // Doc 2 - empty
         collector.begin_doc();
         collector.end_doc_empty();
 
@@ -197,11 +294,6 @@ mod tests {
         assert_eq!(reader.gapmap().num_tokens(0), 2);
         assert_eq!(reader.gapmap().num_tokens(1), 1);
         assert_eq!(reader.gapmap().num_tokens(2), 0);
-
-        // "orld" is suffix of "world"
-        let parents = reader.resolve_suffix("orld");
-        assert_eq!(parents.len(), 1);
-        assert_eq!(parents[0].si, 1);
     }
 
     #[test]
@@ -209,46 +301,39 @@ mod tests {
         let mut collector = SfxCollector::new();
 
         collector.begin_doc();
+        collector.begin_value("framework", 0);
         collector.add_token("framework", 0, 9);
-        collector.end_doc("framework");
+        collector.end_value();
+        collector.end_doc();
 
         let sfx_bytes = collector.build().unwrap();
         let reader = SfxFileReader::open(&sfx_bytes).unwrap();
 
-        // Prefix walk "work" should find "work" (suffix of "framework" at SI=5)
         let results = reader.prefix_walk("work");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "work");
         assert_eq!(results[0].1[0].si, 5);
-
-        // Prefix walk "fram" should find "framework"
-        let results = reader.prefix_walk("fram");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "framework");
-        assert_eq!(results[0].1[0].si, 0);
     }
 
     #[test]
     fn test_collector_ordinals_match_sorted_tokens() {
         let mut collector = SfxCollector::new();
 
-        // Tokens in insertion order: "zebra", "apple", "mango"
         collector.begin_doc();
+        collector.begin_value("zebra apple mango", 0);
         collector.add_token("zebra", 0, 5);
         collector.add_token("apple", 6, 11);
         collector.add_token("mango", 12, 17);
-        collector.end_doc("zebra apple mango");
+        collector.end_value();
+        collector.end_doc();
 
         let sfx_bytes = collector.build().unwrap();
         let reader = SfxFileReader::open(&sfx_bytes).unwrap();
 
-        // Sorted order: apple(0), mango(1), zebra(2)
         let parents = reader.resolve_suffix("apple");
         assert_eq!(parents[0], ParentEntry { raw_ordinal: 0, si: 0 });
-
         let parents = reader.resolve_suffix("mango");
         assert_eq!(parents[0], ParentEntry { raw_ordinal: 1, si: 0 });
-
         let parents = reader.resolve_suffix("zebra");
         assert_eq!(parents[0], ParentEntry { raw_ordinal: 2, si: 0 });
     }

@@ -190,19 +190,23 @@ mod tests {
 
         // Doc 0: "import rag3db from 'rag3db_core';"
         collector.begin_doc();
+        collector.begin_value("import rag3db from 'rag3db_core';", 0);
         collector.add_token("import", 0, 6);
         collector.add_token("rag3db", 7, 13);
         collector.add_token("from", 14, 18);
         collector.add_token("rag3db", 20, 26);
         collector.add_token("core", 27, 31);
-        collector.end_doc("import rag3db from 'rag3db_core';");
+        collector.end_value();
+        collector.end_doc();
 
         // Doc 1: "rag3db is cool"
         collector.begin_doc();
+        collector.begin_value("rag3db is cool", 0);
         collector.add_token("rag3db", 0, 6);
         collector.add_token("is", 7, 9);
         collector.add_token("cool", 10, 14);
-        collector.end_doc("rag3db is cool");
+        collector.end_value();
+        collector.end_doc();
 
         let sfx_bytes = collector.build().unwrap();
 
