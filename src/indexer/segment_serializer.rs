@@ -88,6 +88,22 @@ impl SegmentSerializer {
         Ok(())
     }
 
+    /// Write the .sfx manifest listing which field_ids have per-field .sfx files.
+    /// This file is tracked by SegmentComponent::SuffixFst so the GC preserves it
+    /// and the per-field files it references.
+    pub fn write_sfx_manifest(&mut self, field_ids: &[u32]) -> crate::Result<()> {
+        use crate::index::SegmentComponent;
+        use common::TerminatingWrite;
+        let mut writer = self.segment.open_write(SegmentComponent::SuffixFst)?;
+        // Format: num_fields (u32 LE) + field_ids (u32 LE each)
+        writer.write_all(&(field_ids.len() as u32).to_le_bytes())?;
+        for &fid in field_ids {
+            writer.write_all(&fid.to_le_bytes())?;
+        }
+        writer.terminate()?;
+        Ok(())
+    }
+
     /// Finalize the segment serialization.
     pub fn close(mut self) -> crate::Result<()> {
         if let Some(fieldnorms_serializer) = self.extract_fieldnorms_serializer() {

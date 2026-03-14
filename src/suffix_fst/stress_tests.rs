@@ -169,31 +169,6 @@ mod tests {
         assert_eq!(results[1], (0, 10, 14));
     }
 
-    // ──────────────── Min suffix length ────────────────
-
-    #[test]
-    fn test_min_suffix_len_3_filters_short() {
-        // "db" is 2 chars < min_suffix_len=3, should NOT be in the FST
-        let (sfx, postings) = build_index(&[
-            ("rag3db", &[("rag3db", 0, 6)]),
-        ]);
-
-        let results = search(&sfx, &postings, "db");
-        assert!(results.is_empty()); // "db" not indexed (< 3 chars)
-    }
-
-    #[test]
-    fn test_min_suffix_len_3_exact_boundary() {
-        // "3db" is exactly 3 chars = min_suffix_len, SHOULD be in the FST
-        let (sfx, postings) = build_index(&[
-            ("rag3db", &[("rag3db", 0, 6)]),
-        ]);
-
-        let results = search(&sfx, &postings, "3db");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0], (0, 3, 6)); // SI=3
-    }
-
     // ──────────────── Empty and edge cases ────────────────
 
     #[test]
@@ -448,21 +423,6 @@ mod tests {
     }
 
     // ──────────────── Token = exact suffix of another ────────────────
-
-    #[test]
-    fn test_token_equals_suffix_of_another() {
-        // "db" exists as a full token AND as suffix of "rag3db"
-        // But "db" is < min_suffix_len=3, so only the full token posting would work
-        // Actually "db" as SI=4 of "rag3db" is NOT indexed (2 chars < 3).
-        // But the full token "db" with SI=0 IS in ._raw but NOT in .sfx (len=2 < 3).
-        // So search for "db" returns empty.
-        let (sfx, postings) = build_index(&[
-            ("rag3db db", &[("rag3db", 0, 6), ("db", 7, 9)]),
-        ]);
-
-        let results = search(&sfx, &postings, "db");
-        assert!(results.is_empty()); // both paths blocked by min_suffix_len=3
-    }
 
     #[test]
     fn test_token_equals_suffix_of_another_above_min() {

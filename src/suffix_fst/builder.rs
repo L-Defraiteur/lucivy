@@ -1,9 +1,15 @@
 use std::collections::BTreeMap;
 use lucivy_fst::{MapBuilder, OutputTableBuilder};
 
-/// Minimum suffix length to index. Suffixes shorter than this are skipped
-/// to avoid excessive multi-parent entries for common short suffixes like "s", "e", "a".
-const DEFAULT_MIN_SUFFIX_LEN: usize = 3;
+/// Minimum suffix length to index.
+/// Default 1 = index all suffixes (needed for correct substring search).
+/// Override via LUCIVY_MIN_SUFFIX_LEN env var for benchmarking.
+fn default_min_suffix_len() -> usize {
+    std::env::var("LUCIVY_MIN_SUFFIX_LEN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
+}
 
 // Encoding layout for single-parent u64 output:
 //   bit 63 = 0 (single parent)
@@ -61,9 +67,11 @@ pub struct ParentEntry {
 
 /// Encode a list of parent entries into bytes for the OutputTable.
 pub fn encode_parent_entries(parents: &[ParentEntry]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(1 + parents.len() * 6);
-    buf.push(parents.len() as u8);
-    for p in parents {
+    let mut sorted = parents.to_vec();
+    sorted.sort_by_key(|p| p.si); // SI=0 first → early exit for exact/prefix lookups
+    let mut buf = Vec::with_capacity(1 + sorted.len() * 6);
+    buf.push(sorted.len() as u8);
+    for p in &sorted {
         buf.extend_from_slice(&(p.raw_ordinal as u32).to_le_bytes());
         buf.extend_from_slice(&p.si.to_le_bytes());
     }
@@ -107,7 +115,7 @@ pub struct SuffixFstBuilder {
 
 impl SuffixFstBuilder {
     pub fn new() -> Self {
-        Self::with_min_suffix_len(DEFAULT_MIN_SUFFIX_LEN)
+        Self::with_min_suffix_len(default_min_suffix_len())
     }
 
     pub fn with_min_suffix_len(min: usize) -> Self {

@@ -54,9 +54,13 @@ struct TokenCapture {
 }
 
 impl SfxCollector {
-    /// Create a new collector with default min_suffix_len=3.
+    /// Create a new collector. Reads LUCIVY_MIN_SUFFIX_LEN env var (default 1).
     pub fn new() -> Self {
-        Self::with_min_suffix_len(3)
+        let min = std::env::var("LUCIVY_MIN_SUFFIX_LEN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1);
+        Self::with_min_suffix_len(min)
     }
 
     /// Create with custom minimum suffix length.

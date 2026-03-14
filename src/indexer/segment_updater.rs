@@ -129,18 +129,33 @@ impl SegmentUpdaterShared {
             .flat_map(|segment_meta| segment_meta.list_files())
             .collect();
         files.insert(META_FILEPATH.to_path_buf());
-        // Include per-field .sfx files for ._raw fields.
-        // These are written by the SegmentWriter but not tracked by SegmentComponent.
-        let schema = self.index.schema();
+        // Per-field .sfx files are listed in the manifest (SegmentComponent::SuffixFst).
+        // The manifest itself is tracked by list_files() via SegmentComponent::iterator().
+        // We read it to discover which per-field .sfx files to preserve from GC.
         for segment_meta in self.index.list_all_segment_metas() {
-            for (field, entry) in schema.fields() {
-                if entry.name().ends_with("._raw") {
-                    let sfx_path = PathBuf::from(format!(
-                        "{}.{}.sfx",
-                        segment_meta.id().uuid_string(),
-                        field.field_id()
-                    ));
-                    files.insert(sfx_path);
+            let segment = self.index.segment(segment_meta.clone());
+            if let Ok(manifest_slice) = segment.open_read(crate::index::SegmentComponent::SuffixFst) {
+                if let Ok(manifest_data) = manifest_slice.read_bytes() {
+                    if manifest_data.len() >= 4 {
+                        let num = u32::from_le_bytes([
+                            manifest_data[0], manifest_data[1],
+                            manifest_data[2], manifest_data[3],
+                        ]) as usize;
+                        for i in 0..num {
+                            let off = 4 + i * 4;
+                            if off + 4 > manifest_data.len() { break; }
+                            let fid = u32::from_le_bytes([
+                                manifest_data[off], manifest_data[off+1],
+                                manifest_data[off+2], manifest_data[off+3],
+                            ]);
+                            let sfx_path = PathBuf::from(format!(
+                                "{}.{}.sfx",
+                                segment_meta.id().uuid_string(),
+                                fid,
+                            ));
+                            files.insert(sfx_path);
+                        }
+                    }
                 }
             }
         }

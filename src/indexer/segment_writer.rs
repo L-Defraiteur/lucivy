@@ -143,15 +143,20 @@ impl SegmentWriter {
         self.fieldnorms_writer.fill_up_to_max_doc(self.max_doc);
         // Build and write .sfx files before the serializer is consumed
         let sfx_collectors = std::mem::take(&mut self.sfx_collectors);
+        let mut sfx_field_ids = Vec::new();
         for (field_id, collector) in sfx_collectors {
             match collector.build() {
                 Ok(sfx_bytes) => {
                     self.segment_serializer.write_sfx(field_id, &sfx_bytes)?;
+                    sfx_field_ids.push(field_id);
                 }
                 Err(e) => {
                     log::warn!("Failed to build .sfx for field {field_id}: {e}");
                 }
             }
+        }
+        if !sfx_field_ids.is_empty() {
+            self.segment_serializer.write_sfx_manifest(&sfx_field_ids)?;
         }
         remap_and_write(
             self.schema,

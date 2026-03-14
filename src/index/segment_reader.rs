@@ -51,18 +51,46 @@ pub struct SegmentReader {
     sfx_files: FnvHashMap<Field, FileSlice>,
 }
 
-/// Load .sfx files for all ._raw fields that have one.
-/// Silently skips fields without a .sfx file.
-fn load_sfx_files(segment: &Segment, schema: &Schema) -> FnvHashMap<Field, FileSlice> {
+/// Load per-field .sfx files listed in the .sfx manifest.
+/// The manifest is written as SegmentComponent::SuffixFst and lists field_ids.
+/// Each per-field .sfx is stored as `{uuid}.{field_id}.sfx` (custom file).
+/// Returns empty map if no manifest exists.
+fn load_sfx_files(segment: &Segment, _schema: &Schema) -> FnvHashMap<Field, FileSlice> {
+    use crate::index::SegmentComponent;
     let mut sfx_files = FnvHashMap::default();
-    for (field, entry) in schema.fields() {
-        if entry.name().ends_with("._raw") {
-            let suffix = format!("{}.sfx", field.field_id());
-            if let Ok(file_slice) = segment.open_read_custom(&suffix) {
-                sfx_files.insert(field, file_slice);
-            }
+
+    // Read manifest
+    let manifest_data = match segment.open_read(SegmentComponent::SuffixFst) {
+        Ok(file_slice) => match file_slice.read_bytes() {
+            Ok(bytes) => bytes,
+            Err(_) => return sfx_files,
+        },
+        Err(_) => return sfx_files,
+    };
+
+    if manifest_data.len() < 4 {
+        return sfx_files;
+    }
+
+    let num_fields = u32::from_le_bytes([
+        manifest_data[0], manifest_data[1], manifest_data[2], manifest_data[3],
+    ]) as usize;
+
+    for i in 0..num_fields {
+        let offset = 4 + i * 4;
+        if offset + 4 > manifest_data.len() {
+            break;
+        }
+        let field_id = u32::from_le_bytes([
+            manifest_data[offset], manifest_data[offset + 1],
+            manifest_data[offset + 2], manifest_data[offset + 3],
+        ]);
+        let suffix = format!("{}.sfx", field_id);
+        if let Ok(file_slice) = segment.open_read_custom(&suffix) {
+            sfx_files.insert(Field::from_field_id(field_id), file_slice);
         }
     }
+
     sfx_files
 }
 
