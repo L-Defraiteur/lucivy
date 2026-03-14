@@ -48,9 +48,30 @@ pub struct SegmentReader {
     store_file: FileSlice,
     alive_bitset_opt: Option<AliveBitSet>,
     schema: Schema,
+    sfx_files: FnvHashMap<Field, FileSlice>,
+}
+
+/// Load .sfx files for all ._raw fields that have one.
+/// Silently skips fields without a .sfx file.
+fn load_sfx_files(segment: &Segment, schema: &Schema) -> FnvHashMap<Field, FileSlice> {
+    let mut sfx_files = FnvHashMap::default();
+    for (field, entry) in schema.fields() {
+        if entry.name().ends_with("._raw") {
+            let suffix = format!("{}.sfx", field.field_id());
+            if let Ok(file_slice) = segment.open_read_custom(&suffix) {
+                sfx_files.insert(field, file_slice);
+            }
+        }
+    }
+    sfx_files
 }
 
 impl SegmentReader {
+    /// Access a pre-loaded .sfx file for the given field, if one exists.
+    pub fn sfx_file(&self, field: Field) -> Option<&FileSlice> {
+        self.sfx_files.get(&field)
+    }
+
     /// Returns the highest document id ever attributed in
     /// this segment + 1.
     pub fn max_doc(&self) -> DocId {
@@ -225,7 +246,8 @@ impl SegmentReader {
             alive_bitset_opt,
             positions_composite,
             offsets_composite,
-            schema,
+            schema: schema.clone(),
+            sfx_files: load_sfx_files(segment, &schema),
         })
     }
 
@@ -296,7 +318,8 @@ impl SegmentReader {
             alive_bitset_opt,
             positions_composite,
             offsets_composite,
-            schema,
+            schema: schema.clone(),
+            sfx_files: load_sfx_files(segment, &schema),
         })
     }
 

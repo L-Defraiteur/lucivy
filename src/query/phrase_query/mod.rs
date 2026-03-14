@@ -9,6 +9,7 @@ pub mod regex_phrase_query;
 mod regex_phrase_weight;
 pub mod scoring_utils;
 pub mod suffix_contains;
+pub mod suffix_contains_query;
 
 pub use self::automaton_phrase_query::AutomatonPhraseQuery;
 pub use self::ngram_contains_query::{

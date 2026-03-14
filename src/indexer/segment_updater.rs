@@ -129,6 +129,21 @@ impl SegmentUpdaterShared {
             .flat_map(|segment_meta| segment_meta.list_files())
             .collect();
         files.insert(META_FILEPATH.to_path_buf());
+        // Include per-field .sfx files for ._raw fields.
+        // These are written by the SegmentWriter but not tracked by SegmentComponent.
+        let schema = self.index.schema();
+        for segment_meta in self.index.list_all_segment_metas() {
+            for (field, entry) in schema.fields() {
+                if entry.name().ends_with("._raw") {
+                    let sfx_path = PathBuf::from(format!(
+                        "{}.{}.sfx",
+                        segment_meta.id().uuid_string(),
+                        field.field_id()
+                    ));
+                    files.insert(sfx_path);
+                }
+            }
+        }
         files
     }
 }

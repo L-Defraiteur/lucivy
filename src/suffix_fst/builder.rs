@@ -126,7 +126,9 @@ impl SuffixFstBuilder {
                 continue;
             }
             let suffix = &lower[si..];
-            if suffix.len() < self.min_suffix_len {
+            // SI=0 (full token) is always indexed regardless of length.
+            // SI>0 (true suffix) is only indexed if long enough.
+            if si > 0 && suffix.len() < self.min_suffix_len {
                 break; // remaining suffixes are even shorter
             }
             let entry = ParentEntry {

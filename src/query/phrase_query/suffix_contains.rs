@@ -6,6 +6,12 @@
 //! Kept as a standalone module — can be activated/deactivated without
 //! touching the existing ngram contains path.
 
+use std::sync::Arc;
+
+use crate::docset::{DocSet, TERMINATED};
+use crate::index::InvertedIndexReader;
+use crate::postings::Postings;
+use crate::schema::{Field, IndexRecordOption};
 use crate::suffix_fst::file::SfxFileReader;
 
 /// A single contains match result.
@@ -76,6 +82,91 @@ where
     matches
 }
 
+/// Search for single-token fuzzy contains matches using the suffix FST.
+///
+/// Like `suffix_contains_single_token` but uses Levenshtein DFA with the given
+/// edit distance. Matches suffix terms within `distance` edits of the query.
+pub fn suffix_contains_single_token_fuzzy<F>(
+    sfx_reader: &SfxFileReader<'_>,
+    query: &str,
+    distance: u8,
+    raw_term_resolver: F,
+) -> Vec<SuffixContainsMatch>
+where
+    F: Fn(u64) -> Vec<RawPostingEntry>,
+{
+    if distance == 0 {
+        return suffix_contains_single_token(sfx_reader, query, raw_term_resolver);
+    }
+
+    let query_lower = query.to_lowercase();
+    let query_len = query_lower.len();
+
+    // Fuzzy walk on the suffix FST
+    let walk_results = sfx_reader.fuzzy_walk(&query_lower, distance);
+
+    let mut matches: Vec<SuffixContainsMatch> = Vec::new();
+
+    for (_suffix_term, parents) in &walk_results {
+        for parent in parents {
+            let postings = raw_term_resolver(parent.raw_ordinal);
+
+            for entry in &postings {
+                matches.push(SuffixContainsMatch {
+                    doc_id: entry.doc_id,
+                    token_index: entry.token_index,
+                    byte_from: entry.byte_from as usize + parent.si as usize,
+                    byte_to: entry.byte_from as usize + parent.si as usize + query_len,
+                    parent_term: String::new(),
+                    si: parent.si,
+                });
+            }
+        }
+    }
+
+    matches.sort_by(|a, b| a.doc_id.cmp(&b.doc_id).then(a.byte_from.cmp(&b.byte_from)));
+    matches.dedup_by(|a, b| a.doc_id == b.doc_id && a.byte_from == b.byte_from);
+
+    matches
+}
+
+/// Check if two separator byte slices are within Levenshtein distance `max_distance`.
+fn separator_matches_fuzzy(actual: &[u8], expected: &[u8], max_distance: u8) -> bool {
+    if actual == expected {
+        return true;
+    }
+    if max_distance == 0 {
+        return false;
+    }
+    // Simple byte-level edit distance for short separators
+    let a = actual;
+    let b = expected;
+    let len_a = a.len();
+    let len_b = b.len();
+    // Quick reject: if length difference > max_distance, can't match
+    if (len_a as isize - len_b as isize).unsigned_abs() > max_distance as usize {
+        return false;
+    }
+    // For very short separators (typical case), compute exact edit distance
+    if len_a <= 8 && len_b <= 8 {
+        let mut dp = [[0u8; 9]; 9];
+        for i in 0..=len_a { dp[i][0] = i as u8; }
+        for j in 0..=len_b { dp[0][j] = j as u8; }
+        for i in 1..=len_a {
+            for j in 1..=len_b {
+                let cost = if a[i-1] == b[j-1] { 0 } else { 1 };
+                dp[i][j] = dp[i-1][j-1].saturating_add(cost)
+                    .min(dp[i-1][j].saturating_add(1))
+                    .min(dp[i][j-1].saturating_add(1));
+            }
+        }
+        dp[len_a][len_b] <= max_distance
+    } else {
+        // Long separators: just check exact match (rare case)
+        false
+    }
+}
+
 /// A posting list entry from the ._raw field.
 #[derive(Debug, Clone)]
 pub struct RawPostingEntry {
@@ -85,34 +176,112 @@ pub struct RawPostingEntry {
     pub byte_to: u32,
 }
 
+/// Resolve a raw_ordinal to its posting entries using the real inverted index.
+///
+/// This reads the ._raw posting list for the term at the given ordinal,
+/// extracting (doc_id, position, byte_from, byte_to) for each occurrence.
+pub fn resolve_raw_ordinal(
+    inv_idx_reader: &InvertedIndexReader,
+    raw_ordinal: u64,
+) -> Vec<RawPostingEntry> {
+    let term_dict = inv_idx_reader.terms();
+    let term_info = term_dict.term_info_from_ord(raw_ordinal);
+
+    let mut postings = match inv_idx_reader.read_postings_from_terminfo(
+        &term_info,
+        IndexRecordOption::WithFreqsAndPositionsAndOffsets,
+    ) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut entries = Vec::new();
+    loop {
+        let doc_id = postings.doc();
+        if doc_id == TERMINATED {
+            break;
+        }
+        let mut pos_offsets = Vec::new();
+        postings.append_positions_and_offsets(0, &mut pos_offsets);
+        for (position, byte_from, byte_to) in pos_offsets {
+            entries.push(RawPostingEntry {
+                doc_id,
+                token_index: position,
+                byte_from,
+                byte_to,
+            });
+        }
+        postings.advance();
+    }
+    entries
+}
+
+/// Create a resolver closure that reads real posting lists from the inverted index.
+///
+/// Returns a closure suitable for passing to `suffix_contains_single_token`.
+pub fn make_raw_resolver(
+    inv_idx_reader: Arc<InvertedIndexReader>,
+) -> impl Fn(u64) -> Vec<RawPostingEntry> {
+    move |raw_ordinal| resolve_raw_ordinal(&inv_idx_reader, raw_ordinal)
+}
+
 /// Search for multi-token contains matches.
 ///
 /// Rules:
-/// - First token: .sfx exact lookup, any SI (can be suffix of doc token)
-/// - Middle tokens: ._raw exact lookup, SI=0 (must be full tokens)
-/// - Last token: .sfx prefix walk, SI=0 (can be prefix of doc token)
+/// - First token: .sfx lookup (any SI — can be a suffix of the doc token)
+/// - Middle tokens: .sfx lookup (SI=0 only — must be full tokens)
+/// - Last token: .sfx prefix walk (SI=0 only — can be a prefix of the doc token)
+/// - Between each pair of consecutive tokens: GapMap separator must match the query separator
 ///
-/// `raw_exact_resolver` resolves a term string to its posting entries from ._raw.
-/// `sfx_reader` provides suffix FST access.
+/// `raw_ordinal_resolver` maps a raw_ordinal to its posting entries (doc_id, Ti, byte offsets).
+/// `sfx_reader` provides suffix FST access + GapMap.
 pub fn suffix_contains_multi_token<F>(
     sfx_reader: &SfxFileReader<'_>,
     query_tokens: &[&str],
-    separators: &[&str],
-    raw_exact_resolver: F,
+    query_separators: &[&str],
+    raw_ordinal_resolver: F,
 ) -> Vec<SuffixContainsMultiMatch>
 where
-    F: Fn(&str) -> Vec<RawPostingEntry>,
+    F: Fn(u64) -> Vec<RawPostingEntry>,
+{
+    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, raw_ordinal_resolver, 0)
+}
+
+/// Multi-token contains search with optional fuzzy distance.
+/// Fuzzy distance applies to both token matching (Levenshtein DFA on suffix FST)
+/// and separator validation (edit distance on separator bytes).
+pub fn suffix_contains_multi_token_fuzzy<F>(
+    sfx_reader: &SfxFileReader<'_>,
+    query_tokens: &[&str],
+    query_separators: &[&str],
+    raw_ordinal_resolver: F,
+    fuzzy_distance: u8,
+) -> Vec<SuffixContainsMultiMatch>
+where
+    F: Fn(u64) -> Vec<RawPostingEntry>,
+{
+    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, raw_ordinal_resolver, fuzzy_distance)
+}
+
+fn suffix_contains_multi_token_impl<F>(
+    sfx_reader: &SfxFileReader<'_>,
+    query_tokens: &[&str],
+    query_separators: &[&str],
+    raw_ordinal_resolver: F,
+    fuzzy_distance: u8,
+) -> Vec<SuffixContainsMultiMatch>
+where
+    F: Fn(u64) -> Vec<RawPostingEntry>,
 {
     if query_tokens.is_empty() {
         return Vec::new();
     }
     if query_tokens.len() == 1 {
-        // Delegate to single-token with a simple resolver adapter
-        let results = suffix_contains_single_token(sfx_reader, query_tokens[0], |ord| {
-            // For single token via multi-token path, we'd need the ordinal resolver.
-            // This path shouldn't normally be taken — use suffix_contains_single_token directly.
-            Vec::new()
-        });
+        let results = if fuzzy_distance > 0 {
+            suffix_contains_single_token_fuzzy(sfx_reader, query_tokens[0], fuzzy_distance, &raw_ordinal_resolver)
+        } else {
+            suffix_contains_single_token(sfx_reader, query_tokens[0], &raw_ordinal_resolver)
+        };
         return results
             .into_iter()
             .map(|m| SuffixContainsMultiMatch {
@@ -124,47 +293,180 @@ where
             .collect();
     }
 
-    // Step 1: Resolve first token via .sfx (any SI)
-    let first_query = query_tokens[0].to_lowercase();
-    let first_parents = sfx_reader.resolve_suffix(&first_query);
-    if first_parents.is_empty() {
-        return Vec::new();
-    }
+    assert_eq!(
+        query_separators.len(),
+        query_tokens.len() - 1,
+        "separators must be one less than tokens"
+    );
 
-    // Step 2: Resolve middle tokens via ._raw exact (SI=0)
-    let mut middle_postings: Vec<Vec<RawPostingEntry>> = Vec::new();
-    for &token in &query_tokens[1..query_tokens.len() - 1] {
-        let postings = raw_exact_resolver(&token.to_lowercase());
-        if postings.is_empty() {
-            return Vec::new(); // A middle token doesn't exist → no match possible
-        }
-        middle_postings.push(postings);
-    }
+    // Step 1: Resolve ALL tokens to per-doc postings via .sfx
+    //
+    // For each token position in the query, collect postings grouped by doc_id.
+    // - First token (i=0): any SI (can be a suffix of the doc token)
+    // - Middle tokens: SI=0 only (must match full doc tokens)
+    // - Last token: prefix walk with SI=0 (can be a prefix of the doc token)
 
-    // Step 3: Resolve last token via .sfx prefix walk (SI=0 only)
-    let last_query = query_tokens[query_tokens.len() - 1].to_lowercase();
-    let last_walk = sfx_reader.prefix_walk(&last_query);
-    let mut last_postings: Vec<RawPostingEntry> = Vec::new();
-    for (_, parents) in &last_walk {
-        for parent in parents {
-            if parent.si != 0 {
-                continue; // Last token must match at SI=0 (start of doc token)
+    let n = query_tokens.len();
+    let mut per_token_postings: Vec<Vec<RawPostingEntry>> = Vec::with_capacity(n);
+
+    for (i, &token) in query_tokens.iter().enumerate() {
+        let query_lower = token.to_lowercase();
+        let is_first = i == 0;
+        let is_last = i == n - 1;
+
+        let mut postings = Vec::new();
+
+        // Choose walk strategy based on position and fuzzy_distance
+        let walk_results = if is_last {
+            // Last token: prefix walk (or fuzzy walk)
+            if fuzzy_distance > 0 {
+                sfx_reader.fuzzy_walk(&query_lower, fuzzy_distance)
+            } else {
+                sfx_reader.prefix_walk(&query_lower)
             }
-            let entries = raw_exact_resolver(""); // Would need ordinal resolver here
-            // TODO: This needs the ordinal-based resolver, not string-based.
-            // For now, this is a placeholder. The full integration will use the
-            // inverted index reader to resolve ordinals to posting lists.
+        } else {
+            // First or middle token: exact lookup (or fuzzy walk)
+            if fuzzy_distance > 0 {
+                sfx_reader.fuzzy_walk(&query_lower, fuzzy_distance)
+            } else {
+                sfx_reader.resolve_suffix(&query_lower)
+                    .into_iter()
+                    .map(|p| (query_lower.clone(), vec![p]))
+                    .collect()
+            }
+        };
+
+        for (_suffix_term, parents) in &walk_results {
+            for parent in parents {
+                if !is_first && parent.si != 0 {
+                    continue; // middle/last tokens must be SI=0
+                }
+                let entries = raw_ordinal_resolver(parent.raw_ordinal);
+                for entry in entries {
+                    postings.push(entry);
+                }
+            }
         }
+
+        if postings.is_empty() {
+            return Vec::new(); // Any token with zero postings → no match possible
+        }
+
+        // Sort by (doc_id, token_index) for efficient intersection
+        postings.sort_by(|a, b| a.doc_id.cmp(&b.doc_id).then(a.token_index.cmp(&b.token_index)));
+        per_token_postings.push(postings);
     }
 
-    // TODO: Step 4-7: intersection of consecutive Ti, GapMap validation
-    // This is a placeholder for the full multi-token flow.
-    // The core logic is:
-    // - For each first_parent posting, find consecutive Ti in middle + last postings
-    // - Validate separators via GapMap
-    // - Verify first token reaches end of doc token (SI + len = parent_len)
+    // Step 2: Find chains of consecutive token positions across docs
+    //
+    // For each first-token posting, try to extend it by finding consecutive Ti
+    // in the following token postings. Then validate separators via GapMap.
 
-    Vec::new()
+    let mut matches: Vec<SuffixContainsMultiMatch> = Vec::new();
+    let gapmap = sfx_reader.gapmap();
+
+    for first_entry in &per_token_postings[0] {
+        let doc_id = first_entry.doc_id;
+        let first_ti = first_entry.token_index;
+
+        // Try to build a chain starting from this first_entry
+        let mut chain = vec![first_entry.clone()];
+        let mut valid = true;
+
+        for step in 1..n {
+            let expected_ti = first_ti + step as u32;
+
+            // Binary search for (doc_id, expected_ti) in per_token_postings[step]
+            let found = per_token_postings[step]
+                .binary_search_by(|e| {
+                    e.doc_id.cmp(&doc_id).then(e.token_index.cmp(&expected_ti))
+                });
+
+            match found {
+                Ok(idx) => {
+                    chain.push(per_token_postings[step][idx].clone());
+                }
+                Err(_) => {
+                    valid = false;
+                    break;
+                }
+            }
+        }
+
+        if !valid {
+            continue;
+        }
+
+        // Step 3: Validate separators via GapMap
+        let mut seps_valid = true;
+        for sep_idx in 0..query_separators.len() {
+            let ti_a = first_ti + sep_idx as u32;
+            let ti_b = ti_a + 1;
+            let expected_sep = query_separators[sep_idx].as_bytes();
+
+            match gapmap.read_separator(doc_id, ti_a, ti_b) {
+                Some(actual_sep) => {
+                    if !separator_matches_fuzzy(actual_sep, expected_sep, fuzzy_distance) {
+                        seps_valid = false;
+                        break;
+                    }
+                }
+                None => {
+                    // Can't read separator (cross-value boundary or invalid Ti)
+                    seps_valid = false;
+                    break;
+                }
+            }
+        }
+
+        if !seps_valid {
+            continue;
+        }
+
+        // Build the multi-match result
+        let first = &chain[0];
+        let last = &chain[chain.len() - 1];
+
+        // byte_from: first token's byte_from (adjusted by SI if substring match)
+        let first_parents = sfx_reader.resolve_suffix(&query_tokens[0].to_lowercase());
+        let first_si = first_parents.iter()
+            .find(|p| p.raw_ordinal == per_token_postings[0]
+                .iter()
+                .find(|e| e.doc_id == doc_id && e.token_index == first_ti)
+                .map(|_| p.raw_ordinal)
+                .unwrap_or(u64::MAX))
+            .map(|p| p.si)
+            .unwrap_or(0);
+
+        let byte_from = first.byte_from as usize + first_si as usize;
+        // byte_to: last token's byte_from + length of the query's last token
+        let last_query_token = query_tokens[n - 1].to_lowercase();
+        let byte_to = last.byte_from as usize + last_query_token.len();
+
+        let token_matches = chain.iter().enumerate().map(|(i, entry)| {
+            SuffixContainsMatch {
+                doc_id: entry.doc_id,
+                token_index: entry.token_index,
+                byte_from: entry.byte_from as usize,
+                byte_to: entry.byte_to as usize,
+                parent_term: String::new(),
+                si: if i == 0 { first_si } else { 0 },
+            }
+        }).collect();
+
+        matches.push(SuffixContainsMultiMatch {
+            doc_id,
+            byte_from,
+            byte_to,
+            token_matches,
+        });
+    }
+
+    // Deduplicate by (doc_id, byte_from)
+    matches.sort_by(|a, b| a.doc_id.cmp(&b.doc_id).then(a.byte_from.cmp(&b.byte_from)));
+    matches.dedup_by(|a, b| a.doc_id == b.doc_id && a.byte_from == b.byte_from);
+
+    matches
 }
 
 /// A multi-token contains match.
@@ -341,5 +643,291 @@ mod tests {
         assert_eq!(results[0].byte_from, 28); // 27 + 1
         assert_eq!(results[0].byte_to, 31);   // 28 + 3
         assert_eq!(results[0].si, 1);
+    }
+
+    // ─── Multi-token tests ──────────────────────────────────────
+
+    #[test]
+    fn test_multi_token_exact() {
+        let (sfx_bytes, raw_postings) = build_test_index();
+        let reader = SfxFileReader::open(&sfx_bytes).unwrap();
+
+        // Search "rag3db from" — two consecutive tokens in doc 0
+        // Doc 0: "import rag3db from 'rag3db_core';"
+        // Tokens: import(Ti=0) rag3db(Ti=1) from(Ti=2) rag3db(Ti=3) core(Ti=4)
+        // Separator between Ti=1 and Ti=2 = " "
+        let results = suffix_contains_multi_token(
+            &reader,
+            &["rag3db", "from"],
+            &[" "],
+            |ord| raw_postings.get(&ord).cloned().unwrap_or_default(),
+        );
+
+        assert_eq!(results.len(), 1, "should find 'rag3db from' in doc 0");
+        assert_eq!(results[0].doc_id, 0);
+        assert_eq!(results[0].byte_from, 7);  // "rag3db" starts at byte 7
+        assert_eq!(results[0].byte_to, 18);   // "from" ends at byte 18
+    }
+
+    #[test]
+    fn test_multi_token_wrong_separator() {
+        let (sfx_bytes, raw_postings) = build_test_index();
+        let reader = SfxFileReader::open(&sfx_bytes).unwrap();
+
+        // Search "rag3db_from" — separator "_" doesn't match " " in the doc
+        let results = suffix_contains_multi_token(
+            &reader,
+            &["rag3db", "from"],
+            &["_"],
+            |ord| raw_postings.get(&ord).cloned().unwrap_or_default(),
+        );
+
+        assert!(results.is_empty(), "separator '_' doesn't match ' '");
+    }
+
+    #[test]
+    fn test_multi_token_no_match() {
+        let (sfx_bytes, raw_postings) = build_test_index();
+        let reader = SfxFileReader::open(&sfx_bytes).unwrap();
+
+        // "rag3db xyz" — "xyz" doesn't exist
+        let results = suffix_contains_multi_token(
+            &reader,
+            &["rag3db", "xyz"],
+            &[" "],
+            |ord| raw_postings.get(&ord).cloned().unwrap_or_default(),
+        );
+
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_multi_token_three_tokens() {
+        let (sfx_bytes, raw_postings) = build_test_index();
+        let reader = SfxFileReader::open(&sfx_bytes).unwrap();
+
+        // "rag3db is cool" — all three in doc 1
+        // Doc 1: "rag3db is cool"
+        // Tokens: rag3db(Ti=0) is(Ti=1) cool(Ti=2)
+        let results = suffix_contains_multi_token(
+            &reader,
+            &["rag3db", "is", "cool"],
+            &[" ", " "],
+            |ord| raw_postings.get(&ord).cloned().unwrap_or_default(),
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].doc_id, 1);
+        assert_eq!(results[0].byte_from, 0);
+        assert_eq!(results[0].byte_to, 14); // "cool" = 4 bytes, starts at 10
+    }
+
+    #[test]
+    fn test_multi_token_not_consecutive() {
+        let (sfx_bytes, raw_postings) = build_test_index();
+        let reader = SfxFileReader::open(&sfx_bytes).unwrap();
+
+        // "import from" — these exist in doc 0 but NOT consecutive (Ti=0, Ti=2)
+        let results = suffix_contains_multi_token(
+            &reader,
+            &["import", "from"],
+            &[" "],
+            |ord| raw_postings.get(&ord).cloned().unwrap_or_default(),
+        );
+
+        assert!(results.is_empty(), "import and from are not consecutive tokens");
+    }
+
+    /// Integration test: real Index with real ._raw posting lists.
+    /// Verifies that resolve_raw_ordinal reads actual postings correctly.
+    #[test]
+    fn test_resolve_raw_ordinal_real_index() {
+        use crate::schema::{SchemaBuilder, TextFieldIndexing, TextOptions};
+        use crate::tokenizer::{LowerCaser, SimpleTokenizer, TextAnalyzer};
+        use crate::{Index, LucivyDocument, Term};
+
+        // Build schema with a ._raw field (lowercase only, positions + offsets)
+        let mut schema_builder = SchemaBuilder::new();
+        let raw_opts = TextOptions::default().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer("raw")
+                .set_index_option(IndexRecordOption::WithFreqsAndPositionsAndOffsets),
+        );
+        let body_raw = schema_builder.add_text_field("body_raw", raw_opts);
+        let schema = schema_builder.build();
+
+        // Build index in RAM
+        let index = Index::create_in_ram(schema);
+        let raw_tokenizer = TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter(LowerCaser)
+            .build();
+        index.tokenizers().register("raw", raw_tokenizer);
+
+        let mut writer = index.writer_for_tests().unwrap();
+
+        // Doc 0: "import rag3db from core"
+        let mut doc0 = LucivyDocument::new();
+        doc0.add_text(body_raw, "import rag3db from core");
+        writer.add_document(doc0).unwrap();
+
+        // Doc 1: "rag3db is cool"
+        let mut doc1 = LucivyDocument::new();
+        doc1.add_text(body_raw, "rag3db is cool");
+        writer.add_document(doc1).unwrap();
+
+        writer.commit().unwrap();
+
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+
+        // Get the single segment
+        assert_eq!(searcher.segment_readers().len(), 1);
+        let seg_reader = &searcher.segment_readers()[0];
+        let inv_idx = seg_reader.inverted_index(body_raw).unwrap();
+
+        // Find ordinal for "rag3db"
+        let term = Term::from_field_text(body_raw, "rag3db");
+        let term_dict = inv_idx.terms();
+        let ordinal = term_dict.term_ord(term.serialized_value_bytes()).unwrap().unwrap();
+
+        // Resolve using our function
+        let entries = resolve_raw_ordinal(&inv_idx, ordinal);
+
+        // "rag3db" appears in doc 0 (position 1) and doc 1 (position 0)
+        assert_eq!(entries.len(), 2, "rag3db should appear in 2 docs");
+        assert_eq!(entries[0].doc_id, 0);
+        assert_eq!(entries[0].token_index, 1); // "import" is at pos 0, "rag3db" at pos 1
+        assert_eq!(entries[0].byte_from, 7);   // "import " = 7 bytes
+        assert_eq!(entries[0].byte_to, 13);    // "rag3db" = 6 bytes
+        assert_eq!(entries[1].doc_id, 1);
+        assert_eq!(entries[1].token_index, 0); // first token
+        assert_eq!(entries[1].byte_from, 0);
+        assert_eq!(entries[1].byte_to, 6);
+    }
+
+    /// E2E test with Unicode characters: accents, CJK, emoji in identifiers.
+    /// Verifies that byte offsets are correct for multi-byte UTF-8 chars.
+    #[test]
+    fn test_e2e_unicode_characters() {
+        use crate::schema::{SchemaBuilder, TextFieldIndexing, TextOptions};
+        use crate::tokenizer::{LowerCaser, SimpleTokenizer, TextAnalyzer};
+        use crate::{Index, LucivyDocument, Term};
+
+        let mut schema_builder = SchemaBuilder::new();
+        let raw_opts = TextOptions::default().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer("raw")
+                .set_index_option(IndexRecordOption::WithFreqsAndPositionsAndOffsets),
+        );
+        let body = schema_builder.add_text_field("body_raw", raw_opts);
+        let schema = schema_builder.build();
+
+        let index = Index::create_in_ram(schema);
+        let raw_tokenizer = TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter(LowerCaser)
+            .build();
+        index.tokenizers().register("raw", raw_tokenizer);
+
+        let mut writer = index.writer_for_tests().unwrap();
+
+        // Doc 0: French accents — "é" is 2 bytes, "ç" is 2 bytes
+        let mut doc0 = LucivyDocument::new();
+        doc0.add_text(body, "résumé café François");
+        writer.add_document(doc0).unwrap();
+
+        // Doc 1: CJK characters — each is 3 bytes
+        let mut doc1 = LucivyDocument::new();
+        doc1.add_text(body, "東京タワー hello 世界");
+        writer.add_document(doc1).unwrap();
+
+        // Doc 2: emoji + mixed — "🦀" is 4 bytes
+        let mut doc2 = LucivyDocument::new();
+        doc2.add_text(body, "rust🦀lang crème brûlée");
+        writer.add_document(doc2).unwrap();
+
+        writer.commit().unwrap();
+
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        assert_eq!(searcher.segment_readers().len(), 1);
+        let seg_reader = &searcher.segment_readers()[0];
+        let inv_idx = seg_reader.inverted_index(body).unwrap();
+
+        // Test 1: "résumé" — 8 bytes (r=1, é=2, s=1, u=1, m=1, é=2)
+        let term = Term::from_field_text(body, "résumé");
+        let term_dict = inv_idx.terms();
+        let ordinal = term_dict.term_ord(term.serialized_value_bytes()).unwrap().unwrap();
+        let entries = resolve_raw_ordinal(&inv_idx, ordinal);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].doc_id, 0);
+        assert_eq!(entries[0].byte_from, 0);
+        assert_eq!(entries[0].byte_to, 8); // "résumé" = 8 bytes
+
+        // Test 2: "café" — 5 bytes (c=1, a=1, f=1, é=2)
+        let term = Term::from_field_text(body, "café");
+        let ordinal = term_dict.term_ord(term.serialized_value_bytes()).unwrap().unwrap();
+        let entries = resolve_raw_ordinal(&inv_idx, ordinal);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].doc_id, 0);
+        assert_eq!(entries[0].byte_from, 9); // "résumé " = 8 + 1 space
+        assert_eq!(entries[0].byte_to, 14);  // "café" = 5 bytes
+
+        // Test 3: "françois" (lowercased from "François") — ç is 2 bytes
+        let term = Term::from_field_text(body, "françois");
+        let ordinal = term_dict.term_ord(term.serialized_value_bytes()).unwrap().unwrap();
+        let entries = resolve_raw_ordinal(&inv_idx, ordinal);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].doc_id, 0);
+        assert_eq!(entries[0].byte_from, 15); // "résumé café " = 8 + 1 + 5 + 1
+        assert_eq!(entries[0].byte_to, 24);   // "françois" = 9 bytes (ç=2)
+
+        // Test 4: CJK — "東京タワー" = 15 bytes (5 chars × 3 bytes)
+        let term = Term::from_field_text(body, "東京タワー");
+        let ordinal = term_dict.term_ord(term.serialized_value_bytes()).unwrap().unwrap();
+        let entries = resolve_raw_ordinal(&inv_idx, ordinal);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].doc_id, 1);
+        assert_eq!(entries[0].byte_from, 0);
+        assert_eq!(entries[0].byte_to, 15);
+
+        // Test 5: "hello" in CJK doc — byte_from after CJK chars
+        let term = Term::from_field_text(body, "hello");
+        let ordinal = term_dict.term_ord(term.serialized_value_bytes()).unwrap().unwrap();
+        let entries = resolve_raw_ordinal(&inv_idx, ordinal);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].doc_id, 1);
+        assert_eq!(entries[0].byte_from, 16); // "東京タワー " = 15 + 1
+        assert_eq!(entries[0].byte_to, 21);   // "hello" = 5
+
+        // Test 6: "世界" — after "hello " in CJK doc
+        let term = Term::from_field_text(body, "世界");
+        let ordinal = term_dict.term_ord(term.serialized_value_bytes()).unwrap().unwrap();
+        let entries = resolve_raw_ordinal(&inv_idx, ordinal);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].doc_id, 1);
+        assert_eq!(entries[0].byte_from, 22); // 15 + 1 + 5 + 1
+        assert_eq!(entries[0].byte_to, 28);   // "世界" = 6 bytes
+
+        // Test 7: "rust🦀lang" — 🦀 is 4 bytes, total = 4 + 4 + 4 = 12
+        let term = Term::from_field_text(body, "rust🦀lang");
+        // SimpleTokenizer splits on whitespace, so "rust🦀lang" is one token
+        if let Some(ordinal) = term_dict.term_ord(term.serialized_value_bytes()).unwrap() {
+            let entries = resolve_raw_ordinal(&inv_idx, ordinal);
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].doc_id, 2);
+            assert_eq!(entries[0].byte_from, 0);
+            assert_eq!(entries[0].byte_to, 12); // "rust"=4 + "🦀"=4 + "lang"=4
+        }
+
+        // Test 8: "brûlée" — û=2 bytes, é=2 bytes → 8 bytes
+        let term = Term::from_field_text(body, "brûlée");
+        let ordinal = term_dict.term_ord(term.serialized_value_bytes()).unwrap().unwrap();
+        let entries = resolve_raw_ordinal(&inv_idx, ordinal);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].doc_id, 2);
+        // "rust🦀lang crème brûlée"
+        // "rust🦀lang"=12, " "=1, "crème"=6, " "=1 → 20
+        assert_eq!(entries[0].byte_from, 20);
+        assert_eq!(entries[0].byte_to, 28); // "brûlée" = 8 bytes
     }
 }

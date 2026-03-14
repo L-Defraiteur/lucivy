@@ -1,9 +1,33 @@
 use std::io::{self, Write};
 
-use lucivy_fst::{IntoStreamer, Map, OutputTable, Streamer};
+use levenshtein_automata::{Distance, LevenshteinAutomatonBuilder, DFA};
+use lucivy_fst::{Automaton, IntoStreamer, Map, OutputTable, Streamer};
 
 use super::builder::{decode_output, decode_parent_entries, read_parent_list, ParentEntry, ParentRef};
 use super::gapmap::GapMapReader;
+
+/// DFA wrapper implementing lucivy_fst::Automaton for Levenshtein search on the suffix FST.
+pub(crate) struct SfxDfaWrapper(pub DFA);
+
+impl Automaton for SfxDfaWrapper {
+    type State = u32;
+
+    fn start(&self) -> Self::State {
+        self.0.initial_state()
+    }
+
+    fn is_match(&self, state: &Self::State) -> bool {
+        matches!(self.0.distance(*state), Distance::Exact(_))
+    }
+
+    fn can_match(&self, state: &u32) -> bool {
+        *state != levenshtein_automata::SINK_STATE
+    }
+
+    fn accept(&self, state: &Self::State, byte: u8) -> Self::State {
+        self.0.transition(*state, byte)
+    }
+}
 
 // .sfx file format:
 //
@@ -165,6 +189,27 @@ impl<'a> SfxFileReader<'a> {
             // prefix is all 0xFF bytes, just scan to end
             self.fst.range().ge(ge).into_stream()
         };
+
+        while let Some((key, val)) = stream.next() {
+            let term = String::from_utf8_lossy(key).into_owned();
+            let parents = self.decode_parents(val);
+            results.push((term, parents));
+        }
+
+        results
+    }
+
+    /// Fuzzy walk: find all suffix terms within Levenshtein distance `d` of `query`.
+    /// Returns an iterator of (suffix_term, parent_entries).
+    /// Uses a Levenshtein prefix DFA — matches terms that START with something
+    /// within edit distance `d` of `query` (contains = prefix of suffix).
+    pub fn fuzzy_walk(&self, query: &str, distance: u8) -> Vec<(String, Vec<ParentEntry>)> {
+        let builder = LevenshteinAutomatonBuilder::new(distance, true);
+        let dfa = builder.build_prefix_dfa(query);
+        let automaton = SfxDfaWrapper(dfa);
+
+        let mut results = Vec::new();
+        let mut stream = self.fst.search(automaton).into_stream();
 
         while let Some((key, val)) = stream.next() {
             let term = String::from_utf8_lossy(key).into_owned();

@@ -146,11 +146,10 @@ impl TermDictionary {
         self.0.ord_to_term(ord, bytes)
     }
 
-    // this isn't used, and has different prototype in Fst and SSTable
-    // Returns the number of terms in the dictionary.
-    // pub fn term_info_from_ord(&self, term_ord: TermOrdinal) -> TermInfo {
-    // self.0.term_info_from_ord(term_ord)
-    // }
+    /// Returns the TermInfo for the given term ordinal.
+    pub fn term_info_from_ord(&self, term_ord: TermOrdinal) -> TermInfo {
+        self.0.term_info_from_ord(term_ord)
+    }
 
     /// Lookups the value corresponding to the key.
     pub fn get<K: AsRef<[u8]>>(&self, key: K) -> io::Result<Option<TermInfo>> {
