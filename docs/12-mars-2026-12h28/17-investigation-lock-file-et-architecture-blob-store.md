@@ -105,6 +105,19 @@ pub fn close(&self) -> Result<(), String> {
 
 Ceci permet de libérer le lock explicitement via le bridge CXX, sans dépendre du destructeur C++ de `Database`. L'extension `lucivy_fts` peut exposer un `close_index()` appelé avant le drop de la connexion.
 
+#### Garanties de sécurité de `close()`
+
+- **Après `close()`** : toute écriture (`add_document`, `commit`, `delete`) retourne `Err("index is closed")` via `.as_mut().ok_or(...)`. Pas de panic, pas d'UB.
+- **La lecture continue** : `search()` utilise le `reader`, pas le `writer`. Les recherches fonctionnent normalement après `close()`.
+- **Idempotent** : appeler `close()` deux fois est safe — `guard.take()` sur `None` retourne `None`, le `if let Some` ne matche pas.
+- **`rollback()`** est aussi safe : `if let Some(writer) = guard.as_mut()` — si `None`, ne fait rien.
+
+#### Fichiers modifiés
+
+- `lucivy_core/src/handle.rs` : `Mutex<Option<IndexWriter>>`, `close()`, tests
+- `lucivy_fts/rust/src/bridge.rs` : tous les accès writer adaptés pour `Option` avec erreur `"index is closed"`
+- `bindings/wasm/src/lib.rs` : même adaptation pour le binding WASM
+
 ## Architecture : trait `IndexBlobStore` unifié
 
 ### Contexte

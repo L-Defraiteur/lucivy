@@ -98,9 +98,36 @@ L'étape 2 (lecture stored text) est le vrai coût. Le `StoreReader::get(doc_id)
 - **Batch store reads** : grouper les lectures de stored text par bloc au lieu d'une par document.
 - **Cache de décompression** : garder les blocs décompressés en LRU cache entre les candidats (le store utilise des blocs de ~16KB, souvent plusieurs docs par bloc).
 
+## Optimisation 5 — Cascade stem → trigram → FST fuzzy → stored text
+
+**Idée** : utiliser le champ stemmed comme premier filtre (O(1) lookup exacte), puis trigrams, puis FST fuzzy sur raw, puis stored text en dernier recours. Chaque niveau élimine des candidats avant le suivant.
+
+```
+Niveau 1 : stem exact (gratuit) → 5000 → 200 docs
+Niveau 2 : trigram intersection → 200 → 100 docs
+Niveau 3 : FST fuzzy sur ._raw → 100 → 30 docs
+Niveau 4 : stored text verification → 30 docs (seul coût réel)
+```
+
+**Limite** : marche pour les tokens entiers. Les substrings purs ("prog" dans "programming") fallback directement sur trigrams.
+
+**Impact estimé** : potentiellement -80% sur d=1 (le stem élimine la majorité des candidats avant toute vérification coûteuse).
+
+## Optimisation 6 — Morpheme/syllable tokenizer (exploratoire)
+
+**Idée** : un champ intermédiaire entre ngram (3 chars) et raw (token entier), découpant les mots en sous-unités morphologiques : "programming" → "pro", "gram", "ming". Résolution croisée entre les champs ngram, morpheme, raw pour trouver les candidats.
+
+**Avantage** : plus sélectif que les trigrams, moins strict que le raw. Capturerait "program" dans "programming" sans fuzzy.
+
+**Risque** : design de recherche avancé, nécessite un tokenizer morphologique (ou heuristique syllabique). Impact sur la taille de l'index. Prédictibilité du contains à valider.
+
+**Statut** : idée à explorer après les optimisations 4-5. Nécessite un prototype + benchmark comparatif.
+
 ## Priorités
 
-1. **BM25 séparé du highlight** (impact immédiat, peu de risque)
-2. **UTF-8 clamping à l'indexation** (impact moyen, besoin de valider les tokenizers)
-3. **AutomatonScorer sparse** (impact faible, à benchmarker)
-4. **Fuzzy pré-filtrage FST** (gros impact potentiel, design significatif)
+1. ~~**BM25 séparé du highlight**~~ (fait — commit 2cd65c2)
+2. ~~**UTF-8 clamping supprimé du hot path**~~ (fait — commit 2cd65c2)
+3. **AutomatonScorer sparse** (impact faible, surtout mémoire — P3)
+4. **Fuzzy pré-filtrage FST** sur ._raw (gros impact, design modéré — P1)
+5. **Cascade stem → trigram → FST** (très gros impact potentiel, design significatif — P2)
+6. **Morpheme tokenizer** (exploratoire, post-release — P4)

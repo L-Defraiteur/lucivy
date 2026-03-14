@@ -350,8 +350,8 @@ async function startup() {
     window._lucivy = lucivy;
     await lucivy.ready;
 
-    statusEl.textContent = 'Loading dataset (lucivy source code)...';
-    const resp = await fetch('./dataset.luce');
+    statusEl.textContent = 'Loading dataset (rag3db source code)...';
+    const resp = await fetch('./rag3db.luce');
     if (!resp.ok) throw new Error(`Failed to fetch dataset: ${resp.status}`);
     const blob = await resp.arrayBuffer();
     const data = new Uint8Array(blob);

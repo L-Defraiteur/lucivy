@@ -279,9 +279,7 @@ impl Weight for NgramContainsWeight {
         let raw_inverted = reader.inverted_index(self.raw_field)?;
         let ngram_inverted = reader.inverted_index(self.ngram_field)?;
 
-        // fst_verified: true if ALL tokens were resolved via FST (exact or fuzzy).
-        // When true, we can skip stored text verification entirely.
-        let (final_candidates, fst_verified) = match &self.verification {
+        let final_candidates = match &self.verification {
             VerificationMode::Fuzzy(params) => {
                 // Fuzzy mode: FST pre-filter first, then ngram fallback.
                 let mut per_token_candidates: Vec<Vec<DocId>> = Vec::new();
@@ -314,9 +312,7 @@ impl Weight for NgramContainsWeight {
                     )?;
                     per_token_candidates.push(candidates);
                 }
-                // Only mark as fst_verified if no prefix/suffix validation needed.
-                let needs_prefix_suffix = !params.prefix.is_empty() || !params.suffix.is_empty();
-                (intersect_sorted_vecs(per_token_candidates), all_fst && !needs_prefix_suffix)
+                intersect_sorted_vecs(per_token_candidates)
             }
             VerificationMode::Regex(params) => {
                 // Regex always needs stored text verification — can't skip.
@@ -337,7 +333,7 @@ impl Weight for NgramContainsWeight {
                     all_candidates.dedup();
                     all_candidates
                 };
-                (candidates, false)
+                candidates
             }
         };
 
@@ -345,17 +341,9 @@ impl Weight for NgramContainsWeight {
             return Ok(Box::new(EmptyScorer));
         }
 
-        // If FST verified all tokens, skip stored text verification entirely.
-        if fst_verified && self.highlight_sink.is_none() {
-            let fieldnorm_reader = reader.fieldnorms_readers()
-                .get_field(self.raw_field)?
-                .unwrap_or_else(|| FieldNormReader::constant(reader.max_doc(), 1));
-            return Ok(Box::new(FstVerifiedScorer::new(
-                final_candidates,
-                self.bm25_weight.boost_by(boost),
-                fieldnorm_reader,
-            )));
-        }
+        // Note: FST pre-filter (Level 2) reduces candidates but does NOT skip
+        // stored text verification — contains searches for substrings, not whole
+        // terms, so the FST match is a superset of the true matches.
 
         // Create scorer that verifies each candidate via stored text.
         let store_reader = reader
