@@ -31,12 +31,15 @@ pub enum SegmentComponent {
     /// Character byte offsets (offset_from, offset_to) for each term occurrence.
     /// Used for highlighting and separator-aware matching.
     Offsets,
+    /// Suffix FST index for contains search without stored text verification.
+    /// Maps suffix terms to parent tokens in the ._raw FST via redirection.
+    SuffixFst,
 }
 
 impl SegmentComponent {
     /// Iterates through the components.
     pub fn iterator() -> slice::Iter<'static, SegmentComponent> {
-        static SEGMENT_COMPONENTS: [SegmentComponent; 9] = [
+        static SEGMENT_COMPONENTS: [SegmentComponent; 10] = [
             SegmentComponent::Postings,
             SegmentComponent::Positions,
             SegmentComponent::FastFields,
@@ -46,6 +49,7 @@ impl SegmentComponent {
             SegmentComponent::TempStore,
             SegmentComponent::Delete,
             SegmentComponent::Offsets,
+            SegmentComponent::SuffixFst,
         ];
         SEGMENT_COMPONENTS.iter()
     }

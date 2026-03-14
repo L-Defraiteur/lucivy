@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use columnar::MonotonicallyMappableToU64;
 use common::JsonPathWriter;
 use itertools::Itertools;
@@ -15,7 +17,8 @@ use crate::postings::{
     PerFieldPostingsWriter, PostingsWriter,
 };
 use crate::schema::document::{Document, Value};
-use crate::schema::{FieldEntry, FieldType, Schema, DATE_TIME_PRECISION_INDEXED};
+use crate::schema::{Field, FieldEntry, FieldType, Schema, DATE_TIME_PRECISION_INDEXED};
+use crate::suffix_fst::SfxCollector;
 use crate::tokenizer::{FacetTokenizer, PreTokenizedStream, TextAnalyzer, Tokenizer};
 use crate::{DocId, Opstamp, LucivyError};
 
@@ -58,6 +61,10 @@ pub struct SegmentWriter {
     per_field_text_analyzers: Vec<TextAnalyzer>,
     term_buffer: IndexingTerm,
     schema: Schema,
+    /// Per-field SfxCollectors for ._raw fields. Key = field id of the ._raw field.
+    sfx_collectors: HashMap<u32, SfxCollector>,
+    /// Tracks which sfx_collectors were fed during the current document.
+    sfx_fed_this_doc: Vec<u32>,
 }
 
 impl SegmentWriter {
@@ -114,6 +121,16 @@ impl SegmentWriter {
             doc_opstamps: Vec::with_capacity(1_000),
             per_field_text_analyzers,
             term_buffer: IndexingTerm::with_capacity(16),
+            sfx_collectors: {
+                let mut collectors = HashMap::new();
+                for (field, field_entry) in schema.fields() {
+                    if field_entry.name().ends_with("._raw") {
+                        collectors.insert(field.field_id(), SfxCollector::new());
+                    }
+                }
+                collectors
+            },
+            sfx_fed_this_doc: Vec::new(),
             schema,
         })
     }
@@ -124,6 +141,18 @@ impl SegmentWriter {
     /// be used afterwards.
     pub fn finalize(mut self) -> crate::Result<Vec<u64>> {
         self.fieldnorms_writer.fill_up_to_max_doc(self.max_doc);
+        // Build and write .sfx files before the serializer is consumed
+        let sfx_collectors = std::mem::take(&mut self.sfx_collectors);
+        for (field_id, collector) in sfx_collectors {
+            match collector.build() {
+                Ok(sfx_bytes) => {
+                    self.segment_serializer.write_sfx(field_id, &sfx_bytes)?;
+                }
+                Err(e) => {
+                    log::warn!("Failed to build .sfx for field {field_id}: {e}");
+                }
+            }
+        }
         remap_and_write(
             self.schema,
             &self.per_field_postings_writers,
@@ -192,9 +221,17 @@ impl SegmentWriter {
                     }
                 }
                 FieldType::Str(_) => {
+                    let is_raw_field = self.sfx_collectors.contains_key(&field.field_id());
                     let mut indexing_position = IndexingPosition::default();
                     for value in values {
                         let value = value.as_value();
+
+                        // Capture raw text for sfx collector before tokenization
+                        let raw_text_for_sfx = if is_raw_field {
+                            value.as_str().map(|s| s.to_string())
+                        } else {
+                            None
+                        };
 
                         let mut token_stream = if let Some(text) = value.as_str() {
                             let text_analyzer =
@@ -207,13 +244,35 @@ impl SegmentWriter {
                         };
 
                         assert!(term_buffer.is_empty());
-                        postings_writer.index_text(
-                            doc_id,
-                            &mut *token_stream,
-                            term_buffer,
-                            ctx,
-                            &mut indexing_position,
-                        );
+
+                        if let Some(ref raw_text) = raw_text_for_sfx {
+                            // Wrap with interceptor to capture tokens for .sfx
+                            let mut interceptor =
+                                crate::suffix_fst::SfxTokenInterceptor::wrap(token_stream);
+                            postings_writer.index_text(
+                                doc_id,
+                                &mut interceptor,
+                                term_buffer,
+                                ctx,
+                                &mut indexing_position,
+                            );
+                            // Feed captured tokens to the collector
+                            let collector = self.sfx_collectors.get_mut(&field.field_id()).unwrap();
+                            collector.begin_doc();
+                            for tok in interceptor.take_captured() {
+                                collector.add_token(&tok.text, tok.offset_from, tok.offset_to);
+                            }
+                            collector.end_doc(raw_text);
+                            self.sfx_fed_this_doc.push(field.field_id());
+                        } else {
+                            postings_writer.index_text(
+                                doc_id,
+                                &mut *token_stream,
+                                term_buffer,
+                                ctx,
+                                &mut indexing_position,
+                            );
+                        }
                     }
                     if field_entry.has_fieldnorms() {
                         self.fieldnorms_writer
@@ -352,8 +411,17 @@ impl SegmentWriter {
     ) -> crate::Result<()> {
         let AddOperation { document, opstamp } = add_operation;
         self.doc_opstamps.push(opstamp);
+        self.sfx_fed_this_doc.clear();
         self.fast_field_writers.add_document(&document)?;
         self.index_document(&document)?;
+        // Fill empty docs for sfx collectors that were not fed during this document
+        let fed: Vec<u32> = self.sfx_fed_this_doc.clone();
+        for (&field_id, collector) in &mut self.sfx_collectors {
+            if !fed.contains(&field_id) {
+                collector.begin_doc();
+                collector.end_doc_empty();
+            }
+        }
         let doc_writer = self.segment_serializer.get_store_writer();
         doc_writer.store(&document, &self.schema)?;
         self.max_doc += 1;

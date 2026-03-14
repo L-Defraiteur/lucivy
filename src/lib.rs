@@ -207,6 +207,9 @@ pub mod space_usage;
 pub mod store;
 pub mod termdict;
 
+/// Suffix FST index for contains search without stored text verification.
+pub mod suffix_fst;
+
 mod docset;
 mod reader;
 

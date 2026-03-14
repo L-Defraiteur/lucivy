@@ -87,4 +87,20 @@ impl Segment {
         let write = self.index.directory_mut().open_write(&path)?;
         Ok(write)
     }
+
+    /// Open a custom file for write, using a raw path suffix.
+    /// The path is `{segment_uuid}.{suffix}`.
+    /// Used for per-field files like .sfx (suffix FST).
+    pub fn open_write_custom(&mut self, suffix: &str) -> Result<WritePtr, OpenWriteError> {
+        let path = PathBuf::from(format!("{}.{}", self.id().uuid_string(), suffix));
+        let write = self.index.directory_mut().open_write(&path)?;
+        Ok(write)
+    }
+
+    /// Open a custom file for read, using a raw path suffix.
+    /// The path is `{segment_uuid}.{suffix}`.
+    pub fn open_read_custom(&self, suffix: &str) -> Result<FileSlice, OpenReadError> {
+        let path = PathBuf::from(format!("{}.{}", self.id().uuid_string(), suffix));
+        self.index.directory().open_read(&path)
+    }
 }

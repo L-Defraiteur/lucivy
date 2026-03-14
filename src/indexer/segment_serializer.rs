@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use common::TerminatingWrite;
 
 use crate::directory::WritePtr;
@@ -74,6 +76,16 @@ impl SegmentSerializer {
     /// Accessor to the `StoreWriter`.
     pub fn get_store_writer(&mut self) -> &mut StoreWriter {
         &mut self.store_writer
+    }
+
+    /// Write a per-field .sfx file. `field_id` is used in the filename.
+    pub fn write_sfx(&mut self, field_id: u32, data: &[u8]) -> crate::Result<()> {
+        let suffix = format!("{field_id}.sfx");
+        let mut writer = self.segment.open_write_custom(&suffix)?;
+        use common::TerminatingWrite;
+        writer.write_all(data)?;
+        writer.terminate()?;
+        Ok(())
     }
 
     /// Finalize the segment serialization.
