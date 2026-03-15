@@ -129,8 +129,9 @@ where
     let start_state = automaton.start();
     let matches = sfx_dict.search_continuation(automaton, start_state, si_zero_only);
 
-    // Candidates: (doc_id, position) → DFA end state
-    let mut candidates: HashMap<(DocId, u32), A::State> = HashMap::new();
+    // Candidates: (doc_id, position) → set of DFA end states.
+    // Multiple SI values for the same token can produce different alive states.
+    let mut candidates: HashMap<(DocId, u32), Vec<A::State>> = HashMap::new();
 
     for m in &matches {
         let mut postings = inverted_index.read_postings_from_terminfo(
@@ -151,7 +152,10 @@ where
                 if m.is_accepting {
                     doc_bitset.insert(doc);
                 } else if automaton.can_match(&m.end_state) {
-                    candidates.insert((doc, pos as u32), m.end_state.clone());
+                    let states = candidates.entry((doc, pos as u32)).or_default();
+                    if !states.contains(&m.end_state) {
+                        states.push(m.end_state.clone());
+                    }
                 }
             }
 
@@ -168,7 +172,7 @@ where
         // Feed gap bytes to DFA for each candidate → group by post-gap state
         let mut post_gap: HashMap<A::State, Vec<(DocId, u32)>> = HashMap::new();
 
-        for (&(doc, pos), end_state) in &candidates {
+        for (&(doc, pos), end_states) in &candidates {
             let gap = gapmap.read_separator(doc, pos, pos + 1);
             let Some(gap_bytes) = gap else {
                 continue;
@@ -177,26 +181,28 @@ where
                 continue;
             }
 
-            // Feed gap bytes to DFA
-            let mut state = end_state.clone();
-            let mut alive = true;
-            for &byte in gap_bytes {
-                state = automaton.accept(&state, byte);
-                if !automaton.can_match(&state) {
-                    alive = false;
-                    break;
+            for end_state in end_states {
+                // Feed gap bytes to DFA
+                let mut state = end_state.clone();
+                let mut alive = true;
+                for &byte in gap_bytes {
+                    state = automaton.accept(&state, byte);
+                    if !automaton.can_match(&state) {
+                        alive = false;
+                        break;
+                    }
                 }
-            }
 
-            if !alive {
-                continue;
-            }
+                if !alive {
+                    continue;
+                }
 
-            if automaton.is_match(&state) {
-                doc_bitset.insert(doc);
-            }
-            if automaton.can_match(&state) {
-                post_gap.entry(state).or_default().push((doc, pos + 1));
+                if automaton.is_match(&state) {
+                    doc_bitset.insert(doc);
+                }
+                if automaton.can_match(&state) {
+                    post_gap.entry(state).or_default().push((doc, pos + 1));
+                }
             }
         }
 
@@ -205,7 +211,7 @@ where
         }
 
         // Walk FST for each unique post-gap state (SI=0, continuation tokens)
-        let mut new_candidates: HashMap<(DocId, u32), A::State> = HashMap::new();
+        let mut new_candidates: HashMap<(DocId, u32), Vec<A::State>> = HashMap::new();
 
         for (gap_state, doc_positions) in &post_gap {
             let next_matches =
@@ -241,8 +247,12 @@ where
                                 if nm.is_accepting {
                                     doc_bitset.insert(doc);
                                 } else if automaton.can_match(&nm.end_state) {
-                                    new_candidates
-                                        .insert((doc, pos as u32), nm.end_state.clone());
+                                    let states = new_candidates
+                                        .entry((doc, pos as u32))
+                                        .or_default();
+                                    if !states.contains(&nm.end_state) {
+                                        states.push(nm.end_state.clone());
+                                    }
                                 }
                             }
                         }
@@ -508,5 +518,109 @@ mod tests {
             .unwrap();
 
         assert_eq!(results.len(), 0);
+    }
+
+    // ── Fuzzy single-token query → continuation tests ──
+    // These verify that a single-token fuzzy query correctly spans token
+    // boundaries when the edit distance budget absorbs the gap.
+
+    #[test]
+    fn test_fuzzy_single_token_absorbs_gap() {
+        // "importrag3db" d=1 → should match "import rag3db" (space = 1 insertion)
+        let (index, field) = build_continuation_index();
+        let query = RegexContinuationQuery::new(
+            field,
+            "importrag3db".into(),
+            ContinuationMode::StartsWith,
+        )
+        .with_fuzzy_distance(1);
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let results = searcher
+            .search(&query, &TopDocs::with_limit(10).order_by_score())
+            .unwrap();
+
+        // Doc 0 has "import rag3db from core" — "import rag3db" matches with d=1
+        assert_eq!(results.len(), 1, "'importrag3db' d=1 should match 'import rag3db'");
+        assert_eq!(results[0].1.doc_id, 0);
+    }
+
+    #[test]
+    fn test_fuzzy_single_token_no_gap_budget() {
+        // "importrag3db" d=0 → should NOT match "import rag3db" (no budget for gap)
+        let (index, field) = build_continuation_index();
+        let query = RegexContinuationQuery::new(
+            field,
+            "importrag3db".into(),
+            ContinuationMode::StartsWith,
+        );
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let results = searcher
+            .search(&query, &TopDocs::with_limit(10).order_by_score())
+            .unwrap();
+
+        assert_eq!(results.len(), 0, "d=0 cannot absorb the gap");
+    }
+
+    #[test]
+    fn test_fuzzy_single_token_still_matches_single() {
+        // "rag3dc" d=1 → should still match "rag3db" (single token, no continuation)
+        let (index, field) = build_continuation_index();
+        let query = RegexContinuationQuery::new(
+            field,
+            "rag3dc".into(),
+            ContinuationMode::Contains,
+        )
+        .with_fuzzy_distance(1);
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let results = searcher
+            .search(&query, &TopDocs::with_limit(10).order_by_score())
+            .unwrap();
+
+        assert_eq!(results.len(), 2, "fuzzy 'rag3dc' d=1 should match 2 docs with 'rag3db'");
+    }
+
+    #[test]
+    fn test_fuzzy_contains_absorbs_gap_mid_token() {
+        // "3dbis" d=1 contains → "3db" (suffix SI=3) + gap " " (insertion d=1) + "is"
+        let (index, field) = build_continuation_index();
+        let query = RegexContinuationQuery::new(
+            field,
+            "3dbis".into(),
+            ContinuationMode::Contains,
+        )
+        .with_fuzzy_distance(1);
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let results = searcher
+            .search(&query, &TopDocs::with_limit(10).order_by_score())
+            .unwrap();
+
+        // Doc 1: "rag3db is cool" → suffix "3db" + " " gap + "is"
+        assert_eq!(results.len(), 1, "'3dbis' d=1 contains should match doc 1");
+        assert_eq!(results[0].1.doc_id, 1);
+    }
+
+    #[test]
+    fn test_fuzzy_three_tokens_d2() {
+        // "rag3dbiscool" d=2 → "rag3db" + " "(d=1) + "is" + " "(d=2) + "cool"
+        let (index, field) = build_continuation_index();
+        let query = RegexContinuationQuery::new(
+            field,
+            "rag3dbiscool".into(),
+            ContinuationMode::StartsWith,
+        )
+        .with_fuzzy_distance(2);
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let results = searcher
+            .search(&query, &TopDocs::with_limit(10).order_by_score())
+            .unwrap();
+
+        // Doc 1: "rag3db is cool" — 2 spaces absorbed = d=2
+        assert_eq!(results.len(), 1, "'rag3dbiscool' d=2 should match 'rag3db is cool'");
+        assert_eq!(results[0].1.doc_id, 1);
     }
 }
