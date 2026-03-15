@@ -9,12 +9,60 @@
 
 use std::io;
 
-use lucivy_fst::{Automaton, IntoStreamer, Map, Streamer};
+use lucivy_fst::{Automaton, IntoStreamer, Streamer};
 
 use super::builder::{decode_output, decode_parent_entries, ParentEntry, ParentRef};
 use super::file::SfxFileReader;
 use crate::postings::TermInfo;
 use crate::termdict::{TermDictionary, TermOrdinal};
+
+/// Result of a continuation walk on the suffix FST.
+/// Contains the DFA end state so the caller can feed gap bytes and continue.
+#[derive(Debug, Clone)]
+pub struct ContinuationMatch<S> {
+    /// The raw ordinal in the TermDictionary.
+    pub raw_ordinal: u64,
+    /// Suffix index (0 = full token, >0 = starts mid-token).
+    pub si: u16,
+    /// TermInfo for posting list resolution.
+    pub term_info: TermInfo,
+    /// DFA state at the end of this token/suffix.
+    pub end_state: S,
+    /// Whether the DFA accepts at this point (direct match).
+    pub is_accepting: bool,
+}
+
+/// Wrapper automaton that starts from an arbitrary state and treats
+/// "alive" (can_match) as "matching" so the FST stream yields all
+/// entries where the DFA hasn't died — not just accepting entries.
+struct ContinuationAutomaton<'a, A: Automaton> {
+    inner: &'a A,
+    start_state: A::State,
+}
+
+impl<A: Automaton> Automaton for ContinuationAutomaton<'_, A>
+where
+    A::State: Clone,
+{
+    type State = A::State;
+
+    fn start(&self) -> Self::State {
+        self.start_state.clone()
+    }
+
+    fn is_match(&self, state: &Self::State) -> bool {
+        // Yield all alive entries, not just accepting ones
+        self.inner.can_match(state)
+    }
+
+    fn can_match(&self, state: &Self::State) -> bool {
+        self.inner.can_match(state)
+    }
+
+    fn accept(&self, state: &Self::State, byte: u8) -> Self::State {
+        self.inner.accept(state, byte)
+    }
+}
 
 /// A term dictionary backed by the .sfx suffix FST.
 ///
@@ -132,6 +180,66 @@ impl<'a> SfxTermDictionary<'a> {
     /// Stream all terms (SI=0 only). Returns all terms with their TermInfo.
     pub fn stream_all(&self) -> Vec<(String, TermInfo)> {
         self.range_scan(&[], None)
+    }
+
+    /// Walk suffix FST with an automaton starting from an arbitrary state.
+    ///
+    /// Unlike `search_automaton` which only returns entries where the DFA
+    /// accepts, this returns ALL entries where the DFA is still alive
+    /// (`can_match`) at the end of the key. This is needed for regex
+    /// continuation across token boundaries.
+    ///
+    /// Returns `ContinuationMatch` entries with the DFA end state, so the
+    /// caller can feed gap bytes and continue to the next token.
+    ///
+    /// `si_zero_only`: if true, only SI=0 entries (full tokens). Use true
+    /// for continuation walks (next token starts from beginning). Use false
+    /// for the initial walk in contains mode (regex can start mid-token).
+    pub fn search_continuation<A: Automaton>(
+        &self,
+        automaton: &A,
+        start_state: A::State,
+        si_zero_only: bool,
+    ) -> Vec<ContinuationMatch<A::State>>
+    where
+        A::State: Clone,
+    {
+        let wrapper = ContinuationAutomaton {
+            inner: automaton,
+            start_state: start_state.clone(),
+        };
+        let mut stream = self.sfx_reader.fst().search(&wrapper).into_stream();
+        let mut results = Vec::new();
+
+        while let Some((key, val)) = stream.next() {
+            // Re-walk the DFA through the key bytes to recover the actual end state
+            let mut state = start_state.clone();
+            for &byte in key {
+                state = automaton.accept(&state, byte);
+            }
+            let is_accepting = automaton.is_match(&state);
+            let is_alive = automaton.can_match(&state);
+
+            if !is_alive {
+                continue;
+            }
+
+            let parents = self.decode_parents(val);
+            for p in &parents {
+                if si_zero_only && p.si != 0 {
+                    continue;
+                }
+                let term_info = self.termdict.term_info_from_ord(p.raw_ordinal);
+                results.push(ContinuationMatch {
+                    raw_ordinal: p.raw_ordinal,
+                    si: p.si,
+                    term_info,
+                    end_state: state.clone(),
+                    is_accepting,
+                });
+            }
+        }
+        results
     }
 
     /// Access the underlying SfxFileReader for contains queries (any SI).
@@ -425,6 +533,100 @@ mod tests {
         let std_lower = termdict.get(b"hello").unwrap().expect("std hello");
         assert_eq!(ti_upper, std_upper, "HELLO parity");
         assert_eq!(ti_lower, std_lower, "hello parity");
+    }
+
+    /// Test search_continuation: walk FST from a mid-DFA state.
+    /// Simulates the second walk in a regex continuation chain.
+    #[test]
+    fn test_search_continuation_basic() {
+        use crate::suffix_fst::file::SfxDfaWrapper;
+        use levenshtein_automata::LevenshteinAutomatonBuilder;
+
+        let (index, body_raw) = build_test_index();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let seg_reader = &searcher.segment_readers()[0];
+
+        let inv_idx = seg_reader.inverted_index(body_raw).unwrap();
+        let termdict = inv_idx.terms();
+        let sfx_data = seg_reader.sfx_file(body_raw).unwrap();
+        let sfx_bytes = sfx_data.read_bytes().unwrap();
+        let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref()).unwrap();
+        let sfx_dict = SfxTermDictionary::new(&sfx_reader, termdict);
+
+        // Build a DFA for "cool" d=0 (exact)
+        let builder = LevenshteinAutomatonBuilder::new(0, true);
+        let dfa = builder.build_dfa("cool");
+        let automaton = SfxDfaWrapper(dfa);
+
+        // Walk from start state, SI=0 only → should find "cool"
+        let start = automaton.start();
+        let results = sfx_dict.search_continuation(&automaton, start, true);
+        let accepting: Vec<_> = results.iter().filter(|m| m.is_accepting).collect();
+        assert_eq!(accepting.len(), 1, "should find 'cool' as accepting");
+        assert_eq!(accepting[0].si, 0);
+
+        // Now simulate continuation: advance DFA through "co" manually,
+        // then walk from that state → should find entries starting with "ol"
+        let mut state = automaton.start();
+        state = automaton.accept(&state, b'c');
+        state = automaton.accept(&state, b'o');
+        assert!(automaton.can_match(&state), "DFA should be alive after 'co'");
+        assert!(!automaton.is_match(&state), "DFA should not accept after 'co'");
+
+        // Walk from mid-state, any SI → should find suffix "ol" (from "cool" SI=2)
+        let results = sfx_dict.search_continuation(&automaton, state, false);
+        let alive: Vec<_> = results.iter().filter(|m| m.si > 0).collect();
+        assert!(!alive.is_empty(), "should find suffixes matching continuation from 'co'");
+
+        // Among them, "ol" with SI=2 should lead to an accepting state
+        // (after 'co' + 'ol' the DFA has seen "cool" → accept)
+        let accepting: Vec<_> = results.iter().filter(|m| m.is_accepting).collect();
+        assert!(!accepting.is_empty(), "should find accepting continuation after 'co'");
+    }
+
+    /// Test search_continuation returns alive-but-not-accepting entries.
+    /// These entries need further continuation through gaps.
+    #[test]
+    fn test_search_continuation_alive_not_accepting() {
+        use crate::suffix_fst::file::SfxDfaWrapper;
+        use levenshtein_automata::LevenshteinAutomatonBuilder;
+
+        let (index, body_raw) = build_test_index();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let seg_reader = &searcher.segment_readers()[0];
+
+        let inv_idx = seg_reader.inverted_index(body_raw).unwrap();
+        let termdict = inv_idx.terms();
+        let sfx_data = seg_reader.sfx_file(body_raw).unwrap();
+        let sfx_bytes = sfx_data.read_bytes().unwrap();
+        let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref()).unwrap();
+        let sfx_dict = SfxTermDictionary::new(&sfx_reader, termdict);
+
+        // DFA for "rag3dbiscool" d=0 — this spans 3 tokens ("rag3db" + "is" + "cool")
+        // Walk 1 from start, SI=0: "rag3db" will be alive but NOT accepting
+        // (the DFA has only seen 6 of 12 chars)
+        let builder = LevenshteinAutomatonBuilder::new(0, true);
+        let dfa = builder.build_dfa("rag3dbiscool");
+        let automaton = SfxDfaWrapper(dfa);
+
+        let start = automaton.start();
+        let results = sfx_dict.search_continuation(&automaton, start, true);
+
+        // "rag3db" should be alive but not accepting (6/12 chars consumed)
+        let rag3db_matches: Vec<_> = results.iter()
+            .filter(|m| {
+                let mut buf = Vec::new();
+                termdict.ord_to_term(m.raw_ordinal, &mut buf).unwrap();
+                buf == b"rag3db"
+            })
+            .collect();
+        assert!(!rag3db_matches.is_empty(), "rag3db should be found");
+        assert!(
+            rag3db_matches.iter().any(|m| !m.is_accepting && automaton.can_match(&m.end_state)),
+            "rag3db should be alive but not accepting"
+        );
     }
 
     fn build_test_index() -> (Index, crate::schema::Field) {

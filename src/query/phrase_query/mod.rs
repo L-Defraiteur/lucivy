@@ -8,6 +8,7 @@ mod phrase_weight;
 pub mod regex_phrase_query;
 mod regex_phrase_weight;
 pub mod scoring_utils;
+pub mod regex_continuation_query;
 pub mod suffix_contains;
 pub mod suffix_contains_query;
 
