@@ -14,7 +14,7 @@ fn default_min_suffix_len() -> usize {
 // Encoding layout for single-parent u64 output:
 //   bit 63 = 0 (single parent)
 //   bits 0-23  = raw_ordinal (up to ~16M tokens)
-//   bits 24-31 = SI (up to 256 chars)
+//   bits 24-39 = SI (16 bits, up to 65535 chars)
 //
 // For multi-parent:
 //   bit 63 = 1
@@ -23,7 +23,7 @@ fn default_min_suffix_len() -> usize {
 const MULTI_PARENT_FLAG: u64 = 1 << 63;
 const RAW_ORDINAL_MASK: u64 = 0x00FF_FFFF; // 24 bits
 const SI_SHIFT: u32 = 24;
-const SI_MASK: u64 = 0xFF; // 8 bits
+const SI_MASK: u64 = 0xFFFF; // 16 bits
 
 /// Encode a single-parent value into u64.
 pub fn encode_single_parent(raw_ordinal: u64, si: u16) -> u64 {

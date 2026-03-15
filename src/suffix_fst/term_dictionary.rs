@@ -23,14 +23,14 @@ use crate::termdict::{TermDictionary, TermOrdinal};
 ///
 /// For contains lookups: uses any SI via the SfxFileReader directly.
 pub struct SfxTermDictionary<'a> {
-    sfx_reader: SfxFileReader<'a>,
+    sfx_reader: &'a SfxFileReader<'a>,
     /// The underlying TermDictionary for TermInfo resolution via ordinal.
     termdict: &'a TermDictionary,
 }
 
 impl<'a> SfxTermDictionary<'a> {
     /// Create from a parsed SfxFileReader and the existing TermDictionary.
-    pub fn new(sfx_reader: SfxFileReader<'a>, termdict: &'a TermDictionary) -> Self {
+    pub fn new(sfx_reader: &'a SfxFileReader<'a>, termdict: &'a TermDictionary) -> Self {
         Self { sfx_reader, termdict }
     }
 
@@ -164,7 +164,7 @@ mod tests {
         let sfx_bytes = sfx_data.read_bytes().unwrap();
         let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref()).unwrap();
 
-        let sfx_dict = SfxTermDictionary::new(sfx_reader, termdict);
+        let sfx_dict = SfxTermDictionary::new(&sfx_reader, termdict);
 
         // Exact lookup: "import" should return same TermInfo as standard TermDictionary
         let standard_ti = termdict.get(b"import").unwrap();
@@ -199,7 +199,7 @@ mod tests {
         let sfx_bytes = sfx_data.read_bytes().unwrap();
         let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref()).unwrap();
 
-        let sfx_dict = SfxTermDictionary::new(sfx_reader, termdict);
+        let sfx_dict = SfxTermDictionary::new(&sfx_reader, termdict);
 
         // Range "im" to "in" should find "import" (SI=0) but not "mport" (SI>0)
         let results = sfx_dict.range_scan(b"im", Some(b"in"));
@@ -224,7 +224,7 @@ mod tests {
         let sfx_bytes = sfx_data.read_bytes().unwrap();
         let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref()).unwrap();
 
-        let sfx_dict = SfxTermDictionary::new(sfx_reader, termdict);
+        let sfx_dict = SfxTermDictionary::new(&sfx_reader, termdict);
 
         // Fuzzy search "importt" d=1 → should find "import"
         let builder = LevenshteinAutomatonBuilder::new(1, true);

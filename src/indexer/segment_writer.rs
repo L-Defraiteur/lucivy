@@ -61,7 +61,7 @@ pub struct SegmentWriter {
     per_field_text_analyzers: Vec<TextAnalyzer>,
     term_buffer: IndexingTerm,
     schema: Schema,
-    /// Per-field SfxCollectors for ._raw fields. Key = field id of the ._raw field.
+    /// Per-field SfxCollectors for all indexed Str fields.
     sfx_collectors: HashMap<u32, SfxCollector>,
     /// Tracks which sfx_collectors were fed during the current document.
     sfx_fed_this_doc: Vec<u32>,
@@ -124,8 +124,10 @@ impl SegmentWriter {
             sfx_collectors: {
                 let mut collectors = HashMap::new();
                 for (field, field_entry) in schema.fields() {
-                    if field_entry.name().ends_with("._raw") {
-                        collectors.insert(field.field_id(), SfxCollector::new());
+                    if let FieldType::Str(opts) = field_entry.field_type() {
+                        if opts.get_indexing_options().is_some() {
+                            collectors.insert(field.field_id(), SfxCollector::new());
+                        }
                     }
                 }
                 collectors

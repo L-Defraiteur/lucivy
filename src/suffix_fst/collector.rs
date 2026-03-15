@@ -95,7 +95,11 @@ impl SfxCollector {
     }
 
     /// Add a token from the current value's tokenization.
+    /// Tokens exceeding MAX_TOKEN_LEN are skipped (consistent with postings_writer).
     pub fn add_token(&mut self, text: &str, offset_from: usize, offset_to: usize) {
+        if text.len() > crate::tokenizer::MAX_TOKEN_LEN {
+            return;
+        }
         self.unique_tokens.insert(text.to_string());
         self.current_value_tokens.push(TokenCapture {
             text: text.to_string(),

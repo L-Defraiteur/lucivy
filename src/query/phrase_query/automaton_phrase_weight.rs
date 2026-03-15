@@ -17,6 +17,8 @@ use crate::query::fuzzy_query::DfaWrapper;
 use crate::query::phrase_prefix_query::prefix_end;
 use crate::query::{BitSetDocSet, ConstScorer, EmptyScorer, Explanation, Scorer, Weight};
 use crate::schema::{Field, IndexRecordOption, Term};
+use crate::suffix_fst::SfxTermDictionary;
+use crate::suffix_fst::file::SfxDfaWrapper;
 use crate::{DocId, InvertedIndexReader, Score};
 
 /// Cascade level returned by cascade_term_infos.
@@ -121,27 +123,24 @@ impl AutomatonPhraseWeight {
 
     /// Auto-cascade for a single token: exact → fuzzy.
     /// Returns (term_infos, cascade_level) from the first level that finds matches.
+    /// Uses SfxTermDictionary when available, falls back to standard TermDictionary.
     fn cascade_term_infos(
         &self,
         token: &str,
-        inverted_index: &InvertedIndexReader,
+        sfx_dict: &SfxTermDictionary<'_>,
     ) -> crate::Result<(Vec<TermInfo>, CascadeLevel)> {
-        // 1. EXACT: direct term dictionary lookup
-        let term = Term::from_field_text(self.field, token);
-        if let Some(term_info) = inverted_index.get_term_info(&term)? {
+        // 1. EXACT: direct lookup via .sfx FST (SI=0)
+        if let Some(term_info) = sfx_dict.get(token.as_bytes())? {
             return Ok((vec![term_info], CascadeLevel::Exact));
         }
 
         // 2. FUZZY: Levenshtein DFA (if enabled and distance ≤ 2)
         if self.fuzzy_distance > 0 && self.fuzzy_distance <= 2 {
             let builder = get_automaton_builder(self.fuzzy_distance);
-            let dfa = DfaWrapper(builder.build_dfa(token));
-            let mut stream = inverted_index.terms().search(&dfa).into_stream()?;
-            let mut term_infos = Vec::new();
-            while stream.advance() {
-                term_infos.push(stream.value().clone());
-            }
-            if !term_infos.is_empty() {
+            let sfx_dfa = SfxDfaWrapper(builder.build_dfa(token));
+            let results = sfx_dict.search_automaton(&sfx_dfa);
+            if !results.is_empty() {
+                let term_infos: Vec<TermInfo> = results.into_iter().map(|(_, ti)| ti).collect();
                 return Ok((term_infos, CascadeLevel::Fuzzy(self.fuzzy_distance)));
             }
         }
@@ -152,39 +151,35 @@ impl AutomatonPhraseWeight {
 
     /// Cascade for a prefix token (last token in startsWith mode):
     /// prefix range → prefix fuzzy DFA.
+    /// Uses SfxTermDictionary when available, falls back to standard TermDictionary.
     fn prefix_term_infos(
         &self,
         token: &str,
-        inverted_index: &InvertedIndexReader,
+        sfx_dict: &SfxTermDictionary<'_>,
     ) -> crate::Result<(Vec<TermInfo>, CascadeLevel)> {
-        let term_dict = inverted_index.terms();
-
-        // 1. PREFIX RANGE: all terms starting with `token`
         let prefix_bytes = token.as_bytes();
-        let mut builder = term_dict.range();
-        builder = builder.ge(prefix_bytes);
-        if let Some(end) = prefix_end(prefix_bytes) {
-            builder = builder.lt(&end);
-        }
-        let mut stream = builder.into_stream()?;
-        let mut term_infos = Vec::new();
-        while stream.advance() && term_infos.len() < self.max_expansions as usize {
-            term_infos.push(stream.value().clone());
-        }
-        if !term_infos.is_empty() {
+
+        // 1. PREFIX RANGE: all terms starting with `token` (SI=0 via .sfx)
+        let lt = prefix_end(prefix_bytes);
+        let results = sfx_dict.range_scan(prefix_bytes, lt.as_deref());
+        if !results.is_empty() {
+            let term_infos: Vec<TermInfo> = results.into_iter()
+                .take(self.max_expansions as usize)
+                .map(|(_, ti)| ti)
+                .collect();
             return Ok((term_infos, CascadeLevel::Exact));
         }
 
-        // 2. PREFIX FUZZY: Levenshtein prefix DFA
+        // 2. PREFIX FUZZY: Levenshtein prefix DFA (SI=0 via .sfx)
         if self.fuzzy_distance > 0 && self.fuzzy_distance <= 2 {
             let automaton_builder = get_automaton_builder(self.fuzzy_distance);
-            let dfa = DfaWrapper(automaton_builder.build_prefix_dfa(token));
-            let mut stream = term_dict.search(&dfa).into_stream()?;
-            let mut term_infos = Vec::new();
-            while stream.advance() && term_infos.len() < self.max_expansions as usize {
-                term_infos.push(stream.value().clone());
-            }
-            if !term_infos.is_empty() {
+            let sfx_dfa = SfxDfaWrapper(automaton_builder.build_prefix_dfa(token));
+            let results = sfx_dict.search_automaton(&sfx_dfa);
+            if !results.is_empty() {
+                let term_infos: Vec<TermInfo> = results.into_iter()
+                    .take(self.max_expansions as usize)
+                    .map(|(_, ti)| ti)
+                    .collect();
                 return Ok((term_infos, CascadeLevel::Fuzzy(self.fuzzy_distance)));
             }
         }
@@ -205,6 +200,18 @@ impl AutomatonPhraseWeight {
             .map(|sw| sw.boost_by(boost));
         let fieldnorm_reader = self.fieldnorm_reader(reader)?;
         let inverted_index = reader.inverted_index(self.field)?;
+
+        // Open .sfx — required for unified term resolution
+        let sfx_bytes = reader.sfx_file(self.field)
+            .ok_or_else(|| crate::LucivyError::InvalidArgument(format!(
+                "no .sfx file for field {:?}. Unified term dictionary requires suffix index.",
+                self.field
+            )))?
+            .read_bytes().map_err(|e| crate::LucivyError::SystemError(format!("read .sfx: {e}")))?;
+        let sfx_reader = crate::suffix_fst::SfxFileReader::open(sfx_bytes.as_ref())
+            .map_err(|e| crate::LucivyError::SystemError(format!("open .sfx: {e}")))?;
+        let sfx_dict = SfxTermDictionary::new(&sfx_reader, inverted_index.terms());
+
         let mut posting_lists = Vec::new();
         let mut num_terms = 0;
         let mut budget = self.max_expansions as usize;
@@ -213,9 +220,9 @@ impl AutomatonPhraseWeight {
         let last_idx = self.phrase_terms.len() - 1;
         for (i, &(offset, ref token)) in self.phrase_terms.iter().enumerate() {
             let (term_infos, level) = if self.last_token_is_prefix && i == last_idx {
-                self.prefix_term_infos(token, &inverted_index)?
+                self.prefix_term_infos(token, &sfx_dict)?
             } else {
-                self.cascade_term_infos(token, &inverted_index)?
+                self.cascade_term_infos(token, &sfx_dict)?
             };
             if term_infos.is_empty() {
                 return Ok(None);
@@ -278,11 +285,23 @@ impl AutomatonPhraseWeight {
         segment_id: SegmentId,
     ) -> crate::Result<Box<dyn Scorer>> {
         let inverted_index = reader.inverted_index(self.field)?;
+
+        // Open .sfx — required for unified term resolution
+        let sfx_bytes = reader.sfx_file(self.field)
+            .ok_or_else(|| crate::LucivyError::InvalidArgument(format!(
+                "no .sfx file for field {:?}. Unified term dictionary requires suffix index.",
+                self.field
+            )))?
+            .read_bytes().map_err(|e| crate::LucivyError::SystemError(format!("read .sfx: {e}")))?;
+        let sfx_reader = crate::suffix_fst::SfxFileReader::open(sfx_bytes.as_ref())
+            .map_err(|e| crate::LucivyError::SystemError(format!("open .sfx: {e}")))?;
+        let sfx_dict = SfxTermDictionary::new(&sfx_reader, inverted_index.terms());
+
         let token = &self.phrase_terms[0].1;
         let (term_infos, level) = if self.last_token_is_prefix {
-            self.prefix_term_infos(token, &inverted_index)?
+            self.prefix_term_infos(token, &sfx_dict)?
         } else {
-            self.cascade_term_infos(token, &inverted_index)?
+            self.cascade_term_infos(token, &sfx_dict)?
         };
         if term_infos.is_empty() {
             return Ok(Box::new(EmptyScorer));
