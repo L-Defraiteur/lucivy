@@ -125,7 +125,14 @@ impl SegmentWriter {
                 let mut collectors = HashMap::new();
                 for (field, field_entry) in schema.fields() {
                     if let FieldType::Str(opts) = field_entry.field_type() {
-                        if opts.get_indexing_options().is_some() {
+                        if let Some(indexing) = opts.get_indexing_options() {
+                            // Skip ngram tokenizers — their overlapping offsets
+                            // are incompatible with SfxCollector gap computation.
+                            // Ngrams will be removed in U4.
+                            let tok = indexing.tokenizer();
+                            if tok.contains("ngram") {
+                                continue;
+                            }
                             collectors.insert(field.field_id(), SfxCollector::new());
                         }
                     }

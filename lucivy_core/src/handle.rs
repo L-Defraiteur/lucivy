@@ -29,6 +29,9 @@ pub const RAW_SUFFIX: &str = "._raw";
 /// Suffix appended to text fields for the n-gram (trigram) counterpart.
 pub const NGRAM_SUFFIX: &str = "._ngram";
 
+/// Tokenizer name for ._raw fields (camelCase split + lowercase).
+const RAW_TOKENIZER: &str = "raw_code";
+
 /// Tokenizer name for stemmed fields.
 const STEMMED_TOKENIZER: &str = "stemmed";
 
@@ -255,7 +258,7 @@ pub fn build_schema(
                 // Raw counterpart: "default" tokenizer (lowercase only), NOT stored.
                 // Used by term/fuzzy/regex/contains queries for precision matching.
                 let raw_indexing = TextFieldIndexing::default()
-                    .set_tokenizer("default")
+                    .set_tokenizer(RAW_TOKENIZER)
                     .set_index_option(IndexRecordOption::WithFreqsAndPositionsAndOffsets);
                 let raw_opts = TextOptions::default().set_indexing_options(raw_indexing);
                 let raw_name = format!("{}{RAW_SUFFIX}", field_def.name);
@@ -347,9 +350,19 @@ pub fn build_schema(
 }
 
 pub fn configure_tokenizers(index: &Index, config: &SchemaConfig) {
-    use ld_lucivy::tokenizer::{AsciiFoldingFilter, LowerCaser, SimpleTokenizer, TextAnalyzer};
+    use ld_lucivy::tokenizer::{
+        AsciiFoldingFilter, CamelCaseSplitFilter, LowerCaser, SimpleTokenizer, TextAnalyzer,
+    };
 
     use crate::tokenizer::NgramFilter;
+
+    // Raw tokenizer for ._raw fields: split camelCase BEFORE lowercasing.
+    // CamelCaseSplitFilter also handles long token splitting (>256 bytes).
+    let raw_tokenizer = TextAnalyzer::builder(SimpleTokenizer::default())
+        .filter(CamelCaseSplitFilter)
+        .filter(LowerCaser)
+        .build();
+    index.tokenizers().register(RAW_TOKENIZER, raw_tokenizer);
 
     // N-gram tokenizer: always registered (used by ._ngram fields for contains queries).
     // AsciiFoldingFilter normalizes diacritics (ç→c, é→e) so that ngram candidates

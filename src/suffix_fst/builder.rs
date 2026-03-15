@@ -20,6 +20,9 @@ fn default_min_suffix_len() -> usize {
 //   bit 63 = 1
 //   bits 0-31  = offset into OutputTable
 
+/// Max suffix depth in bytes. Safety net for tokens not split by the tokenizer.
+const MAX_CHUNK_BYTES: usize = 256;
+
 const MULTI_PARENT_FLAG: u64 = 1 << 63;
 const RAW_ORDINAL_MASK: u64 = 0x00FF_FFFF; // 24 bits
 const SI_SHIFT: u32 = 24;
@@ -129,7 +132,11 @@ impl SuffixFstBuilder {
     /// `raw_ordinal` is the term ordinal in the ._raw FST (sorted alphabetical position).
     pub fn add_token(&mut self, token: &str, raw_ordinal: u64) {
         let lower = token.to_lowercase();
-        for si in 0..lower.len() {
+        // Cap suffix depth to MAX_CHUNK_BYTES. Tokens should be split by the
+        // tokenizer (CamelCaseSplitFilter) before reaching here, but as a safety
+        // net we don't index suffixes beyond this depth.
+        let max_si = lower.len().min(MAX_CHUNK_BYTES);
+        for si in 0..max_si {
             if !lower.is_char_boundary(si) {
                 continue;
             }
