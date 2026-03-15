@@ -11,10 +11,12 @@ use common::BitSet;
 use levenshtein_automata::LevenshteinAutomatonBuilder;
 use lucivy_fst::Automaton;
 use once_cell::sync::OnceCell;
+use tantivy_fst::Regex;
 
 use crate::docset::DocSet;
 use crate::index::SegmentReader;
 use crate::postings::Postings;
+use crate::query::automaton_weight::SfxAutomatonAdapter;
 use crate::query::{BitSetDocSet, ConstScorer, EnableScoring, Explanation, Query, Scorer, Weight};
 use crate::schema::{Field, IndexRecordOption};
 use crate::suffix_fst::file::{SfxDfaWrapper, SfxFileReader};
@@ -45,29 +47,49 @@ fn get_builder(distance: u8) -> &'static LevenshteinAutomatonBuilder {
     BUILDERS[distance as usize].get_or_init(|| LevenshteinAutomatonBuilder::new(distance, true))
 }
 
-/// A query that matches a Levenshtein DFA across token boundaries by chaining
-/// suffix FST walks through GapMap separators.
+/// What kind of DFA to build for the continuation walk.
+#[derive(Debug, Clone)]
+enum DfaKind {
+    /// Levenshtein DFA: exact or fuzzy match on a literal string.
+    Fuzzy { text: String, distance: u8 },
+    /// Regex DFA: compile a regex pattern into an automaton.
+    Regex { pattern: String },
+}
+
+/// A query that matches a DFA (Levenshtein or regex) across token boundaries
+/// by chaining suffix FST walks through GapMap separators.
 #[derive(Debug, Clone)]
 pub struct RegexContinuationQuery {
     field: Field,
-    query_text: String,
-    fuzzy_distance: u8,
+    dfa_kind: DfaKind,
     mode: ContinuationMode,
 }
 
 impl RegexContinuationQuery {
+    /// Continuation with Levenshtein DFA (exact or fuzzy).
     pub fn new(field: Field, query_text: String, mode: ContinuationMode) -> Self {
         Self {
             field,
-            query_text,
-            fuzzy_distance: 0,
+            dfa_kind: DfaKind::Fuzzy { text: query_text, distance: 0 },
             mode,
         }
     }
 
-    pub fn with_fuzzy_distance(mut self, distance: u8) -> Self {
-        self.fuzzy_distance = distance;
+    /// Set fuzzy distance for Levenshtein mode.
+    pub fn with_fuzzy_distance(mut self, dist: u8) -> Self {
+        if let DfaKind::Fuzzy { ref mut distance, .. } = self.dfa_kind {
+            *distance = dist;
+        }
         self
+    }
+
+    /// Continuation with a regex pattern DFA.
+    pub fn from_regex(field: Field, pattern: String, mode: ContinuationMode) -> Self {
+        Self {
+            field,
+            dfa_kind: DfaKind::Regex { pattern },
+            mode,
+        }
     }
 }
 
@@ -75,8 +97,7 @@ impl Query for RegexContinuationQuery {
     fn weight(&self, _enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
         Ok(Box::new(RegexContinuationWeight {
             field: self.field,
-            query_text: self.query_text.clone(),
-            fuzzy_distance: self.fuzzy_distance,
+            dfa_kind: self.dfa_kind.clone(),
             mode: self.mode,
         }))
     }
@@ -84,8 +105,7 @@ impl Query for RegexContinuationQuery {
 
 struct RegexContinuationWeight {
     field: Field,
-    query_text: String,
-    fuzzy_distance: u8,
+    dfa_kind: DfaKind,
     mode: ContinuationMode,
 }
 
@@ -259,19 +279,25 @@ impl Weight for RegexContinuationWeight {
         let inverted_index = reader.inverted_index(self.field)?;
         let sfx_dict = SfxTermDictionary::new(&sfx_reader, inverted_index.terms());
 
-        // Build DFA
-        let builder = get_builder(self.fuzzy_distance);
-        let dfa = builder.build_dfa(&self.query_text);
-        let automaton = SfxDfaWrapper(dfa);
-
-        let doc_bitset = continuation_score(
-            &automaton,
-            &sfx_dict,
-            &inverted_index,
-            &sfx_reader,
-            self.mode,
-            max_doc,
-        )?;
+        let doc_bitset = match &self.dfa_kind {
+            DfaKind::Fuzzy { text, distance } => {
+                let builder = get_builder(*distance);
+                let dfa = builder.build_dfa(text);
+                let automaton = SfxDfaWrapper(dfa);
+                continuation_score(
+                    &automaton, &sfx_dict, &inverted_index, &sfx_reader, self.mode, max_doc,
+                )?
+            }
+            DfaKind::Regex { pattern } => {
+                let regex = Regex::new(pattern).map_err(|e| {
+                    LucivyError::InvalidArgument(format!("RegexContinuation: {e}"))
+                })?;
+                let automaton = SfxAutomatonAdapter(&regex);
+                continuation_score(
+                    &automaton, &sfx_dict, &inverted_index, &sfx_reader, self.mode, max_doc,
+                )?
+            }
+        };
 
         let doc_bitset = BitSetDocSet::from(doc_bitset);
         let scorer = ConstScorer::new(doc_bitset, boost);
@@ -426,5 +452,61 @@ mod tests {
 
         assert_eq!(results.len(), 1, "contains '3db is' should match doc 1");
         assert_eq!(results[0].1.doc_id, 1);
+    }
+
+    #[test]
+    fn test_continuation_regex_cross_token() {
+        // Regex "rag.db i. cool" — . matches any char, spans 3 tokens
+        let (index, field) = build_continuation_index();
+        let query = RegexContinuationQuery::from_regex(
+            field,
+            "rag.db i. cool".into(),
+            ContinuationMode::StartsWith,
+        );
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let results = searcher
+            .search(&query, &TopDocs::with_limit(10).order_by_score())
+            .unwrap();
+
+        assert_eq!(results.len(), 1, "regex should match doc 1");
+        assert_eq!(results[0].1.doc_id, 1);
+    }
+
+    #[test]
+    fn test_continuation_regex_contains_mid_token() {
+        // Regex "3db i." — starts mid-token, crosses gap, . matches 's'
+        let (index, field) = build_continuation_index();
+        let query = RegexContinuationQuery::from_regex(
+            field,
+            "3db i.".into(),
+            ContinuationMode::Contains,
+        );
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let results = searcher
+            .search(&query, &TopDocs::with_limit(10).order_by_score())
+            .unwrap();
+
+        assert_eq!(results.len(), 1, "regex contains '3db i.' should match doc 1");
+        assert_eq!(results[0].1.doc_id, 1);
+    }
+
+    #[test]
+    fn test_continuation_regex_no_match() {
+        // Regex "rag.db x. cool" — 'x.' won't match 'is'
+        let (index, field) = build_continuation_index();
+        let query = RegexContinuationQuery::from_regex(
+            field,
+            "rag.db x. cool".into(),
+            ContinuationMode::StartsWith,
+        );
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let results = searcher
+            .search(&query, &TopDocs::with_limit(10).order_by_score())
+            .unwrap();
+
+        assert_eq!(results.len(), 0);
     }
 }
