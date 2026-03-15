@@ -78,6 +78,37 @@ impl HighlightSink {
         }
         Some(by_field)
     }
+
+    /// Returns all highlight entries across all segments, flattened.
+    /// Useful for inspecting results without knowing segment IDs.
+    pub fn all_entries(&self) -> Vec<HighlightEntry> {
+        let data = self.data.lock().unwrap();
+        let mut out = Vec::new();
+        for (&(_seg, doc_id), entries) in data.iter() {
+            for (field, start, end) in entries {
+                out.push(HighlightEntry {
+                    doc_id,
+                    field: field.clone(),
+                    offsets: vec![[*start, *end]],
+                });
+            }
+        }
+        out
+    }
+}
+
+impl Default for HighlightSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A single highlight entry returned by `all_entries()`.
+#[derive(Debug, Clone)]
+pub struct HighlightEntry {
+    pub doc_id: DocId,
+    pub field: String,
+    pub offsets: Vec<[usize; 2]>,
 }
 
 // ─── Tokenization ───────────────────────────────────────────────────────────
