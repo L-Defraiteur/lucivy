@@ -225,6 +225,16 @@ impl<'a> SfxFileReader<'a> {
         &self.gapmap
     }
 
+    /// Access the underlying FST map (for automaton searches).
+    pub fn fst(&self) -> &Map<Vec<u8>> {
+        &self.fst
+    }
+
+    /// Access the parent list data (for OutputTable lookups).
+    pub fn parent_list_data(&self) -> &'a [u8] {
+        self.parent_list_data
+    }
+
     fn decode_parents(&self, val: u64) -> Vec<ParentEntry> {
         match decode_output(val) {
             ParentRef::Single { raw_ordinal, si } => {

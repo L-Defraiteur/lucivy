@@ -3,6 +3,7 @@ mod collector;
 pub(crate) mod gapmap;
 pub(crate) mod file;
 mod interceptor;
+pub(crate) mod term_dictionary;
 #[cfg(test)]
 mod stress_tests;
 
@@ -11,3 +12,4 @@ pub use collector::SfxCollector;
 pub use gapmap::{GapMapWriter, GapMapReader};
 pub use file::{SfxFileWriter, SfxFileReader};
 pub use interceptor::{SfxTokenInterceptor, CapturedToken};
+pub use term_dictionary::SfxTermDictionary;
