@@ -219,6 +219,7 @@ impl Index {
     }
 
     /// Commit pending changes (makes added/deleted docs visible to searches).
+    /// Also waits for any pending merges to complete.
     fn commit(&self) -> PyResult<()> {
         let mut guard = self.handle.writer.lock()
             .map_err(|_| PyValueError::new_err("writer lock poisoned"))?;
@@ -226,6 +227,9 @@ impl Index {
             .ok_or_else(|| PyValueError::new_err("index is closed"))?;
         writer.commit()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        writer.drain_merges()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        drop(guard);
         self.handle.reader.reload()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         self.handle.mark_committed();

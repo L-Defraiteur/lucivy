@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use columnar::{
@@ -18,6 +19,9 @@ use crate::indexer::SegmentSerializer;
 use crate::postings::{InvertedIndexSerializer, Postings, SegmentPostings};
 use crate::schema::{value_type_to_column_type, Field, FieldType, Schema};
 use crate::store::StoreWriter;
+use crate::suffix_fst::builder::SuffixFstBuilder;
+use crate::suffix_fst::file::{SfxFileReader, SfxFileWriter};
+use crate::suffix_fst::gapmap::GapMapWriter;
 use crate::termdict::{TermMerger, TermOrdinal};
 use crate::{DocAddress, DocId, InvertedIndexReader};
 
@@ -570,11 +574,135 @@ impl IndexMerger {
         debug!("write-storagefields");
         self.write_storable_fields(serializer.get_store_writer())?;
         debug!("write-fastfields");
+        let sfx_doc_mapping: Vec<DocAddress> =
+            doc_id_mapping.iter_old_doc_addrs().collect();
         self.write_fast_fields(serializer.get_fast_field_write(), doc_id_mapping)?;
+
+        debug!("write-sfx");
+        self.merge_sfx(&mut serializer, &sfx_doc_mapping)?;
 
         debug!("close-serializer");
         serializer.close()?;
         Ok(self.max_doc)
+    }
+
+    /// Merge .sfx files from source segments into the merged segment.
+    ///
+    /// For each `._raw` field that has .sfx in at least one source segment:
+    /// 1. Collect all unique tokens from source term dictionaries
+    /// 2. Rebuild suffix FST with SuffixFstBuilder
+    /// 3. Copy GapMap data per-doc in merge order
+    pub(crate) fn merge_sfx(
+        &self,
+        serializer: &mut SegmentSerializer,
+        doc_mapping: &[DocAddress],
+    ) -> crate::Result<()> {
+        // Find ._raw fields that have .sfx in at least one source segment
+        let raw_fields: Vec<Field> = self
+            .schema
+            .fields()
+            .filter(|(_, entry)| entry.name().ends_with("._raw"))
+            .map(|(field, _)| field)
+            .collect();
+
+        if raw_fields.is_empty() {
+            return Ok(());
+        }
+
+        // Pre-load .sfx data from all source segments (per field)
+        // sfx_sources[field_idx][segment_ord] = Option<(sfx_bytes, SfxFileReader)>
+        let mut sfx_field_ids = Vec::new();
+
+        for &field in &raw_fields {
+            // Load .sfx bytes from each source segment
+            let mut segment_sfx: Vec<Option<Vec<u8>>> = Vec::with_capacity(self.readers.len());
+            let mut any_has_sfx = false;
+
+            for reader in &self.readers {
+                if let Some(file_slice) = reader.sfx_file(field) {
+                    match file_slice.read_bytes() {
+                        Ok(bytes) => {
+                            segment_sfx.push(Some(bytes.to_vec()));
+                            any_has_sfx = true;
+                        }
+                        Err(_) => segment_sfx.push(None),
+                    }
+                } else {
+                    segment_sfx.push(None);
+                }
+            }
+
+            if !any_has_sfx {
+                continue;
+            }
+
+            // Parse the SfxFileReaders
+            let sfx_readers: Vec<Option<SfxFileReader<'_>>> = segment_sfx
+                .iter()
+                .map(|opt| {
+                    opt.as_ref()
+                        .and_then(|bytes| SfxFileReader::open(bytes).ok())
+                })
+                .collect();
+
+            // 1. Collect all unique tokens from source term dictionaries for this field
+            let mut unique_tokens = BTreeSet::new();
+            for reader in &self.readers {
+                if let Ok(inv_idx) = reader.inverted_index(field) {
+                    let term_dict = inv_idx.terms();
+                    let mut stream = term_dict.stream()?;
+                    while stream.advance() {
+                        if let Ok(s) = std::str::from_utf8(stream.key()) {
+                            unique_tokens.insert(s.to_string());
+                        }
+                    }
+                }
+            }
+
+            // 2. Build suffix FST
+            let mut sfx_builder = SuffixFstBuilder::new();
+            for (ordinal, token) in unique_tokens.iter().enumerate() {
+                sfx_builder.add_token(token, ordinal as u64);
+            }
+            let num_terms = sfx_builder.num_terms() as u32;
+            let (fst_data, parent_list_data) = sfx_builder.build().map_err(|e| {
+                crate::LucivyError::SystemError(format!("merge sfx build: {e}"))
+            })?;
+
+            // 3. Build GapMap by copying doc data in merge order
+            let mut gapmap_writer = GapMapWriter::new();
+            for &doc_addr in doc_mapping {
+                let seg_ord = doc_addr.segment_ord as usize;
+                let old_doc_id = doc_addr.doc_id;
+
+                if let Some(Some(sfx_reader)) = sfx_readers.get(seg_ord) {
+                    let doc_data = sfx_reader.gapmap().doc_data(old_doc_id);
+                    gapmap_writer.add_doc_raw(doc_data);
+                } else {
+                    // Source segment had no .sfx — add empty doc
+                    gapmap_writer.add_empty_doc();
+                }
+            }
+
+            // 4. Assemble and write
+            let gapmap_data = gapmap_writer.serialize();
+            let sfx_file = SfxFileWriter::new(
+                fst_data,
+                parent_list_data,
+                gapmap_data,
+                doc_mapping.len() as u32,
+                num_terms,
+            );
+            let sfx_bytes = sfx_file.to_bytes();
+            serializer.write_sfx(field.field_id(), &sfx_bytes)?;
+            sfx_field_ids.push(field.field_id());
+        }
+
+        if !sfx_field_ids.is_empty() {
+            serializer.write_sfx_manifest(&sfx_field_ids)?;
+        }
+
+        Ok(())
     }
 }
 

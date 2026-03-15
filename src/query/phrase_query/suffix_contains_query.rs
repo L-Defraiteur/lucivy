@@ -57,6 +57,7 @@ fn tokenize_query(query: &str) -> (Vec<String>, Vec<String>) {
 pub struct SuffixContainsQuery {
     raw_field: Field,
     query_text: String,
+    fuzzy_distance: u8,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
 }
@@ -70,9 +71,16 @@ impl SuffixContainsQuery {
         Self {
             raw_field,
             query_text,
+            fuzzy_distance: 0,
             highlight_sink: None,
             highlight_field_name: String::new(),
         }
+    }
+
+    /// Set fuzzy Levenshtein distance (0 = exact).
+    pub fn with_fuzzy_distance(mut self, distance: u8) -> Self {
+        self.fuzzy_distance = distance;
+        self
     }
 
     /// Attach a highlight sink for collecting byte offsets of matches.
@@ -99,6 +107,7 @@ impl Query for SuffixContainsQuery {
         Ok(Box::new(SuffixContainsWeight {
             raw_field: self.raw_field,
             query_text: self.query_text.clone(),
+            fuzzy_distance: self.fuzzy_distance,
             highlight_sink: self.highlight_sink.clone(),
             highlight_field_name: self.highlight_field_name.clone(),
             bm25_weight,
@@ -109,6 +118,7 @@ impl Query for SuffixContainsQuery {
 struct SuffixContainsWeight {
     raw_field: Field,
     query_text: String,
+    fuzzy_distance: u8,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
     bm25_weight: Bm25Weight,
@@ -139,12 +149,20 @@ impl Weight for SuffixContainsWeight {
         // Tokenize the query to determine single vs multi-token path
         let (query_tokens, query_separators) = tokenize_query(&self.query_text);
 
+        let fuzzy_d = self.fuzzy_distance;
+
         let (doc_ids, highlights) = if query_tokens.len() <= 1 {
             // Single-token path
             let query = if query_tokens.is_empty() { &self.query_text } else { &query_tokens[0] };
-            let matches = suffix_contains::suffix_contains_single_token(
-                &sfx_reader, query, resolver,
-            );
+            let matches = if fuzzy_d == 0 {
+                suffix_contains::suffix_contains_single_token(
+                    &sfx_reader, query, resolver,
+                )
+            } else {
+                suffix_contains::suffix_contains_single_token_fuzzy(
+                    &sfx_reader, query, fuzzy_d, resolver,
+                )
+            };
             let highlights: Vec<(DocId, usize, usize)> = matches.iter()
                 .map(|m| (m.doc_id, m.byte_from, m.byte_to))
                 .collect();
@@ -156,9 +174,15 @@ impl Weight for SuffixContainsWeight {
             // Multi-token path
             let token_refs: Vec<&str> = query_tokens.iter().map(|s| s.as_str()).collect();
             let sep_refs: Vec<&str> = query_separators.iter().map(|s| s.as_str()).collect();
-            let matches = suffix_contains::suffix_contains_multi_token(
-                &sfx_reader, &token_refs, &sep_refs, resolver,
-            );
+            let matches = if fuzzy_d == 0 {
+                suffix_contains::suffix_contains_multi_token(
+                    &sfx_reader, &token_refs, &sep_refs, resolver,
+                )
+            } else {
+                suffix_contains::suffix_contains_multi_token_fuzzy(
+                    &sfx_reader, &token_refs, &sep_refs, resolver, fuzzy_d,
+                )
+            };
             let highlights: Vec<(DocId, usize, usize)> = matches.iter()
                 .map(|m| (m.doc_id, m.byte_from, m.byte_to))
                 .collect();

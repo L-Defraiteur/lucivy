@@ -549,6 +549,13 @@ impl<D: Document> IndexWriter<D> {
         self.prepare_commit()?.commit()
     }
 
+    /// Wait for pending merges to complete without consuming the writer.
+    /// Call this after commit() if you need a fully merged state
+    /// (e.g., before exporting a snapshot).
+    pub fn drain_merges(&self) -> crate::Result<()> {
+        self.segment_updater.wait_merging_thread()
+    }
+
     pub(crate) fn segment_updater(&self) -> &SegmentUpdater {
         &self.segment_updater
     }

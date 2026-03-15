@@ -111,6 +111,12 @@ impl GapMapWriter {
         self.data_buffer.push(1u8); // num_values = 1
     }
 
+    /// Add raw doc bytes directly (for merge — copies the exact doc_data from a source GapMap).
+    pub fn add_doc_raw(&mut self, raw_doc_data: &[u8]) {
+        self.doc_offsets.push(self.data_buffer.len() as u64);
+        self.data_buffer.extend_from_slice(raw_doc_data);
+    }
+
     /// Number of documents added so far.
     pub fn num_docs(&self) -> u32 {
         self.doc_offsets.len() as u32
@@ -181,7 +187,7 @@ impl<'a> GapMapReader<'a> {
     }
 
     /// Get the raw bytes for a document's gap data.
-    fn doc_data(&self, doc_id: u32) -> &'a [u8] {
+    pub fn doc_data(&self, doc_id: u32) -> &'a [u8] {
         let offset_pos = HEADER_SIZE_BASE + (doc_id as usize) * 8;
         let start = u64::from_le_bytes(
             self.data[offset_pos..offset_pos + 8].try_into().unwrap(),

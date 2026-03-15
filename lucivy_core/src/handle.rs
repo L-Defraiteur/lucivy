@@ -904,4 +904,80 @@ mod tests {
         assert!(found_highlights,
             "multi-token startsWith should produce highlights but none were found");
     }
+
+    /// Reproduce rag3weaver "neural networks" contains failure.
+    #[test]
+    fn test_contains_neural_networks() {
+        let tmp = std::env::temp_dir().join("lucivy_test_neural_networks");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.to_str().unwrap();
+
+        let config_json = serde_json::json!({
+            "fields": [
+                {"name": "title", "type": "text", "stored": true},
+                {"name": "body", "type": "text", "stored": true}
+            ]
+        });
+        let config: SchemaConfig = serde_json::from_value(config_json).unwrap();
+
+        let directory = StdFsDirectory::open(path).unwrap();
+        let handle = LucivyHandle::create(directory, &config).unwrap();
+
+        let title_field = handle.field("title").unwrap();
+        let body_field = handle.field("body").unwrap();
+        let nid_field = handle.field(NODE_ID_FIELD).unwrap();
+
+        {
+            let mut guard = handle.writer.lock().unwrap();
+            let writer = guard.as_mut().unwrap();
+
+            let docs = vec![
+                (0u64, "Rust Programming", "Rust is a systems programming language focused on safety and performance."),
+                (1, "French Cuisine", "La cuisine française est mondialement reconnue."),
+                (2, "Machine Learning", "Deep learning uses neural networks with many layers. Transformers and attention mechanisms."),
+            ];
+
+            for (nid, title, body) in docs {
+                let mut doc = ld_lucivy::LucivyDocument::new();
+                doc.add_u64(nid_field, nid);
+                doc.add_text(title_field, title);
+                doc.add_text(body_field, body);
+                for (user, raw_name) in &handle.raw_field_pairs {
+                    if let Some(f) = handle.field(raw_name) {
+                        if user == "title" { doc.add_text(f, title); }
+                        if user == "body" { doc.add_text(f, body); }
+                    }
+                }
+                for (user, ngram_name) in &handle.ngram_field_pairs {
+                    if let Some(f) = handle.field(ngram_name) {
+                        if user == "title" { doc.add_text(f, title); }
+                        if user == "body" { doc.add_text(f, body); }
+                    }
+                }
+                writer.add_document(doc).unwrap();
+            }
+            writer.commit().unwrap();
+        }
+        handle.reader.reload().unwrap();
+
+        // Contains "neural networks" on body
+        let query_json = r#"{"type":"contains","field":"body","value":"neural networks"}"#;
+        let query_config: crate::query::QueryConfig = serde_json::from_str(query_json).unwrap();
+        let query = crate::query::build_query(
+            &query_config,
+            &handle.schema,
+            &handle.index,
+            &handle.raw_field_pairs,
+            &handle.ngram_field_pairs,
+            None,
+        ).expect("query build should succeed");
+
+        let searcher = handle.reader.searcher();
+        let collector = ld_lucivy::collector::TopDocs::with_limit(10).order_by_score();
+        let results = searcher.search(&*query, &collector).unwrap();
+
+        eprintln!("Contains 'neural networks': {} results", results.len());
+        assert!(results.len() > 0, "Contains should find 'neural networks' in body of Machine Learning doc");
+    }
 }

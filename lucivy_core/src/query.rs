@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use ld_lucivy::query::{
     AllQuery, AutomatonPhraseQuery, BooleanQuery, FuzzyParams, FuzzyTermQuery, HighlightSink,
     NgramContainsQuery, Occur, PhraseQuery, Query, QueryParser, RangeQuery, RegexParams,
-    RegexQuery, TermQuery, VerificationMode,
+    RegexQuery, SuffixContainsQuery, TermQuery, VerificationMode,
 };
 use regex::Regex;
 use regex_syntax::hir::literal::Extractor;
@@ -230,6 +230,14 @@ pub fn build_query(
             build_contains_query(config, schema, index, raw_pairs, ngram_pairs, highlight_sink)
         }
         "startsWith" => build_starts_with_query(config, schema, index, raw_pairs, highlight_sink),
+        "sfx_contains" => {
+            build_sfx_contains_query(config, schema, raw_pairs, highlight_sink)
+        }
+        "sfx_contains_split" => {
+            let expanded = expand_split(config, "sfx_contains");
+            build_query(&expanded, schema, index, raw_pairs, ngram_pairs, highlight_sink)
+                .map(|q| q as Box<dyn Query>)
+        }
         "contains_split" => {
             let expanded = expand_split(config, "contains");
             build_query(&expanded, schema, index, raw_pairs, ngram_pairs, highlight_sink)
@@ -500,6 +508,28 @@ fn build_contains_regex(
         query = query.with_highlight_sink(sink, config.field.clone().unwrap_or_default());
     }
     Ok(Box::new(query) as Box<dyn Query>)
+}
+
+/// SFX contains query: substring search via suffix FST (.sfx file).
+/// Zero stored text reads — direct proof via suffix walk + inverted index.
+/// Requires .sfx file to exist for the target field.
+fn build_sfx_contains_query(
+    config: &QueryConfig,
+    schema: &Schema,
+    raw_pairs: &[(String, String)],
+    highlight_sink: Option<Arc<HighlightSink>>,
+) -> Result<Box<dyn Query>, String> {
+    let field = resolve_field(config, schema, raw_pairs, true)?;
+    let value = config.value.as_deref().ok_or("sfx_contains query requires 'value'")?;
+    let distance = config.distance.unwrap_or(0);
+
+    let mut query = SuffixContainsQuery::new(field, value.to_lowercase())
+        .with_fuzzy_distance(distance);
+    if let Some(sink) = highlight_sink {
+        let field_name = config.field.clone().unwrap_or_default();
+        query = query.with_highlight_sink(sink, field_name);
+    }
+    Ok(Box::new(query))
 }
 
 /// StartsWith query: FST prefix search with optional fuzzy.

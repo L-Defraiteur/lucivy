@@ -26,6 +26,8 @@ enum MergePhase {
     Store,
     /// Écriture des fast fields (colonnes).
     FastFields,
+    /// Merge des fichiers .sfx (suffix FST).
+    Sfx,
     /// Finalisation : close serializer + construction du résultat.
     Close,
 }
@@ -47,6 +49,8 @@ pub(crate) struct MergeState {
     merged_segment: Segment,
     delete_cursor: DeleteCursor,
     doc_id_mapping: Option<SegmentDocIdMapping>,
+    /// Saved for .sfx merge (doc_id_mapping is consumed by fast fields).
+    sfx_doc_mapping: Option<Vec<crate::DocAddress>>,
     fieldnorm_readers: Option<FieldNormReaders>,
     phase: MergePhase,
     /// Liste pré-calculée des champs indexés (Field + index dans le schéma).
@@ -115,6 +119,7 @@ impl MergeState {
             merged_segment,
             delete_cursor,
             doc_id_mapping: None,
+            sfx_doc_mapping: None,
             fieldnorm_readers: None,
             phase: MergePhase::Init,
             indexed_fields,
@@ -147,6 +152,7 @@ impl MergeState {
             MergePhase::Postings { .. } => self.step_postings(),
             MergePhase::Store => self.step_store(),
             MergePhase::FastFields => self.step_fast_fields(),
+            MergePhase::Sfx => self.step_sfx(),
             MergePhase::Close => self.step_close(),
         }
     }
@@ -219,8 +225,19 @@ impl MergeState {
     fn step_fast_fields(&mut self) -> crate::Result<StepResult> {
         let serializer = self.serializer.as_mut().unwrap();
         let doc_id_mapping = self.doc_id_mapping.take().unwrap();
+        // Save doc mapping for .sfx merge before it's consumed
+        self.sfx_doc_mapping = Some(doc_id_mapping.iter_old_doc_addrs().collect());
         self.merger
             .write_fast_fields(serializer.get_fast_field_write(), doc_id_mapping)?;
+        self.phase = MergePhase::Sfx;
+        Ok(StepResult::Continue)
+    }
+
+    /// Phase Sfx : merge des fichiers .sfx (suffix FST + GapMap).
+    fn step_sfx(&mut self) -> crate::Result<StepResult> {
+        let serializer = self.serializer.as_mut().unwrap();
+        let doc_mapping = self.sfx_doc_mapping.take().unwrap_or_default();
+        self.merger.merge_sfx(serializer, &doc_mapping)?;
         self.phase = MergePhase::Close;
         Ok(StepResult::Continue)
     }
