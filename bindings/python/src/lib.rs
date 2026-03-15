@@ -14,7 +14,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use lucivy_core::handle::{LucivyHandle, NGRAM_SUFFIX, NODE_ID_FIELD, RAW_SUFFIX};
+use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD, RAW_SUFFIX};
 use lucivy_core::directory::StdFsDirectory;
 use lucivy_core::query;
 use lucivy_core::snapshot;
@@ -283,7 +283,7 @@ impl Index {
             &self.handle.schema,
             &self.handle.index,
             &self.handle.raw_field_pairs,
-            &self.handle.ngram_field_pairs,
+            &[],
             highlight_sink.clone(),
         ).map_err(|e| PyValueError::new_err(e))?;
 
@@ -554,14 +554,6 @@ fn auto_duplicate(handle: &LucivyHandle, doc: &mut LucivyDocument, field_name: &
             doc.add_text(raw_field, text);
         }
     }
-    if let Some(ngram_name) = handle.ngram_field_pairs.iter()
-        .find(|(user, _)| user == field_name)
-        .map(|(_, ngram)| ngram.as_str())
-    {
-        if let Some(ngram_field) = handle.field(ngram_name) {
-            doc.add_text(ngram_field, text);
-        }
-    }
 }
 
 fn execute_top_docs(
@@ -612,7 +604,7 @@ fn collect_results(
             let seg_id = searcher.segment_reader(doc_addr.segment_ord).segment_id();
             let by_field = sink.get(seg_id, doc_addr.doc_id)?;
             let map: HashMap<String, Vec<(u32, u32)>> = by_field.into_iter()
-                .filter(|(name, _)| !name.ends_with(RAW_SUFFIX) && !name.ends_with(NGRAM_SUFFIX))
+                .filter(|(name, _)| !name.ends_with(RAW_SUFFIX))
                 .map(|(name, offsets)| {
                     let ranges = offsets.into_iter().map(|[s, e]| (s as u32, e as u32)).collect();
                     (name, ranges)
@@ -625,7 +617,7 @@ fn collect_results(
             let mut map = HashMap::new();
             for (field, value) in doc.field_values() {
                 let name = schema.get_field_name(field);
-                if name == NODE_ID_FIELD || name.ends_with(RAW_SUFFIX) || name.ends_with(NGRAM_SUFFIX) {
+                if name == NODE_ID_FIELD || name.ends_with(RAW_SUFFIX) {
                     continue;
                 }
                 let rv = value.as_value();

@@ -14,7 +14,7 @@ use ld_lucivy::query::HighlightSink;
 use ld_lucivy::schema::{Field, FieldType, Value as LucivyValue};
 use ld_lucivy::{DocAddress, Searcher, LucivyDocument};
 
-use lucivy_core::handle::{NGRAM_SUFFIX, NODE_ID_FIELD, RAW_SUFFIX};
+use lucivy_core::handle::{NODE_ID_FIELD, RAW_SUFFIX};
 use lucivy_core::query;
 
 use crate::LucivyHandle;
@@ -179,7 +179,7 @@ fn get_field_ids(handle: &LucivyHandle) -> Vec<ffi::IndexFieldInfo> {
     handle
         .field_map
         .iter()
-        .filter(|(name, _)| !name.ends_with(RAW_SUFFIX) && !name.ends_with(NGRAM_SUFFIX))
+        .filter(|(name, _)| !name.ends_with(RAW_SUFFIX))
         .map(|(name, field)| {
             let ft = match handle.schema.get_field_entry(*field).field_type() {
                 FieldType::Str(_) => "text",
@@ -290,16 +290,6 @@ fn auto_duplicate_field(
         }
     }
 
-    if let Some(ngram_name) = handle
-        .ngram_field_pairs
-        .iter()
-        .find(|(user, _)| user == field_name)
-        .map(|(_, ngram)| ngram.as_str())
-    {
-        if let Some(ngram_field) = handle.field(ngram_name) {
-            doc.add_text(ngram_field, value);
-        }
-    }
 }
 
 fn delete_by_node_id(handle: &LucivyHandle, node_id: u64) -> Result<i64, String> {
@@ -358,7 +348,7 @@ fn search(
         &handle.schema,
         &handle.index,
         &handle.raw_field_pairs,
-        &handle.ngram_field_pairs,
+        &[],
         None,
     )?;
 
@@ -382,7 +372,7 @@ fn search_with_highlights(
         &handle.schema,
         &handle.index,
         &handle.raw_field_pairs,
-        &handle.ngram_field_pairs,
+        &[],
         Some(highlight_sink.clone()),
     )?;
 
@@ -475,7 +465,7 @@ fn search_typed_with_highlights(
         &handle.schema,
         &handle.index,
         &handle.raw_field_pairs,
-        &handle.ngram_field_pairs,
+        &[],
         Some(highlight_sink.clone()),
     )?;
 
@@ -505,7 +495,7 @@ fn search_filtered(
         &handle.schema,
         &handle.index,
         &handle.raw_field_pairs,
-        &handle.ngram_field_pairs,
+        &[],
         None,
     )?;
 
@@ -531,7 +521,7 @@ fn search_filtered_with_highlights(
         &handle.schema,
         &handle.index,
         &handle.raw_field_pairs,
-        &handle.ngram_field_pairs,
+        &[],
         Some(highlight_sink.clone()),
     )?;
 

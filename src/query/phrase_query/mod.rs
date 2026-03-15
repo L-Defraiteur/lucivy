@@ -1,7 +1,6 @@
 pub mod automaton_phrase_query;
 mod automaton_phrase_weight;
 mod contains_scorer;
-pub mod ngram_contains_query;
 mod phrase_query;
 mod phrase_scorer;
 mod phrase_weight;
@@ -13,9 +12,6 @@ pub mod suffix_contains;
 pub mod suffix_contains_query;
 
 pub use self::automaton_phrase_query::AutomatonPhraseQuery;
-pub use self::ngram_contains_query::{
-    FuzzyParams, NgramContainsQuery, RegexParams, VerificationMode,
-};
 pub use self::phrase_query::PhraseQuery;
 pub(crate) use self::phrase_scorer::intersection_count;
 pub use self::phrase_scorer::PhraseScorer;

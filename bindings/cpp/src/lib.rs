@@ -14,7 +14,7 @@ use ld_lucivy::query::HighlightSink;
 use ld_lucivy::schema::{FieldType, Value as LucivyValue};
 use ld_lucivy::{DocAddress, LucivyDocument, Searcher};
 
-use lucivy_core::handle::{LucivyHandle, NGRAM_SUFFIX, NODE_ID_FIELD, RAW_SUFFIX};
+use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD, RAW_SUFFIX};
 use lucivy_core::query;
 use lucivy_core::snapshot;
 
@@ -357,7 +357,7 @@ impl LucivyIndex {
             &self.handle.schema,
             &self.handle.index,
             &self.handle.raw_field_pairs,
-            &self.handle.ngram_field_pairs,
+            &[],
             None,
         )?;
 
@@ -379,7 +379,7 @@ impl LucivyIndex {
             &self.handle.schema,
             &self.handle.index,
             &self.handle.raw_field_pairs,
-            &self.handle.ngram_field_pairs,
+            &[],
             Some(highlight_sink.clone()),
         )?;
 
@@ -405,7 +405,7 @@ impl LucivyIndex {
             &self.handle.schema,
             &self.handle.index,
             &self.handle.raw_field_pairs,
-            &self.handle.ngram_field_pairs,
+            &[],
             None,
         )?;
 
@@ -429,7 +429,7 @@ impl LucivyIndex {
             &self.handle.schema,
             &self.handle.index,
             &self.handle.raw_field_pairs,
-            &self.handle.ngram_field_pairs,
+            &[],
             Some(highlight_sink.clone()),
         )?;
 
@@ -469,7 +469,6 @@ impl LucivyIndex {
             .iter()
             .filter(|(name, _)| {
                 !name.ends_with(RAW_SUFFIX)
-                    && !name.ends_with(NGRAM_SUFFIX)
                     && name != NODE_ID_FIELD
             })
             .map(|(name, field)| {
@@ -637,16 +636,6 @@ fn auto_duplicate(handle: &LucivyHandle, doc: &mut LucivyDocument, field_name: &
             doc.add_text(raw_field, text);
         }
     }
-    if let Some(ngram_name) = handle
-        .ngram_field_pairs
-        .iter()
-        .find(|(user, _)| user == field_name)
-        .map(|(_, ngram)| ngram.as_str())
-    {
-        if let Some(ngram_field) = handle.field(ngram_name) {
-            doc.add_text(ngram_field, text);
-        }
-    }
 }
 
 fn execute_top_docs(
@@ -725,7 +714,7 @@ fn collect_results_with_highlights(
                 let entries: Vec<ffi::FieldHighlights> = by_field
                     .into_iter()
                     .filter(|(name, _)| {
-                        !name.ends_with(RAW_SUFFIX) && !name.ends_with(NGRAM_SUFFIX)
+                        !name.ends_with(RAW_SUFFIX)
                     })
                     .map(|(field_name, offsets)| ffi::FieldHighlights {
                         field_name,

@@ -14,7 +14,7 @@ use ld_lucivy::query::HighlightSink;
 use ld_lucivy::schema::{FieldType, Value as LucivyValue};
 use ld_lucivy::{DocAddress, LucivyDocument, Searcher};
 
-use lucivy_core::handle::{LucivyHandle, NGRAM_SUFFIX, NODE_ID_FIELD, RAW_SUFFIX};
+use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD, RAW_SUFFIX};
 use lucivy_core::query;
 use lucivy_core::snapshot;
 
@@ -327,7 +327,7 @@ impl Index {
             &self.handle.schema,
             &self.handle.index,
             &self.handle.raw_field_pairs,
-            &self.handle.ngram_field_pairs,
+            &[],
             highlight_sink.clone(),
         ).map_err(|e| JsError::new(&e))?;
 
@@ -362,7 +362,7 @@ impl Index {
             &self.handle.schema,
             &self.handle.index,
             &self.handle.raw_field_pairs,
-            &self.handle.ngram_field_pairs,
+            &[],
             highlight_sink.clone(),
         ).map_err(|e| JsError::new(&e))?;
 
@@ -450,14 +450,6 @@ impl Index {
             .map(|(_, raw)| raw.as_str())
         {
             if let Some(f) = self.handle.field(raw_name) {
-                doc.add_text(f, text);
-            }
-        }
-        if let Some(ngram_name) = self.handle.ngram_field_pairs.iter()
-            .find(|(user, _)| user == field_name)
-            .map(|(_, ngram)| ngram.as_str())
-        {
-            if let Some(f) = self.handle.field(ngram_name) {
                 doc.add_text(f, text);
             }
         }
@@ -623,7 +615,7 @@ fn collect_results(
             let seg_id = searcher.segment_reader(doc_addr.segment_ord).segment_id();
             let by_field = sink.get(seg_id, doc_addr.doc_id)?;
             let map: HashMap<String, Vec<[u32; 2]>> = by_field.into_iter()
-                .filter(|(name, _)| !name.ends_with(RAW_SUFFIX) && !name.ends_with(NGRAM_SUFFIX))
+                .filter(|(name, _)| !name.ends_with(RAW_SUFFIX))
                 .map(|(name, offsets)| {
                     let ranges: Vec<[u32; 2]> = offsets.into_iter()
                         .map(|[s, e]| [s as u32, e as u32])

@@ -204,10 +204,3 @@ harness = false
 name = "bool_queries_with_range"
 harness = false
 
-[[bench]]
-name = "ngram_bench"
-harness = false
-
-[[bench]]
-name = "stress_threading"
-harness = false
