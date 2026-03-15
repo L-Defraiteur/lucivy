@@ -11,6 +11,8 @@ use crate::query::phrase_query::scoring_utils::HighlightSink;
 use crate::query::weight::{for_each_docset_buffered, for_each_scorer};
 use crate::query::{AllScorer, AllWeight, EmptyScorer, Explanation, Scorer, Weight};
 use crate::schema::IndexRecordOption;
+use crate::suffix_fst::SfxTermDictionary;
+use crate::suffix_fst::file::SfxFileReader;
 use crate::{DocId, Score, LucivyError, Term};
 
 pub struct TermWeight {
@@ -64,7 +66,16 @@ impl Weight for TermWeight {
         } else {
             let field = self.term.field();
             let inv_index = reader.inverted_index(field)?;
-            let term_info = inv_index.get_term_info(&self.term)?;
+            let term_info = if let Some(sfx_data) = reader.sfx_file(field) {
+                let sfx_bytes = sfx_data.read_bytes()
+                    .map_err(|e| crate::LucivyError::SystemError(format!("read .sfx: {e}")))?;
+                let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
+                    .map_err(|e| crate::LucivyError::SystemError(format!("open .sfx: {e}")))?;
+                let sfx_dict = SfxTermDictionary::new(&sfx_reader, inv_index.terms());
+                sfx_dict.get(self.term.serialized_value_bytes())?
+            } else {
+                inv_index.get_term_info(&self.term)?
+            };
             Ok(term_info.map(|term_info| term_info.doc_freq).unwrap_or(0))
         }
     }
@@ -281,7 +292,19 @@ impl TermWeight {
     ) -> crate::Result<TermOrEmptyOrAllScorer> {
         let field = self.term.field();
         let inverted_index = reader.inverted_index(field)?;
-        let Some(term_info) = inverted_index.get_term_info(&self.term)? else {
+
+        // Resolve term → TermInfo via .sfx if available, otherwise standard path
+        let term_info = if let Some(sfx_data) = reader.sfx_file(field) {
+            let sfx_bytes = sfx_data.read_bytes()
+                .map_err(|e| crate::LucivyError::SystemError(format!("read .sfx: {e}")))?;
+            let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
+                .map_err(|e| crate::LucivyError::SystemError(format!("open .sfx: {e}")))?;
+            let sfx_dict = SfxTermDictionary::new(&sfx_reader, inverted_index.terms());
+            sfx_dict.get(self.term.serialized_value_bytes())?
+        } else {
+            inverted_index.get_term_info(&self.term)?
+        };
+        let Some(term_info) = term_info else {
             return Ok(TermOrEmptyOrAllScorer::Empty);
         };
 

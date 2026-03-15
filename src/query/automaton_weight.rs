@@ -15,7 +15,37 @@ use crate::docset::COLLECT_BLOCK_BUFFER_LEN;
 use crate::query::{BitSetDocSet, ConstScorer, Explanation, Scorer, Weight};
 use crate::schema::{Field, IndexRecordOption};
 use crate::termdict::{TermDictionary, TermStreamer};
+use crate::suffix_fst::SfxTermDictionary;
+use crate::suffix_fst::file::SfxFileReader;
+use crate::index::InvertedIndexReader;
 use crate::{DocId, Score, LucivyError, TERMINATED};
+
+/// Bridge adapter: wraps a tantivy_fst::Automaton to implement lucivy_fst::Automaton
+/// for searching the suffix FST.
+struct SfxAutomatonAdapter<'a, A>(&'a A);
+
+impl<A: Automaton> lucivy_fst::Automaton for SfxAutomatonAdapter<'_, A>
+where
+    A::State: Clone,
+{
+    type State = A::State;
+
+    fn start(&self) -> Self::State {
+        self.0.start()
+    }
+
+    fn is_match(&self, state: &Self::State) -> bool {
+        self.0.is_match(state)
+    }
+
+    fn can_match(&self, state: &Self::State) -> bool {
+        self.0.can_match(state)
+    }
+
+    fn accept(&self, state: &Self::State, byte: u8) -> Self::State {
+        self.0.accept(state, byte)
+    }
+}
 
 /// A weight struct for Fuzzy Term and Regex Queries
 pub struct AutomatonWeight<A> {
@@ -96,6 +126,34 @@ where
     /// Returns the term infos that match the automaton
     pub fn get_match_term_infos(&self, reader: &SegmentReader) -> crate::Result<Vec<TermInfo>> {
         let inverted_index = reader.inverted_index(self.field)?;
+        self.collect_term_infos(reader, &inverted_index)
+    }
+
+    /// Collect matching TermInfos — via .sfx if available, otherwise via standard stream.
+    /// JSON path queries always use the standard stream (JSON fields don't have .sfx).
+    fn collect_term_infos(
+        &self,
+        reader: &SegmentReader,
+        inverted_index: &InvertedIndexReader,
+    ) -> crate::Result<Vec<TermInfo>> {
+        // Try .sfx path (skip for JSON fields — they don't have suffix indexes)
+        if self.json_path_bytes.is_none() {
+            if let Some(sfx_data) = reader.sfx_file(self.field) {
+                let sfx_bytes = sfx_data.read_bytes()
+                    .map_err(|e| crate::LucivyError::SystemError(format!("read .sfx: {e}")))?;
+                let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
+                    .map_err(|e| crate::LucivyError::SystemError(format!("open .sfx: {e}")))?;
+                let sfx_dict = SfxTermDictionary::new(&sfx_reader, inverted_index.terms());
+                let adapter = SfxAutomatonAdapter(&*self.automaton);
+                return Ok(sfx_dict
+                    .search_automaton(&adapter)
+                    .into_iter()
+                    .map(|(_, ti)| ti)
+                    .collect());
+            }
+        }
+
+        // Standard path: stream through TermDictionary
         let term_dict = inverted_index.terms();
         let mut term_stream = self.automaton_stream(term_dict)?;
         let mut term_infos = Vec::new();
@@ -162,8 +220,9 @@ where
         let max_doc = reader.max_doc();
         let mut doc_bitset = BitSet::with_max_value(max_doc);
         let inverted_index = reader.inverted_index(self.field)?;
-        let term_dict = inverted_index.terms();
-        let mut term_stream = self.automaton_stream(term_dict)?;
+
+        // Collect all matching term infos upfront (via .sfx or standard stream)
+        let term_infos = self.collect_term_infos(reader, &inverted_index)?;
 
         // Get fieldnorm reader, falling back to constant(1) if not available (e.g. JSON fields).
         let fieldnorm_reader = reader
@@ -182,15 +241,14 @@ where
                 let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
                 let mut scores = vec![0.0f32; max_doc as usize];
 
-                while term_stream.advance() {
-                    let term_info = term_stream.value().clone();
+                for term_info in &term_infos {
                     let bm25 = Bm25Weight::for_one_term_without_explain(
                         term_info.doc_freq as u64,
                         total_num_docs,
                         average_fieldnorm,
                     );
                     let mut segment_postings = inverted_index.read_postings_from_terminfo(
-                        &term_info,
+                        term_info,
                         IndexRecordOption::WithFreqsAndPositionsAndOffsets,
                     )?;
                     loop {
@@ -220,10 +278,9 @@ where
                 Ok(Box::new(scorer))
             } else {
                 // Highlight only (no scoring): collect offsets, use ConstScorer.
-                while term_stream.advance() {
-                    let term_info = term_stream.value().clone();
+                for term_info in &term_infos {
                     let mut segment_postings = inverted_index.read_postings_from_terminfo(
-                        &term_info,
+                        term_info,
                         IndexRecordOption::WithFreqsAndPositionsAndOffsets,
                     )?;
                     loop {
@@ -256,15 +313,14 @@ where
             let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
             let mut scores = vec![0.0f32; max_doc as usize];
 
-            while term_stream.advance() {
-                let term_info = term_stream.value().clone();
+            for term_info in &term_infos {
                 let bm25 = Bm25Weight::for_one_term_without_explain(
                     term_info.doc_freq as u64,
                     total_num_docs,
                     average_fieldnorm,
                 );
                 let mut segment_postings = inverted_index.read_postings_from_terminfo(
-                    &term_info,
+                    term_info,
                     IndexRecordOption::WithFreqs,
                 )?;
                 loop {
@@ -285,8 +341,7 @@ where
             Ok(Box::new(scorer))
         } else {
             // Fast path: no scoring, no highlights. Block postings with Basic.
-            while term_stream.advance() {
-                let term_info = term_stream.value();
+            for term_info in &term_infos {
                 let mut block_segment_postings = inverted_index
                     .read_block_postings_from_terminfo(term_info, IndexRecordOption::Basic)?;
                 loop {
