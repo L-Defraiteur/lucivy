@@ -11,9 +11,10 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use ld_lucivy::query::{
-    AllQuery, AutomatonPhraseQuery, BooleanQuery, FuzzyParams, FuzzyTermQuery, HighlightSink,
-    NgramContainsQuery, Occur, PhraseQuery, Query, QueryParser, RangeQuery, RegexParams,
-    RegexQuery, SuffixContainsQuery, TermQuery, VerificationMode,
+    AllQuery, AutomatonPhraseQuery, BooleanQuery, ContinuationMode, FuzzyParams, FuzzyTermQuery,
+    HighlightSink, NgramContainsQuery, Occur, PhraseQuery, Query, QueryParser, RangeQuery,
+    RegexContinuationQuery, RegexParams, RegexQuery, SuffixContainsQuery, TermQuery,
+    VerificationMode,
 };
 use regex::Regex;
 use regex_syntax::hir::literal::Extractor;
@@ -302,13 +303,16 @@ fn build_fuzzy_query(
     let value = config.value.as_deref().ok_or("fuzzy query requires 'value'")?;
     let distance = config.distance.unwrap_or(1);
 
-    // Direct lowercase — Levenshtein automaton runs on the raw token form.
-    let term = Term::from_field_text(field, &value.to_lowercase());
-    let mut query = FuzzyTermQuery::new(term, distance, true);
-    if let Some(sink) = highlight_sink {
-        let field_name = config.field.clone().unwrap_or_default();
-        query = query.with_highlight_sink(sink, field_name);
-    }
+    // Use RegexContinuationQuery so fuzzy matching can span token boundaries.
+    // The Levenshtein DFA absorbs gaps (spaces, etc.) as insertions within
+    // the edit distance budget.
+    let query = RegexContinuationQuery::new(
+        field,
+        value.to_lowercase(),
+        ContinuationMode::Contains,
+    )
+    .with_fuzzy_distance(distance);
+    // TODO: highlight_sink not yet supported in RegexContinuationQuery
     Ok(Box::new(query))
 }
 
@@ -622,11 +626,14 @@ fn build_regex_query(
         .pattern
         .as_deref()
         .ok_or("regex query requires 'pattern'")?;
-    let mut query = RegexQuery::from_pattern(pattern, field)
-        .map_err(|e| format!("invalid regex: {e}"))?;
-    if let Some(sink) = highlight_sink {
-        query = query.with_highlight_sink(sink, config.field.clone().unwrap_or_default());
-    }
+
+    // Use RegexContinuationQuery so regex matching can span token boundaries.
+    let query = RegexContinuationQuery::from_regex(
+        field,
+        pattern.to_string(),
+        ContinuationMode::Contains,
+    );
+    // TODO: highlight_sink not yet supported in RegexContinuationQuery
     Ok(Box::new(query) as Box<dyn Query>)
 }
 
