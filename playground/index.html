@@ -192,7 +192,7 @@ window._allLogs = [];
 <div class="container">
   <header>
     <h1><span>lucivy</span> playground</h1>
-    <p>BM25 search with cross-token fuzzy matching &mdash; running in your browser via WASM</p>
+    <p>BM25 full-text search &mdash; substring, fuzzy, regex &mdash; running in your browser via WASM</p>
   </header>
 
   <div class="search-bar">
@@ -352,18 +352,31 @@ async function startup() {
     window._lucivy = lucivy;
     await lucivy.ready;
 
-    statusEl.textContent = 'Loading dataset (rag3db source code)...';
-    const resp = await fetch('./rag3db.luce');
+    // Try rag3db.luce first, fall back to dataset.luce
+    let datasetName = 'rag3db.luce';
+    statusEl.textContent = 'Loading dataset...';
+    let resp = await fetch('./' + datasetName);
+    if (!resp.ok) {
+      datasetName = 'dataset.luce';
+      resp = await fetch('./' + datasetName);
+    }
     if (!resp.ok) throw new Error(`Failed to fetch dataset: ${resp.status}`);
     const blob = await resp.arrayBuffer();
     const data = new Uint8Array(blob);
 
-    statusEl.textContent = 'Importing snapshot...';
+    const isRag3db = datasetName.includes('rag3db');
+    const demoLabel = isRag3db
+      ? 'rag3db source code (5k+ full code documents)'
+      : 'lucivy source code';
+
+    statusEl.textContent = `Importing ${datasetName}...`;
     demoIndex = await lucivy.importSnapshot(data, '/playground');
     demoNumDocs = await demoIndex.numDocs();
 
+    demoLabelText = demoLabel;
+    tabDemo.childNodes[0].textContent = isRag3db ? 'rag3db source code ' : 'Lucivy source code ';
     tabDemoCount.textContent = `(${demoNumDocs})`;
-    setReady(`${demoNumDocs} documents indexed (lucivy source code)`);
+    setReady(`${demoNumDocs} documents indexed (${demoLabel})`);
   } catch (e) {
     statusEl.className = 'status error';
     statusEl.textContent = `Error: ${e.message}`;
@@ -381,6 +394,8 @@ function setReady(msg) {
 
 // ── Tabs ──────────────────────────────────────────────────────────
 
+let demoLabelText = 'lucivy source code';
+
 function switchTab(tab) {
   if (tab === 'user' && !userIndex) return;
   activeTab = tab;
@@ -388,7 +403,7 @@ function switchTab(tab) {
   tabUser.classList.toggle('active', tab === 'user');
 
   const count = tab === 'demo' ? demoNumDocs : userNumDocs;
-  const label = tab === 'demo' ? 'lucivy source code' : 'your files';
+  const label = tab === 'demo' ? demoLabelText : 'your files';
   setReady(`${count} documents indexed (${label})`);
 
   resultsEl.innerHTML = '';

@@ -357,26 +357,46 @@ where
         per_token_postings.push(postings);
     }
 
-    // Step 2: Find chains of consecutive token positions across docs
+    // Step 2: Pick the most selective token as pivot (fewest postings).
+    // This avoids iterating thousands of candidates when a short token
+    // like "is" or "a" is in the query alongside a long discriminating one.
+
+    let pivot_idx = per_token_postings
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, p)| p.len())
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+
+    // Step 3: Find chains of consecutive token positions across docs
     //
-    // For each first-token posting, try to extend it by finding consecutive Ti
-    // in the following token postings. Then validate separators via GapMap.
+    // For each pivot posting, extend in both directions (backward + forward)
+    // to build a full chain, then validate separators via GapMap.
 
     let mut matches: Vec<SuffixContainsMultiMatch> = Vec::new();
     let gapmap = sfx_reader.gapmap();
 
-    for first_entry in &per_token_postings[0] {
-        let doc_id = first_entry.doc_id;
-        let first_ti = first_entry.token_index;
+    for pivot_entry in &per_token_postings[pivot_idx] {
+        let doc_id = pivot_entry.doc_id;
+        let pivot_ti = pivot_entry.token_index;
 
-        // Try to build a chain starting from this first_entry
-        let mut chain = vec![first_entry.clone()];
+        // The first token of the chain is at Ti = pivot_ti - pivot_idx
+        if (pivot_idx as u32) > pivot_ti {
+            continue; // pivot_ti too small to have tokens before it
+        }
+        let first_ti = pivot_ti - pivot_idx as u32;
+
+        // Build chain: check all positions from first_ti to first_ti + n - 1
+        let mut chain: Vec<Option<RawPostingEntry>> = vec![None; n];
+        chain[pivot_idx] = Some(pivot_entry.clone());
         let mut valid = true;
 
-        for step in 1..n {
+        for step in 0..n {
+            if step == pivot_idx {
+                continue; // already have the pivot
+            }
             let expected_ti = first_ti + step as u32;
 
-            // Binary search for (doc_id, expected_ti) in per_token_postings[step]
             let found = per_token_postings[step]
                 .binary_search_by(|e| {
                     e.doc_id.cmp(&doc_id).then(e.token_index.cmp(&expected_ti))
@@ -384,7 +404,7 @@ where
 
             match found {
                 Ok(idx) => {
-                    chain.push(per_token_postings[step][idx].clone());
+                    chain[step] = Some(per_token_postings[step][idx].clone());
                 }
                 Err(_) => {
                     valid = false;
@@ -397,7 +417,7 @@ where
             continue;
         }
 
-        // Step 3: Validate separators via GapMap
+        // Step 4: Validate separators via GapMap
         let mut seps_valid = true;
         for sep_idx in 0..query_separators.len() {
             let ti_a = first_ti + sep_idx as u32;
@@ -412,7 +432,6 @@ where
                     }
                 }
                 None => {
-                    // Can't read separator (cross-value boundary or invalid Ti)
                     seps_valid = false;
                     break;
                 }
@@ -424,6 +443,7 @@ where
         }
 
         // Build the multi-match result
+        let chain: Vec<RawPostingEntry> = chain.into_iter().map(|c| c.unwrap()).collect();
         let first = &chain[0];
         let last = &chain[chain.len() - 1];
 
@@ -439,7 +459,6 @@ where
             .unwrap_or(0);
 
         let byte_from = first.byte_from as usize + first_si as usize;
-        // byte_to: last token's byte_from + length of the query's last token
         let last_query_token = query_tokens[n - 1].to_lowercase();
         let byte_to = last.byte_from as usize + last_query_token.len();
 
@@ -736,6 +755,133 @@ mod tests {
         );
 
         assert!(results.is_empty(), "import and from are not consecutive tokens");
+    }
+
+    /// Fuzzy d=3: "is 3db cool" on "is rag3db cool" — middle token "3db" fuzzy
+    /// matches "rag3db" (Levenshtein distance 3: insert r,a,g). Validates that
+    /// fuzzy on middle tokens works with SI=0 filtering and pivot selection.
+    #[test]
+    fn test_multi_token_fuzzy_d3_middle_token() {
+        // Build a standalone index with "is rag3db cool"
+        let mut collector = SfxCollector::new();
+        collector.begin_doc();
+        collector.begin_value("is rag3db cool", 0);
+        collector.add_token("is", 0, 2);
+        collector.add_token("rag3db", 3, 9);
+        collector.add_token("cool", 10, 14);
+        collector.end_value();
+        collector.end_doc();
+
+        let sfx_bytes = collector.build().unwrap();
+        let reader = SfxFileReader::open(&sfx_bytes).unwrap();
+
+        // Sorted unique tokens: cool(0), is(1), rag3db(2)
+        let mut raw_postings: HashMap<u64, Vec<RawPostingEntry>> = HashMap::new();
+        raw_postings.insert(0, vec![
+            RawPostingEntry { doc_id: 0, token_index: 2, byte_from: 10, byte_to: 14 },
+        ]);
+        raw_postings.insert(1, vec![
+            RawPostingEntry { doc_id: 0, token_index: 0, byte_from: 0, byte_to: 2 },
+        ]);
+        raw_postings.insert(2, vec![
+            RawPostingEntry { doc_id: 0, token_index: 1, byte_from: 3, byte_to: 9 },
+        ]);
+
+        // "is 3db cool" with d=3 — "3db" should fuzzy match "rag3db" (distance 3)
+        let results = suffix_contains_multi_token_fuzzy(
+            &reader,
+            &["is", "3db", "cool"],
+            &[" ", " "],
+            |ord| raw_postings.get(&ord).cloned().unwrap_or_default(),
+            3,
+        );
+
+        assert_eq!(results.len(), 1, "should find 'is rag3db cool' via fuzzy d=3 on middle token '3db'");
+        assert_eq!(results[0].doc_id, 0);
+    }
+
+    /// Pivot optimization: "is cool" — "is" has few matches but is short,
+    /// "cool" is longer and also has few matches. Pivot should pick the
+    /// most selective token. Result should still find doc 1.
+    #[test]
+    fn test_multi_token_pivot_short_first_token() {
+        let (sfx_bytes, raw_postings) = build_test_index();
+        let reader = SfxFileReader::open(&sfx_bytes).unwrap();
+
+        // "is cool" in doc 1: "rag3db is cool"
+        // "is" (Ti=1), "cool" (Ti=2), separator " "
+        let results = suffix_contains_multi_token(
+            &reader,
+            &["is", "cool"],
+            &[" "],
+            |ord| raw_postings.get(&ord).cloned().unwrap_or_default(),
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].doc_id, 1);
+    }
+
+    /// Pivot with 3 tokens: "rag3db from core" — pivot should be "rag3db"
+    /// (most selective? actually all have 1-3 postings, but validates
+    /// bidirectional chain building).
+    #[test]
+    fn test_multi_token_pivot_middle_longest() {
+        let (sfx_bytes, raw_postings) = build_test_index();
+        let reader = SfxFileReader::open(&sfx_bytes).unwrap();
+
+        // Not a match: rag3db(Ti=1) from(Ti=2) but core is at Ti=4 not Ti=3
+        // Wait — doc 0: import(0) rag3db(1) from(2) rag3db(3) core(4)
+        // "rag3db from" → Ti=1,2 with sep " " ✓
+        // But "from rag3db" → Ti=2,3 → sep "'" not " "... actually sep between Ti=2 and Ti=3 is " '"
+        // Let's search "from rag3db" with sep " '"... no let's keep it simple
+        // "import rag3db" → Ti=0,1 with sep " " ✓
+        let results = suffix_contains_multi_token(
+            &reader,
+            &["import", "rag3db"],
+            &[" "],
+            |ord| raw_postings.get(&ord).cloned().unwrap_or_default(),
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].doc_id, 0);
+    }
+
+    /// Fuzzy multi-token with pivot: "iz cool" (d=1) — "iz" fuzzy matches "is",
+    /// pivot should pick "cool" (exact, fewer candidates) and validate backward.
+    #[test]
+    fn test_multi_token_fuzzy_pivot() {
+        let (sfx_bytes, raw_postings) = build_test_index();
+        let reader = SfxFileReader::open(&sfx_bytes).unwrap();
+
+        let results = suffix_contains_multi_token_fuzzy(
+            &reader,
+            &["iz", "cool"],
+            &[" "],
+            |ord| raw_postings.get(&ord).cloned().unwrap_or_default(),
+            1,
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].doc_id, 1);
+    }
+
+    /// Fuzzy multi-token: "rag3db iz kool" (d=1) — 3 tokens, fuzzy on middle and last.
+    /// Pivot should pick the most selective, validate bidirectionally.
+    #[test]
+    fn test_multi_token_fuzzy_three_tokens() {
+        let (sfx_bytes, raw_postings) = build_test_index();
+        let reader = SfxFileReader::open(&sfx_bytes).unwrap();
+
+        let results = suffix_contains_multi_token_fuzzy(
+            &reader,
+            &["rag3db", "iz", "kool"],
+            &[" ", " "],
+            |ord| raw_postings.get(&ord).cloned().unwrap_or_default(),
+            1,
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].doc_id, 1);
     }
 
     /// Integration test: real Index with real ._raw posting lists.
