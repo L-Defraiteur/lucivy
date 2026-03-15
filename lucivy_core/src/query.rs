@@ -11,13 +11,10 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use ld_lucivy::query::{
-    AllQuery, AutomatonPhraseQuery, BooleanQuery, ContinuationMode, FuzzyParams, FuzzyTermQuery,
-    HighlightSink, NgramContainsQuery, Occur, PhraseQuery, Query, QueryParser, RangeQuery,
-    RegexContinuationQuery, RegexParams, RegexQuery, SuffixContainsQuery, TermQuery,
-    VerificationMode,
+    AllQuery, AutomatonPhraseQuery, BooleanQuery, ContinuationMode, FuzzyTermQuery,
+    HighlightSink, Occur, PhraseQuery, Query, QueryParser, RangeQuery,
+    RegexContinuationQuery, RegexQuery, SuffixContainsQuery, TermQuery,
 };
-use regex::Regex;
-use regex_syntax::hir::literal::Extractor;
 use ld_lucivy::schema::{Field, FieldType, IndexRecordOption, Schema, Term};
 use ld_lucivy::Index;
 
@@ -222,34 +219,28 @@ pub fn build_query(
     ngram_pairs: &[(String, String)],
     highlight_sink: Option<Arc<HighlightSink>>,
 ) -> Result<Box<dyn Query>, String> {
+    // ngram_pairs is kept in the signature for API compatibility but no longer used.
+    let _ = ngram_pairs;
     let text_query = match config.query_type.as_str() {
         "term" => build_term_query(config, schema, index, raw_pairs, highlight_sink),
         "fuzzy" => build_fuzzy_query(config, schema, index, raw_pairs, highlight_sink),
         "phrase" => build_phrase_query(config, schema, index, raw_pairs, highlight_sink),
         "regex" => build_regex_query(config, schema, raw_pairs, highlight_sink),
-        "contains" => {
-            build_contains_query(config, schema, index, raw_pairs, ngram_pairs, highlight_sink)
+        "contains" | "sfx_contains" => {
+            build_contains_query(config, schema, raw_pairs, highlight_sink)
         }
         "startsWith" => build_starts_with_query(config, schema, index, raw_pairs, highlight_sink),
-        "sfx_contains" => {
-            build_sfx_contains_query(config, schema, raw_pairs, highlight_sink)
-        }
-        "sfx_contains_split" => {
-            let expanded = expand_split(config, "sfx_contains");
-            build_query(&expanded, schema, index, raw_pairs, ngram_pairs, highlight_sink)
-                .map(|q| q as Box<dyn Query>)
-        }
-        "contains_split" => {
+        "contains_split" | "sfx_contains_split" => {
             let expanded = expand_split(config, "contains");
-            build_query(&expanded, schema, index, raw_pairs, ngram_pairs, highlight_sink)
+            build_query(&expanded, schema, index, raw_pairs, &[], highlight_sink)
                 .map(|q| q as Box<dyn Query>)
         }
         "startsWith_split" => {
             let expanded = expand_split(config, "startsWith");
-            build_query(&expanded, schema, index, raw_pairs, ngram_pairs, highlight_sink)
+            build_query(&expanded, schema, index, raw_pairs, &[], highlight_sink)
                 .map(|q| q as Box<dyn Query>)
         }
-        "boolean" => build_boolean_query(config, schema, index, raw_pairs, ngram_pairs, highlight_sink),
+        "boolean" => build_boolean_query(config, schema, index, raw_pairs, highlight_sink),
         "parse" => build_parsed_query(config, schema, index),
         other => Err(format!("unknown query type: {other}")),
     }?;
@@ -260,7 +251,7 @@ pub fn build_query(
             let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
             clauses.push((Occur::Must, text_query));
             for filter in filters {
-                clauses.push((Occur::Must, build_filter_clause(filter, schema, index, raw_pairs, ngram_pairs)?));
+                clauses.push((Occur::Must, build_filter_clause(filter, schema, index, raw_pairs)?));
             }
             return Ok(Box::new(BooleanQuery::new(clauses)));
         }
@@ -350,188 +341,52 @@ fn build_phrase_query(
     Ok(Box::new(query))
 }
 
-/// Contains query: auto-cascade per position (exact → fuzzy → substring).
-///   - Uses AutomatonPhraseQuery which handles both single-token and multi-token.
-///   - Fuzzy distance defaults to 1 (configurable via `distance` field).
-///   - Extracts separators, prefix, and suffix from the query string for validation.
-/// Resolve the ngram field for a user field name, if ngram pairs are configured.
-fn resolve_ngram_field(
-    config: &QueryConfig,
-    schema: &Schema,
-    ngram_pairs: &[(String, String)],
-) -> Option<Field> {
-    let name = config.field.as_deref()?;
-    let ngram_name = ngram_pairs
-        .iter()
-        .find(|(user, _)| user == name)
-        .map(|(_, ngram)| ngram.as_str())?;
-    schema.get_field(ngram_name).ok()
-}
-
+/// Contains query: substring search via suffix FST (.sfx file).
+/// Zero stored text reads — direct proof via suffix walk + inverted index.
+///
+/// In regex mode (`regex: true`), uses RegexContinuationQuery for cross-token regex matching.
+/// In fuzzy mode (default), uses SuffixContainsQuery with optional Levenshtein distance.
 fn build_contains_query(
     config: &QueryConfig,
     schema: &Schema,
-    index: &Index,
     raw_pairs: &[(String, String)],
-    ngram_pairs: &[(String, String)],
     highlight_sink: Option<Arc<HighlightSink>>,
 ) -> Result<Box<dyn Query>, String> {
     let is_regex = config.regex.unwrap_or(false);
     if is_regex {
-        return build_contains_regex(config, schema, raw_pairs, ngram_pairs, highlight_sink);
+        return build_contains_regex(config, schema, raw_pairs, highlight_sink);
     }
-    build_contains_fuzzy(config, schema, index, raw_pairs, ngram_pairs, highlight_sink)
-}
 
-/// Contains query in fuzzy mode (default): tokenize → trigrams → fuzzy verification → BM25.
-fn build_contains_fuzzy(
-    config: &QueryConfig,
-    schema: &Schema,
-    index: &Index,
-    raw_pairs: &[(String, String)],
-    ngram_pairs: &[(String, String)],
-    highlight_sink: Option<Arc<HighlightSink>>,
-) -> Result<Box<dyn Query>, String> {
     let field = resolve_field(config, schema, raw_pairs, true)?;
-    let stored_field = resolve_field(config, schema, raw_pairs, false).ok();
     let value = config.value.as_deref().ok_or("contains query requires 'value'")?;
-    let fuzzy_distance = config.distance.unwrap_or(1);
-    let strict_separators = config.strict_separators.unwrap_or(true);
+    let distance = config.distance.unwrap_or(1);
 
-
-    let tokens = tokenize_with_offsets(index, field, schema, value);
-
-
-    if tokens.is_empty() {
-        let escaped = regex_escape(&value.to_lowercase());
-        let pattern = format!(".*{escaped}.*");
-        return RegexQuery::from_pattern(&pattern, field)
-            .map(|q| Box::new(q) as Box<dyn Query>)
-            .map_err(|e| format!("invalid contains pattern: {e}"));
-    }
-
-    let separators: Vec<String> = tokens
-        .windows(2)
-        .map(|w| value[w[0].offset_to..w[1].offset_from].to_string())
-        .collect();
-
-    let prefix = value[..tokens.first().map(|t| t.offset_from).unwrap_or(0)].to_string();
-    let suffix = value[tokens.last().map(|t| t.offset_to).unwrap_or(value.len())..].to_string();
-
-    let token_texts: Vec<String> = tokens.iter().map(|t| t.text.clone()).collect();
-    let distance_budget = fuzzy_distance as u32;
-
-    let ngram_field = resolve_ngram_field(config, schema, ngram_pairs)
-        .ok_or_else(|| {
-            let name = config.field.as_deref().unwrap_or("?");
-            format!(
-                "contains query requires an ngram field for '{name}'. \
-                 Configure a _ngram field in your schema for substring search."
-            )
-        })?;
-
-    let verification = VerificationMode::Fuzzy(FuzzyParams {
-        tokens: token_texts.clone(),
-        separators,
-        prefix,
-        suffix,
-        fuzzy_distance,
-        distance_budget,
-        strict_separators,
-    });
-    let mut query = NgramContainsQuery::new(
-        field,
-        ngram_field,
-        stored_field,
-        token_texts,
-        verification,
-    );
+    let mut query = SuffixContainsQuery::new(field, value.to_lowercase())
+        .with_fuzzy_distance(distance);
     if let Some(sink) = highlight_sink {
-        query = query.with_highlight_sink(sink, config.field.clone().unwrap_or_default());
+        let field_name = config.field.clone().unwrap_or_default();
+        query = query.with_highlight_sink(sink, field_name);
     }
     Ok(Box::new(query))
 }
 
-/// Contains query in regex mode: parse pattern → extract literals → trigrams → regex verification → BM25.
+/// Contains query in regex mode: cross-token regex via RegexContinuationQuery.
 fn build_contains_regex(
     config: &QueryConfig,
     schema: &Schema,
     raw_pairs: &[(String, String)],
-    ngram_pairs: &[(String, String)],
     highlight_sink: Option<Arc<HighlightSink>>,
 ) -> Result<Box<dyn Query>, String> {
     let field = resolve_field(config, schema, raw_pairs, true)?;
-    let stored_field = resolve_field(config, schema, raw_pairs, false).ok();
     let pattern = config.value.as_deref().ok_or("contains regex query requires 'value'")?;
-    let fuzzy_distance = config.distance.unwrap_or(0); // regex default: no fuzzy
-
-    // 1. Fold the pattern to ASCII (ç→c, é→e) for accent-insensitive matching.
-    //    The scorer folds stored text before running the regex, so the pattern must also be folded.
-    let mut folded_pattern = String::new();
-    ld_lucivy::tokenizer::to_ascii(pattern, &mut folded_pattern);
-    let compiled = Regex::new(&format!("(?i){folded_pattern}"))
-        .map_err(|e| format!("invalid regex pattern: {e}"))?;
-
-    // 2. Parse HIR and extract obligatory literals.
-    let hir = regex_syntax::parse(pattern)
-        .map_err(|e| format!("invalid regex syntax: {e}"))?;
-    let seq = Extractor::new().extract(&hir);
-    let literals: Vec<String> = seq
-        .literals()
-        .map(|lits| {
-            lits.iter()
-                .map(|lit| String::from_utf8_lossy(lit.as_bytes()).to_lowercase())
-                .filter(|s| s.len() >= 3) // Only keep literals >= 3 chars (useful for trigrams)
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // 3. If we have an ngram field, always use NgramContainsQuery (with or without literals).
-    //    When literals are empty (< 3 chars), the scorer does a full segment scan
-    //    instead of trigram-based candidate collection, but still uses BM25 scoring.
-    if let Some(ngram_field) = resolve_ngram_field(config, schema, ngram_pairs) {
-        let verification = VerificationMode::Regex(RegexParams {
-            compiled,
-            literals: literals.clone(),
-            fuzzy_distance,
-        });
-        let mut query = NgramContainsQuery::new(
-            field,
-            ngram_field,
-            stored_field,
-            literals,
-            verification,
-        );
-        if let Some(sink) = highlight_sink {
-            query = query.with_highlight_sink(sink, config.field.clone().unwrap_or_default());
-        }
-        return Ok(Box::new(query));
-    }
-
-    // Fallback (no ngram field): standard RegexQuery (FST walk, ConstScorer — no BM25).
-    let mut query = RegexQuery::from_pattern(&format!("(?i){pattern}"), field)
-        .map_err(|e| format!("invalid regex: {e}"))?;
-    if let Some(sink) = highlight_sink {
-        query = query.with_highlight_sink(sink, config.field.clone().unwrap_or_default());
-    }
-    Ok(Box::new(query) as Box<dyn Query>)
-}
-
-/// SFX contains query: substring search via suffix FST (.sfx file).
-/// Zero stored text reads — direct proof via suffix walk + inverted index.
-/// Requires .sfx file to exist for the target field.
-fn build_sfx_contains_query(
-    config: &QueryConfig,
-    schema: &Schema,
-    raw_pairs: &[(String, String)],
-    highlight_sink: Option<Arc<HighlightSink>>,
-) -> Result<Box<dyn Query>, String> {
-    let field = resolve_field(config, schema, raw_pairs, true)?;
-    let value = config.value.as_deref().ok_or("sfx_contains query requires 'value'")?;
     let distance = config.distance.unwrap_or(0);
 
-    let mut query = SuffixContainsQuery::new(field, value.to_lowercase())
-        .with_fuzzy_distance(distance);
+    let mut query = RegexContinuationQuery::from_regex(
+        field,
+        pattern.to_string(),
+        ContinuationMode::Contains,
+    );
+    query = query.with_fuzzy_distance(distance);
     if let Some(sink) = highlight_sink {
         let field_name = config.field.clone().unwrap_or_default();
         query = query.with_highlight_sink(sink, field_name);
@@ -548,59 +403,27 @@ fn build_sfx_contains_query(
 fn build_starts_with_query(
     config: &QueryConfig,
     schema: &Schema,
-    index: &Index,
+    _index: &Index,
     raw_pairs: &[(String, String)],
     highlight_sink: Option<Arc<HighlightSink>>,
 ) -> Result<Box<dyn Query>, String> {
     let field = resolve_field(config, schema, raw_pairs, true)?;
-    let stored_field = resolve_field(config, schema, raw_pairs, false).ok();
     let value = config.value.as_deref().ok_or("startsWith query requires 'value'")?;
     let fuzzy_distance = config.distance.unwrap_or(0);
 
-    let tokens = tokenize_with_offsets(index, field, schema, value);
-    if tokens.is_empty() {
-        return Err("startsWith query produced no tokens".into());
-    }
-
-    // Single token: use FuzzyTermQuery in prefix mode directly.
-    if tokens.len() == 1 {
-        let term = Term::from_field_text(field, &tokens[0].text);
-        let mut query = FuzzyTermQuery::new_prefix(term, fuzzy_distance, true);
-        if let Some(sink) = highlight_sink {
-            query = query.with_highlight_sink(sink, config.field.clone().unwrap_or_default());
-        }
-        return Ok(Box::new(query));
-    }
-
-    // Extract separators between tokens (same as contains).
-    let separators: Vec<String> = tokens
-        .windows(2)
-        .map(|w| value[w[0].offset_to..w[1].offset_from].to_string())
-        .collect();
-    let prefix = value[..tokens.first().map(|t| t.offset_from).unwrap_or(0)].to_string();
-
-    let phrase_terms: Vec<(usize, String)> = tokens
-        .iter()
-        .enumerate()
-        .map(|(i, t)| (i, t.text.clone()))
-        .collect();
-
-    // Multi-token: AutomatonPhraseQuery with separators + prefix mode.
-    let mut query = AutomatonPhraseQuery::new_with_separators(
+    // Use RegexContinuationQuery with prefix DFA. The prefix DFA accepts as
+    // soon as the target text is consumed, regardless of remaining token bytes.
+    // Cross-token continuation through GapMap handles multi-token startsWith.
+    let mut query = RegexContinuationQuery::new(
         field,
-        stored_field,
-        phrase_terms,
-        50, // max_expansions for prefix
-        fuzzy_distance,
-        separators,
-        prefix,
-        String::new(), // no suffix for startsWith
-        fuzzy_distance as u32,
-        true, // strict_separators
-    ).with_prefix_mode();
-
+        value.to_lowercase(),
+        ContinuationMode::StartsWith,
+    )
+    .with_prefix()
+    .with_fuzzy_distance(fuzzy_distance);
     if let Some(sink) = highlight_sink {
-        query = query.with_highlight_sink(sink, config.field.clone().unwrap_or_default());
+        let field_name = config.field.clone().unwrap_or_default();
+        query = query.with_highlight_sink(sink, field_name);
     }
     Ok(Box::new(query))
 }
@@ -647,24 +470,23 @@ fn build_boolean_query(
     schema: &Schema,
     index: &Index,
     raw_pairs: &[(String, String)],
-    ngram_pairs: &[(String, String)],
     highlight_sink: Option<Arc<HighlightSink>>,
 ) -> Result<Box<dyn Query>, String> {
     let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
 
     if let Some(ref must) = config.must {
         for sub in must {
-            clauses.push((Occur::Must, build_query(sub, schema, index, raw_pairs, ngram_pairs, highlight_sink.clone())?));
+            clauses.push((Occur::Must, build_query(sub, schema, index, raw_pairs, &[], highlight_sink.clone())?));
         }
     }
     if let Some(ref should) = config.should {
         for sub in should {
-            clauses.push((Occur::Should, build_query(sub, schema, index, raw_pairs, ngram_pairs, highlight_sink.clone())?));
+            clauses.push((Occur::Should, build_query(sub, schema, index, raw_pairs, &[], highlight_sink.clone())?));
         }
     }
     if let Some(ref must_not) = config.must_not {
         for sub in must_not {
-            clauses.push((Occur::MustNot, build_query(sub, schema, index, raw_pairs, ngram_pairs, None)?));
+            clauses.push((Occur::MustNot, build_query(sub, schema, index, raw_pairs, &[], None)?));
         }
     }
 
@@ -739,7 +561,6 @@ fn build_filter_clause(
     schema: &Schema,
     index: &Index,
     raw_pairs: &[(String, String)],
-    ngram_pairs: &[(String, String)],
 ) -> Result<Box<dyn Query>, String> {
     // Composite ops (must/should/must_not) — no field required.
     match filter.op.as_str() {
@@ -754,7 +575,7 @@ fn build_filter_clause(
             };
             let clauses: Vec<(Occur, Box<dyn Query>)> = sub_clauses
                 .iter()
-                .map(|c| Ok((occur, build_filter_clause(c, schema, index, raw_pairs, ngram_pairs)?)))
+                .map(|c| Ok((occur, build_filter_clause(c, schema, index, raw_pairs)?)))
                 .collect::<Result<Vec<_>, String>>()?;
             if clauses.is_empty() {
                 return Err(format!("'{}' filter requires at least one clause", filter.op));
@@ -886,7 +707,7 @@ fn build_filter_clause(
                 distance: Some(distance),
                 ..Default::default()
             };
-            build_contains_query(&config, schema, index, raw_pairs, ngram_pairs, None)
+            build_contains_query(&config, schema, raw_pairs, None)
         }
         other => Err(format!("unknown filter operator: {other}")),
     }
@@ -1068,10 +889,8 @@ mod tests {
         }
     }
 
-    fn make_filter_index() -> (Schema, Index, Vec<(String, String)>, Vec<(String, String)>) {
+    fn make_filter_index() -> (Schema, Index, Vec<(String, String)>) {
         use ld_lucivy::schema::{TextFieldIndexing, TextOptions};
-        use ld_lucivy::tokenizer::{LowerCaser, SimpleTokenizer, TextAnalyzer};
-        use crate::tokenizer::NgramFilter;
 
         let mut builder = Schema::builder();
         builder.add_u64_field("count", INDEXED | STORED);
@@ -1083,35 +902,22 @@ mod tests {
             .set_tokenizer("default")
             .set_index_option(ld_lucivy::schema::IndexRecordOption::WithFreqsAndPositionsAndOffsets);
         builder.add_text_field("name._raw", TextOptions::default().set_indexing_options(raw_indexing));
-        // Ngram field for "name" (trigrams for contains candidate generation)
-        let ngram_indexing = TextFieldIndexing::default()
-            .set_tokenizer("ngram")
-            .set_index_option(ld_lucivy::schema::IndexRecordOption::Basic);
-        builder.add_text_field("name._ngram", TextOptions::default().set_indexing_options(ngram_indexing));
 
         let schema = builder.build();
         let index = Index::create_in_ram(schema.clone());
 
-        // Register ngram tokenizer
-        let ngram_tokenizer = TextAnalyzer::builder(SimpleTokenizer::default())
-            .filter(LowerCaser)
-            .filter(NgramFilter)
-            .build();
-        index.tokenizers().register("ngram", ngram_tokenizer);
-
         let raw_pairs = vec![("name".to_string(), "name._raw".to_string())];
-        let ngram_pairs = vec![("name".to_string(), "name._ngram".to_string())];
-        (schema, index, raw_pairs, ngram_pairs)
+        (schema, index, raw_pairs)
     }
 
     fn assert_filter_ok(filter: &FilterClause) {
-        let (schema, index, raw_pairs, ngram_pairs) = make_filter_index();
-        assert!(build_filter_clause(filter, &schema, &index, &raw_pairs, &ngram_pairs).is_ok());
+        let (schema, index, raw_pairs) = make_filter_index();
+        assert!(build_filter_clause(filter, &schema, &index, &raw_pairs).is_ok());
     }
 
     fn assert_filter_err(filter: &FilterClause) {
-        let (schema, index, raw_pairs, ngram_pairs) = make_filter_index();
-        assert!(build_filter_clause(filter, &schema, &index, &raw_pairs, &ngram_pairs).is_err());
+        let (schema, index, raw_pairs) = make_filter_index();
+        assert!(build_filter_clause(filter, &schema, &index, &raw_pairs).is_err());
     }
 
     #[test]
@@ -1186,21 +992,20 @@ mod tests {
 
     #[test]
     fn test_filter_clause_starts_with() {
-        let (schema, index, raw_pairs, ngram_pairs) = make_filter_index();
+        let (schema, index, raw_pairs) = make_filter_index();
         let filter = make_filter("name", "starts_with", json!("hel"));
-        let result = build_filter_clause(&filter, &schema, &index, &raw_pairs, &ngram_pairs);
+        let result = build_filter_clause(&filter, &schema, &index, &raw_pairs);
         assert!(result.is_ok(), "starts_with failed: {:?}", result.err());
     }
 
     #[test]
     fn test_filter_clause_contains() {
-        // Contains dispatches to build_contains_query — needs ngram pairs for trigram candidate generation.
         assert_filter_ok(&make_filter("name", "contains", json!("ell")));
     }
 
     #[test]
     fn test_filter_clause_contains_with_fuzzy() {
-        let (schema, index, raw_pairs, ngram_pairs) = make_filter_index();
+        let (schema, index, raw_pairs) = make_filter_index();
         let filter = FilterClause {
             field: Some("name".into()),
             op: "contains".into(),
@@ -1208,7 +1013,7 @@ mod tests {
             distance: Some(2),
             clauses: None,
         };
-        assert!(build_filter_clause(&filter, &schema, &index, &raw_pairs, &ngram_pairs).is_ok());
+        assert!(build_filter_clause(&filter, &schema, &index, &raw_pairs).is_ok());
     }
 
     // ─── Composite ops ────────────────────────────────────────────────

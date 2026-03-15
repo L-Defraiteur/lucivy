@@ -2,10 +2,9 @@
 //!
 //! Each LucivyHandle holds an Index, an IndexWriter, and an IndexReader.
 //!
-//! Every "text" field gets a triple-field layout:
+//! Every "text" field gets a dual-field layout:
 //!   - `{name}` : tokenized (stemmed if stemmer configured, else lowercase)
 //!   - `{name}._raw` : lowercased only (for term/fuzzy/regex/contains queries — precision)
-//!   - `{name}._ngram` : trigrams (for fast substring candidate generation in contains queries)
 //! The routing is transparent — users always reference the base field name.
 
 use std::path::Path;
@@ -26,17 +25,11 @@ pub const NODE_ID_FIELD: &str = "_node_id";
 /// Suffix appended to text fields for the non-stemmed counterpart.
 pub const RAW_SUFFIX: &str = "._raw";
 
-/// Suffix appended to text fields for the n-gram (trigram) counterpart.
-pub const NGRAM_SUFFIX: &str = "._ngram";
-
 /// Tokenizer name for ._raw fields (camelCase split + lowercase).
 const RAW_TOKENIZER: &str = "raw_code";
 
 /// Tokenizer name for stemmed fields.
 const STEMMED_TOKENIZER: &str = "stemmed";
-
-/// Tokenizer name for n-gram (trigram) fields.
-const NGRAM_TOKENIZER: &str = "ngram";
 
 /// Opaque handle shared by all bindings.
 pub struct LucivyHandle {
@@ -49,8 +42,7 @@ pub struct LucivyHandle {
     /// Maps user field names to their `._raw` counterpart names.
     /// Always populated for "text" fields.
     pub raw_field_pairs: Vec<(String, String)>,
-    /// Maps user field names to their `._ngram` counterpart names.
-    /// Always populated for "text" fields.
+    /// Deprecated: kept for API compatibility, always empty.
     pub ngram_field_pairs: Vec<(String, String)>,
     /// Original schema config, available for bindings that need field metadata on open().
     pub config: Option<SchemaConfig>,
@@ -84,7 +76,7 @@ fn create_writer(index: &Index) -> Result<IndexWriter, String> {
 impl LucivyHandle {
     /// Create a new index with the given directory and schema config.
     pub fn create(dir: impl Directory, config: &SchemaConfig) -> Result<Self, String> {
-        let (schema, field_map, raw_field_pairs, ngram_field_pairs) = build_schema(config)?;
+        let (schema, field_map, raw_field_pairs) = build_schema(config)?;
 
         // Persist config BEFORE creating the index, so it bypasses ManagedDirectory's GC.
         // ManagedDirectory.atomic_write registers files as "managed" and the GC deletes them
@@ -114,7 +106,7 @@ impl LucivyHandle {
             schema,
             field_map,
             raw_field_pairs,
-            ngram_field_pairs,
+            ngram_field_pairs: Vec::new(),
             config: Some(config.clone()),
             has_uncommitted: AtomicBool::new(false),
         })
@@ -130,36 +122,23 @@ impl LucivyHandle {
         let index = Index::open(dir).map_err(|e| format!("cannot open index: {e}"))?;
 
         // Use the pre-read config to re-register tokenizers and rebuild field pairs.
-        let (config, raw_field_pairs, ngram_field_pairs) = match config_bytes {
+        let (config, raw_field_pairs) = match config_bytes {
             Some(config_data) => {
                 match serde_json::from_slice::<SchemaConfig>(&config_data) {
                     Ok(config) => {
                         configure_tokenizers(&index, &config);
-                        let text_fields: Vec<_> = config
+                        let raw: Vec<_> = config
                             .fields
                             .iter()
                             .filter(|f| f.field_type == "text")
-                            .collect();
-                        let string_fields: Vec<_> = config
-                            .fields
-                            .iter()
-                            .filter(|f| f.field_type == "string")
-                            .collect();
-                        let raw: Vec<_> = text_fields
-                            .iter()
                             .map(|f| (f.name.clone(), format!("{}{RAW_SUFFIX}", f.name)))
                             .collect();
-                        let ngram: Vec<_> = text_fields
-                            .iter()
-                            .chain(string_fields.iter())
-                            .map(|f| (f.name.clone(), format!("{}{NGRAM_SUFFIX}", f.name)))
-                            .collect();
-                        (Some(config), raw, ngram)
+                        (Some(config), raw)
                     }
-                    Err(_) => (None, Vec::new(), Vec::new()),
+                    Err(_) => (None, Vec::new()),
                 }
             }
-            None => (None, Vec::new(), Vec::new()),
+            None => (None, Vec::new()),
         };
 
         let schema = index.schema();
@@ -182,7 +161,7 @@ impl LucivyHandle {
             schema,
             field_map,
             raw_field_pairs,
-            ngram_field_pairs,
+            ngram_field_pairs: Vec::new(),
             config,
             has_uncommitted: AtomicBool::new(false),
         })
@@ -228,11 +207,10 @@ impl LucivyHandle {
 
 pub fn build_schema(
     config: &SchemaConfig,
-) -> Result<(Schema, Vec<(String, Field)>, Vec<(String, String)>, Vec<(String, String)>), String> {
+) -> Result<(Schema, Vec<(String, Field)>, Vec<(String, String)>), String> {
     let mut builder = Schema::builder();
     let mut field_map = Vec::new();
     let mut raw_field_pairs = Vec::new();
-    let mut ngram_field_pairs = Vec::new();
     let has_stemmer = config.stemmer.is_some();
 
     // Auto-add _node_id as u64 FAST + INDEXED + STORED field.
@@ -265,17 +243,6 @@ pub fn build_schema(
                 let raw_field = builder.add_text_field(&raw_name, raw_opts);
                 field_map.push((raw_name.clone(), raw_field));
                 raw_field_pairs.push((field_def.name.clone(), raw_name));
-
-                // N-gram counterpart: trigrams for fast substring candidate generation.
-                // Uses IndexRecordOption::Basic (doc IDs only — no positions/offsets needed).
-                let ngram_indexing = TextFieldIndexing::default()
-                    .set_tokenizer(NGRAM_TOKENIZER)
-                    .set_index_option(IndexRecordOption::Basic);
-                let ngram_opts = TextOptions::default().set_indexing_options(ngram_indexing);
-                let ngram_name = format!("{}{NGRAM_SUFFIX}", field_def.name);
-                let ngram_field = builder.add_text_field(&ngram_name, ngram_opts);
-                field_map.push((ngram_name.clone(), ngram_field));
-                ngram_field_pairs.push((field_def.name.clone(), ngram_name));
             }
             "u64" => {
                 use ld_lucivy::schema::{NumericOptions, FAST, INDEXED};
@@ -331,30 +298,18 @@ pub fn build_schema(
                 };
                 let field = builder.add_text_field(&field_def.name, opts);
                 field_map.push((field_def.name.clone(), field));
-
-                // Ngram counterpart for substring matching (NgramContainsQuery).
-                let ngram_indexing = TextFieldIndexing::default()
-                    .set_tokenizer(NGRAM_TOKENIZER)
-                    .set_index_option(IndexRecordOption::Basic);
-                let ngram_opts = TextOptions::default().set_indexing_options(ngram_indexing);
-                let ngram_name = format!("{}{NGRAM_SUFFIX}", field_def.name);
-                let ngram_field = builder.add_text_field(&ngram_name, ngram_opts);
-                field_map.push((ngram_name.clone(), ngram_field));
-                ngram_field_pairs.push((field_def.name.clone(), ngram_name));
             }
             other => return Err(format!("unknown field type: {other}")),
         }
     }
 
-    Ok((builder.build(), field_map, raw_field_pairs, ngram_field_pairs))
+    Ok((builder.build(), field_map, raw_field_pairs))
 }
 
 pub fn configure_tokenizers(index: &Index, config: &SchemaConfig) {
     use ld_lucivy::tokenizer::{
-        AsciiFoldingFilter, CamelCaseSplitFilter, LowerCaser, SimpleTokenizer, TextAnalyzer,
+        CamelCaseSplitFilter, LowerCaser, SimpleTokenizer, TextAnalyzer,
     };
-
-    use crate::tokenizer::NgramFilter;
 
     // Raw tokenizer for ._raw fields: split camelCase BEFORE lowercasing.
     // CamelCaseSplitFilter also handles long token splitting (>256 bytes).
@@ -363,16 +318,6 @@ pub fn configure_tokenizers(index: &Index, config: &SchemaConfig) {
         .filter(LowerCaser)
         .build();
     index.tokenizers().register(RAW_TOKENIZER, raw_tokenizer);
-
-    // N-gram tokenizer: always registered (used by ._ngram fields for contains queries).
-    // AsciiFoldingFilter normalizes diacritics (ç→c, é→e) so that ngram candidates
-    // are not missed when query/data differ only by accents.
-    let ngram_tokenizer = TextAnalyzer::builder(SimpleTokenizer::default())
-        .filter(LowerCaser)
-        .filter(AsciiFoldingFilter)
-        .filter(NgramFilter)
-        .build();
-    index.tokenizers().register(NGRAM_TOKENIZER, ngram_tokenizer);
 
     // Stemmer: only if requested.
     if let Some(ref stemmer_lang) = config.stemmer {
@@ -423,8 +368,8 @@ mod tests {
 
     /// Integration test: STRING filter field + contains filter via build_query.
     #[test]
-    fn test_string_filter_field_contains() {
-        let tmp = std::env::temp_dir().join("lucivy_test_string_filter_contains");
+    fn test_string_filter_field_eq() {
+        let tmp = std::env::temp_dir().join("lucivy_test_string_filter_eq");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let path = tmp.to_str().unwrap();
@@ -441,12 +386,6 @@ mod tests {
 
         let directory = StdFsDirectory::open(path).unwrap();
         let handle = LucivyHandle::create(directory, &config).unwrap();
-
-        // Verify ngram pairs include "tag"
-        assert!(
-            handle.ngram_field_pairs.iter().any(|(user, _)| user == "tag"),
-            "ngram_field_pairs should contain tag: {:?}", handle.ngram_field_pairs
-        );
 
         // Add documents
         let body_field = handle.field("body").unwrap();
@@ -466,16 +405,7 @@ mod tests {
                 doc.add_u64(nid_field, nid);
                 doc.add_text(body_field, body);
                 doc.add_text(tag_field, tag);
-                // Auto-duplicate to ngram fields
-                for (user, ngram_name) in &handle.ngram_field_pairs {
-                    if user == "body" {
-                        if let Some(f) = handle.field(ngram_name) { doc.add_text(f, body); }
-                    }
-                    if user == "tag" {
-                        if let Some(f) = handle.field(ngram_name) { doc.add_text(f, tag); }
-                    }
-                }
-                // Also raw field for body
+                // Auto-duplicate to raw field for body
                 for (user, raw_name) in &handle.raw_field_pairs {
                     if user == "body" {
                         if let Some(f) = handle.field(raw_name) { doc.add_text(f, body); }
@@ -487,12 +417,12 @@ mod tests {
         }
         handle.reader.reload().unwrap();
 
-        // Search: body contains "programming" + filter tag contains "ystem"
+        // Search: body contains "programming" + filter tag eq "systems"
         let query_json = r#"{
             "type": "contains",
             "field": "body",
             "value": "programming",
-            "filters": [{"field": "tag", "op": "contains", "value": "ystem"}]
+            "filters": [{"field": "tag", "op": "eq", "value": "systems"}]
         }"#;
         let query_config: crate::query::QueryConfig = serde_json::from_str(query_json).unwrap();
         let query = crate::query::build_query(
@@ -508,7 +438,7 @@ mod tests {
         let collector = ld_lucivy::collector::TopDocs::with_limit(10).order_by_score();
         let results = searcher.search(&*query, &collector).unwrap();
 
-        println!("Results for contains 'ystem' filter: {:?}", results);
+        println!("Results for eq 'systems' filter: {:?}", results);
         assert_eq!(results.len(), 1, "Should find 1 doc (tag=systems, body has programming)");
     }
 
@@ -589,7 +519,7 @@ mod tests {
         let mut fields: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         for (field, value) in doc.field_values() {
             let name = handle.schema.get_field_name(field);
-            if name == NODE_ID_FIELD || name.ends_with(RAW_SUFFIX) || name.ends_with(NGRAM_SUFFIX) {
+            if name == NODE_ID_FIELD || name.ends_with(RAW_SUFFIX) {
                 continue;
             }
             if let Some(s) = value.as_value().as_str() {
