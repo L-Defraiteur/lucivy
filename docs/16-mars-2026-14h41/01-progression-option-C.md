@@ -36,6 +36,13 @@ Même pattern dans `suffix_contains_query.rs` (closure boxed).
 - RegexContinuation : 20/20
 - SuffixContains : 9/9
 
+### Phase 1 : ResolvedPostings ✅
+- `bbcb225` — ResolvedPostings adaptateur Vec<PostingEntry> → Postings + DocSet, 7 tests
+- Binary search seek, groupement par doc_id, O(1) advance
+
+### Phase 2 préparation : SfxTermDictionary ordinal methods ✅
+- `b2b8abc` — search_automaton_ordinals(), get_ordinal(), range_scan_ordinals()
+
 ## Reste à faire
 
 ### BM25 doc_freq
