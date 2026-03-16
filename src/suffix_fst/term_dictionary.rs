@@ -175,6 +175,60 @@ impl<'a> SfxTermDictionary<'a> {
         results
     }
 
+    /// Search with automaton (SI=0 only). Returns (key, raw_ordinal) pairs.
+    pub fn search_automaton_ordinals<A: Automaton>(&self, automaton: &A) -> Vec<(String, u64)>
+    where A::State: Clone {
+        let mut stream = self.sfx_reader.fst().search(automaton).into_stream();
+        let mut results = Vec::new();
+        while let Some((key, val)) = stream.next() {
+            let parents = self.decode_parents(val);
+            for p in &parents {
+                if p.si == 0 {
+                    if let Ok(s) = std::str::from_utf8(key) {
+                        results.push((s.to_string(), p.raw_ordinal));
+                    }
+                    break;
+                }
+            }
+        }
+        results
+    }
+
+    /// Lookup a term → raw_ordinal (SI=0 only).
+    pub fn get_ordinal(&self, key: &[u8]) -> io::Result<Option<u64>> {
+        let key_str = std::str::from_utf8(key).map_err(|e| io::Error::other(e.to_string()))?;
+        let lower = key_str.to_lowercase();
+        let parents = self.sfx_reader.resolve_suffix(&lower);
+        for p in &parents {
+            if p.si == 0 {
+                return Ok(Some(p.raw_ordinal));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Range scan (SI=0 only). Returns (key, raw_ordinal) pairs.
+    pub fn range_scan_ordinals(&self, ge: &[u8], lt: Option<&[u8]>) -> Vec<(String, u64)> {
+        let mut builder = self.sfx_reader.fst().range().ge(ge);
+        if let Some(lt_bound) = lt {
+            builder = builder.lt(lt_bound);
+        }
+        let mut stream = builder.into_stream();
+        let mut results = Vec::new();
+        while let Some((key, val)) = stream.next() {
+            let parents = self.decode_parents(val);
+            for p in &parents {
+                if p.si == 0 {
+                    if let Ok(s) = std::str::from_utf8(key) {
+                        results.push((s.to_string(), p.raw_ordinal));
+                    }
+                    break;
+                }
+            }
+        }
+        results
+    }
+
     /// Stream all terms (SI=0 only). Returns all terms with their TermInfo.
     pub fn stream_all(&self) -> Vec<(String, TermInfo)> {
         self.range_scan(&[], None)
