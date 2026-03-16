@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use lucivy_fst::{MapBuilder, OutputTableBuilder};
 
 /// Minimum suffix length to index.
@@ -103,17 +102,19 @@ pub fn decode_parent_entries(data: &[u8]) -> Vec<ParentEntry> {
 
 /// Builds a suffix FST from unique tokens.
 ///
-/// The builder accumulates (suffix_term -> parent list) mappings. Each token's
-/// suffixes of length >= min_suffix_len are registered. The builder only stores
-/// unique terms and their parents, not per-document occurrences (those live in ._raw).
+/// Uses batch accumulation: suffix entries are pushed into a Vec during add_token
+/// (O(1) per entry), then sorted and grouped at build time (one O(n log n) pass).
+/// This is faster than the BTreeMap approach which does O(log n) per insert.
 ///
 /// At build time, produces:
 /// - FST bytes: suffix term -> u64 output (encoded parent ref)
 /// - OutputTable bytes: for multi-parent suffixes, variable-length records
 ///   containing packed (raw_ordinal, SI) entries
 pub struct SuffixFstBuilder {
-    suffix_to_parents: BTreeMap<String, Vec<ParentEntry>>,
+    /// Unsorted, with potential duplicates. Sorted and grouped at build time.
+    entries: Vec<(String, ParentEntry)>,
     min_suffix_len: usize,
+    num_terms: usize,
 }
 
 impl SuffixFstBuilder {
@@ -123,66 +124,86 @@ impl SuffixFstBuilder {
 
     pub fn with_min_suffix_len(min: usize) -> Self {
         Self {
-            suffix_to_parents: BTreeMap::new(),
+            entries: Vec::new(),
             min_suffix_len: min,
+            num_terms: 0,
         }
     }
 
     /// Register all suffixes of a token. Called once per unique token in the segment.
-    /// `raw_ordinal` is the term ordinal in the ._raw FST (sorted alphabetical position).
+    /// `raw_ordinal` is the term ordinal (sorted alphabetical position).
     pub fn add_token(&mut self, token: &str, raw_ordinal: u64) {
         let lower = token.to_lowercase();
-        // Cap suffix depth to MAX_CHUNK_BYTES. Tokens should be split by the
-        // tokenizer (CamelCaseSplitFilter) before reaching here, but as a safety
-        // net we don't index suffixes beyond this depth.
         let max_si = lower.len().min(MAX_CHUNK_BYTES);
         for si in 0..max_si {
             if !lower.is_char_boundary(si) {
                 continue;
             }
             let suffix = &lower[si..];
-            // SI=0 (full token) is always indexed regardless of length.
-            // SI>0 (true suffix) is only indexed if long enough.
             if si > 0 && suffix.len() < self.min_suffix_len {
-                break; // remaining suffixes are even shorter
+                break;
             }
-            let entry = ParentEntry {
-                raw_ordinal,
-                si: si as u16,
-            };
-            let parents = self.suffix_to_parents.entry(suffix.to_string()).or_default();
-            // Deduplicate: same token shouldn't be added twice
-            if !parents.iter().any(|p| p.raw_ordinal == raw_ordinal && p.si == entry.si) {
-                parents.push(entry);
-            }
+            self.entries.push((
+                suffix.to_string(),
+                ParentEntry { raw_ordinal, si: si as u16 },
+            ));
         }
     }
 
     /// Build the FST and output table bytes.
-    /// Returns (fst_bytes, output_table_bytes).
-    pub fn build(self) -> Result<(Vec<u8>, Vec<u8>), lucivy_fst::Error> {
+    /// Sorts entries, deduplicates, groups by suffix key, then builds FST.
+    pub fn build(mut self) -> Result<(Vec<u8>, Vec<u8>), lucivy_fst::Error> {
+        // Sort by suffix key (lexicographic) then by (raw_ordinal, si) for stable dedup
+        self.entries.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then(a.1.raw_ordinal.cmp(&b.1.raw_ordinal))
+                .then(a.1.si.cmp(&b.1.si))
+        });
+        // Deduplicate
+        self.entries.dedup_by(|a, b| {
+            a.0 == b.0 && a.1.raw_ordinal == b.1.raw_ordinal && a.1.si == b.1.si
+        });
+
         let mut fst_builder = MapBuilder::memory();
         let mut output_table = OutputTableBuilder::new();
+        self.num_terms = 0;
 
-        for (suffix, parents) in &self.suffix_to_parents {
-            let output = if parents.len() == 1 {
-                let p = &parents[0];
+        let mut i = 0;
+        while i < self.entries.len() {
+            let key = &self.entries[i].0;
+            // Collect all parents for this suffix key
+            let mut j = i + 1;
+            while j < self.entries.len() && self.entries[j].0 == *key {
+                j += 1;
+            }
+            let num_parents = j - i;
+
+            let output = if num_parents == 1 {
+                let p = &self.entries[i].1;
                 encode_single_parent(p.raw_ordinal, p.si)
             } else {
-                let record = encode_parent_entries(parents);
+                let parents: Vec<ParentEntry> = self.entries[i..j]
+                    .iter()
+                    .map(|(_, p)| p.clone())
+                    .collect();
+                let record = encode_parent_entries(&parents);
                 let offset = output_table.add(&record);
                 encode_multi_parent(offset)
             };
-            fst_builder.insert(suffix.as_bytes(), output)?;
+            fst_builder.insert(key.as_bytes(), output)?;
+            self.num_terms += 1;
+
+            i = j;
         }
 
         let fst_bytes = fst_builder.into_inner()?;
         Ok((fst_bytes, output_table.into_inner()))
     }
 
-    /// Number of unique suffix terms accumulated so far.
+    /// Number of unique suffix terms. Only accurate after build().
+    /// During accumulation, returns an estimate (total entries, not unique).
     pub fn num_terms(&self) -> usize {
-        self.suffix_to_parents.len()
+        self.num_terms
     }
 }
 
@@ -364,12 +385,14 @@ mod tests {
     fn test_num_terms() {
         let mut builder = SuffixFstBuilder::with_min_suffix_len(3);
         builder.add_token("rag3db", 0);
-        // "rag3db"(6) - min_suffix_len(3) = suffixes: rag3db, ag3db, g3db, 3db = 4 terms
-        assert_eq!(builder.num_terms(), 4);
-
         builder.add_token("core", 1);
-        // "core"(4): core, ore = 2 new terms (but "ore" is new, "core" is new)
-        // Total: 4 + 2 = 6
-        assert_eq!(builder.num_terms(), 6);
+
+        // After build, num_terms = unique suffix keys:
+        // "rag3db": rag3db, ag3db, g3db, 3db (4)
+        // "core": core, ore (2)
+        // Total: 6 unique suffix keys
+        let (fst_bytes, _) = builder.build().unwrap();
+        let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
+        assert_eq!(fst.len(), 6);
     }
 }

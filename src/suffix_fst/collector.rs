@@ -215,8 +215,8 @@ impl SfxCollector {
             sfx_builder.add_token(&self.token_texts[old_ord as usize], new_ordinal as u64);
         }
 
-        let num_terms = sfx_builder.num_terms() as u32;
         let (fst_data, parent_list_data) = sfx_builder.build()?;
+        let num_terms = num_tokens as u32;
         let gapmap_data = self.gapmap_writer.serialize();
 
         let file_writer = SfxFileWriter::new(

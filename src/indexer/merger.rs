@@ -691,7 +691,6 @@ impl IndexMerger {
             for (ordinal, token) in unique_tokens.iter().enumerate() {
                 sfx_builder.add_token(token, ordinal as u64);
             }
-            let num_terms = sfx_builder.num_terms() as u32;
             let (fst_data, parent_list_data) = sfx_builder.build().map_err(|e| {
                 crate::LucivyError::SystemError(format!("merge sfx build: {e}"))
             })?;
@@ -801,7 +800,7 @@ impl IndexMerger {
                 parent_list_data,
                 gapmap_data,
                 doc_mapping.len() as u32,
-                num_terms,
+                unique_tokens.len() as u32,
             );
             let sfx_bytes = sfx_file.to_bytes();
             serializer.write_sfx(field.field_id(), &sfx_bytes)?;

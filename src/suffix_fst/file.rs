@@ -401,7 +401,7 @@ mod tests {
         sfx_builder.add_token("from", 2);
         sfx_builder.add_token("core", 3);
 
-        let num_terms = sfx_builder.num_terms() as u32;
+        let num_tokens = 4u32; // import, rag3db, from, core
         let (fst_data, parent_list_data) = sfx_builder.build().unwrap();
 
         // Build GapMap
@@ -416,7 +416,7 @@ mod tests {
             parent_list_data,
             gapmap_data,
             1, // num_docs
-            num_terms,
+            num_tokens,
         );
 
         file_writer.to_bytes()
@@ -490,7 +490,7 @@ mod tests {
         sfx_builder.add_token("core", 0);
         sfx_builder.add_token("hardcore", 1);
 
-        let num_terms = sfx_builder.num_terms() as u32;
+        let num_tokens = 2u32; // core, hardcore
         let (fst_data, parent_list_data) = sfx_builder.build().unwrap();
 
         let mut gapmap_writer = GapMapWriter::new();
@@ -502,7 +502,7 @@ mod tests {
             parent_list_data,
             gapmap_data,
             1,
-            num_terms,
+            num_tokens,
         );
         let bytes = file_writer.to_bytes();
         let reader = SfxFileReader::open(&bytes).unwrap();
