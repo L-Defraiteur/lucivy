@@ -225,8 +225,11 @@ pub fn build_schema(
     for field_def in &config.fields {
         match field_def.field_type.as_str() {
             "text" => {
-                // Main field: stemmed tokenizer if stemmer configured, else "default" (lowercase).
-                let main_tokenizer = if has_stemmer { STEMMED_TOKENIZER } else { "default" };
+                // Main field: stemmed tokenizer if configured, else RAW_TOKENIZER
+                // (CamelCaseSplit + lowercase). Using RAW_TOKENIZER when no stemmer avoids
+                // double tokenization in the segment_writer and gives better code search
+                // (camelCase → ["camel", "case"]).
+                let main_tokenizer = if has_stemmer { STEMMED_TOKENIZER } else { RAW_TOKENIZER };
                 let indexing = TextFieldIndexing::default()
                     .set_tokenizer(main_tokenizer)
                     .set_index_option(IndexRecordOption::WithFreqsAndPositionsAndOffsets);
