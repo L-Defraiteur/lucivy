@@ -11,11 +11,11 @@ use super::gapmap::GapMapWriter;
 ///
 /// Usage:
 ///   collector.begin_doc();
-///   collector.begin_value("hello world", 0);
+///   collector.begin_value("hello world");
 ///   collector.add_token("hello", 0, 5);
 ///   collector.add_token("world", 6, 11);
 ///   collector.end_value();
-///   collector.begin_value("foo bar", 3);
+///   collector.begin_value("foo bar");
 ///   collector.add_token("foo", 0, 3);
 ///   collector.add_token("bar", 4, 7);
 ///   collector.end_value();
@@ -88,12 +88,10 @@ impl SfxCollector {
 
     /// Begin a new value within the current document.
     /// `raw_text` is the original text string for this value.
-    /// `ti_start` is the posting Ti of the first token of this value
-    /// (= indexing_position.end_position before tokenizing this value).
-    pub fn begin_value(&mut self, raw_text: &str, ti_start: u32) {
+    /// Token index is tracked internally (cumulative across values in a doc).
+    pub fn begin_value(&mut self, raw_text: &str) {
         self.current_value_text = Some(raw_text.to_string());
         self.current_value_tokens.clear();
-        self.current_value_ti_start = ti_start;
     }
 
     /// Add a token from the current value's tokenization.
@@ -146,6 +144,9 @@ impl SfxCollector {
             gaps,
             ti_start: self.current_value_ti_start,
         });
+        // Advance cumulative token counter: tokens + 1 boundary gap between values.
+        // The gap prevents phrase queries from matching across value boundaries.
+        self.current_value_ti_start += tokens.len() as u32 + 1;
     }
 
     /// End the current document. Writes accumulated value gaps to the GapMap.
@@ -261,7 +262,7 @@ mod tests {
         let mut collector = SfxCollector::new();
 
         collector.begin_doc();
-        collector.begin_value("import rag3db from 'rag3db_core';", 0);
+        collector.begin_value("import rag3db from 'rag3db_core';");
         collector.add_token("import", 0, 6);
         collector.add_token("rag3db", 7, 13);
         collector.add_token("from", 14, 18);
@@ -292,12 +293,12 @@ mod tests {
 
         collector.begin_doc();
         // Value 0: "hello world" → Ti=0,1 → end_position=2+GAP=3
-        collector.begin_value("hello world", 0);
+        collector.begin_value("hello world");
         collector.add_token("hello", 0, 5);
         collector.add_token("world", 6, 11);
         collector.end_value();
         // Value 1: "foo bar" → Ti=3,4
-        collector.begin_value("foo bar", 3);
+        collector.begin_value("foo bar");
         collector.add_token("foo", 0, 3);
         collector.add_token("bar", 4, 7);
         collector.end_value();
@@ -332,14 +333,14 @@ mod tests {
         let mut collector = SfxCollector::new();
 
         collector.begin_doc();
-        collector.begin_value("hello world", 0);
+        collector.begin_value("hello world");
         collector.add_token("hello", 0, 5);
         collector.add_token("world", 6, 11);
         collector.end_value();
         collector.end_doc();
 
         collector.begin_doc();
-        collector.begin_value("foo", 0);
+        collector.begin_value("foo");
         collector.add_token("foo", 0, 3);
         collector.end_value();
         collector.end_doc();
@@ -361,7 +362,7 @@ mod tests {
         let mut collector = SfxCollector::new();
 
         collector.begin_doc();
-        collector.begin_value("framework", 0);
+        collector.begin_value("framework");
         collector.add_token("framework", 0, 9);
         collector.end_value();
         collector.end_doc();
@@ -380,7 +381,7 @@ mod tests {
         let mut collector = SfxCollector::new();
 
         collector.begin_doc();
-        collector.begin_value("zebra apple mango", 0);
+        collector.begin_value("zebra apple mango");
         collector.add_token("zebra", 0, 5);
         collector.add_token("apple", 6, 11);
         collector.add_token("mango", 12, 17);

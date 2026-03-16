@@ -598,15 +598,16 @@ impl IndexMerger {
         serializer: &mut SegmentSerializer,
         doc_mapping: &[DocAddress],
     ) -> crate::Result<()> {
-        // Find ._raw fields that have .sfx in at least one source segment
-        let raw_fields: Vec<Field> = self
+        // Find ._raw fields that have .sfx in at least one source segment.
+        // After Phase 7c (._raw removal), this will filter by .sfx presence instead.
+        let sfx_fields: Vec<Field> = self
             .schema
             .fields()
             .filter(|(_, entry)| entry.name().ends_with("._raw"))
             .map(|(field, _)| field)
             .collect();
 
-        if raw_fields.is_empty() {
+        if sfx_fields.is_empty() {
             return Ok(());
         }
 
@@ -621,7 +622,7 @@ impl IndexMerger {
 
         let mut sfx_field_ids = Vec::new();
 
-        for &field in &raw_fields {
+        for &field in &sfx_fields {
             // Load .sfx bytes from each source segment
             let mut segment_sfx: Vec<Option<Vec<u8>>> = Vec::with_capacity(self.readers.len());
             let mut any_has_sfx = false;
@@ -653,15 +654,27 @@ impl IndexMerger {
                 })
                 .collect();
 
-            // 1. Collect all unique tokens from source term dictionaries for this field
+            // 1. Collect all unique tokens from .sfx sources (SI=0 entries only = full tokens)
             let mut unique_tokens = BTreeSet::new();
-            for reader in &self.readers {
-                if let Ok(inv_idx) = reader.inverted_index(field) {
-                    let term_dict = inv_idx.terms();
-                    let mut stream = term_dict.stream()?;
-                    while stream.advance() {
-                        if let Ok(s) = std::str::from_utf8(stream.key()) {
-                            unique_tokens.insert(s.to_string());
+            {
+                use crate::suffix_fst::builder::{decode_output, decode_parent_entries, ParentRef};
+                use lucivy_fst::{IntoStreamer, Streamer};
+                for sfx_reader in &sfx_readers {
+                    if let Some(reader) = sfx_reader {
+                        let mut stream = reader.fst().into_stream();
+                        while let Some((key, val)) = stream.next() {
+                            let has_si0 = match decode_output(val) {
+                                ParentRef::Single { si, .. } => si == 0,
+                                ParentRef::Multi { offset } => {
+                                    let table = lucivy_fst::OutputTable::new(reader.parent_list_data());
+                                    decode_parent_entries(table.get(offset)).iter().any(|e| e.si == 0)
+                                }
+                            };
+                            if has_si0 {
+                                if let Ok(s) = std::str::from_utf8(key) {
+                                    unique_tokens.insert(s.to_string());
+                                }
+                            }
                         }
                     }
                 }

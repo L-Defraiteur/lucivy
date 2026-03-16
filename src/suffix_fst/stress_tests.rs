@@ -22,7 +22,7 @@ mod tests {
 
         for (doc_id, (text, tokens)) in docs.iter().enumerate() {
             collector.begin_doc();
-            collector.begin_value(text, 0);
+            collector.begin_value(text);
             for (ti, (tok, from, to)) in tokens.iter().enumerate() {
                 collector.add_token(tok, *from, *to);
                 all_tokens.insert(tok.to_string());
@@ -286,13 +286,13 @@ mod tests {
 
         collector.begin_doc();
         // Value 0: "foo_bar" → tokens foo, bar with sep "_"
-        collector.begin_value("foo_bar", 0);
+        collector.begin_value("foo_bar");
         collector.add_token("foo", 0, 3);
         collector.add_token("bar", 4, 7);
         collector.end_value();
         // Value 1: "foo bar" → tokens foo, bar with sep " "
         // Ti starts at 3 (2 tokens + POSITION_GAP=1)
-        collector.begin_value("foo bar", 3);
+        collector.begin_value("foo bar");
         collector.add_token("foo", 0, 3);
         collector.add_token("bar", 4, 7);
         collector.end_value();

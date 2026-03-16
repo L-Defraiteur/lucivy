@@ -511,7 +511,7 @@ mod tests {
 
         // Doc 0: "import rag3db from 'rag3db_core';"
         collector.begin_doc();
-        collector.begin_value("import rag3db from 'rag3db_core';", 0);
+        collector.begin_value("import rag3db from 'rag3db_core';");
         collector.add_token("import", 0, 6);
         collector.add_token("rag3db", 7, 13);
         collector.add_token("from", 14, 18);
@@ -522,7 +522,7 @@ mod tests {
 
         // Doc 1: "rag3db is cool"
         collector.begin_doc();
-        collector.begin_value("rag3db is cool", 0);
+        collector.begin_value("rag3db is cool");
         collector.add_token("rag3db", 0, 6);
         collector.add_token("is", 7, 9);
         collector.add_token("cool", 10, 14);
@@ -765,7 +765,7 @@ mod tests {
         // Build a standalone index with "is rag3db cool"
         let mut collector = SfxCollector::new();
         collector.begin_doc();
-        collector.begin_value("is rag3db cool", 0);
+        collector.begin_value("is rag3db cool");
         collector.add_token("is", 0, 2);
         collector.add_token("rag3db", 3, 9);
         collector.add_token("cool", 10, 14);
