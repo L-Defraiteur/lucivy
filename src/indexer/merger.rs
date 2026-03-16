@@ -686,10 +686,12 @@ impl IndexMerger {
 
             // 4. Assemble and write
             let gapmap_data = gapmap_writer.serialize();
+            // TODO(U5): rebuild mini postings from merged GapMap data
             let sfx_file = SfxFileWriter::new(
                 fst_data,
                 parent_list_data,
                 gapmap_data,
+                Vec::new(), // mini postings rebuilt later
                 doc_mapping.len() as u32,
                 num_terms,
             );

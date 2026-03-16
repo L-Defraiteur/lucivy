@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use super::builder::SuffixFstBuilder;
 use super::file::SfxFileWriter;
@@ -21,14 +21,15 @@ use super::gapmap::GapMapWriter;
 ///   collector.end_value();
 ///   collector.end_doc();
 pub struct SfxCollector {
-    // Per-segment: unique raw tokens
-    unique_tokens: BTreeSet<String>,
+    // Per-segment: token → list of doc IDs containing it (sorted, with duplicates for tf)
+    token_docs: BTreeMap<String, Vec<u32>>,
     // Per-segment: gap map writer
     gapmap_writer: GapMapWriter,
 
     // Per-document state
     doc_values: Vec<ValueData>,
     doc_active: bool,
+    current_doc_id: u32,
 
     // Per-value state
     current_value_text: Option<String>,
@@ -66,10 +67,11 @@ impl SfxCollector {
     /// Create with custom minimum suffix length.
     pub fn with_min_suffix_len(min_suffix_len: usize) -> Self {
         Self {
-            unique_tokens: BTreeSet::new(),
+            token_docs: BTreeMap::new(),
             gapmap_writer: GapMapWriter::new(),
             doc_values: Vec::new(),
             doc_active: false,
+            current_doc_id: 0,
             current_value_text: None,
             current_value_tokens: Vec::new(),
             current_value_ti_start: 0,
@@ -100,7 +102,10 @@ impl SfxCollector {
         if text.len() > crate::tokenizer::MAX_TOKEN_LEN {
             return;
         }
-        self.unique_tokens.insert(text.to_string());
+        self.token_docs
+            .entry(text.to_string())
+            .or_default()
+            .push(self.current_doc_id);
         self.current_value_tokens.push(TokenCapture {
             text: text.to_string(),
             offset_from,
@@ -145,6 +150,7 @@ impl SfxCollector {
     /// End the current document. Writes accumulated value gaps to the GapMap.
     pub fn end_doc(&mut self) {
         self.doc_active = false;
+        self.current_doc_id += 1;
 
         if self.doc_values.is_empty() {
             self.gapmap_writer.add_empty_doc();
@@ -171,13 +177,17 @@ impl SfxCollector {
     /// End doc without any values — adds an empty doc to gapmap.
     pub fn end_doc_empty(&mut self) {
         self.doc_active = false;
+        self.current_doc_id += 1;
         self.gapmap_writer.add_empty_doc();
     }
 
     /// Build the .sfx file bytes from all collected data.
+    ///
+    /// The mini posting index maps each ordinal to its list of doc IDs.
+    /// Doc IDs within each list are delta-encoded for compactness.
     pub fn build(self) -> Result<Vec<u8>, lucivy_fst::Error> {
         let mut sfx_builder = SuffixFstBuilder::with_min_suffix_len(self.min_suffix_len);
-        for (ordinal, token) in self.unique_tokens.iter().enumerate() {
+        for (ordinal, token) in self.token_docs.keys().enumerate() {
             sfx_builder.add_token(token, ordinal as u64);
         }
 
@@ -185,15 +195,57 @@ impl SfxCollector {
         let (fst_data, parent_list_data) = sfx_builder.build()?;
         let gapmap_data = self.gapmap_writer.serialize();
 
+        // Build mini posting index: for each ordinal, a sorted+deduped list of doc IDs.
+        // Format: [num_terms: u32] [offsets: u32 × (num_terms+1)] [doc_ids: delta-VInt encoded]
+        let mut posting_offsets: Vec<u32> = Vec::with_capacity(self.token_docs.len() + 1);
+        let mut posting_data: Vec<u8> = Vec::new();
+        for doc_ids in self.token_docs.values() {
+            posting_offsets.push(posting_data.len() as u32);
+            // Sort and dedup doc_ids for this term
+            let mut sorted = doc_ids.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            // Delta-encode
+            let mut prev = 0u32;
+            for &doc_id in &sorted {
+                let delta = doc_id - prev;
+                encode_vint(delta, &mut posting_data);
+                prev = doc_id;
+            }
+        }
+        posting_offsets.push(posting_data.len() as u32); // sentinel
+
+        // Serialize: [num_terms: u32] [offsets: u32 × (num_terms+1)] [posting_data]
+        let mut mini_postings: Vec<u8> = Vec::new();
+        mini_postings.extend_from_slice(&(self.token_docs.len() as u32).to_le_bytes());
+        for &off in &posting_offsets {
+            mini_postings.extend_from_slice(&off.to_le_bytes());
+        }
+        mini_postings.extend_from_slice(&posting_data);
+
         let file_writer = SfxFileWriter::new(
             fst_data,
             parent_list_data,
             gapmap_data,
+            mini_postings,
             self.gapmap_writer.num_docs(),
             num_terms,
         );
 
         Ok(file_writer.to_bytes())
+    }
+}
+
+/// Encode a u32 as a variable-length integer (1-5 bytes, little-endian, MSB continuation).
+fn encode_vint(mut val: u32, out: &mut Vec<u8>) {
+    loop {
+        let byte = (val & 0x7F) as u8;
+        val >>= 7;
+        if val == 0 {
+            out.push(byte);
+            return;
+        }
+        out.push(byte | 0x80);
     }
 }
 

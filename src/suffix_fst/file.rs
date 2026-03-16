@@ -29,11 +29,11 @@ impl Automaton for SfxDfaWrapper {
     }
 }
 
-// .sfx file format:
+// .sfx file format v2:
 //
-// HEADER (fixed 49 bytes):
-//   magic: [u8; 4] = b"SFX1"
-//   version: u8 = 1
+// HEADER (fixed 69 bytes):
+//   magic: [u8; 4] = b"SFX2"
+//   version: u8 = 2
 //   num_docs: u32 LE
 //   num_suffix_terms: u32 LE
 //   fst_offset: u64 LE
@@ -41,20 +41,27 @@ impl Automaton for SfxDfaWrapper {
 //   parent_list_offset: u64 LE
 //   parent_list_length: u64 LE
 //   gapmap_offset: u64 LE
+//   gapmap_length: u64 LE          (NEW in v2)
+//   postings_offset: u64 LE        (NEW in v2 — 0 if absent)
 //
 // SECTION A: Suffix FST (at fst_offset, fst_length bytes)
 // SECTION B: Parent lists (at parent_list_offset, parent_list_length bytes)
-// SECTION C: GapMap (at gapmap_offset, to end of file)
+// SECTION C: GapMap (at gapmap_offset, gapmap_length bytes)
+// SECTION D: Mini postings (at postings_offset, to end of file)
+//            Format: [num_terms: u32] [offsets: u32 × (num_terms+1)] [delta-VInt doc_ids]
 
-const MAGIC: &[u8; 4] = b"SFX1";
-const VERSION: u8 = 1;
-const HEADER_SIZE: usize = 4 + 1 + 4 + 4 + 8 + 8 + 8 + 8 + 8; // 53 bytes
+const MAGIC_V1: &[u8; 4] = b"SFX1";
+const MAGIC_V2: &[u8; 4] = b"SFX2";
+const VERSION_V2: u8 = 2;
+const HEADER_SIZE_V1: usize = 4 + 1 + 4 + 4 + 8 + 8 + 8 + 8 + 8; // 53 bytes
+const HEADER_SIZE_V2: usize = HEADER_SIZE_V1 + 8 + 8; // 69 bytes
 
-/// Assembles FST + parent lists + GapMap into a single .sfx file.
+/// Assembles FST + parent lists + GapMap + mini postings into a single .sfx file.
 pub struct SfxFileWriter {
     fst_data: Vec<u8>,
     parent_list_data: Vec<u8>,
     gapmap_data: Vec<u8>,
+    mini_postings: Vec<u8>,
     num_docs: u32,
     num_suffix_terms: u32,
 }
@@ -64,6 +71,7 @@ impl SfxFileWriter {
         fst_data: Vec<u8>,
         parent_list_data: Vec<u8>,
         gapmap_data: Vec<u8>,
+        mini_postings: Vec<u8>,
         num_docs: u32,
         num_suffix_terms: u32,
     ) -> Self {
@@ -71,22 +79,29 @@ impl SfxFileWriter {
             fst_data,
             parent_list_data,
             gapmap_data,
+            mini_postings,
             num_docs,
             num_suffix_terms,
         }
     }
 
-    /// Write the complete .sfx file.
+    /// Write the complete .sfx v2 file.
     pub fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
-        let fst_offset = HEADER_SIZE as u64;
+        let fst_offset = HEADER_SIZE_V2 as u64;
         let fst_length = self.fst_data.len() as u64;
         let parent_list_offset = fst_offset + fst_length;
         let parent_list_length = self.parent_list_data.len() as u64;
         let gapmap_offset = parent_list_offset + parent_list_length;
+        let gapmap_length = self.gapmap_data.len() as u64;
+        let postings_offset = if self.mini_postings.is_empty() {
+            0u64
+        } else {
+            gapmap_offset + gapmap_length
+        };
 
         // Header
-        writer.write_all(MAGIC)?;
-        writer.write_all(&[VERSION])?;
+        writer.write_all(MAGIC_V2)?;
+        writer.write_all(&[VERSION_V2])?;
         writer.write_all(&self.num_docs.to_le_bytes())?;
         writer.write_all(&self.num_suffix_terms.to_le_bytes())?;
         writer.write_all(&fst_offset.to_le_bytes())?;
@@ -94,11 +109,16 @@ impl SfxFileWriter {
         writer.write_all(&parent_list_offset.to_le_bytes())?;
         writer.write_all(&parent_list_length.to_le_bytes())?;
         writer.write_all(&gapmap_offset.to_le_bytes())?;
+        writer.write_all(&gapmap_length.to_le_bytes())?;
+        writer.write_all(&postings_offset.to_le_bytes())?;
 
         // Sections
         writer.write_all(&self.fst_data)?;
         writer.write_all(&self.parent_list_data)?;
         writer.write_all(&self.gapmap_data)?;
+        if !self.mini_postings.is_empty() {
+            writer.write_all(&self.mini_postings)?;
+        }
 
         Ok(())
     }
@@ -112,24 +132,34 @@ impl SfxFileWriter {
 }
 
 /// Reads a .sfx file from mmap'd or in-memory data.
+/// Supports both v1 (SFX1, no postings) and v2 (SFX2, with mini postings).
 pub struct SfxFileReader<'a> {
     fst: Map<Vec<u8>>,
     parent_list_data: &'a [u8],
     gapmap: GapMapReader<'a>,
+    /// Mini postings section (v2 only). None for v1 files.
+    mini_postings: Option<MiniPostingsReader<'a>>,
     num_docs: u32,
     num_suffix_terms: u32,
 }
 
 impl<'a> SfxFileReader<'a> {
     /// Open a .sfx file from raw bytes (mmap'd or in-memory).
+    /// Accepts both v1 and v2 formats.
     pub fn open(data: &'a [u8]) -> Result<Self, SfxError> {
-        // Validate magic
-        if data.len() < HEADER_SIZE || &data[0..4] != MAGIC {
-            return Err(SfxError::InvalidMagic);
+        let magic = &data[0..4];
+        if magic == MAGIC_V2 {
+            return Self::open_v2(data);
         }
-        let version = data[4];
-        if version != VERSION {
-            return Err(SfxError::UnsupportedVersion(version));
+        if magic == MAGIC_V1 {
+            return Self::open_v1(data);
+        }
+        Err(SfxError::InvalidMagic)
+    }
+
+    fn open_v1(data: &'a [u8]) -> Result<Self, SfxError> {
+        if data.len() < HEADER_SIZE_V1 {
+            return Err(SfxError::InvalidMagic);
         }
 
         let num_docs = u32::from_le_bytes(data[5..9].try_into().unwrap());
@@ -143,8 +173,7 @@ impl<'a> SfxFileReader<'a> {
         let fst_bytes = data[fst_offset..fst_offset + fst_length].to_vec();
         let fst = Map::new(fst_bytes).map_err(|e| SfxError::FstError(e.to_string()))?;
 
-        let parent_list_data =
-            &data[parent_list_offset..parent_list_offset + parent_list_length];
+        let parent_list_data = &data[parent_list_offset..parent_list_offset + parent_list_length];
         let gapmap_data = &data[gapmap_offset..];
         let gapmap = GapMapReader::open(gapmap_data);
 
@@ -152,6 +181,45 @@ impl<'a> SfxFileReader<'a> {
             fst,
             parent_list_data,
             gapmap,
+            mini_postings: None,
+            num_docs,
+            num_suffix_terms,
+        })
+    }
+
+    fn open_v2(data: &'a [u8]) -> Result<Self, SfxError> {
+        if data.len() < HEADER_SIZE_V2 {
+            return Err(SfxError::InvalidMagic);
+        }
+
+        let num_docs = u32::from_le_bytes(data[5..9].try_into().unwrap());
+        let num_suffix_terms = u32::from_le_bytes(data[9..13].try_into().unwrap());
+        let fst_offset = u64::from_le_bytes(data[13..21].try_into().unwrap()) as usize;
+        let fst_length = u64::from_le_bytes(data[21..29].try_into().unwrap()) as usize;
+        let parent_list_offset = u64::from_le_bytes(data[29..37].try_into().unwrap()) as usize;
+        let parent_list_length = u64::from_le_bytes(data[37..45].try_into().unwrap()) as usize;
+        let gapmap_offset = u64::from_le_bytes(data[45..53].try_into().unwrap()) as usize;
+        let gapmap_length = u64::from_le_bytes(data[53..61].try_into().unwrap()) as usize;
+        let postings_offset = u64::from_le_bytes(data[61..69].try_into().unwrap()) as usize;
+
+        let fst_bytes = data[fst_offset..fst_offset + fst_length].to_vec();
+        let fst = Map::new(fst_bytes).map_err(|e| SfxError::FstError(e.to_string()))?;
+
+        let parent_list_data = &data[parent_list_offset..parent_list_offset + parent_list_length];
+        let gapmap_data = &data[gapmap_offset..gapmap_offset + gapmap_length];
+        let gapmap = GapMapReader::open(gapmap_data);
+
+        let mini_postings = if postings_offset > 0 && postings_offset < data.len() {
+            Some(MiniPostingsReader::open(&data[postings_offset..])?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            fst,
+            parent_list_data,
+            gapmap,
+            mini_postings,
             num_docs,
             num_suffix_terms,
         })
@@ -235,6 +303,16 @@ impl<'a> SfxFileReader<'a> {
         self.parent_list_data
     }
 
+    /// Access the mini postings reader (v2 only). None for v1 files.
+    pub fn mini_postings(&self) -> Option<&MiniPostingsReader<'a>> {
+        self.mini_postings.as_ref()
+    }
+
+    /// Returns true if this .sfx has embedded mini postings (v2+).
+    pub fn has_postings(&self) -> bool {
+        self.mini_postings.is_some()
+    }
+
     fn decode_parents(&self, val: u64) -> Vec<ParentEntry> {
         match decode_output(val) {
             ParentRef::Single { raw_ordinal, si } => {
@@ -247,6 +325,89 @@ impl<'a> SfxFileReader<'a> {
             }
         }
     }
+}
+
+// ─── Mini Postings Reader ──────────────────────────────────────────────────
+
+/// Reads the mini posting index embedded in a v2 .sfx file.
+/// Format: [num_terms: u32] [offsets: u32 × (num_terms+1)] [delta-VInt doc_ids]
+pub struct MiniPostingsReader<'a> {
+    num_terms: u32,
+    offsets: &'a [u8],    // (num_terms + 1) × 4 bytes
+    doc_data: &'a [u8],   // delta-VInt encoded doc IDs
+}
+
+impl<'a> MiniPostingsReader<'a> {
+    pub fn open(data: &'a [u8]) -> Result<Self, SfxError> {
+        if data.len() < 4 {
+            return Err(SfxError::InvalidMagic);
+        }
+        let num_terms = u32::from_le_bytes(data[0..4].try_into().unwrap());
+        let offsets_size = (num_terms as usize + 1) * 4;
+        if data.len() < 4 + offsets_size {
+            return Err(SfxError::InvalidMagic);
+        }
+        let offsets = &data[4..4 + offsets_size];
+        let doc_data = &data[4 + offsets_size..];
+        Ok(Self { num_terms, offsets, doc_data })
+    }
+
+    /// Number of unique terms in the posting index.
+    pub fn num_terms(&self) -> u32 {
+        self.num_terms
+    }
+
+    /// Get the sorted list of doc IDs for a given ordinal.
+    pub fn doc_ids(&self, ordinal: u32) -> Vec<u32> {
+        if ordinal >= self.num_terms {
+            return Vec::new();
+        }
+        let off_start = self.read_offset(ordinal) as usize;
+        let off_end = self.read_offset(ordinal + 1) as usize;
+        if off_start >= off_end || off_start >= self.doc_data.len() {
+            return Vec::new();
+        }
+        let slice = &self.doc_data[off_start..off_end.min(self.doc_data.len())];
+        decode_vint_deltas(slice)
+    }
+
+    /// Get the doc_freq (number of unique docs) for a given ordinal.
+    pub fn doc_freq(&self, ordinal: u32) -> u32 {
+        self.doc_ids(ordinal).len() as u32
+    }
+
+    fn read_offset(&self, idx: u32) -> u32 {
+        let pos = idx as usize * 4;
+        u32::from_le_bytes(self.offsets[pos..pos + 4].try_into().unwrap())
+    }
+}
+
+/// Decode delta-VInt encoded doc IDs.
+fn decode_vint_deltas(data: &[u8]) -> Vec<u32> {
+    let mut result = Vec::new();
+    let mut pos = 0;
+    let mut prev = 0u32;
+    while pos < data.len() {
+        let (delta, bytes_read) = decode_vint(&data[pos..]);
+        prev += delta;
+        result.push(prev);
+        pos += bytes_read;
+    }
+    result
+}
+
+/// Decode a single VInt. Returns (value, bytes_consumed).
+fn decode_vint(data: &[u8]) -> (u32, usize) {
+    let mut val = 0u32;
+    let mut shift = 0;
+    for (i, &byte) in data.iter().enumerate() {
+        val |= ((byte & 0x7F) as u32) << shift;
+        if byte & 0x80 == 0 {
+            return (val, i + 1);
+        }
+        shift += 7;
+    }
+    (val, data.len())
 }
 
 /// Compute the exclusive upper bound for a prefix range scan.
@@ -310,6 +471,7 @@ mod tests {
             fst_data,
             parent_list_data,
             gapmap_data,
+            Vec::new(), // no mini postings in this test
             1, // num_docs
             num_terms,
         );
@@ -396,6 +558,7 @@ mod tests {
             fst_data,
             parent_list_data,
             gapmap_data,
+            Vec::new(),
             1,
             num_terms,
         );
