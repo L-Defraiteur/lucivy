@@ -20,12 +20,10 @@ use crate::termdict::{TermDictionary, TermOrdinal};
 /// Contains the DFA end state so the caller can feed gap bytes and continue.
 #[derive(Debug, Clone)]
 pub struct ContinuationMatch<S> {
-    /// The raw ordinal in the TermDictionary.
+    /// The raw ordinal — used to resolve postings via .sfxpost or TermDictionary.
     pub raw_ordinal: u64,
     /// Suffix index (0 = full token, >0 = starts mid-token).
     pub si: u16,
-    /// TermInfo for posting list resolution.
-    pub term_info: TermInfo,
     /// DFA state at the end of this token/suffix.
     pub end_state: S,
     /// Whether the DFA accepts at this point (direct match).
@@ -229,11 +227,9 @@ impl<'a> SfxTermDictionary<'a> {
                 if si_zero_only && p.si != 0 {
                     continue;
                 }
-                let term_info = self.termdict.term_info_from_ord(p.raw_ordinal);
                 results.push(ContinuationMatch {
                     raw_ordinal: p.raw_ordinal,
                     si: p.si,
-                    term_info,
                     end_state: state.clone(),
                     is_accepting,
                 });
