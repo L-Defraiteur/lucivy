@@ -178,25 +178,6 @@ impl Weight for TermWeight {
         } else {
             let field = self.term.field();
 
-            // Try .sfxpost path for doc_freq
-            if reader.sfxpost_file(field).is_some() {
-                if let Some(sfx_data) = reader.sfx_file(field) {
-                    let inv_index = reader.inverted_index(field)?;
-                    let sfx_bytes = sfx_data.read_bytes()
-                        .map_err(|e| LucivyError::SystemError(format!("read .sfx: {e}")))?;
-                    let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
-                        .map_err(|e| LucivyError::SystemError(format!("open .sfx: {e}")))?;
-                    let sfx_dict = SfxTermDictionary::new(&sfx_reader, inv_index.terms());
-                    if let Some(ordinal) = sfx_dict.get_ordinal(self.term.serialized_value_bytes())? {
-                        let resolver = build_resolver(reader, field)?;
-                        return Ok(resolver.doc_freq(ordinal));
-                    } else {
-                        return Ok(0);
-                    }
-                }
-            }
-
-            // Fallback
             let inv_index = reader.inverted_index(field)?;
             let term_info = if let Some(sfx_data) = reader.sfx_file(field) {
                 let sfx_bytes = sfx_data.read_bytes()
@@ -460,50 +441,12 @@ impl TermWeight {
         let field = self.term.field();
         let inverted_index = reader.inverted_index(field)?;
 
-        // Prefer .sfxpost path when both .sfx and .sfxpost are available
-        if reader.sfxpost_file(field).is_some() {
-            if let Some(sfx_data) = reader.sfx_file(field) {
-                let sfx_bytes = sfx_data.read_bytes()
-                    .map_err(|e| LucivyError::SystemError(format!("read .sfx: {e}")))?;
-                let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
-                    .map_err(|e| LucivyError::SystemError(format!("open .sfx: {e}")))?;
-                let sfx_dict = SfxTermDictionary::new(&sfx_reader, inverted_index.terms());
+        // NOTE: The .sfxpost ordinal path (ResolvedTermScorer) is NOT used here
+        // automatically. It will be activated by explicit opt-in after Phase 7c
+        // (._raw removal), when the routing layer knows which fields have raw tokens
+        // in their .sfxpost vs stemmed tokens in their inverted index.
 
-                if let Some(ordinal) = sfx_dict.get_ordinal(self.term.serialized_value_bytes())? {
-                    let resolver = build_resolver(reader, field)?;
-                    let doc_freq = resolver.doc_freq(ordinal);
-
-                    if doc_freq == 0 {
-                        return Ok(TermOrEmptyOrAllScorer::Empty);
-                    }
-                    if !self.scoring_enabled && doc_freq == reader.max_doc() {
-                        return Ok(TermOrEmptyOrAllScorer::AllMatch(AllScorer::new(
-                            reader.max_doc(),
-                        )));
-                    }
-
-                    let entries = resolver.resolve(ordinal);
-                    let postings = ResolvedPostings::from_entries(entries);
-                    let fieldnorm_reader = self.fieldnorm_reader(reader)?;
-                    let similarity_weight = self.similarity_weight.boost_by(boost);
-                    let mut scorer = ResolvedTermScorer::new(
-                        postings, fieldnorm_reader, similarity_weight,
-                    );
-                    if let Some(ref sink) = self.highlight_sink {
-                        scorer = scorer.with_highlight_sink(
-                            Arc::clone(sink),
-                            self.highlight_field_name.clone(),
-                            reader.segment_id(),
-                        );
-                    }
-                    return Ok(TermOrEmptyOrAllScorer::ResolvedScorer(Box::new(scorer)));
-                } else {
-                    return Ok(TermOrEmptyOrAllScorer::Empty);
-                }
-            }
-        }
-
-        // Fallback: resolve term via .sfx or TermDictionary, read postings from inverted index
+        // Resolve term via .sfx or TermDictionary, read postings from inverted index
         let term_info = if let Some(sfx_data) = reader.sfx_file(field) {
             let sfx_bytes = sfx_data.read_bytes()
                 .map_err(|e| crate::LucivyError::SystemError(format!("read .sfx: {e}")))?;

@@ -148,12 +148,9 @@ impl SegmentUpdaterShared {
                                 manifest_data[off], manifest_data[off+1],
                                 manifest_data[off+2], manifest_data[off+3],
                             ]);
-                            let sfx_path = PathBuf::from(format!(
-                                "{}.{}.sfx",
-                                segment_meta.id().uuid_string(),
-                                fid,
-                            ));
-                            files.insert(sfx_path);
+                            let uuid = segment_meta.id().uuid_string();
+                            files.insert(PathBuf::from(format!("{uuid}.{fid}.sfx")));
+                            files.insert(PathBuf::from(format!("{uuid}.{fid}.sfxpost")));
                         }
                     }
                 }
