@@ -143,7 +143,7 @@ impl SegmentWriter {
                 collectors
             },
             sfx_fed_this_doc: Vec::new(),
-            sfx_raw_analyzer: tokenizer_manager.get("lucivy_raw"),
+            sfx_raw_analyzer: tokenizer_manager.get("raw_code"),
             schema,
         })
     }
@@ -253,7 +253,7 @@ impl SegmentWriter {
                                 .unwrap_or("default"),
                             _ => "default",
                         };
-                        tok_name != "lucivy_raw"
+                        tok_name != "raw_code"
                     };
                     // Clone raw analyzer to avoid borrow conflicts with sfx_collectors
                     let mut raw_analyzer = if use_double_tok {
