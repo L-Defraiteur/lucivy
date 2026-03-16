@@ -57,6 +57,9 @@ pub struct AutomatonWeight<A> {
     // dictionary. This prevents terms from unrelated paths from matching the search criteria.
     json_path_bytes: Option<Box<[u8]>>,
     scoring_enabled: bool,
+    /// When true, prefer .sfxpost ordinal path over inverted index posting reads.
+    /// Set by queries that target raw (non-stemmed) tokens (term, fuzzy, regex via lucivy_core).
+    prefer_sfxpost: bool,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
 }
@@ -73,6 +76,7 @@ where
             automaton: automaton.into(),
             json_path_bytes: None,
             scoring_enabled: false,
+            prefer_sfxpost: false,
             highlight_sink: None,
             highlight_field_name: String::new(),
         }
@@ -89,6 +93,7 @@ where
             automaton: automaton.into(),
             json_path_bytes: Some(json_path_bytes.to_vec().into_boxed_slice()),
             scoring_enabled: false,
+            prefer_sfxpost: false,
             highlight_sink: None,
             highlight_field_name: String::new(),
         }
@@ -97,6 +102,13 @@ where
     /// Set whether BM25 scoring is enabled. When disabled, uses fast path with ConstScorer.
     pub fn with_scoring(mut self, scoring_enabled: bool) -> Self {
         self.scoring_enabled = scoring_enabled;
+        self
+    }
+
+    /// Prefer .sfxpost ordinal path over inverted index posting reads.
+    /// Use for queries targeting raw (non-stemmed) tokens.
+    pub fn with_prefer_sfxpost(mut self, prefer: bool) -> Self {
+        self.prefer_sfxpost = prefer;
         self
     }
 
@@ -504,10 +516,10 @@ where
             .get_field(self.field)?
             .unwrap_or_else(|| FieldNormReader::constant(max_doc, 1));
 
-        // Prefer ordinal path when both .sfx and .sfxpost are available.
-        // Without .sfxpost, the resolver would fall back to InvertedIndexResolver
-        // which can't handle fields indexed without positions/offsets.
-        if reader.sfxpost_file(self.field).is_some() {
+        // Ordinal path: use .sfxpost instead of reading posting data from inverted index.
+        // Only activated when prefer_sfxpost is set (queries targeting raw tokens)
+        // AND .sfxpost exists for this field.
+        if self.prefer_sfxpost && reader.sfxpost_file(self.field).is_some() {
             if let Some(ordinals) = self.collect_ordinals(reader)? {
                 let resolver = build_resolver(reader, self.field)?;
                 return self.scorer_from_ordinals(

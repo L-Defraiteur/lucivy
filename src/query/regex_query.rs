@@ -60,6 +60,7 @@ pub struct RegexQuery {
     field: Field,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
+    prefer_sfxpost: bool,
 }
 
 impl RegexQuery {
@@ -77,6 +78,7 @@ impl RegexQuery {
             field,
             highlight_sink: None,
             highlight_field_name: String::new(),
+            prefer_sfxpost: false,
         }
     }
 
@@ -87,11 +89,18 @@ impl RegexQuery {
         self
     }
 
+    /// Set whether to prefer suffix postings lists during automaton traversal.
+    pub fn with_prefer_sfxpost(mut self, prefer: bool) -> Self {
+        self.prefer_sfxpost = prefer;
+        self
+    }
+
     fn specialized_weight(&self) -> AutomatonWeight<Regex> {
         let mut weight = AutomatonWeight::new(self.field, self.regex.clone());
         if let Some(ref sink) = self.highlight_sink {
             weight = weight.with_highlight_sink(Arc::clone(sink), self.highlight_field_name.clone());
         }
+        weight = weight.with_prefer_sfxpost(self.prefer_sfxpost);
         weight
     }
 }

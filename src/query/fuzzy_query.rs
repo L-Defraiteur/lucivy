@@ -89,6 +89,7 @@ pub struct FuzzyTermQuery {
     transposition_cost_one: bool,
     /// is a starts with query
     prefix: bool,
+    prefer_sfxpost: bool,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
 }
@@ -112,6 +113,7 @@ impl FuzzyTermQuery {
             distance,
             transposition_cost_one,
             prefix: false,
+            prefer_sfxpost: false,
             highlight_sink: None,
             highlight_field_name: String::new(),
         }
@@ -124,9 +126,16 @@ impl FuzzyTermQuery {
             distance,
             transposition_cost_one,
             prefix: true,
+            prefer_sfxpost: false,
             highlight_sink: None,
             highlight_field_name: String::new(),
         }
+    }
+
+    /// Prefer .sfxpost ordinal path for raw token matching.
+    pub fn with_prefer_sfxpost(mut self, prefer: bool) -> Self {
+        self.prefer_sfxpost = prefer;
+        self
     }
 
     /// Attach a highlight sink to capture byte offsets during scoring.
@@ -198,6 +207,7 @@ impl FuzzyTermQuery {
                 DfaWrapper(automaton),
             )
         };
+        weight = weight.with_prefer_sfxpost(self.prefer_sfxpost);
         if let Some(ref sink) = self.highlight_sink {
             weight = weight.with_highlight_sink(Arc::clone(sink), self.highlight_field_name.clone());
         }

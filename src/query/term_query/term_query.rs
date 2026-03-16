@@ -62,6 +62,7 @@ use crate::Term;
 pub struct TermQuery {
     term: Term,
     index_record_option: IndexRecordOption,
+    prefer_sfxpost: bool,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
 }
@@ -78,9 +79,16 @@ impl TermQuery {
         TermQuery {
             term,
             index_record_option: segment_postings_options,
+            prefer_sfxpost: false,
             highlight_sink: None,
             highlight_field_name: String::new(),
         }
+    }
+
+    /// Prefer .sfxpost ordinal path for raw token matching.
+    pub fn with_prefer_sfxpost(mut self, prefer: bool) -> Self {
+        self.prefer_sfxpost = prefer;
+        self
     }
 
     /// Attach a highlight sink to capture byte offsets during scoring.
@@ -131,6 +139,7 @@ impl TermQuery {
             index_record_option,
             bm25_weight,
             scoring_enabled,
+            self.prefer_sfxpost,
         );
         if let Some(ref sink) = self.highlight_sink {
             weight = weight.with_highlight_sink(Arc::clone(sink), self.highlight_field_name.clone());
