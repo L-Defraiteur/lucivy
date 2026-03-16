@@ -29,6 +29,7 @@ mod term_query;
 mod union;
 mod weight;
 pub mod posting_resolver;
+pub mod resolved_postings;
 
 #[cfg(test)]
 mod vec_docset;
