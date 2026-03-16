@@ -44,10 +44,14 @@ Chaque shard maintient un compteur per-token :
 ```rust
 struct ShardRouter {
     num_shards: usize,
-    /// Per-shard token counts: shard_id → (token_hash → posting_count)
+    /// Per-shard token counts (only tokens with df < threshold)
     shard_token_counts: Vec<HashMap<u64, u32>>,
+    /// Global token counts (for IDF weight + threshold check)
+    global_token_counts: HashMap<u64, u32>,
     /// Per-shard total posting entries
     shard_totals: Vec<u64>,
+    /// Only track tokens below this df
+    df_threshold: u32,
 }
 ```
 
@@ -88,33 +92,76 @@ fn route(&mut self, doc_tokens: &[&str]) -> usize {
 
 ### Heuristique de score
 
-Le score simple (somme des counts) favorise l'équilibre per-token. Variantes possibles :
-
-**1. Score pondéré par IDF** — les tokens rares comptent plus que les tokens fréquents :
+**Score IDF-weighted avec sqrt** — les tokens rares dominent le routage :
 ```rust
-let idf_weight = 1.0 / (1.0 + global_count[tok] as f64).ln();
-score += count_in_shard as f64 * idf_weight;
-```
-Rationale : "import" (fréquent) sera réparti naturellement. "rag3db" (rare) a besoin d'aide.
+fn route(&mut self, doc_tokens: &[&str]) -> usize {
+    let mut best_shard = 0;
+    let mut best_score = f64::MAX;
 
-**2. Score min-max** — minimiser le max imbalance au lieu de la somme :
+    for shard_id in 0..self.num_shards {
+        let score: f64 = doc_tokens.iter()
+            .filter_map(|tok| {
+                let h = hash(tok);
+                let global = *self.global_token_counts.get(&h)?;
+                let local = *self.shard_token_counts[shard_id].get(&h).unwrap_or(&0) as f64;
+                // sqrt donne un ratio ~14x entre rare (50 docs) et fréquent (10k docs)
+                // vs ln qui ne donne que ~2x — trop faible pour différencier
+                Some(local / (global as f64).sqrt())
+            })
+            .sum();
+        if score < best_score {
+            best_score = score;
+            best_shard = shard_id;
+        }
+    }
+    best_shard
+}
+```
+
+Pourquoi `1/sqrt(global)` et pas `1/ln(global)` :
+```
+token rare (50 docs)    : 1/sqrt(50)    ≈ 0.14   vs  1/ln(51)    ≈ 0.25
+token fréquent (10k)    : 1/sqrt(10000) = 0.01   vs  1/ln(10001) ≈ 0.11
+ratio rare/fréquent     : 14x                     vs  2x
+```
+Le sqrt assure que les tokens mid-frequency (50-500 docs) dominent vraiment le routage. Les tokens fréquents se répartissent naturellement.
+
+### Optimisation mémoire : threshold sur df
+
+**Problème** : tracker TOUS les tokens coûte cher en mémoire.
+```
+50M tokens uniques × 6 shards × 24 bytes/entry = 7.2 GB  ← trop
+```
+
+**Solution** : ne tracker que les tokens avec `df < seuil`. Les tokens fréquents (df > 5000) se répartissent naturellement par la loi des grands nombres — pas besoin de les compter.
+
 ```rust
-let score = doc_tokens.iter()
-    .map(|tok| shard_token_counts[shard_id][tok])
-    .max()
-    .unwrap_or(0);
-```
-Rationale : le token le plus déséquilibré détermine la latence de query.
+const DF_TRACKING_THRESHOLD: u32 = 5000;
 
-**3. Score hybride** — combiner total postings + per-token :
+fn should_track(global_count: u32) -> bool {
+    global_count < DF_TRACKING_THRESHOLD
+}
+```
+
+Résultat : ~500k tokens trackés au lieu de 50M → **72 MB** au lieu de 7.2 GB.
+
+Les tokens au-dessus du seuil contribuent un score constant (même poids dans tous les shards) → n'influencent pas le choix du shard.
+
+### Variante : power of two choices
+
+Au lieu de tester TOUS les shards, tester 2 shards aléatoires et prendre le meilleur :
+
 ```rust
-let token_score: u64 = /* somme des counts */;
-let total_penalty = shard_totals[shard_id] / avg_total;
-score = token_score + total_penalty * BALANCE_WEIGHT;
+fn route_p2c(&mut self, doc_tokens: &[&str], doc_id: u64) -> usize {
+    let a = hash(doc_id) as usize % self.num_shards;
+    let b = hash(doc_id.wrapping_add(SEED)) as usize % self.num_shards;
+    let score_a = self.score_shard(a, doc_tokens);
+    let score_b = self.score_shard(b, doc_tokens);
+    if score_a <= score_b { a } else { b }
+}
 ```
-Rationale : éviter qu'un shard reçoive trop de docs au total même s'il est sous-représenté en tokens.
 
-**Recommandation** : commencer avec le score IDF-weighted. Les tokens fréquents ("import", "return") se répartissent naturellement par la loi des grands nombres — le routing n'a pas d'impact sur eux. Ce sont les tokens mid-frequency (50-500 docs : "rag3db", "configManager") qui bénéficient du routing intelligent. L'IDF weight assure qu'on optimise pour ces tokens-là.
+Coût : O(tokens × 2) au lieu de O(tokens × N_shards). Prouvé quasi-optimal en théorie des systèmes distribués. Suffisant pour la plupart des cas, full scan des shards en fallback pour les corpus très déséquilibrés.
 
 ### Query
 
@@ -172,7 +219,7 @@ Le `doc_freq` est calculé localement par shard. L'IDF sera légèrement différ
 
 2. **Delete/update** — supprimer un doc décrémente les compteurs du shard. L'équilibre peut se dégrader avec beaucoup de deletes. Fix : rebalance périodique ou lazy.
 
-3. **Mémoire des compteurs** — HashMap<u64, u32> par shard. Pour 1M tokens uniques × 6 shards = ~72 MB. Acceptable. Peut être compressé (bloom filter approximatif pour les tokens rares).
+3. **Mémoire des compteurs** — Mitigé par le df threshold : seuls les tokens avec df < 5000 sont trackés. ~500k tokens × 6 shards × 24 bytes = ~72 MB. Sans threshold, 50M tokens × 6 shards = 7.2 GB (inacceptable).
 
 4. **Cross-token queries** — le cross-token (regex multi-token via GapMap) fonctionne car chaque doc est dans UN seul shard. Le GapMap est local au shard.
 
