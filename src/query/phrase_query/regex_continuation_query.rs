@@ -14,17 +14,15 @@ use lucivy_fst::Automaton;
 use once_cell::sync::OnceCell;
 use tantivy_fst::Regex;
 
-use crate::docset::DocSet;
 use crate::index::SegmentReader;
-use crate::postings::Postings;
 use crate::query::automaton_weight::SfxAutomatonAdapter;
 use crate::query::phrase_query::scoring_utils::HighlightSink;
 use crate::query::{BitSetDocSet, ConstScorer, EnableScoring, Explanation, Query, Scorer, Weight};
-use crate::schema::{Field, IndexRecordOption};
+use crate::schema::Field;
 use crate::suffix_fst::file::{SfxDfaWrapper, SfxFileReader};
 use crate::suffix_fst::gapmap::is_value_boundary;
 use crate::suffix_fst::SfxTermDictionary;
-use crate::{DocId, LucivyError, Score, TERMINATED};
+use crate::{DocId, LucivyError, Score};
 
 /// Mode controls where the regex can match relative to the text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,64 +142,7 @@ struct CandidateState<S> {
     byte_from: u32,
 }
 
-/// Posting entry from .sfxpost, used by continuation_score.
-#[derive(Clone)]
-struct PostingEntry {
-    doc_id: DocId,
-    position: u32,
-    byte_from: u32,
-    byte_to: u32,
-}
-
-/// Trait for resolving ordinals to posting entries.
-/// Abstracts over .sfxpost (preferred) and inverted_index (fallback).
-trait PostingResolver {
-    fn resolve(&self, ordinal: u64) -> Vec<PostingEntry>;
-}
-
-/// Resolver backed by pre-loaded .sfxpost entries.
-struct SfxPostResolver {
-    entries: Arc<Vec<Vec<PostingEntry>>>,
-}
-
-impl PostingResolver for SfxPostResolver {
-    fn resolve(&self, ordinal: u64) -> Vec<PostingEntry> {
-        self.entries.get(ordinal as usize).cloned().unwrap_or_default()
-    }
-}
-
-/// Resolver backed by the ._raw inverted index (fallback for old indexes).
-struct InvertedIndexResolver {
-    inv_idx: Arc<crate::index::InvertedIndexReader>,
-}
-
-impl PostingResolver for InvertedIndexResolver {
-    fn resolve(&self, ordinal: u64) -> Vec<PostingEntry> {
-        let term_dict = self.inv_idx.terms();
-        let term_info = term_dict.term_info_from_ord(ordinal);
-        let mut postings = match self.inv_idx.read_postings_from_terminfo(
-            &term_info,
-            IndexRecordOption::WithFreqsAndPositionsAndOffsets,
-        ) {
-            Ok(p) => p,
-            Err(_) => return Vec::new(),
-        };
-        let mut entries = Vec::new();
-        loop {
-            let doc = postings.doc();
-            if doc == TERMINATED {
-                break;
-            }
-            let mut pos_offsets = Vec::new();
-            postings.append_positions_and_offsets(0, &mut pos_offsets);
-            for (pos, off_from, off_to) in pos_offsets {
-                entries.push(PostingEntry { doc_id: doc, position: pos, byte_from: off_from, byte_to: off_to });
-            }
-            postings.advance();
-        }
-        entries
-    }
-}
+use crate::query::posting_resolver::{self, PostingResolver, PostingEntry};
 
 /// Run the continuation algorithm with a given automaton on a segment.
 /// Returns (doc_bitset, highlights) where highlights = Vec<(doc_id, byte_from, byte_to)>.
@@ -345,26 +286,7 @@ impl Weight for RegexContinuationWeight {
         let inverted_index = reader.inverted_index(self.field)?;
         let sfx_dict = SfxTermDictionary::new(&sfx_reader, inverted_index.terms());
 
-        // Build resolver: prefer .sfxpost, fall back to inverted index
-        let resolver: Box<dyn PostingResolver> =
-            if let Some(sfxpost_data) = reader.sfxpost_file(self.field) {
-                let sfxpost_bytes = sfxpost_data.read_bytes().map_err(|e| {
-                    LucivyError::SystemError(format!("read .sfxpost: {e}"))
-                })?.to_vec();
-                let pr = crate::suffix_fst::file::SfxPostingsReader::open(&sfxpost_bytes)
-                    .map_err(|e| LucivyError::SystemError(format!("open .sfxpost: {e}")))?;
-                let num = pr.num_terms();
-                let mut all: Vec<Vec<PostingEntry>> = Vec::with_capacity(num as usize);
-                for ord in 0..num {
-                    all.push(pr.entries(ord).into_iter().map(|e| PostingEntry {
-                        doc_id: e.doc_id, position: e.token_index,
-                        byte_from: e.byte_from, byte_to: e.byte_to,
-                    }).collect());
-                }
-                Box::new(SfxPostResolver { entries: Arc::new(all) })
-            } else {
-                Box::new(InvertedIndexResolver { inv_idx: Arc::clone(&inverted_index) })
-            };
+        let resolver = posting_resolver::build_resolver(reader, self.field)?;
 
         let (doc_bitset, highlights) = match &self.dfa_kind {
             DfaKind::Fuzzy { text, distance, prefix } => {
@@ -424,7 +346,7 @@ impl Weight for RegexContinuationWeight {
 mod tests {
     use super::*;
     use crate::collector::TopDocs;
-    use crate::schema::{SchemaBuilder, TextFieldIndexing, TextOptions};
+    use crate::schema::{IndexRecordOption, SchemaBuilder, TextFieldIndexing, TextOptions};
     use crate::tokenizer::{LowerCaser, SimpleTokenizer, TextAnalyzer};
     use crate::{Index, LucivyDocument};
 
