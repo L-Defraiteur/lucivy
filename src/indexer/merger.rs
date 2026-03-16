@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use columnar::{
@@ -20,7 +20,8 @@ use crate::postings::{InvertedIndexSerializer, Postings, SegmentPostings};
 use crate::schema::{value_type_to_column_type, Field, FieldType, Schema};
 use crate::store::StoreWriter;
 use crate::suffix_fst::builder::SuffixFstBuilder;
-use crate::suffix_fst::file::{SfxFileReader, SfxFileWriter};
+use crate::suffix_fst::encode_vint;
+use crate::suffix_fst::file::{SfxFileReader, SfxFileWriter, SfxPostingsReader};
 use crate::suffix_fst::gapmap::GapMapWriter;
 use crate::termdict::{TermMerger, TermOrdinal};
 use crate::{DocAddress, DocId, InvertedIndexReader};
@@ -684,7 +685,98 @@ impl IndexMerger {
                 }
             }
 
-            // 4. Assemble and write
+            // 4. Reconstruct .sfxpost by merging posting entries with doc_id remapping
+            let mut sfxpost_data: Option<Vec<u8>> = None;
+            {
+                let mut segment_sfxpost: Vec<Option<Vec<u8>>> = Vec::with_capacity(self.readers.len());
+                let mut any_has_sfxpost = false;
+                for reader in &self.readers {
+                    if let Some(file_slice) = reader.sfxpost_file(field) {
+                        match file_slice.read_bytes() {
+                            Ok(bytes) => {
+                                segment_sfxpost.push(Some(bytes.to_vec()));
+                                any_has_sfxpost = true;
+                            }
+                            Err(_) => segment_sfxpost.push(None),
+                        }
+                    } else {
+                        segment_sfxpost.push(None);
+                    }
+                }
+
+                if any_has_sfxpost {
+                    let sfxpost_readers: Vec<Option<SfxPostingsReader<'_>>> = segment_sfxpost
+                        .iter()
+                        .map(|opt| opt.as_ref().and_then(|b| SfxPostingsReader::open(b).ok()))
+                        .collect();
+
+                    // token → old ordinal for each source segment
+                    let mut token_to_ordinal: Vec<HashMap<String, u32>> = Vec::with_capacity(self.readers.len());
+                    for reader in &self.readers {
+                        let mut map = HashMap::new();
+                        if let Ok(inv_idx) = reader.inverted_index(field) {
+                            let term_dict = inv_idx.terms();
+                            let mut stream = term_dict.stream()?;
+                            let mut ord = 0u32;
+                            while stream.advance() {
+                                if let Ok(s) = std::str::from_utf8(stream.key()) {
+                                    map.insert(s.to_string(), ord);
+                                }
+                                ord += 1;
+                            }
+                        }
+                        token_to_ordinal.push(map);
+                    }
+
+                    // Reverse doc mapping: (seg_ord, old_doc) → new_doc
+                    let mut reverse_doc_map: Vec<HashMap<DocId, DocId>> =
+                        vec![HashMap::new(); self.readers.len()];
+                    for (new_doc, old_addr) in doc_mapping.iter().enumerate() {
+                        reverse_doc_map[old_addr.segment_ord as usize]
+                            .insert(old_addr.doc_id, new_doc as DocId);
+                    }
+
+                    // Merge entries per token in BTreeSet order (= new ordinal order)
+                    let mut posting_offsets: Vec<u32> = Vec::with_capacity(unique_tokens.len() + 1);
+                    let mut posting_bytes: Vec<u8> = Vec::new();
+
+                    for token in &unique_tokens {
+                        posting_offsets.push(posting_bytes.len() as u32);
+                        let mut merged: Vec<(u32, u32, u32, u32)> = Vec::new();
+
+                        for (seg_ord, sfxpost_reader) in sfxpost_readers.iter().enumerate() {
+                            if let Some(reader) = sfxpost_reader {
+                                if let Some(&old_ord) = token_to_ordinal[seg_ord].get(token.as_str()) {
+                                    for e in reader.entries(old_ord) {
+                                        if let Some(&new_doc) = reverse_doc_map[seg_ord].get(&e.doc_id) {
+                                            merged.push((new_doc, e.token_index, e.byte_from, e.byte_to));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        merged.sort_unstable();
+                        for &(doc_id, ti, byte_from, byte_to) in &merged {
+                            encode_vint(doc_id, &mut posting_bytes);
+                            encode_vint(ti, &mut posting_bytes);
+                            encode_vint(byte_from, &mut posting_bytes);
+                            encode_vint(byte_to, &mut posting_bytes);
+                        }
+                    }
+                    posting_offsets.push(posting_bytes.len() as u32);
+
+                    let mut data = Vec::new();
+                    data.extend_from_slice(&(unique_tokens.len() as u32).to_le_bytes());
+                    for &off in &posting_offsets {
+                        data.extend_from_slice(&off.to_le_bytes());
+                    }
+                    data.extend_from_slice(&posting_bytes);
+                    sfxpost_data = Some(data);
+                }
+            }
+
+            // 5. Assemble and write .sfx + .sfxpost
             let gapmap_data = gapmap_writer.serialize();
             let sfx_file = SfxFileWriter::new(
                 fst_data,
@@ -695,6 +787,9 @@ impl IndexMerger {
             );
             let sfx_bytes = sfx_file.to_bytes();
             serializer.write_sfx(field.field_id(), &sfx_bytes)?;
+            if let Some(ref sfxpost) = sfxpost_data {
+                serializer.write_sfxpost(field.field_id(), sfxpost)?;
+            }
             sfx_field_ids.push(field.field_id());
         }
 

@@ -237,7 +237,7 @@ impl SfxCollector {
 }
 
 /// Encode a u32 as a variable-length integer (1-5 bytes, little-endian, MSB continuation).
-fn encode_vint(mut val: u32, out: &mut Vec<u8>) {
+pub(crate) fn encode_vint(mut val: u32, out: &mut Vec<u8>) {
     loop {
         let byte = (val & 0x7F) as u8;
         val >>= 7;

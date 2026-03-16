@@ -9,6 +9,7 @@ mod stress_tests;
 
 pub use builder::{SuffixFstBuilder, ParentEntry};
 pub use collector::SfxCollector;
+pub(crate) use collector::encode_vint;
 pub use gapmap::{GapMapWriter, GapMapReader};
 pub use file::{SfxFileWriter, SfxFileReader, SfxPostingsReader, SfxPostingEntry};
 pub use interceptor::{SfxTokenInterceptor, CapturedToken};
