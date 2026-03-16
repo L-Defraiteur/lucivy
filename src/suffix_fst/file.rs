@@ -248,12 +248,22 @@ impl<'a> SfxFileReader<'a> {
 
 // ─── SFX Postings Reader ───────────────────────────────────────────────────
 
-/// Reads a .sfxpost file: per-ordinal posting lists (sorted doc IDs, delta-VInt encoded).
-/// Format: [num_terms: u32] [offsets: u32 × (num_terms+1)] [delta-VInt doc_ids]
+/// A posting entry from the .sfxpost file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SfxPostingEntry {
+    pub doc_id: u32,
+    pub token_index: u32,
+    pub byte_from: u32,
+    pub byte_to: u32,
+}
+
+/// Reads a .sfxpost file: per-ordinal posting entries.
+/// Format: [num_terms: u32] [offsets: u32 × (num_terms+1)] [entries: VInt packed]
+/// Each entry: doc_id(VInt) + token_index(VInt) + byte_from(VInt) + byte_to(VInt)
 pub struct SfxPostingsReader<'a> {
     num_terms: u32,
-    offsets: &'a [u8],    // (num_terms + 1) × 4 bytes
-    doc_data: &'a [u8],   // delta-VInt encoded doc IDs
+    offsets: &'a [u8],
+    entry_data: &'a [u8],
 }
 
 impl<'a> SfxPostingsReader<'a> {
@@ -267,32 +277,41 @@ impl<'a> SfxPostingsReader<'a> {
             return Err(SfxError::InvalidMagic);
         }
         let offsets = &data[4..4 + offsets_size];
-        let doc_data = &data[4 + offsets_size..];
-        Ok(Self { num_terms, offsets, doc_data })
+        let entry_data = &data[4 + offsets_size..];
+        Ok(Self { num_terms, offsets, entry_data })
     }
 
-    /// Number of unique terms in the posting index.
+    /// Number of unique terms.
     pub fn num_terms(&self) -> u32 {
         self.num_terms
     }
 
-    /// Get the sorted list of doc IDs for a given ordinal.
-    pub fn doc_ids(&self, ordinal: u32) -> Vec<u32> {
+    /// Get all posting entries for a given ordinal, sorted by (doc_id, token_index).
+    pub fn entries(&self, ordinal: u32) -> Vec<SfxPostingEntry> {
         if ordinal >= self.num_terms {
             return Vec::new();
         }
         let off_start = self.read_offset(ordinal) as usize;
         let off_end = self.read_offset(ordinal + 1) as usize;
-        if off_start >= off_end || off_start >= self.doc_data.len() {
+        if off_start >= off_end || off_start >= self.entry_data.len() {
             return Vec::new();
         }
-        let slice = &self.doc_data[off_start..off_end.min(self.doc_data.len())];
-        decode_vint_deltas(slice)
+        let slice = &self.entry_data[off_start..off_end.min(self.entry_data.len())];
+        decode_posting_entries(slice)
     }
 
     /// Get the doc_freq (number of unique docs) for a given ordinal.
     pub fn doc_freq(&self, ordinal: u32) -> u32 {
-        self.doc_ids(ordinal).len() as u32
+        let entries = self.entries(ordinal);
+        let mut count = 0u32;
+        let mut prev_doc = u32::MAX;
+        for e in &entries {
+            if e.doc_id != prev_doc {
+                count += 1;
+                prev_doc = e.doc_id;
+            }
+        }
+        count
     }
 
     fn read_offset(&self, idx: u32) -> u32 {
@@ -301,16 +320,22 @@ impl<'a> SfxPostingsReader<'a> {
     }
 }
 
-/// Decode delta-VInt encoded doc IDs.
-fn decode_vint_deltas(data: &[u8]) -> Vec<u32> {
+fn decode_posting_entries(data: &[u8]) -> Vec<SfxPostingEntry> {
     let mut result = Vec::new();
     let mut pos = 0;
-    let mut prev = 0u32;
     while pos < data.len() {
-        let (delta, bytes_read) = decode_vint(&data[pos..]);
-        prev += delta;
-        result.push(prev);
-        pos += bytes_read;
+        let (doc_id, n) = decode_vint(&data[pos..]);
+        pos += n;
+        if pos >= data.len() { break; }
+        let (token_index, n) = decode_vint(&data[pos..]);
+        pos += n;
+        if pos >= data.len() { break; }
+        let (byte_from, n) = decode_vint(&data[pos..]);
+        pos += n;
+        if pos >= data.len() { break; }
+        let (byte_to, n) = decode_vint(&data[pos..]);
+        pos += n;
+        result.push(SfxPostingEntry { doc_id, token_index, byte_from, byte_to });
     }
     result
 }

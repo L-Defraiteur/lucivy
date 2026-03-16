@@ -21,8 +21,8 @@ use super::gapmap::GapMapWriter;
 ///   collector.end_value();
 ///   collector.end_doc();
 pub struct SfxCollector {
-    // Per-segment: token → list of doc IDs containing it (sorted, with duplicates for tf)
-    token_docs: BTreeMap<String, Vec<u32>>,
+    // Per-segment: token → list of (doc_id, token_index, byte_from, byte_to) occurrences
+    token_postings: BTreeMap<String, Vec<(u32, u32, u32, u32)>>,
     // Per-segment: gap map writer
     gapmap_writer: GapMapWriter,
 
@@ -67,7 +67,7 @@ impl SfxCollector {
     /// Create with custom minimum suffix length.
     pub fn with_min_suffix_len(min_suffix_len: usize) -> Self {
         Self {
-            token_docs: BTreeMap::new(),
+            token_postings: BTreeMap::new(),
             gapmap_writer: GapMapWriter::new(),
             doc_values: Vec::new(),
             doc_active: false,
@@ -102,10 +102,11 @@ impl SfxCollector {
         if text.len() > crate::tokenizer::MAX_TOKEN_LEN {
             return;
         }
-        self.token_docs
+        let ti = self.current_value_ti_start + self.current_value_tokens.len() as u32;
+        self.token_postings
             .entry(text.to_string())
             .or_default()
-            .push(self.current_doc_id);
+            .push((self.current_doc_id, ti, offset_from as u32, offset_to as u32));
         self.current_value_tokens.push(TokenCapture {
             text: text.to_string(),
             offset_from,
@@ -188,7 +189,7 @@ impl SfxCollector {
     /// - sfxpost_bytes: posting index (ordinal → delta-VInt doc IDs)
     pub fn build(self) -> Result<(Vec<u8>, Vec<u8>), lucivy_fst::Error> {
         let mut sfx_builder = SuffixFstBuilder::with_min_suffix_len(self.min_suffix_len);
-        for (ordinal, token) in self.token_docs.keys().enumerate() {
+        for (ordinal, token) in self.token_postings.keys().enumerate() {
             sfx_builder.add_token(token, ordinal as u64);
         }
 
@@ -196,7 +197,6 @@ impl SfxCollector {
         let (fst_data, parent_list_data) = sfx_builder.build()?;
         let gapmap_data = self.gapmap_writer.serialize();
 
-        // .sfx file (v1 format — no postings embedded)
         let file_writer = SfxFileWriter::new(
             fst_data,
             parent_list_data,
@@ -206,25 +206,27 @@ impl SfxCollector {
         );
         let sfx_bytes = file_writer.to_bytes();
 
-        // .sfxpost file: ordinal → sorted doc IDs (delta-VInt encoded)
-        // Format: [num_terms: u32] [offsets: u32 × (num_terms+1)] [doc_ids: delta-VInt]
-        let mut posting_offsets: Vec<u32> = Vec::with_capacity(self.token_docs.len() + 1);
+        // .sfxpost file: ordinal → posting entries (doc_id, token_index, byte_from, byte_to)
+        // Format: [num_terms: u32] [offsets: u32 × (num_terms+1)] [entries: packed]
+        // Each entry: doc_id(VInt) + token_index(VInt) + byte_from(VInt) + byte_to(VInt)
+        // Entries sorted by (doc_id, token_index) within each ordinal.
+        let mut posting_offsets: Vec<u32> = Vec::with_capacity(self.token_postings.len() + 1);
         let mut posting_data: Vec<u8> = Vec::new();
-        for doc_ids in self.token_docs.values() {
+        for entries in self.token_postings.values() {
             posting_offsets.push(posting_data.len() as u32);
-            let mut sorted = doc_ids.clone();
+            let mut sorted = entries.clone();
             sorted.sort_unstable();
-            sorted.dedup();
-            let mut prev = 0u32;
-            for &doc_id in &sorted {
-                encode_vint(doc_id - prev, &mut posting_data);
-                prev = doc_id;
+            for &(doc_id, ti, byte_from, byte_to) in &sorted {
+                encode_vint(doc_id, &mut posting_data);
+                encode_vint(ti, &mut posting_data);
+                encode_vint(byte_from, &mut posting_data);
+                encode_vint(byte_to, &mut posting_data);
             }
         }
         posting_offsets.push(posting_data.len() as u32);
 
         let mut sfxpost_bytes: Vec<u8> = Vec::new();
-        sfxpost_bytes.extend_from_slice(&(self.token_docs.len() as u32).to_le_bytes());
+        sfxpost_bytes.extend_from_slice(&(self.token_postings.len() as u32).to_le_bytes());
         for &off in &posting_offsets {
             sfxpost_bytes.extend_from_slice(&off.to_le_bytes());
         }
