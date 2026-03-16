@@ -49,27 +49,29 @@ pub struct SegmentReader {
     alive_bitset_opt: Option<AliveBitSet>,
     schema: Schema,
     sfx_files: FnvHashMap<Field, FileSlice>,
+    sfxpost_files: FnvHashMap<Field, FileSlice>,
 }
 
 /// Load per-field .sfx files listed in the .sfx manifest.
 /// The manifest is written as SegmentComponent::SuffixFst and lists field_ids.
 /// Each per-field .sfx is stored as `{uuid}.{field_id}.sfx` (custom file).
 /// Returns empty map if no manifest exists.
-fn load_sfx_files(segment: &Segment, _schema: &Schema) -> FnvHashMap<Field, FileSlice> {
+fn load_sfx_files(segment: &Segment, _schema: &Schema) -> (FnvHashMap<Field, FileSlice>, FnvHashMap<Field, FileSlice>) {
     use crate::index::SegmentComponent;
     let mut sfx_files = FnvHashMap::default();
+    let mut sfxpost_files = FnvHashMap::default();
 
     // Read manifest
     let manifest_data = match segment.open_read(SegmentComponent::SuffixFst) {
         Ok(file_slice) => match file_slice.read_bytes() {
             Ok(bytes) => bytes,
-            Err(_) => return sfx_files,
+            Err(_) => return (sfx_files, sfxpost_files),
         },
-        Err(_) => return sfx_files,
+        Err(_) => return (sfx_files, sfxpost_files),
     };
 
     if manifest_data.len() < 4 {
-        return sfx_files;
+        return (sfx_files, sfxpost_files);
     }
 
     let num_fields = u32::from_le_bytes([
@@ -85,19 +87,27 @@ fn load_sfx_files(segment: &Segment, _schema: &Schema) -> FnvHashMap<Field, File
             manifest_data[offset], manifest_data[offset + 1],
             manifest_data[offset + 2], manifest_data[offset + 3],
         ]);
-        let suffix = format!("{}.sfx", field_id);
-        if let Ok(file_slice) = segment.open_read_custom(&suffix) {
-            sfx_files.insert(Field::from_field_id(field_id), file_slice);
+        let field = Field::from_field_id(field_id);
+        if let Ok(file_slice) = segment.open_read_custom(&format!("{field_id}.sfx")) {
+            sfx_files.insert(field, file_slice);
+        }
+        if let Ok(file_slice) = segment.open_read_custom(&format!("{field_id}.sfxpost")) {
+            sfxpost_files.insert(field, file_slice);
         }
     }
 
-    sfx_files
+    (sfx_files, sfxpost_files)
 }
 
 impl SegmentReader {
     /// Access a pre-loaded .sfx file for the given field, if one exists.
     pub fn sfx_file(&self, field: Field) -> Option<&FileSlice> {
         self.sfx_files.get(&field)
+    }
+
+    /// Access a pre-loaded .sfxpost file for the given field, if one exists.
+    pub fn sfxpost_file(&self, field: Field) -> Option<&FileSlice> {
+        self.sfxpost_files.get(&field)
     }
 
     /// Returns the highest document id ever attributed in
@@ -260,6 +270,8 @@ impl SegmentReader {
             .map(|alive_bitset| alive_bitset.num_alive_docs() as u32)
             .unwrap_or(max_doc);
 
+        let (sfx_files, sfxpost_files) = load_sfx_files(segment, &schema);
+
         Ok(SegmentReader {
             inv_idx_reader_cache: Default::default(),
             num_docs,
@@ -275,7 +287,8 @@ impl SegmentReader {
             positions_composite,
             offsets_composite,
             schema: schema.clone(),
-            sfx_files: load_sfx_files(segment, &schema),
+            sfx_files,
+            sfxpost_files,
         })
     }
 
@@ -332,6 +345,8 @@ impl SegmentReader {
             .map(|alive_bitset| alive_bitset.num_alive_docs() as u32)
             .unwrap_or(max_doc);
 
+        let (sfx_files, sfxpost_files) = load_sfx_files(segment, &schema);
+
         Ok(SegmentReader {
             inv_idx_reader_cache: Default::default(),
             num_docs,
@@ -347,7 +362,8 @@ impl SegmentReader {
             positions_composite,
             offsets_composite,
             schema: schema.clone(),
-            sfx_files: load_sfx_files(segment, &schema),
+            sfx_files,
+            sfxpost_files,
         })
     }
 
