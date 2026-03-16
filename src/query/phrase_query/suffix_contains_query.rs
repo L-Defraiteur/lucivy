@@ -22,6 +22,28 @@ use crate::tokenizer::{SimpleTokenizer, TextAnalyzer, LowerCaser, TokenStream, T
 
 use super::suffix_contains;
 
+/// Count term frequency per document from match doc_ids (already extracted).
+/// Input must be sorted. Returns (doc_id, tf) pairs.
+fn count_tf_sorted(doc_ids: &[DocId]) -> Vec<(DocId, u32)> {
+    if doc_ids.is_empty() {
+        return Vec::new();
+    }
+    let mut result = Vec::with_capacity(doc_ids.len() / 2 + 1);
+    let mut prev = doc_ids[0];
+    let mut count = 1u32;
+    for &d in &doc_ids[1..] {
+        if d == prev {
+            count += 1;
+        } else {
+            result.push((prev, count));
+            prev = d;
+            count = 1;
+        }
+    }
+    result.push((prev, count));
+    result
+}
+
 /// Tokenize a query string into (tokens, separators) using the same
 /// SimpleTokenizer + LowerCaser as the ._raw field.
 /// Returns (["rust", "lang"], ["🦀"]) for "rust🦀lang".
@@ -151,7 +173,7 @@ impl Weight for SuffixContainsWeight {
 
         let fuzzy_d = self.fuzzy_distance;
 
-        let (doc_ids, highlights) = if query_tokens.len() <= 1 {
+        let (doc_tf, highlights) = if query_tokens.len() <= 1 {
             // Single-token path
             let query = if query_tokens.is_empty() { &self.query_text } else { &query_tokens[0] };
             let matches = if fuzzy_d == 0 {
@@ -168,8 +190,7 @@ impl Weight for SuffixContainsWeight {
                 .collect();
             let mut doc_ids: Vec<DocId> = matches.iter().map(|m| m.doc_id).collect();
             doc_ids.sort_unstable();
-            doc_ids.dedup();
-            (doc_ids, highlights)
+            (count_tf_sorted(&doc_ids), highlights)
         } else {
             // Multi-token path
             let token_refs: Vec<&str> = query_tokens.iter().map(|s| s.as_str()).collect();
@@ -188,11 +209,10 @@ impl Weight for SuffixContainsWeight {
                 .collect();
             let mut doc_ids: Vec<DocId> = matches.iter().map(|m| m.doc_id).collect();
             doc_ids.sort_unstable();
-            doc_ids.dedup();
-            (doc_ids, highlights)
+            (count_tf_sorted(&doc_ids), highlights)
         };
 
-        if doc_ids.is_empty() {
+        if doc_tf.is_empty() {
             return Ok(Box::new(EmptyScorer));
         }
 
@@ -218,7 +238,7 @@ impl Weight for SuffixContainsWeight {
         };
 
         Ok(Box::new(SuffixContainsScorer::new(
-            doc_ids,
+            doc_tf,
             self.bm25_weight.boost_by(boost),
             fieldnorm_reader,
         )))
@@ -236,9 +256,10 @@ impl Weight for SuffixContainsWeight {
 }
 
 /// Scorer that iterates pre-verified doc IDs from the suffix FST.
-/// No stored text decompression — BM25 scoring with term_freq=1.
+/// Uses real term frequency (number of match positions per document) for BM25.
 struct SuffixContainsScorer {
-    candidates: Vec<DocId>,
+    /// (doc_id, term_freq) pairs, sorted by doc_id.
+    candidates: Vec<(DocId, u32)>,
     cursor: usize,
     bm25_weight: Bm25Weight,
     fieldnorm_reader: FieldNormReader,
@@ -246,7 +267,7 @@ struct SuffixContainsScorer {
 
 impl SuffixContainsScorer {
     fn new(
-        candidates: Vec<DocId>,
+        candidates: Vec<(DocId, u32)>,
         bm25_weight: Bm25Weight,
         fieldnorm_reader: FieldNormReader,
     ) -> Self {
@@ -262,7 +283,7 @@ impl DocSet for SuffixContainsScorer {
 
     fn doc(&self) -> DocId {
         if self.cursor < self.candidates.len() {
-            self.candidates[self.cursor]
+            self.candidates[self.cursor].0
         } else {
             TERMINATED
         }
@@ -284,10 +305,10 @@ impl DocSet for SuffixContainsScorer {
 
 impl Scorer for SuffixContainsScorer {
     fn score(&mut self) -> Score {
-        let doc = self.doc();
-        if doc == TERMINATED { return 0.0; }
+        if self.cursor >= self.candidates.len() { return 0.0; }
+        let (doc, tf) = self.candidates[self.cursor];
         let fieldnorm_id = self.fieldnorm_reader.fieldnorm_id(doc);
-        self.bm25_weight.score(fieldnorm_id, 1)
+        self.bm25_weight.score(fieldnorm_id, tf)
     }
 }
 
