@@ -610,8 +610,15 @@ impl IndexMerger {
             return Ok(());
         }
 
-        // Pre-load .sfx data from all source segments (per field)
-        // sfx_sources[field_idx][segment_ord] = Option<(sfx_bytes, SfxFileReader)>
+        // Reverse doc mapping for .sfxpost merge: (seg_ord, old_doc) → new_doc
+        // Computed once, shared across all fields.
+        let mut reverse_doc_map: Vec<HashMap<DocId, DocId>> =
+            vec![HashMap::new(); self.readers.len()];
+        for (new_doc, old_addr) in doc_mapping.iter().enumerate() {
+            reverse_doc_map[old_addr.segment_ord as usize]
+                .insert(old_addr.doc_id, new_doc as DocId);
+        }
+
         let mut sfx_field_ids = Vec::new();
 
         for &field in &raw_fields {
@@ -726,14 +733,6 @@ impl IndexMerger {
                             }
                         }
                         token_to_ordinal.push(map);
-                    }
-
-                    // Reverse doc mapping: (seg_ord, old_doc) → new_doc
-                    let mut reverse_doc_map: Vec<HashMap<DocId, DocId>> =
-                        vec![HashMap::new(); self.readers.len()];
-                    for (new_doc, old_addr) in doc_mapping.iter().enumerate() {
-                        reverse_doc_map[old_addr.segment_ord as usize]
-                            .insert(old_addr.doc_id, new_doc as DocId);
                     }
 
                     // Merge entries per token in BTreeSet order (= new ordinal order)
