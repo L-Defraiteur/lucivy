@@ -155,8 +155,11 @@ impl SegmentWriter {
         let mut sfx_field_ids = Vec::new();
         for (field_id, collector) in sfx_collectors {
             match collector.build() {
-                Ok(sfx_bytes) => {
+                Ok((sfx_bytes, sfxpost_bytes)) => {
                     self.segment_serializer.write_sfx(field_id, &sfx_bytes)?;
+                    if !sfxpost_bytes.is_empty() {
+                        self.segment_serializer.write_sfxpost(field_id, &sfxpost_bytes)?;
+                    }
                     sfx_field_ids.push(field_id);
                 }
                 Err(e) => {

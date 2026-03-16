@@ -88,6 +88,16 @@ impl SegmentSerializer {
         Ok(())
     }
 
+    /// Write a per-field .sfxpost file (sfx postings). `field_id` is used in the filename.
+    pub fn write_sfxpost(&mut self, field_id: u32, data: &[u8]) -> crate::Result<()> {
+        let suffix = format!("{field_id}.sfxpost");
+        let mut writer = self.segment.open_write_custom(&suffix)?;
+        use common::TerminatingWrite;
+        writer.write_all(data)?;
+        writer.terminate()?;
+        Ok(())
+    }
+
     /// Write the .sfx manifest listing which field_ids have per-field .sfx files.
     /// This file is tracked by SegmentComponent::SuffixFst so the GC preserves it
     /// and the per-field files it references.

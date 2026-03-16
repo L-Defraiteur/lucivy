@@ -181,11 +181,12 @@ impl SfxCollector {
         self.gapmap_writer.add_empty_doc();
     }
 
-    /// Build the .sfx file bytes from all collected data.
+    /// Build the .sfx file bytes and the .sfxpost file bytes.
     ///
-    /// The mini posting index maps each ordinal to its list of doc IDs.
-    /// Doc IDs within each list are delta-encoded for compactness.
-    pub fn build(self) -> Result<Vec<u8>, lucivy_fst::Error> {
+    /// Returns `(sfx_bytes, sfxpost_bytes)`:
+    /// - sfx_bytes: suffix FST + parent lists + GapMap
+    /// - sfxpost_bytes: posting index (ordinal → delta-VInt doc IDs)
+    pub fn build(self) -> Result<(Vec<u8>, Vec<u8>), lucivy_fst::Error> {
         let mut sfx_builder = SuffixFstBuilder::with_min_suffix_len(self.min_suffix_len);
         for (ordinal, token) in self.token_docs.keys().enumerate() {
             sfx_builder.add_token(token, ordinal as u64);
@@ -195,44 +196,41 @@ impl SfxCollector {
         let (fst_data, parent_list_data) = sfx_builder.build()?;
         let gapmap_data = self.gapmap_writer.serialize();
 
-        // Build mini posting index: for each ordinal, a sorted+deduped list of doc IDs.
-        // Format: [num_terms: u32] [offsets: u32 × (num_terms+1)] [doc_ids: delta-VInt encoded]
-        let mut posting_offsets: Vec<u32> = Vec::with_capacity(self.token_docs.len() + 1);
-        let mut posting_data: Vec<u8> = Vec::new();
-        for doc_ids in self.token_docs.values() {
-            posting_offsets.push(posting_data.len() as u32);
-            // Sort and dedup doc_ids for this term
-            let mut sorted = doc_ids.clone();
-            sorted.sort_unstable();
-            sorted.dedup();
-            // Delta-encode
-            let mut prev = 0u32;
-            for &doc_id in &sorted {
-                let delta = doc_id - prev;
-                encode_vint(delta, &mut posting_data);
-                prev = doc_id;
-            }
-        }
-        posting_offsets.push(posting_data.len() as u32); // sentinel
-
-        // Serialize: [num_terms: u32] [offsets: u32 × (num_terms+1)] [posting_data]
-        let mut mini_postings: Vec<u8> = Vec::new();
-        mini_postings.extend_from_slice(&(self.token_docs.len() as u32).to_le_bytes());
-        for &off in &posting_offsets {
-            mini_postings.extend_from_slice(&off.to_le_bytes());
-        }
-        mini_postings.extend_from_slice(&posting_data);
-
+        // .sfx file (v1 format — no postings embedded)
         let file_writer = SfxFileWriter::new(
             fst_data,
             parent_list_data,
             gapmap_data,
-            mini_postings,
             self.gapmap_writer.num_docs(),
             num_terms,
         );
+        let sfx_bytes = file_writer.to_bytes();
 
-        Ok(file_writer.to_bytes())
+        // .sfxpost file: ordinal → sorted doc IDs (delta-VInt encoded)
+        // Format: [num_terms: u32] [offsets: u32 × (num_terms+1)] [doc_ids: delta-VInt]
+        let mut posting_offsets: Vec<u32> = Vec::with_capacity(self.token_docs.len() + 1);
+        let mut posting_data: Vec<u8> = Vec::new();
+        for doc_ids in self.token_docs.values() {
+            posting_offsets.push(posting_data.len() as u32);
+            let mut sorted = doc_ids.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            let mut prev = 0u32;
+            for &doc_id in &sorted {
+                encode_vint(doc_id - prev, &mut posting_data);
+                prev = doc_id;
+            }
+        }
+        posting_offsets.push(posting_data.len() as u32);
+
+        let mut sfxpost_bytes: Vec<u8> = Vec::new();
+        sfxpost_bytes.extend_from_slice(&(self.token_docs.len() as u32).to_le_bytes());
+        for &off in &posting_offsets {
+            sfxpost_bytes.extend_from_slice(&off.to_le_bytes());
+        }
+        sfxpost_bytes.extend_from_slice(&posting_data);
+
+        Ok((sfx_bytes, sfxpost_bytes))
     }
 }
 
@@ -270,7 +268,7 @@ mod tests {
         collector.end_value();
         collector.end_doc();
 
-        let sfx_bytes = collector.build().unwrap();
+        let (sfx_bytes, _sfxpost_bytes) = collector.build().unwrap();
         let reader = SfxFileReader::open(&sfx_bytes).unwrap();
 
         let parents = reader.resolve_suffix("g3db");
@@ -303,7 +301,7 @@ mod tests {
         collector.end_value();
         collector.end_doc();
 
-        let sfx_bytes = collector.build().unwrap();
+        let (sfx_bytes, _sfxpost_bytes) = collector.build().unwrap();
         let reader = SfxFileReader::open(&sfx_bytes).unwrap();
 
         assert_eq!(reader.gapmap().num_tokens(0), 4);
@@ -347,7 +345,7 @@ mod tests {
         collector.begin_doc();
         collector.end_doc_empty();
 
-        let sfx_bytes = collector.build().unwrap();
+        let (sfx_bytes, _sfxpost_bytes) = collector.build().unwrap();
         let reader = SfxFileReader::open(&sfx_bytes).unwrap();
 
         assert_eq!(reader.num_docs(), 3);
@@ -366,7 +364,7 @@ mod tests {
         collector.end_value();
         collector.end_doc();
 
-        let sfx_bytes = collector.build().unwrap();
+        let (sfx_bytes, _sfxpost_bytes) = collector.build().unwrap();
         let reader = SfxFileReader::open(&sfx_bytes).unwrap();
 
         let results = reader.prefix_walk("work");
@@ -387,7 +385,7 @@ mod tests {
         collector.end_value();
         collector.end_doc();
 
-        let sfx_bytes = collector.build().unwrap();
+        let (sfx_bytes, _sfxpost_bytes) = collector.build().unwrap();
         let reader = SfxFileReader::open(&sfx_bytes).unwrap();
 
         let parents = reader.resolve_suffix("apple");

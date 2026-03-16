@@ -32,7 +32,7 @@ mod tests {
             collector.end_doc();
         }
 
-        let sfx_bytes = collector.build().unwrap();
+        let (sfx_bytes, _sfxpost_bytes) = collector.build().unwrap();
 
         // Build raw postings indexed by ordinal (sorted token order)
         let sorted_tokens: Vec<String> = all_tokens.into_iter().collect();
@@ -298,7 +298,7 @@ mod tests {
         collector.end_value();
         collector.end_doc();
 
-        let sfx_bytes = collector.build().unwrap();
+        let (sfx_bytes, _) = collector.build().unwrap();
         let reader = SfxFileReader::open(&sfx_bytes).unwrap();
         let gm = reader.gapmap();
 

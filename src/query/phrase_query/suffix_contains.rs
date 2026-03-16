@@ -529,7 +529,7 @@ mod tests {
         collector.end_value();
         collector.end_doc();
 
-        let sfx_bytes = collector.build().unwrap();
+        let (sfx_bytes, _sfxpost_bytes) = collector.build().unwrap();
 
         // Build fake ._raw posting lists indexed by raw_ordinal.
         // Sorted unique tokens: cool(0), core(1), from(2), import(3), is(4), rag3db(5)
@@ -772,7 +772,7 @@ mod tests {
         collector.end_value();
         collector.end_doc();
 
-        let sfx_bytes = collector.build().unwrap();
+        let (sfx_bytes, _sfxpost_bytes) = collector.build().unwrap();
         let reader = SfxFileReader::open(&sfx_bytes).unwrap();
 
         // Sorted unique tokens: cool(0), is(1), rag3db(2)
