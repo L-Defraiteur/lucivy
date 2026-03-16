@@ -115,16 +115,7 @@ impl SuffixContainsQuery {
 
 impl Query for SuffixContainsQuery {
     fn weight(&self, enable_scoring: EnableScoring) -> crate::Result<Box<dyn Weight>> {
-        let bm25_weight = match enable_scoring {
-            EnableScoring::Enabled {
-                statistics_provider,
-                ..
-            } => {
-                let term = crate::schema::Term::from_field_text(self.raw_field, &self.query_text);
-                Bm25Weight::for_terms(statistics_provider, &[term])?
-            }
-            EnableScoring::Disabled { .. } => Bm25Weight::for_one_term(0, 1, 1.0),
-        };
+        let scoring_enabled = matches!(enable_scoring, EnableScoring::Enabled { .. });
 
         Ok(Box::new(SuffixContainsWeight {
             raw_field: self.raw_field,
@@ -132,7 +123,7 @@ impl Query for SuffixContainsQuery {
             fuzzy_distance: self.fuzzy_distance,
             highlight_sink: self.highlight_sink.clone(),
             highlight_field_name: self.highlight_field_name.clone(),
-            bm25_weight,
+            scoring_enabled,
         }))
     }
 }
@@ -143,7 +134,7 @@ struct SuffixContainsWeight {
     fuzzy_distance: u8,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
-    bm25_weight: Bm25Weight,
+    scoring_enabled: bool,
 }
 
 impl Weight for SuffixContainsWeight {
@@ -244,9 +235,20 @@ impl Weight for SuffixContainsWeight {
             FieldNormReader::constant(reader.max_doc(), 1)
         };
 
+        // Compute BM25 per-segment from actual match statistics (no ._raw term dict needed)
+        let bm25_weight = if self.scoring_enabled {
+            let inverted_index = reader.inverted_index(self.raw_field)?;
+            let total_num_tokens = inverted_index.total_num_tokens();
+            let total_num_docs = (reader.max_doc() as u64).max(1);
+            let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
+            Bm25Weight::for_one_term(doc_tf.len() as u64, total_num_docs, average_fieldnorm)
+        } else {
+            Bm25Weight::for_one_term(0, 1, 1.0)
+        };
+
         Ok(Box::new(SuffixContainsScorer::new(
             doc_tf,
-            self.bm25_weight.boost_by(boost),
+            bm25_weight.boost_by(boost),
             fieldnorm_reader,
         )))
     }

@@ -10,18 +10,21 @@ use super::scoring_utils::HighlightSink;
 use super::PhraseScorer;
 use crate::fieldnorm::FieldNormReader;
 use crate::index::{SegmentId, SegmentReader};
-use crate::postings::TermInfo;
+use crate::postings::{Postings, TermInfo};
 use crate::query::bm25::Bm25Weight;
 use crate::query::explanation::does_not_match;
 use crate::query::fuzzy_query::DfaWrapper;
 use crate::query::phrase_prefix_query::prefix_end;
+use crate::query::posting_resolver::{PostingResolver, build_resolver};
+use crate::query::resolved_postings::ResolvedPostings;
+use crate::query::union::SimpleUnion;
 use crate::query::{BitSetDocSet, ConstScorer, EmptyScorer, Explanation, Scorer, Weight};
 use crate::schema::{Field, IndexRecordOption, Term};
 use crate::suffix_fst::SfxTermDictionary;
 use crate::suffix_fst::file::SfxDfaWrapper;
 use crate::{DocId, InvertedIndexReader, Score};
 
-/// Cascade level returned by cascade_term_infos.
+/// Cascade level returned by cascade_term_infos / cascade_ordinals.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum CascadeLevel {
     Exact,
@@ -46,6 +49,21 @@ fn get_automaton_builder(distance: u8) -> &'static LevenshteinAutomatonBuilder {
     ];
     AUTOMATON_BUILDER[distance as usize]
         .get_or_init(|| LevenshteinAutomatonBuilder::new(distance, true))
+}
+
+/// Build a SimpleUnion of ResolvedPostings from ordinals via PostingResolver.
+fn build_union_from_ordinals(
+    ordinals: &[u64],
+    resolver: &dyn PostingResolver,
+) -> SimpleUnion<Box<dyn Postings + 'static>> {
+    let docsets: Vec<Box<dyn Postings + 'static>> = ordinals
+        .iter()
+        .map(|&ord| {
+            let entries = resolver.resolve(ord);
+            Box::new(ResolvedPostings::from_entries(entries)) as Box<dyn Postings + 'static>
+        })
+        .collect();
+    SimpleUnion::build(docsets)
 }
 
 /// Weight for `AutomatonPhraseQuery`. Implements the auto-cascade
@@ -121,20 +139,18 @@ impl AutomatonPhraseWeight {
         Ok(FieldNormReader::constant(reader.max_doc(), 1))
     }
 
+    // ── TermInfo path (fallback) ─────────────────────────────────────
+
     /// Auto-cascade for a single token: exact → fuzzy.
     /// Returns (term_infos, cascade_level) from the first level that finds matches.
-    /// Uses SfxTermDictionary when available, falls back to standard TermDictionary.
     fn cascade_term_infos(
         &self,
         token: &str,
         sfx_dict: &SfxTermDictionary<'_>,
     ) -> crate::Result<(Vec<TermInfo>, CascadeLevel)> {
-        // 1. EXACT: direct lookup via .sfx FST (SI=0)
         if let Some(term_info) = sfx_dict.get(token.as_bytes())? {
             return Ok((vec![term_info], CascadeLevel::Exact));
         }
-
-        // 2. FUZZY: Levenshtein DFA (if enabled and distance ≤ 2)
         if self.fuzzy_distance > 0 && self.fuzzy_distance <= 2 {
             let builder = get_automaton_builder(self.fuzzy_distance);
             let sfx_dfa = SfxDfaWrapper(builder.build_dfa(token));
@@ -144,22 +160,16 @@ impl AutomatonPhraseWeight {
                 return Ok((term_infos, CascadeLevel::Fuzzy(self.fuzzy_distance)));
             }
         }
-
-        // No matches
         Ok((Vec::new(), CascadeLevel::Exact))
     }
 
-    /// Cascade for a prefix token (last token in startsWith mode):
-    /// prefix range → prefix fuzzy DFA.
-    /// Uses SfxTermDictionary when available, falls back to standard TermDictionary.
+    /// Cascade for a prefix token (last token in startsWith mode).
     fn prefix_term_infos(
         &self,
         token: &str,
         sfx_dict: &SfxTermDictionary<'_>,
     ) -> crate::Result<(Vec<TermInfo>, CascadeLevel)> {
         let prefix_bytes = token.as_bytes();
-
-        // 1. PREFIX RANGE: all terms starting with `token` (SI=0 via .sfx)
         let lt = prefix_end(prefix_bytes);
         let results = sfx_dict.range_scan(prefix_bytes, lt.as_deref());
         if !results.is_empty() {
@@ -169,8 +179,6 @@ impl AutomatonPhraseWeight {
                 .collect();
             return Ok((term_infos, CascadeLevel::Exact));
         }
-
-        // 2. PREFIX FUZZY: Levenshtein prefix DFA (SI=0 via .sfx)
         if self.fuzzy_distance > 0 && self.fuzzy_distance <= 2 {
             let automaton_builder = get_automaton_builder(self.fuzzy_distance);
             let sfx_dfa = SfxDfaWrapper(automaton_builder.build_prefix_dfa(token));
@@ -183,9 +191,64 @@ impl AutomatonPhraseWeight {
                 return Ok((term_infos, CascadeLevel::Fuzzy(self.fuzzy_distance)));
             }
         }
-
         Ok((Vec::new(), CascadeLevel::Exact))
     }
+
+    // ── Ordinal path (.sfxpost) ──────────────────────────────────────
+
+    /// Auto-cascade returning ordinals instead of TermInfo.
+    fn cascade_ordinals(
+        &self,
+        token: &str,
+        sfx_dict: &SfxTermDictionary<'_>,
+    ) -> crate::Result<(Vec<u64>, CascadeLevel)> {
+        if let Some(ordinal) = sfx_dict.get_ordinal(token.as_bytes())? {
+            return Ok((vec![ordinal], CascadeLevel::Exact));
+        }
+        if self.fuzzy_distance > 0 && self.fuzzy_distance <= 2 {
+            let builder = get_automaton_builder(self.fuzzy_distance);
+            let sfx_dfa = SfxDfaWrapper(builder.build_dfa(token));
+            let results = sfx_dict.search_automaton_ordinals(&sfx_dfa);
+            if !results.is_empty() {
+                let ordinals: Vec<u64> = results.into_iter().map(|(_, ord)| ord).collect();
+                return Ok((ordinals, CascadeLevel::Fuzzy(self.fuzzy_distance)));
+            }
+        }
+        Ok((Vec::new(), CascadeLevel::Exact))
+    }
+
+    /// Prefix cascade returning ordinals.
+    fn prefix_ordinals(
+        &self,
+        token: &str,
+        sfx_dict: &SfxTermDictionary<'_>,
+    ) -> crate::Result<(Vec<u64>, CascadeLevel)> {
+        let prefix_bytes = token.as_bytes();
+        let lt = prefix_end(prefix_bytes);
+        let results = sfx_dict.range_scan_ordinals(prefix_bytes, lt.as_deref());
+        if !results.is_empty() {
+            let ordinals: Vec<u64> = results.into_iter()
+                .take(self.max_expansions as usize)
+                .map(|(_, ord)| ord)
+                .collect();
+            return Ok((ordinals, CascadeLevel::Exact));
+        }
+        if self.fuzzy_distance > 0 && self.fuzzy_distance <= 2 {
+            let automaton_builder = get_automaton_builder(self.fuzzy_distance);
+            let sfx_dfa = SfxDfaWrapper(automaton_builder.build_prefix_dfa(token));
+            let results = sfx_dict.search_automaton_ordinals(&sfx_dfa);
+            if !results.is_empty() {
+                let ordinals: Vec<u64> = results.into_iter()
+                    .take(self.max_expansions as usize)
+                    .map(|(_, ord)| ord)
+                    .collect();
+                return Ok((ordinals, CascadeLevel::Fuzzy(self.fuzzy_distance)));
+            }
+        }
+        Ok((Vec::new(), CascadeLevel::Exact))
+    }
+
+    // ── Scorers ──────────────────────────────────────────────────────
 
     /// Multi-token: cascade per position, then ContainsScorer or PhraseScorer.
     pub(crate) fn phrase_scorer(
@@ -212,6 +275,13 @@ impl AutomatonPhraseWeight {
             .map_err(|e| crate::LucivyError::SystemError(format!("open .sfx: {e}")))?;
         let sfx_dict = SfxTermDictionary::new(&sfx_reader, inverted_index.terms());
 
+        // .sfxpost resolver (None if not available → fallback to TermInfo path)
+        let resolver: Option<Box<dyn PostingResolver>> = if reader.sfxpost_file(self.field).is_some() {
+            Some(build_resolver(reader, self.field)?)
+        } else {
+            None
+        };
+
         let mut posting_lists = Vec::new();
         let mut num_terms = 0;
         let mut budget = self.max_expansions as usize;
@@ -219,19 +289,41 @@ impl AutomatonPhraseWeight {
 
         let last_idx = self.phrase_terms.len() - 1;
         for (i, &(offset, ref token)) in self.phrase_terms.iter().enumerate() {
-            let (term_infos, level) = if self.last_token_is_prefix && i == last_idx {
-                self.prefix_term_infos(token, &sfx_dict)?
+            let is_prefix = self.last_token_is_prefix && i == last_idx;
+
+            let (union, level, count) = if let Some(ref resolver) = resolver {
+                // .sfxpost ordinal path
+                let (ordinals, level) = if is_prefix {
+                    self.prefix_ordinals(token, &sfx_dict)?
+                } else {
+                    self.cascade_ordinals(token, &sfx_dict)?
+                };
+                if ordinals.is_empty() {
+                    return Ok(None);
+                }
+                let count = ordinals.len();
+                let union = build_union_from_ordinals(&ordinals, &**resolver);
+                (union, level, count)
             } else {
-                self.cascade_term_infos(token, &sfx_dict)?
+                // Fallback: TermInfo path
+                let (term_infos, level) = if is_prefix {
+                    self.prefix_term_infos(token, &sfx_dict)?
+                } else {
+                    self.cascade_term_infos(token, &sfx_dict)?
+                };
+                if term_infos.is_empty() {
+                    return Ok(None);
+                }
+                let count = term_infos.len();
+                let union =
+                    RegexPhraseWeight::get_union_from_term_infos(&term_infos, reader, &inverted_index)?;
+                (union, level, count)
             };
-            if term_infos.is_empty() {
-                return Ok(None);
-            }
+
             cascade_distances.push(level.distance());
-            num_terms += term_infos.len();
+            num_terms += count;
             if num_terms > budget {
                 if self.last_token_is_prefix {
-                    // startsWith: grant extra headroom per token (prefix can expand a lot).
                     budget += 20;
                 }
                 if num_terms > budget {
@@ -240,8 +332,6 @@ impl AutomatonPhraseWeight {
                     )));
                 }
             }
-            let union =
-                RegexPhraseWeight::get_union_from_term_infos(&term_infos, reader, &inverted_index)?;
             posting_lists.push((offset, union));
         }
 
@@ -267,12 +357,11 @@ impl AutomatonPhraseWeight {
                 segment_id,
             ))))
         } else {
-            // Fast path: no validation, no highlights → position-only PhraseScorer.
             Ok(Some(Box::new(PhraseScorer::new(
                 posting_lists,
                 similarity_weight_opt,
                 fieldnorm_reader,
-                0, // slop = 0: consecutive positions
+                0,
             ))))
         }
     }
@@ -298,6 +387,57 @@ impl AutomatonPhraseWeight {
         let sfx_dict = SfxTermDictionary::new(&sfx_reader, inverted_index.terms());
 
         let token = &self.phrase_terms[0].1;
+
+        // Try .sfxpost ordinal path
+        if reader.sfxpost_file(self.field).is_some() {
+            let (ordinals, level) = if self.last_token_is_prefix {
+                self.prefix_ordinals(token, &sfx_dict)?
+            } else {
+                self.cascade_ordinals(token, &sfx_dict)?
+            };
+            if ordinals.is_empty() {
+                return Ok(Box::new(EmptyScorer));
+            }
+
+            let resolver = build_resolver(reader, self.field)?;
+            let max_doc = reader.max_doc();
+            let mut doc_bitset = BitSet::with_max_value(max_doc);
+            for &ordinal in &ordinals {
+                let entries = resolver.resolve(ordinal);
+                for entry in &entries {
+                    doc_bitset.insert(entry.doc_id);
+                }
+            }
+
+            return if self.needs_validation() || self.highlight_sink.is_some() {
+                let store_reader = reader
+                    .get_store_reader(50)
+                    .map_err(crate::LucivyError::from)?;
+                let text_field = self.stored_field.unwrap_or(self.field);
+                Ok(Box::new(ContainsSingleScorer::new(
+                    BitSetDocSet::from(doc_bitset),
+                    store_reader,
+                    text_field,
+                    token.clone(),
+                    self.query_prefix.clone(),
+                    self.query_suffix.clone(),
+                    self.distance_budget,
+                    self.strict_separators,
+                    level.distance(),
+                    boost,
+                    self.highlight_sink.clone(),
+                    self.highlight_field_name.clone(),
+                    segment_id,
+                )))
+            } else {
+                Ok(Box::new(ConstScorer::new(
+                    BitSetDocSet::from(doc_bitset),
+                    boost,
+                )))
+            };
+        }
+
+        // Fallback: TermInfo path
         let (term_infos, level) = if self.last_token_is_prefix {
             self.prefix_term_infos(token, &sfx_dict)?
         } else {

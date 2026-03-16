@@ -11,6 +11,7 @@ use crate::index::SegmentReader;
 use crate::postings::{Postings, TermInfo};
 use crate::query::bm25::Bm25Weight;
 use crate::query::phrase_query::scoring_utils::HighlightSink;
+use crate::query::posting_resolver::{PostingEntry, PostingResolver, build_resolver};
 use crate::docset::COLLECT_BLOCK_BUFFER_LEN;
 use crate::query::{BitSetDocSet, ConstScorer, Explanation, Scorer, Weight};
 use crate::schema::{Field, IndexRecordOption};
@@ -162,6 +163,285 @@ where
         }
         Ok(term_infos)
     }
+
+    /// Collect matching ordinals via .sfx. Returns None if unavailable (JSON fields, old segments).
+    fn collect_ordinals(&self, reader: &SegmentReader) -> crate::Result<Option<Vec<u64>>> {
+        if self.json_path_bytes.is_some() {
+            return Ok(None);
+        }
+        let sfx_data = match reader.sfx_file(self.field) {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+        let sfx_bytes = sfx_data.read_bytes()
+            .map_err(|e| LucivyError::SystemError(format!("read .sfx: {e}")))?;
+        let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
+            .map_err(|e| LucivyError::SystemError(format!("open .sfx: {e}")))?;
+        let inverted_index = reader.inverted_index(self.field)?;
+        let sfx_dict = SfxTermDictionary::new(&sfx_reader, inverted_index.terms());
+        let adapter = SfxAutomatonAdapter(&*self.automaton);
+        Ok(Some(
+            sfx_dict.search_automaton_ordinals(&adapter)
+                .into_iter()
+                .map(|(_, ord)| ord)
+                .collect()
+        ))
+    }
+
+    /// Build scorer from ordinals resolved via PostingResolver.
+    /// Avoids reading posting data from the inverted index — only metadata (total_num_tokens).
+    fn scorer_from_ordinals(
+        &self,
+        reader: &SegmentReader,
+        ordinals: &[u64],
+        resolver: &dyn PostingResolver,
+        inverted_index: &InvertedIndexReader,
+        fieldnorm_reader: &FieldNormReader,
+        boost: Score,
+        max_doc: u32,
+    ) -> crate::Result<Box<dyn Scorer>> {
+        let mut doc_bitset = BitSet::with_max_value(max_doc);
+
+        if let Some(ref sink) = self.highlight_sink {
+            let segment_id = reader.segment_id();
+
+            if self.scoring_enabled {
+                // Highlight + BM25 scoring
+                let total_num_tokens = inverted_index.total_num_tokens();
+                let total_num_docs = (max_doc as u64).max(1);
+                let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
+                let mut scores = vec![0.0f32; max_doc as usize];
+
+                for &ordinal in ordinals {
+                    let entries = resolver.resolve(ordinal);
+                    let doc_freq = resolver.doc_freq(ordinal);
+                    let bm25 = Bm25Weight::for_one_term_without_explain(
+                        doc_freq as u64, total_num_docs, average_fieldnorm,
+                    );
+                    for_each_doc_group(&entries, |doc_id, tf, doc_entries| {
+                        doc_bitset.insert(doc_id);
+                        let fieldnorm_id = fieldnorm_reader.fieldnorm_id(doc_id);
+                        scores[doc_id as usize] += bm25.score(fieldnorm_id, tf);
+                        let offsets: Vec<[usize; 2]> = doc_entries.iter()
+                            .map(|e| [e.byte_from as usize, e.byte_to as usize])
+                            .collect();
+                        if !offsets.is_empty() {
+                            sink.insert(segment_id, doc_id, &self.highlight_field_name, offsets);
+                        }
+                    });
+                }
+
+                let doc_bitset = BitSetDocSet::from(doc_bitset);
+                Ok(Box::new(AutomatonScorer::new(doc_bitset, scores, boost)))
+            } else {
+                // Highlight only (no scoring)
+                for &ordinal in ordinals {
+                    let entries = resolver.resolve(ordinal);
+                    for_each_doc_group(&entries, |doc_id, _, doc_entries| {
+                        doc_bitset.insert(doc_id);
+                        let offsets: Vec<[usize; 2]> = doc_entries.iter()
+                            .map(|e| [e.byte_from as usize, e.byte_to as usize])
+                            .collect();
+                        if !offsets.is_empty() {
+                            sink.insert(segment_id, doc_id, &self.highlight_field_name, offsets);
+                        }
+                    });
+                }
+
+                let doc_bitset = BitSetDocSet::from(doc_bitset);
+                Ok(Box::new(ConstScorer::new(doc_bitset, boost)))
+            }
+        } else if self.scoring_enabled {
+            // BM25 scoring only (no highlights)
+            let total_num_tokens = inverted_index.total_num_tokens();
+            let total_num_docs = (max_doc as u64).max(1);
+            let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
+            let mut scores = vec![0.0f32; max_doc as usize];
+
+            for &ordinal in ordinals {
+                let entries = resolver.resolve(ordinal);
+                let doc_freq = resolver.doc_freq(ordinal);
+                let bm25 = Bm25Weight::for_one_term_without_explain(
+                    doc_freq as u64, total_num_docs, average_fieldnorm,
+                );
+                for_each_doc_group(&entries, |doc_id, tf, _| {
+                    doc_bitset.insert(doc_id);
+                    let fieldnorm_id = fieldnorm_reader.fieldnorm_id(doc_id);
+                    scores[doc_id as usize] += bm25.score(fieldnorm_id, tf);
+                });
+            }
+
+            let doc_bitset = BitSetDocSet::from(doc_bitset);
+            Ok(Box::new(AutomatonScorer::new(doc_bitset, scores, boost)))
+        } else {
+            // Fast path: no scoring, no highlights
+            for &ordinal in ordinals {
+                let entries = resolver.resolve(ordinal);
+                for entry in &entries {
+                    doc_bitset.insert(entry.doc_id);
+                }
+            }
+
+            let doc_bitset = BitSetDocSet::from(doc_bitset);
+            Ok(Box::new(ConstScorer::new(doc_bitset, boost)))
+        }
+    }
+
+    /// Build scorer from TermInfos via the inverted index (fallback for segments without .sfx).
+    fn scorer_from_term_infos(
+        &self,
+        reader: &SegmentReader,
+        inverted_index: &InvertedIndexReader,
+        term_infos: &[TermInfo],
+        fieldnorm_reader: &FieldNormReader,
+        boost: Score,
+        max_doc: u32,
+    ) -> crate::Result<Box<dyn Scorer>> {
+        let mut doc_bitset = BitSet::with_max_value(max_doc);
+
+        if let Some(ref sink) = self.highlight_sink {
+            let segment_id = reader.segment_id();
+
+            if self.scoring_enabled {
+                let total_num_tokens = inverted_index.total_num_tokens();
+                let total_num_docs = (max_doc as u64).max(1);
+                let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
+                let mut scores = vec![0.0f32; max_doc as usize];
+
+                for term_info in term_infos {
+                    let bm25 = Bm25Weight::for_one_term_without_explain(
+                        term_info.doc_freq as u64,
+                        total_num_docs,
+                        average_fieldnorm,
+                    );
+                    let mut segment_postings = inverted_index.read_postings_from_terminfo(
+                        term_info,
+                        IndexRecordOption::WithFreqsAndPositionsAndOffsets,
+                    )?;
+                    loop {
+                        let doc = segment_postings.doc();
+                        if doc == TERMINATED {
+                            break;
+                        }
+                        doc_bitset.insert(doc);
+                        let term_freq = segment_postings.term_freq();
+                        let fieldnorm_id = fieldnorm_reader.fieldnorm_id(doc);
+                        scores[doc as usize] += bm25.score(fieldnorm_id, term_freq);
+                        let mut offsets_buf = Vec::new();
+                        segment_postings.append_offsets(&mut offsets_buf);
+                        if !offsets_buf.is_empty() {
+                            let offsets: Vec<[usize; 2]> = offsets_buf
+                                .iter()
+                                .map(|&(from, to)| [from as usize, to as usize])
+                                .collect();
+                            sink.insert(segment_id, doc, &self.highlight_field_name, offsets);
+                        }
+                        segment_postings.advance();
+                    }
+                }
+
+                let doc_bitset = BitSetDocSet::from(doc_bitset);
+                Ok(Box::new(AutomatonScorer::new(doc_bitset, scores, boost)))
+            } else {
+                for term_info in term_infos {
+                    let mut segment_postings = inverted_index.read_postings_from_terminfo(
+                        term_info,
+                        IndexRecordOption::WithFreqsAndPositionsAndOffsets,
+                    )?;
+                    loop {
+                        let doc = segment_postings.doc();
+                        if doc == TERMINATED {
+                            break;
+                        }
+                        doc_bitset.insert(doc);
+                        let mut offsets_buf = Vec::new();
+                        segment_postings.append_offsets(&mut offsets_buf);
+                        if !offsets_buf.is_empty() {
+                            let offsets: Vec<[usize; 2]> = offsets_buf
+                                .iter()
+                                .map(|&(from, to)| [from as usize, to as usize])
+                                .collect();
+                            sink.insert(segment_id, doc, &self.highlight_field_name, offsets);
+                        }
+                        segment_postings.advance();
+                    }
+                }
+
+                let doc_bitset = BitSetDocSet::from(doc_bitset);
+                let const_scorer = ConstScorer::new(doc_bitset, boost);
+                Ok(Box::new(const_scorer))
+            }
+        } else if self.scoring_enabled {
+            let total_num_tokens = inverted_index.total_num_tokens();
+            let total_num_docs = (max_doc as u64).max(1);
+            let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
+            let mut scores = vec![0.0f32; max_doc as usize];
+
+            for term_info in term_infos {
+                let bm25 = Bm25Weight::for_one_term_without_explain(
+                    term_info.doc_freq as u64,
+                    total_num_docs,
+                    average_fieldnorm,
+                );
+                let mut segment_postings = inverted_index.read_postings_from_terminfo(
+                    term_info,
+                    IndexRecordOption::WithFreqs,
+                )?;
+                loop {
+                    let doc = segment_postings.doc();
+                    if doc == TERMINATED {
+                        break;
+                    }
+                    doc_bitset.insert(doc);
+                    let term_freq = segment_postings.term_freq();
+                    let fieldnorm_id = fieldnorm_reader.fieldnorm_id(doc);
+                    scores[doc as usize] += bm25.score(fieldnorm_id, term_freq);
+                    segment_postings.advance();
+                }
+            }
+
+            let doc_bitset = BitSetDocSet::from(doc_bitset);
+            let scorer = AutomatonScorer::new(doc_bitset, scores, boost);
+            Ok(Box::new(scorer))
+        } else {
+            for term_info in term_infos {
+                let mut block_segment_postings = inverted_index
+                    .read_block_postings_from_terminfo(term_info, IndexRecordOption::Basic)?;
+                loop {
+                    let docs = block_segment_postings.docs();
+                    if docs.is_empty() {
+                        break;
+                    }
+                    for &doc in docs {
+                        doc_bitset.insert(doc);
+                    }
+                    block_segment_postings.advance();
+                }
+            }
+
+            let doc_bitset = BitSetDocSet::from(doc_bitset);
+            let const_scorer = ConstScorer::new(doc_bitset, boost);
+            Ok(Box::new(const_scorer))
+        }
+    }
+}
+
+/// Iterate posting entries grouped by doc_id (entries must be sorted by doc_id).
+/// Calls `on_doc(doc_id, term_freq, entries_for_doc)` for each unique document.
+fn for_each_doc_group(
+    entries: &[PostingEntry],
+    mut on_doc: impl FnMut(DocId, u32, &[PostingEntry]),
+) {
+    let mut start = 0;
+    while start < entries.len() {
+        let doc_id = entries[start].doc_id;
+        let mut end = start + 1;
+        while end < entries.len() && entries[end].doc_id == doc_id {
+            end += 1;
+        }
+        on_doc(doc_id, (end - start) as u32, &entries[start..end]);
+        start = end;
+    }
 }
 
 /// Scorer that wraps a BitSetDocSet with pre-computed per-doc BM25 scores.
@@ -218,148 +498,31 @@ where
 {
     fn scorer(&self, reader: &SegmentReader, boost: Score) -> crate::Result<Box<dyn Scorer>> {
         let max_doc = reader.max_doc();
-        let mut doc_bitset = BitSet::with_max_value(max_doc);
         let inverted_index = reader.inverted_index(self.field)?;
-
-        // Collect all matching term infos upfront (via .sfx or standard stream)
-        let term_infos = self.collect_term_infos(reader, &inverted_index)?;
-
-        // Get fieldnorm reader, falling back to constant(1) if not available (e.g. JSON fields).
         let fieldnorm_reader = reader
             .fieldnorms_readers()
             .get_field(self.field)?
             .unwrap_or_else(|| FieldNormReader::constant(max_doc, 1));
 
-        if let Some(ref sink) = self.highlight_sink {
-            // Highlight path: read full postings for offsets.
-            let segment_id = reader.segment_id();
-
-            if self.scoring_enabled {
-                // Highlight + scoring: compute BM25 opportunistically while reading offsets.
-                let total_num_tokens = inverted_index.total_num_tokens();
-                let total_num_docs = (max_doc as u64).max(1);
-                let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
-                let mut scores = vec![0.0f32; max_doc as usize];
-
-                for term_info in &term_infos {
-                    let bm25 = Bm25Weight::for_one_term_without_explain(
-                        term_info.doc_freq as u64,
-                        total_num_docs,
-                        average_fieldnorm,
-                    );
-                    let mut segment_postings = inverted_index.read_postings_from_terminfo(
-                        term_info,
-                        IndexRecordOption::WithFreqsAndPositionsAndOffsets,
-                    )?;
-                    loop {
-                        let doc = segment_postings.doc();
-                        if doc == TERMINATED {
-                            break;
-                        }
-                        doc_bitset.insert(doc);
-                        let term_freq = segment_postings.term_freq();
-                        let fieldnorm_id = fieldnorm_reader.fieldnorm_id(doc);
-                        scores[doc as usize] += bm25.score(fieldnorm_id, term_freq);
-                        let mut offsets_buf = Vec::new();
-                        segment_postings.append_offsets(&mut offsets_buf);
-                        if !offsets_buf.is_empty() {
-                            let offsets: Vec<[usize; 2]> = offsets_buf
-                                .iter()
-                                .map(|&(from, to)| [from as usize, to as usize])
-                                .collect();
-                            sink.insert(segment_id, doc, &self.highlight_field_name, offsets);
-                        }
-                        segment_postings.advance();
-                    }
-                }
-
-                let doc_bitset = BitSetDocSet::from(doc_bitset);
-                let scorer = AutomatonScorer::new(doc_bitset, scores, boost);
-                Ok(Box::new(scorer))
-            } else {
-                // Highlight only (no scoring): collect offsets, use ConstScorer.
-                for term_info in &term_infos {
-                    let mut segment_postings = inverted_index.read_postings_from_terminfo(
-                        term_info,
-                        IndexRecordOption::WithFreqsAndPositionsAndOffsets,
-                    )?;
-                    loop {
-                        let doc = segment_postings.doc();
-                        if doc == TERMINATED {
-                            break;
-                        }
-                        doc_bitset.insert(doc);
-                        let mut offsets_buf = Vec::new();
-                        segment_postings.append_offsets(&mut offsets_buf);
-                        if !offsets_buf.is_empty() {
-                            let offsets: Vec<[usize; 2]> = offsets_buf
-                                .iter()
-                                .map(|&(from, to)| [from as usize, to as usize])
-                                .collect();
-                            sink.insert(segment_id, doc, &self.highlight_field_name, offsets);
-                        }
-                        segment_postings.advance();
-                    }
-                }
-
-                let doc_bitset = BitSetDocSet::from(doc_bitset);
-                let const_scorer = ConstScorer::new(doc_bitset, boost);
-                Ok(Box::new(const_scorer))
-            }
-        } else if self.scoring_enabled {
-            // BM25 scoring path: read postings with freqs.
-            let total_num_tokens = inverted_index.total_num_tokens();
-            let total_num_docs = (max_doc as u64).max(1);
-            let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
-            let mut scores = vec![0.0f32; max_doc as usize];
-
-            for term_info in &term_infos {
-                let bm25 = Bm25Weight::for_one_term_without_explain(
-                    term_info.doc_freq as u64,
-                    total_num_docs,
-                    average_fieldnorm,
+        // Prefer ordinal path when both .sfx and .sfxpost are available.
+        // Without .sfxpost, the resolver would fall back to InvertedIndexResolver
+        // which can't handle fields indexed without positions/offsets.
+        if reader.sfxpost_file(self.field).is_some() {
+            if let Some(ordinals) = self.collect_ordinals(reader)? {
+                let resolver = build_resolver(reader, self.field)?;
+                return self.scorer_from_ordinals(
+                    reader, &ordinals, &*resolver, &inverted_index,
+                    &fieldnorm_reader, boost, max_doc,
                 );
-                let mut segment_postings = inverted_index.read_postings_from_terminfo(
-                    term_info,
-                    IndexRecordOption::WithFreqs,
-                )?;
-                loop {
-                    let doc = segment_postings.doc();
-                    if doc == TERMINATED {
-                        break;
-                    }
-                    doc_bitset.insert(doc);
-                    let term_freq = segment_postings.term_freq();
-                    let fieldnorm_id = fieldnorm_reader.fieldnorm_id(doc);
-                    scores[doc as usize] += bm25.score(fieldnorm_id, term_freq);
-                    segment_postings.advance();
-                }
             }
-
-            let doc_bitset = BitSetDocSet::from(doc_bitset);
-            let scorer = AutomatonScorer::new(doc_bitset, scores, boost);
-            Ok(Box::new(scorer))
-        } else {
-            // Fast path: no scoring, no highlights. Block postings with Basic.
-            for term_info in &term_infos {
-                let mut block_segment_postings = inverted_index
-                    .read_block_postings_from_terminfo(term_info, IndexRecordOption::Basic)?;
-                loop {
-                    let docs = block_segment_postings.docs();
-                    if docs.is_empty() {
-                        break;
-                    }
-                    for &doc in docs {
-                        doc_bitset.insert(doc);
-                    }
-                    block_segment_postings.advance();
-                }
-            }
-
-            let doc_bitset = BitSetDocSet::from(doc_bitset);
-            let const_scorer = ConstScorer::new(doc_bitset, boost);
-            Ok(Box::new(const_scorer))
         }
+
+        // Fallback: standard TermInfo path (no .sfx, e.g. JSON fields)
+        let term_infos = self.collect_term_infos(reader, &inverted_index)?;
+        self.scorer_from_term_infos(
+            reader, &inverted_index, &term_infos,
+            &fieldnorm_reader, boost, max_doc,
+        )
     }
 
     fn explain(&self, reader: &SegmentReader, doc: DocId) -> crate::Result<Explanation> {
