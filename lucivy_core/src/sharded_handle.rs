@@ -12,13 +12,16 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use ld_lucivy::collector::Collector;
 use ld_lucivy::actor::mailbox::{mailbox, ActorRef};
 use ld_lucivy::actor::reply::{reply, Reply};
 use ld_lucivy::actor::scheduler::global_scheduler;
 use ld_lucivy::actor::{Actor, ActorStatus, Priority};
+use ld_lucivy::query::Weight;
 use ld_lucivy::schema::{Field, FieldType, Schema, Value};
 use ld_lucivy::{DocAddress, Index, LucivyDocument};
 
+use crate::bm25_global::AggregatedBm25StatsOwned;
 use crate::directory::StdFsDirectory;
 use crate::handle::{LucivyHandle, NODE_ID_FIELD};
 use crate::query::{QueryConfig, SchemaConfig};
@@ -33,12 +36,15 @@ const SHARD_CONFIG_FILE: &str = "_shard_config.json";
 // ─── Actor ──────────────────────────────────────────────────────────────────
 
 /// Message sent to a shard search actor.
+///
+/// Scatter-gather pattern: the Weight is pre-compiled with global BM25 stats
+/// by the caller. The actor just runs the Weight against its local segments.
 pub enum ShardSearchMsg {
-    /// Execute a search query and reply with results.
+    /// Execute a pre-compiled Weight on this shard's segments.
     Search {
-        query_config: QueryConfig,
+        /// Pre-compiled query weight (built with global BM25 stats).
+        weight: Arc<dyn Weight>,
         top_k: usize,
-        highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
         reply: Reply<Result<Vec<(f32, DocAddress)>, String>>,
     },
 }
@@ -60,13 +66,16 @@ impl Actor for ShardSearchActor {
     fn handle(&mut self, msg: ShardSearchMsg) -> ActorStatus {
         match msg {
             ShardSearchMsg::Search {
-                query_config,
+                weight,
                 top_k,
-                highlight_sink,
                 reply,
             } => {
-                let result =
-                    search_shard(&self.handle, self.shard_id, &query_config, top_k, highlight_sink);
+                let result = execute_weight_on_shard(
+                    &self.handle,
+                    self.shard_id,
+                    weight.as_ref(),
+                    top_k,
+                );
                 reply.send(result);
                 ActorStatus::Continue
             }
@@ -79,20 +88,29 @@ impl Actor for ShardSearchActor {
     }
 }
 
-/// Execute a search on a single shard.
-fn search_shard(
+/// Execute a pre-compiled Weight on a single shard's segments.
+/// No query building or BM25 computation here — just scoring.
+fn execute_weight_on_shard(
     handle: &LucivyHandle,
     shard_id: usize,
-    query_config: &QueryConfig,
+    weight: &dyn Weight,
     top_k: usize,
-    highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
 ) -> Result<Vec<(f32, DocAddress)>, String> {
-    let query = crate::query::build_query(query_config, &handle.schema, &handle.index, highlight_sink)?;
     let searcher = handle.reader.searcher();
     let collector = ld_lucivy::collector::TopDocs::with_limit(top_k).order_by_score();
-    searcher
-        .search(&*query, &collector)
-        .map_err(|e| format!("search shard_{shard_id}: {e}"))
+    collector.check_schema(searcher.schema())
+        .map_err(|e| format!("schema check shard_{shard_id}: {e}"))?;
+    let segment_readers = searcher.segment_readers();
+    let mut fruits = Vec::with_capacity(segment_readers.len());
+    for (seg_ord, seg_reader) in segment_readers.iter().enumerate() {
+        let fruit = collector
+            .collect_segment(weight, seg_ord as u32, seg_reader)
+            .map_err(|e| format!("collect shard_{shard_id} seg_{seg_ord}: {e}"))?;
+        fruits.push(fruit);
+    }
+    collector
+        .merge_fruits(fruits)
+        .map_err(|e| format!("merge shard_{shard_id}: {e}"))
 }
 
 // ─── Search Result ──────────────────────────────────────────────────────────
@@ -383,7 +401,10 @@ impl ShardedHandle {
 
     /// Search all shards in parallel and merge top-K results.
     ///
-    /// Dispatches search to all shard actors via the global scheduler.
+    /// Scatter-gather: builds the query Weight ONCE with global BM25 stats
+    /// (aggregated across all shards), then dispatches the pre-compiled Weight
+    /// to each shard actor. Each actor just scores its local segments.
+    ///
     /// Returns results sorted by descending score.
     pub fn search(
         &self,
@@ -408,15 +429,40 @@ impl ShardedHandle {
             }
         }
 
-        // Send search to all shard actors in parallel.
+        // ── Scatter: build Weight once with global stats ────────────────
+
+        // Collect searchers from all shards for aggregated BM25 stats.
+        let searchers: Vec<_> = self.shards.iter().map(|s| s.reader.searcher()).collect();
+        let global_stats = AggregatedBm25StatsOwned::new(searchers);
+
+        // Build the query using shard 0's index (schema + tokenizers are identical).
+        let query = crate::query::build_query(
+            query_config,
+            &self.schema,
+            &self.shards[0].index,
+            highlight_sink,
+        )?;
+
+        // Compile the Weight with global stats. Use shard 0's searcher for schema access.
+        let searcher_0 = self.shards[0].reader.searcher();
+        let enable_scoring = ld_lucivy::query::EnableScoring::enabled_from_statistics_provider(
+            &global_stats,
+            &searcher_0,
+        );
+        let weight: Arc<dyn Weight> = query
+            .weight(enable_scoring)
+            .map_err(|e| format!("weight: {e}"))?
+            .into();
+
+        // ── Gather: dispatch Weight to all shard actors ─────────────────
+
         let mut receivers = Vec::with_capacity(self.search_actors.len());
         for actor_ref in &self.search_actors {
             let (tx, rx) = reply();
             actor_ref
                 .send(ShardSearchMsg::Search {
-                    query_config: query_config.clone(),
+                    weight: Arc::clone(&weight),
                     top_k,
-                    highlight_sink: highlight_sink.clone(),
                     reply: tx,
                 })
                 .map_err(|_| "search actor channel closed")?;
@@ -428,11 +474,7 @@ impl ShardedHandle {
         let mut heap = BinaryHeap::with_capacity(top_k + 1);
 
         for (shard_id, rx) in receivers.into_iter().enumerate() {
-            // wait_cooperative pumps the scheduler when in single-thread mode (WASM).
-            // In multi-thread mode, the actor threads process the work and the condvar
-            // wakes us up — the run_one_step calls are no-ops (return false quickly).
-            let shard_hits =
-                rx.wait_cooperative(|| scheduler.run_one_step())?;
+            let shard_hits = rx.wait_cooperative(|| scheduler.run_one_step())?;
 
             for (score, doc_addr) in shard_hits {
                 heap.push(ScoredEntry {

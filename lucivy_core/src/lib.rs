@@ -1,5 +1,6 @@
 pub mod blob_directory;
 pub mod blob_store;
+pub mod bm25_global;
 pub mod directory;
 pub mod handle;
 pub mod query;
