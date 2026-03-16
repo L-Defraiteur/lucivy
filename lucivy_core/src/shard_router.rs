@@ -30,11 +30,20 @@ type FxBuildHasher = BuildHasherDefault<FxHasher>;
 /// Tokens above this are frequent enough to balance naturally.
 const DEFAULT_DF_THRESHOLD: u32 = 5000;
 
+/// Default balance weight for hybrid scoring.
+/// 0.0 = pure per-token, 1.0 = pure total balance.
+const DEFAULT_BALANCE_WEIGHT: f64 = 0.2;
+
 /// Token-aware shard router.
 ///
 /// Maintains per-shard per-token document frequency counters.
-/// At insertion, scores each shard by sum of `local_df / sqrt(global_df)`
-/// and picks the shard with the lowest score (most under-represented).
+/// At insertion, scores each shard by a hybrid of:
+///   - per-token IDF-weighted balance (rare tokens dominate)
+///   - total document balance (avoid overloading one shard)
+///
+/// Supports two routing modes:
+///   - Full scan: score all N shards, pick the best (default)
+///   - Power of two choices: score 2 random shards, pick the best (faster for large N)
 pub struct ShardRouter {
     num_shards: usize,
     /// Per-shard token counts: shard_token_counts[shard_id][token_hash] = count.
@@ -45,18 +54,28 @@ pub struct ShardRouter {
     shard_doc_counts: Vec<u64>,
     /// Only track tokens with global df below this.
     df_threshold: u32,
+    /// Weight for total balance in hybrid scoring (0.0 to 1.0).
+    balance_weight: f64,
     /// Mapping node_id → shard_id for targeted deletes.
     node_id_to_shard: HashMap<u64, usize, FxBuildHasher>,
 }
 
 impl ShardRouter {
-    /// Create a new router for `num_shards` shards.
+    /// Create a new router for `num_shards` shards with default settings.
     pub fn new(num_shards: usize) -> Self {
-        Self::with_threshold(num_shards, DEFAULT_DF_THRESHOLD)
+        Self::with_options(num_shards, DEFAULT_DF_THRESHOLD, DEFAULT_BALANCE_WEIGHT)
     }
 
     /// Create a new router with a custom df threshold.
     pub fn with_threshold(num_shards: usize, df_threshold: u32) -> Self {
+        Self::with_options(num_shards, df_threshold, DEFAULT_BALANCE_WEIGHT)
+    }
+
+    /// Create a new router with all options.
+    ///
+    /// - `df_threshold`: only track tokens with global df below this (default 5000)
+    /// - `balance_weight`: weight for total balance in hybrid scoring, 0.0-1.0 (default 0.2)
+    pub fn with_options(num_shards: usize, df_threshold: u32, balance_weight: f64) -> Self {
         Self {
             num_shards,
             shard_token_counts: (0..num_shards)
@@ -65,13 +84,15 @@ impl ShardRouter {
             global_token_counts: HashMap::with_hasher(FxBuildHasher::default()),
             shard_doc_counts: vec![0; num_shards],
             df_threshold,
+            balance_weight: balance_weight.clamp(0.0, 1.0),
             node_id_to_shard: HashMap::with_hasher(FxBuildHasher::default()),
         }
     }
 
-    /// Route a document to the best shard based on its tokens.
+    /// Route a document to the best shard based on its tokens (full scan).
     /// Returns the shard index (0..num_shards).
     ///
+    /// Uses hybrid scoring: per-token IDF-weighted + total balance.
     /// After routing, updates the counters for the chosen shard.
     pub fn route(&mut self, doc_tokens: &[u64]) -> usize {
         if self.num_shards == 1 {
@@ -85,37 +106,72 @@ impl ShardRouter {
         let mut best_shard = 0;
         let mut best_score = f64::MAX;
 
+        let total_docs = self.shard_doc_counts.iter().sum::<u64>().max(1) as f64;
+
         for shard_id in 0..self.num_shards {
-            let score: f64 = doc_tokens
-                .iter()
-                .filter_map(|&h| {
-                    let global = *self.global_token_counts.get(&h)?;
-                    if global >= self.df_threshold {
-                        return None; // frequent token, skip
-                    }
-                    let local = *self.shard_token_counts[shard_id]
-                        .get(&h)
-                        .unwrap_or(&0) as f64;
-                    Some(local / (global as f64).sqrt())
-                })
-                .sum();
-
-            // Tie-break: prefer the shard with fewer total docs.
-            let adjusted = score + (self.shard_doc_counts[shard_id] as f64) * 1e-12;
-
-            if adjusted < best_score {
-                best_score = adjusted;
+            let score = self.score_shard(shard_id, doc_tokens, total_docs);
+            if score < best_score {
+                best_score = score;
                 best_shard = shard_id;
             }
         }
 
-        // Update counters for the chosen shard.
-        self.shard_doc_counts[best_shard] += 1;
-        for &h in doc_tokens {
-            self.update_counters_for_token(best_shard, h);
+        self.apply_route(best_shard, doc_tokens);
+        best_shard
+    }
+
+    /// Route using power of two choices: score 2 random shards, pick the best.
+    ///
+    /// O(tokens × 2) instead of O(tokens × N_shards). Proven quasi-optimal
+    /// in distributed systems theory. Use `doc_id` as seed for deterministic
+    /// shard selection.
+    pub fn route_p2c(&mut self, doc_tokens: &[u64], doc_id: u64) -> usize {
+        if self.num_shards <= 2 {
+            return self.route(doc_tokens);
         }
 
-        best_shard
+        let a = (doc_id.wrapping_mul(0x9E3779B97F4A7C15) >> 32) as usize % self.num_shards;
+        let b = (doc_id.wrapping_mul(0x517CC1B727220A95) >> 32) as usize % self.num_shards;
+        let b = if a == b { (b + 1) % self.num_shards } else { b };
+
+        let total_docs = self.shard_doc_counts.iter().sum::<u64>().max(1) as f64;
+        let score_a = self.score_shard(a, doc_tokens, total_docs);
+        let score_b = self.score_shard(b, doc_tokens, total_docs);
+
+        let best = if score_a <= score_b { a } else { b };
+        self.apply_route(best, doc_tokens);
+        best
+    }
+
+    /// Score a single shard for routing (lower is better).
+    ///
+    /// Hybrid: `(1 - balance_weight) * per_token_score + balance_weight * shard_ratio`
+    fn score_shard(&self, shard_id: usize, doc_tokens: &[u64], total_docs: f64) -> f64 {
+        let token_score: f64 = doc_tokens
+            .iter()
+            .filter_map(|&h| {
+                let global = *self.global_token_counts.get(&h)?;
+                if global >= self.df_threshold {
+                    return None;
+                }
+                let local = *self.shard_token_counts[shard_id]
+                    .get(&h)
+                    .unwrap_or(&0) as f64;
+                Some(local / (global as f64).sqrt())
+            })
+            .sum();
+
+        let shard_ratio = self.shard_doc_counts[shard_id] as f64 / total_docs;
+
+        (1.0 - self.balance_weight) * token_score + self.balance_weight * shard_ratio
+    }
+
+    /// Apply routing decision: update doc counts and token counters.
+    fn apply_route(&mut self, shard_id: usize, doc_tokens: &[u64]) {
+        self.shard_doc_counts[shard_id] += 1;
+        for &h in doc_tokens {
+            self.update_counters_for_token(shard_id, h);
+        }
     }
 
     fn update_counters_for_token(&mut self, shard_id: usize, h: u64) {
@@ -252,11 +308,12 @@ impl ShardRouter {
 
         // Magic + version
         buf.extend_from_slice(b"SHRD");
-        buf.push(2u8); // version 2 (added node_id_to_shard)
+        buf.push(3u8); // version 3 (added balance_weight)
 
         // Header
         buf.extend_from_slice(&(self.num_shards as u32).to_le_bytes());
         buf.extend_from_slice(&self.df_threshold.to_le_bytes());
+        buf.extend_from_slice(&self.balance_weight.to_le_bytes());
 
         // Shard doc counts
         for &count in &self.shard_doc_counts {
@@ -298,7 +355,7 @@ impl ShardRouter {
             return Err("invalid shard stats magic".into());
         }
         let version = data[4];
-        if version != 1 && version != 2 {
+        if !(1..=3).contains(&version) {
             return Err(format!("unsupported shard stats version: {version}"));
         }
 
@@ -322,8 +379,22 @@ impl ShardRouter {
             Ok(v)
         };
 
+        let read_f64 = |pos: &mut usize, data: &[u8]| -> Result<f64, String> {
+            if *pos + 8 > data.len() {
+                return Err("truncated shard stats".into());
+            }
+            let v = f64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+            *pos += 8;
+            Ok(v)
+        };
+
         let num_shards = read_u32(&mut pos, data)? as usize;
         let df_threshold = read_u32(&mut pos, data)?;
+        let balance_weight = if version >= 3 {
+            read_f64(&mut pos, data)?
+        } else {
+            DEFAULT_BALANCE_WEIGHT
+        };
 
         // Shard doc counts
         let mut shard_doc_counts = Vec::with_capacity(num_shards);
@@ -374,6 +445,7 @@ impl ShardRouter {
             global_token_counts,
             shard_doc_counts,
             df_threshold,
+            balance_weight,
             node_id_to_shard,
         })
     }
@@ -457,6 +529,70 @@ mod tests {
         // Empty token list → tie-break by doc count → shard 0
         let shard = router.route(&[]);
         assert_eq!(shard, 0);
+    }
+
+    #[test]
+    fn test_power_of_two_choices() {
+        let mut router = ShardRouter::new(6);
+        let tokens: Vec<u64> = (0..5)
+            .map(|i| ShardRouter::hash_token(&format!("term_{i}")))
+            .collect();
+
+        // Route 60 docs via p2c
+        for doc_id in 0u64..60 {
+            let shard = router.route_p2c(&tokens, doc_id);
+            assert!(shard < 6);
+        }
+
+        // All shards should have some docs
+        for &c in router.shard_doc_counts() {
+            assert!(c > 0, "p2c should distribute to all shards: {:?}", router.shard_doc_counts());
+        }
+    }
+
+    #[test]
+    fn test_balance_weight_pure_balance() {
+        // With balance_weight = 1.0, routing should be pure round-robin-like
+        let mut router = ShardRouter::with_options(3, 5000, 1.0);
+        let tok = ShardRouter::hash_token("same_token");
+
+        for _ in 0..9 {
+            router.route(&[tok]);
+        }
+
+        // Should be perfectly balanced: 3 docs per shard
+        assert_eq!(router.shard_doc_counts(), &[3, 3, 3]);
+    }
+
+    #[test]
+    fn test_balance_weight_pure_token() {
+        // With balance_weight = 0.0, routing is pure per-token
+        let mut router = ShardRouter::with_options(2, 5000, 0.0);
+        let tok = ShardRouter::hash_token("rare");
+
+        let s1 = router.route(&[tok]);
+        let s2 = router.route(&[tok]);
+        // First goes to 0, second to 1 (per-token balance)
+        assert_ne!(s1, s2);
+    }
+
+    #[test]
+    fn test_serialize_roundtrip_v3() {
+        let mut router = ShardRouter::with_options(4, 2000, 0.35);
+        let tokens: Vec<u64> = (0..5)
+            .map(|i| ShardRouter::hash_token(&format!("t_{i}")))
+            .collect();
+        for i in 0u64..20 {
+            router.route(&tokens);
+            router.record_node_id(i, (i % 4) as usize);
+        }
+
+        let bytes = router.to_bytes();
+        let restored = ShardRouter::from_bytes(&bytes).unwrap();
+
+        assert_eq!(restored.num_shards(), 4);
+        assert_eq!(restored.total_docs(), 20);
+        assert_eq!(restored.shard_for_node_id(3), Some(3));
     }
 
     #[test]

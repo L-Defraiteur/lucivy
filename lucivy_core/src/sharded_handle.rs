@@ -254,7 +254,9 @@ impl ShardedHandle {
         let schema = shards[0].schema.clone();
         let field_map = shards[0].field_map.clone();
         let text_fields = find_text_fields(&schema);
-        let router = ShardRouter::new(num_shards);
+        let df_threshold = config.df_threshold.unwrap_or(5000);
+        let balance_weight = config.balance_weight.unwrap_or(0.2);
+        let router = ShardRouter::with_options(num_shards, df_threshold, balance_weight);
         let search_actors = spawn_search_actors(&shards);
 
         Ok(Self {
@@ -288,7 +290,9 @@ impl ShardedHandle {
                 .map_err(|e| format!("cannot read shard stats: {e}"))?;
             ShardRouter::from_bytes(&stats_data)?
         } else {
-            ShardRouter::new(num_shards)
+            let df_threshold = config.df_threshold.unwrap_or(5000);
+            let balance_weight = config.balance_weight.unwrap_or(0.2);
+            ShardRouter::with_options(num_shards, df_threshold, balance_weight)
         };
 
         // Open each shard.

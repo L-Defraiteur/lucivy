@@ -27,6 +27,12 @@ pub struct SchemaConfig {
     pub stemmer: Option<String>,
     /// Number of shards for token-aware sharding. None or 1 = no sharding.
     pub shards: Option<usize>,
+    /// Only track tokens with global df below this threshold (default 5000).
+    /// Higher = more memory, better routing for mid-frequency tokens.
+    pub df_threshold: Option<u32>,
+    /// Weight for total balance in hybrid shard routing, 0.0-1.0 (default 0.2).
+    /// 0.0 = pure per-token routing, 1.0 = pure round-robin-like balance.
+    pub balance_weight: Option<f64>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
