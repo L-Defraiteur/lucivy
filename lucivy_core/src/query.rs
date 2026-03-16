@@ -145,27 +145,14 @@ fn tokenize_with_offsets(
 fn resolve_field(
     config: &QueryConfig,
     schema: &Schema,
-    raw_pairs: &[(String, String)],
-    use_raw: bool,
 ) -> Result<Field, String> {
     let name = config
         .field
         .as_deref()
         .ok_or("query requires 'field'")?;
-
-    let actual_name = if use_raw {
-        raw_pairs
-            .iter()
-            .find(|(user, _)| user == name)
-            .map(|(_, raw)| raw.as_str())
-            .unwrap_or(name) // no raw counterpart → use base field
-    } else {
-        name
-    };
-
     schema
-        .get_field(actual_name)
-        .map_err(|_| format!("unknown field: {actual_name}"))
+        .get_field(name)
+        .map_err(|_| format!("unknown field: {name}"))
 }
 
 // ─── Split Expansion ────────────────────────────────────────────────────────
@@ -215,32 +202,28 @@ pub fn build_query(
     config: &QueryConfig,
     schema: &Schema,
     index: &Index,
-    raw_pairs: &[(String, String)],
-    ngram_pairs: &[(String, String)],
     highlight_sink: Option<Arc<HighlightSink>>,
 ) -> Result<Box<dyn Query>, String> {
-    // ngram_pairs is kept in the signature for API compatibility but no longer used.
-    let _ = ngram_pairs;
     let text_query = match config.query_type.as_str() {
-        "term" => build_term_query(config, schema, index, raw_pairs, highlight_sink),
-        "fuzzy" => build_fuzzy_query(config, schema, index, raw_pairs, highlight_sink),
-        "phrase" => build_phrase_query(config, schema, index, raw_pairs, highlight_sink),
-        "regex" => build_regex_query(config, schema, raw_pairs, highlight_sink),
+        "term" => build_term_query(config, schema, index, highlight_sink),
+        "fuzzy" => build_fuzzy_query(config, schema, index, highlight_sink),
+        "phrase" => build_phrase_query(config, schema, index, highlight_sink),
+        "regex" => build_regex_query(config, schema, highlight_sink),
         "contains" | "sfx_contains" => {
-            build_contains_query(config, schema, raw_pairs, highlight_sink)
+            build_contains_query(config, schema, highlight_sink)
         }
-        "startsWith" => build_starts_with_query(config, schema, index, raw_pairs, highlight_sink),
+        "startsWith" => build_starts_with_query(config, schema, index, highlight_sink),
         "contains_split" | "sfx_contains_split" => {
             let expanded = expand_split(config, "contains");
-            build_query(&expanded, schema, index, raw_pairs, &[], highlight_sink)
+            build_query(&expanded, schema, index, highlight_sink)
                 .map(|q| q as Box<dyn Query>)
         }
         "startsWith_split" => {
             let expanded = expand_split(config, "startsWith");
-            build_query(&expanded, schema, index, raw_pairs, &[], highlight_sink)
+            build_query(&expanded, schema, index, highlight_sink)
                 .map(|q| q as Box<dyn Query>)
         }
-        "boolean" => build_boolean_query(config, schema, index, raw_pairs, highlight_sink),
+        "boolean" => build_boolean_query(config, schema, index, highlight_sink),
         "parse" => build_parsed_query(config, schema, index),
         other => Err(format!("unknown query type: {other}")),
     }?;
@@ -251,7 +234,7 @@ pub fn build_query(
             let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
             clauses.push((Occur::Must, text_query));
             for filter in filters {
-                clauses.push((Occur::Must, build_filter_clause(filter, schema, index, raw_pairs)?));
+                clauses.push((Occur::Must, build_filter_clause(filter, schema, index)?));
             }
             return Ok(Box::new(BooleanQuery::new(clauses)));
         }
@@ -266,10 +249,9 @@ fn build_term_query(
     config: &QueryConfig,
     schema: &Schema,
     _index: &Index,
-    raw_pairs: &[(String, String)],
     highlight_sink: Option<Arc<HighlightSink>>,
 ) -> Result<Box<dyn Query>, String> {
-    let field = resolve_field(config, schema, raw_pairs, true)?;
+    let field = resolve_field(config, schema)?;
     let value = config.value.as_deref().ok_or("term query requires 'value'")?;
 
     // Direct lowercase — no tokenizer pipeline, just case-fold for exact token lookup.
@@ -288,10 +270,9 @@ fn build_fuzzy_query(
     config: &QueryConfig,
     schema: &Schema,
     _index: &Index,
-    raw_pairs: &[(String, String)],
     highlight_sink: Option<Arc<HighlightSink>>,
 ) -> Result<Box<dyn Query>, String> {
-    let field = resolve_field(config, schema, raw_pairs, true)?;
+    let field = resolve_field(config, schema)?;
     let value = config.value.as_deref().ok_or("fuzzy query requires 'value'")?;
     let distance = config.distance.unwrap_or(1);
 
@@ -316,10 +297,9 @@ fn build_phrase_query(
     config: &QueryConfig,
     schema: &Schema,
     index: &Index,
-    raw_pairs: &[(String, String)],
     highlight_sink: Option<Arc<HighlightSink>>,
 ) -> Result<Box<dyn Query>, String> {
-    let field = resolve_field(config, schema, raw_pairs, false)?;
+    let field = resolve_field(config, schema)?;
     let terms_str = config
         .terms
         .as_ref()
@@ -350,15 +330,14 @@ fn build_phrase_query(
 fn build_contains_query(
     config: &QueryConfig,
     schema: &Schema,
-    raw_pairs: &[(String, String)],
     highlight_sink: Option<Arc<HighlightSink>>,
 ) -> Result<Box<dyn Query>, String> {
     let is_regex = config.regex.unwrap_or(false);
     if is_regex {
-        return build_contains_regex(config, schema, raw_pairs, highlight_sink);
+        return build_contains_regex(config, schema, highlight_sink);
     }
 
-    let field = resolve_field(config, schema, raw_pairs, true)?;
+    let field = resolve_field(config, schema)?;
     let value = config.value.as_deref().ok_or("contains query requires 'value'")?;
     let distance = config.distance.unwrap_or(1);
 
@@ -375,10 +354,9 @@ fn build_contains_query(
 fn build_contains_regex(
     config: &QueryConfig,
     schema: &Schema,
-    raw_pairs: &[(String, String)],
     highlight_sink: Option<Arc<HighlightSink>>,
 ) -> Result<Box<dyn Query>, String> {
-    let field = resolve_field(config, schema, raw_pairs, true)?;
+    let field = resolve_field(config, schema)?;
     let pattern = config.value.as_deref().ok_or("contains regex query requires 'value'")?;
     let distance = config.distance.unwrap_or(0);
 
@@ -405,10 +383,9 @@ fn build_starts_with_query(
     config: &QueryConfig,
     schema: &Schema,
     _index: &Index,
-    raw_pairs: &[(String, String)],
     highlight_sink: Option<Arc<HighlightSink>>,
 ) -> Result<Box<dyn Query>, String> {
-    let field = resolve_field(config, schema, raw_pairs, true)?;
+    let field = resolve_field(config, schema)?;
     let value = config.value.as_deref().ok_or("startsWith query requires 'value'")?;
     let fuzzy_distance = config.distance.unwrap_or(0);
 
@@ -445,10 +422,9 @@ fn regex_escape(s: &str) -> String {
 fn build_regex_query(
     config: &QueryConfig,
     schema: &Schema,
-    raw_pairs: &[(String, String)],
     highlight_sink: Option<Arc<HighlightSink>>,
 ) -> Result<Box<dyn Query>, String> {
-    let field = resolve_field(config, schema, raw_pairs, true)?;
+    let field = resolve_field(config, schema)?;
     let pattern = config
         .pattern
         .as_deref()
@@ -470,24 +446,23 @@ fn build_boolean_query(
     config: &QueryConfig,
     schema: &Schema,
     index: &Index,
-    raw_pairs: &[(String, String)],
     highlight_sink: Option<Arc<HighlightSink>>,
 ) -> Result<Box<dyn Query>, String> {
     let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
 
     if let Some(ref must) = config.must {
         for sub in must {
-            clauses.push((Occur::Must, build_query(sub, schema, index, raw_pairs, &[], highlight_sink.clone())?));
+            clauses.push((Occur::Must, build_query(sub, schema, index, highlight_sink.clone())?));
         }
     }
     if let Some(ref should) = config.should {
         for sub in should {
-            clauses.push((Occur::Should, build_query(sub, schema, index, raw_pairs, &[], highlight_sink.clone())?));
+            clauses.push((Occur::Should, build_query(sub, schema, index, highlight_sink.clone())?));
         }
     }
     if let Some(ref must_not) = config.must_not {
         for sub in must_not {
-            clauses.push((Occur::MustNot, build_query(sub, schema, index, raw_pairs, &[], None)?));
+            clauses.push((Occur::MustNot, build_query(sub, schema, index, None)?));
         }
     }
 
@@ -561,7 +536,6 @@ fn build_filter_clause(
     filter: &FilterClause,
     schema: &Schema,
     index: &Index,
-    raw_pairs: &[(String, String)],
 ) -> Result<Box<dyn Query>, String> {
     // Composite ops (must/should/must_not) — no field required.
     match filter.op.as_str() {
@@ -576,7 +550,7 @@ fn build_filter_clause(
             };
             let clauses: Vec<(Occur, Box<dyn Query>)> = sub_clauses
                 .iter()
-                .map(|c| Ok((occur, build_filter_clause(c, schema, index, raw_pairs)?)))
+                .map(|c| Ok((occur, build_filter_clause(c, schema, index)?)))
                 .collect::<Result<Vec<_>, String>>()?;
             if clauses.is_empty() {
                 return Err(format!("'{}' filter requires at least one clause", filter.op));
@@ -708,7 +682,7 @@ fn build_filter_clause(
                 distance: Some(distance),
                 ..Default::default()
             };
-            build_contains_query(&config, schema, raw_pairs, None)
+            build_contains_query(&config, schema, None)
         }
         other => Err(format!("unknown filter operator: {other}")),
     }
@@ -890,7 +864,7 @@ mod tests {
         }
     }
 
-    fn make_filter_index() -> (Schema, Index, Vec<(String, String)>) {
+    fn make_filter_index() -> (Schema, Index) {
         use ld_lucivy::schema::{TextFieldIndexing, TextOptions};
 
         let mut builder = Schema::builder();
@@ -907,18 +881,17 @@ mod tests {
         let schema = builder.build();
         let index = Index::create_in_ram(schema.clone());
 
-        let raw_pairs = vec![("name".to_string(), "name._raw".to_string())];
-        (schema, index, raw_pairs)
+        (schema, index)
     }
 
     fn assert_filter_ok(filter: &FilterClause) {
-        let (schema, index, raw_pairs) = make_filter_index();
-        assert!(build_filter_clause(filter, &schema, &index, &raw_pairs).is_ok());
+        let (schema, index) = make_filter_index();
+        assert!(build_filter_clause(filter, &schema, &index).is_ok());
     }
 
     fn assert_filter_err(filter: &FilterClause) {
-        let (schema, index, raw_pairs) = make_filter_index();
-        assert!(build_filter_clause(filter, &schema, &index, &raw_pairs).is_err());
+        let (schema, index) = make_filter_index();
+        assert!(build_filter_clause(filter, &schema, &index).is_err());
     }
 
     #[test]
@@ -993,9 +966,9 @@ mod tests {
 
     #[test]
     fn test_filter_clause_starts_with() {
-        let (schema, index, raw_pairs) = make_filter_index();
+        let (schema, index) = make_filter_index();
         let filter = make_filter("name", "starts_with", json!("hel"));
-        let result = build_filter_clause(&filter, &schema, &index, &raw_pairs);
+        let result = build_filter_clause(&filter, &schema, &index);
         assert!(result.is_ok(), "starts_with failed: {:?}", result.err());
     }
 
@@ -1006,7 +979,7 @@ mod tests {
 
     #[test]
     fn test_filter_clause_contains_with_fuzzy() {
-        let (schema, index, raw_pairs) = make_filter_index();
+        let (schema, index) = make_filter_index();
         let filter = FilterClause {
             field: Some("name".into()),
             op: "contains".into(),
@@ -1014,7 +987,7 @@ mod tests {
             distance: Some(2),
             clauses: None,
         };
-        assert!(build_filter_clause(&filter, &schema, &index, &raw_pairs).is_ok());
+        assert!(build_filter_clause(&filter, &schema, &index).is_ok());
     }
 
     // ─── Composite ops ────────────────────────────────────────────────

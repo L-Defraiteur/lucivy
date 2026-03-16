@@ -298,16 +298,6 @@ mod tests {
             let mut doc = ld_lucivy::LucivyDocument::new();
             doc.add_u64(nid, i);
             doc.add_text(body, &text);
-            for (_user, raw_name) in &handle.raw_field_pairs {
-                if let Some(f) = handle.field(raw_name) {
-                    doc.add_text(f, &text);
-                }
-            }
-            for (_user, ngram_name) in &handle.ngram_field_pairs {
-                if let Some(f) = handle.field(ngram_name) {
-                    doc.add_text(f, &text);
-                }
-            }
             w.add_document(doc).unwrap();
         }
         w.commit().unwrap();
@@ -407,16 +397,6 @@ mod tests {
                     let mut doc = ld_lucivy::LucivyDocument::new();
                     doc.add_u64(nid, i as u64);
                     doc.add_text(body, text);
-                    for (_user, raw_name) in &handle.raw_field_pairs {
-                        if let Some(f) = handle.field(raw_name) {
-                            doc.add_text(f, text);
-                        }
-                    }
-                    for (_user, ngram_name) in &handle.ngram_field_pairs {
-                        if let Some(f) = handle.field(ngram_name) {
-                            doc.add_text(f, text);
-                        }
-                    }
                     w.add_document(doc).unwrap();
                 }
                 w.commit().unwrap();
@@ -435,8 +415,6 @@ mod tests {
             &query_config,
             &handle.schema,
             &handle.index,
-            &handle.raw_field_pairs,
-            &handle.ngram_field_pairs,
             None,
         )
         .unwrap();

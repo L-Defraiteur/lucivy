@@ -1,11 +1,6 @@
 //! Index handle management.
 //!
 //! Each LucivyHandle holds an Index, an IndexWriter, and an IndexReader.
-//!
-//! Every "text" field gets a dual-field layout:
-//!   - `{name}` : tokenized (stemmed if stemmer configured, else lowercase)
-//!   - `{name}._raw` : lowercased only (for term/fuzzy/regex/contains queries — precision)
-//! The routing is transparent — users always reference the base field name.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,10 +17,7 @@ use crate::query::SchemaConfig;
 /// Reserved field name for Rag3db node IDs, used for filtered search.
 pub const NODE_ID_FIELD: &str = "_node_id";
 
-/// Suffix appended to text fields for the non-stemmed counterpart.
-pub const RAW_SUFFIX: &str = "._raw";
-
-/// Tokenizer name for ._raw fields (camelCase split + lowercase).
+/// Tokenizer name for raw fields (camelCase split + lowercase).
 const RAW_TOKENIZER: &str = "raw_code";
 
 /// Tokenizer name for stemmed fields.
@@ -37,13 +29,8 @@ pub struct LucivyHandle {
     pub writer: Mutex<Option<IndexWriter>>,
     pub reader: IndexReader,
     pub schema: Schema,
-    /// Maps field names (including internal `._raw` names) to Field objects.
+    /// Maps field names to Field objects.
     pub field_map: Vec<(String, Field)>,
-    /// Maps user field names to their `._raw` counterpart names.
-    /// Always populated for "text" fields.
-    pub raw_field_pairs: Vec<(String, String)>,
-    /// Deprecated: kept for API compatibility, always empty.
-    pub ngram_field_pairs: Vec<(String, String)>,
     /// Original schema config, available for bindings that need field metadata on open().
     pub config: Option<SchemaConfig>,
     /// True if there are uncommitted changes (add/remove/update without commit).
@@ -76,7 +63,7 @@ fn create_writer(index: &Index) -> Result<IndexWriter, String> {
 impl LucivyHandle {
     /// Create a new index with the given directory and schema config.
     pub fn create(dir: impl Directory, config: &SchemaConfig) -> Result<Self, String> {
-        let (schema, field_map, raw_field_pairs) = build_schema(config)?;
+        let (schema, field_map) = build_schema(config)?;
 
         // Persist config BEFORE creating the index, so it bypasses ManagedDirectory's GC.
         // ManagedDirectory.atomic_write registers files as "managed" and the GC deletes them
@@ -105,8 +92,6 @@ impl LucivyHandle {
             reader,
             schema,
             field_map,
-            raw_field_pairs,
-            ngram_field_pairs: Vec::new(),
             config: Some(config.clone()),
             has_uncommitted: AtomicBool::new(false),
         })
@@ -121,28 +106,18 @@ impl LucivyHandle {
 
         let index = Index::open(dir).map_err(|e| format!("cannot open index: {e}"))?;
 
-        // Use the pre-read config to re-register tokenizers and rebuild field pairs.
-        let (config, raw_field_pairs) = match config_bytes {
+        // Use the pre-read config to re-register tokenizers.
+        let config = match config_bytes {
             Some(config_data) => {
                 match serde_json::from_slice::<SchemaConfig>(&config_data) {
                     Ok(config) => {
                         configure_tokenizers(&index, &config);
-                        // Only populate raw_field_pairs if ._raw fields actually exist
-                        // in the schema (backward compat with old indexes).
-                        let schema = index.schema();
-                        let raw: Vec<_> = config
-                            .fields
-                            .iter()
-                            .filter(|f| f.field_type == "text")
-                            .filter(|f| schema.get_field(&format!("{}{RAW_SUFFIX}", f.name)).is_ok())
-                            .map(|f| (f.name.clone(), format!("{}{RAW_SUFFIX}", f.name)))
-                            .collect();
-                        (Some(config), raw)
+                        Some(config)
                     }
-                    Err(_) => (None, Vec::new()),
+                    Err(_) => None,
                 }
             }
-            None => (None, Vec::new()),
+            None => None,
         };
 
         let schema = index.schema();
@@ -164,8 +139,6 @@ impl LucivyHandle {
             reader,
             schema,
             field_map,
-            raw_field_pairs,
-            ngram_field_pairs: Vec::new(),
             config,
             has_uncommitted: AtomicBool::new(false),
         })
@@ -211,10 +184,9 @@ impl LucivyHandle {
 
 pub fn build_schema(
     config: &SchemaConfig,
-) -> Result<(Schema, Vec<(String, Field)>, Vec<(String, String)>), String> {
+) -> Result<(Schema, Vec<(String, Field)>), String> {
     let mut builder = Schema::builder();
     let mut field_map = Vec::new();
-    let mut raw_field_pairs = Vec::new();
     let has_stemmer = config.stemmer.is_some();
 
     // Auto-add _node_id as u64 FAST + INDEXED + STORED field.
@@ -301,7 +273,7 @@ pub fn build_schema(
         }
     }
 
-    Ok((builder.build(), field_map, raw_field_pairs))
+    Ok((builder.build(), field_map))
 }
 
 pub fn configure_tokenizers(index: &Index, config: &SchemaConfig) {
@@ -403,12 +375,6 @@ mod tests {
                 doc.add_u64(nid_field, nid);
                 doc.add_text(body_field, body);
                 doc.add_text(tag_field, tag);
-                // Auto-duplicate to raw field for body
-                for (user, raw_name) in &handle.raw_field_pairs {
-                    if user == "body" {
-                        if let Some(f) = handle.field(raw_name) { doc.add_text(f, body); }
-                    }
-                }
                 writer.add_document(doc).unwrap();
             }
             writer.commit().unwrap();
@@ -427,8 +393,6 @@ mod tests {
             &query_config,
             &handle.schema,
             &handle.index,
-            &handle.raw_field_pairs,
-            &handle.ngram_field_pairs,
             None,
         ).unwrap();
 
@@ -471,19 +435,6 @@ mod tests {
             doc.add_u64(nid_field, 42);
             doc.add_text(path_field, "src/main.rs");
             doc.add_text(content_field, "fn main() { println!(\"hello\"); }");
-            // Add to raw/ngram fields
-            for (user, raw_name) in &handle.raw_field_pairs {
-                if let Some(f) = handle.field(raw_name) {
-                    if user == "path" { doc.add_text(f, "src/main.rs"); }
-                    if user == "content" { doc.add_text(f, "fn main() { println!(\"hello\"); }"); }
-                }
-            }
-            for (user, ngram_name) in &handle.ngram_field_pairs {
-                if let Some(f) = handle.field(ngram_name) {
-                    if user == "path" { doc.add_text(f, "src/main.rs"); }
-                    if user == "content" { doc.add_text(f, "fn main() { println!(\"hello\"); }"); }
-                }
-            }
             writer.add_document(doc).unwrap();
             writer.commit().unwrap();
         }
@@ -494,8 +445,7 @@ mod tests {
             r#"{"type": "contains", "field": "content", "value": "main"}"#
         ).unwrap();
         let query = crate::query::build_query(
-            &query_config, &handle.schema, &handle.index,
-            &handle.raw_field_pairs, &handle.ngram_field_pairs, None,
+            &query_config, &handle.schema, &handle.index, None,
         ).unwrap();
 
         let searcher = handle.reader.searcher();
@@ -513,11 +463,11 @@ mod tests {
             .unwrap();
         assert_eq!(nid, 42);
 
-        // Check stored text fields (skip internal _raw/_ngram)
+        // Check stored text fields
         let mut fields: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         for (field, value) in doc.field_values() {
             let name = handle.schema.get_field_name(field);
-            if name == NODE_ID_FIELD || name.ends_with(RAW_SUFFIX) {
+            if name == NODE_ID_FIELD {
                 continue;
             }
             if let Some(s) = value.as_value().as_str() {
@@ -557,21 +507,6 @@ mod tests {
                     let mut doc = ld_lucivy::LucivyDocument::new();
                     doc.add_u64(nid_field, i);
                     doc.add_text(body_field, &format!("document number {i}"));
-                    // Also add to raw/ngram fields
-                    for (user, raw_name) in &handle.raw_field_pairs {
-                        if user == "body" {
-                            if let Some(f) = handle.field(raw_name) {
-                                doc.add_text(f, &format!("document number {i}"));
-                            }
-                        }
-                    }
-                    for (user, ngram_name) in &handle.ngram_field_pairs {
-                        if user == "body" {
-                            if let Some(f) = handle.field(ngram_name) {
-                                doc.add_text(f, &format!("document number {i}"));
-                            }
-                        }
-                    }
                     writer.add_document(doc).unwrap();
                 }
                 writer.commit().unwrap();
@@ -619,20 +554,6 @@ mod tests {
                     let mut doc = ld_lucivy::LucivyDocument::new();
                     doc.add_u64(nid, id);
                     doc.add_text(body, &format!("batch {batch} document {i} with some text for merging"));
-                    for (user, raw_name) in &handle.raw_field_pairs {
-                        if user == "body" {
-                            if let Some(f) = handle.field(raw_name) {
-                                doc.add_text(f, &format!("batch {batch} document {i} with some text for merging"));
-                            }
-                        }
-                    }
-                    for (user, ngram_name) in &handle.ngram_field_pairs {
-                        if user == "body" {
-                            if let Some(f) = handle.field(ngram_name) {
-                                doc.add_text(f, &format!("batch {batch} document {i} with some text for merging"));
-                            }
-                        }
-                    }
                     w.add_document(doc).unwrap();
                 }
                 w.commit().unwrap();
@@ -791,16 +712,6 @@ mod tests {
                 let mut doc = ld_lucivy::LucivyDocument::new();
                 doc.add_u64(nid_field, nid);
                 doc.add_text(body_field, text);
-                for (user, raw_name) in &handle.raw_field_pairs {
-                    if user == "body" {
-                        if let Some(f) = handle.field(raw_name) { doc.add_text(f, text); }
-                    }
-                }
-                for (user, ngram_name) in &handle.ngram_field_pairs {
-                    if user == "body" {
-                        if let Some(f) = handle.field(ngram_name) { doc.add_text(f, text); }
-                    }
-                }
                 writer.add_document(doc).unwrap();
             }
             writer.commit().unwrap();
@@ -819,8 +730,6 @@ mod tests {
             &query_config,
             &handle.schema,
             &handle.index,
-            &handle.raw_field_pairs,
-            &handle.ngram_field_pairs,
             Some(sink.clone()),
         ).unwrap();
 
@@ -884,18 +793,6 @@ mod tests {
                 doc.add_u64(nid_field, nid);
                 doc.add_text(title_field, title);
                 doc.add_text(body_field, body);
-                for (user, raw_name) in &handle.raw_field_pairs {
-                    if let Some(f) = handle.field(raw_name) {
-                        if user == "title" { doc.add_text(f, title); }
-                        if user == "body" { doc.add_text(f, body); }
-                    }
-                }
-                for (user, ngram_name) in &handle.ngram_field_pairs {
-                    if let Some(f) = handle.field(ngram_name) {
-                        if user == "title" { doc.add_text(f, title); }
-                        if user == "body" { doc.add_text(f, body); }
-                    }
-                }
                 writer.add_document(doc).unwrap();
             }
             writer.commit().unwrap();
@@ -909,8 +806,6 @@ mod tests {
             &query_config,
             &handle.schema,
             &handle.index,
-            &handle.raw_field_pairs,
-            &handle.ngram_field_pairs,
             None,
         ).expect("query build should succeed");
 

@@ -1,15 +1,7 @@
-//! PostingResolver — unified posting resolution from .sfxpost or ._raw inverted index.
+//! PostingResolver — posting resolution from .sfxpost files.
 //!
-//! All query scorers use this trait to resolve ordinals to posting entries,
-//! abstracting over the data source. When .sfxpost is available, it is preferred
-//! (zero dependency on ._raw). Otherwise, falls back to the inverted index.
+//! All query scorers use this trait to resolve ordinals to posting entries.
 
-use std::sync::Arc;
-
-use crate::docset::{DocSet, TERMINATED};
-use crate::index::InvertedIndexReader;
-use crate::postings::Postings;
-use crate::schema::IndexRecordOption;
 use crate::suffix_fst::file::SfxPostingsReader;
 use crate::{DocId, SegmentReader};
 
@@ -90,54 +82,16 @@ impl PostingResolver for SfxPostResolver {
     }
 }
 
-/// Fallback resolver from the ._raw inverted index (for old indexes without .sfxpost).
-pub struct InvertedIndexResolver {
-    inv_idx: Arc<InvertedIndexReader>,
-}
-
-impl InvertedIndexResolver {
-    pub fn new(inv_idx: Arc<InvertedIndexReader>) -> Self {
-        Self { inv_idx }
-    }
-}
-
-impl PostingResolver for InvertedIndexResolver {
-    fn resolve(&self, ordinal: u64) -> Vec<PostingEntry> {
-        let term_dict = self.inv_idx.terms();
-        let term_info = term_dict.term_info_from_ord(ordinal);
-        let mut postings = match self.inv_idx.read_postings_from_terminfo(
-            &term_info,
-            IndexRecordOption::WithFreqsAndPositionsAndOffsets,
-        ) {
-            Ok(p) => p,
-            Err(_) => return Vec::new(),
-        };
-        let mut entries = Vec::new();
-        loop {
-            let doc = postings.doc();
-            if doc == TERMINATED { break; }
-            let mut pos_offsets = Vec::new();
-            postings.append_positions_and_offsets(0, &mut pos_offsets);
-            for (pos, off_from, off_to) in pos_offsets {
-                entries.push(PostingEntry {
-                    doc_id: doc, position: pos, byte_from: off_from, byte_to: off_to,
-                });
-            }
-            postings.advance();
-        }
-        entries
-    }
-}
-
-/// Build the best available PostingResolver for a field in a segment.
-/// Prefers .sfxpost (self-contained), falls back to ._raw inverted index.
+/// Build a PostingResolver from the .sfxpost file for a field in a segment.
 pub fn build_resolver(reader: &SegmentReader, field: crate::schema::Field) -> Result<Box<dyn PostingResolver>, crate::LucivyError> {
-    if let Some(sfxpost_data) = reader.sfxpost_file(field) {
-        let bytes = sfxpost_data.read_bytes().map_err(|e| {
-            crate::LucivyError::SystemError(format!("read .sfxpost: {e}"))
-        })?;
-        return Ok(Box::new(SfxPostResolver::from_bytes(&bytes)?));
-    }
-    let inv_idx = reader.inverted_index(field)?;
-    Ok(Box::new(InvertedIndexResolver::new(Arc::clone(&inv_idx))))
+    let sfxpost_data = reader.sfxpost_file(field).ok_or_else(|| {
+        crate::LucivyError::InvalidArgument(format!(
+            "no .sfxpost file for field {:?}. PostingResolver requires suffix postings.",
+            field
+        ))
+    })?;
+    let bytes = sfxpost_data.read_bytes().map_err(|e| {
+        crate::LucivyError::SystemError(format!("read .sfxpost: {e}"))
+    })?;
+    Ok(Box::new(SfxPostResolver::from_bytes(&bytes)?))
 }
