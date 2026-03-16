@@ -164,9 +164,40 @@ impl Weight for SuffixContainsWeight {
             crate::LucivyError::SystemError(format!("open .sfx: {e}"))
         })?;
 
-        // Get the real inverted index for posting list resolution
-        let raw_inverted = reader.inverted_index(self.raw_field)?;
-        let resolver = suffix_contains::make_raw_resolver(Arc::clone(&raw_inverted));
+        // Resolve posting entries: prefer .sfxpost (self-contained), fall back to ._raw inverted index
+        let resolver: Box<dyn Fn(u64) -> Vec<suffix_contains::RawPostingEntry>> =
+            if let Some(sfxpost_data) = reader.sfxpost_file(self.raw_field) {
+                let sfxpost_bytes = sfxpost_data.read_bytes().map_err(|e| {
+                    crate::LucivyError::SystemError(format!("read .sfxpost: {e}"))
+                })?;
+                let sfxpost_bytes = sfxpost_bytes.to_vec();
+                // Parse once, share via Arc for the closure
+                let sfxpost_entries = {
+                    use crate::suffix_fst::file::SfxPostingsReader;
+                    let pr = SfxPostingsReader::open(&sfxpost_bytes).map_err(|e| {
+                        crate::LucivyError::SystemError(format!("open .sfxpost: {e}"))
+                    })?;
+                    // Pre-load all ordinals into a Vec<Vec<RawPostingEntry>>
+                    let num = pr.num_terms();
+                    let mut all: Vec<Vec<suffix_contains::RawPostingEntry>> = Vec::with_capacity(num as usize);
+                    for ord in 0..num {
+                        all.push(pr.entries(ord).into_iter().map(|e| suffix_contains::RawPostingEntry {
+                            doc_id: e.doc_id,
+                            token_index: e.token_index,
+                            byte_from: e.byte_from,
+                            byte_to: e.byte_to,
+                        }).collect());
+                    }
+                    Arc::new(all)
+                };
+                Box::new(move |raw_ordinal: u64| {
+                    sfxpost_entries.get(raw_ordinal as usize).cloned().unwrap_or_default()
+                })
+            } else {
+                // Fallback: read from ._raw inverted index (for old indexes without .sfxpost)
+                let raw_inverted = reader.inverted_index(self.raw_field)?;
+                Box::new(suffix_contains::make_raw_resolver(Arc::clone(&raw_inverted)))
+            };
 
         // Tokenize the query to determine single vs multi-token path
         let (query_tokens, query_separators) = tokenize_query(&self.query_text);
