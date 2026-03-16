@@ -677,7 +677,11 @@ mod tests {
             assert!(num_segments <= 4);
             let num_components_except_deletes_and_tempstore =
                 crate::index::SegmentComponent::iterator().len() - 2;
-            let max_num_mmapped = num_components_except_deletes_and_tempstore * num_segments;
+            // Per-field .sfx + .sfxpost files are custom (not in SegmentComponent enum).
+            // Allow extra headroom for these per-segment files.
+            let sfx_extra_per_segment = 4; // 2 text fields × (.sfx + .sfxpost)
+            let max_num_mmapped =
+                (num_components_except_deletes_and_tempstore + sfx_extra_per_segment) * num_segments;
             assert_eventually(|| {
                 let num_mmapped = mmap_directory.get_cache_info().mmapped.len();
                 if num_mmapped > max_num_mmapped {

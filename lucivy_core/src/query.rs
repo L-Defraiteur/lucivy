@@ -274,7 +274,8 @@ fn build_term_query(
 
     // Direct lowercase — no tokenizer pipeline, just case-fold for exact token lookup.
     let term = Term::from_field_text(field, &value.to_lowercase());
-    let mut query = TermQuery::new(term, IndexRecordOption::WithFreqs);
+    let mut query = TermQuery::new(term, IndexRecordOption::WithFreqs)
+        .with_prefer_sfxpost(true);
     if let Some(sink) = highlight_sink {
         let field_name = config.field.clone().unwrap_or_default();
         query = query.with_highlight_sink(sink, field_name);

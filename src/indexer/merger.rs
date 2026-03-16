@@ -17,7 +17,7 @@ use crate::index::{Segment, SegmentComponent, SegmentReader};
 use crate::indexer::doc_id_mapping::{MappingType, SegmentDocIdMapping};
 use crate::indexer::SegmentSerializer;
 use crate::postings::{InvertedIndexSerializer, Postings, SegmentPostings};
-use crate::schema::{value_type_to_column_type, Field, FieldType, Schema};
+use crate::schema::{value_type_to_column_type, Field, FieldType, IndexRecordOption, Schema};
 use crate::store::StoreWriter;
 use crate::suffix_fst::builder::SuffixFstBuilder;
 use crate::suffix_fst::encode_vint;
@@ -598,13 +598,11 @@ impl IndexMerger {
         serializer: &mut SegmentSerializer,
         doc_mapping: &[DocAddress],
     ) -> crate::Result<()> {
-        // Find ._raw fields that have .sfx in at least one source segment.
-        // After removing ._raw from the schema, this filter will change to match
-        // the new field layout (e.g. all text fields with .sfx).
+        // Find fields that have .sfx in at least one source segment.
         let sfx_fields: Vec<Field> = self
             .schema
             .fields()
-            .filter(|(_, entry)| entry.name().ends_with("._raw"))
+            .filter(|(field, _)| self.readers.iter().any(|r| r.sfx_file(*field).is_some()))
             .map(|(field, _)| field)
             .collect();
 
@@ -655,15 +653,34 @@ impl IndexMerger {
                 })
                 .collect();
 
-            // 1. Collect all unique tokens from source term dictionaries
+            // 1. Collect unique tokens that have at least one alive document.
+            // We can't blindly use inverted_index.terms() because it includes terms
+            // from deleted documents — those get purged in the merged TermDictionary,
+            // causing ordinal mismatches between .sfx and TermDictionary.
             let mut unique_tokens = BTreeSet::new();
-            for reader in &self.readers {
+            for (seg_ord, reader) in self.readers.iter().enumerate() {
                 if let Ok(inv_idx) = reader.inverted_index(field) {
                     let term_dict = inv_idx.terms();
+                    let alive = reader.alive_bitset();
                     let mut stream = term_dict.stream()?;
                     while stream.advance() {
                         if let Ok(s) = std::str::from_utf8(stream.key()) {
-                            unique_tokens.insert(s.to_string());
+                            // Check if at least one alive doc has this term
+                            let ti = stream.value().clone();
+                            let mut postings = inv_idx.read_postings_from_terminfo(
+                                &ti, IndexRecordOption::Basic)?;
+                            let has_alive_doc = loop {
+                                let doc = postings.doc();
+                                if doc == TERMINATED { break false; }
+                                let is_alive = alive.map_or(true, |bs| bs.is_alive(doc));
+                                if is_alive && reverse_doc_map[seg_ord].contains_key(&doc) {
+                                    break true;
+                                }
+                                postings.advance();
+                            };
+                            if has_alive_doc {
+                                unique_tokens.insert(s.to_string());
+                            }
                         }
                     }
                 }

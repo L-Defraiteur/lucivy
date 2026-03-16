@@ -127,10 +127,14 @@ impl LucivyHandle {
                 match serde_json::from_slice::<SchemaConfig>(&config_data) {
                     Ok(config) => {
                         configure_tokenizers(&index, &config);
+                        // Only populate raw_field_pairs if ._raw fields actually exist
+                        // in the schema (backward compat with old indexes).
+                        let schema = index.schema();
                         let raw: Vec<_> = config
                             .fields
                             .iter()
                             .filter(|f| f.field_type == "text")
+                            .filter(|f| schema.get_field(&format!("{}{RAW_SUFFIX}", f.name)).is_ok())
                             .map(|f| (f.name.clone(), format!("{}{RAW_SUFFIX}", f.name)))
                             .collect();
                         (Some(config), raw)
@@ -232,17 +236,8 @@ pub fn build_schema(
                 }
                 let field = builder.add_text_field(&field_def.name, opts);
                 field_map.push((field_def.name.clone(), field));
-
-                // Raw counterpart: "default" tokenizer (lowercase only), NOT stored.
-                // Used by term/fuzzy/regex/contains queries for precision matching.
-                let raw_indexing = TextFieldIndexing::default()
-                    .set_tokenizer(RAW_TOKENIZER)
-                    .set_index_option(IndexRecordOption::WithFreqsAndPositionsAndOffsets);
-                let raw_opts = TextOptions::default().set_indexing_options(raw_indexing);
-                let raw_name = format!("{}{RAW_SUFFIX}", field_def.name);
-                let raw_field = builder.add_text_field(&raw_name, raw_opts);
-                field_map.push((raw_name.clone(), raw_field));
-                raw_field_pairs.push((field_def.name.clone(), raw_name));
+                // No ._raw counterpart — the SfxCollector captures raw tokens
+                // via separate RAW_TOKENIZER in the segment_writer (double tokenization).
             }
             "u64" => {
                 use ld_lucivy::schema::{NumericOptions, FAST, INDEXED};
