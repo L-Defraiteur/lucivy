@@ -114,7 +114,7 @@ score = token_score + total_penalty * BALANCE_WEIGHT;
 ```
 Rationale : éviter qu'un shard reçoive trop de docs au total même s'il est sous-représenté en tokens.
 
-**Recommandation** : commencer avec le score simple (somme). Itérer sur les heuristiques après benchmarks.
+**Recommandation** : commencer avec le score IDF-weighted. Les tokens fréquents ("import", "return") se répartissent naturellement par la loi des grands nombres — le routing n'a pas d'impact sur eux. Ce sont les tokens mid-frequency (50-500 docs : "rag3db", "configManager") qui bénéficient du routing intelligent. L'IDF weight assure qu'on optimise pour ces tokens-là.
 
 ### Query
 
@@ -125,12 +125,16 @@ fn search(query: &str, shards: &[ShardHandle]) -> Vec<SearchResult> {
         .map(|shard| shard.search(query))
         .collect();
 
-    // 2. Merge top-K
-    let mut merged = shard_results.into_iter().flatten().collect::<Vec<_>>();
-    merged.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-    merged.truncate(top_k);
-
-    merged
+    // 2. Merge top-K via priority queue (heap merge, not flatten+sort)
+    use std::collections::BinaryHeap;
+    let mut heap = BinaryHeap::new();
+    for (shard_id, results) in shard_results.into_iter().enumerate() {
+        for (score, doc_id) in results {
+            heap.push((score, shard_id, doc_id));
+            if heap.len() > top_k { heap.pop(); }
+        }
+    }
+    heap.into_sorted_vec()
 }
 ```
 
@@ -174,25 +178,23 @@ Le `doc_freq` est calculé localement par shard. L'IDF sera légèrement différ
 
 ## Implémentation
 
-### Phase 1 : ShardRouter + multi-index
-- `ShardRouter` struct avec compteurs
+### Phase 1 : ShardRouter IDF-weighted + multi-index
+- `ShardRouter` struct avec compteurs per-token per-shard
+- Score IDF-weighted dès le départ (les tokens mid-frequency sont le vrai gain)
 - `ShardedIndex` wraps N `LucivyHandle`
 - `create(dir, config)` crée N sous-index
 - `add_document(doc)` route via ShardRouter
-- `search(query)` query N shards en parallèle, merge top-K
+- `search(query)` query N shards en parallèle, heap merge top-K
 
-### Phase 2 : Persistance des compteurs
-- `_shard_stats.bin` sérialisé au commit
+### Phase 2 : Persistance des compteurs + BM25 global
+- `_shard_stats.bin` sérialisé au commit (compteurs + stats globales)
 - Rechargé à l'open pour reprendre le routage
+- Stats globales agrégées pour BM25 cross-shard
 
-### Phase 3 : BM25 global
-- Stats globales agrégées au commit
-- Chaque shard lit les stats globales pour scorer
-
-### Phase 4 : Heuristiques avancées
-- Score IDF-weighted
+### Phase 3 : Heuristiques avancées + benchmarks
 - Score min-max
-- Benchmarks comparatifs vs round-robin
+- Score hybride (per-token + total balance)
+- Benchmarks comparatifs vs round-robin sur 100K+ docs
 
 ## Estimation
 
