@@ -14,7 +14,7 @@ use ld_lucivy::{DocAddress, LucivyDocument, Searcher};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD, RAW_SUFFIX};
+use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD};
 use lucivy_core::directory::StdFsDirectory;
 use lucivy_core::query;
 use lucivy_core::snapshot;
@@ -259,8 +259,6 @@ impl Index {
             &query_config,
             &self.handle.schema,
             &self.handle.index,
-            &self.handle.raw_field_pairs,
-            &[],
             highlight_sink.clone(),
         )
         .map_err(|e| Error::from_reason(e))?;
@@ -496,7 +494,6 @@ fn add_field_value(
                 .as_str()
                 .ok_or_else(|| Error::from_reason(format!("expected string for field {field_name}")))?;
             doc.add_text(field, text);
-            auto_duplicate(handle, doc, field_name, text);
         }
         FieldType::U64(_) => {
             let v = value
@@ -523,19 +520,6 @@ fn add_field_value(
         }
     }
     Ok(())
-}
-
-fn auto_duplicate(handle: &LucivyHandle, doc: &mut LucivyDocument, field_name: &str, text: &str) {
-    if let Some(raw_name) = handle
-        .raw_field_pairs
-        .iter()
-        .find(|(user, _)| user == field_name)
-        .map(|(_, raw)| raw.as_str())
-    {
-        if let Some(raw_field) = handle.field(raw_name) {
-            doc.add_text(raw_field, text);
-        }
-    }
 }
 
 fn execute_top_docs(
@@ -605,9 +589,6 @@ fn collect_results(
             let by_field = sink.get(seg_id, doc_addr.doc_id)?;
             let map: HashMap<String, Vec<Vec<u32>>> = by_field
                 .into_iter()
-                .filter(|(name, _)| {
-                    !name.ends_with(RAW_SUFFIX)
-                })
                 .map(|(name, offsets)| {
                     let ranges = offsets
                         .into_iter()
@@ -627,7 +608,7 @@ fn collect_results(
             let mut map = HashMap::new();
             for (field, value) in doc.field_values() {
                 let name = schema.get_field_name(field);
-                if name == NODE_ID_FIELD || name.ends_with(RAW_SUFFIX) {
+                if name == NODE_ID_FIELD {
                     continue;
                 }
                 let rv = value.as_value();

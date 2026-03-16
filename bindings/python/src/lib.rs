@@ -14,7 +14,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD, RAW_SUFFIX};
+use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD};
 use lucivy_core::directory::StdFsDirectory;
 use lucivy_core::query;
 use lucivy_core::snapshot;
@@ -57,7 +57,7 @@ impl SearchResult {
 struct Index {
     handle: LucivyHandle,
     index_path: String,
-    /// User field names (excludes _node_id, ._raw, ._ngram).
+    /// User field names (excludes _node_id).
     user_fields: Vec<(String, String)>, // (name, field_type)
     /// Text field names (for default parse query).
     text_fields: Vec<String>,
@@ -282,8 +282,6 @@ impl Index {
             &query_config,
             &self.handle.schema,
             &self.handle.index,
-            &self.handle.raw_field_pairs,
-            &[],
             highlight_sink.clone(),
         ).map_err(|e| PyValueError::new_err(e))?;
 
@@ -525,7 +523,6 @@ fn add_field_value(
         FieldType::Str(_) => {
             let text: String = value.extract()?;
             doc.add_text(field, &text);
-            auto_duplicate(handle, doc, field_name, &text);
         }
         FieldType::U64(_) => {
             let v: u64 = value.extract()?;
@@ -542,18 +539,6 @@ fn add_field_value(
         _ => return Err(PyValueError::new_err(format!("unsupported field type for {field_name}"))),
     }
     Ok(())
-}
-
-/// Auto-duplicate text values into ._raw and ._ngram counterparts.
-fn auto_duplicate(handle: &LucivyHandle, doc: &mut LucivyDocument, field_name: &str, text: &str) {
-    if let Some(raw_name) = handle.raw_field_pairs.iter()
-        .find(|(user, _)| user == field_name)
-        .map(|(_, raw)| raw.as_str())
-    {
-        if let Some(raw_field) = handle.field(raw_name) {
-            doc.add_text(raw_field, text);
-        }
-    }
 }
 
 fn execute_top_docs(
@@ -604,7 +589,6 @@ fn collect_results(
             let seg_id = searcher.segment_reader(doc_addr.segment_ord).segment_id();
             let by_field = sink.get(seg_id, doc_addr.doc_id)?;
             let map: HashMap<String, Vec<(u32, u32)>> = by_field.into_iter()
-                .filter(|(name, _)| !name.ends_with(RAW_SUFFIX))
                 .map(|(name, offsets)| {
                     let ranges = offsets.into_iter().map(|[s, e]| (s as u32, e as u32)).collect();
                     (name, ranges)
@@ -617,7 +601,7 @@ fn collect_results(
             let mut map = HashMap::new();
             for (field, value) in doc.field_values() {
                 let name = schema.get_field_name(field);
-                if name == NODE_ID_FIELD || name.ends_with(RAW_SUFFIX) {
+                if name == NODE_ID_FIELD {
                     continue;
                 }
                 let rv = value.as_value();

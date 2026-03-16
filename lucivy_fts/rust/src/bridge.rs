@@ -14,7 +14,7 @@ use ld_lucivy::query::HighlightSink;
 use ld_lucivy::schema::{Field, FieldType, Value as LucivyValue};
 use ld_lucivy::{DocAddress, Searcher, LucivyDocument};
 
-use lucivy_core::handle::{NODE_ID_FIELD, RAW_SUFFIX};
+use lucivy_core::handle::NODE_ID_FIELD;
 use lucivy_core::query;
 
 use crate::LucivyHandle;
@@ -179,7 +179,6 @@ fn get_field_ids(handle: &LucivyHandle) -> Vec<ffi::IndexFieldInfo> {
     handle
         .field_map
         .iter()
-        .filter(|(name, _)| !name.ends_with(RAW_SUFFIX))
         .map(|(name, field)| {
             let ft = match handle.schema.get_field_entry(*field).field_type() {
                 FieldType::Str(_) => "text",
@@ -214,8 +213,6 @@ fn add_document_texts(
     for f in fields {
         let field = Field::from_field_id(f.field_id);
         doc.add_text(field, &f.value);
-        let field_name = handle.schema.get_field_entry(field).name().to_owned();
-        auto_duplicate_field(&mut doc, handle, &field_name, &f.value);
     }
 
     let mut guard = handle
@@ -247,8 +244,6 @@ fn add_document_mixed(
     for f in text_fields {
         let field = Field::from_field_id(f.field_id);
         doc.add_text(field, &f.value);
-        let field_name = handle.schema.get_field_entry(field).name().to_owned();
-        auto_duplicate_field(&mut doc, handle, &field_name, &f.value);
     }
 
     for f in u64_fields {
@@ -270,26 +265,6 @@ fn add_document_mixed(
         .add_document(doc)
         .map(|o| o as i64)
         .map_err(|e| e.to_string())
-}
-
-/// Auto-duplicate a text value into ._raw and ._ngram counterparts if they exist.
-fn auto_duplicate_field(
-    doc: &mut LucivyDocument,
-    handle: &LucivyHandle,
-    field_name: &str,
-    value: &str,
-) {
-    if let Some(raw_name) = handle
-        .raw_field_pairs
-        .iter()
-        .find(|(user, _)| user == field_name)
-        .map(|(_, raw)| raw.as_str())
-    {
-        if let Some(raw_field) = handle.field(raw_name) {
-            doc.add_text(raw_field, value);
-        }
-    }
-
 }
 
 fn delete_by_node_id(handle: &LucivyHandle, node_id: u64) -> Result<i64, String> {
@@ -347,8 +322,6 @@ fn search(
         &config,
         &handle.schema,
         &handle.index,
-        &handle.raw_field_pairs,
-        &[],
         None,
     )?;
 
@@ -371,8 +344,6 @@ fn search_with_highlights(
         &config,
         &handle.schema,
         &handle.index,
-        &handle.raw_field_pairs,
-        &[],
         Some(highlight_sink.clone()),
     )?;
 
@@ -464,8 +435,6 @@ fn search_typed_with_highlights(
         &config,
         &handle.schema,
         &handle.index,
-        &handle.raw_field_pairs,
-        &[],
         Some(highlight_sink.clone()),
     )?;
 
@@ -494,8 +463,6 @@ fn search_filtered(
         &config,
         &handle.schema,
         &handle.index,
-        &handle.raw_field_pairs,
-        &[],
         None,
     )?;
 
@@ -520,8 +487,6 @@ fn search_filtered_with_highlights(
         &config,
         &handle.schema,
         &handle.index,
-        &handle.raw_field_pairs,
-        &[],
         Some(highlight_sink.clone()),
     )?;
 

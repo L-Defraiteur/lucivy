@@ -14,7 +14,7 @@ use ld_lucivy::query::HighlightSink;
 use ld_lucivy::schema::{FieldType, Value as LucivyValue};
 use ld_lucivy::{DocAddress, LucivyDocument, Searcher};
 
-use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD, RAW_SUFFIX};
+use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD};
 use lucivy_core::query;
 use lucivy_core::snapshot;
 
@@ -356,8 +356,6 @@ impl LucivyIndex {
             &query_config,
             &self.handle.schema,
             &self.handle.index,
-            &self.handle.raw_field_pairs,
-            &[],
             None,
         )?;
 
@@ -378,8 +376,6 @@ impl LucivyIndex {
             &query_config,
             &self.handle.schema,
             &self.handle.index,
-            &self.handle.raw_field_pairs,
-            &[],
             Some(highlight_sink.clone()),
         )?;
 
@@ -404,8 +400,6 @@ impl LucivyIndex {
             &query_config,
             &self.handle.schema,
             &self.handle.index,
-            &self.handle.raw_field_pairs,
-            &[],
             None,
         )?;
 
@@ -428,8 +422,6 @@ impl LucivyIndex {
             &query_config,
             &self.handle.schema,
             &self.handle.index,
-            &self.handle.raw_field_pairs,
-            &[],
             Some(highlight_sink.clone()),
         )?;
 
@@ -468,8 +460,7 @@ impl LucivyIndex {
             .field_map
             .iter()
             .filter(|(name, _)| {
-                !name.ends_with(RAW_SUFFIX)
-                    && name != NODE_ID_FIELD
+                name != NODE_ID_FIELD
             })
             .map(|(name, field)| {
                 let ft = match self.handle.schema.get_field_entry(*field).field_type() {
@@ -600,7 +591,6 @@ fn add_field_value(
                 .as_str()
                 .ok_or_else(|| format!("expected string for field {field_name}"))?;
             doc.add_text(field, text);
-            auto_duplicate(handle, doc, field_name, text);
         }
         FieldType::U64(_) => {
             let v = value
@@ -623,19 +613,6 @@ fn add_field_value(
         _ => return Err(format!("unsupported field type for {field_name}")),
     }
     Ok(())
-}
-
-fn auto_duplicate(handle: &LucivyHandle, doc: &mut LucivyDocument, field_name: &str, text: &str) {
-    if let Some(raw_name) = handle
-        .raw_field_pairs
-        .iter()
-        .find(|(user, _)| user == field_name)
-        .map(|(_, raw)| raw.as_str())
-    {
-        if let Some(raw_field) = handle.field(raw_name) {
-            doc.add_text(raw_field, text);
-        }
-    }
 }
 
 fn execute_top_docs(
@@ -713,9 +690,6 @@ fn collect_results_with_highlights(
                 let by_field = sink.get(seg_id, doc_addr.doc_id)?;
                 let entries: Vec<ffi::FieldHighlights> = by_field
                     .into_iter()
-                    .filter(|(name, _)| {
-                        !name.ends_with(RAW_SUFFIX)
-                    })
                     .map(|(field_name, offsets)| ffi::FieldHighlights {
                         field_name,
                         ranges: offsets

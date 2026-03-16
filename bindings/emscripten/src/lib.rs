@@ -172,7 +172,7 @@ use ld_lucivy::query::HighlightSink;
 use ld_lucivy::schema::{FieldType, Value};
 use ld_lucivy::{DocAddress, LucivyDocument, Searcher};
 
-use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD, RAW_SUFFIX};
+use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD};
 use lucivy_core::query;
 use lucivy_core::snapshot;
 
@@ -745,8 +745,6 @@ pub unsafe extern "C" fn lucivy_search(
         &query_config,
         &ctx.handle.schema,
         &ctx.handle.index,
-        &ctx.handle.raw_field_pairs,
-        &[],
         highlight_sink.clone(),
     ) {
         Ok(q) => q,
@@ -807,8 +805,6 @@ pub unsafe extern "C" fn lucivy_search_filtered(
         &query_config,
         &ctx.handle.schema,
         &ctx.handle.index,
-        &ctx.handle.raw_field_pairs,
-        &[],
         highlight_sink.clone(),
     ) {
         Ok(q) => q,
@@ -865,7 +861,6 @@ fn add_field_value(
             let text = value.as_str()
                 .ok_or_else(|| format!("expected string for {field_name}"))?;
             doc.add_text(field, text);
-            auto_duplicate(ctx, doc, field_name, text);
         }
         FieldType::U64(_) => {
             let v = value.as_u64()
@@ -885,17 +880,6 @@ fn add_field_value(
         _ => return Err(format!("unsupported field type for {field_name}")),
     }
     Ok(())
-}
-
-fn auto_duplicate(ctx: &LucivyContext, doc: &mut LucivyDocument, field_name: &str, text: &str) {
-    if let Some(raw_name) = ctx.handle.raw_field_pairs.iter()
-        .find(|(user, _)| user == field_name)
-        .map(|(_, raw)| raw.as_str())
-    {
-        if let Some(f) = ctx.handle.field(raw_name) {
-            doc.add_text(f, text);
-        }
-    }
 }
 
 fn extract_text_fields(config: &query::SchemaConfig) -> Vec<String> {
@@ -1034,7 +1018,6 @@ fn collect_results(
             let seg_id = searcher.segment_reader(doc_addr.segment_ord).segment_id();
             let by_field = sink.get(seg_id, doc_addr.doc_id)?;
             let map: HashMap<String, Vec<[u32; 2]>> = by_field.into_iter()
-                .filter(|(name, _)| !name.ends_with(RAW_SUFFIX))
                 .map(|(name, offsets)| {
                     let ranges: Vec<[u32; 2]> = offsets.into_iter()
                         .map(|[s, e]| [s as u32, e as u32])
@@ -1049,7 +1032,7 @@ fn collect_results(
             let mut map = HashMap::new();
             for (field, value) in doc.field_values() {
                 let name = schema.get_field_name(field);
-                if name == NODE_ID_FIELD || name.ends_with(RAW_SUFFIX) {
+                if name == NODE_ID_FIELD {
                     continue;
                 }
                 let rv = value.as_value();
