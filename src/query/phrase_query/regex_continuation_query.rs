@@ -53,7 +53,7 @@ fn get_builder(distance: u8) -> &'static LevenshteinAutomatonBuilder {
 #[derive(Debug, Clone)]
 enum DfaKind {
     /// Levenshtein DFA: exact or fuzzy match on a literal string.
-    Fuzzy { text: String, distance: u8 },
+    Fuzzy { text: String, distance: u8, prefix: bool },
     /// Regex DFA: compile a regex pattern into an automaton.
     Regex { pattern: String },
 }
@@ -74,7 +74,7 @@ impl RegexContinuationQuery {
     pub fn new(field: Field, query_text: String, mode: ContinuationMode) -> Self {
         Self {
             field,
-            dfa_kind: DfaKind::Fuzzy { text: query_text, distance: 0 },
+            dfa_kind: DfaKind::Fuzzy { text: query_text, distance: 0, prefix: false },
             mode,
             highlight_sink: None,
             highlight_field_name: String::new(),
@@ -85,6 +85,15 @@ impl RegexContinuationQuery {
     pub fn with_fuzzy_distance(mut self, dist: u8) -> Self {
         if let DfaKind::Fuzzy { ref mut distance, .. } = self.dfa_kind {
             *distance = dist;
+        }
+        self
+    }
+
+    /// Use prefix DFA (accepts when target is consumed, ignores remaining input).
+    /// Needed for startsWith queries.
+    pub fn with_prefix(mut self) -> Self {
+        if let DfaKind::Fuzzy { ref mut prefix, .. } = self.dfa_kind {
+            *prefix = true;
         }
         self
     }
@@ -135,12 +144,71 @@ struct CandidateState<S> {
     byte_from: u32,
 }
 
+/// Posting entry from .sfxpost, used by continuation_score.
+#[derive(Clone)]
+struct PostingEntry {
+    doc_id: DocId,
+    position: u32,
+    byte_from: u32,
+    byte_to: u32,
+}
+
+/// Trait for resolving ordinals to posting entries.
+/// Abstracts over .sfxpost (preferred) and inverted_index (fallback).
+trait PostingResolver {
+    fn resolve(&self, ordinal: u64) -> Vec<PostingEntry>;
+}
+
+/// Resolver backed by pre-loaded .sfxpost entries.
+struct SfxPostResolver {
+    entries: Arc<Vec<Vec<PostingEntry>>>,
+}
+
+impl PostingResolver for SfxPostResolver {
+    fn resolve(&self, ordinal: u64) -> Vec<PostingEntry> {
+        self.entries.get(ordinal as usize).cloned().unwrap_or_default()
+    }
+}
+
+/// Resolver backed by the ._raw inverted index (fallback for old indexes).
+struct InvertedIndexResolver {
+    inv_idx: Arc<crate::index::InvertedIndexReader>,
+}
+
+impl PostingResolver for InvertedIndexResolver {
+    fn resolve(&self, ordinal: u64) -> Vec<PostingEntry> {
+        let term_dict = self.inv_idx.terms();
+        let term_info = term_dict.term_info_from_ord(ordinal);
+        let mut postings = match self.inv_idx.read_postings_from_terminfo(
+            &term_info,
+            IndexRecordOption::WithFreqsAndPositionsAndOffsets,
+        ) {
+            Ok(p) => p,
+            Err(_) => return Vec::new(),
+        };
+        let mut entries = Vec::new();
+        loop {
+            let doc = postings.doc();
+            if doc == TERMINATED {
+                break;
+            }
+            let mut pos_offsets = Vec::new();
+            postings.append_positions_and_offsets(0, &mut pos_offsets);
+            for (pos, off_from, off_to) in pos_offsets {
+                entries.push(PostingEntry { doc_id: doc, position: pos, byte_from: off_from, byte_to: off_to });
+            }
+            postings.advance();
+        }
+        entries
+    }
+}
+
 /// Run the continuation algorithm with a given automaton on a segment.
 /// Returns (doc_bitset, highlights) where highlights = Vec<(doc_id, byte_from, byte_to)>.
 fn continuation_score<A: Automaton>(
     automaton: &A,
     sfx_dict: &SfxTermDictionary,
-    inverted_index: &crate::index::InvertedIndexReader,
+    resolver: &dyn PostingResolver,
     sfx_reader: &SfxFileReader,
     mode: ContinuationMode,
     max_doc: DocId,
@@ -157,41 +225,23 @@ where
     let start_state = automaton.start();
     let matches = sfx_dict.search_continuation(automaton, start_state, si_zero_only);
 
-    // Candidates: (doc_id, position) → list of (DFA state, byte_from).
     let mut candidates: HashMap<(DocId, u32), Vec<CandidateState<A::State>>> = HashMap::new();
 
     for m in &matches {
-        let mut postings = inverted_index.read_postings_from_terminfo(
-            &m.term_info,
-            IndexRecordOption::WithFreqsAndPositionsAndOffsets,
-        )?;
+        let entries = resolver.resolve(m.raw_ordinal);
+        for e in &entries {
+            let byte_from = e.byte_from + m.si as u32;
 
-        loop {
-            let doc = postings.doc();
-            if doc == TERMINATED {
-                break;
-            }
-
-            let mut pos_offsets = Vec::new();
-            postings.append_positions_and_offsets(0, &mut pos_offsets);
-
-            for &(pos, off_from, off_to) in &pos_offsets {
-                // byte_from = token start + SI (suffix offset within token)
-                let byte_from = off_from + m.si as u32;
-
-                if m.is_accepting {
-                    doc_bitset.insert(doc);
-                    highlights.push((doc, byte_from as usize, off_to as usize));
-                } else if automaton.can_match(&m.end_state) {
-                    let states = candidates.entry((doc, pos)).or_default();
-                    let cs = CandidateState { dfa_state: m.end_state.clone(), byte_from };
-                    if !states.iter().any(|s| s.dfa_state == m.end_state) {
-                        states.push(cs);
-                    }
+            if m.is_accepting {
+                doc_bitset.insert(e.doc_id);
+                highlights.push((e.doc_id, byte_from as usize, e.byte_to as usize));
+            } else if automaton.can_match(&m.end_state) {
+                let states = candidates.entry((e.doc_id, e.position)).or_default();
+                let cs = CandidateState { dfa_state: m.end_state.clone(), byte_from };
+                if !states.iter().any(|s| s.dfa_state == m.end_state) {
+                    states.push(cs);
                 }
             }
-
-            postings.advance();
         }
     }
 
@@ -201,39 +251,24 @@ where
             break;
         }
 
-        // Feed gap bytes to DFA for each candidate → group by post-gap state
-        // post_gap: state → Vec<(doc, next_pos, byte_from)>
         let mut post_gap: HashMap<A::State, Vec<(DocId, u32, u32)>> = HashMap::new();
 
         for (&(doc, pos), cand_states) in &candidates {
             let gap = gapmap.read_separator(doc, pos, pos + 1);
-            let Some(gap_bytes) = gap else {
-                continue;
-            };
-            if is_value_boundary(gap_bytes) {
-                continue;
-            }
+            let Some(gap_bytes) = gap else { continue; };
+            if is_value_boundary(gap_bytes) { continue; }
 
             for cs in cand_states {
                 let mut state = cs.dfa_state.clone();
                 let mut alive = true;
                 for &byte in gap_bytes {
                     state = automaton.accept(&state, byte);
-                    if !automaton.can_match(&state) {
-                        alive = false;
-                        break;
-                    }
+                    if !automaton.can_match(&state) { alive = false; break; }
                 }
-
-                if !alive {
-                    continue;
-                }
+                if !alive { continue; }
 
                 if automaton.is_match(&state) {
                     doc_bitset.insert(doc);
-                    // Match ends in the gap — byte_to is end of previous token + gap length.
-                    // Approximate: use the offset of the next token's start (if available).
-                    // For now, we don't record a highlight for gap-only endings.
                 }
                 if automaton.can_match(&state) {
                     post_gap.entry(state).or_default().push((doc, pos + 1, cs.byte_from));
@@ -241,18 +276,13 @@ where
             }
         }
 
-        if post_gap.is_empty() {
-            break;
-        }
+        if post_gap.is_empty() { break; }
 
-        // Walk FST for each unique post-gap state (SI=0, continuation tokens)
         let mut new_candidates: HashMap<(DocId, u32), Vec<CandidateState<A::State>>> = HashMap::new();
 
         for (gap_state, doc_positions) in &post_gap {
-            let next_matches =
-                sfx_dict.search_continuation(automaton, gap_state.clone(), true);
+            let next_matches = sfx_dict.search_continuation(automaton, gap_state.clone(), true);
 
-            // Build candidate doc → expected (pos, byte_from) for fast intersection
             let candidate_docs: HashMap<DocId, Vec<(u32, u32)>> = {
                 let mut map: HashMap<DocId, Vec<(u32, u32)>> = HashMap::new();
                 for &(doc, expected_pos, byte_from) in doc_positions {
@@ -262,45 +292,29 @@ where
             };
 
             for nm in &next_matches {
-                let mut postings = inverted_index.read_postings_from_terminfo(
-                    &nm.term_info,
-                    IndexRecordOption::WithFreqsAndPositionsAndOffsets,
-                )?;
-
-                loop {
-                    let doc = postings.doc();
-                    if doc == TERMINATED {
-                        break;
-                    }
-
-                    if let Some(expected) = candidate_docs.get(&doc) {
-                        let mut pos_offsets = Vec::new();
-                        postings.append_positions_and_offsets(0, &mut pos_offsets);
-
-                        for &(pos, _off_from, off_to) in &pos_offsets {
-                            for &(exp_pos, byte_from) in expected {
-                                if pos == exp_pos {
-                                    if nm.is_accepting {
-                                        doc_bitset.insert(doc);
-                                        highlights.push((doc, byte_from as usize, off_to as usize));
-                                    } else if automaton.can_match(&nm.end_state) {
-                                        let states = new_candidates
-                                            .entry((doc, pos))
-                                            .or_default();
-                                        let cs = CandidateState {
-                                            dfa_state: nm.end_state.clone(),
-                                            byte_from,
-                                        };
-                                        if !states.iter().any(|s| s.dfa_state == nm.end_state) {
-                                            states.push(cs);
-                                        }
+                let entries = resolver.resolve(nm.raw_ordinal);
+                for e in &entries {
+                    if let Some(expected) = candidate_docs.get(&e.doc_id) {
+                        for &(exp_pos, byte_from) in expected {
+                            if e.position == exp_pos {
+                                if nm.is_accepting {
+                                    doc_bitset.insert(e.doc_id);
+                                    highlights.push((e.doc_id, byte_from as usize, e.byte_to as usize));
+                                } else if automaton.can_match(&nm.end_state) {
+                                    let states = new_candidates
+                                        .entry((e.doc_id, e.position))
+                                        .or_default();
+                                    let cs = CandidateState {
+                                        dfa_state: nm.end_state.clone(),
+                                        byte_from,
+                                    };
+                                    if !states.iter().any(|s| s.dfa_state == nm.end_state) {
+                                        states.push(cs);
                                     }
                                 }
                             }
                         }
                     }
-
-                    postings.advance();
                 }
             }
         }
@@ -331,13 +345,38 @@ impl Weight for RegexContinuationWeight {
         let inverted_index = reader.inverted_index(self.field)?;
         let sfx_dict = SfxTermDictionary::new(&sfx_reader, inverted_index.terms());
 
+        // Build resolver: prefer .sfxpost, fall back to inverted index
+        let resolver: Box<dyn PostingResolver> =
+            if let Some(sfxpost_data) = reader.sfxpost_file(self.field) {
+                let sfxpost_bytes = sfxpost_data.read_bytes().map_err(|e| {
+                    LucivyError::SystemError(format!("read .sfxpost: {e}"))
+                })?.to_vec();
+                let pr = crate::suffix_fst::file::SfxPostingsReader::open(&sfxpost_bytes)
+                    .map_err(|e| LucivyError::SystemError(format!("open .sfxpost: {e}")))?;
+                let num = pr.num_terms();
+                let mut all: Vec<Vec<PostingEntry>> = Vec::with_capacity(num as usize);
+                for ord in 0..num {
+                    all.push(pr.entries(ord).into_iter().map(|e| PostingEntry {
+                        doc_id: e.doc_id, position: e.token_index,
+                        byte_from: e.byte_from, byte_to: e.byte_to,
+                    }).collect());
+                }
+                Box::new(SfxPostResolver { entries: Arc::new(all) })
+            } else {
+                Box::new(InvertedIndexResolver { inv_idx: Arc::clone(&inverted_index) })
+            };
+
         let (doc_bitset, highlights) = match &self.dfa_kind {
-            DfaKind::Fuzzy { text, distance } => {
+            DfaKind::Fuzzy { text, distance, prefix } => {
                 let builder = get_builder(*distance);
-                let dfa = builder.build_dfa(text);
+                let dfa = if *prefix {
+                    builder.build_prefix_dfa(text)
+                } else {
+                    builder.build_dfa(text)
+                };
                 let automaton = SfxDfaWrapper(dfa);
                 continuation_score(
-                    &automaton, &sfx_dict, &inverted_index, &sfx_reader, self.mode, max_doc,
+                    &automaton, &sfx_dict, &*resolver, &sfx_reader, self.mode, max_doc,
                 )?
             }
             DfaKind::Regex { pattern } => {
@@ -346,7 +385,7 @@ impl Weight for RegexContinuationWeight {
                 })?;
                 let automaton = SfxAutomatonAdapter(&regex);
                 continuation_score(
-                    &automaton, &sfx_dict, &inverted_index, &sfx_reader, self.mode, max_doc,
+                    &automaton, &sfx_dict, &*resolver, &sfx_reader, self.mode, max_doc,
                 )?
             }
         };
@@ -769,5 +808,87 @@ mod tests {
             }),
             "doc 1 should have highlight [3,9], got {:?}", doc1_entries
         );
+    }
+
+    // ── startsWith (prefix DFA) tests ──
+
+    #[test]
+    fn test_starts_with_prefix_single_token() {
+        // "rag" prefix → matches "rag3db" in docs 0 and 1
+        let (index, field) = build_continuation_index();
+        let query = RegexContinuationQuery::new(
+            field,
+            "rag".into(),
+            ContinuationMode::StartsWith,
+        )
+        .with_prefix();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let results = searcher
+            .search(&query, &TopDocs::with_limit(10).order_by_score())
+            .unwrap();
+
+        assert_eq!(results.len(), 2, "prefix 'rag' should match 2 docs");
+    }
+
+    #[test]
+    fn test_starts_with_prefix_cross_token() {
+        // "import rag" prefix → matches "import rag3db from core" (doc 0)
+        // The prefix DFA walks "import", gap " ", then "rag" (first 3 bytes of "rag3db") and accepts
+        let (index, field) = build_continuation_index();
+        let query = RegexContinuationQuery::new(
+            field,
+            "import rag".into(),
+            ContinuationMode::StartsWith,
+        )
+        .with_prefix();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let results = searcher
+            .search(&query, &TopDocs::with_limit(10).order_by_score())
+            .unwrap();
+
+        assert_eq!(results.len(), 1, "prefix 'import rag' should match doc 0");
+        assert_eq!(results[0].1.doc_id, 0);
+    }
+
+    #[test]
+    fn test_starts_with_prefix_fuzzy() {
+        // "imporr rag" d=1 prefix → matches "import rag3db..." (doc 0)
+        let (index, field) = build_continuation_index();
+        let query = RegexContinuationQuery::new(
+            field,
+            "imporr rag".into(),
+            ContinuationMode::StartsWith,
+        )
+        .with_prefix()
+        .with_fuzzy_distance(1);
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let results = searcher
+            .search(&query, &TopDocs::with_limit(10).order_by_score())
+            .unwrap();
+
+        assert_eq!(results.len(), 1, "fuzzy prefix 'imporr rag' d=1 should match doc 0");
+        assert_eq!(results[0].1.doc_id, 0);
+    }
+
+    #[test]
+    fn test_starts_with_prefix_no_match() {
+        // "zzz" prefix → no match
+        let (index, field) = build_continuation_index();
+        let query = RegexContinuationQuery::new(
+            field,
+            "zzz".into(),
+            ContinuationMode::StartsWith,
+        )
+        .with_prefix();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let results = searcher
+            .search(&query, &TopDocs::with_limit(10).order_by_score())
+            .unwrap();
+
+        assert_eq!(results.len(), 0);
     }
 }
