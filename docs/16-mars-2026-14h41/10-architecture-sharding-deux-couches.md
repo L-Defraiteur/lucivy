@@ -134,3 +134,21 @@ Le merger traite un segment à la fois au sein d'un index. Avec le sharding, cha
 - Catalog utilise ShardedHandle pour les grosses entities
 - Shard pruning par entity_id au niveau applicatif
 - Multi-codebase = multi-index + sharding intra-index
+
+## Use case cible : mémoire long terme agent
+
+Au-delà du code search, lucivy vise à servir de **mémoire persistante pour agents IA** :
+
+- Un agent accumule sessions, code, docs, conversations → **50M+ tokens** sur des mois
+- Recherche en temps réel pendant le raisonnement : "ce bug qu'on avait fixé en février"
+- Contains/fuzzy/regex sur du texte mixte (code + langage naturel + logs)
+- Latence critique : l'agent ne peut pas attendre 30s pour chercher dans sa mémoire
+
+**Implications sur le design :**
+
+- Le df_threshold doit être **configurable** : les tokens de langage naturel ont une distribution différente du code. "the" est ultra-fréquent en anglais, "fonction" est mid-frequency en français.
+- Le sharding token-aware est essentiel : la distribution est naturellement déséquilibrée (sessions anciennes vs récentes, code vs prose, langues différentes).
+- Le full scan des shards (pas juste power of two choices) doit rester une option pour les corpus à distribution imprévisible.
+- La mémoire des compteurs (72 MB pour 500k tokens trackés) est acceptable pour un agent qui tourne en continu.
+
+**Positionnement :** Aucun moteur de recherche existant n'est optimisé pour ce use case. Elasticsearch est trop lourd. Tantivy n'a pas de contains natif. Meilisearch est pour le typo-tolerant UI, pas pour la mémoire agent. Lucivy avec token-aware sharding + suffix FST + .sfxpost est la seule solution qui combine substring search, fuzzy cross-token, regex, BM25, et sharding intelligent dans une lib embeddable.
