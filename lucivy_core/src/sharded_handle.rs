@@ -9,13 +9,14 @@
 
 use std::collections::BinaryHeap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ld_lucivy::actor::mailbox::{mailbox, ActorRef};
 use ld_lucivy::actor::reply::{reply, Reply};
 use ld_lucivy::actor::scheduler::global_scheduler;
 use ld_lucivy::actor::{Actor, ActorStatus, Priority};
-use ld_lucivy::schema::{Field, Schema};
+use ld_lucivy::schema::{Field, FieldType, Schema, Value};
 use ld_lucivy::{DocAddress, Index, LucivyDocument};
 
 use crate::directory::StdFsDirectory;
@@ -155,6 +156,10 @@ pub struct ShardedHandle {
     pub field_map: Vec<(String, Field)>,
     /// Original config.
     pub config: SchemaConfig,
+    /// True if deletes happened since last resync.
+    has_deletes: AtomicBool,
+    /// Text field IDs (for tokenization at add_document).
+    text_fields: Vec<Field>,
 }
 
 /// Spawn N ShardSearchActors in the global scheduler.
@@ -175,6 +180,22 @@ fn spawn_search_actors(
     }
 
     actors
+}
+
+/// Extract text field IDs from the schema (for automatic tokenization at add_document).
+fn find_text_fields(schema: &Schema) -> Vec<Field> {
+    schema
+        .fields()
+        .filter_map(|(field, entry)| {
+            if entry.name() == NODE_ID_FIELD {
+                return None;
+            }
+            match entry.field_type() {
+                FieldType::Str(opts) if opts.get_indexing_options().is_some() => Some(field),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 impl ShardedHandle {
@@ -214,6 +235,7 @@ impl ShardedHandle {
 
         let schema = shards[0].schema.clone();
         let field_map = shards[0].field_map.clone();
+        let text_fields = find_text_fields(&schema);
         let router = ShardRouter::new(num_shards);
         let search_actors = spawn_search_actors(&shards);
 
@@ -225,6 +247,8 @@ impl ShardedHandle {
             schema,
             field_map,
             config: config.clone(),
+            has_deletes: AtomicBool::new(false),
+            text_fields,
         })
     }
 
@@ -261,6 +285,7 @@ impl ShardedHandle {
 
         let schema = shards[0].schema.clone();
         let field_map = shards[0].field_map.clone();
+        let text_fields = find_text_fields(&schema);
         let search_actors = spawn_search_actors(&shards);
 
         Ok(Self {
@@ -271,21 +296,25 @@ impl ShardedHandle {
             schema,
             field_map,
             config,
+            has_deletes: AtomicBool::new(false),
+            text_fields,
         })
     }
 
-    /// Route a document to a shard and add it.
+    /// Add a document, automatically tokenizing text fields for routing.
     ///
-    /// `token_hashes` are the pre-hashed tokens of the document (via `ShardRouter::hash_token`).
-    /// The caller is responsible for tokenizing and hashing — this keeps the handle generic.
-    pub fn add_document(
-        &self,
-        doc: LucivyDocument,
-        token_hashes: &[u64],
-    ) -> Result<usize, String> {
+    /// Extracts text from all text fields in the doc, tokenizes via the index's
+    /// tokenizer, hashes the tokens, routes to the best shard, and inserts.
+    /// Also records the node_id → shard_id mapping for targeted deletes.
+    pub fn add_document(&self, doc: LucivyDocument, node_id: u64) -> Result<usize, String> {
+        // Extract and hash tokens from all text field values in the document.
+        let token_hashes = self.extract_token_hashes(&doc);
+
         let shard_id = {
             let mut router = self.router.lock().map_err(|_| "router lock poisoned")?;
-            router.route(token_hashes)
+            let sid = router.route(&token_hashes);
+            router.record_node_id(node_id, sid);
+            sid
         };
 
         let handle = &self.shards[shard_id];
@@ -297,6 +326,59 @@ impl ShardedHandle {
         handle.mark_uncommitted();
 
         Ok(shard_id)
+    }
+
+    /// Add a document with pre-computed token hashes (for callers who already tokenized).
+    pub fn add_document_with_hashes(
+        &self,
+        doc: LucivyDocument,
+        node_id: u64,
+        token_hashes: &[u64],
+    ) -> Result<usize, String> {
+        let shard_id = {
+            let mut router = self.router.lock().map_err(|_| "router lock poisoned")?;
+            let sid = router.route(token_hashes);
+            router.record_node_id(node_id, sid);
+            sid
+        };
+
+        let handle = &self.shards[shard_id];
+        let mut guard = handle.writer.lock().map_err(|_| "writer lock poisoned")?;
+        let writer = guard.as_mut().ok_or("shard is closed")?;
+        writer
+            .add_document(doc)
+            .map_err(|e| format!("add_document to shard_{shard_id}: {e}"))?;
+        handle.mark_uncommitted();
+
+        Ok(shard_id)
+    }
+
+    /// Extract token hashes from a document's text fields.
+    fn extract_token_hashes(&self, doc: &LucivyDocument) -> Vec<u64> {
+        let mut hashes = Vec::new();
+        for (field, value) in doc.field_values() {
+            if !self.text_fields.contains(&field) {
+                continue;
+            }
+            if let Some(text) = value.as_value().as_str() {
+                // Tokenize using the index's tokenizer for this field.
+                let index = &self.shards[0].index;
+                let tokenizer_name = match self.schema.get_field_entry(field).field_type() {
+                    FieldType::Str(opts) => opts
+                        .get_indexing_options()
+                        .map(|o| o.tokenizer())
+                        .unwrap_or("default"),
+                    _ => "default",
+                };
+                if let Some(mut tokenizer) = index.tokenizers().get(tokenizer_name) {
+                    let mut stream = tokenizer.token_stream(text);
+                    while let Some(token) = stream.next() {
+                        hashes.push(ShardRouter::hash_token(&token.text));
+                    }
+                }
+            }
+        }
+        hashes
     }
 
     /// Search all shards in parallel and merge top-K results.
@@ -379,6 +461,9 @@ impl ShardedHandle {
     }
 
     /// Commit all shards and persist the shard router state.
+    ///
+    /// If deletes happened since last commit, resyncs the router's token counters
+    /// from the actual term dictionaries so they stay accurate.
     pub fn commit(&self) -> Result<(), String> {
         for (i, shard) in self.shards.iter().enumerate() {
             let mut guard = shard.writer.lock().map_err(|_| "writer lock poisoned")?;
@@ -394,8 +479,40 @@ impl ShardedHandle {
                 .map_err(|e| format!("reload shard_{i}: {e}"))?;
         }
 
+        // Resync router counters from index if deletes happened.
+        let mut router = self.router.lock().map_err(|_| "router lock poisoned")?;
+
+        if self.has_deletes.swap(false, Ordering::Relaxed) {
+            // Update doc counts from actual index state.
+            for (i, shard) in self.shards.iter().enumerate() {
+                router.shard_doc_counts_mut()[i] = shard.reader.searcher().num_docs();
+            }
+
+            // Resync token counters from term dictionaries.
+            let text_fields = &self.text_fields;
+            let shards = &self.shards;
+            router.resync(|visitor| {
+                for (shard_id, shard) in shards.iter().enumerate() {
+                    visitor(shard_id, &|term_visitor| {
+                        let searcher = shard.reader.searcher();
+                        for seg_reader in searcher.segment_readers() {
+                            for &field in text_fields {
+                                let inv_index = seg_reader.inverted_index(field).unwrap();
+                                let term_dict = inv_index.terms();
+                                let mut stream = term_dict.stream().unwrap();
+                                while stream.advance() {
+                                    let key = stream.key();
+                                    let doc_freq = stream.value().doc_freq;
+                                    term_visitor(key, doc_freq);
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+        }
+
         // Persist router state.
-        let router = self.router.lock().map_err(|_| "router lock poisoned")?;
         let stats_bytes = router.to_bytes();
         std::fs::write(
             Path::new(&self.base_path).join(SHARD_STATS_FILE),
@@ -427,23 +544,46 @@ impl ShardedHandle {
         Ok(())
     }
 
-    /// Delete a document by its _node_id from ALL shards.
-    /// (We don't know which shard holds it.)
+    /// Delete a document by its _node_id.
+    ///
+    /// Uses the node_id → shard_id mapping to target only the correct shard.
+    /// If the mapping is missing (e.g. old data without mapping), falls back
+    /// to broadcasting the delete to all shards.
     pub fn delete_by_node_id(&self, node_id: u64) -> Result<(), String> {
         let nid_field = self
             .field(NODE_ID_FIELD)
             .ok_or("_node_id field not found")?;
         let term = ld_lucivy::schema::Term::from_field_u64(nid_field, node_id);
 
-        for (i, shard) in self.shards.iter().enumerate() {
+        let target_shard = {
+            let mut router = self.router.lock().map_err(|_| "router lock poisoned")?;
+            router.remove_node_id(node_id)
+        };
+
+        if let Some(shard_id) = target_shard {
+            // Targeted delete: only the shard that holds this doc.
+            let shard = &self.shards[shard_id];
             let mut guard = shard.writer.lock().map_err(|_| "writer lock poisoned")?;
             if let Some(ref mut writer) = *guard {
-                writer.delete_term(term.clone());
+                writer.delete_term(term);
                 shard.mark_uncommitted();
             } else {
-                return Err(format!("shard_{i} is closed"));
+                return Err(format!("shard_{shard_id} is closed"));
+            }
+        } else {
+            // Fallback: broadcast to all shards.
+            for (i, shard) in self.shards.iter().enumerate() {
+                let mut guard = shard.writer.lock().map_err(|_| "writer lock poisoned")?;
+                if let Some(ref mut writer) = *guard {
+                    writer.delete_term(term.clone());
+                    shard.mark_uncommitted();
+                } else {
+                    return Err(format!("shard_{i} is closed"));
+                }
             }
         }
+
+        self.has_deletes.store(true, Ordering::Relaxed);
         Ok(())
     }
 
@@ -519,12 +659,7 @@ mod tests {
             let mut doc = LucivyDocument::new();
             doc.add_u64(nid, i);
             doc.add_text(body, &format!("document number {i} about rust"));
-            let tokens = vec![
-                ShardRouter::hash_token("document"),
-                ShardRouter::hash_token("number"),
-                ShardRouter::hash_token("rust"),
-            ];
-            handle.add_document(doc, &tokens).unwrap();
+            handle.add_document(doc, i).unwrap();
         }
 
         handle.commit().unwrap();
@@ -558,12 +693,7 @@ mod tests {
                 format!("java enterprise language {i}")
             };
             doc.add_text(body, &text);
-
-            let words: Vec<u64> = text
-                .split_whitespace()
-                .map(|w| ShardRouter::hash_token(w))
-                .collect();
-            handle.add_document(doc, &words).unwrap();
+            handle.add_document(doc, i).unwrap();
         }
 
         handle.commit().unwrap();
@@ -604,8 +734,7 @@ mod tests {
                 let mut doc = LucivyDocument::new();
                 doc.add_u64(nid, i);
                 doc.add_text(body, &format!("persistence test doc {i}"));
-                let tokens = vec![ShardRouter::hash_token("persistence")];
-                handle.add_document(doc, &tokens).unwrap();
+                handle.add_document(doc, i).unwrap();
             }
             handle.close().unwrap();
         }
@@ -638,16 +767,19 @@ mod tests {
             let mut doc = LucivyDocument::new();
             doc.add_u64(nid, i);
             doc.add_text(body, &format!("deletable doc {i}"));
-            handle
-                .add_document(doc, &[ShardRouter::hash_token("deletable")])
-                .unwrap();
+            handle.add_document(doc, i).unwrap();
         }
         handle.commit().unwrap();
         assert_eq!(handle.num_docs(), 10);
 
-        // Delete node_id=5
+        // Delete node_id=5 — should target a single shard + resync counters
         handle.delete_by_node_id(5).unwrap();
         handle.commit().unwrap();
         assert_eq!(handle.num_docs(), 9);
+
+        // Router doc counts should reflect the delete
+        let (counts, total) = handle.router_stats().unwrap();
+        assert_eq!(total, 9);
+        assert_eq!(counts.iter().sum::<u64>(), 9);
     }
 }

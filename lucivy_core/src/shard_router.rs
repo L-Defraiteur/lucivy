@@ -45,6 +45,8 @@ pub struct ShardRouter {
     shard_doc_counts: Vec<u64>,
     /// Only track tokens with global df below this.
     df_threshold: u32,
+    /// Mapping node_id → shard_id for targeted deletes.
+    node_id_to_shard: HashMap<u64, usize, FxBuildHasher>,
 }
 
 impl ShardRouter {
@@ -63,6 +65,7 @@ impl ShardRouter {
             global_token_counts: HashMap::with_hasher(FxBuildHasher::default()),
             shard_doc_counts: vec![0; num_shards],
             df_threshold,
+            node_id_to_shard: HashMap::with_hasher(FxBuildHasher::default()),
         }
     }
 
@@ -143,9 +146,90 @@ impl ShardRouter {
         &self.shard_doc_counts
     }
 
+    /// Mutable access to shard doc counts (for resync from actual index state).
+    pub fn shard_doc_counts_mut(&mut self) -> &mut [u64] {
+        &mut self.shard_doc_counts
+    }
+
     /// Total documents across all shards.
     pub fn total_docs(&self) -> u64 {
         self.shard_doc_counts.iter().sum()
+    }
+
+    // ─── Node ID tracking ────────────────────────────────────────────────
+
+    /// Record which shard a node_id was routed to.
+    pub fn record_node_id(&mut self, node_id: u64, shard_id: usize) {
+        self.node_id_to_shard.insert(node_id, shard_id);
+    }
+
+    /// Look up which shard holds a given node_id.
+    pub fn shard_for_node_id(&self, node_id: u64) -> Option<usize> {
+        self.node_id_to_shard.get(&node_id).copied()
+    }
+
+    /// Remove a node_id from the mapping (after delete).
+    pub fn remove_node_id(&mut self, node_id: u64) -> Option<usize> {
+        self.node_id_to_shard.remove(&node_id)
+    }
+
+    // ─── Resync from index ──────────────────────────────────────────────
+
+    /// Rebuild token counters from the actual term dictionaries of each shard.
+    ///
+    /// Called after deletes+commit so the counters reflect the true state.
+    /// Iterates all text fields' term dictionaries, hashes each term, and
+    /// reconstructs `shard_token_counts` and `global_token_counts`.
+    ///
+    /// Also resyncs `shard_doc_counts` from actual searcher.num_docs().
+    ///
+    /// `shard_readers` provides (shard_id, text_fields, searcher) for each shard.
+    pub fn resync<F>(&mut self, iter_shards: F)
+    where
+        F: FnOnce(&mut dyn FnMut(usize, &dyn Fn(&mut dyn FnMut(&[u8], u32)))),
+    {
+        // Clear all token counters.
+        for counts in &mut self.shard_token_counts {
+            counts.clear();
+        }
+        self.global_token_counts.clear();
+
+        // Iterate each shard's terms.
+        iter_shards(&mut |shard_id: usize, iter_terms: &dyn Fn(&mut dyn FnMut(&[u8], u32))| {
+            iter_terms(&mut |term_bytes: &[u8], doc_freq: u32| {
+                if doc_freq == 0 {
+                    return;
+                }
+                let h = Self::hash_bytes(term_bytes);
+                // Accumulate global counts.
+                let global = self.global_token_counts.entry(h).or_default();
+                *global += doc_freq;
+                // Per-shard counts (only below threshold — we check after full iteration).
+                *self.shard_token_counts[shard_id].entry(h).or_default() += doc_freq;
+            });
+        });
+
+        // Prune entries above threshold.
+        let threshold = self.df_threshold;
+        let above_threshold: Vec<u64> = self
+            .global_token_counts
+            .iter()
+            .filter(|(_, &count)| count >= threshold)
+            .map(|(&h, _)| h)
+            .collect();
+        for h in &above_threshold {
+            self.global_token_counts.remove(h);
+            for counts in &mut self.shard_token_counts {
+                counts.remove(h);
+            }
+        }
+    }
+
+    /// Hash raw bytes (term bytes from the term dictionary).
+    pub fn hash_bytes(bytes: &[u8]) -> u64 {
+        let mut hasher = FxHasher::default();
+        hasher.write(bytes);
+        hasher.finish()
     }
 
     // ─── Persistence ────────────────────────────────────────────────────
@@ -168,7 +252,7 @@ impl ShardRouter {
 
         // Magic + version
         buf.extend_from_slice(b"SHRD");
-        buf.push(1u8); // version 1
+        buf.push(2u8); // version 2 (added node_id_to_shard)
 
         // Header
         buf.extend_from_slice(&(self.num_shards as u32).to_le_bytes());
@@ -195,6 +279,13 @@ impl ShardRouter {
             }
         }
 
+        // Node ID → shard mapping
+        buf.extend_from_slice(&(self.node_id_to_shard.len() as u32).to_le_bytes());
+        for (&node_id, &shard_id) in &self.node_id_to_shard {
+            buf.extend_from_slice(&node_id.to_le_bytes());
+            buf.extend_from_slice(&(shard_id as u32).to_le_bytes());
+        }
+
         buf
     }
 
@@ -206,8 +297,9 @@ impl ShardRouter {
         if &data[0..4] != b"SHRD" {
             return Err("invalid shard stats magic".into());
         }
-        if data[4] != 1 {
-            return Err(format!("unsupported shard stats version: {}", data[4]));
+        let version = data[4];
+        if version != 1 && version != 2 {
+            return Err(format!("unsupported shard stats version: {version}"));
         }
 
         let mut pos = 5;
@@ -263,12 +355,26 @@ impl ShardRouter {
             shard_token_counts.push(counts);
         }
 
+        // Node ID → shard mapping (version 2+)
+        let mut node_id_to_shard = HashMap::with_hasher(FxBuildHasher::default());
+        if version >= 2 && pos < data.len() {
+            let num_nodes = read_u32(&mut pos, data)? as usize;
+            node_id_to_shard =
+                HashMap::with_capacity_and_hasher(num_nodes, FxBuildHasher::default());
+            for _ in 0..num_nodes {
+                let node_id = read_u64(&mut pos, data)?;
+                let shard_id = read_u32(&mut pos, data)? as usize;
+                node_id_to_shard.insert(node_id, shard_id);
+            }
+        }
+
         Ok(Self {
             num_shards,
             shard_token_counts,
             global_token_counts,
             shard_doc_counts,
             df_threshold,
+            node_id_to_shard,
         })
     }
 }
