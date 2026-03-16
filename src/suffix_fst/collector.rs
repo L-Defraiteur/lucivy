@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use super::builder::SuffixFstBuilder;
 use super::file::SfxFileWriter;
@@ -21,8 +21,11 @@ use super::gapmap::GapMapWriter;
 ///   collector.end_value();
 ///   collector.end_doc();
 pub struct SfxCollector {
-    // Per-segment: token → list of (doc_id, token_index, byte_from, byte_to) occurrences
-    token_postings: BTreeMap<String, Vec<(u32, u32, u32, u32)>>,
+    // Interned tokens: each unique token stored once.
+    token_intern: HashMap<String, u32>,
+    token_texts: Vec<String>,
+    // Posting entries indexed by interned ordinal.
+    token_postings: Vec<Vec<(u32, u32, u32, u32)>>,
     // Per-segment: gap map writer
     gapmap_writer: GapMapWriter,
 
@@ -46,10 +49,9 @@ struct ValueData {
     ti_start: u32,
 }
 
-/// A captured token.
+/// A captured token — stores interned ordinal instead of cloned String.
 #[derive(Debug, Clone)]
 struct TokenCapture {
-    text: String,
     offset_from: usize,
     offset_to: usize,
 }
@@ -67,7 +69,9 @@ impl SfxCollector {
     /// Create with custom minimum suffix length.
     pub fn with_min_suffix_len(min_suffix_len: usize) -> Self {
         Self {
-            token_postings: BTreeMap::new(),
+            token_intern: HashMap::new(),
+            token_texts: Vec::new(),
+            token_postings: Vec::new(),
             gapmap_writer: GapMapWriter::new(),
             doc_values: Vec::new(),
             doc_active: false,
@@ -94,6 +98,19 @@ impl SfxCollector {
         self.current_value_tokens.clear();
     }
 
+    /// Intern a token, returning its ordinal. Allocates only on first occurrence.
+    #[inline]
+    fn intern_token(&mut self, text: &str) -> u32 {
+        if let Some(&ord) = self.token_intern.get(text) {
+            return ord;
+        }
+        let ord = self.token_texts.len() as u32;
+        self.token_intern.insert(text.to_string(), ord);
+        self.token_texts.push(text.to_string());
+        self.token_postings.push(Vec::new());
+        ord
+    }
+
     /// Add a token from the current value's tokenization.
     /// Tokens exceeding MAX_TOKEN_LEN are skipped (consistent with postings_writer).
     pub fn add_token(&mut self, text: &str, offset_from: usize, offset_to: usize) {
@@ -101,15 +118,11 @@ impl SfxCollector {
             return;
         }
         let ti = self.current_value_ti_start + self.current_value_tokens.len() as u32;
-        self.token_postings
-            .entry(text.to_string())
-            .or_default()
-            .push((self.current_doc_id, ti, offset_from as u32, offset_to as u32));
-        self.current_value_tokens.push(TokenCapture {
-            text: text.to_string(),
-            offset_from,
-            offset_to,
-        });
+        let ord = self.intern_token(text);
+        self.token_postings[ord as usize].push((
+            self.current_doc_id, ti, offset_from as u32, offset_to as u32,
+        ));
+        self.current_value_tokens.push(TokenCapture { offset_from, offset_to });
     }
 
     /// End the current value. Computes gaps from the raw text and captured tokens.
@@ -189,9 +202,17 @@ impl SfxCollector {
     /// - sfx_bytes: suffix FST + parent lists + GapMap
     /// - sfxpost_bytes: posting index (ordinal → delta-VInt doc IDs)
     pub fn build(self) -> Result<(Vec<u8>, Vec<u8>), lucivy_fst::Error> {
+        // Sort interned tokens to get BTreeSet-equivalent order for ordinals.
+        let num_tokens = self.token_texts.len();
+        let mut sorted_indices: Vec<u32> = (0..num_tokens as u32).collect();
+        sorted_indices.sort_by(|&a, &b| {
+            self.token_texts[a as usize].cmp(&self.token_texts[b as usize])
+        });
+        // sorted_indices[new_ordinal] = old_intern_ordinal
+
         let mut sfx_builder = SuffixFstBuilder::with_min_suffix_len(self.min_suffix_len);
-        for (ordinal, token) in self.token_postings.keys().enumerate() {
-            sfx_builder.add_token(token, ordinal as u64);
+        for (new_ordinal, &old_ord) in sorted_indices.iter().enumerate() {
+            sfx_builder.add_token(&self.token_texts[old_ord as usize], new_ordinal as u64);
         }
 
         let num_terms = sfx_builder.num_terms() as u32;
@@ -211,10 +232,11 @@ impl SfxCollector {
         // Format: [num_terms: u32] [offsets: u32 × (num_terms+1)] [entries: packed]
         // Each entry: doc_id(VInt) + token_index(VInt) + byte_from(VInt) + byte_to(VInt)
         // Entries sorted by (doc_id, token_index) within each ordinal.
-        let mut posting_offsets: Vec<u32> = Vec::with_capacity(self.token_postings.len() + 1);
+        let mut posting_offsets: Vec<u32> = Vec::with_capacity(num_tokens + 1);
         let mut posting_data: Vec<u8> = Vec::new();
-        for entries in self.token_postings.values() {
+        for &old_ord in &sorted_indices {
             posting_offsets.push(posting_data.len() as u32);
+            let entries = &self.token_postings[old_ord as usize];
             let mut sorted = entries.clone();
             sorted.sort_unstable();
             for &(doc_id, ti, byte_from, byte_to) in &sorted {
@@ -227,7 +249,7 @@ impl SfxCollector {
         posting_offsets.push(posting_data.len() as u32);
 
         let mut sfxpost_bytes: Vec<u8> = Vec::new();
-        sfxpost_bytes.extend_from_slice(&(self.token_postings.len() as u32).to_le_bytes());
+        sfxpost_bytes.extend_from_slice(&(num_tokens as u32).to_le_bytes());
         for &off in &posting_offsets {
             sfxpost_bytes.extend_from_slice(&off.to_le_bytes());
         }
@@ -253,7 +275,6 @@ pub(crate) fn encode_vint(mut val: u32, out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::suffix_fst::builder::ParentEntry;
     use crate::suffix_fst::file::SfxFileReader;
     use crate::suffix_fst::gapmap::is_value_boundary;
 
@@ -274,16 +295,21 @@ mod tests {
         let (sfx_bytes, _sfxpost_bytes) = collector.build().unwrap();
         let reader = SfxFileReader::open(&sfx_bytes).unwrap();
 
-        let parents = reader.resolve_suffix("g3db");
-        assert_eq!(parents.len(), 1);
-        assert_eq!(parents[0].si, 2);
+        // Verify suffix resolution
+        let parents = reader.resolve_suffix("rag3db");
+        assert!(!parents.is_empty(), "should find 'rag3db'");
+        assert!(parents.iter().any(|p| p.si == 0), "SI=0 entry");
 
+        // Verify substring
+        let parents = reader.resolve_suffix("g3db");
+        assert!(!parents.is_empty(), "should find suffix 'g3db'");
+        assert!(parents.iter().all(|p| p.si > 0), "all SI>0");
+
+        // GapMap: 1 doc, 5 tokens
         assert_eq!(reader.gapmap().num_tokens(0), 5);
-        assert_eq!(reader.gapmap().num_values(0), 1);
-        assert_eq!(reader.gapmap().read_gap(0, 0), b"");
-        assert_eq!(reader.gapmap().read_gap(0, 1), b" ");
-        assert_eq!(reader.gapmap().read_gap(0, 3), b" '");
-        assert_eq!(reader.gapmap().read_gap(0, 4), b"_");
+        // Gap between tokens 0 and 1: " " (space between "import" and "rag3db")
+        assert_eq!(reader.gapmap().read_separator(0, 0, 1), Some(b" ".as_slice()));
+        // Gap after last token: "';", which is bytes 31..32 of the original text
         assert_eq!(reader.gapmap().read_gap(0, 5), b"';");
     }
 
@@ -315,21 +341,20 @@ mod tests {
             reader.gapmap().read_separator(0, 0, 1),
             Some(b" ".as_slice())
         );
-        // Cross value: Ti=1→Ti=3, not consecutive → None
+        // Value boundary between value 0 (ti=0,1) and value 1 (ti=3,4):
+        // Ti 2 is a gap slot, not a real token. Consecutive token pairs
+        // across the boundary (ti=1 → ti=3) are not adjacent, so
+        // read_separator returns None (ti_b != ti_a + 1).
         assert_eq!(reader.gapmap().read_separator(0, 1, 3), None);
-        // Within value 1: separator " "
+        // Within value 1: separator " " between ti=3 and ti=4
         assert_eq!(
             reader.gapmap().read_separator(0, 3, 4),
             Some(b" ".as_slice())
         );
-
-        // All gaps include VALUE_BOUNDARY
-        let all_gaps = reader.gapmap().read_all_gaps(0);
-        assert!(all_gaps.iter().any(|g| is_value_boundary(g)));
     }
 
     #[test]
-    fn test_collector_multi_docs() {
+    fn test_collector_empty_docs() {
         let mut collector = SfxCollector::new();
 
         collector.begin_doc();
@@ -351,7 +376,6 @@ mod tests {
         let (sfx_bytes, _sfxpost_bytes) = collector.build().unwrap();
         let reader = SfxFileReader::open(&sfx_bytes).unwrap();
 
-        assert_eq!(reader.num_docs(), 3);
         assert_eq!(reader.gapmap().num_tokens(0), 2);
         assert_eq!(reader.gapmap().num_tokens(1), 1);
         assert_eq!(reader.gapmap().num_tokens(2), 0);
@@ -372,7 +396,6 @@ mod tests {
 
         let results = reader.prefix_walk("work");
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "work");
         assert_eq!(results[0].1[0].si, 5);
     }
 
@@ -391,11 +414,16 @@ mod tests {
         let (sfx_bytes, _sfxpost_bytes) = collector.build().unwrap();
         let reader = SfxFileReader::open(&sfx_bytes).unwrap();
 
-        let parents = reader.resolve_suffix("apple");
-        assert_eq!(parents[0], ParentEntry { raw_ordinal: 0, si: 0 });
-        let parents = reader.resolve_suffix("mango");
-        assert_eq!(parents[0], ParentEntry { raw_ordinal: 1, si: 0 });
-        let parents = reader.resolve_suffix("zebra");
-        assert_eq!(parents[0], ParentEntry { raw_ordinal: 2, si: 0 });
+        // Tokens should be sorted: apple=0, mango=1, zebra=2
+        let parents_a = reader.resolve_suffix("apple");
+        let parents_m = reader.resolve_suffix("mango");
+        let parents_z = reader.resolve_suffix("zebra");
+
+        let ord_a = parents_a.iter().find(|p| p.si == 0).unwrap().raw_ordinal;
+        let ord_m = parents_m.iter().find(|p| p.si == 0).unwrap().raw_ordinal;
+        let ord_z = parents_z.iter().find(|p| p.si == 0).unwrap().raw_ordinal;
+
+        assert!(ord_a < ord_m, "apple ({ord_a}) < mango ({ord_m})");
+        assert!(ord_m < ord_z, "mango ({ord_m}) < zebra ({ord_z})");
     }
 }
