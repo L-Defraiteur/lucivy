@@ -37,7 +37,7 @@ static GLOBAL_SCHEDULER: OnceLock<GlobalSchedulerState> = OnceLock::new();
 ///
 /// Si la variable d'environnement `LUCIVY_SCHEDULER_DEBUG=1` est définie,
 /// un thread logger affiche tous les events du scheduler sur stderr.
-pub(crate) fn global_scheduler() -> &'static Arc<Scheduler> {
+pub fn global_scheduler() -> &'static Arc<Scheduler> {
     &GLOBAL_SCHEDULER
         .get_or_init(|| {
             let num_threads = std::env::var("LUCIVY_SCHEDULER_THREADS")
@@ -97,7 +97,7 @@ pub(crate) fn global_scheduler() -> &'static Arc<Scheduler> {
 
 /// Identifiant unique d'un acteur dans le scheduler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct ActorId(u64);
+pub struct ActorId(u64);
 
 /// Nombre max de messages traités par batch avant de yield au scheduler.
 const BATCH_SIZE: usize = 1024;
@@ -106,7 +106,7 @@ const BATCH_SIZE: usize = 1024;
 // Scheduler
 // ---------------------------------------------------------------------------
 
-pub(crate) struct Scheduler {
+pub struct Scheduler {
     num_threads: usize,
     shared: Arc<SharedState>,
     next_actor_id: AtomicU64,
@@ -413,7 +413,7 @@ impl Scheduler {
 // SchedulerHandle
 // ---------------------------------------------------------------------------
 
-pub(crate) struct SchedulerHandle {
+pub struct SchedulerHandle {
     threads: Vec<JoinHandle<()>>,
     shared: Arc<SharedState>,
 }

@@ -8,7 +8,7 @@ use super::{ActorId, Priority};
 
 /// Events émis par le scheduler.
 #[derive(Debug, Clone)]
-pub(crate) enum SchedulerEvent {
+pub enum SchedulerEvent {
     MessageHandled {
         actor_id: ActorId,
         actor_name: &'static str,
@@ -69,7 +69,7 @@ pub(crate) enum SchedulerEvent {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum WakeReason {
+pub enum WakeReason {
     MessageReceived,
     IdleWork,
 }
@@ -78,7 +78,7 @@ pub(crate) enum WakeReason {
 ///
 /// Utilise un vrai broadcast : chaque subscriber a son propre channel.
 /// `emit()` envoie une copie à chaque subscriber.
-pub(crate) struct EventBus<E> {
+pub struct EventBus<E> {
     subscriber_count: AtomicUsize,
     subscribers: Mutex<Vec<channel::Sender<E>>>,
 }
@@ -118,7 +118,7 @@ impl<E: Clone + Send + 'static> EventBus<E> {
     }
 }
 
-pub(crate) struct EventReceiver<E> {
+pub struct EventReceiver<E> {
     receiver: channel::Receiver<E>,
     bus: Arc<EventBus<E>>,
 }

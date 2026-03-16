@@ -25,6 +25,8 @@ pub struct SchemaConfig {
     pub fields: Vec<FieldDef>,
     pub tokenizer: Option<String>,
     pub stemmer: Option<String>,
+    /// Number of shards for token-aware sharding. None or 1 = no sharding.
+    pub shards: Option<usize>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]

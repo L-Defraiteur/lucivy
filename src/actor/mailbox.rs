@@ -7,7 +7,7 @@ use super::events::{EventBus, SchedulerEvent};
 use super::scheduler::SchedulerNotifier;
 
 /// Côté réception d'un acteur. FIFO strict.
-pub(crate) struct Mailbox<M> {
+pub struct Mailbox<M> {
     pub(super) receiver: channel::Receiver<M>,
 }
 
@@ -26,7 +26,7 @@ impl<M> Mailbox<M> {
 }
 
 /// Handle pour envoyer des messages à un acteur. Clonable.
-pub(crate) struct ActorRef<M> {
+pub struct ActorRef<M> {
     sender: channel::Sender<M>,
     notifier: Option<Arc<WakeHandle>>,
 }
@@ -34,7 +34,7 @@ pub(crate) struct ActorRef<M> {
 /// Partagé entre l'ActorRef et le scheduler.
 /// Le scheduler remet `is_idle = true` quand l'acteur passe idle.
 /// L'ActorRef le passe à `false` (swap) pour savoir s'il doit wake.
-pub(crate) struct WakeHandle {
+pub struct WakeHandle {
     pub(super) notifier: SchedulerNotifier,
     pub(super) is_idle: AtomicBool,
     pub(super) events: Arc<EventBus<SchedulerEvent>>,
@@ -86,7 +86,7 @@ impl<M> ActorRef<M> {
 
 /// Crée une paire (Mailbox, ActorRef) avec un channel bounded.
 /// Le WakeHandle sera attaché par le scheduler au spawn.
-pub(crate) fn mailbox<M>(capacity: usize) -> (Mailbox<M>, ActorRef<M>) {
+pub fn mailbox<M>(capacity: usize) -> (Mailbox<M>, ActorRef<M>) {
     let (sender, receiver) = channel::bounded(capacity);
     (
         Mailbox { receiver },

@@ -12,12 +12,12 @@ struct State<T> {
 }
 
 /// Côté acteur : envoie la réponse (oneshot).
-pub(crate) struct Reply<T> {
+pub struct Reply<T> {
     inner: Arc<Inner<T>>,
 }
 
 /// Côté appelant : attend la réponse.
-pub(crate) struct ReplyReceiver<T> {
+pub struct ReplyReceiver<T> {
     inner: Arc<Inner<T>>,
 }
 
@@ -103,7 +103,7 @@ impl<T> ReplyReceiver<T> {
 }
 
 /// Crée une paire (Reply, ReplyReceiver).
-pub(crate) fn reply<T>() -> (Reply<T>, ReplyReceiver<T>) {
+pub fn reply<T>() -> (Reply<T>, ReplyReceiver<T>) {
     let inner = Arc::new(Inner {
         state: Mutex::new(State {
             value: None,

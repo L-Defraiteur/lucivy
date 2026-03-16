@@ -1,11 +1,11 @@
-pub(crate) mod events;
-pub(crate) mod mailbox;
-pub(crate) mod reply;
-pub(crate) mod scheduler;
+pub mod events;
+pub mod mailbox;
+pub mod reply;
+pub mod scheduler;
 
-pub(crate) use mailbox::{mailbox, ActorRef, Mailbox};
-pub(crate) use reply::{reply, Reply, ReplyReceiver};
-pub(crate) use scheduler::{ActorId, Scheduler, SchedulerHandle};
+pub use mailbox::{mailbox, ActorRef, Mailbox};
+pub use reply::{reply, Reply, ReplyReceiver};
+pub use scheduler::{ActorId, Scheduler, SchedulerHandle};
 
 use std::task::Poll;
 
@@ -13,7 +13,7 @@ use std::task::Poll;
 ///
 /// Un acteur reçoit des messages typés via sa mailbox, les traite un par un,
 /// et déclare sa priorité courante pour le scheduling.
-pub(crate) trait Actor: Send + 'static {
+pub trait Actor: Send + 'static {
     type Msg: Send + 'static;
 
     /// Nom lisible pour les events et le debug.
@@ -39,7 +39,7 @@ pub(crate) trait Actor: Send + 'static {
 
 /// Status retourné par `Actor::handle()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ActorStatus {
+pub enum ActorStatus {
     /// Continuer à traiter les messages.
     Continue,
     /// Yield au scheduler — l'acteur a du travail mais cède pour l'équité.
@@ -51,7 +51,7 @@ pub(crate) enum ActorStatus {
 /// Priorité de scheduling d'un acteur.
 /// Plus la valeur est haute, plus l'acteur est traité en premier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum Priority {
+pub enum Priority {
     /// WatcherActor en attente de tick.
     Idle = 0,
     /// Merges, compression — différable.
