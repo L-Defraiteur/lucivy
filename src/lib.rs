@@ -168,6 +168,7 @@ mod functional_test;
 mod macros;
 #[allow(dead_code, unused_imports)]
 pub mod actor;
+mod error_message;
 mod future_result;
 
 // Re-exports

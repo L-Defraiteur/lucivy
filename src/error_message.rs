@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use super::envelope::{type_tag_hash, Message};
+use crate::actor::envelope::{type_tag_hash, Message};
 use crate::error::LucivyError;
 
 // Variant tags for serialization.

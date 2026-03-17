@@ -71,6 +71,30 @@ pub fn reply_port() -> (ReplyPort, super::reply::ReplyReceiver<Result<Vec<u8>, V
     (ReplyPort::new(tx), rx)
 }
 
+/// Generic actor error — wraps a remote error `E` or a local transport error.
+///
+/// `E` is the application's error type (e.g. `LucivyError`, `SparseError`).
+/// Luciole doesn't know about `E` — it's provided by the application.
+#[derive(Debug)]
+pub enum ActorError<E> {
+    /// The remote actor sent a typed error.
+    Remote(E),
+    /// The actor channel is closed (actor died or was killed).
+    ChannelClosed,
+    /// Failed to decode the reply or error bytes.
+    DecodeError(String),
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for ActorError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Remote(e) => write!(f, "{e}"),
+            Self::ChannelClosed => write!(f, "actor channel closed"),
+            Self::DecodeError(e) => write!(f, "decode error: {e}"),
+        }
+    }
+}
+
 /// Typed facade over `ActorRef<Envelope>`.
 ///
 /// Provides ergonomic typed methods for sending messages and waiting for
@@ -104,36 +128,39 @@ impl TypedActorRef {
             .map_err(|_| "channel closed".into())
     }
 
-    /// Send a request and wait for a typed reply.
-    /// Errors are decoded as LucivyError (type-preserving).
-    pub fn request<M: Message, R: Message>(&self, msg: M) -> crate::Result<R> {
+    /// Send a request and wait for a typed reply with a typed error.
+    ///
+    /// Generic over the error type — the application provides its own error
+    /// type that implements `Message` (e.g. `LucivyError`, `SparseError`).
+    pub fn request<M: Message, R: Message, E: Message>(
+        &self,
+        msg: M,
+    ) -> Result<R, ActorError<E>> {
         let (env, rx) = msg.into_request();
-        self.inner.send(env).map_err(|_| crate::LucivyError::SystemError("channel closed".into()))?;
+        self.inner.send(env).map_err(|_| ActorError::ChannelClosed)?;
         let scheduler = super::scheduler::global_scheduler();
         match rx.wait_cooperative(|| scheduler.run_one_step()) {
-            Ok(bytes) => R::decode(&bytes).map_err(|e| crate::LucivyError::SystemError(e)),
-            Err(err_bytes) => Err(
-                crate::LucivyError::decode(&err_bytes)
-                    .unwrap_or_else(|e| crate::LucivyError::SystemError(format!("error decode: {e}")))
-            ),
+            Ok(bytes) => R::decode(&bytes).map_err(|e| ActorError::DecodeError(e)),
+            Err(err_bytes) => Err(ActorError::Remote(
+                E::decode(&err_bytes).map_err(|e| ActorError::DecodeError(e))?
+            )),
         }
     }
 
     /// Send a request with local data and wait for a typed reply.
-    pub fn request_with_local<M: Message, R: Message>(
+    pub fn request_with_local<M: Message, R: Message, E: Message>(
         &self,
         msg: M,
         local: impl Any + Send,
-    ) -> crate::Result<R> {
+    ) -> Result<R, ActorError<E>> {
         let (env, rx) = msg.into_request_with_local(local);
-        self.inner.send(env).map_err(|_| crate::LucivyError::SystemError("channel closed".into()))?;
+        self.inner.send(env).map_err(|_| ActorError::ChannelClosed)?;
         let scheduler = super::scheduler::global_scheduler();
         match rx.wait_cooperative(|| scheduler.run_one_step()) {
-            Ok(bytes) => R::decode(&bytes).map_err(|e| crate::LucivyError::SystemError(e)),
-            Err(err_bytes) => Err(
-                crate::LucivyError::decode(&err_bytes)
-                    .unwrap_or_else(|e| crate::LucivyError::SystemError(format!("error decode: {e}")))
-            ),
+            Ok(bytes) => R::decode(&bytes).map_err(|e| ActorError::DecodeError(e)),
+            Err(err_bytes) => Err(ActorError::Remote(
+                E::decode(&err_bytes).map_err(|e| ActorError::DecodeError(e))?
+            )),
         }
     }
 

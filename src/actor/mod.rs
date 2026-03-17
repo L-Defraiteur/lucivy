@@ -1,6 +1,5 @@
 pub mod actor_state;
 pub mod envelope;
-pub mod error_message;
 pub mod events;
 pub mod generic_actor;
 pub mod handler;
@@ -9,7 +8,7 @@ pub mod reply;
 pub mod scheduler;
 
 pub use actor_state::ActorState;
-pub use envelope::{Envelope, Message, ReplyPort, TypedActorRef, reply_port, type_tag_hash};
+pub use envelope::{ActorError, Envelope, Message, ReplyPort, TypedActorRef, reply_port, type_tag_hash};
 pub use generic_actor::GenericActor;
 pub use handler::{Handler, TypedHandler};
 pub use mailbox::{mailbox, ActorRef, Mailbox};

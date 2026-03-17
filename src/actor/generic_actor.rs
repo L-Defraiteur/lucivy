@@ -90,13 +90,13 @@ impl GenericActor {
                 envelope.local,
             ),
             None => {
-                // No handler — send error reply if expected, otherwise drop silently.
+                // No handler — send raw error bytes (no dependency on app error type).
                 if let Some(reply) = envelope.reply {
-                    let err = crate::LucivyError::SystemError(format!(
+                    let msg = format!(
                         "actor '{}' has no handler for type_tag {:#018x}",
                         self.name, envelope.type_tag
-                    ));
-                    reply.send_err(err);
+                    );
+                    reply.send_err_bytes(msg.into_bytes());
                 }
                 ActorStatus::Continue
             }
@@ -142,6 +142,18 @@ mod tests {
     use crate::actor::mailbox::mailbox;
     use crate::actor::scheduler::global_scheduler;
     use std::sync::Arc;
+
+    // ─── Test error type ─────────────────────────────────────────────
+
+    #[derive(Debug)]
+    struct TestError(String);
+    impl Message for TestError {
+        fn type_tag() -> u64 { type_tag_hash(b"TestError") }
+        fn encode(&self) -> Vec<u8> { self.0.as_bytes().to_vec() }
+        fn decode(bytes: &[u8]) -> Result<Self, String> {
+            Ok(Self(String::from_utf8_lossy(bytes).to_string()))
+        }
+    }
 
     // ─── Test messages ──────────────────────────────────────────────
 
@@ -341,7 +353,7 @@ mod tests {
         typed.send(AddMsg { value: 32 }).unwrap();
 
         // Request/response
-        let reply: ValueReply = typed.request::<GetMsg, ValueReply>(GetMsg).unwrap();
+        let reply: ValueReply = typed.request::<GetMsg, ValueReply, TestError>(GetMsg).unwrap();
         assert_eq!(reply.value, 42);
     }
 
