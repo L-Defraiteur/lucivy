@@ -71,6 +71,7 @@ impl GenericActor {
                 &mut self.state,
                 &envelope.payload,
                 envelope.reply,
+                envelope.local,
             ),
             None => {
                 // No handler — send error reply if expected, otherwise drop silently.
@@ -160,7 +161,7 @@ mod tests {
         let mut actor = GenericActor::new("counter");
         actor.state_mut().insert::<i64>(0);
 
-        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply| {
+        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply, _local| {
             *state.get_mut::<i64>().unwrap() += msg.value;
             ActorStatus::Continue
         }));
@@ -183,13 +184,13 @@ mod tests {
         actor.state_mut().insert::<i64>(100);
 
         // Add handler
-        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply| {
+        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply, _local| {
             *state.get_mut::<i64>().unwrap() += msg.value;
             ActorStatus::Continue
         }));
 
         // Get handler (with reply)
-        actor.register(TypedHandler::<GetMsg, _>::new(|state, _msg, reply| {
+        actor.register(TypedHandler::<GetMsg, _>::new(|state, _msg, reply, _local| {
             let value = *state.get::<i64>().unwrap();
             if let Some(reply) = reply {
                 reply.send(ValueReply { value });
@@ -227,7 +228,7 @@ mod tests {
         let mut actor = GenericActor::new("unreg");
         actor.state_mut().insert::<i64>(0);
 
-        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply| {
+        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply, _local| {
             *state.get_mut::<i64>().unwrap() += msg.value;
             ActorStatus::Continue
         }));
@@ -250,12 +251,12 @@ mod tests {
 
         let mut actor = GenericActor::new("sched-test");
         actor.state_mut().insert::<i64>(0);
-        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply| {
+        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply, _local| {
             *state.get_mut::<i64>().unwrap() += msg.value;
             ActorStatus::Continue
         }));
         actor.register(TypedHandler::<GetMsg, _>::with_priority(
-            |state, _msg, reply| {
+            |state, _msg, reply, _local| {
                 let value = *state.get::<i64>().unwrap();
                 if let Some(reply) = reply {
                     reply.send(ValueReply { value });

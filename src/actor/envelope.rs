@@ -3,6 +3,8 @@
 //! An Envelope carries a type tag (stable hash of the message type name),
 //! a serialized payload (bytes), and an optional reply port for request/response.
 
+use std::any::Any;
+
 use super::reply::Reply;
 
 /// Stable hash (FNV-1a 64-bit) of a string. Cross-build, cross-platform.
@@ -25,6 +27,10 @@ pub struct Envelope {
     pub payload: Vec<u8>,
     /// Optional reply channel for request/response pattern.
     pub reply: Option<ReplyPort>,
+    /// Local-only opaque data (not serialized for network transport).
+    /// Used to carry non-serializable resources like `Arc<dyn Weight>`.
+    /// Will be None when the message comes from the network (Phase 4).
+    pub local: Option<Box<dyn Any + Send>>,
 }
 
 /// Reply channel that sends bytes back to the caller.
@@ -74,22 +80,49 @@ pub trait Message: Send + Sized + 'static {
     /// Deserialize from bytes.
     fn decode(bytes: &[u8]) -> Result<Self, String>;
 
-    /// Wrap into an Envelope (no reply).
+    /// Wrap into an Envelope (no reply, no local data).
     fn into_envelope(self) -> Envelope {
         Envelope {
             type_tag: Self::type_tag(),
             payload: self.encode(),
             reply: None,
+            local: None,
         }
     }
 
-    /// Wrap into an Envelope with a reply port.
+    /// Wrap into an Envelope with local opaque data (no reply).
+    fn into_envelope_with_local(self, local: impl Any + Send) -> Envelope {
+        Envelope {
+            type_tag: Self::type_tag(),
+            payload: self.encode(),
+            reply: None,
+            local: Some(Box::new(local)),
+        }
+    }
+
+    /// Wrap into an Envelope with a reply port (no local data).
     fn into_request(self) -> (Envelope, super::reply::ReplyReceiver<Result<Vec<u8>, String>>) {
         let (port, rx) = reply_port();
         let envelope = Envelope {
             type_tag: Self::type_tag(),
             payload: self.encode(),
             reply: Some(port),
+            local: None,
+        };
+        (envelope, rx)
+    }
+
+    /// Wrap into an Envelope with a reply port and local opaque data.
+    fn into_request_with_local(
+        self,
+        local: impl Any + Send,
+    ) -> (Envelope, super::reply::ReplyReceiver<Result<Vec<u8>, String>>) {
+        let (port, rx) = reply_port();
+        let envelope = Envelope {
+            type_tag: Self::type_tag(),
+            payload: self.encode(),
+            reply: Some(port),
+            local: Some(Box::new(local)),
         };
         (envelope, rx)
     }
