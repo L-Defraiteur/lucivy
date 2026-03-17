@@ -164,31 +164,71 @@ impl<'a> SfxFileReader<'a> {
 
     /// Resolve a suffix term to its parent entries.
     /// Returns empty vec if the suffix is not in the FST.
+    /// Searches both SI=0 and SI>0 entries (contains mode).
     pub fn resolve_suffix(&self, suffix: &str) -> Vec<ParentEntry> {
-        match self.fst.get(suffix.as_bytes()) {
+        let mut all = Vec::new();
+        // Check SI=0 entry
+        let key0 = format!("\x00{suffix}");
+        if let Some(val) = self.fst.get(key0.as_bytes()) {
+            all.extend(self.decode_parents(val));
+        }
+        // Check SI>0 entry
+        let key1 = format!("\x01{suffix}");
+        if let Some(val) = self.fst.get(key1.as_bytes()) {
+            all.extend(self.decode_parents(val));
+        }
+        all
+    }
+
+    /// Resolve a suffix term to only SI=0 parent entries.
+    pub fn resolve_suffix_si0(&self, suffix: &str) -> Vec<ParentEntry> {
+        let key0 = format!("\x00{suffix}");
+        match self.fst.get(key0.as_bytes()) {
             Some(val) => self.decode_parents(val),
             None => Vec::new(),
         }
     }
 
     /// Prefix walk: find all suffix terms starting with `prefix`.
-    /// Returns an iterator of (suffix_term, parent_entries).
+    /// Searches both SI=0 and SI>0 entries (contains mode).
+    /// Merges parents from both partitions by key.
     pub fn prefix_walk(&self, prefix: &str) -> Vec<(String, Vec<ParentEntry>)> {
-        // Compute the exclusive upper bound for the prefix range.
-        // e.g., "g3d" → "g3e" (increment last byte)
-        let ge = prefix.as_bytes();
-        let lt = increment_prefix(ge);
+        use std::collections::HashMap;
+        let mut merged: HashMap<String, Vec<ParentEntry>> = HashMap::new();
+        for (key, parents) in self.prefix_walk_with_byte(super::builder::SI0_PREFIX, prefix) {
+            merged.entry(key).or_default().extend(parents);
+        }
+        for (key, parents) in self.prefix_walk_with_byte(super::builder::SI_REST_PREFIX, prefix) {
+            merged.entry(key).or_default().extend(parents);
+        }
+        let mut results: Vec<_> = merged.into_iter().collect();
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+        results
+    }
+
+    /// Prefix walk for startsWith: only SI=0 entries (full token start).
+    /// Much faster than prefix_walk() — skips all substring entries.
+    pub fn prefix_walk_si0(&self, prefix: &str) -> Vec<(String, Vec<ParentEntry>)> {
+        self.prefix_walk_with_byte(super::builder::SI0_PREFIX, prefix)
+    }
+
+    /// Internal: prefix walk within a single partition (SI=0 or SI>0).
+    fn prefix_walk_with_byte(&self, prefix_byte: u8, prefix: &str) -> Vec<(String, Vec<ParentEntry>)> {
+        let mut ge_key = vec![prefix_byte];
+        ge_key.extend_from_slice(prefix.as_bytes());
+
+        let lt_key = increment_prefix(&ge_key);
 
         let mut results = Vec::new();
-        let mut stream = if let Some(ref lt_bound) = lt {
-            self.fst.range().ge(ge).lt(lt_bound).into_stream()
+        let mut stream = if let Some(ref lt_bound) = lt_key {
+            self.fst.range().ge(&ge_key).lt(lt_bound).into_stream()
         } else {
-            // prefix is all 0xFF bytes, just scan to end
-            self.fst.range().ge(ge).into_stream()
+            self.fst.range().ge(&ge_key).into_stream()
         };
 
         while let Some((key, val)) = stream.next() {
-            let term = String::from_utf8_lossy(key).into_owned();
+            // Strip the prefix byte from the returned term
+            let term = String::from_utf8_lossy(&key[1..]).into_owned();
             let parents = self.decode_parents(val);
             results.push((term, parents));
         }
@@ -197,19 +237,44 @@ impl<'a> SfxFileReader<'a> {
     }
 
     /// Fuzzy walk: find all suffix terms within Levenshtein distance `d` of `query`.
-    /// Returns an iterator of (suffix_term, parent_entries).
-    /// Uses a Levenshtein prefix DFA — matches terms that START with something
-    /// within edit distance `d` of `query` (contains = prefix of suffix).
+    /// Searches both SI=0 and SI>0 entries (contains mode).
+    /// Merges parents from both partitions by key.
     pub fn fuzzy_walk(&self, query: &str, distance: u8) -> Vec<(String, Vec<ParentEntry>)> {
+        use std::collections::HashMap;
+        let mut merged: HashMap<String, Vec<ParentEntry>> = HashMap::new();
+        for (key, parents) in self.fuzzy_walk_with_byte(super::builder::SI0_PREFIX, query, distance) {
+            merged.entry(key).or_default().extend(parents);
+        }
+        for (key, parents) in self.fuzzy_walk_with_byte(super::builder::SI_REST_PREFIX, query, distance) {
+            merged.entry(key).or_default().extend(parents);
+        }
+        let mut results: Vec<_> = merged.into_iter().collect();
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+        results
+    }
+
+    /// Fuzzy walk for startsWith: only SI=0 entries.
+    pub fn fuzzy_walk_si0(&self, query: &str, distance: u8) -> Vec<(String, Vec<ParentEntry>)> {
+        self.fuzzy_walk_with_byte(super::builder::SI0_PREFIX, query, distance)
+    }
+
+    /// Internal: fuzzy walk within a single partition.
+    fn fuzzy_walk_with_byte(&self, prefix_byte: u8, query: &str, distance: u8) -> Vec<(String, Vec<ParentEntry>)> {
+        // Build a prefixed query: the DFA must match prefix_byte + query
+        let mut prefixed_query = String::with_capacity(1 + query.len());
+        prefixed_query.push(prefix_byte as char);
+        prefixed_query.push_str(query);
+
         let builder = LevenshteinAutomatonBuilder::new(distance, true);
-        let dfa = builder.build_prefix_dfa(query);
+        let dfa = builder.build_prefix_dfa(&prefixed_query);
         let automaton = SfxDfaWrapper(dfa);
 
         let mut results = Vec::new();
         let mut stream = self.fst.search(automaton).into_stream();
 
         while let Some((key, val)) = stream.next() {
-            let term = String::from_utf8_lossy(key).into_owned();
+            // Strip the prefix byte
+            let term = String::from_utf8_lossy(&key[1..]).into_owned();
             let parents = self.decode_parents(val);
             results.push((term, parents));
         }

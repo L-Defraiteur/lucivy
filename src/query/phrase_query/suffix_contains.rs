@@ -75,17 +75,17 @@ where
     let query_lower = query.to_lowercase();
     let query_len = query_lower.len();
 
-    // Prefix walk on the suffix FST
-    let walk_results = sfx_reader.prefix_walk(&query_lower);
+    // Use the partitioned FST: si0 for startsWith, all for contains.
+    let walk_results = if prefix_only {
+        sfx_reader.prefix_walk_si0(&query_lower)
+    } else {
+        sfx_reader.prefix_walk(&query_lower)
+    };
 
     let mut matches: Vec<SuffixContainsMatch> = Vec::new();
 
     for (_suffix_term, parents) in &walk_results {
         for parent in parents {
-            // For prefix_only (startsWith), skip substring matches (SI > 0)
-            if prefix_only && parent.si > 0 {
-                continue;
-            }
             // Resolve parent ordinal to posting list entries
             let postings = raw_term_resolver(parent.raw_ordinal);
 
@@ -157,16 +157,17 @@ where
     let query_lower = query.to_lowercase();
     let query_len = query_lower.len();
 
-    // Fuzzy walk on the suffix FST
-    let walk_results = sfx_reader.fuzzy_walk(&query_lower, distance);
+    // Fuzzy walk: partitioned by prefix byte.
+    let walk_results = if prefix_only {
+        sfx_reader.fuzzy_walk_si0(&query_lower, distance)
+    } else {
+        sfx_reader.fuzzy_walk(&query_lower, distance)
+    };
 
     let mut matches: Vec<SuffixContainsMatch> = Vec::new();
 
     for (_suffix_term, parents) in &walk_results {
         for parent in parents {
-            if prefix_only && parent.si > 0 {
-                continue;
-            }
             let postings = raw_term_resolver(parent.raw_ordinal);
 
             for entry in &postings {
@@ -400,21 +401,30 @@ where
 
         let mut postings = Vec::new();
 
-        // Choose walk strategy based on position and fuzzy_distance
+        // Choose walk strategy based on position, prefix_only, and fuzzy_distance.
+        // For prefix_only (startsWith): all tokens use si0 variants.
+        // For contains: first token uses all (any SI), others use si0.
+        let use_si0 = prefix_only || !is_first;
+
         let walk_results = if is_last {
-            // Last token: prefix walk (or fuzzy walk)
             if fuzzy_distance > 0 {
-                sfx_reader.fuzzy_walk(&query_lower, fuzzy_distance)
+                if use_si0 { sfx_reader.fuzzy_walk_si0(&query_lower, fuzzy_distance) }
+                else { sfx_reader.fuzzy_walk(&query_lower, fuzzy_distance) }
             } else {
-                sfx_reader.prefix_walk(&query_lower)
+                if use_si0 { sfx_reader.prefix_walk_si0(&query_lower) }
+                else { sfx_reader.prefix_walk(&query_lower) }
             }
         } else {
-            // First or middle token: exact lookup (or fuzzy walk)
             if fuzzy_distance > 0 {
-                sfx_reader.fuzzy_walk(&query_lower, fuzzy_distance)
+                if use_si0 { sfx_reader.fuzzy_walk_si0(&query_lower, fuzzy_distance) }
+                else { sfx_reader.fuzzy_walk(&query_lower, fuzzy_distance) }
             } else {
-                sfx_reader.resolve_suffix(&query_lower)
-                    .into_iter()
+                let resolved = if use_si0 {
+                    sfx_reader.resolve_suffix_si0(&query_lower)
+                } else {
+                    sfx_reader.resolve_suffix(&query_lower)
+                };
+                resolved.into_iter()
                     .map(|p| (query_lower.clone(), vec![p]))
                     .collect()
             }
@@ -422,14 +432,6 @@ where
 
         for (_suffix_term, parents) in &walk_results {
             for parent in parents {
-                // For contains: first token accepts any SI, others SI=0.
-                // For prefix_only (startsWith): ALL tokens must be SI=0.
-                if prefix_only && parent.si != 0 {
-                    continue;
-                }
-                if !prefix_only && !is_first && parent.si != 0 {
-                    continue;
-                }
                 let entries = raw_ordinal_resolver(parent.raw_ordinal);
                 for entry in entries {
                     postings.push(entry);

@@ -22,6 +22,13 @@ fn default_min_suffix_len() -> usize {
 /// Max suffix depth in bytes. Safety net for tokens not split by the tokenizer.
 const MAX_CHUNK_BYTES: usize = 256;
 
+/// Prefix byte for SI=0 entries (full token start) in the suffix FST.
+/// startsWith queries range-scan only these entries.
+pub const SI0_PREFIX: u8 = 0x00;
+
+/// Prefix byte for SI>0 entries (substring) in the suffix FST.
+pub const SI_REST_PREFIX: u8 = 0x01;
+
 const MULTI_PARENT_FLAG: u64 = 1 << 63;
 const RAW_ORDINAL_MASK: u64 = 0x00FF_FFFF; // 24 bits
 const SI_SHIFT: u32 = 24;
@@ -132,6 +139,10 @@ impl SuffixFstBuilder {
 
     /// Register all suffixes of a token. Called once per unique token in the segment.
     /// `raw_ordinal` is the term ordinal (sorted alphabetical position).
+    ///
+    /// Each suffix is prefixed with `SI0_PREFIX` (0x00) for SI=0 entries
+    /// or `SI_REST_PREFIX` (0x01) for SI>0. This partitions the FST so that
+    /// startsWith queries can range-scan only SI=0 entries.
     pub fn add_token(&mut self, token: &str, raw_ordinal: u64) {
         let lower = token.to_lowercase();
         let max_si = lower.len().min(MAX_CHUNK_BYTES);
@@ -143,8 +154,12 @@ impl SuffixFstBuilder {
             if si > 0 && suffix.len() < self.min_suffix_len {
                 break;
             }
+            let prefix = if si == 0 { SI0_PREFIX } else { SI_REST_PREFIX };
+            let mut key = String::with_capacity(1 + suffix.len());
+            key.push(prefix as char);
+            key.push_str(suffix);
             self.entries.push((
-                suffix.to_string(),
+                key,
                 ParentEntry { raw_ordinal, si: si as u16 },
             ));
         }
@@ -263,6 +278,19 @@ mod tests {
         assert_eq!(decoded, entries);
     }
 
+    /// Helper: get from FST with prefix byte prepended
+    fn fst_get_si0(fst: &lucivy_fst::Map<Vec<u8>>, key: &[u8]) -> Option<u64> {
+        let mut prefixed = vec![SI0_PREFIX];
+        prefixed.extend_from_slice(key);
+        fst.get(&prefixed)
+    }
+
+    fn fst_get_si_rest(fst: &lucivy_fst::Map<Vec<u8>>, key: &[u8]) -> Option<u64> {
+        let mut prefixed = vec![SI_REST_PREFIX];
+        prefixed.extend_from_slice(key);
+        fst.get(&prefixed)
+    }
+
     #[test]
     fn test_builder_single_token() {
         let mut builder = SuffixFstBuilder::with_min_suffix_len(3);
@@ -271,25 +299,25 @@ mod tests {
         let (fst_bytes, _output_table) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
-        // "rag3db" SI=0
-        let val = fst.get(b"rag3db").expect("rag3db should exist");
+        // "rag3db" SI=0 → in \x00 partition
+        let val = fst_get_si0(&fst, b"rag3db").expect("rag3db should exist in SI=0");
         assert_eq!(decode_output(val), ParentRef::Single { raw_ordinal: 0, si: 0 });
 
-        // "ag3db" SI=1
-        let val = fst.get(b"ag3db").expect("ag3db should exist");
+        // "ag3db" SI=1 → in \x01 partition
+        let val = fst_get_si_rest(&fst, b"ag3db").expect("ag3db should exist in SI>0");
         assert_eq!(decode_output(val), ParentRef::Single { raw_ordinal: 0, si: 1 });
 
-        // "g3db" SI=2
-        let val = fst.get(b"g3db").expect("g3db should exist");
+        // "g3db" SI=2 → in \x01 partition
+        let val = fst_get_si_rest(&fst, b"g3db").expect("g3db should exist in SI>0");
         assert_eq!(decode_output(val), ParentRef::Single { raw_ordinal: 0, si: 2 });
 
-        // "3db" SI=3
-        let val = fst.get(b"3db").expect("3db should exist");
+        // "3db" SI=3 → in \x01 partition
+        let val = fst_get_si_rest(&fst, b"3db").expect("3db should exist in SI>0");
         assert_eq!(decode_output(val), ParentRef::Single { raw_ordinal: 0, si: 3 });
 
         // "db" should NOT exist (< min_suffix_len=3)
-        assert!(fst.get(b"db").is_none());
-        assert!(fst.get(b"b").is_none());
+        assert!(fst_get_si_rest(&fst, b"db").is_none());
+        assert!(fst_get_si_rest(&fst, b"b").is_none());
     }
 
     #[test]
@@ -302,20 +330,16 @@ mod tests {
         let (fst_bytes, output_table_data) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
-        // "core" has 2 parents: (0, SI=0) from "core" and (1, SI=4) from "hardcore"
-        let val = fst.get(b"core").expect("core should exist");
-        match decode_output(val) {
-            ParentRef::Multi { offset } => {
-                let entries = read_parent_list(&output_table_data, offset);
-                assert_eq!(entries.len(), 2);
-                assert!(entries.contains(&ParentEntry { raw_ordinal: 0, si: 0 }));
-                assert!(entries.contains(&ParentEntry { raw_ordinal: 1, si: 4 }));
-            }
-            _ => panic!("expected multi parent for 'core'"),
-        }
+        // "core" SI=0 partition: single parent (0, si=0) from "core"
+        let val = fst_get_si0(&fst, b"core").expect("core should exist in SI=0");
+        assert_eq!(decode_output(val), ParentRef::Single { raw_ordinal: 0, si: 0 });
+
+        // "core" SI>0 partition: single parent (1, si=4) from "hardcore"
+        let val = fst_get_si_rest(&fst, b"core").expect("core should exist in SI>0");
+        assert_eq!(decode_output(val), ParentRef::Single { raw_ordinal: 1, si: 4 });
 
         // "hardcore" SI=0 should be single parent
-        let val = fst.get(b"hardcore").expect("hardcore should exist");
+        let val = fst_get_si0(&fst, b"hardcore").expect("hardcore should exist in SI=0");
         assert_eq!(decode_output(val), ParentRef::Single { raw_ordinal: 1, si: 0 });
     }
 
@@ -330,11 +354,14 @@ mod tests {
         let (fst_bytes, _) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
-        // Prefix walk "g3d" should find "g3db"
-        let mut stream = fst.range().ge(b"g3d").lt(b"g3e").into_stream();
+        // Prefix walk "\x01g3d" should find "\x01g3db" (SI>0 partition)
+        let ge = [SI_REST_PREFIX, b'g', b'3', b'd'];
+        let lt = [SI_REST_PREFIX, b'g', b'3', b'e'];
+        let mut stream = fst.range().ge(&ge).lt(&lt).into_stream();
         let mut found = Vec::new();
         while let Some((key, val)) = stream.next() {
-            found.push((String::from_utf8(key.to_vec()).unwrap(), val));
+            // Strip prefix byte
+            found.push((String::from_utf8(key[1..].to_vec()).unwrap(), val));
         }
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, "g3db");
@@ -347,37 +374,31 @@ mod tests {
     #[test]
     fn test_builder_utf8_boundaries() {
         let mut builder = SuffixFstBuilder::with_min_suffix_len(3);
-        // "café" has a multi-byte char 'é' (2 bytes in UTF-8)
         builder.add_token("café", 0);
 
         let (fst_bytes, _) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
-        // Should have "café" (SI=0) and "afé" (SI=1, but byte index varies)
-        // "café" in lowercase is "café", 5 bytes: c(1) a(1) f(1) é(2)
-        let val = fst.get("café".as_bytes()).expect("café should exist");
+        // "café" SI=0 → \x00 partition
+        let val = fst_get_si0(&fst, "café".as_bytes()).expect("café should exist in SI=0");
         assert_eq!(decode_output(val), ParentRef::Single { raw_ordinal: 0, si: 0 });
 
-        // "afé" SI=1
-        let val = fst.get("afé".as_bytes()).expect("afé should exist");
+        // "afé" SI=1 → \x01 partition
+        let val = fst_get_si_rest(&fst, "afé".as_bytes()).expect("afé should exist in SI>0");
         assert_eq!(decode_output(val), ParentRef::Single { raw_ordinal: 0, si: 1 });
-
-        // Should NOT have a suffix starting in the middle of 'é'
-        // (is_char_boundary check filters it)
     }
 
     #[test]
     fn test_builder_no_duplicate_parents() {
         let mut builder = SuffixFstBuilder::with_min_suffix_len(3);
-        // Adding same token twice should not duplicate parent entries
         builder.add_token("rag3db", 0);
         builder.add_token("rag3db", 0);
 
         let (fst_bytes, _) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
-        // Should still be single parent, not multi
-        let val = fst.get(b"rag3db").unwrap();
+        // Should still be single parent in SI=0 partition
+        let val = fst_get_si0(&fst, b"rag3db").unwrap();
         assert!(matches!(decode_output(val), ParentRef::Single { .. }));
     }
 
@@ -387,10 +408,10 @@ mod tests {
         builder.add_token("rag3db", 0);
         builder.add_token("core", 1);
 
-        // After build, num_terms = unique suffix keys:
-        // "rag3db": rag3db, ag3db, g3db, 3db (4)
-        // "core": core, ore (2)
-        // Total: 6 unique suffix keys
+        // After build with prefix bytes:
+        // "rag3db": \x00rag3db, \x01ag3db, \x01g3db, \x013db (4 entries)
+        // "core": \x00core, \x01ore (2 entries)
+        // Total: 6 unique entries
         let (fst_bytes, _) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
         assert_eq!(fst.len(), 6);

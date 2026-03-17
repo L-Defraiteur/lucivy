@@ -30,9 +30,113 @@ pub struct ContinuationMatch<S> {
     pub is_accepting: bool,
 }
 
-/// Wrapper automaton that starts from an arbitrary state and treats
-/// "alive" (can_match) as "matching" so the FST stream yields all
-/// entries where the DFA hasn't died — not just accepting entries.
+/// Wrapper automaton that prepends a required prefix byte before delegating
+/// to the inner automaton. Used to restrict FST searches to SI=0 or SI>0 partitions.
+struct PrefixByteAutomaton<'a, A: Automaton> {
+    inner: &'a A,
+    prefix_byte: u8,
+}
+
+/// State: None = expecting prefix byte, Some(inner_state) = delegating
+#[derive(Clone)]
+enum PrefixByteState<S: Clone> {
+    ExpectingPrefix,
+    Inner(S),
+    Dead,
+}
+
+impl<'a, A: Automaton> Automaton for PrefixByteAutomaton<'a, A>
+where A::State: Clone {
+    type State = PrefixByteState<A::State>;
+
+    fn start(&self) -> Self::State {
+        PrefixByteState::ExpectingPrefix
+    }
+
+    fn is_match(&self, state: &Self::State) -> bool {
+        match state {
+            PrefixByteState::Inner(s) => self.inner.is_match(s),
+            _ => false,
+        }
+    }
+
+    fn can_match(&self, state: &Self::State) -> bool {
+        match state {
+            PrefixByteState::ExpectingPrefix => true,
+            PrefixByteState::Inner(s) => self.inner.can_match(s),
+            PrefixByteState::Dead => false,
+        }
+    }
+
+    fn accept(&self, state: &Self::State, byte: u8) -> Self::State {
+        match state {
+            PrefixByteState::ExpectingPrefix => {
+                if byte == self.prefix_byte {
+                    PrefixByteState::Inner(self.inner.start())
+                } else {
+                    PrefixByteState::Dead
+                }
+            }
+            PrefixByteState::Inner(s) => PrefixByteState::Inner(self.inner.accept(s, byte)),
+            PrefixByteState::Dead => PrefixByteState::Dead,
+        }
+    }
+}
+
+/// Wrapper automaton that combines prefix byte filtering with continuation
+/// semantics (can_match as match). Used by search_continuation.
+struct PrefixByteContinuationAutomaton<'a, A: Automaton> {
+    inner: &'a A,
+    start_state: A::State,
+    prefix_byte: u8,
+}
+
+#[derive(Clone)]
+enum PrefixContinuationState<S: Clone> {
+    ExpectingPrefix,
+    Inner(S),
+    Dead,
+}
+
+impl<'a, A: Automaton> Automaton for PrefixByteContinuationAutomaton<'a, A>
+where A::State: Clone {
+    type State = PrefixContinuationState<A::State>;
+
+    fn start(&self) -> Self::State {
+        PrefixContinuationState::ExpectingPrefix
+    }
+
+    fn is_match(&self, state: &Self::State) -> bool {
+        // Continuation semantics: "alive" = "matching"
+        self.can_match(state)
+    }
+
+    fn can_match(&self, state: &Self::State) -> bool {
+        match state {
+            PrefixContinuationState::ExpectingPrefix => true,
+            PrefixContinuationState::Inner(s) => self.inner.can_match(s),
+            PrefixContinuationState::Dead => false,
+        }
+    }
+
+    fn accept(&self, state: &Self::State, byte: u8) -> Self::State {
+        match state {
+            PrefixContinuationState::ExpectingPrefix => {
+                if byte == self.prefix_byte {
+                    PrefixContinuationState::Inner(self.start_state.clone())
+                } else {
+                    PrefixContinuationState::Dead
+                }
+            }
+            PrefixContinuationState::Inner(s) => {
+                PrefixContinuationState::Inner(self.inner.accept(s, byte))
+            }
+            PrefixContinuationState::Dead => PrefixContinuationState::Dead,
+        }
+    }
+}
+
+/// Legacy wrapper — kept for backward compat but no longer used by search_continuation.
 struct ContinuationAutomaton<'a, A: Automaton> {
     inner: &'a A,
     start_state: A::State,
@@ -134,28 +238,39 @@ impl<'a> SfxTermDictionary<'a> {
     /// Equivalent to TermDictionary::search(automaton).into_stream() iterated to completion.
     pub fn search_automaton<A: Automaton>(&self, automaton: &A) -> Vec<(String, TermInfo)>
     where A::State: Clone {
-        let mut stream = self.sfx_reader.fst().search(automaton).into_stream();
+        // Walk only SI=0 partition (\x00 prefix) — wrap automaton to skip prefix byte
+        let wrapper = PrefixByteAutomaton { inner: automaton, prefix_byte: super::builder::SI0_PREFIX };
+        let mut stream = self.sfx_reader.fst().search(&wrapper).into_stream();
         let mut results = Vec::new();
         while let Some((key, val)) = stream.next() {
             let parents = self.decode_parents(val);
             for p in &parents {
-                if p.si == 0 {
-                    let term_info = self.termdict.term_info_from_ord(p.raw_ordinal);
-                    if let Ok(s) = std::str::from_utf8(key) {
+                let term_info = self.termdict.term_info_from_ord(p.raw_ordinal);
+                // Strip prefix byte from key
+                if key.len() > 1 {
+                    if let Ok(s) = std::str::from_utf8(&key[1..]) {
                         results.push((s.to_string(), term_info));
                     }
-                    break; // SI=0 is first (sorted), take only the first
                 }
+                break; // One parent per SI=0 entry
             }
         }
         results
     }
 
     /// Range scan (SI=0 only). Returns all terms in [ge, lt) with their TermInfo.
-    /// Equivalent to TermDictionary::range().ge().lt().into_stream() iterated.
     pub fn range_scan(&self, ge: &[u8], lt: Option<&[u8]>) -> Vec<(String, TermInfo)> {
-        let mut builder = self.sfx_reader.fst().range().ge(ge);
-        if let Some(lt_bound) = lt {
+        // Prefix with \x00 for SI=0 partition
+        let mut ge_key = vec![super::builder::SI0_PREFIX];
+        ge_key.extend_from_slice(ge);
+        let lt_key = lt.map(|l| {
+            let mut k = vec![super::builder::SI0_PREFIX];
+            k.extend_from_slice(l);
+            k
+        });
+
+        let mut builder = self.sfx_reader.fst().range().ge(&ge_key);
+        if let Some(ref lt_bound) = lt_key {
             builder = builder.lt(lt_bound);
         }
         let mut stream = builder.into_stream();
@@ -163,13 +278,13 @@ impl<'a> SfxTermDictionary<'a> {
         while let Some((key, val)) = stream.next() {
             let parents = self.decode_parents(val);
             for p in &parents {
-                if p.si == 0 {
-                    let term_info = self.termdict.term_info_from_ord(p.raw_ordinal);
-                    if let Ok(s) = std::str::from_utf8(key) {
+                let term_info = self.termdict.term_info_from_ord(p.raw_ordinal);
+                if key.len() > 1 {
+                    if let Ok(s) = std::str::from_utf8(&key[1..]) {
                         results.push((s.to_string(), term_info));
                     }
-                    break;
                 }
+                break;
             }
         }
         results
@@ -178,17 +293,18 @@ impl<'a> SfxTermDictionary<'a> {
     /// Search with automaton (SI=0 only). Returns (key, raw_ordinal) pairs.
     pub fn search_automaton_ordinals<A: Automaton>(&self, automaton: &A) -> Vec<(String, u64)>
     where A::State: Clone {
-        let mut stream = self.sfx_reader.fst().search(automaton).into_stream();
+        let wrapper = PrefixByteAutomaton { inner: automaton, prefix_byte: super::builder::SI0_PREFIX };
+        let mut stream = self.sfx_reader.fst().search(&wrapper).into_stream();
         let mut results = Vec::new();
         while let Some((key, val)) = stream.next() {
             let parents = self.decode_parents(val);
             for p in &parents {
-                if p.si == 0 {
-                    if let Ok(s) = std::str::from_utf8(key) {
+                if key.len() > 1 {
+                    if let Ok(s) = std::str::from_utf8(&key[1..]) {
                         results.push((s.to_string(), p.raw_ordinal));
                     }
-                    break;
                 }
+                break;
             }
         }
         results
@@ -209,8 +325,15 @@ impl<'a> SfxTermDictionary<'a> {
 
     /// Range scan (SI=0 only). Returns (key, raw_ordinal) pairs.
     pub fn range_scan_ordinals(&self, ge: &[u8], lt: Option<&[u8]>) -> Vec<(String, u64)> {
-        let mut builder = self.sfx_reader.fst().range().ge(ge);
-        if let Some(lt_bound) = lt {
+        let mut ge_key = vec![super::builder::SI0_PREFIX];
+        ge_key.extend_from_slice(ge);
+        let lt_key = lt.map(|l| {
+            let mut k = vec![super::builder::SI0_PREFIX];
+            k.extend_from_slice(l);
+            k
+        });
+        let mut builder = self.sfx_reader.fst().range().ge(&ge_key);
+        if let Some(ref lt_bound) = lt_key {
             builder = builder.lt(lt_bound);
         }
         let mut stream = builder.into_stream();
@@ -218,12 +341,12 @@ impl<'a> SfxTermDictionary<'a> {
         while let Some((key, val)) = stream.next() {
             let parents = self.decode_parents(val);
             for p in &parents {
-                if p.si == 0 {
-                    if let Ok(s) = std::str::from_utf8(key) {
+                if key.len() > 1 {
+                    if let Ok(s) = std::str::from_utf8(&key[1..]) {
                         results.push((s.to_string(), p.raw_ordinal));
                     }
-                    break;
                 }
+                break;
             }
         }
         results
@@ -256,37 +379,45 @@ impl<'a> SfxTermDictionary<'a> {
     where
         A::State: Clone,
     {
-        let wrapper = ContinuationAutomaton {
-            inner: automaton,
-            start_state: start_state.clone(),
-        };
-        let mut stream = self.sfx_reader.fst().search(&wrapper).into_stream();
         let mut results = Vec::new();
 
-        while let Some((key, val)) = stream.next() {
-            // Re-walk the DFA through the key bytes to recover the actual end state
-            let mut state = start_state.clone();
-            for &byte in key {
-                state = automaton.accept(&state, byte);
-            }
-            let is_accepting = automaton.is_match(&state);
-            let is_alive = automaton.can_match(&state);
+        // Determine which partitions to search
+        let prefixes: &[u8] = if si_zero_only {
+            &[super::builder::SI0_PREFIX]
+        } else {
+            &[super::builder::SI0_PREFIX, super::builder::SI_REST_PREFIX]
+        };
 
-            if !is_alive {
-                continue;
-            }
+        for &prefix_byte in prefixes {
+            let wrapper = PrefixByteContinuationAutomaton {
+                inner: automaton,
+                start_state: start_state.clone(),
+                prefix_byte,
+            };
+            let mut stream = self.sfx_reader.fst().search(&wrapper).into_stream();
 
-            let parents = self.decode_parents(val);
-            for p in &parents {
-                if si_zero_only && p.si != 0 {
+            while let Some((key, val)) = stream.next() {
+                // Re-walk the DFA through the key bytes (skip prefix byte)
+                let mut state = start_state.clone();
+                for &byte in &key[1..] {
+                    state = automaton.accept(&state, byte);
+                }
+                let is_accepting = automaton.is_match(&state);
+                let is_alive = automaton.can_match(&state);
+
+                if !is_alive {
                     continue;
                 }
-                results.push(ContinuationMatch {
-                    raw_ordinal: p.raw_ordinal,
-                    si: p.si,
-                    end_state: state.clone(),
-                    is_accepting,
-                });
+
+                let parents = self.decode_parents(val);
+                for p in &parents {
+                    results.push(ContinuationMatch {
+                        raw_ordinal: p.raw_ordinal,
+                        si: p.si,
+                        end_state: state.clone(),
+                        is_accepting,
+                    });
+                }
             }
         }
         results
