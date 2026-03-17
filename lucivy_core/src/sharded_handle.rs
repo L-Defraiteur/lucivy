@@ -482,6 +482,38 @@ fn create_router_actor(
 /// The document is NOT modified. The PreTokenizedData is passed alongside
 /// the document through the pipeline to the SegmentWriter, which uses it
 /// instead of re-tokenizing (eliminates double tokenization).
+/// Tokenize text fields for routing hashes only (no PreTokenizedData).
+/// Used by the single-shard direct path to avoid pipeline overhead.
+fn extract_token_hashes_from(
+    doc: &LucivyDocument,
+    schema: &Schema,
+    text_fields: &[Field],
+    tokenizer_manager: &TokenizerManager,
+) -> Vec<u64> {
+    let mut hashes = Vec::new();
+    for (field, value) in doc.field_values() {
+        if !text_fields.contains(&field) {
+            continue;
+        }
+        if let Some(text) = value.as_value().as_str() {
+            let tokenizer_name = match schema.get_field_entry(field).field_type() {
+                FieldType::Str(opts) => opts
+                    .get_indexing_options()
+                    .map(|o| o.tokenizer())
+                    .unwrap_or("default"),
+                _ => "default",
+            };
+            if let Some(mut tokenizer) = tokenizer_manager.get(tokenizer_name) {
+                let mut stream = tokenizer.token_stream(text);
+                while let Some(token) = stream.next() {
+                    hashes.push(ShardRouter::hash_token(&token.text));
+                }
+            }
+        }
+    }
+    hashes
+}
+
 fn tokenize_for_pipeline(
     doc: &LucivyDocument,
     schema: &Schema,
@@ -984,9 +1016,18 @@ impl ShardedHandle {
 
     /// Add a document via the ingestion pipeline (non-blocking).
     ///
-    /// Sends the document to a ReaderActor (round-robin) which tokenizes+hashes
-    /// in parallel, then forwards to the RouterActor for routing to the right shard.
+    /// For multi-shard: sends to ReaderActor (round-robin) for parallel tokenization,
+    /// then RouterActor routes to the right shard.
+    /// For single-shard: direct path (tokenize + send to shard, no pipeline overhead).
     pub fn add_document(&self, doc: LucivyDocument, node_id: u64) -> Result<(), String> {
+        if self.shards.len() == 1 {
+            // Direct path: no pipeline overhead for single shard.
+            let hashes = extract_token_hashes_from(
+                &doc, &self.schema, &self.text_fields, &self.shards[0].index.tokenizers(),
+            );
+            self.route_and_send(doc, node_id, &hashes)?;
+            return Ok(());
+        }
         let idx = self.next_reader.fetch_add(1, Ordering::Relaxed) % self.reader_actors.len();
         let payload: (LucivyDocument, u64) = (doc, node_id);
         let env = ReaderTokenizeMsg.into_envelope_with_local(payload);
