@@ -654,31 +654,46 @@ impl IndexMerger {
                 .collect();
 
             // 1. Collect unique tokens that have at least one alive document.
-            // We can't blindly use inverted_index.terms() because it includes terms
-            // from deleted documents — those get purged in the merged TermDictionary,
-            // causing ordinal mismatches between .sfx and TermDictionary.
+            let has_deletes = self.readers.iter().any(|r| r.alive_bitset().is_some());
             let mut unique_tokens = BTreeSet::new();
-            for (seg_ord, reader) in self.readers.iter().enumerate() {
-                if let Ok(inv_idx) = reader.inverted_index(field) {
-                    let term_dict = inv_idx.terms();
-                    let alive = reader.alive_bitset();
-                    let mut stream = term_dict.stream()?;
-                    while stream.advance() {
-                        if let Ok(s) = std::str::from_utf8(stream.key()) {
-                            // Check if at least one alive doc has this term
-                            let ti = stream.value().clone();
-                            let mut postings = inv_idx.read_postings_from_terminfo(
-                                &ti, IndexRecordOption::Basic)?;
-                            let has_alive_doc = loop {
-                                let doc = postings.doc();
-                                if doc == TERMINATED { break false; }
-                                let is_alive = alive.map_or(true, |bs| bs.is_alive(doc));
-                                if is_alive && reverse_doc_map[seg_ord].contains_key(&doc) {
-                                    break true;
+
+            if has_deletes {
+                // Slow path: must check each term's postings for alive docs.
+                // Terms from deleted documents get purged in the merged TermDictionary,
+                // causing ordinal mismatches if we include them in .sfx.
+                for (seg_ord, reader) in self.readers.iter().enumerate() {
+                    if let Ok(inv_idx) = reader.inverted_index(field) {
+                        let term_dict = inv_idx.terms();
+                        let alive = reader.alive_bitset();
+                        let mut stream = term_dict.stream()?;
+                        while stream.advance() {
+                            if let Ok(s) = std::str::from_utf8(stream.key()) {
+                                let ti = stream.value().clone();
+                                let mut postings = inv_idx.read_postings_from_terminfo(
+                                    &ti, IndexRecordOption::Basic)?;
+                                let has_alive_doc = loop {
+                                    let doc = postings.doc();
+                                    if doc == TERMINATED { break false; }
+                                    let is_alive = alive.map_or(true, |bs| bs.is_alive(doc));
+                                    if is_alive && reverse_doc_map[seg_ord].contains_key(&doc) {
+                                        break true;
+                                    }
+                                    postings.advance();
+                                };
+                                if has_alive_doc {
+                                    unique_tokens.insert(s.to_string());
                                 }
-                                postings.advance();
-                            };
-                            if has_alive_doc {
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Fast path: no deletes — all terms are alive, skip postings check.
+                for reader in &self.readers {
+                    if let Ok(inv_idx) = reader.inverted_index(field) {
+                        let mut stream = inv_idx.terms().stream()?;
+                        while stream.advance() {
+                            if let Ok(s) = std::str::from_utf8(stream.key()) {
                                 unique_tokens.insert(s.to_string());
                             }
                         }

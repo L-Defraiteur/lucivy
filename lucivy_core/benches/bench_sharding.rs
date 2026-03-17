@@ -195,21 +195,46 @@ fn bench_sharding_comparison() {
 
     // ── Index ───────────────────────────────────────────────────────────
 
-    eprintln!("=== Indexing: 1 shard (baseline) ===");
-    let (single, single_time) = index_single(&files, &format!("{BENCH_BASE}/single"));
-    eprintln!("  {} docs in {:.2}s\n", single.reader.searcher().num_docs(), single_time);
+    // BENCH_MODE env: "SINGLE", "TA", "RR", or combine with "|" e.g. "SINGLE|TA"
+    // Default: all three.
+    let bench_mode = std::env::var("BENCH_MODE").unwrap_or_else(|_| "SINGLE|TA|RR".into());
+    let do_single = bench_mode.contains("SINGLE");
+    let do_ta = bench_mode.contains("TA");
+    let do_rr = bench_mode.contains("RR");
 
-    eprintln!("=== Indexing: {} shards token-aware (balance_weight=0.2) ===", num_shards);
-    let (sharded_ta, ta_time) = index_sharded(&files, &format!("{BENCH_BASE}/token_aware"), num_shards, 0.2);
-    let (ta_counts, _) = sharded_ta.router_stats().unwrap();
-    eprintln!("  {} docs in {:.2}s", sharded_ta.num_docs(), ta_time);
-    eprintln!("  distribution: {:?}\n", ta_counts);
+    let (single, single_time) = if do_single {
+        eprintln!("=== Indexing: 1 shard (baseline) ===");
+        let (s, t) = index_single(&files, &format!("{BENCH_BASE}/single"));
+        eprintln!("  {} docs in {:.2}s\n", s.reader.searcher().num_docs(), t);
+        (Some(s), t)
+    } else {
+        eprintln!("=== Skipping 1 shard ===\n");
+        (None, 0.0)
+    };
 
-    eprintln!("=== Indexing: {} shards round-robin (balance_weight=1.0) ===", num_shards);
-    let (sharded_rr, rr_time) = index_sharded(&files, &format!("{BENCH_BASE}/round_robin"), num_shards, 1.0);
-    let (rr_counts, _) = sharded_rr.router_stats().unwrap();
-    eprintln!("  {} docs in {:.2}s", sharded_rr.num_docs(), rr_time);
-    eprintln!("  distribution: {:?}\n", rr_counts);
+    let (sharded_ta, ta_time, ta_counts) = if do_ta {
+        eprintln!("=== Indexing: {} shards token-aware (balance_weight=0.2) ===", num_shards);
+        let (h, t) = index_sharded(&files, &format!("{BENCH_BASE}/token_aware"), num_shards, 0.2);
+        let (counts, _) = h.router_stats().unwrap();
+        eprintln!("  {} docs in {:.2}s", h.num_docs(), t);
+        eprintln!("  distribution: {:?}\n", counts);
+        (Some(h), t, counts)
+    } else {
+        eprintln!("=== Skipping TA ===\n");
+        (None, 0.0, vec![])
+    };
+
+    let (sharded_rr, rr_time, rr_counts) = if do_rr {
+        eprintln!("=== Indexing: {} shards round-robin (balance_weight=1.0) ===", num_shards);
+        let (h, t) = index_sharded(&files, &format!("{BENCH_BASE}/round_robin"), num_shards, 1.0);
+        let (counts, _) = h.router_stats().unwrap();
+        eprintln!("  {} docs in {:.2}s", h.num_docs(), t);
+        eprintln!("  distribution: {:?}\n", counts);
+        (Some(h), t, counts)
+    } else {
+        eprintln!("=== Skipping RR ===\n");
+        (None, 0.0, vec![])
+    };
 
     // ── Queries ─────────────────────────────────────────────────────────
 
@@ -277,9 +302,9 @@ fn bench_sharding_comparison() {
 
     for (label, config) in &queries {
         // Warm up
-        let _ = time_single_query(&single, config);
-        let _ = time_sharded_query(&sharded_ta, config);
-        let _ = time_sharded_query(&sharded_rr, config);
+        if let Some(ref s) = single { let _ = time_single_query(s, config); }
+        if let Some(ref s) = sharded_ta { let _ = time_sharded_query(s, config); }
+        if let Some(ref s) = sharded_rr { let _ = time_sharded_query(s, config); }
 
         // 3-run average
         let mut single_ms = 0.0;
@@ -287,13 +312,20 @@ fn bench_sharding_comparison() {
         let mut rr_ms = 0.0;
         let mut hits = 0;
         for _ in 0..3 {
-            let (h, ms) = time_single_query(&single, config);
-            single_ms += ms;
-            hits = h;
-            let (_, ms) = time_sharded_query(&sharded_ta, config);
-            ta_ms += ms;
-            let (_, ms) = time_sharded_query(&sharded_rr, config);
-            rr_ms += ms;
+            if let Some(ref s) = single {
+                let (h, ms) = time_single_query(s, config);
+                single_ms += ms;
+                hits = h;
+            }
+            if let Some(ref s) = sharded_ta {
+                let (h, ms) = time_sharded_query(s, config);
+                ta_ms += ms;
+                if hits == 0 { hits = h; }
+            }
+            if let Some(ref s) = sharded_rr {
+                let (_, ms) = time_sharded_query(s, config);
+                rr_ms += ms;
+            }
         }
         eprintln!("{:<35} {:>6} {:>8.1}ms {:>8.1}ms {:>8.1}ms",
             label, hits, single_ms / 3.0, ta_ms / 3.0, rr_ms / 3.0);
