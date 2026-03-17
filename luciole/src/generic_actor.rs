@@ -136,11 +136,11 @@ impl Actor for GenericActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actor::actor_state::ActorState;
-    use crate::actor::envelope::{type_tag_hash, Message, ReplyPort};
-    use crate::actor::handler::TypedHandler;
-    use crate::actor::mailbox::mailbox;
-    use crate::actor::scheduler::global_scheduler;
+    use crate::actor_state::ActorState;
+    use crate::envelope::{type_tag_hash, Message, ReplyPort};
+    use crate::handler::TypedHandler;
+    use crate::mailbox::mailbox;
+    use crate::scheduler::global_scheduler;
     use std::sync::Arc;
 
     // ─── Test error type ─────────────────────────────────────────────
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn test_typed_actor_ref() {
-        use crate::actor::envelope::TypedActorRef;
+        use crate::envelope::TypedActorRef;
 
         let scheduler = global_scheduler();
 

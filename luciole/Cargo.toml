@@ -1,0 +1,12 @@
+[package]
+name = "luciole"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Generic actor runtime with serialized messages, dynamic roles, and WASM support"
+authors = ["Luciform Research <luciedefraiteur@luciformresearch.com>"]
+repository = "https://github.com/L-Defraiteur/lucivy"
+keywords = ["actor", "async", "wasm", "message-passing", "scheduler"]
+
+[dependencies]
+flume = "0.11"

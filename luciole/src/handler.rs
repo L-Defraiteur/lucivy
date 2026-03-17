@@ -107,7 +107,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actor::envelope::{self, type_tag_hash};
+    use crate::envelope::{self, type_tag_hash};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
 

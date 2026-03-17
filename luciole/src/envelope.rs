@@ -346,18 +346,16 @@ mod tests {
 
     #[test]
     fn test_reply_port_error() {
-        use crate::LucivyError;
-
+        // Use PingMsg as a generic error type (any Message works).
         let msg = PingMsg { value: 1 };
         let (env, rx) = msg.into_request();
         let reply = env.reply.unwrap();
-        reply.send_err(LucivyError::SchemaError("something broke".into()));
+        reply.send_err(PingMsg { value: 999 });
 
         let result = rx.wait_blocking();
         assert!(result.is_err());
         let err_bytes = result.unwrap_err();
-        let err = LucivyError::decode(&err_bytes).unwrap();
-        assert!(matches!(err, LucivyError::SchemaError(_)));
-        assert!(err.to_string().contains("something broke"));
+        let err = PingMsg::decode(&err_bytes).unwrap();
+        assert_eq!(err.value, 999);
     }
 }
