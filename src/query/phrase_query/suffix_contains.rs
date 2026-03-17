@@ -47,6 +47,31 @@ pub fn suffix_contains_single_token<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
+    suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, false)
+}
+
+/// Like `suffix_contains_single_token` but only matches tokens that START
+/// with the query (SI=0 filter). Used for prefix/startsWith queries.
+pub fn suffix_contains_single_token_prefix<F>(
+    sfx_reader: &SfxFileReader<'_>,
+    query: &str,
+    raw_term_resolver: F,
+) -> Vec<SuffixContainsMatch>
+where
+    F: Fn(u64) -> Vec<RawPostingEntry>,
+{
+    suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, true)
+}
+
+fn suffix_contains_single_token_inner<F>(
+    sfx_reader: &SfxFileReader<'_>,
+    query: &str,
+    raw_term_resolver: F,
+    prefix_only: bool,
+) -> Vec<SuffixContainsMatch>
+where
+    F: Fn(u64) -> Vec<RawPostingEntry>,
+{
     let query_lower = query.to_lowercase();
     let query_len = query_lower.len();
 
@@ -55,8 +80,12 @@ where
 
     let mut matches: Vec<SuffixContainsMatch> = Vec::new();
 
-    for (suffix_term, parents) in &walk_results {
+    for (_suffix_term, parents) in &walk_results {
         for parent in parents {
+            // For prefix_only (startsWith), skip substring matches (SI > 0)
+            if prefix_only && parent.si > 0 {
+                continue;
+            }
             // Resolve parent ordinal to posting list entries
             let postings = raw_term_resolver(parent.raw_ordinal);
 
@@ -95,8 +124,34 @@ pub fn suffix_contains_single_token_fuzzy<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
+    suffix_contains_single_token_fuzzy_inner(sfx_reader, query, distance, raw_term_resolver, false)
+}
+
+/// Like fuzzy but prefix_only (SI=0 filter).
+pub fn suffix_contains_single_token_fuzzy_prefix<F>(
+    sfx_reader: &SfxFileReader<'_>,
+    query: &str,
+    distance: u8,
+    raw_term_resolver: F,
+) -> Vec<SuffixContainsMatch>
+where
+    F: Fn(u64) -> Vec<RawPostingEntry>,
+{
+    suffix_contains_single_token_fuzzy_inner(sfx_reader, query, distance, raw_term_resolver, true)
+}
+
+fn suffix_contains_single_token_fuzzy_inner<F>(
+    sfx_reader: &SfxFileReader<'_>,
+    query: &str,
+    distance: u8,
+    raw_term_resolver: F,
+    prefix_only: bool,
+) -> Vec<SuffixContainsMatch>
+where
+    F: Fn(u64) -> Vec<RawPostingEntry>,
+{
     if distance == 0 {
-        return suffix_contains_single_token(sfx_reader, query, raw_term_resolver);
+        return suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, prefix_only);
     }
 
     let query_lower = query.to_lowercase();
@@ -109,6 +164,9 @@ where
 
     for (_suffix_term, parents) in &walk_results {
         for parent in parents {
+            if prefix_only && parent.si > 0 {
+                continue;
+            }
             let postings = raw_term_resolver(parent.raw_ordinal);
 
             for entry in &postings {
@@ -244,12 +302,23 @@ pub fn suffix_contains_multi_token<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, raw_ordinal_resolver, 0)
+    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, raw_ordinal_resolver, 0, false)
+}
+
+/// Multi-token prefix search (startsWith). All tokens must be SI=0.
+pub fn suffix_contains_multi_token_prefix<F>(
+    sfx_reader: &SfxFileReader<'_>,
+    query_tokens: &[&str],
+    query_separators: &[&str],
+    raw_ordinal_resolver: F,
+) -> Vec<SuffixContainsMultiMatch>
+where
+    F: Fn(u64) -> Vec<RawPostingEntry>,
+{
+    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, raw_ordinal_resolver, 0, true)
 }
 
 /// Multi-token contains search with optional fuzzy distance.
-/// Fuzzy distance applies to both token matching (Levenshtein DFA on suffix FST)
-/// and separator validation (edit distance on separator bytes).
 pub fn suffix_contains_multi_token_fuzzy<F>(
     sfx_reader: &SfxFileReader<'_>,
     query_tokens: &[&str],
@@ -260,10 +329,11 @@ pub fn suffix_contains_multi_token_fuzzy<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, raw_ordinal_resolver, fuzzy_distance)
+    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, raw_ordinal_resolver, fuzzy_distance, false)
 }
 
-fn suffix_contains_multi_token_impl<F>(
+/// Multi-token fuzzy prefix search.
+pub fn suffix_contains_multi_token_fuzzy_prefix<F>(
     sfx_reader: &SfxFileReader<'_>,
     query_tokens: &[&str],
     query_separators: &[&str],
@@ -273,14 +343,28 @@ fn suffix_contains_multi_token_impl<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
+    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, raw_ordinal_resolver, fuzzy_distance, true)
+}
+
+fn suffix_contains_multi_token_impl<F>(
+    sfx_reader: &SfxFileReader<'_>,
+    query_tokens: &[&str],
+    query_separators: &[&str],
+    raw_ordinal_resolver: F,
+    fuzzy_distance: u8,
+    prefix_only: bool,
+) -> Vec<SuffixContainsMultiMatch>
+where
+    F: Fn(u64) -> Vec<RawPostingEntry>,
+{
     if query_tokens.is_empty() {
         return Vec::new();
     }
     if query_tokens.len() == 1 {
         let results = if fuzzy_distance > 0 {
-            suffix_contains_single_token_fuzzy(sfx_reader, query_tokens[0], fuzzy_distance, &raw_ordinal_resolver)
+            suffix_contains_single_token_fuzzy_inner(sfx_reader, query_tokens[0], fuzzy_distance, &raw_ordinal_resolver, prefix_only)
         } else {
-            suffix_contains_single_token(sfx_reader, query_tokens[0], &raw_ordinal_resolver)
+            suffix_contains_single_token_inner(sfx_reader, query_tokens[0], &raw_ordinal_resolver, prefix_only)
         };
         return results
             .into_iter()
@@ -338,8 +422,13 @@ where
 
         for (_suffix_term, parents) in &walk_results {
             for parent in parents {
-                if !is_first && parent.si != 0 {
-                    continue; // middle/last tokens must be SI=0
+                // For contains: first token accepts any SI, others SI=0.
+                // For prefix_only (startsWith): ALL tokens must be SI=0.
+                if prefix_only && parent.si != 0 {
+                    continue;
+                }
+                if !prefix_only && !is_first && parent.si != 0 {
+                    continue;
                 }
                 let entries = raw_ordinal_resolver(parent.raw_ordinal);
                 for entry in entries {

@@ -80,6 +80,8 @@ pub struct SuffixContainsQuery {
     raw_field: Field,
     query_text: String,
     fuzzy_distance: u8,
+    /// If true, only match tokens that START with the query (SI=0 filter).
+    prefix_only: bool,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
 }
@@ -94,9 +96,17 @@ impl SuffixContainsQuery {
             raw_field,
             query_text,
             fuzzy_distance: 0,
+            prefix_only: false,
             highlight_sink: None,
             highlight_field_name: String::new(),
         }
+    }
+
+    /// Only match tokens that START with the query (prefix/startsWith mode).
+    /// Filters suffix FST entries to SI=0 (full token start, not substring).
+    pub fn with_prefix_only(mut self) -> Self {
+        self.prefix_only = true;
+        self
     }
 
     /// Set fuzzy Levenshtein distance (0 = exact).
@@ -121,6 +131,7 @@ impl Query for SuffixContainsQuery {
             raw_field: self.raw_field,
             query_text: self.query_text.clone(),
             fuzzy_distance: self.fuzzy_distance,
+            prefix_only: self.prefix_only,
             highlight_sink: self.highlight_sink.clone(),
             highlight_field_name: self.highlight_field_name.clone(),
             scoring_enabled,
@@ -132,6 +143,7 @@ struct SuffixContainsWeight {
     raw_field: Field,
     query_text: String,
     fuzzy_distance: u8,
+    prefix_only: bool,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
     scoring_enabled: bool,
@@ -171,17 +183,31 @@ impl Weight for SuffixContainsWeight {
 
         let fuzzy_d = self.fuzzy_distance;
 
+        let prefix_only = self.prefix_only;
+
         let (doc_tf, highlights) = if query_tokens.len() <= 1 {
             // Single-token path
             let query = if query_tokens.is_empty() { &self.query_text } else { &query_tokens[0] };
             let matches = if fuzzy_d == 0 {
-                suffix_contains::suffix_contains_single_token(
-                    &sfx_reader, query, resolver,
-                )
+                if prefix_only {
+                    suffix_contains::suffix_contains_single_token_prefix(
+                        &sfx_reader, query, resolver,
+                    )
+                } else {
+                    suffix_contains::suffix_contains_single_token(
+                        &sfx_reader, query, resolver,
+                    )
+                }
             } else {
-                suffix_contains::suffix_contains_single_token_fuzzy(
-                    &sfx_reader, query, fuzzy_d, resolver,
-                )
+                if prefix_only {
+                    suffix_contains::suffix_contains_single_token_fuzzy_prefix(
+                        &sfx_reader, query, fuzzy_d, resolver,
+                    )
+                } else {
+                    suffix_contains::suffix_contains_single_token_fuzzy(
+                        &sfx_reader, query, fuzzy_d, resolver,
+                    )
+                }
             };
             let highlights: Vec<(DocId, usize, usize)> = matches.iter()
                 .map(|m| (m.doc_id, m.byte_from, m.byte_to))
@@ -194,13 +220,25 @@ impl Weight for SuffixContainsWeight {
             let token_refs: Vec<&str> = query_tokens.iter().map(|s| s.as_str()).collect();
             let sep_refs: Vec<&str> = query_separators.iter().map(|s| s.as_str()).collect();
             let matches = if fuzzy_d == 0 {
-                suffix_contains::suffix_contains_multi_token(
-                    &sfx_reader, &token_refs, &sep_refs, resolver,
-                )
+                if prefix_only {
+                    suffix_contains::suffix_contains_multi_token_prefix(
+                        &sfx_reader, &token_refs, &sep_refs, resolver,
+                    )
+                } else {
+                    suffix_contains::suffix_contains_multi_token(
+                        &sfx_reader, &token_refs, &sep_refs, resolver,
+                    )
+                }
             } else {
-                suffix_contains::suffix_contains_multi_token_fuzzy(
-                    &sfx_reader, &token_refs, &sep_refs, resolver, fuzzy_d,
-                )
+                if prefix_only {
+                    suffix_contains::suffix_contains_multi_token_fuzzy_prefix(
+                        &sfx_reader, &token_refs, &sep_refs, resolver, fuzzy_d,
+                    )
+                } else {
+                    suffix_contains::suffix_contains_multi_token_fuzzy(
+                        &sfx_reader, &token_refs, &sep_refs, resolver, fuzzy_d,
+                    )
+                }
             };
             let highlights: Vec<(DocId, usize, usize)> = matches.iter()
                 .map(|m| (m.doc_id, m.byte_from, m.byte_to))

@@ -397,16 +397,12 @@ fn build_starts_with_query(
     let value = config.value.as_deref().ok_or("startsWith query requires 'value'")?;
     let fuzzy_distance = config.distance.unwrap_or(0);
 
-    // Use RegexContinuationQuery with prefix DFA. The prefix DFA accepts as
-    // soon as the target text is consumed, regardless of remaining token bytes.
-    // Cross-token continuation through GapMap handles multi-token startsWith.
-    let mut query = RegexContinuationQuery::new(
-        field,
-        value.to_lowercase(),
-        ContinuationMode::StartsWith,
-    )
-    .with_prefix()
-    .with_fuzzy_distance(fuzzy_distance);
+    // Use SuffixContainsQuery with prefix_only (SI=0 filter).
+    // Same suffix FST walk as contains, but skips substring matches.
+    // Multi-token: all tokens must start at token boundary (SI=0).
+    let mut query = SuffixContainsQuery::new(field, value.to_lowercase())
+        .with_prefix_only()
+        .with_fuzzy_distance(fuzzy_distance);
     if let Some(sink) = highlight_sink {
         let field_name = config.field.clone().unwrap_or_default();
         query = query.with_highlight_sink(sink, field_name);
