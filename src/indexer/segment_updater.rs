@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use super::segment_manager::SegmentManager;
-use super::segment_updater_actor::{SegmentUpdaterActor, SegmentUpdaterMsg};
-use crate::actor::{mailbox, reply, ActorRef, Scheduler};
+use super::segment_updater_actor::*;
+use crate::actor::{mailbox, ActorRef, Envelope, Message, Scheduler};
 use crate::core::META_FILEPATH;
 use crate::directory::{Directory, DirectoryClone, GarbageCollectionResult};
 use crate::fastfield::AliveBitSet;
@@ -226,7 +226,7 @@ pub(crate) fn merge(
 #[derive(Clone)]
 pub(crate) struct SegmentUpdater {
     shared: Arc<SegmentUpdaterShared>,
-    actor_ref: ActorRef<SegmentUpdaterMsg>,
+    actor_ref: ActorRef<Envelope>,
 }
 
 impl Deref for SegmentUpdater {
@@ -259,8 +259,8 @@ impl SegmentUpdater {
             event_bus: Arc::new(EventBus::new()),
         });
 
-        let (mbox, mut aref) = mailbox(SEGMENT_UPDATER_MAILBOX_CAPACITY);
-        let actor = SegmentUpdaterActor::new(shared.clone());
+        let (mbox, mut aref) = mailbox::<Envelope>(SEGMENT_UPDATER_MAILBOX_CAPACITY);
+        let actor = create_segment_updater_actor(shared.clone());
         scheduler.spawn(actor, mbox, &mut aref, SEGMENT_UPDATER_MAILBOX_CAPACITY);
 
         Ok(SegmentUpdater {
@@ -288,9 +288,7 @@ impl SegmentUpdater {
         // le thread et provoquerait un deadlock quand tous les threads sont
         // occupés (doc 08 — cause racine des tests bloqués).
         self.actor_ref
-            .send(SegmentUpdaterMsg::AddSegment {
-                entry: segment_entry,
-            })
+            .send(SuAddSegmentMsg.into_envelope_with_local(segment_entry))
             .map_err(|_| {
                 LucivyError::SystemError("Segment updater actor died".to_string())
             })?;
@@ -304,7 +302,7 @@ impl SegmentUpdater {
 
     pub fn kill(&mut self) {
         self.shared.killed.store(true, Ordering::Release);
-        let _ = self.actor_ref.send(SegmentUpdaterMsg::Kill);
+        let _ = self.actor_ref.send(SuKillMsg.into_envelope());
     }
 
     pub(crate) fn schedule_commit(
@@ -315,30 +313,42 @@ impl SegmentUpdater {
         if !self.is_alive() {
             return Err(LucivyError::SystemError("Segment updater killed".to_string()));
         }
-        let (reply_tx, reply_rx) = reply();
+        let (env, rx) = SuCommitMsg { opstamp, payload }.into_request();
         self.actor_ref
-            .send(SegmentUpdaterMsg::Commit {
-                opstamp,
-                payload,
-                reply: reply_tx,
-            })
+            .send(env)
             .map_err(|_| {
                 LucivyError::SystemError("Segment updater actor died".to_string())
             })?;
-        reply_rx.wait_blocking()
+        match rx.wait_blocking() {
+            Ok(bytes) => {
+                let reply = SuOpsReply::decode(&bytes)
+                    .map_err(|e| LucivyError::SystemError(e))?;
+                Ok(reply.opstamp)
+            }
+            Err(err_bytes) => Err(
+                LucivyError::decode(&err_bytes)
+                    .unwrap_or_else(|e| LucivyError::SystemError(format!("decode: {e}")))
+            ),
+        }
     }
 
     pub fn schedule_garbage_collect(&self) -> crate::Result<GarbageCollectionResult> {
         if !self.is_alive() {
             return Err(LucivyError::SystemError("Segment updater killed".to_string()));
         }
-        let (reply_tx, reply_rx) = reply();
+        let (env, rx) = SuGarbageCollectMsg.into_request();
         self.actor_ref
-            .send(SegmentUpdaterMsg::GarbageCollect(reply_tx))
+            .send(env)
             .map_err(|_| {
                 LucivyError::SystemError("Segment updater actor died".to_string())
             })?;
-        reply_rx.wait_blocking()
+        match rx.wait_blocking() {
+            Ok(_) => garbage_collect_files(&self.shared),
+            Err(err_bytes) => Err(
+                LucivyError::decode(&err_bytes)
+                    .unwrap_or_else(|e| LucivyError::SystemError(format!("decode: {e}")))
+            ),
+        }
     }
 
     pub(crate) fn make_merge_operation(&self, segment_ids: &[SegmentId]) -> MergeOperation {
@@ -358,29 +368,32 @@ impl SegmentUpdater {
         if !self.is_alive() {
             return Err(LucivyError::SystemError("Segment updater killed".to_string()));
         }
-        let (reply_tx, reply_rx) = reply();
+        let (env, rx) = SuStartMergeMsg.into_request_with_local(merge_operation);
         self.actor_ref
-            .send(SegmentUpdaterMsg::StartMerge {
-                merge_operation,
-                reply: reply_tx,
-            })
+            .send(env)
             .map_err(|_| {
                 LucivyError::SystemError("Segment updater actor died".to_string())
             })?;
-        reply_rx.wait_blocking()
+        match rx.wait_blocking() {
+            Ok(_) => Ok(None), // StartMerge reply doesn't carry SegmentMeta in envelope mode
+            Err(err_bytes) => Err(
+                LucivyError::decode(&err_bytes)
+                    .unwrap_or_else(|e| LucivyError::SystemError(format!("decode: {e}")))
+            ),
+        }
     }
 
     pub fn wait_merging_thread(&self) -> crate::Result<()> {
         if !self.is_alive() {
             return Ok(());
         }
-        let (reply_tx, reply_rx) = reply();
+        let (env, rx) = SuDrainMergesMsg.into_request();
         self.actor_ref
-            .send(SegmentUpdaterMsg::DrainMerges(reply_tx))
+            .send(env)
             .map_err(|_| {
                 LucivyError::SystemError("Segment updater actor died".to_string())
             })?;
-        reply_rx.wait_blocking();
+        let _ = rx.wait_blocking();
         Ok(())
     }
 }
