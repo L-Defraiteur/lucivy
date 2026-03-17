@@ -12,13 +12,17 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use std::any::Any;
+
 use ld_lucivy::collector::Collector;
+use ld_lucivy::actor::envelope::{type_tag_hash, Envelope, Message, ReplyPort};
+use ld_lucivy::actor::handler::TypedHandler;
+use ld_lucivy::actor::generic_actor::GenericActor;
 use ld_lucivy::actor::mailbox::{mailbox, ActorRef};
-use ld_lucivy::actor::reply::{reply, Reply};
 use ld_lucivy::actor::scheduler::global_scheduler;
-use ld_lucivy::actor::{Actor, ActorStatus, Priority};
+use ld_lucivy::actor::{ActorStatus, Priority};
 use ld_lucivy::query::Weight;
-use ld_lucivy::schema::{Field, FieldType, Schema, Value};
+use ld_lucivy::schema::{Field, FieldType, Schema, Term, Value};
 use ld_lucivy::{DocAddress, Index, LucivyDocument};
 
 use crate::bm25_global::AggregatedBm25StatsOwned;
@@ -33,63 +37,102 @@ const SHARD_STATS_FILE: &str = "_shard_stats.bin";
 /// Config file for the sharded index (number of shards + schema).
 const SHARD_CONFIG_FILE: &str = "_shard_config.json";
 
-// ─── Actor ──────────────────────────────────────────────────────────────────
+// ─── Shard Actor Messages ───────────────────────────────────────────────────
+//
+// Each message type implements the Message trait (type_tag + encode/decode).
+// The Arc<dyn Weight> for search is passed via Envelope.local (not serialized).
 
-/// Message sent to a shard search actor.
-///
-/// Scatter-gather pattern: the Weight is pre-compiled with global BM25 stats
-/// by the caller. The actor just runs the Weight against its local segments.
-pub enum ShardSearchMsg {
-    /// Execute a pre-compiled Weight on this shard's segments.
-    Search {
-        /// Pre-compiled query weight (built with global BM25 stats).
-        weight: Arc<dyn Weight>,
-        top_k: usize,
-        reply: Reply<Result<Vec<(f32, DocAddress)>, String>>,
-    },
+/// Search: execute a pre-compiled Weight on this shard's segments.
+/// The Weight is in Envelope.local as Arc<dyn Weight>.
+struct ShardSearchMsg {
+    top_k: usize,
 }
 
-/// Persistent actor for a single shard. Holds an Arc to the shard's handle.
-/// Spawned once at create/open and lives until the ShardedHandle is dropped.
-struct ShardSearchActor {
-    shard_id: usize,
-    handle: Arc<LucivyHandle>,
-}
-
-impl Actor for ShardSearchActor {
-    type Msg = ShardSearchMsg;
-
-    fn name(&self) -> &'static str {
-        "shard-search"
+impl Message for ShardSearchMsg {
+    fn type_tag() -> u64 { type_tag_hash(b"ShardSearchMsg") }
+    fn encode(&self) -> Vec<u8> { (self.top_k as u32).to_le_bytes().to_vec() }
+    fn decode(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() < 4 { return Err("too short".into()); }
+        Ok(Self { top_k: u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize })
     }
+}
 
-    fn handle(&mut self, msg: ShardSearchMsg) -> ActorStatus {
-        match msg {
-            ShardSearchMsg::Search {
-                weight,
-                top_k,
-                reply,
-            } => {
-                let result = execute_weight_on_shard(
-                    &self.handle,
-                    self.shard_id,
-                    weight.as_ref(),
-                    top_k,
-                );
-                reply.send(result);
-                ActorStatus::Continue
-            }
+/// Insert a document into this shard.
+/// The LucivyDocument is in Envelope.local (not serializable yet).
+struct ShardInsertMsg;
+
+impl Message for ShardInsertMsg {
+    fn type_tag() -> u64 { type_tag_hash(b"ShardInsertMsg") }
+    fn encode(&self) -> Vec<u8> { vec![] }
+    fn decode(_bytes: &[u8]) -> Result<Self, String> { Ok(Self) }
+}
+
+/// Commit pending writes on this shard.
+struct ShardCommitMsg;
+
+impl Message for ShardCommitMsg {
+    fn type_tag() -> u64 { type_tag_hash(b"ShardCommitMsg") }
+    fn encode(&self) -> Vec<u8> { vec![] }
+    fn decode(_bytes: &[u8]) -> Result<Self, String> { Ok(Self) }
+}
+
+/// Delete a document by term on this shard.
+/// The Term is in Envelope.local.
+struct ShardDeleteMsg;
+
+impl Message for ShardDeleteMsg {
+    fn type_tag() -> u64 { type_tag_hash(b"ShardDeleteMsg") }
+    fn encode(&self) -> Vec<u8> { vec![] }
+    fn decode(_bytes: &[u8]) -> Result<Self, String> { Ok(Self) }
+}
+
+/// Reply with search results.
+struct ShardSearchReply {
+    results: Vec<(f32, DocAddress)>,
+}
+
+impl Message for ShardSearchReply {
+    fn type_tag() -> u64 { type_tag_hash(b"ShardSearchReply") }
+    fn encode(&self) -> Vec<u8> {
+        // Encode as: [num_results: u32] [score: f32, seg_ord: u32, doc_id: u32] ...
+        let mut buf = Vec::with_capacity(4 + self.results.len() * 12);
+        buf.extend_from_slice(&(self.results.len() as u32).to_le_bytes());
+        for (score, addr) in &self.results {
+            buf.extend_from_slice(&score.to_le_bytes());
+            buf.extend_from_slice(&addr.segment_ord.to_le_bytes());
+            buf.extend_from_slice(&addr.doc_id.to_le_bytes());
         }
+        buf
     }
-
-    fn priority(&self) -> Priority {
-        // Critical: the caller blocks on the reply.
-        Priority::Critical
+    fn decode(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() < 4 { return Err("too short".into()); }
+        let n = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+        let mut results = Vec::with_capacity(n);
+        let mut pos = 4;
+        for _ in 0..n {
+            if pos + 12 > bytes.len() { return Err("truncated".into()); }
+            let score = f32::from_le_bytes(bytes[pos..pos+4].try_into().unwrap());
+            let seg_ord = u32::from_le_bytes(bytes[pos+4..pos+8].try_into().unwrap());
+            let doc_id = u32::from_le_bytes(bytes[pos+8..pos+12].try_into().unwrap());
+            results.push((score, DocAddress { segment_ord: seg_ord, doc_id }));
+            pos += 12;
+        }
+        Ok(Self { results })
     }
 }
+
+/// Simple OK/Error reply.
+struct ShardOkReply;
+
+impl Message for ShardOkReply {
+    fn type_tag() -> u64 { type_tag_hash(b"ShardOkReply") }
+    fn encode(&self) -> Vec<u8> { vec![] }
+    fn decode(_bytes: &[u8]) -> Result<Self, String> { Ok(Self) }
+}
+
+// ─── Shard Actor Creation ───────────────────────────────────────────────────
 
 /// Execute a pre-compiled Weight on a single shard's segments.
-/// No query building or BM25 computation here — just scoring.
 fn execute_weight_on_shard(
     handle: &LucivyHandle,
     shard_id: usize,
@@ -111,6 +154,138 @@ fn execute_weight_on_shard(
     collector
         .merge_fruits(fruits)
         .map_err(|e| format!("merge shard_{shard_id}: {e}"))
+}
+
+/// Create a GenericActor for a shard with all roles: search, insert, commit, delete.
+fn create_shard_actor(shard_id: usize, handle: Arc<LucivyHandle>) -> GenericActor {
+    // Leak the name — one per shard, lives forever.
+    let name: &'static str = Box::leak(format!("shard-{shard_id}").into_boxed_str());
+    let mut actor = GenericActor::new(name);
+
+    // State: the shard's handle + insert buffer
+    actor.state_mut().insert::<Arc<LucivyHandle>>(handle);
+    actor.state_mut().insert::<usize>(shard_id);
+    actor.state_mut().insert::<Vec<LucivyDocument>>(Vec::new());
+
+    // Search handler: Weight comes via envelope.local
+    actor.register(TypedHandler::<ShardSearchMsg, _>::with_priority(
+        |state, msg, reply, local| {
+            let handle = state.get::<Arc<LucivyHandle>>().unwrap();
+            let shard_id = *state.get::<usize>().unwrap();
+
+            let weight = local
+                .and_then(|l| l.downcast::<Arc<dyn Weight>>().ok())
+                .map(|w| *w);
+
+            let result = match weight {
+                Some(w) => execute_weight_on_shard(handle, shard_id, w.as_ref(), msg.top_k),
+                None => Err("search: no Weight in envelope.local".into()),
+            };
+
+            if let Some(reply) = reply {
+                match result {
+                    Ok(hits) => reply.send(ShardSearchReply { results: hits }),
+                    Err(e) => reply.send_err(e),
+                }
+            }
+            ActorStatus::Continue
+        },
+        Priority::Critical,
+    ));
+
+    // Insert handler: LucivyDocument comes via envelope.local
+    actor.register(TypedHandler::<ShardInsertMsg, _>::new(
+        |state, _msg, reply, local| {
+            let handle = state.get::<Arc<LucivyHandle>>().unwrap();
+            let shard_id = *state.get::<usize>().unwrap();
+
+            let doc = local.and_then(|l| l.downcast::<LucivyDocument>().ok()).map(|d| *d);
+
+            let result = match doc {
+                Some(doc) => {
+                    let mut guard = handle.writer.lock().unwrap();
+                    match guard.as_mut() {
+                        Some(writer) => {
+                            writer.add_document(doc)
+                                .map(|_| { handle.mark_uncommitted(); })
+                                .map_err(|e| format!("insert shard_{shard_id}: {e}"))
+                        }
+                        None => Err(format!("shard_{shard_id} is closed")),
+                    }
+                }
+                None => Err("insert: no LucivyDocument in envelope.local".into()),
+            };
+
+            if let Some(reply) = reply {
+                match result {
+                    Ok(()) => reply.send(ShardOkReply),
+                    Err(e) => reply.send_err(e),
+                }
+            }
+            ActorStatus::Continue
+        },
+    ));
+
+    // Commit handler
+    actor.register(TypedHandler::<ShardCommitMsg, _>::new(
+        |state, _msg, reply, _local| {
+            let handle = state.get::<Arc<LucivyHandle>>().unwrap();
+            let shard_id = *state.get::<usize>().unwrap();
+
+            let result = (|| -> Result<(), String> {
+                let mut guard = handle.writer.lock().map_err(|_| "lock poisoned")?;
+                if let Some(ref mut writer) = *guard {
+                    writer.commit().map_err(|e| format!("commit shard_{shard_id}: {e}"))?;
+                }
+                handle.mark_committed();
+                handle.reader.reload().map_err(|e| format!("reload shard_{shard_id}: {e}"))?;
+                Ok(())
+            })();
+
+            if let Some(reply) = reply {
+                match result {
+                    Ok(()) => reply.send(ShardOkReply),
+                    Err(e) => reply.send_err(e),
+                }
+            }
+            ActorStatus::Continue
+        },
+    ));
+
+    // Delete handler: Term comes via envelope.local
+    actor.register(TypedHandler::<ShardDeleteMsg, _>::new(
+        |state, _msg, reply, local| {
+            let handle = state.get::<Arc<LucivyHandle>>().unwrap();
+            let shard_id = *state.get::<usize>().unwrap();
+
+            let term = local.and_then(|l| l.downcast::<Term>().ok()).map(|t| *t);
+
+            let result = match term {
+                Some(term) => {
+                    let mut guard = handle.writer.lock().unwrap();
+                    match guard.as_mut() {
+                        Some(writer) => {
+                            writer.delete_term(term);
+                            handle.mark_uncommitted();
+                            Ok(())
+                        }
+                        None => Err(format!("shard_{shard_id} is closed")),
+                    }
+                }
+                None => Err("delete: no Term in envelope.local".into()),
+            };
+
+            if let Some(reply) = reply {
+                match result {
+                    Ok(()) => reply.send(ShardOkReply),
+                    Err(e) => reply.send_err(e),
+                }
+            }
+            ActorStatus::Continue
+        },
+    ));
+
+    actor
 }
 
 // ─── Search Result ──────────────────────────────────────────────────────────
@@ -163,8 +338,8 @@ impl Ord for ScoredEntry {
 /// In WASM single-threaded mode, the scheduler processes them cooperatively.
 pub struct ShardedHandle {
     shards: Vec<Arc<LucivyHandle>>,
-    /// One ActorRef per shard, for sending search messages.
-    search_actors: Vec<ActorRef<ShardSearchMsg>>,
+    /// One ActorRef per shard (GenericActor, receives Envelopes).
+    shard_actors: Vec<ActorRef<Envelope>>,
     router: Mutex<ShardRouter>,
     /// Base directory path (contains shard_0/, shard_1/, ...).
     base_path: String,
@@ -180,20 +355,17 @@ pub struct ShardedHandle {
     text_fields: Vec<Field>,
 }
 
-/// Spawn N ShardSearchActors in the global scheduler.
-fn spawn_search_actors(
+/// Spawn N GenericActors (one per shard) in the global scheduler.
+fn spawn_shard_actors(
     shards: &[Arc<LucivyHandle>],
-) -> Vec<ActorRef<ShardSearchMsg>> {
+) -> Vec<ActorRef<Envelope>> {
     let scheduler = global_scheduler();
     let mut actors = Vec::with_capacity(shards.len());
 
     for (shard_id, handle) in shards.iter().enumerate() {
-        let actor = ShardSearchActor {
-            shard_id,
-            handle: Arc::clone(handle),
-        };
-        let (mailbox, mut actor_ref) = mailbox::<ShardSearchMsg>(64);
-        scheduler.spawn(actor, mailbox, &mut actor_ref, 64);
+        let actor = create_shard_actor(shard_id, Arc::clone(handle));
+        let (mb, mut actor_ref) = mailbox::<Envelope>(64);
+        scheduler.spawn(actor, mb, &mut actor_ref, 64);
         actors.push(actor_ref);
     }
 
@@ -257,11 +429,11 @@ impl ShardedHandle {
         let df_threshold = config.df_threshold.unwrap_or(5000);
         let balance_weight = config.balance_weight.unwrap_or(0.2);
         let router = ShardRouter::with_options(num_shards, df_threshold, balance_weight);
-        let search_actors = spawn_search_actors(&shards);
+        let shard_actors = spawn_shard_actors(&shards);
 
         Ok(Self {
             shards,
-            search_actors,
+            shard_actors,
             router: Mutex::new(router),
             base_path: base_path.to_string(),
             schema,
@@ -308,11 +480,11 @@ impl ShardedHandle {
         let schema = shards[0].schema.clone();
         let field_map = shards[0].field_map.clone();
         let text_fields = find_text_fields(&schema);
-        let search_actors = spawn_search_actors(&shards);
+        let shard_actors = spawn_shard_actors(&shards);
 
         Ok(Self {
             shards,
-            search_actors,
+            shard_actors,
             router: Mutex::new(router),
             base_path: base_path.to_string(),
             schema,
@@ -458,18 +630,15 @@ impl ShardedHandle {
             .map_err(|e| format!("weight: {e}"))?
             .into();
 
-        // ── Gather: dispatch Weight to all shard actors ─────────────────
+        // ── Gather: dispatch Weight to all shard actors via Envelope ────
 
-        let mut receivers = Vec::with_capacity(self.search_actors.len());
-        for actor_ref in &self.search_actors {
-            let (tx, rx) = reply();
+        let mut receivers = Vec::with_capacity(self.shard_actors.len());
+        for actor_ref in &self.shard_actors {
+            let msg = ShardSearchMsg { top_k };
+            let (env, rx) = msg.into_request_with_local(Arc::clone(&weight));
             actor_ref
-                .send(ShardSearchMsg::Search {
-                    weight: Arc::clone(&weight),
-                    top_k,
-                    reply: tx,
-                })
-                .map_err(|_| "search actor channel closed")?;
+                .send(env)
+                .map_err(|_| "shard actor channel closed")?;
             receivers.push(rx);
         }
 
@@ -478,7 +647,11 @@ impl ShardedHandle {
         let mut heap = BinaryHeap::with_capacity(top_k + 1);
 
         for (shard_id, rx) in receivers.into_iter().enumerate() {
-            let shard_hits = rx.wait_cooperative(|| scheduler.run_one_step())?;
+            let reply_bytes = rx.wait_cooperative(|| scheduler.run_one_step())
+                .map_err(|e| format!("search shard_{shard_id}: {e}"))?;
+            let shard_reply = ShardSearchReply::decode(&reply_bytes)
+                .map_err(|e| format!("decode shard_{shard_id} reply: {e}"))?;
+            let shard_hits = shard_reply.results;
 
             for (score, doc_addr) in shard_hits {
                 heap.push(ScoredEntry {
