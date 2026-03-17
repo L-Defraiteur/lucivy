@@ -9,7 +9,7 @@
 
 use std::collections::BinaryHeap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use std::any::Any;
@@ -23,6 +23,7 @@ use ld_lucivy::actor::scheduler::global_scheduler;
 use ld_lucivy::actor::{ActorStatus, Priority};
 use ld_lucivy::query::Weight;
 use ld_lucivy::schema::{Field, FieldType, Schema, Term, Value};
+use ld_lucivy::tokenizer::TokenizerManager;
 use ld_lucivy::{DocAddress, Index, LucivyDocument};
 
 use crate::bm25_global::AggregatedBm25StatsOwned;
@@ -309,6 +310,165 @@ impl Message for ShardOkReply {
     fn decode(_bytes: &[u8]) -> Result<Self, String> { Ok(Self) }
 }
 
+// ─── Pipeline Actor Messages ─────────────────────────────────────────────────
+//
+// Reader actors tokenize documents for routing. Router actor routes to shards.
+// The pipeline: ReaderActor[pool] → RouterActor → ShardActor[target].
+
+/// Tokenize a document for routing. (LucivyDocument, u64 node_id) in Envelope.local.
+struct ReaderTokenizeMsg;
+
+impl Message for ReaderTokenizeMsg {
+    fn type_tag() -> u64 { type_tag_hash(b"ReaderTokenizeMsg") }
+    fn encode(&self) -> Vec<u8> { vec![] }
+    fn decode(_bytes: &[u8]) -> Result<Self, String> { Ok(Self) }
+}
+
+/// Route a pre-tokenized document. (LucivyDocument, u64 node_id, Vec<u64> hashes) in local.
+struct RouterRouteMsg;
+
+impl Message for RouterRouteMsg {
+    fn type_tag() -> u64 { type_tag_hash(b"RouterRouteMsg") }
+    fn encode(&self) -> Vec<u8> { vec![] }
+    fn decode(_bytes: &[u8]) -> Result<Self, String> { Ok(Self) }
+}
+
+/// Drain: request/reply — ensures all prior messages in the mailbox are processed.
+struct PipelineDrainMsg;
+
+impl Message for PipelineDrainMsg {
+    fn type_tag() -> u64 { type_tag_hash(b"PipelineDrainMsg") }
+    fn encode(&self) -> Vec<u8> { vec![] }
+    fn decode(_bytes: &[u8]) -> Result<Self, String> { Ok(Self) }
+}
+
+/// Drain reply (ack).
+struct PipelineDrainReply;
+
+impl Message for PipelineDrainReply {
+    fn type_tag() -> u64 { type_tag_hash(b"PipelineDrainReply") }
+    fn encode(&self) -> Vec<u8> { vec![] }
+    fn decode(_bytes: &[u8]) -> Result<Self, String> { Ok(Self) }
+}
+
+// ─── Pipeline Actor Creation ─────────────────────────────────────────────────
+
+/// State needed by ReaderActors (shared, read-only).
+struct ReaderContext {
+    schema: Schema,
+    text_fields: Vec<Field>,
+    tokenizer_manager: TokenizerManager,
+    router_actor: ActorRef<Envelope>,
+}
+
+/// Create a ReaderActor that tokenizes documents and forwards to RouterActor.
+fn create_reader_actor(ctx: Arc<ReaderContext>) -> GenericActor {
+    let mut actor = GenericActor::new("reader");
+
+    let ctx2 = Arc::clone(&ctx);
+    actor.register(TypedHandler::<ReaderTokenizeMsg, _>::new(
+        move |_state, _msg, _reply, local| {
+            let (doc, node_id) = *local.unwrap().downcast::<(LucivyDocument, u64)>().unwrap();
+
+            // Tokenize + hash (CPU-bound work)
+            let hashes = extract_token_hashes_from(&doc, &ctx2.schema, &ctx2.text_fields, &ctx2.tokenizer_manager);
+
+            // Forward to router
+            let payload: (LucivyDocument, u64, Vec<u64>) = (doc, node_id, hashes);
+            let env = RouterRouteMsg.into_envelope_with_local(payload);
+            let _ = ctx2.router_actor.send(env);
+
+            ActorStatus::Continue
+        },
+    ));
+
+    // Drain handler: ack when all prior messages are processed (FIFO guarantee).
+    actor.register(TypedHandler::<PipelineDrainMsg, _>::new(
+        |_state, _msg, reply, _local| {
+            if let Some(reply) = reply {
+                reply.send(PipelineDrainReply);
+            }
+            ActorStatus::Continue
+        },
+    ));
+
+    actor
+}
+
+/// Create the RouterActor that routes tokenized documents to shard actors.
+fn create_router_actor(
+    router: Arc<Mutex<ShardRouter>>,
+    shard_actors: Vec<ActorRef<Envelope>>,
+) -> GenericActor {
+    let mut actor = GenericActor::new("router");
+
+    let router2 = Arc::clone(&router);
+    let shard_actors2 = shard_actors.clone();
+    actor.register(TypedHandler::<RouterRouteMsg, _>::new(
+        move |_state, _msg, _reply, local| {
+            let (doc, node_id, hashes) = *local.unwrap()
+                .downcast::<(LucivyDocument, u64, Vec<u64>)>().unwrap();
+
+            let shard_id = {
+                let mut r = router2.lock().unwrap();
+                let sid = r.route(&hashes);
+                r.record_node_id(node_id, sid);
+                sid
+            };
+
+            let env = ShardInsertMsg.into_envelope_with_local(doc);
+            let _ = shard_actors2[shard_id].send(env);
+
+            ActorStatus::Continue
+        },
+    ));
+
+    // Drain handler
+    let router3 = Arc::clone(&router);
+    let shard_actors3 = shard_actors;
+    actor.register(TypedHandler::<PipelineDrainMsg, _>::new(
+        move |_state, _msg, reply, _local| {
+            if let Some(reply) = reply {
+                reply.send(PipelineDrainReply);
+            }
+            ActorStatus::Continue
+        },
+    ));
+
+    actor
+}
+
+/// Tokenize text fields for routing hashes (standalone, no &self needed).
+fn extract_token_hashes_from(
+    doc: &LucivyDocument,
+    schema: &Schema,
+    text_fields: &[Field],
+    tokenizer_manager: &TokenizerManager,
+) -> Vec<u64> {
+    let mut hashes = Vec::new();
+    for (field, value) in doc.field_values() {
+        if !text_fields.contains(&field) {
+            continue;
+        }
+        if let Some(text) = value.as_value().as_str() {
+            let tokenizer_name = match schema.get_field_entry(field).field_type() {
+                FieldType::Str(opts) => opts
+                    .get_indexing_options()
+                    .map(|o| o.tokenizer())
+                    .unwrap_or("default"),
+                _ => "default",
+            };
+            if let Some(mut tokenizer) = tokenizer_manager.get(tokenizer_name) {
+                let mut stream = tokenizer.token_stream(text);
+                while let Some(token) = stream.next() {
+                    hashes.push(ShardRouter::hash_token(&token.text));
+                }
+            }
+        }
+    }
+    hashes
+}
+
 // ─── Shard Actor Creation ───────────────────────────────────────────────────
 
 /// Execute a pre-compiled Weight on a single shard's segments.
@@ -519,7 +679,7 @@ pub struct ShardedHandle {
     shards: Vec<Arc<LucivyHandle>>,
     /// One ActorRef per shard (GenericActor, receives Envelopes).
     shard_actors: Vec<ActorRef<Envelope>>,
-    router: Mutex<ShardRouter>,
+    router: Arc<Mutex<ShardRouter>>,
     /// Storage backend for root files and shard directories.
     storage: Box<dyn ShardStorage>,
     /// Schema (same across all shards).
@@ -532,6 +692,12 @@ pub struct ShardedHandle {
     has_deletes: AtomicBool,
     /// Text field IDs (for tokenization at add_document).
     text_fields: Vec<Field>,
+    /// Pipeline: pool of ReaderActors for parallel tokenization.
+    reader_actors: Vec<ActorRef<Envelope>>,
+    /// Pipeline: single RouterActor for sequential routing.
+    router_actor: ActorRef<Envelope>,
+    /// Round-robin index for reader actor selection.
+    next_reader: AtomicUsize,
 }
 
 /// Spawn N GenericActors (one per shard) in the global scheduler.
@@ -549,6 +715,47 @@ fn spawn_shard_actors(
     }
 
     actors
+}
+
+/// Spawn pipeline actors: N ReaderActors + 1 RouterActor.
+///
+/// ReaderActors tokenize+hash in parallel, RouterActor routes sequentially.
+fn spawn_pipeline_actors(
+    schema: &Schema,
+    text_fields: &[Field],
+    index: &Index,
+    router: &Arc<Mutex<ShardRouter>>,
+    shard_actors: &[ActorRef<Envelope>],
+    num_readers: usize,
+) -> (Vec<ActorRef<Envelope>>, ActorRef<Envelope>) {
+    let scheduler = global_scheduler();
+
+    // Spawn router actor first (readers need its ActorRef).
+    let router_generic = create_router_actor(
+        Arc::clone(router),
+        shard_actors.to_vec(),
+    );
+    let (router_mb, mut router_ref) = mailbox::<Envelope>(256);
+    scheduler.spawn(router_generic, router_mb, &mut router_ref, 256);
+
+    // Build shared reader context.
+    let ctx = Arc::new(ReaderContext {
+        schema: schema.clone(),
+        text_fields: text_fields.to_vec(),
+        tokenizer_manager: index.tokenizers().clone(),
+        router_actor: router_ref.clone(),
+    });
+
+    // Spawn reader actors.
+    let mut reader_refs = Vec::with_capacity(num_readers);
+    for _ in 0..num_readers {
+        let reader = create_reader_actor(Arc::clone(&ctx));
+        let (mb, mut r) = mailbox::<Envelope>(128);
+        scheduler.spawn(reader, mb, &mut r, 128);
+        reader_refs.push(r);
+    }
+
+    (reader_refs, router_ref)
 }
 
 /// Extract text field IDs from the schema (for automatic tokenization at add_document).
@@ -609,19 +816,35 @@ impl ShardedHandle {
         let text_fields = find_text_fields(&schema);
         let df_threshold = config.df_threshold.unwrap_or(5000);
         let balance_weight = config.balance_weight.unwrap_or(0.2);
-        let router = ShardRouter::with_options(num_shards, df_threshold, balance_weight);
+        let router = Arc::new(Mutex::new(
+            ShardRouter::with_options(num_shards, df_threshold, balance_weight),
+        ));
         let shard_actors = spawn_shard_actors(&shards);
+
+        // Pipeline: N readers + 1 router. Default N = num_shards (at least 2).
+        let num_readers = num_shards.max(2);
+        let (reader_actors, router_actor) = spawn_pipeline_actors(
+            &schema,
+            &text_fields,
+            &shards[0].index,
+            &router,
+            &shard_actors,
+            num_readers,
+        );
 
         Ok(Self {
             shards,
             shard_actors,
-            router: Mutex::new(router),
+            router,
             storage,
             schema,
             field_map,
             config: config.clone(),
             has_deletes: AtomicBool::new(false),
             text_fields,
+            reader_actors,
+            router_actor,
+            next_reader: AtomicUsize::new(0),
         })
     }
 
@@ -635,7 +858,7 @@ impl ShardedHandle {
         let num_shards = config.shards.unwrap_or(1);
 
         // Read shard router state if available.
-        let router = if storage.root_file_exists(SHARD_STATS_FILE) {
+        let router_inner = if storage.root_file_exists(SHARD_STATS_FILE) {
             let stats_data = storage.read_root_file(SHARD_STATS_FILE)?;
             ShardRouter::from_bytes(&stats_data)?
         } else {
@@ -643,6 +866,7 @@ impl ShardedHandle {
             let balance_weight = config.balance_weight.unwrap_or(0.2);
             ShardRouter::with_options(num_shards, df_threshold, balance_weight)
         };
+        let router = Arc::new(Mutex::new(router_inner));
 
         // Open each shard handle.
         let mut shards = Vec::with_capacity(num_shards);
@@ -656,30 +880,47 @@ impl ShardedHandle {
         let text_fields = find_text_fields(&schema);
         let shard_actors = spawn_shard_actors(&shards);
 
+        // Pipeline: N readers + 1 router.
+        let num_readers = num_shards.max(2);
+        let (reader_actors, router_actor) = spawn_pipeline_actors(
+            &schema,
+            &text_fields,
+            &shards[0].index,
+            &router,
+            &shard_actors,
+            num_readers,
+        );
+
         Ok(Self {
             shards,
             shard_actors,
-            router: Mutex::new(router),
+            router,
             storage,
             schema,
             field_map,
             config,
             has_deletes: AtomicBool::new(false),
             text_fields,
+            reader_actors,
+            router_actor,
+            next_reader: AtomicUsize::new(0),
         })
     }
 
-    /// Add a document, automatically tokenizing text fields for routing.
+    /// Add a document via the ingestion pipeline (non-blocking).
     ///
-    /// Extracts text from all text fields in the doc, tokenizes via the index's
-    /// tokenizer, hashes the tokens, routes to the best shard, and sends the doc
-    /// to the shard actor for insertion (non-blocking, parallel per shard).
-    pub fn add_document(&self, doc: LucivyDocument, node_id: u64) -> Result<usize, String> {
-        let token_hashes = self.extract_token_hashes(&doc);
-        self.route_and_send(doc, node_id, &token_hashes)
+    /// Sends the document to a ReaderActor (round-robin) which tokenizes+hashes
+    /// in parallel, then forwards to the RouterActor for routing to the right shard.
+    pub fn add_document(&self, doc: LucivyDocument, node_id: u64) -> Result<(), String> {
+        let idx = self.next_reader.fetch_add(1, Ordering::Relaxed) % self.reader_actors.len();
+        let payload: (LucivyDocument, u64) = (doc, node_id);
+        let env = ReaderTokenizeMsg.into_envelope_with_local(payload);
+        self.reader_actors[idx]
+            .send(env)
+            .map_err(|_| "reader actor channel closed".to_string())
     }
 
-    /// Add a document with pre-computed token hashes (for callers who already tokenized).
+    /// Add a document with pre-computed token hashes (bypasses reader actors).
     pub fn add_document_with_hashes(
         &self,
         doc: LucivyDocument,
@@ -689,8 +930,7 @@ impl ShardedHandle {
         self.route_and_send(doc, node_id, token_hashes)
     }
 
-    /// Route a document to a shard and send it to the shard actor.
-    /// Fire-and-forget: the actor handles the actual writer insert.
+    /// Route a document to a shard and send it to the shard actor (direct path).
     fn route_and_send(
         &self,
         doc: LucivyDocument,
@@ -704,7 +944,6 @@ impl ShardedHandle {
             sid
         };
 
-        // Send doc to shard actor — non-blocking, the actor writes it.
         let env = ShardInsertMsg.into_envelope_with_local(doc);
         self.shard_actors[shard_id]
             .send(env)
@@ -713,32 +952,27 @@ impl ShardedHandle {
         Ok(shard_id)
     }
 
-    /// Extract token hashes from a document's text fields.
-    fn extract_token_hashes(&self, doc: &LucivyDocument) -> Vec<u64> {
-        let mut hashes = Vec::new();
-        for (field, value) in doc.field_values() {
-            if !self.text_fields.contains(&field) {
-                continue;
-            }
-            if let Some(text) = value.as_value().as_str() {
-                // Tokenize using the index's tokenizer for this field.
-                let index = &self.shards[0].index;
-                let tokenizer_name = match self.schema.get_field_entry(field).field_type() {
-                    FieldType::Str(opts) => opts
-                        .get_indexing_options()
-                        .map(|o| o.tokenizer())
-                        .unwrap_or("default"),
-                    _ => "default",
-                };
-                if let Some(mut tokenizer) = index.tokenizers().get(tokenizer_name) {
-                    let mut stream = tokenizer.token_stream(text);
-                    while let Some(token) = stream.next() {
-                        hashes.push(ShardRouter::hash_token(&token.text));
-                    }
-                }
+    /// Drain all pipeline actors: wait for readers then router to finish pending work.
+    fn drain_pipeline(&self) {
+        let scheduler = global_scheduler();
+
+        // Drain all readers in parallel.
+        let mut reader_rxs = Vec::with_capacity(self.reader_actors.len());
+        for reader in &self.reader_actors {
+            let (env, rx) = PipelineDrainMsg.into_request();
+            if reader.send(env).is_ok() {
+                reader_rxs.push(rx);
             }
         }
-        hashes
+        for rx in reader_rxs {
+            let _ = rx.wait_cooperative(|| scheduler.run_one_step());
+        }
+
+        // Then drain the router (all reader outputs have been forwarded).
+        let (env, rx) = PipelineDrainMsg.into_request();
+        if self.router_actor.send(env).is_ok() {
+            let _ = rx.wait_cooperative(|| scheduler.run_one_step());
+        }
     }
 
     /// Search all shards in parallel and merge top-K results.
@@ -754,6 +988,9 @@ impl ShardedHandle {
         top_k: usize,
         highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
     ) -> Result<Vec<ShardedSearchResult>, String> {
+        // Drain pipeline: ensure all in-flight documents reach shard actors.
+        self.drain_pipeline();
+
         // Flush uncommitted changes on all shards before searching (via actors).
         {
             let scheduler = global_scheduler();
@@ -857,9 +1094,12 @@ impl ShardedHandle {
 
     /// Commit all shards in parallel via shard actors, then persist router state.
     ///
-    /// If deletes happened since last commit, resyncs the router's token counters
-    /// from the actual term dictionaries so they stay accurate.
+    /// Drains the ingestion pipeline first (readers → router → shards), then commits.
+    /// If deletes happened since last commit, resyncs the router's token counters.
     pub fn commit(&self) -> Result<(), String> {
+        // Drain the pipeline: wait for all in-flight documents to reach shards.
+        self.drain_pipeline();
+
         // Send Commit to all shard actors in parallel.
         let scheduler = global_scheduler();
         let mut receivers = Vec::with_capacity(self.shard_actors.len());
@@ -920,8 +1160,11 @@ impl ShardedHandle {
         Ok(())
     }
 
-    /// Close all shards (commit pending writes via actors, then release locks).
+    /// Close all shards (drain pipeline, commit pending writes, release locks).
     pub fn close(&self) -> Result<(), String> {
+        // Drain the ingestion pipeline first.
+        self.drain_pipeline();
+
         // Commit all pending writes via shard actors (flushes mailbox + writer).
         let scheduler = global_scheduler();
         let mut receivers = Vec::with_capacity(self.shard_actors.len());
