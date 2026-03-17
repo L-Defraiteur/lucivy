@@ -325,6 +325,15 @@ impl Message for ReaderTokenizeMsg {
     fn decode(_bytes: &[u8]) -> Result<Self, String> { Ok(Self) }
 }
 
+/// Tokenize a batch of documents. Vec<(LucivyDocument, u64)> in Envelope.local.
+struct ReaderBatchMsg;
+
+impl Message for ReaderBatchMsg {
+    fn type_tag() -> u64 { type_tag_hash(b"ReaderBatchMsg") }
+    fn encode(&self) -> Vec<u8> { vec![] }
+    fn decode(_bytes: &[u8]) -> Result<Self, String> { Ok(Self) }
+}
+
 /// Route a pre-tokenized document. (LucivyDocument, u64 node_id, Vec<u64> hashes) in local.
 struct RouterRouteMsg;
 
@@ -384,6 +393,26 @@ fn create_reader_actor(ctx: Arc<ReaderContext>) -> GenericActor {
                 (doc, node_id, hashes, pre_tokenized);
             let env = RouterRouteMsg.into_envelope_with_local(payload);
             let _ = ctx2.router_actor.send(env);
+
+            ActorStatus::Continue
+        },
+    ));
+
+    // Batch handler: tokenize all docs in one message, forward each to router.
+    let ctx3 = Arc::clone(&ctx);
+    actor.register(TypedHandler::<ReaderBatchMsg, _>::new(
+        move |_state, _msg, _reply, local| {
+            let batch = *local.unwrap().downcast::<Vec<(LucivyDocument, u64)>>().unwrap();
+
+            for (doc, node_id) in batch {
+                let (hashes, pre_tokenized) = tokenize_for_pipeline(
+                    &doc, &ctx3.schema, &ctx3.text_fields, &ctx3.tokenizer_manager,
+                );
+                let payload: (LucivyDocument, u64, Vec<u64>, PreTokenizedData) =
+                    (doc, node_id, hashes, pre_tokenized);
+                let env = RouterRouteMsg.into_envelope_with_local(payload);
+                let _ = ctx3.router_actor.send(env);
+            }
 
             ActorStatus::Continue
         },
@@ -964,6 +993,31 @@ impl ShardedHandle {
         self.reader_actors[idx]
             .send(env)
             .map_err(|_| "reader actor channel closed".to_string())
+    }
+
+    /// Add a batch of documents via the ingestion pipeline.
+    ///
+    /// Splits the batch into N sub-batches (one per ReaderActor) for parallel
+    /// tokenization. Each sub-batch is a single message — much less overhead
+    /// than N individual add_document calls.
+    pub fn add_documents(&self, docs: Vec<(LucivyDocument, u64)>) -> Result<(), String> {
+        let n = self.reader_actors.len();
+        // Distribute docs round-robin into per-reader sub-batches.
+        let mut batches: Vec<Vec<(LucivyDocument, u64)>> = (0..n).map(|_| Vec::new()).collect();
+        for (i, doc) in docs.into_iter().enumerate() {
+            batches[i % n].push(doc);
+        }
+        // Send each non-empty sub-batch as a single message.
+        for (i, batch) in batches.into_iter().enumerate() {
+            if batch.is_empty() {
+                continue;
+            }
+            let env = ReaderBatchMsg.into_envelope_with_local(batch);
+            self.reader_actors[i]
+                .send(env)
+                .map_err(|_| "reader actor channel closed".to_string())?;
+        }
+        Ok(())
     }
 
     /// Add a document with pre-computed token hashes (bypasses reader actors).
