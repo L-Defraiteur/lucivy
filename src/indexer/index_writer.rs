@@ -5,11 +5,11 @@ use std::sync::Arc;
 use common::BitSet;
 use smallvec::smallvec;
 
-use super::indexer_actor::{IndexerActor, IndexerMsg};
+use super::indexer_actor::{create_indexer_actor, IndexerDocsMsg, IndexerFlushMsg, IndexerShutdownMsg};
 use super::operation::{AddOperation, UserOperation};
 use super::segment_updater::SegmentUpdater;
 use super::{AddBatch, PreparedCommit};
-use crate::actor::{mailbox, reply, ActorRef};
+use crate::actor::{mailbox, ActorRef, Envelope, Message};
 use crate::directory::{DirectoryLock, GarbageCollectionResult, TerminatingWrite};
 use crate::error::LucivyError;
 use crate::fastfield::write_alive_bitset;
@@ -80,7 +80,7 @@ pub struct IndexWriter<D: Document = LucivyDocument> {
     options: IndexWriterOptions,
 
     /// ActorRef for each indexer worker.
-    worker_refs: Vec<ActorRef<IndexerMsg<D>>>,
+    worker_refs: Vec<ActorRef<Envelope>>,
 
     /// Round-robin counter for distributing docs to workers.
     next_worker: Arc<AtomicUsize>,
@@ -300,9 +300,9 @@ impl<D: Document> IndexWriter<D> {
 
         let mut worker_refs = Vec::with_capacity(options.num_worker_threads);
         for _ in 0..options.num_worker_threads {
-            let (mbox, mut aref) = mailbox(PIPELINE_MAX_SIZE_IN_DOCS);
+            let (mbox, mut aref) = mailbox::<Envelope>(PIPELINE_MAX_SIZE_IN_DOCS);
             let bomb = index_writer_status.create_bomb();
-            let actor = IndexerActor::new(
+            let actor = create_indexer_actor::<D>(
                 segment_updater.clone(),
                 index.clone(),
                 options.memory_budget_per_thread,
@@ -349,7 +349,7 @@ impl<D: Document> IndexWriter<D> {
 
         // Shutdown les workers — les acteurs se retirent du scheduler global.
         for worker in &self.worker_refs {
-            let _ = worker.send(IndexerMsg::Shutdown);
+            let _ = worker.send(IndexerShutdownMsg.into_envelope());
         }
 
         result
@@ -467,9 +467,9 @@ impl<D: Document> IndexWriter<D> {
         // Flush all workers so they finish any in-progress segments.
         // We ignore the results — those segments will be discarded anyway.
         for worker in &self.worker_refs {
-            let (reply_tx, reply_rx) = reply();
-            let _ = worker.send(IndexerMsg::Flush(reply_tx));
-            let _ = reply_rx.wait_blocking();
+            let (env, rx) = IndexerFlushMsg.into_request();
+            let _ = worker.send(env);
+            let _ = rx.wait_blocking();
         }
 
         // Now all workers are idle. Kill the segment updater.
@@ -513,17 +513,18 @@ impl<D: Document> IndexWriter<D> {
         // Send Flush to each worker via its actor mailbox.
         let mut receivers = Vec::new();
         for worker in &self.worker_refs {
-            let (reply_tx, reply_rx) = reply();
-            worker.send(IndexerMsg::Flush(reply_tx))
+            let (env, rx) = IndexerFlushMsg.into_request();
+            worker.send(env)
                 .map_err(|_| error_in_index_worker_thread("Worker died"))?;
-            receivers.push(reply_rx);
+            receivers.push(rx);
         }
 
         // Wait for all workers to finish flushing their current segments.
         // wait_blocking est sûr ici : on est sur le test/caller thread,
         // pas sur un thread du scheduler. Les scheduler threads traitent les Flush.
         for rx in receivers {
-            rx.wait_blocking()?;
+            rx.wait_blocking()
+                .map_err(|e| error_in_index_worker_thread(&e))?;
         }
 
         let commit_opstamp = self.stamper.stamp();
@@ -691,8 +692,9 @@ impl<D: Document> IndexWriter<D> {
             return Err(error_in_index_worker_thread("An index writer was killed."));
         }
         let idx = self.next_worker.fetch_add(1, Ordering::Relaxed) % self.worker_refs.len();
+        let env = IndexerDocsMsg.into_envelope_with_local(add_ops);
         self.worker_refs[idx]
-            .send(IndexerMsg::Docs(add_ops))
+            .send(env)
             .map_err(|_| error_in_index_worker_thread("An index writer was killed."))
     }
 }
@@ -703,7 +705,7 @@ impl<D: Document> Drop for IndexWriter<D> {
         // Send Shutdown to each worker actor so they exit cleanly.
         // Les acteurs se retirent du scheduler global — les threads persistent.
         for worker in &self.worker_refs {
-            let _ = worker.send(IndexerMsg::Shutdown);
+            let _ = worker.send(IndexerShutdownMsg.into_envelope());
         }
     }
 }
