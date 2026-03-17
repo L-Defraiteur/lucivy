@@ -523,8 +523,14 @@ impl<D: Document> IndexWriter<D> {
         // wait_blocking est sûr ici : on est sur le test/caller thread,
         // pas sur un thread du scheduler. Les scheduler threads traitent les Flush.
         for rx in receivers {
-            rx.wait_blocking()
-                .map_err(|e| error_in_index_worker_thread(&e))?;
+            match rx.wait_blocking() {
+                Ok(_) => {}
+                Err(err_bytes) => {
+                    let err = crate::LucivyError::decode(&err_bytes)
+                        .unwrap_or_else(|e| crate::LucivyError::SystemError(format!("decode: {e}")));
+                    return Err(err);
+                }
+            }
         }
 
         let commit_opstamp = self.stamper.stamp();

@@ -212,7 +212,7 @@ pub(crate) fn create_indexer_actor<D: Document>(
             if let Some(reply) = reply {
                 match result {
                     Ok(()) => reply.send(IndexerFlushReply),
-                    Err(e) => reply.send_err(format!("{e}")),
+                    Err(e) => reply.send_err(e),
                 }
             }
             ActorStatus::Continue

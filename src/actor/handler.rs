@@ -91,7 +91,9 @@ where
             Ok(msg) => (self.handler_fn)(state, msg, reply, local),
             Err(e) => {
                 if let Some(reply) = reply {
-                    reply.send_err(format!("decode error: {e}"));
+                    reply.send_err(crate::LucivyError::SystemError(
+                        format!("decode error: {e}")
+                    ));
                 }
                 ActorStatus::Continue
             }

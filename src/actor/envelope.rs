@@ -35,12 +35,12 @@ pub struct Envelope {
 
 /// Reply channel that sends bytes back to the caller.
 pub struct ReplyPort {
-    inner: Reply<Result<Vec<u8>, String>>,
+    inner: Reply<Result<Vec<u8>, Vec<u8>>>,
 }
 
 impl ReplyPort {
     /// Create a new ReplyPort from a Reply.
-    pub fn new(inner: Reply<Result<Vec<u8>, String>>) -> Self {
+    pub fn new(inner: Reply<Result<Vec<u8>, Vec<u8>>>) -> Self {
         Self { inner }
     }
 
@@ -54,14 +54,19 @@ impl ReplyPort {
         self.inner.send(Ok(bytes));
     }
 
-    /// Send an error.
-    pub fn send_err(self, err: String) {
-        self.inner.send(Err(err));
+    /// Send a serialized error (encoded via Message::encode).
+    pub fn send_err<E: Message>(self, err: E) {
+        self.inner.send(Err(err.encode()));
+    }
+
+    /// Send raw error bytes.
+    pub fn send_err_bytes(self, err_bytes: Vec<u8>) {
+        self.inner.send(Err(err_bytes));
     }
 }
 
 /// Create a (ReplyPort, ReplyReceiver) pair for request/response.
-pub fn reply_port() -> (ReplyPort, super::reply::ReplyReceiver<Result<Vec<u8>, String>>) {
+pub fn reply_port() -> (ReplyPort, super::reply::ReplyReceiver<Result<Vec<u8>, Vec<u8>>>) {
     let (tx, rx) = super::reply::reply();
     (ReplyPort::new(tx), rx)
 }
@@ -100,14 +105,18 @@ impl TypedActorRef {
     }
 
     /// Send a request and wait for a typed reply.
-    pub fn request<M: Message, R: Message>(&self, msg: M) -> Result<R, String> {
+    /// Errors are decoded as LucivyError (type-preserving).
+    pub fn request<M: Message, R: Message>(&self, msg: M) -> crate::Result<R> {
         let (env, rx) = msg.into_request();
-        self.inner.send(env).map_err(|_| "channel closed")?;
+        self.inner.send(env).map_err(|_| crate::LucivyError::SystemError("channel closed".into()))?;
         let scheduler = super::scheduler::global_scheduler();
-        let bytes = rx
-            .wait_cooperative(|| scheduler.run_one_step())
-            .map_err(|e| e)?;
-        R::decode(&bytes)
+        match rx.wait_cooperative(|| scheduler.run_one_step()) {
+            Ok(bytes) => R::decode(&bytes).map_err(|e| crate::LucivyError::SystemError(e)),
+            Err(err_bytes) => Err(
+                crate::LucivyError::decode(&err_bytes)
+                    .unwrap_or_else(|e| crate::LucivyError::SystemError(format!("error decode: {e}")))
+            ),
+        }
     }
 
     /// Send a request with local data and wait for a typed reply.
@@ -115,14 +124,17 @@ impl TypedActorRef {
         &self,
         msg: M,
         local: impl Any + Send,
-    ) -> Result<R, String> {
+    ) -> crate::Result<R> {
         let (env, rx) = msg.into_request_with_local(local);
-        self.inner.send(env).map_err(|_| "channel closed")?;
+        self.inner.send(env).map_err(|_| crate::LucivyError::SystemError("channel closed".into()))?;
         let scheduler = super::scheduler::global_scheduler();
-        let bytes = rx
-            .wait_cooperative(|| scheduler.run_one_step())
-            .map_err(|e| e)?;
-        R::decode(&bytes)
+        match rx.wait_cooperative(|| scheduler.run_one_step()) {
+            Ok(bytes) => R::decode(&bytes).map_err(|e| crate::LucivyError::SystemError(e)),
+            Err(err_bytes) => Err(
+                crate::LucivyError::decode(&err_bytes)
+                    .unwrap_or_else(|e| crate::LucivyError::SystemError(format!("error decode: {e}")))
+            ),
+        }
     }
 
     /// Access the inner ActorRef (for advanced use).
@@ -174,7 +186,7 @@ pub trait Message: Send + Sized + 'static {
     }
 
     /// Wrap into an Envelope with a reply port (no local data).
-    fn into_request(self) -> (Envelope, super::reply::ReplyReceiver<Result<Vec<u8>, String>>) {
+    fn into_request(self) -> (Envelope, super::reply::ReplyReceiver<Result<Vec<u8>, Vec<u8>>>) {
         let (port, rx) = reply_port();
         let envelope = Envelope {
             type_tag: Self::type_tag(),
@@ -189,7 +201,7 @@ pub trait Message: Send + Sized + 'static {
     fn into_request_with_local(
         self,
         local: impl Any + Send,
-    ) -> (Envelope, super::reply::ReplyReceiver<Result<Vec<u8>, String>>) {
+    ) -> (Envelope, super::reply::ReplyReceiver<Result<Vec<u8>, Vec<u8>>>) {
         let (port, rx) = reply_port();
         let envelope = Envelope {
             type_tag: Self::type_tag(),
@@ -307,13 +319,18 @@ mod tests {
 
     #[test]
     fn test_reply_port_error() {
+        use crate::LucivyError;
+
         let msg = PingMsg { value: 1 };
         let (env, rx) = msg.into_request();
         let reply = env.reply.unwrap();
-        reply.send_err("something broke".into());
+        reply.send_err(LucivyError::SchemaError("something broke".into()));
 
         let result = rx.wait_blocking();
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "something broke");
+        let err_bytes = result.unwrap_err();
+        let err = LucivyError::decode(&err_bytes).unwrap();
+        assert!(matches!(err, LucivyError::SchemaError(_)));
+        assert!(err.to_string().contains("something broke"));
     }
 }

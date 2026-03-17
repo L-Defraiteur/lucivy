@@ -92,10 +92,11 @@ impl GenericActor {
             None => {
                 // No handler — send error reply if expected, otherwise drop silently.
                 if let Some(reply) = envelope.reply {
-                    reply.send_err(format!(
+                    let err = crate::LucivyError::SystemError(format!(
                         "actor '{}' has no handler for type_tag {:#018x}",
                         self.name, envelope.type_tag
                     ));
+                    reply.send_err(err);
                 }
                 ActorStatus::Continue
             }

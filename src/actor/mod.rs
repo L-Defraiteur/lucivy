@@ -1,5 +1,6 @@
 pub mod actor_state;
 pub mod envelope;
+pub mod error_message;
 pub mod events;
 pub mod generic_actor;
 pub mod handler;
