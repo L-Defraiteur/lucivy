@@ -624,7 +624,26 @@ impl<D: Document> IndexWriter<D> {
     /// document queue.
     pub fn add_document(&self, document: D) -> crate::Result<Opstamp> {
         let opstamp = self.stamper.stamp();
-        self.send_add_documents_batch(smallvec![AddOperation { opstamp, document }])?;
+        self.send_add_documents_batch(smallvec![AddOperation { opstamp, document, pre_tokenized: None }])?;
+        Ok(opstamp)
+    }
+
+    /// Adds a document with pre-tokenized field data.
+    ///
+    /// The pre-tokenized data is passed through to the SegmentWriter, which
+    /// uses it instead of re-running the tokenizer. This eliminates double
+    /// tokenization when documents come from the reader actors pipeline.
+    pub fn add_document_pre_tokenized(
+        &self,
+        document: D,
+        pre_tokenized: crate::indexer::PreTokenizedData,
+    ) -> crate::Result<Opstamp> {
+        let opstamp = self.stamper.stamp();
+        self.send_add_documents_batch(smallvec![AddOperation {
+            opstamp,
+            document,
+            pre_tokenized: Some(pre_tokenized),
+        }])?;
         Ok(opstamp)
     }
 
@@ -684,7 +703,7 @@ impl<D: Document> IndexWriter<D> {
                     self.delete_queue.push(delete_operation);
                 }
                 UserOperation::Add(document) => {
-                    let add_operation = AddOperation { opstamp, document };
+                    let add_operation = AddOperation { opstamp, document, pre_tokenized: None };
                     adds.push(add_operation);
                 }
             }

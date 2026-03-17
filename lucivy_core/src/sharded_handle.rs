@@ -23,7 +23,8 @@ use ld_lucivy::actor::scheduler::global_scheduler;
 use ld_lucivy::actor::{ActorStatus, Priority};
 use ld_lucivy::query::Weight;
 use ld_lucivy::schema::{Field, FieldType, Schema, Term, Value};
-use ld_lucivy::tokenizer::TokenizerManager;
+use ld_lucivy::tokenizer::{PreTokenizedString, Token, TokenizerManager};
+use ld_lucivy::indexer::PreTokenizedData;
 use ld_lucivy::{DocAddress, Index, LucivyDocument};
 
 use crate::bm25_global::AggregatedBm25StatsOwned;
@@ -362,6 +363,9 @@ struct ReaderContext {
 }
 
 /// Create a ReaderActor that tokenizes documents and forwards to RouterActor.
+///
+/// Produces both routing hashes AND PreTokenizedData in a single pass,
+/// eliminating double tokenization in the SegmentWriter.
 fn create_reader_actor(ctx: Arc<ReaderContext>) -> GenericActor {
     let mut actor = GenericActor::new("reader");
 
@@ -370,11 +374,14 @@ fn create_reader_actor(ctx: Arc<ReaderContext>) -> GenericActor {
         move |_state, _msg, _reply, local| {
             let (doc, node_id) = *local.unwrap().downcast::<(LucivyDocument, u64)>().unwrap();
 
-            // Tokenize + hash (CPU-bound work)
-            let hashes = extract_token_hashes_from(&doc, &ctx2.schema, &ctx2.text_fields, &ctx2.tokenizer_manager);
+            // Tokenize once: produce hashes + PreTokenizedData (CPU-bound work)
+            let (hashes, pre_tokenized) = tokenize_for_pipeline(
+                &doc, &ctx2.schema, &ctx2.text_fields, &ctx2.tokenizer_manager,
+            );
 
-            // Forward to router
-            let payload: (LucivyDocument, u64, Vec<u64>) = (doc, node_id, hashes);
+            // Forward to router with pre-tokenized data
+            let payload: (LucivyDocument, u64, Vec<u64>, PreTokenizedData) =
+                (doc, node_id, hashes, pre_tokenized);
             let env = RouterRouteMsg.into_envelope_with_local(payload);
             let _ = ctx2.router_actor.send(env);
 
@@ -406,8 +413,8 @@ fn create_router_actor(
     let shard_actors2 = shard_actors.clone();
     actor.register(TypedHandler::<RouterRouteMsg, _>::new(
         move |_state, _msg, _reply, local| {
-            let (doc, node_id, hashes) = *local.unwrap()
-                .downcast::<(LucivyDocument, u64, Vec<u64>)>().unwrap();
+            let (doc, node_id, hashes, pre_tokenized) = *local.unwrap()
+                .downcast::<(LucivyDocument, u64, Vec<u64>, PreTokenizedData)>().unwrap();
 
             let shard_id = {
                 let mut r = router2.lock().unwrap();
@@ -416,7 +423,10 @@ fn create_router_actor(
                 sid
             };
 
-            let env = ShardInsertMsg.into_envelope_with_local(doc);
+            // Send (doc, pre_tokenized) to shard actor.
+            let pre_tok = if pre_tokenized.is_empty() { None } else { Some(pre_tokenized) };
+            let payload: (LucivyDocument, Option<PreTokenizedData>) = (doc, pre_tok);
+            let env = ShardInsertMsg.into_envelope_with_local(payload);
             let _ = shard_actors2[shard_id].send(env);
 
             ActorStatus::Continue
@@ -438,14 +448,22 @@ fn create_router_actor(
     actor
 }
 
-/// Tokenize text fields for routing hashes (standalone, no &self needed).
-fn extract_token_hashes_from(
+/// Tokenize text fields once: produce routing hashes AND PreTokenizedData.
+///
+/// The document is NOT modified. The PreTokenizedData is passed alongside
+/// the document through the pipeline to the SegmentWriter, which uses it
+/// instead of re-tokenizing (eliminates double tokenization).
+fn tokenize_for_pipeline(
     doc: &LucivyDocument,
     schema: &Schema,
     text_fields: &[Field],
     tokenizer_manager: &TokenizerManager,
-) -> Vec<u64> {
+) -> (Vec<u64>, PreTokenizedData) {
     let mut hashes = Vec::new();
+    // Group pre-tokenized data per field (supports multi-value fields).
+    let mut field_map: std::collections::HashMap<Field, Vec<PreTokenizedString>> =
+        std::collections::HashMap::new();
+
     for (field, value) in doc.field_values() {
         if !text_fields.contains(&field) {
             continue;
@@ -459,14 +477,30 @@ fn extract_token_hashes_from(
                 _ => "default",
             };
             if let Some(mut tokenizer) = tokenizer_manager.get(tokenizer_name) {
+                let mut tokens = Vec::new();
                 let mut stream = tokenizer.token_stream(text);
-                while let Some(token) = stream.next() {
+                while stream.advance() {
+                    let token = stream.token_mut();
                     hashes.push(ShardRouter::hash_token(&token.text));
+                    tokens.push(Token {
+                        offset_from: token.offset_from,
+                        offset_to: token.offset_to,
+                        position: token.position,
+                        text: std::mem::take(&mut token.text), // move, not clone
+                        position_length: token.position_length,
+                    });
                 }
+                drop(stream);
+
+                field_map.entry(field).or_default().push(PreTokenizedString {
+                    text: text.to_string(),
+                    tokens,
+                });
             }
         }
     }
-    hashes
+    let pre_tokenized: PreTokenizedData = field_map.into_iter().collect();
+    (hashes, pre_tokenized)
 }
 
 // ─── Shard Actor Creation ───────────────────────────────────────────────────
@@ -532,21 +566,33 @@ fn create_shard_actor(shard_id: usize, handle: Arc<LucivyHandle>) -> GenericActo
         Priority::Critical,
     ));
 
-    // Insert handler: LucivyDocument comes via envelope.local
+    // Insert handler: (LucivyDocument, Option<PreTokenizedData>) in envelope.local
     actor.register(TypedHandler::<ShardInsertMsg, _>::new(
         |state, _msg, reply, local| {
             let handle = state.get::<Arc<LucivyHandle>>().unwrap();
             let shard_id = *state.get::<usize>().unwrap();
 
-            let doc = local.and_then(|l| l.downcast::<LucivyDocument>().ok()).map(|d| *d);
+            // Try (doc, pre_tokenized) tuple first (pipeline path),
+            // then plain LucivyDocument (direct path / backward compat).
+            let (doc, pre_tok) = if let Some(tuple) = local
+                .and_then(|l| l.downcast::<(LucivyDocument, Option<PreTokenizedData>)>().ok())
+            {
+                (Some(tuple.0), tuple.1)
+            } else {
+                (None, None)
+            };
 
             let result = match doc {
                 Some(doc) => {
                     let mut guard = handle.writer.lock().unwrap();
                     match guard.as_mut() {
                         Some(writer) => {
-                            writer.add_document(doc)
-                                .map(|_| { handle.mark_uncommitted(); })
+                            let res = if let Some(pt) = pre_tok {
+                                writer.add_document_pre_tokenized(doc, pt)
+                            } else {
+                                writer.add_document(doc)
+                            };
+                            res.map(|_| { handle.mark_uncommitted(); })
                                 .map_err(|e| format!("insert shard_{shard_id}: {e}"))
                         }
                         None => Err(format!("shard_{shard_id} is closed")),
@@ -944,7 +990,8 @@ impl ShardedHandle {
             sid
         };
 
-        let env = ShardInsertMsg.into_envelope_with_local(doc);
+        let payload: (LucivyDocument, Option<PreTokenizedData>) = (doc, None);
+        let env = ShardInsertMsg.into_envelope_with_local(payload);
         self.shard_actors[shard_id]
             .send(env)
             .map_err(|_| format!("shard_{shard_id} actor channel closed"))?;

@@ -138,17 +138,32 @@ impl SfxCollector {
             let mut gaps = Vec::with_capacity(tokens.len() + 1);
 
             // prefix before first token
-            gaps.push(text_bytes[..tokens[0].offset_from].to_vec());
+            let first_start = tokens[0].offset_from;
+            if first_start <= text_bytes.len() {
+                gaps.push(text_bytes[..first_start].to_vec());
+            } else {
+                gaps.push(Vec::new());
+            }
 
             // separators between consecutive tokens
             for i in 1..tokens.len() {
                 let prev_end = tokens[i - 1].offset_to;
                 let curr_start = tokens[i].offset_from;
-                gaps.push(text_bytes[prev_end..curr_start].to_vec());
+                if prev_end <= curr_start && curr_start <= text_bytes.len() {
+                    gaps.push(text_bytes[prev_end..curr_start].to_vec());
+                } else {
+                    // Overlapping or out-of-order offsets: empty gap.
+                    gaps.push(Vec::new());
+                }
             }
 
             // suffix after last token
-            gaps.push(text_bytes[tokens.last().unwrap().offset_to..].to_vec());
+            let last_end = tokens.last().unwrap().offset_to;
+            if last_end <= text_bytes.len() {
+                gaps.push(text_bytes[last_end..].to_vec());
+            } else {
+                gaps.push(Vec::new());
+            }
 
             gaps
         };

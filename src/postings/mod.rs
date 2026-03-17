@@ -236,6 +236,7 @@ pub(crate) mod tests {
                        text_field => "a b a c a d a a.",
                        text_field => "d d d d a"
                     ),
+                    pre_tokenized: None,
                 };
                 segment_writer.add_document(op)?;
             }
@@ -243,6 +244,7 @@ pub(crate) mod tests {
                 let op = AddOperation {
                     opstamp: 1u64,
                     document: doc!(text_field => "b a"),
+                    pre_tokenized: None,
                 };
                 segment_writer.add_document(op).unwrap();
             }
@@ -252,6 +254,7 @@ pub(crate) mod tests {
                 let op = AddOperation {
                     opstamp: 2u64,
                     document: doc!(text_field => text),
+                    pre_tokenized: None,
                 };
                 segment_writer.add_document(op).unwrap();
             }

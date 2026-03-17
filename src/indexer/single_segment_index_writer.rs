@@ -34,7 +34,7 @@ impl<D: Document> SingleSegmentIndexWriter<D> {
         let opstamp = self.opstamp;
         self.opstamp += 1;
         self.segment_writer
-            .add_document(AddOperation { opstamp, document })
+            .add_document(AddOperation { opstamp, document, pre_tokenized: None })
     }
 
     pub fn finalize(self) -> crate::Result<Index> {

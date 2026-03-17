@@ -5,7 +5,7 @@ use common::JsonPathWriter;
 use itertools::Itertools;
 use tokenizer_api::BoxTokenStream;
 
-use super::operation::AddOperation;
+use super::operation::{AddOperation, PreTokenizedData};
 use crate::fastfield::FastFieldsWriter;
 use crate::fieldnorm::{FieldNormReaders, FieldNormsWriter};
 use crate::index::{Segment, SegmentComponent};
@@ -19,7 +19,7 @@ use crate::postings::{
 use crate::schema::document::{Document, Value};
 use crate::schema::{Field, FieldEntry, FieldType, Schema, DATE_TIME_PRECISION_INDEXED};
 use crate::suffix_fst::SfxCollector;
-use crate::tokenizer::{FacetTokenizer, PreTokenizedStream, TextAnalyzer, Tokenizer};
+use crate::tokenizer::{FacetTokenizer, PreTokenizedStream, PreTokenizedString, TextAnalyzer, Tokenizer};
 use crate::{DocId, Opstamp, LucivyError};
 
 /// Computes the initial size of the hash table.
@@ -194,7 +194,11 @@ impl SegmentWriter {
             + self.segment_serializer.mem_usage()
     }
 
-    fn index_document<D: Document>(&mut self, doc: &D) -> crate::Result<()> {
+    fn index_document<D: Document>(
+        &mut self,
+        doc: &D,
+        mut pre_tokenized: Option<PreTokenizedData>,
+    ) -> crate::Result<()> {
         let doc_id = self.max_doc;
 
         // TODO: Can this be optimised a bit?
@@ -267,24 +271,65 @@ impl SegmentWriter {
                         collector.begin_doc();
                     }
 
+                    // Extract pre-tokenized tokens for this field (drain from owned vec).
+                    // One PreTokenizedString per text value, consumed in order.
+                    let mut field_pre_toks: Vec<PreTokenizedString> = pre_tokenized
+                        .as_mut()
+                        .and_then(|pts| {
+                            pts.iter_mut()
+                                .find(|(f, _)| *f == field)
+                                .map(|(_, v)| std::mem::take(v))
+                        })
+                        .unwrap_or_default();
+                    let mut pre_tok_drain = field_pre_toks.drain(..);
+
                     for value in values {
                         let value = value.as_value();
 
-                        let raw_text_for_sfx = if has_sfx {
-                            value.as_str().map(|s| s.to_string())
-                        } else {
-                            None
-                        };
+                        // ── Pre-tokenized fast path ──────────────────────────
+                        // When pre-tokenized data is available, use it for BOTH
+                        // postings AND SfxCollector — zero re-tokenization, zero clones.
+                        if let Some(pre_tok) = pre_tok_drain.next() {
+                            if value.as_str().is_none() && value.into_pre_tokenized_text().is_none() {
+                                continue;
+                            }
 
-                        let mut token_stream = if let Some(text) = value.as_str() {
-                            let text_analyzer =
-                                &mut self.per_field_text_analyzers[field.field_id() as usize];
-                            text_analyzer.token_stream(text)
-                        } else if let Some(tok_str) = value.into_pre_tokenized_text() {
-                            BoxTokenStream::new(PreTokenizedStream::from(*tok_str.clone()))
-                        } else {
+                            assert!(term_buffer.is_empty());
+
+                            if has_sfx {
+                                // Feed SfxCollector by reference (borrow before move).
+                                let collector = self.sfx_collectors.get_mut(&field.field_id()).unwrap();
+                                collector.begin_value(&pre_tok.text);
+                                for tok in &pre_tok.tokens {
+                                    collector.add_token(&tok.text, tok.offset_from, tok.offset_to);
+                                }
+                                collector.end_value();
+                            }
+
+                            // Move into PreTokenizedStream — no clone.
+                            let mut token_stream = BoxTokenStream::new(
+                                PreTokenizedStream::from(pre_tok),
+                            );
+                            postings_writer.index_text(
+                                doc_id, &mut *token_stream, term_buffer, ctx,
+                                &mut indexing_position,
+                            );
                             continue;
-                        };
+                        }
+
+                        // ── Normal path (no pre-tokenized data) ──────────────
+                        let (raw_text_for_sfx, mut token_stream) =
+                            if let Some(text) = value.as_str() {
+                                let raw_text = if has_sfx { Some(text.to_string()) } else { None };
+                                let text_analyzer =
+                                    &mut self.per_field_text_analyzers[field.field_id() as usize];
+                                (raw_text, text_analyzer.token_stream(text))
+                            } else if let Some(tok_str) = value.into_pre_tokenized_text() {
+                                let raw_text = if has_sfx { Some(tok_str.text.clone()) } else { None };
+                                (raw_text, BoxTokenStream::new(PreTokenizedStream::from(*tok_str.clone())))
+                            } else {
+                                continue;
+                            };
 
                         assert!(term_buffer.is_empty());
 
@@ -466,11 +511,11 @@ impl SegmentWriter {
         &mut self,
         add_operation: AddOperation<D>,
     ) -> crate::Result<()> {
-        let AddOperation { document, opstamp } = add_operation;
+        let AddOperation { document, opstamp, pre_tokenized } = add_operation;
         self.doc_opstamps.push(opstamp);
         self.sfx_fed_this_doc.clear();
         self.fast_field_writers.add_document(&document)?;
-        self.index_document(&document)?;
+        self.index_document(&document, pre_tokenized)?;
         // Fill empty docs for sfx collectors that were not fed during this document
         let fed: Vec<u32> = self.sfx_fed_this_doc.clone();
         for (&field_id, collector) in &mut self.sfx_collectors {
