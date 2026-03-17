@@ -205,8 +205,39 @@ fn bench_sharding_comparison() {
     // ── Queries ─────────────────────────────────────────────────────────
 
     let queries: Vec<(&str, QueryConfig)> = vec![
+        ("contains 'function'", QueryConfig {
+            query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some("function".into()),
+            ..Default::default()
+        }),
+        ("contains_split 'create index'", QueryConfig {
+            query_type: "contains_split".into(),
+            field: Some("content".into()),
+            value: Some("create index".into()),
+            ..Default::default()
+        }),
+        // ── Same terms: contains vs startsWith head-to-head ──
+        ("contains 'segment'", QueryConfig {
+            query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some("segment".into()),
+            ..Default::default()
+        }),
+        ("startsWith 'segment'", QueryConfig {
+            query_type: "startsWith".into(),
+            field: Some("content".into()),
+            value: Some("segment".into()),
+            ..Default::default()
+        }),
         ("contains 'rag3db'", QueryConfig {
             query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some("rag3db".into()),
+            ..Default::default()
+        }),
+        ("startsWith 'rag3db'", QueryConfig {
+            query_type: "startsWith".into(),
             field: Some("content".into()),
             value: Some("rag3db".into()),
             ..Default::default()
@@ -217,25 +248,14 @@ fn bench_sharding_comparison() {
             value: Some("kuzu".into()),
             ..Default::default()
         }),
-        ("contains 'function'", QueryConfig {
-            query_type: "contains".into(),
-            field: Some("content".into()),
-            value: Some("function".into()),
-            ..Default::default()
-        }),
-        ("contains 'create index'", QueryConfig {
-            query_type: "contains_split".into(),
-            field: Some("content".into()),
-            value: Some("create index".into()),
-            ..Default::default()
-        }),
-        ("startsWith 'segment'", QueryConfig {
+        ("startsWith 'kuzu'", QueryConfig {
             query_type: "startsWith".into(),
             field: Some("content".into()),
-            value: Some("segment".into()),
+            value: Some("kuzu".into()),
             ..Default::default()
         }),
-        ("contains 'cmake'", QueryConfig {
+        // ── Other queries ──
+        ("contains 'cmake' (path)", QueryConfig {
             query_type: "contains".into(),
             field: Some("path".into()),
             value: Some("cmake".into()),
