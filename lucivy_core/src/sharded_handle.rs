@@ -498,32 +498,26 @@ impl ShardedHandle {
     /// Add a document, automatically tokenizing text fields for routing.
     ///
     /// Extracts text from all text fields in the doc, tokenizes via the index's
-    /// tokenizer, hashes the tokens, routes to the best shard, and inserts.
-    /// Also records the node_id → shard_id mapping for targeted deletes.
+    /// tokenizer, hashes the tokens, routes to the best shard, and sends the doc
+    /// to the shard actor for insertion (non-blocking, parallel per shard).
     pub fn add_document(&self, doc: LucivyDocument, node_id: u64) -> Result<usize, String> {
-        // Extract and hash tokens from all text field values in the document.
         let token_hashes = self.extract_token_hashes(&doc);
-
-        let shard_id = {
-            let mut router = self.router.lock().map_err(|_| "router lock poisoned")?;
-            let sid = router.route(&token_hashes);
-            router.record_node_id(node_id, sid);
-            sid
-        };
-
-        let handle = &self.shards[shard_id];
-        let mut guard = handle.writer.lock().map_err(|_| "writer lock poisoned")?;
-        let writer = guard.as_mut().ok_or("shard is closed")?;
-        writer
-            .add_document(doc)
-            .map_err(|e| format!("add_document to shard_{shard_id}: {e}"))?;
-        handle.mark_uncommitted();
-
-        Ok(shard_id)
+        self.route_and_send(doc, node_id, &token_hashes)
     }
 
     /// Add a document with pre-computed token hashes (for callers who already tokenized).
     pub fn add_document_with_hashes(
+        &self,
+        doc: LucivyDocument,
+        node_id: u64,
+        token_hashes: &[u64],
+    ) -> Result<usize, String> {
+        self.route_and_send(doc, node_id, token_hashes)
+    }
+
+    /// Route a document to a shard and send it to the shard actor.
+    /// Fire-and-forget: the actor handles the actual writer insert.
+    fn route_and_send(
         &self,
         doc: LucivyDocument,
         node_id: u64,
@@ -536,13 +530,11 @@ impl ShardedHandle {
             sid
         };
 
-        let handle = &self.shards[shard_id];
-        let mut guard = handle.writer.lock().map_err(|_| "writer lock poisoned")?;
-        let writer = guard.as_mut().ok_or("shard is closed")?;
-        writer
-            .add_document(doc)
-            .map_err(|e| format!("add_document to shard_{shard_id}: {e}"))?;
-        handle.mark_uncommitted();
+        // Send doc to shard actor — non-blocking, the actor writes it.
+        let env = ShardInsertMsg.into_envelope_with_local(doc);
+        self.shard_actors[shard_id]
+            .send(env)
+            .map_err(|_| format!("shard_{shard_id} actor channel closed"))?;
 
         Ok(shard_id)
     }
@@ -588,20 +580,22 @@ impl ShardedHandle {
         top_k: usize,
         highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
     ) -> Result<Vec<ShardedSearchResult>, String> {
-        // Flush uncommitted changes on all shards before searching.
-        for (i, shard) in self.shards.iter().enumerate() {
-            if shard.has_uncommitted() {
-                let mut guard = shard.writer.lock().map_err(|_| "writer lock poisoned")?;
-                if let Some(ref mut writer) = *guard {
-                    writer
-                        .commit()
-                        .map_err(|e| format!("commit shard_{i}: {e}"))?;
+        // Flush uncommitted changes on all shards before searching (via actors).
+        {
+            let scheduler = global_scheduler();
+            let mut flush_rxs = Vec::new();
+            for (i, (shard, actor_ref)) in self.shards.iter().zip(&self.shard_actors).enumerate() {
+                if shard.has_uncommitted() {
+                    let (env, rx) = ShardCommitMsg.into_request();
+                    actor_ref
+                        .send(env)
+                        .map_err(|_| format!("shard_{i} actor closed"))?;
+                    flush_rxs.push((i, rx));
                 }
-                shard.mark_committed();
-                shard
-                    .reader
-                    .reload()
-                    .map_err(|e| format!("reload shard_{i}: {e}"))?;
+            }
+            for (i, rx) in flush_rxs {
+                rx.wait_cooperative(|| scheduler.run_one_step())
+                    .map_err(|e| format!("flush shard_{i}: {e}"))?;
             }
         }
 
@@ -679,23 +673,26 @@ impl ShardedHandle {
         Ok(results)
     }
 
-    /// Commit all shards and persist the shard router state.
+    /// Commit all shards in parallel via shard actors, then persist router state.
     ///
     /// If deletes happened since last commit, resyncs the router's token counters
     /// from the actual term dictionaries so they stay accurate.
     pub fn commit(&self) -> Result<(), String> {
-        for (i, shard) in self.shards.iter().enumerate() {
-            let mut guard = shard.writer.lock().map_err(|_| "writer lock poisoned")?;
-            if let Some(ref mut writer) = *guard {
-                writer
-                    .commit()
-                    .map_err(|e| format!("commit shard_{i}: {e}"))?;
-            }
-            shard.mark_committed();
-            shard
-                .reader
-                .reload()
-                .map_err(|e| format!("reload shard_{i}: {e}"))?;
+        // Send Commit to all shard actors in parallel.
+        let scheduler = global_scheduler();
+        let mut receivers = Vec::with_capacity(self.shard_actors.len());
+        for actor_ref in &self.shard_actors {
+            let (env, rx) = ShardCommitMsg.into_request();
+            actor_ref
+                .send(env)
+                .map_err(|_| "shard actor channel closed")?;
+            receivers.push(rx);
+        }
+
+        // Wait for all commits to complete.
+        for (i, rx) in receivers.into_iter().enumerate() {
+            rx.wait_cooperative(|| scheduler.run_one_step())
+                .map_err(|e| format!("commit shard_{i}: {e}"))?;
         }
 
         // Resync router counters from index if deletes happened.
@@ -742,9 +739,24 @@ impl ShardedHandle {
         Ok(())
     }
 
-    /// Close all shards (flush + release writer locks).
+    /// Close all shards (commit pending writes via actors, then release locks).
     pub fn close(&self) -> Result<(), String> {
-        // Persist router state first.
+        // Commit all pending writes via shard actors (flushes mailbox + writer).
+        let scheduler = global_scheduler();
+        let mut receivers = Vec::with_capacity(self.shard_actors.len());
+        for (i, actor_ref) in self.shard_actors.iter().enumerate() {
+            let (env, rx) = ShardCommitMsg.into_request();
+            actor_ref
+                .send(env)
+                .map_err(|_| format!("shard_{i} actor closed on close"))?;
+            receivers.push((i, rx));
+        }
+        for (i, rx) in receivers {
+            rx.wait_cooperative(|| scheduler.run_one_step())
+                .map_err(|e| format!("commit on close shard_{i}: {e}"))?;
+        }
+
+        // Persist router state.
         {
             let router = self.router.lock().map_err(|_| "router lock poisoned")?;
             let stats_bytes = router.to_bytes();
@@ -755,6 +767,7 @@ impl ShardedHandle {
             .map_err(|e| format!("cannot write shard stats on close: {e}"))?;
         }
 
+        // Release writer locks.
         for (i, shard) in self.shards.iter().enumerate() {
             shard
                 .close()
@@ -763,16 +776,15 @@ impl ShardedHandle {
         Ok(())
     }
 
-    /// Delete a document by its _node_id.
+    /// Delete a document by its _node_id via shard actors.
     ///
     /// Uses the node_id → shard_id mapping to target only the correct shard.
-    /// If the mapping is missing (e.g. old data without mapping), falls back
-    /// to broadcasting the delete to all shards.
+    /// If the mapping is missing, broadcasts the delete to all shards.
     pub fn delete_by_node_id(&self, node_id: u64) -> Result<(), String> {
         let nid_field = self
             .field(NODE_ID_FIELD)
             .ok_or("_node_id field not found")?;
-        let term = ld_lucivy::schema::Term::from_field_u64(nid_field, node_id);
+        let term = Term::from_field_u64(nid_field, node_id);
 
         let target_shard = {
             let mut router = self.router.lock().map_err(|_| "router lock poisoned")?;
@@ -780,25 +792,18 @@ impl ShardedHandle {
         };
 
         if let Some(shard_id) = target_shard {
-            // Targeted delete: only the shard that holds this doc.
-            let shard = &self.shards[shard_id];
-            let mut guard = shard.writer.lock().map_err(|_| "writer lock poisoned")?;
-            if let Some(ref mut writer) = *guard {
-                writer.delete_term(term);
-                shard.mark_uncommitted();
-            } else {
-                return Err(format!("shard_{shard_id} is closed"));
-            }
+            // Targeted delete via actor.
+            let env = ShardDeleteMsg.into_envelope_with_local(term);
+            self.shard_actors[shard_id]
+                .send(env)
+                .map_err(|_| format!("shard_{shard_id} actor channel closed"))?;
         } else {
-            // Fallback: broadcast to all shards.
-            for (i, shard) in self.shards.iter().enumerate() {
-                let mut guard = shard.writer.lock().map_err(|_| "writer lock poisoned")?;
-                if let Some(ref mut writer) = *guard {
-                    writer.delete_term(term.clone());
-                    shard.mark_uncommitted();
-                } else {
-                    return Err(format!("shard_{i} is closed"));
-                }
+            // Broadcast delete to all shard actors.
+            for (i, actor_ref) in self.shard_actors.iter().enumerate() {
+                let env = ShardDeleteMsg.into_envelope_with_local(term.clone());
+                actor_ref
+                    .send(env)
+                    .map_err(|_| format!("shard_{i} actor channel closed"))?;
             }
         }
 
