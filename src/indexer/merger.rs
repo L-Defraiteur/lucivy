@@ -580,9 +580,7 @@ impl IndexMerger {
         self.write_fast_fields(serializer.get_fast_field_write(), doc_id_mapping)?;
 
         debug!("write-sfx");
-        let sfx_t0 = std::time::Instant::now();
         self.merge_sfx(&mut serializer, &sfx_doc_mapping)?;
-        info!("merge_sfx took {:.1}ms", sfx_t0.elapsed().as_secs_f64() * 1000.0);
 
         debug!("close-serializer");
         serializer.close()?;
@@ -655,7 +653,6 @@ impl IndexMerger {
                 })
                 .collect();
 
-            let step_t0 = std::time::Instant::now();
             // 1. Collect unique tokens that have at least one alive document.
             // We can't blindly use inverted_index.terms() because it includes terms
             // from deleted documents — those get purged in the merged TermDictionary,
@@ -689,9 +686,6 @@ impl IndexMerger {
                 }
             }
 
-            info!("  merge_sfx step1 (collect tokens): {:.1}ms, {} unique tokens",
-                step_t0.elapsed().as_secs_f64() * 1000.0, unique_tokens.len());
-            let step_t1 = std::time::Instant::now();
             // 2. Build suffix FST
             let mut sfx_builder = SuffixFstBuilder::new();
             for (ordinal, token) in unique_tokens.iter().enumerate() {
@@ -701,9 +695,6 @@ impl IndexMerger {
                 crate::LucivyError::SystemError(format!("merge sfx build: {e}"))
             })?;
 
-            info!("  merge_sfx step2 (build FST): {:.1}ms",
-                step_t1.elapsed().as_secs_f64() * 1000.0);
-            let step_t2 = std::time::Instant::now();
             // 3. Build GapMap by copying doc data in merge order
             let mut gapmap_writer = GapMapWriter::new();
             for &doc_addr in doc_mapping {
@@ -719,9 +710,6 @@ impl IndexMerger {
                 }
             }
 
-            info!("  merge_sfx step3 (gapmap): {:.1}ms",
-                step_t2.elapsed().as_secs_f64() * 1000.0);
-            let step_t3 = std::time::Instant::now();
             // 4. Reconstruct .sfxpost by merging posting entries with doc_id remapping
             let mut sfxpost_data: Option<Vec<u8>> = None;
             {
@@ -805,8 +793,6 @@ impl IndexMerger {
                 }
             }
 
-            info!("  merge_sfx step4 (sfxpost merge): {:.1}ms",
-                step_t3.elapsed().as_secs_f64() * 1000.0);
             // 5. Assemble and write .sfx + .sfxpost
             let gapmap_data = gapmap_writer.serialize();
             let sfx_file = SfxFileWriter::new(

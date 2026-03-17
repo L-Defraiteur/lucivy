@@ -164,6 +164,7 @@ trait AnyActor: Send {
     fn try_handle_one(&mut self) -> Option<ActorStatus>;
     fn priority(&self) -> Priority;
     fn has_pending(&self) -> bool;
+    fn is_disconnected(&self) -> bool;
     fn poll_idle(&mut self) -> Poll<()>;
     fn name(&self) -> &'static str;
     fn mailbox_len(&self) -> usize;
@@ -186,6 +187,10 @@ impl<A: Actor> AnyActor for ActorWrapper<A> {
 
     fn has_pending(&self) -> bool {
         self.mailbox.has_pending()
+    }
+
+    fn is_disconnected(&self) -> bool {
+        self.mailbox.is_disconnected()
     }
 
     fn poll_idle(&mut self) -> Poll<()> {
@@ -691,10 +696,17 @@ fn run_one_step_impl(shared: &SharedState) -> bool {
                 ActorStatus::Yield | ActorStatus::Continue => (false, false),
             }
         }
-        None => match actor_box.poll_idle() {
-            Poll::Ready(()) => (false, false),
-            Poll::Pending => (false, true),
-        },
+        None => {
+            // Garbage-collect zombie actors: all senders dropped + mailbox empty.
+            if actor_box.is_disconnected() {
+                (true, false) // treat as stopped
+            } else {
+                match actor_box.poll_idle() {
+                    Poll::Ready(()) => (false, false),
+                    Poll::Pending => (false, true),
+                }
+            }
+        }
     };
 
     if stopped {

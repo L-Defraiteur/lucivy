@@ -16,6 +16,12 @@ impl<M> Mailbox<M> {
         self.receiver.try_recv().ok()
     }
 
+    /// Returns true if all senders have been dropped and the mailbox is empty.
+    /// The scheduler uses this to garbage-collect zombie actors.
+    pub fn is_disconnected(&self) -> bool {
+        self.receiver.is_disconnected() && self.receiver.is_empty()
+    }
+
     pub fn has_pending(&self) -> bool {
         !self.receiver.is_empty()
     }

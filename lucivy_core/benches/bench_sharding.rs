@@ -102,6 +102,8 @@ fn index_single(files: &[(String, String)], dir: &str) -> (LucivyHandle, f64) {
     let content_f = handle.field("content").unwrap();
     let nid_f = handle.field(NODE_ID_FIELD).unwrap();
 
+    let commit_every = 5000;
+    let total = files.len();
     let t0 = Instant::now();
     {
         let mut guard = handle.writer.lock().unwrap();
@@ -112,8 +114,9 @@ fn index_single(files: &[(String, String)], dir: &str) -> (LucivyHandle, f64) {
             doc.add_text(path_f, path);
             doc.add_text(content_f, content);
             w.add_document(doc).unwrap();
-            if (i + 1) % 1000 == 0 {
+            if (i + 1) % commit_every == 0 {
                 w.commit().unwrap();
+                eprintln!("    committed {}/{} ({:.1}s)", i + 1, total, t0.elapsed().as_secs_f64());
             }
         }
         w.commit().unwrap();
@@ -131,6 +134,8 @@ fn index_sharded(files: &[(String, String)], dir: &str, num_shards: usize, balan
     let content_f = handle.field("content").unwrap();
     let nid_f = handle.field(NODE_ID_FIELD).unwrap();
 
+    let commit_every = 5000;
+    let total = files.len();
     let t0 = Instant::now();
     for (i, (path, content)) in files.iter().enumerate() {
         let mut doc = ld_lucivy::LucivyDocument::new();
@@ -138,6 +143,10 @@ fn index_sharded(files: &[(String, String)], dir: &str, num_shards: usize, balan
         doc.add_text(path_f, path);
         doc.add_text(content_f, content);
         handle.add_document(doc, i as u64).unwrap();
+        if (i + 1) % commit_every == 0 {
+            handle.commit().unwrap();
+            eprintln!("    committed {}/{} ({:.1}s)", i + 1, total, t0.elapsed().as_secs_f64());
+        }
     }
     handle.commit().unwrap();
     let elapsed = t0.elapsed().as_secs_f64();
@@ -170,7 +179,7 @@ fn bench_sharding_comparison() {
     let max_docs: usize = std::env::var("MAX_DOCS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(5000);
+        .unwrap_or(usize::MAX);
 
     eprintln!("\n=== Collecting files from {} (max {}) ===", RAG3DB_CLONE, max_docs);
     let files = collect_files(Path::new(RAG3DB_CLONE), max_docs);
