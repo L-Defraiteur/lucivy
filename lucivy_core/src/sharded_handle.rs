@@ -31,6 +31,91 @@ use crate::handle::{LucivyHandle, NODE_ID_FIELD};
 use crate::query::{QueryConfig, SchemaConfig};
 use crate::shard_router::ShardRouter;
 
+// ─── Storage abstraction ────────────────────────────────────────────────────
+
+/// Abstraction for shard storage.
+///
+/// Each implementation creates `LucivyHandle`s with its own concrete Directory type
+/// (StdFsDirectory, BlobDirectory, RamDirectory, etc.). Also handles root-level
+/// file persistence (config, stats).
+///
+/// Implementations:
+/// - `FsShardStorage` — filesystem (default)
+/// - `BlobShardStorage` — ACID (mmap + DB blob) [future, in rag3weaver]
+/// - `MemShardStorage` — in-memory (tests) [future]
+pub trait ShardStorage: Send + Sync {
+    /// Create a new LucivyHandle for a shard (index creation).
+    fn create_shard_handle(
+        &self,
+        shard_id: usize,
+        config: &SchemaConfig,
+    ) -> Result<LucivyHandle, String>;
+
+    /// Open an existing LucivyHandle for a shard.
+    fn open_shard_handle(&self, shard_id: usize) -> Result<LucivyHandle, String>;
+
+    /// Write a root-level file (e.g. _shard_config.json, _shard_stats.bin).
+    fn write_root_file(&self, name: &str, data: &[u8]) -> Result<(), String>;
+
+    /// Read a root-level file.
+    fn read_root_file(&self, name: &str) -> Result<Vec<u8>, String>;
+
+    /// Check if a root-level file exists.
+    fn root_file_exists(&self, name: &str) -> bool;
+}
+
+/// Filesystem-based shard storage (default).
+pub struct FsShardStorage {
+    base_path: String,
+}
+
+impl FsShardStorage {
+    /// Create a new FsShardStorage, creating the base directory if needed.
+    pub fn new(base_path: &str) -> Result<Self, String> {
+        std::fs::create_dir_all(base_path)
+            .map_err(|e| format!("cannot create base dir: {e}"))?;
+        Ok(Self {
+            base_path: base_path.to_string(),
+        })
+    }
+}
+
+impl ShardStorage for FsShardStorage {
+    fn create_shard_handle(
+        &self,
+        shard_id: usize,
+        config: &SchemaConfig,
+    ) -> Result<LucivyHandle, String> {
+        let shard_dir = Path::new(&self.base_path).join(format!("shard_{shard_id}"));
+        std::fs::create_dir_all(&shard_dir)
+            .map_err(|e| format!("cannot create shard_{shard_id} dir: {e}"))?;
+        let dir = StdFsDirectory::open(shard_dir.to_str().unwrap())
+            .map_err(|e| format!("cannot open shard_{shard_id} dir: {e}"))?;
+        LucivyHandle::create(dir, config)
+    }
+
+    fn open_shard_handle(&self, shard_id: usize) -> Result<LucivyHandle, String> {
+        let shard_dir = Path::new(&self.base_path).join(format!("shard_{shard_id}"));
+        let dir = StdFsDirectory::open(shard_dir.to_str().unwrap())
+            .map_err(|e| format!("cannot open shard_{shard_id} dir: {e}"))?;
+        LucivyHandle::open(dir)
+    }
+
+    fn write_root_file(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        std::fs::write(Path::new(&self.base_path).join(name), data)
+            .map_err(|e| format!("cannot write {name}: {e}"))
+    }
+
+    fn read_root_file(&self, name: &str) -> Result<Vec<u8>, String> {
+        std::fs::read(Path::new(&self.base_path).join(name))
+            .map_err(|e| format!("cannot read {name}: {e}"))
+    }
+
+    fn root_file_exists(&self, name: &str) -> bool {
+        Path::new(&self.base_path).join(name).exists()
+    }
+}
+
 /// File storing shard router state (counters, thresholds).
 const SHARD_STATS_FILE: &str = "_shard_stats.bin";
 
@@ -185,7 +270,7 @@ fn create_shard_actor(shard_id: usize, handle: Arc<LucivyHandle>) -> GenericActo
             if let Some(reply) = reply {
                 match result {
                     Ok(hits) => reply.send(ShardSearchReply { results: hits }),
-                    Err(e) => reply.send_err(e),
+                    Err(e) => reply.send_err(ld_lucivy::LucivyError::SystemError(e)),
                 }
             }
             ActorStatus::Continue
@@ -219,7 +304,7 @@ fn create_shard_actor(shard_id: usize, handle: Arc<LucivyHandle>) -> GenericActo
             if let Some(reply) = reply {
                 match result {
                     Ok(()) => reply.send(ShardOkReply),
-                    Err(e) => reply.send_err(e),
+                    Err(e) => reply.send_err(ld_lucivy::LucivyError::SystemError(e)),
                 }
             }
             ActorStatus::Continue
@@ -245,7 +330,7 @@ fn create_shard_actor(shard_id: usize, handle: Arc<LucivyHandle>) -> GenericActo
             if let Some(reply) = reply {
                 match result {
                     Ok(()) => reply.send(ShardOkReply),
-                    Err(e) => reply.send_err(e),
+                    Err(e) => reply.send_err(ld_lucivy::LucivyError::SystemError(e)),
                 }
             }
             ActorStatus::Continue
@@ -278,7 +363,7 @@ fn create_shard_actor(shard_id: usize, handle: Arc<LucivyHandle>) -> GenericActo
             if let Some(reply) = reply {
                 match result {
                     Ok(()) => reply.send(ShardOkReply),
-                    Err(e) => reply.send_err(e),
+                    Err(e) => reply.send_err(ld_lucivy::LucivyError::SystemError(e)),
                 }
             }
             ActorStatus::Continue
@@ -341,8 +426,8 @@ pub struct ShardedHandle {
     /// One ActorRef per shard (GenericActor, receives Envelopes).
     shard_actors: Vec<ActorRef<Envelope>>,
     router: Mutex<ShardRouter>,
-    /// Base directory path (contains shard_0/, shard_1/, ...).
-    base_path: String,
+    /// Storage backend for root files and shard directories.
+    storage: Box<dyn ShardStorage>,
     /// Schema (same across all shards).
     pub schema: Schema,
     /// Field map (same across all shards).
@@ -389,37 +474,39 @@ fn find_text_fields(schema: &Schema) -> Vec<Field> {
 }
 
 impl ShardedHandle {
-    /// Create a new sharded index.
-    ///
-    /// Creates `config.shards` sub-directories, each with its own `LucivyHandle`.
-    /// Spawns N `ShardSearchActor`s in the global scheduler.
+    /// Create a new sharded index on the filesystem.
     pub fn create(base_path: &str, config: &SchemaConfig) -> Result<Self, String> {
+        let storage = FsShardStorage::new(base_path)?;
+        Self::create_with_storage(Box::new(storage), config)
+    }
+
+    /// Open an existing sharded index from the filesystem.
+    pub fn open(base_path: &str) -> Result<Self, String> {
+        let storage = FsShardStorage::new(base_path)?;
+        Self::open_with_storage(Box::new(storage))
+    }
+
+    /// Create a new sharded index with a custom storage backend.
+    ///
+    /// Use this for BlobStore-backed indexes, in-memory indexes, etc.
+    pub fn create_with_storage(
+        storage: Box<dyn ShardStorage>,
+        config: &SchemaConfig,
+    ) -> Result<Self, String> {
         let num_shards = config.shards.unwrap_or(1);
         if num_shards == 0 {
             return Err("shards must be >= 1".into());
         }
 
-        std::fs::create_dir_all(base_path)
-            .map_err(|e| format!("cannot create base dir: {e}"))?;
-
         // Save shard config at root level.
         let config_json = serde_json::to_string(config)
             .map_err(|e| format!("cannot serialize shard config: {e}"))?;
-        std::fs::write(
-            Path::new(base_path).join(SHARD_CONFIG_FILE),
-            config_json.as_bytes(),
-        )
-        .map_err(|e| format!("cannot write shard config: {e}"))?;
+        storage.write_root_file(SHARD_CONFIG_FILE, config_json.as_bytes())?;
 
-        // Create each shard sub-directory + handle.
+        // Create each shard handle.
         let mut shards = Vec::with_capacity(num_shards);
         for i in 0..num_shards {
-            let shard_dir = Path::new(base_path).join(format!("shard_{i}"));
-            std::fs::create_dir_all(&shard_dir)
-                .map_err(|e| format!("cannot create shard_{i} dir: {e}"))?;
-            let dir = StdFsDirectory::open(shard_dir.to_str().unwrap())
-                .map_err(|e| format!("cannot open shard_{i} dir: {e}"))?;
-            let handle = LucivyHandle::create(dir, config)?;
+            let handle = storage.create_shard_handle(i, config)?;
             shards.push(Arc::new(handle));
         }
 
@@ -435,7 +522,7 @@ impl ShardedHandle {
             shards,
             shard_actors,
             router: Mutex::new(router),
-            base_path: base_path.to_string(),
+            storage,
             schema,
             field_map,
             config: config.clone(),
@@ -444,22 +531,18 @@ impl ShardedHandle {
         })
     }
 
-    /// Open an existing sharded index.
-    pub fn open(base_path: &str) -> Result<Self, String> {
+    /// Open an existing sharded index with a custom storage backend.
+    pub fn open_with_storage(storage: Box<dyn ShardStorage>) -> Result<Self, String> {
         // Read shard config.
-        let config_path = Path::new(base_path).join(SHARD_CONFIG_FILE);
-        let config_data = std::fs::read(&config_path)
-            .map_err(|e| format!("cannot read shard config: {e}"))?;
+        let config_data = storage.read_root_file(SHARD_CONFIG_FILE)?;
         let config: SchemaConfig = serde_json::from_slice(&config_data)
             .map_err(|e| format!("cannot parse shard config: {e}"))?;
 
         let num_shards = config.shards.unwrap_or(1);
 
         // Read shard router state if available.
-        let stats_path = Path::new(base_path).join(SHARD_STATS_FILE);
-        let router = if stats_path.exists() {
-            let stats_data = std::fs::read(&stats_path)
-                .map_err(|e| format!("cannot read shard stats: {e}"))?;
+        let router = if storage.root_file_exists(SHARD_STATS_FILE) {
+            let stats_data = storage.read_root_file(SHARD_STATS_FILE)?;
             ShardRouter::from_bytes(&stats_data)?
         } else {
             let df_threshold = config.df_threshold.unwrap_or(5000);
@@ -467,13 +550,10 @@ impl ShardedHandle {
             ShardRouter::with_options(num_shards, df_threshold, balance_weight)
         };
 
-        // Open each shard.
+        // Open each shard handle.
         let mut shards = Vec::with_capacity(num_shards);
         for i in 0..num_shards {
-            let shard_dir = Path::new(base_path).join(format!("shard_{i}"));
-            let dir = StdFsDirectory::open(shard_dir.to_str().unwrap())
-                .map_err(|e| format!("cannot open shard_{i}: {e}"))?;
-            let handle = LucivyHandle::open(dir)?;
+            let handle = storage.open_shard_handle(i)?;
             shards.push(Arc::new(handle));
         }
 
@@ -486,7 +566,7 @@ impl ShardedHandle {
             shards,
             shard_actors,
             router: Mutex::new(router),
-            base_path: base_path.to_string(),
+            storage,
             schema,
             field_map,
             config,
@@ -594,8 +674,10 @@ impl ShardedHandle {
                 }
             }
             for (i, rx) in flush_rxs {
-                rx.wait_cooperative(|| scheduler.run_one_step())
-                    .map_err(|e| format!("flush shard_{i}: {e}"))?;
+                if let Err(err_bytes) = rx.wait_cooperative(|| scheduler.run_one_step()) {
+                    let _ = ld_lucivy::LucivyError::decode(&err_bytes);
+                    // Flush errors before search are non-fatal — log and continue.
+                }
             }
         }
 
@@ -641,8 +723,14 @@ impl ShardedHandle {
         let mut heap = BinaryHeap::with_capacity(top_k + 1);
 
         for (shard_id, rx) in receivers.into_iter().enumerate() {
-            let reply_bytes = rx.wait_cooperative(|| scheduler.run_one_step())
-                .map_err(|e| format!("search shard_{shard_id}: {e}"))?;
+            let reply_bytes = match rx.wait_cooperative(|| scheduler.run_one_step()) {
+                Ok(b) => b,
+                Err(err_bytes) => {
+                    let err = ld_lucivy::LucivyError::decode(&err_bytes)
+                        .unwrap_or_else(|_| ld_lucivy::LucivyError::SystemError(format!("search shard_{shard_id} failed")));
+                    return Err(format!("{err}"));
+                }
+            };
             let shard_reply = ShardSearchReply::decode(&reply_bytes)
                 .map_err(|e| format!("decode shard_{shard_id} reply: {e}"))?;
             let shard_hits = shard_reply.results;
@@ -691,8 +779,11 @@ impl ShardedHandle {
 
         // Wait for all commits to complete.
         for (i, rx) in receivers.into_iter().enumerate() {
-            rx.wait_cooperative(|| scheduler.run_one_step())
-                .map_err(|e| format!("commit shard_{i}: {e}"))?;
+            if let Err(err_bytes) = rx.wait_cooperative(|| scheduler.run_one_step()) {
+                let err = ld_lucivy::LucivyError::decode(&err_bytes)
+                    .unwrap_or_else(|_| ld_lucivy::LucivyError::SystemError(format!("commit shard_{i} failed")));
+                return Err(format!("{err}"));
+            }
         }
 
         // Resync router counters from index if deletes happened.
@@ -730,11 +821,7 @@ impl ShardedHandle {
 
         // Persist router state.
         let stats_bytes = router.to_bytes();
-        std::fs::write(
-            Path::new(&self.base_path).join(SHARD_STATS_FILE),
-            &stats_bytes,
-        )
-        .map_err(|e| format!("cannot write shard stats: {e}"))?;
+        self.storage.write_root_file(SHARD_STATS_FILE, &stats_bytes)?;
 
         Ok(())
     }
@@ -752,19 +839,18 @@ impl ShardedHandle {
             receivers.push((i, rx));
         }
         for (i, rx) in receivers {
-            rx.wait_cooperative(|| scheduler.run_one_step())
-                .map_err(|e| format!("commit on close shard_{i}: {e}"))?;
+            if let Err(err_bytes) = rx.wait_cooperative(|| scheduler.run_one_step()) {
+                let err = ld_lucivy::LucivyError::decode(&err_bytes)
+                    .unwrap_or_else(|_| ld_lucivy::LucivyError::SystemError(format!("close shard_{i} failed")));
+                return Err(format!("{err}"));
+            }
         }
 
         // Persist router state.
         {
             let router = self.router.lock().map_err(|_| "router lock poisoned")?;
             let stats_bytes = router.to_bytes();
-            std::fs::write(
-                Path::new(&self.base_path).join(SHARD_STATS_FILE),
-                &stats_bytes,
-            )
-            .map_err(|e| format!("cannot write shard stats on close: {e}"))?;
+            self.storage.write_root_file(SHARD_STATS_FILE, &stats_bytes)?;
         }
 
         // Release writer locks.
