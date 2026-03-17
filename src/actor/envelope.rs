@@ -66,6 +66,79 @@ pub fn reply_port() -> (ReplyPort, super::reply::ReplyReceiver<Result<Vec<u8>, S
     (ReplyPort::new(tx), rx)
 }
 
+/// Typed facade over `ActorRef<Envelope>`.
+///
+/// Provides ergonomic typed methods for sending messages and waiting for
+/// replies, while using Luciole Envelopes under the hood.
+/// Callers never see bytes — the TypedActorRef handles encode/decode.
+pub struct TypedActorRef {
+    inner: super::mailbox::ActorRef<Envelope>,
+}
+
+impl TypedActorRef {
+    /// Wrap an `ActorRef<Envelope>`.
+    pub fn new(inner: super::mailbox::ActorRef<Envelope>) -> Self {
+        Self { inner }
+    }
+
+    /// Send a message (fire-and-forget, no reply).
+    pub fn send<M: Message>(&self, msg: M) -> Result<(), String> {
+        self.inner
+            .send(msg.into_envelope())
+            .map_err(|_| "channel closed".into())
+    }
+
+    /// Send a message with local non-serializable data (fire-and-forget).
+    pub fn send_with_local<M: Message>(
+        &self,
+        msg: M,
+        local: impl Any + Send,
+    ) -> Result<(), String> {
+        self.inner
+            .send(msg.into_envelope_with_local(local))
+            .map_err(|_| "channel closed".into())
+    }
+
+    /// Send a request and wait for a typed reply.
+    pub fn request<M: Message, R: Message>(&self, msg: M) -> Result<R, String> {
+        let (env, rx) = msg.into_request();
+        self.inner.send(env).map_err(|_| "channel closed")?;
+        let scheduler = super::scheduler::global_scheduler();
+        let bytes = rx
+            .wait_cooperative(|| scheduler.run_one_step())
+            .map_err(|e| e)?;
+        R::decode(&bytes)
+    }
+
+    /// Send a request with local data and wait for a typed reply.
+    pub fn request_with_local<M: Message, R: Message>(
+        &self,
+        msg: M,
+        local: impl Any + Send,
+    ) -> Result<R, String> {
+        let (env, rx) = msg.into_request_with_local(local);
+        self.inner.send(env).map_err(|_| "channel closed")?;
+        let scheduler = super::scheduler::global_scheduler();
+        let bytes = rx
+            .wait_cooperative(|| scheduler.run_one_step())
+            .map_err(|e| e)?;
+        R::decode(&bytes)
+    }
+
+    /// Access the inner ActorRef (for advanced use).
+    pub fn inner(&self) -> &super::mailbox::ActorRef<Envelope> {
+        &self.inner
+    }
+}
+
+impl Clone for TypedActorRef {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
 /// Trait for messages that can be sent via Envelope.
 ///
 /// Provides type tag (stable hash), encode (to bytes), decode (from bytes).

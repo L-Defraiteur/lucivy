@@ -8,7 +8,7 @@ pub mod reply;
 pub mod scheduler;
 
 pub use actor_state::ActorState;
-pub use envelope::{Envelope, Message, ReplyPort, reply_port, type_tag_hash};
+pub use envelope::{Envelope, Message, ReplyPort, TypedActorRef, reply_port, type_tag_hash};
 pub use generic_actor::GenericActor;
 pub use handler::{Handler, TypedHandler};
 pub use mailbox::{mailbox, ActorRef, Mailbox};

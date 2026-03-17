@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use super::actor_state::ActorState;
 use super::envelope::Envelope;
 use super::handler::Handler;
+use super::mailbox::ActorRef;
 use super::{Actor, ActorStatus, Priority};
 
 /// An actor that dispatches Envelopes to dynamically registered handlers.
@@ -19,6 +20,8 @@ pub struct GenericActor {
     state: ActorState,
     handlers: HashMap<u64, Box<dyn Handler>>,
     name: &'static str,
+    /// Optional dynamic priority function. If set, overrides handler priorities.
+    priority_fn: Option<Box<dyn Fn(&ActorState) -> Priority + Send>>,
 }
 
 impl GenericActor {
@@ -30,7 +33,20 @@ impl GenericActor {
             state: ActorState::new(),
             handlers: HashMap::new(),
             name,
+            priority_fn: None,
         }
+    }
+
+    /// Set a dynamic priority function based on actor state.
+    ///
+    /// Example: an indexer actor returns High priority when a segment is open
+    /// (memory allocated), Low when idle.
+    pub fn with_priority_fn(
+        mut self,
+        f: impl Fn(&ActorState) -> Priority + Send + 'static,
+    ) -> Self {
+        self.priority_fn = Some(Box::new(f));
+        self
     }
 
     /// Register a handler (= add a role). Replaces any existing handler
@@ -100,11 +116,19 @@ impl Actor for GenericActor {
     }
 
     fn priority(&self) -> Priority {
-        self.handlers
-            .values()
-            .map(|h| h.priority())
-            .max()
-            .unwrap_or(Priority::Medium)
+        if let Some(ref f) = self.priority_fn {
+            f(&self.state)
+        } else {
+            self.handlers
+                .values()
+                .map(|h| h.priority())
+                .max()
+                .unwrap_or(Priority::Medium)
+        }
+    }
+
+    fn on_start(&mut self, self_ref: ActorRef<Envelope>) {
+        self.state.insert::<ActorRef<Envelope>>(self_ref);
     }
 }
 
@@ -281,5 +305,133 @@ mod tests {
         let reply_bytes = rx.wait_cooperative(|| scheduler.run_one_step());
         let reply = ValueReply::decode(&reply_bytes.unwrap()).unwrap();
         assert_eq!(reply.value, 42);
+    }
+
+    #[test]
+    fn test_typed_actor_ref() {
+        use crate::actor::envelope::TypedActorRef;
+
+        let scheduler = global_scheduler();
+
+        let mut actor = GenericActor::new("typed-ref-test");
+        actor.state_mut().insert::<i64>(0);
+        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply, _local| {
+            *state.get_mut::<i64>().unwrap() += msg.value;
+            ActorStatus::Continue
+        }));
+        actor.register(TypedHandler::<GetMsg, _>::with_priority(
+            |state, _msg, reply, _local| {
+                let value = *state.get::<i64>().unwrap();
+                if let Some(reply) = reply {
+                    reply.send(ValueReply { value });
+                }
+                ActorStatus::Continue
+            },
+            Priority::Critical,
+        ));
+
+        let (mb, mut actor_ref) = mailbox::<Envelope>(64);
+        scheduler.spawn(actor, mb, &mut actor_ref, 64);
+
+        let typed = TypedActorRef::new(actor_ref);
+
+        // Fire-and-forget
+        typed.send(AddMsg { value: 10 }).unwrap();
+        typed.send(AddMsg { value: 32 }).unwrap();
+
+        // Request/response
+        let reply: ValueReply = typed.request::<GetMsg, ValueReply>(GetMsg).unwrap();
+        assert_eq!(reply.value, 42);
+    }
+
+    #[test]
+    fn test_priority_fn() {
+        let actor = GenericActor::new("prio-test")
+            .with_priority_fn(|state| {
+                if state.get::<bool>().copied().unwrap_or(false) {
+                    Priority::High
+                } else {
+                    Priority::Low
+                }
+            });
+
+        // No bool in state → false → Low
+        assert_eq!(actor.priority(), Priority::Low);
+
+        // Manually test with state change
+        let mut actor = actor;
+        actor.state_mut().insert::<bool>(true);
+        assert_eq!(actor.priority(), Priority::High);
+
+        actor.state_mut().insert::<bool>(false);
+        assert_eq!(actor.priority(), Priority::Low);
+    }
+
+    #[test]
+    fn test_on_start_stores_self_ref() {
+        let scheduler = global_scheduler();
+
+        // SelfPingMsg: the actor sends itself an AddMsg(100) via self_ref,
+        // then replies OK so the caller knows the self-message was sent.
+        struct SelfPingMsg;
+        impl Message for SelfPingMsg {
+            fn type_tag() -> u64 { type_tag_hash(b"SelfPingMsg") }
+            fn encode(&self) -> Vec<u8> { vec![] }
+            fn decode(_: &[u8]) -> Result<Self, String> { Ok(Self) }
+        }
+
+        struct OkReply;
+        impl Message for OkReply {
+            fn type_tag() -> u64 { type_tag_hash(b"OkReply") }
+            fn encode(&self) -> Vec<u8> { vec![] }
+            fn decode(_: &[u8]) -> Result<Self, String> { Ok(Self) }
+        }
+
+        let mut actor = GenericActor::new("self-msg-test");
+        actor.state_mut().insert::<i64>(0);
+
+        // Add handler
+        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply, _local| {
+            *state.get_mut::<i64>().unwrap() += msg.value;
+            ActorStatus::Continue
+        }));
+
+        // SelfPing handler: send AddMsg(100) to self, then reply OK
+        actor.register(TypedHandler::<SelfPingMsg, _>::new(|state, _msg, reply, _local| {
+            let self_ref = state.get::<ActorRef<Envelope>>().unwrap();
+            let _ = self_ref.send(AddMsg { value: 100 }.into_envelope());
+            if let Some(reply) = reply {
+                reply.send(OkReply);
+            }
+            ActorStatus::Continue
+        }));
+
+        // Get handler
+        actor.register(TypedHandler::<GetMsg, _>::with_priority(
+            |state, _msg, reply, _local| {
+                let value = *state.get::<i64>().unwrap();
+                if let Some(reply) = reply {
+                    reply.send(ValueReply { value });
+                }
+                ActorStatus::Continue
+            },
+            Priority::Critical,
+        ));
+
+        let (mb, mut actor_ref) = mailbox::<Envelope>(64);
+        scheduler.spawn(actor, mb, &mut actor_ref, 64);
+
+        // Send SelfPing and wait for reply (ensures self-message was sent)
+        let (env, rx) = SelfPingMsg.into_request();
+        actor_ref.send(env).unwrap();
+        let _ = rx.wait_cooperative(|| scheduler.run_one_step());
+
+        // Now Get — the AddMsg(100) from self-message is in the mailbox
+        // and will be processed before this Get (FIFO)
+        let (env, rx) = GetMsg.into_request();
+        actor_ref.send(env).unwrap();
+        let reply_bytes = rx.wait_cooperative(|| scheduler.run_one_step());
+        let reply = ValueReply::decode(&reply_bytes.unwrap()).unwrap();
+        assert_eq!(reply.value, 100);
     }
 }
