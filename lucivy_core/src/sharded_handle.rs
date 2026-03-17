@@ -116,6 +116,100 @@ impl ShardStorage for FsShardStorage {
     }
 }
 
+/// BlobStore-backed shard storage for ACID persistence.
+///
+/// Each shard gets a `BlobDirectory` with a unique namespace in the store.
+/// Reads are served from local mmap cache (zero-copy). Writes go to both
+/// cache and BlobStore (source of truth).
+///
+/// Usage:
+/// ```ignore
+/// let store = Arc::new(MemBlobStore::new());  // or CypherBlobStore, PostgresBlobStore, etc.
+/// let storage = BlobShardStorage::new(store, "my_entity", Path::new("/tmp/cache"));
+/// let handle = ShardedHandle::create_with_storage(Box::new(storage), &config)?;
+/// ```
+pub struct BlobShardStorage<S: crate::blob_store::BlobStore> {
+    store: std::sync::Arc<S>,
+    /// Base index name (e.g. "my_entity"). Shards get "my_entity/shard_0", etc.
+    index_name: String,
+    /// Local cache base directory for mmap files.
+    cache_base: std::path::PathBuf,
+}
+
+impl<S: crate::blob_store::BlobStore> BlobShardStorage<S> {
+    /// Create a new BlobShardStorage.
+    ///
+    /// - `store`: the blob store backend (shared, Arc'd)
+    /// - `index_name`: base name for this index (e.g. "entity_products")
+    /// - `cache_base`: local directory for mmap cache files
+    pub fn new(
+        store: std::sync::Arc<S>,
+        index_name: impl Into<String>,
+        cache_base: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        Self {
+            store,
+            index_name: index_name.into(),
+            cache_base: cache_base.into(),
+        }
+    }
+
+    fn shard_name(&self, shard_id: usize) -> String {
+        format!("{}/shard_{shard_id}", self.index_name)
+    }
+
+    /// Root-level files use index_name directly (no shard prefix).
+    fn root_blob_name(&self) -> &str {
+        &self.index_name
+    }
+}
+
+impl<S: crate::blob_store::BlobStore> ShardStorage for BlobShardStorage<S> {
+    fn create_shard_handle(
+        &self,
+        shard_id: usize,
+        config: &SchemaConfig,
+    ) -> Result<LucivyHandle, String> {
+        let shard_name = self.shard_name(shard_id);
+        let dir = crate::blob_directory::BlobDirectory::new(
+            self.store.clone(),
+            &shard_name,
+            &self.cache_base,
+        )
+        .map_err(|e| format!("cannot create blob dir shard_{shard_id}: {e}"))?;
+        LucivyHandle::create(dir, config)
+    }
+
+    fn open_shard_handle(&self, shard_id: usize) -> Result<LucivyHandle, String> {
+        let shard_name = self.shard_name(shard_id);
+        let dir = crate::blob_directory::BlobDirectory::new(
+            self.store.clone(),
+            &shard_name,
+            &self.cache_base,
+        )
+        .map_err(|e| format!("cannot open blob dir shard_{shard_id}: {e}"))?;
+        LucivyHandle::open(dir)
+    }
+
+    fn write_root_file(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        self.store
+            .save(self.root_blob_name(), name, data)
+            .map_err(|e| format!("cannot write root {name}: {e}"))
+    }
+
+    fn read_root_file(&self, name: &str) -> Result<Vec<u8>, String> {
+        self.store
+            .load(self.root_blob_name(), name)
+            .map_err(|e| format!("cannot read root {name}: {e}"))
+    }
+
+    fn root_file_exists(&self, name: &str) -> bool {
+        self.store
+            .exists(self.root_blob_name(), name)
+            .unwrap_or(false)
+    }
+}
+
 /// File storing shard router state (counters, thresholds).
 const SHARD_STATS_FILE: &str = "_shard_stats.bin";
 
@@ -1091,5 +1185,57 @@ mod tests {
         let (counts, total) = handle.router_stats().unwrap();
         assert_eq!(total, 9);
         assert_eq!(counts.iter().sum::<u64>(), 9);
+    }
+
+    #[test]
+    fn test_blob_shard_storage() {
+        use crate::blob_store::MemBlobStore;
+
+        let store = std::sync::Arc::new(MemBlobStore::new());
+        let cache = std::env::temp_dir().join("lucivy_blob_shard_test");
+        let _ = std::fs::remove_dir_all(&cache);
+
+        let config = make_config(2);
+        let storage = BlobShardStorage::new(store.clone(), "test_entity", &cache);
+        let handle = ShardedHandle::create_with_storage(Box::new(storage), &config).unwrap();
+
+        let body = handle.field("body").unwrap();
+        let nid = handle.field(NODE_ID_FIELD).unwrap();
+
+        for i in 0u64..20 {
+            let mut doc = LucivyDocument::new();
+            doc.add_u64(nid, i);
+            doc.add_text(body, &format!("blob persistence test doc {i}"));
+            handle.add_document(doc, i).unwrap();
+        }
+        handle.commit().unwrap();
+        assert_eq!(handle.num_docs(), 20);
+
+        // Search works
+        let query: QueryConfig = serde_json::from_str(
+            r#"{"type": "contains", "field": "body", "value": "persistence"}"#,
+        ).unwrap();
+        let results = handle.search(&query, 10, None).unwrap();
+        assert!(!results.is_empty());
+
+        // Close and reopen from same blob store
+        handle.close().unwrap();
+
+        let storage2 = BlobShardStorage::new(store.clone(), "test_entity", &cache);
+        let handle2 = ShardedHandle::open_with_storage(Box::new(storage2)).unwrap();
+        for shard in &handle2.shards {
+            shard.reader.reload().unwrap();
+        }
+        assert_eq!(handle2.num_docs(), 20);
+
+        // Router state restored
+        let (_, total) = handle2.router_stats().unwrap();
+        assert_eq!(total, 20);
+
+        // Search still works after reopen
+        let results2 = handle2.search(&query, 10, None).unwrap();
+        assert!(!results2.is_empty());
+
+        let _ = std::fs::remove_dir_all(&cache);
     }
 }
