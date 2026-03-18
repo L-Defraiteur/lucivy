@@ -1167,4 +1167,80 @@ mod tests {
         assert_eq!(entries[0].byte_from, 20);
         assert_eq!(entries[0].byte_to, 28); // "brûlée" = 8 bytes
     }
+
+    /// Regression test: "contains 'function'" on text with "function" and "disjunction".
+    /// The suffix FST must NOT produce parasitic matches from "disjunction" suffixes
+    /// like "junction" or "unction" when searching for "function".
+    #[test]
+    fn test_no_parasitic_matches_function_disjunction() {
+        // Text: "the function foo() calls disjunction bar()"
+        // Tokens: the(0) function(1) foo(2) calls(3) disjunction(4) bar(5)
+        let mut collector = SfxCollector::new();
+        collector.begin_doc();
+        collector.begin_value("the function foo() calls disjunction bar()");
+        collector.add_token("the", 0, 3);
+        collector.add_token("function", 4, 12);
+        collector.add_token("foo", 13, 16);
+        collector.add_token("calls", 20, 25);
+        collector.add_token("disjunction", 26, 37);
+        collector.add_token("bar", 38, 41);
+        collector.end_value();
+        collector.end_doc();
+
+        let (sfx_bytes, _sfxpost_bytes) = collector.build().unwrap();
+        let reader = SfxFileReader::open(&sfx_bytes).unwrap();
+
+        // Sorted unique tokens: bar(0), calls(1), disjunction(2), foo(3), function(4), the(5)
+        let mut raw_postings: HashMap<u64, Vec<RawPostingEntry>> = HashMap::new();
+        raw_postings.insert(0, vec![
+            RawPostingEntry { doc_id: 0, token_index: 5, byte_from: 38, byte_to: 41 },
+        ]);
+        raw_postings.insert(1, vec![
+            RawPostingEntry { doc_id: 0, token_index: 3, byte_from: 20, byte_to: 25 },
+        ]);
+        raw_postings.insert(2, vec![
+            RawPostingEntry { doc_id: 0, token_index: 4, byte_from: 26, byte_to: 37 },
+        ]);
+        raw_postings.insert(3, vec![
+            RawPostingEntry { doc_id: 0, token_index: 2, byte_from: 13, byte_to: 16 },
+        ]);
+        raw_postings.insert(4, vec![
+            RawPostingEntry { doc_id: 0, token_index: 1, byte_from: 4, byte_to: 12 },
+        ]);
+        raw_postings.insert(5, vec![
+            RawPostingEntry { doc_id: 0, token_index: 0, byte_from: 0, byte_to: 3 },
+        ]);
+
+        let results = suffix_contains_single_token(&reader, "function", |ord| {
+            raw_postings.get(&ord).cloned().unwrap_or_default()
+        });
+
+        // Must find exactly ONE match: "function" at byte 4..12, SI=0
+        eprintln!("results for 'function': {:?}", results);
+        assert_eq!(results.len(), 1, "should find exactly 1 match, no parasites");
+        assert_eq!(results[0].doc_id, 0);
+        assert_eq!(results[0].byte_from, 4);
+        assert_eq!(results[0].byte_to, 12);
+        assert_eq!(results[0].si, 0);
+
+        // Also verify: "unction" search should find BOTH (from function SI=1 and disjunction SI=4)
+        let results_unction = suffix_contains_single_token(&reader, "unction", |ord| {
+            raw_postings.get(&ord).cloned().unwrap_or_default()
+        });
+        eprintln!("results for 'unction': {:?}", results_unction);
+        // "unction" in "function" at SI=1: byte_from=4+1=5, byte_to=5+7=12
+        // "unction" in "disjunction" at SI=4: byte_from=26+4=30, byte_to=30+7=37
+        assert_eq!(results_unction.len(), 2, "unction should match both function and disjunction");
+        assert_eq!(results_unction[0].byte_from, 5);  // function[1..]
+        assert_eq!(results_unction[1].byte_from, 30); // disjunction[4..]
+
+        // And "junction" should find only disjunction
+        let results_junction = suffix_contains_single_token(&reader, "junction", |ord| {
+            raw_postings.get(&ord).cloned().unwrap_or_default()
+        });
+        eprintln!("results for 'junction': {:?}", results_junction);
+        // "junction" in "disjunction" at SI=3: byte_from=26+3=29, byte_to=29+8=37
+        assert_eq!(results_junction.len(), 1, "junction should only match disjunction");
+        assert_eq!(results_junction[0].byte_from, 29);
+    }
 }

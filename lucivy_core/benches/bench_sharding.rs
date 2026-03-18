@@ -239,10 +239,11 @@ fn bench_sharding_comparison() {
     // ── Queries ─────────────────────────────────────────────────────────
 
     let queries: Vec<(&str, QueryConfig)> = vec![
-        ("contains 'function'", QueryConfig {
+        ("contains 'function' d=1", QueryConfig {
             query_type: "contains".into(),
             field: Some("content".into()),
             value: Some("function".into()),
+            distance: Some(1),
             ..Default::default()
         }),
         ("contains_split 'create index'", QueryConfig {
@@ -332,29 +333,55 @@ fn bench_sharding_comparison() {
             label, hits, single_ms / 3.0, ta_ms / 3.0, rr_ms / 3.0);
     }
 
-    // ── Sanity check: run first query with highlights ─────────────────
+    // ── Sanity check: run ALL queries with highlights ─────────────────
     {
-        let first_query = &queries[0].1; // contains 'function'
-        let first_handle = sharded_rr.as_ref()
-            .or(sharded_ta.as_ref());
-        if let Some(handle) = first_handle {
-            let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
-            let results = handle.search(first_query, 3, Some(Arc::clone(&sink))).unwrap();
-            eprintln!("\n=== Sanity check: '{}' on {} ===",
-                first_query.value.as_deref().unwrap_or("?"),
-                if sharded_rr.is_some() { "RR" } else { "TA" });
-            for r in &results {
-                let shard = handle.shard(r.shard_id).unwrap();
-                let searcher = shard.reader.searcher();
-                let seg_reader = searcher.segment_reader(r.doc_address.segment_ord);
-                let seg_id = seg_reader.segment_id();
-                let highlights = sink.get(seg_id, r.doc_address.doc_id);
-                let snippet = highlights.as_ref()
-                    .and_then(|h| h.values().next())
-                    .and_then(|offsets| offsets.first())
-                    .map(|[s, e]| format!("highlight @{}..{}", s, e))
-                    .unwrap_or_else(|| "(no highlight)".into());
-                eprintln!("  shard={} score={:.3} → {}", r.shard_id, r.score, snippet);
+        let handle = sharded_rr.as_ref().or(sharded_ta.as_ref());
+        let mode = if sharded_rr.is_some() { "RR" } else { "TA" };
+        if let Some(handle) = handle {
+            for (label, qconfig) in &queries {
+                let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
+                let results = handle.search(qconfig, 2, Some(Arc::clone(&sink))).unwrap();
+                let query_val = qconfig.value.as_deref().unwrap_or("?");
+                eprintln!("\n--- {label} on {mode}: {} hits ---", results.len());
+                for r in results.iter().take(2) {
+                    let shard = handle.shard(r.shard_id).unwrap();
+                    let searcher = shard.reader.searcher();
+                    let seg_id = searcher.segment_reader(r.doc_address.segment_ord).segment_id();
+                    let highlights = sink.get(seg_id, r.doc_address.doc_id);
+                    let stored = searcher.doc::<ld_lucivy::LucivyDocument>(r.doc_address).ok();
+
+                    // Extract first highlight snippet
+                    let snippet = highlights.as_ref()
+                        .and_then(|h| h.iter().next())
+                        .and_then(|(field_name, offsets)| {
+                            offsets.first().map(|[s, e]| {
+                                stored.as_ref().and_then(|doc| {
+                                    let field = handle.field(field_name)?;
+                                    doc.field_values()
+                                        .find(|(f, _)| *f == field)
+                                        .and_then(|(_, v)| {
+                                            use ld_lucivy::schema::document::Value;
+                                            v.as_value().as_str().map(|text| {
+                                                let clamp = |pos: usize| -> usize {
+                                                    let mut p = pos.min(text.len());
+                                                    while p > 0 && !text.is_char_boundary(p) { p -= 1; }
+                                                    p
+                                                };
+                                                let cs = clamp(s.saturating_sub(20));
+                                                let hs = clamp(*s);
+                                                let he = clamp(*e);
+                                                let ce = clamp((*e + 20).min(text.len()));
+                                                format!("...{}«{}»{}...",
+                                                    &text[cs..hs], &text[hs..he], &text[he..ce])
+                                            })
+                                        })
+                                }).unwrap_or_else(|| format!("@{}..{}", s, e))
+                            })
+                        })
+                        .unwrap_or_else(|| "(no highlight)".into());
+                    eprintln!("  shard={} doc={} score={:.3} → {}",
+                        r.shard_id, r.doc_address.doc_id, r.score, snippet);
+                }
             }
         }
     }

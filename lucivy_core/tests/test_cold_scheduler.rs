@@ -3,7 +3,8 @@
 //! This test runs as a separate binary — the global scheduler is cold.
 //! Reproduces the bug where RR-4sh returns 0 hits when it's the first index.
 
-use lucivy_core::handle::NODE_ID_FIELD;
+use std::sync::Arc;
+use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD};
 use lucivy_core::query::QueryConfig;
 use lucivy_core::sharded_handle::ShardedHandle;
 
@@ -114,4 +115,88 @@ fn test_cold_rr_two_fields() {
     let results = handle.search(&query, 20, None).unwrap();
     eprintln!("cold_rr_2f: {} results", results.len());
     assert!(results.len() > 0, "should find docs with 'function' in content");
+}
+
+/// Test highlight offsets on a single LucivyHandle (no sharding).
+/// Reproduces the scenario from doc 03: "function" vs "disjunction".
+/// The highlight for "contains 'function'" must point to "function" only,
+/// not to "junction" or "unction" from "disjunction".
+#[test]
+fn test_single_handle_highlights() {
+    use ld_lucivy::query::HighlightSink;
+    use lucivy_core::directory::StdFsDirectory;
+    use lucivy_core::query::SchemaConfig;
+
+    let tmp = tmp_dir("lucivy_single_handle_highlights");
+
+    let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+        "fields": [
+            {"name": "content", "type": "text", "stored": true}
+        ]
+    })).unwrap();
+
+    let directory = StdFsDirectory::open(&tmp).unwrap();
+    let handle = LucivyHandle::create(directory, &config).unwrap();
+
+    let content_f = handle.field("content").unwrap();
+    let nid_f = handle.field(NODE_ID_FIELD).unwrap();
+
+    // Single doc with "function" and "disjunction"
+    {
+        let mut guard = handle.writer.lock().unwrap();
+        let writer = guard.as_mut().unwrap();
+
+        let mut doc = ld_lucivy::LucivyDocument::new();
+        doc.add_u64(nid_f, 0);
+        doc.add_text(content_f, "the function foo() calls disjunction bar()");
+        writer.add_document(doc).unwrap();
+
+        writer.commit().unwrap();
+    }
+    handle.reader.reload().unwrap();
+
+    // Search "contains 'function'" with highlights
+    let sink = Arc::new(HighlightSink::new());
+    let query_config = QueryConfig {
+        query_type: "contains".into(),
+        field: Some("content".into()),
+        value: Some("function".into()),
+        ..Default::default()
+    };
+    let query = lucivy_core::query::build_query(
+        &query_config,
+        &handle.schema,
+        &handle.index,
+        Some(sink.clone()),
+    ).unwrap();
+
+    let searcher = handle.reader.searcher();
+    let collector = ld_lucivy::collector::TopDocs::with_limit(10).order_by_score();
+    let results = searcher.search(&*query, &collector).unwrap();
+
+    eprintln!("single_handle_highlights: {} results", results.len());
+    assert!(!results.is_empty(), "should find doc with 'function'");
+
+    // Check highlight offsets
+    let text = "the function foo() calls disjunction bar()";
+    for &(_score, doc_addr) in &results {
+        let seg_id = searcher.segment_reader(doc_addr.segment_ord).segment_id();
+        if let Some(by_field) = sink.get(seg_id, doc_addr.doc_id) {
+            for (field_name, offsets) in &by_field {
+                eprintln!("  field='{}' offsets={:?}", field_name, offsets);
+                for offset in offsets {
+                    let start = offset[0];
+                    let end = offset[1];
+                    let snippet = &text[start..end.min(text.len())];
+                    eprintln!("    @{}..{} = {:?}", start, end, snippet);
+                    // The highlight MUST contain "function", not "junction" or "unction"
+                    assert!(
+                        snippet.contains("function"),
+                        "highlight @{}..{} = {:?} does not contain 'function' — parasitic match!",
+                        start, end, snippet,
+                    );
+                }
+            }
+        }
+    }
 }

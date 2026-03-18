@@ -347,7 +347,7 @@ fn build_contains_query(
 
     let field = resolve_field(config, schema)?;
     let value = config.value.as_deref().ok_or("contains query requires 'value'")?;
-    let distance = config.distance.unwrap_or(1);
+    let distance = config.distance.unwrap_or(0);
 
     let mut query = SuffixContainsQuery::new(field, value.to_lowercase())
         .with_fuzzy_distance(distance);
@@ -678,7 +678,7 @@ fn build_filter_clause(
         "contains" => {
             let substr = value()?.as_str()
                 .ok_or("'contains' filter requires a string value")?;
-            let distance = filter.distance.unwrap_or(1);
+            let distance = filter.distance.unwrap_or(0);
             let config = QueryConfig {
                 query_type: "contains".into(),
                 field: Some(field_name.to_string()),
