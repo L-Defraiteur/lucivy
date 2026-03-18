@@ -193,16 +193,6 @@ impl SegmentUpdaterState {
         let result = (|| {
             let segment_entries = self.shared.purge_deletes(opstamp)?;
             self.shared.segment_manager.commit(segment_entries);
-
-            // Trigger merge policy and drain all merges synchronously.
-            // This ensures merged segments exist before we rebuild their .sfx FST.
-            self.enqueue_merge_candidates_no_start();
-            self.drain_all_merges();
-
-            // Rebuild .sfx FST for merged segments that have deferred sfx.
-            if let Err(e) = rebuild_deferred_sfx(&self.shared) {
-                log::warn!("rebuild_deferred_sfx: {e}");
-            }
             self.shared.save_metas(opstamp, payload)?;
             let _ = garbage_collect_files(&self.shared);
             Ok(opstamp)
@@ -326,14 +316,6 @@ impl SegmentUpdaterState {
 
         let _ = garbage_collect_files(&self.shared);
         Ok(())
-    }
-
-    /// Enqueue merge candidates without starting them (for drain_all_merges).
-    fn enqueue_merge_candidates_no_start(&mut self) {
-        let candidates = self.collect_merge_candidates();
-        for op in candidates {
-            self.pending_merges.push_back(op);
-        }
     }
 
     fn enqueue_merge_candidates(&mut self, actor_state: &ActorState) {
@@ -898,119 +880,4 @@ pub(crate) fn create_segment_updater_actor(
     ));
 
     actor
-}
-
-// ─── Deferred SFX rebuild ───────────────────────────────────────────────────
-
-use std::io::Write;
-use std::path::PathBuf;
-use crate::directory::Directory;
-use crate::index::SegmentReader;
-use crate::schema::FieldType;
-use crate::suffix_fst::builder::SuffixFstBuilder;
-use crate::suffix_fst::file::{SfxFileReader, SfxFileWriter};
-
-/// Rebuild .sfx FST for segments that have deferred sfx (empty FST from merge).
-///
-/// Called at commit time, after segment_manager.commit() and before save_metas().
-/// Scans all committed segments, finds those with num_suffix_terms == 0 (deferred),
-/// rebuilds the FST from the term dictionary, and rewrites the .sfx file with
-/// the new FST + existing gapmap.
-fn rebuild_deferred_sfx(shared: &SegmentUpdaterShared) -> crate::Result<()> {
-    let index = &shared.index;
-    let schema = index.schema();
-
-    // Find text fields that could have .sfx
-    let sfx_fields: Vec<crate::schema::Field> = schema
-        .fields()
-        .filter_map(|(field, entry)| {
-            if let FieldType::Str(opts) = entry.field_type() {
-                if opts.get_indexing_options().is_some() {
-                    return Some(field);
-                }
-            }
-            None
-        })
-        .collect();
-
-    if sfx_fields.is_empty() {
-        return Ok(());
-    }
-
-    let segment_metas = shared.segment_manager.committed_segment_metas();
-    eprintln!("[rebuild_deferred_sfx] {} segments, {} sfx_fields", segment_metas.len(), sfx_fields.len());
-
-    for meta in segment_metas {
-        let segment = index.segment(meta.clone());
-
-        for &field in &sfx_fields {
-            let sfx_suffix = format!("{}.sfx", field.field_id());
-
-            // Try to read the existing .sfx file
-            let sfx_data = match segment.open_read_custom(&sfx_suffix) {
-                Ok(slice) => match slice.read_bytes() {
-                    Ok(bytes) => bytes,
-                    Err(_) => continue,
-                },
-                Err(_) => continue, // no .sfx for this field
-            };
-
-            // Parse the .sfx header to check if FST is empty (deferred merge)
-            // and extract gapmap data without requiring a valid FST.
-            let data = sfx_data.as_ref();
-            if data.len() < 53 { continue; } // header too small
-            let num_docs = u32::from_le_bytes(data[5..9].try_into().unwrap());
-            let num_suffix_terms = u32::from_le_bytes(data[9..13].try_into().unwrap());
-            let fst_length = u64::from_le_bytes(data[21..29].try_into().unwrap()) as usize;
-
-            // Only rebuild if FST is empty (deferred from merge)
-            if num_suffix_terms > 0 || fst_length > 0 {
-                continue;
-            }
-            eprintln!("[rebuild_deferred_sfx] rebuilding field {} for segment {}", field.field_id(), segment.id().uuid_string());
-
-            // Extract gapmap: starts right after FST + parent_list (both empty)
-            let gapmap_offset = u64::from_le_bytes(data[45..53].try_into().unwrap()) as usize;
-            let gapmap_data = data[gapmap_offset..].to_vec();
-
-            // Rebuild FST from the term dictionary
-            let reader = SegmentReader::open(&segment)?;
-            let inv_idx = reader.inverted_index(field)?;
-            let mut sfx_builder = SuffixFstBuilder::new();
-            let mut stream = inv_idx.terms().stream()?;
-            let mut ordinal = 0u64;
-            while stream.advance() {
-                if let Ok(token) = std::str::from_utf8(stream.key()) {
-                    sfx_builder.add_token(token, ordinal);
-                    ordinal += 1;
-                }
-            }
-            let (fst_data, parent_list_data) = sfx_builder.build().map_err(|e| {
-                crate::LucivyError::SystemError(format!("rebuild sfx fst: {e}"))
-            })?;
-
-            // Rewrite the complete .sfx file
-            let sfx_file = SfxFileWriter::new(
-                fst_data,
-                parent_list_data,
-                gapmap_data,
-                num_docs,
-                ordinal as u32,
-            );
-            let sfx_bytes = sfx_file.to_bytes();
-
-            // Write via directory
-            let path = PathBuf::from(format!(
-                "{}.{}",
-                segment.id().uuid_string(),
-                sfx_suffix
-            ));
-            use common::TerminatingWrite;
-            let mut writer = index.directory().open_write(&path)?;
-            writer.write_all(&sfx_bytes)?;
-            writer.terminate()?;
-        }
-    }
-
-    Ok(())
 }

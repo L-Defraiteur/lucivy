@@ -153,12 +153,13 @@ impl Weight for SuffixContainsWeight {
     fn scorer(&self, reader: &SegmentReader, boost: Score) -> crate::Result<Box<dyn Scorer>> {
         let segment_id = reader.segment_id();
 
-        // Open the .sfx file — if not present (e.g. merged segment pending
-        // sfx rebuild), return an empty scorer (no results from this segment).
-        let sfx_data = match reader.sfx_file(self.raw_field) {
-            Some(data) => data,
-            None => return Ok(Box::new(crate::query::EmptyScorer)),
-        };
+        // Open the .sfx file — error if not present
+        let sfx_data = reader.sfx_file(self.raw_field).ok_or_else(|| {
+            crate::LucivyError::InvalidArgument(format!(
+                "no .sfx file for field {:?}. SuffixContainsQuery requires a suffix index.",
+                self.raw_field
+            ))
+        })?;
         let sfx_bytes = sfx_data.read_bytes().map_err(|e| {
             crate::LucivyError::SystemError(format!("read .sfx: {e}"))
         })?;

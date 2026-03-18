@@ -182,11 +182,6 @@ impl<'a> GapMapReader<'a> {
         Self { data, num_docs }
     }
 
-    /// Raw bytes of the entire gapmap section (for rebuilding .sfx files).
-    pub fn raw_data(&self) -> &'a [u8] {
-        self.data
-    }
-
     pub fn num_docs(&self) -> u32 {
         self.num_docs
     }

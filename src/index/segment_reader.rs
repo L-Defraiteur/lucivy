@@ -89,22 +89,7 @@ fn load_sfx_files(segment: &Segment, _schema: &Schema) -> (FnvHashMap<Field, Fil
         ]);
         let field = Field::from_field_id(field_id);
         if let Ok(file_slice) = segment.open_read_custom(&format!("{field_id}.sfx")) {
-            // Skip deferred .sfx files (empty FST from merge).
-            // num_suffix_terms is at bytes 9..13 in the header.
-            let is_valid = file_slice.read_bytes()
-                .map(|b| {
-                    let valid = b.len() >= 13 && u32::from_le_bytes([b[9], b[10], b[11], b[12]]) > 0;
-                    if !valid {
-                        eprintln!("[load_sfx] SKIPPED field {} (len={}, num_suffix_terms={})",
-                            field_id, b.len(),
-                            if b.len() >= 13 { u32::from_le_bytes([b[9], b[10], b[11], b[12]]) } else { 0 });
-                    }
-                    valid
-                })
-                .unwrap_or(false);
-            if is_valid {
-                sfx_files.insert(field, file_slice);
-            }
+            sfx_files.insert(field, file_slice);
         }
         if let Ok(file_slice) = segment.open_read_custom(&format!("{field_id}.sfxpost")) {
             sfxpost_files.insert(field, file_slice);
