@@ -138,8 +138,15 @@ impl<'a> SfxFileReader<'a> {
         let parent_list_length = u64::from_le_bytes(data[37..45].try_into().unwrap()) as usize;
         let gapmap_offset = u64::from_le_bytes(data[45..53].try_into().unwrap()) as usize;
 
-        let fst_bytes = data[fst_offset..fst_offset + fst_length].to_vec();
-        let fst = Map::new(fst_bytes).map_err(|e| SfxError::FstError(e.to_string()))?;
+        // Handle empty FST (deferred merge: FST not yet rebuilt).
+        // Build an empty Map so the reader is valid but has no entries.
+        let fst = if fst_length == 0 {
+            Map::new(lucivy_fst::MapBuilder::memory().into_inner().unwrap_or_default())
+                .map_err(|e| SfxError::FstError(e.to_string()))?
+        } else {
+            let fst_bytes = data[fst_offset..fst_offset + fst_length].to_vec();
+            Map::new(fst_bytes).map_err(|e| SfxError::FstError(e.to_string()))?
+        };
 
         let parent_list_data = &data[parent_list_offset..parent_list_offset + parent_list_length];
         let gapmap_data = &data[gapmap_offset..];

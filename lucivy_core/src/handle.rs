@@ -43,21 +43,36 @@ const WRITER_HEAP_SIZE: usize = 50_000_000;
 /// Config file stored alongside the index for reopening.
 const CONFIG_FILE: &str = "_config.json";
 
+/// Max docs per segment before the merge policy stops merging it.
+/// Bounds the memory used by SuffixFstBuilder during merge_sfx rebuild.
+/// With 50K docs: ~1.5GB peak for FST rebuild (vs 10GB+ at 200K+ docs).
+const MAX_DOCS_BEFORE_MERGE: usize = 50_000;
+
 /// Create an IndexWriter with a thread count appropriate for the target.
 /// On WASM, limit to 1 thread to avoid exhausting the emscripten pthread pool.
+/// Configures the merge policy with a bounded max_docs_before_merge.
 fn create_writer(index: &Index) -> Result<IndexWriter, String> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        index
-            .writer_with_num_threads(1, WRITER_HEAP_SIZE)
-            .map_err(|e| format!("cannot create writer: {e}"))
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        index
-            .writer(WRITER_HEAP_SIZE)
-            .map_err(|e| format!("cannot create writer: {e}"))
-    }
+    let writer = {
+        #[cfg(target_arch = "wasm32")]
+        {
+            index
+                .writer_with_num_threads(1, WRITER_HEAP_SIZE)
+                .map_err(|e| format!("cannot create writer: {e}"))?
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            index
+                .writer(WRITER_HEAP_SIZE)
+                .map_err(|e| format!("cannot create writer: {e}"))?
+        }
+    };
+
+    // Cap segment size to bound SuffixFstBuilder memory usage.
+    let mut policy = ld_lucivy::indexer::LogMergePolicy::default();
+    policy.set_max_docs_before_merge(MAX_DOCS_BEFORE_MERGE);
+    writer.set_merge_policy(Box::new(policy));
+
+    Ok(writer)
 }
 
 impl LucivyHandle {

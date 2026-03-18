@@ -264,12 +264,12 @@ impl AutomatonPhraseWeight {
         let fieldnorm_reader = self.fieldnorm_reader(reader)?;
         let inverted_index = reader.inverted_index(self.field)?;
 
-        // Open .sfx — required for unified term resolution
-        let sfx_bytes = reader.sfx_file(self.field)
-            .ok_or_else(|| crate::LucivyError::InvalidArgument(format!(
-                "no .sfx file for field {:?}. Unified term dictionary requires suffix index.",
-                self.field
-            )))?
+        // Open .sfx — if not present, return None (no results from this segment).
+        let sfx_data = match reader.sfx_file(self.field) {
+            Some(data) => data,
+            None => return Ok(None),
+        };
+        let sfx_bytes = sfx_data
             .read_bytes().map_err(|e| crate::LucivyError::SystemError(format!("read .sfx: {e}")))?;
         let sfx_reader = crate::suffix_fst::SfxFileReader::open(sfx_bytes.as_ref())
             .map_err(|e| crate::LucivyError::SystemError(format!("open .sfx: {e}")))?;
@@ -375,12 +375,12 @@ impl AutomatonPhraseWeight {
     ) -> crate::Result<Box<dyn Scorer>> {
         let inverted_index = reader.inverted_index(self.field)?;
 
-        // Open .sfx — required for unified term resolution
-        let sfx_bytes = reader.sfx_file(self.field)
-            .ok_or_else(|| crate::LucivyError::InvalidArgument(format!(
-                "no .sfx file for field {:?}. Unified term dictionary requires suffix index.",
-                self.field
-            )))?
+        // Open .sfx — if not present, return empty scorer.
+        let sfx_data = match reader.sfx_file(self.field) {
+            Some(data) => data,
+            None => return Ok(Box::new(crate::query::EmptyScorer)),
+        };
+        let sfx_bytes = sfx_data
             .read_bytes().map_err(|e| crate::LucivyError::SystemError(format!("read .sfx: {e}")))?;
         let sfx_reader = crate::suffix_fst::SfxFileReader::open(sfx_bytes.as_ref())
             .map_err(|e| crate::LucivyError::SystemError(format!("open .sfx: {e}")))?;

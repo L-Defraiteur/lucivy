@@ -148,3 +148,133 @@ lucivy_core/benches/bench_sharding.rs — BENCH_MODE, commit_every, progress
 ```
 
 ## Tests : 1318 green (51 luciole + 1185 ld-lucivy + 82 lucivy-core)
+
+
+
+● Bash(git add docs/17-mars-2026/14-session-recap-indexation-pipeline.md &&
+      git commit -m "$(cat <<'EOF'
+      docs: session recap — indexation pipeline optims + 212K bench…)
+  ⎿  [feature/sfx-unified 6b66476] docs: session recap — indexation pip
+     eline optims + 212K bench findings
+      1 file changed, 150 insertions(+)
+     … +2 lines (ctrl+o to expand)
+
+● Voilà, tout est documenté et commité. Résumé de la session :
+
+  Gains réalisés (5K docs) :
+  - Indexation : 3.05s → 1.39s (2.2x)
+  - 6 commits d'optim, 1318 tests green
+
+  Découverte majeure (212K docs) :
+  - Le SuffixFstBuilder est le bottleneck fondamental à grande échelle
+  - 10GB+ RAM avec 4 shards en parallèle
+  - Le sharding perd vs 1-shard sur gros index
+
+  Prochaines pistes : streaming SuffixFstBuilder (mémoire bornée) ou
+  multi-segment sfx search (pas de rebuild au merge).
+
+✻ Cogitated for 1m 36s
+
+❯ multi segment sfx search ce serait quoi?                                  
+
+● Au lieu de fusionner les .sfx de N segments en un seul .sfx au merge, on
+  les garde séparés et on les query tous au search.
+
+  Aujourd'hui :
+  merge(seg_A, seg_B) → seg_C avec nouveau .sfx (rebuild coûteux)
+  search → query seg_C.sfx
+
+  Multi-segment sfx :
+  merge(seg_A, seg_B) → seg_C SANS .sfx (rapide)
+  search → query seg_A.sfx + seg_B.sfx, remap doc_ids vers seg_C
+
+  Le merge ne touche plus au .sfx du tout — zéro coût, zéro mémoire. Au
+  search, on itère les .sfx des segments "sources" et on remappe les
+  résultats.
+
+  Avantages :
+  - Merge instantané côté sfx
+  - Mémoire bornée (pas d'accumulation)
+  - Les .sfx existants sont déjà construits et optimisés
+
+  Inconvénients :
+  - Search un peu plus lent (query N fichiers .sfx au lieu de 1)
+  - Il faut garder les anciens .sfx quelque part (pas les supprimer au
+  merge)
+  - Remap doc_ids : le merger renuméro les docs, il faut un mapping old→new
+  - Plus de fichiers sur disque
+
+  C'est le même trade-off que les segments eux-mêmes dans lucivy/tantivy :
+  on query N segments en parallèle et on merge les résultats. Le .sfx ferait
+   pareil.
+
+❯ un peu plus lent mais a quel point ? pourquoi pas un seul merge de sfx au 
+ commit du coup par segment?                                                
+
+● Le ralentissement search : sur un segment mergé de 5 sources, on query 5
+  .sfx au lieu de 1. Mais le FST lookup est ~microseconde, le coût c'est le
+  posting resolution après. Sur 5K docs c'était ~40ms, ça passerait à ~45ms.
+   Quasi rien.
+
+  Un seul merge sfx au commit — oui c'est la bonne idée ! C'est plus simple
+  que le multi-segment. Aujourd'hui :
+
+  commit 1 → merge(A,B) → rebuild sfx ← coûteux, résultat jeté au commit 2
+  commit 2 → merge(AB,C) → rebuild sfx ← coûteux, résultat jeté au commit 3
+  commit 3 → merge(ABC,D) → rebuild sfx ← coûteux
+
+  Avec sfx au commit uniquement :
+  commit 1 → merge(A,B) → PAS de sfx (rapide)
+           → rebuild sfx pour le segment final → 1 seul rebuild
+  commit 2 → merge(AB,C) → PAS de sfx (rapide)
+           → rebuild sfx pour le segment final → 1 seul rebuild
+
+  On élimine les rebuilds intermédiaires qui sont jetés au merge suivant. Et
+   le rebuild final est le même coût qu'aujourd'hui, mais il ne se fait
+  qu'une fois.
+
+  Le problème mémoire reste pour le rebuild final sur un gros segment. Mais
+  au moins on ne le fait pas 5 fois en cascade. Tu veux qu'on implémente ça
+  ?
+
+✻ Crunched for 36s
+
+❯ et on peut pas limiter la taille max d'un segment aussi ? ça se passe     
+comment à ce niveau pour l'instant?                                         
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ aucun moyen de s'assurer jamais dépasser 3gb ram?                         
+
+● Le plus simple : capper la taille max d'un segment dans la merge policy.
+  Si un segment ne dépasse jamais 50K docs, le sfx rebuild reste borné en
+  mémoire (~1.5GB max). Avec 212K docs sur 4 shards, chaque shard aurait ~4
+  segments de 13K docs au lieu d'1 méga-segment.
+
+  Vérifions comment la merge policy est configurée :
+
+● Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● Ligne 11 : DEFAULT_MAX_DOCS_BEFORE_MERGE: usize = 10_000_000 — un segment
+  de 10M docs max. C'est énorme.
+
+  Ligne 97 : seg.num_docs() <= self.max_docs_before_merge — les segments
+  au-dessus de ce seuil ne sont jamais candidats au merge.
+
+  On peut baisser ce seuil. Par exemple max_docs_before_merge = 50_000 →
+  chaque shard garde des segments de 50K docs max → le sfx rebuild est borné
+   en mémoire (~1.5GB).
+
+  C'est configurable via set_max_docs_before_merge() sur le LogMergePolicy.
+  On peut l'exposer dans ShardedHandle ou LucivyHandle. Et pour garantir la
+  RAM à 3GB, c'est une règle simple : le nombre de tokens uniques dans un
+  segment × suffixes × taille mémoire par entry. On peut calculer le seuil.
+
+  Tu veux qu'on ajoute ça comme option configurable et qu'on teste sur 212K
+  ?
+
+✻ Baked for 36s
+
+❯ c'est tantivy qui avait cette variable a la base tu crois?                
+  ⎿  API Error: 500
+     {"type":"error","error":{"type":"api_error","message":"Internal server
+     error"},"request_id":"req_011CZ9JK1qfdiTAEpV4pjtfz"}
