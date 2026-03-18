@@ -1262,6 +1262,11 @@ impl ShardedHandle {
             }
         }
 
+        // Force reader reload so search sees committed data immediately.
+        for shard in &self.shards {
+            let _ = shard.reader.reload();
+        }
+
         // Resync router counters from index if deletes happened.
         let mut router = self.router.lock().map_err(|_| "router lock poisoned")?;
 
@@ -1622,5 +1627,40 @@ mod tests {
         assert!(!results2.is_empty());
 
         let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn test_diag_rr_contains_search() {
+        let dir = tmp_dir("lucivy_diag_rr");
+        let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+            "fields": [
+                {"name": "path", "type": "text", "stored": true},
+                {"name": "content", "type": "text", "stored": true}
+            ],
+            "shards": 4,
+            "balance_weight": 1.0
+        })).unwrap();
+        let handle = ShardedHandle::create(&dir, &config).unwrap();
+        let path_f = handle.field("path").unwrap();
+        let content_f = handle.field("content").unwrap();
+        let nid = handle.field(NODE_ID_FIELD).unwrap();
+
+        for i in 0u64..100 {
+            let mut doc = LucivyDocument::new();
+            doc.add_u64(nid, i);
+            doc.add_text(path_f, &format!("file_{i}.rs"));
+            doc.add_text(content_f, &format!("function test_{i}() {{ println!(\"hello\"); }}"));
+            handle.add_document(doc, i).unwrap();
+        }
+
+        handle.commit().unwrap();
+        assert_eq!(handle.num_docs(), 100);
+
+        let query: QueryConfig = serde_json::from_str(
+            r#"{"type": "contains", "field": "content", "value": "function"}"#
+        ).unwrap();
+        let results = handle.search(&query, 20, None).unwrap();
+        eprintln!("diag_rr: {} results for 'function'", results.len());
+        assert!(results.len() > 0, "should find docs with 'function'");
     }
 }

@@ -323,12 +323,40 @@ fn bench_sharding_comparison() {
                 if hits == 0 { hits = h; }
             }
             if let Some(ref s) = sharded_rr {
-                let (_, ms) = time_sharded_query(s, config);
+                let (h, ms) = time_sharded_query(s, config);
                 rr_ms += ms;
+                if hits == 0 { hits = h; }
             }
         }
         eprintln!("{:<35} {:>6} {:>8.1}ms {:>8.1}ms {:>8.1}ms",
             label, hits, single_ms / 3.0, ta_ms / 3.0, rr_ms / 3.0);
+    }
+
+    // ── Sanity check: run first query with highlights ─────────────────
+    {
+        let first_query = &queries[0].1; // contains 'function'
+        let first_handle = sharded_rr.as_ref()
+            .or(sharded_ta.as_ref());
+        if let Some(handle) = first_handle {
+            let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
+            let results = handle.search(first_query, 3, Some(Arc::clone(&sink))).unwrap();
+            eprintln!("\n=== Sanity check: '{}' on {} ===",
+                first_query.value.as_deref().unwrap_or("?"),
+                if sharded_rr.is_some() { "RR" } else { "TA" });
+            for r in &results {
+                let shard = handle.shard(r.shard_id).unwrap();
+                let searcher = shard.reader.searcher();
+                let seg_reader = searcher.segment_reader(r.doc_address.segment_ord);
+                let seg_id = seg_reader.segment_id();
+                let highlights = sink.get(seg_id, r.doc_address.doc_id);
+                let snippet = highlights.as_ref()
+                    .and_then(|h| h.values().next())
+                    .and_then(|offsets| offsets.first())
+                    .map(|[s, e]| format!("highlight @{}..{}", s, e))
+                    .unwrap_or_else(|| "(no highlight)".into());
+                eprintln!("  shard={} score={:.3} → {}", r.shard_id, r.score, snippet);
+            }
+        }
     }
 
     // ── Summary ─────────────────────────────────────────────────────────
