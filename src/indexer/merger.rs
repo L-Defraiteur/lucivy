@@ -83,7 +83,7 @@ fn estimate_total_num_tokens(readers: &[SegmentReader], field: Field) -> crate::
 
 pub struct IndexMerger {
     pub(crate) schema: Schema,
-    pub(crate) readers: Vec<SegmentReader>,
+    pub(crate) readers: Arc<Vec<SegmentReader>>,
     pub(crate) max_doc: u32,
 }
 
@@ -192,7 +192,7 @@ impl IndexMerger {
         }
         Ok(IndexMerger {
             schema,
-            readers,
+            readers: Arc::new(readers),
             max_doc,
         })
     }
@@ -520,7 +520,7 @@ impl IndexMerger {
         debug_time!("write-storable-fields");
         debug!("write-storable-field");
 
-        for reader in &self.readers {
+        for reader in self.readers.iter() {
             let store_reader = reader.get_store_reader(1)?;
             if reader.has_deletes()
                     // If there is not enough data in the store, we avoid stacking in order to
@@ -641,7 +641,7 @@ impl IndexMerger {
             // Load source .sfx files
             let mut segment_sfx: Vec<Option<Vec<u8>>> = Vec::with_capacity(self.readers.len());
             let mut any_has_sfx = false;
-            for reader in &self.readers {
+            for reader in self.readers.iter() {
                 if let Some(file_slice) = reader.sfx_file(field) {
                     match file_slice.read_bytes() {
                         Ok(bytes) => { segment_sfx.push(Some(bytes.to_vec())); any_has_sfx = true; }
@@ -662,7 +662,7 @@ impl IndexMerger {
             let has_deletes = self.readers.iter().any(|r| r.alive_bitset().is_some());
             let mut unique_tokens = BTreeSet::new();
             if has_deletes {
-                for (seg_ord, reader) in self.readers.iter().enumerate() {
+                for (seg_ord, reader) in (*self.readers).iter().enumerate() {
                     if let Ok(inv_idx) = reader.inverted_index(field) {
                         let term_dict = inv_idx.terms();
                         let alive = reader.alive_bitset();
@@ -689,7 +689,7 @@ impl IndexMerger {
                     }
                 }
             } else {
-                for reader in &self.readers {
+                for reader in self.readers.iter() {
                     if let Ok(inv_idx) = reader.inverted_index(field) {
                         let mut stream = inv_idx.terms().stream()?;
                         while stream.advance() {
@@ -721,7 +721,7 @@ impl IndexMerger {
             {
                 let mut segment_sfxpost: Vec<Option<Vec<u8>>> = Vec::with_capacity(self.readers.len());
                 let mut any_has_sfxpost = false;
-                for reader in &self.readers {
+                for reader in self.readers.iter() {
                     if let Some(file_slice) = reader.sfxpost_file(field) {
                         match file_slice.read_bytes() {
                             Ok(bytes) => { segment_sfxpost.push(Some(bytes.to_vec())); any_has_sfxpost = true; }
@@ -739,7 +739,7 @@ impl IndexMerger {
                         .collect();
 
                     let mut token_to_ordinal: Vec<HashMap<String, u32>> = Vec::with_capacity(self.readers.len());
-                    for reader in &self.readers {
+                    for reader in self.readers.iter() {
                         let mut map = HashMap::new();
                         if let Ok(inv_idx) = reader.inverted_index(field) {
                             let term_dict = inv_idx.terms();

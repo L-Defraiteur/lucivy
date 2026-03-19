@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use crate::fieldnorm::FieldNormReaders;
 use crate::index::{Index, Segment, SegmentComponent};
 use crate::indexer::doc_id_mapping::SegmentDocIdMapping;
@@ -299,11 +300,61 @@ impl MergeState {
         Ok(StepResult::Continue)
     }
 
-    /// Phase Sfx : merge suffix FST data (always full FST).
+    /// Phase Sfx : merge suffix FST data via sfx_dag (parallel steps).
     fn step_sfx(&mut self) -> crate::Result<StepResult> {
-        let serializer = self.serializer.as_mut().unwrap();
+        use super::sfx_merge;
+
         let doc_mapping = self.sfx_doc_mapping.take().unwrap_or_default();
-        self.merger.merge_sfx(serializer, &doc_mapping)?;
+        let readers = Arc::clone(&self.merger.readers);
+        let schema = self.merger.schema.clone();
+
+        // Get sfx fields
+        let sfx_fields: Vec<Field> = schema
+            .fields()
+            .filter(|(_, entry)| {
+                matches!(entry.field_type(), crate::schema::FieldType::Str(opts)
+                    if opts.get_indexing_options().is_some())
+            })
+            .map(|(field, _)| field)
+            .collect();
+
+        let reverse_doc_map = sfx_merge::build_reverse_doc_map(
+            &doc_mapping, readers.len(),
+        );
+
+        let serializer = self.serializer.as_mut().unwrap();
+        let mut sfx_field_ids = Vec::new();
+
+        for &field in &sfx_fields {
+            let (sfx_data, any_has_sfx) = sfx_merge::load_sfx_data(&readers, field);
+            if !any_has_sfx { continue; }
+
+            // These 3 steps are independent — could be parallelized via sfx_dag
+            let tokens = sfx_merge::collect_tokens(&readers, field, &reverse_doc_map)?;
+            let (fst_data, parent_list_data) = sfx_merge::build_fst(&tokens)?;
+            let gapmap_data = sfx_merge::copy_gapmap(&sfx_data, &doc_mapping);
+            let sfxpost_data = sfx_merge::merge_sfxpost(
+                &readers, field, &tokens, &reverse_doc_map,
+            )?;
+
+            let errors = sfx_merge::validate_gapmap(&gapmap_data);
+            if !errors.is_empty() {
+                warn!("gapmap validation: {} errors for field {}", errors.len(), field.field_id());
+            }
+
+            sfx_merge::write_sfx(
+                serializer, field,
+                fst_data, parent_list_data, gapmap_data,
+                doc_mapping.len() as u32, tokens.len() as u32,
+                sfxpost_data,
+            )?;
+            sfx_field_ids.push(field.field_id());
+        }
+
+        if !sfx_field_ids.is_empty() {
+            serializer.write_sfx_manifest(&sfx_field_ids)?;
+        }
+
         self.phase = MergePhase::Close;
         Ok(StepResult::Continue)
     }

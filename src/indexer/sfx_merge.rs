@@ -17,6 +17,23 @@ use crate::suffix_fst::gapmap::{GapMapReader, GapMapWriter, GapMapError};
 use crate::DocAddress;
 
 // ---------------------------------------------------------------------------
+// Reverse doc map (shared by multiple steps)
+// ---------------------------------------------------------------------------
+
+/// Build reverse doc mapping: for each segment, (old_doc_id → new_doc_id).
+pub(crate) fn build_reverse_doc_map(
+    doc_mapping: &[DocAddress],
+    num_segments: usize,
+) -> Vec<HashMap<u32, u32>> {
+    let mut reverse: Vec<HashMap<u32, u32>> = vec![HashMap::new(); num_segments];
+    for (new_doc, old_addr) in doc_mapping.iter().enumerate() {
+        reverse[old_addr.segment_ord as usize]
+            .insert(old_addr.doc_id, new_doc as u32);
+    }
+    reverse
+}
+
+// ---------------------------------------------------------------------------
 // Step 0: Load sfx data from source segments
 // ---------------------------------------------------------------------------
 
