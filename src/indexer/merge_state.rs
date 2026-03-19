@@ -58,6 +58,8 @@ pub(crate) struct MergeState {
     indexed_fields: Vec<Field>,
     /// Compteur de steps complétés (pour observabilité).
     steps_completed: u32,
+    /// SFX field IDs collected during step_sfx (propagated to SegmentMeta in step_close).
+    sfx_field_ids: Vec<u32>,
     /// Timing: when this merge started.
     merge_start: std::time::Instant,
     /// Timing: phase start.
@@ -167,6 +169,7 @@ impl MergeState {
             phase: MergePhase::Init,
             indexed_fields,
             steps_completed: 0,
+            sfx_field_ids: Vec::new(),
             merge_start: std::time::Instant::now(),
             phase_start: std::time::Instant::now(),
             total_docs,
@@ -327,8 +330,6 @@ impl MergeState {
 
         let serializer = self.serializer.as_mut().unwrap();
         let scheduler = global_scheduler();
-        let mut sfx_field_ids = Vec::new();
-
         for &field in &sfx_fields {
             let (sfx_data, any_has_sfx) = sfx_merge::load_sfx_data(&readers, field);
             if !any_has_sfx { continue; }
@@ -379,11 +380,11 @@ impl MergeState {
                 doc_mapping.len() as u32, tokens.len() as u32,
                 sfxpost_data,
             )?;
-            sfx_field_ids.push(field.field_id());
+            self.sfx_field_ids.push(field.field_id());
         }
 
-        if !sfx_field_ids.is_empty() {
-            serializer.write_sfx_manifest(&sfx_field_ids)?;
+        if !self.sfx_field_ids.is_empty() {
+            serializer.write_sfx_manifest(&self.sfx_field_ids)?;
         }
 
         self.phase = MergePhase::Close;
@@ -397,7 +398,8 @@ impl MergeState {
 
         let merged_segment_id = self.merged_segment.id();
         let num_docs = self.merger.max_doc;
-        let segment_meta = self.index.new_segment_meta(merged_segment_id, num_docs);
+        let segment_meta = self.index.new_segment_meta(merged_segment_id, num_docs)
+            .with_sfx_field_ids(std::mem::take(&mut self.sfx_field_ids));
         let entry = SegmentEntry::new(segment_meta, self.delete_cursor.clone(), None);
 
         Ok(StepResult::Done(Some(entry)))

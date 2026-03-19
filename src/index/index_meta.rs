@@ -100,6 +100,19 @@ impl SegmentMeta {
         &self.tracked.sfx_field_ids
     }
 
+    /// Set the SFX field IDs on this segment meta.
+    #[must_use]
+    pub fn with_sfx_field_ids(self, sfx_field_ids: Vec<u32>) -> SegmentMeta {
+        let tracked = self.tracked.map(move |inner| InnerSegmentMeta {
+            segment_id: inner.segment_id,
+            max_doc: inner.max_doc,
+            sfx_field_ids,
+            deletes: inner.deletes.clone(),
+            include_temp_doc_store: inner.include_temp_doc_store.clone(),
+        });
+        SegmentMeta { tracked }
+    }
+
     /// Returns the number of deleted documents.
     pub fn num_deleted_docs(&self) -> u32 {
         self.tracked

@@ -192,10 +192,10 @@ pub(super) fn finalize_segment(
         return Ok(());
     }
 
-    let doc_opstamps: Vec<Opstamp> = segment_writer.finalize()?;
+    let (doc_opstamps, sfx_field_ids) = segment_writer.finalize()?;
     let segment_with_max_doc = segment.with_max_doc(max_doc);
     let alive_bitset_opt = apply_deletes(&segment_with_max_doc, delete_cursor, &doc_opstamps)?;
-    let meta = segment_with_max_doc.meta().clone();
+    let meta = segment_with_max_doc.meta().clone().with_sfx_field_ids(sfx_field_ids);
     meta.untrack_temp_docstore();
     let segment_entry = SegmentEntry::new(meta, delete_cursor.clone(), alive_bitset_opt);
     segment_updater.schedule_add_segment(segment_entry)?;

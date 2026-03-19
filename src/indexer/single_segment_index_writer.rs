@@ -39,12 +39,13 @@ impl<D: Document> SingleSegmentIndexWriter<D> {
 
     pub fn finalize(self) -> crate::Result<Index> {
         let max_doc = self.segment_writer.max_doc();
-        self.segment_writer.finalize()?;
+        let (_doc_opstamps, sfx_field_ids) = self.segment_writer.finalize()?;
         let segment: Segment = self.segment.with_max_doc(max_doc);
+        let meta_with_sfx = segment.meta().clone().with_sfx_field_ids(sfx_field_ids);
         let index = segment.index();
         let index_meta = IndexMeta {
             index_settings: index.settings().clone(),
-            segments: vec![segment.meta().clone()],
+            segments: vec![meta_with_sfx],
             schema: index.schema(),
             opstamp: 0,
             payload: None,

@@ -152,7 +152,9 @@ impl SegmentWriter {
     ///
     /// Finalize consumes the `SegmentWriter`, so that it cannot
     /// be used afterwards.
-    pub fn finalize(mut self) -> crate::Result<Vec<u64>> {
+    /// Finalize the segment: build SFX, write all components, return
+    /// (doc_opstamps, sfx_field_ids).
+    pub fn finalize(mut self) -> crate::Result<(Vec<u64>, Vec<u32>)> {
         self.fieldnorms_writer.fill_up_to_max_doc(self.max_doc);
         // Build and write .sfx files before the serializer is consumed
         let sfx_collectors = std::mem::take(&mut self.sfx_collectors);
@@ -186,7 +188,7 @@ impl SegmentWriter {
             &self.fieldnorms_writer,
             self.segment_serializer,
         )?;
-        Ok(self.doc_opstamps)
+        Ok((self.doc_opstamps, sfx_field_ids))
     }
 
     /// Returns an estimation of the current memory usage of the segment writer.
