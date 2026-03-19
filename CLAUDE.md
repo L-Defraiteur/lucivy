@@ -22,13 +22,12 @@ Le code C++ de l'extension rag3db est dans **deux endroits** :
 
 ## Champs internes
 
-Chaque champ `text` génère un triple :
-- `{name}` : tokenisé (stemmed si configuré)
-- `{name}._raw` : lowercase only (precision pour term/fuzzy/regex/contains)
-- `{name}._ngram` : trigrams (candidats rapides pour contains)
-
-Les champs `string` ont aussi un `._ngram`.
-Les bindings doivent auto-dupliquer les valeurs texte vers `_raw` et `_ngram` à l'insertion.
+Chaque champ `text` :
+- Sans stemmer : utilise RAW_TOKENIZER (lowercase + split). Un seul champ dans le schema.
+- Avec stemmer : utilise STEMMED_TOKENIZER. Un seul champ dans le schema.
+- Le suffix FST (.sfx) est construit par le SfxCollector pendant l'écriture du segment, qui fait du double tokenization en RAW_TOKENIZER indépendamment du tokenizer principal.
+- PAS de champs `._raw` ou `._ngram` séparés dans le schema lucivy core.
+- Les bindings CXX (rag3db) PEUVENT ajouter `._raw` et `._ngram` comme champs séparés pour le bridge — c'est spécifique au binding, pas au core.
 
 ## BlobStore + BlobDirectory (nouveau, non committé)
 
@@ -68,11 +67,33 @@ Tous les 6 bindings passent correctement `handle.raw_field_pairs` et `handle.ngr
 ## Features clés (ajouts récents au-dessus de Tantivy)
 
 ### Query types
-- **contains** : recherche substring via NGramContainsQuery. Cascade : trigram candidats (._ngram) → vérification stored text (._raw). Requiert les champs `._ngram` et `._raw`.
+- **contains** : recherche substring via SuffixContainsQuery. Utilise le suffix FST (.sfx) pour trouver tous les termes contenant le substring, puis le sfxpost pour les positions exactes. PAS de ngrams — le suffix FST gère tout. Cherche sur le champ RAW (lowercase only, pas stemmé).
 - **contains_split** : split par whitespace → boolean should de contains. Expansion faite dans chaque binding.
-- **startsWith** : prefix search via FST natif (AutomatonPhraseQuery). Dernier token = prefix (range FST puis prefix fuzzy DFA), tokens précédents = exact/fuzzy. Plus rapide que contains car pas de trigrams. Routing : single-token → FuzzyTermQuery::new_prefix, multi-token → AutomatonPhraseQuery::new_starts_with().
+- **startsWith** : prefix search via FST natif (AutomatonPhraseQuery). Dernier token = prefix (range FST puis prefix fuzzy DFA), tokens précédents = exact/fuzzy. Routing : single-token → FuzzyTermQuery::new_prefix, multi-token → AutomatonPhraseQuery::new_starts_with().
 - **startsWith_split** : même split que contains_split mais avec startsWith.
-- **fuzzy, regex, term, parse** : types standard tantivy exposés.
+- **fuzzy, regex, term, parse** : types standard lucivy exposés.
+
+### Suffix FST (.sfx) — moteur du contains
+Le suffix FST est le mécanisme central pour les recherches substring. Pas de ngrams.
+
+**Construction** (segment_writer / merge) :
+- Pour chaque terme du term dict, génère TOUS les suffixes (offsets 0 à len)
+- Chaque suffixe est stocké avec `(raw_ordinal, si)` : ordinal du terme parent + offset
+- Partitionné en SI=0 (début de mot = startsWith) et SI>0 (substring)
+- Ex: "function" → suffixes: "function"(SI=0), "unction"(SI=1), "nction"(SI=2), etc.
+
+**Recherche** (suffix_contains_query.rs) :
+- `prefix_walk(query)` sur les deux partitions du FST
+- Pour chaque match : resolve `raw_ordinal` → posting entries (doc_id, token_index, byte_from, byte_to)
+- Byte offsets ajustés : `byte_from + si` pour pointer dans le texte original
+
+**Fichiers** :
+- `.sfx` : suffix FST + parent list + gapmap (par champ, par segment)
+- `.sfxpost` : posting entries indexées par ordinal (doc_id, token_index, offsets)
+- Pas de champs `._raw` ou `._ngram` séparés dans le schema
+- Le SfxCollector fait du double tokenization dans le segment_writer (RAW_TOKENIZER)
+
+**GapMap** : stocke les séparateurs inter-tokens par doc pour la reconstruction du texte original lors des highlights multi-token.
 
 ### BM25 scoring pour AutomatonWeight
 `AutomatonWeight` (utilisé par startsWith, fuzzy, regex) supporte maintenant le BM25 scoring opt-in via `with_scoring(bool)`. 3 paths dans `scorer()` :
@@ -82,14 +103,16 @@ Tous les 6 bindings passent correctement `handle.raw_field_pairs` et `handle.ngr
 
 Activé automatiquement via `EnableScoring::is_scoring_enabled()` dans `Query::weight()`. Propagé dans FuzzyTermQuery, RegexQuery, TermSetQuery.
 
-### Architecture Actor + Scheduler global
-Remplacement des 6 patterns de threading (crossbeam, rayon, mpsc, atomic polling...) par un framework d'acteurs unifié :
-- **Fichiers** : `src/actor/` (mod.rs, mailbox.rs, reply.rs, events.rs, scheduler.rs)
-- **Acteurs** : trait `Actor` avec `handle()` + `priority()`, `Mailbox<M>` FIFO, `ActorRef` typé, `Reply/ReplyReceiver` oneshot
-- **Scheduler global** : `global_scheduler()` lazily initialized, partagé entre tous les IndexWriters (comme rayon global pool). Configurable via `LUCIVY_SCHEDULER_THREADS`.
-- **EventBus** : broadcast d'événements (MessageHandled, PriorityChanged, ActorIdle, ActorWoken, ThreadParked/Unparked, ActorStopped, ActorSpawned, MessageSent*, BatchStarted) pour observabilité
-- **WASM compatible** : 1 thread coopératif (wait_cooperative avec condvar.wait_timeout 1ms) ou N threads natifs (wait_blocking)
-- **"Take pattern"** : `slot.actor.take()` temporaire pendant handle_batch() pour éviter deadlock réentrant, puis remise en place avec `slot.actor = Some(actor_box)`
+### luciole — framework de coordination (crate séparé dans luciole/)
+Framework complet de threading avec pool de threads persistants unifié :
+- **Actor** : trait `Actor<Msg=MyEnum>`, typed messages, `Pool<M>`, `Scope`, `DrainMsg`
+- **DAG** : `Dag`, `Node`, `PollNode`, `GraphNode`, `execute_dag()`, `DagResult::take_output()`
+- **Observabilité** : `subscribe_dag_events()`, `TapRegistry`, `display_progress()`, `CheckpointStore`
+- **Scheduler** : pool de threads persistants, `submit_task()`, `WorkItem` (Actor + Task unifié)
+- **WASM** : tout compatible via `wait_cooperative` + `run_one_step()`
+- **Commit** : DAG structurel (prepare → merges ∥ → finalize → save → gc → reload)
+- **Search** : DAG (drain → flush → build_weight → search_shard_N ∥ → merge_results)
+- **Merge sfx** : steps parallélisés (build_fst, copy_gapmap, merge_sfxpost via submit_task)
 
 ### Merger — offsets préservés
 Fix critique : le merger écrivait les postings sans offsets (write_doc au lieu de write_doc_with_offsets), causant un panic avec highlights sur segments mergés. Fichier : `src/indexer/merger.rs`.
