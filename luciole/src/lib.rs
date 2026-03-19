@@ -1,18 +1,26 @@
 pub mod actor_state;
+pub mod dag;
 pub mod envelope;
 pub mod events;
 pub mod generic_actor;
 pub mod handler;
 pub mod mailbox;
+pub mod node;
+pub mod port;
 pub mod reply;
+pub mod runtime;
 pub mod scheduler;
 
 pub use actor_state::ActorState;
+pub use dag::{Dag, DagEdge};
 pub use envelope::{ActorError, Envelope, Message, ReplyPort, TypedActorRef, reply_port, type_tag_hash};
 pub use generic_actor::GenericActor;
 pub use handler::{Handler, TypedHandler};
 pub use mailbox::{mailbox, ActorRef, Mailbox};
+pub use node::{LogLevel, Node, NodeContext, PortDef};
+pub use port::{PortType, PortValue};
 pub use reply::{reply, Reply, ReplyReceiver};
+pub use runtime::{execute_dag, DagEvent, DagResult, NodeResult};
 pub use scheduler::{ActorId, Scheduler, SchedulerHandle};
 
 use std::task::Poll;
