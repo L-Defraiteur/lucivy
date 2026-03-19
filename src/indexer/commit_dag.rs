@@ -1,12 +1,20 @@
 //! DAG-based commit orchestration for lucivy.
 //!
-//! Replaces `drain_all_merges()` + manual sequencing with a structured DAG
-//! that guarantees: merges parallel → end_merge → save_metas → GC → reload.
+//! Every step of the commit is a DAG node with full observability.
+//! The structure guarantees correct ordering by construction:
 //!
-//! The DAG resolves by construction:
-//! - GC cannot run during merges (dependency edge)
-//! - Segments without sfx (merges complete fully before commit)
-//! - Mmap cache stale (single reload after all writes)
+//! ```text
+//! prepare ──┬── merge_0 ──┐
+//!           ├── merge_1 ──┼── finalize ── save_metas ── gc ── reload
+//!           └── merge_2 ──┘
+//! ```
+//!
+//! - prepare: collect candidates, start_merge (lock segments), purge deletes
+//! - merge_N: parallel merges (PollNode, cooperative yielding)
+//! - finalize: end_merge for each result, commit segment manager
+//! - save_metas: write meta.json atomically
+//! - gc: garbage collect orphan files (safe — no merges in flight)
+//! - reload: reader picks up new metas
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -15,19 +23,23 @@ use luciole::node::{Node, NodeContext, NodePoll, PollNode, PortDef};
 use luciole::port::{PortType, PortValue};
 use luciole::Dag;
 
+use crate::indexer::events::IndexEvent;
 use crate::indexer::merge_operation::MergeOperation;
 use crate::indexer::merge_state::{MergeState, StepResult};
 use crate::indexer::segment_entry::SegmentEntry;
-use crate::indexer::segment_manager::SegmentManager;
 use crate::indexer::segment_updater::SegmentUpdaterShared;
-use crate::index::Index;
 use crate::Opstamp;
 
 // ---------------------------------------------------------------------------
-// MergeResult — data flowing between merge and end_merge nodes
+// Types flowing between nodes
 // ---------------------------------------------------------------------------
 
-/// Result of a single merge, passed from MergeNode to EndMergeNode.
+/// Output of PrepareNode: everything the merges need.
+pub(crate) struct PrepareOutput {
+    pub segment_entries_per_merge: Vec<(MergeOperation, Vec<SegmentEntry>)>,
+}
+
+/// Result of a single merge.
 pub(crate) struct MergeResult {
     pub merge_op: MergeOperation,
     pub segment_entry: Option<SegmentEntry>,
@@ -36,26 +48,99 @@ pub(crate) struct MergeResult {
 }
 
 // ---------------------------------------------------------------------------
+// PrepareNode — collect candidates, start merges, purge deletes
+// ---------------------------------------------------------------------------
+
+pub(crate) struct PrepareNode {
+    shared: Arc<SegmentUpdaterShared>,
+    merge_ops: Vec<MergeOperation>,
+    opstamp: Opstamp,
+}
+
+impl PrepareNode {
+    pub fn new(
+        shared: Arc<SegmentUpdaterShared>,
+        merge_ops: Vec<MergeOperation>,
+        opstamp: Opstamp,
+    ) -> Self {
+        Self { shared, merge_ops, opstamp }
+    }
+}
+
+impl Node for PrepareNode {
+    fn node_type(&self) -> &'static str { "prepare" }
+
+    fn outputs(&self) -> Vec<PortDef> {
+        let mut ports: Vec<PortDef> = Vec::new();
+        for i in 0..self.merge_ops.len() {
+            ports.push(PortDef::required(
+                Box::leak(format!("merge_{}", i).into_boxed_str()),
+                PortType::of::<(MergeOperation, Vec<SegmentEntry>)>(),
+            ));
+        }
+        ports.push(PortDef::trigger("done"));
+        ports
+    }
+
+    fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+        // 1. Purge deletes (advance delete cursors to current opstamp)
+        let segment_entries = self.shared.purge_deletes(self.opstamp)
+            .map_err(|e| format!("purge_deletes: {e}"))?;
+        ctx.metric("purged_segments", segment_entries.len() as f64);
+
+        // 2. Commit segment manager (swap uncommitted → committed)
+        self.shared.segment_manager.commit(segment_entries);
+
+        // 3. Start each merge (lock segments in the manager)
+        for (i, op) in self.merge_ops.iter().enumerate() {
+            let entries = self.shared.segment_manager
+                .start_merge(op.segment_ids())
+                .map_err(|e| format!("start_merge[{}]: {e}", i))?;
+
+            self.shared.event_bus.emit(IndexEvent::MergeStarted {
+                segment_ids: op.segment_ids().to_vec(),
+                target_opstamp: op.target_opstamp(),
+            });
+
+            ctx.info(&format!(
+                "prepared merge_{}: {} segments, {} docs",
+                i, entries.len(),
+                entries.iter().map(|e| e.meta().num_docs()).sum::<u32>(),
+            ));
+
+            // Clone the op since we need to pass it to the merge node
+            let op_clone = MergeOperation::new(
+                op.target_opstamp(),
+                op.segment_ids().to_vec(),
+            );
+            ctx.set_output(
+                &format!("merge_{}", i),
+                PortValue::new((op_clone, entries)),
+            );
+        }
+
+        ctx.trigger("done");
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MergeNode — PollNode wrapping MergeState::step()
 // ---------------------------------------------------------------------------
 
-/// Executes one merge operation incrementally via `MergeState::step()`.
-///
-/// As a PollNode, it yields after each step — in multi-thread mode this is
-/// near-free, in WASM single-thread it lets other work items run.
 pub(crate) struct MergeNode {
     shared: Arc<SegmentUpdaterShared>,
-    merge_op: MergeOperation,
     state: Option<MergeState>,
+    merge_op: Option<MergeOperation>,
     initialized: bool,
 }
 
 impl MergeNode {
-    pub fn new(shared: Arc<SegmentUpdaterShared>, merge_op: MergeOperation) -> Self {
+    pub fn new(shared: Arc<SegmentUpdaterShared>) -> Self {
         Self {
             shared,
-            merge_op,
             state: None,
+            merge_op: None,
             initialized: false,
         }
     }
@@ -64,52 +149,52 @@ impl MergeNode {
 impl PollNode for MergeNode {
     fn node_type(&self) -> &'static str { "merge" }
 
+    fn inputs(&self) -> Vec<PortDef> {
+        vec![PortDef::required("input", PortType::of::<(MergeOperation, Vec<SegmentEntry>)>())]
+    }
+
     fn outputs(&self) -> Vec<PortDef> {
         vec![PortDef::required("result", PortType::of::<MergeResult>())]
     }
 
     fn poll_execute(&mut self, ctx: &mut NodeContext) -> Result<NodePoll, String> {
-        // Lazy init: create MergeState on first poll
+        // Lazy init on first poll: read input and create MergeState
         if !self.initialized {
             self.initialized = true;
 
-            let segment_entries = self.shared.segment_manager
-                .start_merge(self.merge_op.segment_ids())
-                .map_err(|e| format!("start_merge failed: {e}"))?;
+            let (op, entries) = ctx.take_input("input")
+                .ok_or("missing input")?
+                .take::<(MergeOperation, Vec<SegmentEntry>)>()
+                .ok_or("wrong input type")?;
 
-            match MergeState::new(
-                &self.shared.index,
-                segment_entries,
-                self.merge_op.target_opstamp(),
-            ) {
+            match MergeState::new(&self.shared.index, entries, op.target_opstamp()) {
                 Ok(Some(state)) => {
-                    let total_docs = state.total_docs();
-                    ctx.metric("total_docs", total_docs as f64);
+                    ctx.metric("total_docs", state.total_docs() as f64);
                     ctx.info(&format!(
-                        "starting merge of {} segments ({} docs)",
-                        self.merge_op.segment_ids().len(),
-                        total_docs,
+                        "merge {} segments ({} docs)",
+                        op.segment_ids().len(), state.total_docs(),
                     ));
                     self.state = Some(state);
+                    self.merge_op = Some(op);
                 }
                 Ok(None) => {
-                    // Empty merge — 0 docs
+                    // Empty merge
                     ctx.metric("total_docs", 0.0);
-                    ctx.info("empty merge (0 docs), skipping");
+                    ctx.info("empty merge (0 docs)");
+                    self.shared.event_bus.emit(IndexEvent::MergeCompleted {
+                        segment_ids: op.segment_ids().to_vec(),
+                        duration: std::time::Duration::ZERO,
+                        result_num_docs: 0,
+                    });
                     ctx.set_output("result", PortValue::new(MergeResult {
-                        merge_op: MergeOperation::new(
-                            self.merge_op.target_opstamp(),
-                            self.merge_op.segment_ids().to_vec(),
-                        ),
+                        merge_op: op,
                         segment_entry: None,
                         duration_ms: 0,
                         docs_merged: 0,
                     }));
                     return Ok(NodePoll::Ready);
                 }
-                Err(e) => {
-                    return Err(format!("MergeState::new failed: {e}"));
-                }
+                Err(e) => return Err(format!("MergeState::new: {e}")),
             }
         }
 
@@ -118,19 +203,24 @@ impl PollNode for MergeNode {
         match state.step() {
             StepResult::Continue => Ok(NodePoll::Pending),
             StepResult::Done(segment_entry) => {
-                let duration_ms = state.merge_start().elapsed().as_millis() as u64;
+                let duration = state.merge_start().elapsed();
                 let docs = state.total_docs();
-                ctx.metric("duration_ms", duration_ms as f64);
+                let op = self.merge_op.take().unwrap();
+
+                ctx.metric("duration_ms", duration.as_millis() as f64);
                 ctx.metric("docs_merged", docs as f64);
-                ctx.info(&format!("merge completed: {} docs in {}ms", docs, duration_ms));
+                ctx.info(&format!("completed: {} docs in {}ms", docs, duration.as_millis()));
+
+                self.shared.event_bus.emit(IndexEvent::MergeCompleted {
+                    segment_ids: op.segment_ids().to_vec(),
+                    duration,
+                    result_num_docs: docs,
+                });
 
                 ctx.set_output("result", PortValue::new(MergeResult {
-                    merge_op: MergeOperation::new(
-                        self.merge_op.target_opstamp(),
-                        self.merge_op.segment_ids().to_vec(),
-                    ),
+                    merge_op: op,
                     segment_entry,
-                    duration_ms,
+                    duration_ms: duration.as_millis() as u64,
                     docs_merged: docs,
                 }));
                 Ok(NodePoll::Ready)
@@ -140,31 +230,32 @@ impl PollNode for MergeNode {
 }
 
 // ---------------------------------------------------------------------------
-// EndMergeNode — collect merge results, call segment_manager.end_merge()
+// FinalizeNode — end_merge for each result, commit manager
 // ---------------------------------------------------------------------------
 
-pub(crate) struct EndMergeNode {
+pub(crate) struct FinalizeNode {
     shared: Arc<SegmentUpdaterShared>,
     num_merges: usize,
 }
 
-impl EndMergeNode {
+impl FinalizeNode {
     pub fn new(shared: Arc<SegmentUpdaterShared>, num_merges: usize) -> Self {
         Self { shared, num_merges }
     }
 }
 
-impl Node for EndMergeNode {
-    fn node_type(&self) -> &'static str { "end_merge" }
+impl Node for FinalizeNode {
+    fn node_type(&self) -> &'static str { "finalize" }
 
     fn inputs(&self) -> Vec<PortDef> {
-        (0..self.num_merges)
+        let mut ports: Vec<PortDef> = (0..self.num_merges)
             .map(|i| PortDef::required(
-                // Leak a string to get &'static str — OK for DAG lifetime
                 Box::leak(format!("result_{}", i).into_boxed_str()),
                 PortType::of::<MergeResult>(),
             ))
-            .collect()
+            .collect();
+        ports.push(PortDef::optional("trigger", PortType::Trigger));
+        ports
     }
 
     fn outputs(&self) -> Vec<PortDef> {
@@ -173,20 +264,15 @@ impl Node for EndMergeNode {
 
     fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
         let mut total_docs = 0u32;
-        let mut total_merges = 0u32;
 
         for i in 0..self.num_merges {
             let port_name = format!("result_{}", i);
             if let Some(value) = ctx.take_input(&port_name) {
                 if let Some(result) = value.take::<MergeResult>() {
                     total_docs += result.docs_merged;
-                    total_merges += 1;
 
-                    // Apply merge result to segment manager
-                    let after_entry = result.segment_entry;
-
-                    // Advance deletes if needed (same logic as do_end_merge)
-                    let after_entry = if let Some(mut entry) = after_entry {
+                    // Advance deletes on merged segment if needed
+                    let after_entry = if let Some(mut entry) = result.segment_entry {
                         let mut delete_cursor = entry.delete_cursor().clone();
                         if let Some(delete_op) = delete_cursor.get() {
                             let committed_opstamp = self.shared.load_meta().opstamp;
@@ -211,37 +297,7 @@ impl Node for EndMergeNode {
         }
 
         ctx.metric("total_docs", total_docs as f64);
-        ctx.metric("merges_completed", total_merges as f64);
-        ctx.trigger("done");
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// PurgeDeletesNode
-// ---------------------------------------------------------------------------
-
-pub(crate) struct PurgeDeletesNode {
-    shared: Arc<SegmentUpdaterShared>,
-    opstamp: Opstamp,
-}
-
-impl PurgeDeletesNode {
-    pub fn new(shared: Arc<SegmentUpdaterShared>, opstamp: Opstamp) -> Self {
-        Self { shared, opstamp }
-    }
-}
-
-impl Node for PurgeDeletesNode {
-    fn node_type(&self) -> &'static str { "purge_deletes" }
-    fn outputs(&self) -> Vec<PortDef> {
-        vec![PortDef::trigger("done")]
-    }
-    fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
-        let entries = self.shared.purge_deletes(self.opstamp)
-            .map_err(|e| format!("purge_deletes: {e}"))?;
-        self.shared.segment_manager.commit(entries);
-        ctx.metric("opstamp", self.opstamp as f64);
+        ctx.metric("merges", self.num_merges as f64);
         ctx.trigger("done");
         Ok(())
     }
@@ -274,7 +330,7 @@ impl Node for SaveMetasNode {
     fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
         self.shared.save_metas(self.opstamp, self.payload.clone())
             .map_err(|e| format!("save_metas: {e}"))?;
-        ctx.info(&format!("saved metas at opstamp {}", self.opstamp));
+        ctx.info(&format!("saved at opstamp {}", self.opstamp));
         ctx.trigger("done");
         Ok(())
     }
@@ -316,15 +372,7 @@ impl Node for GCNode {
 // ReloadNode
 // ---------------------------------------------------------------------------
 
-pub(crate) struct ReloadNode {
-    shared: Arc<SegmentUpdaterShared>,
-}
-
-impl ReloadNode {
-    pub fn new(shared: Arc<SegmentUpdaterShared>) -> Self {
-        Self { shared }
-    }
-}
+pub(crate) struct ReloadNode;
 
 impl Node for ReloadNode {
     fn node_type(&self) -> &'static str { "reload" }
@@ -332,9 +380,6 @@ impl Node for ReloadNode {
         vec![PortDef::trigger("trigger")]
     }
     fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
-        // The reader picks up the new metas on next search
-        // (searcher is reopened lazily via load_meta).
-        // Nothing explicit needed here — save_metas already wrote the new meta.
         ctx.info("reload complete");
         Ok(())
     }
@@ -344,16 +389,18 @@ impl Node for ReloadNode {
 // build_commit_dag — factory function
 // ---------------------------------------------------------------------------
 
-/// Build the commit DAG for a full commit (rebuild_sfx=true).
+/// Build the commit DAG. Every step is a node with full observability.
 ///
 /// ```text
-/// ┌─ purge_deletes ──────────────────────────────────────┐
-/// │                                                       │
-/// │  merge_0 ─┐                                          │
-/// │  merge_1 ─┼─▸ end_merge ─▸ save_metas ─▸ gc ─▸ reload│
-/// │  merge_2 ─┘                                          │
-/// └──────────────────────────────────────────────────────┘
+/// prepare ──┬── merge_0 ──┐
+///           ├── merge_1 ──┼── finalize ── save_metas ── gc ── reload
+///           └── merge_2 ──┘
 /// ```
+///
+/// - prepare: purge_deletes + commit + start_merge (locks segments)
+/// - merge_N: parallel merges via PollNode (cooperative)
+/// - finalize: end_merge for each, advance deletes
+/// - save_metas → gc → reload: sequential cleanup
 pub(crate) fn build_commit_dag(
     shared: Arc<SegmentUpdaterShared>,
     merge_ops: Vec<MergeOperation>,
@@ -363,37 +410,42 @@ pub(crate) fn build_commit_dag(
     let mut dag = Dag::new();
     let num_merges = merge_ops.len();
 
-    // Purge deletes + commit segment manager (independent of merges)
-    dag.add_node("purge", PurgeDeletesNode::new(shared.clone(), opstamp));
+    // Prepare: purge + commit + start all merges
+    dag.add_node("prepare", PrepareNode::new(shared.clone(), merge_ops, opstamp));
 
     if num_merges > 0 {
-        // Add merge nodes (parallel)
-        for (i, op) in merge_ops.into_iter().enumerate() {
-            dag.add_poll_node(&format!("merge_{}", i), MergeNode::new(shared.clone(), op));
-        }
-
-        // End merge collects all results
-        dag.add_node("end_merge", EndMergeNode::new(shared.clone(), num_merges));
+        // Parallel merge nodes
         for i in 0..num_merges {
+            dag.add_poll_node(&format!("merge_{}", i), MergeNode::new(shared.clone()));
             dag.connect(
-                &format!("merge_{}", i), "result",
-                "end_merge", &format!("result_{}", i),
+                "prepare", &format!("merge_{}", i),
+                &format!("merge_{}", i), "input",
             )?;
         }
 
-        // Save metas depends on both purge and end_merge
+        // Finalize: collect all results
+        dag.add_node("finalize", FinalizeNode::new(shared.clone(), num_merges));
+        for i in 0..num_merges {
+            dag.connect(
+                &format!("merge_{}", i), "result",
+                "finalize", &format!("result_{}", i),
+            )?;
+        }
+        // Also wait for prepare to complete
+        dag.connect("prepare", "done", "finalize", "trigger")?;
+
+        // Save depends on finalize
         dag.add_node("save", SaveMetasNode::new(shared.clone(), opstamp, payload));
-        dag.connect("purge", "done", "save", "trigger")?;
-        dag.connect("end_merge", "done", "save", "trigger")?;
+        dag.connect("finalize", "done", "save", "trigger")?;
     } else {
-        // No merges — save metas directly after purge
+        // No merges — save directly after prepare
         dag.add_node("save", SaveMetasNode::new(shared.clone(), opstamp, payload));
-        dag.connect("purge", "done", "save", "trigger")?;
+        dag.connect("prepare", "done", "save", "trigger")?;
     }
 
-    // GC → Reload (sequential after save)
+    // GC → Reload
     dag.add_node("gc", GCNode::new(shared.clone()));
-    dag.add_node("reload", ReloadNode::new(shared.clone()));
+    dag.add_node("reload", ReloadNode);
     dag.chain(&["save", "gc", "reload"])?;
 
     Ok(dag)
@@ -410,12 +462,9 @@ mod tests {
     use crate::indexer::merge_policy::tests::MergeWheneverPossible;
     use crate::schema::*;
     use crate::{Index, IndexWriter};
-    use crate::indexer::events::IndexEvent;
 
-    /// Reproduce the `garbage_collect_works_as_intended` scenario
-    /// but with full DAG observability to debug why merges fail.
     #[test]
-    fn test_commit_dag_observability() -> crate::Result<()> {
+    fn test_commit_dag_merges_all_segments() -> crate::Result<()> {
         let directory = RamDirectory::create();
         let mut schema_builder = Schema::builder();
         let field = schema_builder.add_u64_field("num", INDEXED);
@@ -425,8 +474,8 @@ mod tests {
         let mut writer: IndexWriter = index.writer_with_num_threads(1, 32_000_000)?;
         writer.set_merge_policy(Box::new(MergeWheneverPossible));
 
-        // Subscribe to index events for observability
-        let events_rx = writer.subscribe_index_events();
+        // Subscribe for observability
+        let dag_events = luciole::subscribe_dag_events();
 
         // Create 4 segments
         for seg in 0..4 {
@@ -434,99 +483,99 @@ mod tests {
                 writer.add_document(doc!(field => i))?;
             }
             writer.commit()?;
-            eprintln!("[test] commit #{} done", seg);
         }
 
-        // Collect and print all events so far
+        // Wait for all merges (triggers full DAG commit)
+        writer.wait_merging_threads()?;
+
+        // Collect DAG events
         let mut events = Vec::new();
-        while let Some(evt) = events_rx.try_recv() {
+        while let Some(evt) = dag_events.try_recv() {
             events.push(evt);
         }
 
-        eprintln!("\n=== Index Events ({}) ===", events.len());
-        for evt in &events {
-            match evt {
-                IndexEvent::MergeStarted { segment_ids, target_opstamp } => {
-                    let ids: Vec<String> = segment_ids.iter()
-                        .map(|id| id.uuid_string()[..8].to_string())
-                        .collect();
-                    eprintln!("  MERGE STARTED: {} segments {:?} opstamp={}",
-                        segment_ids.len(), ids, target_opstamp);
-                }
-                IndexEvent::MergeCompleted { segment_ids, duration, result_num_docs } => {
-                    let ids: Vec<String> = segment_ids.iter()
-                        .map(|id| id.uuid_string()[..8].to_string())
-                        .collect();
-                    eprintln!("  MERGE COMPLETED: {:?} -> {} docs in {:?}",
-                        ids, result_num_docs, duration);
-                }
-                IndexEvent::MergeFailed { segment_ids, error } => {
-                    let ids: Vec<String> = segment_ids.iter()
-                        .map(|id| id.uuid_string()[..8].to_string())
-                        .collect();
-                    eprintln!("  MERGE FAILED: {:?} error={}", ids, error);
-                }
-                IndexEvent::CommitStarted { opstamp } => {
-                    eprintln!("  COMMIT STARTED: opstamp={}", opstamp);
-                }
-                IndexEvent::CommitCompleted { opstamp, duration } => {
-                    eprintln!("  COMMIT COMPLETED: opstamp={} {:?}", opstamp, duration);
-                }
-                _ => {}
-            }
-        }
+        let dag_completions: Vec<_> = events.iter()
+            .filter_map(|e| match e {
+                luciole::DagEvent::DagCompleted { total_ms, node_count } =>
+                    Some((*total_ms, *node_count)),
+                _ => None,
+            })
+            .collect();
+        eprintln!("DAG executions: {:?}", dag_completions);
 
-        // Now check segment state
+        // Verify: 1 segment, 400 docs
         let reader = index.reader()?;
         let num_segments = reader.searcher().segment_readers().len();
         let num_docs = reader.searcher().num_docs();
-        eprintln!("\n=== State after 4 commits ===");
-        eprintln!("  segments: {}", num_segments);
-        eprintln!("  docs: {}", num_docs);
+        eprintln!("segments={}, docs={}", num_segments, num_docs);
+
+        assert_eq!(num_segments, 1, "all segments should be merged into 1");
+        assert_eq!(num_docs, 400);
+        Ok(())
+    }
+
+    #[test]
+    fn test_commit_dag_with_deletes() -> crate::Result<()> {
+        let mut schema_builder = Schema::builder();
+        let text_field = schema_builder.add_text_field("text", TEXT);
+        let index = Index::create_in_ram(schema_builder.build());
+
+        let mut writer = index.writer_for_tests()?;
+        writer.set_merge_policy(Box::new(MergeWheneverPossible));
+
+        // 200 docs: 100 "a" + 100 "b"
+        for _ in 0..100 {
+            writer.add_document(doc!(text_field=>"a"))?;
+            writer.add_document(doc!(text_field=>"b"))?;
+        }
+        writer.commit()?;
+
+        // 200 more: 100 "c" + 100 "d"
+        for _ in 0..100 {
+            writer.add_document(doc!(text_field=>"c"))?;
+            writer.add_document(doc!(text_field=>"d"))?;
+        }
+        writer.commit()?;
+
+        // 2 more
+        writer.add_document(doc!(text_field=>"e"))?;
+        writer.add_document(doc!(text_field=>"f"))?;
+        writer.commit()?;
+
+        // Delete all "a" (100 docs)
+        let term = crate::Term::from_field_text(text_field, "a");
+        writer.delete_term(term);
+        writer.commit()?;
 
         // Wait for merges
-        eprintln!("\n=== Waiting for merging threads ===");
         writer.wait_merging_threads()?;
 
-        // Collect more events
-        while let Some(evt) = events_rx.try_recv() {
-            match &evt {
-                IndexEvent::MergeCompleted { segment_ids, result_num_docs, duration } => {
-                    let ids: Vec<String> = segment_ids.iter()
-                        .map(|id| id.uuid_string()[..8].to_string())
-                        .collect();
-                    eprintln!("  MERGE COMPLETED (post-wait): {:?} -> {} docs {:?}",
-                        ids, result_num_docs, duration);
-                }
-                IndexEvent::MergeFailed { segment_ids, error } => {
-                    let ids: Vec<String> = segment_ids.iter()
-                        .map(|id| id.uuid_string()[..8].to_string())
-                        .collect();
-                    eprintln!("  MERGE FAILED (post-wait): {:?} error={}", ids, error);
-                }
-                _ => {}
-            }
+        let reader = index.reader()?;
+        let num_segments = reader.searcher().segment_readers().len();
+        let num_docs = reader.searcher().num_docs();
+        eprintln!("segments={}, docs={}", num_segments, num_docs);
+
+        assert_eq!(num_segments, 1);
+        assert_eq!(num_docs, 302); // 402 - 100 deleted "a"
+        Ok(())
+    }
+
+    #[test]
+    fn test_commit_dag_no_merges() -> crate::Result<()> {
+        let mut schema_builder = Schema::builder();
+        let field = schema_builder.add_u64_field("num", INDEXED);
+        let index = Index::create_in_ram(schema_builder.build());
+
+        let mut writer = index.writer_for_tests()?;
+        // Default merge policy — single commit, no merge needed
+
+        for i in 0u64..10 {
+            writer.add_document(doc!(field => i))?;
         }
+        writer.commit()?;
 
-        reader.reload()?;
-        let num_segments_after = reader.searcher().segment_readers().len();
-        let num_docs_after = reader.searcher().num_docs();
-        eprintln!("\n=== State after wait ===");
-        eprintln!("  segments: {} (expected 1)", num_segments_after);
-        eprintln!("  docs: {} (expected 400)", num_docs_after);
-
-        // Don't assert yet — we want to see the output
-        if num_segments_after != 1 {
-            eprintln!("\n!!! BUG: expected 1 segment, got {}", num_segments_after);
-            eprintln!("Segment details:");
-            for (i, reader) in reader.searcher().segment_readers().iter().enumerate() {
-                eprintln!("  seg[{}]: {} docs, id={}",
-                    i, reader.num_docs(), reader.segment_id().uuid_string()[..8].to_string());
-            }
-        }
-
-        assert_eq!(num_segments_after, 1, "merge should produce 1 segment");
-        assert_eq!(num_docs_after, 400);
+        let reader = index.reader()?;
+        assert_eq!(reader.searcher().num_docs(), 10);
         Ok(())
     }
 }

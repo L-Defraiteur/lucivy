@@ -231,36 +231,16 @@ impl SegmentUpdaterState {
         payload: Option<String>,
     ) -> crate::Result<crate::Opstamp> {
         // 1. Drain any active/explicit/pending merges (complete them inline)
-        //    This ensures no merge is in-flight when we collect candidates.
         self.drain_all_merges();
 
         // 2. Collect ALL merge candidates (including cascading merges)
-        //    Keep collecting until no more candidates — this catches the
-        //    "cascade" bug where merge results need to be re-merged.
-        let mut all_ops = Vec::new();
-        loop {
-            let candidates = self.collect_merge_candidates();
-            if candidates.is_empty() {
-                break;
-            }
-            // Start each merge to lock the segments
-            for op in candidates {
-                let segment_entries = match self.shared.segment_manager.start_merge(op.segment_ids()) {
-                    Ok(entries) => entries,
-                    Err(e) => {
-                        warn!("start_merge failed (non-fatal): {e}");
-                        continue;
-                    }
-                };
-                // Track segments (protect from GC during merge)
-                for id in op.segment_ids() {
-                    self.segments_in_merge.insert(*id);
-                }
-                all_ops.push(op);
-            }
-        }
+        let all_ops = self.collect_merge_candidates();
 
         // 3. Build and execute the commit DAG
+        //    PrepareNode handles: purge_deletes, commit, start_merge
+        //    MergeNodes handle: parallel merges
+        //    FinalizeNode handles: end_merge, advance deletes
+        //    Then: save_metas → gc → reload
         let mut dag = super::commit_dag::build_commit_dag(
             self.shared.clone(),
             all_ops,
@@ -271,10 +251,10 @@ impl SegmentUpdaterState {
         let dag_result = luciole::execute_dag(&mut dag, None)
             .map_err(|e| crate::LucivyError::SystemError(format!("execute DAG: {e}")))?;
 
-        // 4. Log the DAG result
+        // Log the result
         eprintln!("{}", dag_result.display_summary());
 
-        // 5. Clear merge tracking (all merges done)
+        // Clear merge tracking (all merges done, GC already ran)
         self.segments_in_merge.clear();
         self.shared.gc_protected_segments.lock().unwrap().clear();
 
