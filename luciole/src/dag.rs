@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::events::EventReceiver;
-use crate::node::Node;
+use crate::node::{Node, PollNode, PollNodeAdapter};
 use crate::observe::{TapEvent, TapRegistry};
 use crate::port::PortType;
 
@@ -50,6 +50,15 @@ impl Dag {
         self.nodes.push(DagNodeEntry {
             name: name.to_string(),
             node: Box::new(node),
+        });
+    }
+
+    /// Register a poll-based node (long-running, cooperative yielding).
+    /// Automatically wrapped in a `PollNodeAdapter`.
+    pub fn add_poll_node(&mut self, name: &str, node: impl PollNode + 'static) {
+        self.nodes.push(DagNodeEntry {
+            name: name.to_string(),
+            node: Box::new(PollNodeAdapter::new(node)),
         });
     }
 

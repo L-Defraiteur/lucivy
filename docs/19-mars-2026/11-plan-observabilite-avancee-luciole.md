@@ -393,3 +393,178 @@ Phase 3 : ~200 lignes dans luciole (checkpoint, report)
 Résultat : suppression de ~3800 lignes dans rag3weaver, remplacées par
 une dépendance sur luciole. Un seul DAG framework, battle-tested,
 utilisé par les deux projets.
+
+## Pourquoi PAS async_trait (update post-réflexion)
+
+Le plan ci-dessus proposait `#[cfg(feature = "async")]` + `async_trait`.
+Mauvaise idée :
+
+1. **async_trait = tokio** en pratique. Pas de tokio en WASM.
+2. **Feature gates** = double maintenance, double testing, bugs subtils
+3. **Rag3weaver doit être WASM compatible** à terme (rag3db compile en WASM)
+4. En WASM, kuzu est sync de toute façon (pas de réseau, pas d'I/O async)
+
+### La vraie solution : poll coopératif
+
+Le pattern existe déjà dans luciole :
+- `Actor::poll_idle()` → travail incrémental quand la mailbox est vide
+- `Reply::wait_cooperative(|| scheduler.run_one_step())` → pompe le scheduler en attendant
+- `MergeState::step()` → une étape de merge, retourne Continue ou Done
+
+**C'est le même pattern pour les nœuds** : un nœud qui a du travail long
+(merge, requête DB, embedding) peut *yield* entre les étapes. Le runtime
+le re-schedule. En multi-thread : pas de différence (le thread est dédié).
+En single-thread WASM : le nœud partage le thread coopérativement.
+
+### Design : Node + PollNode
+
+```rust
+// Le Node sync classique — la majorité des cas
+pub trait Node: Send {
+    fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String>;
+}
+
+// Pour les nœuds qui veulent yield (long-running, "async" sans tokio)
+pub trait PollNode: Send {
+    fn node_type(&self) -> &'static str;
+    fn inputs(&self) -> Vec<PortDef> { vec![] }
+    fn outputs(&self) -> Vec<PortDef> { vec![] }
+
+    /// Avance d'un pas. Retourne Ready quand terminé.
+    fn poll_execute(&mut self, ctx: &mut NodeContext) -> Result<NodePoll, String>;
+}
+
+pub enum NodePoll {
+    /// Le nœud a terminé.
+    Ready,
+    /// Le nœud a du travail restant. Le runtime le re-schedule.
+    Pending,
+}
+```
+
+### Comment le runtime gère PollNode
+
+```rust
+// Pour un Node sync classique : une seule task sur le pool
+scheduler.submit_task(Priority::High, move || {
+    node.execute(&mut ctx)
+});
+
+// Pour un PollNode : boucle coopérative
+scheduler.submit_task(Priority::High, move || {
+    loop {
+        match node.poll_execute(&mut ctx) {
+            Ok(NodePoll::Ready) => return Ok(()),
+            Ok(NodePoll::Pending) => {
+                // Yield : laisse le scheduler traiter d'autres work items
+                std::thread::yield_now();
+            }
+            Err(e) => return Err(e),
+        }
+    }
+});
+```
+
+En multi-thread natif : `yield_now()` est quasi-gratuit, le thread revient
+immédiatement (ou laisse un autre thread tourner brièvement).
+
+En single-thread WASM : le submit_task est exécuté via `run_one_step()`.
+Le yield n'aide pas directement, mais le runtime pourrait alterner entre
+nœuds PollNode et autres work items si on structure la boucle autrement.
+
+### Cas concret : rag3weaver search node
+
+```rust
+// Aujourd'hui dans rag3weaver (async) :
+#[async_trait]
+impl Node for KBSearchNode {
+    async fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+        let results = self.db.query(&self.cypher).await?;  // async DB call
+        ctx.set_output("results", PortValue::new(results));
+        Ok(())
+    }
+}
+
+// Demain dans luciole (sync, WASM-safe) :
+impl Node for KBSearchNode {
+    fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+        // En natif : la connexion DB est sync (ou block_on interne)
+        // En WASM : kuzu est sync de toute façon
+        let results = self.db.query_sync(&self.cypher)?;
+        ctx.set_output("results", PortValue::new(results));
+        Ok(())
+    }
+}
+```
+
+L'async disparaît. La query DB est sync dans les deux cas. Pas besoin
+de PollNode ici — la query prend quelques ms.
+
+### Cas concret : lucivy merge node (long-running)
+
+```rust
+// Un merge peut prendre 30 secondes sur un gros segment
+impl PollNode for MergeNode {
+    fn poll_execute(&mut self, ctx: &mut NodeContext) -> Result<NodePoll, String> {
+        match self.state.step() {
+            StepResult::Continue => {
+                ctx.metric("docs_so_far", self.state.docs_processed() as f64);
+                Ok(NodePoll::Pending)  // yield, reviens me voir
+            }
+            StepResult::Done(result) => {
+                ctx.set_output("result", PortValue::new(result));
+                ctx.metric("total_docs", self.state.total_docs() as f64);
+                Ok(NodePoll::Ready)
+            }
+        }
+    }
+}
+```
+
+En multi-thread : le thread exécute la boucle poll jusqu'à Ready.
+Les yields sont quasi-gratuits.
+
+En WASM single-thread : le runtime peut intercaler d'autres work items
+(acteurs, autres nœuds) entre chaque poll du merge. Le merge avance
+pas à pas sans bloquer le thread pendant 30 secondes.
+
+### PollNode → Node adapter
+
+Pour que le runtime n'ait qu'un seul chemin d'exécution, un PollNode
+s'adapte en Node automatiquement :
+
+```rust
+impl<N: PollNode> Node for PollNodeAdapter<N> {
+    fn node_type(&self) -> &'static str { self.inner.node_type() }
+    fn inputs(&self) -> Vec<PortDef> { self.inner.inputs() }
+    fn outputs(&self) -> Vec<PortDef> { self.inner.outputs() }
+
+    fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+        loop {
+            match self.inner.poll_execute(ctx)? {
+                NodePoll::Ready => return Ok(()),
+                NodePoll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+}
+```
+
+Le runtime ne voit que des `Node`. Les PollNode sont wrappés
+automatiquement. Zéro complexité dans le runtime.
+
+### Plan révisé pour la convergence
+
+Phase 1 (luciole) :
+- ~~Feature gate async~~ → **PollNode trait + adapter** (~50 lignes)
+- ServiceRegistry optionnel dans NodeContext (~30 lignes)
+- Tests : PollNode avec merge simulé, adapter
+
+Phase 2 (rag3weaver) :
+- Supprimer async_trait des nœuds
+- Remplacer `async fn execute` par `fn execute` (sync)
+- Les DB calls deviennent sync (block_on en natif, sync en WASM)
+- Importer luciole au lieu de dataflow/
+
+Pas de feature gate. Pas de tokio dans luciole. Un seul trait Node.
+WASM compatible par construction.

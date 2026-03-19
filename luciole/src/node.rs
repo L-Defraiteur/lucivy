@@ -1,6 +1,34 @@
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::port::{PortType, PortValue};
+
+// ---------------------------------------------------------------------------
+// ServiceRegistry — optional shared services for nodes
+// ---------------------------------------------------------------------------
+
+/// String-keyed registry of shared services accessible by nodes.
+///
+/// Optional — lucivy nodes capture context at construction (no registry needed).
+/// Rag3weaver nodes use this for dependency injection (DB connections, etc.).
+pub struct ServiceRegistry {
+    services: HashMap<String, Box<dyn Any + Send + Sync>>,
+}
+
+impl ServiceRegistry {
+    pub fn new() -> Self {
+        Self { services: HashMap::new() }
+    }
+
+    pub fn register<T: Send + Sync + 'static>(&mut self, key: &str, value: T) {
+        self.services.insert(key.to_string(), Box::new(value));
+    }
+
+    pub fn get<T: 'static>(&self, key: &str) -> Option<&T> {
+        self.services.get(key)?.downcast_ref()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // PortDef — static port declaration
@@ -57,6 +85,65 @@ pub trait Node: Send {
 }
 
 // ---------------------------------------------------------------------------
+// PollNode — cooperative yielding for long-running nodes
+// ---------------------------------------------------------------------------
+
+/// Result of a single poll step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodePoll {
+    /// The node has completed.
+    Ready,
+    /// The node has more work. The runtime will call `poll_execute` again.
+    Pending,
+}
+
+/// A node that executes incrementally via cooperative polling.
+///
+/// Use this for long-running work (merges, large I/O) that should yield
+/// periodically. In multi-thread mode, yields are near-free. In WASM
+/// single-thread mode, yields let other work items (actors, other nodes)
+/// run between steps.
+///
+/// PollNodes are automatically adapted to `Node` via `PollNodeAdapter`.
+pub trait PollNode: Send {
+    fn node_type(&self) -> &'static str;
+    fn inputs(&self) -> Vec<PortDef> { vec![] }
+    fn outputs(&self) -> Vec<PortDef> { vec![] }
+
+    /// Advance one step. Called repeatedly until `NodePoll::Ready`.
+    ///
+    /// The context is the same across all calls — outputs and metrics
+    /// accumulate. Set outputs when ready.
+    fn poll_execute(&mut self, ctx: &mut NodeContext) -> Result<NodePoll, String>;
+}
+
+/// Adapter: wraps a `PollNode` into a `Node` by looping until Ready.
+pub struct PollNodeAdapter<N> {
+    inner: N,
+}
+
+impl<N: PollNode> PollNodeAdapter<N> {
+    pub fn new(node: N) -> Self {
+        Self { inner: node }
+    }
+}
+
+impl<N: PollNode> Node for PollNodeAdapter<N> {
+    fn node_type(&self) -> &'static str { self.inner.node_type() }
+    fn inputs(&self) -> Vec<PortDef> { self.inner.inputs() }
+    fn outputs(&self) -> Vec<PortDef> { self.inner.outputs() }
+
+    fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+        loop {
+            match self.inner.poll_execute(ctx)? {
+                NodePoll::Ready => return Ok(()),
+                NodePoll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // LogLevel
 // ---------------------------------------------------------------------------
 
@@ -81,6 +168,7 @@ pub struct NodeContext {
     outputs: HashMap<String, PortValue>,
     metrics: Vec<(String, f64)>,
     logs: Vec<(LogLevel, String)>,
+    services: Option<Arc<ServiceRegistry>>,
 }
 
 impl NodeContext {
@@ -90,6 +178,17 @@ impl NodeContext {
             outputs: HashMap::new(),
             metrics: Vec::new(),
             logs: Vec::new(),
+            services: None,
+        }
+    }
+
+    pub(crate) fn with_services(inputs: HashMap<String, PortValue>, services: Arc<ServiceRegistry>) -> Self {
+        Self {
+            inputs,
+            outputs: HashMap::new(),
+            metrics: Vec::new(),
+            logs: Vec::new(),
+            services: Some(services),
         }
     }
 
@@ -143,6 +242,14 @@ impl NodeContext {
 
     pub fn error(&mut self, msg: &str) {
         self.logs.push((LogLevel::Error, msg.to_string()));
+    }
+
+    // -- services --
+
+    /// Access a shared service by key. Returns None if no registry
+    /// is configured or the key/type doesn't match.
+    pub fn service<T: 'static>(&self, key: &str) -> Option<&T> {
+        self.services.as_ref()?.get(key)
     }
 
     // -- accessors for the runtime --
@@ -236,5 +343,93 @@ mod tests {
         ctx.trigger("done");
         let out = ctx.take_outputs();
         assert!(out.get("done").unwrap().is_trigger());
+    }
+
+    #[test]
+    fn poll_node_incremental() {
+        struct CountdownNode {
+            remaining: u32,
+            total: u32,
+        }
+
+        impl PollNode for CountdownNode {
+            fn node_type(&self) -> &'static str { "countdown" }
+            fn outputs(&self) -> Vec<PortDef> {
+                vec![PortDef::required("result", PortType::of::<u32>())]
+            }
+            fn poll_execute(&mut self, ctx: &mut NodeContext) -> Result<NodePoll, String> {
+                if self.remaining == 0 {
+                    ctx.set_output("result", PortValue::new(self.total));
+                    ctx.metric("steps", self.total as f64);
+                    return Ok(NodePoll::Ready);
+                }
+                self.remaining -= 1;
+                Ok(NodePoll::Pending)
+            }
+        }
+
+        // Via adapter
+        let mut node = PollNodeAdapter::new(CountdownNode { remaining: 5, total: 5 });
+        let mut ctx = NodeContext::new(HashMap::new());
+        node.execute(&mut ctx).unwrap();
+
+        let out = ctx.take_outputs();
+        assert_eq!(*out.get("result").unwrap().downcast::<u32>().unwrap(), 5);
+        assert_eq!(ctx.metrics()[0].1, 5.0);
+    }
+
+    #[test]
+    fn poll_node_in_dag() {
+        use crate::dag::Dag;
+        use crate::runtime::execute_dag;
+
+        struct StepNode { steps: u32 }
+        impl PollNode for StepNode {
+            fn node_type(&self) -> &'static str { "stepper" }
+            fn poll_execute(&mut self, ctx: &mut NodeContext) -> Result<NodePoll, String> {
+                if self.steps == 0 {
+                    ctx.metric("done", 1.0);
+                    Ok(NodePoll::Ready)
+                } else {
+                    self.steps -= 1;
+                    Ok(NodePoll::Pending)
+                }
+            }
+        }
+
+        let mut dag = Dag::new();
+        dag.add_poll_node("stepper", StepNode { steps: 10 });
+
+        let result = execute_dag(&mut dag, None).unwrap();
+        let nr = result.get("stepper").unwrap();
+        assert_eq!(nr.metrics[0].1, 1.0);
+    }
+
+    #[test]
+    fn service_registry() {
+        let mut reg = ServiceRegistry::new();
+        reg.register("db_url", "postgres://localhost".to_string());
+        reg.register("max_retries", 3u32);
+
+        assert_eq!(reg.get::<String>("db_url"), Some(&"postgres://localhost".to_string()));
+        assert_eq!(reg.get::<u32>("max_retries"), Some(&3u32));
+        assert_eq!(reg.get::<u32>("db_url"), None); // wrong type
+        assert_eq!(reg.get::<String>("missing"), None); // missing key
+    }
+
+    #[test]
+    fn node_context_with_services() {
+        let mut reg = ServiceRegistry::new();
+        reg.register("answer", 42u64);
+
+        let ctx = NodeContext::with_services(HashMap::new(), Arc::new(reg));
+        assert_eq!(ctx.service::<u64>("answer"), Some(&42u64));
+        assert_eq!(ctx.service::<u64>("nope"), None);
+    }
+
+    #[test]
+    fn node_context_without_services() {
+        let ctx = NodeContext::new(HashMap::new());
+        assert_eq!(ctx.service::<u64>("anything"), None);
     }
 }

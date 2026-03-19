@@ -20,7 +20,7 @@ pub use envelope::{ActorError, Envelope, Message, ReplyPort, TypedActorRef, repl
 pub use generic_actor::GenericActor;
 pub use handler::{Handler, TypedHandler};
 pub use mailbox::{mailbox, ActorRef, Mailbox};
-pub use node::{LogLevel, Node, NodeContext, PortDef};
+pub use node::{LogLevel, Node, NodeContext, NodePoll, PollNode, PollNodeAdapter, PortDef, ServiceRegistry};
 pub use observe::{TapEvent, TapRegistry};
 pub use pool::{DrainMsg, DrainableRef, Pool, ShutdownMsg};
 pub use port::{PortType, PortValue};
