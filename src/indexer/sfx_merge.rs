@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::docset::{DocSet, TERMINATED};
 use crate::index::SegmentReader;
-use crate::postings::{Postings, SegmentPostings};
+use crate::postings::Postings;
 use crate::schema::{Field, IndexRecordOption};
 use crate::suffix_fst::builder::SuffixFstBuilder;
 use crate::suffix_fst::encode_vint;
@@ -242,6 +242,13 @@ pub(crate) fn merge_sfxpost(
                         }
                     }
                 }
+            }
+            // No sfxpost for this segment — its docs will be MISSING from search.
+            // This should not happen if all segments were properly merged via commit().
+            if token_to_ordinal[seg_ord].contains_key(token.as_str()) {
+                let ndocs = readers[seg_ord].num_docs();
+                eprintln!("[merge_sfxpost] ERROR: segment {} ({} docs) has term {:?} but NO sfxpost file — docs will be missing from contains search!",
+                    readers[seg_ord].segment_id().uuid_string()[..8].to_string(), ndocs, token);
             }
         }
 

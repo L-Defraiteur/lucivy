@@ -156,7 +156,7 @@ fn index_sharded(files: &[(String, String)], dir: &str, num_shards: usize, balan
         doc.add_text(content_f, content);
         handle.add_document(doc, i as u64).unwrap();
         if (i + 1) % commit_every == 0 {
-            handle.commit_fast().unwrap();
+            handle.commit().unwrap();
             eprintln!("    committed {}/{} ({:.1}s)", i + 1, total, t0.elapsed().as_secs_f64());
         }
     }
