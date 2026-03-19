@@ -53,42 +53,25 @@ pub struct SegmentReader {
 }
 
 
-/// Load per-field .sfx files listed in the .sfx manifest.
-/// The manifest is written as SegmentComponent::SuffixFst and lists field_ids.
-/// Each per-field .sfx is stored as `{uuid}.{field_id}.sfx` (custom file).
-/// Returns empty map if no manifest exists.
+/// Load per-field .sfx/.sfxpost files using sfx_field_ids from the SegmentMeta.
+/// Falls back to reading the old .sfx manifest if sfx_field_ids is empty
+/// (backward compat with indexes created before this change).
 fn load_sfx_files(segment: &Segment, _schema: &Schema) -> (FnvHashMap<Field, FileSlice>, FnvHashMap<Field, FileSlice>) {
-    use crate::index::SegmentComponent;
     let mut sfx_files = FnvHashMap::default();
     let mut sfxpost_files = FnvHashMap::default();
 
-    // Read manifest
-    let manifest_data = match segment.open_read(SegmentComponent::SuffixFst) {
-        Ok(file_slice) => match file_slice.read_bytes() {
-            Ok(bytes) => bytes,
-            Err(_) => return (sfx_files, sfxpost_files),
-        },
-        Err(_) => return (sfx_files, sfxpost_files),
+    // Get sfx_field_ids from the segment meta
+    let sfx_field_ids = segment.meta().sfx_field_ids().to_vec();
+
+    // If empty, try the legacy manifest for backward compat
+    let field_ids = if sfx_field_ids.is_empty() {
+        load_sfx_field_ids_from_legacy_manifest(segment)
+    } else {
+        sfx_field_ids
     };
 
-    if manifest_data.len() < 4 {
-        return (sfx_files, sfxpost_files);
-    }
-
-    let num_fields = u32::from_le_bytes([
-        manifest_data[0], manifest_data[1], manifest_data[2], manifest_data[3],
-    ]) as usize;
-
-    for i in 0..num_fields {
-        let offset = 4 + i * 4;
-        if offset + 4 > manifest_data.len() {
-            break;
-        }
-        let field_id = u32::from_le_bytes([
-            manifest_data[offset], manifest_data[offset + 1],
-            manifest_data[offset + 2], manifest_data[offset + 3],
-        ]);
-        let field = Field::from_field_id(field_id);
+    for field_id in &field_ids {
+        let field = Field::from_field_id(*field_id);
         if let Ok(file_slice) = segment.open_read_custom(&format!("{field_id}.sfx")) {
             sfx_files.insert(field, file_slice);
         }
@@ -98,6 +81,37 @@ fn load_sfx_files(segment: &Segment, _schema: &Schema) -> (FnvHashMap<Field, Fil
     }
 
     (sfx_files, sfxpost_files)
+}
+
+/// Legacy: read field_ids from the old .sfx manifest file.
+fn load_sfx_field_ids_from_legacy_manifest(segment: &Segment) -> Vec<u32> {
+    // Try opening the old manifest (stored as a custom file ".sfx")
+    let manifest_data = match segment.open_read_custom("sfx") {
+        Ok(file_slice) => match file_slice.read_bytes() {
+            Ok(bytes) => bytes,
+            Err(_) => return vec![],
+        },
+        Err(_) => return vec![],
+    };
+
+    if manifest_data.len() < 4 {
+        return vec![];
+    }
+
+    let num_fields = u32::from_le_bytes([
+        manifest_data[0], manifest_data[1], manifest_data[2], manifest_data[3],
+    ]) as usize;
+
+    let mut ids = Vec::with_capacity(num_fields);
+    for i in 0..num_fields {
+        let offset = 4 + i * 4;
+        if offset + 4 > manifest_data.len() { break; }
+        ids.push(u32::from_le_bytes([
+            manifest_data[offset], manifest_data[offset + 1],
+            manifest_data[offset + 2], manifest_data[offset + 3],
+        ]));
+    }
+    ids
 }
 
 impl SegmentReader {

@@ -98,19 +98,15 @@ impl SegmentSerializer {
         Ok(())
     }
 
-    /// Write the .sfx manifest listing which field_ids have per-field .sfx files.
-    /// This file is tracked by SegmentComponent::SuffixFst so the GC preserves it
-    /// and the per-field files it references.
-    pub fn write_sfx_manifest(&mut self, field_ids: &[u32]) -> crate::Result<()> {
-        use crate::index::SegmentComponent;
-        use common::TerminatingWrite;
-        let mut writer = self.segment.open_write(SegmentComponent::SuffixFst)?;
-        // Format: num_fields (u32 LE) + field_ids (u32 LE each)
-        writer.write_all(&(field_ids.len() as u32).to_le_bytes())?;
-        for &fid in field_ids {
-            writer.write_all(&fid.to_le_bytes())?;
-        }
-        writer.terminate()?;
+    /// Returns the list of field_ids that had sfx files written.
+    /// The caller should store these in the SegmentMeta (sfx_field_ids)
+    /// so that list_files() and GC know about them.
+    ///
+    /// NOTE: The old .sfx manifest file is no longer written.
+    /// sfx_field_ids are stored in meta.json instead.
+    pub fn write_sfx_manifest(&mut self, _field_ids: &[u32]) -> crate::Result<()> {
+        // No-op: sfx_field_ids are now tracked in SegmentMeta, not in a manifest file.
+        // The caller (segment_writer, merge_state) must set sfx_field_ids on the SegmentMeta.
         Ok(())
     }
 
