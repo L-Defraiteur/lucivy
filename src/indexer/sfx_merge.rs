@@ -5,11 +5,30 @@
 //! each step can be individually timed, tapped, and debugged.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::docset::{DocSet, TERMINATED};
 use crate::index::SegmentReader;
 use crate::postings::Postings;
 use crate::schema::{Field, IndexRecordOption};
+
+// ---------------------------------------------------------------------------
+// Validation flag — enabled by default, disable via LUCIVY_SKIP_VALIDATION=1
+// ---------------------------------------------------------------------------
+
+static VALIDATION_FLAG: AtomicU8 = AtomicU8::new(0); // 0=unset, 1=enabled, 2=disabled
+
+fn should_validate() -> bool {
+    let flag = VALIDATION_FLAG.load(Ordering::Relaxed);
+    if flag != 0 {
+        return flag == 1;
+    }
+    let enabled = std::env::var("LUCIVY_SKIP_VALIDATION")
+        .map(|v| v != "1")
+        .unwrap_or(true);
+    VALIDATION_FLAG.store(if enabled { 1 } else { 2 }, Ordering::Relaxed);
+    enabled
+}
 use crate::suffix_fst::builder::SuffixFstBuilder;
 use crate::suffix_fst::encode_vint;
 use crate::suffix_fst::file::{SfxFileReader, SfxFileWriter, SfxPostingsReader};
@@ -278,8 +297,89 @@ pub(crate) fn merge_sfxpost(
 
 /// Validate gapmap data. Returns errors (empty = valid).
 pub(crate) fn validate_gapmap(gapmap_data: &[u8]) -> Vec<GapMapError> {
+    if !should_validate() { return vec![]; }
     let reader = GapMapReader::open(gapmap_data);
     reader.validate()
+}
+
+/// Validate sfxpost data against the term dict.
+/// Checks:
+/// - All doc_ids < num_docs
+/// - Number of ordinals matches num_tokens
+/// Returns error description or None if valid.
+pub(crate) fn validate_sfxpost(
+    sfxpost_data: &[u8],
+    num_docs: u32,
+    num_tokens: u32,
+) -> Option<String> {
+    if !should_validate() { return None; }
+    if sfxpost_data.len() < 4 { return Some("sfxpost too short".into()); }
+
+    let stored_num_tokens = u32::from_le_bytes([
+        sfxpost_data[0], sfxpost_data[1], sfxpost_data[2], sfxpost_data[3],
+    ]);
+    if stored_num_tokens != num_tokens {
+        return Some(format!(
+            "sfxpost num_tokens mismatch: stored={} expected={}",
+            stored_num_tokens, num_tokens,
+        ));
+    }
+
+    // Read offset table
+    let offsets_size = (stored_num_tokens as usize + 1) * 4;
+    if 4 + offsets_size > sfxpost_data.len() {
+        return Some(format!(
+            "sfxpost offset table overflows: need {} bytes, have {}",
+            4 + offsets_size, sfxpost_data.len(),
+        ));
+    }
+
+    // Check doc_ids in posting entries
+    let data_start = 4 + offsets_size;
+    let posting_data = &sfxpost_data[data_start..];
+
+    // Decode entries and check doc_ids
+    let mut cursor = 0usize;
+    let mut entry_count = 0u64;
+    let mut max_doc_id = 0u32;
+    while cursor < posting_data.len() {
+        // Each entry: doc_id(VInt) + token_index(VInt) + byte_from(VInt) + byte_to(VInt)
+        let (doc_id, next) = decode_vint(&posting_data[cursor..]);
+        if doc_id >= num_docs {
+            return Some(format!(
+                "sfxpost doc_id {} >= num_docs {} at entry {}",
+                doc_id, num_docs, entry_count,
+            ));
+        }
+        if doc_id > max_doc_id { max_doc_id = doc_id; }
+        cursor = cursor + next;
+
+        // Skip token_index, byte_from, byte_to
+        let (_, n) = decode_vint(&posting_data[cursor..]);
+        cursor += n;
+        let (_, n) = decode_vint(&posting_data[cursor..]);
+        cursor += n;
+        let (_, n) = decode_vint(&posting_data[cursor..]);
+        cursor += n;
+
+        entry_count += 1;
+    }
+
+    None // valid
+}
+
+fn decode_vint(data: &[u8]) -> (u32, usize) {
+    let mut result = 0u32;
+    let mut shift = 0;
+    for (i, &byte) in data.iter().enumerate() {
+        result |= ((byte & 0x7F) as u32) << shift;
+        if byte & 0x80 == 0 {
+            return (result, i + 1);
+        }
+        shift += 7;
+        if shift >= 35 { break; } // overflow protection
+    }
+    (result, data.len())
 }
 
 // ---------------------------------------------------------------------------

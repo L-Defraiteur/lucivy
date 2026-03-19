@@ -372,6 +372,13 @@ impl MergeState {
             if !errors.is_empty() {
                 warn!("gapmap validation: {} errors for field {}", errors.len(), field.field_id());
             }
+            if let Some(ref sfxpost) = sfxpost_data {
+                if let Some(err) = sfx_merge::validate_sfxpost(
+                    sfxpost, doc_mapping.len() as u32, tokens.len() as u32,
+                ) {
+                    warn!("sfxpost validation: {} for field {}", err, field.field_id());
+                }
+            }
 
             // Step 6: write (sequential — needs serializer)
             sfx_merge::write_sfx(

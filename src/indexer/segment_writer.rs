@@ -19,6 +19,14 @@ use crate::postings::{
 use crate::schema::document::{Document, Value};
 use crate::schema::{Field, FieldEntry, FieldType, Schema, DATE_TIME_PRECISION_INDEXED};
 use crate::suffix_fst::SfxCollector;
+
+/// Extract num_suffix_terms from sfx_bytes header.
+fn collector_token_count(sfx_bytes: &[u8]) -> u32 {
+    use crate::suffix_fst::file::SfxFileReader;
+    SfxFileReader::open(sfx_bytes)
+        .map(|r| r.num_suffix_terms())
+        .unwrap_or(0)
+}
 use crate::tokenizer::{FacetTokenizer, PreTokenizedStream, PreTokenizedString, TextAnalyzer, Tokenizer};
 use crate::{DocId, Opstamp, LucivyError};
 
@@ -164,6 +172,14 @@ impl SegmentWriter {
                 Ok((sfx_bytes, sfxpost_bytes)) => {
                     self.segment_serializer.write_sfx(field_id, &sfx_bytes)?;
                     if !sfxpost_bytes.is_empty() {
+                        // Validate sfxpost before writing
+                        let num_tokens = collector_token_count(&sfx_bytes);
+                        if let Some(err) = super::sfx_merge::validate_sfxpost(
+                            &sfxpost_bytes, self.max_doc, num_tokens,
+                        ) {
+                            eprintln!("[segment_writer] SFXPOST VALIDATION FAILED field {}: {}",
+                                field_id, err);
+                        }
                         self.segment_serializer.write_sfxpost(field_id, &sfxpost_bytes)?;
                     } else {
                         eprintln!("[segment_writer] WARNING: empty sfxpost for field {} ({} docs)",
