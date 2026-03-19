@@ -300,15 +300,18 @@ impl MergeState {
         Ok(StepResult::Continue)
     }
 
-    /// Phase Sfx : merge suffix FST data via sfx_dag (parallel steps).
+    /// Phase Sfx : merge suffix FST data with parallel steps.
+    ///
+    /// collect_tokens is sequential (needs readers), then build_fst,
+    /// copy_gapmap, and merge_sfxpost run in PARALLEL on the scheduler pool.
     fn step_sfx(&mut self) -> crate::Result<StepResult> {
         use super::sfx_merge;
+        use luciole::scheduler::global_scheduler;
 
         let doc_mapping = self.sfx_doc_mapping.take().unwrap_or_default();
         let readers = Arc::clone(&self.merger.readers);
         let schema = self.merger.schema.clone();
 
-        // Get sfx fields
         let sfx_fields: Vec<Field> = schema
             .fields()
             .filter(|(_, entry)| {
@@ -323,25 +326,53 @@ impl MergeState {
         );
 
         let serializer = self.serializer.as_mut().unwrap();
+        let scheduler = global_scheduler();
         let mut sfx_field_ids = Vec::new();
 
         for &field in &sfx_fields {
             let (sfx_data, any_has_sfx) = sfx_merge::load_sfx_data(&readers, field);
             if !any_has_sfx { continue; }
 
-            // These 3 steps are independent — could be parallelized via sfx_dag
+            // Step 1: collect tokens (sequential — needs readers)
             let tokens = sfx_merge::collect_tokens(&readers, field, &reverse_doc_map)?;
-            let (fst_data, parent_list_data) = sfx_merge::build_fst(&tokens)?;
-            let gapmap_data = sfx_merge::copy_gapmap(&sfx_data, &doc_mapping);
-            let sfxpost_data = sfx_merge::merge_sfxpost(
-                &readers, field, &tokens, &reverse_doc_map,
-            )?;
+            let tokens = Arc::new(tokens);
 
+            // Steps 2-4: PARALLEL via submit_task
+            let tokens_fst = Arc::clone(&tokens);
+            let rx_fst = scheduler.submit_task(luciole::Priority::High, move || {
+                sfx_merge::build_fst(&tokens_fst)
+            });
+
+            let sfx_data_clone = sfx_data.clone();
+            let doc_mapping_clone = doc_mapping.clone();
+            let rx_gapmap = scheduler.submit_task(luciole::Priority::High, move || {
+                sfx_merge::copy_gapmap(&sfx_data_clone, &doc_mapping_clone)
+            });
+
+            let readers_post = Arc::clone(&readers);
+            let tokens_post = Arc::clone(&tokens);
+            let rdm_clone = reverse_doc_map.clone();
+            let rx_sfxpost = scheduler.submit_task(luciole::Priority::High, move || {
+                sfx_merge::merge_sfxpost(&readers_post, field, &tokens_post, &rdm_clone)
+            });
+
+            // Wait for all 3 (cooperative — works in WASM too)
+            let (fst_data, parent_list_data) = rx_fst
+                .wait_cooperative_named("sfx_build_fst", || scheduler.run_one_step())
+                .map_err(|e| crate::LucivyError::SystemError(format!("build_fst: {e}")))?;
+            let gapmap_data = rx_gapmap
+                .wait_cooperative_named("sfx_copy_gapmap", || scheduler.run_one_step());
+            let sfxpost_data = rx_sfxpost
+                .wait_cooperative_named("sfx_merge_sfxpost", || scheduler.run_one_step())
+                .map_err(|e| crate::LucivyError::SystemError(format!("merge_sfxpost: {e}")))?;
+
+            // Step 5: validate (sequential)
             let errors = sfx_merge::validate_gapmap(&gapmap_data);
             if !errors.is_empty() {
                 warn!("gapmap validation: {} errors for field {}", errors.len(), field.field_id());
             }
 
+            // Step 6: write (sequential — needs serializer)
             sfx_merge::write_sfx(
                 serializer, field,
                 fst_data, parent_list_data, gapmap_data,
