@@ -868,245 +868,50 @@ impl IndexMerger {
         let mut sfx_field_ids = Vec::new();
 
         for &field in &sfx_fields {
-            // Load .sfx bytes from each source segment
-            let mut segment_sfx: Vec<Option<Vec<u8>>> = Vec::with_capacity(self.readers.len());
-            let mut any_has_sfx = false;
+            use super::sfx_merge;
 
-            for reader in &self.readers {
-                if let Some(file_slice) = reader.sfx_file(field) {
-                    match file_slice.read_bytes() {
-                        Ok(bytes) => {
-                            segment_sfx.push(Some(bytes.to_vec()));
-                            any_has_sfx = true;
-                        }
-                        Err(_) => segment_sfx.push(None),
-                    }
-                } else {
-                    segment_sfx.push(None);
-                }
-            }
-
+            // Step 0: Load sfx data
+            let (sfx_data, any_has_sfx) = sfx_merge::load_sfx_data(&self.readers, field);
             if !any_has_sfx {
                 continue;
             }
 
-            // Parse the SfxFileReaders
-            let sfx_readers: Vec<Option<SfxFileReader<'_>>> = segment_sfx
-                .iter()
-                .map(|opt| {
-                    opt.as_ref()
-                        .and_then(|bytes| SfxFileReader::open(bytes).ok())
-                })
-                .collect();
+            // Step 1: Collect unique tokens
+            let unique_tokens = sfx_merge::collect_tokens(
+                &self.readers, field, &reverse_doc_map,
+            )?;
 
-            // 1. Collect unique tokens that have at least one alive document.
-            let has_deletes = self.readers.iter().any(|r| r.alive_bitset().is_some());
-            let mut unique_tokens = BTreeSet::new();
+            eprintln!("[merge_sfx] field {} : {} unique tokens, {} readers",
+                field.field_id(), unique_tokens.len(), self.readers.len());
 
-            if has_deletes {
-                // Slow path: must check each term's postings for alive docs.
-                // Terms from deleted documents get purged in the merged TermDictionary,
-                // causing ordinal mismatches if we include them in .sfx.
-                for (seg_ord, reader) in self.readers.iter().enumerate() {
-                    if let Ok(inv_idx) = reader.inverted_index(field) {
-                        let term_dict = inv_idx.terms();
-                        let alive = reader.alive_bitset();
-                        let mut stream = term_dict.stream()?;
-                        while stream.advance() {
-                            if let Ok(s) = std::str::from_utf8(stream.key()) {
-                                let ti = stream.value().clone();
-                                let mut postings = inv_idx.read_postings_from_terminfo(
-                                    &ti, IndexRecordOption::Basic)?;
-                                let has_alive_doc = loop {
-                                    let doc = postings.doc();
-                                    if doc == TERMINATED { break false; }
-                                    let is_alive = alive.map_or(true, |bs| bs.is_alive(doc));
-                                    if is_alive && reverse_doc_map[seg_ord].contains_key(&doc) {
-                                        break true;
-                                    }
-                                    postings.advance();
-                                };
-                                if has_alive_doc {
-                                    unique_tokens.insert(s.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                // Fast path: no deletes — all terms are alive, skip postings check.
-                for reader in &self.readers {
-                    if let Ok(inv_idx) = reader.inverted_index(field) {
-                        let mut stream = inv_idx.terms().stream()?;
-                        while stream.advance() {
-                            if let Ok(s) = std::str::from_utf8(stream.key()) {
-                                unique_tokens.insert(s.to_string());
-                            }
-                        }
-                    }
+            // Step 2: Build FST
+            let (fst_data, parent_list_data) = sfx_merge::build_fst(&unique_tokens)?;
+
+            // Step 3: Copy gapmap
+            let gapmap_data = sfx_merge::copy_gapmap(&sfx_data, doc_mapping);
+
+            // Step 4: Merge sfxpost
+            let sfxpost_data = sfx_merge::merge_sfxpost(
+                &self.readers, field, &unique_tokens, &reverse_doc_map,
+            )?;
+
+            // Step 5: Validate gapmap
+            let errors = sfx_merge::validate_gapmap(&gapmap_data);
+            if !errors.is_empty() {
+                eprintln!("[merge_sfx] GAPMAP VALIDATION FAILED field {}: {} errors",
+                    field.field_id(), errors.len());
+                for (i, err) in errors.iter().enumerate().take(10) {
+                    eprintln!("[merge_sfx]   {}: {}", i, err);
                 }
             }
 
-            // 2. Build suffix FST
-            eprintln!("[merge_sfx] field {} : {} unique tokens collected, has_deletes={}, {} readers",
-                field.field_id(), unique_tokens.len(), has_deletes, self.readers.len());
-            if unique_tokens.len() < 5 {
-                eprintln!("[merge_sfx]   tokens: {:?}", unique_tokens.iter().take(10).collect::<Vec<_>>());
-            }
-            let mut sfx_builder = SuffixFstBuilder::new();
-            for (ordinal, token) in unique_tokens.iter().enumerate() {
-                sfx_builder.add_token(token, ordinal as u64);
-            }
-            let (fst_data, parent_list_data) = sfx_builder.build().map_err(|e| {
-                crate::LucivyError::SystemError(format!("merge sfx build: {e}"))
-            })?;
-
-            // 3. Build GapMap by copying doc data in merge order
-            let mut gapmap_writer = GapMapWriter::new();
-            for &doc_addr in doc_mapping {
-                let seg_ord = doc_addr.segment_ord as usize;
-                let old_doc_id = doc_addr.doc_id;
-
-                if let Some(Some(sfx_reader)) = sfx_readers.get(seg_ord) {
-                    let doc_data = sfx_reader.gapmap().doc_data(old_doc_id);
-                    gapmap_writer.add_doc_raw(doc_data);
-                } else {
-                    // Source segment had no .sfx — add empty doc
-                    gapmap_writer.add_empty_doc();
-                }
-            }
-
-            // 4. Reconstruct .sfxpost by merging posting entries with doc_id remapping
-            let mut sfxpost_data: Option<Vec<u8>> = None;
-            {
-                let mut segment_sfxpost: Vec<Option<Vec<u8>>> = Vec::with_capacity(self.readers.len());
-                let mut any_has_sfxpost = false;
-                let mut missing_sfxpost = Vec::new();
-                for (seg_ord, reader) in self.readers.iter().enumerate() {
-                    if let Some(file_slice) = reader.sfxpost_file(field) {
-                        match file_slice.read_bytes() {
-                            Ok(bytes) => {
-                                segment_sfxpost.push(Some(bytes.to_vec()));
-                                any_has_sfxpost = true;
-                            }
-                            Err(_) => {
-                                segment_sfxpost.push(None);
-                                missing_sfxpost.push((seg_ord, reader.num_docs(), "read_err"));
-                            }
-                        }
-                    } else {
-                        segment_sfxpost.push(None);
-                        missing_sfxpost.push((seg_ord, reader.num_docs(), "no_file"));
-                    }
-                }
-                if !missing_sfxpost.is_empty() {
-                    for &(seg_ord, ndocs, reason) in &missing_sfxpost {
-                        let has_sfx = self.readers[seg_ord].sfx_file(field).is_some();
-                        let seg_id = self.readers[seg_ord].segment_id().uuid_string();
-                        eprintln!("[merge_sfx] WARNING: seg={} ({} docs) missing sfxpost ({}), has_sfx={}",
-                            &seg_id[..8], ndocs, reason, has_sfx);
-                    }
-                }
-
-                if any_has_sfxpost {
-                    let sfxpost_readers: Vec<Option<SfxPostingsReader<'_>>> = segment_sfxpost
-                        .iter()
-                        .map(|opt| opt.as_ref().and_then(|b| SfxPostingsReader::open(b).ok()))
-                        .collect();
-
-                    // token → old ordinal for each source segment
-                    let mut token_to_ordinal: Vec<HashMap<String, u32>> = Vec::with_capacity(self.readers.len());
-                    for reader in &self.readers {
-                        let mut map = HashMap::new();
-                        if let Ok(inv_idx) = reader.inverted_index(field) {
-                            let term_dict = inv_idx.terms();
-                            let mut stream = term_dict.stream()?;
-                            let mut ord = 0u32;
-                            while stream.advance() {
-                                if let Ok(s) = std::str::from_utf8(stream.key()) {
-                                    map.insert(s.to_string(), ord);
-                                }
-                                ord += 1;
-                            }
-                        }
-                        token_to_ordinal.push(map);
-                    }
-
-                    // Merge entries per token in BTreeSet order (= new ordinal order)
-                    let mut posting_offsets: Vec<u32> = Vec::with_capacity(unique_tokens.len() + 1);
-                    let mut posting_bytes: Vec<u8> = Vec::new();
-
-                    for token in &unique_tokens {
-                        posting_offsets.push(posting_bytes.len() as u32);
-                        let mut merged: Vec<(u32, u32, u32, u32)> = Vec::new();
-
-                        for (seg_ord, sfxpost_reader) in sfxpost_readers.iter().enumerate() {
-                            if let Some(reader) = sfxpost_reader {
-                                if let Some(&old_ord) = token_to_ordinal[seg_ord].get(token.as_str()) {
-                                    for e in reader.entries(old_ord) {
-                                        if let Some(&new_doc) = reverse_doc_map[seg_ord].get(&e.doc_id) {
-                                            merged.push((new_doc, e.token_index, e.byte_from, e.byte_to));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        merged.sort_unstable();
-                        for &(doc_id, ti, byte_from, byte_to) in &merged {
-                            encode_vint(doc_id, &mut posting_bytes);
-                            encode_vint(ti, &mut posting_bytes);
-                            encode_vint(byte_from, &mut posting_bytes);
-                            encode_vint(byte_to, &mut posting_bytes);
-                        }
-                    }
-                    posting_offsets.push(posting_bytes.len() as u32);
-
-                    let mut data = Vec::new();
-                    data.extend_from_slice(&(unique_tokens.len() as u32).to_le_bytes());
-                    for &off in &posting_offsets {
-                        data.extend_from_slice(&off.to_le_bytes());
-                    }
-                    data.extend_from_slice(&posting_bytes);
-                    sfxpost_data = Some(data);
-                }
-            }
-
-            // 5. Validate gapmap before writing
-            let gapmap_data = gapmap_writer.serialize();
-            {
-                use crate::suffix_fst::gapmap::GapMapReader;
-                let validation_reader = GapMapReader::open(&gapmap_data);
-                let errors = validation_reader.validate();
-                if !errors.is_empty() {
-                    eprintln!("[merge_sfx] GAPMAP VALIDATION FAILED for field {}: {} errors in {} docs",
-                        field.field_id(), errors.len(), doc_mapping.len());
-                    for (i, err) in errors.iter().enumerate().take(10) {
-                        eprintln!("[merge_sfx]   error {}: {}", i, err);
-                    }
-                    // Log source segment details for diagnosis
-                    for (seg_ord, reader) in self.readers.iter().enumerate() {
-                        let has_sfx = reader.sfx_file(field).is_some();
-                        let seg_id = reader.segment_id().uuid_string();
-                        eprintln!("[merge_sfx]   source seg[{}] {} ({} docs) has_sfx={}",
-                            seg_ord, &seg_id[..8], reader.num_docs(), has_sfx);
-                    }
-                }
-            }
-
-            // 6. Assemble and write .sfx + .sfxpost
-            let sfx_file = SfxFileWriter::new(
-                fst_data,
-                parent_list_data,
-                gapmap_data,
-                doc_mapping.len() as u32,
-                unique_tokens.len() as u32,
-            );
-            let sfx_bytes = sfx_file.to_bytes();
-            serializer.write_sfx(field.field_id(), &sfx_bytes)?;
-            if let Some(ref sfxpost) = sfxpost_data {
-                serializer.write_sfxpost(field.field_id(), sfxpost)?;
-            }
+            // Step 6: Write
+            sfx_merge::write_sfx(
+                serializer, field,
+                fst_data, parent_list_data, gapmap_data,
+                doc_mapping.len() as u32, unique_tokens.len() as u32,
+                sfxpost_data,
+            )?;
             sfx_field_ids.push(field.field_id());
         }
 
