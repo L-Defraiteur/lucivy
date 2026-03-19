@@ -196,6 +196,8 @@ pub fn execute_dag(
 
     let mut port_data: HashMap<(String, String), PortValue> = HashMap::new();
     let mut results: Vec<(String, NodeResult)> = Vec::with_capacity(total_nodes);
+    // Undo contexts: (node_idx, undo_data) in execution order
+    let mut undo_stack: Vec<(usize, Box<dyn std::any::Any + Send>)> = Vec::new();
 
     let bus = dag_event_bus();
     let emit = |evt: DagEvent| {
@@ -205,39 +207,72 @@ pub fn execute_dag(
         }
     };
 
-    for (level_idx, level) in levels.iter().enumerate() {
-        let level_start = Instant::now();
-        let level_names: Vec<String> = level.iter()
-            .map(|&i| dag.node_name(i).to_string())
-            .collect();
+    let execute_result: Result<(), String> = (|| {
+        for (level_idx, level) in levels.iter().enumerate() {
+            let level_start = Instant::now();
+            let level_names: Vec<String> = level.iter()
+                .map(|&i| dag.node_name(i).to_string())
+                .collect();
 
-        emit(DagEvent::LevelStarted {
-            level: level_idx,
-            nodes: level_names.clone(),
-        });
+            emit(DagEvent::LevelStarted {
+                level: level_idx,
+                nodes: level_names.clone(),
+            });
 
-        if level.len() == 1 {
-            // Single node — execute inline (no task overhead)
-            let node_idx = level[0];
-            let node_name = dag.node_name(node_idx).to_string();
-            let nr = execute_single_node(
-                dag, node_idx, &mut port_data, &mut consumer_counts,
-                level_idx, &emit,
-            )?;
-            results.push((node_name, nr));
-        } else {
-            // Multiple nodes — submit as tasks to the scheduler pool
-            let level_results = execute_level_parallel(
-                dag, level, &mut port_data, &mut consumer_counts,
-                level_idx, &emit,
-            )?;
-            results.extend(level_results);
+            if level.len() == 1 {
+                let node_idx = level[0];
+                let node_name = dag.node_name(node_idx).to_string();
+                let nr = execute_single_node(
+                    dag, node_idx, &mut port_data, &mut consumer_counts,
+                    level_idx, &emit,
+                )?;
+                // Capture undo context if supported
+                if dag.node_mut(node_idx).can_undo() {
+                    if let Some(undo_ctx) = dag.node_mut(node_idx).undo_context() {
+                        undo_stack.push((node_idx, undo_ctx));
+                    }
+                }
+                results.push((node_name, nr));
+            } else {
+                let level_results = execute_level_parallel(
+                    dag, level, &mut port_data, &mut consumer_counts,
+                    level_idx, &emit,
+                )?;
+                // Capture undo contexts for parallel nodes
+                for &node_idx in level {
+                    if dag.node_mut(node_idx).can_undo() {
+                        if let Some(undo_ctx) = dag.node_mut(node_idx).undo_context() {
+                            undo_stack.push((node_idx, undo_ctx));
+                        }
+                    }
+                }
+                results.extend(level_results);
+            }
+
+            emit(DagEvent::LevelCompleted {
+                level: level_idx,
+                duration_ms: level_start.elapsed().as_millis() as u64,
+            });
         }
+        Ok(())
+    })();
 
-        emit(DagEvent::LevelCompleted {
-            level: level_idx,
-            duration_ms: level_start.elapsed().as_millis() as u64,
-        });
+    if let Err(ref error) = execute_result {
+        // Rollback: call undo in reverse order on completed nodes
+        if !undo_stack.is_empty() {
+            for (node_idx, undo_ctx) in undo_stack.into_iter().rev() {
+                let node_name = dag.node_name(node_idx).to_string();
+                if let Err(undo_err) = dag.node_mut(node_idx).undo(undo_ctx) {
+                    emit(DagEvent::NodeFailed {
+                        node: format!("undo:{}", node_name),
+                        error: undo_err,
+                        duration_ms: 0,
+                    });
+                }
+            }
+        }
+        emit(DagEvent::DagFailed { error: error.clone() });
+        return Err(execute_result.unwrap_err());
     }
 
     let total_ms = dag_start.elapsed().as_millis() as u64;
@@ -916,5 +951,82 @@ mod tests {
         let result = execute_dag(&mut dag, None).unwrap();
         let total = result.total("emitted");
         assert_eq!(total, 3.0); // 1 + 2
+    }
+
+    #[test]
+    fn rollback_on_failure() {
+        use std::sync::Mutex;
+
+        let undo_log = Arc::new(Mutex::new(Vec::<String>::new()));
+
+        struct UndoableNode {
+            name: String,
+            log: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl Node for UndoableNode {
+            fn node_type(&self) -> &'static str { "undoable" }
+            fn inputs(&self) -> Vec<PortDef> {
+                vec![PortDef::optional("trigger", PortType::Trigger)]
+            }
+            fn outputs(&self) -> Vec<PortDef> {
+                vec![PortDef::trigger("done")]
+            }
+            fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+                ctx.trigger("done");
+                Ok(())
+            }
+            fn can_undo(&self) -> bool { true }
+            fn undo_context(&self) -> Option<Box<dyn std::any::Any + Send>> {
+                Some(Box::new(self.name.clone()))
+            }
+            fn undo(&mut self, ctx: Box<dyn std::any::Any + Send>) -> Result<(), String> {
+                let name = ctx.downcast::<String>().map_err(|_| "bad type")?;
+                self.log.lock().unwrap().push(format!("undo:{}", name));
+                Ok(())
+            }
+        }
+
+        struct FailTrigger;
+        impl Node for FailTrigger {
+            fn node_type(&self) -> &'static str { "fail_trigger" }
+            fn inputs(&self) -> Vec<PortDef> {
+                vec![PortDef::trigger("trigger")]
+            }
+            fn execute(&mut self, _ctx: &mut NodeContext) -> Result<(), String> {
+                Err("boom".to_string())
+            }
+        }
+
+        let mut dag = Dag::new();
+        dag.add_node("step1", UndoableNode {
+            name: "step1".into(), log: undo_log.clone(),
+        });
+        dag.add_node("step2", UndoableNode {
+            name: "step2".into(), log: undo_log.clone(),
+        });
+        dag.add_node("fail", FailTrigger);
+
+        dag.connect("step1", "done", "step2", "trigger").unwrap();
+        dag.connect("step2", "done", "fail", "trigger").unwrap();
+
+        let err = execute_dag(&mut dag, None).unwrap_err();
+        assert!(err.contains("boom"));
+
+        // Undo should have been called in reverse order: step2 then step1
+        let log = undo_log.lock().unwrap();
+        assert_eq!(*log, vec!["undo:step2", "undo:step1"]);
+    }
+
+    #[test]
+    fn no_rollback_when_no_undo() {
+        // Nodes without can_undo → no rollback attempt, no panic
+        let mut dag = Dag::new();
+        dag.add_node("source", EmitNode { value: 1 });
+        dag.add_node("fail", FailNode);
+        dag.connect("source", "out", "fail", "in").unwrap();
+
+        let err = execute_dag(&mut dag, None).unwrap_err();
+        assert!(err.contains("intentional failure"));
     }
 }

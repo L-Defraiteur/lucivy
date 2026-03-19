@@ -82,6 +82,19 @@ pub trait Node: Send {
     /// Execute the node. Read from `ctx.input()` / `ctx.take_input()`,
     /// write to `ctx.set_output()`, emit metrics via `ctx.metric()`.
     fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String>;
+
+    /// Whether this node supports undo. Default: false.
+    fn can_undo(&self) -> bool { false }
+
+    /// Capture undo context after successful execute(). Called by the runtime.
+    /// Return Some(data) to enable rollback of this node.
+    fn undo_context(&self) -> Option<Box<dyn Any + Send>> { None }
+
+    /// Reverse the effects of execute() using the captured context.
+    /// Called in reverse topological order when a downstream node fails.
+    fn undo(&mut self, _ctx: Box<dyn Any + Send>) -> Result<(), String> {
+        Err("undo not supported".to_string())
+    }
 }
 
 // ---------------------------------------------------------------------------
