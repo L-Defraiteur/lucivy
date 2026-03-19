@@ -18,6 +18,15 @@ pub struct Pool<M: Send + 'static> {
     next: AtomicUsize,
 }
 
+impl<M: Send + 'static> Clone for Pool<M> {
+    fn clone(&self) -> Self {
+        Pool {
+            workers: self.workers.clone(),
+            next: AtomicUsize::new(self.next.load(Ordering::Relaxed)),
+        }
+    }
+}
+
 impl<M: Send + 'static> Pool<M> {
     /// Spawn `count` actors using the factory function.
     /// Each actor gets its index (0..count) for identification.

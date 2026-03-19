@@ -594,6 +594,252 @@ fn execute_weight_on_shard(
         .map_err(|e| format!("merge shard_{shard_id}: {e}"))
 }
 
+// ---------------------------------------------------------------------------
+// ShardActor — typed actor replacing GenericActor<Envelope>
+// ---------------------------------------------------------------------------
+
+/// Message type for shard actors. Exhaustive enum — no Envelope overhead.
+pub(crate) enum ShardMsg {
+    Search {
+        weight: Arc<dyn Weight>,
+        top_k: usize,
+        reply: luciole::Reply<Result<Vec<(f32, DocAddress)>, String>>,
+    },
+    Insert {
+        doc: LucivyDocument,
+        pre_tokenized: Option<PreTokenizedData>,
+    },
+    Commit {
+        fast: bool,
+        reply: luciole::Reply<Result<(), String>>,
+    },
+    Delete {
+        term: Term,
+    },
+    Drain(luciole::DrainMsg),
+}
+
+impl From<luciole::DrainMsg> for ShardMsg {
+    fn from(d: luciole::DrainMsg) -> Self { ShardMsg::Drain(d) }
+}
+
+/// Typed shard actor: search, insert, commit, delete.
+struct ShardActor {
+    shard_id: usize,
+    handle: Arc<LucivyHandle>,
+}
+
+impl luciole::Actor for ShardActor {
+    type Msg = ShardMsg;
+
+    fn name(&self) -> &'static str { "shard" }
+
+    fn priority(&self) -> Priority { Priority::Medium }
+
+    fn handle(&mut self, msg: ShardMsg) -> ActorStatus {
+        match msg {
+            ShardMsg::Search { weight, top_k, reply } => {
+                let result = execute_weight_on_shard(
+                    &self.handle, self.shard_id, weight.as_ref(), top_k,
+                );
+                reply.send(result);
+            }
+            ShardMsg::Insert { doc, pre_tokenized } => {
+                let mut guard = self.handle.writer.lock().unwrap();
+                if let Some(writer) = guard.as_mut() {
+                    let _ = if let Some(pt) = pre_tokenized {
+                        writer.add_document_pre_tokenized(doc, pt)
+                    } else {
+                        writer.add_document(doc)
+                    };
+                    self.handle.mark_uncommitted();
+                }
+            }
+            ShardMsg::Commit { fast, reply } => {
+                let result = (|| -> Result<(), String> {
+                    let mut guard = self.handle.writer.lock()
+                        .map_err(|_| "lock poisoned".to_string())?;
+                    if let Some(ref mut writer) = *guard {
+                        if fast {
+                            writer.commit_fast()
+                                .map_err(|e| format!("commit_fast shard_{}: {e}", self.shard_id))?;
+                        } else {
+                            writer.commit()
+                                .map_err(|e| format!("commit shard_{}: {e}", self.shard_id))?;
+                        }
+                    }
+                    self.handle.mark_committed();
+                    self.handle.reader.reload()
+                        .map_err(|e| format!("reload shard_{}: {e}", self.shard_id))?;
+                    Ok(())
+                })();
+                reply.send(result);
+            }
+            ShardMsg::Delete { term } => {
+                let mut guard = self.handle.writer.lock().unwrap();
+                if let Some(writer) = guard.as_mut() {
+                    writer.delete_term(term);
+                    self.handle.mark_uncommitted();
+                }
+            }
+            ShardMsg::Drain(d) => {
+                d.ack();
+            }
+        }
+        ActorStatus::Continue
+    }
+}
+
+/// Spawn typed shard actors, return a Pool.
+fn spawn_shard_pool(shards: &[Arc<LucivyHandle>]) -> luciole::Pool<ShardMsg> {
+    let shards_clone: Vec<Arc<LucivyHandle>> = shards.to_vec();
+    luciole::Pool::spawn(shards.len(), 64, |i| {
+        ShardActor {
+            shard_id: i,
+            handle: shards_clone[i].clone(),
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// RouterActor — typed
+// ---------------------------------------------------------------------------
+
+pub(crate) enum RouterMsg {
+    Route {
+        doc: LucivyDocument,
+        node_id: u64,
+        hashes: Vec<u64>,
+        pre_tokenized: PreTokenizedData,
+    },
+    Drain(luciole::DrainMsg),
+}
+
+impl From<luciole::DrainMsg> for RouterMsg {
+    fn from(d: luciole::DrainMsg) -> Self { RouterMsg::Drain(d) }
+}
+
+struct RouterActor {
+    router: Arc<Mutex<ShardRouter>>,
+    shard_pool: luciole::Pool<ShardMsg>,
+}
+
+impl luciole::Actor for RouterActor {
+    type Msg = RouterMsg;
+    fn name(&self) -> &'static str { "router" }
+    fn priority(&self) -> Priority { Priority::Medium }
+
+    fn handle(&mut self, msg: RouterMsg) -> ActorStatus {
+        match msg {
+            RouterMsg::Route { doc, node_id, hashes, pre_tokenized } => {
+                let shard_id = {
+                    let mut r = self.router.lock().unwrap();
+                    let sid = r.route(&hashes);
+                    r.record_node_id(node_id, sid);
+                    sid
+                };
+                let pre_tok = if pre_tokenized.is_empty() { None } else { Some(pre_tokenized) };
+                let _ = self.shard_pool.send_to(shard_id, ShardMsg::Insert {
+                    doc,
+                    pre_tokenized: pre_tok,
+                });
+            }
+            RouterMsg::Drain(d) => {
+                d.ack();
+            }
+        }
+        ActorStatus::Continue
+    }
+}
+
+fn spawn_router(
+    router: Arc<Mutex<ShardRouter>>,
+    shard_pool: luciole::Pool<ShardMsg>,
+) -> luciole::ActorRef<RouterMsg> {
+    let scheduler = global_scheduler();
+    let actor = RouterActor { router, shard_pool };
+    let (mb, mut ar) = luciole::mailbox::<RouterMsg>(256);
+    scheduler.spawn(actor, mb, &mut ar, 256);
+    ar
+}
+
+// ---------------------------------------------------------------------------
+// ReaderActor — typed
+// ---------------------------------------------------------------------------
+
+pub(crate) enum ReaderMsg {
+    Tokenize { doc: LucivyDocument, node_id: u64 },
+    Batch { docs: Vec<(LucivyDocument, u64)> },
+    Drain(luciole::DrainMsg),
+}
+
+impl From<luciole::DrainMsg> for ReaderMsg {
+    fn from(d: luciole::DrainMsg) -> Self { ReaderMsg::Drain(d) }
+}
+
+struct ReaderActor {
+    schema: Schema,
+    text_fields: Vec<Field>,
+    tokenizer_manager: TokenizerManager,
+    router_ref: luciole::ActorRef<RouterMsg>,
+}
+
+impl luciole::Actor for ReaderActor {
+    type Msg = ReaderMsg;
+    fn name(&self) -> &'static str { "reader" }
+    fn priority(&self) -> Priority { Priority::Medium }
+
+    fn handle(&mut self, msg: ReaderMsg) -> ActorStatus {
+        match msg {
+            ReaderMsg::Tokenize { doc, node_id } => {
+                let (hashes, pre_tokenized) = tokenize_for_pipeline(
+                    &doc, &self.schema, &self.text_fields, &self.tokenizer_manager,
+                );
+                let _ = self.router_ref.send(RouterMsg::Route {
+                    doc, node_id, hashes, pre_tokenized,
+                });
+            }
+            ReaderMsg::Batch { docs } => {
+                for (doc, node_id) in docs {
+                    let (hashes, pre_tokenized) = tokenize_for_pipeline(
+                        &doc, &self.schema, &self.text_fields, &self.tokenizer_manager,
+                    );
+                    let _ = self.router_ref.send(RouterMsg::Route {
+                        doc, node_id, hashes, pre_tokenized,
+                    });
+                }
+            }
+            ReaderMsg::Drain(d) => {
+                d.ack();
+            }
+        }
+        ActorStatus::Continue
+    }
+}
+
+fn spawn_reader_pool(
+    schema: &Schema,
+    text_fields: &[Field],
+    tokenizer_manager: &TokenizerManager,
+    router_ref: luciole::ActorRef<RouterMsg>,
+    num_readers: usize,
+) -> luciole::Pool<ReaderMsg> {
+    let schema = schema.clone();
+    let text_fields = text_fields.to_vec();
+    let tm = tokenizer_manager.clone();
+    let rr = router_ref;
+    luciole::Pool::spawn(num_readers, 128, |_| {
+        ReaderActor {
+            schema: schema.clone(),
+            text_fields: text_fields.clone(),
+            tokenizer_manager: tm.clone(),
+            router_ref: rr.clone(),
+        }
+    })
+}
+
+// Legacy GenericActor creation kept for reference/removal later.
+#[allow(dead_code)]
 /// Create a GenericActor for a shard with all roles: search, insert, commit, delete.
 fn create_shard_actor(shard_id: usize, handle: Arc<LucivyHandle>) -> GenericActor {
     // Leak the name — one per shard, lives forever.
@@ -792,8 +1038,8 @@ impl Ord for ScoredEntry {
 /// In WASM single-threaded mode, the scheduler processes them cooperatively.
 pub struct ShardedHandle {
     shards: Vec<Arc<LucivyHandle>>,
-    /// One ActorRef per shard (GenericActor, receives Envelopes).
-    shard_actors: Vec<ActorRef<Envelope>>,
+    /// Pool of typed shard actors (key-routed by shard_id).
+    shard_pool: luciole::Pool<ShardMsg>,
     router: Arc<Mutex<ShardRouter>>,
     /// Storage backend for root files and shard directories.
     storage: Box<dyn ShardStorage>,
@@ -807,12 +1053,10 @@ pub struct ShardedHandle {
     has_deletes: AtomicBool,
     /// Text field IDs (for tokenization at add_document).
     text_fields: Vec<Field>,
-    /// Pipeline: pool of ReaderActors for parallel tokenization.
-    reader_actors: Vec<ActorRef<Envelope>>,
-    /// Pipeline: single RouterActor for sequential routing.
-    router_actor: ActorRef<Envelope>,
-    /// Round-robin index for reader actor selection.
-    next_reader: AtomicUsize,
+    /// Pipeline: reader pool (typed, round-robin).
+    reader_pool: luciole::Pool<ReaderMsg>,
+    /// Pipeline: single router actor (typed).
+    router_ref: luciole::ActorRef<RouterMsg>,
 }
 
 /// Spawn N GenericActors (one per shard) in the global scheduler.
@@ -934,22 +1178,21 @@ impl ShardedHandle {
         let router = Arc::new(Mutex::new(
             ShardRouter::with_options(num_shards, df_threshold, balance_weight),
         ));
-        let shard_actors = spawn_shard_actors(&shards);
+        let shard_pool = spawn_shard_pool(&shards);
 
-        // Pipeline: N readers + 1 router. Default N = num_shards (at least 2).
+        // Pipeline: N readers → 1 router → shard pool
         let num_readers = num_shards.max(2);
-        let (reader_actors, router_actor) = spawn_pipeline_actors(
-            &schema,
-            &text_fields,
-            &shards[0].index,
-            &router,
-            &shard_actors,
+        let router_ref = spawn_router(Arc::clone(&router), shard_pool.clone());
+        let reader_pool = spawn_reader_pool(
+            &schema, &text_fields,
+            &shards[0].index.tokenizers(),
+            router_ref.clone(),
             num_readers,
         );
 
         Ok(Self {
             shards,
-            shard_actors,
+            shard_pool,
             router,
             storage,
             schema,
@@ -957,9 +1200,8 @@ impl ShardedHandle {
             config: config.clone(),
             has_deletes: AtomicBool::new(false),
             text_fields,
-            reader_actors,
-            router_actor,
-            next_reader: AtomicUsize::new(0),
+            reader_pool,
+            router_ref,
         })
     }
 
@@ -993,22 +1235,20 @@ impl ShardedHandle {
         let schema = shards[0].schema.clone();
         let field_map = shards[0].field_map.clone();
         let text_fields = find_text_fields(&schema);
-        let shard_actors = spawn_shard_actors(&shards);
+        let shard_pool = spawn_shard_pool(&shards);
 
-        // Pipeline: N readers + 1 router.
         let num_readers = num_shards.max(2);
-        let (reader_actors, router_actor) = spawn_pipeline_actors(
-            &schema,
-            &text_fields,
-            &shards[0].index,
-            &router,
-            &shard_actors,
+        let router_ref = spawn_router(Arc::clone(&router), shard_pool.clone());
+        let reader_pool = spawn_reader_pool(
+            &schema, &text_fields,
+            &shards[0].index.tokenizers(),
+            router_ref.clone(),
             num_readers,
         );
 
         Ok(Self {
             shards,
-            shard_actors,
+            shard_pool,
             router,
             storage,
             schema,
@@ -1016,9 +1256,8 @@ impl ShardedHandle {
             config,
             has_deletes: AtomicBool::new(false),
             text_fields,
-            reader_actors,
-            router_actor,
-            next_reader: AtomicUsize::new(0),
+            reader_pool,
+            router_ref,
         })
     }
 
@@ -1036,11 +1275,8 @@ impl ShardedHandle {
             self.route_and_send(doc, node_id, &hashes)?;
             return Ok(());
         }
-        let idx = self.next_reader.fetch_add(1, Ordering::Relaxed) % self.reader_actors.len();
-        let payload: (LucivyDocument, u64) = (doc, node_id);
-        let env = ReaderTokenizeMsg.into_envelope_with_local(payload);
-        self.reader_actors[idx]
-            .send(env)
+        self.reader_pool
+            .send(ReaderMsg::Tokenize { doc, node_id })
             .map_err(|_| "reader actor channel closed".to_string())
     }
 
@@ -1050,20 +1286,15 @@ impl ShardedHandle {
     /// tokenization. Each sub-batch is a single message — much less overhead
     /// than N individual add_document calls.
     pub fn add_documents(&self, docs: Vec<(LucivyDocument, u64)>) -> Result<(), String> {
-        let n = self.reader_actors.len();
-        // Distribute docs round-robin into per-reader sub-batches.
+        let n = self.reader_pool.len();
         let mut batches: Vec<Vec<(LucivyDocument, u64)>> = (0..n).map(|_| Vec::new()).collect();
         for (i, doc) in docs.into_iter().enumerate() {
             batches[i % n].push(doc);
         }
-        // Send each non-empty sub-batch as a single message.
         for (i, batch) in batches.into_iter().enumerate() {
-            if batch.is_empty() {
-                continue;
-            }
-            let env = ReaderBatchMsg.into_envelope_with_local(batch);
-            self.reader_actors[i]
-                .send(env)
+            if batch.is_empty() { continue; }
+            self.reader_pool.worker(i)
+                .send(ReaderMsg::Batch { docs: batch })
                 .map_err(|_| "reader actor channel closed".to_string())?;
         }
         Ok(())
@@ -1093,36 +1324,24 @@ impl ShardedHandle {
             sid
         };
 
-        let payload: (LucivyDocument, Option<PreTokenizedData>) = (doc, None);
-        let env = ShardInsertMsg.into_envelope_with_local(payload);
-        self.shard_actors[shard_id]
-            .send(env)
-            .map_err(|_| format!("shard_{shard_id} actor channel closed"))?;
+        self.shard_pool.send_to(shard_id, ShardMsg::Insert {
+            doc,
+            pre_tokenized: None,
+        }).map_err(|_| format!("shard_{shard_id} actor channel closed"))?;
 
         Ok(shard_id)
     }
 
     /// Drain all pipeline actors: wait for readers then router to finish pending work.
     fn drain_pipeline(&self) {
-        let scheduler = global_scheduler();
-
-        // Drain all readers in parallel.
-        let mut reader_rxs = Vec::with_capacity(self.reader_actors.len());
-        for reader in &self.reader_actors {
-            let (env, rx) = PipelineDrainMsg.into_request();
-            if reader.send(env).is_ok() {
-                reader_rxs.push(rx);
-            }
-        }
-        for rx in reader_rxs {
-            let _ = rx.wait_cooperative_named("drain_pipeline", || scheduler.run_one_step());
-        }
-
-        // Then drain the router (all reader outputs have been forwarded).
-        let (env, rx) = PipelineDrainMsg.into_request();
-        if self.router_actor.send(env).is_ok() {
-            let _ = rx.wait_cooperative_named("drain_router", || scheduler.run_one_step());
-        }
+        // Drain readers first (upstream), then router (downstream).
+        // Pool::drain sends DrainMsg to each worker and waits.
+        self.reader_pool.drain("drain_readers");
+        // Router: single actor, drain via request.
+        self.router_ref.request(
+            |r| RouterMsg::Drain(luciole::DrainMsg(r)),
+            "drain_router",
+        ).ok();
     }
 
     /// Search all shards in parallel and merge top-K results.
@@ -1141,101 +1360,56 @@ impl ShardedHandle {
         // Drain pipeline: ensure all in-flight documents reach shard actors.
         self.drain_pipeline();
 
-        // Flush uncommitted changes on all shards before searching (via actors).
-        {
-            let scheduler = global_scheduler();
-            let mut flush_rxs = Vec::new();
-            for (i, (shard, actor_ref)) in self.shards.iter().zip(&self.shard_actors).enumerate() {
-                if shard.has_uncommitted() {
-                    let (env, rx) = ShardCommitMsg { fast: false }.into_request();
-                    actor_ref
-                        .send(env)
-                        .map_err(|_| format!("shard_{i} actor closed"))?;
-                    flush_rxs.push((i, rx));
-                }
-            }
-            for (i, rx) in flush_rxs {
-                if let Err(err_bytes) = rx.wait_cooperative_named("flush_before_search", || scheduler.run_one_step()) {
-                    let _ = ld_lucivy::LucivyError::decode(&err_bytes);
-                    // Flush errors before search are non-fatal — log and continue.
-                }
+        // Flush uncommitted shards before searching.
+        for i in 0..self.shard_pool.len() {
+            if self.shards[i].has_uncommitted() {
+                let _ = self.shard_pool.worker(i).request(
+                    |r| ShardMsg::Commit { fast: false, reply: r },
+                    "flush_before_search",
+                );
             }
         }
 
-        // ── Scatter: build Weight once with global stats ────────────────
-
-        // Collect searchers from all shards for aggregated BM25 stats.
+        // Build Weight once with global BM25 stats.
         let searchers: Vec<_> = self.shards.iter().map(|s| s.reader.searcher()).collect();
         let global_stats = AggregatedBm25StatsOwned::new(searchers);
-
-        // Build the query using shard 0's index (schema + tokenizers are identical).
         let query = crate::query::build_query(
-            query_config,
-            &self.schema,
-            &self.shards[0].index,
-            highlight_sink,
+            query_config, &self.schema, &self.shards[0].index, highlight_sink,
         )?;
-
-        // Compile the Weight with global stats. Use shard 0's searcher for schema access.
         let searcher_0 = self.shards[0].reader.searcher();
         let enable_scoring = ld_lucivy::query::EnableScoring::enabled_from_statistics_provider(
-            &global_stats,
-            &searcher_0,
+            &global_stats, &searcher_0,
         );
         let weight: Arc<dyn Weight> = query
             .weight(enable_scoring)
             .map_err(|e| format!("weight: {e}"))?
             .into();
 
-        // ── Gather: dispatch Weight to all shard actors via Envelope ────
+        // Scatter: dispatch Weight to all shards via typed messages.
+        let shard_results: Vec<Result<Vec<(f32, DocAddress)>, String>> = self.shard_pool.scatter(
+            |r| ShardMsg::Search {
+                weight: Arc::clone(&weight),
+                top_k,
+                reply: r,
+            },
+            "search_shard",
+        );
 
-        let mut receivers = Vec::with_capacity(self.shard_actors.len());
-        for actor_ref in &self.shard_actors {
-            let msg = ShardSearchMsg { top_k };
-            let (env, rx) = msg.into_request_with_local(Arc::clone(&weight));
-            actor_ref
-                .send(env)
-                .map_err(|_| "shard actor channel closed")?;
-            receivers.push(rx);
-        }
-
-        // Collect results and heap-merge top-K.
-        let scheduler = global_scheduler();
+        // Gather: heap-merge top-K from all shards.
         let mut heap = BinaryHeap::with_capacity(top_k + 1);
-
-        for (shard_id, rx) in receivers.into_iter().enumerate() {
-            let reply_bytes = match rx.wait_cooperative_named("search_shard", || scheduler.run_one_step()) {
-                Ok(b) => b,
-                Err(err_bytes) => {
-                    let err = ld_lucivy::LucivyError::decode(&err_bytes)
-                        .unwrap_or_else(|_| ld_lucivy::LucivyError::SystemError(format!("search shard_{shard_id} failed")));
-                    return Err(format!("{err}"));
-                }
-            };
-            let shard_reply = ShardSearchReply::decode(&reply_bytes)
-                .map_err(|e| format!("decode shard_{shard_id} reply: {e}"))?;
-            let shard_hits = shard_reply.results;
-
-            for (score, doc_addr) in shard_hits {
-                heap.push(ScoredEntry {
-                    score,
-                    shard_id,
-                    doc_address: doc_addr,
-                });
-                if heap.len() > top_k {
-                    heap.pop();
-                }
+        for (shard_id, result) in shard_results.into_iter().enumerate() {
+            let hits = result.map_err(|e| format!("shard_{shard_id}: {e}"))?;
+            for (score, doc_addr) in hits {
+                heap.push(ScoredEntry { score, shard_id, doc_address: doc_addr });
+                if heap.len() > top_k { heap.pop(); }
             }
         }
 
-        // Extract in descending score order.
         let mut results: Vec<ShardedSearchResult> = heap
             .into_sorted_vec()
             .into_iter()
             .map(|e| ShardedSearchResult {
-                score: e.score,
-                shard_id: e.shard_id,
-                doc_address: e.doc_address,
+                score: e.score, shard_id: e.shard_id, doc_address: e.doc_address,
             })
             .collect();
         results.reverse();
@@ -1247,27 +1421,15 @@ impl ShardedHandle {
     /// Drains the ingestion pipeline first (readers → router → shards), then commits.
     /// If deletes happened since last commit, resyncs the router's token counters.
     pub fn commit(&self) -> Result<(), String> {
-        // Drain the pipeline: wait for all in-flight documents to reach shards.
         self.drain_pipeline();
 
-        // Send Commit to all shard actors in parallel.
-        let scheduler = global_scheduler();
-        let mut receivers = Vec::with_capacity(self.shard_actors.len());
-        for actor_ref in &self.shard_actors {
-            let (env, rx) = ShardCommitMsg { fast: false }.into_request();
-            actor_ref
-                .send(env)
-                .map_err(|_| "shard actor channel closed")?;
-            receivers.push(rx);
-        }
-
-        // Wait for all commits to complete.
-        for (i, rx) in receivers.into_iter().enumerate() {
-            if let Err(err_bytes) = rx.wait_cooperative_named("commit_shard", || scheduler.run_one_step()) {
-                let err = ld_lucivy::LucivyError::decode(&err_bytes)
-                    .unwrap_or_else(|_| ld_lucivy::LucivyError::SystemError(format!("commit shard_{i} failed")));
-                return Err(format!("{err}"));
-            }
+        // Scatter commit to all shards in parallel.
+        let results: Vec<Result<(), String>> = self.shard_pool.scatter(
+            |r| ShardMsg::Commit { fast: false, reply: r },
+            "commit_shard",
+        );
+        for (i, result) in results.into_iter().enumerate() {
+            result.map_err(|e| format!("commit shard_{i}: {e}"))?;
         }
 
         // Force reader reload so search sees committed data immediately.
@@ -1319,21 +1481,12 @@ impl ShardedHandle {
     /// Use during bulk indexation. Call commit() at the end to rebuild FSTs.
     pub fn commit_fast(&self) -> Result<(), String> {
         self.drain_pipeline();
-        let scheduler = global_scheduler();
-        let mut receivers = Vec::with_capacity(self.shard_actors.len());
-        for actor_ref in &self.shard_actors {
-            let (env, rx) = ShardCommitMsg { fast: true }.into_request();
-            actor_ref
-                .send(env)
-                .map_err(|_| "shard actor channel closed")?;
-            receivers.push(rx);
-        }
-        for (i, rx) in receivers.into_iter().enumerate() {
-            if let Err(err_bytes) = rx.wait_cooperative_named("commit_fast_shard", || scheduler.run_one_step()) {
-                let err = ld_lucivy::LucivyError::decode(&err_bytes)
-                    .unwrap_or_else(|_| ld_lucivy::LucivyError::SystemError(format!("commit_fast shard_{i} failed")));
-                return Err(format!("{err}"));
-            }
+        let results: Vec<Result<(), String>> = self.shard_pool.scatter(
+            |r| ShardMsg::Commit { fast: true, reply: r },
+            "commit_fast_shard",
+        );
+        for (i, result) in results.into_iter().enumerate() {
+            result.map_err(|e| format!("commit_fast shard_{i}: {e}"))?;
         }
         for shard in &self.shards {
             let _ = shard.reader.reload();
@@ -1343,25 +1496,15 @@ impl ShardedHandle {
 
     /// Close all shards (drain pipeline, commit pending writes, release locks).
     pub fn close(&self) -> Result<(), String> {
-        // Drain the ingestion pipeline first.
         self.drain_pipeline();
 
-        // Commit all pending writes via shard actors (flushes mailbox + writer).
-        let scheduler = global_scheduler();
-        let mut receivers = Vec::with_capacity(self.shard_actors.len());
-        for (i, actor_ref) in self.shard_actors.iter().enumerate() {
-            let (env, rx) = ShardCommitMsg { fast: false }.into_request();
-            actor_ref
-                .send(env)
-                .map_err(|_| format!("shard_{i} actor closed on close"))?;
-            receivers.push((i, rx));
-        }
-        for (i, rx) in receivers {
-            if let Err(err_bytes) = rx.wait_cooperative_named("close_shard", || scheduler.run_one_step()) {
-                let err = ld_lucivy::LucivyError::decode(&err_bytes)
-                    .unwrap_or_else(|_| ld_lucivy::LucivyError::SystemError(format!("close shard_{i} failed")));
-                return Err(format!("{err}"));
-            }
+        // Commit all shards in parallel.
+        let results: Vec<Result<(), String>> = self.shard_pool.scatter(
+            |r| ShardMsg::Commit { fast: false, reply: r },
+            "close_shard",
+        );
+        for (i, result) in results.into_iter().enumerate() {
+            result.map_err(|e| format!("close shard_{i}: {e}"))?;
         }
 
         // Persist router state.
@@ -1396,19 +1539,12 @@ impl ShardedHandle {
         };
 
         if let Some(shard_id) = target_shard {
-            // Targeted delete via actor.
-            let env = ShardDeleteMsg.into_envelope_with_local(term);
-            self.shard_actors[shard_id]
-                .send(env)
+            self.shard_pool.send_to(shard_id, ShardMsg::Delete { term })
                 .map_err(|_| format!("shard_{shard_id} actor channel closed"))?;
         } else {
-            // Broadcast delete to all shard actors.
-            for (i, actor_ref) in self.shard_actors.iter().enumerate() {
-                let env = ShardDeleteMsg.into_envelope_with_local(term.clone());
-                actor_ref
-                    .send(env)
-                    .map_err(|_| format!("shard_{i} actor channel closed"))?;
-            }
+            // Broadcast delete to all shards.
+            self.shard_pool.broadcast(|| ShardMsg::Delete { term: term.clone() })
+                .map_err(|e| format!("broadcast delete: {e}"))?;
         }
 
         self.has_deletes.store(true, Ordering::Relaxed);
