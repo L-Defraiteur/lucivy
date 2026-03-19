@@ -198,9 +198,24 @@ impl PollNode for MergeNode {
             }
         }
 
-        // Step the merge
+        // Step the merge — track phase transitions for observability
         let state = self.state.as_mut().unwrap();
-        match state.step() {
+        let phase_before = state.phase_name();
+        let phase_elapsed_before = state.phase_elapsed_ms();
+
+        let result = state.step();
+
+        let phase_after = state.phase_name();
+        if phase_before != phase_after || matches!(result, StepResult::Done(_)) {
+            // Phase completed — emit its timing
+            ctx.metric(
+                &format!("{}_ms", phase_before),
+                phase_elapsed_before as f64,
+            );
+            ctx.info(&format!("phase {} completed ({}ms)", phase_before, phase_elapsed_before));
+        }
+
+        match result {
             StepResult::Continue => Ok(NodePoll::Pending),
             StepResult::Done(segment_entry) => {
                 let duration = state.merge_start().elapsed();

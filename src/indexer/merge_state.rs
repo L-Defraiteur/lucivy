@@ -76,6 +76,28 @@ impl MergeState {
         self.merge_start
     }
 
+    /// Name of the current phase (for observability).
+    pub fn phase_name(&self) -> &'static str {
+        match &self.phase {
+            MergePhase::Init => "init",
+            MergePhase::Postings { .. } => "postings",
+            MergePhase::Store => "store",
+            MergePhase::FastFields => "fast_fields",
+            MergePhase::Sfx => "sfx",
+            MergePhase::Close => "close",
+        }
+    }
+
+    /// Milliseconds elapsed in the current phase.
+    pub fn phase_elapsed_ms(&self) -> u64 {
+        self.phase_start.elapsed().as_millis() as u64
+    }
+
+    /// Number of indexed fields (for postings phase granularity).
+    pub fn num_indexed_fields(&self) -> usize {
+        self.indexed_fields.len()
+    }
+
     /// Crée un nouveau MergeState prêt à être steppé.
     ///
     /// Retourne `Ok(None)` si tous les segments sont vides (rien à merger).
