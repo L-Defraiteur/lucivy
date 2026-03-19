@@ -15,6 +15,7 @@ pub mod reply;
 pub mod runtime;
 pub mod scheduler;
 pub mod scope;
+pub mod stream_dag;
 
 pub use actor_state::ActorState;
 pub use dag::{Dag, DagEdge};
@@ -32,6 +33,7 @@ pub use checkpoint::{CheckpointStatus, CheckpointStore, DagCheckpoint, FileCheck
 pub use runtime::{display_progress, execute_dag, execute_dag_with_checkpoint, subscribe_dag_events, DagEvent, DagResult, NodeResult};
 pub use scheduler::{ActorId, Scheduler, SchedulerHandle};
 pub use scope::{Drainable, Scope};
+pub use stream_dag::StreamDag;
 
 use std::task::Poll;
 
