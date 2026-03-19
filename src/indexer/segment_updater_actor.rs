@@ -250,7 +250,7 @@ impl SegmentUpdaterState {
         };
 
         info!("Starting merge (explicit) - {:?}", merge_operation.segment_ids());
-        self.segments_in_merge.extend(merge_operation.segment_ids());
+        self.track_segments(merge_operation.segment_ids());
         self.shared.event_bus.emit(IndexEvent::MergeStarted {
             segment_ids: merge_operation.segment_ids().to_vec(),
             target_opstamp: merge_operation.target_opstamp(),
@@ -354,7 +354,7 @@ impl SegmentUpdaterState {
             };
 
             info!("Starting merge (incremental) - {:?}", merge_op.segment_ids());
-            self.segments_in_merge.extend(merge_op.segment_ids());
+            self.track_segments(merge_op.segment_ids());
             self.shared.event_bus.emit(IndexEvent::MergeStarted {
                 segment_ids: merge_op.segment_ids().to_vec(),
                 target_opstamp: merge_op.target_opstamp(),
@@ -483,7 +483,7 @@ impl SegmentUpdaterState {
                 Ok(entries) => entries,
                 Err(err) => { warn!("Starting drain merge failed (not fatal): {err}"); continue; }
             };
-            self.segments_in_merge.extend(merge_op.segment_ids());
+            self.track_segments(merge_op.segment_ids());
             self.shared.event_bus.emit(IndexEvent::MergeStarted {
                 segment_ids: merge_op.segment_ids().to_vec(),
                 target_opstamp: merge_op.target_opstamp(),
@@ -547,6 +547,17 @@ impl SegmentUpdaterState {
     fn untrack_segments(&mut self, merge_op: &MergeOperation) {
         for segment_id in merge_op.segment_ids() {
             self.segments_in_merge.remove(segment_id);
+        }
+        // Sync to shared GC protection
+        if let Ok(mut protected) = self.shared.gc_protected_segments.lock() {
+            *protected = self.segments_in_merge.clone();
+        }
+    }
+
+    fn track_segments(&mut self, segment_ids: &[SegmentId]) {
+        self.segments_in_merge.extend(segment_ids);
+        if let Ok(mut protected) = self.shared.gc_protected_segments.lock() {
+            *protected = self.segments_in_merge.clone();
         }
     }
 
@@ -641,7 +652,7 @@ pub(crate) fn create_segment_updater_actor(
                             Err(err) => { warn!("Starting incremental merge failed: {err}"); continue; }
                         };
                         info!("Starting merge (incremental) - {:?}", merge_op.segment_ids());
-                        su.segments_in_merge.extend(merge_op.segment_ids());
+                        su.track_segments(merge_op.segment_ids());
                         su.shared.event_bus.emit(IndexEvent::MergeStarted {
                             segment_ids: merge_op.segment_ids().to_vec(),
                             target_opstamp: merge_op.target_opstamp(),
@@ -766,7 +777,7 @@ pub(crate) fn create_segment_updater_actor(
                         Ok(e) => e,
                         Err(err) => { warn!("Start pending merge failed: {err}"); continue; }
                     };
-                    su.segments_in_merge.extend(merge_op.segment_ids());
+                    su.track_segments(merge_op.segment_ids());
                     su.shared.event_bus.emit(IndexEvent::MergeStarted {
                         segment_ids: merge_op.segment_ids().to_vec(),
                         target_opstamp: merge_op.target_opstamp(),
@@ -849,7 +860,7 @@ pub(crate) fn create_segment_updater_actor(
                                 Ok(e) => e,
                                 Err(err) => { warn!("Next merge failed: {err}"); continue; }
                             };
-                            su.segments_in_merge.extend(merge_op.segment_ids());
+                            su.track_segments(merge_op.segment_ids());
                             su.shared.event_bus.emit(IndexEvent::MergeStarted {
                                 segment_ids: merge_op.segment_ids().to_vec(),
                                 target_opstamp: merge_op.target_opstamp(),

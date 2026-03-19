@@ -163,11 +163,15 @@ impl SegmentWriter {
                     self.segment_serializer.write_sfx(field_id, &sfx_bytes)?;
                     if !sfxpost_bytes.is_empty() {
                         self.segment_serializer.write_sfxpost(field_id, &sfxpost_bytes)?;
+                    } else {
+                        eprintln!("[segment_writer] WARNING: empty sfxpost for field {} ({} docs)",
+                            field_id, self.max_doc);
                     }
                     sfx_field_ids.push(field_id);
                 }
                 Err(e) => {
-                    log::warn!("Failed to build .sfx for field {field_id}: {e}");
+                    eprintln!("[segment_writer] ERROR: failed to build .sfx for field {field_id} ({} docs): {e}",
+                        self.max_doc);
                 }
             }
         }

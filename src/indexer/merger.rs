@@ -989,8 +989,12 @@ impl IndexMerger {
                     }
                 }
                 if !missing_sfxpost.is_empty() {
-                    eprintln!("[merge_sfx] WARNING: {} source segments missing sfxpost: {:?}",
-                        missing_sfxpost.len(), missing_sfxpost);
+                    // Also check if these segments have .sfx
+                    for &(seg_ord, ndocs, reason) in &missing_sfxpost {
+                        let has_sfx = self.readers[seg_ord].sfx_file(field).is_some();
+                        eprintln!("[merge_sfx] WARNING: seg_ord={} ({} docs) missing sfxpost ({}), has_sfx={}",
+                            seg_ord, ndocs, reason, has_sfx);
+                    }
                 }
 
                 if any_has_sfxpost {

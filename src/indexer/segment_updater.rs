@@ -4,7 +4,7 @@ use std::io::Write;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use super::segment_manager::SegmentManager;
 use super::segment_updater_actor::*;
@@ -63,6 +63,9 @@ pub(crate) struct SegmentUpdaterShared {
     pub(crate) killed: AtomicBool,
     pub(crate) stamper: Stamper,
     pub(crate) event_bus: Arc<EventBus<IndexEvent>>,
+    /// Segments currently being merged — their files must be protected from GC.
+    /// Updated by SegmentUpdaterState, read by list_files().
+    pub(crate) gc_protected_segments: Mutex<HashSet<SegmentId>>,
 }
 
 impl SegmentUpdaterShared {
@@ -129,6 +132,25 @@ impl SegmentUpdaterShared {
             .flat_map(|segment_meta| segment_meta.list_files())
             .collect();
         files.insert(META_FILEPATH.to_path_buf());
+
+        // Also protect files from segments currently being merged.
+        // Without this, a concurrent GC could delete .sfx/.sfxpost files
+        // of segments that are source inputs to an in-progress merge.
+        if let Ok(protected) = self.gc_protected_segments.lock() {
+            for &seg_id in protected.iter() {
+                let uuid = seg_id.uuid_string();
+                // Protect all standard component files
+                for ext in &["store", "fast", "fieldnorm", "idx", "pos", "term", "offsets", "sfx"] {
+                    files.insert(PathBuf::from(format!("{uuid}.{ext}")));
+                }
+                // Protect per-field .sfx/.sfxpost (field_ids 0-10 covers all practical cases)
+                for fid in 0..10u32 {
+                    files.insert(PathBuf::from(format!("{uuid}.{fid}.sfx")));
+                    files.insert(PathBuf::from(format!("{uuid}.{fid}.sfxpost")));
+                }
+            }
+        }
+
         // Per-field .sfx files are listed in the manifest (SegmentComponent::SuffixFst).
         // The manifest itself is tracked by list_files() via SegmentComponent::iterator().
         // We read it to discover which per-field .sfx files to preserve from GC.
@@ -257,6 +279,7 @@ impl SegmentUpdater {
             killed: AtomicBool::new(false),
             stamper,
             event_bus: Arc::new(EventBus::new()),
+            gc_protected_segments: Mutex::new(HashSet::new()),
         });
 
         let (mbox, mut aref) = mailbox::<Envelope>(SEGMENT_UPDATER_MAILBOX_CAPACITY);
