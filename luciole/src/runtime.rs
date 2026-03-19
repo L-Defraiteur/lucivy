@@ -4,6 +4,8 @@ use std::time::Instant;
 use crate::dag::Dag;
 use crate::node::{LogLevel, NodeContext};
 use crate::port::PortValue;
+use crate::scheduler::global_scheduler;
+use crate::Priority;
 
 // ---------------------------------------------------------------------------
 // DagResult — output of a DAG execution
@@ -84,8 +86,9 @@ pub enum DagEvent {
 /// Execute a DAG synchronously.
 ///
 /// Nodes are executed level by level (topological order).
-/// Within a level, nodes with no data dependencies between them are
-/// executed in parallel using `std::thread::scope`.
+/// Within a level, nodes are submitted as tasks to the global scheduler's
+/// thread pool — same threads that run actors. In WASM single-thread mode,
+/// tasks execute via `run_one_step()` cooperative pumping.
 ///
 /// An optional event callback receives `DagEvent`s for observability.
 pub fn execute_dag(
@@ -96,9 +99,7 @@ pub fn execute_dag(
     let levels = dag.topological_levels()?;
     let total_nodes = dag.node_count();
 
-    // Pre-compute how many consumers each (from_node, from_port) has.
-    // When the last consumer reads, we remove from port_data (enabling take()).
-    // When there are still consumers left, we clone (cheap Arc clone).
+    // Pre-compute consumer counts for fan-out handling
     let mut consumer_counts: HashMap<(String, String), usize> = HashMap::new();
     for edge in dag.edges() {
         *consumer_counts
@@ -106,7 +107,6 @@ pub fn execute_dag(
             .or_insert(0) += 1;
     }
 
-    // Port data store: (node_name, port_name) → PortValue
     let mut port_data: HashMap<(String, String), PortValue> = HashMap::new();
     let mut results: Vec<(String, NodeResult)> = Vec::with_capacity(total_nodes);
 
@@ -128,6 +128,7 @@ pub fn execute_dag(
         });
 
         if level.len() == 1 {
+            // Single node — execute inline (no task overhead)
             let node_idx = level[0];
             let node_name = dag.node_name(node_idx).to_string();
             let nr = execute_single_node(
@@ -136,6 +137,7 @@ pub fn execute_dag(
             )?;
             results.push((node_name, nr));
         } else {
+            // Multiple nodes — submit as tasks to the scheduler pool
             let level_results = execute_level_parallel(
                 dag, level, &mut port_data, &mut consumer_counts,
                 level_idx, &emit,
@@ -159,7 +161,7 @@ pub fn execute_dag(
 }
 
 // ---------------------------------------------------------------------------
-// Internal: execute a single node
+// Internal: execute a single node inline
 // ---------------------------------------------------------------------------
 
 fn execute_single_node(
@@ -217,7 +219,7 @@ fn execute_single_node(
 }
 
 // ---------------------------------------------------------------------------
-// Internal: execute a level of nodes in parallel
+// Internal: execute a level of nodes via scheduler tasks
 // ---------------------------------------------------------------------------
 
 fn execute_level_parallel(
@@ -229,23 +231,16 @@ fn execute_level_parallel(
     emit: &dyn Fn(DagEvent),
 ) -> Result<Vec<(String, NodeResult)>, String> {
     let edges = dag.edges().to_vec();
+    let scheduler = global_scheduler();
 
-    // Collect inputs for each node before taking nodes out
-    let mut node_inputs: Vec<(usize, String, HashMap<String, PortValue>)> = Vec::new();
+    // Collect inputs and take nodes out of the DAG
+    let mut taken: Vec<(usize, String, HashMap<String, PortValue>, Box<dyn crate::node::Node>)> = Vec::new();
     for &node_idx in level {
         let node_name = dag.node_name(node_idx).to_string();
         let inputs = collect_inputs(&node_name, &edges, port_data, consumer_counts);
-        node_inputs.push((node_idx, node_name, inputs));
-    }
 
-    // Take nodes out of the DAG temporarily (like the scheduler take pattern)
-    let nodes_vec = dag.nodes_mut();
-    let mut taken: Vec<(usize, String, HashMap<String, PortValue>, Box<dyn crate::node::Node>)> = Vec::new();
-    for (node_idx, node_name, inputs) in node_inputs {
-        let entry = &mut nodes_vec[node_idx];
-        // Safety: we put it back after execution. The slot is left in an
-        // indeterminate state (moved-from Box), which is fine because we
-        // write back before any other code can observe it.
+        // Take node out (like the scheduler take pattern for actors)
+        let entry = &mut dag.nodes_mut()[node_idx];
         let node_box = unsafe {
             let ptr = &mut entry.node as *mut Box<dyn crate::node::Node>;
             std::ptr::read(ptr)
@@ -253,40 +248,34 @@ fn execute_level_parallel(
         taken.push((node_idx, node_name, inputs, node_box));
     }
 
-    // Execute in parallel via scoped threads
-    let results: Vec<Result<(usize, String, NodeResult, HashMap<String, PortValue>, Box<dyn crate::node::Node>), String>> =
-        std::thread::scope(|s| {
-            let handles: Vec<_> = taken.into_iter().map(|(node_idx, node_name, inputs, mut node_box)| {
-                s.spawn(move || {
-                    let start = Instant::now();
-                    let mut ctx = NodeContext::new(inputs);
-
-                    match node_box.execute(&mut ctx) {
-                        Ok(()) => {
-                            let duration_ms = start.elapsed().as_millis() as u64;
-                            let outputs = ctx.take_outputs();
-                            let metrics = ctx.metrics().to_vec();
-                            let logs = ctx.logs().to_vec();
-                            let nr = NodeResult { duration_ms, metrics, logs };
-                            Ok((node_idx, node_name, nr, outputs, node_box))
-                        }
-                        Err(e) => {
-                            Err(format!("node '{}' failed: {}", node_name, e))
-                        }
-                    }
-                })
-            }).collect();
-
-            handles.into_iter()
-                .map(|h| h.join().unwrap_or_else(|_| Err("thread panicked".to_string())))
-                .collect()
+    // Submit each node as a task to the scheduler's thread pool
+    let mut receivers = Vec::with_capacity(taken.len());
+    for (node_idx, node_name, inputs, mut node_box) in taken {
+        let rx = scheduler.submit_task(Priority::High, move || {
+            let start = Instant::now();
+            let mut ctx = NodeContext::new(inputs);
+            match node_box.execute(&mut ctx) {
+                Ok(()) => {
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    let outputs = ctx.take_outputs();
+                    let metrics = ctx.metrics().to_vec();
+                    let logs = ctx.logs().to_vec();
+                    let nr = NodeResult { duration_ms, metrics, logs };
+                    Ok((node_idx, node_name, nr, outputs, node_box))
+                }
+                Err(e) => Err((node_name, e))
+            }
         });
+        receivers.push(rx);
+    }
 
-    // Put nodes back and collect results
+    // Wait for all tasks — cooperative pumping (works in WASM too)
     let mut level_results = Vec::new();
-    for result in results {
-        match result {
+    for rx in receivers {
+        let task_result = rx.wait_cooperative_named("dag_node", || scheduler.run_one_step());
+        match task_result {
             Ok((node_idx, node_name, nr, outputs, node_box)) => {
+                // Put node back in the DAG
                 let entry = &mut dag.nodes_mut()[node_idx];
                 unsafe {
                     let ptr = &mut entry.node as *mut Box<dyn crate::node::Node>;
@@ -305,9 +294,9 @@ fn execute_level_parallel(
 
                 level_results.push((node_name, nr));
             }
-            Err(e) => {
+            Err((node_name, e)) => {
                 emit(DagEvent::DagFailed { error: e.clone() });
-                return Err(e);
+                return Err(format!("node '{}' failed: {}", node_name, e));
             }
         }
     }
@@ -319,9 +308,6 @@ fn execute_level_parallel(
 // Internal: collect inputs for a node from port_data via edges
 // ---------------------------------------------------------------------------
 
-/// For each incoming edge to `node_name`, grab the value from `port_data`.
-/// If a source port has only one remaining consumer, remove (move) the value.
-/// Otherwise, clone it (cheap Arc bump) so the next consumer can still get it.
 fn collect_inputs(
     node_name: &str,
     edges: &[crate::dag::DagEdge],
@@ -336,12 +322,10 @@ fn collect_inputs(
             if let Some(count) = remaining {
                 *count -= 1;
                 if *count == 0 {
-                    // Last consumer: move the value (enables take())
                     if let Some(value) = port_data.remove(&key) {
                         inputs.insert(edge.to_port.clone(), value);
                     }
                 } else {
-                    // More consumers remaining: clone (cheap Arc ref bump)
                     if let Some(value) = port_data.get(&key) {
                         inputs.insert(edge.to_port.clone(), value.clone());
                     }
@@ -463,7 +447,7 @@ mod tests {
 
         assert_eq!(result.node_results.len(), 3);
         let sink_result = result.get("sink").unwrap();
-        assert_eq!(sink_result.metrics[0].1, 10.0); // 5 * 2 = 10
+        assert_eq!(sink_result.metrics[0].1, 10.0);
     }
 
     #[test]
@@ -482,7 +466,7 @@ mod tests {
 
         assert_eq!(counter.load(Ordering::Relaxed), 4);
         assert_eq!(result.node_results.len(), 4);
-        // 4 × 20ms parallel should be ~20-40ms, not ~80ms sequential
+        // 4 × 20ms parallel should be ~20-50ms, not ~80ms sequential
         assert!(elapsed.as_millis() < 70, "took {}ms, expected parallel", elapsed.as_millis());
     }
 
@@ -549,7 +533,6 @@ mod tests {
 
     #[test]
     fn fan_out_data_flow() {
-        // A(emit 3) → B(double=6), A → C(add_10=13), both read A's output
         struct AddNode { add: i32 }
         impl Node for AddNode {
             fn node_type(&self) -> &'static str { "add" }
@@ -576,17 +559,13 @@ mod tests {
         dag.connect("source", "out", "double", "in").unwrap();
 
         let result = execute_dag(&mut dag, None).unwrap();
-
-        // add_10 got 3+10=13
         let add_r = result.get("add_10").unwrap();
         assert_eq!(add_r.metrics[0].1, 13.0);
-        // double got 3*2=6 — verify it also got the value
         assert_eq!(result.node_results.len(), 3);
     }
 
     #[test]
     fn take_works_for_single_consumer() {
-        // Single consumer should be able to take() (move) the value
         struct TakeNode { received: Option<Vec<u64>> }
         impl Node for TakeNode {
             fn node_type(&self) -> &'static str { "take" }

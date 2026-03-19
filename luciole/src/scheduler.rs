@@ -113,7 +113,7 @@ pub struct Scheduler {
 }
 
 struct SharedState {
-    ready_queue: Mutex<BinaryHeap<ReadyEntry>>,
+    ready_queue: Mutex<BinaryHeap<WorkItem>>,
     /// Un acteur est `take()` pendant qu'il est traité par un thread,
     /// ce qui évite les deadlocks lors de réentrance (doc 08, point 3).
     actors: Mutex<HashMap<ActorId, ActorSlot>>,
@@ -163,27 +163,48 @@ impl ActorActivity {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ReadyEntry {
-    priority: Priority,
-    actor_id: ActorId,
+// ---------------------------------------------------------------------------
+// WorkItem — unified work unit: actor batch OR one-shot task
+// ---------------------------------------------------------------------------
+
+enum WorkItem {
+    /// Process one batch of messages for this actor.
+    Actor {
+        priority: Priority,
+        actor_id: ActorId,
+    },
+    /// Execute a one-shot closure on a pool thread.
+    Task {
+        priority: Priority,
+        task: Option<Box<dyn FnOnce() + Send>>,
+        done: crate::reply::Reply<()>,
+    },
 }
 
-impl Eq for ReadyEntry {}
+impl WorkItem {
+    fn priority(&self) -> Priority {
+        match self {
+            WorkItem::Actor { priority, .. } => *priority,
+            WorkItem::Task { priority, .. } => *priority,
+        }
+    }
+}
 
-impl PartialEq for ReadyEntry {
+impl Eq for WorkItem {}
+
+impl PartialEq for WorkItem {
     fn eq(&self, other: &Self) -> bool {
-        self.priority == other.priority && self.actor_id == other.actor_id
+        self.priority() == other.priority()
     }
 }
 
-impl Ord for ReadyEntry {
+impl Ord for WorkItem {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.priority.cmp(&other.priority)
+        self.priority().cmp(&other.priority())
     }
 }
 
-impl PartialOrd for ReadyEntry {
+impl PartialOrd for WorkItem {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
@@ -272,7 +293,7 @@ impl SchedulerNotifier {
 
         {
             let mut queue = self.shared.ready_queue.lock().unwrap();
-            queue.push(ReadyEntry {
+            queue.push(WorkItem::Actor {
                 priority,
                 actor_id: self.actor_id,
             });
@@ -351,7 +372,7 @@ impl Scheduler {
 
         {
             let mut queue = self.shared.ready_queue.lock().unwrap();
-            queue.push(ReadyEntry {
+            queue.push(WorkItem::Actor {
                 priority,
                 actor_id: id,
             });
@@ -439,6 +460,36 @@ impl Scheduler {
         run_one_step_impl(&self.shared)
     }
 
+    /// Submit a one-shot task to the thread pool.
+    /// The closure will be executed by a pool thread (or by `run_one_step`
+    /// in cooperative/WASM mode). Returns a receiver to wait on the result.
+    pub fn submit_task<F, R>(&self, priority: Priority, f: F) -> crate::reply::ReplyReceiver<R>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let (result_tx, result_rx) = crate::reply::reply::<R>();
+        let (done_tx, _done_rx) = crate::reply::reply::<()>();
+
+        // Wrap: execute f, send result via result_tx, then signal done_tx
+        let task = Box::new(move || {
+            let result = f();
+            result_tx.send(result);
+        });
+
+        {
+            let mut queue = self.shared.ready_queue.lock().unwrap();
+            queue.push(WorkItem::Task {
+                priority,
+                task: Some(task),
+                done: done_tx,
+            });
+        }
+        self.shared.work_available.notify_one();
+
+        result_rx
+    }
+
     pub fn is_single_threaded(&self) -> bool {
         self.num_threads <= 1
     }
@@ -509,108 +560,115 @@ fn run_loop(shared: &SharedState, thread_index: usize) {
             return;
         }
 
-        let actor_id = pop_ready_actor(shared, thread_index);
-        let Some(actor_id) = actor_id else {
+        let Some(item) = pop_work(shared, thread_index) else {
             continue;
         };
 
-        // Prendre l'acteur OUT du HashMap.
-        let (mut actor_box, name, activity) = {
-            let mut actors = shared.actors.lock().unwrap();
-            let slot = match actors.get_mut(&actor_id) {
-                Some(s) => s,
-                None => continue,
-            };
-            match slot.actor.take() {
-                Some(actor) => (actor, slot.name, Arc::clone(&slot.activity)),
-                None => continue, // Déjà pris (doublon dans la ready queue)
+        match item {
+            WorkItem::Task { task, done, .. } => {
+                if let Some(f) = task {
+                    f();
+                }
+                done.send(());
             }
-        };
-
-        activity.set("processing");
-        let result = handle_batch(shared, actor_id, name, &mut actor_box);
-        activity.clear();
-
-        match result {
-            BatchResult::Stopped => {
-                let mut actors = shared.actors.lock().unwrap();
-                actors.remove(&actor_id);
-                shared.events.emit(SchedulerEvent::ActorStopped {
-                    actor_id,
-                    actor_name: name,
-                });
-            }
-            BatchResult::HasMore => {
-                let priority = actor_box.priority();
-                {
-                    let mut actors = shared.actors.lock().unwrap();
-                    if let Some(slot) = actors.get_mut(&actor_id) {
-                        slot.actor = Some(actor_box);
-                        // Pas idle — on ne touche pas le flag.
-                    }
-                }
-                {
-                    let mut queue = shared.ready_queue.lock().unwrap();
-                    queue.push(ReadyEntry {
-                        priority,
-                        actor_id,
-                    });
-                }
-                shared.work_available.notify_one();
-            }
-            BatchResult::Idle => {
-                let needs_rewake;
-                {
-                    let mut actors = shared.actors.lock().unwrap();
-                    if let Some(slot) = actors.get_mut(&actor_id) {
-                        slot.actor = Some(actor_box);
-                        // Remettre le flag idle → le prochain send() réveillera.
-                        slot.wake_handle.is_idle.store(true, Ordering::Release);
-                        // RACE FIX: un send() a pu arriver entre has_pending()
-                        // (dans handle_batch) et le store(true) ci-dessus.
-                        // Ce send() a vu is_idle=false → pas de wake.
-                        // On re-vérifie la mailbox pour rattraper ce cas.
-                        needs_rewake = slot.actor.as_ref()
-                            .map(|a| a.has_pending())
-                            .unwrap_or(false);
-                    } else {
-                        needs_rewake = false;
-                    }
-                }
-                if needs_rewake {
-                    // Un message a glissé entre le check et le idle.
-                    // Re-enqueue l'acteur (doublon possible, géré par take → None).
-                    let priority = {
-                        let actors = shared.actors.lock().unwrap();
-                        actors.get(&actor_id)
-                            .and_then(|s| s.actor.as_ref())
-                            .map(|a| a.priority())
-                            .unwrap_or(Priority::Medium)
-                    };
-                    {
-                        let mut queue = shared.ready_queue.lock().unwrap();
-                        queue.push(ReadyEntry { priority, actor_id });
-                    }
-                    shared.work_available.notify_one();
-                } else {
-                    shared.events.emit(SchedulerEvent::ActorIdle {
-                        actor_id,
-                        actor_name: name,
-                    });
-                }
+            WorkItem::Actor { actor_id, .. } => {
+                run_loop_handle_actor(shared, actor_id);
             }
         }
     }
 }
 
-fn pop_ready_actor(shared: &SharedState, thread_index: usize) -> Option<ActorId> {
+fn run_loop_handle_actor(shared: &SharedState, actor_id: ActorId) {
+    // Prendre l'acteur OUT du HashMap.
+    let (mut actor_box, name, activity) = {
+        let mut actors = shared.actors.lock().unwrap();
+        let slot = match actors.get_mut(&actor_id) {
+            Some(s) => s,
+            None => return,
+        };
+        match slot.actor.take() {
+            Some(actor) => (actor, slot.name, Arc::clone(&slot.activity)),
+            None => return, // Déjà pris (doublon dans la ready queue)
+        }
+    };
+
+    activity.set("processing");
+    let result = handle_batch(shared, actor_id, name, &mut actor_box);
+    activity.clear();
+
+    match result {
+        BatchResult::Stopped => {
+            let mut actors = shared.actors.lock().unwrap();
+            actors.remove(&actor_id);
+            shared.events.emit(SchedulerEvent::ActorStopped {
+                actor_id,
+                actor_name: name,
+            });
+        }
+        BatchResult::HasMore => {
+            let priority = actor_box.priority();
+            {
+                let mut actors = shared.actors.lock().unwrap();
+                if let Some(slot) = actors.get_mut(&actor_id) {
+                    slot.actor = Some(actor_box);
+                }
+            }
+            {
+                let mut queue = shared.ready_queue.lock().unwrap();
+                queue.push(WorkItem::Actor {
+                    priority,
+                    actor_id,
+                });
+            }
+            shared.work_available.notify_one();
+        }
+        BatchResult::Idle => {
+            let needs_rewake;
+            {
+                let mut actors = shared.actors.lock().unwrap();
+                if let Some(slot) = actors.get_mut(&actor_id) {
+                    slot.actor = Some(actor_box);
+                    slot.wake_handle.is_idle.store(true, Ordering::Release);
+                    // RACE FIX: un send() a pu arriver entre has_pending()
+                    // (dans handle_batch) et le store(true) ci-dessus.
+                    needs_rewake = slot.actor.as_ref()
+                        .map(|a| a.has_pending())
+                        .unwrap_or(false);
+                } else {
+                    needs_rewake = false;
+                }
+            }
+            if needs_rewake {
+                let priority = {
+                    let actors = shared.actors.lock().unwrap();
+                    actors.get(&actor_id)
+                        .and_then(|s| s.actor.as_ref())
+                        .map(|a| a.priority())
+                        .unwrap_or(Priority::Medium)
+                };
+                {
+                    let mut queue = shared.ready_queue.lock().unwrap();
+                    queue.push(WorkItem::Actor { priority, actor_id });
+                }
+                shared.work_available.notify_one();
+            } else {
+                shared.events.emit(SchedulerEvent::ActorIdle {
+                    actor_id,
+                    actor_name: name,
+                });
+            }
+        }
+    }
+}
+
+fn pop_work(shared: &SharedState, thread_index: usize) -> Option<WorkItem> {
     let mut queue = shared.ready_queue.lock().unwrap();
     loop {
         if shared.shutdown.load(Ordering::Acquire) {
             return None;
         }
         match queue.pop() {
-            Some(entry) => return Some(entry.actor_id),
+            Some(item) => return Some(item),
             None => {
                 shared
                     .events
@@ -713,17 +771,30 @@ fn emit_priority_change(
 // ---------------------------------------------------------------------------
 
 fn run_one_step_impl(shared: &SharedState) -> bool {
-    let entry = {
+    let item = {
         let mut queue = shared.ready_queue.lock().unwrap();
         queue.pop()
     };
 
-    let Some(entry) = entry else {
+    let Some(item) = item else {
         return false;
     };
 
-    let actor_id = entry.actor_id;
+    match item {
+        WorkItem::Task { task, done, .. } => {
+            if let Some(f) = task {
+                f();
+            }
+            done.send(());
+            true
+        }
+        WorkItem::Actor { actor_id, priority: entry_priority } => {
+            run_one_step_actor(shared, actor_id, entry_priority)
+        }
+    }
+}
 
+fn run_one_step_actor(shared: &SharedState, actor_id: ActorId, entry_priority: Priority) -> bool {
     let (mut actor_box, name, activity) = {
         let mut actors = shared.actors.lock().unwrap();
         let slot = match actors.get_mut(&actor_id) {
@@ -754,9 +825,8 @@ fn run_one_step_impl(shared: &SharedState) -> bool {
             }
         }
         None => {
-            // Garbage-collect zombie actors: all senders dropped + mailbox empty.
             if actor_box.is_disconnected() {
-                (true, false) // treat as stopped
+                (true, false)
             } else {
                 match actor_box.poll_idle() {
                     Poll::Ready(()) => (false, false),
@@ -783,7 +853,6 @@ fn run_one_step_impl(shared: &SharedState) -> bool {
                 slot.actor = Some(actor_box);
                 if idle {
                     slot.wake_handle.is_idle.store(true, Ordering::Release);
-                    // Même race fix que dans run_loop.
                     needs_rewake = slot.actor.as_ref()
                         .map(|a| a.has_pending())
                         .unwrap_or(false);
@@ -797,8 +866,8 @@ fn run_one_step_impl(shared: &SharedState) -> bool {
 
         if !idle || needs_rewake {
             let mut queue = shared.ready_queue.lock().unwrap();
-            queue.push(ReadyEntry {
-                priority: entry.priority,
+            queue.push(WorkItem::Actor {
+                priority: entry_priority,
                 actor_id,
             });
         }
@@ -1370,5 +1439,125 @@ mod tests {
         // b envoie à a Ping(4998), etc.
         // Total pings traités = rounds + 1
         assert_eq!(count_a + count_b, rounds + 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // submit_task tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_submit_task_basic() {
+        let scheduler = Scheduler::new(2);
+        let _handle = scheduler.start();
+
+        let rx = scheduler.submit_task(Priority::Medium, || 42);
+        let result = rx.wait_cooperative(|| scheduler.run_one_step());
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_submit_task_cooperative() {
+        // No threads started — only cooperative pumping
+        let scheduler = Scheduler::new(1);
+
+        let rx = scheduler.submit_task(Priority::Medium, || "hello");
+        let result = rx.wait_cooperative(|| scheduler.run_one_step());
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_submit_task_parallel() {
+        let scheduler = Scheduler::new(4);
+        let _handle = scheduler.start();
+
+        let start = Instant::now();
+        let mut receivers = Vec::new();
+        for i in 0..4 {
+            let rx = scheduler.submit_task(Priority::High, move || {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                i * 10
+            });
+            receivers.push(rx);
+        }
+
+        let results: Vec<i32> = receivers.into_iter()
+            .map(|rx| rx.wait_cooperative(|| scheduler.run_one_step()))
+            .collect();
+        let elapsed = start.elapsed();
+
+        assert_eq!(results.len(), 4);
+        assert!(results.contains(&0));
+        assert!(results.contains(&10));
+        assert!(results.contains(&20));
+        assert!(results.contains(&30));
+        // 4 × 30ms parallel should be ~30-60ms, not ~120ms
+        assert!(elapsed.as_millis() < 100, "took {}ms, expected parallel", elapsed.as_millis());
+    }
+
+    #[test]
+    fn test_submit_task_mixed_with_actors() {
+        // Tasks and actors coexist on the same pool
+        let scheduler = Scheduler::new(2);
+        let (counter_ref, _) = spawn_counter(&scheduler, 64);
+        let _handle = scheduler.start();
+
+        // Send actor messages
+        counter_ref.send(CounterMsg::Inc).unwrap();
+        counter_ref.send(CounterMsg::Inc).unwrap();
+
+        // Submit a task
+        let rx_task = scheduler.submit_task(Priority::Medium, || 99);
+
+        // Both should complete
+        let task_result = rx_task.wait_cooperative(|| scheduler.run_one_step());
+        assert_eq!(task_result, 99);
+
+        let (tx, rx) = reply();
+        counter_ref.send(CounterMsg::Get(tx)).unwrap();
+        let count = rx.wait_cooperative(|| scheduler.run_one_step());
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_submit_task_priority() {
+        // High priority task should run before low priority actor
+        let scheduler = Scheduler::new(1);
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+
+        let log2 = Arc::clone(&log);
+        let (mbox, mut aref) = mailbox::<()>(64);
+        struct LogActor { log: Arc<Mutex<Vec<String>>> }
+        impl Actor for LogActor {
+            type Msg = ();
+            fn name(&self) -> &'static str { "log" }
+            fn handle(&mut self, _msg: ()) -> ActorStatus {
+                self.log.lock().unwrap().push("actor".to_string());
+                ActorStatus::Continue
+            }
+            fn priority(&self) -> Priority { Priority::Low }
+        }
+        scheduler.spawn(LogActor { log: log2 }, mbox, &mut aref, 64);
+
+        // Send actor message (Low priority)
+        aref.send(()).unwrap();
+
+        // Submit task (High priority)
+        let log3 = Arc::clone(&log);
+        let _rx = scheduler.submit_task(Priority::High, move || {
+            log3.lock().unwrap().push("task".to_string());
+        });
+
+        // Pump — high priority task should run first
+        for _ in 0..10 {
+            scheduler.run_one_step();
+        }
+
+        let log = log.lock().unwrap();
+        if let (Some(pos_task), Some(pos_actor)) = (
+            log.iter().position(|s| s == "task"),
+            log.iter().position(|s| s == "actor"),
+        ) {
+            assert!(pos_task < pos_actor, "task should run before actor: {:?}", *log);
+        }
     }
 }
