@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
+use crate::checkpoint::CheckpointStore;
 use crate::dag::Dag;
 use crate::events::{EventBus, EventReceiver};
 use crate::node::{LogLevel, NodeContext};
@@ -282,6 +283,194 @@ pub fn execute_dag(
         duration_ms: total_ms,
         node_results: results,
     })
+}
+
+/// Execute a DAG with checkpoint persistence.
+///
+/// Same as `execute_dag` but saves progress to a `CheckpointStore`.
+/// After each node completes, it's recorded. On crash + restart,
+/// the caller can load the checkpoint to see which nodes finished
+/// and build a smaller DAG with only the remaining work.
+pub fn execute_dag_with_checkpoint(
+    dag: &mut Dag,
+    dag_id: &str,
+    store: &dyn CheckpointStore,
+    on_event: Option<&dyn Fn(DagEvent)>,
+) -> Result<DagResult, String> {
+    let dag_start = Instant::now();
+    let levels = dag.topological_levels()?;
+    let total_nodes = dag.node_count();
+
+    // Load existing checkpoint to skip completed nodes
+    let skip: HashSet<String> = store.load(dag_id)
+        .map(|cp| cp.completed_nodes.into_iter().collect())
+        .unwrap_or_default();
+
+    let mut consumer_counts: HashMap<(String, String), usize> = HashMap::new();
+    for edge in dag.edges() {
+        *consumer_counts
+            .entry((edge.from_node.clone(), edge.from_port.clone()))
+            .or_insert(0) += 1;
+    }
+
+    let mut port_data: HashMap<(String, String), PortValue> = HashMap::new();
+    let mut results: Vec<(String, NodeResult)> = Vec::with_capacity(total_nodes);
+
+    let bus = dag_event_bus();
+    let emit = |evt: DagEvent| {
+        bus.emit(evt.clone());
+        if let Some(cb) = on_event {
+            cb(evt);
+        }
+    };
+
+    for (level_idx, level) in levels.iter().enumerate() {
+        let level_start = Instant::now();
+        let level_names: Vec<String> = level.iter()
+            .map(|&i| dag.node_name(i).to_string())
+            .collect();
+
+        emit(DagEvent::LevelStarted {
+            level: level_idx,
+            nodes: level_names.clone(),
+        });
+
+        for &node_idx in level {
+            let node_name = dag.node_name(node_idx).to_string();
+            if skip.contains(&node_name) {
+                emit(DagEvent::NodeCompleted {
+                    node: node_name.clone(),
+                    duration_ms: 0,
+                    metrics: vec![("skipped".to_string(), 1.0)],
+                });
+                results.push((node_name, NodeResult {
+                    duration_ms: 0,
+                    metrics: vec![("skipped".to_string(), 1.0)],
+                    logs: vec![],
+                }));
+                continue;
+            }
+
+            match execute_single_node(
+                dag, node_idx, &mut port_data, &mut consumer_counts,
+                level_idx, &emit,
+            ) {
+                Ok(nr) => {
+                    let node_type = dag.node_mut(node_idx).node_type();
+                    store.save_node_completed(dag_id, &node_name, node_type);
+                    results.push((node_name, nr));
+                }
+                Err(e) => {
+                    store.save_node_failed(dag_id, &node_name, &e);
+                    store.mark_failed(dag_id, &e);
+                    emit(DagEvent::DagFailed { error: e.clone() });
+                    return Err(e);
+                }
+            }
+        }
+
+        emit(DagEvent::LevelCompleted {
+            level: level_idx,
+            duration_ms: level_start.elapsed().as_millis() as u64,
+        });
+    }
+
+    let total_ms = dag_start.elapsed().as_millis() as u64;
+    store.mark_completed(dag_id);
+    emit(DagEvent::DagCompleted { total_ms, node_count: total_nodes });
+
+    Ok(DagResult {
+        duration_ms: total_ms,
+        node_results: results,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// display_progress — ASCII tree of DAG execution state
+// ---------------------------------------------------------------------------
+
+/// Render the DAG as an ASCII tree showing execution progress.
+///
+/// Uses a `DagResult` (or None for pre-execution view) to show status.
+///
+/// ```text
+/// DAG commit (125ms)
+/// ├── [✓] plan_merges (2ms)
+/// ├─┬ level 1 (parallel)
+/// │ ├── [✓] merge_0 (45ms) docs=1250 sfx_ms=30
+/// │ ├── [✓] merge_1 (38ms) docs=1000 sfx_ms=25
+/// │ └── [✗] merge_2 FAILED: out of disk
+/// ├── [~] save_metas (pending)
+/// ├── [ ] gc
+/// └── [ ] reload
+/// ```
+pub fn display_progress(dag: &Dag, result: Option<&DagResult>) -> String {
+    let levels = match dag.topological_levels() {
+        Ok(l) => l,
+        Err(e) => return format!("DAG error: {}", e),
+    };
+
+    let completed: HashMap<&str, &NodeResult> = result
+        .map(|r| r.node_results.iter().map(|(n, nr)| (n.as_str(), nr)).collect())
+        .unwrap_or_default();
+
+    let total_ms = result.map(|r| r.duration_ms).unwrap_or(0);
+    let mut lines = Vec::new();
+    lines.push(if total_ms > 0 {
+        format!("DAG ({}ms, {} nodes)", total_ms, dag.node_count())
+    } else {
+        format!("DAG ({} nodes)", dag.node_count())
+    });
+
+    let total_levels = levels.len();
+    for (level_idx, level) in levels.iter().enumerate() {
+        let is_last_level = level_idx == total_levels - 1;
+        let prefix_branch = if is_last_level { "└── " } else { "├── " };
+        let prefix_cont = if is_last_level { "    " } else { "│   " };
+
+        if level.len() == 1 {
+            let node_name = dag.node_name(level[0]);
+            let line = format_node_line(node_name, completed.get(node_name));
+            lines.push(format!("{}{}", prefix_branch, line));
+        } else {
+            // Parallel level
+            lines.push(format!("{}┬ level {} ({} parallel)", prefix_branch.replace("── ", "─"), level_idx, level.len()));
+            for (i, &node_idx) in level.iter().enumerate() {
+                let is_last_node = i == level.len() - 1;
+                let node_prefix = if is_last_node { "└── " } else { "├── " };
+                let node_name = dag.node_name(node_idx);
+                let line = format_node_line(node_name, completed.get(node_name));
+                lines.push(format!("{}{}{}", prefix_cont, node_prefix, line));
+            }
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn format_node_line(name: &str, result: Option<&&NodeResult>) -> String {
+    match result {
+        Some(nr) => {
+            let has_error = nr.logs.iter().any(|(l, _)| *l == LogLevel::Error);
+            let icon = if has_error { "✗" } else { "✓" };
+            let metrics_str = nr.metrics.iter()
+                .map(|(k, v)| {
+                    if *v == (*v as u64) as f64 {
+                        format!("{}={}", k, *v as u64)
+                    } else {
+                        format!("{}={:.1}", k, v)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            if metrics_str.is_empty() {
+                format!("[{}] {} ({}ms)", icon, name, nr.duration_ms)
+            } else {
+                format!("[{}] {} ({}ms) {}", icon, name, nr.duration_ms, metrics_str)
+            }
+        }
+        None => format!("[ ] {}", name),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1028,5 +1217,101 @@ mod tests {
 
         let err = execute_dag(&mut dag, None).unwrap_err();
         assert!(err.contains("intentional failure"));
+    }
+
+    #[test]
+    fn checkpoint_records_progress() {
+        use crate::checkpoint::{MemoryCheckpointStore, CheckpointStatus};
+
+        let store = MemoryCheckpointStore::new();
+
+        let mut dag = Dag::new();
+        dag.add_node("a", EmitNode { value: 1 });
+        dag.add_node("b", CollectNode { received: 0 });
+        dag.connect("a", "out", "b", "in").unwrap();
+
+        let result = execute_dag_with_checkpoint(&mut dag, "test1", &store, None).unwrap();
+        assert_eq!(result.node_results.len(), 2);
+
+        let cp = store.load("test1").unwrap();
+        assert_eq!(cp.completed_nodes, vec!["a", "b"]);
+        assert_eq!(cp.status, CheckpointStatus::Completed);
+    }
+
+    #[test]
+    fn checkpoint_records_failure() {
+        use crate::checkpoint::{MemoryCheckpointStore, CheckpointStatus};
+
+        let store = MemoryCheckpointStore::new();
+
+        let mut dag = Dag::new();
+        dag.add_node("source", EmitNode { value: 1 });
+        dag.add_node("fail", FailNode);
+        dag.connect("source", "out", "fail", "in").unwrap();
+
+        let err = execute_dag_with_checkpoint(&mut dag, "test2", &store, None).unwrap_err();
+        assert!(err.contains("intentional"));
+
+        let cp = store.load("test2").unwrap();
+        assert_eq!(cp.completed_nodes, vec!["source"]);
+        assert_eq!(cp.status, CheckpointStatus::Failed);
+        assert!(cp.failed_node.is_some());
+    }
+
+    #[test]
+    fn checkpoint_skips_completed_nodes() {
+        use crate::checkpoint::MemoryCheckpointStore;
+
+        let store = MemoryCheckpointStore::new();
+        // Simulate prior run that completed "a"
+        store.save_node_completed("test3", "a", "emit");
+
+        let mut dag = Dag::new();
+        dag.add_node("a", EmitNode { value: 1 });
+        dag.add_node("b", EmitNode { value: 2 });
+
+        let result = execute_dag_with_checkpoint(&mut dag, "test3", &store, None).unwrap();
+        let a = result.get("a").unwrap();
+        assert_eq!(a.metrics[0], ("skipped".to_string(), 1.0));
+        let b = result.get("b").unwrap();
+        assert_eq!(b.metrics[0], ("emitted".to_string(), 2.0));
+    }
+
+    #[test]
+    fn display_progress_ascii() {
+        let mut dag = Dag::new();
+        dag.add_node("source", EmitNode { value: 5 });
+        dag.add_node("double", DoubleNode);
+        dag.add_node("sink", CollectNode { received: 0 });
+        dag.connect("source", "out", "double", "in").unwrap();
+        dag.connect("double", "out", "sink", "in").unwrap();
+
+        // Before execution
+        let tree = display_progress(&dag, None);
+        assert!(tree.contains("[ ] source"));
+        assert!(tree.contains("[ ] double"));
+        assert!(tree.contains("[ ] sink"));
+
+        // After execution
+        let result = execute_dag(&mut dag, None).unwrap();
+        let tree = display_progress(&dag, Some(&result));
+        assert!(tree.contains("[✓] source"));
+        assert!(tree.contains("[✓] double"));
+        assert!(tree.contains("[✓] sink"));
+        assert!(tree.contains("received=10"));
+    }
+
+    #[test]
+    fn display_progress_parallel() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut dag = Dag::new();
+        dag.add_node("a", CounterNode { counter: counter.clone() });
+        dag.add_node("b", CounterNode { counter: counter.clone() });
+
+        let result = execute_dag(&mut dag, None).unwrap();
+        let tree = display_progress(&dag, Some(&result));
+        assert!(tree.contains("parallel"));
+        assert!(tree.contains("[✓] a"));
+        assert!(tree.contains("[✓] b"));
     }
 }

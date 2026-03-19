@@ -1,4 +1,5 @@
 pub mod actor_state;
+pub mod checkpoint;
 pub mod dag;
 pub mod envelope;
 pub mod events;
@@ -25,7 +26,8 @@ pub use observe::{TapEvent, TapRegistry};
 pub use pool::{DrainMsg, DrainableRef, Pool, ShutdownMsg};
 pub use port::{PortType, PortValue};
 pub use reply::{reply, Reply, ReplyReceiver};
-pub use runtime::{execute_dag, subscribe_dag_events, DagEvent, DagResult, NodeResult};
+pub use checkpoint::{CheckpointStatus, CheckpointStore, DagCheckpoint, FileCheckpointStore, MemoryCheckpointStore};
+pub use runtime::{display_progress, execute_dag, execute_dag_with_checkpoint, subscribe_dag_events, DagEvent, DagResult, NodeResult};
 pub use scheduler::{ActorId, Scheduler, SchedulerHandle};
 pub use scope::{Drainable, Scope};
 
