@@ -66,6 +66,16 @@ pub(crate) struct MergeState {
 }
 
 impl MergeState {
+    /// Total docs in this merge (before deletes).
+    pub fn total_docs(&self) -> u32 {
+        self.total_docs
+    }
+
+    /// When this merge started.
+    pub fn merge_start(&self) -> std::time::Instant {
+        self.merge_start
+    }
+
     /// Crée un nouveau MergeState prêt à être steppé.
     ///
     /// Retourne `Ok(None)` si tous les segments sont vides (rien à merger).
