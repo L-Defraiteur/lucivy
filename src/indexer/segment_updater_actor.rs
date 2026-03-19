@@ -207,18 +207,23 @@ impl SegmentUpdaterState {
         result
     }
 
-    /// Fast commit path: no merges, just purge + save + optional GC.
+    /// Fast commit via DAG: purge + save + gc. Same observability as full commit.
     fn handle_commit_fast(
         &mut self,
         opstamp: crate::Opstamp,
         payload: Option<String>,
     ) -> crate::Result<crate::Opstamp> {
-        let segment_entries = self.shared.purge_deletes(opstamp)?;
-        self.shared.segment_manager.commit(segment_entries);
-        self.shared.save_metas(opstamp, payload)?;
-        if self.segments_in_merge.is_empty() {
-            let _ = garbage_collect_files(&self.shared);
-        }
+        let mut dag = super::commit_dag::build_commit_dag(
+            self.shared.clone(),
+            vec![], // no merges
+            opstamp,
+            payload,
+        ).map_err(|e| crate::LucivyError::SystemError(format!("build fast DAG: {e}")))?;
+
+        let dag_result = luciole::execute_dag(&mut dag, None)
+            .map_err(|e| crate::LucivyError::SystemError(format!("execute fast DAG: {e}")))?;
+
+        eprintln!("{}", dag_result.display_summary());
         Ok(opstamp)
     }
 

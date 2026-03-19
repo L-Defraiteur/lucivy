@@ -83,9 +83,6 @@ pub trait Node: Send {
     /// write to `ctx.set_output()`, emit metrics via `ctx.metric()`.
     fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String>;
 
-    /// Downcast to concrete type (used by GraphNode to access InjectNode/CollectNode).
-    fn as_any_mut(&mut self) -> &mut dyn Any { unimplemented!("as_any_mut not supported for this node") }
-
     /// Whether this node supports undo. Default: false.
     fn can_undo(&self) -> bool { false }
 

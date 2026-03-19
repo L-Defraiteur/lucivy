@@ -42,6 +42,7 @@ pub fn subscribe_dag_events() -> EventReceiver<DagEvent> {
 
 /// Result of executing a DAG, containing per-node metrics, timing,
 /// and remaining outputs (from leaf nodes not consumed by downstream edges).
+#[derive(Debug)]
 pub struct DagResult {
     pub duration_ms: u64,
     pub node_results: Vec<(String, NodeResult)>,
@@ -214,7 +215,9 @@ pub fn execute_dag(
             .or_insert(0) += 1;
     }
 
-    let mut port_data: HashMap<(String, String), PortValue> = HashMap::new();
+    // Seed port_data with any initial inputs set on the DAG
+    let mut port_data: HashMap<(String, String), PortValue> =
+        std::mem::take(&mut dag.initial_inputs);
     let mut results: Vec<(String, NodeResult)> = Vec::with_capacity(total_nodes);
     // Undo contexts: (node_idx, undo_data) in execution order
     let mut undo_stack: Vec<(usize, Box<dyn std::any::Any + Send>)> = Vec::new();
@@ -684,6 +687,23 @@ fn collect_inputs(
     consumer_counts: &mut HashMap<(String, String), usize>,
 ) -> HashMap<String, PortValue> {
     let mut inputs = HashMap::new();
+
+    // 1. Check initial_inputs: values keyed by (node_name, port_name) directly
+    let direct_keys: Vec<(String, String)> = port_data.keys()
+        .filter(|(n, _)| n == node_name)
+        .cloned()
+        .collect();
+    for key in direct_keys {
+        // Only take if no edge produces this port (initial_inputs have no edges)
+        let has_edge = edges.iter().any(|e| e.to_node == node_name && e.to_port == key.1);
+        if !has_edge {
+            if let Some(value) = port_data.remove(&key) {
+                inputs.insert(key.1, value);
+            }
+        }
+    }
+
+    // 2. Collect from edges (upstream node outputs)
     for edge in edges {
         if edge.to_node == node_name {
             let key = (edge.from_node.clone(), edge.from_port.clone());

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::events::EventReceiver;
 use crate::node::{Node, PollNode, PollNodeAdapter};
 use crate::observe::{TapEvent, TapRegistry};
-use crate::port::PortType;
+use crate::port::{PortType, PortValue};
 
 // ---------------------------------------------------------------------------
 // Edge
@@ -34,6 +34,10 @@ pub struct Dag {
     nodes: Vec<DagNodeEntry>,
     edges: Vec<DagEdge>,
     pub(crate) taps: TapRegistry,
+    /// Pre-loaded port data injected before execution.
+    /// Key: (node_name, port_name). These values appear as if
+    /// a source node produced them.
+    pub(crate) initial_inputs: HashMap<(String, String), PortValue>,
 }
 
 impl Dag {
@@ -42,7 +46,14 @@ impl Dag {
             nodes: Vec::new(),
             edges: Vec::new(),
             taps: TapRegistry::new(),
+            initial_inputs: HashMap::new(),
         }
+    }
+
+    /// Pre-load a value as if a source node produced it on a port.
+    /// Used by GraphNode to inject external inputs into a sub-DAG.
+    pub fn set_initial_input(&mut self, node: &str, port: &str, value: PortValue) {
+        self.initial_inputs.insert((node.to_string(), port.to_string()), value);
     }
 
     /// Register a node in the DAG.
