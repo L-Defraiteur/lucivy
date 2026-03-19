@@ -261,6 +261,13 @@ impl Dag {
         &mut *self.nodes[idx].node
     }
 
+    /// Find a node by name and return a mutable reference.
+    pub fn node_mut_by_name(&mut self, name: &str) -> Option<&mut dyn Node> {
+        self.nodes.iter_mut()
+            .find(|e| e.name == name)
+            .map(|e| &mut *e.node as &mut dyn Node)
+    }
+
     // -- helpers --
 
     fn find_node(&self, name: &str) -> Option<&DagNodeEntry> {
