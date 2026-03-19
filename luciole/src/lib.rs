@@ -11,6 +11,7 @@ pub mod port;
 pub mod reply;
 pub mod runtime;
 pub mod scheduler;
+pub mod scope;
 
 pub use actor_state::ActorState;
 pub use dag::{Dag, DagEdge};
@@ -24,6 +25,7 @@ pub use port::{PortType, PortValue};
 pub use reply::{reply, Reply, ReplyReceiver};
 pub use runtime::{execute_dag, DagEvent, DagResult, NodeResult};
 pub use scheduler::{ActorId, Scheduler, SchedulerHandle};
+pub use scope::{Drainable, Scope};
 
 use std::task::Poll;
 

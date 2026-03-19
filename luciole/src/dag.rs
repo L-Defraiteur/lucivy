@@ -179,6 +179,22 @@ impl Dag {
         Ok(())
     }
 
+    /// Connect a sequence of nodes linearly via trigger ports.
+    /// Each node's "done" output connects to the next node's "trigger" input.
+    ///
+    /// ```ignore
+    /// dag.chain(&["save", "gc", "reload"])?;
+    /// // equivalent to:
+    /// // dag.connect("save", "done", "gc", "trigger")?;
+    /// // dag.connect("gc", "done", "reload", "trigger")?;
+    /// ```
+    pub fn chain(&mut self, names: &[&str]) -> Result<(), String> {
+        for pair in names.windows(2) {
+            self.connect(pair[0], "done", pair[1], "trigger")?;
+        }
+        Ok(())
+    }
+
     /// Number of nodes.
     pub fn node_count(&self) -> usize {
         self.nodes.len()
@@ -429,6 +445,41 @@ mod tests {
 
         let levels = dag.topological_levels().unwrap();
         assert_eq!(levels.len(), 2);
+    }
+
+    #[test]
+    fn chain_helper() {
+        let mut dag = Dag::new();
+        dag.add_node("a", TriggerSource);
+        dag.add_node("b", TriggerSink);  // has "go" input, but chain uses "trigger"
+        // We need nodes with "done" output and "trigger" input for chain to work.
+        // Let's use TriggerSource (has "done" output) for all, and a custom sink.
+
+        struct ChainNode;
+        impl Node for ChainNode {
+            fn node_type(&self) -> &'static str { "chain" }
+            fn inputs(&self) -> Vec<PortDef> {
+                vec![PortDef::trigger("trigger")]
+            }
+            fn outputs(&self) -> Vec<PortDef> {
+                vec![PortDef::trigger("done")]
+            }
+            fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+                ctx.trigger("done");
+                Ok(())
+            }
+        }
+
+        let mut dag = Dag::new();
+        dag.add_node("a", TriggerSource);
+        dag.add_node("b", ChainNode);
+        dag.add_node("c", ChainNode);
+
+        dag.chain(&["a", "b", "c"]).unwrap();
+        dag.validate().unwrap();
+
+        let levels = dag.topological_levels().unwrap();
+        assert_eq!(levels.len(), 3);
     }
 
     #[test]
