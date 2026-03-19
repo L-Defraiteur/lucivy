@@ -6,7 +6,7 @@ use common::{ByteCount, HasLen};
 use fnv::FnvHashMap;
 use itertools::Itertools;
 
-use crate::directory::{CompositeFile, FileSlice};
+use crate::directory::{CompositeFile, Directory, FileSlice};
 use crate::error::DataCorruption;
 use crate::fastfield::{intersect_alive_bitsets, AliveBitSet, FacetReader, FastFieldReaders};
 use crate::fieldnorm::{FieldNormReader, FieldNormReaders};
@@ -51,6 +51,7 @@ pub struct SegmentReader {
     sfx_files: FnvHashMap<Field, FileSlice>,
     sfxpost_files: FnvHashMap<Field, FileSlice>,
 }
+
 
 /// Load per-field .sfx files listed in the .sfx manifest.
 /// The manifest is written as SegmentComponent::SuffixFst and lists field_ids.

@@ -34,6 +34,8 @@ impl Message for SuAddSegmentMsg {
 pub(crate) struct SuCommitMsg {
     pub opstamp: crate::Opstamp,
     pub payload: Option<String>,
+    /// If true, rebuild suffix FST for deferred segments after commit.
+    pub rebuild_sfx: bool,
 }
 impl Message for SuCommitMsg {
     fn type_tag() -> u64 { type_tag_hash(b"SuCommitMsg") }
@@ -43,15 +45,17 @@ impl Message for SuCommitMsg {
             Some(p) => { buf.push(1); buf.extend_from_slice(p.as_bytes()); }
             None => { buf.push(0); }
         }
+        buf.push(if self.rebuild_sfx { 1 } else { 0 });
         buf
     }
     fn decode(bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() < 9 { return Err("too short".into()); }
         let opstamp = u64::from_le_bytes(bytes[..8].try_into().unwrap());
         let payload = if bytes[8] == 1 {
-            Some(String::from_utf8_lossy(&bytes[9..]).to_string())
+            Some(String::from_utf8_lossy(&bytes[9..bytes.len() - 1]).to_string())
         } else { None };
-        Ok(Self { opstamp, payload })
+        let rebuild_sfx = bytes.last().copied().unwrap_or(1) == 1;
+        Ok(Self { opstamp, payload, rebuild_sfx })
     }
 }
 
@@ -187,10 +191,19 @@ impl SegmentUpdaterState {
         &mut self,
         opstamp: crate::Opstamp,
         payload: Option<String>,
+        rebuild_sfx: bool,
     ) -> crate::Result<crate::Opstamp> {
         let start = Instant::now();
         self.shared.event_bus.emit(IndexEvent::CommitStarted { opstamp });
         let result = (|| {
+            if rebuild_sfx {
+                // Drain pending merges before commit. All merges use full
+                // merge_sfx so the resulting segments have valid FSTs.
+                lucivy_trace!("[commit] draining merges");
+                self.drain_all_merges();
+                lucivy_trace!("[commit] drain complete");
+            }
+
             let segment_entries = self.shared.purge_deletes(opstamp)?;
             self.shared.segment_manager.commit(segment_entries);
             self.shared.save_metas(opstamp, payload)?;
@@ -540,6 +553,12 @@ impl SegmentUpdaterState {
     fn collect_merge_candidates(&self) -> Vec<MergeOperation> {
         let (mut committed_segments, mut uncommitted_segments) =
             self.shared.get_mergeable_segments(&self.segments_in_merge);
+
+        let committed_docs: Vec<u32> = committed_segments.iter().map(|s| s.num_docs()).collect();
+        let uncommitted_docs: Vec<u32> = uncommitted_segments.iter().map(|s| s.num_docs()).collect();
+        lucivy_trace!("[merge_policy] segments: committed={:?} uncommitted={:?} in_merge={}",
+            committed_docs, uncommitted_docs, self.segments_in_merge.len());
+
         if committed_segments.len() == 1 && committed_segments[0].num_deleted_docs() == 0 {
             committed_segments.clear();
         }
@@ -564,6 +583,17 @@ impl SegmentUpdaterState {
         merge_candidates.extend(committed_merge_candidates);
 
         merge_candidates.retain(|op| op.segment_ids().len() > 1);
+
+        for op in &merge_candidates {
+            let seg_docs: Vec<String> = op.segment_ids().iter().map(|id| {
+                committed_docs.iter().chain(uncommitted_docs.iter())
+                    .find(|_| true) // just show count
+                    .map(|_| format!("{}", id.uuid_string().chars().take(8).collect::<String>()))
+                    .unwrap_or_default()
+            }).collect();
+            lucivy_trace!("[merge_policy] candidate: {} segments {:?}", op.segment_ids().len(), seg_docs);
+        }
+
         merge_candidates
     }
 }
@@ -659,18 +689,21 @@ pub(crate) fn create_segment_updater_actor(
     actor.register(TypedHandler::<SuCommitMsg, _>::new(
         |state, msg, reply, _local| {
             let su = state.get_mut::<SegmentUpdaterState>().unwrap();
-            let result = su.handle_commit(msg.opstamp, msg.payload);
-            // enqueue merge candidates after commit
-            let self_ref_opt = state.get::<ActorRef<Envelope>>().cloned();
-            let su = state.get_mut::<SegmentUpdaterState>().unwrap();
-            let candidates = su.collect_merge_candidates();
-            for op in candidates {
-                su.pending_merges.push_back(op);
-            }
-            if su.active_merge.is_none() && !su.pending_merges.is_empty() {
-                if let Some(ref sr) = self_ref_opt {
-                    // Trigger merge step to start processing
-                    let _ = sr.send(SuMergeStepMsg.into_envelope());
+            let result = su.handle_commit(msg.opstamp, msg.payload, msg.rebuild_sfx);
+            // Enqueue merge candidates after commit — but NOT if we just
+            // drained+rebuilt (rebuild_sfx=true), because that would create
+            // new deferred segments after the rebuild.
+            if !msg.rebuild_sfx {
+                let self_ref_opt = state.get::<ActorRef<Envelope>>().cloned();
+                let su = state.get_mut::<SegmentUpdaterState>().unwrap();
+                let candidates = su.collect_merge_candidates();
+                for op in candidates {
+                    su.pending_merges.push_back(op);
+                }
+                if su.active_merge.is_none() && !su.pending_merges.is_empty() {
+                    if let Some(ref sr) = self_ref_opt {
+                        let _ = sr.send(SuMergeStepMsg.into_envelope());
+                    }
                 }
             }
             if let Some(reply) = reply {

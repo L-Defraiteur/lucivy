@@ -1,7 +1,7 @@
-pub(crate) mod builder;
+pub mod builder;
 mod collector;
-pub(crate) mod gapmap;
-pub(crate) mod file;
+pub mod gapmap;
+pub mod file;
 mod interceptor;
 pub(crate) mod term_dictionary;
 #[cfg(test)]

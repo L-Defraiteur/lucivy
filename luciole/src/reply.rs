@@ -61,40 +61,94 @@ impl<T> ReplyReceiver<T> {
         state.value.take()
     }
 
-    /// Attente coopérative : pompe le scheduler entre chaque tentative.
-    /// Utilisé quand le scheduler n'a pas de threads dédiés (tests unitaires,
-    /// mode single-thread sans start()).
-    ///
-    /// `run_step` retourne `true` si du travail a été effectué.
-    /// Quand il n'y a pas de travail, attend brièvement sur la reply.
-    pub fn wait_cooperative<F>(self, mut run_step: F) -> T
+    /// Attente coopérative sans label (backward compat).
+    pub fn wait_cooperative<F>(self, run_step: F) -> T
     where
         F: FnMut() -> bool,
     {
+        self.wait_cooperative_named("(unnamed)", run_step)
+    }
+
+    /// Attente coopérative avec label pour diagnostics.
+    ///
+    /// Pompe le scheduler entre chaque tentative. Émet un warning si le wait
+    /// dépasse le seuil (LUCIVY_WAIT_WARN_SECS, défaut 10s).
+    ///
+    /// `run_step` retourne `true` si du travail a été effectué.
+    pub fn wait_cooperative_named<F>(self, label: &str, mut run_step: F) -> T
+    where
+        F: FnMut() -> bool,
+    {
+        use std::time::{Duration, Instant};
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static WARN_SECS: AtomicU64 = AtomicU64::new(u64::MAX);
+
+        let threshold_secs = {
+            let v = WARN_SECS.load(Ordering::Relaxed);
+            if v == u64::MAX {
+                let secs = std::env::var("LUCIVY_WAIT_WARN_SECS")
+                    .ok().and_then(|v| v.parse().ok())
+                    .unwrap_or(10u64);
+                WARN_SECS.store(secs, Ordering::Relaxed);
+                secs
+            } else {
+                v
+            }
+        };
+        let warn_threshold = Duration::from_secs(threshold_secs);
+
+        let start = Instant::now();
+        let mut warn_count = 0u32;
+
         loop {
             {
                 let mut state = self.inner.state.lock().unwrap();
                 if let Some(value) = state.value.take() {
+                    if warn_count > 0 {
+                        eprintln!("[luciole] {:?} resolved after {:.1}s",
+                            label, start.elapsed().as_secs_f64());
+                    }
                     return value;
                 }
                 if state.closed {
-                    panic!("actor died without replying");
+                    panic!("[luciole] actor died without replying (wait {:?}, {:.1}s)",
+                        label, start.elapsed().as_secs_f64());
                 }
             }
+
+            // Periodic warning with scheduler state dump
+            let elapsed = start.elapsed();
+            if elapsed >= warn_threshold * (warn_count + 1) {
+                warn_count += 1;
+                let dump = crate::scheduler::global_scheduler().dump_state();
+                eprintln!("[luciole] WARNING: {:?} waiting {:.1}s (warn #{})\n{}",
+                    label, elapsed.as_secs_f64(), warn_count, dump);
+            }
+
             if !run_step() {
                 let mut state = self.inner.state.lock().unwrap();
                 if let Some(value) = state.value.take() {
+                    if warn_count > 0 {
+                        eprintln!("[luciole] {:?} resolved after {:.1}s",
+                            label, start.elapsed().as_secs_f64());
+                    }
                     return value;
                 }
                 if state.closed {
-                    panic!("actor died without replying");
+                    panic!("[luciole] actor died without replying (wait {:?}, {:.1}s)",
+                        label, start.elapsed().as_secs_f64());
                 }
                 let (mut state, _) = self
                     .inner
                     .ready
-                    .wait_timeout(state, std::time::Duration::from_millis(1))
+                    .wait_timeout(state, Duration::from_millis(1))
                     .unwrap();
                 if let Some(value) = state.value.take() {
+                    if warn_count > 0 {
+                        eprintln!("[luciole] {:?} resolved after {:.1}s",
+                            label, start.elapsed().as_secs_f64());
+                    }
                     return value;
                 }
             }

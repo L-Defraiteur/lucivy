@@ -164,6 +164,33 @@ extern crate test;
 #[cfg(test)]
 mod functional_test;
 
+/// Debug tracing controlled by LUCIVY_DEBUG=1 env var.
+/// Use `lucivy_trace!("message", args...)` — zero cost when disabled.
+pub mod trace {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static ENABLED: AtomicU8 = AtomicU8::new(2); // 2 = not initialized
+
+    /// Returns true if LUCIVY_DEBUG=1 is set.
+    #[inline]
+    pub fn is_enabled() -> bool {
+        let v = ENABLED.load(Ordering::Relaxed);
+        if v != 2 { return v == 1; }
+        let enabled = std::env::var("LUCIVY_DEBUG").map(|v| v == "1").unwrap_or(false);
+        ENABLED.store(if enabled { 1 } else { 0 }, Ordering::Relaxed);
+        enabled
+    }
+}
+
+/// Trace macro: prints to stderr only when LUCIVY_DEBUG=1.
+#[macro_export]
+macro_rules! lucivy_trace {
+    ($($arg:tt)*) => {
+        if $crate::trace::is_enabled() {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
 #[macro_use]
 mod macros;
 #[allow(dead_code, unused_imports)]

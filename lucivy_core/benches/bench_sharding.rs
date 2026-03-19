@@ -17,7 +17,8 @@ use lucivy_core::sharded_handle::ShardedHandle;
 use ld_lucivy::query::HighlightSink;
 
 const RAG3DB_CLONE: &str = "/tmp/rag3db_bench";
-const BENCH_BASE: &str = "/tmp/lucivy_bench_sharding";
+const LINUX_CLONE: &str = "/home/luciedefraiteur/linux_bench";
+const BENCH_BASE: &str = "/home/luciedefraiteur/lucivy_bench_sharding";
 const MAX_FILE_SIZE: u64 = 100_000;
 
 // ─── File collection (same as build_dataset.py) ────────────────────────────
@@ -30,28 +31,39 @@ fn is_text(path: &Path) -> bool {
 }
 
 fn collect_files(root: &Path, max_docs: usize) -> Vec<(String, String)> {
+    use std::collections::HashSet;
+
     let exclude_dirs = [
         "target", "node_modules", ".git", "build", "build_wasm", "pkg",
         "__pycache__", ".venv", ".pytest_cache", "playground",
     ];
     let exclude_files = ["package-lock.json", ".env", ".gitignore"];
     let mut files = Vec::new();
+    let mut visited = HashSet::new();
 
     fn walk(
         dir: &Path, root: &Path,
         exclude_dirs: &[&str], exclude_files: &[&str],
         files: &mut Vec<(String, String)>,
+        visited: &mut HashSet<std::path::PathBuf>,
         max_docs: usize,
     ) {
         if files.len() >= max_docs { return; }
+        // Resolve symlinks and skip already-visited dirs
+        let canonical = match dir.canonicalize() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        if !visited.insert(canonical) { return; }
+
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         for entry in entries.flatten() {
             if files.len() >= max_docs { return; }
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
-            if path.is_dir() {
+            if path.is_dir() || path.is_symlink() && path.metadata().map(|m| m.is_dir()).unwrap_or(false) {
                 if !exclude_dirs.contains(&name.as_str()) {
-                    walk(&path, root, exclude_dirs, exclude_files, files, max_docs);
+                    walk(&path, root, exclude_dirs, exclude_files, files, visited, max_docs);
                 }
             } else if path.is_file() {
                 if exclude_files.contains(&name.as_str()) { continue; }
@@ -68,7 +80,7 @@ fn collect_files(root: &Path, max_docs: usize) -> Vec<(String, String)> {
         }
     }
 
-    walk(root, root, &exclude_dirs, &exclude_files, &mut files, max_docs);
+    walk(root, root, &exclude_dirs, &exclude_files, &mut files, &mut visited, max_docs);
     files
 }
 
@@ -144,11 +156,14 @@ fn index_sharded(files: &[(String, String)], dir: &str, num_shards: usize, balan
         doc.add_text(content_f, content);
         handle.add_document(doc, i as u64).unwrap();
         if (i + 1) % commit_every == 0 {
-            handle.commit().unwrap();
+            handle.commit_fast().unwrap();
             eprintln!("    committed {}/{} ({:.1}s)", i + 1, total, t0.elapsed().as_secs_f64());
         }
     }
+    // Final commit: rebuild all deferred FSTs
+    let t_final = std::time::Instant::now();
     handle.commit().unwrap();
+    eprintln!("    final commit ({:.1}s)", t_final.elapsed().as_secs_f64());
     let elapsed = t0.elapsed().as_secs_f64();
     (handle, elapsed)
 }
@@ -181,8 +196,9 @@ fn bench_sharding_comparison() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(usize::MAX);
 
-    eprintln!("\n=== Collecting files from {} (max {}) ===", RAG3DB_CLONE, max_docs);
-    let files = collect_files(Path::new(RAG3DB_CLONE), max_docs);
+    let dataset = std::env::var("BENCH_DATASET").unwrap_or_else(|_| LINUX_CLONE.to_string());
+    eprintln!("\n=== Collecting files from {} (max {}) ===", dataset, max_docs);
+    let files = collect_files(Path::new(&dataset), max_docs);
     let ndocs = files.len();
     eprintln!("Collected {} text files\n", ndocs);
 
@@ -239,61 +255,54 @@ fn bench_sharding_comparison() {
     // ── Queries ─────────────────────────────────────────────────────────
 
     let queries: Vec<(&str, QueryConfig)> = vec![
-        ("contains 'function' d=1", QueryConfig {
+        ("contains 'mutex_lock'", QueryConfig {
+            query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some("mutex_lock".into()),
+            ..Default::default()
+        }),
+        ("contains 'function'", QueryConfig {
             query_type: "contains".into(),
             field: Some("content".into()),
             value: Some("function".into()),
-            distance: Some(1),
             ..Default::default()
         }),
-        ("contains_split 'create index'", QueryConfig {
+        ("contains_split 'struct device'", QueryConfig {
             query_type: "contains_split".into(),
             field: Some("content".into()),
-            value: Some("create index".into()),
+            value: Some("struct device".into()),
             ..Default::default()
         }),
         // ── Same terms: contains vs startsWith head-to-head ──
-        ("contains 'segment'", QueryConfig {
+        ("contains 'sched'", QueryConfig {
             query_type: "contains".into(),
             field: Some("content".into()),
-            value: Some("segment".into()),
+            value: Some("sched".into()),
             ..Default::default()
         }),
-        ("startsWith 'segment'", QueryConfig {
+        ("startsWith 'sched'", QueryConfig {
             query_type: "startsWith".into(),
             field: Some("content".into()),
-            value: Some("segment".into()),
+            value: Some("sched".into()),
             ..Default::default()
         }),
-        ("contains 'rag3db'", QueryConfig {
+        ("contains 'printk'", QueryConfig {
             query_type: "contains".into(),
             field: Some("content".into()),
-            value: Some("rag3db".into()),
+            value: Some("printk".into()),
             ..Default::default()
         }),
-        ("startsWith 'rag3db'", QueryConfig {
+        ("startsWith 'printk'", QueryConfig {
             query_type: "startsWith".into(),
             field: Some("content".into()),
-            value: Some("rag3db".into()),
+            value: Some("printk".into()),
             ..Default::default()
         }),
-        ("contains 'kuzu'", QueryConfig {
-            query_type: "contains".into(),
-            field: Some("content".into()),
-            value: Some("kuzu".into()),
-            ..Default::default()
-        }),
-        ("startsWith 'kuzu'", QueryConfig {
-            query_type: "startsWith".into(),
-            field: Some("content".into()),
-            value: Some("kuzu".into()),
-            ..Default::default()
-        }),
-        // ── Other queries ──
-        ("contains 'cmake' (path)", QueryConfig {
+        // ── Path search ──
+        ("contains 'drivers' (path)", QueryConfig {
             query_type: "contains".into(),
             field: Some("path".into()),
-            value: Some("cmake".into()),
+            value: Some("drivers".into()),
             ..Default::default()
         }),
     ];
@@ -386,6 +395,94 @@ fn bench_sharding_comparison() {
         }
     }
 
+    // ── Diagnostic: multi-token vs single-token hit count ─────────────
+    if let Some(handle) = sharded_rr.as_ref().or(sharded_ta.as_ref()) {
+        eprintln!("\n=== Query diagnostic ===");
+        let diag_queries = vec![
+            ("contains 'mutex' (single)", "contains", "mutex"),
+            ("contains 'mutex_lock' (multi)", "contains", "mutex_lock"),
+            ("contains 'lock' (single)", "contains", "lock"),
+            ("contains_split 'mutex lock'", "contains_split", "mutex lock"),
+        ];
+        for (label, qtype, value) in &diag_queries {
+            let config = QueryConfig {
+                query_type: qtype.to_string(),
+                field: Some("content".into()),
+                value: Some(value.to_string()),
+                ..Default::default()
+            };
+            let results = handle.search(&config, 1000, None).unwrap();
+            eprintln!("  {}: {} hits", label, results.len());
+        }
+
+        // Post-mortem: inspect term in all shards
+        let verify = std::env::var("LUCIVY_VERIFY").map(|v| v == "1").unwrap_or(false);
+        eprintln!("\n=== Post-mortem: term inspection {} ===",
+            if verify { "(with ground truth)" } else { "" });
+        for term in &["mutex", "lock", "function", "printk"] {
+            let reports = if verify {
+                lucivy_core::diagnostics::inspect_term_sharded_verified(handle, "content", term)
+            } else {
+                lucivy_core::diagnostics::inspect_term_sharded(handle, "content", term)
+            };
+            let total: u32 = reports.iter().map(|(_, r)| r.total_doc_freq).sum();
+            let gt: Option<u32> = if verify {
+                Some(reports.iter().map(|(_, r)| r.ground_truth_count.unwrap_or(0)).sum())
+            } else { None };
+            let gt_str = gt.map(|g| {
+                let status = if g == total { "MATCH" } else { "MISMATCH" };
+                format!(" | ground_truth={} ({})", g, status)
+            }).unwrap_or_default();
+            eprintln!("\n  Term {:?} — total doc_freq: {}{}", term, total, gt_str);
+            for (shard_id, report) in &reports {
+                let seg_found: usize = report.segments.iter().filter(|s| s.term_found).count();
+                let seg_total = report.segments.len();
+                let shard_df = report.total_doc_freq;
+                eprintln!("    shard_{}: doc_freq={} ({}/{} segments have term)",
+                    shard_id, shard_df, seg_found, seg_total);
+                // Show segments where term is NOT found (suspicious)
+                for seg in &report.segments {
+                    if !seg.term_found && seg.num_docs > 100 {
+                        eprintln!("      MISSING in {} ({} docs, sfx={})",
+                            &seg.segment_id[..8], seg.num_docs,
+                            if seg.has_sfx { "ok" } else { "NONE" });
+                    }
+                }
+            }
+        }
+
+        // Dump term dict vs FST keys for shard 0 (to debug format mismatches)
+        if let Some(shard) = handle.shard(0) {
+            let dump = lucivy_core::diagnostics::dump_segment_keys(shard, "content", 5);
+            eprintln!("\n=== Key dump shard_0 ==={}", dump);
+        }
+
+        // Deep ordinal comparison for shard 0
+        if let Some(shard) = handle.shard(0) {
+            for term in &["mutex", "lock"] {
+                let cmp = lucivy_core::diagnostics::compare_postings_vs_sfxpost(shard, "content", term);
+                eprintln!("{}", cmp);
+            }
+        }
+
+        // SFX path diagnostic: trace prefix_walk → parents → sfxpost → doc_ids
+        eprintln!("\n=== SFX path diagnostic ===");
+        for term in &["mutex", "lock"] {
+            let sfx_reports = lucivy_core::diagnostics::inspect_sfx_sharded(handle, "content", term);
+            let total_sfx: u32 = sfx_reports.iter().map(|(_, r)| r.total_sfx_docs).sum();
+            eprintln!("\n  SFX search {:?}: {} total docs via sfx path", term, total_sfx);
+            for (shard_id, report) in &sfx_reports {
+                for seg in &report.segments {
+                    if seg.sfx_doc_count > 0 || !seg.has_sfx {
+                        eprintln!("    shard_{} seg {} ({} docs): walk={} parents={} → {} docs",
+                            shard_id, &seg.segment_id[..8.min(seg.segment_id.len())],
+                            seg.num_docs, seg.sfx_walk_hits, seg.sfx_parent_count, seg.sfx_doc_count);
+                    }
+                }
+            }
+        }
+    }
+
     // ── Summary ─────────────────────────────────────────────────────────
 
     eprintln!("\n=== Summary ===");
@@ -402,5 +499,6 @@ fn bench_sharding_comparison() {
     eprintln!("Balance CV:  TA {:.3}  |  RR {:.3}  (lower = more balanced)", ta_stddev / ta_mean, rr_stddev / rr_mean);
 
     // Cleanup
-    let _ = std::fs::remove_dir_all(BENCH_BASE);
+    // Keep the index for post-mortem inspection
+    eprintln!("\n=== Index preserved at {} ===", BENCH_BASE);
 }

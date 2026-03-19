@@ -249,12 +249,16 @@ impl Message for ShardInsertMsg {
 }
 
 /// Commit pending writes on this shard.
-struct ShardCommitMsg;
+struct ShardCommitMsg {
+    fast: bool,
+}
 
 impl Message for ShardCommitMsg {
     fn type_tag() -> u64 { type_tag_hash(b"ShardCommitMsg") }
-    fn encode(&self) -> Vec<u8> { vec![] }
-    fn decode(_bytes: &[u8]) -> Result<Self, String> { Ok(Self) }
+    fn encode(&self) -> Vec<u8> { vec![if self.fast { 1 } else { 0 }] }
+    fn decode(bytes: &[u8]) -> Result<Self, String> {
+        Ok(Self { fast: bytes.first().copied().unwrap_or(0) == 1 })
+    }
 }
 
 /// Delete a document by term on this shard.
@@ -674,14 +678,18 @@ fn create_shard_actor(shard_id: usize, handle: Arc<LucivyHandle>) -> GenericActo
 
     // Commit handler
     actor.register(TypedHandler::<ShardCommitMsg, _>::new(
-        |state, _msg, reply, _local| {
+        |state, msg, reply, _local| {
             let handle = state.get::<Arc<LucivyHandle>>().unwrap();
             let shard_id = *state.get::<usize>().unwrap();
 
             let result = (|| -> Result<(), String> {
                 let mut guard = handle.writer.lock().map_err(|_| "lock poisoned")?;
                 if let Some(ref mut writer) = *guard {
-                    writer.commit().map_err(|e| format!("commit shard_{shard_id}: {e}"))?;
+                    if msg.fast {
+                        writer.commit_fast().map_err(|e| format!("commit_fast shard_{shard_id}: {e}"))?;
+                    } else {
+                        writer.commit().map_err(|e| format!("commit shard_{shard_id}: {e}"))?;
+                    }
                 }
                 handle.mark_committed();
                 handle.reader.reload().map_err(|e| format!("reload shard_{shard_id}: {e}"))?;
@@ -1107,13 +1115,13 @@ impl ShardedHandle {
             }
         }
         for rx in reader_rxs {
-            let _ = rx.wait_cooperative(|| scheduler.run_one_step());
+            let _ = rx.wait_cooperative_named("drain_pipeline", || scheduler.run_one_step());
         }
 
         // Then drain the router (all reader outputs have been forwarded).
         let (env, rx) = PipelineDrainMsg.into_request();
         if self.router_actor.send(env).is_ok() {
-            let _ = rx.wait_cooperative(|| scheduler.run_one_step());
+            let _ = rx.wait_cooperative_named("drain_router", || scheduler.run_one_step());
         }
     }
 
@@ -1139,7 +1147,7 @@ impl ShardedHandle {
             let mut flush_rxs = Vec::new();
             for (i, (shard, actor_ref)) in self.shards.iter().zip(&self.shard_actors).enumerate() {
                 if shard.has_uncommitted() {
-                    let (env, rx) = ShardCommitMsg.into_request();
+                    let (env, rx) = ShardCommitMsg { fast: false }.into_request();
                     actor_ref
                         .send(env)
                         .map_err(|_| format!("shard_{i} actor closed"))?;
@@ -1147,7 +1155,7 @@ impl ShardedHandle {
                 }
             }
             for (i, rx) in flush_rxs {
-                if let Err(err_bytes) = rx.wait_cooperative(|| scheduler.run_one_step()) {
+                if let Err(err_bytes) = rx.wait_cooperative_named("flush_before_search", || scheduler.run_one_step()) {
                     let _ = ld_lucivy::LucivyError::decode(&err_bytes);
                     // Flush errors before search are non-fatal — log and continue.
                 }
@@ -1196,7 +1204,7 @@ impl ShardedHandle {
         let mut heap = BinaryHeap::with_capacity(top_k + 1);
 
         for (shard_id, rx) in receivers.into_iter().enumerate() {
-            let reply_bytes = match rx.wait_cooperative(|| scheduler.run_one_step()) {
+            let reply_bytes = match rx.wait_cooperative_named("search_shard", || scheduler.run_one_step()) {
                 Ok(b) => b,
                 Err(err_bytes) => {
                     let err = ld_lucivy::LucivyError::decode(&err_bytes)
@@ -1246,7 +1254,7 @@ impl ShardedHandle {
         let scheduler = global_scheduler();
         let mut receivers = Vec::with_capacity(self.shard_actors.len());
         for actor_ref in &self.shard_actors {
-            let (env, rx) = ShardCommitMsg.into_request();
+            let (env, rx) = ShardCommitMsg { fast: false }.into_request();
             actor_ref
                 .send(env)
                 .map_err(|_| "shard actor channel closed")?;
@@ -1255,7 +1263,7 @@ impl ShardedHandle {
 
         // Wait for all commits to complete.
         for (i, rx) in receivers.into_iter().enumerate() {
-            if let Err(err_bytes) = rx.wait_cooperative(|| scheduler.run_one_step()) {
+            if let Err(err_bytes) = rx.wait_cooperative_named("commit_shard", || scheduler.run_one_step()) {
                 let err = ld_lucivy::LucivyError::decode(&err_bytes)
                     .unwrap_or_else(|_| ld_lucivy::LucivyError::SystemError(format!("commit shard_{i} failed")));
                 return Err(format!("{err}"));
@@ -1307,6 +1315,32 @@ impl ShardedHandle {
         Ok(())
     }
 
+    /// Fast commit: persist data but skip suffix FST rebuild.
+    /// Use during bulk indexation. Call commit() at the end to rebuild FSTs.
+    pub fn commit_fast(&self) -> Result<(), String> {
+        self.drain_pipeline();
+        let scheduler = global_scheduler();
+        let mut receivers = Vec::with_capacity(self.shard_actors.len());
+        for actor_ref in &self.shard_actors {
+            let (env, rx) = ShardCommitMsg { fast: true }.into_request();
+            actor_ref
+                .send(env)
+                .map_err(|_| "shard actor channel closed")?;
+            receivers.push(rx);
+        }
+        for (i, rx) in receivers.into_iter().enumerate() {
+            if let Err(err_bytes) = rx.wait_cooperative_named("commit_fast_shard", || scheduler.run_one_step()) {
+                let err = ld_lucivy::LucivyError::decode(&err_bytes)
+                    .unwrap_or_else(|_| ld_lucivy::LucivyError::SystemError(format!("commit_fast shard_{i} failed")));
+                return Err(format!("{err}"));
+            }
+        }
+        for shard in &self.shards {
+            let _ = shard.reader.reload();
+        }
+        Ok(())
+    }
+
     /// Close all shards (drain pipeline, commit pending writes, release locks).
     pub fn close(&self) -> Result<(), String> {
         // Drain the ingestion pipeline first.
@@ -1316,14 +1350,14 @@ impl ShardedHandle {
         let scheduler = global_scheduler();
         let mut receivers = Vec::with_capacity(self.shard_actors.len());
         for (i, actor_ref) in self.shard_actors.iter().enumerate() {
-            let (env, rx) = ShardCommitMsg.into_request();
+            let (env, rx) = ShardCommitMsg { fast: false }.into_request();
             actor_ref
                 .send(env)
                 .map_err(|_| format!("shard_{i} actor closed on close"))?;
             receivers.push((i, rx));
         }
         for (i, rx) in receivers {
-            if let Err(err_bytes) = rx.wait_cooperative(|| scheduler.run_one_step()) {
+            if let Err(err_bytes) = rx.wait_cooperative_named("close_shard", || scheduler.run_one_step()) {
                 let err = ld_lucivy::LucivyError::decode(&err_bytes)
                     .unwrap_or_else(|_| ld_lucivy::LucivyError::SystemError(format!("close shard_{i} failed")));
                 return Err(format!("{err}"));

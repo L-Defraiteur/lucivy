@@ -466,10 +466,11 @@ impl<D: Document> IndexWriter<D> {
 
         // Flush all workers so they finish any in-progress segments.
         // We ignore the results — those segments will be discarded anyway.
+        let scheduler = crate::actor::scheduler::global_scheduler();
         for worker in &self.worker_refs {
             let (env, rx) = IndexerFlushMsg.into_request();
             let _ = worker.send(env);
-            let _ = rx.wait_blocking();
+            let _ = rx.wait_cooperative_named("rollback_flush", || scheduler.run_one_step());
         }
 
         // Now all workers are idle. Kill the segment updater.
@@ -520,10 +521,11 @@ impl<D: Document> IndexWriter<D> {
         }
 
         // Wait for all workers to finish flushing their current segments.
-        // wait_blocking est sûr ici : on est sur le test/caller thread,
-        // pas sur un thread du scheduler. Les scheduler threads traitent les Flush.
+        // Use wait_cooperative: when called from a shard actor handler
+        // (scheduler thread), wait_blocking would deadlock.
+        let scheduler = crate::actor::scheduler::global_scheduler();
         for rx in receivers {
-            match rx.wait_blocking() {
+            match rx.wait_cooperative_named("flush_indexer", || scheduler.run_one_step()) {
                 Ok(_) => {}
                 Err(err_bytes) => {
                     let err = crate::LucivyError::decode(&err_bytes)
@@ -554,6 +556,15 @@ impl<D: Document> IndexWriter<D> {
     /// that made it in the commit.
     pub fn commit(&mut self) -> crate::Result<Opstamp> {
         self.prepare_commit()?.commit()
+    }
+
+    /// Fast commit: persist data but skip suffix FST rebuild for merged segments.
+    ///
+    /// Use this during bulk indexation for speed. Merged segments will have empty
+    /// FSTs until the next regular `commit()` which rebuilds them.
+    /// Queries on segments with empty FSTs will rebuild them on first access.
+    pub fn commit_fast(&mut self) -> crate::Result<Opstamp> {
+        self.prepare_commit()?.commit_fast()
     }
 
     /// Wait for pending merges to complete without consuming the writer.

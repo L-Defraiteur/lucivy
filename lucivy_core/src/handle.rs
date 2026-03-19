@@ -46,7 +46,7 @@ const CONFIG_FILE: &str = "_config.json";
 /// Max docs per segment before the merge policy stops merging it.
 /// Bounds the memory used by SuffixFstBuilder during merge_sfx rebuild.
 /// With 50K docs: ~1.5GB peak for FST rebuild (vs 10GB+ at 200K+ docs).
-const MAX_DOCS_BEFORE_MERGE: usize = 50_000;
+const MAX_DOCS_BEFORE_MERGE: usize = 10_000;
 
 /// Create an IndexWriter with a thread count appropriate for the target.
 /// On WASM, limit to 1 thread to avoid exhausting the emscripten pthread pool.

@@ -219,4 +219,13 @@ impl SegmentManager {
         let registers_lock = self.read();
         registers_lock.committed.segment_metas()
     }
+
+    /// All segment metas (committed + uncommitted).
+    pub fn all_segment_metas(&self) -> Vec<SegmentMeta> {
+        self.remove_empty_segments();
+        let registers_lock = self.read();
+        let mut all = registers_lock.committed.segment_metas();
+        all.extend(registers_lock.uncommitted.segment_metas());
+        all
+    }
 }

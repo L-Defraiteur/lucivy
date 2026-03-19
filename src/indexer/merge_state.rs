@@ -57,6 +57,12 @@ pub(crate) struct MergeState {
     indexed_fields: Vec<Field>,
     /// Compteur de steps complétés (pour observabilité).
     steps_completed: u32,
+    /// Timing: when this merge started.
+    merge_start: std::time::Instant,
+    /// Timing: phase start.
+    phase_start: std::time::Instant,
+    /// Total docs in this merge.
+    total_docs: u32,
 }
 
 impl MergeState {
@@ -112,6 +118,10 @@ impl MergeState {
             })
             .collect();
 
+        let total_docs: u32 = merger.readers.iter().map(|r| r.num_docs()).sum();
+        let num_segments = merger.readers.len();
+        lucivy_trace!("[merge] new: {} segments, {} docs total", num_segments, total_docs);
+
         Ok(Some(MergeState {
             index: index.clone(),
             merger,
@@ -124,6 +134,9 @@ impl MergeState {
             phase: MergePhase::Init,
             indexed_fields,
             steps_completed: 0,
+            merge_start: std::time::Instant::now(),
+            phase_start: std::time::Instant::now(),
+            total_docs,
         }))
     }
 
@@ -147,14 +160,35 @@ impl MergeState {
     }
 
     fn do_step(&mut self) -> crate::Result<StepResult> {
-        match self.phase {
+        let phase_name = match &self.phase {
+            MergePhase::Init => "init",
+            MergePhase::Postings { field_idx } => "postings",
+            MergePhase::Store => "store",
+            MergePhase::FastFields => "fast_fields",
+            MergePhase::Sfx => "sfx",
+            MergePhase::Close => "close",
+        };
+        self.phase_start = std::time::Instant::now();
+
+        let result = match self.phase {
             MergePhase::Init => self.step_init(),
             MergePhase::Postings { .. } => self.step_postings(),
             MergePhase::Store => self.step_store(),
             MergePhase::FastFields => self.step_fast_fields(),
             MergePhase::Sfx => self.step_sfx(),
-            MergePhase::Close => self.step_close(),
+            MergePhase::Close => {
+                let r = self.step_close();
+                lucivy_trace!("[merge] done: {} docs in {:.1}ms",
+                    self.total_docs, self.merge_start.elapsed().as_secs_f64() * 1000.0);
+                r
+            }
+        };
+
+        let elapsed = self.phase_start.elapsed().as_secs_f64() * 1000.0;
+        if elapsed > 10.0 {
+            lucivy_trace!("[merge]   {} took {:.1}ms ({} docs)", phase_name, elapsed, self.total_docs);
         }
+        result
     }
 
     /// Phase Init : calcul du doc ID mapping + écriture des fieldnorms.
@@ -233,7 +267,7 @@ impl MergeState {
         Ok(StepResult::Continue)
     }
 
-    /// Phase Sfx : merge des fichiers .sfx (suffix FST + GapMap).
+    /// Phase Sfx : merge suffix FST data (always full FST).
     fn step_sfx(&mut self) -> crate::Result<StepResult> {
         let serializer = self.serializer.as_mut().unwrap();
         let doc_mapping = self.sfx_doc_mapping.take().unwrap_or_default();

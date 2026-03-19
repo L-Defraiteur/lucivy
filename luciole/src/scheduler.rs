@@ -128,6 +128,39 @@ struct ActorSlot {
     /// Partagé avec les ActorRef — le scheduler remet is_idle=true
     /// quand l'acteur passe idle, l'ActorRef le swap à false pour wake.
     wake_handle: Arc<WakeHandle>,
+    /// Activity tracking: what this actor is currently doing.
+    /// Set by the scheduler dispatch loop, read by dump_state().
+    activity: Arc<ActorActivity>,
+}
+
+/// Tracks what an actor is currently doing (lock-free).
+pub struct ActorActivity {
+    /// Pointer to &'static str + length packed in u64: high 32 bits = len, low 32 = ptr offset.
+    /// Simpler: just use a Mutex<Option<...>> — contention is negligible since reads are rare (only dumps).
+    state: Mutex<Option<(&'static str, Instant)>>,
+}
+
+impl ActorActivity {
+    fn new() -> Self {
+        Self { state: Mutex::new(None) }
+    }
+
+    /// Mark the actor as busy with the given label.
+    pub fn set(&self, label: &'static str) {
+        *self.state.lock().unwrap() = Some((label, Instant::now()));
+    }
+
+    /// Mark the actor as idle.
+    pub fn clear(&self) {
+        *self.state.lock().unwrap() = None;
+    }
+
+    /// Read the current activity. Returns (label, elapsed_secs) or None if idle.
+    pub fn get(&self) -> Option<(&'static str, f64)> {
+        self.state.lock().unwrap().map(|(label, since)| {
+            (label, since.elapsed().as_secs_f64())
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -311,6 +344,7 @@ impl Scheduler {
                     actor: Some(Box::new(wrapper)),
                     name,
                     wake_handle,
+                    activity: Arc::new(ActorActivity::new()),
                 },
             );
         }
@@ -412,6 +446,26 @@ impl Scheduler {
     pub fn subscribe_events(&self) -> EventReceiver<SchedulerEvent> {
         self.shared.events.subscribe()
     }
+
+    /// Dump the state of all actors for diagnostics.
+    /// Returns a human-readable string showing each actor's name, activity, and queue depth.
+    pub fn dump_state(&self) -> String {
+        let actors = self.shared.actors.lock().unwrap();
+        let mut lines = Vec::new();
+        for (id, slot) in actors.iter() {
+            let queue_len = slot.actor.as_ref().map(|a| a.mailbox_len()).unwrap_or(0);
+            let taken = slot.actor.is_none();
+            let activity_str = match slot.activity.get() {
+                Some((label, elapsed)) => format!("BUSY {:?} ({:.1}s)", label, elapsed),
+                None if taken => "TAKEN (being processed)".to_string(),
+                None => "idle".to_string(),
+            };
+            lines.push(format!("  {:?} {:?}: {} | queue: {}",
+                id, slot.name, activity_str, queue_len));
+        }
+        lines.sort(); // deterministic order
+        lines.join("\n")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -461,19 +515,21 @@ fn run_loop(shared: &SharedState, thread_index: usize) {
         };
 
         // Prendre l'acteur OUT du HashMap.
-        let (mut actor_box, name) = {
+        let (mut actor_box, name, activity) = {
             let mut actors = shared.actors.lock().unwrap();
             let slot = match actors.get_mut(&actor_id) {
                 Some(s) => s,
                 None => continue,
             };
             match slot.actor.take() {
-                Some(actor) => (actor, slot.name),
+                Some(actor) => (actor, slot.name, Arc::clone(&slot.activity)),
                 None => continue, // Déjà pris (doublon dans la ready queue)
             }
         };
 
+        activity.set("processing");
         let result = handle_batch(shared, actor_id, name, &mut actor_box);
+        activity.clear();
 
         match result {
             BatchResult::Stopped => {
@@ -668,19 +724,20 @@ fn run_one_step_impl(shared: &SharedState) -> bool {
 
     let actor_id = entry.actor_id;
 
-    let (mut actor_box, name) = {
+    let (mut actor_box, name, activity) = {
         let mut actors = shared.actors.lock().unwrap();
         let slot = match actors.get_mut(&actor_id) {
             Some(s) => s,
             None => return false,
         };
         match slot.actor.take() {
-            Some(actor) => (actor, slot.name),
+            Some(actor) => (actor, slot.name, Arc::clone(&slot.activity)),
             None => return false,
         }
     };
 
     // Traiter UN SEUL message (rendre la main vite en mode coopératif).
+    activity.set("processing");
     let start = Instant::now();
     let (stopped, idle) = match actor_box.try_handle_one() {
         Some(status) => {
@@ -708,6 +765,8 @@ fn run_one_step_impl(shared: &SharedState) -> bool {
             }
         }
     };
+
+    activity.clear();
 
     if stopped {
         let mut actors = shared.actors.lock().unwrap();

@@ -310,16 +310,29 @@ impl SegmentUpdater {
         opstamp: Opstamp,
         payload: Option<String>,
     ) -> crate::Result<Opstamp> {
+        self.schedule_commit_with_rebuild(opstamp, payload, true)
+    }
+
+    pub(crate) fn schedule_commit_with_rebuild(
+        &self,
+        opstamp: Opstamp,
+        payload: Option<String>,
+        rebuild_sfx: bool,
+    ) -> crate::Result<Opstamp> {
         if !self.is_alive() {
             return Err(LucivyError::SystemError("Segment updater killed".to_string()));
         }
-        let (env, rx) = SuCommitMsg { opstamp, payload }.into_request();
+        let (env, rx) = SuCommitMsg { opstamp, payload, rebuild_sfx }.into_request();
         self.actor_ref
             .send(env)
             .map_err(|_| {
                 LucivyError::SystemError("Segment updater actor died".to_string())
             })?;
-        match rx.wait_blocking() {
+        // Use wait_cooperative to avoid deadlock: the shard actor handler
+        // calls this from a scheduler thread. wait_blocking would block that
+        // thread, preventing the segment_updater from being dispatched.
+        let scheduler = crate::actor::scheduler::global_scheduler();
+        match rx.wait_cooperative_named("schedule_commit", || scheduler.run_one_step()) {
             Ok(bytes) => {
                 let reply = SuOpsReply::decode(&bytes)
                     .map_err(|e| LucivyError::SystemError(e))?;
@@ -342,7 +355,7 @@ impl SegmentUpdater {
             .map_err(|_| {
                 LucivyError::SystemError("Segment updater actor died".to_string())
             })?;
-        match rx.wait_blocking() {
+        match rx.wait_cooperative_named("segment_updater_op", || crate::actor::scheduler::global_scheduler().run_one_step()) {
             Ok(_) => garbage_collect_files(&self.shared),
             Err(err_bytes) => Err(
                 LucivyError::decode(&err_bytes)
@@ -374,7 +387,7 @@ impl SegmentUpdater {
             .map_err(|_| {
                 LucivyError::SystemError("Segment updater actor died".to_string())
             })?;
-        match rx.wait_blocking() {
+        match rx.wait_cooperative_named("segment_updater_op", || crate::actor::scheduler::global_scheduler().run_one_step()) {
             Ok(_) => Ok(None), // StartMerge reply doesn't carry SegmentMeta in envelope mode
             Err(err_bytes) => Err(
                 LucivyError::decode(&err_bytes)
@@ -393,7 +406,7 @@ impl SegmentUpdater {
             .map_err(|_| {
                 LucivyError::SystemError("Segment updater actor died".to_string())
             })?;
-        let _ = rx.wait_blocking();
+        let _ = rx.wait_cooperative_named("segment_updater_op", || crate::actor::scheduler::global_scheduler().run_one_step());
         Ok(())
     }
 }

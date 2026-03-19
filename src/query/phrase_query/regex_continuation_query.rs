@@ -270,13 +270,11 @@ impl Weight for RegexContinuationWeight {
     fn scorer(&self, reader: &SegmentReader, boost: Score) -> crate::Result<Box<dyn Scorer>> {
         let max_doc = reader.max_doc();
 
-        // Open .sfx
-        let sfx_data = reader.sfx_file(self.field).ok_or_else(|| {
-            LucivyError::InvalidArgument(format!(
-                "no .sfx file for field {:?}. RegexContinuationQuery requires suffix index.",
-                self.field
-            ))
-        })?;
+        // Open .sfx — if not present, return empty scorer.
+        let sfx_data = match reader.sfx_file(self.field) {
+            Some(data) => data,
+            None => return Ok(Box::new(crate::query::EmptyScorer)),
+        };
         let sfx_bytes = sfx_data
             .read_bytes()
             .map_err(|e| LucivyError::SystemError(format!("read .sfx: {e}")))?;
