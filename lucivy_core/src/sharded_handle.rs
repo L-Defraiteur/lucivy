@@ -999,10 +999,10 @@ pub struct ShardedSearchResult {
 }
 
 /// Wrapper for BinaryHeap ordering (min-heap by score for top-K).
-struct ScoredEntry {
-    score: f32,
-    shard_id: usize,
-    doc_address: DocAddress,
+pub(crate) struct ScoredEntry {
+    pub score: f32,
+    pub shard_id: usize,
+    pub doc_address: DocAddress,
 }
 
 impl PartialEq for ScoredEntry {
@@ -1357,63 +1357,23 @@ impl ShardedHandle {
         top_k: usize,
         highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
     ) -> Result<Vec<ShardedSearchResult>, String> {
-        // Drain pipeline: ensure all in-flight documents reach shard actors.
-        self.drain_pipeline();
-
-        // Flush uncommitted shards before searching.
-        for i in 0..self.shard_pool.len() {
-            if self.shards[i].has_uncommitted() {
-                let _ = self.shard_pool.worker(i).request(
-                    |r| ShardMsg::Commit { fast: false, reply: r },
-                    "flush_before_search",
-                );
-            }
-        }
-
-        // Build Weight once with global BM25 stats.
-        let searchers: Vec<_> = self.shards.iter().map(|s| s.reader.searcher()).collect();
-        let global_stats = AggregatedBm25StatsOwned::new(searchers);
-        let query = crate::query::build_query(
-            query_config, &self.schema, &self.shards[0].index, highlight_sink,
+        let mut dag = crate::search_dag::build_search_dag(
+            &self.shards,
+            &self.shard_pool,
+            &self.reader_pool,
+            &self.router_ref,
+            &self.schema,
+            query_config,
+            top_k,
+            highlight_sink,
         )?;
-        let searcher_0 = self.shards[0].reader.searcher();
-        let enable_scoring = ld_lucivy::query::EnableScoring::enabled_from_statistics_provider(
-            &global_stats, &searcher_0,
-        );
-        let weight: Arc<dyn Weight> = query
-            .weight(enable_scoring)
-            .map_err(|e| format!("weight: {e}"))?
-            .into();
 
-        // Scatter: dispatch Weight to all shards via typed messages.
-        let shard_results: Vec<Result<Vec<(f32, DocAddress)>, String>> = self.shard_pool.scatter(
-            |r| ShardMsg::Search {
-                weight: Arc::clone(&weight),
-                top_k,
-                reply: r,
-            },
-            "search_shard",
-        );
+        let mut result = luciole::execute_dag(&mut dag, None)
+            .map_err(|e| format!("search DAG: {e}"))?;
 
-        // Gather: heap-merge top-K from all shards.
-        let mut heap = BinaryHeap::with_capacity(top_k + 1);
-        for (shard_id, result) in shard_results.into_iter().enumerate() {
-            let hits = result.map_err(|e| format!("shard_{shard_id}: {e}"))?;
-            for (score, doc_addr) in hits {
-                heap.push(ScoredEntry { score, shard_id, doc_address: doc_addr });
-                if heap.len() > top_k { heap.pop(); }
-            }
-        }
-
-        let mut results: Vec<ShardedSearchResult> = heap
-            .into_sorted_vec()
-            .into_iter()
-            .map(|e| ShardedSearchResult {
-                score: e.score, shard_id: e.shard_id, doc_address: e.doc_address,
-            })
-            .collect();
-        results.reverse();
-        Ok(results)
+        // Extract results from the merge node's leaf output
+        result.take_output::<Vec<ShardedSearchResult>>("merge", "results")
+            .ok_or_else(|| "search DAG: no results from merge node".to_string())
     }
 
     /// Commit all shards in parallel via shard actors, then persist router state.

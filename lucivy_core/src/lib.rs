@@ -6,5 +6,6 @@ pub mod directory;
 pub mod handle;
 pub mod query;
 pub mod shard_router;
+pub(crate) mod search_dag;
 pub mod sharded_handle;
 pub mod snapshot;

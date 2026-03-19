@@ -40,11 +40,14 @@ pub fn subscribe_dag_events() -> EventReceiver<DagEvent> {
 // DagResult — output of a DAG execution
 // ---------------------------------------------------------------------------
 
-/// Result of executing a DAG, containing per-node metrics and timing.
-#[derive(Debug)]
+/// Result of executing a DAG, containing per-node metrics, timing,
+/// and remaining outputs (from leaf nodes not consumed by downstream edges).
 pub struct DagResult {
     pub duration_ms: u64,
     pub node_results: Vec<(String, NodeResult)>,
+    /// Remaining port data: outputs from leaf nodes not consumed by any edge.
+    /// Key: (node_name, port_name). Use `output()` to extract typed values.
+    pub outputs: HashMap<(String, String), PortValue>,
 }
 
 /// Per-node execution result.
@@ -66,6 +69,22 @@ impl DagResult {
     /// Total duration in milliseconds.
     pub fn total_ms(&self) -> u64 {
         self.duration_ms
+    }
+
+    /// Extract a typed output value from a leaf node.
+    ///
+    /// ```ignore
+    /// let results: Vec<SearchResult> = dag_result
+    ///     .take_output::<Vec<SearchResult>>("merge", "results")
+    ///     .expect("merge node should produce results");
+    /// ```
+    pub fn take_output<T: Send + Sync + 'static>(
+        &mut self,
+        node: &str,
+        port: &str,
+    ) -> Option<T> {
+        let key = (node.to_string(), port.to_string());
+        self.outputs.remove(&key)?.take::<T>()
     }
 
     /// Sum a metric across all nodes.
@@ -282,6 +301,7 @@ pub fn execute_dag(
     Ok(DagResult {
         duration_ms: total_ms,
         node_results: results,
+        outputs: port_data,
     })
 }
 
@@ -382,6 +402,7 @@ pub fn execute_dag_with_checkpoint(
     Ok(DagResult {
         duration_ms: total_ms,
         node_results: results,
+        outputs: port_data,
     })
 }
 
