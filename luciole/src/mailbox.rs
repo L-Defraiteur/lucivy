@@ -79,6 +79,25 @@ impl<M> ActorRef<M> {
         Ok(())
     }
 
+    /// Send a message containing a `Reply<R>`, wait cooperatively for the response.
+    ///
+    /// `make_msg` receives a `Reply<R>` and must return the message to send.
+    /// The caller blocks (cooperatively) until the actor replies.
+    ///
+    /// ```ignore
+    /// let count = actor_ref.request(|r| CounterMsg::Get(r), "get_count")?;
+    /// ```
+    pub fn request<R, F>(&self, make_msg: F, label: &str) -> Result<R, String>
+    where
+        R: Send + 'static,
+        F: FnOnce(crate::reply::Reply<R>) -> M,
+    {
+        let (tx, rx) = crate::reply::reply::<R>();
+        self.send(make_msg(tx)).map_err(|_| "actor disconnected".to_string())?;
+        let scheduler = crate::scheduler::global_scheduler();
+        Ok(rx.wait_cooperative_named(label, || scheduler.run_one_step()))
+    }
+
     pub fn try_send(&self, msg: M) -> Result<(), channel::TrySendError<M>> {
         self.sender.try_send(msg)?;
         if let Some(wh) = &self.notifier {
