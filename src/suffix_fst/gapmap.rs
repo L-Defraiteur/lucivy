@@ -170,6 +170,19 @@ fn encode_gap(buf: &mut Vec<u8>, gap: &[u8]) {
     }
 }
 
+/// Error found during gapmap validation.
+#[derive(Debug)]
+pub struct GapMapError {
+    pub doc_id: u32,
+    pub message: String,
+}
+
+impl std::fmt::Display for GapMapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "gapmap doc_{}: {}", self.doc_id, self.message)
+    }
+}
+
 /// Reads gap data from a mmap'd or in-memory GapMap.
 pub struct GapMapReader<'a> {
     data: &'a [u8],
@@ -409,6 +422,112 @@ impl<'a> GapMapReader<'a> {
 
         let (gap, _) = decode_gap_at(dd, cursor);
         gap
+    }
+
+    /// Validate all documents in the gapmap. Returns errors for corrupt docs.
+    ///
+    /// Call after merge to detect corruption before search hits it.
+    pub fn validate(&self) -> Vec<GapMapError> {
+        let mut errors = Vec::new();
+        for doc_id in 0..self.num_docs {
+            if let Err(e) = self.validate_doc(doc_id) {
+                errors.push(e);
+            }
+        }
+        errors
+    }
+
+    /// Validate a single document's gap data.
+    pub fn validate_doc(&self, doc_id: u32) -> Result<(), GapMapError> {
+        let dd = self.doc_data(doc_id);
+        if dd.len() < 3 {
+            return Err(GapMapError {
+                doc_id,
+                message: format!("doc_data too short: {} bytes (min 3)", dd.len()),
+            });
+        }
+
+        let num_tokens = u16::from_le_bytes([dd[0], dd[1]]) as usize;
+        let num_values = dd[2] as usize;
+
+        if num_tokens == 0 {
+            return Ok(()); // empty doc is valid
+        }
+
+        if num_values == 0 {
+            return Err(GapMapError {
+                doc_id,
+                message: format!("num_values=0 but num_tokens={}", num_tokens),
+            });
+        }
+
+        let mut cursor = 3;
+        if num_values > 1 {
+            let table_size = num_values * 6;
+            if cursor + table_size > dd.len() {
+                return Err(GapMapError {
+                    doc_id,
+                    message: format!(
+                        "value_offsets table overflows: cursor={}, table_size={}, data_len={}",
+                        cursor, table_size, dd.len(),
+                    ),
+                });
+            }
+            cursor += table_size;
+        }
+
+        // Count gaps by reading until end of data
+        let mut gap_count = 0;
+        while cursor < dd.len() {
+            if cursor >= dd.len() {
+                return Err(GapMapError {
+                    doc_id,
+                    message: format!(
+                        "gap decode overflows: cursor={}, data_len={}, gaps_so_far={}",
+                        cursor, dd.len(), gap_count,
+                    ),
+                });
+            }
+            let len_byte = dd[cursor] as usize;
+            if len_byte == VALUE_BOUNDARY_MARKER as usize {
+                cursor += 1;
+            } else if len_byte == 255 {
+                if cursor + 3 > dd.len() {
+                    return Err(GapMapError {
+                        doc_id,
+                        message: format!(
+                            "extended gap header overflows at cursor={}, data_len={}",
+                            cursor, dd.len(),
+                        ),
+                    });
+                }
+                let ext_len = u16::from_le_bytes([dd[cursor + 1], dd[cursor + 2]]) as usize;
+                cursor += 3 + ext_len;
+            } else {
+                cursor += 1 + len_byte;
+            }
+            gap_count += 1;
+        }
+
+        // Expected: for N tokens and V values, total gaps = N + V - 1
+        // (one gap between each consecutive token, plus VALUE_BOUNDARY between values)
+        let expected_gaps = if num_values == 1 {
+            num_tokens + 1 // gaps around each token
+        } else {
+            num_tokens + num_values // tokens gaps + value boundaries
+        };
+
+        if gap_count < num_tokens {
+            return Err(GapMapError {
+                doc_id,
+                message: format!(
+                    "too few gaps: found {}, tokens={}, values={}, expected>={}",
+                    gap_count, num_tokens, num_values, num_tokens,
+                ),
+            });
+        }
+
+        Ok(())
     }
 
     /// Read all gaps for a document, including VALUE_BOUNDARY markers.

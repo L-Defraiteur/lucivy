@@ -836,12 +836,23 @@ impl IndexMerger {
             .map(|(field, _)| field)
             .collect();
 
+        // Log per-reader sfx status to diagnose segments without sfx
+        for (i, reader) in self.readers.iter().enumerate() {
+            let seg_id = reader.segment_id().uuid_string();
+            let has_any_sfx = self.schema.fields().any(|(f, _)| reader.sfx_file(f).is_some());
+            if !has_any_sfx {
+                eprintln!("[merge_sfx] reader[{}] seg={} ({} docs): NO SFX FILES",
+                    i, &seg_id[..8], reader.num_docs());
+            }
+        }
+
         eprintln!("[merge_sfx] sfx_fields: {:?} ({} readers, {} docs)",
             sfx_fields.iter().map(|f| f.field_id()).collect::<Vec<_>>(),
             self.readers.len(),
             doc_mapping.len());
         if sfx_fields.is_empty() {
-            eprintln!("[merge_sfx] NO sfx fields found — skipping!");
+            eprintln!("[merge_sfx] NO sfx fields found — ALL {} readers missing sfx, producing segment WITHOUT sfx!",
+                self.readers.len());
             return Ok(());
         }
 
@@ -989,11 +1000,11 @@ impl IndexMerger {
                     }
                 }
                 if !missing_sfxpost.is_empty() {
-                    // Also check if these segments have .sfx
                     for &(seg_ord, ndocs, reason) in &missing_sfxpost {
                         let has_sfx = self.readers[seg_ord].sfx_file(field).is_some();
-                        eprintln!("[merge_sfx] WARNING: seg_ord={} ({} docs) missing sfxpost ({}), has_sfx={}",
-                            seg_ord, ndocs, reason, has_sfx);
+                        let seg_id = self.readers[seg_ord].segment_id().uuid_string();
+                        eprintln!("[merge_sfx] WARNING: seg={} ({} docs) missing sfxpost ({}), has_sfx={}",
+                            &seg_id[..8], ndocs, reason, has_sfx);
                     }
                 }
 
@@ -1061,8 +1072,29 @@ impl IndexMerger {
                 }
             }
 
-            // 5. Assemble and write .sfx + .sfxpost
+            // 5. Validate gapmap before writing
             let gapmap_data = gapmap_writer.serialize();
+            {
+                use crate::suffix_fst::gapmap::GapMapReader;
+                let validation_reader = GapMapReader::open(&gapmap_data);
+                let errors = validation_reader.validate();
+                if !errors.is_empty() {
+                    eprintln!("[merge_sfx] GAPMAP VALIDATION FAILED for field {}: {} errors in {} docs",
+                        field.field_id(), errors.len(), doc_mapping.len());
+                    for (i, err) in errors.iter().enumerate().take(10) {
+                        eprintln!("[merge_sfx]   error {}: {}", i, err);
+                    }
+                    // Log source segment details for diagnosis
+                    for (seg_ord, reader) in self.readers.iter().enumerate() {
+                        let has_sfx = reader.sfx_file(field).is_some();
+                        let seg_id = reader.segment_id().uuid_string();
+                        eprintln!("[merge_sfx]   source seg[{}] {} ({} docs) has_sfx={}",
+                            seg_ord, &seg_id[..8], reader.num_docs(), has_sfx);
+                    }
+                }
+            }
+
+            // 6. Assemble and write .sfx + .sfxpost
             let sfx_file = SfxFileWriter::new(
                 fst_data,
                 parent_list_data,
