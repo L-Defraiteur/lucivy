@@ -143,7 +143,58 @@ impl<M: Send + 'static> Pool<M> {
             );
         }
     }
+
+    /// Send a shutdown message to all workers and wait for them to stop.
+    ///
+    /// Like `drain`, requires `M: From<ShutdownMsg>`. Each worker receives
+    /// the shutdown message after processing its pending work (FIFO).
+    pub fn shutdown(&self, label: &str)
+    where
+        M: From<ShutdownMsg>,
+    {
+        let scheduler = global_scheduler();
+        let mut receivers = Vec::with_capacity(self.workers.len());
+
+        for worker in &self.workers {
+            let (tx, rx) = reply::<()>();
+            let _ = worker.send(ShutdownMsg(tx).into());
+            receivers.push(rx);
+        }
+
+        for (i, rx) in receivers.into_iter().enumerate() {
+            rx.wait_cooperative_named(
+                &format!("{}_worker_{}", label, i),
+                || scheduler.run_one_step(),
+            );
+        }
+    }
+
+    /// Wrap existing ActorRefs into a Pool (useful for migration).
+    pub fn from_refs(refs: Vec<ActorRef<M>>) -> Self {
+        assert!(!refs.is_empty(), "pool needs at least 1 worker");
+        Pool {
+            workers: refs,
+            next: AtomicUsize::new(0),
+        }
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Drainable impl for Pool
+// ---------------------------------------------------------------------------
+
+impl<M: Send + 'static> crate::scope::Drainable for Pool<M>
+where
+    M: From<DrainMsg>,
+{
+    fn drain(&self, label: &str) {
+        Pool::drain(self, label);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DrainMsg / ShutdownMsg — protocol messages for pool lifecycle
+// ---------------------------------------------------------------------------
 
 /// Message sent by `Pool::drain()`. The actor should reply immediately.
 /// Include this variant in your actor's message enum:
@@ -166,6 +217,63 @@ impl DrainMsg {
     }
 }
 
+/// Message sent by `Pool::shutdown()`. The actor should finish current work,
+/// reply, then return `ActorStatus::Stop`.
+///
+/// ```ignore
+/// enum MyMsg {
+///     Shutdown(ShutdownMsg),
+/// }
+/// impl From<ShutdownMsg> for MyMsg {
+///     fn from(s: ShutdownMsg) -> Self { MyMsg::Shutdown(s) }
+/// }
+/// // In handler:
+/// MyMsg::Shutdown(s) => { s.ack(); ActorStatus::Stop }
+/// ```
+pub struct ShutdownMsg(pub Reply<()>);
+
+impl ShutdownMsg {
+    /// Acknowledge shutdown (reply to the waiter). Call before returning Stop.
+    pub fn ack(self) {
+        self.0.send(());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DrainableRef — Drainable wrapper for a single ActorRef
+// ---------------------------------------------------------------------------
+
+/// Wraps a single `ActorRef<M>` to make it `Drainable`.
+///
+/// Useful when a Scope contains both Pools and individual actors.
+///
+/// ```ignore
+/// let mut scope = Scope::new("commit");
+/// scope.add("workers", pool);  // Pool implements Drainable
+/// scope.add("updater", DrainableRef::new(updater_ref));  // single actor
+/// ```
+pub struct DrainableRef<M: Send + 'static> {
+    actor_ref: ActorRef<M>,
+}
+
+impl<M: Send + 'static> DrainableRef<M> {
+    pub fn new(actor_ref: ActorRef<M>) -> Self {
+        Self { actor_ref }
+    }
+}
+
+impl<M: Send + 'static> crate::scope::Drainable for DrainableRef<M>
+where
+    M: From<DrainMsg>,
+{
+    fn drain(&self, label: &str) {
+        let scheduler = global_scheduler();
+        let (tx, rx) = reply::<()>();
+        let _ = self.actor_ref.send(DrainMsg(tx).into());
+        rx.wait_cooperative_named(label, || scheduler.run_one_step());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -173,6 +281,7 @@ impl DrainMsg {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scope::Drainable;
     use crate::{ActorStatus, Priority};
     use std::sync::atomic::AtomicU32;
     use std::sync::Arc;
@@ -189,10 +298,15 @@ mod tests {
         GetCount(Reply<u32>),
         GetId(Reply<usize>),
         Drain(DrainMsg),
+        Shutdown(ShutdownMsg),
     }
 
     impl From<DrainMsg> for WorkerMsg {
         fn from(d: DrainMsg) -> Self { WorkerMsg::Drain(d) }
+    }
+
+    impl From<ShutdownMsg> for WorkerMsg {
+        fn from(s: ShutdownMsg) -> Self { WorkerMsg::Shutdown(s) }
     }
 
     impl Actor for Worker {
@@ -215,6 +329,10 @@ mod tests {
                 WorkerMsg::Drain(d) => {
                     d.ack();
                     ActorStatus::Continue
+                }
+                WorkerMsg::Shutdown(s) => {
+                    s.ack();
+                    ActorStatus::Stop
                 }
             }
         }
@@ -327,5 +445,87 @@ mod tests {
         // Request from worker 0 specifically
         let c = pool.request_to(0, |r| WorkerMsg::GetCount(r), "count_0").unwrap();
         assert_eq!(c, 5);
+    }
+
+    #[test]
+    fn test_pool_shutdown() {
+        let count = Arc::new(AtomicU32::new(0));
+        let pool = make_pool(3, count.clone());
+
+        for _ in 0..30 {
+            pool.send(WorkerMsg::Inc).unwrap();
+        }
+
+        pool.shutdown("shutdown_test");
+        assert_eq!(count.load(Ordering::Relaxed), 30);
+        // After shutdown, sends should fail (actors stopped)
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(pool.send(WorkerMsg::Inc).is_err());
+    }
+
+    #[test]
+    fn test_pool_from_refs() {
+        let count = Arc::new(AtomicU32::new(0));
+        let scheduler = global_scheduler();
+
+        let mut refs = Vec::new();
+        for i in 0..3 {
+            let (mb, mut ar) = mailbox::<WorkerMsg>(64);
+            scheduler.spawn(Worker { id: i, count: count.clone() }, mb, &mut ar, 64);
+            refs.push(ar);
+        }
+
+        let pool = Pool::from_refs(refs);
+        assert_eq!(pool.len(), 3);
+
+        for _ in 0..9 {
+            pool.send(WorkerMsg::Inc).unwrap();
+        }
+        pool.drain("from_refs");
+        assert_eq!(count.load(Ordering::Relaxed), 9);
+    }
+
+    #[test]
+    fn test_drainable_ref() {
+        let count = Arc::new(AtomicU32::new(0));
+        let scheduler = global_scheduler();
+
+        let (mb, mut ar) = mailbox::<WorkerMsg>(64);
+        scheduler.spawn(Worker { id: 0, count: count.clone() }, mb, &mut ar, 64);
+
+        for _ in 0..10 {
+            ar.send(WorkerMsg::Inc).unwrap();
+        }
+
+        let drainable = DrainableRef::new(ar);
+        drainable.drain("single_actor");
+        assert_eq!(count.load(Ordering::Relaxed), 10);
+    }
+
+    #[test]
+    fn test_drainable_ref_in_scope() {
+        use crate::scope::Scope;
+
+        let count = Arc::new(AtomicU32::new(0));
+        let scheduler = global_scheduler();
+
+        // A pool + a single actor in the same scope
+        let pool = make_pool(2, count.clone());
+        let (mb, mut ar) = mailbox::<WorkerMsg>(64);
+        scheduler.spawn(Worker { id: 99, count: count.clone() }, mb, &mut ar, 64);
+
+        for _ in 0..10 {
+            pool.send(WorkerMsg::Inc).unwrap();
+        }
+        for _ in 0..5 {
+            ar.send(WorkerMsg::Inc).unwrap();
+        }
+
+        let mut scope = Scope::new("mixed");
+        scope.add("pool", pool);
+        scope.add("single", DrainableRef::new(ar));
+
+        scope.drain();
+        assert_eq!(count.load(Ordering::Relaxed), 15);
     }
 }

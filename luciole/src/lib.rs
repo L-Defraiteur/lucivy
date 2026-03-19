@@ -20,7 +20,7 @@ pub use generic_actor::GenericActor;
 pub use handler::{Handler, TypedHandler};
 pub use mailbox::{mailbox, ActorRef, Mailbox};
 pub use node::{LogLevel, Node, NodeContext, PortDef};
-pub use pool::{DrainMsg, Pool};
+pub use pool::{DrainMsg, DrainableRef, Pool, ShutdownMsg};
 pub use port::{PortType, PortValue};
 pub use reply::{reply, Reply, ReplyReceiver};
 pub use runtime::{execute_dag, DagEvent, DagResult, NodeResult};

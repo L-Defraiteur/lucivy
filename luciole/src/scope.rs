@@ -120,17 +120,6 @@ mod tests {
         fn priority(&self) -> Priority { Priority::Medium }
     }
 
-    // -- Drainable for Pool --
-
-    impl<M: Send + 'static> Drainable for Pool<M>
-    where
-        M: From<DrainMsg>,
-    {
-        fn drain(&self, label: &str) {
-            Pool::drain(self, label);
-        }
-    }
-
     // -- test DAG node --
 
     struct SumNode {
