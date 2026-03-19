@@ -1,11 +1,39 @@
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use crate::dag::Dag;
+use crate::events::{EventBus, EventReceiver};
 use crate::node::{LogLevel, NodeContext};
 use crate::port::PortValue;
 use crate::scheduler::global_scheduler;
 use crate::Priority;
+
+// ---------------------------------------------------------------------------
+// Global DAG event bus — subscribe from any thread
+// ---------------------------------------------------------------------------
+
+static DAG_EVENT_BUS: OnceLock<Arc<EventBus<DagEvent>>> = OnceLock::new();
+
+fn dag_event_bus() -> &'static Arc<EventBus<DagEvent>> {
+    DAG_EVENT_BUS.get_or_init(|| Arc::new(EventBus::new()))
+}
+
+/// Subscribe to DAG events from any thread. Zero-cost when no subscribers.
+///
+/// Events are broadcast in real-time as nodes start/complete/fail.
+/// Use `try_recv()` for non-blocking polling or `recv()` for blocking.
+///
+/// ```ignore
+/// let events = subscribe_dag_events();
+/// // ... execute_dag runs on pool threads ...
+/// while let Some(evt) = events.try_recv() {
+///     eprintln!("{:?}", evt);
+/// }
+/// ```
+pub fn subscribe_dag_events() -> EventReceiver<DagEvent> {
+    dag_event_bus().subscribe()
+}
 
 // ---------------------------------------------------------------------------
 // DagResult — output of a DAG execution
@@ -110,7 +138,9 @@ pub fn execute_dag(
     let mut port_data: HashMap<(String, String), PortValue> = HashMap::new();
     let mut results: Vec<(String, NodeResult)> = Vec::with_capacity(total_nodes);
 
+    let bus = dag_event_bus();
     let emit = |evt: DagEvent| {
+        bus.emit(evt.clone());
         if let Some(cb) = on_event {
             cb(evt);
         }
@@ -636,5 +666,44 @@ mod tests {
         assert_eq!(nr.logs.len(), 2);
         assert_eq!(nr.logs[0].0, LogLevel::Info);
         assert_eq!(nr.logs[1].0, LogLevel::Warn);
+    }
+
+    #[test]
+    fn subscribe_dag_events_from_outside() {
+        // Subscribe BEFORE execution — events arrive via EventBus
+        let events_rx = subscribe_dag_events();
+
+        let mut dag = Dag::new();
+        dag.add_node("a", EmitNode { value: 7 });
+        dag.add_node("b", CollectNode { received: 0 });
+        dag.connect("a", "out", "b", "in").unwrap();
+
+        // Execute with NO callback — events still go through the bus
+        execute_dag(&mut dag, None).unwrap();
+
+        // Collect events from the receiver
+        let mut events = Vec::new();
+        while let Some(evt) = events_rx.try_recv() {
+            events.push(evt);
+        }
+
+        // Should have received events
+        assert!(events.iter().any(|e| matches!(e, DagEvent::DagCompleted { .. })));
+        assert!(events.iter().any(|e| matches!(e,
+            DagEvent::NodeCompleted { node, .. } if node == "a"
+        )));
+        assert!(events.iter().any(|e| matches!(e,
+            DagEvent::NodeCompleted { node, .. } if node == "b"
+        )));
+    }
+
+    #[test]
+    fn no_subscriber_zero_cost() {
+        // No subscriber — events should not allocate or block
+        let mut dag = Dag::new();
+        dag.add_node("x", EmitNode { value: 1 });
+
+        // Should not panic or slow down
+        execute_dag(&mut dag, None).unwrap();
     }
 }

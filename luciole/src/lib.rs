@@ -23,7 +23,7 @@ pub use node::{LogLevel, Node, NodeContext, PortDef};
 pub use pool::{DrainMsg, DrainableRef, Pool, ShutdownMsg};
 pub use port::{PortType, PortValue};
 pub use reply::{reply, Reply, ReplyReceiver};
-pub use runtime::{execute_dag, DagEvent, DagResult, NodeResult};
+pub use runtime::{execute_dag, subscribe_dag_events, DagEvent, DagResult, NodeResult};
 pub use scheduler::{ActorId, Scheduler, SchedulerHandle};
 pub use scope::{Drainable, Scope};
 
