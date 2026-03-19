@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
+use crate::events::EventReceiver;
 use crate::node::Node;
+use crate::observe::{TapEvent, TapRegistry};
 use crate::port::PortType;
 
 // ---------------------------------------------------------------------------
@@ -31,6 +33,7 @@ pub(crate) struct DagNodeEntry {
 pub struct Dag {
     nodes: Vec<DagNodeEntry>,
     edges: Vec<DagEdge>,
+    pub(crate) taps: TapRegistry,
 }
 
 impl Dag {
@@ -38,6 +41,7 @@ impl Dag {
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
+            taps: TapRegistry::new(),
         }
     }
 
@@ -193,6 +197,25 @@ impl Dag {
             self.connect(pair[0], "done", pair[1], "trigger")?;
         }
         Ok(())
+    }
+
+    /// Tap a specific edge to capture data flowing through it.
+    ///
+    /// Returns a receiver that will get `TapEvent`s during execution.
+    /// Zero-cost when no taps are active.
+    pub fn tap(
+        &mut self,
+        from_node: &str,
+        from_port: &str,
+        to_node: &str,
+        to_port: &str,
+    ) -> EventReceiver<TapEvent> {
+        self.taps.tap(from_node, from_port, to_node, to_port)
+    }
+
+    /// Tap ALL edges — every data transfer is captured.
+    pub fn tap_all(&mut self) -> EventReceiver<TapEvent> {
+        self.taps.tap_all()
     }
 
     /// Number of nodes.

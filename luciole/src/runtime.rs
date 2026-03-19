@@ -66,6 +66,58 @@ impl DagResult {
     pub fn total_ms(&self) -> u64 {
         self.duration_ms
     }
+
+    /// Sum a metric across all nodes.
+    ///
+    /// ```ignore
+    /// let total_docs = result.total("docs_merged");
+    /// ```
+    pub fn total(&self, metric: &str) -> f64 {
+        self.node_results.iter()
+            .flat_map(|(_, nr)| nr.metrics.iter())
+            .filter(|(name, _)| name == metric)
+            .map(|(_, value)| value)
+            .sum()
+    }
+
+    /// Human-readable summary for post-mortem / bench output.
+    pub fn display_summary(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("DAG completed in {}ms ({} nodes)",
+            self.duration_ms, self.node_results.len()));
+
+        for (name, nr) in &self.node_results {
+            let metrics_str = nr.metrics.iter()
+                .map(|(k, v)| {
+                    if *v == ((*v) as u64) as f64 {
+                        format!("{}={}", k, *v as u64)
+                    } else {
+                        format!("{}={:.1}", k, v)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            lines.push(format!("  {:30} {:>6}ms  {}",
+                name, nr.duration_ms, metrics_str));
+
+            for (level, text) in &nr.logs {
+                let tag = match level {
+                    LogLevel::Debug => "DBG",
+                    LogLevel::Info => "INF",
+                    LogLevel::Warn => "WRN",
+                    LogLevel::Error => "ERR",
+                };
+                lines.push(format!("    [{}] {}", tag, text));
+            }
+        }
+        lines.join("\n")
+    }
+}
+
+impl std::fmt::Display for DagResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.display_summary())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +140,13 @@ pub enum DagEvent {
         node: String,
         duration_ms: u64,
         metrics: Vec<(String, f64)>,
+    },
+    /// A log message emitted by a node during execution.
+    NodeLog {
+        node: String,
+        node_type: String,
+        level: LogLevel,
+        text: String,
     },
     NodeFailed {
         node: String,
@@ -208,7 +267,7 @@ fn execute_single_node(
 
     emit(DagEvent::NodeStarted {
         node: node_name.clone(),
-        node_type: node_type_str,
+        node_type: node_type_str.clone(),
         level,
     });
 
@@ -223,7 +282,25 @@ fn execute_single_node(
             let metrics = ctx.metrics().to_vec();
             let logs = ctx.logs().to_vec();
 
+            // Emit individual log events
+            for (level, text) in &logs {
+                emit(DagEvent::NodeLog {
+                    node: node_name.clone(),
+                    node_type: node_type_str.clone(),
+                    level: *level,
+                    text: text.clone(),
+                });
+            }
+
             for (port_name, value) in outputs {
+                // Emit tap events for edges leaving this port
+                if dag.taps.is_active() {
+                    for edge in dag.edges() {
+                        if edge.from_node == node_name && edge.from_port == port_name {
+                            dag.taps.check_and_emit(edge, &value);
+                        }
+                    }
+                }
                 port_data.insert((node_name.clone(), port_name), value);
             }
 
@@ -319,7 +396,24 @@ fn execute_level_parallel(
                 });
 
                 for (port_name, value) in outputs {
+                    if dag.taps.is_active() {
+                        for edge in dag.edges() {
+                            if edge.from_node == node_name && edge.from_port == port_name {
+                                dag.taps.check_and_emit(edge, &value);
+                            }
+                        }
+                    }
                     port_data.insert((node_name.clone(), port_name), value);
+                }
+
+                // Emit logs from parallel nodes
+                for (level, text) in &nr.logs {
+                    emit(DagEvent::NodeLog {
+                        node: node_name.clone(),
+                        node_type: String::new(), // type not available here
+                        level: *level,
+                        text: text.clone(),
+                    });
                 }
 
                 level_results.push((node_name, nr));
@@ -705,5 +799,122 @@ mod tests {
 
         // Should not panic or slow down
         execute_dag(&mut dag, None).unwrap();
+    }
+
+    #[test]
+    fn node_log_events_emitted() {
+        struct LoggyNode;
+        impl Node for LoggyNode {
+            fn node_type(&self) -> &'static str { "loggy" }
+            fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+                ctx.info("starting work");
+                ctx.warn("something odd");
+                ctx.metric("items", 42.0);
+                Ok(())
+            }
+        }
+
+        let rx = subscribe_dag_events();
+        let mut dag = Dag::new();
+        dag.add_node("loggy", LoggyNode);
+        execute_dag(&mut dag, None).unwrap();
+
+        let mut events = Vec::new();
+        while let Some(evt) = rx.try_recv() {
+            events.push(evt);
+        }
+
+        let log_events: Vec<_> = events.iter().filter(|e| matches!(e, DagEvent::NodeLog { .. })).collect();
+        assert_eq!(log_events.len(), 2);
+        assert!(matches!(&log_events[0], DagEvent::NodeLog { level: LogLevel::Info, text, .. } if text == "starting work"));
+        assert!(matches!(&log_events[1], DagEvent::NodeLog { level: LogLevel::Warn, text, .. } if text == "something odd"));
+    }
+
+    #[test]
+    fn edge_tap_captures_data() {
+        let mut dag = Dag::new();
+        dag.add_node("source", EmitNode { value: 77 });
+        dag.add_node("sink", CollectNode { received: 0 });
+        dag.connect("source", "out", "sink", "in").unwrap();
+
+        let tap_rx = dag.tap("source", "out", "sink", "in");
+
+        execute_dag(&mut dag, None).unwrap();
+
+        let evt = tap_rx.try_recv().expect("should have captured edge data");
+        assert_eq!(evt.from_node, "source");
+        assert_eq!(evt.to_node, "sink");
+        assert_eq!(*evt.value.downcast::<i32>().unwrap(), 77);
+        assert!(tap_rx.try_recv().is_none()); // only one edge
+    }
+
+    #[test]
+    fn tap_all_captures_everything() {
+        let mut dag = Dag::new();
+        dag.add_node("a", EmitNode { value: 1 });
+        dag.add_node("b", DoubleNode);
+        dag.add_node("c", CollectNode { received: 0 });
+        dag.connect("a", "out", "b", "in").unwrap();
+        dag.connect("b", "out", "c", "in").unwrap();
+
+        let tap_rx = dag.tap_all();
+
+        execute_dag(&mut dag, None).unwrap();
+
+        let mut taps = Vec::new();
+        while let Some(evt) = tap_rx.try_recv() {
+            taps.push(evt);
+        }
+        // a→b and b→c = 2 edges
+        assert_eq!(taps.len(), 2);
+        assert_eq!(taps[0].from_node, "a");
+        assert_eq!(taps[1].from_node, "b");
+    }
+
+    #[test]
+    fn tap_inactive_zero_cost() {
+        // No taps — should not slow down
+        let mut dag = Dag::new();
+        dag.add_node("a", EmitNode { value: 1 });
+        dag.add_node("b", CollectNode { received: 0 });
+        dag.connect("a", "out", "b", "in").unwrap();
+
+        execute_dag(&mut dag, None).unwrap();
+    }
+
+    #[test]
+    fn display_summary() {
+        struct WorkNode;
+        impl Node for WorkNode {
+            fn node_type(&self) -> &'static str { "work" }
+            fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+                ctx.metric("docs", 100.0);
+                ctx.metric("duration_ms", 42.5);
+                ctx.info("done");
+                Ok(())
+            }
+        }
+
+        let mut dag = Dag::new();
+        dag.add_node("worker", WorkNode);
+        let result = execute_dag(&mut dag, None).unwrap();
+
+        let summary = result.display_summary();
+        assert!(summary.contains("DAG completed"));
+        assert!(summary.contains("worker"));
+        assert!(summary.contains("docs=100"));
+        assert!(summary.contains("duration_ms=42.5"));
+        assert!(summary.contains("[INF] done"));
+    }
+
+    #[test]
+    fn total_metric_aggregation() {
+        let mut dag = Dag::new();
+        dag.add_node("a", EmitNode { value: 1 });
+        dag.add_node("b", EmitNode { value: 2 });
+
+        let result = execute_dag(&mut dag, None).unwrap();
+        let total = result.total("emitted");
+        assert_eq!(total, 3.0); // 1 + 2
     }
 }
