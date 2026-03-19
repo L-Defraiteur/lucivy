@@ -195,26 +195,90 @@ impl SegmentUpdaterState {
     ) -> crate::Result<crate::Opstamp> {
         let start = Instant::now();
         self.shared.event_bus.emit(IndexEvent::CommitStarted { opstamp });
-        let result = (|| {
-            if rebuild_sfx {
-                // Drain pending merges before commit. All merges use full
-                // merge_sfx so the resulting segments have valid FSTs.
-                lucivy_trace!("[commit] draining merges");
-                self.drain_all_merges();
-                lucivy_trace!("[commit] drain complete");
-            }
-
-            let segment_entries = self.shared.purge_deletes(opstamp)?;
-            self.shared.segment_manager.commit(segment_entries);
-            self.shared.save_metas(opstamp, payload)?;
-            let _ = garbage_collect_files(&self.shared);
-            Ok(opstamp)
-        })();
+        let result = if rebuild_sfx {
+            self.handle_commit_dag(opstamp, payload)
+        } else {
+            self.handle_commit_fast(opstamp, payload)
+        };
         self.shared.event_bus.emit(IndexEvent::CommitCompleted {
             opstamp,
             duration: start.elapsed(),
         });
         result
+    }
+
+    /// Fast commit path: no merges, just purge + save + optional GC.
+    fn handle_commit_fast(
+        &mut self,
+        opstamp: crate::Opstamp,
+        payload: Option<String>,
+    ) -> crate::Result<crate::Opstamp> {
+        let segment_entries = self.shared.purge_deletes(opstamp)?;
+        self.shared.segment_manager.commit(segment_entries);
+        self.shared.save_metas(opstamp, payload)?;
+        if self.segments_in_merge.is_empty() {
+            let _ = garbage_collect_files(&self.shared);
+        }
+        Ok(opstamp)
+    }
+
+    /// Full commit via DAG: drain active merges, collect ALL merge candidates,
+    /// execute them in parallel, then save + GC + reload — all sequenced by
+    /// the DAG structure. No race conditions by construction.
+    fn handle_commit_dag(
+        &mut self,
+        opstamp: crate::Opstamp,
+        payload: Option<String>,
+    ) -> crate::Result<crate::Opstamp> {
+        // 1. Drain any active/explicit/pending merges (complete them inline)
+        //    This ensures no merge is in-flight when we collect candidates.
+        self.drain_all_merges();
+
+        // 2. Collect ALL merge candidates (including cascading merges)
+        //    Keep collecting until no more candidates — this catches the
+        //    "cascade" bug where merge results need to be re-merged.
+        let mut all_ops = Vec::new();
+        loop {
+            let candidates = self.collect_merge_candidates();
+            if candidates.is_empty() {
+                break;
+            }
+            // Start each merge to lock the segments
+            for op in candidates {
+                let segment_entries = match self.shared.segment_manager.start_merge(op.segment_ids()) {
+                    Ok(entries) => entries,
+                    Err(e) => {
+                        warn!("start_merge failed (non-fatal): {e}");
+                        continue;
+                    }
+                };
+                // Track segments (protect from GC during merge)
+                for id in op.segment_ids() {
+                    self.segments_in_merge.insert(*id);
+                }
+                all_ops.push(op);
+            }
+        }
+
+        // 3. Build and execute the commit DAG
+        let mut dag = super::commit_dag::build_commit_dag(
+            self.shared.clone(),
+            all_ops,
+            opstamp,
+            payload,
+        ).map_err(|e| crate::LucivyError::SystemError(format!("build DAG: {e}")))?;
+
+        let dag_result = luciole::execute_dag(&mut dag, None)
+            .map_err(|e| crate::LucivyError::SystemError(format!("execute DAG: {e}")))?;
+
+        // 4. Log the DAG result
+        eprintln!("{}", dag_result.display_summary());
+
+        // 5. Clear merge tracking (all merges done)
+        self.segments_in_merge.clear();
+        self.shared.gc_protected_segments.lock().unwrap().clear();
+
+        Ok(opstamp)
     }
 
     fn handle_garbage_collect(&self) -> crate::Result<GarbageCollectionResult> {
@@ -907,9 +971,22 @@ pub(crate) fn create_segment_updater_actor(
     actor.register(TypedHandler::<SuDrainMergesMsg, _>::with_priority(
         |state, _msg, reply, _local| {
             let su = state.get_mut::<SegmentUpdaterState>().unwrap();
-            su.drain_all_merges();
-            if let Some(reply) = reply {
-                reply.send(SuOkReply);
+            // Full DAG commit: drain active merges, collect ALL candidates
+            // (including cascading), execute them, save metas, GC.
+            let opstamp = su.shared.load_meta().opstamp;
+            let payload = su.shared.load_meta().payload.clone();
+            match su.handle_commit_dag(opstamp, payload) {
+                Ok(_) => {
+                    if let Some(reply) = reply {
+                        reply.send(SuOkReply);
+                    }
+                }
+                Err(e) => {
+                    error!("DAG drain failed: {e:?}");
+                    if let Some(reply) = reply {
+                        reply.send(SuOkReply); // still reply to unblock caller
+                    }
+                }
             }
             ActorStatus::Continue
         },
