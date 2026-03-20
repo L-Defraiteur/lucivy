@@ -261,11 +261,10 @@ pub(crate) fn merge_sfxpost(
                         }
                     }
                 }
-            }
-            // No sfxpost for this segment — fail the merge.
-            // Every segment MUST have sfxpost. If this fires, the segment was
-            // created without running the SfxCollector (bug in segment creation).
-            if token_to_ordinal[seg_ord].contains_key(token.as_str()) {
+            } else if token_to_ordinal[seg_ord].contains_key(token.as_str()) {
+                // Segment has this term in its term dict but NO sfxpost.
+                // This is a data integrity error — every segment with text
+                // terms MUST have sfxpost built by the SfxCollector.
                 let seg_id = readers[seg_ord].segment_id().uuid_string();
                 let ndocs = readers[seg_ord].num_docs();
                 return Err(crate::LucivyError::SystemError(format!(

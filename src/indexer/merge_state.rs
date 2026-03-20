@@ -178,20 +178,18 @@ impl MergeState {
 
     /// Avance le merge d'un step. Retourne `Continue` si le merge
     /// n'est pas terminé, `Done` quand il l'est.
-    pub fn step(&mut self) -> StepResult {
+    /// Advance the merge by one step.
+    ///
+    /// Returns `Err` on failure — the caller MUST handle the error.
+    /// Never swallows errors silently.
+    pub fn step(&mut self) -> crate::Result<StepResult> {
         match self.do_step() {
             Ok(StepResult::Continue) => {
                 self.steps_completed += 1;
-                StepResult::Continue
+                Ok(StepResult::Continue)
             }
-            Ok(done) => done,
-            Err(e) => {
-                // En cas d'erreur, on log et on signale Done(None).
-                // Le caller (SegmentUpdaterActor) traitera ça comme un
-                // merge échoué — les segments source restent inchangés.
-                warn!("Incremental merge step failed: {e:?}");
-                StepResult::Done(None)
-            }
+            Ok(done) => Ok(done),
+            Err(e) => Err(e),
         }
     }
 
@@ -441,7 +439,7 @@ pub(crate) fn merge_incremental(
     };
 
     loop {
-        match state.step() {
+        match state.step()? {
             StepResult::Continue => continue,
             StepResult::Done(result) => return Ok(result),
         }

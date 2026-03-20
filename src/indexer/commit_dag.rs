@@ -203,7 +203,7 @@ impl PollNode for MergeNode {
         let phase_before = state.phase_name();
         let phase_elapsed_before = state.phase_elapsed_ms();
 
-        let result = state.step();
+        let result = state.step().map_err(|e| format!("merge step: {e}"))?;
 
         let phase_after = state.phase_name();
         if phase_before != phase_after || matches!(result, StepResult::Done(_)) {

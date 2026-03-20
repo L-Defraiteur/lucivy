@@ -4,7 +4,7 @@ use std::io::Write;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use super::segment_manager::SegmentManager;
 use super::segment_updater_actor::*;
@@ -63,9 +63,6 @@ pub(crate) struct SegmentUpdaterShared {
     pub(crate) killed: AtomicBool,
     pub(crate) stamper: Stamper,
     pub(crate) event_bus: Arc<EventBus<IndexEvent>>,
-    /// Segments currently being merged — their files must be protected from GC.
-    /// Updated by SegmentUpdaterState, read by list_files().
-    pub(crate) gc_protected_segments: Mutex<HashSet<SegmentId>>,
 }
 
 impl SegmentUpdaterShared {
@@ -133,26 +130,10 @@ impl SegmentUpdaterShared {
             .collect();
         files.insert(META_FILEPATH.to_path_buf());
 
-        // Also protect files from segments currently being merged.
-        // Without this, a concurrent GC could delete .sfx/.sfxpost files
-        // of segments that are source inputs to an in-progress merge.
-        if let Ok(protected) = self.gc_protected_segments.lock() {
-            for &seg_id in protected.iter() {
-                let uuid = seg_id.uuid_string();
-                // Protect all standard component files
-                for ext in &["store", "fast", "fieldnorm", "idx", "pos", "term", "offsets", "sfx"] {
-                    files.insert(PathBuf::from(format!("{uuid}.{ext}")));
-                }
-                // Protect per-field .sfx/.sfxpost (field_ids 0-10 covers all practical cases)
-                for fid in 0..10u32 {
-                    files.insert(PathBuf::from(format!("{uuid}.{fid}.sfx")));
-                    files.insert(PathBuf::from(format!("{uuid}.{fid}.sfxpost")));
-                }
-            }
-        }
-
-        // Per-field .sfx/.sfxpost files are now included by segment_meta.list_files()
-        // via sfx_field_ids stored in meta.json. No manifest needed.
+        // Per-field .sfx/.sfxpost files are included by segment_meta.list_files()
+        // via sfx_field_ids stored in meta.json.
+        // No gc_protected_segments needed: merges run inside the DAG,
+        // GC runs AFTER finalize — no concurrent merge to protect.
         files
     }
 }
@@ -254,7 +235,6 @@ impl SegmentUpdater {
             killed: AtomicBool::new(false),
             stamper,
             event_bus: Arc::new(EventBus::new()),
-            gc_protected_segments: Mutex::new(HashSet::new()),
         });
 
         let (mbox, mut aref) = mailbox::<Envelope>(SEGMENT_UPDATER_MAILBOX_CAPACITY);
@@ -394,17 +374,9 @@ impl SegmentUpdater {
         }
     }
 
+    /// No-op: merges are now synchronous within the DAG.
+    /// Kept for API compatibility with IndexWriter::wait_merging_threads().
     pub fn wait_merging_thread(&self) -> crate::Result<()> {
-        if !self.is_alive() {
-            return Ok(());
-        }
-        let (env, rx) = SuDrainMergesMsg.into_request();
-        self.actor_ref
-            .send(env)
-            .map_err(|_| {
-                LucivyError::SystemError("Segment updater actor died".to_string())
-            })?;
-        let _ = rx.wait_cooperative_named("segment_updater_op", || crate::actor::scheduler::global_scheduler().run_one_step());
         Ok(())
     }
 }

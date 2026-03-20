@@ -73,9 +73,6 @@ pub struct SegmentWriter {
     sfx_collectors: HashMap<u32, SfxCollector>,
     /// Tracks which sfx_collectors were fed during the current document.
     sfx_fed_this_doc: Vec<u32>,
-    /// Separate RAW tokenizer for SfxCollector when the field uses a different tokenizer
-    /// (e.g. stemmed). None = use interceptor (field's own tokenizer = raw).
-    sfx_raw_analyzer: Option<TextAnalyzer>,
 }
 
 impl SegmentWriter {
@@ -151,7 +148,6 @@ impl SegmentWriter {
                 collectors
             },
             sfx_fed_this_doc: Vec::new(),
-            sfx_raw_analyzer: tokenizer_manager.get("raw_code"),
             schema,
         })
     }
@@ -271,23 +267,6 @@ impl SegmentWriter {
                     let has_sfx = self.sfx_collectors.contains_key(&field.field_id());
                     let mut indexing_position = IndexingPosition::default();
 
-                    // Determine if we need double tokenization (separate RAW tokenizer for SfxCollector)
-                    let use_double_tok = has_sfx && self.sfx_raw_analyzer.is_some() && {
-                        let tok_name = match field_entry.field_type() {
-                            FieldType::Str(opts) => opts.get_indexing_options()
-                                .map(|idx| idx.tokenizer())
-                                .unwrap_or("default"),
-                            _ => "default",
-                        };
-                        tok_name != "raw_code"
-                    };
-                    // Clone raw analyzer to avoid borrow conflicts with sfx_collectors
-                    let mut raw_analyzer = if use_double_tok {
-                        self.sfx_raw_analyzer.clone()
-                    } else {
-                        None
-                    };
-
                     if has_sfx {
                         let collector = self.sfx_collectors.get_mut(&field.field_id()).unwrap();
                         collector.begin_doc();
@@ -356,36 +335,20 @@ impl SegmentWriter {
                         assert!(term_buffer.is_empty());
 
                         if let Some(ref raw_text) = raw_text_for_sfx {
-                            if let Some(ref mut raw_ana) = raw_analyzer {
-                                // Double tokenization: main tokenizer → inverted index,
-                                // RAW tokenizer → SfxCollector
-                                postings_writer.index_text(
-                                    doc_id, &mut *token_stream, term_buffer, ctx,
-                                    &mut indexing_position,
-                                );
-                                let mut raw_stream = raw_ana.token_stream(raw_text);
-                                let collector = self.sfx_collectors.get_mut(&field.field_id()).unwrap();
-                                collector.begin_value(raw_text);
-                                while raw_stream.advance() {
-                                    let tok = raw_stream.token();
-                                    collector.add_token(&tok.text, tok.offset_from, tok.offset_to);
-                                }
-                                collector.end_value();
-                            } else {
-                                // Single tokenization with interceptor (field's tokenizer = raw)
-                                let mut interceptor =
-                                    crate::suffix_fst::SfxTokenInterceptor::wrap(token_stream);
-                                postings_writer.index_text(
-                                    doc_id, &mut interceptor, term_buffer, ctx,
-                                    &mut indexing_position,
-                                );
-                                let collector = self.sfx_collectors.get_mut(&field.field_id()).unwrap();
-                                collector.begin_value(raw_text);
-                                for tok in interceptor.take_captured() {
-                                    collector.add_token(&tok.text, tok.offset_from, tok.offset_to);
-                                }
-                                collector.end_value();
+                            // Single tokenization: interceptor captures tokens
+                            // for SfxCollector during BM25 indexing.
+                            let mut interceptor =
+                                crate::suffix_fst::SfxTokenInterceptor::wrap(token_stream);
+                            postings_writer.index_text(
+                                doc_id, &mut interceptor, term_buffer, ctx,
+                                &mut indexing_position,
+                            );
+                            let collector = self.sfx_collectors.get_mut(&field.field_id()).unwrap();
+                            collector.begin_value(raw_text);
+                            for tok in interceptor.take_captured() {
+                                collector.add_token(&tok.text, tok.offset_from, tok.offset_to);
                             }
+                            collector.end_value();
                         } else {
                             postings_writer.index_text(
                                 doc_id, &mut *token_stream, term_buffer, ctx,
