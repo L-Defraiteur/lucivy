@@ -262,12 +262,17 @@ pub(crate) fn merge_sfxpost(
                     }
                 }
             }
-            // No sfxpost for this segment — its docs will be MISSING from search.
-            // This should not happen if all segments were properly merged via commit().
+            // No sfxpost for this segment — fail the merge.
+            // Every segment MUST have sfxpost. If this fires, the segment was
+            // created without running the SfxCollector (bug in segment creation).
             if token_to_ordinal[seg_ord].contains_key(token.as_str()) {
+                let seg_id = readers[seg_ord].segment_id().uuid_string();
                 let ndocs = readers[seg_ord].num_docs();
-                eprintln!("[merge_sfxpost] ERROR: segment {} ({} docs) has term {:?} but NO sfxpost file — docs will be missing from contains search!",
-                    readers[seg_ord].segment_id().uuid_string()[..8].to_string(), ndocs, token);
+                return Err(crate::LucivyError::SystemError(format!(
+                    "merge_sfxpost: segment {} ({} docs) has term {:?} but NO sfxpost — \
+                     every segment must have sfxpost",
+                    &seg_id[..8], ndocs, token,
+                )));
             }
         }
 
