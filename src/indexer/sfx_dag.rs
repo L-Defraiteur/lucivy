@@ -218,13 +218,13 @@ impl Node for ValidateSfxpostNode {
 }
 
 // ---------------------------------------------------------------------------
-// WriteSfxNode
+// WriteSfxNode — writes .sfx/.sfxpost directly via Segment
 // ---------------------------------------------------------------------------
 
 struct WriteSfxNode {
+    segment: Option<crate::index::Segment>,
     field: Field,
     num_docs: u32,
-    serializer: Arc<std::sync::Mutex<Option<crate::indexer::SegmentSerializer>>>,
 }
 
 impl Node for WriteSfxNode {
@@ -248,14 +248,32 @@ impl Node for WriteSfxNode {
             .ok_or("missing tokens")?.downcast::<BTreeSet<String>>().ok_or("tokens type")?;
 
         let num_tokens = tokens.len() as u32;
-        let mut serializer = self.serializer.lock().unwrap();
-        let ser = serializer.as_mut().ok_or("serializer already taken")?;
+        let segment = self.segment.as_mut().ok_or("segment missing")?;
+        let field_id = self.field.field_id();
 
-        sfx_merge::write_sfx(
-            ser, self.field,
+        // Build .sfx file
+        let sfx_file = crate::suffix_fst::file::SfxFileWriter::new(
             fst_data, parent_data, gapmap_data,
-            self.num_docs, num_tokens, sfxpost_data,
-        ).map_err(|e| format!("write_sfx: {e}"))?;
+            self.num_docs, num_tokens,
+        );
+        let sfx_bytes = sfx_file.to_bytes();
+
+        // Write .sfx
+        use common::TerminatingWrite;
+        let mut writer = segment.open_write_custom(&format!("{field_id}.sfx"))
+            .map_err(|e| format!("open sfx: {e}"))?;
+        std::io::Write::write_all(&mut writer, &sfx_bytes)
+            .map_err(|e| format!("write sfx: {e}"))?;
+        writer.terminate().map_err(|e| format!("close sfx: {e}"))?;
+
+        // Write .sfxpost
+        if let Some(sfxpost) = &sfxpost_data {
+            let mut writer = segment.open_write_custom(&format!("{field_id}.sfxpost"))
+                .map_err(|e| format!("open sfxpost: {e}"))?;
+            std::io::Write::write_all(&mut writer, sfxpost)
+                .map_err(|e| format!("write sfxpost: {e}"))?;
+            writer.terminate().map_err(|e| format!("close sfxpost: {e}"))?;
+        }
 
         ctx.metric("written", 1.0);
         Ok(())
@@ -281,8 +299,8 @@ pub(crate) fn build_sfx_dag(
     doc_mapping: Vec<DocAddress>,
     reverse_doc_map: Vec<HashMap<u32, u32>>,
     sfx_data: Vec<Option<Vec<u8>>>,
-    serializer: crate::indexer::SegmentSerializer,
-) -> (Dag, Arc<std::sync::Mutex<Option<crate::indexer::SegmentSerializer>>>) {
+    segment: crate::index::Segment,
+) -> Dag {
     let num_docs = doc_mapping.len() as u32;
 
     let ctx = Arc::new(SfxContext {
@@ -292,8 +310,6 @@ pub(crate) fn build_sfx_dag(
         reverse_doc_map,
         sfx_data,
     });
-
-    let serializer = Arc::new(std::sync::Mutex::new(Some(serializer)));
 
     let mut dag = Dag::new();
 
@@ -322,14 +338,14 @@ pub(crate) fn build_sfx_dag(
 
     // write (depends on all: fst, validated gapmap, validated sfxpost, tokens)
     dag.add_node("write", WriteSfxNode {
+        segment: Some(segment),
         field,
         num_docs,
-        serializer: serializer.clone(),
     });
     dag.connect("build_fst", "fst", "write", "fst").unwrap();
     dag.connect("validate_gapmap", "gapmap", "write", "gapmap").unwrap();
     dag.connect("validate_sfxpost", "sfxpost", "write", "sfxpost").unwrap();
     dag.connect("collect", "tokens", "write", "tokens").unwrap();
 
-    (dag, serializer)
+    dag
 }

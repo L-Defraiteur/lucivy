@@ -268,74 +268,18 @@ impl Node for SfxNode {
             let (sfx_data, any_has_sfx) = super::sfx_merge::load_sfx_data(&readers, field);
             if !any_has_sfx { continue; }
 
-            // Collect tokens
-            let tokens = super::sfx_merge::collect_tokens(&readers, field, &reverse_doc_map)
-                .map_err(|e| format!("collect_tokens: {e}"))?;
-
-            // Parallel: build_fst, copy_gapmap, merge_sfxpost
-            let scheduler = luciole::scheduler::global_scheduler();
-
-            let tokens_fst = tokens.clone();
-            let rx_fst = scheduler.submit_task(luciole::Priority::High, move || {
-                super::sfx_merge::build_fst(&tokens_fst)
-            });
-
-            let sfx_data_clone = sfx_data.clone();
-            let doc_mapping_clone = doc_mapping.clone();
-            let rx_gapmap = scheduler.submit_task(luciole::Priority::High, move || {
-                super::sfx_merge::copy_gapmap(&sfx_data_clone, &doc_mapping_clone)
-            });
-
-            let readers_post = Arc::clone(&readers);
-            let tokens_post = tokens.clone();
-            let rdm_clone = reverse_doc_map.clone();
-            let rx_sfxpost = scheduler.submit_task(luciole::Priority::High, move || {
-                super::sfx_merge::merge_sfxpost(&readers_post, field, &tokens_post, &rdm_clone)
-            });
-
-            // Wait for all 3
-            let (fst_data, parent_list_data) = rx_fst
-                .wait_cooperative_named("sfx_fst", || scheduler.run_one_step())
-                .map_err(|e| format!("build_fst: {e}"))?;
-            let gapmap_data = rx_gapmap
-                .wait_cooperative_named("sfx_gapmap", || scheduler.run_one_step());
-            let sfxpost_data = rx_sfxpost
-                .wait_cooperative_named("sfx_sfxpost", || scheduler.run_one_step())
-                .map_err(|e| format!("merge_sfxpost: {e}"))?;
-
-            // Validate
-            let errors = super::sfx_merge::validate_gapmap(&gapmap_data);
-            if !errors.is_empty() {
-                return Err(format!("gapmap: {} errors", errors.len()));
-            }
-            if let Some(ref data) = sfxpost_data {
-                if let Some(err) = super::sfx_merge::validate_sfxpost(
-                    data, doc_mapping.len() as u32, tokens.len() as u32,
-                ) {
-                    return Err(format!("sfxpost: {err}"));
-                }
-            }
-
-            // Write directly via segment (no SegmentSerializer needed)
-            use common::TerminatingWrite;
-            let sfx_file = crate::suffix_fst::file::SfxFileWriter::new(
-                fst_data, parent_list_data, gapmap_data,
-                doc_mapping.len() as u32, tokens.len() as u32,
+            // Build and execute sfx sub-DAG for this field
+            let mut sfx_dag = super::sfx_dag::build_sfx_dag(
+                Arc::clone(&readers),
+                field,
+                doc_mapping.clone(),
+                reverse_doc_map.clone(),
+                sfx_data,
+                segment.clone(),
             );
-            let sfx_bytes = sfx_file.to_bytes();
-            let mut writer = segment.open_write_custom(&format!("{}.sfx", field.field_id()))
-                .map_err(|e| format!("write sfx: {e}"))?;
-            std::io::Write::write_all(&mut writer, &sfx_bytes)
-                .map_err(|e| format!("write sfx: {e}"))?;
-            writer.terminate().map_err(|e| format!("close sfx: {e}"))?;
 
-            if let Some(ref sfxpost) = sfxpost_data {
-                let mut writer = segment.open_write_custom(&format!("{}.sfxpost", field.field_id()))
-                    .map_err(|e| format!("write sfxpost: {e}"))?;
-                std::io::Write::write_all(&mut writer, sfxpost)
-                    .map_err(|e| format!("write sfxpost: {e}"))?;
-                writer.terminate().map_err(|e| format!("close sfxpost: {e}"))?;
-            }
+            luciole::execute_dag(&mut sfx_dag, None)
+                .map_err(|e| format!("sfx DAG field {}: {e}", field.field_id()))?;
 
             sfx_field_ids.push(field.field_id());
         }
