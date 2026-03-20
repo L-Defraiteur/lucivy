@@ -307,7 +307,6 @@ impl MergeState {
     /// copy_gapmap, and merge_sfxpost run in PARALLEL on the scheduler pool.
     fn step_sfx(&mut self) -> crate::Result<StepResult> {
         use super::sfx_merge;
-        use luciole::scheduler::global_scheduler;
 
         let doc_mapping = self.sfx_doc_mapping.take().unwrap_or_default();
         let readers = Arc::clone(&self.merger.readers);
@@ -326,69 +325,40 @@ impl MergeState {
             &doc_mapping, readers.len(),
         );
 
-        let serializer = self.serializer.as_mut().unwrap();
-        let scheduler = global_scheduler();
         for &field in &sfx_fields {
             let (sfx_data, any_has_sfx) = sfx_merge::load_sfx_data(&readers, field);
             if !any_has_sfx { continue; }
 
-            // Step 1: collect tokens (sequential — needs readers)
-            let tokens = sfx_merge::collect_tokens(&readers, field, &reverse_doc_map)?;
-            let tokens = Arc::new(tokens);
+            // Take the serializer out for the DAG, put it back after
+            let serializer = self.serializer.take()
+                .ok_or_else(|| crate::LucivyError::SystemError("serializer missing".into()))?;
 
-            // Steps 2-4: PARALLEL via submit_task
-            let tokens_fst = Arc::clone(&tokens);
-            let rx_fst = scheduler.submit_task(luciole::Priority::High, move || {
-                sfx_merge::build_fst(&tokens_fst)
-            });
+            let (mut dag, ser_handle) = super::sfx_dag::build_sfx_dag(
+                Arc::clone(&readers),
+                field,
+                doc_mapping.clone(),
+                reverse_doc_map.clone(),
+                sfx_data,
+                serializer,
+            );
 
-            let sfx_data_clone = sfx_data.clone();
-            let doc_mapping_clone = doc_mapping.clone();
-            let rx_gapmap = scheduler.submit_task(luciole::Priority::High, move || {
-                sfx_merge::copy_gapmap(&sfx_data_clone, &doc_mapping_clone)
-            });
+            let dag_result = luciole::execute_dag(&mut dag, None)
+                .map_err(|e| crate::LucivyError::SystemError(
+                    format!("sfx DAG field {}: {e}", field.field_id()),
+                ))?;
 
-            let readers_post = Arc::clone(&readers);
-            let tokens_post = Arc::clone(&tokens);
-            let rdm_clone = reverse_doc_map.clone();
-            let rx_sfxpost = scheduler.submit_task(luciole::Priority::High, move || {
-                sfx_merge::merge_sfxpost(&readers_post, field, &tokens_post, &rdm_clone)
-            });
+            eprintln!("  sfx field {} — {}", field.field_id(), dag_result.display_summary());
 
-            // Wait for all 3 (cooperative — works in WASM too)
-            let (fst_data, parent_list_data) = rx_fst
-                .wait_cooperative_named("sfx_build_fst", || scheduler.run_one_step())
-                .map_err(|e| crate::LucivyError::SystemError(format!("build_fst: {e}")))?;
-            let gapmap_data = rx_gapmap
-                .wait_cooperative_named("sfx_copy_gapmap", || scheduler.run_one_step());
-            let sfxpost_data = rx_sfxpost
-                .wait_cooperative_named("sfx_merge_sfxpost", || scheduler.run_one_step())
-                .map_err(|e| crate::LucivyError::SystemError(format!("merge_sfxpost: {e}")))?;
+            // Put the serializer back
+            let serializer = ser_handle.lock().unwrap().take()
+                .ok_or_else(|| crate::LucivyError::SystemError("serializer lost in DAG".into()))?;
+            self.serializer = Some(serializer);
 
-            // Step 5: validate (sequential)
-            let errors = sfx_merge::validate_gapmap(&gapmap_data);
-            if !errors.is_empty() {
-                warn!("gapmap validation: {} errors for field {}", errors.len(), field.field_id());
-            }
-            if let Some(ref sfxpost) = sfxpost_data {
-                if let Some(err) = sfx_merge::validate_sfxpost(
-                    sfxpost, doc_mapping.len() as u32, tokens.len() as u32,
-                ) {
-                    warn!("sfxpost validation: {} for field {}", err, field.field_id());
-                }
-            }
-
-            // Step 6: write (sequential — needs serializer)
-            sfx_merge::write_sfx(
-                serializer, field,
-                fst_data, parent_list_data, gapmap_data,
-                doc_mapping.len() as u32, tokens.len() as u32,
-                sfxpost_data,
-            )?;
             self.sfx_field_ids.push(field.field_id());
         }
 
         if !self.sfx_field_ids.is_empty() {
+            let serializer = self.serializer.as_mut().unwrap();
             serializer.write_sfx_manifest(&self.sfx_field_ids)?;
         }
 

@@ -23,20 +23,16 @@ use crate::DocAddress;
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
-// Types flowing between nodes
+// Shared context (read-only, Arc'd for DAG nodes)
 // ---------------------------------------------------------------------------
 
-/// Shared context for all sfx merge nodes (read-only segment readers).
 struct SfxContext {
-    readers: Vec<SegmentReader>,
+    readers: Arc<Vec<SegmentReader>>,
     field: Field,
     doc_mapping: Vec<DocAddress>,
     reverse_doc_map: Vec<HashMap<u32, u32>>,
     sfx_data: Vec<Option<Vec<u8>>>,
 }
-
-// We can't pass SegmentReader through PortValue (not Sync).
-// Instead, each node captures an Arc<SfxContext> at construction.
 
 // ---------------------------------------------------------------------------
 // CollectTokensNode
@@ -83,7 +79,6 @@ impl Node for BuildFstNode {
         let (fst_data, parent_data) = sfx_merge::build_fst(tokens)
             .map_err(|e| format!("build_fst: {e}"))?;
         ctx.metric("fst_bytes", fst_data.len() as f64);
-        ctx.metric("parent_bytes", parent_data.len() as f64);
         ctx.set_output("fst", PortValue::new((fst_data, parent_data)));
         Ok(())
     }
@@ -99,11 +94,6 @@ struct CopyGapmapNode {
 
 impl Node for CopyGapmapNode {
     fn node_type(&self) -> &'static str { "sfx_copy_gapmap" }
-    fn inputs(&self) -> Vec<PortDef> {
-        // Depends on collect_tokens only for sequencing (needs sfx_data loaded)
-        // Actually independent — just needs sfx_data and doc_mapping
-        vec![]
-    }
     fn outputs(&self) -> Vec<PortDef> {
         vec![PortDef::required("gapmap", PortType::of::<Vec<u8>>())]
     }
@@ -112,7 +102,6 @@ impl Node for CopyGapmapNode {
             &self.ctx.sfx_data, &self.ctx.doc_mapping,
         );
         nctx.metric("gapmap_bytes", gapmap_data.len() as f64);
-        nctx.metric("docs", self.ctx.doc_mapping.len() as f64);
         nctx.set_output("gapmap", PortValue::new(gapmap_data));
         Ok(())
     }
@@ -125,7 +114,7 @@ impl Node for CopyGapmapNode {
 struct ValidateGapmapNode;
 
 impl Node for ValidateGapmapNode {
-    fn node_type(&self) -> &'static str { "sfx_validate" }
+    fn node_type(&self) -> &'static str { "sfx_validate_gapmap" }
     fn inputs(&self) -> Vec<PortDef> {
         vec![PortDef::required("gapmap", PortType::of::<Vec<u8>>())]
     }
@@ -140,14 +129,13 @@ impl Node for ValidateGapmapNode {
 
         let errors = sfx_merge::validate_gapmap(gapmap_data);
         ctx.metric("errors", errors.len() as f64);
-
         if !errors.is_empty() {
             for (i, err) in errors.iter().enumerate().take(10) {
                 ctx.warn(&format!("gapmap error {}: {}", i, err));
             }
         }
 
-        // Passthrough — clone the Arc (cheap)
+        // Passthrough
         let gapmap_clone = ctx.take_input("gapmap").unwrap();
         ctx.set_output("gapmap", gapmap_clone);
         Ok(())
@@ -187,13 +175,55 @@ impl Node for MergeSfxpostNode {
 }
 
 // ---------------------------------------------------------------------------
+// ValidateSfxpostNode
+// ---------------------------------------------------------------------------
+
+struct ValidateSfxpostNode {
+    num_docs: u32,
+}
+
+impl Node for ValidateSfxpostNode {
+    fn node_type(&self) -> &'static str { "sfx_validate_sfxpost" }
+    fn inputs(&self) -> Vec<PortDef> {
+        vec![
+            PortDef::required("sfxpost", PortType::of::<Option<Vec<u8>>>()),
+            PortDef::required("tokens", PortType::of::<BTreeSet<String>>()),
+        ]
+    }
+    fn outputs(&self) -> Vec<PortDef> {
+        vec![PortDef::required("sfxpost", PortType::of::<Option<Vec<u8>>>())]
+    }
+    fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+        let sfxpost = ctx.input("sfxpost")
+            .ok_or("missing sfxpost")?
+            .downcast::<Option<Vec<u8>>>()
+            .ok_or("wrong type")?;
+        let tokens = ctx.input("tokens")
+            .ok_or("missing tokens")?
+            .downcast::<BTreeSet<String>>()
+            .ok_or("wrong type")?;
+
+        if let Some(data) = &sfxpost {
+            if let Some(err) = sfx_merge::validate_sfxpost(
+                data, self.num_docs, tokens.len() as u32,
+            ) {
+                return Err(format!("sfxpost validation: {err}"));
+            }
+        }
+
+        let sfxpost_pass = ctx.take_input("sfxpost").unwrap();
+        ctx.set_output("sfxpost", sfxpost_pass);
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WriteSfxNode
 // ---------------------------------------------------------------------------
 
 struct WriteSfxNode {
-    serializer_field: Field,
+    field: Field,
     num_docs: u32,
-    /// Shared mutable serializer — only this node writes to it.
     serializer: Arc<std::sync::Mutex<Option<crate::indexer::SegmentSerializer>>>,
 }
 
@@ -219,10 +249,10 @@ impl Node for WriteSfxNode {
 
         let num_tokens = tokens.len() as u32;
         let mut serializer = self.serializer.lock().unwrap();
-        let ser = serializer.as_mut().ok_or("serializer taken")?;
+        let ser = serializer.as_mut().ok_or("serializer already taken")?;
 
         sfx_merge::write_sfx(
-            ser, self.serializer_field,
+            ser, self.field,
             fst_data, parent_data, gapmap_data,
             self.num_docs, num_tokens, sfxpost_data,
         ).map_err(|e| format!("write_sfx: {e}"))?;
@@ -238,10 +268,15 @@ impl Node for WriteSfxNode {
 
 /// Build a DAG for merging suffix FST data of a single field.
 ///
-/// Returns (dag, serializer_handle). The caller must put the serializer
-/// back after execution.
+/// ```text
+/// collect_tokens ──┬── build_fst ─────────────────────────┐
+///                  ├── copy_gapmap ── validate_gapmap ─────┼── write_sfx
+///                  └── merge_sfxpost ── validate_sfxpost ──┘
+/// ```
+///
+/// build_fst, copy_gapmap, and merge_sfxpost run in PARALLEL.
 pub(crate) fn build_sfx_dag(
-    readers: Vec<SegmentReader>,
+    readers: Arc<Vec<SegmentReader>>,
     field: Field,
     doc_mapping: Vec<DocAddress>,
     reverse_doc_map: Vec<HashMap<u32, u32>>,
@@ -262,33 +297,38 @@ pub(crate) fn build_sfx_dag(
 
     let mut dag = Dag::new();
 
-    // collect_tokens (source node)
+    // collect_tokens (source node — sequential, needs readers)
     dag.add_node("collect", CollectTokensNode { ctx: ctx.clone() });
 
-    // copy_gapmap (independent — parallel with build_fst)
+    // copy_gapmap (independent — parallel with build_fst and merge_sfxpost)
     dag.add_node("copy_gapmap", CopyGapmapNode { ctx: ctx.clone() });
 
     // build_fst (depends on tokens)
     dag.add_node("build_fst", BuildFstNode);
     dag.connect("collect", "tokens", "build_fst", "tokens").unwrap();
 
-    // validate (depends on gapmap)
-    dag.add_node("validate", ValidateGapmapNode);
-    dag.connect("copy_gapmap", "gapmap", "validate", "gapmap").unwrap();
+    // validate_gapmap (depends on gapmap)
+    dag.add_node("validate_gapmap", ValidateGapmapNode);
+    dag.connect("copy_gapmap", "gapmap", "validate_gapmap", "gapmap").unwrap();
 
     // merge_sfxpost (depends on tokens, parallel with fst+gapmap)
     dag.add_node("merge_sfxpost", MergeSfxpostNode { ctx: ctx.clone() });
     dag.connect("collect", "tokens", "merge_sfxpost", "tokens").unwrap();
 
-    // write (depends on all: fst, validated gapmap, sfxpost, tokens)
+    // validate_sfxpost (depends on sfxpost + tokens)
+    dag.add_node("validate_sfxpost", ValidateSfxpostNode { num_docs });
+    dag.connect("merge_sfxpost", "sfxpost", "validate_sfxpost", "sfxpost").unwrap();
+    dag.connect("collect", "tokens", "validate_sfxpost", "tokens").unwrap();
+
+    // write (depends on all: fst, validated gapmap, validated sfxpost, tokens)
     dag.add_node("write", WriteSfxNode {
-        serializer_field: field,
+        field,
         num_docs,
         serializer: serializer.clone(),
     });
     dag.connect("build_fst", "fst", "write", "fst").unwrap();
-    dag.connect("validate", "gapmap", "write", "gapmap").unwrap();
-    dag.connect("merge_sfxpost", "sfxpost", "write", "sfxpost").unwrap();
+    dag.connect("validate_gapmap", "gapmap", "write", "gapmap").unwrap();
+    dag.connect("validate_sfxpost", "sfxpost", "write", "sfxpost").unwrap();
     dag.connect("collect", "tokens", "write", "tokens").unwrap();
 
     (dag, serializer)
