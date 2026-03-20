@@ -11,7 +11,7 @@ use std::sync::Arc;
 use crate::docset::{DocSet, TERMINATED};
 use crate::index::InvertedIndexReader;
 use crate::postings::Postings;
-use crate::schema::{Field, IndexRecordOption};
+use crate::schema::IndexRecordOption;
 use crate::suffix_fst::file::SfxFileReader;
 
 /// A single contains match result.

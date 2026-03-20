@@ -19,7 +19,6 @@ use crate::indexer::SegmentSerializer;
 use crate::postings::{InvertedIndexSerializer, Postings, SegmentPostings};
 use crate::schema::{value_type_to_column_type, Field, FieldType, IndexRecordOption, Schema};
 use crate::store::StoreWriter;
-use crate::suffix_fst::builder::SuffixFstBuilder;
 use crate::suffix_fst::encode_vint;
 use crate::suffix_fst::file::{SfxFileReader, SfxFileWriter, SfxPostingsReader};
 use crate::suffix_fst::gapmap::GapMapWriter;

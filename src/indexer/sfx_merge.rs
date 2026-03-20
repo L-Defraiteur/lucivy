@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::docset::{DocSet, TERMINATED};
 use crate::index::SegmentReader;
-use crate::postings::Postings;
 use crate::schema::{Field, IndexRecordOption};
 
 // ---------------------------------------------------------------------------

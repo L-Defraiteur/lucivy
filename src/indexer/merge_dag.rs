@@ -236,7 +236,7 @@ impl Node for SfxNode {
         ]
     }
     fn execute(&mut self, nctx: &mut NodeContext) -> Result<(), String> {
-        let mut segment = nctx.take_input("segment")
+        let segment = nctx.take_input("segment")
             .ok_or("missing")?.take::<Segment>().ok_or("type")?;
         let doc_mapping = nctx.take_input("sfx_doc_mapping")
             .ok_or("missing")?.take::<Vec<DocAddress>>().ok_or("type")?;
@@ -320,7 +320,7 @@ impl Node for CloseNode {
             .ok_or("missing")?.take::<InvertedIndexSerializer>().ok_or("type")?;
         let store_writer = nctx.take_input("store_writer")
             .ok_or("missing")?.take::<StoreWriter>().ok_or("type")?;
-        let mut ff_write = nctx.take_input("ff_write")
+        let ff_write = nctx.take_input("ff_write")
             .ok_or("missing")?.take::<WritePtr>().ok_or("type")?;
         let sfx_field_ids = nctx.take_input("sfx_field_ids")
             .ok_or("missing")?.take::<Vec<u32>>().ok_or("type")?;

@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use levenshtein_automata::{Distance, LevenshteinAutomatonBuilder, DFA};
 use lucivy_fst::{Automaton, IntoStreamer, Map, OutputTable, Streamer};
 
-use super::builder::{decode_output, decode_parent_entries, read_parent_list, ParentEntry, ParentRef};
+use super::builder::{decode_output, decode_parent_entries, ParentEntry, ParentRef};
 use super::gapmap::GapMapReader;
 
 /// DFA wrapper implementing lucivy_fst::Automaton for Levenshtein search on the suffix FST.

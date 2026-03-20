@@ -142,7 +142,7 @@ struct CandidateState<S> {
     byte_from: u32,
 }
 
-use crate::query::posting_resolver::{self, PostingResolver, PostingEntry};
+use crate::query::posting_resolver::{self, PostingResolver};
 
 /// Run the continuation algorithm with a given automaton on a segment.
 /// Returns (doc_bitset, highlights) where highlights = Vec<(doc_id, byte_from, byte_to)>.

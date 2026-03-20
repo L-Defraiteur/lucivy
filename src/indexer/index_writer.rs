@@ -1,5 +1,4 @@
 use std::ops::Range;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common::BitSet;
@@ -9,7 +8,7 @@ use super::indexer_actor::{create_indexer_actor, IndexerDocsMsg, IndexerFlushMsg
 use super::operation::{AddOperation, UserOperation};
 use super::segment_updater::SegmentUpdater;
 use super::{AddBatch, PreparedCommit};
-use crate::actor::{mailbox, ActorRef, Envelope, Message};
+use crate::actor::{Envelope, Message};
 use crate::directory::{DirectoryLock, GarbageCollectionResult, TerminatingWrite};
 use crate::error::LucivyError;
 use crate::fastfield::write_alive_bitset;

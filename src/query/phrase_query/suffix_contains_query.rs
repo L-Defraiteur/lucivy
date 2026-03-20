@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use crate::docset::{DocSet, TERMINATED};
 use crate::fieldnorm::FieldNormReader;
-use crate::index::SegmentId;
 use crate::query::bm25::Bm25Weight;
 use crate::query::phrase_query::scoring_utils::HighlightSink;
 use crate::query::{EmptyScorer, EnableScoring, Explanation, Query, Scorer, Weight};

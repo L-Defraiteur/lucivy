@@ -5,19 +5,15 @@
 
 use std::sync::Arc;
 
-use crate::actor::actor_state::ActorState;
-use crate::actor::envelope::{type_tag_hash, Envelope, Message, ReplyPort};
+use crate::actor::envelope::{type_tag_hash, Message};
 use crate::actor::generic_actor::GenericActor;
 use crate::actor::handler::TypedHandler;
-use crate::actor::mailbox::ActorRef;
-use crate::actor::{ActorStatus, Priority};
+use crate::actor::ActorStatus;
 use crate::directory::GarbageCollectionResult;
-use crate::index::SegmentId;
 use crate::indexer::events::IndexEvent;
 use crate::indexer::merge_operation::MergeOperation;
 use crate::indexer::segment_updater::{garbage_collect_files, SegmentUpdaterShared};
 use crate::indexer::SegmentEntry;
-use crate::LucivyError;
 
 // ─── Messages ───────────────────────────────────────────────────────────────
 

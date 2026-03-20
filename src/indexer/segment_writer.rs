@@ -17,7 +17,7 @@ use crate::postings::{
     PerFieldPostingsWriter, PostingsWriter,
 };
 use crate::schema::document::{Document, Value};
-use crate::schema::{Field, FieldEntry, FieldType, Schema, DATE_TIME_PRECISION_INDEXED};
+use crate::schema::{FieldEntry, FieldType, Schema, DATE_TIME_PRECISION_INDEXED};
 use crate::suffix_fst::SfxCollector;
 
 /// Extract num_suffix_terms from sfx_bytes header.

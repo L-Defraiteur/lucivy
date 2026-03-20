@@ -9,7 +9,7 @@
 //! FinalizerActor while the IndexerActor immediately starts a new segment.
 //! This pipelines the expensive finalize with the next batch of documents.
 
-use crate::actor::envelope::{type_tag_hash, Envelope, Message, ReplyPort};
+use crate::actor::envelope::{type_tag_hash, Envelope, Message};
 use crate::actor::generic_actor::GenericActor;
 use crate::actor::handler::TypedHandler;
 use crate::actor::mailbox::{mailbox, ActorRef};

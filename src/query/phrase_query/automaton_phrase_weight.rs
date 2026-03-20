@@ -13,16 +13,15 @@ use crate::index::{SegmentId, SegmentReader};
 use crate::postings::{Postings, TermInfo};
 use crate::query::bm25::Bm25Weight;
 use crate::query::explanation::does_not_match;
-use crate::query::fuzzy_query::DfaWrapper;
 use crate::query::phrase_prefix_query::prefix_end;
 use crate::query::posting_resolver::{PostingResolver, build_resolver};
 use crate::query::resolved_postings::ResolvedPostings;
 use crate::query::union::SimpleUnion;
 use crate::query::{BitSetDocSet, ConstScorer, EmptyScorer, Explanation, Scorer, Weight};
-use crate::schema::{Field, IndexRecordOption, Term};
+use crate::schema::{Field, IndexRecordOption};
 use crate::suffix_fst::SfxTermDictionary;
 use crate::suffix_fst::file::SfxDfaWrapper;
-use crate::{DocId, InvertedIndexReader, Score};
+use crate::{DocId, Score};
 
 /// Cascade level returned by cascade_term_infos / cascade_ordinals.
 #[derive(Debug, Clone, Copy)]
