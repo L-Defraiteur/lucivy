@@ -46,30 +46,6 @@ fn count_tf_sorted(doc_ids: &[DocId]) -> Vec<(DocId, u32)> {
 /// Tokenize a query string into (tokens, separators) using the same
 /// SimpleTokenizer + LowerCaser as the ._raw field.
 /// Returns (["rust", "lang"], ["🦀"]) for "rust🦀lang".
-/// Tokenize with the full RAW_TOKENIZER (SimpleTokenizer + CamelCaseSplit + LowerCaser).
-/// Used for cross-token expansion: uppercase query → camelCase split → multi-token search.
-fn tokenize_query_raw(query: &str) -> (Vec<String>, Vec<String>) {
-    use crate::tokenizer::CamelCaseSplitFilter;
-    let mut tokenizer = TextAnalyzer::builder(SimpleTokenizer::default())
-        .filter(CamelCaseSplitFilter)
-        .filter(LowerCaser)
-        .build();
-    let mut stream = tokenizer.token_stream(query);
-    let mut tokens = Vec::new();
-    let mut separators = Vec::new();
-    let mut last_end: usize = 0;
-    while stream.advance() {
-        let tok = stream.token();
-        if !tokens.is_empty() {
-            let sep = &query[last_end..tok.offset_from];
-            separators.push(sep.to_lowercase());
-        }
-        tokens.push(tok.text.clone());
-        last_end = tok.offset_to;
-    }
-    (tokens, separators)
-}
-
 fn tokenize_query(query: &str) -> (Vec<String>, Vec<String>) {
     let mut tokenizer = TextAnalyzer::builder(SimpleTokenizer::default())
         .filter(LowerCaser)
@@ -248,37 +224,8 @@ impl Weight for SuffixContainsWeight {
                 }
             };
 
-            // Cross-token expansion: tokenize the query in UPPERCASE with the
-            // full RAW_TOKENIZER (CamelCaseSplit). If this produces multiple
-            // tokens, run multi-token search with empty gap separators and
-            // union the results. This catches cases where the tokenizer split
-            // an ALL_CAPS word in the document (e.g., FUNCTION → FUNC+TION).
-            if !prefix_only && fuzzy_d == 0 {
-                let upper_query = self.query_text.to_uppercase();
-                let (upper_tokens, _) = tokenize_query_raw(&upper_query);
-                if upper_tokens.len() > 1 {
-                    let token_refs: Vec<&str> = upper_tokens.iter().map(|s| s.as_str()).collect();
-                    let empty_seps: Vec<&str> = vec![""; upper_tokens.len() - 1];
-                    let multi_matches = suffix_contains::suffix_contains_multi_token(
-                        &sfx_reader, &token_refs, &empty_seps, &resolver,
-                    );
-                    // Merge: add multi-token matches as single-token match entries
-                    let existing_docs: std::collections::HashSet<u32> =
-                        matches.iter().map(|m| m.doc_id).collect();
-                    for mm in multi_matches {
-                        if !existing_docs.contains(&mm.doc_id) {
-                            matches.push(suffix_contains::SuffixContainsMatch {
-                                doc_id: mm.doc_id,
-                                token_index: mm.token_matches.first().map(|m| m.token_index).unwrap_or(0),
-                                byte_from: mm.byte_from,
-                                byte_to: mm.byte_to,
-                                parent_term: String::new(),
-                                si: 0,
-                            });
-                        }
-                    }
-                }
-            }
+            // No uppercase expansion needed: CamelCaseSplitFilter no longer
+            // splits ALL_CAPS, and cross-token continuation handles edge cases.
 
             // Continuation is handled inside suffix_contains_single_token_inner
             // via the sfx_reader parameter (passed through the closure).
