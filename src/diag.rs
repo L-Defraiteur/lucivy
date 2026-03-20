@@ -125,7 +125,7 @@ impl DiagFilter {
 
 /// Global diagnostic event bus.
 pub struct DiagBus {
-    subscribers: Mutex<Vec<(DiagFilter, std::sync::mpsc::SyncSender<DiagEvent>)>>,
+    subscribers: Mutex<Vec<(DiagFilter, std::sync::mpsc::Sender<DiagEvent>)>>,
     active: AtomicBool,
 }
 
@@ -150,14 +150,14 @@ impl DiagBus {
         let subs = self.subscribers.lock().unwrap();
         for (filter, tx) in subs.iter() {
             if filter.matches(&event) {
-                let _ = tx.try_send(event.clone());
+                let _ = tx.send(event.clone());
             }
         }
     }
 
     /// Subscribe to diagnostic events matching the filter.
     pub fn subscribe(&self, filter: DiagFilter) -> std::sync::mpsc::Receiver<DiagEvent> {
-        let (tx, rx) = std::sync::mpsc::sync_channel(10_000);
+        let (tx, rx) = std::sync::mpsc::channel();
         let mut subs = self.subscribers.lock().unwrap();
         subs.push((filter, tx));
         self.active.store(true, Ordering::Relaxed);
