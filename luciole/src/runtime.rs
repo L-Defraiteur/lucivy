@@ -242,20 +242,25 @@ pub fn execute_dag(
                 nodes: level_names.clone(),
             });
 
-            if level.len() == 1 {
-                let node_idx = level[0];
-                let node_name = dag.node_name(node_idx).to_string();
-                let nr = execute_single_node(
-                    dag, node_idx, &mut port_data, &mut consumer_counts,
-                    level_idx, &emit,
-                )?;
-                // Capture undo context if supported
-                if dag.node_mut(node_idx).can_undo() {
-                    if let Some(undo_ctx) = dag.node_mut(node_idx).undo_context() {
-                        undo_stack.push((node_idx, undo_ctx));
+            // If on a scheduler thread, execute ALL nodes inline (sequentially)
+            // to avoid thread pool starvation deadlocks. Parallel execution is
+            // only safe when called from a non-scheduler thread.
+            let inline = crate::scheduler::is_scheduler_thread() || level.len() == 1;
+
+            if inline {
+                for &node_idx in level {
+                    let node_name = dag.node_name(node_idx).to_string();
+                    let nr = execute_single_node(
+                        dag, node_idx, &mut port_data, &mut consumer_counts,
+                        level_idx, &emit,
+                    )?;
+                    if dag.node_mut(node_idx).can_undo() {
+                        if let Some(undo_ctx) = dag.node_mut(node_idx).undo_context() {
+                            undo_stack.push((node_idx, undo_ctx));
+                        }
                     }
+                    results.push((node_name, nr));
                 }
-                results.push((node_name, nr));
             } else {
                 let level_results = execute_level_parallel(
                     dag, level, &mut port_data, &mut consumer_counts,

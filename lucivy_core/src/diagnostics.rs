@@ -629,3 +629,249 @@ pub fn inspect_segments(handle: &LucivyHandle) -> Vec<SegmentSummary> {
     }
     summaries
 }
+
+// ---------------------------------------------------------------------------
+// trace_search — structured trace: why is doc X (not) found by contains "Y"?
+// ---------------------------------------------------------------------------
+
+/// One step in the search trace chain.
+#[derive(Debug)]
+pub enum TraceStep {
+    /// The doc's stored text contains the search term as substring.
+    GroundTruth { found: bool, context: Option<String> },
+    /// Tokens produced by the tokenizer for this doc.
+    Tokens { tokens_containing_term: Vec<String>, total_tokens: usize },
+    /// Token found in the term dict (BM25 inverted index).
+    TermDict { token: String, found: bool, doc_freq: Option<u32> },
+    /// Suffix found in the suffix FST.
+    SuffixFst { token: String, suffix: String, si: u16, found: bool, ordinal: Option<u64> },
+    /// Doc found in the sfxpost for this ordinal.
+    SfxPost { token: String, ordinal: u64, doc_found: bool, total_docs: usize },
+}
+
+/// Full trace of why a doc is/isn't found by a contains search.
+#[derive(Debug)]
+pub struct SearchTrace {
+    pub query: String,
+    pub doc_id: u32,
+    pub segment_id: String,
+    pub steps: Vec<TraceStep>,
+}
+
+impl std::fmt::Display for SearchTrace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "=== Search trace: {:?} in doc {} (segment {}) ===",
+            self.query, self.doc_id, &self.segment_id[..8.min(self.segment_id.len())])?;
+        for step in &self.steps {
+            match step {
+                TraceStep::GroundTruth { found, context } => {
+                    let ctx = context.as_deref().unwrap_or("");
+                    writeln!(f, "  ground_truth: {} {}", if *found { "FOUND" } else { "NOT FOUND" }, ctx)?;
+                }
+                TraceStep::Tokens { tokens_containing_term, total_tokens } => {
+                    writeln!(f, "  tokenizer: {}/{} tokens contain query: {:?}",
+                        tokens_containing_term.len(), total_tokens, tokens_containing_term)?;
+                }
+                TraceStep::TermDict { token, found, doc_freq } => {
+                    writeln!(f, "  term_dict: {:?} {} (doc_freq={:?})",
+                        token, if *found { "FOUND" } else { "NOT FOUND" }, doc_freq)?;
+                }
+                TraceStep::SuffixFst { token, suffix, si, found, ordinal } => {
+                    writeln!(f, "  suffix_fst: {:?} suffix={:?} si={} {} (ordinal={:?})",
+                        token, suffix, si, if *found { "FOUND" } else { "NOT FOUND" }, ordinal)?;
+                }
+                TraceStep::SfxPost { token, ordinal, doc_found, total_docs } => {
+                    writeln!(f, "  sfxpost: {:?} ord={} doc {} ({} total entries)",
+                        token, ordinal, if *doc_found { "FOUND" } else { "NOT FOUND" }, total_docs)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Trace why a specific doc is/isn't found by a contains search.
+///
+/// Walks the entire chain: stored text → tokenizer → term dict → suffix FST → sfxpost.
+/// Returns a structured trace showing where the chain breaks (if it does).
+pub fn trace_search(
+    handle: &LucivyHandle,
+    field_name: &str,
+    search_term: &str,
+    doc_id: u32,
+) -> SearchTrace {
+    use ld_lucivy::suffix_fst::file::SfxFileReader;
+    use ld_lucivy::query::posting_resolver;
+    use ld_lucivy::schema::IndexRecordOption;
+    use ld_lucivy::{DocSet, TERMINATED};
+
+    let field = handle.field(field_name).unwrap();
+    let searcher = handle.reader.searcher();
+    let search_lower = search_term.to_lowercase();
+    let mut steps = Vec::new();
+    let mut segment_id = String::new();
+
+    for seg_reader in searcher.segment_readers() {
+        if doc_id >= seg_reader.max_doc() { continue; }
+        if seg_reader.alive_bitset().map_or(false, |bs| !bs.is_alive(doc_id)) { continue; }
+
+        segment_id = seg_reader.segment_id().uuid_string();
+
+        // Step 1: Ground truth — does the stored text contain the search term?
+        let mut doc_text = String::new();
+        if let Ok(store) = seg_reader.get_store_reader(0) {
+            if let Ok(doc) = store.get::<LucivyDocument>(doc_id) {
+                for (f, val) in doc.field_values() {
+                    if f == field {
+                        if let Some(text) = val.as_value().as_str() {
+                            doc_text = text.to_string();
+                        }
+                    }
+                }
+            }
+        }
+        let lower_text = doc_text.to_lowercase();
+        let gt_found = lower_text.contains(&search_lower);
+        let context = if gt_found {
+            lower_text.find(&search_lower).map(|pos| {
+                let start = pos.saturating_sub(30);
+                let end = (pos + search_lower.len() + 30).min(doc_text.len());
+                format!("...{}...", &doc_text[start..end])
+            })
+        } else { None };
+        steps.push(TraceStep::GroundTruth { found: gt_found, context });
+
+        // Step 2: Tokenize with the field's tokenizer
+        let mut all_tokens = Vec::new();
+        let mut matching_tokens = Vec::new();
+        let tm = handle.index.tokenizers();
+        let analyzer_name = "raw_code";
+        match tm.get(analyzer_name) {
+            Some(mut analyzer) => {
+                let mut stream = analyzer.token_stream(&doc_text);
+                while stream.advance() {
+                    let tok = stream.token();
+                    all_tokens.push(tok.text.clone());
+                    if tok.text.contains(&search_lower) {
+                        matching_tokens.push(tok.text.clone());
+                    }
+                }
+            }
+            None => {
+                // Tokenizer not registered — show what's available
+                steps.push(TraceStep::Tokens {
+                    tokens_containing_term: vec![format!("ERROR: tokenizer '{}' not found", analyzer_name)],
+                    total_tokens: 0,
+                });
+            }
+        }
+        steps.push(TraceStep::Tokens {
+            tokens_containing_term: matching_tokens.clone(),
+            total_tokens: all_tokens.len(),
+        });
+
+        // Step 3: For each matching token, check term dict
+        for token in &matching_tokens {
+            let term = Term::from_field_text(field, token);
+            if let Ok(inv_idx) = seg_reader.inverted_index(field) {
+                match inv_idx.get_term_info(&term) {
+                    Ok(Some(ti)) => {
+                        // Check if this doc is in the postings
+                        let mut in_postings = false;
+                        if let Ok(mut p) = inv_idx.read_postings_from_terminfo(&ti, IndexRecordOption::Basic) {
+                            loop {
+                                let d = p.doc();
+                                if d == TERMINATED { break; }
+                                if d == doc_id { in_postings = true; break; }
+                                p.advance();
+                            }
+                        }
+                        steps.push(TraceStep::TermDict {
+                            token: token.clone(),
+                            found: in_postings,
+                            doc_freq: Some(ti.doc_freq),
+                        });
+                    }
+                    _ => {
+                        steps.push(TraceStep::TermDict {
+                            token: token.clone(),
+                            found: false,
+                            doc_freq: None,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Step 3b: Show tokens around the match position for debugging
+        if gt_found && matching_tokens.is_empty() {
+            if let Some(pos) = lower_text.find(&search_lower) {
+                // Find tokens whose offset range overlaps with the match position
+                let tm2 = handle.index.tokenizers();
+                if let Some(mut analyzer) = tm2.get("raw_code") {
+                    let mut nearby = Vec::new();
+                    let mut stream = analyzer.token_stream(&doc_text);
+                    while stream.advance() {
+                        let tok = stream.token();
+                        // Tokens within 50 bytes of the match
+                        if tok.offset_from <= pos + 50 && tok.offset_to + 50 >= pos {
+                            nearby.push(format!("{}[{}..{}]", tok.text, tok.offset_from, tok.offset_to));
+                        }
+                    }
+                    steps.push(TraceStep::Tokens {
+                        tokens_containing_term: nearby,
+                        total_tokens: 0, // marker: these are "nearby" tokens
+                    });
+                }
+            }
+        }
+
+        // Steps 4-5: SFX + sfxpost — read bytes directly, no build_resolver.
+        // This avoids any scheduler/lock dependency → zero deadlock risk.
+        if let (Some(sfx_slice), Some(sfxpost_slice)) = (seg_reader.sfx_file(field), seg_reader.sfxpost_file(field)) {
+            if let (Ok(sfx_bytes), Ok(sfxpost_bytes)) = (sfx_slice.read_bytes(), sfxpost_slice.read_bytes()) {
+                if let Ok(sfx_reader) = ld_lucivy::suffix_fst::file::SfxFileReader::open(sfx_bytes.as_ref()) {
+                    if let Ok(sfxpost_reader) = ld_lucivy::suffix_fst::file::SfxPostingsReader::open(sfxpost_bytes.as_ref()) {
+                        let walk = sfx_reader.prefix_walk(&search_lower);
+                        for (suffix_key, parents) in &walk {
+                            for parent in parents {
+                                steps.push(TraceStep::SuffixFst {
+                                    token: suffix_key.clone(),
+                                    suffix: search_lower.clone(),
+                                    si: parent.si,
+                                    found: true,
+                                    ordinal: Some(parent.raw_ordinal),
+                                });
+
+                                // Read sfxpost directly — no resolver needed
+                                let entries = sfxpost_reader.entries(parent.raw_ordinal as u32);
+                                let doc_found = entries.iter().any(|e| e.doc_id == doc_id);
+                                steps.push(TraceStep::SfxPost {
+                                    token: suffix_key.clone(),
+                                    ordinal: parent.raw_ordinal,
+                                    doc_found,
+                                    total_docs: entries.len(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        break; // only process the first matching segment
+    }
+
+    SearchTrace { query: search_term.to_string(), doc_id, segment_id, steps }
+}
+
+/// Trace for sharded handles — finds which shard contains the doc.
+pub fn trace_search_sharded(
+    handle: &ShardedHandle,
+    field_name: &str,
+    search_term: &str,
+    shard_idx: usize,
+    doc_id: u32,
+) -> Option<SearchTrace> {
+    handle.shard(shard_idx).map(|shard| trace_search(shard, field_name, search_term, doc_id))
+}

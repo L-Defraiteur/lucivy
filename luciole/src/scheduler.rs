@@ -9,6 +9,17 @@ use super::events::{EventBus, EventReceiver, SchedulerEvent, WakeReason};
 use super::mailbox::{attach_wake_handle, ActorRef, Mailbox, WakeHandle};
 use super::{Actor, ActorStatus, Priority};
 
+thread_local! {
+    /// True if the current thread is a scheduler worker thread.
+    static IS_SCHEDULER_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Returns true if the current thread is a scheduler worker thread.
+/// Used by execute_dag to decide between parallel and inline execution.
+pub fn is_scheduler_thread() -> bool {
+    IS_SCHEDULER_THREAD.with(|c| c.get())
+}
+
 // ---------------------------------------------------------------------------
 // Global scheduler — un seul pool de threads pour tout le process.
 // Comme rayon::ThreadPool, initialisé lazy au premier usage.
@@ -555,6 +566,7 @@ impl Drop for SchedulerHandle {
 // ---------------------------------------------------------------------------
 
 fn run_loop(shared: &SharedState, thread_index: usize) {
+    IS_SCHEDULER_THREAD.with(|c| c.set(true));
     loop {
         if shared.shutdown.load(Ordering::Acquire) {
             return;

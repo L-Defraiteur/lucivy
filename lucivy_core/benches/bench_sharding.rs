@@ -459,24 +459,219 @@ fn bench_sharding_comparison() {
 
         // Deep ordinal comparison for shard 0
         if let Some(shard) = handle.shard(0) {
-            for term in &["mutex", "lock"] {
+            for term in &["mutex", "lock", "function"] {
                 let cmp = lucivy_core::diagnostics::compare_postings_vs_sfxpost(shard, "content", term);
                 eprintln!("{}", cmp);
             }
         }
 
         // SFX path diagnostic: trace prefix_walk → parents → sfxpost → doc_ids
-        eprintln!("\n=== SFX path diagnostic ===");
-        for term in &["mutex", "lock"] {
-            let sfx_reports = lucivy_core::diagnostics::inspect_sfx_sharded(handle, "content", term);
-            let total_sfx: u32 = sfx_reports.iter().map(|(_, r)| r.total_sfx_docs).sum();
-            eprintln!("\n  SFX search {:?}: {} total docs via sfx path", term, total_sfx);
-            for (shard_id, report) in &sfx_reports {
-                for seg in &report.segments {
-                    if seg.sfx_doc_count > 0 || !seg.has_sfx {
-                        eprintln!("    shard_{} seg {} ({} docs): walk={} parents={} → {} docs",
-                            shard_id, &seg.segment_id[..8.min(seg.segment_id.len())],
-                            seg.num_docs, seg.sfx_walk_hits, seg.sfx_parent_count, seg.sfx_doc_count);
+        eprintln!("\n=== Real search vs ground truth (via DiagBus) ===");
+        for term in &["mutex", "lock", "function", "printk", "sched"] {
+            // Subscribe to search events BEFORE the search
+            let rx = ld_lucivy::diag::diag_bus().subscribe(
+                ld_lucivy::diag::DiagFilter::SfxTerm(term.to_string()),
+            );
+
+            // Run the real search via each shard
+            for shard_idx in 0..4 {
+                if let Some(shard) = handle.shard(shard_idx) {
+                    let searcher = shard.reader.searcher();
+                    let field = shard.field("content").unwrap();
+                    let q = ld_lucivy::query::SuffixContainsQuery::new(
+                        field, term.to_string(),
+                    );
+                    let _ = searcher.search(&q, &ld_lucivy::collector::Count);
+                }
+            }
+
+            // Collect totals from SearchComplete events (one per segment)
+            let mut total_search = 0u32;
+            while let Ok(event) = rx.try_recv() {
+                if let ld_lucivy::diag::DiagEvent::SearchComplete { total_docs, .. } = event {
+                    total_search += total_docs;
+                }
+            }
+
+            ld_lucivy::diag::diag_bus().clear();
+
+            // Compare with ground truth
+            let gt_status = if verify {
+                let gt_reports = lucivy_core::diagnostics::inspect_term_sharded_verified(handle, "content", term);
+                let gt: u32 = gt_reports.iter().map(|(_, r)| r.ground_truth_count.unwrap_or(0)).sum();
+                if total_search == gt { format!(" | ground_truth={gt} ✓ MATCH") }
+                else { format!(" | ground_truth={gt} ✗ DIFF={}", (gt as i64 - total_search as i64).abs()) }
+            } else { String::new() };
+            eprintln!("\n  search {:?}: {} docs{}", term, total_search, gt_status);
+        }
+
+        // Find missing docs: in ground truth but NOT in SFX search
+        if verify {
+            eprintln!("\n=== Missing docs analysis ===");
+            for term in &["function"] {
+                // Get SFX doc set
+                let sfx_reports = lucivy_core::diagnostics::inspect_sfx_sharded(handle, "content", term);
+                let mut sfx_docs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+                for (_, report) in &sfx_reports {
+                    for seg in &report.segments {
+                        // We need doc_ids from the SFX path — reuse total count
+                    }
+                }
+
+                // Brute force: for each shard, find docs with "function" in text
+                // that the SFX search missed
+                let search_lower = term.to_lowercase();
+                let mut missing_count = 0u32;
+                for shard_idx in 0..4 {
+                    if let Some(shard) = handle.shard(shard_idx) {
+                        let searcher = shard.reader.searcher();
+                        let field = shard.field("content").unwrap();
+
+                        // Get SFX doc_ids for this shard
+                        let sfx_report = lucivy_core::diagnostics::inspect_sfx(shard, "content", term);
+                        // sfx_report has total_sfx_docs but not the actual doc_ids
+                        // We need to redo the SFX search to get doc_ids
+                        use ld_lucivy::suffix_fst::file::SfxFileReader;
+                        use ld_lucivy::query::posting_resolver;
+                        let mut shard_sfx_docs = std::collections::HashSet::new();
+                        for seg_reader in searcher.segment_readers() {
+                            if let (Some(sfx_slice), Some(_sfxpost)) = (seg_reader.sfx_file(field), seg_reader.sfxpost_file(field)) {
+                                if let Ok(sfx_bytes) = sfx_slice.read_bytes() {
+                                    if let Ok(sfx_reader) = SfxFileReader::open(sfx_bytes.as_ref()) {
+                                        let walk = sfx_reader.prefix_walk(&search_lower);
+                                        if let Ok(resolver) = posting_resolver::build_resolver(seg_reader, field) {
+                                            for (_, parents) in &walk {
+                                                for parent in parents {
+                                                    for e in resolver.resolve(parent.raw_ordinal) {
+                                                        shard_sfx_docs.insert(e.doc_id);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Now find ground truth docs NOT in SFX
+                        for seg_reader in searcher.segment_readers() {
+                            if let Ok(store) = seg_reader.get_store_reader(0) {
+                                for doc_id in 0..seg_reader.max_doc() {
+                                    if seg_reader.alive_bitset().map_or(true, |bs| bs.is_alive(doc_id)) {
+                                        if let Ok(doc) = store.get::<ld_lucivy::LucivyDocument>(doc_id) {
+                                            for (f, val) in doc.field_values() {
+                                                if f == field {
+                                                    if let Some(text) = {
+                                                        use ld_lucivy::schema::document::Value;
+                                                        val.as_value().as_str()
+                                                    } {
+                                                        if text.to_lowercase().contains(&search_lower) && !shard_sfx_docs.contains(&doc_id) {
+                                                            missing_count += 1;
+                                                            if missing_count <= 5 {
+                                                                let lower = text.to_lowercase();
+                                                                if let Some(pos) = lower.find(&search_lower) {
+                                                                    let start = pos.saturating_sub(40);
+                                                                    let end = (pos + search_lower.len() + 40).min(text.len());
+                                                                    let ctx = &text[start..end];
+                                                                    // Check if this doc is in the BM25 posting list
+                                                                    let in_postings = {
+                                                                        use ld_lucivy::schema::Term;
+                                                                        use ld_lucivy::{DocSet, TERMINATED};
+                                                                        let term = Term::from_field_text(field, &search_lower);
+                                                                        let mut found = false;
+                                                                        for sr in searcher.segment_readers() {
+                                                                            if let Ok(inv) = sr.inverted_index(field) {
+                                                                                if let Ok(Some(ti)) = inv.get_term_info(&term) {
+                                                                                    if let Ok(mut p) = inv.read_postings_from_terminfo(
+                                                                                        &ti, ld_lucivy::schema::IndexRecordOption::Basic,
+                                                                                    ) {
+                                                                                        loop {
+                                                                                            let d = p.doc();
+                                                                                            if d == TERMINATED { break; }
+                                                                                            if d == doc_id { found = true; break; }
+                                                                                            p.advance();
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                        found
+                                                                    };
+                                                                    eprintln!("\n  MISSING shard_{} doc_{}: {:?}", shard_idx, doc_id, ctx);
+                                                                    eprintln!("    in_BM25_postings={}", in_postings);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                eprintln!("\n  {:?}: {} docs missing from SFX", term, missing_count);
+
+                // Trace the first few missing docs
+                if missing_count > 0 {
+                    for shard_idx in 0..4 {
+                        if let Some(shard) = handle.shard(shard_idx) {
+                            let searcher = shard.reader.searcher();
+                            let field = shard.field("content").unwrap();
+                            let search_lower = term.to_lowercase();
+
+                            // Rebuild SFX doc set for this shard
+                            use ld_lucivy::suffix_fst::file::SfxFileReader;
+                            use ld_lucivy::query::posting_resolver;
+                            let mut sfx_set = std::collections::HashSet::new();
+                            for sr in searcher.segment_readers() {
+                                if let (Some(sfx_slice), Some(_)) = (sr.sfx_file(field), sr.sfxpost_file(field)) {
+                                    if let Ok(sfx_bytes) = sfx_slice.read_bytes() {
+                                        if let Ok(sfx_reader) = SfxFileReader::open(sfx_bytes.as_ref()) {
+                                            if let Ok(resolver) = posting_resolver::build_resolver(sr, field) {
+                                                for (_, parents) in sfx_reader.prefix_walk(&search_lower) {
+                                                    for p in &parents {
+                                                        for e in resolver.resolve(p.raw_ordinal) {
+                                                            sfx_set.insert(e.doc_id);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Find missing docs and trace them
+                            let mut traced = 0;
+                            for sr in searcher.segment_readers() {
+                                if let Ok(store) = sr.get_store_reader(0) {
+                                    for did in 0..sr.max_doc() {
+                                        if sr.alive_bitset().map_or(true, |bs| bs.is_alive(did)) {
+                                            if let Ok(doc) = store.get::<ld_lucivy::LucivyDocument>(did) {
+                                                for (f, val) in doc.field_values() {
+                                                    if f == field {
+                                                        use ld_lucivy::schema::document::Value;
+                                                        if let Some(text) = val.as_value().as_str() {
+                                                            if text.to_lowercase().contains(&search_lower) && !sfx_set.contains(&did) {
+                                                                if traced < 2 {
+                                                                    let trace = lucivy_core::diagnostics::trace_search(shard, "content", term, did);
+                                                                    eprintln!("\n{}", trace);
+                                                                    traced += 1;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        break; // only first shard for now
                     }
                 }
             }

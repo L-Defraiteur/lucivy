@@ -372,6 +372,18 @@ impl SegmentWriter {
                             let collector = self.sfx_collectors.get_mut(&field.field_id()).unwrap();
                             collector.begin_value(raw_text);
                             for tok in interceptor.take_captured() {
+                                {
+                                    let bus = crate::diag::diag_bus();
+                                    if bus.is_active() {
+                                        bus.emit(crate::diag::DiagEvent::TokenCaptured {
+                                            doc_id,
+                                            field_id: field.field_id(),
+                                            token: tok.text.clone(),
+                                            offset_from: tok.offset_from,
+                                            offset_to: tok.offset_to,
+                                        });
+                                    }
+                                }
                                 collector.add_token(&tok.text, tok.offset_from, tok.offset_to);
                             }
                             collector.end_value();

@@ -47,6 +47,30 @@ fn count_tf_sorted(doc_ids: &[DocId]) -> Vec<(DocId, u32)> {
 /// Tokenize a query string into (tokens, separators) using the same
 /// SimpleTokenizer + LowerCaser as the ._raw field.
 /// Returns (["rust", "lang"], ["🦀"]) for "rust🦀lang".
+/// Tokenize with the full RAW_TOKENIZER (SimpleTokenizer + CamelCaseSplit + LowerCaser).
+/// Used for cross-token expansion: uppercase query → camelCase split → multi-token search.
+fn tokenize_query_raw(query: &str) -> (Vec<String>, Vec<String>) {
+    use crate::tokenizer::CamelCaseSplitFilter;
+    let mut tokenizer = TextAnalyzer::builder(SimpleTokenizer::default())
+        .filter(CamelCaseSplitFilter)
+        .filter(LowerCaser)
+        .build();
+    let mut stream = tokenizer.token_stream(query);
+    let mut tokens = Vec::new();
+    let mut separators = Vec::new();
+    let mut last_end: usize = 0;
+    while stream.advance() {
+        let tok = stream.token();
+        if !tokens.is_empty() {
+            let sep = &query[last_end..tok.offset_from];
+            separators.push(sep.to_lowercase());
+        }
+        tokens.push(tok.text.clone());
+        last_end = tok.offset_to;
+    }
+    (tokens, separators)
+}
+
 fn tokenize_query(query: &str) -> (Vec<String>, Vec<String>) {
     let mut tokenizer = TextAnalyzer::builder(SimpleTokenizer::default())
         .filter(LowerCaser)
@@ -187,27 +211,86 @@ impl Weight for SuffixContainsWeight {
         let (doc_tf, highlights) = if query_tokens.len() <= 1 {
             // Single-token path
             let query = if query_tokens.is_empty() { &self.query_text } else { &query_tokens[0] };
-            let matches = if fuzzy_d == 0 {
+            let mut matches = if fuzzy_d == 0 {
                 if prefix_only {
                     suffix_contains::suffix_contains_single_token_prefix(
-                        &sfx_reader, query, resolver,
+                        &sfx_reader, query, &resolver,
                     )
                 } else {
                     suffix_contains::suffix_contains_single_token(
-                        &sfx_reader, query, resolver,
+                        &sfx_reader, query, &resolver,
                     )
                 }
             } else {
                 if prefix_only {
                     suffix_contains::suffix_contains_single_token_fuzzy_prefix(
-                        &sfx_reader, query, fuzzy_d, resolver,
+                        &sfx_reader, query, fuzzy_d, &resolver,
                     )
                 } else {
                     suffix_contains::suffix_contains_single_token_fuzzy(
-                        &sfx_reader, query, fuzzy_d, resolver,
+                        &sfx_reader, query, fuzzy_d, &resolver,
                     )
                 }
             };
+
+            // Cross-token expansion: tokenize the query in UPPERCASE with the
+            // full RAW_TOKENIZER (CamelCaseSplit). If this produces multiple
+            // tokens, run multi-token search with empty gap separators and
+            // union the results. This catches cases where the tokenizer split
+            // an ALL_CAPS word in the document (e.g., FUNCTION → FUNC+TION).
+            if !prefix_only && fuzzy_d == 0 {
+                let upper_query = self.query_text.to_uppercase();
+                let (upper_tokens, _) = tokenize_query_raw(&upper_query);
+                if upper_tokens.len() > 1 {
+                    let token_refs: Vec<&str> = upper_tokens.iter().map(|s| s.as_str()).collect();
+                    let empty_seps: Vec<&str> = vec![""; upper_tokens.len() - 1];
+                    let multi_matches = suffix_contains::suffix_contains_multi_token(
+                        &sfx_reader, &token_refs, &empty_seps, &resolver,
+                    );
+                    // Merge: add multi-token matches as single-token match entries
+                    let existing_docs: std::collections::HashSet<u32> =
+                        matches.iter().map(|m| m.doc_id).collect();
+                    for mm in multi_matches {
+                        if !existing_docs.contains(&mm.doc_id) {
+                            matches.push(suffix_contains::SuffixContainsMatch {
+                                doc_id: mm.doc_id,
+                                token_index: mm.token_matches.first().map(|m| m.token_index).unwrap_or(0),
+                                byte_from: mm.byte_from,
+                                byte_to: mm.byte_to,
+                                parent_term: String::new(),
+                                si: 0,
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Emit diagnostic events
+            {
+                let bus = crate::diag::diag_bus();
+                if bus.is_active() {
+                    let seg_id = segment_id.uuid_string();
+                    for m in &matches {
+                        bus.emit(crate::diag::DiagEvent::SearchMatch {
+                            query: self.query_text.clone(),
+                            segment_id: seg_id.clone(),
+                            doc_id: m.doc_id,
+                            byte_from: m.byte_from,
+                            byte_to: m.byte_to,
+                            cross_token: false, // TODO: tag cross-token matches
+                        });
+                    }
+                    let mut unique: Vec<DocId> = matches.iter().map(|m| m.doc_id).collect();
+                    unique.sort_unstable();
+                    unique.dedup();
+                    bus.emit(crate::diag::DiagEvent::SearchComplete {
+                        query: self.query_text.clone(),
+                        segment_id: seg_id,
+                        total_docs: unique.len() as u32,
+                    });
+                }
+            }
+
             let highlights: Vec<(DocId, usize, usize)> = matches.iter()
                 .map(|m| (m.doc_id, m.byte_from, m.byte_to))
                 .collect();

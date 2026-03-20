@@ -216,6 +216,7 @@ pub type Result<T> = std::result::Result<T, LucivyError>;
 mod core;
 pub mod indexer;
 
+pub mod diag;
 pub mod error;
 pub mod tokenizer;
 
