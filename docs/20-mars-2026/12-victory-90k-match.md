@@ -92,3 +92,28 @@ search_dag (drain → flush → build_weight → shard_N ∥ → merge_results)
 4. Tests WASM emscripten multi-thread
 5. Optimisation continuation (cache les walks, early exit)
 6. Fix lock file (close() cascade)
+
+## Optimisation future : continuation via stored text
+
+La continuation hybride actuelle fait N walks successifs pour traverser N frontières
+de tokens. Chaque walk est un `prefix_walk_si0(remaining)` + join. À depth 3+,
+ça multiplie les lookups FST.
+
+Optimisation possible :
+- **Depth 1-2** : continuation hybride (walk + gapmap + walk). Rapide, pas besoin du store.
+- **Depth 3+** : fallback sur le texte stocké (stored doc). Le `byte_from` est connu
+  dès le walk 1 (dans le sfxpost entry). Il suffit de lire `text[byte_from..byte_from+query_len]`
+  et comparer avec le query. Une seule lecture mmap, O(1).
+
+Avantage : on peut monter à depth illimité sans coût supplémentaire. À partir du moment
+où on a intersecté au moins 2-3 walks (suffisamment sélectif), les candidats restants sont
+peu nombreux. La vérification sur le store est quasi-gratuite (mmap déjà chargé).
+
+```
+depth 1-2: walk hybride (rapide, sélectif)
+depth 3+:  store.get(doc_id) → text[byte_from..].starts_with(remaining)
+           → O(1) par candidat, pas de walk FST supplémentaire
+```
+
+Pour l'instant la depth 3+ est rare (le CamelCaseSplit ne split plus les ALL_CAPS).
+À implémenter quand un bench montre que la continuation est un bottleneck.
