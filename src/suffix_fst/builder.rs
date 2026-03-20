@@ -78,8 +78,8 @@ pub struct ParentEntry {
 pub fn encode_parent_entries(parents: &[ParentEntry]) -> Vec<u8> {
     let mut sorted = parents.to_vec();
     sorted.sort_by_key(|p| p.si); // SI=0 first → early exit for exact/prefix lookups
-    let mut buf = Vec::with_capacity(1 + sorted.len() * 6);
-    buf.push(sorted.len() as u8);
+    let mut buf = Vec::with_capacity(2 + sorted.len() * 6);
+    buf.extend_from_slice(&(sorted.len() as u16).to_le_bytes());
     for p in &sorted {
         buf.extend_from_slice(&(p.raw_ordinal as u32).to_le_bytes());
         buf.extend_from_slice(&p.si.to_le_bytes());
@@ -89,8 +89,8 @@ pub fn encode_parent_entries(parents: &[ParentEntry]) -> Vec<u8> {
 
 /// Decode parent entries from bytes read from the OutputTable.
 pub fn decode_parent_entries(data: &[u8]) -> Vec<ParentEntry> {
-    let num_parents = data[0] as usize;
-    let mut cursor = 1;
+    let num_parents = u16::from_le_bytes([data[0], data[1]]) as usize;
+    let mut cursor = 2;
     let mut entries = Vec::with_capacity(num_parents);
     for _ in 0..num_parents {
         let raw_ordinal = u32::from_le_bytes([
