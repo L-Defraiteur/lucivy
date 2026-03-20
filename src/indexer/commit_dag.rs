@@ -17,15 +17,13 @@
 //! - reload: reader picks up new metas
 
 use std::sync::Arc;
-use std::time::Instant;
 
-use luciole::node::{Node, NodeContext, NodePoll, PollNode, PortDef};
+use luciole::node::{Node, NodeContext, PortDef};
 use luciole::port::{PortType, PortValue};
 use luciole::Dag;
 
 use crate::indexer::events::IndexEvent;
 use crate::indexer::merge_operation::MergeOperation;
-use crate::indexer::merge_state::{MergeState, StepResult};
 use crate::indexer::segment_entry::SegmentEntry;
 use crate::indexer::segment_updater::SegmentUpdaterShared;
 use crate::Opstamp;
@@ -125,28 +123,20 @@ impl Node for PrepareNode {
 }
 
 // ---------------------------------------------------------------------------
-// MergeNode — PollNode wrapping MergeState::step()
+// MergeNode — executes a merge DAG (postings ∥ store ∥ fast_fields → sfx)
 // ---------------------------------------------------------------------------
 
 pub(crate) struct MergeNode {
     shared: Arc<SegmentUpdaterShared>,
-    state: Option<MergeState>,
-    merge_op: Option<MergeOperation>,
-    initialized: bool,
 }
 
 impl MergeNode {
     pub fn new(shared: Arc<SegmentUpdaterShared>) -> Self {
-        Self {
-            shared,
-            state: None,
-            merge_op: None,
-            initialized: false,
-        }
+        Self { shared }
     }
 }
 
-impl PollNode for MergeNode {
+impl Node for MergeNode {
     fn node_type(&self) -> &'static str { "merge" }
 
     fn inputs(&self) -> Vec<PortDef> {
@@ -157,90 +147,55 @@ impl PollNode for MergeNode {
         vec![PortDef::required("result", PortType::of::<MergeResult>())]
     }
 
-    fn poll_execute(&mut self, ctx: &mut NodeContext) -> Result<NodePoll, String> {
-        // Lazy init on first poll: read input and create MergeState
-        if !self.initialized {
-            self.initialized = true;
+    fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+        let (op, entries) = ctx.take_input("input")
+            .ok_or("missing input")?
+            .take::<(MergeOperation, Vec<SegmentEntry>)>()
+            .ok_or("wrong input type")?;
 
-            let (op, entries) = ctx.take_input("input")
-                .ok_or("missing input")?
-                .take::<(MergeOperation, Vec<SegmentEntry>)>()
-                .ok_or("wrong input type")?;
+        let start = std::time::Instant::now();
+        let num_segments = op.segment_ids().len();
 
-            match MergeState::new(&self.shared.index, entries, op.target_opstamp()) {
-                Ok(Some(state)) => {
-                    ctx.metric("total_docs", state.total_docs() as f64);
-                    ctx.info(&format!(
-                        "merge {} segments ({} docs)",
-                        op.segment_ids().len(), state.total_docs(),
-                    ));
-                    self.state = Some(state);
-                    self.merge_op = Some(op);
-                }
-                Ok(None) => {
-                    // Empty merge
-                    ctx.metric("total_docs", 0.0);
-                    ctx.info("empty merge (0 docs)");
-                    self.shared.event_bus.emit(IndexEvent::MergeCompleted {
-                        segment_ids: op.segment_ids().to_vec(),
-                        duration: std::time::Duration::ZERO,
-                        result_num_docs: 0,
-                    });
-                    ctx.set_output("result", PortValue::new(MergeResult {
-                        merge_op: op,
-                        segment_entry: None,
-                        duration_ms: 0,
-                        docs_merged: 0,
-                    }));
-                    return Ok(NodePoll::Ready);
-                }
-                Err(e) => return Err(format!("MergeState::new: {e}")),
+        // Build and execute the merge DAG
+        let merge_dag = super::merge_dag::build_merge_dag(
+            &self.shared.index, entries, op.target_opstamp(),
+        ).map_err(|e| format!("build_merge_dag: {e}"))?;
+
+        let (segment_entry, docs_merged) = match merge_dag {
+            Some(mut dag) => {
+                let mut dag_result = luciole::execute_dag(&mut dag, None)
+                    .map_err(|e| format!("merge DAG: {e}"))?;
+
+                eprintln!("    merge ({} segments) — {}", num_segments, dag_result.display_summary());
+
+                // Extract the SegmentEntry from the close node's output
+                let entry = dag_result.take_output::<SegmentEntry>("close", "entry");
+                let docs = entry.as_ref().map(|e| e.meta().num_docs()).unwrap_or(0);
+                (entry, docs)
             }
-        }
-
-        // Step the merge — track phase transitions for observability
-        let state = self.state.as_mut().unwrap();
-        let phase_before = state.phase_name();
-        let phase_elapsed_before = state.phase_elapsed_ms();
-
-        let result = state.step().map_err(|e| format!("merge step: {e}"))?;
-
-        let phase_after = state.phase_name();
-        if phase_before != phase_after || matches!(result, StepResult::Done(_)) {
-            // Phase completed — emit its timing
-            ctx.metric(
-                &format!("{}_ms", phase_before),
-                phase_elapsed_before as f64,
-            );
-            ctx.info(&format!("phase {} completed ({}ms)", phase_before, phase_elapsed_before));
-        }
-
-        match result {
-            StepResult::Continue => Ok(NodePoll::Pending),
-            StepResult::Done(segment_entry) => {
-                let duration = state.merge_start().elapsed();
-                let docs = state.total_docs();
-                let op = self.merge_op.take().unwrap();
-
-                ctx.metric("duration_ms", duration.as_millis() as f64);
-                ctx.metric("docs_merged", docs as f64);
-                ctx.info(&format!("completed: {} docs in {}ms", docs, duration.as_millis()));
-
-                self.shared.event_bus.emit(IndexEvent::MergeCompleted {
-                    segment_ids: op.segment_ids().to_vec(),
-                    duration,
-                    result_num_docs: docs,
-                });
-
-                ctx.set_output("result", PortValue::new(MergeResult {
-                    merge_op: op,
-                    segment_entry,
-                    duration_ms: duration.as_millis() as u64,
-                    docs_merged: docs,
-                }));
-                Ok(NodePoll::Ready)
+            None => {
+                ctx.info("empty merge (0 docs)");
+                (None, 0)
             }
-        }
+        };
+
+        let duration = start.elapsed();
+        ctx.metric("duration_ms", duration.as_millis() as f64);
+        ctx.metric("docs_merged", docs_merged as f64);
+
+        self.shared.event_bus.emit(IndexEvent::MergeCompleted {
+            segment_ids: op.segment_ids().to_vec(),
+            duration,
+            result_num_docs: docs_merged,
+        });
+
+        ctx.set_output("result", PortValue::new(MergeResult {
+            merge_op: op,
+            segment_entry,
+            duration_ms: duration.as_millis() as u64,
+            docs_merged,
+        }));
+        Ok(())
     }
 }
 
@@ -431,7 +386,7 @@ pub(crate) fn build_commit_dag(
     if num_merges > 0 {
         // Parallel merge nodes
         for i in 0..num_merges {
-            dag.add_poll_node(&format!("merge_{}", i), MergeNode::new(shared.clone()));
+            dag.add_node(&format!("merge_{}", i), MergeNode::new(shared.clone()));
             dag.connect(
                 "prepare", &format!("merge_{}", i),
                 &format!("merge_{}", i), "input",

@@ -110,6 +110,27 @@ impl SegmentSerializer {
         Ok(())
     }
 
+    /// Decompose the serializer into independent writers for parallel DAG nodes.
+    /// Each writer operates on a separate file — safe to use from different threads.
+    /// The caller must close each writer individually.
+    pub fn decompose(
+        self,
+    ) -> (
+        InvertedIndexSerializer,
+        StoreWriter,
+        WritePtr,
+        Segment,
+        Option<FieldNormsSerializer>,
+    ) {
+        (
+            self.postings_serializer,
+            self.store_writer,
+            self.fast_field_write,
+            self.segment,
+            self.fieldnorms_serializer,
+        )
+    }
+
     /// Finalize the segment serialization.
     pub fn close(mut self) -> crate::Result<()> {
         if let Some(fieldnorms_serializer) = self.extract_fieldnorms_serializer() {
