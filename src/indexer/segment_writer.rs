@@ -177,22 +177,37 @@ impl SegmentWriter {
                 sfx_field_ids.push(field_id);
             }
         } else {
-            // Multiple fields — build in parallel
-            let scheduler = luciole::scheduler::global_scheduler();
-            let receivers: Vec<_> = sfx_collectors.into_iter()
+            // Multiple fields — build in parallel via scatter DAG
+            let field_ids: Vec<u32> = sfx_collectors.keys().copied().collect();
+            let tasks: Vec<(&str, _)> = sfx_collectors.into_iter()
                 .map(|(field_id, collector)| {
-                    let rx = scheduler.submit_task(luciole::Priority::High, move || {
-                        collector.build().map(|result| (field_id, result))
-                    });
-                    (field_id, rx)
+                    let name: &str = Box::leak(format!("field_{field_id}").into_boxed_str());
+                    let f = move || -> Result<luciole::PortValue, String> {
+                        let (sfx_bytes, sfxpost_bytes) = collector.build()
+                            .map_err(|e| format!("sfx build field {field_id}: {e}"))?;
+                        Ok(luciole::PortValue::new((field_id, sfx_bytes, sfxpost_bytes)))
+                    };
+                    (name, f)
                 })
                 .collect();
 
-            for (field_id, rx) in receivers {
-                let (fid, (sfx_bytes, sfxpost_bytes)) = rx
-                    .wait_cooperative_named("sfx_build", || scheduler.run_one_step())
-                    .map_err(|e| crate::LucivyError::SystemError(
-                        format!("sfx build field {field_id}: {e}")))?;
+            let field_names: Vec<String> = tasks.iter().map(|(n, _)| n.to_string()).collect();
+            let mut dag = luciole::scatter::build_scatter_dag(tasks);
+            let mut dag_result = luciole::execute_dag(&mut dag, None)
+                .map_err(|e| crate::LucivyError::SystemError(
+                    format!("sfx build DAG: {e}")))?;
+
+            let map = dag_result
+                .take_output::<std::collections::HashMap<String, luciole::PortValue>>("collect", "results")
+                .ok_or_else(|| crate::LucivyError::SystemError(
+                    "missing scatter results".into()))?;
+            let mut scatter = luciole::scatter::ScatterResults::from(map);
+
+            for name in &field_names {
+                let (fid, sfx_bytes, sfxpost_bytes) = scatter
+                    .take::<(u32, Vec<u8>, Vec<u8>)>(name)
+                    .ok_or_else(|| crate::LucivyError::SystemError(
+                        format!("missing sfx result '{name}'")))?;
                 self.segment_serializer.write_sfx(fid, &sfx_bytes)?;
                 if !sfxpost_bytes.is_empty() {
                     self.segment_serializer.write_sfxpost(fid, &sfxpost_bytes)?;

@@ -203,22 +203,39 @@ impl InnerIndexReader {
             return Ok(segment_readers);
         }
 
-        // Parallel: open each segment reader on the scheduler pool
-        let scheduler = luciole::scheduler::global_scheduler();
-        let receivers: Vec<_> = searchable_segments
+        // Parallel: open each segment reader via scatter DAG
+        let tasks: Vec<(&str, _)> = searchable_segments
             .into_iter()
-            .map(|segment| {
-                scheduler.submit_task(luciole::Priority::High, move || {
-                    SegmentReader::open(&segment)
-                })
+            .enumerate()
+            .map(|(i, segment)| {
+                let name: &str = Box::leak(format!("seg_{i}").into_boxed_str());
+                let f = move || -> Result<luciole::PortValue, String> {
+                    let reader = SegmentReader::open(&segment)
+                        .map_err(|e| format!("open reader: {e}"))?;
+                    Ok(luciole::PortValue::new(reader))
+                };
+                (name, f)
             })
             .collect();
 
-        let mut segment_readers = Vec::with_capacity(receivers.len());
-        for rx in receivers {
-            let reader = rx
-                .wait_cooperative_named("open_segment_reader", || scheduler.run_one_step())
-                .map_err(|e| crate::LucivyError::SystemError(format!("open reader: {e}")))?;
+        let seg_names: Vec<String> = tasks.iter().map(|(n, _)| n.to_string()).collect();
+        let mut dag = luciole::scatter::build_scatter_dag(tasks);
+        let mut dag_result = luciole::execute_dag(&mut dag, None)
+            .map_err(|e| crate::LucivyError::SystemError(format!("open readers DAG: {e}")))?;
+
+        let map = dag_result
+            .take_output::<std::collections::HashMap<String, luciole::PortValue>>("collect", "results")
+            .ok_or_else(|| crate::LucivyError::SystemError(
+                "missing scatter results".into(),
+            ))?;
+        let mut scatter = luciole::scatter::ScatterResults::from(map);
+
+        let mut segment_readers = Vec::with_capacity(seg_names.len());
+        for name in &seg_names {
+            let reader = scatter.take::<SegmentReader>(name)
+                .ok_or_else(|| crate::LucivyError::SystemError(
+                    format!("missing reader '{name}'"),
+                ))?;
             segment_readers.push(reader);
         }
         Ok(segment_readers)

@@ -15,6 +15,8 @@ pub mod reply;
 pub mod runtime;
 pub mod scheduler;
 pub mod scope;
+pub mod scatter;
+pub use scatter::ScatterResults;
 pub mod stream_dag;
 
 pub use actor_state::ActorState;
