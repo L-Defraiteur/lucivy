@@ -200,7 +200,13 @@ fn split_and_merge(text: &str) -> Vec<(usize, usize)> {
 }
 
 /// Find byte positions where a split should occur.
-/// Split before: uppercase letters, letter→digit, digit→letter.
+///
+/// Rules:
+/// - lower→UPPER: `getElement` → split before `E`
+/// - UPPER→UPPER+lower: `HTMLParser` → split before `P` (acronym end)
+/// - letter↔digit: `var123` → split before `1`
+///
+/// NOT split: ALL_CAPS runs (`FUNCTION` stays as one chunk).
 fn find_boundaries(text: &str) -> Vec<usize> {
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     let mut boundaries = vec![0usize];
@@ -209,7 +215,14 @@ fn find_boundaries(text: &str) -> Vec<usize> {
         let (byte_pos, cur) = chars[i];
         let (_, prev) = chars[i - 1];
 
-        let split = cur.is_uppercase()
+        let split =
+            // lower→UPPER: standard camelCase boundary
+            (prev.is_lowercase() && cur.is_uppercase())
+            // UPPER→UPPER+lower: end of acronym (e.g., HTML|Parser, HTML|AParser)
+            // Split before cur when cur is uppercase and NEXT is lowercase
+            || (i + 1 < chars.len() && cur.is_uppercase()
+                && prev.is_uppercase() && chars[i + 1].1.is_lowercase())
+            // letter↔digit transitions
             || (prev.is_alphabetic() && cur.is_ascii_digit())
             || (prev.is_ascii_digit() && cur.is_alphabetic());
 
@@ -292,7 +305,8 @@ mod tests {
 
     #[test]
     fn test_html_a_parser() {
-        assert_eq!(split_token("HTMLAParser"), vec!["HTML", "AParser"]);
+        // HTMLA|Parser: split before P (last upper before lower transition)
+        assert_eq!(split_token("HTMLAParser"), vec!["HTMLA", "Parser"]);
     }
 
     #[test]
@@ -313,6 +327,15 @@ mod tests {
     #[test]
     fn test_allcaps() {
         assert_eq!(split_token("ALLCAPS"), vec!["ALLCAPS"]);
+    }
+
+    #[test]
+    fn test_function_allcaps() {
+        // ALL_CAPS words must NOT be split — they're constants, not camelCase
+        assert_eq!(split_token("FUNCTION"), vec!["FUNCTION"]);
+        assert_eq!(split_token("SCHEDULER"), vec!["SCHEDULER"]);
+        assert_eq!(split_token("DIRECTION"), vec!["DIRECTION"]);
+        assert_eq!(split_token("INITIALIZATION"), vec!["INITIALIZATION"]);
     }
 
     #[test]

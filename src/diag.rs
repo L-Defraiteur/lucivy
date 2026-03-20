@@ -178,9 +178,24 @@ impl DiagBus {
 
 static DIAG_BUS: OnceLock<DiagBus> = OnceLock::new();
 
+/// Global verbose flag — controls eprintln DAG summaries.
+static VERBOSE: AtomicBool = AtomicBool::new(true);
+
 /// Get the global diagnostic bus.
 pub fn diag_bus() -> &'static DiagBus {
     DIAG_BUS.get_or_init(DiagBus::new)
+}
+
+/// Enable/disable verbose output (DAG summaries on stderr).
+/// Default: true (for backward compat).
+pub fn set_verbose(enabled: bool) {
+    VERBOSE.store(enabled, Ordering::Relaxed);
+}
+
+/// Check if verbose output is enabled.
+#[inline]
+pub fn is_verbose() -> bool {
+    VERBOSE.load(Ordering::Relaxed)
 }
 
 /// Convenience macro: emit a diagnostic event only if the bus is active.

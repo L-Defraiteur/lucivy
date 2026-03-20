@@ -166,7 +166,9 @@ impl Node for MergeNode {
                 let mut dag_result = luciole::execute_dag(&mut dag, None)
                     .map_err(|e| format!("merge DAG: {e}"))?;
 
-                eprintln!("    merge ({} segments) — {}", num_segments, dag_result.display_summary());
+                if crate::diag::is_verbose() {
+                    eprintln!("    merge ({} segments) — {}", num_segments, dag_result.display_summary());
+                }
 
                 // Extract the SegmentEntry from the close node's output
                 let entry = dag_result.take_output::<SegmentEntry>("close", "entry");

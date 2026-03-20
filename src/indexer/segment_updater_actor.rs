@@ -127,7 +127,9 @@ impl SegmentUpdaterState {
             let dag_result = luciole::execute_dag(&mut dag, None)
                 .map_err(|e| crate::LucivyError::SystemError(format!("execute DAG: {e}")))?;
 
-            eprintln!("{}", dag_result.display_summary());
+            if crate::diag::is_verbose() {
+                eprintln!("{}", dag_result.display_summary());
+            }
 
             if no_merges {
                 break;
