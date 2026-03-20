@@ -160,33 +160,44 @@ impl SegmentWriter {
     /// (doc_opstamps, sfx_field_ids).
     pub fn finalize(mut self) -> crate::Result<(Vec<u64>, Vec<u32>)> {
         self.fieldnorms_writer.fill_up_to_max_doc(self.max_doc);
-        // Build and write .sfx files before the serializer is consumed
+        // Build .sfx files in parallel (each collector is independent)
         let sfx_collectors = std::mem::take(&mut self.sfx_collectors);
         let mut sfx_field_ids = Vec::new();
-        for (field_id, collector) in sfx_collectors {
-            match collector.build() {
-                Ok((sfx_bytes, sfxpost_bytes)) => {
-                    self.segment_serializer.write_sfx(field_id, &sfx_bytes)?;
-                    if !sfxpost_bytes.is_empty() {
-                        // Validate sfxpost before writing
-                        let num_tokens = collector_token_count(&sfx_bytes);
-                        if let Some(err) = super::sfx_merge::validate_sfxpost(
-                            &sfxpost_bytes, self.max_doc, num_tokens,
-                        ) {
-                            eprintln!("[segment_writer] SFXPOST VALIDATION FAILED field {}: {}",
-                                field_id, err);
-                        }
-                        self.segment_serializer.write_sfxpost(field_id, &sfxpost_bytes)?;
-                    } else {
-                        eprintln!("[segment_writer] WARNING: empty sfxpost for field {} ({} docs)",
-                            field_id, self.max_doc);
-                    }
-                    sfx_field_ids.push(field_id);
+
+        if sfx_collectors.len() <= 1 {
+            // Single field — no parallelism needed
+            for (field_id, collector) in sfx_collectors {
+                let (sfx_bytes, sfxpost_bytes) = collector.build()
+                    .map_err(|e| crate::LucivyError::SystemError(
+                        format!("sfx build field {field_id}: {e}")))?;
+                self.segment_serializer.write_sfx(field_id, &sfx_bytes)?;
+                if !sfxpost_bytes.is_empty() {
+                    self.segment_serializer.write_sfxpost(field_id, &sfxpost_bytes)?;
                 }
-                Err(e) => {
-                    eprintln!("[segment_writer] ERROR: failed to build .sfx for field {field_id} ({} docs): {e}",
-                        self.max_doc);
+                sfx_field_ids.push(field_id);
+            }
+        } else {
+            // Multiple fields — build in parallel
+            let scheduler = luciole::scheduler::global_scheduler();
+            let receivers: Vec<_> = sfx_collectors.into_iter()
+                .map(|(field_id, collector)| {
+                    let rx = scheduler.submit_task(luciole::Priority::High, move || {
+                        collector.build().map(|result| (field_id, result))
+                    });
+                    (field_id, rx)
+                })
+                .collect();
+
+            for (field_id, rx) in receivers {
+                let (fid, (sfx_bytes, sfxpost_bytes)) = rx
+                    .wait_cooperative_named("sfx_build", || scheduler.run_one_step())
+                    .map_err(|e| crate::LucivyError::SystemError(
+                        format!("sfx build field {field_id}: {e}")))?;
+                self.segment_serializer.write_sfx(fid, &sfx_bytes)?;
+                if !sfxpost_bytes.is_empty() {
+                    self.segment_serializer.write_sfxpost(fid, &sfxpost_bytes)?;
                 }
+                sfx_field_ids.push(fid);
             }
         }
         if !sfx_field_ids.is_empty() {

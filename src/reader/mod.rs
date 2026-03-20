@@ -193,10 +193,34 @@ impl InnerIndexReader {
         // Prevents segment files from getting deleted while we are in the process of opening them
         let _meta_lock = index.directory().acquire_lock(&META_LOCK)?;
         let searchable_segments = index.searchable_segments()?;
-        let segment_readers = searchable_segments
-            .iter()
-            .map(SegmentReader::open)
-            .collect::<crate::Result<_>>()?;
+
+        if searchable_segments.len() <= 1 {
+            // Single segment — no parallelism needed
+            let segment_readers = searchable_segments
+                .iter()
+                .map(SegmentReader::open)
+                .collect::<crate::Result<_>>()?;
+            return Ok(segment_readers);
+        }
+
+        // Parallel: open each segment reader on the scheduler pool
+        let scheduler = luciole::scheduler::global_scheduler();
+        let receivers: Vec<_> = searchable_segments
+            .into_iter()
+            .map(|segment| {
+                scheduler.submit_task(luciole::Priority::High, move || {
+                    SegmentReader::open(&segment)
+                })
+            })
+            .collect();
+
+        let mut segment_readers = Vec::with_capacity(receivers.len());
+        for rx in receivers {
+            let reader = rx
+                .wait_cooperative_named("open_segment_reader", || scheduler.run_one_step())
+                .map_err(|e| crate::LucivyError::SystemError(format!("open reader: {e}")))?;
+            segment_readers.push(reader);
+        }
         Ok(segment_readers)
     }
 
