@@ -108,6 +108,8 @@ pub struct SuffixContainsQuery {
     prefix_only: bool,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
+    /// If true, use continuation DFA to match across token boundaries.
+    continuation: bool,
 }
 
 impl SuffixContainsQuery {
@@ -123,6 +125,7 @@ impl SuffixContainsQuery {
             prefix_only: false,
             highlight_sink: None,
             highlight_field_name: String::new(),
+            continuation: false,
         }
     }
 
@@ -130,6 +133,13 @@ impl SuffixContainsQuery {
     /// Filters suffix FST entries to SI=0 (full token start, not substring).
     pub fn with_prefix_only(mut self) -> Self {
         self.prefix_only = true;
+        self
+    }
+
+    /// Enable cross-token continuation via DFA.
+    /// Finds matches that span token boundaries (e.g., FUNCTION split into FUNC+TION).
+    pub fn with_continuation(mut self, enabled: bool) -> Self {
+        self.continuation = enabled;
         self
     }
 
@@ -159,6 +169,7 @@ impl Query for SuffixContainsQuery {
             highlight_sink: self.highlight_sink.clone(),
             highlight_field_name: self.highlight_field_name.clone(),
             scoring_enabled,
+            continuation: self.continuation,
         }))
     }
 }
@@ -171,6 +182,7 @@ struct SuffixContainsWeight {
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
     scoring_enabled: bool,
+    continuation: bool,
 }
 
 impl Weight for SuffixContainsWeight {
@@ -214,6 +226,10 @@ impl Weight for SuffixContainsWeight {
             let mut matches = if fuzzy_d == 0 {
                 if prefix_only {
                     suffix_contains::suffix_contains_single_token_prefix(
+                        &sfx_reader, query, &resolver,
+                    )
+                } else if self.continuation {
+                    suffix_contains::suffix_contains_single_token_continuation(
                         &sfx_reader, query, &resolver,
                     )
                 } else {
@@ -264,6 +280,9 @@ impl Weight for SuffixContainsWeight {
                     }
                 }
             }
+
+            // Continuation is handled inside suffix_contains_single_token_inner
+            // via the sfx_reader parameter (passed through the closure).
 
             // Emit diagnostic events
             {

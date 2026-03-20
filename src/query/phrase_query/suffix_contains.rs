@@ -47,7 +47,18 @@ pub fn suffix_contains_single_token<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, false)
+    suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, false, false)
+}
+
+pub fn suffix_contains_single_token_continuation<F>(
+    sfx_reader: &SfxFileReader<'_>,
+    query: &str,
+    raw_term_resolver: F,
+) -> Vec<SuffixContainsMatch>
+where
+    F: Fn(u64) -> Vec<RawPostingEntry>,
+{
+    suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, false, true)
 }
 
 /// Like `suffix_contains_single_token` but only matches tokens that START
@@ -60,7 +71,7 @@ pub fn suffix_contains_single_token_prefix<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, true)
+    suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, true, false)
 }
 
 fn suffix_contains_single_token_inner<F>(
@@ -68,6 +79,7 @@ fn suffix_contains_single_token_inner<F>(
     query: &str,
     raw_term_resolver: F,
     prefix_only: bool,
+    continuation: bool,
 ) -> Vec<SuffixContainsMatch>
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
@@ -99,6 +111,132 @@ where
                     si: parent.si,
                 });
             }
+        }
+    }
+
+    // Cross-token continuation: detect partial matches where a TOKEN is a
+    // suffix-prefix of the query. Two sources of candidates:
+    // 1. Walk 1 entries where match extends past token end (si + query_len > token_len)
+    // 2. Tokens that END with a prefix of the query (token is shorter than query)
+    //    → found by walking prefixes of the query: "sched" → check "sche", "sch", etc.
+    if continuation && !prefix_only && query_len >= 2 {
+        let gapmap = sfx_reader.gapmap();
+
+        let mut candidates: std::collections::HashMap<
+            usize, Vec<(u32, u32, usize)> // consumed → (doc_id, token_index, byte_from)
+        > = std::collections::HashMap::new();
+
+        // Source 1: walk 1 entries that extend past token boundary
+        for (_suffix_term, parents) in &walk_results {
+            for parent in parents {
+                let postings = raw_term_resolver(parent.raw_ordinal);
+                for entry in &postings {
+                    let token_byte_len = (entry.byte_to - entry.byte_from) as usize;
+                    let match_end = parent.si as usize + query_len;
+                    if match_end > token_byte_len {
+                        let consumed = token_byte_len - parent.si as usize;
+                        if consumed > 0 && consumed < query_len {
+                            candidates.entry(consumed).or_default().push((
+                                entry.doc_id,
+                                entry.token_index,
+                                entry.byte_from as usize + parent.si as usize,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Source 2: tokens ending with a prefix of the query.
+        // For each prefix length k (1..query_len), check if a token ENDS with query[..k].
+        // "sched" → check tokens ending with "s", "sc", "sch", "sche"
+        // A token ends with X if X is a suffix of the token → prefix_walk(X) with
+        // si + len(X) == token_len.
+        for k in 1..query_len {
+            if !query_lower.is_char_boundary(k) { continue; }
+            let prefix = &query_lower[..k];
+            // Find tokens that have `prefix` as a suffix (at end of token)
+            let prefix_walk = sfx_reader.prefix_walk(prefix);
+            for (_key, parents) in &prefix_walk {
+                for parent in parents {
+                    let postings = raw_term_resolver(parent.raw_ordinal);
+                    for entry in &postings {
+                        let token_byte_len = (entry.byte_to - entry.byte_from) as usize;
+                        // Check: prefix at the END of the token
+                        if parent.si as usize + k == token_byte_len {
+                            candidates.entry(k).or_default().push((
+                                entry.doc_id,
+                                entry.token_index,
+                                entry.byte_from as usize + parent.si as usize,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Continuation loop (supports N-depth token chains)
+        let mut depth_candidates = candidates;
+        for _depth in 0..8 {
+            if depth_candidates.is_empty() { break; }
+            let mut next_candidates: std::collections::HashMap<
+                usize, Vec<(u32, u32, usize)>
+            > = std::collections::HashMap::new();
+
+            for (&consumed, entries) in &depth_candidates {
+                if consumed >= query_len { continue; }
+                let remaining = &query_lower[consumed..];
+
+                // Walk 2: tokens starting with `remaining` (or a prefix of it)
+                let cont_walk = sfx_reader.prefix_walk_si0(remaining);
+                let mut full_match: std::collections::HashMap<(u32, u32), usize> =
+                    std::collections::HashMap::new();
+                let mut partial_match: std::collections::HashMap<(u32, u32), usize> =
+                    std::collections::HashMap::new();
+
+                for (_key, parents) in &cont_walk {
+                    for p in parents {
+                        if p.si != 0 { continue; }
+                        for e in raw_term_resolver(p.raw_ordinal) {
+                            let token_len = (e.byte_to - e.byte_from) as usize;
+                            if token_len >= remaining.len() {
+                                // Token covers all of remaining → full match
+                                full_match.insert(
+                                    (e.doc_id, e.token_index),
+                                    e.byte_from as usize + remaining.len(),
+                                );
+                            } else {
+                                // Token shorter than remaining → needs more continuation
+                                partial_match.insert(
+                                    (e.doc_id, e.token_index),
+                                    token_len,
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Join candidates with continuation results
+                for &(doc_id, left_ti, byte_from) in entries {
+                    let right_ti = left_ti + 1;
+                    let gap_ok = gapmap.read_separator(doc_id, left_ti, right_ti)
+                        .map_or(false, |sep| sep.is_empty());
+                    if !gap_ok { continue; }
+
+                    if let Some(&byte_to) = full_match.get(&(doc_id, right_ti)) {
+                        matches.push(SuffixContainsMatch {
+                            doc_id, token_index: left_ti,
+                            byte_from, byte_to,
+                            parent_term: String::new(), si: 0,
+                        });
+                    } else if let Some(&tok_len) = partial_match.get(&(doc_id, right_ti)) {
+                        next_candidates.entry(consumed + tok_len).or_default().push((
+                            doc_id, right_ti, byte_from,
+                        ));
+                    }
+                }
+            }
+            depth_candidates = next_candidates;
         }
     }
 
@@ -151,7 +289,7 @@ where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
     if distance == 0 {
-        return suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, prefix_only);
+        return suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, prefix_only, false);
     }
 
     let query_lower = query.to_lowercase();
@@ -365,7 +503,7 @@ where
         let results = if fuzzy_distance > 0 {
             suffix_contains_single_token_fuzzy_inner(sfx_reader, query_tokens[0], fuzzy_distance, &raw_ordinal_resolver, prefix_only)
         } else {
-            suffix_contains_single_token_inner(sfx_reader, query_tokens[0], &raw_ordinal_resolver, prefix_only)
+            suffix_contains_single_token_inner(sfx_reader, query_tokens[0], &raw_ordinal_resolver, prefix_only, false)
         };
         return results
             .into_iter()

@@ -480,7 +480,7 @@ fn bench_sharding_comparison() {
                     let field = shard.field("content").unwrap();
                     let q = ld_lucivy::query::SuffixContainsQuery::new(
                         field, term.to_string(),
-                    );
+                    ).with_continuation(true);
                     let _ = searcher.search(&q, &ld_lucivy::collector::Count);
                 }
             }

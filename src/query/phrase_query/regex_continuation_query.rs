@@ -146,7 +146,9 @@ use crate::query::posting_resolver::{self, PostingResolver, PostingEntry};
 
 /// Run the continuation algorithm with a given automaton on a segment.
 /// Returns (doc_bitset, highlights) where highlights = Vec<(doc_id, byte_from, byte_to)>.
-fn continuation_score<A: Automaton>(
+///
+/// Reusable by any query that needs cross-token matching: contains, startsWith, regex.
+pub(crate) fn continuation_score<A: Automaton>(
     automaton: &A,
     sfx_dict: &SfxTermDictionary,
     resolver: &dyn PostingResolver,
