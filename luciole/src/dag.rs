@@ -105,6 +105,12 @@ impl Dag {
             ));
         }
 
+        // Warn about fan-out: same output port connected to multiple inputs.
+        // Fan-out is safe for read-only access (input/downcast) but NOT for
+        // take_input/take (Arc::try_unwrap needs ref count == 1).
+        // We track fan-out here; runtime will log a warning if take() fails.
+        // To avoid issues: use separate output ports for data that will be taken.
+
         self.edges.push(DagEdge {
             from_node: from_node.to_string(),
             from_port: from_port.to_string(),

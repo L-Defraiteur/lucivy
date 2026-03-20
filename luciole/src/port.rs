@@ -75,12 +75,26 @@ impl PortValue {
         }
     }
 
-    /// Consume and extract the concrete type. Succeeds if this is the only
-    /// reference (no fan-out clone outstanding).
+    /// Consume and extract the concrete type.
+    ///
+    /// Panics if the type matches but there are multiple references (fan-out).
+    /// This catches the bug at runtime with a clear message instead of silent None.
+    /// Use `downcast()` for read-only fan-out access.
     pub fn take<T: Send + Sync + 'static>(self) -> Option<T> {
         match self {
             PortValue::Data(arc) => {
-                Arc::downcast::<T>(arc).ok().and_then(|a| Arc::try_unwrap(a).ok())
+                let typed = Arc::downcast::<T>(arc).ok()?;
+                match Arc::try_unwrap(typed) {
+                    Ok(val) => Some(val),
+                    Err(arc) => panic!(
+                        "PortValue::take() failed: {} outstanding references to {}. \
+                         This means the same output port is connected to multiple inputs \
+                         (fan-out). Use separate output ports for data that will be taken, \
+                         or use downcast() for read-only access.",
+                        Arc::strong_count(&arc),
+                        std::any::type_name::<T>(),
+                    ),
+                }
             }
             _ => None,
         }
@@ -145,10 +159,20 @@ mod tests {
         let v2 = v.clone();
         assert_eq!(v.downcast::<u64>(), Some(&42u64));
         assert_eq!(v2.downcast::<u64>(), Some(&42u64));
-        // take fails when there are multiple references
-        assert_eq!(v.take::<u64>(), None);
-        // but succeeds on the last reference
+        // downcast (borrow) works with fan-out
+        // take panics with fan-out — tested separately via should_panic
+        drop(v);
+        // succeeds on the last reference
         assert_eq!(v2.take::<u64>(), Some(42));
+    }
+
+    #[test]
+    #[should_panic(expected = "outstanding references")]
+    fn port_value_take_panics_on_fanout() {
+        let v = PortValue::new(42u64);
+        let _v2 = v.clone();
+        // This should panic — fan-out detected
+        let _ = v.take::<u64>();
     }
 
     #[test]
