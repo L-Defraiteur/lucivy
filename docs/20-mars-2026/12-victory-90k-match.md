@@ -117,3 +117,18 @@ depth 3+:  store.get(doc_id) → text[byte_from..].starts_with(remaining)
 
 Pour l'instant la depth 3+ est rare (le CamelCaseSplit ne split plus les ALL_CAPS).
 À implémenter quand un bench montre que la continuation est un bottleneck.
+
+## Nettoyage post-validation
+
+L'expansion uppercase (re-tokeniser la query en majuscules → multi-token search)
+a été supprimée. C'était un fix intermédiaire, rendu redondant par :
+- Le fix CamelCaseSplitFilter (ALL_CAPS ne sont plus splittés)
+- La continuation hybride (couvre les edge cases restants)
+
+Validé : **5/5 MATCH sur 90K** sans l'expansion uppercase. -55 lignes de code.
+
+## Performances (avec DiagBus + eprintln actifs)
+
+Contains search sur 90K docs kernel Linux :
+- **~650ms** par query substring (avec overhead debug)
+- Sans DiagBus/eprintln, sera encore plus rapide

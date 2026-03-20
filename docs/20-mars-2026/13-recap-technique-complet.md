@@ -142,11 +142,6 @@ sans re-tokeniser. Un seul passage de tokenisation (stemming supprimé).
 3. Match : `(doc_id, byte_from + si, byte_from + si + query_len)`
 4. Déduplication par (doc_id, byte_from)
 
-### Cross-token expansion (uppercase)
-Si query single-token : on tokenise aussi `query.to_uppercase()` avec le RAW_TOKENIZER.
-Si ça donne plusieurs tokens → multi-token search avec gaps vides.
-Couvre les cas où le doc a le même split que la query uppercase.
-
 ### Cross-token continuation (hybride)
 Quand le walk 1 détecte un match partiel (query dépasse la fin du token) :
 
@@ -299,9 +294,22 @@ cd lucivy_core && cargo test
 # Bench 5K (rapide, ~30s)
 MAX_DOCS=5000 LUCIVY_VERIFY=1 cargo test --release --package lucivy-core --test bench_sharding -- --nocapture
 
-# Bench 90K (complet, ~25min avec ground truth)
+# Bench 90K (complet, ~12min avec ground truth)
 MAX_DOCS=90000 LUCIVY_VERIFY=1 cargo test --release --package lucivy-core --test bench_sharding -- --nocapture
 
 # Investigation sur index persisté
 cargo test --package lucivy-core --test test_lock_investigation -- --nocapture
 ```
+
+## Performances
+
+Contains search sur 90K docs kernel Linux : **~650ms** par query (avec DiagBus + eprintln actifs).
+Sans overhead debug, sera significativement plus rapide.
+
+## État final
+
+- Branche : `feature/luciole-dag`, dernier commit : `a23b696`
+- 1200 tests pass, 0 fail
+- 5/5 MATCH sur 90K (zéro diff)
+- Expansion uppercase supprimée (redondante)
+- Prochaines étapes : bench perf propre, cleanup warnings, adaptation bindings, tests WASM
