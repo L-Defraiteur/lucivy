@@ -77,9 +77,10 @@ impl<S: BlobStore> BlobDirectory<S> {
         let _ = std::fs::remove_dir_all(&cache_dir);
         std::fs::create_dir_all(&cache_dir)?;
 
-        // Materialize all blobs from the store
+        // Materialize all blobs from the store (skip lock files — they are process-local)
         let files = store.list(&prefixed_name)?;
         for file_name in &files {
+            if file_name.ends_with(".lock") { continue; }
             let data = store.load(&prefixed_name, file_name)?;
             let file_path = cache_dir.join(file_name);
             if let Some(parent) = file_path.parent() {
@@ -230,8 +231,14 @@ impl<S: BlobStore> Directory for BlobDirectory<S> {
         // Write to local cache
         self.inner.atomic_write(path, data)?;
 
-        // Sync to blob store
+        // Don't persist lock files to the blob store — they are process-local
+        // and would block reopen after a crash.
         let fname = Self::file_name(path);
+        if fname.ends_with(".lock") {
+            return Ok(());
+        }
+
+        // Sync to blob store (durable)
         self.store.save(&self.prefixed_name, &fname, data)?;
 
         // Notify watchers on meta.json write (commit point)
