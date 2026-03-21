@@ -16,3 +16,4 @@ cargo-timing*
 control
 variable
 .env
+docker-compose.test.yml
