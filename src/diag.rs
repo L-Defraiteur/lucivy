@@ -212,7 +212,8 @@ impl DiagBus {
 static DIAG_BUS: OnceLock<DiagBus> = OnceLock::new();
 
 /// Global verbose flag — controls eprintln DAG summaries.
-static VERBOSE: AtomicBool = AtomicBool::new(true);
+/// Default: false. Set via `set_verbose(true)` or env `LUCIVY_VERBOSE=1`.
+static VERBOSE: AtomicBool = AtomicBool::new(false);
 
 /// Get the global diagnostic bus.
 pub fn diag_bus() -> &'static DiagBus {

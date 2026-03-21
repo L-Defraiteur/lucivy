@@ -59,7 +59,9 @@ pub fn global_scheduler() -> &'static Arc<Scheduler> {
                         .map(|n| n.get())
                         .unwrap_or(2)
                 });
-            eprintln!("[scheduler] starting with {num_threads} threads");
+            if cfg!(debug_assertions) {
+                eprintln!("[scheduler] starting with {num_threads} threads");
+            }
             let scheduler = Arc::new(Scheduler::new(num_threads));
             let handle = scheduler.start();
 

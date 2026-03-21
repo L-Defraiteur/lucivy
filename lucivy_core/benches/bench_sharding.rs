@@ -298,6 +298,22 @@ fn bench_sharding_comparison() {
             value: Some("printk".into()),
             ..Default::default()
         }),
+        // ── Fuzzy contains ──
+        ("fuzzy 'schdule' (d=1)", QueryConfig {
+            query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some("schdule".into()),
+            distance: Some(1),
+            ..Default::default()
+        }),
+        // ── Regex contains ──
+        ("regex 'pr_[a-z]+'", QueryConfig {
+            query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some("pr_[a-z]+".into()),
+            regex: Some(true),
+            ..Default::default()
+        }),
         // ── Path search ──
         ("contains 'drivers' (path)", QueryConfig {
             query_type: "contains".into(),
@@ -342,6 +358,8 @@ fn bench_sharding_comparison() {
             label, hits, single_ms / 3.0, ta_ms / 3.0, rr_ms / 3.0);
     }
 
+    let verify = std::env::var("LUCIVY_VERIFY").map(|v| v == "1").unwrap_or(false);
+
     // ── Sanity check: run ALL queries with highlights ─────────────────
     {
         let handle = sharded_rr.as_ref().or(sharded_ta.as_ref());
@@ -350,7 +368,7 @@ fn bench_sharding_comparison() {
             for (label, qconfig) in &queries {
                 let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
                 let results = handle.search(qconfig, 2, Some(Arc::clone(&sink))).unwrap();
-                let query_val = qconfig.value.as_deref().unwrap_or("?");
+                let _query_val = qconfig.value.as_deref().unwrap_or("?");
                 eprintln!("\n--- {label} on {mode}: {} hits ---", results.len());
                 for r in results.iter().take(2) {
                     let shard = handle.shard(r.shard_id).unwrap();
@@ -396,7 +414,7 @@ fn bench_sharding_comparison() {
     }
 
     // ── Diagnostic: multi-token vs single-token hit count ─────────────
-    if let Some(handle) = sharded_rr.as_ref().or(sharded_ta.as_ref()) {
+    if verify { if let Some(handle) = sharded_rr.as_ref().or(sharded_ta.as_ref()) {
         eprintln!("\n=== Query diagnostic ===");
         let diag_queries = vec![
             ("contains 'mutex' (single)", "contains", "mutex"),
@@ -416,7 +434,6 @@ fn bench_sharding_comparison() {
         }
 
         // Post-mortem: inspect term in all shards
-        let verify = std::env::var("LUCIVY_VERIFY").map(|v| v == "1").unwrap_or(false);
         eprintln!("\n=== Post-mortem: term inspection {} ===",
             if verify { "(with ground truth)" } else { "" });
         for term in &["mutex", "lock", "function", "printk"] {
@@ -563,7 +580,7 @@ fn bench_sharding_comparison() {
               } // end shard loop
             }
         }
-    }
+    } } // if verify + if let Some(handle)
 
     // ── Summary ─────────────────────────────────────────────────────────
 
