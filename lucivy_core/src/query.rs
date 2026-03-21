@@ -11,7 +11,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use ld_lucivy::query::{
-    AllQuery, AutomatonPhraseQuery, BooleanQuery, ContinuationMode, FuzzyTermQuery,
+    AllQuery, BooleanQuery, ContinuationMode,
     HighlightSink, Occur, PhraseQuery, Query, QueryParser, RangeQuery,
     RegexContinuationQuery, RegexQuery, SuffixContainsQuery, TermQuery,
 };
@@ -104,6 +104,7 @@ fn tokenize_for_field(index: &Index, field: Field, schema: &Schema, text: &str) 
 }
 
 /// Token with byte offsets, used to extract separators from the query string.
+#[allow(dead_code)]
 struct TokenWithOffsets {
     text: String,
     offset_from: usize,
@@ -111,6 +112,7 @@ struct TokenWithOffsets {
 }
 
 /// Tokenize text through the tokenizer configured for a field, preserving byte offsets.
+#[allow(dead_code)]
 fn tokenize_with_offsets(
     index: &Index,
     field: Field,

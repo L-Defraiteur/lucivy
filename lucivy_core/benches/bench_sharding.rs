@@ -14,7 +14,6 @@ use std::time::Instant;
 use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD};
 use lucivy_core::query::{self, QueryConfig};
 use lucivy_core::sharded_handle::ShardedHandle;
-use ld_lucivy::query::HighlightSink;
 
 const RAG3DB_CLONE: &str = "/tmp/rag3db_bench";
 const LINUX_CLONE: &str = "/home/luciedefraiteur/linux_bench";
@@ -304,14 +303,6 @@ fn bench_sharding_comparison() {
             field: Some("content".into()),
             value: Some("schdule".into()),
             distance: Some(1),
-            ..Default::default()
-        }),
-        // ── Regex contains ──
-        ("regex 'pr_[a-z]+'", QueryConfig {
-            query_type: "contains".into(),
-            field: Some("content".into()),
-            value: Some("pr_[a-z]+".into()),
-            regex: Some(true),
             ..Default::default()
         }),
         // ── Path search ──

@@ -284,7 +284,7 @@ pub fn build_schema(
     Ok((builder.build(), field_map))
 }
 
-pub fn configure_tokenizers(index: &Index, config: &SchemaConfig) {
+pub fn configure_tokenizers(index: &Index, _config: &SchemaConfig) {
     use ld_lucivy::tokenizer::{
         CamelCaseSplitFilter, LowerCaser, SimpleTokenizer, TextAnalyzer,
     };

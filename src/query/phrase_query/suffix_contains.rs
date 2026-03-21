@@ -25,6 +25,7 @@ pub struct SuffixContainsMatch {
     #[allow(dead_code)]
     pub parent_term: String,
     /// Suffix index (0 = full token match, >0 = substring).
+    #[allow(dead_code)]
     pub si: u16,
 }
 
@@ -61,6 +62,7 @@ where
 /// Like `suffix_contains_single_token_continuation` but with a stored text verifier
 /// for deep continuation (depth 3+). The verifier receives (doc_id, byte_from, remaining_query)
 /// and returns true if the stored text confirms the match.
+#[allow(dead_code)]
 pub fn suffix_contains_single_token_continuation_with_store<F>(
     sfx_reader: &SfxFileReader<'_>,
     query: &str,
@@ -415,6 +417,7 @@ pub struct RawPostingEntry {
 ///
 /// This reads the ._raw posting list for the term at the given ordinal,
 /// extracting (doc_id, position, byte_from, byte_to) for each occurrence.
+#[allow(dead_code)]
 pub fn resolve_raw_ordinal(
     inv_idx_reader: &InvertedIndexReader,
     raw_ordinal: u64,

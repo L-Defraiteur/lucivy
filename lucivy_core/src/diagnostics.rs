@@ -4,9 +4,8 @@
 //!   let report = inspect_term(&handle, "content", "mutex");
 //!   eprintln!("{}", report);
 
-use ld_lucivy::schema::{Field, Term};
-use ld_lucivy::schema::document::{Document, Value};
-use ld_lucivy::termdict::TermDictionary;
+use ld_lucivy::schema::Term;
+use ld_lucivy::schema::document::Value;
 use ld_lucivy::LucivyDocument;
 
 use crate::handle::LucivyHandle;
@@ -266,7 +265,7 @@ impl std::fmt::Display for SfxTermReport {
 /// Trace the full SFX query path for a search term across all segments.
 pub fn inspect_sfx(handle: &LucivyHandle, field_name: &str, search_term: &str) -> SfxTermReport {
     use ld_lucivy::suffix_fst::file::SfxFileReader;
-    use ld_lucivy::query::posting_resolver::{self, PostingResolver};
+    use ld_lucivy::query::posting_resolver;
     use std::collections::HashSet;
 
     let field = handle.field(field_name);
@@ -700,8 +699,6 @@ pub fn trace_search(
     search_term: &str,
     doc_id: u32,
 ) -> SearchTrace {
-    use ld_lucivy::suffix_fst::file::SfxFileReader;
-    use ld_lucivy::query::posting_resolver;
     use ld_lucivy::schema::IndexRecordOption;
     use ld_lucivy::{DocSet, TERMINATED};
 

@@ -160,6 +160,7 @@ pub(crate) fn edit_distance(a: &str, b: &str) -> u32 {
 
 /// Check if `text` contains a substring within Levenshtein distance `max_d` of `pattern`.
 /// Uses semi-global alignment (free prefix/suffix gaps in `text`).
+#[allow(dead_code)]
 pub(crate) fn contains_fuzzy_substring(text: &str, pattern: &str, max_d: u32) -> bool {
     let text = text.as_bytes();
     let pattern = pattern.as_bytes();
@@ -191,6 +192,7 @@ pub(crate) fn contains_fuzzy_substring(text: &str, pattern: &str, max_d: u32) ->
 /// Check if a doc token matches a query token via exact, substring, fuzzy, or fuzzy substring.
 /// Returns the match distance (0 for exact/substring, d for fuzzy).
 /// Applies ASCII folding (ç→c, é→e) so that accent differences don't count as edits.
+#[allow(dead_code)]
 pub(crate) fn token_match_distance(
     doc_token: &str,
     query_token: &str,

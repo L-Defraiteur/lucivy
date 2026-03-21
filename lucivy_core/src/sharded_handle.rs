@@ -7,15 +7,12 @@
 //!
 //! WASM compatible: uses the actor system (persistent threads or cooperative).
 
-use std::collections::BinaryHeap;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use std::any::Any;
-
 use ld_lucivy::collector::Collector;
-use ld_lucivy::actor::envelope::{type_tag_hash, Envelope, Message, ReplyPort};
+use ld_lucivy::actor::envelope::{type_tag_hash, Envelope, Message};
 use ld_lucivy::actor::handler::TypedHandler;
 use ld_lucivy::actor::generic_actor::GenericActor;
 use ld_lucivy::actor::mailbox::{mailbox, ActorRef};
@@ -27,7 +24,6 @@ use ld_lucivy::tokenizer::{PreTokenizedString, Token, TokenizerManager};
 use ld_lucivy::indexer::PreTokenizedData;
 use ld_lucivy::{DocAddress, Index, LucivyDocument};
 
-use crate::bm25_global::AggregatedBm25StatsOwned;
 use crate::directory::StdFsDirectory;
 use crate::handle::{LucivyHandle, NODE_ID_FIELD};
 use crate::query::{QueryConfig, SchemaConfig};
@@ -368,6 +364,7 @@ impl Message for PipelineDrainReply {
 // ─── Pipeline Actor Creation ─────────────────────────────────────────────────
 
 /// State needed by ReaderActors (shared, read-only).
+#[allow(dead_code)]
 struct ReaderContext {
     schema: Schema,
     text_fields: Vec<Field>,
@@ -379,6 +376,7 @@ struct ReaderContext {
 ///
 /// Produces both routing hashes AND PreTokenizedData in a single pass,
 /// eliminating double tokenization in the SegmentWriter.
+#[allow(dead_code)]
 fn create_reader_actor(ctx: Arc<ReaderContext>) -> GenericActor {
     let mut actor = GenericActor::new("reader");
 
@@ -436,6 +434,7 @@ fn create_reader_actor(ctx: Arc<ReaderContext>) -> GenericActor {
 }
 
 /// Create the RouterActor that routes tokenized documents to shard actors.
+#[allow(dead_code)]
 fn create_router_actor(
     router: Arc<Mutex<ShardRouter>>,
     shard_actors: Vec<ActorRef<Envelope>>,
@@ -467,8 +466,8 @@ fn create_router_actor(
     ));
 
     // Drain handler
-    let router3 = Arc::clone(&router);
-    let shard_actors3 = shard_actors;
+    let _router3 = Arc::clone(&router);
+    let _shard_actors3 = shard_actors;
     actor.register(TypedHandler::<PipelineDrainMsg, _>::new(
         move |_state, _msg, reply, _local| {
             if let Some(reply) = reply {
@@ -1060,6 +1059,7 @@ pub struct ShardedHandle {
 }
 
 /// Spawn N GenericActors (one per shard) in the global scheduler.
+#[allow(dead_code)]
 fn spawn_shard_actors(
     shards: &[Arc<LucivyHandle>],
 ) -> Vec<ActorRef<Envelope>> {
@@ -1079,6 +1079,7 @@ fn spawn_shard_actors(
 /// Spawn pipeline actors: N ReaderActors + 1 RouterActor.
 ///
 /// ReaderActors tokenize+hash in parallel, RouterActor routes sequentially.
+#[allow(dead_code)]
 fn spawn_pipeline_actors(
     schema: &Schema,
     text_fields: &[Field],

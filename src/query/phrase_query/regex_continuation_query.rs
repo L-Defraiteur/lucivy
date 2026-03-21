@@ -150,6 +150,7 @@ use crate::query::posting_resolver::{self, PostingResolver};
 ///
 /// Verify a DFA match by reading the stored text from `byte_from` onwards.
 /// Returns `Some(byte_to)` if the DFA accepts, `None` otherwise.
+#[allow(dead_code)]
 fn store_verify_dfa<A: Automaton>(
     store: &StoreReader,
     field: Field,
