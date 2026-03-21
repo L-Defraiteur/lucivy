@@ -44,7 +44,7 @@ pub fn suffix_contains_single_token<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, false, false)
+    suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, false, false, None)
 }
 
 pub fn suffix_contains_single_token_continuation<F>(
@@ -55,7 +55,22 @@ pub fn suffix_contains_single_token_continuation<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, false, true)
+    suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, false, true, None)
+}
+
+/// Like `suffix_contains_single_token_continuation` but with a stored text verifier
+/// for deep continuation (depth 3+). The verifier receives (doc_id, byte_from, remaining_query)
+/// and returns true if the stored text confirms the match.
+pub fn suffix_contains_single_token_continuation_with_store<F>(
+    sfx_reader: &SfxFileReader<'_>,
+    query: &str,
+    raw_term_resolver: F,
+    store_verifier: &dyn Fn(u32, usize, &str) -> bool,
+) -> Vec<SuffixContainsMatch>
+where
+    F: Fn(u64) -> Vec<RawPostingEntry>,
+{
+    suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, false, true, Some(store_verifier))
 }
 
 /// Like `suffix_contains_single_token` but only matches tokens that START
@@ -68,7 +83,7 @@ pub fn suffix_contains_single_token_prefix<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, true, false)
+    suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, true, false, None)
 }
 
 fn suffix_contains_single_token_inner<F>(
@@ -77,6 +92,7 @@ fn suffix_contains_single_token_inner<F>(
     raw_term_resolver: F,
     prefix_only: bool,
     continuation: bool,
+    store_verifier: Option<&dyn Fn(u32, usize, &str) -> bool>,
 ) -> Vec<SuffixContainsMatch>
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
@@ -174,8 +190,33 @@ where
 
         // Continuation loop (supports N-depth token chains)
         let mut depth_candidates = candidates;
-        for _depth in 0..8 {
+        for depth in 0..8 {
             if depth_candidates.is_empty() { break; }
+
+            // Depth 3+: fallback to stored text verification if available.
+            // At this point we've done 2-3 selective FST walks, few candidates remain.
+            // Reading stored text is O(1) per candidate (mmap), much cheaper than more walks.
+            if depth >= 3 {
+                if let Some(verify) = &store_verifier {
+                    for (&consumed, entries) in &depth_candidates {
+                        if consumed >= query_len { continue; }
+                        let remaining = &query_lower[consumed..];
+                        for &(doc_id, _ti, byte_from) in entries {
+                            if verify(doc_id, byte_from, remaining) {
+                                matches.push(SuffixContainsMatch {
+                                    doc_id,
+                                    token_index: 0,
+                                    byte_from,
+                                    byte_to: byte_from + query_len,
+                                    parent_term: String::new(),
+                                    si: 0,
+                                });
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
             let mut next_candidates: std::collections::HashMap<
                 usize, Vec<(u32, u32, usize)>
             > = std::collections::HashMap::new();
@@ -286,7 +327,7 @@ where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
     if distance == 0 {
-        return suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, prefix_only, false);
+        return suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, prefix_only, false, None);
     }
 
     let query_lower = query.to_lowercase();
@@ -491,7 +532,7 @@ where
         let results = if fuzzy_distance > 0 {
             suffix_contains_single_token_fuzzy_inner(sfx_reader, query_tokens[0], fuzzy_distance, &raw_ordinal_resolver, prefix_only)
         } else {
-            suffix_contains_single_token_inner(sfx_reader, query_tokens[0], &raw_ordinal_resolver, prefix_only, false)
+            suffix_contains_single_token_inner(sfx_reader, query_tokens[0], &raw_ordinal_resolver, prefix_only, false, None)
         };
         return results
             .into_iter()

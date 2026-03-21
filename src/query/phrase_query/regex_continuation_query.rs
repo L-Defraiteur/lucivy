@@ -21,6 +21,7 @@ use crate::query::{BitSetDocSet, ConstScorer, EnableScoring, Explanation, Query,
 use crate::schema::Field;
 use crate::suffix_fst::file::{SfxDfaWrapper, SfxFileReader};
 use crate::suffix_fst::gapmap::is_value_boundary;
+use crate::store::StoreReader;
 use crate::suffix_fst::SfxTermDictionary;
 use crate::{DocId, LucivyError, Score};
 
@@ -147,7 +148,48 @@ use crate::query::posting_resolver::{self, PostingResolver};
 /// Run the continuation algorithm with a given automaton on a segment.
 /// Returns (doc_bitset, highlights) where highlights = Vec<(doc_id, byte_from, byte_to)>.
 ///
+/// Verify a DFA match by reading the stored text from `byte_from` onwards.
+/// Returns `Some(byte_to)` if the DFA accepts, `None` otherwise.
+fn store_verify_dfa<A: Automaton>(
+    store: &StoreReader,
+    field: Field,
+    doc_id: DocId,
+    byte_from: usize,
+    automaton: &A,
+    start_state: &A::State,
+) -> Option<usize>
+where
+    A::State: Clone,
+{
+    let doc = store.get::<crate::LucivyDocument>(doc_id).ok()?;
+    for (f, val) in doc.field_values() {
+        if f == field {
+            use crate::schema::document::Value;
+            if let Some(text) = val.as_value().as_str() {
+                let text_lower = text.to_lowercase();
+                if byte_from >= text_lower.len() { continue; }
+                let bytes = text_lower[byte_from..].as_bytes();
+                let mut state = start_state.clone();
+                for (i, &byte) in bytes.iter().enumerate() {
+                    state = automaton.accept(&state, byte);
+                    if automaton.is_match(&state) {
+                        return Some(byte_from + i + 1);
+                    }
+                    if !automaton.can_match(&state) {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Reusable by any query that needs cross-token matching: contains, startsWith, regex.
+///
+/// `store_dfa_verifier`: optional callback for depth 3+ stored text fallback.
+/// Receives (doc_id, byte_from, automaton, dfa_state) and returns true if the
+/// stored text confirms the DFA match from that position.
 pub(crate) fn continuation_score<A: Automaton>(
     automaton: &A,
     sfx_dict: &SfxTermDictionary,
@@ -155,6 +197,7 @@ pub(crate) fn continuation_score<A: Automaton>(
     sfx_reader: &SfxFileReader,
     mode: ContinuationMode,
     max_doc: DocId,
+    store_dfa_verifier: Option<&dyn Fn(DocId, u32, &A, &A::State) -> Option<usize>>,
 ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>)>
 where
     A::State: Clone + Eq + std::hash::Hash,
@@ -189,9 +232,24 @@ where
     }
 
     // === Continuation loop ===
-    for _depth in 0..MAX_CONTINUATION_DEPTH {
+    for depth in 0..MAX_CONTINUATION_DEPTH {
         if candidates.is_empty() {
             break;
+        }
+
+        // Depth 3+: fallback to stored text verification if available.
+        if depth >= 3 {
+            if let Some(verify) = &store_dfa_verifier {
+                for (&(doc, _pos), cand_states) in &candidates {
+                    for cs in cand_states {
+                        if let Some(byte_to) = verify(doc, cs.byte_from, automaton, &cs.dfa_state) {
+                            doc_bitset.insert(doc);
+                            highlights.push((doc, cs.byte_from as usize, byte_to));
+                        }
+                    }
+                }
+                break;
+            }
         }
 
         let mut post_gap: HashMap<A::State, Vec<(DocId, u32, u32)>> = HashMap::new();
@@ -299,6 +357,7 @@ impl Weight for RegexContinuationWeight {
                 let automaton = SfxDfaWrapper(dfa);
                 continuation_score(
                     &automaton, &sfx_dict, &*resolver, &sfx_reader, self.mode, max_doc,
+                    None,
                 )?
             }
             DfaKind::Regex { pattern } => {
@@ -308,6 +367,7 @@ impl Weight for RegexContinuationWeight {
                 let automaton = SfxAutomatonAdapter(&regex);
                 continuation_score(
                     &automaton, &sfx_dict, &*resolver, &sfx_reader, self.mode, max_doc,
+                    None,
                 )?
             }
         };
