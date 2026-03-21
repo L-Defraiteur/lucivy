@@ -224,96 +224,6 @@ pub(crate) fn token_match_distance(
     None
 }
 
-// ─── N-gram Utilities ────────────────────────────────────────────────────────
-
-const NGRAM_SIZE: usize = 3;
-
-/// Generate character-level trigrams from a token.
-/// Tokens shorter than 3 are returned as-is.
-/// Applies ASCII folding (ç→c, é→e) to match the ngram index tokenizer.
-pub(crate) fn generate_trigrams(token: &str) -> Vec<String> {
-    let mut buf = String::new();
-    crate::tokenizer::to_ascii(token, &mut buf);
-    let folded = if buf.is_empty() && !token.is_empty() {
-        // to_ascii clears buf then writes; if input is all-ASCII, buf == token
-        token
-    } else {
-        &buf
-    };
-    let chars: Vec<char> = folded.chars().collect();
-    if chars.len() < NGRAM_SIZE {
-        return vec![folded.to_string()];
-    }
-    chars
-        .windows(NGRAM_SIZE)
-        .map(|w| w.iter().collect())
-        .collect()
-}
-
-/// Fold text to ASCII and build a byte offset map (folded position → original position).
-///
-/// For a regex match at `[s, e)` in the folded text, the corresponding span in the
-/// original text is `[map[s], map[e])`.
-pub(crate) fn fold_with_byte_map(text: &str) -> (String, Vec<usize>) {
-    let mut folded = String::new();
-    let mut map = Vec::with_capacity(text.len() + 1);
-    let mut char_buf = String::with_capacity(4);
-    let mut fold_buf = String::with_capacity(8);
-
-    for (orig_byte, c) in text.char_indices() {
-        char_buf.clear();
-        char_buf.push(c);
-        fold_buf.clear();
-        crate::tokenizer::to_ascii(&char_buf, &mut fold_buf);
-
-        // Each folded byte maps back to the original char's start byte.
-        for _ in fold_buf.as_bytes() {
-            map.push(orig_byte);
-        }
-        folded.push_str(&fold_buf);
-    }
-    map.push(text.len()); // sentinel for end-of-string
-    (folded, map)
-}
-
-/// Minimum number of shared trigrams required for a candidate match.
-/// For fuzzy distance `d`, each edit can destroy up to 3 trigrams.
-pub(crate) fn ngram_threshold(num_trigrams: usize, fuzzy_distance: u8) -> usize {
-    let threshold = num_trigrams as i32 - (fuzzy_distance as i32 * 3);
-    std::cmp::max(1, threshold) as usize
-}
-
-/// Intersect multiple sorted doc_id vectors.
-pub(crate) fn intersect_sorted_vecs(mut vecs: Vec<Vec<DocId>>) -> Vec<DocId> {
-    if vecs.is_empty() {
-        return Vec::new();
-    }
-    if vecs.len() == 1 {
-        return vecs.into_iter().next().unwrap();
-    }
-    // Process smallest first for efficiency.
-    vecs.sort_by_key(|v| v.len());
-
-    let mut result = vecs.remove(0);
-    for other in &vecs {
-        let mut merged = Vec::new();
-        let (mut i, mut j) = (0, 0);
-        while i < result.len() && j < other.len() {
-            match result[i].cmp(&other[j]) {
-                std::cmp::Ordering::Equal => {
-                    merged.push(result[i]);
-                    i += 1;
-                    j += 1;
-                }
-                std::cmp::Ordering::Less => i += 1,
-                std::cmp::Ordering::Greater => j += 1,
-            }
-        }
-        result = merged;
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,80 +292,6 @@ mod tests {
         assert_eq!(token_match_distance("hello", "xyz", 1), None);
     }
 
-    // ─── generate_trigrams ───────────────────────────────────────────────
-
-    #[test]
-    fn test_generate_trigrams() {
-        assert_eq!(generate_trigrams("hello"), vec!["hel", "ell", "llo"]);
-        assert_eq!(generate_trigrams("ab"), vec!["ab"]);
-        assert_eq!(generate_trigrams("abc"), vec!["abc"]);
-    }
-
-    // ─── ngram_threshold ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_ngram_threshold() {
-        assert_eq!(ngram_threshold(3, 0), 3);
-        assert_eq!(ngram_threshold(3, 1), 1);
-        assert_eq!(ngram_threshold(9, 0), 9);
-        assert_eq!(ngram_threshold(9, 1), 6);
-    }
-
-    // ─── intersect_sorted_vecs ───────────────────────────────────────────
-
-    #[test]
-    fn test_intersect_sorted_vecs() {
-        let a = vec![1, 3, 5, 7, 9];
-        let b = vec![2, 3, 5, 8, 9];
-        assert_eq!(intersect_sorted_vecs(vec![a, b]), vec![3, 5, 9]);
-    }
-
-    #[test]
-    fn test_intersect_sorted_vecs_empty() {
-        assert_eq!(intersect_sorted_vecs(vec![]), Vec::<DocId>::new());
-    }
-
-    #[test]
-    fn test_intersect_sorted_vecs_single() {
-        assert_eq!(intersect_sorted_vecs(vec![vec![1, 2, 3]]), vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn test_intersect_sorted_vecs_disjoint() {
-        assert_eq!(
-            intersect_sorted_vecs(vec![vec![1, 3, 5], vec![2, 4, 6]]),
-            Vec::<DocId>::new()
-        );
-    }
-
-    #[test]
-    fn test_intersect_sorted_vecs_three() {
-        let a = vec![1, 2, 3, 5, 8];
-        let b = vec![2, 3, 5, 7];
-        let c = vec![3, 5, 9];
-        assert_eq!(intersect_sorted_vecs(vec![a, b, c]), vec![3, 5]);
-    }
-
-    // ─── generate_trigrams edge cases ──────────────────────────────────
-
-    #[test]
-    fn test_generate_trigrams_empty() {
-        assert_eq!(generate_trigrams(""), vec![""]);
-    }
-
-    #[test]
-    fn test_generate_trigrams_single_char() {
-        assert_eq!(generate_trigrams("a"), vec!["a"]);
-    }
-
-    #[test]
-    fn test_generate_trigrams_long() {
-        let trigrams = generate_trigrams("programming");
-        assert_eq!(trigrams.len(), 9); // 11 chars - 3 + 1 = 9 trigrams
-        assert_eq!(trigrams[0], "pro");
-        assert_eq!(trigrams[8], "ing");
-    }
-
     // ─── token_match_distance edge cases ───────────────────────────────
 
     #[test]
@@ -491,20 +327,6 @@ mod tests {
     #[test]
     fn test_contains_fuzzy_substring_exact_match() {
         assert!(contains_fuzzy_substring("hello", "hello", 0));
-    }
-
-    // ─── ngram_threshold edge cases ─────────────────────────────────────
-
-    #[test]
-    fn test_ngram_threshold_zero_trigrams() {
-        // With 0 trigrams and distance 0, threshold should be min 1
-        assert_eq!(ngram_threshold(0, 0), 1);
-    }
-
-    #[test]
-    fn test_ngram_threshold_high_distance() {
-        // With distance > num_trigrams / 3, threshold floors to 1
-        assert_eq!(ngram_threshold(3, 2), 1);
     }
 
     // ─── edit_distance edge cases ───────────────────────────────────────

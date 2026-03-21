@@ -63,14 +63,26 @@ pub fn decode_output(value: u64) -> ParentRef {
 /// Decoded parent reference from an FST output value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParentRef {
-    Single { raw_ordinal: u64, si: u16 },
-    Multi { offset: u64 },
+    /// A single parent token, stored inline in the FST output value.
+    Single {
+        /// Term ordinal of the parent token.
+        raw_ordinal: u64,
+        /// Byte offset within the parent token where this suffix starts.
+        si: u16,
+    },
+    /// Multiple parent tokens, stored in the OutputTable at the given offset.
+    Multi {
+        /// Byte offset into the OutputTable.
+        offset: u64,
+    },
 }
 
 /// A parent entry: which raw token this suffix comes from, and at what offset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParentEntry {
+    /// Term ordinal (sorted alphabetical position) of the parent token.
     pub raw_ordinal: u64,
+    /// Suffix index: byte offset within the parent token where this suffix starts.
     pub si: u16,
 }
 
@@ -125,10 +137,12 @@ pub struct SuffixFstBuilder {
 }
 
 impl SuffixFstBuilder {
+    /// Create a new builder with the default minimum suffix length.
     pub fn new() -> Self {
         Self::with_min_suffix_len(default_min_suffix_len())
     }
 
+    /// Create a new builder with a specific minimum suffix length.
     pub fn with_min_suffix_len(min: usize) -> Self {
         Self {
             entries: Vec::new(),
@@ -327,7 +341,7 @@ mod tests {
         builder.add_token("core", 0);      // "core" SI=0
         builder.add_token("hardcore", 1);  // "hardcore" has suffix "core" at SI=4
 
-        let (fst_bytes, output_table_data) = builder.build().unwrap();
+        let (fst_bytes, _output_table_data) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
         // "core" SI=0 partition: single parent (0, si=0) from "core"

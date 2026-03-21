@@ -13,7 +13,6 @@ lucivy-core = { path = "../../lucivy_core" }
 ld-lucivy = { path = "../..", default-features = false, features = [
     "stopwords",
     "lz4-compression",
-    "stemmer",
 ] }
 napi = { version = "2", features = ["napi9", "serde-json"] }
 napi-derive = "2"

@@ -36,17 +36,16 @@ pub struct Index {
 impl Index {
     /// Create a new index.
     /// `fields_json`: JSON array of field definitions.
-    /// `stemmer`: language string ("english", "french", ...) or empty.
     /// Returns an Index. Caller should then call `export_all_files()` to persist to OPFS.
     #[wasm_bindgen(constructor)]
-    pub fn create(path: &str, fields_json: &str, stemmer: &str) -> Result<Index, JsError> {
+    pub fn create(path: &str, fields_json: &str) -> Result<Index, JsError> {
         let fields: Vec<query::FieldDef> = serde_json::from_str(fields_json)
             .map_err(|e| JsError::new(&format!("invalid fields JSON: {e}")))?;
 
         let config = query::SchemaConfig {
             fields,
             tokenizer: None,
-            stemmer: if stemmer.is_empty() { None } else { Some(stemmer.to_string()) },
+            ..Default::default()
         };
 
         let directory = MemoryDirectory::new();

@@ -66,7 +66,7 @@ pub struct Index {
 impl Index {
     /// Create a new index at the given path.
     #[napi(factory)]
-    pub fn create(path: String, fields: Vec<FieldDef>, stemmer: Option<String>) -> Result<Self> {
+    pub fn create(path: String, fields: Vec<FieldDef>) -> Result<Self> {
         let field_defs: Vec<query::FieldDef> = fields
             .iter()
             .map(|f| query::FieldDef {
@@ -81,7 +81,7 @@ impl Index {
         let config = query::SchemaConfig {
             fields: field_defs,
             tokenizer: None,
-            stemmer,
+            ..Default::default()
         };
 
         let directory = StdFsDirectory::open(&path)

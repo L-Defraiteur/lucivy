@@ -1,12 +1,7 @@
-//! Suffix FST contains search — v2 path parallel to ngram_contains_query.
+//! Suffix FST contains search — substring matching via suffix FST.
 //!
-//! Uses the .sfx file (suffix FST with redirection to ._raw posting lists)
-//! to resolve contains queries without stored text verification.
-//!
-//! Kept as a standalone module — can be activated/deactivated without
-//! touching the existing ngram contains path.
-
-use std::sync::Arc;
+//! Uses the .sfx file (suffix FST with posting lists) to resolve
+//! contains queries without stored text verification.
 
 use crate::docset::{DocSet, TERMINATED};
 use crate::index::InvertedIndexReader;
@@ -20,12 +15,14 @@ pub struct SuffixContainsMatch {
     /// Document ID within the segment.
     pub doc_id: u32,
     /// Token index of the matched token in the document.
+    #[allow(dead_code)]
     pub token_index: u32,
     /// Byte offset in the original text where the match starts.
     pub byte_from: usize,
     /// Byte offset where the match ends (byte_from + query_len).
     pub byte_to: usize,
     /// The parent token text (from ._raw FST). Empty if not resolved.
+    #[allow(dead_code)]
     pub parent_term: String,
     /// Suffix index (0 = full token match, >0 = substring).
     pub si: u16,
@@ -413,15 +410,6 @@ pub fn resolve_raw_ordinal(
     entries
 }
 
-/// Create a resolver closure that reads real posting lists from the inverted index.
-///
-/// Returns a closure suitable for passing to `suffix_contains_single_token`.
-pub fn make_raw_resolver(
-    inv_idx_reader: Arc<InvertedIndexReader>,
-) -> impl Fn(u64) -> Vec<RawPostingEntry> {
-    move |raw_ordinal| resolve_raw_ordinal(&inv_idx_reader, raw_ordinal)
-}
-
 /// Search for multi-token contains matches.
 ///
 /// Rules:
@@ -723,6 +711,7 @@ pub struct SuffixContainsMultiMatch {
     pub doc_id: u32,
     pub byte_from: usize,
     pub byte_to: usize,
+    #[allow(dead_code)]
     pub token_matches: Vec<SuffixContainsMatch>,
 }
 

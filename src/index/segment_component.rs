@@ -29,9 +29,15 @@ pub enum SegmentComponent {
     /// Byte offsets for each term occurrence (for highlights).
     Offsets,
     /// Suffix FST for a specific field (contains search).
-    SuffixFst { field_id: u32 },
+    SuffixFst {
+        /// Schema field ID this suffix FST belongs to.
+        field_id: u32,
+    },
     /// Suffix postings for a specific field (doc_id + offsets per term).
-    SuffixPost { field_id: u32 },
+    SuffixPost {
+        /// Schema field ID this suffix postings file belongs to.
+        field_id: u32,
+    },
 }
 
 impl SegmentComponent {

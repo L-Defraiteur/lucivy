@@ -39,10 +39,12 @@ pub struct ValueGaps<'a> {
 /// Supports multi-value fields with VALUE_BOUNDARY markers.
 pub struct GapMapWriter {
     data_buffer: Vec<u8>,
+    /// Per-document byte offsets into `data_buffer`.
     doc_offsets: Vec<u64>,
 }
 
 impl GapMapWriter {
+    /// Create a new empty GapMap writer.
     pub fn new() -> Self {
         Self {
             data_buffer: Vec::new(),
@@ -173,7 +175,9 @@ fn encode_gap(buf: &mut Vec<u8>, gap: &[u8]) {
 /// Error found during gapmap validation.
 #[derive(Debug)]
 pub struct GapMapError {
+    /// ID of the document that failed validation.
     pub doc_id: u32,
+    /// Description of the validation failure.
     pub message: String,
 }
 
@@ -190,6 +194,7 @@ pub struct GapMapReader<'a> {
 }
 
 impl<'a> GapMapReader<'a> {
+    /// Open a GapMap from raw bytes (mmap'd or in-memory).
     pub fn open(data: &'a [u8]) -> Self {
         let num_docs = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         Self { data, num_docs }
@@ -200,6 +205,7 @@ impl<'a> GapMapReader<'a> {
         self.data
     }
 
+    /// Number of documents in this GapMap.
     pub fn num_docs(&self) -> u32 {
         self.num_docs
     }
@@ -511,7 +517,7 @@ impl<'a> GapMapReader<'a> {
 
         // Expected: for N tokens and V values, total gaps = N + V - 1
         // (one gap between each consecutive token, plus VALUE_BOUNDARY between values)
-        let expected_gaps = if num_values == 1 {
+        let _expected_gaps = if num_values == 1 {
             num_tokens + 1 // gaps around each token
         } else {
             num_tokens + num_values // tokens gaps + value boundaries

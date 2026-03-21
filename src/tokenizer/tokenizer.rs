@@ -83,10 +83,10 @@ impl<T: Tokenizer> TextAnalyzerBuilder<T> {
     /// ```rust
     /// use ld_lucivy::tokenizer::*;
     ///
-    /// let en_stem = TextAnalyzer::builder(SimpleTokenizer::default())
+    /// let code = TextAnalyzer::builder(SimpleTokenizer::default())
     ///     .filter(RemoveLongFilter::limit(40))
+    ///     .filter(CamelCaseSplitFilter)
     ///     .filter(LowerCaser)
-    ///     .filter(Stemmer::default())
     ///     .build();
     /// ```
     pub fn filter<F: TokenFilter>(self, token_filter: F) -> TextAnalyzerBuilder<F::Tokenizer<T>> {

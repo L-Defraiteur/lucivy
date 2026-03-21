@@ -231,7 +231,6 @@ trait AnyActor: Send {
     fn has_pending(&self) -> bool;
     fn is_disconnected(&self) -> bool;
     fn poll_idle(&mut self) -> Poll<()>;
-    fn name(&self) -> &'static str;
     fn mailbox_len(&self) -> usize;
 }
 
@@ -260,10 +259,6 @@ impl<A: Actor> AnyActor for ActorWrapper<A> {
 
     fn poll_idle(&mut self) -> Poll<()> {
         self.actor.poll_idle()
-    }
-
-    fn name(&self) -> &'static str {
-        self.actor.name()
     }
 
     fn mailbox_len(&self) -> usize {

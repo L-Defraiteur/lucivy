@@ -19,9 +19,27 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
 
-#[cfg(feature = "stopwords")]
-use super::Language;
 use super::{Token, TokenFilter, TokenStream, Tokenizer};
+
+/// Language enum for stop word lists.
+#[cfg(feature = "stopwords")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub enum Language {
+    Danish,
+    Dutch,
+    English,
+    Finnish,
+    French,
+    German,
+    Hungarian,
+    Italian,
+    Norwegian,
+    Portuguese,
+    Russian,
+    Spanish,
+    Swedish,
+}
 
 /// `TokenFilter` that removes stop words from a token stream
 #[derive(Clone)]
@@ -57,7 +75,6 @@ impl StopWordFilter {
             Language::Russian => stopwords::RUSSIAN,
             Language::Spanish => stopwords::SPANISH,
             Language::Swedish => stopwords::SWEDISH,
-            _ => return None,
         };
 
         Some(Self::remove(words.iter().map(|&word| word.to_owned())))

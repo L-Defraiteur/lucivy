@@ -136,36 +136,6 @@ where A::State: Clone {
     }
 }
 
-/// Legacy wrapper — kept for backward compat but no longer used by search_continuation.
-struct ContinuationAutomaton<'a, A: Automaton> {
-    inner: &'a A,
-    start_state: A::State,
-}
-
-impl<A: Automaton> Automaton for ContinuationAutomaton<'_, A>
-where
-    A::State: Clone,
-{
-    type State = A::State;
-
-    fn start(&self) -> Self::State {
-        self.start_state.clone()
-    }
-
-    fn is_match(&self, state: &Self::State) -> bool {
-        // Yield all alive entries, not just accepting ones
-        self.inner.can_match(state)
-    }
-
-    fn can_match(&self, state: &Self::State) -> bool {
-        self.inner.can_match(state)
-    }
-
-    fn accept(&self, state: &Self::State, byte: u8) -> Self::State {
-        self.inner.accept(state, byte)
-    }
-}
-
 /// A term dictionary backed by the .sfx suffix FST.
 ///
 /// For exact/prefix/fuzzy/regex (standard lookups): filters SI=0 entries,
@@ -450,7 +420,6 @@ impl<'a> SfxTermDictionary<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::suffix_fst::SfxCollector;
     use crate::schema::{SchemaBuilder, TextFieldIndexing, TextOptions, IndexRecordOption};
     use crate::tokenizer::{LowerCaser, SimpleTokenizer, TextAnalyzer};
     use crate::{Index, LucivyDocument};
@@ -562,7 +531,6 @@ mod tests {
         // Iterate ALL terms in standard TermDictionary and compare
         let mut stream = termdict.stream().unwrap();
         let mut checked = 0;
-        use crate::termdict::TermStreamer;
         while stream.advance() {
             let key = stream.key().to_vec();
             let standard_ti = stream.value().clone();

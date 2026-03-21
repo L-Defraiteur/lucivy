@@ -291,7 +291,6 @@ pub(crate) fn encode_vint(mut val: u32, out: &mut Vec<u8>) {
 mod tests {
     use super::*;
     use crate::suffix_fst::file::SfxFileReader;
-    use crate::suffix_fst::gapmap::is_value_boundary;
 
     #[test]
     fn test_collector_single_value() {

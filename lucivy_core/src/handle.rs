@@ -20,9 +20,6 @@ pub const NODE_ID_FIELD: &str = "_node_id";
 /// Tokenizer name for raw fields (camelCase split + lowercase).
 const RAW_TOKENIZER: &str = "raw_code";
 
-/// Tokenizer name for stemmed fields.
-const STEMMED_TOKENIZER: &str = "stemmed";
-
 /// Opaque handle shared by all bindings.
 pub struct LucivyHandle {
     pub index: Index,
@@ -202,7 +199,6 @@ pub fn build_schema(
 ) -> Result<(Schema, Vec<(String, Field)>), String> {
     let mut builder = Schema::builder();
     let mut field_map = Vec::new();
-    let has_stemmer = config.stemmer.is_some();
 
     // Auto-add _node_id as u64 FAST + INDEXED + STORED field.
     // STORED is required so that extract_node_id() can read it back from documents.
@@ -212,13 +208,10 @@ pub fn build_schema(
     for field_def in &config.fields {
         match field_def.field_type.as_str() {
             "text" => {
-                // Main field: stemmed tokenizer if configured, else RAW_TOKENIZER
-                // (CamelCaseSplit + lowercase). Using RAW_TOKENIZER when no stemmer avoids
-                // double tokenization in the segment_writer and gives better code search
+                // RAW_TOKENIZER: CamelCaseSplit + lowercase. Gives good code search
                 // (camelCase → ["camel", "case"]).
-                let main_tokenizer = if has_stemmer { STEMMED_TOKENIZER } else { RAW_TOKENIZER };
                 let indexing = TextFieldIndexing::default()
-                    .set_tokenizer(main_tokenizer)
+                    .set_tokenizer(RAW_TOKENIZER)
                     .set_index_option(IndexRecordOption::WithFreqsAndPositionsAndOffsets);
                 let mut opts = TextOptions::default().set_indexing_options(indexing);
                 if field_def.stored.unwrap_or(true) {
@@ -303,29 +296,6 @@ pub fn configure_tokenizers(index: &Index, config: &SchemaConfig) {
         .filter(LowerCaser)
         .build();
     index.tokenizers().register(RAW_TOKENIZER, raw_tokenizer);
-
-    // Stemmer: only if requested.
-    if let Some(ref stemmer_lang) = config.stemmer {
-        use ld_lucivy::tokenizer::Stemmer;
-
-        let lang = match stemmer_lang.as_str() {
-            "english" => ld_lucivy::tokenizer::Language::English,
-            "french" => ld_lucivy::tokenizer::Language::French,
-            "german" => ld_lucivy::tokenizer::Language::German,
-            "spanish" => ld_lucivy::tokenizer::Language::Spanish,
-            "italian" => ld_lucivy::tokenizer::Language::Italian,
-            "portuguese" => ld_lucivy::tokenizer::Language::Portuguese,
-            "dutch" => ld_lucivy::tokenizer::Language::Dutch,
-            "russian" => ld_lucivy::tokenizer::Language::Russian,
-            _ => return,
-        };
-
-        let tokenizer = TextAnalyzer::builder(SimpleTokenizer::default())
-            .filter(LowerCaser)
-            .filter(Stemmer::new(lang))
-            .build();
-        index.tokenizers().register(STEMMED_TOKENIZER, tokenizer);
-    }
 }
 
 #[cfg(test)]

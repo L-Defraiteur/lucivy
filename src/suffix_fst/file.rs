@@ -59,10 +59,12 @@ pub struct SfxFileWriter {
     parent_list_data: Vec<u8>,
     gapmap_data: Vec<u8>,
     num_docs: u32,
+    /// Number of unique suffix terms in the FST.
     num_suffix_terms: u32,
 }
 
 impl SfxFileWriter {
+    /// Create a new writer from pre-built FST, parent list, and GapMap data.
     pub fn new(
         fst_data: Vec<u8>,
         parent_list_data: Vec<u8>,
@@ -161,10 +163,12 @@ impl<'a> SfxFileReader<'a> {
         })
     }
 
+    /// Number of documents indexed in this `.sfx` file.
     pub fn num_docs(&self) -> u32 {
         self.num_docs
     }
 
+    /// Number of unique suffix terms in the FST.
     pub fn num_suffix_terms(&self) -> u32 {
         self.num_suffix_terms
     }
@@ -323,9 +327,13 @@ impl<'a> SfxFileReader<'a> {
 /// A posting entry from the .sfxpost file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SfxPostingEntry {
+    /// Document ID containing this posting.
     pub doc_id: u32,
+    /// Token position within the document.
     pub token_index: u32,
+    /// Start byte offset of the token in the original text.
     pub byte_from: u32,
+    /// End byte offset (exclusive) of the token in the original text.
     pub byte_to: u32,
 }
 
@@ -339,6 +347,7 @@ pub struct SfxPostingsReader<'a> {
 }
 
 impl<'a> SfxPostingsReader<'a> {
+    /// Open a `.sfxpost` file from raw bytes.
     pub fn open(data: &'a [u8]) -> Result<Self, SfxError> {
         if data.len() < 4 {
             return Err(SfxError::InvalidMagic);
@@ -440,10 +449,14 @@ fn increment_prefix(prefix: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+/// Errors that can occur when reading a `.sfx` or `.sfxpost` file.
 #[derive(Debug)]
 pub enum SfxError {
+    /// The file header does not contain valid magic bytes.
     InvalidMagic,
+    /// The file version is not supported by this reader.
     UnsupportedVersion(u8),
+    /// The FST data is corrupted or invalid.
     FstError(String),
 }
 

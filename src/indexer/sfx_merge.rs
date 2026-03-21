@@ -390,6 +390,8 @@ fn decode_vint(data: &[u8]) -> (u32, usize) {
 // ---------------------------------------------------------------------------
 
 /// Assemble SFX file from components and write via serializer.
+/// Legacy — replaced by WriteSfxNode in sfx_dag.rs.
+#[allow(dead_code)]
 pub(crate) fn write_sfx(
     serializer: &mut crate::indexer::SegmentSerializer,
     field: Field,

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::mailbox::{mailbox, ActorRef};
 use crate::reply::{reply, Reply};
 use crate::scheduler::global_scheduler;
-use crate::{Actor, Mailbox};
+use crate::Actor;
 
 // ---------------------------------------------------------------------------
 // Pool — N identical actors with dispatch strategies

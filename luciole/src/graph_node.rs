@@ -1,6 +1,6 @@
 use crate::dag::Dag;
 use crate::node::{Node, NodeContext, PortDef};
-use crate::port::{PortType, PortValue};
+use crate::port::PortType;
 use crate::runtime::{execute_dag, DagResult};
 
 // ---------------------------------------------------------------------------

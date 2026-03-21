@@ -20,13 +20,6 @@ use crate::schema::document::{Document, Value};
 use crate::schema::{FieldEntry, FieldType, Schema, DATE_TIME_PRECISION_INDEXED};
 use crate::suffix_fst::SfxCollector;
 
-/// Extract num_suffix_terms from sfx_bytes header.
-fn collector_token_count(sfx_bytes: &[u8]) -> u32 {
-    use crate::suffix_fst::file::SfxFileReader;
-    SfxFileReader::open(sfx_bytes)
-        .map(|r| r.num_suffix_terms())
-        .unwrap_or(0)
-}
 use crate::tokenizer::{FacetTokenizer, PreTokenizedStream, PreTokenizedString, TextAnalyzer, Tokenizer};
 use crate::{DocId, Opstamp, LucivyError};
 
@@ -178,7 +171,7 @@ impl SegmentWriter {
             }
         } else {
             // Multiple fields — build in parallel via scatter DAG
-            let field_ids: Vec<u32> = sfx_collectors.keys().copied().collect();
+            let _field_ids: Vec<u32> = sfx_collectors.keys().copied().collect();
             let tasks: Vec<(&str, _)> = sfx_collectors.into_iter()
                 .map(|(field_id, collector)| {
                     let name: &str = Box::leak(format!("field_{field_id}").into_boxed_str());

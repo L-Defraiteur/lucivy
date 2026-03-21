@@ -127,7 +127,7 @@ impl SegmentSpaceUsage {
             SegmentComponent::TempStore => ComponentSpaceUsage::Store(self.store().clone()),
             Delete => Basic(self.deletes()),
             Offsets => PerField(self.positions().clone()), // offsets mirror positions layout
-            SuffixFst => Basic(Default::default()), // .sfx is a standalone file, not tracked per-field
+            _ => Basic(Default::default()), // .sfx/.sfxpost are standalone files, not tracked per-field
         }
     }
 

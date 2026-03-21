@@ -8,14 +8,19 @@ use crate::{DocId, SegmentReader};
 /// A resolved posting entry: one occurrence of a term in a document.
 #[derive(Debug, Clone)]
 pub struct PostingEntry {
+    /// Document containing this occurrence.
     pub doc_id: DocId,
+    /// Token position within the document.
     pub position: u32,
+    /// Start byte offset of the term in the original text.
     pub byte_from: u32,
+    /// End byte offset (exclusive) of the term in the original text.
     pub byte_to: u32,
 }
 
 /// Resolves ordinals to posting entries.
 pub trait PostingResolver: Send + Sync {
+    /// Resolve a term ordinal to all its posting entries.
     fn resolve(&self, ordinal: u64) -> Vec<PostingEntry>;
 
     /// doc_freq = number of unique docs for this ordinal.

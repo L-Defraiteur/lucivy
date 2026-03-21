@@ -20,11 +20,10 @@ use ld_lucivy::Index;
 
 // ─── Schema Config ──────────────────────────────────────────────────────────
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct SchemaConfig {
     pub fields: Vec<FieldDef>,
     pub tokenizer: Option<String>,
-    pub stemmer: Option<String>,
     /// Number of shards for token-aware sharding. None or 1 = no sharding.
     pub shards: Option<usize>,
     /// Only track tokens with global df below this threshold (default 5000).
@@ -81,7 +80,7 @@ pub struct QueryConfig {
 // ─── Tokenization Helper ────────────────────────────────────────────────────
 
 /// Tokenize text through the tokenizer configured for a field.
-/// Returns the list of tokens (e.g. ["lazi", "dog"] for "lazy dog" with English stemmer).
+/// Returns the list of tokens (e.g. ["lazy", "dog"] for "lazy dog").
 fn tokenize_for_field(index: &Index, field: Field, schema: &Schema, text: &str) -> Vec<String> {
     let tokenizer_name = match schema.get_field_entry(field).field_type() {
         FieldType::Str(opts) => opts

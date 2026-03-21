@@ -8,6 +8,7 @@ authors = ["Luciform Research <luciedefraiteur@luciformresearch.com>"]
 repository = "https://github.com/L-Defraiteur/lucivy"
 readme = "README.md"
 keywords = ["search", "full-text", "bm25", "lucivy"]
+autobenches = false
 
 [lib]
 crate-type = ["lib"]
@@ -16,7 +17,6 @@ crate-type = ["lib"]
 ld-lucivy = { version = "0.27.0", path = "..", default-features = false, features = [
     "stopwords",
     "lz4-compression",
-    "stemmer",
 ] }
 luciole = { path = "../luciole" }
 serde = { version = "1", features = ["derive"] }

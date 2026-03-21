@@ -222,11 +222,9 @@ unsafe fn str_from_ptr<'a>(ptr: *const c_char) -> &'a str {
 pub unsafe extern "C" fn lucivy_create(
     path: *const c_char,
     fields_json: *const c_char,
-    stemmer: *const c_char,
 ) -> *mut LucivyContext {
     let path = str_from_ptr(path);
     let fields_json = str_from_ptr(fields_json);
-    let stemmer = str_from_ptr(stemmer);
 
     let fields: Vec<query::FieldDef> = match serde_json::from_str(fields_json) {
         Ok(f) => f,
@@ -236,7 +234,7 @@ pub unsafe extern "C" fn lucivy_create(
     let config = query::SchemaConfig {
         fields,
         tokenizer: None,
-        stemmer: if stemmer.is_empty() { None } else { Some(stemmer.to_string()) },
+        ..Default::default()
     };
 
     let directory = MemoryDirectory::new();

@@ -22,56 +22,89 @@ use std::sync::{Mutex, OnceLock};
 pub enum DiagEvent {
     /// Token captured by SfxTokenInterceptor during indexing.
     TokenCaptured {
+        /// Document ID within the segment.
         doc_id: u32,
+        /// Field ID being indexed.
         field_id: u32,
+        /// Token text (lowercased).
         token: String,
+        /// Byte offset where the token starts in the source text.
         offset_from: usize,
+        /// Byte offset where the token ends.
         offset_to: usize,
     },
     /// Suffix added to the FST during build.
     SuffixAdded {
+        /// Parent token text.
         token: String,
+        /// Raw ordinal of the parent token in the term dict.
         ordinal: u64,
+        /// The suffix string being added.
         suffix: String,
+        /// Suffix index (0 = full token, >0 = substring offset).
         si: u16,
     },
     /// SFX prefix_walk result for a search query.
     SfxWalk {
+        /// The search query string.
         query: String,
+        /// Segment identifier.
         segment_id: String,
+        /// Number of SI=0 (startsWith) entries found.
         si0_entries: usize,
+        /// Number of SI>0 (substring) entries found.
         si_rest_entries: usize,
+        /// Total parent tokens resolved.
         total_parents: usize,
     },
     /// SFX ordinal resolved to doc_ids via sfxpost.
     SfxResolve {
+        /// The search query string.
         query: String,
+        /// Segment identifier.
         segment_id: String,
+        /// Raw ordinal in the term dict.
         ordinal: u32,
+        /// Parent token text.
         token: String,
+        /// Suffix index.
         si: u16,
+        /// Number of documents containing this ordinal.
         doc_count: usize,
     },
     /// Contains search matched a doc in a segment.
     SearchMatch {
+        /// The search query string.
         query: String,
+        /// Segment identifier.
         segment_id: String,
+        /// Document ID within the segment.
         doc_id: u32,
+        /// Byte offset where the match starts.
         byte_from: usize,
+        /// Byte offset where the match ends.
         byte_to: usize,
+        /// Whether the match spans multiple tokens.
         cross_token: bool,
     },
     /// Contains search completed for a segment.
     SearchComplete {
+        /// The search query string.
         query: String,
+        /// Segment identifier.
         segment_id: String,
+        /// Total number of matching documents.
         total_docs: u32,
     },
-    /// Merge sfxpost: doc remapped.
+    /// Merge sfxpost: doc remapped during segment merge.
     MergeDocRemapped {
+        /// Field ID being merged.
         field_id: u32,
+        /// Token text.
         token: String,
+        /// Document ID before remapping.
         old_doc_id: u32,
+        /// Document ID after remapping.
         new_doc_id: u32,
     },
 }

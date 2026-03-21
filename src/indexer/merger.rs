@@ -816,13 +816,9 @@ impl IndexMerger {
         Ok(())
     }
 
-    /// Merge .sfx files from source segments into the merged segment.
-    ///
-    /// For each `._raw` field that has .sfx in at least one source segment:
-    /// 1. Collect all unique tokens from source term dictionaries
-    /// 2. Rebuild suffix FST with SuffixFstBuilder
-    /// 3. Copy GapMap data per-doc in merge order
-    pub(crate) fn merge_sfx(
+    // Legacy merge_sfx — replaced by sfx_dag.rs
+    #[allow(dead_code)]
+    pub(crate) fn merge_sfx_legacy(
         &self,
         serializer: &mut SegmentSerializer,
         doc_mapping: &[DocAddress],

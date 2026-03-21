@@ -45,13 +45,6 @@
 //! Does not actual tokenizer your text. It keeps it entirely unprocessed.
 //! It can be useful to index uuids, or urls for instance.
 //!
-//! ## `en_stem`
-//!
-//! In addition to what `default` does, the `en_stem` tokenizer also
-//! apply stemming to your tokens. Stemming consists in trimming words to
-//! remove their inflection. This tokenizer is slower than the default one,
-//! but is recommended to improve recall.
-//!
 //! # Custom tokenizer Library
 //! Avoid using lucivy as dependency and prefer `lucivy-tokenizer-api` instead.
 //!
@@ -61,15 +54,15 @@
 //! or you can extend an existing [`Tokenizer`] by chaining it with several
 //! [`TokenFilter`]s.
 //!
-//! For instance, the `en_stem` is defined as follows.
+//! For instance, a code tokenizer with camelCase splitting:
 //!
 //! ```rust
 //! use ld_lucivy::tokenizer::*;
 //!
-//! let en_stem = TextAnalyzer::builder(SimpleTokenizer::default())
+//! let code_tokenizer = TextAnalyzer::builder(SimpleTokenizer::default())
 //!     .filter(RemoveLongFilter::limit(40))
+//!     .filter(CamelCaseSplitFilter)
 //!     .filter(LowerCaser)
-//!     .filter(Stemmer::new(Language::English))
 //!     .build();
 //! ```
 //!
@@ -126,7 +119,6 @@ mod ascii_folding_filter;
 mod empty_tokenizer;
 mod facet_tokenizer;
 mod lower_caser;
-mod ngram_tokenizer;
 mod raw_tokenizer;
 mod regex_tokenizer;
 mod remove_long;
@@ -139,8 +131,6 @@ mod tokenizer;
 mod tokenizer_manager;
 mod whitespace_tokenizer;
 
-#[cfg(feature = "stemmer")]
-mod stemmer;
 pub use tokenizer_api::{BoxTokenStream, Token, TokenFilter, TokenStream, Tokenizer};
 
 pub use self::camel_case_split::CamelCaseSplitFilter;
@@ -148,14 +138,11 @@ pub use self::alphanum_only::AlphaNumOnlyFilter;
 pub use self::ascii_folding_filter::{AsciiFoldingFilter, to_ascii};
 pub use self::facet_tokenizer::FacetTokenizer;
 pub use self::lower_caser::LowerCaser;
-pub use self::ngram_tokenizer::NgramTokenizer;
 pub use self::raw_tokenizer::RawTokenizer;
 pub use self::regex_tokenizer::RegexTokenizer;
 pub use self::remove_long::RemoveLongFilter;
 pub use self::simple_tokenizer::{SimpleTokenStream, SimpleTokenizer};
 pub use self::split_compound_words::SplitCompoundWords;
-#[cfg(feature = "stemmer")]
-pub use self::stemmer::{Language, Stemmer};
 pub use self::stop_word_filter::StopWordFilter;
 pub use self::tokenized_string::{PreTokenizedStream, PreTokenizedString};
 pub use self::tokenizer::{TextAnalyzer, TextAnalyzerBuilder};

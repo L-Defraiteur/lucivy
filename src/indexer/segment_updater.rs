@@ -61,6 +61,7 @@ pub(crate) struct SegmentUpdaterShared {
     pub(crate) segment_manager: SegmentManager,
     pub(crate) merge_policy: RwLock<Arc<dyn MergePolicy>>,
     pub(crate) killed: AtomicBool,
+    #[allow(dead_code)]
     pub(crate) stamper: Stamper,
     pub(crate) event_bus: Arc<EventBus<IndexEvent>>,
 }
@@ -281,14 +282,6 @@ impl SegmentUpdater {
     pub fn kill(&mut self) {
         self.shared.killed.store(true, Ordering::Release);
         let _ = self.actor_ref.send(SuKillMsg.into_envelope());
-    }
-
-    pub(crate) fn schedule_commit(
-        &self,
-        opstamp: Opstamp,
-        payload: Option<String>,
-    ) -> crate::Result<Opstamp> {
-        self.schedule_commit_with_rebuild(opstamp, payload, true)
     }
 
     pub(crate) fn schedule_commit_with_rebuild(

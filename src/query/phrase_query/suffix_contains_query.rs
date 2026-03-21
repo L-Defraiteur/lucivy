@@ -17,7 +17,7 @@ use crate::schema::Field;
 use crate::suffix_fst::file::SfxFileReader;
 use crate::{DocId, Score, SegmentReader};
 
-use crate::tokenizer::{SimpleTokenizer, TextAnalyzer, LowerCaser, TokenStream, Tokenizer};
+use crate::tokenizer::{SimpleTokenizer, TextAnalyzer, LowerCaser, TokenStream};
 
 use super::suffix_contains;
 
@@ -198,7 +198,7 @@ impl Weight for SuffixContainsWeight {
         let (doc_tf, highlights) = if query_tokens.len() <= 1 {
             // Single-token path
             let query = if query_tokens.is_empty() { &self.query_text } else { &query_tokens[0] };
-            let mut matches = if fuzzy_d == 0 {
+            let matches = if fuzzy_d == 0 {
                 if prefix_only {
                     suffix_contains::suffix_contains_single_token_prefix(
                         &sfx_reader, query, &resolver,

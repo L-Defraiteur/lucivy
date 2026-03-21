@@ -63,18 +63,6 @@ impl Default for TokenizerManager {
                 .filter(LowerCaser)
                 .build(),
         );
-        #[cfg(feature = "stemmer")]
-        {
-            use crate::tokenizer::stemmer::{Language, Stemmer};
-            manager.register(
-                "en_stem",
-                TextAnalyzer::builder(SimpleTokenizer::default())
-                    .filter(RemoveLongFilter::limit(40))
-                    .filter(LowerCaser) // The stemmer does not lowercase
-                    .filter(Stemmer::new(Language::English))
-                    .build(),
-            );
-        }
         manager.register("whitespace", WhitespaceTokenizer::default());
         manager
     }

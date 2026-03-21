@@ -1,4 +1,4 @@
-use std::any::{Any, TypeId};
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -192,16 +192,6 @@ impl NodeContext {
             metrics: Vec::new(),
             logs: Vec::new(),
             services: None,
-        }
-    }
-
-    pub(crate) fn with_services(inputs: HashMap<String, PortValue>, services: Arc<ServiceRegistry>) -> Self {
-        Self {
-            inputs,
-            outputs: HashMap::new(),
-            metrics: Vec::new(),
-            logs: Vec::new(),
-            services: Some(services),
         }
     }
 
@@ -428,16 +418,6 @@ mod tests {
         assert_eq!(reg.get::<u32>("max_retries"), Some(&3u32));
         assert_eq!(reg.get::<u32>("db_url"), None); // wrong type
         assert_eq!(reg.get::<String>("missing"), None); // missing key
-    }
-
-    #[test]
-    fn node_context_with_services() {
-        let mut reg = ServiceRegistry::new();
-        reg.register("answer", 42u64);
-
-        let ctx = NodeContext::with_services(HashMap::new(), Arc::new(reg));
-        assert_eq!(ctx.service::<u64>("answer"), Some(&42u64));
-        assert_eq!(ctx.service::<u64>("nope"), None);
     }
 
     #[test]

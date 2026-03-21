@@ -52,7 +52,7 @@ mod ffi {
         type LucivyIndex;
 
         // Lifecycle
-        fn lucivy_create(path: &str, fields_json: &str, stemmer: &str) -> Result<Box<LucivyIndex>>;
+        fn lucivy_create(path: &str, fields_json: &str) -> Result<Box<LucivyIndex>>;
         fn lucivy_open(path: &str) -> Result<Box<LucivyIndex>>;
 
         // Document operations
@@ -117,18 +117,14 @@ pub struct LucivyIndex {
 
 // ── Lifecycle ──────────────────────────────────────────────────────────────
 
-fn lucivy_create(path: &str, fields_json: &str, stemmer: &str) -> Result<Box<LucivyIndex>, String> {
+fn lucivy_create(path: &str, fields_json: &str) -> Result<Box<LucivyIndex>, String> {
     let fields: Vec<query::FieldDef> = serde_json::from_str(fields_json)
         .map_err(|e| format!("invalid fields JSON: {e}"))?;
 
     let config = query::SchemaConfig {
         fields,
         tokenizer: None,
-        stemmer: if stemmer.is_empty() {
-            None
-        } else {
-            Some(stemmer.to_string())
-        },
+        ..Default::default()
     };
 
     let directory = lucivy_core::directory::StdFsDirectory::open(path)

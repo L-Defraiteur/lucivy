@@ -32,16 +32,10 @@ use crate::Opstamp;
 // Types flowing between nodes
 // ---------------------------------------------------------------------------
 
-/// Output of PrepareNode: everything the merges need.
-pub(crate) struct PrepareOutput {
-    pub segment_entries_per_merge: Vec<(MergeOperation, Vec<SegmentEntry>)>,
-}
-
 /// Result of a single merge.
 pub(crate) struct MergeResult {
     pub merge_op: MergeOperation,
     pub segment_entry: Option<SegmentEntry>,
-    pub duration_ms: u64,
     pub docs_merged: u32,
 }
 
@@ -194,7 +188,6 @@ impl Node for MergeNode {
         ctx.set_output("result", PortValue::new(MergeResult {
             merge_op: op,
             segment_entry,
-            duration_ms: duration.as_millis() as u64,
             docs_merged,
         }));
         Ok(())
@@ -429,7 +422,6 @@ pub(crate) fn build_commit_dag(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::directory::RamDirectory;
     use crate::indexer::merge_policy::tests::MergeWheneverPossible;
     use crate::schema::*;
@@ -450,7 +442,7 @@ mod tests {
         let dag_events = luciole::subscribe_dag_events();
 
         // Create 4 segments
-        for seg in 0..4 {
+        for _seg in 0..4 {
             for i in 0u64..100u64 {
                 writer.add_document(doc!(field => i))?;
             }

@@ -5,9 +5,7 @@
 mod tests {
     use std::collections::HashMap;
 
-    use crate::suffix_fst::builder::ParentEntry;
     use crate::suffix_fst::file::SfxFileReader;
-    use crate::suffix_fst::gapmap::{is_value_boundary, GapMapReader};
     use crate::suffix_fst::SfxCollector;
     use crate::query::phrase_query::suffix_contains::{
         suffix_contains_single_token, RawPostingEntry,
