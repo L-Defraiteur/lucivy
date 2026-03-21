@@ -363,34 +363,47 @@ fn test_distributed_search_two_nodes_postgres() {
         Box::new(storage_b), &config,
     ).expect("create node B");
 
-    // ── Index different docs on each node ──
+    // ── Distributed indexation with client-side routing ──
+    //
+    // In a real deployment, the client (or a load balancer) decides which
+    // node receives each document. The nodes don't coordinate during indexation.
+    //
+    // Common routing strategies:
+    //   - hash(doc_id) % num_nodes  → deterministic, good for deletes
+    //   - round-robin               → balanced, simple
+    //   - by category/tenant        → data locality
+    //
+    // Here we use hash routing: doc_id % 2 → node A or B.
 
+    let nodes = [&node_a, &node_b];
     let body = node_a.field("body").unwrap();
     let nid = node_a.field("_node_id").unwrap();
 
-    // Node A: docs about mutex and synchronization
-    for i in 0..50u64 {
-        let mut doc = ld_lucivy::LucivyDocument::new();
-        doc.add_u64(nid, i);
-        doc.add_text(body, &format!(
-            "Document {i} discusses mutex synchronization and lock contention in concurrent systems"
-        ));
-        node_a.add_document(doc, i).unwrap();
-    }
-    node_a.commit().unwrap();
+    let topics = [
+        "mutex synchronization and lock contention in concurrent systems",
+        "scheduler performance and lock free data structures",
+        "memory allocation with malloc and free in kernel modules",
+        "spinlock implementation and atomic compare exchange operations",
+        "process scheduling with priority queues and lock ordering",
+    ];
 
-    // Node B: docs about scheduling and performance
-    for i in 50..100u64 {
+    for i in 0..100u64 {
+        let target_node = (i % 2) as usize;  // hash routing
+        let topic = &topics[(i % topics.len() as u64) as usize];
+
         let mut doc = ld_lucivy::LucivyDocument::new();
         doc.add_u64(nid, i);
-        doc.add_text(body, &format!(
-            "Document {i} covers scheduler performance and lock free data structures"
-        ));
-        node_b.add_document(doc, i).unwrap();
+        doc.add_text(body, &format!("Document {i} covers {topic}"));
+
+        nodes[target_node].add_document(doc, i).unwrap();
     }
+
+    // Each node commits independently (could be on different machines)
+    node_a.commit().unwrap();
     node_b.commit().unwrap();
 
     eprintln!("Node A: {} docs, Node B: {} docs", node_a.num_docs(), node_b.num_docs());
+    assert_eq!(node_a.num_docs() + node_b.num_docs(), 100);
 
     // ── Distributed search protocol ──
 
