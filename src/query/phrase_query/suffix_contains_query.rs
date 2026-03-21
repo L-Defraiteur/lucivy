@@ -6,16 +6,39 @@
 //! Requires a .sfx file to exist for the target field. If not present,
 //! returns an error — no silent fallback.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use crate::docset::{DocSet, TERMINATED};
 use crate::fieldnorm::FieldNormReader;
+use crate::index::SegmentId;
 use crate::query::bm25::Bm25Weight;
 use crate::query::phrase_query::scoring_utils::HighlightSink;
 use crate::query::{EmptyScorer, EnableScoring, Explanation, Query, Scorer, Weight};
 use crate::schema::Field;
 use crate::suffix_fst::file::SfxFileReader;
 use crate::{DocId, Score, SegmentReader};
+
+/// Cached SFX walk results for two-pass scoring.
+/// Pass 1: SFX walk populates this cache + returns doc_freq count.
+/// Pass 2: scorer reads from cache, uses global doc_freq for correct IDF.
+impl std::fmt::Debug for SfxCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SfxCache").finish()
+    }
+}
+
+#[derive(Default)]
+pub struct SfxCache {
+    segments: Mutex<HashMap<SegmentId, CachedSfxResult>>,
+    /// After pass 1, stores the total doc_freq across all segments on this shard.
+    pub doc_freq_count: std::sync::atomic::AtomicU64,
+}
+
+struct CachedSfxResult {
+    doc_tf: Vec<(DocId, u32)>,
+    highlights: Vec<(DocId, usize, usize)>,
+}
 
 use crate::tokenizer::{SimpleTokenizer, TextAnalyzer, LowerCaser, TokenStream};
 
@@ -85,6 +108,11 @@ pub struct SuffixContainsQuery {
     highlight_field_name: String,
     /// If true, use continuation DFA to match across token boundaries.
     continuation: bool,
+    /// Shared cache for two-pass scoring (count → score with global IDF).
+    sfx_cache: Option<Arc<SfxCache>>,
+    /// If set, use this as global doc_freq instead of per-segment doc_tf.len().
+    /// This is set in pass 2 after the coordinator has aggregated counts.
+    global_doc_freq: Option<u64>,
 }
 
 impl SuffixContainsQuery {
@@ -101,7 +129,23 @@ impl SuffixContainsQuery {
             highlight_sink: None,
             highlight_field_name: String::new(),
             continuation: false,
+            sfx_cache: None,
+            global_doc_freq: None,
         }
+    }
+
+    /// Attach a shared SFX cache for two-pass scoring.
+    /// Pass 1: SFX walk results are cached + doc_freq_count is accumulated.
+    /// Pass 2: cached results are reused with correct global IDF.
+    pub fn with_sfx_cache(mut self, cache: Arc<SfxCache>) -> Self {
+        self.sfx_cache = Some(cache);
+        self
+    }
+
+    /// Set global doc_freq for pass 2 scoring (correct IDF).
+    pub fn with_global_doc_freq(mut self, doc_freq: u64) -> Self {
+        self.global_doc_freq = Some(doc_freq);
+        self
     }
 
     /// Only match tokens that START with the query (prefix/startsWith mode).
@@ -134,7 +178,14 @@ impl SuffixContainsQuery {
 
 impl Query for SuffixContainsQuery {
     fn weight(&self, enable_scoring: EnableScoring) -> crate::Result<Box<dyn Weight>> {
-        let scoring_enabled = matches!(enable_scoring, EnableScoring::Enabled { .. });
+        let (scoring_enabled, global_num_docs, global_num_tokens) = match &enable_scoring {
+            EnableScoring::Enabled { statistics_provider, .. } => {
+                let num_docs = statistics_provider.total_num_docs().unwrap_or(0);
+                let num_tokens = statistics_provider.total_num_tokens(self.raw_field).unwrap_or(0);
+                (true, num_docs, num_tokens)
+            }
+            _ => (false, 0, 0),
+        };
 
         Ok(Box::new(SuffixContainsWeight {
             raw_field: self.raw_field,
@@ -144,7 +195,11 @@ impl Query for SuffixContainsQuery {
             highlight_sink: self.highlight_sink.clone(),
             highlight_field_name: self.highlight_field_name.clone(),
             scoring_enabled,
+            global_num_docs,
+            global_num_tokens,
             continuation: self.continuation,
+            sfx_cache: self.sfx_cache.clone(),
+            global_doc_freq: self.global_doc_freq,
         }))
     }
 }
@@ -157,12 +212,88 @@ struct SuffixContainsWeight {
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
     scoring_enabled: bool,
+    /// Global total_num_docs from EnableScoring (for cross-shard BM25 consistency).
+    global_num_docs: u64,
+    /// Global total_num_tokens for the field (for average_fieldnorm consistency).
+    global_num_tokens: u64,
     continuation: bool,
+    /// Shared cache for two-pass scoring.
+    sfx_cache: Option<Arc<SfxCache>>,
+    /// Global doc_freq from pass 2 (overrides per-segment doc_tf.len()).
+    global_doc_freq: Option<u64>,
+}
+
+impl SuffixContainsWeight {
+    /// Build scorer from cached SFX walk results (pass 2).
+    fn scorer_from_cached(
+        &self, reader: &SegmentReader, boost: Score,
+        segment_id: SegmentId, cached: CachedSfxResult,
+    ) -> crate::Result<Box<dyn Scorer>> {
+        if cached.doc_tf.is_empty() {
+            return Ok(Box::new(EmptyScorer));
+        }
+        self.emit_highlights(segment_id, &cached.highlights);
+        self.build_scorer(reader, boost, cached.doc_tf)
+    }
+
+    fn emit_highlights(&self, segment_id: SegmentId, highlights: &[(DocId, usize, usize)]) {
+        if let Some(ref sink) = self.highlight_sink {
+            for &(doc_id, byte_from, byte_to) in highlights {
+                sink.insert(
+                    segment_id,
+                    doc_id,
+                    &self.highlight_field_name,
+                    vec![[byte_from, byte_to]],
+                );
+            }
+        }
+    }
+
+    fn build_scorer(
+        &self, reader: &SegmentReader, boost: Score,
+        doc_tf: Vec<(DocId, u32)>,
+    ) -> crate::Result<Box<dyn Scorer>> {
+        let fieldnorm_reader = if let Some(fnr) = reader
+            .fieldnorms_readers()
+            .get_field(self.raw_field)?
+        {
+            fnr
+        } else {
+            FieldNormReader::constant(reader.max_doc(), 1)
+        };
+
+        let bm25_weight = if self.scoring_enabled {
+            let (total_num_docs, total_num_tokens) = if self.global_num_docs > 0 {
+                (self.global_num_docs, self.global_num_tokens)
+            } else {
+                let inverted_index = reader.inverted_index(self.raw_field)?;
+                ((reader.max_doc() as u64).max(1), inverted_index.total_num_tokens())
+            };
+            let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
+            let doc_freq = self.global_doc_freq.unwrap_or(doc_tf.len() as u64);
+            Bm25Weight::for_one_term(doc_freq, total_num_docs, average_fieldnorm)
+        } else {
+            Bm25Weight::for_one_term(0, 1, 1.0)
+        };
+
+        Ok(Box::new(SuffixContainsScorer::new(
+            doc_tf,
+            bm25_weight.boost_by(boost),
+            fieldnorm_reader,
+        )))
+    }
 }
 
 impl Weight for SuffixContainsWeight {
     fn scorer(&self, reader: &SegmentReader, boost: Score) -> crate::Result<Box<dyn Scorer>> {
         let segment_id = reader.segment_id();
+
+        // Pass 2 with cache: reuse cached SFX walk results, skip the walk.
+        if let Some(ref cache) = self.sfx_cache {
+            if let Some(cached) = cache.segments.lock().unwrap().remove(&segment_id) {
+                return self.scorer_from_cached(reader, boost, segment_id, cached);
+            }
+        }
 
         // Open the .sfx file — if not present (e.g. merged segment pending
         // sfx rebuild), return an empty scorer (no results from this segment).
@@ -178,7 +309,6 @@ impl Weight for SuffixContainsWeight {
         })?;
 
         let pr = crate::query::posting_resolver::build_resolver(reader, self.raw_field)?;
-        // Adapt PostingResolver to the closure signature expected by suffix_contains functions
         let resolver = move |raw_ordinal: u64| -> Vec<suffix_contains::RawPostingEntry> {
             pr.resolve(raw_ordinal).into_iter().map(|e| suffix_contains::RawPostingEntry {
                 doc_id: e.doc_id,
@@ -299,43 +429,27 @@ impl Weight for SuffixContainsWeight {
             return Ok(Box::new(EmptyScorer));
         }
 
-        // Report highlights
-        if let Some(ref sink) = self.highlight_sink {
-            for &(doc_id, byte_from, byte_to) in &highlights {
-                sink.insert(
-                    segment_id,
-                    doc_id,
-                    &self.highlight_field_name,
-                    vec![[byte_from, byte_to]],
+        // Pass 1 with cache: store results for pass 2, accumulate doc_freq.
+        if let Some(ref cache) = self.sfx_cache {
+            if self.global_doc_freq.is_none() {
+                // Pass 1: cache results, return scorer with neutral IDF.
+                cache.doc_freq_count.fetch_add(
+                    doc_tf.len() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
                 );
+                cache.segments.lock().unwrap().insert(segment_id, CachedSfxResult {
+                    doc_tf,
+                    highlights,
+                });
+                // Return empty scorer — pass 1 is count-only, no results needed.
+                return Ok(Box::new(EmptyScorer));
             }
         }
 
-        let fieldnorm_reader = if let Some(fnr) = reader
-            .fieldnorms_readers()
-            .get_field(self.raw_field)?
-        {
-            fnr
-        } else {
-            FieldNormReader::constant(reader.max_doc(), 1)
-        };
+        // Report highlights (pass 2 or non-cached mode)
+        self.emit_highlights(segment_id, &highlights);
 
-        // Compute BM25 per-segment from actual match statistics (no ._raw term dict needed)
-        let bm25_weight = if self.scoring_enabled {
-            let inverted_index = reader.inverted_index(self.raw_field)?;
-            let total_num_tokens = inverted_index.total_num_tokens();
-            let total_num_docs = (reader.max_doc() as u64).max(1);
-            let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
-            Bm25Weight::for_one_term(doc_tf.len() as u64, total_num_docs, average_fieldnorm)
-        } else {
-            Bm25Weight::for_one_term(0, 1, 1.0)
-        };
-
-        Ok(Box::new(SuffixContainsScorer::new(
-            doc_tf,
-            bm25_weight.boost_by(boost),
-            fieldnorm_reader,
-        )))
+        self.build_scorer(reader, boost, doc_tf)
     }
 
     fn explain(&self, reader: &SegmentReader, doc: DocId) -> crate::Result<Explanation> {

@@ -117,15 +117,20 @@ impl ExportableStats {
             .map(|s| s.total_num_docs().unwrap_or(0))
             .sum();
 
-        // Collect total tokens for all fields present in the terms
+        // Collect total tokens for ALL indexed fields (not just query terms).
+        // This is needed for contains/SFX queries which don't produce standard
+        // BM25 terms but still need global avg_fieldnorm for scoring.
         let mut total_num_tokens = HashMap::new();
-        for term in terms {
-            let field_id = term.field().field_id();
-            if !total_num_tokens.contains_key(&field_id) {
+        if let Some(s0) = searchers.first() {
+            let schema = s0.schema();
+            for (field, _entry) in schema.fields() {
+                let field_id = field.field_id();
                 let count: u64 = searchers.iter()
-                    .map(|s| s.total_num_tokens(term.field()).unwrap_or(0))
+                    .map(|s| s.total_num_tokens(field).unwrap_or(0))
                     .sum();
-                total_num_tokens.insert(field_id, count);
+                if count > 0 {
+                    total_num_tokens.insert(field_id, count);
+                }
             }
         }
 

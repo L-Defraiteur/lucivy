@@ -58,7 +58,7 @@ pub use self::phrase_query::regex_phrase_query::{wildcard_query_to_regex_str, Re
 pub use self::phrase_query::AutomatonPhraseQuery;
 pub use self::phrase_query::scoring_utils::HighlightSink;
 pub use self::phrase_query::regex_continuation_query::{RegexContinuationQuery, ContinuationMode};
-pub use self::phrase_query::suffix_contains_query::SuffixContainsQuery;
+pub use self::phrase_query::suffix_contains_query::{SuffixContainsQuery, SfxCache};
 pub use self::phrase_query::PhraseQuery;
 pub use self::posting_resolver::{PostingResolver, PostingEntry, SfxPostResolver, build_resolver};
 pub use self::query::{EnableScoring, Query, QueryClone};

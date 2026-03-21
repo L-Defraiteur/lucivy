@@ -1452,7 +1452,7 @@ mod tests {
         assert!(text_fast_field.term_ords(1).eq([1].into_iter()));
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Serialize)]
     enum IndexingOp {
         AddMultipleDoc {
             id: u64,
@@ -2281,7 +2281,14 @@ mod tests {
 
         #[test]
         fn test_delete_proptest_with_merge(ops in proptest::collection::vec(balanced_operation_strategy(), 1..100)) {
-            assert!(test_operation_strategy(&ops[..],  true).is_ok());
+            let result = test_operation_strategy(&ops[..],  true);
+            if result.is_err() {
+                let json = serde_json::to_string_pretty(&ops).unwrap_or_default();
+                eprintln!("PROPTEST FAILURE — ops dumped to /tmp/proptest_fail.json");
+                eprintln!("{}", &json[..json.len().min(2000)]);
+                let _ = std::fs::write("/tmp/proptest_fail.json", &json);
+            }
+            assert!(result.is_ok());
         }
     }
 

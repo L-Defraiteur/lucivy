@@ -490,3 +490,78 @@ fn test_distributed_search_two_nodes_postgres() {
     node_b.close().unwrap();
     eprintln!("\nDistributed search test passed!");
 }
+
+/// Verify that BM25 scores are identical regardless of shard count.
+/// Same 100 docs indexed in 1-shard vs 4-shard config → same scores.
+/// This validates the two-pass DAG (count → aggregate → score with global IDF).
+#[test]
+#[ignore]
+fn test_bm25_scores_identical_across_shard_counts() {
+    let url = pg_url().expect("POSTGRES_URL required");
+    let store = std::sync::Arc::new(PostgresBlobStore::connect(&url).unwrap());
+    store.clear_index("score_1sh");
+    store.clear_index("score_4sh");
+
+    let cache_1 = std::env::temp_dir().join("lucivy_score_1sh");
+    let cache_4 = std::env::temp_dir().join("lucivy_score_4sh");
+    let _ = std::fs::remove_dir_all(&cache_1);
+    let _ = std::fs::remove_dir_all(&cache_4);
+
+    // Same 100 docs, two configurations: 1 shard vs 4 shards
+    let storage_1 = lucivy_core::sharded_handle::BlobShardStorage::new(
+        store.clone(), "score_1sh", &cache_1,
+    );
+    let handle_1 = lucivy_core::sharded_handle::ShardedHandle::create_with_storage(
+        Box::new(storage_1), &make_config(1),
+    ).unwrap();
+
+    let storage_4 = lucivy_core::sharded_handle::BlobShardStorage::new(
+        store.clone(), "score_4sh", &cache_4,
+    );
+    let handle_4 = lucivy_core::sharded_handle::ShardedHandle::create_with_storage(
+        Box::new(storage_4), &make_config(4),
+    ).unwrap();
+
+    let body = handle_1.field("body").unwrap();
+    let nid = handle_1.field("_node_id").unwrap();
+
+    for i in 0..100u64 {
+        let text = format!("Document {i} about mutex lock contention and scheduling");
+
+        let mut doc1 = ld_lucivy::LucivyDocument::new();
+        doc1.add_u64(nid, i);
+        doc1.add_text(body, &text);
+        handle_1.add_document(doc1, i).unwrap();
+
+        let mut doc4 = ld_lucivy::LucivyDocument::new();
+        doc4.add_u64(nid, i);
+        doc4.add_text(body, &text);
+        handle_4.add_document(doc4, i).unwrap();
+    }
+    handle_1.commit().unwrap();
+    handle_4.commit().unwrap();
+
+    // Both use search() with two-pass DAG.
+    // Scores should be identical regardless of shard count.
+    let query = QueryConfig {
+        query_type: "contains".into(),
+        field: Some("body".into()),
+        value: Some("mutex".into()),
+        ..Default::default()
+    };
+    let results_1 = handle_1.search(&query, 10, None).unwrap();
+    let results_4 = handle_4.search(&query, 10, None).unwrap();
+
+    eprintln!("1-shard: {} hits, score[0]={:.6}", results_1.len(), results_1[0].score);
+    eprintln!("4-shard: {} hits, score[0]={:.6}", results_4.len(), results_4[0].score);
+
+    let diff = (results_1[0].score - results_4[0].score).abs();
+    eprintln!("Score difference: {:.10}", diff);
+    assert!(diff < 0.0001,
+        "BM25 scores must be identical: 1sh={:.6} vs 4sh={:.6} (diff={diff})",
+        results_1[0].score, results_4[0].score);
+
+    handle_1.close().unwrap();
+    handle_4.close().unwrap();
+    eprintln!("BM25 score consistency test passed!");
+}

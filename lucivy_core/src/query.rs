@@ -207,11 +207,30 @@ fn expand_split(config: &QueryConfig, sub_type: &str) -> QueryConfig {
 
 // ─── Query Building ─────────────────────────────────────────────────────────
 
+/// Options for two-pass BM25 scoring (contains/startsWith queries).
+#[derive(Clone, Default)]
+pub struct SfxScoringOptions {
+    /// Shared cache for SFX walk results between count and score passes.
+    pub sfx_cache: Option<Arc<ld_lucivy::query::SfxCache>>,
+    /// Global doc_freq (set in pass 2 after aggregation).
+    pub global_doc_freq: Option<u64>,
+}
+
 pub fn build_query(
     config: &QueryConfig,
     schema: &Schema,
     index: &Index,
     highlight_sink: Option<Arc<HighlightSink>>,
+) -> Result<Box<dyn Query>, String> {
+    build_query_ex(config, schema, index, highlight_sink, None)
+}
+
+pub fn build_query_ex(
+    config: &QueryConfig,
+    schema: &Schema,
+    index: &Index,
+    highlight_sink: Option<Arc<HighlightSink>>,
+    sfx_opts: Option<&SfxScoringOptions>,
 ) -> Result<Box<dyn Query>, String> {
     let text_query = match config.query_type.as_str() {
         "term" => build_term_query(config, schema, index, highlight_sink),
@@ -219,17 +238,17 @@ pub fn build_query(
         "phrase" => build_phrase_query(config, schema, index, highlight_sink),
         "regex" => build_regex_query(config, schema, highlight_sink),
         "contains" | "sfx_contains" => {
-            build_contains_query(config, schema, highlight_sink)
+            build_contains_query(config, schema, highlight_sink, sfx_opts)
         }
-        "startsWith" => build_starts_with_query(config, schema, index, highlight_sink),
+        "startsWith" => build_starts_with_query(config, schema, index, highlight_sink, sfx_opts),
         "contains_split" | "sfx_contains_split" => {
             let expanded = expand_split(config, "contains");
-            build_query(&expanded, schema, index, highlight_sink)
+            build_query_ex(&expanded, schema, index, highlight_sink, sfx_opts)
                 .map(|q| q as Box<dyn Query>)
         }
         "startsWith_split" => {
             let expanded = expand_split(config, "startsWith");
-            build_query(&expanded, schema, index, highlight_sink)
+            build_query_ex(&expanded, schema, index, highlight_sink, sfx_opts)
                 .map(|q| q as Box<dyn Query>)
         }
         "boolean" => build_boolean_query(config, schema, index, highlight_sink),
@@ -340,6 +359,7 @@ fn build_contains_query(
     config: &QueryConfig,
     schema: &Schema,
     highlight_sink: Option<Arc<HighlightSink>>,
+    sfx_opts: Option<&SfxScoringOptions>,
 ) -> Result<Box<dyn Query>, String> {
     let is_regex = config.regex.unwrap_or(false);
     if is_regex {
@@ -355,6 +375,14 @@ fn build_contains_query(
     if let Some(sink) = highlight_sink {
         let field_name = config.field.clone().unwrap_or_default();
         query = query.with_highlight_sink(sink, field_name);
+    }
+    if let Some(opts) = sfx_opts {
+        if let Some(ref cache) = opts.sfx_cache {
+            query = query.with_sfx_cache(cache.clone());
+        }
+        if let Some(doc_freq) = opts.global_doc_freq {
+            query = query.with_global_doc_freq(doc_freq);
+        }
     }
     Ok(Box::new(query))
 }
@@ -393,20 +421,26 @@ fn build_starts_with_query(
     schema: &Schema,
     _index: &Index,
     highlight_sink: Option<Arc<HighlightSink>>,
+    sfx_opts: Option<&SfxScoringOptions>,
 ) -> Result<Box<dyn Query>, String> {
     let field = resolve_field(config, schema)?;
     let value = config.value.as_deref().ok_or("startsWith query requires 'value'")?;
     let fuzzy_distance = config.distance.unwrap_or(0);
 
-    // Use SuffixContainsQuery with prefix_only (SI=0 filter).
-    // Same suffix FST walk as contains, but skips substring matches.
-    // Multi-token: all tokens must start at token boundary (SI=0).
     let mut query = SuffixContainsQuery::new(field, value.to_lowercase())
         .with_prefix_only()
         .with_fuzzy_distance(fuzzy_distance);
     if let Some(sink) = highlight_sink {
         let field_name = config.field.clone().unwrap_or_default();
         query = query.with_highlight_sink(sink, field_name);
+    }
+    if let Some(opts) = sfx_opts {
+        if let Some(ref cache) = opts.sfx_cache {
+            query = query.with_sfx_cache(cache.clone());
+        }
+        if let Some(doc_freq) = opts.global_doc_freq {
+            query = query.with_global_doc_freq(doc_freq);
+        }
     }
     Ok(Box::new(query))
 }
@@ -687,7 +721,7 @@ fn build_filter_clause(
                 distance: Some(distance),
                 ..Default::default()
             };
-            build_contains_query(&config, schema, None)
+            build_contains_query(&config, schema, None, None)
         }
         other => Err(format!("unknown filter operator: {other}")),
     }

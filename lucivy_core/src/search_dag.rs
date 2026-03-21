@@ -15,6 +15,7 @@ use luciole::node::{Node, NodeContext, PortDef};
 use luciole::port::{PortType, PortValue};
 use luciole::Dag;
 
+use ld_lucivy::collector::Collector;
 use ld_lucivy::query::Weight;
 use ld_lucivy::schema::Schema;
 use ld_lucivy::{DocAddress, Index};
@@ -101,31 +102,31 @@ impl Node for FlushNode {
 }
 
 // ---------------------------------------------------------------------------
-// BuildWeightNode — parse query + compile Weight with global stats
+// BuildCountWeightNode — pass 1: build Weight with SFX cache (IDF-neutral)
 // ---------------------------------------------------------------------------
 
-pub(crate) struct BuildWeightNode {
+pub(crate) struct BuildCountWeightNode {
     shards: Vec<Arc<LucivyHandle>>,
     schema: Schema,
     index: Index,
     query_config: QueryConfig,
-    highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
+    sfx_cache: Arc<ld_lucivy::query::SfxCache>,
 }
 
-impl BuildWeightNode {
+impl BuildCountWeightNode {
     pub fn new(
         shards: Vec<Arc<LucivyHandle>>,
         schema: Schema,
         index: Index,
         query_config: QueryConfig,
-        highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
+        sfx_cache: Arc<ld_lucivy::query::SfxCache>,
     ) -> Self {
-        Self { shards, schema, index, query_config, highlight_sink }
+        Self { shards, schema, index, query_config, sfx_cache }
     }
 }
 
-impl Node for BuildWeightNode {
-    fn node_type(&self) -> &'static str { "build_weight" }
+impl Node for BuildCountWeightNode {
+    fn node_type(&self) -> &'static str { "build_count_weight" }
     fn inputs(&self) -> Vec<PortDef> {
         vec![PortDef::trigger("trigger")]
     }
@@ -136,9 +137,13 @@ impl Node for BuildWeightNode {
         let searchers: Vec<_> = self.shards.iter().map(|s| s.reader.searcher()).collect();
         let global_stats = AggregatedBm25StatsOwned::new(searchers);
 
-        let query = crate::query::build_query(
-            &self.query_config, &self.schema, &self.index,
-            self.highlight_sink.clone(),
+        // Pass 1: build query with cache, no global_doc_freq → IDF-neutral scorers
+        let sfx_opts = crate::query::SfxScoringOptions {
+            sfx_cache: Some(self.sfx_cache.clone()),
+            global_doc_freq: None,
+        };
+        let query = crate::query::build_query_ex(
+            &self.query_config, &self.schema, &self.index, None, Some(&sfx_opts),
         )?;
 
         let searcher_0 = self.shards[0].reader.searcher();
@@ -150,14 +155,185 @@ impl Node for BuildWeightNode {
             .map_err(|e| format!("weight: {e}"))?
             .into();
 
-        ctx.metric("compiled", 1.0);
         ctx.set_output("weight", PortValue::new(weight));
         Ok(())
     }
 }
 
 // ---------------------------------------------------------------------------
-// SearchShardNode — execute weight on one shard
+// BuildScoreWeightNode — pass 2: build Weight with cache + global doc_freq
+// ---------------------------------------------------------------------------
+
+pub(crate) struct BuildScoreWeightNode {
+    shards: Vec<Arc<LucivyHandle>>,
+    schema: Schema,
+    index: Index,
+    query_config: QueryConfig,
+    highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
+    sfx_cache: Arc<ld_lucivy::query::SfxCache>,
+    num_count_shards: usize,
+}
+
+impl BuildScoreWeightNode {
+    pub fn new(
+        shards: Vec<Arc<LucivyHandle>>,
+        schema: Schema,
+        index: Index,
+        query_config: QueryConfig,
+        highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
+        sfx_cache: Arc<ld_lucivy::query::SfxCache>,
+        num_count_shards: usize,
+    ) -> Self {
+        Self { shards, schema, index, query_config, highlight_sink, sfx_cache, num_count_shards }
+    }
+}
+
+impl Node for BuildScoreWeightNode {
+    fn node_type(&self) -> &'static str { "build_score_weight" }
+    fn inputs(&self) -> Vec<PortDef> {
+        (0..self.num_count_shards)
+            .map(|i| PortDef::trigger(
+                Box::leak(format!("counted_{}", i).into_boxed_str()),
+            ))
+            .collect()
+    }
+    fn outputs(&self) -> Vec<PortDef> {
+        vec![PortDef::required("weight", PortType::of::<Arc<dyn Weight>>())]
+    }
+    fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+        // Read aggregated doc_freq from cache (populated by count pass)
+        let global_doc_freq = self.sfx_cache.doc_freq_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        let searchers: Vec<_> = self.shards.iter().map(|s| s.reader.searcher()).collect();
+        let global_stats = AggregatedBm25StatsOwned::new(searchers);
+
+        // Pass 2: build query with cache + global_doc_freq → correct IDF
+        let sfx_opts = crate::query::SfxScoringOptions {
+            sfx_cache: Some(self.sfx_cache.clone()),
+            global_doc_freq: Some(global_doc_freq),
+        };
+        let query = crate::query::build_query_ex(
+            &self.query_config, &self.schema, &self.index,
+            self.highlight_sink.clone(), Some(&sfx_opts),
+        )?;
+
+        let searcher_0 = self.shards[0].reader.searcher();
+        let enable_scoring = ld_lucivy::query::EnableScoring::enabled_from_statistics_provider(
+            &global_stats, &searcher_0,
+        );
+        let weight: Arc<dyn Weight> = query
+            .weight(enable_scoring)
+            .map_err(|e| format!("weight: {e}"))?
+            .into();
+
+        ctx.metric("global_doc_freq", global_doc_freq as f64);
+        ctx.set_output("weight", PortValue::new(weight));
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CountShardNode — pass 1: SFX walk on one shard (populates cache, no results)
+// ---------------------------------------------------------------------------
+
+pub(crate) struct CountShardNode {
+    handle: Arc<LucivyHandle>,
+    shard_id: usize,
+}
+
+impl CountShardNode {
+    pub fn new(handle: Arc<LucivyHandle>, shard_id: usize) -> Self {
+        Self { handle, shard_id }
+    }
+}
+
+impl Node for CountShardNode {
+    fn node_type(&self) -> &'static str { "count_shard" }
+    fn inputs(&self) -> Vec<PortDef> {
+        vec![PortDef::required("weight", PortType::of::<Arc<dyn Weight>>())]
+    }
+    fn outputs(&self) -> Vec<PortDef> {
+        vec![PortDef::trigger("done")]
+    }
+    fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+        let weight = ctx.input("weight")
+            .ok_or("missing weight")?
+            .downcast::<Arc<dyn Weight>>()
+            .ok_or("wrong weight type")?
+            .clone();
+
+        // Call scorer() on each segment — this triggers the SFX walk
+        // and populates the SfxCache. The scorer returns EmptyScorer (no results).
+        let searcher = self.handle.reader.searcher();
+        for (seg_ord, seg_reader) in searcher.segment_readers().iter().enumerate() {
+            let _scorer = weight.scorer(seg_reader, 1.0)
+                .map_err(|e| format!("count shard_{} seg_{}: {e}", self.shard_id, seg_ord))?;
+        }
+
+        ctx.trigger("done");
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ScoreShardNode — pass 2: score from cached SFX walk results
+// ---------------------------------------------------------------------------
+
+pub(crate) struct ScoreShardNode {
+    handle: Arc<LucivyHandle>,
+    shard_id: usize,
+    top_k: usize,
+}
+
+impl ScoreShardNode {
+    pub fn new(handle: Arc<LucivyHandle>, shard_id: usize, top_k: usize) -> Self {
+        Self { handle, shard_id, top_k }
+    }
+}
+
+impl Node for ScoreShardNode {
+    fn node_type(&self) -> &'static str { "score_shard" }
+    fn inputs(&self) -> Vec<PortDef> {
+        vec![PortDef::required("weight", PortType::of::<Arc<dyn Weight>>())]
+    }
+    fn outputs(&self) -> Vec<PortDef> {
+        vec![PortDef::required("hits", PortType::of::<Vec<(usize, f32, DocAddress)>>())]
+    }
+    fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+        let weight = ctx.input("weight")
+            .ok_or("missing weight")?
+            .downcast::<Arc<dyn Weight>>()
+            .ok_or("wrong weight type")?
+            .clone();
+
+        // Execute weight directly on handle (same reader as CountShardNode)
+        let searcher = self.handle.reader.searcher();
+        let collector = ld_lucivy::collector::TopDocs::with_limit(self.top_k).order_by_score();
+        let segment_readers = searcher.segment_readers();
+        let mut fruits = Vec::with_capacity(segment_readers.len());
+        for (seg_ord, seg_reader) in segment_readers.iter().enumerate() {
+            let fruit = collector
+                .collect_segment(weight.as_ref(), seg_ord as u32, seg_reader)
+                .map_err(|e| format!("score shard_{} seg_{}: {e}", self.shard_id, seg_ord))?;
+            fruits.push(fruit);
+        }
+        let hits = collector
+            .merge_fruits(fruits)
+            .map_err(|e| format!("merge shard_{}: {e}", self.shard_id))?;
+
+        let tagged: Vec<(usize, f32, DocAddress)> = hits.into_iter()
+            .map(|(score, addr)| (self.shard_id, score, addr))
+            .collect();
+
+        ctx.metric("hits", tagged.len() as f64);
+        ctx.set_output("hits", PortValue::new(tagged));
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SearchShardNode — execute weight on one shard (via shard pool)
 // ---------------------------------------------------------------------------
 
 pub(crate) struct SearchShardNode {
@@ -277,27 +453,44 @@ pub(crate) fn build_search_dag(
 ) -> Result<Dag, String> {
     let mut dag = Dag::new();
     let num_shards = shards.len();
+    let sfx_cache = Arc::new(ld_lucivy::query::SfxCache::default());
 
-    // drain → flush → build_weight
+    // drain → flush
     dag.add_node("drain", DrainNode::new(reader_pool.clone(), router_ref.clone()));
     dag.add_node("flush", FlushNode::new(shards.to_vec(), shard_pool.clone()));
-    dag.add_node("build_weight", BuildWeightNode::new(
-        shards.to_vec(),
-        schema.clone(),
-        shards[0].index.clone(),
-        query_config.clone(),
-        highlight_sink,
-    ));
     dag.connect("drain", "done", "flush", "trigger")?;
-    dag.connect("flush", "done", "build_weight", "trigger")?;
 
-    // Parallel search shards
+    // Pass 1: count (SFX walk → cache doc_tf, accumulate doc_freq)
+    dag.add_node("build_count_weight", BuildCountWeightNode::new(
+        shards.to_vec(), schema.clone(), shards[0].index.clone(),
+        query_config.clone(), sfx_cache.clone(),
+    ));
+    dag.connect("flush", "done", "build_count_weight", "trigger")?;
+
     for i in 0..num_shards {
-        dag.add_node(
-            &format!("search_{}", i),
-            SearchShardNode::new(shard_pool.clone(), i, top_k),
-        );
-        dag.connect("build_weight", "weight", &format!("search_{}", i), "weight")?;
+        let name = format!("count_{}", i);
+        dag.add_node(&name, CountShardNode::new(shards[i].clone(), i));
+        dag.connect("build_count_weight", "weight", &name, "weight")?;
+    }
+
+    // Pass 2: score (read cached doc_tf, use global doc_freq for IDF)
+    dag.add_node("build_score_weight", BuildScoreWeightNode::new(
+        shards.to_vec(), schema.clone(), shards[0].index.clone(),
+        query_config.clone(), highlight_sink, sfx_cache.clone(),
+        num_shards,
+    ));
+    // build_score_weight waits for ALL count nodes to finish
+    for i in 0..num_shards {
+        dag.connect(
+            &format!("count_{}", i), "done",
+            "build_score_weight", &format!("counted_{}", i),
+        )?;
+    }
+
+    for i in 0..num_shards {
+        let name = format!("search_{}", i);
+        dag.add_node(&name, ScoreShardNode::new(shards[i].clone(), i, top_k));
+        dag.connect("build_score_weight", "weight", &name, "weight")?;
     }
 
     // Merge results
