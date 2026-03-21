@@ -331,3 +331,149 @@ fn test_acid_crash_recovery() {
     handle2.close().unwrap();
     eprintln!("Crash recovery test passed!");
 }
+
+/// Distributed search: two ShardedHandles in Postgres, unified BM25, merged results.
+#[test]
+#[ignore]
+fn test_distributed_search_two_nodes_postgres() {
+    let url = pg_url().expect("POSTGRES_URL required");
+    let store = std::sync::Arc::new(PostgresBlobStore::connect(&url).unwrap());
+    store.clear_index("dist_node_a");
+    store.clear_index("dist_node_b");
+
+    let config = make_config(2);
+    let cache_a = std::env::temp_dir().join("lucivy_dist_a");
+    let cache_b = std::env::temp_dir().join("lucivy_dist_b");
+    let _ = std::fs::remove_dir_all(&cache_a);
+    let _ = std::fs::remove_dir_all(&cache_b);
+
+    // ── Create two "machines" backed by same Postgres, different namespaces ──
+
+    let storage_a = lucivy_core::sharded_handle::BlobShardStorage::new(
+        store.clone(), "dist_node_a", &cache_a,
+    );
+    let node_a = lucivy_core::sharded_handle::ShardedHandle::create_with_storage(
+        Box::new(storage_a), &config,
+    ).expect("create node A");
+
+    let storage_b = lucivy_core::sharded_handle::BlobShardStorage::new(
+        store.clone(), "dist_node_b", &cache_b,
+    );
+    let node_b = lucivy_core::sharded_handle::ShardedHandle::create_with_storage(
+        Box::new(storage_b), &config,
+    ).expect("create node B");
+
+    // ── Index different docs on each node ──
+
+    let body = node_a.field("body").unwrap();
+    let nid = node_a.field("_node_id").unwrap();
+
+    // Node A: docs about mutex and synchronization
+    for i in 0..50u64 {
+        let mut doc = ld_lucivy::LucivyDocument::new();
+        doc.add_u64(nid, i);
+        doc.add_text(body, &format!(
+            "Document {i} discusses mutex synchronization and lock contention in concurrent systems"
+        ));
+        node_a.add_document(doc, i).unwrap();
+    }
+    node_a.commit().unwrap();
+
+    // Node B: docs about scheduling and performance
+    for i in 50..100u64 {
+        let mut doc = ld_lucivy::LucivyDocument::new();
+        doc.add_u64(nid, i);
+        doc.add_text(body, &format!(
+            "Document {i} covers scheduler performance and lock free data structures"
+        ));
+        node_b.add_document(doc, i).unwrap();
+    }
+    node_b.commit().unwrap();
+
+    eprintln!("Node A: {} docs, Node B: {} docs", node_a.num_docs(), node_b.num_docs());
+
+    // ── Distributed search protocol ──
+
+    let query = QueryConfig {
+        query_type: "contains".into(),
+        field: Some("body".into()),
+        value: Some("lock".into()),
+        ..Default::default()
+    };
+
+    // Phase 1: collect stats from both nodes
+    let stats_a = node_a.export_stats(&query).unwrap();
+    let stats_b = node_b.export_stats(&query).unwrap();
+    eprintln!("Stats A: {} docs, Stats B: {} docs", stats_a.total_num_docs, stats_b.total_num_docs);
+
+    // Simulate serialization over network
+    let json_a = serde_json::to_string(&stats_a).unwrap();
+    let json_b = serde_json::to_string(&stats_b).unwrap();
+    eprintln!("Stats A JSON: {} bytes, Stats B JSON: {} bytes", json_a.len(), json_b.len());
+
+    let stats_a: lucivy_core::bm25_global::ExportableStats = serde_json::from_str(&json_a).unwrap();
+    let stats_b: lucivy_core::bm25_global::ExportableStats = serde_json::from_str(&json_b).unwrap();
+
+    // Phase 2: coordinator merges stats
+    let global_stats = lucivy_core::bm25_global::ExportableStats::merge(&[stats_a, stats_b]);
+    eprintln!("Global stats: {} total docs", global_stats.total_num_docs);
+
+    // Phase 3: search each node with global stats + highlights
+    let sink_a = std::sync::Arc::new(ld_lucivy::query::HighlightSink::new());
+    let sink_b = std::sync::Arc::new(ld_lucivy::query::HighlightSink::new());
+
+    let results_a = node_a.search_with_global_stats(&query, 10, &global_stats, Some(sink_a.clone())).unwrap();
+    let results_b = node_b.search_with_global_stats(&query, 10, &global_stats, Some(sink_b.clone())).unwrap();
+
+    eprintln!("Results A: {} hits, Results B: {} hits", results_a.len(), results_b.len());
+
+    // Phase 4: merge results (coordinator side)
+    let mut merged: Vec<_> = results_a.iter()
+        .map(|r| (r.score, "A", r.shard_id, r.doc_address))
+        .chain(results_b.iter().map(|r| (r.score, "B", r.shard_id, r.doc_address)))
+        .collect();
+    merged.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    merged.truncate(10);
+
+    eprintln!("\n=== Top 10 merged results (global BM25) ===");
+    for (score, node, shard, addr) in &merged {
+        eprintln!("  score={:.4} node={} shard={} doc={}", score, node, shard, addr.doc_id);
+    }
+
+    // ── Verify ──
+
+    // "lock" appears in both nodes (A: "lock contention", B: "lock free")
+    assert!(!results_a.is_empty(), "node A should have results for 'lock'");
+    assert!(!results_b.is_empty(), "node B should have results for 'lock'");
+    assert!(merged.len() <= 10, "top-10 merge");
+
+    // Verify highlights work on both nodes
+    for r in &results_a {
+        let shard = node_a.shard(r.shard_id).unwrap();
+        let searcher = shard.reader.searcher();
+        let seg = searcher.segment_reader(r.doc_address.segment_ord);
+        let hl = sink_a.get(seg.segment_id(), r.doc_address.doc_id);
+        assert!(hl.is_some(), "highlights should exist for node A results");
+    }
+    for r in &results_b {
+        let shard = node_b.shard(r.shard_id).unwrap();
+        let searcher = shard.reader.searcher();
+        let seg = searcher.segment_reader(r.doc_address.segment_ord);
+        let hl = sink_b.get(seg.segment_id(), r.doc_address.doc_id);
+        assert!(hl.is_some(), "highlights should exist for node B results");
+    }
+
+    // Also test search_with_docs (convenience method)
+    let hits_a = node_a.search_with_docs(&query, 3).unwrap();
+    eprintln!("\n=== search_with_docs (node A, top 3) ===");
+    for hit in &hits_a {
+        eprintln!("  score={:.4} shard={} highlights={:?}",
+            hit.score, hit.shard_id, hit.highlights);
+    }
+    assert!(!hits_a.is_empty());
+    assert!(!hits_a[0].highlights.is_empty(), "search_with_docs should include highlights");
+
+    node_a.close().unwrap();
+    node_b.close().unwrap();
+    eprintln!("\nDistributed search test passed!");
+}

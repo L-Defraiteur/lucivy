@@ -997,6 +997,16 @@ pub struct ShardedSearchResult {
     pub doc_address: DocAddress,
 }
 
+/// A search result with the document and highlights already resolved.
+/// Returned by `search_with_docs()` — ready to serialize/display.
+#[derive(Debug)]
+pub struct SearchHit {
+    pub score: f32,
+    pub shard_id: usize,
+    pub doc: ld_lucivy::LucivyDocument,
+    pub highlights: std::collections::HashMap<String, Vec<[usize; 2]>>,
+}
+
 /// Wrapper for BinaryHeap ordering (min-heap by score for top-K).
 pub(crate) struct ScoredEntry {
     pub score: f32,
@@ -1375,6 +1385,116 @@ impl ShardedHandle {
         // Extract results from the merge node's leaf output
         result.take_output::<Vec<ShardedSearchResult>>("merge", "results")
             .ok_or_else(|| "search DAG: no results from merge node".to_string())
+    }
+
+    // ── Distributed search support ──────────────────────────────────────
+
+    /// Export BM25 statistics for the given query terms.
+    /// Used by a coordinator to aggregate stats across multiple nodes.
+    pub fn export_stats(
+        &self,
+        query_config: &QueryConfig,
+    ) -> Result<crate::bm25_global::ExportableStats, String> {
+        self.drain_pipeline();
+
+        let searchers: Vec<_> = self.shards.iter().map(|s| s.reader.searcher()).collect();
+
+        // Build the query to extract terms
+        let query = crate::query::build_query(
+            query_config, &self.schema, &self.shards[0].index, None,
+        )?;
+
+        // Collect all terms the query will need for BM25
+        let mut term_set = Vec::new();
+        query.query_terms(&mut |term, _| {
+            term_set.push(term.clone());
+        });
+
+        Ok(crate::bm25_global::ExportableStats::from_searchers(&searchers, &term_set))
+    }
+
+    /// Search with externally-provided global BM25 stats (distributed mode).
+    /// The global_stats should be the merged stats from all nodes.
+    pub fn search_with_global_stats(
+        &self,
+        query_config: &QueryConfig,
+        top_k: usize,
+        global_stats: &crate::bm25_global::ExportableStats,
+        highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
+    ) -> Result<Vec<ShardedSearchResult>, String> {
+        self.drain_pipeline();
+
+        let query = crate::query::build_query(
+            query_config, &self.schema, &self.shards[0].index,
+            highlight_sink.clone(),
+        )?;
+
+        // Build weight with global stats (not local)
+        let searcher_0 = self.shards[0].reader.searcher();
+        let enable = ld_lucivy::query::EnableScoring::enabled_from_statistics_provider(
+            global_stats, &searcher_0,
+        );
+        let weight: Arc<dyn ld_lucivy::query::Weight> = query
+            .weight(enable)
+            .map_err(|e| format!("weight: {e}"))?
+            .into();
+
+        // Execute weight on each shard locally and collect top-K
+        let mut all_hits: Vec<ShardedSearchResult> = Vec::new();
+        for (shard_id, shard) in self.shards.iter().enumerate() {
+            let searcher = shard.reader.searcher();
+            for (seg_ord, seg_reader) in searcher.segment_readers().iter().enumerate() {
+                let mut scorer = weight.scorer(seg_reader, 1.0)
+                    .map_err(|e| format!("scorer shard {shard_id}: {e}"))?;
+
+                let alive = seg_reader.alive_bitset();
+                loop {
+                    let doc = scorer.doc();
+                    if doc == ld_lucivy::TERMINATED { break; }
+                    if alive.map_or(true, |bs| bs.is_alive(doc)) {
+                        all_hits.push(ShardedSearchResult {
+                            score: scorer.score(),
+                            shard_id,
+                            doc_address: ld_lucivy::DocAddress::new(seg_ord as u32, doc),
+                        });
+                    }
+                    scorer.advance();
+                }
+            }
+        }
+
+        // Sort by score descending and truncate to top_k
+        all_hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        all_hits.truncate(top_k);
+        Ok(all_hits)
+    }
+
+    /// Search and return results with resolved documents and highlights.
+    pub fn search_with_docs(
+        &self,
+        query_config: &QueryConfig,
+        top_k: usize,
+    ) -> Result<Vec<SearchHit>, String> {
+        let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
+        let results = self.search(query_config, top_k, Some(sink.clone()))?;
+
+        results.iter().map(|r| {
+            let shard = self.shard(r.shard_id)
+                .ok_or_else(|| format!("shard {} not found", r.shard_id))?;
+            let searcher = shard.reader.searcher();
+            let seg_reader = searcher.segment_reader(r.doc_address.segment_ord);
+            let doc: ld_lucivy::LucivyDocument = searcher.doc(r.doc_address)
+                .map_err(|e| format!("get doc: {e}"))?;
+            let highlights = sink.get(seg_reader.segment_id(), r.doc_address.doc_id)
+                .unwrap_or_default();
+
+            Ok(SearchHit {
+                score: r.score,
+                shard_id: r.shard_id,
+                doc,
+                highlights,
+            })
+        }).collect()
     }
 
     /// Commit all shards in parallel via shard actors, then persist router state.

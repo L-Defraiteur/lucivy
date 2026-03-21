@@ -91,6 +91,97 @@ impl Bm25StatisticsProvider for AggregatedBm25StatsOwned {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Serializable stats for distributed search
+// ---------------------------------------------------------------------------
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// Serializable BM25 statistics for one node (one ShardedHandle).
+/// Can be sent over the network and aggregated by a coordinator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportableStats {
+    /// Total documents across all shards on this node.
+    pub total_num_docs: u64,
+    /// Total tokens per field (field_id → count).
+    pub total_num_tokens: HashMap<u32, u64>,
+    /// Document frequency per term (serialized term bytes → count).
+    pub doc_freqs: HashMap<Vec<u8>, u64>,
+}
+
+impl ExportableStats {
+    /// Export stats from a set of searchers for the given query terms.
+    pub fn from_searchers(searchers: &[Searcher], terms: &[Term]) -> Self {
+        let total_num_docs: u64 = searchers.iter()
+            .map(|s| s.total_num_docs().unwrap_or(0))
+            .sum();
+
+        // Collect total tokens for all fields present in the terms
+        let mut total_num_tokens = HashMap::new();
+        for term in terms {
+            let field_id = term.field().field_id();
+            if !total_num_tokens.contains_key(&field_id) {
+                let count: u64 = searchers.iter()
+                    .map(|s| s.total_num_tokens(term.field()).unwrap_or(0))
+                    .sum();
+                total_num_tokens.insert(field_id, count);
+            }
+        }
+
+        let mut doc_freqs = HashMap::new();
+        for term in terms {
+            let key = term.serialized_term();
+            if !doc_freqs.contains_key(&key) {
+                let freq: u64 = searchers.iter()
+                    .map(|s| s.doc_freq(term).unwrap_or(0))
+                    .sum();
+                doc_freqs.insert(key, freq);
+            }
+        }
+
+        Self { total_num_docs, total_num_tokens, doc_freqs }
+    }
+
+    /// Merge multiple ExportableStats into one (coordinator aggregation).
+    pub fn merge(stats: &[ExportableStats]) -> ExportableStats {
+        let total_num_docs: u64 = stats.iter().map(|s| s.total_num_docs).sum();
+
+        let mut total_num_tokens: HashMap<u32, u64> = HashMap::new();
+        for s in stats {
+            for (&field_id, &count) in &s.total_num_tokens {
+                *total_num_tokens.entry(field_id).or_insert(0) += count;
+            }
+        }
+
+        let mut doc_freqs: HashMap<Vec<u8>, u64> = HashMap::new();
+        for s in stats {
+            for (key, &freq) in &s.doc_freqs {
+                *doc_freqs.entry(key.clone()).or_insert(0) += freq;
+            }
+        }
+
+        ExportableStats { total_num_docs, total_num_tokens, doc_freqs }
+    }
+}
+
+/// BM25 statistics provider backed by ExportableStats (deserialized from network).
+/// Used by distributed search to build Weight with global stats.
+impl Bm25StatisticsProvider for ExportableStats {
+    fn total_num_tokens(&self, field: Field) -> ld_lucivy::Result<u64> {
+        Ok(*self.total_num_tokens.get(&field.field_id()).unwrap_or(&0))
+    }
+
+    fn total_num_docs(&self) -> ld_lucivy::Result<u64> {
+        Ok(self.total_num_docs)
+    }
+
+    fn doc_freq(&self, term: &Term) -> ld_lucivy::Result<u64> {
+        let key = term.serialized_term();
+        Ok(*self.doc_freqs.get(&key).unwrap_or(&0))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
