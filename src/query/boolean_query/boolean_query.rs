@@ -173,6 +173,13 @@ impl Query for BooleanQuery {
             subquery.query_terms(visitor);
         }
     }
+
+    fn prescan_segments(&mut self, segments: &[&crate::SegmentReader]) -> crate::Result<()> {
+        for (_occur, subquery) in &mut self.subqueries {
+            subquery.prescan_segments(segments)?;
+        }
+        Ok(())
+    }
 }
 
 impl BooleanQuery {

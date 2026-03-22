@@ -166,6 +166,16 @@ pub trait Query: QueryClone + Send + Sync + downcast_rs::Downcast + fmt::Debug {
     /// Note that there can be multiple instances of any given term
     /// in a query and deduplication must be handled by the visitor.
     fn query_terms<'a>(&'a self, _visitor: &mut dyn FnMut(&'a Term, bool)) {}
+
+    /// Pre-scan segment readers to compute global BM25 statistics.
+    ///
+    /// Called before `weight()` when cross-segment/shard consistency is needed.
+    /// SuffixContainsQuery uses this to compute global doc_freq for correct IDF.
+    /// BooleanQuery propagates to sub-queries.
+    /// Default: no-op (standard queries get IDF from the statistics provider).
+    fn prescan_segments(&mut self, _segments: &[&crate::SegmentReader]) -> crate::Result<()> {
+        Ok(())
+    }
 }
 
 /// Implements `box_clone`.

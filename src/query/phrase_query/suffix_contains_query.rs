@@ -299,6 +299,13 @@ where
 }
 
 impl Query for SuffixContainsQuery {
+    fn prescan_segments(&mut self, segments: &[&crate::SegmentReader]) -> crate::Result<()> {
+        let (cache, doc_freq) = self.prescan(segments)?;
+        self.prescan_cache = Some(cache);
+        self.global_doc_freq = Some(doc_freq);
+        Ok(())
+    }
+
     fn weight(&self, enable_scoring: EnableScoring) -> crate::Result<Box<dyn Weight>> {
         let (scoring_enabled, global_num_docs, global_num_tokens) = match &enable_scoring {
             EnableScoring::Enabled { statistics_provider, .. } => {

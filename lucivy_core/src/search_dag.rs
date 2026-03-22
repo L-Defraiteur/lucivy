@@ -137,10 +137,18 @@ impl Node for BuildWeightNode {
         let searchers: Vec<_> = self.shards.iter().map(|s| s.reader.searcher()).collect();
         let global_stats = AggregatedBm25StatsOwned::new(searchers);
 
-        let query = crate::query::build_query(
+        let mut query = crate::query::build_query(
             &self.query_config, &self.schema, &self.index,
             self.highlight_sink.clone(),
         )?;
+
+        // Pre-scan ALL segments from ALL shards for global BM25 doc_freq.
+        let all_seg_readers: Vec<_> = self.shards.iter()
+            .flat_map(|s| s.reader.searcher().segment_readers().to_vec())
+            .collect();
+        let seg_refs: Vec<&ld_lucivy::SegmentReader> = all_seg_readers.iter().collect();
+        query.prescan_segments(&seg_refs)
+            .map_err(|e| format!("prescan: {e}"))?;
 
         let searcher_0 = self.shards[0].reader.searcher();
         let enable_scoring = ld_lucivy::query::EnableScoring::enabled_from_statistics_provider(
