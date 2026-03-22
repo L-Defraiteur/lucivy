@@ -270,7 +270,10 @@ impl BuildWeightNode {
 impl Node for BuildWeightNode {
     fn node_type(&self) -> &'static str { "build_weight" }
     fn inputs(&self) -> Vec<PortDef> {
-        vec![PortDef::required("prescan", PortType::of::<PrescanResult>())]
+        vec![
+            PortDef::optional("prescan", PortType::of::<PrescanResult>()),
+            PortDef::optional("trigger", PortType::Trigger),  // for fast path (no prescan)
+        ]
     }
     fn outputs(&self) -> Vec<PortDef> {
         vec![PortDef::required("weight", PortType::of::<Arc<dyn Weight>>())]
@@ -444,22 +447,27 @@ pub(crate) fn build_search_dag(
     )?;
     let prescan_params = probe_query.sfx_prescan_params();
 
+    let needs_prescan = !prescan_params.is_empty();
+
     // drain → flush
     dag.add_node("drain", DrainNode::new(reader_pool.clone(), router_ref.clone()));
     dag.add_node("flush", FlushNode::new(shards.to_vec(), shard_pool.clone()));
     dag.connect("drain", "done", "flush", "trigger")?;
 
-    // flush → prescan_0..N ∥ (parallel SFX walks per shard)
+    // flush → branch: needs prescan?
+    dag.add_node("needs_prescan", luciole::BranchNode::new(move || needs_prescan));
+    dag.connect("flush", "done", "needs_prescan", "trigger")?;
+
+    // "then" path: prescan_0..N ∥ → merge_prescan → build_weight
     for i in 0..num_shards {
         let node_name = format!("prescan_{i}");
         dag.add_node(&node_name, PrescanShardNode::new(
             shards[i].clone(),
             prescan_params.clone(),
         ));
-        dag.connect("flush", "done", &node_name, "trigger")?;
+        dag.connect("needs_prescan", "then", &node_name, "trigger")?;
     }
 
-    // prescan_0..N → merge_prescan
     dag.add_node("merge_prescan", MergePrescanNode::new(num_shards));
     for i in 0..num_shards {
         dag.connect(
@@ -468,7 +476,7 @@ pub(crate) fn build_search_dag(
         )?;
     }
 
-    // merge_prescan → build_weight
+    // build_weight: receives prescan from "then" path OR trigger from "else" path
     dag.add_node("build_weight", BuildWeightNode::new(
         shards.to_vec(),
         schema.clone(),
@@ -477,6 +485,7 @@ pub(crate) fn build_search_dag(
         highlight_sink,
     ));
     dag.connect("merge_prescan", "merged", "build_weight", "prescan")?;
+    dag.connect("needs_prescan", "else", "build_weight", "trigger")?;
 
     // build_weight → search_0..N ∥ (parallel search per shard)
     for i in 0..num_shards {

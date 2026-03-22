@@ -365,7 +365,26 @@ pub fn execute_dag_with_checkpoint(
 
         for &node_idx in level {
             let node_name = dag.node_name(node_idx).to_string();
-            if skip.contains(&node_name) {
+
+            // Skip if checkpointed OR if required trigger inputs are unsatisfied
+            // (e.g. downstream of a BranchNode that took the other path).
+            let trigger_unsatisfied = if !skip.contains(&node_name) {
+                let node_inputs = dag.node_mut(node_idx).inputs();
+                node_inputs.iter().any(|port| {
+                    port.required && port.port_type == crate::port::PortType::Trigger && {
+                        // Check if any edge delivers this trigger
+                        let has_trigger = dag.edges().iter().any(|e| {
+                            e.to_node == node_name && e.to_port == port.name
+                                && port_data.contains_key(&(e.from_node.clone(), e.from_port.clone()))
+                        });
+                        !has_trigger
+                    }
+                })
+            } else {
+                false
+            };
+
+            if skip.contains(&node_name) || trigger_unsatisfied {
                 emit(DagEvent::NodeCompleted {
                     node: node_name.clone(),
                     duration_ms: 0,
@@ -593,10 +612,40 @@ fn execute_level_parallel(
     let edges = dag.edges().to_vec();
     let scheduler = global_scheduler();
 
-    // Collect inputs and take nodes out of the DAG
+    // Collect inputs and take nodes out of the DAG.
+    // Skip nodes whose required trigger inputs are unsatisfied (BranchNode inactive path).
     let mut taken: Vec<(usize, String, HashMap<String, PortValue>, Box<dyn crate::node::Node>)> = Vec::new();
+    let mut skipped_results: Vec<(String, NodeResult)> = Vec::new();
     for &node_idx in level {
         let node_name = dag.node_name(node_idx).to_string();
+
+        let trigger_unsatisfied = {
+            let node_inputs = dag.node_mut(node_idx).inputs();
+            node_inputs.iter().any(|port| {
+                port.required && port.port_type == crate::port::PortType::Trigger && {
+                    let has_trigger = edges.iter().any(|e| {
+                        e.to_node == node_name && e.to_port == port.name
+                            && port_data.contains_key(&(e.from_node.clone(), e.from_port.clone()))
+                    });
+                    !has_trigger
+                }
+            })
+        };
+
+        if trigger_unsatisfied {
+            emit(DagEvent::NodeCompleted {
+                node: node_name.clone(),
+                duration_ms: 0,
+                metrics: vec![("skipped".to_string(), 1.0)],
+            });
+            skipped_results.push((node_name, NodeResult {
+                duration_ms: 0,
+                metrics: vec![("skipped".to_string(), 1.0)],
+                logs: vec![],
+            }));
+            continue;
+        }
+
         let inputs = collect_inputs(&node_name, &edges, port_data, consumer_counts);
 
         // Take node out (like the scheduler take pattern for actors)
@@ -678,6 +727,7 @@ fn execute_level_parallel(
         }
     }
 
+    level_results.extend(skipped_results);
     Ok(level_results)
 }
 

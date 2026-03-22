@@ -12,9 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use ld_lucivy::query::{
     AllQuery, BooleanQuery, ContinuationMode, DisjunctionMaxQuery, FuzzyTermQuery,
-    HighlightSink, Occur, PhrasePrefixQuery, PhraseQuery, Query, QueryParser, RangeQuery,
-    RegexContinuationQuery, RegexQuery, SuffixContainsQuery, TermQuery,
+    HighlightSink, MoreLikeThisQuery, Occur, PhrasePrefixQuery, PhraseQuery, Query,
+    QueryParser, RangeQuery, RegexContinuationQuery, RegexQuery, SuffixContainsQuery, TermQuery,
 };
+use ld_lucivy::schema::OwnedValue;
 use ld_lucivy::schema::{Field, FieldType, IndexRecordOption, Schema, Term};
 use ld_lucivy::Index;
 
@@ -84,6 +85,14 @@ pub struct QueryConfig {
     pub tie_breaker: Option<f32>,
     // PhrasePrefixQuery: max_expansions for last-term prefix
     pub max_expansions: Option<u32>,
+    // MoreLikeThis: tuning parameters
+    pub min_doc_frequency: Option<u64>,
+    pub max_doc_frequency: Option<u64>,
+    pub min_term_frequency: Option<usize>,
+    pub max_query_terms: Option<usize>,
+    pub min_word_length: Option<usize>,
+    pub max_word_length: Option<usize>,
+    pub boost_factor: Option<f32>,
 }
 
 // ─── Tokenization Helper ────────────────────────────────────────────────────
@@ -262,6 +271,7 @@ pub fn build_query(
         "parse" => build_parsed_query(config, schema, index),
         "phrase_prefix" => build_phrase_prefix_query(config, schema, index, highlight_sink),
         "disjunction_max" => build_disjunction_max_query(config, schema, index, highlight_sink),
+        "more_like_this" => build_more_like_this_query(config, schema),
         other => Err(format!("unknown query type: {other}")),
     }?;
 
@@ -554,6 +564,29 @@ fn build_disjunction_max_query(
 
     let tie_breaker = config.tie_breaker.unwrap_or(0.0);
     Ok(Box::new(DisjunctionMaxQuery::with_tie_breaker(disjuncts, tie_breaker)))
+}
+
+/// MoreLikeThis query: find documents similar to the given text.
+/// Uses value as the reference text, field as the target field.
+fn build_more_like_this_query(
+    config: &QueryConfig,
+    schema: &Schema,
+) -> Result<Box<dyn Query>, String> {
+    let field = resolve_field(config, schema)?;
+    let value = config.value.as_deref()
+        .ok_or("more_like_this query requires 'value' (reference text)")?;
+
+    let mut builder = MoreLikeThisQuery::builder();
+    if let Some(v) = config.min_doc_frequency { builder = builder.with_min_doc_frequency(v); }
+    if let Some(v) = config.max_doc_frequency { builder = builder.with_max_doc_frequency(v); }
+    if let Some(v) = config.min_term_frequency { builder = builder.with_min_term_frequency(v); }
+    if let Some(v) = config.max_query_terms { builder = builder.with_max_query_terms(v); }
+    if let Some(v) = config.min_word_length { builder = builder.with_min_word_length(v); }
+    if let Some(v) = config.max_word_length { builder = builder.with_max_word_length(v); }
+    if let Some(v) = config.boost_factor { builder = builder.with_boost_factor(v); }
+
+    let doc_fields = vec![(field, vec![OwnedValue::Str(value.to_string())])];
+    Ok(Box::new(builder.with_document_fields(doc_fields)))
 }
 
 /// Parse query: already uses the field's configured tokenizer (stemmed pipeline).

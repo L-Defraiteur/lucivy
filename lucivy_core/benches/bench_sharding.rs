@@ -948,6 +948,12 @@ fn bench_query_times() {
             query_type: "phrase_prefix".into(), field: Some("content".into()),
             value: Some("struct dev".into()), ..Default::default()
         }),
+        ("more_like_this 'mutex..'", QueryConfig {
+            query_type: "more_like_this".into(), field: Some("content".into()),
+            value: Some("mutex lock synchronization primitives kernel".into()),
+            min_doc_frequency: Some(1), min_term_frequency: Some(1),
+            min_word_length: Some(3), ..Default::default()
+        }),
         ("dismax term×2 fields", QueryConfig {
             query_type: "disjunction_max".into(),
             queries: Some(vec![
@@ -1116,6 +1122,16 @@ fn test_sfx_disabled() {
     }, 20, None).unwrap();
     assert!(!pp_results.is_empty(), "phrase_prefix should find results");
     eprintln!("  phrase_prefix 'device driv': {} hits ✓", pp_results.len());
+
+    // more_like_this should work
+    let mlt_results = handle.search(&QueryConfig {
+        query_type: "more_like_this".into(), field: Some("body".into()),
+        value: Some("mutex lock synchronization primitives".into()),
+        min_doc_frequency: Some(1), min_term_frequency: Some(1),
+        min_word_length: Some(3),
+        ..Default::default()
+    }, 20, None).unwrap();
+    eprintln!("  more_like_this: {} hits ✓", mlt_results.len());
 
     // contains should ERROR
     let contains_err = handle.search(&QueryConfig {

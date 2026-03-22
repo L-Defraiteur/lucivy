@@ -15,7 +15,9 @@ pub mod reply;
 pub mod runtime;
 pub mod scheduler;
 pub mod scope;
+pub mod branch;
 pub mod scatter;
+pub use branch::BranchNode;
 pub use scatter::ScatterResults;
 pub mod stream_dag;
 
