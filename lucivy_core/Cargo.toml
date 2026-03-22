@@ -26,6 +26,7 @@ regex-syntax = "0.8"
 
 [dev-dependencies]
 postgres = "0.19"
+tantivy = "0.25"
 
 [[test]]
 name = "bench_contains"
@@ -35,4 +36,9 @@ harness = true
 [[test]]
 name = "bench_sharding"
 path = "benches/bench_sharding.rs"
+harness = true
+
+[[test]]
+name = "bench_vs_tantivy"
+path = "benches/bench_vs_tantivy.rs"
 harness = true

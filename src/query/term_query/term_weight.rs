@@ -487,17 +487,8 @@ impl TermWeight {
             }
         }
 
-        // Fallback: resolve term via .sfx or TermDictionary, read postings from inverted index
-        let term_info = if let Some(sfx_data) = reader.sfx_file(field) {
-            let sfx_bytes = sfx_data.read_bytes()
-                .map_err(|e| crate::LucivyError::SystemError(format!("read .sfx: {e}")))?;
-            let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
-                .map_err(|e| crate::LucivyError::SystemError(format!("open .sfx: {e}")))?;
-            let sfx_dict = SfxTermDictionary::new(&sfx_reader, inverted_index.terms());
-            sfx_dict.get(self.term.serialized_value_bytes())?
-        } else {
-            inverted_index.get_term_info(&self.term)?
-        };
+        // Resolve term via standard term dict (fast, no SFX file open needed).
+        let term_info = inverted_index.get_term_info(&self.term)?;
         let Some(term_info) = term_info else {
             return Ok(TermOrEmptyOrAllScorer::Empty);
         };
