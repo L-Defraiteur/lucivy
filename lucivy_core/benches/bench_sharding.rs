@@ -939,6 +939,30 @@ fn bench_query_times() {
             query_type: "term".into(), field: Some("content".into()),
             value: Some("mutex".into()), ..Default::default()
         }),
+        // ── New query types ──
+        ("phrase_prefix 'mutex loc'", QueryConfig {
+            query_type: "phrase_prefix".into(), field: Some("content".into()),
+            value: Some("mutex loc".into()), ..Default::default()
+        }),
+        ("phrase_prefix 'struct dev'", QueryConfig {
+            query_type: "phrase_prefix".into(), field: Some("content".into()),
+            value: Some("struct dev".into()), ..Default::default()
+        }),
+        ("dismax term×2 fields", QueryConfig {
+            query_type: "disjunction_max".into(),
+            queries: Some(vec![
+                QueryConfig {
+                    query_type: "term".into(), field: Some("content".into()),
+                    value: Some("mutex".into()), ..Default::default()
+                },
+                QueryConfig {
+                    query_type: "term".into(), field: Some("path".into()),
+                    value: Some("mutex".into()), ..Default::default()
+                },
+            ]),
+            tie_breaker: Some(0.1),
+            ..Default::default()
+        }),
     ];
 
     eprintln!("{:<35} {:>6} {:>10}", "Query", "Hits", "Time");

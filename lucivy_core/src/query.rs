@@ -11,8 +11,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use ld_lucivy::query::{
-    AllQuery, BooleanQuery, ContinuationMode,
-    HighlightSink, Occur, PhraseQuery, Query, QueryParser, RangeQuery,
+    AllQuery, BooleanQuery, ContinuationMode, DisjunctionMaxQuery,
+    HighlightSink, Occur, PhrasePrefixQuery, PhraseQuery, Query, QueryParser, RangeQuery,
     RegexContinuationQuery, RegexQuery, SuffixContainsQuery, TermQuery,
 };
 use ld_lucivy::schema::{Field, FieldType, IndexRecordOption, Schema, Term};
@@ -75,6 +75,11 @@ pub struct QueryConfig {
     pub must_not: Option<Vec<QueryConfig>>,
     // Filter clauses on non-text fields
     pub filters: Option<Vec<FilterClause>>,
+    // DisjunctionMax: sub-queries + tie_breaker
+    pub queries: Option<Vec<QueryConfig>>,
+    pub tie_breaker: Option<f32>,
+    // PhrasePrefixQuery: max_expansions for last-term prefix
+    pub max_expansions: Option<u32>,
 }
 
 // ─── Tokenization Helper ────────────────────────────────────────────────────
@@ -234,6 +239,8 @@ pub fn build_query(
         }
         "boolean" => build_boolean_query(config, schema, index, highlight_sink),
         "parse" => build_parsed_query(config, schema, index),
+        "phrase_prefix" => build_phrase_prefix_query(config, schema, index, highlight_sink),
+        "disjunction_max" => build_disjunction_max_query(config, schema, index, highlight_sink),
         other => Err(format!("unknown query type: {other}")),
     }?;
 
@@ -475,6 +482,68 @@ fn build_boolean_query(
     }
 
     Ok(Box::new(BooleanQuery::new(clauses)))
+}
+
+/// Phrase prefix query: "mutex loc" → matches "mutex lock", "mutex local", etc.
+/// Last term is treated as a prefix, preceding terms are exact.
+fn build_phrase_prefix_query(
+    config: &QueryConfig,
+    schema: &Schema,
+    index: &Index,
+    _highlight_sink: Option<Arc<HighlightSink>>,
+) -> Result<Box<dyn Query>, String> {
+    let field = resolve_field(config, schema)?;
+
+    // Accept terms=["mutex", "loc"] or value="mutex loc" (split by whitespace)
+    let terms_owned: Vec<String>;
+    let terms_ref = if let Some(ref terms) = config.terms {
+        terms
+    } else {
+        let value = config.value.as_deref().ok_or("phrase_prefix query requires 'terms' or 'value'")?;
+        terms_owned = value.split_whitespace().map(|w| w.to_string()).collect();
+        &terms_owned
+    };
+
+    if terms_ref.len() < 2 {
+        return Err("phrase_prefix query requires at least 2 terms".into());
+    }
+
+    let terms: Vec<Term> = terms_ref.iter()
+        .map(|t| {
+            let tokens = tokenize_for_field(index, field, schema, t);
+            let stemmed = tokens.first().map(|s| s.as_str()).unwrap_or(t);
+            Term::from_field_text(field, stemmed)
+        })
+        .collect();
+
+    let mut query = PhrasePrefixQuery::new(terms);
+    if let Some(max) = config.max_expansions {
+        query.set_max_expansions(max);
+    }
+    Ok(Box::new(query))
+}
+
+/// Disjunction max query: max score among sub-queries, with optional tie_breaker.
+/// Useful for multi-field search: best match across fields wins.
+fn build_disjunction_max_query(
+    config: &QueryConfig,
+    schema: &Schema,
+    index: &Index,
+    highlight_sink: Option<Arc<HighlightSink>>,
+) -> Result<Box<dyn Query>, String> {
+    let sub_configs = config.queries.as_ref()
+        .ok_or("disjunction_max query requires 'queries'")?;
+
+    if sub_configs.is_empty() {
+        return Err("disjunction_max query has no sub-queries".into());
+    }
+
+    let disjuncts: Vec<Box<dyn Query>> = sub_configs.iter()
+        .map(|sub| build_query(sub, schema, index, highlight_sink.clone()))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let tie_breaker = config.tie_breaker.unwrap_or(0.0);
+    Ok(Box::new(DisjunctionMaxQuery::with_tie_breaker(disjuncts, tie_breaker)))
 }
 
 /// Parse query: already uses the field's configured tokenizer (stemmed pipeline).
