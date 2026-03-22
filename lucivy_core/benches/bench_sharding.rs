@@ -958,4 +958,30 @@ fn bench_query_times() {
         }
         eprintln!("{:<35} {:>6} {:>8.1}ms", label, hits, total_ms / 3.0);
     }
+
+    // Highlight timing: term + phrase with highlight_sink
+    eprintln!("\n{:<35} {:>6} {:>10}", "With highlights", "Hits", "Time");
+    eprintln!("{}", "-".repeat(55));
+    let hl_queries: Vec<(&str, QueryConfig)> = vec![
+        ("term 'mutex' +hl", QueryConfig {
+            query_type: "term".into(), field: Some("content".into()),
+            value: Some("mutex".into()), ..Default::default()
+        }),
+        ("phrase 'mutex lock' +hl", QueryConfig {
+            query_type: "phrase".into(), field: Some("content".into()),
+            terms: Some(vec!["mutex".into(), "lock".into()]), ..Default::default()
+        }),
+        ("contains 'mutex' +hl", QueryConfig {
+            query_type: "contains".into(), field: Some("content".into()),
+            value: Some("mutex".into()), ..Default::default()
+        }),
+    ];
+    for (label, config) in &hl_queries {
+        let _ = search_with_snippets(&handle, config, 20, 60); // warmup
+        let t0 = Instant::now();
+        let (hits, snippets) = search_with_snippets(&handle, config, 20, 60);
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        eprintln!("{:<35} {:>6} {:>8.1}ms", label, hits, ms);
+        for s in snippets.iter().take(2) { eprintln!("{}", s); }
+    }
 }
