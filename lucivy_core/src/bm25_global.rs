@@ -108,6 +108,10 @@ pub struct ExportableStats {
     pub total_num_tokens: HashMap<u32, u64>,
     /// Document frequency per term (serialized term bytes → count).
     pub doc_freqs: HashMap<Vec<u8>, u64>,
+    /// Contains/startsWith doc_freq per query text (from prescan).
+    /// Key: lowercased query text → number of docs matching the substring.
+    #[serde(default)]
+    pub contains_doc_freqs: HashMap<String, u64>,
 }
 
 impl ExportableStats {
@@ -145,7 +149,13 @@ impl ExportableStats {
             }
         }
 
-        Self { total_num_docs, total_num_tokens, doc_freqs }
+        Self { total_num_docs, total_num_tokens, doc_freqs, contains_doc_freqs: HashMap::new() }
+    }
+
+    /// Set contains doc_freq from a prescan result.
+    pub fn with_contains_doc_freq(mut self, query_text: &str, doc_freq: u64) -> Self {
+        self.contains_doc_freqs.insert(query_text.to_string(), doc_freq);
+        self
     }
 
     /// Merge multiple ExportableStats into one (coordinator aggregation).
@@ -166,7 +176,14 @@ impl ExportableStats {
             }
         }
 
-        ExportableStats { total_num_docs, total_num_tokens, doc_freqs }
+        let mut contains_doc_freqs: HashMap<String, u64> = HashMap::new();
+        for s in stats {
+            for (key, &freq) in &s.contains_doc_freqs {
+                *contains_doc_freqs.entry(key.clone()).or_insert(0) += freq;
+            }
+        }
+
+        ExportableStats { total_num_docs, total_num_tokens, doc_freqs, contains_doc_freqs }
     }
 }
 

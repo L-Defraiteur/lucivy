@@ -176,6 +176,17 @@ pub trait Query: QueryClone + Send + Sync + downcast_rs::Downcast + fmt::Debug {
     fn prescan_segments(&mut self, _segments: &[&crate::SegmentReader]) -> crate::Result<()> {
         Ok(())
     }
+
+    /// Collect contains/substring doc_freqs from prescan results.
+    /// Used to build ExportableStats for distributed search.
+    /// BooleanQuery propagates to sub-queries.
+    /// Default: no-op.
+    fn collect_prescan_doc_freqs(&self, _out: &mut std::collections::HashMap<String, u64>) {}
+
+    /// Set global doc_freq for contains queries (from coordinator aggregation).
+    /// BooleanQuery propagates to sub-queries.
+    /// Default: no-op.
+    fn set_global_contains_doc_freqs(&mut self, _freqs: &std::collections::HashMap<String, u64>) {}
 }
 
 /// Implements `box_clone`.

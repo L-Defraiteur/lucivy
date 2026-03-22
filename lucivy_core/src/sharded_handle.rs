@@ -1399,18 +1399,31 @@ impl ShardedHandle {
 
         let searchers: Vec<_> = self.shards.iter().map(|s| s.reader.searcher()).collect();
 
-        // Build the query to extract terms
-        let query = crate::query::build_query(
+        // Build the query and prescan for contains doc_freq
+        let mut query = crate::query::build_query(
             query_config, &self.schema, &self.shards[0].index, None,
         )?;
 
-        // Collect all terms the query will need for BM25
+        // Prescan all segments for contains doc_freq
+        let all_segs: Vec<_> = self.shards.iter()
+            .flat_map(|s| s.reader.searcher().segment_readers().to_vec())
+            .collect();
+        let seg_refs: Vec<&ld_lucivy::SegmentReader> = all_segs.iter().collect();
+        query.prescan_segments(&seg_refs)
+            .map_err(|e| format!("prescan: {e}"))?;
+
+        // Collect standard BM25 terms
         let mut term_set = Vec::new();
         query.query_terms(&mut |term, _| {
             term_set.push(term.clone());
         });
 
-        Ok(crate::bm25_global::ExportableStats::from_searchers(&searchers, &term_set))
+        let mut stats = crate::bm25_global::ExportableStats::from_searchers(&searchers, &term_set);
+
+        // Add contains doc_freqs from prescan
+        query.collect_prescan_doc_freqs(&mut stats.contains_doc_freqs);
+
+        Ok(stats)
     }
 
     /// Search with externally-provided global BM25 stats (distributed mode).
@@ -1424,12 +1437,25 @@ impl ShardedHandle {
     ) -> Result<Vec<ShardedSearchResult>, String> {
         self.drain_pipeline();
 
-        let query = crate::query::build_query(
+        let mut query = crate::query::build_query(
             query_config, &self.schema, &self.shards[0].index,
             highlight_sink.clone(),
         )?;
 
-        // Build weight with global stats (not local)
+        // Prescan local segments (populates cache + local doc_freq)
+        let all_segs: Vec<_> = self.shards.iter()
+            .flat_map(|s| s.reader.searcher().segment_readers().to_vec())
+            .collect();
+        let seg_refs: Vec<&ld_lucivy::SegmentReader> = all_segs.iter().collect();
+        query.prescan_segments(&seg_refs)
+            .map_err(|e| format!("prescan: {e}"))?;
+
+        // Inject global contains doc_freqs from coordinator (overrides local prescan doc_freq)
+        if !global_stats.contains_doc_freqs.is_empty() {
+            query.set_global_contains_doc_freqs(&global_stats.contains_doc_freqs);
+        }
+
+        // Build weight with global stats (total_docs, total_tokens, term doc_freqs)
         let searcher_0 = self.shards[0].reader.searcher();
         let enable = ld_lucivy::query::EnableScoring::enabled_from_statistics_provider(
             global_stats, &searcher_0,

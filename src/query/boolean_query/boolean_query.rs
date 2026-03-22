@@ -180,6 +180,18 @@ impl Query for BooleanQuery {
         }
         Ok(())
     }
+
+    fn collect_prescan_doc_freqs(&self, out: &mut std::collections::HashMap<String, u64>) {
+        for (_occur, subquery) in &self.subqueries {
+            subquery.collect_prescan_doc_freqs(out);
+        }
+    }
+
+    fn set_global_contains_doc_freqs(&mut self, freqs: &std::collections::HashMap<String, u64>) {
+        for (_occur, subquery) in &mut self.subqueries {
+            subquery.set_global_contains_doc_freqs(freqs);
+        }
+    }
 }
 
 impl BooleanQuery {

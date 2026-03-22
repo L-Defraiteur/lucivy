@@ -205,6 +205,16 @@ impl SuffixContainsQuery {
         self
     }
 
+    /// Get the doc_freq from the last prescan (for export to coordinator).
+    pub fn prescan_doc_freq(&self) -> u64 {
+        self.global_doc_freq.unwrap_or(0)
+    }
+
+    /// Get the query text (for keying contains_doc_freqs).
+    pub fn query_text(&self) -> &str {
+        &self.query_text
+    }
+
     /// Set global doc_freq (from aggregation of prescan results).
     pub fn with_global_doc_freq(mut self, doc_freq: u64) -> Self {
         self.global_doc_freq = Some(doc_freq);
@@ -304,6 +314,18 @@ impl Query for SuffixContainsQuery {
         self.prescan_cache = Some(cache);
         self.global_doc_freq = Some(doc_freq);
         Ok(())
+    }
+
+    fn collect_prescan_doc_freqs(&self, out: &mut std::collections::HashMap<String, u64>) {
+        if let Some(freq) = self.global_doc_freq {
+            out.insert(self.query_text.clone(), freq);
+        }
+    }
+
+    fn set_global_contains_doc_freqs(&mut self, freqs: &std::collections::HashMap<String, u64>) {
+        if let Some(&freq) = freqs.get(&self.query_text) {
+            self.global_doc_freq = Some(freq);
+        }
     }
 
     fn weight(&self, enable_scoring: EnableScoring) -> crate::Result<Box<dyn Weight>> {
