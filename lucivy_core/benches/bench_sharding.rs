@@ -865,3 +865,97 @@ fn ground_truth_exhaustive() {
     eprintln!("=== Results: {} pass, {} fail ===", pass, fail);
     assert_eq!(fail, 0, "{} ground truth checks FAILED", fail);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Quick query timing: reuse persisted index, no ground truth, no events
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn bench_query_times() {
+    let index_dir = format!("{}/round_robin", BENCH_BASE);
+    if !std::path::Path::new(&index_dir).exists() {
+        eprintln!("Skipping: no persisted index at {}", index_dir);
+        return;
+    }
+
+    let handle = ShardedHandle::open(&index_dir).unwrap();
+    eprintln!("\n=== Query timing on {} docs (3-run avg) ===\n", handle.num_docs());
+
+    let queries: Vec<(&str, QueryConfig)> = vec![
+        ("contains 'mutex_lock'", QueryConfig {
+            query_type: "contains".into(), field: Some("content".into()),
+            value: Some("mutex_lock".into()), ..Default::default()
+        }),
+        ("contains 'function'", QueryConfig {
+            query_type: "contains".into(), field: Some("content".into()),
+            value: Some("function".into()), ..Default::default()
+        }),
+        ("contains 'sched'", QueryConfig {
+            query_type: "contains".into(), field: Some("content".into()),
+            value: Some("sched".into()), ..Default::default()
+        }),
+        ("contains 'printk'", QueryConfig {
+            query_type: "contains".into(), field: Some("content".into()),
+            value: Some("printk".into()), ..Default::default()
+        }),
+        ("startsWith 'sched'", QueryConfig {
+            query_type: "startsWith".into(), field: Some("content".into()),
+            value: Some("sched".into()), ..Default::default()
+        }),
+        ("startsWith 'printk'", QueryConfig {
+            query_type: "startsWith".into(), field: Some("content".into()),
+            value: Some("printk".into()), ..Default::default()
+        }),
+        ("contains_split 'struct device'", QueryConfig {
+            query_type: "contains_split".into(), field: Some("content".into()),
+            value: Some("struct device".into()), ..Default::default()
+        }),
+        ("fuzzy 'schdule' (d=1)", QueryConfig {
+            query_type: "contains".into(), field: Some("content".into()),
+            value: Some("schdule".into()), distance: Some(1), ..Default::default()
+        }),
+        ("fuzzy 'mutex' (d=2)", QueryConfig {
+            query_type: "contains".into(), field: Some("content".into()),
+            value: Some("mutex".into()), distance: Some(2), ..Default::default()
+        }),
+        ("contains 'drivers' (path)", QueryConfig {
+            query_type: "contains".into(), field: Some("path".into()),
+            value: Some("drivers".into()), ..Default::default()
+        }),
+        // ── Phrase queries ──
+        ("phrase 'mutex lock'", QueryConfig {
+            query_type: "phrase".into(), field: Some("content".into()),
+            terms: Some(vec!["mutex".into(), "lock".into()]), ..Default::default()
+        }),
+        ("phrase 'struct device'", QueryConfig {
+            query_type: "phrase".into(), field: Some("content".into()),
+            terms: Some(vec!["struct".into(), "device".into()]), ..Default::default()
+        }),
+        ("phrase 'return error'", QueryConfig {
+            query_type: "phrase".into(), field: Some("content".into()),
+            terms: Some(vec!["return".into(), "error".into()]), ..Default::default()
+        }),
+        ("term 'mutex'", QueryConfig {
+            query_type: "term".into(), field: Some("content".into()),
+            value: Some("mutex".into()), ..Default::default()
+        }),
+    ];
+
+    eprintln!("{:<35} {:>6} {:>10}", "Query", "Hits", "Time");
+    eprintln!("{}", "-".repeat(55));
+
+    for (label, config) in &queries {
+        // Warmup
+        let _ = time_sharded_query(&handle, config);
+
+        // 3-run average
+        let mut total_ms = 0.0;
+        let mut hits = 0;
+        for _ in 0..3 {
+            let (h, ms) = time_sharded_query(&handle, config);
+            total_ms += ms;
+            hits = h;
+        }
+        eprintln!("{:<35} {:>6} {:>8.1}ms", label, hits, total_ms / 3.0);
+    }
+}
