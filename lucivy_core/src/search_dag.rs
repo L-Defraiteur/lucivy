@@ -137,20 +137,114 @@ impl Node for BuildWeightNode {
         let searchers: Vec<_> = self.shards.iter().map(|s| s.reader.searcher()).collect();
         let global_stats = AggregatedBm25StatsOwned::new(searchers);
 
-        // Build query once
+        // Extract contains/startsWith terms to prescan
+        let contains_terms = extract_contains_terms(&self.query_config);
+
+        // Resolve the field for SFX prescan
+        let raw_field = self.query_config.field.as_ref()
+            .and_then(|name| self.schema.get_field(name).ok());
+
+        // Collect segment readers per shard
+        let all_shard_segs: Vec<Vec<ld_lucivy::SegmentReader>> = self.shards.iter()
+            .map(|s| s.reader.searcher().segment_readers().to_vec())
+            .collect();
+
+        // Parallel prescan via scatter DAG (uses luciole scheduler, no new threads)
+        let (merged_cache, merged_freqs) = if !contains_terms.is_empty() && raw_field.is_some() {
+            use ld_lucivy::query::{
+                run_sfx_walk, tokenize_query, CachedSfxResult, RawPostingEntry,
+                build_resolver,
+            };
+            use ld_lucivy::suffix_fst::file::SfxFileReader;
+
+            let field = raw_field.unwrap();
+
+            // Build scatter tasks: one per shard
+            type PrescanResult = (HashMap<ld_lucivy::index::SegmentId, CachedSfxResult>, HashMap<String, u64>);
+            let tasks: Vec<(&str, _)> = all_shard_segs.into_iter().enumerate()
+                .map(|(i, shard_segs)| {
+                    let name: &str = Box::leak(format!("prescan_{i}").into_boxed_str());
+                    let terms = contains_terms.clone();
+                    let f = move || -> Result<luciole::PortValue, String> {
+                        let mut cache = HashMap::new();
+                        let mut freqs: HashMap<String, u64> = HashMap::new();
+
+                        for seg_reader in &shard_segs {
+                            let sfx_data = match seg_reader.sfx_file(field) {
+                                Some(d) => d,
+                                None => continue,
+                            };
+                            let sfx_bytes = sfx_data.read_bytes()
+                                .map_err(|e| format!("read sfx: {e}"))?;
+                            let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
+                                .map_err(|e| format!("open sfx: {e}"))?;
+
+                            let pr = build_resolver(seg_reader, field)
+                                .map_err(|e| format!("resolver: {e}"))?;
+                            let resolver = |ord: u64| -> Vec<RawPostingEntry> {
+                                pr.resolve(ord).into_iter().map(|e| {
+                                    RawPostingEntry {
+                                        doc_id: e.doc_id, token_index: e.position,
+                                        byte_from: e.byte_from, byte_to: e.byte_to,
+                                    }
+                                }).collect()
+                            };
+
+                            for (query_text, prefix_only, fuzzy_d, continuation) in &terms {
+                                let (tokens, seps) = tokenize_query(query_text);
+                                let (doc_tf, highlights) = run_sfx_walk(
+                                    &sfx_reader, &resolver, query_text,
+                                    &tokens, &seps,
+                                    *fuzzy_d, *prefix_only, *continuation,
+                                );
+
+                                *freqs.entry(query_text.clone()).or_insert(0) += doc_tf.len() as u64;
+                                if !doc_tf.is_empty() {
+                                    cache.insert(seg_reader.segment_id(), CachedSfxResult::new(doc_tf, highlights));
+                                }
+                            }
+                        }
+                        Ok(luciole::PortValue::new((cache, freqs)))
+                    };
+                    (name, f)
+                })
+                .collect();
+
+            // Execute scatter DAG on the luciole scheduler (parallel, no new threads)
+            let mut scatter_dag = luciole::scatter::build_scatter_dag(tasks);
+            let mut scatter_result = luciole::execute_dag(&mut scatter_dag, None)
+                .map_err(|e| format!("prescan scatter: {e}"))?;
+
+            let scatter_map = scatter_result
+                .take_output::<HashMap<String, luciole::PortValue>>("collect", "results")
+                .ok_or("prescan: no scatter results")?;
+
+            let mut mc: HashMap<ld_lucivy::index::SegmentId, CachedSfxResult> = HashMap::new();
+            let mut mf: HashMap<String, u64> = HashMap::new();
+            for (_name, pv) in scatter_map {
+                if let Some((cache, freqs)) = pv.take::<PrescanResult>() {
+                    mc.extend(cache);
+                    for (key, freq) in freqs {
+                        *mf.entry(key).or_insert(0) += freq;
+                    }
+                }
+            }
+            (mc, mf)
+        } else {
+            (HashMap::new(), HashMap::new())
+        };
+
+        // Build query once (with highlights)
         let mut query = crate::query::build_query(
             &self.query_config, &self.schema, &self.index,
             self.highlight_sink.clone(),
         )?;
 
-        // Sequential prescan: all segments from all shards.
-        // Computes global doc_freq for correct BM25 IDF.
-        let all_seg_readers: Vec<ld_lucivy::SegmentReader> = self.shards.iter()
-            .flat_map(|s| s.reader.searcher().segment_readers().to_vec())
-            .collect();
-        let seg_refs: Vec<&ld_lucivy::SegmentReader> = all_seg_readers.iter().collect();
-        query.prescan_segments(&seg_refs)
-            .map_err(|e| format!("prescan: {e}"))?;
+        // Inject prescan results into the query
+        if !merged_freqs.is_empty() {
+            query.set_global_contains_doc_freqs(&merged_freqs);
+            query.inject_prescan_cache(merged_cache);
+        }
 
         let searcher_0 = self.shards[0].reader.searcher();
         let enable_scoring = ld_lucivy::query::EnableScoring::enabled_from_statistics_provider(
@@ -164,91 +258,13 @@ impl Node for BuildWeightNode {
         ctx.metric("compiled", 1.0);
         ctx.set_output("weight", PortValue::new(weight));
         Ok(())
-
-        /* Parallel prescan (disabled — vtable dispatch issues, to investigate later)
-        let contains_terms = extract_contains_terms(&self.query_config);
-        let all_shard_segs: Vec<Vec<ld_lucivy::SegmentReader>> = self.shards.iter()
-            .map(|s| s.reader.searcher().segment_readers().to_vec())
-            .collect();
-        let raw_field = self.query_config.field.as_ref()
-            .and_then(|name| self.schema.get_field(name).ok());
-        if false && !contains_terms.is_empty() && raw_field.is_some() {
-            use ld_lucivy::query::{
-                run_sfx_walk, tokenize_query, CachedSfxResult, RawPostingEntry,
-                build_resolver,
-            };
-            use ld_lucivy::suffix_fst::file::SfxFileReader;
-
-            let field = raw_field.unwrap();
-
-            let prescan_results: Vec<Result<(HashMap<ld_lucivy::index::SegmentId, CachedSfxResult>, HashMap<String, u64>), String>> =
-                std::thread::scope(|scope| {
-                    let terms = &contains_terms;
-                    let handles: Vec<_> = all_shard_segs.iter().map(|shard_segs| {
-                        scope.spawn(move || {
-                            let mut cache = HashMap::new();
-                            let mut freqs: HashMap<String, u64> = HashMap::new();
-
-                            for seg_reader in shard_segs {
-                                let sfx_data = match seg_reader.sfx_file(field) {
-                                    Some(d) => d,
-                                    None => continue,
-                                };
-                                let sfx_bytes = sfx_data.read_bytes()
-                                    .map_err(|e| format!("read sfx: {e}"))?;
-                                let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
-                                    .map_err(|e| format!("open sfx: {e}"))?;
-
-                                let pr = build_resolver(seg_reader, field)
-                                    .map_err(|e| format!("resolver: {e}"))?;
-                                let resolver = |ord: u64| -> Vec<RawPostingEntry> {
-                                    pr.resolve(ord).into_iter().map(|e| {
-                                        RawPostingEntry {
-                                            doc_id: e.doc_id, token_index: e.position,
-                                            byte_from: e.byte_from, byte_to: e.byte_to,
-                                        }
-                                    }).collect()
-                                };
-
-                                for (query_text, prefix_only, fuzzy_d, continuation) in terms {
-                                    let (tokens, seps) = tokenize_query(query_text);
-                                    let (doc_tf, highlights) = run_sfx_walk(
-                                        &sfx_reader, &resolver, query_text,
-                                        &tokens, &seps,
-                                        *fuzzy_d, *prefix_only, *continuation,
-                                    );
-
-                                    *freqs.entry(query_text.clone()).or_insert(0) += doc_tf.len() as u64;
-                                    if !doc_tf.is_empty() {
-                                        cache.insert(seg_reader.segment_id(), CachedSfxResult::new(doc_tf, highlights));
-                                    }
-                                }
-                            }
-                            Ok((cache, freqs))
-                        })
-                    }).collect();
-
-                    handles.into_iter()
-                        .map(|h| h.join().map_err(|_| "prescan panicked".to_string())?)
-                        .collect()
-                });
-
-            let mut mc = HashMap::new();
-            let mut mf: HashMap<String, u64> = HashMap::new();
-            for result in prescan_results {
-                let (cache, freqs) = result?;
-                mc.extend(cache);
-                for (key, freq) in freqs {
-                    *mf.entry(key).or_insert(0) += freq;
-                }
-            }
-            (mc, mf)
-        } else {
-            (HashMap::new(), HashMap::new())
-        };
-        */
     }
 }
+
+/* OLD sequential fallback (correct but no sharding benefit):
+   query.prescan_segments(&all_seg_readers); // sequential, all shards
+   query.weight(enable_scoring); // reads cache
+*/
 
 /// Extract contains/startsWith terms from a query config for prescan.
 /// Returns (query_text, prefix_only, fuzzy_distance, continuation).
