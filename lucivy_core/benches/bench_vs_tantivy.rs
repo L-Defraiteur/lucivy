@@ -242,6 +242,31 @@ fn time_tantivy_parse(index: &TvIndex, field_name: &str, query_str: &str) -> (us
     (results.len(), ms)
 }
 
+fn time_tantivy_fuzzy(index: &TvIndex, field_name: &str, value: &str, distance: u8) -> (usize, f64) {
+    use tantivy::query::FuzzyTermQuery as TvFuzzyTermQuery;
+    let reader = index.reader().unwrap();
+    let searcher = reader.searcher();
+    let field = index.schema().get_field(field_name).unwrap();
+    let term = TvTerm::from_field_text(field, value);
+    let query = TvFuzzyTermQuery::new(term, distance, true);
+    let t0 = Instant::now();
+    let results = searcher.search(&query, &TopDocs::with_limit(20)).unwrap();
+    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+    (results.len(), ms)
+}
+
+fn time_tantivy_regex(index: &TvIndex, field_name: &str, pattern: &str) -> (usize, f64) {
+    use tantivy::query::RegexQuery as TvRegexQuery;
+    let reader = index.reader().unwrap();
+    let searcher = reader.searcher();
+    let field = index.schema().get_field(field_name).unwrap();
+    let query = TvRegexQuery::from_pattern(pattern, field).unwrap();
+    let t0 = Instant::now();
+    let results = searcher.search(&query, &TopDocs::with_limit(20)).unwrap();
+    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+    (results.len(), ms)
+}
+
 fn time_lucivy_single(handle: &LucivyHandle, config: &QueryConfig) -> (usize, f64) {
     let t0 = Instant::now();
     let query = query::build_query(config, &handle.schema, &handle.index, None).unwrap();
@@ -408,6 +433,50 @@ fn bench_vs_tantivy() {
         let hits = h_tv.max(h_lv1).max(h_lv4);
         eprintln!("parse '{:<17}'  {:>6} {:>8.1}ms {} {:>8.1}ms",
             q, hits, ms_tv, lv1_col(ms_lv1), ms_lv4);
+    }
+
+    eprintln!();
+
+    // Fuzzy queries (Levenshtein on term dict — same behavior both engines)
+    let fuzzy_queries: Vec<(&str, &str, u8)> = vec![
+        ("schdule", "schdule", 1),
+        ("mutex", "mutex", 2),
+        ("fuction", "fuction", 1),
+        ("prntk", "prntk", 2),
+    ];
+    for (label, value, distance) in &fuzzy_queries {
+        let lv_cfg = QueryConfig {
+            query_type: "fuzzy".into(), field: Some("content".into()),
+            value: Some(value.to_string()), distance: Some(*distance),
+            ..Default::default()
+        };
+        let (h_tv, ms_tv) = avg3(|| time_tantivy_fuzzy(&tv_index, "content", value, *distance));
+        let (h_lv1, ms_lv1) = lv1_avg(&lv_cfg);
+        let (h_lv4, ms_lv4) = avg3(|| time_lucivy_sharded(&lv_sharded, &lv_cfg));
+        let hits = h_tv.max(h_lv1).max(h_lv4);
+        eprintln!("fuzzy '{:<10}' d={}    {:>6} {:>8.1}ms {} {:>8.1}ms",
+            label, distance, hits, ms_tv, lv1_col(ms_lv1), ms_lv4);
+    }
+
+    eprintln!();
+
+    // Regex queries (on term dict — same behavior both engines)
+    let regex_queries: Vec<(&str, &str)> = vec![
+        ("mutex.*", "mutex.*"),
+        ("sched[a-z]+", "sched[a-z]+"),
+        ("print[kf]", "print[kf]"),
+    ];
+    for (label, pattern) in &regex_queries {
+        let lv_cfg = QueryConfig {
+            query_type: "regex".into(), field: Some("content".into()),
+            pattern: Some(pattern.to_string()), ..Default::default()
+        };
+        let (h_tv, ms_tv) = avg3(|| time_tantivy_regex(&tv_index, "content", pattern));
+        let (h_lv1, ms_lv1) = lv1_avg(&lv_cfg);
+        let (h_lv4, ms_lv4) = avg3(|| time_lucivy_sharded(&lv_sharded, &lv_cfg));
+        let hits = h_tv.max(h_lv1).max(h_lv4);
+        eprintln!("regex '{:<15}'  {:>6} {:>8.1}ms {} {:>8.1}ms",
+            label, hits, ms_tv, lv1_col(ms_lv1), ms_lv4);
     }
 
     eprintln!();

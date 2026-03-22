@@ -142,15 +142,18 @@ where
         self.collect_term_infos(reader, &inverted_index)
     }
 
-    /// Collect matching TermInfos — via .sfx if available, otherwise via standard stream.
-    /// JSON path queries always use the standard stream (JSON fields don't have .sfx).
+    /// Collect matching TermInfos.
+    /// - SFX path (prefer_sfxpost=true): walks the suffix FST, needed for
+    ///   substring/contains queries where the automaton must match suffixes.
+    /// - Standard path (prefer_sfxpost=false): walks the term dict FST,
+    ///   for whole-token matching (fuzzy, regex on tokens). Same as tantivy.
     fn collect_term_infos(
         &self,
         reader: &SegmentReader,
         inverted_index: &InvertedIndexReader,
     ) -> crate::Result<Vec<TermInfo>> {
-        // Try .sfx path (skip for JSON fields — they don't have suffix indexes)
-        if self.json_path_bytes.is_none() {
+        // SFX path: needed when matching suffixes (contains+regex)
+        if self.prefer_sfxpost && self.json_path_bytes.is_none() {
             if let Some(sfx_data) = reader.sfx_file(self.field) {
                 let sfx_bytes = sfx_data.read_bytes()
                     .map_err(|e| crate::LucivyError::SystemError(format!("read .sfx: {e}")))?;

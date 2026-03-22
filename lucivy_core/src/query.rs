@@ -11,7 +11,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use ld_lucivy::query::{
-    AllQuery, BooleanQuery, ContinuationMode, DisjunctionMaxQuery,
+    AllQuery, BooleanQuery, ContinuationMode, DisjunctionMaxQuery, FuzzyTermQuery,
     HighlightSink, Occur, PhrasePrefixQuery, PhraseQuery, Query, QueryParser, RangeQuery,
     RegexContinuationQuery, RegexQuery, SuffixContainsQuery, TermQuery,
 };
@@ -284,29 +284,21 @@ fn build_term_query(
 }
 
 /// Fuzzy query: Levenshtein match on raw field (lowercased only, no stemming).
+/// Fuzzy query: Levenshtein match on term dict (standard tantivy behavior).
+/// Matches individual tokens within edit distance. Fast (term dict DFA walk).
+/// For cross-token fuzzy substring search, use contains with distance parameter.
 fn build_fuzzy_query(
     config: &QueryConfig,
     schema: &Schema,
     _index: &Index,
-    highlight_sink: Option<Arc<HighlightSink>>,
+    _highlight_sink: Option<Arc<HighlightSink>>,
 ) -> Result<Box<dyn Query>, String> {
     let field = resolve_field(config, schema)?;
     let value = config.value.as_deref().ok_or("fuzzy query requires 'value'")?;
     let distance = config.distance.unwrap_or(1);
 
-    // Use RegexContinuationQuery so fuzzy matching can span token boundaries.
-    // The Levenshtein DFA absorbs gaps (spaces, etc.) as insertions within
-    // the edit distance budget.
-    let mut query = RegexContinuationQuery::new(
-        field,
-        value.to_lowercase(),
-        ContinuationMode::Contains,
-    )
-    .with_fuzzy_distance(distance);
-    if let Some(sink) = highlight_sink {
-        let field_name = config.field.clone().unwrap_or_default();
-        query = query.with_highlight_sink(sink, field_name);
-    }
+    let term = Term::from_field_text(field, &value.to_lowercase());
+    let query = FuzzyTermQuery::new(term, distance, true);
     Ok(Box::new(query))
 }
 
@@ -430,27 +422,24 @@ fn regex_escape(s: &str) -> String {
 }
 
 /// Regex query: pattern applies to raw field terms (lowercased, not stemmed).
+/// Regex query: regex match on term dict (standard tantivy behavior).
+/// Matches individual tokens against a regex pattern. Fast (term dict DFA walk).
+/// For cross-token regex substring search, use contains with regex=true.
 fn build_regex_query(
     config: &QueryConfig,
     schema: &Schema,
-    highlight_sink: Option<Arc<HighlightSink>>,
+    _highlight_sink: Option<Arc<HighlightSink>>,
 ) -> Result<Box<dyn Query>, String> {
     let field = resolve_field(config, schema)?;
     let pattern = config
         .pattern
         .as_deref()
-        .ok_or("regex query requires 'pattern'")?;
+        .or(config.value.as_deref())
+        .ok_or("regex query requires 'pattern' or 'value'")?;
 
-    // Use RegexContinuationQuery so regex matching can span token boundaries.
-    let mut query = RegexContinuationQuery::from_regex(
-        field,
-        pattern.to_string(),
-        ContinuationMode::Contains,
-    );
-    if let Some(sink) = highlight_sink {
-        query = query.with_highlight_sink(sink, config.field.clone().unwrap_or_default());
-    }
-    Ok(Box::new(query) as Box<dyn Query>)
+    let query = RegexQuery::from_pattern(pattern, field)
+        .map_err(|e| format!("invalid regex: {e}"))?;
+    Ok(Box::new(query))
 }
 
 fn build_boolean_query(
