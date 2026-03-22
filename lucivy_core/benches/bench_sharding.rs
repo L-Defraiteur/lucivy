@@ -1009,3 +1009,131 @@ fn bench_query_times() {
         for s in snippets.iter().take(2) { eprintln!("{}", s); }
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Test: sfx:false mode — indexation + term/phrase OK + contains error
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_sfx_disabled() {
+    let test_dir = "/tmp/lucivy_test_sfx_disabled";
+    let _ = std::fs::remove_dir_all(test_dir);
+
+    // Index with sfx:false, 4 shards
+    let config: query::SchemaConfig = serde_json::from_value(serde_json::json!({
+        "fields": [
+            {"name": "title", "type": "text", "stored": true},
+            {"name": "body", "type": "text", "stored": true}
+        ],
+        "shards": 4,
+        "balance_weight": 1.0,
+        "sfx": false
+    })).unwrap();
+
+    let handle = ShardedHandle::create(test_dir, &config).unwrap();
+    let title_f = handle.field("title").unwrap();
+    let body_f = handle.field("body").unwrap();
+    let nid_f = handle.field(lucivy_core::handle::NODE_ID_FIELD).unwrap();
+
+    // Add some documents
+    let docs = vec![
+        ("Mutex Design", "The mutex_lock function provides mutual exclusion for shared resources."),
+        ("Scheduler Overview", "The scheduler manages process scheduling and CPU allocation."),
+        ("Device Driver Guide", "Writing device drivers requires understanding struct device patterns."),
+        ("Error Handling", "Return error codes from functions to signal failure conditions."),
+        ("Lock Implementation", "Spinlocks and mutex locks are fundamental synchronization primitives."),
+        ("Memory Management", "The kernel memory allocator handles page allocation and deallocation."),
+    ];
+
+    for (i, (title, body)) in docs.iter().enumerate() {
+        let mut doc = ld_lucivy::LucivyDocument::new();
+        doc.add_u64(nid_f, i as u64);
+        doc.add_text(title_f, title);
+        doc.add_text(body_f, body);
+        handle.add_document(doc, i as u64).unwrap();
+    }
+    handle.commit().unwrap();
+
+    eprintln!("\n=== sfx:false test ({} docs, 4 shards) ===\n", handle.num_docs());
+
+    // Verify no .sfx files were created
+    let sfx_count: usize = (0..4).map(|i| {
+        let shard_dir = format!("{}/shard_{}", test_dir, i);
+        std::fs::read_dir(&shard_dir).map(|entries| {
+            entries.flatten().filter(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                name.ends_with(".sfx") || name.ends_with(".sfxpost")
+            }).count()
+        }).unwrap_or(0)
+    }).sum();
+    assert_eq!(sfx_count, 0, "Expected no .sfx/.sfxpost files with sfx:false");
+    eprintln!("  .sfx/.sfxpost files: {} (expected 0) ✓", sfx_count);
+
+    // term query should work
+    let term_results = handle.search(&QueryConfig {
+        query_type: "term".into(), field: Some("body".into()),
+        value: Some("mutex".into()), ..Default::default()
+    }, 20, None).unwrap();
+    assert!(!term_results.is_empty(), "term query should find results");
+    eprintln!("  term 'mutex': {} hits ✓", term_results.len());
+
+    // phrase query should work
+    let phrase_results = handle.search(&QueryConfig {
+        query_type: "phrase".into(), field: Some("body".into()),
+        terms: Some(vec!["device".into(), "drivers".into()]), ..Default::default()
+    }, 20, None).unwrap();
+    assert!(!phrase_results.is_empty(), "phrase query should find results");
+    eprintln!("  phrase 'device drivers': {} hits ✓", phrase_results.len());
+
+    // fuzzy query should work
+    let fuzzy_results = handle.search(&QueryConfig {
+        query_type: "fuzzy".into(), field: Some("body".into()),
+        value: Some("mutx".into()), distance: Some(1), ..Default::default()
+    }, 20, None).unwrap();
+    assert!(!fuzzy_results.is_empty(), "fuzzy query should find results");
+    eprintln!("  fuzzy 'mutx' d=1: {} hits ✓", fuzzy_results.len());
+
+    // regex query should work
+    let regex_results = handle.search(&QueryConfig {
+        query_type: "regex".into(), field: Some("body".into()),
+        pattern: Some("sched.*".into()), ..Default::default()
+    }, 20, None).unwrap();
+    assert!(!regex_results.is_empty(), "regex query should find results");
+    eprintln!("  regex 'sched.*': {} hits ✓", regex_results.len());
+
+    // parse query should work
+    let parse_results = handle.search(&QueryConfig {
+        query_type: "parse".into(), field: Some("body".into()),
+        value: Some("mutex AND lock".into()), ..Default::default()
+    }, 20, None).unwrap();
+    assert!(!parse_results.is_empty(), "parse query should find results");
+    eprintln!("  parse 'mutex AND lock': {} hits ✓", parse_results.len());
+
+    // phrase_prefix should work
+    let pp_results = handle.search(&QueryConfig {
+        query_type: "phrase_prefix".into(), field: Some("body".into()),
+        value: Some("device driv".into()), ..Default::default()
+    }, 20, None).unwrap();
+    assert!(!pp_results.is_empty(), "phrase_prefix should find results");
+    eprintln!("  phrase_prefix 'device driv': {} hits ✓", pp_results.len());
+
+    // contains should ERROR
+    let contains_err = handle.search(&QueryConfig {
+        query_type: "contains".into(), field: Some("body".into()),
+        value: Some("mutex".into()), ..Default::default()
+    }, 20, None);
+    assert!(contains_err.is_err(), "contains should error with sfx:false");
+    eprintln!("  contains 'mutex': error ✓ ({})", contains_err.unwrap_err());
+
+    // startsWith should ERROR
+    let sw_err = handle.search(&QueryConfig {
+        query_type: "startsWith".into(), field: Some("body".into()),
+        value: Some("sched".into()), ..Default::default()
+    }, 20, None);
+    assert!(sw_err.is_err(), "startsWith should error with sfx:false");
+    eprintln!("  startsWith 'sched': error ✓ ({})", sw_err.unwrap_err());
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(test_dir);
+    eprintln!("\n  All checks passed! ✓");
+}
