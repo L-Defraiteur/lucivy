@@ -52,8 +52,14 @@ impl SfxCache {
 
 #[derive(Clone, Debug)]
 pub struct CachedSfxResult {
-    doc_tf: Vec<(DocId, u32)>,
-    highlights: Vec<(DocId, usize, usize)>,
+    pub(crate) doc_tf: Vec<(DocId, u32)>,
+    pub(crate) highlights: Vec<(DocId, usize, usize)>,
+}
+
+impl CachedSfxResult {
+    pub fn new(doc_tf: Vec<(DocId, u32)>, highlights: Vec<(DocId, usize, usize)>) -> Self {
+        Self { doc_tf, highlights }
+    }
 }
 
 use crate::tokenizer::{SimpleTokenizer, TextAnalyzer, LowerCaser, TokenStream};
@@ -85,7 +91,7 @@ fn count_tf_sorted(doc_ids: &[DocId]) -> Vec<(DocId, u32)> {
 /// Tokenize a query string into (tokens, separators) using the same
 /// SimpleTokenizer + LowerCaser as the ._raw field.
 /// Returns (["rust", "lang"], ["🦀"]) for "rust🦀lang".
-fn tokenize_query(query: &str) -> (Vec<String>, Vec<String>) {
+pub fn tokenize_query(query: &str) -> (Vec<String>, Vec<String>) {
     let mut tokenizer = TextAnalyzer::builder(SimpleTokenizer::default())
         .filter(LowerCaser)
         .build();
@@ -251,7 +257,7 @@ impl SuffixContainsQuery {
 
 /// Run the SFX walk and return (doc_tf, highlights).
 /// Shared between prescan() and scorer() fallback.
-fn run_sfx_walk<F>(
+pub fn run_sfx_walk<F>(
     sfx_reader: &SfxFileReader<'_>,
     resolver: &F,
     query_text: &str,
