@@ -186,6 +186,33 @@ fn time_sharded_query(handle: &ShardedHandle, config: &QueryConfig) -> (usize, f
     (results.len(), ms)
 }
 
+fn time_sharded_query_traced(handle: &ShardedHandle, config: &QueryConfig, label: &str) -> (usize, f64) {
+    let rx = luciole::subscribe_dag_events();
+    let t0 = Instant::now();
+    let results = handle.search(config, 20, None).unwrap();
+    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    eprintln!("\n  [TRACE] {} — total {:.1}ms", label, ms);
+    while let Some(event) = rx.try_recv() {
+        match event {
+            luciole::DagEvent::NodeCompleted { node, duration_ms, metrics, .. } => {
+                let metrics_str = metrics.iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect::<Vec<_>>().join(" ");
+                eprintln!("    {:20} {:>8.1}ms  {}", node, duration_ms, metrics_str);
+            }
+            luciole::DagEvent::LevelCompleted { level, duration_ms, .. } => {
+                eprintln!("    --- level {} --- {:>8.1}ms", level, duration_ms);
+            }
+            luciole::DagEvent::DagCompleted { total_ms, .. } => {
+                eprintln!("    === DAG total === {:>6.1}ms", total_ms);
+            }
+            _ => {}
+        }
+    }
+    (results.len(), ms)
+}
+
 // ─── Main bench ────────────────────────────────────────────────────────────
 
 #[test]
@@ -254,13 +281,25 @@ fn bench_sharding_comparison() {
     // ── Queries ─────────────────────────────────────────────────────────
 
     let queries: Vec<(&str, QueryConfig)> = vec![
-        ("contains 'mutex_lock'", QueryConfig {
+        ("contains 'mutex_lock' [1]", QueryConfig {
             query_type: "contains".into(),
             field: Some("content".into()),
             value: Some("mutex_lock".into()),
             ..Default::default()
         }),
         ("contains 'function'", QueryConfig {
+            query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some("function".into()),
+            ..Default::default()
+        }),
+        ("contains 'mutex_lock' [2]", QueryConfig {
+            query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some("mutex_lock".into()),
+            ..Default::default()
+        }),
+        ("contains 'function' [dup]", QueryConfig {
             query_type: "contains".into(),
             field: Some("content".into()),
             value: Some("function".into()),
@@ -316,6 +355,17 @@ fn bench_sharding_comparison() {
 
     eprintln!("{:<35} {:>6} {:>10} {:>10} {:>10}", "Query", "Hits", "1-shard", "TA-4sh", "RR-4sh");
     eprintln!("{}", "-".repeat(75));
+
+    // Traced run: one per query on RR to see per-node timing
+    if do_rr {
+        eprintln!("\n=== DAG node timing (one run per query) ===");
+        for (label, config) in &queries {
+            if let Some(ref s) = sharded_rr {
+                let _ = time_sharded_query_traced(s, config, label);
+            }
+        }
+        eprintln!();
+    }
 
     for (label, config) in &queries {
         // Warm up
@@ -473,104 +523,34 @@ fn bench_sharding_comparison() {
             }
         }
 
-        // SFX path diagnostic: trace prefix_walk → parents → sfxpost → doc_ids
-        eprintln!("\n=== Real search vs ground truth (via DiagBus) ===");
+        // SFX search vs ground truth (direct Count collector)
+        eprintln!("\n=== Real search vs ground truth ===");
         for term in &["mutex", "lock", "function", "printk", "sched"] {
-            // Subscribe to search events BEFORE the search
-            let rx = ld_lucivy::diag::diag_bus().subscribe(
-                ld_lucivy::diag::DiagFilter::SfxTerm(term.to_string()),
-            );
-
-            // Run the real search via each shard
+            let mut total_search = 0usize;
             for shard_idx in 0..4 {
                 if let Some(shard) = handle.shard(shard_idx) {
                     let searcher = shard.reader.searcher();
                     let field = shard.field("content").unwrap();
                     let q = ld_lucivy::query::SuffixContainsQuery::new(
                         field, term.to_string(),
-                    ).with_continuation(true);
-                    let _ = searcher.search(&q, &ld_lucivy::collector::Count);
+                    );
+                    total_search += searcher.search(&q, &ld_lucivy::collector::Count).unwrap_or(0);
                 }
             }
-
-            // Collect totals from SearchComplete events (one per segment)
-            let mut total_search = 0u32;
-            while let Ok(event) = rx.try_recv() {
-                if let ld_lucivy::diag::DiagEvent::SearchComplete { total_docs, .. } = event {
-                    total_search += total_docs;
-                }
-            }
-
-            ld_lucivy::diag::diag_bus().clear();
 
             // Compare with ground truth
             let gt_status = if verify {
                 let gt_reports = lucivy_core::diagnostics::inspect_term_sharded_verified(handle, "content", term);
                 let gt: u32 = gt_reports.iter().map(|(_, r)| r.ground_truth_count.unwrap_or(0)).sum();
-                if total_search == gt { format!(" | ground_truth={gt} ✓ MATCH") }
+                if total_search as u32 == gt { format!(" | ground_truth={gt} ✓ MATCH") }
                 else { format!(" | ground_truth={gt} ✗ DIFF={}", (gt as i64 - total_search as i64).abs()) }
             } else { String::new() };
             eprintln!("\n  search {:?}: {} docs{}", term, total_search, gt_status);
         }
 
-        // Trace missing docs for terms with DIFF
-        if verify {
-            eprintln!("\n=== Missing docs trace ===");
-            for term in &["sched", "lock"] {
-              for shard_idx in 0..4 {
-                // Use trace_search on missing docs
-                if let Some(shard) = handle.shard(shard_idx) {
-                    let searcher = shard.reader.searcher();
-                    let field = shard.field("content").unwrap();
-                    let search_lower = term.to_lowercase();
-
-                    // Collect search doc_ids via DiagBus
-                    let rx = ld_lucivy::diag::diag_bus().subscribe(
-                        ld_lucivy::diag::DiagFilter::SfxTerm(term.to_string()),
-                    );
-                    let q = ld_lucivy::query::SuffixContainsQuery::new(field, term.to_string());
-                    let _ = searcher.search(&q, &ld_lucivy::collector::Count);
-                    let mut search_docs = std::collections::HashSet::new();
-                    while let Ok(event) = rx.try_recv() {
-                        if let ld_lucivy::diag::DiagEvent::SearchMatch { doc_id, .. } = event {
-                            search_docs.insert(doc_id);
-                        }
-                    }
-                    ld_lucivy::diag::diag_bus().clear();
-
-                    // Find ground truth docs NOT in search results, trace first 2
-                    let mut traced = 0;
-                    for sr in searcher.segment_readers() {
-                        if let Ok(store) = sr.get_store_reader(0) {
-                            for did in 0..sr.max_doc() {
-                                if sr.alive_bitset().map_or(true, |bs| bs.is_alive(did)) {
-                                    if let Ok(doc) = store.get::<ld_lucivy::LucivyDocument>(did) {
-                                        for (f, val) in doc.field_values() {
-                                            if f == field {
-                                                use ld_lucivy::schema::document::Value;
-                                                if let Some(text) = val.as_value().as_str() {
-                                                    if text.to_lowercase().contains(&search_lower) && !search_docs.contains(&did) {
-                                                        if traced < 2 {
-                                                            let trace = lucivy_core::diagnostics::trace_search(shard, "content", term, did);
-                                                            eprintln!("\n{}", trace);
-                                                            traced += 1;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if traced == 0 {
-                        eprintln!("  {:?}: no missing docs in shard {}", term, shard_idx);
-                    }
-                }
-              } // end shard loop
-            }
-        }
+        // Missing docs trace removed — was using DiagBus which doesn't emit
+        // SearchMatch events from the scorer path. If ground truth shows DIFF,
+        // use lucivy_core::diagnostics::trace_search() directly.
     } } // if verify + if let Some(handle)
 
     // ── Summary ─────────────────────────────────────────────────────────

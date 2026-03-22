@@ -62,7 +62,7 @@ pub use self::phrase_query::suffix_contains_query::{SuffixContainsQuery, SfxCach
 pub use self::phrase_query::suffix_contains::RawPostingEntry;
 pub use self::phrase_query::PhraseQuery;
 pub use self::posting_resolver::{PostingResolver, PostingEntry, SfxPostResolver, build_resolver};
-pub use self::query::{EnableScoring, Query, QueryClone};
+pub use self::query::{EnableScoring, Query, QueryClone, SfxPrescanParam};
 pub use self::query_parser::{QueryParser, QueryParserError};
 pub use self::range_query::*;
 pub use self::regex_query::RegexQuery;

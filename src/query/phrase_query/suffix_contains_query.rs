@@ -354,6 +354,16 @@ impl Query for SuffixContainsQuery {
         }
     }
 
+    fn sfx_prescan_params(&self) -> Vec<crate::query::SfxPrescanParam> {
+        vec![crate::query::SfxPrescanParam {
+            field: self.raw_field,
+            query_text: self.query_text.clone(),
+            prefix_only: self.prefix_only,
+            fuzzy_distance: self.fuzzy_distance,
+            continuation: self.continuation,
+        }]
+    }
+
     fn weight(&self, enable_scoring: EnableScoring) -> crate::Result<Box<dyn Weight>> {
         let (scoring_enabled, global_num_docs, global_num_tokens) = match &enable_scoring {
             EnableScoring::Enabled { statistics_provider, .. } => {

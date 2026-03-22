@@ -1,13 +1,14 @@
 //! DAG-based search orchestration for sharded indexes.
 //!
 //! ```text
-//! drain ── flush ── build_weight ──┬── search_shard_0 ──┐
-//!                                  ├── search_shard_1 ──┼── merge_results
-//!                                  └── search_shard_2 ──┘
+//! drain ── flush ──┬── prescan_0 ──┐                    ┌── search_0 ──┐
+//!                  ├── prescan_1 ──┼── merge_prescan ── build_weight ──┼── search_1 ──┼── merge
+//!                  └── prescan_2 ──┘                    └── search_2 ──┘
 //! ```
 //!
-//! BuildWeightNode does parallel prescan (one thread per shard) for globally
-//! consistent BM25 contains/startsWith scoring.
+//! Prescan nodes run SFX walks in parallel (one per shard) for globally
+//! consistent BM25 contains/startsWith scoring. For non-SFX query types
+//! (term, phrase, regex, fuzzy) the prescan nodes are no-ops.
 
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
@@ -24,6 +25,12 @@ use crate::bm25_global::AggregatedBm25StatsOwned;
 use crate::handle::LucivyHandle;
 use crate::query::QueryConfig;
 use crate::sharded_handle::{ShardMsg, ShardedSearchResult, ScoredEntry};
+
+/// Prescan result from one shard: (segment_id → cached SFX results, query_text → doc_freq).
+type PrescanResult = (
+    HashMap<ld_lucivy::index::SegmentId, ld_lucivy::query::CachedSfxResult>,
+    HashMap<String, u64>,
+);
 
 // ---------------------------------------------------------------------------
 // DrainNode — flush ingestion pipeline
@@ -102,7 +109,142 @@ impl Node for FlushNode {
 }
 
 // ---------------------------------------------------------------------------
-// BuildWeightNode — parallel prescan + compile Weight with global stats
+// PrescanShardNode — SFX walk on one shard's segments (parallel per shard)
+// ---------------------------------------------------------------------------
+
+pub(crate) struct PrescanShardNode {
+    shard: Arc<LucivyHandle>,
+    prescan_params: Vec<ld_lucivy::query::SfxPrescanParam>,
+}
+
+impl PrescanShardNode {
+    pub fn new(
+        shard: Arc<LucivyHandle>,
+        prescan_params: Vec<ld_lucivy::query::SfxPrescanParam>,
+    ) -> Self {
+        Self { shard, prescan_params }
+    }
+}
+
+impl Node for PrescanShardNode {
+    fn node_type(&self) -> &'static str { "prescan_shard" }
+    fn inputs(&self) -> Vec<PortDef> {
+        vec![PortDef::trigger("trigger")]
+    }
+    fn outputs(&self) -> Vec<PortDef> {
+        vec![PortDef::required("prescan", PortType::of::<PrescanResult>())]
+    }
+    fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+        if self.prescan_params.is_empty() {
+            ctx.set_output("prescan", PortValue::new(
+                (HashMap::new(), HashMap::new()) as PrescanResult,
+            ));
+            return Ok(());
+        }
+
+        use ld_lucivy::query::{
+            run_sfx_walk, tokenize_query, CachedSfxResult, RawPostingEntry,
+            build_resolver,
+        };
+        use ld_lucivy::suffix_fst::file::SfxFileReader;
+
+        let searcher = self.shard.reader.searcher();
+        let mut cache = HashMap::new();
+        let mut freqs: HashMap<String, u64> = HashMap::new();
+
+        for seg_reader in searcher.segment_readers() {
+            for param in &self.prescan_params {
+                let sfx_data = match seg_reader.sfx_file(param.field) {
+                    Some(d) => d,
+                    None => continue,
+                };
+                let sfx_bytes = sfx_data.read_bytes()
+                    .map_err(|e| format!("read sfx: {e}"))?;
+                let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
+                    .map_err(|e| format!("open sfx: {e}"))?;
+
+                let pr = build_resolver(seg_reader, param.field)
+                    .map_err(|e| format!("resolver: {e}"))?;
+                let resolver = |ord: u64| -> Vec<RawPostingEntry> {
+                    pr.resolve(ord).into_iter().map(|e| {
+                        RawPostingEntry {
+                            doc_id: e.doc_id, token_index: e.position,
+                            byte_from: e.byte_from, byte_to: e.byte_to,
+                        }
+                    }).collect()
+                };
+
+                let (tokens, seps) = tokenize_query(&param.query_text);
+                let (doc_tf, highlights) = run_sfx_walk(
+                    &sfx_reader, &resolver, &param.query_text,
+                    &tokens, &seps,
+                    param.fuzzy_distance, param.prefix_only, param.continuation,
+                );
+
+                *freqs.entry(param.query_text.clone()).or_insert(0) += doc_tf.len() as u64;
+                if !doc_tf.is_empty() {
+                    cache.insert(seg_reader.segment_id(), CachedSfxResult::new(doc_tf, highlights));
+                }
+            }
+        }
+
+        ctx.metric("segments_scanned", cache.len() as f64);
+        ctx.set_output("prescan", PortValue::new((cache, freqs) as PrescanResult));
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MergePrescanNode — aggregate prescan results from all shards
+// ---------------------------------------------------------------------------
+
+pub(crate) struct MergePrescanNode {
+    num_shards: usize,
+}
+
+impl MergePrescanNode {
+    pub fn new(num_shards: usize) -> Self {
+        Self { num_shards }
+    }
+}
+
+impl Node for MergePrescanNode {
+    fn node_type(&self) -> &'static str { "merge_prescan" }
+    fn inputs(&self) -> Vec<PortDef> {
+        (0..self.num_shards)
+            .map(|i| PortDef::required(
+                Box::leak(format!("prescan_{i}").into_boxed_str()),
+                PortType::of::<PrescanResult>(),
+            ))
+            .collect()
+    }
+    fn outputs(&self) -> Vec<PortDef> {
+        vec![PortDef::required("merged", PortType::of::<PrescanResult>())]
+    }
+    fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+        let mut merged_cache = HashMap::new();
+        let mut merged_freqs: HashMap<String, u64> = HashMap::new();
+
+        for i in 0..self.num_shards {
+            let port = format!("prescan_{i}");
+            if let Some(value) = ctx.take_input(&port) {
+                if let Some((cache, freqs)) = value.take::<PrescanResult>() {
+                    merged_cache.extend(cache);
+                    for (key, freq) in freqs {
+                        *merged_freqs.entry(key).or_insert(0) += freq;
+                    }
+                }
+            }
+        }
+
+        ctx.metric("total_segments", merged_cache.len() as f64);
+        ctx.set_output("merged", PortValue::new((merged_cache, merged_freqs) as PrescanResult));
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BuildWeightNode — compile Weight with prescan results + global stats
 // ---------------------------------------------------------------------------
 
 pub(crate) struct BuildWeightNode {
@@ -128,7 +270,7 @@ impl BuildWeightNode {
 impl Node for BuildWeightNode {
     fn node_type(&self) -> &'static str { "build_weight" }
     fn inputs(&self) -> Vec<PortDef> {
-        vec![PortDef::trigger("trigger")]
+        vec![PortDef::required("prescan", PortType::of::<PrescanResult>())]
     }
     fn outputs(&self) -> Vec<PortDef> {
         vec![PortDef::required("weight", PortType::of::<Arc<dyn Weight>>())]
@@ -137,102 +279,10 @@ impl Node for BuildWeightNode {
         let searchers: Vec<_> = self.shards.iter().map(|s| s.reader.searcher()).collect();
         let global_stats = AggregatedBm25StatsOwned::new(searchers);
 
-        // Extract contains/startsWith terms to prescan
-        let contains_terms = extract_contains_terms(&self.query_config);
-
-        // Resolve the field for SFX prescan
-        let raw_field = self.query_config.field.as_ref()
-            .and_then(|name| self.schema.get_field(name).ok());
-
-        // Collect segment readers per shard
-        let all_shard_segs: Vec<Vec<ld_lucivy::SegmentReader>> = self.shards.iter()
-            .map(|s| s.reader.searcher().segment_readers().to_vec())
-            .collect();
-
-        // Parallel prescan via scatter DAG (uses luciole scheduler, no new threads)
-        let (merged_cache, merged_freqs) = if !contains_terms.is_empty() && raw_field.is_some() {
-            use ld_lucivy::query::{
-                run_sfx_walk, tokenize_query, CachedSfxResult, RawPostingEntry,
-                build_resolver,
-            };
-            use ld_lucivy::suffix_fst::file::SfxFileReader;
-
-            let field = raw_field.unwrap();
-
-            // Build scatter tasks: one per shard
-            type PrescanResult = (HashMap<ld_lucivy::index::SegmentId, CachedSfxResult>, HashMap<String, u64>);
-            let tasks: Vec<(&str, _)> = all_shard_segs.into_iter().enumerate()
-                .map(|(i, shard_segs)| {
-                    let name: &str = Box::leak(format!("prescan_{i}").into_boxed_str());
-                    let terms = contains_terms.clone();
-                    let f = move || -> Result<luciole::PortValue, String> {
-                        let mut cache = HashMap::new();
-                        let mut freqs: HashMap<String, u64> = HashMap::new();
-
-                        for seg_reader in &shard_segs {
-                            let sfx_data = match seg_reader.sfx_file(field) {
-                                Some(d) => d,
-                                None => continue,
-                            };
-                            let sfx_bytes = sfx_data.read_bytes()
-                                .map_err(|e| format!("read sfx: {e}"))?;
-                            let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
-                                .map_err(|e| format!("open sfx: {e}"))?;
-
-                            let pr = build_resolver(seg_reader, field)
-                                .map_err(|e| format!("resolver: {e}"))?;
-                            let resolver = |ord: u64| -> Vec<RawPostingEntry> {
-                                pr.resolve(ord).into_iter().map(|e| {
-                                    RawPostingEntry {
-                                        doc_id: e.doc_id, token_index: e.position,
-                                        byte_from: e.byte_from, byte_to: e.byte_to,
-                                    }
-                                }).collect()
-                            };
-
-                            for (query_text, prefix_only, fuzzy_d, continuation) in &terms {
-                                let (tokens, seps) = tokenize_query(query_text);
-                                let (doc_tf, highlights) = run_sfx_walk(
-                                    &sfx_reader, &resolver, query_text,
-                                    &tokens, &seps,
-                                    *fuzzy_d, *prefix_only, *continuation,
-                                );
-
-                                *freqs.entry(query_text.clone()).or_insert(0) += doc_tf.len() as u64;
-                                if !doc_tf.is_empty() {
-                                    cache.insert(seg_reader.segment_id(), CachedSfxResult::new(doc_tf, highlights));
-                                }
-                            }
-                        }
-                        Ok(luciole::PortValue::new((cache, freqs)))
-                    };
-                    (name, f)
-                })
-                .collect();
-
-            // Execute scatter DAG on the luciole scheduler (parallel, no new threads)
-            let mut scatter_dag = luciole::scatter::build_scatter_dag(tasks);
-            let mut scatter_result = luciole::execute_dag(&mut scatter_dag, None)
-                .map_err(|e| format!("prescan scatter: {e}"))?;
-
-            let scatter_map = scatter_result
-                .take_output::<HashMap<String, luciole::PortValue>>("collect", "results")
-                .ok_or("prescan: no scatter results")?;
-
-            let mut mc: HashMap<ld_lucivy::index::SegmentId, CachedSfxResult> = HashMap::new();
-            let mut mf: HashMap<String, u64> = HashMap::new();
-            for (_name, pv) in scatter_map {
-                if let Some((cache, freqs)) = pv.take::<PrescanResult>() {
-                    mc.extend(cache);
-                    for (key, freq) in freqs {
-                        *mf.entry(key).or_insert(0) += freq;
-                    }
-                }
-            }
-            (mc, mf)
-        } else {
-            (HashMap::new(), HashMap::new())
-        };
+        // Get prescan results from merge_prescan node
+        let (merged_cache, merged_freqs) = ctx.take_input("prescan")
+            .and_then(|v| v.take::<PrescanResult>())
+            .unwrap_or_default();
 
         // Build query once (with highlights)
         let mut query = crate::query::build_query(
@@ -261,43 +311,8 @@ impl Node for BuildWeightNode {
     }
 }
 
-/* OLD sequential fallback (correct but no sharding benefit):
-   query.prescan_segments(&all_seg_readers); // sequential, all shards
-   query.weight(enable_scoring); // reads cache
-*/
-
-/// Extract contains/startsWith terms from a query config for prescan.
-/// Returns (query_text, prefix_only, fuzzy_distance, continuation).
-fn extract_contains_terms(config: &QueryConfig) -> Vec<(String, bool, u8, bool)> {
-    match config.query_type.as_str() {
-        "contains" | "sfx_contains" => {
-            if config.regex.unwrap_or(false) { return vec![]; } // regex uses different path
-            config.value.as_ref().map(|v| {
-                vec![(v.to_lowercase(), false, config.distance.unwrap_or(0), true)]
-            }).unwrap_or_default()
-        }
-        "startsWith" => {
-            config.value.as_ref().map(|v| {
-                vec![(v.to_lowercase(), true, config.distance.unwrap_or(0), false)]
-            }).unwrap_or_default()
-        }
-        "contains_split" | "sfx_contains_split" => {
-            config.value.as_ref().map(|v| {
-                v.split_whitespace()
-                    .map(|w| (w.to_lowercase(), false, config.distance.unwrap_or(0), true))
-                    .collect()
-            }).unwrap_or_default()
-        }
-        "startsWith_split" => {
-            config.value.as_ref().map(|v| {
-                v.split_whitespace()
-                    .map(|w| (w.to_lowercase(), true, config.distance.unwrap_or(0), false))
-                    .collect()
-            }).unwrap_or_default()
-        }
-        _ => vec![], // term, phrase, regex, fuzzy — no SFX prescan
-    }
-}
+// extract_contains_terms removed — prescan params are now derived from the
+// built query via sfx_prescan_params(), so there's a single source of truth.
 
 // ---------------------------------------------------------------------------
 // SearchShardNode — execute weight on one shard (via shard pool)
@@ -421,9 +436,39 @@ pub(crate) fn build_search_dag(
     let mut dag = Dag::new();
     let num_shards = shards.len();
 
-    // drain → flush → build_weight
+    // Build the query once to extract prescan params (single source of truth).
+    // The query is built again in BuildWeightNode with the same config, but
+    // this ensures prescan uses the exact same field/continuation/fuzzy settings.
+    let probe_query = crate::query::build_query(
+        query_config, schema, &shards[0].index, None,
+    )?;
+    let prescan_params = probe_query.sfx_prescan_params();
+
+    // drain → flush
     dag.add_node("drain", DrainNode::new(reader_pool.clone(), router_ref.clone()));
     dag.add_node("flush", FlushNode::new(shards.to_vec(), shard_pool.clone()));
+    dag.connect("drain", "done", "flush", "trigger")?;
+
+    // flush → prescan_0..N ∥ (parallel SFX walks per shard)
+    for i in 0..num_shards {
+        let node_name = format!("prescan_{i}");
+        dag.add_node(&node_name, PrescanShardNode::new(
+            shards[i].clone(),
+            prescan_params.clone(),
+        ));
+        dag.connect("flush", "done", &node_name, "trigger")?;
+    }
+
+    // prescan_0..N → merge_prescan
+    dag.add_node("merge_prescan", MergePrescanNode::new(num_shards));
+    for i in 0..num_shards {
+        dag.connect(
+            &format!("prescan_{i}"), "prescan",
+            "merge_prescan", &format!("prescan_{i}"),
+        )?;
+    }
+
+    // merge_prescan → build_weight
     dag.add_node("build_weight", BuildWeightNode::new(
         shards.to_vec(),
         schema.clone(),
@@ -431,24 +476,23 @@ pub(crate) fn build_search_dag(
         query_config.clone(),
         highlight_sink,
     ));
-    dag.connect("drain", "done", "flush", "trigger")?;
-    dag.connect("flush", "done", "build_weight", "trigger")?;
+    dag.connect("merge_prescan", "merged", "build_weight", "prescan")?;
 
-    // Parallel search shards
+    // build_weight → search_0..N ∥ (parallel search per shard)
     for i in 0..num_shards {
         dag.add_node(
-            &format!("search_{}", i),
+            &format!("search_{i}"),
             SearchShardNode::new(shard_pool.clone(), i, top_k),
         );
-        dag.connect("build_weight", "weight", &format!("search_{}", i), "weight")?;
+        dag.connect("build_weight", "weight", &format!("search_{i}"), "weight")?;
     }
 
-    // Merge results
+    // search_0..N → merge_results
     dag.add_node("merge", MergeResultsNode::new(num_shards, top_k));
     for i in 0..num_shards {
         dag.connect(
-            &format!("search_{}", i), "hits",
-            "merge", &format!("hits_{}", i),
+            &format!("search_{i}"), "hits",
+            "merge", &format!("hits_{i}"),
         )?;
     }
 

@@ -204,6 +204,29 @@ pub trait Query: QueryClone + Send + Sync + downcast_rs::Downcast + fmt::Debug {
         _cache: std::collections::HashMap<crate::index::SegmentId, crate::query::phrase_query::suffix_contains_query::CachedSfxResult>,
     ) {
     }
+
+    /// Return SFX prescan parameters needed by this query.
+    /// Used by the search DAG to run prescan nodes with the exact same
+    /// parameters as the query itself — no duplication, no mismatch.
+    /// SuffixContainsQuery returns its own params. BooleanQuery aggregates.
+    /// Default: empty (no SFX prescan needed).
+    fn sfx_prescan_params(&self) -> Vec<SfxPrescanParam> { vec![] }
+}
+
+/// Parameters for an SFX prescan walk, extracted from a built query.
+/// Ensures the prescan uses the exact same settings as the query's scorer.
+#[derive(Clone, Debug)]
+pub struct SfxPrescanParam {
+    /// The field to prescan.
+    pub field: crate::schema::Field,
+    /// The query text (lowercased).
+    pub query_text: String,
+    /// If true, only match SI=0 (prefix/startsWith mode).
+    pub prefix_only: bool,
+    /// Fuzzy Levenshtein distance (0 = exact).
+    pub fuzzy_distance: u8,
+    /// If true, use continuation DFA for cross-token matching.
+    pub continuation: bool,
 }
 
 /// Implements `box_clone`.
@@ -231,6 +254,36 @@ impl Query for Box<dyn Query> {
 
     fn query_terms<'a>(&'a self, visitor: &mut dyn FnMut(&'a Term, bool)) {
         self.as_ref().query_terms(visitor);
+    }
+
+    fn prescan_segments(&mut self, segments: &[&crate::SegmentReader]) -> crate::Result<()> {
+        self.as_mut().prescan_segments(segments)
+    }
+
+    fn collect_prescan_doc_freqs(&self, out: &mut std::collections::HashMap<String, u64>) {
+        self.as_ref().collect_prescan_doc_freqs(out)
+    }
+
+    fn set_global_contains_doc_freqs(&mut self, freqs: &std::collections::HashMap<String, u64>) {
+        self.as_mut().set_global_contains_doc_freqs(freqs)
+    }
+
+    fn take_prescan_cache(
+        &mut self,
+        out: &mut std::collections::HashMap<crate::index::SegmentId, crate::query::phrase_query::suffix_contains_query::CachedSfxResult>,
+    ) {
+        self.as_mut().take_prescan_cache(out)
+    }
+
+    fn inject_prescan_cache(
+        &mut self,
+        cache: std::collections::HashMap<crate::index::SegmentId, crate::query::phrase_query::suffix_contains_query::CachedSfxResult>,
+    ) {
+        self.as_mut().inject_prescan_cache(cache)
+    }
+
+    fn sfx_prescan_params(&self) -> Vec<SfxPrescanParam> {
+        self.as_ref().sfx_prescan_params()
     }
 }
 

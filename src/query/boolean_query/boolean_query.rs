@@ -211,6 +211,12 @@ impl Query for BooleanQuery {
             subquery.inject_prescan_cache(cache.clone());
         }
     }
+
+    fn sfx_prescan_params(&self) -> Vec<crate::query::SfxPrescanParam> {
+        self.subqueries.iter()
+            .flat_map(|(_, subquery)| subquery.sfx_prescan_params())
+            .collect()
+    }
 }
 
 impl BooleanQuery {
