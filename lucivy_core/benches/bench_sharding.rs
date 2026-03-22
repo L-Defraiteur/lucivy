@@ -572,3 +572,296 @@ fn bench_sharding_comparison() {
     // Keep the index for post-mortem inspection
     eprintln!("\n=== Index preserved at {} ===", BENCH_BASE);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Ground truth exhaustive: reuse persisted index, test all query variants
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Ground truth: count docs containing `needle` (case-insensitive) across all shards.
+fn ground_truth_substring(handle: &ShardedHandle, field_name: &str, needle: &str) -> usize {
+    let needle_lower = needle.to_lowercase();
+    let mut count = 0usize;
+    for shard_idx in 0..handle.num_shards() {
+        let shard = handle.shard(shard_idx).unwrap();
+        let searcher = shard.reader.searcher();
+        let field = shard.field(field_name).unwrap();
+        for sr in searcher.segment_readers() {
+            if let Ok(store) = sr.get_store_reader(0) {
+                for did in 0..sr.max_doc() {
+                    if sr.alive_bitset().map_or(true, |bs| bs.is_alive(did)) {
+                        if let Ok(doc) = store.get::<ld_lucivy::LucivyDocument>(did) {
+                            for (f, val) in doc.field_values() {
+                                if f == field {
+                                    use ld_lucivy::schema::document::Value;
+                                    if let Some(text) = val.as_value().as_str() {
+                                        if text.to_lowercase().contains(&needle_lower) {
+                                            count += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
+/// Ground truth: count docs where any token STARTS with `prefix` (case-insensitive).
+fn ground_truth_starts_with(handle: &ShardedHandle, field_name: &str, prefix: &str) -> usize {
+    let prefix_lower = prefix.to_lowercase();
+    let mut count = 0usize;
+    for shard_idx in 0..handle.num_shards() {
+        let shard = handle.shard(shard_idx).unwrap();
+        let searcher = shard.reader.searcher();
+        let field = shard.field(field_name).unwrap();
+        for sr in searcher.segment_readers() {
+            if let Ok(store) = sr.get_store_reader(0) {
+                for did in 0..sr.max_doc() {
+                    if sr.alive_bitset().map_or(true, |bs| bs.is_alive(did)) {
+                        if let Ok(doc) = store.get::<ld_lucivy::LucivyDocument>(did) {
+                            for (f, val) in doc.field_values() {
+                                if f == field {
+                                    use ld_lucivy::schema::document::Value;
+                                    if let Some(text) = val.as_value().as_str() {
+                                        // Tokenize like SimpleTokenizer: split on non-alphanumeric
+                                        let has_match = text.to_lowercase()
+                                            .split(|c: char| !c.is_alphanumeric() && c != '_')
+                                            .any(|tok| tok.starts_with(&prefix_lower));
+                                        if has_match {
+                                            count += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
+/// Search count via ShardedHandle DAG (the real search path).
+fn search_count(handle: &ShardedHandle, config: &QueryConfig) -> usize {
+    handle.search(config, 100_000, None).unwrap().len()
+}
+
+/// Search with highlights + stored text snippets. Returns (count, snippet_lines).
+fn search_with_snippets(
+    handle: &ShardedHandle, config: &QueryConfig, top_k: usize, context_chars: usize,
+) -> (usize, Vec<String>) {
+    let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
+    let results = handle.search(config, top_k, Some(Arc::clone(&sink))).unwrap();
+    let count = results.len();
+    let field_name = config.field.as_deref().unwrap_or("content");
+
+    let mut lines = Vec::new();
+    for r in &results {
+        let shard = handle.shard(r.shard_id).unwrap();
+        let searcher = shard.reader.searcher();
+        let seg_reader = searcher.segment_reader(r.doc_address.segment_ord);
+        let seg_id = seg_reader.segment_id();
+
+        // Get stored text
+        let stored_text = searcher.doc::<ld_lucivy::LucivyDocument>(r.doc_address).ok()
+            .and_then(|doc| {
+                let field = handle.field(field_name)?;
+                doc.field_values()
+                    .find(|(f, _)| *f == field)
+                    .and_then(|(_, v)| {
+                        use ld_lucivy::schema::document::Value;
+                        v.as_value().as_str().map(|s| s.to_string())
+                    })
+            });
+
+        let highlights = sink.get(seg_id, r.doc_address.doc_id);
+
+        let snippet = if let (Some(text), Some(hl_map)) = (&stored_text, &highlights) {
+            if let Some(offsets) = hl_map.get(field_name) {
+                if let Some([s, e]) = offsets.first() {
+                    // Clamp to char boundaries
+                    let clamp = |pos: usize| -> usize {
+                        let mut p = pos.min(text.len());
+                        while p > 0 && !text.is_char_boundary(p) { p -= 1; }
+                        p
+                    };
+                    let cs = clamp(s.saturating_sub(context_chars));
+                    let hs = clamp(*s);
+                    let he = clamp(*e);
+                    let ce = clamp((*e + context_chars).min(text.len()));
+                    let before = text[cs..hs].replace('\n', " ");
+                    let matched = text[hs..he].replace('\n', " ");
+                    let after = text[he..ce].replace('\n', " ");
+                    format!("...{}«{}»{}...", before.trim(), matched, after.trim())
+                } else {
+                    "(no offsets)".into()
+                }
+            } else {
+                "(no field highlights)".into()
+            }
+        } else {
+            "(no stored text)".into()
+        };
+
+        lines.push(format!("  [{:>2}] score={:.4}  {}", r.shard_id, r.score, snippet));
+    }
+    (count, lines)
+}
+
+/// Search count via direct SuffixContainsQuery on each shard (bypasses DAG).
+fn search_count_direct(handle: &ShardedHandle, field_name: &str, term: &str) -> usize {
+    let mut total = 0;
+    for shard_idx in 0..handle.num_shards() {
+        let shard = handle.shard(shard_idx).unwrap();
+        let searcher = shard.reader.searcher();
+        let field = shard.field(field_name).unwrap();
+        let q = ld_lucivy::query::SuffixContainsQuery::new(field, term.to_string());
+        total += searcher.search(&q, &ld_lucivy::collector::Count).unwrap_or(0);
+    }
+    total
+}
+
+#[test]
+fn ground_truth_exhaustive() {
+    let index_dir = format!("{}/round_robin", BENCH_BASE);
+    if !std::path::Path::new(&index_dir).exists() {
+        eprintln!("Skipping: no persisted index at {}", index_dir);
+        eprintln!("Run the main bench first: MAX_DOCS=90000 cargo test ...");
+        return;
+    }
+
+    let handle = ShardedHandle::open(&index_dir).unwrap();
+    let num_docs = handle.num_docs();
+    eprintln!("\n=== Ground truth exhaustive on {} docs ===\n", num_docs);
+
+    let terms = &["mutex", "lock", "function", "printk", "sched", "device", "error"];
+    let mut pass = 0u32;
+    let mut fail = 0u32;
+
+    let show_top = 3; // snippets to display per query variant
+
+    for term in terms {
+        eprintln!("--- term: {:?} ---", term);
+
+        // 1. contains (substring match)
+        let gt_contains = ground_truth_substring(&handle, "content", term);
+        let contains_cfg = QueryConfig {
+            query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some(term.to_string()),
+            ..Default::default()
+        };
+        let search_contains = search_count(&handle, &contains_cfg);
+        let (_, snippets) = search_with_snippets(&handle, &contains_cfg, 20, 60);
+        let direct_contains = search_count_direct(&handle, "content", term);
+        let status_dag = if search_contains == gt_contains { pass += 1; "MATCH" } else { fail += 1; "FAIL" };
+        let status_direct = if direct_contains == gt_contains { pass += 1; "MATCH" } else { fail += 1; "FAIL" };
+        eprintln!("  contains DAG:    {:>6} vs gt {:>6}  {}", search_contains, gt_contains, status_dag);
+        eprintln!("  contains direct: {:>6} vs gt {:>6}  {}", direct_contains, gt_contains, status_direct);
+        for s in snippets.iter().take(show_top) { eprintln!("{}", s); }
+
+        // 2. startsWith (token prefix match)
+        let starts_cfg = QueryConfig {
+            query_type: "startsWith".into(),
+            field: Some("content".into()),
+            value: Some(term.to_string()),
+            ..Default::default()
+        };
+        let search_starts = search_count(&handle, &starts_cfg);
+        let (_, snippets) = search_with_snippets(&handle, &starts_cfg, 20, 60);
+        let gt_starts = ground_truth_starts_with(&handle, "content", term);
+        let status = if search_starts >= gt_starts { pass += 1; "OK (≥ gt)" } else { fail += 1; "FAIL (< gt!)" };
+        eprintln!("  startsWith DAG:  {:>6} vs gt {:>6}  {}", search_starts, gt_starts, status);
+        for s in snippets.iter().take(show_top) { eprintln!("{}", s); }
+
+        // 3. fuzzy d=1 contains
+        let fuzzy1_cfg = QueryConfig {
+            query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some(term.to_string()),
+            distance: Some(1),
+            ..Default::default()
+        };
+        let search_fuzzy1 = search_count(&handle, &fuzzy1_cfg);
+        let (_, snippets) = search_with_snippets(&handle, &fuzzy1_cfg, 20, 60);
+        let status = if search_fuzzy1 >= search_contains { pass += 1; "OK (≥ exact)" } else { fail += 1; "FAIL (< exact!)" };
+        eprintln!("  fuzzy d=1 DAG:   {:>6} vs exact {:>6}  {}", search_fuzzy1, search_contains, status);
+        for s in snippets.iter().take(show_top) { eprintln!("{}", s); }
+
+        // 4. fuzzy d=2 contains
+        let fuzzy2_cfg = QueryConfig {
+            query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some(term.to_string()),
+            distance: Some(2),
+            ..Default::default()
+        };
+        let search_fuzzy2 = search_count(&handle, &fuzzy2_cfg);
+        let (_, snippets) = search_with_snippets(&handle, &fuzzy2_cfg, 20, 60);
+        let status = if search_fuzzy2 >= search_fuzzy1 { pass += 1; "OK (≥ d=1)" } else { fail += 1; "FAIL (< d=1!)" };
+        eprintln!("  fuzzy d=2 DAG:   {:>6} vs d=1 {:>6}  {}", search_fuzzy2, search_fuzzy1, status);
+        for s in snippets.iter().take(show_top) { eprintln!("{}", s); }
+
+        eprintln!();
+    }
+
+    // 5. contains_split ground truth
+    let split_terms = &[("struct device", "content"), ("mutex lock", "content")];
+    for (phrase, field) in split_terms {
+        eprintln!("--- contains_split: {:?} ---", phrase);
+        let words: Vec<&str> = phrase.split_whitespace().collect();
+
+        // Ground truth: doc contains ALL words as substrings
+        let gt = {
+            let mut count = 0usize;
+            for shard_idx in 0..handle.num_shards() {
+                let shard = handle.shard(shard_idx).unwrap();
+                let searcher = shard.reader.searcher();
+                let f = shard.field(field).unwrap();
+                for sr in searcher.segment_readers() {
+                    if let Ok(store) = sr.get_store_reader(0) {
+                        for did in 0..sr.max_doc() {
+                            if sr.alive_bitset().map_or(true, |bs| bs.is_alive(did)) {
+                                if let Ok(doc) = store.get::<ld_lucivy::LucivyDocument>(did) {
+                                    for (ff, val) in doc.field_values() {
+                                        if ff == f {
+                                            use ld_lucivy::schema::document::Value;
+                                            if let Some(text) = val.as_value().as_str() {
+                                                let lower = text.to_lowercase();
+                                                if words.iter().all(|w| lower.contains(&w.to_lowercase())) {
+                                                    count += 1;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            count
+        };
+
+        let split_cfg = QueryConfig {
+            query_type: "contains_split".into(),
+            field: Some(field.to_string()),
+            value: Some(phrase.to_string()),
+            ..Default::default()
+        };
+        let search = search_count(&handle, &split_cfg);
+        let (_, snippets) = search_with_snippets(&handle, &split_cfg, 20, 60);
+        // contains_split uses boolean SHOULD (OR), not AND — so search >= gt
+        let status = if search >= gt { pass += 1; "OK (≥ AND)" } else { fail += 1; "FAIL (< AND!)" };
+        eprintln!("  DAG:    {:>6} vs gt(AND) {:>6}  {}", search, gt, status);
+        for s in snippets.iter().take(show_top) { eprintln!("{}", s); }
+        eprintln!();
+    }
+
+    eprintln!("=== Results: {} pass, {} fail ===", pass, fail);
+    assert_eq!(fail, 0, "{} ground truth checks FAILED", fail);
+}
