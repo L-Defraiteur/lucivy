@@ -30,12 +30,28 @@ impl std::fmt::Debug for SfxCache {
 
 #[derive(Default)]
 pub struct SfxCache {
-    segments: Mutex<HashMap<SegmentId, CachedSfxResult>>,
-    /// After pass 1, stores the total doc_freq across all segments on this shard.
-    pub doc_freq_count: std::sync::atomic::AtomicU64,
+    /// Per-query, per-segment cached results.
+    /// Key: (query_text, segment_id) → cached SFX walk results.
+    segments: Mutex<HashMap<(String, SegmentId), CachedSfxResult>>,
+    /// Per-query doc_freq counts. Key: query_text → total doc_freq across segments.
+    doc_freq_counts: Mutex<HashMap<String, u64>>,
 }
 
-struct CachedSfxResult {
+impl SfxCache {
+    /// Get the doc_freq for a specific query term.
+    pub fn doc_freq_for(&self, query_text: &str) -> u64 {
+        self.doc_freq_counts.lock().unwrap()
+            .get(query_text).copied().unwrap_or(0)
+    }
+
+    /// Get the total doc_freq across all query terms (for single-term compat).
+    pub fn total_doc_freq(&self) -> u64 {
+        self.doc_freq_counts.lock().unwrap().values().sum()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CachedSfxResult {
     doc_tf: Vec<(DocId, u32)>,
     highlights: Vec<(DocId, usize, usize)>,
 }
@@ -108,10 +124,9 @@ pub struct SuffixContainsQuery {
     highlight_field_name: String,
     /// If true, use continuation DFA to match across token boundaries.
     continuation: bool,
-    /// Shared cache for two-pass scoring (count → score with global IDF).
-    sfx_cache: Option<Arc<SfxCache>>,
-    /// If set, use this as global doc_freq instead of per-segment doc_tf.len().
-    /// This is set in pass 2 after the coordinator has aggregated counts.
+    /// Pre-scanned cache from prescan() — keyed by SegmentId.
+    prescan_cache: Option<HashMap<SegmentId, CachedSfxResult>>,
+    /// Global doc_freq from prescan aggregation.
     global_doc_freq: Option<u64>,
 }
 
@@ -129,20 +144,68 @@ impl SuffixContainsQuery {
             highlight_sink: None,
             highlight_field_name: String::new(),
             continuation: false,
-            sfx_cache: None,
+            prescan_cache: None,
             global_doc_freq: None,
         }
     }
 
-    /// Attach a shared SFX cache for two-pass scoring.
-    /// Pass 1: SFX walk results are cached + doc_freq_count is accumulated.
-    /// Pass 2: cached results are reused with correct global IDF.
-    pub fn with_sfx_cache(mut self, cache: Arc<SfxCache>) -> Self {
-        self.sfx_cache = Some(cache);
+    /// Pre-scan segment readers: do the SFX walk, cache doc_tf, return doc_freq.
+    ///
+    /// Call this before weight(). Then pass the cache + aggregated doc_freq:
+    /// ```ignore
+    /// let (cache, doc_freq) = query.prescan(&segment_readers)?;
+    /// let query = query.with_prescan_cache(cache).with_global_doc_freq(doc_freq);
+    /// let weight = query.weight(enable_scoring)?;
+    /// ```
+    pub fn prescan(
+        &self,
+        segment_readers: &[&crate::SegmentReader],
+    ) -> crate::Result<(HashMap<SegmentId, CachedSfxResult>, u64)> {
+        let mut cache = HashMap::new();
+        let mut doc_freq = 0u64;
+
+        for seg_reader in segment_readers {
+            let segment_id = seg_reader.segment_id();
+            let sfx_data = match seg_reader.sfx_file(self.raw_field) {
+                Some(d) => d,
+                None => continue,
+            };
+            let sfx_bytes = sfx_data.read_bytes().map_err(|e|
+                crate::LucivyError::SystemError(format!("prescan read .sfx: {e}")))?;
+            let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref()).map_err(|e|
+                crate::LucivyError::SystemError(format!("prescan open .sfx: {e}")))?;
+
+            let pr = crate::query::posting_resolver::build_resolver(seg_reader, self.raw_field)?;
+            let resolver = |raw_ordinal: u64| -> Vec<suffix_contains::RawPostingEntry> {
+                pr.resolve(raw_ordinal).into_iter().map(|e| suffix_contains::RawPostingEntry {
+                    doc_id: e.doc_id, token_index: e.position,
+                    byte_from: e.byte_from, byte_to: e.byte_to,
+                }).collect()
+            };
+
+            let (query_tokens, query_separators) = tokenize_query(&self.query_text);
+            let (doc_tf, highlights) = run_sfx_walk(
+                &sfx_reader, &resolver, &self.query_text,
+                &query_tokens, &query_separators,
+                self.fuzzy_distance, self.prefix_only, self.continuation,
+            );
+
+            doc_freq += doc_tf.len() as u64;
+            if !doc_tf.is_empty() {
+                cache.insert(segment_id, CachedSfxResult { doc_tf, highlights });
+            }
+        }
+
+        Ok((cache, doc_freq))
+    }
+
+    /// Attach pre-scanned cache (from prescan()).
+    pub fn with_prescan_cache(mut self, cache: HashMap<SegmentId, CachedSfxResult>) -> Self {
+        self.prescan_cache = Some(cache);
         self
     }
 
-    /// Set global doc_freq for pass 2 scoring (correct IDF).
+    /// Set global doc_freq (from aggregation of prescan results).
     pub fn with_global_doc_freq(mut self, doc_freq: u64) -> Self {
         self.global_doc_freq = Some(doc_freq);
         self
@@ -176,6 +239,65 @@ impl SuffixContainsQuery {
     }
 }
 
+/// Run the SFX walk and return (doc_tf, highlights).
+/// Shared between prescan() and scorer() fallback.
+fn run_sfx_walk<F>(
+    sfx_reader: &SfxFileReader<'_>,
+    resolver: &F,
+    query_text: &str,
+    query_tokens: &[String],
+    query_separators: &[String],
+    fuzzy_distance: u8,
+    prefix_only: bool,
+    continuation: bool,
+) -> (Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)
+where
+    F: Fn(u64) -> Vec<suffix_contains::RawPostingEntry>,
+{
+    if query_tokens.len() <= 1 {
+        let query = if query_tokens.is_empty() { query_text } else { &query_tokens[0] };
+        let matches = if fuzzy_distance == 0 {
+            if prefix_only {
+                suffix_contains::suffix_contains_single_token_prefix(sfx_reader, query, resolver)
+            } else if continuation {
+                suffix_contains::suffix_contains_single_token_continuation(sfx_reader, query, resolver)
+            } else {
+                suffix_contains::suffix_contains_single_token(sfx_reader, query, resolver)
+            }
+        } else if prefix_only {
+            suffix_contains::suffix_contains_single_token_fuzzy_prefix(sfx_reader, query, fuzzy_distance, resolver)
+        } else {
+            suffix_contains::suffix_contains_single_token_fuzzy(sfx_reader, query, fuzzy_distance, resolver)
+        };
+        let highlights: Vec<(DocId, usize, usize)> = matches.iter()
+            .map(|m| (m.doc_id, m.byte_from, m.byte_to))
+            .collect();
+        let mut doc_ids: Vec<DocId> = matches.iter().map(|m| m.doc_id).collect();
+        doc_ids.sort_unstable();
+        (count_tf_sorted(&doc_ids), highlights)
+    } else {
+        let token_refs: Vec<&str> = query_tokens.iter().map(|s| s.as_str()).collect();
+        let sep_refs: Vec<&str> = query_separators.iter().map(|s| s.as_str()).collect();
+        let matches = if fuzzy_distance == 0 {
+            if prefix_only {
+                suffix_contains::suffix_contains_multi_token_prefix(sfx_reader, &token_refs, &sep_refs, resolver)
+            } else {
+                suffix_contains::suffix_contains_multi_token(sfx_reader, &token_refs, &sep_refs, resolver)
+            }
+        } else if prefix_only {
+            suffix_contains::suffix_contains_multi_token_fuzzy_prefix(sfx_reader, &token_refs, &sep_refs, resolver, fuzzy_distance)
+        } else {
+            suffix_contains::suffix_contains_multi_token_fuzzy(sfx_reader, &token_refs, &sep_refs, resolver, fuzzy_distance)
+        };
+        let highlights: Vec<(DocId, usize, usize)> = matches.iter()
+            .map(|m| (m.doc_id, m.byte_from, m.byte_to))
+            .collect();
+        let mut doc_ids: Vec<DocId> = matches.iter().map(|m| m.doc_id).collect();
+        doc_ids.sort_unstable();
+        (count_tf_sorted(&doc_ids), highlights)
+    }
+}
+
 impl Query for SuffixContainsQuery {
     fn weight(&self, enable_scoring: EnableScoring) -> crate::Result<Box<dyn Weight>> {
         let (scoring_enabled, global_num_docs, global_num_tokens) = match &enable_scoring {
@@ -185,6 +307,21 @@ impl Query for SuffixContainsQuery {
                 (true, num_docs, num_tokens)
             }
             _ => (false, 0, 0),
+        };
+
+        // Use pre-scanned cache if provided (from prescan() call).
+        // Otherwise, auto-prescan from the searcher's segment_readers.
+        let (prescan_cache, global_doc_freq) = if let Some(cache) = &self.prescan_cache {
+            (cache.clone(), self.global_doc_freq.unwrap_or(0))
+        } else if scoring_enabled {
+            if let Some(searcher) = enable_scoring.searcher() {
+                let seg_refs: Vec<&crate::SegmentReader> = searcher.segment_readers().iter().collect();
+                self.prescan(&seg_refs)?
+            } else {
+                (HashMap::new(), 0)
+            }
+        } else {
+            (HashMap::new(), 0)
         };
 
         Ok(Box::new(SuffixContainsWeight {
@@ -198,8 +335,8 @@ impl Query for SuffixContainsQuery {
             global_num_docs,
             global_num_tokens,
             continuation: self.continuation,
-            sfx_cache: self.sfx_cache.clone(),
-            global_doc_freq: self.global_doc_freq,
+            prescan_cache,
+            global_doc_freq,
         }))
     }
 }
@@ -217,10 +354,10 @@ struct SuffixContainsWeight {
     /// Global total_num_tokens for the field (for average_fieldnorm consistency).
     global_num_tokens: u64,
     continuation: bool,
-    /// Shared cache for two-pass scoring.
-    sfx_cache: Option<Arc<SfxCache>>,
-    /// Global doc_freq from pass 2 (overrides per-segment doc_tf.len()).
-    global_doc_freq: Option<u64>,
+    /// Pre-scanned cache: segment_id → (doc_tf, highlights). Populated by prescan().
+    prescan_cache: HashMap<SegmentId, CachedSfxResult>,
+    /// Global doc_freq from prescan (correct IDF across all segments/shards).
+    global_doc_freq: u64,
 }
 
 impl SuffixContainsWeight {
@@ -270,7 +407,7 @@ impl SuffixContainsWeight {
                 ((reader.max_doc() as u64).max(1), inverted_index.total_num_tokens())
             };
             let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
-            let doc_freq = self.global_doc_freq.unwrap_or(doc_tf.len() as u64);
+            let doc_freq = if self.global_doc_freq > 0 { self.global_doc_freq } else { doc_tf.len() as u64 };
             Bm25Weight::for_one_term(doc_freq, total_num_docs, average_fieldnorm)
         } else {
             Bm25Weight::for_one_term(0, 1, 1.0)
@@ -288,13 +425,12 @@ impl Weight for SuffixContainsWeight {
     fn scorer(&self, reader: &SegmentReader, boost: Score) -> crate::Result<Box<dyn Scorer>> {
         let segment_id = reader.segment_id();
 
-        // Pass 2 with cache: reuse cached SFX walk results, skip the walk.
-        if let Some(ref cache) = self.sfx_cache {
-            if let Some(cached) = cache.segments.lock().unwrap().remove(&segment_id) {
-                return self.scorer_from_cached(reader, boost, segment_id, cached);
-            }
+        // Use pre-scanned cache if available (from prescan or auto-prescan in weight()).
+        if let Some(cached) = self.prescan_cache.get(&segment_id) {
+            return self.scorer_from_cached(reader, boost, segment_id, cached.clone());
         }
 
+        // Fallback: no cache (scoring disabled or prescan skipped).
         // Open the .sfx file — if not present (e.g. merged segment pending
         // sfx rebuild), return an empty scorer (no results from this segment).
         let sfx_data = match reader.sfx_file(self.raw_field) {
@@ -318,137 +454,19 @@ impl Weight for SuffixContainsWeight {
             }).collect()
         };
 
-        // Tokenize the query to determine single vs multi-token path
         let (query_tokens, query_separators) = tokenize_query(&self.query_text);
-
-        let fuzzy_d = self.fuzzy_distance;
-
-        let prefix_only = self.prefix_only;
-
-        let (doc_tf, highlights) = if query_tokens.len() <= 1 {
-            // Single-token path
-            let query = if query_tokens.is_empty() { &self.query_text } else { &query_tokens[0] };
-            let matches = if fuzzy_d == 0 {
-                if prefix_only {
-                    suffix_contains::suffix_contains_single_token_prefix(
-                        &sfx_reader, query, &resolver,
-                    )
-                } else if self.continuation {
-                    suffix_contains::suffix_contains_single_token_continuation(
-                        &sfx_reader, query, &resolver,
-                    )
-                } else {
-                    suffix_contains::suffix_contains_single_token(
-                        &sfx_reader, query, &resolver,
-                    )
-                }
-            } else {
-                if prefix_only {
-                    suffix_contains::suffix_contains_single_token_fuzzy_prefix(
-                        &sfx_reader, query, fuzzy_d, &resolver,
-                    )
-                } else {
-                    suffix_contains::suffix_contains_single_token_fuzzy(
-                        &sfx_reader, query, fuzzy_d, &resolver,
-                    )
-                }
-            };
-
-            // No uppercase expansion needed: CamelCaseSplitFilter no longer
-            // splits ALL_CAPS, and cross-token continuation handles edge cases.
-
-            // Continuation is handled inside suffix_contains_single_token_inner
-            // via the sfx_reader parameter (passed through the closure).
-
-            // Emit diagnostic events
-            {
-                let bus = crate::diag::diag_bus();
-                if bus.is_active() {
-                    let seg_id = segment_id.uuid_string();
-                    for m in &matches {
-                        bus.emit(crate::diag::DiagEvent::SearchMatch {
-                            query: self.query_text.clone(),
-                            segment_id: seg_id.clone(),
-                            doc_id: m.doc_id,
-                            byte_from: m.byte_from,
-                            byte_to: m.byte_to,
-                            cross_token: false, // TODO: tag cross-token matches
-                        });
-                    }
-                    let mut unique: Vec<DocId> = matches.iter().map(|m| m.doc_id).collect();
-                    unique.sort_unstable();
-                    unique.dedup();
-                    bus.emit(crate::diag::DiagEvent::SearchComplete {
-                        query: self.query_text.clone(),
-                        segment_id: seg_id,
-                        total_docs: unique.len() as u32,
-                    });
-                }
-            }
-
-            let highlights: Vec<(DocId, usize, usize)> = matches.iter()
-                .map(|m| (m.doc_id, m.byte_from, m.byte_to))
-                .collect();
-            let mut doc_ids: Vec<DocId> = matches.iter().map(|m| m.doc_id).collect();
-            doc_ids.sort_unstable();
-            (count_tf_sorted(&doc_ids), highlights)
-        } else {
-            // Multi-token path
-            let token_refs: Vec<&str> = query_tokens.iter().map(|s| s.as_str()).collect();
-            let sep_refs: Vec<&str> = query_separators.iter().map(|s| s.as_str()).collect();
-            let matches = if fuzzy_d == 0 {
-                if prefix_only {
-                    suffix_contains::suffix_contains_multi_token_prefix(
-                        &sfx_reader, &token_refs, &sep_refs, resolver,
-                    )
-                } else {
-                    suffix_contains::suffix_contains_multi_token(
-                        &sfx_reader, &token_refs, &sep_refs, resolver,
-                    )
-                }
-            } else {
-                if prefix_only {
-                    suffix_contains::suffix_contains_multi_token_fuzzy_prefix(
-                        &sfx_reader, &token_refs, &sep_refs, resolver, fuzzy_d,
-                    )
-                } else {
-                    suffix_contains::suffix_contains_multi_token_fuzzy(
-                        &sfx_reader, &token_refs, &sep_refs, resolver, fuzzy_d,
-                    )
-                }
-            };
-            let highlights: Vec<(DocId, usize, usize)> = matches.iter()
-                .map(|m| (m.doc_id, m.byte_from, m.byte_to))
-                .collect();
-            let mut doc_ids: Vec<DocId> = matches.iter().map(|m| m.doc_id).collect();
-            doc_ids.sort_unstable();
-            (count_tf_sorted(&doc_ids), highlights)
-        };
+        let (doc_tf, highlights) = run_sfx_walk(
+            &sfx_reader, &resolver, &self.query_text,
+            &query_tokens, &query_separators,
+            self.fuzzy_distance, self.prefix_only, self.continuation,
+        );
 
         if doc_tf.is_empty() {
             return Ok(Box::new(EmptyScorer));
         }
 
-        // Pass 1 with cache: store results for pass 2, accumulate doc_freq.
-        if let Some(ref cache) = self.sfx_cache {
-            if self.global_doc_freq.is_none() {
-                // Pass 1: cache results, return scorer with neutral IDF.
-                cache.doc_freq_count.fetch_add(
-                    doc_tf.len() as u64,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                cache.segments.lock().unwrap().insert(segment_id, CachedSfxResult {
-                    doc_tf,
-                    highlights,
-                });
-                // Return empty scorer — pass 1 is count-only, no results needed.
-                return Ok(Box::new(EmptyScorer));
-            }
-        }
-
-        // Report highlights (pass 2 or non-cached mode)
+        // Report highlights and build scorer (fallback: no prescan cache)
         self.emit_highlights(segment_id, &highlights);
-
         self.build_scorer(reader, boost, doc_tf)
     }
 
