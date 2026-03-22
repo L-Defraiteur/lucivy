@@ -86,7 +86,9 @@ impl LucivyHandle {
         dir.atomic_write(Path::new(CONFIG_FILE), config_json.as_bytes())
             .map_err(|e| format!("cannot write config: {e}"))?;
 
-        let index = Index::create(dir, schema.clone(), IndexSettings::default())
+        let mut settings = IndexSettings::default();
+        settings.sfx_enabled = config.sfx.unwrap_or(true);
+        let index = Index::create(dir, schema.clone(), settings)
             .map_err(|e| format!("cannot create index: {e}"))?;
 
         configure_tokenizers(&index, config);

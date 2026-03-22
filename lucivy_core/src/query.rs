@@ -32,6 +32,10 @@ pub struct SchemaConfig {
     /// Weight for total balance in hybrid shard routing, 0.0-1.0 (default 0.2).
     /// 0.0 = pure per-token routing, 1.0 = pure round-robin-like balance.
     pub balance_weight: Option<f64>,
+    /// Build suffix FST (.sfx + .sfxpost) for contains/startsWith queries.
+    /// Default: true. Set to false for faster indexation and smaller indexes
+    /// when only term/phrase/fuzzy/regex queries are needed.
+    pub sfx: Option<bool>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -210,6 +214,17 @@ fn expand_split(config: &QueryConfig, sub_type: &str) -> QueryConfig {
     }
 }
 
+/// Check that SFX indexing is enabled. Returns an error if sfx_enabled=false.
+fn require_sfx(index: &Index) -> Result<(), String> {
+    if !index.settings().sfx_enabled {
+        return Err(
+            "contains/startsWith queries require SFX indexing. \
+             Set sfx: true (default) in schema config.".into()
+        );
+    }
+    Ok(())
+}
+
 // ─── Query Building ─────────────────────────────────────────────────────────
 
 pub fn build_query(
@@ -224,15 +239,21 @@ pub fn build_query(
         "phrase" => build_phrase_query(config, schema, index, highlight_sink),
         "regex" => build_regex_query(config, schema, highlight_sink),
         "contains" | "sfx_contains" => {
+            require_sfx(index)?;
             build_contains_query(config, schema, highlight_sink)
         }
-        "startsWith" => build_starts_with_query(config, schema, index, highlight_sink),
+        "startsWith" => {
+            require_sfx(index)?;
+            build_starts_with_query(config, schema, index, highlight_sink)
+        }
         "contains_split" | "sfx_contains_split" => {
+            require_sfx(index)?;
             let expanded = expand_split(config, "contains");
             build_query(&expanded, schema, index, highlight_sink)
                 .map(|q| q as Box<dyn Query>)
         }
         "startsWith_split" => {
+            require_sfx(index)?;
             let expanded = expand_split(config, "startsWith");
             build_query(&expanded, schema, index, highlight_sink)
                 .map(|q| q as Box<dyn Query>)

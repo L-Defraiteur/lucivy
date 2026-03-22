@@ -276,6 +276,11 @@ pub struct IndexSettings {
     #[serde(default = "default_docstore_blocksize")]
     /// The size of each block that will be compressed and written to disk
     pub docstore_blocksize: usize,
+    /// Build suffix FST (.sfx + .sfxpost) for contains/startsWith queries.
+    /// Default: true. Set to false for faster indexation and smaller indexes.
+    #[serde(default = "return_true")]
+    #[serde(skip_serializing_if = "is_true")]
+    pub sfx_enabled: bool,
 }
 
 /// Must be a function to be compatible with serde defaults
@@ -289,6 +294,7 @@ impl Default for IndexSettings {
             docstore_compression: Compressor::default(),
             docstore_blocksize: default_docstore_blocksize(),
             docstore_compress_dedicated_thread: true,
+            sfx_enabled: true,
         }
     }
 }
@@ -523,7 +529,8 @@ mod tests {
             IndexSettings {
                 docstore_compression: Compressor::default(),
                 docstore_compress_dedicated_thread: true,
-                docstore_blocksize: 16_384
+                docstore_blocksize: 16_384,
+                sfx_enabled: true,
             }
         );
         {
