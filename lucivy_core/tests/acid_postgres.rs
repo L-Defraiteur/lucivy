@@ -17,6 +17,7 @@ use std::sync::Mutex;
 
 use lucivy_core::blob_store::BlobStore;
 use lucivy_core::query::QueryConfig;
+use ld_lucivy::query::Query;
 
 // ─── PostgresBlobStore ──────────────────────────────────────────────────────
 
@@ -664,4 +665,185 @@ fn test_bm25_scores_identical_across_shard_counts() {
     handle_1.close().unwrap();
     handle_4.close().unwrap();
     eprintln!("BM25 score consistency test passed!");
+}
+
+/// Distributed BM25 ground truth: two separate ShardedHandles simulate two machines.
+/// Same 100 docs split across two nodes → scores must equal ground truth.
+#[test]
+#[ignore]
+fn test_distributed_bm25_ground_truth() {
+    let url = pg_url().expect("POSTGRES_URL required");
+    let store = std::sync::Arc::new(PostgresBlobStore::connect(&url).unwrap());
+    store.clear_index("dist_gt_a");
+    store.clear_index("dist_gt_b");
+
+    let cache_a = std::env::temp_dir().join("lucivy_dist_gt_a");
+    let cache_b = std::env::temp_dir().join("lucivy_dist_gt_b");
+    let _ = std::fs::remove_dir_all(&cache_a);
+    let _ = std::fs::remove_dir_all(&cache_b);
+
+    let storage_a = lucivy_core::sharded_handle::BlobShardStorage::new(
+        store.clone(), "dist_gt_a", &cache_a,
+    );
+    let node_a = lucivy_core::sharded_handle::ShardedHandle::create_with_storage(
+        Box::new(storage_a), &make_config(2),
+    ).unwrap();
+
+    let storage_b = lucivy_core::sharded_handle::BlobShardStorage::new(
+        store.clone(), "dist_gt_b", &cache_b,
+    );
+    let node_b = lucivy_core::sharded_handle::ShardedHandle::create_with_storage(
+        Box::new(storage_b), &make_config(2),
+    ).unwrap();
+
+    // Same 100 docs, hash-routed to two nodes
+    let body = node_a.field("body").unwrap();
+    let nid = node_a.field("_node_id").unwrap();
+    let nodes = [&node_a, &node_b];
+
+    for i in 0..100u64 {
+        let text = format!("Document {i} about mutex lock contention and scheduling");
+        let mut doc = ld_lucivy::LucivyDocument::new();
+        doc.add_u64(nid, i);
+        doc.add_text(body, &text);
+        nodes[(i % 2) as usize].add_document(doc, i).unwrap();
+    }
+    node_a.commit().unwrap();
+    node_b.commit().unwrap();
+
+    let query_config = QueryConfig {
+        query_type: "contains".into(),
+        field: Some("body".into()),
+        value: Some("mutex".into()),
+        ..Default::default()
+    };
+
+    // ── Distributed prescan protocol ──
+    // Step 1: each node prescans its own segments
+    let mut query_a = lucivy_core::query::build_query(
+        &query_config, &node_a.schema, &node_a.index(), None,
+    ).unwrap();
+    let mut query_b = lucivy_core::query::build_query(
+        &query_config, &node_b.schema, &node_b.index(), None,
+    ).unwrap();
+
+    let segs_a: Vec<_> = (0..node_a.num_shards())
+        .flat_map(|i| node_a.shard(i).unwrap().reader.searcher().segment_readers().to_vec())
+        .collect();
+    let segs_b: Vec<_> = (0..node_b.num_shards())
+        .flat_map(|i| node_b.shard(i).unwrap().reader.searcher().segment_readers().to_vec())
+        .collect();
+
+    let seg_refs_a: Vec<&ld_lucivy::SegmentReader> = segs_a.iter().collect();
+    let seg_refs_b: Vec<&ld_lucivy::SegmentReader> = segs_b.iter().collect();
+
+    // Each node prescans → gets local doc_freq + caches results
+    query_a.prescan_segments(&seg_refs_a).unwrap();
+    query_b.prescan_segments(&seg_refs_b).unwrap();
+
+    // Step 2: "coordinator" aggregates doc_freqs
+    // For now, we read it from the queries via the prescan cache.
+    // In a real distributed system, each node would return its doc_freq.
+    // Here we use search() which already does the prescan internally.
+
+    // Actually, let's use the simpler approach: each node does search()
+    // (which auto-prescans its own segments). Then we compare scores.
+    let results_a = node_a.search(&query_config, 100, None).unwrap();
+    let results_b = node_b.search(&query_config, 100, None).unwrap();
+
+    // Ground truth: all 100 docs contain "mutex"
+    let total_docs = 100u64;
+    let doc_freq = 100u64;
+    let idf = ((total_docs as f32 - doc_freq as f32 + 0.5) / (doc_freq as f32 + 0.5) + 1.0).ln();
+    let ground_truth_score = idf * 1.0; // TF_comp = 1.0 (same as before)
+
+    let score_a = results_a.first().map(|r| r.score).unwrap_or(0.0);
+    let score_b = results_b.first().map(|r| r.score).unwrap_or(0.0);
+
+    eprintln!("=== Distributed ground truth ===");
+    eprintln!("Node A: {} hits, score[0]={:.6}", results_a.len(), score_a);
+    eprintln!("Node B: {} hits, score[0]={:.6}", results_b.len(), score_b);
+    eprintln!("Ground truth: {:.6}", ground_truth_score);
+
+    // Each node only sees 50 docs (its own shards).
+    // With auto-prescan in weight(), each node computes doc_freq from its own segments only.
+    // So doc_freq_a ≈ 50, doc_freq_b ≈ 50, not 100.
+    // The scores will be HIGHER than ground truth because IDF is inflated.
+    // This is EXPECTED for independent nodes without coordinator aggregation.
+    let diff_a = (score_a - ground_truth_score).abs();
+    let diff_b = (score_b - ground_truth_score).abs();
+    eprintln!("Diff A vs ground truth: {:.6}", diff_a);
+    eprintln!("Diff B vs ground truth: {:.6}", diff_b);
+
+    // The two nodes should have CONSISTENT scores with each other
+    // (both see ~50 docs with "mutex" out of ~50 total)
+    let diff_ab = (score_a - score_b).abs();
+    eprintln!("Diff A vs B: {:.6}", diff_ab);
+    assert!(diff_ab < 0.01, "Node A and B should have similar scores: {score_a:.6} vs {score_b:.6}");
+
+    // To get exact ground truth, we'd need the distributed prescan protocol:
+    // prescan each node → sum doc_freqs → set global_doc_freq on each query → weight()
+    // Let's test that:
+    eprintln!("\n=== With coordinator aggregation ===");
+
+    // Rebuild queries and prescan
+    let mut q_a = lucivy_core::query::build_query(
+        &query_config, &node_a.schema, &node_a.index(), None,
+    ).unwrap();
+    let mut q_b = lucivy_core::query::build_query(
+        &query_config, &node_b.schema, &node_b.index(), None,
+    ).unwrap();
+
+    q_a.prescan_segments(&seg_refs_a).unwrap();
+    q_b.prescan_segments(&seg_refs_b).unwrap();
+
+    // Extract doc_freqs (in real system this is sent over network)
+    // For SuffixContainsQuery, doc_freq is in the prescan_cache.
+    // We need a way to extract it. For now, use the search results count.
+    let freq_a = results_a.len() as u64;
+    let freq_b = results_b.len() as u64;
+    let global_doc_freq = freq_a + freq_b;
+    eprintln!("freq_a={}, freq_b={}, global={}", freq_a, freq_b, global_doc_freq);
+
+    // Rebuild with global doc_freq
+    use ld_lucivy::query::SuffixContainsQuery;
+    let q_a_global = SuffixContainsQuery::new(body, "mutex".to_string())
+        .with_global_doc_freq(global_doc_freq);
+    let q_b_global = SuffixContainsQuery::new(body, "mutex".to_string())
+        .with_global_doc_freq(global_doc_freq);
+
+    // Build weights with each node's stats
+    let searcher_a = node_a.shard(0).unwrap().reader.searcher();
+    let weight_a = q_a_global.weight(
+        ld_lucivy::query::EnableScoring::enabled_from_searcher(&searcher_a)
+    ).unwrap();
+    let searcher_b = node_b.shard(0).unwrap().reader.searcher();
+    let weight_b = q_b_global.weight(
+        ld_lucivy::query::EnableScoring::enabled_from_searcher(&searcher_b)
+    ).unwrap();
+
+    // Score one doc from each node
+    let seg_a = searcher_a.segment_reader(0);
+    let mut scorer_a = weight_a.scorer(seg_a, 1.0).unwrap();
+    let coordinated_score_a = if scorer_a.doc() != ld_lucivy::TERMINATED { scorer_a.score() } else { 0.0 };
+
+    let seg_b = searcher_b.segment_reader(0);
+    let mut scorer_b = weight_b.scorer(seg_b, 1.0).unwrap();
+    let coordinated_score_b = if scorer_b.doc() != ld_lucivy::TERMINATED { scorer_b.score() } else { 0.0 };
+
+    eprintln!("Coordinated A score: {:.6}", coordinated_score_a);
+    eprintln!("Coordinated B score: {:.6}", coordinated_score_b);
+    eprintln!("Ground truth:        {:.6}", ground_truth_score);
+
+    let diff_coord_gt = (coordinated_score_a - ground_truth_score).abs();
+    eprintln!("Diff coordinated vs ground truth: {:.6}", diff_coord_gt);
+
+    // With global doc_freq, scores should be close to ground truth
+    // (small diff due to avg_fieldnorm being per-shard, not global — acceptable)
+    assert!(diff_coord_gt < 0.01,
+        "Coordinated score should match ground truth: {coordinated_score_a:.6} vs {ground_truth_score:.6}");
+
+    node_a.close().unwrap();
+    node_b.close().unwrap();
+    eprintln!("Distributed ground truth test passed!");
 }
