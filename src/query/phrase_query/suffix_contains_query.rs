@@ -328,6 +328,26 @@ impl Query for SuffixContainsQuery {
         }
     }
 
+    fn take_prescan_cache(
+        &mut self,
+        out: &mut std::collections::HashMap<crate::index::SegmentId, CachedSfxResult>,
+    ) {
+        if let Some(cache) = self.prescan_cache.take() {
+            out.extend(cache);
+        }
+    }
+
+    fn inject_prescan_cache(
+        &mut self,
+        cache: std::collections::HashMap<crate::index::SegmentId, CachedSfxResult>,
+    ) {
+        if let Some(ref mut existing) = self.prescan_cache {
+            existing.extend(cache);
+        } else {
+            self.prescan_cache = Some(cache);
+        }
+    }
+
     fn weight(&self, enable_scoring: EnableScoring) -> crate::Result<Box<dyn Weight>> {
         let (scoring_enabled, global_num_docs, global_num_tokens) = match &enable_scoring {
             EnableScoring::Enabled { statistics_provider, .. } => {

@@ -6,10 +6,10 @@
 //!                                  └── search_shard_2 ──┘
 //! ```
 //!
-//! BM25 scoring is globally consistent: SuffixContainsQuery::weight() pre-scans
-//! all segments to compute global doc_freq. No two-pass DAG needed.
+//! BuildWeightNode does parallel prescan (one thread per shard) for globally
+//! consistent BM25 contains/startsWith scoring.
 
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 
 use luciole::node::{Node, NodeContext, PortDef};
@@ -102,7 +102,7 @@ impl Node for FlushNode {
 }
 
 // ---------------------------------------------------------------------------
-// BuildWeightNode — parse query + compile Weight with global stats
+// BuildWeightNode — parallel prescan + compile Weight with global stats
 // ---------------------------------------------------------------------------
 
 pub(crate) struct BuildWeightNode {
@@ -137,18 +137,55 @@ impl Node for BuildWeightNode {
         let searchers: Vec<_> = self.shards.iter().map(|s| s.reader.searcher()).collect();
         let global_stats = AggregatedBm25StatsOwned::new(searchers);
 
+        // Parallel prescan: one thread per shard, each builds its own query
+        // clone and prescans its segments. Results are merged.
+        let all_shard_segs: Vec<Vec<ld_lucivy::SegmentReader>> = self.shards.iter()
+            .map(|s| s.reader.searcher().segment_readers().to_vec())
+            .collect();
+
+        let prescan_results: Vec<Result<(HashMap<ld_lucivy::index::SegmentId, ld_lucivy::query::CachedSfxResult>, HashMap<String, u64>), String>> =
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = all_shard_segs.iter().map(|shard_segs| {
+                    let config = &self.query_config;
+                    let schema = &self.schema;
+                    let index = &self.index;
+                    scope.spawn(move || {
+                        let mut q = crate::query::build_query(config, schema, index, None)?;
+                        let seg_refs: Vec<&ld_lucivy::SegmentReader> = shard_segs.iter().collect();
+                        q.prescan_segments(&seg_refs).map_err(|e| format!("prescan: {e}"))?;
+                        let mut cache = HashMap::new();
+                        let mut freqs = HashMap::new();
+                        q.take_prescan_cache(&mut cache);
+                        q.collect_prescan_doc_freqs(&mut freqs);
+                        Ok((cache, freqs))
+                    })
+                }).collect();
+
+                handles.into_iter()
+                    .map(|h| h.join().map_err(|_| "prescan thread panicked".to_string())?)
+                    .collect()
+            });
+
+        // Merge prescan results
+        let mut merged_cache: HashMap<ld_lucivy::index::SegmentId, ld_lucivy::query::CachedSfxResult> = HashMap::new();
+        let mut merged_freqs: HashMap<String, u64> = HashMap::new();
+        for result in prescan_results {
+            let (cache, freqs) = result?;
+            merged_cache.extend(cache);
+            for (key, freq) in freqs {
+                *merged_freqs.entry(key).or_insert(0) += freq;
+            }
+        }
+
+        // Build the main query with highlights, then inject prescan results
         let mut query = crate::query::build_query(
             &self.query_config, &self.schema, &self.index,
             self.highlight_sink.clone(),
         )?;
 
-        // Pre-scan ALL segments from ALL shards for global BM25 doc_freq.
-        let all_seg_readers: Vec<_> = self.shards.iter()
-            .flat_map(|s| s.reader.searcher().segment_readers().to_vec())
-            .collect();
-        let seg_refs: Vec<&ld_lucivy::SegmentReader> = all_seg_readers.iter().collect();
-        query.prescan_segments(&seg_refs)
-            .map_err(|e| format!("prescan: {e}"))?;
+        // Inject: set global doc_freqs + prescan cache on the query tree
+        query.set_global_contains_doc_freqs(&merged_freqs);
+        query.inject_prescan_cache(merged_cache);
 
         let searcher_0 = self.shards[0].reader.searcher();
         let enable_scoring = ld_lucivy::query::EnableScoring::enabled_from_statistics_provider(

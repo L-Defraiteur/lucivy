@@ -192,6 +192,25 @@ impl Query for BooleanQuery {
             subquery.set_global_contains_doc_freqs(freqs);
         }
     }
+
+    fn take_prescan_cache(
+        &mut self,
+        out: &mut std::collections::HashMap<crate::index::SegmentId, crate::query::phrase_query::suffix_contains_query::CachedSfxResult>,
+    ) {
+        for (_occur, subquery) in &mut self.subqueries {
+            subquery.take_prescan_cache(out);
+        }
+    }
+
+    fn inject_prescan_cache(
+        &mut self,
+        cache: std::collections::HashMap<crate::index::SegmentId, crate::query::phrase_query::suffix_contains_query::CachedSfxResult>,
+    ) {
+        // Each sub-query gets a clone (they have different query_text keys in the cache)
+        for (_occur, subquery) in &mut self.subqueries {
+            subquery.inject_prescan_cache(cache.clone());
+        }
+    }
 }
 
 impl BooleanQuery {

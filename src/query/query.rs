@@ -187,6 +187,23 @@ pub trait Query: QueryClone + Send + Sync + downcast_rs::Downcast + fmt::Debug {
     /// BooleanQuery propagates to sub-queries.
     /// Default: no-op.
     fn set_global_contains_doc_freqs(&mut self, _freqs: &std::collections::HashMap<String, u64>) {}
+
+    /// Extract prescan cache (for moving between DAG nodes).
+    /// SuffixContainsQuery moves its cache out. BooleanQuery propagates.
+    /// Default: no-op.
+    fn take_prescan_cache(
+        &mut self,
+        _out: &mut std::collections::HashMap<crate::index::SegmentId, crate::query::phrase_query::suffix_contains_query::CachedSfxResult>,
+    ) {}
+
+    /// Inject prescan cache (merged from multiple shards by the DAG).
+    /// SuffixContainsQuery stores it for scorer(). BooleanQuery propagates.
+    /// Default: no-op.
+    fn inject_prescan_cache(
+        &mut self,
+        _cache: std::collections::HashMap<crate::index::SegmentId, crate::query::phrase_query::suffix_contains_query::CachedSfxResult>,
+    ) {
+    }
 }
 
 /// Implements `box_clone`.
