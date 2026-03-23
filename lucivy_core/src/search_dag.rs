@@ -175,10 +175,12 @@ impl Node for PrescanShardNode {
                 };
 
                 let (tokens, seps) = tokenize_query(&param.query_text);
+                let seg_str = format!("{:?}", seg_reader.segment_id());
                 let (doc_tf, highlights) = run_sfx_walk(
                     &sfx_reader, &resolver, &param.query_text,
                     &tokens, &seps,
                     param.fuzzy_distance, param.prefix_only, param.continuation,
+                    Some(&seg_str),
                 );
 
                 *freqs.entry(param.query_text.clone()).or_insert(0) += doc_tf.len() as u64;

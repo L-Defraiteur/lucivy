@@ -190,10 +190,12 @@ impl SuffixContainsQuery {
             };
 
             let (query_tokens, query_separators) = tokenize_query(&self.query_text);
+            let seg_str = format!("{:?}", segment_id);
             let (doc_tf, highlights) = run_sfx_walk(
                 &sfx_reader, &resolver, &self.query_text,
                 &query_tokens, &query_separators,
                 self.fuzzy_distance, self.prefix_only, self.continuation,
+                Some(&seg_str),
             );
 
             doc_freq += doc_tf.len() as u64;
@@ -257,6 +259,9 @@ impl SuffixContainsQuery {
 
 /// Run the SFX walk and return (doc_tf, highlights).
 /// Shared between prescan() and scorer() fallback.
+///
+/// `segment_id` is optional — when provided, emits DiagBus events
+/// (SearchMatch, SearchComplete) for diagnostic subscribers.
 pub fn run_sfx_walk<F>(
     sfx_reader: &SfxFileReader<'_>,
     resolver: &F,
@@ -266,11 +271,13 @@ pub fn run_sfx_walk<F>(
     fuzzy_distance: u8,
     prefix_only: bool,
     continuation: bool,
+    segment_id: Option<&str>,
 ) -> (Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)
 where
     F: Fn(u64) -> Vec<suffix_contains::RawPostingEntry>,
 {
-    if query_tokens.len() <= 1 {
+    // Extract (highlights, doc_ids) from either single-token or multi-token matches.
+    let (highlights, mut doc_ids) = if query_tokens.len() <= 1 {
         let query = if query_tokens.is_empty() { query_text } else { &query_tokens[0] };
         let matches = if fuzzy_distance == 0 {
             if prefix_only {
@@ -285,12 +292,10 @@ where
         } else {
             suffix_contains::suffix_contains_single_token_fuzzy(sfx_reader, query, fuzzy_distance, resolver)
         };
-        let highlights: Vec<(DocId, usize, usize)> = matches.iter()
-            .map(|m| (m.doc_id, m.byte_from, m.byte_to))
-            .collect();
-        let mut doc_ids: Vec<DocId> = matches.iter().map(|m| m.doc_id).collect();
-        doc_ids.sort_unstable();
-        (count_tf_sorted(&doc_ids), highlights)
+        let hl: Vec<(DocId, usize, usize)> = matches.iter()
+            .map(|m| (m.doc_id, m.byte_from, m.byte_to)).collect();
+        let ids: Vec<DocId> = matches.iter().map(|m| m.doc_id).collect();
+        (hl, ids)
     } else {
         let token_refs: Vec<&str> = query_tokens.iter().map(|s| s.as_str()).collect();
         let sep_refs: Vec<&str> = query_separators.iter().map(|s| s.as_str()).collect();
@@ -305,13 +310,43 @@ where
         } else {
             suffix_contains::suffix_contains_multi_token_fuzzy(sfx_reader, &token_refs, &sep_refs, resolver, fuzzy_distance)
         };
-        let highlights: Vec<(DocId, usize, usize)> = matches.iter()
-            .map(|m| (m.doc_id, m.byte_from, m.byte_to))
-            .collect();
-        let mut doc_ids: Vec<DocId> = matches.iter().map(|m| m.doc_id).collect();
-        doc_ids.sort_unstable();
-        (count_tf_sorted(&doc_ids), highlights)
+        let hl: Vec<(DocId, usize, usize)> = matches.iter()
+            .map(|m| (m.doc_id, m.byte_from, m.byte_to)).collect();
+        let ids: Vec<DocId> = matches.iter().map(|m| m.doc_id).collect();
+        (hl, ids)
+    };
+
+    // Emit DiagBus events if subscribers are active
+    let bus = crate::diag::diag_bus();
+    if bus.is_active() {
+        if let Some(seg) = segment_id {
+            for &(doc_id, byte_from, byte_to) in &highlights {
+                bus.emit(crate::diag::DiagEvent::SearchMatch {
+                    query: query_text.to_string(),
+                    segment_id: seg.to_string(),
+                    doc_id,
+                    byte_from,
+                    byte_to,
+                    cross_token: false,
+                });
+            }
+        }
     }
+
+    doc_ids.sort_unstable();
+    let doc_tf = count_tf_sorted(&doc_ids);
+
+    if bus.is_active() {
+        if let Some(seg) = segment_id {
+            bus.emit(crate::diag::DiagEvent::SearchComplete {
+                query: query_text.to_string(),
+                segment_id: seg.to_string(),
+                total_docs: doc_tf.len() as u32,
+            });
+        }
+    }
+
+    (doc_tf, highlights)
 }
 
 impl Query for SuffixContainsQuery {
@@ -520,10 +555,12 @@ impl Weight for SuffixContainsWeight {
         };
 
         let (query_tokens, query_separators) = tokenize_query(&self.query_text);
+        let seg_str = format!("{:?}", segment_id);
         let (doc_tf, highlights) = run_sfx_walk(
             &sfx_reader, &resolver, &self.query_text,
             &query_tokens, &query_separators,
             self.fuzzy_distance, self.prefix_only, self.continuation,
+            Some(&seg_str),
         );
 
         if doc_tf.is_empty() {
