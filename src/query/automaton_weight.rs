@@ -62,6 +62,10 @@ pub struct AutomatonWeight<A> {
     prefer_sfxpost: bool,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
+    /// Global total_num_docs for cross-shard/segment BM25 consistency.
+    global_num_docs: Option<u64>,
+    /// Global total_num_tokens for average_fieldnorm consistency.
+    global_num_tokens: Option<u64>,
 }
 
 impl<A> AutomatonWeight<A>
@@ -79,6 +83,8 @@ where
             prefer_sfxpost: false,
             highlight_sink: None,
             highlight_field_name: String::new(),
+            global_num_docs: None,
+            global_num_tokens: None,
         }
     }
 
@@ -96,7 +102,16 @@ where
             prefer_sfxpost: false,
             highlight_sink: None,
             highlight_field_name: String::new(),
+            global_num_docs: None,
+            global_num_tokens: None,
         }
+    }
+
+    /// Set global BM25 stats for cross-shard/segment consistency.
+    pub fn with_global_stats(mut self, num_docs: u64, num_tokens: u64) -> Self {
+        self.global_num_docs = Some(num_docs);
+        self.global_num_tokens = Some(num_tokens);
+        self
     }
 
     /// Set whether BM25 scoring is enabled. When disabled, uses fast path with ConstScorer.
@@ -203,6 +218,17 @@ where
         ))
     }
 
+    /// Get BM25 stats: (total_num_docs, average_fieldnorm).
+    /// Uses global stats if available, otherwise falls back to per-segment.
+    fn bm25_stats(&self, inverted_index: &InvertedIndexReader, max_doc: u32) -> (u64, Score) {
+        let total_num_docs = self.global_num_docs
+            .unwrap_or_else(|| (max_doc as u64).max(1));
+        let total_num_tokens = self.global_num_tokens
+            .unwrap_or_else(|| inverted_index.total_num_tokens());
+        let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
+        (total_num_docs, average_fieldnorm)
+    }
+
     /// Build scorer from ordinals resolved via PostingResolver.
     /// Avoids reading posting data from the inverted index — only metadata (total_num_tokens).
     fn scorer_from_ordinals(
@@ -222,9 +248,7 @@ where
 
             if self.scoring_enabled {
                 // Highlight + BM25 scoring
-                let total_num_tokens = inverted_index.total_num_tokens();
-                let total_num_docs = (max_doc as u64).max(1);
-                let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
+                let (total_num_docs, average_fieldnorm) = self.bm25_stats(inverted_index, max_doc);
                 let mut scores = vec![0.0f32; max_doc as usize];
 
                 for &ordinal in ordinals {
@@ -268,9 +292,7 @@ where
             }
         } else if self.scoring_enabled {
             // BM25 scoring only (no highlights)
-            let total_num_tokens = inverted_index.total_num_tokens();
-            let total_num_docs = (max_doc as u64).max(1);
-            let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
+            let (total_num_docs, average_fieldnorm) = self.bm25_stats(inverted_index, max_doc);
             let mut scores = vec![0.0f32; max_doc as usize];
 
             for &ordinal in ordinals {
@@ -318,9 +340,7 @@ where
             let segment_id = reader.segment_id();
 
             if self.scoring_enabled {
-                let total_num_tokens = inverted_index.total_num_tokens();
-                let total_num_docs = (max_doc as u64).max(1);
-                let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
+                let (total_num_docs, average_fieldnorm) = self.bm25_stats(inverted_index, max_doc);
                 let mut scores = vec![0.0f32; max_doc as usize];
 
                 for term_info in term_infos {
@@ -387,9 +407,7 @@ where
                 Ok(Box::new(const_scorer))
             }
         } else if self.scoring_enabled {
-            let total_num_tokens = inverted_index.total_num_tokens();
-            let total_num_docs = (max_doc as u64).max(1);
-            let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
+            let (total_num_docs, average_fieldnorm) = self.bm25_stats(inverted_index, max_doc);
             let mut scores = vec![0.0f32; max_doc as usize];
 
             for term_info in term_infos {

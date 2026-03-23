@@ -34,6 +34,7 @@ impl TermSetQuery {
         &self,
         schema: &Schema,
         scoring_enabled: bool,
+        global_stats: Option<(u64, u64)>,
     ) -> crate::Result<BooleanWeight<DoNothingCombiner>> {
         let mut sub_queries: Vec<(_, Box<dyn Weight>)> = Vec::with_capacity(self.terms_map.len());
 
@@ -55,9 +56,13 @@ impl TermSetQuery {
             )
             .map_err(std::io::Error::other)?;
 
+            let mut aw = AutomatonWeight::new(field, SetDfaWrapper(map)).with_scoring(scoring_enabled);
+            if let Some((nd, nt)) = global_stats {
+                aw = aw.with_global_stats(nd, nt);
+            }
             sub_queries.push((
                 Occur::Should,
-                Box::new(AutomatonWeight::new(field, SetDfaWrapper(map)).with_scoring(scoring_enabled)),
+                Box::new(aw),
             ));
         }
 
@@ -71,7 +76,15 @@ impl TermSetQuery {
 
 impl Query for TermSetQuery {
     fn weight(&self, enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
-        Ok(Box::new(self.specialized_weight(enable_scoring.schema(), enable_scoring.is_scoring_enabled())?))
+        let global_stats = if let EnableScoring::Enabled { statistics_provider, .. } = &enable_scoring {
+            let nd = statistics_provider.total_num_docs().ok().unwrap_or(0);
+            // Use first field for num_tokens (TermSetQuery can span multiple fields)
+            let nt = self.terms_map.keys().next()
+                .and_then(|f| statistics_provider.total_num_tokens(*f).ok())
+                .unwrap_or(0);
+            if nd > 0 { Some((nd, nt)) } else { None }
+        } else { None };
+        Ok(Box::new(self.specialized_weight(enable_scoring.schema(), enable_scoring.is_scoring_enabled(), global_stats)?))
     }
 
     fn query_terms<'a>(&'a self, visitor: &mut dyn FnMut(&'a Term, bool)) {
