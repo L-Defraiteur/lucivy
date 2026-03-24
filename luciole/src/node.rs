@@ -95,6 +95,12 @@ pub trait Node: Send {
     fn undo(&mut self, _ctx: Box<dyn Any + Send>) -> Result<(), String> {
         Err("undo not supported".to_string())
     }
+
+    /// Serializable configuration for checkpoint recovery.
+    /// When a DAG is checkpointed, the runtime stores node_type() + node_config()
+    /// for each completed node. On restart, a NodeFactory can reconstruct the node.
+    /// Default: None (node cannot be reconstructed from config alone).
+    fn node_config(&self) -> Option<Box<dyn Any + Send>> { None }
 }
 
 // ---------------------------------------------------------------------------
