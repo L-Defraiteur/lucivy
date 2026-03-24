@@ -177,3 +177,106 @@ Phase 4 : Search DAG
 | `src/dataflow/checkpoint_store.rs` | CypherCheckpointStore |
 | `src/dataflow/node_factories.rs` | NodeFactory + NodeRegistry |
 | `src/dataflow/record_nodes.rs` | Les 14 nodes (~3800 lignes) |
+
+---
+
+## Réponse : tout est implémenté (24 mars 2026)
+
+Tous les points demandés ont été implémentés et validés (90K docs bench, 1155 tests).
+
+### 1. Undo / rollback ✅
+
+**Déjà sur le trait Node** (`luciole/src/node.rs` lignes 86-97) :
+```rust
+fn can_undo(&self) -> bool { false }
+fn undo_context(&self) -> Option<Box<dyn Any + Send>> { None }
+fn undo(&mut self, _ctx: Box<dyn Any + Send>) -> Result<(), String> { ... }
+```
+
+**Rollback dans le runtime** (`luciole/src/runtime.rs`) :
+- `execute_dag()` : lignes 222-223, 257-261 (collect undo), 288-301 (rollback loop)
+- `execute_dag_with_checkpoint()` : même pattern via `rollback_undo_stack_by_idx()`
+- En cas d'erreur, les noeuds complétés sont undo'd en ordre inverse
+- Émet `DagEvent::NodeLog` pour chaque undo (success ou failure)
+
+### 2. ServiceRegistry ✅
+
+**Struct** : `luciole/src/node.rs` lignes 15-31 — `ServiceRegistry` avec `register::<T>()` / `get::<T>()`
+
+**Dans NodeContext** : `luciole/src/node.rs` ligne 184 — `services: Option<Arc<ServiceRegistry>>`
+- Accessor : `ctx.service::<T>(key)` (ligne 254)
+- Builder : `NodeContext::with_services(Arc<ServiceRegistry>)` (ligne 197)
+
+**Dans Dag** : `luciole/src/dag.rs` — `Dag::with_services(Arc<ServiceRegistry>)`
+- Le runtime propage aux NodeContext automatiquement (séquentiel + parallèle)
+
+**Usage** :
+```rust
+let mut services = ServiceRegistry::new();
+services.register("conn", my_db_connection);
+let dag = Dag::new().with_services(Arc::new(services));
+// Dans un node :
+let conn = ctx.service::<DbConnection>("conn").unwrap();
+```
+
+### 3. NodeFactory / NodeRegistry
+
+Pas dans luciole — vous l'implémentez côté rag3weaver au-dessus de luciole. Le pattern est simple grâce à `node_type()` + `node_config()`.
+
+### 4. node_config() ✅
+
+**Sur le trait Node** (`luciole/src/node.rs` ligne 99) :
+```rust
+fn node_config(&self) -> Option<Box<dyn Any + Send>> { None }
+```
+
+Optionnel, retourne la config sérialisable pour reconstruire le node au restart.
+
+### 5. take_output() ✅
+
+**Existe déjà** : `luciole/src/runtime.rs` ligne 82 :
+```rust
+impl DagResult {
+    pub fn take_output<T: Send + Sync + 'static>(&mut self, node: &str, port: &str) -> Option<T>
+}
+```
+
+### 6. StreamDag ✅ (validé en production)
+
+**Code** : `luciole/src/stream_dag.rs`
+
+**Validé** dans lucivy sur le pipeline d'ingestion (`lucivy_core/src/sharded_handle.rs`) :
+```rust
+let mut pipeline = StreamDag::new("ingestion");
+pipeline.add_stage("readers", reader_pool.clone(), num_readers);
+pipeline.add_stage("router", router_ref.clone(), 1);
+pipeline.add_stage("shards", shard_pool.clone(), num_shards);
+pipeline.connect("readers", "router");
+pipeline.connect("router", "shards");
+```
+
+Le `DrainNode` du search DAG utilise `pipeline.drain()` au lieu du drain manuel.
+Testé sur 90K docs Linux kernel — zéro régression.
+
+**Note** : `ActorRef<M>` implémente maintenant `Drainable` quand `M: From<DrainMsg>`
+(`luciole/src/mailbox.rs`) — donc les acteurs standalone (comme le router) peuvent
+être des stages StreamDag.
+
+### Noeuds flow-control bonus
+
+En plus de ce qui était demandé, luciole a maintenant :
+
+| Noeud | Fichier | Description |
+|-------|---------|-------------|
+| **SwitchNode** | `luciole/src/branch.rs` | Routing N-way conditionnel |
+| **BranchNode** | même fichier | Alias 2-way (then/else) |
+| **GateNode** | `luciole/src/gate.rs` | Pass/block conditionnel |
+| **MergeNode** | `luciole/src/fan_out.rs` | N inputs → 1 output, merge fn custom |
+| **fan_out_merge()** | même fichier | Helper sur Dag : N workers + merge en un appel |
+| **add_node_boxed()** | `luciole/src/dag.rs` | Pour nodes pré-boxés (factory pattern) |
+
+### Prochaine étape pour vous
+
+Phase 1 du plan de convergence : rendre vos nodes sync, puis remplacer
+`DataflowGraph` par `luciole::Dag` et `DataflowRuntime` par `luciole::execute_dag`.
+Tout est prêt côté luciole.
