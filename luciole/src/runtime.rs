@@ -343,6 +343,8 @@ pub fn execute_dag_with_checkpoint(
 
     let mut port_data: HashMap<(String, String), PortValue> = HashMap::new();
     let mut results: Vec<(String, NodeResult)> = Vec::with_capacity(total_nodes);
+    // Track undo contexts for rollback on failure (node_idx, undo_data)
+    let mut undo_stack: Vec<(usize, Box<dyn std::any::Any + Send>)> = Vec::new();
 
     let bus = dag_event_bus();
     let emit = |evt: DagEvent| {
@@ -403,11 +405,19 @@ pub fn execute_dag_with_checkpoint(
                 level_idx, &emit,
             ) {
                 Ok(nr) => {
-                    let node_type = dag.node_mut(node_idx).node_type();
-                    store.save_node_completed(dag_id, &node_name, node_type);
+                    let node = dag.node_mut(node_idx);
+                    let node_type_str = node.node_type().to_string();
+                    if node.can_undo() {
+                        if let Some(undo_ctx) = node.undo_context() {
+                            undo_stack.push((node_idx, undo_ctx));
+                        }
+                    }
+                    store.save_node_completed(dag_id, &node_name, &node_type_str);
                     results.push((node_name, nr));
                 }
                 Err(e) => {
+                    // Rollback completed nodes in reverse order
+                    rollback_undo_stack_by_idx(dag, &mut undo_stack, &emit);
                     store.save_node_failed(dag_id, &node_name, &e);
                     store.mark_failed(dag_id, &e);
                     emit(DagEvent::DagFailed { error: e.clone() });
@@ -545,6 +555,9 @@ fn execute_single_node(
 
     let start = Instant::now();
     let mut ctx = NodeContext::new(inputs);
+    if let Some(ref services) = dag.services {
+        ctx = ctx.with_services(Arc::clone(services));
+    }
     let node = dag.node_mut(node_idx);
 
     match node.execute(&mut ctx) {
@@ -658,11 +671,16 @@ fn execute_level_parallel(
     }
 
     // Submit each node as a task to the scheduler's thread pool
+    let services = dag.services.clone();
     let mut receivers = Vec::with_capacity(taken.len());
     for (node_idx, node_name, inputs, mut node_box) in taken {
+        let svc = services.clone();
         let rx = scheduler.submit_task(Priority::High, move || {
             let start = Instant::now();
             let mut ctx = NodeContext::new(inputs);
+            if let Some(s) = svc {
+                ctx = ctx.with_services(s);
+            }
             match node_box.execute(&mut ctx) {
                 Ok(()) => {
                     let duration_ms = start.elapsed().as_millis() as u64;
@@ -729,6 +747,40 @@ fn execute_level_parallel(
 
     level_results.extend(skipped_results);
     Ok(level_results)
+}
+
+// ---------------------------------------------------------------------------
+// Internal: rollback completed nodes on failure
+// ---------------------------------------------------------------------------
+
+fn rollback_undo_stack_by_idx(
+    dag: &mut Dag,
+    undo_stack: &mut Vec<(usize, Box<dyn std::any::Any + Send>)>,
+    emit: &dyn Fn(DagEvent),
+) {
+    while let Some((node_idx, undo_ctx)) = undo_stack.pop() {
+        let node_name = dag.node_name(node_idx).to_string();
+        let t0 = Instant::now();
+        match dag.node_mut(node_idx).undo(undo_ctx) {
+            Ok(()) => {
+                let ms = t0.elapsed().as_millis() as u64;
+                emit(DagEvent::NodeLog {
+                    node: node_name,
+                    node_type: String::new(),
+                    level: crate::node::LogLevel::Info,
+                    text: format!("undo completed in {}ms", ms),
+                });
+            }
+            Err(e) => {
+                emit(DagEvent::NodeLog {
+                    node: node_name,
+                    node_type: String::new(),
+                    level: crate::node::LogLevel::Error,
+                    text: format!("undo failed: {}", e),
+                });
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

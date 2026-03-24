@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::events::EventReceiver;
 use crate::node::{Node, PollNode, PollNodeAdapter};
@@ -35,9 +36,9 @@ pub struct Dag {
     edges: Vec<DagEdge>,
     pub(crate) taps: TapRegistry,
     /// Pre-loaded port data injected before execution.
-    /// Key: (node_name, port_name). These values appear as if
-    /// a source node produced them.
     pub(crate) initial_inputs: HashMap<(String, String), PortValue>,
+    /// Shared services accessible by nodes via ctx.service::<T>(key).
+    pub(crate) services: Option<Arc<crate::node::ServiceRegistry>>,
 }
 
 impl Dag {
@@ -47,7 +48,14 @@ impl Dag {
             edges: Vec::new(),
             taps: TapRegistry::new(),
             initial_inputs: HashMap::new(),
+            services: None,
         }
+    }
+
+    /// Set shared services accessible by nodes via `ctx.service::<T>(key)`.
+    pub fn with_services(mut self, services: Arc<crate::node::ServiceRegistry>) -> Self {
+        self.services = Some(services);
+        self
     }
 
     /// Pre-load a value as if a source node produced it on a port.

@@ -195,6 +195,11 @@ impl NodeContext {
         }
     }
 
+    pub(crate) fn with_services(mut self, services: Arc<ServiceRegistry>) -> Self {
+        self.services = Some(services);
+        self
+    }
+
     // -- inputs --
 
     /// Borrow an input value by port name.
