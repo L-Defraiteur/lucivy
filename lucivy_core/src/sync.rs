@@ -626,6 +626,235 @@ pub fn compute_shard_versions(base_path: &Path, num_shards: usize) -> Result<Vec
     Ok(versions)
 }
 
+// ── SyncServer ───────────────────────────────────────────────────────────────
+
+use std::collections::VecDeque;
+
+/// A version snapshot: version string + the segment IDs at that point.
+#[derive(Debug, Clone)]
+struct VersionEntry {
+    version: String,
+    segment_ids: HashSet<String>,
+}
+
+/// Server-side sync helper that tracks version history.
+///
+/// Keeps the last N versions so it can compute deltas for clients that are
+/// slightly behind. If a client's version is too old (not in history),
+/// the server returns a full snapshot response.
+///
+/// Works for both single-shard and sharded indexes.
+pub struct SyncServer {
+    /// Per-shard version histories. Key = shard index (0 for single-shard).
+    shard_histories: Vec<VecDeque<VersionEntry>>,
+    max_history: usize,
+    num_shards: usize,
+}
+
+/// What the server returns to a client sync request.
+pub enum SyncResponse {
+    /// Incremental delta — client can apply this.
+    Delta(IndexDelta),
+    /// Client version too old or unknown — needs a full snapshot.
+    FullSnapshot,
+    /// Shard is already up-to-date.
+    UpToDate,
+}
+
+/// What the server returns for a sharded sync request.
+pub enum ShardedSyncResponse {
+    /// Incremental sharded delta.
+    Delta(ShardedDelta),
+    /// At least one shard's version is too old — full snapshot needed.
+    FullSnapshot,
+    /// All requested shards are up-to-date.
+    UpToDate,
+}
+
+impl SyncServer {
+    /// Create a new SyncServer for a single-shard index.
+    pub fn new(max_history: usize) -> Self {
+        Self {
+            shard_histories: vec![VecDeque::with_capacity(max_history)],
+            max_history,
+            num_shards: 1,
+        }
+    }
+
+    /// Create a new SyncServer for a sharded index.
+    pub fn new_sharded(num_shards: usize, max_history: usize) -> Self {
+        let mut shard_histories = Vec::with_capacity(num_shards);
+        for _ in 0..num_shards {
+            shard_histories.push(VecDeque::with_capacity(max_history));
+        }
+        Self {
+            shard_histories,
+            max_history,
+            num_shards,
+        }
+    }
+
+    /// Number of shards this server tracks.
+    pub fn num_shards(&self) -> usize {
+        self.num_shards
+    }
+
+    /// Record a new version after a commit on a single-shard index.
+    pub fn on_commit(&mut self, handle: &LucivyHandle) -> Result<String, String> {
+        self.on_shard_commit(0, handle)
+    }
+
+    /// Record a new version after a commit on a specific shard.
+    pub fn on_shard_commit(
+        &mut self,
+        shard_id: usize,
+        handle: &LucivyHandle,
+    ) -> Result<String, String> {
+        if shard_id >= self.num_shards {
+            return Err(format!("shard_id {shard_id} >= num_shards {}", self.num_shards));
+        }
+
+        let meta_bytes = read_meta_bytes(&handle.index)?;
+        let version = compute_version_from_bytes(&meta_bytes);
+        let segment_ids = segment_ids_from_meta(&meta_bytes)?;
+
+        let history = &mut self.shard_histories[shard_id];
+
+        // Don't record duplicate consecutive versions.
+        if history.back().map(|e| &e.version) == Some(&version) {
+            return Ok(version);
+        }
+
+        if history.len() >= self.max_history {
+            history.pop_front();
+        }
+        history.push_back(VersionEntry { version: version.clone(), segment_ids });
+
+        Ok(version)
+    }
+
+    /// Current version of a shard (or the single index).
+    pub fn current_version(&self, shard_id: usize) -> Option<&str> {
+        self.shard_histories
+            .get(shard_id)
+            .and_then(|h| h.back())
+            .map(|e| e.version.as_str())
+    }
+
+    /// Compute the sync response for a single-shard client.
+    pub fn sync(
+        &self,
+        handle: &LucivyHandle,
+        index_path: &Path,
+        client_version: &str,
+    ) -> Result<SyncResponse, String> {
+        self.sync_shard(0, handle, index_path, client_version)
+    }
+
+    /// Compute the sync response for a specific shard.
+    pub fn sync_shard(
+        &self,
+        shard_id: usize,
+        handle: &LucivyHandle,
+        shard_path: &Path,
+        client_version: &str,
+    ) -> Result<SyncResponse, String> {
+        if shard_id >= self.num_shards {
+            return Err(format!("shard_id {shard_id} >= num_shards {}", self.num_shards));
+        }
+
+        let history = &self.shard_histories[shard_id];
+
+        // Check if client is already up-to-date.
+        if let Some(latest) = history.back() {
+            if latest.version == client_version {
+                return Ok(SyncResponse::UpToDate);
+            }
+        }
+
+        // Find client's version in history.
+        let client_entry = history.iter().find(|e| e.version == client_version);
+
+        match client_entry {
+            Some(entry) => {
+                let delta = export_delta(
+                    handle,
+                    shard_path,
+                    &entry.segment_ids,
+                    client_version,
+                )?;
+                Ok(SyncResponse::Delta(delta))
+            }
+            None => {
+                // Client version not in history — too old or unknown.
+                Ok(SyncResponse::FullSnapshot)
+            }
+        }
+    }
+
+    /// Compute the sync response for a sharded index.
+    ///
+    /// `shard_handles` is a slice of (shard_id, &LucivyHandle, shard_path).
+    /// `client_versions` is the per-shard versions from the client.
+    /// `requested_shards` filters which shards to include (None = all).
+    /// `shard_config` is included if provided (first sync or config change).
+    pub fn sync_sharded(
+        &self,
+        shard_handles: &[(usize, &LucivyHandle, &Path)],
+        client_versions: &[ShardVersion],
+        requested_shards: Option<&HashSet<usize>>,
+        shard_config: Option<Vec<u8>>,
+    ) -> Result<ShardedSyncResponse, String> {
+        let mut shard_deltas = Vec::new();
+        let mut any_full_snapshot = false;
+
+        for (shard_id, handle, shard_path) in shard_handles {
+            if let Some(requested) = requested_shards {
+                if !requested.contains(shard_id) {
+                    continue;
+                }
+            }
+
+            let client_sv = client_versions.iter().find(|sv| sv.shard_id == *shard_id);
+
+            match client_sv {
+                Some(sv) => {
+                    let resp = self.sync_shard(*shard_id, handle, shard_path, &sv.version)?;
+                    match resp {
+                        SyncResponse::Delta(delta) => {
+                            shard_deltas.push((*shard_id, delta));
+                        }
+                        SyncResponse::FullSnapshot => {
+                            any_full_snapshot = true;
+                            break;
+                        }
+                        SyncResponse::UpToDate => {} // skip
+                    }
+                }
+                None => {
+                    // Client doesn't have this shard — needs full export.
+                    let delta = export_delta(handle, shard_path, &HashSet::new(), "")?;
+                    shard_deltas.push((*shard_id, delta));
+                }
+            }
+        }
+
+        if any_full_snapshot {
+            return Ok(ShardedSyncResponse::FullSnapshot);
+        }
+
+        if shard_deltas.is_empty() {
+            return Ok(ShardedSyncResponse::UpToDate);
+        }
+
+        Ok(ShardedSyncResponse::Delta(ShardedDelta {
+            shard_deltas,
+            shard_config,
+            num_shards: self.num_shards,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1223,5 +1452,243 @@ mod tests {
 
         for h in &handles { h.close().unwrap(); }
         let _ = std::fs::remove_dir_all(&tmp_src);
+    }
+
+    // ── SyncServer tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_sync_server_single_shard() {
+        use crate::directory::StdFsDirectory;
+        use crate::handle::LucivyHandle;
+        use crate::query::SchemaConfig;
+
+        let tmp = std::env::temp_dir().join("lucivy_sync_server_single");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+            "fields": [{"name": "body", "type": "text", "stored": true}],
+            "sfx": false
+        })).unwrap();
+
+        let dir = StdFsDirectory::open(tmp.to_str().unwrap()).unwrap();
+        let handle = LucivyHandle::create(dir, &config).unwrap();
+        let body = handle.field("body").unwrap();
+        let nid = handle.field("_node_id").unwrap();
+
+        let mut server = SyncServer::new(10);
+
+        // Commit 1: 5 docs.
+        {
+            let mut g = handle.writer.lock().unwrap();
+            let w = g.as_mut().unwrap();
+            for i in 0u64..5 {
+                let mut doc = ld_lucivy::LucivyDocument::new();
+                doc.add_u64(nid, i);
+                doc.add_text(body, &format!("doc {i}"));
+                w.add_document(doc).unwrap();
+            }
+            w.commit().unwrap();
+        }
+        let v1 = server.on_commit(&handle).unwrap();
+
+        // Client arrives with v1 — should be up-to-date.
+        match server.sync(&handle, &tmp, &v1).unwrap() {
+            SyncResponse::UpToDate => {}
+            other => panic!("expected UpToDate, got {:?}", match other {
+                SyncResponse::Delta(_) => "Delta",
+                SyncResponse::FullSnapshot => "FullSnapshot",
+                _ => "unknown",
+            }),
+        }
+
+        // Commit 2: 5 more docs.
+        {
+            let mut g = handle.writer.lock().unwrap();
+            let w = g.as_mut().unwrap();
+            for i in 5u64..10 {
+                let mut doc = ld_lucivy::LucivyDocument::new();
+                doc.add_u64(nid, i);
+                doc.add_text(body, &format!("doc {i}"));
+                w.add_document(doc).unwrap();
+            }
+            w.commit().unwrap();
+        }
+        let v2 = server.on_commit(&handle).unwrap();
+        assert_ne!(v1, v2);
+
+        // Client with v1 — should get a delta.
+        match server.sync(&handle, &tmp, &v1).unwrap() {
+            SyncResponse::Delta(delta) => {
+                assert_eq!(delta.from_version, v1);
+                assert!(!delta.added_segments.is_empty());
+            }
+            _ => panic!("expected Delta"),
+        }
+
+        // Client with unknown version — should get FullSnapshot.
+        match server.sync(&handle, &tmp, "unknown_version").unwrap() {
+            SyncResponse::FullSnapshot => {}
+            _ => panic!("expected FullSnapshot"),
+        }
+
+        // Client with v2 — up-to-date.
+        match server.sync(&handle, &tmp, &v2).unwrap() {
+            SyncResponse::UpToDate => {}
+            _ => panic!("expected UpToDate"),
+        }
+
+        handle.close().unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_sync_server_history_overflow() {
+        use crate::directory::StdFsDirectory;
+        use crate::handle::LucivyHandle;
+        use crate::query::SchemaConfig;
+
+        let tmp = std::env::temp_dir().join("lucivy_sync_server_overflow");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+            "fields": [{"name": "body", "type": "text", "stored": true}],
+            "sfx": false
+        })).unwrap();
+
+        let dir = StdFsDirectory::open(tmp.to_str().unwrap()).unwrap();
+        let handle = LucivyHandle::create(dir, &config).unwrap();
+        let body = handle.field("body").unwrap();
+        let nid = handle.field("_node_id").unwrap();
+
+        // History of 3 — oldest version gets evicted.
+        let mut server = SyncServer::new(3);
+
+        let mut versions = Vec::new();
+        for batch in 0u64..5 {
+            let mut g = handle.writer.lock().unwrap();
+            let w = g.as_mut().unwrap();
+            let mut doc = ld_lucivy::LucivyDocument::new();
+            doc.add_u64(nid, batch);
+            doc.add_text(body, &format!("batch {batch}"));
+            w.add_document(doc).unwrap();
+            w.commit().unwrap();
+            drop(g);
+            versions.push(server.on_commit(&handle).unwrap());
+        }
+
+        // v0 and v1 should be evicted (only v2, v3, v4 remain).
+        match server.sync(&handle, &tmp, &versions[0]).unwrap() {
+            SyncResponse::FullSnapshot => {}
+            _ => panic!("v0 should be evicted → FullSnapshot"),
+        }
+        match server.sync(&handle, &tmp, &versions[1]).unwrap() {
+            SyncResponse::FullSnapshot => {}
+            _ => panic!("v1 should be evicted → FullSnapshot"),
+        }
+
+        // v2 should still be in history.
+        match server.sync(&handle, &tmp, &versions[2]).unwrap() {
+            SyncResponse::Delta(_) => {}
+            _ => panic!("v2 should still be in history → Delta"),
+        }
+
+        handle.close().unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_sync_server_sharded() {
+        use crate::directory::StdFsDirectory;
+        use crate::handle::LucivyHandle;
+        use crate::query::SchemaConfig;
+
+        let tmp = std::env::temp_dir().join("lucivy_sync_server_sharded");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let num_shards = 2;
+        let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+            "fields": [{"name": "body", "type": "text", "stored": true}],
+            "sfx": false
+        })).unwrap();
+
+        let mut handles = Vec::new();
+        let mut shard_paths = Vec::new();
+        for i in 0..num_shards {
+            let shard_dir = tmp.join(format!("shard_{i}"));
+            std::fs::create_dir_all(&shard_dir).unwrap();
+            let dir = StdFsDirectory::open(shard_dir.to_str().unwrap()).unwrap();
+            handles.push(LucivyHandle::create(dir, &config).unwrap());
+            shard_paths.push(shard_dir);
+        }
+
+        let mut server = SyncServer::new_sharded(num_shards, 10);
+
+        let body = handles[0].field("body").unwrap();
+        let nid = handles[0].field("_node_id").unwrap();
+
+        // Insert + commit on both shards.
+        for i in 0u64..10 {
+            let shard = (i as usize) % num_shards;
+            let mut g = handles[shard].writer.lock().unwrap();
+            let w = g.as_mut().unwrap();
+            let mut doc = ld_lucivy::LucivyDocument::new();
+            doc.add_u64(nid, i);
+            doc.add_text(body, &format!("doc {i}"));
+            w.add_document(doc).unwrap();
+        }
+        for (i, h) in handles.iter().enumerate() {
+            let mut g = h.writer.lock().unwrap();
+            g.as_mut().unwrap().commit().unwrap();
+            server.on_shard_commit(i, h).unwrap();
+        }
+
+        // Client has current versions — should be up-to-date.
+        let client_versions: Vec<ShardVersion> = (0..num_shards).map(|i| {
+            let v = server.current_version(i).unwrap().to_string();
+            let meta = std::fs::read(shard_paths[i].join("meta.json")).unwrap();
+            ShardVersion {
+                shard_id: i,
+                version: v,
+                segment_ids: segment_ids_from_meta(&meta).unwrap(),
+            }
+        }).collect();
+
+        let shard_refs: Vec<(usize, &LucivyHandle, &Path)> = handles.iter()
+            .enumerate()
+            .map(|(i, h)| (i, h, shard_paths[i].as_path()))
+            .collect();
+
+        match server.sync_sharded(&shard_refs, &client_versions, None, None).unwrap() {
+            ShardedSyncResponse::UpToDate => {}
+            _ => panic!("expected UpToDate"),
+        }
+
+        // Add docs only to shard 0.
+        {
+            let mut g = handles[0].writer.lock().unwrap();
+            let w = g.as_mut().unwrap();
+            for i in 100u64..105 {
+                let mut doc = ld_lucivy::LucivyDocument::new();
+                doc.add_u64(nid, i);
+                doc.add_text(body, &format!("new {i}"));
+                w.add_document(doc).unwrap();
+            }
+            w.commit().unwrap();
+        }
+        server.on_shard_commit(0, &handles[0]).unwrap();
+
+        // Client with old versions — should get delta for shard 0 only.
+        match server.sync_sharded(&shard_refs, &client_versions, None, None).unwrap() {
+            ShardedSyncResponse::Delta(sd) => {
+                assert_eq!(sd.shard_deltas.len(), 1);
+                assert_eq!(sd.shard_deltas[0].0, 0);
+            }
+            _ => panic!("expected Delta"),
+        }
+
+        for h in &handles { h.close().unwrap(); }
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
