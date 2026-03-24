@@ -64,55 +64,82 @@ Nécessaire car le destructeur C++ de rag3db (`~Database()`) ne cascade pas la d
 ### ngram/raw pairs — OK partout
 Tous les 6 bindings passent correctement `handle.raw_field_pairs` et `handle.ngram_field_pairs` à `build_query()` et auto-dupliquent les textes à l'insertion.
 
-## Features clés (ajouts récents au-dessus de Tantivy)
+## Features clés (au-dessus de Tantivy)
 
-### Query types
-- **contains** : recherche substring via SuffixContainsQuery. Utilise le suffix FST (.sfx) pour trouver tous les termes contenant le substring, puis le sfxpost pour les positions exactes. PAS de ngrams — le suffix FST gère tout. Cherche sur le champ RAW (lowercase only, pas stemmé).
-- **contains_split** : split par whitespace → boolean should de contains. Expansion faite dans chaque binding.
-- **startsWith** : prefix search via FST natif (AutomatonPhraseQuery). Dernier token = prefix (range FST puis prefix fuzzy DFA), tokens précédents = exact/fuzzy. Routing : single-token → FuzzyTermQuery::new_prefix, multi-token → AutomatonPhraseQuery::new_starts_with().
-- **startsWith_split** : même split que contains_split mais avec startsWith.
-- **fuzzy, regex, term, parse** : types standard lucivy exposés.
+### Query types exposés via build_query()
+- **term** : exact token match, term dict standard (0.2ms)
+- **phrase** : multi-token exact sequence (1-5ms, 2.5x faster than tantivy on 4-shard)
+- **fuzzy** : Levenshtein on term dict, standard tantivy behavior (2x faster on 4-shard)
+- **regex** : regex on term dict, standard tantivy behavior
+- **parse** : QueryParser ("mutex AND lock", "return error")
+- **contains** : substring search via SFX (lucivy exclusive, ~700ms on 90K)
+- **startsWith** : prefix search via SFX (lucivy exclusive)
+- **contains_split** / **startsWith_split** : whitespace split → boolean should
+- **phrase_prefix** : autocomplétion "mutex loc" → "mutex lock" (1ms)
+- **disjunction_max** : max score among sub-queries + tie_breaker
+- **more_like_this** : find similar docs by reference text (0.7ms)
+- **boolean** : must/should/must_not sub-queries
 
-### Suffix FST (.sfx) — moteur du contains
-Le suffix FST est le mécanisme central pour les recherches substring. Pas de ngrams.
+Note: `fuzzy` et `regex` top-level = tantivy behavior (term dict).
+Cross-token fuzzy/regex = `contains` + distance/regex params (SFX).
 
-**Construction** (segment_writer / merge) :
-- Pour chaque terme du term dict, génère TOUS les suffixes (offsets 0 à len)
-- Chaque suffixe est stocké avec `(raw_ordinal, si)` : ordinal du terme parent + offset
-- Partitionné en SI=0 (début de mot = startsWith) et SI>0 (substring)
-- Ex: "function" → suffixes: "function"(SI=0), "unction"(SI=1), "nction"(SI=2), etc.
+### SFX optionnel (`sfx: false`)
+SchemaConfig accepte `sfx: false` pour skip SFX build.
+- IndexSettings.sfx_enabled persisté dans meta.json
+- SegmentWriter skip SfxCollector, merger skip SFX merge naturellement
+- contains/startsWith retournent erreur explicite
+- Réduit taille index ~3-5x, indexation plus rapide
 
-**Recherche** (suffix_contains_query.rs) :
-- `prefix_walk(query)` sur les deux partitions du FST
-- Pour chaque match : resolve `raw_ordinal` → posting entries (doc_id, token_index, byte_from, byte_to)
-- Byte offsets ajustés : `byte_from + si` pour pointer dans le texte original
+### BM25 scoring — Arc<dyn Bm25StatisticsProvider>
+`EnableScoring::Enabled` porte un `Arc<dyn Bm25StatisticsProvider + Send + Sync>`.
+L'Arc est stockable dans les Weights, partageable across threads.
+- TermQuery, PhraseQuery : utilisent stats via EnableScoring (natif)
+- FuzzyTermQuery, RegexQuery, TermSetQuery : AutomatonWeight.stats (Arc)
+  + global_doc_freq() per matched term
+- MoreLikeThisQuery : stats_provider param for doc_freq/num_docs
+- SuffixContainsQuery : prescan global_doc_freq (séparé)
+- Score consistency : 5/5 single vs 4-shard (diff=0.0000)
 
-**Fichiers** :
-- `.sfx` : suffix FST + parent list + gapmap (par champ, par segment)
-- `.sfxpost` : posting entries indexées par ordinal (doc_id, token_index, offsets)
-- Pas de champs `._raw` ou `._ngram` séparés dans le schema
-- Le SfxCollector fait du double tokenization dans le segment_writer (RAW_TOKENIZER)
+### TermQuery — PAS de SFX
+TermQuery n'utilise plus sfxpost ni SFX fallback. Le term dict standard suffit.
+Highlights via WithFreqsAndPositionsAndOffsets du posting list standard.
 
-**GapMap** : stocke les séparateurs inter-tokens par doc pour la reconstruction du texte original lors des highlights multi-token.
+### AutomatonWeight — SFX conditionnel
+`collect_term_infos()` conditionné par `prefer_sfxpost`:
+- false (fuzzy/regex top-level) → term dict standard (rapide)
+- true (contains+regex) → SFX (nécessaire pour suffixes)
+`collect_term_infos` retourne `Vec<(Vec<u8>, TermInfo)>` pour global doc_freq lookup.
 
-### BM25 scoring pour AutomatonWeight
-`AutomatonWeight` (utilisé par startsWith, fuzzy, regex) supporte maintenant le BM25 scoring opt-in via `with_scoring(bool)`. 3 paths dans `scorer()` :
-- `highlight_sink` présent → WithFreqsAndPositionsAndOffsets + AutomatonScorer (le plus lent)
-- `scoring_enabled = true` → WithFreqs + AutomatonScorer (BM25)
-- `scoring_enabled = false` → Basic + ConstScorer (score = boost, fast path par défaut)
+### Search DAG conditionnel (BranchNode)
+```
+drain → flush → needs_prescan?
+                  ├── then → prescan_0..N ∥ → merge_prescan ─→ build_weight → search_0..N ∥ → merge
+                  └── else ──────────────────────────────────→ build_weight
+```
+Query construite AVANT le DAG (pas de DFA compilation dans le DAG).
+BranchNode skip prescan pour term/phrase/fuzzy/regex.
 
-Activé automatiquement via `EnableScoring::is_scoring_enabled()` dans `Query::weight()`. Propagé dans FuzzyTermQuery, RegexQuery, TermSetQuery.
+### luciole — framework DAG/Actor (crate séparé dans luciole/)
+Framework complet de threading :
+- **Actor** : trait `Actor<Msg=MyEnum>`, `Pool<M>`, `Scope`, `DrainMsg`
+- **DAG** : `Dag`, `Node`, `PollNode`, `execute_dag()`, `DagResult::take_output()`
+- **Flow control** : `SwitchNode` (N-way), `BranchNode` (2-way fn alias), `GateNode` (pass/block)
+- **Fan-out** : `MergeNode`, `Dag::fan_out_merge()`, `ScatterDAG`
+- **Streaming** : `StreamDag` (pipeline topology + topo drain) — validé en prod
+- **Services** : `ServiceRegistry` dans `NodeContext`, `Dag::with_services(Arc)`
+- **Undo** : `can_undo()`, `undo()`, `undo_context()` sur Node + rollback dans runtime
+- **Config** : `node_config()` pour checkpoint recovery
+- **Observabilité** : `subscribe_dag_events()`, `TapRegistry`, `CheckpointStore`
+- **Scheduler** : pool de threads persistants, WASM compatible
+- **Utilitaire** : `add_node_boxed()` pour Box<dyn Node>
 
-### luciole — framework de coordination (crate séparé dans luciole/)
-Framework complet de threading avec pool de threads persistants unifié :
-- **Actor** : trait `Actor<Msg=MyEnum>`, typed messages, `Pool<M>`, `Scope`, `DrainMsg`
-- **DAG** : `Dag`, `Node`, `PollNode`, `GraphNode`, `execute_dag()`, `DagResult::take_output()`
-- **Observabilité** : `subscribe_dag_events()`, `TapRegistry`, `display_progress()`, `CheckpointStore`
-- **Scheduler** : pool de threads persistants, `submit_task()`, `WorkItem` (Actor + Task unifié)
-- **WASM** : tout compatible via `wait_cooperative` + `run_one_step()`
-- **Commit** : DAG structurel (prepare → merges ∥ → finalize → save → gc → reload)
-- **Search** : DAG (drain → flush → build_weight → search_shard_N ∥ → merge_results)
-- **Merge sfx** : steps parallélisés (build_fst, copy_gapmap, merge_sfxpost via submit_task)
+Note: `BranchNode` est une FONCTION pas un struct : `BranchNode(|| cond)` pas `BranchNode::new()`
+
+### DiagBus
+`src/diag.rs` — event bus zero-cost (atomic fast-path).
+- `SearchMatch` + `SearchComplete` câblés dans `run_sfx_walk` (via segment_id param)
+- `TokenCaptured` câblé dans segment_writer
+- `SfxWalk`, `SfxResolve`, `SuffixAdded`, `MergeDocRemapped` : pas encore câblés
 
 ### Merger — offsets préservés
 Fix critique : le merger écrivait les postings sans offsets (write_doc au lieu de write_doc_with_offsets), causant un panic avec highlights sur segments mergés. Fichier : `src/indexer/merger.rs`.
@@ -125,14 +152,28 @@ Les NGramContainsQuery paniquaient sur les caractères multi-byte (accents, symb
 
 ## Tests
 
-- `cargo test` dans ld-lucivy : 1113+ tests
-- `cargo test` dans lucivy_core : 71+ tests (dont blob_directory 7 tests, blob_store 3 tests)
-- Les tests blob_directory utilisent `MemBlobStore` et vérifient create/search, close/reopen, WORM, isolation multi-index, survie après cleanup cache, multiple commits
+- `cargo test --lib` dans ld-lucivy : 1155 tests
+- Bench sharding : `bench_sharding.rs` (90K docs Linux kernel)
+  - `bench_query_times` : timing rapide toutes queries
+  - `ground_truth_exhaustive` : 37/37 checks (7 termes × 4 variantes + 2 splits)
+  - `test_score_consistency` : single vs 4-shard (5/5 diff=0.0000)
+  - `test_sfx_disabled` : sfx:false mode (toutes queries + erreur contains)
+  - `profile_regex_automaton_weight` : timing per-node AutomatonWeight
+- Bench vs tantivy : `bench_vs_tantivy.rs` (tantivy 0.25 dev-dependency)
+- IMPORTANT : toujours `> /tmp/fichier.txt 2>&1`, JAMAIS `| tail`
+- Lock files : `find ... -name "*.lock" -delete` avant réouverture
+
+Index persistés :
+- `/home/luciedefraiteur/lucivy_bench_sharding/single/` (90K, 1 shard)
+- `/home/luciedefraiteur/lucivy_bench_sharding/round_robin/` (90K, 4 shards)
+- `/home/luciedefraiteur/lucivy_bench_vs_tantivy/tantivy/` (90K, tantivy 0.25)
 
 ## Docs
 
-Les docs sont dans `docs/` organisés par dossier horodaté. Le plus récent : `13-mars-2026-16h47/`.
-Doc clé : `12-mars-2026-12h28/17-investigation-lock-file-et-architecture-blob-store.md`.
+Les docs sont dans `docs/` organisés par dossier horodaté.
+- `24-mars-2026-20h35/08-knowledge-dump-session-complete.md` — KNOWLEDGE DUMP COMPLET
+- `24-mars-2026-20h35/` — docs de la session courante (01-08)
+- `22-mars-2026-12h58/` — session précédente (01-06)
 
 ## Style
 
