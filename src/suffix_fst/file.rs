@@ -244,6 +244,14 @@ impl<'a> SfxFileReader<'a> {
             results.push((term, parents));
         }
 
+        crate::diag_emit!(crate::diag::DiagEvent::SfxWalk {
+            query: prefix.to_string(),
+            segment_id: String::new(),
+            si0_entries: if prefix_byte == super::builder::SI0_PREFIX { results.len() } else { 0 },
+            si_rest_entries: if prefix_byte != super::builder::SI0_PREFIX { results.len() } else { 0 },
+            total_parents: results.iter().map(|(_, p)| p.len()).sum(),
+        });
+
         results
     }
 

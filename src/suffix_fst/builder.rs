@@ -176,6 +176,12 @@ impl SuffixFstBuilder {
                 key,
                 ParentEntry { raw_ordinal, si: si as u16 },
             ));
+            crate::diag_emit!(crate::diag::DiagEvent::SuffixAdded {
+                token: token.to_string(),
+                ordinal: raw_ordinal,
+                suffix: suffix.to_string(),
+                si: si as u16,
+            });
         }
     }
 

@@ -116,6 +116,15 @@ where
             // Resolve parent ordinal to posting list entries
             let postings = raw_term_resolver(parent.raw_ordinal);
 
+            crate::diag_emit!(crate::diag::DiagEvent::SfxResolve {
+                query: query.to_string(),
+                segment_id: String::new(),
+                ordinal: parent.raw_ordinal as u32,
+                token: _suffix_term.clone(),
+                si: parent.si,
+                doc_count: postings.len(),
+            });
+
             for entry in &postings {
                 matches.push(SuffixContainsMatch {
                     doc_id: entry.doc_id,

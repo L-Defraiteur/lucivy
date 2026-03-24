@@ -766,6 +766,12 @@ impl IndexMerger {
                                     for e in reader.entries(old_ord) {
                                         if let Some(&new_doc) = reverse_doc_map[seg_ord].get(&e.doc_id) {
                                             merged.push((new_doc, e.token_index, e.byte_from, e.byte_to));
+                                            crate::diag_emit!(crate::diag::DiagEvent::MergeDocRemapped {
+                                                field_id: field.field_id(),
+                                                token: token.clone(),
+                                                old_doc_id: e.doc_id,
+                                                new_doc_id: new_doc,
+                                            });
                                         }
                                     }
                                 }
