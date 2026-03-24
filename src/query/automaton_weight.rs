@@ -9,7 +9,7 @@ use crate::docset::DocSet;
 use crate::fieldnorm::FieldNormReader;
 use crate::index::SegmentReader;
 use crate::postings::{Postings, TermInfo};
-use crate::query::bm25::Bm25Weight;
+use crate::query::bm25::{Bm25StatisticsProvider, Bm25Weight};
 use crate::query::phrase_query::scoring_utils::HighlightSink;
 use crate::query::posting_resolver::{PostingEntry, PostingResolver, build_resolver};
 use crate::docset::COLLECT_BLOCK_BUFFER_LEN;
@@ -62,10 +62,8 @@ pub struct AutomatonWeight<A> {
     prefer_sfxpost: bool,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
-    /// Global total_num_docs for cross-shard/segment BM25 consistency.
-    global_num_docs: Option<u64>,
-    /// Global total_num_tokens for average_fieldnorm consistency.
-    global_num_tokens: Option<u64>,
+    /// Global BM25 stats provider (Arc for cross-shard/segment consistency).
+    stats: Option<Arc<dyn Bm25StatisticsProvider + Send + Sync>>,
 }
 
 impl<A> AutomatonWeight<A>
@@ -83,8 +81,7 @@ where
             prefer_sfxpost: false,
             highlight_sink: None,
             highlight_field_name: String::new(),
-            global_num_docs: None,
-            global_num_tokens: None,
+            stats: None,
         }
     }
 
@@ -102,15 +99,13 @@ where
             prefer_sfxpost: false,
             highlight_sink: None,
             highlight_field_name: String::new(),
-            global_num_docs: None,
-            global_num_tokens: None,
+            stats: None,
         }
     }
 
-    /// Set global BM25 stats for cross-shard/segment consistency.
-    pub fn with_global_stats(mut self, num_docs: u64, num_tokens: u64) -> Self {
-        self.global_num_docs = Some(num_docs);
-        self.global_num_tokens = Some(num_tokens);
+    /// Set global BM25 stats provider (Arc for cross-shard/segment consistency).
+    pub fn with_stats(mut self, stats: Arc<dyn Bm25StatisticsProvider + Send + Sync>) -> Self {
+        self.stats = Some(stats);
         self
     }
 
@@ -219,11 +214,13 @@ where
     }
 
     /// Get BM25 stats: (total_num_docs, average_fieldnorm).
-    /// Uses global stats if available, otherwise falls back to per-segment.
+    /// Uses global stats provider if available, otherwise falls back to per-segment.
     fn bm25_stats(&self, inverted_index: &InvertedIndexReader, max_doc: u32) -> (u64, Score) {
-        let total_num_docs = self.global_num_docs
+        let total_num_docs = self.stats.as_ref()
+            .and_then(|s| s.total_num_docs().ok())
             .unwrap_or_else(|| (max_doc as u64).max(1));
-        let total_num_tokens = self.global_num_tokens
+        let total_num_tokens = self.stats.as_ref()
+            .and_then(|s| s.total_num_tokens(self.field).ok())
             .unwrap_or_else(|| inverted_index.total_num_tokens());
         let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
         (total_num_docs, average_fieldnorm)

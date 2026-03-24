@@ -108,12 +108,8 @@ impl RegexQuery {
 impl Query for RegexQuery {
     fn weight(&self, enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
         let mut weight = self.specialized_weight().with_scoring(enable_scoring.is_scoring_enabled());
-        if let EnableScoring::Enabled { stats: statistics_provider, .. } = &enable_scoring {
-            let num_docs = statistics_provider.total_num_docs().ok().unwrap_or(0);
-            let num_tokens = statistics_provider.total_num_tokens(self.field).ok().unwrap_or(0);
-            if num_docs > 0 {
-                weight = weight.with_global_stats(num_docs, num_tokens);
-            }
+        if let Some(stats) = enable_scoring.stats() {
+            weight = weight.with_stats(Arc::clone(stats));
         }
         Ok(Box::new(weight))
     }
