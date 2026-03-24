@@ -62,7 +62,7 @@ impl CachedSfxResult {
     }
 }
 
-use crate::tokenizer::{SimpleTokenizer, TextAnalyzer, LowerCaser, TokenStream};
+use crate::tokenizer::{CamelCaseSplitFilter, SimpleTokenizer, TextAnalyzer, LowerCaser, TokenStream};
 
 use super::suffix_contains;
 
@@ -93,6 +93,7 @@ fn count_tf_sorted(doc_ids: &[DocId]) -> Vec<(DocId, u32)> {
 /// Returns (["rust", "lang"], ["🦀"]) for "rust🦀lang".
 pub fn tokenize_query(query: &str) -> (Vec<String>, Vec<String>) {
     let mut tokenizer = TextAnalyzer::builder(SimpleTokenizer::default())
+        .filter(CamelCaseSplitFilter)
         .filter(LowerCaser)
         .build();
     let mut stream = tokenizer.token_stream(query);
