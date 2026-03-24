@@ -3,7 +3,7 @@ use std::collections::{BinaryHeap, HashMap};
 
 use tokenizer_api::Token;
 
-use crate::query::bm25::idf;
+use crate::query::bm25::{idf, Bm25StatisticsProvider};
 use crate::query::{BooleanQuery, BoostQuery, Occur, Query, TermQuery};
 use crate::schema::document::{Document, Value};
 use crate::schema::{Field, FieldType, IndexRecordOption, Term};
@@ -86,8 +86,9 @@ impl MoreLikeThis {
         &self,
         searcher: &Searcher,
         doc_address: DocAddress,
+        stats_provider: Option<&(dyn Bm25StatisticsProvider + Send + Sync)>,
     ) -> Result<BooleanQuery> {
-        let score_terms = self.retrieve_terms_from_doc_address(searcher, doc_address)?;
+        let score_terms = self.retrieve_terms_from_doc_address(searcher, doc_address, stats_provider)?;
         let query = self.create_query(score_terms);
         Ok(query)
     }
@@ -97,8 +98,9 @@ impl MoreLikeThis {
         &self,
         searcher: &Searcher,
         doc_fields: &[(Field, Vec<V>)],
+        stats_provider: Option<&(dyn Bm25StatisticsProvider + Send + Sync)>,
     ) -> Result<BooleanQuery> {
-        let score_terms = self.retrieve_terms_from_doc_fields(searcher, doc_fields)?;
+        let score_terms = self.retrieve_terms_from_doc_fields(searcher, doc_fields, stats_provider)?;
         let query = self.create_query(score_terms);
         Ok(query)
     }
@@ -128,11 +130,12 @@ impl MoreLikeThis {
         &self,
         searcher: &Searcher,
         doc_address: DocAddress,
+        stats_provider: Option<&(dyn Bm25StatisticsProvider + Send + Sync)>,
     ) -> Result<Vec<ScoreTerm>> {
         let doc = searcher.doc::<LucivyDocument>(doc_address)?;
 
         let field_to_values = doc.get_sorted_field_values();
-        self.retrieve_terms_from_doc_fields(searcher, &field_to_values)
+        self.retrieve_terms_from_doc_fields(searcher, &field_to_values, stats_provider)
     }
 
     /// Finds terms for a more-like-this query.
@@ -141,6 +144,7 @@ impl MoreLikeThis {
         &self,
         searcher: &Searcher,
         field_to_values: &[(Field, Vec<V>)],
+        stats_provider: Option<&(dyn Bm25StatisticsProvider + Send + Sync)>,
     ) -> Result<Vec<ScoreTerm>> {
         if field_to_values.is_empty() {
             return Err(LucivyError::InvalidArgument(
@@ -153,7 +157,7 @@ impl MoreLikeThis {
         for (field, values) in field_to_values {
             self.add_term_frequencies(searcher, *field, values, &mut field_to_term_freq_map)?;
         }
-        self.create_score_term(searcher, field_to_term_freq_map)
+        self.create_score_term(searcher, field_to_term_freq_map, stats_provider)
     }
 
     /// Computes the frequency of values for a field while updating the term frequencies
@@ -300,13 +304,16 @@ impl MoreLikeThis {
         &self,
         searcher: &Searcher,
         per_field_term_frequencies: HashMap<Term, usize>,
+        stats_provider: Option<&(dyn Bm25StatisticsProvider + Send + Sync)>,
     ) -> Result<Vec<ScoreTerm>> {
         let mut score_terms: BinaryHeap<Reverse<ScoreTerm>> = BinaryHeap::new();
-        let num_docs = searcher
-            .segment_readers()
-            .iter()
-            .map(|segment_reader| segment_reader.num_docs() as u64)
-            .sum::<u64>();
+        let num_docs = if let Some(provider) = stats_provider {
+            provider.total_num_docs().unwrap_or(0)
+        } else {
+            searcher.segment_readers().iter()
+                .map(|segment_reader| segment_reader.num_docs() as u64)
+                .sum::<u64>()
+        };
 
         for (term, term_frequency) in per_field_term_frequencies.iter() {
             // ignore terms with less than min_term_frequency
@@ -318,7 +325,11 @@ impl MoreLikeThis {
                 continue;
             }
 
-            let doc_freq = searcher.doc_freq(term)?;
+            let doc_freq = if let Some(provider) = stats_provider {
+                provider.doc_freq(term).unwrap_or(0)
+            } else {
+                searcher.doc_freq(term)?
+            };
 
             // ignore terms with less than min_doc_frequency
             if self

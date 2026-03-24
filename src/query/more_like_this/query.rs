@@ -45,17 +45,18 @@ impl MoreLikeThisQuery {
 
 impl Query for MoreLikeThisQuery {
     fn weight(&self, enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
-        let searcher = match enable_scoring {
-            EnableScoring::Enabled { searcher, .. } => searcher,
+        let (searcher, stats) = match &enable_scoring {
+            EnableScoring::Enabled { searcher, stats, .. } => (*searcher, Some(stats.clone())),
             EnableScoring::Disabled { .. } => {
                 let err = "MoreLikeThisQuery requires to enable scoring.".to_string();
                 return Err(crate::LucivyError::InvalidArgument(err));
             }
         };
+        let stats_ref = stats.as_deref();
         match &self.target {
             TargetDocument::DocumentAddress(doc_address) => self
                 .mlt
-                .query_with_document(searcher, *doc_address)?
+                .query_with_document(searcher, *doc_address, stats_ref)?
                 .weight(enable_scoring),
             TargetDocument::DocumentFields(doc_fields) => {
                 let values = doc_fields
@@ -64,7 +65,7 @@ impl Query for MoreLikeThisQuery {
                     .collect::<Vec<_>>();
 
                 self.mlt
-                    .query_with_document_fields(searcher, &values)?
+                    .query_with_document_fields(searcher, &values, stats_ref)?
                     .weight(enable_scoring)
             }
         }
