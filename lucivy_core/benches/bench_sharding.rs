@@ -1153,3 +1153,91 @@ fn test_sfx_disabled() {
     let _ = std::fs::remove_dir_all(test_dir);
     eprintln!("\n  All checks passed! ✓");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Score consistency: single-shard vs 4-shard top-1 scores must match
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_score_consistency_single_vs_sharded() {
+    let single_dir = format!("{}/single", BENCH_BASE);
+    let sharded_dir = format!("{}/round_robin", BENCH_BASE);
+
+    if !std::path::Path::new(&single_dir).exists() || !std::path::Path::new(&sharded_dir).join("_shard_config.json").exists() {
+        eprintln!("Skipping: need both single + round_robin indexes at {}", BENCH_BASE);
+        eprintln!("Run: BENCH_MODE=\"SINGLE|RR\" MAX_DOCS=90000 cargo test ...");
+        return;
+    }
+
+    // Open both indexes
+    let d = lucivy_core::directory::StdFsDirectory::open(&single_dir).unwrap();
+    let single = LucivyHandle::open(d).unwrap();
+    let lv1_ndocs = single.reader.searcher().num_docs();
+
+    for p in std::fs::read_dir(&sharded_dir).into_iter().flatten().flatten() {
+        if p.file_name().to_string_lossy().ends_with(".lock") {
+            let _ = std::fs::remove_file(p.path());
+        }
+    }
+    let sharded = ShardedHandle::open(&sharded_dir).unwrap();
+    let lv4_ndocs = sharded.num_docs();
+
+    eprintln!("\n=== Score consistency: single ({} docs) vs 4-shard ({} docs) ===\n",
+        lv1_ndocs, lv4_ndocs);
+
+    let queries: Vec<(&str, QueryConfig)> = vec![
+        ("term 'mutex'", QueryConfig {
+            query_type: "term".into(), field: Some("content".into()),
+            value: Some("mutex".into()), ..Default::default()
+        }),
+        ("phrase 'struct device'", QueryConfig {
+            query_type: "phrase".into(), field: Some("content".into()),
+            terms: Some(vec!["struct".into(), "device".into()]), ..Default::default()
+        }),
+        ("fuzzy 'schdule' d=1", QueryConfig {
+            query_type: "fuzzy".into(), field: Some("content".into()),
+            value: Some("schdule".into()), distance: Some(1), ..Default::default()
+        }),
+        ("regex 'mutex.*'", QueryConfig {
+            query_type: "regex".into(), field: Some("content".into()),
+            pattern: Some("mutex.*".into()), ..Default::default()
+        }),
+        ("parse 'mutex AND lock'", QueryConfig {
+            query_type: "parse".into(), field: Some("content".into()),
+            value: Some("mutex AND lock".into()), ..Default::default()
+        }),
+    ];
+
+    let mut pass = 0u32;
+    let mut fail = 0u32;
+    let tolerance = 0.01; // 1% score difference allowed
+
+    for (label, config) in &queries {
+        // Single shard: direct search
+        let q = query::build_query(config, &single.schema, &single.index, None).unwrap();
+        let searcher = single.reader.searcher();
+        let collector = ld_lucivy::collector::TopDocs::with_limit(1).order_by_score();
+        let single_results = searcher.search(&*q, &collector).unwrap();
+        let score_1 = single_results.first().map(|(s, _)| *s).unwrap_or(0.0);
+
+        // 4-shard: DAG search
+        let sharded_results = sharded.search(config, 1, None).unwrap();
+        let score_4 = sharded_results.first().map(|r| r.score).unwrap_or(0.0);
+
+        let diff = (score_1 - score_4).abs();
+        let rel_diff = if score_1 > 0.0 { diff / score_1 } else { diff };
+
+        if rel_diff <= tolerance {
+            pass += 1;
+            eprintln!("  {:<30} single={:.4}  4sh={:.4}  diff={:.4} ({:.1}%) ✓",
+                label, score_1, score_4, diff, rel_diff * 100.0);
+        } else {
+            fail += 1;
+            eprintln!("  {:<30} single={:.4}  4sh={:.4}  diff={:.4} ({:.1}%) FAIL",
+                label, score_1, score_4, diff, rel_diff * 100.0);
+        }
+    }
+
+    eprintln!("\n=== Score consistency: {} pass, {} fail ===", pass, fail);
+    assert_eq!(fail, 0, "{} score consistency checks FAILED", fail);
+}

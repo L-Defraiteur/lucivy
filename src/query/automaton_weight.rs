@@ -149,7 +149,8 @@ where
     /// Returns the term infos that match the automaton
     pub fn get_match_term_infos(&self, reader: &SegmentReader) -> crate::Result<Vec<TermInfo>> {
         let inverted_index = reader.inverted_index(self.field)?;
-        self.collect_term_infos(reader, &inverted_index)
+        Ok(self.collect_term_infos(reader, &inverted_index)?
+            .into_iter().map(|(_, ti)| ti).collect())
     }
 
     /// Collect matching TermInfos.
@@ -157,11 +158,12 @@ where
     ///   substring/contains queries where the automaton must match suffixes.
     /// - Standard path (prefer_sfxpost=false): walks the term dict FST,
     ///   for whole-token matching (fuzzy, regex on tokens). Same as tantivy.
+    /// Returns (term_bytes, TermInfo) pairs for global doc_freq lookup.
     fn collect_term_infos(
         &self,
         reader: &SegmentReader,
         inverted_index: &InvertedIndexReader,
-    ) -> crate::Result<Vec<TermInfo>> {
+    ) -> crate::Result<Vec<(Vec<u8>, TermInfo)>> {
         // SFX path: needed when matching suffixes (contains+regex)
         if self.prefer_sfxpost && self.json_path_bytes.is_none() {
             if let Some(sfx_data) = reader.sfx_file(self.field) {
@@ -174,7 +176,7 @@ where
                 return Ok(sfx_dict
                     .search_automaton(&adapter)
                     .into_iter()
-                    .map(|(_, ti)| ti)
+                    .map(|(term_str, ti)| (term_str.into_bytes(), ti))
                     .collect());
             }
         }
@@ -184,7 +186,7 @@ where
         let mut term_stream = self.automaton_stream(term_dict)?;
         let mut term_infos = Vec::new();
         while term_stream.advance() {
-            term_infos.push(term_stream.value().clone());
+            term_infos.push((term_stream.key().to_vec(), term_stream.value().clone()));
         }
         Ok(term_infos)
     }
@@ -321,12 +323,23 @@ where
         }
     }
 
+    /// Look up global doc_freq for a term via the stats provider.
+    /// Falls back to the per-segment doc_freq if no provider or lookup fails.
+    fn global_doc_freq(&self, term_bytes: &[u8], local_doc_freq: u32) -> u64 {
+        if let Some(ref stats) = self.stats {
+            let term = crate::schema::Term::from_field_bytes(self.field, term_bytes);
+            stats.doc_freq(&term).unwrap_or(local_doc_freq as u64)
+        } else {
+            local_doc_freq as u64
+        }
+    }
+
     /// Build scorer from TermInfos via the inverted index (fallback for segments without .sfx).
     fn scorer_from_term_infos(
         &self,
         reader: &SegmentReader,
         inverted_index: &InvertedIndexReader,
-        term_infos: &[TermInfo],
+        term_infos: &[(Vec<u8>, TermInfo)],
         fieldnorm_reader: &FieldNormReader,
         boost: Score,
         max_doc: u32,
@@ -340,9 +353,10 @@ where
                 let (total_num_docs, average_fieldnorm) = self.bm25_stats(inverted_index, max_doc);
                 let mut scores = vec![0.0f32; max_doc as usize];
 
-                for term_info in term_infos {
+                for (term_bytes, term_info) in term_infos {
+                    let doc_freq = self.global_doc_freq(term_bytes, term_info.doc_freq);
                     let bm25 = Bm25Weight::for_one_term_without_explain(
-                        term_info.doc_freq as u64,
+                        doc_freq,
                         total_num_docs,
                         average_fieldnorm,
                     );
@@ -375,7 +389,7 @@ where
                 let doc_bitset = BitSetDocSet::from(doc_bitset);
                 Ok(Box::new(AutomatonScorer::new(doc_bitset, scores, boost)))
             } else {
-                for term_info in term_infos {
+                for (_term_bytes, term_info) in term_infos {
                     let mut segment_postings = inverted_index.read_postings_from_terminfo(
                         term_info,
                         IndexRecordOption::WithFreqsAndPositionsAndOffsets,
@@ -407,9 +421,10 @@ where
             let (total_num_docs, average_fieldnorm) = self.bm25_stats(inverted_index, max_doc);
             let mut scores = vec![0.0f32; max_doc as usize];
 
-            for term_info in term_infos {
+            for (term_bytes, term_info) in term_infos {
+                let doc_freq = self.global_doc_freq(term_bytes, term_info.doc_freq);
                 let bm25 = Bm25Weight::for_one_term_without_explain(
-                    term_info.doc_freq as u64,
+                    doc_freq,
                     total_num_docs,
                     average_fieldnorm,
                 );
@@ -434,7 +449,7 @@ where
             let scorer = AutomatonScorer::new(doc_bitset, scores, boost);
             Ok(Box::new(scorer))
         } else {
-            for term_info in term_infos {
+            for (_term_bytes, term_info) in term_infos {
                 let mut block_segment_postings = inverted_index
                     .read_block_postings_from_terminfo(term_info, IndexRecordOption::Basic)?;
                 loop {
