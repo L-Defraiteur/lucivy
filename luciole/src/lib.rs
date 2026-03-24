@@ -16,8 +16,12 @@ pub mod runtime;
 pub mod scheduler;
 pub mod scope;
 pub mod branch;
+pub mod fan_out;
+pub mod gate;
 pub mod scatter;
-pub use branch::BranchNode;
+pub use branch::{BranchNode, SwitchNode};
+pub use fan_out::MergeNode;
+pub use gate::GateNode;
 pub use scatter::ScatterResults;
 pub mod stream_dag;
 

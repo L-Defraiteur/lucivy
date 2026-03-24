@@ -64,6 +64,14 @@ impl Dag {
         });
     }
 
+    /// Register a pre-boxed node in the DAG.
+    pub fn add_node_boxed(&mut self, name: &str, node: Box<dyn Node>) {
+        self.nodes.push(DagNodeEntry {
+            name: name.to_string(),
+            node,
+        });
+    }
+
     /// Register a poll-based node (long-running, cooperative yielding).
     /// Automatically wrapped in a `PollNodeAdapter`.
     pub fn add_poll_node(&mut self, name: &str, node: impl PollNode + 'static) {
