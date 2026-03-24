@@ -646,10 +646,15 @@ async function importFiles(fileList) {
       { name: 'content', type: 'text' },
     ]);
 
-    for (let i = 0; i < textFiles.length; i++) {
-      const { path, content } = textFiles[i];
-      await userIndex.add(i, { path, content });
-      userFiles.set(i, { path, content });
+    const BATCH = 5000;
+    for (let start = 0; start < textFiles.length; start += BATCH) {
+      const batch = textFiles.slice(start, start + BATCH).map((f, j) => {
+        const i = start + j;
+        userFiles.set(i, f);
+        return { docId: i, path: f.path, content: f.content };
+      });
+      statusEl.textContent = `Indexing ${textFiles.length} file(s)... ${Math.min(start + BATCH, textFiles.length)}/${textFiles.length}`;
+      await userIndex.addMany(batch);
     }
     await userIndex.commit();
     userNumDocs = await userIndex.numDocs();
@@ -910,15 +915,15 @@ async function cloneGitRepo() {
       { name: 'content', type: 'text' },
     ]);
 
-    const BATCH = 200;
-    for (let i = 0; i < textFiles.length; i++) {
-      const { path, content } = textFiles[i];
-      await userIndex.add(i, { path, content });
-      userFiles.set(i, { path, content });
-      if ((i + 1) % BATCH === 0) {
-        statusEl.textContent = `Indexing ${owner}/${repo}... ${i + 1}/${textFiles.length}`;
-        await userIndex.commit();
-      }
+    const BATCH = 5000;
+    for (let start = 0; start < textFiles.length; start += BATCH) {
+      const batch = textFiles.slice(start, start + BATCH).map((f, j) => {
+        const i = start + j;
+        userFiles.set(i, f);
+        return { docId: i, path: f.path, content: f.content };
+      });
+      statusEl.textContent = `Indexing ${owner}/${repo}... ${Math.min(start + BATCH, textFiles.length)}/${textFiles.length}`;
+      await userIndex.addMany(batch);
     }
     await userIndex.commit();
     userNumDocs = await userIndex.numDocs();
