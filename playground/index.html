@@ -203,13 +203,16 @@ window._allLogs = [];
     <label>
       Mode:
       <select id="mode">
-        <option value="startsWith">startsWith</option>
-        <option value="startsWith_split">startsWith (split)</option>
-        <option value="sfx_contains_split">sfx contains (split)</option>
-        <option value="sfx_contains">sfx contains</option>
-        <option value="contains_split">contains (split)</option>
+        <option value="contains_split" selected>contains (split)</option>
         <option value="contains">contains</option>
-        <option value="regex">contains + regex</option>
+        <option value="startsWith_split">startsWith (split)</option>
+        <option value="startsWith">startsWith</option>
+        <option value="regex">regex</option>
+        <option value="term">term</option>
+        <option value="phrase">phrase</option>
+        <option value="fuzzy">fuzzy</option>
+        <option value="phrase_prefix">phrase prefix</option>
+        <option value="parse">parse</option>
       </select>
     </label>
     <label>
@@ -218,6 +221,9 @@ window._allLogs = [];
     </label>
     <label>
       <input type="checkbox" id="highlights" checked> Highlights
+    </label>
+    <label>
+      <input type="checkbox" id="strictSeparators"> Strict separators
     </label>
     <label>
       Limit:
@@ -325,6 +331,7 @@ const queryEl = document.getElementById('query');
 const modeEl = document.getElementById('mode');
 const distanceEl = document.getElementById('distance');
 const highlightsEl = document.getElementById('highlights');
+const strictSepEl = document.getElementById('strictSeparators');
 const limitEl = document.getElementById('limit');
 const statusEl = document.getElementById('status');
 const resultsEl = document.getElementById('results');
@@ -419,11 +426,12 @@ tabUser.addEventListener('click', () => switchTab('user'));
 function buildQuery(text) {
   const mode = modeEl.value;
   const distance = parseInt(distanceEl.value) || 0;
+  const strict = strictSepEl.checked || undefined;
 
   if (mode === 'regex') {
-    return { type: 'contains', field: 'content', value: text, regex: true };
+    return { type: 'contains', field: 'content', value: text, regex: true, strict_separators: strict };
   }
-  return { type: mode, field: 'content', value: text, distance };
+  return { type: mode, field: 'content', value: text, distance, strict_separators: strict };
 }
 
 let searchGeneration = 0;
@@ -947,6 +955,7 @@ queryEl.addEventListener('keydown', (e) => {
 modeEl.addEventListener('change', doSearch);
 distanceEl.addEventListener('change', doSearch);
 highlightsEl.addEventListener('change', doSearch);
+strictSepEl.addEventListener('change', doSearch);
 limitEl.addEventListener('change', doSearch);
 
 dropZone.addEventListener('click', () => fileInput.click());

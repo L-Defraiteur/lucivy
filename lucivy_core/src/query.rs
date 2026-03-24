@@ -383,7 +383,8 @@ fn build_contains_query(
     let distance = config.distance.unwrap_or(0);
 
     let mut query = SuffixContainsQuery::new(field, value.to_lowercase())
-        .with_fuzzy_distance(distance);
+        .with_fuzzy_distance(distance)
+        .with_strict_separators(config.strict_separators.unwrap_or(false));
     if let Some(sink) = highlight_sink {
         let field_name = config.field.clone().unwrap_or_default();
         query = query.with_highlight_sink(sink, field_name);
