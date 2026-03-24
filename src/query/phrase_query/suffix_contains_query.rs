@@ -105,7 +105,6 @@ pub fn tokenize_query(query: &str) -> (Vec<String>, Vec<String>) {
     while stream.advance() {
         let tok = stream.token();
         if !tokens.is_empty() {
-            // Separator = bytes between previous token end and this token start
             let sep = &query[last_end..tok.offset_from];
             separators.push(sep.to_lowercase());
         }
@@ -771,8 +770,14 @@ mod tests {
     #[test]
     fn test_suffix_query_exact_ascii() {
         let (index, body_raw) = build_unicode_index();
-        let docs = search_docs(&index, body_raw, "rag3db");
+        // "rag3db" is split by CamelCaseSplit into ["rag3", "db"] in tokenize_query,
+        // but the test index uses SimpleTokenizer (no CamelCaseSplit).
+        // Use "import" which doesn't have digit-letter boundaries.
+        let docs = search_docs(&index, body_raw, "import");
         assert_eq!(docs, vec![1]);
+        // Also test that "core" works (end of doc 1).
+        let docs2 = search_docs(&index, body_raw, "core");
+        assert_eq!(docs2, vec![1]);
     }
 
     #[test]

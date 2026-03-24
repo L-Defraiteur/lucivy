@@ -279,7 +279,7 @@ mod tests {
             for i in 0u64..10 {
                 let mut doc = ld_lucivy::LucivyDocument::new();
                 doc.add_u64(nid1, i);
-                doc.add_text(body1, &format!("shard1 word_{i} common"));
+                doc.add_text(body1, &format!("shardone word_{i} common"));
                 w.add_document(doc).unwrap();
             }
             w.commit().unwrap();
@@ -297,7 +297,7 @@ mod tests {
             for i in 0u64..5 {
                 let mut doc = ld_lucivy::LucivyDocument::new();
                 doc.add_u64(nid2, 100 + i);
-                doc.add_text(body2, &format!("shard2 word_{i} common"));
+                doc.add_text(body2, &format!("shardtwo word_{i} common"));
                 w.add_document(doc).unwrap();
             }
             w.commit().unwrap();
@@ -315,12 +315,12 @@ mod tests {
         let term = Term::from_field_text(body1, "common");
         assert_eq!(stats.doc_freq(&term).unwrap(), 15);
 
-        // doc_freq("shard1") = 10 (only in shard 1)
-        let term_s1 = Term::from_field_text(body1, "shard1");
+        // doc_freq("shardone") = 10 (only in shard 1)
+        let term_s1 = Term::from_field_text(body1, "shardone");
         assert_eq!(stats.doc_freq(&term_s1).unwrap(), 10);
 
-        // doc_freq("shard2") = 5 (only in shard 2)
-        let term_s2 = Term::from_field_text(body1, "shard2");
+        // doc_freq("shardtwo") = 5 (only in shard 2)
+        let term_s2 = Term::from_field_text(body1, "shardtwo");
         assert_eq!(stats.doc_freq(&term_s2).unwrap(), 5);
     }
 }

@@ -186,15 +186,10 @@ fn split_and_merge(text: &str) -> Vec<(usize, usize)> {
     }
     merged.push((acc_start, acc_end));
 
-    // Backward merge: if last chunk < MIN_CHUNK_CHARS, merge into previous
-    if merged.len() > 1 {
-        let last = merged.last().unwrap();
-        let last_chars = text[last.0..last.1].chars().count();
-        if last_chars < MIN_CHUNK_CHARS {
-            let last = merged.pop().unwrap();
-            merged.last_mut().unwrap().1 = last.1;
-        }
-    }
+    // No backward merge: short last chunks stay separate.
+    // This gives consistent splits regardless of the last chunk length
+    // (e.g. "rag3db" → ["rag3", "db"], "rag3weaver" → ["rag3", "weaver"]).
+    // Short last tokens are handled fine by multi-token prefix matching in search.
 
     merged
 }
@@ -316,12 +311,15 @@ mod tests {
 
     #[test]
     fn test_rag3db() {
-        assert_eq!(split_token("rag3db"), vec!["rag3db"]);
+        // No backward merge: "db" stays separate.
+        assert_eq!(split_token("rag3db"), vec!["rag3", "db"]);
     }
 
     #[test]
     fn test_my_var_123() {
-        assert_eq!(split_token("myVar123"), vec!["myVar123"]);
+        // No backward merge: "123" stays separate.
+        assert_eq!(split_token("myVar"), vec!["myVar"]);
+        assert_eq!(split_token("myVar123"), vec!["myVar", "123"]);
     }
 
     #[test]
@@ -355,6 +353,7 @@ mod tests {
 
     #[test]
     fn test_get_x() {
+        // "get"(3<4) forward merges with "X" → "getX" (single token).
         assert_eq!(split_token("getX"), vec!["getX"]);
     }
 
@@ -434,4 +433,5 @@ mod tests {
         assert_eq!(positions[2], ("ById".into(), 2));
         assert_eq!(positions[3], ("world".into(), 3));
     }
+
 }
