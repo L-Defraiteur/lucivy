@@ -1241,3 +1241,56 @@ fn test_score_consistency_single_vs_sharded() {
     eprintln!("\n=== Score consistency: {} pass, {} fail ===", pass, fail);
     assert_eq!(fail, 0, "{} score consistency checks FAILED", fail);
 }
+
+#[test]
+fn profile_regex_automaton_weight() {
+    let single_dir = format!("{}/single", BENCH_BASE);
+    if !std::path::Path::new(&single_dir).exists() {
+        eprintln!("Skipping: need single index at {}", single_dir);
+        return;
+    }
+
+    let d = lucivy_core::directory::StdFsDirectory::open(&single_dir).unwrap();
+    let single = LucivyHandle::open(d).unwrap();
+    let ndocs = single.reader.searcher().num_docs();
+    eprintln!("\n=== Regex profiling on {} docs ===\n", ndocs);
+
+    // Subscribe to DiagBus to activate timing in AutomatonWeight
+    let _rx = ld_lucivy::diag::diag_bus().subscribe(ld_lucivy::diag::DiagFilter::All);
+
+    let regex_queries = vec![
+        ("mutex.*", "mutex.*"),
+        ("sched[a-z]+", "sched[a-z]+"),
+        ("print[kf]", "print[kf]"),
+    ];
+
+    for (label, pattern) in &regex_queries {
+        let config = QueryConfig {
+            query_type: "regex".into(), field: Some("content".into()),
+            pattern: Some(pattern.to_string()), ..Default::default()
+        };
+
+        // Warmup
+        let _ = time_single_query(&single, &config);
+
+        eprintln!("--- regex '{}' ---", label);
+        let t0 = Instant::now();
+        let q = query::build_query(&config, &single.schema, &single.index, None).unwrap();
+        let t_build = t0.elapsed();
+
+        let t1 = Instant::now();
+        let searcher = single.reader.searcher();
+        let collector = ld_lucivy::collector::TopDocs::with_limit(20).order_by_score();
+        let results = searcher.search(&*q, &collector).unwrap();
+        let t_search = t1.elapsed();
+
+        eprintln!("  build_query={:.3}ms  search={:.3}ms  total={:.3}ms  hits={}",
+            t_build.as_secs_f64() * 1000.0,
+            t_search.as_secs_f64() * 1000.0,
+            (t_build + t_search).as_secs_f64() * 1000.0,
+            results.len(),
+        );
+    }
+
+    ld_lucivy::diag::diag_bus().clear();
+}

@@ -268,8 +268,9 @@ fn time_tantivy_regex(index: &TvIndex, field_name: &str, pattern: &str) -> (usiz
 }
 
 fn time_lucivy_single(handle: &LucivyHandle, config: &QueryConfig) -> (usize, f64) {
-    let t0 = Instant::now();
+    // Build query BEFORE the timer — same as tantivy bench does.
     let query = query::build_query(config, &handle.schema, &handle.index, None).unwrap();
+    let t0 = Instant::now();
     let searcher = handle.reader.searcher();
     let collector = ld_lucivy::collector::TopDocs::with_limit(20).order_by_score();
     let results = searcher.search(&*query, &collector).unwrap();

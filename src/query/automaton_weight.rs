@@ -563,11 +563,27 @@ where
         }
 
         // Fallback: standard TermInfo path (no .sfx, e.g. JSON fields)
+        let t0 = std::time::Instant::now();
         let term_infos = self.collect_term_infos(reader, &inverted_index)?;
-        self.scorer_from_term_infos(
+        let t_collect = t0.elapsed();
+
+        let t1 = std::time::Instant::now();
+        let result = self.scorer_from_term_infos(
             reader, &inverted_index, &term_infos,
             &fieldnorm_reader, boost, max_doc,
-        )
+        );
+        let t_score = t1.elapsed();
+
+        if crate::diag::diag_bus().is_active() {
+            eprintln!("[automaton_weight] collect={:.3}ms ({} terms) score={:.3}ms max_doc={} has_stats={}",
+                t_collect.as_secs_f64() * 1000.0,
+                term_infos.len(),
+                t_score.as_secs_f64() * 1000.0,
+                max_doc,
+                self.stats.is_some(),
+            );
+        }
+        result
     }
 
     fn explain(&self, reader: &SegmentReader, doc: DocId) -> crate::Result<Explanation> {
