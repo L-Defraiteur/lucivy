@@ -190,6 +190,74 @@ pub fn segment_ids_from_meta(meta_bytes: &[u8]) -> Result<HashSet<String>, Strin
     Ok(ids)
 }
 
+// ── DeltaExporter trait ──────────────────────────────────────────────────────
+
+/// Trait for exporting deltas from any engine.
+///
+/// Each engine (lucivy, sparse_vector, etc.) implements this to describe
+/// how to read its current state. The generic `export_delta_from` function
+/// uses this to compute deltas without knowing engine internals.
+pub trait DeltaExporter {
+    /// List all bundle IDs in the current manifest (e.g. segment UUIDs).
+    fn current_bundle_ids(&self) -> Result<HashSet<String>, String>;
+
+    /// Read the raw manifest bytes (e.g. meta.json).
+    fn read_manifest(&self) -> Result<Vec<u8>, String>;
+
+    /// Read all files belonging to a specific bundle.
+    fn read_bundle_files(&self, bundle_id: &str) -> Result<Vec<(String, Vec<u8>)>, String>;
+
+    /// Read the optional config file (e.g. _config.json). None if not applicable.
+    fn read_config(&self) -> Option<Vec<u8>> { None }
+
+    /// Whether the index has uncommitted changes.
+    fn has_uncommitted(&self) -> bool { false }
+}
+
+/// Compute an IndexDelta from a DeltaExporter and a set of client bundle IDs.
+///
+/// Engine-agnostic: works for lucivy segments, sparse chunks, or any WORM bundles.
+pub fn export_delta_from(
+    exporter: &dyn DeltaExporter,
+    client_bundle_ids: &HashSet<String>,
+    client_version: &str,
+) -> Result<IndexDelta, String> {
+    if exporter.has_uncommitted() {
+        return Err("index has uncommitted changes — commit before export".into());
+    }
+
+    let manifest = exporter.read_manifest()?;
+    let to_version = crate::version::compute_version_from_bytes(&manifest);
+    let current_ids = exporter.current_bundle_ids()?;
+
+    // Added = in current but not in client.
+    let added_ids: Vec<&String> = current_ids.difference(client_bundle_ids).collect();
+    // Removed = in client but not in current.
+    let removed_ids: Vec<String> = client_bundle_ids.difference(&current_ids)
+        .cloned()
+        .collect();
+
+    let mut added_segments = Vec::with_capacity(added_ids.len());
+    for bundle_id in added_ids {
+        let files = exporter.read_bundle_files(bundle_id)?;
+        added_segments.push(SegmentBundle {
+            segment_id: bundle_id.clone(),
+            files,
+        });
+    }
+
+    let config = exporter.read_config();
+
+    Ok(IndexDelta {
+        from_version: client_version.to_string(),
+        to_version,
+        added_segments,
+        removed_segment_ids: removed_ids,
+        meta: manifest,
+        config,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,5 +313,77 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.contains("abc"));
         assert!(ids.contains("def"));
+    }
+
+    // ── DeltaExporter tests ──────────────────────────────────────────────
+
+    struct MockExporter {
+        bundle_ids: HashSet<String>,
+        manifest: Vec<u8>,
+        bundles: std::collections::HashMap<String, Vec<(String, Vec<u8>)>>,
+    }
+
+    impl DeltaExporter for MockExporter {
+        fn current_bundle_ids(&self) -> Result<HashSet<String>, String> {
+            Ok(self.bundle_ids.clone())
+        }
+        fn read_manifest(&self) -> Result<Vec<u8>, String> {
+            Ok(self.manifest.clone())
+        }
+        fn read_bundle_files(&self, bundle_id: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+            self.bundles.get(bundle_id)
+                .cloned()
+                .ok_or_else(|| format!("bundle {bundle_id} not found"))
+        }
+    }
+
+    #[test]
+    fn test_export_delta_from_added() {
+        let mut bundles = std::collections::HashMap::new();
+        bundles.insert("seg_new".into(), vec![("seg_new.data".into(), vec![1, 2, 3])]);
+
+        let exporter = MockExporter {
+            bundle_ids: ["seg_old".into(), "seg_new".into()].into(),
+            manifest: b"{\"v\":2}".to_vec(),
+            bundles,
+        };
+
+        let client_ids: HashSet<String> = ["seg_old".into()].into();
+        let delta = export_delta_from(&exporter, &client_ids, "v1").unwrap();
+
+        assert_eq!(delta.from_version, "v1");
+        assert_eq!(delta.added_segments.len(), 1);
+        assert_eq!(delta.added_segments[0].segment_id, "seg_new");
+        assert_eq!(delta.added_segments[0].files[0].1, vec![1, 2, 3]);
+        assert!(delta.removed_segment_ids.is_empty());
+    }
+
+    #[test]
+    fn test_export_delta_from_removed() {
+        let exporter = MockExporter {
+            bundle_ids: ["seg_b".into()].into(),
+            manifest: b"{}".to_vec(),
+            bundles: std::collections::HashMap::new(),
+        };
+
+        let client_ids: HashSet<String> = ["seg_a".into(), "seg_b".into()].into();
+        let delta = export_delta_from(&exporter, &client_ids, "v1").unwrap();
+
+        assert!(delta.added_segments.is_empty());
+        assert_eq!(delta.removed_segment_ids, vec!["seg_a"]);
+    }
+
+    #[test]
+    fn test_export_delta_from_uncommitted() {
+        struct UncommittedExporter;
+        impl DeltaExporter for UncommittedExporter {
+            fn current_bundle_ids(&self) -> Result<HashSet<String>, String> { Ok(HashSet::new()) }
+            fn read_manifest(&self) -> Result<Vec<u8>, String> { Ok(vec![]) }
+            fn read_bundle_files(&self, _: &str) -> Result<Vec<(String, Vec<u8>)>, String> { Ok(vec![]) }
+            fn has_uncommitted(&self) -> bool { true }
+        }
+
+        let err = export_delta_from(&UncommittedExporter, &HashSet::new(), "").unwrap_err();
+        assert!(err.contains("uncommitted"));
     }
 }

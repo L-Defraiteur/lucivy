@@ -18,7 +18,7 @@ pub use lucistore::fs_utils::{apply_delta, apply_sharded_delta, read_directory_f
 pub use lucistore::sync_server::*;
 pub use lucistore::version::*;
 
-// ── Lucivy-specific functions ────────────────────────────────────────────────
+// ── LucivyDeltaExporter ──────────────────────────────────────────────────────
 
 /// Read raw meta.json bytes from an index's directory.
 fn read_meta_bytes(index: &Index) -> Result<Vec<u8>, String> {
@@ -33,65 +33,66 @@ pub fn compute_version(handle: &LucivyHandle) -> Result<String, String> {
     Ok(compute_version_from_bytes(&meta_bytes))
 }
 
-/// Export a delta from the current index state vs. a known set of client segment IDs.
+/// DeltaExporter implementation for a lucivy index.
 ///
-/// Reads segment files from disk via `SegmentMeta::list_files()`.
+/// Wraps a LucivyHandle + its filesystem path to provide the generic
+/// export interface. Reads segment files via `SegmentMeta::list_files()`.
+pub struct LucivyDeltaExporter<'a> {
+    pub handle: &'a LucivyHandle,
+    pub index_path: &'a Path,
+}
+
+impl<'a> DeltaExporter for LucivyDeltaExporter<'a> {
+    fn current_bundle_ids(&self) -> Result<HashSet<String>, String> {
+        let meta = self.handle.index.load_metas()
+            .map_err(|e| format!("cannot load index metas: {e}"))?;
+        Ok(meta.segments.iter().map(|s| s.id().uuid_string()).collect())
+    }
+
+    fn read_manifest(&self) -> Result<Vec<u8>, String> {
+        read_meta_bytes(&self.handle.index)
+    }
+
+    fn read_bundle_files(&self, bundle_id: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+        let meta = self.handle.index.load_metas()
+            .map_err(|e| format!("cannot load index metas: {e}"))?;
+        let seg_meta = meta.segments.iter()
+            .find(|s| s.id().uuid_string() == bundle_id)
+            .ok_or_else(|| format!("segment {bundle_id} not found in meta"))?;
+
+        let mut files = Vec::new();
+        for rel_path in seg_meta.list_files() {
+            let full_path = self.index_path.join(&rel_path);
+            if full_path.exists() {
+                let name = rel_path.to_string_lossy().to_string();
+                let data = std::fs::read(&full_path)
+                    .map_err(|e| format!("cannot read '{}': {e}", full_path.display()))?;
+                files.push((name, data));
+            }
+        }
+        Ok(files)
+    }
+
+    fn read_config(&self) -> Option<Vec<u8>> {
+        std::fs::read(self.index_path.join("_config.json")).ok()
+    }
+
+    fn has_uncommitted(&self) -> bool {
+        self.handle.has_uncommitted()
+    }
+}
+
+/// Export a delta from a LucivyHandle.
+///
+/// Convenience wrapper around `export_delta_from` + `LucivyDeltaExporter`.
 pub fn export_delta(
     handle: &LucivyHandle,
     index_path: &Path,
     client_segment_ids: &HashSet<String>,
     client_version: &str,
 ) -> Result<IndexDelta, String> {
-    if handle.has_uncommitted() {
-        return Err("index has uncommitted changes — commit before export".into());
-    }
-
-    let meta_bytes = read_meta_bytes(&handle.index)?;
-    let to_version = compute_version_from_bytes(&meta_bytes);
-
-    let meta = handle.index.load_metas()
-        .map_err(|e| format!("cannot load index metas: {e}"))?;
-    let current_ids: HashSet<String> = meta.segments.iter()
-        .map(|s| s.id().uuid_string())
-        .collect();
-
-    let added_ids: Vec<&String> = current_ids.difference(client_segment_ids).collect();
-    let removed_ids: Vec<String> = client_segment_ids.difference(&current_ids)
-        .cloned()
-        .collect();
-
-    let mut added_segments = Vec::with_capacity(added_ids.len());
-    for seg_id_str in &added_ids {
-        let seg_meta = meta.segments.iter()
-            .find(|s| &s.id().uuid_string() == *seg_id_str)
-            .ok_or_else(|| format!("segment {} not found in meta", seg_id_str))?;
-
-        let mut files = Vec::new();
-        for rel_path in seg_meta.list_files() {
-            let full_path = index_path.join(&rel_path);
-            if full_path.exists() {
-                let name = rel_path.to_string_lossy().to_string();
-                let data = std::fs::read(&full_path)
-                    .map_err(|e| format!("cannot read segment file '{}': {e}", full_path.display()))?;
-                files.push((name, data));
-            }
-        }
-        added_segments.push(SegmentBundle {
-            segment_id: (*seg_id_str).clone(),
-            files,
-        });
-    }
-
-    let config = std::fs::read(index_path.join("_config.json")).ok();
-
-    Ok(IndexDelta {
-        from_version: client_version.to_string(),
-        to_version,
-        added_segments,
-        removed_segment_ids: removed_ids,
-        meta: meta_bytes,
-        config,
-    })
+    let exporter = LucivyDeltaExporter { handle, index_path };
+    export_delta_from(&exporter, client_segment_ids, client_version)
 }
 
 /// Export a sharded delta from multiple shard handles.
