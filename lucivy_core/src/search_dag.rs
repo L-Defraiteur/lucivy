@@ -251,21 +251,16 @@ impl Node for MergePrescanNode {
 
 pub(crate) struct BuildWeightNode {
     shards: Vec<Arc<LucivyHandle>>,
-    schema: Schema,
-    index: Index,
-    query_config: QueryConfig,
-    highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
+    /// Pre-built query (constructed once before the DAG, not inside it).
+    query: Box<dyn ld_lucivy::query::Query>,
 }
 
 impl BuildWeightNode {
     pub fn new(
         shards: Vec<Arc<LucivyHandle>>,
-        schema: Schema,
-        index: Index,
-        query_config: QueryConfig,
-        highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
+        query: Box<dyn ld_lucivy::query::Query>,
     ) -> Self {
-        Self { shards, schema, index, query_config, highlight_sink }
+        Self { shards, query }
     }
 }
 
@@ -289,23 +284,17 @@ impl Node for BuildWeightNode {
             .and_then(|v| v.take::<PrescanResult>())
             .unwrap_or_default();
 
-        // Build query once (with highlights)
-        let mut query = crate::query::build_query(
-            &self.query_config, &self.schema, &self.index,
-            self.highlight_sink.clone(),
-        )?;
-
-        // Inject prescan results into the query
+        // Inject prescan results into the pre-built query
         if !merged_freqs.is_empty() {
-            query.set_global_contains_doc_freqs(&merged_freqs);
-            query.inject_prescan_cache(merged_cache);
+            self.query.set_global_contains_doc_freqs(&merged_freqs);
+            self.query.inject_prescan_cache(merged_cache);
         }
 
         let searcher_0 = self.shards[0].reader.searcher();
         let enable_scoring = ld_lucivy::query::EnableScoring::enabled_from_statistics_provider(
             Arc::new(global_stats), &searcher_0,
         );
-        let weight: Arc<dyn Weight> = query
+        let weight: Arc<dyn Weight> = self.query
             .weight(enable_scoring)
             .map_err(|e| format!("weight: {e}"))?
             .into();
@@ -441,13 +430,12 @@ pub(crate) fn build_search_dag(
     let mut dag = Dag::new();
     let num_shards = shards.len();
 
-    // Build the query once to extract prescan params (single source of truth).
-    // The query is built again in BuildWeightNode with the same config, but
-    // this ensures prescan uses the exact same field/continuation/fuzzy settings.
-    let probe_query = crate::query::build_query(
-        query_config, schema, &shards[0].index, None,
+    // Build the query once BEFORE the DAG — avoids DFA/regex compilation inside the DAG.
+    // Same query is used for prescan params extraction AND weight compilation.
+    let query = crate::query::build_query(
+        query_config, schema, &shards[0].index, highlight_sink,
     )?;
-    let prescan_params = probe_query.sfx_prescan_params();
+    let prescan_params = query.sfx_prescan_params();
 
     let needs_prescan = !prescan_params.is_empty();
 
@@ -481,10 +469,7 @@ pub(crate) fn build_search_dag(
     // build_weight: receives prescan from "then" path OR trigger from "else" path
     dag.add_node("build_weight", BuildWeightNode::new(
         shards.to_vec(),
-        schema.clone(),
-        shards[0].index.clone(),
-        query_config.clone(),
-        highlight_sink,
+        query,
     ));
     dag.connect("merge_prescan", "merged", "build_weight", "prescan")?;
     dag.connect("needs_prescan", "else", "build_weight", "trigger")?;
