@@ -436,7 +436,7 @@ pub(crate) fn build_search_dag(
     dag.connect("drain", "done", "flush", "trigger")?;
 
     // flush → branch: needs prescan?
-    dag.add_node("needs_prescan", luciole::BranchNode::new(move || needs_prescan));
+    dag.add_node("needs_prescan", luciole::BranchNode(move || needs_prescan));
     dag.connect("flush", "done", "needs_prescan", "trigger")?;
 
     // "then" path: prescan_0..N ∥ → merge_prescan → build_weight

@@ -109,6 +109,17 @@ impl<M> ActorRef<M> {
     }
 }
 
+impl<M: Send + 'static> crate::scope::Drainable for ActorRef<M>
+where M: From<crate::pool::DrainMsg>
+{
+    fn drain(&self, label: &str) {
+        let _ = self.request(
+            |r| M::from(crate::pool::DrainMsg(r)),
+            label,
+        );
+    }
+}
+
 /// Crée une paire (Mailbox, ActorRef) avec un channel bounded.
 /// Le WakeHandle sera attaché par le scheduler au spawn.
 pub fn mailbox<M>(capacity: usize) -> (Mailbox<M>, ActorRef<M>) {
