@@ -131,6 +131,9 @@ pub struct SuffixContainsQuery {
     highlight_field_name: String,
     /// If true, use continuation DFA to match across token boundaries.
     continuation: bool,
+    /// If true, validate separators via GapMap in multi-token mode.
+    /// If false (default), just check consecutive token positions — ignores gaps.
+    strict_separators: bool,
     /// Pre-scanned cache from prescan() — keyed by SegmentId.
     prescan_cache: Option<HashMap<SegmentId, CachedSfxResult>>,
     /// Global doc_freq from prescan aggregation.
@@ -151,6 +154,7 @@ impl SuffixContainsQuery {
             highlight_sink: None,
             highlight_field_name: String::new(),
             continuation: false,
+            strict_separators: false,
             prescan_cache: None,
             global_doc_freq: None,
         }
@@ -196,6 +200,7 @@ impl SuffixContainsQuery {
                 &sfx_reader, &resolver, &self.query_text,
                 &query_tokens, &query_separators,
                 self.fuzzy_distance, self.prefix_only, self.continuation,
+                self.strict_separators,
                 Some(&seg_str),
             );
 
@@ -244,6 +249,14 @@ impl SuffixContainsQuery {
         self
     }
 
+    /// Enable strict separator validation in multi-token mode.
+    /// When true, GapMap separators must match the query separators.
+    /// When false (default), just check consecutive token positions.
+    pub fn with_strict_separators(mut self, enabled: bool) -> Self {
+        self.strict_separators = enabled;
+        self
+    }
+
     /// Set fuzzy Levenshtein distance (0 = exact).
     pub fn with_fuzzy_distance(mut self, distance: u8) -> Self {
         self.fuzzy_distance = distance;
@@ -272,6 +285,7 @@ pub fn run_sfx_walk<F>(
     fuzzy_distance: u8,
     prefix_only: bool,
     continuation: bool,
+    strict_separators: bool,
     segment_id: Option<&str>,
 ) -> (Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)
 where
@@ -299,7 +313,14 @@ where
         (hl, ids)
     } else {
         let token_refs: Vec<&str> = query_tokens.iter().map(|s| s.as_str()).collect();
-        let sep_refs: Vec<&str> = query_separators.iter().map(|s| s.as_str()).collect();
+        // When strict_separators is false, pass empty separators so multi-token
+        // skips GapMap validation and just checks consecutive token positions.
+        let empty_seps: Vec<String> = vec![String::new(); query_separators.len()];
+        let sep_refs: Vec<&str> = if strict_separators {
+            query_separators.iter().map(|s| s.as_str()).collect()
+        } else {
+            empty_seps.iter().map(|s| s.as_str()).collect()
+        };
         let matches = if fuzzy_distance == 0 {
             if prefix_only {
                 suffix_contains::suffix_contains_multi_token_prefix(sfx_reader, &token_refs, &sep_refs, resolver)
@@ -397,6 +418,7 @@ impl Query for SuffixContainsQuery {
             prefix_only: self.prefix_only,
             fuzzy_distance: self.fuzzy_distance,
             continuation: self.continuation,
+            strict_separators: self.strict_separators,
         }]
     }
 
@@ -436,6 +458,7 @@ impl Query for SuffixContainsQuery {
             global_num_docs,
             global_num_tokens,
             continuation: self.continuation,
+            strict_separators: self.strict_separators,
             prescan_cache,
             global_doc_freq,
         }))
@@ -455,6 +478,7 @@ struct SuffixContainsWeight {
     /// Global total_num_tokens for the field (for average_fieldnorm consistency).
     global_num_tokens: u64,
     continuation: bool,
+    strict_separators: bool,
     /// Pre-scanned cache: segment_id → (doc_tf, highlights). Populated by prescan().
     prescan_cache: HashMap<SegmentId, CachedSfxResult>,
     /// Global doc_freq from prescan (correct IDF across all segments/shards).
@@ -561,6 +585,7 @@ impl Weight for SuffixContainsWeight {
             &sfx_reader, &resolver, &self.query_text,
             &query_tokens, &query_separators,
             self.fuzzy_distance, self.prefix_only, self.continuation,
+            self.strict_separators,
             Some(&seg_str),
         );
 

@@ -172,6 +172,7 @@ impl Node for PrescanShardNode {
                     &sfx_reader, &resolver, &param.query_text,
                     &tokens, &seps,
                     param.fuzzy_distance, param.prefix_only, param.continuation,
+                    param.strict_separators,
                     Some(&seg_str),
                 );
 

@@ -237,6 +237,8 @@ pub struct SfxPrescanParam {
     pub fuzzy_distance: u8,
     /// If true, use continuation DFA for cross-token matching.
     pub continuation: bool,
+    /// If true, validate separators via GapMap in multi-token mode.
+    pub strict_separators: bool,
 }
 
 /// Implements `box_clone`.

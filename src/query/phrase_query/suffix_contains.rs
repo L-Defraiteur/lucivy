@@ -687,29 +687,34 @@ where
             continue;
         }
 
-        // Step 4: Validate separators via GapMap
-        let mut seps_valid = true;
-        for sep_idx in 0..query_separators.len() {
-            let ti_a = first_ti + sep_idx as u32;
-            let ti_b = ti_a + 1;
-            let expected_sep = query_separators[sep_idx].as_bytes();
+        // Step 4: Validate separators via GapMap (skip if all separators are empty —
+        // this happens when the query was split by CamelCaseSplit with no whitespace,
+        // e.g. "rag3weaver" → ["rag3", "weaver"] with separator "").
+        let all_seps_empty = query_separators.iter().all(|s| s.is_empty());
+        if !all_seps_empty {
+            let mut seps_valid = true;
+            for sep_idx in 0..query_separators.len() {
+                let ti_a = first_ti + sep_idx as u32;
+                let ti_b = ti_a + 1;
+                let expected_sep = query_separators[sep_idx].as_bytes();
 
-            match gapmap.read_separator(doc_id, ti_a, ti_b) {
-                Some(actual_sep) => {
-                    if !separator_matches_fuzzy(actual_sep, expected_sep, fuzzy_distance) {
+                match gapmap.read_separator(doc_id, ti_a, ti_b) {
+                    Some(actual_sep) => {
+                        if !separator_matches_fuzzy(actual_sep, expected_sep, fuzzy_distance) {
+                            seps_valid = false;
+                            break;
+                        }
+                    }
+                    None => {
                         seps_valid = false;
                         break;
                     }
                 }
-                None => {
-                    seps_valid = false;
-                    break;
-                }
             }
-        }
 
-        if !seps_valid {
-            continue;
+            if !seps_valid {
+                continue;
+            }
         }
 
         // Build the multi-match result
