@@ -83,8 +83,21 @@ export class Lucivy {
         });
     }
 
-    async create(path, fields, stemmer) {
-        await this._call('create', { path, fields, stemmer });
+    /**
+     * Create a new index.
+     * @param {string} path
+     * @param {Array|Object} fieldsOrConfig — either a fields array or a full SchemaConfig
+     *   Full config: { fields: [...], sfx: false, tokenizer: "english", ... }
+     *   Legacy: [{ name: "body", type: "text" }]
+     */
+    async create(path, fieldsOrConfig) {
+        const isConfig = !Array.isArray(fieldsOrConfig) && typeof fieldsOrConfig === 'object'
+            && fieldsOrConfig.fields;
+        if (isConfig) {
+            await this._call('create', { path, config: fieldsOrConfig });
+        } else {
+            await this._call('create', { path, fields: fieldsOrConfig });
+        }
         return new LucivyIndex(this, path);
     }
 

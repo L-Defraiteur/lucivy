@@ -235,11 +235,17 @@ self.onmessage = async (e) => {
             }
 
             case 'create': {
-                const { path, fields, stemmer } = args;
-                const fieldsJson = typeof fields === 'string' ? fields : JSON.stringify(fields);
+                const { path, fields, config, stemmer } = args;
+                // Support both legacy (fields array) and new (full config object).
+                let configJson;
+                if (config) {
+                    configJson = typeof config === 'string' ? config : JSON.stringify(config);
+                } else {
+                    configJson = typeof fields === 'string' ? fields : JSON.stringify(fields);
+                }
                 const ctx = await Module.ccall('lucivy_create', 'number',
-                    ['string', 'string', 'string'],
-                    [path, fieldsJson, stemmer || ''], { async: true });
+                    ['string', 'string'],
+                    [path, configJson], { async: true });
                 if (!ctx) throw new Error('lucivy_create returned null');
                 indexes.set(path, ctx);
 

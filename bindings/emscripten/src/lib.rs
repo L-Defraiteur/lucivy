@@ -217,24 +217,33 @@ unsafe fn str_from_ptr<'a>(ptr: *const c_char) -> &'a str {
 
 /// Create a new index.
 /// Returns opaque pointer to LucivyContext, or null on error.
-/// `error_out` receives error message if non-null and creation fails.
+///
+/// `config_json` accepts either:
+/// - A full SchemaConfig object: `{"fields":[...], "sfx": false, ...}`
+/// - A plain fields array (legacy): `[{"name":"body","type":"text"}]`
 #[no_mangle]
 pub unsafe extern "C" fn lucivy_create(
     path: *const c_char,
-    fields_json: *const c_char,
+    config_json: *const c_char,
 ) -> *mut LucivyContext {
     let path = str_from_ptr(path);
-    let fields_json = str_from_ptr(fields_json);
+    let config_json = str_from_ptr(config_json);
 
-    let fields: Vec<query::FieldDef> = match serde_json::from_str(fields_json) {
-        Ok(f) => f,
-        Err(_) => return std::ptr::null_mut(),
-    };
-
-    let config = query::SchemaConfig {
-        fields,
-        tokenizer: None,
-        ..Default::default()
+    // Try parsing as full SchemaConfig first, then fall back to fields-only array.
+    let config: query::SchemaConfig = match serde_json::from_str(config_json) {
+        Ok(c) => c,
+        Err(_) => {
+            // Legacy: parse as plain fields array.
+            let fields: Vec<query::FieldDef> = match serde_json::from_str(config_json) {
+                Ok(f) => f,
+                Err(_) => return std::ptr::null_mut(),
+            };
+            query::SchemaConfig {
+                fields,
+                tokenizer: None,
+                ..Default::default()
+            }
+        }
     };
 
     let directory = MemoryDirectory::new();
