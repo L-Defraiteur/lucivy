@@ -37,16 +37,12 @@ type PrescanResult = (
 // ---------------------------------------------------------------------------
 
 pub(crate) struct DrainNode {
-    reader_pool: luciole::Pool<super::sharded_handle::ReaderMsg>,
-    router_ref: luciole::ActorRef<super::sharded_handle::RouterMsg>,
+    pipeline: Arc<luciole::StreamDag>,
 }
 
 impl DrainNode {
-    pub fn new(
-        reader_pool: luciole::Pool<super::sharded_handle::ReaderMsg>,
-        router_ref: luciole::ActorRef<super::sharded_handle::RouterMsg>,
-    ) -> Self {
-        Self { reader_pool, router_ref }
+    pub fn new(pipeline: Arc<luciole::StreamDag>) -> Self {
+        Self { pipeline }
     }
 }
 
@@ -56,11 +52,7 @@ impl Node for DrainNode {
         vec![PortDef::trigger("done")]
     }
     fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
-        self.reader_pool.drain("search_drain_readers");
-        self.router_ref.request(
-            |r| super::sharded_handle::RouterMsg::Drain(luciole::DrainMsg(r)),
-            "search_drain_router",
-        ).ok();
+        self.pipeline.drain();
         ctx.info("pipeline drained");
         ctx.trigger("done");
         Ok(())
@@ -420,8 +412,7 @@ impl Node for MergeResultsNode {
 pub(crate) fn build_search_dag(
     shards: &[Arc<LucivyHandle>],
     shard_pool: &luciole::Pool<ShardMsg>,
-    reader_pool: &luciole::Pool<super::sharded_handle::ReaderMsg>,
-    router_ref: &luciole::ActorRef<super::sharded_handle::RouterMsg>,
+    pipeline: &Arc<luciole::StreamDag>,
     schema: &Schema,
     query_config: &QueryConfig,
     top_k: usize,
@@ -440,7 +431,7 @@ pub(crate) fn build_search_dag(
     let needs_prescan = !prescan_params.is_empty();
 
     // drain → flush
-    dag.add_node("drain", DrainNode::new(reader_pool.clone(), router_ref.clone()));
+    dag.add_node("drain", DrainNode::new(Arc::clone(pipeline)));
     dag.add_node("flush", FlushNode::new(shards.to_vec(), shard_pool.clone()));
     dag.connect("drain", "done", "flush", "trigger")?;
 

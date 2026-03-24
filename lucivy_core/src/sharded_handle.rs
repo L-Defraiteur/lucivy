@@ -1066,6 +1066,8 @@ pub struct ShardedHandle {
     reader_pool: luciole::Pool<ReaderMsg>,
     /// Pipeline: single router actor (typed).
     router_ref: luciole::ActorRef<RouterMsg>,
+    /// Streaming pipeline topology for structured drain.
+    pipeline: Arc<luciole::StreamDag>,
 }
 
 /// Spawn N GenericActors (one per shard) in the global scheduler.
@@ -1126,6 +1128,23 @@ fn spawn_pipeline_actors(
     }
 
     (reader_refs, router_ref)
+}
+
+/// Build the ingestion pipeline topology: readers → router → shards.
+fn build_pipeline(
+    reader_pool: &luciole::Pool<ReaderMsg>,
+    router_ref: &luciole::ActorRef<RouterMsg>,
+    shard_pool: &luciole::Pool<ShardMsg>,
+    num_readers: usize,
+    num_shards: usize,
+) -> Arc<luciole::StreamDag> {
+    let mut pipeline = luciole::StreamDag::new("ingestion");
+    pipeline.add_stage("readers", reader_pool.clone(), num_readers);
+    pipeline.add_stage("router", router_ref.clone(), 1);
+    pipeline.add_stage("shards", shard_pool.clone(), num_shards);
+    pipeline.connect("readers", "router");
+    pipeline.connect("router", "shards");
+    Arc::new(pipeline)
 }
 
 /// Extract text field IDs from the schema (for automatic tokenization at add_document).
@@ -1201,6 +1220,8 @@ impl ShardedHandle {
             num_readers,
         );
 
+        let pipeline = build_pipeline(&reader_pool, &router_ref, &shard_pool, num_readers, num_shards);
+
         Ok(Self {
             shards,
             shard_pool,
@@ -1213,6 +1234,7 @@ impl ShardedHandle {
             text_fields,
             reader_pool,
             router_ref,
+            pipeline,
         })
     }
 
@@ -1257,6 +1279,8 @@ impl ShardedHandle {
             num_readers,
         );
 
+        let pipeline = build_pipeline(&reader_pool, &router_ref, &shard_pool, num_readers, num_shards);
+
         Ok(Self {
             shards,
             shard_pool,
@@ -1269,6 +1293,7 @@ impl ShardedHandle {
             text_fields,
             reader_pool,
             router_ref,
+            pipeline,
         })
     }
 
@@ -1371,8 +1396,7 @@ impl ShardedHandle {
         let mut dag = crate::search_dag::build_search_dag(
             &self.shards,
             &self.shard_pool,
-            &self.reader_pool,
-            &self.router_ref,
+            &self.pipeline,
             &self.schema,
             query_config,
             top_k,
