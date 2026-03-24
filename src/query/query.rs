@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::Arc;
 
 use downcast_rs::impl_downcast;
 
@@ -10,18 +11,18 @@ use crate::schema::Schema;
 use crate::{DocAddress, Term};
 
 /// Argument used in `Query::weight(..)`
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub enum EnableScoring<'a> {
     /// Pass this to enable scoring.
     Enabled {
-        /// The searcher to use during scoring.
+        /// The searcher (for schema, tokenizers, doc retrieval).
         searcher: &'a Searcher,
 
-        /// A [Bm25StatisticsProvider] used to compute BM25 scores.
+        /// Global BM25 statistics provider (Arc for storage in Weights).
         ///
-        /// Normally this should be the [Searcher], but you can specify a custom
-        /// one to adjust the statistics.
-        statistics_provider: &'a dyn Bm25StatisticsProvider,
+        /// Shared across all queries in a search — same stats whether
+        /// local multi-shard or distributed.
+        stats: Arc<dyn Bm25StatisticsProvider + Send + Sync>,
     },
     /// Pass this to disable scoring.
     /// This can improve performance.
@@ -35,22 +36,22 @@ pub enum EnableScoring<'a> {
 
 impl<'a> EnableScoring<'a> {
     /// Create using [Searcher] with scoring enabled.
+    /// The searcher provides both schema/tokenizers AND statistics.
+    /// The Searcher is cloned into an Arc for the stats provider (cheap — Arc<Inner>).
     pub fn enabled_from_searcher(searcher: &'a Searcher) -> EnableScoring<'a> {
         EnableScoring::Enabled {
             searcher,
-            statistics_provider: searcher,
+            stats: Arc::new(searcher.clone()),
         }
     }
 
-    /// Create using a custom [Bm25StatisticsProvider] with scoring enabled.
+    /// Create using a custom stats provider with scoring enabled.
+    /// Use for multi-shard (AggregatedBm25StatsOwned) or distributed (ExportableStats).
     pub fn enabled_from_statistics_provider(
-        statistics_provider: &'a dyn Bm25StatisticsProvider,
+        stats: Arc<dyn Bm25StatisticsProvider + Send + Sync>,
         searcher: &'a Searcher,
     ) -> EnableScoring<'a> {
-        EnableScoring::Enabled {
-            statistics_provider,
-            searcher,
-        }
+        EnableScoring::Enabled { searcher, stats }
     }
 
     /// Create using [Searcher] with scoring disabled.
@@ -77,6 +78,14 @@ impl<'a> EnableScoring<'a> {
         }
     }
 
+    /// Returns the global stats provider (Arc, storable in Weights).
+    pub fn stats(&self) -> Option<&Arc<dyn Bm25StatisticsProvider + Send + Sync>> {
+        match self {
+            EnableScoring::Enabled { stats, .. } => Some(stats),
+            EnableScoring::Disabled { .. } => None,
+        }
+    }
+
     /// Returns the schema.
     pub fn schema(&self) -> &Schema {
         match self {
@@ -90,6 +99,7 @@ impl<'a> EnableScoring<'a> {
         matches!(self, EnableScoring::Enabled { .. })
     }
 }
+
 
 /// The `Query` trait defines a set of documents and a scoring method
 /// for those documents.

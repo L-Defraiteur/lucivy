@@ -234,7 +234,7 @@ mod tests {
         let phrase_query = PhrasePrefixQuery::new(vec![Term::from_field_text(text_field, "c")]);
         let enable_scoring = EnableScoring::enabled_from_searcher(&searcher);
         assert!(phrase_query
-            .phrase_prefix_query_weight(enable_scoring)
+            .phrase_prefix_query_weight(enable_scoring.clone())
             .unwrap()
             .is_none());
         let weight = phrase_query.weight(enable_scoring).unwrap();

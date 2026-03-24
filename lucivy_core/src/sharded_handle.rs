@@ -1458,7 +1458,7 @@ impl ShardedHandle {
         // Build weight with global stats (total_docs, total_tokens, term doc_freqs)
         let searcher_0 = self.shards[0].reader.searcher();
         let enable = ld_lucivy::query::EnableScoring::enabled_from_statistics_provider(
-            global_stats, &searcher_0,
+            Arc::new(global_stats.clone()), &searcher_0,
         );
         let weight: Arc<dyn ld_lucivy::query::Weight> = query
             .weight(enable)

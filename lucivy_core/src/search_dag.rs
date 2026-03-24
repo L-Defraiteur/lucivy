@@ -303,7 +303,7 @@ impl Node for BuildWeightNode {
 
         let searcher_0 = self.shards[0].reader.searcher();
         let enable_scoring = ld_lucivy::query::EnableScoring::enabled_from_statistics_provider(
-            &global_stats, &searcher_0,
+            Arc::new(global_stats), &searcher_0,
         );
         let weight: Arc<dyn Weight> = query
             .weight(enable_scoring)

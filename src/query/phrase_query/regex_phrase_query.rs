@@ -144,9 +144,9 @@ impl RegexPhraseQuery {
         let terms = self.phrase_terms();
         let bm25_weight_opt = match enable_scoring {
             EnableScoring::Enabled {
-                statistics_provider,
+                stats: statistics_provider,
                 ..
-            } => Some(Bm25Weight::for_terms(statistics_provider, &terms)?),
+            } => Some(Bm25Weight::for_terms(&*statistics_provider, &terms)?),
             EnableScoring::Disabled { .. } => None,
         };
         let weight = RegexPhraseWeight::new(

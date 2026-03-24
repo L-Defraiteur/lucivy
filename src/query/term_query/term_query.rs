@@ -118,16 +118,17 @@ impl TermQuery {
             let error_msg = format!("Field {:?} is not indexed.", field_entry.name());
             return Err(crate::LucivyError::SchemaError(error_msg));
         }
+        let scoring_enabled_flag = enable_scoring.is_scoring_enabled();
         let bm25_weight = match enable_scoring {
             EnableScoring::Enabled {
-                statistics_provider,
+                stats: statistics_provider,
                 ..
-            } => Bm25Weight::for_terms(statistics_provider, std::slice::from_ref(&self.term))?,
+            } => Bm25Weight::for_terms(&*statistics_provider, std::slice::from_ref(&self.term))?,
             EnableScoring::Disabled { .. } => {
                 Bm25Weight::new(Explanation::new("<no score>", 1.0f32), 1.0f32)
             }
         };
-        let scoring_enabled = enable_scoring.is_scoring_enabled();
+        let scoring_enabled = scoring_enabled_flag;
         let index_record_option = if scoring_enabled {
             self.index_record_option
         } else {

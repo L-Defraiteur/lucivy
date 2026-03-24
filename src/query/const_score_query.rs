@@ -38,8 +38,9 @@ impl fmt::Debug for ConstScoreQuery {
 
 impl Query for ConstScoreQuery {
     fn weight(&self, enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
+        let scoring = enable_scoring.is_scoring_enabled();
         let inner_weight = self.query.weight(enable_scoring)?;
-        Ok(if enable_scoring.is_scoring_enabled() {
+        Ok(if scoring {
             Box::new(ConstWeight::new(inner_weight, self.score))
         } else {
             inner_weight

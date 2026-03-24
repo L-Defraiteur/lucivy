@@ -158,7 +158,7 @@ impl Query for BooleanQuery {
         let sub_weights = self
             .subqueries
             .iter()
-            .map(|(occur, subquery)| Ok((*occur, subquery.weight(enable_scoring)?)))
+            .map(|(occur, subquery)| Ok((*occur, subquery.weight(enable_scoring.clone())?)))
             .collect::<crate::Result<_>>()?;
         Ok(Box::new(BooleanWeight::with_minimum_number_should_match(
             sub_weights,

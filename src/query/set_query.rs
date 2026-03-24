@@ -76,7 +76,7 @@ impl TermSetQuery {
 
 impl Query for TermSetQuery {
     fn weight(&self, enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
-        let global_stats = if let EnableScoring::Enabled { statistics_provider, .. } = &enable_scoring {
+        let global_stats = if let EnableScoring::Enabled { stats: statistics_provider, .. } = &enable_scoring {
             let nd = statistics_provider.total_num_docs().ok().unwrap_or(0);
             // Use first field for num_tokens (TermSetQuery can span multiple fields)
             let nt = self.terms_map.keys().next()

@@ -401,7 +401,7 @@ impl Query for SuffixContainsQuery {
 
     fn weight(&self, enable_scoring: EnableScoring) -> crate::Result<Box<dyn Weight>> {
         let (scoring_enabled, global_num_docs, global_num_tokens) = match &enable_scoring {
-            EnableScoring::Enabled { statistics_provider, .. } => {
+            EnableScoring::Enabled { stats: statistics_provider, .. } => {
                 let num_docs = statistics_provider.total_num_docs().unwrap_or(0);
                 let num_tokens = statistics_provider.total_num_tokens(self.raw_field).unwrap_or(0);
                 (true, num_docs, num_tokens)

@@ -182,7 +182,7 @@ impl Searcher {
         query: &dyn Query,
         collector: &C,
     ) -> crate::Result<C::Fruit> {
-        self.search_with_statistics_provider(query, collector, self)
+        self.search_with_statistics_provider(query, collector, Arc::new(self.clone()))
     }
 
     /// Same as [`search(...)`](Searcher::search) but allows specifying
@@ -194,7 +194,7 @@ impl Searcher {
         &self,
         query: &dyn Query,
         collector: &C,
-        statistics_provider: &dyn Bm25StatisticsProvider,
+        statistics_provider: Arc<dyn Bm25StatisticsProvider + Send + Sync>,
     ) -> crate::Result<C::Fruit> {
         let enabled_scoring = if collector.requires_scoring() {
             EnableScoring::enabled_from_statistics_provider(statistics_provider, self)

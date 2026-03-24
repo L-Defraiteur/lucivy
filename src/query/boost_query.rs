@@ -39,8 +39,9 @@ impl fmt::Debug for BoostQuery {
 
 impl Query for BoostQuery {
     fn weight(&self, enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
+        let scoring = enable_scoring.is_scoring_enabled();
         let weight_without_boost = self.query.weight(enable_scoring)?;
-        let boosted_weight = if enable_scoring.is_scoring_enabled() {
+        let boosted_weight = if scoring {
             Box::new(BoostWeight::new(weight_without_boost, self.boost))
         } else {
             weight_without_boost

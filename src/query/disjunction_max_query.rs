@@ -94,7 +94,7 @@ impl Query for DisjunctionMaxQuery {
         let disjuncts = self
             .disjuncts
             .iter()
-            .map(|disjunct| Ok((Occur::Should, disjunct.weight(enable_scoring)?)))
+            .map(|disjunct| Ok((Occur::Should, disjunct.weight(enable_scoring.clone())?)))
             .collect::<crate::Result<_>>()?;
         let tie_breaker = self.tie_breaker;
         Ok(Box::new(BooleanWeight::new(
