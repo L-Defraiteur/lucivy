@@ -243,32 +243,15 @@ impl SfxCollector {
         );
         let sfx_bytes = file_writer.to_bytes();
 
-        // .sfxpost file: ordinal → posting entries (doc_id, token_index, byte_from, byte_to)
-        // Format: [num_terms: u32] [offsets: u32 × (num_terms+1)] [entries: packed]
-        // Each entry: doc_id(VInt) + token_index(VInt) + byte_from(VInt) + byte_to(VInt)
-        // Entries sorted by (doc_id, token_index) within each ordinal.
-        let mut posting_offsets: Vec<u32> = Vec::with_capacity(num_tokens + 1);
-        let mut posting_data: Vec<u8> = Vec::new();
-        for &old_ord in &sorted_indices {
-            posting_offsets.push(posting_data.len() as u32);
+        // .sfxpost file V2: per-ordinal posting entries with binary-searchable doc_ids.
+        let mut sfxpost_writer = super::sfxpost_v2::SfxPostWriterV2::new(num_tokens);
+        for (new_ord, &old_ord) in sorted_indices.iter().enumerate() {
             let entries = &self.token_postings[old_ord as usize];
-            let mut sorted = entries.clone();
-            sorted.sort_unstable();
-            for &(doc_id, ti, byte_from, byte_to) in &sorted {
-                encode_vint(doc_id, &mut posting_data);
-                encode_vint(ti, &mut posting_data);
-                encode_vint(byte_from, &mut posting_data);
-                encode_vint(byte_to, &mut posting_data);
+            for &(doc_id, ti, byte_from, byte_to) in entries {
+                sfxpost_writer.add_entry(new_ord as u32, doc_id, ti, byte_from, byte_to);
             }
         }
-        posting_offsets.push(posting_data.len() as u32);
-
-        let mut sfxpost_bytes: Vec<u8> = Vec::new();
-        sfxpost_bytes.extend_from_slice(&(num_tokens as u32).to_le_bytes());
-        for &off in &posting_offsets {
-            sfxpost_bytes.extend_from_slice(&off.to_le_bytes());
-        }
-        sfxpost_bytes.extend_from_slice(&posting_data);
+        let sfxpost_bytes = sfxpost_writer.finish();
 
         Ok((sfx_bytes, sfxpost_bytes))
     }
