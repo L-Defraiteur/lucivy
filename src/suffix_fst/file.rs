@@ -116,6 +116,16 @@ impl SfxFileWriter {
     }
 }
 
+/// A split candidate found during a falling walk.
+/// Represents a point where a prefix of the query reaches the end of an indexed token.
+#[derive(Debug, Clone)]
+pub struct SplitCandidate {
+    /// How many bytes of the query are consumed by the left part.
+    pub prefix_len: usize,
+    /// The parent entry that reaches its token boundary.
+    pub parent: ParentEntry,
+}
+
 /// Reads a .sfx file from mmap'd or in-memory data.
 pub struct SfxFileReader<'a> {
     fst: Map<Vec<u8>>,
@@ -327,6 +337,58 @@ impl<'a> SfxFileReader<'a> {
                 decode_parent_entries(record)
             }
         }
+    }
+
+    /// Walk the FST byte-by-byte with the query, collecting all split candidates
+    /// where a prefix of the query reaches the end of a parent token
+    /// (si + prefix_len == token_len).
+    ///
+    /// Walks both SI=0 and SI>0 partitions. Returns candidates sorted by
+    /// prefix_len descending (longest first).
+    ///
+    /// Cost: O(2L) node lookups where L = query.len(). No posting resolution.
+    pub fn falling_walk(&self, query: &str) -> Vec<SplitCandidate> {
+        let fst = self.fst.as_fst();
+        let query_bytes = query.as_bytes();
+        let mut candidates = Vec::new();
+
+        for &partition in &[super::builder::SI0_PREFIX, super::builder::SI_REST_PREFIX] {
+            let root = fst.root();
+            // Follow partition prefix byte
+            let Some(idx) = root.find_input(partition) else { continue };
+            let trans = root.transition(idx);
+            let mut output = lucivy_fst::raw::Output::zero().cat(trans.out);
+            let mut node = fst.node(trans.addr);
+
+            // Walk query bytes
+            for (i, &byte) in query_bytes.iter().enumerate() {
+                let Some(idx) = node.find_input(byte) else { break };
+                let trans = node.transition(idx);
+                output = output.cat(trans.out);
+                node = fst.node(trans.addr);
+
+                // If this node is a final state, we have a complete SFX key
+                if node.is_final() {
+                    let val = output.cat(node.final_output()).value();
+                    let prefix_len = i + 1;
+                    let parents = self.decode_parents(val);
+
+                    for parent in parents {
+                        // Does this prefix reach the END of the parent token?
+                        if parent.si as usize + prefix_len == parent.token_len as usize {
+                            candidates.push(SplitCandidate {
+                                prefix_len,
+                                parent,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by prefix_len descending (longest split first = most selective)
+        candidates.sort_by(|a, b| b.prefix_len.cmp(&a.prefix_len));
+        candidates
     }
 }
 
@@ -611,5 +673,66 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "core");
         assert_eq!(results[0].1.len(), 2);
+    }
+
+    #[test]
+    fn test_falling_walk_cross_token() {
+        // Tokens: "import" (ord 0), "rag3db" (ord 1), "from" (ord 2), "core" (ord 3)
+        let bytes = build_test_sfx();
+        let reader = SfxFileReader::open(&bytes).unwrap();
+
+        // "rag3db" is 6 chars. Query "rag3dbfr" crosses "rag3db"|"from" boundary.
+        // Falling walk should find: "rag3db" at SI=0, token_len=6, prefix_len=6
+        // (si=0 + 6 == token_len=6 → reaches end of token)
+        let candidates = reader.falling_walk("rag3dbfr");
+        assert!(!candidates.is_empty(), "should find cross-token split for 'rag3dbfr'");
+
+        let best = &candidates[0];
+        assert_eq!(best.prefix_len, 6, "should split after 'rag3db' (6 bytes)");
+        assert_eq!(best.parent.raw_ordinal, 1, "should be ordinal 1 (rag3db)");
+        assert_eq!(best.parent.si, 0);
+        assert_eq!(best.parent.token_len, 6);
+    }
+
+    #[test]
+    fn test_falling_walk_suffix_cross_token() {
+        let bytes = build_test_sfx();
+        let reader = SfxFileReader::open(&bytes).unwrap();
+
+        // "3dbfr" → "3db" is a suffix of "rag3db" at SI=3.
+        // si(3) + prefix_len(3) = 6 = token_len(6) → reaches end.
+        let candidates = reader.falling_walk("3dbfr");
+        assert!(!candidates.is_empty(), "should find cross-token split for '3dbfr'");
+
+        let found = candidates.iter().find(|c| c.prefix_len == 3);
+        assert!(found.is_some(), "should have split at prefix_len=3 ('3db')");
+        let c = found.unwrap();
+        assert_eq!(c.parent.si, 3);
+        assert_eq!(c.parent.token_len, 6);
+    }
+
+    #[test]
+    fn test_falling_walk_no_cross_token() {
+        let bytes = build_test_sfx();
+        let reader = SfxFileReader::open(&bytes).unwrap();
+
+        // "import" is fully within one token → no split candidate
+        // (si=0, prefix_len=6, token_len=6 → si+6==6 → this IS a boundary,
+        //  but we'd use single-token search first, not falling_walk)
+        // Actually "importx" → "import" at SI=0, si+6==6 → valid split!
+        // The falling walk just collects candidates, it doesn't know about single-token.
+        let candidates = reader.falling_walk("importx");
+        assert!(!candidates.is_empty(), "should find split for 'importx'");
+        assert_eq!(candidates[0].prefix_len, 6);
+    }
+
+    #[test]
+    fn test_falling_walk_nonexistent() {
+        let bytes = build_test_sfx();
+        let reader = SfxFileReader::open(&bytes).unwrap();
+
+        // "zzzzz" doesn't match any suffix
+        let candidates = reader.falling_walk("zzzzz");
+        assert!(candidates.is_empty());
     }
 }
