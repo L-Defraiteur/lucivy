@@ -136,26 +136,44 @@ pub fn build_sfxpost_v2(
 // ─── Reader ──────────────────────────────────────────────────────────────────
 
 /// Reads sfxpost V2 format with binary-searchable doc_ids.
-pub struct SfxPostReaderV2<'a> {
+///
+/// Owns its data (Vec<u8>) — Send + Sync, no lifetimes.
+/// Can be constructed from OwnedBytes (mmap) or Vec<u8> (in-memory).
+pub struct SfxPostReaderV2 {
+    data: Vec<u8>,
     num_terms: u32,
-    offsets: &'a [u8],
-    entry_data: &'a [u8],
+    offsets_start: usize,
+    entry_data_start: usize,
 }
 
-impl<'a> SfxPostReaderV2<'a> {
-    /// Open a sfxpost V2 file from raw bytes.
-    pub fn open(data: &'a [u8]) -> Option<Self> {
+impl SfxPostReaderV2 {
+    /// Open a sfxpost V2 file from owned bytes.
+    /// Returns None if the data is not V2 format (no "SFP2" magic).
+    pub fn open(data: Vec<u8>) -> Option<Self> {
         if data.len() < 8 || &data[0..4] != MAGIC_V2 {
-            return None; // Not V2 format
+            return None;
         }
         let num_terms = u32::from_le_bytes(data[4..8].try_into().ok()?);
         let offsets_size = (num_terms as usize + 1) * 4;
         if data.len() < 8 + offsets_size {
             return None;
         }
-        let offsets = &data[8..8 + offsets_size];
-        let entry_data = &data[8 + offsets_size..];
-        Some(Self { num_terms, offsets, entry_data })
+        let offsets_start = 8;
+        let entry_data_start = 8 + offsets_size;
+        Some(Self { data, num_terms, offsets_start, entry_data_start })
+    }
+
+    /// Open from a byte slice (copies into owned Vec).
+    pub fn open_slice(data: &[u8]) -> Option<Self> {
+        Self::open(data.to_vec())
+    }
+
+    fn offsets(&self) -> &[u8] {
+        &self.data[self.offsets_start..self.entry_data_start]
+    }
+
+    fn entry_data(&self) -> &[u8] {
+        &self.data[self.entry_data_start..]
     }
 
     /// Number of terms.
@@ -236,17 +254,19 @@ impl<'a> SfxPostReaderV2<'a> {
     // ── Internal ─────────────────────────────────────────────────────────
 
     fn read_offset(&self, idx: u32) -> u32 {
+        let offsets = self.offsets();
         let pos = idx as usize * 4;
-        u32::from_le_bytes(self.offsets[pos..pos + 4].try_into().unwrap())
+        u32::from_le_bytes(offsets[pos..pos + 4].try_into().unwrap())
     }
 
     fn read_ordinal_header(&self, ordinal: u32) -> Option<OrdinalHeader> {
         let off_start = self.read_offset(ordinal) as usize;
         let off_end = self.read_offset(ordinal + 1) as usize;
-        if off_start >= off_end || off_start >= self.entry_data.len() {
+        let entry_data = self.entry_data();
+        if off_start >= off_end || off_start >= entry_data.len() {
             return None;
         }
-        let data = &self.entry_data[off_start..off_end.min(self.entry_data.len())];
+        let data = &entry_data[off_start..off_end.min(entry_data.len())];
         if data.len() < 4 { return None; }
 
         let num_docs = u32::from_le_bytes(data[0..4].try_into().ok()?) as usize;
@@ -335,7 +355,7 @@ mod tests {
         writer.add_entry(0, 20, 0, 0, 8);
         let data = writer.finish();
 
-        let reader = SfxPostReaderV2::open(&data).unwrap();
+        let reader = SfxPostReaderV2::open(data.clone()).unwrap();
         assert_eq!(reader.num_terms(), 1);
 
         let entries = reader.entries(0);
@@ -354,7 +374,7 @@ mod tests {
             writer.add_entry(0, doc, 0, 0, 5);
         }
         let data = writer.finish();
-        let reader = SfxPostReaderV2::open(&data).unwrap();
+        let reader = SfxPostReaderV2::open(data.clone()).unwrap();
 
         // Filter to only 3 docs
         let filter: HashSet<u32> = [10, 50, 99].into();
@@ -373,7 +393,7 @@ mod tests {
         writer.add_entry(0, 20, 1, 5, 10);
         writer.add_entry(0, 30, 0, 0, 3);
         let data = writer.finish();
-        let reader = SfxPostReaderV2::open(&data).unwrap();
+        let reader = SfxPostReaderV2::open(data.clone()).unwrap();
 
         let entries = reader.entries_for_doc(0, 10);
         assert_eq!(entries.len(), 2);
@@ -393,7 +413,7 @@ mod tests {
         writer.add_entry(0, 10, 0, 0, 5);
         writer.add_entry(0, 20, 0, 0, 5);
         let data = writer.finish();
-        let reader = SfxPostReaderV2::open(&data).unwrap();
+        let reader = SfxPostReaderV2::open(data.clone()).unwrap();
 
         assert!(reader.has_doc(0, 10));
         assert!(reader.has_doc(0, 20));
@@ -409,7 +429,7 @@ mod tests {
         writer.add_entry(0, 20, 0, 0, 5);
         writer.add_entry(1, 30, 0, 0, 5);
         let data = writer.finish();
-        let reader = SfxPostReaderV2::open(&data).unwrap();
+        let reader = SfxPostReaderV2::open(data.clone()).unwrap();
 
         assert_eq!(reader.doc_freq(0), 2); // docs 10, 20
         assert_eq!(reader.doc_freq(1), 1); // doc 30
@@ -422,7 +442,7 @@ mod tests {
         writer.add_entry(1, 2, 0, 0, 5);
         writer.add_entry(2, 3, 0, 0, 5);
         let data = writer.finish();
-        let reader = SfxPostReaderV2::open(&data).unwrap();
+        let reader = SfxPostReaderV2::open(data.clone()).unwrap();
 
         assert_eq!(reader.entries(0).len(), 1);
         assert_eq!(reader.entries(0)[0].doc_id, 1);
@@ -435,7 +455,7 @@ mod tests {
         let writer = SfxPostWriterV2::new(2);
         // Don't add any entries to ordinal 0
         let data = writer.finish();
-        let reader = SfxPostReaderV2::open(&data).unwrap();
+        let reader = SfxPostReaderV2::open(data.clone()).unwrap();
 
         assert!(reader.entries(0).is_empty());
         assert!(reader.entries(1).is_empty());
@@ -445,6 +465,6 @@ mod tests {
     fn test_v2_not_v2_format() {
         // V1 data doesn't start with "SFP2"
         let v1_data = vec![0u8; 100];
-        assert!(SfxPostReaderV2::open(&v1_data).is_none());
+        assert!(SfxPostReaderV2::open(v1_data).is_none());
     }
 }
