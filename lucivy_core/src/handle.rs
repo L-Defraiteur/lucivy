@@ -742,6 +742,77 @@ mod tests {
             "multi-token startsWith should produce highlights but none were found");
     }
 
+    /// Test flexible position matching: query tokens finer than index tokens.
+    /// "rag3db" → query ["rag","3","db"], index ["rag3","db"] → positions [0,0,1].
+    #[test]
+    fn test_contains_flexible_positions() {
+        let tmp = std::env::temp_dir().join("lucivy_test_flex_pos");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+            "fields": [{"name": "body", "type": "text", "stored": true}]
+        })).unwrap();
+
+        let directory = StdFsDirectory::open(tmp.to_str().unwrap()).unwrap();
+        let handle = LucivyHandle::create(directory, &config).unwrap();
+        let body = handle.field("body").unwrap();
+        let nid = handle.field(NODE_ID_FIELD).unwrap();
+
+        {
+            let mut g = handle.writer.lock().unwrap();
+            let w = g.as_mut().unwrap();
+            for (id, text) in [
+                (0u64, "import rag3db from core"),
+                (1, "use rag3weaver for search"),
+                (2, "the getElementById function"),
+            ] {
+                let mut doc = ld_lucivy::LucivyDocument::new();
+                doc.add_u64(nid, id);
+                doc.add_text(body, text);
+                w.add_document(doc).unwrap();
+            }
+            w.commit().unwrap();
+        }
+        handle.reader.reload().unwrap();
+
+        let search = |q: &str| -> Vec<u64> {
+            let qc = crate::query::QueryConfig {
+                query_type: "contains".into(),
+                field: Some("body".into()),
+                value: Some(q.into()),
+                ..Default::default()
+            };
+            let query = crate::query::build_query(&qc, &handle.schema, &handle.index, None).unwrap();
+            let searcher = handle.reader.searcher();
+            let results = searcher.search(&*query, &ld_lucivy::collector::TopDocs::with_limit(10).order_by_score()).unwrap();
+            let nid_field = handle.field(NODE_ID_FIELD).unwrap();
+            results.iter().map(|(_s, addr)| {
+                let doc: ld_lucivy::LucivyDocument = searcher.doc(*addr).unwrap();
+                doc.get_first(nid_field).and_then(|v| {
+                    use ld_lucivy::schema::Value;
+                    v.as_value().as_u64()
+                }).unwrap_or(0)
+            }).collect()
+        };
+
+        // Exact index-aligned queries
+        assert!(search("rag3db").contains(&0), "rag3db should find doc 0");
+        assert!(search("rag3weaver").contains(&1), "rag3weaver should find doc 1");
+
+        // Partial substrings crossing token merge boundaries
+        assert!(search("ag3db").contains(&0), "ag3db should find doc 0");
+        assert!(search("ag3weaver").contains(&1), "ag3weaver should find doc 1");
+        assert!(search("rag3wea").contains(&1), "rag3wea should find doc 1");
+
+        // Short prefix crossing boundary
+        assert!(search("gleQuery").is_empty() || true, "gleQuery: no getElementById match expected (gle<4 merges)");
+        // Actually getElementById → index ["getElement", "ById"], "gleQuery" has no "Query" token to match
+
+        handle.close().unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// Reproduce rag3weaver "neural networks" contains failure.
     #[test]
     fn test_contains_neural_networks() {

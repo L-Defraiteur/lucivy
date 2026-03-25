@@ -62,7 +62,7 @@ impl CachedSfxResult {
     }
 }
 
-use crate::tokenizer::{CamelCaseSplitFilter, SimpleTokenizer, TextAnalyzer, LowerCaser, TokenStream};
+use crate::tokenizer::{SimpleTokenizer, TextAnalyzer, LowerCaser, TokenStream};
 
 use super::suffix_contains;
 
@@ -92,10 +92,10 @@ fn count_tf_sorted(doc_ids: &[DocId]) -> Vec<(DocId, u32)> {
 /// SimpleTokenizer + LowerCaser as the ._raw field.
 /// Returns (["rust", "lang"], ["🦀"]) for "rust🦀lang".
 pub fn tokenize_query(query: &str) -> (Vec<String>, Vec<String>) {
-    let mut tokenizer = TextAnalyzer::builder(SimpleTokenizer::default())
-        .filter(CamelCaseSplitFilter)
-        .filter(LowerCaser)
-        .build();
+    use crate::tokenizer::camel_case_split::find_boundaries;
+
+    // Step 1: SimpleTokenizer splits on whitespace/punctuation (no lowering yet).
+    let mut tokenizer = TextAnalyzer::builder(SimpleTokenizer::default()).build();
     let mut stream = tokenizer.token_stream(query);
 
     let mut tokens = Vec::new();
@@ -104,11 +104,36 @@ pub fn tokenize_query(query: &str) -> (Vec<String>, Vec<String>) {
 
     while stream.advance() {
         let tok = stream.token();
-        if !tokens.is_empty() {
-            let sep = &query[last_end..tok.offset_from];
-            separators.push(sep.to_lowercase());
+        let sep = if tokens.is_empty() {
+            String::new()
+        } else {
+            query[last_end..tok.offset_from].to_lowercase()
+        };
+
+        // Step 2: Split each word-token at CamelCase + digit boundaries
+        // on the ORIGINAL CASE text, then lowercase each sub-token.
+        // No merge — query tokens are maximally split so multi-token
+        // matching always works via suffix match + position check.
+        let boundaries = find_boundaries(&tok.text);
+        let mut sub_tokens: Vec<String> = Vec::new();
+        for i in 0..boundaries.len() {
+            let start = boundaries[i];
+            let end = if i + 1 < boundaries.len() { boundaries[i + 1] } else { tok.text.len() };
+            if start < end {
+                sub_tokens.push(tok.text[start..end].to_lowercase());
+            }
         }
-        tokens.push(tok.text.clone());
+        if sub_tokens.is_empty() {
+            sub_tokens.push(tok.text.to_lowercase());
+        }
+
+        for (i, sub) in sub_tokens.iter().enumerate() {
+            if !tokens.is_empty() {
+                separators.push(if i == 0 { sep.clone() } else { String::new() });
+            }
+            tokens.push(sub.clone());
+        }
+
         last_end = tok.offset_to;
     }
 

@@ -123,7 +123,7 @@ mod raw_tokenizer;
 mod regex_tokenizer;
 mod remove_long;
 mod simple_tokenizer;
-mod camel_case_split;
+pub(crate) mod camel_case_split;
 mod split_compound_words;
 mod stop_word_filter;
 mod tokenized_string;

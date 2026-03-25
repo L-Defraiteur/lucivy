@@ -579,8 +579,12 @@ where
         let query_lower = token.to_lowercase();
         let is_first = i == 0;
         let is_last = i == n - 1;
+        // First token: any SI (can be substring). Others: SI=0 only (full token).
+        // In prefix_only (startsWith): all SI=0.
         let use_si0 = prefix_only || !is_first;
 
+        // Last token: prefix_walk (can be a prefix of indexed token).
+        // Others: resolve_suffix (exact match).
         let walk_results: Vec<(String, Vec<ParentEntry>)> = if is_last {
             if fuzzy_distance > 0 {
                 if use_si0 { sfx_reader.fuzzy_walk_si0(&query_lower, fuzzy_distance) }
@@ -690,36 +694,24 @@ where
         let doc_id = pivot_entry.doc_id;
         let pivot_ti = pivot_entry.token_index;
 
-        // The first token of the chain is at Ti = pivot_ti - pivot_idx
+        // Build chain: strict position matching (1:1 query token → index position).
         if (pivot_idx as u32) > pivot_ti {
-            continue; // pivot_ti too small to have tokens before it
+            continue;
         }
         let first_ti = pivot_ti - pivot_idx as u32;
 
-        // Build chain: check all positions from first_ti to first_ti + n - 1
         let mut chain: Vec<Option<RawPostingEntry>> = vec![None; n];
         chain[pivot_idx] = Some(pivot_entry.clone());
         let mut valid = true;
 
         for step in 0..n {
-            if step == pivot_idx {
-                continue; // already have the pivot
-            }
+            if step == pivot_idx { continue; }
             let expected_ti = first_ti + step as u32;
-
             let found = per_token_postings[step]
-                .binary_search_by(|e| {
-                    e.doc_id.cmp(&doc_id).then(e.token_index.cmp(&expected_ti))
-                });
-
+                .binary_search_by(|e| e.doc_id.cmp(&doc_id).then(e.token_index.cmp(&expected_ti)));
             match found {
-                Ok(idx) => {
-                    chain[step] = Some(per_token_postings[step][idx].clone());
-                }
-                Err(_) => {
-                    valid = false;
-                    break;
-                }
+                Ok(idx) => { chain[step] = Some(per_token_postings[step][idx].clone()); }
+                Err(_) => { valid = false; break; }
             }
         }
 

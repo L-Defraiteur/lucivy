@@ -205,7 +205,7 @@ fn split_and_merge(text: &str) -> Vec<(usize, usize)> {
 /// - letter↔digit: `var123` → split before `1`
 ///
 /// NOT split: ALL_CAPS runs (`FUNCTION` stays as one chunk).
-fn find_boundaries(text: &str) -> Vec<usize> {
+pub(crate) fn find_boundaries(text: &str) -> Vec<usize> {
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     let mut boundaries = vec![0usize];
 
