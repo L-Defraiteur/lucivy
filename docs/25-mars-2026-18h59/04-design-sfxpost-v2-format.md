@@ -221,3 +221,21 @@ Les vieux segments restent lisibles. Les nouveaux segments utilisent V2.
    → Les doc_ids sont triés. Delta encoding réduirait la taille du header.
    → Mais ça empêche le binary search (faut prefix-sum pour reconstruire).
    → On garde les doc_ids en valeur absolue pour le binary search.
+
+## Future : séparation en 3 fichiers
+
+Le `.sfx` actuel contient le FST + parent list + GapMap. Le GapMap n'est utilisé
+que pour `strict_separators=true` (désactivé par défaut) et le cross-token search
+n'en a pas besoin.
+
+Séparation naturelle :
+```
+.sfx      — FST + parent list (suffix lookup)
+.sfxpost  — posting lists V2 (ordinal → doc entries)
+.sfxgap   — GapMap (séparateurs inter-tokens, optionnel)
+```
+
+Avantages : search ne charge que `.sfx` + `.sfxpost`, mmap plus granulaire,
+GapMap peut évoluer ou disparaître indépendamment.
+
+Pas prioritaire — à faire après avoir validé le V2 et le cross-token search.
