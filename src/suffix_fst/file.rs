@@ -318,8 +318,8 @@ impl<'a> SfxFileReader<'a> {
 
     fn decode_parents(&self, val: u64) -> Vec<ParentEntry> {
         match decode_output(val) {
-            ParentRef::Single { raw_ordinal, si } => {
-                vec![ParentEntry { raw_ordinal, si }]
+            ParentRef::Single { raw_ordinal, si, token_len } => {
+                vec![ParentEntry { raw_ordinal, si, token_len }]
             }
             ParentRef::Multi { offset } => {
                 let table = OutputTable::new(self.parent_list_data);
@@ -525,12 +525,12 @@ mod tests {
         // Resolve "g3db" → parent "rag3db" (ordinal=1), SI=2
         let parents = reader.resolve_suffix("g3db");
         assert_eq!(parents.len(), 1);
-        assert_eq!(parents[0], ParentEntry { raw_ordinal: 1, si: 2 });
+        assert_eq!(parents[0], ParentEntry { raw_ordinal: 1, si: 2, token_len: 6 });
 
         // Resolve "rag3db" → parent "rag3db" (ordinal=1), SI=0
         let parents = reader.resolve_suffix("rag3db");
         assert_eq!(parents.len(), 1);
-        assert_eq!(parents[0], ParentEntry { raw_ordinal: 1, si: 0 });
+        assert_eq!(parents[0], ParentEntry { raw_ordinal: 1, si: 0, token_len: 6 });
 
         // Resolve nonexistent
         assert!(reader.resolve_suffix("xyz").is_empty());
@@ -545,7 +545,7 @@ mod tests {
         let results = reader.prefix_walk("g3d");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "g3db");
-        assert_eq!(results[0].1[0], ParentEntry { raw_ordinal: 1, si: 2 });
+        assert_eq!(results[0].1[0], ParentEntry { raw_ordinal: 1, si: 2, token_len: 6 });
 
         // Prefix walk "rag" → should find "rag3db"
         let results = reader.prefix_walk("rag");
@@ -603,8 +603,8 @@ mod tests {
         // "core" should have 2 parents
         let parents = reader.resolve_suffix("core");
         assert_eq!(parents.len(), 2);
-        assert!(parents.contains(&ParentEntry { raw_ordinal: 0, si: 0 }));
-        assert!(parents.contains(&ParentEntry { raw_ordinal: 1, si: 4 }));
+        assert!(parents.contains(&ParentEntry { raw_ordinal: 0, si: 0, token_len: 4 }));
+        assert!(parents.contains(&ParentEntry { raw_ordinal: 1, si: 4, token_len: 8 }));
 
         // Prefix walk "cor" → finds "core" with 2 parents
         let results = reader.prefix_walk("cor");

@@ -33,12 +33,17 @@ const MULTI_PARENT_FLAG: u64 = 1 << 63;
 const RAW_ORDINAL_MASK: u64 = 0x00FF_FFFF; // 24 bits
 const SI_SHIFT: u32 = 24;
 const SI_MASK: u64 = 0xFFFF; // 16 bits
+const TOKEN_LEN_SHIFT: u32 = 40;
+const TOKEN_LEN_MASK: u64 = 0xFFFF; // 16 bits
 
 /// Encode a single-parent value into u64.
-pub fn encode_single_parent(raw_ordinal: u64, si: u16) -> u64 {
+/// Layout: [63: multi_flag][55..40: token_len][39..24: si][23..0: ordinal]
+pub fn encode_single_parent(raw_ordinal: u64, si: u16, token_len: u16) -> u64 {
     debug_assert!(raw_ordinal <= RAW_ORDINAL_MASK, "raw_ordinal overflow: {raw_ordinal}");
     debug_assert!((si as u64) <= SI_MASK, "SI overflow: {si}");
-    (raw_ordinal & RAW_ORDINAL_MASK) | ((si as u64) << SI_SHIFT)
+    (raw_ordinal & RAW_ORDINAL_MASK)
+        | ((si as u64) << SI_SHIFT)
+        | ((token_len as u64) << TOKEN_LEN_SHIFT)
 }
 
 /// Encode a multi-parent offset into u64.
@@ -56,6 +61,7 @@ pub fn decode_output(value: u64) -> ParentRef {
         ParentRef::Single {
             raw_ordinal: value & RAW_ORDINAL_MASK,
             si: ((value >> SI_SHIFT) & SI_MASK) as u16,
+            token_len: ((value >> TOKEN_LEN_SHIFT) & TOKEN_LEN_MASK) as u16,
         }
     }
 }
@@ -69,6 +75,8 @@ pub enum ParentRef {
         raw_ordinal: u64,
         /// Byte offset within the parent token where this suffix starts.
         si: u16,
+        /// Total byte length of the parent token (lowercased).
+        token_len: u16,
     },
     /// Multiple parent tokens, stored in the OutputTable at the given offset.
     Multi {
@@ -84,17 +92,21 @@ pub struct ParentEntry {
     pub raw_ordinal: u64,
     /// Suffix index: byte offset within the parent token where this suffix starts.
     pub si: u16,
+    /// Total byte length of the parent token (lowercased).
+    pub token_len: u16,
 }
 
 /// Encode a list of parent entries into bytes for the OutputTable.
+/// Format per entry: [u32 ordinal][u16 si][u16 token_len] = 8 bytes.
 pub fn encode_parent_entries(parents: &[ParentEntry]) -> Vec<u8> {
     let mut sorted = parents.to_vec();
     sorted.sort_by_key(|p| p.si); // SI=0 first → early exit for exact/prefix lookups
-    let mut buf = Vec::with_capacity(2 + sorted.len() * 6);
+    let mut buf = Vec::with_capacity(2 + sorted.len() * 8);
     buf.extend_from_slice(&(sorted.len() as u16).to_le_bytes());
     for p in &sorted {
         buf.extend_from_slice(&(p.raw_ordinal as u32).to_le_bytes());
         buf.extend_from_slice(&p.si.to_le_bytes());
+        buf.extend_from_slice(&p.token_len.to_le_bytes());
     }
     buf
 }
@@ -114,7 +126,9 @@ pub fn decode_parent_entries(data: &[u8]) -> Vec<ParentEntry> {
         cursor += 4;
         let si = u16::from_le_bytes([data[cursor], data[cursor + 1]]);
         cursor += 2;
-        entries.push(ParentEntry { raw_ordinal, si });
+        let token_len = u16::from_le_bytes([data[cursor], data[cursor + 1]]);
+        cursor += 2;
+        entries.push(ParentEntry { raw_ordinal, si, token_len });
     }
     entries
 }
@@ -174,7 +188,7 @@ impl SuffixFstBuilder {
             key.push_str(suffix);
             self.entries.push((
                 key,
-                ParentEntry { raw_ordinal, si: si as u16 },
+                ParentEntry { raw_ordinal, si: si as u16, token_len: lower.len() as u16 },
             ));
             crate::diag_emit!(crate::diag::DiagEvent::SuffixAdded {
                 token: token.to_string(),
@@ -215,7 +229,7 @@ impl SuffixFstBuilder {
 
             let output = if num_parents == 1 {
                 let p = &self.entries[i].1;
-                encode_single_parent(p.raw_ordinal, p.si)
+                encode_single_parent(p.raw_ordinal, p.si, p.token_len)
             } else {
                 let parents: Vec<ParentEntry> = self.entries[i..j]
                     .iter()
@@ -256,11 +270,12 @@ mod tests {
 
     #[test]
     fn test_encode_decode_single_parent() {
-        let encoded = encode_single_parent(42, 3);
+        let encoded = encode_single_parent(42, 3, 10);
         match decode_output(encoded) {
-            ParentRef::Single { raw_ordinal, si } => {
+            ParentRef::Single { raw_ordinal, si, token_len } => {
                 assert_eq!(raw_ordinal, 42);
                 assert_eq!(si, 3);
+                assert_eq!(token_len, 10);
             }
             _ => panic!("expected single parent"),
         }
@@ -268,11 +283,12 @@ mod tests {
 
     #[test]
     fn test_encode_decode_single_parent_max_values() {
-        let encoded = encode_single_parent(0x00FF_FFFF, 255);
+        let encoded = encode_single_parent(0x00FF_FFFF, 255, 300);
         match decode_output(encoded) {
-            ParentRef::Single { raw_ordinal, si } => {
+            ParentRef::Single { raw_ordinal, si, token_len } => {
                 assert_eq!(raw_ordinal, 0x00FF_FFFF);
                 assert_eq!(si, 255);
+                assert_eq!(token_len, 300);
             }
             _ => panic!("expected single parent"),
         }
@@ -290,8 +306,8 @@ mod tests {
     #[test]
     fn test_encode_decode_parent_entries() {
         let entries = vec![
-            ParentEntry { raw_ordinal: 5, si: 1 },
-            ParentEntry { raw_ordinal: 12, si: 4 },
+            ParentEntry { raw_ordinal: 5, si: 1, token_len: 10 },
+            ParentEntry { raw_ordinal: 12, si: 4, token_len: 20 },
         ];
         let bytes = encode_parent_entries(&entries);
         let decoded = decode_parent_entries(&bytes);
@@ -321,19 +337,19 @@ mod tests {
 
         // "rag3db" SI=0 → in \x00 partition
         let val = fst_get_si0(&fst, b"rag3db").expect("rag3db should exist in SI=0");
-        assert_eq!(decode_output(val), ParentRef::Single { raw_ordinal: 0, si: 0 });
+        assert!(matches!(decode_output(val), ParentRef::Single { raw_ordinal: 0, si: 0, token_len: 6 }));
 
         // "ag3db" SI=1 → in \x01 partition
         let val = fst_get_si_rest(&fst, b"ag3db").expect("ag3db should exist in SI>0");
-        assert_eq!(decode_output(val), ParentRef::Single { raw_ordinal: 0, si: 1 });
+        assert!(matches!(decode_output(val), ParentRef::Single { raw_ordinal: 0, si: 1, token_len: 6 }));
 
         // "g3db" SI=2 → in \x01 partition
         let val = fst_get_si_rest(&fst, b"g3db").expect("g3db should exist in SI>0");
-        assert_eq!(decode_output(val), ParentRef::Single { raw_ordinal: 0, si: 2 });
+        assert!(matches!(decode_output(val), ParentRef::Single { raw_ordinal: 0, si: 2, token_len: 6 }));
 
         // "3db" SI=3 → in \x01 partition
         let val = fst_get_si_rest(&fst, b"3db").expect("3db should exist in SI>0");
-        assert_eq!(decode_output(val), ParentRef::Single { raw_ordinal: 0, si: 3 });
+        assert!(matches!(decode_output(val), ParentRef::Single { raw_ordinal: 0, si: 3, token_len: 6 }));
 
         // "db" should NOT exist (< min_suffix_len=3)
         assert!(fst_get_si_rest(&fst, b"db").is_none());
@@ -350,17 +366,17 @@ mod tests {
         let (fst_bytes, _output_table_data) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
-        // "core" SI=0 partition: single parent (0, si=0) from "core"
+        // "core" SI=0 partition: single parent (0, si=0) from "core" (len=4)
         let val = fst_get_si0(&fst, b"core").expect("core should exist in SI=0");
-        assert_eq!(decode_output(val), ParentRef::Single { raw_ordinal: 0, si: 0 });
+        assert!(matches!(decode_output(val), ParentRef::Single { raw_ordinal: 0, si: 0, token_len: 4 }));
 
-        // "core" SI>0 partition: single parent (1, si=4) from "hardcore"
+        // "core" SI>0 partition: single parent (1, si=4) from "hardcore" (len=8)
         let val = fst_get_si_rest(&fst, b"core").expect("core should exist in SI>0");
-        assert_eq!(decode_output(val), ParentRef::Single { raw_ordinal: 1, si: 4 });
+        assert!(matches!(decode_output(val), ParentRef::Single { raw_ordinal: 1, si: 4, token_len: 8 }));
 
-        // "hardcore" SI=0 should be single parent
+        // "hardcore" SI=0 should be single parent (len=8)
         let val = fst_get_si0(&fst, b"hardcore").expect("hardcore should exist in SI=0");
-        assert_eq!(decode_output(val), ParentRef::Single { raw_ordinal: 1, si: 0 });
+        assert!(matches!(decode_output(val), ParentRef::Single { raw_ordinal: 1, si: 0, token_len: 8 }));
     }
 
     #[test]
@@ -385,10 +401,7 @@ mod tests {
         }
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, "g3db");
-        assert_eq!(
-            decode_output(found[0].1),
-            ParentRef::Single { raw_ordinal: 0, si: 2 }
-        );
+        assert!(matches!(decode_output(found[0].1), ParentRef::Single { raw_ordinal: 0, si: 2, token_len: 6 }));
     }
 
     #[test]
@@ -399,13 +412,13 @@ mod tests {
         let (fst_bytes, _) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
-        // "café" SI=0 → \x00 partition
+        // "café" SI=0 → \x00 partition (lowercased "café" = 5 bytes UTF-8)
         let val = fst_get_si0(&fst, "café".as_bytes()).expect("café should exist in SI=0");
-        assert_eq!(decode_output(val), ParentRef::Single { raw_ordinal: 0, si: 0 });
+        assert!(matches!(decode_output(val), ParentRef::Single { raw_ordinal: 0, si: 0, .. }));
 
         // "afé" SI=1 → \x01 partition
         let val = fst_get_si_rest(&fst, "afé".as_bytes()).expect("afé should exist in SI>0");
-        assert_eq!(decode_output(val), ParentRef::Single { raw_ordinal: 0, si: 1 });
+        assert!(matches!(decode_output(val), ParentRef::Single { raw_ordinal: 0, si: 1, .. }));
     }
 
     #[test]

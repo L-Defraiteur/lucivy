@@ -405,8 +405,8 @@ impl<'a> SfxTermDictionary<'a> {
 
     fn decode_parents(&self, val: u64) -> Vec<ParentEntry> {
         match decode_output(val) {
-            ParentRef::Single { raw_ordinal, si } => {
-                vec![ParentEntry { raw_ordinal, si }]
+            ParentRef::Single { raw_ordinal, si, token_len } => {
+                vec![ParentEntry { raw_ordinal, si, token_len }]
             }
             ParentRef::Multi { offset } => {
                 let table = lucivy_fst::OutputTable::new(self.sfx_reader.parent_list_data());
