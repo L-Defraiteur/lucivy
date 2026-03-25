@@ -138,8 +138,8 @@ export class LucivyIndex {
         return this._lucivy._call('update', { path: this.path, docId, fields });
     }
 
-    commit() {
-        return this._lucivy._call('commit', { path: this.path });
+    commit({ sync = true } = {}) {
+        return this._lucivy._call('commit', { path: this.path, sync });
     }
 
     rollback() {

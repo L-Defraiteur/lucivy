@@ -167,29 +167,32 @@ fn split_and_merge(text: &str) -> Vec<(usize, usize)> {
         return ranges;
     }
 
-    // Forward merge: accumulate chunks < MIN_CHUNK_CHARS with the next
+    // Forward merge: accumulate chunks < MIN_CHUNK_CHARS with the next,
+    // but never merge more than MAX_MERGED_CHUNKS raw chunks together.
+    // This prevents long absorptions like "ag3weaver" → 1 token.
+    // No backward merge: short last chunks stay separate.
+    const MAX_MERGED_CHUNKS: usize = 2;
+
     let mut merged: Vec<(usize, usize)> = Vec::new();
     let mut acc_start = ranges[0].0;
     let mut acc_end = ranges[0].1;
+    let mut acc_chunks = 1usize;
 
     for i in 1..ranges.len() {
         let acc_chars = text[acc_start..acc_end].chars().count();
-        if acc_chars < MIN_CHUNK_CHARS {
+        if acc_chars < MIN_CHUNK_CHARS && acc_chunks < MAX_MERGED_CHUNKS {
             // Merge: extend accumulator
             acc_end = ranges[i].1;
+            acc_chunks += 1;
         } else {
             // Flush and start new accumulator
             merged.push((acc_start, acc_end));
             acc_start = ranges[i].0;
             acc_end = ranges[i].1;
+            acc_chunks = 1;
         }
     }
     merged.push((acc_start, acc_end));
-
-    // No backward merge: short last chunks stay separate.
-    // This gives consistent splits regardless of the last chunk length
-    // (e.g. "rag3db" → ["rag3", "db"], "rag3weaver" → ["rag3", "weaver"]).
-    // Short last tokens are handled fine by multi-token prefix matching in search.
 
     merged
 }

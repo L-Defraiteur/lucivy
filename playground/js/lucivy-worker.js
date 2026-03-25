@@ -338,6 +338,7 @@ self.onmessage = async (e) => {
 
             case 'commit': {
                 const ctx = getCtx(args.path);
+                const syncOpfs = args.sync !== false; // default true, pass sync:false to skip
 
                 // Spawn commit on a dedicated pthread (bypasses ASYNCIFY).
                 wlog('[commit] spawning commit thread...');
@@ -368,8 +369,8 @@ self.onmessage = async (e) => {
                 // Reset status via quick ccall.
                 await Module.ccall('lucivy_commit_finish', 'number', [], [], { async: true });
 
-                // Sync dirty files to OPFS (best-effort).
-                try {
+                // Sync dirty files to OPFS (opt-in, skip during bulk indexing).
+                if (syncOpfs) try {
                     await syncDirtyToOpfs(args.path, ctx);
                 } catch (e) {
                     console.warn('[lucivy-worker] OPFS sync skipped:', e.message);

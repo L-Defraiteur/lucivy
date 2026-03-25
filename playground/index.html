@@ -203,8 +203,8 @@ window._allLogs = [];
     <label>
       Mode:
       <select id="mode">
-        <option value="contains_split" selected>contains (split)</option>
-        <option value="contains">contains</option>
+        <option value="contains" selected>contains</option>
+        <option value="contains_split">contains (split)</option>
         <option value="startsWith_split">startsWith (split)</option>
         <option value="startsWith">startsWith</option>
         <option value="regex">regex</option>
@@ -217,7 +217,7 @@ window._allLogs = [];
     </label>
     <label>
       Fuzzy distance:
-      <input type="number" id="distance" value="1" min="0" max="3">
+      <input type="number" id="distance" value="0" min="0" max="3">
     </label>
     <label>
       <input type="checkbox" id="highlights" checked> Highlights
@@ -435,11 +435,21 @@ function buildQuery(text) {
 }
 
 let searchGeneration = 0;
+let searchRunning = false;
+let pendingSearch = null;
 
 const queryWarningEl = document.getElementById('queryWarning');
 
 async function doSearch() {
   const text = queryEl.value.trim();
+
+  // If a search is already running, store this as pending and return.
+  // When the running search finishes, it will re-trigger with the latest.
+  if (searchRunning) {
+    pendingSearch = text;
+    return;
+  }
+
   const gen = ++searchGeneration;
   resultsEl.innerHTML = '';
   resultsHeaderEl.textContent = '';
@@ -465,14 +475,36 @@ async function doSearch() {
   const wantHighlights = highlightsEl.checked;
   const query = buildQuery(text);
 
+  searchRunning = true;
   const t0 = performance.now();
   let results;
   try {
     results = await idx.search(query, { limit, highlights: wantHighlights, fields: true });
   } catch (e) {
     if (gen === searchGeneration) resultsHeaderEl.textContent = `Error: ${e.message}`;
+    searchRunning = false;
+    // Re-trigger pending search if different from this one.
+    if (pendingSearch !== null && pendingSearch !== text) {
+      const next = pendingSearch;
+      pendingSearch = null;
+      queryEl.value = next;
+      doSearch();
+    }
+    pendingSearch = null;
     return;
   }
+  searchRunning = false;
+
+  // Re-trigger pending search if the user typed something new while we were busy.
+  if (pendingSearch !== null && pendingSearch !== text) {
+    const next = pendingSearch;
+    pendingSearch = null;
+    // Don't render stale results — go straight to the new search.
+    doSearch();
+    return;
+  }
+  pendingSearch = null;
+
   // Discard stale results from earlier keystrokes
   if (gen !== searchGeneration) return;
   const elapsed = (performance.now() - t0).toFixed(1);
@@ -646,15 +678,15 @@ async function importFiles(fileList) {
       { name: 'content', type: 'text' },
     ]);
 
-    const BATCH = 5000;
-    for (let start = 0; start < textFiles.length; start += BATCH) {
-      const batch = textFiles.slice(start, start + BATCH).map((f, j) => {
-        const i = start + j;
-        userFiles.set(i, f);
-        return { docId: i, path: f.path, content: f.content };
-      });
-      statusEl.textContent = `Indexing ${textFiles.length} file(s)... ${Math.min(start + BATCH, textFiles.length)}/${textFiles.length}`;
-      await userIndex.addMany(batch);
+    const COMMIT_EVERY = 200;
+    for (let i = 0; i < textFiles.length; i++) {
+      const { path, content } = textFiles[i];
+      await userIndex.add(i, { path, content });
+      userFiles.set(i, { path, content });
+      if ((i + 1) % COMMIT_EVERY === 0) {
+        statusEl.textContent = `Indexing ${textFiles.length} file(s)... ${i + 1}/${textFiles.length} (committing...)`;
+        await userIndex.commit({ sync: false });
+      }
     }
     await userIndex.commit();
     userNumDocs = await userIndex.numDocs();
@@ -915,15 +947,15 @@ async function cloneGitRepo() {
       { name: 'content', type: 'text' },
     ]);
 
-    const BATCH = 5000;
-    for (let start = 0; start < textFiles.length; start += BATCH) {
-      const batch = textFiles.slice(start, start + BATCH).map((f, j) => {
-        const i = start + j;
-        userFiles.set(i, f);
-        return { docId: i, path: f.path, content: f.content };
-      });
-      statusEl.textContent = `Indexing ${owner}/${repo}... ${Math.min(start + BATCH, textFiles.length)}/${textFiles.length}`;
-      await userIndex.addMany(batch);
+    const COMMIT_EVERY = 200;
+    for (let i = 0; i < textFiles.length; i++) {
+      const { path, content } = textFiles[i];
+      await userIndex.add(i, { path, content });
+      userFiles.set(i, { path, content });
+      if ((i + 1) % COMMIT_EVERY === 0) {
+        statusEl.textContent = `Indexing ${owner}/${repo}... ${i + 1}/${textFiles.length} (committing...)`;
+        await userIndex.commit({ sync: false });
+      }
     }
     await userIndex.commit();
     userNumDocs = await userIndex.numDocs();

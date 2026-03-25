@@ -7,6 +7,7 @@ use crate::docset::{DocSet, TERMINATED};
 use crate::index::InvertedIndexReader;
 use crate::postings::Postings;
 use crate::schema::IndexRecordOption;
+use crate::suffix_fst::builder::ParentEntry;
 use crate::suffix_fst::file::SfxFileReader;
 
 /// A single contains match result.
@@ -563,29 +564,24 @@ where
         "separators must be one less than tokens"
     );
 
-    // Step 1: Resolve ALL tokens to per-doc postings via .sfx
+    // Step 1: Walk ALL tokens — collect ordinals only (cheap, no posting resolution).
     //
-    // For each token position in the query, collect postings grouped by doc_id.
     // - First token (i=0): any SI (can be a suffix of the doc token)
     // - Middle tokens: SI=0 only (must match full doc tokens)
     // - Last token: prefix walk with SI=0 (can be a prefix of the doc token)
 
     let n = query_tokens.len();
-    let mut per_token_postings: Vec<Vec<RawPostingEntry>> = Vec::with_capacity(n);
+
+    // Walk results: Vec of (suffix_term, Vec<ParentEntry>) per query token.
+    let mut per_token_walks: Vec<Vec<(String, Vec<ParentEntry>)>> = Vec::with_capacity(n);
 
     for (i, &token) in query_tokens.iter().enumerate() {
         let query_lower = token.to_lowercase();
         let is_first = i == 0;
         let is_last = i == n - 1;
-
-        let mut postings = Vec::new();
-
-        // Choose walk strategy based on position, prefix_only, and fuzzy_distance.
-        // For prefix_only (startsWith): all tokens use si0 variants.
-        // For contains: first token uses all (any SI), others use si0.
         let use_si0 = prefix_only || !is_first;
 
-        let walk_results = if is_last {
+        let walk_results: Vec<(String, Vec<ParentEntry>)> = if is_last {
             if fuzzy_distance > 0 {
                 if use_si0 { sfx_reader.fuzzy_walk_si0(&query_lower, fuzzy_distance) }
                 else { sfx_reader.fuzzy_walk(&query_lower, fuzzy_distance) }
@@ -609,34 +605,78 @@ where
             }
         };
 
-        for (_suffix_term, parents) in &walk_results {
+        if walk_results.is_empty() {
+            return Vec::new(); // No ordinals → no match possible
+        }
+
+        per_token_walks.push(walk_results);
+    }
+
+    // Step 2: Pick pivot = token with fewest total ordinals (most selective).
+    // Count parent entries per token as a proxy for posting list size.
+
+    let pivot_idx = per_token_walks
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, walks)| walks.iter().map(|(_, parents)| parents.len()).sum::<usize>())
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+
+    // Step 3: Resolve pivot's postings fully → extract doc_ids for filtering.
+
+    let mut pivot_postings: Vec<RawPostingEntry> = Vec::new();
+    for (_suffix_term, parents) in &per_token_walks[pivot_idx] {
+        for parent in parents {
+            let entries = raw_ordinal_resolver(parent.raw_ordinal);
+            for entry in entries {
+                pivot_postings.push(entry);
+            }
+        }
+    }
+
+    if pivot_postings.is_empty() {
+        return Vec::new();
+    }
+
+    let pivot_doc_ids: std::collections::HashSet<u32> = pivot_postings.iter()
+        .map(|e| e.doc_id)
+        .collect();
+
+    pivot_postings.sort_by(|a, b| a.doc_id.cmp(&b.doc_id).then(a.token_index.cmp(&b.token_index)));
+
+    // Step 4: Resolve other tokens' postings, filtered by pivot_doc_ids.
+    // Only keep entries whose doc_id appears in the pivot — massively reduces memory.
+
+    let mut per_token_postings: Vec<Vec<RawPostingEntry>> = Vec::with_capacity(n);
+
+    for i in 0..n {
+        if i == pivot_idx {
+            per_token_postings.push(pivot_postings.clone());
+            continue;
+        }
+
+        let mut postings: Vec<RawPostingEntry> = Vec::new();
+        for (_suffix_term, parents) in &per_token_walks[i] {
             for parent in parents {
                 let entries = raw_ordinal_resolver(parent.raw_ordinal);
                 for entry in entries {
-                    postings.push(entry);
+                    if pivot_doc_ids.contains(&entry.doc_id) {
+                        postings.push(entry);
+                    }
                 }
             }
         }
 
         if postings.is_empty() {
-            return Vec::new(); // Any token with zero postings → no match possible
+            return Vec::new(); // No intersection possible
         }
 
-        // Sort by (doc_id, token_index) for efficient intersection
         postings.sort_by(|a, b| a.doc_id.cmp(&b.doc_id).then(a.token_index.cmp(&b.token_index)));
         per_token_postings.push(postings);
     }
 
-    // Step 2: Pick the most selective token as pivot (fewest postings).
-    // This avoids iterating thousands of candidates when a short token
-    // like "is" or "a" is in the query alongside a long discriminating one.
-
-    let pivot_idx = per_token_postings
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, p)| p.len())
-        .map(|(i, _)| i)
-        .unwrap_or(0);
+    // Drop walk results — no longer needed.
+    drop(per_token_walks);
 
     // Step 3: Find chains of consecutive token positions across docs
     //

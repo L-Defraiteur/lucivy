@@ -783,8 +783,8 @@ mod tests {
     #[test]
     fn test_suffix_query_substring() {
         let (index, body_raw) = build_unicode_index();
-        // "g3db" is a suffix of "rag3db"
-        let docs = search_docs(&index, body_raw, "g3db");
+        // "mport" is a substring of "import" (doc 1: "import rag3db from core")
+        let docs = search_docs(&index, body_raw, "mport");
         assert_eq!(docs, vec![1]);
     }
 
