@@ -382,7 +382,8 @@ fn build_contains_query(
     let value = config.value.as_deref().ok_or("contains query requires 'value'")?;
     let distance = config.distance.unwrap_or(0);
 
-    let mut query = SuffixContainsQuery::new(field, value.to_lowercase())
+    // Pass original case — tokenize_query does CamelCaseSplit (needs case) then LowerCaser.
+    let mut query = SuffixContainsQuery::new(field, value.to_string())
         .with_fuzzy_distance(distance)
         .with_strict_separators(config.strict_separators.unwrap_or(false));
     if let Some(sink) = highlight_sink {

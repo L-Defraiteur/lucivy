@@ -256,6 +256,88 @@ impl Index {
             .map_err(|e| PyValueError::new_err(e))
     }
 
+    // ── Delta sync ──────────────────────────────────────────────────────
+
+    /// Current version of the index (hash of meta.json).
+    #[getter]
+    fn version(&self) -> PyResult<String> {
+        lucivy_core::sync::compute_version(&self.handle)
+            .map_err(|e| PyValueError::new_err(e))
+    }
+
+    /// List of segment IDs in the current committed state.
+    #[getter]
+    fn segment_ids(&self) -> PyResult<Vec<String>> {
+        let meta = self.handle.index.load_metas()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(meta.segments.iter().map(|s| s.id().uuid_string()).collect())
+    }
+
+    /// Export a LUCID delta blob from this index.
+    ///
+    /// Args:
+    ///     client_version: The version the client currently has.
+    ///     client_segment_ids: List of segment ID strings the client has.
+    ///
+    /// Returns: bytes (LUCID binary blob).
+    #[pyo3(signature = (client_version, client_segment_ids))]
+    fn export_delta<'py>(
+        &self,
+        py: Python<'py>,
+        client_version: &str,
+        client_segment_ids: Vec<String>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        let client_ids: std::collections::HashSet<String> = client_segment_ids.into_iter().collect();
+        let delta = lucivy_core::sync::export_delta(
+            &self.handle,
+            std::path::Path::new(&self.index_path),
+            &client_ids,
+            client_version,
+        ).map_err(|e| PyValueError::new_err(e))?;
+
+        let blob = lucistore::delta::serialize_delta(&delta);
+        Ok(pyo3::types::PyBytes::new(py, &blob))
+    }
+
+    /// Apply a LUCID delta blob to this index.
+    ///
+    /// Writes new segment files, removes old ones, writes new meta.json.
+    /// Then reopens the reader so new docs are visible.
+    fn apply_delta(&self, data: &[u8]) -> PyResult<()> {
+        let delta = lucistore::delta::deserialize_delta(data)
+            .map_err(|e| PyValueError::new_err(e))?;
+        lucistore::fs_utils::apply_delta(
+            std::path::Path::new(&self.index_path),
+            &delta,
+        ).map_err(|e| PyValueError::new_err(e))?;
+
+        self.handle.reader.reload()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Export a LUCID delta blob to a file.
+    #[pyo3(signature = (path, client_version, client_segment_ids))]
+    fn export_delta_to(
+        &self,
+        path: &str,
+        client_version: &str,
+        client_segment_ids: Vec<String>,
+    ) -> PyResult<()> {
+        let client_ids: std::collections::HashSet<String> = client_segment_ids.into_iter().collect();
+        let delta = lucivy_core::sync::export_delta(
+            &self.handle,
+            std::path::Path::new(&self.index_path),
+            &client_ids,
+            client_version,
+        ).map_err(|e| PyValueError::new_err(e))?;
+
+        let blob = lucistore::delta::serialize_delta(&delta);
+        std::fs::write(path, &blob)
+            .map_err(|e| PyValueError::new_err(format!("cannot write delta: {e}")))?;
+        Ok(())
+    }
+
     /// Search the index.
     ///
     /// Args:

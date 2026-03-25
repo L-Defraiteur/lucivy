@@ -803,4 +803,90 @@ mod tests {
         eprintln!("Contains 'neural networks': {} results", results.len());
         assert!(results.len() > 0, "Contains should find 'neural networks' in body of Machine Learning doc");
     }
+
+    /// Reproduce highlight offset bug: "ingleQuery" should highlight "SingleQuery",
+    /// not "ddSingleQuery" or any other wrong span.
+    #[test]
+    fn test_contains_camel_case_highlight_offsets() {
+        use std::sync::Arc;
+        use ld_lucivy::query::HighlightSink;
+        use ld_lucivy::schema::Value;
+
+        let tmp = std::env::temp_dir().join("lucivy_test_camel_highlight");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+            "fields": [{"name": "body", "type": "text", "stored": true}]
+        })).unwrap();
+
+        let directory = StdFsDirectory::open(tmp.to_str().unwrap()).unwrap();
+        let handle = LucivyHandle::create(directory, &config).unwrap();
+
+        let body = handle.field("body").unwrap();
+        let nid = handle.field(NODE_ID_FIELD).unwrap();
+
+        let text = "regularQuery->addSingleQuery(transformSingleQuery(*unionClause->oC_SingleQuery()))";
+        {
+            let mut g = handle.writer.lock().unwrap();
+            let w = g.as_mut().unwrap();
+            let mut doc = ld_lucivy::LucivyDocument::new();
+            doc.add_u64(nid, 0);
+            doc.add_text(body, text);
+            w.add_document(doc).unwrap();
+            w.commit().unwrap();
+        }
+        handle.reader.reload().unwrap();
+
+        // Search "ingleQuery" — should match via CamelCaseSplit ["ingle", "Query"]
+        let sink = Arc::new(HighlightSink::new());
+        let query_config = crate::query::QueryConfig {
+            query_type: "contains".into(),
+            field: Some("body".into()),
+            value: Some("ingleQuery".into()),
+            ..Default::default()
+        };
+        let query = crate::query::build_query(
+            &query_config, &handle.schema, &handle.index, Some(sink.clone()),
+        ).unwrap();
+
+        let searcher = handle.reader.searcher();
+        let collector = ld_lucivy::collector::TopDocs::with_limit(10).order_by_score();
+        let results = searcher.search(&*query, &collector).unwrap();
+
+        assert!(!results.is_empty(), "should find 'ingleQuery' in text");
+
+        // Check highlight offsets
+        for &(_score, doc_addr) in &results {
+            let doc: ld_lucivy::LucivyDocument = searcher.doc(doc_addr).unwrap();
+            let stored = doc.get_first(body)
+                .and_then(|v| v.as_value().as_str().map(|s| s.to_string()))
+                .unwrap_or_default();
+
+            let seg_id = searcher.segment_reader(doc_addr.segment_ord).segment_id();
+            if let Some(by_field) = sink.get(seg_id, doc_addr.doc_id) {
+                for (field_name, offsets) in &by_field {
+                    for &[from, to] in offsets {
+                        let highlighted = &stored[from..to];
+                        eprintln!("Highlight [{from}..{to}]: '{highlighted}'");
+                        // The highlight should contain "ingleQuery" or "SingleQuery",
+                        // NOT "ddSingleQuery" or anything wider.
+                        assert!(
+                            highlighted.contains("ingleQuery") || highlighted.contains("SingleQuery"),
+                            "Bad highlight: '{highlighted}' (expected to contain 'ingleQuery' or 'SingleQuery')"
+                        );
+                        // Must not extend past the token boundary
+                        assert!(
+                            highlighted.len() <= "SingleQuery".len() + 5,
+                            "Highlight too wide: '{highlighted}' ({} bytes)",
+                            highlighted.len()
+                        );
+                    }
+                }
+            }
+        }
+
+        handle.close().unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

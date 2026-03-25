@@ -15,5 +15,6 @@ ld-lucivy = { path = "../..", default-features = false, features = [
     "stopwords",
     "lz4-compression",
 ] }
+lucistore = { path = "../../lucistore" }
 pyo3 = { version = "0.24", features = ["extension-module"] }
 serde_json = "1"

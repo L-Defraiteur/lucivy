@@ -762,16 +762,28 @@ where
         let first = &chain[0];
         let last = &chain[chain.len() - 1];
 
-        // byte_from: first token's byte_from (adjusted by SI if substring match)
-        let first_parents = sfx_reader.resolve_suffix(&query_tokens[0].to_lowercase());
-        let first_si = first_parents.iter()
-            .find(|p| p.raw_ordinal == per_token_postings[0]
-                .iter()
-                .find(|e| e.doc_id == doc_id && e.token_index == first_ti)
-                .map(|_| p.raw_ordinal)
-                .unwrap_or(u64::MAX))
-            .map(|p| p.si)
-            .unwrap_or(0);
+        // byte_from: first token's byte_from (adjusted by SI if substring match).
+        // The first query token may match as a suffix of a longer indexed token.
+        // We need the SI that, when added to byte_from, gives the correct highlight start.
+        //
+        // Strategy: resolve all parents for the first query token, find the one whose
+        // ordinal produces a posting at (doc_id, first_ti), and use that parent's SI.
+        let first_query_lower = query_tokens[0].to_lowercase();
+        let first_walk = if prefix_only {
+            sfx_reader.resolve_suffix_si0(&first_query_lower)
+        } else {
+            sfx_reader.resolve_suffix(&first_query_lower)
+        };
+        let mut first_si: u16 = 0;
+        'outer: for parent in &first_walk {
+            let entries = raw_ordinal_resolver(parent.raw_ordinal);
+            for e in &entries {
+                if e.doc_id == doc_id && e.token_index == first_ti {
+                    first_si = parent.si;
+                    break 'outer;
+                }
+            }
+        }
 
         let byte_from = first.byte_from as usize + first_si as usize;
         let last_query_token = query_tokens[n - 1].to_lowercase();
