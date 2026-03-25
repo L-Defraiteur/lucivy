@@ -8,6 +8,7 @@ pub mod gapmap;
 /// File I/O for `.sfx` and `.sfxpost` formats (reader/writer).
 pub mod file;
 mod interceptor;
+pub mod sfxpost_v2;
 pub(crate) mod term_dictionary;
 #[cfg(test)]
 mod stress_tests;
