@@ -360,7 +360,11 @@ impl DfaBuilder {
         for seq in Utf8Sequences::new(from_chr, to_chr) {
             let mut fsi = from_si;
             for range in &seq.as_slice()[0..seq.len() - 1] {
-                let tsi = self.new_state(false);
+                // Intermediate UTF-8 states inherit max_prefix_len from the source.
+                // We haven't consumed a complete character yet, so the prefix
+                // matching state hasn't changed.
+                let parent_prefix = self.dfa.states[fsi].max_prefix_len;
+                let tsi = self.new_state_with_prefix(false, parent_prefix);
                 self.add_utf8_range(overwrite, fsi, tsi, range);
                 fsi = tsi;
             }
@@ -389,6 +393,11 @@ impl DfaBuilder {
 
     fn new_state(&mut self, is_match: bool) -> usize {
         self.dfa.states.push(State { next: [None; 256], is_match, max_prefix_len: 0 });
+        self.dfa.states.len() - 1
+    }
+
+    fn new_state_with_prefix(&mut self, is_match: bool, max_prefix_len: usize) -> usize {
+        self.dfa.states.push(State { next: [None; 256], is_match, max_prefix_len });
         self.dfa.states.len() - 1
     }
 }
