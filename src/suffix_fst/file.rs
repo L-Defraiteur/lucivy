@@ -2,6 +2,7 @@ use std::io::{self, Write};
 
 use levenshtein_automata::{Distance, LevenshteinAutomatonBuilder, DFA};
 use lucivy_fst::{Automaton, IntoStreamer, Map, OutputTable, Streamer};
+use lucivy_fst::automaton::Levenshtein as LevAutomaton;
 
 use super::builder::{decode_output, decode_parent_entries, ParentEntry, ParentRef};
 use super::gapmap::GapMapReader;
@@ -388,6 +389,81 @@ impl<'a> SfxFileReader<'a> {
 
         // Sort by prefix_len descending (longest split first = most selective)
         candidates.sort_by(|a, b| b.prefix_len.cmp(&a.prefix_len));
+        candidates
+    }
+
+    /// Fuzzy falling walk: like falling_walk but uses a Levenshtein DFA to
+    /// tolerate edit distance in the query prefix.
+    ///
+    /// Uses DFS through the FST guided by the Levenshtein automaton.
+    /// At each final FST node where the DFA has matched a prefix of the query
+    /// (max_prefix_len > 0), checks if si + prefix_len == token_len.
+    ///
+    /// Falls back to exact falling_walk when distance == 0.
+    pub fn fuzzy_falling_walk(&self, query: &str, distance: u8) -> Vec<SplitCandidate> {
+        if distance == 0 {
+            return self.falling_walk(query);
+        }
+
+        let Ok(lev) = LevAutomaton::new(query, distance as u32) else {
+            return Vec::new(); // query too long for DFA construction
+        };
+
+        let fst = self.fst.as_fst();
+        let mut candidates = Vec::new();
+
+        for &partition in &[super::builder::SI0_PREFIX, super::builder::SI_REST_PREFIX] {
+            let root = fst.root();
+            let Some(idx) = root.find_input(partition) else { continue };
+            let trans = root.transition(idx);
+
+            // DFS stack: (fst_node, fst_output, lev_dfa_state)
+            let initial_output = lucivy_fst::raw::Output::zero().cat(trans.out);
+            let initial_lev_state = {
+                // The partition byte is not part of the query — skip it in the DFA.
+                // We start the DFA fresh after consuming the partition prefix.
+
+                lev.start()
+            };
+
+            let mut stack: Vec<(lucivy_fst::raw::CompiledAddr, lucivy_fst::raw::Output, Option<usize>)> = Vec::new();
+            stack.push((trans.addr, initial_output, initial_lev_state));
+
+            while let Some((addr, output, lev_state)) = stack.pop() {
+                let node = fst.node(addr);
+
+                // Check: final FST node + DFA has matched a prefix?
+                if node.is_final() {
+                    let prefix_len = lev.max_prefix_len(&lev_state);
+                    if prefix_len > 0 {
+                        let val = output.cat(node.final_output()).value();
+                        let parents = self.decode_parents(val);
+                        for parent in parents {
+                            if parent.si as usize + prefix_len == parent.token_len as usize {
+                                candidates.push(SplitCandidate {
+                                    prefix_len,
+                                    parent,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Pruning: can the DFA still match?
+
+                if !lev.can_match(&lev_state) { continue; }
+
+                // Explore all FST transitions
+                for t in node.transitions() {
+                    let next_lev = lev.accept(&lev_state, t.inp);
+                    let next_output = output.cat(t.out);
+                    stack.push((t.addr, next_output, next_lev));
+                }
+            }
+        }
+
+        candidates.sort_by(|a, b| b.prefix_len.cmp(&a.prefix_len));
+        candidates.dedup_by(|a, b| a.prefix_len == b.prefix_len && a.parent.raw_ordinal == b.parent.raw_ordinal);
         candidates
     }
 }

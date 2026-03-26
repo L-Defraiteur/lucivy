@@ -147,6 +147,18 @@ impl Levenshtein {
     }
 }
 
+impl Levenshtein {
+    /// Maximum prefix length of the query matched within edit distance at the given DFA state.
+    /// Returns 0 if no prefix matches. Used by fuzzy falling walk for cross-token search.
+    #[inline]
+    pub fn max_prefix_len(&self, state: &Option<usize>) -> usize {
+        match state {
+            Some(si) => self.dfa.states[*si].max_prefix_len,
+            None => 0,
+        }
+    }
+}
+
 impl fmt::Debug for Levenshtein {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -222,6 +234,10 @@ struct Dfa {
 struct State {
     next: [Option<usize>; 256],
     is_match: bool,
+    /// Maximum prefix length of the query that is matched within edit distance
+    /// at this DFA state. 0 means no prefix matches. Used by fuzzy falling walk
+    /// to detect cross-token split points.
+    max_prefix_len: usize,
 }
 
 impl fmt::Debug for State {
@@ -305,7 +321,13 @@ impl DfaBuilder {
             Entry::Occupied(v) => (*v.get(), true),
             Entry::Vacant(v) => {
                 let is_match = self.lev.is_match(lev_state);
-                self.dfa.states.push(State { next: [None; 256], is_match });
+                // Compute max prefix length matched within edit distance.
+                // lev_state[i] = edit distance to match first i chars of query.
+                let max_prefix_len = lev_state.iter().enumerate().rev()
+                    .find(|(_, &d)| d <= self.lev.dist)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                self.dfa.states.push(State { next: [None; 256], is_match, max_prefix_len });
                 (*v.insert(self.dfa.states.len() - 1), false)
             }
         })

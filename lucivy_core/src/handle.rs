@@ -813,6 +813,87 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// Test regex, term, phrase, fuzzy query types all work with V2 sfxpost.
+    #[test]
+    fn test_all_query_types_v2() {
+        let tmp = std::env::temp_dir().join("lucivy_test_all_qtypes");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+            "fields": [{"name": "body", "type": "text", "stored": true}]
+        })).unwrap();
+
+        let directory = StdFsDirectory::open(tmp.to_str().unwrap()).unwrap();
+        let handle = LucivyHandle::create(directory, &config).unwrap();
+        let body = handle.field("body").unwrap();
+        let nid = handle.field(NODE_ID_FIELD).unwrap();
+        {
+            let mut g = handle.writer.lock().unwrap();
+            let w = g.as_mut().unwrap();
+            for (id, text) in [
+                (0u64, "use rag3weaver for full text search"),
+                (1, "the getElementById function in JavaScript"),
+                (2, "mutex lock implementation for thread safety"),
+            ] {
+                let mut doc = ld_lucivy::LucivyDocument::new();
+                doc.add_u64(nid, id);
+                doc.add_text(body, text);
+                w.add_document(doc).unwrap();
+            }
+            w.commit().unwrap();
+        }
+        handle.reader.reload().unwrap();
+
+        let search = |qtype: &str, value: &str, extra: Option<(&str, serde_json::Value)>| -> usize {
+            let mut json = serde_json::json!({
+                "type": qtype,
+                "field": "body",
+                "value": value,
+            });
+            if let Some((k, v)) = extra {
+                json[k] = v;
+            }
+            let qc: crate::query::QueryConfig = serde_json::from_value(json).unwrap();
+            let query = crate::query::build_query(&qc, &handle.schema, &handle.index, None).unwrap();
+            let searcher = handle.reader.searcher();
+            searcher.search(&*query, &ld_lucivy::collector::TopDocs::with_limit(10).order_by_score())
+                .unwrap().len()
+        };
+
+        // Term
+        eprintln!("term 'mutex': {}", search("term", "mutex", None));
+        assert!(search("term", "mutex", None) > 0);
+
+        // Parse (natural language query)
+        eprintln!("parse 'full text search': {}", search("parse", "full text search", None));
+        assert!(search("parse", "full text search", None) > 0);
+
+        // Contains exact
+        eprintln!("contains 'weaver': {}", search("contains", "weaver", None));
+        assert!(search("contains", "weaver", None) > 0);
+
+        // Contains cross-token
+        eprintln!("contains 'rag3weaver': {}", search("contains", "rag3weaver", None));
+        assert!(search("contains", "rag3weaver", None) > 0);
+
+        // Regex
+        eprintln!("contains regex 'mutex.*lock': {}", search("contains", "mutex.*lock", Some(("regex", serde_json::json!(true)))));
+        let regex_results = search("contains", "mutex.*lock", Some(("regex", serde_json::json!(true))));
+        eprintln!("  → {} results", regex_results);
+
+        // Fuzzy
+        eprintln!("fuzzy 'mutx' d=1: {}", search("fuzzy", "mutx", Some(("distance", serde_json::json!(1)))));
+        assert!(search("fuzzy", "mutx", Some(("distance", serde_json::json!(1)))) > 0);
+
+        // startsWith
+        eprintln!("startsWith 'imple': {}", search("startsWith", "imple", None));
+        assert!(search("startsWith", "imple", None) > 0);
+
+        handle.close().unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// Test fuzzy contains: single-token and cross-token.
     #[test]
     fn test_fuzzy_contains() {

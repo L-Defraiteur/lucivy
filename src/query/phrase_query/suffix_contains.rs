@@ -853,7 +853,7 @@ where
     let t0 = std::time::Instant::now();
 
     // Falling walk: find all split candidates
-    let candidates = sfx_reader.falling_walk(&query_lower);
+    let candidates = sfx_reader.fuzzy_falling_walk(&query_lower, fuzzy_distance);
     let t_fall = t0.elapsed();
     if candidates.is_empty() {
         return Vec::new();
