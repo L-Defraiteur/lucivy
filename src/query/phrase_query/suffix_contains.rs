@@ -849,26 +849,7 @@ where
         return Vec::new();
     }
 
-    // Pivot-first: resolve left side first (usually more selective),
-    // extract doc_ids, then only resolve right ordinals for matching docs.
-    let mut ordinal_cache: std::collections::HashMap<u64, Vec<RawPostingEntry>> = std::collections::HashMap::new();
-
-    // Step 1: Resolve left ordinals → extract pivot doc_ids
-    let mut pivot_doc_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    for cand in &candidates {
-        let postings = ordinal_cache
-            .entry(cand.parent.raw_ordinal)
-            .or_insert_with(|| raw_term_resolver(cand.parent.raw_ordinal));
-        for p in postings.iter() {
-            pivot_doc_ids.insert(p.doc_id);
-        }
-    }
-
-    if pivot_doc_ids.is_empty() {
-        return Vec::new();
-    }
-
-    // Step 2: Walk remainders (cheap FST scan, no posting resolve yet)
+    // Step 1: Walk remainders (cheap FST scan, no posting resolve yet)
     let mut remainder_cache: std::collections::HashMap<String, Vec<(String, Vec<ParentEntry>)>> = std::collections::HashMap::new();
     for cand in &candidates {
         let remainder = query_lower[cand.prefix_len..].to_string();
@@ -878,20 +859,78 @@ where
             .or_insert_with(|| sfx_reader.prefix_walk_si0(&remainder));
     }
 
-    // Step 3: Resolve right ordinals FILTERED by pivot doc_ids
-    // Only resolve postings for docs that appear in the left side.
-    for walks in remainder_cache.values() {
-        for (_suffix, parents) in walks {
-            for parent in parents {
-                ordinal_cache
-                    .entry(parent.raw_ordinal)
-                    .or_insert_with(|| {
-                        raw_term_resolver(parent.raw_ordinal)
-                            .into_iter()
-                            .filter(|e| pivot_doc_ids.contains(&e.doc_id))
-                            .collect()
-                    });
+    // Step 2: Count parents on each side to pick the best pivot
+    let left_parent_count: usize = {
+        let mut unique: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for cand in &candidates { unique.insert(cand.parent.raw_ordinal); }
+        unique.len()
+    };
+    let right_parent_count: usize = {
+        let mut unique: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for walks in remainder_cache.values() {
+            for (_suffix, parents) in walks {
+                for p in parents { unique.insert(p.raw_ordinal); }
             }
+        }
+        unique.len()
+    };
+
+    let left_is_pivot = left_parent_count <= right_parent_count;
+
+    // Step 3: Resolve pivot side → extract doc_ids
+    let mut ordinal_cache: std::collections::HashMap<u64, Vec<RawPostingEntry>> = std::collections::HashMap::new();
+    let mut pivot_doc_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
+    if left_is_pivot {
+        for cand in &candidates {
+            let postings = ordinal_cache
+                .entry(cand.parent.raw_ordinal)
+                .or_insert_with(|| raw_term_resolver(cand.parent.raw_ordinal));
+            for p in postings.iter() { pivot_doc_ids.insert(p.doc_id); }
+        }
+    } else {
+        for walks in remainder_cache.values() {
+            for (_suffix, parents) in walks {
+                for parent in parents {
+                    let postings = ordinal_cache
+                        .entry(parent.raw_ordinal)
+                        .or_insert_with(|| raw_term_resolver(parent.raw_ordinal));
+                    for p in postings.iter() { pivot_doc_ids.insert(p.doc_id); }
+                }
+            }
+        }
+    }
+
+    if pivot_doc_ids.is_empty() {
+        return Vec::new();
+    }
+
+    // Step 4: Resolve non-pivot side FILTERED by pivot doc_ids
+    if left_is_pivot {
+        for walks in remainder_cache.values() {
+            for (_suffix, parents) in walks {
+                for parent in parents {
+                    ordinal_cache
+                        .entry(parent.raw_ordinal)
+                        .or_insert_with(|| {
+                            raw_term_resolver(parent.raw_ordinal)
+                                .into_iter()
+                                .filter(|e| pivot_doc_ids.contains(&e.doc_id))
+                                .collect()
+                        });
+                }
+            }
+        }
+    } else {
+        for cand in &candidates {
+            ordinal_cache
+                .entry(cand.parent.raw_ordinal)
+                .or_insert_with(|| {
+                    raw_term_resolver(cand.parent.raw_ordinal)
+                        .into_iter()
+                        .filter(|e| pivot_doc_ids.contains(&e.doc_id))
+                        .collect()
+                });
         }
     }
 
