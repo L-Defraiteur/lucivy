@@ -849,17 +849,26 @@ where
         return Vec::new();
     }
 
-    // Resolve all needed ordinals upfront (deduplicate posting lookups)
+    // Pivot-first: resolve left side first (usually more selective),
+    // extract doc_ids, then only resolve right ordinals for matching docs.
     let mut ordinal_cache: std::collections::HashMap<u64, Vec<RawPostingEntry>> = std::collections::HashMap::new();
 
-    // Pre-resolve left ordinals
+    // Step 1: Resolve left ordinals → extract pivot doc_ids
+    let mut pivot_doc_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
     for cand in &candidates {
-        ordinal_cache
+        let postings = ordinal_cache
             .entry(cand.parent.raw_ordinal)
             .or_insert_with(|| raw_term_resolver(cand.parent.raw_ordinal));
+        for p in postings.iter() {
+            pivot_doc_ids.insert(p.doc_id);
+        }
     }
 
-    // Pre-resolve right ordinals
+    if pivot_doc_ids.is_empty() {
+        return Vec::new();
+    }
+
+    // Step 2: Walk remainders (cheap FST scan, no posting resolve yet)
     let mut remainder_cache: std::collections::HashMap<String, Vec<(String, Vec<ParentEntry>)>> = std::collections::HashMap::new();
     for cand in &candidates {
         let remainder = query_lower[cand.prefix_len..].to_string();
@@ -868,17 +877,25 @@ where
             .entry(remainder.clone())
             .or_insert_with(|| sfx_reader.prefix_walk_si0(&remainder));
     }
+
+    // Step 3: Resolve right ordinals FILTERED by pivot doc_ids
+    // Only resolve postings for docs that appear in the left side.
     for walks in remainder_cache.values() {
         for (_suffix, parents) in walks {
             for parent in parents {
                 ordinal_cache
                     .entry(parent.raw_ordinal)
-                    .or_insert_with(|| raw_term_resolver(parent.raw_ordinal));
+                    .or_insert_with(|| {
+                        raw_term_resolver(parent.raw_ordinal)
+                            .into_iter()
+                            .filter(|e| pivot_doc_ids.contains(&e.doc_id))
+                            .collect()
+                    });
             }
         }
     }
 
-    // Now all postings are cached — do adjacency checks
+    // Step 4: Adjacency checks (all postings pre-filtered, small sets)
     let mut results: Vec<SuffixContainsMatch> = Vec::new();
 
     for cand in &candidates {
@@ -894,7 +911,10 @@ where
 
         for (_suffix_term, right_parents) in right_walks {
             for right_parent in right_parents {
-                let right_postings = &ordinal_cache[&right_parent.raw_ordinal];
+                let right_postings = match ordinal_cache.get(&right_parent.raw_ordinal) {
+                    Some(p) if !p.is_empty() => p,
+                    _ => continue,
+                };
 
                 for left_entry in left_postings.iter() {
                     let expected_next = left_entry.token_index + 1;
