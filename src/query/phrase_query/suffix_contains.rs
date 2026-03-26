@@ -317,7 +317,13 @@ pub fn suffix_contains_single_token_fuzzy<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_single_token_fuzzy_inner(sfx_reader, query, distance, raw_term_resolver, false)
+    let matches = suffix_contains_single_token_fuzzy_inner(sfx_reader, query, distance, &raw_term_resolver, false);
+    if !matches.is_empty() {
+        return matches;
+    }
+    // Fallback: cross-token search (exact, not fuzzy — the cross-token split
+    // handles boundary crossing, fuzzy handles typos within a single token).
+    cross_token_search(sfx_reader, query, &raw_term_resolver)
 }
 
 /// Like fuzzy but prefix_only (SI=0 filter).
@@ -330,14 +336,14 @@ pub fn suffix_contains_single_token_fuzzy_prefix<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_single_token_fuzzy_inner(sfx_reader, query, distance, raw_term_resolver, true)
+    suffix_contains_single_token_fuzzy_inner(sfx_reader, query, distance, &raw_term_resolver, true)
 }
 
 fn suffix_contains_single_token_fuzzy_inner<F>(
     sfx_reader: &SfxFileReader<'_>,
     query: &str,
     distance: u8,
-    raw_term_resolver: F,
+    raw_term_resolver: &F,
     prefix_only: bool,
 ) -> Vec<SuffixContainsMatch>
 where
