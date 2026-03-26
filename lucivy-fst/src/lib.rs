@@ -9,7 +9,9 @@
 
 #![deny(missing_docs)]
 
-pub use crate::automaton::Automaton;
+pub use crate::inner_automaton::Automaton;
+#[cfg(feature = "levenshtein")]
+pub use crate::inner_automaton::{Levenshtein, LevenshteinError};
 pub use crate::error::{Error, Result};
 pub use crate::map::{Map, MapBuilder};
 pub use crate::output_table::{OutputTable, OutputTableBuilder};

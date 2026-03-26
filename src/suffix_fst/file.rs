@@ -2,7 +2,7 @@ use std::io::{self, Write};
 
 use levenshtein_automata::{Distance, LevenshteinAutomatonBuilder, DFA};
 use lucivy_fst::{Automaton, IntoStreamer, Map, OutputTable, Streamer};
-use lucivy_fst::automaton::Levenshtein as LevAutomaton;
+use lucivy_fst::Levenshtein as LevAutomaton;
 
 use super::builder::{decode_output, decode_parent_entries, ParentEntry, ParentRef};
 use super::gapmap::GapMapReader;
