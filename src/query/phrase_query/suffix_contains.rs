@@ -842,14 +842,20 @@ where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
     let query_lower = query.to_lowercase();
+    let t0 = std::time::Instant::now();
 
     // Falling walk: find all split candidates
     let candidates = sfx_reader.falling_walk(&query_lower);
+    let t_fall = t0.elapsed();
     if candidates.is_empty() {
         return Vec::new();
     }
 
+    eprintln!("[cross_token] query='{}' falling_walk: {}us, {} candidates",
+        query_lower, t_fall.as_micros(), candidates.len());
+
     // Step 1: Walk remainders (cheap FST scan, no posting resolve yet)
+    let t1 = std::time::Instant::now();
     let mut remainder_cache: std::collections::HashMap<String, Vec<(String, Vec<ParentEntry>)>> = std::collections::HashMap::new();
     for cand in &candidates {
         let remainder = query_lower[cand.prefix_len..].to_string();
@@ -876,8 +882,14 @@ where
     };
 
     let left_is_pivot = left_parent_count <= right_parent_count;
+    let t_walk = t1.elapsed();
+
+    eprintln!("[cross_token] remainder walks: {}us, left_parents={}, right_parents={}, pivot={}",
+        t_walk.as_micros(), left_parent_count, right_parent_count,
+        if left_is_pivot { "left" } else { "right" });
 
     // Step 3: Resolve pivot side → extract doc_ids
+    let t3 = std::time::Instant::now();
     let mut ordinal_cache: std::collections::HashMap<u64, Vec<RawPostingEntry>> = std::collections::HashMap::new();
     let mut pivot_doc_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
@@ -934,45 +946,62 @@ where
         }
     }
 
-    // Step 4: Adjacency checks (all postings pre-filtered, small sets)
-    let mut results: Vec<SuffixContainsMatch> = Vec::new();
+    let t_resolve = t3.elapsed();
+    eprintln!("[cross_token] resolve pivot+filter: {}us, pivot_docs={}",
+        t_resolve.as_micros(), pivot_doc_ids.len());
 
+    // Step 4: Adjacency checks via HashMap — O(left + right) instead of O(left × right).
+    //
+    // Index all right postings by (doc_id, token_index), then for each left posting
+    // look up (doc_id, position+1).
+
+    // Build right index: (doc_id, token_index) → Vec<(byte_from, remainder_len)>
+    let mut right_index: std::collections::HashMap<(u32, u32), Vec<(u32, usize)>> = std::collections::HashMap::new();
+    for cand in &candidates {
+        let remainder = &query_lower[cand.prefix_len..];
+        if remainder.is_empty() { continue; }
+        let right_walks = match remainder_cache.get(remainder) {
+            Some(w) => w,
+            _ => continue,
+        };
+        for (_suffix_term, right_parents) in right_walks {
+            for right_parent in right_parents {
+                if let Some(postings) = ordinal_cache.get(&right_parent.raw_ordinal) {
+                    for re in postings {
+                        right_index.entry((re.doc_id, re.token_index))
+                            .or_default()
+                            .push((re.byte_from, remainder.len()));
+                    }
+                }
+            }
+        }
+    }
+
+    // For each left posting, O(1) lookup in right index
+    let mut results: Vec<SuffixContainsMatch> = Vec::new();
     for cand in &candidates {
         let remainder = &query_lower[cand.prefix_len..];
         if remainder.is_empty() { continue; }
 
-        let right_walks = match remainder_cache.get(remainder) {
-            Some(w) if !w.is_empty() => w,
+        let left_postings = match ordinal_cache.get(&cand.parent.raw_ordinal) {
+            Some(p) => p,
             _ => continue,
         };
 
-        let left_postings = &ordinal_cache[&cand.parent.raw_ordinal];
-
-        for (_suffix_term, right_parents) in right_walks {
-            for right_parent in right_parents {
-                let right_postings = match ordinal_cache.get(&right_parent.raw_ordinal) {
-                    Some(p) if !p.is_empty() => p,
-                    _ => continue,
-                };
-
-                for left_entry in left_postings.iter() {
-                    let expected_next = left_entry.token_index + 1;
-                    for right_entry in right_postings.iter() {
-                        if right_entry.doc_id == left_entry.doc_id
-                            && right_entry.token_index == expected_next
-                        {
-                            let byte_from = left_entry.byte_from as usize + cand.parent.si as usize;
-                            let byte_to = right_entry.byte_from as usize + remainder.len();
-                            results.push(SuffixContainsMatch {
-                                doc_id: left_entry.doc_id,
-                                token_index: left_entry.token_index,
-                                byte_from,
-                                byte_to,
-                                parent_term: String::new(),
-                                si: cand.parent.si,
-                            });
-                        }
-                    }
+        for left_entry in left_postings {
+            let key = (left_entry.doc_id, left_entry.token_index + 1);
+            if let Some(right_entries) = right_index.get(&key) {
+                for &(right_byte_from, rem_len) in right_entries {
+                    let byte_from = left_entry.byte_from as usize + cand.parent.si as usize;
+                    let byte_to = right_byte_from as usize + rem_len;
+                    results.push(SuffixContainsMatch {
+                        doc_id: left_entry.doc_id,
+                        token_index: left_entry.token_index,
+                        byte_from,
+                        byte_to,
+                        parent_term: String::new(),
+                        si: cand.parent.si,
+                    });
                 }
             }
         }
