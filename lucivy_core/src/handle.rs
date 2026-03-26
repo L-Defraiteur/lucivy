@@ -813,6 +813,72 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// Test fuzzy contains: single-token and cross-token.
+    #[test]
+    fn test_fuzzy_contains() {
+        let tmp = std::env::temp_dir().join("lucivy_test_fuzzy_contains");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+            "fields": [{"name": "body", "type": "text", "stored": true}]
+        })).unwrap();
+
+        let directory = StdFsDirectory::open(tmp.to_str().unwrap()).unwrap();
+        let handle = LucivyHandle::create(directory, &config).unwrap();
+        let body = handle.field("body").unwrap();
+        let nid = handle.field(NODE_ID_FIELD).unwrap();
+        {
+            let mut g = handle.writer.lock().unwrap();
+            let w = g.as_mut().unwrap();
+            let mut doc = ld_lucivy::LucivyDocument::new();
+            doc.add_u64(nid, 0);
+            doc.add_text(body, "use rag3weaver for search");
+            w.add_document(doc).unwrap();
+            w.commit().unwrap();
+        }
+        handle.reader.reload().unwrap();
+
+        let search = |q: &str, dist: u8| -> usize {
+            let qc = crate::query::QueryConfig {
+                query_type: "contains".into(),
+                field: Some("body".into()),
+                value: Some(q.into()),
+                distance: Some(dist),
+                ..Default::default()
+            };
+            let query = crate::query::build_query(&qc, &handle.schema, &handle.index, None).unwrap();
+            let searcher = handle.reader.searcher();
+            searcher.search(&*query, &ld_lucivy::collector::TopDocs::with_limit(10).order_by_score())
+                .unwrap().len()
+        };
+
+        // Exact single-token
+        eprintln!("weaver d=0: {}", search("weaver", 0));
+        assert!(search("weaver", 0) > 0, "exact 'weaver' should match");
+
+        // Fuzzy single-token (typo in weaver)
+        eprintln!("weavr d=1: {}", search("weavr", 1));
+        assert!(search("weavr", 1) > 0, "fuzzy 'weavr' d=1 should match 'weaver'");
+
+        eprintln!("weavxr d=1: {}", search("weavxr", 1));
+        assert!(search("weavxr", 1) > 0, "fuzzy 'weavxr' d=1 should match 'weaver'");
+
+        // Exact cross-token
+        eprintln!("rag3weaver d=0: {}", search("rag3weaver", 0));
+        assert!(search("rag3weaver", 0) > 0, "exact cross-token 'rag3weaver' should match");
+
+        // Fuzzy cross-token (typo in second part)
+        eprintln!("rag3weavr d=1: {}", search("rag3weavr", 1));
+        // This won't work yet — cross_token_search is exact only.
+        // Just log the result for now.
+        let fuzzy_cross = search("rag3weavr", 1);
+        eprintln!("rag3weavr d=1 (cross-token fuzzy): {} results", fuzzy_cross);
+
+        handle.close().unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// Reproduce rag3weaver "neural networks" contains failure.
     #[test]
     fn test_contains_neural_networks() {

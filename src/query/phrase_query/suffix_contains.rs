@@ -51,7 +51,7 @@ where
         return matches;
     }
     // Fallback: query may span across token boundaries.
-    cross_token_search(sfx_reader, query, &raw_term_resolver)
+    cross_token_search(sfx_reader, query, &raw_term_resolver, 0)
 }
 
 pub fn suffix_contains_single_token_continuation<F>(
@@ -321,9 +321,10 @@ where
     if !matches.is_empty() {
         return matches;
     }
-    // Fallback: cross-token search (exact, not fuzzy — the cross-token split
-    // handles boundary crossing, fuzzy handles typos within a single token).
-    cross_token_search(sfx_reader, query, &raw_term_resolver)
+    // Fallback: cross-token search with fuzzy remainder matching.
+    // The falling walk finds exact split points (left reaches token end),
+    // then the remainder is matched with fuzzy_walk on the next token.
+    cross_token_search(sfx_reader, query, &raw_term_resolver, distance)
 }
 
 /// Like fuzzy but prefix_only (SI=0 filter).
@@ -843,6 +844,7 @@ pub fn cross_token_search<F>(
     sfx_reader: &SfxFileReader<'_>,
     query: &str,
     raw_term_resolver: &F,
+    fuzzy_distance: u8,
 ) -> Vec<SuffixContainsMatch>
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
@@ -868,7 +870,13 @@ where
         if remainder.is_empty() { continue; }
         remainder_cache
             .entry(remainder.clone())
-            .or_insert_with(|| sfx_reader.prefix_walk_si0(&remainder));
+            .or_insert_with(|| {
+                if fuzzy_distance > 0 {
+                    sfx_reader.fuzzy_walk_si0(&remainder, fuzzy_distance)
+                } else {
+                    sfx_reader.prefix_walk_si0(&remainder)
+                }
+            });
     }
 
     // Step 2: Count parents on each side to pick the best pivot
