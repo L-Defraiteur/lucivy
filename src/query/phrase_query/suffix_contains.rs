@@ -46,7 +46,12 @@ pub fn suffix_contains_single_token<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, false, false, None)
+    let matches = suffix_contains_single_token_inner(sfx_reader, query, &raw_term_resolver, false, false, None);
+    if !matches.is_empty() {
+        return matches;
+    }
+    // Fallback: query may span across token boundaries.
+    cross_token_search(sfx_reader, query, &raw_term_resolver)
 }
 
 pub fn suffix_contains_single_token_continuation<F>(
@@ -57,7 +62,7 @@ pub fn suffix_contains_single_token_continuation<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, false, true, None)
+    suffix_contains_single_token_inner(sfx_reader, query, &raw_term_resolver, false, true, None)
 }
 
 /// Like `suffix_contains_single_token_continuation` but with a stored text verifier
@@ -73,7 +78,7 @@ pub fn suffix_contains_single_token_continuation_with_store<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, false, true, Some(store_verifier))
+    suffix_contains_single_token_inner(sfx_reader, query, &raw_term_resolver, false, true, Some(store_verifier))
 }
 
 /// Like `suffix_contains_single_token` but only matches tokens that START
@@ -86,13 +91,13 @@ pub fn suffix_contains_single_token_prefix<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, true, false, None)
+    suffix_contains_single_token_inner(sfx_reader, query, &raw_term_resolver, true, false, None)
 }
 
 fn suffix_contains_single_token_inner<F>(
     sfx_reader: &SfxFileReader<'_>,
     query: &str,
-    raw_term_resolver: F,
+    raw_term_resolver: &F,
     prefix_only: bool,
     continuation: bool,
     store_verifier: Option<&dyn Fn(u32, usize, &str) -> bool>,
@@ -339,7 +344,7 @@ where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
     if distance == 0 {
-        return suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, prefix_only, false, None);
+        return suffix_contains_single_token_inner(sfx_reader, query, &raw_term_resolver, prefix_only, false, None);
     }
 
     let query_lower = query.to_lowercase();
@@ -815,6 +820,110 @@ pub struct SuffixContainsMultiMatch {
     pub byte_to: usize,
     #[allow(dead_code)]
     pub token_matches: Vec<SuffixContainsMatch>,
+}
+
+// ── Cross-token search ───────────────────────────────────────────────────────
+
+/// Search for a query that may span across indexed token boundaries.
+///
+/// Uses the falling walk to find split candidates where the query prefix
+/// reaches the end of an indexed token (si + prefix_len == token_len).
+/// Then checks if the remainder matches the start of the next token.
+///
+/// Returns matches as SuffixContainsMatch with byte offsets spanning both tokens.
+///
+/// Recursive: if the remainder itself spans another boundary, it recurses.
+pub fn cross_token_search<F>(
+    sfx_reader: &SfxFileReader<'_>,
+    query: &str,
+    raw_term_resolver: &F,
+) -> Vec<SuffixContainsMatch>
+where
+    F: Fn(u64) -> Vec<RawPostingEntry>,
+{
+    let query_lower = query.to_lowercase();
+
+    // Falling walk: find all split candidates
+    let candidates = sfx_reader.falling_walk(&query_lower);
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    // Resolve all needed ordinals upfront (deduplicate posting lookups)
+    let mut ordinal_cache: std::collections::HashMap<u64, Vec<RawPostingEntry>> = std::collections::HashMap::new();
+
+    // Pre-resolve left ordinals
+    for cand in &candidates {
+        ordinal_cache
+            .entry(cand.parent.raw_ordinal)
+            .or_insert_with(|| raw_term_resolver(cand.parent.raw_ordinal));
+    }
+
+    // Pre-resolve right ordinals
+    let mut remainder_cache: std::collections::HashMap<String, Vec<(String, Vec<ParentEntry>)>> = std::collections::HashMap::new();
+    for cand in &candidates {
+        let remainder = query_lower[cand.prefix_len..].to_string();
+        if remainder.is_empty() { continue; }
+        remainder_cache
+            .entry(remainder.clone())
+            .or_insert_with(|| sfx_reader.prefix_walk_si0(&remainder));
+    }
+    for walks in remainder_cache.values() {
+        for (_suffix, parents) in walks {
+            for parent in parents {
+                ordinal_cache
+                    .entry(parent.raw_ordinal)
+                    .or_insert_with(|| raw_term_resolver(parent.raw_ordinal));
+            }
+        }
+    }
+
+    // Now all postings are cached — do adjacency checks
+    let mut results: Vec<SuffixContainsMatch> = Vec::new();
+
+    for cand in &candidates {
+        let remainder = &query_lower[cand.prefix_len..];
+        if remainder.is_empty() { continue; }
+
+        let right_walks = match remainder_cache.get(remainder) {
+            Some(w) if !w.is_empty() => w,
+            _ => continue,
+        };
+
+        let left_postings = &ordinal_cache[&cand.parent.raw_ordinal];
+
+        for (_suffix_term, right_parents) in right_walks {
+            for right_parent in right_parents {
+                let right_postings = &ordinal_cache[&right_parent.raw_ordinal];
+
+                for left_entry in left_postings.iter() {
+                    let expected_next = left_entry.token_index + 1;
+                    for right_entry in right_postings.iter() {
+                        if right_entry.doc_id == left_entry.doc_id
+                            && right_entry.token_index == expected_next
+                        {
+                            let byte_from = left_entry.byte_from as usize + cand.parent.si as usize;
+                            let byte_to = right_entry.byte_from as usize + remainder.len();
+                            results.push(SuffixContainsMatch {
+                                doc_id: left_entry.doc_id,
+                                token_index: left_entry.token_index,
+                                byte_from,
+                                byte_to,
+                                parent_term: String::new(),
+                                si: cand.parent.si,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Deduplicate by (doc_id, byte_from)
+    results.sort_by(|a, b| a.doc_id.cmp(&b.doc_id).then(a.byte_from.cmp(&b.byte_from)));
+    results.dedup_by(|a, b| a.doc_id == b.doc_id && a.byte_from == b.byte_from);
+
+    results
 }
 
 #[cfg(test)]
