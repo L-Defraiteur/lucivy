@@ -30,7 +30,8 @@ fn should_validate() -> bool {
 }
 use crate::suffix_fst::builder::SuffixFstBuilder;
 use crate::suffix_fst::encode_vint;
-use crate::suffix_fst::file::{SfxFileReader, SfxFileWriter, SfxPostingsReader};
+use crate::suffix_fst::file::{SfxFileReader, SfxFileWriter};
+use crate::suffix_fst::sfxpost_v2::SfxPostReaderV2;
 use crate::suffix_fst::gapmap::{GapMapReader, GapMapWriter, GapMapError};
 use crate::DocAddress;
 
@@ -220,9 +221,9 @@ pub(crate) fn merge_sfxpost(
         return Ok(None);
     }
 
-    let sfxpost_readers: Vec<Option<SfxPostingsReader<'_>>> = segment_sfxpost
+    let sfxpost_readers: Vec<Option<SfxPostReaderV2>> = segment_sfxpost
         .iter()
-        .map(|opt| opt.as_ref().and_then(|b| SfxPostingsReader::open(b).ok()))
+        .map(|opt| opt.as_ref().and_then(|b| SfxPostReaderV2::open_slice(b)))
         .collect();
 
     // Build token → old ordinal maps
@@ -243,27 +244,20 @@ pub(crate) fn merge_sfxpost(
         token_to_ordinal.push(map);
     }
 
-    // Merge entries per token
-    let mut posting_offsets: Vec<u32> = Vec::with_capacity(tokens.len() + 1);
-    let mut posting_bytes: Vec<u8> = Vec::new();
+    // Merge entries per token → V2 format
+    let mut sfxpost_writer = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::new(tokens.len());
 
-    for token in tokens {
-        posting_offsets.push(posting_bytes.len() as u32);
-        let mut merged: Vec<(u32, u32, u32, u32)> = Vec::new();
-
+    for (new_ord, token) in tokens.iter().enumerate() {
         for (seg_ord, sfxpost_reader) in sfxpost_readers.iter().enumerate() {
             if let Some(reader) = sfxpost_reader {
                 if let Some(&old_ord) = token_to_ordinal[seg_ord].get(token.as_str()) {
                     for e in reader.entries(old_ord) {
                         if let Some(&new_doc) = reverse_doc_map[seg_ord].get(&e.doc_id) {
-                            merged.push((new_doc, e.token_index, e.byte_from, e.byte_to));
+                            sfxpost_writer.add_entry(new_ord as u32, new_doc, e.token_index, e.byte_from, e.byte_to);
                         }
                     }
                 }
             } else if token_to_ordinal[seg_ord].contains_key(token.as_str()) {
-                // Segment has this term in its term dict but NO sfxpost.
-                // This is a data integrity error — every segment with text
-                // terms MUST have sfxpost built by the SfxCollector.
                 let seg_id = readers[seg_ord].segment_id().uuid_string();
                 let ndocs = readers[seg_ord].num_docs();
                 return Err(crate::LucivyError::SystemError(format!(
@@ -273,25 +267,9 @@ pub(crate) fn merge_sfxpost(
                 )));
             }
         }
-
-        merged.sort_unstable();
-        for &(doc_id, ti, byte_from, byte_to) in &merged {
-            encode_vint(doc_id, &mut posting_bytes);
-            encode_vint(ti, &mut posting_bytes);
-            encode_vint(byte_from, &mut posting_bytes);
-            encode_vint(byte_to, &mut posting_bytes);
-        }
     }
-    posting_offsets.push(posting_bytes.len() as u32);
 
-    let mut data = Vec::new();
-    data.extend_from_slice(&(tokens.len() as u32).to_le_bytes());
-    for &off in &posting_offsets {
-        data.extend_from_slice(&off.to_le_bytes());
-    }
-    data.extend_from_slice(&posting_bytes);
-
-    Ok(Some(data))
+    Ok(Some(sfxpost_writer.finish()))
 }
 
 // ---------------------------------------------------------------------------
@@ -316,11 +294,16 @@ pub(crate) fn validate_sfxpost(
     num_tokens: u32,
 ) -> Option<String> {
     if !should_validate() { return None; }
-    if sfxpost_data.len() < 4 { return Some("sfxpost too short".into()); }
+    if sfxpost_data.len() < 8 { return Some("sfxpost too short".into()); }
 
-    let stored_num_tokens = u32::from_le_bytes([
-        sfxpost_data[0], sfxpost_data[1], sfxpost_data[2], sfxpost_data[3],
-    ]);
+    // V2 format: "SFP2" magic + u32 num_terms + offset table + entry data
+    if &sfxpost_data[0..4] != b"SFP2" {
+        return Some("sfxpost: missing SFP2 magic".into());
+    }
+
+    let stored_num_tokens = u32::from_le_bytes(
+        sfxpost_data[4..8].try_into().unwrap()
+    );
     if stored_num_tokens != num_tokens {
         return Some(format!(
             "sfxpost num_tokens mismatch: stored={} expected={}",
@@ -328,44 +311,22 @@ pub(crate) fn validate_sfxpost(
         ));
     }
 
-    // Read offset table
-    let offsets_size = (stored_num_tokens as usize + 1) * 4;
-    if 4 + offsets_size > sfxpost_data.len() {
-        return Some(format!(
-            "sfxpost offset table overflows: need {} bytes, have {}",
-            4 + offsets_size, sfxpost_data.len(),
-        ));
-    }
+    // Validate via V2 reader: try to open and read all entries
+    let reader = match SfxPostReaderV2::open_slice(sfxpost_data) {
+        Some(r) => r,
+        None => return Some("sfxpost: cannot open V2 reader".into()),
+    };
 
-    // Check doc_ids in posting entries
-    let data_start = 4 + offsets_size;
-    let posting_data = &sfxpost_data[data_start..];
-
-    // Decode entries and check doc_ids
-    let mut cursor = 0usize;
-    let mut entry_count = 0u64;
-    let mut max_doc_id = 0u32;
-    while cursor < posting_data.len() {
-        // Each entry: doc_id(VInt) + token_index(VInt) + byte_from(VInt) + byte_to(VInt)
-        let (doc_id, next) = decode_vint(&posting_data[cursor..]);
-        if doc_id >= num_docs {
-            return Some(format!(
-                "sfxpost doc_id {} >= num_docs {} at entry {}",
-                doc_id, num_docs, entry_count,
-            ));
+    for ord in 0..num_tokens {
+        let entries = reader.entries(ord);
+        for e in &entries {
+            if e.doc_id >= num_docs {
+                return Some(format!(
+                    "sfxpost doc_id {} >= num_docs {} at ordinal {}",
+                    e.doc_id, num_docs, ord,
+                ));
+            }
         }
-        if doc_id > max_doc_id { max_doc_id = doc_id; }
-        cursor = cursor + next;
-
-        // Skip token_index, byte_from, byte_to
-        let (_, n) = decode_vint(&posting_data[cursor..]);
-        cursor += n;
-        let (_, n) = decode_vint(&posting_data[cursor..]);
-        cursor += n;
-        let (_, n) = decode_vint(&posting_data[cursor..]);
-        cursor += n;
-
-        entry_count += 1;
     }
 
     None // valid

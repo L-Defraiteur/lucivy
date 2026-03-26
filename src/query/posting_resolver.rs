@@ -145,8 +145,7 @@ impl PostingResolver for SfxPostResolverV2 {
     }
 }
 
-/// Build a PostingResolver from the .sfxpost file for a field in a segment.
-/// Auto-detects V2 ("SFP2" magic) vs V1 (legacy) format.
+/// Build a PostingResolver from the .sfxpost V2 file for a field in a segment.
 pub fn build_resolver(reader: &SegmentReader, field: crate::schema::Field) -> Result<Box<dyn PostingResolver>, crate::LucivyError> {
     let sfxpost_data = reader.sfxpost_file(field).ok_or_else(|| {
         crate::LucivyError::InvalidArgument(format!(
@@ -158,11 +157,8 @@ pub fn build_resolver(reader: &SegmentReader, field: crate::schema::Field) -> Re
         crate::LucivyError::SystemError(format!("read .sfxpost: {e}"))
     })?;
 
-    // Try V2 first (lazy, binary-searchable doc_ids)
-    if let Some(v2_reader) = SfxPostReaderV2::open(bytes.to_vec()) {
-        return Ok(Box::new(SfxPostResolverV2::new(v2_reader)));
-    }
-
-    // Fallback to V1 (pre-loaded)
-    Ok(Box::new(SfxPostResolver::from_bytes(&bytes)?))
+    let v2_reader = SfxPostReaderV2::open(bytes.to_vec()).ok_or_else(|| {
+        crate::LucivyError::SystemError("sfxpost: invalid V2 format (missing SFP2 magic)".into())
+    })?;
+    Ok(Box::new(SfxPostResolverV2::new(v2_reader)))
 }

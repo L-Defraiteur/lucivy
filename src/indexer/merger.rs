@@ -20,7 +20,8 @@ use crate::postings::{InvertedIndexSerializer, Postings, SegmentPostings};
 use crate::schema::{value_type_to_column_type, Field, FieldType, IndexRecordOption, Schema};
 use crate::store::StoreWriter;
 use crate::suffix_fst::encode_vint;
-use crate::suffix_fst::file::{SfxFileReader, SfxFileWriter, SfxPostingsReader};
+use crate::suffix_fst::file::{SfxFileReader, SfxFileWriter};
+use crate::suffix_fst::sfxpost_v2::SfxPostReaderV2;
 use crate::suffix_fst::gapmap::GapMapWriter;
 use crate::termdict::{TermMerger, TermOrdinal};
 use crate::{DocAddress, DocId, InvertedIndexReader};
@@ -732,9 +733,9 @@ impl IndexMerger {
                 }
 
                 if any_has_sfxpost {
-                    let sfxpost_readers: Vec<Option<SfxPostingsReader<'_>>> = segment_sfxpost
+                    let sfxpost_readers: Vec<Option<SfxPostReaderV2>> = segment_sfxpost
                         .iter()
-                        .map(|opt| opt.as_ref().and_then(|b| SfxPostingsReader::open(b).ok()))
+                        .map(|opt| opt.as_ref().and_then(|b| SfxPostReaderV2::open_slice(b)))
                         .collect();
 
                     let mut token_to_ordinal: Vec<HashMap<String, u32>> = Vec::with_capacity(self.readers.len());
@@ -754,11 +755,9 @@ impl IndexMerger {
                         token_to_ordinal.push(map);
                     }
 
-                    let mut posting_offsets: Vec<u32> = Vec::with_capacity(unique_tokens.len() + 1);
-                    let mut posting_bytes: Vec<u8> = Vec::new();
+                    let mut sfxpost_writer = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::new(unique_tokens.len());
 
-                    for token in &unique_tokens {
-                        posting_offsets.push(posting_bytes.len() as u32);
+                    for (new_ord, token) in unique_tokens.iter().enumerate() {
                         let mut merged: Vec<(u32, u32, u32, u32)> = Vec::new();
                         for (seg_ord, sfxpost_reader) in sfxpost_readers.iter().enumerate() {
                             if let Some(reader) = sfxpost_reader {
@@ -777,23 +776,11 @@ impl IndexMerger {
                                 }
                             }
                         }
-                        merged.sort_unstable();
-                        for &(doc_id, ti, byte_from, byte_to) in &merged {
-                            encode_vint(doc_id, &mut posting_bytes);
-                            encode_vint(ti, &mut posting_bytes);
-                            encode_vint(byte_from, &mut posting_bytes);
-                            encode_vint(byte_to, &mut posting_bytes);
+                        for &(doc_id, ti, bf, bt) in &merged {
+                            sfxpost_writer.add_entry(new_ord as u32, doc_id, ti, bf, bt);
                         }
                     }
-                    posting_offsets.push(posting_bytes.len() as u32);
-
-                    let mut data = Vec::new();
-                    data.extend_from_slice(&(unique_tokens.len() as u32).to_le_bytes());
-                    for &off in &posting_offsets {
-                        data.extend_from_slice(&off.to_le_bytes());
-                    }
-                    data.extend_from_slice(&posting_bytes);
-                    sfxpost_data = Some(data);
+                    sfxpost_data = Some(sfxpost_writer.finish());
                 }
             }
 
