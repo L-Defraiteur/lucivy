@@ -174,6 +174,7 @@ impl Node for PrescanShardNode {
                     param.fuzzy_distance, param.prefix_only, param.continuation,
                     param.strict_separators,
                     Some(&seg_str),
+                    None,
                 );
 
                 *freqs.entry(param.query_text.clone()).or_insert(0) += doc_tf.len() as u64;

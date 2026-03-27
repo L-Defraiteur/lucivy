@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::builder::SuffixFstBuilder;
 use super::file::SfxFileWriter;
 use super::gapmap::GapMapWriter;
+use super::sibling_table::SiblingTableWriter;
 
 /// Collects token and gap data during indexation to produce a .sfx file.
 ///
@@ -28,6 +29,9 @@ pub struct SfxCollector {
     token_postings: Vec<Vec<(u32, u32, u32, u32)>>,
     // Per-segment: gap map writer
     gapmap_writer: GapMapWriter,
+    // Sibling pairs: (intern_id, next_intern_id) → set of gap_len values observed.
+    // Deduplicated: same pair with same gap_len stored only once.
+    sibling_pairs: HashMap<(u32, u32), HashSet<u16>>,
 
     // Per-document state
     doc_values: Vec<ValueData>,
@@ -49,9 +53,10 @@ struct ValueData {
     ti_start: u32,
 }
 
-/// A captured token — stores interned ordinal instead of cloned String.
+/// A captured token — stores interned ordinal and byte offsets.
 #[derive(Debug, Clone)]
 struct TokenCapture {
+    intern_id: u32,
     offset_from: usize,
     offset_to: usize,
 }
@@ -73,6 +78,7 @@ impl SfxCollector {
             token_texts: Vec::new(),
             token_postings: Vec::new(),
             gapmap_writer: GapMapWriter::new(),
+            sibling_pairs: HashMap::new(),
             doc_values: Vec::new(),
             doc_active: false,
             current_doc_id: 0,
@@ -122,13 +128,23 @@ impl SfxCollector {
         self.token_postings[ord as usize].push((
             self.current_doc_id, ti, offset_from as u32, offset_to as u32,
         ));
-        self.current_value_tokens.push(TokenCapture { offset_from, offset_to });
+        self.current_value_tokens.push(TokenCapture { intern_id: ord, offset_from, offset_to });
     }
 
-    /// End the current value. Computes gaps from the raw text and captured tokens.
+    /// End the current value. Computes gaps and sibling links from the raw text and captured tokens.
     pub fn end_value(&mut self) {
         let text = self.current_value_text.take().unwrap_or_default();
         let tokens = std::mem::take(&mut self.current_value_tokens);
+
+        // Collect sibling pairs: consecutive tokens with their gap lengths.
+        for i in 0..tokens.len().saturating_sub(1) {
+            let gap_len = tokens[i + 1].offset_from.saturating_sub(tokens[i].offset_to);
+            let gap_len_u16 = gap_len.min(u16::MAX as usize) as u16;
+            self.sibling_pairs
+                .entry((tokens[i].intern_id, tokens[i + 1].intern_id))
+                .or_default()
+                .insert(gap_len_u16);
+        }
 
         let gaps = if tokens.is_empty() {
             // No tokens in this value — just store empty prefix+suffix
@@ -234,13 +250,30 @@ impl SfxCollector {
         let num_terms = num_tokens as u32;
         let gapmap_data = self.gapmap_writer.serialize();
 
+        // Build reverse mapping: intern_id → final_ordinal
+        let mut intern_to_final = vec![0u32; num_tokens];
+        for (new_ord, &old_ord) in sorted_indices.iter().enumerate() {
+            intern_to_final[old_ord as usize] = new_ord as u32;
+        }
+
+        // Build sibling table with remapped ordinals
+        let mut sibling_writer = SiblingTableWriter::new(num_terms);
+        for ((intern_a, intern_b), gap_lens) in &self.sibling_pairs {
+            let final_a = intern_to_final[*intern_a as usize];
+            let final_b = intern_to_final[*intern_b as usize];
+            for &gap_len in gap_lens {
+                sibling_writer.add(final_a, final_b, gap_len);
+            }
+        }
+        let sibling_data = sibling_writer.serialize();
+
         let file_writer = SfxFileWriter::new(
             fst_data,
             parent_list_data,
             gapmap_data,
             self.gapmap_writer.num_docs(),
             num_terms,
-        );
+        ).with_sibling_data(sibling_data);
         let sfx_bytes = file_writer.to_bytes();
 
         // .sfxpost file V2: per-ordinal posting entries with binary-searchable doc_ids.
@@ -422,5 +455,51 @@ mod tests {
 
         assert!(ord_a < ord_m, "apple ({ord_a}) < mango ({ord_m})");
         assert!(ord_m < ord_z, "mango ({ord_m}) < zebra ({ord_z})");
+    }
+
+    #[test]
+    fn test_collector_sibling_links() {
+        let mut collector = SfxCollector::new();
+        collector.begin_doc();
+        // "rag3Weaver" → CamelCaseSplit → "rag3"(0,4) + "weaver"(4,10) — contiguous
+        collector.begin_value("rag3Weaver");
+        collector.add_token("rag3", 0, 4);
+        collector.add_token("weaver", 4, 10);
+        collector.end_value();
+        collector.end_doc();
+
+        collector.begin_doc();
+        // "import rag3db" → "import"(0,6) + "rag3db"(7,13) — gap=1 (space)
+        collector.begin_value("import rag3db");
+        collector.add_token("import", 0, 6);
+        collector.add_token("rag3db", 7, 13);
+        collector.end_value();
+        collector.end_doc();
+
+        let (sfx_bytes, _) = collector.build().unwrap();
+        let reader = SfxFileReader::open(&sfx_bytes).unwrap();
+        let sibling = reader.sibling_table().expect("sibling table should be present");
+
+        // Sorted tokens: import(0), rag3(1), rag3db(2), weaver(3)
+        // Sibling links:
+        //   rag3(1) → weaver(3), gap=0 (contiguous)
+        //   import(0) → rag3db(2), gap=1 (space)
+
+        let rag3_siblings = sibling.siblings(1); // rag3
+        assert_eq!(rag3_siblings.len(), 1);
+        assert_eq!(rag3_siblings[0].next_ordinal, 3); // weaver
+        assert_eq!(rag3_siblings[0].gap_len, 0);
+
+        let import_siblings = sibling.siblings(0); // import
+        assert_eq!(import_siblings.len(), 1);
+        assert_eq!(import_siblings[0].next_ordinal, 2); // rag3db
+        assert_eq!(import_siblings[0].gap_len, 1);
+
+        // Contiguous only
+        let contiguous = sibling.contiguous_siblings(1); // rag3
+        assert_eq!(contiguous, vec![3]); // weaver
+
+        let contiguous_import = sibling.contiguous_siblings(0); // import
+        assert!(contiguous_import.is_empty()); // gap=1 → not contiguous
     }
 }

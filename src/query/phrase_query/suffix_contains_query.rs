@@ -195,6 +195,18 @@ impl SuffixContainsQuery {
                 }).collect()
             };
 
+            let inv_idx = seg_reader.inverted_index(self.raw_field).map_err(|e|
+                crate::LucivyError::SystemError(format!("prescan inv_idx: {e}")))?;
+            let term_dict = inv_idx.terms();
+            let ord_to_term_fn = |ord: u64| -> Option<String> {
+                let mut bytes = Vec::new();
+                if term_dict.ord_to_term(ord, &mut bytes).ok()? {
+                    String::from_utf8(bytes).ok()
+                } else {
+                    None
+                }
+            };
+
             let (query_tokens, query_separators) = tokenize_query(&self.query_text);
             let seg_str = format!("{:?}", segment_id);
             let (doc_tf, highlights) = run_sfx_walk(
@@ -203,6 +215,7 @@ impl SuffixContainsQuery {
                 self.fuzzy_distance, self.prefix_only, self.continuation,
                 self.strict_separators,
                 Some(&seg_str),
+                Some(&ord_to_term_fn),
             );
 
             doc_freq += doc_tf.len() as u64;
@@ -288,6 +301,7 @@ pub fn run_sfx_walk<F>(
     continuation: bool,
     strict_separators: bool,
     segment_id: Option<&str>,
+    ord_to_term: Option<&dyn Fn(u64) -> Option<String>>,
 ) -> (Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)
 where
     F: Fn(u64) -> Vec<suffix_contains::RawPostingEntry>,
@@ -301,7 +315,7 @@ where
             } else if continuation {
                 suffix_contains::suffix_contains_single_token_continuation(sfx_reader, query, resolver)
             } else {
-                suffix_contains::suffix_contains_single_token(sfx_reader, query, resolver)
+                suffix_contains::suffix_contains_single_token_with_terms(sfx_reader, query, resolver, ord_to_term)
             }
         } else if prefix_only {
             suffix_contains::suffix_contains_single_token_fuzzy_prefix(sfx_reader, query, fuzzy_distance, resolver)
@@ -580,6 +594,18 @@ impl Weight for SuffixContainsWeight {
             }).collect()
         };
 
+        let inv_idx = reader.inverted_index(self.raw_field).map_err(|e|
+            crate::LucivyError::SystemError(format!("scorer inv_idx: {e}")))?;
+        let term_dict = inv_idx.terms();
+        let ord_to_term_fn = |ord: u64| -> Option<String> {
+            let mut bytes = Vec::new();
+            if term_dict.ord_to_term(ord, &mut bytes).ok()? {
+                String::from_utf8(bytes).ok()
+            } else {
+                None
+            }
+        };
+
         let (query_tokens, query_separators) = tokenize_query(&self.query_text);
         let seg_str = format!("{:?}", segment_id);
         let (doc_tf, highlights) = run_sfx_walk(
@@ -588,6 +614,7 @@ impl Weight for SuffixContainsWeight {
             self.fuzzy_distance, self.prefix_only, self.continuation,
             self.strict_separators,
             Some(&seg_str),
+            Some(&ord_to_term_fn),
         );
 
         if doc_tf.is_empty() {

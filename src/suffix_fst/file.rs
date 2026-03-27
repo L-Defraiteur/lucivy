@@ -6,6 +6,7 @@ use lucivy_fst::Levenshtein as LevAutomaton;
 
 use super::builder::{decode_output, decode_parent_entries, ParentEntry, ParentRef};
 use super::gapmap::GapMapReader;
+use super::sibling_table::SiblingTableReader;
 
 /// DFA wrapper implementing lucivy_fst::Automaton for Levenshtein search on the suffix FST.
 pub(crate) struct SfxDfaWrapper(pub DFA);
@@ -54,10 +55,16 @@ impl Automaton for SfxDfaWrapper {
 const MAGIC_V1: &[u8; 4] = b"SFX1";
 const HEADER_SIZE_V1: usize = 4 + 1 + 4 + 4 + 8 + 8 + 8 + 8 + 8; // 53 bytes
 
-/// Assembles FST + parent lists + GapMap into a single .sfx file.
+/// Assembles FST + parent lists + sibling table + GapMap into a single .sfx file.
+///
+/// Layout: [header 53B] [FST] [parent list] [sibling table] [GapMap]
+/// The GapMap is always last (its data extends to EOF for backward compat).
+/// The sibling table is inserted between parent list and GapMap.
+/// If sibling_data is empty, gapmap_offset == parent_list_end (no sibling section).
 pub struct SfxFileWriter {
     fst_data: Vec<u8>,
     parent_list_data: Vec<u8>,
+    sibling_data: Vec<u8>,
     gapmap_data: Vec<u8>,
     num_docs: u32,
     /// Number of unique suffix terms in the FST.
@@ -66,6 +73,7 @@ pub struct SfxFileWriter {
 
 impl SfxFileWriter {
     /// Create a new writer from pre-built FST, parent list, and GapMap data.
+    /// Sibling table is optional (empty = no cross-token links).
     pub fn new(
         fst_data: Vec<u8>,
         parent_list_data: Vec<u8>,
@@ -76,10 +84,17 @@ impl SfxFileWriter {
         Self {
             fst_data,
             parent_list_data,
+            sibling_data: Vec::new(),
             gapmap_data,
             num_docs,
             num_suffix_terms,
         }
+    }
+
+    /// Set the sibling table data (from SiblingTableWriter::serialize()).
+    pub fn with_sibling_data(mut self, data: Vec<u8>) -> Self {
+        self.sibling_data = data;
+        self
     }
 
     /// Write the complete .sfx file.
@@ -88,9 +103,12 @@ impl SfxFileWriter {
         let fst_length = self.fst_data.len() as u64;
         let parent_list_offset = fst_offset + fst_length;
         let parent_list_length = self.parent_list_data.len() as u64;
-        let gapmap_offset = parent_list_offset + parent_list_length;
+        // Sibling table sits between parent list and GapMap.
+        let sibling_offset = parent_list_offset + parent_list_length;
+        let sibling_length = self.sibling_data.len() as u64;
+        let gapmap_offset = sibling_offset + sibling_length;
 
-        // Header
+        // Header (unchanged layout — gapmap_offset now accounts for sibling section)
         writer.write_all(MAGIC_V1)?;
         writer.write_all(&[1u8])?;
         writer.write_all(&self.num_docs.to_le_bytes())?;
@@ -104,6 +122,7 @@ impl SfxFileWriter {
         // Sections
         writer.write_all(&self.fst_data)?;
         writer.write_all(&self.parent_list_data)?;
+        writer.write_all(&self.sibling_data)?;
         writer.write_all(&self.gapmap_data)?;
 
         Ok(())
@@ -131,6 +150,7 @@ pub struct SplitCandidate {
 pub struct SfxFileReader<'a> {
     fst: Map<Vec<u8>>,
     parent_list_data: &'a [u8],
+    sibling_table: Option<SiblingTableReader<'a>>,
     gapmap: GapMapReader<'a>,
     num_docs: u32,
     num_suffix_terms: u32,
@@ -162,12 +182,24 @@ impl<'a> SfxFileReader<'a> {
         };
 
         let parent_list_data = &data[parent_list_offset..parent_list_offset + parent_list_length];
+
+        // Sibling table sits between parent_list_end and gapmap_offset.
+        // If they're equal, no sibling table (backward compat with old files).
+        let parent_list_end = parent_list_offset + parent_list_length;
+        let sibling_table = if gapmap_offset > parent_list_end {
+            let sibling_data = &data[parent_list_end..gapmap_offset];
+            SiblingTableReader::open(sibling_data)
+        } else {
+            None
+        };
+
         let gapmap_data = &data[gapmap_offset..];
         let gapmap = GapMapReader::open(gapmap_data);
 
         Ok(Self {
             fst,
             parent_list_data,
+            sibling_table,
             gapmap,
             num_docs,
             num_suffix_terms,
@@ -315,6 +347,11 @@ impl<'a> SfxFileReader<'a> {
     /// Access the GapMap reader.
     pub fn gapmap(&self) -> &GapMapReader<'a> {
         &self.gapmap
+    }
+
+    /// Access the sibling table (if present). None for old .sfx files without sibling links.
+    pub fn sibling_table(&self) -> Option<&SiblingTableReader<'a>> {
+        self.sibling_table.as_ref()
     }
 
     /// Access the underlying FST map (for automaton searches).

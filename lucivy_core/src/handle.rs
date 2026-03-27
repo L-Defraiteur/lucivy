@@ -1107,4 +1107,85 @@ mod tests {
         handle.close().unwrap();
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    #[test]
+    fn test_diag_luce_cross_token() {
+        let luce_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../playground/dataset.luce");
+        let data = match std::fs::read(luce_path) {
+            Ok(d) => d,
+            Err(_) => { eprintln!("[diag] skipping: .luce not found"); return; }
+        };
+
+        let mut indexes = crate::snapshot::import_snapshot(&data).unwrap();
+        let imported = indexes.remove(0);
+
+        let tmp = std::env::temp_dir().join("lucivy_diag_luce");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        for (name, file_data) in &imported.files {
+            let path = tmp.join(name);
+            if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).unwrap(); }
+            std::fs::write(&path, file_data).unwrap();
+        }
+
+        let directory = StdFsDirectory::open(tmp.to_str().unwrap()).unwrap();
+        let handle = LucivyHandle::open(directory).unwrap();
+        eprintln!("[diag] fields: {:?}", handle.field_map.iter().map(|(n,_)| n.as_str()).collect::<Vec<_>>());
+
+        let field_name = handle.field_map.iter()
+            .find(|(n, _)| n != NODE_ID_FIELD)
+            .map(|(n, _)| n.clone())
+            .unwrap();
+
+        let search = |q: &str| -> (usize, std::time::Duration) {
+            let qc = crate::query::QueryConfig {
+                query_type: "contains".into(),
+                field: Some(field_name.clone()),
+                value: Some(q.into()),
+                ..Default::default()
+            };
+            let query = crate::query::build_query(&qc, &handle.schema, &handle.index, None).unwrap();
+            let searcher = handle.reader.searcher();
+            let t0 = std::time::Instant::now();
+            let results = searcher.search(
+                &*query, &ld_lucivy::collector::TopDocs::with_limit(20).order_by_score(),
+            ).unwrap();
+            (results.len(), t0.elapsed())
+        };
+
+        // Diagnostic: how many segments?
+        let searcher = handle.reader.searcher();
+        eprintln!("[diag] num_segments={}, num_docs={}", searcher.segment_readers().len(), searcher.num_docs());
+        drop(searcher);
+
+        for q in ["weaver", "rag3weaver", "rag3w", "rag3db", "getElementById"] {
+            let (count, elapsed) = search(q);
+            eprintln!("[diag] query='{}' → {} results in {:?}", q, count, elapsed);
+        }
+        // Test with highlights (like the playground does)
+        eprintln!("[diag] --- with highlights ---");
+        let search_hl = |q: &str| -> (usize, std::time::Duration) {
+            let sink = std::sync::Arc::new(ld_lucivy::query::HighlightSink::new());
+            let qc = crate::query::QueryConfig {
+                query_type: "contains".into(),
+                field: Some(field_name.clone()),
+                value: Some(q.into()),
+                ..Default::default()
+            };
+            let query = crate::query::build_query(&qc, &handle.schema, &handle.index, Some(sink.clone())).unwrap();
+            let searcher = handle.reader.searcher();
+            let t0 = std::time::Instant::now();
+            let results = searcher.search(
+                &*query, &ld_lucivy::collector::TopDocs::with_limit(20).order_by_score(),
+            ).unwrap();
+            (results.len(), t0.elapsed())
+        };
+        for q in ["rag3weaver", "rag3w", "getElementById"] {
+            let (count, elapsed) = search_hl(q);
+            eprintln!("[diag] query='{}' (hl) → {} results in {:?}", q, count, elapsed);
+        }
+
+        handle.close().unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

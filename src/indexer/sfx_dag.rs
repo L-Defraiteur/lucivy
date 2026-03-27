@@ -175,6 +175,44 @@ impl Node for MergeSfxpostNode {
 }
 
 // ---------------------------------------------------------------------------
+// MergeSiblingLinksNode
+// ---------------------------------------------------------------------------
+
+struct MergeSiblingLinksNode {
+    ctx: Arc<SfxContext>,
+}
+
+impl Node for MergeSiblingLinksNode {
+    fn node_type(&self) -> &'static str { "sfx_merge_siblings" }
+    fn inputs(&self) -> Vec<PortDef> {
+        vec![PortDef::required("tokens", PortType::of::<BTreeSet<String>>())]
+    }
+    fn outputs(&self) -> Vec<PortDef> {
+        vec![PortDef::required("siblings", PortType::of::<Vec<u8>>())]
+    }
+    fn execute(&mut self, nctx: &mut NodeContext) -> Result<(), String> {
+        let tokens = nctx.input("tokens")
+            .ok_or("missing tokens")?
+            .downcast::<BTreeSet<String>>()
+            .ok_or("wrong type")?;
+
+        let sfx_data: Vec<Option<Vec<u8>>> = self.ctx.readers.iter().map(|r| {
+            r.sfx_file(self.ctx.field)
+                .and_then(|f| f.read_bytes().ok())
+                .map(|b| b.to_vec())
+        }).collect();
+
+        let sibling_data = sfx_merge::merge_sibling_links(
+            &sfx_data, &self.ctx.readers, self.ctx.field, tokens,
+        ).map_err(|e| format!("merge_sibling_links: {e}"))?;
+
+        nctx.metric("sibling_bytes", sibling_data.len() as f64);
+        nctx.set_output("siblings", PortValue::new(sibling_data));
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ValidateSfxpostNode
 // ---------------------------------------------------------------------------
 
@@ -234,6 +272,7 @@ impl Node for WriteSfxNode {
             PortDef::required("fst", PortType::of::<(Vec<u8>, Vec<u8>)>()),
             PortDef::required("gapmap", PortType::of::<Vec<u8>>()),
             PortDef::required("sfxpost", PortType::of::<Option<Vec<u8>>>()),
+            PortDef::required("siblings", PortType::of::<Vec<u8>>()),
             PortDef::required("tokens", PortType::of::<BTreeSet<String>>()),
         ]
     }
@@ -244,6 +283,9 @@ impl Node for WriteSfxNode {
             .ok_or("missing gapmap")?.take::<Vec<u8>>().ok_or("gapmap type")?;
         let sfxpost_data = ctx.take_input("sfxpost")
             .ok_or("missing sfxpost")?.take::<Option<Vec<u8>>>().ok_or("sfxpost type")?;
+        let sibling_data = ctx.take_input("siblings")
+            .and_then(|v| v.take::<Vec<u8>>())
+            .unwrap_or_default();
         let tokens = ctx.input("tokens")
             .ok_or("missing tokens")?.downcast::<BTreeSet<String>>().ok_or("tokens type")?;
 
@@ -255,7 +297,7 @@ impl Node for WriteSfxNode {
         let sfx_file = crate::suffix_fst::file::SfxFileWriter::new(
             fst_data, parent_data, gapmap_data,
             self.num_docs, num_tokens,
-        );
+        ).with_sibling_data(sibling_data);
         let sfx_bytes = sfx_file.to_bytes();
 
         // Write .sfx
@@ -336,7 +378,11 @@ pub(crate) fn build_sfx_dag(
     dag.connect("merge_sfxpost", "sfxpost", "validate_sfxpost", "sfxpost").unwrap();
     dag.connect("collect", "tokens", "validate_sfxpost", "tokens").unwrap();
 
-    // write (depends on all: fst, validated gapmap, validated sfxpost, tokens)
+    // merge_sibling_links (depends on tokens, parallel with fst+gapmap+sfxpost)
+    dag.add_node("merge_siblings", MergeSiblingLinksNode { ctx: ctx.clone() });
+    dag.connect("collect", "tokens", "merge_siblings", "tokens").unwrap();
+
+    // write (depends on all: fst, validated gapmap, validated sfxpost, siblings, tokens)
     dag.add_node("write", WriteSfxNode {
         segment: Some(segment),
         field,
@@ -345,6 +391,7 @@ pub(crate) fn build_sfx_dag(
     dag.connect("build_fst", "fst", "write", "fst").unwrap();
     dag.connect("validate_gapmap", "gapmap", "write", "gapmap").unwrap();
     dag.connect("validate_sfxpost", "sfxpost", "write", "sfxpost").unwrap();
+    dag.connect("merge_siblings", "siblings", "write", "siblings").unwrap();
     dag.connect("collect", "tokens", "write", "tokens").unwrap();
 
     dag

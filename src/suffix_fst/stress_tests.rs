@@ -176,8 +176,9 @@ mod tests {
         ]);
 
         assert!(search(&sfx, &postings, "xyz").is_empty());
-        // "helloworld" now matches via cross-token search: "hello" + "world"
-        assert_eq!(search(&sfx, &postings, "helloworld").len(), 1);
+        // "helloworld" does NOT match: "hello"(0,5) and "world"(6,11) have a gap (space)
+        // → byte_to(5) != byte_from(6) → byte continuity rejects the cross-token match
+        assert!(search(&sfx, &postings, "helloworld").is_empty());
     }
 
     #[test]
@@ -197,8 +198,8 @@ mod tests {
             ("hi there", &[("hi", 0, 2), ("there", 3, 8)]),
         ]);
 
-        // "hithere" now matches via cross-token search: "hi" + "there"
-        assert_eq!(search(&sfx, &postings, "hithere").len(), 1);
+        // "hithere" does NOT match: "hi"(0,2) and "there"(3,8) have a gap (space)
+        assert!(search(&sfx, &postings, "hithere").is_empty());
     }
 
     // ──────────────── GapMap separator validation ────────────────

@@ -273,6 +273,84 @@ pub(crate) fn merge_sfxpost(
 }
 
 // ---------------------------------------------------------------------------
+// Step 4b: Merge sibling links from source segments
+// ---------------------------------------------------------------------------
+
+/// Merge sibling links from source segments with ordinal remapping.
+/// Returns serialized sibling table bytes.
+pub(crate) fn merge_sibling_links(
+    sfx_data: &[Option<Vec<u8>>],
+    readers: &[SegmentReader],
+    field: Field,
+    tokens: &BTreeSet<String>,
+) -> crate::Result<Vec<u8>> {
+    use crate::suffix_fst::sibling_table::SiblingTableWriter;
+
+    let num_tokens = tokens.len() as u32;
+    let mut writer = SiblingTableWriter::new(num_tokens);
+
+    // Build old_ordinal → token text maps per segment (for reverse lookup)
+    // and token text → new_ordinal map (from merged BTreeSet)
+    let token_to_new: HashMap<&str, u32> = tokens.iter().enumerate()
+        .map(|(i, t)| (t.as_str(), i as u32))
+        .collect();
+
+    for (seg_ord, reader) in readers.iter().enumerate() {
+        // Read old sibling table from the segment's .sfx
+        let sfx_bytes = match &sfx_data[seg_ord] {
+            Some(b) => b,
+            None => continue,
+        };
+        let sfx_reader = match SfxFileReader::open(sfx_bytes) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let sibling_table = match sfx_reader.sibling_table() {
+            Some(t) => t,
+            None => continue,
+        };
+
+        // Build old_ordinal → token text for this segment
+        let mut old_ord_to_text: Vec<String> = Vec::new();
+        if let Ok(inv_idx) = reader.inverted_index(field) {
+            let term_dict = inv_idx.terms();
+            let mut stream = term_dict.stream()?;
+            while stream.advance() {
+                if let Ok(s) = std::str::from_utf8(stream.key()) {
+                    old_ord_to_text.push(s.to_string());
+                }
+            }
+        }
+
+        // Remap sibling links
+        for old_ord in 0..sibling_table.num_ordinals() {
+            let old_text = match old_ord_to_text.get(old_ord as usize) {
+                Some(t) => t.as_str(),
+                None => continue,
+            };
+            let new_ord = match token_to_new.get(old_text) {
+                Some(&n) => n,
+                None => continue, // token was deleted
+            };
+
+            for entry in sibling_table.siblings(old_ord) {
+                let next_old_text = match old_ord_to_text.get(entry.next_ordinal as usize) {
+                    Some(t) => t.as_str(),
+                    None => continue,
+                };
+                let next_new_ord = match token_to_new.get(next_old_text) {
+                    Some(&n) => n,
+                    None => continue, // next token was deleted
+                };
+                writer.add(new_ord, next_new_ord, entry.gap_len);
+            }
+        }
+    }
+
+    Ok(writer.serialize())
+}
+
+// ---------------------------------------------------------------------------
 // Step 5: Validate gapmap
 // ---------------------------------------------------------------------------
 

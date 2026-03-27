@@ -46,12 +46,25 @@ pub fn suffix_contains_single_token<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    let matches = suffix_contains_single_token_inner(sfx_reader, query, &raw_term_resolver, false, false, None);
+    suffix_contains_single_token_with_terms(sfx_reader, query, &raw_term_resolver, None)
+}
+
+/// Like suffix_contains_single_token but with optional ord_to_term for sibling-link cross-token.
+pub fn suffix_contains_single_token_with_terms<F>(
+    sfx_reader: &SfxFileReader<'_>,
+    query: &str,
+    raw_term_resolver: &F,
+    ord_to_term: Option<&dyn Fn(u64) -> Option<String>>,
+) -> Vec<SuffixContainsMatch>
+where
+    F: Fn(u64) -> Vec<RawPostingEntry>,
+{
+    let matches = suffix_contains_single_token_inner(sfx_reader, query, raw_term_resolver, false, false, None);
     if !matches.is_empty() {
         return matches;
     }
     // Fallback: query may span across token boundaries.
-    cross_token_search(sfx_reader, query, &raw_term_resolver, 0)
+    cross_token_search_with_terms(sfx_reader, query, raw_term_resolver, 0, ord_to_term)
 }
 
 pub fn suffix_contains_single_token_continuation<F>(
@@ -833,13 +846,16 @@ pub struct SuffixContainsMultiMatch {
 
 /// Search for a query that may span across indexed token boundaries.
 ///
-/// Uses the falling walk to find split candidates where the query prefix
-/// reaches the end of an indexed token (si + prefix_len == token_len).
-/// Then checks if the remainder matches the start of the next token.
+/// Uses sibling links (pre-computed at indexation) to follow token chains.
+/// Falls back to single-split prefix_walk if no sibling table or no ord_to_term.
 ///
-/// Returns matches as SuffixContainsMatch with byte offsets spanning both tokens.
-///
-/// Recursive: if the remainder itself spans another boundary, it recurses.
+/// Algorithm:
+/// 1. falling_walk(query) → first-split candidates (any SI)
+/// 2. For each candidate at a token boundary, follow sibling links:
+///    - Get next_ordinal from sibling table (O(1) lookup)
+///    - Get token text via ord_to_term (O(log N) term dict)
+///    - Check if remainder starts with that text → chain or terminal match
+/// 3. Resolve only the ordinals in valid chains → verify adjacency
 pub fn cross_token_search<F>(
     sfx_reader: &SfxFileReader<'_>,
     query: &str,
@@ -849,179 +865,177 @@ pub fn cross_token_search<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    let query_lower = query.to_lowercase();
-    let t0 = std::time::Instant::now();
+    cross_token_search_with_terms(sfx_reader, query, raw_term_resolver, fuzzy_distance, None)
+}
 
-    // Falling walk: find all split candidates
-    let candidates = sfx_reader.fuzzy_falling_walk(&query_lower, fuzzy_distance);
-    let t_fall = t0.elapsed();
+/// Cross-token search with optional ord_to_term for sibling link chain walk.
+pub fn cross_token_search_with_terms<F>(
+    sfx_reader: &SfxFileReader<'_>,
+    query: &str,
+    raw_term_resolver: &F,
+    _fuzzy_distance: u8,
+    ord_to_term: Option<&dyn Fn(u64) -> Option<String>>,
+) -> Vec<SuffixContainsMatch>
+where
+    F: Fn(u64) -> Vec<RawPostingEntry>,
+{
+    let query_lower = query.to_lowercase();
+    let query_bytes = query_lower.as_bytes();
+
+    // Step 1: falling_walk → first-split candidates
+    let candidates = sfx_reader.falling_walk(&query_lower);
     if candidates.is_empty() {
         return Vec::new();
     }
 
-    eprintln!("[cross_token] query='{}' falling_walk: {}us, {} candidates",
-        query_lower, t_fall.as_micros(), candidates.len());
+    let sibling_table = sfx_reader.sibling_table();
+    let has_siblings = sibling_table.is_some() && ord_to_term.is_some();
 
-    // Step 1: Walk remainders (cheap FST scan, no posting resolve yet)
-    let t1 = std::time::Instant::now();
-    let mut remainder_cache: std::collections::HashMap<String, Vec<(String, Vec<ParentEntry>)>> = std::collections::HashMap::new();
-    for cand in &candidates {
-        let remainder = query_lower[cand.prefix_len..].to_string();
-        if remainder.is_empty() { continue; }
-        remainder_cache
-            .entry(remainder.clone())
-            .or_insert_with(|| {
-                if fuzzy_distance > 0 {
-                    sfx_reader.fuzzy_walk_si0(&remainder, fuzzy_distance)
-                } else {
-                    sfx_reader.prefix_walk_si0(&remainder)
-                }
-            });
-    }
+    // Step 2: For each candidate, try to cover the remainder via sibling chain
+    // A valid chain: sequence of ordinals [first, ..., terminal] where each
+    // token's text exactly covers a slice of the query, and the terminal
+    // token's text starts with the remaining query bytes.
 
-    // Step 2: Count parents on each side to pick the best pivot
-    let left_parent_count: usize = {
-        let mut unique: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        for cand in &candidates { unique.insert(cand.parent.raw_ordinal); }
-        unique.len()
-    };
-    let right_parent_count: usize = {
-        let mut unique: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        for walks in remainder_cache.values() {
-            for (_suffix, parents) in walks {
-                for p in parents { unique.insert(p.raw_ordinal); }
-            }
-        }
-        unique.len()
-    };
+    const MAX_CHAIN_DEPTH: usize = 8;
 
-    let left_is_pivot = left_parent_count <= right_parent_count;
-    let t_walk = t1.elapsed();
+    // Each valid chain: (first_candidate, chain_ordinals: Vec<u64>)
+    // chain_ordinals includes the first candidate's ordinal + all chained ordinals
+    let mut valid_chains: Vec<(usize, Vec<u64>)> = Vec::new(); // (cand_idx, ordinals)
 
-    eprintln!("[cross_token] remainder walks: {}us, left_parents={}, right_parents={}, pivot={}",
-        t_walk.as_micros(), left_parent_count, right_parent_count,
-        if left_is_pivot { "left" } else { "right" });
-
-    // Step 3: Resolve pivot side → extract doc_ids
-    let t3 = std::time::Instant::now();
-    let mut ordinal_cache: std::collections::HashMap<u64, Vec<RawPostingEntry>> = std::collections::HashMap::new();
-    let mut pivot_doc_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
-
-    if left_is_pivot {
-        for cand in &candidates {
-            let postings = ordinal_cache
-                .entry(cand.parent.raw_ordinal)
-                .or_insert_with(|| raw_term_resolver(cand.parent.raw_ordinal));
-            for p in postings.iter() { pivot_doc_ids.insert(p.doc_id); }
-        }
-    } else {
-        for walks in remainder_cache.values() {
-            for (_suffix, parents) in walks {
-                for parent in parents {
-                    let postings = ordinal_cache
-                        .entry(parent.raw_ordinal)
-                        .or_insert_with(|| raw_term_resolver(parent.raw_ordinal));
-                    for p in postings.iter() { pivot_doc_ids.insert(p.doc_id); }
-                }
-            }
-        }
-    }
-
-    if pivot_doc_ids.is_empty() {
-        return Vec::new();
-    }
-
-    // Step 4: Resolve non-pivot side FILTERED by pivot doc_ids
-    if left_is_pivot {
-        for walks in remainder_cache.values() {
-            for (_suffix, parents) in walks {
-                for parent in parents {
-                    ordinal_cache
-                        .entry(parent.raw_ordinal)
-                        .or_insert_with(|| {
-                            raw_term_resolver(parent.raw_ordinal)
-                                .into_iter()
-                                .filter(|e| pivot_doc_ids.contains(&e.doc_id))
-                                .collect()
-                        });
-                }
-            }
-        }
-    } else {
-        for cand in &candidates {
-            ordinal_cache
-                .entry(cand.parent.raw_ordinal)
-                .or_insert_with(|| {
-                    raw_term_resolver(cand.parent.raw_ordinal)
-                        .into_iter()
-                        .filter(|e| pivot_doc_ids.contains(&e.doc_id))
-                        .collect()
-                });
-        }
-    }
-
-    let t_resolve = t3.elapsed();
-    eprintln!("[cross_token] resolve pivot+filter: {}us, pivot_docs={}",
-        t_resolve.as_micros(), pivot_doc_ids.len());
-
-    // Step 4: Adjacency checks via HashMap — O(left + right) instead of O(left × right).
-    //
-    // Index all right postings by (doc_id, token_index), then for each left posting
-    // look up (doc_id, position+1).
-
-    // Build right index: (doc_id, token_index) → Vec<(byte_from, remainder_len)>
-    let mut right_index: std::collections::HashMap<(u32, u32), Vec<(u32, usize)>> = std::collections::HashMap::new();
-    for cand in &candidates {
+    for (cand_idx, cand) in candidates.iter().enumerate() {
         let remainder = &query_lower[cand.prefix_len..];
         if remainder.is_empty() { continue; }
-        let right_walks = match remainder_cache.get(remainder) {
-            Some(w) => w,
-            _ => continue,
-        };
-        for (_suffix_term, right_parents) in right_walks {
-            for right_parent in right_parents {
-                if let Some(postings) = ordinal_cache.get(&right_parent.raw_ordinal) {
-                    for re in postings {
-                        right_index.entry((re.doc_id, re.token_index))
-                            .or_default()
-                            .push((re.byte_from, remainder.len()));
+
+        if has_siblings {
+            let sib_table = sibling_table.unwrap();
+            let get_term = ord_to_term.unwrap();
+
+            // Follow sibling chain
+            let mut current_ord = cand.parent.raw_ordinal;
+            let mut rem = remainder;
+            let mut chain = vec![current_ord];
+            let mut found = false;
+
+            for _ in 0..MAX_CHAIN_DEPTH {
+                if rem.is_empty() { break; }
+
+                // Get contiguous siblings of current token
+                let siblings = sib_table.contiguous_siblings(current_ord as u32);
+                let mut matched = false;
+
+                for next_ord in &siblings {
+                    let next_text = match get_term(*next_ord as u64) {
+                        Some(t) => t,
+                        None => continue,
+                    };
+
+                    if rem.starts_with(&next_text) {
+                        // Full token consumed → continue chain
+                        chain.push(*next_ord as u64);
+                        rem = &rem[next_text.len()..];
+                        current_ord = *next_ord as u64;
+                        matched = true;
+                        break;
+                    } else if next_text.starts_with(rem) {
+                        // Remainder is a prefix of the next token → terminal match!
+                        chain.push(*next_ord as u64);
+                        found = true;
+                        matched = true;
+                        break;
+                    }
+                }
+
+                if !matched { break; }
+                if found { break; }
+            }
+
+            if found || rem.is_empty() {
+                valid_chains.push((cand_idx, chain));
+            }
+        } else {
+            // Fallback: no sibling table → single-split with prefix_walk
+            let right_walks = sfx_reader.prefix_walk_si0(remainder);
+            if !right_walks.is_empty() {
+                for (_suffix, parents) in &right_walks {
+                    for rp in parents {
+                        if rp.si == 0 {
+                            valid_chains.push((cand_idx, vec![cand.parent.raw_ordinal, rp.raw_ordinal]));
+                        }
                     }
                 }
             }
         }
     }
 
-    // For each left posting, O(1) lookup in right index
-    let mut results: Vec<SuffixContainsMatch> = Vec::new();
-    for cand in &candidates {
-        let remainder = &query_lower[cand.prefix_len..];
-        if remainder.is_empty() { continue; }
+    if valid_chains.is_empty() {
+        return Vec::new();
+    }
 
-        let left_postings = match ordinal_cache.get(&cand.parent.raw_ordinal) {
-            Some(p) => p,
-            _ => continue,
-        };
-
-        for left_entry in left_postings {
-            let key = (left_entry.doc_id, left_entry.token_index + 1);
-            if let Some(right_entries) = right_index.get(&key) {
-                for &(right_byte_from, rem_len) in right_entries {
-                    let byte_from = left_entry.byte_from as usize + cand.parent.si as usize;
-                    let byte_to = right_byte_from as usize + rem_len;
-                    results.push(SuffixContainsMatch {
-                        doc_id: left_entry.doc_id,
-                        token_index: left_entry.token_index,
-                        byte_from,
-                        byte_to,
-                        parent_term: String::new(),
-                        si: cand.parent.si,
-                    });
-                }
-            }
+    // Step 3: Resolve only the ordinals in valid chains
+    let mut ordinal_cache: std::collections::HashMap<u64, Vec<RawPostingEntry>> = std::collections::HashMap::new();
+    for (_, chain) in &valid_chains {
+        for &ord in chain {
+            ordinal_cache.entry(ord).or_insert_with(|| raw_term_resolver(ord));
         }
     }
 
-    // Deduplicate by (doc_id, byte_from)
+    // Step 4: Verify adjacency + byte continuity for each chain
+    let mut results: Vec<SuffixContainsMatch> = Vec::new();
+
+    for (cand_idx, chain) in &valid_chains {
+        let cand = &candidates[*cand_idx];
+
+        // Seed from first ordinal's postings
+        let first_postings = match ordinal_cache.get(&chain[0]) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        // active: Vec<(doc_id, next_position, next_byte_from, highlight_byte_from, first_ti)>
+        let mut active: Vec<(u32, u32, u32, usize, u32)> = Vec::new();
+        for p in first_postings {
+            let byte_from = p.byte_from as usize + cand.parent.si as usize;
+            active.push((p.doc_id, p.token_index + 1, p.byte_to, byte_from, p.token_index));
+        }
+
+        // Chain through remaining ordinals
+        for &ord in &chain[1..] {
+            if active.is_empty() { break; }
+            let postings = match ordinal_cache.get(&ord) {
+                Some(p) => p,
+                None => { active.clear(); break; }
+            };
+
+            active.sort_by_key(|a| (a.0, a.1));
+            let mut next_active: Vec<(u32, u32, u32, usize, u32)> = Vec::new();
+            for p in postings {
+                let target = (p.doc_id, p.token_index);
+                let idx = active.partition_point(|a| (a.0, a.1) < target);
+                let mut i = idx;
+                while i < active.len() && active[i].0 == p.doc_id && active[i].1 == p.token_index {
+                    if p.byte_from == active[i].2 {
+                        next_active.push((p.doc_id, p.token_index + 1, p.byte_to, active[i].3, active[i].4));
+                    }
+                    i += 1;
+                }
+            }
+            active = next_active;
+        }
+
+        // Emit results
+        for &(doc_id, _, _, byte_from, first_ti) in &active {
+            results.push(SuffixContainsMatch {
+                doc_id,
+                token_index: first_ti,
+                byte_from,
+                byte_to: byte_from + query_bytes.len(),
+                parent_term: String::new(),
+                si: cand.parent.si,
+            });
+        }
+    }
+
+    // Deduplicate
     results.sort_by(|a, b| a.doc_id.cmp(&b.doc_id).then(a.byte_from.cmp(&b.byte_from)));
     results.dedup_by(|a, b| a.doc_id == b.doc_id && a.byte_from == b.byte_from);
 

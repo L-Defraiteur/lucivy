@@ -5,6 +5,8 @@ pub mod builder;
 mod collector;
 /// GapMap: binary format for storing inter-token separators per document.
 pub mod gapmap;
+/// Sibling table: per-ordinal successor links for cross-token search.
+pub mod sibling_table;
 /// File I/O for `.sfx` and `.sfxpost` formats (reader/writer).
 pub mod file;
 mod interceptor;
@@ -20,6 +22,8 @@ pub use collector::SfxCollector;
 pub(crate) use collector::encode_vint;
 /// Writer and reader for the GapMap binary format (inter-token separators).
 pub use gapmap::{GapMapWriter, GapMapReader};
+/// Writer and reader for the sibling table (cross-token successor links).
+pub use sibling_table::{SiblingTableWriter, SiblingTableReader, SiblingEntry};
 /// Writer and reader for the `.sfx` file format, plus per-ordinal postings reader.
 pub use file::{SfxFileWriter, SfxFileReader, SfxPostingsReader, SfxPostingEntry};
 /// Token interceptor that captures tokens during indexing for suffix FST construction.
