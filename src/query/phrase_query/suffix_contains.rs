@@ -1133,19 +1133,39 @@ where
 
     // Step 1: falling_walk → first-split candidates.
     // Fuzzy falling_walk finds splits despite typos in the left part.
+    let t0 = std::time::Instant::now();
     let candidates = if fuzzy_distance > 0 {
         sfx_reader.fuzzy_falling_walk(&query_lower, fuzzy_distance)
     } else {
         sfx_reader.falling_walk(&query_lower)
     };
-    eprintln!("[ct_wt] query='{}' d={} candidates={}", query_lower, fuzzy_distance, candidates.len());
+    let t_walk = t0.elapsed();
+    eprintln!("[ct_wt] query='{}' d={} candidates={} walk={:?}", query_lower, fuzzy_distance, candidates.len(), t_walk);
+
+    let sibling_table = sfx_reader.sibling_table();
+    let has_siblings = sibling_table.is_some() && ord_to_term.is_some();
+
+    // Filter candidates: keep only those that are useful.
+    // A candidate is useful if:
+    // 1. It consumes the entire query (single-token fuzzy match), OR
+    // 2. Its parent ordinal has contiguous siblings (cross-token chain possible)
+    let candidates: Vec<_> = if fuzzy_distance > 0 && has_siblings {
+        let sib = sibling_table.unwrap();
+        let before = candidates.len();
+        let filtered: Vec<_> = candidates.into_iter().filter(|c| {
+            let consumes_all = c.prefix_len >= query_lower.len();
+            let has_sibling = !sib.contiguous_siblings(c.parent.raw_ordinal as u32).is_empty();
+            consumes_all || has_sibling
+        }).collect();
+        eprintln!("[ct_wt] filtered: {} → {} candidates", before, filtered.len());
+        filtered
+    } else {
+        candidates
+    };
 
     if candidates.is_empty() {
         return Vec::new();
     }
-
-    let sibling_table = sfx_reader.sibling_table();
-    let has_siblings = sibling_table.is_some() && ord_to_term.is_some();
 
     // Step 2: For each candidate, try to cover the remainder via sibling chain
     // A valid chain: sequence of ordinals [first, ..., terminal] where each

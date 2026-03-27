@@ -1247,9 +1247,7 @@ mod tests {
         eprintln!("[diag] num_segments={}, num_docs={}", searcher.segment_readers().len(), searcher.num_docs());
         drop(searcher);
 
-        for q in ["weaver", "rag3weaver", "rag3w", "rag3db", "getElementById",
-                  "rag3weaver : 3.4ms", "void Planner plan",
-                  "use rag3weaver", "import rag3db", "fn main"] {
+        for q in ["weaver", "rag3weaver", "rag3w", "rag3db", "getElementById"] {
             let (toks, seps) = ld_lucivy::query::tokenize_query(q);
             if toks.len() > 1 {
                 eprintln!("[diag] tokenize '{}' → tokens={:?}, seps={:?}", q, toks, seps);
@@ -1275,6 +1273,29 @@ mod tests {
             ).unwrap();
             (results.len(), t0.elapsed())
         };
+        // Fuzzy queries on .luce
+        eprintln!("[diag] --- fuzzy d=1 ---");
+        let search_fuzzy = |q: &str, d: u8| -> (usize, std::time::Duration) {
+            let qc = crate::query::QueryConfig {
+                query_type: "contains".into(),
+                field: Some(field_name.clone()),
+                value: Some(q.into()),
+                distance: Some(d),
+                ..Default::default()
+            };
+            let query = crate::query::build_query(&qc, &handle.schema, &handle.index, None).unwrap();
+            let searcher = handle.reader.searcher();
+            let t0 = std::time::Instant::now();
+            let results = searcher.search(
+                &*query, &ld_lucivy::collector::TopDocs::with_limit(20).order_by_score(),
+            ).unwrap();
+            (results.len(), t0.elapsed())
+        };
+        for q in ["rak3weaver", "rag3weavr", "weavr", "rag3we4ver"] {
+            let (count, elapsed) = search_fuzzy(q, 1);
+            eprintln!("[diag] fuzzy '{}' d=1 → {} results in {:?}", q, count, elapsed);
+        }
+
         for q in ["rag3weaver", "rag3w", "getElementById"] {
             let (count, elapsed) = search_hl(q);
             eprintln!("[diag] query='{}' (hl) → {} results in {:?}", q, count, elapsed);
