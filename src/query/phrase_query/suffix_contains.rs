@@ -439,6 +439,57 @@ fn separator_matches_fuzzy(actual: &[u8], expected: &[u8], max_distance: u8) -> 
     }
 }
 
+/// Check if `query` fuzzy-matches a PREFIX of `text` within edit distance `max_distance`.
+///
+/// Returns true if there exists a prefix `text[0..k]` such that
+/// `levenshtein(query, text[0..k]) <= max_distance`.
+///
+/// Used for fuzzy terminal matching in cross-token search: the query remainder
+/// is compared against the beginning of the next token.
+fn levenshtein_prefix_match(query: &str, text: &str, max_distance: u8) -> bool {
+    if max_distance == 0 {
+        return text.starts_with(query);
+    }
+    let q = query.as_bytes();
+    let t = text.as_bytes();
+    let qlen = q.len();
+    let tlen = t.len();
+
+    // DP matrix: dp[i][j] = edit distance between query[0..i] and text[0..j]
+    // We want min(dp[qlen][0..=tlen]) <= max_distance
+    // Optimization: only keep two rows (previous and current)
+    let max_j = tlen.min(qlen + max_distance as usize); // no need to go further
+    let mut prev = vec![0u16; max_j + 1];
+    let mut curr = vec![0u16; max_j + 1];
+
+    // Row 0: dp[0][j] = 0 for all j (empty query matches any prefix with 0 deletions)
+    // Wait — dp[0][j] = j (need j deletions to match empty query against text[0..j])
+    // Actually for PREFIX match: dp[0][j] = 0 for all j? No.
+    // Standard Levenshtein: dp[0][j] = j. But for prefix match, we want the minimum
+    // of the LAST row, not dp[qlen][tlen]. So we use standard DP.
+    for j in 0..=max_j { prev[j] = j as u16; }
+
+    for i in 1..=qlen {
+        curr[0] = i as u16;
+        let mut row_min = curr[0];
+        for j in 1..=max_j {
+            let cost = if q[i - 1] == t[j - 1] { 0u16 } else { 1 };
+            curr[j] = (prev[j - 1] + cost)
+                .min(prev[j] + 1)
+                .min(curr[j - 1] + 1);
+            row_min = row_min.min(curr[j]);
+        }
+        // Early termination: if the entire row is > max_distance, no prefix can match
+        if row_min > max_distance as u16 {
+            return false;
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    // Check: min(dp[qlen][0..=max_j]) <= max_distance
+    prev[..=max_j].iter().any(|&d| d <= max_distance as u16)
+}
+
 /// A posting list entry from the ._raw field.
 #[derive(Debug, Clone)]
 pub struct RawPostingEntry {
@@ -511,6 +562,7 @@ fn cross_token_resolve_for_multi<F>(
     is_first: bool,
     is_last: bool,
     prefix_only: bool,
+    fuzzy_distance: u8,
 ) -> Vec<MultiTokenPosting>
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
@@ -525,10 +577,12 @@ where
     // This handles "plan" matching "planner", "planning", etc.
     // For non-last tokens, resolve_suffix finds exact matches.
     if is_last {
-        let prefix_results = if use_si0 {
-            sfx_reader.prefix_walk_si0(&query_lower)
+        let prefix_results = if fuzzy_distance > 0 {
+            if use_si0 { sfx_reader.fuzzy_walk_si0(&query_lower, fuzzy_distance) }
+            else { sfx_reader.fuzzy_walk(&query_lower, fuzzy_distance) }
         } else {
-            sfx_reader.prefix_walk(&query_lower)
+            if use_si0 { sfx_reader.prefix_walk_si0(&query_lower) }
+            else { sfx_reader.prefix_walk(&query_lower) }
         };
         for (_suffix, parents) in &prefix_results {
             for parent in parents {
@@ -546,8 +600,32 @@ where
                 }
             }
         }
+    } else if fuzzy_distance > 0 {
+        // Non-last fuzzy: fuzzy_walk finds tokens within edit distance
+        let fuzzy_results = if use_si0 {
+            sfx_reader.fuzzy_walk_si0(&query_lower, fuzzy_distance)
+        } else {
+            sfx_reader.fuzzy_walk(&query_lower, fuzzy_distance)
+        };
+        for (_suffix, parents) in &fuzzy_results {
+            for parent in parents {
+                if use_si0 && parent.si != 0 { continue; }
+                // Must be a full-token match (SI=0, covers entire token)
+                if parent.si != 0 { continue; }
+                let postings = raw_term_resolver(parent.raw_ordinal);
+                for p in &postings {
+                    results.push(MultiTokenPosting {
+                        doc_id: p.doc_id,
+                        token_index: p.token_index,
+                        span: 1,
+                        byte_from: p.byte_from,
+                        byte_to: p.byte_to,
+                    });
+                }
+            }
+        }
     } else {
-        // Non-last: exact resolve — the query must match a full indexed token
+        // Non-last exact: resolve_suffix — the query must match a full indexed token
         let resolved = if use_si0 {
             sfx_reader.resolve_suffix_si0(&query_lower)
         } else {
@@ -609,7 +687,7 @@ where
                         None => continue,
                     };
 
-                    if rem == next_text || (!is_last && rem.len() == next_text.len() && rem == next_text) {
+                    if rem == next_text {
                         // Exact full token match
                         chain_ords.push(*next_ord as u64);
                         rem = "";
@@ -623,8 +701,11 @@ where
                         current_ord = *next_ord as u64;
                         matched = true;
                         break;
-                    } else if is_last && next_text.starts_with(rem) {
-                        // Last token: remainder is prefix of next token → terminal
+                    } else if is_last && (
+                        next_text.starts_with(rem) ||
+                        (fuzzy_distance > 0 && levenshtein_prefix_match(rem, &next_text, fuzzy_distance))
+                    ) {
+                        // Last token: remainder matches prefix of next token (exact or fuzzy)
                         chain_ords.push(*next_ord as u64);
                         found = true;
                         matched = true;
@@ -842,7 +923,7 @@ where
 
         let postings = cross_token_resolve_for_multi(
             sfx_reader, token, raw_ordinal_resolver, ord_to_term,
-            is_first, is_last, prefix_only,
+            is_first, is_last, prefix_only, fuzzy_distance,
         );
 
         if postings.is_empty() {
@@ -1038,7 +1119,7 @@ pub fn cross_token_search_with_terms<F>(
     sfx_reader: &SfxFileReader<'_>,
     query: &str,
     raw_term_resolver: &F,
-    _fuzzy_distance: u8,
+    fuzzy_distance: u8,
     ord_to_term: Option<&dyn Fn(u64) -> Option<String>>,
 ) -> Vec<SuffixContainsMatch>
 where
@@ -1094,15 +1175,22 @@ where
                         None => continue,
                     };
 
-                    if rem.starts_with(&next_text) {
+                    if rem == next_text {
+                        // Exact full token match
+                        chain.push(*next_ord as u64);
+                        rem = "";
+                        found = true;
+                        matched = true;
+                        break;
+                    } else if rem.starts_with(&next_text) {
                         // Full token consumed → continue chain
                         chain.push(*next_ord as u64);
                         rem = &rem[next_text.len()..];
                         current_ord = *next_ord as u64;
                         matched = true;
                         break;
-                    } else if next_text.starts_with(rem) {
-                        // Remainder is a prefix of the next token → terminal match!
+                    } else if next_text.starts_with(rem) || (fuzzy_distance > 0 && levenshtein_prefix_match(rem, &next_text, fuzzy_distance)) {
+                        // Remainder matches prefix of next token (exact or fuzzy) → terminal
                         chain.push(*next_ord as u64);
                         found = true;
                         matched = true;
@@ -1118,8 +1206,12 @@ where
                 valid_chains.push((cand_idx, chain));
             }
         } else {
-            // Fallback: no sibling table → single-split with prefix_walk
-            let right_walks = sfx_reader.prefix_walk_si0(remainder);
+            // Fallback: no sibling table → single-split with prefix_walk or fuzzy_walk
+            let right_walks = if fuzzy_distance > 0 {
+                sfx_reader.fuzzy_walk_si0(remainder, fuzzy_distance)
+            } else {
+                sfx_reader.prefix_walk_si0(remainder)
+            };
             if !right_walks.is_empty() {
                 for (_suffix, parents) in &right_walks {
                     for rp in parents {
