@@ -650,12 +650,7 @@ where
     }
 
     // falling_walk + sibling chain: find cross-token matches
-    // Fuzzy falling_walk tolerates typos in the left part of the split.
-    let candidates = if fuzzy_distance > 0 {
-        sfx_reader.fuzzy_falling_walk(&query_lower, fuzzy_distance)
-    } else {
-        sfx_reader.falling_walk(&query_lower)
-    };
+    let candidates = sfx_reader.falling_walk(&query_lower);
 
     for cand in &candidates {
         // Skip non-SI=0 candidates when required (middle/last tokens)
@@ -787,6 +782,105 @@ where
                                     byte_to: rp_entry.byte_from + remainder.len() as u32,
                                 });
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fuzzy sibling-first: if no results yet and fuzzy, iterate tokens with siblings
+    if results.is_empty() && fuzzy_distance > 0 {
+        if let (Some(sib_table), Some(get_term)) = (sibling_table, &ord_to_term) {
+            let d = fuzzy_distance as usize;
+            for ord in 0..sib_table.num_ordinals() {
+                let siblings = sib_table.contiguous_siblings(ord);
+                if siblings.is_empty() { continue; }
+                let token_text = match get_term(ord as u64) {
+                    Some(t) => t,
+                    None => continue,
+                };
+                let tlen = token_text.len();
+
+                for split_len in tlen.saturating_sub(d)..=(tlen + d).min(query_lower.len()) {
+                    let query_prefix = &query_lower[..split_len];
+                    if !levenshtein_prefix_match(query_prefix, &token_text, fuzzy_distance) {
+                        continue;
+                    }
+                    let remainder = &query_lower[split_len..];
+                    if remainder.is_empty() { continue; }
+
+                    // Follow sibling chain
+                    let mut current_ord = ord as u64;
+                    let mut rem = remainder;
+                    let mut chain_ords: Vec<u64> = vec![current_ord];
+                    let mut found = false;
+                    const MAX_CHAIN: usize = 8;
+
+                    for _ in 0..MAX_CHAIN {
+                        if rem.is_empty() { found = true; break; }
+                        let sibs = sib_table.contiguous_siblings(current_ord as u32);
+                        let mut matched = false;
+                        for next_ord in &sibs {
+                            let next_text = match get_term(*next_ord as u64) {
+                                Some(t) => t,
+                                None => continue,
+                            };
+                            if rem == next_text {
+                                chain_ords.push(*next_ord as u64);
+                                rem = "";
+                                found = true;
+                                matched = true;
+                                break;
+                            } else if rem.starts_with(&next_text) {
+                                chain_ords.push(*next_ord as u64);
+                                rem = &rem[next_text.len()..];
+                                current_ord = *next_ord as u64;
+                                matched = true;
+                                break;
+                            } else if is_last && (next_text.starts_with(rem) || levenshtein_prefix_match(rem, &next_text, fuzzy_distance)) {
+                                chain_ords.push(*next_ord as u64);
+                                found = true;
+                                matched = true;
+                                break;
+                            }
+                        }
+                        if !matched || found { break; }
+                    }
+
+                    if found || rem.is_empty() {
+                        let span = chain_ords.len() as u32;
+                        // Resolve chain postings
+                        let first_postings = raw_term_resolver(chain_ords[0]);
+                        let mut active: Vec<(u32, u32, u32, u32, u32)> = Vec::new();
+                        for p in &first_postings {
+                            active.push((p.doc_id, p.token_index + 1, p.byte_to, p.byte_from, p.token_index));
+                        }
+                        for &co in &chain_ords[1..] {
+                            if active.is_empty() { break; }
+                            let postings = raw_term_resolver(co);
+                            active.sort_by_key(|a| (a.0, a.1));
+                            let mut next: Vec<(u32, u32, u32, u32, u32)> = Vec::new();
+                            for p in &postings {
+                                let idx = active.partition_point(|a| (a.0, a.1) < (p.doc_id, p.token_index));
+                                let mut i = idx;
+                                while i < active.len() && active[i].0 == p.doc_id && active[i].1 == p.token_index {
+                                    if p.byte_from == active[i].2 {
+                                        next.push((p.doc_id, p.token_index + 1, p.byte_to, active[i].3, active[i].4));
+                                    }
+                                    i += 1;
+                                }
+                            }
+                            active = next;
+                        }
+                        for &(doc_id, _, byte_to, byte_from, first_ti) in &active {
+                            results.push(MultiTokenPosting {
+                                doc_id,
+                                token_index: first_ti,
+                                span,
+                                byte_from,
+                                byte_to,
+                            });
                         }
                     }
                 }
@@ -1134,12 +1228,7 @@ where
     let query_bytes = query_lower.as_bytes();
 
     // Step 1: falling_walk → first-split candidates
-    // Fuzzy falling_walk tolerates typos in the left part of the split.
-    let candidates = if fuzzy_distance > 0 {
-        sfx_reader.fuzzy_falling_walk(&query_lower, fuzzy_distance)
-    } else {
-        sfx_reader.falling_walk(&query_lower)
-    };
+    let candidates = sfx_reader.falling_walk(&query_lower);
     if candidates.is_empty() {
         return Vec::new();
     }
@@ -1234,6 +1323,81 @@ where
         }
     }
 
+    // Step 2b: Fuzzy sibling-first — find tokens whose text fuzzy-matches
+    // a prefix of the query, then follow sibling chain for the remainder.
+    // This handles typos in the LEFT part of a split (e.g., "rak3weaver" → "rag3").
+    // Cost: iterate tokens with siblings (~300) × levenshtein check (~100 ops) = ~30K ops.
+    if valid_chains.is_empty() && fuzzy_distance > 0 && has_siblings {
+        let sib_table = sibling_table.unwrap();
+        let get_term = ord_to_term.unwrap();
+        let d = fuzzy_distance as usize;
+
+        for ord in 0..sib_table.num_ordinals() {
+            let siblings = sib_table.contiguous_siblings(ord);
+            if siblings.is_empty() { continue; }
+
+            let token_text = match get_term(ord as u64) {
+                Some(t) => t,
+                None => continue,
+            };
+            let tlen = token_text.len();
+
+            // Check if the query starts with a fuzzy match of this token.
+            // The split point in the query can be tlen ± d (insertions/deletions).
+            for split_len in tlen.saturating_sub(d)..=(tlen + d).min(query_bytes.len()) {
+                let query_prefix = &query_lower[..split_len];
+                if levenshtein_prefix_match(query_prefix, &token_text, fuzzy_distance)
+                    && query_prefix.len() <= token_text.len() + d
+                {
+                    let remainder = &query_lower[split_len..];
+                    if remainder.is_empty() { continue; }
+
+                    // Follow sibling chain from this token
+                    let mut current_ord = ord as u64;
+                    let mut rem = remainder;
+                    let mut chain = vec![current_ord];
+                    let mut found = false;
+
+                    for _ in 0..MAX_CHAIN_DEPTH {
+                        if rem.is_empty() { found = true; break; }
+                        let sibs = sib_table.contiguous_siblings(current_ord as u32);
+                        let mut matched = false;
+                        for next_ord in &sibs {
+                            let next_text = match get_term(*next_ord as u64) {
+                                Some(t) => t,
+                                None => continue,
+                            };
+                            if rem == next_text {
+                                chain.push(*next_ord as u64);
+                                rem = "";
+                                found = true;
+                                matched = true;
+                                break;
+                            } else if rem.starts_with(&next_text) {
+                                chain.push(*next_ord as u64);
+                                rem = &rem[next_text.len()..];
+                                current_ord = *next_ord as u64;
+                                matched = true;
+                                break;
+                            } else if next_text.starts_with(rem) || levenshtein_prefix_match(rem, &next_text, fuzzy_distance) {
+                                chain.push(*next_ord as u64);
+                                found = true;
+                                matched = true;
+                                break;
+                            }
+                        }
+                        if !matched || found { break; }
+                    }
+
+                    if found || rem.is_empty() {
+                        // Use a synthetic cand_idx — we'll handle byte_from from postings
+                        valid_chains.push((usize::MAX, chain));
+                    }
+                }
+            }
+        }
+    }
+
     if valid_chains.is_empty() {
         return Vec::new();
     }
@@ -1250,7 +1414,13 @@ where
     let mut results: Vec<SuffixContainsMatch> = Vec::new();
 
     for (cand_idx, chain) in &valid_chains {
-        let cand = &candidates[*cand_idx];
+        // For fuzzy sibling-first chains, cand_idx is usize::MAX (no falling_walk candidate).
+        // The first token is SI=0 (full token). For normal chains, use the candidate's SI.
+        let first_si = if *cand_idx < candidates.len() {
+            candidates[*cand_idx].parent.si as usize
+        } else {
+            0 // fuzzy sibling-first: always SI=0
+        };
 
         // Seed from first ordinal's postings
         let first_postings = match ordinal_cache.get(&chain[0]) {
@@ -1261,7 +1431,7 @@ where
         // active: Vec<(doc_id, next_position, next_byte_from, highlight_byte_from, first_ti)>
         let mut active: Vec<(u32, u32, u32, usize, u32)> = Vec::new();
         for p in first_postings {
-            let byte_from = p.byte_from as usize + cand.parent.si as usize;
+            let byte_from = p.byte_from as usize + first_si;
             active.push((p.doc_id, p.token_index + 1, p.byte_to, byte_from, p.token_index));
         }
 
@@ -1297,7 +1467,7 @@ where
                 byte_from,
                 byte_to: byte_from + query_bytes.len(),
                 parent_term: String::new(),
-                si: cand.parent.si,
+                si: first_si as u16,
             });
         }
     }
