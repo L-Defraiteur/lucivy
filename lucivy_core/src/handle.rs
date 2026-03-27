@@ -1301,6 +1301,130 @@ mod tests {
             eprintln!("[diag] query='{}' (hl) → {} results in {:?}", q, count, elapsed);
         }
 
+        // Regex contains queries — diagnostic with timers
+        eprintln!("[diag] --- regex contains ---");
+        let search_regex = |pattern: &str| -> (usize, std::time::Duration) {
+            let qc = crate::query::QueryConfig {
+                query_type: "contains".into(),
+                field: Some(field_name.clone()),
+                value: Some(pattern.into()),
+                regex: Some(true),
+                ..Default::default()
+            };
+            let query = crate::query::build_query(&qc, &handle.schema, &handle.index, None).unwrap();
+            let searcher = handle.reader.searcher();
+            let t0 = std::time::Instant::now();
+            let results = searcher.search(
+                &*query, &ld_lucivy::collector::TopDocs::with_limit(20).order_by_score(),
+            ).unwrap();
+            (results.len(), t0.elapsed())
+        };
+        for pattern in [
+            "shard[a-z]+",
+            "incremental.sync",
+            "flow.control",
+            "blob.irectory",
+            "rag3[a-z]+",
+            "get.*element",
+            "[a-z]+ment",
+        ] {
+            let (count, elapsed) = search_regex(pattern);
+            eprintln!("[diag] regex '{}' → {} results in {:?}", pattern, count, elapsed);
+        }
+
+        // Compare: exact contains for same root terms
+        eprintln!("[diag] --- exact contains (baseline) ---");
+        for q in ["shard", "incremental", "flow", "blob"] {
+            let (count, elapsed) = search(q);
+            eprintln!("[diag] exact '{}' → {} results in {:?}", q, count, elapsed);
+        }
+
+        // Regex DFA compilation timing
+        eprintln!("[diag] --- regex DFA compilation ---");
+        for pattern in ["shard[a-z]+", "incremental.sync", "[a-z]+ment", "get.*element"] {
+            let t0 = std::time::Instant::now();
+            let _ = tantivy_fst::Regex::new(pattern);
+            let elapsed = t0.elapsed();
+            eprintln!("[diag] compile '{}' → {:?}", pattern, elapsed);
+        }
+
+        // Per-segment regex diagnostic: check code path + timing
+        eprintln!("[diag] --- per-segment regex diagnostic ---");
+        {
+            let searcher = handle.reader.searcher();
+            let field = handle.field_map.iter()
+                .find(|(n, _)| n != NODE_ID_FIELD)
+                .map(|(_, f)| *f).unwrap();
+
+            for pattern in ["shard[a-z]+", "incremental.sync", "[a-z]+ment"] {
+                let prefix = {
+                    let mut result = String::new();
+                    let bytes = pattern.as_bytes();
+                    let mut i = 0;
+                    while i < bytes.len() {
+                        let b = bytes[i];
+                        match b {
+                            b'\\' if i + 1 < bytes.len() => {
+                                let next = bytes[i + 1];
+                                if matches!(next, b'.' | b'[' | b']' | b'(' | b')' | b'{' | b'}'
+                                    | b'|' | b'^' | b'$' | b'\\' | b'*' | b'+' | b'?') {
+                                    result.push(next as char);
+                                    i += 2;
+                                } else { break; }
+                            }
+                            b'.' | b'*' | b'+' | b'?' | b'[' | b']' | b'(' | b')'
+                            | b'{' | b'}' | b'|' | b'^' | b'$' => { break; }
+                            _ => { result.push(b as char); i += 1; }
+                        }
+                    }
+                    result.to_lowercase()
+                };
+
+                let mut total_walk = 0usize;
+                let mut total_parents = 0usize;
+                for (si, seg) in searcher.segment_readers().iter().enumerate() {
+                    if let Some(sfx_data) = seg.sfx_file(field) {
+                        if let Ok(bytes) = sfx_data.read_bytes() {
+                            if let Ok(sfx_reader) = ld_lucivy::suffix_fst::SfxFileReader::open(bytes.as_ref()) {
+                                let has_sib = sfx_reader.sibling_table().is_some();
+                                let walk = sfx_reader.prefix_walk(&prefix);
+                                let nparents: usize = walk.iter().map(|(_, p)| p.len()).sum();
+                                total_walk += walk.len();
+                                total_parents += nparents;
+                                if si == 0 {
+                                    eprintln!("[diag] regex '{}': literal_prefix='{}' ({}B), sibling={}",
+                                        pattern, prefix, prefix.len(), has_sib);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Also count siblings for cross-token ordinals
+                let mut total_gap0_sibs = 0usize;
+                let mut total_gap_sibs = 0usize;
+                for seg in searcher.segment_readers().iter() {
+                    if let Some(sfx_data) = seg.sfx_file(field) {
+                        if let Ok(bytes) = sfx_data.read_bytes() {
+                            if let Ok(sfx_reader) = ld_lucivy::suffix_fst::SfxFileReader::open(bytes.as_ref()) {
+                                if let Some(sib_table) = sfx_reader.sibling_table() {
+                                    let walk = sfx_reader.prefix_walk(&prefix);
+                                    for (_, parents) in &walk {
+                                        for p in parents {
+                                            let sibs = sib_table.siblings(p.raw_ordinal as u32);
+                                            total_gap0_sibs += sibs.iter().filter(|s| s.gap_len == 0).count();
+                                            total_gap_sibs += sibs.iter().filter(|s| s.gap_len > 0).count();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                eprintln!("[diag]   total prefix_walk entries={}, parents={}, gap0_sibs={}, gap>0_sibs={} across {} segs",
+                    total_walk, total_parents, total_gap0_sibs, total_gap_sibs, searcher.segment_readers().len());
+            }
+        }
+
         handle.close().unwrap();
         let _ = std::fs::remove_dir_all(&tmp);
     }
