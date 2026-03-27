@@ -292,11 +292,13 @@ pub(crate) fn regex_contains_via_literal<A: Automaton>(
     mode: ContinuationMode,
     max_doc: DocId,
     ord_to_term: &dyn Fn(u64) -> Option<String>,
+    posmap_data: Option<&[u8]>,
 ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>)>
 where
     A::State: Clone + Eq + std::hash::Hash,
 {
     use std::time::Instant;
+    use crate::suffix_fst::posmap::PosMapReader;
 
     let t_total = Instant::now();
     let all_literals = extract_all_literals(pattern);
@@ -768,8 +770,110 @@ where
         allowed_docs = Some(position_filtered);
     }
 
-    // 3c: Gap>0 cross-token — runs on position-filtered doc set.
-    if !gap_candidates.is_empty() {
+    // 3c-posmap: When we have multi-literal + PosMap, validate the path between
+    // literal positions by reading ordinals from the PosMap and feeding them to the DFA.
+    // O(distance × token_len) per doc — replaces the sibling walk entirely.
+    let posmap = posmap_data.and_then(PosMapReader::open);
+    let mut posmap_handled = false;
+
+    if has_multi_literal && posmap.is_some() && !other_postings_by_doc.is_empty() {
+        let pm = posmap.as_ref().unwrap();
+        let gapmap = sfx_reader.gapmap();
+
+        // For each cross_token candidate in allowed_docs: validate via PosMap walk.
+        for &(ord, si, ref dfa_state) in &cross_token {
+            let entries = if let Some(ref allowed) = allowed_docs {
+                resolver.resolve_filtered(ord, allowed)
+            } else {
+                resolver.resolve(ord)
+            };
+
+            for e in &entries {
+                let byte_from = e.byte_from + si as u32;
+
+                // Find the target: earliest other-literal position AFTER this one.
+                let mut target_pos = None;
+                let mut target_byte_to = e.byte_to;
+                for other_by_doc in &other_postings_by_doc {
+                    if let Some(positions) = other_by_doc.get(&e.doc_id) {
+                        if let Some(&(pos, _, bt)) = positions.iter()
+                            .filter(|&&(_, bf, _)| bf >= e.byte_to)
+                            .min_by_key(|&&(_, bf, _)| bf)
+                        {
+                            target_pos = Some(pos);
+                            target_byte_to = bt;
+                        }
+                    }
+                }
+
+                let Some(t_pos) = target_pos else { continue; };
+
+                // PosMap walk: read ordinals from e.position+1 to t_pos (exclusive),
+                // feed gap bytes + token text to DFA.
+                let mut state = dfa_state.clone();
+                let mut alive = true;
+
+                for walk_pos in (e.position + 1)..t_pos {
+                    // Gap between previous token and this one
+                    let gap = gapmap.read_separator(e.doc_id, walk_pos - 1, walk_pos);
+                    if let Some(gap_bytes) = gap {
+                        if is_value_boundary(gap_bytes) { alive = false; break; }
+                        for &byte in gap_bytes {
+                            state = automaton.accept(&state, byte);
+                            if !automaton.can_match(&state) { alive = false; break; }
+                        }
+                        if !alive { break; }
+                    }
+
+                    // Token at this position
+                    if let Some(tok_ord) = pm.ordinal_at(e.doc_id, walk_pos) {
+                        if let Some(text) = ord_to_term(tok_ord as u64) {
+                            for &byte in text.as_bytes() {
+                                state = automaton.accept(&state, byte);
+                                if !automaton.can_match(&state) { alive = false; break; }
+                            }
+                            if !alive { break; }
+                        }
+                    }
+                }
+
+                if !alive { continue; }
+
+                // Feed gap before target literal
+                if t_pos > 0 {
+                    let gap = gapmap.read_separator(e.doc_id, t_pos - 1, t_pos);
+                    if let Some(gap_bytes) = gap {
+                        if is_value_boundary(gap_bytes) { continue; }
+                        for &byte in gap_bytes {
+                            state = automaton.accept(&state, byte);
+                            if !automaton.can_match(&state) { alive = false; break; }
+                        }
+                        if !alive { continue; }
+                    }
+                }
+
+                // Feed target literal's token
+                if let Some(tok_ord) = pm.ordinal_at(e.doc_id, t_pos) {
+                    if let Some(text) = ord_to_term(tok_ord as u64) {
+                        for &byte in text.as_bytes() {
+                            state = automaton.accept(&state, byte);
+                            if !automaton.can_match(&state) { alive = false; break; }
+                        }
+                    }
+                }
+
+                if alive && automaton.is_match(&state) {
+                    doc_bitset.insert(e.doc_id);
+                    highlights.push((e.doc_id, byte_from as usize, target_byte_to as usize));
+                }
+            }
+        }
+        posmap_handled = true;
+        eprintln!("[regex-timer] posmap walk: validated {} docs", doc_bitset.len());
+    }
+
+    // 3c: Gap>0 cross-token — fallback when no PosMap or single-literal.
+    if !posmap_handled && !gap_candidates.is_empty() {
         if let Some(sib_table) = sfx_reader.sibling_table() {
             let gapmap = sfx_reader.gapmap();
 
@@ -1238,6 +1342,11 @@ impl Weight for RegexContinuationWeight {
 
         let use_sibling = sfx_reader.sibling_table().is_some();
 
+        // Load .posmap bytes for position-based regex cross-token validation.
+        let posmap_bytes = reader.posmap_file(self.field)
+            .and_then(|data| data.read_bytes().ok())
+            .map(|b| b.as_ref().to_vec());
+
         let (doc_bitset, highlights) = match &self.dfa_kind {
             DfaKind::Fuzzy { text, distance, prefix } => {
                 let builder = get_builder(*distance);
@@ -1277,6 +1386,7 @@ impl Weight for RegexContinuationWeight {
                     regex_contains_via_literal(
                         &automaton, pattern, &sfx_dict, &*resolver, &sfx_reader,
                         self.mode, max_doc, &ord_to_term_fn,
+                        posmap_bytes.as_deref(),
                     )?
                 } else {
                     continuation_score(

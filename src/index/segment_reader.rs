@@ -50,15 +50,19 @@ pub struct SegmentReader {
     schema: Schema,
     sfx_files: FnvHashMap<Field, FileSlice>,
     sfxpost_files: FnvHashMap<Field, FileSlice>,
+    posmap_files: FnvHashMap<Field, FileSlice>,
+    bytemap_files: FnvHashMap<Field, FileSlice>,
 }
 
 
 /// Load per-field .sfx/.sfxpost files using sfx_field_ids from the SegmentMeta.
 /// Falls back to reading the old .sfx manifest if sfx_field_ids is empty
 /// (backward compat with indexes created before this change).
-fn load_sfx_files(segment: &Segment, _schema: &Schema) -> (FnvHashMap<Field, FileSlice>, FnvHashMap<Field, FileSlice>) {
+fn load_sfx_files(segment: &Segment, _schema: &Schema) -> (FnvHashMap<Field, FileSlice>, FnvHashMap<Field, FileSlice>, FnvHashMap<Field, FileSlice>, FnvHashMap<Field, FileSlice>) {
     let mut sfx_files = FnvHashMap::default();
     let mut sfxpost_files = FnvHashMap::default();
+    let mut posmap_files = FnvHashMap::default();
+    let mut bytemap_files = FnvHashMap::default();
 
     // Get sfx_field_ids from the segment meta
     let sfx_field_ids = segment.meta().sfx_field_ids().to_vec();
@@ -78,9 +82,15 @@ fn load_sfx_files(segment: &Segment, _schema: &Schema) -> (FnvHashMap<Field, Fil
         if let Ok(file_slice) = segment.open_read_custom(&format!("{field_id}.sfxpost")) {
             sfxpost_files.insert(field, file_slice);
         }
+        if let Ok(file_slice) = segment.open_read_custom(&format!("{field_id}.posmap")) {
+            posmap_files.insert(field, file_slice);
+        }
+        if let Ok(file_slice) = segment.open_read_custom(&format!("{field_id}.bytemap")) {
+            bytemap_files.insert(field, file_slice);
+        }
     }
 
-    (sfx_files, sfxpost_files)
+    (sfx_files, sfxpost_files, posmap_files, bytemap_files)
 }
 
 /// Legacy: read field_ids from the old .sfx manifest file.
@@ -123,6 +133,16 @@ impl SegmentReader {
     /// Access a pre-loaded .sfxpost file for the given field, if one exists.
     pub fn sfxpost_file(&self, field: Field) -> Option<&FileSlice> {
         self.sfxpost_files.get(&field)
+    }
+
+    /// Access a pre-loaded .posmap file for the given field, if one exists.
+    pub fn posmap_file(&self, field: Field) -> Option<&FileSlice> {
+        self.posmap_files.get(&field)
+    }
+
+    /// Access a pre-loaded .bytemap file for the given field, if one exists.
+    pub fn bytemap_file(&self, field: Field) -> Option<&FileSlice> {
+        self.bytemap_files.get(&field)
     }
 
     /// Returns the highest document id ever attributed in
@@ -285,7 +305,7 @@ impl SegmentReader {
             .map(|alive_bitset| alive_bitset.num_alive_docs() as u32)
             .unwrap_or(max_doc);
 
-        let (sfx_files, sfxpost_files) = load_sfx_files(segment, &schema);
+        let (sfx_files, sfxpost_files, posmap_files, bytemap_files) = load_sfx_files(segment, &schema);
 
         Ok(SegmentReader {
             inv_idx_reader_cache: Default::default(),
@@ -304,6 +324,8 @@ impl SegmentReader {
             schema: schema.clone(),
             sfx_files,
             sfxpost_files,
+            posmap_files,
+            bytemap_files,
         })
     }
 
@@ -360,7 +382,7 @@ impl SegmentReader {
             .map(|alive_bitset| alive_bitset.num_alive_docs() as u32)
             .unwrap_or(max_doc);
 
-        let (sfx_files, sfxpost_files) = load_sfx_files(segment, &schema);
+        let (sfx_files, sfxpost_files, posmap_files, bytemap_files) = load_sfx_files(segment, &schema);
 
         Ok(SegmentReader {
             inv_idx_reader_cache: Default::default(),
@@ -379,6 +401,8 @@ impl SegmentReader {
             schema: schema.clone(),
             sfx_files,
             sfxpost_files,
+            posmap_files,
+            bytemap_files,
         })
     }
 
