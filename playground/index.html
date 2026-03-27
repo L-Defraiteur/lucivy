@@ -568,7 +568,8 @@ function buildSnippets(text, offsets, contextChars = 120) {
   const encoder = new TextEncoder();
   const bytes = encoder.encode(text);
 
-  // Map byte offsets to char offsets
+  // Map byte offsets to JS string char offsets (UTF-16 code units).
+  // 4-byte UTF-8 sequences (U+10000+) produce surrogate pairs = 2 JS chars.
   const byteToChar = new Int32Array(bytes.length + 1);
   let charIdx = 0, byteIdx = 0;
   while (byteIdx < bytes.length) {
@@ -579,7 +580,7 @@ function buildSnippets(text, offsets, contextChars = 120) {
       byteToChar[byteIdx + k] = charIdx;
     }
     byteIdx += len;
-    charIdx++;
+    charIdx += (len === 4) ? 2 : 1; // surrogate pair = 2 JS chars
   }
   byteToChar[bytes.length] = charIdx;
 

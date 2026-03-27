@@ -1144,6 +1144,26 @@ mod tests {
         let handle = LucivyHandle::open(directory).unwrap();
         eprintln!("[diag] fields: {:?}", handle.field_map.iter().map(|(n,_)| n.as_str()).collect::<Vec<_>>());
 
+        // Check if sibling table is present in the segments
+        let searcher = handle.reader.searcher();
+        for (i, seg) in searcher.segment_readers().iter().enumerate() {
+            let field = handle.field_map.iter()
+                .find(|(n, _)| n != NODE_ID_FIELD)
+                .map(|(_, f)| *f).unwrap();
+            if let Some(sfx_data) = seg.sfx_file(field) {
+                if let Ok(bytes) = sfx_data.read_bytes() {
+                    if let Ok(sfx_reader) = ld_lucivy::suffix_fst::SfxFileReader::open(bytes.as_ref()) {
+                        let has_sib = sfx_reader.sibling_table().is_some();
+                        let sib_count = sfx_reader.sibling_table()
+                            .map(|s| (0..s.num_ordinals()).filter(|&o| !s.siblings(o).is_empty()).count())
+                            .unwrap_or(0);
+                        eprintln!("[diag] seg[{}] has_sibling={} ordinals_with_siblings={}", i, has_sib, sib_count);
+                    }
+                }
+            }
+        }
+        drop(searcher);
+
         let field_name = handle.field_map.iter()
             .find(|(n, _)| n != NODE_ID_FIELD)
             .map(|(n, _)| n.clone())
@@ -1202,6 +1222,90 @@ mod tests {
             let (count, elapsed) = search_hl(q);
             eprintln!("[diag] query='{}' (hl) → {} results in {:?}", q, count, elapsed);
         }
+
+        handle.close().unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Diagnostic: index the real doc 11 and check all highlights for "rag3weaver".
+    #[test]
+    fn test_diag_highlight_rag3weaver() {
+        let doc_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/19-mars-2026/11-plan-observabilite-avancee-luciole.md"
+        );
+        let text = match std::fs::read_to_string(doc_path) {
+            Ok(t) => t,
+            Err(_) => { eprintln!("[hl_diag] skipping: doc not found"); return; }
+        };
+
+        let tmp = std::env::temp_dir().join("lucivy_test_diag_hl");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+            "fields": [{"name": "body", "type": "text", "stored": true}]
+        })).unwrap();
+
+        let directory = StdFsDirectory::open(tmp.to_str().unwrap()).unwrap();
+        let handle = LucivyHandle::create(directory, &config).unwrap();
+        let body = handle.field("body").unwrap();
+        let nid = handle.field(NODE_ID_FIELD).unwrap();
+
+        {
+            let mut g = handle.writer.lock().unwrap();
+            let w = g.as_mut().unwrap();
+            let mut doc = ld_lucivy::LucivyDocument::new();
+            doc.add_u64(nid, 0);
+            doc.add_text(body, &text);
+            w.add_document(doc).unwrap();
+            w.commit().unwrap();
+        }
+        handle.reader.reload().unwrap();
+
+        let sink = std::sync::Arc::new(ld_lucivy::query::HighlightSink::new());
+        let qc = crate::query::QueryConfig {
+            query_type: "contains".into(),
+            field: Some("body".into()),
+            value: Some("rag3weaver".into()),
+            ..Default::default()
+        };
+        let query = crate::query::build_query(&qc, &handle.schema, &handle.index, Some(sink.clone())).unwrap();
+        let searcher = handle.reader.searcher();
+        let results = searcher.search(
+            &*query, &ld_lucivy::collector::TopDocs::with_limit(20).order_by_score(),
+        ).unwrap();
+
+        // Find all expected byte positions of "rag3weaver" in the original text
+        let lower = text.to_lowercase();
+        let mut expected = Vec::new();
+        let mut pos = 0;
+        while let Some(found) = lower[pos..].find("rag3weaver") {
+            let abs = pos + found;
+            expected.push(abs);
+            pos = abs + 1;
+        }
+        eprintln!("[hl_diag] doc len={} bytes, results={}, expected occurrences={}", text.len(), results.len(), expected.len());
+        for &p in &expected {
+            eprintln!("[hl_diag] expected: bytes {}..{} → {:?}", p, p+10, &text[p..p+10]);
+        }
+
+        let highlights = sink.all_entries();
+        let mut all_ok = true;
+        for entry in &highlights {
+            for &[byte_from, byte_to] in &entry.offsets {
+                let safe_to = byte_to.min(text.len());
+                let safe_from = byte_from.min(safe_to);
+                let highlighted = &text[safe_from..safe_to];
+                let ok = highlighted.to_lowercase() == "rag3weaver";
+                eprintln!("[hl_diag] got: bytes {}..{} → {:?} {}",
+                    byte_from, byte_to, highlighted, if ok { "✓" } else { "✗ WRONG" });
+                if !ok { all_ok = false; }
+            }
+        }
+
+        assert!(!highlights.is_empty(), "should have highlights");
+        assert!(all_ok, "some highlights were incorrect");
 
         handle.close().unwrap();
         let _ = std::fs::remove_dir_all(&tmp);
