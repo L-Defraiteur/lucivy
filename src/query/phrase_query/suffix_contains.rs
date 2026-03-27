@@ -650,7 +650,12 @@ where
     }
 
     // falling_walk + sibling chain: find cross-token matches
-    let candidates = sfx_reader.falling_walk(&query_lower);
+    // Fuzzy falling_walk tolerates typos in the left part of the split.
+    let candidates = if fuzzy_distance > 0 {
+        sfx_reader.fuzzy_falling_walk(&query_lower, fuzzy_distance)
+    } else {
+        sfx_reader.falling_walk(&query_lower)
+    };
 
     for cand in &candidates {
         // Skip non-SI=0 candidates when required (middle/last tokens)
@@ -1129,7 +1134,12 @@ where
     let query_bytes = query_lower.as_bytes();
 
     // Step 1: falling_walk → first-split candidates
-    let candidates = sfx_reader.falling_walk(&query_lower);
+    // Fuzzy falling_walk tolerates typos in the left part of the split.
+    let candidates = if fuzzy_distance > 0 {
+        sfx_reader.fuzzy_falling_walk(&query_lower, fuzzy_distance)
+    } else {
+        sfx_reader.falling_walk(&query_lower)
+    };
     if candidates.is_empty() {
         return Vec::new();
     }
