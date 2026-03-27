@@ -61,3 +61,15 @@ C'est déjà supporté — la sibling table est une liste de successeurs par ord
 À terme, la sibling table + gap_dict pourrait remplacer complètement le GapMap
 pour les use cases search (adjacency, strict separators). Le GapMap resterait
 utile uniquement pour le highlighting (byte-exact offsets).
+
+## Conclusion : on garde GapMap
+
+Le gap_dict est une fausse bonne idée. Les gaps sont arbitraires (fichiers
+binaires, garbage, séparateurs exotiques) → le dict peut exploser en taille.
+
+Le design actuel est déjà le bon :
+- **Sibling table** avec `gap_len: u16` → cross-token (gap_len==0) et filtre rapide
+- **GapMap** → contenu exact du gap par (doc_id, position), utilisé SEULEMENT
+  en strict mode sur les candidats finaux (pas dans le hot path)
+
+Pas besoin de gap_dict ni de gap_id. Simple et robuste.
