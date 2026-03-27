@@ -1133,14 +1133,11 @@ where
 
     // Step 1: falling_walk → first-split candidates.
     // Fuzzy falling_walk finds splits despite typos in the left part.
-    let t0 = std::time::Instant::now();
     let candidates = if fuzzy_distance > 0 {
         sfx_reader.fuzzy_falling_walk(&query_lower, fuzzy_distance)
     } else {
         sfx_reader.falling_walk(&query_lower)
     };
-    let t_walk = t0.elapsed();
-    eprintln!("[ct_wt] query='{}' d={} candidates={} walk={:?}", query_lower, fuzzy_distance, candidates.len(), t_walk);
 
     let sibling_table = sfx_reader.sibling_table();
     let has_siblings = sibling_table.is_some() && ord_to_term.is_some();
@@ -1157,7 +1154,6 @@ where
             let has_sibling = !sib.contiguous_siblings(c.parent.raw_ordinal as u32).is_empty();
             consumes_all || has_sibling
         }).collect();
-        eprintln!("[ct_wt] filtered: {} → {} candidates", before, filtered.len());
         filtered
     } else {
         candidates
@@ -1181,8 +1177,6 @@ where
     for (cand_idx, cand) in candidates.iter().enumerate() {
         let split_at = cand.prefix_len.min(query_lower.len());
         let remainder = &query_lower[split_at..];
-        eprintln!("[ct_wt]   cand[{}] prefix_len={} si={} token_len={} split_at={} rem='{}'",
-            cand_idx, cand.prefix_len, cand.parent.si, cand.parent.token_len, split_at, remainder);
         if remainder.is_empty() {
             // The entire query was consumed by this single token (possibly fuzzy).
             valid_chains.push((cand_idx, vec![cand.parent.raw_ordinal]));
