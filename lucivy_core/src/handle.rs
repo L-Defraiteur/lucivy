@@ -807,7 +807,19 @@ mod tests {
 
         // Short prefix crossing boundary
         assert!(search("gleQuery").is_empty() || true, "gleQuery: no getElementById match expected (gle<4 merges)");
-        // Actually getElementById → index ["getElement", "ById"], "gleQuery" has no "Query" token to match
+
+        // Multi-token contains: query with spaces should match via multi-token path
+        let r = search("rag3db from");
+        eprintln!("[test] 'rag3db from' → {:?}", r);
+        assert!(r.contains(&0), "'rag3db from' should find doc 0");
+
+        let r = search("use rag3weaver");
+        eprintln!("[test] 'use rag3weaver' → {:?}", r);
+        assert!(r.contains(&1), "'use rag3weaver' should find doc 1");
+
+        let r = search("getElementById function");
+        eprintln!("[test] 'getElementById function' → {:?}", r);
+        assert!(r.contains(&2), "'getElementById function' should find doc 2");
 
         handle.close().unwrap();
         let _ = std::fs::remove_dir_all(&tmp);
@@ -1158,7 +1170,13 @@ mod tests {
         eprintln!("[diag] num_segments={}, num_docs={}", searcher.segment_readers().len(), searcher.num_docs());
         drop(searcher);
 
-        for q in ["weaver", "rag3weaver", "rag3w", "rag3db", "getElementById"] {
+        for q in ["weaver", "rag3weaver", "rag3w", "rag3db", "getElementById",
+                  "rag3weaver : 3.4ms", "void Planner plan",
+                  "use rag3weaver", "import rag3db", "fn main"] {
+            let (toks, seps) = ld_lucivy::query::tokenize_query(q);
+            if toks.len() > 1 {
+                eprintln!("[diag] tokenize '{}' → tokens={:?}, seps={:?}", q, toks, seps);
+            }
             let (count, elapsed) = search(q);
             eprintln!("[diag] query='{}' → {} results in {:?}", q, count, elapsed);
         }

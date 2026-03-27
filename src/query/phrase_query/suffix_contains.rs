@@ -489,16 +489,237 @@ pub fn resolve_raw_ordinal(
     entries
 }
 
+/// A resolved posting for multi-token search, with span for cross-token chains.
+#[derive(Debug, Clone)]
+struct MultiTokenPosting {
+    doc_id: u32,
+    token_index: u32,  // position of the FIRST token in the chain
+    span: u32,         // number of indexed positions occupied (1 = single token, N = chain)
+    byte_from: u32,
+    byte_to: u32,
+}
+
+/// Resolve a sub-token via falling_walk + sibling chain for multi-token search.
+///
+/// Returns all valid postings with their spans. This covers both single-token
+/// matches (span=1) and cross-token chains (span=N) in one pass.
+fn cross_token_resolve_for_multi<F>(
+    sfx_reader: &SfxFileReader<'_>,
+    sub_token: &str,
+    raw_term_resolver: &F,
+    ord_to_term: Option<&dyn Fn(u64) -> Option<String>>,
+    is_first: bool,
+    is_last: bool,
+    prefix_only: bool,
+) -> Vec<MultiTokenPosting>
+where
+    F: Fn(u64) -> Vec<RawPostingEntry>,
+{
+    let query_lower = sub_token.to_lowercase();
+    let use_si0 = prefix_only || !is_first;
+
+    let sibling_table = sfx_reader.sibling_table();
+    let mut results: Vec<MultiTokenPosting> = Vec::new();
+
+    // For last token (or any token): prefix_walk finds tokens that START with the query.
+    // This handles "plan" matching "planner", "planning", etc.
+    // For non-last tokens, resolve_suffix finds exact matches.
+    if is_last {
+        let prefix_results = if use_si0 {
+            sfx_reader.prefix_walk_si0(&query_lower)
+        } else {
+            sfx_reader.prefix_walk(&query_lower)
+        };
+        for (_suffix, parents) in &prefix_results {
+            for parent in parents {
+                if use_si0 && parent.si != 0 { continue; }
+                let postings = raw_term_resolver(parent.raw_ordinal);
+                for p in &postings {
+                    results.push(MultiTokenPosting {
+                        doc_id: p.doc_id,
+                        token_index: p.token_index,
+                        span: 1,
+                        byte_from: p.byte_from + parent.si as u32,
+                        byte_to: p.byte_from + query_lower.len() as u32,
+                    });
+                }
+            }
+        }
+    } else {
+        // Non-last: exact resolve — the query must match a full indexed token
+        let resolved = if use_si0 {
+            sfx_reader.resolve_suffix_si0(&query_lower)
+        } else {
+            sfx_reader.resolve_suffix(&query_lower)
+        };
+        for parent in &resolved {
+            // Only exact full-token match: si + query_len == token_len
+            if parent.si as usize + query_lower.len() != parent.token_len as usize {
+                continue;
+            }
+            let postings = raw_term_resolver(parent.raw_ordinal);
+            for p in &postings {
+                results.push(MultiTokenPosting {
+                    doc_id: p.doc_id,
+                    token_index: p.token_index,
+                    span: 1,
+                    byte_from: p.byte_from + parent.si as u32,
+                    byte_to: p.byte_to,
+                });
+            }
+        }
+    }
+
+    // falling_walk + sibling chain: find cross-token matches
+    let candidates = sfx_reader.falling_walk(&query_lower);
+
+    for cand in &candidates {
+        // Skip non-SI=0 candidates when required (middle/last tokens)
+        if use_si0 && cand.parent.si != 0 {
+            continue;
+        }
+
+        let remainder = &query_lower[cand.prefix_len..];
+
+        if remainder.is_empty() {
+            // Already handled above (exact match or prefix match)
+            continue;
+        }
+
+        // remainder is non-empty → need sibling chain
+        if let (Some(sib_table), Some(get_term)) = (sibling_table, &ord_to_term) {
+            // Follow sibling chain
+            let mut current_ord = cand.parent.raw_ordinal;
+            let mut rem = remainder;
+            let mut chain_ords: Vec<u64> = vec![current_ord];
+
+            const MAX_CHAIN: usize = 8;
+            let mut found = false;
+
+            for _ in 0..MAX_CHAIN {
+                if rem.is_empty() { found = true; break; }
+
+                let siblings = sib_table.contiguous_siblings(current_ord as u32);
+                let mut matched = false;
+
+                for next_ord in &siblings {
+                    let next_text = match get_term(*next_ord as u64) {
+                        Some(t) => t,
+                        None => continue,
+                    };
+
+                    if rem == next_text || (!is_last && rem.len() == next_text.len() && rem == next_text) {
+                        // Exact full token match
+                        chain_ords.push(*next_ord as u64);
+                        rem = "";
+                        found = true;
+                        matched = true;
+                        break;
+                    } else if rem.starts_with(&next_text) {
+                        // Full token consumed → continue chain
+                        chain_ords.push(*next_ord as u64);
+                        rem = &rem[next_text.len()..];
+                        current_ord = *next_ord as u64;
+                        matched = true;
+                        break;
+                    } else if is_last && next_text.starts_with(rem) {
+                        // Last token: remainder is prefix of next token → terminal
+                        chain_ords.push(*next_ord as u64);
+                        found = true;
+                        matched = true;
+                        break;
+                    }
+                }
+
+                if !matched || found { break; }
+            }
+
+            if found {
+                let span = chain_ords.len() as u32;
+
+                // Resolve chain: verify adjacency + byte continuity
+                let first_postings = raw_term_resolver(chain_ords[0]);
+                let mut active: Vec<(u32, u32, u32, u32, u32)> = Vec::new(); // (doc, next_pos, next_byte, byte_from, first_ti)
+                for p in &first_postings {
+                    let bf = p.byte_from + cand.parent.si as u32;
+                    active.push((p.doc_id, p.token_index + 1, p.byte_to, bf, p.token_index));
+                }
+
+                for &ord in &chain_ords[1..] {
+                    if active.is_empty() { break; }
+                    let postings = raw_term_resolver(ord);
+                    active.sort_by_key(|a| (a.0, a.1));
+                    let mut next_active: Vec<(u32, u32, u32, u32, u32)> = Vec::new();
+                    for p in &postings {
+                        let idx = active.partition_point(|a| (a.0, a.1) < (p.doc_id, p.token_index));
+                        let mut i = idx;
+                        while i < active.len() && active[i].0 == p.doc_id && active[i].1 == p.token_index {
+                            if p.byte_from == active[i].2 {
+                                next_active.push((p.doc_id, p.token_index + 1, p.byte_to, active[i].3, active[i].4));
+                            }
+                            i += 1;
+                        }
+                    }
+                    active = next_active;
+                }
+
+                for &(doc_id, _, byte_to, byte_from, first_ti) in &active {
+                    results.push(MultiTokenPosting {
+                        doc_id,
+                        token_index: first_ti,
+                        span,
+                        byte_from,
+                        byte_to,
+                    });
+                }
+            }
+        } else if is_last {
+            // No sibling table → fallback: prefix_walk for last token remainder
+            let right_walks = if use_si0 {
+                sfx_reader.prefix_walk_si0(remainder)
+            } else {
+                sfx_reader.prefix_walk(remainder)
+            };
+            for (_suffix, parents) in &right_walks {
+                for rp in parents {
+                    if use_si0 && rp.si != 0 { continue; }
+                    // Two-token chain: cand + rp
+                    let left_postings = raw_term_resolver(cand.parent.raw_ordinal);
+                    let right_postings = raw_term_resolver(rp.raw_ordinal);
+                    for lp in &left_postings {
+                        for rp_entry in &right_postings {
+                            if lp.doc_id == rp_entry.doc_id
+                                && lp.token_index + 1 == rp_entry.token_index
+                                && lp.byte_to == rp_entry.byte_from
+                            {
+                                results.push(MultiTokenPosting {
+                                    doc_id: lp.doc_id,
+                                    token_index: lp.token_index,
+                                    span: 2,
+                                    byte_from: lp.byte_from + cand.parent.si as u32,
+                                    byte_to: rp_entry.byte_from + remainder.len() as u32,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Deduplicate
+    results.sort_by(|a, b| a.doc_id.cmp(&b.doc_id).then(a.token_index.cmp(&b.token_index)));
+    results.dedup_by(|a, b| a.doc_id == b.doc_id && a.token_index == b.token_index);
+    results
+}
+
 /// Search for multi-token contains matches.
 ///
-/// Rules:
-/// - First token: .sfx lookup (any SI — can be a suffix of the doc token)
-/// - Middle tokens: .sfx lookup (SI=0 only — must be full tokens)
-/// - Last token: .sfx prefix walk (SI=0 only — can be a prefix of the doc token)
-/// - Between each pair of consecutive tokens: GapMap separator must match the query separator
+/// Each sub-token is resolved via falling_walk + sibling chain (covers both
+/// single-token and cross-token matches). Adjacency uses spans.
 ///
-/// `raw_ordinal_resolver` maps a raw_ordinal to its posting entries (doc_id, Ti, byte offsets).
-/// `sfx_reader` provides suffix FST access + GapMap.
+/// `raw_ordinal_resolver` maps a raw_ordinal to its posting entries.
+/// `sfx_reader` provides suffix FST access + GapMap + sibling table.
 pub fn suffix_contains_multi_token<F>(
     sfx_reader: &SfxFileReader<'_>,
     query_tokens: &[&str],
@@ -508,7 +729,7 @@ pub fn suffix_contains_multi_token<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, raw_ordinal_resolver, 0, false)
+    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, &raw_ordinal_resolver, 0, false, None)
 }
 
 /// Multi-token prefix search (startsWith). All tokens must be SI=0.
@@ -521,7 +742,7 @@ pub fn suffix_contains_multi_token_prefix<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, raw_ordinal_resolver, 0, true)
+    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, &raw_ordinal_resolver, 0, true, None)
 }
 
 /// Multi-token contains search with optional fuzzy distance.
@@ -535,7 +756,7 @@ pub fn suffix_contains_multi_token_fuzzy<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, raw_ordinal_resolver, fuzzy_distance, false)
+    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, &raw_ordinal_resolver, fuzzy_distance, false, None)
 }
 
 /// Multi-token fuzzy prefix search.
@@ -549,16 +770,33 @@ pub fn suffix_contains_multi_token_fuzzy_prefix<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, raw_ordinal_resolver, fuzzy_distance, true)
+    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, &raw_ordinal_resolver, fuzzy_distance, true, None)
 }
 
-fn suffix_contains_multi_token_impl<F>(
+/// Multi-token search with ord_to_term for sibling-link cross-token on sub-tokens.
+pub fn suffix_contains_multi_token_impl_pub<F>(
     sfx_reader: &SfxFileReader<'_>,
     query_tokens: &[&str],
     query_separators: &[&str],
     raw_ordinal_resolver: F,
     fuzzy_distance: u8,
     prefix_only: bool,
+    ord_to_term: Option<&dyn Fn(u64) -> Option<String>>,
+) -> Vec<SuffixContainsMultiMatch>
+where
+    F: Fn(u64) -> Vec<RawPostingEntry>,
+{
+    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, &raw_ordinal_resolver, fuzzy_distance, prefix_only, ord_to_term)
+}
+
+fn suffix_contains_multi_token_impl<F>(
+    sfx_reader: &SfxFileReader<'_>,
+    query_tokens: &[&str],
+    query_separators: &[&str],
+    raw_ordinal_resolver: &F,
+    fuzzy_distance: u8,
+    prefix_only: bool,
+    ord_to_term: Option<&dyn Fn(u64) -> Option<String>>,
 ) -> Vec<SuffixContainsMultiMatch>
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
@@ -589,128 +827,61 @@ where
         "separators must be one less than tokens"
     );
 
-    // Step 1: Walk ALL tokens — collect ordinals only (cheap, no posting resolution).
-    //
-    // - First token (i=0): any SI (can be a suffix of the doc token)
-    // - Middle tokens: SI=0 only (must match full doc tokens)
-    // - Last token: prefix walk with SI=0 (can be a prefix of the doc token)
-
     let n = query_tokens.len();
 
-    // Walk results: Vec of (suffix_term, Vec<ParentEntry>) per query token.
-    let mut per_token_walks: Vec<Vec<(String, Vec<ParentEntry>)>> = Vec::with_capacity(n);
+    // Step 1: Resolve ALL sub-tokens via falling_walk + sibling chain.
+    // Each sub-token produces MultiTokenPostings with spans.
+    // This covers both single-token matches (span=1) and cross-token chains (span=N).
+
+    let mut per_token_postings: Vec<Vec<MultiTokenPosting>> = Vec::with_capacity(n);
 
     for (i, &token) in query_tokens.iter().enumerate() {
-        let query_lower = token.to_lowercase();
         let is_first = i == 0;
         let is_last = i == n - 1;
-        // First token: any SI (can be substring). Others: SI=0 only (full token).
-        // In prefix_only (startsWith): all SI=0.
-        let use_si0 = prefix_only || !is_first;
 
-        // Last token: prefix_walk (can be a prefix of indexed token).
-        // Others: resolve_suffix (exact match).
-        let walk_results: Vec<(String, Vec<ParentEntry>)> = if is_last {
-            if fuzzy_distance > 0 {
-                if use_si0 { sfx_reader.fuzzy_walk_si0(&query_lower, fuzzy_distance) }
-                else { sfx_reader.fuzzy_walk(&query_lower, fuzzy_distance) }
-            } else {
-                if use_si0 { sfx_reader.prefix_walk_si0(&query_lower) }
-                else { sfx_reader.prefix_walk(&query_lower) }
-            }
-        } else {
-            if fuzzy_distance > 0 {
-                if use_si0 { sfx_reader.fuzzy_walk_si0(&query_lower, fuzzy_distance) }
-                else { sfx_reader.fuzzy_walk(&query_lower, fuzzy_distance) }
-            } else {
-                let resolved = if use_si0 {
-                    sfx_reader.resolve_suffix_si0(&query_lower)
-                } else {
-                    sfx_reader.resolve_suffix(&query_lower)
-                };
-                resolved.into_iter()
-                    .map(|p| (query_lower.clone(), vec![p]))
-                    .collect()
-            }
-        };
-
-        if walk_results.is_empty() {
-            return Vec::new(); // No ordinals → no match possible
-        }
-
-        per_token_walks.push(walk_results);
-    }
-
-    // Step 2: Pick pivot = token with fewest total ordinals (most selective).
-    // Count parent entries per token as a proxy for posting list size.
-
-    let pivot_idx = per_token_walks
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, walks)| walks.iter().map(|(_, parents)| parents.len()).sum::<usize>())
-        .map(|(i, _)| i)
-        .unwrap_or(0);
-
-    // Step 3: Resolve pivot's postings fully → extract doc_ids for filtering.
-
-    let mut pivot_postings: Vec<RawPostingEntry> = Vec::new();
-    for (_suffix_term, parents) in &per_token_walks[pivot_idx] {
-        for parent in parents {
-            let entries = raw_ordinal_resolver(parent.raw_ordinal);
-            for entry in entries {
-                pivot_postings.push(entry);
-            }
-        }
-    }
-
-    if pivot_postings.is_empty() {
-        return Vec::new();
-    }
-
-    let pivot_doc_ids: std::collections::HashSet<u32> = pivot_postings.iter()
-        .map(|e| e.doc_id)
-        .collect();
-
-    pivot_postings.sort_by(|a, b| a.doc_id.cmp(&b.doc_id).then(a.token_index.cmp(&b.token_index)));
-
-    // Step 4: Resolve other tokens' postings, filtered by pivot_doc_ids.
-    // Only keep entries whose doc_id appears in the pivot — massively reduces memory.
-
-    let mut per_token_postings: Vec<Vec<RawPostingEntry>> = Vec::with_capacity(n);
-
-    for i in 0..n {
-        if i == pivot_idx {
-            per_token_postings.push(pivot_postings.clone());
-            continue;
-        }
-
-        let mut postings: Vec<RawPostingEntry> = Vec::new();
-        for (_suffix_term, parents) in &per_token_walks[i] {
-            for parent in parents {
-                let entries = raw_ordinal_resolver(parent.raw_ordinal);
-                for entry in entries {
-                    if pivot_doc_ids.contains(&entry.doc_id) {
-                        postings.push(entry);
-                    }
-                }
-            }
-        }
+        let postings = cross_token_resolve_for_multi(
+            sfx_reader, token, raw_ordinal_resolver, ord_to_term,
+            is_first, is_last, prefix_only,
+        );
 
         if postings.is_empty() {
-            return Vec::new(); // No intersection possible
+            return Vec::new();
         }
 
-        postings.sort_by(|a, b| a.doc_id.cmp(&b.doc_id).then(a.token_index.cmp(&b.token_index)));
         per_token_postings.push(postings);
     }
 
-    // Drop walk results — no longer needed.
-    drop(per_token_walks);
+    // Step 2: Pick pivot = sub-token with fewest postings (most selective).
+    let pivot_idx = per_token_postings
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, p)| p.len())
+        .map(|(i, _)| i)
+        .unwrap_or(0);
 
-    // Step 3: Find chains of consecutive token positions across docs
+    let pivot_doc_ids: std::collections::HashSet<u32> = per_token_postings[pivot_idx]
+        .iter()
+        .map(|e| e.doc_id)
+        .collect();
+
+    // Filter non-pivot postings by pivot doc_ids
+    for i in 0..n {
+        if i == pivot_idx { continue; }
+        per_token_postings[i].retain(|e| pivot_doc_ids.contains(&e.doc_id));
+        if per_token_postings[i].is_empty() {
+            return Vec::new();
+        }
+    }
+
+    // Sort all by (doc_id, token_index) for binary search
+    for postings in &mut per_token_postings {
+        postings.sort_by_key(|e| (e.doc_id, e.token_index));
+    }
+
+    // Step 3: Find chains of consecutive positions with spans.
     //
-    // For each pivot posting, extend in both directions (backward + forward)
-    // to build a full chain, then validate separators via GapMap.
+    // For each pivot posting, compute cumulative offsets using spans,
+    // then verify that each sub-token has a posting at the expected position.
 
     let mut matches: Vec<SuffixContainsMultiMatch> = Vec::new();
     let gapmap = sfx_reader.gapmap();
@@ -719,40 +890,63 @@ where
         let doc_id = pivot_entry.doc_id;
         let pivot_ti = pivot_entry.token_index;
 
-        // Build chain: strict position matching (1:1 query token → index position).
-        if (pivot_idx as u32) > pivot_ti {
-            continue;
-        }
-        let first_ti = pivot_ti - pivot_idx as u32;
+        // We need to find first_ti such that the cumulative span from token 0
+        // to pivot_idx lands on pivot_ti.
+        // Try: assume all tokens before pivot have span from their posting.
+        // We search backward from pivot to find first_ti.
 
-        let mut chain: Vec<Option<RawPostingEntry>> = vec![None; n];
+        // Collect chain: for each sub-token, find a posting at the expected position.
+        // Start from pivot and extend in both directions.
+        let mut chain: Vec<Option<MultiTokenPosting>> = vec![None; n];
         chain[pivot_idx] = Some(pivot_entry.clone());
         let mut valid = true;
 
-        for step in 0..n {
-            if step == pivot_idx { continue; }
-            let expected_ti = first_ti + step as u32;
-            let found = per_token_postings[step]
-                .binary_search_by(|e| e.doc_id.cmp(&doc_id).then(e.token_index.cmp(&expected_ti)));
+        // Backward: find postings for tokens before pivot
+        let mut expected_ti = pivot_ti;
+        for step in (0..pivot_idx).rev() {
+            // The token at `step` must end at expected_ti (its span reaches expected_ti)
+            // So we look for a posting where token_index + span == expected_ti
+            let found = per_token_postings[step].iter().find(|e| {
+                e.doc_id == doc_id && e.token_index + e.span == expected_ti
+            });
             match found {
-                Ok(idx) => { chain[step] = Some(per_token_postings[step][idx].clone()); }
-                Err(_) => { valid = false; break; }
+                Some(entry) => {
+                    expected_ti = entry.token_index;
+                    chain[step] = Some(entry.clone());
+                }
+                None => { valid = false; break; }
             }
         }
 
-        if !valid {
-            continue;
+        if !valid { continue; }
+
+        // Forward: find postings for tokens after pivot
+        expected_ti = pivot_ti + pivot_entry.span;
+        for step in (pivot_idx + 1)..n {
+            let found = per_token_postings[step].iter().find(|e| {
+                e.doc_id == doc_id && e.token_index == expected_ti
+            });
+            match found {
+                Some(entry) => {
+                    expected_ti = entry.token_index + entry.span;
+                    chain[step] = Some(entry.clone());
+                }
+                None => { valid = false; break; }
+            }
         }
 
-        // Step 4: Validate separators via GapMap (skip if all separators are empty —
-        // this happens when the query was split by CamelCaseSplit with no whitespace,
-        // e.g. "rag3weaver" → ["rag3", "weaver"] with separator "").
+        if !valid { continue; }
+
+        // Validate separators via GapMap
         let all_seps_empty = query_separators.iter().all(|s| s.is_empty());
         if !all_seps_empty {
             let mut seps_valid = true;
             for sep_idx in 0..query_separators.len() {
-                let ti_a = first_ti + sep_idx as u32;
-                let ti_b = ti_a + 1;
+                let left = chain[sep_idx].as_ref().unwrap();
+                let right = chain[sep_idx + 1].as_ref().unwrap();
+                // Separator is between the LAST position of left and FIRST position of right
+                let ti_a = left.token_index + left.span - 1;
+                let ti_b = right.token_index;
                 let expected_sep = query_separators[sep_idx].as_bytes();
 
                 match gapmap.read_separator(doc_id, ti_a, ti_b) {
@@ -762,58 +956,28 @@ where
                             break;
                         }
                     }
-                    None => {
-                        seps_valid = false;
-                        break;
-                    }
+                    None => { seps_valid = false; break; }
                 }
             }
-
-            if !seps_valid {
-                continue;
-            }
+            if !seps_valid { continue; }
         }
 
-        // Build the multi-match result
-        let chain: Vec<RawPostingEntry> = chain.into_iter().map(|c| c.unwrap()).collect();
+        // Build result
+        let chain: Vec<MultiTokenPosting> = chain.into_iter().map(|c| c.unwrap()).collect();
         let first = &chain[0];
-        let last = &chain[chain.len() - 1];
-
-        // byte_from: first token's byte_from (adjusted by SI if substring match).
-        // The first query token may match as a suffix of a longer indexed token.
-        // We need the SI that, when added to byte_from, gives the correct highlight start.
-        //
-        // Strategy: resolve all parents for the first query token, find the one whose
-        // ordinal produces a posting at (doc_id, first_ti), and use that parent's SI.
-        let first_query_lower = query_tokens[0].to_lowercase();
-        let first_walk = if prefix_only {
-            sfx_reader.resolve_suffix_si0(&first_query_lower)
-        } else {
-            sfx_reader.resolve_suffix(&first_query_lower)
-        };
-        let mut first_si: u16 = 0;
-        'outer: for parent in &first_walk {
-            let entries = raw_ordinal_resolver(parent.raw_ordinal);
-            for e in &entries {
-                if e.doc_id == doc_id && e.token_index == first_ti {
-                    first_si = parent.si;
-                    break 'outer;
-                }
-            }
-        }
-
-        let byte_from = first.byte_from as usize + first_si as usize;
+        let last = &chain[n - 1];
+        let byte_from = first.byte_from as usize;
         let last_query_token = query_tokens[n - 1].to_lowercase();
         let byte_to = last.byte_from as usize + last_query_token.len();
 
-        let token_matches = chain.iter().enumerate().map(|(i, entry)| {
+        let token_matches = chain.iter().map(|entry| {
             SuffixContainsMatch {
                 doc_id: entry.doc_id,
                 token_index: entry.token_index,
                 byte_from: entry.byte_from as usize,
                 byte_to: entry.byte_to as usize,
                 parent_term: String::new(),
-                si: if i == 0 { first_si } else { 0 },
+                si: 0,
             }
         }).collect();
 

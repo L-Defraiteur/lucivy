@@ -336,17 +336,10 @@ where
         } else {
             empty_seps.iter().map(|s| s.as_str()).collect()
         };
-        let matches = if fuzzy_distance == 0 {
-            if prefix_only {
-                suffix_contains::suffix_contains_multi_token_prefix(sfx_reader, &token_refs, &sep_refs, resolver)
-            } else {
-                suffix_contains::suffix_contains_multi_token(sfx_reader, &token_refs, &sep_refs, resolver)
-            }
-        } else if prefix_only {
-            suffix_contains::suffix_contains_multi_token_fuzzy_prefix(sfx_reader, &token_refs, &sep_refs, resolver, fuzzy_distance)
-        } else {
-            suffix_contains::suffix_contains_multi_token_fuzzy(sfx_reader, &token_refs, &sep_refs, resolver, fuzzy_distance)
-        };
+        let matches = suffix_contains::suffix_contains_multi_token_impl_pub(
+            sfx_reader, &token_refs, &sep_refs, resolver,
+            fuzzy_distance, prefix_only, ord_to_term,
+        );
         let hl: Vec<(DocId, usize, usize)> = matches.iter()
             .map(|m| (m.doc_id, m.byte_from, m.byte_to)).collect();
         let ids: Vec<DocId> = matches.iter().map(|m| m.doc_id).collect();
