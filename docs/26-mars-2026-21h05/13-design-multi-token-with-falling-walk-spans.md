@@ -1,6 +1,6 @@
-# Doc 13 — Design : multi-token avec falling_walk + spans
+# Doc 13 — Design : multi-token via falling_walk + sibling links + spans
 
-Date : 27 mars 2026
+Date : 27 mars 2026 (v2)
 Branche : `feature/cross-token-search`
 
 ## Problème (rappel doc 12)
@@ -9,197 +9,127 @@ Branche : `feature/cross-token-search`
 `resolve_suffix`/`prefix_walk` pour chaque sous-token. "planinsertclau"
 n'est pas un token indexé unique → échec → abandon.
 
-## Solution : falling_walk + sibling chain pour chaque sous-token
+## Insight clé
 
-### Principe
+Le falling_walk + sibling chain walk est un **superset** du walk normal :
+- Si "planinsert" est un token indexé unique → falling_walk le trouve comme
+  un candidat terminal (prefix_len == remainder.len(), span=1)
+- Si "planinsert" = "plan" + "insert" → sibling links trouvent la chaîne (span=2)
 
-Dans `suffix_contains_multi_token_impl`, step 1 (walk des tokens),
-chaque sous-token est résolu via :
+Pas besoin de deux paths (walk normal + fallback). Un seul algo via
+falling_walk couvre tout. Pas de fallback, pas d'union, pas de résultats perdus.
 
-1. D'abord le walk normal (resolve_suffix / prefix_walk) — rapide, O(1)
-2. Si ça échoue, **falling_walk + sibling chain walk** sur ce sous-token
-3. Le résultat est un ensemble de postings + un **span** (nombre de positions
-   indexées que ce sous-token consomme)
+## Design
 
-### Span
+### Step 1 : falling_walk + sibling chain pour chaque sous-token
 
-Un sous-token normal occupe 1 position indexée :
-- "void" → 1 token indexé → span = 1
+Pour chaque sous-token du multi-token, on appelle `cross_token_search_for_multi()`.
+Cette fonction :
+1. Fait le falling_walk sur le sous-token
+2. Suit les sibling links pour les chaînes
+3. Résout les postings des chaînes valides
+4. Retourne des `MultiTokenPosting` avec span
 
-Un sous-token cross-token occupe N positions :
-- "planinsertclau" → "plan" + "insert" + "clau..." = 3 tokens → span = 3
-
-Le span est nécessaire pour l'adjacency check.
-
-### Adjacency avec spans
-
-Actuellement :
 ```rust
-let expected_ti = first_ti + step as u32;
-```
-Assume span = 1 pour chaque sous-token.
-
-Avec spans :
-```rust
-// spans[i] = nombre de positions indexées du sous-token i
-// cumulative_offset[i] = sum(spans[0..i])
-let mut cumulative = vec![0u32; n];
-for i in 1..n {
-    cumulative[i] = cumulative[i-1] + spans[i-1];
+struct MultiTokenPosting {
+    doc_id: u32,
+    token_index: u32,  // position du PREMIER token de la chaîne
+    span: u32,         // nombre de positions occupées (1 = single token, N = chaîne)
+    byte_from: u32,
+    byte_to: u32,
 }
-
-// Dans l'adjacency check :
-let expected_ti = first_ti + cumulative[step];
 ```
 
-Exemple : ["void"(span=1), "planner"(span=1), "planinsertclau"(span=3)]
-- cumulative = [0, 1, 2]
-- void → position first_ti + 0
-- planner → position first_ti + 1
-- planinsertclau → positions first_ti + 2, first_ti + 3, first_ti + 4
+### Step 2 : pivot selection
 
-### Postings pour un sous-token cross-token
+Le pivot est le sous-token avec le moins de postings (comme avant).
+Les postings cross-token sont déjà résolues → on compte directement.
 
-Le falling_walk + sibling chain walk produit des chaînes d'ordinals.
-Pour chaque chaîne validée (byte continuity), on obtient :
-- doc_id
-- token_index du PREMIER token de la chaîne
-- byte_from du premier token
-- byte_to du dernier token
-- span = nombre de tokens dans la chaîne
+### Step 3 : adjacency avec spans
 
-Ces postings sont stockés dans `per_token_postings[i]` avec :
-- `token_index` = position du premier token (pour l'adjacency avec le précédent)
-- L'adjacency avec le suivant utilise `token_index + span` au lieu de `token_index + 1`
+Chaque posting a son propre span. L'adjacency vérifie :
 
-### Séparateur validation
+```
+posting[i].token_index + posting[i].span == posting[i+1].token_index
+```
 
-Pour les séparateurs entre sous-tokens, on vérifie le gap entre :
-- Le DERNIER token du sous-token i (position = first_ti + cumulative[i] + spans[i] - 1)
-- Le PREMIER token du sous-token i+1 (position = first_ti + cumulative[i+1])
+Au lieu de l'ancien :
+```
+posting[i].token_index + 1 == posting[i+1].token_index
+```
+
+C'est la seule modification dans l'adjacency check. Le span=1 pour les
+tokens normaux donne exactement le même comportement qu'avant.
+
+### Step 4 : séparateur validation
+
+Le séparateur entre sous-token i et i+1 se vérifie entre :
+- La DERNIÈRE position du sous-token i : `posting[i].token_index + posting[i].span - 1`
+- La PREMIÈRE position du sous-token i+1 : `posting[i+1].token_index`
 
 Le GapMap donne le séparateur exact entre ces deux positions.
 
-### Implémentation step by step
+## Exemple
 
-#### 1. Ajouter `spans: Vec<u32>` au pipeline
+Query : "void Planner planInsertClau"
+Sous-tokens : ["void", "planner", "planinsertclau"]
 
-```rust
-let mut per_token_walks: Vec<Vec<(String, Vec<ParentEntry>)>> = Vec::with_capacity(n);
-let mut spans: Vec<u32> = Vec::with_capacity(n);
+### Step 1 résultats
+
+| Sous-token | Résultat | Span |
+|------------|----------|------|
+| "void" | falling_walk → "void" direct, terminal | 1 |
+| "planner" | falling_walk → "planner" direct, terminal | 1 |
+| "planinsertclau" | falling_walk → "plan" (split), sibling → "insert", sibling → "clau..." (terminal) | 3 |
+
+### Step 3 adjacency
+
+```
+doc X: void(pos=5), planner(pos=6), plan(pos=7), insert(pos=8), clause(pos=9)
+
+void posting:     token_index=5, span=1
+planner posting:  token_index=6, span=1
+planinsertclau:   token_index=7, span=3
+
+Check: 5 + 1 == 6 ✓ (void → planner)
+Check: 6 + 1 == 7 ✓ (planner → planinsertclau)
+→ MATCH!
 ```
 
-#### 2. Pour chaque sous-token : walk normal, fallback cross-token
+## Fonction `cross_token_resolve_for_multi`
+
+Nouvelle fonction qui remplace le walk normal dans le multi-token pipeline.
+Retourne `Vec<MultiTokenPosting>` pour un sous-token donné.
 
 ```rust
-for (i, &token) in query_tokens.iter().enumerate() {
-    let query_lower = token.to_lowercase();
-
-    // Walk normal (comme avant)
-    let walk_results = /* resolve_suffix ou prefix_walk */;
-
-    if !walk_results.is_empty() {
-        per_token_walks.push(walk_results);
-        spans.push(1);
-        continue;
-    }
-
-    // Fallback: cross-token via falling_walk + sibling links
-    let (ct_walks, ct_span) = cross_token_walk_for_multi(
-        sfx_reader, &query_lower, ord_to_term,
-    );
-
-    if ct_walks.is_empty() {
-        return Vec::new(); // Vraiment aucun match
-    }
-
-    per_token_walks.push(ct_walks);
-    spans.push(ct_span);
-}
+fn cross_token_resolve_for_multi(
+    sfx_reader: &SfxFileReader,
+    sub_token: &str,
+    raw_term_resolver: &F,
+    ord_to_term: Option<&dyn Fn(u64) -> Option<String>>,
+    is_first: bool,   // any SI pour le premier, SI=0 pour les autres
+    is_last: bool,    // prefix match pour le dernier, exact pour les autres
+) -> Vec<MultiTokenPosting>
 ```
 
-#### 3. `cross_token_walk_for_multi` — nouvelle fonction
+Pour chaque candidat du falling_walk :
+1. Si le remainder est vide ou matche un token SI=0 en prefix → span=1, terminal
+2. Sinon, sibling chain walk → span=N, chaîne complète
+3. Résoudre les postings de la chaîne, vérifier byte continuity
 
-Fait le falling_walk + sibling chain walk et retourne des résultats
-au format `Vec<(String, Vec<ParentEntry>)>` compatible avec le multi-token.
+## Impact sur le code existant
 
-Pour chaque chaîne valide, crée un "virtual ParentEntry" dont le raw_ordinal
-est le premier ordinal de la chaîne. Les postings résolues ultérieurement
-via le raw_ordinal_resolver donneront les postings du premier token.
+| Fichier | Changement |
+|---------|-----------|
+| `suffix_contains.rs` | Ajouter `MultiTokenPosting`, `cross_token_resolve_for_multi()` |
+| `suffix_contains.rs` | Modifier `suffix_contains_multi_token_impl` step 1 : utiliser falling_walk |
+| `suffix_contains.rs` | Modifier adjacency check : `token_index + span` au lieu de `+ 1` |
+| `suffix_contains.rs` | Modifier séparateur check : positions ajustées par span |
+| `suffix_contains_query.rs` | Passer `ord_to_term` au multi-token path |
 
-Le span est retourné pour l'adjacency.
+## Ce qui ne change PAS
 
-**Problème** : le resolver ne sait pas que c'est un virtual ordinal.
-Il va résoudre les postings du premier token seulement, pas de la chaîne.
-
-**Solution** : pré-résoudre les chaînes cross-token et injecter les résultats
-directement dans `per_token_postings` (step 4) au lieu de passer par
-`per_token_walks` + resolver.
-
-#### 4. Modifier step 4 (resolve) pour les cross-token sub-tokens
-
-```rust
-for i in 0..n {
-    if i == pivot_idx {
-        per_token_postings.push(pivot_postings.clone());
-        continue;
-    }
-
-    if is_cross_token[i] {
-        // Déjà résolu — injecter directement
-        per_token_postings.push(pre_resolved_ct_postings[i].clone());
-        continue;
-    }
-
-    // Normal resolve via raw_ordinal_resolver (comme avant)
-    ...
-}
-```
-
-#### 5. Modifier l'adjacency (step 5) pour utiliser les spans
-
-```rust
-let mut cumulative = vec![0u32; n];
-for i in 1..n {
-    cumulative[i] = cumulative[i-1] + spans[i-1];
-}
-
-// Dans le chain building :
-let expected_ti = first_ti + cumulative[step];
-
-// Pour le séparateur entre step i et step i+1 :
-let ti_a = first_ti + cumulative[i] + spans[i] - 1; // dernière position du sous-token i
-let ti_b = first_ti + cumulative[i + 1];             // première position du sous-token i+1
-```
-
-### Pivot avec cross-token sub-tokens
-
-Le pivot choisit le sous-token le plus sélectif. Un sous-token cross-token
-a déjà ses postings pré-résolues (pas de walk_results avec ParentEntry).
-On peut compter directement le nombre de postings pour le pivot selection.
-
-```rust
-let pivot_idx = (0..n).min_by_key(|&i| {
-    if is_cross_token[i] {
-        pre_resolved_ct_postings[i].len()
-    } else {
-        per_token_walks[i].iter().map(|(_, p)| p.len()).sum::<usize>()
-    }
-}).unwrap_or(0);
-```
-
-### Complexité
-
-- Walk normal : O(1) par sous-token (comme avant)
-- Cross-token fallback : O(falling_walk) + O(sibling chain) = O(L + splits)
-- Adjacency : O(N) avec spans cumulés
-- Total : dominé par le resolve de postings (comme avant)
-
-### Cas couverts
-
-| Query | Sous-tokens | Spans |
-|-------|------------|-------|
-| "void Planner planInsertClau" | [void, planner, planinsertclau] | [1, 1, 3] |
-| "rag3weaver" | [rag3weaver] (single, cross-token) | N/A (single token path) |
-| "import getElementById" | [import, getelementbyid] | [1, 4] |
-| "class Foo extends Bar" | [class, foo, extends, bar] | [1, 1, 1, 1] |
+- Le pivot selection (même logique, comptage de postings)
+- Le GapMap (toujours utilisé pour strict separators)
+- Le single-token path (inchangé, pas de multi-token)
+- Les sibling links (inchangés, déjà en place)
