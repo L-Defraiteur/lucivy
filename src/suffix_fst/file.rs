@@ -454,47 +454,44 @@ impl<'a> SfxFileReader<'a> {
             let Some(idx) = root.find_input(partition) else { continue };
             let trans = root.transition(idx);
 
-            // DFS stack: (fst_node, fst_output, lev_dfa_state)
+            // DFS stack: (fst_addr, fst_output, lev_dfa_state, fst_depth)
+            // fst_depth = number of bytes walked in the FST after the partition byte.
+            // The split point in the query is fst_depth (where the token boundary is),
+            // not max_prefix_len (which tracks query consumption and can differ due to edits).
+            type StackEntry = (lucivy_fst::raw::CompiledAddr, lucivy_fst::raw::Output, Option<usize>, usize);
+
             let initial_output = lucivy_fst::raw::Output::zero().cat(trans.out);
-            let initial_lev_state = {
-                // The partition byte is not part of the query — skip it in the DFA.
-                // We start the DFA fresh after consuming the partition prefix.
+            let initial_lev_state = lev.start();
 
-                lev.start()
-            };
+            let mut stack: Vec<StackEntry> = Vec::new();
+            stack.push((trans.addr, initial_output, initial_lev_state, 0));
 
-            let mut stack: Vec<(lucivy_fst::raw::CompiledAddr, lucivy_fst::raw::Output, Option<usize>)> = Vec::new();
-            stack.push((trans.addr, initial_output, initial_lev_state));
-
-            while let Some((addr, output, lev_state)) = stack.pop() {
+            while let Some((addr, output, lev_state, fst_depth)) = stack.pop() {
                 let node = fst.node(addr);
 
-                // Check: final FST node + DFA has matched a prefix?
-                if node.is_final() {
-                    let prefix_len = lev.max_prefix_len(&lev_state);
-                    if prefix_len > 0 {
-                        let val = output.cat(node.final_output()).value();
-                        let parents = self.decode_parents(val);
-                        for parent in parents {
-                            if parent.si as usize + prefix_len == parent.token_len as usize {
-                                candidates.push(SplitCandidate {
-                                    prefix_len,
-                                    parent,
-                                });
-                            }
+                // Check: final FST node = complete suffix key.
+                // Use fst_depth as the split point (= suffix length consumed).
+                if node.is_final() && fst_depth > 0 {
+                    let val = output.cat(node.final_output()).value();
+                    let parents = self.decode_parents(val);
+                    for parent in parents {
+                        if parent.si as usize + fst_depth == parent.token_len as usize {
+                            candidates.push(SplitCandidate {
+                                prefix_len: fst_depth,
+                                parent,
+                            });
                         }
                     }
                 }
 
                 // Pruning: can the DFA still match?
-
                 if !lev.can_match(&lev_state) { continue; }
 
                 // Explore all FST transitions
                 for t in node.transitions() {
                     let next_lev = lev.accept(&lev_state, t.inp);
                     let next_output = output.cat(t.out);
-                    stack.push((t.addr, next_output, next_lev));
+                    stack.push((t.addr, next_output, next_lev, fst_depth + 1));
                 }
             }
         }
@@ -847,5 +844,22 @@ mod tests {
         // "zzzzz" doesn't match any suffix
         let candidates = reader.falling_walk("zzzzz");
         assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_fuzzy_falling_walk_single_token() {
+        // build_test_sfx has tokens: import(0), rag3db(1), from(2), core(3)
+        // "rag3db" is 6 chars. Query "rag3cb" d=1 should find "rag3db".
+        let bytes = build_test_sfx();
+        let reader = SfxFileReader::open(&bytes).unwrap();
+
+        let candidates = reader.fuzzy_falling_walk("rag3cb", 1);
+        eprintln!("rag3cb d=1 candidates: {:?}", candidates.iter()
+            .map(|c| (c.prefix_len, c.parent.si, c.parent.token_len, c.parent.raw_ordinal))
+            .collect::<Vec<_>>());
+
+        // Should find rag3db (ordinal=1, si=0, token_len=6) at fst_depth=6
+        let found = candidates.iter().find(|c| c.parent.token_len == 6 && c.parent.si == 0);
+        assert!(found.is_some(), "should find 'rag3db' via fuzzy d=1 for 'rag3cb'");
     }
 }

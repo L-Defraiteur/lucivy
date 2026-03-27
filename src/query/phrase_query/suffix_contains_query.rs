@@ -320,7 +320,9 @@ where
         } else if prefix_only {
             suffix_contains::suffix_contains_single_token_fuzzy_prefix(sfx_reader, query, fuzzy_distance, resolver)
         } else {
-            suffix_contains::suffix_contains_single_token_fuzzy(sfx_reader, query, fuzzy_distance, resolver)
+            // Fuzzy contains: cross_token_search_with_terms is a superset —
+            // fuzzy_falling_walk finds both single-token and cross-token matches.
+            suffix_contains::cross_token_search_with_terms(sfx_reader, query, resolver, fuzzy_distance, ord_to_term)
         };
         let hl: Vec<(DocId, usize, usize)> = matches.iter()
             .map(|m| (m.doc_id, m.byte_from, m.byte_to)).collect();

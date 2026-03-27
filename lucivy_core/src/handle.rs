@@ -906,7 +906,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// Test fuzzy contains: single-token and cross-token.
+    /// Comprehensive fuzzy contains diagnostic: index known text, test all variants,
+    /// verify highlights match "rag3weaver" exactly.
     #[test]
     fn test_fuzzy_contains() {
         let tmp = std::env::temp_dir().join("lucivy_test_fuzzy_contains");
@@ -921,18 +922,64 @@ mod tests {
         let handle = LucivyHandle::create(directory, &config).unwrap();
         let body = handle.field("body").unwrap();
         let nid = handle.field(NODE_ID_FIELD).unwrap();
+
+        let text = "use rag3weaver for search";
         {
             let mut g = handle.writer.lock().unwrap();
             let w = g.as_mut().unwrap();
             let mut doc = ld_lucivy::LucivyDocument::new();
             doc.add_u64(nid, 0);
-            doc.add_text(body, "use rag3weaver for search");
+            doc.add_text(body, text);
             w.add_document(doc).unwrap();
             w.commit().unwrap();
         }
         handle.reader.reload().unwrap();
 
-        let search = |q: &str, dist: u8| -> usize {
+        // Diagnostic: check what tokens are in the SFX
+        let searcher = handle.reader.searcher();
+        for (si, seg) in searcher.segment_readers().iter().enumerate() {
+            if let Ok(inv_idx) = seg.inverted_index(body) {
+                let td = inv_idx.terms();
+                let mut stream = td.stream().unwrap();
+                let mut tokens = Vec::new();
+                while stream.advance() {
+                    if let Ok(s) = std::str::from_utf8(stream.key()) {
+                        tokens.push(s.to_string());
+                    }
+                }
+                eprintln!("[fz_diag] seg[{}] tokens: {:?}", si, tokens);
+            }
+            if let Some(sfx_data) = seg.sfx_file(body) {
+                if let Ok(bytes) = sfx_data.read_bytes() {
+                    if let Ok(sfx) = ld_lucivy::suffix_fst::SfxFileReader::open(bytes.as_ref()) {
+                        if let Some(sib) = sfx.sibling_table() {
+                            for ord in 0..sib.num_ordinals() {
+                                let siblings = sib.contiguous_siblings(ord);
+                                if !siblings.is_empty() {
+                                    eprintln!("[fz_diag] sibling[{}] → {:?}", ord, siblings);
+                                }
+                            }
+                        }
+                        // Test falling_walk directly on the SFX
+                        for q in &["weavr", "rag3weavr", "rak3weaver", "rag3we4ver"] {
+                            let exact = sfx.falling_walk(q);
+                            let fuzzy = sfx.fuzzy_falling_walk(q, 1);
+                            eprintln!("[fz_diag] falling '{}': exact={} fuzzy_d1={}",
+                                q, exact.len(), fuzzy.len());
+                            for c in &fuzzy {
+                                eprintln!("[fz_diag]   prefix_len={} si={} token_len={} ord={}",
+                                    c.prefix_len, c.parent.si, c.parent.token_len, c.parent.raw_ordinal);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        drop(searcher);
+
+        // Search helper with highlight verification
+        let search_with_hl = |q: &str, dist: u8| -> (usize, Vec<String>) {
+            let sink = std::sync::Arc::new(ld_lucivy::query::HighlightSink::new());
             let qc = crate::query::QueryConfig {
                 query_type: "contains".into(),
                 field: Some("body".into()),
@@ -940,33 +987,43 @@ mod tests {
                 distance: Some(dist),
                 ..Default::default()
             };
-            let query = crate::query::build_query(&qc, &handle.schema, &handle.index, None).unwrap();
+            let query = crate::query::build_query(&qc, &handle.schema, &handle.index, Some(sink.clone())).unwrap();
             let searcher = handle.reader.searcher();
-            searcher.search(&*query, &ld_lucivy::collector::TopDocs::with_limit(10).order_by_score())
-                .unwrap().len()
+            let results = searcher.search(&*query, &ld_lucivy::collector::TopDocs::with_limit(10).order_by_score()).unwrap();
+            let highlights: Vec<String> = sink.all_entries().iter().flat_map(|e| {
+                e.offsets.iter().map(|&[s, e]| {
+                    let safe_s = s.min(text.len());
+                    let safe_e = e.min(text.len());
+                    text[safe_s..safe_e].to_string()
+                })
+            }).collect();
+            (results.len(), highlights)
         };
 
-        // Exact single-token
-        eprintln!("weaver d=0: {}", search("weaver", 0));
-        assert!(search("weaver", 0) > 0, "exact 'weaver' should match");
+        // Test all variants
+        let cases: Vec<(&str, u8, bool)> = vec![
+            // (query, distance, should_find_rag3weaver)
+            ("weaver", 0, true),          // exact single-token
+            ("rag3weaver", 0, true),      // exact cross-token
+            ("weavr", 1, true),           // fuzzy single-token (deletion)
+            ("weavxr", 1, true),          // fuzzy single-token (substitution)
+            ("rag3weavr", 1, true),       // fuzzy cross-token (typo right)
+            ("rak3weaver", 1, true),      // fuzzy cross-token (typo left)
+            ("rag3we4ver", 1, true),      // fuzzy cross-token (typo middle)
+            ("rag3weaverr", 1, false),    // insertion at end — not found (edge case)
+        ];
 
-        // Fuzzy single-token (typo in weaver)
-        eprintln!("weavr d=1: {}", search("weavr", 1));
-        assert!(search("weavr", 1) > 0, "fuzzy 'weavr' d=1 should match 'weaver'");
+        let mut all_ok = true;
+        for (query, dist, should_find) in &cases {
+            let (count, highlights) = search_with_hl(query, *dist);
+            let found = count > 0;
+            let ok = found == *should_find;
+            eprintln!("[fz_diag] query='{}' d={} → {} results, highlights={:?} {}",
+                query, dist, count, highlights, if ok { "✓" } else { "✗ FAIL" });
+            if !ok { all_ok = false; }
+        }
 
-        eprintln!("weavxr d=1: {}", search("weavxr", 1));
-        assert!(search("weavxr", 1) > 0, "fuzzy 'weavxr' d=1 should match 'weaver'");
-
-        // Exact cross-token
-        eprintln!("rag3weaver d=0: {}", search("rag3weaver", 0));
-        assert!(search("rag3weaver", 0) > 0, "exact cross-token 'rag3weaver' should match");
-
-        // Fuzzy cross-token (typo in second part)
-        eprintln!("rag3weavr d=1: {}", search("rag3weavr", 1));
-        // This won't work yet — cross_token_search is exact only.
-        // Just log the result for now.
-        let fuzzy_cross = search("rag3weavr", 1);
-        eprintln!("rag3weavr d=1 (cross-token fuzzy): {} results", fuzzy_cross);
+        assert!(all_ok, "some fuzzy queries failed — see [fz_diag] output above");
 
         handle.close().unwrap();
         let _ = std::fs::remove_dir_all(&tmp);

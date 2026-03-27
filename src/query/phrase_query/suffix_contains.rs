@@ -330,13 +330,8 @@ pub fn suffix_contains_single_token_fuzzy<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    let matches = suffix_contains_single_token_fuzzy_inner(sfx_reader, query, distance, &raw_term_resolver, false);
-    if !matches.is_empty() {
-        return matches;
-    }
-    // Fallback: cross-token search with fuzzy remainder matching.
-    // The falling walk finds exact split points (left reaches token end),
-    // then the remainder is matched with fuzzy_walk on the next token.
+    // Cross-token search is a superset: fuzzy_falling_walk finds both single-token
+    // matches (prefix_len == query.len, no sibling chain) and cross-token matches.
     cross_token_search(sfx_reader, query, &raw_term_resolver, distance)
 }
 
@@ -649,8 +644,14 @@ where
         }
     }
 
-    // falling_walk + sibling chain: find cross-token matches
-    let candidates = sfx_reader.falling_walk(&query_lower);
+    // falling_walk + sibling chain: find cross-token matches.
+    // Fuzzy falling_walk finds the first split despite typos in the left part.
+    // The sibling chain after handles the rest efficiently (O(1) per step).
+    let candidates = if fuzzy_distance > 0 {
+        sfx_reader.fuzzy_falling_walk(&query_lower, fuzzy_distance)
+    } else {
+        sfx_reader.falling_walk(&query_lower)
+    };
 
     for cand in &candidates {
         // Skip non-SI=0 candidates when required (middle/last tokens)
@@ -658,7 +659,9 @@ where
             continue;
         }
 
-        let remainder = &query_lower[cand.prefix_len..];
+        // In fuzzy mode, fst_depth (prefix_len) can exceed query length due to insertions.
+        let split_at = cand.prefix_len.min(query_lower.len());
+        let remainder = &query_lower[split_at..];
 
         if remainder.is_empty() {
             // Already handled above (exact match or prefix match)
@@ -782,105 +785,6 @@ where
                                     byte_to: rp_entry.byte_from + remainder.len() as u32,
                                 });
                             }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Fuzzy sibling-first: if no results yet and fuzzy, iterate tokens with siblings
-    if results.is_empty() && fuzzy_distance > 0 {
-        if let (Some(sib_table), Some(get_term)) = (sibling_table, &ord_to_term) {
-            let d = fuzzy_distance as usize;
-            for ord in 0..sib_table.num_ordinals() {
-                let siblings = sib_table.contiguous_siblings(ord);
-                if siblings.is_empty() { continue; }
-                let token_text = match get_term(ord as u64) {
-                    Some(t) => t,
-                    None => continue,
-                };
-                let tlen = token_text.len();
-
-                for split_len in tlen.saturating_sub(d)..=(tlen + d).min(query_lower.len()) {
-                    let query_prefix = &query_lower[..split_len];
-                    if !levenshtein_prefix_match(query_prefix, &token_text, fuzzy_distance) {
-                        continue;
-                    }
-                    let remainder = &query_lower[split_len..];
-                    if remainder.is_empty() { continue; }
-
-                    // Follow sibling chain
-                    let mut current_ord = ord as u64;
-                    let mut rem = remainder;
-                    let mut chain_ords: Vec<u64> = vec![current_ord];
-                    let mut found = false;
-                    const MAX_CHAIN: usize = 8;
-
-                    for _ in 0..MAX_CHAIN {
-                        if rem.is_empty() { found = true; break; }
-                        let sibs = sib_table.contiguous_siblings(current_ord as u32);
-                        let mut matched = false;
-                        for next_ord in &sibs {
-                            let next_text = match get_term(*next_ord as u64) {
-                                Some(t) => t,
-                                None => continue,
-                            };
-                            if rem == next_text {
-                                chain_ords.push(*next_ord as u64);
-                                rem = "";
-                                found = true;
-                                matched = true;
-                                break;
-                            } else if rem.starts_with(&next_text) {
-                                chain_ords.push(*next_ord as u64);
-                                rem = &rem[next_text.len()..];
-                                current_ord = *next_ord as u64;
-                                matched = true;
-                                break;
-                            } else if is_last && (next_text.starts_with(rem) || levenshtein_prefix_match(rem, &next_text, fuzzy_distance)) {
-                                chain_ords.push(*next_ord as u64);
-                                found = true;
-                                matched = true;
-                                break;
-                            }
-                        }
-                        if !matched || found { break; }
-                    }
-
-                    if found || rem.is_empty() {
-                        let span = chain_ords.len() as u32;
-                        // Resolve chain postings
-                        let first_postings = raw_term_resolver(chain_ords[0]);
-                        let mut active: Vec<(u32, u32, u32, u32, u32)> = Vec::new();
-                        for p in &first_postings {
-                            active.push((p.doc_id, p.token_index + 1, p.byte_to, p.byte_from, p.token_index));
-                        }
-                        for &co in &chain_ords[1..] {
-                            if active.is_empty() { break; }
-                            let postings = raw_term_resolver(co);
-                            active.sort_by_key(|a| (a.0, a.1));
-                            let mut next: Vec<(u32, u32, u32, u32, u32)> = Vec::new();
-                            for p in &postings {
-                                let idx = active.partition_point(|a| (a.0, a.1) < (p.doc_id, p.token_index));
-                                let mut i = idx;
-                                while i < active.len() && active[i].0 == p.doc_id && active[i].1 == p.token_index {
-                                    if p.byte_from == active[i].2 {
-                                        next.push((p.doc_id, p.token_index + 1, p.byte_to, active[i].3, active[i].4));
-                                    }
-                                    i += 1;
-                                }
-                            }
-                            active = next;
-                        }
-                        for &(doc_id, _, byte_to, byte_from, first_ti) in &active {
-                            results.push(MultiTokenPosting {
-                                doc_id,
-                                token_index: first_ti,
-                                span,
-                                byte_from,
-                                byte_to,
-                            });
                         }
                     }
                 }
@@ -1227,8 +1131,15 @@ where
     let query_lower = query.to_lowercase();
     let query_bytes = query_lower.as_bytes();
 
-    // Step 1: falling_walk → first-split candidates
-    let candidates = sfx_reader.falling_walk(&query_lower);
+    // Step 1: falling_walk → first-split candidates.
+    // Fuzzy falling_walk finds splits despite typos in the left part.
+    let candidates = if fuzzy_distance > 0 {
+        sfx_reader.fuzzy_falling_walk(&query_lower, fuzzy_distance)
+    } else {
+        sfx_reader.falling_walk(&query_lower)
+    };
+    eprintln!("[ct_wt] query='{}' d={} candidates={}", query_lower, fuzzy_distance, candidates.len());
+
     if candidates.is_empty() {
         return Vec::new();
     }
@@ -1248,8 +1159,15 @@ where
     let mut valid_chains: Vec<(usize, Vec<u64>)> = Vec::new(); // (cand_idx, ordinals)
 
     for (cand_idx, cand) in candidates.iter().enumerate() {
-        let remainder = &query_lower[cand.prefix_len..];
-        if remainder.is_empty() { continue; }
+        let split_at = cand.prefix_len.min(query_lower.len());
+        let remainder = &query_lower[split_at..];
+        eprintln!("[ct_wt]   cand[{}] prefix_len={} si={} token_len={} split_at={} rem='{}'",
+            cand_idx, cand.prefix_len, cand.parent.si, cand.parent.token_len, split_at, remainder);
+        if remainder.is_empty() {
+            // The entire query was consumed by this single token (possibly fuzzy).
+            valid_chains.push((cand_idx, vec![cand.parent.raw_ordinal]));
+            continue;
+        }
 
         if has_siblings {
             let sib_table = sibling_table.unwrap();
@@ -1323,81 +1241,8 @@ where
         }
     }
 
-    // Step 2b: Fuzzy sibling-first — find tokens whose text fuzzy-matches
-    // a prefix of the query, then follow sibling chain for the remainder.
-    // This handles typos in the LEFT part of a split (e.g., "rak3weaver" → "rag3").
-    // Cost: iterate tokens with siblings (~300) × levenshtein check (~100 ops) = ~30K ops.
-    if valid_chains.is_empty() && fuzzy_distance > 0 && has_siblings {
-        let sib_table = sibling_table.unwrap();
-        let get_term = ord_to_term.unwrap();
-        let d = fuzzy_distance as usize;
-
-        for ord in 0..sib_table.num_ordinals() {
-            let siblings = sib_table.contiguous_siblings(ord);
-            if siblings.is_empty() { continue; }
-
-            let token_text = match get_term(ord as u64) {
-                Some(t) => t,
-                None => continue,
-            };
-            let tlen = token_text.len();
-
-            // Check if the query starts with a fuzzy match of this token.
-            // The split point in the query can be tlen ± d (insertions/deletions).
-            for split_len in tlen.saturating_sub(d)..=(tlen + d).min(query_bytes.len()) {
-                let query_prefix = &query_lower[..split_len];
-                if levenshtein_prefix_match(query_prefix, &token_text, fuzzy_distance)
-                    && query_prefix.len() <= token_text.len() + d
-                {
-                    let remainder = &query_lower[split_len..];
-                    if remainder.is_empty() { continue; }
-
-                    // Follow sibling chain from this token
-                    let mut current_ord = ord as u64;
-                    let mut rem = remainder;
-                    let mut chain = vec![current_ord];
-                    let mut found = false;
-
-                    for _ in 0..MAX_CHAIN_DEPTH {
-                        if rem.is_empty() { found = true; break; }
-                        let sibs = sib_table.contiguous_siblings(current_ord as u32);
-                        let mut matched = false;
-                        for next_ord in &sibs {
-                            let next_text = match get_term(*next_ord as u64) {
-                                Some(t) => t,
-                                None => continue,
-                            };
-                            if rem == next_text {
-                                chain.push(*next_ord as u64);
-                                rem = "";
-                                found = true;
-                                matched = true;
-                                break;
-                            } else if rem.starts_with(&next_text) {
-                                chain.push(*next_ord as u64);
-                                rem = &rem[next_text.len()..];
-                                current_ord = *next_ord as u64;
-                                matched = true;
-                                break;
-                            } else if next_text.starts_with(rem) || levenshtein_prefix_match(rem, &next_text, fuzzy_distance) {
-                                chain.push(*next_ord as u64);
-                                found = true;
-                                matched = true;
-                                break;
-                            }
-                        }
-                        if !matched || found { break; }
-                    }
-
-                    if found || rem.is_empty() {
-                        // Use a synthetic cand_idx — we'll handle byte_from from postings
-                        valid_chains.push((usize::MAX, chain));
-                    }
-                }
-            }
-        }
-    }
-
+    // Fuzzy left-side typos are handled by fuzzy_falling_walk above.
+    // No need for sibling-first iteration — the DFA finds the split despite typos,
     if valid_chains.is_empty() {
         return Vec::new();
     }
