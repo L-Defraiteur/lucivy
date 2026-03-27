@@ -535,12 +535,13 @@ where
                 if use_si0 && parent.si != 0 { continue; }
                 let postings = raw_term_resolver(parent.raw_ordinal);
                 for p in &postings {
+                    let bf = p.byte_from + parent.si as u32;
                     results.push(MultiTokenPosting {
                         doc_id: p.doc_id,
                         token_index: p.token_index,
                         span: 1,
-                        byte_from: p.byte_from + parent.si as u32,
-                        byte_to: p.byte_from + query_lower.len() as u32,
+                        byte_from: bf,
+                        byte_to: bf + query_lower.len() as u32,
                     });
                 }
             }
