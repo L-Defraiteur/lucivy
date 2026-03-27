@@ -98,6 +98,26 @@ impl SegmentSerializer {
         Ok(())
     }
 
+    /// Write a per-field .posmap file (position-to-ordinal map).
+    pub fn write_posmap(&mut self, field_id: u32, data: &[u8]) -> crate::Result<()> {
+        let suffix = format!("{field_id}.posmap");
+        let mut writer = self.segment.open_write_custom(&suffix)?;
+        use common::TerminatingWrite;
+        writer.write_all(data)?;
+        writer.terminate()?;
+        Ok(())
+    }
+
+    /// Write a per-field .bytemap file (byte presence bitmap).
+    pub fn write_bytemap(&mut self, field_id: u32, data: &[u8]) -> crate::Result<()> {
+        let suffix = format!("{field_id}.bytemap");
+        let mut writer = self.segment.open_write_custom(&suffix)?;
+        use common::TerminatingWrite;
+        writer.write_all(data)?;
+        writer.terminate()?;
+        Ok(())
+    }
+
     /// Returns the list of field_ids that had sfx files written.
     /// The caller should store these in the SegmentMeta (sfx_field_ids)
     /// so that list_files() and GC know about them.

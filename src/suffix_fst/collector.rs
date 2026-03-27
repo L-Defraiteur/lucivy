@@ -1,9 +1,24 @@
 use std::collections::{HashMap, HashSet};
 
 use super::builder::SuffixFstBuilder;
+use super::bytemap::ByteBitmapWriter;
 use super::file::SfxFileWriter;
 use super::gapmap::GapMapWriter;
+use super::posmap::PosMapWriter;
 use super::sibling_table::SiblingTableWriter;
+
+/// Output of SfxCollector::build(). Each field is a self-contained binary blob
+/// that gets written to its own file. Adding a new index type = add a field here.
+pub struct SfxBuildOutput {
+    /// .sfx — suffix FST + parent lists + sibling table + GapMap
+    pub sfx: Vec<u8>,
+    /// .sfxpost — posting index (ordinal → doc entries)
+    pub sfxpost: Vec<u8>,
+    /// .posmap — position-to-ordinal reverse map (doc_id, pos) → ordinal
+    pub posmap: Vec<u8>,
+    /// .bytemap — byte presence bitmap per ordinal (256 bits each)
+    pub bytemap: Vec<u8>,
+}
 
 /// Collects token and gap data during indexation to produce a .sfx file.
 ///
@@ -227,12 +242,10 @@ impl SfxCollector {
         self.gapmap_writer.add_empty_doc();
     }
 
-    /// Build the .sfx file bytes and the .sfxpost file bytes.
+    /// Build all index files from collected data.
     ///
-    /// Returns `(sfx_bytes, sfxpost_bytes)`:
-    /// - sfx_bytes: suffix FST + parent lists + GapMap
-    /// - sfxpost_bytes: posting index (ordinal → delta-VInt doc IDs)
-    pub fn build(self) -> Result<(Vec<u8>, Vec<u8>), lucivy_fst::Error> {
+    /// Returns `SfxBuildOutput` with each section as a self-contained binary blob.
+    pub fn build(self) -> Result<SfxBuildOutput, lucivy_fst::Error> {
         // Sort interned tokens to get BTreeSet-equivalent order for ordinals.
         let num_tokens = self.token_texts.len();
         let mut sorted_indices: Vec<u32> = (0..num_tokens as u32).collect();
@@ -276,7 +289,7 @@ impl SfxCollector {
         ).with_sibling_data(sibling_data);
         let sfx_bytes = file_writer.to_bytes();
 
-        // .sfxpost file V2: per-ordinal posting entries with binary-searchable doc_ids.
+        // .sfxpost file V2
         let mut sfxpost_writer = super::sfxpost_v2::SfxPostWriterV2::new(num_tokens);
         for (new_ord, &old_ord) in sorted_indices.iter().enumerate() {
             let entries = &self.token_postings[old_ord as usize];
@@ -286,7 +299,30 @@ impl SfxCollector {
         }
         let sfxpost_bytes = sfxpost_writer.finish();
 
-        Ok((sfx_bytes, sfxpost_bytes))
+        // .posmap — position-to-ordinal reverse map
+        let mut posmap_writer = PosMapWriter::new();
+        for (new_ord, &old_ord) in sorted_indices.iter().enumerate() {
+            let final_ord = new_ord as u32;
+            for &(doc_id, ti, _, _) in &self.token_postings[old_ord as usize] {
+                posmap_writer.add(doc_id, ti, final_ord);
+            }
+        }
+        let posmap_bytes = posmap_writer.serialize();
+
+        // .bytemap — byte presence bitmap per ordinal
+        let mut bytemap_writer = ByteBitmapWriter::new();
+        bytemap_writer.ensure_capacity(num_terms);
+        for (new_ord, &old_ord) in sorted_indices.iter().enumerate() {
+            bytemap_writer.record_token(new_ord as u32, self.token_texts[old_ord as usize].as_bytes());
+        }
+        let bytemap_bytes = bytemap_writer.serialize();
+
+        Ok(SfxBuildOutput {
+            sfx: sfx_bytes,
+            sfxpost: sfxpost_bytes,
+            posmap: posmap_bytes,
+            bytemap: bytemap_bytes,
+        })
     }
 }
 
@@ -322,8 +358,8 @@ mod tests {
         collector.end_value();
         collector.end_doc();
 
-        let (sfx_bytes, _sfxpost_bytes) = collector.build().unwrap();
-        let reader = SfxFileReader::open(&sfx_bytes).unwrap();
+        let output = collector.build().unwrap();
+        let reader = SfxFileReader::open(&output.sfx).unwrap();
 
         // Verify suffix resolution
         let parents = reader.resolve_suffix("rag3db");
@@ -360,7 +396,8 @@ mod tests {
         collector.end_value();
         collector.end_doc();
 
-        let (sfx_bytes, _sfxpost_bytes) = collector.build().unwrap();
+        let output = collector.build().unwrap();
+        let sfx_bytes = output.sfx;
         let reader = SfxFileReader::open(&sfx_bytes).unwrap();
 
         assert_eq!(reader.gapmap().num_tokens(0), 4);
@@ -403,7 +440,8 @@ mod tests {
         collector.begin_doc();
         collector.end_doc_empty();
 
-        let (sfx_bytes, _sfxpost_bytes) = collector.build().unwrap();
+        let output = collector.build().unwrap();
+        let sfx_bytes = output.sfx;
         let reader = SfxFileReader::open(&sfx_bytes).unwrap();
 
         assert_eq!(reader.gapmap().num_tokens(0), 2);
@@ -421,7 +459,8 @@ mod tests {
         collector.end_value();
         collector.end_doc();
 
-        let (sfx_bytes, _sfxpost_bytes) = collector.build().unwrap();
+        let output = collector.build().unwrap();
+        let sfx_bytes = output.sfx;
         let reader = SfxFileReader::open(&sfx_bytes).unwrap();
 
         let results = reader.prefix_walk("work");
@@ -441,7 +480,8 @@ mod tests {
         collector.end_value();
         collector.end_doc();
 
-        let (sfx_bytes, _sfxpost_bytes) = collector.build().unwrap();
+        let output = collector.build().unwrap();
+        let sfx_bytes = output.sfx;
         let reader = SfxFileReader::open(&sfx_bytes).unwrap();
 
         // Tokens should be sorted: apple=0, mango=1, zebra=2
@@ -476,7 +516,8 @@ mod tests {
         collector.end_value();
         collector.end_doc();
 
-        let (sfx_bytes, _) = collector.build().unwrap();
+        let output = collector.build().unwrap();
+        let sfx_bytes = output.sfx;
         let reader = SfxFileReader::open(&sfx_bytes).unwrap();
         let sibling = reader.sibling_table().expect("sibling table should be present");
 

@@ -160,12 +160,18 @@ impl SegmentWriter {
         if sfx_collectors.len() <= 1 {
             // Single field — no parallelism needed
             for (field_id, collector) in sfx_collectors {
-                let (sfx_bytes, sfxpost_bytes) = collector.build()
+                let output = collector.build()
                     .map_err(|e| crate::LucivyError::SystemError(
                         format!("sfx build field {field_id}: {e}")))?;
-                self.segment_serializer.write_sfx(field_id, &sfx_bytes)?;
-                if !sfxpost_bytes.is_empty() {
-                    self.segment_serializer.write_sfxpost(field_id, &sfxpost_bytes)?;
+                self.segment_serializer.write_sfx(field_id, &output.sfx)?;
+                if !output.sfxpost.is_empty() {
+                    self.segment_serializer.write_sfxpost(field_id, &output.sfxpost)?;
+                }
+                if !output.posmap.is_empty() {
+                    self.segment_serializer.write_posmap(field_id, &output.posmap)?;
+                }
+                if !output.bytemap.is_empty() {
+                    self.segment_serializer.write_bytemap(field_id, &output.bytemap)?;
                 }
                 sfx_field_ids.push(field_id);
             }
@@ -176,9 +182,9 @@ impl SegmentWriter {
                 .map(|(field_id, collector)| {
                     let name: &str = Box::leak(format!("field_{field_id}").into_boxed_str());
                     let f = move || -> Result<luciole::PortValue, String> {
-                        let (sfx_bytes, sfxpost_bytes) = collector.build()
+                        let output = collector.build()
                             .map_err(|e| format!("sfx build field {field_id}: {e}"))?;
-                        Ok(luciole::PortValue::new((field_id, sfx_bytes, sfxpost_bytes)))
+                        Ok(luciole::PortValue::new((field_id, output)))
                     };
                     (name, f)
                 })
@@ -197,13 +203,19 @@ impl SegmentWriter {
             let mut scatter = luciole::scatter::ScatterResults::from(map);
 
             for name in &field_names {
-                let (fid, sfx_bytes, sfxpost_bytes) = scatter
-                    .take::<(u32, Vec<u8>, Vec<u8>)>(name)
+                let (fid, output) = scatter
+                    .take::<(u32, crate::suffix_fst::SfxBuildOutput)>(name)
                     .ok_or_else(|| crate::LucivyError::SystemError(
                         format!("missing sfx result '{name}'")))?;
-                self.segment_serializer.write_sfx(fid, &sfx_bytes)?;
-                if !sfxpost_bytes.is_empty() {
-                    self.segment_serializer.write_sfxpost(fid, &sfxpost_bytes)?;
+                self.segment_serializer.write_sfx(fid, &output.sfx)?;
+                if !output.sfxpost.is_empty() {
+                    self.segment_serializer.write_sfxpost(fid, &output.sfxpost)?;
+                }
+                if !output.posmap.is_empty() {
+                    self.segment_serializer.write_posmap(fid, &output.posmap)?;
+                }
+                if !output.bytemap.is_empty() {
+                    self.segment_serializer.write_bytemap(fid, &output.bytemap)?;
                 }
                 sfx_field_ids.push(fid);
             }
