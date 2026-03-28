@@ -1,0 +1,275 @@
+//! Literal resolution primitives: find a literal string in the index,
+//! intersect multiple literals, validate DFA paths between positions.
+//!
+//! These are the building blocks used by regex contains (and potentially
+//! by exact contains in the future). Each function is self-contained
+//! and works at the (doc_id, position, byte_from, byte_to) level.
+
+use std::collections::{HashMap, HashSet};
+
+use crate::suffix_fst::file::SfxFileReader;
+use crate::suffix_fst::gapmap::is_value_boundary;
+use crate::suffix_fst::posmap::PosMapReader;
+use crate::query::posting_resolver::PostingResolver;
+use crate::DocId;
+
+use super::suffix_contains;
+
+// ─────────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────────
+
+/// A match for a literal string in the index.
+#[derive(Debug, Clone)]
+pub struct LiteralMatch {
+    pub doc_id: DocId,
+    pub position: u32,
+    pub byte_from: u32,
+    pub byte_to: u32,
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 1. find_literal — resolve a literal using exact contains logic
+// ─────────────────────────────────────────────────────────────────────
+
+/// Find all occurrences of `literal` in the index, including cross-token
+/// matches via sibling links. Uses the same code path as exact contains.
+///
+/// Returns matches with (doc_id, position, byte_from, byte_to).
+pub fn find_literal(
+    sfx_reader: &SfxFileReader<'_>,
+    literal: &str,
+    resolver: &dyn PostingResolver,
+    ord_to_term: &dyn Fn(u64) -> Option<String>,
+) -> Vec<LiteralMatch> {
+    // Build the raw_term_resolver closure from PostingResolver.
+    let raw_resolver = |raw_ordinal: u64| -> Vec<suffix_contains::RawPostingEntry> {
+        resolver.resolve(raw_ordinal).into_iter().map(|e| {
+            suffix_contains::RawPostingEntry {
+                doc_id: e.doc_id,
+                token_index: e.position,
+                byte_from: e.byte_from,
+                byte_to: e.byte_to,
+            }
+        }).collect()
+    };
+
+    // Use the exact same function as contains search.
+    let matches = suffix_contains::suffix_contains_single_token_with_terms(
+        sfx_reader,
+        literal,
+        &raw_resolver,
+        Some(&ord_to_term),
+    );
+
+    matches.into_iter().map(|m| LiteralMatch {
+        doc_id: m.doc_id,
+        position: m.token_index,
+        byte_from: m.byte_from as u32,
+        byte_to: m.byte_to as u32,
+    }).collect()
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 2. intersect_literals — intersect matches from multiple literals
+// ─────────────────────────────────────────────────────────────────────
+
+/// Per-literal matches grouped by doc_id.
+pub type MatchesByDoc = HashMap<DocId, Vec<(u32, u32, u32)>>; // (position, byte_from, byte_to)
+
+/// Group literal matches by doc_id.
+pub fn group_by_doc(matches: &[LiteralMatch]) -> MatchesByDoc {
+    let mut by_doc: MatchesByDoc = HashMap::new();
+    for m in matches {
+        by_doc.entry(m.doc_id).or_default().push((m.position, m.byte_from, m.byte_to));
+    }
+    by_doc
+}
+
+/// Intersect multiple literal match sets: keep only doc_ids present in ALL sets,
+/// where the literals appear in order (each literal's byte_from >= previous literal's byte_to).
+///
+/// `literals_by_doc[i]` = matches for literal i, grouped by doc.
+/// Literals are in regex order.
+///
+/// Returns: set of doc_ids that survive + per-doc matched ranges
+/// `(doc_id, first_byte_from, last_byte_to)`.
+pub fn intersect_literals_ordered(
+    literals_by_doc: &[MatchesByDoc],
+) -> Vec<(DocId, u32, u32)> {
+    if literals_by_doc.is_empty() {
+        return Vec::new();
+    }
+
+    // Start with the smallest set for efficiency.
+    let smallest_idx = literals_by_doc.iter()
+        .enumerate()
+        .min_by_key(|(_, m)| m.len())
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+
+    let mut results = Vec::new();
+
+    for (&doc_id, _) in &literals_by_doc[smallest_idx] {
+        // Check all other literals have this doc.
+        let all_present = literals_by_doc.iter().all(|m| m.contains_key(&doc_id));
+        if !all_present {
+            continue;
+        }
+
+        // Check position ordering: find a chain where each literal appears after the previous.
+        let first_matches = &literals_by_doc[0][&doc_id];
+        'outer: for &(_, first_bf, first_bt) in first_matches {
+            let mut min_byte = first_bt;
+            let mut all_ok = true;
+            let mut last_bt = first_bt;
+
+            for lit_matches in &literals_by_doc[1..] {
+                let positions = &lit_matches[&doc_id];
+                if let Some(&(_, _bf, bt)) = positions.iter()
+                    .filter(|&&(_, bf, _)| bf >= min_byte)
+                    .min_by_key(|&&(_, bf, _)| bf)
+                {
+                    min_byte = bt;
+                    last_bt = bt;
+                } else {
+                    all_ok = false;
+                    break;
+                }
+            }
+
+            if all_ok {
+                results.push((doc_id, first_bf, last_bt));
+                break 'outer;
+            }
+        }
+    }
+
+    results
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 3. validate_path — DFA validation between two known positions
+// ─────────────────────────────────────────────────────────────────────
+
+/// Validate that the DFA accepts the token sequence between pos_from and pos_to
+/// (inclusive) in a document. Uses PosMap to read ordinals and GapMap for gaps.
+///
+/// Returns the DFA state at the first accepting point, or None if the DFA
+/// never accepts (dies or reaches pos_to without accepting).
+pub fn validate_path<A: lucivy_fst::Automaton>(
+    automaton: &A,
+    dfa_state: &A::State,
+    posmap: &PosMapReader<'_>,
+    sfx_reader: &SfxFileReader<'_>,
+    ord_to_term: &dyn Fn(u64) -> Option<String>,
+    doc_id: DocId,
+    pos_from: u32, // exclusive: start feeding AFTER this position
+    pos_to: u32,   // inclusive: feed up to and including this position
+) -> Option<A::State>
+where
+    A::State: Clone,
+{
+    let gapmap = sfx_reader.gapmap();
+    let mut state = dfa_state.clone();
+
+    for pos in (pos_from + 1)..=pos_to {
+        // Feed gap bytes between previous position and this one.
+        let gap = gapmap.read_separator(doc_id, pos - 1, pos);
+        if let Some(gap_bytes) = gap {
+            if is_value_boundary(gap_bytes) {
+                return None;
+            }
+            for &byte in gap_bytes {
+                state = automaton.accept(&state, byte);
+                if !automaton.can_match(&state) {
+                    return None;
+                }
+            }
+        }
+
+        // Feed token text at this position.
+        if let Some(tok_ord) = posmap.ordinal_at(doc_id, pos) {
+            if let Some(text) = ord_to_term(tok_ord as u64) {
+                for &byte in text.as_bytes() {
+                    state = automaton.accept(&state, byte);
+                    if !automaton.can_match(&state) {
+                        return None;
+                    }
+                }
+            }
+        }
+
+        // Early return: if DFA accepts after this token, we have a match.
+        // Don't continue feeding — the regex is satisfied.
+        if automaton.is_match(&state) {
+            return Some(state);
+        }
+    }
+
+    Some(state)
+}
+
+/// Quick check: does the DFA accept ANY path between two positions?
+/// For `.*` patterns this always returns true without needing PosMap.
+pub fn dfa_accepts_anything<A: lucivy_fst::Automaton>(
+    automaton: &A,
+    state: &A::State,
+) -> bool
+where
+    A::State: Clone,
+{
+    // A DFA that accepts anything: is_match AND can_match from current state.
+    // This is the case for `.*` — the DFA is already accepting and can continue.
+    automaton.is_match(state) && automaton.can_match(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_intersect_empty() {
+        let result = intersect_literals_ordered(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_intersect_single() {
+        let mut by_doc = HashMap::new();
+        by_doc.insert(1, vec![(0, 0, 5)]);
+        by_doc.insert(2, vec![(0, 0, 3)]);
+
+        let result = intersect_literals_ordered(&[by_doc]);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_intersect_two_ordered() {
+        let mut lit_a = HashMap::new();
+        lit_a.insert(1, vec![(0, 0, 5)]); // doc1: "hello" at pos 0
+        lit_a.insert(2, vec![(0, 0, 3)]); // doc2: "foo" at pos 0
+
+        let mut lit_b = HashMap::new();
+        lit_b.insert(1, vec![(2, 10, 15)]); // doc1: "world" at pos 2, byte 10-15
+        // doc2 doesn't have lit_b → eliminated
+
+        let result = intersect_literals_ordered(&[lit_a, lit_b]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, 1); // doc1
+        assert_eq!(result[0].1, 0); // first_byte_from
+        assert_eq!(result[0].2, 15); // last_byte_to
+    }
+
+    #[test]
+    fn test_intersect_wrong_order() {
+        let mut lit_a = HashMap::new();
+        lit_a.insert(1, vec![(5, 20, 25)]); // doc1: lit_a at byte 20-25
+
+        let mut lit_b = HashMap::new();
+        lit_b.insert(1, vec![(2, 5, 10)]); // doc1: lit_b at byte 5-10 (BEFORE lit_a)
+
+        let result = intersect_literals_ordered(&[lit_a, lit_b]);
+        assert!(result.is_empty()); // wrong order → eliminated
+    }
+}

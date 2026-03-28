@@ -282,7 +282,7 @@ fn pick_best_literal(pattern: &str, fragments: &[String]) -> (String, bool) {
 /// 4. Resolve postings only for validated matches, verify adjacency + byte continuity
 /// 5. Gap>0 cross-token: resolve first ordinal, read GapMap, validate DFA, check adjacency
 ///
-/// Falls back to continuation_score_sibling when no usable literal found.
+/// Falls back to empty results when no usable literal found (never scans full FST).
 pub(crate) fn regex_contains_via_literal<A: Automaton>(
     automaton: &A,
     pattern: &str,
@@ -297,733 +297,171 @@ pub(crate) fn regex_contains_via_literal<A: Automaton>(
 where
     A::State: Clone + Eq + std::hash::Hash,
 {
+    use super::literal_resolve::{self, LiteralMatch};
     use std::time::Instant;
     use crate::suffix_fst::posmap::PosMapReader;
 
     let t_total = Instant::now();
     let all_literals = extract_all_literals(pattern);
-    let si_zero_only = mode != ContinuationMode::Contains;
 
-    // Viable literals for prefix_walk.
     let viable: Vec<&String> = all_literals.iter()
         .filter(|l| l.len() >= MIN_LITERAL_LEN)
         .collect();
 
     if viable.is_empty() {
-        eprintln!("[regex-timer] FALLBACK no viable literal for '{}'", pattern);
-        return continuation_score_sibling(
-            automaton, sfx_dict, resolver, sfx_reader, mode, max_doc, ord_to_term,
-        );
+        eprintln!("[regex-timer] no viable literal for '{}' → 0 results", pattern);
+        return Ok((BitSet::with_max_value(max_doc), Vec::new()));
     }
-
-    // ── Optim 1: pick primary by doc_freq (most selective literal) ──
-    let t0 = Instant::now();
-
-    // prefix_walk each viable literal, compute estimated doc_freq.
-    struct LiteralInfo {
-        literal: String,
-        is_prefix: bool,
-        walk: Vec<(String, Vec<crate::suffix_fst::builder::ParentEntry>)>,
-        ordinals: Vec<u64>,
-        est_freq: u32,
-    }
-    let mut literal_infos: Vec<LiteralInfo> = Vec::new();
-    for lit in &viable {
-        let walk = if si_zero_only {
-            sfx_reader.prefix_walk_si0(lit)
-        } else {
-            sfx_reader.prefix_walk(lit)
-        };
-        let ordinals: Vec<u64> = walk.iter()
-            .flat_map(|(_, parents)| parents.iter().map(|p| p.raw_ordinal))
-            .collect();
-        let est_freq: u32 = ordinals.iter()
-            .map(|&ord| resolver.doc_freq(ord))
-            .sum();
-        let is_prefix = pattern.to_lowercase().starts_with(lit.as_str());
-        literal_infos.push(LiteralInfo {
-            literal: (*lit).clone(), is_prefix, walk, ordinals, est_freq,
-        });
-    }
-
-    // The DFA walk literal must be the FIRST literal in regex order (or a prefix).
-    // The most selective literal is used for intersection pre-filtering only.
-    // Walk literal = first viable literal in regex order.
-    // Filter literal = most selective (lowest doc_freq).
-    let walk_idx = 0; // first literal in regex order
-    let filter_idx = literal_infos.iter()
-        .enumerate()
-        .min_by_key(|(_, li)| li.est_freq)
-        .map(|(i, _)| i)
-        .unwrap_or(0);
-
-    let walk_info = &literal_infos[walk_idx];
-    let literal = walk_info.literal.clone();
-    let is_prefix = walk_info.is_prefix;
-    let walk_results = walk_info.walk.clone();
-    let walk_us = t0.elapsed().as_micros();
-
-    if walk_results.is_empty() {
-        eprintln!("[regex-timer] FALLBACK prefix_walk empty for '{}' (literal='{}')", pattern, literal);
-        return continuation_score_sibling(
-            automaton, sfx_dict, resolver, sfx_reader, mode, max_doc, ord_to_term,
-        );
-    }
-
-    eprintln!("[regex-timer] walk='{}' freq={} is_prefix={}, filter='{}' freq={} (from {} viable)",
-        literal, walk_info.est_freq, is_prefix,
-        literal_infos[filter_idx].literal, literal_infos[filter_idx].est_freq,
-        literal_infos.len());
-
-    // ── Optim 2: multi-literal intersection via has_doc (no full resolve) ──
-    // Use the most selective literal as the base set, then has_doc filter with all others.
-    let has_multi_literal = literal_infos.len() > 1;
-    let mut allowed_docs: Option<std::collections::HashSet<DocId>> = None;
-    let mut other_postings_by_doc: Vec<HashMap<DocId, Vec<(u32, u32, u32)>>> = Vec::new();
-
-    if has_multi_literal {
-        let filter_info = &literal_infos[filter_idx];
-
-        // Resolve the most selective literal to get the smallest doc set.
-        let mut base_docs: std::collections::HashSet<DocId> = std::collections::HashSet::new();
-        for &ord in &filter_info.ordinals {
-            for e in &resolver.resolve(ord) {
-                base_docs.insert(e.doc_id);
-            }
-        }
-
-        // has_doc filter: for each other literal, retain only docs that contain it.
-        let mut survivors = base_docs.clone();
-        for (i, li) in literal_infos.iter().enumerate() {
-            if i == filter_idx { continue; }
-            survivors.retain(|&doc_id| {
-                li.ordinals.iter().any(|&ord| resolver.has_doc(ord, doc_id))
-            });
-        }
-
-        // Resolve postings of non-walk literals for position ordering check.
-        // Use resolve_filtered to skip eliminated docs.
-        // Collect in REGEX ORDER (all literals except the walk literal).
-        for (i, li) in literal_infos.iter().enumerate() {
-            if i == walk_idx { continue; }
-            let mut by_doc: HashMap<DocId, Vec<(u32, u32, u32)>> = HashMap::new();
-            for &ord in &li.ordinals {
-                for e in &resolver.resolve_filtered(ord, &survivors) {
-                    by_doc.entry(e.doc_id).or_default().push((
-                        e.position, e.byte_from, e.byte_to,
-                    ));
-                }
-            }
-            other_postings_by_doc.push(by_doc);
-        }
-
-        eprintln!("[regex-timer] multi-literal: base_docs({})={} → survivors={} (has_doc filter)",
-            filter_info.literal, base_docs.len(), survivors.len());
-        allowed_docs = Some(survivors);
-    }
-
-    let walk_entries = walk_results.len();
-    let walk_parents: usize = walk_results.iter().map(|(_, p)| p.len()).sum();
 
     // ═══════════════════════════════════════════════════════════════════
-    // Phase 1: DFA validation at ORDINAL level — zero posting resolves.
+    // Step 1: Resolve each literal using exact contains logic (cross-token aware).
+    // ═══════════════════════════════════════════════════════════════════
+    let t0 = Instant::now();
+
+    let mut all_matches: Vec<Vec<LiteralMatch>> = Vec::new();
+    for lit in &viable {
+        let matches = literal_resolve::find_literal(sfx_reader, lit, resolver, ord_to_term);
+        eprintln!("[regex-timer] find_literal('{}') → {} matches", lit, matches.len());
+        all_matches.push(matches);
+    }
+
+    let find_us = t0.elapsed().as_micros();
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Step 2: Single-literal → DFA validate each match. Multi-literal → intersect + PosMap.
     // ═══════════════════════════════════════════════════════════════════
     let t1 = Instant::now();
 
-    // Single-token matches: DFA accepted within the token.
-    let mut accepted: Vec<(u64, u16)> = Vec::new(); // (raw_ordinal, si)
-
-    // Cross-token candidates: DFA alive but NOT accepting at token boundary.
-    // Keyed by raw_ordinal (deduped) since DFA state is deterministic per entry_text.
-    let mut cross_token: Vec<(u64, u16, A::State)> = Vec::new(); // (raw_ordinal, si, dfa_state)
-    let mut cross_token_seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
-
-    let start_state = automaton.start();
-
-    // When literal is the regex prefix, we can pre-compute the DFA state after
-    // consuming the literal and only feed the remaining entry bytes.
-    let prefix_state = if is_prefix {
-        let mut s = start_state.clone();
-        for &byte in literal.as_bytes() {
-            s = automaton.accept(&s, byte);
-        }
-        Some(s)
-    } else {
-        None
-    };
-
-    // Dedup: avoid processing the same ordinal multiple times (different SIs share same token).
-    let mut validated_ordinals: HashMap<u64, Option<(A::State, bool)>> = HashMap::new();
-
-    for (entry_text, parents) in &walk_results {
-        for parent in parents {
-            // Check cache first
-            if let Some(cached) = validated_ordinals.get(&parent.raw_ordinal) {
-                if let Some((state, is_acc)) = cached {
-                    if *is_acc {
-                        accepted.push((parent.raw_ordinal, parent.si));
-                    }
-                    if !*is_acc && automaton.can_match(state) {
-                        if cross_token_seen.insert(parent.raw_ordinal) {
-                            cross_token.push((parent.raw_ordinal, parent.si, state.clone()));
-                        }
-                    }
-                }
-                continue;
-            }
-
-            // Validate: feed text through DFA.
-            let (state, alive) = if let Some(ref ps) = prefix_state {
-                // Prefix literal: skip literal bytes, feed remaining entry_text bytes.
-                let remaining = &entry_text[literal.len()..];
-                let mut s = ps.clone();
-                let mut ok = true;
-                for &byte in remaining.as_bytes() {
-                    s = automaton.accept(&s, byte);
-                    if !automaton.can_match(&s) { ok = false; break; }
-                }
-                (s, ok)
-            } else {
-                // Non-prefix literal: feed FULL token text from start state.
-                let full_text = match ord_to_term(parent.raw_ordinal) {
-                    Some(t) => t,
-                    None => {
-                        validated_ordinals.insert(parent.raw_ordinal, None);
-                        continue;
-                    }
-                };
-                let mut s = start_state.clone();
-                let mut ok = true;
-                for &byte in full_text.as_bytes() {
-                    s = automaton.accept(&s, byte);
-                    if !automaton.can_match(&s) { ok = false; break; }
-                }
-                (s, ok)
-            };
-
-            if !alive {
-                validated_ordinals.insert(parent.raw_ordinal, None);
-                continue;
-            }
-
-            let is_accepting = automaton.is_match(&state);
-            validated_ordinals.insert(parent.raw_ordinal, Some((state.clone(), is_accepting)));
-
-            if is_accepting {
-                accepted.push((parent.raw_ordinal, parent.si));
-            }
-            if !is_accepting && automaton.can_match(&state) {
-                if cross_token_seen.insert(parent.raw_ordinal) {
-                    cross_token.push((parent.raw_ordinal, parent.si, state));
-                }
-            }
-        }
-    }
-
-    let phase1_us = t1.elapsed().as_micros();
-
-    // ═══════════════════════════════════════════════════════════════════
-    // Phase 2: Gap=0 sibling chain at ORDINAL level — zero posting resolves.
-    // ═══════════════════════════════════════════════════════════════════
-    let t2 = Instant::now();
-
-    // A valid chain: sequence of ordinals where gap=0 sibling links connect tokens
-    // and the DFA accepts at the end of the chain.
-    // Format: (first_ordinal, first_si, chain_ordinals_including_first)
-    let mut valid_gap0_chains: Vec<(u64, u16, Vec<u64>)> = Vec::new();
-
-    // Gap>0 candidates: ordinals needing per-document GapMap reads.
-    let mut gap_candidates: Vec<(u64, u16, A::State)> = Vec::new();
-
-    if let Some(sib_table) = sfx_reader.sibling_table() {
-        for &(ord, si, ref dfa_state) in &cross_token {
-            let has_gap_siblings = sib_table
-                .siblings(ord as u32)
-                .iter()
-                .any(|s| s.gap_len > 0);
-            if has_gap_siblings {
-                gap_candidates.push((ord, si, dfa_state.clone()));
-            }
-
-            // Follow gap=0 chain
-            let mut current_ord = ord;
-            let mut state = dfa_state.clone();
-            let mut chain = vec![current_ord];
-
-            for _depth in 0..MAX_CONTINUATION_DEPTH {
-                let siblings = sib_table.contiguous_siblings(current_ord as u32);
-                let mut advanced = false;
-
-                for next_ord in &siblings {
-                    let next_text = match ord_to_term(*next_ord as u64) {
-                        Some(t) => t,
-                        None => continue,
-                    };
-
-                    let mut new_state = state.clone();
-                    let mut alive = true;
-                    for &byte in next_text.as_bytes() {
-                        new_state = automaton.accept(&new_state, byte);
-                        if !automaton.can_match(&new_state) {
-                            alive = false;
-                            break;
-                        }
-                    }
-                    if !alive {
-                        continue;
-                    }
-
-                    chain.push(*next_ord as u64);
-
-                    if automaton.is_match(&new_state) {
-                        valid_gap0_chains.push((ord, si, chain.clone()));
-                        // Don't continue past acceptance
-                        advanced = false;
-                        break;
-                    }
-
-                    if automaton.can_match(&new_state) {
-                        current_ord = *next_ord as u64;
-                        state = new_state;
-                        advanced = true;
-                        break; // take first viable sibling, continue chain
-                    }
-                }
-
-                if !advanced {
-                    break;
-                }
-            }
-        }
-    }
-
-    let phase2_us = t2.elapsed().as_micros();
-
-    // ═══════════════════════════════════════════════════════════════════
-    // Phase 3: Resolve postings for validated matches only.
-    // ═══════════════════════════════════════════════════════════════════
-    let t3a = Instant::now();
-
     let mut doc_bitset = BitSet::with_max_value(max_doc);
     let mut highlights: Vec<(DocId, usize, usize)> = Vec::new();
-
-    // ── Optim 3: resolve_filtered when allowed_docs is set ──
-    // 3a. Single-token accepted ordinals
-    accepted.sort_by_key(|a| a.0);
-    accepted.dedup();
-    for &(ord, si) in &accepted {
-        let entries = if let Some(ref allowed) = allowed_docs {
-            resolver.resolve_filtered(ord, allowed)
-        } else {
-            resolver.resolve(ord)
-        };
-        for e in &entries {
-            doc_bitset.insert(e.doc_id);
-            let byte_from = (e.byte_from + si as u32) as usize;
-            highlights.push((e.doc_id, byte_from, e.byte_to as usize));
-        }
-    }
-
-    let phase3a_us = t3a.elapsed().as_micros();
-    let t3b = Instant::now();
-
-    // 3b. Gap=0 cross-token chains — resolve + adjacency + byte continuity
-    if !valid_gap0_chains.is_empty() {
-        let mut ordinal_cache: HashMap<u64, Vec<posting_resolver::PostingEntry>> = HashMap::new();
-        for (_, _, chain) in &valid_gap0_chains {
-            for &ord in chain {
-                ordinal_cache
-                    .entry(ord)
-                    .or_insert_with(|| resolver.resolve(ord));
-            }
-        }
-
-        for (_, first_si, chain) in &valid_gap0_chains {
-            let first_postings = match ordinal_cache.get(&chain[0]) {
-                Some(p) => p,
-                None => continue,
-            };
-
-            // active: (doc_id, next_expected_pos, next_byte_from, highlight_byte_from)
-            let mut active: Vec<(DocId, u32, u32, u32)> = Vec::new();
-            for p in first_postings {
-                let byte_from = p.byte_from + *first_si as u32;
-                active.push((p.doc_id, p.position + 1, p.byte_to, byte_from));
-            }
-
-            for &ord in &chain[1..] {
-                if active.is_empty() {
-                    break;
-                }
-                let postings = match ordinal_cache.get(&ord) {
-                    Some(p) => p,
-                    None => {
-                        active.clear();
-                        break;
-                    }
-                };
-
-                active.sort_by_key(|a| (a.0, a.1));
-                let mut next_active: Vec<(DocId, u32, u32, u32)> = Vec::new();
-                for p in postings {
-                    let target = (p.doc_id, p.position);
-                    let idx = active.partition_point(|a| (a.0, a.1) < target);
-                    let mut i = idx;
-                    while i < active.len() && active[i].0 == p.doc_id && active[i].1 == p.position
-                    {
-                        // Byte continuity: next token starts where previous ended
-                        if p.byte_from == active[i].2 {
-                            next_active.push((
-                                p.doc_id,
-                                p.position + 1,
-                                p.byte_to,
-                                active[i].3,
-                            ));
-                        }
-                        i += 1;
-                    }
-                }
-                active = next_active;
-            }
-
-            for &(doc_id, _, byte_to, byte_from) in &active {
-                doc_bitset.insert(doc_id);
-                highlights.push((doc_id, byte_from as usize, byte_to as usize));
-            }
-        }
-    }
-
-    let phase3b_us = t3b.elapsed().as_micros();
-    let t3c = Instant::now();
-
-    // 3c-pre: Position ordering pre-filter for multi-literal.
-    // Keep only docs where ALL literals appear in regex order.
-    // The primary literal is first (or best). Other literals must appear after it in order.
-    //
-    // For "rag.*ver.*end" with literals ["rag","ver","end"]:
-    //   primary = "rag", others = ["ver", "end"] (in regex order)
-    //   A doc matches only if ∃ P_rag < P_ver < P_end.
-    if has_multi_literal && !other_postings_by_doc.is_empty() {
-        // Resolve primary literal positions (from both accepted + cross_token ordinals).
-        let mut primary_by_doc: HashMap<DocId, Vec<u32>> = HashMap::new();
-        let mut all_primary_ords: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        for &(ord, _, _) in &cross_token {
-            all_primary_ords.insert(ord);
-        }
-        for &(ord, _) in &accepted {
-            all_primary_ords.insert(ord);
-        }
-        for ord in &all_primary_ords {
-            let entries = resolver.resolve(*ord);
-            for e in &entries {
-                if let Some(ref allowed) = allowed_docs {
-                    if !allowed.contains(&e.doc_id) { continue; }
-                }
-                primary_by_doc.entry(e.doc_id).or_default().push(e.position);
-            }
-        }
-
-        // For each doc, check: exists a chain where each literal's byte_from >= previous literal's byte_to.
-        // This ensures literals don't overlap and appear in the correct order.
-        let mut position_filtered = std::collections::HashSet::new();
-
-        // Collect primary (byte_from, byte_to) per doc.
-        let mut primary_bytes: HashMap<DocId, Vec<(u32, u32)>> = HashMap::new();
-        for ord in &all_primary_ords {
-            for e in &resolver.resolve(*ord) {
-                if let Some(ref allowed) = allowed_docs {
-                    if !allowed.contains(&e.doc_id) { continue; }
-                }
-                primary_bytes.entry(e.doc_id).or_default().push((e.byte_from, e.byte_to));
-            }
-        }
-
-        for (&doc_id, byte_ranges) in &primary_bytes {
-            'outer: for &(_, primary_byte_to) in byte_ranges {
-                let mut min_byte = primary_byte_to;
-                let mut all_ok = true;
-                for other_by_doc in &other_postings_by_doc {
-                    if let Some(positions) = other_by_doc.get(&doc_id) {
-                        // Find earliest occurrence whose byte_from >= min_byte
-                        if let Some(&(_, bf, bt)) = positions.iter()
-                            .filter(|&&(_, bf, _)| bf >= min_byte)
-                            .min_by_key(|&&(_, bf, _)| bf)
-                        {
-                            min_byte = bt; // next literal must start after this one ends
-                        } else {
-                            all_ok = false;
-                            break;
-                        }
-                    } else {
-                        all_ok = false;
-                        break;
-                    }
-                }
-                if all_ok {
-                    position_filtered.insert(doc_id);
-                    break 'outer;
-                }
-            }
-        }
-        eprintln!("[regex-timer] position-order filter: {} → {} docs",
-            primary_by_doc.len(), position_filtered.len());
-        allowed_docs = Some(position_filtered);
-    }
-
-    // 3c-posmap: When we have multi-literal + PosMap, validate the path between
-    // literal positions by reading ordinals from the PosMap and feeding them to the DFA.
-    // O(distance × token_len) per doc — replaces the sibling walk entirely.
     let posmap = posmap_data.and_then(PosMapReader::open);
-    let mut posmap_handled = false;
+    let start_state = automaton.start();
 
-    if has_multi_literal && posmap.is_some() && !other_postings_by_doc.is_empty() {
-        let pm = posmap.as_ref().unwrap();
-        let gapmap = sfx_reader.gapmap();
+    let first_literal = &viable[0];
 
-        // For each cross_token candidate in allowed_docs: validate via PosMap walk.
-        for &(ord, si, ref dfa_state) in &cross_token {
-            let entries = if let Some(ref allowed) = allowed_docs {
-                resolver.resolve_filtered(ord, allowed)
-            } else {
-                resolver.resolve(ord)
-            };
+    if all_matches.len() == 1 {
+        // ── Single-literal: DFA validate ──
+        // The find_literal matched the literal as a substring (may be mid-token).
+        // Feed the literal text itself to the DFA (we know it's in the text).
+        // Then walk forward via PosMap for the rest of the regex.
+        let literal_bytes = first_literal.as_bytes();
 
-            for e in &entries {
-                let byte_from = e.byte_from + si as u32;
+        for m in &all_matches[0] {
+            // Feed the literal to get DFA state after the matched substring.
+            let mut state = start_state.clone();
+            let mut alive = true;
+            for &byte in literal_bytes {
+                state = automaton.accept(&state, byte);
+                if !automaton.can_match(&state) { alive = false; break; }
+            }
+            if !alive { continue; }
 
-                // Find the target: earliest other-literal position AFTER this one.
-                let mut target_pos = None;
-                let mut target_byte_to = e.byte_to;
-                for other_by_doc in &other_postings_by_doc {
-                    if let Some(positions) = other_by_doc.get(&e.doc_id) {
-                        if let Some(&(pos, _, bt)) = positions.iter()
-                            .filter(|&&(_, bf, _)| bf >= e.byte_to)
-                            .min_by_key(|&&(_, bf, _)| bf)
-                        {
-                            target_pos = Some(pos);
-                            target_byte_to = bt;
-                        }
-                    }
-                }
+            if automaton.is_match(&state) {
+                doc_bitset.insert(m.doc_id);
+                highlights.push((m.doc_id, m.byte_from as usize, m.byte_to as usize));
+                continue;
+            }
 
-                let Some(t_pos) = target_pos else { continue; };
-
-                // PosMap walk: read ordinals from e.position+1 to t_pos (exclusive),
-                // feed gap bytes + token text to DFA.
-                let mut state = dfa_state.clone();
-                let mut alive = true;
-
-                for walk_pos in (e.position + 1)..t_pos {
-                    // Gap between previous token and this one
-                    let gap = gapmap.read_separator(e.doc_id, walk_pos - 1, walk_pos);
-                    if let Some(gap_bytes) = gap {
-                        if is_value_boundary(gap_bytes) { alive = false; break; }
-                        for &byte in gap_bytes {
-                            state = automaton.accept(&state, byte);
-                            if !automaton.can_match(&state) { alive = false; break; }
-                        }
-                        if !alive { break; }
-                    }
-
-                    // Token at this position
-                    if let Some(tok_ord) = pm.ordinal_at(e.doc_id, walk_pos) {
-                        if let Some(text) = ord_to_term(tok_ord as u64) {
-                            for &byte in text.as_bytes() {
-                                state = automaton.accept(&state, byte);
-                                if !automaton.can_match(&state) { alive = false; break; }
+            // DFA alive but not accepting → cross-token via PosMap.
+            if automaton.can_match(&state) {
+                if let Some(pm) = &posmap {
+                    let max_pos = pm.num_tokens(m.doc_id);
+                    let end_pos = (m.position + MAX_CONTINUATION_DEPTH as u32).min(max_pos);
+                    if end_pos > m.position {
+                        if let Some(final_state) = literal_resolve::validate_path(
+                            automaton, &state, pm, sfx_reader, ord_to_term,
+                            m.doc_id, m.position, end_pos - 1,
+                        ) {
+                            if automaton.is_match(&final_state) {
+                                doc_bitset.insert(m.doc_id);
+                                highlights.push((m.doc_id, m.byte_from as usize, m.byte_to as usize));
                             }
-                            if !alive { break; }
                         }
                     }
+                } else {
+                    // No PosMap — accept conservatively.
+                    doc_bitset.insert(m.doc_id);
+                    highlights.push((m.doc_id, m.byte_from as usize, m.byte_to as usize));
                 }
+            }
+        }
+    } else {
+        // ── Multi-literal: intersect + position ordering + PosMap DFA validate ──
+        let grouped: Vec<literal_resolve::MatchesByDoc> = all_matches.iter()
+            .map(|matches| literal_resolve::group_by_doc(matches))
+            .collect();
 
-                if !alive { continue; }
+        let ordered = literal_resolve::intersect_literals_ordered(&grouped);
 
-                // Feed gap before target literal
-                if t_pos > 0 {
-                    let gap = gapmap.read_separator(e.doc_id, t_pos - 1, t_pos);
-                    if let Some(gap_bytes) = gap {
-                        if is_value_boundary(gap_bytes) { continue; }
-                        for &byte in gap_bytes {
-                            state = automaton.accept(&state, byte);
-                            if !automaton.can_match(&state) { alive = false; break; }
+        eprintln!("[regex-timer] multi-literal intersect: {} docs survive ordering", ordered.len());
+
+        if let Some(pm) = &posmap {
+            // PosMap walk: validate DFA between the literal positions.
+            for &(doc_id, first_bf, last_bt) in &ordered {
+                // Find actual positions of first and last literals in this doc.
+                let first_pos = grouped[0].get(&doc_id)
+                    .and_then(|v| v.iter().find(|&&(_, bf, _)| bf == first_bf))
+                    .map(|&(pos, _, _)| pos);
+                let last_pos = grouped.last().unwrap().get(&doc_id)
+                    .and_then(|v| v.iter().find(|&&(_, _, bt)| bt == last_bt))
+                    .map(|&(pos, _, _)| pos);
+
+                let (Some(fp), Some(lp)) = (first_pos, last_pos) else { continue; };
+
+                // Feed first token to DFA.
+                let first_state = if let Some(tok_ord) = pm.ordinal_at(doc_id, fp) {
+                    if let Some(text) = ord_to_term(tok_ord as u64) {
+                        let mut s = start_state.clone();
+                        let mut alive = true;
+                        for &byte in text.as_bytes() {
+                            s = automaton.accept(&s, byte);
+                            if !automaton.can_match(&s) { alive = false; break; }
                         }
                         if !alive { continue; }
+                        s
+                    } else { continue; }
+                } else { continue; };
+
+                // Validate path from first token to last token.
+                if fp == lp {
+                    // Same token — already validated above.
+                    if automaton.is_match(&first_state) {
+                        doc_bitset.insert(doc_id);
+                        highlights.push((doc_id, first_bf as usize, last_bt as usize));
                     }
-                }
-
-                // Feed target literal's token
-                if let Some(tok_ord) = pm.ordinal_at(e.doc_id, t_pos) {
-                    if let Some(text) = ord_to_term(tok_ord as u64) {
-                        for &byte in text.as_bytes() {
-                            state = automaton.accept(&state, byte);
-                            if !automaton.can_match(&state) { alive = false; break; }
-                        }
-                    }
-                }
-
-                if alive && automaton.is_match(&state) {
-                    doc_bitset.insert(e.doc_id);
-                    highlights.push((e.doc_id, byte_from as usize, target_byte_to as usize));
-                }
-            }
-        }
-        posmap_handled = true;
-        eprintln!("[regex-timer] posmap walk: validated {} docs", doc_bitset.len());
-    }
-
-    // 3c: Gap>0 cross-token — fallback when no PosMap or single-literal.
-    if !posmap_handled && !gap_candidates.is_empty() {
-        if let Some(sib_table) = sfx_reader.sibling_table() {
-            let gapmap = sfx_reader.gapmap();
-
-            for &(ord, si, ref dfa_state) in &gap_candidates {
-                // Precompute gap>0 siblings + their text ONCE per ordinal.
-                let sibling_texts: Vec<(u32, String)> = sib_table
-                    .siblings(ord as u32)
-                    .into_iter()
-                    .filter(|s| s.gap_len > 0)
-                    .filter_map(|s| {
-                        ord_to_term(s.next_ordinal as u64)
-                            .map(|text| (s.next_ordinal, text))
-                    })
-                    .collect();
-
-                if sibling_texts.is_empty() {
-                    continue;
-                }
-
-                let first_entries = if let Some(ref allowed) = allowed_docs {
-                    resolver.resolve_filtered(ord, allowed)
                 } else {
-                    resolver.resolve(ord)
-                };
-
-                // Seed: (doc_id, position, byte_from, dfa_state, current_ordinal)
-                let mut active: Vec<(DocId, u32, u32, A::State, u64)> = Vec::new();
-                for fe in &first_entries {
-                    active.push((
-                        fe.doc_id,
-                        fe.position,
-                        fe.byte_from + si as u32,
-                        dfa_state.clone(),
-                        ord,
-                    ));
-                }
-
-                for _depth in 0..MAX_CONTINUATION_DEPTH {
-                    if active.is_empty() {
-                        break;
-                    }
-
-                    let mut next_active: Vec<(DocId, u32, u32, A::State, u64)> = Vec::new();
-
-                    for &(doc_id, pos, byte_from, ref state, cur_ord) in &active {
-                        let gap_bytes = gapmap.read_separator(doc_id, pos, pos + 1);
-                        let gap_bytes = match gap_bytes {
-                            Some(g) if !is_value_boundary(g) => g,
-                            _ => continue,
-                        };
-
-                        // Empty gap = contiguous tokens → already handled by Phase 2/3b.
-                        if gap_bytes.is_empty() {
-                            continue;
-                        }
-
-                        // Feed gap bytes ONCE per doc — if DFA dies, skip ALL siblings.
-                        let mut gap_state = state.clone();
-                        let mut gap_alive = true;
-                        for &byte in gap_bytes {
-                            gap_state = automaton.accept(&gap_state, byte);
-                            if !automaton.can_match(&gap_state) {
-                                gap_alive = false;
-                                break;
-                            }
-                        }
-                        if !gap_alive {
-                            continue;
-                        }
-
-                        // Reuse precomputed sibling texts when possible.
-                        let owned_sibs;
-                        let sibs: &[(u32, String)] = if cur_ord == ord {
-                            &sibling_texts
-                        } else {
-                            // Deeper depth: different ordinal, recompute.
-                            owned_sibs = sib_table
-                                .siblings(cur_ord as u32)
-                                .into_iter()
-                                .filter(|s| s.gap_len > 0)
-                                .filter_map(|s| {
-                                    ord_to_term(s.next_ordinal as u64)
-                                        .map(|text| (s.next_ordinal, text))
-                                })
-                                .collect::<Vec<_>>();
-                            &owned_sibs
-                        };
-
-                        for (next_ord, next_text) in sibs {
-                            let mut s = gap_state.clone();
-                            let mut alive = true;
-                            for &byte in next_text.as_bytes() {
-                                s = automaton.accept(&s, byte);
-                                if !automaton.can_match(&s) {
-                                    alive = false;
-                                    break;
-                                }
-                            }
-                            if !alive {
-                                continue;
-                            }
-
-                            // Verify position adjacency
-                            let next_entries = resolver.resolve(*next_ord as u64);
-                            for ne in &next_entries {
-                                if ne.doc_id == doc_id && ne.position == pos + 1 {
-                                    if automaton.is_match(&s) {
-                                        doc_bitset.insert(doc_id);
-                                        highlights.push((
-                                            doc_id,
-                                            byte_from as usize,
-                                            ne.byte_to as usize,
-                                        ));
-                                    }
-                                    if automaton.can_match(&s) && !automaton.is_match(&s) {
-                                        next_active.push((
-                                            doc_id,
-                                            ne.position,
-                                            byte_from,
-                                            s.clone(),
-                                            *next_ord as u64,
-                                        ));
-                                    }
-                                }
-                            }
+                    // Walk intermediate tokens via PosMap.
+                    let result = literal_resolve::validate_path(
+                        automaton, &first_state, pm, sfx_reader, ord_to_term,
+                        doc_id, fp, lp,
+                    );
+                    if let Some(final_state) = result {
+                        if automaton.is_match(&final_state) {
+                            doc_bitset.insert(doc_id);
+                            highlights.push((doc_id, first_bf as usize, last_bt as usize));
                         }
                     }
-
-                    active = next_active;
                 }
+            }
+        } else {
+            // No PosMap — accept all ordered matches (conservative).
+            for &(doc_id, first_bf, last_bt) in &ordered {
+                doc_bitset.insert(doc_id);
+                highlights.push((doc_id, first_bf as usize, last_bt as usize));
             }
         }
     }
 
-    let phase3c_us = t3c.elapsed().as_micros();
     let total_us = t_total.elapsed().as_micros();
-
     eprintln!(
-        "[regex-timer] '{}' literal='{}' | walk={}us ({}ent,{}par) | p1={}us ({}acc,{}ct) | p2={}us ({}g0,{}gap) | p3a={}us | p3b={}us | p3c={}us | total={}us | {}docs,{}hl",
-        pattern, literal,
-        walk_us, walk_entries, walk_parents,
-        phase1_us, accepted.len(), cross_token.len(),
-        phase2_us, valid_gap0_chains.len(), gap_candidates.len(),
-        phase3a_us, phase3b_us, phase3c_us,
-        total_us,
+        "[regex-timer] '{}' | find={}us | validate={}us | total={}us | {}docs,{}hl",
+        pattern, find_us, t1.elapsed().as_micros(), total_us,
         doc_bitset.len(), highlights.len(),
     );
 
     Ok((doc_bitset, highlights))
 }
+
 
 /// Sibling-accelerated continuation: replaces Walk 2 (DFA × SFX FST) with
 /// sibling link lookup + ord_to_term + DFA byte feed. Works for both gap=0
