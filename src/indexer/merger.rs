@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use columnar::{
@@ -617,6 +617,9 @@ impl IndexMerger {
         serializer: &mut SegmentSerializer,
         doc_mapping: &[DocAddress],
     ) -> crate::Result<()> {
+        use std::time::Instant;
+        let t_merge_total = Instant::now();
+
         let sfx_fields: Vec<Field> = self
             .schema
             .fields()
@@ -658,52 +661,10 @@ impl IndexMerger {
                 .map(|opt| opt.as_ref().and_then(|bytes| SfxFileReader::open(bytes).ok()))
                 .collect();
 
-            // Step 1: collect unique tokens (fast path, no alive check needed for ordering)
-            let has_deletes = self.readers.iter().any(|r| r.alive_bitset().is_some());
-            let mut unique_tokens = BTreeSet::new();
-            if has_deletes {
-                for (seg_ord, reader) in (*self.readers).iter().enumerate() {
-                    if let Ok(inv_idx) = reader.inverted_index(field) {
-                        let term_dict = inv_idx.terms();
-                        let alive = reader.alive_bitset();
-                        let mut stream = term_dict.stream()?;
-                        while stream.advance() {
-                            if let Ok(s) = std::str::from_utf8(stream.key()) {
-                                let ti = stream.value().clone();
-                                let mut postings = inv_idx.read_postings_from_terminfo(
-                                    &ti, IndexRecordOption::Basic)?;
-                                let has_alive_doc = loop {
-                                    let doc = postings.doc();
-                                    if doc == TERMINATED { break false; }
-                                    let is_alive = alive.map_or(true, |bs| bs.is_alive(doc));
-                                    if is_alive && reverse_doc_map[seg_ord].contains_key(&doc) {
-                                        break true;
-                                    }
-                                    postings.advance();
-                                };
-                                if has_alive_doc {
-                                    unique_tokens.insert(s.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                for reader in self.readers.iter() {
-                    if let Ok(inv_idx) = reader.inverted_index(field) {
-                        let mut stream = inv_idx.terms().stream()?;
-                        while stream.advance() {
-                            if let Ok(s) = std::str::from_utf8(stream.key()) {
-                                unique_tokens.insert(s.to_string());
-                            }
-                        }
-                    }
-                }
-            }
+            // Step 1: SKIP FST rebuild (deferred to commit time)
 
-            // Step 2: SKIP FST rebuild (deferred to commit time)
-
-            // Step 3: Copy GapMap in merge order
+            // Step 2: Copy GapMap in merge order
+            let t_gapmap = Instant::now();
             let mut gapmap_writer = GapMapWriter::new();
             for &doc_addr in doc_mapping {
                 let seg_ord = doc_addr.segment_ord as usize;
@@ -716,11 +677,16 @@ impl IndexMerger {
                 }
             }
 
-            // Step 4: Merge sfxpost + posmap + bytemap with doc_id remapping
+            let gapmap_ms = t_gapmap.elapsed().as_millis();
+
+            // Step 3: Merge sfxpost + posmap + bytemap via N-way merge-sort on term dicts.
+            // Single pass: no BTreeSet, no HashMap<String,u32>, no String allocations.
+            let t_nway = Instant::now();
             let mut sfxpost_data: Option<Vec<u8>> = None;
             let mut posmap_data: Option<Vec<u8>> = None;
             let mut bytemap_data: Option<Vec<u8>> = None;
             {
+                // Load sfxpost readers
                 let mut segment_sfxpost: Vec<Option<Vec<u8>>> = Vec::with_capacity(self.readers.len());
                 let mut any_has_sfxpost = false;
                 for reader in self.readers.iter() {
@@ -740,64 +706,131 @@ impl IndexMerger {
                         .map(|opt| opt.as_ref().and_then(|b| SfxPostReaderV2::open_slice(b)))
                         .collect();
 
-                    let mut token_to_ordinal: Vec<HashMap<String, u32>> = Vec::with_capacity(self.readers.len());
-                    for reader in self.readers.iter() {
-                        let mut map = HashMap::new();
-                        if let Ok(inv_idx) = reader.inverted_index(field) {
-                            let term_dict = inv_idx.terms();
-                            let mut stream = term_dict.stream()?;
-                            let mut ord = 0u32;
-                            while stream.advance() {
-                                if let Ok(s) = std::str::from_utf8(stream.key()) {
-                                    map.insert(s.to_string(), ord);
-                                }
-                                ord += 1;
+                    // Load bytemap readers (for direct bitmap copy)
+                    let segment_bytemap_bytes: Vec<Option<Vec<u8>>> = self.readers.iter()
+                        .map(|reader| reader.bytemap_file(field)
+                            .and_then(|fs| fs.read_bytes().ok())
+                            .map(|b| b.as_ref().to_vec()))
+                        .collect();
+                    let bytemap_readers: Vec<Option<crate::suffix_fst::ByteBitmapReader<'_>>> =
+                        segment_bytemap_bytes.iter()
+                            .map(|opt| opt.as_ref().and_then(|b| crate::suffix_fst::ByteBitmapReader::open(b)))
+                            .collect();
+
+                    // Open N term dict streams (sorted, one per segment).
+                    // inv_indexes must outlive streams (streams borrow term dicts).
+                    let inv_indexes: Vec<Option<Arc<crate::InvertedIndexReader>>> = self.readers.iter()
+                        .map(|r| r.inverted_index(field).ok())
+                        .collect();
+                    let mut streams: Vec<Option<crate::termdict::TermStreamer<'_>>> = Vec::new();
+                    let mut stream_ords: Vec<u32> = Vec::new();
+                    for inv_opt in &inv_indexes {
+                        if let Some(inv_idx) = inv_opt {
+                            let mut stream = inv_idx.terms().stream()?;
+                            if stream.advance() {
+                                streams.push(Some(stream));
+                            } else {
+                                streams.push(None);
                             }
+                        } else {
+                            streams.push(None);
                         }
-                        token_to_ordinal.push(map);
+                        stream_ords.push(0);
                     }
 
-                    let mut sfxpost_writer = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::new(unique_tokens.len());
+                    // Count total unique tokens for writer pre-allocation (estimate: max across segments)
+                    let max_terms: usize = sfxpost_readers.iter()
+                        .filter_map(|r| r.as_ref().map(|r| r.num_terms() as usize))
+                        .sum();
+
+                    let mut sfxpost_writer = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::new(max_terms);
                     let mut posmap_writer = crate::suffix_fst::PosMapWriter::new();
                     let mut bytemap_writer = crate::suffix_fst::ByteBitmapWriter::new();
-                    bytemap_writer.ensure_capacity(unique_tokens.len() as u32);
+                    let mut new_ord = 0u32;
 
-                    for (new_ord, token) in unique_tokens.iter().enumerate() {
-                        // Record byte bitmap for this token.
-                        bytemap_writer.record_token(new_ord as u32, token.as_bytes());
+                    // N-way merge-sort: find smallest key across all streams, collect sources, advance
+                    loop {
+                        // Find the smallest key among all active stream heads
+                        let mut min_key: Option<Vec<u8>> = None;
+                        for (seg_ord, stream_opt) in streams.iter().enumerate() {
+                            if let Some(stream) = stream_opt {
+                                let key = stream.key();
+                                if min_key.as_ref().map_or(true, |mk| key < mk.as_slice()) {
+                                    min_key = Some(key.to_vec());
+                                }
+                            }
+                        }
+                        let Some(current_key) = min_key else { break; };
 
-                        let mut merged: Vec<(u32, u32, u32, u32)> = Vec::new();
-                        for (seg_ord, sfxpost_reader) in sfxpost_readers.iter().enumerate() {
-                            if let Some(reader) = sfxpost_reader {
-                                if let Some(&old_ord) = token_to_ordinal[seg_ord].get(token.as_str()) {
-                                    for e in reader.entries(old_ord) {
-                                        if let Some(&new_doc) = reverse_doc_map[seg_ord].get(&e.doc_id) {
-                                            merged.push((new_doc, e.token_index, e.byte_from, e.byte_to));
-                                            crate::diag_emit!(crate::diag::DiagEvent::MergeDocRemapped {
-                                                field_id: field.field_id(),
-                                                token: token.clone(),
-                                                old_doc_id: e.doc_id,
-                                                new_doc_id: new_doc,
-                                            });
-                                        }
+                        // Collect all segments that have this token + their ordinals
+                        let mut sources: Vec<(usize, u32)> = Vec::new(); // (seg_ord, old_ordinal)
+                        for (seg_ord, stream_opt) in streams.iter().enumerate() {
+                            if let Some(stream) = stream_opt {
+                                if stream.key() == current_key.as_slice() {
+                                    sources.push((seg_ord, stream_ords[seg_ord]));
+                                }
+                            }
+                        }
+
+                        // Check if any source has alive entries (for delete handling)
+                        let mut has_entries = false;
+
+                        // Bytemap: copy from the first source that has it
+                        let mut bytemap_copied = false;
+                        for &(seg_ord, old_ord) in &sources {
+                            if !bytemap_copied {
+                                if let Some(Some(bm_reader)) = bytemap_readers.get(seg_ord) {
+                                    if let Some(bitmap) = bm_reader.bitmap(old_ord) {
+                                        bytemap_writer.copy_bitmap(new_ord, bitmap);
+                                        bytemap_copied = true;
                                     }
                                 }
                             }
                         }
-                        for &(doc_id, ti, bf, bt) in &merged {
-                            sfxpost_writer.add_entry(new_ord as u32, doc_id, ti, bf, bt);
-                            // Record position → ordinal mapping.
-                            posmap_writer.add(doc_id, ti, new_ord as u32);
+                        if !bytemap_copied {
+                            // Fallback: build from key bytes
+                            bytemap_writer.record_token(new_ord, &current_key);
+                        }
+
+                        // Sfxpost + posmap: merge entries from all sources, remap doc_ids
+                        for &(seg_ord, old_ord) in &sources {
+                            if let Some(Some(reader)) = sfxpost_readers.get(seg_ord) {
+                                for e in reader.entries(old_ord) {
+                                    if let Some(&new_doc) = reverse_doc_map[seg_ord].get(&e.doc_id) {
+                                        sfxpost_writer.add_entry(new_ord, new_doc, e.token_index, e.byte_from, e.byte_to);
+                                        posmap_writer.add(new_doc, e.token_index, new_ord);
+                                        has_entries = true;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Advance all streams that matched this key
+                        for &(seg_ord, _) in &sources {
+                            if let Some(ref mut stream) = streams[seg_ord] {
+                                stream_ords[seg_ord] += 1;
+                                if !stream.advance() {
+                                    streams[seg_ord] = None;
+                                }
+                            }
+                        }
+
+                        if has_entries {
+                            new_ord += 1;
                         }
                     }
+
                     sfxpost_data = Some(sfxpost_writer.finish());
                     posmap_data = Some(posmap_writer.serialize());
                     bytemap_data = Some(bytemap_writer.serialize());
                 }
             }
 
+            let nway_ms = t_nway.elapsed().as_millis();
+
             // Write gapmap as a partial .sfx file (empty FST, gapmap only).
             // The FST will be rebuilt at commit time.
+            let t_write = Instant::now();
             let gapmap_data = gapmap_writer.serialize();
             let sfx_file = SfxFileWriter::new(
                 Vec::new(),  // empty FST — rebuilt at commit
@@ -817,12 +850,22 @@ impl IndexMerger {
             if let Some(ref bytemap) = bytemap_data {
                 serializer.write_bytemap(field.field_id(), bytemap)?;
             }
+            let write_ms = t_write.elapsed().as_millis();
+
+            eprintln!(
+                "[sfx-profile] merge_sfx: {}segs {}docs | gapmap={}ms nway_merge={}ms write={}ms",
+                self.readers.len(), doc_mapping.len(), gapmap_ms, nway_ms, write_ms,
+            );
+
             sfx_field_ids.push(field.field_id());
         }
 
         if !sfx_field_ids.is_empty() {
             serializer.write_sfx_manifest(&sfx_field_ids)?;
         }
+
+        let merge_total_ms = t_merge_total.elapsed().as_millis();
+        eprintln!("[sfx-profile] merge_sfx_deferred total={}ms", merge_total_ms);
 
         Ok(())
     }

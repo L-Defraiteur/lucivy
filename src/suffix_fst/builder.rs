@@ -144,8 +144,10 @@ pub fn decode_parent_entries(data: &[u8]) -> Vec<ParentEntry> {
 /// - OutputTable bytes: for multi-parent suffixes, variable-length records
 ///   containing packed (raw_ordinal, SI) entries
 pub struct SuffixFstBuilder {
-    /// Unsorted, with potential duplicates. Sorted and grouped at build time.
-    entries: Vec<(String, ParentEntry)>,
+    /// Contiguous buffer for all suffix keys (no individual String allocations).
+    key_buf: Vec<u8>,
+    /// (key_start, key_len, parent) — offsets into key_buf.
+    entries: Vec<(u32, u32, ParentEntry)>,
     min_suffix_len: usize,
     num_terms: usize,
 }
@@ -159,6 +161,7 @@ impl SuffixFstBuilder {
     /// Create a new builder with a specific minimum suffix length.
     pub fn with_min_suffix_len(min: usize) -> Self {
         Self {
+            key_buf: Vec::new(),
             entries: Vec::new(),
             min_suffix_len: min,
             num_terms: 0,
@@ -183,34 +186,36 @@ impl SuffixFstBuilder {
                 break;
             }
             let prefix = if si == 0 { SI0_PREFIX } else { SI_REST_PREFIX };
-            let mut key = String::with_capacity(1 + suffix.len());
-            key.push(prefix as char);
-            key.push_str(suffix);
+            // Write key directly into contiguous buffer (no String allocation)
+            let key_start = self.key_buf.len() as u32;
+            self.key_buf.push(prefix);
+            self.key_buf.extend_from_slice(suffix.as_bytes());
+            let key_len = (self.key_buf.len() as u32) - key_start;
             self.entries.push((
-                key,
+                key_start,
+                key_len,
                 ParentEntry { raw_ordinal, si: si as u16, token_len: lower.len() as u16 },
             ));
-            crate::diag_emit!(crate::diag::DiagEvent::SuffixAdded {
-                token: token.to_string(),
-                ordinal: raw_ordinal,
-                suffix: suffix.to_string(),
-                si: si as u16,
-            });
         }
     }
 
     /// Build the FST and output table bytes.
     /// Sorts entries, deduplicates, groups by suffix key, then builds FST.
     pub fn build(mut self) -> Result<(Vec<u8>, Vec<u8>), lucivy_fst::Error> {
-        // Sort by suffix key (lexicographic) then by (raw_ordinal, si) for stable dedup
+        let buf = &self.key_buf;
+        // Sort by suffix key (lexicographic) then by (raw_ordinal, si) for stable dedup.
+        // Compares slices into the contiguous buffer — no String ownership.
         self.entries.sort_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then(a.1.raw_ordinal.cmp(&b.1.raw_ordinal))
-                .then(a.1.si.cmp(&b.1.si))
+            buf[a.0 as usize..(a.0 + a.1) as usize]
+                .cmp(&buf[b.0 as usize..(b.0 + b.1) as usize])
+                .then(a.2.raw_ordinal.cmp(&b.2.raw_ordinal))
+                .then(a.2.si.cmp(&b.2.si))
         });
         // Deduplicate
         self.entries.dedup_by(|a, b| {
-            a.0 == b.0 && a.1.raw_ordinal == b.1.raw_ordinal && a.1.si == b.1.si
+            buf[a.0 as usize..(a.0 + a.1) as usize] == buf[b.0 as usize..(b.0 + b.1) as usize]
+                && a.2.raw_ordinal == b.2.raw_ordinal
+                && a.2.si == b.2.si
         });
 
         let mut fst_builder = MapBuilder::memory();
@@ -219,27 +224,30 @@ impl SuffixFstBuilder {
 
         let mut i = 0;
         while i < self.entries.len() {
-            let key = &self.entries[i].0;
+            let (ks, kl, _) = self.entries[i];
+            let key = &buf[ks as usize..(ks + kl) as usize];
             // Collect all parents for this suffix key
             let mut j = i + 1;
-            while j < self.entries.len() && self.entries[j].0 == *key {
+            while j < self.entries.len() {
+                let (js, jl, _) = self.entries[j];
+                if &buf[js as usize..(js + jl) as usize] != key { break; }
                 j += 1;
             }
             let num_parents = j - i;
 
             let output = if num_parents == 1 {
-                let p = &self.entries[i].1;
+                let p = &self.entries[i].2;
                 encode_single_parent(p.raw_ordinal, p.si, p.token_len)
             } else {
                 let parents: Vec<ParentEntry> = self.entries[i..j]
                     .iter()
-                    .map(|(_, p)| p.clone())
+                    .map(|e| e.2.clone())
                     .collect();
                 let record = encode_parent_entries(&parents);
                 let offset = output_table.add(&record);
                 encode_multi_parent(offset)
             };
-            fst_builder.insert(key.as_bytes(), output)?;
+            fst_builder.insert(key, output)?;
             self.num_terms += 1;
 
             i = j;

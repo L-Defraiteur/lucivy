@@ -41,6 +41,15 @@ impl ByteBitmapWriter {
         }
     }
 
+    /// Copy an existing bitmap for the given ordinal (from a source ByteBitmapReader).
+    pub fn copy_bitmap(&mut self, ordinal: u32, bitmap: &[u8; 32]) {
+        let o = ordinal as usize;
+        if o >= self.bitmaps.len() {
+            self.bitmaps.resize(o + 1, [0u8; 32]);
+        }
+        self.bitmaps[o] = *bitmap;
+    }
+
     /// Serialize to binary format.
     pub fn serialize(&self) -> Vec<u8> {
         let num = self.bitmaps.len() as u32;
