@@ -95,8 +95,14 @@ fn test_luce_playground_search() {
                         let start = hl[0];
                         let end = hl[1].min(content.len());
                         let matched = &content[start..end];
-                        let context_start = start.saturating_sub(10);
-                        let context_end = (end + 10).min(content.len());
+                        let mut context_start = start.saturating_sub(10);
+                        while context_start > 0 && !content.is_char_boundary(context_start) {
+                            context_start -= 1;
+                        }
+                        let mut context_end = (end + 10).min(content.len());
+                        while context_end < content.len() && !content.is_char_boundary(context_end) {
+                            context_end += 1;
+                        }
                         let context = &content[context_start..context_end];
                         eprintln!("  doc={} score={:.4} hl=[{},{}] = \"{}\"  context: ...{}...",
                             addr.doc_id, score, start, end, matched, context);

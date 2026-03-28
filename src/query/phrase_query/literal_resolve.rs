@@ -159,13 +159,15 @@ pub fn intersect_literals_ordered(
 /// `trigrams_by_doc[i]` = matches for trigram i (in query order).
 /// `query_positions[i]` = byte position of trigram i in the query string.
 ///
-/// Returns: `(doc_id, first_byte_from, last_byte_to)` for validated matches.
+/// Returns: `(doc_id, first_byte_from, last_byte_to, first_tri_idx)` for validated matches.
+/// `first_tri_idx` is the index of the first trigram in the best chain — needed
+/// to compute the actual match start position (`first_bf - query_positions[first_tri_idx]`).
 pub fn intersect_trigrams_with_threshold(
     trigrams_by_doc: &[MatchesByDoc],
     query_positions: &[usize],
     threshold: usize,
     distance: u8,
-) -> Vec<(DocId, u32, u32)> {
+) -> Vec<(DocId, u32, u32, usize)> {
     if trigrams_by_doc.is_empty() || threshold == 0 {
         return Vec::new();
     }
@@ -178,7 +180,7 @@ pub fn intersect_trigrams_with_threshold(
         }
     }
 
-    let mut results = Vec::new();
+    let mut results: Vec<(DocId, u32, u32, usize)> = Vec::new();
 
     for &doc_id in &all_docs {
         // Collect all (tri_index, byte_from, byte_to) for this doc, sorted by byte_from
@@ -192,10 +194,21 @@ pub fn intersect_trigrams_with_threshold(
         }
         entries.sort_by_key(|&(_, bf, _)| bf);
 
-        // Greedy scan: find the longest subsequence with increasing tri_index.
-        // Then check byte span consistency.
-        let mut best_chain: Vec<(usize, u32, u32)> = Vec::new();
+        // Greedy scan: find ALL chains with increasing tri_index.
+        // Each chain that meets the threshold + byte span check becomes a result.
+        // This handles multiple occurrences of the pattern in the same doc.
         let mut current_chain: Vec<(usize, u32, u32)> = Vec::new();
+
+        let mut check_chain = |chain: &[(usize, u32, u32)], results: &mut Vec<(DocId, u32, u32, usize)>| {
+            if chain.len() < threshold { return; }
+            let first = &chain[0];
+            let last = &chain[chain.len() - 1];
+            let text_span = last.1 as i64 - first.1 as i64;
+            let query_span = query_positions[last.0] as i64 - query_positions[first.0] as i64;
+            let span_diff = (text_span - query_span).unsigned_abs();
+            if span_diff > distance as u64 { return; }
+            results.push((doc_id, first.1, last.2, first.0));
+        };
 
         for &(tri_idx, bf, bt) in &entries {
             if current_chain.is_empty()
@@ -203,42 +216,13 @@ pub fn intersect_trigrams_with_threshold(
             {
                 current_chain.push((tri_idx, bf, bt));
             } else {
-                // tri_index not increasing — restart chain from this entry
-                if current_chain.len() > best_chain.len() {
-                    best_chain = current_chain.clone();
-                }
+                // Chain broken — emit if valid, start new chain
+                check_chain(&current_chain, &mut results);
                 current_chain.clear();
                 current_chain.push((tri_idx, bf, bt));
             }
         }
-        if current_chain.len() > best_chain.len() {
-            best_chain = current_chain;
-        }
-
-        if best_chain.len() < threshold {
-            eprintln!("[intersect-debug] doc={} chain_len={} < threshold={} → skip",
-                doc_id, best_chain.len(), threshold);
-            continue;
-        }
-
-        // Check byte span consistency: |text_span - query_span| <= distance
-        let first = &best_chain[0];
-        let last = &best_chain[best_chain.len() - 1];
-
-        let text_span = last.1 as i64 - first.1 as i64;
-        let query_span = query_positions[last.0] as i64 - query_positions[first.0] as i64;
-        let span_diff = (text_span - query_span).unsigned_abs();
-
-        eprintln!("[intersect-debug] doc={} chain_len={} first_tri={} last_tri={} text_span={} query_span={} diff={} d={}",
-            doc_id, best_chain.len(), first.0, last.0, text_span, query_span, span_diff, distance);
-
-        if span_diff > distance as u64 {
-            eprintln!("[intersect-debug] doc={} → span_diff {} > d {} → REJECTED", doc_id, span_diff, distance);
-            continue;
-        }
-
-        eprintln!("[intersect-debug] doc={} → ACCEPTED bf={} bt={}", doc_id, first.1, last.2);
-        results.push((doc_id, first.1, last.2));
+        check_chain(&current_chain, &mut results);
     }
 
     results

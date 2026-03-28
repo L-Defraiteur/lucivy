@@ -599,8 +599,9 @@ pub fn fuzzy_contains_via_trigram(
     let mut doc_bitset = BitSet::with_max_value(max_doc);
     let mut highlights: Vec<(DocId, usize, usize)> = Vec::new();
 
-    for (doc_id, first_bf, last_bt) in &candidates {
+    for (doc_id, first_bf, last_bt, first_tri_idx) in &candidates {
         let doc_id = *doc_id;
+        let first_tri_idx = *first_tri_idx;
 
         // Find the token position for first_bf from the trigram matches
         let first_pos = all_matches.iter()
@@ -612,43 +613,104 @@ pub fn fuzzy_contains_via_trigram(
         let Some(fp) = first_pos else { continue; };
 
         if let Some(pm) = &posmap {
-            // Feed first token from the trigram's offset within the token.
-            // E.g. query "3dbis", token "rag3db": trigram "3db" at byte 3 in token
-            // → feed from byte 3 ("3db") not byte 0 ("rag3db").
-            let first_trigram = ngrams.first().map(|s| s.as_str()).unwrap_or("");
-            let first_state = if let Some(tok_ord) = pm.ordinal_at(doc_id, fp) {
-                if let Some(text) = ord_to_term(tok_ord as u64) {
-                    let offset = text.find(first_trigram).unwrap_or(0);
-                    let mut s = start_state.clone();
-                    let mut alive = true;
-                    for &byte in &text.as_bytes()[offset..] {
-                        s = automaton.accept(&s, byte);
-                        if !automaton.can_match(&s) { alive = false; break; }
-                    }
-                    if !alive { continue; }
-                    s
-                } else { continue; }
-            } else { continue; };
-
-            if automaton.is_match(&first_state) {
-                doc_bitset.insert(doc_id);
-                highlights.push((doc_id, *first_bf as usize, *last_bt as usize));
-                continue;
-            }
-
-            // Walk forward via PosMap for cross-token validation
+            // Fix cross-token DFA validation:
+            // Build the text around the match region, then validate with a
+            // sliding-window DFA scan. This handles both same-token and
+            // cross-token matches uniformly.
+            //
+            // Gap handling: for single-word queries (no spaces), skip gap
+            // bytes — the SFX cross-token model concatenates tokens without
+            // separators. For multi-word queries (has spaces), include gaps
+            // — the spaces in the query correspond to token separators.
+            let back_bytes = query_positions[first_tri_idx];
+            let lookback_positions = (back_bytes as u32 + 2).min(fp);
+            let start_pos = fp - lookback_positions;
+            // Only look forward enough to cover the query — NOT 64 tokens,
+            // which would create a huge concat text and cause false DFA matches.
+            let forward_bytes = query_text.len() + distance as usize;
+            let forward_positions = forward_bytes as u32 / 2 + 3;
             let max_pos = pm.num_tokens(doc_id);
-            let end_pos = (fp + MAX_CONTINUATION_DEPTH as u32).min(max_pos);
-            if end_pos > fp {
-                if let Some(final_state) = literal_resolve::validate_path(
-                    &automaton, &first_state, pm, sfx_reader, ord_to_term,
-                    doc_id, fp, end_pos - 1,
-                ) {
-                    if automaton.is_match(&final_state) {
-                        doc_bitset.insert(doc_id);
-                        highlights.push((doc_id, *first_bf as usize, *last_bt as usize));
+            let end_pos = (fp + forward_positions).min(max_pos);
+
+            let include_gaps = query_text.contains(' ');
+            let mut concat_bytes: Vec<u8> = Vec::new();
+            let mut fp_concat_offset: usize = 0;
+            for pos in start_pos..end_pos {
+                if pos == fp { fp_concat_offset = concat_bytes.len(); }
+                if include_gaps && pos > start_pos {
+                    let gap = sfx_reader.gapmap().read_separator(doc_id, pos - 1, pos);
+                    if let Some(gap_bytes) = gap {
+                        if is_value_boundary(gap_bytes) { break; }
+                        concat_bytes.extend_from_slice(gap_bytes);
                     }
                 }
+                if let Some(tok_ord) = pm.ordinal_at(doc_id, pos) {
+                    if let Some(text) = ord_to_term(tok_ord as u64) {
+                        concat_bytes.extend_from_slice(text.as_bytes());
+                    }
+                }
+            }
+
+            // Find the first matched trigram near fp in concat to anchor the DFA.
+            // Search from fp_concat_offset to avoid matching a wrong occurrence
+            // of the trigram in an earlier token.
+            let trigram_bytes = ngrams[first_tri_idx].as_bytes();
+            let trigram_near_fp = concat_bytes[fp_concat_offset..].windows(trigram_bytes.len())
+                .position(|w| w == trigram_bytes)
+                .map(|p| p + fp_concat_offset);
+
+            let expected_start = trigram_near_fp
+                .map(|tp| tp.saturating_sub(query_positions[first_tri_idx]))
+                .unwrap_or(fp_concat_offset);
+
+            // Validate from the anchored position. Try expected_start first,
+            // then ±1 for edge cases (deletions/insertions at the start).
+            // Feed up to query_len + distance bytes and take the LONGEST match
+            // (the DFA can accept early via trailing deletions).
+            let mut matched = false;
+            let mut match_len: usize = 0;
+            let max_feed = query_text.len() + distance as usize + 1;
+            let try_offsets = [0i32, -1, 1];
+            for &offset in &try_offsets {
+                let start_byte = if offset < 0 {
+                    expected_start.checked_sub((-offset) as usize)
+                } else {
+                    Some(expected_start + offset as usize)
+                };
+                let Some(sb) = start_byte else { continue };
+                if sb >= concat_bytes.len() { continue; }
+                let mut s = start_state.clone();
+                let mut fed: usize = 0;
+                let mut local_matched = false;
+                let mut best_len: usize = 0;
+                let mut best_diff: usize = usize::MAX;
+                let qlen = query_text.len();
+                for &byte in &concat_bytes[sb..] {
+                    if fed >= max_feed { break; }
+                    s = automaton.accept(&s, byte);
+                    fed += 1;
+                    if !automaton.can_match(&s) { break; }
+                    if automaton.is_match(&s) {
+                        local_matched = true;
+                        let diff = (fed as isize - qlen as isize).unsigned_abs();
+                        if diff < best_diff {
+                            best_diff = diff;
+                            best_len = fed;
+                        }
+                    }
+                }
+                if local_matched {
+                    matched = true;
+                    match_len = best_len;
+                    break;
+                }
+            }
+
+            if matched {
+                doc_bitset.insert(doc_id);
+                let adj_bf = first_bf.saturating_sub(query_positions[first_tri_idx] as u32);
+                let adj_bt = adj_bf + match_len as u32;
+                highlights.push((doc_id, adj_bf as usize, adj_bt as usize));
             }
         } else {
             // No PosMap — accept trigram-filtered candidates conservatively
