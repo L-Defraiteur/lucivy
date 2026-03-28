@@ -162,6 +162,9 @@ where
     // 1. Walk 1 entries where match extends past token end (si + query_len > token_len)
     // 2. Tokens that END with a prefix of the query (token is shorter than query)
     //    → found by walking prefixes of the query: "sched" → check "sche", "sch", etc.
+    let _diag_query = query.to_string();
+    eprintln!("[contains-diag] query='{}' walk_results={} matches_before_continuation={}",
+        _diag_query, walk_results.len(), matches.len());
     if continuation && !prefix_only && query_len >= 2 {
         let gapmap = sfx_reader.gapmap();
 
@@ -195,6 +198,7 @@ where
         // "sched" → check tokens ending with "s", "sc", "sch", "sche"
         // A token ends with X if X is a suffix of the token → prefix_walk(X) with
         // si + len(X) == token_len.
+        let _src2_before = candidates.len();
         for k in 1..query_len {
             if !query_lower.is_char_boundary(k) { continue; }
             let prefix = &query_lower[..k];
@@ -215,6 +219,14 @@ where
                         }
                     }
                 }
+            }
+        }
+
+        if _diag_query == "rag3weaver" {
+            eprintln!("[contains-diag] after source1+2: {} candidate groups (src2 added {})",
+                candidates.len(), candidates.len() - _src2_before);
+            for (&consumed, entries) in &candidates {
+                eprintln!("[contains-diag]   consumed={}: {} entries", consumed, entries.len());
             }
         }
 
@@ -287,8 +299,16 @@ where
                 // Join candidates with continuation results
                 for &(doc_id, left_ti, byte_from) in entries {
                     let right_ti = left_ti + 1;
-                    let gap_ok = gapmap.read_separator(doc_id, left_ti, right_ti)
-                        .map_or(false, |sep| sep.is_empty());
+                    let gap_raw = gapmap.read_separator(doc_id, left_ti, right_ti);
+                    let gap_ok = gap_raw.map_or(false, |sep| sep.is_empty());
+                    if _diag_query == "rag3weaver" && depth == 0 {
+                        eprintln!("[contains-diag] depth={} consumed={} doc={} left_ti={} right_ti={} gap={:?} gap_ok={} full={} partial={}",
+                            depth, consumed, doc_id, left_ti, right_ti,
+                            gap_raw.map(|g| g.len()),
+                            gap_ok,
+                            full_match.contains_key(&(doc_id, right_ti)),
+                            partial_match.contains_key(&(doc_id, right_ti)));
+                    }
                     if !gap_ok { continue; }
 
                     if let Some(&byte_to) = full_match.get(&(doc_id, right_ti)) {
@@ -1139,6 +1159,12 @@ where
         sfx_reader.falling_walk(&query_lower)
     };
 
+    eprintln!("[cross-token-diag] query='{}' falling_walk candidates={}", query, candidates.len());
+    for (i, c) in candidates.iter().enumerate().take(5) {
+        eprintln!("[cross-token-diag]   cand[{}]: prefix_len={} parent_ord={} si={}",
+            i, c.prefix_len, c.parent.raw_ordinal, c.parent.si);
+    }
+
     let sibling_table = sfx_reader.sibling_table();
     let has_siblings = sibling_table.is_some() && ord_to_term.is_some();
 
@@ -1198,6 +1224,14 @@ where
 
                 // Get contiguous siblings of current token
                 let siblings = sib_table.contiguous_siblings(current_ord as u32);
+                if query == "rag3weaver" && chain.len() == 1 && cand.prefix_len == 4 && cand_idx == 0 {
+                    eprintln!("[cross-token-diag] first cand: ord={} rem='{}' siblings={:?}",
+                        current_ord, rem,
+                        siblings.iter().map(|s| {
+                            let t = get_term(*s as u64).unwrap_or_default();
+                            format!("{}({})", s, t)
+                        }).collect::<Vec<_>>());
+                }
                 let mut matched = false;
 
                 for next_ord in &siblings {
@@ -1254,6 +1288,9 @@ where
             }
         }
     }
+
+    eprintln!("[cross-token-diag] query='{}' valid_chains={} has_siblings={}",
+        query, valid_chains.len(), has_siblings);
 
     // Fuzzy left-side typos are handled by fuzzy_falling_walk above.
     // No need for sibling-first iteration — the DFA finds the split despite typos,

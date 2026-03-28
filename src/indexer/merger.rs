@@ -560,6 +560,7 @@ impl IndexMerger {
         let merge_start = Instant::now();
         let num_readers = self.readers.len();
         let total_docs: u32 = self.readers.iter().map(|r| r.num_docs()).sum();
+        eprintln!("[MERGE] start: {} segments, {} docs total", num_readers, total_docs);
         lucivy_trace!("[merge] start: {} segments, {} docs total", num_readers, total_docs);
 
         let doc_id_mapping = self.get_doc_id_from_concatenated_data()?;
@@ -998,6 +999,11 @@ impl IndexMerger {
                 &self.readers, field, &unique_tokens, &reverse_doc_map,
             )?;
 
+            // Step 4b: Merge sibling links
+            let sibling_data = sfx_merge::merge_sibling_links(
+                &sfx_data, &self.readers, field, &unique_tokens,
+            ).ok();
+
             // Step 5: Validate gapmap
             let errors = sfx_merge::validate_gapmap(&gapmap_data);
             if !errors.is_empty() {
@@ -1014,6 +1020,7 @@ impl IndexMerger {
                 fst_data, parent_list_data, gapmap_data,
                 doc_mapping.len() as u32, unique_tokens.len() as u32,
                 sfxpost_data,
+                sibling_data,
             )?;
 
             // PosMap + ByteBitmap: build from sfxpost data + term dict

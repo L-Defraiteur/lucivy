@@ -148,13 +148,17 @@ pub(crate) fn collect_tokens(
 pub(crate) fn build_fst(
     tokens: &BTreeSet<String>,
 ) -> crate::Result<(Vec<u8>, Vec<u8>)> {
+    let has_rag3weaver = tokens.contains("rag3weaver");
+    eprintln!("[build_fst] {} unique tokens, has 'rag3weaver': {}", tokens.len(), has_rag3weaver);
     let mut sfx_builder = SuffixFstBuilder::new();
     for (ordinal, token) in tokens.iter().enumerate() {
         sfx_builder.add_token(token, ordinal as u64);
     }
-    sfx_builder.build().map_err(|e| {
+    let result = sfx_builder.build().map_err(|e| {
         crate::LucivyError::SystemError(format!("sfx fst build: {e}"))
-    })
+    })?;
+    eprintln!("[build_fst] fst_data={} bytes, parent_list={} bytes", result.0.len(), result.1.len());
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -440,14 +444,18 @@ pub(crate) fn write_sfx(
     num_docs: u32,
     num_tokens: u32,
     sfxpost_data: Option<Vec<u8>>,
+    sibling_data: Option<Vec<u8>>,
 ) -> crate::Result<()> {
-    let sfx_file = SfxFileWriter::new(
+    let mut sfx_file = SfxFileWriter::new(
         fst_data,
         parent_list_data,
         gapmap_data,
         num_docs,
         num_tokens,
     );
+    if let Some(sib) = sibling_data {
+        sfx_file = sfx_file.with_sibling_data(sib);
+    }
     let sfx_bytes = sfx_file.to_bytes();
     serializer.write_sfx(field.field_id(), &sfx_bytes)?;
     if let Some(ref sfxpost) = sfxpost_data {
