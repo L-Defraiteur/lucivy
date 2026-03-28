@@ -563,8 +563,8 @@ pub fn fuzzy_contains_via_trigram(
     }
 
     // Threshold: each edit can break at most n adjacent n-grams.
-    // Add extra slack (+1) for cross-token trigrams that may not be findable.
-    let threshold = (ngrams.len() as i32 - n as i32 * distance as i32 - 1).max(1) as usize;
+    // Minimum 2 to avoid flooding with single-bigram false positives.
+    let threshold = (ngrams.len() as i32 - n as i32 * distance as i32 - 1).max(2) as usize;
     eprintln!("[fuzzy-debug] threshold={} (ngrams={}, n={}, d={})", threshold, ngrams.len(), n, distance);
 
     // Step 1: Find each n-gram via exact contains (cross-token aware)
@@ -673,43 +673,27 @@ pub fn fuzzy_contains_via_trigram(
                 }
             }
 
-            // Anchor DFA scan: find the trigram near fp in concat
-            let trigram_bytes = ngrams[first_tri_idx].as_bytes();
-            let trigram_near_fp = concat_bytes[fp_concat_offset..].windows(trigram_bytes.len())
-                .position(|w| w == trigram_bytes)
-                .map(|p| p + fp_concat_offset);
-
-            let expected_start = trigram_near_fp
-                .map(|tp| tp.saturating_sub(query_positions[first_tri_idx]))
-                .unwrap_or(fp_concat_offset);
-
-            // Validate DFA from anchored position (try ±1 for edge cases)
+            // Validate: slide DFA over ALL positions in concat.
+            // The concat is small (~8 tokens) so this is fast.
+            // Pick the match whose length is closest to query_len.
             let mut matched = false;
             let mut match_start: usize = 0;
             let mut match_len: usize = 0;
+            let mut global_best_diff: usize = usize::MAX;
             let max_feed = query_text.len() + distance as usize + 1;
-            let try_offsets = [0i32, -1, 1];
-            for &offset in &try_offsets {
-                let start_byte = if offset < 0 {
-                    expected_start.checked_sub((-offset) as usize)
-                } else {
-                    Some(expected_start + offset as usize)
-                };
-                let Some(sb) = start_byte else { continue };
-                if sb >= concat_bytes.len() { continue; }
+            let qlen = query_text.len();
+
+            for sb in 0..concat_bytes.len() {
                 let mut s = start_state.clone();
                 let mut fed: usize = 0;
-                let mut local_matched = false;
                 let mut best_len: usize = 0;
                 let mut best_diff: usize = usize::MAX;
-                let qlen = query_text.len();
                 for &byte in &concat_bytes[sb..] {
                     if fed >= max_feed { break; }
                     s = automaton.accept(&s, byte);
                     fed += 1;
                     if !automaton.can_match(&s) { break; }
                     if automaton.is_match(&s) {
-                        local_matched = true;
                         let diff = (fed as isize - qlen as isize).unsigned_abs();
                         if diff < best_diff {
                             best_diff = diff;
@@ -717,11 +701,11 @@ pub fn fuzzy_contains_via_trigram(
                         }
                     }
                 }
-                if local_matched {
-                    matched = true;
+                if best_diff < global_best_diff {
+                    global_best_diff = best_diff;
                     match_start = sb;
                     match_len = best_len;
-                    break;
+                    matched = true;
                 }
             }
 

@@ -196,33 +196,38 @@ pub fn intersect_trigrams_with_threshold(
 
         // Greedy scan: find ALL chains with increasing tri_index.
         // Each chain that meets the threshold + byte span check becomes a result.
-        // This handles multiple occurrences of the pattern in the same doc.
+        // Cap at MAX_CHAINS_PER_DOC to avoid O(N²) DFA validations on common bigrams.
+        const MAX_CHAINS_PER_DOC: usize = 20;
         let mut current_chain: Vec<(usize, u32, u32)> = Vec::new();
+        let results_before = results.len();
 
-        let mut check_chain = |chain: &[(usize, u32, u32)], results: &mut Vec<(DocId, u32, u32, usize)>| {
-            if chain.len() < threshold { return; }
+        let mut check_chain = |chain: &[(usize, u32, u32)], results: &mut Vec<(DocId, u32, u32, usize)>| -> bool {
+            if chain.len() < threshold { return false; }
+            if results.len() - results_before >= MAX_CHAINS_PER_DOC { return true; } // cap reached
             let first = &chain[0];
             let last = &chain[chain.len() - 1];
             let text_span = last.1 as i64 - first.1 as i64;
             let query_span = query_positions[last.0] as i64 - query_positions[first.0] as i64;
             let span_diff = (text_span - query_span).unsigned_abs();
-            if span_diff > distance as u64 { return; }
+            if span_diff > distance as u64 { return false; }
             results.push((doc_id, first.1, last.2, first.0));
+            false
         };
 
+        let mut capped = false;
         for &(tri_idx, bf, bt) in &entries {
+            if capped { break; }
             if current_chain.is_empty()
                 || tri_idx > current_chain.last().unwrap().0
             {
                 current_chain.push((tri_idx, bf, bt));
             } else {
-                // Chain broken — emit if valid, start new chain
-                check_chain(&current_chain, &mut results);
+                capped = check_chain(&current_chain, &mut results);
                 current_chain.clear();
                 current_chain.push((tri_idx, bf, bt));
             }
         }
-        check_chain(&current_chain, &mut results);
+        if !capped { check_chain(&current_chain, &mut results); }
     }
 
     results
