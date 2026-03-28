@@ -38,6 +38,16 @@ pub enum SegmentComponent {
         /// Schema field ID this suffix postings file belongs to.
         field_id: u32,
     },
+    /// Position-to-ordinal map for a specific field (reverse posting index).
+    PosMap {
+        /// Schema field ID.
+        field_id: u32,
+    },
+    /// Byte presence bitmap for a specific field (256-bit per ordinal).
+    ByteMap {
+        /// Schema field ID.
+        field_id: u32,
+    },
 }
 
 impl SegmentComponent {
@@ -55,6 +65,8 @@ impl SegmentComponent {
             SegmentComponent::Offsets => "offsets".to_string(),
             SegmentComponent::SuffixFst { field_id } => format!("{}.sfx", field_id),
             SegmentComponent::SuffixPost { field_id } => format!("{}.sfxpost", field_id),
+            SegmentComponent::PosMap { field_id } => format!("{}.posmap", field_id),
+            SegmentComponent::ByteMap { field_id } => format!("{}.bytemap", field_id),
         }
     }
 
@@ -85,6 +97,8 @@ impl SegmentComponent {
         for &fid in sfx_field_ids {
             components.push(SegmentComponent::SuffixFst { field_id: fid });
             components.push(SegmentComponent::SuffixPost { field_id: fid });
+            components.push(SegmentComponent::PosMap { field_id: fid });
+            components.push(SegmentComponent::ByteMap { field_id: fid });
         }
         components
     }
@@ -97,7 +111,8 @@ impl SegmentComponent {
 
     /// Is this a per-field component?
     pub fn is_per_field(&self) -> bool {
-        matches!(self, SegmentComponent::SuffixFst { .. } | SegmentComponent::SuffixPost { .. })
+        matches!(self, SegmentComponent::SuffixFst { .. } | SegmentComponent::SuffixPost { .. }
+            | SegmentComponent::PosMap { .. } | SegmentComponent::ByteMap { .. })
     }
 }
 
@@ -143,8 +158,8 @@ mod tests {
         assert!(all.contains(&SegmentComponent::SuffixPost { field_id: 1 }));
         assert!(all.contains(&SegmentComponent::SuffixFst { field_id: 2 }));
         assert!(all.contains(&SegmentComponent::SuffixPost { field_id: 2 }));
-        // 9 fixed + 2 sfx + 2 sfxpost = 13
-        assert_eq!(all.len(), 13);
+        // 9 fixed + 2×(sfx + sfxpost + posmap + bytemap) = 9 + 8 = 17
+        assert_eq!(all.len(), 17);
     }
 
     #[test]
