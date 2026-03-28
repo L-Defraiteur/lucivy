@@ -11,6 +11,8 @@ pub mod sibling_table;
 pub mod posmap;
 /// Byte presence bitmap: 256-bit bitmap per ordinal for fast pre-filtering.
 pub mod bytemap;
+/// SFX index file abstraction: trait + registry for per-field index files.
+pub mod index_registry;
 /// File I/O for `.sfx` and `.sfxpost` formats (reader/writer).
 pub mod file;
 mod interceptor;

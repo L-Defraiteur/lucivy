@@ -204,3 +204,45 @@ mod tests {
         assert_eq!(reader.ordinal_at(2, 0), Some(99));
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// SfxIndexFile implementation
+// ─────────────────────────────────────────────────────────────────────
+
+pub struct PosMapIndex;
+
+impl super::index_registry::SfxIndexFile for PosMapIndex {
+    fn id(&self) -> &'static str { "posmap" }
+    fn extension(&self) -> &'static str { "posmap" }
+
+    fn build(&self, ctx: &super::index_registry::SfxBuildContext) -> Vec<u8> {
+        let mut writer = PosMapWriter::new();
+        for (ord, postings) in ctx.token_postings.iter().enumerate() {
+            for &(doc_id, ti, _, _) in *postings {
+                writer.add(doc_id, ti, ord as u32);
+            }
+        }
+        writer.serialize()
+    }
+
+    fn merge(&self, _sources: &[Option<&[u8]>], ctx: &super::index_registry::SfxMergeContext) -> Vec<u8> {
+        let mut writer = PosMapWriter::new();
+        for (seg_ord, reader_opt) in ctx.sfxpost_readers.iter().enumerate() {
+            if let Some(reader) = reader_opt {
+                for &(new_ord, _) in ctx.merged_terms {
+                    let old_ord = ctx.ordinal_maps[seg_ord].iter()
+                        .find(|(_, new)| **new == new_ord)
+                        .map(|(&old, _)| old);
+                    if let Some(old_ord) = old_ord {
+                        for e in reader.entries(old_ord) {
+                            if let Some(&new_doc) = ctx.reverse_doc_map[seg_ord].get(&e.doc_id) {
+                                writer.add(new_doc, e.token_index, new_ord);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        writer.serialize()
+    }
+}
