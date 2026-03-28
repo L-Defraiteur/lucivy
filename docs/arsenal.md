@@ -58,46 +58,93 @@ Reverse du posting index. Pour chaque (doc_id, position) → ordinal du token.
 
 **Usage principal** : pré-filtre regex — avant de feeder un token au DFA, vérifier que ses bytes sont compatibles avec le pattern. Ex: `[a-z]+` → `all_bytes_in_range(ord, b'a', b'z')`.
 
-### Fichiers standard (hérités)
+### `.termtexts` — Token texts par ordinal SFX (PLANIFIÉ, PAS ENCORE IMPLÉMENTÉ)
+
+Lookup O(1) ordinal SFX → texte du token. **Nécessaire** car les ordinals
+SFX ≠ ordinals du term dict tantivy (voir bug critique doc 08).
+
+| Méthode | Complexité | Description |
+|---|---|---|
+| `text(ordinal)` | O(1) | Texte du token à cet ordinal SFX |
+| `num_terms()` | O(1) | Nombre de tokens |
+
+Format : `TTXT` header + offset table u32 + textes concaténés UTF-8.
+
+**⚠ SANS CE FICHIER, toutes les fonctions cross-token qui utilisent
+`ord_to_term()` du term dict tantivy sont CASSÉES** (ordinal mismatch).
+
+### Fichiers standard (hérités tantivy)
 
 | Fichier | Description |
 |---|---|
-| `.term` | Term dictionary — `ord_to_term(ord)` → texte du token, `term_ord(text)` → ordinal |
+| `.term` | Term dictionary tantivy — **⚠ SES ORDINALS ≠ ORDINALS SFX**. Ne PAS utiliser `ord_to_term()` avec des ordinals SFX. |
 | `.pos` | Positions dans les postings standard |
 | `.store` | Stored fields (texte original complet) |
 | `.fast` | Fast fields (valeurs numériques) |
 
 ## Combinaisons clés pour la recherche
 
-### Exact contains
+### Exact contains (single token)
 ```
 prefix_walk(query) → parents → resolve → matches
-  + sibling chain (gap=0) pour cross-token
 ```
+**Requiert** : SuffixFst, SuffixPost
 
-### Fuzzy contains
+### Exact contains (cross-token via sibling links)
 ```
-fuzzy_falling_walk(query, d) → split candidates
-  + sibling chain → resolve-last
+1. prefix_walk(query) → essaie single-token d'abord
+2. Si 0 résultat → falling_walk(query) → split candidates
+3. sibling_table[ordinal] → successeurs contigus (gap=0)
+4. ord_to_term(next_ord) → texte du token suivant    ⚠ CASSÉ (ordinal mismatch)
+5. remainder.starts_with(next_text) → chaîner ou terminal
+6. Resolve les ordinals de la chaîne valide
+7. Adjacency check via byte continuity
 ```
+**Requiert** : SuffixFst, SuffixPost, SiblingTable, TermTexts (⚠ pas encore implémenté)
 
-### Regex contains (actuel)
+### Fuzzy contains d>0 (via trigram pigeonhole)
 ```
-extract_all_literals(pattern) → pick best by doc_freq
-  prefix_walk(literal) → DFA validate ordinal-level
-  multi-literal intersection via has_doc O(log n)
-  position ordering filter (byte offsets)
-  Phase 3c gap>0 continuation (LENT pour .*)
+1. generate_ngrams(query, distance) → bigrammes/trigrammes
+2. find_literal(ngram) → matches per-doc via SFX cross-token
+3. intersect_trigrams_with_threshold → candidats filtrés
+4. Build concat text (tokens via PosMap + ord_to_term)    ⚠ CASSÉ (ordinal mismatch)
+5. DFA Levenshtein validation sur le texte concaténé
+6. Highlight via token mapping
 ```
+**Requiert** : SuffixFst, SuffixPost, PosMap, TermTexts (⚠ pas encore implémenté)
 
-### Regex contains (cible avec PosMap)
+### Regex contains
 ```
-extract_all_literals → resolve chaque → intersection + position ordering
-  PosMap: lire ordinals entre les deux positions
-  ord_to_term + GapMap: reconstruire le texte
-  Feed DFA sur le texte reconstruit → O(distance)
-  ByteBitmap: pré-filtre rapide sur chaque token
+1. extract_all_literals(pattern) → littéraux du regex
+2. find_literal(lit) → matches via SFX cross-token
+3. Multi-literal intersection + position ordering
+4. PosMap: lire ordinals entre les positions
+5. ord_to_term + GapMap: reconstruire le texte    ⚠ CASSÉ (ordinal mismatch)
+6. Feed DFA regex sur le texte reconstruit
+7. ByteBitmap: pré-filtre rapide sur chaque token
 ```
+**Requiert** : SuffixFst, SuffixPost, PosMap, TermTexts (⚠ pas encore implémenté), ByteMap
+
+### BM25 prescan (DAG)
+```
+PrescanShardNode → run_regex_prescan / run_fuzzy_prescan par segment
+MergePrescanNode → fusionne caches + freqs
+BuildWeightNode → injecte dans le Weight avant compilation
+```
+Cache : `CachedRegexResult { doc_tf, highlights }` per segment.
+
+## ⚠ Bug critique : ordinal mismatch (doc 08)
+
+**TOUS les paths cross-token qui utilisent `ord_to_term()` du term dict
+tantivy sont CASSÉS.** Les ordinals SFX ≠ ordinals term dict.
+
+Le fix planifié : fichier `.termtexts` (voir ci-dessus) qui stocke les
+textes dans l'espace d'ordinals SFX.
+
+**Fonctions impactées** : `cross_token_search_with_terms`,
+`find_literal`, `validate_path`, `fuzzy_contains_via_trigram`,
+`regex_contains_via_literal`, `run_sfx_walk`, `run_regex_prescan`,
+`run_fuzzy_prescan`.
 
 ## Tailles estimées
 
