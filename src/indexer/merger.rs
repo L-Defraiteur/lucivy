@@ -716,8 +716,10 @@ impl IndexMerger {
                 }
             }
 
-            // Step 4: Merge sfxpost with doc_id remapping
+            // Step 4: Merge sfxpost + posmap + bytemap with doc_id remapping
             let mut sfxpost_data: Option<Vec<u8>> = None;
+            let mut posmap_data: Option<Vec<u8>> = None;
+            let mut bytemap_data: Option<Vec<u8>> = None;
             {
                 let mut segment_sfxpost: Vec<Option<Vec<u8>>> = Vec::with_capacity(self.readers.len());
                 let mut any_has_sfxpost = false;
@@ -756,8 +758,14 @@ impl IndexMerger {
                     }
 
                     let mut sfxpost_writer = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::new(unique_tokens.len());
+                    let mut posmap_writer = crate::suffix_fst::PosMapWriter::new();
+                    let mut bytemap_writer = crate::suffix_fst::ByteBitmapWriter::new();
+                    bytemap_writer.ensure_capacity(unique_tokens.len() as u32);
 
                     for (new_ord, token) in unique_tokens.iter().enumerate() {
+                        // Record byte bitmap for this token.
+                        bytemap_writer.record_token(new_ord as u32, token.as_bytes());
+
                         let mut merged: Vec<(u32, u32, u32, u32)> = Vec::new();
                         for (seg_ord, sfxpost_reader) in sfxpost_readers.iter().enumerate() {
                             if let Some(reader) = sfxpost_reader {
@@ -778,9 +786,13 @@ impl IndexMerger {
                         }
                         for &(doc_id, ti, bf, bt) in &merged {
                             sfxpost_writer.add_entry(new_ord as u32, doc_id, ti, bf, bt);
+                            // Record position → ordinal mapping.
+                            posmap_writer.add(doc_id, ti, new_ord as u32);
                         }
                     }
                     sfxpost_data = Some(sfxpost_writer.finish());
+                    posmap_data = Some(posmap_writer.serialize());
+                    bytemap_data = Some(bytemap_writer.serialize());
                 }
             }
 
@@ -798,6 +810,12 @@ impl IndexMerger {
             serializer.write_sfx(field.field_id(), &sfx_bytes)?;
             if let Some(ref sfxpost) = sfxpost_data {
                 serializer.write_sfxpost(field.field_id(), sfxpost)?;
+            }
+            if let Some(ref posmap) = posmap_data {
+                serializer.write_posmap(field.field_id(), posmap)?;
+            }
+            if let Some(ref bytemap) = bytemap_data {
+                serializer.write_bytemap(field.field_id(), bytemap)?;
             }
             sfx_field_ids.push(field.field_id());
         }
@@ -900,6 +918,12 @@ impl IndexMerger {
                 doc_mapping.len() as u32, unique_tokens.len() as u32,
                 sfxpost_data,
             )?;
+
+            // PosMap + ByteBitmap: write empty placeholders for legacy merge path.
+            // These will be rebuilt at the next commit that triggers sfx_dag rebuild.
+            serializer.write_posmap(field.field_id(), &crate::suffix_fst::PosMapWriter::new().serialize())?;
+            serializer.write_bytemap(field.field_id(), &crate::suffix_fst::ByteBitmapWriter::new().serialize())?;
+
             sfx_field_ids.push(field.field_id());
         }
 
