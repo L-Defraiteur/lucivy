@@ -13,8 +13,6 @@
 //!     [2 bytes] gap_len (0 = contiguous, >0 = separator bytes between tokens)
 //! ```
 
-use std::collections::{HashMap, HashSet};
-
 /// A single sibling link: this token is followed by `next_ordinal` with `gap_len` bytes between.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SiblingEntry {
@@ -26,9 +24,10 @@ pub struct SiblingEntry {
 }
 
 /// Builder: collects sibling pairs during indexation, serializes to binary.
+/// Uses a flat buffer (no HashMap/HashSet) — sort + dedup at serialize time.
 pub struct SiblingTableWriter {
-    /// (ordinal, next_ordinal, gap_len) — deduplicated per (ordinal, next_ordinal).
-    pairs: HashMap<u32, HashSet<SiblingEntry>>,
+    /// Flat buffer: (ordinal, next_ordinal, gap_len). Unsorted, with potential dups.
+    pairs: Vec<(u32, u32, u16)>,
     num_ordinals: u32,
 }
 
@@ -36,34 +35,35 @@ impl SiblingTableWriter {
     /// Create a new writer for `num_ordinals` unique tokens.
     pub fn new(num_ordinals: u32) -> Self {
         Self {
-            pairs: HashMap::new(),
+            pairs: Vec::new(),
             num_ordinals,
         }
     }
 
     /// Record that `ordinal` is followed by `next_ordinal` with `gap_len` bytes between.
     pub fn add(&mut self, ordinal: u32, next_ordinal: u32, gap_len: u16) {
-        self.pairs
-            .entry(ordinal)
-            .or_default()
-            .insert(SiblingEntry { next_ordinal, gap_len });
+        self.pairs.push((ordinal, next_ordinal, gap_len));
     }
 
-    /// Serialize to binary format.
-    pub fn serialize(&self) -> Vec<u8> {
+    /// Serialize to binary format. Sorts and deduplicates the flat buffer.
+    pub fn serialize(&mut self) -> Vec<u8> {
+        // Sort by (ordinal, next_ordinal, gap_len) then dedup
+        self.pairs.sort_unstable();
+        self.pairs.dedup();
+
         let num = self.num_ordinals;
-        // Offset table: (num + 1) × 4 bytes
         let header_size = 4 + (num as usize + 1) * 4;
         let mut offsets: Vec<u32> = Vec::with_capacity(num as usize + 1);
         let mut entries_data: Vec<u8> = Vec::new();
 
+        let mut cursor = 0usize;
         for ord in 0..num {
             offsets.push(entries_data.len() as u32);
-            if let Some(siblings) = self.pairs.get(&ord) {
-                for s in siblings {
-                    entries_data.extend_from_slice(&s.next_ordinal.to_le_bytes());
-                    entries_data.extend_from_slice(&s.gap_len.to_le_bytes());
-                }
+            while cursor < self.pairs.len() && self.pairs[cursor].0 == ord {
+                let (_, next_ord, gap_len) = self.pairs[cursor];
+                entries_data.extend_from_slice(&next_ord.to_le_bytes());
+                entries_data.extend_from_slice(&gap_len.to_le_bytes());
+                cursor += 1;
             }
         }
         offsets.push(entries_data.len() as u32); // sentinel

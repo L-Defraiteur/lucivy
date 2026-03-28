@@ -617,8 +617,8 @@ impl IndexMerger {
         serializer: &mut SegmentSerializer,
         doc_mapping: &[DocAddress],
     ) -> crate::Result<()> {
-        use std::time::Instant;
-        let t_merge_total = Instant::now();
+        #[cfg(feature = "sfx-profile")]
+        let t_merge_total = std::time::Instant::now();
 
         let sfx_fields: Vec<Field> = self
             .schema
@@ -664,7 +664,8 @@ impl IndexMerger {
             // Step 1: SKIP FST rebuild (deferred to commit time)
 
             // Step 2: Copy GapMap in merge order
-            let t_gapmap = Instant::now();
+            #[cfg(feature = "sfx-profile")]
+            let t_gapmap = std::time::Instant::now();
             let mut gapmap_writer = GapMapWriter::new();
             for &doc_addr in doc_mapping {
                 let seg_ord = doc_addr.segment_ord as usize;
@@ -677,11 +678,13 @@ impl IndexMerger {
                 }
             }
 
+            #[cfg(feature = "sfx-profile")]
             let gapmap_ms = t_gapmap.elapsed().as_millis();
 
             // Step 3: Merge sfxpost + posmap + bytemap via N-way merge-sort on term dicts.
             // Single pass: no BTreeSet, no HashMap<String,u32>, no String allocations.
-            let t_nway = Instant::now();
+            #[cfg(feature = "sfx-profile")]
+            let t_nway = std::time::Instant::now();
             let mut sfxpost_data: Option<Vec<u8>> = None;
             let mut posmap_data: Option<Vec<u8>> = None;
             let mut bytemap_data: Option<Vec<u8>> = None;
@@ -826,11 +829,13 @@ impl IndexMerger {
                 }
             }
 
+            #[cfg(feature = "sfx-profile")]
             let nway_ms = t_nway.elapsed().as_millis();
 
             // Write gapmap as a partial .sfx file (empty FST, gapmap only).
             // The FST will be rebuilt at commit time.
-            let t_write = Instant::now();
+            #[cfg(feature = "sfx-profile")]
+            let t_write = std::time::Instant::now();
             let gapmap_data = gapmap_writer.serialize();
             let sfx_file = SfxFileWriter::new(
                 Vec::new(),  // empty FST — rebuilt at commit
@@ -850,8 +855,10 @@ impl IndexMerger {
             if let Some(ref bytemap) = bytemap_data {
                 serializer.write_bytemap(field.field_id(), bytemap)?;
             }
+            #[cfg(feature = "sfx-profile")]
             let write_ms = t_write.elapsed().as_millis();
 
+            #[cfg(feature = "sfx-profile")]
             eprintln!(
                 "[sfx-profile] merge_sfx: {}segs {}docs | gapmap={}ms nway_merge={}ms write={}ms",
                 self.readers.len(), doc_mapping.len(), gapmap_ms, nway_ms, write_ms,
@@ -864,8 +871,11 @@ impl IndexMerger {
             serializer.write_sfx_manifest(&sfx_field_ids)?;
         }
 
-        let merge_total_ms = t_merge_total.elapsed().as_millis();
-        eprintln!("[sfx-profile] merge_sfx_deferred total={}ms", merge_total_ms);
+        #[cfg(feature = "sfx-profile")]
+        {
+            let merge_total_ms = t_merge_total.elapsed().as_millis();
+            eprintln!("[sfx-profile] merge_sfx_deferred total={}ms", merge_total_ms);
+        }
 
         Ok(())
     }

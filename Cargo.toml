@@ -122,6 +122,7 @@ overflow-checks = true
 default = ["mmap", "stopwords", "lz4-compression", "columnar-zstd-compression"]
 mmap = ["fs4", "tempfile", "memmap2", "tokio"]
 stopwords = []
+sfx-profile = []
 
 lz4-compression = ["lz4_flex"]
 zstd-compression = ["zstd"]

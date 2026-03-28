@@ -246,35 +246,36 @@ impl SfxCollector {
     ///
     /// Returns `SfxBuildOutput` with each section as a self-contained binary blob.
     pub fn build(self) -> Result<SfxBuildOutput, lucivy_fst::Error> {
-        use std::time::Instant;
-        let t_total = Instant::now();
+        #[cfg(feature = "sfx-profile")]
+        let t_total = std::time::Instant::now();
 
         // Sort interned tokens to get BTreeSet-equivalent order for ordinals.
         let num_tokens = self.token_texts.len();
-        let t0 = Instant::now();
+        #[cfg(feature = "sfx-profile")]
+        let t0 = std::time::Instant::now();
         let mut sorted_indices: Vec<u32> = (0..num_tokens as u32).collect();
         sorted_indices.sort_by(|&a, &b| {
             self.token_texts[a as usize].cmp(&self.token_texts[b as usize])
         });
+        #[cfg(feature = "sfx-profile")]
         let sort_ms = t0.elapsed().as_millis();
-        // sorted_indices[new_ordinal] = old_intern_ordinal
 
-        let t0 = Instant::now();
+        #[cfg(feature = "sfx-profile")]
+        let t0 = std::time::Instant::now();
         let mut sfx_builder = SuffixFstBuilder::with_min_suffix_len(self.min_suffix_len);
         for (new_ordinal, &old_ord) in sorted_indices.iter().enumerate() {
             sfx_builder.add_token(&self.token_texts[old_ord as usize], new_ordinal as u64);
         }
-
         let (fst_data, parent_list_data) = sfx_builder.build()?;
+        #[cfg(feature = "sfx-profile")]
         let fst_ms = t0.elapsed().as_millis();
 
         let num_terms = num_tokens as u32;
-        let t0 = Instant::now();
         let gapmap_data = self.gapmap_writer.serialize();
-        let gapmap_ms = t0.elapsed().as_millis();
 
         // Build reverse mapping: intern_id → final_ordinal
-        let t0 = Instant::now();
+        #[cfg(feature = "sfx-profile")]
+        let t0 = std::time::Instant::now();
         let mut intern_to_final = vec![0u32; num_tokens];
         for (new_ord, &old_ord) in sorted_indices.iter().enumerate() {
             intern_to_final[old_ord as usize] = new_ord as u32;
@@ -290,9 +291,9 @@ impl SfxCollector {
             }
         }
         let sibling_data = sibling_writer.serialize();
+        #[cfg(feature = "sfx-profile")]
         let sibling_ms = t0.elapsed().as_millis();
 
-        let t0 = Instant::now();
         let file_writer = SfxFileWriter::new(
             fst_data,
             parent_list_data,
@@ -301,45 +302,31 @@ impl SfxCollector {
             num_terms,
         ).with_sibling_data(sibling_data);
         let sfx_bytes = file_writer.to_bytes();
-        let sfx_assemble_ms = t0.elapsed().as_millis();
 
         // .sfxpost + .posmap + .bytemap — single pass over sorted ordinals
-        let t0 = Instant::now();
         let mut sfxpost_writer = super::sfxpost_v2::SfxPostWriterV2::new(num_tokens);
         let mut posmap_writer = PosMapWriter::new();
         let mut bytemap_writer = ByteBitmapWriter::new();
         bytemap_writer.ensure_capacity(num_terms);
 
-        let mut total_entries = 0usize;
         for (new_ord, &old_ord) in sorted_indices.iter().enumerate() {
             let final_ord = new_ord as u32;
             let old = old_ord as usize;
-
             bytemap_writer.record_token(final_ord, self.token_texts[old].as_bytes());
-
             for &(doc_id, ti, byte_from, byte_to) in &self.token_postings[old] {
                 sfxpost_writer.add_entry(final_ord, doc_id, ti, byte_from, byte_to);
                 posmap_writer.add(doc_id, ti, final_ord);
-                total_entries += 1;
             }
         }
-        let posting_pass_ms = t0.elapsed().as_millis();
 
-        let t0 = Instant::now();
         let sfxpost_bytes = sfxpost_writer.finish();
-        let sfxpost_finish_ms = t0.elapsed().as_millis();
-        let t0 = Instant::now();
         let posmap_bytes = posmap_writer.serialize();
-        let posmap_ms = t0.elapsed().as_millis();
-        let t0 = Instant::now();
         let bytemap_bytes = bytemap_writer.serialize();
-        let bytemap_ms = t0.elapsed().as_millis();
 
-        let total_ms = t_total.elapsed().as_millis();
+        #[cfg(feature = "sfx-profile")]
         eprintln!(
-            "[sfx-profile] build: {}tokens {}entries | sort={}ms fst={}ms gapmap={}ms sibling={}ms assemble={}ms | postings={}ms sfxpost_finish={}ms posmap={}ms bytemap={}ms | total={}ms",
-            num_tokens, total_entries, sort_ms, fst_ms, gapmap_ms, sibling_ms, sfx_assemble_ms,
-            posting_pass_ms, sfxpost_finish_ms, posmap_ms, bytemap_ms, total_ms,
+            "[sfx-profile] build: {}tokens | sort={}ms fst={}ms sibling={}ms | total={}ms",
+            num_tokens, sort_ms, fst_ms, sibling_ms, t_total.elapsed().as_millis(),
         );
 
         Ok(SfxBuildOutput {
