@@ -468,3 +468,45 @@ mod tests {
         assert!(SfxPostReaderV2::open(v1_data).is_none());
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// SfxIndexFile implementation
+// ─────────────────────────────────────────────────────────────────────
+
+pub struct SfxPostIndex;
+
+impl super::index_registry::SfxIndexFile for SfxPostIndex {
+    fn id(&self) -> &'static str { "sfxpost" }
+    fn extension(&self) -> &'static str { "sfxpost" }
+
+    fn build(&self, ctx: &super::index_registry::SfxBuildContext) -> Vec<u8> {
+        let mut writer = SfxPostWriterV2::new(ctx.token_texts.len());
+        for (ord, postings) in ctx.token_postings.iter().enumerate() {
+            for &(doc_id, ti, byte_from, byte_to) in *postings {
+                writer.add_entry(ord as u32, doc_id, ti, byte_from, byte_to);
+            }
+        }
+        writer.finish()
+    }
+
+    fn merge(&self, _sources: &[Option<&[u8]>], ctx: &super::index_registry::SfxMergeContext) -> Vec<u8> {
+        let mut writer = SfxPostWriterV2::new(ctx.merged_terms.len());
+        for (seg_ord, reader_opt) in ctx.sfxpost_readers.iter().enumerate() {
+            if let Some(reader) = reader_opt {
+                for &(new_ord, _) in ctx.merged_terms {
+                    let old_ord = ctx.ordinal_maps[seg_ord].iter()
+                        .find(|(_, new)| **new == new_ord)
+                        .map(|(&old, _)| old);
+                    if let Some(old_ord) = old_ord {
+                        for e in reader.entries(old_ord) {
+                            if let Some(&new_doc) = ctx.reverse_doc_map[seg_ord].get(&e.doc_id) {
+                                writer.add_entry(new_ord, new_doc, e.token_index, e.byte_from, e.byte_to);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        writer.finish()
+    }
+}

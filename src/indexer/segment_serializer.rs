@@ -118,6 +118,16 @@ impl SegmentSerializer {
         Ok(())
     }
 
+    /// Write a custom per-field index file (generic, used by the registry).
+    pub fn write_custom_index(&mut self, field_id: u32, extension: &str, data: &[u8]) -> crate::Result<()> {
+        let suffix = format!("{field_id}.{extension}");
+        let mut writer = self.segment.open_write_custom(&suffix)?;
+        use common::TerminatingWrite;
+        writer.write_all(data)?;
+        writer.terminate()?;
+        Ok(())
+    }
+
     /// Returns the list of field_ids that had sfx files written.
     /// The caller should store these in the SegmentMeta (sfx_field_ids)
     /// so that list_files() and GC know about them.

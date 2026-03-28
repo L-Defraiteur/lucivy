@@ -157,28 +157,24 @@ impl SegmentWriter {
         let sfx_collectors = std::mem::take(&mut self.sfx_collectors);
         let mut sfx_field_ids = Vec::new();
 
+        // Helper: write SfxBuildOutput to serializer (sfx + registry files)
+        let write_output = |serializer: &mut crate::indexer::SegmentSerializer, field_id: u32, output: &crate::suffix_fst::SfxBuildOutput| -> crate::Result<()> {
+            serializer.write_sfx(field_id, &output.sfx)?;
+            for (ext, data) in &output.registry_files {
+                serializer.write_custom_index(field_id, ext, data)?;
+            }
+            Ok(())
+        };
+
         if sfx_collectors.len() <= 1 {
-            // Single field — no parallelism needed
             for (field_id, collector) in sfx_collectors {
                 let output = collector.build()
                     .map_err(|e| crate::LucivyError::SystemError(
                         format!("sfx build field {field_id}: {e}")))?;
-                self.segment_serializer.write_sfx(field_id, &output.sfx)?;
-                if !output.sfxpost.is_empty() {
-                    self.segment_serializer.write_sfxpost(field_id, &output.sfxpost)?;
-                }
-                eprintln!("[sfx-write] field={} sfx={} sfxpost={} posmap={} bytemap={}",
-                    field_id, output.sfx.len(), output.sfxpost.len(), output.posmap.len(), output.bytemap.len());
-                if !output.posmap.is_empty() {
-                    self.segment_serializer.write_posmap(field_id, &output.posmap)?;
-                }
-                if !output.bytemap.is_empty() {
-                    self.segment_serializer.write_bytemap(field_id, &output.bytemap)?;
-                }
+                write_output(&mut self.segment_serializer, field_id, &output)?;
                 sfx_field_ids.push(field_id);
             }
         } else {
-            // Multiple fields — build in parallel via scatter DAG
             let _field_ids: Vec<u32> = sfx_collectors.keys().copied().collect();
             let tasks: Vec<(&str, _)> = sfx_collectors.into_iter()
                 .map(|(field_id, collector)| {
@@ -209,16 +205,7 @@ impl SegmentWriter {
                     .take::<(u32, crate::suffix_fst::SfxBuildOutput)>(name)
                     .ok_or_else(|| crate::LucivyError::SystemError(
                         format!("missing sfx result '{name}'")))?;
-                self.segment_serializer.write_sfx(fid, &output.sfx)?;
-                if !output.sfxpost.is_empty() {
-                    self.segment_serializer.write_sfxpost(fid, &output.sfxpost)?;
-                }
-                if !output.posmap.is_empty() {
-                    self.segment_serializer.write_posmap(fid, &output.posmap)?;
-                }
-                if !output.bytemap.is_empty() {
-                    self.segment_serializer.write_bytemap(fid, &output.bytemap)?;
-                }
+                write_output(&mut self.segment_serializer, fid, &output)?;
                 sfx_field_ids.push(fid);
             }
         }

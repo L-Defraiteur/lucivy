@@ -52,22 +52,30 @@ pub struct SegmentReader {
     sfxpost_files: FnvHashMap<Field, FileSlice>,
     posmap_files: FnvHashMap<Field, FileSlice>,
     bytemap_files: FnvHashMap<Field, FileSlice>,
+    /// Registry-loaded index files: keyed by (index_id, field).
+    registry_files: std::collections::HashMap<(String, Field), FileSlice>,
 }
 
 
 /// Load per-field .sfx/.sfxpost files using sfx_field_ids from the SegmentMeta.
 /// Falls back to reading the old .sfx manifest if sfx_field_ids is empty
 /// (backward compat with indexes created before this change).
-fn load_sfx_files(segment: &Segment, _schema: &Schema) -> (FnvHashMap<Field, FileSlice>, FnvHashMap<Field, FileSlice>, FnvHashMap<Field, FileSlice>, FnvHashMap<Field, FileSlice>) {
+fn load_sfx_files(segment: &Segment, _schema: &Schema) -> (
+    FnvHashMap<Field, FileSlice>,
+    FnvHashMap<Field, FileSlice>,
+    FnvHashMap<Field, FileSlice>,
+    FnvHashMap<Field, FileSlice>,
+    HashMap<(String, Field), FileSlice>,
+) {
+    use std::collections::HashMap;
+
     let mut sfx_files = FnvHashMap::default();
     let mut sfxpost_files = FnvHashMap::default();
     let mut posmap_files = FnvHashMap::default();
     let mut bytemap_files = FnvHashMap::default();
+    let mut registry_files: HashMap<(String, Field), FileSlice> = HashMap::new();
 
-    // Get sfx_field_ids from the segment meta
     let sfx_field_ids = segment.meta().sfx_field_ids().to_vec();
-
-    // If empty, try the legacy manifest for backward compat
     let field_ids = if sfx_field_ids.is_empty() {
         load_sfx_field_ids_from_legacy_manifest(segment)
     } else {
@@ -79,18 +87,23 @@ fn load_sfx_files(segment: &Segment, _schema: &Schema) -> (FnvHashMap<Field, Fil
         if let Ok(file_slice) = segment.open_read_custom(&format!("{field_id}.sfx")) {
             sfx_files.insert(field, file_slice);
         }
-        if let Ok(file_slice) = segment.open_read_custom(&format!("{field_id}.sfxpost")) {
-            sfxpost_files.insert(field, file_slice);
-        }
-        if let Ok(file_slice) = segment.open_read_custom(&format!("{field_id}.posmap")) {
-            posmap_files.insert(field, file_slice);
-        }
-        if let Ok(file_slice) = segment.open_read_custom(&format!("{field_id}.bytemap")) {
-            bytemap_files.insert(field, file_slice);
+        // Load all registry index files
+        for index in crate::suffix_fst::index_registry::all_indexes() {
+            let ext = index.extension();
+            if let Ok(file_slice) = segment.open_read_custom(&format!("{field_id}.{ext}")) {
+                // Backward compat: also populate the legacy maps
+                match ext {
+                    "sfxpost" => { sfxpost_files.insert(field, file_slice.clone()); }
+                    "posmap" => { posmap_files.insert(field, file_slice.clone()); }
+                    "bytemap" => { bytemap_files.insert(field, file_slice.clone()); }
+                    _ => {}
+                }
+                registry_files.insert((index.id().to_string(), field), file_slice);
+            }
         }
     }
 
-    (sfx_files, sfxpost_files, posmap_files, bytemap_files)
+    (sfx_files, sfxpost_files, posmap_files, bytemap_files, registry_files)
 }
 
 /// Legacy: read field_ids from the old .sfx manifest file.
@@ -143,6 +156,11 @@ impl SegmentReader {
     /// Access a pre-loaded .bytemap file for the given field, if one exists.
     pub fn bytemap_file(&self, field: Field) -> Option<&FileSlice> {
         self.bytemap_files.get(&field)
+    }
+
+    /// Generic accessor for registry index files by id (e.g. "termtexts").
+    pub fn sfx_index_file(&self, id: &str, field: Field) -> Option<&FileSlice> {
+        self.registry_files.get(&(id.to_string(), field))
     }
 
     /// Returns the highest document id ever attributed in
@@ -305,7 +323,7 @@ impl SegmentReader {
             .map(|alive_bitset| alive_bitset.num_alive_docs() as u32)
             .unwrap_or(max_doc);
 
-        let (sfx_files, sfxpost_files, posmap_files, bytemap_files) = load_sfx_files(segment, &schema);
+        let (sfx_files, sfxpost_files, posmap_files, bytemap_files, registry_files) = load_sfx_files(segment, &schema);
 
         Ok(SegmentReader {
             inv_idx_reader_cache: Default::default(),
@@ -326,6 +344,7 @@ impl SegmentReader {
             sfxpost_files,
             posmap_files,
             bytemap_files,
+            registry_files,
         })
     }
 
@@ -382,7 +401,7 @@ impl SegmentReader {
             .map(|alive_bitset| alive_bitset.num_alive_docs() as u32)
             .unwrap_or(max_doc);
 
-        let (sfx_files, sfxpost_files, posmap_files, bytemap_files) = load_sfx_files(segment, &schema);
+        let (sfx_files, sfxpost_files, posmap_files, bytemap_files, registry_files) = load_sfx_files(segment, &schema);
 
         Ok(SegmentReader {
             inv_idx_reader_cache: Default::default(),
@@ -403,6 +422,7 @@ impl SegmentReader {
             sfxpost_files,
             posmap_files,
             bytemap_files,
+            registry_files,
         })
     }
 

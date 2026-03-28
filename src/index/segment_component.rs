@@ -48,6 +48,11 @@ pub enum SegmentComponent {
         /// Schema field ID.
         field_id: u32,
     },
+    /// Custom per-field SFX index file (from the registry).
+    CustomSfxIndex {
+        field_id: u32,
+        extension: String,
+    },
 }
 
 impl SegmentComponent {
@@ -67,6 +72,7 @@ impl SegmentComponent {
             SegmentComponent::SuffixPost { field_id } => format!("{}.sfxpost", field_id),
             SegmentComponent::PosMap { field_id } => format!("{}.posmap", field_id),
             SegmentComponent::ByteMap { field_id } => format!("{}.bytemap", field_id),
+            SegmentComponent::CustomSfxIndex { field_id, extension } => format!("{}.{}", field_id, extension),
         }
     }
 
@@ -92,13 +98,18 @@ impl SegmentComponent {
     }
 
     /// List ALL components for a segment, including per-field SFX.
+    /// Uses the SFX index registry so new index types are automatically protected from GC.
     pub fn all_components(sfx_field_ids: &[u32]) -> Vec<SegmentComponent> {
         let mut components: Vec<SegmentComponent> = Self::fixed_components().to_vec();
         for &fid in sfx_field_ids {
             components.push(SegmentComponent::SuffixFst { field_id: fid });
-            components.push(SegmentComponent::SuffixPost { field_id: fid });
-            components.push(SegmentComponent::PosMap { field_id: fid });
-            components.push(SegmentComponent::ByteMap { field_id: fid });
+            // All registry index files (sfxpost, posmap, bytemap, termtexts, ...)
+            for index in crate::suffix_fst::index_registry::all_indexes() {
+                components.push(SegmentComponent::CustomSfxIndex {
+                    field_id: fid,
+                    extension: index.extension().to_string(),
+                });
+            }
         }
         components
     }
@@ -112,7 +123,8 @@ impl SegmentComponent {
     /// Is this a per-field component?
     pub fn is_per_field(&self) -> bool {
         matches!(self, SegmentComponent::SuffixFst { .. } | SegmentComponent::SuffixPost { .. }
-            | SegmentComponent::PosMap { .. } | SegmentComponent::ByteMap { .. })
+            | SegmentComponent::PosMap { .. } | SegmentComponent::ByteMap { .. }
+            | SegmentComponent::CustomSfxIndex { .. })
     }
 }
 
@@ -155,11 +167,14 @@ mod tests {
         let all = SegmentComponent::all_components(&[1, 2]);
         assert!(all.contains(&SegmentComponent::Postings)); // fixed
         assert!(all.contains(&SegmentComponent::SuffixFst { field_id: 1 }));
-        assert!(all.contains(&SegmentComponent::SuffixPost { field_id: 1 }));
         assert!(all.contains(&SegmentComponent::SuffixFst { field_id: 2 }));
-        assert!(all.contains(&SegmentComponent::SuffixPost { field_id: 2 }));
-        // 9 fixed + 2×(sfx + sfxpost + posmap + bytemap) = 9 + 8 = 17
-        assert_eq!(all.len(), 17);
+        // Registry indexes (sfxpost, posmap, bytemap) are now CustomSfxIndex
+        let has_sfxpost_1 = all.iter().any(|c| matches!(c,
+            SegmentComponent::CustomSfxIndex { field_id: 1, extension } if extension == "sfxpost"));
+        assert!(has_sfxpost_1, "should have sfxpost for field 1 via registry");
+        let num_registry = crate::suffix_fst::index_registry::all_indexes().len();
+        // 9 fixed + 2×(sfx + N registry indexes)
+        assert_eq!(all.len(), 9 + 2 * (1 + num_registry));
     }
 
     #[test]

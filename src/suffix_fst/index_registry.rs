@@ -67,9 +67,10 @@ pub trait SfxIndexFile: Send + Sync {
 /// Adding a new index = add one line here.
 pub fn all_indexes() -> Vec<Box<dyn SfxIndexFile>> {
     vec![
+        Box::new(super::sfxpost_v2::SfxPostIndex),
         Box::new(super::posmap::PosMapIndex),
         Box::new(super::bytemap::ByteMapIndex),
-        // Box::new(super::termtexts::TermTextsIndex),  // TODO: phase 4
+        // Box::new(super::termtexts::TermTextsIndex),  // TODO: next
     ]
 }
 

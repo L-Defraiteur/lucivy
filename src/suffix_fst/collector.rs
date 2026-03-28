@@ -7,17 +7,14 @@ use super::gapmap::GapMapWriter;
 use super::posmap::PosMapWriter;
 use super::sibling_table::SiblingTableWriter;
 
-/// Output of SfxCollector::build(). Each field is a self-contained binary blob
-/// that gets written to its own file. Adding a new index type = add a field here.
+/// Output of SfxCollector::build(). The `.sfx` file is always produced.
+/// All other index files are built via the registry (SfxIndexFile trait).
 pub struct SfxBuildOutput {
-    /// .sfx — suffix FST + parent lists + sibling table + GapMap
+    /// .sfx — suffix FST + parent lists + sibling table + GapMap (always present)
     pub sfx: Vec<u8>,
-    /// .sfxpost — posting index (ordinal → doc entries)
-    pub sfxpost: Vec<u8>,
-    /// .posmap — position-to-ordinal reverse map (doc_id, pos) → ordinal
-    pub posmap: Vec<u8>,
-    /// .bytemap — byte presence bitmap per ordinal (256 bits each)
-    pub bytemap: Vec<u8>,
+    /// Registry-built index files: (extension, bytes).
+    /// Built automatically from all_indexes() via SfxBuildContext.
+    pub registry_files: Vec<(String, Vec<u8>)>,
 }
 
 /// Collects token and gap data during indexation to produce a .sfx file.
@@ -303,25 +300,27 @@ impl SfxCollector {
         ).with_sibling_data(sibling_data);
         let sfx_bytes = file_writer.to_bytes();
 
-        // .sfxpost + .posmap + .bytemap — single pass over sorted ordinals
-        let mut sfxpost_writer = super::sfxpost_v2::SfxPostWriterV2::new(num_tokens);
-        let mut posmap_writer = PosMapWriter::new();
-        let mut bytemap_writer = ByteBitmapWriter::new();
-        bytemap_writer.ensure_capacity(num_terms);
+        // Build all registry index files via SfxBuildContext
+        let token_text_refs: Vec<&str> = sorted_indices.iter()
+            .map(|&old_ord| self.token_texts[old_ord as usize].as_str())
+            .collect();
+        let postings_refs: Vec<&[(u32, u32, u32, u32)]> = sorted_indices.iter()
+            .map(|&old_ord| self.token_postings[old_ord as usize].as_slice())
+            .collect();
 
-        for (new_ord, &old_ord) in sorted_indices.iter().enumerate() {
-            let final_ord = new_ord as u32;
-            let old = old_ord as usize;
-            bytemap_writer.record_token(final_ord, self.token_texts[old].as_bytes());
-            for &(doc_id, ti, byte_from, byte_to) in &self.token_postings[old] {
-                sfxpost_writer.add_entry(final_ord, doc_id, ti, byte_from, byte_to);
-                posmap_writer.add(doc_id, ti, final_ord);
+        let build_ctx = super::index_registry::SfxBuildContext {
+            token_texts: &token_text_refs,
+            token_postings: &postings_refs,
+            num_docs: self.gapmap_writer.num_docs() as u32,
+        };
+
+        let mut registry_files = Vec::new();
+        for index in super::index_registry::all_indexes() {
+            let data = index.build(&build_ctx);
+            if !data.is_empty() {
+                registry_files.push((index.extension().to_string(), data));
             }
         }
-
-        let sfxpost_bytes = sfxpost_writer.finish();
-        let posmap_bytes = posmap_writer.serialize();
-        let bytemap_bytes = bytemap_writer.serialize();
 
         #[cfg(feature = "sfx-profile")]
         eprintln!(
@@ -331,9 +330,7 @@ impl SfxCollector {
 
         Ok(SfxBuildOutput {
             sfx: sfx_bytes,
-            sfxpost: sfxpost_bytes,
-            posmap: posmap_bytes,
-            bytemap: bytemap_bytes,
+            registry_files,
         })
     }
 }
