@@ -355,7 +355,7 @@ struct SiblingCandidateState<S> {
 
 /// Minimum literal length to use prefix_walk optimization.
 /// Below this threshold, prefix_walk returns too many candidates.
-const MIN_LITERAL_LEN: usize = 3;
+const MIN_LITERAL_LEN: usize = 1;
 
 /// Extract ALL literal fragments from a regex pattern, in order.
 /// Splits on metacharacters, skips character classes, handles escapes.
@@ -566,12 +566,16 @@ where
 
                 let (Some(fp), Some(lp)) = (first_pos, last_pos) else { continue; };
 
-                // Feed first token to DFA.
+                // Feed first token to DFA, starting from the literal's offset
+                // within the token. For `ag3.*ver` with token "rag3db", feed
+                // from byte 1 ("ag3db") not byte 0 ("rag3db"), because the DFA
+                // expects the first literal at its start state.
                 let first_state = if let Some(tok_ord) = pm.ordinal_at(doc_id, fp) {
                     if let Some(text) = ord_to_term(tok_ord as u64) {
+                        let offset = text.find(first_literal.as_str()).unwrap_or(0);
                         let mut s = start_state.clone();
                         let mut alive = true;
-                        for &byte in text.as_bytes() {
+                        for &byte in &text.as_bytes()[offset..] {
                             s = automaton.accept(&s, byte);
                             if !automaton.can_match(&s) { alive = false; break; }
                         }
