@@ -6,9 +6,8 @@
 //!                  └── prescan_2 ──┘                    └── search_2 ──┘
 //! ```
 //!
-//! Prescan nodes run SFX walks in parallel (one per shard) for globally
-//! consistent BM25 contains/startsWith scoring. For non-SFX query types
-//! (term, phrase, regex, fuzzy) the prescan nodes are no-ops.
+//! Prescan nodes run SFX walks (contains/startsWith) and regex walks in
+//! parallel (one per shard) for globally consistent BM25 scoring.
 
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
@@ -26,9 +25,12 @@ use crate::handle::LucivyHandle;
 use crate::query::QueryConfig;
 use crate::sharded_handle::{ShardMsg, ShardedSearchResult, ScoredEntry};
 
-/// Prescan result from one shard: (segment_id → cached SFX results, query_text → doc_freq).
+/// Prescan result from one shard:
+/// (sfx_cache, sfx_freqs, regex_cache, regex_freqs).
 type PrescanResult = (
     HashMap<ld_lucivy::index::SegmentId, ld_lucivy::query::CachedSfxResult>,
+    HashMap<String, u64>,
+    HashMap<ld_lucivy::index::SegmentId, ld_lucivy::query::CachedRegexResult>,
     HashMap<String, u64>,
 );
 
@@ -106,15 +108,17 @@ impl Node for FlushNode {
 
 pub(crate) struct PrescanShardNode {
     shard: Arc<LucivyHandle>,
-    prescan_params: Vec<ld_lucivy::query::SfxPrescanParam>,
+    sfx_prescan_params: Vec<ld_lucivy::query::SfxPrescanParam>,
+    regex_prescan_params: Vec<ld_lucivy::query::RegexPrescanParam>,
 }
 
 impl PrescanShardNode {
     pub fn new(
         shard: Arc<LucivyHandle>,
-        prescan_params: Vec<ld_lucivy::query::SfxPrescanParam>,
+        sfx_prescan_params: Vec<ld_lucivy::query::SfxPrescanParam>,
+        regex_prescan_params: Vec<ld_lucivy::query::RegexPrescanParam>,
     ) -> Self {
-        Self { shard, prescan_params }
+        Self { shard, sfx_prescan_params, regex_prescan_params }
     }
 }
 
@@ -127,25 +131,28 @@ impl Node for PrescanShardNode {
         vec![PortDef::required("prescan", PortType::of::<PrescanResult>())]
     }
     fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
-        if self.prescan_params.is_empty() {
+        if self.sfx_prescan_params.is_empty() && self.regex_prescan_params.is_empty() {
             ctx.set_output("prescan", PortValue::new(
-                (HashMap::new(), HashMap::new()) as PrescanResult,
+                (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new()) as PrescanResult,
             ));
             return Ok(());
         }
 
         use ld_lucivy::query::{
-            run_sfx_walk, tokenize_query, CachedSfxResult, RawPostingEntry,
-            build_resolver,
+            run_sfx_walk, tokenize_query, CachedSfxResult, CachedRegexResult,
+            RawPostingEntry, build_resolver, run_regex_prescan,
         };
         use ld_lucivy::suffix_fst::file::SfxFileReader;
 
         let searcher = self.shard.reader.searcher();
-        let mut cache = HashMap::new();
-        let mut freqs: HashMap<String, u64> = HashMap::new();
+        let mut sfx_cache = HashMap::new();
+        let mut sfx_freqs: HashMap<String, u64> = HashMap::new();
+        let mut regex_cache = HashMap::new();
+        let mut regex_freqs: HashMap<String, u64> = HashMap::new();
 
+        // --- SFX prescan (existing logic, unchanged) ---
         for seg_reader in searcher.segment_readers() {
-            for param in &self.prescan_params {
+            for param in &self.sfx_prescan_params {
                 let sfx_data = match seg_reader.sfx_file(param.field) {
                     Some(d) => d,
                     None => continue,
@@ -177,15 +184,34 @@ impl Node for PrescanShardNode {
                     None,
                 );
 
-                *freqs.entry(param.query_text.clone()).or_insert(0) += doc_tf.len() as u64;
+                *sfx_freqs.entry(param.query_text.clone()).or_insert(0) += doc_tf.len() as u64;
                 if !doc_tf.is_empty() {
-                    cache.insert(seg_reader.segment_id(), CachedSfxResult::new(doc_tf, highlights));
+                    sfx_cache.insert(seg_reader.segment_id(), CachedSfxResult::new(doc_tf, highlights));
                 }
             }
         }
 
-        ctx.metric("segments_scanned", cache.len() as f64);
-        ctx.set_output("prescan", PortValue::new((cache, freqs) as PrescanResult));
+        // --- Regex prescan (NEW) ---
+        // DFA compiled inside run_regex_prescan per segment.
+        for param in &self.regex_prescan_params {
+            for seg_reader in searcher.segment_readers() {
+                let (doc_tf, highlights) = run_regex_prescan(
+                    seg_reader, param.field, &param.pattern, param.mode,
+                ).map_err(|e| format!("regex prescan: {e}"))?;
+
+                *regex_freqs.entry(param.pattern.clone()).or_insert(0) += doc_tf.len() as u64;
+                if !doc_tf.is_empty() {
+                    regex_cache.insert(seg_reader.segment_id(), CachedRegexResult {
+                        doc_tf, highlights,
+                    });
+                }
+            }
+        }
+
+        ctx.metric("segments_scanned", (sfx_cache.len() + regex_cache.len()) as f64);
+        ctx.set_output("prescan", PortValue::new(
+            (sfx_cache, sfx_freqs, regex_cache, regex_freqs) as PrescanResult,
+        ));
         Ok(())
     }
 }
@@ -218,23 +244,31 @@ impl Node for MergePrescanNode {
         vec![PortDef::required("merged", PortType::of::<PrescanResult>())]
     }
     fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
-        let mut merged_cache = HashMap::new();
-        let mut merged_freqs: HashMap<String, u64> = HashMap::new();
+        let mut merged_sfx_cache = HashMap::new();
+        let mut merged_sfx_freqs: HashMap<String, u64> = HashMap::new();
+        let mut merged_regex_cache = HashMap::new();
+        let mut merged_regex_freqs: HashMap<String, u64> = HashMap::new();
 
         for i in 0..self.num_shards {
             let port = format!("prescan_{i}");
             if let Some(value) = ctx.take_input(&port) {
-                if let Some((cache, freqs)) = value.take::<PrescanResult>() {
-                    merged_cache.extend(cache);
-                    for (key, freq) in freqs {
-                        *merged_freqs.entry(key).or_insert(0) += freq;
+                if let Some((sfx_cache, sfx_freqs, regex_cache, regex_freqs)) = value.take::<PrescanResult>() {
+                    merged_sfx_cache.extend(sfx_cache);
+                    for (key, freq) in sfx_freqs {
+                        *merged_sfx_freqs.entry(key).or_insert(0) += freq;
+                    }
+                    merged_regex_cache.extend(regex_cache);
+                    for (key, freq) in regex_freqs {
+                        *merged_regex_freqs.entry(key).or_insert(0) += freq;
                     }
                 }
             }
         }
 
-        ctx.metric("total_segments", merged_cache.len() as f64);
-        ctx.set_output("merged", PortValue::new((merged_cache, merged_freqs) as PrescanResult));
+        ctx.metric("total_segments", (merged_sfx_cache.len() + merged_regex_cache.len()) as f64);
+        ctx.set_output("merged", PortValue::new(
+            (merged_sfx_cache, merged_sfx_freqs, merged_regex_cache, merged_regex_freqs) as PrescanResult,
+        ));
         Ok(())
     }
 }
@@ -274,14 +308,20 @@ impl Node for BuildWeightNode {
         let global_stats = AggregatedBm25StatsOwned::new(searchers);
 
         // Get prescan results from merge_prescan node
-        let (merged_cache, merged_freqs) = ctx.take_input("prescan")
+        let (sfx_cache, sfx_freqs, regex_cache, regex_freqs) = ctx.take_input("prescan")
             .and_then(|v| v.take::<PrescanResult>())
             .unwrap_or_default();
 
-        // Inject prescan results into the pre-built query
-        if !merged_freqs.is_empty() {
-            self.query.set_global_contains_doc_freqs(&merged_freqs);
-            self.query.inject_prescan_cache(merged_cache);
+        // Inject SFX prescan results
+        if !sfx_freqs.is_empty() {
+            self.query.set_global_contains_doc_freqs(&sfx_freqs);
+            self.query.inject_prescan_cache(sfx_cache);
+        }
+
+        // Inject regex prescan results
+        if !regex_freqs.is_empty() {
+            self.query.set_global_regex_doc_freqs(&regex_freqs);
+            self.query.inject_regex_prescan_cache(regex_cache);
         }
 
         let searcher_0 = self.shards[0].reader.searcher();
@@ -428,9 +468,10 @@ pub(crate) fn build_search_dag(
     let query = crate::query::build_query(
         query_config, schema, &shards[0].index, highlight_sink,
     )?;
-    let prescan_params = query.sfx_prescan_params();
+    let sfx_prescan_params = query.sfx_prescan_params();
+    let regex_prescan_params = query.regex_prescan_params();
 
-    let needs_prescan = !prescan_params.is_empty();
+    let needs_prescan = !sfx_prescan_params.is_empty() || !regex_prescan_params.is_empty();
 
     // drain → flush
     dag.add_node("drain", DrainNode::new(Arc::clone(pipeline)));
@@ -446,7 +487,8 @@ pub(crate) fn build_search_dag(
         let node_name = format!("prescan_{i}");
         dag.add_node(&node_name, PrescanShardNode::new(
             shards[i].clone(),
-            prescan_params.clone(),
+            sfx_prescan_params.clone(),
+            regex_prescan_params.clone(),
         ));
         dag.connect("needs_prescan", "then", &node_name, "trigger")?;
     }

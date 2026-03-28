@@ -217,6 +217,33 @@ impl Query for BooleanQuery {
             .flat_map(|(_, subquery)| subquery.sfx_prescan_params())
             .collect()
     }
+
+    fn regex_prescan_params(&self) -> Vec<crate::query::RegexPrescanParam> {
+        self.subqueries.iter()
+            .flat_map(|(_, subquery)| subquery.regex_prescan_params())
+            .collect()
+    }
+
+    fn inject_regex_prescan_cache(
+        &mut self,
+        cache: std::collections::HashMap<crate::index::SegmentId, crate::query::phrase_query::regex_continuation_query::CachedRegexResult>,
+    ) {
+        for (_occur, subquery) in &mut self.subqueries {
+            subquery.inject_regex_prescan_cache(cache.clone());
+        }
+    }
+
+    fn set_global_regex_doc_freqs(&mut self, freqs: &std::collections::HashMap<String, u64>) {
+        for (_occur, subquery) in &mut self.subqueries {
+            subquery.set_global_regex_doc_freqs(freqs);
+        }
+    }
+
+    fn collect_regex_prescan_doc_freqs(&self, out: &mut std::collections::HashMap<String, u64>) {
+        for (_occur, subquery) in &self.subqueries {
+            subquery.collect_regex_prescan_doc_freqs(out);
+        }
+    }
 }
 
 impl BooleanQuery {

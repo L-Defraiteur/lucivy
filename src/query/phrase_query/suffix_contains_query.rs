@@ -634,7 +634,8 @@ impl Weight for SuffixContainsWeight {
 
 /// Scorer that iterates pre-verified doc IDs from the suffix FST.
 /// Uses real term frequency (number of match positions per document) for BM25.
-struct SuffixContainsScorer {
+/// Reused by RegexContinuationWeight for BM25 regex scoring.
+pub(crate) struct SuffixContainsScorer {
     /// (doc_id, term_freq) pairs, sorted by doc_id.
     candidates: Vec<(DocId, u32)>,
     cursor: usize,
@@ -643,7 +644,7 @@ struct SuffixContainsScorer {
 }
 
 impl SuffixContainsScorer {
-    fn new(
+    pub(crate) fn new(
         candidates: Vec<(DocId, u32)>,
         bm25_weight: Bm25Weight,
         fieldnorm_reader: FieldNormReader,

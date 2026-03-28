@@ -1206,6 +1206,20 @@ fn test_score_consistency_single_vs_sharded() {
             query_type: "parse".into(), field: Some("content".into()),
             value: Some("mutex AND lock".into()), ..Default::default()
         }),
+        // Contains exact (SFX substring search)
+        ("contains 'mutex'", QueryConfig {
+            query_type: "contains".into(), field: Some("content".into()),
+            value: Some("mutex".into()), ..Default::default()
+        }),
+        // Contains regex (cross-token regex via SFX + prescan)
+        ("contains regex 'mutex.*lock'", QueryConfig {
+            query_type: "contains".into(), field: Some("content".into()),
+            value: Some("mutex.*lock".into()), regex: Some(true), ..Default::default()
+        }),
+        ("contains regex 'sched[a-z]+'", QueryConfig {
+            query_type: "contains".into(), field: Some("content".into()),
+            value: Some("sched[a-z]+".into()), regex: Some(true), ..Default::default()
+        }),
     ];
 
     let mut pass = 0u32;

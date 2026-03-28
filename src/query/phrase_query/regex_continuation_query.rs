@@ -14,16 +14,90 @@ use lucivy_fst::Automaton;
 use once_cell::sync::OnceCell;
 use tantivy_fst::Regex;
 
-use crate::index::SegmentReader;
+use crate::index::{SegmentId, SegmentReader};
 use crate::query::automaton_weight::SfxAutomatonAdapter;
 use crate::query::phrase_query::scoring_utils::HighlightSink;
-use crate::query::{BitSetDocSet, ConstScorer, EnableScoring, Explanation, Query, Scorer, Weight};
+use crate::query::phrase_query::suffix_contains_query::SuffixContainsScorer;
+use crate::fieldnorm::FieldNormReader;
+use crate::query::{EnableScoring, Explanation, Query, Scorer, Weight};
+use crate::query::bm25::Bm25Weight;
+use crate::query::posting_resolver;
 use crate::schema::Field;
 use crate::suffix_fst::file::{SfxDfaWrapper, SfxFileReader};
 use crate::suffix_fst::gapmap::is_value_boundary;
 use crate::store::StoreReader;
 use crate::suffix_fst::SfxTermDictionary;
 use crate::{DocId, LucivyError, Score};
+
+/// Cached regex prescan result per segment.
+#[derive(Clone, Debug)]
+pub struct CachedRegexResult {
+    pub doc_tf: Vec<(DocId, u32)>,
+    pub highlights: Vec<(DocId, usize, usize)>,
+}
+
+/// Run regex prescan on a single segment. Compiles DFA, runs the walk,
+/// returns (doc_tf, highlights). Called by the search DAG prescan node.
+pub fn run_regex_prescan(
+    reader: &SegmentReader,
+    field: Field,
+    pattern: &str,
+    mode: ContinuationMode,
+) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)> {
+    let sfx_data = match reader.sfx_file(field) {
+        Some(d) => d,
+        None => return Ok((vec![], vec![])),
+    };
+    let sfx_bytes = sfx_data
+        .read_bytes()
+        .map_err(|e| LucivyError::SystemError(format!("read .sfx: {e}")))?;
+    let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
+        .map_err(|e| LucivyError::SystemError(format!("open .sfx: {e}")))?;
+
+    let pr = posting_resolver::build_resolver(reader, field)?;
+
+    let inverted_index = reader.inverted_index(field)?;
+    let term_dict = inverted_index.terms();
+    let sfx_dict = SfxTermDictionary::new(&sfx_reader, term_dict);
+
+    let ord_to_term_fn = |ord: u64| -> Option<String> {
+        let mut bytes = Vec::new();
+        if term_dict.ord_to_term(ord, &mut bytes).ok()? {
+            String::from_utf8(bytes).ok()
+        } else {
+            None
+        }
+    };
+
+    let posmap_bytes = reader.posmap_file(field)
+        .and_then(|d| d.read_bytes().ok())
+        .map(|b| b.as_ref().to_vec());
+
+    let regex = Regex::new(pattern).map_err(|e| {
+        LucivyError::InvalidArgument(format!("RegexContinuation: {e}"))
+    })?;
+    let automaton = SfxAutomatonAdapter(&regex);
+
+    let (_, highlights) = regex_contains_via_literal(
+        &automaton, pattern, &sfx_dict, &*pr, &sfx_reader,
+        mode, reader.max_doc(), &ord_to_term_fn,
+        posmap_bytes.as_deref(),
+    )?;
+
+    let doc_tf = highlights_to_doc_tf(&highlights);
+    Ok((doc_tf, highlights))
+}
+
+/// Convert highlights to (doc_id, term_frequency) pairs for BM25 scoring.
+pub fn highlights_to_doc_tf(highlights: &[(DocId, usize, usize)]) -> Vec<(DocId, u32)> {
+    let mut counts: HashMap<DocId, u32> = HashMap::new();
+    for &(doc_id, _, _) in highlights {
+        *counts.entry(doc_id).or_default() += 1;
+    }
+    let mut doc_tf: Vec<(DocId, u32)> = counts.into_iter().collect();
+    doc_tf.sort_by_key(|&(d, _)| d);
+    doc_tf
+}
 
 /// Mode controls where the regex can match relative to the text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +140,10 @@ pub struct RegexContinuationQuery {
     mode: ContinuationMode,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
+    /// Prescan cache: segment_id → cached regex results (populated by DAG injection).
+    regex_prescan_cache: Option<HashMap<SegmentId, CachedRegexResult>>,
+    /// Global doc_freq from prescan (correct IDF across all segments/shards).
+    global_regex_doc_freq: Option<u64>,
 }
 
 impl RegexContinuationQuery {
@@ -77,6 +155,8 @@ impl RegexContinuationQuery {
             mode,
             highlight_sink: None,
             highlight_field_name: String::new(),
+            regex_prescan_cache: None,
+            global_regex_doc_freq: None,
         }
     }
 
@@ -105,6 +185,8 @@ impl RegexContinuationQuery {
             mode,
             highlight_sink: None,
             highlight_field_name: String::new(),
+            regex_prescan_cache: None,
+            global_regex_doc_freq: None,
         }
     }
 
@@ -117,14 +199,85 @@ impl RegexContinuationQuery {
 }
 
 impl Query for RegexContinuationQuery {
-    fn weight(&self, _enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
+    fn prescan_segments(&mut self, segments: &[&crate::SegmentReader]) -> crate::Result<()> {
+        if let DfaKind::Regex { ref pattern } = self.dfa_kind {
+            let mut cache = HashMap::new();
+            let mut doc_freq = 0u64;
+            for seg_reader in segments {
+                let (doc_tf, highlights) = run_regex_prescan(
+                    seg_reader, self.field, pattern, self.mode,
+                )?;
+                doc_freq += doc_tf.len() as u64;
+                if !doc_tf.is_empty() {
+                    cache.insert(seg_reader.segment_id(), CachedRegexResult { doc_tf, highlights });
+                }
+            }
+            self.regex_prescan_cache = Some(cache);
+            self.global_regex_doc_freq = Some(doc_freq);
+        }
+        Ok(())
+    }
+
+    fn collect_regex_prescan_doc_freqs(&self, out: &mut std::collections::HashMap<String, u64>) {
+        if let DfaKind::Regex { ref pattern } = self.dfa_kind {
+            if let Some(freq) = self.global_regex_doc_freq {
+                out.insert(pattern.clone(), freq);
+            }
+        }
+    }
+
+    fn weight(&self, enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
+        let (scoring_enabled, global_num_docs, global_num_tokens) = match &enable_scoring {
+            EnableScoring::Enabled { stats, .. } => {
+                let num_docs = stats.total_num_docs().unwrap_or(0);
+                let num_tokens = stats.total_num_tokens(self.field).unwrap_or(0);
+                (true, num_docs, num_tokens)
+            }
+            _ => (false, 0, 0),
+        };
+
         Ok(Box::new(RegexContinuationWeight {
             field: self.field,
             dfa_kind: self.dfa_kind.clone(),
             mode: self.mode,
             highlight_sink: self.highlight_sink.clone(),
             highlight_field_name: self.highlight_field_name.clone(),
+            scoring_enabled,
+            global_num_docs,
+            global_num_tokens,
+            regex_prescan_cache: self.regex_prescan_cache.clone().unwrap_or_default(),
+            global_regex_doc_freq: self.global_regex_doc_freq.unwrap_or(0),
         }))
+    }
+
+    fn regex_prescan_params(&self) -> Vec<crate::query::RegexPrescanParam> {
+        match &self.dfa_kind {
+            DfaKind::Regex { pattern } => vec![crate::query::RegexPrescanParam {
+                field: self.field,
+                pattern: pattern.clone(),
+                mode: self.mode,
+            }],
+            DfaKind::Fuzzy { .. } => vec![],
+        }
+    }
+
+    fn inject_regex_prescan_cache(
+        &mut self,
+        cache: HashMap<SegmentId, CachedRegexResult>,
+    ) {
+        if let Some(ref mut existing) = self.regex_prescan_cache {
+            existing.extend(cache);
+        } else {
+            self.regex_prescan_cache = Some(cache);
+        }
+    }
+
+    fn set_global_regex_doc_freqs(&mut self, freqs: &HashMap<String, u64>) {
+        if let DfaKind::Regex { pattern } = &self.dfa_kind {
+            if let Some(&df) = freqs.get(pattern) {
+                self.global_regex_doc_freq = Some(df);
+            }
+        }
     }
 }
 
@@ -134,6 +287,11 @@ struct RegexContinuationWeight {
     mode: ContinuationMode,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
+    scoring_enabled: bool,
+    global_num_docs: u64,
+    global_num_tokens: u64,
+    regex_prescan_cache: HashMap<SegmentId, CachedRegexResult>,
+    global_regex_doc_freq: u64,
 }
 
 /// Candidate state: DFA end state + byte_from of match start for highlights.
@@ -143,7 +301,7 @@ struct CandidateState<S> {
     byte_from: u32,
 }
 
-use crate::query::posting_resolver::{self, PostingResolver};
+use crate::query::posting_resolver::PostingResolver;
 
 /// Run the continuation algorithm with a given automaton on a segment.
 /// Returns (doc_bitset, highlights) where highlights = Vec<(doc_id, byte_from, byte_to)>.
@@ -283,7 +441,7 @@ fn pick_best_literal(pattern: &str, fragments: &[String]) -> (String, bool) {
 /// 5. Gap>0 cross-token: resolve first ordinal, read GapMap, validate DFA, check adjacency
 ///
 /// Falls back to empty results when no usable literal found (never scans full FST).
-pub(crate) fn regex_contains_via_literal<A: Automaton>(
+pub fn regex_contains_via_literal<A: Automaton>(
     automaton: &A,
     pattern: &str,
     sfx_dict: &SfxTermDictionary,
@@ -747,14 +905,65 @@ where
     Ok((doc_bitset, highlights))
 }
 
-impl Weight for RegexContinuationWeight {
-    fn scorer(&self, reader: &SegmentReader, boost: Score) -> crate::Result<Box<dyn Scorer>> {
+impl RegexContinuationWeight {
+    /// Emit highlights to the sink (shared by cached and fallback paths).
+    fn emit_highlights(&self, segment_id: SegmentId, highlights: &[(DocId, usize, usize)]) {
+        if let Some(ref sink) = self.highlight_sink {
+            for &(doc_id, byte_from, byte_to) in highlights {
+                sink.insert(
+                    segment_id,
+                    doc_id,
+                    &self.highlight_field_name,
+                    vec![[byte_from, byte_to]],
+                );
+            }
+        }
+    }
+
+    /// Build BM25 scorer from doc_tf (shared by cached and fallback paths).
+    fn build_scorer(
+        &self, reader: &SegmentReader, boost: Score,
+        doc_tf: Vec<(DocId, u32)>,
+    ) -> crate::Result<Box<dyn Scorer>> {
+        let fieldnorm_reader = reader.fieldnorms_readers()
+            .get_field(self.field)?
+            .unwrap_or_else(|| FieldNormReader::constant(reader.max_doc(), 1));
+
+        let bm25_weight = if self.scoring_enabled {
+            let (total_num_docs, total_num_tokens) = if self.global_num_docs > 0 {
+                (self.global_num_docs, self.global_num_tokens)
+            } else {
+                let inv_idx = reader.inverted_index(self.field)?;
+                ((reader.max_doc() as u64).max(1), inv_idx.total_num_tokens())
+            };
+            let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
+            let doc_freq = if self.global_regex_doc_freq > 0 {
+                self.global_regex_doc_freq
+            } else {
+                doc_tf.len() as u64
+            };
+            Bm25Weight::for_one_term(doc_freq, total_num_docs, average_fieldnorm)
+        } else {
+            Bm25Weight::for_one_term(0, 1, 1.0)
+        };
+
+        Ok(Box::new(SuffixContainsScorer::new(
+            doc_tf,
+            bm25_weight.boost_by(boost),
+            fieldnorm_reader,
+        )))
+    }
+
+    /// Fallback: run regex walk without prescan cache.
+    /// Compiles DFA, opens .sfx/.posmap, runs the walk, converts to doc_tf.
+    fn run_regex_fallback(
+        &self, reader: &SegmentReader,
+    ) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)> {
         let max_doc = reader.max_doc();
 
-        // Open .sfx — if not present, return empty scorer.
         let sfx_data = match reader.sfx_file(self.field) {
             Some(data) => data,
-            None => return Ok(Box::new(crate::query::EmptyScorer)),
+            None => return Ok((vec![], vec![])),
         };
         let sfx_bytes = sfx_data
             .read_bytes()
@@ -768,7 +977,6 @@ impl Weight for RegexContinuationWeight {
 
         let resolver = posting_resolver::build_resolver(reader, self.field)?;
 
-        // Build ord_to_term for sibling-accelerated path.
         let ord_to_term_fn = |ord: u64| -> Option<String> {
             let mut bytes = Vec::new();
             if term_dict.ord_to_term(ord, &mut bytes).ok()? {
@@ -779,11 +987,6 @@ impl Weight for RegexContinuationWeight {
         };
 
         let use_sibling = sfx_reader.sibling_table().is_some();
-
-        // Load .posmap bytes for position-based regex cross-token validation.
-        let posmap_bytes = reader.posmap_file(self.field)
-            .and_then(|data| data.read_bytes().ok())
-            .map(|b| b.as_ref().to_vec());
 
         let (doc_bitset, highlights) = match &self.dfa_kind {
             DfaKind::Fuzzy { text, distance, prefix } => {
@@ -807,18 +1010,14 @@ impl Weight for RegexContinuationWeight {
                 }
             }
             DfaKind::Regex { pattern } => {
-                let t_dfa = std::time::Instant::now();
+                let posmap_bytes = reader.posmap_file(self.field)
+                    .and_then(|data| data.read_bytes().ok())
+                    .map(|b| b.as_ref().to_vec());
+
                 let regex = Regex::new(pattern).map_err(|e| {
                     LucivyError::InvalidArgument(format!("RegexContinuation: {e}"))
                 })?;
-                let dfa_us = t_dfa.elapsed().as_micros();
-
-                let t_setup = std::time::Instant::now();
                 let automaton = SfxAutomatonAdapter(&regex);
-                let setup_us = t_setup.elapsed().as_micros();
-
-                eprintln!("[regex-timer] scorer: dfa_compile={}us setup={}us sibling={} pattern='{}'",
-                    dfa_us, setup_us, use_sibling, pattern);
 
                 if use_sibling {
                     regex_contains_via_literal(
@@ -835,28 +1034,39 @@ impl Weight for RegexContinuationWeight {
             }
         };
 
-        // Report highlights to sink
-        if let Some(ref sink) = self.highlight_sink {
-            let segment_id = reader.segment_id();
-            for &(doc_id, byte_from, byte_to) in &highlights {
-                sink.insert(
-                    segment_id,
-                    doc_id,
-                    &self.highlight_field_name,
-                    vec![[byte_from, byte_to]],
-                );
+        // Convert (BitSet, highlights) → (doc_tf, highlights)
+        let _ = doc_bitset; // BitSet no longer needed — doc_tf derived from highlights
+        let doc_tf = highlights_to_doc_tf(&highlights);
+        Ok((doc_tf, highlights))
+    }
+}
+
+impl Weight for RegexContinuationWeight {
+    fn scorer(&self, reader: &SegmentReader, boost: Score) -> crate::Result<Box<dyn Scorer>> {
+        let segment_id = reader.segment_id();
+
+        // === FAST PATH: prescan cache available (from DAG) ===
+        if let Some(cached) = self.regex_prescan_cache.get(&segment_id) {
+            if cached.doc_tf.is_empty() {
+                return Ok(Box::new(crate::query::EmptyScorer));
             }
+            self.emit_highlights(segment_id, &cached.highlights);
+            return self.build_scorer(reader, boost, cached.doc_tf.clone());
         }
 
-        let doc_bitset = BitSetDocSet::from(doc_bitset);
-        let scorer = ConstScorer::new(doc_bitset, boost);
-        Ok(Box::new(scorer))
+        // === SLOW PATH: fallback (non-DAG or prescan skipped) ===
+        let (doc_tf, highlights) = self.run_regex_fallback(reader)?;
+        if doc_tf.is_empty() {
+            return Ok(Box::new(crate::query::EmptyScorer));
+        }
+        self.emit_highlights(segment_id, &highlights);
+        self.build_scorer(reader, boost, doc_tf)
     }
 
     fn explain(&self, reader: &SegmentReader, doc: DocId) -> crate::Result<Explanation> {
         let mut scorer = self.scorer(reader, 1.0)?;
         if scorer.seek(doc) == doc {
-            Ok(Explanation::new("RegexContinuationQuery", 1.0))
+            Ok(Explanation::new("RegexContinuationQuery", scorer.score()))
         } else {
             Err(LucivyError::InvalidArgument(
                 "Document does not exist".to_string(),

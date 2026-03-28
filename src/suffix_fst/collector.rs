@@ -289,32 +289,28 @@ impl SfxCollector {
         ).with_sibling_data(sibling_data);
         let sfx_bytes = file_writer.to_bytes();
 
-        // .sfxpost file V2
+        // .sfxpost + .posmap + .bytemap — single pass over sorted ordinals
         let mut sfxpost_writer = super::sfxpost_v2::SfxPostWriterV2::new(num_tokens);
-        for (new_ord, &old_ord) in sorted_indices.iter().enumerate() {
-            let entries = &self.token_postings[old_ord as usize];
-            for &(doc_id, ti, byte_from, byte_to) in entries {
-                sfxpost_writer.add_entry(new_ord as u32, doc_id, ti, byte_from, byte_to);
-            }
-        }
-        let sfxpost_bytes = sfxpost_writer.finish();
-
-        // .posmap — position-to-ordinal reverse map
         let mut posmap_writer = PosMapWriter::new();
+        let mut bytemap_writer = ByteBitmapWriter::new();
+        bytemap_writer.ensure_capacity(num_terms);
+
         for (new_ord, &old_ord) in sorted_indices.iter().enumerate() {
             let final_ord = new_ord as u32;
-            for &(doc_id, ti, _, _) in &self.token_postings[old_ord as usize] {
+            let old = old_ord as usize;
+
+            // bytemap: record byte presence for this token
+            bytemap_writer.record_token(final_ord, self.token_texts[old].as_bytes());
+
+            // sfxpost + posmap: iterate postings once
+            for &(doc_id, ti, byte_from, byte_to) in &self.token_postings[old] {
+                sfxpost_writer.add_entry(final_ord, doc_id, ti, byte_from, byte_to);
                 posmap_writer.add(doc_id, ti, final_ord);
             }
         }
-        let posmap_bytes = posmap_writer.serialize();
 
-        // .bytemap — byte presence bitmap per ordinal
-        let mut bytemap_writer = ByteBitmapWriter::new();
-        bytemap_writer.ensure_capacity(num_terms);
-        for (new_ord, &old_ord) in sorted_indices.iter().enumerate() {
-            bytemap_writer.record_token(new_ord as u32, self.token_texts[old_ord as usize].as_bytes());
-        }
+        let sfxpost_bytes = sfxpost_writer.finish();
+        let posmap_bytes = posmap_writer.serialize();
         let bytemap_bytes = bytemap_writer.serialize();
 
         Ok(SfxBuildOutput {

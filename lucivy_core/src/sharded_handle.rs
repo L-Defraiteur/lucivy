@@ -1447,6 +1447,9 @@ impl ShardedHandle {
         // Add contains doc_freqs from prescan
         query.collect_prescan_doc_freqs(&mut stats.contains_doc_freqs);
 
+        // Add regex doc_freqs from prescan
+        query.collect_regex_prescan_doc_freqs(&mut stats.regex_doc_freqs);
+
         Ok(stats)
     }
 
@@ -1477,6 +1480,11 @@ impl ShardedHandle {
         // Inject global contains doc_freqs from coordinator (overrides local prescan doc_freq)
         if !global_stats.contains_doc_freqs.is_empty() {
             query.set_global_contains_doc_freqs(&global_stats.contains_doc_freqs);
+        }
+
+        // Inject global regex doc_freqs from coordinator
+        if !global_stats.regex_doc_freqs.is_empty() {
+            query.set_global_regex_doc_freqs(&global_stats.regex_doc_freqs);
         }
 
         // Build weight with global stats (total_docs, total_tokens, term doc_freqs)

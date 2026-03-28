@@ -23,7 +23,7 @@ use crate::{DocId, Score, LucivyError, TERMINATED};
 
 /// Bridge adapter: wraps a tantivy_fst::Automaton to implement lucivy_fst::Automaton
 /// for searching the suffix FST.
-pub(crate) struct SfxAutomatonAdapter<'a, A>(pub &'a A);
+pub struct SfxAutomatonAdapter<'a, A>(pub &'a A);
 
 impl<A: Automaton> lucivy_fst::Automaton for SfxAutomatonAdapter<'_, A>
 where

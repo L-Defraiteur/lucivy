@@ -112,6 +112,10 @@ pub struct ExportableStats {
     /// Key: lowercased query text → number of docs matching the substring.
     #[serde(default)]
     pub contains_doc_freqs: HashMap<String, u64>,
+    /// Regex doc_freq per pattern (from prescan).
+    /// Key: regex pattern → number of docs matching.
+    #[serde(default)]
+    pub regex_doc_freqs: HashMap<String, u64>,
 }
 
 impl ExportableStats {
@@ -149,7 +153,7 @@ impl ExportableStats {
             }
         }
 
-        Self { total_num_docs, total_num_tokens, doc_freqs, contains_doc_freqs: HashMap::new() }
+        Self { total_num_docs, total_num_tokens, doc_freqs, contains_doc_freqs: HashMap::new(), regex_doc_freqs: HashMap::new() }
     }
 
     /// Set contains doc_freq from a prescan result.
@@ -183,7 +187,14 @@ impl ExportableStats {
             }
         }
 
-        ExportableStats { total_num_docs, total_num_tokens, doc_freqs, contains_doc_freqs }
+        let mut regex_doc_freqs: HashMap<String, u64> = HashMap::new();
+        for s in stats {
+            for (key, &freq) in &s.regex_doc_freqs {
+                *regex_doc_freqs.entry(key.clone()).or_insert(0) += freq;
+            }
+        }
+
+        ExportableStats { total_num_docs, total_num_tokens, doc_freqs, contains_doc_freqs, regex_doc_freqs }
     }
 }
 

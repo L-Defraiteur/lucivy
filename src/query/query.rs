@@ -221,6 +221,30 @@ pub trait Query: QueryClone + Send + Sync + downcast_rs::Downcast + fmt::Debug {
     /// SuffixContainsQuery returns its own params. BooleanQuery aggregates.
     /// Default: empty (no SFX prescan needed).
     fn sfx_prescan_params(&self) -> Vec<SfxPrescanParam> { vec![] }
+
+    /// Return regex prescan parameters needed by this query.
+    /// RegexContinuationQuery returns its params. BooleanQuery aggregates.
+    /// Default: empty (no regex prescan needed).
+    fn regex_prescan_params(&self) -> Vec<RegexPrescanParam> { vec![] }
+
+    /// Inject regex prescan cache (merged from multiple shards by the DAG).
+    /// RegexContinuationQuery stores it for scorer(). BooleanQuery propagates.
+    /// Default: no-op.
+    fn inject_regex_prescan_cache(
+        &mut self,
+        _cache: std::collections::HashMap<crate::index::SegmentId, crate::query::phrase_query::regex_continuation_query::CachedRegexResult>,
+    ) {
+    }
+
+    /// Set global doc_freq for regex queries (from prescan aggregation).
+    /// RegexContinuationQuery reads its pattern key. BooleanQuery propagates.
+    /// Default: no-op.
+    fn set_global_regex_doc_freqs(&mut self, _freqs: &std::collections::HashMap<String, u64>) {}
+
+    /// Collect regex doc_freqs from prescan results (for ExportableStats).
+    /// RegexContinuationQuery exports its pattern → doc_freq. BooleanQuery propagates.
+    /// Default: no-op.
+    fn collect_regex_prescan_doc_freqs(&self, _out: &mut std::collections::HashMap<String, u64>) {}
 }
 
 /// Parameters for an SFX prescan walk, extracted from a built query.
@@ -239,6 +263,17 @@ pub struct SfxPrescanParam {
     pub continuation: bool,
     /// If true, validate separators via GapMap in multi-token mode.
     pub strict_separators: bool,
+}
+
+/// Parameters for a regex prescan walk, extracted from a built query.
+#[derive(Clone, Debug)]
+pub struct RegexPrescanParam {
+    /// The field to prescan.
+    pub field: crate::schema::Field,
+    /// The regex pattern.
+    pub pattern: String,
+    /// Continuation mode (Contains / StartsWith).
+    pub mode: crate::query::phrase_query::regex_continuation_query::ContinuationMode,
 }
 
 /// Implements `box_clone`.
@@ -296,6 +331,25 @@ impl Query for Box<dyn Query> {
 
     fn sfx_prescan_params(&self) -> Vec<SfxPrescanParam> {
         self.as_ref().sfx_prescan_params()
+    }
+
+    fn regex_prescan_params(&self) -> Vec<RegexPrescanParam> {
+        self.as_ref().regex_prescan_params()
+    }
+
+    fn inject_regex_prescan_cache(
+        &mut self,
+        cache: std::collections::HashMap<crate::index::SegmentId, crate::query::phrase_query::regex_continuation_query::CachedRegexResult>,
+    ) {
+        self.as_mut().inject_regex_prescan_cache(cache)
+    }
+
+    fn set_global_regex_doc_freqs(&mut self, freqs: &std::collections::HashMap<String, u64>) {
+        self.as_mut().set_global_regex_doc_freqs(freqs)
+    }
+
+    fn collect_regex_prescan_doc_freqs(&self, out: &mut std::collections::HashMap<String, u64>) {
+        self.as_ref().collect_regex_prescan_doc_freqs(out)
     }
 }
 
