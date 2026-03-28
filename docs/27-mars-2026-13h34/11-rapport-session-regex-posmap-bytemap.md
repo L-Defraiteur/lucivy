@@ -107,16 +107,35 @@ regex_contains_via_literal(pattern):
 
 ## Tests : 1181 passent
 
-## Points à investiguer (prochaine étape)
+## Compatibilité vérifiée
 
-### Compatibilité à vérifier
-- **Merge de segments** : les .posmap et .bytemap doivent être reconstruits pendant le merge
-- **Snapshots incrémentaux (lucid/lucids)** : les nouveaux fichiers doivent être inclus dans les deltas
-- **Sharding** : les PosMap/ByteBitmap sont par-segment, pas d'impact cross-shard
-- **Sharding distribué** : idem, chaque nœud a ses propres segments
+| Zone | Status | Notes |
+|---|---|---|
+| **Merge (primary path)** | ✅ Fixé (commit d7f805b) | PosMap + ByteBitmap reconstruits dans la boucle sfxpost merge |
+| **Merge (legacy path)** | ⚠️ Placeholders vides | Code mort `#[allow(dead_code)]`, à supprimer |
+| **Snapshots** | ✅ OK | `read_directory_files()` prend tous les fichiers |
+| **Import backward compat** | ✅ OK | Fichiers optionnels via `Option<FileSlice>` |
+| **Deltas (lucid/lucids)** | ✅ OK | `list_files()` via SegmentComponent inclut PosMap/ByteMap |
+| **Sharding** | ✅ OK | Chaque shard indépendant |
+| **GC** | ✅ OK | SegmentComponent enum protège les fichiers |
+
+## Problèmes connus
+
+### Scoring regex — tous les résultats à 1.0
+Le regex utilise `ConstScorer` (score fixe 1.0) au lieu de BM25.
+Le `RegexContinuationWeight.scorer()` construit un `ConstScorer` — il faudrait
+utiliser le même `SuffixContainsScorer` avec BM25 que le contains exact.
+Impact : tri par pertinence non fonctionnel pour regex.
 
 ### ByteBitmap pas encore câblé à la recherche
-Le ByteBitmap est indexé et stocké mais pas utilisé par le regex pour l'instant. Sera un pré-filtre futur.
+Indexé et stocké mais pas utilisé comme pré-filtre dans le regex.
+Sera utile pour les patterns restrictifs comme `[a-z]+` → vérifier que les tokens
+intermédiaires n'ont que des lettres minuscules.
 
 ### `[a-z]+ment` — pas de littéral viable
-Retourne 0 résultats immédiatement (pas de littéral ≥ 3 chars). Correct mais limitant. Piste : extraire des bigrams ou réduire MIN_LITERAL_LEN à 2.
+Retourne 0 résultats immédiatement (pas de littéral ≥ 3 chars).
+Pistes : réduire MIN_LITERAL_LEN à 2, ou extraire bigrams.
+
+### Legacy merge path à supprimer
+Le code `merge_sfx_legacy` est `#[allow(dead_code)]` et écrit des placeholders vides
+pour PosMap/ByteBitmap. À nettoyer dans un futur cleanup.
