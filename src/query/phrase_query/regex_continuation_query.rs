@@ -613,47 +613,67 @@ pub fn fuzzy_contains_via_trigram(
         let Some(fp) = first_pos else { continue; };
 
         if let Some(pm) = &posmap {
-            // Fix cross-token DFA validation:
-            // Build the text around the match region, then validate with a
-            // sliding-window DFA scan. This handles both same-token and
-            // cross-token matches uniformly.
-            //
-            // Gap handling: for single-word queries (no spaces), skip gap
-            // bytes — the SFX cross-token model concatenates tokens without
-            // separators. For multi-word queries (has spaces), include gaps
-            // — the spaces in the query correspond to token separators.
+            // Build text around the match region for DFA validation.
+            // Track content byte positions so we can map the DFA match
+            // back to actual document byte offsets (accounting for separators).
             let back_bytes = query_positions[first_tri_idx];
             let lookback_positions = (back_bytes as u32 + 2).min(fp);
             let start_pos = fp - lookback_positions;
-            // Only look forward enough to cover the query — NOT 64 tokens,
-            // which would create a huge concat text and cause false DFA matches.
             let forward_bytes = query_text.len() + distance as usize;
             let forward_positions = forward_bytes as u32 / 2 + 3;
             let max_pos = pm.num_tokens(doc_id);
             let end_pos = (fp + forward_positions).min(max_pos);
 
+            // Compute content byte of fp's token from the trigram match position
+            let fp_token_text = pm.ordinal_at(doc_id, fp)
+                .and_then(|ord| ord_to_term(ord as u64));
+            let tri_offset_in_tok = fp_token_text.as_ref()
+                .and_then(|t| t.find(&ngrams[first_tri_idx]))
+                .unwrap_or(0);
+            let fp_content_byte = (*first_bf as i64 - tri_offset_in_tok as i64).max(0) as u32;
+
+            // Walk backward from fp to get content byte of start_pos
+            let mut cb = fp_content_byte as i64;
+            for pos in (start_pos..fp).rev() {
+                let gap_len = sfx_reader.gapmap().read_separator(doc_id, pos, pos + 1)
+                    .map(|g| g.len() as i64).unwrap_or(1);
+                let tok_len = pm.ordinal_at(doc_id, pos)
+                    .and_then(|ord| ord_to_term(ord as u64))
+                    .map(|t| t.len() as i64).unwrap_or(0);
+                cb -= tok_len + gap_len;
+            }
+            let start_content_byte = cb.max(0) as u32;
+
+            // Build concat text, tracking (concat_offset → content_byte) per token
             let include_gaps = query_text.contains(' ');
             let mut concat_bytes: Vec<u8> = Vec::new();
             let mut fp_concat_offset: usize = 0;
+            // Each entry: (concat_offset_of_token_start, content_byte_of_token_start)
+            let mut token_map: Vec<(usize, u32)> = Vec::new();
+            let mut current_cb = start_content_byte;
+
             for pos in start_pos..end_pos {
                 if pos == fp { fp_concat_offset = concat_bytes.len(); }
-                if include_gaps && pos > start_pos {
+                if pos > start_pos {
                     let gap = sfx_reader.gapmap().read_separator(doc_id, pos - 1, pos);
                     if let Some(gap_bytes) = gap {
                         if is_value_boundary(gap_bytes) { break; }
-                        concat_bytes.extend_from_slice(gap_bytes);
+                        if include_gaps {
+                            concat_bytes.extend_from_slice(gap_bytes);
+                        }
+                        current_cb += gap_bytes.len() as u32;
                     }
                 }
+                token_map.push((concat_bytes.len(), current_cb));
                 if let Some(tok_ord) = pm.ordinal_at(doc_id, pos) {
                     if let Some(text) = ord_to_term(tok_ord as u64) {
                         concat_bytes.extend_from_slice(text.as_bytes());
+                        current_cb += text.len() as u32;
                     }
                 }
             }
 
-            // Find the first matched trigram near fp in concat to anchor the DFA.
-            // Search from fp_concat_offset to avoid matching a wrong occurrence
-            // of the trigram in an earlier token.
+            // Anchor DFA scan: find the trigram near fp in concat
             let trigram_bytes = ngrams[first_tri_idx].as_bytes();
             let trigram_near_fp = concat_bytes[fp_concat_offset..].windows(trigram_bytes.len())
                 .position(|w| w == trigram_bytes)
@@ -663,11 +683,9 @@ pub fn fuzzy_contains_via_trigram(
                 .map(|tp| tp.saturating_sub(query_positions[first_tri_idx]))
                 .unwrap_or(fp_concat_offset);
 
-            // Validate from the anchored position. Try expected_start first,
-            // then ±1 for edge cases (deletions/insertions at the start).
-            // Feed up to query_len + distance bytes and take the LONGEST match
-            // (the DFA can accept early via trailing deletions).
+            // Validate DFA from anchored position (try ±1 for edge cases)
             let mut matched = false;
+            let mut match_start: usize = 0;
             let mut match_len: usize = 0;
             let max_feed = query_text.len() + distance as usize + 1;
             let try_offsets = [0i32, -1, 1];
@@ -701,6 +719,7 @@ pub fn fuzzy_contains_via_trigram(
                 }
                 if local_matched {
                     matched = true;
+                    match_start = sb;
                     match_len = best_len;
                     break;
                 }
@@ -708,9 +727,23 @@ pub fn fuzzy_contains_via_trigram(
 
             if matched {
                 doc_bitset.insert(doc_id);
-                let adj_bf = first_bf.saturating_sub(query_positions[first_tri_idx] as u32);
-                let adj_bt = adj_bf + match_len as u32;
-                highlights.push((doc_id, adj_bf as usize, adj_bt as usize));
+                // Map concat byte range → content byte range via token_map.
+                // This correctly accounts for separator bytes in the content
+                // that aren't in the concat (for single-word queries).
+                let concat_start = match_start;
+                let concat_end = match_start + match_len;
+
+                let hl_start = token_map.iter().rev()
+                    .find(|(co, _)| *co <= concat_start)
+                    .map(|(co, cb)| *cb + (concat_start - co) as u32)
+                    .unwrap_or(*first_bf) as usize;
+
+                let hl_end = token_map.iter().rev()
+                    .find(|(co, _)| *co < concat_end)
+                    .map(|(co, cb)| *cb + (concat_end - co) as u32)
+                    .unwrap_or(*first_bf + match_len as u32) as usize;
+
+                highlights.push((doc_id, hl_start, hl_end));
             }
         } else {
             // No PosMap — accept trigram-filtered candidates conservatively
@@ -719,7 +752,23 @@ pub fn fuzzy_contains_via_trigram(
         }
     }
 
-    Ok((doc_bitset, highlights))
+    // Merge overlapping/adjacent highlights for the same doc.
+    // Cross-token matches can produce separate chains for each token
+    // fragment (e.g. "rag3" and "weaver" instead of "rag3weaver").
+    highlights.sort_by_key(|&(doc, bf, _)| (doc, bf));
+    let mut merged: Vec<(DocId, usize, usize)> = Vec::new();
+    for hl in &highlights {
+        if let Some(last) = merged.last_mut() {
+            if last.0 == hl.0 && hl.1 <= last.2 + 1 {
+                // Same doc, overlapping or adjacent (gap ≤ 1 byte) — extend
+                last.2 = last.2.max(hl.2);
+                continue;
+            }
+        }
+        merged.push(*hl);
+    }
+
+    Ok((doc_bitset, merged))
 }
 
 /// Pick the best literal for the primary prefix_walk.
