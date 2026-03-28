@@ -149,7 +149,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_empty() {
-        let writer = SiblingTableWriter::new(3);
+        let mut writer = SiblingTableWriter::new(3);
         let data = writer.serialize();
         let reader = SiblingTableReader::open(&data).unwrap();
         assert_eq!(reader.num_ordinals(), 3);
@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn test_out_of_bounds() {
-        let writer = SiblingTableWriter::new(2);
+        let mut writer = SiblingTableWriter::new(2);
         let data = writer.serialize();
         let reader = SiblingTableReader::open(&data).unwrap();
         assert!(reader.siblings(99).is_empty());

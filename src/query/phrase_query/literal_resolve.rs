@@ -149,6 +149,95 @@ pub fn intersect_literals_ordered(
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// 2b. intersect_trigrams — fuzzy match via trigram pigeonhole
+// ─────────────────────────────────────────────────────────────────────
+
+/// Intersect trigram matches for fuzzy search: find docs where at least
+/// `threshold` trigrams appear in order with byte span consistent with
+/// the query (±distance tolerance).
+///
+/// `trigrams_by_doc[i]` = matches for trigram i (in query order).
+/// `query_positions[i]` = byte position of trigram i in the query string.
+///
+/// Returns: `(doc_id, first_byte_from, last_byte_to)` for validated matches.
+pub fn intersect_trigrams_with_threshold(
+    trigrams_by_doc: &[MatchesByDoc],
+    query_positions: &[usize],
+    threshold: usize,
+    distance: u8,
+) -> Vec<(DocId, u32, u32)> {
+    if trigrams_by_doc.is_empty() || threshold == 0 {
+        return Vec::new();
+    }
+
+    // Collect all doc_ids that appear in at least one trigram
+    let mut all_docs: HashSet<DocId> = HashSet::new();
+    for tri_matches in trigrams_by_doc {
+        for &doc_id in tri_matches.keys() {
+            all_docs.insert(doc_id);
+        }
+    }
+
+    let mut results = Vec::new();
+
+    for &doc_id in &all_docs {
+        // Collect all (tri_index, byte_from, byte_to) for this doc, sorted by byte_from
+        let mut entries: Vec<(usize, u32, u32)> = Vec::new();
+        for (tri_idx, tri_matches) in trigrams_by_doc.iter().enumerate() {
+            if let Some(positions) = tri_matches.get(&doc_id) {
+                for &(_pos, bf, bt) in positions {
+                    entries.push((tri_idx, bf, bt));
+                }
+            }
+        }
+        entries.sort_by_key(|&(_, bf, _)| bf);
+
+        // Greedy scan: find the longest subsequence with increasing tri_index.
+        // Then check byte span consistency.
+        let mut best_chain: Vec<(usize, u32, u32)> = Vec::new();
+        let mut current_chain: Vec<(usize, u32, u32)> = Vec::new();
+
+        for &(tri_idx, bf, bt) in &entries {
+            if current_chain.is_empty()
+                || tri_idx > current_chain.last().unwrap().0
+            {
+                current_chain.push((tri_idx, bf, bt));
+            } else {
+                // tri_index not increasing — restart chain from this entry
+                if current_chain.len() > best_chain.len() {
+                    best_chain = current_chain.clone();
+                }
+                current_chain.clear();
+                current_chain.push((tri_idx, bf, bt));
+            }
+        }
+        if current_chain.len() > best_chain.len() {
+            best_chain = current_chain;
+        }
+
+        if best_chain.len() < threshold {
+            continue;
+        }
+
+        // Check byte span consistency: |text_span - query_span| <= distance
+        let first = &best_chain[0];
+        let last = &best_chain[best_chain.len() - 1];
+
+        let text_span = last.1 as i64 - first.1 as i64;
+        let query_span = query_positions[last.0] as i64 - query_positions[first.0] as i64;
+        let span_diff = (text_span - query_span).unsigned_abs();
+
+        if span_diff > distance as u64 {
+            continue;
+        }
+
+        results.push((doc_id, first.1, last.2));
+    }
+
+    results
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // 3. validate_path — DFA validation between two known positions
 // ─────────────────────────────────────────────────────────────────────
 

@@ -382,7 +382,22 @@ fn build_contains_query(
     let value = config.value.as_deref().ok_or("contains query requires 'value'")?;
     let distance = config.distance.unwrap_or(0);
 
-    // Pass original case — tokenize_query does CamelCaseSplit (needs case) then LowerCaser.
+    // Fuzzy d>=1: use trigram pigeonhole via RegexContinuationQuery (fast + correct ordering).
+    eprintln!("[debug] build_contains_query: value='{}' distance={}", value, distance);
+    if distance > 0 {
+        let mut query = RegexContinuationQuery::new(
+            field,
+            value.to_string(),
+            ContinuationMode::Contains,
+        ).with_fuzzy_distance(distance as u8);
+        if let Some(sink) = highlight_sink {
+            let field_name = config.field.clone().unwrap_or_default();
+            query = query.with_highlight_sink(sink, field_name);
+        }
+        return Ok(Box::new(query));
+    }
+
+    // Exact (d=0): SuffixContainsQuery.
     let mut query = SuffixContainsQuery::new(field, value.to_string())
         .with_fuzzy_distance(distance)
         .with_strict_separators(config.strict_separators.unwrap_or(false));

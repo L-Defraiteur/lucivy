@@ -88,6 +88,53 @@ pub fn run_regex_prescan(
     Ok((doc_tf, highlights))
 }
 
+/// Run fuzzy prescan on a single segment via trigram pigeonhole.
+pub fn run_fuzzy_prescan(
+    reader: &SegmentReader,
+    field: Field,
+    query_text: &str,
+    distance: u8,
+    prefix: bool,
+    mode: ContinuationMode,
+) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)> {
+    let sfx_data = match reader.sfx_file(field) {
+        Some(d) => d,
+        None => return Ok((vec![], vec![])),
+    };
+    let sfx_bytes = sfx_data
+        .read_bytes()
+        .map_err(|e| LucivyError::SystemError(format!("read .sfx: {e}")))?;
+    let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
+        .map_err(|e| LucivyError::SystemError(format!("open .sfx: {e}")))?;
+
+    let pr = posting_resolver::build_resolver(reader, field)?;
+
+    let inverted_index = reader.inverted_index(field)?;
+    let term_dict = inverted_index.terms();
+
+    let ord_to_term_fn = |ord: u64| -> Option<String> {
+        let mut bytes = Vec::new();
+        if term_dict.ord_to_term(ord, &mut bytes).ok()? {
+            String::from_utf8(bytes).ok()
+        } else {
+            None
+        }
+    };
+
+    let posmap_bytes = reader.posmap_file(field)
+        .and_then(|d| d.read_bytes().ok())
+        .map(|b| b.as_ref().to_vec());
+
+    let (_, highlights) = fuzzy_contains_via_trigram(
+        query_text, distance, prefix, &sfx_reader, &*pr,
+        &ord_to_term_fn, mode, reader.max_doc(),
+        posmap_bytes.as_deref(),
+    )?;
+
+    let doc_tf = highlights_to_doc_tf(&highlights);
+    Ok((doc_tf, highlights))
+}
+
 /// Convert highlights to (doc_id, term_frequency) pairs for BM25 scoring.
 pub fn highlights_to_doc_tf(highlights: &[(DocId, usize, usize)]) -> Vec<(DocId, u32)> {
     let mut counts: HashMap<DocId, u32> = HashMap::new();
@@ -200,29 +247,48 @@ impl RegexContinuationQuery {
 
 impl Query for RegexContinuationQuery {
     fn prescan_segments(&mut self, segments: &[&crate::SegmentReader]) -> crate::Result<()> {
-        if let DfaKind::Regex { ref pattern } = self.dfa_kind {
-            let mut cache = HashMap::new();
-            let mut doc_freq = 0u64;
-            for seg_reader in segments {
-                let (doc_tf, highlights) = run_regex_prescan(
-                    seg_reader, self.field, pattern, self.mode,
-                )?;
-                doc_freq += doc_tf.len() as u64;
-                if !doc_tf.is_empty() {
-                    cache.insert(seg_reader.segment_id(), CachedRegexResult { doc_tf, highlights });
+        let mut cache = HashMap::new();
+        let mut doc_freq = 0u64;
+        match &self.dfa_kind {
+            DfaKind::Regex { pattern } => {
+                let pattern = pattern.clone();
+                for seg_reader in segments {
+                    let (doc_tf, highlights) = run_regex_prescan(
+                        seg_reader, self.field, &pattern, self.mode,
+                    )?;
+                    doc_freq += doc_tf.len() as u64;
+                    if !doc_tf.is_empty() {
+                        cache.insert(seg_reader.segment_id(), CachedRegexResult { doc_tf, highlights });
+                    }
                 }
             }
-            self.regex_prescan_cache = Some(cache);
-            self.global_regex_doc_freq = Some(doc_freq);
+            DfaKind::Fuzzy { text, distance, prefix } => {
+                let text = text.clone();
+                let distance = *distance;
+                let prefix = *prefix;
+                for seg_reader in segments {
+                    let (doc_tf, highlights) = run_fuzzy_prescan(
+                        seg_reader, self.field, &text, distance, prefix, self.mode,
+                    )?;
+                    doc_freq += doc_tf.len() as u64;
+                    if !doc_tf.is_empty() {
+                        cache.insert(seg_reader.segment_id(), CachedRegexResult { doc_tf, highlights });
+                    }
+                }
+            }
         }
+        self.regex_prescan_cache = Some(cache);
+        self.global_regex_doc_freq = Some(doc_freq);
         Ok(())
     }
 
     fn collect_regex_prescan_doc_freqs(&self, out: &mut std::collections::HashMap<String, u64>) {
-        if let DfaKind::Regex { ref pattern } = self.dfa_kind {
-            if let Some(freq) = self.global_regex_doc_freq {
-                out.insert(pattern.clone(), freq);
-            }
+        if let Some(freq) = self.global_regex_doc_freq {
+            let key = match &self.dfa_kind {
+                DfaKind::Regex { pattern } => pattern.clone(),
+                DfaKind::Fuzzy { text, distance, .. } => format!("fuzzy:{}:{}", text, distance),
+            };
+            out.insert(key, freq);
         }
     }
 
@@ -257,6 +323,7 @@ impl Query for RegexContinuationQuery {
                 pattern: pattern.clone(),
                 mode: self.mode,
             }],
+            // Fuzzy uses prescan_segments() directly, not DAG regex prescan params.
             DfaKind::Fuzzy { .. } => vec![],
         }
     }
@@ -273,10 +340,12 @@ impl Query for RegexContinuationQuery {
     }
 
     fn set_global_regex_doc_freqs(&mut self, freqs: &HashMap<String, u64>) {
-        if let DfaKind::Regex { pattern } = &self.dfa_kind {
-            if let Some(&df) = freqs.get(pattern) {
-                self.global_regex_doc_freq = Some(df);
-            }
+        let key = match &self.dfa_kind {
+            DfaKind::Regex { pattern } => pattern.clone(),
+            DfaKind::Fuzzy { text, distance, .. } => format!("fuzzy:{}:{}", text, distance),
+        };
+        if let Some(&df) = freqs.get(&key) {
+            self.global_regex_doc_freq = Some(df);
         }
     }
 }
@@ -411,6 +480,184 @@ fn extract_all_literals(pattern: &str) -> Vec<String> {
     }
 
     fragments.into_iter().map(|f| f.to_lowercase()).collect()
+}
+
+/// Generate n-grams from a query string, adapting n-gram size to query length.
+/// Short queries (< 7 chars) use bigrams, longer queries use trigrams.
+/// Spaces are treated as separators (tokens never contain spaces).
+/// Returns (ngram_strings, query_byte_positions, ngram_size).
+fn generate_ngrams(query: &str, distance: u8) -> (Vec<String>, Vec<usize>, usize) {
+    let lower = query.to_lowercase();
+    // Strip spaces to measure effective length (spaces are token boundaries)
+    let effective_len: usize = lower.chars().filter(|c| *c != ' ').count();
+
+    // Choose n-gram size: bigrams for short queries, trigrams for longer ones.
+    // A single edit can break at most n adjacent n-grams. For the pigeonhole
+    // to guarantee at least 1 survivor: effective_len - n + 1 - n*d >= 1
+    // → effective_len >= n*(d+1) + n. For trigrams d=1: need >= 7 chars.
+    let n = if effective_len >= 3 * (distance as usize + 1) + 1 { 3 } else { 2 };
+
+    let bytes = lower.as_bytes();
+    let mut ngrams = Vec::new();
+    let mut positions = Vec::new();
+
+    if bytes.len() < n {
+        let trimmed = lower.replace(' ', "");
+        if !trimmed.is_empty() {
+            ngrams.push(trimmed);
+            positions.push(0);
+        }
+        return (ngrams, positions, n);
+    }
+
+    for i in 0..=bytes.len() - n {
+        if !lower.is_char_boundary(i) || !lower.is_char_boundary(i + n) {
+            continue;
+        }
+        let gram = &lower[i..i + n];
+        if gram.contains(' ') {
+            continue;
+        }
+        ngrams.push(gram.to_string());
+        positions.push(i);
+    }
+
+    // Fallback: if no n-gram survived, use individual words
+    if ngrams.is_empty() {
+        for word in lower.split_whitespace() {
+            if !word.is_empty() {
+                let pos = word.as_ptr() as usize - lower.as_ptr() as usize;
+                ngrams.push(word.to_string());
+                positions.push(pos);
+            }
+        }
+    }
+    (ngrams, positions, n)
+}
+
+/// Fuzzy search via trigram pigeonhole + Levenshtein DFA validation.
+/// 1. Generates trigrams from the query, searches each via find_literal (cross-token)
+/// 2. Filters candidates by order + threshold + byte span (fast, eliminates 99%+)
+/// 3. Validates survivors with Levenshtein DFA via PosMap walk (guaranteed correct)
+pub fn fuzzy_contains_via_trigram(
+    query_text: &str,
+    distance: u8,
+    prefix: bool,
+    sfx_reader: &SfxFileReader,
+    resolver: &dyn PostingResolver,
+    ord_to_term: &dyn Fn(u64) -> Option<String>,
+    mode: ContinuationMode,
+    max_doc: DocId,
+    posmap_data: Option<&[u8]>,
+) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>)> {
+    use super::literal_resolve::{self, LiteralMatch};
+    use crate::suffix_fst::posmap::PosMapReader;
+
+    let (ngrams, query_positions, n) = generate_ngrams(query_text, distance);
+
+    eprintln!("[fuzzy-debug] query='{}' d={} ngrams={:?} n={} positions={:?}",
+        query_text, distance, ngrams, n, query_positions);
+
+    if ngrams.is_empty() {
+        return Ok((BitSet::with_max_value(max_doc), Vec::new()));
+    }
+
+    // Threshold: each edit can break at most n adjacent n-grams.
+    // Add extra slack (+1) for cross-token trigrams that may not be findable.
+    let threshold = (ngrams.len() as i32 - n as i32 * distance as i32 - 1).max(1) as usize;
+    eprintln!("[fuzzy-debug] threshold={} (ngrams={}, n={}, d={})", threshold, ngrams.len(), n, distance);
+
+    // Step 1: Find each n-gram via exact contains (cross-token aware)
+    let mut all_matches: Vec<Vec<LiteralMatch>> = Vec::new();
+    for gram in &ngrams {
+        let matches = literal_resolve::find_literal(sfx_reader, gram, resolver, ord_to_term);
+        eprintln!("[fuzzy-debug] find_literal('{}') → {} matches", gram, matches.len());
+        all_matches.push(matches);
+    }
+
+    // Step 2: Filter by trigram order + threshold + byte span
+    let grouped: Vec<literal_resolve::MatchesByDoc> = all_matches.iter()
+        .map(|matches| literal_resolve::group_by_doc(matches))
+        .collect();
+
+    let candidates = literal_resolve::intersect_trigrams_with_threshold(
+        &grouped, &query_positions, threshold, distance,
+    );
+    eprintln!("[fuzzy-debug] candidates after intersection: {}", candidates.len());
+
+    // Step 3: Validate each candidate with Levenshtein DFA via PosMap
+    let builder = get_builder(distance);
+    let dfa = if prefix {
+        builder.build_prefix_dfa(&query_text.to_lowercase())
+    } else {
+        builder.build_dfa(&query_text.to_lowercase())
+    };
+    let automaton = SfxDfaWrapper(dfa);
+    let start_state = automaton.start();
+    let posmap = posmap_data.and_then(PosMapReader::open);
+
+    let mut doc_bitset = BitSet::with_max_value(max_doc);
+    let mut highlights: Vec<(DocId, usize, usize)> = Vec::new();
+
+    for (doc_id, first_bf, last_bt) in &candidates {
+        let doc_id = *doc_id;
+
+        // Find the token position for first_bf from the trigram matches
+        let first_pos = all_matches.iter()
+            .flat_map(|m| m.iter())
+            .filter(|m| m.doc_id == doc_id && m.byte_from == *first_bf)
+            .map(|m| m.position)
+            .min();
+
+        let Some(fp) = first_pos else { continue; };
+
+        if let Some(pm) = &posmap {
+            // Feed first token from the trigram's offset within the token.
+            // E.g. query "3dbis", token "rag3db": trigram "3db" at byte 3 in token
+            // → feed from byte 3 ("3db") not byte 0 ("rag3db").
+            let first_trigram = ngrams.first().map(|s| s.as_str()).unwrap_or("");
+            let first_state = if let Some(tok_ord) = pm.ordinal_at(doc_id, fp) {
+                if let Some(text) = ord_to_term(tok_ord as u64) {
+                    let offset = text.find(first_trigram).unwrap_or(0);
+                    let mut s = start_state.clone();
+                    let mut alive = true;
+                    for &byte in &text.as_bytes()[offset..] {
+                        s = automaton.accept(&s, byte);
+                        if !automaton.can_match(&s) { alive = false; break; }
+                    }
+                    if !alive { continue; }
+                    s
+                } else { continue; }
+            } else { continue; };
+
+            if automaton.is_match(&first_state) {
+                doc_bitset.insert(doc_id);
+                highlights.push((doc_id, *first_bf as usize, *last_bt as usize));
+                continue;
+            }
+
+            // Walk forward via PosMap for cross-token validation
+            let max_pos = pm.num_tokens(doc_id);
+            let end_pos = (fp + MAX_CONTINUATION_DEPTH as u32).min(max_pos);
+            if end_pos > fp {
+                if let Some(final_state) = literal_resolve::validate_path(
+                    &automaton, &first_state, pm, sfx_reader, ord_to_term,
+                    doc_id, fp, end_pos - 1,
+                ) {
+                    if automaton.is_match(&final_state) {
+                        doc_bitset.insert(doc_id);
+                        highlights.push((doc_id, *first_bf as usize, *last_bt as usize));
+                    }
+                }
+            }
+        } else {
+            // No PosMap — accept trigram-filtered candidates conservatively
+            doc_bitset.insert(doc_id);
+            highlights.push((doc_id, *first_bf as usize, *last_bt as usize));
+        }
+    }
+
+    Ok((doc_bitset, highlights))
 }
 
 /// Pick the best literal for the primary prefix_walk.
@@ -993,7 +1240,19 @@ impl RegexContinuationWeight {
         let use_sibling = sfx_reader.sibling_table().is_some();
 
         let (doc_bitset, highlights) = match &self.dfa_kind {
+            DfaKind::Fuzzy { text, distance, prefix } if *distance > 0 => {
+                // Fuzzy d>=1 via trigram pigeonhole + DFA validation.
+                let posmap_bytes = reader.posmap_file(self.field)
+                    .and_then(|data| data.read_bytes().ok())
+                    .map(|b| b.as_ref().to_vec());
+                fuzzy_contains_via_trigram(
+                    text, *distance, *prefix, &sfx_reader, &*resolver,
+                    &ord_to_term_fn, self.mode, max_doc,
+                    posmap_bytes.as_deref(),
+                )?
+            }
             DfaKind::Fuzzy { text, distance, prefix } => {
+                // Exact (d=0) — use existing DFA continuation path.
                 let builder = get_builder(*distance);
                 let dfa = if *prefix {
                     builder.build_prefix_dfa(text)
@@ -1549,5 +1808,37 @@ mod tests {
             .unwrap();
 
         assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_fuzzy_ngram_variants() {
+        let (index, field) = build_continuation_index();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+
+        // Target text in index: "rag3db" (in docs 0 and 1)
+        let cases: Vec<(&str, u8, bool)> = vec![
+            ("rag3db", 0, true),       // exact
+            ("rak3db", 1, true),       // sub pos 2 (g→k), 4 chars prefix
+            ("rag3xb", 1, true),       // sub pos 4 (d→x)
+            ("rag3d", 1, true),        // deletion at end
+            ("ag3db", 1, true),        // deletion at start
+            ("rag3dba", 1, true),      // insertion at end
+            ("rXg3db", 1, true),       // sub pos 1 (a→X)
+            ("rak3db", 0, false),      // not exact
+            ("rak3xb", 1, false),      // 2 edits
+        ];
+
+        for (query, dist, should_match) in &cases {
+            let q = RegexContinuationQuery::new(
+                field, query.to_string(), ContinuationMode::Contains,
+            ).with_fuzzy_distance(*dist);
+            let results = searcher.search(&q, &TopDocs::with_limit(10).order_by_score()).unwrap();
+            let matched = !results.is_empty();
+            eprintln!("  '{}' d={} → {} results {}", query, dist, results.len(),
+                if matched == *should_match { "✓" } else { "FAIL" });
+            assert_eq!(matched, *should_match,
+                "'{}' d={}: got {} results", query, dist, results.len());
+        }
     }
 }
