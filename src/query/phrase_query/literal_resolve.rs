@@ -216,6 +216,8 @@ pub fn intersect_trigrams_with_threshold(
         }
 
         if best_chain.len() < threshold {
+            eprintln!("[intersect-debug] doc={} chain_len={} < threshold={} → skip",
+                doc_id, best_chain.len(), threshold);
             continue;
         }
 
@@ -227,10 +229,15 @@ pub fn intersect_trigrams_with_threshold(
         let query_span = query_positions[last.0] as i64 - query_positions[first.0] as i64;
         let span_diff = (text_span - query_span).unsigned_abs();
 
+        eprintln!("[intersect-debug] doc={} chain_len={} first_tri={} last_tri={} text_span={} query_span={} diff={} d={}",
+            doc_id, best_chain.len(), first.0, last.0, text_span, query_span, span_diff, distance);
+
         if span_diff > distance as u64 {
+            eprintln!("[intersect-debug] doc={} → span_diff {} > d {} → REJECTED", doc_id, span_diff, distance);
             continue;
         }
 
+        eprintln!("[intersect-debug] doc={} → ACCEPTED bf={} bt={}", doc_id, first.1, last.2);
         results.push((doc_id, first.1, last.2));
     }
 
