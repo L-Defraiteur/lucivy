@@ -599,6 +599,8 @@ pub fn fuzzy_contains_via_trigram(
     let mut doc_bitset = BitSet::with_max_value(max_doc);
     let mut highlights: Vec<(DocId, usize, usize)> = Vec::new();
 
+    eprintln!("[fuzzy-path] posmap={} candidates={}", posmap.is_some(), candidates.len());
+
     for (doc_id, first_bf, last_bt, first_tri_idx) in &candidates {
         let doc_id = *doc_id;
         let first_tri_idx = *first_tri_idx;
@@ -610,12 +612,14 @@ pub fn fuzzy_contains_via_trigram(
             .map(|m| m.position)
             .min();
 
+        if first_pos.is_none() {
+            eprintln!("[fuzzy-path] doc={} first_bf={} → fp=NONE (no matching literal)", doc_id, first_bf);
+        }
+
         let Some(fp) = first_pos else { continue; };
 
         if let Some(pm) = &posmap {
-            // Build text around the match region for DFA validation.
-            // Track content byte positions so we can map the DFA match
-            // back to actual document byte offsets (accounting for separators).
+            // === Step 1: Build concat with token span tracking ===
             let back_bytes = query_positions[first_tri_idx];
             let lookback_positions = (back_bytes as u32 + 2).min(fp);
             let start_pos = fp - lookback_positions;
@@ -624,58 +628,31 @@ pub fn fuzzy_contains_via_trigram(
             let max_pos = pm.num_tokens(doc_id);
             let end_pos = (fp + forward_positions).min(max_pos);
 
-            // Compute content byte of fp's token from the trigram match position
-            let fp_token_text = pm.ordinal_at(doc_id, fp)
-                .and_then(|ord| ord_to_term(ord as u64));
-            let tri_offset_in_tok = fp_token_text.as_ref()
-                .and_then(|t| t.find(&ngrams[first_tri_idx]))
-                .unwrap_or(0);
-            let fp_content_byte = (*first_bf as i64 - tri_offset_in_tok as i64).max(0) as u32;
-
-            // Walk backward from fp to get content byte of start_pos
-            let mut cb = fp_content_byte as i64;
-            for pos in (start_pos..fp).rev() {
-                let gap_len = sfx_reader.gapmap().read_separator(doc_id, pos, pos + 1)
-                    .map(|g| g.len() as i64).unwrap_or(1);
-                let tok_len = pm.ordinal_at(doc_id, pos)
-                    .and_then(|ord| ord_to_term(ord as u64))
-                    .map(|t| t.len() as i64).unwrap_or(0);
-                cb -= tok_len + gap_len;
-            }
-            let start_content_byte = cb.max(0) as u32;
-
-            // Build concat text, tracking (concat_offset → content_byte) per token
             let include_gaps = query_text.contains(' ');
             let mut concat_bytes: Vec<u8> = Vec::new();
-            let mut fp_concat_offset: usize = 0;
-            // Each entry: (concat_offset_of_token_start, content_byte_of_token_start)
-            let mut token_map: Vec<(usize, u32)> = Vec::new();
-            let mut current_cb = start_content_byte;
+            // Track each token's bounds: (position, concat_start, concat_end, text_len)
+            let mut token_spans: Vec<(u32, usize, usize, usize)> = Vec::new();
 
             for pos in start_pos..end_pos {
-                if pos == fp { fp_concat_offset = concat_bytes.len(); }
-                if pos > start_pos {
+                if include_gaps && pos > start_pos {
                     let gap = sfx_reader.gapmap().read_separator(doc_id, pos - 1, pos);
                     if let Some(gap_bytes) = gap {
                         if is_value_boundary(gap_bytes) { break; }
-                        if include_gaps {
-                            concat_bytes.extend_from_slice(gap_bytes);
-                        }
-                        current_cb += gap_bytes.len() as u32;
+                        concat_bytes.extend_from_slice(gap_bytes);
                     }
                 }
-                token_map.push((concat_bytes.len(), current_cb));
+                let cs = concat_bytes.len();
+                let mut tlen = 0usize;
                 if let Some(tok_ord) = pm.ordinal_at(doc_id, pos) {
                     if let Some(text) = ord_to_term(tok_ord as u64) {
+                        tlen = text.len();
                         concat_bytes.extend_from_slice(text.as_bytes());
-                        current_cb += text.len() as u32;
                     }
                 }
+                token_spans.push((pos, cs, concat_bytes.len(), tlen));
             }
 
-            // Validate: slide DFA over ALL positions in concat.
-            // The concat is small (~8 tokens) so this is fast.
-            // Pick the match whose length is closest to query_len.
+            // === Step 2: DFA sliding window over full concat ===
             let mut matched = false;
             let mut match_start: usize = 0;
             let mut match_len: usize = 0;
@@ -709,25 +686,64 @@ pub fn fuzzy_contains_via_trigram(
                 }
             }
 
+            eprintln!("[fuzzy-val] doc={} matched={} match_start={} match_len={} concat_len={} n_spans={}",
+                doc_id, matched, match_start, match_len, concat_bytes.len(), token_spans.len());
+
             if matched {
                 doc_bitset.insert(doc_id);
-                // Map concat byte range → content byte range via token_map.
-                // This correctly accounts for separator bytes in the content
-                // that aren't in the concat (for single-word queries).
-                let concat_start = match_start;
-                let concat_end = match_start + match_len;
 
-                let hl_start = token_map.iter().rev()
-                    .find(|(co, _)| *co <= concat_start)
-                    .map(|(co, cb)| *cb + (concat_start - co) as u32)
-                    .unwrap_or(*first_bf) as usize;
+                // === Step 3: Identify touched tokens ===
+                let match_end = match_start + match_len;
+                let first_span = token_spans.iter()
+                    .find(|(_, _, ce, _)| *ce > match_start);
+                let last_span = token_spans.iter().rev()
+                    .find(|(_, cs, _, _)| *cs < match_end);
 
-                let hl_end = token_map.iter().rev()
-                    .find(|(co, _)| *co < concat_end)
-                    .map(|(co, cb)| *cb + (concat_end - co) as u32)
-                    .unwrap_or(*first_bf + match_len as u32) as usize;
+                if first_span.is_none() || last_span.is_none() {
+                    eprintln!("[hl-debug] SPAN MISS doc={} match_start={} match_end={} concat_len={} n_spans={}",
+                        doc_id, match_start, match_end, concat_bytes.len(), token_spans.len());
+                }
+                if let (Some(fspan), Some(lspan)) = (first_span, last_span) {
+                    // === Step 4: Content bytes via walk from anchor ===
+                    // Anchor: fp is at content byte first_bf - tri_offset
+                    let fp_tok_text = pm.ordinal_at(doc_id, fp)
+                        .and_then(|ord| ord_to_term(ord as u64));
+                    let tri_offset = fp_tok_text.as_ref()
+                        .and_then(|t| t.find(&ngrams[first_tri_idx]))
+                        .unwrap_or(0);
+                    let fp_cb_start = (*first_bf as i64 - tri_offset as i64).max(0) as u32;
 
-                highlights.push((doc_id, hl_start, hl_end));
+                    // Walk backward from fp to first touched token
+                    let mut hl_start_cb = fp_cb_start;
+                    for pos in (fspan.0..fp).rev() {
+                        let gap = sfx_reader.gapmap().read_separator(doc_id, pos, pos + 1)
+                            .map(|g| g.len() as u32).unwrap_or(1);
+                        let tl = pm.ordinal_at(doc_id, pos)
+                            .and_then(|ord| ord_to_term(ord as u64))
+                            .map(|t| t.len() as u32).unwrap_or(0);
+                        hl_start_cb = hl_start_cb.saturating_sub(tl + gap);
+                    }
+
+                    // Walk forward from fp to end of last touched token
+                    let fp_tok_len = fp_tok_text.as_ref()
+                        .map(|t| t.len() as u32).unwrap_or(0);
+                    let mut hl_end_cb = fp_cb_start + fp_tok_len;
+                    for pos in (fp + 1)..=lspan.0 {
+                        let gap = sfx_reader.gapmap().read_separator(doc_id, pos - 1, pos)
+                            .map(|g| g.len() as u32).unwrap_or(1);
+                        let tl = pm.ordinal_at(doc_id, pos)
+                            .and_then(|ord| ord_to_term(ord as u64))
+                            .map(|t| t.len() as u32).unwrap_or(0);
+                        hl_end_cb += gap + tl;
+                    }
+
+                    eprintln!("[hl-debug] doc={} first_bf={} tri_idx={} tri_offset={} fp={} fp_cb_start={} fspan.pos={} lspan.pos={} match_start={} match_len={} hl=[{},{}] fp_tok={:?}",
+                        doc_id, first_bf, first_tri_idx, tri_offset, fp, fp_cb_start,
+                        fspan.0, lspan.0, match_start, match_len,
+                        hl_start_cb, hl_end_cb,
+                        fp_tok_text.as_ref().map(|t| t.as_str()));
+                    highlights.push((doc_id, hl_start_cb as usize, hl_end_cb as usize));
+                }
             }
         } else {
             // No PosMap — accept trigram-filtered candidates conservatively

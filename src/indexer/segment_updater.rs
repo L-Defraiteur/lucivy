@@ -188,7 +188,16 @@ pub(crate) fn merge(
 
     let merged_segment_id = merged_segment.id();
 
-    let segment_meta = index.new_segment_meta(merged_segment_id, num_docs);
+    // Propagate sfx_field_ids from source segments to the merged segment.
+    // Without this, the merged segment's SegmentMeta has no sfx_field_ids,
+    // so load_sfx_files skips it and .posmap/.bytemap/.sfxpost are invisible.
+    let mut sfx_ids: Vec<u32> = segment_entries.iter()
+        .flat_map(|se| se.meta().sfx_field_ids().iter().copied())
+        .collect();
+    sfx_ids.sort_unstable();
+    sfx_ids.dedup();
+    let segment_meta = index.new_segment_meta(merged_segment_id, num_docs)
+        .with_sfx_field_ids(sfx_ids);
     Ok(Some(SegmentEntry::new(segment_meta, delete_cursor, None)))
 }
 
@@ -470,7 +479,13 @@ pub fn merge_filtered_segments<T: Into<Box<dyn Directory>>>(
     let segment_serializer = SegmentSerializer::for_segment(merged_segment)?;
     let num_docs = merger.write(segment_serializer)?;
 
-    let segment_meta = merged_index.new_segment_meta(merged_segment_id, num_docs);
+    let mut sfx_ids: Vec<u32> = segments.iter()
+        .flat_map(|seg| seg.meta().sfx_field_ids().iter().copied())
+        .collect();
+    sfx_ids.sort_unstable();
+    sfx_ids.dedup();
+    let segment_meta = merged_index.new_segment_meta(merged_segment_id, num_docs)
+        .with_sfx_field_ids(sfx_ids);
 
     let stats = format!(
         "Segments Merge: [{}]",

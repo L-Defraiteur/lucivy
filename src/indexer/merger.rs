@@ -593,8 +593,8 @@ impl IndexMerger {
         lucivy_trace!("[merge]   fast_fields: {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
 
         let t = Instant::now();
-        self.merge_sfx_deferred(&mut serializer, &sfx_doc_mapping)?;
-        lucivy_trace!("[merge]   sfx_deferred: {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
+        self.merge_sfx_legacy(&mut serializer, &sfx_doc_mapping)?;
+        lucivy_trace!("[merge]   sfx_merge: {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
 
         let t = Instant::now();
         serializer.close()?;
@@ -688,6 +688,9 @@ impl IndexMerger {
             let mut sfxpost_data: Option<Vec<u8>> = None;
             let mut posmap_data: Option<Vec<u8>> = None;
             let mut bytemap_data: Option<Vec<u8>> = None;
+            let mut fst_result: Option<(Vec<u8>, Vec<u8>)> = None;
+            let mut num_terms: u32 = 0;
+            let mut sibling_data: Option<Vec<u8>> = None;
             {
                 // Load sfxpost readers
                 let mut segment_sfxpost: Vec<Option<Vec<u8>>> = Vec::with_capacity(self.readers.len());
@@ -749,6 +752,9 @@ impl IndexMerger {
                     let mut sfxpost_writer = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::new(max_terms);
                     let mut posmap_writer = crate::suffix_fst::PosMapWriter::new();
                     let mut bytemap_writer = crate::suffix_fst::ByteBitmapWriter::new();
+                    let mut sfx_builder = crate::suffix_fst::SuffixFstBuilder::with_min_suffix_len(3);
+                    // Track old→new ordinal per segment for sibling remapping
+                    let mut old_to_new: Vec<HashMap<u32, u32>> = vec![HashMap::new(); self.readers.len()];
                     let mut new_ord = 0u32;
 
                     // N-way merge-sort: find smallest key across all streams, collect sources, advance
@@ -819,6 +825,13 @@ impl IndexMerger {
                         }
 
                         if has_entries {
+                            // Add token to FST + record ordinal mapping ONLY for alive tokens
+                            if let Ok(key_str) = std::str::from_utf8(&current_key) {
+                                sfx_builder.add_token(key_str, new_ord as u64);
+                            }
+                            for &(seg_ord, old_ord) in &sources {
+                                old_to_new[seg_ord].insert(old_ord, new_ord);
+                            }
                             new_ord += 1;
                         }
                     }
@@ -826,29 +839,60 @@ impl IndexMerger {
                     sfxpost_data = Some(sfxpost_writer.finish());
                     posmap_data = Some(posmap_writer.serialize());
                     bytemap_data = Some(bytemap_writer.serialize());
+
+                    // Build FST from collected tokens
+                    fst_result = sfx_builder.build().ok();
+                    num_terms = new_ord;
+
+                    // Build sibling table by remapping source segments' siblings
+                    let mut sib_writer = crate::suffix_fst::SiblingTableWriter::new(new_ord);
+                    for (seg_ord, sfx_opt) in sfx_readers.iter().enumerate() {
+                        if let Some(sfx_reader) = sfx_opt {
+                            if let Some(sib_table) = sfx_reader.sibling_table() {
+                                for ord_a in 0..sib_table.num_ordinals() {
+                                    if let Some(&new_a) = old_to_new[seg_ord].get(&ord_a) {
+                                        for entry in sib_table.siblings(ord_a) {
+                                            if let Some(&new_b) = old_to_new[seg_ord].get(&entry.next_ordinal) {
+                                                sib_writer.add(new_a, new_b, entry.gap_len);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    sibling_data = Some(sib_writer.serialize());
                 }
             }
 
             #[cfg(feature = "sfx-profile")]
             let nway_ms = t_nway.elapsed().as_millis();
 
-            // Write gapmap as a partial .sfx file (empty FST, gapmap only).
-            // The FST will be rebuilt at commit time.
+            // Write complete .sfx file with FST + gapmap + sibling table.
             #[cfg(feature = "sfx-profile")]
             let t_write = std::time::Instant::now();
             let gapmap_data = gapmap_writer.serialize();
-            let sfx_file = SfxFileWriter::new(
-                Vec::new(),  // empty FST — rebuilt at commit
-                Vec::new(),  // empty parent list
+            let (fst_data, parent_data) = fst_result.unwrap_or_default();
+            let mut sfx_file = SfxFileWriter::new(
+                fst_data,
+                parent_data,
                 gapmap_data,
                 doc_mapping.len() as u32,
-                0,           // no suffix terms yet
+                num_terms,
             );
+            if let Some(sib) = sibling_data {
+                sfx_file = sfx_file.with_sibling_data(sib);
+            }
             let sfx_bytes = sfx_file.to_bytes();
             serializer.write_sfx(field.field_id(), &sfx_bytes)?;
             if let Some(ref sfxpost) = sfxpost_data {
                 serializer.write_sfxpost(field.field_id(), sfxpost)?;
             }
+            eprintln!("[merge-sfx] field={} sfxpost={} posmap={} bytemap={}",
+                field.field_id(),
+                sfxpost_data.as_ref().map(|d| d.len()).unwrap_or(0),
+                posmap_data.as_ref().map(|d| d.len()).unwrap_or(0),
+                bytemap_data.as_ref().map(|d| d.len()).unwrap_or(0));
             if let Some(ref posmap) = posmap_data {
                 serializer.write_posmap(field.field_id(), posmap)?;
             }
@@ -972,10 +1016,47 @@ impl IndexMerger {
                 sfxpost_data,
             )?;
 
-            // PosMap + ByteBitmap: write empty placeholders for legacy merge path.
-            // These will be rebuilt at the next commit that triggers sfx_dag rebuild.
-            serializer.write_posmap(field.field_id(), &crate::suffix_fst::PosMapWriter::new().serialize())?;
-            serializer.write_bytemap(field.field_id(), &crate::suffix_fst::ByteBitmapWriter::new().serialize())?;
+            // PosMap + ByteBitmap: build from sfxpost data + term dict
+            {
+                let mut posmap_writer = crate::suffix_fst::PosMapWriter::new();
+                let mut bytemap_writer = crate::suffix_fst::ByteBitmapWriter::new();
+                bytemap_writer.ensure_capacity(unique_tokens.len() as u32);
+                for (new_ord, token) in unique_tokens.iter().enumerate() {
+                    let new_ord = new_ord as u32;
+                    bytemap_writer.record_token(new_ord, token.as_bytes());
+                    for (seg_ord, reader) in self.readers.iter().enumerate() {
+                        if let Some(file_slice) = reader.sfxpost_file(field) {
+                            if let Ok(bytes) = file_slice.read_bytes() {
+                                if let Some(sfxpost) = crate::suffix_fst::sfxpost_v2::SfxPostReaderV2::open_slice(bytes.as_ref()) {
+                                    if let Ok(inv_idx) = reader.inverted_index(field) {
+                                        let term_dict = inv_idx.terms();
+                                        let mut term_bytes: Vec<u8> = Vec::new();
+                                        let mut ord = 0u32;
+                                        let mut stream = term_dict.stream().unwrap();
+                                        let mut old_ord = None;
+                                        while stream.advance() {
+                                            if std::str::from_utf8(stream.key()).ok() == Some(token.as_str()) {
+                                                old_ord = Some(ord);
+                                                break;
+                                            }
+                                            ord += 1;
+                                        }
+                                        if let Some(old_ord) = old_ord {
+                                            for e in sfxpost.entries(old_ord) {
+                                                if let Some(&new_doc) = reverse_doc_map[seg_ord].get(&e.doc_id) {
+                                                    posmap_writer.add(new_doc, e.token_index, new_ord);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                serializer.write_posmap(field.field_id(), &posmap_writer.serialize())?;
+                serializer.write_bytemap(field.field_id(), &bytemap_writer.serialize())?;
+            }
 
             sfx_field_ids.push(field.field_id());
         }

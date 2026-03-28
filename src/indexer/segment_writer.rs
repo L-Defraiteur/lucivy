@@ -167,6 +167,8 @@ impl SegmentWriter {
                 if !output.sfxpost.is_empty() {
                     self.segment_serializer.write_sfxpost(field_id, &output.sfxpost)?;
                 }
+                eprintln!("[sfx-write] field={} sfx={} sfxpost={} posmap={} bytemap={}",
+                    field_id, output.sfx.len(), output.sfxpost.len(), output.posmap.len(), output.bytemap.len());
                 if !output.posmap.is_empty() {
                     self.segment_serializer.write_posmap(field_id, &output.posmap)?;
                 }
