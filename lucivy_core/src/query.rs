@@ -383,7 +383,6 @@ fn build_contains_query(
     let distance = config.distance.unwrap_or(0);
 
     // Fuzzy d>=1: use trigram pigeonhole via RegexContinuationQuery (fast + correct ordering).
-    eprintln!("[debug] build_contains_query: value='{}' distance={}", value, distance);
     if distance > 0 {
         let mut query = RegexContinuationQuery::new(
             field,

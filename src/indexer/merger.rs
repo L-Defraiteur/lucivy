@@ -914,14 +914,6 @@ impl IndexMerger {
                     serializer.write_custom_index(fid, "sibling", sib)?;
                 }
             }
-            eprintln!("[merge-sfx] field={} sfxpost={} posmap={} bytemap={} termtexts={} gapmap={} sibling={}",
-                fid,
-                sfxpost_data.as_ref().map(|d| d.len()).unwrap_or(0),
-                posmap_data.as_ref().map(|d| d.len()).unwrap_or(0),
-                bytemap_data.as_ref().map(|d| d.len()).unwrap_or(0),
-                termtexts_data.as_ref().map(|d| d.len()).unwrap_or(0),
-                gapmap_bytes.len(),
-                sibling_data.as_ref().map(|d| d.len()).unwrap_or(0));
             #[cfg(feature = "sfx-profile")]
             let write_ms = t_write.elapsed().as_millis();
 

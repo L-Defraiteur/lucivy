@@ -565,8 +565,6 @@ pub fn fuzzy_contains_via_trigram(
 
     let (ngrams, query_positions, n) = generate_ngrams(query_text, distance);
 
-    eprintln!("[fuzzy-debug] query='{}' d={} ngrams={:?} n={} positions={:?}",
-        query_text, distance, ngrams, n, query_positions);
 
     if ngrams.is_empty() {
         return Ok((BitSet::with_max_value(max_doc), Vec::new()));
@@ -575,13 +573,12 @@ pub fn fuzzy_contains_via_trigram(
     // Threshold: each edit can break at most n adjacent n-grams.
     // Minimum 2 to avoid flooding with single-bigram false positives.
     let threshold = (ngrams.len() as i32 - n as i32 * distance as i32 - 1).max(2) as usize;
-    eprintln!("[fuzzy-debug] threshold={} (ngrams={}, n={}, d={})", threshold, ngrams.len(), n, distance);
 
     // Step 1: Find each n-gram via exact contains (cross-token aware)
     let mut all_matches: Vec<Vec<LiteralMatch>> = Vec::new();
     for gram in &ngrams {
         let matches = literal_resolve::find_literal(sfx_reader, gram, resolver, ord_to_term);
-        eprintln!("[fuzzy-debug] find_literal('{}') → {} matches", gram, matches.len());
+
         all_matches.push(matches);
     }
 
@@ -593,7 +590,7 @@ pub fn fuzzy_contains_via_trigram(
     let candidates = literal_resolve::intersect_trigrams_with_threshold(
         &grouped, &query_positions, threshold, distance,
     );
-    eprintln!("[fuzzy-debug] candidates after intersection: {}", candidates.len());
+
 
     // Step 3: Validate each candidate with Levenshtein DFA via PosMap
     let builder = get_builder(distance);
@@ -609,7 +606,6 @@ pub fn fuzzy_contains_via_trigram(
     let mut doc_bitset = BitSet::with_max_value(max_doc);
     let mut highlights: Vec<(DocId, usize, usize)> = Vec::new();
 
-    eprintln!("[fuzzy-path] posmap={} candidates={}", posmap.is_some(), candidates.len());
 
     for (doc_id, first_bf, last_bt, first_tri_idx, first_si) in &candidates {
         let doc_id = *doc_id;
@@ -624,7 +620,7 @@ pub fn fuzzy_contains_via_trigram(
             .min();
 
         if first_pos.is_none() {
-            eprintln!("[fuzzy-path] doc={} first_bf={} → fp=NONE (no matching literal)", doc_id, first_bf);
+
         }
 
         let Some(fp) = first_pos else { continue; };
@@ -697,8 +693,6 @@ pub fn fuzzy_contains_via_trigram(
                 }
             }
 
-            eprintln!("[fuzzy-val] doc={} matched={} match_start={} match_len={} concat_len={} n_spans={}",
-                doc_id, matched, match_start, match_len, concat_bytes.len(), token_spans.len());
 
             if matched {
                 doc_bitset.insert(doc_id);
@@ -746,24 +740,6 @@ pub fn fuzzy_contains_via_trigram(
                     // === Step 4: Map match_start/match_end from concat to content bytes ===
                     let match_end = match_start + match_len;
 
-                    // Diagnostic: dump token spans table with content bytes
-                    eprintln!("[hl-diag] doc={} fp={} fp_idx={} first_bf={} first_si={} tok_start={} match=[{},{}] concat_len={}",
-                        doc_id, fp, fp_idx, first_bf, first_si,
-                        first_bf.saturating_sub(first_si as u32),
-                        match_start, match_end, concat_bytes.len());
-                    for (i, &(pos, cs, ce, tlen)) in token_spans.iter().enumerate() {
-                        let tok_text = pm.ordinal_at(doc_id, pos)
-                            .and_then(|ord| ord_to_term(ord as u64))
-                            .unwrap_or_default();
-                        let marker = if i == fp_idx { " <-- fp" } else { "" };
-                        eprintln!("[hl-diag]   span[{}] pos={} concat=[{},{}) tlen={} cb_start={} tok=\"{}\"{}",
-                            i, pos, cs, ce, tlen, content_byte_starts[i], tok_text, marker);
-                    }
-                    let matched_bytes = &concat_bytes[match_start..match_end];
-                    eprintln!("[hl-diag]   DFA matched concat[{}..{}] = {:?}",
-                        match_start, match_end,
-                        std::str::from_utf8(matched_bytes).unwrap_or("<non-utf8>"));
-
                     // Find token containing match_start
                     let start_span_idx = token_spans.iter()
                         .position(|(_, cs, ce, _)| match_start >= *cs && match_start < *ce)
@@ -783,12 +759,7 @@ pub fn fuzzy_contains_via_trigram(
                         let intra_end = match_end.saturating_sub(token_spans[ei].1);
                         let hl_end = content_byte_starts[ei] as usize + intra_end;
 
-                        eprintln!("[hl-debug] doc={} si={} ei={} intra_s={} intra_e={} hl=[{},{}]",
-                            doc_id, si, ei, intra_start, intra_end, hl_start, hl_end);
                         highlights.push((doc_id, hl_start, hl_end));
-                    } else {
-                        eprintln!("[hl-debug] doc={} SPAN LOOKUP FAILED start_idx={:?} end_idx={:?}",
-                            doc_id, start_span_idx, end_span_idx);
                     }
                 }
             }
@@ -1397,14 +1368,6 @@ impl RegexContinuationWeight {
                 let posmap_bytes = reader.posmap_file(self.field)
                     .and_then(|data| data.read_bytes().ok())
                     .map(|b| b.as_ref().to_vec());
-                let has_sfx = reader.sfx_file(self.field).is_some();
-                let has_sfxpost = reader.sfxpost_file(self.field).is_some();
-                let has_registry_posmap = reader.sfx_index_file("posmap", self.field).is_some();
-                let has_registry_termtexts = reader.sfx_index_file("termtexts", self.field).is_some();
-                let sfx_ids = reader.segment_id();
-                eprintln!("[fuzzy-diag] segment={:?} field={:?} sfx={} sfxpost={} posmap_legacy={} posmap_registry={} termtexts={}",
-                    sfx_ids, self.field,
-                    has_sfx, has_sfxpost, posmap_bytes.is_some(), has_registry_posmap, has_registry_termtexts);
                 fuzzy_contains_via_trigram(
                     text, *distance, *prefix, &sfx_reader, &*resolver,
                     &ord_to_term_fn, self.mode, max_doc,
