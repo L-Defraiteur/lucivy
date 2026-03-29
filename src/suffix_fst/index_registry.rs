@@ -21,6 +21,10 @@ pub struct SfxBuildContext<'a> {
     pub token_postings: &'a [&'a [(u32, u32, u32, u32)]],
     /// Number of documents in this segment.
     pub num_docs: u32,
+    /// Pre-built gapmap data (built by collector during indexation).
+    pub gapmap_data: Option<&'a [u8]>,
+    /// Pre-built sibling table data (built by collector during indexation).
+    pub sibling_data: Option<&'a [u8]>,
 }
 
 /// Data available during merge.
@@ -33,6 +37,12 @@ pub struct SfxMergeContext<'a> {
     pub reverse_doc_map: &'a [HashMap<DocId, DocId>],
     /// Sfxpost readers per source segment.
     pub sfxpost_readers: &'a [Option<&'a crate::suffix_fst::sfxpost_v2::SfxPostReaderV2>],
+    /// Doc address mapping for gapmap copy (new_doc_idx → old segment+doc).
+    pub doc_mapping: &'a [crate::DocAddress],
+    /// Source gapmap bytes per segment.
+    pub source_gapmaps: &'a [Option<&'a [u8]>],
+    /// Source sibling table bytes per segment.
+    pub source_siblings: &'a [Option<&'a [u8]>],
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -68,6 +78,8 @@ pub trait SfxIndexFile: Send + Sync {
 pub fn all_indexes() -> Vec<Box<dyn SfxIndexFile>> {
     vec![
         Box::new(super::sfxpost_v2::SfxPostIndex),
+        Box::new(super::gapmap::GapMapIndex),
+        Box::new(super::sibling_table::SiblingIndex),
         Box::new(super::posmap::PosMapIndex),
         Box::new(super::bytemap::ByteMapIndex),
         // Box::new(super::termtexts::TermTextsIndex),  // TODO: next

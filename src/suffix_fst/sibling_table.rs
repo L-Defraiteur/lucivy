@@ -203,3 +203,45 @@ mod tests {
         assert!(reader.siblings(99).is_empty());
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// SfxIndexFile implementation
+// ─────────────────────────────────────────────────────────────────────
+
+pub struct SiblingIndex;
+
+impl super::index_registry::SfxIndexFile for SiblingIndex {
+    fn id(&self) -> &'static str { "sibling" }
+    fn extension(&self) -> &'static str { "sibling" }
+
+    fn build(&self, ctx: &super::index_registry::SfxBuildContext) -> Vec<u8> {
+        // Sibling table is pre-built by the collector.
+        ctx.sibling_data.map(|d| d.to_vec()).unwrap_or_default()
+    }
+
+    fn merge(&self, _sources: &[Option<&[u8]>], ctx: &super::index_registry::SfxMergeContext) -> Vec<u8> {
+        let num_terms = ctx.merged_terms.len() as u32;
+        let mut writer = SiblingTableWriter::new(num_terms);
+
+        for (seg_ord, sib_bytes_opt) in ctx.source_siblings.iter().enumerate() {
+            let sib_bytes = match sib_bytes_opt {
+                Some(b) => b,
+                None => continue,
+            };
+            let sib_table = match SiblingTableReader::open(sib_bytes) {
+                Some(t) => t,
+                None => continue,
+            };
+            for ord_a in 0..sib_table.num_ordinals() {
+                if let Some(&new_a) = ctx.ordinal_maps[seg_ord].get(&ord_a) {
+                    for entry in sib_table.siblings(ord_a) {
+                        if let Some(&new_b) = ctx.ordinal_maps[seg_ord].get(&entry.next_ordinal) {
+                            writer.add(new_a, new_b, entry.gap_len);
+                        }
+                    }
+                }
+            }
+        }
+        writer.serialize()
+    }
+}

@@ -291,13 +291,14 @@ impl SfxCollector {
         #[cfg(feature = "sfx-profile")]
         let sibling_ms = t0.elapsed().as_millis();
 
+        // .sfx = FST + parent lists only (gapmap + sibling are separate registry files)
         let file_writer = SfxFileWriter::new(
             fst_data,
             parent_list_data,
-            gapmap_data,
+            gapmap_data.clone(),
             self.gapmap_writer.num_docs(),
             num_terms,
-        ).with_sibling_data(sibling_data);
+        ).with_sibling_data(sibling_data.clone());
         let sfx_bytes = file_writer.to_bytes();
 
         // Build all registry index files via SfxBuildContext
@@ -312,6 +313,8 @@ impl SfxCollector {
             token_texts: &token_text_refs,
             token_postings: &postings_refs,
             num_docs: self.gapmap_writer.num_docs() as u32,
+            gapmap_data: Some(&gapmap_data),
+            sibling_data: Some(&sibling_data),
         };
 
         let mut registry_files = Vec::new();
