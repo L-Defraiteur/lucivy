@@ -293,6 +293,10 @@ impl Node for WriteSfxNode {
         let segment = self.segment.as_mut().ok_or("segment missing")?;
         let field_id = self.field.field_id();
 
+        // Clone gapmap/sibling before passing to SfxFileWriter (which takes ownership)
+        let gapmap_data_clone = gapmap_data.clone();
+        let sibling_data_clone = sibling_data.clone();
+
         // Build .sfx file
         let sfx_file = crate::suffix_fst::file::SfxFileWriter::new(
             fst_data, parent_data, gapmap_data,
@@ -308,13 +312,48 @@ impl Node for WriteSfxNode {
             .map_err(|e| format!("write sfx: {e}"))?;
         writer.terminate().map_err(|e| format!("close sfx: {e}"))?;
 
-        // Write .sfxpost
-        if let Some(sfxpost) = &sfxpost_data {
-            let mut writer = segment.open_write_custom(&format!("{field_id}.sfxpost"))
-                .map_err(|e| format!("open sfxpost: {e}"))?;
-            std::io::Write::write_all(&mut writer, sfxpost)
-                .map_err(|e| format!("write sfxpost: {e}"))?;
-            writer.terminate().map_err(|e| format!("close sfxpost: {e}"))?;
+        // Write all registry files via write_custom_index pattern
+        let write_file = |seg: &mut crate::index::Segment, ext: &str, data: &[u8]| -> Result<(), String> {
+            let mut w = seg.open_write_custom(&format!("{field_id}.{ext}"))
+                .map_err(|e| format!("open {ext}: {e}"))?;
+            std::io::Write::write_all(&mut w, data)
+                .map_err(|e| format!("write {ext}: {e}"))?;
+            use common::TerminatingWrite;
+            w.terminate().map_err(|e| format!("close {ext}: {e}"))?;
+            Ok(())
+        };
+
+        if let Some(ref sfxpost) = sfxpost_data {
+            write_file(segment, "sfxpost", sfxpost)?;
+
+            // Build posmap + bytemap + termtexts from sfxpost data + tokens
+            if let Some(reader) = crate::suffix_fst::sfxpost_v2::SfxPostReaderV2::open_slice(sfxpost) {
+                let mut posmap_writer = crate::suffix_fst::PosMapWriter::new();
+                let mut bytemap_writer = crate::suffix_fst::ByteBitmapWriter::new();
+                let mut termtexts_writer = crate::suffix_fst::TermTextsWriter::new();
+                bytemap_writer.ensure_capacity(num_tokens);
+
+                for (ord, token) in tokens.iter().enumerate() {
+                    let ord = ord as u32;
+                    bytemap_writer.record_token(ord, token.as_bytes());
+                    termtexts_writer.add(ord, token);
+                    for e in reader.entries(ord) {
+                        posmap_writer.add(e.doc_id, e.token_index, ord);
+                    }
+                }
+
+                write_file(segment, "posmap", &posmap_writer.serialize())?;
+                write_file(segment, "bytemap", &bytemap_writer.serialize())?;
+                write_file(segment, "termtexts", &termtexts_writer.serialize())?;
+            }
+        }
+
+        // Write gapmap + sibling as separate registry files
+        if !gapmap_data_clone.is_empty() {
+            write_file(segment, "gapmap", &gapmap_data_clone)?;
+        }
+        if !sibling_data_clone.is_empty() {
+            write_file(segment, "sibling", &sibling_data_clone)?;
         }
 
         ctx.metric("written", 1.0);
