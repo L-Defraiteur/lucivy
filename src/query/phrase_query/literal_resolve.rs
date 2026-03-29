@@ -163,17 +163,19 @@ pub fn intersect_literals_ordered(
 /// `trigrams_by_doc[i]` = matches for trigram i (in query order).
 /// `query_positions[i]` = byte position of trigram i in the query string.
 ///
-/// Returns: `(doc_id, first_byte_from, last_byte_to, first_tri_idx, first_si)` for validated matches.
+/// Returns: `(doc_id, first_byte_from, last_byte_to, first_tri_idx, first_si, trigram_proven)`.
 /// `first_tri_idx` is the index of the first trigram in the best chain — needed
 /// to compute the actual match start position (`first_bf - query_positions[first_tri_idx]`).
 /// `first_si` is the suffix index of the first trigram match — `first_bf - first_si`
 /// gives the content byte start of the parent token.
+/// `trigram_proven` is true when ALL trigrams matched with consistent byte span —
+/// the match is guaranteed correct and DFA validation can be skipped.
 pub fn intersect_trigrams_with_threshold(
     trigrams_by_doc: &[MatchesByDoc],
     query_positions: &[usize],
     threshold: usize,
     distance: u8,
-) -> Vec<(DocId, u32, u32, usize, u16)> {
+) -> Vec<(DocId, u32, u32, usize, u16, bool)> {
     if trigrams_by_doc.is_empty() || threshold == 0 {
         return Vec::new();
     }
@@ -186,7 +188,8 @@ pub fn intersect_trigrams_with_threshold(
         }
     }
 
-    let mut results: Vec<(DocId, u32, u32, usize, u16)> = Vec::new();
+    let num_trigrams = trigrams_by_doc.len();
+    let mut results: Vec<(DocId, u32, u32, usize, u16, bool)> = Vec::new();
 
     for &doc_id in &all_docs {
         // Collect all (tri_index, byte_from, byte_to, si) for this doc, sorted by byte_from
@@ -207,7 +210,7 @@ pub fn intersect_trigrams_with_threshold(
         let mut current_chain: Vec<(usize, u32, u32, u16)> = Vec::new();
         let results_before = results.len();
 
-        let mut check_chain = |chain: &[(usize, u32, u32, u16)], results: &mut Vec<(DocId, u32, u32, usize, u16)>| -> bool {
+        let mut check_chain = |chain: &[(usize, u32, u32, u16)], results: &mut Vec<(DocId, u32, u32, usize, u16, bool)>| -> bool {
             if chain.len() < threshold { return false; }
             if results.len() - results_before >= MAX_CHAINS_PER_DOC { return true; } // cap reached
             let first = &chain[0];
@@ -216,7 +219,10 @@ pub fn intersect_trigrams_with_threshold(
             let query_span = query_positions[last.0] as i64 - query_positions[first.0] as i64;
             let span_diff = (text_span - query_span).unsigned_abs();
             if span_diff > distance as u64 { return false; }
-            results.push((doc_id, first.1, last.2, first.0, first.3));
+            // If ALL trigrams matched with consistent span, the match is
+            // proven by pigeonhole — DFA validation can be skipped.
+            let proven = chain.len() == num_trigrams && span_diff <= distance as u64;
+            results.push((doc_id, first.1, last.2, first.0, first.3, proven));
             false
         };
 

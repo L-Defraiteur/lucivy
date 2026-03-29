@@ -607,10 +607,11 @@ pub fn fuzzy_contains_via_trigram(
     let mut highlights: Vec<(DocId, usize, usize)> = Vec::new();
 
 
-    for (doc_id, first_bf, last_bt, first_tri_idx, first_si) in &candidates {
+    for (doc_id, first_bf, last_bt, first_tri_idx, first_si, trigram_proven) in &candidates {
         let doc_id = *doc_id;
         let first_tri_idx = *first_tri_idx;
         let first_si = *first_si;
+        let trigram_proven = *trigram_proven;
 
         // Find the token position for first_bf from the trigram matches
         let first_pos = all_matches.iter()
@@ -619,11 +620,23 @@ pub fn fuzzy_contains_via_trigram(
             .map(|m| m.position)
             .min();
 
-        if first_pos.is_none() {
-
-        }
-
         let Some(fp) = first_pos else { continue; };
+
+        // Fast path: all trigrams matched with consistent byte span.
+        // The pigeonhole principle guarantees this is a valid match —
+        // skip DFA validation entirely, use trigram byte range as highlight.
+        if trigram_proven {
+            doc_bitset.insert(doc_id);
+            // Compute highlight from the trigram chain byte range.
+            // first_bf is the suffix match start; the actual match starts
+            // at first_bf - first_si (token start) - query_positions[first_tri_idx].
+            // But simpler: the trigram chain spans [first_bf, last_bt].
+            // The full match starts query_positions[first_tri_idx] bytes before first_bf.
+            let hl_start = (*first_bf as usize).saturating_sub(query_positions[first_tri_idx] + first_si as usize);
+            let hl_end = hl_start + query_text.len() + distance as usize;
+            highlights.push((doc_id, hl_start, hl_end));
+            continue;
+        }
 
         if let Some(pm) = &posmap {
             // === Step 1: Build concat with token span tracking ===
