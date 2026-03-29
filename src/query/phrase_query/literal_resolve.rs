@@ -119,7 +119,7 @@ pub fn intersect_literals_ordered(
 
         // Check position ordering: find a chain where each literal appears after the previous.
         let first_matches = &literals_by_doc[0][&doc_id];
-        'outer: for &(_, first_bf, first_bt) in first_matches {
+        for &(_, first_bf, first_bt) in first_matches {
             let mut min_byte = first_bt;
             let mut all_ok = true;
             let mut last_bt = first_bt;
@@ -140,7 +140,7 @@ pub fn intersect_literals_ordered(
 
             if all_ok {
                 results.push((doc_id, first_bf, last_bt));
-                break 'outer;
+                // Don't break — collect ALL matches per doc
             }
         }
     }
