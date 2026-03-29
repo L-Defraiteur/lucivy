@@ -659,7 +659,21 @@ pub fn fuzzy_contains_via_trigram(
                 token_spans.push((pos, cs, concat_bytes.len(), tlen));
             }
 
-            // === Step 2: DFA sliding window over full concat ===
+            // === Step 2: Anchored DFA sliding window ===
+            // We know the first trigram matched at position fp in the document.
+            // In the concat, fp's token starts at fp_concat_start, and the
+            // trigram is at offset first_si within that token. The full match
+            // must start at approximately:
+            //   anchor = fp_concat_start + first_si - query_positions[first_tri_idx]
+            // We only need to try positions [anchor - distance, anchor + distance].
+            let fp_span = token_spans.iter()
+                .find(|(pos, _, _, _)| *pos == fp);
+            let fp_concat_start = fp_span.map(|s| s.1).unwrap_or(0);
+            let tri_query_offset = query_positions[first_tri_idx];
+            let anchor = (fp_concat_start + first_si as usize).saturating_sub(tri_query_offset);
+            let window_lo = anchor.saturating_sub(distance as usize + 1);
+            let window_hi = (anchor + distance as usize + 1).min(concat_bytes.len());
+
             let mut matched = false;
             let mut match_start: usize = 0;
             let mut match_len: usize = 0;
@@ -667,7 +681,7 @@ pub fn fuzzy_contains_via_trigram(
             let max_feed = query_text.len() + distance as usize + 1;
             let qlen = query_text.len();
 
-            for sb in 0..concat_bytes.len() {
+            for sb in window_lo..window_hi {
                 let mut s = start_state.clone();
                 let mut fed: usize = 0;
                 let mut best_len: usize = 0;
@@ -690,6 +704,7 @@ pub fn fuzzy_contains_via_trigram(
                     match_start = sb;
                     match_len = best_len;
                     matched = true;
+                    if global_best_diff == 0 { break; } // perfect match, can't do better
                 }
             }
 
