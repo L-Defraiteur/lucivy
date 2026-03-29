@@ -1213,66 +1213,44 @@ where
             let sib_table = sibling_table.unwrap();
             let get_term = ord_to_term.unwrap();
 
-            // Follow sibling chain
-            let mut current_ord = cand.parent.raw_ordinal;
-            let mut rem = remainder;
-            let mut chain = vec![current_ord];
-            let mut found = false;
+            // Explore ALL sibling paths via worklist (DFS).
+            // Each entry: (current_ord, remainder, chain_so_far, depth)
+            let mut stack: Vec<(u64, &str, Vec<u64>, usize)> = vec![
+                (cand.parent.raw_ordinal, remainder, vec![cand.parent.raw_ordinal], 0)
+            ];
 
-            for _ in 0..MAX_CHAIN_DEPTH {
-                if rem.is_empty() { break; }
-
-                // Get contiguous siblings of current token
-                let siblings = sib_table.contiguous_siblings(current_ord as u32);
-                if query == "rag3weaver" && chain.len() == 1 && cand.prefix_len == 4 && cand_idx == 0 {
-                    let all_siblings = sib_table.siblings(current_ord as u32);
-                    let weaver_sibs: Vec<_> = all_siblings.iter()
-                        .filter(|s| get_term(s.next_ordinal as u64).map_or(false, |t| t == "weaver"))
-                        .collect();
-                    eprintln!("[cross-token-diag] first cand: ord={} rem='{}' contiguous_siblings={} weaver_sibs(all gaps)={:?}",
-                        current_ord, rem, siblings.len(),
-                        weaver_sibs.iter().map(|s| format!("gap={}", s.gap_len)).collect::<Vec<_>>());
+            while let Some((cur_ord, rem, chain, depth)) = stack.pop() {
+                if rem.is_empty() || depth >= MAX_CHAIN_DEPTH {
+                    if rem.is_empty() {
+                        valid_chains.push((cand_idx, chain));
+                    }
+                    continue;
                 }
-                let mut matched = false;
 
-                for next_ord in &siblings {
-                    let next_text = match get_term(*next_ord as u64) {
+                let siblings = sib_table.contiguous_siblings(cur_ord as u32);
+                for &next_ord in &siblings {
+                    let next_text = match get_term(next_ord as u64) {
                         Some(t) => t,
                         None => continue,
                     };
 
                     if rem == next_text {
-                        // Exact full token match
-                        chain.push(*next_ord as u64);
-                        rem = "";
-                        found = true;
-                        matched = true;
-                        if query == "rag3weaver" {
-                            eprintln!("[cross-token-diag] CHAIN MATCH! cand_idx={} chain={:?}", cand_idx, chain);
-                        }
-                        break;
-                    } else if rem.starts_with(&next_text) {
-                        // Full token consumed → continue chain
-                        chain.push(*next_ord as u64);
-                        rem = &rem[next_text.len()..];
-                        current_ord = *next_ord as u64;
-                        matched = true;
-                        break;
+                        // Exact match → terminal, emit chain
+                        let mut c = chain.clone();
+                        c.push(next_ord as u64);
+                        valid_chains.push((cand_idx, c));
                     } else if next_text.starts_with(rem) || (fuzzy_distance > 0 && levenshtein_prefix_match(rem, &next_text, fuzzy_distance)) {
-                        // Remainder matches prefix of next token (exact or fuzzy) → terminal
-                        chain.push(*next_ord as u64);
-                        found = true;
-                        matched = true;
-                        break;
+                        // Token covers remainder → terminal
+                        let mut c = chain.clone();
+                        c.push(next_ord as u64);
+                        valid_chains.push((cand_idx, c));
+                    } else if rem.starts_with(&next_text) {
+                        // Partial consumption → continue exploring
+                        let mut c = chain.clone();
+                        c.push(next_ord as u64);
+                        stack.push((next_ord as u64, &rem[next_text.len()..], c, depth + 1));
                     }
                 }
-
-                if !matched { break; }
-                if found { break; }
-            }
-
-            if found || rem.is_empty() {
-                valid_chains.push((cand_idx, chain));
             }
         } else {
             // Fallback: no sibling table → single-split with prefix_walk or fuzzy_walk
@@ -1293,6 +1271,15 @@ where
         }
     }
 
+    if query == "rag3weaver" && valid_chains.is_empty() {
+        // Count candidates by prefix_len
+        let mut by_prefix: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        for c in &candidates {
+            *by_prefix.entry(c.prefix_len).or_default() += 1;
+        }
+        eprintln!("[cross-token-diag] NO CHAINS! {} candidates, by_prefix_len={:?}",
+            candidates.len(), by_prefix);
+    }
     eprintln!("[cross-token-diag] query='{}' valid_chains={} has_siblings={}",
         query, valid_chains.len(), has_siblings);
 
@@ -1314,28 +1301,30 @@ where
     let mut results: Vec<SuffixContainsMatch> = Vec::new();
 
     for (cand_idx, chain) in &valid_chains {
-        // For fuzzy sibling-first chains, cand_idx is usize::MAX (no falling_walk candidate).
-        // The first token is SI=0 (full token). For normal chains, use the candidate's SI.
         let first_si = if *cand_idx < candidates.len() {
             candidates[*cand_idx].parent.si as usize
         } else {
-            0 // fuzzy sibling-first: always SI=0
+            0
         };
 
-        // Seed from first ordinal's postings
         let first_postings = match ordinal_cache.get(&chain[0]) {
             Some(p) => p,
             None => continue,
         };
 
-        // active: Vec<(doc_id, next_position, next_byte_from, highlight_byte_from, first_ti)>
         let mut active: Vec<(u32, u32, u32, usize, u32)> = Vec::new();
         for p in first_postings {
             let byte_from = p.byte_from as usize + first_si;
             active.push((p.doc_id, p.token_index + 1, p.byte_to, byte_from, p.token_index));
         }
 
-        // Chain through remaining ordinals
+        let _diag = query == "rag3weaver" && chain.len() == 2;
+        if _diag {
+            eprintln!("[adjacency] chain={:?} first_si={} active_seed={} chain[1]_postings={}",
+                chain, first_si, active.len(),
+                ordinal_cache.get(&chain[1]).map(|p| p.len()).unwrap_or(0));
+        }
+
         for &ord in &chain[1..] {
             if active.is_empty() { break; }
             let postings = match ordinal_cache.get(&ord) {
@@ -1345,15 +1334,43 @@ where
 
             active.sort_by_key(|a| (a.0, a.1));
             let mut next_active: Vec<(u32, u32, u32, usize, u32)> = Vec::new();
+            let mut _matched = 0u32;
+            let mut _checked = 0u32;
+            let mut _pos_miss = 0u32;
+            let mut _byte_miss = 0u32;
             for p in postings {
                 let target = (p.doc_id, p.token_index);
                 let idx = active.partition_point(|a| (a.0, a.1) < target);
                 let mut i = idx;
                 while i < active.len() && active[i].0 == p.doc_id && active[i].1 == p.token_index {
+                    _checked += 1;
                     if p.byte_from == active[i].2 {
                         next_active.push((p.doc_id, p.token_index + 1, p.byte_to, active[i].3, active[i].4));
+                        _matched += 1;
+                    } else {
+                        _byte_miss += 1;
                     }
                     i += 1;
+                }
+                if idx == active.len() || active[idx].0 != p.doc_id || active[idx].1 != p.token_index {
+                    _pos_miss += 1;
+                }
+            }
+            if _diag {
+                eprintln!("[adjacency] ord={} active_before={} checked={} matched={} byte_miss={} pos_miss={} next_active={}",
+                    ord, active.len(), _checked, _matched, _byte_miss, _pos_miss, next_active.len());
+                // Show first few mismatches
+                if _byte_miss > 0 && _byte_miss <= 5 {
+                    for p in postings {
+                        let target = (p.doc_id, p.token_index);
+                        let idx = active.partition_point(|a| (a.0, a.1) < target);
+                        if idx < active.len() && active[idx].0 == p.doc_id && active[idx].1 == p.token_index {
+                            if p.byte_from != active[idx].2 {
+                                eprintln!("[adjacency]   byte_miss: doc={} ti={} expected_bf={} actual_bf={}",
+                                    p.doc_id, p.token_index, active[idx].2, p.byte_from);
+                            }
+                        }
+                    }
                 }
             }
             active = next_active;
