@@ -200,25 +200,15 @@ impl SuffixContainsQuery {
             let termtexts_bytes = seg_reader.sfx_index_file("termtexts", self.raw_field)
                 .and_then(|fs| fs.read_bytes().ok())
                 .map(|b| b.as_ref().to_vec());
+            // TermTexts required — no fallback to tantivy term dict (ordinal mismatch)
             let termtexts_reader = termtexts_bytes.as_ref()
-                .and_then(|b| crate::suffix_fst::TermTextsReader::open(b));
-
-            let inv_idx = seg_reader.inverted_index(self.raw_field).map_err(|e|
-                crate::LucivyError::SystemError(format!("prescan inv_idx: {e}")))?;
-            let term_dict = inv_idx.terms();
+                .and_then(|b| crate::suffix_fst::TermTextsReader::open(b))
+                .ok_or_else(|| crate::LucivyError::SystemError(
+                    "contains requires .termtexts — index may need rebuild".into()
+                ))?;
 
             let ord_to_term_fn = |ord: u64| -> Option<String> {
-                // Prefer termtexts (correct SFX ordinals) over term dict (tantivy ordinals)
-                if let Some(ref reader) = termtexts_reader {
-                    return reader.text(ord as u32).map(|s| s.to_string());
-                }
-                // Fallback for old indexes without .termtexts
-                let mut bytes = Vec::new();
-                if term_dict.ord_to_term(ord, &mut bytes).ok()? {
-                    String::from_utf8(bytes).ok()
-                } else {
-                    None
-                }
+                termtexts_reader.text(ord as u32).map(|s| s.to_string())
             };
 
             let (query_tokens, query_separators) = tokenize_query(&self.query_text);
@@ -607,23 +597,15 @@ impl Weight for SuffixContainsWeight {
         let termtexts_bytes = reader.sfx_index_file("termtexts", self.raw_field)
             .and_then(|fs| fs.read_bytes().ok())
             .map(|b| b.as_ref().to_vec());
+        // TermTexts required — no fallback to tantivy term dict (ordinal mismatch)
         let termtexts_reader = termtexts_bytes.as_ref()
-            .and_then(|b| crate::suffix_fst::TermTextsReader::open(b));
-
-        let inv_idx = reader.inverted_index(self.raw_field).map_err(|e|
-            crate::LucivyError::SystemError(format!("scorer inv_idx: {e}")))?;
-        let term_dict = inv_idx.terms();
+            .and_then(|b| crate::suffix_fst::TermTextsReader::open(b))
+            .ok_or_else(|| crate::LucivyError::SystemError(
+                "contains requires .termtexts — index may need rebuild".into()
+            ))?;
 
         let ord_to_term_fn = |ord: u64| -> Option<String> {
-            if let Some(ref reader) = termtexts_reader {
-                return reader.text(ord as u32).map(|s| s.to_string());
-            }
-            let mut bytes = Vec::new();
-            if term_dict.ord_to_term(ord, &mut bytes).ok()? {
-                String::from_utf8(bytes).ok()
-            } else {
-                None
-            }
+            termtexts_reader.text(ord as u32).map(|s| s.to_string())
         };
 
         let (query_tokens, query_separators) = tokenize_query(&self.query_text);

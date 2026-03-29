@@ -60,23 +60,18 @@ pub fn run_regex_prescan(
     let term_dict = inverted_index.terms();
     let sfx_dict = SfxTermDictionary::new(&sfx_reader, term_dict);
 
-    // Use TermTexts (SFX ordinals) instead of tantivy term dict
+    // TermTexts required — no fallback to tantivy term dict (ordinal mismatch)
     let termtexts_bytes = reader.sfx_index_file("termtexts", field)
         .and_then(|fs| fs.read_bytes().ok())
         .map(|b| b.as_ref().to_vec());
     let termtexts_reader = termtexts_bytes.as_ref()
-        .and_then(|b| crate::suffix_fst::TermTextsReader::open(b));
+        .and_then(|b| crate::suffix_fst::TermTextsReader::open(b))
+        .ok_or_else(|| LucivyError::SystemError(
+            "regex contains requires .termtexts — index may need rebuild".into()
+        ))?;
 
     let ord_to_term_fn = |ord: u64| -> Option<String> {
-        if let Some(ref r) = termtexts_reader {
-            return r.text(ord as u32).map(|s| s.to_string());
-        }
-        let mut bytes = Vec::new();
-        if term_dict.ord_to_term(ord, &mut bytes).ok()? {
-            String::from_utf8(bytes).ok()
-        } else {
-            None
-        }
+        termtexts_reader.text(ord as u32).map(|s| s.to_string())
     };
 
     let posmap_bytes = reader.posmap_file(field)
@@ -122,22 +117,18 @@ pub fn run_fuzzy_prescan(
     let inverted_index = reader.inverted_index(field)?;
     let term_dict = inverted_index.terms();
 
+    // TermTexts required — no fallback to tantivy term dict (ordinal mismatch)
     let termtexts_bytes = reader.sfx_index_file("termtexts", field)
         .and_then(|fs| fs.read_bytes().ok())
         .map(|b| b.as_ref().to_vec());
     let termtexts_reader = termtexts_bytes.as_ref()
-        .and_then(|b| crate::suffix_fst::TermTextsReader::open(b));
+        .and_then(|b| crate::suffix_fst::TermTextsReader::open(b))
+        .ok_or_else(|| LucivyError::SystemError(
+            "fuzzy contains requires .termtexts — index may need rebuild".into()
+        ))?;
 
     let ord_to_term_fn = |ord: u64| -> Option<String> {
-        if let Some(ref r) = termtexts_reader {
-            return r.text(ord as u32).map(|s| s.to_string());
-        }
-        let mut bytes = Vec::new();
-        if term_dict.ord_to_term(ord, &mut bytes).ok()? {
-            String::from_utf8(bytes).ok()
-        } else {
-            None
-        }
+        termtexts_reader.text(ord as u32).map(|s| s.to_string())
     };
 
     let posmap_bytes = reader.posmap_file(field)
@@ -1384,22 +1375,18 @@ impl RegexContinuationWeight {
 
         let resolver = posting_resolver::build_resolver(reader, self.field)?;
 
+        // TermTexts required — no fallback to tantivy term dict (ordinal mismatch)
         let termtexts_bytes = reader.sfx_index_file("termtexts", self.field)
             .and_then(|fs| fs.read_bytes().ok())
             .map(|b| b.as_ref().to_vec());
         let termtexts_reader = termtexts_bytes.as_ref()
-            .and_then(|b| crate::suffix_fst::TermTextsReader::open(b));
+            .and_then(|b| crate::suffix_fst::TermTextsReader::open(b))
+            .ok_or_else(|| crate::LucivyError::SystemError(
+                "contains/fuzzy/regex requires .termtexts — index may need rebuild".into()
+            ))?;
 
         let ord_to_term_fn = |ord: u64| -> Option<String> {
-            if let Some(ref r) = termtexts_reader {
-                return r.text(ord as u32).map(|s| s.to_string());
-            }
-            let mut bytes = Vec::new();
-            if term_dict.ord_to_term(ord, &mut bytes).ok()? {
-                String::from_utf8(bytes).ok()
-            } else {
-                None
-            }
+            termtexts_reader.text(ord as u32).map(|s| s.to_string())
         };
 
         let use_sibling = sfx_reader.sibling_table().is_some();
