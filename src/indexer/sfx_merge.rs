@@ -459,7 +459,7 @@ pub(crate) fn write_sfx(
     let sfx_bytes = sfx_file.to_bytes();
     serializer.write_sfx(field.field_id(), &sfx_bytes)?;
     if let Some(ref sfxpost) = sfxpost_data {
-        serializer.write_sfxpost(field.field_id(), sfxpost)?;
+        serializer.write_custom_index(field.field_id(), "sfxpost", sfxpost)?;
     }
     Ok(())
 }

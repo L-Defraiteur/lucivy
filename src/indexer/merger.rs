@@ -689,6 +689,7 @@ impl IndexMerger {
             let mut sfxpost_data: Option<Vec<u8>> = None;
             let mut posmap_data: Option<Vec<u8>> = None;
             let mut bytemap_data: Option<Vec<u8>> = None;
+            let mut termtexts_data: Option<Vec<u8>> = None;
             let mut fst_result: Option<(Vec<u8>, Vec<u8>)> = None;
             let mut num_terms: u32 = 0;
             let mut sibling_data: Option<Vec<u8>> = None;
@@ -753,6 +754,7 @@ impl IndexMerger {
                     let mut sfxpost_writer = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::new(max_terms);
                     let mut posmap_writer = crate::suffix_fst::PosMapWriter::new();
                     let mut bytemap_writer = crate::suffix_fst::ByteBitmapWriter::new();
+                    let mut termtexts_writer = crate::suffix_fst::TermTextsWriter::new();
                     let mut sfx_builder = crate::suffix_fst::SuffixFstBuilder::with_min_suffix_len(3);
                     // Track old→new ordinal per segment for sibling remapping
                     let mut old_to_new: Vec<HashMap<u32, u32>> = vec![HashMap::new(); self.readers.len()];
@@ -829,6 +831,7 @@ impl IndexMerger {
                             // Add token to FST + record ordinal mapping ONLY for alive tokens
                             if let Ok(key_str) = std::str::from_utf8(&current_key) {
                                 sfx_builder.add_token(key_str, new_ord as u64);
+                                termtexts_writer.add(new_ord, key_str);
                             }
                             for &(seg_ord, old_ord) in &sources {
                                 old_to_new[seg_ord].insert(old_ord, new_ord);
@@ -840,6 +843,7 @@ impl IndexMerger {
                     sfxpost_data = Some(sfxpost_writer.finish());
                     posmap_data = Some(posmap_writer.serialize());
                     bytemap_data = Some(bytemap_writer.serialize());
+                    termtexts_data = Some(termtexts_writer.serialize());
 
                     // Build FST from collected tokens
                     fst_result = sfx_builder.build().ok();
@@ -872,34 +876,52 @@ impl IndexMerger {
             // Write complete .sfx file with FST + gapmap + sibling table.
             #[cfg(feature = "sfx-profile")]
             let t_write = std::time::Instant::now();
-            let gapmap_data = gapmap_writer.serialize();
+            let gapmap_bytes = gapmap_writer.serialize();
             let (fst_data, parent_data) = fst_result.unwrap_or_default();
             let mut sfx_file = SfxFileWriter::new(
                 fst_data,
                 parent_data,
-                gapmap_data,
+                gapmap_bytes.clone(),
                 doc_mapping.len() as u32,
                 num_terms,
             );
-            if let Some(sib) = sibling_data {
-                sfx_file = sfx_file.with_sibling_data(sib);
+            if let Some(ref sib) = sibling_data {
+                sfx_file = sfx_file.with_sibling_data(sib.clone());
             }
             let sfx_bytes = sfx_file.to_bytes();
-            serializer.write_sfx(field.field_id(), &sfx_bytes)?;
-            if let Some(ref sfxpost) = sfxpost_data {
-                serializer.write_sfxpost(field.field_id(), sfxpost)?;
+            let fid = field.field_id();
+            serializer.write_sfx(fid, &sfx_bytes)?;
+            // Write all registry files via write_custom_index (unified path)
+            if let Some(ref data) = sfxpost_data {
+                serializer.write_custom_index(fid, "sfxpost", data)?;
             }
-            eprintln!("[merge-sfx] field={} sfxpost={} posmap={} bytemap={}",
-                field.field_id(),
+            if let Some(ref data) = posmap_data {
+                serializer.write_custom_index(fid, "posmap", data)?;
+            }
+            if let Some(ref data) = bytemap_data {
+                serializer.write_custom_index(fid, "bytemap", data)?;
+            }
+            if let Some(ref data) = termtexts_data {
+                if !data.is_empty() {
+                    serializer.write_custom_index(fid, "termtexts", data)?;
+                }
+            }
+            if !gapmap_bytes.is_empty() {
+                serializer.write_custom_index(fid, "gapmap", &gapmap_bytes)?;
+            }
+            if let Some(ref sib) = sibling_data {
+                if !sib.is_empty() {
+                    serializer.write_custom_index(fid, "sibling", sib)?;
+                }
+            }
+            eprintln!("[merge-sfx] field={} sfxpost={} posmap={} bytemap={} termtexts={} gapmap={} sibling={}",
+                fid,
                 sfxpost_data.as_ref().map(|d| d.len()).unwrap_or(0),
                 posmap_data.as_ref().map(|d| d.len()).unwrap_or(0),
-                bytemap_data.as_ref().map(|d| d.len()).unwrap_or(0));
-            if let Some(ref posmap) = posmap_data {
-                serializer.write_posmap(field.field_id(), posmap)?;
-            }
-            if let Some(ref bytemap) = bytemap_data {
-                serializer.write_bytemap(field.field_id(), bytemap)?;
-            }
+                bytemap_data.as_ref().map(|d| d.len()).unwrap_or(0),
+                termtexts_data.as_ref().map(|d| d.len()).unwrap_or(0),
+                gapmap_bytes.len(),
+                sibling_data.as_ref().map(|d| d.len()).unwrap_or(0));
             #[cfg(feature = "sfx-profile")]
             let write_ms = t_write.elapsed().as_millis();
 
@@ -1061,8 +1083,18 @@ impl IndexMerger {
                         }
                     }
                 }
-                serializer.write_posmap(field.field_id(), &posmap_writer.serialize())?;
-                serializer.write_bytemap(field.field_id(), &bytemap_writer.serialize())?;
+                let fid = field.field_id();
+                serializer.write_custom_index(fid, "posmap", &posmap_writer.serialize())?;
+                serializer.write_custom_index(fid, "bytemap", &bytemap_writer.serialize())?;
+                // Build termtexts from unique_tokens
+                let mut tt_writer = crate::suffix_fst::TermTextsWriter::new();
+                for (ord, token) in unique_tokens.iter().enumerate() {
+                    tt_writer.add(ord as u32, token);
+                }
+                let tt_data = tt_writer.serialize();
+                if !tt_data.is_empty() {
+                    serializer.write_custom_index(fid, "termtexts", &tt_data)?;
+                }
             }
 
             sfx_field_ids.push(field.field_id());

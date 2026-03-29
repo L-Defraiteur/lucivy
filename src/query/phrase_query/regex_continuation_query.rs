@@ -802,9 +802,9 @@ pub fn fuzzy_contains_via_trigram(
                 }
             }
         } else {
-            // No PosMap — accept trigram-filtered candidates conservatively
-            doc_bitset.insert(doc_id);
-            highlights.push((doc_id, *first_bf as usize, *last_bt as usize));
+            return Err(crate::LucivyError::SystemError(
+                format!("fuzzy contains requires PosMap but none found for doc {} — index may need rebuild", doc_id)
+            ));
         }
     }
 
@@ -1410,6 +1410,14 @@ impl RegexContinuationWeight {
                 let posmap_bytes = reader.posmap_file(self.field)
                     .and_then(|data| data.read_bytes().ok())
                     .map(|b| b.as_ref().to_vec());
+                let has_sfx = reader.sfx_file(self.field).is_some();
+                let has_sfxpost = reader.sfxpost_file(self.field).is_some();
+                let has_registry_posmap = reader.sfx_index_file("posmap", self.field).is_some();
+                let has_registry_termtexts = reader.sfx_index_file("termtexts", self.field).is_some();
+                let sfx_ids = reader.segment_id();
+                eprintln!("[fuzzy-diag] segment={:?} field={:?} sfx={} sfxpost={} posmap_legacy={} posmap_registry={} termtexts={}",
+                    sfx_ids, self.field,
+                    has_sfx, has_sfxpost, posmap_bytes.is_some(), has_registry_posmap, has_registry_termtexts);
                 fuzzy_contains_via_trigram(
                     text, *distance, *prefix, &sfx_reader, &*resolver,
                     &ord_to_term_fn, self.mode, max_doc,
