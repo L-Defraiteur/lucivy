@@ -251,6 +251,8 @@ pub fn intersect_trigrams_with_threshold(
 
 /// Validate that the DFA accepts the token sequence between pos_from and pos_to
 /// (inclusive) in a document. Uses PosMap to read ordinals and GapMap for gaps.
+/// If a ByteMap is provided, tokens whose bytes are incompatible with the DFA
+/// are detected early without feeding individual bytes.
 ///
 /// Returns the DFA state at the first accepting point, or None if the DFA
 /// never accepts (dies or reaches pos_to without accepting).
@@ -263,6 +265,7 @@ pub fn validate_path<A: lucivy_fst::Automaton>(
     doc_id: DocId,
     pos_from: u32, // exclusive: start feeding AFTER this position
     pos_to: u32,   // inclusive: feed up to and including this position
+    bytemap: Option<&crate::suffix_fst::bytemap::ByteBitmapReader<'_>>,
 ) -> Option<A::State>
 where
     A::State: Clone,
@@ -287,6 +290,12 @@ where
 
         // Feed token text at this position.
         if let Some(tok_ord) = posmap.ordinal_at(doc_id, pos) {
+            // ByteMap pre-filter: skip token if no byte can advance the DFA
+            if let Some(bm) = bytemap {
+                if !super::dfa_byte_filter::can_token_advance_dfa(automaton, &state, bm, tok_ord) {
+                    return None;
+                }
+            }
             if let Some(text) = ord_to_term(tok_ord as u64) {
                 for &byte in text.as_bytes() {
                     state = automaton.accept(&state, byte);

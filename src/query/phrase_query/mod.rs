@@ -11,6 +11,7 @@ pub mod regex_continuation_query;
 pub mod suffix_contains;
 pub mod suffix_contains_query;
 pub mod literal_resolve;
+pub mod dfa_byte_filter;
 
 pub use self::automaton_phrase_query::AutomatonPhraseQuery;
 pub use self::phrase_query::PhraseQuery;

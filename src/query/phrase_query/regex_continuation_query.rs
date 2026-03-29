@@ -77,6 +77,9 @@ pub fn run_regex_prescan(
     let posmap_bytes = reader.posmap_file(field)
         .and_then(|d| d.read_bytes().ok())
         .map(|b| b.as_ref().to_vec());
+    let bytemap_bytes = reader.bytemap_file(field)
+        .and_then(|d| d.read_bytes().ok())
+        .map(|b| b.as_ref().to_vec());
 
     let regex = Regex::new(pattern).map_err(|e| {
         LucivyError::InvalidArgument(format!("RegexContinuation: {e}"))
@@ -87,6 +90,7 @@ pub fn run_regex_prescan(
         &automaton, pattern, &sfx_dict, &*pr, &sfx_reader,
         mode, reader.max_doc(), &ord_to_term_fn,
         posmap_bytes.as_deref(),
+        bytemap_bytes.as_deref(),
     )?;
 
     let doc_tf = highlights_to_doc_tf(&highlights);
@@ -844,10 +848,12 @@ pub fn regex_contains_via_literal<A: Automaton>(
     max_doc: DocId,
     ord_to_term: &dyn Fn(u64) -> Option<String>,
     posmap_data: Option<&[u8]>,
+    bytemap_data: Option<&[u8]>,
 ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>)>
 where
     A::State: Clone + Eq + std::hash::Hash,
 {
+    let bytemap = bytemap_data.and_then(crate::suffix_fst::bytemap::ByteBitmapReader::open);
     use super::literal_resolve::{self, LiteralMatch};
     use std::time::Instant;
     use crate::suffix_fst::posmap::PosMapReader;
@@ -922,6 +928,7 @@ where
                         if let Some(final_state) = literal_resolve::validate_path(
                             automaton, &state, pm, sfx_reader, ord_to_term,
                             m.doc_id, m.position, end_pos - 1,
+                            bytemap.as_ref(),
                         ) {
                             if automaton.is_match(&final_state) {
                                 doc_bitset.insert(m.doc_id);
@@ -989,6 +996,7 @@ where
                     let result = literal_resolve::validate_path(
                         automaton, &first_state, pm, sfx_reader, ord_to_term,
                         doc_id, fp, lp,
+                        bytemap.as_ref(),
                     );
                     if let Some(final_state) = result {
                         if automaton.is_match(&final_state) {
@@ -1427,6 +1435,9 @@ impl RegexContinuationWeight {
                 let posmap_bytes = reader.posmap_file(self.field)
                     .and_then(|data| data.read_bytes().ok())
                     .map(|b| b.as_ref().to_vec());
+                let bytemap_bytes = reader.bytemap_file(self.field)
+                    .and_then(|data| data.read_bytes().ok())
+                    .map(|b| b.as_ref().to_vec());
 
                 let regex = Regex::new(pattern).map_err(|e| {
                     LucivyError::InvalidArgument(format!("RegexContinuation: {e}"))
@@ -1438,6 +1449,7 @@ impl RegexContinuationWeight {
                         &automaton, pattern, &sfx_dict, &*resolver, &sfx_reader,
                         self.mode, max_doc, &ord_to_term_fn,
                         posmap_bytes.as_deref(),
+                        bytemap_bytes.as_deref(),
                     )?
                 } else {
                     continuation_score(
