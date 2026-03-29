@@ -26,6 +26,9 @@ pub struct LiteralMatch {
     pub position: u32,
     pub byte_from: u32,
     pub byte_to: u32,
+    /// Suffix index: byte offset within the parent token where the match starts.
+    /// `byte_from - si` gives the content byte start of the parent token.
+    pub si: u16,
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -67,6 +70,7 @@ pub fn find_literal(
         position: m.token_index,
         byte_from: m.byte_from as u32,
         byte_to: m.byte_to as u32,
+        si: m.si,
     }).collect()
 }
 
@@ -75,13 +79,13 @@ pub fn find_literal(
 // ─────────────────────────────────────────────────────────────────────
 
 /// Per-literal matches grouped by doc_id.
-pub type MatchesByDoc = HashMap<DocId, Vec<(u32, u32, u32)>>; // (position, byte_from, byte_to)
+pub type MatchesByDoc = HashMap<DocId, Vec<(u32, u32, u32, u16)>>; // (position, byte_from, byte_to, si)
 
 /// Group literal matches by doc_id.
 pub fn group_by_doc(matches: &[LiteralMatch]) -> MatchesByDoc {
     let mut by_doc: MatchesByDoc = HashMap::new();
     for m in matches {
-        by_doc.entry(m.doc_id).or_default().push((m.position, m.byte_from, m.byte_to));
+        by_doc.entry(m.doc_id).or_default().push((m.position, m.byte_from, m.byte_to, m.si));
     }
     by_doc
 }
@@ -93,10 +97,10 @@ pub fn group_by_doc(matches: &[LiteralMatch]) -> MatchesByDoc {
 /// Literals are in regex order.
 ///
 /// Returns: set of doc_ids that survive + per-doc matched ranges
-/// `(doc_id, first_byte_from, last_byte_to)`.
+/// `(doc_id, first_byte_from, last_byte_to, first_si)`.
 pub fn intersect_literals_ordered(
     literals_by_doc: &[MatchesByDoc],
-) -> Vec<(DocId, u32, u32)> {
+) -> Vec<(DocId, u32, u32, u16)> {
     if literals_by_doc.is_empty() {
         return Vec::new();
     }
@@ -119,16 +123,16 @@ pub fn intersect_literals_ordered(
 
         // Check position ordering: find a chain where each literal appears after the previous.
         let first_matches = &literals_by_doc[0][&doc_id];
-        for &(_, first_bf, first_bt) in first_matches {
+        for &(_, first_bf, first_bt, first_si) in first_matches {
             let mut min_byte = first_bt;
             let mut all_ok = true;
             let mut last_bt = first_bt;
 
             for lit_matches in &literals_by_doc[1..] {
                 let positions = &lit_matches[&doc_id];
-                if let Some(&(_, _bf, bt)) = positions.iter()
-                    .filter(|&&(_, bf, _)| bf >= min_byte)
-                    .min_by_key(|&&(_, bf, _)| bf)
+                if let Some(&(_, _bf, bt, _si)) = positions.iter()
+                    .filter(|&&(_, bf, _, _)| bf >= min_byte)
+                    .min_by_key(|&&(_, bf, _, _)| bf)
                 {
                     min_byte = bt;
                     last_bt = bt;
@@ -139,7 +143,7 @@ pub fn intersect_literals_ordered(
             }
 
             if all_ok {
-                results.push((doc_id, first_bf, last_bt));
+                results.push((doc_id, first_bf, last_bt, first_si));
                 // Don't break — collect ALL matches per doc
             }
         }
@@ -159,15 +163,17 @@ pub fn intersect_literals_ordered(
 /// `trigrams_by_doc[i]` = matches for trigram i (in query order).
 /// `query_positions[i]` = byte position of trigram i in the query string.
 ///
-/// Returns: `(doc_id, first_byte_from, last_byte_to, first_tri_idx)` for validated matches.
+/// Returns: `(doc_id, first_byte_from, last_byte_to, first_tri_idx, first_si)` for validated matches.
 /// `first_tri_idx` is the index of the first trigram in the best chain — needed
 /// to compute the actual match start position (`first_bf - query_positions[first_tri_idx]`).
+/// `first_si` is the suffix index of the first trigram match — `first_bf - first_si`
+/// gives the content byte start of the parent token.
 pub fn intersect_trigrams_with_threshold(
     trigrams_by_doc: &[MatchesByDoc],
     query_positions: &[usize],
     threshold: usize,
     distance: u8,
-) -> Vec<(DocId, u32, u32, usize)> {
+) -> Vec<(DocId, u32, u32, usize, u16)> {
     if trigrams_by_doc.is_empty() || threshold == 0 {
         return Vec::new();
     }
@@ -180,28 +186,28 @@ pub fn intersect_trigrams_with_threshold(
         }
     }
 
-    let mut results: Vec<(DocId, u32, u32, usize)> = Vec::new();
+    let mut results: Vec<(DocId, u32, u32, usize, u16)> = Vec::new();
 
     for &doc_id in &all_docs {
-        // Collect all (tri_index, byte_from, byte_to) for this doc, sorted by byte_from
-        let mut entries: Vec<(usize, u32, u32)> = Vec::new();
+        // Collect all (tri_index, byte_from, byte_to, si) for this doc, sorted by byte_from
+        let mut entries: Vec<(usize, u32, u32, u16)> = Vec::new();
         for (tri_idx, tri_matches) in trigrams_by_doc.iter().enumerate() {
             if let Some(positions) = tri_matches.get(&doc_id) {
-                for &(_pos, bf, bt) in positions {
-                    entries.push((tri_idx, bf, bt));
+                for &(_pos, bf, bt, si) in positions {
+                    entries.push((tri_idx, bf, bt, si));
                 }
             }
         }
-        entries.sort_by_key(|&(_, bf, _)| bf);
+        entries.sort_by_key(|&(_, bf, _, _)| bf);
 
         // Greedy scan: find ALL chains with increasing tri_index.
         // Each chain that meets the threshold + byte span check becomes a result.
         // Cap at MAX_CHAINS_PER_DOC to avoid O(N²) DFA validations on common bigrams.
         const MAX_CHAINS_PER_DOC: usize = 20;
-        let mut current_chain: Vec<(usize, u32, u32)> = Vec::new();
+        let mut current_chain: Vec<(usize, u32, u32, u16)> = Vec::new();
         let results_before = results.len();
 
-        let mut check_chain = |chain: &[(usize, u32, u32)], results: &mut Vec<(DocId, u32, u32, usize)>| -> bool {
+        let mut check_chain = |chain: &[(usize, u32, u32, u16)], results: &mut Vec<(DocId, u32, u32, usize, u16)>| -> bool {
             if chain.len() < threshold { return false; }
             if results.len() - results_before >= MAX_CHAINS_PER_DOC { return true; } // cap reached
             let first = &chain[0];
@@ -210,21 +216,21 @@ pub fn intersect_trigrams_with_threshold(
             let query_span = query_positions[last.0] as i64 - query_positions[first.0] as i64;
             let span_diff = (text_span - query_span).unsigned_abs();
             if span_diff > distance as u64 { return false; }
-            results.push((doc_id, first.1, last.2, first.0));
+            results.push((doc_id, first.1, last.2, first.0, first.3));
             false
         };
 
         let mut capped = false;
-        for &(tri_idx, bf, bt) in &entries {
+        for &(tri_idx, bf, bt, si) in &entries {
             if capped { break; }
             if current_chain.is_empty()
                 || tri_idx > current_chain.last().unwrap().0
             {
-                current_chain.push((tri_idx, bf, bt));
+                current_chain.push((tri_idx, bf, bt, si));
             } else {
                 capped = check_chain(&current_chain, &mut results);
                 current_chain.clear();
-                current_chain.push((tri_idx, bf, bt));
+                current_chain.push((tri_idx, bf, bt, si));
             }
         }
         if !capped { check_chain(&current_chain, &mut results); }
@@ -322,8 +328,8 @@ mod tests {
     #[test]
     fn test_intersect_single() {
         let mut by_doc = HashMap::new();
-        by_doc.insert(1, vec![(0, 0, 5)]);
-        by_doc.insert(2, vec![(0, 0, 3)]);
+        by_doc.insert(1, vec![(0, 0, 5, 0)]);
+        by_doc.insert(2, vec![(0, 0, 3, 0)]);
 
         let result = intersect_literals_ordered(&[by_doc]);
         assert_eq!(result.len(), 2);
@@ -332,11 +338,11 @@ mod tests {
     #[test]
     fn test_intersect_two_ordered() {
         let mut lit_a = HashMap::new();
-        lit_a.insert(1, vec![(0, 0, 5)]); // doc1: "hello" at pos 0
-        lit_a.insert(2, vec![(0, 0, 3)]); // doc2: "foo" at pos 0
+        lit_a.insert(1, vec![(0, 0, 5, 0)]); // doc1: "hello" at pos 0
+        lit_a.insert(2, vec![(0, 0, 3, 0)]); // doc2: "foo" at pos 0
 
         let mut lit_b = HashMap::new();
-        lit_b.insert(1, vec![(2, 10, 15)]); // doc1: "world" at pos 2, byte 10-15
+        lit_b.insert(1, vec![(2, 10, 15, 0)]); // doc1: "world" at pos 2, byte 10-15
         // doc2 doesn't have lit_b → eliminated
 
         let result = intersect_literals_ordered(&[lit_a, lit_b]);
@@ -349,10 +355,10 @@ mod tests {
     #[test]
     fn test_intersect_wrong_order() {
         let mut lit_a = HashMap::new();
-        lit_a.insert(1, vec![(5, 20, 25)]); // doc1: lit_a at byte 20-25
+        lit_a.insert(1, vec![(5, 20, 25, 0)]); // doc1: lit_a at byte 20-25
 
         let mut lit_b = HashMap::new();
-        lit_b.insert(1, vec![(2, 5, 10)]); // doc1: lit_b at byte 5-10 (BEFORE lit_a)
+        lit_b.insert(1, vec![(2, 5, 10, 0)]); // doc1: lit_b at byte 5-10 (BEFORE lit_a)
 
         let result = intersect_literals_ordered(&[lit_a, lit_b]);
         assert!(result.is_empty()); // wrong order → eliminated

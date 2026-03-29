@@ -620,9 +620,10 @@ pub fn fuzzy_contains_via_trigram(
 
     eprintln!("[fuzzy-path] posmap={} candidates={}", posmap.is_some(), candidates.len());
 
-    for (doc_id, first_bf, last_bt, first_tri_idx) in &candidates {
+    for (doc_id, first_bf, last_bt, first_tri_idx, first_si) in &candidates {
         let doc_id = *doc_id;
         let first_tri_idx = *first_tri_idx;
+        let first_si = *first_si;
 
         // Find the token position for first_bf from the trigram matches
         let first_pos = all_matches.iter()
@@ -711,57 +712,93 @@ pub fn fuzzy_contains_via_trigram(
             if matched {
                 doc_bitset.insert(doc_id);
 
-                // === Step 3: Identify touched tokens ===
-                let match_end = match_start + match_len;
-                let first_span = token_spans.iter()
-                    .find(|(_, _, ce, _)| *ce > match_start);
-                let last_span = token_spans.iter().rev()
-                    .find(|(_, cs, _, _)| *cs < match_end);
+                // === Step 3: Build content byte table for each token span ===
+                // We know fp (the token position of the first trigram match)
+                // is at content byte `first_bf`. Walk from fp to build the
+                // content byte start for every token in token_spans.
 
-                if first_span.is_none() || last_span.is_none() {
-                    eprintln!("[hl-debug] SPAN MISS doc={} match_start={} match_end={} concat_len={} n_spans={}",
-                        doc_id, match_start, match_end, concat_bytes.len(), token_spans.len());
-                }
-                if let (Some(fspan), Some(lspan)) = (first_span, last_span) {
-                    // === Step 4: Content bytes via walk from anchor ===
-                    // Anchor: fp is at content byte first_bf - tri_offset
-                    let fp_tok_text = pm.ordinal_at(doc_id, fp)
-                        .and_then(|ord| ord_to_term(ord as u64));
-                    let tri_offset = fp_tok_text.as_ref()
-                        .and_then(|t| t.find(&ngrams[first_tri_idx]))
-                        .unwrap_or(0);
-                    let fp_cb_start = (*first_bf as i64 - tri_offset as i64).max(0) as u32;
+                // Find fp's index in token_spans
+                let fp_span_idx = token_spans.iter()
+                    .position(|(pos, _, _, _)| *pos == fp);
 
-                    // Walk backward from fp to first touched token
-                    let mut hl_start_cb = fp_cb_start;
-                    for pos in (fspan.0..fp).rev() {
-                        let gap = sfx_reader.gapmap().read_separator(doc_id, pos, pos + 1)
+                if let Some(fp_idx) = fp_span_idx {
+                    // content_byte_starts[i] = content byte offset of token_spans[i]
+                    let mut content_byte_starts: Vec<u32> = vec![0u32; token_spans.len()];
+
+                    // fp token starts at first_bf - first_si in content bytes
+                    // (first_bf is the suffix match start, first_si is the offset within the token)
+                    content_byte_starts[fp_idx] = first_bf.saturating_sub(first_si as u32);
+
+                    // Walk backward from fp to build content byte starts for earlier tokens
+                    for i in (0..fp_idx).rev() {
+                        let cur_pos = token_spans[i].0;
+                        let next_pos = token_spans[i + 1].0;
+                        let gap = sfx_reader.gapmap().read_separator(doc_id, cur_pos, next_pos)
                             .map(|g| g.len() as u32).unwrap_or(1);
-                        let tl = pm.ordinal_at(doc_id, pos)
-                            .and_then(|ord| ord_to_term(ord as u64))
-                            .map(|t| t.len() as u32).unwrap_or(0);
-                        hl_start_cb = hl_start_cb.saturating_sub(tl + gap);
+                        let cur_tlen = token_spans[i].3 as u32;
+                        // content_byte_starts[i+1] = content_byte_starts[i] + cur_tlen + gap
+                        // => content_byte_starts[i] = content_byte_starts[i+1] - cur_tlen - gap
+                        content_byte_starts[i] = content_byte_starts[i + 1]
+                            .saturating_sub(cur_tlen + gap);
                     }
 
-                    // Walk forward from fp to end of last touched token
-                    let fp_tok_len = fp_tok_text.as_ref()
-                        .map(|t| t.len() as u32).unwrap_or(0);
-                    let mut hl_end_cb = fp_cb_start + fp_tok_len;
-                    for pos in (fp + 1)..=lspan.0 {
-                        let gap = sfx_reader.gapmap().read_separator(doc_id, pos - 1, pos)
+                    // Walk forward from fp to build content byte starts for later tokens
+                    for i in (fp_idx + 1)..token_spans.len() {
+                        let prev_pos = token_spans[i - 1].0;
+                        let cur_pos = token_spans[i].0;
+                        let gap = sfx_reader.gapmap().read_separator(doc_id, prev_pos, cur_pos)
                             .map(|g| g.len() as u32).unwrap_or(1);
-                        let tl = pm.ordinal_at(doc_id, pos)
-                            .and_then(|ord| ord_to_term(ord as u64))
-                            .map(|t| t.len() as u32).unwrap_or(0);
-                        hl_end_cb += gap + tl;
+                        let prev_tlen = token_spans[i - 1].3 as u32;
+                        content_byte_starts[i] = content_byte_starts[i - 1] + prev_tlen + gap;
                     }
 
-                    eprintln!("[hl-debug] doc={} first_bf={} tri_idx={} tri_offset={} fp={} fp_cb_start={} fspan.pos={} lspan.pos={} match_start={} match_len={} hl=[{},{}] fp_tok={:?}",
-                        doc_id, first_bf, first_tri_idx, tri_offset, fp, fp_cb_start,
-                        fspan.0, lspan.0, match_start, match_len,
-                        hl_start_cb, hl_end_cb,
-                        fp_tok_text.as_ref().map(|t| t.as_str()));
-                    highlights.push((doc_id, hl_start_cb as usize, hl_end_cb as usize));
+                    // === Step 4: Map match_start/match_end from concat to content bytes ===
+                    let match_end = match_start + match_len;
+
+                    // Diagnostic: dump token spans table with content bytes
+                    eprintln!("[hl-diag] doc={} fp={} fp_idx={} first_bf={} first_si={} tok_start={} match=[{},{}] concat_len={}",
+                        doc_id, fp, fp_idx, first_bf, first_si,
+                        first_bf.saturating_sub(first_si as u32),
+                        match_start, match_end, concat_bytes.len());
+                    for (i, &(pos, cs, ce, tlen)) in token_spans.iter().enumerate() {
+                        let tok_text = pm.ordinal_at(doc_id, pos)
+                            .and_then(|ord| ord_to_term(ord as u64))
+                            .unwrap_or_default();
+                        let marker = if i == fp_idx { " <-- fp" } else { "" };
+                        eprintln!("[hl-diag]   span[{}] pos={} concat=[{},{}) tlen={} cb_start={} tok=\"{}\"{}",
+                            i, pos, cs, ce, tlen, content_byte_starts[i], tok_text, marker);
+                    }
+                    let matched_bytes = &concat_bytes[match_start..match_end];
+                    eprintln!("[hl-diag]   DFA matched concat[{}..{}] = {:?}",
+                        match_start, match_end,
+                        std::str::from_utf8(matched_bytes).unwrap_or("<non-utf8>"));
+
+                    // Find token containing match_start
+                    let start_span_idx = token_spans.iter()
+                        .position(|(_, cs, ce, _)| match_start >= *cs && match_start < *ce)
+                        .or_else(|| token_spans.iter()
+                            .position(|(_, _, ce, _)| *ce > match_start));
+
+                    // Find token containing match_end (or the last token before it)
+                    let end_span_idx = token_spans.iter()
+                        .rposition(|(_, cs, ce, _)| match_end > *cs && match_end <= *ce)
+                        .or_else(|| token_spans.iter()
+                            .rposition(|(_, cs, _, _)| *cs < match_end));
+
+                    if let (Some(si), Some(ei)) = (start_span_idx, end_span_idx) {
+                        let intra_start = match_start.saturating_sub(token_spans[si].1);
+                        let hl_start = content_byte_starts[si] as usize + intra_start;
+
+                        let intra_end = match_end.saturating_sub(token_spans[ei].1);
+                        let hl_end = content_byte_starts[ei] as usize + intra_end;
+
+                        eprintln!("[hl-debug] doc={} si={} ei={} intra_s={} intra_e={} hl=[{},{}]",
+                            doc_id, si, ei, intra_start, intra_end, hl_start, hl_end);
+                        highlights.push((doc_id, hl_start, hl_end));
+                    } else {
+                        eprintln!("[hl-debug] doc={} SPAN LOOKUP FAILED start_idx={:?} end_idx={:?}",
+                            doc_id, start_span_idx, end_span_idx);
+                    }
                 }
             }
         } else {
@@ -771,23 +808,12 @@ pub fn fuzzy_contains_via_trigram(
         }
     }
 
-    // Merge overlapping/adjacent highlights for the same doc.
-    // Cross-token matches can produce separate chains for each token
-    // fragment (e.g. "rag3" and "weaver" instead of "rag3weaver").
-    highlights.sort_by_key(|&(doc, bf, _)| (doc, bf));
-    let mut merged: Vec<(DocId, usize, usize)> = Vec::new();
-    for hl in &highlights {
-        if let Some(last) = merged.last_mut() {
-            if last.0 == hl.0 && hl.1 <= last.2 + 1 {
-                // Same doc, overlapping or adjacent (gap ≤ 1 byte) — extend
-                last.2 = last.2.max(hl.2);
-                continue;
-            }
-        }
-        merged.push(*hl);
-    }
+    // Deduplicate identical highlights, but don't merge overlapping ones
+    // (they may come from different match instances, each valid on its own).
+    highlights.sort_by_key(|&(doc, bf, bt)| (doc, bf, bt));
+    highlights.dedup();
 
-    Ok((doc_bitset, merged))
+    Ok((doc_bitset, highlights))
 }
 
 /// Pick the best literal for the primary prefix_walk.
@@ -932,14 +958,14 @@ where
 
         if let Some(pm) = &posmap {
             // PosMap walk: validate DFA between the literal positions.
-            for &(doc_id, first_bf, last_bt) in &ordered {
+            for &(doc_id, first_bf, last_bt, _first_si) in &ordered {
                 // Find actual positions of first and last literals in this doc.
                 let first_pos = grouped[0].get(&doc_id)
-                    .and_then(|v| v.iter().find(|&&(_, bf, _)| bf == first_bf))
-                    .map(|&(pos, _, _)| pos);
+                    .and_then(|v| v.iter().find(|&&(_, bf, _, _)| bf == first_bf))
+                    .map(|&(pos, _, _, _)| pos);
                 let last_pos = grouped.last().unwrap().get(&doc_id)
-                    .and_then(|v| v.iter().find(|&&(_, _, bt)| bt == last_bt))
-                    .map(|&(pos, _, _)| pos);
+                    .and_then(|v| v.iter().find(|&&(_, _, bt, _)| bt == last_bt))
+                    .map(|&(pos, _, _, _)| pos);
 
                 let (Some(fp), Some(lp)) = (first_pos, last_pos) else { continue; };
 
@@ -984,7 +1010,7 @@ where
             }
         } else {
             // No PosMap — accept all ordered matches (conservative).
-            for &(doc_id, first_bf, last_bt) in &ordered {
+            for &(doc_id, first_bf, last_bt, _first_si) in &ordered {
                 doc_bitset.insert(doc_id);
                 highlights.push((doc_id, first_bf as usize, last_bt as usize));
             }
