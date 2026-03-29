@@ -11,6 +11,8 @@ pub mod sibling_table;
 pub mod posmap;
 /// Byte presence bitmap: 256-bit bitmap per ordinal for fast pre-filtering.
 pub mod bytemap;
+/// Term texts: O(1) SFX ordinal → token text (fixes ordinal mismatch with tantivy term dict).
+pub mod termtexts;
 /// SFX index file abstraction: trait + registry for per-field index files.
 pub mod index_registry;
 /// File I/O for `.sfx` and `.sfxpost` formats (reader/writer).
@@ -34,6 +36,8 @@ pub use sibling_table::{SiblingTableWriter, SiblingTableReader, SiblingEntry};
 pub use posmap::{PosMapWriter, PosMapReader};
 /// Byte presence bitmap writer/reader.
 pub use bytemap::{ByteBitmapWriter, ByteBitmapReader};
+/// Term texts writer/reader for SFX ordinal → token text lookup.
+pub use termtexts::{TermTextsWriter, TermTextsReader};
 /// Writer and reader for the `.sfx` file format, plus per-ordinal postings reader.
 pub use file::{SfxFileWriter, SfxFileReader, SfxPostingsReader, SfxPostingEntry};
 /// Token interceptor that captures tokens during indexing for suffix FST construction.

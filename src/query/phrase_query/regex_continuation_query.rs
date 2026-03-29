@@ -60,7 +60,17 @@ pub fn run_regex_prescan(
     let term_dict = inverted_index.terms();
     let sfx_dict = SfxTermDictionary::new(&sfx_reader, term_dict);
 
+    // Use TermTexts (SFX ordinals) instead of tantivy term dict
+    let termtexts_bytes = reader.sfx_index_file("termtexts", field)
+        .and_then(|fs| fs.read_bytes().ok())
+        .map(|b| b.as_ref().to_vec());
+    let termtexts_reader = termtexts_bytes.as_ref()
+        .and_then(|b| crate::suffix_fst::TermTextsReader::open(b));
+
     let ord_to_term_fn = |ord: u64| -> Option<String> {
+        if let Some(ref r) = termtexts_reader {
+            return r.text(ord as u32).map(|s| s.to_string());
+        }
         let mut bytes = Vec::new();
         if term_dict.ord_to_term(ord, &mut bytes).ok()? {
             String::from_utf8(bytes).ok()
@@ -112,7 +122,16 @@ pub fn run_fuzzy_prescan(
     let inverted_index = reader.inverted_index(field)?;
     let term_dict = inverted_index.terms();
 
+    let termtexts_bytes = reader.sfx_index_file("termtexts", field)
+        .and_then(|fs| fs.read_bytes().ok())
+        .map(|b| b.as_ref().to_vec());
+    let termtexts_reader = termtexts_bytes.as_ref()
+        .and_then(|b| crate::suffix_fst::TermTextsReader::open(b));
+
     let ord_to_term_fn = |ord: u64| -> Option<String> {
+        if let Some(ref r) = termtexts_reader {
+            return r.text(ord as u32).map(|s| s.to_string());
+        }
         let mut bytes = Vec::new();
         if term_dict.ord_to_term(ord, &mut bytes).ok()? {
             String::from_utf8(bytes).ok()
@@ -1339,7 +1358,16 @@ impl RegexContinuationWeight {
 
         let resolver = posting_resolver::build_resolver(reader, self.field)?;
 
+        let termtexts_bytes = reader.sfx_index_file("termtexts", self.field)
+            .and_then(|fs| fs.read_bytes().ok())
+            .map(|b| b.as_ref().to_vec());
+        let termtexts_reader = termtexts_bytes.as_ref()
+            .and_then(|b| crate::suffix_fst::TermTextsReader::open(b));
+
         let ord_to_term_fn = |ord: u64| -> Option<String> {
+            if let Some(ref r) = termtexts_reader {
+                return r.text(ord as u32).map(|s| s.to_string());
+            }
             let mut bytes = Vec::new();
             if term_dict.ord_to_term(ord, &mut bytes).ok()? {
                 String::from_utf8(bytes).ok()

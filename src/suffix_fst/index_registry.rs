@@ -82,7 +82,7 @@ pub fn all_indexes() -> Vec<Box<dyn SfxIndexFile>> {
         Box::new(super::sibling_table::SiblingIndex),
         Box::new(super::posmap::PosMapIndex),
         Box::new(super::bytemap::ByteMapIndex),
-        // Box::new(super::termtexts::TermTextsIndex),  // TODO: next
+        Box::new(super::termtexts::TermTextsIndex),
     ]
 }
 

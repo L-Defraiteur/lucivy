@@ -1225,12 +1225,13 @@ where
                 // Get contiguous siblings of current token
                 let siblings = sib_table.contiguous_siblings(current_ord as u32);
                 if query == "rag3weaver" && chain.len() == 1 && cand.prefix_len == 4 && cand_idx == 0 {
-                    eprintln!("[cross-token-diag] first cand: ord={} rem='{}' siblings={:?}",
-                        current_ord, rem,
-                        siblings.iter().map(|s| {
-                            let t = get_term(*s as u64).unwrap_or_default();
-                            format!("{}({})", s, t)
-                        }).collect::<Vec<_>>());
+                    let all_siblings = sib_table.siblings(current_ord as u32);
+                    let weaver_sibs: Vec<_> = all_siblings.iter()
+                        .filter(|s| get_term(s.next_ordinal as u64).map_or(false, |t| t == "weaver"))
+                        .collect();
+                    eprintln!("[cross-token-diag] first cand: ord={} rem='{}' contiguous_siblings={} weaver_sibs(all gaps)={:?}",
+                        current_ord, rem, siblings.len(),
+                        weaver_sibs.iter().map(|s| format!("gap={}", s.gap_len)).collect::<Vec<_>>());
                 }
                 let mut matched = false;
 
@@ -1246,6 +1247,9 @@ where
                         rem = "";
                         found = true;
                         matched = true;
+                        if query == "rag3weaver" {
+                            eprintln!("[cross-token-diag] CHAIN MATCH! cand_idx={} chain={:?}", cand_idx, chain);
+                        }
                         break;
                     } else if rem.starts_with(&next_text) {
                         // Full token consumed → continue chain
