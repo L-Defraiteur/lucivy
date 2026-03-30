@@ -175,16 +175,18 @@ fn extract_byte_ranges_from_class(cls: &Class) -> Option<Vec<(u8, u8)>> {
             Some(bc.ranges().iter().map(|r| (r.start(), r.end())).collect())
         }
         Class::Unicode(uc) => {
-            // Convert Unicode ranges to byte ranges if all chars are ASCII
+            // Extract ASCII-range portions of Unicode classes.
+            // For \w this gives [0-9, A-Z, _, a-z] which is correct for ASCII text.
+            // Non-ASCII ranges are dropped (conservative: bytemap only has ASCII).
             let mut byte_ranges = Vec::new();
             for r in uc.ranges() {
                 let start = r.start() as u32;
                 let end = r.end() as u32;
-                if end > 0x7F {
-                    return None; // non-ASCII, can't use bytemap
-                }
-                byte_ranges.push((start as u8, end as u8));
+                if start > 0x7F { continue; } // fully non-ASCII range, skip
+                let clamped_end = end.min(0x7F);
+                byte_ranges.push((start as u8, clamped_end as u8));
             }
+            if byte_ranges.is_empty() { return None; }
             Some(byte_ranges)
         }
     }
