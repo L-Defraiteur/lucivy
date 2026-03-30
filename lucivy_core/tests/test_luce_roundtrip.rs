@@ -129,5 +129,35 @@ fn test_luce_playground_search() {
     eprintln!("regex \"rag3.*ver\": {} results", results.len());
     assert!(results.len() > 0, "regex should find results");
 
+    // === Multi-token contains (d=0) ===
+    eprintln!();
+    let multi_queries = [
+        "use rag3weaver",
+        "use rag3weaver for",
+        "use rag3weaver for search",
+        "rag3weaver for search",
+    ];
+    for q in &multi_queries {
+        let results = search_with_highlights(&handle, &QueryConfig {
+            query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some(q.to_string()),
+            ..Default::default()
+        });
+        eprintln!("contains d=0 \"{}\": {} results", q, results.len());
+    }
+
+    // === Multi-token fuzzy (d=1) ===
+    for q in ["use rak3weaver for search", "rak3weaver for search"] {
+        let results = search_with_highlights(&handle, &QueryConfig {
+            query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some(q.to_string()),
+            distance: Some(1),
+            ..Default::default()
+        });
+        eprintln!("contains d=1 \"{}\": {} results", q, results.len());
+    }
+
     eprintln!("\nAll .luce native tests passed!");
 }

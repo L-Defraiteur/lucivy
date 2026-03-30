@@ -202,6 +202,9 @@ pub fn intersect_trigrams_with_threshold(
             }
         }
         entries.sort_by_key(|&(_, bf, _, _)| bf);
+        // Dedup entries with same (tri_idx, bf) — duplicates from multiple
+        // SFX paths (e.g. cross-token and single-token) break the greedy chain.
+        entries.dedup_by_key(|e| (e.0, e.1));
 
         // Greedy scan: find ALL chains with increasing tri_index.
         // Each chain that meets the threshold + byte span check becomes a result.

@@ -608,17 +608,16 @@ fn extract_all_literals(pattern: &str) -> Vec<String> {
 
 /// Generate n-grams from a query string, adapting n-gram size to query length.
 /// Short queries (< 7 chars) use bigrams, longer queries use trigrams.
-/// Spaces are treated as separators (tokens never contain spaces).
+/// Non-alphanumeric characters are treated as separators — n-grams never
+/// span across separators. This matches the SFX tokenization where tokens
+/// are alphanumeric segments.
 /// Returns (ngram_strings, query_byte_positions, ngram_size).
 fn generate_ngrams(query: &str, distance: u8) -> (Vec<String>, Vec<usize>, usize) {
     let lower = query.to_lowercase();
-    // Strip spaces to measure effective length (spaces are token boundaries)
-    let effective_len: usize = lower.chars().filter(|c| *c != ' ').count();
+    // Strip non-alphanumeric to measure effective length
+    let effective_len: usize = lower.chars().filter(|c| c.is_alphanumeric()).count();
 
     // Choose n-gram size: bigrams for short queries, trigrams for longer ones.
-    // A single edit can break at most n adjacent n-grams. For the pigeonhole
-    // to guarantee at least 1 survivor: effective_len - n + 1 - n*d >= 1
-    // → effective_len >= n*(d+1) + n. For trigrams d=1: need >= 7 chars.
     let n = if effective_len >= 3 * (distance as usize + 1) + 1 { 3 } else { 2 };
 
     let bytes = lower.as_bytes();
@@ -626,7 +625,7 @@ fn generate_ngrams(query: &str, distance: u8) -> (Vec<String>, Vec<usize>, usize
     let mut positions = Vec::new();
 
     if bytes.len() < n {
-        let trimmed = lower.replace(' ', "");
+        let trimmed: String = lower.chars().filter(|c| c.is_alphanumeric()).collect();
         if !trimmed.is_empty() {
             ngrams.push(trimmed);
             positions.push(0);
@@ -639,19 +638,20 @@ fn generate_ngrams(query: &str, distance: u8) -> (Vec<String>, Vec<usize>, usize
             continue;
         }
         let gram = &lower[i..i + n];
-        if gram.contains(' ') {
+        // Skip n-grams that contain non-alphanumeric chars (separator boundaries)
+        if gram.chars().any(|c| !c.is_alphanumeric()) {
             continue;
         }
         ngrams.push(gram.to_string());
         positions.push(i);
     }
 
-    // Fallback: if no n-gram survived, use individual words
+    // Fallback: if no n-gram survived, use individual alphanumeric segments
     if ngrams.is_empty() {
-        for word in lower.split_whitespace() {
-            if !word.is_empty() {
-                let pos = word.as_ptr() as usize - lower.as_ptr() as usize;
-                ngrams.push(word.to_string());
+        for segment in lower.split(|c: char| !c.is_alphanumeric()) {
+            if !segment.is_empty() {
+                let pos = segment.as_ptr() as usize - lower.as_ptr() as usize;
+                ngrams.push(segment.to_string());
                 positions.push(pos);
             }
         }
@@ -677,56 +677,6 @@ pub fn fuzzy_contains_via_trigram(
     use super::literal_resolve::{self, LiteralMatch};
     use super::literal_pipeline;
     use crate::suffix_fst::posmap::PosMapReader;
-
-    // Multi-token: if the query contains non-alphanumeric separators, split
-    // into segments and run fuzzy on each separately. Intersect the doc sets.
-    // This handles queries like "use rag3weaver" d=1 where trigrams across
-    // separator boundaries don't exist in the SFX index.
-    let tokens: Vec<&str> = query_text
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if tokens.len() > 1 {
-        let mut combined_bitset = BitSet::with_max_value(max_doc);
-        let mut combined_highlights: Vec<(DocId, usize, usize)> = Vec::new();
-        let mut first = true;
-
-        for token in &tokens {
-            let (token_bitset, token_hl) = fuzzy_contains_via_trigram(
-                token, distance, prefix, sfx_reader, resolver,
-                ord_to_term, mode, max_doc, posmap_data,
-            )?;
-
-            if first {
-                combined_bitset = token_bitset;
-                combined_highlights = token_hl;
-                first = false;
-            } else {
-                // Intersect: keep only docs present in both
-                let mut intersected = BitSet::with_max_value(max_doc);
-                for doc_id in 0..max_doc {
-                    if combined_bitset.contains(doc_id) && token_bitset.contains(doc_id) {
-                        intersected.insert(doc_id);
-                    }
-                }
-                combined_bitset = intersected;
-                // Keep highlights only for docs in the intersection
-                combined_highlights.retain(|&(doc_id, _, _)| combined_bitset.contains(doc_id));
-                for &(doc_id, bf, bt) in &token_hl {
-                    if combined_bitset.contains(doc_id) {
-                        combined_highlights.push((doc_id, bf, bt));
-                    }
-                }
-            }
-
-            // Short-circuit if no docs survive
-            if combined_bitset.len() == 0 { break; }
-        }
-
-        combined_highlights.sort_by_key(|&(doc, bf, _)| (doc, bf));
-        combined_highlights.dedup();
-        return Ok((combined_bitset, combined_highlights));
-    }
 
     let (ngrams, query_positions, n) = generate_ngrams(query_text, distance);
 
