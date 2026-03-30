@@ -678,6 +678,56 @@ pub fn fuzzy_contains_via_trigram(
     use super::literal_pipeline;
     use crate::suffix_fst::posmap::PosMapReader;
 
+    // Multi-token: if the query contains non-alphanumeric separators, split
+    // into segments and run fuzzy on each separately. Intersect the doc sets.
+    // This handles queries like "use rag3weaver" d=1 where trigrams across
+    // separator boundaries don't exist in the SFX index.
+    let tokens: Vec<&str> = query_text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if tokens.len() > 1 {
+        let mut combined_bitset = BitSet::with_max_value(max_doc);
+        let mut combined_highlights: Vec<(DocId, usize, usize)> = Vec::new();
+        let mut first = true;
+
+        for token in &tokens {
+            let (token_bitset, token_hl) = fuzzy_contains_via_trigram(
+                token, distance, prefix, sfx_reader, resolver,
+                ord_to_term, mode, max_doc, posmap_data,
+            )?;
+
+            if first {
+                combined_bitset = token_bitset;
+                combined_highlights = token_hl;
+                first = false;
+            } else {
+                // Intersect: keep only docs present in both
+                let mut intersected = BitSet::with_max_value(max_doc);
+                for doc_id in 0..max_doc {
+                    if combined_bitset.contains(doc_id) && token_bitset.contains(doc_id) {
+                        intersected.insert(doc_id);
+                    }
+                }
+                combined_bitset = intersected;
+                // Keep highlights only for docs in the intersection
+                combined_highlights.retain(|&(doc_id, _, _)| combined_bitset.contains(doc_id));
+                for &(doc_id, bf, bt) in &token_hl {
+                    if combined_bitset.contains(doc_id) {
+                        combined_highlights.push((doc_id, bf, bt));
+                    }
+                }
+            }
+
+            // Short-circuit if no docs survive
+            if combined_bitset.len() == 0 { break; }
+        }
+
+        combined_highlights.sort_by_key(|&(doc, bf, _)| (doc, bf));
+        combined_highlights.dedup();
+        return Ok((combined_bitset, combined_highlights));
+    }
+
     let (ngrams, query_positions, n) = generate_ngrams(query_text, distance);
 
     if ngrams.is_empty() {
