@@ -442,7 +442,7 @@ const MIN_LITERAL_LEN: usize = 1;
 
 /// Whether the gap between two literals needs DFA validation.
 #[derive(Debug, Clone, PartialEq)]
-enum GapKind {
+pub(super) enum GapKind {
     /// Gap is `.*` or equivalent — any text is accepted, just check order.
     AcceptAnything,
     /// Gap has constraints — needs DFA validate_path.
@@ -459,7 +459,7 @@ fn gap_accepts_anything(gap: &str) -> bool {
 /// Extract literal fragments + gap info between them.
 /// Returns (literals, gap_kinds) where gap_kinds[i] is the gap AFTER literal[i].
 /// gap_kinds.len() == literals.len() - 1 for multi-literal patterns.
-fn extract_literals_with_gaps(pattern: &str) -> (Vec<String>, Vec<GapKind>) {
+pub(super) fn extract_literals_with_gaps(pattern: &str) -> (Vec<String>, Vec<GapKind>) {
     let mut fragments: Vec<String> = Vec::new();
     let mut gaps: Vec<String> = Vec::new();
     let mut current_literal = String::new();
@@ -1034,12 +1034,10 @@ where
     use crate::suffix_fst::posmap::PosMapReader;
 
     let t_total = Instant::now();
-    let (all_literals, gap_kinds) = extract_literals_with_gaps(pattern);
-    // If ALL gaps between literals are `.*`, we can skip DFA validate_path
-    // entirely — just check that literals appear in order (which
-    // intersect_literals_ordered already guarantees).
-    let all_gaps_accept_anything = !gap_kinds.is_empty()
-        && gap_kinds.iter().all(|g| *g == GapKind::AcceptAnything);
+    // Parse regex into literals + typed gaps via regex-syntax AST.
+    let (all_literals, analyzed_gaps) = super::regex_gap_analyzer::analyze_regex(pattern);
+    // Convert to local GapKind for the has_any_constrained check
+    let has_any_dfa_gap = analyzed_gaps.iter().any(|g| matches!(g, super::regex_gap_analyzer::GapKind::DfaValidation));
 
     let viable: Vec<&String> = all_literals.iter()
         .filter(|l| l.len() >= MIN_LITERAL_LEN)
@@ -1094,6 +1092,7 @@ where
 
         all_matches[lit_idx] = matches;
     }
+
 
     let find_us = t0.elapsed().as_micros();
 
@@ -1169,22 +1168,21 @@ where
 
         let ordered = literal_resolve::intersect_literals_ordered(&grouped);
 
-        // For each ordered match, validate gap by gap.
-        // AcceptAnything gaps are free (order already verified by intersection).
-        // NeedsValidation gaps require validate_path between the two literal positions.
-        let has_any_constrained_gap = gap_kinds.iter().any(|g| *g == GapKind::NeedsValidation);
+        // Validate gap by gap. Three tiers:
+        // 1. AcceptAnything (.*) — free, order already verified
+        // 2. ByteRangeCheck ([a-z]+) — O(1) per token via ByteMap
+        // 3. DfaValidation — full validate_path with DFA
+        use super::regex_gap_analyzer::GapKind as AnalyzedGap;
 
-        if !has_any_constrained_gap {
-            // Fast path: ALL gaps are `.*` — accept all ordered matches.
+        if !has_any_dfa_gap && analyzed_gaps.iter().all(|g| matches!(g, AnalyzedGap::AcceptAnything)) {
+            // Ultra fast: all gaps are .* → accept all ordered matches
             for &(doc_id, first_bf, last_bt, _first_si) in &ordered {
                 doc_bitset.insert(doc_id);
                 highlights.push((doc_id, first_bf as usize, last_bt as usize));
             }
         } else if let Some(pm) = &posmap {
-            // Some gaps need validation. For each doc, find positions of each
-            // literal, then validate only the constrained gaps.
             'doc_loop: for &(doc_id, first_bf, last_bt, _first_si) in &ordered {
-                // Collect the position of each literal in this doc
+                // Collect positions of each literal in this doc
                 let mut lit_positions: Vec<u32> = Vec::new();
                 for (li, grp) in grouped.iter().enumerate() {
                     let pos = grp.get(&doc_id)
@@ -1194,7 +1192,6 @@ where
                             } else if li == grouped.len() - 1 {
                                 v.iter().find(|&&(_, _, bt, _)| bt == last_bt).map(|&(p, _, _, _)| p)
                             } else {
-                                // Middle literal: find a position between prev and next
                                 let prev_pos = *lit_positions.last().unwrap_or(&0);
                                 v.iter()
                                     .filter(|&&(_, bf, _, _)| bf >= first_bf)
@@ -1209,39 +1206,57 @@ where
                     }
                 }
 
-                // Validate each constrained gap
+                // Validate each gap
                 let mut valid = true;
-                for (gap_idx, gap_kind) in gap_kinds.iter().enumerate() {
-                    if *gap_kind == GapKind::AcceptAnything { continue; }
-
+                for (gap_idx, gap) in analyzed_gaps.iter().enumerate() {
+                    if gap_idx >= lit_positions.len() - 1 { break; }
                     let from_pos = lit_positions[gap_idx];
                     let to_pos = lit_positions[gap_idx + 1];
-                    if from_pos >= to_pos { continue; } // same or adjacent token
+                    if from_pos >= to_pos { continue; }
 
-                    // Feed the left literal to get DFA state, then validate_path
-                    let left_lit = &viable[gap_idx];
-                    let dfa_state = if let Some(tok_ord) = pm.ordinal_at(doc_id, from_pos) {
-                        if let Some(text) = ord_to_term(tok_ord as u64) {
-                            let offset = text.find(left_lit.as_str()).unwrap_or(0);
-                            let mut s = start_state.clone();
-                            let mut alive = true;
-                            for &byte in &text.as_bytes()[offset..] {
-                                s = automaton.accept(&s, byte);
-                                if !automaton.can_match(&s) { alive = false; break; }
+                    match gap {
+                        AnalyzedGap::AcceptAnything => {
+                            // Free — order already verified
+                        }
+                        AnalyzedGap::ByteRangeCheck(ranges) => {
+                            // ByteMap check: all intermediate tokens must have bytes in ranges
+                            if let Some(ref bm) = bytemap {
+                                if !super::regex_gap_analyzer::validate_gap_bytemap(
+                                    pm, bm, doc_id, from_pos, to_pos, ranges,
+                                ) {
+                                    valid = false;
+                                    break;
+                                }
                             }
-                            if !alive { valid = false; break; }
-                            s
-                        } else { valid = false; break; }
-                    } else { valid = false; break; };
+                            // No bytemap → skip check (conservative accept)
+                        }
+                        AnalyzedGap::DfaValidation => {
+                            // Full DFA validate_path
+                            let left_lit = &viable[gap_idx];
+                            let dfa_state = if let Some(tok_ord) = pm.ordinal_at(doc_id, from_pos) {
+                                if let Some(text) = ord_to_term(tok_ord as u64) {
+                                    let offset = text.find(left_lit.as_str()).unwrap_or(0);
+                                    let mut s = start_state.clone();
+                                    let mut alive = true;
+                                    for &byte in &text.as_bytes()[offset..] {
+                                        s = automaton.accept(&s, byte);
+                                        if !automaton.can_match(&s) { alive = false; break; }
+                                    }
+                                    if !alive { valid = false; break; }
+                                    s
+                                } else { valid = false; break; }
+                            } else { valid = false; break; };
 
-                    let result = literal_resolve::validate_path(
-                        automaton, &dfa_state, pm, sfx_reader, ord_to_term,
-                        doc_id, from_pos, to_pos,
-                        bytemap.as_ref(),
-                    );
-                    if result.is_none() {
-                        valid = false;
-                        break;
+                            let result = literal_resolve::validate_path(
+                                automaton, &dfa_state, pm, sfx_reader, ord_to_term,
+                                doc_id, from_pos, to_pos,
+                                bytemap.as_ref(),
+                            );
+                            if result.is_none() {
+                                valid = false;
+                                break;
+                            }
+                        }
                     }
                 }
 

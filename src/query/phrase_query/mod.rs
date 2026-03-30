@@ -13,6 +13,7 @@ pub mod suffix_contains_query;
 pub mod literal_resolve;
 pub mod dfa_byte_filter;
 pub mod literal_pipeline;
+pub mod regex_gap_analyzer;
 
 pub use self::automaton_phrase_query::AutomatonPhraseQuery;
 pub use self::phrase_query::PhraseQuery;
