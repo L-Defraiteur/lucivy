@@ -565,10 +565,10 @@ pub fn fuzzy_contains_via_trigram(
     posmap_data: Option<&[u8]>,
 ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>)> {
     use super::literal_resolve::{self, LiteralMatch};
+    use super::literal_pipeline;
     use crate::suffix_fst::posmap::PosMapReader;
 
     let (ngrams, query_positions, n) = generate_ngrams(query_text, distance);
-
 
     if ngrams.is_empty() {
         return Ok((BitSet::with_max_value(max_doc), Vec::new()));
@@ -578,12 +578,81 @@ pub fn fuzzy_contains_via_trigram(
     // Minimum 2 to avoid flooding with single-bigram false positives.
     let threshold = (ngrams.len() as i32 - n as i32 * distance as i32 - 1).max(2) as usize;
 
-    // Step 1: Find each n-gram via exact contains (cross-token aware)
-    let mut all_matches: Vec<Vec<LiteralMatch>> = Vec::new();
-    for gram in &ngrams {
-        let matches = literal_resolve::find_literal(sfx_reader, gram, resolver, ord_to_term);
+    // Step 1: Pipeline — estimate selectivity, resolve in order, filter progressively.
+    //
+    // Phase A: FST walk + falling walk for ALL trigrams (no resolve, quasi free).
+    //          Estimate selectivity = number of FST + cross-token candidates.
+    let mut fst_cands_per_gram: Vec<Vec<literal_pipeline::FstCandidate>> = Vec::new();
+    let mut ct_chains_per_gram: Vec<Vec<literal_pipeline::CrossTokenChain>> = Vec::new();
+    let mut selectivity: Vec<(usize, usize)> = Vec::new(); // (original_index, score)
 
-        all_matches.push(matches);
+    for (i, gram) in ngrams.iter().enumerate() {
+        let fst_cands = literal_pipeline::fst_candidates(sfx_reader, gram);
+        let ct_chains = literal_pipeline::cross_token_falling_walk(sfx_reader, gram, 0, ord_to_term);
+        let score = fst_cands.len() + ct_chains.len();
+        selectivity.push((i, score));
+        fst_cands_per_gram.push(fst_cands);
+        ct_chains_per_gram.push(ct_chains);
+    }
+
+    // Sort by selectivity ascending (rarest first)
+    selectivity.sort_by_key(|&(_, score)| score);
+
+    // Phase B: Build doc filter from the `threshold` rarest EXACT trigrams.
+    //
+    // Pigeonhole: with d edits and n-gram size n, at most n*d trigrams are
+    // broken. So at least (ngrams.len() - n*d) trigrams match exactly.
+    // The threshold guarantees that every valid doc contains >= threshold
+    // exact trigrams. We resolve those first (no filter), intersect their
+    // doc_ids, then resolve remaining trigrams only in that doc set.
+
+    let exact_grams: Vec<(usize, usize)> = selectivity.iter()
+        .filter(|&&(idx, _)| !fst_cands_per_gram[idx].is_empty() || !ct_chains_per_gram[idx].is_empty())
+        .copied()
+        .collect();
+
+    let filter_count = threshold.min(exact_grams.len());
+    let mut all_matches: Vec<Vec<LiteralMatch>> = vec![Vec::new(); ngrams.len()];
+    let mut doc_filter: Option<std::collections::HashSet<DocId>> = None;
+
+    // Step B1: Resolve the `threshold` rarest exact trigrams without filter
+    for &(gram_idx, _) in exact_grams.iter().take(filter_count) {
+        let literal_len = ngrams[gram_idx].to_lowercase().len();
+
+        let mut matches = literal_pipeline::resolve_candidates(
+            &fst_cands_per_gram[gram_idx], literal_len, resolver, None,
+        );
+        let cross_matches = literal_pipeline::resolve_chains(
+            &ct_chains_per_gram[gram_idx], literal_len, resolver, None,
+        );
+        matches.extend(cross_matches);
+
+        // Union: a valid doc must contain at least ONE of these exact trigrams
+        let gram_docs: std::collections::HashSet<DocId> = matches.iter().map(|m| m.doc_id).collect();
+        doc_filter = Some(match doc_filter {
+            None => gram_docs,
+            Some(mut prev) => { prev.extend(gram_docs); prev },
+        });
+
+        all_matches[gram_idx] = matches;
+    }
+
+    // Step B2: Resolve remaining trigrams with the doc filter
+    for &(gram_idx, _) in &selectivity {
+        if !all_matches[gram_idx].is_empty() { continue; }
+
+        let literal_len = ngrams[gram_idx].to_lowercase().len();
+        let filter_ref = doc_filter.as_ref();
+
+        let mut matches = literal_pipeline::resolve_candidates(
+            &fst_cands_per_gram[gram_idx], literal_len, resolver, filter_ref,
+        );
+        let cross_matches = literal_pipeline::resolve_chains(
+            &ct_chains_per_gram[gram_idx], literal_len, resolver, filter_ref,
+        );
+        matches.extend(cross_matches);
+
+        all_matches[gram_idx] = matches;
     }
 
     // Step 2: Filter by trigram order + threshold + byte span

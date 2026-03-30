@@ -2,6 +2,8 @@
 
 Inventaire de tout ce qui est construit pendant l'indexation et accessible au query time.
 
+Mis à jour : 29 mars 2026
+
 ## Fichiers par segment
 
 ### `.sfx` — Suffix FST + métadonnées
@@ -22,6 +24,11 @@ Fichier principal du SFX. Contient 4 sections :
 | | | `num_tokens(doc_id)` → u32 |
 | | | Retourne `None` si VALUE_BOUNDARY (cross-value) |
 
+**Note** : gapmap et sibling sont aussi écrits en fichiers séparés via le
+registre (`.gapmap`, `.sibling`). Le .sfx les contient encore inline pour
+backward compat. Migration à terme : les queries liront les fichiers séparés
+et le .sfx ne contiendra plus que FST + parent list.
+
 ### `.sfxpost` — Posting index (ordinal → documents)
 
 Index inversé ordinal → postings avec doc_ids triés pour binary search.
@@ -33,7 +40,7 @@ Index inversé ordinal → postings avec doc_ids triés pour binary search.
 | `has_doc(ordinal, doc_id)` | O(log n) | Existence d'un doc pour cet ordinal. **Zéro décodage payload.** |
 | `doc_freq(ordinal)` | O(1) | Nombre de docs uniques. Juste lire le header. |
 
-### `.posmap` — Position-to-ordinal map (NOUVEAU)
+### `.posmap` — Position-to-ordinal map
 
 Reverse du posting index. Pour chaque (doc_id, position) → ordinal du token.
 
@@ -43,9 +50,10 @@ Reverse du posting index. Pour chaque (doc_id, position) → ordinal du token.
 | `ordinals_range(doc_id, pos_from, pos_to)` | O(distance) | Tous les ordinals dans une plage de positions |
 | `num_tokens(doc_id)` | O(1) | Nombre de tokens dans le doc |
 
-**Usage principal** : regex cross-token — au lieu d'explorer les siblings à l'aveugle (Phase 3c), lire les ordinals entre deux positions connues et feeder le DFA. O(distance) au lieu de O(64 × siblings).
+**Usage** : fuzzy DFA validation (concat tokens autour du match candidat),
+regex cross-token validation (lire ordinals entre deux positions).
 
-### `.bytemap` — Byte presence bitmap (NOUVEAU)
+### `.bytemap` — Byte presence bitmap
 
 256 bits (32 bytes) par ordinal : quels byte values apparaissent dans le texte du token.
 
@@ -56,12 +64,16 @@ Reverse du posting index. Pour chaque (doc_id, position) → ordinal du token.
 | `all_bytes_in_range(ordinal, lo, hi)` | O(popcount) | Tous les bytes du token sont dans [lo, hi] ? |
 | `contains_all_bytes(ordinal, &[bytes])` | O(k) | Le token contient tous ces bytes ? |
 
-**Usage principal** : pré-filtre regex — avant de feeder un token au DFA, vérifier que ses bytes sont compatibles avec le pattern. Ex: `[a-z]+` → `all_bytes_in_range(ord, b'a', b'z')`.
+**Usage** : pré-filtre regex — avant de feeder un token au DFA, vérifier que
+ses bytes sont compatibles avec le pattern. Ex: `[a-z]+` →
+`all_bytes_in_range(ord, b'a', b'z')`.
 
-### `.termtexts` — Token texts par ordinal SFX (PLANIFIÉ, PAS ENCORE IMPLÉMENTÉ)
+**Pas encore utilisé** par le regex path actuel. Optimisation à implémenter.
 
-Lookup O(1) ordinal SFX → texte du token. **Nécessaire** car les ordinals
-SFX ≠ ordinals du term dict tantivy (voir bug critique doc 08).
+### `.termtexts` — Token texts par ordinal SFX
+
+Lookup O(1) ordinal SFX → texte du token. **Requis** pour toutes les fonctions
+cross-token (contient les textes dans l'espace d'ordinals SFX, pas tantivy).
 
 | Méthode | Complexité | Description |
 |---|---|---|
@@ -70,14 +82,23 @@ SFX ≠ ordinals du term dict tantivy (voir bug critique doc 08).
 
 Format : `TTXT` header + offset table u32 + textes concaténés UTF-8.
 
-**⚠ SANS CE FICHIER, toutes les fonctions cross-token qui utilisent
-`ord_to_term()` du term dict tantivy sont CASSÉES** (ordinal mismatch).
+**Si absent** : erreur explicite. Pas de fallback sur le term dict tantivy
+(ordinal mismatch → résultats incorrects).
 
-### Fichiers standard (hérités tantivy)
+### `.gapmap` / `.sibling` — Fichiers séparés du registre
+
+Copies des données gapmap et sibling du .sfx, écrites comme fichiers séparés
+via le registre. Pas encore lues par les queries (qui utilisent encore
+`sfx_reader.gapmap()` et `sfx_reader.sibling_table()`).
+
+**Migration prévue** : les queries liront `sfx_index_file("gapmap", field)` et
+`sfx_index_file("sibling", field)` au lieu de passer par le .sfx.
+
+### Fichiers standard (hérités)
 
 | Fichier | Description |
 |---|---|
-| `.term` | Term dictionary tantivy — **⚠ SES ORDINALS ≠ ORDINALS SFX**. Ne PAS utiliser `ord_to_term()` avec des ordinals SFX. |
+| `.term` | Term dictionary — **ses ordinals ≠ ordinals SFX**. Ne PAS utiliser `ord_to_term()` avec des ordinals SFX. |
 | `.pos` | Positions dans les postings standard |
 | `.store` | Stored fields (texte original complet) |
 | `.fast` | Fast fields (valeurs numériques) |
@@ -88,30 +109,32 @@ Format : `TTXT` header + offset table u32 + textes concaténés UTF-8.
 ```
 prefix_walk(query) → parents → resolve → matches
 ```
-**Requiert** : SuffixFst, SuffixPost
+**Requiert** : SuffixFst, SfxPost
 
 ### Exact contains (cross-token via sibling links)
 ```
 1. prefix_walk(query) → essaie single-token d'abord
 2. Si 0 résultat → falling_walk(query) → split candidates
 3. sibling_table[ordinal] → successeurs contigus (gap=0)
-4. ord_to_term(next_ord) → texte du token suivant    ⚠ CASSÉ (ordinal mismatch)
-5. remainder.starts_with(next_text) → chaîner ou terminal
-6. Resolve les ordinals de la chaîne valide
-7. Adjacency check via byte continuity
+4. DFS worklist : explore TOUTES les branches de siblings
+5. ord_to_term(next_ord) via TermTexts → texte du token suivant
+6. remainder.starts_with(next_text) → chaîner ou terminal
+7. Resolve les ordinals de la chaîne valide
+8. Adjacency check via byte continuity
 ```
-**Requiert** : SuffixFst, SuffixPost, SiblingTable, TermTexts (⚠ pas encore implémenté)
+**Requiert** : SuffixFst, SfxPost, SiblingTable, TermTexts
 
 ### Fuzzy contains d>0 (via trigram pigeonhole)
 ```
 1. generate_ngrams(query, distance) → bigrammes/trigrammes
 2. find_literal(ngram) → matches per-doc via SFX cross-token
-3. intersect_trigrams_with_threshold → candidats filtrés
-4. Build concat text (tokens via PosMap + ord_to_term)    ⚠ CASSÉ (ordinal mismatch)
-5. DFA Levenshtein validation sur le texte concaténé
-6. Highlight via token mapping
+3. intersect_trigrams_with_threshold → candidats filtrés (+ si propagé)
+4. Build concat text (tokens via PosMap + ord_to_term via TermTexts)
+5. DFA Levenshtein sliding window sur le concat
+6. Byte-exact highlight mapping via content_byte_starts table
+   (ancre = first_bf - first_si = token start dans le content)
 ```
-**Requiert** : SuffixFst, SuffixPost, PosMap, TermTexts (⚠ pas encore implémenté)
+**Requiert** : SuffixFst, SfxPost, PosMap, TermTexts, GapMap
 
 ### Regex contains
 ```
@@ -119,11 +142,12 @@ prefix_walk(query) → parents → resolve → matches
 2. find_literal(lit) → matches via SFX cross-token
 3. Multi-literal intersection + position ordering
 4. PosMap: lire ordinals entre les positions
-5. ord_to_term + GapMap: reconstruire le texte    ⚠ CASSÉ (ordinal mismatch)
+5. ord_to_term via TermTexts + GapMap: reconstruire le texte
 6. Feed DFA regex sur le texte reconstruit
-7. ByteBitmap: pré-filtre rapide sur chaque token
+7. ByteBitmap: pré-filtre rapide sur chaque token (PAS ENCORE UTILISÉ)
 ```
-**Requiert** : SuffixFst, SuffixPost, PosMap, TermTexts (⚠ pas encore implémenté), ByteMap
+**Requiert** : SuffixFst, SfxPost, PosMap, TermTexts, GapMap
+**Optionnel** : ByteMap (pré-filtre, pas encore câblé)
 
 ### BM25 prescan (DAG)
 ```
@@ -133,18 +157,69 @@ BuildWeightNode → injecte dans le Weight avant compilation
 ```
 Cache : `CachedRegexResult { doc_tf, highlights }` per segment.
 
-## ⚠ Bug critique : ordinal mismatch (doc 08)
+## Registre SfxIndexFile
 
-**TOUS les paths cross-token qui utilisent `ord_to_term()` du term dict
-tantivy sont CASSÉS.** Les ordinals SFX ≠ ordinals term dict.
+Toutes les structures ci-dessus (sauf .sfx lui-même) sont gérées par le
+registre (`all_indexes()` dans `index_registry.rs`). Ajouter un nouveau
+fichier d'index = 1 struct + impl `SfxIndexFile`.
 
-Le fix planifié : fichier `.termtexts` (voir ci-dessus) qui stocke les
-textes dans l'espace d'ordinals SFX.
+Le registre garantit :
+- **Build** : appelé automatiquement par `SfxCollector::build()`
+- **Merge** : doit être fait dans TOUS les chemins de merge (segment_writer,
+  merger.rs N-way, merger.rs fallback, sfx_dag.rs WriteSfxNode)
+- **GC** : `all_components()` protège automatiquement les fichiers
+- **Load** : `load_sfx_files()` charge automatiquement via `open_read_custom`
 
-**Fonctions impactées** : `cross_token_search_with_terms`,
-`find_literal`, `validate_path`, `fuzzy_contains_via_trigram`,
-`regex_contains_via_literal`, `run_sfx_walk`, `run_regex_prescan`,
-`run_fuzzy_prescan`.
+## Optimisations possibles
+
+### 1. ByteMap pré-filtre pour regex (pas encore câblé)
+
+Le `.bytemap` est construit et stocké mais jamais utilisé par le regex path.
+Avant de feeder chaque token au DFA regex, on pourrait vérifier que ses bytes
+sont compatibles avec le pattern. Pour `[a-z]+`, ça éliminerait tous les tokens
+avec des chiffres ou ponctuation sans même lancer le DFA.
+
+**Impact estimé** : réduction 30-50% du temps DFA pour les regex restrictifs.
+
+### 2. PosMap pré-filtre pour fuzzy
+
+Le fuzzy actuel construit un concat de tokens autour du candidat trigram et
+lance un DFA sliding window sur tout le concat. On pourrait d'abord vérifier
+via PosMap que les tokens dans la fenêtre contiennent les bytes attendus
+(via ByteMap) avant de construire le concat.
+
+### 3. Threshold adaptatif pour queries courtes
+
+Bug E de doc 12 : `threshold = max(2, computed)`. Pour queries ≤ 4 chars
+avec d=1, le threshold est trop haut (2 bigrams doivent matcher, mais 1 peut
+être cassé par l'edit). Fix : `threshold = max(1, computed)` pour queries
+courtes.
+
+### 4. Anchor tie-breaking pour fuzzy DFA
+
+Bug A de doc 12 : le DFA sliding window prend le match avec le plus petit
+`global_best_diff`. Mais si deux positions ont le même diff, il prend la
+première (itération séquentielle). Pas de préférence pour la position la plus
+proche du trigram anchor. Impact faible car le concat est petit (~8 tokens).
+
+### 5. Migrer gapmap/sibling vers fichiers séparés
+
+Les queries lisent encore `sfx_reader.gapmap()` et `sfx_reader.sibling_table()`
+(inline dans le .sfx). Migrer vers `sfx_index_file("gapmap", field)` et
+`sfx_index_file("sibling", field)`. Ensuite supprimer gapmap/sibling du .sfx
+pour réduire sa taille.
+
+### 6. Supprimer les méthodes legacy du serializer
+
+`write_sfxpost()`, `write_posmap()`, `write_bytemap()` dans
+`segment_serializer.rs` ne sont plus utilisées (tout passe par
+`write_custom_index`). À supprimer dans un cleanup.
+
+### 7. Unifier les chemins de merge via le registre
+
+Les 3 chemins de merge (merger.rs N-way, merger.rs fallback, sfx_dag.rs)
+reconstruisent chacun les fichiers manuellement. Idéalement ils utiliseraient
+`SfxIndexFile::merge()` du registre. Refactor futur.
 
 ## Tailles estimées
 
@@ -156,4 +231,5 @@ textes dans l'espace d'ordinals SFX.
 | GapMap | ~200 KB | ~1 MB | ~15 MB |
 | PosMap | ~344 KB | ~2 MB | ~72 MB |
 | ByteBitmap | ~160 KB | ~800 KB | ~5 MB |
-| **Total SFX** | **~1.5 MB** | **~7.4 MB** | **~143 MB** |
+| TermTexts | ~50 KB | ~250 KB | ~3 MB |
+| **Total SFX** | **~1.6 MB** | **~7.7 MB** | **~146 MB** |
