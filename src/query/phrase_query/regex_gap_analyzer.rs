@@ -251,8 +251,11 @@ fn byte_in_ranges(byte: u8, ranges: &[(u8, u8)]) -> bool {
 /// have all its bytes within the given ranges. Separator bytes are checked
 /// via SepMap (O(1) per ordinal) instead of GapMap (O(1) per doc×position).
 ///
-/// If `sepmap` is provided, checks that separator bytes after each token
-/// are within the ranges. If not provided, only checks token bytes.
+/// Returns:
+/// - Some(true) if validated (all bytes in range)
+/// - Some(false) if invalidated (byte out of range)
+/// - None if inconclusive (no intermediate tokens to check — the gap is
+///   intra-token and needs DFA validation)
 pub fn validate_gap_bytemap(
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
     bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
@@ -261,36 +264,35 @@ pub fn validate_gap_bytemap(
     pos_from: u32,
     pos_to: u32,
     ranges: &[(u8, u8)],
-) -> bool {
+) -> Option<bool> {
+    // If no intermediate tokens (adjacent or same token), the gap is
+    // intra-token — bytemap can't validate, needs DFA.
+    if pos_to <= pos_from + 1 {
+        return None; // inconclusive
+    }
+
     let mut prev_ord: Option<u32> = posmap.ordinal_at(doc_id, pos_from);
 
     for pos in (pos_from + 1)..pos_to {
         // Check separator bytes via SepMap (global bitmap, O(1))
-        // The SepMap for the PREVIOUS token tells us what separator bytes
-        // have been observed after it. If any are outside the ranges,
-        // AND the token has never been contiguous (gap=0), reject.
         if let (Some(sm), Some(prev)) = (sepmap, prev_ord) {
             if !sm.sep_bytes_in_ranges(prev, ranges) {
-                // Separator bytes are outside ranges. But if contiguous
-                // transitions exist (gap=0), the match might still work
-                // in docs where the tokens are contiguous.
                 if !sm.has_contiguous(prev) {
-                    return false; // never contiguous → impossible
+                    return Some(false); // never contiguous → impossible
                 }
-                // Has contiguous → can't reject globally, would need
-                // per-doc GapMap check. For now, accept conservatively.
+                // Has contiguous → can't reject globally, accept conservatively.
             }
         }
 
         // Check token bytes via bytemap
         if let Some(ord) = posmap.ordinal_at(doc_id, pos) {
             if !token_bytes_in_ranges(bytemap, ord, ranges) {
-                return false;
+                return Some(false);
             }
             prev_ord = Some(ord);
         }
     }
-    true
+    Some(true)
 }
 
 #[cfg(test)]

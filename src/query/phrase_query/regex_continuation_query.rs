@@ -1180,7 +1180,8 @@ where
         // 3. DfaValidation — full validate_path with DFA
         use super::regex_gap_analyzer::GapKind as AnalyzedGap;
 
-        if !has_any_dfa_gap && analyzed_gaps.iter().all(|g| matches!(g, AnalyzedGap::AcceptAnything)) {
+        let all_accept = !has_any_dfa_gap && analyzed_gaps.iter().all(|g| matches!(g, AnalyzedGap::AcceptAnything));
+        if all_accept {
             // Ultra fast: all gaps are .* → accept all ordered matches
             for &(doc_id, first_bf, last_bt, _first_si) in &ordered {
                 doc_bitset.insert(doc_id);
@@ -1225,16 +1226,45 @@ where
                             // Free — order already verified
                         }
                         AnalyzedGap::ByteRangeCheck(ranges) => {
-                            // ByteMap check: all intermediate tokens must have bytes in ranges
-                            if let Some(ref bm) = bytemap {
-                                if !super::regex_gap_analyzer::validate_gap_bytemap(
+                            // Try ByteMap+SepMap check first (O(1) per token)
+                            let bytemap_result = if let Some(ref bm) = bytemap {
+                                super::regex_gap_analyzer::validate_gap_bytemap(
                                     pm, bm, sepmap.as_ref(), doc_id, from_pos, to_pos, ranges,
-                                ) {
-                                    valid = false;
-                                    break;
+                                )
+                            } else {
+                                None // no bytemap → inconclusive
+                            };
+                            match bytemap_result {
+                                Some(false) => { valid = false; break; } // rejected
+                                Some(true) => {} // validated
+                                None => {
+                                    // Inconclusive (adjacent/same token) → fallback DFA
+                                    let left_lit = &viable[gap_idx];
+                                    let dfa_state = if let Some(tok_ord) = pm.ordinal_at(doc_id, from_pos) {
+                                        if let Some(text) = ord_to_term(tok_ord as u64) {
+                                            let offset = text.find(left_lit.as_str()).unwrap_or(0);
+                                            let mut s = start_state.clone();
+                                            let mut alive = true;
+                                            for &byte in &text.as_bytes()[offset..] {
+                                                s = automaton.accept(&s, byte);
+                                                if !automaton.can_match(&s) { alive = false; break; }
+                                            }
+                                            if !alive { valid = false; break; }
+                                            s
+                                        } else { valid = false; break; }
+                                    } else { valid = false; break; };
+
+                                    let result = literal_resolve::validate_path(
+                                        automaton, &dfa_state, pm, sfx_reader, ord_to_term,
+                                        doc_id, from_pos, to_pos,
+                                        bytemap.as_ref(),
+                                    );
+                                    if result.is_none() {
+                                        valid = false;
+                                        break;
+                                    }
                                 }
                             }
-                            // No bytemap → skip check (conservative accept)
                         }
                         AnalyzedGap::DfaValidation => {
                             // Full DFA validate_path
