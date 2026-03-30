@@ -241,18 +241,41 @@ pub fn token_bytes_in_ranges(
     true
 }
 
+/// Check if a single byte falls within any of the given ranges.
+fn byte_in_ranges(byte: u8, ranges: &[(u8, u8)]) -> bool {
+    ranges.iter().any(|&(lo, hi)| byte >= lo && byte <= hi)
+}
+
 /// Validate a ByteRangeCheck gap between two positions.
 /// Every token between pos_from (exclusive) and pos_to (exclusive) must
-/// have all its bytes within the given ranges.
+/// have all its bytes within the given ranges. Additionally, the separator
+/// bytes between tokens (from GapMap) must also be in the ranges — otherwise
+/// the regex pattern `[a-z]+` would incorrectly match across newlines,
+/// punctuation, etc.
 pub fn validate_gap_bytemap(
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
     bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
+    gapmap: &crate::suffix_fst::gapmap::GapMapReader<'_>,
     doc_id: crate::DocId,
     pos_from: u32,
     pos_to: u32,
     ranges: &[(u8, u8)],
 ) -> bool {
     for pos in (pos_from + 1)..pos_to {
+        // Check separator bytes between previous token and this one
+        let gap = gapmap.read_separator(doc_id, pos - 1, pos);
+        if let Some(gap_bytes) = gap {
+            if crate::suffix_fst::gapmap::is_value_boundary(gap_bytes) {
+                return false; // cross-value boundary
+            }
+            for &byte in gap_bytes {
+                if !byte_in_ranges(byte, ranges) {
+                    return false; // separator byte not in allowed ranges
+                }
+            }
+        }
+
+        // Check token bytes via bytemap
         if let Some(ord) = posmap.ordinal_at(doc_id, pos) {
             if !token_bytes_in_ranges(bytemap, ord, ranges) {
                 return false;
