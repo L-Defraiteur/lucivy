@@ -776,6 +776,22 @@ pub fn fuzzy_contains_via_trigram(
 
 
     // Step 3: Validate each candidate with Levenshtein DFA via PosMap
+    // For d>=3, skip DFA entirely — the Levenshtein DFA has huge state space
+    // and the trigram intersection is sufficient at this distance level.
+    if distance >= 3 {
+        let mut doc_bitset = BitSet::with_max_value(max_doc);
+        let mut highlights: Vec<(DocId, usize, usize)> = Vec::new();
+        for &(doc_id, first_bf, _last_bt, first_tri_idx, first_si, _) in &candidates {
+            doc_bitset.insert(doc_id);
+            let hl_start = (first_bf as usize).saturating_sub(query_positions[first_tri_idx] + first_si as usize);
+            let hl_end = hl_start + query_text.len() + distance as usize;
+            highlights.push((doc_id, hl_start, hl_end));
+        }
+        highlights.sort_by_key(|&(doc, bf, bt)| (doc, bf, bt));
+        highlights.dedup();
+        return Ok((doc_bitset, highlights));
+    }
+
     let builder = get_builder(distance);
     let dfa = if prefix {
         builder.build_prefix_dfa(&query_text.to_lowercase())
