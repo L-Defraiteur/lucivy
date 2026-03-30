@@ -25,6 +25,8 @@ pub struct SfxBuildContext<'a> {
     pub gapmap_data: Option<&'a [u8]>,
     /// Pre-built sibling table data (built by collector during indexation).
     pub sibling_data: Option<&'a [u8]>,
+    /// Pre-built separator bytemap data (built by collector during indexation).
+    pub sepmap_data: Option<&'a [u8]>,
 }
 
 /// Data available during merge.
@@ -83,6 +85,7 @@ pub fn all_indexes() -> Vec<Box<dyn SfxIndexFile>> {
         Box::new(super::posmap::PosMapIndex),
         Box::new(super::bytemap::ByteMapIndex),
         Box::new(super::termtexts::TermTextsIndex),
+        Box::new(super::sepmap::SepMapIndex),
     ]
 }
 

@@ -260,17 +260,20 @@ pub fn validate_gap_bytemap(
     pos_from: u32,
     pos_to: u32,
     ranges: &[(u8, u8)],
+    check_separators: bool,
 ) -> bool {
     for pos in (pos_from + 1)..pos_to {
         // Check separator bytes between previous token and this one
-        let gap = gapmap.read_separator(doc_id, pos - 1, pos);
-        if let Some(gap_bytes) = gap {
-            if crate::suffix_fst::gapmap::is_value_boundary(gap_bytes) {
-                return false; // cross-value boundary
-            }
-            for &byte in gap_bytes {
-                if !byte_in_ranges(byte, ranges) {
-                    return false; // separator byte not in allowed ranges
+        if check_separators {
+            let gap = gapmap.read_separator(doc_id, pos - 1, pos);
+            if let Some(gap_bytes) = gap {
+                if crate::suffix_fst::gapmap::is_value_boundary(gap_bytes) {
+                    return false;
+                }
+                for &byte in gap_bytes {
+                    if !byte_in_ranges(byte, ranges) {
+                        return false;
+                    }
                 }
             }
         }

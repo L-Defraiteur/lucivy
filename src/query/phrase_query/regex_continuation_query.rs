@@ -1223,7 +1223,7 @@ where
                             if let Some(ref bm) = bytemap {
                                 let gm = sfx_reader.gapmap();
                                 if !super::regex_gap_analyzer::validate_gap_bytemap(
-                                    pm, bm, gm, doc_id, from_pos, to_pos, ranges,
+                                    pm, bm, gm, doc_id, from_pos, to_pos, ranges, true,
                                 ) {
                                     valid = false;
                                     break;

@@ -5,6 +5,7 @@ use super::bytemap::ByteBitmapWriter;
 use super::file::SfxFileWriter;
 use super::gapmap::GapMapWriter;
 use super::posmap::PosMapWriter;
+use super::sepmap::SepMapWriter;
 use super::sibling_table::SiblingTableWriter;
 
 /// Output of SfxCollector::build(). The `.sfx` file is always produced.
@@ -41,6 +42,8 @@ pub struct SfxCollector {
     token_postings: Vec<Vec<(u32, u32, u32, u32)>>,
     // Per-segment: gap map writer
     gapmap_writer: GapMapWriter,
+    // Per-segment: separator bytemap writer (which sep bytes after each token ordinal)
+    sepmap_writer: SepMapWriter,
     // Sibling pairs: (intern_id, next_intern_id) → set of gap_len values observed.
     // Deduplicated: same pair with same gap_len stored only once.
     sibling_pairs: HashMap<(u32, u32), HashSet<u16>>,
@@ -90,6 +93,7 @@ impl SfxCollector {
             token_texts: Vec::new(),
             token_postings: Vec::new(),
             gapmap_writer: GapMapWriter::new(),
+            sepmap_writer: SepMapWriter::new(),
             sibling_pairs: HashMap::new(),
             doc_values: Vec::new(),
             doc_active: false,
@@ -178,10 +182,14 @@ impl SfxCollector {
                 let prev_end = tokens[i - 1].offset_to;
                 let curr_start = tokens[i].offset_from;
                 if prev_end <= curr_start && curr_start <= text_bytes.len() {
-                    gaps.push(text_bytes[prev_end..curr_start].to_vec());
+                    let gap_bytes = &text_bytes[prev_end..curr_start];
+                    gaps.push(gap_bytes.to_vec());
+                    // Record separator bytes in the SepMap (indexed by the LEFT token's ordinal)
+                    self.sepmap_writer.record_gap(tokens[i - 1].intern_id, gap_bytes);
                 } else {
                     // Overlapping or out-of-order offsets: empty gap.
                     gaps.push(Vec::new());
+                    self.sepmap_writer.record_contiguous(tokens[i - 1].intern_id);
                 }
             }
 
@@ -288,6 +296,16 @@ impl SfxCollector {
             }
         }
         let sibling_data = sibling_writer.serialize();
+
+        // Build remapped SepMap: intern ordinals → final ordinals
+        let mut final_sepmap_writer = SepMapWriter::new();
+        final_sepmap_writer.ensure_capacity(num_terms);
+        for (intern_ord, bitmap) in self.sepmap_writer.bitmaps_ref().iter().enumerate() {
+            let final_ord = intern_to_final[intern_ord];
+            final_sepmap_writer.or_bitmap(final_ord, bitmap);
+        }
+        let sepmap_data = final_sepmap_writer.serialize();
+
         #[cfg(feature = "sfx-profile")]
         let sibling_ms = t0.elapsed().as_millis();
 
@@ -315,6 +333,7 @@ impl SfxCollector {
             num_docs: self.gapmap_writer.num_docs() as u32,
             gapmap_data: Some(&gapmap_data),
             sibling_data: Some(&sibling_data),
+            sepmap_data: Some(&sepmap_data),
         };
 
         let mut registry_files = Vec::new();

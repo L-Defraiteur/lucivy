@@ -495,10 +495,17 @@ fn test_fuzzy_ground_truth() {
             }
         }
 
-        // Check recall
+        // Check recall (filter out duplicate-content files that can't be mapped)
         let mut missed = Vec::new();
         for (&doc_idx, matches) in &ground_truth {
             if !found_doc_indices.contains(&doc_idx) {
+                // Check if this is a duplicate file (hash maps to different index)
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                files[doc_idx].1.hash(&mut h);
+                if file_content_map.get(&h.finish()) != Some(&doc_idx) {
+                    continue; // duplicate content, not a real miss
+                }
                 let path = &files[doc_idx].0;
                 let match_strs: Vec<String> = matches.iter().map(|(s, d)| format!("\"{}\"(d={})", s, d)).collect();
                 missed.push(format!("  MISSED [{}] {} : {}", doc_idx, path, match_strs.join(", ")));
