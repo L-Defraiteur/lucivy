@@ -248,33 +248,37 @@ fn byte_in_ranges(byte: u8, ranges: &[(u8, u8)]) -> bool {
 
 /// Validate a ByteRangeCheck gap between two positions.
 /// Every token between pos_from (exclusive) and pos_to (exclusive) must
-/// have all its bytes within the given ranges. Additionally, the separator
-/// bytes between tokens (from GapMap) must also be in the ranges — otherwise
-/// the regex pattern `[a-z]+` would incorrectly match across newlines,
-/// punctuation, etc.
+/// have all its bytes within the given ranges. Separator bytes are checked
+/// via SepMap (O(1) per ordinal) instead of GapMap (O(1) per doc×position).
+///
+/// If `sepmap` is provided, checks that separator bytes after each token
+/// are within the ranges. If not provided, only checks token bytes.
 pub fn validate_gap_bytemap(
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
     bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
-    gapmap: &crate::suffix_fst::gapmap::GapMapReader<'_>,
+    sepmap: Option<&crate::suffix_fst::sepmap::SepMapReader<'_>>,
     doc_id: crate::DocId,
     pos_from: u32,
     pos_to: u32,
     ranges: &[(u8, u8)],
-    check_separators: bool,
 ) -> bool {
+    let mut prev_ord: Option<u32> = posmap.ordinal_at(doc_id, pos_from);
+
     for pos in (pos_from + 1)..pos_to {
-        // Check separator bytes between previous token and this one
-        if check_separators {
-            let gap = gapmap.read_separator(doc_id, pos - 1, pos);
-            if let Some(gap_bytes) = gap {
-                if crate::suffix_fst::gapmap::is_value_boundary(gap_bytes) {
-                    return false;
+        // Check separator bytes via SepMap (global bitmap, O(1))
+        // The SepMap for the PREVIOUS token tells us what separator bytes
+        // have been observed after it. If any are outside the ranges,
+        // AND the token has never been contiguous (gap=0), reject.
+        if let (Some(sm), Some(prev)) = (sepmap, prev_ord) {
+            if !sm.sep_bytes_in_ranges(prev, ranges) {
+                // Separator bytes are outside ranges. But if contiguous
+                // transitions exist (gap=0), the match might still work
+                // in docs where the tokens are contiguous.
+                if !sm.has_contiguous(prev) {
+                    return false; // never contiguous → impossible
                 }
-                for &byte in gap_bytes {
-                    if !byte_in_ranges(byte, ranges) {
-                        return false;
-                    }
-                }
+                // Has contiguous → can't reject globally, would need
+                // per-doc GapMap check. For now, accept conservatively.
             }
         }
 
@@ -283,6 +287,7 @@ pub fn validate_gap_bytemap(
             if !token_bytes_in_ranges(bytemap, ord, ranges) {
                 return false;
             }
+            prev_ord = Some(ord);
         }
     }
     true

@@ -80,6 +80,9 @@ pub fn run_regex_prescan(
     let bytemap_bytes = reader.bytemap_file(field)
         .and_then(|d| d.read_bytes().ok())
         .map(|b| b.as_ref().to_vec());
+    let sepmap_bytes = reader.sfx_index_file("sepmap", field)
+        .and_then(|d| d.read_bytes().ok())
+        .map(|b| b.as_ref().to_vec());
 
     let regex = Regex::new(pattern).map_err(|e| {
         LucivyError::InvalidArgument(format!("RegexContinuation: {e}"))
@@ -91,6 +94,7 @@ pub fn run_regex_prescan(
         mode, reader.max_doc(), &ord_to_term_fn,
         posmap_bytes.as_deref(),
         bytemap_bytes.as_deref(),
+        sepmap_bytes.as_deref(),
     )?;
 
     let doc_tf = highlights_to_doc_tf(&highlights);
@@ -1024,11 +1028,13 @@ pub fn regex_contains_via_literal<A: Automaton>(
     ord_to_term: &dyn Fn(u64) -> Option<String>,
     posmap_data: Option<&[u8]>,
     bytemap_data: Option<&[u8]>,
+    sepmap_data: Option<&[u8]>,
 ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>)>
 where
     A::State: Clone + Eq + std::hash::Hash,
 {
     let bytemap = bytemap_data.and_then(crate::suffix_fst::bytemap::ByteBitmapReader::open);
+    let sepmap = sepmap_data.and_then(crate::suffix_fst::sepmap::SepMapReader::open);
     use super::literal_resolve::{self, LiteralMatch};
     use std::time::Instant;
     use crate::suffix_fst::posmap::PosMapReader;
@@ -1221,9 +1227,8 @@ where
                         AnalyzedGap::ByteRangeCheck(ranges) => {
                             // ByteMap check: all intermediate tokens must have bytes in ranges
                             if let Some(ref bm) = bytemap {
-                                let gm = sfx_reader.gapmap();
                                 if !super::regex_gap_analyzer::validate_gap_bytemap(
-                                    pm, bm, gm, doc_id, from_pos, to_pos, ranges, true,
+                                    pm, bm, sepmap.as_ref(), doc_id, from_pos, to_pos, ranges,
                                 ) {
                                     valid = false;
                                     break;
@@ -1698,6 +1703,9 @@ impl RegexContinuationWeight {
                 let bytemap_bytes = reader.bytemap_file(self.field)
                     .and_then(|data| data.read_bytes().ok())
                     .map(|b| b.as_ref().to_vec());
+                let sepmap_bytes = reader.sfx_index_file("sepmap", self.field)
+                    .and_then(|data| data.read_bytes().ok())
+                    .map(|b| b.as_ref().to_vec());
 
                 let regex = Regex::new(pattern).map_err(|e| {
                     LucivyError::InvalidArgument(format!("RegexContinuation: {e}"))
@@ -1710,6 +1718,7 @@ impl RegexContinuationWeight {
                         self.mode, max_doc, &ord_to_term_fn,
                         posmap_bytes.as_deref(),
                         bytemap_bytes.as_deref(),
+                        sepmap_bytes.as_deref(),
                     )?
                 } else {
                     continuation_score(
