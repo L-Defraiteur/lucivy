@@ -440,6 +440,112 @@ struct SiblingCandidateState<S> {
 /// Below this threshold, prefix_walk returns too many candidates.
 const MIN_LITERAL_LEN: usize = 1;
 
+/// Whether the gap between two literals needs DFA validation.
+#[derive(Debug, Clone, PartialEq)]
+enum GapKind {
+    /// Gap is `.*` or equivalent — any text is accepted, just check order.
+    AcceptAnything,
+    /// Gap has constraints — needs DFA validate_path.
+    NeedsValidation,
+}
+
+/// Check if a regex gap pattern accepts any string (e.g. `.*`, `.+`, `.*?`, etc.)
+fn gap_accepts_anything(gap: &str) -> bool {
+    let trimmed = gap.trim();
+    // Common "accept anything" patterns
+    matches!(trimmed, ".*" | ".+" | ".*?" | ".+?" | "(.*)" | "(.+)" | "")
+}
+
+/// Extract literal fragments + gap info between them.
+/// Returns (literals, gap_kinds) where gap_kinds[i] is the gap AFTER literal[i].
+/// gap_kinds.len() == literals.len() - 1 for multi-literal patterns.
+fn extract_literals_with_gaps(pattern: &str) -> (Vec<String>, Vec<GapKind>) {
+    let mut fragments: Vec<String> = Vec::new();
+    let mut gaps: Vec<String> = Vec::new();
+    let mut current_literal = String::new();
+    let mut current_gap = String::new();
+    let mut in_gap = false;
+    let bytes = pattern.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'\\' if i + 1 < bytes.len() => {
+                let next = bytes[i + 1];
+                if matches!(next, b'.' | b'[' | b']' | b'(' | b')' | b'{' | b'}'
+                    | b'|' | b'^' | b'$' | b'\\' | b'*' | b'+' | b'?') {
+                    if in_gap {
+                        // Escaped literal char ends the gap
+                        in_gap = false;
+                        if !current_literal.is_empty() || !fragments.is_empty() {
+                            gaps.push(std::mem::take(&mut current_gap));
+                        }
+                    }
+                    current_literal.push(next as char);
+                    i += 2;
+                } else {
+                    if !current_literal.is_empty() {
+                        fragments.push(std::mem::take(&mut current_literal));
+                        in_gap = true;
+                    }
+                    current_gap.push(b as char);
+                    current_gap.push(next as char);
+                    i += 2;
+                }
+            }
+            b'[' => {
+                if !current_literal.is_empty() {
+                    fragments.push(std::mem::take(&mut current_literal));
+                    in_gap = true;
+                }
+                // Capture the whole character class in the gap
+                current_gap.push(b as char);
+                i += 1;
+                while i < bytes.len() && bytes[i] != b']' {
+                    current_gap.push(bytes[i] as char);
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    current_gap.push(bytes[i] as char);
+                    i += 1;
+                }
+            }
+            b'.' | b'*' | b'+' | b'?' | b'(' | b')'
+            | b'{' | b'}' | b'|' | b'^' | b'$'
+            | b' ' | b'\t' | b'\n' | b'\r' => {
+                if !current_literal.is_empty() {
+                    fragments.push(std::mem::take(&mut current_literal));
+                    in_gap = true;
+                }
+                current_gap.push(b as char);
+                i += 1;
+            }
+            _ => {
+                if in_gap {
+                    in_gap = false;
+                    if !fragments.is_empty() {
+                        gaps.push(std::mem::take(&mut current_gap));
+                    } else {
+                        current_gap.clear();
+                    }
+                }
+                current_literal.push(b as char);
+                i += 1;
+            }
+        }
+    }
+    if !current_literal.is_empty() {
+        fragments.push(current_literal);
+    }
+
+    let literals: Vec<String> = fragments.into_iter().map(|f| f.to_lowercase()).collect();
+    let gap_kinds: Vec<GapKind> = gaps.into_iter().map(|g| {
+        if gap_accepts_anything(&g) { GapKind::AcceptAnything } else { GapKind::NeedsValidation }
+    }).collect();
+
+    (literals, gap_kinds)
+}
+
 /// Extract ALL literal fragments from a regex pattern, in order.
 /// Splits on metacharacters, skips character classes, handles escapes.
 fn extract_all_literals(pattern: &str) -> Vec<String> {
@@ -928,7 +1034,12 @@ where
     use crate::suffix_fst::posmap::PosMapReader;
 
     let t_total = Instant::now();
-    let all_literals = extract_all_literals(pattern);
+    let (all_literals, gap_kinds) = extract_literals_with_gaps(pattern);
+    // If ALL gaps between literals are `.*`, we can skip DFA validate_path
+    // entirely — just check that literals appear in order (which
+    // intersect_literals_ordered already guarantees).
+    let all_gaps_accept_anything = !gap_kinds.is_empty()
+        && gap_kinds.iter().all(|g| *g == GapKind::AcceptAnything);
 
     let viable: Vec<&String> = all_literals.iter()
         .filter(|l| l.len() >= MIN_LITERAL_LEN)
@@ -940,15 +1051,48 @@ where
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // Step 1: Resolve each literal using exact contains logic (cross-token aware).
+    // Step 1: Resolve literals via pipeline (selectivity-ordered, filtered).
     // ═══════════════════════════════════════════════════════════════════
     let t0 = Instant::now();
 
-    let mut all_matches: Vec<Vec<LiteralMatch>> = Vec::new();
-    for lit in &viable {
-        let matches = literal_resolve::find_literal(sfx_reader, lit, resolver, ord_to_term);
-        eprintln!("[regex-timer] find_literal('{}') → {} matches", lit, matches.len());
-        all_matches.push(matches);
+    // Phase A: estimate selectivity for all literals (no resolve, quasi free)
+    let mut lit_fst_cands: Vec<Vec<super::literal_pipeline::FstCandidate>> = Vec::new();
+    let mut lit_ct_chains: Vec<Vec<super::literal_pipeline::CrossTokenChain>> = Vec::new();
+    let mut lit_selectivity: Vec<(usize, usize)> = Vec::new();
+
+    for (i, lit) in viable.iter().enumerate() {
+        let fst_cands = super::literal_pipeline::fst_candidates(sfx_reader, lit);
+        let ct_chains = super::literal_pipeline::cross_token_falling_walk(sfx_reader, lit, 0, ord_to_term);
+        let score = fst_cands.len() + ct_chains.len();
+        lit_selectivity.push((i, score));
+        lit_fst_cands.push(fst_cands);
+        lit_ct_chains.push(ct_chains);
+    }
+
+    lit_selectivity.sort_by_key(|&(_, score)| score);
+
+    // Phase B: resolve rarest literal first, use its doc set as filter for the rest
+    let mut all_matches: Vec<Vec<LiteralMatch>> = vec![Vec::new(); viable.len()];
+    let mut doc_filter: Option<std::collections::HashSet<DocId>> = None;
+
+    for &(lit_idx, _) in &lit_selectivity {
+        let literal_len = viable[lit_idx].to_lowercase().len();
+        let filter_ref = doc_filter.as_ref();
+
+        let mut matches = super::literal_pipeline::resolve_candidates(
+            &lit_fst_cands[lit_idx], literal_len, resolver, filter_ref,
+        );
+        let cross_matches = super::literal_pipeline::resolve_chains(
+            &lit_ct_chains[lit_idx], literal_len, resolver, filter_ref,
+        );
+        matches.extend(cross_matches);
+
+        // For regex d=0, all literals must match → intersection is safe
+        if doc_filter.is_none() && !matches.is_empty() {
+            doc_filter = Some(matches.iter().map(|m| m.doc_id).collect());
+        }
+
+        all_matches[lit_idx] = matches;
     }
 
     let find_us = t0.elapsed().as_micros();
@@ -990,7 +1134,12 @@ where
 
             // DFA alive but not accepting → cross-token via PosMap.
             if automaton.can_match(&state) {
-                if let Some(pm) = &posmap {
+                if literal_resolve::dfa_accepts_anything(automaton, &state) {
+                    // Fast path: DFA accepts anything from here (e.g. `foo.*`).
+                    // No need to walk tokens — already a valid match.
+                    doc_bitset.insert(m.doc_id);
+                    highlights.push((m.doc_id, m.byte_from as usize, m.byte_to as usize));
+                } else if let Some(pm) = &posmap {
                     let max_pos = pm.num_tokens(m.doc_id);
                     let end_pos = (m.position + MAX_CONTINUATION_DEPTH as u32).min(max_pos);
                     if end_pos > m.position {
@@ -1013,66 +1162,92 @@ where
             }
         }
     } else {
-        // ── Multi-literal: intersect + position ordering + PosMap DFA validate ──
+        // ── Multi-literal: intersect + gap-by-gap validation ──
         let grouped: Vec<literal_resolve::MatchesByDoc> = all_matches.iter()
             .map(|matches| literal_resolve::group_by_doc(matches))
             .collect();
 
         let ordered = literal_resolve::intersect_literals_ordered(&grouped);
 
-        eprintln!("[regex-timer] multi-literal intersect: {} docs survive ordering", ordered.len());
+        // For each ordered match, validate gap by gap.
+        // AcceptAnything gaps are free (order already verified by intersection).
+        // NeedsValidation gaps require validate_path between the two literal positions.
+        let has_any_constrained_gap = gap_kinds.iter().any(|g| *g == GapKind::NeedsValidation);
 
-        if let Some(pm) = &posmap {
-            // PosMap walk: validate DFA between the literal positions.
+        if !has_any_constrained_gap {
+            // Fast path: ALL gaps are `.*` — accept all ordered matches.
             for &(doc_id, first_bf, last_bt, _first_si) in &ordered {
-                // Find actual positions of first and last literals in this doc.
-                let first_pos = grouped[0].get(&doc_id)
-                    .and_then(|v| v.iter().find(|&&(_, bf, _, _)| bf == first_bf))
-                    .map(|&(pos, _, _, _)| pos);
-                let last_pos = grouped.last().unwrap().get(&doc_id)
-                    .and_then(|v| v.iter().find(|&&(_, _, bt, _)| bt == last_bt))
-                    .map(|&(pos, _, _, _)| pos);
-
-                let (Some(fp), Some(lp)) = (first_pos, last_pos) else { continue; };
-
-                // Feed first token to DFA, starting from the literal's offset
-                // within the token. For `ag3.*ver` with token "rag3db", feed
-                // from byte 1 ("ag3db") not byte 0 ("rag3db"), because the DFA
-                // expects the first literal at its start state.
-                let first_state = if let Some(tok_ord) = pm.ordinal_at(doc_id, fp) {
-                    if let Some(text) = ord_to_term(tok_ord as u64) {
-                        let offset = text.find(first_literal.as_str()).unwrap_or(0);
-                        let mut s = start_state.clone();
-                        let mut alive = true;
-                        for &byte in &text.as_bytes()[offset..] {
-                            s = automaton.accept(&s, byte);
-                            if !automaton.can_match(&s) { alive = false; break; }
-                        }
-                        if !alive { continue; }
-                        s
-                    } else { continue; }
-                } else { continue; };
-
-                // Validate path from first token to last token.
-                if fp == lp {
-                    // Same token — already validated above.
-                    if automaton.is_match(&first_state) {
-                        doc_bitset.insert(doc_id);
-                        highlights.push((doc_id, first_bf as usize, last_bt as usize));
+                doc_bitset.insert(doc_id);
+                highlights.push((doc_id, first_bf as usize, last_bt as usize));
+            }
+        } else if let Some(pm) = &posmap {
+            // Some gaps need validation. For each doc, find positions of each
+            // literal, then validate only the constrained gaps.
+            'doc_loop: for &(doc_id, first_bf, last_bt, _first_si) in &ordered {
+                // Collect the position of each literal in this doc
+                let mut lit_positions: Vec<u32> = Vec::new();
+                for (li, grp) in grouped.iter().enumerate() {
+                    let pos = grp.get(&doc_id)
+                        .and_then(|v| {
+                            if li == 0 {
+                                v.iter().find(|&&(_, bf, _, _)| bf == first_bf).map(|&(p, _, _, _)| p)
+                            } else if li == grouped.len() - 1 {
+                                v.iter().find(|&&(_, _, bt, _)| bt == last_bt).map(|&(p, _, _, _)| p)
+                            } else {
+                                // Middle literal: find a position between prev and next
+                                let prev_pos = *lit_positions.last().unwrap_or(&0);
+                                v.iter()
+                                    .filter(|&&(_, bf, _, _)| bf >= first_bf)
+                                    .filter(|&&(p, _, _, _)| p > prev_pos)
+                                    .min_by_key(|&&(_, bf, _, _)| bf)
+                                    .map(|&(p, _, _, _)| p)
+                            }
+                        });
+                    match pos {
+                        Some(p) => lit_positions.push(p),
+                        None => continue 'doc_loop,
                     }
-                } else {
-                    // Walk intermediate tokens via PosMap.
+                }
+
+                // Validate each constrained gap
+                let mut valid = true;
+                for (gap_idx, gap_kind) in gap_kinds.iter().enumerate() {
+                    if *gap_kind == GapKind::AcceptAnything { continue; }
+
+                    let from_pos = lit_positions[gap_idx];
+                    let to_pos = lit_positions[gap_idx + 1];
+                    if from_pos >= to_pos { continue; } // same or adjacent token
+
+                    // Feed the left literal to get DFA state, then validate_path
+                    let left_lit = &viable[gap_idx];
+                    let dfa_state = if let Some(tok_ord) = pm.ordinal_at(doc_id, from_pos) {
+                        if let Some(text) = ord_to_term(tok_ord as u64) {
+                            let offset = text.find(left_lit.as_str()).unwrap_or(0);
+                            let mut s = start_state.clone();
+                            let mut alive = true;
+                            for &byte in &text.as_bytes()[offset..] {
+                                s = automaton.accept(&s, byte);
+                                if !automaton.can_match(&s) { alive = false; break; }
+                            }
+                            if !alive { valid = false; break; }
+                            s
+                        } else { valid = false; break; }
+                    } else { valid = false; break; };
+
                     let result = literal_resolve::validate_path(
-                        automaton, &first_state, pm, sfx_reader, ord_to_term,
-                        doc_id, fp, lp,
+                        automaton, &dfa_state, pm, sfx_reader, ord_to_term,
+                        doc_id, from_pos, to_pos,
                         bytemap.as_ref(),
                     );
-                    if let Some(final_state) = result {
-                        if automaton.is_match(&final_state) {
-                            doc_bitset.insert(doc_id);
-                            highlights.push((doc_id, first_bf as usize, last_bt as usize));
-                        }
+                    if result.is_none() {
+                        valid = false;
+                        break;
                     }
+                }
+
+                if valid {
+                    doc_bitset.insert(doc_id);
+                    highlights.push((doc_id, first_bf as usize, last_bt as usize));
                 }
             }
         } else {
