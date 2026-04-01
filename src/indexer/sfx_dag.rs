@@ -357,45 +357,58 @@ impl Node for WriteSfxNode {
             write_file(segment, "sibling", &sibling_data_clone)?;
         }
 
-        // Merge sepmap from source segments (OR-merge bitmaps per ordinal)
+        // Merge sepmap from source segments (OR-merge bitmaps per ordinal).
+        // Uses TermTextsReader (SFX ordinals) to map token text → old SFX ordinal,
+        // NOT the term dict (which has different ordinals).
         {
             use crate::suffix_fst::sepmap::{SepMapReader, SepMapWriter};
+            use crate::suffix_fst::TermTextsReader;
+
             let source_sepmaps: Vec<Option<Vec<u8>>> = self.ctx.readers.iter().map(|r| {
                 r.sfx_index_file("sepmap", self.field)
                     .and_then(|f| f.read_bytes().ok())
                     .map(|b| b.to_vec())
             }).collect();
+            let source_termtexts: Vec<Option<Vec<u8>>> = self.ctx.readers.iter().map(|r| {
+                r.sfx_index_file("termtexts", self.field)
+                    .and_then(|f| f.read_bytes().ok())
+                    .map(|b| b.to_vec())
+            }).collect();
 
-            let readers: Vec<Option<SepMapReader>> = source_sepmaps.iter()
+            let sepmap_readers: Vec<Option<SepMapReader>> = source_sepmaps.iter()
                 .map(|opt| opt.as_deref().and_then(SepMapReader::open))
                 .collect();
 
-            if readers.iter().any(|r| r.is_some()) {
+            if sepmap_readers.iter().any(|r| r.is_some()) {
                 let num_terms = tokens.len() as u32;
                 let mut sepmap_writer = SepMapWriter::new();
                 sepmap_writer.ensure_capacity(num_terms);
 
-                // Build ordinal maps: old_ord → new_ord per source segment.
-                // Tokens are in BTreeSet order = sorted = new ordinal order.
-                // Source segments have their own ordinal order (also sorted).
-                // We need to map: for each source segment, which old ordinal
-                // corresponds to which new ordinal.
-                for (seg_idx, reader_opt) in readers.iter().enumerate() {
-                    let reader = match reader_opt {
+                for (seg_idx, sepmap_opt) in sepmap_readers.iter().enumerate() {
+                    let sepmap = match sepmap_opt {
                         Some(r) => r,
                         None => continue,
                     };
-                    // Source segment's tokens (via term dict)
-                    let seg_reader = &self.ctx.readers[seg_idx];
-                    if let Some(inv_idx) = seg_reader.inverted_index(self.field).ok() {
-                        let term_dict = inv_idx.terms();
-                        // Walk merged tokens in order — new_ord is the position in BTreeSet
-                        for (new_ord, token) in tokens.iter().enumerate() {
-                            // Find this token in the source segment's term dict
-                            if let Ok(Some(old_ord)) = term_dict.term_ord(token.as_bytes()) {
-                                if let Some(bitmap) = reader.bitmap(old_ord as u32) {
-                                    sepmap_writer.or_bitmap(new_ord as u32, bitmap);
-                                }
+
+                    // Build reverse map: token text → old SFX ordinal via TermTextsReader
+                    let reverse_map: std::collections::HashMap<&str, u32> =
+                        if let Some(tt_bytes) = &source_termtexts[seg_idx] {
+                            if let Some(tt_reader) = TermTextsReader::open(tt_bytes) {
+                                (0..tt_reader.num_terms())
+                                    .filter_map(|ord| tt_reader.text(ord).map(|t| (t, ord)))
+                                    .collect()
+                            } else {
+                                std::collections::HashMap::new()
+                            }
+                        } else {
+                            std::collections::HashMap::new()
+                        };
+
+                    // For each merged token, find its old SFX ordinal and OR-merge bitmap
+                    for (new_ord, token) in tokens.iter().enumerate() {
+                        if let Some(&old_ord) = reverse_map.get(token.as_str()) {
+                            if let Some(bitmap) = sepmap.bitmap(old_ord) {
+                                sepmap_writer.or_bitmap(new_ord as u32, bitmap);
                             }
                         }
                     }
