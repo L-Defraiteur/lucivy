@@ -391,6 +391,161 @@ pub fn find_literal_pipeline(
     matches
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// resolve_token_for_multi — unified per-token resolution for multi-token
+// ─────────────────────────────────────────────────────────────────────
+
+/// A resolved posting for multi-token search, with span for cross-token chains.
+#[derive(Debug, Clone)]
+pub struct MultiTokenMatch {
+    pub doc_id: u32,
+    pub token_index: u32,
+    pub span: u32,
+    pub byte_from: u32,
+    pub byte_to: u32,
+}
+
+/// Resolve one query token for multi-token search using the pipeline briques.
+///
+/// Single source of truth: the same code path as single-token contains,
+/// with additional filters for multi-token constraints:
+/// - `is_first`: if false, only SI=0 matches (token must start at indexed token boundary)
+/// - `is_last`: if true, prefix matches allowed (query can match start of token)
+///              if false, query must cover token to the end (si + query_len == token_len)
+///
+/// `resolve_fn` maps raw ordinal → posting entries (doc_id, position, byte_from, byte_to).
+///
+/// Returns postings with span (1 for single-token, N for cross-token chains).
+pub fn resolve_token_for_multi<R>(
+    sfx_reader: &SfxFileReader<'_>,
+    query_token: &str,
+    resolve_fn: &R,
+    ord_to_term: Option<&dyn Fn(u64) -> Option<String>>,
+    is_first: bool,
+    is_last: bool,
+    fuzzy_distance: u8,
+) -> Vec<MultiTokenMatch>
+where
+    R: Fn(u64) -> Vec<(u32, u32, u32, u32)>, // (doc_id, position, byte_from, byte_to)
+{
+    let query_lower = query_token.to_lowercase();
+    let query_len = query_lower.len();
+    let require_si0 = !is_first;
+
+    let mut results: Vec<MultiTokenMatch> = Vec::new();
+
+    // ── Single-token path ──
+    // d=0: fst_candidates (prefix_walk) → filter
+    // d>0: fuzzy_walk → filter (SI=0 only for non-last, full token match)
+
+    let filtered_cands: Vec<FstCandidate> = if fuzzy_distance > 0 {
+        // Fuzzy: use fuzzy_walk which returns (suffix, parents) with edit distance
+        let fuzzy_results = if require_si0 {
+            sfx_reader.fuzzy_walk_si0(&query_lower, fuzzy_distance)
+        } else {
+            sfx_reader.fuzzy_walk(&query_lower, fuzzy_distance)
+        };
+        let mut cands = Vec::new();
+        for (_suffix, parents) in &fuzzy_results {
+            for parent in parents {
+                if require_si0 && parent.si != 0 { continue; }
+                // Non-last fuzzy: must be full-token match (SI=0)
+                if !is_last && parent.si != 0 { continue; }
+                cands.push(FstCandidate {
+                    raw_ordinal: parent.raw_ordinal,
+                    si: parent.si,
+                    token_len: parent.token_len,
+                });
+            }
+        }
+        cands
+    } else {
+        // Exact: prefix_walk → filter
+        let fst_cands = fst_candidates(sfx_reader, &query_lower);
+        fst_cands.into_iter().filter(|c| {
+            if require_si0 && c.si != 0 { return false; }
+            if !is_last && (c.si as usize + query_len != c.token_len as usize) { return false; }
+            true
+        }).collect()
+    };
+
+    for cand in &filtered_cands {
+        let postings = resolve_fn(cand.raw_ordinal);
+        for (doc_id, position, byte_from, byte_to) in &postings {
+            results.push(MultiTokenMatch {
+                doc_id: *doc_id,
+                token_index: *position,
+                span: 1,
+                byte_from: *byte_from + cand.si as u32,
+                byte_to: if is_last {
+                    *byte_from + cand.si as u32 + query_len as u32
+                } else {
+                    *byte_to
+                },
+            });
+        }
+    }
+
+    // ── Cross-token path: falling_walk → sibling chain → resolve ──
+
+    if let Some(get_term) = ord_to_term {
+        let chains = cross_token_falling_walk(sfx_reader, &query_lower, fuzzy_distance, get_term);
+
+        let chains: Vec<_> = if require_si0 {
+            chains.into_iter().filter(|c| c.first_si == 0).collect()
+        } else {
+            chains
+        };
+
+        for chain in &chains {
+            let span = chain.ordinals.len() as u32;
+            if span < 2 { continue; }
+
+            let first_postings = resolve_fn(chain.ordinals[0]);
+            let mut active: Vec<(u32, u32, u32, u32, u32)> = Vec::new();
+            for (doc_id, position, byte_from, byte_to) in &first_postings {
+                let bf = *byte_from + chain.first_si as u32;
+                active.push((*doc_id, *position + 1, *byte_to, bf, *position));
+            }
+
+            for &ord in &chain.ordinals[1..] {
+                if active.is_empty() { break; }
+                let postings = resolve_fn(ord);
+
+                active.sort_by_key(|a| (a.0, a.1));
+                let mut next_active: Vec<(u32, u32, u32, u32, u32)> = Vec::new();
+
+                for (doc_id, position, byte_from, _byte_to) in &postings {
+                    let target = (*doc_id, *position);
+                    let idx = active.partition_point(|a| (a.0, a.1) < target);
+                    let mut i = idx;
+                    while i < active.len() && active[i].0 == *doc_id && active[i].1 == *position {
+                        if *byte_from == active[i].2 {
+                            next_active.push((*doc_id, *position + 1, _byte_to.clone(), active[i].3, active[i].4));
+                        }
+                        i += 1;
+                    }
+                }
+                active = next_active;
+            }
+
+            for &(doc_id, _, byte_to, match_bf, first_pos) in &active {
+                results.push(MultiTokenMatch {
+                    doc_id,
+                    token_index: first_pos,
+                    span,
+                    byte_from: match_bf,
+                    byte_to,
+                });
+            }
+        }
+    }
+
+    results.sort_by(|a, b| a.doc_id.cmp(&b.doc_id).then(a.token_index.cmp(&b.token_index)));
+    results.dedup_by(|a, b| a.doc_id == b.doc_id && a.token_index == b.token_index);
+    results
+}
+
 /// Estimate the selectivity of a literal: how many FST entries + cross-token
 /// chains match. Lower = more selective. Very cheap (no posting resolve).
 #[allow(dead_code)]

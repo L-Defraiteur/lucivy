@@ -556,14 +556,8 @@ pub fn resolve_raw_ordinal(
 }
 
 /// A resolved posting for multi-token search, with span for cross-token chains.
-#[derive(Debug, Clone)]
-struct MultiTokenPosting {
-    doc_id: u32,
-    token_index: u32,  // position of the FIRST token in the chain
-    span: u32,         // number of indexed positions occupied (1 = single token, N = chain)
-    byte_from: u32,
-    byte_to: u32,
-}
+/// Re-exported from literal_pipeline::MultiTokenMatch for internal use.
+type MultiTokenPosting = super::literal_pipeline::MultiTokenMatch;
 
 /// Resolve a sub-token via falling_walk + sibling chain for multi-token search.
 ///
@@ -934,21 +928,27 @@ where
 
     let n = query_tokens.len();
 
-    // Step 1: Resolve ALL sub-tokens via falling_walk + sibling chain.
-    // Each sub-token produces MultiTokenPostings with spans.
-    // This covers both single-token matches (span=1) and cross-token chains (span=N).
+    // Step 1: Resolve ALL sub-tokens via pipeline briques.
+    // Uses the same code path as single-token contains (fst_candidates + falling_walk).
 
     let mut per_token_postings: Vec<Vec<MultiTokenPosting>> = Vec::with_capacity(n);
 
     let diag = std::env::var("LUCIVY_MULTI_TOKEN_DIAG").is_ok();
 
+    // Adapter: convert RawPostingEntry resolver to tuple-based resolver for pipeline
+    let resolve_fn = |ord: u64| -> Vec<(u32, u32, u32, u32)> {
+        raw_ordinal_resolver(ord).into_iter()
+            .map(|e| (e.doc_id, e.token_index, e.byte_from, e.byte_to))
+            .collect()
+    };
+
     for (i, &token) in query_tokens.iter().enumerate() {
-        let is_first = i == 0;
+        let is_first = i == 0 && !prefix_only;
         let is_last = i == n - 1;
 
-        let postings = cross_token_resolve_for_multi(
-            sfx_reader, token, raw_ordinal_resolver, ord_to_term,
-            is_first, is_last, prefix_only, fuzzy_distance,
+        let postings = super::literal_pipeline::resolve_token_for_multi(
+            sfx_reader, token, &resolve_fn, ord_to_term,
+            is_first, is_last, fuzzy_distance,
         );
 
         if diag {
