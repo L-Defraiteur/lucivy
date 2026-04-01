@@ -940,6 +940,8 @@ where
 
     let mut per_token_postings: Vec<Vec<MultiTokenPosting>> = Vec::with_capacity(n);
 
+    let diag = std::env::var("LUCIVY_MULTI_TOKEN_DIAG").is_ok();
+
     for (i, &token) in query_tokens.iter().enumerate() {
         let is_first = i == 0;
         let is_last = i == n - 1;
@@ -949,7 +951,19 @@ where
             is_first, is_last, prefix_only, fuzzy_distance,
         );
 
+        if diag {
+            let unique_docs: std::collections::HashSet<u32> = postings.iter().map(|p| p.doc_id).collect();
+            eprintln!("[multi-token-diag] token[{}]='{}' is_first={} is_last={} postings={} unique_docs={}",
+                i, token, is_first, is_last, postings.len(), unique_docs.len());
+            if postings.len() <= 20 {
+                for p in &postings {
+                    eprintln!("  doc={} ti={} span={} bf={} bt={}", p.doc_id, p.token_index, p.span, p.byte_from, p.byte_to);
+                }
+            }
+        }
+
         if postings.is_empty() {
+            if diag { eprintln!("[multi-token-diag] ABORT: token '{}' has 0 postings", token); }
             return Vec::new();
         }
 
@@ -964,6 +978,10 @@ where
         .map(|(i, _)| i)
         .unwrap_or(0);
 
+    if diag {
+        eprintln!("[multi-token-diag] pivot_idx={} pivot_token='{}'", pivot_idx, query_tokens[pivot_idx]);
+    }
+
     let pivot_doc_ids: std::collections::HashSet<u32> = per_token_postings[pivot_idx]
         .iter()
         .map(|e| e.doc_id)
@@ -972,8 +990,13 @@ where
     // Filter non-pivot postings by pivot doc_ids
     for i in 0..n {
         if i == pivot_idx { continue; }
+        let before = per_token_postings[i].len();
         per_token_postings[i].retain(|e| pivot_doc_ids.contains(&e.doc_id));
+        if diag {
+            eprintln!("[multi-token-diag] filter token[{}]: {} -> {} postings", i, before, per_token_postings[i].len());
+        }
         if per_token_postings[i].is_empty() {
+            if diag { eprintln!("[multi-token-diag] ABORT: token[{}] empty after pivot filter", i); }
             return Vec::new();
         }
     }
@@ -1097,6 +1120,11 @@ where
     // Deduplicate by (doc_id, byte_from)
     matches.sort_by(|a, b| a.doc_id.cmp(&b.doc_id).then(a.byte_from.cmp(&b.byte_from)));
     matches.dedup_by(|a, b| a.doc_id == b.doc_id && a.byte_from == b.byte_from);
+
+    if diag {
+        let unique_docs: std::collections::HashSet<u32> = matches.iter().map(|m| m.doc_id).collect();
+        eprintln!("[multi-token-diag] RESULT: {} matches in {} unique docs", matches.len(), unique_docs.len());
+    }
 
     matches
 }
@@ -2053,5 +2081,90 @@ mod tests {
         // "junction" in "disjunction" at SI=3: byte_from=26+3=29, byte_to=29+8=37
         assert_eq!(results_junction.len(), 1, "junction should only match disjunction");
         assert_eq!(results_junction[0].byte_from, 29);
+    }
+
+    /// Build a test index with "use rag3weaver for search" to test
+    /// multi-token substring queries like "3weaver for search".
+    fn build_rag3weaver_index() -> (Vec<u8>, HashMap<u64, Vec<RawPostingEntry>>) {
+        let mut collector = SfxCollector::new();
+
+        // Doc 0: "use rag3weaver for search"
+        collector.begin_doc();
+        collector.begin_value("use rag3weaver for search");
+        collector.add_token("use", 0, 3);
+        collector.add_token("rag3weaver", 4, 14);
+        collector.add_token("for", 15, 18);
+        collector.add_token("search", 19, 25);
+        collector.end_value();
+        collector.end_doc();
+
+        let output = collector.build().unwrap();
+        let sfx_bytes = output.sfx;
+
+        // Sorted unique tokens: for(0), rag3weaver(1), search(2), use(3)
+        let mut raw_postings: HashMap<u64, Vec<RawPostingEntry>> = HashMap::new();
+        raw_postings.insert(0, vec![ // "for"
+            RawPostingEntry { doc_id: 0, token_index: 2, byte_from: 15, byte_to: 18 },
+        ]);
+        raw_postings.insert(1, vec![ // "rag3weaver"
+            RawPostingEntry { doc_id: 0, token_index: 1, byte_from: 4, byte_to: 14 },
+        ]);
+        raw_postings.insert(2, vec![ // "search"
+            RawPostingEntry { doc_id: 0, token_index: 3, byte_from: 19, byte_to: 25 },
+        ]);
+        raw_postings.insert(3, vec![ // "use"
+            RawPostingEntry { doc_id: 0, token_index: 0, byte_from: 0, byte_to: 3 },
+        ]);
+
+        (sfx_bytes, raw_postings)
+    }
+
+    #[test]
+    fn test_multi_token_substring_3weaver() {
+        let (sfx_bytes, raw_postings) = build_rag3weaver_index();
+        let reader = SfxFileReader::open(&sfx_bytes).unwrap();
+        let resolver = |ord: u64| raw_postings.get(&ord).cloned().unwrap_or_default();
+
+        // "weaver for search" — suffix of rag3weaver + consecutive tokens
+        let r1 = suffix_contains_multi_token(
+            &reader, &["weaver", "for", "search"], &[" ", " "], &resolver,
+        );
+        eprintln!("'weaver for search': {} results", r1.len());
+        assert!(r1.len() > 0, "'weaver for search' should find doc 0");
+
+        // "3weaver for search" — suffix of rag3weaver + consecutive tokens
+        let r2 = suffix_contains_multi_token(
+            &reader, &["3weaver", "for", "search"], &[" ", " "], &resolver,
+        );
+        eprintln!("'3weaver for search': {} results", r2.len());
+        assert!(r2.len() > 0, "'3weaver for search' should find doc 0");
+
+        // "rag3weaver for search" — full token + consecutive tokens
+        let r3 = suffix_contains_multi_token(
+            &reader, &["rag3weaver", "for", "search"], &[" ", " "], &resolver,
+        );
+        eprintln!("'rag3weaver for search': {} results", r3.len());
+        assert!(r3.len() > 0, "'rag3weaver for search' should find doc 0");
+
+        // "use rag3weaver" — two consecutive tokens
+        let r4 = suffix_contains_multi_token(
+            &reader, &["use", "rag3weaver"], &[" "], &resolver,
+        );
+        eprintln!("'use rag3weaver': {} results", r4.len());
+        assert!(r4.len() > 0, "'use rag3weaver' should find doc 0");
+
+        // "use rag3weaver for search" — all four tokens
+        let r5 = suffix_contains_multi_token(
+            &reader, &["use", "rag3weaver", "for", "search"], &[" ", " ", " "], &resolver,
+        );
+        eprintln!("'use rag3weaver for search': {} results", r5.len());
+        assert!(r5.len() > 0, "'use rag3weaver for search' should find doc 0");
+
+        // Also test with empty separators (non-strict mode)
+        let r6 = suffix_contains_multi_token(
+            &reader, &["3weaver", "for", "search"], &["", ""], &resolver,
+        );
+        eprintln!("'3weaver for search' (empty seps): {} results", r6.len());
+        assert!(r6.len() > 0, "'3weaver for search' with empty seps should find doc 0");
     }
 }

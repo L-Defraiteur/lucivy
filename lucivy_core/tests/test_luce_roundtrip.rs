@@ -136,6 +136,10 @@ fn test_luce_playground_search() {
         "use rag3weaver for",
         "use rag3weaver for search",
         "rag3weaver for search",
+        "weaver for search",
+        "3weaver for search",
+        "weaver for",
+        "3weaver for",
     ];
     for q in &multi_queries {
         let results = search_with_highlights(&handle, &QueryConfig {

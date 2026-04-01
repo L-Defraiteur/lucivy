@@ -61,6 +61,8 @@ fn test_merge_contains_correctness() {
     std::fs::create_dir_all(tmp_path).unwrap();
     let config = SchemaConfig {
         fields: vec![
+            query::FieldDef { name: "path".into(), field_type: "text".into(),
+                stored: Some(true), indexed: Some(false), fast: None },
             query::FieldDef { name: "content".into(), field_type: "text".into(),
                 stored: Some(true), indexed: Some(true), fast: None },
         ],
@@ -73,9 +75,11 @@ fn test_merge_contains_correctness() {
     {
         let mut guard = handle.writer.lock().unwrap();
         let writer = guard.as_mut().unwrap();
+        let path_field = handle.field("path").unwrap();
         let content_field = handle.field("content").unwrap();
-        for (i, (_path, content)) in files.iter().enumerate() {
+        for (i, (path, content)) in files.iter().enumerate() {
             let mut doc = ld_lucivy::LucivyDocument::new();
+            doc.add_text(path_field, path);
             doc.add_text(content_field, content);
             writer.add_document(doc).unwrap();
         }
@@ -168,4 +172,99 @@ fn test_merge_contains_correctness() {
     let collector = ld_lucivy::collector::TopDocs::with_limit(1000).order_by_score();
     let results = searcher2.search(&*query, &collector).unwrap();
     eprintln!("contains \"rag3weaver\" (no merge): {} results", results.len());
+
+    // === Multi-token d=0 tests: WITH merge vs WITHOUT merge ===
+    eprintln!("\n=== Multi-token contains d=0: WITH merge ===");
+    let multi_queries = [
+        "use rag3weaver",
+        "rag3weaver for",
+        "weaver for search",
+        "3weaver for search",
+        "3weaver for",
+        "use rag3weaver for search",
+        "rag3weaver for search",
+    ];
+    for q in &multi_queries {
+        let qconfig = QueryConfig {
+            query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some(q.to_string()),
+            ..Default::default()
+        };
+        let query = query::build_query(&qconfig, &handle.schema, &handle.index, None).unwrap();
+        let collector = ld_lucivy::collector::TopDocs::with_limit(1000).order_by_score();
+        let results = searcher.search(&*query, &collector).unwrap();
+        eprintln!("  WITH merge  d=0 \"{}\": {} results", q, results.len());
+    }
+
+    eprintln!("\n=== Multi-token contains d=0: WITHOUT merge ===");
+    for q in &multi_queries {
+        let qconfig = QueryConfig {
+            query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some(q.to_string()),
+            ..Default::default()
+        };
+        let query = query::build_query(&qconfig, &handle2.schema, &handle2.index, None).unwrap();
+        let collector = ld_lucivy::collector::TopDocs::with_limit(1000).order_by_score();
+        let results = searcher2.search(&*query, &collector).unwrap();
+        eprintln!("  WITHOUT merge d=0 \"{}\": {} results", q, results.len());
+    }
+
+    // Ground truth: count how many files actually contain each sub-query
+    eprintln!("\n=== Ground truth (brute force string search) ===");
+    for q in &multi_queries {
+        let count = files.iter().filter(|(_, c)| c.to_lowercase().contains(&q.to_lowercase())).count();
+        eprintln!("  brute-force \"{}\": {} files", q, count);
+    }
+
+    // Detailed miss analysis for "use rag3weaver"
+    eprintln!("\n=== Miss analysis: 'use rag3weaver' ===");
+    let q = "use rag3weaver";
+    let qconfig = QueryConfig {
+        query_type: "contains".into(),
+        field: Some("content".into()),
+        value: Some(q.to_string()),
+        ..Default::default()
+    };
+    let query_obj = query::build_query(&qconfig, &handle.schema, &handle.index, None).unwrap();
+    let collector = ld_lucivy::collector::TopDocs::with_limit(1000).order_by_score();
+    let results_with = searcher.search(&*query_obj, &collector).unwrap();
+
+    // Retrieve paths of found docs
+    let path_field = handle.field("path").unwrap();
+    let mut found_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (_, addr) in &results_with {
+        let doc: ld_lucivy::LucivyDocument = searcher.doc(*addr).unwrap();
+        if let Some(v) = doc.get_first(path_field) {
+            let owned: ld_lucivy::schema::OwnedValue = v.into();
+            if let ld_lucivy::schema::OwnedValue::Str(s) = owned {
+                found_paths.insert(s);
+            }
+        }
+    }
+
+    // Compare with brute-force
+    let expected_paths: Vec<&str> = files.iter()
+        .filter(|(_, c)| c.to_lowercase().contains(&q.to_lowercase()))
+        .map(|(p, _)| p.as_str())
+        .collect();
+
+    for path in &expected_paths {
+        if found_paths.contains(*path) {
+            eprintln!("  HIT  {}", path);
+        } else {
+            let content = &files.iter().find(|(p, _)| p == path).unwrap().1;
+            let lower = content.to_lowercase();
+            let pos = lower.find(&q.to_lowercase()).unwrap();
+            let start = pos.saturating_sub(10);
+            let end = (pos + q.len() + 30).min(content.len());
+            // Safe char boundaries
+            let mut s = start;
+            while s > 0 && !content.is_char_boundary(s) { s -= 1; }
+            let mut e = end;
+            while e < content.len() && !content.is_char_boundary(e) { e += 1; }
+            eprintln!("  MISS {} — context: {:?}", path, &content[s..e]);
+        }
+    }
 }
