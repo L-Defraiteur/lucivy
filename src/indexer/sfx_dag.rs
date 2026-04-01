@@ -263,6 +263,7 @@ struct WriteSfxNode {
     segment: Option<crate::index::Segment>,
     field: Field,
     num_docs: u32,
+    ctx: Arc<SfxContext>,
 }
 
 impl Node for WriteSfxNode {
@@ -356,6 +357,57 @@ impl Node for WriteSfxNode {
             write_file(segment, "sibling", &sibling_data_clone)?;
         }
 
+        // Merge sepmap from source segments (OR-merge bitmaps per ordinal)
+        {
+            use crate::suffix_fst::sepmap::{SepMapReader, SepMapWriter};
+            let source_sepmaps: Vec<Option<Vec<u8>>> = self.ctx.readers.iter().map(|r| {
+                r.sfx_index_file("sepmap", self.field)
+                    .and_then(|f| f.read_bytes().ok())
+                    .map(|b| b.to_vec())
+            }).collect();
+
+            let readers: Vec<Option<SepMapReader>> = source_sepmaps.iter()
+                .map(|opt| opt.as_deref().and_then(SepMapReader::open))
+                .collect();
+
+            if readers.iter().any(|r| r.is_some()) {
+                let num_terms = tokens.len() as u32;
+                let mut sepmap_writer = SepMapWriter::new();
+                sepmap_writer.ensure_capacity(num_terms);
+
+                // Build ordinal maps: old_ord → new_ord per source segment.
+                // Tokens are in BTreeSet order = sorted = new ordinal order.
+                // Source segments have their own ordinal order (also sorted).
+                // We need to map: for each source segment, which old ordinal
+                // corresponds to which new ordinal.
+                for (seg_idx, reader_opt) in readers.iter().enumerate() {
+                    let reader = match reader_opt {
+                        Some(r) => r,
+                        None => continue,
+                    };
+                    // Source segment's tokens (via term dict)
+                    let seg_reader = &self.ctx.readers[seg_idx];
+                    if let Some(inv_idx) = seg_reader.inverted_index(self.field).ok() {
+                        let term_dict = inv_idx.terms();
+                        // Walk merged tokens in order — new_ord is the position in BTreeSet
+                        for (new_ord, token) in tokens.iter().enumerate() {
+                            // Find this token in the source segment's term dict
+                            if let Ok(Some(old_ord)) = term_dict.term_ord(token.as_bytes()) {
+                                if let Some(bitmap) = reader.bitmap(old_ord as u32) {
+                                    sepmap_writer.or_bitmap(new_ord as u32, bitmap);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let sepmap_data = sepmap_writer.serialize();
+                if !sepmap_data.is_empty() {
+                    write_file(segment, "sepmap", &sepmap_data)?;
+                }
+            }
+        }
+
         ctx.metric("written", 1.0);
         Ok(())
     }
@@ -426,6 +478,7 @@ pub(crate) fn build_sfx_dag(
         segment: Some(segment),
         field,
         num_docs,
+        ctx: ctx.clone(),
     });
     dag.connect("build_fst", "fst", "write", "fst").unwrap();
     dag.connect("validate_gapmap", "gapmap", "write", "gapmap").unwrap();
