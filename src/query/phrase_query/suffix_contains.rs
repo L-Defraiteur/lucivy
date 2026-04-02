@@ -156,6 +156,7 @@ where
                     parent_term: String::new(),
                     si: parent.si,
                     token_len: parent.token_len,
+                    ordinal: parent.raw_ordinal as u32,
                 });
             }
         }
@@ -257,6 +258,7 @@ where
                                     parent_term: String::new(),
                                     si: 0,
                                     token_len: 0,
+                                    ordinal: 0,
                                 });
                             }
                         }
@@ -320,7 +322,7 @@ where
                         matches.push(SuffixContainsMatch {
                             doc_id, token_index: left_ti,
                             byte_from, byte_to,
-                            parent_term: String::new(), si: 0, token_len: 0,
+                            parent_term: String::new(), si: 0, token_len: 0, ordinal: 0,
                         });
                     } else if let Some(&tok_len) = partial_match.get(&(doc_id, right_ti)) {
                         next_candidates.entry(consumed + tok_len).or_default().push((
@@ -412,6 +414,7 @@ where
                     parent_term: String::new(),
                     si: parent.si,
                     token_len: parent.token_len,
+                    ordinal: parent.raw_ordinal as u32,
                 });
             }
         }
@@ -1113,6 +1116,7 @@ where
                 parent_term: String::new(),
                 si: 0,
                 token_len: 0,
+                ordinal: 0,
             }
         }).collect();
 
@@ -1421,6 +1425,7 @@ where
                 parent_term: String::new(),
                 si: first_si as u16,
                 token_len: 0,
+                ordinal: 0,
             });
         }
     }
