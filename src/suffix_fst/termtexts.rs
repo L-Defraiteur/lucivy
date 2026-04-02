@@ -131,6 +131,29 @@ impl super::index_registry::SfxIndexFile for TermTextsIndex {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// SfxDerivedIndex implementation
+// ─────────────────────────────────────────────────────────────────────
+
+pub struct DerivedTermTexts {
+    writer: TermTextsWriter,
+}
+
+impl DerivedTermTexts {
+    pub fn new() -> Self { Self { writer: TermTextsWriter::new() } }
+}
+
+impl super::index_registry::SfxDerivedIndex for DerivedTermTexts {
+    fn id(&self) -> &'static str { "termtexts" }
+    fn extension(&self) -> &'static str { "termtexts" }
+
+    fn on_token(&mut self, ord: u32, text: &str) {
+        self.writer.add(ord, text);
+    }
+
+    fn serialize(&self) -> Vec<u8> { self.writer.serialize() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

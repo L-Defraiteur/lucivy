@@ -246,3 +246,26 @@ impl super::index_registry::SfxIndexFile for PosMapIndex {
         writer.serialize()
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// SfxDerivedIndex implementation
+// ─────────────────────────────────────────────────────────────────────
+
+pub struct DerivedPosMap {
+    writer: PosMapWriter,
+}
+
+impl DerivedPosMap {
+    pub fn new() -> Self { Self { writer: PosMapWriter::new() } }
+}
+
+impl super::index_registry::SfxDerivedIndex for DerivedPosMap {
+    fn id(&self) -> &'static str { "posmap" }
+    fn extension(&self) -> &'static str { "posmap" }
+
+    fn on_posting(&mut self, ord: u32, doc_id: u32, position: u32, _bf: u32, _bt: u32) {
+        self.writer.add(doc_id, position, ord);
+    }
+
+    fn serialize(&self) -> Vec<u8> { self.writer.serialize() }
+}

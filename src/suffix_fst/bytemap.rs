@@ -237,3 +237,27 @@ impl super::index_registry::SfxIndexFile for ByteMapIndex {
         writer.serialize()
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// SfxDerivedIndex implementation
+// ─────────────────────────────────────────────────────────────────────
+
+pub struct DerivedByteMap {
+    writer: ByteBitmapWriter,
+}
+
+impl DerivedByteMap {
+    pub fn new() -> Self { Self { writer: ByteBitmapWriter::new() } }
+}
+
+impl super::index_registry::SfxDerivedIndex for DerivedByteMap {
+    fn id(&self) -> &'static str { "bytemap" }
+    fn extension(&self) -> &'static str { "bytemap" }
+
+    fn on_token(&mut self, ord: u32, text: &str) {
+        self.writer.ensure_capacity(ord + 1);
+        self.writer.record_token(ord, text.as_bytes());
+    }
+
+    fn serialize(&self) -> Vec<u8> { self.writer.serialize() }
+}

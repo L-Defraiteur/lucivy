@@ -324,32 +324,10 @@ impl Node for WriteSfxNode {
             Ok(())
         };
 
+        // Write primary index files (from DAG nodes)
         if let Some(ref sfxpost) = sfxpost_data {
             write_file(segment, "sfxpost", sfxpost)?;
-
-            // Build posmap + bytemap + termtexts from sfxpost data + tokens
-            if let Some(reader) = crate::suffix_fst::sfxpost_v2::SfxPostReaderV2::open_slice(sfxpost) {
-                let mut posmap_writer = crate::suffix_fst::PosMapWriter::new();
-                let mut bytemap_writer = crate::suffix_fst::ByteBitmapWriter::new();
-                let mut termtexts_writer = crate::suffix_fst::TermTextsWriter::new();
-                bytemap_writer.ensure_capacity(num_tokens);
-
-                for (ord, token) in tokens.iter().enumerate() {
-                    let ord = ord as u32;
-                    bytemap_writer.record_token(ord, token.as_bytes());
-                    termtexts_writer.add(ord, token);
-                    for e in reader.entries(ord) {
-                        posmap_writer.add(e.doc_id, e.token_index, ord);
-                    }
-                }
-
-                write_file(segment, "posmap", &posmap_writer.serialize())?;
-                write_file(segment, "bytemap", &bytemap_writer.serialize())?;
-                write_file(segment, "termtexts", &termtexts_writer.serialize())?;
-            }
         }
-
-        // Write gapmap + sibling as separate registry files
         if !gapmap_data_clone.is_empty() {
             write_file(segment, "gapmap", &gapmap_data_clone)?;
         }
@@ -357,68 +335,16 @@ impl Node for WriteSfxNode {
             write_file(segment, "sibling", &sibling_data_clone)?;
         }
 
-        // Merge sepmap from source segments (OR-merge bitmaps per ordinal).
-        // Uses TermTextsReader (SFX ordinals) to map token text → old SFX ordinal,
-        // NOT the term dict (which has different ordinals).
-        {
-            use crate::suffix_fst::sepmap::{SepMapReader, SepMapWriter};
-            use crate::suffix_fst::TermTextsReader;
-
-            let source_sepmaps: Vec<Option<Vec<u8>>> = self.ctx.readers.iter().map(|r| {
-                r.sfx_index_file("sepmap", self.field)
-                    .and_then(|f| f.read_bytes().ok())
-                    .map(|b| b.to_vec())
-            }).collect();
-            let source_termtexts: Vec<Option<Vec<u8>>> = self.ctx.readers.iter().map(|r| {
-                r.sfx_index_file("termtexts", self.field)
-                    .and_then(|f| f.read_bytes().ok())
-                    .map(|b| b.to_vec())
-            }).collect();
-
-            let sepmap_readers: Vec<Option<SepMapReader>> = source_sepmaps.iter()
-                .map(|opt| opt.as_deref().and_then(SepMapReader::open))
-                .collect();
-
-            if sepmap_readers.iter().any(|r| r.is_some()) {
-                let num_terms = tokens.len() as u32;
-                let mut sepmap_writer = SepMapWriter::new();
-                sepmap_writer.ensure_capacity(num_terms);
-
-                for (seg_idx, sepmap_opt) in sepmap_readers.iter().enumerate() {
-                    let sepmap = match sepmap_opt {
-                        Some(r) => r,
-                        None => continue,
-                    };
-
-                    // Build reverse map: token text → old SFX ordinal via TermTextsReader
-                    let reverse_map: std::collections::HashMap<&str, u32> =
-                        if let Some(tt_bytes) = &source_termtexts[seg_idx] {
-                            if let Some(tt_reader) = TermTextsReader::open(tt_bytes) {
-                                (0..tt_reader.num_terms())
-                                    .filter_map(|ord| tt_reader.text(ord).map(|t| (t, ord)))
-                                    .collect()
-                            } else {
-                                std::collections::HashMap::new()
-                            }
-                        } else {
-                            std::collections::HashMap::new()
-                        };
-
-                    // For each merged token, find its old SFX ordinal and OR-merge bitmap
-                    for (new_ord, token) in tokens.iter().enumerate() {
-                        if let Some(&old_ord) = reverse_map.get(token.as_str()) {
-                            if let Some(bitmap) = sepmap.bitmap(old_ord) {
-                                sepmap_writer.or_bitmap(new_ord as u32, bitmap);
-                            }
-                        }
-                    }
-                }
-
-                let sepmap_data = sepmap_writer.serialize();
-                if !sepmap_data.is_empty() {
-                    write_file(segment, "sepmap", &sepmap_data)?;
-                }
-            }
+        // Build all derived indexes via registry single-pass
+        // (posmap, bytemap, termtexts, sepmap — in one loop over tokens+sfxpost)
+        let derived_files = crate::suffix_fst::index_registry::build_derived_indexes(
+            tokens,
+            sfxpost_data.as_deref(),
+            &gapmap_data_clone,
+            self.num_docs,
+        );
+        for (ext, data) in &derived_files {
+            write_file(segment, ext, data)?;
         }
 
         ctx.metric("written", 1.0);

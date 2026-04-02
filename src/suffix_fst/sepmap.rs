@@ -215,6 +215,61 @@ impl super::index_registry::SfxIndexFile for SepMapIndex {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// SfxDerivedIndex implementation
+// ─────────────────────────────────────────────────────────────────────
+
+pub struct DerivedSepMap {
+    writer: SepMapWriter,
+}
+
+impl DerivedSepMap {
+    pub fn new() -> Self { Self { writer: SepMapWriter::new() } }
+}
+
+impl super::index_registry::SfxDerivedIndex for DerivedSepMap {
+    fn id(&self) -> &'static str { "sepmap" }
+    fn extension(&self) -> &'static str { "sepmap" }
+
+    fn depends_on(&self) -> Vec<&'static str> { vec!["posmap"] }
+
+    fn build_from_deps(&mut self, ctx: &super::index_registry::SfxDeriveContext) {
+        use super::gapmap::GapMapReader;
+        use super::posmap::PosMapReader;
+
+        let posmap_bytes = match ctx.derived.get("posmap") {
+            Some(b) => b,
+            None => return,
+        };
+        let posmap = match PosMapReader::open(posmap_bytes) {
+            Some(r) => r,
+            None => return,
+        };
+        if ctx.gapmap_data.is_empty() {
+            return;
+        }
+        let gapmap = GapMapReader::open(ctx.gapmap_data);
+
+        // Walk each doc, each consecutive token pair, record separator bytes per ordinal.
+        for doc_id in 0..ctx.num_docs {
+            let num_tokens = gapmap.num_tokens(doc_id) as u32;
+            if num_tokens == 0 { continue; }
+            for pos in 0..num_tokens.saturating_sub(1) {
+                let ord = match posmap.ordinal_at(doc_id, pos) {
+                    Some(o) => o,
+                    None => continue,
+                };
+                self.writer.ensure_capacity(ord + 1);
+                if let Some(gap_bytes) = gapmap.read_separator(doc_id, pos, pos + 1) {
+                    self.writer.record_gap(ord, gap_bytes);
+                }
+            }
+        }
+    }
+
+    fn serialize(&self) -> Vec<u8> { self.writer.serialize() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

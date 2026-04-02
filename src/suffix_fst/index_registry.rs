@@ -95,6 +95,127 @@ pub fn get_index(id: &str) -> Option<Box<dyn SfxIndexFile>> {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Derived index trait — single-pass event-driven + dependency-driven
+// ─────────────────────────────────────────────────────────────────────
+
+/// Context for dependency-driven build (after the single-pass events).
+pub struct SfxDeriveContext<'a> {
+    /// Already-serialized derived indexes, keyed by id.
+    pub derived: &'a HashMap<String, Vec<u8>>,
+    /// Primary gapmap data (from CopyGapmapNode).
+    pub gapmap_data: &'a [u8],
+    /// Number of documents in this segment.
+    pub num_docs: u32,
+}
+
+/// A derived index built from primary SFX data in a single pass.
+///
+/// Events (`on_token`, `on_posting`) are called once per token/posting
+/// during a single loop over tokens + sfxpost entries. Indexes that need
+/// data from other derived indexes declare `depends_on()` and receive
+/// the serialized data via `build_from_deps()` after the event pass.
+///
+/// Adding a new derived index = implement this trait + add to `all_derived_indexes()`.
+pub trait SfxDerivedIndex: Send {
+    fn id(&self) -> &'static str;
+    fn extension(&self) -> &'static str;
+
+    /// Called once per token in ordinal order.
+    fn on_token(&mut self, _ord: u32, _text: &str) {}
+
+    /// Called for each sfxpost entry (doc_id, position, byte_from, byte_to).
+    fn on_posting(&mut self, _ord: u32, _doc_id: u32, _position: u32,
+                  _byte_from: u32, _byte_to: u32) {}
+
+    /// IDs of derived indexes this index depends on.
+    /// Must be a subset of indexes with empty depends_on (no circular deps).
+    fn depends_on(&self) -> Vec<&'static str> { vec![] }
+
+    /// Called after the event pass, with access to already-built data.
+    /// Only called if `depends_on()` is non-empty.
+    fn build_from_deps(&mut self, _ctx: &SfxDeriveContext) {}
+
+    /// Serialize accumulated data to bytes.
+    fn serialize(&self) -> Vec<u8>;
+}
+
+/// All derived indexes. Order doesn't matter — dependencies are resolved automatically.
+pub fn all_derived_indexes() -> Vec<Box<dyn SfxDerivedIndex>> {
+    vec![
+        Box::new(super::posmap::DerivedPosMap::new()),
+        Box::new(super::bytemap::DerivedByteMap::new()),
+        Box::new(super::termtexts::DerivedTermTexts::new()),
+        Box::new(super::sepmap::DerivedSepMap::new()),
+    ]
+}
+
+/// Run the single-pass build for all derived indexes.
+///
+/// Used by both WriteSfxNode (merge) and SfxCollector (segment creation).
+pub fn build_derived_indexes(
+    tokens: &std::collections::BTreeSet<String>,
+    sfxpost_data: Option<&[u8]>,
+    gapmap_data: &[u8],
+    num_docs: u32,
+) -> Vec<(String, Vec<u8>)> {
+    let sfxpost_reader = sfxpost_data
+        .and_then(crate::suffix_fst::sfxpost_v2::SfxPostReaderV2::open_slice);
+
+    let mut indexes = all_derived_indexes();
+
+    // Phase 1: single-pass events (tokens + sfxpost entries)
+    for (ord, token) in tokens.iter().enumerate() {
+        let ord = ord as u32;
+        for idx in indexes.iter_mut() {
+            idx.on_token(ord, token);
+        }
+        if let Some(ref reader) = sfxpost_reader {
+            for entry in reader.entries(ord) {
+                for idx in indexes.iter_mut() {
+                    idx.on_posting(ord, entry.doc_id, entry.token_index,
+                                   entry.byte_from, entry.byte_to);
+                }
+            }
+        }
+    }
+
+    // Phase 2: serialize indexes without dependencies
+    let mut built: HashMap<String, Vec<u8>> = HashMap::new();
+    for idx in indexes.iter() {
+        if idx.depends_on().is_empty() {
+            let data = idx.serialize();
+            if !data.is_empty() {
+                built.insert(idx.id().to_string(), data);
+            }
+        }
+    }
+
+    // Phase 3: build indexes with dependencies
+    // Snapshot the already-built data so we can mutate `built` after build_from_deps.
+    for idx in indexes.iter_mut() {
+        if !idx.depends_on().is_empty() {
+            let ctx = SfxDeriveContext {
+                derived: &built,
+                gapmap_data,
+                num_docs,
+            };
+            idx.build_from_deps(&ctx);
+            let data = idx.serialize();
+            if !data.is_empty() {
+                built.insert(idx.id().to_string(), data);
+            }
+        }
+    }
+
+    // Return as vec of (extension, data)
+    indexes.iter()
+        .filter_map(|idx| {
+            built.remove(idx.id()).map(|data| (idx.extension().to_string(), data))
+        })
+        .collect()
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Feature checking
 // ─────────────────────────────────────────────────────────────────────
 

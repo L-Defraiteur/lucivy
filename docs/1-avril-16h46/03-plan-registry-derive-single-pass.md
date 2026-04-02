@@ -199,6 +199,36 @@ Ces 4 sont les **inputs** de la passe single-pass. Ils ne changent pas.
 6. **Test** : vérifier que les fichiers produits sont identiques bit-à-bit
    (ou au moins fonctionnellement équivalents) avant/après le refactoring
 
+### Version finale : depends_on + build_from_deps
+
+Le `finalize()` est remplacé par un système de dépendances déclaratives :
+
+```rust
+pub trait SfxDerivedIndex: Send {
+    fn id(&self) -> &'static str;
+    fn extension(&self) -> &'static str;
+
+    fn on_token(&mut self, _ord: u32, _text: &str) {}
+    fn on_posting(&mut self, _ord: u32, _doc_id: u32, _pos: u32, _bf: u32, _bt: u32) {}
+
+    fn depends_on(&self) -> Vec<&'static str> { vec![] }
+    fn build_from_deps(&mut self, _ctx: &SfxDeriveContext) {}
+
+    fn serialize(&self) -> Vec<u8>;
+}
+
+pub struct SfxDeriveContext<'a> {
+    pub derived: &'a HashMap<String, Vec<u8>>,  // index déjà sérialisés
+    pub gapmap_data: &'a [u8],                  // données primaires du DAG
+    pub num_docs: u32,
+}
+```
+
+SepMapIndex :
+- `depends_on() → ["posmap"]`
+- `build_from_deps()` : ouvre PosMapReader (dérivé) + GapMapReader (primaire),
+  walk chaque doc/position, lookup ordinal, record separator bytes.
+
 ### Résultat attendu
 
 - WriteSfxNode utilise le registry ✅
@@ -206,3 +236,4 @@ Ces 4 sont les **inputs** de la passe single-pass. Ils ne changent pas.
 - Sepmap inclus au merge ✅
 - Une seule passe sur tokens+sfxpost (au lieu de 3-4 boucles séparées) ✅
 - Même code pour segment initial et merge ✅
+- Dépendances inter-index déclaratives, zero coupling ✅
