@@ -1,10 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use super::builder::SuffixFstBuilder;
-use super::bytemap::ByteBitmapWriter;
 use super::file::SfxFileWriter;
 use super::gapmap::GapMapWriter;
-use super::posmap::PosMapWriter;
 use super::sepmap::SepMapWriter;
 use super::sibling_table::SiblingTableWriter;
 
@@ -296,15 +294,6 @@ impl SfxCollector {
             }
         }
         let sibling_data = sibling_writer.serialize();
-
-        // Build remapped SepMap: intern ordinals → final ordinals
-        let mut final_sepmap_writer = SepMapWriter::new();
-        final_sepmap_writer.ensure_capacity(num_terms);
-        for (intern_ord, bitmap) in self.sepmap_writer.bitmaps_ref().iter().enumerate() {
-            let final_ord = intern_to_final[intern_ord];
-            final_sepmap_writer.or_bitmap(final_ord, bitmap);
-        }
-        let sepmap_data = final_sepmap_writer.serialize();
 
         #[cfg(feature = "sfx-profile")]
         let sibling_ms = t0.elapsed().as_millis();

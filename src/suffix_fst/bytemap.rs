@@ -190,69 +190,18 @@ mod tests {
 // SfxIndexFile implementation
 // ─────────────────────────────────────────────────────────────────────
 
-pub struct ByteMapIndex;
+pub struct ByteMapIndex {
+    writer: ByteBitmapWriter,
+}
+
+impl ByteMapIndex {
+    pub fn new() -> Self { Self { writer: ByteBitmapWriter::new() } }
+}
 
 impl super::index_registry::SfxIndexFile for ByteMapIndex {
     fn id(&self) -> &'static str { "bytemap" }
     fn extension(&self) -> &'static str { "bytemap" }
-
-    fn build(&self, ctx: &super::index_registry::SfxBuildContext) -> Vec<u8> {
-        let mut writer = ByteBitmapWriter::new();
-        writer.ensure_capacity(ctx.token_texts.len() as u32);
-        for (ord, text) in ctx.token_texts.iter().enumerate() {
-            writer.record_token(ord as u32, text.as_bytes());
-        }
-        writer.serialize()
-    }
-
-    fn merge(&self, sources: &[Option<&[u8]>], ctx: &super::index_registry::SfxMergeContext) -> Vec<u8> {
-        let readers: Vec<Option<ByteBitmapReader>> = sources.iter()
-            .map(|opt| opt.and_then(|b| ByteBitmapReader::open(b)))
-            .collect();
-
-        let num_terms = ctx.merged_terms.len() as u32;
-        let mut writer = ByteBitmapWriter::new();
-        writer.ensure_capacity(num_terms);
-
-        for &(new_ord, text) in ctx.merged_terms {
-            let mut copied = false;
-            for (seg_ord, reader_opt) in readers.iter().enumerate() {
-                if copied { break; }
-                if let Some(reader) = reader_opt {
-                    let old_ord = ctx.ordinal_maps[seg_ord].iter()
-                        .find(|(_, new)| **new == new_ord)
-                        .map(|(&old, _)| old);
-                    if let Some(old_ord) = old_ord {
-                        if let Some(bitmap) = reader.bitmap(old_ord) {
-                            writer.copy_bitmap(new_ord, bitmap);
-                            copied = true;
-                        }
-                    }
-                }
-            }
-            if !copied {
-                writer.record_token(new_ord, text.as_bytes());
-            }
-        }
-        writer.serialize()
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// SfxDerivedIndex implementation
-// ─────────────────────────────────────────────────────────────────────
-
-pub struct DerivedByteMap {
-    writer: ByteBitmapWriter,
-}
-
-impl DerivedByteMap {
-    pub fn new() -> Self { Self { writer: ByteBitmapWriter::new() } }
-}
-
-impl super::index_registry::SfxDerivedIndex for DerivedByteMap {
-    fn id(&self) -> &'static str { "bytemap" }
-    fn extension(&self) -> &'static str { "bytemap" }
+    fn kind(&self) -> super::index_registry::IndexKind { super::index_registry::IndexKind::Derived }
 
     fn on_token(&mut self, ord: u32, text: &str) {
         self.writer.ensure_capacity(ord + 1);

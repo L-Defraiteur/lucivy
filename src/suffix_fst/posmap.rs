@@ -206,62 +206,21 @@ mod tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// SfxIndexFile implementation
+// SfxIndexFile implementation (Derived)
 // ─────────────────────────────────────────────────────────────────────
 
-pub struct PosMapIndex;
+pub struct PosMapIndex {
+    writer: PosMapWriter,
+}
+
+impl PosMapIndex {
+    pub fn new() -> Self { Self { writer: PosMapWriter::new() } }
+}
 
 impl super::index_registry::SfxIndexFile for PosMapIndex {
     fn id(&self) -> &'static str { "posmap" }
     fn extension(&self) -> &'static str { "posmap" }
-
-    fn build(&self, ctx: &super::index_registry::SfxBuildContext) -> Vec<u8> {
-        let mut writer = PosMapWriter::new();
-        for (ord, postings) in ctx.token_postings.iter().enumerate() {
-            for &(doc_id, ti, _, _) in *postings {
-                writer.add(doc_id, ti, ord as u32);
-            }
-        }
-        writer.serialize()
-    }
-
-    fn merge(&self, _sources: &[Option<&[u8]>], ctx: &super::index_registry::SfxMergeContext) -> Vec<u8> {
-        let mut writer = PosMapWriter::new();
-        for (seg_ord, reader_opt) in ctx.sfxpost_readers.iter().enumerate() {
-            if let Some(reader) = reader_opt {
-                for &(new_ord, _) in ctx.merged_terms {
-                    let old_ord = ctx.ordinal_maps[seg_ord].iter()
-                        .find(|(_, new)| **new == new_ord)
-                        .map(|(&old, _)| old);
-                    if let Some(old_ord) = old_ord {
-                        for e in reader.entries(old_ord) {
-                            if let Some(&new_doc) = ctx.reverse_doc_map[seg_ord].get(&e.doc_id) {
-                                writer.add(new_doc, e.token_index, new_ord);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        writer.serialize()
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// SfxDerivedIndex implementation
-// ─────────────────────────────────────────────────────────────────────
-
-pub struct DerivedPosMap {
-    writer: PosMapWriter,
-}
-
-impl DerivedPosMap {
-    pub fn new() -> Self { Self { writer: PosMapWriter::new() } }
-}
-
-impl super::index_registry::SfxDerivedIndex for DerivedPosMap {
-    fn id(&self) -> &'static str { "posmap" }
-    fn extension(&self) -> &'static str { "posmap" }
+    fn kind(&self) -> super::index_registry::IndexKind { super::index_registry::IndexKind::Derived }
 
     fn on_posting(&mut self, ord: u32, doc_id: u32, position: u32, _bf: u32, _bt: u32) {
         self.writer.add(doc_id, position, ord);

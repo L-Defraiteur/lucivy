@@ -815,27 +815,5 @@ pub struct GapMapIndex;
 impl super::index_registry::SfxIndexFile for GapMapIndex {
     fn id(&self) -> &'static str { "gapmap" }
     fn extension(&self) -> &'static str { "gapmap" }
-
-    fn build(&self, ctx: &super::index_registry::SfxBuildContext) -> Vec<u8> {
-        // GapMap is pre-built by the collector (needs raw text + token offsets).
-        // Just pass through the pre-built data.
-        ctx.gapmap_data.map(|d| d.to_vec()).unwrap_or_default()
-    }
-
-    fn merge(&self, _sources: &[Option<&[u8]>], ctx: &super::index_registry::SfxMergeContext) -> Vec<u8> {
-        // Copy gap data doc-by-doc in merge order
-        let mut writer = GapMapWriter::new();
-        for &doc_addr in ctx.doc_mapping {
-            let seg_ord = doc_addr.segment_ord as usize;
-            let old_doc_id = doc_addr.doc_id;
-            if let Some(Some(gapmap_bytes)) = ctx.source_gapmaps.get(seg_ord) {
-                let reader = GapMapReader::open(gapmap_bytes);
-                let doc_data = reader.doc_data(old_doc_id);
-                writer.add_doc_raw(doc_data);
-            } else {
-                writer.add_empty_doc();
-            }
-        }
-        writer.serialize()
-    }
+    fn kind(&self) -> super::index_registry::IndexKind { super::index_registry::IndexKind::Primary }
 }

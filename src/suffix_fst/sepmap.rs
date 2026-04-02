@@ -176,60 +176,18 @@ impl<'a> SepMapReader<'a> {
 // SfxIndexFile implementation
 // ─────────────────────────────────────────────────────────────────────
 
-pub struct SepMapIndex;
+pub struct SepMapIndex {
+    writer: SepMapWriter,
+}
+
+impl SepMapIndex {
+    pub fn new() -> Self { Self { writer: SepMapWriter::new() } }
+}
 
 impl super::index_registry::SfxIndexFile for SepMapIndex {
     fn id(&self) -> &'static str { "sepmap" }
     fn extension(&self) -> &'static str { "sepmap" }
-
-    fn build(&self, ctx: &super::index_registry::SfxBuildContext) -> Vec<u8> {
-        // Build from pre-built sepmap data if available
-        ctx.sepmap_data.map(|d| d.to_vec()).unwrap_or_default()
-    }
-
-    fn merge(&self, sources: &[Option<&[u8]>], ctx: &super::index_registry::SfxMergeContext) -> Vec<u8> {
-        let readers: Vec<Option<SepMapReader>> = sources.iter()
-            .map(|opt| opt.and_then(|b| SepMapReader::open(b)))
-            .collect();
-
-        let num_terms = ctx.merged_terms.len() as u32;
-        let mut writer = SepMapWriter::new();
-        writer.ensure_capacity(num_terms);
-
-        // OR-merge bitmaps from all source segments
-        for &(new_ord, _text) in ctx.merged_terms {
-            for (seg_ord, reader_opt) in readers.iter().enumerate() {
-                if let Some(reader) = reader_opt {
-                    let old_ord = ctx.ordinal_maps[seg_ord].iter()
-                        .find(|(_, new)| **new == new_ord)
-                        .map(|(&old, _)| old);
-                    if let Some(old_ord) = old_ord {
-                        if let Some(bitmap) = reader.bitmap(old_ord) {
-                            writer.or_bitmap(new_ord, bitmap);
-                        }
-                    }
-                }
-            }
-        }
-        writer.serialize()
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// SfxDerivedIndex implementation
-// ─────────────────────────────────────────────────────────────────────
-
-pub struct DerivedSepMap {
-    writer: SepMapWriter,
-}
-
-impl DerivedSepMap {
-    pub fn new() -> Self { Self { writer: SepMapWriter::new() } }
-}
-
-impl super::index_registry::SfxDerivedIndex for DerivedSepMap {
-    fn id(&self) -> &'static str { "sepmap" }
-    fn extension(&self) -> &'static str { "sepmap" }
+    fn kind(&self) -> super::index_registry::IndexKind { super::index_registry::IndexKind::DerivedWithDeps }
 
     fn depends_on(&self) -> Vec<&'static str> { vec!["posmap"] }
 
@@ -250,7 +208,6 @@ impl super::index_registry::SfxDerivedIndex for DerivedSepMap {
         }
         let gapmap = GapMapReader::open(ctx.gapmap_data);
 
-        // Walk each doc, each consecutive token pair, record separator bytes per ordinal.
         for doc_id in 0..ctx.num_docs {
             let num_tokens = gapmap.num_tokens(doc_id) as u32;
             if num_tokens == 0 { continue; }

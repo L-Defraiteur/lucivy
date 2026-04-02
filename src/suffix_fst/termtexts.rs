@@ -108,44 +108,18 @@ impl<'a> TermTextsReader<'a> {
 // SfxIndexFile implementation
 // ─────────────────────────────────────────────────────────────────────
 
-pub struct TermTextsIndex;
+pub struct TermTextsIndex {
+    writer: TermTextsWriter,
+}
+
+impl TermTextsIndex {
+    pub fn new() -> Self { Self { writer: TermTextsWriter::new() } }
+}
 
 impl super::index_registry::SfxIndexFile for TermTextsIndex {
     fn id(&self) -> &'static str { "termtexts" }
     fn extension(&self) -> &'static str { "termtexts" }
-
-    fn build(&self, ctx: &super::index_registry::SfxBuildContext) -> Vec<u8> {
-        let mut writer = TermTextsWriter::new();
-        for (ord, text) in ctx.token_texts.iter().enumerate() {
-            writer.add(ord as u32, text);
-        }
-        writer.serialize()
-    }
-
-    fn merge(&self, _sources: &[Option<&[u8]>], ctx: &super::index_registry::SfxMergeContext) -> Vec<u8> {
-        let mut writer = TermTextsWriter::new();
-        for &(new_ord, text) in ctx.merged_terms {
-            writer.add(new_ord, text);
-        }
-        writer.serialize()
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// SfxDerivedIndex implementation
-// ─────────────────────────────────────────────────────────────────────
-
-pub struct DerivedTermTexts {
-    writer: TermTextsWriter,
-}
-
-impl DerivedTermTexts {
-    pub fn new() -> Self { Self { writer: TermTextsWriter::new() } }
-}
-
-impl super::index_registry::SfxDerivedIndex for DerivedTermTexts {
-    fn id(&self) -> &'static str { "termtexts" }
-    fn extension(&self) -> &'static str { "termtexts" }
+    fn kind(&self) -> super::index_registry::IndexKind { super::index_registry::IndexKind::Derived }
 
     fn on_token(&mut self, ord: u32, text: &str) {
         self.writer.add(ord, text);
