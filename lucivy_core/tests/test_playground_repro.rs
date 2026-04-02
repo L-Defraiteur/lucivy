@@ -1,11 +1,15 @@
 //! Reproduce the playground indexation flow natively.
 //!
 //! Indexes the rag3db repo files exactly like the WASM playground:
-//! - One doc per file (path + content fields)
-//! - COMMIT_EVERY = 200 docs
+//! - Same TEXT_EXTENSIONS filter
+//! - Same isBinaryContent check (null byte in first 512 bytes)
+//! - Same MAX_FILE_SIZE = 100KB
+//! - Same COMMIT_EVERY = 200 docs
 //! - No drain_merges (WASM doesn't call it)
+//! - Fields: path (text, stored, not indexed) + content (text, stored, indexed)
 //!
-//! Then tests fuzzy d=1 for "rag3weaver" and "rak3weaver" with highlights.
+//! The repo root defaults to the rag3db parent directory (packages/rag3db/).
+//! Set RAG3DB_ROOT env var to override.
 
 use lucivy_core::handle::LucivyHandle;
 use lucivy_core::query::{self, QueryConfig, SchemaConfig};
@@ -15,30 +19,52 @@ use std::sync::Arc;
 const COMMIT_EVERY: usize = 200;
 const MAX_FILE_SIZE: u64 = 100_000;
 
-/// Collect files from the rag3db repo (same filtering as playground).
-fn collect_rag3db_files() -> Vec<(String, String)> {
-    let rag3db_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../");  // ld-lucivy → lucivy → rag3db
+/// Same extensions as the playground's TEXT_EXTENSIONS set.
+const TEXT_EXTENSIONS: &[&str] = &[
+    "txt", "md", "rs", "py", "js", "ts", "jsx", "tsx", "json", "toml",
+    "yaml", "yml", "html", "htm", "css", "scss", "less", "go", "java",
+    "c", "cpp", "cc", "h", "hpp", "rb", "sh", "bash", "zsh", "fish",
+    "sql", "xml", "csv", "tsv", "r", "swift", "kt", "scala",
+    "lua", "vim", "el", "ex", "exs", "erl", "hs", "ml", "mli",
+    "clj", "lisp", "php", "pl", "pm", "tcl", "awk", "sed",
+    "makefile", "cmake", "dockerfile", "gitignore", "env",
+    "cfg", "ini", "conf", "properties", "lock",
+];
 
-    // The playground indexes the parent rag3db repo, not ld-lucivy
-    let root = if rag3db_root.join("extension").exists() {
-        rag3db_root
-    } else {
-        // Fallback: index ld-lucivy itself
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").to_path_buf().into()
-    };
+/// Same as playground's isTextFilename
+fn is_text_filename(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    if let Some(dot_pos) = lower.rfind('.') {
+        let ext = &lower[dot_pos + 1..];
+        if TEXT_EXTENSIONS.contains(&ext) { return true; }
+    }
+    let base = lower.rsplit('/').next().unwrap_or(&lower);
+    matches!(base, "makefile" | "dockerfile" | "readme" | "license" | "changelog" | "authors" | "cargo.lock")
+}
+
+/// Same as playground's isBinaryContent
+fn is_binary_content(content: &[u8]) -> bool {
+    content[..content.len().min(512)].contains(&0)
+}
+
+/// Collect files from the rag3db repo, matching the playground's exact filtering.
+fn collect_repo_files() -> Vec<(String, String)> {
+    // Default to the rag3db repo root (parent of ld-lucivy)
+    let default_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../"); // lucivy_core → ld-lucivy → lucivy → rag3db
+    let root = std::env::var("RAG3DB_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| default_root);
+
+    eprintln!("Indexing from: {}", root.display());
 
     let exclude_dirs: Vec<&str> = vec![
         "target", "node_modules", "__pycache__", ".venv",
-        ".pytest_cache", "pkg", ".git", "playground", "build",
-    ];
-    let text_extensions: Vec<&str> = vec![
-        "txt", "md", "rs", "py", "js", "ts", "go", "java", "c", "cpp",
-        "json", "toml", "yaml", "html", "css", "sh", "sql",
+        ".pytest_cache", "pkg", ".git", "build", "build_wasm",
     ];
     let mut files = Vec::new();
 
-    fn walk(dir: &std::path::Path, exclude: &[&str], text_ext: &[&str],
+    fn walk(dir: &std::path::Path, exclude: &[&str],
             files: &mut Vec<(String, String)>, root: &std::path::Path) {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
@@ -49,15 +75,13 @@ fn collect_rag3db_files() -> Vec<(String, String)> {
             let name = entry.file_name().to_string_lossy().to_string();
             if path.is_dir() {
                 if !exclude.contains(&name.as_str()) {
-                    walk(&path, exclude, text_ext, files, root);
+                    walk(&path, exclude, files, root);
                 }
             } else if path.is_file() {
-                // Check extension
-                let ext = path.extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("");
-                if !text_ext.contains(&ext) { continue; }
-                // Check size
+                let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
+                // Same extension check as playground
+                if !is_text_filename(&rel) { continue; }
+                // Same size check
                 if let Ok(meta) = path.metadata() {
                     if meta.len() > MAX_FILE_SIZE { continue; }
                 }
@@ -65,28 +89,36 @@ fn collect_rag3db_files() -> Vec<(String, String)> {
                     Ok(b) => b,
                     Err(_) => continue,
                 };
-                if bytes.contains(&0) { continue; }
+                // Same binary check as playground
+                if is_binary_content(&bytes) { continue; }
                 let content = match String::from_utf8(bytes) {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
-                if content.trim().is_empty() { continue; }
-                let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
+                if content.is_empty() { continue; }
                 files.push((rel, content));
             }
         }
     }
 
-    walk(&root, &exclude_dirs, &text_extensions, &mut files, &root);
+    walk(&root, &exclude_dirs, &mut files, &root);
     files.sort_by(|a, b| a.0.cmp(&b.0));
     files
 }
 
 #[test]
 fn test_playground_repro() {
-    let files = collect_rag3db_files();
+    let files = collect_repo_files();
     eprintln!("Collected {} files", files.len());
-    assert!(files.len() > 100, "Expected at least 100 files from repo");
+
+    // Verify we got the rag3db repo (not just ld-lucivy)
+    let has_cmake = files.iter().any(|(p, _)| p.contains("CMakeLists"));
+    let has_extension = files.iter().any(|(p, _)| p.starts_with("extension/"));
+    eprintln!("Has CMakeLists: {}, Has extension/: {}", has_cmake, has_extension);
+
+    // Check if "librag3weaver" is in any file (the bug trigger)
+    let has_librag3weaver = files.iter().any(|(_, c)| c.contains("librag3weaver"));
+    eprintln!("Has 'librag3weaver' in content: {}", has_librag3weaver);
 
     // ── Create index exactly like the playground ──
     let tmp_path = std::path::Path::new("/tmp/test_playground_repro");
@@ -124,10 +156,8 @@ fn test_playground_repro() {
                 let t = std::time::Instant::now();
                 writer.commit().unwrap();
                 eprintln!("  commit after {} docs ({}ms)", i + 1, t.elapsed().as_millis());
-                // NO drain_merges — playground doesn't do it
             }
         }
-        // Final commit
         let t = std::time::Instant::now();
         writer.commit().unwrap();
         eprintln!("  final commit after {} docs ({}ms)", files.len(), t.elapsed().as_millis());
@@ -136,25 +166,14 @@ fn test_playground_repro() {
     let index_ms = t_index.elapsed().as_millis();
 
     let searcher = handle.reader.searcher();
-    let num_segments = searcher.segment_readers().len();
-    eprintln!("\nIndex: {} docs, {} segments, indexed in {}ms", searcher.num_docs(), num_segments, index_ms);
-
-    // Check SFX presence
-    for (i, reader) in searcher.segment_readers().iter().enumerate() {
-        let has_sfx = reader.sfx_file(content_field).is_some();
-        let has_posmap = reader.posmap_file(content_field).is_some();
-        let has_termtexts = reader.sfx_index_file("termtexts", content_field).is_some();
-        let has_sepmap = reader.sfx_index_file("sepmap", content_field).is_some();
-        let has_freqmap = reader.sfx_index_file("freqmap", content_field).is_some();
-        eprintln!("  seg[{}]: {} docs, sfx={} posmap={} termtexts={} sepmap={} freqmap={}",
-            i, reader.num_docs(), has_sfx, has_posmap, has_termtexts, has_sepmap, has_freqmap);
-    }
+    eprintln!("\nIndex: {} docs, {} segments, indexed in {}ms",
+        searcher.num_docs(), searcher.segment_readers().len(), index_ms);
 
     // ── Test queries ──
     let test_cases: Vec<(&str, u8)> = vec![
-        ("rag3weaver", 0),    // exact contains
-        ("rag3weaver", 1),    // fuzzy d=1
-        ("rak3weaver", 1),    // fuzzy d=1 (substitution)
+        ("rag3weaver", 0),
+        ("rag3weaver", 1),
+        ("rak3weaver", 1),
     ];
 
     for (query_text, distance) in &test_cases {
@@ -176,8 +195,7 @@ fn test_playground_repro() {
 
         eprintln!("{} results in {}ms", results.len(), query_ms);
 
-        // Show highlights for first 10 results
-        for (score, addr) in results.iter().take(10) {
+        for (score, addr) in results.iter().take(20) {
             let doc: ld_lucivy::LucivyDocument = searcher.doc(*addr).unwrap();
             let path: String = doc.get_first(path_field)
                 .map(|v| { let o: ld_lucivy::schema::OwnedValue = v.into(); match o { ld_lucivy::schema::OwnedValue::Str(s) => s, _ => String::new() } })
@@ -195,7 +213,6 @@ fn test_playground_repro() {
                         let hl_end = hl[1].min(content.len());
                         if hl[0] < content.len() && content.is_char_boundary(hl[0]) && content.is_char_boundary(hl_end) {
                             let matched = &content[hl[0]..hl_end];
-                            // Strip non-alphanumeric and check distance
                             let stripped: String = matched.chars()
                                 .filter(|c| c.is_alphanumeric())
                                 .collect::<String>()
@@ -203,10 +220,18 @@ fn test_playground_repro() {
                             let query_lower = query_text.to_lowercase();
                             let dist = levenshtein(&stripped, &query_lower);
                             let status = if dist <= *distance as u32 { "OK" } else { "FAIL" };
-                            eprintln!("  [{}] {} score={:.4} hl=[{},{}] len={} stripped=\"{}\" dist={}  raw=\"{}\"",
+
+                            // Show more context for FAIL
+                            let ctx_start = hl[0].saturating_sub(15);
+                            let ctx_end = (hl_end + 15).min(content.len());
+                            let ctx_s = if ctx_start > 0 { let mut s = ctx_start; while s > 0 && !content.is_char_boundary(s) { s -= 1; } s } else { 0 };
+                            let ctx_e = { let mut e = ctx_end; while e < content.len() && !content.is_char_boundary(e) { e += 1; } e };
+
+                            eprintln!("  [{}] {} score={:.4} hl=[{},{}] len={} stripped=\"{}\" dist={} raw=\"{}\" ctx=\"{}\"",
                                 status, path, score, hl[0], hl[1], hl[1] - hl[0],
                                 stripped, dist,
-                                matched.replace('\n', "\\n"));
+                                matched.replace('\n', "\\n"),
+                                content[ctx_s..ctx_e].replace('\n', "\\n"));
                         }
                     }
                 }

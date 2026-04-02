@@ -829,9 +829,10 @@ pub fn fuzzy_contains_via_trigram(
         // skip DFA validation entirely, use trigram positions as highlight.
         if trigram_proven {
             doc_bitset.insert(doc_id);
-            // hl_start: first trigram is at query_positions[first_tri_idx] bytes into the query,
-            // and at content byte first_bf (with first_si offset into its parent token).
-            let hl_start = (*first_bf as usize).saturating_sub(query_positions[first_tri_idx] + first_si as usize);
+            // hl_start: first_bf is the content byte where the first trigram's suffix match starts.
+            // The match in the query starts query_positions[first_tri_idx] bytes before the first trigram.
+            // Note: do NOT subtract first_si — first_bf already points to the suffix start, not the token start.
+            let hl_start = (*first_bf as usize).saturating_sub(query_positions[first_tri_idx]);
             // hl_end: last trigram ends at content byte last_bt.
             // Remaining query bytes after last trigram = query_len - query_positions[last_tri_idx] - n
             let remaining = query_text.len().saturating_sub(query_positions[last_tri_idx] + n);

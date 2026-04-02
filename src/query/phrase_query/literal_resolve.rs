@@ -222,9 +222,21 @@ pub fn intersect_trigrams_with_threshold(
             let query_span = query_positions[last.0] as i64 - query_positions[first.0] as i64;
             let span_diff = (text_span - query_span).unsigned_abs();
             if span_diff > distance as u64 { return false; }
-            // If ALL trigrams matched with consistent span, the match is
-            // proven by pigeonhole — DFA validation can be skipped.
-            let proven = chain.len() == num_trigrams && span_diff <= distance as u64;
+            // Proven = ALL trigrams matched AND each consecutive pair has
+            // a byte span within ±distance of the expected query offset.
+            // Global span_diff alone is insufficient — shifted matches like
+            // "librag3weaver" have all trigrams shifted by +3 but same span.
+            let mut proven = chain.len() == num_trigrams && span_diff <= distance as u64;
+            if proven && chain.len() >= 2 {
+                for w in chain.windows(2) {
+                    let pair_text_span = w[1].1 as i64 - w[0].1 as i64;
+                    let pair_query_span = query_positions[w[1].0] as i64 - query_positions[w[0].0] as i64;
+                    if (pair_text_span - pair_query_span).unsigned_abs() > distance as u64 {
+                        proven = false;
+                        break;
+                    }
+                }
+            }
             results.push((doc_id, first.1, last.2, first.0, first.3, proven, last.0));
             false
         };
