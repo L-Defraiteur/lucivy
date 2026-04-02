@@ -776,6 +776,12 @@ pub fn fuzzy_contains_via_trigram(
     let _intersect_ms = _t_intersect.elapsed().as_millis();
 
 
+    // Sort candidates: proven first, then by doc_id.
+    // This maximizes doc-dedup — proven candidates populate the bitset for free,
+    // so non-proven candidates for the same doc are skipped.
+    let mut candidates = candidates;
+    candidates.sort_by(|a, b| b.5.cmp(&a.5).then(a.0.cmp(&b.0)));
+
     let _t_dfa = std::time::Instant::now();
     // Step 3: Validate each candidate with Levenshtein DFA via PosMap
     // For d>=3, skip DFA entirely — the Levenshtein DFA has huge state space
@@ -808,12 +814,18 @@ pub fn fuzzy_contains_via_trigram(
     let mut highlights: Vec<(DocId, usize, usize)> = Vec::new();
 
 
+    let mut _diag_unproven = 0usize;
+    let mut _diag_unproven_skipped = 0usize;
+    let mut _diag_unproven_dfa = 0usize;
+    let mut _diag_unproven_dfa_fail = 0usize;
+
     for (doc_id, first_bf, last_bt, first_tri_idx, first_si, trigram_proven, last_tri_idx) in &candidates {
         let doc_id = *doc_id;
         let first_tri_idx = *first_tri_idx;
         let first_si = *first_si;
         let trigram_proven = *trigram_proven;
         let last_tri_idx = *last_tri_idx;
+        if !trigram_proven { _diag_unproven += 1; }
 
         // Find the token position for first_bf from the trigram matches
         let first_pos = all_matches.iter()
@@ -844,7 +856,8 @@ pub fn fuzzy_contains_via_trigram(
         // For docs already validated: skip DFA only for proven candidates
         // (non-proven might be false positives that DFA would reject)
         if doc_bitset.contains(doc_id) && !trigram_proven {
-            continue; // Skip non-proven duplicates — no reliable highlight without DFA
+            _diag_unproven_skipped += 1;
+            continue;
         }
 
         if let Some(pm) = &posmap {
@@ -1017,9 +1030,11 @@ pub fn fuzzy_contains_via_trigram(
     if _total_ms > 5 {
         let proven = candidates.iter().filter(|c| c.5 /* trigram_proven */).count();
         let unproven = candidates.len() - proven;
-        eprintln!("[fuzzy-timing] total={}ms fst={}ms resolve={}ms intersect={}ms dfa={}ms | ngrams={} candidates={} (proven={} unproven={}) results={} max_doc={}",
+        eprintln!("[fuzzy-timing] total={}ms fst={}ms resolve={}ms intersect={}ms dfa={}ms | ngrams={} candidates={} (proven={} unproven={} skipped={} dfa_walked={}) results={} max_doc={}",
             _total_ms, _fst_ms, _resolve_ms, _intersect_ms, _dfa_ms,
-            ngrams.len(), candidates.len(), proven, unproven, highlights.len(), max_doc);
+            ngrams.len(), candidates.len(), proven, unproven, _diag_unproven_skipped,
+            _diag_unproven - _diag_unproven_skipped,
+            highlights.len(), max_doc);
     }
 
     Ok((doc_bitset, highlights))

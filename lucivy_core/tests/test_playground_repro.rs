@@ -48,19 +48,29 @@ fn is_binary_content(content: &[u8]) -> bool {
 }
 
 /// Collect files from the rag3db repo, matching the playground's exact filtering.
+/// Uses RAG3DB_ROOT env var, or clones from GitHub to /tmp/test_rag3db_clone.
 fn collect_repo_files() -> Vec<(String, String)> {
-    // Default to the rag3db repo root (parent of ld-lucivy)
-    let default_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../"); // lucivy_core → ld-lucivy → lucivy → rag3db
-    let root = std::env::var("RAG3DB_ROOT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| default_root);
+    let root = if let Ok(path) = std::env::var("RAG3DB_ROOT") {
+        std::path::PathBuf::from(path)
+    } else {
+        let clone_path = std::path::Path::new("/tmp/test_rag3db_clone");
+        if !clone_path.exists() {
+            eprintln!("Cloning https://github.com/L-Defraiteur/rag3db.git ...");
+            let status = std::process::Command::new("git")
+                .args(&["clone", "--depth", "1", "https://github.com/L-Defraiteur/rag3db.git", clone_path.to_str().unwrap()])
+                .status()
+                .expect("git clone failed");
+            assert!(status.success(), "git clone failed");
+        }
+        clone_path.to_path_buf()
+    };
 
     eprintln!("Indexing from: {}", root.display());
 
+    // No exclude dirs — the playground indexes everything from the tarball
+    // (it doesn't know about .git, build dirs etc. — tarball excludes .git already)
     let exclude_dirs: Vec<&str> = vec![
-        "target", "node_modules", "__pycache__", ".venv",
-        ".pytest_cache", "pkg", ".git", "build", "build_wasm",
+        ".git",
     ];
     let mut files = Vec::new();
 
@@ -73,6 +83,10 @@ fn collect_repo_files() -> Vec<(String, String)> {
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
+            // Skip symlinks (tarball doesn't follow them)
+            if path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                continue;
+            }
             if path.is_dir() {
                 if !exclude.contains(&name.as_str()) {
                     walk(&path, exclude, files, root);
@@ -174,6 +188,7 @@ fn test_playground_repro() {
         ("rag3weaver", 0),
         ("rag3weaver", 1),
         ("rak3weaver", 1),
+        ("rag3db", 1),
     ];
 
     for (query_text, distance) in &test_cases {
