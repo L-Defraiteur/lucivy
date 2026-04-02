@@ -84,6 +84,25 @@ Alternative : stocker un `ordinal` seulement, et cacher les texts dans
 un `HashMap<u32, String>` une seule fois par segment (le termtexts reader
 est O(1) par lookup, pas besoin de le rappeler).
 
+### Qui en profite ?
+
+**Pas que le fuzzy — tous les chemins de query :**
+
+| Chemin | Lookup éliminé | Où |
+|--------|---------------|-----|
+| **Fuzzy d>0** (trigram path) | ord_to_term × N tokens × M candidats dans DFA walk | regex_continuation_query.rs:890 |
+| **Fuzzy d>0** (validate_path) | ord_to_term × N tokens par gap validation | literal_resolve.rs:314 |
+| **Regex** (multi-literal gaps) | ord_to_term dans validate_path pour chaque gap | regex_continuation_query.rs:1296,1325 |
+| **Regex** (sibling DFS) | ord_to_term par sibling dans continuation | regex_continuation_query.rs:1453 |
+| **Contains d=0** (cross-token) | ordinal perdu à la résolution, re-fetché si highlight | suffix_contains.rs:137 |
+| **Pipeline briques** | ordinal_cache local à resolve_chains, perdu après | literal_pipeline.rs:273-284 |
+| **bf_to_pos HashMap** | pourrait être éliminé si position déjà dans le match | regex_continuation_query.rs:819-825 |
+
+**Conclusion** : l'enrichissement de LiteralMatch est transversal. Il bénéficie
+à TOUS les chemins de query qui utilisent les briques du pipeline. C'est
+l'optimisation la plus structurante car elle élimine les lookups au point de
+consommation en les faisant UNE FOIS au point de production.
+
 ---
 
 ## Plan B : Grouper candidats par doc_id (PRIORITÉ 2)
