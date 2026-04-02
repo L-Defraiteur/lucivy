@@ -319,30 +319,36 @@ impl SfxCollector {
         ).with_sibling_data(sibling_data.clone());
         let sfx_bytes = file_writer.to_bytes();
 
-        // Build all registry index files via SfxBuildContext
-        let token_text_refs: Vec<&str> = sorted_indices.iter()
-            .map(|&old_ord| self.token_texts[old_ord as usize].as_str())
+        // Build sfxpost (primary — needed by derived indexes)
+        let sorted_tokens: std::collections::BTreeSet<String> = sorted_indices.iter()
+            .map(|&old_ord| self.token_texts[old_ord as usize].clone())
             .collect();
-        let postings_refs: Vec<&[(u32, u32, u32, u32)]> = sorted_indices.iter()
-            .map(|&old_ord| self.token_postings[old_ord as usize].as_slice())
-            .collect();
+        let num_docs = self.gapmap_writer.num_docs() as u32;
 
-        let build_ctx = super::index_registry::SfxBuildContext {
-            token_texts: &token_text_refs,
-            token_postings: &postings_refs,
-            num_docs: self.gapmap_writer.num_docs() as u32,
-            gapmap_data: Some(&gapmap_data),
-            sibling_data: Some(&sibling_data),
-            sepmap_data: Some(&sepmap_data),
-        };
-
-        let mut registry_files = Vec::new();
-        for index in super::index_registry::all_indexes() {
-            let data = index.build(&build_ctx);
-            if !data.is_empty() {
-                registry_files.push((index.extension().to_string(), data));
+        let mut sfxpost_writer = super::sfxpost_v2::SfxPostWriterV2::new(num_terms as usize);
+        for (final_ord, &old_ord) in sorted_indices.iter().enumerate() {
+            for &(doc_id, ti, bf, bt) in &self.token_postings[old_ord as usize] {
+                sfxpost_writer.add_entry(final_ord as u32, doc_id, ti, bf, bt);
             }
         }
+        let sfxpost_data = sfxpost_writer.finish();
+
+        // Build all derived indexes via single-pass registry
+        // (posmap, bytemap, termtexts, sepmap — one loop over tokens+sfxpost)
+        let derived_files = super::index_registry::build_derived_indexes(
+            &sorted_tokens,
+            Some(&sfxpost_data),
+            &gapmap_data,
+            num_docs,
+        );
+
+        let mut registry_files = Vec::new();
+        // Primary files
+        registry_files.push(("sfxpost".to_string(), sfxpost_data));
+        registry_files.push(("gapmap".to_string(), gapmap_data.clone()));
+        registry_files.push(("sibling".to_string(), sibling_data.clone()));
+        // Derived files
+        registry_files.extend(derived_files);
 
         #[cfg(feature = "sfx-profile")]
         eprintln!(
