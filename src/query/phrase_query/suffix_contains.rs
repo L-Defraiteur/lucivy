@@ -26,8 +26,9 @@ pub struct SuffixContainsMatch {
     #[allow(dead_code)]
     pub parent_term: String,
     /// Suffix index (0 = full token match, >0 = substring).
-    #[allow(dead_code)]
     pub si: u16,
+    /// Total byte length of the parent token (lowercased).
+    pub token_len: u16,
 }
 
 /// Search for single-token contains matches using the suffix FST.
@@ -150,8 +151,9 @@ where
                     token_index: entry.token_index,
                     byte_from: entry.byte_from as usize + parent.si as usize,
                     byte_to: entry.byte_from as usize + parent.si as usize + query_len,
-                    parent_term: String::new(), // resolved later if needed
+                    parent_term: String::new(),
                     si: parent.si,
+                    token_len: parent.token_len,
                 });
             }
         }

@@ -29,6 +29,8 @@ pub struct LiteralMatch {
     /// Suffix index: byte offset within the parent token where the match starts.
     /// `byte_from - si` gives the content byte start of the parent token.
     pub si: u16,
+    /// Total byte length of the parent token (lowercased).
+    pub token_len: u16,
 }
 
 // ─────────────────────────────────────────────────────────────────────
