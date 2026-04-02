@@ -681,6 +681,7 @@ pub fn fuzzy_contains_via_trigram(
     // Minimum 2 to avoid flooding with single-bigram false positives.
     let threshold = (ngrams.len() as i32 - n as i32 * distance as i32 - 1).max(2) as usize;
 
+    let _t_total = std::time::Instant::now();
     // Step 1: Pipeline — estimate selectivity, resolve in order, filter progressively.
     //
     // Phase A: FST walk + falling walk for ALL trigrams (no resolve, quasi free).
@@ -689,6 +690,7 @@ pub fn fuzzy_contains_via_trigram(
     let mut ct_chains_per_gram: Vec<Vec<literal_pipeline::CrossTokenChain>> = Vec::new();
     let mut selectivity: Vec<(usize, usize)> = Vec::new(); // (original_index, score)
 
+    let _t_fst = std::time::Instant::now();
     for (i, gram) in ngrams.iter().enumerate() {
         let fst_cands = literal_pipeline::fst_candidates(sfx_reader, gram);
         let ct_chains = literal_pipeline::cross_token_falling_walk(sfx_reader, gram, 0, ord_to_term);
@@ -697,6 +699,7 @@ pub fn fuzzy_contains_via_trigram(
         fst_cands_per_gram.push(fst_cands);
         ct_chains_per_gram.push(ct_chains);
     }
+    let _fst_ms = _t_fst.elapsed().as_millis();
 
     // Sort by selectivity ascending (rarest first)
     selectivity.sort_by_key(|&(_, score)| score);
@@ -718,6 +721,7 @@ pub fn fuzzy_contains_via_trigram(
     let mut all_matches: Vec<Vec<LiteralMatch>> = vec![Vec::new(); ngrams.len()];
     let mut doc_filter: Option<std::collections::HashSet<DocId>> = None;
 
+    let _t_resolve = std::time::Instant::now();
     // Step B1: Resolve the `threshold` rarest exact trigrams without filter
     for &(gram_idx, _) in exact_grams.iter().take(filter_count) {
         let literal_len = ngrams[gram_idx].to_lowercase().len();
@@ -758,7 +762,10 @@ pub fn fuzzy_contains_via_trigram(
         all_matches[gram_idx] = matches;
     }
 
+    let _resolve_ms = _t_resolve.elapsed().as_millis();
+
     // Step 2: Filter by trigram order + threshold + byte span
+    let _t_intersect = std::time::Instant::now();
     let grouped: Vec<literal_resolve::MatchesByDoc> = all_matches.iter()
         .map(|matches| literal_resolve::group_by_doc(matches))
         .collect();
@@ -766,8 +773,10 @@ pub fn fuzzy_contains_via_trigram(
     let candidates = literal_resolve::intersect_trigrams_with_threshold(
         &grouped, &query_positions, threshold, distance,
     );
+    let _intersect_ms = _t_intersect.elapsed().as_millis();
 
 
+    let _t_dfa = std::time::Instant::now();
     // Step 3: Validate each candidate with Levenshtein DFA via PosMap
     // For d>=3, skip DFA entirely — the Levenshtein DFA has huge state space
     // and the trigram intersection is sufficient at this distance level.
@@ -994,6 +1003,16 @@ pub fn fuzzy_contains_via_trigram(
     // (they may come from different match instances, each valid on its own).
     highlights.sort_by_key(|&(doc, bf, bt)| (doc, bf, bt));
     highlights.dedup();
+
+    let _dfa_ms = _t_dfa.elapsed().as_millis();
+    let _total_ms = _t_total.elapsed().as_millis();
+    if _total_ms > 5 {
+        let proven = candidates.iter().filter(|c| c.5).count();
+        let unproven = candidates.len() - proven;
+        eprintln!("[fuzzy-timing] total={}ms fst={}ms resolve={}ms intersect={}ms dfa={}ms | ngrams={} candidates={} (proven={} unproven={}) results={} max_doc={}",
+            _total_ms, _fst_ms, _resolve_ms, _intersect_ms, _dfa_ms,
+            ngrams.len(), candidates.len(), proven, unproven, highlights.len(), max_doc);
+    }
 
     Ok((doc_bitset, highlights))
 }
