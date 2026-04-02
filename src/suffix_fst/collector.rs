@@ -245,111 +245,67 @@ impl SfxCollector {
         self.gapmap_writer.add_empty_doc();
     }
 
-    /// Build all index files from collected data.
+    /// Extract sorted data from collector for DAG-based build.
     ///
-    /// Returns `SfxBuildOutput` with each section as a self-contained binary blob.
-    pub fn build(self) -> Result<SfxBuildOutput, lucivy_fst::Error> {
-        #[cfg(feature = "sfx-profile")]
-        let t_total = std::time::Instant::now();
-
-        // Sort interned tokens to get BTreeSet-equivalent order for ordinals.
+    /// Sorts tokens, remaps ordinals, serializes gapmap.
+    /// Returns `SfxCollectorData` ready for DAG nodes.
+    pub fn into_data(self) -> SfxCollectorData {
         let num_tokens = self.token_texts.len();
-        #[cfg(feature = "sfx-profile")]
-        let t0 = std::time::Instant::now();
+
+        // Sort interned tokens to get BTreeSet-equivalent order for ordinals
         let mut sorted_indices: Vec<u32> = (0..num_tokens as u32).collect();
         sorted_indices.sort_by(|&a, &b| {
             self.token_texts[a as usize].cmp(&self.token_texts[b as usize])
         });
-        #[cfg(feature = "sfx-profile")]
-        let sort_ms = t0.elapsed().as_millis();
 
-        #[cfg(feature = "sfx-profile")]
-        let t0 = std::time::Instant::now();
-        let mut sfx_builder = SuffixFstBuilder::with_min_suffix_len(self.min_suffix_len);
-        for (new_ordinal, &old_ord) in sorted_indices.iter().enumerate() {
-            sfx_builder.add_token(&self.token_texts[old_ord as usize], new_ordinal as u64);
-        }
-        let (fst_data, parent_list_data) = sfx_builder.build()?;
-        #[cfg(feature = "sfx-profile")]
-        let fst_ms = t0.elapsed().as_millis();
-
-        let num_terms = num_tokens as u32;
-        let gapmap_data = self.gapmap_writer.serialize();
-
-        // Build reverse mapping: intern_id → final_ordinal
-        #[cfg(feature = "sfx-profile")]
-        let t0 = std::time::Instant::now();
+        // Reverse mapping: intern_id → final_ordinal
         let mut intern_to_final = vec![0u32; num_tokens];
         for (new_ord, &old_ord) in sorted_indices.iter().enumerate() {
             intern_to_final[old_ord as usize] = new_ord as u32;
         }
 
-        // Build sibling table with remapped ordinals
-        let mut sibling_writer = SiblingTableWriter::new(num_terms);
-        for ((intern_a, intern_b), gap_lens) in &self.sibling_pairs {
-            let final_a = intern_to_final[*intern_a as usize];
-            let final_b = intern_to_final[*intern_b as usize];
-            for &gap_len in gap_lens {
-                sibling_writer.add(final_a, final_b, gap_len);
-            }
-        }
-        let sibling_data = sibling_writer.serialize();
-
-        #[cfg(feature = "sfx-profile")]
-        let sibling_ms = t0.elapsed().as_millis();
-
-        // .sfx = FST + parent lists only (gapmap + sibling are separate registry files)
-        let file_writer = SfxFileWriter::new(
-            fst_data,
-            parent_list_data,
-            gapmap_data.clone(),
-            self.gapmap_writer.num_docs(),
-            num_terms,
-        ).with_sibling_data(sibling_data.clone());
-        let sfx_bytes = file_writer.to_bytes();
-
-        // Build sfxpost (primary — needed by derived indexes)
-        let sorted_tokens: std::collections::BTreeSet<String> = sorted_indices.iter()
+        // Sorted tokens as BTreeSet
+        let tokens: std::collections::BTreeSet<String> = sorted_indices.iter()
             .map(|&old_ord| self.token_texts[old_ord as usize].clone())
             .collect();
+
+        let gapmap_data = self.gapmap_writer.serialize();
         let num_docs = self.gapmap_writer.num_docs() as u32;
 
-        let mut sfxpost_writer = super::sfxpost_v2::SfxPostWriterV2::new(num_terms as usize);
-        for (final_ord, &old_ord) in sorted_indices.iter().enumerate() {
-            for &(doc_id, ti, bf, bt) in &self.token_postings[old_ord as usize] {
-                sfxpost_writer.add_entry(final_ord as u32, doc_id, ti, bf, bt);
-            }
-        }
-        let sfxpost_data = sfxpost_writer.finish();
-
-        // Build all derived indexes via single-pass registry
-        // (posmap, bytemap, termtexts, sepmap — one loop over tokens+sfxpost)
-        let derived_files = super::index_registry::build_derived_indexes(
-            &sorted_tokens,
-            Some(&sfxpost_data),
-            &gapmap_data,
+        SfxCollectorData {
+            tokens,
+            sorted_indices,
+            intern_to_final,
+            token_texts: self.token_texts,
+            token_postings: self.token_postings,
+            sibling_pairs: self.sibling_pairs,
+            gapmap_data,
             num_docs,
-        );
-
-        let mut registry_files = Vec::new();
-        // Primary files
-        registry_files.push(("sfxpost".to_string(), sfxpost_data));
-        registry_files.push(("gapmap".to_string(), gapmap_data.clone()));
-        registry_files.push(("sibling".to_string(), sibling_data.clone()));
-        // Derived files
-        registry_files.extend(derived_files);
-
-        #[cfg(feature = "sfx-profile")]
-        eprintln!(
-            "[sfx-profile] build: {}tokens | sort={}ms fst={}ms sibling={}ms | total={}ms",
-            num_tokens, sort_ms, fst_ms, sibling_ms, t_total.elapsed().as_millis(),
-        );
-
-        Ok(SfxBuildOutput {
-            sfx: sfx_bytes,
-            registry_files,
-        })
+            min_suffix_len: self.min_suffix_len,
+        }
     }
+}
+
+/// Data extracted from SfxCollector, ready for DAG-based build.
+pub struct SfxCollectorData {
+    /// Unique tokens in sorted (BTreeSet) order = final ordinal order.
+    pub tokens: std::collections::BTreeSet<String>,
+    /// Mapping from final ordinal → intern ordinal.
+    pub sorted_indices: Vec<u32>,
+    /// Reverse mapping: intern ordinal → final ordinal.
+    pub intern_to_final: Vec<u32>,
+    /// Token texts indexed by intern ordinal.
+    pub token_texts: Vec<String>,
+    /// Posting entries per intern ordinal: (doc_id, token_index, byte_from, byte_to).
+    pub token_postings: Vec<Vec<(u32, u32, u32, u32)>>,
+    /// Sibling pairs: (intern_a, intern_b) → gap_lens.
+    pub sibling_pairs: HashMap<(u32, u32), HashSet<u16>>,
+    /// Serialized gapmap data.
+    pub gapmap_data: Vec<u8>,
+    /// Number of documents.
+    pub num_docs: u32,
+    /// Minimum suffix length for the FST.
+    pub min_suffix_len: usize,
 }
 
 /// Encode a u32 as a variable-length integer (1-5 bytes, little-endian, MSB continuation).

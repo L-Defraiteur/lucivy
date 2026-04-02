@@ -28,7 +28,7 @@ mod stress_tests;
 /// Builder for constructing a suffix FST from unique tokens.
 pub use builder::{SuffixFstBuilder, ParentEntry};
 /// Collector that captures tokens during segment writing for suffix FST construction.
-pub use collector::{SfxCollector, SfxBuildOutput};
+pub use collector::{SfxCollector, SfxBuildOutput, SfxCollectorData};
 pub(crate) use collector::encode_vint;
 /// Writer and reader for the GapMap binary format (inter-token separators).
 pub use gapmap::{GapMapWriter, GapMapReader};

@@ -166,48 +166,19 @@ impl SegmentWriter {
             Ok(())
         };
 
-        if sfx_collectors.len() <= 1 {
-            for (field_id, collector) in sfx_collectors {
-                let output = collector.build()
-                    .map_err(|e| crate::LucivyError::SystemError(
-                        format!("sfx build field {field_id}: {e}")))?;
-                write_output(&mut self.segment_serializer, field_id, &output)?;
-                sfx_field_ids.push(field_id);
-            }
-        } else {
-            let _field_ids: Vec<u32> = sfx_collectors.keys().copied().collect();
-            let tasks: Vec<(&str, _)> = sfx_collectors.into_iter()
-                .map(|(field_id, collector)| {
-                    let name: &str = Box::leak(format!("field_{field_id}").into_boxed_str());
-                    let f = move || -> Result<luciole::PortValue, String> {
-                        let output = collector.build()
-                            .map_err(|e| format!("sfx build field {field_id}: {e}"))?;
-                        Ok(luciole::PortValue::new((field_id, output)))
-                    };
-                    (name, f)
-                })
-                .collect();
-
-            let field_names: Vec<String> = tasks.iter().map(|(n, _)| n.to_string()).collect();
-            let mut dag = luciole::scatter::build_scatter_dag(tasks);
+        // Build SFX via DAG per field (FST, sfxpost, sibling run in parallel)
+        for (field_id, collector) in sfx_collectors {
+            let data = collector.into_data();
+            let mut dag = super::sfx_dag::build_initial_sfx_dag(data);
             let mut dag_result = luciole::execute_dag(&mut dag, None)
                 .map_err(|e| crate::LucivyError::SystemError(
-                    format!("sfx build DAG: {e}")))?;
-
-            let map = dag_result
-                .take_output::<std::collections::HashMap<String, luciole::PortValue>>("collect", "results")
+                    format!("sfx build DAG field {field_id}: {e}")))?;
+            let output = dag_result
+                .take_output::<crate::suffix_fst::SfxBuildOutput>("assemble", "output")
                 .ok_or_else(|| crate::LucivyError::SystemError(
-                    "missing scatter results".into()))?;
-            let mut scatter = luciole::scatter::ScatterResults::from(map);
-
-            for name in &field_names {
-                let (fid, output) = scatter
-                    .take::<(u32, crate::suffix_fst::SfxBuildOutput)>(name)
-                    .ok_or_else(|| crate::LucivyError::SystemError(
-                        format!("missing sfx result '{name}'")))?;
-                write_output(&mut self.segment_serializer, fid, &output)?;
-                sfx_field_ids.push(fid);
-            }
+                    format!("sfx DAG missing output for field {field_id}")))?;
+            write_output(&mut self.segment_serializer, field_id, &output)?;
+            sfx_field_ids.push(field_id);
         }
         if !sfx_field_ids.is_empty() {
             self.segment_serializer.write_sfx_manifest(&sfx_field_ids)?;

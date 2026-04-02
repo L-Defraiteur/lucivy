@@ -427,3 +427,244 @@ pub(crate) fn build_sfx_dag(
 
     dag
 }
+
+// ===========================================================================
+// Initial segment build DAG
+// ===========================================================================
+//
+// ```text
+// prepare_data ──┬── build_fst ──────────┐
+//                ├── build_sfxpost ───────┼── write_sfx
+//                └── build_sibling ───────┘
+// ```
+
+// ---------------------------------------------------------------------------
+// PrepareDataNode — sort tokens, extract data from SfxCollector
+// ---------------------------------------------------------------------------
+
+struct PrepareDataNode {
+    data: Option<crate::suffix_fst::SfxCollectorData>,
+}
+
+impl Node for PrepareDataNode {
+    fn node_type(&self) -> &'static str { "sfx_prepare_data" }
+    fn outputs(&self) -> Vec<PortDef> {
+        vec![
+            PortDef::required("tokens", PortType::of::<BTreeSet<String>>()),
+            PortDef::required("collector_data", PortType::of::<crate::suffix_fst::SfxCollectorData>()),
+        ]
+    }
+    fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+        let data = self.data.take().ok_or("data already consumed")?;
+        ctx.metric("tokens", data.tokens.len() as f64);
+        ctx.set_output("tokens", PortValue::new(data.tokens.clone()));
+        ctx.set_output("collector_data", PortValue::new(data));
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BuildSfxPostNode — build sfxpost from raw collector data
+// ---------------------------------------------------------------------------
+
+struct BuildSfxPostNode;
+
+impl Node for BuildSfxPostNode {
+    fn node_type(&self) -> &'static str { "sfx_build_sfxpost" }
+    fn inputs(&self) -> Vec<PortDef> {
+        vec![PortDef::required("collector_data", PortType::of::<crate::suffix_fst::SfxCollectorData>())]
+    }
+    fn outputs(&self) -> Vec<PortDef> {
+        vec![PortDef::required("sfxpost", PortType::of::<Option<Vec<u8>>>())]
+    }
+    fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+        let data = ctx.input("collector_data")
+            .ok_or("missing collector_data")?
+            .downcast::<crate::suffix_fst::SfxCollectorData>()
+            .ok_or("wrong type")?;
+
+        let num_terms = data.tokens.len();
+        let mut writer = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::new(num_terms);
+        for (final_ord, &old_ord) in data.sorted_indices.iter().enumerate() {
+            for &(doc_id, ti, bf, bt) in &data.token_postings[old_ord as usize] {
+                writer.add_entry(final_ord as u32, doc_id, ti, bf, bt);
+            }
+        }
+        let sfxpost_data = writer.finish();
+        ctx.metric("sfxpost_bytes", sfxpost_data.len() as f64);
+        ctx.set_output("sfxpost", PortValue::new(Some(sfxpost_data)));
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BuildSiblingNode — build sibling table from collector sibling_pairs
+// ---------------------------------------------------------------------------
+
+struct BuildSiblingNode;
+
+impl Node for BuildSiblingNode {
+    fn node_type(&self) -> &'static str { "sfx_build_sibling" }
+    fn inputs(&self) -> Vec<PortDef> {
+        vec![PortDef::required("collector_data", PortType::of::<crate::suffix_fst::SfxCollectorData>())]
+    }
+    fn outputs(&self) -> Vec<PortDef> {
+        vec![PortDef::required("siblings", PortType::of::<Vec<u8>>())]
+    }
+    fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+        let data = ctx.input("collector_data")
+            .ok_or("missing collector_data")?
+            .downcast::<crate::suffix_fst::SfxCollectorData>()
+            .ok_or("wrong type")?;
+
+        let num_terms = data.tokens.len() as u32;
+        let mut writer = crate::suffix_fst::sibling_table::SiblingTableWriter::new(num_terms);
+        for ((intern_a, intern_b), gap_lens) in &data.sibling_pairs {
+            let final_a = data.intern_to_final[*intern_a as usize];
+            let final_b = data.intern_to_final[*intern_b as usize];
+            for &gap_len in gap_lens {
+                writer.add(final_a, final_b, gap_len);
+            }
+        }
+        let sibling_data = writer.serialize();
+        ctx.metric("sibling_bytes", sibling_data.len() as f64);
+        ctx.set_output("siblings", PortValue::new(sibling_data));
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// build_initial_sfx_dag — factory for initial segment build
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// AssembleSfxNode — collect all outputs into SfxBuildOutput (no I/O)
+// ---------------------------------------------------------------------------
+
+struct AssembleSfxNode {
+    num_docs: u32,
+}
+
+impl Node for AssembleSfxNode {
+    fn node_type(&self) -> &'static str { "sfx_assemble" }
+    fn inputs(&self) -> Vec<PortDef> {
+        vec![
+            PortDef::required("fst", PortType::of::<(Vec<u8>, Vec<u8>)>()),
+            PortDef::required("gapmap", PortType::of::<Vec<u8>>()),
+            PortDef::required("sfxpost", PortType::of::<Option<Vec<u8>>>()),
+            PortDef::required("siblings", PortType::of::<Vec<u8>>()),
+            PortDef::required("tokens", PortType::of::<BTreeSet<String>>()),
+        ]
+    }
+    fn outputs(&self) -> Vec<PortDef> {
+        vec![PortDef::required("output", PortType::of::<crate::suffix_fst::SfxBuildOutput>())]
+    }
+    fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+        let (fst_data, parent_data) = ctx.take_input("fst")
+            .ok_or("missing fst")?.take::<(Vec<u8>, Vec<u8>)>().ok_or("fst type")?;
+        let gapmap_data = ctx.take_input("gapmap")
+            .ok_or("missing gapmap")?.take::<Vec<u8>>().ok_or("gapmap type")?;
+        let sfxpost_data = ctx.take_input("sfxpost")
+            .ok_or("missing sfxpost")?.take::<Option<Vec<u8>>>().ok_or("sfxpost type")?;
+        let sibling_data = ctx.take_input("siblings")
+            .and_then(|v| v.take::<Vec<u8>>())
+            .unwrap_or_default();
+        let tokens = ctx.input("tokens")
+            .ok_or("missing tokens")?.downcast::<BTreeSet<String>>().ok_or("tokens type")?;
+
+        let num_tokens = tokens.len() as u32;
+
+        // Build .sfx file bytes
+        let sfx_file = crate::suffix_fst::file::SfxFileWriter::new(
+            fst_data, parent_data, gapmap_data.clone(),
+            self.num_docs, num_tokens,
+        ).with_sibling_data(sibling_data.clone());
+        let sfx_bytes = sfx_file.to_bytes();
+
+        // Primary registry files
+        let mut registry_files = Vec::new();
+        if let Some(ref data) = sfxpost_data {
+            registry_files.push(("sfxpost".to_string(), data.clone()));
+        }
+        if !gapmap_data.is_empty() {
+            registry_files.push(("gapmap".to_string(), gapmap_data.clone()));
+        }
+        if !sibling_data.is_empty() {
+            registry_files.push(("sibling".to_string(), sibling_data));
+        }
+
+        // Derived indexes via single-pass registry
+        let derived = crate::suffix_fst::index_registry::build_derived_indexes(
+            tokens,
+            sfxpost_data.as_deref(),
+            &gapmap_data,
+            self.num_docs,
+        );
+        registry_files.extend(derived);
+
+        ctx.set_output("output", PortValue::new(crate::suffix_fst::SfxBuildOutput {
+            sfx: sfx_bytes,
+            registry_files,
+        }));
+        Ok(())
+    }
+}
+
+/// Build a DAG for initial SFX index creation from SfxCollector data.
+///
+/// ```text
+/// prepare_data ──┬── build_fst ──────────┐
+///                ├── build_sfxpost ───────┼── assemble → SfxBuildOutput
+///                └── build_sibling ───────┘
+/// ```
+///
+/// build_fst, build_sfxpost, and build_sibling run in PARALLEL.
+/// Returns a DAG whose "assemble" node outputs `SfxBuildOutput`.
+pub(crate) fn build_initial_sfx_dag(
+    data: crate::suffix_fst::SfxCollectorData,
+) -> Dag {
+    let num_docs = data.num_docs;
+    let gapmap_data = data.gapmap_data.clone();
+
+    let mut dag = Dag::new();
+
+    // prepare_data (source node)
+    dag.add_node("prepare", PrepareDataNode { data: Some(data) });
+
+    // build_fst (parallel — reuses the merge DAG node)
+    dag.add_node("build_fst", BuildFstNode);
+    dag.connect("prepare", "tokens", "build_fst", "tokens").unwrap();
+
+    // build_sfxpost (parallel)
+    dag.add_node("build_sfxpost", BuildSfxPostNode);
+    dag.connect("prepare", "collector_data", "build_sfxpost", "collector_data").unwrap();
+
+    // build_sibling (parallel)
+    dag.add_node("build_sibling", BuildSiblingNode);
+    dag.connect("prepare", "collector_data", "build_sibling", "collector_data").unwrap();
+
+    // gapmap as constant source
+    struct GapmapSourceNode(Option<Vec<u8>>);
+    impl Node for GapmapSourceNode {
+        fn node_type(&self) -> &'static str { "gapmap_source" }
+        fn outputs(&self) -> Vec<PortDef> {
+            vec![PortDef::required("gapmap", PortType::of::<Vec<u8>>())]
+        }
+        fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+            let data = self.0.take().unwrap_or_default();
+            ctx.set_output("gapmap", PortValue::new(data));
+            Ok(())
+        }
+    }
+    dag.add_node("gapmap_source", GapmapSourceNode(Some(gapmap_data)));
+
+    // assemble (collect all → SfxBuildOutput)
+    dag.add_node("assemble", AssembleSfxNode { num_docs });
+    dag.connect("build_fst", "fst", "assemble", "fst").unwrap();
+    dag.connect("gapmap_source", "gapmap", "assemble", "gapmap").unwrap();
+    dag.connect("build_sfxpost", "sfxpost", "assemble", "sfxpost").unwrap();
+    dag.connect("build_sibling", "siblings", "assemble", "siblings").unwrap();
+    dag.connect("prepare", "tokens", "assemble", "tokens").unwrap();
+
+    dag
+}
