@@ -814,13 +814,12 @@ pub fn fuzzy_contains_via_trigram(
     let mut highlights: Vec<(DocId, usize, usize)> = Vec::new();
 
     // Pre-build lookup: (doc_id, byte_from) → min token position
-    // Avoids O(n) scan of all_matches per candidate.
     let mut bf_to_pos: std::collections::HashMap<(DocId, u32), u32> = std::collections::HashMap::new();
     for matches in &all_matches {
         for m in matches {
-            let key = (m.doc_id, m.byte_from);
-            let entry = bf_to_pos.entry(key).or_insert(m.position);
-            if m.position < *entry { *entry = m.position; }
+            bf_to_pos.entry((m.doc_id, m.byte_from))
+                .and_modify(|e| *e = (*e).min(m.position))
+                .or_insert(m.position);
         }
     }
 
