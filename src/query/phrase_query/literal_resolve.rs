@@ -31,6 +31,8 @@ pub struct LiteralMatch {
     pub si: u16,
     /// Total byte length of the parent token (lowercased).
     pub token_len: u16,
+    /// SFX ordinal of the parent token. Use with ord_to_term cache to get text.
+    pub ordinal: u32,
 }
 
 // ─────────────────────────────────────────────────────────────────────

@@ -29,6 +29,8 @@ pub struct SuffixContainsMatch {
     pub si: u16,
     /// Total byte length of the parent token (lowercased).
     pub token_len: u16,
+    /// SFX ordinal of the parent token.
+    pub ordinal: u32,
 }
 
 /// Search for single-token contains matches using the suffix FST.
