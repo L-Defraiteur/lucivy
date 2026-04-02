@@ -91,6 +91,7 @@ pub fn resolve_candidates(
                 byte_from: entry.byte_from + cand.si as u32,
                 byte_to: entry.byte_from + cand.si as u32 + literal_len as u32,
                 si: cand.si,
+                token_len: cand.token_len,
             });
         }
     }
@@ -301,6 +302,7 @@ pub fn resolve_chains(
                     byte_from: p.byte_from + first_si as u32,
                     byte_to: p.byte_from + first_si as u32 + literal_len as u32,
                     si: chain.first_si,
+                    token_len: (p.byte_to - p.byte_from) as u16,
                 });
             }
             continue;
@@ -347,6 +349,7 @@ pub fn resolve_chains(
                 byte_from: *match_bf,
                 byte_to: *match_bf + literal_len as u32,
                 si: chain.first_si,
+                token_len: 0, // cross-token chain — token_len not meaningful
             });
         }
     }

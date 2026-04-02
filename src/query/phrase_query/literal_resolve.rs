@@ -73,6 +73,7 @@ pub fn find_literal(
         byte_from: m.byte_from as u32,
         byte_to: m.byte_to as u32,
         si: m.si,
+        token_len: m.token_len,
     }).collect()
 }
 
