@@ -102,6 +102,7 @@ pub fn all_indexes() -> Vec<Box<dyn SfxIndexFile>> {
         Box::new(super::posmap::PosMapIndex::new()),
         Box::new(super::bytemap::ByteMapIndex::new()),
         Box::new(super::termtexts::TermTextsIndex::new()),
+        Box::new(super::freqmap::FreqMapIndex::new()),
         // DerivedWithDeps
         Box::new(super::sepmap::SepMapIndex::new()),
     ]
