@@ -11,7 +11,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use ld_lucivy::query::{
-    AllQuery, BooleanQuery, ContinuationMode, DisjunctionMaxQuery, FuzzyTermQuery,
+    AllQuery, BooleanQuery, DisjunctionMaxQuery, FuzzyTermQuery,
     HighlightSink, MoreLikeThisQuery, Occur, PhrasePrefixQuery, PhraseQuery, Query,
     QueryParser, RangeQuery, RegexContinuationQuery, RegexQuery, SuffixContainsQuery, TermQuery,
 };
@@ -387,7 +387,7 @@ fn build_contains_query(
         let mut query = RegexContinuationQuery::new(
             field,
             value.to_string(),
-            ContinuationMode::Contains,
+            false /* contains */,
         ).with_fuzzy_distance(distance as u8);
         if let Some(sink) = highlight_sink {
             let field_name = config.field.clone().unwrap_or_default();
@@ -420,7 +420,7 @@ fn build_contains_regex(
     let mut query = RegexContinuationQuery::from_regex(
         field,
         pattern.to_string(),
-        ContinuationMode::Contains,
+        false /* contains */,
     );
     query = query.with_fuzzy_distance(distance);
     if let Some(sink) = highlight_sink {
@@ -447,7 +447,7 @@ fn build_starts_with_query(
     let fuzzy_distance = config.distance.unwrap_or(0);
 
     let mut query = SuffixContainsQuery::new(field, value.to_lowercase())
-        .with_prefix_only()
+        .with_anchor_start()
         .with_fuzzy_distance(fuzzy_distance);
     if let Some(sink) = highlight_sink {
         let field_name = config.field.clone().unwrap_or_default();

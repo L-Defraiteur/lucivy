@@ -111,7 +111,7 @@ fn suffix_contains_single_token_inner<F>(
     sfx_reader: &SfxFileReader<'_>,
     query: &str,
     raw_term_resolver: &F,
-    prefix_only: bool,
+    anchor_start: bool,
     continuation: bool,
     store_verifier: Option<&dyn Fn(u32, usize, &str) -> bool>,
 ) -> Vec<SuffixContainsMatch>
@@ -122,7 +122,7 @@ where
     let query_len = query_lower.len();
 
     // Use the partitioned FST: si0 for startsWith, all for contains.
-    let walk_results = if prefix_only {
+    let walk_results = if anchor_start {
         sfx_reader.prefix_walk_si0(&query_lower)
     } else {
         sfx_reader.prefix_walk(&query_lower)
@@ -165,7 +165,7 @@ where
     let _diag_query = query.to_string();
     eprintln!("[contains-diag] query='{}' walk_results={} matches_before_continuation={}",
         _diag_query, walk_results.len(), matches.len());
-    if continuation && !prefix_only && query_len >= 2 {
+    if continuation && !anchor_start && query_len >= 2 {
         let gapmap = sfx_reader.gapmap();
 
         let mut candidates: std::collections::HashMap<
@@ -355,7 +355,7 @@ where
     cross_token_search(sfx_reader, query, &raw_term_resolver, distance)
 }
 
-/// Like fuzzy but prefix_only (SI=0 filter).
+/// Like fuzzy but anchor_start (SI=0 filter).
 pub fn suffix_contains_single_token_fuzzy_prefix<F>(
     sfx_reader: &SfxFileReader<'_>,
     query: &str,
@@ -373,20 +373,20 @@ fn suffix_contains_single_token_fuzzy_inner<F>(
     query: &str,
     distance: u8,
     raw_term_resolver: &F,
-    prefix_only: bool,
+    anchor_start: bool,
 ) -> Vec<SuffixContainsMatch>
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
     if distance == 0 {
-        return suffix_contains_single_token_inner(sfx_reader, query, &raw_term_resolver, prefix_only, false, None);
+        return suffix_contains_single_token_inner(sfx_reader, query, &raw_term_resolver, anchor_start, false, None);
     }
 
     let query_lower = query.to_lowercase();
     let query_len = query_lower.len();
 
     // Fuzzy walk: partitioned by prefix byte.
-    let walk_results = if prefix_only {
+    let walk_results = if anchor_start {
         sfx_reader.fuzzy_walk_si0(&query_lower, distance)
     } else {
         sfx_reader.fuzzy_walk(&query_lower, distance)
@@ -570,14 +570,14 @@ fn cross_token_resolve_for_multi<F>(
     ord_to_term: Option<&dyn Fn(u64) -> Option<String>>,
     is_first: bool,
     is_last: bool,
-    prefix_only: bool,
+    anchor_start: bool,
     fuzzy_distance: u8,
 ) -> Vec<MultiTokenPosting>
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
     let query_lower = sub_token.to_lowercase();
-    let use_si0 = prefix_only || !is_first;
+    let use_si0 = anchor_start || !is_first;
 
     let sibling_table = sfx_reader.sibling_table();
     let mut results: Vec<MultiTokenPosting> = Vec::new();
@@ -879,13 +879,13 @@ pub fn suffix_contains_multi_token_impl_pub<F>(
     query_separators: &[&str],
     raw_ordinal_resolver: F,
     fuzzy_distance: u8,
-    prefix_only: bool,
+    anchor_start: bool,
     ord_to_term: Option<&dyn Fn(u64) -> Option<String>>,
 ) -> Vec<SuffixContainsMultiMatch>
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, &raw_ordinal_resolver, fuzzy_distance, prefix_only, ord_to_term)
+    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, &raw_ordinal_resolver, fuzzy_distance, anchor_start, ord_to_term)
 }
 
 fn suffix_contains_multi_token_impl<F>(
@@ -894,7 +894,7 @@ fn suffix_contains_multi_token_impl<F>(
     query_separators: &[&str],
     raw_ordinal_resolver: &F,
     fuzzy_distance: u8,
-    prefix_only: bool,
+    anchor_start: bool,
     ord_to_term: Option<&dyn Fn(u64) -> Option<String>>,
 ) -> Vec<SuffixContainsMultiMatch>
 where
@@ -905,9 +905,9 @@ where
     }
     if query_tokens.len() == 1 {
         let results = if fuzzy_distance > 0 {
-            suffix_contains_single_token_fuzzy_inner(sfx_reader, query_tokens[0], fuzzy_distance, &raw_ordinal_resolver, prefix_only)
+            suffix_contains_single_token_fuzzy_inner(sfx_reader, query_tokens[0], fuzzy_distance, &raw_ordinal_resolver, anchor_start)
         } else {
-            suffix_contains_single_token_inner(sfx_reader, query_tokens[0], &raw_ordinal_resolver, prefix_only, false, None)
+            suffix_contains_single_token_inner(sfx_reader, query_tokens[0], &raw_ordinal_resolver, anchor_start, false, None)
         };
         return results
             .into_iter()
@@ -943,7 +943,7 @@ where
     };
 
     for (i, &token) in query_tokens.iter().enumerate() {
-        let is_first = i == 0 && !prefix_only;
+        let is_first = i == 0 && !anchor_start;
         let is_last = i == n - 1;
 
         let postings = super::literal_pipeline::resolve_token_for_multi(

@@ -245,6 +245,17 @@ impl SfxCollector {
         self.gapmap_writer.add_empty_doc();
     }
 
+    /// Build all SFX index files via DAG.
+    /// Convenience wrapper: `into_data()` → `build_initial_sfx_dag()` → execute.
+    pub fn build(self) -> Result<SfxBuildOutput, lucivy_fst::Error> {
+        let data = self.into_data();
+        let mut dag = crate::indexer::sfx_dag::build_initial_sfx_dag(data);
+        let mut result = luciole::execute_dag(&mut dag, None)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("sfx build DAG: {e}")))?;
+        result.take_output::<SfxBuildOutput>("assemble", "output")
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "sfx DAG missing output").into())
+    }
+
     /// Extract sorted data from collector for DAG-based build.
     ///
     /// Sorts tokens, remaps ordinals, serializes gapmap.

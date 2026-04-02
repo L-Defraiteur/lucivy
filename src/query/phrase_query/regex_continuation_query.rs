@@ -42,7 +42,7 @@ pub fn run_regex_prescan(
     reader: &SegmentReader,
     field: Field,
     pattern: &str,
-    mode: ContinuationMode,
+    anchor_start: bool,
 ) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)> {
     let sfx_data = match reader.sfx_file(field) {
         Some(d) => d,
@@ -91,7 +91,7 @@ pub fn run_regex_prescan(
 
     let (_, highlights) = regex_contains_via_literal(
         &automaton, pattern, &sfx_dict, &*pr, &sfx_reader,
-        mode, reader.max_doc(), &ord_to_term_fn,
+        anchor_start, reader.max_doc(), &ord_to_term_fn,
         posmap_bytes.as_deref(),
         bytemap_bytes.as_deref(),
         sepmap_bytes.as_deref(),
@@ -108,7 +108,7 @@ pub fn run_fuzzy_prescan(
     query_text: &str,
     distance: u8,
     prefix: bool,
-    mode: ContinuationMode,
+    anchor_start: bool,
 ) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)> {
     let sfx_data = match reader.sfx_file(field) {
         Some(d) => d,
@@ -145,7 +145,7 @@ pub fn run_fuzzy_prescan(
 
     let (_, highlights) = fuzzy_contains_via_trigram(
         query_text, distance, prefix, &sfx_reader, &*pr,
-        &ord_to_term_fn, mode, reader.max_doc(),
+        &ord_to_term_fn, anchor_start, reader.max_doc(),
         posmap_bytes.as_deref(),
     )?;
 
@@ -162,15 +162,6 @@ pub fn highlights_to_doc_tf(highlights: &[(DocId, usize, usize)]) -> Vec<(DocId,
     let mut doc_tf: Vec<(DocId, u32)> = counts.into_iter().collect();
     doc_tf.sort_by_key(|&(d, _)| d);
     doc_tf
-}
-
-/// Mode controls where the regex can match relative to the text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ContinuationMode {
-    /// Regex can match anywhere (any SI for initial walk).
-    Contains,
-    /// Regex must match from the start of the first token (SI=0 only).
-    StartsWith,
 }
 
 /// Maximum continuation depth (token boundaries to traverse).
@@ -202,7 +193,8 @@ enum DfaKind {
 pub struct RegexContinuationQuery {
     field: Field,
     dfa_kind: DfaKind,
-    mode: ContinuationMode,
+    /// If true, first token must match at SI=0 (startsWith mode).
+    anchor_start: bool,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
     /// Prescan cache: segment_id → cached regex results (populated by DAG injection).
@@ -213,11 +205,12 @@ pub struct RegexContinuationQuery {
 
 impl RegexContinuationQuery {
     /// Continuation with Levenshtein DFA (exact or fuzzy).
-    pub fn new(field: Field, query_text: String, mode: ContinuationMode) -> Self {
+    /// `anchor_start`: if true, first token must match at SI=0 (startsWith).
+    pub fn new(field: Field, query_text: String, anchor_start: bool) -> Self {
         Self {
             field,
             dfa_kind: DfaKind::Fuzzy { text: query_text, distance: 0, prefix: false },
-            mode,
+            anchor_start,
             highlight_sink: None,
             highlight_field_name: String::new(),
             regex_prescan_cache: None,
@@ -243,11 +236,11 @@ impl RegexContinuationQuery {
     }
 
     /// Continuation with a regex pattern DFA.
-    pub fn from_regex(field: Field, pattern: String, mode: ContinuationMode) -> Self {
+    pub fn from_regex(field: Field, pattern: String, anchor_start: bool) -> Self {
         Self {
             field,
             dfa_kind: DfaKind::Regex { pattern },
-            mode,
+            anchor_start,
             highlight_sink: None,
             highlight_field_name: String::new(),
             regex_prescan_cache: None,
@@ -272,7 +265,7 @@ impl Query for RegexContinuationQuery {
                 let pattern = pattern.clone();
                 for seg_reader in segments {
                     let (doc_tf, highlights) = run_regex_prescan(
-                        seg_reader, self.field, &pattern, self.mode,
+                        seg_reader, self.field, &pattern, self.anchor_start,
                     )?;
                     doc_freq += doc_tf.len() as u64;
                     if !doc_tf.is_empty() {
@@ -286,7 +279,7 @@ impl Query for RegexContinuationQuery {
                 let prefix = *prefix;
                 for seg_reader in segments {
                     let (doc_tf, highlights) = run_fuzzy_prescan(
-                        seg_reader, self.field, &text, distance, prefix, self.mode,
+                        seg_reader, self.field, &text, distance, prefix, self.anchor_start,
                     )?;
                     doc_freq += doc_tf.len() as u64;
                     if !doc_tf.is_empty() {
@@ -323,7 +316,7 @@ impl Query for RegexContinuationQuery {
         Ok(Box::new(RegexContinuationWeight {
             field: self.field,
             dfa_kind: self.dfa_kind.clone(),
-            mode: self.mode,
+            anchor_start: self.anchor_start,
             highlight_sink: self.highlight_sink.clone(),
             highlight_field_name: self.highlight_field_name.clone(),
             scoring_enabled,
@@ -339,7 +332,7 @@ impl Query for RegexContinuationQuery {
             DfaKind::Regex { pattern } => vec![crate::query::RegexPrescanParam {
                 field: self.field,
                 pattern: pattern.clone(),
-                mode: self.mode,
+                anchor_start: self.anchor_start,
             }],
             // Fuzzy uses prescan_segments() directly, not DAG regex prescan params.
             DfaKind::Fuzzy { .. } => vec![],
@@ -371,7 +364,7 @@ impl Query for RegexContinuationQuery {
 struct RegexContinuationWeight {
     field: Field,
     dfa_kind: DfaKind,
-    mode: ContinuationMode,
+    anchor_start: bool,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
     scoring_enabled: bool,
@@ -670,7 +663,7 @@ pub fn fuzzy_contains_via_trigram(
     sfx_reader: &SfxFileReader,
     resolver: &dyn PostingResolver,
     ord_to_term: &dyn Fn(u64) -> Option<String>,
-    mode: ContinuationMode,
+    anchor_start: bool,
     max_doc: DocId,
     posmap_data: Option<&[u8]>,
 ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>)> {
@@ -1039,7 +1032,7 @@ pub fn regex_contains_via_literal<A: Automaton>(
     sfx_dict: &SfxTermDictionary,
     resolver: &dyn PostingResolver,
     sfx_reader: &SfxFileReader,
-    mode: ContinuationMode,
+    anchor_start: bool,
     max_doc: DocId,
     ord_to_term: &dyn Fn(u64) -> Option<String>,
     posmap_data: Option<&[u8]>,
@@ -1347,7 +1340,7 @@ pub(crate) fn continuation_score_sibling<A: Automaton>(
     sfx_dict: &SfxTermDictionary,
     resolver: &dyn PostingResolver,
     sfx_reader: &SfxFileReader,
-    mode: ContinuationMode,
+    anchor_start: bool,
     max_doc: DocId,
     ord_to_term: &dyn Fn(u64) -> Option<String>,
 ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>)>
@@ -1358,7 +1351,7 @@ where
         Some(t) => t,
         None => {
             // No sibling table — fall back to old Walk 2 approach.
-            return continuation_score(automaton, sfx_dict, resolver, sfx_reader, mode, max_doc, None);
+            return continuation_score(automaton, sfx_dict, resolver, sfx_reader, anchor_start, max_doc, None);
         }
     };
 
@@ -1367,7 +1360,7 @@ where
     let gapmap = sfx_reader.gapmap();
 
     // === Walk 1: initial DFA × SFX FST walk (identical to continuation_score) ===
-    let si_zero_only = mode != ContinuationMode::Contains;
+    let si_zero_only = anchor_start;
     let start_state = automaton.start();
     let matches = sfx_dict.search_continuation(automaton, start_state, si_zero_only);
 
@@ -1490,7 +1483,7 @@ pub(crate) fn continuation_score<A: Automaton>(
     sfx_dict: &SfxTermDictionary,
     resolver: &dyn PostingResolver,
     sfx_reader: &SfxFileReader,
-    mode: ContinuationMode,
+    anchor_start: bool,
     max_doc: DocId,
     store_dfa_verifier: Option<&dyn Fn(DocId, u32, &A, &A::State) -> Option<usize>>,
 ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>)>
@@ -1502,7 +1495,7 @@ where
     let gapmap = sfx_reader.gapmap();
 
     // === Walk 1: initial walk ===
-    let si_zero_only = mode != ContinuationMode::Contains;
+    let si_zero_only = anchor_start;
     let start_state = automaton.start();
     let matches = sfx_dict.search_continuation(automaton, start_state, si_zero_only);
 
@@ -1717,7 +1710,7 @@ impl RegexContinuationWeight {
                     .map(|b| b.as_ref().to_vec());
                 fuzzy_contains_via_trigram(
                     text, *distance, *prefix, &sfx_reader, &*resolver,
-                    &ord_to_term_fn, self.mode, max_doc,
+                    &ord_to_term_fn, self.anchor_start, max_doc,
                     posmap_bytes.as_deref(),
                 )?
             }
@@ -1732,12 +1725,12 @@ impl RegexContinuationWeight {
                 let automaton = SfxDfaWrapper(dfa);
                 if use_sibling {
                     continuation_score_sibling(
-                        &automaton, &sfx_dict, &*resolver, &sfx_reader, self.mode, max_doc,
+                        &automaton, &sfx_dict, &*resolver, &sfx_reader, self.anchor_start, max_doc,
                         &ord_to_term_fn,
                     )?
                 } else {
                     continuation_score(
-                        &automaton, &sfx_dict, &*resolver, &sfx_reader, self.mode, max_doc,
+                        &automaton, &sfx_dict, &*resolver, &sfx_reader, self.anchor_start, max_doc,
                         None,
                     )?
                 }
@@ -1761,14 +1754,14 @@ impl RegexContinuationWeight {
                 if use_sibling {
                     regex_contains_via_literal(
                         &automaton, pattern, &sfx_dict, &*resolver, &sfx_reader,
-                        self.mode, max_doc, &ord_to_term_fn,
+                        self.anchor_start, max_doc, &ord_to_term_fn,
                         posmap_bytes.as_deref(),
                         bytemap_bytes.as_deref(),
                         sepmap_bytes.as_deref(),
                     )?
                 } else {
                     continuation_score(
-                        &automaton, &sfx_dict, &*resolver, &sfx_reader, self.mode, max_doc,
+                        &automaton, &sfx_dict, &*resolver, &sfx_reader, self.anchor_start, max_doc,
                         None,
                     )?
                 }
@@ -1868,7 +1861,7 @@ mod tests {
         let query = RegexContinuationQuery::new(
             field,
             "rag3db".into(),
-            ContinuationMode::Contains,
+            false /* contains */,
         );
         let reader = index.reader().unwrap();
         let searcher = reader.searcher();
@@ -1886,7 +1879,7 @@ mod tests {
         let query = RegexContinuationQuery::new(
             field,
             "rag3db is cool".into(),
-            ContinuationMode::StartsWith,
+            true /* startsWith */,
         );
         let reader = index.reader().unwrap();
         let searcher = reader.searcher();
@@ -1905,7 +1898,7 @@ mod tests {
         let query = RegexContinuationQuery::new(
             field,
             "rag3db iz cool".into(),
-            ContinuationMode::StartsWith,
+            true /* startsWith */,
         )
         .with_fuzzy_distance(1);
         let reader = index.reader().unwrap();
@@ -1924,7 +1917,7 @@ mod tests {
         let query = RegexContinuationQuery::new(
             field,
             "rag3db is warm".into(),
-            ContinuationMode::StartsWith,
+            true /* startsWith */,
         );
         let reader = index.reader().unwrap();
         let searcher = reader.searcher();
@@ -1942,7 +1935,7 @@ mod tests {
         let query = RegexContinuationQuery::new(
             field,
             "3db is".into(),
-            ContinuationMode::Contains,
+            false /* contains */,
         );
         let reader = index.reader().unwrap();
         let searcher = reader.searcher();
@@ -1961,7 +1954,7 @@ mod tests {
         let query = RegexContinuationQuery::from_regex(
             field,
             "rag.db i. cool".into(),
-            ContinuationMode::StartsWith,
+            true /* startsWith */,
         );
         let reader = index.reader().unwrap();
         let searcher = reader.searcher();
@@ -1980,7 +1973,7 @@ mod tests {
         let query = RegexContinuationQuery::from_regex(
             field,
             "3db i.".into(),
-            ContinuationMode::Contains,
+            false /* contains */,
         );
         let reader = index.reader().unwrap();
         let searcher = reader.searcher();
@@ -1999,7 +1992,7 @@ mod tests {
         let query = RegexContinuationQuery::from_regex(
             field,
             "rag.db x. cool".into(),
-            ContinuationMode::StartsWith,
+            true /* startsWith */,
         );
         let reader = index.reader().unwrap();
         let searcher = reader.searcher();
@@ -2021,7 +2014,7 @@ mod tests {
         let query = RegexContinuationQuery::new(
             field,
             "importrag3db".into(),
-            ContinuationMode::StartsWith,
+            true /* startsWith */,
         )
         .with_fuzzy_distance(1);
         let reader = index.reader().unwrap();
@@ -2042,7 +2035,7 @@ mod tests {
         let query = RegexContinuationQuery::new(
             field,
             "importrag3db".into(),
-            ContinuationMode::StartsWith,
+            true /* startsWith */,
         );
         let reader = index.reader().unwrap();
         let searcher = reader.searcher();
@@ -2060,7 +2053,7 @@ mod tests {
         let query = RegexContinuationQuery::new(
             field,
             "rag3dc".into(),
-            ContinuationMode::Contains,
+            false /* contains */,
         )
         .with_fuzzy_distance(1);
         let reader = index.reader().unwrap();
@@ -2079,7 +2072,7 @@ mod tests {
         let query = RegexContinuationQuery::new(
             field,
             "3dbis".into(),
-            ContinuationMode::Contains,
+            false /* contains */,
         )
         .with_fuzzy_distance(1);
         let reader = index.reader().unwrap();
@@ -2100,7 +2093,7 @@ mod tests {
         let query = RegexContinuationQuery::new(
             field,
             "rag3dbiscool".into(),
-            ContinuationMode::StartsWith,
+            true /* startsWith */,
         )
         .with_fuzzy_distance(2);
         let reader = index.reader().unwrap();
@@ -2124,7 +2117,7 @@ mod tests {
         let query = RegexContinuationQuery::new(
             field,
             "rag3db".into(),
-            ContinuationMode::StartsWith,
+            true /* startsWith */,
         )
         .with_highlight_sink(Arc::clone(&sink), "body._raw".into());
 
@@ -2152,7 +2145,7 @@ mod tests {
         let query = RegexContinuationQuery::new(
             field,
             "rag3db is cool".into(),
-            ContinuationMode::StartsWith,
+            true /* startsWith */,
         )
         .with_highlight_sink(Arc::clone(&sink), "body._raw".into());
 
@@ -2182,7 +2175,7 @@ mod tests {
         let query = RegexContinuationQuery::new(
             field,
             "3db is".into(),
-            ContinuationMode::Contains,
+            false /* contains */,
         )
         .with_highlight_sink(Arc::clone(&sink), "body._raw".into());
 
@@ -2215,7 +2208,7 @@ mod tests {
         let query = RegexContinuationQuery::new(
             field,
             "rag".into(),
-            ContinuationMode::StartsWith,
+            true /* startsWith */,
         )
         .with_prefix();
         let reader = index.reader().unwrap();
@@ -2235,7 +2228,7 @@ mod tests {
         let query = RegexContinuationQuery::new(
             field,
             "import rag".into(),
-            ContinuationMode::StartsWith,
+            true /* startsWith */,
         )
         .with_prefix();
         let reader = index.reader().unwrap();
@@ -2255,7 +2248,7 @@ mod tests {
         let query = RegexContinuationQuery::new(
             field,
             "imporr rag".into(),
-            ContinuationMode::StartsWith,
+            true /* startsWith */,
         )
         .with_prefix()
         .with_fuzzy_distance(1);
@@ -2276,7 +2269,7 @@ mod tests {
         let query = RegexContinuationQuery::new(
             field,
             "zzz".into(),
-            ContinuationMode::StartsWith,
+            true /* startsWith */,
         )
         .with_prefix();
         let reader = index.reader().unwrap();
@@ -2309,7 +2302,7 @@ mod tests {
 
         for (query, dist, should_match) in &cases {
             let q = RegexContinuationQuery::new(
-                field, query.to_string(), ContinuationMode::Contains,
+                field, query.to_string(), false /* contains */,
             ).with_fuzzy_distance(*dist);
             let results = searcher.search(&q, &TopDocs::with_limit(10).order_by_score()).unwrap();
             let matched = !results.is_empty();

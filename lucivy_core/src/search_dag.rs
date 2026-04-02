@@ -178,7 +178,7 @@ impl Node for PrescanShardNode {
                 let (doc_tf, highlights) = run_sfx_walk(
                     &sfx_reader, &resolver, &param.query_text,
                     &tokens, &seps,
-                    param.fuzzy_distance, param.prefix_only, param.continuation,
+                    param.fuzzy_distance, param.anchor_start, param.continuation,
                     param.strict_separators,
                     Some(&seg_str),
                     None,
@@ -196,7 +196,7 @@ impl Node for PrescanShardNode {
         for param in &self.regex_prescan_params {
             for seg_reader in searcher.segment_readers() {
                 let (doc_tf, highlights) = run_regex_prescan(
-                    seg_reader, param.field, &param.pattern, param.mode,
+                    seg_reader, param.field, &param.pattern, param.anchor_start,
                 ).map_err(|e| format!("regex prescan: {e}"))?;
 
                 *regex_freqs.entry(param.pattern.clone()).or_insert(0) += doc_tf.len() as u64;

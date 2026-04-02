@@ -127,7 +127,7 @@ pub struct SuffixContainsQuery {
     query_text: String,
     fuzzy_distance: u8,
     /// If true, only match tokens that START with the query (SI=0 filter).
-    prefix_only: bool,
+    anchor_start: bool,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
     /// If true, use continuation DFA to match across token boundaries.
@@ -151,7 +151,7 @@ impl SuffixContainsQuery {
             raw_field,
             query_text,
             fuzzy_distance: 0,
-            prefix_only: false,
+            anchor_start: false,
             highlight_sink: None,
             highlight_field_name: String::new(),
             continuation: false,
@@ -216,7 +216,7 @@ impl SuffixContainsQuery {
             let (doc_tf, highlights) = run_sfx_walk(
                 &sfx_reader, &resolver, &self.query_text,
                 &query_tokens, &query_separators,
-                self.fuzzy_distance, self.prefix_only, self.continuation,
+                self.fuzzy_distance, self.anchor_start, self.continuation,
                 self.strict_separators,
                 Some(&seg_str),
                 Some(&ord_to_term_fn),
@@ -255,8 +255,8 @@ impl SuffixContainsQuery {
 
     /// Only match tokens that START with the query (prefix/startsWith mode).
     /// Filters suffix FST entries to SI=0 (full token start, not substring).
-    pub fn with_prefix_only(mut self) -> Self {
-        self.prefix_only = true;
+    pub fn with_anchor_start(mut self) -> Self {
+        self.anchor_start = true;
         self
     }
 
@@ -301,7 +301,7 @@ pub fn run_sfx_walk<F>(
     query_tokens: &[String],
     query_separators: &[String],
     fuzzy_distance: u8,
-    prefix_only: bool,
+    anchor_start: bool,
     continuation: bool,
     strict_separators: bool,
     segment_id: Option<&str>,
@@ -314,14 +314,14 @@ where
     let (highlights, mut doc_ids) = if query_tokens.len() <= 1 {
         let query = if query_tokens.is_empty() { query_text } else { &query_tokens[0] };
         let matches = if fuzzy_distance == 0 {
-            if prefix_only {
+            if anchor_start {
                 suffix_contains::suffix_contains_single_token_prefix(sfx_reader, query, resolver)
             } else if continuation {
                 suffix_contains::suffix_contains_single_token_continuation(sfx_reader, query, resolver)
             } else {
                 suffix_contains::suffix_contains_single_token_with_terms(sfx_reader, query, resolver, ord_to_term)
             }
-        } else if prefix_only {
+        } else if anchor_start {
             suffix_contains::suffix_contains_single_token_fuzzy_prefix(sfx_reader, query, fuzzy_distance, resolver)
         } else {
             // Fuzzy contains: cross_token_search_with_terms is a superset —
@@ -344,7 +344,7 @@ where
         };
         let matches = suffix_contains::suffix_contains_multi_token_impl_pub(
             sfx_reader, &token_refs, &sep_refs, resolver,
-            fuzzy_distance, prefix_only, ord_to_term,
+            fuzzy_distance, anchor_start, ord_to_term,
         );
         let hl: Vec<(DocId, usize, usize)> = matches.iter()
             .map(|m| (m.doc_id, m.byte_from, m.byte_to)).collect();
@@ -429,7 +429,7 @@ impl Query for SuffixContainsQuery {
         vec![crate::query::SfxPrescanParam {
             field: self.raw_field,
             query_text: self.query_text.clone(),
-            prefix_only: self.prefix_only,
+            anchor_start: self.anchor_start,
             fuzzy_distance: self.fuzzy_distance,
             continuation: self.continuation,
             strict_separators: self.strict_separators,
@@ -465,7 +465,7 @@ impl Query for SuffixContainsQuery {
             raw_field: self.raw_field,
             query_text: self.query_text.clone(),
             fuzzy_distance: self.fuzzy_distance,
-            prefix_only: self.prefix_only,
+            anchor_start: self.anchor_start,
             highlight_sink: self.highlight_sink.clone(),
             highlight_field_name: self.highlight_field_name.clone(),
             scoring_enabled,
@@ -483,7 +483,7 @@ struct SuffixContainsWeight {
     raw_field: Field,
     query_text: String,
     fuzzy_distance: u8,
-    prefix_only: bool,
+    anchor_start: bool,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
     scoring_enabled: bool,
@@ -613,7 +613,7 @@ impl Weight for SuffixContainsWeight {
         let (doc_tf, highlights) = run_sfx_walk(
             &sfx_reader, &resolver, &self.query_text,
             &query_tokens, &query_separators,
-            self.fuzzy_distance, self.prefix_only, self.continuation,
+            self.fuzzy_distance, self.anchor_start, self.continuation,
             self.strict_separators,
             Some(&seg_str),
             Some(&ord_to_term_fn),

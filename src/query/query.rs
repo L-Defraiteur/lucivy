@@ -256,7 +256,7 @@ pub struct SfxPrescanParam {
     /// The query text (lowercased).
     pub query_text: String,
     /// If true, only match SI=0 (prefix/startsWith mode).
-    pub prefix_only: bool,
+    pub anchor_start: bool,
     /// Fuzzy Levenshtein distance (0 = exact).
     pub fuzzy_distance: u8,
     /// If true, use continuation DFA for cross-token matching.
@@ -272,8 +272,8 @@ pub struct RegexPrescanParam {
     pub field: crate::schema::Field,
     /// The regex pattern.
     pub pattern: String,
-    /// Continuation mode (Contains / StartsWith).
-    pub mode: crate::query::phrase_query::regex_continuation_query::ContinuationMode,
+    /// If true, first token must match at SI=0 (startsWith mode).
+    pub anchor_start: bool,
 }
 
 /// Implements `box_clone`.
