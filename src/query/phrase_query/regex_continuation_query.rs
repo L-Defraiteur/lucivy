@@ -783,7 +783,7 @@ pub fn fuzzy_contains_via_trigram(
     if distance >= 3 {
         let mut doc_bitset = BitSet::with_max_value(max_doc);
         let mut highlights: Vec<(DocId, usize, usize)> = Vec::new();
-        for &(doc_id, first_bf, _last_bt, first_tri_idx, first_si, _) in &candidates {
+        for &(doc_id, first_bf, _last_bt, first_tri_idx, first_si, _, _last_tri_idx) in &candidates {
             doc_bitset.insert(doc_id);
             let hl_start = (first_bf as usize).saturating_sub(query_positions[first_tri_idx] + first_si as usize);
             let hl_end = hl_start + query_text.len() + distance as usize;
@@ -808,11 +808,12 @@ pub fn fuzzy_contains_via_trigram(
     let mut highlights: Vec<(DocId, usize, usize)> = Vec::new();
 
 
-    for (doc_id, first_bf, last_bt, first_tri_idx, first_si, trigram_proven) in &candidates {
+    for (doc_id, first_bf, last_bt, first_tri_idx, first_si, trigram_proven, last_tri_idx) in &candidates {
         let doc_id = *doc_id;
         let first_tri_idx = *first_tri_idx;
         let first_si = *first_si;
         let trigram_proven = *trigram_proven;
+        let last_tri_idx = *last_tri_idx;
 
         // Find the token position for first_bf from the trigram matches
         let first_pos = all_matches.iter()
@@ -837,6 +838,12 @@ pub fn fuzzy_contains_via_trigram(
             let hl_end = hl_start + query_text.len() + distance as usize;
             highlights.push((doc_id, hl_start, hl_end));
             continue;
+        }
+
+        // For docs already validated: skip DFA only for proven candidates
+        // (non-proven might be false positives that DFA would reject)
+        if doc_bitset.contains(doc_id) && !trigram_proven {
+            continue; // Skip non-proven duplicates — no reliable highlight without DFA
         }
 
         if let Some(pm) = &posmap {
@@ -1007,7 +1014,7 @@ pub fn fuzzy_contains_via_trigram(
     let _dfa_ms = _t_dfa.elapsed().as_millis();
     let _total_ms = _t_total.elapsed().as_millis();
     if _total_ms > 5 {
-        let proven = candidates.iter().filter(|c| c.5).count();
+        let proven = candidates.iter().filter(|c| c.5 /* trigram_proven */).count();
         let unproven = candidates.len() - proven;
         eprintln!("[fuzzy-timing] total={}ms fst={}ms resolve={}ms intersect={}ms dfa={}ms | ngrams={} candidates={} (proven={} unproven={}) results={} max_doc={}",
             _total_ms, _fst_ms, _resolve_ms, _intersect_ms, _dfa_ms,
