@@ -122,6 +122,7 @@ pub fn build_derived_indexes(
     gapmap_data: &[u8],
     num_docs: u32,
 ) -> Vec<(String, Vec<u8>)> {
+    let t0 = std::time::Instant::now();
     let sfxpost_reader = sfxpost_data
         .and_then(crate::suffix_fst::sfxpost_v2::SfxPostReaderV2::open_slice);
 
@@ -147,18 +148,26 @@ pub fn build_derived_indexes(
         }
     }
 
+    let phase1_ms = t0.elapsed().as_millis();
+
     // Phase 2: serialize Derived (no dependencies)
+    let t1 = std::time::Instant::now();
     let mut built: HashMap<String, Vec<u8>> = HashMap::new();
     for idx in indexes.iter() {
         if matches!(idx.kind(), IndexKind::Derived) {
+            let ts = std::time::Instant::now();
             let data = idx.serialize();
+            let ms = ts.elapsed().as_millis();
+            if ms > 5 { eprintln!("[derive-timing] serialize {} = {}ms ({} bytes)", idx.id(), ms, data.len()); }
             if !data.is_empty() {
                 built.insert(idx.id().to_string(), data);
             }
         }
     }
+    let phase2_ms = t1.elapsed().as_millis();
 
     // Phase 3: build DerivedWithDeps (have dependencies on Derived)
+    let t2 = std::time::Instant::now();
     for idx in indexes.iter_mut() {
         if matches!(idx.kind(), IndexKind::DerivedWithDeps) {
             let ctx = SfxDeriveContext {
@@ -166,12 +175,24 @@ pub fn build_derived_indexes(
                 gapmap_data,
                 num_docs,
             };
+            let ts = std::time::Instant::now();
             idx.build_from_deps(&ctx);
+            let dep_ms = ts.elapsed().as_millis();
             let data = idx.serialize();
+            let total_ms = ts.elapsed().as_millis();
+            if total_ms > 5 { eprintln!("[derive-timing] deps {} = {}ms build + {}ms serialize ({} bytes)",
+                idx.id(), dep_ms, total_ms - dep_ms, data.len()); }
             if !data.is_empty() {
                 built.insert(idx.id().to_string(), data);
             }
         }
+    }
+    let phase3_ms = t2.elapsed().as_millis();
+
+    let total_ms = t0.elapsed().as_millis();
+    if total_ms > 10 {
+        eprintln!("[derive-timing] total={}ms (events={}ms serialize={}ms deps={}ms) tokens={} num_docs={}",
+            total_ms, phase1_ms, phase2_ms, phase3_ms, tokens.len(), num_docs);
     }
 
     // Return (extension, data) for non-Primary indexes
