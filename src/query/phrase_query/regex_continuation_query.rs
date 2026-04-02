@@ -826,16 +826,16 @@ pub fn fuzzy_contains_via_trigram(
 
         // Fast path: all trigrams matched with consistent byte span.
         // The pigeonhole principle guarantees this is a valid match —
-        // skip DFA validation entirely, use trigram byte range as highlight.
+        // skip DFA validation entirely, use trigram positions as highlight.
         if trigram_proven {
             doc_bitset.insert(doc_id);
-            // Compute highlight from the trigram chain byte range.
-            // first_bf is the suffix match start; the actual match starts
-            // at first_bf - first_si (token start) - query_positions[first_tri_idx].
-            // But simpler: the trigram chain spans [first_bf, last_bt].
-            // The full match starts query_positions[first_tri_idx] bytes before first_bf.
+            // hl_start: first trigram is at query_positions[first_tri_idx] bytes into the query,
+            // and at content byte first_bf (with first_si offset into its parent token).
             let hl_start = (*first_bf as usize).saturating_sub(query_positions[first_tri_idx] + first_si as usize);
-            let hl_end = hl_start + query_text.len() + distance as usize;
+            // hl_end: last trigram ends at content byte last_bt.
+            // Remaining query bytes after last trigram = query_len - query_positions[last_tri_idx] - n
+            let remaining = query_text.len().saturating_sub(query_positions[last_tri_idx] + n);
+            let hl_end = *last_bt as usize + remaining;
             highlights.push((doc_id, hl_start, hl_end));
             continue;
         }
