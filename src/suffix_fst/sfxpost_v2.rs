@@ -478,5 +478,5 @@ pub struct SfxPostIndex;
 impl super::index_registry::SfxIndexFile for SfxPostIndex {
     fn id(&self) -> &'static str { "sfxpost" }
     fn extension(&self) -> &'static str { "sfxpost" }
-    fn kind(&self) -> super::index_registry::IndexKind { super::index_registry::IndexKind::Primary }
+    fn merge_strategy(&self) -> super::index_registry::MergeStrategy { super::index_registry::MergeStrategy::ExternalDagNode }
 }

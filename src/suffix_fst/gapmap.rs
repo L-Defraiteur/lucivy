@@ -815,5 +815,6 @@ pub struct GapMapIndex;
 impl super::index_registry::SfxIndexFile for GapMapIndex {
     fn id(&self) -> &'static str { "gapmap" }
     fn extension(&self) -> &'static str { "gapmap" }
-    fn kind(&self) -> super::index_registry::IndexKind { super::index_registry::IndexKind::Primary }
+    fn merge_strategy(&self) -> super::index_registry::MergeStrategy { super::index_registry::MergeStrategy::ExternalDagNode }
+    fn prebuilt_by_collector(&self) -> bool { true }
 }

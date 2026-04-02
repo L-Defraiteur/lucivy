@@ -177,54 +177,60 @@ impl<'a> SepMapReader<'a> {
 // ─────────────────────────────────────────────────────────────────────
 
 pub struct SepMapIndex {
-    writer: SepMapWriter,
+    data: Vec<u8>,
 }
 
 impl SepMapIndex {
-    pub fn new() -> Self { Self { writer: SepMapWriter::new() } }
+    pub fn new() -> Self { Self { data: Vec::new() } }
 }
 
 impl super::index_registry::SfxIndexFile for SepMapIndex {
     fn id(&self) -> &'static str { "sepmap" }
     fn extension(&self) -> &'static str { "sepmap" }
-    fn kind(&self) -> super::index_registry::IndexKind { super::index_registry::IndexKind::DerivedWithDeps }
+    fn merge_strategy(&self) -> super::index_registry::MergeStrategy {
+        super::index_registry::MergeStrategy::OrMergeWithRemap
+    }
+    fn prebuilt_by_collector(&self) -> bool { true }
 
-    fn depends_on(&self) -> Vec<&'static str> { vec!["posmap"] }
+    fn merge_from_sources(
+        &mut self,
+        sources: &[Option<&[u8]>],
+        source_termtexts: &[Option<&[u8]>],
+        token_to_new_ord: &dyn Fn(&str) -> Option<u32>,
+    ) {
+        use super::TermTextsReader;
 
-    fn build_from_deps(&mut self, ctx: &super::index_registry::SfxDeriveContext) {
-        use super::gapmap::GapMapReader;
-        use super::posmap::PosMapReader;
+        let readers: Vec<Option<SepMapReader>> = sources.iter()
+            .map(|opt| opt.and_then(SepMapReader::open))
+            .collect();
 
-        let posmap_bytes = match ctx.derived.get("posmap") {
-            Some(b) => b,
-            None => return,
-        };
-        let posmap = match PosMapReader::open(posmap_bytes) {
-            Some(r) => r,
-            None => return,
-        };
-        if ctx.gapmap_data.is_empty() {
+        if !readers.iter().any(|r| r.is_some()) {
             return;
         }
-        let gapmap = GapMapReader::open(ctx.gapmap_data);
 
-        for doc_id in 0..ctx.num_docs {
-            let num_tokens = gapmap.num_tokens(doc_id) as u32;
-            if num_tokens == 0 { continue; }
-            for pos in 0..num_tokens.saturating_sub(1) {
-                let ord = match posmap.ordinal_at(doc_id, pos) {
-                    Some(o) => o,
-                    None => continue,
-                };
-                self.writer.ensure_capacity(ord + 1);
-                if let Some(gap_bytes) = gapmap.read_separator(doc_id, pos, pos + 1) {
-                    self.writer.record_gap(ord, gap_bytes);
+        let mut writer = SepMapWriter::new();
+
+        for (seg_idx, reader_opt) in readers.iter().enumerate() {
+            let reader = match reader_opt { Some(r) => r, None => continue };
+            let tt = match source_termtexts[seg_idx].and_then(|b| TermTextsReader::open(b)) {
+                Some(t) => t, None => continue,
+            };
+
+            for old_ord in 0..tt.num_terms() {
+                let text = match tt.text(old_ord) { Some(t) => t, None => continue };
+                let new_ord = match token_to_new_ord(text) { Some(o) => o, None => continue };
+
+                if let Some(bitmap) = reader.bitmap(old_ord) {
+                    writer.ensure_capacity(new_ord + 1);
+                    writer.or_bitmap(new_ord, bitmap);
                 }
             }
         }
+
+        self.data = writer.serialize();
     }
 
-    fn serialize(&self) -> Vec<u8> { self.writer.serialize() }
+    fn serialize(&self) -> Vec<u8> { self.data.clone() }
 }
 
 #[cfg(test)]

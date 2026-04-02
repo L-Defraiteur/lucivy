@@ -201,7 +201,7 @@ impl ByteMapIndex {
 impl super::index_registry::SfxIndexFile for ByteMapIndex {
     fn id(&self) -> &'static str { "bytemap" }
     fn extension(&self) -> &'static str { "bytemap" }
-    fn kind(&self) -> super::index_registry::IndexKind { super::index_registry::IndexKind::Derived }
+    fn merge_strategy(&self) -> super::index_registry::MergeStrategy { super::index_registry::MergeStrategy::EventDriven }
 
     fn on_token(&mut self, ord: u32, text: &str) {
         self.writer.ensure_capacity(ord + 1);

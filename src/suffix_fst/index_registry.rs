@@ -1,46 +1,32 @@
 //! SFX index file abstraction: unified trait + registry.
 //!
 //! Every per-field SFX index file implements `SfxIndexFile`.
-//! Three kinds exist:
+//! Two build strategies:
 //!
-//! - **Primary**: built by dedicated DAG nodes (sfxpost, gapmap, sibling).
-//!   The trait is used only for GC protection + file loading.
-//! - **Derived**: built by single-pass events (posmap, bytemap, termtexts).
-//!   `on_token`/`on_posting` called during one loop over tokens + sfxpost.
-//! - **DerivedWithDeps**: built after Derived, with access to their data (sepmap).
-//!   `build_from_deps()` receives already-serialized Derived indexes.
+//! - **EventDriven**: built by single-pass events (`on_token`/`on_posting`)
+//!   during one loop over tokens + sfxpost. (posmap, bytemap, termtexts, freqmap)
+//! - **OrMergeWithRemap**: OR-merge source data with ordinal remapping at merge,
+//!   pre-built by the SfxCollector at segment creation. (sibling, sepmap)
+//! - **ExternalDagNode**: managed by dedicated DAG nodes, too complex to generalize.
+//!   (sfxpost, gapmap)
 //!
 //! Adding a new index = implement the trait + add one line to `all_indexes()`.
 
 use std::collections::HashMap;
 
 // ─────────────────────────────────────────────────────────────────────
-// IndexKind
+// MergeStrategy
 // ─────────────────────────────────────────────────────────────────────
 
-/// Role of an index in the build/merge pipeline.
+/// How an index is built during merge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IndexKind {
-    /// Built by a dedicated DAG node. The trait serves GC + loading only.
-    Primary,
-    /// Built by single-pass events (on_token / on_posting).
-    Derived,
-    /// Built after Derived indexes, with access to their serialized data.
-    DerivedWithDeps,
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// Context for DerivedWithDeps
-// ─────────────────────────────────────────────────────────────────────
-
-/// Data available to DerivedWithDeps indexes after the event pass.
-pub struct SfxDeriveContext<'a> {
-    /// Already-serialized Derived indexes, keyed by id.
-    pub derived: &'a HashMap<String, Vec<u8>>,
-    /// Primary gapmap data (from CopyGapmapNode or SfxCollector).
-    pub gapmap_data: &'a [u8],
-    /// Number of documents in this segment.
-    pub num_docs: u32,
+pub enum MergeStrategy {
+    /// Built from sfxpost + tokens via on_token/on_posting events.
+    EventDriven,
+    /// OR-merge source data with ordinal remapping via token text.
+    OrMergeWithRemap,
+    /// Managed by a dedicated DAG node (too complex for generic merge).
+    ExternalDagNode,
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -48,11 +34,6 @@ pub struct SfxDeriveContext<'a> {
 // ─────────────────────────────────────────────────────────────────────
 
 /// A per-field index file in the SFX ecosystem.
-///
-/// Unified abstraction for GC, loading, and build/merge.
-/// Primary indexes only need `id`/`extension`/`kind`.
-/// Derived indexes add event callbacks.
-/// DerivedWithDeps indexes add dependency resolution.
 pub trait SfxIndexFile: Send {
     /// Unique identifier (e.g. "posmap", "termtexts").
     fn id(&self) -> &'static str;
@@ -60,10 +41,14 @@ pub trait SfxIndexFile: Send {
     /// File extension without the dot (e.g. "posmap").
     fn extension(&self) -> &'static str;
 
-    /// Role in the pipeline.
-    fn kind(&self) -> IndexKind;
+    /// How this index is merged.
+    fn merge_strategy(&self) -> MergeStrategy;
 
-    // ── Events (Derived + DerivedWithDeps) ───────────────────────
+    /// If true, the SfxCollector pre-builds this index during indexation
+    /// and passes it as serialized data. If false, built by events or DAG.
+    fn prebuilt_by_collector(&self) -> bool { false }
+
+    // ── Events (EventDriven) ─────────────────────────────────────
 
     /// Called once per token in ordinal order.
     fn on_token(&mut self, _ord: u32, _text: &str) {}
@@ -72,17 +57,25 @@ pub trait SfxIndexFile: Send {
     fn on_posting(&mut self, _ord: u32, _doc_id: u32, _position: u32,
                   _byte_from: u32, _byte_to: u32) {}
 
-    // ── Dependencies (DerivedWithDeps only) ──────────────────────
+    // ── OR-merge (OrMergeWithRemap) ──────────────────────────────
 
-    /// IDs of indexes this depends on (must be Derived, no circular deps).
-    fn depends_on(&self) -> Vec<&'static str> { vec![] }
-
-    /// Called after Derived indexes are serialized.
-    fn build_from_deps(&mut self, _ctx: &SfxDeriveContext) {}
+    /// Merge data from source segments with ordinal remapping.
+    /// Called by OrMergeNode during merge DAG execution.
+    ///
+    /// For each source segment, `sources[i]` contains this index's bytes
+    /// (None if absent). `source_termtexts[i]` provides ordinal→text mapping
+    /// for the source segment. `token_to_new_ord` maps token text to the
+    /// new ordinal in the merged segment.
+    fn merge_from_sources(
+        &mut self,
+        _sources: &[Option<&[u8]>],
+        _source_termtexts: &[Option<&[u8]>],
+        _token_to_new_ord: &dyn Fn(&str) -> Option<u32>,
+    ) {}
 
     // ── Output ───────────────────────────────────────────────────
 
-    /// Serialize accumulated data. Primary indexes return empty (data managed externally).
+    /// Serialize accumulated data.
     fn serialize(&self) -> Vec<u8> { Vec::new() }
 }
 
@@ -94,52 +87,49 @@ pub trait SfxIndexFile: Send {
 /// Adding a new index = add one line here.
 pub fn all_indexes() -> Vec<Box<dyn SfxIndexFile>> {
     vec![
-        // Primary (built by DAG nodes)
+        // ExternalDagNode (dedicated DAG nodes)
         Box::new(super::sfxpost_v2::SfxPostIndex),
         Box::new(super::gapmap::GapMapIndex),
-        Box::new(super::sibling_table::SiblingIndex),
-        // Derived (single-pass events)
+        // OrMergeWithRemap (prebuilt by collector, OR-merged at merge)
+        Box::new(super::sibling_table::SiblingIndex::new()),
+        Box::new(super::sepmap::SepMapIndex::new()),
+        // EventDriven (single-pass events)
         Box::new(super::posmap::PosMapIndex::new()),
         Box::new(super::bytemap::ByteMapIndex::new()),
         Box::new(super::termtexts::TermTextsIndex::new()),
         Box::new(super::freqmap::FreqMapIndex::new()),
-        // DerivedWithDeps
-        Box::new(super::sepmap::SepMapIndex::new()),
     ]
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Single-pass build for Derived + DerivedWithDeps
+// Single-pass build for EventDriven indexes
 // ─────────────────────────────────────────────────────────────────────
 
-/// Build all Derived and DerivedWithDeps indexes in a single pass.
+/// Build all EventDriven indexes in a single pass over tokens + sfxpost.
 ///
-/// Used by both WriteSfxNode (merge) and SfxCollector (segment creation).
-/// Primary indexes are skipped — they are managed by DAG nodes or the collector.
+/// Used by both AssembleSfxNode (segment creation) and WriteSfxNode (merge).
+/// OrMergeWithRemap and ExternalDagNode indexes are skipped.
 pub fn build_derived_indexes(
     tokens: &std::collections::BTreeSet<String>,
     sfxpost_data: Option<&[u8]>,
-    gapmap_data: &[u8],
-    num_docs: u32,
 ) -> Vec<(String, Vec<u8>)> {
-    let t0 = std::time::Instant::now();
     let sfxpost_reader = sfxpost_data
         .and_then(crate::suffix_fst::sfxpost_v2::SfxPostReaderV2::open_slice);
 
     let mut indexes = all_indexes();
 
-    // Phase 1: single-pass events (Derived + DerivedWithDeps)
+    // Single-pass events
     for (ord, token) in tokens.iter().enumerate() {
         let ord = ord as u32;
         for idx in indexes.iter_mut() {
-            if matches!(idx.kind(), IndexKind::Derived | IndexKind::DerivedWithDeps) {
+            if matches!(idx.merge_strategy(), MergeStrategy::EventDriven) {
                 idx.on_token(ord, token);
             }
         }
         if let Some(ref reader) = sfxpost_reader {
             for entry in reader.entries(ord) {
                 for idx in indexes.iter_mut() {
-                    if matches!(idx.kind(), IndexKind::Derived | IndexKind::DerivedWithDeps) {
+                    if matches!(idx.merge_strategy(), MergeStrategy::EventDriven) {
                         idx.on_posting(ord, entry.doc_id, entry.token_index,
                                        entry.byte_from, entry.byte_to);
                     }
@@ -148,60 +138,70 @@ pub fn build_derived_indexes(
         }
     }
 
-    let phase1_ms = t0.elapsed().as_millis();
-
-    // Phase 2: serialize Derived (no dependencies)
-    let t1 = std::time::Instant::now();
-    let mut built: HashMap<String, Vec<u8>> = HashMap::new();
-    for idx in indexes.iter() {
-        if matches!(idx.kind(), IndexKind::Derived) {
-            let ts = std::time::Instant::now();
-            let data = idx.serialize();
-            let ms = ts.elapsed().as_millis();
-            if ms > 5 { eprintln!("[derive-timing] serialize {} = {}ms ({} bytes)", idx.id(), ms, data.len()); }
-            if !data.is_empty() {
-                built.insert(idx.id().to_string(), data);
-            }
-        }
-    }
-    let phase2_ms = t1.elapsed().as_millis();
-
-    // Phase 3: build DerivedWithDeps (have dependencies on Derived)
-    let t2 = std::time::Instant::now();
-    for idx in indexes.iter_mut() {
-        if matches!(idx.kind(), IndexKind::DerivedWithDeps) {
-            let ctx = SfxDeriveContext {
-                derived: &built,
-                gapmap_data,
-                num_docs,
-            };
-            let ts = std::time::Instant::now();
-            idx.build_from_deps(&ctx);
-            let dep_ms = ts.elapsed().as_millis();
-            let data = idx.serialize();
-            let total_ms = ts.elapsed().as_millis();
-            if total_ms > 5 { eprintln!("[derive-timing] deps {} = {}ms build + {}ms serialize ({} bytes)",
-                idx.id(), dep_ms, total_ms - dep_ms, data.len()); }
-            if !data.is_empty() {
-                built.insert(idx.id().to_string(), data);
-            }
-        }
-    }
-    let phase3_ms = t2.elapsed().as_millis();
-
-    let total_ms = t0.elapsed().as_millis();
-    if total_ms > 10 {
-        eprintln!("[derive-timing] total={}ms (events={}ms serialize={}ms deps={}ms) tokens={} num_docs={}",
-            total_ms, phase1_ms, phase2_ms, phase3_ms, tokens.len(), num_docs);
-    }
-
-    // Return (extension, data) for non-Primary indexes
+    // Serialize
     indexes.iter()
-        .filter(|idx| !matches!(idx.kind(), IndexKind::Primary))
+        .filter(|idx| matches!(idx.merge_strategy(), MergeStrategy::EventDriven))
         .filter_map(|idx| {
-            built.remove(idx.id()).map(|data| (idx.extension().to_string(), data))
+            let data = idx.serialize();
+            if data.is_empty() { None }
+            else { Some((idx.extension().to_string(), data)) }
         })
         .collect()
+}
+
+/// Run the OR-merge for all OrMergeWithRemap indexes.
+///
+/// Used by OrMergeNode in the merge DAG.
+pub fn or_merge_indexes(
+    readers: &[crate::SegmentReader],
+    field: crate::schema::Field,
+    tokens: &std::collections::BTreeSet<String>,
+) -> Vec<(String, Vec<u8>)> {
+    // Build token → new ordinal map
+    let token_to_ord: HashMap<&str, u32> = tokens.iter()
+        .enumerate()
+        .map(|(i, t)| (t.as_str(), i as u32))
+        .collect();
+
+    // Load source termtexts for ordinal remapping
+    let source_termtexts: Vec<Option<Vec<u8>>> = readers.iter().map(|r| {
+        r.sfx_index_file("termtexts", field)
+            .and_then(|f| f.read_bytes().ok())
+            .map(|b| b.to_vec())
+    }).collect();
+    let tt_refs: Vec<Option<&[u8]>> = source_termtexts.iter()
+        .map(|opt| opt.as_deref())
+        .collect();
+
+    let mut indexes = all_indexes();
+    let mut results = Vec::new();
+
+    for idx in indexes.iter_mut() {
+        if !matches!(idx.merge_strategy(), MergeStrategy::OrMergeWithRemap) {
+            continue;
+        }
+
+        // Load this index's data from each source segment
+        let source_data: Vec<Option<Vec<u8>>> = readers.iter().map(|r| {
+            r.sfx_index_file(idx.id(), field)
+                .and_then(|f| f.read_bytes().ok())
+                .map(|b| b.to_vec())
+        }).collect();
+        let src_refs: Vec<Option<&[u8]>> = source_data.iter()
+            .map(|opt| opt.as_deref())
+            .collect();
+
+        idx.merge_from_sources(&src_refs, &tt_refs, &|text| {
+            token_to_ord.get(text).copied()
+        });
+
+        let data = idx.serialize();
+        if !data.is_empty() {
+            results.push((idx.extension().to_string(), data));
+        }
+    }
+
+    results
 }
 
 // ─────────────────────────────────────────────────────────────────────

@@ -119,7 +119,7 @@ impl TermTextsIndex {
 impl super::index_registry::SfxIndexFile for TermTextsIndex {
     fn id(&self) -> &'static str { "termtexts" }
     fn extension(&self) -> &'static str { "termtexts" }
-    fn kind(&self) -> super::index_registry::IndexKind { super::index_registry::IndexKind::Derived }
+    fn merge_strategy(&self) -> super::index_registry::MergeStrategy { super::index_registry::MergeStrategy::EventDriven }
 
     fn on_token(&mut self, ord: u32, text: &str) {
         self.writer.add(ord, text);

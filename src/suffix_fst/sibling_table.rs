@@ -208,10 +208,75 @@ mod tests {
 // SfxIndexFile implementation
 // ─────────────────────────────────────────────────────────────────────
 
-pub struct SiblingIndex;
+pub struct SiblingIndex {
+    data: Vec<u8>,
+}
+
+impl SiblingIndex {
+    pub fn new() -> Self { Self { data: Vec::new() } }
+}
 
 impl super::index_registry::SfxIndexFile for SiblingIndex {
     fn id(&self) -> &'static str { "sibling" }
     fn extension(&self) -> &'static str { "sibling" }
-    fn kind(&self) -> super::index_registry::IndexKind { super::index_registry::IndexKind::Primary }
+    fn merge_strategy(&self) -> super::index_registry::MergeStrategy {
+        super::index_registry::MergeStrategy::OrMergeWithRemap
+    }
+    fn prebuilt_by_collector(&self) -> bool { true }
+
+    fn merge_from_sources(
+        &mut self,
+        sources: &[Option<&[u8]>],
+        source_termtexts: &[Option<&[u8]>],
+        token_to_new_ord: &dyn Fn(&str) -> Option<u32>,
+    ) {
+        use super::TermTextsReader;
+        // Determine num_terms from the max new ordinal we'll see
+        let mut max_ord = 0u32;
+
+        for (seg_idx, src_opt) in sources.iter().enumerate() {
+            let src = match src_opt { Some(s) => s, None => continue };
+            let sib_table = match SiblingTableReader::open(src) { Some(t) => t, None => continue };
+            let tt = match source_termtexts[seg_idx].and_then(|b| TermTextsReader::open(b)) {
+                Some(t) => t, None => continue,
+            };
+
+            for old_ord in 0..sib_table.num_ordinals() {
+                let text_a = match tt.text(old_ord) { Some(t) => t, None => continue };
+                let new_a = match token_to_new_ord(text_a) { Some(o) => o, None => continue };
+                if new_a > max_ord { max_ord = new_a; }
+
+                for entry in sib_table.siblings(old_ord) {
+                    let text_b = match tt.text(entry.next_ordinal) { Some(t) => t, None => continue };
+                    let new_b = match token_to_new_ord(text_b) { Some(o) => o, None => continue };
+                    if new_b > max_ord { max_ord = new_b; }
+                }
+            }
+        }
+
+        let mut writer = SiblingTableWriter::new(max_ord + 1);
+
+        for (seg_idx, src_opt) in sources.iter().enumerate() {
+            let src = match src_opt { Some(s) => s, None => continue };
+            let sib_table = match SiblingTableReader::open(src) { Some(t) => t, None => continue };
+            let tt = match source_termtexts[seg_idx].and_then(|b| TermTextsReader::open(b)) {
+                Some(t) => t, None => continue,
+            };
+
+            for old_ord in 0..sib_table.num_ordinals() {
+                let text_a = match tt.text(old_ord) { Some(t) => t, None => continue };
+                let new_a = match token_to_new_ord(text_a) { Some(o) => o, None => continue };
+
+                for entry in sib_table.siblings(old_ord) {
+                    let text_b = match tt.text(entry.next_ordinal) { Some(t) => t, None => continue };
+                    let new_b = match token_to_new_ord(text_b) { Some(o) => o, None => continue };
+                    writer.add(new_a, new_b, entry.gap_len);
+                }
+            }
+        }
+
+        self.data = writer.serialize();
+    }
+
+    fn serialize(&self) -> Vec<u8> { self.data.clone() }
 }

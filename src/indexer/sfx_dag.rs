@@ -175,20 +175,20 @@ impl Node for MergeSfxpostNode {
 }
 
 // ---------------------------------------------------------------------------
-// MergeSiblingLinksNode
+// OrMergeNode — generic OR-merge for all OrMergeWithRemap indexes
 // ---------------------------------------------------------------------------
 
-struct MergeSiblingLinksNode {
+struct OrMergeNode {
     ctx: Arc<SfxContext>,
 }
 
-impl Node for MergeSiblingLinksNode {
-    fn node_type(&self) -> &'static str { "sfx_merge_siblings" }
+impl Node for OrMergeNode {
+    fn node_type(&self) -> &'static str { "sfx_or_merge" }
     fn inputs(&self) -> Vec<PortDef> {
         vec![PortDef::required("tokens", PortType::of::<BTreeSet<String>>())]
     }
     fn outputs(&self) -> Vec<PortDef> {
-        vec![PortDef::required("siblings", PortType::of::<Vec<u8>>())]
+        vec![PortDef::required("or_merged", PortType::of::<Vec<(String, Vec<u8>)>>())]
     }
     fn execute(&mut self, nctx: &mut NodeContext) -> Result<(), String> {
         let tokens = nctx.input("tokens")
@@ -196,18 +196,12 @@ impl Node for MergeSiblingLinksNode {
             .downcast::<BTreeSet<String>>()
             .ok_or("wrong type")?;
 
-        let sfx_data: Vec<Option<Vec<u8>>> = self.ctx.readers.iter().map(|r| {
-            r.sfx_file(self.ctx.field)
-                .and_then(|f| f.read_bytes().ok())
-                .map(|b| b.to_vec())
-        }).collect();
+        let results = crate::suffix_fst::index_registry::or_merge_indexes(
+            &self.ctx.readers, self.ctx.field, tokens,
+        );
 
-        let sibling_data = sfx_merge::merge_sibling_links(
-            &sfx_data, &self.ctx.readers, self.ctx.field, tokens,
-        ).map_err(|e| format!("merge_sibling_links: {e}"))?;
-
-        nctx.metric("sibling_bytes", sibling_data.len() as f64);
-        nctx.set_output("siblings", PortValue::new(sibling_data));
+        nctx.metric("or_merged_files", results.len() as f64);
+        nctx.set_output("or_merged", PortValue::new(results));
         Ok(())
     }
 }
@@ -273,7 +267,7 @@ impl Node for WriteSfxNode {
             PortDef::required("fst", PortType::of::<(Vec<u8>, Vec<u8>)>()),
             PortDef::required("gapmap", PortType::of::<Vec<u8>>()),
             PortDef::required("sfxpost", PortType::of::<Option<Vec<u8>>>()),
-            PortDef::required("siblings", PortType::of::<Vec<u8>>()),
+            PortDef::optional("or_merged", PortType::of::<Vec<(String, Vec<u8>)>>()),
             PortDef::required("tokens", PortType::of::<BTreeSet<String>>()),
         ]
     }
@@ -284,19 +278,24 @@ impl Node for WriteSfxNode {
             .ok_or("missing gapmap")?.take::<Vec<u8>>().ok_or("gapmap type")?;
         let sfxpost_data = ctx.take_input("sfxpost")
             .ok_or("missing sfxpost")?.take::<Option<Vec<u8>>>().ok_or("sfxpost type")?;
-        let sibling_data = ctx.take_input("siblings")
-            .and_then(|v| v.take::<Vec<u8>>())
+        // Take or_merged before borrowing tokens (borrow checker)
+        let or_merged = ctx.take_input("or_merged")
+            .and_then(|v| v.take::<Vec<(String, Vec<u8>)>>())
             .unwrap_or_default();
         let tokens = ctx.input("tokens")
             .ok_or("missing tokens")?.downcast::<BTreeSet<String>>().ok_or("tokens type")?;
+
+        // Extract sibling data for .sfx file (it's also written as separate file)
+        let sibling_data = or_merged.iter()
+            .find(|(ext, _)| ext == "sibling")
+            .map(|(_, data)| data.clone())
+            .unwrap_or_default();
 
         let num_tokens = tokens.len() as u32;
         let segment = self.segment.as_mut().ok_or("segment missing")?;
         let field_id = self.field.field_id();
 
-        // Clone gapmap/sibling before passing to SfxFileWriter (which takes ownership)
         let gapmap_data_clone = gapmap_data.clone();
-        let sibling_data_clone = sibling_data.clone();
 
         // Build .sfx file
         let sfx_file = crate::suffix_fst::file::SfxFileWriter::new(
@@ -331,17 +330,16 @@ impl Node for WriteSfxNode {
         if !gapmap_data_clone.is_empty() {
             write_file(segment, "gapmap", &gapmap_data_clone)?;
         }
-        if !sibling_data_clone.is_empty() {
-            write_file(segment, "sibling", &sibling_data_clone)?;
+
+        // Write OR-merged files (sibling, sepmap — from OrMergeNode, already extracted above)
+        for (ext, data) in &or_merged {
+            write_file(segment, ext, data)?;
         }
 
-        // Build all derived indexes via registry single-pass
-        // (posmap, bytemap, termtexts, sepmap — in one loop over tokens+sfxpost)
+        // Build EventDriven indexes via registry single-pass
         let derived_files = crate::suffix_fst::index_registry::build_derived_indexes(
             tokens,
             sfxpost_data.as_deref(),
-            &gapmap_data_clone,
-            self.num_docs,
         );
         for (ext, data) in &derived_files {
             write_file(segment, ext, data)?;
@@ -408,11 +406,11 @@ pub(crate) fn build_sfx_dag(
     dag.connect("merge_sfxpost", "sfxpost", "validate_sfxpost", "sfxpost").unwrap();
     dag.connect("collect", "tokens", "validate_sfxpost", "tokens").unwrap();
 
-    // merge_sibling_links (depends on tokens, parallel with fst+gapmap+sfxpost)
-    dag.add_node("merge_siblings", MergeSiblingLinksNode { ctx: ctx.clone() });
-    dag.connect("collect", "tokens", "merge_siblings", "tokens").unwrap();
+    // or_merge (sibling + sepmap via generic OrMergeNode, parallel with fst+gapmap+sfxpost)
+    dag.add_node("or_merge", OrMergeNode { ctx: ctx.clone() });
+    dag.connect("collect", "tokens", "or_merge", "tokens").unwrap();
 
-    // write (depends on all: fst, validated gapmap, validated sfxpost, siblings, tokens)
+    // write (depends on all: fst, validated gapmap, validated sfxpost, or_merged, tokens)
     dag.add_node("write", WriteSfxNode {
         segment: Some(segment),
         field,
@@ -422,7 +420,7 @@ pub(crate) fn build_sfx_dag(
     dag.connect("build_fst", "fst", "write", "fst").unwrap();
     dag.connect("validate_gapmap", "gapmap", "write", "gapmap").unwrap();
     dag.connect("validate_sfxpost", "sfxpost", "write", "sfxpost").unwrap();
-    dag.connect("merge_siblings", "siblings", "write", "siblings").unwrap();
+    dag.connect("or_merge", "or_merged", "write", "or_merged").unwrap();
     dag.connect("collect", "tokens", "write", "tokens").unwrap();
 
     dag
@@ -498,18 +496,18 @@ impl Node for BuildSfxPostNode {
 }
 
 // ---------------------------------------------------------------------------
-// BuildSiblingNode — build sibling table from collector sibling_pairs
+// BuildPrebuiltNode — build sibling + sepmap from collector data
 // ---------------------------------------------------------------------------
 
-struct BuildSiblingNode;
+struct BuildPrebuiltNode;
 
-impl Node for BuildSiblingNode {
-    fn node_type(&self) -> &'static str { "sfx_build_sibling" }
+impl Node for BuildPrebuiltNode {
+    fn node_type(&self) -> &'static str { "sfx_build_prebuilt" }
     fn inputs(&self) -> Vec<PortDef> {
         vec![PortDef::required("collector_data", PortType::of::<crate::suffix_fst::SfxCollectorData>())]
     }
     fn outputs(&self) -> Vec<PortDef> {
-        vec![PortDef::required("siblings", PortType::of::<Vec<u8>>())]
+        vec![PortDef::required("prebuilt", PortType::of::<Vec<(String, Vec<u8>)>>())]
     }
     fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
         let data = ctx.input("collector_data")
@@ -517,6 +515,9 @@ impl Node for BuildSiblingNode {
             .downcast::<crate::suffix_fst::SfxCollectorData>()
             .ok_or("wrong type")?;
 
+        let mut results: Vec<(String, Vec<u8>)> = Vec::new();
+
+        // Sibling table
         let num_terms = data.tokens.len() as u32;
         let mut writer = crate::suffix_fst::sibling_table::SiblingTableWriter::new(num_terms);
         for ((intern_a, intern_b), gap_lens) in &data.sibling_pairs {
@@ -527,8 +528,16 @@ impl Node for BuildSiblingNode {
             }
         }
         let sibling_data = writer.serialize();
-        ctx.metric("sibling_bytes", sibling_data.len() as f64);
-        ctx.set_output("siblings", PortValue::new(sibling_data));
+        if !sibling_data.is_empty() {
+            results.push(("sibling".to_string(), sibling_data));
+        }
+
+        // Sepmap (pre-built by collector, already remapped)
+        if !data.sepmap_data.is_empty() {
+            results.push(("sepmap".to_string(), data.sepmap_data.clone()));
+        }
+
+        ctx.set_output("prebuilt", PortValue::new(results));
         Ok(())
     }
 }
@@ -552,7 +561,7 @@ impl Node for AssembleSfxNode {
             PortDef::required("fst", PortType::of::<(Vec<u8>, Vec<u8>)>()),
             PortDef::required("gapmap", PortType::of::<Vec<u8>>()),
             PortDef::required("sfxpost", PortType::of::<Option<Vec<u8>>>()),
-            PortDef::required("siblings", PortType::of::<Vec<u8>>()),
+            PortDef::required("prebuilt", PortType::of::<Vec<(String, Vec<u8>)>>()),
             PortDef::required("tokens", PortType::of::<BTreeSet<String>>()),
         ]
     }
@@ -566,39 +575,41 @@ impl Node for AssembleSfxNode {
             .ok_or("missing gapmap")?.take::<Vec<u8>>().ok_or("gapmap type")?;
         let sfxpost_data = ctx.take_input("sfxpost")
             .ok_or("missing sfxpost")?.take::<Option<Vec<u8>>>().ok_or("sfxpost type")?;
-        let sibling_data = ctx.take_input("siblings")
-            .and_then(|v| v.take::<Vec<u8>>())
+        let prebuilt = ctx.take_input("prebuilt")
+            .and_then(|v| v.take::<Vec<(String, Vec<u8>)>>())
             .unwrap_or_default();
         let tokens = ctx.input("tokens")
             .ok_or("missing tokens")?.downcast::<BTreeSet<String>>().ok_or("tokens type")?;
 
         let num_tokens = tokens.len() as u32;
 
+        // Extract sibling for .sfx file
+        let sibling_data = prebuilt.iter()
+            .find(|(ext, _)| ext == "sibling")
+            .map(|(_, data)| data.clone())
+            .unwrap_or_default();
+
         // Build .sfx file bytes
         let sfx_file = crate::suffix_fst::file::SfxFileWriter::new(
             fst_data, parent_data, gapmap_data.clone(),
             self.num_docs, num_tokens,
-        ).with_sibling_data(sibling_data.clone());
+        ).with_sibling_data(sibling_data);
         let sfx_bytes = sfx_file.to_bytes();
 
-        // Primary registry files
+        // Registry files: primary + prebuilt + derived
         let mut registry_files = Vec::new();
         if let Some(ref data) = sfxpost_data {
             registry_files.push(("sfxpost".to_string(), data.clone()));
         }
         if !gapmap_data.is_empty() {
-            registry_files.push(("gapmap".to_string(), gapmap_data.clone()));
+            registry_files.push(("gapmap".to_string(), gapmap_data));
         }
-        if !sibling_data.is_empty() {
-            registry_files.push(("sibling".to_string(), sibling_data));
-        }
-
-        // Derived indexes via single-pass registry
+        // Prebuilt files (sibling, sepmap)
+        registry_files.extend(prebuilt);
+        // EventDriven indexes
         let derived = crate::suffix_fst::index_registry::build_derived_indexes(
             tokens,
             sfxpost_data.as_deref(),
-            &gapmap_data,
-            self.num_docs,
         );
         registry_files.extend(derived);
 
@@ -639,9 +650,9 @@ pub(crate) fn build_initial_sfx_dag(
     dag.add_node("build_sfxpost", BuildSfxPostNode);
     dag.connect("prepare", "collector_data", "build_sfxpost", "collector_data").unwrap();
 
-    // build_sibling (parallel)
-    dag.add_node("build_sibling", BuildSiblingNode);
-    dag.connect("prepare", "collector_data", "build_sibling", "collector_data").unwrap();
+    // build_prebuilt: sibling + sepmap (parallel)
+    dag.add_node("build_prebuilt", BuildPrebuiltNode);
+    dag.connect("prepare", "collector_data", "build_prebuilt", "collector_data").unwrap();
 
     // gapmap as constant source
     struct GapmapSourceNode(Option<Vec<u8>>);
@@ -663,7 +674,7 @@ pub(crate) fn build_initial_sfx_dag(
     dag.connect("build_fst", "fst", "assemble", "fst").unwrap();
     dag.connect("gapmap_source", "gapmap", "assemble", "gapmap").unwrap();
     dag.connect("build_sfxpost", "sfxpost", "assemble", "sfxpost").unwrap();
-    dag.connect("build_sibling", "siblings", "assemble", "siblings").unwrap();
+    dag.connect("build_prebuilt", "prebuilt", "assemble", "prebuilt").unwrap();
     dag.connect("prepare", "tokens", "assemble", "tokens").unwrap();
 
     dag

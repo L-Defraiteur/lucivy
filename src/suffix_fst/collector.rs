@@ -283,6 +283,16 @@ impl SfxCollector {
         let gapmap_data = self.gapmap_writer.serialize();
         let num_docs = self.gapmap_writer.num_docs() as u32;
 
+        // Remap sepmap: intern ordinals → final ordinals
+        let num_terms = num_tokens as u32;
+        let mut final_sepmap_writer = SepMapWriter::new();
+        final_sepmap_writer.ensure_capacity(num_terms);
+        for (intern_ord, bitmap) in self.sepmap_writer.bitmaps_ref().iter().enumerate() {
+            let final_ord = intern_to_final[intern_ord];
+            final_sepmap_writer.or_bitmap(final_ord, bitmap);
+        }
+        let sepmap_data = final_sepmap_writer.serialize();
+
         SfxCollectorData {
             tokens,
             sorted_indices,
@@ -291,6 +301,7 @@ impl SfxCollector {
             token_postings: self.token_postings,
             sibling_pairs: self.sibling_pairs,
             gapmap_data,
+            sepmap_data,
             num_docs,
             min_suffix_len: self.min_suffix_len,
         }
@@ -313,6 +324,8 @@ pub struct SfxCollectorData {
     pub sibling_pairs: HashMap<(u32, u32), HashSet<u16>>,
     /// Serialized gapmap data.
     pub gapmap_data: Vec<u8>,
+    /// Serialized sepmap data (pre-built, remapped to final ordinals).
+    pub sepmap_data: Vec<u8>,
     /// Number of documents.
     pub num_docs: u32,
     /// Minimum suffix length for the FST.

@@ -220,7 +220,7 @@ impl PosMapIndex {
 impl super::index_registry::SfxIndexFile for PosMapIndex {
     fn id(&self) -> &'static str { "posmap" }
     fn extension(&self) -> &'static str { "posmap" }
-    fn kind(&self) -> super::index_registry::IndexKind { super::index_registry::IndexKind::Derived }
+    fn merge_strategy(&self) -> super::index_registry::MergeStrategy { super::index_registry::MergeStrategy::EventDriven }
 
     fn on_posting(&mut self, ord: u32, doc_id: u32, position: u32, _bf: u32, _bt: u32) {
         self.writer.add(doc_id, position, ord);
