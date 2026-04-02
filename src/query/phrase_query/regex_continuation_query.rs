@@ -813,6 +813,16 @@ pub fn fuzzy_contains_via_trigram(
     let mut doc_bitset = BitSet::with_max_value(max_doc);
     let mut highlights: Vec<(DocId, usize, usize)> = Vec::new();
 
+    // Pre-build lookup: (doc_id, byte_from) → min token position
+    // Avoids O(n) scan of all_matches per candidate.
+    let mut bf_to_pos: std::collections::HashMap<(DocId, u32), u32> = std::collections::HashMap::new();
+    for matches in &all_matches {
+        for m in matches {
+            let key = (m.doc_id, m.byte_from);
+            let entry = bf_to_pos.entry(key).or_insert(m.position);
+            if m.position < *entry { *entry = m.position; }
+        }
+    }
 
     let mut _diag_unproven = 0usize;
     let mut _diag_unproven_skipped = 0usize;
@@ -827,12 +837,8 @@ pub fn fuzzy_contains_via_trigram(
         let last_tri_idx = *last_tri_idx;
         if !trigram_proven { _diag_unproven += 1; }
 
-        // Find the token position for first_bf from the trigram matches
-        let first_pos = all_matches.iter()
-            .flat_map(|m| m.iter())
-            .filter(|m| m.doc_id == doc_id && m.byte_from == *first_bf)
-            .map(|m| m.position)
-            .min();
+        // Lookup token position for first_bf — O(1) via pre-built HashMap
+        let first_pos = bf_to_pos.get(&(doc_id, *first_bf)).copied();
 
         let Some(fp) = first_pos else { continue; };
 
@@ -853,12 +859,7 @@ pub fn fuzzy_contains_via_trigram(
             continue;
         }
 
-        // For docs already validated: skip DFA only for proven candidates
-        // (non-proven might be false positives that DFA would reject)
-        if doc_bitset.contains(doc_id) && !trigram_proven {
-            _diag_unproven_skipped += 1;
-            continue;
-        }
+        if !trigram_proven { _diag_unproven_skipped += 0; /* no skip — exact results */ }
 
         if let Some(pm) = &posmap {
             // === Step 1: Build concat with token span tracking ===
