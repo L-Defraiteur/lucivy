@@ -225,15 +225,27 @@ pub fn intersect_trigrams_with_threshold(
 
             // Separator-agnostic span check: only enforce span_diff on
             // intra-word pairs. Cross-word pairs have free separator size.
-            // Global check: allow extra tolerance per cross-word transition.
+            // Also tolerate cross-token gaps within a single query word
+            // (CamelCase split: "rag3weaver" → tokens "rag3"+"weaver" with gap).
             let cross_word_count = chain.windows(2)
                 .filter(|w| word_ids[w[0].0] != word_ids[w[1].0])
+                .count() as u64;
+            // Count content token gaps: consecutive trigrams where byte_from
+            // jumps by more than n+1 bytes (indicating a gap between indexed tokens).
+            let content_gap_count = chain.windows(2)
+                .filter(|w| {
+                    let bf_diff = w[1].1 as i64 - w[0].1 as i64;
+                    let qp_diff = query_positions[w[1].0] as i64 - query_positions[w[0].0] as i64;
+                    // A content gap exists when text advances much more than query
+                    bf_diff > qp_diff + 1
+                })
                 .count() as u64;
             let text_span = last.1 as i64 - first.1 as i64;
             let query_span = query_positions[last.0] as i64 - query_positions[first.0] as i64;
             let span_diff = (text_span - query_span).unsigned_abs();
-            // Each cross-word transition allows up to 64 bytes of separator drift
-            let tolerance = distance as u64 + cross_word_count * 64;
+            // Each cross-word transition allows up to 64 bytes of separator drift.
+            // Each content token gap allows up to 64 bytes (CamelCase gaps etc).
+            let tolerance = distance as u64 + (cross_word_count + content_gap_count) * 64;
             if span_diff > tolerance { return false; }
 
             // Proven = ALL trigrams matched AND each intra-word consecutive
@@ -242,11 +254,13 @@ pub fn intersect_trigrams_with_threshold(
             let mut proven = chain.len() == num_trigrams;
             if proven && chain.len() >= 2 {
                 for w in chain.windows(2) {
-                    // Cross-word pairs: skip span check (separator-agnostic)
-                    if word_ids[w[0].0] != word_ids[w[1].0] { continue; }
                     let pair_text_span = w[1].1 as i64 - w[0].1 as i64;
                     let pair_query_span = query_positions[w[1].0] as i64 - query_positions[w[0].0] as i64;
-                    if (pair_text_span - pair_query_span).unsigned_abs() > distance as u64 {
+                    let pair_diff = (pair_text_span - pair_query_span).unsigned_abs();
+                    // Cross-word pairs: skip span check (separator-agnostic)
+                    if word_ids[w[0].0] != word_ids[w[1].0] { continue; }
+                    // Content token gap: text advances much more than query → not proven
+                    if pair_diff > distance as u64 {
                         proven = false;
                         break;
                     }
