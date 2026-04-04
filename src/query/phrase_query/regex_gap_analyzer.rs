@@ -88,7 +88,25 @@ fn walk_hir(hir: &Hir) -> Vec<RegexSegment> {
     match hir.kind() {
         HirKind::Literal(lit) => {
             let s = String::from_utf8_lossy(&lit.0).to_lowercase();
-            vec![RegexSegment::Literal(s)]
+            // Split on non-alphanumeric chars: they are token boundaries in the SFX.
+            // Each alphanumeric segment becomes a Literal, each non-alpha char
+            // becomes a DfaValidation gap (the DFA checks the exact separator byte).
+            let mut segments = Vec::new();
+            let mut current = String::new();
+            for c in s.chars() {
+                if c.is_alphanumeric() {
+                    current.push(c);
+                } else {
+                    if !current.is_empty() {
+                        segments.push(RegexSegment::Literal(std::mem::take(&mut current)));
+                    }
+                    segments.push(RegexSegment::Gap(GapKind::DfaValidation));
+                }
+            }
+            if !current.is_empty() {
+                segments.push(RegexSegment::Literal(current));
+            }
+            segments
         }
         HirKind::Concat(subs) => {
             subs.iter().flat_map(walk_hir).collect()

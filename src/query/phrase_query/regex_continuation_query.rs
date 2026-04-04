@@ -1227,7 +1227,6 @@ where
         all_matches[lit_idx] = matches;
     }
 
-
     let find_us = t0.elapsed().as_micros();
 
     // ═══════════════════════════════════════════════════════════════════
@@ -1302,10 +1301,18 @@ where
 
         let ordered = literal_resolve::intersect_literals_ordered(&grouped);
 
-        // Validate gap by gap. Three tiers:
-        // 1. AcceptAnything (.*) — free, order already verified
-        // 2. ByteRangeCheck ([a-z]+) — O(1) per token via ByteMap
-        // 3. DfaValidation — full validate_path with DFA
+        if std::env::var("LUCIVY_REGEX_DIAG").is_ok() {
+            eprintln!("[regex-diag] ordered={} candidates", ordered.len());
+            for &(doc_id, first_bf, last_bt, first_si) in &ordered {
+                eprintln!("  doc={} bf={} bt={} si={}", doc_id, first_bf, last_bt, first_si);
+            }
+        }
+
+        // Validate via single continuous DFA walk from the first literal's
+        // token through all subsequent tokens. The multi-literal intersection
+        // above is a filter — the DFA walk is the authoritative check.
+        // This correctly handles intra-token gaps (e.g., "rag.db" where "."
+        // matches byte "3" inside token "rag3db").
         use super::regex_gap_analyzer::GapKind as AnalyzedGap;
 
         let all_accept = !has_any_dfa_gap && analyzed_gaps.iter().all(|g| matches!(g, AnalyzedGap::AcceptAnything));
@@ -1316,117 +1323,51 @@ where
                 highlights.push((doc_id, first_bf as usize, last_bt as usize));
             }
         } else if let Some(pm) = &posmap {
-            'doc_loop: for &(doc_id, first_bf, last_bt, _first_si) in &ordered {
-                // Collect positions of each literal in this doc
-                let mut lit_positions: Vec<u32> = Vec::new();
-                for (li, grp) in grouped.iter().enumerate() {
-                    let pos = grp.get(&doc_id)
-                        .and_then(|v| {
-                            if li == 0 {
-                                v.iter().find(|&&(_, bf, _, _)| bf == first_bf).map(|&(p, _, _, _)| p)
-                            } else if li == grouped.len() - 1 {
-                                v.iter().find(|&&(_, _, bt, _)| bt == last_bt).map(|&(p, _, _, _)| p)
-                            } else {
-                                let prev_pos = *lit_positions.last().unwrap_or(&0);
-                                v.iter()
-                                    .filter(|&&(_, bf, _, _)| bf >= first_bf)
-                                    .filter(|&&(p, _, _, _)| p > prev_pos)
-                                    .min_by_key(|&&(_, bf, _, _)| bf)
-                                    .map(|&(p, _, _, _)| p)
-                            }
-                        });
-                    match pos {
-                        Some(p) => lit_positions.push(p),
-                        None => continue 'doc_loop,
-                    }
-                }
+            for &(doc_id, first_bf, last_bt, first_si) in &ordered {
+                // Find the token position of the first literal match
+                let first_entry = grouped[0].get(&doc_id)
+                    .and_then(|v| v.iter().find(|&&(_, bf, _, _)| bf == first_bf));
+                let Some(&(first_pos, _, _, _)) = first_entry else { continue; };
 
-                // Validate each gap
-                let mut valid = true;
-                for (gap_idx, gap) in analyzed_gaps.iter().enumerate() {
-                    if gap_idx >= lit_positions.len() - 1 { break; }
-                    let from_pos = lit_positions[gap_idx];
-                    let to_pos = lit_positions[gap_idx + 1];
-                    if from_pos >= to_pos { continue; }
+                // Find the token position of the last literal match
+                let last_entry = grouped.last().unwrap().get(&doc_id)
+                    .and_then(|v| v.iter().find(|&&(_, _, bt, _)| bt == last_bt));
+                let last_pos = last_entry.map(|&(p, _, _, _)| p).unwrap_or(first_pos);
 
-                    match gap {
-                        AnalyzedGap::AcceptAnything => {
-                            // Free — order already verified
+                // Feed the first token from the literal's offset to end of token
+                let mut state = start_state.clone();
+                let mut alive = true;
+                if let Some(tok_ord) = pm.ordinal_at(doc_id, first_pos) {
+                    if let Some(text) = ord_to_term(tok_ord as u64) {
+                        let offset = first_si as usize;
+                        for &byte in &text.as_bytes()[offset..] {
+                            state = automaton.accept(&state, byte);
+                            if !automaton.can_match(&state) { alive = false; break; }
                         }
-                        AnalyzedGap::ByteRangeCheck(ranges) => {
-                            // Try ByteMap+SepMap check first (O(1) per token)
-                            let bytemap_result = if let Some(ref bm) = bytemap {
-                                super::regex_gap_analyzer::validate_gap_bytemap(
-                                    pm, bm, sepmap.as_ref(), doc_id, from_pos, to_pos, ranges,
-                                )
-                            } else {
-                                None // no bytemap → inconclusive
-                            };
-                            match bytemap_result {
-                                Some(false) => { valid = false; break; } // rejected
-                                Some(true) => {} // validated
-                                None => {
-                                    // Inconclusive (adjacent/same token) → fallback DFA
-                                    let left_lit = &viable[gap_idx];
-                                    let dfa_state = if let Some(tok_ord) = pm.ordinal_at(doc_id, from_pos) {
-                                        if let Some(text) = ord_to_term(tok_ord as u64) {
-                                            let offset = text.find(left_lit.as_str()).unwrap_or(0);
-                                            let mut s = start_state.clone();
-                                            let mut alive = true;
-                                            for &byte in &text.as_bytes()[offset..] {
-                                                s = automaton.accept(&s, byte);
-                                                if !automaton.can_match(&s) { alive = false; break; }
-                                            }
-                                            if !alive { valid = false; break; }
-                                            s
-                                        } else { valid = false; break; }
-                                    } else { valid = false; break; };
+                    } else { continue; }
+                } else { continue; }
 
-                                    let result = literal_resolve::validate_path(
-                                        automaton, &dfa_state, pm, sfx_reader, ord_to_term,
-                                        doc_id, from_pos, to_pos,
-                                        bytemap.as_ref(), false,
-                                    );
-                                    if result.is_none() {
-                                        valid = false;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        AnalyzedGap::DfaValidation => {
-                            // Full DFA validate_path
-                            let left_lit = &viable[gap_idx];
-                            let dfa_state = if let Some(tok_ord) = pm.ordinal_at(doc_id, from_pos) {
-                                if let Some(text) = ord_to_term(tok_ord as u64) {
-                                    let offset = text.find(left_lit.as_str()).unwrap_or(0);
-                                    let mut s = start_state.clone();
-                                    let mut alive = true;
-                                    for &byte in &text.as_bytes()[offset..] {
-                                        s = automaton.accept(&s, byte);
-                                        if !automaton.can_match(&s) { alive = false; break; }
-                                    }
-                                    if !alive { valid = false; break; }
-                                    s
-                                } else { valid = false; break; }
-                            } else { valid = false; break; };
+                if !alive { continue; }
 
-                            let result = literal_resolve::validate_path(
-                                automaton, &dfa_state, pm, sfx_reader, ord_to_term,
-                                doc_id, from_pos, to_pos,
-                                bytemap.as_ref(), false,
-                            );
-                            if result.is_none() {
-                                valid = false;
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                if valid {
+                if automaton.is_match(&state) {
                     doc_bitset.insert(doc_id);
                     highlights.push((doc_id, first_bf as usize, last_bt as usize));
+                    continue;
+                }
+
+                // Walk forward via validate_path to cover remaining tokens + gaps
+                let end_pos = (last_pos + MAX_CONTINUATION_DEPTH as u32).min(pm.num_tokens(doc_id));
+                if end_pos > first_pos {
+                    if let Some(final_state) = literal_resolve::validate_path(
+                        automaton, &state, pm, sfx_reader, ord_to_term,
+                        doc_id, first_pos, end_pos - 1,
+                        bytemap.as_ref(), false,
+                    ) {
+                        if automaton.is_match(&final_state) {
+                            doc_bitset.insert(doc_id);
+                            highlights.push((doc_id, first_bf as usize, last_bt as usize));
+                        }
+                    }
                 }
             }
         } else {
