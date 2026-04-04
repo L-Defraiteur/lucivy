@@ -1279,7 +1279,7 @@ where
                         if let Some(final_state) = literal_resolve::validate_path(
                             automaton, &state, pm, sfx_reader, ord_to_term,
                             m.doc_id, m.position, end_pos - 1,
-                            bytemap.as_ref(),
+                            bytemap.as_ref(), false,
                         ) {
                             if automaton.is_match(&final_state) {
                                 doc_bitset.insert(m.doc_id);
@@ -1385,7 +1385,7 @@ where
                                     let result = literal_resolve::validate_path(
                                         automaton, &dfa_state, pm, sfx_reader, ord_to_term,
                                         doc_id, from_pos, to_pos,
-                                        bytemap.as_ref(),
+                                        bytemap.as_ref(), false,
                                     );
                                     if result.is_none() {
                                         valid = false;
@@ -1414,7 +1414,7 @@ where
                             let result = literal_resolve::validate_path(
                                 automaton, &dfa_state, pm, sfx_reader, ord_to_term,
                                 doc_id, from_pos, to_pos,
-                                bytemap.as_ref(),
+                                bytemap.as_ref(), false,
                             );
                             if result.is_none() {
                                 valid = false;

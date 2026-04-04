@@ -331,6 +331,7 @@ pub fn validate_path<A: lucivy_fst::Automaton>(
     pos_from: u32, // exclusive: start feeding AFTER this position
     pos_to: u32,   // inclusive: feed up to and including this position
     bytemap: Option<&crate::suffix_fst::bytemap::ByteBitmapReader<'_>>,
+    normalize_gaps: bool,
 ) -> Option<A::State>
 where
     A::State: Clone,
@@ -345,13 +346,22 @@ where
             if is_value_boundary(gap_bytes) {
                 return None;
             }
-            // Normalize gap: any separator → single space (separator-agnostic).
-            // The DFA is built from a normalized query where separators are
-            // also single spaces, so this ensures separator size doesn't
-            // affect the edit distance.
-            state = automaton.accept(&state, b' ');
-            if !automaton.can_match(&state) {
-                return None;
+            if normalize_gaps {
+                // Normalize gap: any separator → single space (separator-agnostic).
+                // The DFA is built from a normalized query where separators are
+                // also single spaces, so this ensures separator size doesn't
+                // affect the edit distance.
+                state = automaton.accept(&state, b' ');
+                if !automaton.can_match(&state) {
+                    return None;
+                }
+            } else {
+                for &byte in gap_bytes {
+                    state = automaton.accept(&state, byte);
+                    if !automaton.can_match(&state) {
+                        return None;
+                    }
+                }
             }
         }
 
