@@ -378,15 +378,16 @@ fn test_fuzzy_ground_truth() {
 
     let content_field = handle.field("content").unwrap();
 
-    // Build a map: file content hash → doc_index (for matching)
-    let file_content_map: HashMap<u64, usize> = files.iter().enumerate()
-        .map(|(i, (_, content))| {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            content.hash(&mut hasher);
-            (hasher.finish(), i)
-        })
-        .collect();
+    // Build a map: file content hash → doc_indices (for matching).
+    // Multiple files can have identical content (e.g. README.md duplicates),
+    // so we map to Vec<usize> to avoid losing entries on hash collision.
+    let mut file_content_map: HashMap<u64, Vec<usize>> = HashMap::new();
+    for (i, (_, content)) in files.iter().enumerate() {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        content.hash(&mut hasher);
+        file_content_map.entry(hasher.finish()).or_default().push(i);
+    }
 
     // ── 3. Test multiple queries ──────────────────────────────────────
     let queries: Vec<(&str, u32)> = vec![
@@ -440,13 +441,15 @@ fn test_fuzzy_ground_truth() {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             content.hash(&mut hasher);
             let hash = hasher.finish();
-            let doc_idx = file_content_map.get(&hash).copied();
+            let doc_indices = file_content_map.get(&hash);
 
-            if let Some(idx) = doc_idx {
-                found_doc_indices.insert(idx);
+            if let Some(indices) = doc_indices {
+                for &idx in indices {
+                    found_doc_indices.insert(idx);
+                }
             }
 
-            let path_str = doc_idx.map(|i| files[i].0.as_str()).unwrap_or("???");
+            let path_str = doc_indices.and_then(|v| v.first()).map(|&i| files[i].0.as_str()).unwrap_or("???");
 
             let seg_id = searcher.segment_reader(addr.segment_ord as u32).segment_id();
             let hl_map = sink.get(seg_id, addr.doc_id);
@@ -503,7 +506,7 @@ fn test_fuzzy_ground_truth() {
                 use std::hash::{Hash, Hasher};
                 let mut h = std::collections::hash_map::DefaultHasher::new();
                 files[doc_idx].1.hash(&mut h);
-                if file_content_map.get(&h.finish()) != Some(&doc_idx) {
+                if !file_content_map.get(&h.finish()).map_or(false, |v| v.contains(&doc_idx)) {
                     continue; // duplicate content, not a real miss
                 }
                 let path = &files[doc_idx].0;
