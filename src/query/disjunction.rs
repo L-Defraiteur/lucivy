@@ -92,7 +92,7 @@ impl<TScorer: Scorer, TScoreCombiner: ScoreCombiner> Disjunction<TScorer, TScore
         score_combiner: TScoreCombiner,
         minimum_matches_required: usize,
     ) -> Self {
-        debug_assert!(
+        assert!(
             minimum_matches_required > 1,
             "union scorer works better if just one matches required"
         );
