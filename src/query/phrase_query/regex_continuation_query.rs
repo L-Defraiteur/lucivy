@@ -988,10 +988,9 @@ pub fn fuzzy_contains_via_trigram(
             let window_lo = anchor_first.min(anchor_last).saturating_sub(distance as usize + 1);
             let window_hi = (anchor_first.max(anchor_last) + distance as usize + 1).min(concat_bytes.len());
 
-            let mut matched = false;
-            let mut match_start: usize = 0;
-            let mut match_len: usize = 0;
-            let mut global_best_diff: usize = usize::MAX;
+            // Collect ALL DFA matches in the concat, not just the best one.
+            // Each match produces a separate highlight for correct BM25 tf scoring.
+            let mut dfa_matches: Vec<(usize, usize)> = Vec::new(); // (start, len)
 
             for sb in window_lo..window_hi {
                 let mut s = start_state.clone();
@@ -1011,14 +1010,18 @@ pub fn fuzzy_contains_via_trigram(
                         }
                     }
                 }
-                if best_diff < global_best_diff {
-                    global_best_diff = best_diff;
-                    match_start = sb;
-                    match_len = best_len;
-                    matched = true;
-                    if global_best_diff == 0 { break; } // perfect match, can't do better
+                if best_len > 0 {
+                    // Skip if this match overlaps with the previous one
+                    let dominated = dfa_matches.last()
+                        .map_or(false, |&(prev_start, prev_len)| sb < prev_start + prev_len);
+                    if !dominated {
+                        dfa_matches.push((sb, best_len));
+                    }
                 }
             }
+
+            let matched = !dfa_matches.is_empty();
+            let (match_start, match_len) = dfa_matches.first().copied().unwrap_or((0, 0));
 
 
             if matched {
@@ -1064,29 +1067,29 @@ pub fn fuzzy_contains_via_trigram(
                         content_byte_starts[i] = content_byte_starts[i - 1] + prev_tlen + gap;
                     }
 
-                    // === Step 4: Map match_start/match_end from concat to content bytes ===
-                    let match_end = match_start + match_len;
+                    // === Step 4: Map ALL matches from concat to content bytes ===
+                    for &(ms, ml) in &dfa_matches {
+                        let me = ms + ml;
 
-                    // Find token containing match_start
-                    let start_span_idx = token_spans.iter()
-                        .position(|(_, cs, ce, _)| match_start >= *cs && match_start < *ce)
-                        .or_else(|| token_spans.iter()
-                            .position(|(_, _, ce, _)| *ce > match_start));
+                        let start_span_idx = token_spans.iter()
+                            .position(|(_, cs, ce, _)| ms >= *cs && ms < *ce)
+                            .or_else(|| token_spans.iter()
+                                .position(|(_, _, ce, _)| *ce > ms));
 
-                    // Find token containing match_end (or the last token before it)
-                    let end_span_idx = token_spans.iter()
-                        .rposition(|(_, cs, ce, _)| match_end > *cs && match_end <= *ce)
-                        .or_else(|| token_spans.iter()
-                            .rposition(|(_, cs, _, _)| *cs < match_end));
+                        let end_span_idx = token_spans.iter()
+                            .rposition(|(_, cs, ce, _)| me > *cs && me <= *ce)
+                            .or_else(|| token_spans.iter()
+                                .rposition(|(_, cs, _, _)| *cs < me));
 
-                    if let (Some(si), Some(ei)) = (start_span_idx, end_span_idx) {
-                        let intra_start = match_start.saturating_sub(token_spans[si].1);
-                        let hl_start = content_byte_starts[si] as usize + intra_start;
+                        if let (Some(si), Some(ei)) = (start_span_idx, end_span_idx) {
+                            let intra_start = ms.saturating_sub(token_spans[si].1);
+                            let hl_start = content_byte_starts[si] as usize + intra_start;
 
-                        let intra_end = match_end.saturating_sub(token_spans[ei].1);
-                        let hl_end = content_byte_starts[ei] as usize + intra_end;
+                            let intra_end = me.saturating_sub(token_spans[ei].1);
+                            let hl_end = content_byte_starts[ei] as usize + intra_end;
 
-                        highlights.push((doc_id, hl_start, hl_end));
+                            highlights.push((doc_id, hl_start, hl_end));
+                        }
                     }
                 }
             }
