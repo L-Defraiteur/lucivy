@@ -258,6 +258,49 @@ fn test_playground_repro() {
             }
         }
     }
+
+    // === Monotonicity check: d=1 must be a superset of d=0 ===
+    eprintln!("\n=== MONOTONICITY CHECK: d=0 ⊆ d=1 ===");
+    for query_text in &["rag3weaver", "rak3weaver"] {
+        // Collect ALL doc addresses for d=0
+        let q0 = query::build_query(&QueryConfig {
+            query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some(query_text.to_string()),
+            distance: Some(0),
+            ..Default::default()
+        }, &handle.schema, &handle.index, None).unwrap();
+        let results_d0 = searcher.search(&*q0, &ld_lucivy::collector::TopDocs::with_limit(100_000).order_by_score()).unwrap();
+        let docs_d0: std::collections::HashSet<u32> = results_d0.iter()
+            .map(|(_, addr)| addr.segment_ord as u32 * 100_000 + addr.doc_id)
+            .collect();
+
+        // Collect ALL doc addresses for d=1
+        let q1 = query::build_query(&QueryConfig {
+            query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some(query_text.to_string()),
+            distance: Some(1),
+            ..Default::default()
+        }, &handle.schema, &handle.index, None).unwrap();
+        let results_d1 = searcher.search(&*q1, &ld_lucivy::collector::TopDocs::with_limit(100_000).order_by_score()).unwrap();
+        let docs_d1: std::collections::HashSet<u32> = results_d1.iter()
+            .map(|(_, addr)| addr.segment_ord as u32 * 100_000 + addr.doc_id)
+            .collect();
+
+        let missing: Vec<_> = docs_d0.difference(&docs_d1).collect();
+        eprintln!("  \"{}\": d=0 found {} docs, d=1 found {} docs, missing from d=1: {}",
+            query_text, docs_d0.len(), docs_d1.len(), missing.len());
+        if !missing.is_empty() {
+            for &addr in missing.iter().take(5) {
+                let seg = (addr / 100_000) as u32;
+                let doc = addr % 100_000;
+                eprintln!("    MISSING: seg={} doc={}", seg, doc);
+            }
+        }
+        assert!(missing.is_empty(), "d=1 must be a superset of d=0 for \"{}\"", query_text);
+    }
+    eprintln!("  MONOTONICITY OK");
 }
 
 fn levenshtein(a: &str, b: &str) -> u32 {
