@@ -942,7 +942,10 @@ pub fn fuzzy_contains_via_trigram(
             let max_pos = pm.num_tokens(doc_id);
             let end_pos = (max_pos_chain + forward_positions).min(max_pos);
 
-            let include_gaps = query_text.contains(' ');
+            // Use normalized query to decide: if it has spaces (from any
+            // non-alpha separator like '_', '.', etc.), include gaps in concat.
+            // Single source of truth: same normalization as the DFA.
+            let include_gaps = normalized.contains(' ');
             let mut concat_bytes: Vec<u8> = Vec::new();
             // Track each token's bounds: (position, concat_start, concat_end, text_len)
             let mut token_spans: Vec<(u32, usize, usize, usize)> = Vec::new();
