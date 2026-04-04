@@ -773,7 +773,11 @@ pub fn fuzzy_contains_via_trigram(
         .copied()
         .collect();
 
-    let filter_count = threshold.min(exact_grams.len());
+    // Resolve ALL exact grams for the doc filter, not just threshold.
+    // With edits, the threshold rarest trigrams may all be "broken" ones
+    // that don't match the target doc, causing it to be filtered out.
+    // Resolving all is marginally slower but guarantees correct recall.
+    let filter_count = exact_grams.len();
     let mut all_matches: Vec<Vec<LiteralMatch>> = vec![Vec::new(); ngrams.len()];
     let mut doc_filter: Option<std::collections::HashSet<DocId>> = None;
 
@@ -845,7 +849,7 @@ pub fn fuzzy_contains_via_trigram(
     if distance >= 3 {
         let mut doc_bitset = BitSet::with_max_value(max_doc);
         let mut highlights: Vec<(DocId, usize, usize)> = Vec::new();
-        for &(doc_id, first_bf, _last_bt, first_tri_idx, first_si, _, _last_tri_idx) in &candidates {
+        for &(doc_id, first_bf, _last_bt, first_tri_idx, first_si, _, _last_tri_idx, _last_bf, _last_si) in &candidates {
             doc_bitset.insert(doc_id);
             let hl_start = (first_bf as usize).saturating_sub(query_positions[first_tri_idx] + first_si as usize);
             let hl_end = hl_start + query_text.len() + distance as usize;
@@ -887,18 +891,22 @@ pub fn fuzzy_contains_via_trigram(
     let mut _diag_unproven_dfa = 0usize;
     let mut _diag_unproven_dfa_fail = 0usize;
 
-    for (doc_id, first_bf, last_bt, first_tri_idx, first_si, trigram_proven, last_tri_idx) in &candidates {
+    for (doc_id, first_bf, last_bt, first_tri_idx, first_si, trigram_proven, last_tri_idx, last_bf, last_si) in &candidates {
         let doc_id = *doc_id;
         let first_tri_idx = *first_tri_idx;
         let first_si = *first_si;
+        let last_si = *last_si;
         let trigram_proven = *trigram_proven;
         let last_tri_idx = *last_tri_idx;
         if !trigram_proven { _diag_unproven += 1; }
 
-        // Lookup token position for first_bf — O(1) via pre-built HashMap
+        // Lookup token positions for first and last trigrams — O(1) via pre-built HashMap.
+        // byte_from values come from all_matches entries, so they're in bf_to_pos.
         let first_pos = bf_to_pos.get(&(doc_id, *first_bf)).copied();
+        let last_pos = bf_to_pos.get(&(doc_id, *last_bf)).copied();
 
         let Some(fp) = first_pos else { continue; };
+        let lp = last_pos.unwrap_or(fp);
 
         // Fast path: all trigrams matched with consistent byte span.
         // The pigeonhole principle guarantees this is a valid match —
@@ -921,13 +929,18 @@ pub fn fuzzy_contains_via_trigram(
 
         if let Some(pm) = &posmap {
             // === Step 1: Build concat with token span tracking ===
+            // Use both first (fp) and last (lp) trigram positions to cover the
+            // full chain range. This handles chains where trigrams come from
+            // different locations in the document.
+            let min_pos = fp.min(lp);
+            let max_pos_chain = fp.max(lp);
             let back_bytes = query_positions[first_tri_idx];
-            let lookback_positions = (back_bytes as u32 + 2).min(fp);
-            let start_pos = fp - lookback_positions;
+            let lookback_positions = (back_bytes as u32 + 2).min(min_pos);
+            let start_pos = min_pos - lookback_positions;
             let forward_bytes = query_text.len() + distance as usize;
             let forward_positions = forward_bytes as u32 / 2 + 3;
             let max_pos = pm.num_tokens(doc_id);
-            let end_pos = (fp + forward_positions).min(max_pos);
+            let end_pos = (max_pos_chain + forward_positions).min(max_pos);
 
             let include_gaps = query_text.contains(' ');
             let mut concat_bytes: Vec<u8> = Vec::new();
@@ -955,26 +968,30 @@ pub fn fuzzy_contains_via_trigram(
             }
 
             // === Step 2: Anchored DFA sliding window ===
-            // We know the first trigram matched at position fp in the document.
-            // In the concat, fp's token starts at fp_concat_start, and the
-            // trigram is at offset first_si within that token. The full match
-            // must start at approximately:
-            //   anchor = fp_concat_start + first_si - query_positions[first_tri_idx]
-            // We only need to try positions [anchor - distance, anchor + distance].
+            // Compute anchor from first trigram position.
             let fp_span = token_spans.iter()
                 .find(|(pos, _, _, _)| *pos == fp);
             let fp_concat_start = fp_span.map(|s| s.1).unwrap_or(0);
             let tri_query_offset = query_positions[first_tri_idx];
-            let anchor = (fp_concat_start + first_si as usize).saturating_sub(tri_query_offset);
-            let window_lo = anchor.saturating_sub(distance as usize + 1);
-            let window_hi = (anchor + distance as usize + 1).min(concat_bytes.len());
+            let anchor_first = (fp_concat_start + first_si as usize).saturating_sub(tri_query_offset);
+
+            // Symmetric anchor from last trigram (same formula as anchor_first).
+            let lp_span = token_spans.iter()
+                .find(|(pos, _, _, _)| *pos == lp);
+            let lp_concat_start = lp_span.map(|s| s.1).unwrap_or(fp_concat_start);
+            let anchor_last = (lp_concat_start + last_si as usize)
+                .saturating_sub(query_positions[last_tri_idx]);
+
+            let max_feed = normalized.len() + distance as usize + 1;
+            let qlen = normalized.len();
+
+            let window_lo = anchor_first.min(anchor_last).saturating_sub(distance as usize + 1);
+            let window_hi = (anchor_first.max(anchor_last) + distance as usize + 1).min(concat_bytes.len());
 
             let mut matched = false;
             let mut match_start: usize = 0;
             let mut match_len: usize = 0;
             let mut global_best_diff: usize = usize::MAX;
-            let max_feed = normalized.len() + distance as usize + 1;
-            let qlen = normalized.len();
 
             for sb in window_lo..window_hi {
                 let mut s = start_state.clone();

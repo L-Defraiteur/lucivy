@@ -179,7 +179,8 @@ pub fn intersect_trigrams_with_threshold(
     word_ids: &[usize],
     threshold: usize,
     distance: u8,
-) -> Vec<(DocId, u32, u32, usize, u16, bool, usize)> {
+)  //     (doc_id, first_bf, last_bt, first_tri_idx, first_si, proven, last_tri_idx, last_bf, last_si)
+-> Vec<(DocId, u32, u32, usize, u16, bool, usize, u32, u16)> {
     if trigrams_by_doc.is_empty() || threshold == 0 {
         return Vec::new();
     }
@@ -193,7 +194,7 @@ pub fn intersect_trigrams_with_threshold(
     }
 
     let num_trigrams = trigrams_by_doc.len();
-    let mut results: Vec<(DocId, u32, u32, usize, u16, bool, usize)> = Vec::new();
+    let mut results: Vec<(DocId, u32, u32, usize, u16, bool, usize, u32, u16)> = Vec::new();
 
     for &doc_id in &all_docs {
         // Collect all (tri_index, byte_from, byte_to, si) for this doc, sorted by byte_from
@@ -217,7 +218,7 @@ pub fn intersect_trigrams_with_threshold(
         let mut current_chain: Vec<(usize, u32, u32, u16)> = Vec::new();
         let results_before = results.len();
 
-        let mut check_chain = |chain: &[(usize, u32, u32, u16)], results: &mut Vec<(DocId, u32, u32, usize, u16, bool, usize)>| -> bool {
+        let mut check_chain = |chain: &[(usize, u32, u32, u16)], results: &mut Vec<(DocId, u32, u32, usize, u16, bool, usize, u32, u16)>| -> bool {
             if chain.len() < threshold { return false; }
             if results.len() - results_before >= MAX_CHAINS_PER_DOC { return true; } // cap reached
             let first = &chain[0];
@@ -266,7 +267,7 @@ pub fn intersect_trigrams_with_threshold(
                     }
                 }
             }
-            results.push((doc_id, first.1, last.2, first.0, first.3, proven, last.0));
+            results.push((doc_id, first.1, last.2, first.0, first.3, proven, last.0, last.1, last.3));
             false
         };
 
