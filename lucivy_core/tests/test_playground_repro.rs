@@ -189,6 +189,9 @@ fn test_playground_repro() {
         ("rag3weaver", 1),
         ("rak3weaver", 1),
         ("rag3db", 1),
+        // Multi-token: d=0 works but d=1 doesn't — BUG
+        ("Build rag3weaver Rust static lib for WASM emscripten Only used in WASM builds Native", 0),
+        ("Build rag3weaver Rust static lib for WASM emscripten Only used in WASM builds Native", 1),
     ];
 
     for (query_text, distance) in &test_cases {

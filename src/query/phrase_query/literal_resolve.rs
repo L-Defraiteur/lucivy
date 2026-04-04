@@ -176,6 +176,7 @@ pub fn intersect_literals_ordered(
 pub fn intersect_trigrams_with_threshold(
     trigrams_by_doc: &[MatchesByDoc],
     query_positions: &[usize],
+    word_ids: &[usize],
     threshold: usize,
     distance: u8,
 ) -> Vec<(DocId, u32, u32, usize, u16, bool, usize)> {
@@ -221,17 +222,28 @@ pub fn intersect_trigrams_with_threshold(
             if results.len() - results_before >= MAX_CHAINS_PER_DOC { return true; } // cap reached
             let first = &chain[0];
             let last = &chain[chain.len() - 1];
+
+            // Separator-agnostic span check: only enforce span_diff on
+            // intra-word pairs. Cross-word pairs have free separator size.
+            // Global check: allow extra tolerance per cross-word transition.
+            let cross_word_count = chain.windows(2)
+                .filter(|w| word_ids[w[0].0] != word_ids[w[1].0])
+                .count() as u64;
             let text_span = last.1 as i64 - first.1 as i64;
             let query_span = query_positions[last.0] as i64 - query_positions[first.0] as i64;
             let span_diff = (text_span - query_span).unsigned_abs();
-            if span_diff > distance as u64 { return false; }
-            // Proven = ALL trigrams matched AND each consecutive pair has
-            // a byte span within ±distance of the expected query offset.
-            // Global span_diff alone is insufficient — shifted matches like
-            // "librag3weaver" have all trigrams shifted by +3 but same span.
-            let mut proven = chain.len() == num_trigrams && span_diff <= distance as u64;
+            // Each cross-word transition allows up to 64 bytes of separator drift
+            let tolerance = distance as u64 + cross_word_count * 64;
+            if span_diff > tolerance { return false; }
+
+            // Proven = ALL trigrams matched AND each intra-word consecutive
+            // pair has a byte span within ±distance. Cross-word pairs are
+            // free (separator-agnostic). Proven candidates skip DFA validation.
+            let mut proven = chain.len() == num_trigrams;
             if proven && chain.len() >= 2 {
                 for w in chain.windows(2) {
+                    // Cross-word pairs: skip span check (separator-agnostic)
+                    if word_ids[w[0].0] != word_ids[w[1].0] { continue; }
                     let pair_text_span = w[1].1 as i64 - w[0].1 as i64;
                     let pair_query_span = query_positions[w[1].0] as i64 - query_positions[w[0].0] as i64;
                     if (pair_text_span - pair_query_span).unsigned_abs() > distance as u64 {
@@ -244,17 +256,37 @@ pub fn intersect_trigrams_with_threshold(
             false
         };
 
+        // Group-by byte_from: when the same content byte matches multiple
+        // tri_idx (repeated words in the query), pick the smallest tri_idx
+        // that continues the chain. This avoids the greedy mis-assignment
+        // where "WASM"×2 in the query causes cross-assignment at the same bf.
+        let mut ei = 0;
         let mut capped = false;
-        for &(tri_idx, bf, bt, si) in &entries {
+        while ei < entries.len() {
             if capped { break; }
-            if current_chain.is_empty()
-                || tri_idx > current_chain.last().unwrap().0
-            {
-                current_chain.push((tri_idx, bf, bt, si));
-            } else {
+            let bf = entries[ei].1;
+            let group_start = ei;
+            while ei < entries.len() && entries[ei].1 == bf { ei += 1; }
+            let group = &entries[group_start..ei];
+
+            let last_tri = current_chain.last().map(|e| e.0);
+
+            // Pick smallest tri_idx in group that continues the chain
+            let best = group.iter()
+                .filter(|e| last_tri.map_or(true, |last| e.0 > last))
+                .min_by_key(|e| e.0);
+
+            if let Some(&entry) = best {
+                current_chain.push(entry);
+            } else if !current_chain.is_empty() {
+                // No valid continuation → check current chain, start fresh
                 capped = check_chain(&current_chain, &mut results);
                 current_chain.clear();
-                current_chain.push((tri_idx, bf, bt, si));
+                // Restart from smallest tri_idx in this group
+                let restart = group.iter().min_by_key(|e| e.0);
+                if let Some(&entry) = restart {
+                    current_chain.push(entry);
+                }
             }
         }
         if !capped { check_chain(&current_chain, &mut results); }
@@ -298,11 +330,13 @@ where
             if is_value_boundary(gap_bytes) {
                 return None;
             }
-            for &byte in gap_bytes {
-                state = automaton.accept(&state, byte);
-                if !automaton.can_match(&state) {
-                    return None;
-                }
+            // Normalize gap: any separator → single space (separator-agnostic).
+            // The DFA is built from a normalized query where separators are
+            // also single spaces, so this ensures separator size doesn't
+            // affect the edit distance.
+            state = automaton.accept(&state, b' ');
+            if !automaton.can_match(&state) {
+                return None;
             }
         }
 

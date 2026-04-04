@@ -604,8 +604,9 @@ fn extract_all_literals(pattern: &str) -> Vec<String> {
 /// Non-alphanumeric characters are treated as separators — n-grams never
 /// span across separators. This matches the SFX tokenization where tokens
 /// are alphanumeric segments.
-/// Returns (ngram_strings, query_byte_positions, ngram_size).
-fn generate_ngrams(query: &str, distance: u8) -> (Vec<String>, Vec<usize>, usize) {
+/// Returns (ngram_strings, query_byte_positions, word_ids, ngram_size).
+/// word_ids[i] = which word (alphanumeric segment) ngram[i] belongs to.
+fn generate_ngrams(query: &str, distance: u8) -> (Vec<String>, Vec<usize>, Vec<usize>, usize) {
     let lower = query.to_lowercase();
     // Strip non-alphanumeric to measure effective length
     let effective_len: usize = lower.chars().filter(|c| c.is_alphanumeric()).count();
@@ -616,14 +617,42 @@ fn generate_ngrams(query: &str, distance: u8) -> (Vec<String>, Vec<usize>, usize
     let bytes = lower.as_bytes();
     let mut ngrams = Vec::new();
     let mut positions = Vec::new();
+    let mut word_ids = Vec::new();
 
     if bytes.len() < n {
         let trimmed: String = lower.chars().filter(|c| c.is_alphanumeric()).collect();
         if !trimmed.is_empty() {
             ngrams.push(trimmed);
             positions.push(0);
+            word_ids.push(0);
         }
-        return (ngrams, positions, n);
+        return (ngrams, positions, word_ids, n);
+    }
+
+    // Build word_id map: for each byte position, which alphanumeric segment it belongs to.
+    // Separator positions get usize::MAX.
+    let mut pos_word_id = vec![usize::MAX; bytes.len()];
+    let mut current_word = 0usize;
+    let mut in_word = false;
+    for (i, c) in lower.char_indices() {
+        if c.is_alphanumeric() {
+            if !in_word {
+                if i > 0 && in_word == false && ngrams.len() > 0 {
+                    // Already incremented below
+                }
+                in_word = true;
+            }
+            for b in i..i + c.len_utf8() {
+                if b < pos_word_id.len() {
+                    pos_word_id[b] = current_word;
+                }
+            }
+        } else {
+            if in_word {
+                current_word += 1;
+                in_word = false;
+            }
+        }
     }
 
     for i in 0..=bytes.len() - n {
@@ -637,19 +666,46 @@ fn generate_ngrams(query: &str, distance: u8) -> (Vec<String>, Vec<usize>, usize
         }
         ngrams.push(gram.to_string());
         positions.push(i);
+        word_ids.push(pos_word_id[i]);
     }
 
     // Fallback: if no n-gram survived, use individual alphanumeric segments
     if ngrams.is_empty() {
+        let mut wid = 0;
         for segment in lower.split(|c: char| !c.is_alphanumeric()) {
             if !segment.is_empty() {
                 let pos = segment.as_ptr() as usize - lower.as_ptr() as usize;
                 ngrams.push(segment.to_string());
                 positions.push(pos);
+                word_ids.push(wid);
+                wid += 1;
             }
         }
     }
-    (ngrams, positions, n)
+    (ngrams, positions, word_ids, n)
+}
+
+/// Normalize a query string for separator-agnostic DFA matching.
+/// Replaces all runs of non-alphanumeric characters with a single space.
+/// Trims leading/trailing spaces.
+fn normalize_query_separators(query: &str) -> String {
+    let lower = query.to_lowercase();
+    let mut result = String::with_capacity(lower.len());
+    let mut was_sep = true; // trim leading
+    for c in lower.chars() {
+        if c.is_alphanumeric() {
+            result.push(c);
+            was_sep = false;
+        } else if !was_sep {
+            result.push(' ');
+            was_sep = true;
+        }
+    }
+    // Trim trailing space
+    if result.ends_with(' ') {
+        result.pop();
+    }
+    result
 }
 
 /// Fuzzy search via trigram pigeonhole + Levenshtein DFA validation.
@@ -671,7 +727,7 @@ pub fn fuzzy_contains_via_trigram(
     use super::literal_pipeline;
     use crate::suffix_fst::posmap::PosMapReader;
 
-    let (ngrams, query_positions, n) = generate_ngrams(query_text, distance);
+    let (ngrams, query_positions, word_ids, n) = generate_ngrams(query_text, distance);
 
     if ngrams.is_empty() {
         return Ok((BitSet::with_max_value(max_doc), Vec::new()));
@@ -771,7 +827,7 @@ pub fn fuzzy_contains_via_trigram(
         .collect();
 
     let candidates = literal_resolve::intersect_trigrams_with_threshold(
-        &grouped, &query_positions, threshold, distance,
+        &grouped, &query_positions, &word_ids, threshold, distance,
     );
     let _intersect_ms = _t_intersect.elapsed().as_millis();
 
@@ -800,11 +856,14 @@ pub fn fuzzy_contains_via_trigram(
         return Ok((doc_bitset, highlights));
     }
 
+    // Normalize query: collapse separator runs to single space so the DFA
+    // doesn't penalize different separators in the content.
+    let normalized = normalize_query_separators(query_text);
     let builder = get_builder(distance);
     let dfa = if prefix {
-        builder.build_prefix_dfa(&query_text.to_lowercase())
+        builder.build_prefix_dfa(&normalized)
     } else {
-        builder.build_dfa(&query_text.to_lowercase())
+        builder.build_dfa(&normalized)
     };
     let automaton = SfxDfaWrapper(dfa);
     let start_state = automaton.start();
@@ -880,7 +939,8 @@ pub fn fuzzy_contains_via_trigram(
                     let gap = sfx_reader.gapmap().read_separator(doc_id, pos - 1, pos);
                     if let Some(gap_bytes) = gap {
                         if is_value_boundary(gap_bytes) { break; }
-                        concat_bytes.extend_from_slice(gap_bytes);
+                        // Normalize gap: any separator → single space (separator-agnostic)
+                        concat_bytes.push(b' ');
                     }
                 }
                 let cs = concat_bytes.len();
@@ -913,8 +973,8 @@ pub fn fuzzy_contains_via_trigram(
             let mut match_start: usize = 0;
             let mut match_len: usize = 0;
             let mut global_best_diff: usize = usize::MAX;
-            let max_feed = query_text.len() + distance as usize + 1;
-            let qlen = query_text.len();
+            let max_feed = normalized.len() + distance as usize + 1;
+            let qlen = normalized.len();
 
             for sb in window_lo..window_hi {
                 let mut s = start_state.clone();
