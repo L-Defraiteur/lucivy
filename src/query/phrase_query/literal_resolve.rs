@@ -197,55 +197,60 @@ pub fn intersect_trigrams_with_threshold(
     let mut results: Vec<(DocId, u32, u32, usize, u16, bool, usize, u32, u16)> = Vec::new();
 
     for &doc_id in &all_docs {
-        // Collect all (tri_index, byte_from, byte_to, si) for this doc, sorted by byte_from
-        let mut entries: Vec<(usize, u32, u32, u16)> = Vec::new();
+        // Collect all (tri_index, byte_from, byte_to, si, token_position) for this doc
+        let mut entries: Vec<(usize, u32, u32, u16, u32)> = Vec::new();
         for (tri_idx, tri_matches) in trigrams_by_doc.iter().enumerate() {
             if let Some(positions) = tri_matches.get(&doc_id) {
-                for &(_pos, bf, bt, si) in positions {
-                    entries.push((tri_idx, bf, bt, si));
+                for &(pos, bf, bt, si) in positions {
+                    entries.push((tri_idx, bf, bt, si, pos));
                 }
             }
         }
-        entries.sort_by_key(|&(_, bf, _, _)| bf);
-        // Dedup entries with same (tri_idx, bf) — duplicates from multiple
-        // SFX paths (e.g. cross-token and single-token) break the greedy chain.
+        entries.sort_by_key(|&(_, bf, _, _, _)| bf);
         entries.dedup_by_key(|e| (e.0, e.1));
 
         // Greedy scan: find ALL chains with increasing tri_index.
         // Each chain that meets the threshold + byte span check becomes a result.
         // Cap at MAX_CHAINS_PER_DOC to avoid O(N²) DFA validations on common bigrams.
         const MAX_CHAINS_PER_DOC: usize = 20;
-        let mut current_chain: Vec<(usize, u32, u32, u16)> = Vec::new();
+        // Max token position gap for cross-word transitions. Prevents
+        // chaining bigrams from unrelated parts of the document (e.g.,
+        // "3d" from "rag3db" at pos 100 + "va" from "valide" at pos 500).
+        const MAX_CROSS_WORD_POS_GAP: u32 = 5;
+
+        let mut current_chain: Vec<(usize, u32, u32, u16, u32)> = Vec::new();
         let results_before = results.len();
 
-        let mut check_chain = |chain: &[(usize, u32, u32, u16)], results: &mut Vec<(DocId, u32, u32, usize, u16, bool, usize, u32, u16)>| -> bool {
+        let mut check_chain = |chain: &[(usize, u32, u32, u16, u32)], results: &mut Vec<(DocId, u32, u32, usize, u16, bool, usize, u32, u16)>| -> bool {
             if chain.len() < threshold { return false; }
-            if results.len() - results_before >= MAX_CHAINS_PER_DOC { return true; } // cap reached
+            if results.len() - results_before >= MAX_CHAINS_PER_DOC { return true; }
             let first = &chain[0];
             let last = &chain[chain.len() - 1];
 
+            // Reject chains with cross-word token position gaps too large.
+            // This prevents false chains from common bigrams in unrelated tokens.
+            for w in chain.windows(2) {
+                if word_ids[w[0].0] != word_ids[w[1].0] {
+                    let pos_gap = w[1].4.saturating_sub(w[0].4);
+                    if pos_gap > MAX_CROSS_WORD_POS_GAP { return false; }
+                }
+            }
+
             // Separator-agnostic span check: only enforce span_diff on
             // intra-word pairs. Cross-word pairs have free separator size.
-            // Also tolerate cross-token gaps within a single query word
-            // (CamelCase split: "rag3weaver" → tokens "rag3"+"weaver" with gap).
             let cross_word_count = chain.windows(2)
                 .filter(|w| word_ids[w[0].0] != word_ids[w[1].0])
                 .count() as u64;
-            // Count content token gaps: consecutive trigrams where byte_from
-            // jumps by more than n+1 bytes (indicating a gap between indexed tokens).
             let content_gap_count = chain.windows(2)
                 .filter(|w| {
                     let bf_diff = w[1].1 as i64 - w[0].1 as i64;
                     let qp_diff = query_positions[w[1].0] as i64 - query_positions[w[0].0] as i64;
-                    // A content gap exists when text advances much more than query
                     bf_diff > qp_diff + 1
                 })
                 .count() as u64;
             let text_span = last.1 as i64 - first.1 as i64;
             let query_span = query_positions[last.0] as i64 - query_positions[first.0] as i64;
             let span_diff = (text_span - query_span).unsigned_abs();
-            // Each cross-word transition allows up to 64 bytes of separator drift.
-            // Each content token gap allows up to 64 bytes (CamelCase gaps etc).
             let tolerance = distance as u64 + (cross_word_count + content_gap_count) * 64;
             if span_diff > tolerance { return false; }
 
@@ -258,9 +263,7 @@ pub fn intersect_trigrams_with_threshold(
                     let pair_text_span = w[1].1 as i64 - w[0].1 as i64;
                     let pair_query_span = query_positions[w[1].0] as i64 - query_positions[w[0].0] as i64;
                     let pair_diff = (pair_text_span - pair_query_span).unsigned_abs();
-                    // Cross-word pairs: skip span check (separator-agnostic)
                     if word_ids[w[0].0] != word_ids[w[1].0] { continue; }
-                    // Content token gap: text advances much more than query → not proven
                     if pair_diff > distance as u64 {
                         proven = false;
                         break;

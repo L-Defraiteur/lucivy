@@ -773,10 +773,8 @@ pub fn fuzzy_contains_via_trigram(
         .copied()
         .collect();
 
-    // Resolve ALL exact grams for the doc filter, not just threshold.
-    // With edits, the threshold rarest trigrams may all be "broken" ones
-    // that don't match the target doc, causing it to be filtered out.
-    // Resolving all is marginally slower but guarantees correct recall.
+    // Resolve all exact grams for the doc filter to avoid excluding
+    // docs whose matching trigrams are not among the threshold rarest.
     let filter_count = exact_grams.len();
     let mut all_matches: Vec<Vec<LiteralMatch>> = vec![Vec::new(); ngrams.len()];
     let mut doc_filter: Option<std::collections::HashSet<DocId>> = None;
@@ -955,8 +953,13 @@ pub fn fuzzy_contains_via_trigram(
                     let gap = sfx_reader.gapmap().read_separator(doc_id, pos - 1, pos);
                     if let Some(gap_bytes) = gap {
                         if is_value_boundary(gap_bytes) { break; }
-                        // Normalize gap: any separator → single space (separator-agnostic)
-                        concat_bytes.push(b' ');
+                        // Only insert normalized space for non-empty gaps.
+                        // Empty gaps (CamelCase split: "rag3"+"db" from "rag3db")
+                        // must stay contiguous — inserting a space would break
+                        // substring matches like "3db".
+                        if !gap_bytes.is_empty() {
+                            concat_bytes.push(b' ');
+                        }
                     }
                 }
                 let cs = concat_bytes.len();
@@ -1025,6 +1028,7 @@ pub fn fuzzy_contains_via_trigram(
 
             let matched = !dfa_matches.is_empty();
             let (match_start, match_len) = dfa_matches.first().copied().unwrap_or((0, 0));
+
 
 
             if matched {
