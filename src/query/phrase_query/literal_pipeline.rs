@@ -118,6 +118,7 @@ pub struct CrossTokenChain {
 
 /// Perform falling walk + sibling chain DFS for a literal.
 /// Returns validated chains WITHOUT resolving any postings.
+/// Only uses contiguous siblings (gap_len == 0, e.g. CamelCase).
 ///
 /// For fuzzy_distance > 0, uses fuzzy_falling_walk (Levenshtein DFA in FST).
 ///
@@ -128,6 +129,28 @@ pub fn cross_token_falling_walk(
     literal: &str,
     fuzzy_distance: u8,
     ord_to_term: &dyn Fn(u64) -> Option<String>,
+) -> Vec<CrossTokenChain> {
+    cross_token_falling_walk_inner(sfx_reader, literal, fuzzy_distance, ord_to_term, false)
+}
+
+/// Same as `cross_token_falling_walk` but allows siblings with gaps
+/// (separators between tokens). Used by fuzzy contains to find trigrams
+/// that span word boundaries like "bva" in "rag3db_value".
+pub fn cross_token_falling_walk_any_gap(
+    sfx_reader: &SfxFileReader<'_>,
+    literal: &str,
+    fuzzy_distance: u8,
+    ord_to_term: &dyn Fn(u64) -> Option<String>,
+) -> Vec<CrossTokenChain> {
+    cross_token_falling_walk_inner(sfx_reader, literal, fuzzy_distance, ord_to_term, true)
+}
+
+fn cross_token_falling_walk_inner(
+    sfx_reader: &SfxFileReader<'_>,
+    literal: &str,
+    fuzzy_distance: u8,
+    ord_to_term: &dyn Fn(u64) -> Option<String>,
+    allow_gaps: bool,
 ) -> Vec<CrossTokenChain> {
     let query_lower = literal.to_lowercase();
 
@@ -150,7 +173,11 @@ pub fn cross_token_falling_walk(
         let sib = sibling_table.unwrap();
         candidates.into_iter().filter(|c| {
             let consumes_all = c.prefix_len >= query_lower.len();
-            let has_sibling = !sib.contiguous_siblings(c.parent.raw_ordinal as u32).is_empty();
+            let has_sibling = if allow_gaps {
+                !sib.siblings(c.parent.raw_ordinal as u32).is_empty()
+            } else {
+                !sib.contiguous_siblings(c.parent.raw_ordinal as u32).is_empty()
+            };
             consumes_all || has_sibling
         }).collect()
     } else {
@@ -193,8 +220,12 @@ pub fn cross_token_falling_walk(
                     continue;
                 }
 
-                let siblings = sib_table.contiguous_siblings(cur_ord as u32);
-                for &next_ord in &siblings {
+                let sibling_ords: Vec<u32> = if allow_gaps {
+                    sib_table.siblings(cur_ord as u32).into_iter().map(|s| s.next_ordinal).collect()
+                } else {
+                    sib_table.contiguous_siblings(cur_ord as u32)
+                };
+                for &next_ord in &sibling_ords {
                     let next_text = match ord_to_term(next_ord as u64) {
                         Some(t) => t,
                         None => continue,

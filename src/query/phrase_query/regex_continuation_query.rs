@@ -139,14 +139,9 @@ pub fn run_fuzzy_prescan(
         termtexts_reader.text(ord as u32).map(|s| s.to_string())
     };
 
-    let posmap_bytes = reader.posmap_file(field)
-        .and_then(|d| d.read_bytes().ok())
-        .map(|b| b.as_ref().to_vec());
-
-    let (_, highlights) = fuzzy_contains_via_trigram(
-        query_text, distance, prefix, &sfx_reader, &*pr,
-        &ord_to_term_fn, anchor_start, reader.max_doc(),
-        posmap_bytes.as_deref(),
+    let (_, highlights) = super::fuzzy_contains::fuzzy_contains(
+        query_text, distance, &sfx_reader, &*pr,
+        &ord_to_term_fn, reader.max_doc(),
     )?;
 
     let doc_tf = highlights_to_doc_tf(&highlights);
@@ -1774,14 +1769,10 @@ impl RegexContinuationWeight {
 
         let (doc_bitset, highlights) = match &self.dfa_kind {
             DfaKind::Fuzzy { text, distance, prefix } if *distance > 0 => {
-                // Fuzzy d>=1 via trigram pigeonhole + DFA validation.
-                let posmap_bytes = reader.posmap_file(self.field)
-                    .and_then(|data| data.read_bytes().ok())
-                    .map(|b| b.as_ref().to_vec());
-                fuzzy_contains_via_trigram(
-                    text, *distance, *prefix, &sfx_reader, &*resolver,
-                    &ord_to_term_fn, self.anchor_start, max_doc,
-                    posmap_bytes.as_deref(),
+                // Fuzzy d>=1 via dedicated fuzzy contains pipeline.
+                super::fuzzy_contains::fuzzy_contains(
+                    text, *distance, &sfx_reader, &*resolver,
+                    &ord_to_term_fn, max_doc,
                 )?
             }
             DfaKind::Fuzzy { text, distance, prefix } => {
