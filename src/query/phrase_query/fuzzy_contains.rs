@@ -169,6 +169,8 @@ struct FuzzyMatch {
     doc_id: DocId,
     byte_from: u32,
     byte_to: u32,
+    /// Ratio of matched trigrams to total trigrams (0.0 - 1.0).
+    coverage: f32,
 }
 
 /// Find all matches in the hit dictionary by anchoring on positions.
@@ -182,6 +184,7 @@ fn find_matches(
     query_positions: &[usize],
     concat_len: usize,
     ngram_size: usize,
+    total_ngrams: usize,
 ) -> Vec<FuzzyMatch> {
     let mut results = Vec::new();
 
@@ -227,10 +230,12 @@ fn find_matches(
                 let remaining = concat_len.saturating_sub(query_positions[best_last_tri] + ngram_size);
                 let hl_end = max_bf + ngram_size as u32 + remaining as u32;
 
+                let coverage = seen_tri.len() as f32 / total_ngrams.max(1) as f32;
                 results.push(FuzzyMatch {
                     doc_id,
                     byte_from: hl_start,
                     byte_to: hl_end,
+                    coverage,
                 });
             }
         }
@@ -327,20 +332,20 @@ pub fn fuzzy_contains(
     resolver: &dyn PostingResolver,
     ord_to_term: &dyn Fn(u64) -> Option<String>,
     max_doc: DocId,
-) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>)> {
+) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>)> {
     let _t_total = std::time::Instant::now();
 
     // Step 1: Concatenate query
     let concat = concat_query(query_text);
     if concat.is_empty() {
-        return Ok((BitSet::with_max_value(max_doc), Vec::new()));
+        return Ok((BitSet::with_max_value(max_doc), Vec::new(), Vec::new()));
     }
     let num_words = count_words(query_text);
 
     // Step 2: Generate trigrams
     let (ngrams, query_positions, n) = generate_trigrams(&concat, distance);
     if ngrams.is_empty() {
-        return Ok((BitSet::with_max_value(max_doc), Vec::new()));
+        return Ok((BitSet::with_max_value(max_doc), Vec::new(), Vec::new()));
     }
 
     // Threshold: pigeonhole principle.
@@ -435,20 +440,28 @@ pub fn fuzzy_contains(
     // Step 5: Find matches by position anchoring
     let matches = find_matches(
         &hits_by_doc, threshold, max_span,
-        &query_positions, concat.len(), n,
+        &query_positions, concat.len(), n, ngrams.len(),
     );
 
     // Step 6: Build result
     let mut doc_bitset = BitSet::with_max_value(max_doc);
     let mut highlights: Vec<(DocId, usize, usize)> = Vec::new();
 
+    // Build per-doc coverage: best (highest) coverage across all matches in the doc.
+    let mut best_coverage: HashMap<DocId, f32> = HashMap::new();
     for m in &matches {
         doc_bitset.insert(m.doc_id);
         highlights.push((m.doc_id, m.byte_from as usize, m.byte_to as usize));
+        let entry = best_coverage.entry(m.doc_id).or_insert(0.0);
+        if m.coverage > *entry {
+            *entry = m.coverage;
+        }
     }
 
     highlights.sort_by_key(|&(doc, bf, bt)| (doc, bf, bt));
     highlights.dedup();
+
+    let doc_coverage: Vec<(DocId, f32)> = best_coverage.into_iter().collect();
 
     let _total_ms = _t_total.elapsed().as_millis();
     {
@@ -458,7 +471,7 @@ pub fn fuzzy_contains(
             hits_by_doc.len(), highlights.len());
     }
 
-    Ok((doc_bitset, highlights))
+    Ok((doc_bitset, highlights, doc_coverage))
 }
 
 #[cfg(test)]

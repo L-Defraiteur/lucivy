@@ -57,7 +57,7 @@ pub use self::phrase_prefix_query::PhrasePrefixQuery;
 pub use self::phrase_query::regex_phrase_query::{wildcard_query_to_regex_str, RegexPhraseQuery};
 pub use self::phrase_query::AutomatonPhraseQuery;
 pub use self::phrase_query::scoring_utils::HighlightSink;
-pub use self::phrase_query::regex_continuation_query::{RegexContinuationQuery, CachedRegexResult, highlights_to_doc_tf, run_regex_prescan, run_fuzzy_prescan};
+pub use self::phrase_query::regex_continuation_query::{RegexContinuationQuery, CachedRegexResult, CachedPrescanResult, highlights_to_doc_tf, run_regex_prescan, run_fuzzy_prescan};
 pub use self::phrase_query::suffix_contains_query::{SuffixContainsQuery, SfxCache, CachedSfxResult, run_sfx_walk, tokenize_query};
 pub use self::phrase_query::suffix_contains::RawPostingEntry;
 pub use self::phrase_query::PhraseQuery;
