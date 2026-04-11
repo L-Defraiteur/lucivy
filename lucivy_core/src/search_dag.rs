@@ -202,7 +202,7 @@ impl Node for PrescanShardNode {
                 *regex_freqs.entry(param.pattern.clone()).or_insert(0) += doc_tf.len() as u64;
                 if !doc_tf.is_empty() {
                     regex_cache.insert(seg_reader.segment_id(), CachedRegexResult {
-                        doc_tf, highlights,
+                        doc_tf, highlights, doc_coverage: Vec::new(),
                     });
                 }
             }
