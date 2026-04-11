@@ -254,9 +254,10 @@ Les tests de ranking bénéficient automatiquement de l'IDF global.
 
 ### Risques
 
-1. **WASM** : le DAG utilise luciole qui dépend de threads. En WASM avec
-   SharedArrayBuffer, ça marche (déjà validé pour le commit thread). Mais
-   vérifier que le mini-DAG séquentiel ne trigger pas de threading inutile.
+1. **WASM** : aucun risque. Le DAG luciole tourne déjà en WASM emscripten
+   avec un vrai thread pool de 4 workers (PTHREAD_POOL_SIZE=8, 4 pour le
+   scheduler, le reste pour commit/warm-gc/debug-logger). C'est du vrai
+   multi-thread via emscripten pthreads, battle-tested dans le playground.
 
 2. **Performance** : le DAG ajoute de l'overhead de scheduling. Pour les
    queries simples (term, phrase), le prescan est skippé (BranchNode).
