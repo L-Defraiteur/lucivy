@@ -55,9 +55,7 @@ fn test_two_text_fields_posmap() {
         distance: Some(1),
         ..Default::default()
     };
-    let q = query::build_query(&qconfig, &handle.schema, &handle.index, Some(sink.clone())).unwrap();
-    let collector = ld_lucivy::collector::TopDocs::with_limit(100).order_by_score();
-    let results = searcher.search(&*q, &collector).unwrap();
+    let results = handle.search(&qconfig, 100, Some(sink.clone())).unwrap();
     eprintln!("fuzzy 'rak3weaver' d=1: {} results", results.len());
     assert!(results.len() > 0, "should find rag3weaver");
 }
@@ -112,9 +110,7 @@ fn test_multi_segment_fuzzy() {
             distance: Some(*d),
             ..Default::default()
         };
-        let query = query::build_query(&qconfig, &handle.schema, &handle.index, Some(sink.clone())).unwrap();
-        let collector = ld_lucivy::collector::TopDocs::with_limit(100).order_by_score();
-        let results = searcher.search(&*query, &collector).unwrap();
+        let results = handle.search(&qconfig, 100, Some(sink.clone())).unwrap();
         eprintln!("fuzzy '{}' d={} ({}): {} results", q, d, desc, results.len());
         assert!(results.len() > 0, "'{}' d={} ({}) should find results", q, d, desc);
     }

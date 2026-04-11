@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use ld_lucivy::collector::{FilterCollector, TopDocs};
+
 use ld_lucivy::query::HighlightSink;
 use ld_lucivy::schema::{FieldType, Value as LucivyValue};
 use ld_lucivy::{DocAddress, LucivyDocument, Searcher};
@@ -255,22 +255,16 @@ impl Index {
             None
         };
 
-        let lucivy_query = query::build_query(
-            &query_config,
-            &self.handle.schema,
-            &self.handle.index,
-            highlight_sink.clone(),
-        )
-        .map_err(|e| Error::from_reason(e))?;
-
-        let searcher = self.handle.reader.searcher();
         let top_docs = match allowed_ids {
             Some(ids) => {
                 let id_set: HashSet<u64> = ids.into_iter().map(|id| id as u64).collect();
-                execute_top_docs_filtered(&searcher, lucivy_query.as_ref(), limit, id_set)?
+                self.handle.search_filtered(&query_config, limit as usize, highlight_sink.clone(), id_set)
+                    .map_err(|e| Error::from_reason(e))?
             }
-            None => execute_top_docs(&searcher, lucivy_query.as_ref(), limit)?,
+            None => self.handle.search(&query_config, limit as usize, highlight_sink.clone())
+                .map_err(|e| Error::from_reason(e))?,
         };
+        let searcher = self.handle.reader.searcher();
 
         collect_results(
             &searcher,
@@ -520,34 +514,6 @@ fn add_field_value(
         }
     }
     Ok(())
-}
-
-fn execute_top_docs(
-    searcher: &Searcher,
-    query: &dyn ld_lucivy::query::Query,
-    limit: u32,
-) -> Result<Vec<(f32, DocAddress)>> {
-    let collector = TopDocs::with_limit(limit as usize).order_by_score();
-    searcher
-        .search(query, &collector)
-        .map_err(|e| Error::from_reason(format!("search error: {e}")))
-}
-
-fn execute_top_docs_filtered(
-    searcher: &Searcher,
-    query: &dyn ld_lucivy::query::Query,
-    limit: u32,
-    allowed_ids: HashSet<u64>,
-) -> Result<Vec<(f32, DocAddress)>> {
-    let inner = TopDocs::with_limit(limit as usize).order_by_score();
-    let collector = FilterCollector::new(
-        NODE_ID_FIELD.to_string(),
-        move |value: u64| allowed_ids.contains(&value),
-        inner,
-    );
-    searcher
-        .search(query, &collector)
-        .map_err(|e| Error::from_reason(format!("filtered search error: {e}")))
 }
 
 fn write_imported_files(dest_path: &str, files: &[(String, Vec<u8>)]) -> Result<()> {

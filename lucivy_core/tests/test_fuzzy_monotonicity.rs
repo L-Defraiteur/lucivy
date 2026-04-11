@@ -9,7 +9,6 @@ use lucivy_core::handle::LucivyHandle;
 use lucivy_core::query::{self, QueryConfig, SchemaConfig};
 use lucivy_core::directory::StdFsDirectory;
 use std::collections::HashSet;
-use std::sync::Arc;
 
 // ═══════════════════════════════════════════════════════════════════════
 // 1. Real repo: cross-token edge cases
@@ -121,50 +120,32 @@ fn build_index(files: &[(String, String)], drain: bool) -> (LucivyHandle, ld_luc
     (handle, content_field)
 }
 
-fn count_docs(handle: &LucivyHandle, query_text: &str, distance: u8) -> usize {
-    let qconfig = QueryConfig {
+fn make_contains_config(query_text: &str, distance: u8) -> QueryConfig {
+    QueryConfig {
         query_type: "contains".into(),
         field: Some("content".into()),
         value: Some(query_text.to_string()),
         distance: Some(distance),
         ..Default::default()
-    };
-    let q = query::build_query(&qconfig, &handle.schema, &handle.index, None).unwrap();
-    let searcher = handle.reader.searcher();
-    let results = searcher.search(&*q,
-        &ld_lucivy::collector::TopDocs::with_limit(100_000).order_by_score()).unwrap();
-    results.len()
+    }
+}
+
+fn count_docs(handle: &LucivyHandle, query_text: &str, distance: u8) -> usize {
+    let qconfig = make_contains_config(query_text, distance);
+    handle.search(&qconfig, 100_000, None).unwrap().len()
 }
 
 fn collect_doc_addrs(handle: &LucivyHandle, query_text: &str, distance: u8) -> HashSet<(u32, u32)> {
-    let qconfig = QueryConfig {
-        query_type: "contains".into(),
-        field: Some("content".into()),
-        value: Some(query_text.to_string()),
-        distance: Some(distance),
-        ..Default::default()
-    };
-    let q = query::build_query(&qconfig, &handle.schema, &handle.index, None).unwrap();
-    let searcher = handle.reader.searcher();
-    let results = searcher.search(&*q,
-        &ld_lucivy::collector::TopDocs::with_limit(100_000).order_by_score()).unwrap();
+    let qconfig = make_contains_config(query_text, distance);
+    let results = handle.search(&qconfig, 100_000, None).unwrap();
     results.iter().map(|(_, addr)| (addr.segment_ord as u32, addr.doc_id)).collect()
 }
 
 /// Search and return results ordered by score (highest first).
 /// Returns Vec<(score, segment_ord, doc_id)>.
 fn search_ranked(handle: &LucivyHandle, query_text: &str, distance: u8, limit: usize) -> Vec<(f32, u32, u32)> {
-    let qconfig = QueryConfig {
-        query_type: "contains".into(),
-        field: Some("content".into()),
-        value: Some(query_text.to_string()),
-        distance: Some(distance),
-        ..Default::default()
-    };
-    let q = query::build_query(&qconfig, &handle.schema, &handle.index, None).unwrap();
-    let searcher = handle.reader.searcher();
-    let results = searcher.search(&*q,
-        &ld_lucivy::collector::TopDocs::with_limit(limit).order_by_score()).unwrap();
+    let qconfig = make_contains_config(query_text, distance);
+    let results = handle.search(&qconfig, limit, None).unwrap();
     results.iter().map(|(score, addr)| (*score, addr.segment_ord as u32, addr.doc_id)).collect()
 }
 

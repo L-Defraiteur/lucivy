@@ -9,7 +9,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use ld_lucivy::collector::{FilterCollector, TopDocs};
 use ld_lucivy::query::HighlightSink;
 use ld_lucivy::schema::{Field, FieldType, Value as LucivyValue};
 use ld_lucivy::{DocAddress, Searcher, LucivyDocument};
@@ -318,15 +317,8 @@ fn search(
     let config: query::QueryConfig = serde_json::from_str(query_json)
         .map_err(|e| format!("invalid query JSON: {e}"))?;
 
-    let lucivy_query = query::build_query(
-        &config,
-        &handle.schema,
-        &handle.index,
-        None,
-    )?;
-
+    let top_docs = handle.search(&config, limit as usize, None)?;
     let searcher = handle.reader.searcher();
-    let top_docs = execute_top_docs(&searcher, lucivy_query.as_ref(), limit)?;
     collect_search_results(&searcher, &top_docs, &handle.schema)
 }
 
@@ -340,15 +332,8 @@ fn search_with_highlights(
 
     let highlight_sink = Arc::new(HighlightSink::new());
 
-    let lucivy_query = query::build_query(
-        &config,
-        &handle.schema,
-        &handle.index,
-        Some(highlight_sink.clone()),
-    )?;
-
+    let top_docs = handle.search(&config, limit as usize, Some(highlight_sink.clone()))?;
     let searcher = handle.reader.searcher();
-    let top_docs = execute_top_docs(&searcher, lucivy_query.as_ref(), limit)?;
     collect_search_results_with_highlights(
         &searcher,
         &top_docs,
@@ -431,15 +416,8 @@ fn search_typed_with_highlights(
 
     let highlight_sink = Arc::new(HighlightSink::new());
 
-    let lucivy_query = query::build_query(
-        &config,
-        &handle.schema,
-        &handle.index,
-        Some(highlight_sink.clone()),
-    )?;
-
+    let top_docs = handle.search(&config, limit as usize, Some(highlight_sink.clone()))?;
     let searcher = handle.reader.searcher();
-    let top_docs = execute_top_docs(&searcher, lucivy_query.as_ref(), limit)?;
     collect_search_results_with_highlights(
         &searcher,
         &top_docs,
@@ -459,16 +437,9 @@ fn search_filtered(
     let config: query::QueryConfig = serde_json::from_str(query_json)
         .map_err(|e| format!("invalid query JSON: {e}"))?;
 
-    let lucivy_query = query::build_query(
-        &config,
-        &handle.schema,
-        &handle.index,
-        None,
-    )?;
-
     let id_set: HashSet<u64> = allowed_ids.iter().copied().collect();
+    let top_docs = handle.search_filtered(&config, limit as usize, None, id_set)?;
     let searcher = handle.reader.searcher();
-    let top_docs = execute_top_docs_filtered(&searcher, lucivy_query.as_ref(), limit, id_set)?;
     collect_search_results(&searcher, &top_docs, &handle.schema)
 }
 
@@ -483,16 +454,9 @@ fn search_filtered_with_highlights(
 
     let highlight_sink = Arc::new(HighlightSink::new());
 
-    let lucivy_query = query::build_query(
-        &config,
-        &handle.schema,
-        &handle.index,
-        Some(highlight_sink.clone()),
-    )?;
-
     let id_set: HashSet<u64> = allowed_ids.iter().copied().collect();
+    let top_docs = handle.search_filtered(&config, limit as usize, Some(highlight_sink.clone()), id_set)?;
     let searcher = handle.reader.searcher();
-    let top_docs = execute_top_docs_filtered(&searcher, lucivy_query.as_ref(), limit, id_set)?;
     collect_search_results_with_highlights(
         &searcher,
         &top_docs,
@@ -512,34 +476,6 @@ fn get_schema_json(handle: &LucivyHandle) -> String {
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────────
-
-fn execute_top_docs(
-    searcher: &Searcher,
-    query: &dyn ld_lucivy::query::Query,
-    limit: u32,
-) -> Result<Vec<(f32, DocAddress)>, String> {
-    let collector = TopDocs::with_limit(limit as usize).order_by_score();
-    searcher
-        .search(query, &collector)
-        .map_err(|e| format!("search error: {e}"))
-}
-
-fn execute_top_docs_filtered(
-    searcher: &Searcher,
-    query: &dyn ld_lucivy::query::Query,
-    limit: u32,
-    allowed_ids: HashSet<u64>,
-) -> Result<Vec<(f32, DocAddress)>, String> {
-    let inner = TopDocs::with_limit(limit as usize).order_by_score();
-    let collector = FilterCollector::new(
-        NODE_ID_FIELD.to_string(),
-        move |value: u64| allowed_ids.contains(&value),
-        inner,
-    );
-    searcher
-        .search(query, &collector)
-        .map_err(|e| format!("filtered search error: {e}"))
-}
 
 fn collect_search_results(
     searcher: &Searcher,

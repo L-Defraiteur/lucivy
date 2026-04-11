@@ -132,9 +132,7 @@ fn test_merge_contains_correctness() {
             value: Some(q.to_string()),
             ..Default::default()
         };
-        let query = query::build_query(&qconfig, &handle.schema, &handle.index, None).unwrap();
-        let collector = ld_lucivy::collector::TopDocs::with_limit(1000).order_by_score();
-        let results = searcher.search(&*query, &collector).unwrap();
+        let results = handle.search(&qconfig, 1000, None).unwrap();
         let expected = if *q == "rag3weaver" { rag3_count } else { 0 };
         eprintln!("contains \"{}\": {} results (expected >= {})", q, results.len(), expected);
     }
@@ -168,9 +166,7 @@ fn test_merge_contains_correctness() {
         value: Some("rag3weaver".to_string()),
         ..Default::default()
     };
-    let query = query::build_query(&qconfig, &handle2.schema, &handle2.index, None).unwrap();
-    let collector = ld_lucivy::collector::TopDocs::with_limit(1000).order_by_score();
-    let results = searcher2.search(&*query, &collector).unwrap();
+    let results = handle2.search(&qconfig, 1000, None).unwrap();
     eprintln!("contains \"rag3weaver\" (no merge): {} results", results.len());
 
     // === Multi-token d=0 tests: WITH merge vs WITHOUT merge ===
@@ -191,9 +187,7 @@ fn test_merge_contains_correctness() {
             value: Some(q.to_string()),
             ..Default::default()
         };
-        let query = query::build_query(&qconfig, &handle.schema, &handle.index, None).unwrap();
-        let collector = ld_lucivy::collector::TopDocs::with_limit(1000).order_by_score();
-        let results = searcher.search(&*query, &collector).unwrap();
+        let results = handle.search(&qconfig, 1000, None).unwrap();
         eprintln!("  WITH merge  d=0 \"{}\": {} results", q, results.len());
     }
 
@@ -205,9 +199,7 @@ fn test_merge_contains_correctness() {
             value: Some(q.to_string()),
             ..Default::default()
         };
-        let query = query::build_query(&qconfig, &handle2.schema, &handle2.index, None).unwrap();
-        let collector = ld_lucivy::collector::TopDocs::with_limit(1000).order_by_score();
-        let results = searcher2.search(&*query, &collector).unwrap();
+        let results = handle2.search(&qconfig, 1000, None).unwrap();
         eprintln!("  WITHOUT merge d=0 \"{}\": {} results", q, results.len());
     }
 
@@ -227,9 +219,8 @@ fn test_merge_contains_correctness() {
         value: Some(q.to_string()),
         ..Default::default()
     };
-    let query_obj = query::build_query(&qconfig, &handle.schema, &handle.index, None).unwrap();
-    let collector = ld_lucivy::collector::TopDocs::with_limit(1000).order_by_score();
-    let results_with = searcher.search(&*query_obj, &collector).unwrap();
+    let results_with = handle.search(&qconfig, 1000, None).unwrap();
+    let searcher = handle.reader.searcher();
 
     // Retrieve paths of found docs
     let path_field = handle.field("path").unwrap();

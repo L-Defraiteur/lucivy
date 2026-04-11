@@ -167,7 +167,7 @@ pub unsafe extern "C" fn lucivy_read_logs() -> *const c_char {
     return_str(json)
 }
 
-use ld_lucivy::collector::{FilterCollector, TopDocs};
+
 use ld_lucivy::query::HighlightSink;
 use ld_lucivy::schema::{FieldType, Value};
 use ld_lucivy::{DocAddress, LucivyDocument, Searcher};
@@ -748,21 +748,11 @@ pub unsafe extern "C" fn lucivy_search(
         None
     };
 
-    let lucivy_query = match query::build_query(
-        &query_config,
-        &ctx.handle.schema,
-        &ctx.handle.index,
-        highlight_sink.clone(),
-    ) {
-        Ok(q) => q,
-        Err(e) => return return_error(&e),
-    };
-
-    let searcher = ctx.handle.reader.searcher();
-    let top_docs = match execute_top_docs(&searcher, lucivy_query.as_ref(), limit) {
+    let top_docs = match ctx.handle.search(&query_config, limit as usize, highlight_sink.clone()) {
         Ok(d) => d,
         Err(e) => return return_error(&e),
     };
+    let searcher = ctx.handle.reader.searcher();
     let results = match collect_results(&searcher, &top_docs, &ctx.handle.schema, highlight_sink.as_deref(), want_fields) {
         Ok(r) => r,
         Err(e) => return return_error(&e),
@@ -808,21 +798,11 @@ pub unsafe extern "C" fn lucivy_search_filtered(
         None
     };
 
-    let lucivy_query = match query::build_query(
-        &query_config,
-        &ctx.handle.schema,
-        &ctx.handle.index,
-        highlight_sink.clone(),
-    ) {
-        Ok(q) => q,
-        Err(e) => return return_error(&e),
-    };
-
-    let searcher = ctx.handle.reader.searcher();
-    let top_docs = match execute_top_docs_filtered(&searcher, lucivy_query.as_ref(), limit, id_set) {
+    let top_docs = match ctx.handle.search_filtered(&query_config, limit as usize, highlight_sink.clone(), id_set) {
         Ok(d) => d,
         Err(e) => return return_error(&e),
     };
+    let searcher = ctx.handle.reader.searcher();
     let results = match collect_results(&searcher, &top_docs, &ctx.handle.schema, highlight_sink.as_deref(), want_fields) {
         Ok(r) => r,
         Err(e) => return return_error(&e),
@@ -965,32 +945,6 @@ fn build_contains_split_multi_field(value: &str, text_fields: &[String], distanc
 }
 
 // ── Search helpers ─────────────────────────────────────────────────────────
-
-fn execute_top_docs(
-    searcher: &Searcher,
-    query: &dyn ld_lucivy::query::Query,
-    limit: u32,
-) -> Result<Vec<(f32, DocAddress)>, String> {
-    let collector = TopDocs::with_limit(limit as usize).order_by_score();
-    searcher.search(query, &collector)
-        .map_err(|e| format!("search error: {e}"))
-}
-
-fn execute_top_docs_filtered(
-    searcher: &Searcher,
-    query: &dyn ld_lucivy::query::Query,
-    limit: u32,
-    allowed_ids: HashSet<u64>,
-) -> Result<Vec<(f32, DocAddress)>, String> {
-    let inner = TopDocs::with_limit(limit as usize).order_by_score();
-    let collector = FilterCollector::new(
-        NODE_ID_FIELD.to_string(),
-        move |value: u64| allowed_ids.contains(&value),
-        inner,
-    );
-    searcher.search(query, &collector)
-        .map_err(|e| format!("filtered search error: {e}"))
-}
 
 #[derive(serde::Serialize)]
 struct SearchResultJson {

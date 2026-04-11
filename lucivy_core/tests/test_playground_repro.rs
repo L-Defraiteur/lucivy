@@ -206,9 +206,7 @@ fn test_playground_repro() {
             ..Default::default()
         };
         let t = std::time::Instant::now();
-        let q = query::build_query(&qconfig, &handle.schema, &handle.index, Some(sink.clone())).unwrap();
-        let collector = ld_lucivy::collector::TopDocs::with_limit(20).order_by_score();
-        let results = searcher.search(&*q, &collector).unwrap();
+        let results = handle.search(&qconfig, 20, Some(sink.clone())).unwrap();
         let query_ms = t.elapsed().as_millis();
 
         eprintln!("{} results in {}ms", results.len(), query_ms);
@@ -263,27 +261,27 @@ fn test_playground_repro() {
     eprintln!("\n=== MONOTONICITY CHECK: d=0 ⊆ d=1 ===");
     for query_text in &["rag3weaver", "rak3weaver"] {
         // Collect ALL doc addresses for d=0
-        let q0 = query::build_query(&QueryConfig {
+        let qconfig_d0 = QueryConfig {
             query_type: "contains".into(),
             field: Some("content".into()),
             value: Some(query_text.to_string()),
             distance: Some(0),
             ..Default::default()
-        }, &handle.schema, &handle.index, None).unwrap();
-        let results_d0 = searcher.search(&*q0, &ld_lucivy::collector::TopDocs::with_limit(100_000).order_by_score()).unwrap();
+        };
+        let results_d0 = handle.search(&qconfig_d0, 100_000, None).unwrap();
         let docs_d0: std::collections::HashSet<u32> = results_d0.iter()
             .map(|(_, addr)| addr.segment_ord as u32 * 100_000 + addr.doc_id)
             .collect();
 
         // Collect ALL doc addresses for d=1
-        let q1 = query::build_query(&QueryConfig {
+        let qconfig_d1 = QueryConfig {
             query_type: "contains".into(),
             field: Some("content".into()),
             value: Some(query_text.to_string()),
             distance: Some(1),
             ..Default::default()
-        }, &handle.schema, &handle.index, None).unwrap();
-        let results_d1 = searcher.search(&*q1, &ld_lucivy::collector::TopDocs::with_limit(100_000).order_by_score()).unwrap();
+        };
+        let results_d1 = handle.search(&qconfig_d1, 100_000, None).unwrap();
         let docs_d1: std::collections::HashSet<u32> = results_d1.iter()
             .map(|(_, addr)| addr.segment_ord as u32 * 100_000 + addr.doc_id)
             .collect();

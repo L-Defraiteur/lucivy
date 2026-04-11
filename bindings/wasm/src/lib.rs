@@ -9,7 +9,7 @@ mod directory;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use ld_lucivy::collector::{FilterCollector, TopDocs};
+
 use ld_lucivy::query::HighlightSink;
 use ld_lucivy::schema::{FieldType, Value as LucivyValue};
 use ld_lucivy::{DocAddress, LucivyDocument, Searcher};
@@ -321,15 +321,9 @@ impl Index {
             None
         };
 
-        let lucivy_query = query::build_query(
-            &query_config,
-            &self.handle.schema,
-            &self.handle.index,
-            highlight_sink.clone(),
-        ).map_err(|e| JsError::new(&e))?;
-
+        let top_docs = self.handle.search(&query_config, limit as usize, highlight_sink.clone())
+            .map_err(|e| JsError::new(&e))?;
         let searcher = self.handle.reader.searcher();
-        let top_docs = execute_top_docs(&searcher, lucivy_query.as_ref(), limit)?;
         let results = collect_results(&searcher, &top_docs, &self.handle.schema, highlight_sink.as_deref())?;
         serde_json::to_string(&results)
             .map_err(|e| JsError::new(&format!("serialize error: {e}")))
@@ -354,16 +348,10 @@ impl Index {
             None
         };
 
-        let lucivy_query = query::build_query(
-            &query_config,
-            &self.handle.schema,
-            &self.handle.index,
-            highlight_sink.clone(),
-        ).map_err(|e| JsError::new(&e))?;
-
         let id_set: HashSet<u64> = allowed_ids.iter().map(|&id| id as u64).collect();
+        let top_docs = self.handle.search_filtered(&query_config, limit as usize, highlight_sink.clone(), id_set)
+            .map_err(|e| JsError::new(&e))?;
         let searcher = self.handle.reader.searcher();
-        let top_docs = execute_top_docs_filtered(&searcher, lucivy_query.as_ref(), limit, id_set)?;
         let results = collect_results(&searcher, &top_docs, &self.handle.schema, highlight_sink.as_deref())?;
         serde_json::to_string(&results)
             .map_err(|e| JsError::new(&format!("serialize error: {e}")))
@@ -541,32 +529,6 @@ fn expand_contains_split_for_field(value: &str, words: &[&str], field: &str, dis
 }
 
 // ── Search helpers ─────────────────────────────────────────────────────────
-
-fn execute_top_docs(
-    searcher: &Searcher,
-    query: &dyn ld_lucivy::query::Query,
-    limit: u32,
-) -> Result<Vec<(f32, DocAddress)>, JsError> {
-    let collector = TopDocs::with_limit(limit as usize).order_by_score();
-    searcher.search(query, &collector)
-        .map_err(|e| JsError::new(&format!("search error: {e}")))
-}
-
-fn execute_top_docs_filtered(
-    searcher: &Searcher,
-    query: &dyn ld_lucivy::query::Query,
-    limit: u32,
-    allowed_ids: HashSet<u64>,
-) -> Result<Vec<(f32, DocAddress)>, JsError> {
-    let inner = TopDocs::with_limit(limit as usize).order_by_score();
-    let collector = FilterCollector::new(
-        NODE_ID_FIELD.to_string(),
-        move |value: u64| allowed_ids.contains(&value),
-        inner,
-    );
-    searcher.search(query, &collector)
-        .map_err(|e| JsError::new(&format!("filtered search error: {e}")))
-}
 
 #[derive(serde::Serialize)]
 struct SearchResultJson {

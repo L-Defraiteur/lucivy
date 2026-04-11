@@ -163,17 +163,9 @@ fn test_single_handle_highlights() {
         value: Some("function".into()),
         ..Default::default()
     };
-    let query = lucivy_core::query::build_query(
-        &query_config,
-        &handle.schema,
-        &handle.index,
-        Some(sink.clone()),
-    ).unwrap();
+    let results = handle.search(&query_config, 10, Some(sink.clone())).unwrap();
 
     let searcher = handle.reader.searcher();
-    let collector = ld_lucivy::collector::TopDocs::with_limit(10).order_by_score();
-    let results = searcher.search(&*query, &collector).unwrap();
-
     eprintln!("single_handle_highlights: {} results", results.len());
     assert!(!results.is_empty(), "should find doc with 'function'");
 

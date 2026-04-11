@@ -162,9 +162,7 @@ fn test_regex_ground_truth() {
         };
 
         let t_query = Instant::now();
-        let q = query::build_query(&qconfig, &handle.schema, &handle.index, Some(sink.clone())).unwrap();
-        let collector = ld_lucivy::collector::TopDocs::with_limit(10_000).order_by_score();
-        let results = searcher.search(&*q, &collector).unwrap();
+        let results = handle.search(&qconfig, 10_000, Some(sink.clone())).unwrap();
         let query_ms = t_query.elapsed().as_millis();
 
         // Map results to doc indices
@@ -251,9 +249,7 @@ fn test_regex_ground_truth() {
                 ..Default::default()
             };
             let t = Instant::now();
-            let q = query::build_query(&qconfig, &handle.schema, &handle.index, None).unwrap();
-            let collector = ld_lucivy::collector::TopDocs::with_limit(10_000).order_by_score();
-            let _ = searcher.search(&*q, &collector).unwrap();
+            let _ = handle.search(&qconfig, 10_000, None).unwrap();
             let ms = t.elapsed().as_millis();
             if ms < best_ms { best_ms = ms; }
         }
@@ -280,9 +276,7 @@ fn test_regex_ground_truth() {
             regex: Some(true),
             ..Default::default()
         };
-        let q = query::build_query(&qconfig, &handle.schema, &handle.index, None).unwrap();
-        let collector = ld_lucivy::collector::TopDocs::with_limit(10_000).order_by_score();
-        let results = searcher.search(&*q, &collector).unwrap();
+        let results = handle.search(&qconfig, 10_000, None).unwrap();
         let mut found: HashSet<usize> = HashSet::new();
         for (_score, addr) in &results {
             let doc: ld_lucivy::LucivyDocument = searcher.doc(*addr).unwrap();

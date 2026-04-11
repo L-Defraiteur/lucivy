@@ -2,17 +2,29 @@
 //!
 //! Each LucivyHandle holds an Index, an IndexWriter, and an IndexReader.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
 
+use std::collections::HashSet;
+
+use ld_lucivy::collector::{Collector, FilterCollector, TopDocs};
 use ld_lucivy::directory::Directory;
+use ld_lucivy::query::{
+    build_resolver, run_regex_prescan, run_sfx_walk, tokenize_query,
+    CachedRegexResult, CachedSfxResult, EnableScoring, HighlightSink,
+    Query, RawPostingEntry,
+};
 use ld_lucivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, INDEXED, STORED,
 };
-use ld_lucivy::{Index, IndexReader, IndexSettings, IndexWriter, ReloadPolicy};
+use ld_lucivy::suffix_fst::file::SfxFileReader;
+use ld_lucivy::{DocAddress, Index, IndexReader, IndexSettings, IndexWriter, ReloadPolicy};
 
-use crate::query::SchemaConfig;
+use crate::bm25_global::AggregatedBm25StatsOwned;
+use crate::query::{QueryConfig, SchemaConfig};
 
 /// Reserved field name for Rag3db node IDs, used for filtered search.
 pub const NODE_ID_FIELD: &str = "_node_id";
@@ -185,6 +197,169 @@ impl LucivyHandle {
         }
         self.mark_committed();
         Ok(())
+    }
+
+    /// Prescan all segments + build Weight with global BM25 stats.
+    ///
+    /// Equivalent to the ShardedHandle DAG path (prescan → merge → build_weight)
+    /// but executed sequentially for a single shard.
+    fn build_search_weight(
+        &self,
+        query_config: &QueryConfig,
+        highlight_sink: Option<Arc<HighlightSink>>,
+    ) -> Result<(ld_lucivy::Searcher, Box<dyn ld_lucivy::query::Weight>), String> {
+        let mut query = crate::query::build_query(
+            query_config, &self.schema, &self.index, highlight_sink,
+        )?;
+
+        let searcher = self.reader.searcher();
+
+        // --- Prescan (conditional) ---
+        let sfx_prescan_params = query.sfx_prescan_params();
+        let regex_prescan_params = query.regex_prescan_params();
+
+        if !sfx_prescan_params.is_empty() || !regex_prescan_params.is_empty() {
+            let mut sfx_cache = HashMap::new();
+            let mut sfx_freqs: HashMap<String, u64> = HashMap::new();
+            let mut regex_cache = HashMap::new();
+            let mut regex_freqs: HashMap<String, u64> = HashMap::new();
+
+            // SFX prescan
+            for seg_reader in searcher.segment_readers() {
+                for param in &sfx_prescan_params {
+                    let sfx_data = match seg_reader.sfx_file(param.field) {
+                        Some(d) => d,
+                        None => continue,
+                    };
+                    let sfx_bytes = sfx_data.read_bytes()
+                        .map_err(|e| format!("read sfx: {e}"))?;
+                    let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
+                        .map_err(|e| format!("open sfx: {e}"))?;
+
+                    let pr = build_resolver(seg_reader, param.field)
+                        .map_err(|e| format!("resolver: {e}"))?;
+                    let resolver = |ord: u64| -> Vec<RawPostingEntry> {
+                        pr.resolve(ord).into_iter().map(|e| {
+                            RawPostingEntry {
+                                doc_id: e.doc_id, token_index: e.position,
+                                byte_from: e.byte_from, byte_to: e.byte_to,
+                            }
+                        }).collect()
+                    };
+
+                    let (tokens, seps) = tokenize_query(&param.query_text);
+                    let seg_str = format!("{:?}", seg_reader.segment_id());
+                    let (doc_tf, highlights) = run_sfx_walk(
+                        &sfx_reader, &resolver, &param.query_text,
+                        &tokens, &seps,
+                        param.fuzzy_distance, param.anchor_start, param.continuation,
+                        param.strict_separators,
+                        Some(&seg_str),
+                        None,
+                    );
+
+                    *sfx_freqs.entry(param.query_text.clone()).or_insert(0) += doc_tf.len() as u64;
+                    if !doc_tf.is_empty() {
+                        sfx_cache.insert(seg_reader.segment_id(), CachedSfxResult::new(doc_tf, highlights));
+                    }
+                }
+            }
+
+            // Regex prescan
+            for param in &regex_prescan_params {
+                for seg_reader in searcher.segment_readers() {
+                    let (doc_tf, highlights) = run_regex_prescan(
+                        seg_reader, param.field, &param.pattern, param.anchor_start,
+                    ).map_err(|e| format!("regex prescan: {e}"))?;
+
+                    *regex_freqs.entry(param.pattern.clone()).or_insert(0) += doc_tf.len() as u64;
+                    if !doc_tf.is_empty() {
+                        regex_cache.insert(seg_reader.segment_id(), CachedRegexResult {
+                            doc_tf, highlights, doc_coverage: Vec::new(),
+                        });
+                    }
+                }
+            }
+
+            // Inject prescan results into query
+            if !sfx_freqs.is_empty() {
+                query.set_global_contains_doc_freqs(&sfx_freqs);
+                query.inject_prescan_cache(sfx_cache);
+            }
+            if !regex_freqs.is_empty() {
+                query.set_global_regex_doc_freqs(&regex_freqs);
+                query.inject_regex_prescan_cache(regex_cache);
+            }
+        }
+
+        // --- Build weight with global stats ---
+        let global_stats = AggregatedBm25StatsOwned::new(vec![searcher.clone()]);
+        let enable_scoring = EnableScoring::enabled_from_statistics_provider(
+            Arc::new(global_stats), &searcher,
+        );
+        let weight = query.weight(enable_scoring)
+            .map_err(|e| format!("weight: {e}"))?;
+
+        Ok((searcher, weight))
+    }
+
+    /// Collect top-k results from a Weight across all segments.
+    fn collect_top_docs(
+        searcher: &ld_lucivy::Searcher,
+        weight: &dyn ld_lucivy::query::Weight,
+        top_k: usize,
+    ) -> Result<Vec<(f32, DocAddress)>, String> {
+        let collector = TopDocs::with_limit(top_k).order_by_score();
+        let segment_readers = searcher.segment_readers();
+        let mut fruits = Vec::with_capacity(segment_readers.len());
+        for (seg_ord, seg_reader) in segment_readers.iter().enumerate() {
+            let fruit = collector
+                .collect_segment(weight, seg_ord as u32, seg_reader)
+                .map_err(|e| format!("collect seg_{seg_ord}: {e}"))?;
+            fruits.push(fruit);
+        }
+        collector
+            .merge_fruits(fruits)
+            .map_err(|e| format!("merge: {e}"))
+    }
+
+    /// Search with prescan + global IDF.
+    pub fn search(
+        &self,
+        query_config: &QueryConfig,
+        top_k: usize,
+        highlight_sink: Option<Arc<HighlightSink>>,
+    ) -> Result<Vec<(f32, DocAddress)>, String> {
+        let (searcher, weight) = self.build_search_weight(query_config, highlight_sink)?;
+        Self::collect_top_docs(&searcher, weight.as_ref(), top_k)
+    }
+
+    /// Search with prescan + global IDF + node_id filter.
+    pub fn search_filtered(
+        &self,
+        query_config: &QueryConfig,
+        top_k: usize,
+        highlight_sink: Option<Arc<HighlightSink>>,
+        allowed_ids: HashSet<u64>,
+    ) -> Result<Vec<(f32, DocAddress)>, String> {
+        let (searcher, weight) = self.build_search_weight(query_config, highlight_sink)?;
+        let inner = TopDocs::with_limit(top_k).order_by_score();
+        let collector = FilterCollector::new(
+            NODE_ID_FIELD.to_string(),
+            move |value: u64| allowed_ids.contains(&value),
+            inner,
+        );
+        let segment_readers = searcher.segment_readers();
+        let mut fruits = Vec::with_capacity(segment_readers.len());
+        for (seg_ord, seg_reader) in segment_readers.iter().enumerate() {
+            let fruit = collector
+                .collect_segment(weight.as_ref(), seg_ord as u32, seg_reader)
+                .map_err(|e| format!("collect seg_{seg_ord}: {e}"))?;
+            fruits.push(fruit);
+        }
+        collector
+            .merge_fruits(fruits)
+            .map_err(|e| format!("merge: {e}"))
     }
 
     /// Get a field by name.

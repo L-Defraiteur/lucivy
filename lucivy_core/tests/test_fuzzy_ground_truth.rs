@@ -405,7 +405,7 @@ fn test_fuzzy_ground_truth() {
         let ground_truth = build_ground_truth(&files, query_text, *distance);
         eprintln!("Ground truth: {} docs", ground_truth.len());
 
-        // Run fuzzy query
+        // Run fuzzy query via handle.search() (prescan + global IDF)
         let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
         let qconfig = QueryConfig {
             query_type: "contains".into(),
@@ -414,9 +414,7 @@ fn test_fuzzy_ground_truth() {
             distance: Some(*distance as u8),
             ..Default::default()
         };
-        let q = query::build_query(&qconfig, &handle.schema, &handle.index, Some(sink.clone())).unwrap();
-        let collector = ld_lucivy::collector::TopDocs::with_limit(10_000).order_by_score();
-        let results = searcher.search(&*q, &collector).unwrap();
+        let results = handle.search(&qconfig, 10_000, Some(sink.clone())).unwrap();
         eprintln!("Query returned {} results", results.len());
 
         let mut found_doc_indices: HashSet<usize> = HashSet::new();

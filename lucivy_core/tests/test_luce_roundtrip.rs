@@ -8,10 +8,8 @@ use std::sync::Arc;
 
 fn search_with_highlights(handle: &LucivyHandle, config: &QueryConfig) -> Vec<(f32, u32, Vec<[usize; 2]>)> {
     let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
-    let q = query::build_query(config, &handle.schema, &handle.index, Some(sink.clone())).unwrap();
+    let results = handle.search(config, 20, Some(sink.clone())).unwrap();
     let searcher = handle.reader.searcher();
-    let collector = ld_lucivy::collector::TopDocs::with_limit(20).order_by_score();
-    let results = searcher.search(&*q, &collector).unwrap();
     results.iter().map(|(score, addr)| {
         let seg_id = searcher.segment_reader(addr.segment_ord as u32).segment_id();
         let hl_map = sink.get(seg_id, addr.doc_id);
@@ -66,10 +64,8 @@ fn test_luce_playground_search() {
             distance: Some(dist),
             ..Default::default()
         };
-        let q = query::build_query(&config, &handle.schema, &handle.index, Some(sink.clone())).unwrap();
+        let results = handle.search(&config, 5, Some(sink.clone())).unwrap();
         let searcher = handle.reader.searcher();
-        let collector = ld_lucivy::collector::TopDocs::with_limit(5).order_by_score();
-        let results = searcher.search(&*q, &collector).unwrap();
         eprintln!("fuzzy \"{}\" d={}: {} results", query_text, dist, results.len());
 
         for (score, addr) in &results {
