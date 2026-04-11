@@ -225,11 +225,18 @@ fn cross_token_falling_walk_inner(
                 } else {
                     sib_table.contiguous_siblings(cur_ord as u32)
                 };
+                let first_byte = rem.as_bytes()[0];
                 for &next_ord in &sibling_ords {
                     let next_text = match ord_to_term(next_ord as u64) {
                         Some(t) => t,
                         None => continue,
                     };
+
+                    // Fast skip: if the sibling token doesn't start with
+                    // the first byte of the remainder, it can't match.
+                    if next_text.as_bytes().first().copied() != Some(first_byte) {
+                        continue;
+                    }
 
                     if rem == next_text {
                         // Exact match → terminal
