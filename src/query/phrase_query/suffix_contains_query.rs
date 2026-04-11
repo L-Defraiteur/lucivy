@@ -703,7 +703,11 @@ impl Scorer for SuffixContainsScorer {
         let fieldnorm_id = self.fieldnorm_reader.fieldnorm_id(doc);
         let base_score = self.bm25_weight.score(fieldnorm_id, tf);
         if let Some(&coverage) = self.coverage_boost.get(&doc) {
-            base_score * coverage
+            // Coverage-dominant scoring: coverage (0.0-1.0) scaled to dominate
+            // over BM25 (typically 0-50). This ensures results with fewer
+            // trigram misses always rank above results with more misses,
+            // with BM25 as tie-breaker within the same miss count.
+            coverage * 1000.0 + base_score
         } else {
             base_score
         }

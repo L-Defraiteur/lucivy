@@ -151,6 +151,23 @@ fn collect_doc_addrs(handle: &LucivyHandle, query_text: &str, distance: u8) -> H
     results.iter().map(|(_, addr)| (addr.segment_ord as u32, addr.doc_id)).collect()
 }
 
+/// Search and return results ordered by score (highest first).
+/// Returns Vec<(score, segment_ord, doc_id)>.
+fn search_ranked(handle: &LucivyHandle, query_text: &str, distance: u8, limit: usize) -> Vec<(f32, u32, u32)> {
+    let qconfig = QueryConfig {
+        query_type: "contains".into(),
+        field: Some("content".into()),
+        value: Some(query_text.to_string()),
+        distance: Some(distance),
+        ..Default::default()
+    };
+    let q = query::build_query(&qconfig, &handle.schema, &handle.index, None).unwrap();
+    let searcher = handle.reader.searcher();
+    let results = searcher.search(&*q,
+        &ld_lucivy::collector::TopDocs::with_limit(limit).order_by_score()).unwrap();
+    results.iter().map(|(score, addr)| (*score, addr.segment_ord as u32, addr.doc_id)).collect()
+}
+
 #[test]
 fn test_monotonicity_real_repo() {
     let files = collect_repo_files();
@@ -203,6 +220,49 @@ fn test_monotonicity_real_repo() {
         }
     }
     assert!(!any_failure, "Monotonicity violated: some d=0 results missing from d=1");
+
+    // Ranking check: for multi-word queries, d=0 results should be ranked
+    // among the top results in d=1 (coverage boost should prioritize them).
+    let ranking_queries = vec!["3db_val", "rag3db_value_destroy", "alue_dest", "query_result_is_success"];
+    let mut ranking_failures = 0;
+
+    for query_text in &ranking_queries {
+        let d0 = collect_doc_addrs(&handle, query_text, 0);
+        if d0.is_empty() { continue; }
+
+        let ranked = search_ranked(&handle, query_text, 1, 100);
+        if ranked.is_empty() { continue; }
+
+        // Check: all d=0 docs should appear in the top N results of d=1,
+        // where N = 2 * d0.len() (generous margin).
+        let top_n = (d0.len() * 2).min(ranked.len());
+        let top_addrs: HashSet<(u32, u32)> = ranked[..top_n].iter()
+            .map(|&(_, seg, doc)| (seg, doc))
+            .collect();
+
+        let not_in_top: Vec<_> = d0.iter()
+            .filter(|addr| !top_addrs.contains(addr))
+            .collect();
+
+        if not_in_top.is_empty() {
+            eprintln!("  [RANK OK] \"{}\": all {} d=0 docs in top {} of {} d=1 results (top score={:.4})",
+                query_text, d0.len(), top_n, ranked.len(), ranked[0].0);
+        } else {
+            eprintln!("  [RANK FAIL] \"{}\": {} of {} d=0 docs NOT in top {} (total d=1={})",
+                query_text, not_in_top.len(), d0.len(), top_n, ranked.len());
+            // Show scores of top results vs d=0 docs
+            for &(score, seg, doc) in ranked.iter().take(5) {
+                let is_d0 = d0.contains(&(seg, doc));
+                eprintln!("    rank: seg={} doc={} score={:.4} {}", seg, doc, score,
+                    if is_d0 { "← d=0" } else { "" });
+            }
+            ranking_failures += 1;
+        }
+    }
+
+    if ranking_failures > 0 {
+        eprintln!("  WARNING: {} ranking issues (d=0 docs not in top results)", ranking_failures);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════

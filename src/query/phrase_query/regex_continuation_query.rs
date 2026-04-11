@@ -1757,12 +1757,12 @@ impl RegexContinuationWeight {
     /// Compiles DFA, opens .sfx/.posmap, runs the walk, converts to doc_tf.
     fn run_regex_fallback(
         &self, reader: &SegmentReader,
-    ) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)> {
+    ) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>)> {
         let max_doc = reader.max_doc();
 
         let sfx_data = match reader.sfx_file(self.field) {
             Some(data) => data,
-            None => return Ok((vec![], vec![])),
+            None => return Ok((vec![], vec![], vec![])),
         };
         let sfx_bytes = sfx_data
             .read_bytes()
@@ -1792,14 +1792,13 @@ impl RegexContinuationWeight {
 
         let use_sibling = sfx_reader.sibling_table().is_some();
 
-        let (doc_bitset, highlights) = match &self.dfa_kind {
+        let (doc_bitset, highlights, fuzzy_coverage) = match &self.dfa_kind {
             DfaKind::Fuzzy { text, distance, prefix } if *distance > 0 => {
                 // Fuzzy d>=1 via dedicated fuzzy contains pipeline.
-                let (bitset, hl, _coverage) = super::fuzzy_contains::fuzzy_contains(
+                super::fuzzy_contains::fuzzy_contains(
                     text, *distance, &sfx_reader, &*resolver,
                     &ord_to_term_fn, max_doc,
-                )?;
-                (bitset, hl)
+                )?
             }
             DfaKind::Fuzzy { text, distance, prefix } => {
                 // Exact (d=0) — use existing DFA continuation path.
@@ -1810,7 +1809,7 @@ impl RegexContinuationWeight {
                     builder.build_dfa(text)
                 };
                 let automaton = SfxDfaWrapper(dfa);
-                if use_sibling {
+                let (bs, hl) = if use_sibling {
                     continuation_score_sibling(
                         &automaton, &sfx_dict, &*resolver, &sfx_reader, self.anchor_start, max_doc,
                         &ord_to_term_fn,
@@ -1820,7 +1819,8 @@ impl RegexContinuationWeight {
                         &automaton, &sfx_dict, &*resolver, &sfx_reader, self.anchor_start, max_doc,
                         None,
                     )?
-                }
+                };
+                (bs, hl, Vec::new())
             }
             DfaKind::Regex { pattern } => {
                 let posmap_bytes = reader.posmap_file(self.field)
@@ -1838,7 +1838,7 @@ impl RegexContinuationWeight {
                 })?;
                 let automaton = SfxAutomatonAdapter(&regex);
 
-                if use_sibling {
+                let (bs, hl) = if use_sibling {
                     regex_contains_via_literal(
                         &automaton, pattern, &sfx_dict, &*resolver, &sfx_reader,
                         self.anchor_start, max_doc, &ord_to_term_fn,
@@ -1851,14 +1851,15 @@ impl RegexContinuationWeight {
                         &automaton, &sfx_dict, &*resolver, &sfx_reader, self.anchor_start, max_doc,
                         None,
                     )?
-                }
+                };
+                (bs, hl, Vec::new())
             }
         };
 
-        // Convert (BitSet, highlights) → (doc_tf, highlights)
-        let _ = doc_bitset; // BitSet no longer needed — doc_tf derived from highlights
+        // Convert (BitSet, highlights, coverage) → (doc_tf, highlights, coverage)
+        let _ = doc_bitset;
         let doc_tf = highlights_to_doc_tf(&highlights);
-        Ok((doc_tf, highlights))
+        Ok((doc_tf, highlights, fuzzy_coverage))
     }
 }
 
@@ -1876,12 +1877,12 @@ impl Weight for RegexContinuationWeight {
         }
 
         // === SLOW PATH: fallback (non-DAG or prescan skipped) ===
-        let (doc_tf, highlights) = self.run_regex_fallback(reader)?;
+        let (doc_tf, highlights, doc_coverage) = self.run_regex_fallback(reader)?;
         if doc_tf.is_empty() {
             return Ok(Box::new(crate::query::EmptyScorer));
         }
         self.emit_highlights(segment_id, &highlights);
-        self.build_scorer(reader, boost, doc_tf, Vec::new())
+        self.build_scorer(reader, boost, doc_tf, doc_coverage)
     }
 
     fn explain(&self, reader: &SegmentReader, doc: DocId) -> crate::Result<Explanation> {
