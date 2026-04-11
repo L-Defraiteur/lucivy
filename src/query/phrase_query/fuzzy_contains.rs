@@ -173,10 +173,11 @@ struct FuzzyMatch {
     coverage: f32,
 }
 
-/// Find all matches in the hit dictionary by anchoring on positions.
+/// Find all matches in the hit dictionary using two-pointer on sorted positions.
 ///
-/// For each document, for each position P, count how many distinct tri_idx
-/// appear in the zone [P, P + max_span]. If >= threshold, emit a match.
+/// For each document, flatten all hits sorted by position, then use a sliding
+/// window (two-pointer) to find the tightest zones where >= threshold distinct
+/// tri_idx appear. max_span is a guard-rail to reject absurdly wide windows.
 fn find_matches(
     hits_by_doc: &HitsByDoc,
     threshold: usize,
@@ -189,54 +190,66 @@ fn find_matches(
     let mut results = Vec::new();
 
     for (&doc_id, doc_hits) in hits_by_doc {
-        // Collect all positions that have hits, sorted
-        let mut positions: Vec<u32> = doc_hits.keys().copied().collect();
-        positions.sort_unstable();
+        // Flatten all hits sorted by (position, tri_idx)
+        let mut flat: Vec<&TrigramHit> = doc_hits.values()
+            .flat_map(|hits| hits.iter())
+            .collect();
+        flat.sort_by_key(|h| (h.position, h.tri_idx));
 
-        for &anchor in &positions {
-            // Count distinct tri_idx in [anchor, anchor + max_span]
-            let mut seen_tri = HashSet::new();
-            let mut min_bf = u32::MAX;
-            let mut max_bf: u32 = 0;
-            let mut best_first_tri: usize = usize::MAX;
-            let mut best_last_tri: usize = 0;
+        if flat.is_empty() { continue; }
 
-            for &pos in &positions {
-                if pos < anchor { continue; }
-                if pos > anchor + max_span { break; }
+        // Two-pointer: expand right to accumulate tri_idx, retract left to tighten.
+        let mut tri_counts: HashMap<usize, usize> = HashMap::new();
+        let mut distinct = 0usize;
+        let mut left = 0usize;
 
-                if let Some(hits) = doc_hits.get(&pos) {
-                    for hit in hits {
-                        seen_tri.insert(hit.tri_idx);
-                        if hit.byte_from < min_bf {
-                            min_bf = hit.byte_from;
-                        }
-                        if hit.byte_from > max_bf {
-                            max_bf = hit.byte_from;
-                        }
-                        if hit.tri_idx < best_first_tri {
-                            best_first_tri = hit.tri_idx;
-                        }
-                        if hit.tri_idx > best_last_tri {
-                            best_last_tri = hit.tri_idx;
-                        }
-                    }
-                }
+        for right in 0..flat.len() {
+            // Add right hit
+            let count = tri_counts.entry(flat[right].tri_idx).or_insert(0);
+            if *count == 0 { distinct += 1; }
+            *count += 1;
+
+            // Retract left while window is too wide
+            while flat[right].position.saturating_sub(flat[left].position) > max_span {
+                let lc = tri_counts.get_mut(&flat[left].tri_idx).unwrap();
+                *lc -= 1;
+                if *lc == 0 { distinct -= 1; }
+                left += 1;
             }
 
-            if seen_tri.len() >= threshold {
-                // Compute highlight from the first and last trigram
+            // Check if we have enough
+            if distinct >= threshold {
+                // Collect stats from the current window
+                let mut min_bf = u32::MAX;
+                let mut max_bf: u32 = 0;
+                let mut best_first_tri = usize::MAX;
+                let mut best_last_tri = 0usize;
+
+                for i in left..=right {
+                    let h = flat[i];
+                    if h.byte_from < min_bf { min_bf = h.byte_from; }
+                    if h.byte_from > max_bf { max_bf = h.byte_from; }
+                    if h.tri_idx < best_first_tri { best_first_tri = h.tri_idx; }
+                    if h.tri_idx > best_last_tri { best_last_tri = h.tri_idx; }
+                }
+
                 let hl_start = min_bf.saturating_sub(query_positions[best_first_tri] as u32);
                 let remaining = concat_len.saturating_sub(query_positions[best_last_tri] + ngram_size);
                 let hl_end = max_bf + ngram_size as u32 + remaining as u32;
 
-                let coverage = seen_tri.len() as f32 / total_ngrams.max(1) as f32;
+                let coverage = distinct as f32 / total_ngrams.max(1) as f32;
                 results.push(FuzzyMatch {
                     doc_id,
                     byte_from: hl_start,
                     byte_to: hl_end,
                     coverage,
                 });
+
+                // Advance left past this match to find subsequent non-overlapping matches
+                let lc = tri_counts.get_mut(&flat[left].tri_idx).unwrap();
+                *lc -= 1;
+                if *lc == 0 { distinct -= 1; }
+                left += 1;
             }
         }
     }
