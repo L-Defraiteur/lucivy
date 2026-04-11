@@ -648,6 +648,9 @@ pub(crate) struct SuffixContainsScorer {
     cursor: usize,
     bm25_weight: Bm25Weight,
     fieldnorm_reader: FieldNormReader,
+    /// Per-doc coverage boost (matched_trigrams / total_trigrams).
+    /// If empty, no coverage boost is applied.
+    coverage_boost: std::collections::HashMap<DocId, f32>,
 }
 
 impl SuffixContainsScorer {
@@ -656,7 +659,12 @@ impl SuffixContainsScorer {
         bm25_weight: Bm25Weight,
         fieldnorm_reader: FieldNormReader,
     ) -> Self {
-        Self { candidates, cursor: 0, bm25_weight, fieldnorm_reader }
+        Self { candidates, cursor: 0, bm25_weight, fieldnorm_reader, coverage_boost: std::collections::HashMap::new() }
+    }
+
+    pub(crate) fn with_coverage(mut self, coverage: Vec<(DocId, f32)>) -> Self {
+        self.coverage_boost = coverage.into_iter().collect();
+        self
     }
 }
 
@@ -693,7 +701,12 @@ impl Scorer for SuffixContainsScorer {
         if self.cursor >= self.candidates.len() { return 0.0; }
         let (doc, tf) = self.candidates[self.cursor];
         let fieldnorm_id = self.fieldnorm_reader.fieldnorm_id(doc);
-        self.bm25_weight.score(fieldnorm_id, tf)
+        let base_score = self.bm25_weight.score(fieldnorm_id, tf);
+        if let Some(&coverage) = self.coverage_boost.get(&doc) {
+            base_score * coverage
+        } else {
+            base_score
+        }
     }
 }
 

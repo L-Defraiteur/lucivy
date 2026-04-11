@@ -203,6 +203,9 @@ pub struct RegexContinuationQuery {
     regex_prescan_cache: Option<HashMap<SegmentId, CachedRegexResult>>,
     /// Global doc_freq from prescan (correct IDF across all segments/shards).
     global_regex_doc_freq: Option<u64>,
+    /// If true (default), fuzzy results are boosted by coverage ratio.
+    /// Coverage = matched_trigrams / total_trigrams. Higher = closer to exact match.
+    fuzzy_coverage_boost: bool,
 }
 
 impl RegexContinuationQuery {
@@ -217,6 +220,7 @@ impl RegexContinuationQuery {
             highlight_field_name: String::new(),
             regex_prescan_cache: None,
             global_regex_doc_freq: None,
+            fuzzy_coverage_boost: true,
         }
     }
 
@@ -247,6 +251,7 @@ impl RegexContinuationQuery {
             highlight_field_name: String::new(),
             regex_prescan_cache: None,
             global_regex_doc_freq: None,
+            fuzzy_coverage_boost: true,
         }
     }
 
@@ -330,6 +335,7 @@ impl Query for RegexContinuationQuery {
             global_num_tokens,
             regex_prescan_cache: self.regex_prescan_cache.clone().unwrap_or_default(),
             global_regex_doc_freq: self.global_regex_doc_freq.unwrap_or(0),
+            fuzzy_coverage_boost: self.fuzzy_coverage_boost,
         }))
     }
 
@@ -378,6 +384,7 @@ struct RegexContinuationWeight {
     global_num_tokens: u64,
     regex_prescan_cache: HashMap<SegmentId, CachedRegexResult>,
     global_regex_doc_freq: u64,
+    fuzzy_coverage_boost: bool,
 }
 
 /// Candidate state: DFA end state + byte_from of match start for highlights.
@@ -1709,6 +1716,7 @@ impl RegexContinuationWeight {
     fn build_scorer(
         &self, reader: &SegmentReader, boost: Score,
         doc_tf: Vec<(DocId, u32)>,
+        doc_coverage: Vec<(DocId, f32)>,
     ) -> crate::Result<Box<dyn Scorer>> {
         let fieldnorm_reader = reader.fieldnorms_readers()
             .get_field(self.field)?
@@ -1732,11 +1740,17 @@ impl RegexContinuationWeight {
             Bm25Weight::for_one_term(0, 1, 1.0)
         };
 
-        Ok(Box::new(SuffixContainsScorer::new(
+        let scorer = SuffixContainsScorer::new(
             doc_tf,
             bm25_weight.boost_by(boost),
             fieldnorm_reader,
-        )))
+        );
+        let scorer = if self.fuzzy_coverage_boost && !doc_coverage.is_empty() {
+            scorer.with_coverage(doc_coverage)
+        } else {
+            scorer
+        };
+        Ok(Box::new(scorer))
     }
 
     /// Fallback: run regex walk without prescan cache.
@@ -1858,7 +1872,7 @@ impl Weight for RegexContinuationWeight {
                 return Ok(Box::new(crate::query::EmptyScorer));
             }
             self.emit_highlights(segment_id, &cached.highlights);
-            return self.build_scorer(reader, boost, cached.doc_tf.clone());
+            return self.build_scorer(reader, boost, cached.doc_tf.clone(), cached.doc_coverage.clone());
         }
 
         // === SLOW PATH: fallback (non-DAG or prescan skipped) ===
@@ -1867,7 +1881,7 @@ impl Weight for RegexContinuationWeight {
             return Ok(Box::new(crate::query::EmptyScorer));
         }
         self.emit_highlights(segment_id, &highlights);
-        self.build_scorer(reader, boost, doc_tf)
+        self.build_scorer(reader, boost, doc_tf, Vec::new())
     }
 
     fn explain(&self, reader: &SegmentReader, doc: DocId) -> crate::Result<Explanation> {
@@ -1982,6 +1996,7 @@ mod tests {
 
         assert!(results.len() >= 1, "fuzzy d=1 should match doc 1");
         assert!(results.iter().any(|(_, addr)| addr.doc_id == 1), "doc 1 should be in results");
+        assert_eq!(results[0].1.doc_id, 1, "doc 1 should be ranked first (highest coverage)");
     }
 
     #[test]
@@ -2157,6 +2172,7 @@ mod tests {
         // Doc 1: "rag3db is cool" → suffix "3db" + " " gap + "is"
         assert!(results.len() >= 1, "'3dbis' d=1 contains should match doc 1");
         assert!(results.iter().any(|(_, addr)| addr.doc_id == 1), "doc 1 should be in results");
+        assert_eq!(results[0].1.doc_id, 1, "doc 1 should be ranked first (highest coverage)");
     }
 
     #[test]
@@ -2178,6 +2194,7 @@ mod tests {
         // Doc 1: "rag3db is cool" — 2 spaces absorbed = d=2
         assert!(results.len() >= 1, "'rag3dbiscool' d=2 should match 'rag3db is cool'");
         assert!(results.iter().any(|(_, addr)| addr.doc_id == 1), "doc 1 should be in results");
+        assert_eq!(results[0].1.doc_id, 1, "doc 1 should be ranked first (highest coverage)");
     }
 
     // ── Highlight tests ──

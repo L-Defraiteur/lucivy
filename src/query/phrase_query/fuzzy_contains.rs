@@ -333,6 +333,18 @@ pub fn fuzzy_contains(
     ord_to_term: &dyn Fn(u64) -> Option<String>,
     max_doc: DocId,
 ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>)> {
+    fuzzy_contains_inner(query_text, distance, sfx_reader, resolver, ord_to_term, max_doc, true)
+}
+
+fn fuzzy_contains_inner(
+    query_text: &str,
+    distance: u8,
+    sfx_reader: &SfxFileReader,
+    resolver: &dyn PostingResolver,
+    ord_to_term: &dyn Fn(u64) -> Option<String>,
+    max_doc: DocId,
+    compute_coverage: bool,
+) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>)> {
     let _t_total = std::time::Instant::now();
 
     // Step 1: Concatenate query
@@ -452,9 +464,11 @@ pub fn fuzzy_contains(
     for m in &matches {
         doc_bitset.insert(m.doc_id);
         highlights.push((m.doc_id, m.byte_from as usize, m.byte_to as usize));
-        let entry = best_coverage.entry(m.doc_id).or_insert(0.0);
-        if m.coverage > *entry {
-            *entry = m.coverage;
+        if compute_coverage {
+            let entry = best_coverage.entry(m.doc_id).or_insert(0.0);
+            if m.coverage > *entry {
+                *entry = m.coverage;
+            }
         }
     }
 
