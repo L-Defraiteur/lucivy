@@ -344,3 +344,129 @@ fn test_fuzzy_sku_catalog() {
     assert_eq!(exact_failures, 0, "Some SKUs not found at d=0");
     assert_eq!(mono_failures, 0, "Monotonicity violated for some SKUs");
 }
+
+#[test]
+fn test_fuzzy_long_api_keys() {
+    let mut rng = SimpleRng::new(99);
+
+    // Generate API key-like strings: "sk-proj-abc123def456ghi789jkl012"
+    // Mix of separators (-, _) and alphanumeric segments of varying length.
+    let keys: Vec<String> = (0..20).map(|_| {
+        let mut key = String::from("sk-proj-");
+        let num_segments = 3 + rng.next_range(4) as usize; // 3-6 segments
+        for seg_idx in 0..num_segments {
+            let seg_len = 4 + rng.next_range(8) as usize; // 4-11 chars per segment
+            for _ in 0..seg_len {
+                key.push(rng.next_char());
+            }
+            if seg_idx < num_segments - 1 {
+                // Random separator: - or _
+                key.push(if rng.next_range(2) == 0 { '-' } else { '_' });
+            }
+        }
+        key
+    }).collect();
+
+    eprintln!("Generated {} API keys, lengths: {:?}",
+        keys.len(), keys.iter().map(|k| k.len()).collect::<Vec<_>>());
+    eprintln!("  Examples: {:?}", &keys[..3]);
+
+    // Create docs with 1-3 keys each
+    let mut docs: Vec<String> = Vec::new();
+    let mut key_in_docs: Vec<Vec<usize>> = vec![Vec::new(); keys.len()];
+
+    for doc_idx in 0..100 {
+        let num_keys = 1 + rng.next_range(3) as usize;
+        let mut content = format!("Config file #{}\n\n", doc_idx);
+        for _ in 0..num_keys {
+            let key_idx = rng.next_range(keys.len() as u64) as usize;
+            content.push_str(&format!("API_KEY={}\nSECRET={}\n",
+                keys[key_idx],
+                rng.gen_sku(8)));
+            key_in_docs[key_idx].push(doc_idx);
+        }
+        content.push_str("\n# end config\n");
+        docs.push(content);
+    }
+
+    // Build index
+    let tmp = std::path::Path::new("/tmp/test_apikey_fuzzy");
+    let _ = std::fs::remove_dir_all(tmp);
+    std::fs::create_dir_all(tmp).unwrap();
+
+    let config = SchemaConfig {
+        fields: vec![
+            query::FieldDef { name: "content".into(), field_type: "text".into(),
+                stored: Some(true), indexed: Some(true), fast: None },
+        ],
+        ..Default::default()
+    };
+    let dir = StdFsDirectory::open(tmp).unwrap();
+    let handle = LucivyHandle::create(dir, &config).unwrap();
+    let content_field = handle.field("content").unwrap();
+
+    {
+        let mut guard = handle.writer.lock().unwrap();
+        let writer = guard.as_mut().unwrap();
+        for content in &docs {
+            let mut doc = ld_lucivy::LucivyDocument::new();
+            doc.add_text(content_field, content);
+            writer.add_document(doc).unwrap();
+        }
+        writer.commit().unwrap();
+    }
+    handle.reader.reload().unwrap();
+
+    eprintln!("API key index: {} docs", docs.len());
+
+    let mut exact_failures = 0;
+    let mut mono_failures = 0;
+
+    for (key_idx, key) in keys.iter().enumerate() {
+        let expected: HashSet<usize> = key_in_docs[key_idx].iter().copied().collect();
+        if expected.is_empty() { continue; }
+
+        let d0 = collect_doc_addrs(&handle, key, 0);
+        let d1 = collect_doc_addrs(&handle, key, 1);
+
+        if d0.len() < expected.len() {
+            eprintln!("  [EXACT FAIL] key[{}] len={}: found {} expected >= {}",
+                key_idx, key.len(), d0.len(), expected.len());
+            exact_failures += 1;
+        }
+
+        let missing: Vec<_> = d0.difference(&d1).collect();
+        if !missing.is_empty() {
+            eprintln!("  [MONO FAIL] key[{}] len={}: d=0={} d=1={} missing={}",
+                key_idx, key.len(), d0.len(), d1.len(), missing.len());
+            mono_failures += 1;
+        }
+
+        // Typo test: change 1 char mid-key
+        if key.len() >= 12 {
+            let alpha_positions: Vec<usize> = key.char_indices()
+                .filter(|(_, c)| c.is_alphanumeric())
+                .map(|(i, _)| i)
+                .collect();
+            if alpha_positions.len() >= 6 {
+                let pos = alpha_positions[alpha_positions.len() / 2]; // mid-key
+                let mut typo: Vec<u8> = key.bytes().collect();
+                typo[pos] = if typo[pos] == b'X' { b'Z' } else { b'X' };
+                let typo_str = String::from_utf8(typo).unwrap();
+
+                let typo_d1 = collect_doc_addrs(&handle, &typo_str, 1);
+                let typo_missing: Vec<_> = d0.difference(&typo_d1).collect();
+                if !typo_missing.is_empty() {
+                    eprintln!("  [TYPO FAIL] key[{}] \"{}\" typo \"{}\" d=1: missing {} of {} d=0 docs",
+                        key_idx, &key[..20], &typo_str[..20], typo_missing.len(), d0.len());
+                    mono_failures += 1;
+                }
+            }
+        }
+    }
+
+    eprintln!("\nAPI key test summary: {} keys, {} exact failures, {} monotonicity failures",
+        keys.len(), exact_failures, mono_failures);
+    assert_eq!(exact_failures, 0, "Some API keys not found at d=0");
+    assert_eq!(mono_failures, 0, "Monotonicity violated for API keys");
+}
