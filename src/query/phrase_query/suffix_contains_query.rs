@@ -702,12 +702,14 @@ impl Scorer for SuffixContainsScorer {
         let (doc, tf) = self.candidates[self.cursor];
         let fieldnorm_id = self.fieldnorm_reader.fieldnorm_id(doc);
         let base_score = self.bm25_weight.score(fieldnorm_id, tf);
-        if let Some(&coverage) = self.coverage_boost.get(&doc) {
-            // Coverage-dominant scoring: coverage (0.0-1.0) scaled to dominate
-            // over BM25 (typically 0-50). This ensures results with fewer
-            // trigram misses always rank above results with more misses,
-            // with BM25 as tie-breaker within the same miss count.
-            coverage * 1000.0 + base_score
+        if let Some(&miss_penalty) = self.coverage_boost.get(&doc) {
+            // Miss-count scoring: miss_penalty is -(miss_count) as f32.
+            //   0 misses → 0 * 1000 + bm25 = bm25 (exact match tier)
+            //   1 miss   → -1000 + bm25 (1-edit tier)
+            //   3 misses → -3000 + bm25 (false positive tier)
+            // Exact matches and d=0 rank in the same tier (pure BM25).
+            // BM25 breaks ties within the same miss count.
+            miss_penalty * 1000.0 + base_score
         } else {
             base_score
         }

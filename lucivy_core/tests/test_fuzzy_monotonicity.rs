@@ -92,19 +92,23 @@ fn build_index(files: &[(String, String)], drain: bool) -> (LucivyHandle, ld_luc
         fields: vec![
             query::FieldDef { name: "content".into(), field_type: "text".into(),
                 stored: Some(true), indexed: Some(true), fast: None },
+            query::FieldDef { name: "path".into(), field_type: "text".into(),
+                stored: Some(true), indexed: Some(false), fast: None },
         ],
         ..Default::default()
     };
     let dir = StdFsDirectory::open(&tmp).unwrap();
     let handle = LucivyHandle::create(dir, &config).unwrap();
     let content_field = handle.field("content").unwrap();
+    let path_field = handle.field("path").unwrap();
 
     {
         let mut guard = handle.writer.lock().unwrap();
         let writer = guard.as_mut().unwrap();
-        for (i, (_, content)) in files.iter().enumerate() {
+        for (i, (path, content)) in files.iter().enumerate() {
             let mut doc = ld_lucivy::LucivyDocument::new();
             doc.add_text(content_field, content);
+            doc.add_text(path_field, path);
             writer.add_document(doc).unwrap();
             if (i + 1) % 200 == 0 { writer.commit().unwrap(); }
         }
@@ -206,13 +210,35 @@ fn test_monotonicity_real_repo() {
     // among the top results in d=1 (coverage boost should prioritize them).
     let ranking_queries = vec!["3db_val", "rag3db_value_destroy", "alue_dest", "query_result_is_success"];
     let mut ranking_failures = 0;
+    let searcher = handle.reader.searcher();
+    let content_field = handle.field("content").unwrap();
+    let path_field = handle.field("path").unwrap();
+
+    let get_path = |seg: u32, doc: u32| -> String {
+        let addr = ld_lucivy::DocAddress::new(seg, doc);
+        searcher.doc(addr).ok()
+            .and_then(|d: ld_lucivy::LucivyDocument| {
+                d.get_first(path_field).map(|v| {
+                    let o: ld_lucivy::schema::OwnedValue = v.into();
+                    match o { ld_lucivy::schema::OwnedValue::Str(s) => s, _ => String::new() }
+                })
+            })
+            .unwrap_or_else(|| format!("seg={}/doc={}", seg, doc))
+    };
 
     for query_text in &ranking_queries {
         let d0 = collect_doc_addrs(&handle, query_text, 0);
         if d0.is_empty() { continue; }
 
-        let ranked = search_ranked(&handle, query_text, 1, 100);
+        // Get ALL d=1 results (not just top 100)
+        let ranked = search_ranked(&handle, query_text, 1, 100_000);
         if ranked.is_empty() { continue; }
+
+        // Build score map for d=1
+        let d1_scores: std::collections::HashMap<(u32, u32), (f32, usize)> = ranked.iter()
+            .enumerate()
+            .map(|(rank, &(score, seg, doc))| ((seg, doc), (score, rank)))
+            .collect();
 
         // Check: all d=0 docs should appear in the top N results of d=1,
         // where N = 2 * d0.len() (generous margin).
@@ -231,11 +257,48 @@ fn test_monotonicity_real_repo() {
         } else {
             eprintln!("  [RANK FAIL] \"{}\": {} of {} d=0 docs NOT in top {} (total d=1={})",
                 query_text, not_in_top.len(), d0.len(), top_n, ranked.len());
-            // Show scores of top results vs d=0 docs
+            // Show top 5 results
             for &(score, seg, doc) in ranked.iter().take(5) {
                 let is_d0 = d0.contains(&(seg, doc));
-                eprintln!("    rank: seg={} doc={} score={:.4} {}", seg, doc, score,
-                    if is_d0 { "← d=0" } else { "" });
+                eprintln!("    top: seg={} doc={} score={:.4} {} | {}", seg, doc, score,
+                    if is_d0 { "← d=0" } else { "" }, get_path(seg, doc));
+            }
+            // Show each missing d=0 doc: its rank in d=1, score, and content snippet
+            eprintln!("    --- missing d=0 docs in d=1 ---");
+            for &&(seg, doc) in not_in_top.iter().take(3) {
+                let d1_info = d1_scores.get(&(seg, doc));
+                let path = get_path(seg, doc);
+                let doc_addr = ld_lucivy::DocAddress::new(seg, doc);
+                let content: String = searcher.doc(doc_addr).ok()
+                    .and_then(|d: ld_lucivy::LucivyDocument| {
+                        d.get_first(content_field).map(|v| {
+                            let o: ld_lucivy::schema::OwnedValue = v.into();
+                            match o { ld_lucivy::schema::OwnedValue::Str(s) => s, _ => String::new() }
+                        })
+                    })
+                    .unwrap_or_default();
+
+                // Find the query text in the content (case-insensitive)
+                let query_lower = query_text.to_lowercase();
+                let content_lower = content.to_lowercase();
+                let snippet = if let Some(pos) = content_lower.find(&query_lower) {
+                    let start = pos.saturating_sub(30);
+                    let end = (pos + query_text.len() + 30).min(content.len());
+                    let mut s = start; while s > 0 && !content.is_char_boundary(s) { s -= 1; }
+                    let mut e = end; while e < content.len() && !content.is_char_boundary(e) { e += 1; }
+                    format!("...{}...", content[s..e].replace('\n', "\\n"))
+                } else {
+                    format!("(query not found in content, len={})", content.len())
+                };
+
+                match d1_info {
+                    Some(&(score, rank)) => {
+                        eprintln!("    seg={} doc={} rank={} score={:.4} | {} | {}", seg, doc, rank, score, path, snippet);
+                    }
+                    None => {
+                        eprintln!("    seg={} doc={} NOT IN d=1! | {} | {}", seg, doc, path, snippet);
+                    }
+                }
             }
             ranking_failures += 1;
         }
@@ -510,4 +573,131 @@ fn test_fuzzy_long_api_keys() {
         keys.len(), exact_failures, mono_failures);
     assert_eq!(exact_failures, 0, "Some API keys not found at d=0");
     assert_eq!(mono_failures, 0, "Monotonicity violated for API keys");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 4. Diagnostic: per-trigram miss analysis on a real file
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_diag_miss_count() {
+    // Index a single file that contains "rag3db_value_destroy" exactly.
+    // Diagnose which trigrams the fuzzy pipeline misses.
+    let content = std::fs::read_to_string(
+        std::env::var("DIAG_FILE").unwrap_or_else(|_| {
+            let root = std::env::var("RAG3DB_ROOT")
+                .unwrap_or_else(|_| "/tmp/test_rag3db_clone".into());
+            format!("{}/test/c_api/query_result_test.cpp", root)
+        })
+    );
+    let content = match content {
+        Ok(c) => c,
+        Err(_) => { eprintln!("SKIP: file not found"); return; }
+    };
+
+    let query_text = std::env::var("DIAG_QUERY")
+        .unwrap_or_else(|_| "rag3db_value_destroy".into());
+
+    eprintln!("=== DIAG: query='{}' file_len={} ===", query_text, content.len());
+
+    // Build single-doc index
+    let tmp = std::path::Path::new("/tmp/test_diag_miss");
+    let _ = std::fs::remove_dir_all(tmp);
+    std::fs::create_dir_all(tmp).unwrap();
+
+    let config = SchemaConfig {
+        fields: vec![
+            query::FieldDef { name: "content".into(), field_type: "text".into(),
+                stored: Some(true), indexed: Some(true), fast: None },
+        ],
+        ..Default::default()
+    };
+    let dir = StdFsDirectory::open(tmp).unwrap();
+    let handle = LucivyHandle::create(dir, &config).unwrap();
+    let content_field = handle.field("content").unwrap();
+
+    {
+        let mut guard = handle.writer.lock().unwrap();
+        let writer = guard.as_mut().unwrap();
+        let mut doc = ld_lucivy::LucivyDocument::new();
+        doc.add_text(content_field, &content);
+        writer.add_document(doc).unwrap();
+        writer.commit().unwrap();
+    }
+    handle.reader.reload().unwrap();
+
+    let searcher = handle.reader.searcher();
+    eprintln!("Index: {} docs, {} segments", searcher.num_docs(), searcher.segment_readers().len());
+
+    // Call fuzzy_contains_diag directly on the segment reader
+    let seg_reader = &searcher.segment_readers()[0];
+    let sfx_data = seg_reader.sfx_file(content_field).expect("no sfx file");
+    let sfx_bytes = sfx_data.read_bytes().unwrap();
+    let sfx_reader = ld_lucivy::suffix_fst::file::SfxFileReader::open(sfx_bytes.as_ref()).unwrap();
+
+    let pr = ld_lucivy::query::build_resolver(seg_reader, content_field).unwrap();
+
+    let tt_bytes = seg_reader.sfx_index_file("termtexts", content_field)
+        .and_then(|fs| fs.read_bytes().ok())
+        .map(|b| b.as_ref().to_vec())
+        .expect("no termtexts file");
+    let tt_reader = ld_lucivy::suffix_fst::TermTextsReader::open(&tt_bytes)
+        .expect("cannot open termtexts");
+    let ord_to_term = |ord: u64| -> Option<String> { tt_reader.text(ord as u32).map(|s| s.to_string()) };
+
+    let diag_docs: HashSet<u32> = vec![0u32].into_iter().collect(); // doc 0 = our only doc
+
+    let (bitset, highlights, doc_coverage) = ld_lucivy::query::phrase_query::fuzzy_contains::fuzzy_contains_diag(
+        &query_text, 1, &sfx_reader, pr.as_ref(), &ord_to_term,
+        searcher.num_docs() as u32, &diag_docs,
+    ).unwrap();
+
+    eprintln!("\n=== RESULTS ===");
+    eprintln!("bitset has doc 0: {}", bitset.contains(0));
+    eprintln!("highlights for doc 0: {:?}", highlights.iter().filter(|(d, _, _)| *d == 0).collect::<Vec<_>>());
+    eprintln!("doc_coverage for doc 0: {:?}", doc_coverage.iter().filter(|(d, _)| *d == 0).collect::<Vec<_>>());
+
+    if let Some(&(_, miss_neg)) = doc_coverage.iter().find(|(d, _)| *d == 0) {
+        let miss = (-miss_neg) as u32;
+        eprintln!("miss_count = {}", miss);
+        if miss > 0 {
+            eprintln!("WARNING: doc has exact match but {} trigrams missed — see [diag] output above", miss);
+        }
+    }
+
+    // Dump: what tokens exist at positions around the expected match?
+    // Find byte offset of the query in the content to locate the right position range.
+    let query_lower = query_text.to_lowercase();
+    let content_lower = content.to_lowercase();
+    if let Some(byte_pos) = content_lower.find(&query_lower) {
+        eprintln!("\n=== TOKEN DUMP around byte {} (query at bytes {}-{}) ===",
+            byte_pos, byte_pos, byte_pos + query_text.len());
+
+        // Walk all ordinals in the FST and find those with postings at doc=0
+        // near the byte offset of the match.
+        let target_byte_start = byte_pos.saturating_sub(10) as u32;
+        let target_byte_end = (byte_pos + query_text.len() + 10) as u32;
+
+        // Iterate ordinals: the SFX FST has ordinals 0..N. Check each.
+        let mut found_at_pos = Vec::new();
+        let mut ord = 0u64;
+        loop {
+            let term = tt_reader.text(ord as u32);
+            if term.is_none() { break; }
+            let term_str = term.unwrap();
+
+            let entries = pr.resolve(ord);
+            for e in &entries {
+                if e.doc_id == 0 && e.byte_from >= target_byte_start && e.byte_from < target_byte_end {
+                    found_at_pos.push((e.position, e.byte_from, e.byte_to, ord, term_str.to_string()));
+                }
+            }
+            ord += 1;
+            if ord > 100_000 { break; } // safety
+        }
+        found_at_pos.sort_by_key(|&(pos, bf, _, _, _)| (pos, bf));
+        for (pos, bf, bt, ord, term) in &found_at_pos {
+            eprintln!("  pos={} byte=[{},{}] ord={} token='{}'", pos, bf, bt, ord, term);
+        }
+    }
 }

@@ -43,6 +43,43 @@ fn count_words(query: &str) -> usize {
         .count()
 }
 
+/// Compute boundary positions in the concatenated query.
+/// Returns positions where word boundaries fall in the concat string.
+/// "rag3db_value_destroy" → concat "rag3dbvaluedestroy" → boundaries at [6, 11]
+fn boundary_positions(query: &str) -> Vec<usize> {
+    let mut positions = Vec::new();
+    let mut concat_pos = 0usize;
+    for word in query.split(|c: char| !c.is_alphanumeric()) {
+        if word.is_empty() { continue; }
+        if concat_pos > 0 {
+            positions.push(concat_pos);
+        }
+        concat_pos += word.len();
+    }
+    positions
+}
+
+/// Mark which trigram indices are cross-boundary (span a word boundary).
+/// A trigram at position p with size n is boundary if it overlaps any boundary pos b:
+/// p < b && p + n > b  (i.e. starts before and ends after the boundary).
+fn boundary_trigram_indices(
+    query_positions: &[usize],
+    ngram_size: usize,
+    boundaries: &[usize],
+) -> HashSet<usize> {
+    let mut result = HashSet::new();
+    for (i, &pos) in query_positions.iter().enumerate() {
+        let end = pos + ngram_size;
+        for &b in boundaries {
+            if pos < b && end > b {
+                result.insert(i);
+                break;
+            }
+        }
+    }
+    result
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Brique 2 : generate_trigrams — sliding window on concatenated query
 // ─────────────────────────────────────────────────────────────────────
@@ -169,8 +206,8 @@ struct FuzzyMatch {
     doc_id: DocId,
     byte_from: u32,
     byte_to: u32,
-    /// Ratio of matched trigrams to total trigrams (0.0 - 1.0).
-    coverage: f32,
+    /// Number of unmatched trigrams (0 = perfect match).
+    miss_count: u32,
 }
 
 /// Find all matches in the hit dictionary using two-pointer on sorted positions.
@@ -186,6 +223,9 @@ fn find_matches(
     concat_len: usize,
     ngram_size: usize,
     total_ngrams: usize,
+    boundary_indices: &HashSet<usize>,
+    ngrams: &[String],
+    diag_docs: Option<&HashSet<DocId>>,
 ) -> Vec<FuzzyMatch> {
     let mut results = Vec::new();
 
@@ -198,10 +238,19 @@ fn find_matches(
 
         if flat.is_empty() { continue; }
 
-        // Two-pointer: expand right to accumulate tri_idx, retract left to tighten.
+        // Number of non-boundary trigrams = the denominator for miss_count.
+        let scorable_total = (0..total_ngrams)
+            .filter(|i| !boundary_indices.contains(i))
+            .count();
+
+        // Sliding window: expand right, retract left only when span exceeded.
+        // Track best match per zone (don't advance left on match — accumulate).
         let mut tri_counts: HashMap<usize, usize> = HashMap::new();
         let mut distinct = 0usize;
         let mut left = 0usize;
+        // Track the best (lowest miss_count) match seen in the current zone.
+        let mut zone_best: Option<(u32, u32, u32, usize, usize)> = None; // (hl_start, hl_end, miss, best_first_tri, best_last_tri)
+        let mut zone_start_pos = u32::MAX;
 
         for right in 0..flat.len() {
             // Add right hit
@@ -209,8 +258,15 @@ fn find_matches(
             if *count == 0 { distinct += 1; }
             *count += 1;
 
-            // Retract left while window is too wide
+            // Retract left only when window is too wide
             while flat[right].position.saturating_sub(flat[left].position) > max_span {
+                // Emit best match of the zone we're leaving
+                if let Some((hl_s, hl_e, miss, _, _)) = zone_best.take() {
+                    if diag_docs.map_or(false, |d| d.contains(&doc_id)) {
+                        eprintln!("[diag] find_matches doc={}: emit zone pos={} miss={}", doc_id, zone_start_pos, miss);
+                    }
+                    results.push(FuzzyMatch { doc_id, byte_from: hl_s, byte_to: hl_e, miss_count: miss });
+                }
                 let lc = tri_counts.get_mut(&flat[left].tri_idx).unwrap();
                 *lc -= 1;
                 if *lc == 0 { distinct -= 1; }
@@ -219,7 +275,7 @@ fn find_matches(
 
             // Check if we have enough
             if distinct >= threshold {
-                // Collect stats from the current window
+                // Collect stats from the full window
                 let mut min_bf = u32::MAX;
                 let mut max_bf: u32 = 0;
                 let mut best_first_tri = usize::MAX;
@@ -237,20 +293,28 @@ fn find_matches(
                 let remaining = concat_len.saturating_sub(query_positions[best_last_tri] + ngram_size);
                 let hl_end = max_bf + ngram_size as u32 + remaining as u32;
 
-                let coverage = distinct as f32 / total_ngrams.max(1) as f32;
-                results.push(FuzzyMatch {
-                    doc_id,
-                    byte_from: hl_start,
-                    byte_to: hl_end,
-                    coverage,
-                });
+                let matched_in_window: HashSet<usize> = (left..=right)
+                    .map(|i| flat[i].tri_idx)
+                    .collect();
+                let matched_non_boundary = matched_in_window.iter()
+                    .filter(|i| !boundary_indices.contains(i))
+                    .count();
+                let real_misses = scorable_total.saturating_sub(matched_non_boundary) as u32;
 
-                // Advance left past this match to find subsequent non-overlapping matches
-                let lc = tri_counts.get_mut(&flat[left].tri_idx).unwrap();
-                *lc -= 1;
-                if *lc == 0 { distinct -= 1; }
-                left += 1;
+                // Update zone best if this window is better
+                let is_better = zone_best.as_ref().map_or(true, |&(_, _, prev_miss, _, _)| real_misses < prev_miss);
+                if is_better {
+                    zone_start_pos = flat[left].position;
+                    zone_best = Some((hl_start, hl_end, real_misses, best_first_tri, best_last_tri));
+                }
             }
+        }
+        // Emit last zone
+        if let Some((hl_s, hl_e, miss, _, _)) = zone_best {
+            if diag_docs.map_or(false, |d| d.contains(&doc_id)) {
+                eprintln!("[diag] find_matches doc={}: emit final zone pos={} miss={}", doc_id, zone_start_pos, miss);
+            }
+            results.push(FuzzyMatch { doc_id, byte_from: hl_s, byte_to: hl_e, miss_count: miss });
         }
     }
 
@@ -346,7 +410,21 @@ pub fn fuzzy_contains(
     ord_to_term: &dyn Fn(u64) -> Option<String>,
     max_doc: DocId,
 ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>)> {
-    fuzzy_contains_inner(query_text, distance, sfx_reader, resolver, ord_to_term, max_doc, true)
+    fuzzy_contains_inner(query_text, distance, sfx_reader, resolver, ord_to_term, max_doc, true, None)
+}
+
+/// Same as fuzzy_contains but with per-doc diagnostics.
+/// When `diag_docs` is Some, prints detailed trigram resolution info for those docs.
+pub fn fuzzy_contains_diag(
+    query_text: &str,
+    distance: u8,
+    sfx_reader: &SfxFileReader,
+    resolver: &dyn PostingResolver,
+    ord_to_term: &dyn Fn(u64) -> Option<String>,
+    max_doc: DocId,
+    diag_docs: &HashSet<DocId>,
+) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>)> {
+    fuzzy_contains_inner(query_text, distance, sfx_reader, resolver, ord_to_term, max_doc, true, Some(diag_docs))
 }
 
 fn fuzzy_contains_inner(
@@ -357,6 +435,7 @@ fn fuzzy_contains_inner(
     ord_to_term: &dyn Fn(u64) -> Option<String>,
     max_doc: DocId,
     compute_coverage: bool,
+    diag_docs: Option<&HashSet<DocId>>,
 ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>)> {
     let _t_total = std::time::Instant::now();
 
@@ -387,6 +466,21 @@ fn fuzzy_contains_inner(
     // +distance for edit tolerance.
     let max_span = (num_words as u32).max(concat.len() as u32 / 4 + 1) + distance as u32;
 
+    // Identify which trigrams straddle word boundaries — these are expected
+    // to be unresolvable by contiguous falling walk, so missing them is not
+    // a real miss for scoring purposes.
+    let boundaries = boundary_positions(query_text);
+    let boundary_indices = boundary_trigram_indices(&query_positions, n, &boundaries);
+
+    let diag = diag_docs.is_some();
+    if diag {
+        let boundary_grams: Vec<(usize, &str)> = boundary_indices.iter()
+            .map(|&i| (i, ngrams[i].as_str()))
+            .collect();
+        eprintln!("[diag] query='{}' concat='{}' ngrams={:?} threshold={} max_span={} n={} boundary_trigrams={:?}",
+            query_text, concat, ngrams, threshold, max_span, n, boundary_grams);
+    }
+
     // Step 3: Resolve trigrams — selective by doc, rarest first.
     //
     // Phase A: FST walk + falling walk (no resolve) to estimate selectivity.
@@ -398,6 +492,9 @@ fn fuzzy_contains_inner(
         let fst_cands = literal_pipeline::fst_candidates(sfx_reader, gram);
         let ct_chains = literal_pipeline::cross_token_falling_walk(sfx_reader, gram, 0, ord_to_term);
         let score = fst_cands.len() + ct_chains.len();
+        if diag {
+            eprintln!("[diag] trigram[{}]='{}' fst_cands={} ct_chains={}", i, gram, fst_cands.len(), ct_chains.len());
+        }
         selectivity.push((i, score));
         fst_cands_per.push(fst_cands);
         ct_chains_per.push(ct_chains);
@@ -431,6 +528,19 @@ fn fuzzy_contains_inner(
             &ct_chains_per[gram_idx], &ngrams[gram_idx], resolver, ord_to_term, None,
         );
 
+        if let Some(target_docs) = diag_docs {
+            let single_in_target: Vec<_> = singles.iter()
+                .filter(|m| target_docs.contains(&m.doc_id))
+                .map(|m| (m.doc_id, m.position, m.byte_from, m.si))
+                .collect();
+            let cross_in_target: Vec<_> = crosses.iter()
+                .filter(|(m, _)| target_docs.contains(&m.doc_id))
+                .map(|(m, parts)| (m.doc_id, m.position, m.byte_from, m.si, parts.clone()))
+                .collect();
+            eprintln!("[diag] resolve B1 trigram[{}]='{}': singles={} crosses={} | target_singles={:?} target_crosses={:?}",
+                gram_idx, ngrams[gram_idx], singles.len(), crosses.len(), single_in_target, cross_in_target);
+        }
+
         let gram_docs: HashSet<DocId> = singles.iter().map(|m| m.doc_id)
             .chain(crosses.iter().map(|(m, _)| m.doc_id))
             .collect();
@@ -447,6 +557,9 @@ fn fuzzy_contains_inner(
     // B2: Resolve remaining with doc filter
     for &(gram_idx, _) in &selectivity {
         if !all_single_matches[gram_idx].is_empty() || !all_cross_matches[gram_idx].is_empty() {
+            if diag {
+                // Already resolved in B1, skip
+            }
             continue;
         }
 
@@ -460,6 +573,21 @@ fn fuzzy_contains_inner(
             &ct_chains_per[gram_idx], &ngrams[gram_idx], resolver, ord_to_term, filter_ref,
         );
 
+        if let Some(target_docs) = diag_docs {
+            let single_in_target: Vec<_> = singles.iter()
+                .filter(|m| target_docs.contains(&m.doc_id))
+                .map(|m| (m.doc_id, m.position, m.byte_from, m.si))
+                .collect();
+            let cross_in_target: Vec<_> = crosses.iter()
+                .filter(|(m, _)| target_docs.contains(&m.doc_id))
+                .map(|(m, parts)| (m.doc_id, m.position, m.byte_from, m.si, parts.clone()))
+                .collect();
+            eprintln!("[diag] resolve B2 trigram[{}]='{}': singles={} crosses={} filter={} | target_singles={:?} target_crosses={:?}",
+                gram_idx, ngrams[gram_idx], singles.len(), crosses.len(),
+                filter_ref.map_or(0, |f| f.len()),
+                single_in_target, cross_in_target);
+        }
+
         all_single_matches[gram_idx] = singles;
         all_cross_matches[gram_idx] = crosses;
     }
@@ -467,25 +595,58 @@ fn fuzzy_contains_inner(
     // Step 4: Build hit dictionary
     let hits_by_doc = build_hits_by_doc(&ngrams, &all_single_matches, &all_cross_matches);
 
+    // Diagnostic: per-doc trigram hit analysis
+    if let Some(target_docs) = diag_docs {
+        for &target_doc in target_docs {
+            if let Some(doc_hits) = hits_by_doc.get(&target_doc) {
+                let hit_trigrams: HashSet<usize> = doc_hits.values()
+                    .flat_map(|hits| hits.iter().map(|h| h.tri_idx))
+                    .collect();
+                let missed: Vec<(usize, &str)> = ngrams.iter().enumerate()
+                    .filter(|(i, _)| !hit_trigrams.contains(i))
+                    .map(|(i, g)| (i, g.as_str()))
+                    .collect();
+                eprintln!("[diag] doc={}: {}/{} trigrams hit, {} missed: {:?}",
+                    target_doc, hit_trigrams.len(), ngrams.len(), missed.len(), missed);
+                // Show positions for each hit trigram
+                for (pos, hits) in doc_hits {
+                    let tri_idxs: Vec<usize> = hits.iter().map(|h| h.tri_idx).collect();
+                    let grams: Vec<&str> = tri_idxs.iter().map(|&i| ngrams[i].as_str()).collect();
+                    eprintln!("[diag]   pos={}: trigrams={:?} ({:?}) byte_from={} parts={:?}",
+                        pos, tri_idxs, grams,
+                        hits[0].byte_from,
+                        hits.iter().map(|h| &h.token_parts).collect::<Vec<_>>());
+                }
+            } else {
+                eprintln!("[diag] doc={}: NOT in hits_by_doc (no trigram hits at all)", target_doc);
+            }
+        }
+    }
+
     // Step 5: Find matches by position anchoring
     let matches = find_matches(
         &hits_by_doc, threshold, max_span,
         &query_positions, concat.len(), n, ngrams.len(),
+        &boundary_indices, &ngrams, diag_docs,
     );
 
     // Step 6: Build result
     let mut doc_bitset = BitSet::with_max_value(max_doc);
     let mut highlights: Vec<(DocId, usize, usize)> = Vec::new();
 
-    // Build per-doc coverage: best (highest) coverage across all matches in the doc.
-    let mut best_coverage: HashMap<DocId, f32> = HashMap::new();
+    // Build per-doc miss count: minimum miss_count across all matches in the doc.
+    // Stored as negative float so the scorer can do `value * 1000 + bm25`:
+    //   0 misses → 0.0 * 1000 + bm25 = bm25 (same tier as exact d=0)
+    //   1 miss   → -1.0 * 1000 + bm25 = bm25 - 1000
+    //   3 misses → -3.0 * 1000 + bm25 = bm25 - 3000
+    let mut best_miss: HashMap<DocId, u32> = HashMap::new();
     for m in &matches {
         doc_bitset.insert(m.doc_id);
         highlights.push((m.doc_id, m.byte_from as usize, m.byte_to as usize));
         if compute_coverage {
-            let entry = best_coverage.entry(m.doc_id).or_insert(0.0);
-            if m.coverage > *entry {
-                *entry = m.coverage;
+            let entry = best_miss.entry(m.doc_id).or_insert(u32::MAX);
+            if m.miss_count < *entry {
+                *entry = m.miss_count;
             }
         }
     }
@@ -493,7 +654,9 @@ fn fuzzy_contains_inner(
     highlights.sort_by_key(|&(doc, bf, bt)| (doc, bf, bt));
     highlights.dedup();
 
-    let doc_coverage: Vec<(DocId, f32)> = best_coverage.into_iter().collect();
+    let doc_coverage: Vec<(DocId, f32)> = best_miss.into_iter()
+        .map(|(doc, miss)| (doc, -(miss as f32)))
+        .collect();
 
     let _total_ms = _t_total.elapsed().as_millis();
     {
