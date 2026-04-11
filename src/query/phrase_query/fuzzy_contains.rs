@@ -343,7 +343,13 @@ pub fn fuzzy_contains(
         return Ok((BitSet::with_max_value(max_doc), Vec::new()));
     }
 
-    let threshold = (ngrams.len() as i32 - n as i32 * distance as i32).max(2) as usize;
+    // Threshold: pigeonhole principle.
+    // - n*d trigrams can be broken by d edits
+    // - (n-1)*num_boundaries trigrams are broken by word boundaries
+    //   (cross-token falling walk with contiguous siblings only won't find them)
+    let num_boundaries = num_words.saturating_sub(1);
+    let broken_by_boundaries = (n as i32 - 1) * num_boundaries as i32;
+    let threshold = (ngrams.len() as i32 - n as i32 * distance as i32 - broken_by_boundaries).max(2) as usize;
     let max_span = num_words as u32 + distance as u32;
 
     // Step 3: Resolve trigrams — selective by doc, rarest first.
