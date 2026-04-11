@@ -177,43 +177,100 @@ impl LucivyHandle {
 **Avantages** : un seul chemin, même code que le sharding
 **Inconvénients** : overhead du DAG pour un single-shard (threads, scheduling)
 
-## Recommandation
+## Recommandation : Option D — forcer le DAG partout
 
-**Option A** (prescan automatique dans weight) est le meilleur compromis.
-Le prescan séquentiel est négligeable pour single-shard (un seul segment
-après merge, ou quelques segments). L'overhead est nul quand le cache est
-déjà peuplé (DAG path).
+L'Option D est la plus propre. Un seul chemin d'exécution pour tout le monde.
+Pas de "si prescan alors... sinon fallback...". Le DAG gère tout.
 
-Le restructuring nécessaire :
-1. `prescan_segments` prend `&mut self` → stocker le cache dans un `RefCell`
-   ou `Mutex` pour permettre l'appel depuis `weight()` qui est `&self`
-2. Ou : faire le prescan dans `weight()` en retournant un Weight qui contient
-   le cache (pas besoin de stocker dans le Query)
+L'overhead du DAG pour single-shard est négligeable :
+- Un seul segment → pas de parallélisme, juste un pipeline séquentiel
+- Le DAG c'est quelques nodes dans un graphe, pas de threads supplémentaires
+- Le prescan est fait une seule fois, résultat caché
 
-### Étape par étape
+### Plan d'implémentation
 
-1. Dans `RegexContinuationQuery::weight()` : si `regex_prescan_cache.is_none()`,
-   construire le cache inline pour tous les segments
-2. Passer le cache au `RegexContinuationWeight`
-3. Le scorer utilise toujours le fast path (cache dispo)
-4. Supprimer `run_regex_fallback` (plus de slow path)
-5. Même chose pour `SuffixContainsQuery`
+#### Étape 1 : `build_search_dag_single_shard()`
 
-### Impact sur les bindings
+Créer une variante du DAG pour single-shard dans `search_dag.rs`.
+Même structure que le DAG shardé mais avec un seul shard :
 
-Aucun changement dans les bindings. Le `weight()` fait le prescan
-automatiquement quand nécessaire. Les bindings continuent à faire
-`searcher.search()` directement.
+```rust
+pub fn build_search_dag_single_shard(
+    reader: &IndexReader,
+    schema: &Schema,
+    query_config: &QueryConfig,
+    top_k: usize,
+    highlight_sink: Option<Arc<HighlightSink>>,
+) -> Result<Dag> {
+    // 1 seul shard = le reader lui-même
+    // Même nodes : prescan → merge → build_weight → search → collect
+    // Pas de fan_out_merge, juste séquentiel
+}
+```
 
-### Impact sur les tests
+#### Étape 2 : modifier LucivyHandle.search()
 
-Les tests obtiennent l'IDF globalisé automatiquement. Le ranking test
-devrait passer sans modification.
+Remplacer le `searcher.search()` direct par le mini-DAG :
 
-## Code mort à supprimer après unification
+```rust
+impl LucivyHandle {
+    pub fn search(&self, config: &QueryConfig, top_k: usize, ...) -> Result<Vec<SearchResult>> {
+        let dag = build_search_dag_single_shard(
+            &self.reader, &self.schema, config, top_k, sink
+        )?;
+        execute_dag(&mut dag, None)?
+            .take_output("results")
+    }
+}
+```
 
-1. `fuzzy_contains_via_trigram()` — l'ancien pipeline DFA (plus appelé)
-2. `intersect_trigrams_with_threshold()` — plus utilisé par le fuzzy
-3. `run_regex_fallback()` — plus de slow path après unification
-4. Le code DFA dans la partie inline du scorer (lignes 1795-1855)
-5. Les variables `posmap_bytes`, `bytemap_bytes`, `sepmap_bytes` dans le scorer
+#### Étape 3 : modifier les bindings
+
+Tous les bindings utilisent `LucivyHandle` → ils héritent du DAG
+automatiquement. Le pattern `execute_top_docs(searcher, query, limit)`
+disparaît au profit de `handle.search(config, limit)`.
+
+Impact par binding :
+- CXX bridge : remplacer `execute_top_docs` par `handle.search()`
+- WASM emscripten : idem
+- WASM wasm-bindgen : idem
+- Node.js napi : idem
+- Python PyO3 : idem
+- C++ standalone : idem
+
+#### Étape 4 : supprimer les fallbacks
+
+- `run_regex_fallback()` : plus de slow path
+- `fuzzy_contains_via_trigram()` : l'ancien pipeline DFA
+- `intersect_trigrams_with_threshold()` : plus utilisé par le fuzzy
+- Le code DFA inline dans le scorer (lignes 1795-1855)
+- Les variables `posmap_bytes`, `bytemap_bytes`, `sepmap_bytes` dans le scorer
+
+#### Étape 5 : adapter les tests
+
+Les tests qui font `searcher.search()` directement passent par
+`handle.search()` (ou un helper qui construit le mini-DAG).
+Les tests de ranking bénéficient automatiquement de l'IDF global.
+
+### Risques
+
+1. **WASM** : le DAG utilise luciole qui dépend de threads. En WASM avec
+   SharedArrayBuffer, ça marche (déjà validé pour le commit thread). Mais
+   vérifier que le mini-DAG séquentiel ne trigger pas de threading inutile.
+
+2. **Performance** : le DAG ajoute de l'overhead de scheduling. Pour les
+   queries simples (term, phrase), le prescan est skippé (BranchNode).
+   Pour les queries SFX, le prescan est le gros du travail → l'overhead
+   du DAG est négligeable.
+
+3. **Backward compat** : les bindings qui exposent `searcher` directement
+   devront être mis à jour. Mais c'est interne, pas une API publique.
+
+### Ce que ça résout
+
+- IDF globalisé partout (pas juste ShardedHandle)
+- Coverage boost partout (pas juste DAG path)
+- Un seul chemin d'exécution à maintenir
+- Plus de fallback inline
+- Les tests de ranking passent automatiquement
+- Le playground/WASM a le même comportement que la prod
