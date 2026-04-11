@@ -367,7 +367,12 @@ fn fuzzy_contains_inner(
     let num_boundaries = num_words.saturating_sub(1);
     let broken_by_boundaries = (n as i32 - 1) * num_boundaries as i32;
     let threshold = (ngrams.len() as i32 - n as i32 * distance as i32 - broken_by_boundaries).max(2) as usize;
-    let max_span = num_words as u32 + distance as u32;
+    // max_span: maximum token position gap for a valid match.
+    // num_words covers the expected token count from the query structure.
+    // concat_len / 4 accounts for short tokens in the content that might
+    // split the query across more positions than expected.
+    // +distance for edit tolerance.
+    let max_span = (num_words as u32).max(concat.len() as u32 / 4 + 1) + distance as u32;
 
     // Step 3: Resolve trigrams — selective by doc, rarest first.
     //
