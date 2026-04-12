@@ -3,6 +3,8 @@
 //! All operations go through ShardedHandle (unified handle, even for 1 shard).
 //! Threading: emscripten pthreads + PROXY_TO_PTHREAD.
 
+mod opfs;
+
 // ── SharedArrayBuffer log ring buffer ─────────────────────────────
 
 use std::cell::UnsafeCell;
