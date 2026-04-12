@@ -146,6 +146,10 @@ export class LucivyIndex {
         return this._lucivy._call('rollback', { path: this.path });
     }
 
+    drainMerges() {
+        return this._lucivy._call('drainMerges', { path: this.path });
+    }
+
     search(query, options = {}) {
         return this._lucivy._call('search', {
             path: this.path,

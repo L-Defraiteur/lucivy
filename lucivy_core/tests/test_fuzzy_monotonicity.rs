@@ -701,3 +701,65 @@ fn test_diag_miss_count() {
         }
     }
 }
+
+#[test]
+fn test_camelcase_matched_by_underscore_query() {
+    // Verify: query "query_result_is_success" (with underscores) matches
+    // content "queryResult.isSuccess()" (CamelCase) in exact contains (d=0).
+    let tmp = std::path::Path::new("/tmp/test_camel_underscore");
+    let _ = std::fs::remove_dir_all(tmp);
+    std::fs::create_dir_all(tmp).unwrap();
+
+    let config = SchemaConfig {
+        fields: vec![
+            query::FieldDef { name: "content".into(), field_type: "text".into(),
+                stored: Some(true), indexed: Some(true), fast: None },
+        ],
+        ..Default::default()
+    };
+    let dir = StdFsDirectory::open(tmp).unwrap();
+    let handle = LucivyHandle::create(dir, &config).unwrap();
+    let f = handle.field("content").unwrap();
+
+    {
+        let mut guard = handle.writer.lock().unwrap();
+        let writer = guard.as_mut().unwrap();
+
+        // Doc 0: CamelCase variant
+        let mut doc = ld_lucivy::LucivyDocument::new();
+        doc.add_text(f, "let ok = queryResult.isSuccess();");
+        writer.add_document(doc).unwrap();
+
+        // Doc 1: underscore variant (exact match)
+        let mut doc = ld_lucivy::LucivyDocument::new();
+        doc.add_text(f, "bool ok = query_result_is_success(&res);");
+        writer.add_document(doc).unwrap();
+
+        // Doc 2: no match
+        let mut doc = ld_lucivy::LucivyDocument::new();
+        doc.add_text(f, "nothing relevant here at all");
+        writer.add_document(doc).unwrap();
+
+        writer.commit().unwrap();
+    }
+    handle.reader.reload().unwrap();
+
+    // d=0: exact contains "query_result_is_success"
+    let d0 = count_docs(&handle, "query_result_is_success", 0);
+    eprintln!("d=0 'query_result_is_success': {} docs", d0);
+
+    // d=1: fuzzy
+    let d1 = count_docs(&handle, "query_result_is_success", 1);
+    eprintln!("d=1 'query_result_is_success': {} docs", d1);
+
+    assert!(d0 >= 1, "underscore variant (doc 1) must match d=0");
+
+    // Also test: CamelCase query matches CamelCase content in d=0?
+    let d0_camel = count_docs(&handle, "queryResult.isSuccess", 0);
+    eprintln!("d=0 'queryResult.isSuccess': {} docs", d0_camel);
+
+    // And: underscore query matches CamelCase content?
+    eprintln!("d=0 'query_result_is_success': {} docs (does it find CamelCase?)", d0);
+
+    assert!(d1 >= d0, "d=1 must be superset of d=0");
+}

@@ -690,6 +690,8 @@ async function importFiles(fileList) {
       }
     }
     await userIndex.commit();
+    statusEl.textContent = `Merging segments...`;
+    await userIndex.drainMerges();
     userNumDocs = await userIndex.numDocs();
 
     tabUser.classList.remove('disabled');
@@ -959,6 +961,8 @@ async function cloneGitRepo() {
       }
     }
     await userIndex.commit();
+    statusEl.textContent = `Merging segments...`;
+    await userIndex.drainMerges();
     userNumDocs = await userIndex.numDocs();
 
     tabUser.classList.remove('disabled');

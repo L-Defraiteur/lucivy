@@ -65,6 +65,7 @@ emcc "$STATIC_LIB" \
         "_lucivy_commit_status_ptr",
         "_lucivy_commit_finish",
         "_lucivy_rollback",
+        "_lucivy_drain_merges",
         "_lucivy_export_dirty",
         "_lucivy_export_all",
         "_lucivy_search",

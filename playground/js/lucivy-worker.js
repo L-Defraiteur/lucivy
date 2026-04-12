@@ -388,6 +388,14 @@ self.onmessage = async (e) => {
                 break;
             }
 
+            case 'drainMerges': {
+                const ctx = getCtx(args.path);
+                const res = await callStr('lucivy_drain_merges', ctx);
+                checkResult(res);
+                result = true;
+                break;
+            }
+
             case 'search': {
                 const ctx = getCtx(args.path);
                 const queryJson = typeof args.query === 'string' && !args.query.startsWith('{')

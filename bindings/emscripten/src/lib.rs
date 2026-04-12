@@ -594,6 +594,30 @@ pub unsafe extern "C" fn lucivy_rollback(ctx: *mut LucivyContext) -> *const c_ch
     }
 }
 
+/// Merge all segments into one. Call after bulk import for best search perf.
+#[no_mangle]
+pub unsafe extern "C" fn lucivy_drain_merges(ctx: *mut LucivyContext) -> *const c_char {
+    let ctx = &*ctx;
+    let mut guard = match ctx.handle.writer.lock() {
+        Ok(w) => w,
+        Err(_) => return return_error("writer lock poisoned"),
+    };
+    let writer = match guard.as_mut() {
+        Some(w) => w,
+        None => return return_error("index is closed"),
+    };
+    match writer.drain_merges() {
+        Ok(_) => {
+            drop(guard);
+            if let Err(e) = ctx.handle.reader.reload() {
+                return return_error(&format!("reload after drain: {e}"));
+            }
+            return_str("ok".into())
+        }
+        Err(e) => return_error(&format!("drain_merges: {e}")),
+    }
+}
+
 // ── File export (for OPFS sync) ────────────────────────────────────────────
 
 /// Export dirty files as JSON: {"modified":[[name, base64], ...], "deleted":[name, ...]}
@@ -747,6 +771,10 @@ pub unsafe extern "C" fn lucivy_search(
     } else {
         None
     };
+
+    let searcher_pre = ctx.handle.reader.searcher();
+    rlog!("[search] {} segments, {} docs", searcher_pre.segment_readers().len(), searcher_pre.num_docs());
+    drop(searcher_pre);
 
     let top_docs = match ctx.handle.search(&query_config, limit as usize, highlight_sink.clone()) {
         Ok(d) => d,
