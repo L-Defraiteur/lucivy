@@ -49,9 +49,11 @@ emcc "$STATIC_LIB" \
     -sMODULARIZE=1 \
     -sEXPORT_NAME=createLucivy \
     -sSTACK_SIZE=2MB \
+    -sWASMFS \
     -sEXPORTED_FUNCTIONS='[
         "_lucivy_configure",
         "_lucivy_create",
+        "_lucivy_open",
         "_lucivy_open_begin",
         "_lucivy_import_file",
         "_lucivy_open_finish",
@@ -64,10 +66,7 @@ emcc "$STATIC_LIB" \
         "_lucivy_commit_async",
         "_lucivy_commit_status_ptr",
         "_lucivy_commit_finish",
-        "_lucivy_rollback",
         "_lucivy_drain_merges",
-        "_lucivy_export_dirty",
-        "_lucivy_export_all",
         "_lucivy_search",
         "_lucivy_search_filtered",
         "_lucivy_export_snapshot",

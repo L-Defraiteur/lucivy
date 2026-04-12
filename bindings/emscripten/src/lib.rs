@@ -2,8 +2,7 @@
 //!
 //! All operations go through ShardedHandle (unified handle, even for 1 shard).
 //! Threading: emscripten pthreads + PROXY_TO_PTHREAD.
-
-mod opfs;
+//! Storage: WASMFS + OPFS backend — std::fs → persistent OPFS, FsShardStorage as-is.
 
 // ── SharedArrayBuffer log ring buffer ─────────────────────────────
 
@@ -88,10 +87,40 @@ macro_rules! rlog {
     ($($arg:tt)*) => { rlog(&format!($($arg)*)) };
 }
 
+// ── WASMFS OPFS mount ─────────────────────────────────────────────
+// These are emscripten WASMFS C functions. Available when built with -sWASMFS.
+
+#[cfg(target_os = "emscripten")]
+extern "C" {
+    fn wasmfs_create_opfs_backend() -> i32; // returns backend_t
+    fn wasmfs_create_directory(path: *const c_char, mode: u32, backend: i32) -> i32;
+}
+
+/// Base path for all lucivy indexes in the OPFS-backed filesystem.
+const OPFS_BASE: &str = "/opfs/lucivy";
+
 #[no_mangle]
 pub extern "C" fn __main_argc_argv(_argc: i32, _argv: *const *const c_char) -> i32 {
     std::env::set_var("LUCIVY_SCHEDULER_THREADS", "4");
     rlog!("[lucivy-wasm] main() started, default scheduler_threads=4");
+
+    // Mount OPFS as filesystem backend (persistent across sessions).
+    #[cfg(target_os = "emscripten")]
+    {
+        unsafe {
+            let backend = wasmfs_create_opfs_backend();
+            let path = CString::new("/opfs").unwrap();
+            let ret = wasmfs_create_directory(path.as_ptr(), 0o777, backend);
+            if ret == 0 {
+                rlog!("[lucivy-wasm] OPFS mounted at /opfs");
+                // Create the base directory for indexes.
+                let _ = std::fs::create_dir_all(OPFS_BASE);
+            } else {
+                rlog!("[lucivy-wasm] WARNING: OPFS mount failed (ret={ret}), using in-memory FS");
+            }
+        }
+    }
+
     0
 }
 
@@ -141,7 +170,7 @@ use ld_lucivy::LucivyDocument;
 use lucivy_core::handle::NODE_ID_FIELD;
 use lucivy_core::query;
 use lucivy_core::snapshot;
-use lucivy_core::sharded_handle::{ShardedHandle, ShardStorage, RamShardStorage, ShardedSearchResult};
+use lucivy_core::sharded_handle::{ShardedHandle, ShardedSearchResult};
 
 // ── Context ──────────────────────────────────────────────────────────────
 
@@ -202,8 +231,8 @@ pub unsafe extern "C" fn lucivy_create(
     };
 
     let text_fields = extract_text_fields(&config);
-    let storage = RamShardStorage::new();
-    let handle = match ShardedHandle::create_with_storage(Box::new(storage), &config) {
+    let index_path = format!("{OPFS_BASE}/{path}");
+    let handle = match ShardedHandle::create(&index_path, &config) {
         Ok(h) => h,
         Err(e) => {
             rlog!("[create] error: {e}");
@@ -218,20 +247,47 @@ pub unsafe extern "C" fn lucivy_create(
     }))
 }
 
-/// Open: two-phase (begin → import files → finish).
-/// For non-sharded snapshots, files go into shard_0.
+/// Open an existing index from OPFS.
+/// The index must have been previously created with lucivy_create.
+#[no_mangle]
+pub unsafe extern "C" fn lucivy_open(path: *const c_char) -> *mut LucivyContext {
+    let path = str_from_ptr(path);
+    let index_path = format!("{OPFS_BASE}/{path}");
+
+    let handle = match ShardedHandle::open(&index_path) {
+        Ok(h) => h,
+        Err(e) => {
+            rlog!("[open] error: {e}");
+            return std::ptr::null_mut();
+        }
+    };
+
+    let text_fields = extract_text_fields(&handle.config);
+
+    Box::into_raw(Box::new(LucivyContext {
+        handle,
+        text_fields,
+        index_path,
+    }))
+}
+
+/// Legacy open: two-phase (begin → import files → finish).
+/// Kept for backward compat with non-OPFS workflows (e.g. drag-drop in playground).
+/// Files are written to the WASMFS filesystem, then opened as ShardedHandle.
 #[no_mangle]
 pub unsafe extern "C" fn lucivy_open_begin(path: *const c_char) -> *mut LucivyContext {
     let path = str_from_ptr(path);
+    let index_path = format!("{OPFS_BASE}/{path}");
+    // Create the shard_0 directory for file imports.
+    let shard_dir = format!("{index_path}/shard_0");
+    let _ = std::fs::create_dir_all(&shard_dir);
     Box::into_raw(Box::new(OpenContext {
-        storage: RamShardStorage::new(),
-        path: path.to_string(),
+        index_path,
     })) as *mut LucivyContext
 }
 
 struct OpenContext {
-    storage: RamShardStorage,
-    path: String,
+    index_path: String,
 }
 
 #[no_mangle]
@@ -242,15 +298,18 @@ pub unsafe extern "C" fn lucivy_import_file(
     len: usize,
 ) {
     if ctx.is_null() || name.is_null() || data.is_null() { return; }
-    let open_ctx = &mut *(ctx as *mut OpenContext);
+    let open_ctx = &*(ctx as *const OpenContext);
     let name = str_from_ptr(name);
     let bytes = std::slice::from_raw_parts(data, len);
 
-    // Root files go to storage root, shard files go to shard_0.
-    if name == "_shard_config.json" || name == "_shard_stats.bin" {
-        let _ = open_ctx.storage.write_root_file(name, bytes);
+    // Root files go at the index root, shard files go to shard_0/.
+    let file_path = if name == "_shard_config.json" || name == "_shard_stats.bin" {
+        format!("{}/{name}", open_ctx.index_path)
     } else {
-        open_ctx.storage.import_shard_file(0, name, bytes.to_vec());
+        format!("{}/shard_0/{name}", open_ctx.index_path)
+    };
+    if let Err(e) = std::fs::write(&file_path, bytes) {
+        rlog!("[import_file] write error {file_path}: {e}");
     }
 }
 
@@ -259,31 +318,21 @@ pub unsafe extern "C" fn lucivy_open_finish(ctx: *mut LucivyContext) -> *mut Luc
     if ctx.is_null() { return std::ptr::null_mut(); }
     let open_ctx = Box::from_raw(ctx as *mut OpenContext);
 
-    // If no _shard_config.json was imported, generate one from _config.json.
-    if !open_ctx.storage.root_file_exists("_shard_config.json") {
-        // Read _config.json from shard_0's files to get the schema.
-        match open_ctx.storage.read_root_file("_shard_config.json") {
-            Ok(_) => {} // already exists
-            Err(_) => {
-                // Try reading _config.json from shard_0 to generate shard config.
-                if let Ok(shard_handle) = open_ctx.storage.open_shard_handle(0) {
-                    if let Some(config) = &shard_handle.config {
-                        let mut shard_config = config.clone();
-                        shard_config.shards = Some(1);
-                        if let Ok(json) = serde_json::to_string(&shard_config) {
-                            let _ = open_ctx.storage.write_root_file(
-                                "_shard_config.json",
-                                json.as_bytes(),
-                            );
-                        }
-                    }
-                    drop(shard_handle);
+    // If no _shard_config.json, generate one from _config.json in shard_0.
+    let config_path = format!("{}/_shard_config.json", open_ctx.index_path);
+    if !std::path::Path::new(&config_path).exists() {
+        let shard_config_path = format!("{}/shard_0/_config.json", open_ctx.index_path);
+        if let Ok(data) = std::fs::read(&shard_config_path) {
+            if let Ok(mut config) = serde_json::from_slice::<query::SchemaConfig>(&data) {
+                config.shards = Some(1);
+                if let Ok(json) = serde_json::to_string(&config) {
+                    let _ = std::fs::write(&config_path, json.as_bytes());
                 }
             }
         }
     }
 
-    let handle = match ShardedHandle::open_with_storage(Box::new(open_ctx.storage)) {
+    let handle = match ShardedHandle::open(&open_ctx.index_path) {
         Ok(h) => h,
         Err(e) => {
             rlog!("[open_finish] error: {e}");
@@ -296,7 +345,7 @@ pub unsafe extern "C" fn lucivy_open_finish(ctx: *mut LucivyContext) -> *mut Luc
     Box::into_raw(Box::new(LucivyContext {
         handle,
         text_fields,
-        index_path: open_ctx.path,
+        index_path: open_ctx.index_path,
     }))
 }
 
@@ -503,53 +552,14 @@ pub unsafe extern "C" fn lucivy_import_snapshot(
     if data.is_null() || len == 0 { return std::ptr::null_mut(); }
     let path = str_from_ptr(path);
     let blob = std::slice::from_raw_parts(data, len);
+    let index_path = format!("{OPFS_BASE}/{path}");
+    let dest = std::path::Path::new(&index_path);
 
-    let mut snap = match snapshot::import_snapshot(blob) {
-        Ok(s) => s,
-        Err(e) => {
-            rlog!("[import_snapshot] error: {e}");
-            return std::ptr::null_mut();
-        }
-    };
-    if snap.indexes.is_empty() { return std::ptr::null_mut(); }
-
-    let storage = RamShardStorage::new();
-
-    if snap.is_sharded {
-        // Sharded snapshot: import root files + per-shard files.
-        for (name, data) in &snap.root_files {
-            let _ = storage.write_root_file(name, data);
-        }
-        for index in &snap.indexes {
-            // Parse shard_id from path (e.g. "shard_0" → 0).
-            let shard_id = index.path.strip_prefix("shard_")
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(0);
-            for (name, data) in &index.files {
-                storage.import_shard_file(shard_id, name, data.clone());
-            }
-        }
-    } else {
-        // Non-sharded: wrap in shard_0, generate _shard_config.json.
-        let imported = &snap.indexes[0];
-        for (name, data) in &imported.files {
-            storage.import_shard_file(0, name, data.clone());
-        }
-        // Generate shard config from _config.json.
-        if let Some((_, config_data)) = imported.files.iter().find(|(n, _)| n == "_config.json") {
-            if let Ok(mut config) = serde_json::from_slice::<query::SchemaConfig>(config_data) {
-                config.shards = Some(1);
-                if let Ok(json) = serde_json::to_string(&config) {
-                    let _ = storage.write_root_file("_shard_config.json", json.as_bytes());
-                }
-            }
-        }
-    }
-
-    let handle = match ShardedHandle::open_with_storage(Box::new(storage)) {
+    // Use the unified snapshot import (writes to filesystem, opens ShardedHandle).
+    let handle = match snapshot::import_from_snapshot(blob, dest) {
         Ok(h) => h,
         Err(e) => {
-            rlog!("[import_snapshot] open error: {e}");
+            rlog!("[import_snapshot] error: {e}");
             return std::ptr::null_mut();
         }
     };
@@ -559,7 +569,7 @@ pub unsafe extern "C" fn lucivy_import_snapshot(
     Box::into_raw(Box::new(LucivyContext {
         handle,
         text_fields,
-        index_path: path.to_string(),
+        index_path,
     }))
 }
 
