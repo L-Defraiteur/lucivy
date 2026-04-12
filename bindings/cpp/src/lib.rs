@@ -310,14 +310,14 @@ impl LucivyIndex {
 }
 
 fn lucivy_import_snapshot(data: &[u8], dest_path: &str) -> Result<Box<LucivyIndex>, String> {
-    let indexes = snapshot::import_snapshot(data)?;
-    if indexes.len() != 1 {
+    let snap = snapshot::import_snapshot(data)?;
+    if snap.indexes.len() != 1 {
         return Err(format!(
             "expected 1 index in snapshot, got {}",
-            indexes.len()
+            snap.indexes.len()
         ));
     }
-    let imported = &indexes[0];
+    let imported = &snap.indexes[0];
     write_imported_files(dest_path, &imported.files)?;
     lucivy_open(dest_path)
 }

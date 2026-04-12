@@ -714,12 +714,12 @@ pub unsafe extern "C" fn lucivy_import_snapshot(
     let path = str_from_ptr(path);
     let blob = std::slice::from_raw_parts(data, len);
 
-    let mut indexes = match snapshot::import_snapshot(blob) {
-        Ok(i) => i,
+    let mut snap = match snapshot::import_snapshot(blob) {
+        Ok(s) => s,
         Err(_) => return std::ptr::null_mut(),
     };
-    if indexes.is_empty() { return std::ptr::null_mut(); }
-    let imported = indexes.remove(0);
+    if snap.indexes.is_empty() { return std::ptr::null_mut(); }
+    let imported = snap.indexes.remove(0);
 
     let directory = MemoryDirectory::new();
     for (name, file_data) in &imported.files {

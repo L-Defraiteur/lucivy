@@ -444,17 +444,17 @@ impl Index {
     #[staticmethod]
     #[pyo3(signature = (data, dest_path=None))]
     fn import_snapshot(data: &[u8], dest_path: Option<&str>) -> PyResult<Self> {
-        let indexes = snapshot::import_snapshot(data)
+        let snap = snapshot::import_snapshot(data)
             .map_err(|e| PyValueError::new_err(e))?;
 
-        if indexes.len() != 1 {
+        if snap.indexes.len() != 1 {
             return Err(PyValueError::new_err(format!(
                 "expected 1 index in snapshot, got {}. Use lucivy.import_snapshots() for multi-index.",
-                indexes.len()
+                snap.indexes.len()
             )));
         }
 
-        let imported = &indexes[0];
+        let imported = &snap.indexes[0];
         let target_path = dest_path.unwrap_or(&imported.path);
 
         write_imported_files(target_path, &imported.files)?;
@@ -719,20 +719,20 @@ fn export_snapshots<'py>(py: Python<'py>, indexes: Vec<PyRef<'_, Index>>) -> PyR
 #[pyfunction]
 #[pyo3(signature = (data, dest_paths=None))]
 fn import_snapshots(data: &[u8], dest_paths: Option<Vec<String>>) -> PyResult<Vec<Index>> {
-    let indexes = snapshot::import_snapshot(data)
+    let snap = snapshot::import_snapshot(data)
         .map_err(|e| PyValueError::new_err(e))?;
 
     if let Some(ref paths) = dest_paths {
-        if paths.len() != indexes.len() {
+        if paths.len() != snap.indexes.len() {
             return Err(PyValueError::new_err(format!(
                 "dest_paths length ({}) doesn't match snapshot index count ({})",
-                paths.len(), indexes.len()
+                paths.len(), snap.indexes.len()
             )));
         }
     }
 
-    let mut result = Vec::with_capacity(indexes.len());
-    for (i, imported) in indexes.iter().enumerate() {
+    let mut result = Vec::with_capacity(snap.indexes.len());
+    for (i, imported) in snap.indexes.iter().enumerate() {
         let target = match &dest_paths {
             Some(paths) => paths[i].as_str(),
             None => &imported.path,

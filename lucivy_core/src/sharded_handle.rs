@@ -7,6 +7,7 @@
 //!
 //! WASM compatible: uses the actor system (persistent threads or cooperative).
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -575,22 +576,43 @@ fn execute_weight_on_shard(
     shard_id: usize,
     weight: &dyn Weight,
     top_k: usize,
+    filter: Option<Arc<HashSet<u64>>>,
 ) -> Result<Vec<(f32, DocAddress)>, String> {
     let searcher = handle.reader.searcher();
-    let collector = ld_lucivy::collector::TopDocs::with_limit(top_k).order_by_score();
-    collector.check_schema(searcher.schema())
-        .map_err(|e| format!("schema check shard_{shard_id}: {e}"))?;
     let segment_readers = searcher.segment_readers();
-    let mut fruits = Vec::with_capacity(segment_readers.len());
-    for (seg_ord, seg_reader) in segment_readers.iter().enumerate() {
-        let fruit = collector
-            .collect_segment(weight, seg_ord as u32, seg_reader)
-            .map_err(|e| format!("collect shard_{shard_id} seg_{seg_ord}: {e}"))?;
-        fruits.push(fruit);
+
+    if let Some(allowed_ids) = filter {
+        let inner = ld_lucivy::collector::TopDocs::with_limit(top_k).order_by_score();
+        let collector = ld_lucivy::collector::FilterCollector::new(
+            NODE_ID_FIELD.to_string(),
+            move |value: u64| allowed_ids.contains(&value),
+            inner,
+        );
+        let mut fruits = Vec::with_capacity(segment_readers.len());
+        for (seg_ord, seg_reader) in segment_readers.iter().enumerate() {
+            let fruit = collector
+                .collect_segment(weight, seg_ord as u32, seg_reader)
+                .map_err(|e| format!("collect shard_{shard_id} seg_{seg_ord}: {e}"))?;
+            fruits.push(fruit);
+        }
+        collector
+            .merge_fruits(fruits)
+            .map_err(|e| format!("merge shard_{shard_id}: {e}"))
+    } else {
+        let collector = ld_lucivy::collector::TopDocs::with_limit(top_k).order_by_score();
+        collector.check_schema(searcher.schema())
+            .map_err(|e| format!("schema check shard_{shard_id}: {e}"))?;
+        let mut fruits = Vec::with_capacity(segment_readers.len());
+        for (seg_ord, seg_reader) in segment_readers.iter().enumerate() {
+            let fruit = collector
+                .collect_segment(weight, seg_ord as u32, seg_reader)
+                .map_err(|e| format!("collect shard_{shard_id} seg_{seg_ord}: {e}"))?;
+            fruits.push(fruit);
+        }
+        collector
+            .merge_fruits(fruits)
+            .map_err(|e| format!("merge shard_{shard_id}: {e}"))
     }
-    collector
-        .merge_fruits(fruits)
-        .map_err(|e| format!("merge shard_{shard_id}: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -602,6 +624,7 @@ pub(crate) enum ShardMsg {
     Search {
         weight: Arc<dyn Weight>,
         top_k: usize,
+        filter: Option<Arc<HashSet<u64>>>,
         reply: luciole::Reply<Result<Vec<(f32, DocAddress)>, String>>,
     },
     Insert {
@@ -637,9 +660,9 @@ impl luciole::Actor for ShardActor {
 
     fn handle(&mut self, msg: ShardMsg) -> ActorStatus {
         match msg {
-            ShardMsg::Search { weight, top_k, reply } => {
+            ShardMsg::Search { weight, top_k, filter, reply } => {
                 let result = execute_weight_on_shard(
-                    &self.handle, self.shard_id, weight.as_ref(), top_k,
+                    &self.handle, self.shard_id, weight.as_ref(), top_k, filter,
                 );
                 reply.send(result);
             }
@@ -861,7 +884,7 @@ fn create_shard_actor(shard_id: usize, handle: Arc<LucivyHandle>) -> GenericActo
                 .map(|w| *w);
 
             let result = match weight {
-                Some(w) => execute_weight_on_shard(handle, shard_id, w.as_ref(), msg.top_k),
+                Some(w) => execute_weight_on_shard(handle, shard_id, w.as_ref(), msg.top_k, None),
                 None => Err("search: no Weight in envelope.local".into()),
             };
 
@@ -1393,6 +1416,27 @@ impl ShardedHandle {
         top_k: usize,
         highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
     ) -> Result<Vec<ShardedSearchResult>, String> {
+        self.search_internal(query_config, top_k, highlight_sink, None)
+    }
+
+    /// Search with node_id filter (only return docs whose _node_id is in allowed_ids).
+    pub fn search_filtered(
+        &self,
+        query_config: &QueryConfig,
+        top_k: usize,
+        highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
+        allowed_ids: HashSet<u64>,
+    ) -> Result<Vec<ShardedSearchResult>, String> {
+        self.search_internal(query_config, top_k, highlight_sink, Some(Arc::new(allowed_ids)))
+    }
+
+    fn search_internal(
+        &self,
+        query_config: &QueryConfig,
+        top_k: usize,
+        highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
+        filter: Option<Arc<HashSet<u64>>>,
+    ) -> Result<Vec<ShardedSearchResult>, String> {
         let mut dag = crate::search_dag::build_search_dag(
             &self.shards,
             &self.shard_pool,
@@ -1401,14 +1445,14 @@ impl ShardedHandle {
             query_config,
             top_k,
             highlight_sink,
+            filter,
         )?;
 
         let mut result = luciole::execute_dag(&mut dag, None)
             .map_err(|e| format!("search DAG: {e}"))?;
 
-        // Extract results from the merge node's leaf output
-        result.take_output::<Vec<ShardedSearchResult>>("merge", "results")
-            .ok_or_else(|| "search DAG: no results from merge node".to_string())
+        result.take_output::<Vec<ShardedSearchResult>>("output", "results")
+            .ok_or_else(|| "search DAG: no results from output node".to_string())
     }
 
     // ── Distributed search support ──────────────────────────────────────

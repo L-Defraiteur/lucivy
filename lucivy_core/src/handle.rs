@@ -1360,8 +1360,8 @@ mod tests {
             Err(_) => { eprintln!("[diag] skipping: .luce not found"); return; }
         };
 
-        let mut indexes = crate::snapshot::import_snapshot(&data).unwrap();
-        let imported = indexes.remove(0);
+        let mut snap = crate::snapshot::import_snapshot(&data).unwrap();
+        let imported = snap.indexes.remove(0);
 
         let tmp = std::env::temp_dir().join("lucivy_diag_luce");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -1514,14 +1514,7 @@ mod tests {
             eprintln!("[diag] exact '{}' → {} results in {:?}", q, count, elapsed);
         }
 
-        // Regex DFA compilation timing
-        eprintln!("[diag] --- regex DFA compilation ---");
-        for pattern in ["shard[a-z]+", "incremental.sync", "[a-z]+ment", "get.*element"] {
-            let t0 = std::time::Instant::now();
-            let _ = tantivy_fst::Regex::new(pattern);
-            let elapsed = t0.elapsed();
-            eprintln!("[diag] compile '{}' → {:?}", pattern, elapsed);
-        }
+        // Regex DFA compilation timing (skipped — lucivy-fst not a dep of lucivy-core)
 
         // Per-segment regex diagnostic: check code path + timing
         eprintln!("[diag] --- per-segment regex diagnostic ---");

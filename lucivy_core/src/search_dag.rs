@@ -9,7 +9,7 @@
 //! Prescan nodes run SFX walks (contains/startsWith) and regex walks in
 //! parallel (one per shard) for globally consistent BM25 scoring.
 
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
 
 use luciole::node::{Node, NodeContext, PortDef};
@@ -350,21 +350,30 @@ pub(crate) struct SearchShardNode {
     shard_pool: luciole::Pool<ShardMsg>,
     shard_id: usize,
     top_k: usize,
+    filter: Option<Arc<HashSet<u64>>>,
 }
 
 impl SearchShardNode {
     pub fn new(shard_pool: luciole::Pool<ShardMsg>, shard_id: usize, top_k: usize) -> Self {
-        Self { shard_pool, shard_id, top_k }
+        Self { shard_pool, shard_id, top_k, filter: None }
+    }
+
+    pub fn with_filter(mut self, filter: Arc<HashSet<u64>>) -> Self {
+        self.filter = Some(filter);
+        self
     }
 }
 
 impl Node for SearchShardNode {
     fn node_type(&self) -> &'static str { "search_shard" }
     fn inputs(&self) -> Vec<PortDef> {
-        vec![PortDef::required("weight", PortType::of::<Arc<dyn Weight>>())]
+        vec![
+            PortDef::required("weight", PortType::of::<Arc<dyn Weight>>()),
+            PortDef::optional("trigger", PortType::Trigger),
+        ]
     }
     fn outputs(&self) -> Vec<PortDef> {
-        vec![PortDef::required("hits", PortType::of::<Vec<(usize, f32, DocAddress)>>())]
+        vec![PortDef::required("hits", PortType::of::<Vec<ShardedSearchResult>>())]
     }
     fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
         let weight = ctx.input("weight")
@@ -373,18 +382,21 @@ impl Node for SearchShardNode {
             .ok_or("wrong weight type")?
             .clone();
 
+        let filter = self.filter.clone();
         let result = self.shard_pool.worker(self.shard_id).request(
-            |r| ShardMsg::Search { weight, top_k: self.top_k, reply: r },
+            |r| ShardMsg::Search { weight, top_k: self.top_k, filter, reply: r },
             "search_shard",
         ).map_err(|e| format!("shard_{} request: {e}", self.shard_id))?;
 
         let hits = result.map_err(|e| format!("shard_{}: {e}", self.shard_id))?;
-        let tagged: Vec<(usize, f32, DocAddress)> = hits.into_iter()
-            .map(|(score, addr)| (self.shard_id, score, addr))
+        let results: Vec<ShardedSearchResult> = hits.into_iter()
+            .map(|(score, addr)| ShardedSearchResult {
+                score, shard_id: self.shard_id, doc_address: addr,
+            })
             .collect();
 
-        ctx.metric("hits", tagged.len() as f64);
-        ctx.set_output("hits", PortValue::new(tagged));
+        ctx.metric("hits", results.len() as f64);
+        ctx.set_output("hits", PortValue::new(results));
         Ok(())
     }
 }
@@ -410,7 +422,7 @@ impl Node for MergeResultsNode {
         (0..self.num_shards)
             .map(|i| PortDef::required(
                 Box::leak(format!("hits_{}", i).into_boxed_str()),
-                PortType::of::<Vec<(usize, f32, DocAddress)>>(),
+                PortType::of::<Vec<ShardedSearchResult>>(),
             ))
             .collect()
     }
@@ -423,9 +435,11 @@ impl Node for MergeResultsNode {
         for i in 0..self.num_shards {
             let port = format!("hits_{}", i);
             if let Some(value) = ctx.take_input(&port) {
-                if let Some(hits) = value.take::<Vec<(usize, f32, DocAddress)>>() {
-                    for (shard_id, score, doc_addr) in hits {
-                        heap.push(ScoredEntry { score, shard_id, doc_address: doc_addr });
+                if let Some(hits) = value.take::<Vec<ShardedSearchResult>>() {
+                    for r in hits {
+                        heap.push(ScoredEntry {
+                            score: r.score, shard_id: r.shard_id, doc_address: r.doc_address,
+                        });
                         if heap.len() > self.top_k { heap.pop(); }
                     }
                 }
@@ -448,6 +462,28 @@ impl Node for MergeResultsNode {
 }
 
 // ---------------------------------------------------------------------------
+// OutputNode — convergence point for single/multi shard results
+// ---------------------------------------------------------------------------
+
+pub(crate) struct OutputNode;
+
+impl Node for OutputNode {
+    fn node_type(&self) -> &'static str { "output" }
+    fn inputs(&self) -> Vec<PortDef> {
+        vec![PortDef::required("results", PortType::of::<Vec<ShardedSearchResult>>())]
+    }
+    fn outputs(&self) -> Vec<PortDef> {
+        vec![PortDef::required("results", PortType::of::<Vec<ShardedSearchResult>>())]
+    }
+    fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+        if let Some(value) = ctx.take_input("results") {
+            ctx.set_output("results", value);
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // build_search_dag — factory
 // ---------------------------------------------------------------------------
 
@@ -459,12 +495,13 @@ pub(crate) fn build_search_dag(
     query_config: &QueryConfig,
     top_k: usize,
     highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
+    filter: Option<Arc<HashSet<u64>>>,
 ) -> Result<Dag, String> {
     let mut dag = Dag::new();
     let num_shards = shards.len();
+    let is_multi = num_shards > 1;
 
     // Build the query once BEFORE the DAG — avoids DFA/regex compilation inside the DAG.
-    // Same query is used for prescan params extraction AND weight compilation.
     let query = crate::query::build_query(
         query_config, schema, &shards[0].index, highlight_sink,
     )?;
@@ -482,7 +519,11 @@ pub(crate) fn build_search_dag(
     dag.add_node("needs_prescan", luciole::BranchNode(move || needs_prescan));
     dag.connect("flush", "done", "needs_prescan", "trigger")?;
 
-    // "then" path: prescan_0..N ∥ → merge_prescan → build_weight
+    // ── Prescan path ───────────────────────────────────────────────────
+    //
+    // N>1: prescan_0..N ∥ → merge_prescan → build_weight
+    // N=1: prescan_0 ──────────────────────→ build_weight  (no merge)
+
     for i in 0..num_shards {
         let node_name = format!("prescan_{i}");
         dag.add_node(&node_name, PrescanShardNode::new(
@@ -493,38 +534,49 @@ pub(crate) fn build_search_dag(
         dag.connect("needs_prescan", "then", &node_name, "trigger")?;
     }
 
-    dag.add_node("merge_prescan", MergePrescanNode::new(num_shards));
-    for i in 0..num_shards {
-        dag.connect(
-            &format!("prescan_{i}"), "prescan",
-            "merge_prescan", &format!("prescan_{i}"),
-        )?;
-    }
-
-    // build_weight: receives prescan from "then" path OR trigger from "else" path
-    dag.add_node("build_weight", BuildWeightNode::new(
-        shards.to_vec(),
-        query,
-    ));
-    dag.connect("merge_prescan", "merged", "build_weight", "prescan")?;
+    dag.add_node("build_weight", BuildWeightNode::new(shards.to_vec(), query));
     dag.connect("needs_prescan", "else", "build_weight", "trigger")?;
 
-    // build_weight → search_0..N ∥ (parallel search per shard)
+    if is_multi {
+        dag.add_node("merge_prescan", MergePrescanNode::new(num_shards));
+        for i in 0..num_shards {
+            dag.connect(
+                &format!("prescan_{i}"), "prescan",
+                "merge_prescan", &format!("prescan_{i}"),
+            )?;
+        }
+        dag.connect("merge_prescan", "merged", "build_weight", "prescan")?;
+    } else {
+        dag.connect("prescan_0", "prescan", "build_weight", "prescan")?;
+    }
+
+    // ── Search path ────────────────────────────────────────────────────
+    //
+    // N>1: search_0..N ∥ → merge_results → output
+    // N=1: search_0 ─────────────────────→ output  (no merge)
+
     for i in 0..num_shards {
-        dag.add_node(
-            &format!("search_{i}"),
-            SearchShardNode::new(shard_pool.clone(), i, top_k),
-        );
+        let mut node = SearchShardNode::new(shard_pool.clone(), i, top_k);
+        if let Some(ref f) = filter {
+            node = node.with_filter(Arc::clone(f));
+        }
+        dag.add_node(&format!("search_{i}"), node);
         dag.connect("build_weight", "weight", &format!("search_{i}"), "weight")?;
     }
 
-    // search_0..N → merge_results
-    dag.add_node("merge", MergeResultsNode::new(num_shards, top_k));
-    for i in 0..num_shards {
-        dag.connect(
-            &format!("search_{i}"), "hits",
-            "merge", &format!("hits_{i}"),
-        )?;
+    dag.add_node("output", OutputNode);
+
+    if is_multi {
+        dag.add_node("merge", MergeResultsNode::new(num_shards, top_k));
+        for i in 0..num_shards {
+            dag.connect(
+                &format!("search_{i}"), "hits",
+                "merge", &format!("hits_{i}"),
+            )?;
+        }
+        dag.connect("merge", "results", "output", "results")?;
+    } else {
+        dag.connect("search_0", "hits", "output", "results")?;
     }
 
     Ok(dag)

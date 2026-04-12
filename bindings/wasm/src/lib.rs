@@ -277,12 +277,12 @@ impl Index {
     /// `path`: the logical path for the imported index.
     #[wasm_bindgen(js_name = "importSnapshot")]
     pub fn import_snapshot(data: &[u8], path: &str) -> Result<Index, JsError> {
-        let mut indexes = snapshot::import_snapshot(data)
+        let mut snap = snapshot::import_snapshot(data)
             .map_err(|e| JsError::new(&e))?;
-        if indexes.is_empty() {
+        if snap.indexes.is_empty() {
             return Err(JsError::new("snapshot contains no indexes"));
         }
-        let imported = indexes.remove(0);
+        let imported = snap.indexes.remove(0);
 
         let directory = MemoryDirectory::new();
         for (name, file_data) in &imported.files {

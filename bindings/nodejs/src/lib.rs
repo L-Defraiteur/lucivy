@@ -328,17 +328,17 @@ impl Index {
     /// The snapshot must contain exactly one index.
     #[napi(factory)]
     pub fn import_snapshot(data: Buffer, dest_path: Option<String>) -> Result<Self> {
-        let indexes = snapshot::import_snapshot(&data)
+        let snap = snapshot::import_snapshot(&data)
             .map_err(|e| Error::from_reason(e))?;
 
-        if indexes.len() != 1 {
+        if snap.indexes.len() != 1 {
             return Err(Error::from_reason(format!(
                 "expected 1 index in snapshot, got {}",
-                indexes.len()
+                snap.indexes.len()
             )));
         }
 
-        let imported = &indexes[0];
+        let imported = &snap.indexes[0];
         let target = dest_path.as_deref().unwrap_or(&imported.path);
 
         write_imported_files(target, &imported.files)?;
