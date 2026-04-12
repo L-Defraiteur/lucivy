@@ -24,6 +24,7 @@ pub use fan_out::MergeNode;
 pub use gate::GateNode;
 pub use scatter::ScatterResults;
 pub mod stream_dag;
+pub mod async_executor;
 
 pub use actor_state::ActorState;
 pub use dag::{Dag, DagEdge};
@@ -42,6 +43,7 @@ pub use runtime::{display_progress, execute_dag, execute_dag_with_checkpoint, su
 pub use scheduler::{ActorId, Scheduler, SchedulerHandle};
 pub use scope::{Drainable, Scope};
 pub use stream_dag::StreamDag;
+pub use async_executor::{AsyncScope, FutureHandle};
 
 use std::task::Poll;
 

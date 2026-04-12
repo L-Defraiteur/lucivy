@@ -273,7 +273,7 @@ impl<A: Actor> AnyActor for ActorWrapper<A> {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
-pub(super) struct SchedulerNotifier {
+pub(crate) struct SchedulerNotifier {
     actor_id: ActorId,
     shared: Arc<SharedState>,
 }

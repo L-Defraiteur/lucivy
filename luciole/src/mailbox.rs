@@ -41,11 +41,11 @@ pub struct ActorRef<M> {
 /// Le scheduler remet `is_idle = true` quand l'acteur passe idle.
 /// L'ActorRef le passe à `false` (swap) pour savoir s'il doit wake.
 pub struct WakeHandle {
-    pub(super) notifier: SchedulerNotifier,
-    pub(super) is_idle: AtomicBool,
-    pub(super) events: Arc<EventBus<SchedulerEvent>>,
+    pub(crate) notifier: SchedulerNotifier,
+    pub(crate) is_idle: AtomicBool,
+    pub(crate) events: Arc<EventBus<SchedulerEvent>>,
     /// Nom de l'acteur — copié au spawn, zero-lock dans send().
-    pub(super) actor_name: &'static str,
+    pub(crate) actor_name: &'static str,
 }
 
 // Manual Clone impl — don't require M: Clone (crossbeam Sender is Clone for any M).
@@ -96,6 +96,11 @@ impl<M> ActorRef<M> {
         self.send(make_msg(tx)).map_err(|_| "actor disconnected".to_string())?;
         let scheduler = crate::scheduler::global_scheduler();
         Ok(rx.wait_cooperative_named(label, || scheduler.run_one_step()))
+    }
+
+    /// Access the wake handle (for async executor waker integration).
+    pub(crate) fn wake_handle(&self) -> Option<&Arc<WakeHandle>> {
+        self.notifier.as_ref()
     }
 
     pub fn try_send(&self, msg: M) -> Result<(), channel::TrySendError<M>> {
