@@ -17,6 +17,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::{Context, Poll, Wake};
 
 use crate::mailbox::{mailbox, ActorRef, Mailbox};
@@ -236,6 +237,98 @@ impl<T: Send + 'static> FutureHandle<T> {
     }
 }
 
+// ── SignalFuture — poll an AtomicU32 shared with external code ──────
+
+/// A Future that completes when an external signal is set.
+///
+/// Used to bridge async operations from JS (Promises), OS, or other threads.
+/// The signal is a shared AtomicU32:
+/// - 0 = pending
+/// - 1 = completed OK
+/// - 2 = completed with error
+///
+/// For JS bridge: Rust creates the signal, passes the pointer to JS via FFI,
+/// JS sets it to 1 when the Promise resolves. The AsyncActor re-polls and
+/// the future completes.
+pub struct SignalFuture {
+    signal: Arc<AtomicU32>,
+}
+
+/// Status values for SignalFuture.
+pub const SIGNAL_PENDING: u32 = 0;
+pub const SIGNAL_OK: u32 = 1;
+pub const SIGNAL_ERROR: u32 = 2;
+
+impl SignalFuture {
+    /// Create a new pending signal future.
+    /// Returns (future, signal_ptr) — pass signal_ptr to the external code
+    /// that will complete the operation.
+    pub fn new() -> (Self, *const AtomicU32) {
+        let signal = Arc::new(AtomicU32::new(SIGNAL_PENDING));
+        let ptr = Arc::as_ptr(&signal);
+        (Self { signal }, ptr)
+    }
+
+    /// Create from an existing shared signal.
+    pub fn from_signal(signal: Arc<AtomicU32>) -> Self {
+        Self { signal }
+    }
+
+    /// Get a raw pointer to the signal (for FFI).
+    pub fn signal_ptr(&self) -> *const AtomicU32 {
+        Arc::as_ptr(&self.signal)
+    }
+}
+
+impl Future for SignalFuture {
+    type Output = Result<(), ()>;
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.signal.load(Ordering::Acquire) {
+            SIGNAL_PENDING => Poll::Pending,
+            SIGNAL_OK => Poll::Ready(Ok(())),
+            _ => Poll::Ready(Err(())),
+        }
+    }
+}
+
+/// A SignalFuture that also carries result data (for reads).
+///
+/// The external code writes data into a buffer, then sets the signal.
+/// On completion, the future takes ownership of the data.
+pub struct SignalDataFuture {
+    signal: Arc<AtomicU32>,
+    /// Pointer to the result data (set by external code before signaling).
+    data_ptr: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+}
+
+impl SignalDataFuture {
+    /// Create a new pending data future.
+    /// Returns (future, signal_ptr, data_setter).
+    /// External code should: set data via data_setter, then signal.
+    pub fn new() -> (Self, *const AtomicU32, Arc<std::sync::Mutex<Option<Vec<u8>>>>) {
+        let signal = Arc::new(AtomicU32::new(SIGNAL_PENDING));
+        let data = Arc::new(std::sync::Mutex::new(None));
+        let ptr = Arc::as_ptr(&signal);
+        (Self { signal, data_ptr: data.clone() }, ptr, data)
+    }
+}
+
+impl Future for SignalDataFuture {
+    type Output = Result<Vec<u8>, ()>;
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.signal.load(Ordering::Acquire) {
+            SIGNAL_PENDING => Poll::Pending,
+            SIGNAL_OK => {
+                let data = self.data_ptr.lock().unwrap().take().unwrap_or_default();
+                Poll::Ready(Ok(data))
+            }
+            _ => Poll::Ready(Err(())),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +364,40 @@ mod tests {
         let h2 = scope.spawn(async { 20 });
         let h3 = scope.spawn(async { 30 });
         assert_eq!(h1.wait() + h2.wait() + h3.wait(), 60);
+    }
+
+    #[test]
+    fn test_signal_future() {
+        let scope = AsyncScope::new(Priority::Idle);
+        let signal = Arc::new(AtomicU32::new(SIGNAL_PENDING));
+        let signal2 = signal.clone();
+
+        let handle = scope.spawn(SignalFuture::from_signal(signal.clone()));
+
+        // Signal not set yet — spawn a thread to set it.
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            signal2.store(SIGNAL_OK, Ordering::Release);
+        });
+
+        let result = handle.wait();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_signal_future_error() {
+        let scope = AsyncScope::new(Priority::Idle);
+        let signal = Arc::new(AtomicU32::new(SIGNAL_PENDING));
+        let signal2 = signal.clone();
+
+        let handle = scope.spawn(SignalFuture::from_signal(signal.clone()));
+
+        std::thread::spawn(move || {
+            signal2.store(SIGNAL_ERROR, Ordering::Release);
+        });
+
+        let result = handle.wait();
+        assert!(result.is_err());
     }
 
     #[test]

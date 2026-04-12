@@ -43,7 +43,7 @@ pub use runtime::{display_progress, execute_dag, execute_dag_with_checkpoint, su
 pub use scheduler::{ActorId, Scheduler, SchedulerHandle};
 pub use scope::{Drainable, Scope};
 pub use stream_dag::StreamDag;
-pub use async_executor::{AsyncScope, FutureHandle};
+pub use async_executor::{AsyncScope, FutureHandle, SignalFuture, SignalDataFuture, SIGNAL_OK, SIGNAL_ERROR, SIGNAL_PENDING};
 
 use std::task::Poll;
 
