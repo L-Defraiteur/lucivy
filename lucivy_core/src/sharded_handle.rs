@@ -115,6 +115,77 @@ impl ShardStorage for FsShardStorage {
     }
 }
 
+/// In-memory shard storage using RamDirectory (no filesystem).
+///
+/// Useful for WASM/emscripten, tests, and ephemeral indexes.
+/// Root files are stored in a HashMap. Each shard gets its own RamDirectory.
+///
+/// Supports two workflows:
+/// - **Create**: `create_shard_handle` creates a fresh RamDirectory per shard
+/// - **Open**: pre-populate via `import_shard_file`, then `open_shard_handle`
+pub struct RamShardStorage {
+    root_files: Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    shard_dirs: Mutex<std::collections::HashMap<usize, ld_lucivy::directory::RamDirectory>>,
+}
+
+impl RamShardStorage {
+    pub fn new() -> Self {
+        Self {
+            root_files: Mutex::new(std::collections::HashMap::new()),
+            shard_dirs: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Import a file into a shard's directory (for open/import workflows).
+    /// Creates the shard directory if it doesn't exist.
+    pub fn import_shard_file(&self, shard_id: usize, name: &str, data: Vec<u8>) {
+        use ld_lucivy::directory::Directory;
+        let mut dirs = self.shard_dirs.lock().unwrap();
+        let dir = dirs.entry(shard_id)
+            .or_insert_with(ld_lucivy::directory::RamDirectory::create);
+        dir.atomic_write(Path::new(name), &data).unwrap();
+    }
+}
+
+impl ShardStorage for RamShardStorage {
+    fn create_shard_handle(
+        &self,
+        shard_id: usize,
+        config: &SchemaConfig,
+    ) -> Result<LucivyHandle, String> {
+        let dir = ld_lucivy::directory::RamDirectory::create();
+        let mut dirs = self.shard_dirs.lock().map_err(|_| "lock poisoned")?;
+        dirs.insert(shard_id, dir.clone());
+        LucivyHandle::create(dir, config)
+    }
+
+    fn open_shard_handle(&self, shard_id: usize) -> Result<LucivyHandle, String> {
+        let dirs = self.shard_dirs.lock().map_err(|_| "lock poisoned")?;
+        let dir = dirs.get(&shard_id)
+            .ok_or_else(|| format!("shard_{shard_id} not found in RamShardStorage"))?
+            .clone();
+        LucivyHandle::open(dir)
+    }
+
+    fn write_root_file(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        let mut files = self.root_files.lock().map_err(|_| "lock poisoned")?;
+        files.insert(name.to_string(), data.to_vec());
+        Ok(())
+    }
+
+    fn read_root_file(&self, name: &str) -> Result<Vec<u8>, String> {
+        let files = self.root_files.lock().map_err(|_| "lock poisoned")?;
+        files.get(name).cloned()
+            .ok_or_else(|| format!("root file '{name}' not found"))
+    }
+
+    fn root_file_exists(&self, name: &str) -> bool {
+        self.root_files.lock()
+            .map(|f| f.contains_key(name))
+            .unwrap_or(false)
+    }
+}
+
 /// BlobStore-backed shard storage for ACID persistence.
 ///
 /// Each shard gets a `BlobDirectory` with a unique namespace in the store.
@@ -2074,5 +2145,30 @@ mod tests {
                 "result node_id {} not in allowed set {:?}", node_id, allowed
             );
         }
+    }
+
+    #[test]
+    fn test_ram_shard_storage() {
+        let config = make_config(1);
+        let storage = RamShardStorage::new();
+        let handle = ShardedHandle::create_with_storage(Box::new(storage), &config).unwrap();
+
+        let body = handle.field("body").unwrap();
+        let nid = handle.field(NODE_ID_FIELD).unwrap();
+
+        for i in 0u64..5 {
+            let mut doc = LucivyDocument::new();
+            doc.add_u64(nid, i);
+            doc.add_text(body, &format!("rust programming {i}"));
+            handle.add_document(doc, i).unwrap();
+        }
+        handle.commit().unwrap();
+        assert_eq!(handle.num_docs(), 5);
+
+        let query: QueryConfig = serde_json::from_value(serde_json::json!({
+            "type": "contains", "field": "body", "value": "rust"
+        })).unwrap();
+        let results = handle.search(&query, 10, None).unwrap();
+        assert_eq!(results.len(), 5);
     }
 }
