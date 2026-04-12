@@ -21,7 +21,7 @@ use ld_lucivy::Index;
 
 // ─── Schema Config ──────────────────────────────────────────────────────────
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct SchemaConfig {
     pub fields: Vec<FieldDef>,
     pub tokenizer: Option<String>,
@@ -39,7 +39,7 @@ pub struct SchemaConfig {
     pub sfx: Option<bool>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FieldDef {
     pub name: String,
     #[serde(rename = "type")]

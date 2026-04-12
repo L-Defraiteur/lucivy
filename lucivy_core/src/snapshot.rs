@@ -1,14 +1,19 @@
 //! LUCE snapshot — lucivy-specific high-level API.
 //!
 //! Delegates format serialization to `lucistore::snapshot` (LUCE v1/v2).
-//! This module adds:
-//! - `export_index` / `import_index` for single-shard filesystem indexes
-//! - `export_sharded` / `import_sharded` for multi-shard filesystem indexes
-//! - Helper utilities (check_committed, read_directory_files, etc.)
+//!
+//! Unified API: always returns `ShardedHandle` (even for single-shard snapshots).
+//! - `export_to_snapshot(handle)` — export any ShardedHandle (1 or N shards)
+//! - `import_from_snapshot(data, dest)` — import any LUCE blob → ShardedHandle
+//!
+//! Legacy single-shard API kept for backward compat:
+//! - `export_index(handle, path)` — export single LucivyHandle
+//! - `import_index(data, dest)` — import → LucivyHandle
 
 use std::path::Path;
 
 use crate::handle::LucivyHandle;
+use crate::query::SchemaConfig;
 use crate::sharded_handle::ShardedHandle;
 
 // Re-export the format types so bindings keep using `lucivy_core::snapshot::*`.
@@ -54,7 +59,112 @@ pub fn read_directory_files(path: &Path) -> Result<Vec<(String, Vec<u8>)>, Strin
     Ok(files)
 }
 
-// ── Single-shard (filesystem) ──────────────────────────────────────────────
+// ── Unified API (always ShardedHandle) ─────────────────────────────────────
+
+/// Export a ShardedHandle (1 or N shards) as a LUCE v2 snapshot blob.
+pub fn export_to_snapshot(handle: &ShardedHandle, base_path: &Path) -> Result<Vec<u8>, String> {
+    let num_shards = handle.num_shards();
+
+    for i in 0..num_shards {
+        let shard = handle.shard(i)
+            .ok_or_else(|| format!("shard {i} not found"))?;
+        check_committed(shard, &format!("shard_{i}"))?;
+    }
+
+    // Root files (_shard_config.json, _shard_stats.bin).
+    let mut root_files = Vec::new();
+    for name in &["_shard_config.json", "_shard_stats.bin"] {
+        let file_path = base_path.join(name);
+        if file_path.exists() {
+            let data = std::fs::read(&file_path)
+                .map_err(|e| format!("cannot read root file '{name}': {e}"))?;
+            root_files.push((name.to_string(), data));
+        }
+    }
+
+    if root_files.is_empty() {
+        return Err("no root files found — is this a sharded index?".into());
+    }
+
+    // Per-shard files.
+    let shard_paths: Vec<String> = (0..num_shards)
+        .map(|i| format!("shard_{i}"))
+        .collect();
+    let mut shard_indexes = Vec::with_capacity(num_shards);
+    for (i, path_str) in shard_paths.iter().enumerate() {
+        let shard_dir = base_path.join(format!("shard_{i}"));
+        let files = read_directory_files(&shard_dir)?;
+        shard_indexes.push(SnapshotIndex {
+            path: path_str,
+            files,
+        });
+    }
+
+    Ok(export_snapshot_sharded(&shard_indexes, &root_files))
+}
+
+/// Import any LUCE snapshot blob (v1 single or v2 sharded) → ShardedHandle.
+///
+/// - Non-sharded (v1 or v2 is_sharded=false): wraps in a 1-shard ShardedHandle.
+///   Writes files to `dest/shard_0/`, generates `_shard_config.json`.
+/// - Sharded (v2 is_sharded=true): writes root files + shard dirs, opens normally.
+pub fn import_from_snapshot(data: &[u8], dest_path: &Path) -> Result<ShardedHandle, String> {
+    let imported = import_snapshot(data)?;
+
+    std::fs::create_dir_all(dest_path)
+        .map_err(|e| format!("cannot create directory '{}': {e}", dest_path.display()))?;
+
+    if imported.is_sharded {
+        // Sharded: write root files + per-shard dirs.
+        for (name, data) in &imported.root_files {
+            let file_path = dest_path.join(name);
+            std::fs::write(&file_path, data)
+                .map_err(|e| format!("cannot write root file '{name}': {e}"))?;
+        }
+        for index in &imported.indexes {
+            let shard_dir = dest_path.join(&index.path);
+            write_imported_files(&shard_dir, &index.files)?;
+        }
+    } else {
+        // Non-sharded: wrap in shard_0/.
+        if imported.indexes.is_empty() {
+            return Err("snapshot contains no indexes".into());
+        }
+        let first = &imported.indexes[0];
+
+        // Write index files into shard_0/.
+        let shard_dir = dest_path.join("shard_0");
+        write_imported_files(&shard_dir, &first.files)?;
+
+        // Read the schema config from the index's meta.json to build _shard_config.json.
+        // The shard config just needs the fields + shards=1.
+        let config = read_schema_config_from_files(&first.files)?;
+        let config_json = serde_json::to_string(&config)
+            .map_err(|e| format!("cannot serialize shard config: {e}"))?;
+        std::fs::write(dest_path.join("_shard_config.json"), config_json.as_bytes())
+            .map_err(|e| format!("cannot write _shard_config.json: {e}"))?;
+    }
+
+    let dest_str = dest_path.to_str()
+        .ok_or_else(|| "dest path is not valid UTF-8".to_string())?;
+    ShardedHandle::open(dest_str)
+}
+
+/// Read SchemaConfig from a set of index files (looks for _config.json).
+fn read_schema_config_from_files(files: &[(String, Vec<u8>)]) -> Result<SchemaConfig, String> {
+    // Look for _config.json in the files (lucivy stores schema config there).
+    for (name, data) in files {
+        if name == "_config.json" {
+            let mut config: SchemaConfig = serde_json::from_slice(data)
+                .map_err(|e| format!("cannot parse _config.json: {e}"))?;
+            config.shards = Some(1);
+            return Ok(config);
+        }
+    }
+    Err("no _config.json found in snapshot — cannot determine schema".into())
+}
+
+// ── Legacy single-shard API ────────────────────────────────────────────────
 
 /// Export a single index from disk as a LUCE snapshot blob.
 pub fn export_index(handle: &LucivyHandle, path: &Path) -> Result<Vec<u8>, String> {
@@ -81,87 +191,8 @@ pub fn import_index(data: &[u8], dest_path: &Path) -> Result<LucivyHandle, Strin
     LucivyHandle::open(dir)
 }
 
-// ── Sharded (filesystem) ───────────────────────────────────────────────────
-
-/// Export a sharded index from disk as a LUCE v2 snapshot blob.
-///
-/// Reads `_shard_config.json`, `_shard_stats.bin` (if present), and all
-/// shard directories (`shard_0/`, `shard_1/`, ...).
-pub fn export_sharded(handle: &ShardedHandle, base_path: &Path) -> Result<Vec<u8>, String> {
-    let num_shards = handle.num_shards();
-
-    // Check all shards are committed.
-    for i in 0..num_shards {
-        let shard = handle.shard(i)
-            .ok_or_else(|| format!("shard {i} not found"))?;
-        check_committed(shard, &format!("shard_{i}"))?;
-    }
-
-    // Collect root files.
-    let mut root_files = Vec::new();
-    for name in &["_shard_config.json", "_shard_stats.bin"] {
-        let file_path = base_path.join(name);
-        if file_path.exists() {
-            let data = std::fs::read(&file_path)
-                .map_err(|e| format!("cannot read root file '{name}': {e}"))?;
-            root_files.push((name.to_string(), data));
-        }
-    }
-
-    if root_files.is_empty() {
-        return Err("no root files found — is this a sharded index?".into());
-    }
-
-    // Collect per-shard files.
-    let shard_paths: Vec<String> = (0..num_shards)
-        .map(|i| format!("shard_{i}"))
-        .collect();
-    let mut shard_indexes = Vec::with_capacity(num_shards);
-    for (i, path_str) in shard_paths.iter().enumerate() {
-        let shard_dir = base_path.join(format!("shard_{i}"));
-        let files = read_directory_files(&shard_dir)?;
-        shard_indexes.push(SnapshotIndex {
-            path: path_str,
-            files,
-        });
-    }
-
-    Ok(export_snapshot_sharded(&shard_indexes, &root_files))
-}
-
-/// Import a sharded LUCE v2 snapshot blob to a destination directory.
-///
-/// Writes root files + per-shard files, then opens a ShardedHandle.
-pub fn import_sharded(data: &[u8], dest_path: &Path) -> Result<ShardedHandle, String> {
-    let imported = import_snapshot(data)?;
-    if !imported.is_sharded {
-        return Err("snapshot is not sharded — use import_index instead".into());
-    }
-
-    // Write root files.
-    std::fs::create_dir_all(dest_path)
-        .map_err(|e| format!("cannot create directory '{}': {e}", dest_path.display()))?;
-    for (name, data) in &imported.root_files {
-        let file_path = dest_path.join(name);
-        std::fs::write(&file_path, data)
-            .map_err(|e| format!("cannot write root file '{name}': {e}"))?;
-    }
-
-    // Write per-shard files.
-    for index in &imported.indexes {
-        let shard_dir = dest_path.join(&index.path);
-        write_imported_files(&shard_dir, &index.files)?;
-    }
-
-    // Open via ShardedHandle::open (reads _shard_config.json, opens each shard).
-    let dest_str = dest_path.to_str()
-        .ok_or_else(|| "dest path is not valid UTF-8".to_string())?;
-    ShardedHandle::open(dest_str)
-}
-
 // ── Internal helpers ───────────────────────────────────────────────────────
 
-/// Write imported files to a destination directory.
 fn write_imported_files(dest: &Path, files: &[(String, Vec<u8>)]) -> Result<(), String> {
     std::fs::create_dir_all(dest)
         .map_err(|e| format!("cannot create directory '{}': {e}", dest.display()))?;
@@ -267,5 +298,24 @@ mod tests {
         let blob = export_snapshot(&[snapshot]);
         let result = import_snapshot(&blob).unwrap();
         assert_eq!(result.indexes[0].files[0].1.len(), 0);
+    }
+
+    #[test]
+    fn test_read_schema_config_from_files() {
+        let files = vec![
+            ("meta.json".into(), b"{}".to_vec()),
+            ("_config.json".into(), br#"{"fields":[{"name":"body","type":"text"}]}"#.to_vec()),
+        ];
+        let config = read_schema_config_from_files(&files).unwrap();
+        assert_eq!(config.shards, Some(1));
+        assert_eq!(config.fields.len(), 1);
+        assert_eq!(config.fields[0].name, "body");
+    }
+
+    #[test]
+    fn test_read_schema_config_missing() {
+        let files = vec![("meta.json".into(), b"{}".to_vec())];
+        let err = read_schema_config_from_files(&files).unwrap_err();
+        assert!(err.contains("no _config.json"));
     }
 }
