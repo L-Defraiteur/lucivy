@@ -730,6 +730,15 @@ impl SegmentReader {
         self.alive_bitset_opt.as_ref()
     }
 
+    /// Replace the alive bitset, intersecting with the existing one if present.
+    /// Use this to inject a pre-filter (e.g. allowed node_ids → doc_id bitset).
+    pub fn set_alive_bitset(&mut self, custom: AliveBitSet) {
+        self.alive_bitset_opt = Some(match self.alive_bitset_opt.take() {
+            Some(existing) => intersect_alive_bitsets(existing, custom),
+            None => custom,
+        });
+    }
+
     /// Returns true if the `doc` is marked
     /// as deleted.
     pub fn is_deleted(&self, doc: DocId) -> bool {

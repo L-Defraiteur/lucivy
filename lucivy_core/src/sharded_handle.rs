@@ -570,7 +570,28 @@ fn tokenize_for_pipeline(
 
 // ─── Shard Actor Creation ───────────────────────────────────────────────────
 
+/// Build an AliveBitSet that only marks docs whose _node_id is in allowed_ids.
+fn build_node_filter_bitset(
+    seg_reader: &ld_lucivy::SegmentReader,
+    allowed_ids: &HashSet<u64>,
+) -> Result<ld_lucivy::fastfield::AliveBitSet, String> {
+    let node_id_column = seg_reader.fast_fields().u64(NODE_ID_FIELD)
+        .map_err(|e| format!("fast field {NODE_ID_FIELD}: {e}"))?;
+    let max_doc = seg_reader.max_doc();
+    let mut bitset = ld_lucivy::BitSet::with_max_value(max_doc);
+    for doc in 0..max_doc {
+        let val = node_id_column.first(doc).unwrap_or(u64::MAX);
+        if allowed_ids.contains(&val) {
+            bitset.insert(doc);
+        }
+    }
+    Ok(ld_lucivy::fastfield::AliveBitSet::from_bitset(&bitset))
+}
+
 /// Execute a pre-compiled Weight on a single shard's segments.
+///
+/// If `filter` is provided, injects an AliveBitSet pre-filter per segment
+/// so that only docs with matching _node_id are visited by the scorer.
 fn execute_weight_on_shard(
     handle: &LucivyHandle,
     shard_id: usize,
@@ -579,40 +600,32 @@ fn execute_weight_on_shard(
     filter: Option<Arc<HashSet<u64>>>,
 ) -> Result<Vec<(f32, DocAddress)>, String> {
     let searcher = handle.reader.searcher();
-    let segment_readers = searcher.segment_readers();
+    let collector = ld_lucivy::collector::TopDocs::with_limit(top_k).order_by_score();
 
-    if let Some(allowed_ids) = filter {
-        let inner = ld_lucivy::collector::TopDocs::with_limit(top_k).order_by_score();
-        let collector = ld_lucivy::collector::FilterCollector::new(
-            NODE_ID_FIELD.to_string(),
-            move |value: u64| allowed_ids.contains(&value),
-            inner,
-        );
-        let mut fruits = Vec::with_capacity(segment_readers.len());
-        for (seg_ord, seg_reader) in segment_readers.iter().enumerate() {
+    let segment_readers = searcher.segment_readers();
+    let mut fruits = Vec::with_capacity(segment_readers.len());
+
+    for (seg_ord, seg_reader) in segment_readers.iter().enumerate() {
+        if let Some(ref allowed_ids) = filter {
+            // Pre-filter: inject alive bitset so scorer skips non-matching docs.
+            let filter_bitset = build_node_filter_bitset(seg_reader, allowed_ids)?;
+            let mut filtered_reader = seg_reader.clone();
+            filtered_reader.set_alive_bitset(filter_bitset);
+            let fruit = collector
+                .collect_segment(weight, seg_ord as u32, &filtered_reader)
+                .map_err(|e| format!("collect shard_{shard_id} seg_{seg_ord}: {e}"))?;
+            fruits.push(fruit);
+        } else {
             let fruit = collector
                 .collect_segment(weight, seg_ord as u32, seg_reader)
                 .map_err(|e| format!("collect shard_{shard_id} seg_{seg_ord}: {e}"))?;
             fruits.push(fruit);
         }
-        collector
-            .merge_fruits(fruits)
-            .map_err(|e| format!("merge shard_{shard_id}: {e}"))
-    } else {
-        let collector = ld_lucivy::collector::TopDocs::with_limit(top_k).order_by_score();
-        collector.check_schema(searcher.schema())
-            .map_err(|e| format!("schema check shard_{shard_id}: {e}"))?;
-        let mut fruits = Vec::with_capacity(segment_readers.len());
-        for (seg_ord, seg_reader) in segment_readers.iter().enumerate() {
-            let fruit = collector
-                .collect_segment(weight, seg_ord as u32, seg_reader)
-                .map_err(|e| format!("collect shard_{shard_id} seg_{seg_ord}: {e}"))?;
-            fruits.push(fruit);
-        }
-        collector
-            .merge_fruits(fruits)
-            .map_err(|e| format!("merge shard_{shard_id}: {e}"))
     }
+
+    collector
+        .merge_fruits(fruits)
+        .map_err(|e| format!("merge shard_{shard_id}: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -2015,5 +2028,51 @@ mod tests {
         let results = handle.search(&query, 20, None).unwrap();
         eprintln!("diag_rr: {} results for 'function'", results.len());
         assert!(results.len() > 0, "should find docs with 'function'");
+    }
+
+    #[test]
+    fn test_search_filtered_prefilter() {
+        let dir = tmp_dir("lucivy_sharded_prefilter");
+        let config = make_config(2);
+        let handle = ShardedHandle::create(&dir, &config).unwrap();
+
+        let body = handle.field("body").unwrap();
+        let nid = handle.field(NODE_ID_FIELD).unwrap();
+
+        // Insert 20 docs, all containing "rust". node_ids 0..20.
+        for i in 0u64..20 {
+            let mut doc = LucivyDocument::new();
+            doc.add_u64(nid, i);
+            doc.add_text(body, &format!("rust programming doc {i}"));
+            handle.add_document(doc, i).unwrap();
+        }
+        handle.commit().unwrap();
+
+        let query: QueryConfig = serde_json::from_value(serde_json::json!({
+            "type": "contains", "field": "body", "value": "rust"
+        })).unwrap();
+
+        // Unfiltered: should find all 20.
+        let all = handle.search(&query, 100, None).unwrap();
+        assert_eq!(all.len(), 20);
+
+        // Filtered: only allow node_ids {3, 7, 15}.
+        let allowed: HashSet<u64> = [3, 7, 15].into_iter().collect();
+        let filtered = handle.search_filtered(&query, 100, None, allowed.clone()).unwrap();
+
+        assert_eq!(filtered.len(), 3, "should return exactly 3 results, got {}", filtered.len());
+
+        // Verify all returned results have node_ids in the allowed set.
+        for r in &filtered {
+            let shard = handle.shard(r.shard_id).unwrap();
+            let searcher = shard.reader.searcher();
+            let seg_reader = searcher.segment_reader(r.doc_address.segment_ord);
+            let node_col = seg_reader.fast_fields().u64(NODE_ID_FIELD).unwrap();
+            let node_id = node_col.first(r.doc_address.doc_id).unwrap();
+            assert!(
+                allowed.contains(&node_id),
+                "result node_id {} not in allowed set {:?}", node_id, allowed
+            );
+        }
     }
 }

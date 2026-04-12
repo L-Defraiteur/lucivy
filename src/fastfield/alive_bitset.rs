@@ -35,6 +35,13 @@ pub fn intersect_alive_bitsets(left: AliveBitSet, right: AliveBitSet) -> AliveBi
 }
 
 impl AliveBitSet {
+    /// Create an AliveBitSet from a BitSet (serializes internally).
+    pub fn from_bitset(bitset: &BitSet) -> AliveBitSet {
+        let mut buf = Vec::new();
+        write_alive_bitset(bitset, &mut buf).expect("alive_bitset serialize");
+        Self::open(OwnedBytes::new(buf))
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test_from_deleted_docs(deleted_docs: &[DocId], max_doc: u32) -> AliveBitSet {
         assert!(deleted_docs.iter().all(|&doc| doc < max_doc));

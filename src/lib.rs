@@ -199,7 +199,7 @@ mod error_message;
 mod future_result;
 
 // Re-exports
-pub use common::{ByteCount, DateTime};
+pub use common::{BitSet, ByteCount, DateTime};
 pub use {columnar, query_grammar, time};
 
 pub use actor::scheduler::set_scheduler_log_hook;
