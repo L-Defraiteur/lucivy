@@ -232,6 +232,14 @@ pub unsafe extern "C" fn lucivy_create(
 
     let text_fields = extract_text_fields(&config);
     let index_path = format!("{OPFS_BASE}/{path}");
+
+    // Clean up any existing index at this path (stale lock files from previous session).
+    let dest = std::path::Path::new(&index_path);
+    if dest.exists() {
+        let _ = std::fs::remove_dir_all(dest);
+        rlog!("[create] cleaned existing index at {index_path}");
+    }
+
     let handle = match ShardedHandle::create(&index_path, &config) {
         Ok(h) => h,
         Err(e) => {
