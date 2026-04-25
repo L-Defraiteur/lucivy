@@ -299,6 +299,101 @@ impl Index {
         Self::import_snapshot(&data, dest_path)
     }
 
+    // ── Delta sync ──────────────────────────────────────────────────────
+
+    /// Per-shard version info (for requesting deltas from a server).
+    /// Returns a list of dicts: [{"shard_id": 0, "version": "abc", "segment_ids": ["x","y"]}, ...]
+    #[getter]
+    fn shard_versions(&self) -> PyResult<Vec<HashMap<String, pyo3::Py<pyo3::PyAny>>>> {
+        let versions = self.handle.shard_versions()
+            .map_err(|e| PyValueError::new_err(e))?;
+        Python::with_gil(|py| {
+            Ok(versions.iter().map(|sv| {
+                let mut m = HashMap::new();
+                m.insert("shard_id".into(), sv.shard_id.into_pyobject(py).unwrap().into_any().unbind());
+                m.insert("version".into(), sv.version.clone().into_pyobject(py).unwrap().into_any().unbind());
+                let ids: Vec<String> = sv.segment_ids.iter().cloned().collect();
+                m.insert("segment_ids".into(), ids.into_pyobject(py).unwrap().into_any().unbind());
+                m
+            }).collect())
+        })
+    }
+
+    /// Export a sharded delta (LUCIDS blob) from this index.
+    ///
+    /// Args:
+    ///     client_versions: list of {"shard_id": int, "version": str, "segment_ids": [str]}
+    ///
+    /// Returns: bytes (LUCIDS binary blob).
+    fn export_sharded_delta<'py>(
+        &self,
+        py: Python<'py>,
+        client_versions: Vec<HashMap<String, pyo3::Py<pyo3::PyAny>>>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        let versions: Vec<lucistore::delta_sharded::ShardVersion> = client_versions.iter()
+            .map(|m| {
+                let shard_id: usize = Python::with_gil(|py| m.get("shard_id").unwrap().extract(py).unwrap());
+                let version: String = Python::with_gil(|py| m.get("version").unwrap().extract(py).unwrap());
+                let ids: Vec<String> = Python::with_gil(|py| m.get("segment_ids").unwrap().extract(py).unwrap());
+                lucistore::delta_sharded::ShardVersion {
+                    shard_id,
+                    version,
+                    segment_ids: ids.into_iter().collect(),
+                }
+            })
+            .collect();
+
+        let blob = self.handle.export_sharded_delta(&self.index_path, &versions)
+            .map_err(|e| PyValueError::new_err(e))?;
+        Ok(pyo3::types::PyBytes::new(py, &blob))
+    }
+
+    /// Apply a sharded delta (LUCIDS blob) to this index.
+    fn apply_sharded_delta(&self, data: &[u8]) -> PyResult<()> {
+        self.handle.apply_sharded_delta(&self.index_path, data)
+            .map_err(|e| PyValueError::new_err(e))
+    }
+
+    // ── Distributed search ──────────────────────────────────────────────
+
+    /// Export BM25 statistics for a query (for distributed search aggregation).
+    /// Returns JSON string of ExportableStats.
+    fn export_stats(&self, query: &Bound<'_, PyAny>) -> PyResult<String> {
+        let query_config = self.parse_query(query)?;
+        let stats = self.handle.export_stats(&query_config)
+            .map_err(|e| PyValueError::new_err(e))?;
+        serde_json::to_string(&stats)
+            .map_err(|e| PyValueError::new_err(format!("serialize stats: {e}")))
+    }
+
+    /// Search with externally-provided global BM25 stats (distributed mode).
+    /// `global_stats_json`: JSON string of merged ExportableStats from all nodes.
+    #[pyo3(signature = (query, global_stats_json, limit=10, highlights=false))]
+    fn search_with_global_stats(
+        &self,
+        query: &Bound<'_, PyAny>,
+        global_stats_json: &str,
+        limit: u32,
+        highlights: bool,
+    ) -> PyResult<Vec<SearchResult>> {
+        let query_config = self.parse_query(query)?;
+        let global_stats: lucivy_core::bm25_global::ExportableStats =
+            serde_json::from_str(global_stats_json)
+                .map_err(|e| PyValueError::new_err(format!("invalid stats JSON: {e}")))?;
+
+        let highlight_sink = if highlights {
+            Some(Arc::new(HighlightSink::new()))
+        } else {
+            None
+        };
+
+        let results = self.handle.search_with_global_stats(
+            &query_config, limit as usize, &global_stats, highlight_sink.clone(),
+        ).map_err(|e| PyValueError::new_err(e))?;
+
+        collect_sharded_results(&self.handle, &results, highlight_sink.as_deref(), false)
+    }
+
     fn __enter__(slf: Py<Self>) -> Py<Self> {
         slf
     }

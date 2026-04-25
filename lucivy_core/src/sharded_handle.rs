@@ -1854,6 +1854,87 @@ impl ShardedHandle {
         let router = self.router.lock().map_err(|_| "router lock poisoned")?;
         Ok((router.shard_doc_counts().to_vec(), router.total_docs()))
     }
+
+    // ── Delta sync ─────────────────────────────────────────────────────
+
+    /// Get per-shard version info (version hash + segment IDs).
+    /// Used by clients to request deltas from a server.
+    pub fn shard_versions(&self) -> Result<Vec<lucistore::delta_sharded::ShardVersion>, String> {
+        let mut versions = Vec::with_capacity(self.shards.len());
+        for (i, shard) in self.shards.iter().enumerate() {
+            let version = crate::sync::compute_version(shard)?;
+            let meta = shard.index.load_metas()
+                .map_err(|e| format!("shard_{i} load metas: {e}"))?;
+            let segment_ids: HashSet<String> = meta.segments.iter()
+                .map(|s| s.id().uuid_string())
+                .collect();
+            versions.push(lucistore::delta_sharded::ShardVersion {
+                shard_id: i,
+                version,
+                segment_ids,
+            });
+        }
+        Ok(versions)
+    }
+
+    /// Export a sharded delta (LUCIDS) from this handle.
+    ///
+    /// `client_versions`: the per-shard versions the client currently has.
+    /// Returns a LUCIDS blob containing only the shards that changed.
+    ///
+    /// Requires filesystem-backed storage (FsShardStorage). For in-memory
+    /// storage (RamShardStorage), use snapshot export instead.
+    pub fn export_sharded_delta(
+        &self,
+        base_path: &str,
+        client_versions: &[lucistore::delta_sharded::ShardVersion],
+    ) -> Result<Vec<u8>, String> {
+        let base = std::path::Path::new(base_path);
+        let shard_data: Vec<(usize, &LucivyHandle, std::path::PathBuf)> = self.shards.iter()
+            .enumerate()
+            .map(|(i, shard)| (i, shard.as_ref(), base.join(format!("shard_{i}"))))
+            .collect();
+
+        let shard_refs: Vec<(usize, &LucivyHandle, &std::path::Path)> = shard_data.iter()
+            .map(|(i, h, p)| (*i, *h, p.as_path()))
+            .collect();
+
+        let shard_config = self.storage.read_root_file(SHARD_CONFIG_FILE).ok();
+
+        let delta = crate::sync::export_sharded_delta(
+            &shard_refs,
+            client_versions,
+            None,
+            shard_config,
+        )?;
+
+        Ok(lucistore::delta_sharded::serialize_sharded_delta(&delta))
+    }
+
+    /// Apply a sharded delta (LUCIDS blob) to this handle.
+    ///
+    /// Writes new segment files, removes old ones, updates manifests per shard.
+    /// Then reloads readers so new data is visible.
+    ///
+    /// Requires filesystem-backed storage (FsShardStorage).
+    pub fn apply_sharded_delta(&self, base_path: &str, blob: &[u8]) -> Result<(), String> {
+        let base = std::path::Path::new(base_path);
+        let delta = lucistore::delta_sharded::deserialize_sharded_delta(blob)?;
+
+        for (shard_id, shard_delta) in &delta.shard_deltas {
+            if *shard_id >= self.shards.len() {
+                return Err(format!("shard_{shard_id} not found (have {} shards)", self.shards.len()));
+            }
+
+            let shard_path = base.join(format!("shard_{shard_id}"));
+            lucistore::fs_utils::apply_delta(&shard_path, shard_delta)?;
+
+            self.shards[*shard_id].reader.reload()
+                .map_err(|e| format!("shard_{shard_id} reload: {e}"))?;
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
