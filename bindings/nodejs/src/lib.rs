@@ -1,23 +1,22 @@
 //! lucivy — Node.js bindings for ld-lucivy BM25 full-text search.
 //!
-//! Provides a JS/TS API for creating, managing, and querying Lucivy indexes.
+//! Unified on ShardedHandle (even single-shard uses ShardedHandle with shards=1).
 //! Distributed under the MIT License.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-
 use ld_lucivy::query::HighlightSink;
 use ld_lucivy::schema::{FieldType, Value as LucivyValue};
-use ld_lucivy::{DocAddress, LucivyDocument, Searcher};
+use ld_lucivy::LucivyDocument;
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD};
-use lucivy_core::directory::StdFsDirectory;
+use lucivy_core::handle::NODE_ID_FIELD;
 use lucivy_core::query;
 use lucivy_core::snapshot;
+use lucivy_core::sharded_handle::{ShardedHandle, ShardedSearchResult};
 
 // ─── SearchResult ──────────────────────────────────────────────────────────
 
@@ -56,7 +55,7 @@ pub struct SearchOptions {
 
 #[napi]
 pub struct Index {
-    handle: LucivyHandle,
+    handle: ShardedHandle,
     index_path: String,
     user_fields: Vec<(String, String)>,
     text_fields: Vec<String>,
@@ -66,7 +65,7 @@ pub struct Index {
 impl Index {
     /// Create a new index at the given path.
     #[napi(factory)]
-    pub fn create(path: String, fields: Vec<FieldDef>) -> Result<Self> {
+    pub fn create(path: String, fields: Vec<FieldDef>, shards: Option<u32>) -> Result<Self> {
         let field_defs: Vec<query::FieldDef> = fields
             .iter()
             .map(|f| query::FieldDef {
@@ -81,12 +80,11 @@ impl Index {
         let config = query::SchemaConfig {
             fields: field_defs,
             tokenizer: None,
+            shards: shards.map(|s| s as usize),
             ..Default::default()
         };
 
-        let directory = StdFsDirectory::open(&path)
-            .map_err(|e| Error::from_reason(e.to_string()))?;
-        let handle = LucivyHandle::create(directory, &config)
+        let handle = ShardedHandle::create(&path, &config)
             .map_err(|e| Error::from_reason(e))?;
 
         let (user_fields, text_fields) = extract_user_fields(&config);
@@ -102,15 +100,10 @@ impl Index {
     /// Open an existing index at the given path.
     #[napi(factory)]
     pub fn open(path: String) -> Result<Self> {
-        let directory = StdFsDirectory::open(&path)
-            .map_err(|e| Error::from_reason(e.to_string()))?;
-        let handle = LucivyHandle::open(directory)
+        let handle = ShardedHandle::open(&path)
             .map_err(|e| Error::from_reason(e))?;
 
-        let (user_fields, text_fields) = match &handle.config {
-            Some(config) => extract_user_fields(config),
-            None => (Vec::new(), Vec::new()),
-        };
+        let (user_fields, text_fields) = extract_user_fields(&handle.config);
 
         Ok(Self {
             handle,
@@ -131,25 +124,14 @@ impl Index {
 
         add_fields_from_map(&self.handle, &mut doc, &fields)?;
 
-        let mut guard = self.handle.writer.lock()
-            .map_err(|_| Error::from_reason("writer lock poisoned"))?;
-        let writer = guard.as_mut()
-            .ok_or_else(|| Error::from_reason("index is closed"))?;
-        writer.add_document(doc)
-            .map_err(|e| Error::from_reason(e.to_string()))?;
-        self.handle.mark_uncommitted();
-        Ok(())
+        self.handle.add_document(doc, doc_id as u64)
+            .map_err(|e| Error::from_reason(e))
     }
 
     /// Add multiple documents at once.
     /// Each element must have a `docId` key and field values.
     #[napi]
     pub fn add_many(&self, docs: Vec<HashMap<String, serde_json::Value>>) -> Result<()> {
-        let mut guard = self.handle.writer.lock()
-            .map_err(|_| Error::from_reason("writer lock poisoned"))?;
-        let writer = guard.as_mut()
-            .ok_or_else(|| Error::from_reason("index is closed"))?;
-
         let nid_field = self.handle.field(NODE_ID_FIELD)
             .ok_or_else(|| Error::from_reason("no _node_id field in schema"))?;
 
@@ -169,26 +151,17 @@ impl Index {
                 add_field_value(&self.handle, &mut doc, key, value)?;
             }
 
-            writer.add_document(doc)
-                .map_err(|e| Error::from_reason(e.to_string()))?;
+            self.handle.add_document(doc, doc_id)
+                .map_err(|e| Error::from_reason(e))?;
         }
-        self.handle.mark_uncommitted();
         Ok(())
     }
 
     /// Delete a document by doc_id.
     #[napi]
     pub fn delete(&self, doc_id: u32) -> Result<()> {
-        let field = self.handle.field(NODE_ID_FIELD)
-            .ok_or_else(|| Error::from_reason("no _node_id field in schema"))?;
-        let term = ld_lucivy::schema::Term::from_field_u64(field, doc_id as u64);
-        let mut guard = self.handle.writer.lock()
-            .map_err(|_| Error::from_reason("writer lock poisoned"))?;
-        let writer = guard.as_mut()
-            .ok_or_else(|| Error::from_reason("index is closed"))?;
-        writer.delete_term(term);
-        self.handle.mark_uncommitted();
-        Ok(())
+        self.handle.delete_by_node_id(doc_id as u64)
+            .map_err(|e| Error::from_reason(e))
     }
 
     /// Update a document (delete + re-add).
@@ -202,29 +175,8 @@ impl Index {
     /// Commit pending changes (makes added/deleted docs visible to searches).
     #[napi]
     pub fn commit(&self) -> Result<()> {
-        let mut guard = self.handle.writer.lock()
-            .map_err(|_| Error::from_reason("writer lock poisoned"))?;
-        let writer = guard.as_mut()
-            .ok_or_else(|| Error::from_reason("index is closed"))?;
-        writer.commit()
-            .map_err(|e| Error::from_reason(e.to_string()))?;
-        self.handle.reader.reload()
-            .map_err(|e| Error::from_reason(e.to_string()))?;
-        self.handle.mark_committed();
-        Ok(())
-    }
-
-    /// Rollback pending changes.
-    #[napi]
-    pub fn rollback(&self) -> Result<()> {
-        let mut guard = self.handle.writer.lock()
-            .map_err(|_| Error::from_reason("writer lock poisoned"))?;
-        let writer = guard.as_mut()
-            .ok_or_else(|| Error::from_reason("index is closed"))?;
-        writer.rollback()
-            .map_err(|e| Error::from_reason(e.to_string()))?;
-        self.handle.mark_committed();
-        Ok(())
+        self.handle.commit()
+            .map_err(|e| Error::from_reason(e))
     }
 
     /// Close the index: commit pending writes and release the writer lock.
@@ -255,7 +207,7 @@ impl Index {
             None
         };
 
-        let top_docs = match allowed_ids {
+        let results = match allowed_ids {
             Some(ids) => {
                 let id_set: HashSet<u64> = ids.into_iter().map(|id| id as u64).collect();
                 self.handle.search_filtered(&query_config, limit as usize, highlight_sink.clone(), id_set)
@@ -264,12 +216,10 @@ impl Index {
             None => self.handle.search(&query_config, limit as usize, highlight_sink.clone())
                 .map_err(|e| Error::from_reason(e))?,
         };
-        let searcher = self.handle.reader.searcher();
 
-        collect_results(
-            &searcher,
-            &top_docs,
-            &self.handle.schema,
+        collect_sharded_results(
+            &self.handle,
+            &results,
             highlight_sink.as_deref(),
             want_fields,
         )
@@ -278,7 +228,13 @@ impl Index {
     /// Number of documents in the index.
     #[napi(getter)]
     pub fn num_docs(&self) -> u32 {
-        self.handle.reader.searcher().num_docs() as u32
+        self.handle.num_docs() as u32
+    }
+
+    /// Number of shards.
+    #[napi(getter)]
+    pub fn num_shards(&self) -> u32 {
+        self.handle.num_shards() as u32
     }
 
     /// Index path.
@@ -288,37 +244,22 @@ impl Index {
     }
 
     /// Export this index as a LUCE snapshot (Buffer).
-    /// Throws if there are uncommitted changes.
     #[napi]
     pub fn export_snapshot(&self) -> Result<Buffer> {
-        snapshot::check_committed(&self.handle, &self.index_path)
-            .map_err(|e| Error::from_reason(e))?;
-
-        let files = snapshot::read_directory_files(std::path::Path::new(&self.index_path))
-            .map_err(|e| Error::from_reason(e))?;
-
-        let idx = snapshot::SnapshotIndex {
-            path: &self.index_path,
-            files,
-        };
-        let blob = snapshot::export_snapshot(&[idx]);
+        let blob = snapshot::export_to_snapshot(
+            &self.handle,
+            std::path::Path::new(&self.index_path),
+        ).map_err(|e| Error::from_reason(e))?;
         Ok(blob.into())
     }
 
     /// Export this index as a LUCE snapshot to a file.
     #[napi]
     pub fn export_snapshot_to(&self, path: String) -> Result<()> {
-        snapshot::check_committed(&self.handle, &self.index_path)
-            .map_err(|e| Error::from_reason(e))?;
-
-        let files = snapshot::read_directory_files(std::path::Path::new(&self.index_path))
-            .map_err(|e| Error::from_reason(e))?;
-
-        let idx = snapshot::SnapshotIndex {
-            path: &self.index_path,
-            files,
-        };
-        let blob = snapshot::export_snapshot(&[idx]);
+        let blob = snapshot::export_to_snapshot(
+            &self.handle,
+            std::path::Path::new(&self.index_path),
+        ).map_err(|e| Error::from_reason(e))?;
         std::fs::write(&path, &blob)
             .map_err(|e| Error::from_reason(format!("cannot write snapshot: {e}")))?;
         Ok(())
@@ -328,21 +269,19 @@ impl Index {
     /// The snapshot must contain exactly one index.
     #[napi(factory)]
     pub fn import_snapshot(data: Buffer, dest_path: Option<String>) -> Result<Self> {
-        let snap = snapshot::import_snapshot(&data)
+        let dest = dest_path.as_deref().unwrap_or("/tmp/lucivy_import");
+        let dest_p = std::path::Path::new(dest);
+        let handle = snapshot::import_from_snapshot(&data, dest_p)
             .map_err(|e| Error::from_reason(e))?;
 
-        if snap.indexes.len() != 1 {
-            return Err(Error::from_reason(format!(
-                "expected 1 index in snapshot, got {}",
-                snap.indexes.len()
-            )));
-        }
+        let (user_fields, text_fields) = extract_user_fields(&handle.config);
 
-        let imported = &snap.indexes[0];
-        let target = dest_path.as_deref().unwrap_or(&imported.path);
-
-        write_imported_files(target, &imported.files)?;
-        Self::open(target.to_string())
+        Ok(Self {
+            handle,
+            index_path: dest.to_string(),
+            user_fields,
+            text_fields,
+        })
     }
 
     /// Import an index from a LUCE snapshot file.
@@ -461,7 +400,7 @@ fn extract_user_fields(config: &query::SchemaConfig) -> (Vec<(String, String)>, 
 }
 
 fn add_fields_from_map(
-    handle: &LucivyHandle,
+    handle: &ShardedHandle,
     doc: &mut LucivyDocument,
     fields: &HashMap<String, serde_json::Value>,
 ) -> Result<()> {
@@ -472,7 +411,7 @@ fn add_fields_from_map(
 }
 
 fn add_field_value(
-    handle: &LucivyHandle,
+    handle: &ShardedHandle,
     doc: &mut LucivyDocument,
     field_name: &str,
     value: &serde_json::Value,
@@ -516,33 +455,25 @@ fn add_field_value(
     Ok(())
 }
 
-fn write_imported_files(dest_path: &str, files: &[(String, Vec<u8>)]) -> Result<()> {
-    std::fs::create_dir_all(dest_path)
-        .map_err(|e| Error::from_reason(format!("cannot create directory '{}': {e}", dest_path)))?;
-    for (name, data) in files {
-        let file_path = std::path::Path::new(dest_path).join(name);
-        std::fs::write(&file_path, data)
-            .map_err(|e| Error::from_reason(format!("cannot write '{}': {e}", file_path.display())))?;
-    }
-    Ok(())
-}
-
-fn collect_results(
-    searcher: &Searcher,
-    top_docs: &[(f32, DocAddress)],
-    schema: &ld_lucivy::schema::Schema,
+fn collect_sharded_results(
+    handle: &ShardedHandle,
+    results: &[ShardedSearchResult],
     highlight_sink: Option<&HighlightSink>,
     include_fields: bool,
 ) -> Result<Vec<SearchResult>> {
-    let nid_field = schema
+    let nid_field = handle.schema
         .get_field(NODE_ID_FIELD)
         .map_err(|_| Error::from_reason("no _node_id field in schema"))?;
 
-    let mut results = Vec::with_capacity(top_docs.len());
-    for &(score, doc_addr) in top_docs {
+    let mut out = Vec::with_capacity(results.len());
+    for r in results {
+        let shard = handle.shard(r.shard_id)
+            .ok_or_else(|| Error::from_reason(format!("shard {} not found", r.shard_id)))?;
+        let searcher = shard.reader.searcher();
         let doc: LucivyDocument = searcher
-            .doc(doc_addr)
+            .doc(r.doc_address)
             .map_err(|e| Error::from_reason(e.to_string()))?;
+
         let doc_id = doc
             .get_first(nid_field)
             .and_then(|v| v.as_value().as_u64())
@@ -550,9 +481,9 @@ fn collect_results(
 
         let highlights = highlight_sink.and_then(|sink| {
             let seg_id = searcher
-                .segment_reader(doc_addr.segment_ord)
+                .segment_reader(r.doc_address.segment_ord)
                 .segment_id();
-            let by_field = sink.get(seg_id, doc_addr.doc_id)?;
+            let by_field = sink.get(seg_id, r.doc_address.doc_id)?;
             let map: HashMap<String, Vec<Vec<u32>>> = by_field
                 .into_iter()
                 .map(|(name, offsets)| {
@@ -573,7 +504,7 @@ fn collect_results(
         let fields = if include_fields {
             let mut map = HashMap::new();
             for (field, value) in doc.field_values() {
-                let name = schema.get_field_name(field);
+                let name = handle.schema.get_field_name(field);
                 if name == NODE_ID_FIELD {
                     continue;
                 }
@@ -596,14 +527,14 @@ fn collect_results(
             None
         };
 
-        results.push(SearchResult {
+        out.push(SearchResult {
             doc_id: doc_id as u32,
-            score: score as f64,
+            score: r.score as f64,
             highlights,
             fields,
         });
     }
-    Ok(results)
+    Ok(out)
 }
 
 #[cfg(test)]

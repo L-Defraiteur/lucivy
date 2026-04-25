@@ -1,21 +1,22 @@
 //! lucivy-cpp — C++ bindings for ld-lucivy BM25 full-text search.
 //!
 //! Provides a CXX bridge for creating, managing, and querying Lucivy indexes.
+//! Unified on ShardedHandle (even single-shard uses ShardedHandle with shards=1).
 //! Distributed under the MIT License.
 //!
 //! API mirrors the Node.js and Python bindings:
-//!   create/open, add/add_many/delete/update, commit/rollback, search, num_docs/path/schema
+//!   create/open, add/add_many/delete/update, commit/close, search, num_docs/path/schema
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-
 use ld_lucivy::query::HighlightSink;
 use ld_lucivy::schema::{FieldType, Value as LucivyValue};
-use ld_lucivy::{DocAddress, LucivyDocument, Searcher};
+use ld_lucivy::LucivyDocument;
 
-use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD};
+use lucivy_core::handle::NODE_ID_FIELD;
 use lucivy_core::query;
+use lucivy_core::sharded_handle::{ShardedHandle, ShardedSearchResult};
 use lucivy_core::snapshot;
 
 // ── CXX bridge ─────────────────────────────────────────────────────────────
@@ -110,7 +111,7 @@ mod ffi {
 // ── LucivyIndex wrapper ────────────────────────────────────────────────────
 
 pub struct LucivyIndex {
-    handle: LucivyHandle,
+    handle: ShardedHandle,
     index_path: String,
     text_fields: Vec<String>,
 }
@@ -127,9 +128,7 @@ fn lucivy_create(path: &str, fields_json: &str) -> Result<Box<LucivyIndex>, Stri
         ..Default::default()
     };
 
-    let directory = lucivy_core::directory::StdFsDirectory::open(path)
-        .map_err(|e| format!("cannot open directory: {e}"))?;
-    let handle = LucivyHandle::create(directory, &config)?;
+    let handle = ShardedHandle::create(path, &config)?;
     let text_fields = extract_text_fields(&config);
 
     Ok(Box::new(LucivyIndex {
@@ -140,14 +139,8 @@ fn lucivy_create(path: &str, fields_json: &str) -> Result<Box<LucivyIndex>, Stri
 }
 
 fn lucivy_open(path: &str) -> Result<Box<LucivyIndex>, String> {
-    let directory = lucivy_core::directory::StdFsDirectory::open(path)
-        .map_err(|e| format!("cannot open directory: {e}"))?;
-    let handle = LucivyHandle::open(directory)?;
-
-    let text_fields = match &handle.config {
-        Some(config) => extract_text_fields(config),
-        None => Vec::new(),
-    };
+    let handle = ShardedHandle::open(path)?;
+    let text_fields = extract_text_fields(&handle.config);
 
     Ok(Box::new(LucivyIndex {
         handle,
@@ -173,29 +166,12 @@ impl LucivyIndex {
 
         add_fields_from_map(&self.handle, &mut doc, &fields)?;
 
-        let mut guard = self
-            .handle
-            .writer
-            .lock()
-            .map_err(|_| "writer lock poisoned".to_string())?;
-        let writer = guard.as_mut().ok_or("index is closed")?;
-        writer
-            .add_document(doc)
-            .map_err(|e| e.to_string())?;
-        self.handle.mark_uncommitted();
-        Ok(())
+        self.handle.add_document(doc, doc_id)
     }
 
     fn add_many(&self, docs_json: &str) -> Result<(), String> {
         let docs: Vec<serde_json::Value> = serde_json::from_str(docs_json)
             .map_err(|e| format!("invalid docs JSON: {e}"))?;
-
-        let mut guard = self
-            .handle
-            .writer
-            .lock()
-            .map_err(|_| "writer lock poisoned".to_string())?;
-        let writer = guard.as_mut().ok_or("index is closed")?;
 
         let nid_field = self
             .handle
@@ -223,29 +199,13 @@ impl LucivyIndex {
                 add_field_value(&self.handle, &mut doc, key, value)?;
             }
 
-            writer
-                .add_document(doc)
-                .map_err(|e| e.to_string())?;
+            self.handle.add_document(doc, doc_id)?;
         }
-        self.handle.mark_uncommitted();
         Ok(())
     }
 
     fn remove(&self, doc_id: u64) -> Result<(), String> {
-        let field = self
-            .handle
-            .field(NODE_ID_FIELD)
-            .ok_or("no _node_id field in schema")?;
-        let term = ld_lucivy::schema::Term::from_field_u64(field, doc_id);
-        let mut guard = self
-            .handle
-            .writer
-            .lock()
-            .map_err(|_| "writer lock poisoned".to_string())?;
-        let writer = guard.as_mut().ok_or("index is closed")?;
-        writer.delete_term(term);
-        self.handle.mark_uncommitted();
-        Ok(())
+        self.handle.delete_by_node_id(doc_id)
     }
 
     fn update(&self, doc_id: u64, fields_json: &str) -> Result<(), String> {
@@ -255,31 +215,11 @@ impl LucivyIndex {
     }
 
     fn commit(&self) -> Result<(), String> {
-        let mut guard = self
-            .handle
-            .writer
-            .lock()
-            .map_err(|_| "writer lock poisoned".to_string())?;
-        let writer = guard.as_mut().ok_or("index is closed")?;
-        writer.commit().map_err(|e| e.to_string())?;
-        self.handle
-            .reader
-            .reload()
-            .map_err(|e| e.to_string())?;
-        self.handle.mark_committed();
-        Ok(())
+        self.handle.commit()
     }
 
     fn rollback(&self) -> Result<(), String> {
-        let mut guard = self
-            .handle
-            .writer
-            .lock()
-            .map_err(|_| "writer lock poisoned".to_string())?;
-        let writer = guard.as_mut().ok_or("index is closed")?;
-        writer.rollback().map_err(|e| e.to_string())?;
-        self.handle.mark_committed();
-        Ok(())
+        Err("rollback is not supported on ShardedHandle".to_string())
     }
 
     fn close(&self) -> Result<(), String> {
@@ -291,14 +231,10 @@ impl LucivyIndex {
 
 impl LucivyIndex {
     fn export_snapshot(&self) -> Result<Vec<u8>, String> {
-        snapshot::check_committed(&self.handle, &self.index_path)?;
-
-        let files = snapshot::read_directory_files(std::path::Path::new(&self.index_path))?;
-        let idx = snapshot::SnapshotIndex {
-            path: &self.index_path,
-            files,
-        };
-        Ok(snapshot::export_snapshot(&[idx]))
+        snapshot::export_to_snapshot(
+            &self.handle,
+            std::path::Path::new(&self.index_path),
+        )
     }
 
     fn export_snapshot_to(&self, path: &str) -> Result<(), String> {
@@ -310,33 +246,21 @@ impl LucivyIndex {
 }
 
 fn lucivy_import_snapshot(data: &[u8], dest_path: &str) -> Result<Box<LucivyIndex>, String> {
-    let snap = snapshot::import_snapshot(data)?;
-    if snap.indexes.len() != 1 {
-        return Err(format!(
-            "expected 1 index in snapshot, got {}",
-            snap.indexes.len()
-        ));
-    }
-    let imported = &snap.indexes[0];
-    write_imported_files(dest_path, &imported.files)?;
-    lucivy_open(dest_path)
+    let dest = std::path::Path::new(dest_path);
+    let handle = snapshot::import_from_snapshot(data, dest)?;
+    let text_fields = extract_text_fields(&handle.config);
+
+    Ok(Box::new(LucivyIndex {
+        handle,
+        index_path: dest_path.to_string(),
+        text_fields,
+    }))
 }
 
 fn lucivy_import_snapshot_from(path: &str, dest_path: &str) -> Result<Box<LucivyIndex>, String> {
     let data = std::fs::read(path)
         .map_err(|e| format!("cannot read snapshot: {e}"))?;
     lucivy_import_snapshot(&data, dest_path)
-}
-
-fn write_imported_files(dest_path: &str, files: &[(String, Vec<u8>)]) -> Result<(), String> {
-    std::fs::create_dir_all(dest_path)
-        .map_err(|e| format!("cannot create directory '{}': {e}", dest_path))?;
-    for (name, data) in files {
-        let file_path = std::path::Path::new(dest_path).join(name);
-        std::fs::write(&file_path, data)
-            .map_err(|e| format!("cannot write '{}': {e}", file_path.display()))?;
-    }
-    Ok(())
 }
 
 // ── Search ─────────────────────────────────────────────────────────────────
@@ -348,9 +272,8 @@ impl LucivyIndex {
         limit: u32,
     ) -> Result<Vec<ffi::SearchResult>, String> {
         let query_config = self.parse_query(query_json)?;
-        let top_docs = self.handle.search(&query_config, limit as usize, None)?;
-        let searcher = self.handle.reader.searcher();
-        collect_results(&searcher, &top_docs, &self.handle.schema)
+        let results = self.handle.search(&query_config, limit as usize, None)?;
+        collect_results(&self.handle, &results)
     }
 
     fn search_with_highlights(
@@ -361,14 +284,8 @@ impl LucivyIndex {
         let query_config = self.parse_query(query_json)?;
         let highlight_sink = Arc::new(HighlightSink::new());
 
-        let top_docs = self.handle.search(&query_config, limit as usize, Some(highlight_sink.clone()))?;
-        let searcher = self.handle.reader.searcher();
-        collect_results_with_highlights(
-            &searcher,
-            &top_docs,
-            &self.handle.schema,
-            Some(&highlight_sink),
-        )
+        let results = self.handle.search(&query_config, limit as usize, Some(highlight_sink.clone()))?;
+        collect_results_with_highlights(&self.handle, &results, Some(&highlight_sink))
     }
 
     fn search_filtered(
@@ -379,9 +296,8 @@ impl LucivyIndex {
     ) -> Result<Vec<ffi::SearchResult>, String> {
         let query_config = self.parse_query(query_json)?;
         let id_set: HashSet<u64> = allowed_ids.iter().copied().collect();
-        let top_docs = self.handle.search_filtered(&query_config, limit as usize, None, id_set)?;
-        let searcher = self.handle.reader.searcher();
-        collect_results(&searcher, &top_docs, &self.handle.schema)
+        let results = self.handle.search_filtered(&query_config, limit as usize, None, id_set)?;
+        collect_results(&self.handle, &results)
     }
 
     fn search_filtered_with_highlights(
@@ -394,14 +310,8 @@ impl LucivyIndex {
         let highlight_sink = Arc::new(HighlightSink::new());
 
         let id_set: HashSet<u64> = allowed_ids.iter().copied().collect();
-        let top_docs = self.handle.search_filtered(&query_config, limit as usize, Some(highlight_sink.clone()), id_set)?;
-        let searcher = self.handle.reader.searcher();
-        collect_results_with_highlights(
-            &searcher,
-            &top_docs,
-            &self.handle.schema,
-            Some(&highlight_sink),
-        )
+        let results = self.handle.search_filtered(&query_config, limit as usize, Some(highlight_sink.clone()), id_set)?;
+        collect_results_with_highlights(&self.handle, &results, Some(&highlight_sink))
     }
 }
 
@@ -409,7 +319,7 @@ impl LucivyIndex {
 
 impl LucivyIndex {
     fn num_docs(&self) -> u64 {
-        self.handle.reader.searcher().num_docs()
+        self.handle.num_docs()
     }
 
     fn get_path(&self) -> &str {
@@ -417,10 +327,7 @@ impl LucivyIndex {
     }
 
     fn get_schema_json(&self) -> String {
-        match &self.handle.config {
-            Some(config) => serde_json::to_string(config).unwrap_or_default(),
-            None => String::new(),
-        }
+        serde_json::to_string(&self.handle.config).unwrap_or_default()
     }
 
     fn get_schema(&self) -> Vec<ffi::FieldInfo> {
@@ -532,7 +439,7 @@ fn extract_text_fields(config: &query::SchemaConfig) -> Vec<String> {
 }
 
 fn add_fields_from_map(
-    handle: &LucivyHandle,
+    handle: &ShardedHandle,
     doc: &mut LucivyDocument,
     fields: &HashMap<String, serde_json::Value>,
 ) -> Result<(), String> {
@@ -543,7 +450,7 @@ fn add_fields_from_map(
 }
 
 fn add_field_value(
-    handle: &LucivyHandle,
+    handle: &ShardedHandle,
     doc: &mut LucivyDocument,
     field_name: &str,
     value: &serde_json::Value,
@@ -584,39 +491,47 @@ fn add_field_value(
 }
 
 fn collect_results(
-    searcher: &Searcher,
-    top_docs: &[(f32, DocAddress)],
-    schema: &ld_lucivy::schema::Schema,
+    handle: &ShardedHandle,
+    results: &[ShardedSearchResult],
 ) -> Result<Vec<ffi::SearchResult>, String> {
-    let nid_field = schema
+    let nid_field = handle.schema
         .get_field(NODE_ID_FIELD)
         .map_err(|_| "no _node_id field in schema")?;
 
-    let mut results = Vec::with_capacity(top_docs.len());
-    for &(score, doc_addr) in top_docs {
-        let doc: LucivyDocument = searcher.doc(doc_addr).map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(results.len());
+    for r in results {
+        let shard = handle.shard(r.shard_id)
+            .ok_or_else(|| format!("shard {} not found", r.shard_id))?;
+        let searcher = shard.reader.searcher();
+        let doc: LucivyDocument = searcher.doc(r.doc_address)
+            .map_err(|e| e.to_string())?;
+
         let doc_id = doc
             .get_first(nid_field)
             .and_then(|v| v.as_value().as_u64())
             .unwrap_or(0);
-        results.push(ffi::SearchResult { doc_id, score });
+        out.push(ffi::SearchResult { doc_id, score: r.score });
     }
-    Ok(results)
+    Ok(out)
 }
 
 fn collect_results_with_highlights(
-    searcher: &Searcher,
-    top_docs: &[(f32, DocAddress)],
-    schema: &ld_lucivy::schema::Schema,
+    handle: &ShardedHandle,
+    results: &[ShardedSearchResult],
     highlight_sink: Option<&HighlightSink>,
 ) -> Result<Vec<ffi::SearchResultWithHighlights>, String> {
-    let nid_field = schema
+    let nid_field = handle.schema
         .get_field(NODE_ID_FIELD)
         .map_err(|_| "no _node_id field in schema")?;
 
-    let mut results = Vec::with_capacity(top_docs.len());
-    for &(score, doc_addr) in top_docs {
-        let doc: LucivyDocument = searcher.doc(doc_addr).map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(results.len());
+    for r in results {
+        let shard = handle.shard(r.shard_id)
+            .ok_or_else(|| format!("shard {} not found", r.shard_id))?;
+        let searcher = shard.reader.searcher();
+        let doc: LucivyDocument = searcher.doc(r.doc_address)
+            .map_err(|e| e.to_string())?;
+
         let doc_id = doc
             .get_first(nid_field)
             .and_then(|v| v.as_value().as_u64())
@@ -625,9 +540,9 @@ fn collect_results_with_highlights(
         let highlights = highlight_sink
             .and_then(|sink| {
                 let seg_id = searcher
-                    .segment_reader(doc_addr.segment_ord)
+                    .segment_reader(r.doc_address.segment_ord)
                     .segment_id();
-                let by_field = sink.get(seg_id, doc_addr.doc_id)?;
+                let by_field = sink.get(seg_id, r.doc_address.doc_id)?;
                 let entries: Vec<ffi::FieldHighlights> = by_field
                     .into_iter()
                     .map(|(field_name, offsets)| ffi::FieldHighlights {
@@ -649,13 +564,13 @@ fn collect_results_with_highlights(
             })
             .unwrap_or_default();
 
-        results.push(ffi::SearchResultWithHighlights {
+        out.push(ffi::SearchResultWithHighlights {
             doc_id,
-            score,
+            score: r.score,
             highlights,
         });
     }
-    Ok(results)
+    Ok(out)
 }
 
 #[cfg(test)]
