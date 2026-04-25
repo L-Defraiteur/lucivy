@@ -381,7 +381,6 @@ async function startup() {
     let datasetName = 'dataset.luce';
     statusEl.textContent = 'Loading dataset...';
     let resp = await fetch('./' + datasetName);
-    }
     if (!resp.ok) throw new Error(`Failed to fetch dataset: ${resp.status}`);
     const blob = await resp.arrayBuffer();
     const data = new Uint8Array(blob);
