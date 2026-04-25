@@ -15,19 +15,25 @@ fenêtre mais pas forcément aligné sur les frontières de mots.
 
 **Sévérité** : cosmétique. Les résultats de recherche sont bons.
 
-### 2. Regex ne trouve pas les sous-chaînes tronquées
+### 2. Regex multi-mot : l'espace déclenche un split
 
-`"programming languag"` (sans le 'e' final) ne match pas en mode regex,
-alors que `"programming language"` match. Le mode contains exact trouve
-les deux sans problème.
+`"programming languag"` ne match pas en regex, mais `"anguag"` (un seul
+mot) match sans problème. Le problème c'est l'espace : la query est
+splittée en deux tokens, et `"languag"` est cherché comme token complet
+dans le term dict (pas en substring).
 
-**Cause probable** : le regex prescan utilise un DFA qui attend le pattern
-complet. Le mode contains utilise le SFX walk (substring matching) qui
-n'a pas cette contrainte.
+Le contains exact n'a pas ce problème car le SFX walk fait du substring
+matching cross-token nativement.
 
-**Sévérité** : faible. Le regex a un comportement attendu (match le pattern
-exact), c'est le contains qui est plus permissif. Mais pourrait surprendre
-les utilisateurs qui s'attendent à du substring matching en regex.
+**Cause** : le regex multi-token split sur espace et chaque mot passe par
+le term dict regex (pas SFX). Un mot tronqué ne match aucun terme exact.
+
+**Fix possible** : pour le regex multi-token, utiliser SFX + regex au lieu
+du term dict regex. Ou ne pas splitter sur espace et traiter la query
+comme un seul pattern regex cross-token.
+
+**Sévérité** : moyenne. L'utilisateur doit écrire `"programming language"`
+(complet) ou `"programming.*languag"` (regex explicit).
 
 ### 3. Logs de diagnostic dans la console
 
