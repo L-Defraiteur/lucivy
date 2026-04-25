@@ -799,7 +799,7 @@ impl luciole::Actor for ShardActor {
 /// Spawn typed shard actors, return a Pool.
 fn spawn_shard_pool(shards: &[Arc<LucivyHandle>]) -> luciole::Pool<ShardMsg> {
     let shards_clone: Vec<Arc<LucivyHandle>> = shards.to_vec();
-    luciole::Pool::spawn(shards.len(), 8192, |i| {
+    luciole::Pool::spawn(shards.len(), 0, |i| { // 0 = unbounded
         ShardActor {
             shard_id: i,
             handle: shards_clone[i].clone(),

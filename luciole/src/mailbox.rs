@@ -125,10 +125,15 @@ where M: From<crate::pool::DrainMsg>
     }
 }
 
-/// Crée une paire (Mailbox, ActorRef) avec un channel bounded.
+/// Crée une paire (Mailbox, ActorRef).
+/// `capacity = 0` → unbounded, `capacity > 0` → bounded.
 /// Le WakeHandle sera attaché par le scheduler au spawn.
 pub fn mailbox<M>(capacity: usize) -> (Mailbox<M>, ActorRef<M>) {
-    let (sender, receiver) = channel::bounded(capacity);
+    let (sender, receiver) = if capacity == 0 {
+        channel::unbounded()
+    } else {
+        channel::bounded(capacity)
+    };
     (
         Mailbox { receiver },
         ActorRef {
