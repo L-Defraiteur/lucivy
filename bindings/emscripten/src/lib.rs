@@ -555,6 +555,12 @@ pub unsafe extern "C" fn lucivy_import_snapshot(
     let index_path = format!("{OPFS_BASE}/{path}");
     let dest = std::path::Path::new(&index_path);
 
+    // Clean up any existing index at this path (stale lock files from previous session).
+    if dest.exists() {
+        let _ = std::fs::remove_dir_all(dest);
+        rlog!("[import_snapshot] cleaned existing index at {index_path}");
+    }
+
     // Use the unified snapshot import (writes to filesystem, opens ShardedHandle).
     let handle = match snapshot::import_from_snapshot(blob, dest) {
         Ok(h) => h,
