@@ -482,16 +482,9 @@ pub unsafe extern "C" fn lucivy_update(
 pub unsafe extern "C" fn lucivy_commit(ctx: *mut LucivyContext) -> *const c_char {
     if ctx.is_null() { return return_error("null context"); }
     let ctx = &*ctx;
-    rlog!("[commit] starting...");
     match ctx.handle.commit() {
-        Ok(()) => {
-            rlog!("[commit] done OK");
-            return_str("ok".into())
-        }
-        Err(e) => {
-            rlog!("[commit] error: {e}");
-            return_error(&e)
-        }
+        Ok(()) => return_str("ok".into()),
+        Err(e) => return_error(&e),
     }
 }
 

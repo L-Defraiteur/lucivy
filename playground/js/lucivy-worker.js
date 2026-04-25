@@ -65,12 +65,8 @@ async function drainRustLogs() {
 }
 
 async function callStr(fn, ...args) {
-    // Drain Rust logs before each call for observability
-    await drainRustLogs();
-    wlog('[callStr] calling ' + fn);
     const types = args.map(a => typeof a === 'number' ? 'number' : 'string');
     const ptr = await Module.ccall(fn, 'number', types, args, { async: true });
-    wlog('[callStr] ' + fn + ' returned');
     return Module.UTF8ToString(ptr);
 }
 
@@ -330,10 +326,8 @@ self.onmessage = async (e) => {
                 const ctx = getCtx(args.path);
 
                 // Synchronous commit via ASYNCIFY (avoids deadlocks with actor system).
-                wlog('[commit] starting...');
                 const res = await callStr('lucivy_commit', ctx);
                 checkResult(res);
-                wlog('[commit] done');
 
                 result = { numDocs: await Module.ccall('lucivy_num_docs', 'number', ['number'], [ctx], { async: true }) };
                 break;
