@@ -135,8 +135,8 @@ pub struct SuffixContainsQuery {
     /// If true, validate separators via GapMap in multi-token mode.
     /// If false (default), just check consecutive token positions — ignores gaps.
     strict_separators: bool,
-    /// Pre-scanned cache from prescan() — keyed by SegmentId.
-    prescan_cache: Option<HashMap<SegmentId, CachedSfxResult>>,
+    /// Pre-scanned cache from prescan() — keyed by (query_text, SegmentId).
+    prescan_cache: Option<HashMap<(String, SegmentId), CachedSfxResult>>,
     /// Global doc_freq from prescan aggregation.
     global_doc_freq: Option<u64>,
 }
@@ -172,7 +172,7 @@ impl SuffixContainsQuery {
     pub fn prescan(
         &self,
         segment_readers: &[&crate::SegmentReader],
-    ) -> crate::Result<(HashMap<SegmentId, CachedSfxResult>, u64)> {
+    ) -> crate::Result<(HashMap<(String, SegmentId), CachedSfxResult>, u64)> {
         let mut cache = HashMap::new();
         let mut doc_freq = 0u64;
 
@@ -224,7 +224,7 @@ impl SuffixContainsQuery {
 
             doc_freq += doc_tf.len() as u64;
             if !doc_tf.is_empty() {
-                cache.insert(segment_id, CachedSfxResult { doc_tf, highlights });
+                cache.insert((self.query_text.clone(), segment_id), CachedSfxResult { doc_tf, highlights });
             }
         }
 
@@ -232,7 +232,7 @@ impl SuffixContainsQuery {
     }
 
     /// Attach pre-scanned cache (from prescan()).
-    pub fn with_prescan_cache(mut self, cache: HashMap<SegmentId, CachedSfxResult>) -> Self {
+    pub fn with_prescan_cache(mut self, cache: HashMap<(String, SegmentId), CachedSfxResult>) -> Self {
         self.prescan_cache = Some(cache);
         self
     }
@@ -407,7 +407,7 @@ impl Query for SuffixContainsQuery {
 
     fn take_prescan_cache(
         &mut self,
-        out: &mut std::collections::HashMap<crate::index::SegmentId, CachedSfxResult>,
+        out: &mut std::collections::HashMap<(String, crate::index::SegmentId), CachedSfxResult>,
     ) {
         if let Some(cache) = self.prescan_cache.take() {
             out.extend(cache);
@@ -416,12 +416,17 @@ impl Query for SuffixContainsQuery {
 
     fn inject_prescan_cache(
         &mut self,
-        cache: std::collections::HashMap<crate::index::SegmentId, CachedSfxResult>,
+        cache: std::collections::HashMap<(String, crate::index::SegmentId), CachedSfxResult>,
     ) {
+        // Filter: only take entries matching our query_text.
+        let filtered: HashMap<(String, SegmentId), CachedSfxResult> = cache.into_iter()
+            .filter(|((qt, _), _)| qt == &self.query_text)
+            .collect();
+        if filtered.is_empty() { return; }
         if let Some(ref mut existing) = self.prescan_cache {
-            existing.extend(cache);
+            existing.extend(filtered);
         } else {
-            self.prescan_cache = Some(cache);
+            self.prescan_cache = Some(filtered);
         }
     }
 
@@ -493,8 +498,8 @@ struct SuffixContainsWeight {
     global_num_tokens: u64,
     continuation: bool,
     strict_separators: bool,
-    /// Pre-scanned cache: segment_id → (doc_tf, highlights). Populated by prescan().
-    prescan_cache: HashMap<SegmentId, CachedSfxResult>,
+    /// Pre-scanned cache: (query_text, segment_id) → (doc_tf, highlights).
+    prescan_cache: HashMap<(String, SegmentId), CachedSfxResult>,
     /// Global doc_freq from prescan (correct IDF across all segments/shards).
     global_doc_freq: u64,
 }
@@ -565,7 +570,7 @@ impl Weight for SuffixContainsWeight {
         let segment_id = reader.segment_id();
 
         // Use pre-scanned cache if available (from prescan or auto-prescan in weight()).
-        if let Some(cached) = self.prescan_cache.get(&segment_id) {
+        if let Some(cached) = self.prescan_cache.get(&(self.query_text.clone(), segment_id)) {
             return self.scorer_from_cached(reader, boost, segment_id, cached.clone());
         }
 

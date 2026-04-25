@@ -28,7 +28,7 @@ use crate::sharded_handle::{ShardMsg, ShardedSearchResult, ScoredEntry};
 /// Prescan result from one shard:
 /// (sfx_cache, sfx_freqs, regex_cache, regex_freqs).
 type PrescanResult = (
-    HashMap<ld_lucivy::index::SegmentId, ld_lucivy::query::CachedSfxResult>,
+    HashMap<(String, ld_lucivy::index::SegmentId), ld_lucivy::query::CachedSfxResult>,
     HashMap<String, u64>,
     HashMap<ld_lucivy::index::SegmentId, ld_lucivy::query::CachedRegexResult>,
     HashMap<String, u64>,
@@ -186,7 +186,7 @@ impl Node for PrescanShardNode {
 
                 *sfx_freqs.entry(param.query_text.clone()).or_insert(0) += doc_tf.len() as u64;
                 if !doc_tf.is_empty() {
-                    sfx_cache.insert(seg_reader.segment_id(), CachedSfxResult::new(doc_tf, highlights));
+                    sfx_cache.insert((param.query_text.clone(), seg_reader.segment_id()), CachedSfxResult::new(doc_tf, highlights));
                 }
             }
         }

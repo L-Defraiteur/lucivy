@@ -195,7 +195,7 @@ impl Query for BooleanQuery {
 
     fn take_prescan_cache(
         &mut self,
-        out: &mut std::collections::HashMap<crate::index::SegmentId, crate::query::phrase_query::suffix_contains_query::CachedSfxResult>,
+        out: &mut std::collections::HashMap<(String, crate::index::SegmentId), crate::query::phrase_query::suffix_contains_query::CachedSfxResult>,
     ) {
         for (_occur, subquery) in &mut self.subqueries {
             subquery.take_prescan_cache(out);
@@ -204,7 +204,7 @@ impl Query for BooleanQuery {
 
     fn inject_prescan_cache(
         &mut self,
-        cache: std::collections::HashMap<crate::index::SegmentId, crate::query::phrase_query::suffix_contains_query::CachedSfxResult>,
+        cache: std::collections::HashMap<(String, crate::index::SegmentId), crate::query::phrase_query::suffix_contains_query::CachedSfxResult>,
     ) {
         // Each sub-query gets a clone (they have different query_text keys in the cache)
         for (_occur, subquery) in &mut self.subqueries {

@@ -260,7 +260,7 @@ impl LucivyHandle {
 
                     *sfx_freqs.entry(param.query_text.clone()).or_insert(0) += doc_tf.len() as u64;
                     if !doc_tf.is_empty() {
-                        sfx_cache.insert(seg_reader.segment_id(), CachedSfxResult::new(doc_tf, highlights));
+                        sfx_cache.insert((param.query_text.clone(), seg_reader.segment_id()), CachedSfxResult::new(doc_tf, highlights));
                     }
                 }
             }
