@@ -1,34 +1,30 @@
 //! lucivy-wasm — WASM bindings for ld-lucivy BM25 full-text search.
 //!
 //! Runs in a Web Worker with OPFS persistence.
-//! The Directory is in-memory (MemoryDirectory); OPFS sync happens
-//! at the JS boundary via import_file / export_dirty.
-
-mod directory;
+//! Uses ShardedHandle with RamShardStorage (in-memory for WASM).
+//! OPFS sync happens at the JS boundary via import_file / export_dirty.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-
+use ld_lucivy::directory::Directory;
 use ld_lucivy::query::HighlightSink;
 use ld_lucivy::schema::{FieldType, Value as LucivyValue};
-use ld_lucivy::{DocAddress, LucivyDocument, Searcher};
+use ld_lucivy::LucivyDocument;
 
-use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD};
+use lucivy_core::handle::NODE_ID_FIELD;
 use lucivy_core::query;
 use lucivy_core::snapshot;
+use lucivy_core::sharded_handle::{RamShardStorage, ShardStorage, ShardedHandle, ShardedSearchResult};
 
 use wasm_bindgen::prelude::*;
-
-use crate::directory::MemoryDirectory;
 
 // ── Index ──────────────────────────────────────────────────────────────────
 
 #[wasm_bindgen]
 pub struct Index {
-    handle: LucivyHandle,
+    handle: ShardedHandle,
     text_fields: Vec<String>,
-    directory: MemoryDirectory,
     index_path: String,
 }
 
@@ -36,20 +32,22 @@ pub struct Index {
 impl Index {
     /// Create a new index.
     /// `fields_json`: JSON array of field definitions.
-    /// Returns an Index. Caller should then call `export_all_files()` to persist to OPFS.
+    /// `shards`: number of shards (default 1).
+    /// Returns an Index.
     #[wasm_bindgen(constructor)]
-    pub fn create(path: &str, fields_json: &str) -> Result<Index, JsError> {
+    pub fn create(path: &str, fields_json: &str, shards: Option<usize>) -> Result<Index, JsError> {
         let fields: Vec<query::FieldDef> = serde_json::from_str(fields_json)
             .map_err(|e| JsError::new(&format!("invalid fields JSON: {e}")))?;
 
         let config = query::SchemaConfig {
             fields,
             tokenizer: None,
+            shards,
             ..Default::default()
         };
 
-        let directory = MemoryDirectory::new();
-        let handle = LucivyHandle::create(directory.clone(), &config)
+        let storage = Box::new(RamShardStorage::new());
+        let handle = ShardedHandle::create_with_storage(storage, &config)
             .map_err(|e| JsError::new(&e))?;
 
         let text_fields = extract_text_fields(&config);
@@ -57,20 +55,29 @@ impl Index {
         Ok(Index {
             handle,
             text_fields,
-            directory,
             index_path: path.to_string(),
         })
     }
 
     /// Open an existing index from files previously read from OPFS.
     /// `files`: JS Map of filename → Uint8Array.
-    /// The JS side reads all files from OPFS and passes them here.
+    ///
+    /// File keys should be prefixed with shard directory, e.g.:
+    /// - `_shard_config.json` (root file)
+    /// - `shard_0/meta.json` (shard file)
+    /// - `shard_0/some_segment.term` (shard file)
+    ///
+    /// Legacy non-sharded files (no `shard_` prefix, no `_shard_` prefix)
+    /// are placed into `shard_0/` automatically.
     #[wasm_bindgen]
     pub fn open(path: &str, files: &js_sys::Map) -> Result<Index, JsError> {
-        let directory = MemoryDirectory::new();
+        let storage = RamShardStorage::new();
 
-        // Import all files from JS Map into MemoryDirectory.
+        // Import all files from JS Map into RamShardStorage.
         let entries = files.entries();
+        let mut has_shard_config = false;
+        let mut legacy_files: Vec<(String, Vec<u8>)> = Vec::new();
+
         loop {
             let next = entries.next().map_err(|e| JsError::new(&format!("map iteration error: {e:?}")))?;
             if next.done() {
@@ -80,21 +87,60 @@ impl Index {
             let key: String = pair.get(0).as_string()
                 .ok_or_else(|| JsError::new("file key must be a string"))?;
             let value = js_sys::Uint8Array::new(&pair.get(1));
-            directory.import_file(&key, value.to_vec());
+            let data = value.to_vec();
+
+            if key == "_shard_config.json" || key == "_shard_stats.bin" {
+                // Root-level file.
+                has_shard_config = has_shard_config || key == "_shard_config.json";
+                storage.write_root_file(&key, &data)
+                    .map_err(|e| JsError::new(&e))?;
+            } else if key.starts_with("shard_") {
+                // Sharded file: "shard_N/filename"
+                if let Some(slash_pos) = key.find('/') {
+                    let shard_prefix = &key[..slash_pos]; // "shard_N"
+                    let filename = &key[slash_pos + 1..];
+                    let shard_id: usize = shard_prefix.strip_prefix("shard_")
+                        .and_then(|s| s.parse().ok())
+                        .ok_or_else(|| JsError::new(&format!("invalid shard prefix: {shard_prefix}")))?;
+                    storage.import_shard_file(shard_id, filename, data);
+                } else {
+                    // Just "shard_N" with no slash — skip or treat as shard_0
+                    legacy_files.push((key, data));
+                }
+            } else {
+                // Legacy non-sharded file — collect for shard_0
+                legacy_files.push((key, data));
+            }
         }
 
-        let handle = LucivyHandle::open(directory.clone())
+        // If no shard config found, this is a legacy non-sharded index.
+        // Import legacy files into shard_0 and synthesize a config.
+        if !has_shard_config && !legacy_files.is_empty() {
+            for (name, data) in &legacy_files {
+                storage.import_shard_file(0, name, data.clone());
+            }
+            // Try to read _config.json from shard_0 to build _shard_config.json.
+            if let Some((_, config_data)) = legacy_files.iter().find(|(n, _)| n == "_config.json") {
+                let mut config: query::SchemaConfig = serde_json::from_slice(config_data)
+                    .map_err(|e| JsError::new(&format!("cannot parse _config.json: {e}")))?;
+                config.shards = Some(1);
+                let config_json = serde_json::to_string(&config)
+                    .map_err(|e| JsError::new(&format!("cannot serialize shard config: {e}")))?;
+                storage.write_root_file("_shard_config.json", config_json.as_bytes())
+                    .map_err(|e| JsError::new(&e))?;
+            } else {
+                return Err(JsError::new("no _shard_config.json or _config.json found in files"));
+            }
+        }
+
+        let handle = ShardedHandle::open_with_storage(Box::new(storage))
             .map_err(|e| JsError::new(&e))?;
 
-        let text_fields = match &handle.config {
-            Some(config) => extract_text_fields(config),
-            None => Vec::new(),
-        };
+        let text_fields = extract_text_fields(&handle.config);
 
         Ok(Index {
             handle,
             text_fields,
-            directory,
             index_path: path.to_string(),
         })
     }
@@ -115,13 +161,8 @@ impl Index {
             self.add_field_value(&mut doc, key, value)?;
         }
 
-        let mut guard = self.handle.writer.lock()
-            .map_err(|_| JsError::new("writer lock poisoned"))?;
-        let writer = guard.as_mut()
-            .ok_or_else(|| JsError::new("index is closed"))?;
-        writer.add_document(doc)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        self.handle.mark_uncommitted();
+        self.handle.add_document(doc, doc_id as u64)
+            .map_err(|e| JsError::new(&e))?;
         Ok(())
     }
 
@@ -130,10 +171,6 @@ impl Index {
         let docs: Vec<serde_json::Value> = serde_json::from_str(docs_json)
             .map_err(|e| JsError::new(&format!("invalid docs JSON: {e}")))?;
 
-        let mut guard = self.handle.writer.lock()
-            .map_err(|_| JsError::new("writer lock poisoned"))?;
-        let writer = guard.as_mut()
-            .ok_or_else(|| JsError::new("index is closed"))?;
         let nid_field = self.handle.field(NODE_ID_FIELD)
             .ok_or_else(|| JsError::new("no _node_id field in schema"))?;
 
@@ -150,25 +187,16 @@ impl Index {
                 if key == "docId" || key == "doc_id" { continue; }
                 self.add_field_value(&mut doc, key, value)?;
             }
-            writer.add_document(doc)
-                .map_err(|e| JsError::new(&e.to_string()))?;
+            self.handle.add_document(doc, doc_id)
+                .map_err(|e| JsError::new(&e))?;
         }
-        self.handle.mark_uncommitted();
         Ok(())
     }
 
     #[wasm_bindgen]
     pub fn remove(&self, doc_id: u32) -> Result<(), JsError> {
-        let field = self.handle.field(NODE_ID_FIELD)
-            .ok_or_else(|| JsError::new("no _node_id field in schema"))?;
-        let term = ld_lucivy::schema::Term::from_field_u64(field, doc_id as u64);
-        let mut guard = self.handle.writer.lock()
-            .map_err(|_| JsError::new("writer lock poisoned"))?;
-        let writer = guard.as_mut()
-            .ok_or_else(|| JsError::new("index is closed"))?;
-        writer.delete_term(term);
-        self.handle.mark_uncommitted();
-        Ok(())
+        self.handle.delete_by_node_id(doc_id as u64)
+            .map_err(|e| JsError::new(&e))
     }
 
     #[wasm_bindgen]
@@ -180,70 +208,33 @@ impl Index {
 
     // ── Transaction ────────────────────────────────────────────────────
 
-    /// Commit changes to the in-memory directory.
+    /// Commit changes.
     /// After this, call `exportDirtyFiles()` to get files to persist to OPFS.
     #[wasm_bindgen]
     pub fn commit(&self) -> Result<(), JsError> {
-        let mut guard = self.handle.writer.lock()
-            .map_err(|_| JsError::new("writer lock poisoned"))?;
-        let writer = guard.as_mut()
-            .ok_or_else(|| JsError::new("index is closed"))?;
-        writer.commit()
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        self.handle.reader.reload()
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        self.handle.mark_committed();
-        Ok(())
+        self.handle.commit()
+            .map_err(|e| JsError::new(&e))
     }
 
+    /// Close the index (flush + release writer locks).
     #[wasm_bindgen]
-    pub fn rollback(&self) -> Result<(), JsError> {
-        let mut guard = self.handle.writer.lock()
-            .map_err(|_| JsError::new("writer lock poisoned"))?;
-        let writer = guard.as_mut()
-            .ok_or_else(|| JsError::new("index is closed"))?;
-        writer.rollback()
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        self.handle.mark_committed();
-        Ok(())
+    pub fn close(&self) -> Result<(), JsError> {
+        self.handle.close()
+            .map_err(|e| JsError::new(&e))
     }
 
     // ── OPFS sync ──────────────────────────────────────────────────────
 
-    /// Export dirty files (modified + deleted) since last export.
-    /// Returns a JS object: `{ modified: [[path, Uint8Array], ...], deleted: [path, ...] }`
-    /// The JS side writes modified files to OPFS and removes deleted ones.
-    #[wasm_bindgen(js_name = "exportDirtyFiles")]
-    pub fn export_dirty_files(&self) -> Result<JsValue, JsError> {
-        let (modified, deleted) = self.directory.export_dirty();
-
-        let result = js_sys::Object::new();
-
-        let mod_array = js_sys::Array::new();
-        for (path, data) in modified {
-            let pair = js_sys::Array::new();
-            pair.push(&JsValue::from_str(&path));
-            pair.push(&js_sys::Uint8Array::from(data.as_slice()).into());
-            mod_array.push(&pair);
-        }
-        js_sys::Reflect::set(&result, &"modified".into(), &mod_array)
-            .map_err(|_| JsError::new("reflect set failed"))?;
-
-        let del_array = js_sys::Array::new();
-        for path in deleted {
-            del_array.push(&JsValue::from_str(&path));
-        }
-        js_sys::Reflect::set(&result, &"deleted".into(), &del_array)
-            .map_err(|_| JsError::new("reflect set failed"))?;
-
-        Ok(result.into())
-    }
-
-    /// Export ALL files (for initial persist after create).
+    /// Export ALL shard files (for OPFS sync).
     /// Returns: `[[path, Uint8Array], ...]`
+    ///
+    /// Paths are prefixed with shard directory, e.g.:
+    /// - `_shard_config.json`
+    /// - `shard_0/meta.json`
+    /// - `shard_0/some_segment.term`
     #[wasm_bindgen(js_name = "exportAllFiles")]
     pub fn export_all_files(&self) -> Result<JsValue, JsError> {
-        let files = self.directory.export_all();
+        let files = self.collect_all_shard_files()?;
         let array = js_sys::Array::new();
         for (path, data) in files {
             let pair = js_sys::Array::new();
@@ -261,15 +252,40 @@ impl Index {
     /// Returns a `Uint8Array`.
     #[wasm_bindgen(js_name = "exportSnapshot")]
     pub fn export_snapshot(&self) -> Result<Vec<u8>, JsError> {
-        snapshot::check_committed(&self.handle, &self.index_path)
-            .map_err(|e| JsError::new(&e))?;
+        // Collect shard files for snapshot.
+        let num_shards = self.handle.num_shards();
 
-        let files = self.collect_snapshot_files();
-        let snap = snapshot::SnapshotIndex {
-            path: &self.index_path,
-            files,
-        };
-        Ok(snapshot::export_snapshot(&[snap]))
+        // Check all shards are committed.
+        for i in 0..num_shards {
+            let shard = self.handle.shard(i)
+                .ok_or_else(|| JsError::new(&format!("shard {i} not found")))?;
+            snapshot::check_committed(shard, &format!("shard_{i}"))
+                .map_err(|e| JsError::new(&e))?;
+        }
+
+        // Collect root files.
+        let mut root_files = Vec::new();
+        let config_json = serde_json::to_string(&self.handle.config)
+            .map_err(|e| JsError::new(&format!("cannot serialize config: {e}")))?;
+        root_files.push(("_shard_config.json".to_string(), config_json.into_bytes()));
+
+        // Collect per-shard files.
+        let shard_paths: Vec<String> = (0..num_shards)
+            .map(|i| format!("shard_{i}"))
+            .collect();
+        let mut shard_data: Vec<Vec<(String, Vec<u8>)>> = Vec::new();
+        for i in 0..num_shards {
+            shard_data.push(self.collect_shard_files(i)?);
+        }
+        let shard_indexes: Vec<snapshot::SnapshotIndex<'_>> = shard_paths.iter()
+            .zip(shard_data.iter())
+            .map(|(path, files)| snapshot::SnapshotIndex {
+                path: path.as_str(),
+                files: files.clone(),
+            })
+            .collect();
+
+        Ok(snapshot::export_snapshot_sharded(&shard_indexes, &root_files))
     }
 
     /// Import a LUCE snapshot blob and return a new Index.
@@ -277,30 +293,57 @@ impl Index {
     /// `path`: the logical path for the imported index.
     #[wasm_bindgen(js_name = "importSnapshot")]
     pub fn import_snapshot(data: &[u8], path: &str) -> Result<Index, JsError> {
-        let mut snap = snapshot::import_snapshot(data)
-            .map_err(|e| JsError::new(&e))?;
-        if snap.indexes.is_empty() {
-            return Err(JsError::new("snapshot contains no indexes"));
-        }
-        let imported = snap.indexes.remove(0);
-
-        let directory = MemoryDirectory::new();
-        for (name, file_data) in &imported.files {
-            directory.import_file(name, file_data.clone());
-        }
-
-        let handle = LucivyHandle::open(directory.clone())
+        let imported = snapshot::import_snapshot(data)
             .map_err(|e| JsError::new(&e))?;
 
-        let text_fields = match &handle.config {
-            Some(config) => extract_text_fields(config),
-            None => Vec::new(),
-        };
+        let storage = RamShardStorage::new();
+
+        if imported.is_sharded {
+            // Sharded snapshot: import root files + per-shard files.
+            for (name, file_data) in &imported.root_files {
+                storage.write_root_file(name, file_data)
+                    .map_err(|e| JsError::new(&e))?;
+            }
+            for index in &imported.indexes {
+                // Parse shard_id from path (e.g. "shard_0").
+                let shard_id: usize = index.path.strip_prefix("shard_")
+                    .and_then(|s| s.parse().ok())
+                    .ok_or_else(|| JsError::new(&format!("invalid shard path: {}", index.path)))?;
+                for (name, file_data) in &index.files {
+                    storage.import_shard_file(shard_id, name, file_data.clone());
+                }
+            }
+        } else {
+            // Non-sharded snapshot: import into shard_0.
+            if imported.indexes.is_empty() {
+                return Err(JsError::new("snapshot contains no indexes"));
+            }
+            let first = &imported.indexes[0];
+            for (name, file_data) in &first.files {
+                storage.import_shard_file(0, name, file_data.clone());
+            }
+            // Build _shard_config.json from _config.json.
+            if let Some((_, config_data)) = first.files.iter().find(|(n, _)| n == "_config.json") {
+                let mut config: query::SchemaConfig = serde_json::from_slice(config_data)
+                    .map_err(|e| JsError::new(&format!("cannot parse _config.json: {e}")))?;
+                config.shards = Some(1);
+                let config_json = serde_json::to_string(&config)
+                    .map_err(|e| JsError::new(&format!("cannot serialize shard config: {e}")))?;
+                storage.write_root_file("_shard_config.json", config_json.as_bytes())
+                    .map_err(|e| JsError::new(&e))?;
+            } else {
+                return Err(JsError::new("no _config.json in snapshot"));
+            }
+        }
+
+        let handle = ShardedHandle::open_with_storage(Box::new(storage))
+            .map_err(|e| JsError::new(&e))?;
+
+        let text_fields = extract_text_fields(&handle.config);
 
         Ok(Index {
             handle,
             text_fields,
-            directory,
             index_path: path.to_string(),
         })
     }
@@ -321,11 +364,11 @@ impl Index {
             None
         };
 
-        let top_docs = self.handle.search(&query_config, limit as usize, highlight_sink.clone())
+        let results = self.handle.search(&query_config, limit as usize, highlight_sink.clone())
             .map_err(|e| JsError::new(&e))?;
-        let searcher = self.handle.reader.searcher();
-        let results = collect_results(&searcher, &top_docs, &self.handle.schema, highlight_sink.as_deref())?;
-        serde_json::to_string(&results)
+
+        let json_results = collect_sharded_results(&self.handle, &results, highlight_sink.as_deref())?;
+        serde_json::to_string(&json_results)
             .map_err(|e| JsError::new(&format!("serialize error: {e}")))
     }
 
@@ -349,11 +392,11 @@ impl Index {
         };
 
         let id_set: HashSet<u64> = allowed_ids.iter().map(|&id| id as u64).collect();
-        let top_docs = self.handle.search_filtered(&query_config, limit as usize, highlight_sink.clone(), id_set)
+        let results = self.handle.search_filtered(&query_config, limit as usize, highlight_sink.clone(), id_set)
             .map_err(|e| JsError::new(&e))?;
-        let searcher = self.handle.reader.searcher();
-        let results = collect_results(&searcher, &top_docs, &self.handle.schema, highlight_sink.as_deref())?;
-        serde_json::to_string(&results)
+
+        let json_results = collect_sharded_results(&self.handle, &results, highlight_sink.as_deref())?;
+        serde_json::to_string(&json_results)
             .map_err(|e| JsError::new(&format!("serialize error: {e}")))
     }
 
@@ -361,7 +404,12 @@ impl Index {
 
     #[wasm_bindgen(js_name = "numDocs", getter)]
     pub fn num_docs(&self) -> u32 {
-        self.handle.reader.searcher().num_docs() as u32
+        self.handle.num_docs() as u32
+    }
+
+    #[wasm_bindgen(js_name = "numShards", getter)]
+    pub fn num_shards(&self) -> usize {
+        self.handle.num_shards()
     }
 
     #[wasm_bindgen(getter)]
@@ -371,10 +419,7 @@ impl Index {
 
     #[wasm_bindgen(js_name = "schemaJson", getter)]
     pub fn schema_json(&self) -> String {
-        match &self.handle.config {
-            Some(config) => serde_json::to_string(config).unwrap_or_default(),
-            None => String::new(),
-        }
+        serde_json::to_string(&self.handle.config).unwrap_or_default()
     }
 }
 
@@ -383,11 +428,52 @@ impl Index {
 const EXCLUDED_FILES: &[&str] = &[".lock", ".tantivy-writer.lock", ".lucivy-writer.lock", ".managed.json"];
 
 impl Index {
-    fn collect_snapshot_files(&self) -> Vec<(String, Vec<u8>)> {
-        self.directory.export_all()
-            .into_iter()
-            .filter(|(name, _)| !EXCLUDED_FILES.contains(&name.as_str()))
-            .collect()
+    /// Collect all files from a single shard (excluding lock files).
+    fn collect_shard_files(&self, shard_id: usize) -> Result<Vec<(String, Vec<u8>)>, JsError> {
+        let shard = self.handle.shard(shard_id)
+            .ok_or_else(|| JsError::new(&format!("shard {shard_id} not found")))?;
+        let directory = shard.index.directory();
+        let managed = directory.list_managed_files();
+        let mut files = Vec::new();
+        for path in managed {
+            let name = path.to_string_lossy().to_string();
+            if EXCLUDED_FILES.contains(&name.as_str()) {
+                continue;
+            }
+            if let Ok(data) = directory.atomic_read(&path) {
+                files.push((name, data));
+            }
+        }
+        // Also include meta.json and _config.json (atomic files not in managed list).
+        for extra in &["meta.json", "_config.json"] {
+            let p = std::path::Path::new(extra);
+            if !files.iter().any(|(n, _)| n == *extra) {
+                if let Ok(data) = directory.atomic_read(p) {
+                    files.push((extra.to_string(), data));
+                }
+            }
+        }
+        Ok(files)
+    }
+
+    /// Collect all files from all shards (prefixed with shard directory).
+    fn collect_all_shard_files(&self) -> Result<Vec<(String, Vec<u8>)>, JsError> {
+        let num_shards = self.handle.num_shards();
+        let mut all_files = Vec::new();
+
+        // Root config.
+        let config_json = serde_json::to_string(&self.handle.config)
+            .map_err(|e| JsError::new(&format!("cannot serialize config: {e}")))?;
+        all_files.push(("_shard_config.json".to_string(), config_json.into_bytes()));
+
+        // Per-shard files.
+        for i in 0..num_shards {
+            let shard_files = self.collect_shard_files(i)?;
+            for (name, data) in shard_files {
+                all_files.push((format!("shard_{i}/{name}"), data));
+            }
+        }
+        Ok(all_files)
     }
 
     fn add_field_value(
@@ -539,26 +625,29 @@ struct SearchResultJson {
     highlights: Option<HashMap<String, Vec<[u32; 2]>>>,
 }
 
-fn collect_results(
-    searcher: &Searcher,
-    top_docs: &[(f32, DocAddress)],
-    schema: &ld_lucivy::schema::Schema,
+fn collect_sharded_results(
+    handle: &ShardedHandle,
+    results: &[ShardedSearchResult],
     highlight_sink: Option<&HighlightSink>,
 ) -> Result<Vec<SearchResultJson>, JsError> {
-    let nid_field = schema.get_field(NODE_ID_FIELD)
+    let nid_field = handle.schema.get_field(NODE_ID_FIELD)
         .map_err(|_| JsError::new("no _node_id field in schema"))?;
 
-    let mut results = Vec::with_capacity(top_docs.len());
-    for &(score, doc_addr) in top_docs {
-        let doc: LucivyDocument = searcher.doc(doc_addr)
+    let mut out = Vec::with_capacity(results.len());
+    for r in results {
+        let shard = handle.shard(r.shard_id)
+            .ok_or_else(|| JsError::new(&format!("shard {} not found", r.shard_id)))?;
+        let searcher = shard.reader.searcher();
+        let doc: LucivyDocument = searcher.doc(r.doc_address)
             .map_err(|e| JsError::new(&e.to_string()))?;
+
         let doc_id = doc.get_first(nid_field)
             .and_then(|v| v.as_value().as_u64())
             .unwrap_or(0);
 
         let highlights = highlight_sink.and_then(|sink| {
-            let seg_id = searcher.segment_reader(doc_addr.segment_ord).segment_id();
-            let by_field = sink.get(seg_id, doc_addr.doc_id)?;
+            let seg_id = searcher.segment_reader(r.doc_address.segment_ord).segment_id();
+            let by_field = sink.get(seg_id, r.doc_address.doc_id)?;
             let map: HashMap<String, Vec<[u32; 2]>> = by_field.into_iter()
                 .map(|(name, offsets)| {
                     let ranges: Vec<[u32; 2]> = offsets.into_iter()
@@ -570,13 +659,13 @@ fn collect_results(
             if map.is_empty() { None } else { Some(map) }
         });
 
-        results.push(SearchResultJson {
+        out.push(SearchResultJson {
             doc_id: doc_id as u32,
-            score,
+            score: r.score,
             highlights,
         });
     }
-    Ok(results)
+    Ok(out)
 }
 
 #[cfg(test)]
