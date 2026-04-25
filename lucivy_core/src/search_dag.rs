@@ -446,14 +446,15 @@ impl Node for MergeResultsNode {
             }
         }
 
-        let mut results: Vec<ShardedSearchResult> = heap
+        // into_sorted_vec() returns ascending by Ord. Our Ord is reversed
+        // (min-heap), so ascending = highest score first. No reverse needed.
+        let results: Vec<ShardedSearchResult> = heap
             .into_sorted_vec()
             .into_iter()
             .map(|e| ShardedSearchResult {
                 score: e.score, shard_id: e.shard_id, doc_address: e.doc_address,
             })
             .collect();
-        results.reverse();
 
         ctx.metric("total_results", results.len() as f64);
         ctx.set_output("results", PortValue::new(results));
