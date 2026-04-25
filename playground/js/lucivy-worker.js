@@ -338,43 +338,12 @@ self.onmessage = async (e) => {
 
             case 'commit': {
                 const ctx = getCtx(args.path);
-                const syncOpfs = args.sync !== false; // default true, pass sync:false to skip
 
-                // Spawn commit on a dedicated pthread (bypasses ASYNCIFY).
-                wlog('[commit] spawning commit thread...');
-                const rc = await Module.ccall('lucivy_commit_async', 'number',
-                    ['number'], [ctx], { async: true });
-                if (rc !== 0) throw new Error('commit already running');
-                wlog('[commit] thread spawned, polling status via SAB...');
-
-                // Poll COMMIT_STATUS directly from SharedArrayBuffer — zero ccall.
-                const statusView = self._commitStatusView;
-                if (!statusView) throw new Error('commit status view not initialized');
-                await new Promise((resolve, reject) => {
-                    const poll = setInterval(() => {
-                        const status = Atomics.load(statusView, 0);
-                        if (status >= 2) {
-                            clearInterval(poll);
-                            if (status === 2) {
-                                wlog('[commit] done OK (from SAB poll)');
-                                resolve();
-                            } else {
-                                wlog('[commit] FAILED (from SAB poll)');
-                                reject(new Error('commit failed — check [rust] ring buffer logs'));
-                            }
-                        }
-                    }, 50);
-                });
-
-                // Reset status via quick ccall.
-                await Module.ccall('lucivy_commit_finish', 'number', [], [], { async: true });
-
-                // Sync dirty files to OPFS (opt-in, skip during bulk indexing).
-                if (syncOpfs) try {
-                    await syncDirtyToOpfs(args.path, ctx);
-                } catch (e) {
-                    console.warn('[lucivy-worker] OPFS sync skipped:', e.message);
-                }
+                // Synchronous commit via ASYNCIFY (avoids deadlocks with actor system).
+                wlog('[commit] starting...');
+                const res = await callStr('lucivy_commit', ctx);
+                checkResult(res);
+                wlog('[commit] done');
 
                 result = { numDocs: await Module.ccall('lucivy_num_docs', 'number', ['number'], [ctx], { async: true }) };
                 break;

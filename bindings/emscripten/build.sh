@@ -63,6 +63,7 @@ emcc "$STATIC_LIB" \
         "_lucivy_add_many",
         "_lucivy_remove",
         "_lucivy_update",
+        "_lucivy_commit",
         "_lucivy_commit_async",
         "_lucivy_commit_status_ptr",
         "_lucivy_commit_finish",

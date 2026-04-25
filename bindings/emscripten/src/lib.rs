@@ -477,6 +477,27 @@ pub unsafe extern "C" fn lucivy_update(
 
 // ── Transaction ──────────────────────────────────────────────────────────
 
+/// Synchronous commit — call via ccall with {async:true} (ASYNCIFY handles blocking).
+/// This is simpler and avoids deadlocks with the actor system's cooperative waiting.
+#[no_mangle]
+pub unsafe extern "C" fn lucivy_commit(ctx: *mut LucivyContext) -> *const c_char {
+    if ctx.is_null() { return return_error("null context"); }
+    let ctx = &*ctx;
+    rlog!("[commit] starting...");
+    match ctx.handle.commit() {
+        Ok(()) => {
+            rlog!("[commit] done OK");
+            return_str("ok".into())
+        }
+        Err(e) => {
+            rlog!("[commit] error: {e}");
+            return_error(&e)
+        }
+    }
+}
+
+// Legacy async commit via dedicated thread — kept for backward compat but may
+// deadlock with ShardedHandle's actor system. Prefer lucivy_commit (sync).
 static COMMIT_STATUS: AtomicU32 = AtomicU32::new(0);
 
 #[no_mangle]
