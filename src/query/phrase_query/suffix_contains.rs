@@ -168,8 +168,8 @@ where
     // 2. Tokens that END with a prefix of the query (token is shorter than query)
     //    → found by walking prefixes of the query: "sched" → check "sche", "sch", etc.
     let _diag_query = query.to_string();
-    eprintln!("[contains-diag] query='{}' walk_results={} matches_before_continuation={}",
-        _diag_query, walk_results.len(), matches.len());
+    // eprintln!("[contains-diag] query='{}' walk_results={} matches_before_continuation={}",
+    //     _diag_query, walk_results.len(), matches.len());
     if continuation && !anchor_start && query_len >= 2 {
         let gapmap = sfx_reader.gapmap();
 
@@ -227,13 +227,13 @@ where
             }
         }
 
-        if _diag_query == "rag3weaver" {
-            eprintln!("[contains-diag] after source1+2: {} candidate groups (src2 added {})",
-                candidates.len(), candidates.len() - _src2_before);
-            for (&consumed, entries) in &candidates {
-                eprintln!("[contains-diag]   consumed={}: {} entries", consumed, entries.len());
-            }
-        }
+        // if _diag_query == "rag3weaver" {
+        //     eprintln!("[contains-diag] after source1+2: {} candidate groups (src2 added {})",
+        //         candidates.len(), candidates.len() - _src2_before);
+        //     for (&consumed, entries) in &candidates {
+        //         eprintln!("[contains-diag]   consumed={}: {} entries", consumed, entries.len());
+        //     }
+        // }
 
         // Continuation loop (supports N-depth token chains)
         let mut depth_candidates = candidates;
@@ -308,14 +308,14 @@ where
                     let right_ti = left_ti + 1;
                     let gap_raw = gapmap.read_separator(doc_id, left_ti, right_ti);
                     let gap_ok = gap_raw.map_or(false, |sep| sep.is_empty());
-                    if _diag_query == "rag3weaver" && depth == 0 {
-                        eprintln!("[contains-diag] depth={} consumed={} doc={} left_ti={} right_ti={} gap={:?} gap_ok={} full={} partial={}",
-                            depth, consumed, doc_id, left_ti, right_ti,
-                            gap_raw.map(|g| g.len()),
-                            gap_ok,
-                            full_match.contains_key(&(doc_id, right_ti)),
-                            partial_match.contains_key(&(doc_id, right_ti)));
-                    }
+                    // if _diag_query == "rag3weaver" && depth == 0 {
+                    //     eprintln!("[contains-diag] depth={} consumed={} doc={} left_ti={} right_ti={} gap={:?} gap_ok={} full={} partial={}",
+                    //         depth, consumed, doc_id, left_ti, right_ti,
+                    //         gap_raw.map(|g| g.len()),
+                    //         gap_ok,
+                    //         full_match.contains_key(&(doc_id, right_ti)),
+                    //         partial_match.contains_key(&(doc_id, right_ti)));
+                    // }
                     if !gap_ok { continue; }
 
                     if let Some(&byte_to) = full_match.get(&(doc_id, right_ti)) {
@@ -1198,11 +1198,11 @@ where
         sfx_reader.falling_walk(&query_lower)
     };
 
-    eprintln!("[cross-token-diag] query='{}' falling_walk candidates={}", query, candidates.len());
-    for (i, c) in candidates.iter().enumerate().take(5) {
-        eprintln!("[cross-token-diag]   cand[{}]: prefix_len={} parent_ord={} si={}",
-            i, c.prefix_len, c.parent.raw_ordinal, c.parent.si);
-    }
+    // eprintln!("[cross-token-diag] query='{}' falling_walk candidates={}", query, candidates.len());
+    // for (i, c) in candidates.iter().enumerate().take(5) {
+    //     eprintln!("[cross-token-diag]   cand[{}]: prefix_len={} parent_ord={} si={}",
+    //         i, c.prefix_len, c.parent.raw_ordinal, c.parent.si);
+    // }
 
     let sibling_table = sfx_reader.sibling_table();
     let has_siblings = sibling_table.is_some() && ord_to_term.is_some();
@@ -1310,17 +1310,16 @@ where
         }
     }
 
-    if query == "rag3weaver" && valid_chains.is_empty() {
-        // Count candidates by prefix_len
-        let mut by_prefix: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
-        for c in &candidates {
-            *by_prefix.entry(c.prefix_len).or_default() += 1;
-        }
-        eprintln!("[cross-token-diag] NO CHAINS! {} candidates, by_prefix_len={:?}",
-            candidates.len(), by_prefix);
-    }
-    eprintln!("[cross-token-diag] query='{}' valid_chains={} has_siblings={}",
-        query, valid_chains.len(), has_siblings);
+    // if query == "rag3weaver" && valid_chains.is_empty() {
+    //     let mut by_prefix: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    //     for c in &candidates {
+    //         *by_prefix.entry(c.prefix_len).or_default() += 1;
+    //     }
+    //     eprintln!("[cross-token-diag] NO CHAINS! {} candidates, by_prefix_len={:?}",
+    //         candidates.len(), by_prefix);
+    // }
+    // eprintln!("[cross-token-diag] query='{}' valid_chains={} has_siblings={}",
+    //     query, valid_chains.len(), has_siblings);
 
     // Fuzzy left-side typos are handled by fuzzy_falling_walk above.
     // No need for sibling-first iteration — the DFA finds the split despite typos,
@@ -1358,11 +1357,11 @@ where
         }
 
         let _diag = query == "rag3weaver" && chain.len() == 2;
-        if _diag {
-            eprintln!("[adjacency] chain={:?} first_si={} active_seed={} chain[1]_postings={}",
-                chain, first_si, active.len(),
-                ordinal_cache.get(&chain[1]).map(|p| p.len()).unwrap_or(0));
-        }
+        // if _diag {
+        //     eprintln!("[adjacency] chain={:?} first_si={} active_seed={} chain[1]_postings={}",
+        //         chain, first_si, active.len(),
+        //         ordinal_cache.get(&chain[1]).map(|p| p.len()).unwrap_or(0));
+        // }
 
         for &ord in &chain[1..] {
             if active.is_empty() { break; }
@@ -1395,23 +1394,22 @@ where
                     _pos_miss += 1;
                 }
             }
-            if _diag {
-                eprintln!("[adjacency] ord={} active_before={} checked={} matched={} byte_miss={} pos_miss={} next_active={}",
-                    ord, active.len(), _checked, _matched, _byte_miss, _pos_miss, next_active.len());
-                // Show first few mismatches
-                if _byte_miss > 0 && _byte_miss <= 5 {
-                    for p in postings {
-                        let target = (p.doc_id, p.token_index);
-                        let idx = active.partition_point(|a| (a.0, a.1) < target);
-                        if idx < active.len() && active[idx].0 == p.doc_id && active[idx].1 == p.token_index {
-                            if p.byte_from != active[idx].2 {
-                                eprintln!("[adjacency]   byte_miss: doc={} ti={} expected_bf={} actual_bf={}",
-                                    p.doc_id, p.token_index, active[idx].2, p.byte_from);
-                            }
-                        }
-                    }
-                }
-            }
+            // if _diag {
+            //     eprintln!("[adjacency] ord={} active_before={} checked={} matched={} byte_miss={} pos_miss={} next_active={}",
+            //         ord, active.len(), _checked, _matched, _byte_miss, _pos_miss, next_active.len());
+            //     if _byte_miss > 0 && _byte_miss <= 5 {
+            //         for p in postings {
+            //             let target = (p.doc_id, p.token_index);
+            //             let idx = active.partition_point(|a| (a.0, a.1) < target);
+            //             if idx < active.len() && active[idx].0 == p.doc_id && active[idx].1 == p.token_index {
+            //                 if p.byte_from != active[idx].2 {
+            //                     eprintln!("[adjacency]   byte_miss: doc={} ti={} expected_bf={} actual_bf={}",
+            //                         p.doc_id, p.token_index, active[idx].2, p.byte_from);
+            //                 }
+            //             }
+            //         }
+            //     }
+            // }
             active = next_active;
         }
 

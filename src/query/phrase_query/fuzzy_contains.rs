@@ -659,12 +659,10 @@ fn fuzzy_contains_inner(
         .collect();
 
     let _total_ms = _t_total.elapsed().as_millis();
-    {
-        eprintln!("[fuzzy-contains] q='{}' total={}ms ngrams={} threshold={} max_span={} docs={} highlights={}",
-            query_text,
-            _total_ms, ngrams.len(), threshold, max_span,
-            hits_by_doc.len(), highlights.len());
-    }
+    // eprintln!("[fuzzy-contains] q='{}' total={}ms ngrams={} threshold={} max_span={} docs={} highlights={}",
+    //     query_text,
+    //     _total_ms, ngrams.len(), threshold, max_span,
+    //     hits_by_doc.len(), highlights.len());
 
     Ok((doc_bitset, highlights, doc_coverage))
 }

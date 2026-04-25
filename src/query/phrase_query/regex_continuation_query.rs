@@ -1127,15 +1127,15 @@ pub fn fuzzy_contains_via_trigram(
 
     let _dfa_ms = _t_dfa.elapsed().as_millis();
     let _total_ms = _t_total.elapsed().as_millis();
-    if _total_ms > 5 {
-        let proven = candidates.iter().filter(|c| c.5 /* trigram_proven */).count();
-        let unproven = candidates.len() - proven;
-        eprintln!("[fuzzy-timing] total={}ms fst={}ms resolve={}ms intersect={}ms dfa={}ms | ngrams={} candidates={} (proven={} unproven={} skipped={} dfa_walked={}) results={} max_doc={}",
-            _total_ms, _fst_ms, _resolve_ms, _intersect_ms, _dfa_ms,
-            ngrams.len(), candidates.len(), proven, unproven, _diag_unproven_skipped,
-            _diag_unproven - _diag_unproven_skipped,
-            highlights.len(), max_doc);
-    }
+    // if _total_ms > 5 {
+    //     let proven = candidates.iter().filter(|c| c.5 /* trigram_proven */).count();
+    //     let unproven = candidates.len() - proven;
+    //     eprintln!("[fuzzy-timing] total={}ms fst={}ms resolve={}ms intersect={}ms dfa={}ms | ngrams={} candidates={} (proven={} unproven={} skipped={} dfa_walked={}) results={} max_doc={}",
+    //         _total_ms, _fst_ms, _resolve_ms, _intersect_ms, _dfa_ms,
+    //         ngrams.len(), candidates.len(), proven, unproven, _diag_unproven_skipped,
+    //         _diag_unproven - _diag_unproven_skipped,
+    //         highlights.len(), max_doc);
+    // }
 
     Ok((doc_bitset, highlights))
 }
@@ -1201,7 +1201,7 @@ where
         .collect();
 
     if viable.is_empty() {
-        eprintln!("[regex-timer] no viable literal for '{}' → 0 results", pattern);
+        // eprintln!("[regex-timer] no viable literal for '{}' → 0 results", pattern);
         return Ok((BitSet::with_max_value(max_doc), Vec::new()));
     }
 
@@ -1402,12 +1402,12 @@ where
         }
     }
 
-    let total_us = t_total.elapsed().as_micros();
-    eprintln!(
-        "[regex-timer] '{}' | find={}us | validate={}us | total={}us | {}docs,{}hl",
-        pattern, find_us, t1.elapsed().as_micros(), total_us,
-        doc_bitset.len(), highlights.len(),
-    );
+    let _total_us = t_total.elapsed().as_micros();
+    // eprintln!(
+    //     "[regex-timer] '{}' | find={}us | validate={}us | total={}us | {}docs,{}hl",
+    //     pattern, find_us, t1.elapsed().as_micros(), total_us,
+    //     doc_bitset.len(), highlights.len(),
+    // );
 
     Ok((doc_bitset, highlights))
 }

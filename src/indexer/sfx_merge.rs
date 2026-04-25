@@ -148,8 +148,8 @@ pub(crate) fn collect_tokens(
 pub(crate) fn build_fst(
     tokens: &BTreeSet<String>,
 ) -> crate::Result<(Vec<u8>, Vec<u8>)> {
-    let has_rag3weaver = tokens.contains("rag3weaver");
-    eprintln!("[build_fst] {} unique tokens, has 'rag3weaver': {}", tokens.len(), has_rag3weaver);
+    let _has_rag3weaver = tokens.contains("rag3weaver");
+    // eprintln!("[build_fst] {} unique tokens, has 'rag3weaver': {}", tokens.len(), _has_rag3weaver);
     let mut sfx_builder = SuffixFstBuilder::new();
     for (ordinal, token) in tokens.iter().enumerate() {
         sfx_builder.add_token(token, ordinal as u64);
@@ -157,7 +157,7 @@ pub(crate) fn build_fst(
     let result = sfx_builder.build().map_err(|e| {
         crate::LucivyError::SystemError(format!("sfx fst build: {e}"))
     })?;
-    eprintln!("[build_fst] fst_data={} bytes, parent_list={} bytes", result.0.len(), result.1.len());
+    // eprintln!("[build_fst] fst_data={} bytes, parent_list={} bytes", result.0.len(), result.1.len());
     Ok(result)
 }
 
