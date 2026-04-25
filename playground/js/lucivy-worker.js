@@ -208,13 +208,8 @@ self.onmessage = async (e) => {
                             ringPtr,
                             ringSize,
                         });
-                        wlog(`[init] log ring: offset=${ringPtr}, size=${ringSize}`);
-                    } else {
-                        wlog('[init] log ring: not available (no SAB or null ptr)');
                     }
-                } catch (e) {
-                    wlog('[init] log ring setup failed: ' + e.message);
-                }
+                } catch (e) { /* log ring not available */ }
 
                 // Get commit status pointer for SAB-based polling (zero ccall).
                 try {
@@ -223,13 +218,8 @@ self.onmessage = async (e) => {
                     if (statusPtr && Module.HEAPU8.buffer instanceof SharedArrayBuffer) {
                         self._commitStatusView = new Int32Array(
                             Module.HEAPU8.buffer, statusPtr, 1);
-                        wlog(`[init] commit status ptr: offset=${statusPtr}`);
                     }
-                } catch (e) {
-                    wlog('[init] commit status ptr failed: ' + e.message);
-                }
-
-                wlog('[init] module ready');
+                } catch (e) { /* commit status not available */ }
                 result = true;
                 break;
             }

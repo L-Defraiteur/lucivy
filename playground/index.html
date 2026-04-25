@@ -378,13 +378,9 @@ async function startup() {
     window._lucivy = lucivy;
     await lucivy.ready;
 
-    // Try rag3db.luce first, fall back to dataset.luce
-    let datasetName = 'rag3db.luce';
+    let datasetName = 'dataset.luce';
     statusEl.textContent = 'Loading dataset...';
     let resp = await fetch('./' + datasetName);
-    if (!resp.ok) {
-      datasetName = 'dataset.luce';
-      resp = await fetch('./' + datasetName);
     }
     if (!resp.ok) throw new Error(`Failed to fetch dataset: ${resp.status}`);
     const blob = await resp.arrayBuffer();

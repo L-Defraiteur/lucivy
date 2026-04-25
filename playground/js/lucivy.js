@@ -24,10 +24,8 @@ export class Lucivy {
         this._logRingInterval = null;
 
         this._worker.onmessage = (e) => {
-            // Relay worker debug logs to main thread console
             if (e.data.type === 'log') {
-                console.log('[worker]', e.data.msg);
-                return;
+                return; // worker logs visible in worker console
             }
             // Set up SharedArrayBuffer log ring polling (reads Rust logs
             // directly from WASM memory — works even during deadlocks).
@@ -68,7 +66,7 @@ export class Lucivy {
                     if (len === 0 || readPos + 2 + len > ringSize) break;
                     const msgBytes = bytes.slice(readPos + 2, readPos + 2 + len);
                     const msg = new TextDecoder().decode(msgBytes);
-                    console.log('[rust]', msg);
+                    // rust ring buffer logs visible in worker console
                     readPos += 2 + len;
                 }
             } catch (e) { /* ignore read errors */ }

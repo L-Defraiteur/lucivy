@@ -102,7 +102,6 @@ const OPFS_BASE: &str = "/opfs/lucivy";
 #[no_mangle]
 pub extern "C" fn __main_argc_argv(_argc: i32, _argv: *const *const c_char) -> i32 {
     std::env::set_var("LUCIVY_SCHEDULER_THREADS", "4");
-    rlog!("[lucivy-wasm] main() started, default scheduler_threads=4");
 
     // Mount OPFS as filesystem backend (persistent across sessions).
     #[cfg(target_os = "emscripten")]
@@ -112,7 +111,7 @@ pub extern "C" fn __main_argc_argv(_argc: i32, _argv: *const *const c_char) -> i
             let path = CString::new("/opfs").unwrap();
             let ret = wasmfs_create_directory(path.as_ptr(), 0o777, backend);
             if ret == 0 {
-                rlog!("[lucivy-wasm] OPFS mounted at /opfs");
+                // OPFS mounted successfully.
                 // Create the base directory for indexes.
                 let _ = std::fs::create_dir_all(OPFS_BASE);
             } else {
@@ -237,7 +236,7 @@ pub unsafe extern "C" fn lucivy_create(
     let dest = std::path::Path::new(&index_path);
     if dest.exists() {
         let _ = std::fs::remove_dir_all(dest);
-        rlog!("[create] cleaned existing index at {index_path}");
+        // Cleaned stale index at this path.
     }
 
     let handle = match ShardedHandle::create(&index_path, &config) {
@@ -587,7 +586,7 @@ pub unsafe extern "C" fn lucivy_import_snapshot(
     // Clean up any existing index at this path (stale lock files from previous session).
     if dest.exists() {
         let _ = std::fs::remove_dir_all(dest);
-        rlog!("[import_snapshot] cleaned existing index at {index_path}");
+        // Cleaned stale index at this path.
     }
 
     // Use the unified snapshot import (writes to filesystem, opens ShardedHandle).
