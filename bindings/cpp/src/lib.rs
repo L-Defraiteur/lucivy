@@ -49,6 +49,12 @@ mod ffi {
         field_type: String,
     }
 
+    struct ShardVersionInfo {
+        shard_id: u32,
+        version: String,
+        segment_ids: Vec<String>,
+    }
+
     extern "Rust" {
         type LucivyIndex;
 
@@ -105,6 +111,20 @@ mod ffi {
         fn export_snapshot_to(self: &LucivyIndex, path: &str) -> Result<()>;
         fn lucivy_import_snapshot(data: &[u8], dest_path: &str) -> Result<Box<LucivyIndex>>;
         fn lucivy_import_snapshot_from(path: &str, dest_path: &str) -> Result<Box<LucivyIndex>>;
+
+        // Delta sync (Tier 2)
+        fn shard_versions(self: &LucivyIndex) -> Result<Vec<ShardVersionInfo>>;
+        fn export_sharded_delta(self: &LucivyIndex, client_versions_json: &str) -> Result<Vec<u8>>;
+        fn apply_sharded_delta(self: &LucivyIndex, data: &[u8]) -> Result<()>;
+
+        // Distributed search (Tier 3)
+        fn export_stats(self: &LucivyIndex, query_json: &str) -> Result<String>;
+        fn search_with_global_stats(
+            self: &LucivyIndex,
+            query_json: &str,
+            global_stats_json: &str,
+            limit: u32,
+        ) -> Result<Vec<SearchResult>>;
     }
 }
 
@@ -261,6 +281,82 @@ fn lucivy_import_snapshot_from(path: &str, dest_path: &str) -> Result<Box<Lucivy
     let data = std::fs::read(path)
         .map_err(|e| format!("cannot read snapshot: {e}"))?;
     lucivy_import_snapshot(&data, dest_path)
+}
+
+// ── Delta sync (Tier 2) ──────────────────────────────────────────────────
+
+impl LucivyIndex {
+    fn shard_versions(&self) -> Result<Vec<ffi::ShardVersionInfo>, String> {
+        let versions = self.handle.shard_versions()?;
+        Ok(versions
+            .into_iter()
+            .map(|sv| ffi::ShardVersionInfo {
+                shard_id: sv.shard_id as u32,
+                version: sv.version,
+                segment_ids: sv.segment_ids.into_iter().collect(),
+            })
+            .collect())
+    }
+
+    fn export_sharded_delta(&self, client_versions_json: &str) -> Result<Vec<u8>, String> {
+        let raw: Vec<serde_json::Value> = serde_json::from_str(client_versions_json)
+            .map_err(|e| format!("invalid client_versions JSON: {e}"))?;
+
+        let versions: Vec<lucistore::delta_sharded::ShardVersion> = raw
+            .into_iter()
+            .map(|v| {
+                let shard_id = v["shard_id"].as_u64().unwrap_or(0) as usize;
+                let version = v["version"].as_str().unwrap_or("").to_string();
+                let segment_ids: std::collections::HashSet<String> = v["segment_ids"]
+                    .as_array()
+                    .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                lucistore::delta_sharded::ShardVersion {
+                    shard_id,
+                    version,
+                    segment_ids,
+                }
+            })
+            .collect();
+
+        self.handle.export_sharded_delta(&self.index_path, &versions)
+    }
+
+    fn apply_sharded_delta(&self, data: &[u8]) -> Result<(), String> {
+        self.handle.apply_sharded_delta(&self.index_path, data)
+    }
+}
+
+// ── Distributed search (Tier 3) ──────────────────────────────────────────
+
+impl LucivyIndex {
+    fn export_stats(&self, query_json: &str) -> Result<String, String> {
+        let query_config = self.parse_query(query_json)?;
+        let stats = self.handle.export_stats(&query_config)?;
+        serde_json::to_string(&stats)
+            .map_err(|e| format!("serialize stats: {e}"))
+    }
+
+    fn search_with_global_stats(
+        &self,
+        query_json: &str,
+        global_stats_json: &str,
+        limit: u32,
+    ) -> Result<Vec<ffi::SearchResult>, String> {
+        let query_config = self.parse_query(query_json)?;
+        let global_stats: lucivy_core::bm25_global::ExportableStats =
+            serde_json::from_str(global_stats_json)
+                .map_err(|e| format!("invalid global_stats JSON: {e}"))?;
+
+        let results = self.handle.search_with_global_stats(
+            &query_config,
+            limit as usize,
+            &global_stats,
+            None,
+        )?;
+
+        collect_results(&self.handle, &results)
+    }
 }
 
 // ── Search ─────────────────────────────────────────────────────────────────

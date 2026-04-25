@@ -18,6 +18,14 @@ use lucivy_core::sharded_handle::ShardedSearchResult;
 
 use crate::LucivyHandle;
 
+/// JSON-deserializable shard version from the C++ side.
+#[derive(serde::Deserialize)]
+struct ClientShardVersion {
+    shard_id: u32,
+    version: String,
+    segment_ids: Vec<String>,
+}
+
 #[cxx::bridge]
 mod ffi {
     // ── Shared structs (visible from both Rust and C++) ──────────────────
@@ -69,7 +77,15 @@ mod ffi {
         field_type: String,
     }
 
-    // ── Rust functions exposed to C++ ───────────���────────────────────────
+    // ── Tier 2 / Tier 3: delta sync + distributed search ───────────────
+
+    struct ShardVersionInfo {
+        shard_id: u32,
+        version: String,
+        segment_ids: Vec<String>,
+    }
+
+    // ── Rust functions exposed to C++ ───────────────────────────────────
 
     extern "Rust" {
         type LucivyHandle;
@@ -144,6 +160,20 @@ mod ffi {
         // Info
         fn num_docs(handle: &LucivyHandle) -> u64;
         fn get_schema_json(handle: &LucivyHandle) -> String;
+
+        // Tier 2: delta sync
+        fn shard_versions(handle: &LucivyHandle) -> Result<Vec<ShardVersionInfo>>;
+        fn export_sharded_delta(handle: &LucivyHandle, base_path: &str, client_versions_json: &str) -> Result<Vec<u8>>;
+        fn apply_sharded_delta(handle: &LucivyHandle, base_path: &str, data: &[u8]) -> Result<()>;
+
+        // Tier 3: distributed search
+        fn export_stats_json(handle: &LucivyHandle, query_json: &str) -> Result<String>;
+        fn search_with_global_stats_json(
+            handle: &LucivyHandle,
+            query_json: &str,
+            global_stats_json: &str,
+            limit: u32,
+        ) -> Result<Vec<SearchResult>>;
     }
 }
 
@@ -400,6 +430,77 @@ fn num_docs(handle: &LucivyHandle) -> u64 {
 
 fn get_schema_json(handle: &LucivyHandle) -> String {
     serde_json::to_string(&handle.config).unwrap_or_default()
+}
+
+// ── Tier 2: delta sync ────────────────────────────────────────────────────
+
+fn shard_versions(handle: &LucivyHandle) -> Result<Vec<ffi::ShardVersionInfo>, String> {
+    let versions = handle.shard_versions()?;
+    Ok(versions
+        .into_iter()
+        .map(|v| ffi::ShardVersionInfo {
+            shard_id: v.shard_id as u32,
+            version: v.version,
+            segment_ids: v.segment_ids.into_iter().collect(),
+        })
+        .collect())
+}
+
+fn export_sharded_delta(
+    handle: &LucivyHandle,
+    base_path: &str,
+    client_versions_json: &str,
+) -> Result<Vec<u8>, String> {
+    let client_versions: Vec<ClientShardVersion> =
+        serde_json::from_str(client_versions_json)
+            .map_err(|e| format!("invalid client_versions JSON: {e}"))?;
+
+    let versions: Vec<lucistore::delta_sharded::ShardVersion> = client_versions
+        .into_iter()
+        .map(|v| lucistore::delta_sharded::ShardVersion {
+            shard_id: v.shard_id as usize,
+            version: v.version,
+            segment_ids: v.segment_ids.into_iter().collect(),
+        })
+        .collect();
+
+    handle.export_sharded_delta(base_path, &versions)
+}
+
+fn apply_sharded_delta(
+    handle: &LucivyHandle,
+    base_path: &str,
+    data: &[u8],
+) -> Result<(), String> {
+    handle.apply_sharded_delta(base_path, data)
+}
+
+// ── Tier 3: distributed search ───────────────────────────────────────────
+
+fn export_stats_json(
+    handle: &LucivyHandle,
+    query_json: &str,
+) -> Result<String, String> {
+    let config: query::QueryConfig = serde_json::from_str(query_json)
+        .map_err(|e| format!("invalid query JSON: {e}"))?;
+    let stats = handle.export_stats(&config)?;
+    serde_json::to_string(&stats)
+        .map_err(|e| format!("failed to serialize stats: {e}"))
+}
+
+fn search_with_global_stats_json(
+    handle: &LucivyHandle,
+    query_json: &str,
+    global_stats_json: &str,
+    limit: u32,
+) -> Result<Vec<ffi::SearchResult>, String> {
+    let config: query::QueryConfig = serde_json::from_str(query_json)
+        .map_err(|e| format!("invalid query JSON: {e}"))?;
+    let global_stats: lucivy_core::bm25_global::ExportableStats =
+        serde_json::from_str(global_stats_json)
+            .map_err(|e| format!("invalid global_stats JSON: {e}"))?;
+    let results = handle.search_with_global_stats(&config, limit as usize, &global_stats, None)?;
+    collect_search_results(handle, &results)
 }
 
 // ── Internal helpers ────��──────────────────────────────────────────────────

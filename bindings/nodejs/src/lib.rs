@@ -18,6 +18,16 @@ use lucivy_core::query;
 use lucivy_core::snapshot;
 use lucivy_core::sharded_handle::{ShardedHandle, ShardedSearchResult};
 
+// ─── ShardVersion (Tier 2 — delta sync) ───────────────────────────────────
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct ShardVersion {
+    pub shard_id: u32,
+    pub version: String,
+    pub segment_ids: Vec<String>,
+}
+
 // ─── SearchResult ──────────────────────────────────────────────────────────
 
 #[napi(object)]
@@ -305,6 +315,102 @@ impl Index {
                 fast: None,
             })
             .collect()
+    }
+
+    // ── Tier 2 — Delta sync ────────────────────────────────────────────
+
+    /// Per-shard version info (for requesting deltas from a server).
+    #[napi(getter)]
+    pub fn shard_versions(&self) -> Result<Vec<ShardVersion>> {
+        let versions = self.handle.shard_versions()
+            .map_err(|e| Error::from_reason(e))?;
+        Ok(versions
+            .iter()
+            .map(|sv| ShardVersion {
+                shard_id: sv.shard_id as u32,
+                version: sv.version.clone(),
+                segment_ids: sv.segment_ids.iter().cloned().collect(),
+            })
+            .collect())
+    }
+
+    /// Export a sharded delta (LUCIDS blob) from this index.
+    ///
+    /// `client_versions`: array of `{ shardId, version, segmentIds }`.
+    /// Returns the binary LUCIDS blob as a Buffer.
+    #[napi]
+    pub fn export_sharded_delta(&self, client_versions: Vec<ShardVersion>) -> Result<Buffer> {
+        let versions: Vec<lucistore::delta_sharded::ShardVersion> = client_versions
+            .iter()
+            .map(|sv| lucistore::delta_sharded::ShardVersion {
+                shard_id: sv.shard_id as usize,
+                version: sv.version.clone(),
+                segment_ids: sv.segment_ids.iter().cloned().collect(),
+            })
+            .collect();
+
+        let blob = self.handle.export_sharded_delta(&self.index_path, &versions)
+            .map_err(|e| Error::from_reason(e))?;
+        Ok(blob.into())
+    }
+
+    /// Apply a sharded delta (LUCIDS blob) to this index.
+    #[napi]
+    pub fn apply_sharded_delta(&self, data: Buffer) -> Result<()> {
+        self.handle.apply_sharded_delta(&self.index_path, &data)
+            .map_err(|e| Error::from_reason(e))
+    }
+
+    // ── Tier 3 — Distributed search ────────────────────────────────────
+
+    /// Export BM25 statistics for a query (for distributed search aggregation).
+    /// Returns a JSON string of ExportableStats.
+    #[napi]
+    pub fn export_stats(&self, query_json: String) -> Result<String> {
+        let config: query::QueryConfig = serde_json::from_str(&query_json)
+            .map_err(|e| Error::from_reason(format!("invalid query JSON: {e}")))?;
+        let stats = self.handle.export_stats(&config)
+            .map_err(|e| Error::from_reason(e))?;
+        serde_json::to_string(&stats)
+            .map_err(|e| Error::from_reason(format!("serialize stats: {e}")))
+    }
+
+    /// Search with externally-provided global BM25 stats (distributed mode).
+    /// `query_json`: JSON string of QueryConfig.
+    /// `global_stats_json`: JSON string of merged ExportableStats from all nodes.
+    #[napi]
+    pub fn search_with_global_stats(
+        &self,
+        query_json: String,
+        global_stats_json: String,
+        limit: Option<u32>,
+        highlights: Option<bool>,
+    ) -> Result<Vec<SearchResult>> {
+        let query_config: query::QueryConfig = serde_json::from_str(&query_json)
+            .map_err(|e| Error::from_reason(format!("invalid query JSON: {e}")))?;
+        let global_stats: lucivy_core::bm25_global::ExportableStats =
+            serde_json::from_str(&global_stats_json)
+                .map_err(|e| Error::from_reason(format!("invalid stats JSON: {e}")))?;
+
+        let limit = limit.unwrap_or(10) as usize;
+        let want_highlights = highlights.unwrap_or(false);
+
+        let highlight_sink = if want_highlights {
+            Some(Arc::new(HighlightSink::new()))
+        } else {
+            None
+        };
+
+        let results = self.handle.search_with_global_stats(
+            &query_config, limit, &global_stats, highlight_sink.clone(),
+        ).map_err(|e| Error::from_reason(e))?;
+
+        collect_sharded_results(
+            &self.handle,
+            &results,
+            highlight_sink.as_deref(),
+            false,
+        )
     }
 }
 
