@@ -110,8 +110,25 @@ Ajouter des logs granulaires pour identifier OÙ exactement ça bloque :
 - Avant/après `drain_pipeline()` dans `commit()`
 - Avant/après chaque stage du drain
 
-## Recommandation
+## Fix appliqué (25 avril)
 
-Commencer par S4 (investiguer) pour confirmer l'hypothèse.
-Puis S3 (DAG batch) pour une solution propre à long terme.
-S2 (augmenter mailbox) comme quick fix si S4 confirme H1.
+**Mailbox unbounded** : changé le shard actor mailbox de `bounded(64)` à
+`unbounded()` (capacity=0 dans luciole). Modifié `mailbox()` dans
+`luciole/src/mailbox.rs` pour supporter capacity=0 → `channel::unbounded()`.
+
+Justification : le backpressure n'a pas de sens pour l'ingestion interne.
+Chaque `ShardMsg::Insert` est petit (~1KB) et consommé quasi-immédiatement.
+Avec 4308 docs × 1KB = ~4MB au pire en vol — négligeable.
+
+**À retester** : le bug était intermittent. Vérifier plusieurs fois que
+l'ingestion complète passe (4308 docs + commit) sans blocage.
+
+**Si ça bloque encore** : le problème serait dans le commit (drain_pipeline
+ou ASYNCIFY), pas dans la mailbox. Dans ce cas → investiguer avec des logs
+ciblés (S4) puis envisager le DAG d'ingestion batch (S3).
+
+## Recommandation long terme
+
+S3 (DAG batch) reste la solution propre : un seul appel
+`lucivy_ingest_batch(docs_json)` qui fait tout dans le scheduler.
+Pas de milliers de ccalls ASYNCIFY, pas de cooperative waiting externe.
