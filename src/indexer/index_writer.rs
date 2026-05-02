@@ -188,16 +188,26 @@ pub(super) fn finalize_segment(
 ) -> crate::Result<()> {
     let max_doc = segment_writer.max_doc();
     if max_doc == 0 {
+        eprintln!("[diag] finalize_segment: empty (0 docs), skipping");
         return Ok(());
     }
 
+    eprintln!("[diag] finalize_segment: {} docs, calling segment_writer.finalize()...", max_doc);
+    let t0 = std::time::Instant::now();
     let (doc_opstamps, sfx_field_ids) = segment_writer.finalize()?;
+    eprintln!("[diag] finalize_segment: finalize() done in {:.1}s, sfx_fields={:?}",
+        t0.elapsed().as_secs_f64(), sfx_field_ids);
+
     let segment_with_max_doc = segment.with_max_doc(max_doc);
+    let t1 = std::time::Instant::now();
     let alive_bitset_opt = apply_deletes(&segment_with_max_doc, delete_cursor, &doc_opstamps)?;
+    eprintln!("[diag] finalize_segment: apply_deletes done in {:.1}s", t1.elapsed().as_secs_f64());
+
     let meta = segment_with_max_doc.meta().clone().with_sfx_field_ids(sfx_field_ids);
     meta.untrack_temp_docstore();
     let segment_entry = SegmentEntry::new(meta, delete_cursor.clone(), alive_bitset_opt);
     segment_updater.schedule_add_segment(segment_entry)?;
+    eprintln!("[diag] finalize_segment: done ({} docs, total {:.1}s)", max_doc, t0.elapsed().as_secs_f64());
     Ok(())
 }
 
@@ -509,8 +519,12 @@ impl<D: Document> IndexWriter<D> {
         let mut receivers = Vec::new();
         for i in 0..self.worker_pool.len() {
             let (env, rx) = IndexerFlushMsg.into_request();
+            let depth_before = self.worker_pool.worker(i).mailbox_depth();
+            eprintln!("[diag] flush_indexer: sending to worker {i}, mailbox_depth_before={depth_before}");
             self.worker_pool.worker(i).send(env)
                 .map_err(|_| error_in_index_worker_thread("Worker died"))?;
+            let depth_after = self.worker_pool.worker(i).mailbox_depth();
+            eprintln!("[diag] flush_indexer: sent to worker {i}, mailbox_depth_after={depth_after}");
             receivers.push(rx);
         }
 

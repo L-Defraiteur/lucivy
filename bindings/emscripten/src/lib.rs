@@ -133,7 +133,7 @@ pub unsafe extern "C" fn lucivy_configure(
             "LUCIVY_SCHEDULER_THREADS",
             scheduler_threads.to_string(),
         );
-        let reserved_for_others = 3;
+        let reserved_for_others = 4; // helper thread + commit thread + merge + margin
         let total_needed = scheduler_threads + reserved_for_others;
         if thread_pool_size > 0 && total_needed >= thread_pool_size {
             rlog!(
@@ -476,13 +476,15 @@ pub unsafe extern "C" fn lucivy_update(
 
 // ── Transaction ──────────────────────────────────────────────────────────
 
-/// Synchronous commit — call via ccall with {async:true} (ASYNCIFY handles blocking).
-/// This is simpler and avoids deadlocks with the actor system's cooperative waiting.
+/// Synchronous commit via ASYNCIFY — calls commit_direct which:
+/// 1. Poll-waits for pipeline mailboxes to drain (ASYNCIFY-safe, no cooperative waiting)
+/// 2. Calls writer.commit() directly on each shard (cooperative waiting handled by
+///    the safety net in run_one_step that rewakes idle actors with pending messages)
 #[no_mangle]
 pub unsafe extern "C" fn lucivy_commit(ctx: *mut LucivyContext) -> *const c_char {
     if ctx.is_null() { return return_error("null context"); }
     let ctx = &*ctx;
-    match ctx.handle.commit() {
+    match ctx.handle.commit_direct() {
         Ok(()) => return_str("ok".into()),
         Err(e) => return_error(&e),
     }
@@ -539,12 +541,8 @@ pub extern "C" fn lucivy_commit_finish() -> *const c_char {
 
 #[no_mangle]
 pub unsafe extern "C" fn lucivy_drain_merges(ctx: *mut LucivyContext) -> *const c_char {
-    let ctx = &*ctx;
-    // Commit merges all segments within each shard.
-    match ctx.handle.commit() {
-        Ok(()) => return_str("ok".into()),
-        Err(e) => return_error(&format!("drain_merges: {e}")),
-    }
+    // Reuse lucivy_commit (thread-based) — same commit logic.
+    lucivy_commit(ctx)
 }
 
 // ── Snapshot (LUCE format) ────────────────────────────────────────────────

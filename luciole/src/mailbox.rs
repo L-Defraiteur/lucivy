@@ -75,6 +75,9 @@ impl<M> ActorRef<M> {
                     mailbox_depth: self.sender.len(),
                 });
             }
+        } else {
+            eprintln!("[diag] ActorRef::send: NO notifier! mailbox_depth={}",
+                self.sender.len());
         }
         Ok(())
     }
@@ -101,6 +104,11 @@ impl<M> ActorRef<M> {
     /// Access the wake handle (for async executor waker integration).
     pub(crate) fn wake_handle(&self) -> Option<&Arc<WakeHandle>> {
         self.notifier.as_ref()
+    }
+
+    /// Number of messages currently in the mailbox (for diagnostics).
+    pub fn mailbox_depth(&self) -> usize {
+        self.sender.len()
     }
 
     pub fn try_send(&self, msg: M) -> Result<(), channel::TrySendError<M>> {

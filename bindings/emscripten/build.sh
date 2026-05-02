@@ -42,7 +42,7 @@ mkdir -p "$OUT_DIR"
 emcc "$STATIC_LIB" \
     -o "$OUT_DIR/lucivy.js" \
     -pthread \
-    -sPTHREAD_POOL_SIZE=8 \
+    -sPTHREAD_POOL_SIZE=9 \
     -sPTHREAD_POOL_SIZE_STRICT=0 \
     -sALLOW_MEMORY_GROWTH=1 \
     -sMAXIMUM_MEMORY=4GB \

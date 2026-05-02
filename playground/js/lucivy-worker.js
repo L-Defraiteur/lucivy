@@ -22,6 +22,70 @@ function wlog(...args) {
     console.log(msg);
 }
 
+// ── Diag: send logs to server + poll eval commands ──────────────────────────
+
+const DIAG_URL = self.location.origin; // same server (serve.mjs)
+let diagLogBatch = [];
+let diagEnabled = true;
+
+function diagSendLog(line) {
+    if (!diagEnabled) return;
+    diagLogBatch.push(line);
+    if (diagLogBatch.length >= 50) diagFlush();
+}
+
+function diagFlush() {
+    if (diagLogBatch.length === 0) return;
+    const batch = diagLogBatch;
+    diagLogBatch = [];
+    try {
+        // Use sendBeacon for fire-and-forget (no await needed)
+        const blob = new Blob([batch.join('\n')], { type: 'text/plain' });
+        // sendBeacon not available in workers, use fetch
+        fetch(`${DIAG_URL}/log`, { method: 'POST', body: batch.join('\n') }).catch(() => {});
+    } catch {}
+}
+
+// Flush logs periodically
+setInterval(diagFlush, 500);
+
+// Poll eval commands from the diag server
+async function diagEvalPoller() {
+    while (true) {
+        try {
+            const resp = await fetch(`${DIAG_URL}/eval/poll`);
+            const cmd = await resp.json();
+            if (cmd.id && cmd.js) {
+                wlog(`[eval] executing: ${cmd.js}`);
+                let result = null, error = null;
+                try {
+                    result = String(eval(cmd.js));
+                } catch (e) {
+                    error = e.message;
+                }
+                wlog(`[eval] result: ${error ? 'ERR ' + error : result}`);
+                fetch(`${DIAG_URL}/eval/result`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: cmd.id, result, error }),
+                }).catch(() => {});
+            }
+        } catch {}
+        await new Promise(r => setTimeout(r, 500));
+    }
+}
+diagEvalPoller();
+
+// Hook: intercept eprintln! (emscripten stderr) and send to diag server.
+// emscripten routes eprintln! → Module.printErr → console.error.
+// We monkey-patch console.error in the worker to capture these.
+const _origConsoleError = console.error;
+console.error = function(...args) {
+    const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+    diagSendLog(msg);
+    _origConsoleError.apply(console, args);
+};
+
 // ── Rust log poller ──────────────────────────────────────────────────────────
 // Polls lucivy_read_logs() every 200ms and relays to main thread via wlog.
 
@@ -184,7 +248,12 @@ self.onmessage = async (e) => {
         switch (type) {
             case 'init': {
                 const { default: createLucivy } = await import('../pkg/lucivy.js');
-                Module = await createLucivy();
+                Module = await createLucivy({
+                    // Intercept eprintln! from ALL pthreads and send to diag server.
+                    printErr: function(text) {
+                        diagSendLog(text);
+                    },
+                });
 
                 // Scheduler is configured to 4 threads by default in main().
                 // Override with lucivy_configure() if needed.

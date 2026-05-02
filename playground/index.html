@@ -703,21 +703,30 @@ async function importFiles(fileList) {
     if (userIndex) { await userIndex.close().catch(() => {}); }
     userFiles.clear();
 
-    userIndex = await lucivy.create('/user_index', [
-      { name: 'path', type: 'text' },
-      { name: 'content', type: 'text' },
-    ]);
+    userIndex = await lucivy.create('/user_index', {
+      fields: [
+        { name: 'path', type: 'text' },
+        { name: 'content', type: 'text' },
+        { name: 'extension', type: 'text' },
+      ],
+      shards: 4,
+    });
 
-    const COMMIT_EVERY = 200;
+    const COMMIT_EVERY = 2000;
     for (let i = 0; i < textFiles.length; i++) {
       const { path, content } = textFiles[i];
-      await userIndex.add(i, { path, content });
-      userFiles.set(i, { path, content });
+      const ext = path.includes('.') ? path.split('.').pop() : '';
+      await userIndex.add(i, { path, content, extension: ext });
+      userFiles.set(i, { path, content, extension: ext });
+      if ((i + 1) % 100 === 0) {
+        statusEl.textContent = `Indexing ${textFiles.length} file(s)... ${i + 1}/${textFiles.length}`;
+      }
       if ((i + 1) % COMMIT_EVERY === 0) {
         statusEl.textContent = `Indexing ${textFiles.length} file(s)... ${i + 1}/${textFiles.length} (committing...)`;
         await userIndex.commit({ sync: false });
       }
     }
+    statusEl.textContent = `Final commit...`;
     await userIndex.commit();
     statusEl.textContent = `Merging segments...`;
     await userIndex.drainMerges();
@@ -974,21 +983,30 @@ async function cloneGitRepo() {
     if (userIndex) { await userIndex.close().catch(() => {}); }
     userFiles.clear();
 
-    userIndex = await lucivy.create('/user_index', [
-      { name: 'path', type: 'text' },
-      { name: 'content', type: 'text' },
-    ]);
+    userIndex = await lucivy.create('/user_index', {
+      fields: [
+        { name: 'path', type: 'text' },
+        { name: 'content', type: 'text' },
+        { name: 'extension', type: 'text' },
+      ],
+      shards: 4,
+    });
 
-    const COMMIT_EVERY = 200;
+    const COMMIT_EVERY = 2000;
     for (let i = 0; i < textFiles.length; i++) {
       const { path, content } = textFiles[i];
-      await userIndex.add(i, { path, content });
-      userFiles.set(i, { path, content });
+      const ext = path.includes('.') ? path.split('.').pop() : '';
+      await userIndex.add(i, { path, content, extension: ext });
+      userFiles.set(i, { path, content, extension: ext });
+      if ((i + 1) % 100 === 0) {
+        statusEl.textContent = `Indexing ${owner}/${repo}... ${i + 1}/${textFiles.length}`;
+      }
       if ((i + 1) % COMMIT_EVERY === 0) {
         statusEl.textContent = `Indexing ${owner}/${repo}... ${i + 1}/${textFiles.length} (committing...)`;
         await userIndex.commit({ sync: false });
       }
     }
+    statusEl.textContent = `Final commit...`;
     await userIndex.commit();
     statusEl.textContent = `Merging segments...`;
     await userIndex.drainMerges();
@@ -1094,6 +1112,31 @@ snapshotFileInput.addEventListener('change', async (e) => {
     queryEl.disabled = false;
   }
 });
+
+// ── Diag: eval poller for main thread ──────────────────────────────
+(async function diagMainEvalPoller() {
+  while (true) {
+    try {
+      const resp = await fetch('/eval/main/poll');
+      const cmd = await resp.json();
+      if (cmd.id && cmd.js) {
+        console.log('[diag-eval-main]', cmd.js);
+        let result = null, error = null;
+        try {
+          result = String(await eval(cmd.js));
+        } catch (e) {
+          error = e.message;
+        }
+        fetch('/eval/main/result', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: cmd.id, result, error }),
+        }).catch(() => {});
+      }
+    } catch {}
+    await new Promise(r => setTimeout(r, 500));
+  }
+})();
 
 // ── Go ────────────────────────────────────────────────────────────
 startup();

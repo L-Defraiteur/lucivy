@@ -864,8 +864,8 @@ fn spawn_router(
 ) -> luciole::ActorRef<RouterMsg> {
     let scheduler = global_scheduler();
     let actor = RouterActor { router, shard_pool };
-    let (mb, mut ar) = luciole::mailbox::<RouterMsg>(256);
-    scheduler.spawn(actor, mb, &mut ar, 256);
+    let (mb, mut ar) = luciole::mailbox::<RouterMsg>(0); // 0 = unbounded
+    scheduler.spawn(actor, mb, &mut ar, 0);
     ar
 }
 
@@ -934,7 +934,7 @@ fn spawn_reader_pool(
     let text_fields = text_fields.to_vec();
     let tm = tokenizer_manager.clone();
     let rr = router_ref;
-    luciole::Pool::spawn(num_readers, 128, |_| {
+    luciole::Pool::spawn(num_readers, 0, |_| { // 0 = unbounded
         ReaderActor {
             schema: schema.clone(),
             text_fields: text_fields.clone(),
@@ -1477,14 +1477,24 @@ impl ShardedHandle {
 
     /// Drain all pipeline actors: wait for readers then router to finish pending work.
     fn drain_pipeline(&self) {
+        let scheduler = luciole::scheduler::global_scheduler();
+        let dump = scheduler.dump_state();
+        let qlen = scheduler.ready_queue_len();
+        eprintln!("[diag] drain_pipeline: scheduler state BEFORE drain (ready_queue={qlen}):\n{dump}");
         // Drain readers first (upstream), then router (downstream).
         // Pool::drain sends DrainMsg to each worker and waits.
+        let scheduler = luciole::scheduler::global_scheduler();
+        let (started, active) = scheduler.thread_stats();
+        eprintln!("[diag] drain_pipeline: scheduler threads started={started}, active={active}");
+        eprintln!("[diag] drain_pipeline: draining readers...");
         self.reader_pool.drain("drain_readers");
+        eprintln!("[diag] drain_pipeline: readers drained, draining router...");
         // Router: single actor, drain via request.
         self.router_ref.request(
             |r| RouterMsg::Drain(luciole::DrainMsg(r)),
             "drain_router",
         ).ok();
+        eprintln!("[diag] drain_pipeline: router drained, done.");
     }
 
     /// Search all shards in parallel and merge top-K results.
@@ -1688,22 +1698,27 @@ impl ShardedHandle {
     /// Drains the ingestion pipeline first (readers → router → shards), then commits.
     /// If deletes happened since last commit, resyncs the router's token counters.
     pub fn commit(&self) -> Result<(), String> {
+        eprintln!("[diag] commit: starting drain_pipeline...");
         self.drain_pipeline();
+        eprintln!("[diag] commit: drain done, scatter commit to {} shards...", self.shards.len());
 
         // Scatter commit to all shards in parallel.
         let results: Vec<Result<(), String>> = self.shard_pool.scatter(
             |r| ShardMsg::Commit { fast: false, reply: r },
             "commit_shard",
         );
+        eprintln!("[diag] commit: scatter done, checking results...");
         for (i, result) in results.into_iter().enumerate() {
             result.map_err(|e| format!("commit shard_{i}: {e}"))?;
         }
 
+        eprintln!("[diag] commit: reloading readers...");
         // Force reader reload so search sees committed data immediately.
         for shard in &self.shards {
             let _ = shard.reader.reload();
         }
 
+        eprintln!("[diag] commit: acquiring router lock...");
         // Resync router counters from index if deletes happened.
         let mut router = self.router.lock().map_err(|_| "router lock poisoned")?;
 
@@ -1741,6 +1756,61 @@ impl ShardedHandle {
         let stats_bytes = router.to_bytes();
         self.storage.write_root_file(SHARD_STATS_FILE, &stats_bytes)?;
 
+        Ok(())
+    }
+
+    /// Direct commit — bypasses the actor system entirely.
+    ///
+    /// Drains reader/router mailboxes by polling (no cooperative waiting),
+    /// then calls writer.commit() directly on each shard. No scheduler
+    /// involvement. Safe for environments where cooperative waiting is
+    /// unreliable (emscripten/ASYNCIFY).
+    pub fn commit_direct(&self) -> Result<(), String> {
+        eprintln!("[diag] commit_direct: waiting for pipeline to drain...");
+
+        // Poll-wait until reader and router mailboxes are empty.
+        // Messages are being processed by scheduler threads concurrently.
+        let mut stall_count = 0u32;
+        loop {
+            let reader_pending: usize = (0..self.reader_pool.len())
+                .map(|i| self.reader_pool.worker(i).mailbox_depth())
+                .sum();
+            let router_pending = self.router_ref.mailbox_depth();
+            let shard_pending: usize = (0..self.shard_pool.len())
+                .map(|i| self.shard_pool.worker(i).mailbox_depth())
+                .sum();
+
+            if reader_pending == 0 && router_pending == 0 && shard_pending == 0 {
+                break;
+            }
+
+            stall_count += 1;
+            if stall_count % 1000 == 0 {
+                eprintln!("[diag] commit_direct: still draining readers={reader_pending} router={router_pending} shards={shard_pending}");
+            }
+            std::thread::yield_now();
+        }
+        eprintln!("[diag] commit_direct: pipeline drained, committing shards...");
+
+        // Commit each shard directly (no actor messages).
+        for (i, shard) in self.shards.iter().enumerate() {
+            let mut guard = shard.writer.lock().map_err(|_| format!("shard_{i} writer lock poisoned"))?;
+            let writer = guard.as_mut().ok_or_else(|| format!("shard_{i} writer closed"))?;
+            writer.commit().map_err(|e| format!("commit shard_{i}: {e}"))?;
+            eprintln!("[diag] commit_direct: shard_{i} committed");
+        }
+
+        // Reload readers.
+        for shard in &self.shards {
+            let _ = shard.reader.reload();
+        }
+
+        // Persist router state.
+        let router = self.router.lock().map_err(|_| "router lock poisoned")?;
+        let stats_bytes = router.to_bytes();
+        self.storage.write_root_file(SHARD_STATS_FILE, &stats_bytes)?;
+
+        eprintln!("[diag] commit_direct: done.");
         Ok(())
     }
 

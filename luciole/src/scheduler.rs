@@ -1,5 +1,5 @@
 use std::collections::{BinaryHeap, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::task::Poll;
 use std::thread::JoinHandle;
@@ -133,6 +133,10 @@ struct SharedState {
     work_available: Condvar,
     shutdown: AtomicBool,
     events: Arc<EventBus<SchedulerEvent>>,
+    /// Number of scheduler threads currently running (not parked).
+    active_threads: AtomicUsize,
+    /// Number of scheduler threads that have started.
+    started_threads: AtomicUsize,
 }
 
 struct ActorSlot {
@@ -332,6 +336,8 @@ impl Scheduler {
                 work_available: Condvar::new(),
                 shutdown: AtomicBool::new(false),
                 events: Arc::new(EventBus::new()),
+                active_threads: AtomicUsize::new(0),
+                started_threads: AtomicUsize::new(0),
             }),
             next_actor_id: AtomicU64::new(0),
         }
@@ -446,7 +452,7 @@ impl Scheduler {
     }
 
     pub fn start(&self) -> SchedulerHandle {
-        let mut threads = Vec::with_capacity(self.num_threads);
+        let mut threads = Vec::with_capacity(self.num_threads + 1);
         for thread_index in 0..self.num_threads {
             let shared = Arc::clone(&self.shared);
             let handle = std::thread::Builder::new()
@@ -457,6 +463,26 @@ impl Scheduler {
                 .expect("failed to spawn scheduler thread");
             threads.push(handle);
         }
+
+        // Helper thread — guarantees progress during cooperative waits.
+        //
+        // Regular threads process up to BATCH_SIZE=1024 messages per actor
+        // and can get stuck in cooperative wait (e.g. indexer waiting for
+        // finalizer). The helper thread only ever processes ONE message at
+        // a time via run_one_step_impl, so it can never be captured for a
+        // long batch. It parks on the same condvar as regular threads but
+        // with a timeout, so it wakes up even if notify_one goes elsewhere.
+        {
+            let shared = Arc::clone(&self.shared);
+            let handle = std::thread::Builder::new()
+                .name("scheduler-helper".into())
+                .spawn(move || {
+                    helper_loop(&shared);
+                })
+                .expect("failed to spawn scheduler helper thread");
+            threads.push(handle);
+        }
+
         SchedulerHandle {
             threads,
             shared: Arc::clone(&self.shared),
@@ -467,6 +493,7 @@ impl Scheduler {
     pub fn run_one_step(&self) -> bool {
         run_one_step_impl(&self.shared)
     }
+
 
     /// Submit a one-shot task to the thread pool.
     /// The closure will be executed by a pool thread (or by `run_one_step`
@@ -506,8 +533,20 @@ impl Scheduler {
         self.shared.events.subscribe()
     }
 
+    /// Number of items in the ready queue.
+    pub fn ready_queue_len(&self) -> usize {
+        self.shared.ready_queue.lock().unwrap().len()
+    }
+
     /// Dump the state of all actors for diagnostics.
     /// Returns a human-readable string showing each actor's name, activity, and queue depth.
+    pub fn thread_stats(&self) -> (usize, usize) {
+        (
+            self.shared.started_threads.load(Ordering::Acquire),
+            self.shared.active_threads.load(Ordering::Acquire),
+        )
+    }
+
     pub fn dump_state(&self) -> String {
         let actors = self.shared.actors.lock().unwrap();
         let mut lines = Vec::new();
@@ -559,11 +598,69 @@ impl Drop for SchedulerHandle {
 }
 
 // ---------------------------------------------------------------------------
+// helper_loop — cooperative-wait safety net
+// ---------------------------------------------------------------------------
+
+/// Dedicated helper thread that guarantees scheduler progress during
+/// cooperative waits.
+///
+/// Unlike regular scheduler threads that process up to BATCH_SIZE messages
+/// per actor (and can get stuck in a cooperative wait mid-batch), the helper
+/// only ever calls `run_one_step_impl` which processes exactly ONE message
+/// and returns. This means:
+///
+/// 1. The helper can never be "captured" by a long batch
+/// 2. Even if it processes an actor that enters cooperative wait, the
+///    recursive run_one_step call processes the dependency (e.g. finalizer)
+///    and returns — max recursion depth = dependency chain length (typically 2)
+/// 3. In the deadlock scenario (all regular threads in cooperative wait),
+///    the helper is the only thread parked on the condvar, so notify_one()
+///    from wake() targets it directly
+fn helper_loop(shared: &SharedState) {
+    IS_SCHEDULER_THREAD.with(|c| c.set(true));
+    eprintln!("[diag] scheduler helper thread started");
+
+    let mut work_done = 0u64;
+    loop {
+        if shared.shutdown.load(Ordering::Acquire) {
+            return;
+        }
+
+        // Non-blocking: pop one item and process it.
+        if run_one_step_impl(shared) {
+            work_done += 1;
+            if work_done <= 5 || work_done % 100 == 0 {
+                eprintln!("[diag] helper: processed {work_done} items");
+            }
+            continue;
+        }
+
+        // No work — park on the same condvar with timeout.
+        // In the deadlock scenario all regular threads are busy (not parked),
+        // so this helper is the only waiter and notify_one() wakes it directly.
+        // The timeout is a safety net in case a notification is missed.
+        {
+            let queue = shared.ready_queue.lock().unwrap();
+            if queue.is_empty() {
+                let _ = shared.work_available.wait_timeout(
+                    queue,
+                    std::time::Duration::from_millis(5),
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // run_loop
 // ---------------------------------------------------------------------------
 
 fn run_loop(shared: &SharedState, thread_index: usize) {
     IS_SCHEDULER_THREAD.with(|c| c.set(true));
+    shared.started_threads.fetch_add(1, Ordering::Release);
+    shared.active_threads.fetch_add(1, Ordering::Release);
+    eprintln!("[diag] scheduler thread {thread_index} started");
+    let mut iteration = 0u64;
     loop {
         if shared.shutdown.load(Ordering::Acquire) {
             return;
@@ -572,6 +669,13 @@ fn run_loop(shared: &SharedState, thread_index: usize) {
         let Some(item) = pop_work(shared, thread_index) else {
             continue;
         };
+
+        iteration += 1;
+        if iteration <= 5 || iteration % 500 == 0 {
+            eprintln!("[diag] scheduler thread {thread_index}: iteration {iteration}, processing {:?}",
+                match &item { WorkItem::Actor { actor_id, .. } => format!("actor {actor_id:?}"),
+                              WorkItem::Task { .. } => "task".to_string() });
+        }
 
         match item {
             WorkItem::Task { task, done, .. } => {
@@ -677,8 +781,12 @@ fn pop_work(shared: &SharedState, thread_index: usize) -> Option<WorkItem> {
             return None;
         }
         match queue.pop() {
-            Some(item) => return Some(item),
+            Some(item) => {
+                shared.active_threads.fetch_add(1, Ordering::Release);
+                return Some(item);
+            }
             None => {
+                shared.active_threads.fetch_sub(1, Ordering::Release);
                 shared
                     .events
                     .emit(SchedulerEvent::ThreadParked { thread_index });
@@ -786,6 +894,33 @@ fn run_one_step_impl(shared: &SharedState) -> bool {
     };
 
     let Some(item) = item else {
+        // Safety net: scan for idle actors with pending messages (missed wakes).
+        let to_rewake: Vec<(ActorId, Priority)> = {
+            let actors = shared.actors.lock().unwrap();
+            actors.iter().filter_map(|(id, slot)| {
+                if slot.wake_handle.is_idle.load(Ordering::Acquire) {
+                    let has_pending = slot.actor.as_ref()
+                        .map(|a| a.has_pending())
+                        .unwrap_or(false);
+                    if has_pending {
+                        slot.wake_handle.is_idle.store(false, Ordering::Release);
+                        let priority = slot.actor.as_ref()
+                            .map(|a| a.priority())
+                            .unwrap_or(Priority::Medium);
+                        return Some((*id, priority));
+                    }
+                }
+                None
+            }).collect()
+        };
+        if !to_rewake.is_empty() {
+            let mut queue = shared.ready_queue.lock().unwrap();
+            for (actor_id, priority) in &to_rewake {
+                queue.push(WorkItem::Actor { priority: *priority, actor_id: *actor_id });
+            }
+            shared.work_available.notify_all();
+            return true;
+        }
         return false;
     };
 

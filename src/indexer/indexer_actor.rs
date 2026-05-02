@@ -165,6 +165,13 @@ struct IndexerState<D: Document> {
 
 impl<D: Document> IndexerState<D> {
     fn handle_docs(&mut self, batch: AddBatch<D>) {
+        static DOC_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = DOC_COUNTER.fetch_add(batch.len() as u32, std::sync::atomic::Ordering::Relaxed);
+        if n % 50 == 0 || n < 5 {
+            eprintln!("[diag] handle_docs: doc #{n}, batch_size={}, mem={}",
+                batch.len(),
+                self.current.as_ref().map(|c| c.writer.mem_usage()).unwrap_or(0));
+        }
         if batch.is_empty() || self.pending_error.is_some() {
             return;
         }
@@ -207,10 +214,16 @@ impl<D: Document> IndexerState<D> {
         if let Some(err) = self.pending_error.take() {
             return Err(err);
         }
+        let has_segment = self.current.is_some();
+        let has_pending = self.pending_finalize.is_some();
+        eprintln!("[diag] indexer handle_flush: has_segment={} has_pending_finalize={}", has_segment, has_pending);
         // Finalize the current segment (blocking — it's a Flush).
         self.finalize_current_segment_blocking()?;
+        eprintln!("[diag] indexer handle_flush: blocking finalize done, waiting pending...");
         // Wait for any background finalize to complete.
-        self.wait_pending_finalize()
+        let r = self.wait_pending_finalize();
+        eprintln!("[diag] indexer handle_flush: pending finalize done");
+        r
     }
 
     fn handle_shutdown(&mut self) {

@@ -117,6 +117,8 @@ impl<M: Send + 'static> Pool<M> {
         let scheduler = global_scheduler();
         let mut receivers = Vec::with_capacity(self.workers.len());
 
+        eprintln!("[diag] Pool::scatter({label}): {} workers", self.workers.len());
+
         for worker in &self.workers {
             let (tx, rx) = reply::<R>();
             let _ = worker.send(make_msg(tx));
@@ -139,6 +141,11 @@ impl<M: Send + 'static> Pool<M> {
         let scheduler = global_scheduler();
         let mut receivers = Vec::with_capacity(self.workers.len());
 
+        eprintln!("[diag] Pool::drain({label}): {} workers, mailbox depths: {:?}",
+            self.workers.len(),
+            self.workers.iter().map(|w| w.mailbox_depth()).collect::<Vec<_>>(),
+        );
+
         for worker in &self.workers {
             let (tx, rx) = reply::<()>();
             let _ = worker.send(DrainMsg(tx).into());
@@ -151,6 +158,7 @@ impl<M: Send + 'static> Pool<M> {
                 || scheduler.run_one_step(),
             );
         }
+        eprintln!("[diag] Pool::drain({label}): all workers drained.");
     }
 
     /// Send a shutdown message to all workers and wait for them to stop.
