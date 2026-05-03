@@ -121,6 +121,11 @@ impl ThreadInfo {
             _ => ThreadState::Idle,
         }
     }
+
+    /// Get the current actor (if any) being run by this thread.
+    pub fn current_actor(&self) -> Option<(ActorId, &'static str)> {
+        self.current_actor.lock().unwrap().clone()
+    }
 }
 
 /// Global thread registry.
@@ -271,6 +276,8 @@ struct ActorSlot {
     /// Activity tracking: what this actor is currently doing.
     /// Set by the scheduler dispatch loop, read by dump_state().
     activity: Arc<ActorActivity>,
+    /// WaitGraph edge ID when this actor is Suspended. Cleared on resume.
+    suspend_edge_id: Option<u64>,
 }
 
 /// Tracks what an actor is currently doing (lock-free).
@@ -549,6 +556,7 @@ impl Scheduler {
                     name,
                     wake_handle,
                     activity: Arc::new(ActorActivity::new()),
+                    suspend_edge_id: None,
                 },
             );
         }
@@ -685,6 +693,55 @@ impl Scheduler {
         result_rx
     }
 
+    /// Submit a CPU task and pipe the result to a target actor as a message.
+    ///
+    /// The task runs on a pool thread. When it completes, `map(result)`
+    /// constructs a message sent to `target`.
+    ///
+    /// No thread blocked on the caller side. WaitGraph auto-tracked.
+    ///
+    /// ```ignore
+    /// scheduler.task_pipe_to(
+    ///     Priority::High,
+    ///     move || execute_dag(&mut dag, None),
+    ///     &self.self_ref, "commit_dag",
+    ///     |result| ShardMsg::DagDone { result },
+    /// );
+    /// ```
+    pub fn task_pipe_to<T, TargetMsg, F, G>(
+        &self,
+        priority: Priority,
+        task: F,
+        target: &crate::mailbox::ActorRef<TargetMsg>,
+        label: &str,
+        map: G,
+    ) where
+        T: Send + 'static,
+        TargetMsg: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+        G: FnOnce(T) -> TargetMsg + Send + 'static,
+    {
+        let target = target.clone();
+        let edge_id = crate::wait_graph::register(
+            crate::wait_graph::current_waiter(),
+            label.to_string(),
+        );
+
+        // submit_task returns ReplyReceiver<T> — pipe it to target.
+        let rx = self.submit_task(priority, task);
+
+        // set_pipe handles the race: if the task already completed
+        // (value arrived), the callback fires immediately.
+        let immediate = rx.set_pipe(move |value| {
+            let _ = target.send(map(value));
+        });
+        if immediate {
+            crate::wait_graph::unregister(edge_id);
+        } else {
+            rx.set_pipe_edge(edge_id);
+        }
+    }
+
     /// Create a test-only ActorContext for unit tests that need to call handlers directly.
     #[cfg(test)]
     pub fn test_context(&self, actor_id: ActorId) -> ActorContext {
@@ -725,6 +782,8 @@ impl Scheduler {
         let label_owned = label.to_string();
         let shared = &self.shared;
         let mut warn_count = 0u32;
+
+        let _guard = crate::wait_graph::WaitGuard::current(label_owned.clone());
 
         let value = rx.wait_blocking_with_diag(Duration::from_secs(10), |elapsed_s| {
             warn_count += 1;
@@ -767,11 +826,14 @@ impl Scheduler {
                 })
                 .collect();
 
+            let wait_graph = crate::wait_graph::dump_text();
+
             eprintln!(
                 "[luciole] WARNING: wait({:?}) blocked {:.0}s (warn #{warn_count})\n\
                  Threads:\n{}\n\
                  Ready queue: {qlen}\n\
-                 Non-idle actors:\n{}",
+                 Non-idle actors:\n{}\n\
+                 {wait_graph}",
                 label_owned, elapsed_s,
                 threads.join("\n"),
                 if actors.is_empty() { "  (all idle)".into() } else { actors.join("\n") },
@@ -888,6 +950,16 @@ pub fn dump_mermaid_global() -> String {
     global_scheduler().dump_mermaid()
 }
 
+/// Dump the global wait graph as mermaid (for C FFI).
+pub fn dump_wait_graph_mermaid() -> String {
+    crate::wait_graph::dump_mermaid()
+}
+
+/// Dump the global wait graph as plain text (for C FFI).
+pub fn dump_wait_graph_text() -> String {
+    crate::wait_graph::dump_text()
+}
+
 // ---------------------------------------------------------------------------
 // SchedulerHandle
 // ---------------------------------------------------------------------------
@@ -966,6 +1038,10 @@ fn run_loop_handle_actor(shared: &Arc<SharedState>, actor_id: ActorId, thread_in
             Some(s) => s,
             None => return,
         };
+        // Clear any suspend edge from previous Suspend (actor was resumed).
+        if let Some(edge_id) = slot.suspend_edge_id.take() {
+            crate::wait_graph::unregister(edge_id);
+        }
         match slot.actor.take() {
             Some(actor) => (actor, slot.name, Arc::clone(&slot.activity)),
             None => return, // Déjà pris (doublon dans la ready queue)
@@ -991,9 +1067,14 @@ fn run_loop_handle_actor(shared: &Arc<SharedState>, actor_id: ActorId, thread_in
             // Put the actor back but do NOT push to ready_queue.
             // The ResumeHandle (registered on a ReplyReceiver by the handler)
             // will push the actor when the dependency completes.
+            let edge_id = crate::wait_graph::register(
+                crate::wait_graph::WaiterKind::Actor(actor_id, name),
+                format!("{name} SUSPENDED"),
+            );
             let mut actors = shared.actors.lock().unwrap();
             if let Some(slot) = actors.get_mut(&actor_id) {
                 slot.actor = Some(actor_box);
+                slot.suspend_edge_id = Some(edge_id);
             }
             // Note: is_idle stays false — the actor is suspended, not idle.
         }
@@ -1238,6 +1319,10 @@ fn run_one_step_actor(shared: &Arc<SharedState>, actor_id: ActorId, entry_priori
             Some(s) => s,
             None => return false,
         };
+        // Clear any suspend edge from previous Suspend (actor was resumed).
+        if let Some(edge_id) = slot.suspend_edge_id.take() {
+            crate::wait_graph::unregister(edge_id);
+        }
         match slot.actor.take() {
             Some(actor) => (actor, slot.name, Arc::clone(&slot.activity)),
             None => return false,
@@ -1284,7 +1369,13 @@ fn run_one_step_actor(shared: &Arc<SharedState>, actor_id: ActorId, entry_priori
     activity.clear();
 
     if stopped {
+        // Clean up any lingering suspend edge before removing actor.
         let mut actors = shared.actors.lock().unwrap();
+        if let Some(slot) = actors.get_mut(&actor_id) {
+            if let Some(edge_id) = slot.suspend_edge_id.take() {
+                crate::wait_graph::unregister(edge_id);
+            }
+        }
         actors.remove(&actor_id);
         shared.events.emit(SchedulerEvent::ActorStopped {
             actor_id,
@@ -1293,9 +1384,14 @@ fn run_one_step_actor(shared: &Arc<SharedState>, actor_id: ActorId, entry_priori
     } else if suspended {
         // Put actor back without pushing to ready_queue.
         // ResumeHandle will re-schedule when the dependency completes.
+        let edge_id = crate::wait_graph::register(
+            crate::wait_graph::WaiterKind::Actor(actor_id, name),
+            format!("{name} SUSPENDED"),
+        );
         let mut actors = shared.actors.lock().unwrap();
         if let Some(slot) = actors.get_mut(&actor_id) {
             slot.actor = Some(actor_box);
+            slot.suspend_edge_id = Some(edge_id);
         }
     } else {
         let needs_rewake;

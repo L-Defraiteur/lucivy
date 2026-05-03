@@ -24,6 +24,7 @@ pub use fan_out::MergeNode;
 pub use gate::GateNode;
 pub use scatter::ScatterResults;
 pub mod stream_dag;
+pub mod wait_graph;
 pub mod async_executor;
 
 pub use actor_state::ActorState;
@@ -37,10 +38,10 @@ pub use node::{LogLevel, Node, NodeContext, NodePoll, PollNode, PollNodeAdapter,
 pub use observe::{TapEvent, TapRegistry};
 pub use pool::{DrainMsg, DrainableRef, Pool, ShutdownMsg};
 pub use port::{PortType, PortValue};
-pub use reply::{reply, JoinResume, Reply, ReplyReceiver, ResumeHandle};
+pub use reply::{reply, collect_replies_to, JoinResume, Reply, ReplyReceiver, ResumeHandle};
 pub use checkpoint::{CheckpointStatus, CheckpointStore, DagCheckpoint, FileCheckpointStore, MemoryCheckpointStore};
-pub use runtime::{display_progress, execute_dag, execute_dag_with_checkpoint, subscribe_dag_events, DagEvent, DagResult, NodeResult};
-pub use scheduler::{ActorContext, ActorId, Scheduler, SchedulerHandle};
+pub use runtime::{display_progress, execute_dag, execute_dag_async, execute_dag_with_checkpoint, subscribe_dag_events, DagEvent, DagResult, NodeResult};
+pub use scheduler::{ActorContext, ActorId, Scheduler, SchedulerHandle, dump_wait_graph_mermaid, dump_wait_graph_text};
 pub use scope::{Drainable, Scope};
 pub use stream_dag::StreamDag;
 pub use async_executor::{AsyncScope, FutureHandle, SignalFuture, SignalDataFuture, SIGNAL_OK, SIGNAL_ERROR, SIGNAL_PENDING};

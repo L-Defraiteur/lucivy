@@ -566,6 +566,19 @@ pub extern "C" fn lucivy_dump_state() -> *const c_char {
     return_str(luciole::scheduler::global_scheduler().dump_state())
 }
 
+/// Dump the wait graph as Mermaid (who waits on what).
+/// Call via: Module.ccall('lucivy_dump_wait_graph', 'string', [], [])
+#[no_mangle]
+pub extern "C" fn lucivy_dump_wait_graph() -> *const c_char {
+    return_str(luciole::dump_wait_graph_mermaid())
+}
+
+/// Dump the wait graph as plain text.
+#[no_mangle]
+pub extern "C" fn lucivy_dump_wait_graph_text() -> *const c_char {
+    return_str(luciole::dump_wait_graph_text())
+}
+
 /// Test condvar between threads. Submit a task via the scheduler, wait for reply.
 /// If this returns "ok" → condvar works. If it hangs → condvar broken.
 #[no_mangle]

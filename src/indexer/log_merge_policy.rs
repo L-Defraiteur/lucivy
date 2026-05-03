@@ -7,7 +7,7 @@ use crate::index::SegmentMeta;
 
 const DEFAULT_LEVEL_LOG_SIZE: f64 = 0.75;
 const DEFAULT_MIN_LAYER_SIZE: u32 = 10_000;
-const DEFAULT_MIN_NUM_SEGMENTS_IN_MERGE: usize = 2; // temporarily lowered from 8 for merge stress testing
+const DEFAULT_MIN_NUM_SEGMENTS_IN_MERGE: usize = 2; // lowered for WASM merge stress testing
 const DEFAULT_MAX_DOCS_BEFORE_MERGE: usize = 10_000_000;
 // The default value of 1 means that deletes are not taken in account when
 // identifying merge candidates. This is not a very sensible default: it was

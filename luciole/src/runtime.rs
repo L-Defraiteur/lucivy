@@ -839,6 +839,398 @@ fn collect_inputs(
     inputs
 }
 
+// ===========================================================================
+// execute_dag_async — DAG driven by pipe_to, no thread ever blocked
+// ===========================================================================
+
+/// Result of a single node task (parallel execution).
+struct NodeTaskResult {
+    node_idx: usize,
+    node_name: String,
+    result: Result<(NodeResult, HashMap<String, PortValue>, Box<dyn crate::node::Node>), String>,
+}
+
+// Needed because Box<dyn Node> is Send but NodeTaskResult must be too.
+unsafe impl Send for NodeTaskResult {}
+
+/// Messages for the DagExecutor actor.
+enum DagExecMsg {
+    /// Begin DAG execution.
+    Start,
+    /// A level completed — all node tasks finished.
+    LevelDone {
+        level_idx: usize,
+        results: Vec<NodeTaskResult>,
+    },
+}
+
+/// Ephemeral actor that drives a DAG level-by-level via pipe_to.
+///
+/// Spawned by `execute_dag_async`, self-destructs when the DAG finishes.
+/// No thread is ever blocked — parallel nodes are submit_task'd and
+/// results are collected via collect_replies_to.
+struct DagExecutor<R: Send + 'static> {
+    dag: crate::dag::Dag,
+    levels: Vec<Vec<usize>>,
+    port_data: HashMap<(String, String), PortValue>,
+    consumer_counts: HashMap<(String, String), usize>,
+    node_results: Vec<(String, NodeResult)>,
+    undo_stack: Vec<(usize, Box<dyn std::any::Any + Send>)>,
+    /// Where to deliver the final result.
+    target: crate::mailbox::ActorRef<R>,
+    map: Option<Box<dyn FnOnce(Result<DagResult, String>) -> R + Send>>,
+    self_ref: Option<crate::mailbox::ActorRef<DagExecMsg>>,
+    dag_start: Instant,
+}
+
+impl<R: Send + 'static> crate::Actor for DagExecutor<R> {
+    type Msg = DagExecMsg;
+
+    fn name(&self) -> &'static str { "dag_executor" }
+
+    fn priority(&self) -> crate::Priority { crate::Priority::High }
+
+    fn on_start(&mut self, self_ref: crate::mailbox::ActorRef<DagExecMsg>) {
+        self.self_ref = Some(self_ref.clone());
+        let _ = self_ref.send(DagExecMsg::Start);
+    }
+
+    fn handle(&mut self, msg: DagExecMsg, _ctx: &crate::ActorContext) -> crate::ActorStatus {
+        match msg {
+            DagExecMsg::Start => {
+                if self.levels.is_empty() {
+                    self.finish(Ok(()));
+                    return crate::ActorStatus::Stop;
+                }
+                self.schedule_level(0);
+            }
+            DagExecMsg::LevelDone { level_idx, results } => {
+                // Process results for this level.
+                if let Err(e) = self.process_level_results(level_idx, results) {
+                    self.rollback();
+                    self.finish(Err(e));
+                    return crate::ActorStatus::Stop;
+                }
+
+                // Next level or finish.
+                let next = level_idx + 1;
+                if next < self.levels.len() {
+                    self.schedule_level(next);
+                } else {
+                    self.finish(Ok(()));
+                    return crate::ActorStatus::Stop;
+                }
+            }
+        }
+        crate::ActorStatus::Continue
+    }
+}
+
+impl<R: Send + 'static> DagExecutor<R> {
+    /// Schedule all nodes in a level as tasks, collect results via collect_replies_to.
+    fn schedule_level(&mut self, level_idx: usize) {
+        let level = &self.levels[level_idx];
+        let edges = self.dag.edges().to_vec();
+        let scheduler = global_scheduler();
+        let self_ref = self.self_ref.as_ref().unwrap();
+
+        let mut task_rxs: Vec<crate::reply::ReplyReceiver<NodeTaskResult>> = Vec::new();
+        let mut immediate_results: Vec<NodeTaskResult> = Vec::new();
+
+        for &node_idx in level {
+            let node_name = self.dag.node_name(node_idx).to_string();
+
+            // Check triggers — skip nodes whose required trigger is unsatisfied.
+            let trigger_unsatisfied = {
+                let node_inputs = self.dag.node_mut(node_idx).inputs();
+                node_inputs.iter().any(|port| {
+                    port.required
+                        && port.port_type == crate::port::PortType::Trigger
+                        && !edges.iter().any(|e| {
+                            e.to_node == node_name
+                                && e.to_port == port.name
+                                && self.port_data.contains_key(&(
+                                    e.from_node.clone(),
+                                    e.from_port.clone(),
+                                ))
+                        })
+                })
+            };
+
+            if trigger_unsatisfied {
+                immediate_results.push(NodeTaskResult {
+                    node_idx,
+                    node_name,
+                    result: Ok((
+                        NodeResult {
+                            duration_ms: 0,
+                            metrics: vec![("skipped".to_string(), 1.0)],
+                            logs: vec![],
+                        },
+                        HashMap::new(),
+                        // Skipped node — take it out and put it back immediately.
+                        // We need the Box<dyn Node> in the result for uniform handling.
+                        unsafe {
+                            let entry = &mut self.dag.nodes_mut()[node_idx];
+                            let ptr = &mut entry.node as *mut Box<dyn crate::node::Node>;
+                            std::ptr::read(ptr)
+                        },
+                    )),
+                });
+                continue;
+            }
+
+            // Collect inputs for this node.
+            let inputs = collect_inputs(
+                &node_name,
+                &edges,
+                &mut self.port_data,
+                &mut self.consumer_counts,
+            );
+
+            // Take node out of the DAG (like execute_level_parallel).
+            let node_box = unsafe {
+                let entry = &mut self.dag.nodes_mut()[node_idx];
+                let ptr = &mut entry.node as *mut Box<dyn crate::node::Node>;
+                std::ptr::read(ptr)
+            };
+
+            let services = self.dag.services.clone();
+
+            // Submit as task — runs on a pool thread.
+            let rx = scheduler.submit_task(crate::Priority::High, move || {
+                let start = Instant::now();
+                let mut ctx = crate::node::NodeContext::new(inputs);
+                if let Some(s) = services {
+                    ctx = ctx.with_services(s);
+                }
+                let mut node = node_box;
+                match node.execute(&mut ctx) {
+                    Ok(()) => {
+                        let duration_ms = start.elapsed().as_millis() as u64;
+                        let outputs = ctx.take_outputs();
+                        let metrics = ctx.metrics().to_vec();
+                        let logs = ctx.logs().to_vec();
+                        NodeTaskResult {
+                            node_idx,
+                            node_name,
+                            result: Ok((
+                                NodeResult { duration_ms, metrics, logs },
+                                outputs,
+                                node,
+                            )),
+                        }
+                    }
+                    Err(e) => NodeTaskResult {
+                        node_idx,
+                        node_name: node_name.clone(),
+                        result: Err(format!("node '{}' failed: {}", node_name, e)),
+                    },
+                }
+            });
+
+            task_rxs.push(rx);
+        }
+
+        if task_rxs.is_empty() {
+            // All nodes were skipped or level is empty — advance immediately.
+            let _ = self_ref.send(DagExecMsg::LevelDone {
+                level_idx,
+                results: immediate_results,
+            });
+            return;
+        }
+
+        // Collect all task results via collect_replies_to.
+        // When the last task finishes, LevelDone is sent to this actor.
+        let immediate = immediate_results;
+        crate::reply::collect_replies_to(
+            task_rxs,
+            self_ref,
+            &format!("dag_level_{level_idx}"),
+            move |mut task_results| {
+                // Prepend skipped nodes (immediate_results) to maintain order.
+                let mut all = immediate;
+                all.append(&mut task_results);
+                DagExecMsg::LevelDone {
+                    level_idx,
+                    results: all,
+                }
+            },
+        );
+    }
+
+    /// Process results from a completed level. Returns Err if any node failed.
+    fn process_level_results(
+        &mut self,
+        _level_idx: usize,
+        results: Vec<NodeTaskResult>,
+    ) -> Result<(), String> {
+        let bus = dag_event_bus();
+
+        for ntr in results {
+            match ntr.result {
+                Ok((nr, outputs, node_box)) => {
+                    // Put node back in the DAG.
+                    let entry = &mut self.dag.nodes_mut()[ntr.node_idx];
+                    unsafe {
+                        let ptr = &mut entry.node as *mut Box<dyn crate::node::Node>;
+                        std::ptr::write(ptr, node_box);
+                    }
+
+                    // Undo context.
+                    if self.dag.node_mut(ntr.node_idx).can_undo() {
+                        if let Some(undo_ctx) = self.dag.node_mut(ntr.node_idx).undo_context() {
+                            self.undo_stack.push((ntr.node_idx, undo_ctx));
+                        }
+                    }
+
+                    // Store outputs in port_data.
+                    for (port_name, value) in outputs {
+                        if self.dag.taps.is_active() {
+                            for edge in self.dag.edges() {
+                                if edge.from_node == ntr.node_name && edge.from_port == port_name {
+                                    self.dag.taps.check_and_emit(edge, &value);
+                                }
+                            }
+                        }
+                        self.port_data
+                            .insert((ntr.node_name.clone(), port_name), value);
+                    }
+
+                    // Emit logs.
+                    for (level, text) in &nr.logs {
+                        bus.emit(DagEvent::NodeLog {
+                            node: ntr.node_name.clone(),
+                            node_type: String::new(),
+                            level: *level,
+                            text: text.clone(),
+                        });
+                    }
+
+                    bus.emit(DagEvent::NodeCompleted {
+                        node: ntr.node_name.clone(),
+                        duration_ms: nr.duration_ms,
+                        metrics: nr.metrics.clone(),
+                    });
+
+                    self.node_results.push((ntr.node_name, nr));
+                }
+                Err(e) => {
+                    bus.emit(DagEvent::NodeFailed {
+                        node: ntr.node_name.clone(),
+                        error: e.clone(),
+                        duration_ms: 0,
+                    });
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Rollback undo stack in reverse order.
+    fn rollback(&mut self) {
+        let bus = dag_event_bus();
+        while let Some((node_idx, undo_ctx)) = self.undo_stack.pop() {
+            let node_name = self.dag.node_name(node_idx).to_string();
+            if let Err(e) = self.dag.node_mut(node_idx).undo(undo_ctx) {
+                bus.emit(DagEvent::NodeFailed {
+                    node: format!("undo:{node_name}"),
+                    error: e,
+                    duration_ms: 0,
+                });
+            }
+        }
+    }
+
+    /// Build final DagResult and deliver to target.
+    fn finish(&mut self, exec_result: Result<(), String>) {
+        let bus = dag_event_bus();
+        let total_ms = self.dag_start.elapsed().as_millis() as u64;
+
+        let result = match exec_result {
+            Ok(()) => {
+                bus.emit(DagEvent::DagCompleted {
+                    total_ms,
+                    node_count: self.node_results.len(),
+                });
+                Ok(DagResult {
+                    duration_ms: total_ms,
+                    node_results: std::mem::take(&mut self.node_results),
+                    outputs: std::mem::take(&mut self.port_data),
+                })
+            }
+            Err(e) => {
+                bus.emit(DagEvent::DagFailed { error: e.clone() });
+                Err(e)
+            }
+        };
+
+        if let Some(map) = self.map.take() {
+            let _ = self.target.send(map(result));
+        }
+    }
+}
+
+/// Execute a DAG asynchronously. Result delivered as a message to target.
+///
+/// Spawns an ephemeral DagExecutor actor that processes the DAG level by level.
+/// Parallel nodes within a level are submitted as tasks and collected via
+/// `collect_replies_to`. **No thread is ever blocked.**
+///
+/// When the DAG completes (success or error), `map(result)` constructs
+/// a message sent to `target`.
+///
+/// ```ignore
+/// execute_dag_async(dag, &self.self_ref, "commit_dag", |result| {
+///     ShardMsg::DagDone { result }
+/// });
+/// return ActorStatus::Continue;
+/// ```
+pub fn execute_dag_async<R: Send + 'static>(
+    mut dag: crate::dag::Dag,
+    target: &crate::mailbox::ActorRef<R>,
+    _label: &str,
+    map: impl FnOnce(Result<DagResult, String>) -> R + Send + 'static,
+) {
+    let levels = match dag.topological_levels() {
+        Ok(l) => l,
+        Err(e) => {
+            let _ = target.send(map(Err(e)));
+            return;
+        }
+    };
+
+    // Pre-compute consumer counts.
+    let mut consumer_counts: HashMap<(String, String), usize> = HashMap::new();
+    for edge in dag.edges() {
+        *consumer_counts
+            .entry((edge.from_node.clone(), edge.from_port.clone()))
+            .or_insert(0) += 1;
+    }
+
+    let port_data = std::mem::take(&mut dag.initial_inputs);
+
+    let executor = DagExecutor {
+        dag,
+        levels,
+        port_data,
+        consumer_counts,
+        node_results: Vec::new(),
+        undo_stack: Vec::new(),
+        target: target.clone(),
+        map: Some(Box::new(map)),
+        self_ref: None,
+        dag_start: Instant::now(),
+    };
+
+    let scheduler = global_scheduler();
+    let (mb, mut ar) = crate::mailbox::mailbox::<DagExecMsg>(64);
+    scheduler.spawn(executor, mb, &mut ar, 64);
+    // on_start sends Start message — execution begins automatically.
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1468,5 +1860,162 @@ mod tests {
         assert!(tree.contains("parallel"));
         assert!(tree.contains("[✓] a"));
         assert!(tree.contains("[✓] b"));
+    }
+
+    // -------------------------------------------------------------------
+    // execute_dag_async tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn async_dag_linear() {
+        // Linear DAG: emit → double → collect
+        let scheduler = crate::Scheduler::new(2);
+        let _handle = scheduler.start();
+
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let done = Arc::new(AtomicBool::new(false));
+        let done2 = done.clone();
+        let result_store = Arc::new(std::sync::Mutex::new(None::<Result<DagResult, String>>));
+        let result_store2 = result_store.clone();
+
+        // Target actor receives the DagResult.
+        struct ResultSink {
+            done: Arc<AtomicBool>,
+            store: Arc<std::sync::Mutex<Option<Result<DagResult, String>>>>,
+        }
+        enum SinkMsg { DagDone(Result<DagResult, String>) }
+        impl crate::Actor for ResultSink {
+            type Msg = SinkMsg;
+            fn name(&self) -> &'static str { "sink" }
+            fn priority(&self) -> crate::Priority { crate::Priority::Medium }
+            fn handle(&mut self, msg: SinkMsg, _ctx: &crate::ActorContext) -> crate::ActorStatus {
+                match msg {
+                    SinkMsg::DagDone(r) => {
+                        *self.store.lock().unwrap() = Some(r);
+                        self.done.store(true, Ordering::Release);
+                    }
+                }
+                crate::ActorStatus::Continue
+            }
+        }
+
+        let (mb, mut ar) = crate::mailbox::<SinkMsg>(64);
+        scheduler.spawn(ResultSink { done: done2, store: result_store2 }, mb, &mut ar, 64);
+
+        let mut dag = Dag::new();
+        dag.add_node("emit", EmitNode { value: 7 });
+        dag.add_node("double", DoubleNode);
+        dag.add_node("collect", CollectNode { received: 0 });
+        dag.connect("emit", "out", "double", "in").unwrap();
+        dag.connect("double", "out", "collect", "in").unwrap();
+
+        execute_dag_async(dag, &ar, "test_linear", |r| SinkMsg::DagDone(r));
+
+        // Wait for result.
+        for _ in 0..100 {
+            if done.load(Ordering::Acquire) { break; }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(done.load(Ordering::Acquire), "dag should complete");
+
+        let result = result_store.lock().unwrap().take().unwrap().unwrap();
+        assert_eq!(result.node_results.len(), 3);
+        let collect_r = result.get("collect").unwrap();
+        assert_eq!(collect_r.metrics[0], ("received".to_string(), 14.0)); // 7*2
+    }
+
+    #[test]
+    fn async_dag_parallel_level() {
+        // Two independent nodes (same level), then a merge.
+        let scheduler = crate::Scheduler::new(4);
+        let _handle = scheduler.start();
+
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let done = Arc::new(AtomicBool::new(false));
+        let done2 = done.clone();
+        let result_store = Arc::new(std::sync::Mutex::new(None::<Result<DagResult, String>>));
+        let result_store2 = result_store.clone();
+
+        struct Sink {
+            done: Arc<AtomicBool>,
+            store: Arc<std::sync::Mutex<Option<Result<DagResult, String>>>>,
+        }
+        enum SM { Done(Result<DagResult, String>) }
+        impl crate::Actor for Sink {
+            type Msg = SM;
+            fn name(&self) -> &'static str { "sink" }
+            fn priority(&self) -> crate::Priority { crate::Priority::Medium }
+            fn handle(&mut self, msg: SM, _ctx: &crate::ActorContext) -> crate::ActorStatus {
+                match msg { SM::Done(r) => { *self.store.lock().unwrap() = Some(r); self.done.store(true, Ordering::Release); } }
+                crate::ActorStatus::Continue
+            }
+        }
+
+        let (mb, mut ar) = crate::mailbox::<SM>(64);
+        scheduler.spawn(Sink { done: done2, store: result_store2 }, mb, &mut ar, 64);
+
+        let mut dag = Dag::new();
+        dag.add_node("a", EmitNode { value: 10 });
+        dag.add_node("b", EmitNode { value: 20 });
+
+        execute_dag_async(dag, &ar, "test_parallel", |r| SM::Done(r));
+
+        for _ in 0..100 {
+            if done.load(Ordering::Acquire) { break; }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(done.load(Ordering::Acquire));
+        let result = result_store.lock().unwrap().take().unwrap().unwrap();
+        assert_eq!(result.node_results.len(), 2);
+        let total = result.total("emitted");
+        assert_eq!(total, 30.0);
+    }
+
+    #[test]
+    fn async_dag_error_rollback() {
+        use std::sync::Mutex as StdMutex;
+
+        let scheduler = crate::Scheduler::new(2);
+        let _handle = scheduler.start();
+
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let done = Arc::new(AtomicBool::new(false));
+        let done2 = done.clone();
+        let result_store = Arc::new(StdMutex::new(None::<Result<DagResult, String>>));
+        let result_store2 = result_store.clone();
+
+        struct Sink {
+            done: Arc<AtomicBool>,
+            store: Arc<StdMutex<Option<Result<DagResult, String>>>>,
+        }
+        enum SM { Done(Result<DagResult, String>) }
+        impl crate::Actor for Sink {
+            type Msg = SM;
+            fn name(&self) -> &'static str { "sink" }
+            fn priority(&self) -> crate::Priority { crate::Priority::Medium }
+            fn handle(&mut self, msg: SM, _ctx: &crate::ActorContext) -> crate::ActorStatus {
+                match msg { SM::Done(r) => { *self.store.lock().unwrap() = Some(r); self.done.store(true, Ordering::Release); } }
+                crate::ActorStatus::Continue
+            }
+        }
+
+        let (mb, mut ar) = crate::mailbox::<SM>(64);
+        scheduler.spawn(Sink { done: done2, store: result_store2 }, mb, &mut ar, 64);
+
+        let mut dag = Dag::new();
+        dag.add_node("source", EmitNode { value: 1 });
+        dag.add_node("fail", FailNode);
+        dag.connect("source", "out", "fail", "in").unwrap();
+
+        execute_dag_async(dag, &ar, "test_fail", |r| SM::Done(r));
+
+        for _ in 0..100 {
+            if done.load(Ordering::Acquire) { break; }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(done.load(Ordering::Acquire));
+        let result = result_store.lock().unwrap().take().unwrap();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("intentional failure"));
     }
 }

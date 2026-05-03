@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::mailbox::{mailbox, ActorRef};
-use crate::reply::{reply, Reply};
+use crate::reply::{self, reply, Reply};
 use crate::scheduler::global_scheduler;
 use crate::Actor;
 
@@ -119,22 +119,12 @@ impl<M: Send + 'static> Pool<M> {
 
         for (i, worker) in self.workers.iter().enumerate() {
             let (tx, rx) = reply::<R>();
-            let depth_before = worker.mailbox_depth();
             let _ = worker.send(make_msg(tx));
-            let depth_after = worker.mailbox_depth();
-            eprintln!("[scatter] {label}: sent to worker {i}, mailbox {depth_before}→{depth_after}");
             receivers.push(rx);
         }
-        eprintln!("[scatter] {label}: all sent, ready_queue={}", scheduler.ready_queue_len());
 
         receivers.into_iter()
-            .enumerate()
-            .map(|(i, rx)| {
-                eprintln!("[scatter] {label}: waiting for worker {i}...");
-                let v = scheduler.wait(rx, label);
-                eprintln!("[scatter] {label}: worker {i} done");
-                v
-            })
+            .map(|rx| scheduler.wait(rx, label))
             .collect()
     }
 
@@ -179,6 +169,55 @@ impl<M: Send + 'static> Pool<M> {
 
         for rx in receivers {
             scheduler.wait(rx, label);
+        }
+    }
+
+    /// Scatter a request to ALL workers and pipe collected results to target.
+    ///
+    /// `msg_fn` is called N times (once per worker), each receiving a `Reply<T>`.
+    /// When ALL workers have replied, `map(results)` constructs a single message
+    /// sent to `target`. `results[i]` corresponds to worker `i`.
+    ///
+    /// **Atomic**: all callbacks are registered BEFORE any message is sent.
+    /// No race condition, no thread blocked, no Suspend needed.
+    ///
+    /// ```ignore
+    /// // "Ask all workers to flush, send all results back to me"
+    /// self.worker_pool.collect_to(
+    ///     |reply| WorkerMsg::Flush(reply),
+    ///     &self.self_ref, "flush_all",
+    ///     |results| ShardMsg::AllDone { results },
+    /// );
+    /// ```
+    pub fn collect_to<T, TargetMsg, F, G>(
+        &self,
+        msg_fn: F,
+        target: &ActorRef<TargetMsg>,
+        label: &str,
+        map: G,
+    ) where
+        T: Send + 'static,
+        TargetMsg: Send + 'static,
+        F: Fn(reply::Reply<T>) -> M,
+        G: FnOnce(Vec<T>) -> TargetMsg + Send + 'static,
+    {
+        let n = self.workers.len();
+
+        // Create all reply pairs upfront.
+        let mut txs = Vec::with_capacity(n);
+        let mut rxs = Vec::with_capacity(n);
+        for _ in 0..n {
+            let (tx, rx) = reply::<T>();
+            txs.push(tx);
+            rxs.push(rx);
+        }
+
+        // 1. Set up collection callbacks BEFORE sending any message.
+        crate::reply::collect_replies_to(rxs, target, label, map);
+
+        // 2. Send AFTER all callbacks are in place.
+        for (i, tx) in txs.into_iter().enumerate() {
+            let _ = self.workers[i].send(msg_fn(tx));
         }
     }
 

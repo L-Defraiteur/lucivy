@@ -72,6 +72,8 @@ emcc "$STATIC_LIB" \
         "_lucivy_dump_state",
         "_lucivy_test_condvar",
         "_lucivy_test_coop",
+        "_lucivy_dump_wait_graph",
+        "_lucivy_dump_wait_graph_text",
         "_lucivy_search",
         "_lucivy_search_filtered",
         "_lucivy_export_snapshot",

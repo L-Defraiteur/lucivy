@@ -111,6 +111,50 @@ impl<M> ActorRef<M> {
         self.sender.len()
     }
 
+    /// Send a request to this actor and pipe the result to a target actor.
+    ///
+    /// `msg_fn` receives a `Reply<T>` and must return the message to send.
+    /// When this actor replies, `map` transforms the result into a message
+    /// for `target`, which receives it in its mailbox.
+    ///
+    /// **Atomic**: callback is registered BEFORE the message is sent.
+    /// No race condition, no thread blocked, no Suspend needed.
+    ///
+    /// ```ignore
+    /// // "Ask indexer to flush, send result back to me as FlushDone"
+    /// self.indexer.pipe_to(
+    ///     |reply| IndexerMsg::Flush(reply),
+    ///     &self.self_ref, "flush",
+    ///     |result| ShardMsg::FlushDone { result },
+    /// );
+    /// ```
+    pub fn pipe_to<T, TargetMsg, F, G>(
+        &self,
+        msg_fn: F,
+        target: &ActorRef<TargetMsg>,
+        label: &str,
+        map: G,
+    ) where
+        T: Send + 'static,
+        TargetMsg: Send + 'static,
+        F: FnOnce(crate::reply::Reply<T>) -> M,
+        G: FnOnce(T) -> TargetMsg + Send + 'static,
+    {
+        let (tx, rx) = crate::reply::reply::<T>();
+        let target = target.clone();
+        let edge_id = crate::wait_graph::register(
+            crate::wait_graph::current_waiter(),
+            label.to_string(),
+        );
+        // 1. Callback BEFORE send — no race possible.
+        rx.set_pipe_edge(edge_id);
+        rx.set_pipe(move |value| {
+            let _ = target.send(map(value));
+        });
+        // 2. Send AFTER callback is in place.
+        let _ = self.send(msg_fn(tx));
+    }
+
     pub fn try_send(&self, msg: M) -> Result<(), channel::TrySendError<M>> {
         self.sender.try_send(msg)?;
         if let Some(wh) = &self.notifier {
