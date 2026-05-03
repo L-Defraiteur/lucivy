@@ -727,6 +727,11 @@ pub(crate) enum ShardMsg {
 
     // ── Internal messages (pipe_to callbacks deliver these) ──────────
 
+    /// All indexer workers have processed pending DocsMsg (drain complete).
+    IndexersDrained {
+        fast: bool,
+        reply: luciole::Reply<Result<(), String>>,
+    },
     /// All indexer workers have flushed — results collected by collect_replies_to.
     FlushDone {
         results: Vec<Result<Vec<u8>, Vec<u8>>>,
@@ -781,7 +786,44 @@ impl luciole::Actor for ShardActor {
                 }
             }
             ShardMsg::Commit { fast, reply } => {
-                // Step 1: Send FlushMsg to all indexer workers.
+                // Step 1: Drain indexers — all pending DocsMsg processed first.
+                // FIFO guarantee: DrainMsg is behind all DocsMsg in the queue.
+                // When all indexers ACK, we know no documents are still being indexed.
+                let drain_rxs = {
+                    let mut guard = self.handle.writer.lock().unwrap();
+                    match guard.as_mut() {
+                        Some(writer) => {
+                            match writer.drain_workers() {
+                                Ok(rxs) => rxs,
+                                Err(e) => {
+                                    reply.send(Err(format!("drain shard_{}: {e}", self.shard_id)));
+                                    return ActorStatus::Continue;
+                                }
+                            }
+                        }
+                        None => {
+                            reply.send(Ok(()));
+                            return ActorStatus::Continue;
+                        }
+                    }
+                };
+
+                if drain_rxs.is_empty() {
+                    let _ = self.self_ref.as_ref().unwrap().send(ShardMsg::IndexersDrained {
+                        fast, reply,
+                    });
+                    return ActorStatus::Continue;
+                }
+
+                luciole::collect_replies_to(
+                    drain_rxs,
+                    self.self_ref.as_ref().unwrap(),
+                    &format!("shard_{}_drain", self.shard_id),
+                    move |_| ShardMsg::IndexersDrained { fast, reply },
+                );
+            }
+            ShardMsg::IndexersDrained { fast, reply } => {
+                // Step 2: All DocsMsg processed. Now flush indexers.
                 let flush_rxs = {
                     let mut guard = self.handle.writer.lock().unwrap();
                     match guard.as_mut() {
@@ -802,15 +844,12 @@ impl luciole::Actor for ShardActor {
                 };
 
                 if flush_rxs.is_empty() {
-                    // No workers — go directly to finalize step.
                     let _ = self.self_ref.as_ref().unwrap().send(ShardMsg::FlushDone {
                         results: vec![], fast, reply,
                     });
                     return ActorStatus::Continue;
                 }
 
-                // collect_replies_to: when ALL indexers reply, deliver
-                // FlushDone back to this actor as a regular message.
                 luciole::collect_replies_to(
                     flush_rxs,
                     self.self_ref.as_ref().unwrap(),

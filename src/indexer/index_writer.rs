@@ -510,6 +510,22 @@ impl<D: Document> IndexWriter<D> {
     /// It is also possible to add a payload to the `commit`
     /// using this API.
     /// See [`PreparedCommit::set_payload()`].
+    /// Send DrainMsg to all indexer workers and return reply receivers.
+    ///
+    /// When all receivers resolve, all pending DocsMsg have been processed
+    /// (FIFO guarantee). Call this before flush_workers() to ensure no
+    /// documents are still being indexed when flush begins.
+    pub fn drain_workers(&mut self) -> crate::Result<Vec<crate::actor::reply::ReplyReceiver<Result<Vec<u8>, Vec<u8>>>>> {
+        let mut receivers = Vec::new();
+        for i in 0..self.worker_pool.len() {
+            let (env, rx) = super::indexer_actor::IndexerDrainMsg.into_request();
+            self.worker_pool.worker(i).send(env)
+                .map_err(|_| error_in_index_worker_thread("Worker died"))?;
+            receivers.push(rx);
+        }
+        Ok(receivers)
+    }
+
     /// Send FlushMsg to all indexer workers without waiting for replies.
     ///
     /// Returns the reply receivers. The caller is responsible for waiting

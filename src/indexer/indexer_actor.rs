@@ -53,6 +53,24 @@ impl Message for IndexerFlushReply {
     fn decode(_: &[u8]) -> Result<Self, String> { Ok(Self) }
 }
 
+/// Drain: reply immediately, proving all prior messages were processed (FIFO).
+pub(crate) struct IndexerDrainMsg;
+
+impl Message for IndexerDrainMsg {
+    fn type_tag() -> u64 { type_tag_hash(b"IndexerDrainMsg") }
+    fn encode(&self) -> Vec<u8> { vec![] }
+    fn decode(_: &[u8]) -> Result<Self, String> { Ok(Self) }
+}
+
+/// Drain reply.
+pub(crate) struct IndexerDrainReply;
+
+impl Message for IndexerDrainReply {
+    fn type_tag() -> u64 { type_tag_hash(b"IndexerDrainReply") }
+    fn encode(&self) -> Vec<u8> { vec![] }
+    fn decode(_: &[u8]) -> Result<Self, String> { Ok(Self) }
+}
+
 /// Shutdown the actor cleanly.
 pub(crate) struct IndexerShutdownMsg;
 
@@ -354,6 +372,16 @@ pub(crate) fn create_indexer_actor<D: Document>(
             ActorStatus::Continue
         },
         Priority::Critical,
+    ));
+
+    // Drain handler: reply immediately (FIFO guarantees all prior DocsMsg processed).
+    actor.register(TypedHandler::<IndexerDrainMsg, _>::new(
+        |_state, _msg, reply, _local, _ctx| {
+            if let Some(reply) = reply {
+                reply.send(IndexerDrainReply);
+            }
+            ActorStatus::Continue
+        },
     ));
 
     // Shutdown handler
