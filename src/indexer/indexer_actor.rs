@@ -174,6 +174,10 @@ struct SegmentInProgress {
     writer: SegmentWriter,
 }
 
+/// Maximum documents processed before the indexer yields the scheduler thread.
+/// Prevents starvation: drain, flush, finalize tasks can run between chunks.
+const YIELD_EVERY_N_DOCS: usize = 64;
+
 /// All state for the indexer, wrapped in a single struct to avoid
 /// TypeId collisions in ActorState.
 struct IndexerState<D: Document> {
@@ -189,6 +193,8 @@ struct IndexerState<D: Document> {
     /// Pending background finalize (at most one).
     /// Ok(bytes) = success, Err(bytes) = serialized LucivyError.
     pending_finalize: Option<ReplyReceiver<Result<Vec<u8>, Vec<u8>>>>,
+    /// Documents processed since last yield. Reset on Yield.
+    docs_since_yield: usize,
 }
 
 impl<D: Document> IndexerState<D> {
@@ -236,7 +242,17 @@ impl<D: Document> IndexerState<D> {
                 current.writer.max_doc()
             );
             self.submit_finalize_task();
+            self.docs_since_yield = 0;
             return true; // Yield to free the scheduler thread.
+        }
+
+        // Yield periodically to prevent starvation. Without this, the indexer
+        // can hold a scheduler thread for thousands of add_document calls,
+        // blocking drain/flush/finalize tasks from running.
+        self.docs_since_yield += 1;
+        if self.docs_since_yield >= YIELD_EVERY_N_DOCS {
+            self.docs_since_yield = 0;
+            return true; // Yield — scheduler can dispatch other work.
         }
         false
     }
@@ -382,6 +398,7 @@ pub(crate) fn create_indexer_actor<D: Document>(
         pending_error: None,
         finalizer_ref,
         pending_finalize: None,
+        docs_since_yield: 0,
     };
     actor.state_mut().insert::<IndexerState<D>>(indexer_state);
 
