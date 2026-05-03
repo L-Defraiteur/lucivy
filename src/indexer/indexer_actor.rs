@@ -53,6 +53,16 @@ impl Message for IndexerFlushReply {
     fn decode(_: &[u8]) -> Result<Self, String> { Ok(Self) }
 }
 
+/// Internal: finalize task completed during flush — now send the flush reply.
+/// The Result<Vec<u8>, Vec<u8>> from the task is in Envelope.local.
+struct IndexerFinalizeCompleteMsg;
+
+impl Message for IndexerFinalizeCompleteMsg {
+    fn type_tag() -> u64 { type_tag_hash(b"IndexerFinalizeCompleteMsg") }
+    fn encode(&self) -> Vec<u8> { vec![] }
+    fn decode(_: &[u8]) -> Result<Self, String> { Ok(Self) }
+}
+
 /// Drain: reply immediately, proving all prior messages were processed (FIFO).
 pub(crate) struct IndexerDrainMsg;
 
@@ -183,16 +193,17 @@ struct IndexerState<D: Document> {
 
 impl<D: Document> IndexerState<D> {
     /// Process a batch of documents. When memory budget is reached,
-    /// finalize the current segment inline (blocking).
+    /// submit the finalize as a task (runs on a pool thread, NOT in a
+    /// handler). The handler returns immediately — thread freed.
     ///
-    /// Returns true if a finalize happened (caller should Yield to free
-    /// the scheduler thread for other actors).
+    /// Returns true if a finalize was dispatched (caller should Yield).
     fn handle_docs(&mut self, batch: AddBatch<D>) -> bool {
         if batch.is_empty() || self.pending_error.is_some() {
             return false;
         }
-        let mem_before = self.current.as_ref().map(|c| c.writer.mem_usage()).unwrap_or(0);
-        eprintln!("[indexer] handle_docs: {} docs, mem={}", batch.len(), mem_before);
+
+        // Poll previous background finalize (non-blocking).
+        self.poll_pending_finalize();
 
         let current = match &mut self.current {
             Some(c) => c,
@@ -224,27 +235,36 @@ impl<D: Document> IndexerState<D> {
                 "Buffer limit reached, flushing segment with maxdoc={}.",
                 current.writer.max_doc()
             );
-            let _ = self.finalize_current_segment_blocking();
-            return true; // Yield after finalize to free the scheduler thread.
+            self.submit_finalize_task();
+            return true; // Yield to free the scheduler thread.
         }
         false
     }
 
-    /// Flush: finalize current segment and wait for any pending background finalize.
-    fn handle_flush(&mut self) -> crate::Result<()> {
-        eprintln!("[indexer] handle_flush: starting");
+    /// Flush: submit current segment for background finalize.
+    ///
+    /// Returns the list of pending finalize receivers (0, 1, or 2).
+    /// The caller is responsible for waiting on these — NOT this function.
+    /// No blocking wait in the handler.
+    fn handle_flush(&mut self) -> crate::Result<Vec<ReplyReceiver<Result<Vec<u8>, Vec<u8>>>>> {
         if let Some(err) = self.pending_error.take() {
             return Err(err);
         }
-        self.finalize_current_segment_blocking()?;
-        eprintln!("[indexer] handle_flush: finalize done, waiting pending...");
-        let r = self.wait_pending_finalize();
-        eprintln!("[indexer] handle_flush: done");
-        r
+        let mut rxs = Vec::new();
+        // Collect any pending finalize from handle_docs.
+        if let Some(rx) = self.pending_finalize.take() {
+            rxs.push(rx);
+        }
+        // Submit current segment to background (if any).
+        self.submit_finalize_task();
+        if let Some(rx) = self.pending_finalize.take() {
+            rxs.push(rx);
+        }
+        Ok(rxs)
     }
 
     fn handle_shutdown(&mut self) {
-        let _ = self.finalize_current_segment_blocking();
+        self.submit_finalize_task();
         let _ = self.wait_pending_finalize();
         if let Some(bomb) = self.bomb.take() {
             bomb.defuse();
@@ -256,31 +276,58 @@ impl<D: Document> IndexerState<D> {
         drop(self.bomb.take());
     }
 
-    /// Finalize the current segment synchronously.
-    fn finalize_current_segment_blocking(&mut self) -> crate::Result<()> {
-        if let Some(current) = self.current.take() {
-            if self.segment_updater.is_alive() {
-                let max_doc = current.writer.max_doc();
-                eprintln!("[indexer] finalize_segment: {} docs, starting...", max_doc);
-                let t0 = std::time::Instant::now();
-                finalize_segment(
-                    current.segment,
-                    current.writer,
-                    &self.segment_updater,
-                    &mut self.delete_cursor,
-                )?;
-                eprintln!("[indexer] finalize_segment: {} docs done in {:.1}s", max_doc, t0.elapsed().as_secs_f64());
-            }
+    /// Submit the current segment for finalization on a pool thread.
+    ///
+    /// The heavy work (SfxCollector.build, remap_and_write, segment_updater
+    /// schedule_add_segment) runs on a task thread — NOT in an actor handler.
+    /// The handler returns immediately.
+    fn submit_finalize_task(&mut self) {
+        let current = match self.current.take() {
+            Some(c) => c,
+            None => return,
+        };
+        if !self.segment_updater.is_alive() {
+            return;
         }
-        Ok(())
+
+        let segment = current.segment;
+        let writer = current.writer;
+        let mut delete_cursor = self.delete_cursor.clone();
+        let segment_updater = self.segment_updater.clone();
+
+        let scheduler = global_scheduler();
+        let rx = scheduler.submit_task(crate::actor::Priority::High, move || {
+            finalize_segment(segment, writer, &segment_updater, &mut delete_cursor)
+                .map(|_| vec![0u8]) // success marker
+                .map_err(|e| e.encode())
+        });
+        self.pending_finalize = Some(rx);
     }
 
-    /// Wait for a pending background finalize to complete.
+    /// Non-blocking poll: check if the pending finalize completed.
+    fn poll_pending_finalize(&mut self) {
+        if let Some(ref rx) = self.pending_finalize {
+            if rx.is_ready() {
+                let rx = self.pending_finalize.take().unwrap();
+                if let Some(result) = rx.take_value() {
+                    if let Err(err_bytes) = result {
+                        let err = crate::LucivyError::decode(&err_bytes)
+                            .unwrap_or_else(|_| {
+                                crate::LucivyError::SystemError("background finalize failed".into())
+                            });
+                        self.set_error(err);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Blocking wait for pending finalize. Used by handle_flush (after drain).
     fn wait_pending_finalize(&mut self) -> crate::Result<()> {
         if let Some(rx) = self.pending_finalize.take() {
             let scheduler = global_scheduler();
             match scheduler.wait(rx, "pending_finalize") {
-                Ok(_success_bytes) => Ok(()),
+                Ok(_) => Ok(()),
                 Err(err_bytes) => {
                     let err = crate::LucivyError::decode(&err_bytes)
                         .unwrap_or_else(|_| {
@@ -358,20 +405,65 @@ pub(crate) fn create_indexer_actor<D: Document>(
         Priority::High,
     ));
 
-    // Flush handler: reply with Ok/Err
+    // Flush handler: submit finalize to background, reply when ALL done.
+    //
+    // handle_flush returns pending finalize receivers. If none, reply
+    // immediately. If some, use collect_replies_to on self_ref to get
+    // notified when all finalizes complete, then reply.
     actor.register(TypedHandler::<IndexerFlushMsg, _>::with_priority(
         |state, _msg, reply, _local, _ctx| {
             let s = state.get_mut::<IndexerState<D>>().unwrap();
-            let result = s.handle_flush();
-            if let Some(reply) = reply {
-                match result {
-                    Ok(()) => reply.send(IndexerFlushReply),
-                    Err(e) => reply.send_err(e),
+            match s.handle_flush() {
+                Err(e) => {
+                    if let Some(reply) = reply { reply.send_err(e); }
+                }
+                Ok(rxs) if rxs.is_empty() => {
+                    // No pending finalize — reply immediately.
+                    if let Some(reply) = reply { reply.send(IndexerFlushReply); }
+                }
+                Ok(rxs) => {
+                    // Wait for background finalizes via collect_replies_to
+                    // on self_ref. When all complete, send the flush reply.
+                    let self_ref = state.get::<ActorRef<Envelope>>().unwrap().clone();
+                    crate::actor::reply::collect_replies_to(
+                        rxs,
+                        &self_ref,
+                        "indexer_flush_finalize",
+                        move |results| {
+                            let success = results.iter().all(|r| r.is_ok());
+                            let local: Box<dyn std::any::Any + Send> =
+                                Box::new((success, reply));
+                            Envelope {
+                                type_tag: IndexerFinalizeCompleteMsg::type_tag(),
+                                payload: IndexerFinalizeCompleteMsg.encode(),
+                                reply: None,
+                                local: Some(local),
+                            }
+                        },
+                    );
                 }
             }
             ActorStatus::Continue
         },
         Priority::Critical,
+    ));
+
+    // FinalizeComplete handler: background finalize done, send the flush reply.
+    actor.register(TypedHandler::<IndexerFinalizeCompleteMsg, _>::new(
+        |_state, _msg, _reply, local, _ctx| {
+            let (success, flush_reply): (bool, Option<crate::actor::envelope::ReplyPort>) =
+                *local.unwrap().downcast().unwrap();
+            if let Some(reply) = flush_reply {
+                if success {
+                    reply.send(IndexerFlushReply);
+                } else {
+                    reply.send_err(crate::LucivyError::SystemError(
+                        "background finalize failed".into(),
+                    ));
+                }
+            }
+            ActorStatus::Continue
+        },
     ));
 
     // Drain handler: reply immediately (FIFO guarantees all prior DocsMsg processed).
