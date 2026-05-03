@@ -64,6 +64,8 @@ pub(crate) struct SegmentUpdaterShared {
     #[allow(dead_code)]
     pub(crate) stamper: Stamper,
     pub(crate) event_bus: Arc<EventBus<IndexEvent>>,
+    /// Number of background merge tasks currently running.
+    pub(crate) pending_merge_tasks: AtomicBool,
 }
 
 impl SegmentUpdaterShared {
@@ -245,6 +247,7 @@ impl SegmentUpdater {
             killed: AtomicBool::new(false),
             stamper,
             event_bus: Arc::new(EventBus::new()),
+            pending_merge_tasks: AtomicBool::new(false),
         });
 
         let (mbox, mut aref) = mailbox::<Envelope>(SEGMENT_UPDATER_MAILBOX_CAPACITY);
@@ -308,11 +311,8 @@ impl SegmentUpdater {
             .map_err(|_| {
                 LucivyError::SystemError("Segment updater actor died".to_string())
             })?;
-        // Use wait_cooperative to avoid deadlock: the shard actor handler
-        // calls this from a scheduler thread. wait_blocking would block that
-        // thread, preventing the segment_updater from being dispatched.
         let scheduler = crate::actor::scheduler::global_scheduler();
-        match rx.wait_cooperative_named("schedule_commit", || scheduler.run_one_step()) {
+        match scheduler.wait(rx, "schedule_commit") {
             Ok(bytes) => {
                 let reply = SuOpsReply::decode(&bytes)
                     .map_err(|e| LucivyError::SystemError(e))?;
@@ -335,7 +335,7 @@ impl SegmentUpdater {
             .map_err(|_| {
                 LucivyError::SystemError("Segment updater actor died".to_string())
             })?;
-        match rx.wait_cooperative_named("segment_updater_op", || crate::actor::scheduler::global_scheduler().run_one_step()) {
+        match crate::actor::scheduler::global_scheduler().wait(rx, "garbage_collect") {
             Ok(_) => garbage_collect_files(&self.shared),
             Err(err_bytes) => Err(
                 LucivyError::decode(&err_bytes)
@@ -367,7 +367,7 @@ impl SegmentUpdater {
             .map_err(|_| {
                 LucivyError::SystemError("Segment updater actor died".to_string())
             })?;
-        match rx.wait_cooperative_named("segment_updater_op", || crate::actor::scheduler::global_scheduler().run_one_step()) {
+        match crate::actor::scheduler::global_scheduler().wait(rx, "start_merge") {
             Ok(_) => Ok(None), // StartMerge reply doesn't carry SegmentMeta in envelope mode
             Err(err_bytes) => Err(
                 LucivyError::decode(&err_bytes)
@@ -379,6 +379,10 @@ impl SegmentUpdater {
     /// No-op: merges are now synchronous within the DAG.
     /// Kept for API compatibility with IndexWriter::wait_merging_threads().
     pub fn wait_merging_thread(&self) -> crate::Result<()> {
+        // Poll until background merge tasks are done.
+        while self.shared.pending_merge_tasks.load(Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         Ok(())
     }
 }

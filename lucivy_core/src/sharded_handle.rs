@@ -17,8 +17,9 @@ use ld_lucivy::actor::envelope::{type_tag_hash, Envelope, Message};
 use ld_lucivy::actor::handler::TypedHandler;
 use ld_lucivy::actor::generic_actor::GenericActor;
 use ld_lucivy::actor::mailbox::{mailbox, ActorRef};
-use ld_lucivy::actor::scheduler::global_scheduler;
+use ld_lucivy::actor::scheduler::{global_scheduler, ActorContext};
 use ld_lucivy::actor::{ActorStatus, Priority};
+use ld_lucivy::actor::envelope::ReplyPort;
 use ld_lucivy::query::Weight;
 use ld_lucivy::schema::{Field, FieldType, Schema, Term, Value};
 use ld_lucivy::tokenizer::{PreTokenizedString, Token, TokenizerManager};
@@ -454,7 +455,7 @@ fn create_reader_actor(ctx: Arc<ReaderContext>) -> GenericActor {
 
     let ctx2 = Arc::clone(&ctx);
     actor.register(TypedHandler::<ReaderTokenizeMsg, _>::new(
-        move |_state, _msg, _reply, local| {
+        move |_state, _msg, _reply, local, _ctx| {
             let (doc, node_id) = *local.unwrap().downcast::<(LucivyDocument, u64)>().unwrap();
 
             // Tokenize once: produce hashes + PreTokenizedData (CPU-bound work)
@@ -475,7 +476,7 @@ fn create_reader_actor(ctx: Arc<ReaderContext>) -> GenericActor {
     // Batch handler: tokenize all docs in one message, forward each to router.
     let ctx3 = Arc::clone(&ctx);
     actor.register(TypedHandler::<ReaderBatchMsg, _>::new(
-        move |_state, _msg, _reply, local| {
+        move |_state, _msg, _reply, local, _ctx| {
             let batch = *local.unwrap().downcast::<Vec<(LucivyDocument, u64)>>().unwrap();
 
             for (doc, node_id) in batch {
@@ -494,7 +495,7 @@ fn create_reader_actor(ctx: Arc<ReaderContext>) -> GenericActor {
 
     // Drain handler: ack when all prior messages are processed (FIFO guarantee).
     actor.register(TypedHandler::<PipelineDrainMsg, _>::new(
-        |_state, _msg, reply, _local| {
+        |_state, _msg, reply, _local, _ctx| {
             if let Some(reply) = reply {
                 reply.send(PipelineDrainReply);
             }
@@ -516,7 +517,7 @@ fn create_router_actor(
     let router2 = Arc::clone(&router);
     let shard_actors2 = shard_actors.clone();
     actor.register(TypedHandler::<RouterRouteMsg, _>::new(
-        move |_state, _msg, _reply, local| {
+        move |_state, _msg, _reply, local, _ctx| {
             let (doc, node_id, hashes, pre_tokenized) = *local.unwrap()
                 .downcast::<(LucivyDocument, u64, Vec<u64>, PreTokenizedData)>().unwrap();
 
@@ -541,7 +542,7 @@ fn create_router_actor(
     let _router3 = Arc::clone(&router);
     let _shard_actors3 = shard_actors;
     actor.register(TypedHandler::<PipelineDrainMsg, _>::new(
-        move |_state, _msg, reply, _local| {
+        move |_state, _msg, reply, _local, _ctx| {
             if let Some(reply) = reply {
                 reply.send(PipelineDrainReply);
             }
@@ -729,10 +730,24 @@ impl From<luciole::DrainMsg> for ShardMsg {
     fn from(d: luciole::DrainMsg) -> Self { ShardMsg::Drain(d) }
 }
 
-/// Typed shard actor: search, insert, commit, delete.
+/// Pending commit state for ShardActor Suspend.
+///
+/// Phase 1 (handler): flush_workers() sends FlushMsg to indexers, returns
+/// receivers. JoinResume fires when all indexers reply.
+/// Phase 2 (poll_idle after resume): collect flush results, finalize commit.
+struct PendingShardCommitState {
+    /// Flush reply receivers (one per indexer worker).
+    flush_rxs: Vec<ld_lucivy::actor::reply::ReplyReceiver<Result<Vec<u8>, Vec<u8>>>>,
+    /// Whether this is a fast commit (skip SFX rebuild on merged segments).
+    fast: bool,
+    /// Reply channel back to the caller (Pool::scatter).
+    reply: luciole::Reply<Result<(), String>>,
+}
+
 struct ShardActor {
     shard_id: usize,
     handle: Arc<LucivyHandle>,
+    pending_commit: Option<PendingShardCommitState>,
 }
 
 impl luciole::Actor for ShardActor {
@@ -742,7 +757,51 @@ impl luciole::Actor for ShardActor {
 
     fn priority(&self) -> Priority { Priority::Medium }
 
-    fn handle(&mut self, msg: ShardMsg) -> ActorStatus {
+    fn poll_idle(&mut self) -> std::task::Poll<()> {
+        let pending = match self.pending_commit.as_ref() {
+            Some(p) => p,
+            None => return std::task::Poll::Pending,
+        };
+
+        // Check if all flush replies have arrived.
+        if !pending.flush_rxs.iter().all(|rx| rx.is_ready()) {
+            return std::task::Poll::Pending;
+        }
+
+        // All flush replies ready — collect results and finalize commit.
+        eprintln!("[shard_{}] commit: phase 2 — all flushes done, finalizing", self.shard_id);
+        let pending = self.pending_commit.take().unwrap();
+        let flush_results: Vec<_> = pending.flush_rxs
+            .into_iter()
+            .map(|rx| rx.take_value().unwrap())
+            .collect();
+
+        let result = (|| -> Result<(), String> {
+            let mut guard = self.handle.writer.lock()
+                .map_err(|_| "lock poisoned".to_string())?;
+            if let Some(ref mut writer) = *guard {
+                let prepared = writer.finalize_flush_and_prepare(flush_results)
+                    .map_err(|e| format!("finalize shard_{}: {e}", self.shard_id))?;
+                if pending.fast {
+                    prepared.commit_fast()
+                        .map_err(|e| format!("commit_fast shard_{}: {e}", self.shard_id))?;
+                } else {
+                    prepared.commit()
+                        .map_err(|e| format!("commit shard_{}: {e}", self.shard_id))?;
+                }
+            }
+            self.handle.mark_committed();
+            self.handle.reader.reload()
+                .map_err(|e| format!("reload shard_{}: {e}", self.shard_id))?;
+            Ok(())
+        })();
+
+        eprintln!("[shard_{}] commit: phase 2 done — result={:?}", self.shard_id, result.is_ok());
+        pending.reply.send(result);
+        std::task::Poll::Ready(())
+    }
+
+    fn handle(&mut self, msg: ShardMsg, ctx: &luciole::ActorContext) -> ActorStatus {
         match msg {
             ShardMsg::Search { weight, top_k, filter, reply } => {
                 let result = execute_weight_on_shard(
@@ -762,24 +821,66 @@ impl luciole::Actor for ShardActor {
                 }
             }
             ShardMsg::Commit { fast, reply } => {
-                let result = (|| -> Result<(), String> {
-                    let mut guard = self.handle.writer.lock()
-                        .map_err(|_| "lock poisoned".to_string())?;
-                    if let Some(ref mut writer) = *guard {
-                        if fast {
-                            writer.commit_fast()
-                                .map_err(|e| format!("commit_fast shard_{}: {e}", self.shard_id))?;
-                        } else {
-                            writer.commit()
-                                .map_err(|e| format!("commit shard_{}: {e}", self.shard_id))?;
+                eprintln!("[shard_{}] commit: phase 1 — flush_workers()", self.shard_id);
+                // Phase 1: send FlushMsg to all indexer workers (non-blocking).
+                let flush_rxs = {
+                    let mut guard = self.handle.writer.lock().unwrap();
+                    match guard.as_mut() {
+                        Some(writer) => {
+                            match writer.flush_workers() {
+                                Ok(rxs) => rxs,
+                                Err(e) => {
+                                    reply.send(Err(format!("flush shard_{}: {e}", self.shard_id)));
+                                    return ActorStatus::Continue;
+                                }
+                            }
+                        }
+                        None => {
+                            reply.send(Ok(()));
+                            return ActorStatus::Continue;
                         }
                     }
-                    self.handle.mark_committed();
-                    self.handle.reader.reload()
-                        .map_err(|e| format!("reload shard_{}: {e}", self.shard_id))?;
-                    Ok(())
-                })();
-                reply.send(result);
+                    // MutexGuard dropped here — writer unlocked during Suspend.
+                };
+
+                // Phase 2: JoinResume — fire when all indexers have flushed.
+                if flush_rxs.is_empty() {
+                    // No workers to flush — commit immediately.
+                    let result = (|| -> Result<(), String> {
+                        let mut guard = self.handle.writer.lock()
+                            .map_err(|_| "lock poisoned".to_string())?;
+                        if let Some(ref mut writer) = *guard {
+                            let prepared = writer.finalize_flush_and_prepare(vec![])
+                                .map_err(|e| format!("finalize shard_{}: {e}", self.shard_id))?;
+                            if fast {
+                                prepared.commit_fast()
+                                    .map_err(|e| format!("commit_fast shard_{}: {e}", self.shard_id))?;
+                            } else {
+                                prepared.commit()
+                                    .map_err(|e| format!("commit shard_{}: {e}", self.shard_id))?;
+                            }
+                        }
+                        self.handle.mark_committed();
+                        self.handle.reader.reload()
+                            .map_err(|e| format!("reload shard_{}: {e}", self.shard_id))?;
+                        Ok(())
+                    })();
+                    reply.send(result);
+                    return ActorStatus::Continue;
+                }
+
+                eprintln!("[shard_{}] commit: phase 1 done — {} flush receivers, suspending", self.shard_id, flush_rxs.len());
+                let join = luciole::JoinResume::new(flush_rxs.len(), ctx.resume_handle());
+                for rx in &flush_rxs {
+                    rx.set_resume(join.one_shot());
+                }
+
+                self.pending_commit = Some(PendingShardCommitState {
+                    flush_rxs,
+                    fast,
+                    reply,
+                });
+                return ActorStatus::Suspend;
             }
             ShardMsg::Delete { term } => {
                 let mut guard = self.handle.writer.lock().unwrap();
@@ -803,6 +904,7 @@ fn spawn_shard_pool(shards: &[Arc<LucivyHandle>]) -> luciole::Pool<ShardMsg> {
         ShardActor {
             shard_id: i,
             handle: shards_clone[i].clone(),
+            pending_commit: None,
         }
     })
 }
@@ -835,7 +937,7 @@ impl luciole::Actor for RouterActor {
     fn name(&self) -> &'static str { "router" }
     fn priority(&self) -> Priority { Priority::Medium }
 
-    fn handle(&mut self, msg: RouterMsg) -> ActorStatus {
+    fn handle(&mut self, msg: RouterMsg, _ctx: &luciole::ActorContext) -> ActorStatus {
         match msg {
             RouterMsg::Route { doc, node_id, hashes, pre_tokenized } => {
                 let shard_id = {
@@ -895,7 +997,7 @@ impl luciole::Actor for ReaderActor {
     fn name(&self) -> &'static str { "reader" }
     fn priority(&self) -> Priority { Priority::Medium }
 
-    fn handle(&mut self, msg: ReaderMsg) -> ActorStatus {
+    fn handle(&mut self, msg: ReaderMsg, _ctx: &luciole::ActorContext) -> ActorStatus {
         match msg {
             ReaderMsg::Tokenize { doc, node_id } => {
                 let (hashes, pre_tokenized) = tokenize_for_pipeline(
@@ -946,11 +1048,35 @@ fn spawn_reader_pool(
 
 // Legacy GenericActor creation kept for reference/removal later.
 #[allow(dead_code)]
+/// Pending commit state — stored in ActorState during Suspend.
+struct PendingShardCommit {
+    rx: Option<luciole::ReplyReceiver<Result<(), String>>>,
+    reply: Option<ReplyPort>,
+}
+
 /// Create a GenericActor for a shard with all roles: search, insert, commit, delete.
 fn create_shard_actor(shard_id: usize, handle: Arc<LucivyHandle>) -> GenericActor {
     // Leak the name — one per shard, lives forever.
     let name: &'static str = Box::leak(format!("shard-{shard_id}").into_boxed_str());
-    let mut actor = GenericActor::new(name);
+    let mut actor = GenericActor::new(name)
+        .with_poll_idle_fn(|state| {
+            // Drain completed commit task and send deferred reply.
+            if let Some(pending) = state.get_mut::<PendingShardCommit>() {
+                if let Some(ref rx) = pending.rx {
+                    if let Some(result) = rx.take_value() {
+                        pending.rx = None;
+                        if let Some(reply) = pending.reply.take() {
+                            match result {
+                                Ok(()) => reply.send(ShardOkReply),
+                                Err(e) => reply.send_err(ld_lucivy::LucivyError::SystemError(e)),
+                            }
+                        }
+                        return std::task::Poll::Ready(());
+                    }
+                }
+            }
+            std::task::Poll::Pending
+        });
 
     // State: the shard's handle + insert buffer
     actor.state_mut().insert::<Arc<LucivyHandle>>(handle);
@@ -959,7 +1085,7 @@ fn create_shard_actor(shard_id: usize, handle: Arc<LucivyHandle>) -> GenericActo
 
     // Search handler: Weight comes via envelope.local
     actor.register(TypedHandler::<ShardSearchMsg, _>::with_priority(
-        |state, msg, reply, local| {
+        |state, msg, reply, local, _ctx| {
             let handle = state.get::<Arc<LucivyHandle>>().unwrap();
             let shard_id = *state.get::<usize>().unwrap();
 
@@ -985,7 +1111,7 @@ fn create_shard_actor(shard_id: usize, handle: Arc<LucivyHandle>) -> GenericActo
 
     // Insert handler: (LucivyDocument, Option<PreTokenizedData>) in envelope.local
     actor.register(TypedHandler::<ShardInsertMsg, _>::new(
-        |state, _msg, reply, local| {
+        |state, _msg, reply, local, _ctx| {
             let handle = state.get::<Arc<LucivyHandle>>().unwrap();
             let shard_id = *state.get::<usize>().unwrap();
 
@@ -1028,16 +1154,24 @@ fn create_shard_actor(shard_id: usize, handle: Arc<LucivyHandle>) -> GenericActo
         },
     ));
 
-    // Commit handler
+    // Commit handler — runs writer.commit() on a pool task thread to avoid
+    // cooperative wait inside this handler. The shard actor Suspends until
+    // the task completes, then sends the reply from poll_idle.
     actor.register(TypedHandler::<ShardCommitMsg, _>::new(
-        |state, msg, reply, _local| {
-            let handle = state.get::<Arc<LucivyHandle>>().unwrap();
+        |state, msg, reply, _local, ctx| {
+            let handle = state.get::<Arc<LucivyHandle>>().unwrap().clone();
             let shard_id = *state.get::<usize>().unwrap();
+            let fast = msg.fast;
 
-            let result = (|| -> Result<(), String> {
+            // Submit the heavy commit work to a pool task thread.
+            // writer.commit() internally does cooperative wait (flush_indexer,
+            // segment_updater) — running it on a task thread keeps those waits
+            // outside any actor handler.
+            let scheduler = global_scheduler();
+            let rx = scheduler.submit_task(Priority::Critical, move || -> Result<(), String> {
                 let mut guard = handle.writer.lock().map_err(|_| "lock poisoned")?;
                 if let Some(ref mut writer) = *guard {
-                    if msg.fast {
+                    if fast {
                         writer.commit_fast().map_err(|e| format!("commit_fast shard_{shard_id}: {e}"))?;
                     } else {
                         writer.commit().map_err(|e| format!("commit shard_{shard_id}: {e}"))?;
@@ -1046,21 +1180,18 @@ fn create_shard_actor(shard_id: usize, handle: Arc<LucivyHandle>) -> GenericActo
                 handle.mark_committed();
                 handle.reader.reload().map_err(|e| format!("reload shard_{shard_id}: {e}"))?;
                 Ok(())
-            })();
+            });
 
-            if let Some(reply) = reply {
-                match result {
-                    Ok(()) => reply.send(ShardOkReply),
-                    Err(e) => reply.send_err(ld_lucivy::LucivyError::SystemError(e)),
-                }
-            }
-            ActorStatus::Continue
+            // Suspend until the task completes.
+            rx.set_resume(ctx.resume_handle());
+            state.insert::<PendingShardCommit>(PendingShardCommit { rx: Some(rx), reply });
+            ActorStatus::Suspend
         },
     ));
 
     // Delete handler: Term comes via envelope.local
     actor.register(TypedHandler::<ShardDeleteMsg, _>::new(
-        |state, _msg, reply, local| {
+        |state, _msg, reply, local, _ctx| {
             let handle = state.get::<Arc<LucivyHandle>>().unwrap();
             let shard_id = *state.get::<usize>().unwrap();
 
@@ -1477,24 +1608,16 @@ impl ShardedHandle {
 
     /// Drain all pipeline actors: wait for readers then router to finish pending work.
     fn drain_pipeline(&self) {
-        let scheduler = luciole::scheduler::global_scheduler();
-        let dump = scheduler.dump_state();
-        let qlen = scheduler.ready_queue_len();
-        eprintln!("[diag] drain_pipeline: scheduler state BEFORE drain (ready_queue={qlen}):\n{dump}");
-        // Drain readers first (upstream), then router (downstream).
-        // Pool::drain sends DrainMsg to each worker and waits.
-        let scheduler = luciole::scheduler::global_scheduler();
-        let (started, active) = scheduler.thread_stats();
-        eprintln!("[diag] drain_pipeline: scheduler threads started={started}, active={active}");
-        eprintln!("[diag] drain_pipeline: draining readers...");
+        eprintln!("[commit] drain_pipeline: draining readers...");
         self.reader_pool.drain("drain_readers");
-        eprintln!("[diag] drain_pipeline: readers drained, draining router...");
-        // Router: single actor, drain via request.
+        eprintln!("[commit] drain_pipeline: draining router...");
         self.router_ref.request(
             |r| RouterMsg::Drain(luciole::DrainMsg(r)),
             "drain_router",
         ).ok();
-        eprintln!("[diag] drain_pipeline: router drained, done.");
+        eprintln!("[commit] drain_pipeline: draining shards...");
+        self.shard_pool.drain("drain_shards");
+        eprintln!("[commit] drain_pipeline: done");
     }
 
     /// Search all shards in parallel and merge top-K results.
@@ -1698,29 +1821,29 @@ impl ShardedHandle {
     /// Drains the ingestion pipeline first (readers → router → shards), then commits.
     /// If deletes happened since last commit, resyncs the router's token counters.
     pub fn commit(&self) -> Result<(), String> {
-        eprintln!("[diag] commit: starting drain_pipeline...");
         self.drain_pipeline();
-        eprintln!("[diag] commit: drain done, scatter commit to {} shards...", self.shards.len());
 
+        eprintln!("[commit] scatter commit to {} shards...", self.shards.len());
         // Scatter commit to all shards in parallel.
         let results: Vec<Result<(), String>> = self.shard_pool.scatter(
             |r| ShardMsg::Commit { fast: false, reply: r },
             "commit_shard",
         );
-        eprintln!("[diag] commit: scatter done, checking results...");
+        eprintln!("[commit] scatter done, checking results...");
         for (i, result) in results.into_iter().enumerate() {
             result.map_err(|e| format!("commit shard_{i}: {e}"))?;
         }
 
-        eprintln!("[diag] commit: reloading readers...");
-        // Force reader reload so search sees committed data immediately.
-        for shard in &self.shards {
+        eprintln!("[commit] reloading readers...");
+        for (i, shard) in self.shards.iter().enumerate() {
+            eprintln!("[commit] reloading shard_{i}...");
             let _ = shard.reader.reload();
+            eprintln!("[commit] shard_{i} reloaded");
         }
 
-        eprintln!("[diag] commit: acquiring router lock...");
-        // Resync router counters from index if deletes happened.
+        eprintln!("[commit] acquiring router lock...");
         let mut router = self.router.lock().map_err(|_| "router lock poisoned")?;
+        eprintln!("[commit] router lock acquired");
 
         if self.has_deletes.swap(false, Ordering::Relaxed) {
             // Update doc counts from actual index state.
@@ -1753,9 +1876,11 @@ impl ShardedHandle {
         }
 
         // Persist router state.
+        eprintln!("[commit] persisting router state...");
         let stats_bytes = router.to_bytes();
         self.storage.write_root_file(SHARD_STATS_FILE, &stats_bytes)?;
 
+        eprintln!("[commit] done!");
         Ok(())
     }
 

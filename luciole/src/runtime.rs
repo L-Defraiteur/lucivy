@@ -245,7 +245,14 @@ pub fn execute_dag(
             // If on a scheduler thread, execute ALL nodes inline (sequentially)
             // to avoid thread pool starvation deadlocks. Parallel execution is
             // only safe when called from a non-scheduler thread.
-            let inline = crate::scheduler::is_scheduler_thread() || level.len() == 1;
+            // Run inline when: on a scheduler thread (avoid pool starvation),
+            // inside an actor handler (avoid nested cooperative waits),
+            // inside a cooperative wait (avoid recursive nesting), or
+            // single-node level (no benefit from parallelism).
+            let inline = crate::scheduler::is_scheduler_thread()
+                || crate::scheduler::in_actor_handler()
+                || crate::scheduler::in_cooperative_wait()
+                || level.len() == 1;
 
             if inline {
                 for &node_idx in level {
@@ -696,10 +703,10 @@ fn execute_level_parallel(
         receivers.push(rx);
     }
 
-    // Wait for all tasks — cooperative pumping (works in WASM too)
+    // Wait for all tasks
     let mut level_results = Vec::new();
     for rx in receivers {
-        let task_result = rx.wait_cooperative_named("dag_node", || scheduler.run_one_step());
+        let task_result = scheduler.wait(rx, "dag_node");
         match task_result {
             Ok((node_idx, node_name, nr, outputs, node_box)) => {
                 // Put node back in the DAG

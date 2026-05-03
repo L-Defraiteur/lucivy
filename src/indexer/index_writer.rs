@@ -188,26 +188,25 @@ pub(super) fn finalize_segment(
 ) -> crate::Result<()> {
     let max_doc = segment_writer.max_doc();
     if max_doc == 0 {
-        eprintln!("[diag] finalize_segment: empty (0 docs), skipping");
         return Ok(());
     }
 
-    eprintln!("[diag] finalize_segment: {} docs, calling segment_writer.finalize()...", max_doc);
     let t0 = std::time::Instant::now();
+    eprintln!("[finalize] segment_writer.finalize() {} docs...", max_doc);
     let (doc_opstamps, sfx_field_ids) = segment_writer.finalize()?;
-    eprintln!("[diag] finalize_segment: finalize() done in {:.1}s, sfx_fields={:?}",
-        t0.elapsed().as_secs_f64(), sfx_field_ids);
+    eprintln!("[finalize] finalize() done in {:.1}s", t0.elapsed().as_secs_f64());
 
     let segment_with_max_doc = segment.with_max_doc(max_doc);
-    let t1 = std::time::Instant::now();
+    eprintln!("[finalize] apply_deletes...");
     let alive_bitset_opt = apply_deletes(&segment_with_max_doc, delete_cursor, &doc_opstamps)?;
-    eprintln!("[diag] finalize_segment: apply_deletes done in {:.1}s", t1.elapsed().as_secs_f64());
+    eprintln!("[finalize] apply_deletes done in {:.1}s", t0.elapsed().as_secs_f64());
 
     let meta = segment_with_max_doc.meta().clone().with_sfx_field_ids(sfx_field_ids);
     meta.untrack_temp_docstore();
     let segment_entry = SegmentEntry::new(meta, delete_cursor.clone(), alive_bitset_opt);
+    eprintln!("[finalize] schedule_add_segment...");
     segment_updater.schedule_add_segment(segment_entry)?;
-    eprintln!("[diag] finalize_segment: done ({} docs, total {:.1}s)", max_doc, t0.elapsed().as_secs_f64());
+    eprintln!("[finalize] done ({} docs, total {:.1}s)", max_doc, t0.elapsed().as_secs_f64());
     Ok(())
 }
 
@@ -473,7 +472,7 @@ impl<D: Document> IndexWriter<D> {
         for i in 0..self.worker_pool.len() {
             let (env, rx) = IndexerFlushMsg.into_request();
             let _ = self.worker_pool.worker(i).send(env);
-            let _ = rx.wait_cooperative_named("rollback_flush", || scheduler.run_one_step());
+            let _ = scheduler.wait(rx, "rollback_flush");
         }
 
         // Now all workers are idle. Kill the segment updater.
@@ -511,6 +510,43 @@ impl<D: Document> IndexWriter<D> {
     /// It is also possible to add a payload to the `commit`
     /// using this API.
     /// See [`PreparedCommit::set_payload()`].
+    /// Send FlushMsg to all indexer workers without waiting for replies.
+    ///
+    /// Returns the reply receivers. The caller is responsible for waiting
+    /// (via JoinResume + Suspend, or scheduler.wait, depending on context).
+    ///
+    /// Used by ShardActor to implement non-blocking commit via Suspend.
+    pub fn flush_workers(&mut self) -> crate::Result<Vec<crate::actor::reply::ReplyReceiver<Result<Vec<u8>, Vec<u8>>>>> {
+        let mut receivers = Vec::new();
+        for i in 0..self.worker_pool.len() {
+            let (env, rx) = IndexerFlushMsg.into_request();
+            self.worker_pool.worker(i).send(env)
+                .map_err(|_| error_in_index_worker_thread("Worker died"))?;
+            receivers.push(rx);
+        }
+        Ok(receivers)
+    }
+
+    /// Finalize a prepared commit after flush_workers() replies have arrived.
+    ///
+    /// Checks flush results, stamps the commit, and returns a PreparedCommit.
+    /// Used by ShardActor after Suspend-resume to complete the commit.
+    pub fn finalize_flush_and_prepare(
+        &mut self,
+        flush_results: Vec<Result<Vec<u8>, Vec<u8>>>,
+    ) -> crate::Result<PreparedCommit<'_, D>> {
+        for result in flush_results {
+            if let Err(err_bytes) = result {
+                let err = crate::LucivyError::decode(&err_bytes)
+                    .unwrap_or_else(|e| crate::LucivyError::SystemError(format!("decode: {e}")));
+                return Err(err);
+            }
+        }
+        let commit_opstamp = self.stamper.stamp();
+        let prepared_commit = PreparedCommit::new(self, commit_opstamp);
+        Ok(prepared_commit)
+    }
+
     pub fn prepare_commit(&mut self) -> crate::Result<PreparedCommit<'_, D>> {
         info!("Preparing commit");
 
@@ -519,17 +555,13 @@ impl<D: Document> IndexWriter<D> {
         let mut receivers = Vec::new();
         for i in 0..self.worker_pool.len() {
             let (env, rx) = IndexerFlushMsg.into_request();
-            let depth_before = self.worker_pool.worker(i).mailbox_depth();
-            eprintln!("[diag] flush_indexer: sending to worker {i}, mailbox_depth_before={depth_before}");
             self.worker_pool.worker(i).send(env)
                 .map_err(|_| error_in_index_worker_thread("Worker died"))?;
-            let depth_after = self.worker_pool.worker(i).mailbox_depth();
-            eprintln!("[diag] flush_indexer: sent to worker {i}, mailbox_depth_after={depth_after}");
             receivers.push(rx);
         }
 
         for rx in receivers {
-            match rx.wait_cooperative_named("flush_indexer", || scheduler.run_one_step()) {
+            match scheduler.wait(rx, "flush_indexer") {
                 Ok(_) => {}
                 Err(err_bytes) => {
                     let err = crate::LucivyError::decode(&err_bytes)

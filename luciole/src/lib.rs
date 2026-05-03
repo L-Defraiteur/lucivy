@@ -37,10 +37,10 @@ pub use node::{LogLevel, Node, NodeContext, NodePoll, PollNode, PollNodeAdapter,
 pub use observe::{TapEvent, TapRegistry};
 pub use pool::{DrainMsg, DrainableRef, Pool, ShutdownMsg};
 pub use port::{PortType, PortValue};
-pub use reply::{reply, Reply, ReplyReceiver};
+pub use reply::{reply, JoinResume, Reply, ReplyReceiver, ResumeHandle};
 pub use checkpoint::{CheckpointStatus, CheckpointStore, DagCheckpoint, FileCheckpointStore, MemoryCheckpointStore};
 pub use runtime::{display_progress, execute_dag, execute_dag_with_checkpoint, subscribe_dag_events, DagEvent, DagResult, NodeResult};
-pub use scheduler::{ActorId, Scheduler, SchedulerHandle};
+pub use scheduler::{ActorContext, ActorId, Scheduler, SchedulerHandle};
 pub use scope::{Drainable, Scope};
 pub use stream_dag::StreamDag;
 pub use async_executor::{AsyncScope, FutureHandle, SignalFuture, SignalDataFuture, SIGNAL_OK, SIGNAL_ERROR, SIGNAL_PENDING};
@@ -51,6 +51,9 @@ use std::task::Poll;
 ///
 /// Un acteur reçoit des messages typés via sa mailbox, les traite un par un,
 /// et déclare sa priorité courante pour le scheduling.
+///
+/// Le `ActorContext` donne accès aux capacités du scheduler (resume handles,
+/// actor ID, etc.) sans coupler la logique métier au scheduler.
 pub trait Actor: Send + 'static {
     type Msg: Send + 'static;
 
@@ -58,7 +61,11 @@ pub trait Actor: Send + 'static {
     fn name(&self) -> &'static str;
 
     /// Traite un message. Retourne le status souhaité.
-    fn handle(&mut self, msg: Self::Msg) -> ActorStatus;
+    ///
+    /// Le `ctx` fournit des capabilities du scheduler :
+    /// - `ctx.resume_handle()` pour créer un handle qui replanifie cet actor
+    /// - `ctx.actor_id()` pour s'identifier
+    fn handle(&mut self, msg: Self::Msg, ctx: &ActorContext) -> ActorStatus;
 
     /// Priorité courante (recalculée par le scheduler après chaque handle).
     fn priority(&self) -> Priority;
@@ -84,6 +91,10 @@ pub enum ActorStatus {
     Yield,
     /// L'acteur a terminé, le retirer du scheduler.
     Stop,
+    /// Suspendre l'actor — le thread est libéré immédiatement.
+    /// L'actor sera replanifié quand le `ResumeHandle` fire (typiquement
+    /// quand un `Reply::send()` est appelé par un actor dépendant).
+    Suspend,
 }
 
 /// Priorité de scheduling d'un acteur.

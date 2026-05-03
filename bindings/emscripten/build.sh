@@ -42,7 +42,7 @@ mkdir -p "$OUT_DIR"
 emcc "$STATIC_LIB" \
     -o "$OUT_DIR/lucivy.js" \
     -pthread \
-    -sPTHREAD_POOL_SIZE=9 \
+    -sPTHREAD_POOL_SIZE=8 \
     -sPTHREAD_POOL_SIZE_STRICT=0 \
     -sALLOW_MEMORY_GROWTH=1 \
     -sMAXIMUM_MEMORY=4GB \
@@ -68,6 +68,10 @@ emcc "$STATIC_LIB" \
         "_lucivy_commit_status_ptr",
         "_lucivy_commit_finish",
         "_lucivy_drain_merges",
+        "_lucivy_dump_mermaid",
+        "_lucivy_dump_state",
+        "_lucivy_test_condvar",
+        "_lucivy_test_coop",
         "_lucivy_search",
         "_lucivy_search_filtered",
         "_lucivy_export_snapshot",

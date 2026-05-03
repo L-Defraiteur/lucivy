@@ -133,7 +133,7 @@ pub unsafe extern "C" fn lucivy_configure(
             "LUCIVY_SCHEDULER_THREADS",
             scheduler_threads.to_string(),
         );
-        let reserved_for_others = 4; // helper thread + commit thread + merge + margin
+        let reserved_for_others = 3; // commit thread + merge + margin
         let total_needed = scheduler_threads + reserved_for_others;
         if thread_pool_size > 0 && total_needed >= thread_pool_size {
             rlog!(
@@ -476,17 +476,23 @@ pub unsafe extern "C" fn lucivy_update(
 
 // ── Transaction ──────────────────────────────────────────────────────────
 
-/// Synchronous commit via ASYNCIFY — calls commit_direct which:
-/// 1. Poll-waits for pipeline mailboxes to drain (ASYNCIFY-safe, no cooperative waiting)
-/// 2. Calls writer.commit() directly on each shard (cooperative waiting handled by
-///    the safety net in run_one_step that rewakes idle actors with pending messages)
+/// Synchronous commit via ASYNCIFY — uses the standard actor-based commit
+/// path (ShardCommitMsg with submit_task + Suspend). No deadlock risk because
+/// IndexerActor uses Suspend instead of cooperative wait.
 #[no_mangle]
 pub unsafe extern "C" fn lucivy_commit(ctx: *mut LucivyContext) -> *const c_char {
     if ctx.is_null() { return return_error("null context"); }
     let ctx = &*ctx;
-    match ctx.handle.commit_direct() {
-        Ok(()) => return_str("ok".into()),
-        Err(e) => return_error(&e),
+    eprintln!("[emscripten] lucivy_commit called");
+    match ctx.handle.commit() {
+        Ok(()) => {
+            eprintln!("[emscripten] lucivy_commit done OK");
+            return_str("ok".into())
+        }
+        Err(e) => {
+            eprintln!("[emscripten] lucivy_commit error: {e}");
+            return_error(&e)
+        }
     }
 }
 
@@ -543,6 +549,52 @@ pub extern "C" fn lucivy_commit_finish() -> *const c_char {
 pub unsafe extern "C" fn lucivy_drain_merges(ctx: *mut LucivyContext) -> *const c_char {
     // Reuse lucivy_commit (thread-based) — same commit logic.
     lucivy_commit(ctx)
+}
+
+// ── Diagnostics ──────────────────────────────────────────────────────────
+
+/// Dump scheduler state as Mermaid graph (for deadlock diagnosis).
+/// Call via: Module.ccall('lucivy_dump_mermaid', 'string', [], [])
+#[no_mangle]
+pub extern "C" fn lucivy_dump_mermaid() -> *const c_char {
+    return_str(luciole::scheduler::dump_mermaid_global())
+}
+
+/// Dump scheduler state as plain text.
+#[no_mangle]
+pub extern "C" fn lucivy_dump_state() -> *const c_char {
+    return_str(luciole::scheduler::global_scheduler().dump_state())
+}
+
+/// Test condvar between threads. Submit a task via the scheduler, wait for reply.
+/// If this returns "ok" → condvar works. If it hangs → condvar broken.
+#[no_mangle]
+pub extern "C" fn lucivy_test_condvar() -> *const c_char {
+    eprintln!("[test] condvar test: submitting task...");
+    let scheduler = luciole::scheduler::global_scheduler();
+    let rx = scheduler.submit_task(luciole::Priority::High, || {
+        eprintln!("[test] condvar test: task running on scheduler thread");
+        42u32
+    });
+    eprintln!("[test] condvar test: waiting for reply (wait_blocking)...");
+    let val = rx.wait_blocking();
+    eprintln!("[test] condvar test: got reply = {val}");
+    return_str(format!("ok: {val}"))
+}
+
+/// Test cooperative wait. Same as above but uses cooperative wait (scheduler thread path).
+#[no_mangle]
+pub extern "C" fn lucivy_test_coop() -> *const c_char {
+    eprintln!("[test] coop test: submitting task...");
+    let scheduler = luciole::scheduler::global_scheduler();
+    let rx = scheduler.submit_task(luciole::Priority::High, || {
+        eprintln!("[test] coop test: task running on scheduler thread");
+        42u32
+    });
+    eprintln!("[test] coop test: waiting (cooperative)...");
+    let val = rx.wait_cooperative_named("test_coop", || scheduler.run_one_step());
+    eprintln!("[test] coop test: got reply = {val}");
+    return_str(format!("ok: {val}"))
 }
 
 // ── Snapshot (LUCE format) ────────────────────────────────────────────────

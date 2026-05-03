@@ -1,5 +1,5 @@
 use std::collections::{BinaryHeap, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::task::Poll;
 use std::thread::JoinHandle;
@@ -12,12 +12,135 @@ use super::{Actor, ActorStatus, Priority};
 thread_local! {
     /// True if the current thread is a scheduler worker thread.
     static IS_SCHEDULER_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// True while inside Actor::handle() — cooperative wait is forbidden.
+    static IN_ACTOR_HANDLER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Nesting depth of cooperative waits on this thread.
+    /// Used by execute_dag to force inline execution when > 0.
+    static COOPERATIVE_WAIT_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// Returns true if the current thread is a scheduler worker thread.
 /// Used by execute_dag to decide between parallel and inline execution.
 pub fn is_scheduler_thread() -> bool {
     IS_SCHEDULER_THREAD.with(|c| c.get())
+}
+
+/// Returns true if the current thread is inside an Actor::handle() call.
+/// Used by wait_cooperative to detect the forbidden pattern (cooperative
+/// wait inside a handler) and panic with a clear message.
+pub fn in_actor_handler() -> bool {
+    IN_ACTOR_HANDLER.with(|c| c.get())
+}
+
+/// Returns true if the current thread is inside a cooperative wait.
+/// Used by execute_dag to force inline execution and avoid nested
+/// cooperative waits that can cause stack overflow in WASM.
+pub fn in_cooperative_wait() -> bool {
+    COOPERATIVE_WAIT_DEPTH.with(|c| c.get() > 0)
+}
+
+/// Increment the cooperative wait nesting depth.
+pub fn enter_cooperative_wait() {
+    COOPERATIVE_WAIT_DEPTH.with(|c| c.set(c.get() + 1));
+}
+
+/// Decrement the cooperative wait nesting depth.
+pub fn leave_cooperative_wait() {
+    COOPERATIVE_WAIT_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
+}
+
+// ---------------------------------------------------------------------------
+// Thread registry — runtime diagnostic for deadlock analysis
+// ---------------------------------------------------------------------------
+
+/// What a thread is doing right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ThreadState {
+    Idle = 0,
+    RunningActor = 1,
+    RunningTask = 2,
+    CooperativeWait = 3,
+}
+
+/// Per-thread diagnostic info.
+pub struct ThreadInfo {
+    pub name: String,
+    state: AtomicU8,
+    label: Mutex<String>,
+    wait_label: Mutex<String>,
+    current_actor: Mutex<Option<(ActorId, &'static str)>>,
+    state_since: Mutex<Instant>,
+}
+
+impl ThreadInfo {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            state: AtomicU8::new(0),
+            label: Mutex::new(String::new()),
+            wait_label: Mutex::new(String::new()),
+            current_actor: Mutex::new(None),
+            state_since: Mutex::new(Instant::now()),
+        }
+    }
+
+    pub fn set_running_actor(&self, actor_id: ActorId, actor_name: &'static str) {
+        *self.current_actor.lock().unwrap() = Some((actor_id, actor_name));
+        *self.label.lock().unwrap() = actor_name.to_string();
+        *self.state_since.lock().unwrap() = Instant::now();
+        self.state.store(ThreadState::RunningActor as u8, Ordering::Release);
+    }
+
+    pub fn set_running_task(&self) {
+        *self.label.lock().unwrap() = "task".to_string();
+        *self.state_since.lock().unwrap() = Instant::now();
+        self.state.store(ThreadState::RunningTask as u8, Ordering::Release);
+    }
+
+    pub fn set_idle(&self) {
+        self.state.store(ThreadState::Idle as u8, Ordering::Release);
+        *self.current_actor.lock().unwrap() = None;
+    }
+
+    pub fn enter_wait(&self, label: &str) {
+        *self.wait_label.lock().unwrap() = label.to_string();
+        self.state.store(ThreadState::CooperativeWait as u8, Ordering::Release);
+    }
+
+    pub fn leave_wait(&self) {
+        *self.wait_label.lock().unwrap() = String::new();
+        // Don't reset state — caller will set the appropriate state.
+    }
+
+    fn state(&self) -> ThreadState {
+        match self.state.load(Ordering::Acquire) {
+            1 => ThreadState::RunningActor,
+            2 => ThreadState::RunningTask,
+            3 => ThreadState::CooperativeWait,
+            _ => ThreadState::Idle,
+        }
+    }
+}
+
+/// Global thread registry.
+static THREAD_REGISTRY: Mutex<Vec<Arc<ThreadInfo>>> = Mutex::new(Vec::new());
+
+thread_local! {
+    static CURRENT_THREAD_INFO: std::cell::RefCell<Option<Arc<ThreadInfo>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn register_thread(name: String) -> Arc<ThreadInfo> {
+    let info = Arc::new(ThreadInfo::new(name));
+    THREAD_REGISTRY.lock().unwrap().push(Arc::clone(&info));
+    CURRENT_THREAD_INFO.with(|c| *c.borrow_mut() = Some(Arc::clone(&info)));
+    info
+}
+
+/// Get the current thread's info (for cooperative wait tracking).
+pub fn current_thread_info() -> Option<Arc<ThreadInfo>> {
+    CURRENT_THREAD_INFO.with(|c| c.borrow().clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +233,7 @@ pub fn global_scheduler() -> &'static Arc<Scheduler> {
 
 /// Identifiant unique d'un acteur dans le scheduler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ActorId(u64);
+pub struct ActorId(pub(crate) u64);
 
 /// Nombre max de messages traités par batch avant de yield au scheduler.
 const BATCH_SIZE: usize = 1024;
@@ -232,7 +355,7 @@ impl PartialOrd for WorkItem {
 // ---------------------------------------------------------------------------
 
 trait AnyActor: Send {
-    fn try_handle_one(&mut self) -> Option<ActorStatus>;
+    fn try_handle_one(&mut self, ctx: &ActorContext) -> Option<ActorStatus>;
     fn priority(&self) -> Priority;
     fn has_pending(&self) -> bool;
     fn is_disconnected(&self) -> bool;
@@ -246,9 +369,9 @@ struct ActorWrapper<A: Actor> {
 }
 
 impl<A: Actor> AnyActor for ActorWrapper<A> {
-    fn try_handle_one(&mut self) -> Option<ActorStatus> {
+    fn try_handle_one(&mut self, ctx: &ActorContext) -> Option<ActorStatus> {
         let msg = self.mailbox.try_recv()?;
-        Some(self.actor.handle(msg))
+        Some(self.actor.handle(msg, ctx))
     }
 
     fn priority(&self) -> Priority {
@@ -269,6 +392,52 @@ impl<A: Actor> AnyActor for ActorWrapper<A> {
 
     fn mailbox_len(&self) -> usize {
         self.mailbox.len()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ActorContext — capabilities passed to Actor::handle()
+// ---------------------------------------------------------------------------
+
+/// Context passed to every `Actor::handle()` call.
+///
+/// Provides access to scheduler capabilities without coupling actor logic
+/// to the scheduler internals. Extensible — add methods here for new
+/// capabilities (spawn_child, deadline, etc.) without changing the Actor trait.
+pub struct ActorContext {
+    actor_id: ActorId,
+    shared: Arc<SharedState>,
+}
+
+impl ActorContext {
+    /// The identity of this actor in the scheduler.
+    pub fn actor_id(&self) -> ActorId {
+        self.actor_id
+    }
+
+    /// Create a `ResumeHandle` that re-schedules this actor when fired.
+    ///
+    /// Used with `ActorStatus::Suspend`: register the handle on a
+    /// `ReplyReceiver` via `set_resume()`, then return `Suspend` from
+    /// the handler. When `Reply::send()` fires, the handle pushes this
+    /// actor back into the ready queue.
+    pub fn resume_handle(&self) -> crate::reply::ResumeHandle {
+        let shared = Arc::clone(&self.shared);
+        let actor_id = self.actor_id;
+        crate::reply::ResumeHandle::new(move || {
+            let priority = {
+                let actors = shared.actors.lock().unwrap();
+                actors.get(&actor_id)
+                    .and_then(|s| s.actor.as_ref())
+                    .map(|a| a.priority())
+                    .unwrap_or(Priority::High)
+            };
+            {
+                let mut queue = shared.ready_queue.lock().unwrap();
+                queue.push(WorkItem::Actor { priority, actor_id });
+            }
+            shared.work_available.notify_one();
+        })
     }
 }
 
@@ -430,16 +599,26 @@ impl Scheduler {
         std::thread::Builder::new()
             .name(format!("pinned-{name}-{}", id.0))
             .spawn(move || {
+                let ctx = ActorContext {
+                    actor_id: id,
+                    shared: Arc::clone(&shared),
+                };
                 loop {
                     if shared.shutdown.load(Ordering::Acquire) {
                         return;
                     }
                     match receiver.recv() {
                         Ok(msg) => {
-                            let status = actor.handle(msg);
+                            let status = actor.handle(msg, &ctx);
                             match status {
                                 ActorStatus::Stop => return,
                                 ActorStatus::Yield | ActorStatus::Continue => {}
+                                ActorStatus::Suspend => {
+                                    // Pinned actor suspends — just wait for next message.
+                                    // The resume handle will have no effect since pinned
+                                    // actors aren't in the scheduler's ready queue.
+                                    // This is OK: the next recv() will pick up new work.
+                                }
                             }
                         }
                         Err(_) => return, // Channel fermé
@@ -452,7 +631,7 @@ impl Scheduler {
     }
 
     pub fn start(&self) -> SchedulerHandle {
-        let mut threads = Vec::with_capacity(self.num_threads + 1);
+        let mut threads = Vec::with_capacity(self.num_threads);
         for thread_index in 0..self.num_threads {
             let shared = Arc::clone(&self.shared);
             let handle = std::thread::Builder::new()
@@ -461,25 +640,6 @@ impl Scheduler {
                     run_loop(&shared, thread_index);
                 })
                 .expect("failed to spawn scheduler thread");
-            threads.push(handle);
-        }
-
-        // Helper thread — guarantees progress during cooperative waits.
-        //
-        // Regular threads process up to BATCH_SIZE=1024 messages per actor
-        // and can get stuck in cooperative wait (e.g. indexer waiting for
-        // finalizer). The helper thread only ever processes ONE message at
-        // a time via run_one_step_impl, so it can never be captured for a
-        // long batch. It parks on the same condvar as regular threads but
-        // with a timeout, so it wakes up even if notify_one goes elsewhere.
-        {
-            let shared = Arc::clone(&self.shared);
-            let handle = std::thread::Builder::new()
-                .name("scheduler-helper".into())
-                .spawn(move || {
-                    helper_loop(&shared);
-                })
-                .expect("failed to spawn scheduler helper thread");
             threads.push(handle);
         }
 
@@ -525,8 +685,100 @@ impl Scheduler {
         result_rx
     }
 
+    /// Create a test-only ActorContext for unit tests that need to call handlers directly.
+    #[cfg(test)]
+    pub fn test_context(&self, actor_id: ActorId) -> ActorContext {
+        ActorContext {
+            actor_id,
+            shared: Arc::clone(&self.shared),
+        }
+    }
+
     pub fn is_single_threaded(&self) -> bool {
         self.num_threads <= 1
+    }
+
+    /// Wait for a reply using the appropriate strategy:
+    /// - single-thread: cooperative wait (pump run_one_step)
+    /// - multi-thread: blocking wait (sleep on condvar, scheduler threads do the work)
+    ///
+    /// This eliminates cooperative wait nesting in multi-thread mode.
+    /// Emits periodic diagnostics if the wait exceeds a threshold.
+    pub fn wait<T>(&self, rx: crate::reply::ReplyReceiver<T>, label: &str) -> T {
+        if self.is_single_threaded() {
+            rx.wait_cooperative_named(label, || self.run_one_step())
+        } else if is_scheduler_thread() {
+            // Scheduler thread: MUST use cooperative wait to avoid deadlock.
+            // If we wait_blocking here, we capture a pool thread that might be
+            // needed to dispatch the actor we're waiting on.
+            rx.wait_cooperative_named(label, || self.run_one_step())
+        } else {
+            // External thread: safe to block — scheduler threads do the work.
+            self.wait_blocking_diag(rx, label)
+        }
+    }
+
+    /// Blocking wait with periodic diagnostics — no thread spawning, safe for WASM.
+    fn wait_blocking_diag<T>(&self, rx: crate::reply::ReplyReceiver<T>, label: &str) -> T {
+        use std::time::Duration;
+
+        let label_owned = label.to_string();
+        let shared = &self.shared;
+        let mut warn_count = 0u32;
+
+        let value = rx.wait_blocking_with_diag(Duration::from_secs(10), |elapsed_s| {
+            warn_count += 1;
+            // Dump thread registry.
+            let threads: Vec<String> = THREAD_REGISTRY.lock().unwrap()
+                .iter()
+                .map(|t| {
+                    let st = t.state.load(std::sync::atomic::Ordering::Acquire);
+                    let state_name = match st {
+                        0 => "IDLE", 1 => "ACTOR", 2 => "TASK", 3 => "WAIT", _ => "?",
+                    };
+                    let lbl = t.label.lock().unwrap().clone();
+                    let wlbl = t.wait_label.lock().unwrap().clone();
+                    let extra = if !lbl.is_empty() || !wlbl.is_empty() {
+                        format!(" ({lbl}{}{wlbl})", if !lbl.is_empty() && !wlbl.is_empty() { " / " } else { "" })
+                    } else {
+                        String::new()
+                    };
+                    format!("  {}: {state_name}{extra}", t.name)
+                })
+                .collect();
+
+            // Dump ready_queue size.
+            let qlen = shared.ready_queue.lock().unwrap().len();
+
+            // Dump non-idle actors.
+            let actors: Vec<String> = shared.actors.lock().unwrap()
+                .iter()
+                .filter_map(|(id, slot)| {
+                    let q = slot.actor.as_ref().map(|a| a.mailbox_len()).unwrap_or(0);
+                    let taken = slot.actor.is_none();
+                    if taken || q > 0 {
+                        Some(format!("  {:?} {}: {} q:{q}",
+                            id, slot.name,
+                            if taken { "TAKEN" } else { "idle" },
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            eprintln!(
+                "[luciole] WARNING: wait({:?}) blocked {:.0}s (warn #{warn_count})\n\
+                 Threads:\n{}\n\
+                 Ready queue: {qlen}\n\
+                 Non-idle actors:\n{}",
+                label_owned, elapsed_s,
+                threads.join("\n"),
+                if actors.is_empty() { "  (all idle)".into() } else { actors.join("\n") },
+            );
+        });
+
+        value
     }
 
     pub fn subscribe_events(&self) -> EventReceiver<SchedulerEvent> {
@@ -564,6 +816,76 @@ impl Scheduler {
         lines.sort(); // deterministic order
         lines.join("\n")
     }
+
+    /// Generate a Mermaid graph of threads + actors for deadlock diagnosis.
+    pub fn dump_mermaid(&self) -> String {
+        let threads: Vec<Arc<ThreadInfo>> = THREAD_REGISTRY.lock().unwrap().clone();
+        let actors = self.shared.actors.lock().unwrap();
+        let queue_len = self.shared.ready_queue.lock().unwrap().len();
+
+        let mut out = String::from("graph LR\n");
+
+        // ── Threads ──
+        out.push_str("    subgraph Threads\n");
+        for (i, t) in threads.iter().enumerate() {
+            let st = t.state();
+            let wait_label = t.wait_label.lock().unwrap().clone();
+            let label = t.label.lock().unwrap().clone();
+            let elapsed = t.state_since.lock().unwrap().elapsed().as_secs_f64();
+            let actor_info = t.current_actor.lock().unwrap().clone();
+
+            let desc = match st {
+                ThreadState::Idle => "IDLE".to_string(),
+                ThreadState::RunningActor => {
+                    let a = actor_info.map(|(id, n)| format!("{n}({id:?})")).unwrap_or_default();
+                    if !wait_label.is_empty() {
+                        format!("ACTOR {a}<br/>wait: {wait_label} ({elapsed:.0}s)")
+                    } else {
+                        format!("ACTOR {a} ({elapsed:.0}s)")
+                    }
+                }
+                ThreadState::RunningTask => {
+                    if !wait_label.is_empty() {
+                        format!("TASK<br/>wait: {wait_label} ({elapsed:.0}s)")
+                    } else {
+                        format!("TASK ({elapsed:.0}s)")
+                    }
+                }
+                ThreadState::CooperativeWait => {
+                    format!("WAIT: {wait_label} ({elapsed:.0}s)")
+                }
+            };
+            out.push_str(&format!("        T{i}[\"{}: {}\"]\n", t.name, desc));
+        }
+        out.push_str("    end\n");
+
+        // ── Actors ──
+        out.push_str("    subgraph Actors\n");
+        for (id, slot) in actors.iter() {
+            let q = slot.actor.as_ref().map(|a| a.mailbox_len()).unwrap_or(0);
+            let taken = slot.actor.is_none();
+            let idle = slot.wake_handle.is_idle.load(Ordering::Acquire);
+            let status = match slot.activity.get() {
+                Some((label, elapsed)) => format!("BUSY {label} ({elapsed:.0}s)"),
+                None if taken => "TAKEN".to_string(),
+                None if idle => "IDLE".to_string(),
+                None => "SUSPENDED".to_string(),
+            };
+            out.push_str(&format!("        A{}[\"{}: {} | q:{}\"]\n",
+                id.0, slot.name, status, q));
+        }
+        out.push_str("    end\n");
+
+        // ── Queue ──
+        out.push_str(&format!("    Q[\"ready_queue: {queue_len}\"]\n"));
+
+        out
+    }
+}
+
+/// Generate Mermaid from the global scheduler (for C FFI).
+pub fn dump_mermaid_global() -> String {
+    global_scheduler().dump_mermaid()
 }
 
 // ---------------------------------------------------------------------------
@@ -601,97 +923,42 @@ impl Drop for SchedulerHandle {
 // helper_loop — cooperative-wait safety net
 // ---------------------------------------------------------------------------
 
-/// Dedicated helper thread that guarantees scheduler progress during
-/// cooperative waits.
-///
-/// Unlike regular scheduler threads that process up to BATCH_SIZE messages
-/// per actor (and can get stuck in a cooperative wait mid-batch), the helper
-/// only ever calls `run_one_step_impl` which processes exactly ONE message
-/// and returns. This means:
-///
-/// 1. The helper can never be "captured" by a long batch
-/// 2. Even if it processes an actor that enters cooperative wait, the
-///    recursive run_one_step call processes the dependency (e.g. finalizer)
-///    and returns — max recursion depth = dependency chain length (typically 2)
-/// 3. In the deadlock scenario (all regular threads in cooperative wait),
-///    the helper is the only thread parked on the condvar, so notify_one()
-///    from wake() targets it directly
-fn helper_loop(shared: &SharedState) {
-    IS_SCHEDULER_THREAD.with(|c| c.set(true));
-    eprintln!("[diag] scheduler helper thread started");
-
-    let mut work_done = 0u64;
-    loop {
-        if shared.shutdown.load(Ordering::Acquire) {
-            return;
-        }
-
-        // Non-blocking: pop one item and process it.
-        if run_one_step_impl(shared) {
-            work_done += 1;
-            if work_done <= 5 || work_done % 100 == 0 {
-                eprintln!("[diag] helper: processed {work_done} items");
-            }
-            continue;
-        }
-
-        // No work — park on the same condvar with timeout.
-        // In the deadlock scenario all regular threads are busy (not parked),
-        // so this helper is the only waiter and notify_one() wakes it directly.
-        // The timeout is a safety net in case a notification is missed.
-        {
-            let queue = shared.ready_queue.lock().unwrap();
-            if queue.is_empty() {
-                let _ = shared.work_available.wait_timeout(
-                    queue,
-                    std::time::Duration::from_millis(5),
-                );
-            }
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // run_loop
 // ---------------------------------------------------------------------------
 
-fn run_loop(shared: &SharedState, thread_index: usize) {
+fn run_loop(shared: &Arc<SharedState>, thread_index: usize) {
     IS_SCHEDULER_THREAD.with(|c| c.set(true));
+    let thread_info = register_thread(format!("scheduler-{thread_index}"));
     shared.started_threads.fetch_add(1, Ordering::Release);
     shared.active_threads.fetch_add(1, Ordering::Release);
-    eprintln!("[diag] scheduler thread {thread_index} started");
-    let mut iteration = 0u64;
     loop {
         if shared.shutdown.load(Ordering::Acquire) {
             return;
         }
 
+        thread_info.set_idle();
         let Some(item) = pop_work(shared, thread_index) else {
             continue;
         };
 
-        iteration += 1;
-        if iteration <= 5 || iteration % 500 == 0 {
-            eprintln!("[diag] scheduler thread {thread_index}: iteration {iteration}, processing {:?}",
-                match &item { WorkItem::Actor { actor_id, .. } => format!("actor {actor_id:?}"),
-                              WorkItem::Task { .. } => "task".to_string() });
-        }
-
         match item {
             WorkItem::Task { task, done, .. } => {
+                thread_info.set_running_task();
                 if let Some(f) = task {
                     f();
                 }
                 done.send(());
+                thread_info.set_idle();
             }
             WorkItem::Actor { actor_id, .. } => {
-                run_loop_handle_actor(shared, actor_id);
+                run_loop_handle_actor(shared, actor_id, &thread_info);
             }
         }
     }
 }
 
-fn run_loop_handle_actor(shared: &SharedState, actor_id: ActorId) {
+fn run_loop_handle_actor(shared: &Arc<SharedState>, actor_id: ActorId, thread_info: &Arc<ThreadInfo>) {
     // Prendre l'acteur OUT du HashMap.
     let (mut actor_box, name, activity) = {
         let mut actors = shared.actors.lock().unwrap();
@@ -705,9 +972,11 @@ fn run_loop_handle_actor(shared: &SharedState, actor_id: ActorId) {
         }
     };
 
+    thread_info.set_running_actor(actor_id, name);
     activity.set("processing");
     let result = handle_batch(shared, actor_id, name, &mut actor_box);
     activity.clear();
+    thread_info.set_idle();
 
     match result {
         BatchResult::Stopped => {
@@ -717,6 +986,16 @@ fn run_loop_handle_actor(shared: &SharedState, actor_id: ActorId) {
                 actor_id,
                 actor_name: name,
             });
+        }
+        BatchResult::Suspended => {
+            // Put the actor back but do NOT push to ready_queue.
+            // The ResumeHandle (registered on a ReplyReceiver by the handler)
+            // will push the actor when the dependency completes.
+            let mut actors = shared.actors.lock().unwrap();
+            if let Some(slot) = actors.get_mut(&actor_id) {
+                slot.actor = Some(actor_box);
+            }
+            // Note: is_idle stays false — the actor is suspended, not idle.
         }
         BatchResult::HasMore => {
             let priority = actor_box.priority();
@@ -774,7 +1053,7 @@ fn run_loop_handle_actor(shared: &SharedState, actor_id: ActorId) {
     }
 }
 
-fn pop_work(shared: &SharedState, thread_index: usize) -> Option<WorkItem> {
+fn pop_work(shared: &Arc<SharedState>, thread_index: usize) -> Option<WorkItem> {
     let mut queue = shared.ready_queue.lock().unwrap();
     loop {
         if shared.shutdown.load(Ordering::Acquire) {
@@ -803,15 +1082,21 @@ enum BatchResult {
     Stopped,
     HasMore,
     Idle,
+    /// Actor returned Suspend — parked, will be resumed by ResumeHandle.
+    Suspended,
 }
 
 fn handle_batch(
-    shared: &SharedState,
+    shared: &Arc<SharedState>,
     actor_id: ActorId,
     actor_name: &'static str,
     actor: &mut Box<dyn AnyActor>,
 ) -> BatchResult {
     let priority_before = actor.priority();
+    let ctx = ActorContext {
+        actor_id,
+        shared: Arc::clone(shared),
+    };
 
     shared.events.emit(SchedulerEvent::BatchStarted {
         actor_id,
@@ -822,7 +1107,11 @@ fn handle_batch(
     for _ in 0..BATCH_SIZE {
         let start = Instant::now();
 
-        match actor.try_handle_one() {
+        IN_ACTOR_HANDLER.with(|c| c.set(true));
+        let handle_result = actor.try_handle_one(&ctx);
+        IN_ACTOR_HANDLER.with(|c| c.set(false));
+
+        match handle_result {
             Some(status) => {
                 shared.events.emit(SchedulerEvent::MessageHandled {
                     actor_id,
@@ -836,6 +1125,10 @@ fn handle_batch(
                     ActorStatus::Stop => return BatchResult::Stopped,
                     ActorStatus::Yield => break,
                     ActorStatus::Continue => {}
+                    ActorStatus::Suspend => {
+                        emit_priority_change(shared, actor_id, actor_name, priority_before, &**actor);
+                        return BatchResult::Suspended;
+                    }
                 }
             }
             None => {
@@ -866,7 +1159,7 @@ fn handle_batch(
 }
 
 fn emit_priority_change(
-    shared: &SharedState,
+    shared: &Arc<SharedState>,
     actor_id: ActorId,
     actor_name: &'static str,
     priority_before: Priority,
@@ -887,7 +1180,7 @@ fn emit_priority_change(
 // run_one_step — pour Reply::wait_cooperative en mode single-thread
 // ---------------------------------------------------------------------------
 
-fn run_one_step_impl(shared: &SharedState) -> bool {
+fn run_one_step_impl(shared: &Arc<SharedState>) -> bool {
     let item = {
         let mut queue = shared.ready_queue.lock().unwrap();
         queue.pop()
@@ -938,7 +1231,7 @@ fn run_one_step_impl(shared: &SharedState) -> bool {
     }
 }
 
-fn run_one_step_actor(shared: &SharedState, actor_id: ActorId, entry_priority: Priority) -> bool {
+fn run_one_step_actor(shared: &Arc<SharedState>, actor_id: ActorId, entry_priority: Priority) -> bool {
     let (mut actor_box, name, activity) = {
         let mut actors = shared.actors.lock().unwrap();
         let slot = match actors.get_mut(&actor_id) {
@@ -952,9 +1245,16 @@ fn run_one_step_actor(shared: &SharedState, actor_id: ActorId, entry_priority: P
     };
 
     // Traiter UN SEUL message (rendre la main vite en mode coopératif).
+    let ctx = ActorContext {
+        actor_id,
+        shared: Arc::clone(&shared),
+    };
     activity.set("processing");
     let start = Instant::now();
-    let (stopped, idle) = match actor_box.try_handle_one() {
+    IN_ACTOR_HANDLER.with(|c| c.set(true));
+    let handle_result = actor_box.try_handle_one(&ctx);
+    IN_ACTOR_HANDLER.with(|c| c.set(false));
+    let (stopped, idle, suspended) = match handle_result {
         Some(status) => {
             shared.events.emit(SchedulerEvent::MessageHandled {
                 actor_id,
@@ -964,17 +1264,18 @@ fn run_one_step_actor(shared: &SharedState, actor_id: ActorId, entry_priority: P
                 priority: actor_box.priority(),
             });
             match status {
-                ActorStatus::Stop => (true, false),
-                ActorStatus::Yield | ActorStatus::Continue => (false, false),
+                ActorStatus::Stop => (true, false, false),
+                ActorStatus::Yield | ActorStatus::Continue => (false, false, false),
+                ActorStatus::Suspend => (false, false, true),
             }
         }
         None => {
             if actor_box.is_disconnected() {
-                (true, false)
+                (true, false, false)
             } else {
                 match actor_box.poll_idle() {
-                    Poll::Ready(()) => (false, false),
-                    Poll::Pending => (false, true),
+                    Poll::Ready(()) => (false, false, false),
+                    Poll::Pending => (false, true, false),
                 }
             }
         }
@@ -989,6 +1290,13 @@ fn run_one_step_actor(shared: &SharedState, actor_id: ActorId, entry_priority: P
             actor_id,
             actor_name: name,
         });
+    } else if suspended {
+        // Put actor back without pushing to ready_queue.
+        // ResumeHandle will re-schedule when the dependency completes.
+        let mut actors = shared.actors.lock().unwrap();
+        if let Some(slot) = actors.get_mut(&actor_id) {
+            slot.actor = Some(actor_box);
+        }
     } else {
         let needs_rewake;
         {
@@ -1046,7 +1354,7 @@ mod tests {
             "counter"
         }
 
-        fn handle(&mut self, msg: CounterMsg) -> ActorStatus {
+        fn handle(&mut self, msg: CounterMsg, _ctx: &ActorContext) -> ActorStatus {
             match msg {
                 CounterMsg::Inc => {
                     self.count += 1;
@@ -1167,7 +1475,7 @@ mod tests {
             fn name(&self) -> &'static str {
                 self.actor_name
             }
-            fn handle(&mut self, _msg: PrioMsg) -> ActorStatus {
+            fn handle(&mut self, _msg: PrioMsg, _ctx: &ActorContext) -> ActorStatus {
                 self.log.lock().unwrap().push(self.actor_name);
                 ActorStatus::Continue
             }
@@ -1295,7 +1603,7 @@ mod tests {
                 "idle-worker"
             }
 
-            fn handle(&mut self, _msg: ()) -> ActorStatus {
+            fn handle(&mut self, _msg: (), _ctx: &ActorContext) -> ActorStatus {
                 ActorStatus::Continue
             }
 
@@ -1432,7 +1740,7 @@ mod tests {
                 "self-sender"
             }
 
-            fn handle(&mut self, msg: SelfMsg) -> ActorStatus {
+            fn handle(&mut self, msg: SelfMsg, _ctx: &ActorContext) -> ActorStatus {
                 match msg {
                     SelfMsg::Start(n) => {
                         self.remaining = n;
@@ -1516,7 +1824,7 @@ mod tests {
                 "ping-pong"
             }
 
-            fn handle(&mut self, msg: PPMsg) -> ActorStatus {
+            fn handle(&mut self, msg: PPMsg, _ctx: &ActorContext) -> ActorStatus {
                 match msg {
                     PPMsg::SetPartner(p) => {
                         self.partner = Some(p);
@@ -1674,7 +1982,7 @@ mod tests {
         impl Actor for LogActor {
             type Msg = ();
             fn name(&self) -> &'static str { "log" }
-            fn handle(&mut self, _msg: ()) -> ActorStatus {
+            fn handle(&mut self, _msg: (), _ctx: &ActorContext) -> ActorStatus {
                 self.log.lock().unwrap().push("actor".to_string());
                 ActorStatus::Continue
             }

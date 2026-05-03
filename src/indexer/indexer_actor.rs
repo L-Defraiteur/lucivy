@@ -101,7 +101,7 @@ fn create_finalizer_actor() -> GenericActor {
     let mut actor = GenericActor::new("finalizer");
 
     actor.register(TypedHandler::<FinalizeMsg, _>::new(
-        |_state, _msg, reply, local| {
+        |_state, _msg, reply, local, _ctx| {
             let mut work = *local.unwrap().downcast::<FinalizeWork>().unwrap();
 
             let result = if work.segment_updater.is_alive() {
@@ -164,17 +164,17 @@ struct IndexerState<D: Document> {
 }
 
 impl<D: Document> IndexerState<D> {
-    fn handle_docs(&mut self, batch: AddBatch<D>) {
-        static DOC_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let n = DOC_COUNTER.fetch_add(batch.len() as u32, std::sync::atomic::Ordering::Relaxed);
-        if n % 50 == 0 || n < 5 {
-            eprintln!("[diag] handle_docs: doc #{n}, batch_size={}, mem={}",
-                batch.len(),
-                self.current.as_ref().map(|c| c.writer.mem_usage()).unwrap_or(0));
-        }
+    /// Process a batch of documents. When memory budget is reached,
+    /// finalize the current segment inline (blocking).
+    ///
+    /// Returns true if a finalize happened (caller should Yield to free
+    /// the scheduler thread for other actors).
+    fn handle_docs(&mut self, batch: AddBatch<D>) -> bool {
         if batch.is_empty() || self.pending_error.is_some() {
-            return;
+            return false;
         }
+        let mem_before = self.current.as_ref().map(|c| c.writer.mem_usage()).unwrap_or(0);
+        eprintln!("[indexer] handle_docs: {} docs, mem={}", batch.len(), mem_before);
 
         let current = match &mut self.current {
             Some(c) => c,
@@ -185,7 +185,7 @@ impl<D: Document> IndexerState<D> {
                     Ok(w) => w,
                     Err(e) => {
                         self.set_error(e);
-                        return;
+                        return false;
                     }
                 };
                 self.current = Some(SegmentInProgress { segment, writer });
@@ -197,7 +197,7 @@ impl<D: Document> IndexerState<D> {
             if let Err(e) = current.writer.add_document(doc) {
                 self.current.take();
                 self.set_error(e);
-                return;
+                return false;
             }
         }
 
@@ -206,23 +206,22 @@ impl<D: Document> IndexerState<D> {
                 "Buffer limit reached, flushing segment with maxdoc={}.",
                 current.writer.max_doc()
             );
-            let _ = self.finalize_current_segment_background();
+            let _ = self.finalize_current_segment_blocking();
+            return true; // Yield after finalize to free the scheduler thread.
         }
+        false
     }
 
+    /// Flush: finalize current segment and wait for any pending background finalize.
     fn handle_flush(&mut self) -> crate::Result<()> {
+        eprintln!("[indexer] handle_flush: starting");
         if let Some(err) = self.pending_error.take() {
             return Err(err);
         }
-        let has_segment = self.current.is_some();
-        let has_pending = self.pending_finalize.is_some();
-        eprintln!("[diag] indexer handle_flush: has_segment={} has_pending_finalize={}", has_segment, has_pending);
-        // Finalize the current segment (blocking — it's a Flush).
         self.finalize_current_segment_blocking()?;
-        eprintln!("[diag] indexer handle_flush: blocking finalize done, waiting pending...");
-        // Wait for any background finalize to complete.
+        eprintln!("[indexer] handle_flush: finalize done, waiting pending...");
         let r = self.wait_pending_finalize();
-        eprintln!("[diag] indexer handle_flush: pending finalize done");
+        eprintln!("[indexer] handle_flush: done");
         r
     }
 
@@ -239,54 +238,20 @@ impl<D: Document> IndexerState<D> {
         drop(self.bomb.take());
     }
 
-    /// Finalize the current segment in background: send work to FinalizerActor,
-    /// start a new segment immediately. Pipeline depth = 2.
-    fn finalize_current_segment_background(&mut self) -> crate::Result<()> {
-        let current = match self.current.take() {
-            Some(c) => c,
-            None => return Ok(()),
-        };
-        if !self.segment_updater.is_alive() {
-            return Ok(());
-        }
-
-        // Wait for any previous background finalize first (at most 1 pending).
-        self.wait_pending_finalize()?;
-
-        // Clone the delete cursor for the background work.
-        // The IndexerActor's own cursor will advance with skip_to() when the
-        // next segment starts.
-        let cursor_clone = self.delete_cursor.clone();
-
-        let work = FinalizeWork {
-            segment: current.segment,
-            writer: current.writer,
-            delete_cursor: cursor_clone,
-            segment_updater: self.segment_updater.clone(),
-        };
-
-        let (env, rx) = FinalizeMsg.into_request_with_local(work);
-        if self.finalizer_ref.send(env).is_ok() {
-            self.pending_finalize = Some(rx);
-        } else {
-            return Err(crate::LucivyError::SystemError(
-                "finalizer actor channel closed".into(),
-            ));
-        }
-
-        Ok(())
-    }
-
-    /// Finalize the current segment synchronously (for Flush/Shutdown).
+    /// Finalize the current segment synchronously.
     fn finalize_current_segment_blocking(&mut self) -> crate::Result<()> {
         if let Some(current) = self.current.take() {
             if self.segment_updater.is_alive() {
+                let max_doc = current.writer.max_doc();
+                eprintln!("[indexer] finalize_segment: {} docs, starting...", max_doc);
+                let t0 = std::time::Instant::now();
                 finalize_segment(
                     current.segment,
                     current.writer,
                     &self.segment_updater,
                     &mut self.delete_cursor,
                 )?;
+                eprintln!("[indexer] finalize_segment: {} docs done in {:.1}s", max_doc, t0.elapsed().as_secs_f64());
             }
         }
         Ok(())
@@ -296,9 +261,7 @@ impl<D: Document> IndexerState<D> {
     fn wait_pending_finalize(&mut self) -> crate::Result<()> {
         if let Some(rx) = self.pending_finalize.take() {
             let scheduler = global_scheduler();
-            // wait_cooperative returns Result<Vec<u8>, Vec<u8>>:
-            // Ok = FinalizeReply encoded, Err = LucivyError encoded.
-            match rx.wait_cooperative(|| scheduler.run_one_step()) {
+            match scheduler.wait(rx, "pending_finalize") {
                 Ok(_success_bytes) => Ok(()),
                 Err(err_bytes) => {
                     let err = crate::LucivyError::decode(&err_bytes)
@@ -359,13 +322,18 @@ pub(crate) fn create_indexer_actor<D: Document>(
 
     // Docs handler: AddBatch<D> in Envelope.local
     actor.register(TypedHandler::<IndexerDocsMsg, _>::with_priority(
-        |state, _msg, _reply, local| {
+        |state, _msg, _reply, local, _ctx| {
             let batch = local
                 .and_then(|l| l.downcast::<AddBatch<D>>().ok())
                 .map(|b| *b);
             if let Some(batch) = batch {
                 let s = state.get_mut::<IndexerState<D>>().unwrap();
-                s.handle_docs(batch);
+                let did_finalize = s.handle_docs(batch);
+                if did_finalize {
+                    // Yield after heavy finalize to free the scheduler thread
+                    // for other actors (drain, commit, etc.).
+                    return ActorStatus::Yield;
+                }
             }
             ActorStatus::Continue
         },
@@ -374,7 +342,7 @@ pub(crate) fn create_indexer_actor<D: Document>(
 
     // Flush handler: reply with Ok/Err
     actor.register(TypedHandler::<IndexerFlushMsg, _>::with_priority(
-        |state, _msg, reply, _local| {
+        |state, _msg, reply, _local, _ctx| {
             let s = state.get_mut::<IndexerState<D>>().unwrap();
             let result = s.handle_flush();
             if let Some(reply) = reply {
@@ -390,7 +358,7 @@ pub(crate) fn create_indexer_actor<D: Document>(
 
     // Shutdown handler
     actor.register(TypedHandler::<IndexerShutdownMsg, _>::new(
-        |state, _msg, _reply, _local| {
+        |state, _msg, _reply, _local, _ctx| {
             let s = state.get_mut::<IndexerState<D>>().unwrap();
             s.handle_shutdown();
             ActorStatus::Stop

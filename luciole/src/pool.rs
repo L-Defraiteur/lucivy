@@ -117,16 +117,24 @@ impl<M: Send + 'static> Pool<M> {
         let scheduler = global_scheduler();
         let mut receivers = Vec::with_capacity(self.workers.len());
 
-        eprintln!("[diag] Pool::scatter({label}): {} workers", self.workers.len());
-
-        for worker in &self.workers {
+        for (i, worker) in self.workers.iter().enumerate() {
             let (tx, rx) = reply::<R>();
+            let depth_before = worker.mailbox_depth();
             let _ = worker.send(make_msg(tx));
+            let depth_after = worker.mailbox_depth();
+            eprintln!("[scatter] {label}: sent to worker {i}, mailbox {depth_before}→{depth_after}");
             receivers.push(rx);
         }
+        eprintln!("[scatter] {label}: all sent, ready_queue={}", scheduler.ready_queue_len());
 
         receivers.into_iter()
-            .map(|rx| rx.wait_cooperative_named(label, || scheduler.run_one_step()))
+            .enumerate()
+            .map(|(i, rx)| {
+                eprintln!("[scatter] {label}: waiting for worker {i}...");
+                let v = scheduler.wait(rx, label);
+                eprintln!("[scatter] {label}: worker {i} done");
+                v
+            })
             .collect()
     }
 
@@ -141,24 +149,15 @@ impl<M: Send + 'static> Pool<M> {
         let scheduler = global_scheduler();
         let mut receivers = Vec::with_capacity(self.workers.len());
 
-        eprintln!("[diag] Pool::drain({label}): {} workers, mailbox depths: {:?}",
-            self.workers.len(),
-            self.workers.iter().map(|w| w.mailbox_depth()).collect::<Vec<_>>(),
-        );
-
         for worker in &self.workers {
             let (tx, rx) = reply::<()>();
             let _ = worker.send(DrainMsg(tx).into());
             receivers.push(rx);
         }
 
-        for (i, rx) in receivers.into_iter().enumerate() {
-            rx.wait_cooperative_named(
-                &format!("{}_worker_{}", label, i),
-                || scheduler.run_one_step(),
-            );
+        for rx in receivers {
+            scheduler.wait(rx, label);
         }
-        eprintln!("[diag] Pool::drain({label}): all workers drained.");
     }
 
     /// Send a shutdown message to all workers and wait for them to stop.
@@ -178,11 +177,8 @@ impl<M: Send + 'static> Pool<M> {
             receivers.push(rx);
         }
 
-        for (i, rx) in receivers.into_iter().enumerate() {
-            rx.wait_cooperative_named(
-                &format!("{}_worker_{}", label, i),
-                || scheduler.run_one_step(),
-            );
+        for rx in receivers {
+            scheduler.wait(rx, label);
         }
     }
 
@@ -287,7 +283,7 @@ where
         let scheduler = global_scheduler();
         let (tx, rx) = reply::<()>();
         let _ = self.actor_ref.send(DrainMsg(tx).into());
-        rx.wait_cooperative_named(label, || scheduler.run_one_step());
+        scheduler.wait(rx, label);
     }
 }
 
@@ -329,7 +325,7 @@ mod tests {
     impl Actor for Worker {
         type Msg = WorkerMsg;
         fn name(&self) -> &'static str { "worker" }
-        fn handle(&mut self, msg: WorkerMsg) -> ActorStatus {
+        fn handle(&mut self, msg: WorkerMsg, _ctx: &crate::scheduler::ActorContext) -> ActorStatus {
             match msg {
                 WorkerMsg::Inc => {
                     self.count.fetch_add(1, Ordering::Relaxed);

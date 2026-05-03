@@ -98,7 +98,7 @@ impl<M> ActorRef<M> {
         let (tx, rx) = crate::reply::reply::<R>();
         self.send(make_msg(tx)).map_err(|_| "actor disconnected".to_string())?;
         let scheduler = crate::scheduler::global_scheduler();
-        Ok(rx.wait_cooperative_named(label, || scheduler.run_one_step()))
+        Ok(scheduler.wait(rx, label))
     }
 
     /// Access the wake handle (for async executor waker integration).

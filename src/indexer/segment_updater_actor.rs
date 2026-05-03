@@ -100,7 +100,11 @@ pub(crate) struct SegmentUpdaterState {
 }
 
 impl SegmentUpdaterState {
-    /// Execute a commit via DAG. Loops until no more merge candidates (cascade).
+    /// Execute a commit via DAG, then schedule merges asynchronously.
+    ///
+    /// The commit (prepare + save_metas) runs inline — it's fast.
+    /// Merges are deferred to a background task via submit_task so the
+    /// scheduler thread is freed immediately after commit.
     fn handle_commit(
         &mut self,
         opstamp: crate::Opstamp,
@@ -109,27 +113,19 @@ impl SegmentUpdaterState {
         let start = std::time::Instant::now();
         self.shared.event_bus.emit(IndexEvent::CommitStarted { opstamp });
 
-        loop {
-            let merge_candidates = self.collect_merge_candidates();
-            let no_merges = merge_candidates.is_empty();
+        // Phase 1: commit without merges (fast — just save_metas).
+        let mut dag = super::commit_dag::build_commit_dag(
+            self.shared.clone(),
+            vec![], // no merges
+            opstamp,
+            payload.clone(),
+        ).map_err(|e| crate::LucivyError::SystemError(format!("build DAG: {e}")))?;
 
-            let mut dag = super::commit_dag::build_commit_dag(
-                self.shared.clone(),
-                merge_candidates,
-                opstamp,
-                payload.clone(),
-            ).map_err(|e| crate::LucivyError::SystemError(format!("build DAG: {e}")))?;
+        let dag_result = luciole::execute_dag(&mut dag, None)
+            .map_err(|e| crate::LucivyError::SystemError(format!("execute DAG: {e}")))?;
 
-            let dag_result = luciole::execute_dag(&mut dag, None)
-                .map_err(|e| crate::LucivyError::SystemError(format!("execute DAG: {e}")))?;
-
-            if crate::diag::is_verbose() {
-                eprintln!("{}", dag_result.display_summary());
-            }
-
-            if no_merges {
-                break;
-            }
+        if crate::diag::is_verbose() {
+            eprintln!("{}", dag_result.display_summary());
         }
 
         self.shared.event_bus.emit(IndexEvent::CommitCompleted {
@@ -137,7 +133,78 @@ impl SegmentUpdaterState {
             duration: start.elapsed(),
         });
 
+        // Merges are deferred — they run when drain_merges() or start_merge()
+        // is called explicitly. This avoids thread starvation during commit.
+
         Ok(opstamp)
+    }
+
+    /// Run merge cascade in a background task. Fire-and-forget.
+    fn run_deferred_merges(
+        shared: Arc<SegmentUpdaterShared>,
+        opstamp: crate::Opstamp,
+        payload: Option<String>,
+    ) {
+        // Ensure we clear the flag when done (even on early return).
+        struct ClearGuard(Arc<SegmentUpdaterShared>);
+        impl Drop for ClearGuard {
+            fn drop(&mut self) {
+                self.0.pending_merge_tasks.store(false, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let _guard = ClearGuard(shared.clone());
+
+        loop {
+            let merge_candidates = {
+                let (committed, uncommitted) =
+                    shared.get_mergeable_segments(&std::collections::HashSet::new());
+                let mut all_segments: Vec<crate::index::SegmentMeta> = committed;
+                all_segments.extend(uncommitted);
+
+                if all_segments.len() <= 1
+                    && all_segments.first().map_or(true, |s| s.num_deleted_docs() == 0)
+                {
+                    return;
+                }
+
+                let merge_policy = shared.get_merge_policy();
+                merge_policy
+                    .compute_merge_candidates(&all_segments)
+                    .into_iter()
+                    .map(|mc| MergeOperation::new(opstamp, mc.0))
+                    .filter(|op| op.segment_ids().len() > 1)
+                    .collect::<Vec<_>>()
+            };
+
+            if merge_candidates.is_empty() {
+                return;
+            }
+
+            let mut dag = match super::commit_dag::build_commit_dag(
+                shared.clone(),
+                merge_candidates,
+                opstamp,
+                payload.clone(),
+            ) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("[merge] deferred merge DAG build error: {e}");
+                    return;
+                }
+            };
+
+            match luciole::execute_dag(&mut dag, None) {
+                Ok(result) => {
+                    if crate::diag::is_verbose() {
+                        eprintln!("{}", result.display_summary());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[merge] deferred merge DAG error: {e}");
+                    return;
+                }
+            }
+        }
     }
 
     /// Execute an explicit merge via DAG.
@@ -210,7 +277,7 @@ pub(crate) fn create_segment_updater_actor(
 
     // AddSegment: SegmentEntry in local
     actor.register(TypedHandler::<SuAddSegmentMsg, _>::new(
-        |state, _msg, _reply, local| {
+        |state, _msg, _reply, local, _ctx| {
             let entry = local.and_then(|l| l.downcast::<SegmentEntry>().ok()).map(|e| *e);
             if let Some(entry) = entry {
                 let su = state.get_mut::<SegmentUpdaterState>().unwrap();
@@ -220,9 +287,11 @@ pub(crate) fn create_segment_updater_actor(
         },
     ));
 
-    // Commit — everything goes through the DAG
+    // Commit — inline (cooperative wait inside handler is OK here:
+    // downstream actors use Suspend, so no deadlock risk. Will be
+    // migrated to submit_task once actor lifecycle management is in place).
     actor.register(TypedHandler::<SuCommitMsg, _>::new(
-        |state, msg, reply, _local| {
+        |state, msg, reply, _local, _ctx| {
             let su = state.get_mut::<SegmentUpdaterState>().unwrap();
             let result = su.handle_commit(msg.opstamp, msg.payload);
             if let Some(reply) = reply {
@@ -237,7 +306,7 @@ pub(crate) fn create_segment_updater_actor(
 
     // GarbageCollect
     actor.register(TypedHandler::<SuGarbageCollectMsg, _>::new(
-        |state, _msg, reply, _local| {
+        |state, _msg, reply, _local, _ctx| {
             let su = state.get_mut::<SegmentUpdaterState>().unwrap();
             let result = su.handle_garbage_collect();
             if let Some(reply) = reply {
@@ -252,7 +321,7 @@ pub(crate) fn create_segment_updater_actor(
 
     // StartMerge: MergeOperation in local — executes merge DAG inline
     actor.register(TypedHandler::<SuStartMergeMsg, _>::new(
-        |state, _msg, reply, local| {
+        |state, _msg, reply, local, _ctx| {
             let merge_op = local.and_then(|l| l.downcast::<MergeOperation>().ok()).map(|m| *m);
             if let (Some(merge_op), Some(reply)) = (merge_op, reply) {
                 let su = state.get_mut::<SegmentUpdaterState>().unwrap();
@@ -267,7 +336,7 @@ pub(crate) fn create_segment_updater_actor(
 
     // Kill
     actor.register(TypedHandler::<SuKillMsg, _>::new(
-        |_state, _msg, _reply, _local| {
+        |_state, _msg, _reply, _local, _ctx| {
             ActorStatus::Stop
         },
     ));

@@ -139,7 +139,7 @@ impl TypedActorRef {
         let (env, rx) = msg.into_request();
         self.inner.send(env).map_err(|_| ActorError::ChannelClosed)?;
         let scheduler = super::scheduler::global_scheduler();
-        match rx.wait_cooperative(|| scheduler.run_one_step()) {
+        match scheduler.wait(rx, "typed_request") {
             Ok(bytes) => R::decode(&bytes).map_err(|e| ActorError::DecodeError(e)),
             Err(err_bytes) => Err(ActorError::Remote(
                 E::decode(&err_bytes).map_err(|e| ActorError::DecodeError(e))?
@@ -156,7 +156,7 @@ impl TypedActorRef {
         let (env, rx) = msg.into_request_with_local(local);
         self.inner.send(env).map_err(|_| ActorError::ChannelClosed)?;
         let scheduler = super::scheduler::global_scheduler();
-        match rx.wait_cooperative(|| scheduler.run_one_step()) {
+        match scheduler.wait(rx, "typed_request_local") {
             Ok(bytes) => R::decode(&bytes).map_err(|e| ActorError::DecodeError(e)),
             Err(err_bytes) => Err(ActorError::Remote(
                 E::decode(&err_bytes).map_err(|e| ActorError::DecodeError(e))?

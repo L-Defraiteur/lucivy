@@ -120,7 +120,7 @@ impl Actor for AsyncActor {
 
     fn name(&self) -> &'static str { "async" }
 
-    fn handle(&mut self, msg: AsyncMsg) -> ActorStatus {
+    fn handle(&mut self, msg: AsyncMsg, _ctx: &crate::ActorContext) -> ActorStatus {
         match msg {
             AsyncMsg::Spawn { task } => {
                 self.tasks.push(task);
@@ -226,9 +226,7 @@ pub struct FutureHandle<T> {
 impl<T: Send + 'static> FutureHandle<T> {
     /// Wait cooperatively for the result (doesn't block the scheduler).
     pub fn wait(self) -> T {
-        self.rx.wait_cooperative_named("async_wait", || {
-            global_scheduler().run_one_step()
-        })
+        global_scheduler().wait(self.rx, "async_wait")
     }
 
     /// Check without blocking.

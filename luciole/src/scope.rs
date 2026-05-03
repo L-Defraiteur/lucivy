@@ -105,7 +105,7 @@ mod tests {
     impl Actor for CountWorker {
         type Msg = CountMsg;
         fn name(&self) -> &'static str { "count_worker" }
-        fn handle(&mut self, msg: CountMsg) -> ActorStatus {
+        fn handle(&mut self, msg: CountMsg, _ctx: &crate::scheduler::ActorContext) -> ActorStatus {
             match msg {
                 CountMsg::Inc => {
                     self.count.fetch_add(1, Ordering::Relaxed);

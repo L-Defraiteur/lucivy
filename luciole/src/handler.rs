@@ -9,6 +9,7 @@ use std::marker::PhantomData;
 
 use super::actor_state::ActorState;
 use super::envelope::{Message, ReplyPort};
+use super::scheduler::ActorContext;
 use super::{ActorStatus, Priority};
 
 /// A handler that processes one type of serialized message.
@@ -19,12 +20,14 @@ pub trait Handler: Send + 'static {
     /// Process a serialized message with access to actor state.
     ///
     /// `local` carries non-serializable data (e.g. Arc<dyn Weight>) in local mode.
+    /// `ctx` provides scheduler capabilities (resume handles, actor ID, etc.).
     fn handle(
         &self,
         state: &mut ActorState,
         payload: &[u8],
         reply: Option<ReplyPort>,
         local: Option<Box<dyn Any + Send>>,
+        ctx: &ActorContext,
     ) -> ActorStatus;
 
     /// Scheduling priority for this handler.
@@ -46,7 +49,7 @@ pub struct TypedHandler<M, F> {
 impl<M, F> TypedHandler<M, F>
 where
     M: Message,
-    F: Fn(&mut ActorState, M, Option<ReplyPort>, Option<Box<dyn Any + Send>>) -> ActorStatus
+    F: Fn(&mut ActorState, M, Option<ReplyPort>, Option<Box<dyn Any + Send>>, &ActorContext) -> ActorStatus
         + Send
         + 'static,
 {
@@ -72,7 +75,7 @@ where
 impl<M, F> Handler for TypedHandler<M, F>
 where
     M: Message,
-    F: Fn(&mut ActorState, M, Option<ReplyPort>, Option<Box<dyn Any + Send>>) -> ActorStatus
+    F: Fn(&mut ActorState, M, Option<ReplyPort>, Option<Box<dyn Any + Send>>, &ActorContext) -> ActorStatus
         + Send
         + 'static,
 {
@@ -86,9 +89,10 @@ where
         payload: &[u8],
         reply: Option<ReplyPort>,
         local: Option<Box<dyn Any + Send>>,
+        ctx: &ActorContext,
     ) -> ActorStatus {
         match M::decode(payload) {
-            Ok(msg) => (self.handler_fn)(state, msg, reply, local),
+            Ok(msg) => (self.handler_fn)(state, msg, reply, local, ctx),
             Err(e) => {
                 if let Some(reply) = reply {
                     let msg = format!("decode error: {e}");
@@ -159,7 +163,7 @@ mod tests {
         let call_count = Arc::new(AtomicU32::new(0));
         let cc = call_count.clone();
 
-        let handler = TypedHandler::<IncrMsg, _>::new(move |state, msg, _reply, _local| {
+        let handler = TypedHandler::<IncrMsg, _>::new(move |state, msg, _reply, _local, _ctx| {
             let counter = state.get_mut::<u32>().unwrap();
             *counter += msg.amount;
             cc.fetch_add(1, Ordering::Relaxed);
@@ -171,10 +175,13 @@ mod tests {
         let mut state = ActorState::new();
         state.insert::<u32>(0);
 
+        let sched = crate::Scheduler::new(1);
+        let ctx = sched.test_context(crate::scheduler::ActorId(0));
+
         // Dispatch
         let payload = IncrMsg { amount: 5 }.encode();
-        handler.handle(&mut state, &payload, None, None);
-        handler.handle(&mut state, &payload, None, None);
+        handler.handle(&mut state, &payload, None, None, &ctx);
+        handler.handle(&mut state, &payload, None, None, &ctx);
 
         assert_eq!(*state.get::<u32>().unwrap(), 10);
         assert_eq!(call_count.load(Ordering::Relaxed), 2);
@@ -182,7 +189,7 @@ mod tests {
 
     #[test]
     fn test_typed_handler_with_reply() {
-        let handler = TypedHandler::<IncrMsg, _>::new(|state, msg, reply, _local| {
+        let handler = TypedHandler::<IncrMsg, _>::new(|state, msg, reply, _local, _ctx| {
             let counter = state.get_mut::<u32>().unwrap();
             *counter += msg.amount;
             if let Some(reply) = reply {
@@ -194,9 +201,12 @@ mod tests {
         let mut state = ActorState::new();
         state.insert::<u32>(100);
 
+        let sched = crate::Scheduler::new(1);
+        let ctx = sched.test_context(crate::scheduler::ActorId(0));
+
         let msg = IncrMsg { amount: 7 };
         let (env, rx) = msg.into_request();
-        handler.handle(&mut state, &env.payload, env.reply, env.local);
+        handler.handle(&mut state, &env.payload, env.reply, env.local, &ctx);
 
         let reply_bytes = rx.wait_blocking().unwrap();
         let reply = CounterReply::decode(&reply_bytes).unwrap();
@@ -205,20 +215,22 @@ mod tests {
 
     #[test]
     fn test_typed_handler_decode_error() {
-        let handler = TypedHandler::<IncrMsg, _>::new(|_state, _msg, _reply, _local| {
+        let handler = TypedHandler::<IncrMsg, _>::new(|_state, _msg, _reply, _local, _ctx| {
             panic!("should not be called on bad payload");
         });
 
         let mut state = ActorState::new();
+        let sched = crate::Scheduler::new(1);
+        let ctx = sched.test_context(crate::scheduler::ActorId(0));
         // Bad payload — too short
-        let status = handler.handle(&mut state, &[0u8, 1], None, None);
+        let status = handler.handle(&mut state, &[0u8, 1], None, None, &ctx);
         assert_eq!(status, ActorStatus::Continue);
     }
 
     #[test]
     fn test_typed_handler_priority() {
         let handler = TypedHandler::<IncrMsg, _>::with_priority(
-            |_s, _m, _r, _l| ActorStatus::Continue,
+            |_s, _m, _r, _l, _ctx| ActorStatus::Continue,
             Priority::Critical,
         );
         assert_eq!(handler.priority(), Priority::Critical);

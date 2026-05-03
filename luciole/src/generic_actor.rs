@@ -8,6 +8,7 @@
 //! existing scheduler without any changes.
 
 use std::collections::HashMap;
+use std::task::Poll;
 
 use super::actor_state::ActorState;
 use super::envelope::Envelope;
@@ -22,6 +23,10 @@ pub struct GenericActor {
     name: &'static str,
     /// Optional dynamic priority function. If set, overrides handler priorities.
     priority_fn: Option<Box<dyn Fn(&ActorState) -> Priority + Send>>,
+    /// Optional poll_idle function. Called when the mailbox is empty.
+    /// Returns Poll::Ready(()) if work was done (will be called again),
+    /// Poll::Pending if idle.
+    poll_idle_fn: Option<Box<dyn FnMut(&mut ActorState) -> Poll<()> + Send>>,
 }
 
 impl GenericActor {
@@ -34,6 +39,7 @@ impl GenericActor {
             handlers: HashMap::new(),
             name,
             priority_fn: None,
+            poll_idle_fn: None,
         }
     }
 
@@ -46,6 +52,18 @@ impl GenericActor {
         f: impl Fn(&ActorState) -> Priority + Send + 'static,
     ) -> Self {
         self.priority_fn = Some(Box::new(f));
+        self
+    }
+
+    /// Set a poll_idle function that runs when the mailbox is empty.
+    ///
+    /// Used by actors that need to drain deferred state after resuming
+    /// from Suspend (e.g. IndexerActor sends deferred flush replies).
+    pub fn with_poll_idle_fn(
+        mut self,
+        f: impl FnMut(&mut ActorState) -> Poll<()> + Send + 'static,
+    ) -> Self {
+        self.poll_idle_fn = Some(Box::new(f));
         self
     }
 
@@ -81,13 +99,15 @@ impl GenericActor {
     }
 
     /// Dispatch an envelope to the matching handler.
-    fn dispatch(&mut self, envelope: Envelope) -> ActorStatus {
+    fn dispatch(&mut self, envelope: Envelope, ctx: &crate::ActorContext) -> ActorStatus {
+        eprintln!("[actor:{}] dispatch type_tag={:#018x}", self.name, envelope.type_tag);
         match self.handlers.get(&envelope.type_tag) {
             Some(handler) => handler.handle(
                 &mut self.state,
                 &envelope.payload,
                 envelope.reply,
                 envelope.local,
+                ctx,
             ),
             None => {
                 // No handler — send raw error bytes (no dependency on app error type).
@@ -112,8 +132,8 @@ impl Actor for GenericActor {
         self.name
     }
 
-    fn handle(&mut self, msg: Envelope) -> ActorStatus {
-        self.dispatch(msg)
+    fn handle(&mut self, msg: Envelope, ctx: &crate::ActorContext) -> ActorStatus {
+        self.dispatch(msg, ctx)
     }
 
     fn priority(&self) -> Priority {
@@ -125,6 +145,14 @@ impl Actor for GenericActor {
                 .map(|h| h.priority())
                 .max()
                 .unwrap_or(Priority::Medium)
+        }
+    }
+
+    fn poll_idle(&mut self) -> Poll<()> {
+        if let Some(ref mut f) = self.poll_idle_fn {
+            f(&mut self.state)
+        } else {
+            Poll::Pending
         }
     }
 
@@ -191,14 +219,20 @@ mod tests {
         }
     }
 
+    fn dummy_ctx() -> crate::scheduler::ActorContext {
+        let sched = crate::Scheduler::new(1);
+        sched.test_context(crate::scheduler::ActorId(0))
+    }
+
     // ─── Tests ──────────────────────────────────────────────────────
 
     #[test]
     fn test_generic_actor_dispatch() {
+        let ctx = dummy_ctx();
         let mut actor = GenericActor::new("counter");
         actor.state_mut().insert::<i64>(0);
 
-        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply, _local| {
+        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply, _local, _ctx| {
             *state.get_mut::<i64>().unwrap() += msg.value;
             ActorStatus::Continue
         }));
@@ -208,26 +242,27 @@ mod tests {
 
         // Dispatch
         let env = AddMsg { value: 10 }.into_envelope();
-        actor.handle(env);
+        actor.handle(env, &ctx);
         let env = AddMsg { value: 32 }.into_envelope();
-        actor.handle(env);
+        actor.handle(env, &ctx);
 
         assert_eq!(*actor.state().get::<i64>().unwrap(), 42);
     }
 
     #[test]
     fn test_generic_actor_multiple_handlers() {
+        let ctx = dummy_ctx();
         let mut actor = GenericActor::new("multi");
         actor.state_mut().insert::<i64>(100);
 
         // Add handler
-        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply, _local| {
+        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply, _local, _ctx| {
             *state.get_mut::<i64>().unwrap() += msg.value;
             ActorStatus::Continue
         }));
 
         // Get handler (with reply)
-        actor.register(TypedHandler::<GetMsg, _>::new(|state, _msg, reply, _local| {
+        actor.register(TypedHandler::<GetMsg, _>::new(|state, _msg, reply, _local, _ctx| {
             let value = *state.get::<i64>().unwrap();
             if let Some(reply) = reply {
                 reply.send(ValueReply { value });
@@ -238,11 +273,11 @@ mod tests {
         assert_eq!(actor.num_handlers(), 2);
 
         // Add 50
-        actor.handle(AddMsg { value: 50 }.into_envelope());
+        actor.handle(AddMsg { value: 50 }.into_envelope(), &ctx);
 
         // Get value via request/response
         let (env, rx) = GetMsg.into_request();
-        actor.handle(env);
+        actor.handle(env, &ctx);
         let reply_bytes = rx.wait_blocking().unwrap();
         let reply = ValueReply::decode(&reply_bytes).unwrap();
         assert_eq!(reply.value, 150);
@@ -250,27 +285,29 @@ mod tests {
 
     #[test]
     fn test_generic_actor_unknown_message() {
+        let ctx = dummy_ctx();
         let mut actor = GenericActor::new("empty");
         // No handlers registered
 
         // Send a message with reply — should get error
         let (env, rx) = AddMsg { value: 1 }.into_request();
-        actor.handle(env);
+        actor.handle(env, &ctx);
         let result = rx.wait_blocking();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_generic_actor_unregister() {
+        let ctx = dummy_ctx();
         let mut actor = GenericActor::new("unreg");
         actor.state_mut().insert::<i64>(0);
 
-        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply, _local| {
+        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply, _local, _ctx| {
             *state.get_mut::<i64>().unwrap() += msg.value;
             ActorStatus::Continue
         }));
 
-        actor.handle(AddMsg { value: 5 }.into_envelope());
+        actor.handle(AddMsg { value: 5 }.into_envelope(), &ctx);
         assert_eq!(*actor.state().get::<i64>().unwrap(), 5);
 
         // Unregister
@@ -278,7 +315,7 @@ mod tests {
         assert_eq!(actor.num_handlers(), 0);
 
         // Now dispatching AddMsg should be a no-op (no reply expected)
-        actor.handle(AddMsg { value: 100 }.into_envelope());
+        actor.handle(AddMsg { value: 100 }.into_envelope(), &ctx);
         assert_eq!(*actor.state().get::<i64>().unwrap(), 5); // unchanged
     }
 
@@ -288,12 +325,12 @@ mod tests {
 
         let mut actor = GenericActor::new("sched-test");
         actor.state_mut().insert::<i64>(0);
-        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply, _local| {
+        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply, _local, _ctx| {
             *state.get_mut::<i64>().unwrap() += msg.value;
             ActorStatus::Continue
         }));
         actor.register(TypedHandler::<GetMsg, _>::with_priority(
-            |state, _msg, reply, _local| {
+            |state, _msg, reply, _local, _ctx| {
                 let value = *state.get::<i64>().unwrap();
                 if let Some(reply) = reply {
                     reply.send(ValueReply { value });
@@ -328,12 +365,12 @@ mod tests {
 
         let mut actor = GenericActor::new("typed-ref-test");
         actor.state_mut().insert::<i64>(0);
-        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply, _local| {
+        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply, _local, _ctx| {
             *state.get_mut::<i64>().unwrap() += msg.value;
             ActorStatus::Continue
         }));
         actor.register(TypedHandler::<GetMsg, _>::with_priority(
-            |state, _msg, reply, _local| {
+            |state, _msg, reply, _local, _ctx| {
                 let value = *state.get::<i64>().unwrap();
                 if let Some(reply) = reply {
                     reply.send(ValueReply { value });
@@ -404,13 +441,13 @@ mod tests {
         actor.state_mut().insert::<i64>(0);
 
         // Add handler
-        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply, _local| {
+        actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply, _local, _ctx| {
             *state.get_mut::<i64>().unwrap() += msg.value;
             ActorStatus::Continue
         }));
 
         // SelfPing handler: send AddMsg(100) to self, then reply OK
-        actor.register(TypedHandler::<SelfPingMsg, _>::new(|state, _msg, reply, _local| {
+        actor.register(TypedHandler::<SelfPingMsg, _>::new(|state, _msg, reply, _local, _ctx| {
             let self_ref = state.get::<ActorRef<Envelope>>().unwrap();
             let _ = self_ref.send(AddMsg { value: 100 }.into_envelope());
             if let Some(reply) = reply {
@@ -421,7 +458,7 @@ mod tests {
 
         // Get handler
         actor.register(TypedHandler::<GetMsg, _>::with_priority(
-            |state, _msg, reply, _local| {
+            |state, _msg, reply, _local, _ctx| {
                 let value = *state.get::<i64>().unwrap();
                 if let Some(reply) = reply {
                     reply.send(ValueReply { value });
