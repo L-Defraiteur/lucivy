@@ -750,6 +750,82 @@ pub unsafe extern "C" fn lucivy_apply_sharded_delta(
     }
 }
 
+// ── Distributed search ──────────────────────────────────────────────────
+
+/// Export BM25 statistics for a query. Returns JSON string of ExportableStats.
+#[no_mangle]
+pub unsafe extern "C" fn lucivy_export_stats(
+    ctx: *mut LucivyContext,
+    query_json: *const c_char,
+) -> *const c_char {
+    if ctx.is_null() { return return_error("null context"); }
+    let ctx = &*ctx;
+    let query_json = str_from_ptr(query_json);
+    let query_config = match parse_query(ctx, query_json) {
+        Ok(q) => q,
+        Err(e) => return return_error(&e),
+    };
+    match ctx.handle.export_stats(&query_config) {
+        Ok(stats) => {
+            match serde_json::to_string(&stats) {
+                Ok(json) => return_str(json),
+                Err(e) => return_error(&format!("serialize stats: {e}")),
+            }
+        }
+        Err(e) => return_error(&e),
+    }
+}
+
+/// Search with externally-provided global BM25 stats (distributed mode).
+/// `global_stats_json`: JSON string of merged ExportableStats from all nodes.
+#[no_mangle]
+pub unsafe extern "C" fn lucivy_search_with_global_stats(
+    ctx: *mut LucivyContext,
+    query_json: *const c_char,
+    global_stats_json: *const c_char,
+    limit: u32,
+    highlights: i32,
+) -> *const c_char {
+    if ctx.is_null() { return return_error("null context"); }
+    let ctx = &*ctx;
+    let query_json = str_from_ptr(query_json);
+    let stats_json = str_from_ptr(global_stats_json);
+
+    let query_config = match parse_query(ctx, query_json) {
+        Ok(q) => q,
+        Err(e) => return return_error(&e),
+    };
+
+    let global_stats: lucivy_core::bm25_global::ExportableStats =
+        match serde_json::from_str(stats_json) {
+            Ok(s) => s,
+            Err(e) => return return_error(&format!("invalid stats JSON: {e}")),
+        };
+
+    let highlight_sink = if highlights != 0 {
+        Some(Arc::new(HighlightSink::new()))
+    } else {
+        None
+    };
+
+    let results = match ctx.handle.search_with_global_stats(
+        &query_config, limit as usize, &global_stats, highlight_sink.clone(),
+    ) {
+        Ok(r) => r,
+        Err(e) => return return_error(&e),
+    };
+
+    let json_results = match collect_sharded_results(&ctx.handle, &results, highlight_sink.as_deref(), true) {
+        Ok(r) => r,
+        Err(e) => return return_error(&e),
+    };
+
+    match serde_json::to_string(&json_results) {
+        Ok(s) => return_str(s),
+        Err(e) => return_error(&format!("serialize error: {e}")),
+    }
+}
+
 // ── Search ───────────────────────────────────────────────────────────────
 
 #[no_mangle]
