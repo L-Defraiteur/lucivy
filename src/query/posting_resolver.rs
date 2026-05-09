@@ -150,8 +150,7 @@ impl PostingResolver for SfxPostResolverV2 {
 pub fn build_resolver(reader: &SegmentReader, field: crate::schema::Field) -> Result<Box<dyn PostingResolver>, crate::LucivyError> {
     let sfxpost_data = reader.sfxpost_file(field).ok_or_else(|| {
         crate::LucivyError::InvalidArgument(format!(
-            "no .sfxpost file for field {:?}. PostingResolver requires suffix postings.",
-            field
+            "no .sfxpost file for field {field:?}. PostingResolver requires suffix postings."
         ))
     })?;
     let bytes = sfxpost_data.read_bytes().map_err(|e| {

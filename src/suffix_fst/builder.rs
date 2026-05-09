@@ -152,6 +152,12 @@ pub struct SuffixFstBuilder {
     num_terms: usize,
 }
 
+impl Default for SuffixFstBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SuffixFstBuilder {
     /// Create a new builder with the default minimum suffix length.
     pub fn new() -> Self {
@@ -401,7 +407,7 @@ mod tests {
         // Prefix walk "\x01g3d" should find "\x01g3db" (SI>0 partition)
         let ge = [SI_REST_PREFIX, b'g', b'3', b'd'];
         let lt = [SI_REST_PREFIX, b'g', b'3', b'e'];
-        let mut stream = fst.range().ge(&ge).lt(&lt).into_stream();
+        let mut stream = fst.range().ge(ge).lt(lt).into_stream();
         let mut found = Vec::new();
         while let Some((key, val)) = stream.next() {
             // Strip prefix byte

@@ -70,11 +70,11 @@ impl SegmentComponent {
             SegmentComponent::TempStore => "temp_store".to_string(),
             SegmentComponent::Delete => "del".to_string(),
             SegmentComponent::Offsets => "offsets".to_string(),
-            SegmentComponent::SuffixFst { field_id } => format!("{}.sfx", field_id),
-            SegmentComponent::SuffixPost { field_id } => format!("{}.sfxpost", field_id),
-            SegmentComponent::PosMap { field_id } => format!("{}.posmap", field_id),
-            SegmentComponent::ByteMap { field_id } => format!("{}.bytemap", field_id),
-            SegmentComponent::CustomSfxIndex { field_id, extension } => format!("{}.{}", field_id, extension),
+            SegmentComponent::SuffixFst { field_id } => format!("{field_id}.sfx"),
+            SegmentComponent::SuffixPost { field_id } => format!("{field_id}.sfxpost"),
+            SegmentComponent::PosMap { field_id } => format!("{field_id}.posmap"),
+            SegmentComponent::ByteMap { field_id } => format!("{field_id}.bytemap"),
+            SegmentComponent::CustomSfxIndex { field_id, extension } => format!("{field_id}.{extension}"),
         }
     }
 

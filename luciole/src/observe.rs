@@ -41,6 +41,12 @@ pub struct TapSpec {
     pub to_port: String,
 }
 
+impl Default for TapRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TapRegistry {
     pub fn new() -> Self {
         Self {

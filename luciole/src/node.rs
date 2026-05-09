@@ -16,6 +16,12 @@ pub struct ServiceRegistry {
     services: HashMap<String, Box<dyn Any + Send + Sync>>,
 }
 
+impl Default for ServiceRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ServiceRegistry {
     pub fn new() -> Self {
         Self { services: HashMap::new() }

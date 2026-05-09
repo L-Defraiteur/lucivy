@@ -361,8 +361,7 @@ pub(crate) fn convert_to_f64<const COLUMN_TYPE_ID: u8>(val: u64) -> f64 {
         val as f64
     } else {
         panic!(
-            "ColumnType ID {} cannot be converted to f64 metric",
-            COLUMN_TYPE_ID
+            "ColumnType ID {COLUMN_TYPE_ID} cannot be converted to f64 metric"
         )
     }
 }

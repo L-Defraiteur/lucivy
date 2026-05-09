@@ -314,7 +314,7 @@ where
                 for &(doc_id, left_ti, byte_from) in entries {
                     let right_ti = left_ti + 1;
                     let gap_raw = gapmap.read_separator(doc_id, left_ti, right_ti);
-                    let gap_ok = gap_raw.map_or(false, |sep| sep.is_empty());
+                    let gap_ok = gap_raw.is_some_and(|sep| sep.is_empty());
                     // if _diag_query == "rag3weaver" && depth == 0 {
                     //     eprintln!("[contains-diag] depth={} consumed={} doc={} left_ti={} right_ti={} gap={:?} gap_ok={} full={} partial={}",
                     //         depth, consumed, doc_id, left_ti, right_ti,
@@ -730,7 +730,7 @@ where
         }
 
         if postings.is_empty() {
-            if diag { eprintln!("[multi-token-diag] ABORT: token '{}' has 0 postings", token); }
+            if diag { eprintln!("[multi-token-diag] ABORT: token '{token}' has 0 postings"); }
             return Vec::new();
         }
 
@@ -763,7 +763,7 @@ where
             eprintln!("[multi-token-diag] filter token[{}]: {} -> {} postings", i, before, per_token_postings[i].len());
         }
         if per_token_postings[i].is_empty() {
-            if diag { eprintln!("[multi-token-diag] ABORT: token[{}] empty after pivot filter", i); }
+            if diag { eprintln!("[multi-token-diag] ABORT: token[{i}] empty after pivot filter"); }
             return Vec::new();
         }
     }
@@ -1827,7 +1827,7 @@ mod tests {
         });
 
         // Must find exactly ONE match: "function" at byte 4..12, SI=0
-        eprintln!("results for 'function': {:?}", results);
+        eprintln!("results for 'function': {results:?}");
         assert_eq!(results.len(), 1, "should find exactly 1 match, no parasites");
         assert_eq!(results[0].doc_id, 0);
         assert_eq!(results[0].byte_from, 4);
@@ -1838,7 +1838,7 @@ mod tests {
         let results_unction = suffix_contains_single_token(&reader, "unction", |ord| {
             raw_postings.get(&ord).cloned().unwrap_or_default()
         });
-        eprintln!("results for 'unction': {:?}", results_unction);
+        eprintln!("results for 'unction': {results_unction:?}");
         // "unction" in "function" at SI=1: byte_from=4+1=5, byte_to=5+7=12
         // "unction" in "disjunction" at SI=4: byte_from=26+4=30, byte_to=30+7=37
         assert_eq!(results_unction.len(), 2, "unction should match both function and disjunction");
@@ -1849,7 +1849,7 @@ mod tests {
         let results_junction = suffix_contains_single_token(&reader, "junction", |ord| {
             raw_postings.get(&ord).cloned().unwrap_or_default()
         });
-        eprintln!("results for 'junction': {:?}", results_junction);
+        eprintln!("results for 'junction': {results_junction:?}");
         // "junction" in "disjunction" at SI=3: byte_from=26+3=29, byte_to=29+8=37
         assert_eq!(results_junction.len(), 1, "junction should only match disjunction");
         assert_eq!(results_junction[0].byte_from, 29);
@@ -1899,44 +1899,44 @@ mod tests {
 
         // "weaver for search" — suffix of rag3weaver + consecutive tokens
         let r1 = suffix_contains_multi_token(
-            &reader, &["weaver", "for", "search"], &[" ", " "], &resolver,
+            &reader, &["weaver", "for", "search"], &[" ", " "], resolver,
         );
         eprintln!("'weaver for search': {} results", r1.len());
-        assert!(r1.len() > 0, "'weaver for search' should find doc 0");
+        assert!(!r1.is_empty(), "'weaver for search' should find doc 0");
 
         // "3weaver for search" — suffix of rag3weaver + consecutive tokens
         let r2 = suffix_contains_multi_token(
-            &reader, &["3weaver", "for", "search"], &[" ", " "], &resolver,
+            &reader, &["3weaver", "for", "search"], &[" ", " "], resolver,
         );
         eprintln!("'3weaver for search': {} results", r2.len());
-        assert!(r2.len() > 0, "'3weaver for search' should find doc 0");
+        assert!(!r2.is_empty(), "'3weaver for search' should find doc 0");
 
         // "rag3weaver for search" — full token + consecutive tokens
         let r3 = suffix_contains_multi_token(
-            &reader, &["rag3weaver", "for", "search"], &[" ", " "], &resolver,
+            &reader, &["rag3weaver", "for", "search"], &[" ", " "], resolver,
         );
         eprintln!("'rag3weaver for search': {} results", r3.len());
-        assert!(r3.len() > 0, "'rag3weaver for search' should find doc 0");
+        assert!(!r3.is_empty(), "'rag3weaver for search' should find doc 0");
 
         // "use rag3weaver" — two consecutive tokens
         let r4 = suffix_contains_multi_token(
-            &reader, &["use", "rag3weaver"], &[" "], &resolver,
+            &reader, &["use", "rag3weaver"], &[" "], resolver,
         );
         eprintln!("'use rag3weaver': {} results", r4.len());
-        assert!(r4.len() > 0, "'use rag3weaver' should find doc 0");
+        assert!(!r4.is_empty(), "'use rag3weaver' should find doc 0");
 
         // "use rag3weaver for search" — all four tokens
         let r5 = suffix_contains_multi_token(
-            &reader, &["use", "rag3weaver", "for", "search"], &[" ", " ", " "], &resolver,
+            &reader, &["use", "rag3weaver", "for", "search"], &[" ", " ", " "], resolver,
         );
         eprintln!("'use rag3weaver for search': {} results", r5.len());
-        assert!(r5.len() > 0, "'use rag3weaver for search' should find doc 0");
+        assert!(!r5.is_empty(), "'use rag3weaver for search' should find doc 0");
 
         // Also test with empty separators (non-strict mode)
         let r6 = suffix_contains_multi_token(
-            &reader, &["3weaver", "for", "search"], &["", ""], &resolver,
+            &reader, &["3weaver", "for", "search"], &["", ""], resolver,
         );
         eprintln!("'3weaver for search' (empty seps): {} results", r6.len());
-        assert!(r6.len() > 0, "'3weaver for search' with empty seps should find doc 0");
+        assert!(!r6.is_empty(), "'3weaver for search' with empty seps should find doc 0");
     }
 }

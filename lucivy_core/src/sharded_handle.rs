@@ -17,7 +17,7 @@ use ld_lucivy::actor::envelope::{type_tag_hash, Envelope, Message};
 use ld_lucivy::actor::handler::TypedHandler;
 use ld_lucivy::actor::generic_actor::GenericActor;
 use ld_lucivy::actor::mailbox::{mailbox, ActorRef};
-use ld_lucivy::actor::scheduler::{global_scheduler, ActorContext};
+use ld_lucivy::actor::scheduler::global_scheduler;
 use ld_lucivy::actor::{ActorStatus, Priority};
 use ld_lucivy::actor::envelope::ReplyPort;
 use ld_lucivy::query::Weight;
@@ -127,6 +127,12 @@ impl ShardStorage for FsShardStorage {
 pub struct RamShardStorage {
     root_files: Mutex<std::collections::HashMap<String, Vec<u8>>>,
     shard_dirs: Mutex<std::collections::HashMap<usize, ld_lucivy::directory::RamDirectory>>,
+}
+
+impl Default for RamShardStorage {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RamShardStorage {
@@ -1470,7 +1476,7 @@ impl ShardedHandle {
         let router_ref = spawn_router(Arc::clone(&router), shard_pool.clone());
         let reader_pool = spawn_reader_pool(
             &schema, &text_fields,
-            &shards[0].index.tokenizers(),
+            shards[0].index.tokenizers(),
             router_ref.clone(),
             num_readers,
         );
@@ -1529,7 +1535,7 @@ impl ShardedHandle {
         let router_ref = spawn_router(Arc::clone(&router), shard_pool.clone());
         let reader_pool = spawn_reader_pool(
             &schema, &text_fields,
-            &shards[0].index.tokenizers(),
+            shards[0].index.tokenizers(),
             router_ref.clone(),
             num_readers,
         );
@@ -1561,7 +1567,7 @@ impl ShardedHandle {
         if self.shards.len() == 1 {
             // Direct path: no pipeline overhead for single shard.
             let hashes = extract_token_hashes_from(
-                &doc, &self.schema, &self.text_fields, &self.shards[0].index.tokenizers(),
+                &doc, &self.schema, &self.text_fields, self.shards[0].index.tokenizers(),
             );
             self.route_and_send(doc, node_id, &hashes)?;
             return Ok(());
@@ -1783,7 +1789,7 @@ impl ShardedHandle {
                 loop {
                     let doc = scorer.doc();
                     if doc == ld_lucivy::TERMINATED { break; }
-                    if alive.map_or(true, |bs| bs.is_alive(doc)) {
+                    if alive.is_none_or(|bs| bs.is_alive(doc)) {
                         all_hits.push(ShardedSearchResult {
                             score: scorer.score(),
                             shard_id,

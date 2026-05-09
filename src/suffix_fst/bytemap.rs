@@ -16,6 +16,12 @@ pub struct ByteBitmapWriter {
     bitmaps: Vec<[u8; 32]>,
 }
 
+impl Default for ByteBitmapWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ByteBitmapWriter {
     /// Creates a new byte presence bitmap writer.
     pub fn new() -> Self {
@@ -146,6 +152,39 @@ impl<'a> ByteBitmapReader<'a> {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// SfxIndexFile implementation
+// ─────────────────────────────────────────────────────────────────────
+
+/// Index file wrapper for byte maps (SfxIndexFile trait).
+pub struct ByteMapIndex {
+    writer: ByteBitmapWriter,
+}
+
+impl Default for ByteMapIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ByteMapIndex {
+    /// Creates a new byte map index file instance.
+    pub fn new() -> Self { Self { writer: ByteBitmapWriter::new() } }
+}
+
+impl super::index_registry::SfxIndexFile for ByteMapIndex {
+    fn id(&self) -> &'static str { "bytemap" }
+    fn extension(&self) -> &'static str { "bytemap" }
+    fn merge_strategy(&self) -> super::index_registry::MergeStrategy { super::index_registry::MergeStrategy::EventDriven }
+
+    fn on_token(&mut self, ord: u32, text: &str) {
+        self.writer.ensure_capacity(ord + 1);
+        self.writer.record_token(ord, text.as_bytes());
+    }
+
+    fn serialize(&self) -> Vec<u8> { self.writer.serialize() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,31 +225,4 @@ mod tests {
         assert_eq!(reader.num_ordinals(), 0);
         assert!(reader.bitmap(0).is_none());
     }
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// SfxIndexFile implementation
-// ─────────────────────────────────────────────────────────────────────
-
-/// Index file wrapper for byte maps (SfxIndexFile trait).
-pub struct ByteMapIndex {
-    writer: ByteBitmapWriter,
-}
-
-impl ByteMapIndex {
-    /// Creates a new byte map index file instance.
-    pub fn new() -> Self { Self { writer: ByteBitmapWriter::new() } }
-}
-
-impl super::index_registry::SfxIndexFile for ByteMapIndex {
-    fn id(&self) -> &'static str { "bytemap" }
-    fn extension(&self) -> &'static str { "bytemap" }
-    fn merge_strategy(&self) -> super::index_registry::MergeStrategy { super::index_registry::MergeStrategy::EventDriven }
-
-    fn on_token(&mut self, ord: u32, text: &str) {
-        self.writer.ensure_capacity(ord + 1);
-        self.writer.record_token(ord, text.as_bytes());
-    }
-
-    fn serialize(&self) -> Vec<u8> { self.writer.serialize() }
 }

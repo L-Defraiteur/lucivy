@@ -268,7 +268,8 @@ impl TopHitsAggregationReq {
         accessors: &HashMap<String, Vec<DynamicColumn>>,
         doc_id: DocId,
     ) -> HashMap<String, FastFieldValue> {
-        let doc_value_fields = self
+        
+        self
             .doc_value_fields
             .iter()
             .map(|field| {
@@ -334,8 +335,7 @@ impl TopHitsAggregationReq {
 
                 (field.to_owned(), FastFieldValue::Array(values))
             })
-            .collect();
-        doc_value_fields
+            .collect()
     }
 }
 

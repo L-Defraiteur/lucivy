@@ -685,10 +685,10 @@ mod tests {
             let range_weight = range_query
                 .weight(EnableScoring::disabled_from_schema(&schema))
                 .unwrap();
-            let range_scorer = range_weight
+            
+            range_weight
                 .scorer(&searcher.segment_readers()[0], 1.0f32)
-                .unwrap();
-            range_scorer
+                .unwrap()
         };
         let range_scorer = make_scorer(Bound::Included(1), Bound::Included(4));
         assert!(range_scorer.is::<AllScorer>());

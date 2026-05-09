@@ -293,12 +293,11 @@ pub fn validate_gap_bytemap(
     for pos in (pos_from + 1)..pos_to {
         // Check separator bytes via SepMap (global bitmap, O(1))
         if let (Some(sm), Some(prev)) = (sepmap, prev_ord) {
-            if !sm.sep_bytes_in_ranges(prev, ranges) {
-                if !sm.has_contiguous(prev) {
+            if !sm.sep_bytes_in_ranges(prev, ranges)
+                && !sm.has_contiguous(prev) {
                     return Some(false); // never contiguous → impossible
                 }
                 // Has contiguous → can't reject globally, accept conservatively.
-            }
         }
 
         // Check token bytes via bytemap

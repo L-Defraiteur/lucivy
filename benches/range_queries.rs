@@ -182,7 +182,7 @@ fn run_benchmark_tasks(
 
     // Test top 100 by the field (ascending order)
     {
-        let collector_name = format!("top100_by_{}_asc", field_name);
+        let collector_name = format!("top100_by_{field_name}_asc");
         let field_name_owned = field_name.to_string();
         add_bench_task_top100_asc(
             bench_group,
@@ -198,7 +198,7 @@ fn run_benchmark_tasks(
 
     // Test top 100 by the field (descending order)
     {
-        let collector_name = format!("top100_by_{}_desc", field_name);
+        let collector_name = format!("top100_by_{field_name}_desc");
         let field_name_owned = field_name.to_string();
         add_bench_task_top100_desc(
             bench_group,
@@ -223,8 +223,7 @@ fn add_bench_task_count(
     range_high: u64,
 ) {
     let task_name = format!(
-        "range_{}_[{} TO {}]_{}",
-        field_name, range_low, range_high, collector_name
+        "range_{field_name}_[{range_low} TO {range_high}]_{collector_name}"
     );
 
     let search_task = CountSearchTask {
@@ -244,8 +243,7 @@ fn add_bench_task_docset(
     range_high: u64,
 ) {
     let task_name = format!(
-        "range_{}_[{} TO {}]_{}",
-        field_name, range_low, range_high, collector_name
+        "range_{field_name}_[{range_low} TO {range_high}]_{collector_name}"
     );
 
     let search_task = DocSetSearchTask {
@@ -266,8 +264,7 @@ fn add_bench_task_top100_asc(
     field_name_owned: String,
 ) {
     let task_name = format!(
-        "range_{}_[{} TO {}]_{}",
-        field_name, range_low, range_high, collector_name
+        "range_{field_name}_[{range_low} TO {range_high}]_{collector_name}"
     );
 
     let search_task = Top100AscSearchTask {
@@ -289,8 +286,7 @@ fn add_bench_task_top100_desc(
     field_name_owned: String,
 ) {
     let task_name = format!(
-        "range_{}_[{} TO {}]_{}",
-        field_name, range_low, range_high, collector_name
+        "range_{field_name}_[{range_low} TO {range_high}]_{collector_name}"
     );
 
     let search_task = Top100DescSearchTask {

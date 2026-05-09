@@ -190,11 +190,10 @@ impl<'a> SfxTermDictionary<'a> {
         let parents = self.sfx_reader.resolve_suffix(&lower);
         let mut term_buf = Vec::new();
         for p in &parents {
-            if p.si == 0 {
-                if self.termdict.ord_to_term(p.raw_ordinal, &mut term_buf)? && term_buf == key {
+            if p.si == 0
+                && self.termdict.ord_to_term(p.raw_ordinal, &mut term_buf)? && term_buf == key {
                     return Ok(Some(p.raw_ordinal));
                 }
-            }
         }
         Ok(None)
     }
@@ -391,7 +390,7 @@ impl<'a> SfxTermDictionary<'a> {
 
     /// Access the underlying SfxFileReader for contains queries (any SI).
     pub fn sfx_reader(&self) -> &SfxFileReader<'a> {
-        &self.sfx_reader
+        self.sfx_reader
     }
 
     /// Access the underlying TermDictionary.

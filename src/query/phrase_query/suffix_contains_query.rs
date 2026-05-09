@@ -216,7 +216,7 @@ impl SuffixContainsQuery {
             };
 
             let (query_tokens, query_separators) = tokenize_query(&self.query_text);
-            let seg_str = format!("{:?}", segment_id);
+            let seg_str = format!("{segment_id:?}");
             let (doc_tf, highlights) = run_sfx_walk(
                 &sfx_reader, &resolver, &self.query_text,
                 &query_tokens, &query_separators,
@@ -638,7 +638,7 @@ impl Weight for SuffixContainsWeight {
         };
 
         let (query_tokens, query_separators) = tokenize_query(&self.query_text);
-        let seg_str = format!("{:?}", segment_id);
+        let seg_str = format!("{segment_id:?}");
         let (doc_tf, highlights) = run_sfx_walk(
             &sfx_reader, &resolver, &self.query_text,
             &query_tokens, &query_separators,

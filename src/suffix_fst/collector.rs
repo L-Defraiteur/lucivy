@@ -71,6 +71,12 @@ struct TokenCapture {
     offset_to: usize,
 }
 
+impl Default for SfxCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SfxCollector {
     /// Create a new collector. Reads LUCIVY_MIN_SUFFIX_LEN env var (default 1).
     pub fn new() -> Self {
@@ -248,9 +254,9 @@ impl SfxCollector {
         let data = self.into_data();
         let mut dag = crate::indexer::sfx_dag::build_initial_sfx_dag(data);
         let mut result = luciole::execute_dag(&mut dag, None)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("sfx build DAG: {e}")))?;
+            .map_err(|e| std::io::Error::other(format!("sfx build DAG: {e}")))?;
         result.take_output::<SfxBuildOutput>("assemble", "output")
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "sfx DAG missing output").into())
+            .ok_or_else(|| std::io::Error::other("sfx DAG missing output").into())
     }
 
     /// Extract sorted data from collector for DAG-based build.
@@ -278,7 +284,7 @@ impl SfxCollector {
             .collect();
 
         let gapmap_data = self.gapmap_writer.serialize();
-        let num_docs = self.gapmap_writer.num_docs() as u32;
+        let num_docs = self.gapmap_writer.num_docs();
 
         // Remap sepmap: intern ordinals → final ordinals
         let num_terms = num_tokens as u32;

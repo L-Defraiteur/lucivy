@@ -490,7 +490,7 @@ impl SegmentReader {
         let offsets_file = self
             .offsets_composite
             .open_read(field)
-            .unwrap_or_else(|| FileSlice::empty());
+            .unwrap_or_else(FileSlice::empty);
 
         let inv_idx_reader = Arc::new(InvertedIndexReader::new(
             TermDictionary::open(termdict_file)?,

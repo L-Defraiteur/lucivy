@@ -109,7 +109,7 @@ pub(crate) fn collect_tokens(
                         let has_alive_doc = loop {
                             let doc = postings.doc();
                             if doc == TERMINATED { break false; }
-                            let is_alive = alive.map_or(true, |bs| bs.is_alive(doc));
+                            let is_alive = alive.is_none_or(|bs| bs.is_alive(doc));
                             if is_alive && reverse_doc_map[seg_ord].contains_key(&doc) {
                                 break true;
                             }
@@ -309,8 +309,7 @@ pub(crate) fn validate_sfxpost(
     );
     if stored_num_tokens != num_tokens {
         return Some(format!(
-            "sfxpost num_tokens mismatch: stored={} expected={}",
-            stored_num_tokens, num_tokens,
+            "sfxpost num_tokens mismatch: stored={stored_num_tokens} expected={num_tokens}",
         ));
     }
 

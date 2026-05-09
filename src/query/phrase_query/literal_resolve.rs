@@ -124,7 +124,7 @@ pub fn intersect_literals_ordered(
 
     let mut results = Vec::new();
 
-    for (&doc_id, _) in &literals_by_doc[smallest_idx] {
+    for &doc_id in literals_by_doc[smallest_idx].keys() {
         // Check all other literals have this doc.
         let all_present = literals_by_doc.iter().all(|m| m.contains_key(&doc_id));
         if !all_present {
@@ -295,7 +295,7 @@ pub fn intersect_trigrams_with_threshold(
 
             // Pick smallest tri_idx in group that continues the chain
             let best = group.iter()
-                .filter(|e| last_tri.map_or(true, |last| e.0 > last))
+                .filter(|e| last_tri.is_none_or(|last| e.0 > last))
                 .min_by_key(|e| e.0);
 
             if let Some(&entry) = best {

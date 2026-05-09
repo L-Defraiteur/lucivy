@@ -71,18 +71,17 @@ fn test_range<T: Display>(
             for (term_name, term) in &term_num_hits {
                 let index = &index;
                 let test_name = if term_name.is_empty() {
-                    format!("id_range_hit_{}", range_name)
+                    format!("id_range_hit_{range_name}")
                 } else {
                     format!(
-                        "id_range_hit_{}_intersect_with_term_{}",
-                        range_name, term_name
+                        "id_range_hit_{range_name}_intersect_with_term_{term_name}"
                     )
                 };
                 group.register(test_name, move |_| {
                     let query = if term_name.is_empty() {
                         "".to_string()
                     } else {
-                        format!("AND id_name:{}", term)
+                        format!("AND id_name:{term}")
                     };
                     black_box(execute_query(field, range, &query, index));
                 });

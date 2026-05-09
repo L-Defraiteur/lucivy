@@ -145,12 +145,12 @@ impl ExportableStats {
         let mut doc_freqs = HashMap::new();
         for term in terms {
             let key = term.serialized_term();
-            if !doc_freqs.contains_key(&key) {
+            doc_freqs.entry(key).or_insert_with(|| {
                 let freq: u64 = searchers.iter()
                     .map(|s| s.doc_freq(term).unwrap_or(0))
                     .sum();
-                doc_freqs.insert(key, freq);
-            }
+                freq
+            });
         }
 
         Self { total_num_docs, total_num_tokens, doc_freqs, contains_doc_freqs: HashMap::new(), regex_doc_freqs: HashMap::new() }

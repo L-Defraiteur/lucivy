@@ -20,6 +20,12 @@ pub struct PosMapWriter {
     docs: Vec<Vec<u32>>,
 }
 
+impl Default for PosMapWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PosMapWriter {
     /// Creates a new position-to-ordinal map writer.
     pub fn new() -> Self {
@@ -160,6 +166,38 @@ impl<'a> PosMapReader<'a> {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// SfxIndexFile implementation (Derived)
+// ─────────────────────────────────────────────────────────────────────
+
+/// Index file wrapper for position maps (SfxIndexFile trait).
+pub struct PosMapIndex {
+    writer: PosMapWriter,
+}
+
+impl Default for PosMapIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PosMapIndex {
+    /// Creates a new position map index file instance.
+    pub fn new() -> Self { Self { writer: PosMapWriter::new() } }
+}
+
+impl super::index_registry::SfxIndexFile for PosMapIndex {
+    fn id(&self) -> &'static str { "posmap" }
+    fn extension(&self) -> &'static str { "posmap" }
+    fn merge_strategy(&self) -> super::index_registry::MergeStrategy { super::index_registry::MergeStrategy::EventDriven }
+
+    fn on_posting(&mut self, ord: u32, doc_id: u32, position: u32, _bf: u32, _bt: u32) {
+        self.writer.add(doc_id, position, ord);
+    }
+
+    fn serialize(&self) -> Vec<u8> { self.writer.serialize() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,30 +242,4 @@ mod tests {
         assert_eq!(reader.num_tokens(1), 0);
         assert_eq!(reader.ordinal_at(2, 0), Some(99));
     }
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// SfxIndexFile implementation (Derived)
-// ─────────────────────────────────────────────────────────────────────
-
-/// Index file wrapper for position maps (SfxIndexFile trait).
-pub struct PosMapIndex {
-    writer: PosMapWriter,
-}
-
-impl PosMapIndex {
-    /// Creates a new position map index file instance.
-    pub fn new() -> Self { Self { writer: PosMapWriter::new() } }
-}
-
-impl super::index_registry::SfxIndexFile for PosMapIndex {
-    fn id(&self) -> &'static str { "posmap" }
-    fn extension(&self) -> &'static str { "posmap" }
-    fn merge_strategy(&self) -> super::index_registry::MergeStrategy { super::index_registry::MergeStrategy::EventDriven }
-
-    fn on_posting(&mut self, ord: u32, doc_id: u32, position: u32, _bf: u32, _bt: u32) {
-        self.writer.add(doc_id, position, ord);
-    }
-
-    fn serialize(&self) -> Vec<u8> { self.writer.serialize() }
 }

@@ -66,6 +66,12 @@ struct CheckpointData {
     status: CheckpointStatus,
 }
 
+impl Default for MemoryCheckpointStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MemoryCheckpointStore {
     pub fn new() -> Self {
         Self { data: Mutex::new(HashMap::new()) }
@@ -143,7 +149,7 @@ impl FileCheckpointStore {
     }
 
     fn path(&self, dag_id: &str) -> std::path::PathBuf {
-        self.dir.join(format!("{}.checkpoint", dag_id))
+        self.dir.join(format!("{dag_id}.checkpoint"))
     }
 
     fn write_lines(&self, dag_id: &str, lines: &[String]) {
@@ -162,13 +168,13 @@ impl FileCheckpointStore {
 impl CheckpointStore for FileCheckpointStore {
     fn save_node_completed(&self, dag_id: &str, node_name: &str, node_type: &str) {
         let mut lines = self.read_lines(dag_id).unwrap_or_default();
-        lines.push(format!("COMPLETED:{}:{}", node_name, node_type));
+        lines.push(format!("COMPLETED:{node_name}:{node_type}"));
         self.write_lines(dag_id, &lines);
     }
 
     fn save_node_failed(&self, dag_id: &str, node_name: &str, error: &str) {
         let mut lines = self.read_lines(dag_id).unwrap_or_default();
-        lines.push(format!("FAILED:{}:{}", node_name, error));
+        lines.push(format!("FAILED:{node_name}:{error}"));
         self.write_lines(dag_id, &lines);
     }
 
@@ -180,7 +186,7 @@ impl CheckpointStore for FileCheckpointStore {
 
     fn mark_failed(&self, dag_id: &str, error: &str) {
         let mut lines = self.read_lines(dag_id).unwrap_or_default();
-        lines.push(format!("STATUS:FAILED:{}", error));
+        lines.push(format!("STATUS:FAILED:{error}"));
         self.write_lines(dag_id, &lines);
     }
 

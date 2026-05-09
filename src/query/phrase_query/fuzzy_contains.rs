@@ -88,7 +88,7 @@ fn boundary_trigram_indices(
 /// Returns (ngram_strings, query_positions, ngram_size).
 fn generate_trigrams(concat: &str, distance: u8) -> (Vec<String>, Vec<usize>, usize) {
     let len = concat.len();
-    let n = if len >= 3 * (distance as usize + 1) + 1 { 3 } else { 2 };
+    let n = if len > 3 * (distance as usize + 1) { 3 } else { 2 };
 
     let mut ngrams = Vec::new();
     let mut positions = Vec::new();
@@ -262,8 +262,8 @@ fn find_matches(
             while flat[right].position.saturating_sub(flat[left].position) > max_span {
                 // Emit best match of the zone we're leaving
                 if let Some((hl_s, hl_e, miss, _, _)) = zone_best.take() {
-                    if diag_docs.map_or(false, |d| d.contains(&doc_id)) {
-                        eprintln!("[diag] find_matches doc={}: emit zone pos={} miss={}", doc_id, zone_start_pos, miss);
+                    if diag_docs.is_some_and(|d| d.contains(&doc_id)) {
+                        eprintln!("[diag] find_matches doc={doc_id}: emit zone pos={zone_start_pos} miss={miss}");
                     }
                     results.push(FuzzyMatch { doc_id, byte_from: hl_s, byte_to: hl_e, miss_count: miss });
                 }
@@ -302,7 +302,7 @@ fn find_matches(
                 let real_misses = scorable_total.saturating_sub(matched_non_boundary) as u32;
 
                 // Update zone best if this window is better
-                let is_better = zone_best.as_ref().map_or(true, |&(_, _, prev_miss, _, _)| real_misses < prev_miss);
+                let is_better = zone_best.as_ref().is_none_or(|&(_, _, prev_miss, _, _)| real_misses < prev_miss);
                 if is_better {
                     zone_start_pos = flat[left].position;
                     zone_best = Some((hl_start, hl_end, real_misses, best_first_tri, best_last_tri));
@@ -311,8 +311,8 @@ fn find_matches(
         }
         // Emit last zone
         if let Some((hl_s, hl_e, miss, _, _)) = zone_best {
-            if diag_docs.map_or(false, |d| d.contains(&doc_id)) {
-                eprintln!("[diag] find_matches doc={}: emit final zone pos={} miss={}", doc_id, zone_start_pos, miss);
+            if diag_docs.is_some_and(|d| d.contains(&doc_id)) {
+                eprintln!("[diag] find_matches doc={doc_id}: emit final zone pos={zone_start_pos} miss={miss}");
             }
             results.push(FuzzyMatch { doc_id, byte_from: hl_s, byte_to: hl_e, miss_count: miss });
         }
@@ -477,8 +477,7 @@ fn fuzzy_contains_inner(
         let boundary_grams: Vec<(usize, &str)> = boundary_indices.iter()
             .map(|&i| (i, ngrams[i].as_str()))
             .collect();
-        eprintln!("[diag] query='{}' concat='{}' ngrams={:?} threshold={} max_span={} n={} boundary_trigrams={:?}",
-            query_text, concat, ngrams, threshold, max_span, n, boundary_grams);
+        eprintln!("[diag] query='{query_text}' concat='{concat}' ngrams={ngrams:?} threshold={threshold} max_span={max_span} n={n} boundary_trigrams={boundary_grams:?}");
     }
 
     // Step 3: Resolve trigrams — selective by doc, rarest first.
@@ -618,7 +617,7 @@ fn fuzzy_contains_inner(
                         hits.iter().map(|h| &h.token_parts).collect::<Vec<_>>());
                 }
             } else {
-                eprintln!("[diag] doc={}: NOT in hits_by_doc (no trigram hits at all)", target_doc);
+                eprintln!("[diag] doc={target_doc}: NOT in hits_by_doc (no trigram hits at all)");
             }
         }
     }

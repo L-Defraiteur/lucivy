@@ -92,7 +92,7 @@ mod tests {
         fn is_match(&self, state: &bool) -> bool { *state }
         fn can_match(&self, state: &bool) -> bool { *state }
         fn accept(&self, state: &bool, byte: u8) -> bool {
-            *state && byte >= b'a' && byte <= b'z'
+            *state && (b'a'..=b'z').contains(&byte)
         }
     }
 

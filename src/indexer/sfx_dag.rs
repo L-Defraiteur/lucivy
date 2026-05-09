@@ -131,7 +131,7 @@ impl Node for ValidateGapmapNode {
         ctx.metric("errors", errors.len() as f64);
         if !errors.is_empty() {
             for (i, err) in errors.iter().enumerate().take(10) {
-                ctx.warn(&format!("gapmap error {}: {}", i, err));
+                ctx.warn(&format!("gapmap error {i}: {err}"));
             }
         }
 

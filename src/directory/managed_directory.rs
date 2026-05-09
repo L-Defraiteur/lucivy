@@ -271,13 +271,13 @@ impl ManagedDirectory {
 
     /// List all managed files
     pub fn list_managed_files(&self) -> HashSet<PathBuf> {
-        let managed_paths = self
+        
+        self
             .meta_informations
             .read()
             .expect("Managed directory rlock poisoned in list damaged.")
             .managed_paths
-            .clone();
-        managed_paths
+            .clone()
     }
 }
 

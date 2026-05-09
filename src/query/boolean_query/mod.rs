@@ -767,7 +767,7 @@ mod proptest_boolean_query {
     ) -> (Index, Vec<Field>, Field) {
         let mut schema_builder = Schema::builder();
         let fields: Vec<Field> = (0..num_fields)
-            .map(|i| schema_builder.add_text_field(&format!("field_{}", i), TEXT))
+            .map(|i| schema_builder.add_text_field(&format!("field_{i}"), TEXT))
             .collect();
         // Add a numeric field for RangeQuery tests - all docs have value = doc_id
         let range_field = schema_builder.add_i64_field(

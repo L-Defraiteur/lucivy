@@ -467,7 +467,7 @@ fn build_contains_query(
             field,
             value.to_string(),
             anchor_start,
-        ).with_fuzzy_distance(distance as u8);
+        ).with_fuzzy_distance(distance);
         if let Some(sink) = highlight_sink {
             let field_name = config.field.clone().unwrap_or_default();
             query = query.with_highlight_sink(sink, field_name);
@@ -723,7 +723,7 @@ fn json_to_term(field: Field, field_type: &FieldType, value: &serde_json::Value)
             let v = value.as_str().ok_or_else(|| format!("expected string value, got {value}"))?;
             Ok(Term::from_field_text(field, v))
         }
-        _ => Err(format!("unsupported field type for filter")),
+        _ => Err("unsupported field type for filter".to_string()),
     }
 }
 

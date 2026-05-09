@@ -972,7 +972,7 @@ fn for_each_matching_term_ord(
     match param {
         IncludeExcludeParam::Regex(pattern) => {
             let re = Regex::new(pattern).map_err(|e| {
-                crate::LucivyError::InvalidArgument(format!("Invalid regex `{}`: {}", pattern, e))
+                crate::LucivyError::InvalidArgument(format!("Invalid regex `{pattern}`: {e}"))
             })?;
             // TODO: we can handle patterns like `^prefix.*` more efficiently
             let mut stream = str_col.dictionary().search(re).into_stream()?;

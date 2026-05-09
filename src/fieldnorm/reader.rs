@@ -155,8 +155,8 @@ impl FieldNormReader {
     pub fn fieldnorm_id(&self, doc_id: DocId) -> u8 {
         match &self.0 {
             ReaderImplEnum::FromData(data) => {
-                let fieldnorm_id = data.as_slice()[doc_id as usize];
-                fieldnorm_id
+                
+                data.as_slice()[doc_id as usize]
             }
             ReaderImplEnum::Const { fieldnorm_id, .. } => *fieldnorm_id,
         }

@@ -2065,7 +2065,7 @@ mod test {
         let expected_regex = tantivy_fst::Regex::new(r".*b").unwrap();
         test_parse_query_to_logical_ast_helper(
             "title:/.*b/",
-            format!("Regex(Field(0), {:#?})", expected_regex).as_str(),
+            format!("Regex(Field(0), {expected_regex:#?})").as_str(),
             false,
         );
 

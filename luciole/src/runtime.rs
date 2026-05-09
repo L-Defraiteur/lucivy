@@ -113,7 +113,7 @@ impl DagResult {
                     if *v == ((*v) as u64) as f64 {
                         format!("{}={}", k, *v as u64)
                     } else {
-                        format!("{}={:.1}", k, v)
+                        format!("{k}={v:.1}")
                     }
                 })
                 .collect::<Vec<_>>()
@@ -128,7 +128,7 @@ impl DagResult {
                     LogLevel::Warn => "WRN",
                     LogLevel::Error => "ERR",
                 };
-                lines.push(format!("    [{}] {}", tag, text));
+                lines.push(format!("    [{tag}] {text}"));
             }
         }
         lines.join("\n")
@@ -299,7 +299,7 @@ pub fn execute_dag(
                 let node_name = dag.node_name(node_idx).to_string();
                 if let Err(undo_err) = dag.node_mut(node_idx).undo(undo_ctx) {
                     emit(DagEvent::NodeFailed {
-                        node: format!("undo:{}", node_name),
+                        node: format!("undo:{node_name}"),
                         error: undo_err,
                         duration_ms: 0,
                     });
@@ -472,7 +472,7 @@ pub fn execute_dag_with_checkpoint(
 pub fn display_progress(dag: &Dag, result: Option<&DagResult>) -> String {
     let levels = match dag.topological_levels() {
         Ok(l) => l,
-        Err(e) => return format!("DAG error: {}", e),
+        Err(e) => return format!("DAG error: {e}"),
     };
 
     let completed: HashMap<&str, &NodeResult> = result
@@ -496,7 +496,7 @@ pub fn display_progress(dag: &Dag, result: Option<&DagResult>) -> String {
         if level.len() == 1 {
             let node_name = dag.node_name(level[0]);
             let line = format_node_line(node_name, completed.get(node_name));
-            lines.push(format!("{}{}", prefix_branch, line));
+            lines.push(format!("{prefix_branch}{line}"));
         } else {
             // Parallel level
             lines.push(format!("{}┬ level {} ({} parallel)", prefix_branch.replace("── ", "─"), level_idx, level.len()));
@@ -505,7 +505,7 @@ pub fn display_progress(dag: &Dag, result: Option<&DagResult>) -> String {
                 let node_prefix = if is_last_node { "└── " } else { "├── " };
                 let node_name = dag.node_name(node_idx);
                 let line = format_node_line(node_name, completed.get(node_name));
-                lines.push(format!("{}{}{}", prefix_cont, node_prefix, line));
+                lines.push(format!("{prefix_cont}{node_prefix}{line}"));
             }
         }
     }
@@ -523,7 +523,7 @@ fn format_node_line(name: &str, result: Option<&&NodeResult>) -> String {
                     if *v == (*v as u64) as f64 {
                         format!("{}={}", k, *v as u64)
                     } else {
-                        format!("{}={:.1}", k, v)
+                        format!("{k}={v:.1}")
                     }
                 })
                 .collect::<Vec<_>>()
@@ -534,7 +534,7 @@ fn format_node_line(name: &str, result: Option<&&NodeResult>) -> String {
                 format!("[{}] {} ({}ms) {}", icon, name, nr.duration_ms, metrics_str)
             }
         }
-        None => format!("[ ] {}", name),
+        None => format!("[ ] {name}"),
     }
 }
 
@@ -612,7 +612,7 @@ fn execute_single_node(
                 duration_ms,
             });
             emit(DagEvent::DagFailed { error: e.clone() });
-            Err(format!("node '{}' failed: {}", node_name, e))
+            Err(format!("node '{node_name}' failed: {e}"))
         }
     }
 }
@@ -747,7 +747,7 @@ fn execute_level_parallel(
             }
             Err((node_name, e)) => {
                 emit(DagEvent::DagFailed { error: e.clone() });
-                return Err(format!("node '{}' failed: {}", node_name, e));
+                return Err(format!("node '{node_name}' failed: {e}"));
             }
         }
     }
@@ -775,7 +775,7 @@ fn rollback_undo_stack_by_idx(
                     node: node_name,
                     node_type: String::new(),
                     level: crate::node::LogLevel::Info,
-                    text: format!("undo completed in {}ms", ms),
+                    text: format!("undo completed in {ms}ms"),
                 });
             }
             Err(e) => {
@@ -783,7 +783,7 @@ fn rollback_undo_stack_by_idx(
                     node: node_name,
                     node_type: String::new(),
                     level: crate::node::LogLevel::Error,
-                    text: format!("undo failed: {}", e),
+                    text: format!("undo failed: {e}"),
                 });
             }
         }
@@ -828,10 +828,8 @@ fn collect_inputs(
                     if let Some(value) = port_data.remove(&key) {
                         inputs.insert(edge.to_port.clone(), value);
                     }
-                } else {
-                    if let Some(value) = port_data.get(&key) {
-                        inputs.insert(edge.to_port.clone(), value.clone());
-                    }
+                } else if let Some(value) = port_data.get(&key) {
+                    inputs.insert(edge.to_port.clone(), value.clone());
                 }
             }
         }
@@ -1024,7 +1022,7 @@ impl<R: Send + 'static> DagExecutor<R> {
                     Err(e) => NodeTaskResult {
                         node_idx,
                         node_name: node_name.clone(),
-                        result: Err(format!("node '{}' failed: {}", node_name, e)),
+                        result: Err(format!("node '{node_name}' failed: {e}")),
                     },
                 }
             });

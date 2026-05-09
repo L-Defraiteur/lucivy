@@ -124,7 +124,7 @@ impl ThreadInfo {
 
     /// Get the current actor (if any) being run by this thread.
     pub fn current_actor(&self) -> Option<(ActorId, &'static str)> {
-        self.current_actor.lock().unwrap().clone()
+        *self.current_actor.lock().unwrap()
     }
 }
 
@@ -886,7 +886,7 @@ impl Scheduler {
             let queue_len = slot.actor.as_ref().map(|a| a.mailbox_len()).unwrap_or(0);
             let taken = slot.actor.is_none();
             let activity_str = match slot.activity.get() {
-                Some((label, elapsed)) => format!("BUSY {:?} ({:.1}s)", label, elapsed),
+                Some((label, elapsed)) => format!("BUSY {label:?} ({elapsed:.1}s)"),
                 None if taken => "TAKEN (being processed)".to_string(),
                 None => "idle".to_string(),
             };
@@ -911,7 +911,7 @@ impl Scheduler {
             let st = t.state();
             let wait_label = t.wait_label.lock().unwrap().clone();
             let elapsed = t.state_since.lock().unwrap().elapsed().as_secs_f64();
-            let actor_info = t.current_actor.lock().unwrap().clone();
+            let actor_info = *t.current_actor.lock().unwrap();
 
             let desc = match st {
                 ThreadState::Idle => "IDLE".to_string(),
@@ -1351,7 +1351,7 @@ fn run_one_step_actor(shared: &Arc<SharedState>, actor_id: ActorId, entry_priori
     // Traiter UN SEUL message (rendre la main vite en mode coopératif).
     let ctx = ActorContext {
         actor_id,
-        shared: Arc::clone(&shared),
+        shared: Arc::clone(shared),
         activity: Arc::clone(&activity),
     };
     activity.set("processing");

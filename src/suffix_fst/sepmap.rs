@@ -23,6 +23,12 @@ pub struct SepMapWriter {
     bitmaps: Vec<[u8; 32]>,
 }
 
+impl Default for SepMapWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SepMapWriter {
     /// Creates a new separator byte bitmap writer.
     pub fn new() -> Self {
@@ -187,6 +193,12 @@ pub struct SepMapIndex {
     data: Vec<u8>,
 }
 
+impl Default for SepMapIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SepMapIndex {
     /// Creates a new separator map index file instance.
     pub fn new() -> Self { Self { data: Vec::new() } }
@@ -220,7 +232,7 @@ impl super::index_registry::SfxIndexFile for SepMapIndex {
 
         for (seg_idx, reader_opt) in readers.iter().enumerate() {
             let reader = match reader_opt { Some(r) => r, None => continue };
-            let tt = match source_termtexts[seg_idx].and_then(|b| TermTextsReader::open(b)) {
+            let tt = match source_termtexts[seg_idx].and_then(TermTextsReader::open) {
                 Some(t) => t, None => continue,
             };
 

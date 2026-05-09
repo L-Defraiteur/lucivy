@@ -133,14 +133,14 @@ impl Node for PostingsNode {
         for (i, &field) in self.ctx.indexed_fields.iter().enumerate() {
             let field_entry = self.ctx.merger.schema.get_field_entry(field);
             let fieldnorm_reader = fieldnorm_readers.get_field(field)
-                .map_err(|e| format!("fieldnorm field {}: {e}", i))?;
+                .map_err(|e| format!("fieldnorm field {i}: {e}"))?;
             self.ctx.merger.write_postings_for_field(
                 field,
                 field_entry.field_type(),
                 &mut postings_ser,
                 fieldnorm_reader,
                 &doc_id_mapping,
-            ).map_err(|e| format!("postings field {}: {e}", i))?;
+            ).map_err(|e| format!("postings field {i}: {e}"))?;
         }
 
         nctx.metric("fields", self.ctx.indexed_fields.len() as f64);
@@ -413,33 +413,33 @@ pub(crate) fn build_merge_dag(
 
     // Postings (parallel with store + fast_fields)
     dag.add_node("postings", PostingsNode { ctx: ctx.clone() });
-    dag.connect("init", "postings_ser", "postings", "postings_ser").map_err(|e| crate::LucivyError::SystemError(e))?;
-    dag.connect("init", "doc_id_mapping_postings", "postings", "doc_id_mapping_postings").map_err(|e| crate::LucivyError::SystemError(e))?;
-    dag.connect("init", "fieldnorm_readers", "postings", "fieldnorm_readers").map_err(|e| crate::LucivyError::SystemError(e))?;
+    dag.connect("init", "postings_ser", "postings", "postings_ser").map_err(crate::LucivyError::SystemError)?;
+    dag.connect("init", "doc_id_mapping_postings", "postings", "doc_id_mapping_postings").map_err(crate::LucivyError::SystemError)?;
+    dag.connect("init", "fieldnorm_readers", "postings", "fieldnorm_readers").map_err(crate::LucivyError::SystemError)?;
 
     // Store (parallel)
     dag.add_node("store", StoreNode { ctx: ctx.clone() });
-    dag.connect("init", "store_writer", "store", "store_writer").map_err(|e| crate::LucivyError::SystemError(e))?;
+    dag.connect("init", "store_writer", "store", "store_writer").map_err(crate::LucivyError::SystemError)?;
 
     // FastFields (parallel)
     dag.add_node("fast_fields", FastFieldsNode { ctx: ctx.clone() });
-    dag.connect("init", "ff_write", "fast_fields", "ff_write").map_err(|e| crate::LucivyError::SystemError(e))?;
-    dag.connect("init", "doc_id_mapping_ff", "fast_fields", "doc_id_mapping_ff").map_err(|e| crate::LucivyError::SystemError(e))?;
+    dag.connect("init", "ff_write", "fast_fields", "ff_write").map_err(crate::LucivyError::SystemError)?;
+    dag.connect("init", "doc_id_mapping_ff", "fast_fields", "doc_id_mapping_ff").map_err(crate::LucivyError::SystemError)?;
 
     // Sfx (after all three parallel phases)
     dag.add_node("sfx", SfxNode { ctx: ctx.clone() });
-    dag.connect("init", "segment", "sfx", "segment").map_err(|e| crate::LucivyError::SystemError(e))?;
-    dag.connect("init", "sfx_doc_mapping", "sfx", "sfx_doc_mapping").map_err(|e| crate::LucivyError::SystemError(e))?;
-    dag.connect("postings", "postings_ser", "sfx", "postings_ser").map_err(|e| crate::LucivyError::SystemError(e))?;
-    dag.connect("store", "store_writer", "sfx", "store_writer").map_err(|e| crate::LucivyError::SystemError(e))?;
-    dag.connect("fast_fields", "ff_write", "sfx", "ff_write").map_err(|e| crate::LucivyError::SystemError(e))?;
+    dag.connect("init", "segment", "sfx", "segment").map_err(crate::LucivyError::SystemError)?;
+    dag.connect("init", "sfx_doc_mapping", "sfx", "sfx_doc_mapping").map_err(crate::LucivyError::SystemError)?;
+    dag.connect("postings", "postings_ser", "sfx", "postings_ser").map_err(crate::LucivyError::SystemError)?;
+    dag.connect("store", "store_writer", "sfx", "store_writer").map_err(crate::LucivyError::SystemError)?;
+    dag.connect("fast_fields", "ff_write", "sfx", "ff_write").map_err(crate::LucivyError::SystemError)?;
 
     // Close (after sfx)
     dag.add_node("close", CloseNode { ctx: ctx.clone() });
-    dag.connect("sfx", "postings_ser", "close", "postings_ser").map_err(|e| crate::LucivyError::SystemError(e))?;
-    dag.connect("sfx", "store_writer", "close", "store_writer").map_err(|e| crate::LucivyError::SystemError(e))?;
-    dag.connect("sfx", "ff_write", "close", "ff_write").map_err(|e| crate::LucivyError::SystemError(e))?;
-    dag.connect("sfx", "sfx_field_ids", "close", "sfx_field_ids").map_err(|e| crate::LucivyError::SystemError(e))?;
+    dag.connect("sfx", "postings_ser", "close", "postings_ser").map_err(crate::LucivyError::SystemError)?;
+    dag.connect("sfx", "store_writer", "close", "store_writer").map_err(crate::LucivyError::SystemError)?;
+    dag.connect("sfx", "ff_write", "close", "ff_write").map_err(crate::LucivyError::SystemError)?;
+    dag.connect("sfx", "sfx_field_ids", "close", "sfx_field_ids").map_err(crate::LucivyError::SystemError)?;
 
     Ok(Some(dag))
 }

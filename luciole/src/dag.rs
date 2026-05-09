@@ -41,6 +41,12 @@ pub struct Dag {
     pub(crate) services: Option<Arc<crate::node::ServiceRegistry>>,
 }
 
+impl Default for Dag {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Dag {
     pub fn new() -> Self {
         Self {
@@ -100,24 +106,22 @@ impl Dag {
         to_port: &str,
     ) -> Result<(), String> {
         let from = self.find_node(from_node)
-            .ok_or_else(|| format!("node '{}' not found", from_node))?;
+            .ok_or_else(|| format!("node '{from_node}' not found"))?;
         let to = self.find_node(to_node)
-            .ok_or_else(|| format!("node '{}' not found", to_node))?;
+            .ok_or_else(|| format!("node '{to_node}' not found"))?;
 
         let from_type = Self::find_output_port_type(&*from.node, from_port)
             .ok_or_else(|| format!(
-                "node '{}' has no output port '{}'", from_node, from_port
+                "node '{from_node}' has no output port '{from_port}'"
             ))?;
         let to_type = Self::find_input_port_type(&*to.node, to_port)
             .ok_or_else(|| format!(
-                "node '{}' has no input port '{}'", to_node, to_port
+                "node '{to_node}' has no input port '{to_port}'"
             ))?;
 
         if !from_type.compatible_with(&to_type) {
             return Err(format!(
-                "port type mismatch: {}.{} ({}) -> {}.{} ({})",
-                from_node, from_port, from_type,
-                to_node, to_port, to_type,
+                "port type mismatch: {from_node}.{from_port} ({from_type}) -> {to_node}.{to_port} ({to_type})",
             ));
         }
 
@@ -211,14 +215,13 @@ impl Dag {
 
         for entry in &self.nodes {
             for port_def in entry.node.inputs() {
-                if port_def.required {
-                    if !incoming.contains_key(&(entry.name.as_str(), port_def.name)) {
+                if port_def.required
+                    && !incoming.contains_key(&(entry.name.as_str(), port_def.name)) {
                         return Err(format!(
                             "required input port '{}.{}' is not connected",
                             entry.name, port_def.name
                         ));
                     }
-                }
             }
         }
 

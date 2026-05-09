@@ -43,6 +43,12 @@ pub struct GapMapWriter {
     doc_offsets: Vec<u64>,
 }
 
+impl Default for GapMapWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GapMapWriter {
     /// Create a new empty GapMap writer.
     pub fn new() -> Self {
@@ -463,7 +469,7 @@ impl<'a> GapMapReader<'a> {
         if num_values == 0 {
             return Err(GapMapError {
                 doc_id,
-                message: format!("num_values=0 but num_tokens={}", num_tokens),
+                message: format!("num_values=0 but num_tokens={num_tokens}"),
             });
         }
 
@@ -527,8 +533,7 @@ impl<'a> GapMapReader<'a> {
             return Err(GapMapError {
                 doc_id,
                 message: format!(
-                    "too few gaps: found {}, tokens={}, values={}, expected>={}",
-                    gap_count, num_tokens, num_values, num_tokens,
+                    "too few gaps: found {gap_count}, tokens={num_tokens}, values={num_values}, expected>={num_tokens}",
                 ),
             });
         }
@@ -568,7 +573,7 @@ impl<'a> GapMapReader<'a> {
 
 /// Decode a gap at position `cursor` in the data. Returns (gap_bytes, next_cursor).
 /// VALUE_BOUNDARY (len=254) returns the sentinel VALUE_BOUNDARY slice.
-fn decode_gap_at<'a>(data: &'a [u8], cursor: usize) -> (&'a [u8], usize) {
+fn decode_gap_at(data: &[u8], cursor: usize) -> (&[u8], usize) {
     let len = data[cursor] as usize;
     if len == VALUE_BOUNDARY_MARKER as usize {
         // VALUE_BOUNDARY marker — no bytes follow
@@ -587,6 +592,20 @@ fn decode_gap_at<'a>(data: &'a [u8], cursor: usize) -> (&'a [u8], usize) {
 /// Check if a gap is a VALUE_BOUNDARY.
 pub fn is_value_boundary(gap: &[u8]) -> bool {
     gap.len() == 1 && gap[0] == VALUE_BOUNDARY_MARKER
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// SfxIndexFile implementation
+// ─────────────────────────────────────────────────────────────────────
+
+/// Index file wrapper for gap maps (SfxIndexFile trait).
+pub struct GapMapIndex;
+
+impl super::index_registry::SfxIndexFile for GapMapIndex {
+    fn id(&self) -> &'static str { "gapmap" }
+    fn extension(&self) -> &'static str { "gapmap" }
+    fn merge_strategy(&self) -> super::index_registry::MergeStrategy { super::index_registry::MergeStrategy::ExternalDagNode }
+    fn prebuilt_by_collector(&self) -> bool { true }
 }
 
 #[cfg(test)]
@@ -804,18 +823,4 @@ mod tests {
         assert_eq!(gap.len(), 254);
         assert!(!is_value_boundary(gap));
     }
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// SfxIndexFile implementation
-// ─────────────────────────────────────────────────────────────────────
-
-/// Index file wrapper for gap maps (SfxIndexFile trait).
-pub struct GapMapIndex;
-
-impl super::index_registry::SfxIndexFile for GapMapIndex {
-    fn id(&self) -> &'static str { "gapmap" }
-    fn extension(&self) -> &'static str { "gapmap" }
-    fn merge_strategy(&self) -> super::index_registry::MergeStrategy { super::index_registry::MergeStrategy::ExternalDagNode }
-    fn prebuilt_by_collector(&self) -> bool { true }
 }

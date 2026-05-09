@@ -105,7 +105,7 @@ impl Node for GraphNode {
         // 4. Forward inner metrics with prefix
         for (node_name, nr) in &result.node_results {
             for (key, value) in &nr.metrics {
-                ctx.metric(&format!("{}.{}", node_name, key), *value);
+                ctx.metric(&format!("{node_name}.{key}"), *value);
             }
         }
         ctx.metric("inner_duration_ms", result.duration_ms as f64);

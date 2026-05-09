@@ -50,7 +50,7 @@ fn collect_text_files(dir: &Path) -> Vec<(String, String)> {
 fn test_rag3db_startswith_highlights_after_merge() {
     let rag3db = Path::new(RAG3DB_PATH);
     if !rag3db.exists() {
-        eprintln!("Skipping: {} not found (run: git clone --depth 1 https://github.com/L-Defraiteur/rag3db /tmp/rag3db-test)", RAG3DB_PATH);
+        eprintln!("Skipping: {RAG3DB_PATH} not found (run: git clone --depth 1 https://github.com/L-Defraiteur/rag3db /tmp/rag3db-test)");
         return;
     }
 
@@ -102,7 +102,7 @@ fn test_rag3db_startswith_highlights_after_merge() {
 
     let num_segments = searcher.segment_readers().len();
     let num_docs: u32 = searcher.segment_readers().iter().map(|r| r.num_docs()).sum();
-    eprintln!("Index: {} docs in {} segments", num_docs, num_segments);
+    eprintln!("Index: {num_docs} docs in {num_segments} segments");
 
     // Test 1: startsWith prefix search with highlights on content field
     let term = Term::from_field_text(content_field, "fn");

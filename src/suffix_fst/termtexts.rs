@@ -24,6 +24,12 @@ pub struct TermTextsWriter {
     texts: Vec<Vec<u8>>,
 }
 
+impl Default for TermTextsWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TermTextsWriter {
     /// Creates a new empty term texts writer.
     pub fn new() -> Self {
@@ -118,6 +124,12 @@ impl<'a> TermTextsReader<'a> {
 /// Index file wrapper for term texts (SfxIndexFile trait).
 pub struct TermTextsIndex {
     writer: TermTextsWriter,
+}
+
+impl Default for TermTextsIndex {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TermTextsIndex {

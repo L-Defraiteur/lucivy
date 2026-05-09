@@ -308,7 +308,7 @@ impl SegmentUpdater {
         match scheduler.wait(rx, "schedule_commit") {
             Ok(bytes) => {
                 let reply = SuOpsReply::decode(&bytes)
-                    .map_err(|e| LucivyError::SystemError(e))?;
+                    .map_err(LucivyError::SystemError)?;
                 Ok(reply.opstamp)
             }
             Err(err_bytes) => Err(

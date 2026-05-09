@@ -117,7 +117,7 @@ impl<M: Send + 'static> Pool<M> {
         let scheduler = global_scheduler();
         let mut receivers = Vec::with_capacity(self.workers.len());
 
-        for (_i, worker) in self.workers.iter().enumerate() {
+        for worker in self.workers.iter() {
             let (tx, rx) = reply::<R>();
             let _ = worker.send(make_msg(tx));
             receivers.push(rx);

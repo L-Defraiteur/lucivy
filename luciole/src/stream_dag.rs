@@ -111,7 +111,7 @@ impl StreamDag {
                 } else {
                     format!("{} workers", stage.num_workers)
                 };
-                lines.push(format!("  {} [{}]", name, worker_label));
+                lines.push(format!("  {name} [{worker_label}]"));
 
                 // Add arrow if not last
                 if i < order.len() - 1 {

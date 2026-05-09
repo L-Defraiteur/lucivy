@@ -309,7 +309,7 @@ impl Query for RegexContinuationQuery {
         if let Some(freq) = self.global_regex_doc_freq {
             let key = match &self.dfa_kind {
                 DfaKind::Regex { pattern } => pattern.clone(),
-                DfaKind::Fuzzy { text, distance, .. } => format!("fuzzy:{}:{}", text, distance),
+                DfaKind::Fuzzy { text, distance, .. } => format!("fuzzy:{text}:{distance}"),
             };
             out.insert(key, freq);
         }
@@ -366,7 +366,7 @@ impl Query for RegexContinuationQuery {
     fn set_global_regex_doc_freqs(&mut self, freqs: &HashMap<String, u64>) {
         let key = match &self.dfa_kind {
             DfaKind::Regex { pattern } => pattern.clone(),
-            DfaKind::Fuzzy { text, distance, .. } => format!("fuzzy:{}:{}", text, distance),
+            DfaKind::Fuzzy { text, distance, .. } => format!("fuzzy:{text}:{distance}"),
         };
         if let Some(&df) = freqs.get(&key) {
             self.global_regex_doc_freq = Some(df);
@@ -570,7 +570,7 @@ fn generate_ngrams(query: &str, distance: u8) -> (Vec<String>, Vec<usize>, Vec<u
     let effective_len: usize = lower.chars().filter(|c| c.is_alphanumeric()).count();
 
     // Choose n-gram size: bigrams for short queries, trigrams for longer ones.
-    let n = if effective_len >= 3 * (distance as usize + 1) + 1 { 3 } else { 2 };
+    let n = if effective_len > 3 * (distance as usize + 1) { 3 } else { 2 };
 
     let bytes = lower.as_bytes();
     let mut ngrams = Vec::new();
@@ -595,7 +595,7 @@ fn generate_ngrams(query: &str, distance: u8) -> (Vec<String>, Vec<usize>, Vec<u
     for (i, c) in lower.char_indices() {
         if c.is_alphanumeric() {
             if !in_word {
-                if i > 0 && in_word == false && ngrams.len() > 0 {
+                if i > 0 && !in_word && !ngrams.is_empty() {
                     // Already incremented below
                 }
                 in_word = true;
@@ -605,11 +605,9 @@ fn generate_ngrams(query: &str, distance: u8) -> (Vec<String>, Vec<usize>, Vec<u
                     pos_word_id[b] = current_word;
                 }
             }
-        } else {
-            if in_word {
-                current_word += 1;
-                in_word = false;
-            }
+        } else if in_word {
+            current_word += 1;
+            in_word = false;
         }
     }
 
@@ -957,7 +955,7 @@ pub fn fuzzy_contains_via_trigram(
             let mut dfa_matches: Vec<(usize, usize)> = Vec::new(); // (start, len)
 
             for sb in window_lo..window_hi {
-                let mut s = start_state.clone();
+                let mut s = start_state;
                 let mut fed: usize = 0;
                 let mut best_len: usize = 0;
                 let mut best_diff: usize = usize::MAX;
@@ -977,7 +975,7 @@ pub fn fuzzy_contains_via_trigram(
                 if best_len > 0 {
                     // Skip if this match overlaps with the previous one
                     let dominated = dfa_matches.last()
-                        .map_or(false, |&(prev_start, prev_len)| sb < prev_start + prev_len);
+                        .is_some_and(|&(prev_start, prev_len)| sb < prev_start + prev_len);
                     if !dominated {
                         dfa_matches.push((sb, best_len));
                     }
@@ -1060,7 +1058,7 @@ pub fn fuzzy_contains_via_trigram(
             }
         } else {
             return Err(crate::LucivyError::SystemError(
-                format!("fuzzy contains requires PosMap but none found for doc {} — index may need rebuild", doc_id)
+                format!("fuzzy contains requires PosMap but none found for doc {doc_id} — index may need rebuild")
             ));
         }
     }
@@ -1267,7 +1265,7 @@ where
         if std::env::var("LUCIVY_REGEX_DIAG").is_ok() {
             eprintln!("[regex-diag] ordered={} candidates", ordered.len());
             for &(doc_id, first_bf, last_bt, first_si) in &ordered {
-                eprintln!("  doc={} bf={} bt={} si={}", doc_id, first_bf, last_bt, first_si);
+                eprintln!("  doc={doc_id} bf={first_bf} bt={last_bt} si={first_si}");
             }
         }
 
@@ -1935,7 +1933,7 @@ mod tests {
             .search(&query, &TopDocs::with_limit(10).order_by_score())
             .unwrap();
 
-        assert!(results.len() >= 1, "fuzzy d=1 should match doc 1");
+        assert!(!results.is_empty(), "fuzzy d=1 should match doc 1");
         assert!(results.iter().any(|(_, addr)| addr.doc_id == 1), "doc 1 should be in results");
         assert_eq!(results[0].1.doc_id, 1, "doc 1 should be ranked first (highest coverage)");
     }
@@ -2028,7 +2026,7 @@ mod tests {
         let results = searcher
             .search(&query, &TopDocs::with_limit(10).order_by_score())
             .unwrap();
-        assert!(results.len() >= 1, "regex 'rag[0-9]db' should match rag3db");
+        assert!(!results.is_empty(), "regex 'rag[0-9]db' should match rag3db");
     }
 
     #[test]
@@ -2045,7 +2043,7 @@ mod tests {
         let results = searcher
             .search(&query, &TopDocs::with_limit(10).order_by_score())
             .unwrap();
-        assert!(results.len() >= 1, "regex 'rag3d[a-z]+' should match rag3db");
+        assert!(!results.is_empty(), "regex 'rag3d[a-z]+' should match rag3db");
     }
 
     #[test]
@@ -2062,7 +2060,7 @@ mod tests {
         let results = searcher
             .search(&query, &TopDocs::with_limit(10).order_by_score())
             .unwrap();
-        assert!(results.len() >= 1, r"regex 'rag\w+' should match rag3db");
+        assert!(!results.is_empty(), r"regex 'rag\w+' should match rag3db");
     }
 
     #[test]
@@ -2079,7 +2077,7 @@ mod tests {
         let results = searcher
             .search(&query, &TopDocs::with_limit(10).order_by_score())
             .unwrap();
-        assert!(results.len() >= 1, "regex 'rag3db is' should match 'rag3db is cool'");
+        assert!(!results.is_empty(), "regex 'rag3db is' should match 'rag3db is cool'");
     }
 
     #[test]
@@ -2123,7 +2121,7 @@ mod tests {
         let results = searcher
             .search(&query, &TopDocs::with_limit(10).order_by_score())
             .unwrap();
-        assert!(results.len() >= 1,
+        assert!(!results.is_empty(),
             "regex 'rag3weaver query' should match 'the rag3weaver query engine is fast', got {} results",
             results.len());
     }
@@ -2225,7 +2223,7 @@ mod tests {
             .unwrap();
 
         // Doc 1: "rag3db is cool" → suffix "3db" + " " gap + "is"
-        assert!(results.len() >= 1, "'3dbis' d=1 contains should match doc 1");
+        assert!(!results.is_empty(), "'3dbis' d=1 contains should match doc 1");
         assert!(results.iter().any(|(_, addr)| addr.doc_id == 1), "doc 1 should be in results");
         assert_eq!(results[0].1.doc_id, 1, "doc 1 should be ranked first (highest coverage)");
     }
@@ -2247,7 +2245,7 @@ mod tests {
             .unwrap();
 
         // Doc 1: "rag3db is cool" — 2 spaces absorbed = d=2
-        assert!(results.len() >= 1, "'rag3dbiscool' d=2 should match 'rag3db is cool'");
+        assert!(!results.is_empty(), "'rag3dbiscool' d=2 should match 'rag3db is cool'");
         assert!(results.iter().any(|(_, addr)| addr.doc_id == 1), "doc 1 should be in results");
         assert_eq!(results[0].1.doc_id, 1, "doc 1 should be ranked first (highest coverage)");
     }
@@ -2278,7 +2276,7 @@ mod tests {
         assert!(!doc1_entries.is_empty(), "should have highlights for doc 1");
         assert!(
             doc1_entries.iter().any(|e| e.offsets.contains(&[0, 6])),
-            "doc 1 should have highlight [0,6] for 'rag3db', got {:?}", doc1_entries
+            "doc 1 should have highlight [0,6] for 'rag3db', got {doc1_entries:?}"
         );
     }
 
@@ -2307,7 +2305,7 @@ mod tests {
         // "rag3db is cool" = bytes [0, 14]
         assert!(
             doc1_entries.iter().any(|e| e.offsets.contains(&[0, 14])),
-            "doc 1 should have highlight [0,14], got {:?}", doc1_entries
+            "doc 1 should have highlight [0,14], got {doc1_entries:?}"
         );
     }
 
@@ -2340,7 +2338,7 @@ mod tests {
             doc1_entries.iter().any(|e| {
                 e.offsets.iter().any(|o| o[0] == 3 && o[1] == 9)
             }),
-            "doc 1 should have highlight [3,9], got {:?}", doc1_entries
+            "doc 1 should have highlight [3,9], got {doc1_entries:?}"
         );
     }
 

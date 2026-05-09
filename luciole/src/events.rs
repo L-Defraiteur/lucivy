@@ -83,6 +83,12 @@ pub struct EventBus<E> {
     subscribers: Mutex<Vec<channel::Sender<E>>>,
 }
 
+impl<E: Clone + Send + 'static> Default for EventBus<E> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<E: Clone + Send + 'static> EventBus<E> {
     pub fn new() -> Self {
         EventBus {

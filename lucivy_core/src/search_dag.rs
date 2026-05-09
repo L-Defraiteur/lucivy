@@ -18,7 +18,6 @@ use luciole::Dag;
 
 use ld_lucivy::query::Weight;
 use ld_lucivy::schema::Schema;
-use ld_lucivy::{DocAddress, Index};
 
 use crate::bm25_global::AggregatedBm25StatsOwned;
 use crate::handle::LucivyHandle;
@@ -96,7 +95,7 @@ impl Node for FlushNode {
             }
         }
         ctx.metric("shards_flushed", flushed as f64);
-        ctx.info(&format!("flushed {} shards", flushed));
+        ctx.info(&format!("flushed {flushed} shards"));
         ctx.trigger("done");
         Ok(())
     }
@@ -421,7 +420,7 @@ impl Node for MergeResultsNode {
     fn inputs(&self) -> Vec<PortDef> {
         (0..self.num_shards)
             .map(|i| PortDef::required(
-                Box::leak(format!("hits_{}", i).into_boxed_str()),
+                Box::leak(format!("hits_{i}").into_boxed_str()),
                 PortType::of::<Vec<ShardedSearchResult>>(),
             ))
             .collect()
@@ -433,7 +432,7 @@ impl Node for MergeResultsNode {
         let mut heap = BinaryHeap::with_capacity(self.top_k + 1);
 
         for i in 0..self.num_shards {
-            let port = format!("hits_{}", i);
+            let port = format!("hits_{i}");
             if let Some(value) = ctx.take_input(&port) {
                 if let Some(hits) = value.take::<Vec<ShardedSearchResult>>() {
                     for r in hits {

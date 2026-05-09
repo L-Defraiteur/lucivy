@@ -373,7 +373,7 @@ impl<'de> Deserialize<'de> for FilterAggregation {
         } else {
             // It's an object - custom builder with typetag
             let builder: Box<dyn QueryBuilder> = serde_json::from_value(value).map_err(|e| {
-                D::Error::custom(format!("Failed to deserialize QueryBuilder: {}", e))
+                D::Error::custom(format!("Failed to deserialize QueryBuilder: {e}"))
             })?;
             FilterQuery::CustomBuilder(builder)
         };
@@ -1526,12 +1526,12 @@ mod tests {
         let query = filter_agg.parse_query(&schema, tokenizers)?;
 
         // Verify the query was built correctly (it should be a TermQuery)
-        assert!(format!("{:?}", query).contains("TermQuery"));
+        assert!(format!("{query:?}").contains("TermQuery"));
 
         // Test that it can be cloned
         let cloned = filter_agg.clone();
         let query2 = cloned.parse_query(&schema, tokenizers)?;
-        assert!(format!("{:?}", query2).contains("TermQuery"));
+        assert!(format!("{query2:?}").contains("TermQuery"));
 
         // Verify that custom builders CAN be serialized with typetag
         let serialized = serde_json::to_string(&filter_agg)?;
@@ -1547,7 +1547,7 @@ mod tests {
         // Verify that it can be deserialized
         let deserialized: FilterAggregation = serde_json::from_str(&serialized)?;
         let query3 = deserialized.parse_query(&schema, tokenizers)?;
-        assert!(format!("{:?}", query3).contains("TermQuery"));
+        assert!(format!("{query3:?}").contains("TermQuery"));
 
         Ok(())
     }

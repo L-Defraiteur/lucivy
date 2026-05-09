@@ -165,8 +165,7 @@ fn main() {
         for &term in &terms {
             for &field_name in &field_names {
                 let query_str = format!(
-                    "{} AND {}:[{} TO {}]",
-                    term, field_name, range_low, range_high
+                    "{term} AND {field_name}:[{range_low} TO {range_high}]"
                 );
                 queries.push((query_str, field_name.to_string()));
             }
@@ -210,7 +209,7 @@ fn run_benchmark_tasks(
     if field_name.ends_with("_fast") {
         // Ascending order
         {
-            let collector_name = format!("top100_by_{}_asc", field_name);
+            let collector_name = format!("top100_by_{field_name}_asc");
             let field_name_owned = field_name.to_string();
             add_bench_task(
                 bench_group,
@@ -223,7 +222,7 @@ fn run_benchmark_tasks(
 
         // Descending order
         {
-            let collector_name = format!("top100_by_{}_desc", field_name);
+            let collector_name = format!("top100_by_{field_name}_desc");
             let field_name_owned = field_name.to_string();
             add_bench_task(
                 bench_group,

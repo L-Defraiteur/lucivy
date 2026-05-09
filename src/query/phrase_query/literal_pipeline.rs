@@ -572,7 +572,7 @@ where
                     let mut i = idx;
                     while i < active.len() && active[i].0 == *doc_id && active[i].1 == *position {
                         if *byte_from == active[i].2 {
-                            next_active.push((*doc_id, *position + 1, _byte_to.clone(), active[i].3, active[i].4));
+                            next_active.push((*doc_id, *position + 1, *_byte_to, active[i].3, active[i].4));
                         }
                         i += 1;
                     }
@@ -612,7 +612,7 @@ pub fn estimate_selectivity(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    
 
     #[test]
     fn test_fst_candidates_empty() {

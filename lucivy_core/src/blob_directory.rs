@@ -90,7 +90,7 @@ impl<S: BlobStore> BlobDirectory<S> {
         }
 
         let inner = NativeDirectory::open(&cache_dir)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{e}")))?;
+            .map_err(|e| io::Error::other(format!("{e}")))?;
 
         Ok(Self {
             store,

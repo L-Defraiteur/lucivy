@@ -555,7 +555,7 @@ impl IndexMerger {
         let merge_start = Instant::now();
         let num_readers = self.readers.len();
         let total_docs: u32 = self.readers.iter().map(|r| r.num_docs()).sum();
-        eprintln!("[MERGE] start: {} segments, {} docs total", num_readers, total_docs);
+        eprintln!("[MERGE] start: {num_readers} segments, {total_docs} docs total");
         lucivy_trace!("[merge] start: {} segments, {} docs total", num_readers, total_docs);
 
         let doc_id_mapping = self.get_doc_id_from_concatenated_data()?;

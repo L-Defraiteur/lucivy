@@ -153,7 +153,7 @@ fn main() {
         {
             // Single-field group: default field is body only
             let mut group = runner.new_group();
-            group.set_name(format!("{} — {}", view_name, label));
+            group.set_name(format!("{view_name} — {label}"));
             for query_str in queries {
                 add_bench_task(&mut group, &bench_index, query_str, Count, "count");
                 add_bench_task(

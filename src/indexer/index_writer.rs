@@ -193,7 +193,7 @@ pub(super) fn finalize_segment(
 
     let t0 = std::time::Instant::now();
     let verbose = crate::diag::is_verbose();
-    if verbose { eprintln!("[finalize] segment_writer.finalize() {} docs...", max_doc); }
+    if verbose { eprintln!("[finalize] segment_writer.finalize() {max_doc} docs..."); }
     let (doc_opstamps, sfx_field_ids) = segment_writer.finalize()?;
     if verbose { eprintln!("[finalize] finalize() done in {:.1}s", t0.elapsed().as_secs_f64()); }
 

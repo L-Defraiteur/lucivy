@@ -43,7 +43,7 @@ impl std::fmt::Display for TermReport {
         write!(f, "  total doc_freq: {}", self.total_doc_freq)?;
         if let Some(gt) = self.ground_truth_count {
             let match_str = if gt == self.total_doc_freq { "MATCH" } else { "MISMATCH" };
-            writeln!(f, " | ground_truth: {} ({})", gt, match_str)?;
+            writeln!(f, " | ground_truth: {gt} ({match_str})")?;
         } else {
             writeln!(f)?;
         }
@@ -153,7 +153,7 @@ fn inspect_term_opts(handle: &LucivyHandle, field_name: &str, term_text: &str, v
             let store = seg_reader.get_store_reader(0).ok();
             if let Some(store) = store {
                 for doc_id in 0..seg_reader.max_doc() {
-                    if seg_reader.alive_bitset().map_or(true, |bs| bs.is_alive(doc_id)) {
+                    if seg_reader.alive_bitset().is_none_or(|bs| bs.is_alive(doc_id)) {
                         if let Ok(doc) = store.get::<LucivyDocument>(doc_id) {
                             for (f, val) in doc.field_values() {
                                 if f == field {
@@ -255,7 +255,7 @@ impl std::fmt::Display for SfxTermReport {
                 &seg.segment_id[..8.min(seg.segment_id.len())], seg.num_docs,
                 sfx_str, seg.sfx_walk_hits, seg.sfx_parent_count, seg.sfx_doc_count)?;
             for sample in &seg.sample_parents {
-                writeln!(f, "    {}", sample)?;
+                writeln!(f, "    {sample}")?;
             }
         }
         Ok(())
@@ -362,7 +362,7 @@ pub fn dump_segment_keys(handle: &LucivyHandle, field_name: &str, max_keys: usiz
 
     let field = match handle.field(field_name) {
         Some(f) => f,
-        None => return format!("field {:?} not found", field_name),
+        None => return format!("field {field_name:?} not found"),
     };
 
     let searcher = handle.reader.searcher();
@@ -385,21 +385,21 @@ pub fn dump_segment_keys(handle: &LucivyHandle, field_name: &str, max_keys: usiz
                         while stream.advance() {
                             if count < max_keys {
                                 let key = stream.key();
-                                let hex: String = key.iter().take(20).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+                                let hex: String = key.iter().take(20).map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
                                 let utf8 = String::from_utf8_lossy(key);
                                 sample_keys.push(format!("[{}] {:?} (hex: {})", count, &utf8[..utf8.len().min(30)], hex));
                             }
                             count += 1;
                         }
-                        out.push_str(&format!("  Term dict: num_terms={} stream_count={}\n", total_terms, count));
+                        out.push_str(&format!("  Term dict: num_terms={total_terms} stream_count={count}\n"));
                         for s in &sample_keys {
-                            out.push_str(&format!("    {}\n", s));
+                            out.push_str(&format!("    {s}\n"));
                         }
                     }
-                    Err(e) => out.push_str(&format!("  Term dict stream error: {}\n", e)),
+                    Err(e) => out.push_str(&format!("  Term dict stream error: {e}\n")),
                 }
             }
-            Err(e) => out.push_str(&format!("  No inverted index: {}\n", e)),
+            Err(e) => out.push_str(&format!("  No inverted index: {e}\n")),
         }
 
         // SFX FST first entries via prefix_walk("")
@@ -453,12 +453,12 @@ pub fn compare_postings_vs_sfxpost(handle: &LucivyHandle, field_name: &str, term
 
     let field = match handle.field(field_name) {
         Some(f) => f,
-        None => return format!("field {:?} not found", field_name),
+        None => return format!("field {field_name:?} not found"),
     };
 
     let searcher = handle.reader.searcher();
     let term = Term::from_field_text(field, term_text);
-    let mut out = format!("=== Postings vs SfxPost for {:?} in {:?} ===\n", term_text, field_name);
+    let mut out = format!("=== Postings vs SfxPost for {term_text:?} in {field_name:?} ===\n");
 
     for seg_reader in searcher.segment_readers() {
         let seg_id = seg_reader.segment_id().uuid_string();
@@ -513,15 +513,15 @@ pub fn compare_postings_vs_sfxpost(handle: &LucivyHandle, field_name: &str, term
             Some(unique_docs.len() as u32)
         });
 
-        let term_ord_str = term_ord.map(|o| format!("{}", o)).unwrap_or("NONE".into());
-        let sfx_ord_str = sfx_ordinal.map(|o| format!("{}", o)).unwrap_or("NONE".into());
-        let sfxpost_str = sfxpost_doc_count.map(|c| format!("{}", c)).unwrap_or("N/A".into());
+        let term_ord_str = term_ord.map(|o| format!("{o}")).unwrap_or("NONE".into());
+        let sfx_ord_str = sfx_ordinal.map(|o| format!("{o}")).unwrap_or("NONE".into());
+        let sfxpost_str = sfxpost_doc_count.map(|c| format!("{c}")).unwrap_or("N/A".into());
 
         let status = match (term_ord, sfx_ordinal, sfxpost_doc_count) {
             (Some(t), Some(s), Some(sp)) => {
-                if t == s as u64 && posting_doc_count == sp {
+                if t == s && posting_doc_count == sp {
                     "OK"
-                } else if t != s as u64 {
+                } else if t != s {
                     "ORDINAL MISMATCH"
                 } else {
                     "DOC COUNT MISMATCH"
@@ -533,8 +533,7 @@ pub fn compare_postings_vs_sfxpost(handle: &LucivyHandle, field_name: &str, term
         };
 
         out.push_str(&format!(
-            "  term_ord={} posting_docs={} | sfx_ord={} sfxpost_docs={} | {}\n",
-            term_ord_str, posting_doc_count, sfx_ord_str, sfxpost_str, status
+            "  term_ord={term_ord_str} posting_docs={posting_doc_count} | sfx_ord={sfx_ord_str} sfxpost_docs={sfxpost_str} | {status}\n"
         ));
 
         // On DOC COUNT MISMATCH: show which doc_ids are missing
@@ -581,7 +580,7 @@ pub fn compare_postings_vs_sfxpost(handle: &LucivyHandle, field_name: &str, term
                 // Check if missing docs are alive
                 let alive = seg_reader.alive_bitset();
                 let missing_alive: Vec<u32> = missing.iter()
-                    .filter(|&&d| alive.map_or(true, |bs| bs.is_alive(d)))
+                    .filter(|&&d| alive.is_none_or(|bs| bs.is_alive(d)))
                     .copied().collect();
                 out.push_str(&format!("    of which alive: {}/{}\n", missing_alive.len(), missing.len()));
             }
@@ -710,7 +709,7 @@ pub fn trace_search(
 
     for seg_reader in searcher.segment_readers() {
         if doc_id >= seg_reader.max_doc() { continue; }
-        if seg_reader.alive_bitset().map_or(false, |bs| !bs.is_alive(doc_id)) { continue; }
+        if seg_reader.alive_bitset().is_some_and(|bs| !bs.is_alive(doc_id)) { continue; }
 
         segment_id = seg_reader.segment_id().uuid_string();
 

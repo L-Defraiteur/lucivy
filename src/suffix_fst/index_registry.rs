@@ -236,7 +236,7 @@ impl std::fmt::Display for IndexFeature {
             Self::SuffixFst => write!(f, "SuffixFst (.sfx)"),
             Self::SuffixPost => write!(f, "SuffixPost (.sfxpost)"),
             Self::SiblingTable => write!(f, "SiblingTable (in .sfx)"),
-            Self::Custom(id) => write!(f, "{} (.{})", id, id),
+            Self::Custom(id) => write!(f, "{id} (.{id})"),
         }
     }
 }

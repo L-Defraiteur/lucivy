@@ -63,7 +63,7 @@ impl SfxPostWriterV2 {
             // Group by doc_id (already sorted)
             let mut docs: Vec<(u32, Vec<(u32, u32, u32)>)> = Vec::new();
             for &(doc_id, ti, bf, bt) in entries.iter() {
-                if docs.last().map_or(true, |d| d.0 != doc_id) {
+                if docs.last().is_none_or(|d| d.0 != doc_id) {
                     docs.push((doc_id, Vec::new()));
                 }
                 docs.last_mut().unwrap().1.push((ti, bf, bt));
@@ -205,7 +205,7 @@ impl SfxPostReaderV2 {
         let mut result = Vec::new();
         for i in 0..header.num_docs {
             let doc_id = header.doc_ids[i];
-            if let Some(ref f) = filter {
+            if let Some(f) = filter {
                 if !f.contains(&doc_id) { continue; }
             }
             let entries = self.decode_doc_payload(&header, i);
@@ -342,6 +342,19 @@ fn decode_vint(data: &[u8]) -> (u32, usize) {
     (result, data.len())
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// SfxIndexFile implementation
+// ─────────────────────────────────────────────────────────────────────
+
+/// Index file wrapper for SFX posting lists (SfxIndexFile trait).
+pub struct SfxPostIndex;
+
+impl super::index_registry::SfxIndexFile for SfxPostIndex {
+    fn id(&self) -> &'static str { "sfxpost" }
+    fn extension(&self) -> &'static str { "sfxpost" }
+    fn merge_strategy(&self) -> super::index_registry::MergeStrategy { super::index_registry::MergeStrategy::ExternalDagNode }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -468,17 +481,4 @@ mod tests {
         let v1_data = vec![0u8; 100];
         assert!(SfxPostReaderV2::open(v1_data).is_none());
     }
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// SfxIndexFile implementation
-// ─────────────────────────────────────────────────────────────────────
-
-/// Index file wrapper for SFX posting lists (SfxIndexFile trait).
-pub struct SfxPostIndex;
-
-impl super::index_registry::SfxIndexFile for SfxPostIndex {
-    fn id(&self) -> &'static str { "sfxpost" }
-    fn extension(&self) -> &'static str { "sfxpost" }
-    fn merge_strategy(&self) -> super::index_registry::MergeStrategy { super::index_registry::MergeStrategy::ExternalDagNode }
 }

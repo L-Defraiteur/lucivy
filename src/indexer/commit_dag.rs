@@ -66,7 +66,7 @@ impl Node for PrepareNode {
         let mut ports: Vec<PortDef> = Vec::new();
         for i in 0..self.merge_ops.len() {
             ports.push(PortDef::required(
-                Box::leak(format!("merge_{}", i).into_boxed_str()),
+                Box::leak(format!("merge_{i}").into_boxed_str()),
                 PortType::of::<(MergeOperation, Vec<SegmentEntry>)>(),
             ));
         }
@@ -87,7 +87,7 @@ impl Node for PrepareNode {
         for (i, op) in self.merge_ops.iter().enumerate() {
             let entries = self.shared.segment_manager
                 .start_merge(op.segment_ids())
-                .map_err(|e| format!("start_merge[{}]: {e}", i))?;
+                .map_err(|e| format!("start_merge[{i}]: {e}"))?;
 
             self.shared.event_bus.emit(IndexEvent::MergeStarted {
                 segment_ids: op.segment_ids().to_vec(),
@@ -106,7 +106,7 @@ impl Node for PrepareNode {
                 op.segment_ids().to_vec(),
             );
             ctx.set_output(
-                &format!("merge_{}", i),
+                &format!("merge_{i}"),
                 PortValue::new((op_clone, entries)),
             );
         }
@@ -215,7 +215,7 @@ impl Node for FinalizeNode {
     fn inputs(&self) -> Vec<PortDef> {
         let mut ports: Vec<PortDef> = (0..self.num_merges)
             .map(|i| PortDef::required(
-                Box::leak(format!("result_{}", i).into_boxed_str()),
+                Box::leak(format!("result_{i}").into_boxed_str()),
                 PortType::of::<MergeResult>(),
             ))
             .collect();
@@ -231,7 +231,7 @@ impl Node for FinalizeNode {
         let mut total_docs = 0u32;
 
         for i in 0..self.num_merges {
-            let port_name = format!("result_{}", i);
+            let port_name = format!("result_{i}");
             if let Some(value) = ctx.take_input(&port_name) {
                 if let Some(result) = value.take::<MergeResult>() {
                     total_docs += result.docs_merged;
@@ -381,10 +381,10 @@ pub(crate) fn build_commit_dag(
     if num_merges > 0 {
         // Parallel merge nodes
         for i in 0..num_merges {
-            dag.add_node(&format!("merge_{}", i), MergeNode::new(shared.clone()));
+            dag.add_node(&format!("merge_{i}"), MergeNode::new(shared.clone()));
             dag.connect(
-                "prepare", &format!("merge_{}", i),
-                &format!("merge_{}", i), "input",
+                "prepare", &format!("merge_{i}"),
+                &format!("merge_{i}"), "input",
             )?;
         }
 
@@ -392,8 +392,8 @@ pub(crate) fn build_commit_dag(
         dag.add_node("finalize", FinalizeNode::new(shared.clone(), num_merges));
         for i in 0..num_merges {
             dag.connect(
-                &format!("merge_{}", i), "result",
-                "finalize", &format!("result_{}", i),
+                &format!("merge_{i}"), "result",
+                "finalize", &format!("result_{i}"),
             )?;
         }
         // Also wait for prepare to complete
@@ -466,13 +466,13 @@ mod tests {
                 _ => None,
             })
             .collect();
-        eprintln!("DAG executions: {:?}", dag_completions);
+        eprintln!("DAG executions: {dag_completions:?}");
 
         // Verify: 1 segment, 400 docs
         let reader = index.reader()?;
         let num_segments = reader.searcher().segment_readers().len();
         let num_docs = reader.searcher().num_docs();
-        eprintln!("segments={}, docs={}", num_segments, num_docs);
+        eprintln!("segments={num_segments}, docs={num_docs}");
 
         assert_eq!(num_segments, 1, "all segments should be merged into 1");
         assert_eq!(num_docs, 400);
@@ -519,7 +519,7 @@ mod tests {
         let reader = index.reader()?;
         let num_segments = reader.searcher().segment_readers().len();
         let num_docs = reader.searcher().num_docs();
-        eprintln!("segments={}, docs={}", num_segments, num_docs);
+        eprintln!("segments={num_segments}, docs={num_docs}");
 
         assert_eq!(num_segments, 1);
         assert_eq!(num_docs, 302); // 402 - 100 deleted "a"

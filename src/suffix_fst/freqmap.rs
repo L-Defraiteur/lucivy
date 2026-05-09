@@ -27,6 +27,12 @@ pub struct FreqMapWriter {
     max_ord: u32,
 }
 
+impl Default for FreqMapWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FreqMapWriter {
     /// Creates a new frequency map writer.
     pub fn new() -> Self {
@@ -196,6 +202,12 @@ impl<'a> FreqMapReader<'a> {
 /// Index file wrapper for frequency maps (SfxIndexFile trait).
 pub struct FreqMapIndex {
     writer: FreqMapWriter,
+}
+
+impl Default for FreqMapIndex {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FreqMapIndex {

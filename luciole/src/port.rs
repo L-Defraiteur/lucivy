@@ -37,7 +37,7 @@ impl PortType {
 impl fmt::Display for PortType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PortType::Typed(id) => write!(f, "Typed({:?})", id),
+            PortType::Typed(id) => write!(f, "Typed({id:?})"),
             PortType::Trigger => write!(f, "Trigger"),
             PortType::Any => write!(f, "Any"),
         }
