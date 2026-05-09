@@ -11,6 +11,7 @@ crate-type = ["staticlib"]
 [dependencies]
 lucivy-core = { path = "../../lucivy_core" }
 luciole = { path = "../../luciole" }
+lucistore = { path = "../../lucistore" }
 ld-lucivy = { path = "../..", default-features = false, features = [
     "stopwords",
     "lz4-compression",

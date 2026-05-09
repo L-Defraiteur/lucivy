@@ -22,7 +22,7 @@ use crate::delta::{IndexDelta, serialize_delta, deserialize_delta};
 use crate::version::compute_version_from_bytes;
 
 /// Per-shard version info sent by the client.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ShardVersion {
     pub shard_id: usize,
     pub version: String,

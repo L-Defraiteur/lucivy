@@ -618,13 +618,26 @@ thread_local! {
 
 #[no_mangle]
 pub unsafe extern "C" fn lucivy_export_snapshot(
-    _ctx: *mut LucivyContext,
-    _out_len: *mut u32,
+    ctx: *mut LucivyContext,
+    out_len: *mut u32,
 ) -> *const u8 {
-    // TODO: export from ShardedHandle's RamShardStorage
-    // For now, not supported in unified handle mode.
-    return_error("export_snapshot not yet supported with unified handle");
-    std::ptr::null()
+    if ctx.is_null() || out_len.is_null() { return std::ptr::null(); }
+    let ctx = &*ctx;
+    let base_path = std::path::Path::new(&ctx.index_path);
+    match snapshot::export_to_snapshot(&ctx.handle, base_path) {
+        Ok(blob) => {
+            *out_len = blob.len() as u32;
+            SNAPSHOT_BUF.with(|buf| {
+                *buf.borrow_mut() = blob;
+                buf.borrow().as_ptr()
+            })
+        }
+        Err(e) => {
+            rlog!("[export_snapshot] error: {e}");
+            *out_len = 0;
+            std::ptr::null()
+        }
+    }
 }
 
 #[no_mangle]
@@ -661,6 +674,80 @@ pub unsafe extern "C" fn lucivy_import_snapshot(
         text_fields,
         index_path,
     }))
+}
+
+// ── Delta sync ──────────────────────────────────────────────────────────
+
+thread_local! {
+    static DELTA_BUF: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(Vec::new());
+}
+
+/// Return per-shard versions as JSON: [{"shard_id":0,"version":"abc","segment_ids":["..."]}]
+#[no_mangle]
+pub unsafe extern "C" fn lucivy_shard_versions(ctx: *mut LucivyContext) -> *const c_char {
+    if ctx.is_null() { return return_error("null context"); }
+    let ctx = &*ctx;
+    match ctx.handle.shard_versions() {
+        Ok(versions) => {
+            let json = serde_json::to_string(&versions)
+                .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"));
+            return_str(json)
+        }
+        Err(e) => return_error(&e),
+    }
+}
+
+/// Export a LUCIDS delta blob. `client_versions_json` is the JSON array from lucivy_shard_versions.
+#[no_mangle]
+pub unsafe extern "C" fn lucivy_export_sharded_delta(
+    ctx: *mut LucivyContext,
+    client_versions_json: *const c_char,
+    out_len: *mut u32,
+) -> *const u8 {
+    if ctx.is_null() || out_len.is_null() { return std::ptr::null(); }
+    let ctx = &*ctx;
+    let json_str = str_from_ptr(client_versions_json);
+
+    let client_versions: Vec<lucistore::delta_sharded::ShardVersion> =
+        match serde_json::from_str(json_str) {
+            Ok(v) => v,
+            Err(e) => {
+                rlog!("[export_delta] parse error: {e}");
+                *out_len = 0;
+                return std::ptr::null();
+            }
+        };
+
+    match ctx.handle.export_sharded_delta(&ctx.index_path, &client_versions) {
+        Ok(blob) => {
+            *out_len = blob.len() as u32;
+            DELTA_BUF.with(|buf| {
+                *buf.borrow_mut() = blob;
+                buf.borrow().as_ptr()
+            })
+        }
+        Err(e) => {
+            rlog!("[export_delta] error: {e}");
+            *out_len = 0;
+            std::ptr::null()
+        }
+    }
+}
+
+/// Apply a LUCIDS delta blob to this index.
+#[no_mangle]
+pub unsafe extern "C" fn lucivy_apply_sharded_delta(
+    ctx: *mut LucivyContext,
+    data: *const u8,
+    len: usize,
+) -> *const c_char {
+    if ctx.is_null() || data.is_null() { return return_error("null context or data"); }
+    let ctx = &*ctx;
+    let blob = std::slice::from_raw_parts(data, len);
+    match ctx.handle.apply_sharded_delta(&ctx.index_path, blob) {
+        Ok(()) => return_str("ok".into()),
+        Err(e) => return_error(&e),
+    }
 }
 
 // ── Search ───────────────────────────────────────────────────────────────
