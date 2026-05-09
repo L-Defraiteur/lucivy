@@ -185,6 +185,22 @@ client_index.apply_delta(delta)
 | `phrase` | Legacy compat — routes to `contains` |
 | `startsWith` | Legacy compat — routes to `contains` + `anchor_start` |
 
+## Performance
+
+Benchmarked on 90,000 files from the Linux kernel source tree (top-20 results, 3-run average):
+
+| Query | 1 shard | 4 shards |
+|-------|---------|----------|
+| `contains 'mutex_lock'` | 261ms | 137ms |
+| `contains 'function'` | 127ms | 131ms |
+| `contains_split 'struct device'` | 338ms | 347ms |
+| `contains 'sched'` | 119ms | 128ms |
+| `startsWith 'sched'` | 185ms | 178ms |
+| `fuzzy 'schdule' (d=1)` | 559ms | 318ms |
+| `contains 'drivers'` (path field) | 7ms | 7ms |
+
+Indexation: 90K docs in **50s** (1 shard) / **100s** (4 shards round-robin).
+
 ## Architecture
 
 ```
