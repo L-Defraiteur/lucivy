@@ -89,6 +89,11 @@ pub struct QueryConfig {
     /// only at the beginning of tokens — equivalent to the old "startsWith" type.
     /// Default: false (substring match anywhere in token).
     pub anchor_start: Option<bool>,
+    /// Require the match to cover the entire token(s), not just a prefix.
+    /// When true: "rag3" only matches the token "rag3", not "rag3db".
+    /// Cross-token aware: "rag3weaver" matches "rag3"+"weaver" if both are
+    /// covered entirely. Default: false (prefix match allowed).
+    pub exact_match: Option<bool>,
     // MoreLikeThis: tuning parameters
     pub min_doc_frequency: Option<u64>,
     pub max_doc_frequency: Option<u64>,
@@ -250,10 +255,45 @@ pub fn build_query(
     highlight_sink: Option<Arc<HighlightSink>>,
 ) -> Result<Box<dyn Query>, String> {
     let text_query = match config.query_type.as_str() {
-        "term" => build_term_query(config, schema, index, highlight_sink),
-        "fuzzy" => build_fuzzy_query(config, schema, index, highlight_sink),
+        "term" => {
+            // Compat: term → contains with anchor_start + exact_match.
+            // Cross-token aware: "rag3weaver" matches even if tokenized as "rag3"+"weaver".
+            if index.settings().sfx_enabled {
+                let mut compat = config.clone();
+                compat.anchor_start = Some(true);
+                compat.exact_match = Some(true);
+                build_contains_query(&compat, schema, highlight_sink)
+            } else {
+                build_term_query(config, schema, index, highlight_sink)
+            }
+        }
+        "fuzzy" => {
+            // Compat: fuzzy → contains with distance.
+            if index.settings().sfx_enabled {
+                let mut compat = config.clone();
+                if compat.distance.is_none() {
+                    compat.distance = Some(1);
+                }
+                build_contains_query(&compat, schema, highlight_sink)
+            } else {
+                build_fuzzy_query(config, schema, index, highlight_sink)
+            }
+        }
         "phrase" => build_phrase_query(config, schema, index, highlight_sink),
-        "regex" => build_regex_query(config, schema, highlight_sink),
+        "regex" => {
+            // Compat: regex → contains with regex=true.
+            if index.settings().sfx_enabled {
+                let mut compat = config.clone();
+                compat.regex = Some(true);
+                // Use pattern or value as the regex
+                if compat.value.is_none() {
+                    compat.value = compat.pattern.clone();
+                }
+                build_contains_query(&compat, schema, highlight_sink)
+            } else {
+                build_regex_query(config, schema, highlight_sink)
+            }
+        }
         "contains" | "sfx_contains" => {
             require_sfx(index)?;
             build_contains_query(config, schema, highlight_sink)
@@ -410,11 +450,15 @@ fn build_contains_query(
     }
 
     // Exact (d=0): SuffixContainsQuery.
+    let exact_match = config.exact_match.unwrap_or(false);
     let mut query = SuffixContainsQuery::new(field, value.to_string())
         .with_fuzzy_distance(distance)
         .with_strict_separators(config.strict_separators.unwrap_or(false));
     if anchor_start {
         query = query.with_anchor_start();
+    }
+    if exact_match {
+        query = query.with_exact_match();
     }
     if let Some(sink) = highlight_sink {
         let field_name = config.field.clone().unwrap_or_default();

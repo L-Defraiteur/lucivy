@@ -132,6 +132,9 @@ pub struct SuffixContainsQuery {
     highlight_field_name: String,
     /// If true, use continuation DFA to match across token boundaries.
     continuation: bool,
+    /// If true, the match must cover the entire token(s) — no prefix allowed.
+    /// "rag3" matches only "rag3", not "rag3db". Cross-token aware.
+    exact_match: bool,
     /// If true, validate separators via GapMap in multi-token mode.
     /// If false (default), just check consecutive token positions — ignores gaps.
     strict_separators: bool,
@@ -152,6 +155,7 @@ impl SuffixContainsQuery {
             query_text,
             fuzzy_distance: 0,
             anchor_start: false,
+            exact_match: false,
             highlight_sink: None,
             highlight_field_name: String::new(),
             continuation: false,
@@ -216,8 +220,8 @@ impl SuffixContainsQuery {
             let (doc_tf, highlights) = run_sfx_walk(
                 &sfx_reader, &resolver, &self.query_text,
                 &query_tokens, &query_separators,
-                self.fuzzy_distance, self.anchor_start, self.continuation,
-                self.strict_separators,
+                self.fuzzy_distance, self.anchor_start, self.exact_match,
+                self.continuation, self.strict_separators,
                 Some(&seg_str),
                 Some(&ord_to_term_fn),
             );
@@ -257,6 +261,13 @@ impl SuffixContainsQuery {
     /// Filters suffix FST entries to SI=0 (full token start, not substring).
     pub fn with_anchor_start(mut self) -> Self {
         self.anchor_start = true;
+        self
+    }
+
+    /// Require the match to cover entire token(s), not just a prefix.
+    /// "rag3" matches only the token "rag3", not "rag3db".
+    pub fn with_exact_match(mut self) -> Self {
+        self.exact_match = true;
         self
     }
 
@@ -302,6 +313,7 @@ pub fn run_sfx_walk<F>(
     query_separators: &[String],
     fuzzy_distance: u8,
     anchor_start: bool,
+    exact_match: bool,
     continuation: bool,
     strict_separators: bool,
     segment_id: Option<&str>,
@@ -327,6 +339,15 @@ where
             // Fuzzy contains: cross_token_search_with_terms is a superset —
             // fuzzy_falling_walk finds both single-token and cross-token matches.
             suffix_contains::cross_token_search_with_terms(sfx_reader, query, resolver, fuzzy_distance, ord_to_term)
+        };
+        // exact_match: filter to matches where query covers the entire token(s).
+        let matches: Vec<_> = if exact_match {
+            let qlen = query.to_lowercase().len();
+            matches.into_iter()
+                .filter(|m| m.si as usize + qlen >= m.token_len as usize)
+                .collect()
+        } else {
+            matches
         };
         let hl: Vec<(DocId, usize, usize)> = matches.iter()
             .map(|m| (m.doc_id, m.byte_from, m.byte_to)).collect();
@@ -438,6 +459,7 @@ impl Query for SuffixContainsQuery {
             fuzzy_distance: self.fuzzy_distance,
             continuation: self.continuation,
             strict_separators: self.strict_separators,
+            exact_match: self.exact_match,
         }]
     }
 
@@ -471,6 +493,7 @@ impl Query for SuffixContainsQuery {
             query_text: self.query_text.clone(),
             fuzzy_distance: self.fuzzy_distance,
             anchor_start: self.anchor_start,
+            exact_match: self.exact_match,
             highlight_sink: self.highlight_sink.clone(),
             highlight_field_name: self.highlight_field_name.clone(),
             scoring_enabled,
@@ -489,6 +512,7 @@ struct SuffixContainsWeight {
     query_text: String,
     fuzzy_distance: u8,
     anchor_start: bool,
+    exact_match: bool,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
     scoring_enabled: bool,
@@ -618,8 +642,8 @@ impl Weight for SuffixContainsWeight {
         let (doc_tf, highlights) = run_sfx_walk(
             &sfx_reader, &resolver, &self.query_text,
             &query_tokens, &query_separators,
-            self.fuzzy_distance, self.anchor_start, self.continuation,
-            self.strict_separators,
+            self.fuzzy_distance, self.anchor_start, self.exact_match,
+            self.continuation, self.strict_separators,
             Some(&seg_str),
             Some(&ord_to_term_fn),
         );

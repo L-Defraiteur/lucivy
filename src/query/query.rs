@@ -263,6 +263,8 @@ pub struct SfxPrescanParam {
     pub continuation: bool,
     /// If true, validate separators via GapMap in multi-token mode.
     pub strict_separators: bool,
+    /// If true, match must cover entire token(s) — no prefix allowed.
+    pub exact_match: bool,
 }
 
 /// Parameters for a regex prescan walk, extracted from a built query.
