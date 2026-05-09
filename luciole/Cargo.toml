@@ -3,10 +3,12 @@ name = "luciole"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Generic actor runtime with serialized messages, dynamic roles, and WASM support"
+description = "Actor runtime + DAG execution engine. WASM-safe, deadlock-aware, with pipe_to, WaitGraph, and streaming pipelines."
 authors = ["Luciform Research <luciedefraiteur@luciformresearch.com>"]
 repository = "https://github.com/L-Defraiteur/lucivy"
-keywords = ["actor", "async", "wasm", "message-passing", "scheduler"]
+readme = "README.md"
+keywords = ["actor", "dag", "wasm", "concurrency", "scheduler"]
+categories = ["concurrency", "asynchronous", "wasm"]
 
 [dependencies]
 flume = "0.11"

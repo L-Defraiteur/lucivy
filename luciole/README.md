@@ -1,16 +1,57 @@
-# Luciole
+# luciole
 
-Generic actor runtime for Rust with serialized messages, dynamic roles, and WASM support.
+Actor runtime + DAG execution engine for Rust. WASM-safe, deadlock-aware, built for real workloads.
+
+## Why luciole
+
+Most actor frameworks stop at message passing. luciole adds structured concurrency on top: DAGs with checkpoints, streaming pipelines, non-blocking request-reply, and built-in deadlock diagnostics. Everything runs on a fixed thread pool that works identically on native and WASM.
 
 ## Features
 
-- **Envelope-based messaging** — messages are serialized bytes with a stable type tag (FNV-1a hash). Transport-agnostic: local or network.
-- **Dynamic roles** — actors register/unregister handlers at runtime. Any actor can take any role without recompilation.
-- **GenericActor** — universal actor type with dynamic state (`ActorState`) and handler registry. Implements the `Actor` trait for seamless scheduler integration.
-- **TypedActorRef** — ergonomic typed facade over `ActorRef<Envelope>`. Compile-time safe send/request with automatic encode/decode.
-- **Generic errors** — `ActorError<E>` is parameterized over the application's error type. No coupling to any specific error enum.
-- **Cooperative scheduling** — works with persistent thread pools (native) or single-thread cooperative mode (WASM). Same code, same API.
-- **Envelope.local** — carry non-serializable data (e.g. `Arc<dyn Trait>`) alongside serialized payloads for zero-cost local transport.
+### Actors
+
+- **Actor trait** — typed messages, priority scheduling (Idle → Critical)
+- **GenericActor** — dynamic handler registration by type tag, no enum boilerplate
+- **Pool** — N identical actors with scatter/gather and round-robin routing
+- **Envelope** — serialized messages with stable type tags. Carry non-serializable data via `local` field for zero-cost local transport
+
+### DAG execution
+
+- **Dag** — build directed acyclic graphs of computation nodes
+- **execute_dag** — topological execution with parallel fan-out per level
+- **execute_dag_async** — non-blocking DAG execution via DagExecutor actor
+- **BranchNode** — conditional 2-way branching (`BranchNode(|| condition)`)
+- **GateNode** — pass/block gate
+- **MergeNode** — fan-out with merge (`fan_out_merge`)
+- **ScatterDAG** — distributed fan-out across workers
+- **Undo** — per-node rollback support
+- **Checkpoint** — save/restore DAG progress (FileCheckpointStore, MemoryCheckpointStore)
+- **Services** — named service injection via `Dag::with_services(Arc<ServiceRegistry>)`
+
+### Streaming
+
+- **StreamDag** — pipeline topology with topological drain. Feed items through a chain of actors, drain in dependency order.
+
+### Non-blocking request-reply
+
+- **pipe_to** — "send message, get result as a message back". Callback registered BEFORE send — no race condition.
+- **collect_replies_to** — N:1 gather. Send N requests, get 1 message when all complete.
+- **task_pipe_to** — submit CPU work to thread pool, pipe result to actor as message.
+
+### Scheduling
+
+- **Persistent thread pool** — fixed N threads, no spawn/destroy overhead
+- **WASM-safe** — same code runs native (multi-threaded) and WASM (cooperative)
+- **Priority scheduling** — actors with higher priority are processed first
+- **Cooperative wait** — `scheduler.wait(rx, label)` pumps the scheduler while waiting
+- **Activity labels** — `ctx.set_activity("processing doc 42/500")` visible in dumps
+
+### Diagnostics
+
+- **WaitGraph** — tracks all inter-thread/inter-actor dependencies. Dumps as mermaid or text.
+- **ActorActivity** — dynamic labels on what each actor is doing, visible in scheduler dumps
+- **Event subscription** — `subscribe_dag_events()` for DAG progress monitoring
+- **TapRegistry** — side-channel introspection of DAG nodes
 
 ## Quick start
 
@@ -18,60 +59,71 @@ Generic actor runtime for Rust with serialized messages, dynamic roles, and WASM
 use luciole::*;
 
 // Define a message
-struct AddMsg { value: i64 }
-
-impl Message for AddMsg {
-    fn type_tag() -> u64 { type_tag_hash(b"AddMsg") }
-    fn encode(&self) -> Vec<u8> { self.value.to_le_bytes().to_vec() }
-    fn decode(bytes: &[u8]) -> Result<Self, String> {
-        Ok(Self { value: i64::from_le_bytes(bytes[..8].try_into().unwrap()) })
-    }
+struct Ping;
+impl Message for Ping {
+    fn type_tag() -> u64 { type_tag_hash(b"Ping") }
+    fn encode(&self) -> Vec<u8> { vec![] }
+    fn decode(_: &[u8]) -> Result<Self, String> { Ok(Ping) }
 }
 
-// Create an actor with a handler
-let mut actor = GenericActor::new("counter");
-actor.state_mut().insert::<i64>(0);
-actor.register(TypedHandler::<AddMsg, _>::new(|state, msg, _reply, _local| {
-    *state.get_mut::<i64>().unwrap() += msg.value;
-    ActorStatus::Continue
-}));
+// Create an actor
+let mut actor = GenericActor::new("pinger");
+actor.register(TypedHandler::<Ping, _>::new(
+    |_state, _msg, _reply, _local, _ctx| {
+        println!("pong!");
+        ActorStatus::Continue
+    },
+));
 
-// Spawn in the scheduler
+// Spawn and send
 let scheduler = scheduler::global_scheduler();
-let (mb, mut actor_ref) = mailbox::<Envelope>(64);
-scheduler.spawn(actor, mb, &mut actor_ref, 64);
-
-// Send messages
-actor_ref.send(AddMsg { value: 42 }.into_envelope()).unwrap();
+let actor_ref = scheduler.spawn_generic(actor);
+actor_ref.send(Ping.into_envelope());
 ```
 
-## Architecture
+### pipe_to example
 
+```rust
+// Non-blocking request → reply as message
+let target: ActorRef<MyMsg> = /* ... */;
+let worker: ActorRef<WorkMsg> = /* ... */;
+
+// "Send Work to worker, when done send ResultMsg to target"
+worker.pipe_to(
+    |reply| WorkMsg::Process { reply },
+    &target,
+    "work_result",
+    |result| MyMsg::WorkDone(result),
+);
 ```
-Caller → TypedActorRef::send(msg) → Envelope { type_tag, payload, local }
-                                          ↓
-                                    ActorRef<Envelope>::send()
-                                          ↓
-                                    Scheduler (thread pool or cooperative)
-                                          ↓
-                                    GenericActor::dispatch()
-                                          ↓
-                                    handlers[type_tag].handle(state, payload, reply, local)
+
+### DAG example
+
+```rust
+let mut dag = Dag::new();
+let a = dag.add_node(MyNode::new("fetch"));
+let b = dag.add_node(MyNode::new("parse"));
+let c = dag.add_node(MyNode::new("index"));
+dag.add_edge(a, b);
+dag.add_edge(b, c);
+
+let result = execute_dag(dag)?;
 ```
 
 ## WASM compatibility
 
-Luciole supports two execution modes:
+luciole runs identically on native and WASM:
 
-- **Multi-threaded** (native): scheduler runs N worker threads. `ReplyReceiver::wait_blocking()` blocks the caller thread.
-- **Single-threaded** (WASM): no worker threads. `ReplyReceiver::wait_cooperative(|| scheduler.run_one_step())` pumps the scheduler between reply checks.
+- **Native**: scheduler runs N worker threads
+- **WASM (emscripten)**: scheduler runs on emscripten pthreads (SharedArrayBuffer required)
+- **No `thread::spawn` in actor handlers** — everything goes through the scheduler
 
-Same actor code works in both modes.
+## Tests
 
-## Dependencies
-
-- `flume` — bounded MPSC channel (lightweight, no-std friendly)
-- `std` — threading, synchronization, collections
+```bash
+cargo test -p luciole --lib
+# 154 tests, 0 failures
+```
 
 ## License
 
