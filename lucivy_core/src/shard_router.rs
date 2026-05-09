@@ -31,8 +31,9 @@ type FxBuildHasher = BuildHasherDefault<FxHasher>;
 const DEFAULT_DF_THRESHOLD: u32 = 5000;
 
 /// Default balance weight for hybrid scoring.
-/// 0.0 = pure per-token, 1.0 = pure total balance.
-const DEFAULT_BALANCE_WEIGHT: f64 = 0.2;
+/// 0.0 = pure per-token, 1.0 = pure total balance (round-robin-like).
+/// Default 1.0: fastest indexation, no quality loss thanks to global BM25 stats.
+const DEFAULT_BALANCE_WEIGHT: f64 = 1.0;
 
 /// Token-aware shard router.
 ///

@@ -1,0 +1,196 @@
+# lucivy
+
+BM25 full-text search engine with substring matching, fuzzy search, and regex — all cross-token aware.
+
+Built for code search, technical documentation, and as a BM25 complement to vector databases.
+
+## What makes lucivy different
+
+Most search engines match **whole tokens**. Search for "mutex" and you'll find the word "mutex" — but not "getMutexHandle" or "lockmutex", because the tokenizer sees those as single opaque tokens. lucivy matches **substrings inside tokens**: "mutex" finds every occurrence, even buried inside compound words, camelCase identifiers, or concatenated strings.
+
+This works because lucivy builds a **Suffix FST** (.sfx) at indexing time. Every suffix of every token is indexed, partitioned by position (SI=0 = token start, SI>0 = substring). This makes substring search as precise as exact-match search, with BM25 scoring.
+
+### Cross-token matching
+
+Tokenizers split text at word boundaries. "rag3weaver" becomes ["rag3", "weaver"]. Traditional search can't find the original compound — lucivy can. The SFX engine follows **sibling links** across token boundaries to reconstruct matches that span multiple tokens.
+
+### Fuzzy with trigram pigeonhole
+
+Fuzzy search (Levenshtein distance) uses a **trigram pigeonhole** strategy: at distance d, at least one trigram of the query must appear exactly. lucivy finds that trigram via the SFX, then validates the full match. This avoids scanning the entire index — only candidates with at least one exact trigram are evaluated.
+
+### Regex with literal extraction
+
+Regex queries are optimized by extracting **literal parts** from the pattern. "log_[a-z]+_error" has literals "log_" and "_error". lucivy searches for these via SFX first, then validates the full regex only on candidates. No full-index scan.
+
+### BM25 scoring — correct across shards
+
+lucivy uses standard BM25 scoring. In sharded mode, global statistics (document frequency, total docs, total tokens) are aggregated before scoring, so results are **identical** whether you use 1 shard or 4. No approximation.
+
+## Features
+
+### Search
+
+- **Substring search** — find text inside tokens, not just whole tokens
+- **Fuzzy search** — Levenshtein distance with trigram acceleration
+- **Regex** — cross-token regex with literal-part optimization
+- **Phrase** — multi-token adjacency with cross-token awareness
+- **Prefix / startsWith** — anchor to token start (SI=0)
+- **Exact match** — cross-token aware full-token matching
+- **Highlights** — byte-offset highlights for all query types
+- **Filters** — non-text field filtering (numeric ranges, equality, membership)
+- **BM25 scoring** — correct cross-shard statistics
+- **More Like This** — find similar documents by reference text
+
+### Indexing
+
+- **Sharded** — token-aware routing distributes documents across N shards for parallel search
+- **Incremental** — add, delete, update documents with lazy commit
+- **Background finalize** — segment finalization runs on a pool thread, not in the indexer
+- **Configurable merge policy** — log-based merge with tunable thresholds
+
+### Sync & Distribution
+
+- **LUCE** — full snapshot export/import (all shards in one blob)
+- **LUCID** — incremental delta sync for a single shard (only changed segments)
+- **LUCIDS** — incremental delta sync across multiple shards
+- **Distributed search** — export_stats / merge / search_with_global_stats pipeline. Each node exports its local BM25 statistics, a coordinator merges them, and each node searches with the global stats. Correct IDF across machines.
+
+### Platforms
+
+- **Python** (PyO3) — `pip install lucivy`
+- **Node.js** (NAPI) — `npm install lucivy`
+- **Browser / WASM** (emscripten) — SharedArrayBuffer + multithreaded
+- **Rust** — `lucivy-core` on crates.io
+- **C++** — cxx bridge
+
+## Quick start
+
+### Python
+
+```python
+import lucivy
+
+# Create an index
+index = lucivy.Index.create("/tmp/my_index", {
+    "fields": [
+        {"name": "body", "type": "text", "stored": True}
+    ]
+})
+
+# Add documents
+index.add({"body": "The pthread_mutex_lock function acquires a mutex"})
+index.add({"body": "Use std::lock_guard for RAII mutex management"})
+index.commit()
+
+# Substring search — finds "mutex" inside "pthread_mutex_lock"
+results = index.search({"type": "contains", "field": "body", "value": "mutex"})
+
+# Fuzzy search — finds "mutex" even with a typo ("mutx")
+results = index.search({"type": "contains", "field": "body", "value": "mutx", "distance": 1})
+
+# Regex — finds "lock" followed by anything then "mutex"
+results = index.search({"type": "contains", "field": "body", "value": "lock.*mutex", "regex": True})
+
+# Prefix / startsWith — finds tokens starting with "pthread"
+results = index.search({"type": "contains", "field": "body", "value": "pthread", "anchor_start": True})
+```
+
+### Node.js
+
+```javascript
+const lucivy = require('lucivy');
+
+const index = lucivy.create('/tmp/my_index', {
+    fields: [{ name: 'body', type: 'text', stored: true }]
+});
+
+index.add({ body: 'The pthread_mutex_lock function acquires a mutex' });
+index.commit();
+
+const results = index.search({ type: 'contains', field: 'body', value: 'mutex' });
+```
+
+### Sharded
+
+```python
+# 4 shards — documents are routed by token affinity
+index = lucivy.Index.create("/tmp/sharded", {
+    "fields": [{"name": "body", "type": "text", "stored": True}],
+    "shards": 4
+})
+```
+
+### Distributed search (multi-machine)
+
+```python
+# On each node: export local stats for this query
+stats = node.export_stats(query_config)
+
+# Coordinator: merge stats from all nodes
+global_stats = lucivy.merge_stats([stats_node_0, stats_node_1, stats_node_2])
+
+# On each node: search with global stats (correct IDF)
+results = node.search_with_global_stats(query_config, top_k=10, global_stats=global_stats)
+
+# Coordinator: merge top-K results from all nodes
+final_results = merge_top_k(all_results, k=10)
+```
+
+### Incremental sync
+
+```python
+# Server: export delta (only segments that changed since client's version)
+delta = server_index.export_delta(client_versions)
+
+# Client: apply delta (writes new segments, removes old, reloads readers)
+client_index.apply_delta(delta)
+```
+
+## Query reference
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `type` | string | required | `"contains"`, `"term"`, `"fuzzy"`, `"regex"`, `"phrase"`, `"boolean"`, etc. |
+| `field` | string | required | Field to search |
+| `value` | string | required | Search text or regex pattern |
+| `distance` | int | 0 | Levenshtein distance for fuzzy (0 = exact) |
+| `anchor_start` | bool | false | Match must start at token boundary (SI=0) |
+| `exact_match` | bool | false | Match must cover entire token(s) |
+| `regex` | bool | false | Treat value as regex pattern |
+| `filters` | array | none | Non-text field filters (eq, gt, in, between, ...) |
+
+## Architecture
+
+```
+Document → Tokenizer → Postings (inverted index)
+                     → SFX (suffix FST + sfxpost)
+                     → Fast fields
+                     → Doc store (compressed)
+
+Query → SFX walk (substring/fuzzy/regex)
+      → Posting resolve (doc_ids + positions)
+      → BM25 scoring (with global stats)
+      → Highlights (byte offsets)
+```
+
+### SFX file format
+
+Each indexed segment contains:
+- `.sfx` — Suffix FST with partitioned SI=0 / SI>0 entries
+- `.sfxpost` — Posting lists mapping suffix ordinals to doc_ids
+- `.termtexts` — Token text storage for cross-token sibling chain resolution
+- `.gapmap` — Gap-encoded byte sequences for separator tracking
+
+### Sharding
+
+Documents are distributed across shards via configurable routing (`balance_weight` in schema config):
+
+- **`balance_weight=1.0`** (default) — round-robin-like. Even distribution, fastest indexation.
+- **`balance_weight=0.2`** — token-aware. Co-locates documents sharing rare tokens for better search performance. Slower indexation due to per-document scoring.
+- **`balance_weight=0.0`** — pure token-aware. Maximum co-location.
+
+The router uses IDF-weighted scoring: `score = (1 - w) × Σ(1/√df[token]) + w × shard_load_ratio`. Tokens above `df_threshold` (default 5000) are ignored — only discriminating tokens influence routing.
+
+## License
+
+MIT

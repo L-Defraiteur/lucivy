@@ -88,6 +88,7 @@ L'algo propriétaire de lucivy pour le substring search.
 
 - Documents routés vers les shards par scoring hybride IDF + balance
 - `score = (1 - balance_weight) × per_token_score + balance_weight × shard_load_ratio`
+- Default `balance_weight=1.0` (round-robin-like, fastest indexation, no quality loss)
 - Power-of-2 choices pour N shards élevé
 - `df_threshold` : ne track que les tokens avec df < seuil (default 5000)
 

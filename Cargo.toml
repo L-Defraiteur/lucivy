@@ -155,7 +155,6 @@ members = [
     "bindings/python",
     "bindings/nodejs",
     "bindings/cpp",
-    "bindings/wasm",
     "bindings/emscripten",
     "lucivy-fst",
     "luciole",
