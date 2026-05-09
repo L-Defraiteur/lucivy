@@ -192,21 +192,22 @@ pub(super) fn finalize_segment(
     }
 
     let t0 = std::time::Instant::now();
-    eprintln!("[finalize] segment_writer.finalize() {} docs...", max_doc);
+    let verbose = crate::diag::is_verbose();
+    if verbose { eprintln!("[finalize] segment_writer.finalize() {} docs...", max_doc); }
     let (doc_opstamps, sfx_field_ids) = segment_writer.finalize()?;
-    eprintln!("[finalize] finalize() done in {:.1}s", t0.elapsed().as_secs_f64());
+    if verbose { eprintln!("[finalize] finalize() done in {:.1}s", t0.elapsed().as_secs_f64()); }
 
     let segment_with_max_doc = segment.with_max_doc(max_doc);
-    eprintln!("[finalize] apply_deletes...");
+    if verbose { eprintln!("[finalize] apply_deletes..."); }
     let alive_bitset_opt = apply_deletes(&segment_with_max_doc, delete_cursor, &doc_opstamps)?;
-    eprintln!("[finalize] apply_deletes done in {:.1}s", t0.elapsed().as_secs_f64());
+    if verbose { eprintln!("[finalize] apply_deletes done in {:.1}s", t0.elapsed().as_secs_f64()); }
 
     let meta = segment_with_max_doc.meta().clone().with_sfx_field_ids(sfx_field_ids);
     meta.untrack_temp_docstore();
     let segment_entry = SegmentEntry::new(meta, delete_cursor.clone(), alive_bitset_opt);
-    eprintln!("[finalize] schedule_add_segment...");
+    if verbose { eprintln!("[finalize] schedule_add_segment..."); }
     segment_updater.schedule_add_segment(segment_entry)?;
-    eprintln!("[finalize] done ({} docs, total {:.1}s)", max_doc, t0.elapsed().as_secs_f64());
+    if verbose { eprintln!("[finalize] done ({} docs, total {:.1}s)", max_doc, t0.elapsed().as_secs_f64()); }
     Ok(())
 }
 
