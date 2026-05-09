@@ -143,12 +143,29 @@ inner: StdFsDirectory,
 
 Ou mieux : abstraire avec un type alias `NativeDirectory` utilisé partout.
 
-## Bench de référence (avant optimisations)
+## Bench de référence
 
 ```
-90K docs Linux kernel, StdFsDirectory, WRITER_HEAP_SIZE=50MB
+90K docs Linux kernel (torvalds/linux shallow clone)
 
-Single shard:   733s (~12 min)
-4-shard TA:     [en cours]
-4-shard RR:     [en cours]
+AVANT (debug, StdFsDirectory, WRITER_HEAP_SIZE=50MB):
+  Single shard:   733s (~12 min)
+  4-shard TA:     758s (~12.6 min)
+  RAM peak:       20GB+ (swap 38GB)
+
+APRES (release, MmapDirectory, WRITER_HEAP_SIZE=200MB):
+  Single shard:   50s
+  4-shard RR:     100s
+  Queries:        147-524ms
+  RAM peak:       ~14GB (pas de swap)
+  Total bench:    213s (3.5 min)
+
+Speedup single:  14.7x
+Speedup sharded: ~7x
+RAM reduction:   -30% + pas de swap
 ```
+
+Le gain vient de trois facteurs combinés :
+1. **release** vs debug : ~3-5x sur le CPU (SFX, hashing, compression)
+2. **200MB heap** : ~300 docs/segment au lieu de 60-90 → 4x moins de merges
+3. **MmapDirectory** : zero-copy reads, le kernel gère le paging → pas de copie RAM
