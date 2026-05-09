@@ -1,0 +1,4609 @@
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /home/luciedefraiteur/LR_CodeRag/community-docs/packages/rag3db/extension/lucivy/ld-lucivy/lucivy-fst/Cargo.toml
+workspace: /home/luciedefraiteur/LR_CodeRag/community-docs/packages/rag3db/extension/lucivy/ld-lucivy/Cargo.toml
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /home/luciedefraiteur/LR_CodeRag/community-docs/packages/rag3db/extension/lucivy/ld-lucivy/lucivy_fts/rust/Cargo.toml
+workspace: /home/luciedefraiteur/LR_CodeRag/community-docs/packages/rag3db/extension/lucivy/ld-lucivy/Cargo.toml
+    Checking rand_chacha v0.3.1
+    Checking ld-ownedbytes v0.26.0 (/home/luciedefraiteur/LR_CodeRag/community-docs/packages/rag3db/extension/lucivy/ld-lucivy/ownedbytes)
+    Checking ld-lucivy-bitpacker v0.26.0 (/home/luciedefraiteur/LR_CodeRag/community-docs/packages/rag3db/extension/lucivy/ld-lucivy/bitpacker)
+   Compiling lucivy-fst v0.1.0 (/home/luciedefraiteur/LR_CodeRag/community-docs/packages/rag3db/extension/lucivy/ld-lucivy/lucivy-fst)
+    Checking ld-lucivy-query-grammar v0.26.0 (/home/luciedefraiteur/LR_CodeRag/community-docs/packages/rag3db/extension/lucivy/ld-lucivy/query-grammar)
+    Checking luciole v0.1.0 (/home/luciedefraiteur/LR_CodeRag/community-docs/packages/rag3db/extension/lucivy/ld-lucivy/luciole)
+    Checking rand v0.9.2
+    Checking rand_chacha v0.9.0
+    Checking ld-lucivy-tokenizer-api v0.26.0 (/home/luciedefraiteur/LR_CodeRag/community-docs/packages/rag3db/extension/lucivy/ld-lucivy/tokenizer-api)
+    Checking criterion v0.5.1
+warning: unused import: `std::collections::HashMap`
+  --> luciole/src/fan_out.rs:16:5
+   |
+16 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `Mailbox`
+  --> luciole/src/async_executor.rs:23:41
+   |
+23 | use crate::mailbox::{mailbox, ActorRef, Mailbox};
+   |                                         ^^^^^^^
+
+warning: variables can be used directly in the `format!` string
+  --> lucivy-fst/build.rs:78:9
+   |
+78 |         writeln!(out, "    {},", x)?;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+   = note: `#[warn(clippy::uninlined_format_args)]` on by default
+help: change this to
+   |
+78 -         writeln!(out, "    {},", x)?;
+78 +         writeln!(out, "    {x},")?;
+   |
+
+warning: variables can be used directly in the `format!` string
+  --> lucivy-fst/build.rs:86:13
+   |
+86 |             writeln!(out, "        {},", x)?;
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+   |
+86 -             writeln!(out, "        {},", x)?;
+86 +             writeln!(out, "        {x},")?;
+   |
+
+    Checking rand v0.8.5
+    Checking ld-lucivy-common v0.26.0 (/home/luciedefraiteur/LR_CodeRag/community-docs/packages/rag3db/extension/lucivy/ld-lucivy/common)
+warning: `lucivy-fst` (build script) generated 2 warnings
+    Checking proptest v1.10.0
+warning: unneeded unit expression
+   --> lucivy-fst/src/automaton/mod.rs:298:9
+    |
+298 |         ()
+    |         ^^ help: remove the final `()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unused_unit
+    = note: `#[warn(clippy::unused_unit)]` on by default
+
+warning: unneeded unit expression
+   --> lucivy-fst/src/automaton/mod.rs:314:9
+    |
+314 |         ()
+    |         ^^ help: remove the final `()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unused_unit
+
+warning: unused variable: `i`
+   --> luciole/src/pool.rs:120:14
+    |
+120 |         for (i, worker) in self.workers.iter().enumerate() {
+    |              ^ help: if this is intentional, prefix it with an underscore: `_i`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+    Checking bpu_trasher v0.2.0
+    Checking rand_distr v0.4.3
+    Checking fail v0.5.1
+    Checking ld-lucivy-stacker v0.26.0 (/home/luciedefraiteur/LR_CodeRag/community-docs/packages/rag3db/extension/lucivy/ld-lucivy/stacker)
+    Checking ld-lucivy-sstable v0.26.0 (/home/luciedefraiteur/LR_CodeRag/community-docs/packages/rag3db/extension/lucivy/ld-lucivy/sstable)
+warning: unused variable: `label`
+   --> luciole/src/scheduler.rs:913:17
+    |
+913 |             let label = t.label.lock().unwrap().clone();
+    |                 ^^^^^ help: if this is intentional, prefix it with an underscore: `_label`
+
+warning: you should consider adding a `Default` implementation for `MemoryCheckpointStore`
+  --> luciole/src/checkpoint.rs:70:5
+   |
+70 | /     pub fn new() -> Self {
+71 | |         Self { data: Mutex::new(HashMap::new()) }
+72 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+   = note: `#[warn(clippy::new_without_default)]` on by default
+help: try adding this
+   |
+69 + impl Default for MemoryCheckpointStore {
+70 +     fn default() -> Self {
+71 +         Self::new()
+72 +     }
+73 + }
+   |
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/checkpoint.rs:146:23
+    |
+146 |         self.dir.join(format!("{}.checkpoint", dag_id))
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+    = note: `#[warn(clippy::uninlined_format_args)]` on by default
+help: change this to
+    |
+146 -         self.dir.join(format!("{}.checkpoint", dag_id))
+146 +         self.dir.join(format!("{dag_id}.checkpoint"))
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/checkpoint.rs:165:20
+    |
+165 |         lines.push(format!("COMPLETED:{}:{}", node_name, node_type));
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+165 -         lines.push(format!("COMPLETED:{}:{}", node_name, node_type));
+165 +         lines.push(format!("COMPLETED:{node_name}:{node_type}"));
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/checkpoint.rs:171:20
+    |
+171 |         lines.push(format!("FAILED:{}:{}", node_name, error));
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+171 -         lines.push(format!("FAILED:{}:{}", node_name, error));
+171 +         lines.push(format!("FAILED:{node_name}:{error}"));
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/checkpoint.rs:183:20
+    |
+183 |         lines.push(format!("STATUS:FAILED:{}", error));
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+183 -         lines.push(format!("STATUS:FAILED:{}", error));
+183 +         lines.push(format!("STATUS:FAILED:{error}"));
+    |
+
+warning: you should consider adding a `Default` implementation for `Dag`
+  --> luciole/src/dag.rs:45:5
+   |
+45 | /     pub fn new() -> Self {
+46 | |         Self {
+47 | |             nodes: Vec::new(),
+48 | |             edges: Vec::new(),
+...  |
+53 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+help: try adding this
+   |
+44 + impl Default for Dag {
+45 +     fn default() -> Self {
+46 +         Self::new()
+47 +     }
+48 + }
+   |
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/dag.rs:103:28
+    |
+103 |             .ok_or_else(|| format!("node '{}' not found", from_node))?;
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+103 -             .ok_or_else(|| format!("node '{}' not found", from_node))?;
+103 +             .ok_or_else(|| format!("node '{from_node}' not found"))?;
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/dag.rs:105:28
+    |
+105 |             .ok_or_else(|| format!("node '{}' not found", to_node))?;
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+105 -             .ok_or_else(|| format!("node '{}' not found", to_node))?;
+105 +             .ok_or_else(|| format!("node '{to_node}' not found"))?;
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/dag.rs:108:28
+    |
+108 |               .ok_or_else(|| format!(
+    |  ____________________________^
+109 | |                 "node '{}' has no output port '{}'", from_node, from_port
+110 | |             ))?;
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+109 -                 "node '{}' has no output port '{}'", from_node, from_port
+109 +                 "node '{from_node}' has no output port '{from_port}'"
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/dag.rs:112:28
+    |
+112 |               .ok_or_else(|| format!(
+    |  ____________________________^
+113 | |                 "node '{}' has no input port '{}'", to_node, to_port
+114 | |             ))?;
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+113 -                 "node '{}' has no input port '{}'", to_node, to_port
+113 +                 "node '{to_node}' has no input port '{to_port}'"
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/dag.rs:117:24
+    |
+117 |               return Err(format!(
+    |  ________________________^
+118 | |                 "port type mismatch: {}.{} ({}) -> {}.{} ({})",
+119 | |                 from_node, from_port, from_type,
+120 | |                 to_node, to_port, to_type,
+121 | |             ));
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+
+warning: this `if` statement can be collapsed
+   --> luciole/src/dag.rs:214:17
+    |
+214 | /                 if port_def.required {
+215 | |                     if !incoming.contains_key(&(entry.name.as_str(), port_def.name)) {
+216 | |                         return Err(format!(
+217 | |                             "required input port '{}.{}' is not connected",
+...   |
+221 | |                 }
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+    = note: `#[warn(clippy::collapsible_if)]` on by default
+help: collapse nested if block
+    |
+214 ~                 if port_def.required
+215 ~                     && !incoming.contains_key(&(entry.name.as_str(), port_def.name)) {
+216 |                         return Err(format!(
+...
+219 |                         ));
+220 ~                     }
+    |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+  --> luciole/src/envelope.rs:69:24
+   |
+69 | pub fn reply_port() -> (ReplyPort, super::reply::ReplyReceiver<Result<Vec<u8>, Vec<u8>>>) {
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+   = note: `#[warn(clippy::type_complexity)]` on by default
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> luciole/src/envelope.rs:216:30
+    |
+216 |     fn into_request(self) -> (Envelope, super::reply::ReplyReceiver<Result<Vec<u8>, Vec<u8>>>) {
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> luciole/src/envelope.rs:231:10
+    |
+231 |     ) -> (Envelope, super::reply::ReplyReceiver<Result<Vec<u8>, Vec<u8>>>) {
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: you should consider adding a `Default` implementation for `EventBus<E>`
+  --> luciole/src/events.rs:87:5
+   |
+87 | /     pub fn new() -> Self {
+88 | |         EventBus {
+89 | |             subscriber_count: AtomicUsize::new(0),
+90 | |             subscribers: Mutex::new(Vec::new()),
+91 | |         }
+92 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+help: try adding this
+   |
+86 + impl<E: Clone + Send + 'static> Default for EventBus<E> {
+87 +     fn default() -> Self {
+88 +         Self::new()
+89 +     }
+90 + }
+   |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+  --> luciole/src/generic_actor.rs:25:18
+   |
+25 |     priority_fn: Option<Box<dyn Fn(&ActorState) -> Priority + Send>>,
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+  --> luciole/src/generic_actor.rs:29:19
+   |
+29 |     poll_idle_fn: Option<Box<dyn FnMut(&mut ActorState) -> Poll<()> + Send>>,
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/graph_node.rs:108:29
+    |
+108 |                 ctx.metric(&format!("{}.{}", node_name, key), *value);
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+108 -                 ctx.metric(&format!("{}.{}", node_name, key), *value);
+108 +                 ctx.metric(&format!("{node_name}.{key}"), *value);
+    |
+
+warning: struct `Mailbox` has a public `len` method, but no `is_empty` method
+  --> luciole/src/mailbox.rs:29:5
+   |
+29 |     pub fn len(&self) -> usize {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#len_without_is_empty
+   = note: `#[warn(clippy::len_without_is_empty)]` on by default
+
+warning: you should consider adding a `Default` implementation for `ServiceRegistry`
+  --> luciole/src/node.rs:20:5
+   |
+20 | /     pub fn new() -> Self {
+21 | |         Self { services: HashMap::new() }
+22 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+help: try adding this
+   |
+19 + impl Default for ServiceRegistry {
+20 +     fn default() -> Self {
+21 +         Self::new()
+22 +     }
+23 + }
+   |
+
+warning: method `new_state` is never used
+   --> lucivy-fst/src/automaton/levenshtein.rs:394:8
+    |
+262 | impl DfaBuilder {
+    | --------------- method in this implementation
+...
+394 |     fn new_state(&mut self, is_match: bool) -> usize {
+    |        ^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: you should consider adding a `Default` implementation for `TapRegistry`
+  --> luciole/src/observe.rs:45:5
+   |
+45 | /     pub fn new() -> Self {
+46 | |         Self {
+47 | |             specs: Vec::new(),
+48 | |             all: false,
+...  |
+51 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+help: try adding this
+   |
+44 + impl Default for TapRegistry {
+45 +     fn default() -> Self {
+46 +         Self::new()
+47 +     }
+48 + }
+   |
+
+warning: manual `RangeInclusive::contains` implementation
+  --> lucivy-fst/src/bytes.rs:84:13
+   |
+84 |     assert!(1 <= nbytes && nbytes <= 8);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use: `(1..=8).contains(&nbytes)`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_range_contains
+   = note: `#[warn(clippy::manual_range_contains)]` on by default
+
+warning: struct `Pool` has a public `len` method, but no `is_empty` method
+  --> luciole/src/pool.rs:59:5
+   |
+59 |     pub fn len(&self) -> usize {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#len_without_is_empty
+
+warning: manual implementation of an assign operation
+  --> lucivy-fst/src/bytes.rs:88:9
+   |
+88 |         n = n >> 8;
+   |         ^^^^^^^^^^ help: replace it with: `n >>= 8`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assign_op_pattern
+   = note: `#[warn(clippy::assign_op_pattern)]` on by default
+
+warning: manual `RangeInclusive::contains` implementation
+   --> lucivy-fst/src/bytes.rs:100:13
+    |
+100 |     assert!(1 <= nbytes && nbytes <= 8);
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use: `(1..=8).contains(&nbytes)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_range_contains
+
+warning: manual implementation of an assign operation
+   --> lucivy-fst/src/bytes.rs:104:9
+    |
+104 |         n = n | ((b as u64) << (8 * i));
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace it with: `n |= ((b as u64) << (8 * i))`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assign_op_pattern
+
+warning: variables can be used directly in the `format!` string
+  --> lucivy-fst/src/automaton/levenshtein.rs:27:60
+   |
+27 |               LevenshteinError::TooManyStates(size_limit) => write!(
+   |  ____________________________________________________________^
+28 | |                 f,
+29 | |                 "Levenshtein automaton exceeds size limit of \
+30 | |                            {} states",
+31 | |                 size_limit
+32 | |             ),
+   | |_____________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+   = note: `#[warn(clippy::uninlined_format_args)]` on by default
+
+warning: variables can be used directly in the `format!` string
+  --> luciole/src/port.rs:40:36
+   |
+40 |             PortType::Typed(id) => write!(f, "Typed({:?})", id),
+   |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+   |
+40 -             PortType::Typed(id) => write!(f, "Typed({:?})", id),
+40 +             PortType::Typed(id) => write!(f, "Typed({id:?})"),
+   |
+
+warning: needless `fn main` in doctest
+  --> lucivy-fst/src/automaton/levenshtein.rs:58:5
+   |
+58 |   /// use lucivy_fst::automaton::Levenshtein;
+   |  _____^
+59 | | /// use lucivy_fst::{IntoStreamer, Streamer, Set};
+60 | | ///
+61 | | /// fn main() {
+...  |
+77 | | ///     ]);
+78 | | /// }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_doctest_main
+   = note: `#[warn(clippy::needless_doctest_main)]` on by default
+
+warning: variables can be used directly in the `format!` string
+   --> lucivy-fst/src/automaton/levenshtein.rs:249:17
+    |
+249 |                 writeln!(f, "  {:?}: {:?}", i, si)?;
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+249 -                 writeln!(f, "  {:?}: {:?}", i, si)?;
+249 +                 writeln!(f, "  {i:?}: {si:?}")?;
+    |
+
+warning: unneeded `return` statement
+   --> lucivy-fst/src/automaton/levenshtein.rs:349:9
+    |
+349 |         return Some((to_si, mismatch_state));
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_return
+    = note: `#[warn(clippy::needless_return)]` on by default
+help: remove `return`
+    |
+349 -         return Some((to_si, mismatch_state));
+349 +         Some((to_si, mismatch_state))
+    |
+
+warning: the following explicit lifetimes could be elided: 'a
+   --> lucivy-fst/src/automaton/mod.rs:113:6
+    |
+113 | impl<'a, T: Automaton> Automaton for &'a T {
+    |      ^^                               ^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_lifetimes
+    = note: `#[warn(clippy::needless_lifetimes)]` on by default
+help: elide the lifetimes
+    |
+113 - impl<'a, T: Automaton> Automaton for &'a T {
+113 + impl<T: Automaton> Automaton for &T {
+    |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> luciole/src/reply.rs:419:10
+    |
+419 |     map: Mutex<Option<Box<dyn FnOnce(Vec<T>) -> M + Send>>>,
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: unneeded unit return type
+   --> lucivy-fst/src/automaton/mod.rs:297:20
+    |
+297 |     fn start(&self) -> () {
+    |                    ^^^^^^ help: remove the `-> ()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unused_unit
+
+warning: unneeded unit return type
+   --> lucivy-fst/src/automaton/mod.rs:313:36
+    |
+313 |     fn accept(&self, _: &(), _: u8) -> () {
+    |                                    ^^^^^^ help: remove the `-> ()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unused_unit
+
+warning: method `from_iter` can be confused for the standard trait method `std::iter::FromIterator::from_iter`
+  --> lucivy-fst/src/map.rs:67:5
+   |
+67 | /     pub fn from_iter<K, I>(iter: I) -> Result<Map<Vec<u8>>>
+68 | |     where
+69 | |         K: AsRef<[u8]>,
+70 | |         I: IntoIterator<Item = (K, u64)>,
+...  |
+74 | |         Map::new(builder.into_inner()?)
+75 | |     }
+   | |_____^
+   |
+   = help: consider implementing the trait `std::iter::FromIterator` or choosing a less ambiguous method name
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#should_implement_trait
+   = note: `#[warn(clippy::should_implement_trait)]` on by default
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/runtime.rs:116:25
+    |
+116 |                         format!("{}={:.1}", k, v)
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+116 -                         format!("{}={:.1}", k, v)
+116 +                         format!("{k}={v:.1}")
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/runtime.rs:131:28
+    |
+131 |                 lines.push(format!("    [{}] {}", tag, text));
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+131 -                 lines.push(format!("    [{}] {}", tag, text));
+131 +                 lines.push(format!("    [{tag}] {text}"));
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/runtime.rs:302:31
+    |
+302 |                         node: format!("undo:{}", node_name),
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+302 -                         node: format!("undo:{}", node_name),
+302 +                         node: format!("undo:{node_name}"),
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/runtime.rs:475:26
+    |
+475 |         Err(e) => return format!("DAG error: {}", e),
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+475 -         Err(e) => return format!("DAG error: {}", e),
+475 +         Err(e) => return format!("DAG error: {e}"),
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/runtime.rs:499:24
+    |
+499 |             lines.push(format!("{}{}", prefix_branch, line));
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+499 -             lines.push(format!("{}{}", prefix_branch, line));
+499 +             lines.push(format!("{prefix_branch}{line}"));
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/runtime.rs:508:28
+    |
+508 |                 lines.push(format!("{}{}{}", prefix_cont, node_prefix, line));
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+508 -                 lines.push(format!("{}{}{}", prefix_cont, node_prefix, line));
+508 +                 lines.push(format!("{prefix_cont}{node_prefix}{line}"));
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/runtime.rs:526:25
+    |
+526 |                         format!("{}={:.1}", k, v)
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+526 -                         format!("{}={:.1}", k, v)
+526 +                         format!("{k}={v:.1}")
+    |
+
+warning: you should consider adding a `Default` implementation for `OpBuilder<'m>`
+   --> lucivy-fst/src/map.rs:950:5
+    |
+950 | /     pub fn new() -> OpBuilder<'m> {
+951 | |         OpBuilder(raw::OpBuilder::new())
+952 | |     }
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+    = note: `#[warn(clippy::new_without_default)]` on by default
+help: try adding this
+    |
+947 + impl<'m> Default for OpBuilder<'m> {
+948 +     fn default() -> Self {
+949 +         Self::new()
+950 +     }
+951 + }
+    |
+
+warning: method `add` can be confused for the standard trait method `std::ops::Add::add`
+   --> lucivy-fst/src/map.rs:961:5
+    |
+961 | /     pub fn add<I, S>(mut self, streamable: I) -> OpBuilder<'m>
+962 | |     where
+963 | |         I: for<'a> IntoStreamer<'a, Into = S, Item = (&'a [u8], u64)>,
+964 | |         S: 'm + for<'a> Streamer<'a, Item = (&'a [u8], u64)>,
+...   |
+967 | |         self
+968 | |     }
+    | |_____^
+    |
+    = help: consider implementing the trait `std::ops::Add` or choosing a less ambiguous method name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#should_implement_trait
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/runtime.rs:537:17
+    |
+537 |         None => format!("[ ] {}", name),
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+537 -         None => format!("[ ] {}", name),
+537 +         None => format!("[ ] {name}"),
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/runtime.rs:615:17
+    |
+615 |             Err(format!("node '{}' failed: {}", node_name, e))
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+615 -             Err(format!("node '{}' failed: {}", node_name, e))
+615 +             Err(format!("node '{node_name}' failed: {e}"))
+    |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> luciole/src/runtime.rs:637:20
+    |
+637 |     let mut taken: Vec<(usize, String, HashMap<String, PortValue>, Box<dyn crate::node::Node>)> = Vec::new();
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: method `from_iter` can be confused for the standard trait method `std::iter::FromIterator::from_iter`
+  --> lucivy-fst/src/set.rs:42:5
+   |
+42 | /     pub fn from_iter<T, I>(iter: I) -> Result<Set<Vec<u8>>>
+43 | |     where
+44 | |         T: AsRef<[u8]>,
+45 | |         I: IntoIterator<Item = T>,
+...  |
+49 | |         Set::new(builder.into_inner()?)
+50 | |     }
+   | |_____^
+   |
+   = help: consider implementing the trait `std::iter::FromIterator` or choosing a less ambiguous method name
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#should_implement_trait
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/runtime.rs:750:28
+    |
+750 |                 return Err(format!("node '{}' failed: {}", node_name, e));
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+750 -                 return Err(format!("node '{}' failed: {}", node_name, e));
+750 +                 return Err(format!("node '{node_name}' failed: {e}"));
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/runtime.rs:778:27
+    |
+778 |                     text: format!("undo completed in {}ms", ms),
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+778 -                     text: format!("undo completed in {}ms", ms),
+778 +                     text: format!("undo completed in {ms}ms"),
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/runtime.rs:786:27
+    |
+786 |                     text: format!("undo failed: {}", e),
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+786 -                     text: format!("undo failed: {}", e),
+786 +                     text: format!("undo failed: {e}"),
+    |
+
+warning: this `else { if .. }` block can be collapsed
+   --> luciole/src/runtime.rs:831:24
+    |
+831 |                   } else {
+    |  ________________________^
+832 | |                     if let Some(value) = port_data.get(&key) {
+833 | |                         inputs.insert(edge.to_port.clone(), value.clone());
+834 | |                     }
+835 | |                 }
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_else_if
+    = note: `#[warn(clippy::collapsible_else_if)]` on by default
+help: collapse nested if block
+    |
+831 ~                 } else if let Some(value) = port_data.get(&key) {
+832 +                     inputs.insert(edge.to_port.clone(), value.clone());
+833 +                 }
+    |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> luciole/src/runtime.rs:850:13
+    |
+850 |     result: Result<(NodeResult, HashMap<String, PortValue>, Box<dyn crate::node::Node>), String>,
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> luciole/src/runtime.rs:881:10
+    |
+881 |     map: Option<Box<dyn FnOnce(Result<DagResult, String>) -> R + Send>>,
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: variables can be used directly in the `format!` string
+    --> luciole/src/runtime.rs:1027:37
+     |
+1027 |                         result: Err(format!("node '{}' failed: {}", node_name, e)),
+     |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+     |
+1027 -                         result: Err(format!("node '{}' failed: {}", node_name, e)),
+1027 +                         result: Err(format!("node '{node_name}' failed: {e}")),
+     |
+
+warning: you should consider adding a `Default` implementation for `OpBuilder<'s>`
+   --> lucivy-fst/src/set.rs:827:5
+    |
+827 | /     pub fn new() -> OpBuilder<'s> {
+828 | |         OpBuilder(raw::OpBuilder::new())
+829 | |     }
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+help: try adding this
+    |
+824 + impl<'s> Default for OpBuilder<'s> {
+825 +     fn default() -> Self {
+826 +         Self::new()
+827 +     }
+828 + }
+    |
+
+warning: method `add` can be confused for the standard trait method `std::ops::Add::add`
+   --> lucivy-fst/src/set.rs:838:5
+    |
+838 | /     pub fn add<I, S>(mut self, streamable: I) -> OpBuilder<'s>
+839 | |     where
+840 | |         I: for<'a> IntoStreamer<'a, Into = S, Item = &'a [u8]>,
+841 | |         S: 's + for<'a> Streamer<'a, Item = &'a [u8]>,
+...   |
+844 | |         self
+845 | |     }
+    | |_____^
+    |
+    = help: consider implementing the trait `std::ops::Add` or choosing a less ambiguous method name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#should_implement_trait
+
+warning: using `clone` on type `Option<(ActorId, &str)>` which implements the `Copy` trait
+   --> luciole/src/scheduler.rs:127:9
+    |
+127 |         self.current_actor.lock().unwrap().clone()
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try dereferencing it: `*self.current_actor.lock().unwrap()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#clone_on_copy
+    = note: `#[warn(clippy::clone_on_copy)]` on by default
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+   --> lucivy-fst/src/raw/build.rs:282:41
+    |
+282 |         let entry = self.registry.entry(&node);
+    |                                         ^^^^^ help: change this to: `node`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_borrow
+    = note: `#[warn(clippy::needless_borrow)]` on by default
+
+warning: this pattern creates a reference to a reference
+   --> lucivy-fst/src/raw/build.rs:393:32
+    |
+393 |             .take_while(|&(&b, ref node)| {
+    |                                ^^^^^^^^ help: try: `node`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_borrow
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/scheduler.rs:889:43
+    |
+889 |                 Some((label, elapsed)) => format!("BUSY {:?} ({:.1}s)", label, elapsed),
+    |                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+889 -                 Some((label, elapsed)) => format!("BUSY {:?} ({:.1}s)", label, elapsed),
+889 +                 Some((label, elapsed)) => format!("BUSY {label:?} ({elapsed:.1}s)"),
+    |
+
+warning: using `clone` on type `Option<(ActorId, &str)>` which implements the `Copy` trait
+   --> luciole/src/scheduler.rs:915:30
+    |
+915 |             let actor_info = t.current_actor.lock().unwrap().clone();
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try dereferencing it: `*t.current_actor.lock().unwrap()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#clone_on_copy
+
+warning: variables can be used directly in the `format!` string
+  --> lucivy-fst/src/raw/error.rs:89:49
+   |
+89 |               Error::Version { expected, got } => write!(
+   |  _________________________________________________^
+90 | |                 f,
+91 | |                 "\
+92 | | Error opening FST: expected API version {}, got API version {}. \
+...  |
+97 | |                 expected, got
+98 | |             ),
+   | |_____________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+
+warning: variables can be used directly in the `format!` string
+   --> lucivy-fst/src/raw/error.rs:99:39
+    |
+99  |               Error::Format { size } => write!(
+    |  _______________________________________^
+100 | |                 f,
+101 | |                 "\
+102 | | Error opening FST with size {} bytes: An unknown error occurred. This \
+103 | | usually means you're trying to read data that isn't actually an encoded FST.",
+104 | |                 size
+105 | |             ),
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+
+warning: variables can be used directly in the `format!` string
+   --> lucivy-fst/src/raw/error.rs:106:58
+    |
+106 |               Error::ChecksumMismatch { expected, got } => write!(
+    |  __________________________________________________________^
+107 | |                 f,
+108 | |                 "FST verification failed: expected checksum of {} but got {}",
+109 | |                 expected, got,
+110 | |             ),
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+
+warning: deref on an immutable reference
+   --> lucivy-fst/src/raw/error.rs:118:30
+    |
+118 |                 format_bytes(&*got)
+    |                              ^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#borrow_deref_ref
+    = note: `#[warn(clippy::borrow_deref_ref)]` on by default
+help: if you would like to reborrow, try removing `&*`
+    |
+118 -                 format_bytes(&*got)
+118 +                 format_bytes(got)
+    |
+help: if you would like to deref, try using `&**`
+    |
+118 |                 format_bytes(&**got)
+    |                                +
+
+warning: deref on an immutable reference
+   --> lucivy-fst/src/raw/error.rs:125:30
+    |
+125 |                 format_bytes(&*got),
+    |                              ^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#borrow_deref_ref
+help: if you would like to reborrow, try removing `&*`
+    |
+125 -                 format_bytes(&*got),
+125 +                 format_bytes(got),
+    |
+help: if you would like to deref, try using `&**`
+    |
+125 |                 format_bytes(&**got),
+    |                                +
+
+warning: deref on an immutable reference
+   --> lucivy-fst/src/raw/error.rs:126:30
+    |
+126 |                 format_bytes(&*previous)
+    |                              ^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#borrow_deref_ref
+help: if you would like to reborrow, try removing `&*`
+    |
+126 -                 format_bytes(&*previous)
+126 +                 format_bytes(previous)
+    |
+help: if you would like to deref, try using `&**`
+    |
+126 |                 format_bytes(&**previous)
+    |                                +
+
+warning: variables can be used directly in the `format!` string
+   --> lucivy-fst/src/raw/error.rs:128:51
+    |
+128 |               Error::WrongType { expected, got } => write!(
+    |  ___________________________________________________^
+129 | |                 f,
+130 | |                 "\
+131 | | Error opening FST: expected type '{}', got type '{}'.",
+132 | |                 expected, got
+133 | |             ),
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+
+warning: variables can be used directly in the `format!` string
+   --> lucivy-fst/src/raw/error.rs:169:19
+    |
+169 |         Err(_) => format!("{:?}", bytes),
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+169 -         Err(_) => format!("{:?}", bytes),
+169 +         Err(_) => format!("{bytes:?}"),
+    |
+
+warning: variables can be used directly in the `format!` string
+  --> lucivy-fst/src/raw/node.rs:45:13
+   |
+45 |             writeln!(f, "    {:?}", t)?;
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+   |
+45 -             writeln!(f, "    {:?}", t)?;
+45 +             writeln!(f, "    {t:?}")?;
+   |
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> luciole/src/scheduler.rs:1355:28
+     |
+1355 |         shared: Arc::clone(&shared),
+     |                            ^^^^^^^ help: change this to: `shared`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_borrow
+     = note: `#[warn(clippy::needless_borrow)]` on by default
+
+warning: unneeded `return` statement
+   --> lucivy-fst/src/raw/node.rs:255:13
+    |
+255 |             return Ok(());
+    |             ^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_return
+help: remove `return`
+    |
+255 -             return Ok(());
+255 +             Ok(())
+    |
+
+warning: this `else { if .. }` block can be collapsed
+   --> lucivy-fst/src/raw/node.rs:258:16
+    |
+258 |           } else {
+    |  ________________^
+259 | |             if node.trans[0].addr == last_addr && node.trans[0].out.is_zero() {
+260 | |                 StateOneTransNext::compile(wtr, addr, node.trans[0].inp)
+261 | |             } else {
+...   |
+264 | |         }
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_else_if
+    = note: `#[warn(clippy::collapsible_else_if)]` on by default
+help: collapse nested if block
+    |
+258 ~         } else if node.trans[0].addr == last_addr && node.trans[0].out.is_zero() {
+259 +             StateOneTransNext::compile(wtr, addr, node.trans[0].inp)
+260 +         } else {
+261 +             StateOneTrans::compile(wtr, addr, node.trans[0])
+262 +         }
+    |
+
+warning: struct `ScatterResults` has a public `len` method, but no `is_empty` method
+  --> luciole/src/scatter.rs:89:5
+   |
+89 |     pub fn len(&self) -> usize {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#len_without_is_empty
+
+warning: variables can be used directly in the `format!` string
+   --> luciole/src/stream_dag.rs:114:28
+    |
+114 |                 lines.push(format!("  {} [{}]", name, worker_label));
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+114 -                 lines.push(format!("  {} [{}]", name, worker_label));
+114 +                 lines.push(format!("  {name} [{worker_label}]"));
+    |
+
+warning: you should consider adding a `Default` implementation for `OpBuilder<'f>`
+  --> lucivy-fst/src/raw/ops.rs:51:5
+   |
+51 | /     pub fn new() -> OpBuilder<'f> {
+52 | |         OpBuilder { streams: vec![] }
+53 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+help: try adding this
+   |
+48 + impl<'f> Default for OpBuilder<'f> {
+49 +     fn default() -> Self {
+50 +         Self::new()
+51 +     }
+52 + }
+   |
+
+warning: method `add` can be confused for the standard trait method `std::ops::Add::add`
+  --> lucivy-fst/src/raw/ops.rs:62:5
+   |
+62 | /     pub fn add<I, S>(mut self, stream: I) -> OpBuilder<'f>
+63 | |     where
+64 | |         I: for<'a> IntoStreamer<'a, Into = S, Item = (&'a [u8], Output)>,
+65 | |         S: 'f + for<'a> Streamer<'a, Item = (&'a [u8], Output)>,
+...  |
+68 | |         self
+69 | |     }
+   | |_____^
+   |
+   = help: consider implementing the trait `std::ops::Add` or choosing a less ambiguous method name
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#should_implement_trait
+
+warning: this `match` expression can be replaced with `?`
+   --> lucivy-fst/src/raw/ops.rs:252:24
+    |
+252 |               let slot = match self.heap.pop() {
+    |  ________________________^
+253 | |                 None => return None,
+254 | |                 Some(slot) => slot,
+255 | |             };
+    | |_____________^ help: try instead: `self.heap.pop()?`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#question_mark
+    = note: `#[warn(clippy::question_mark)]` on by default
+
+warning: this `match` expression can be replaced with `?`
+   --> lucivy-fst/src/raw/ops.rs:337:24
+    |
+337 |               let slot = match self.heap.pop() {
+    |  ________________________^
+338 | |                 None => return None,
+339 | |                 Some(slot) => slot,
+340 | |             };
+    | |_____________^ help: try instead: `self.heap.pop()?`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#question_mark
+
+warning: non-canonical implementation of `partial_cmp` on an `Ord` type
+   --> lucivy-fst/src/raw/ops.rs:447:1
+    |
+447 | /  impl PartialOrd for Slot {
+448 | |      fn partial_cmp(&self, other: &Slot) -> Option<cmp::Ordering> {
+    | | __________________________________________________________________-
+449 | ||         (&self.input, self.output)
+450 | ||             .partial_cmp(&(&other.input, other.output))
+451 | ||             .map(|ord| ord.reverse())
+452 | ||     }
+    | ||_____- help: change this to: `{ Some(self.cmp(other)) }`
+453 | |  }
+    | |__^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#non_canonical_partial_ord_impl
+    = note: `#[warn(clippy::non_canonical_partial_ord_impl)]` on by default
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> luciole/src/async_executor.rs:307:21
+    |
+307 |     pub fn new() -> (Self, *const AtomicU32, Arc<std::sync::Mutex<Option<Vec<u8>>>>) {
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: function `BranchNode` should have a snake case name
+  --> luciole/src/branch.rs:63:8
+   |
+63 | pub fn BranchNode<F: FnMut() -> bool + Send + 'static>(
+   |        ^^^^^^^^^^ help: convert the identifier to snake case: `branch_node`
+   |
+   = note: `#[warn(non_snake_case)]` on by default
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+   --> lucivy-fst/src/raw/mod.rs:353:42
+    |
+353 |         let version = bytes::read_u64_le(&bytes);
+    |                                          ^^^^^^ help: change this to: `bytes`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_borrow
+
+warning: redundant pattern matching, consider using `is_some()`
+   --> lucivy-fst/src/raw/mod.rs:572:19
+    |
+572 |         while let Some(_) = op.next() {
+    |         ----------^^^^^^^------------ help: try: `while op.next().is_some()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_pattern_matching
+    = note: `#[warn(clippy::redundant_pattern_matching)]` on by default
+
+warning: redundant pattern matching, consider using `is_some()`
+   --> lucivy-fst/src/raw/mod.rs:591:19
+    |
+591 |         while let Some(_) = op.next() {
+    |         ----------^^^^^^^------------ help: try: `while op.next().is_some()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_pattern_matching
+
+warning: match expression looks like `matches!` macro
+   --> lucivy-fst/src/raw/mod.rs:965:9
+    |
+965 | /         match *self {
+966 | |             Bound::Excluded(_) => false,
+967 | |             _ => true,
+968 | |         }
+    | |_________^ help: try: `!matches!(*self, Bound::Excluded(_))`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#match_like_matches_macro
+    = note: `#[warn(clippy::match_like_matches_macro)]` on by default
+
+warning: method `sub` can be confused for the standard trait method `std::ops::Sub::sub`
+    --> lucivy-fst/src/raw/mod.rs:1319:5
+     |
+1319 | /     pub fn sub(self, o: Output) -> Output {
+1320 | |         Output(
+1321 | |             self.0
+1322 | |                 .checked_sub(o.0)
+...    |
+1325 | |     }
+     | |_____^
+     |
+     = help: consider implementing the trait `std::ops::Sub` or choosing a less ambiguous method name
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#should_implement_trait
+
+warning: doc list item overindented
+  --> lucivy-fst/src/stream.rs:73:5
+   |
+73 | ///     `'static`) of the underlying stream.
+   |     ^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_overindented_list_items
+   = note: `#[warn(clippy::doc_overindented_list_items)]` on by default
+
+warning: this seems like a manual implementation of the non-exhaustive pattern
+  --> lucivy-fst/src/raw/error.rs:11:1
+   |
+11 | / pub enum Error {
+12 | |     /// A version mismatch occurred while reading a finite state transducer.
+13 | |     ///
+14 | |     /// This occurs when the API version (of the crate) does not match the
+...  |
+82 | |     __Nonexhaustive,
+83 | | }
+   | |_^
+   |
+help: remove this variant
+  --> lucivy-fst/src/raw/error.rs:82:5
+   |
+82 |     __Nonexhaustive,
+   |     ^^^^^^^^^^^^^^^
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_non_exhaustive
+   = note: `#[warn(clippy::manual_non_exhaustive)]` on by default
+help: use the `#[non_exhaustive]` attribute instead
+   |
+11 + #[non_exhaustive]
+12 | pub enum Error {
+   |
+
+warning: `luciole` (lib) generated 54 warnings (run `cargo clippy --fix --lib -p luciole` to apply 38 suggestions)
+warning: `lucivy-fst` (lib) generated 45 warnings (run `cargo clippy --fix --lib -p lucivy-fst` to apply 33 suggestions)
+    Checking ld-lucivy-columnar v0.26.0 (/home/luciedefraiteur/LR_CodeRag/community-docs/packages/rag3db/extension/lucivy/ld-lucivy/columnar)
+    Checking binggan v0.14.2
+    Checking ld-lucivy v0.27.0 (/home/luciedefraiteur/LR_CodeRag/community-docs/packages/rag3db/extension/lucivy/ld-lucivy)
+warning: unused import: `crate::suffix_fst::encode_vint`
+  --> src/indexer/sfx_merge.rs:32:5
+   |
+32 | use crate::suffix_fst::encode_vint;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unnecessary `>= y + 1` or `x - 1 >=`
+   --> src/query/phrase_query/regex_continuation_query.rs:628:16
+    |
+628 |     let n = if effective_len >= 3 * (distance as usize + 1) + 1 { 3 } else { 2 };
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: change it to: `effective_len > 3 * (distance as usize + 1)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#int_plus_one
+    = note: `#[warn(clippy::int_plus_one)]` on by default
+
+warning: unused import: `crate::suffix_fst::builder::ParentEntry`
+  --> src/query/phrase_query/suffix_contains.rs:10:5
+   |
+10 | use crate::suffix_fst::builder::ParentEntry;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::suffix_fst::builder::ParentEntry`
+  --> src/query/phrase_query/literal_pipeline.rs:15:5
+   |
+15 | use crate::suffix_fst::builder::ParentEntry;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ClassBytesRange`
+  --> src/query/phrase_query/regex_gap_analyzer.rs:11:46
+   |
+11 | use regex_syntax::hir::{Hir, HirKind, Class, ClassBytesRange};
+   |                                              ^^^^^^^^^^^^^^^
+
+warning: unnecessary `>= y + 1` or `x - 1 >=`
+  --> src/query/phrase_query/fuzzy_contains.rs:91:16
+   |
+91 |     let n = if len >= 3 * (distance as usize + 1) + 1 { 3 } else { 2 };
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: change it to: `len > 3 * (distance as usize + 1)`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#int_plus_one
+
+warning: unused import: `super::builder::SuffixFstBuilder`
+ --> src/suffix_fst/collector.rs:3:5
+  |
+3 | use super::builder::SuffixFstBuilder;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::file::SfxFileWriter`
+ --> src/suffix_fst/collector.rs:4:5
+  |
+4 | use super::file::SfxFileWriter;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::sibling_table::SiblingTableWriter`
+ --> src/suffix_fst/collector.rs:7:5
+  |
+7 | use super::sibling_table::SiblingTableWriter;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `BTreeMap` and `HashMap`
+  --> src/suffix_fst/sfxpost_v2.rs:21:24
+   |
+21 | use std::collections::{BTreeMap, HashMap, HashSet};
+   |                        ^^^^^^^^  ^^^^^^^
+
+warning: unused import: `super::*`
+   --> src/query/phrase_query/literal_pipeline.rs:608:9
+    |
+608 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused variable: `term_dict`
+   --> src/query/phrase_query/regex_continuation_query.rs:133:9
+    |
+133 |     let term_dict = inverted_index.terms();
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_term_dict`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `prefix`
+   --> src/query/phrase_query/regex_continuation_query.rs:117:5
+    |
+117 |     prefix: bool,
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_prefix`
+
+warning: unused variable: `anchor_start`
+   --> src/query/phrase_query/regex_continuation_query.rs:118:5
+    |
+118 |     anchor_start: bool,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_anchor_start`
+
+warning: unused variable: `match_start`
+    --> src/query/phrase_query/regex_continuation_query.rs:1043:18
+     |
+1043 |             let (match_start, match_len) = dfa_matches.first().copied().unwrap_or((0, 0));
+     |                  ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_match_start`
+
+warning: unused variable: `match_len`
+    --> src/query/phrase_query/regex_continuation_query.rs:1043:31
+     |
+1043 |             let (match_start, match_len) = dfa_matches.first().copied().unwrap_or((0, 0));
+     |                               ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_match_len`
+
+warning: unused variable: `anchor_start`
+   --> src/query/phrase_query/regex_continuation_query.rs:735:5
+    |
+735 |     anchor_start: bool,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_anchor_start`
+
+warning: unused variable: `sepmap`
+    --> src/query/phrase_query/regex_continuation_query.rs:1188:9
+     |
+1188 |     let sepmap = sepmap_data.and_then(crate::suffix_fst::sepmap::SepMapReader::open);
+     |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_sepmap`
+
+warning: unused variable: `find_us`
+    --> src/query/phrase_query/regex_continuation_query.rs:1253:9
+     |
+1253 |     let find_us = t0.elapsed().as_micros();
+     |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_find_us`
+
+warning: unused variable: `t1`
+    --> src/query/phrase_query/regex_continuation_query.rs:1258:9
+     |
+1258 |     let t1 = Instant::now();
+     |         ^^ help: if this is intentional, prefix it with an underscore: `_t1`
+
+warning: unused variable: `sfx_dict`
+    --> src/query/phrase_query/regex_continuation_query.rs:1174:5
+     |
+1174 |     sfx_dict: &SfxTermDictionary,
+     |     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sfx_dict`
+
+warning: unused variable: `anchor_start`
+    --> src/query/phrase_query/regex_continuation_query.rs:1177:5
+     |
+1177 |     anchor_start: bool,
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_anchor_start`
+
+warning: unused variable: `prefix`
+    --> src/query/phrase_query/regex_continuation_query.rs:1812:46
+     |
+1812 |             DfaKind::Fuzzy { text, distance, prefix } if *distance > 0 => {
+     |                                              ^^^^^^ help: try ignoring the field: `prefix: _`
+
+warning: unused variable: `before`
+    --> src/query/phrase_query/suffix_contains.rs:1231:13
+     |
+1231 |         let before = candidates.len();
+     |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_before`
+
+warning: variable does not need to be mutable
+   --> src/query/phrase_query/literal_resolve.rs:224:13
+    |
+224 | ...   let mut check_chain = |chain: &[(usize, u32, u32, u16, u32)], results: &mut Vec<(DocId, u32, u32, usize, u16, bool, usize, u32, u16...
+    |           ----^^^^^^^^^^^
+    |           |
+    |           help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: unused variable: `last_byte_to`
+   --> src/query/phrase_query/literal_pipeline.rs:385:25
+    |
+385 |         for (doc_id, _, last_byte_to, match_bf, first_pos) in &active {
+    |                         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_last_byte_to`
+
+warning: unused variable: `ngrams`
+   --> src/query/phrase_query/fuzzy_contains.rs:227:5
+    |
+227 |     ngrams: &[String],
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_ngrams`
+
+warning: field `finalizer_ref` is never read
+   --> src/indexer/indexer_actor.rs:194:5
+    |
+185 | struct IndexerState<D: Document> {
+    |        ------------ field in this struct
+...
+194 |     finalizer_ref: ActorRef<Envelope>,
+    |     ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: function `merge_sibling_links` is never used
+   --> src/indexer/sfx_merge.rs:285:15
+    |
+285 | pub(crate) fn merge_sibling_links(
+    |               ^^^^^^^^^^^^^^^^^^^
+
+warning: function `decode_vint` is never used
+   --> src/indexer/sfx_merge.rs:417:4
+    |
+417 | fn decode_vint(data: &[u8]) -> (u32, usize) {
+    |    ^^^^^^^^^^^
+
+warning: field `ctx` is never read
+   --> src/indexer/sfx_dag.rs:260:5
+    |
+256 | struct WriteSfxNode {
+    |        ------------ field in this struct
+...
+260 |     ctx: Arc<SfxContext>,
+    |     ^^^
+
+warning: method `get_mergeable_segments` is never used
+  --> src/indexer/segment_manager.rs:79:12
+   |
+66 | impl SegmentManager {
+   | ------------------- method in this implementation
+...
+79 |     pub fn get_mergeable_segments(
+   |            ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `get_mergeable_segments` is never used
+  --> src/indexer/segment_register.rs:47:12
+   |
+42 | impl SegmentRegister {
+   | -------------------- method in this implementation
+...
+47 |     pub fn get_mergeable_segments(
+   |            ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `write_sfxpost`, `write_posmap`, and `write_bytemap` are never used
+   --> src/indexer/segment_serializer.rs:92:12
+    |
+21  | impl SegmentSerializer {
+    | ---------------------- methods in this implementation
+...
+92  |     pub fn write_sfxpost(&mut self, field_id: u32, data: &[u8]) -> crate::Result<()> {
+    |            ^^^^^^^^^^^^^
+...
+102 |     pub fn write_posmap(&mut self, field_id: u32, data: &[u8]) -> crate::Result<()> {
+    |            ^^^^^^^^^^^^
+...
+112 |     pub fn write_bytemap(&mut self, field_id: u32, data: &[u8]) -> crate::Result<()> {
+    |            ^^^^^^^^^^^^^
+
+warning: method `get_mergeable_segments` is never used
+   --> src/indexer/segment_updater.rs:120:19
+    |
+71  | impl SegmentUpdaterShared {
+    | ------------------------- method in this implementation
+...
+120 |     pub(crate) fn get_mergeable_segments(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `run_deferred_merges` and `collect_merge_candidates` are never used
+   --> src/indexer/segment_updater_actor.rs:143:8
+    |
+102 | impl SegmentUpdaterState {
+    | ------------------------ associated items in this implementation
+...
+143 |     fn run_deferred_merges(
+    |        ^^^^^^^^^^^^^^^^^^^
+...
+238 |     fn collect_merge_candidates(&self) -> Vec<MergeOperation> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `extract_all_literals` is never used
+   --> src/query/phrase_query/regex_continuation_query.rs:561:4
+    |
+561 | fn extract_all_literals(pattern: &str) -> Vec<String> {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `pick_best_literal` is never used
+    --> src/query/phrase_query/regex_continuation_query.rs:1146:4
+     |
+1146 | fn pick_best_literal(pattern: &str, fragments: &[String]) -> (String, bool) {
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: function `cross_token_resolve_for_multi` is never used
+   --> src/query/phrase_query/suffix_contains.rs:582:4
+    |
+582 | fn cross_token_resolve_for_multi<F>(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `segments` is never read
+  --> src/query/phrase_query/suffix_contains_query.rs:35:5
+   |
+32 | pub struct SfxCache {
+   |            -------- field in this struct
+...
+35 |     segments: Mutex<HashMap<(String, SegmentId), CachedSfxResult>>,
+   |     ^^^^^^^^
+
+warning: function `byte_in_ranges` is never used
+   --> src/query/phrase_query/regex_gap_analyzer.rs:265:4
+    |
+265 | fn byte_in_ranges(byte: u8, ranges: &[(u8, u8)]) -> bool {
+    |    ^^^^^^^^^^^^^^
+
+warning: variables can be used directly in the `format!` string
+   --> src/indexer/index_writer.rs:196:18
+    |
+196 |     if verbose { eprintln!("[finalize] segment_writer.finalize() {} docs...", max_doc); }
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+    = note: `#[warn(clippy::uninlined_format_args)]` on by default
+help: change this to
+    |
+196 -     if verbose { eprintln!("[finalize] segment_writer.finalize() {} docs...", max_doc); }
+196 +     if verbose { eprintln!("[finalize] segment_writer.finalize() {max_doc} docs..."); }
+    |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/indexer/index_writer.rs:519:40
+    |
+519 |     pub fn drain_workers(&mut self) -> crate::Result<Vec<crate::actor::reply::ReplyReceiver<Result<Vec<u8>, Vec<u8>>>>> {
+    |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+    = note: `#[warn(clippy::type_complexity)]` on by default
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/indexer/index_writer.rs:536:40
+    |
+536 |     pub fn flush_workers(&mut self) -> crate::Result<Vec<crate::actor::reply::ReplyReceiver<Result<Vec<u8>, Vec<u8>>>>> {
+    |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/indexer/indexer_actor.rs:307:35
+    |
+307 |     fn handle_flush(&mut self) -> crate::Result<Vec<ReplyReceiver<Result<Vec<u8>, Vec<u8>>>>> {
+    |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: this `if let` can be collapsed into the outer `if let`
+   --> src/indexer/indexer_actor.rs:371:21
+    |
+371 | /                     if let Err(err_bytes) = result {
+372 | |                         let err = crate::LucivyError::decode(&err_bytes)
+373 | |                             .unwrap_or_else(|_| {
+374 | |                                 crate::LucivyError::SystemError("background finalize failed".into())
+375 | |                             });
+376 | |                         self.set_error(err);
+377 | |                     }
+    | |_____________________^
+    |
+help: the outer pattern can be modified to include the inner pattern
+   --> src/indexer/indexer_actor.rs:370:29
+    |
+370 |                 if let Some(result) = rx.take_value() {
+    |                             ^^^^^^ replace this binding
+371 |                     if let Err(err_bytes) = result {
+    |                            ^^^^^^^^^^^^^^ with this pattern
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_match
+    = note: `#[warn(clippy::collapsible_match)]` on by default
+
+warning: variables can be used directly in the `format!` string
+  --> src/indexer/commit_dag.rs:69:27
+   |
+69 |                 Box::leak(format!("merge_{}", i).into_boxed_str()),
+   |                           ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+   |
+69 -                 Box::leak(format!("merge_{}", i).into_boxed_str()),
+69 +                 Box::leak(format!("merge_{i}").into_boxed_str()),
+   |
+
+warning: variables can be used directly in the `format!` string
+  --> src/indexer/commit_dag.rs:90:30
+   |
+90 |                 .map_err(|e| format!("start_merge[{}]: {e}", i))?;
+   |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+   |
+90 -                 .map_err(|e| format!("start_merge[{}]: {e}", i))?;
+90 +                 .map_err(|e| format!("start_merge[{i}]: {e}"))?;
+   |
+
+warning: variables can be used directly in the `format!` string
+   --> src/indexer/commit_dag.rs:109:18
+    |
+109 |                 &format!("merge_{}", i),
+    |                  ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+109 -                 &format!("merge_{}", i),
+109 +                 &format!("merge_{i}"),
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> src/indexer/commit_dag.rs:218:27
+    |
+218 |                 Box::leak(format!("result_{}", i).into_boxed_str()),
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+218 -                 Box::leak(format!("result_{}", i).into_boxed_str()),
+218 +                 Box::leak(format!("result_{i}").into_boxed_str()),
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> src/indexer/commit_dag.rs:234:29
+    |
+234 |             let port_name = format!("result_{}", i);
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+234 -             let port_name = format!("result_{}", i);
+234 +             let port_name = format!("result_{i}");
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> src/indexer/commit_dag.rs:384:27
+    |
+384 |             dag.add_node(&format!("merge_{}", i), MergeNode::new(shared.clone()));
+    |                           ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+384 -             dag.add_node(&format!("merge_{}", i), MergeNode::new(shared.clone()));
+384 +             dag.add_node(&format!("merge_{i}"), MergeNode::new(shared.clone()));
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> src/indexer/commit_dag.rs:386:29
+    |
+386 |                 "prepare", &format!("merge_{}", i),
+    |                             ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+386 -                 "prepare", &format!("merge_{}", i),
+386 +                 "prepare", &format!("merge_{i}"),
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> src/indexer/commit_dag.rs:387:18
+    |
+387 |                 &format!("merge_{}", i), "input",
+    |                  ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+387 -                 &format!("merge_{}", i), "input",
+387 +                 &format!("merge_{i}"), "input",
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> src/indexer/commit_dag.rs:395:18
+    |
+395 |                 &format!("merge_{}", i), "result",
+    |                  ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+395 -                 &format!("merge_{}", i), "result",
+395 +                 &format!("merge_{i}"), "result",
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> src/indexer/commit_dag.rs:396:30
+    |
+396 |                 "finalize", &format!("result_{}", i),
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+396 -                 "finalize", &format!("result_{}", i),
+396 +                 "finalize", &format!("result_{i}"),
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> src/indexer/merge_dag.rs:136:30
+    |
+136 |                 .map_err(|e| format!("fieldnorm field {}: {e}", i))?;
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+136 -                 .map_err(|e| format!("fieldnorm field {}: {e}", i))?;
+136 +                 .map_err(|e| format!("fieldnorm field {i}: {e}"))?;
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> src/indexer/merge_dag.rs:143:27
+    |
+143 |             ).map_err(|e| format!("postings field {}: {e}", i))?;
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+143 -             ).map_err(|e| format!("postings field {}: {e}", i))?;
+143 +             ).map_err(|e| format!("postings field {i}: {e}"))?;
+    |
+
+warning: redundant closure
+   --> src/indexer/merge_dag.rs:416:77
+    |
+416 |     dag.connect("init", "postings_ser", "postings", "postings_ser").map_err(|e| crate::LucivyError::SystemError(e))?;
+    |                                                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `crate::LucivyError::SystemError`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+    = note: `#[warn(clippy::redundant_closure)]` on by default
+
+warning: redundant closure
+   --> src/indexer/merge_dag.rs:417:99
+    |
+417 |     dag.connect("init", "doc_id_mapping_postings", "postings", "doc_id_mapping_postings").map_err(|e| crate::LucivyError::SystemError(e))?;
+    |                                                                                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `crate::LucivyError::SystemError`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+
+warning: redundant closure
+   --> src/indexer/merge_dag.rs:418:87
+    |
+418 |     dag.connect("init", "fieldnorm_readers", "postings", "fieldnorm_readers").map_err(|e| crate::LucivyError::SystemError(e))?;
+    |                                                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `crate::LucivyError::SystemError`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+
+warning: redundant closure
+   --> src/indexer/merge_dag.rs:422:74
+    |
+422 |     dag.connect("init", "store_writer", "store", "store_writer").map_err(|e| crate::LucivyError::SystemError(e))?;
+    |                                                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `crate::LucivyError::SystemError`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+
+warning: redundant closure
+   --> src/indexer/merge_dag.rs:426:72
+    |
+426 |     dag.connect("init", "ff_write", "fast_fields", "ff_write").map_err(|e| crate::LucivyError::SystemError(e))?;
+    |                                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `crate::LucivyError::SystemError`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+
+warning: redundant closure
+   --> src/indexer/merge_dag.rs:427:90
+    |
+427 |     dag.connect("init", "doc_id_mapping_ff", "fast_fields", "doc_id_mapping_ff").map_err(|e| crate::LucivyError::SystemError(e))?;
+    |                                                                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `crate::LucivyError::SystemError`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+
+warning: redundant closure
+   --> src/indexer/merge_dag.rs:431:62
+    |
+431 |     dag.connect("init", "segment", "sfx", "segment").map_err(|e| crate::LucivyError::SystemError(e))?;
+    |                                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `crate::LucivyError::SystemError`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+
+warning: redundant closure
+   --> src/indexer/merge_dag.rs:432:78
+    |
+432 |     dag.connect("init", "sfx_doc_mapping", "sfx", "sfx_doc_mapping").map_err(|e| crate::LucivyError::SystemError(e))?;
+    |                                                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `crate::LucivyError::SystemError`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+
+warning: redundant closure
+   --> src/indexer/merge_dag.rs:433:76
+    |
+433 |     dag.connect("postings", "postings_ser", "sfx", "postings_ser").map_err(|e| crate::LucivyError::SystemError(e))?;
+    |                                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `crate::LucivyError::SystemError`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+
+warning: redundant closure
+   --> src/indexer/merge_dag.rs:434:73
+    |
+434 |     dag.connect("store", "store_writer", "sfx", "store_writer").map_err(|e| crate::LucivyError::SystemError(e))?;
+    |                                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `crate::LucivyError::SystemError`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+
+warning: redundant closure
+   --> src/indexer/merge_dag.rs:435:71
+    |
+435 |     dag.connect("fast_fields", "ff_write", "sfx", "ff_write").map_err(|e| crate::LucivyError::SystemError(e))?;
+    |                                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `crate::LucivyError::SystemError`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+
+warning: redundant closure
+   --> src/indexer/merge_dag.rs:439:73
+    |
+439 |     dag.connect("sfx", "postings_ser", "close", "postings_ser").map_err(|e| crate::LucivyError::SystemError(e))?;
+    |                                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `crate::LucivyError::SystemError`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+
+warning: redundant closure
+   --> src/indexer/merge_dag.rs:440:73
+    |
+440 |     dag.connect("sfx", "store_writer", "close", "store_writer").map_err(|e| crate::LucivyError::SystemError(e))?;
+    |                                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `crate::LucivyError::SystemError`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+
+warning: redundant closure
+   --> src/indexer/merge_dag.rs:441:65
+    |
+441 |     dag.connect("sfx", "ff_write", "close", "ff_write").map_err(|e| crate::LucivyError::SystemError(e))?;
+    |                                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `crate::LucivyError::SystemError`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+
+warning: redundant closure
+   --> src/indexer/merge_dag.rs:442:75
+    |
+442 |     dag.connect("sfx", "sfx_field_ids", "close", "sfx_field_ids").map_err(|e| crate::LucivyError::SystemError(e))?;
+    |                                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `crate::LucivyError::SystemError`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+
+warning: this `map_or` can be simplified
+   --> src/indexer/sfx_merge.rs:113:44
+    |
+113 | ...                   let is_alive = alive.map_or(true, |bs| bs.is_alive(doc));
+    |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_map_or
+    = note: `#[warn(clippy::unnecessary_map_or)]` on by default
+help: use is_none_or instead
+    |
+113 -                             let is_alive = alive.map_or(true, |bs| bs.is_alive(doc));
+113 +                             let is_alive = alive.is_none_or(|bs| bs.is_alive(doc));
+    |
+
+warning: doc list item without indentation
+   --> src/indexer/sfx_merge.rs:372:5
+    |
+372 | /// Returns error description or None if valid.
+    |     ^
+    |
+    = help: if this is supposed to be its own paragraph, add a blank line
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_lazy_continuation
+    = note: `#[warn(clippy::doc_lazy_continuation)]` on by default
+help: indent this line
+    |
+372 | ///   Returns error description or None if valid.
+    |     ++
+
+warning: variables can be used directly in the `format!` string
+   --> src/indexer/sfx_merge.rs:390:21
+    |
+390 |           return Some(format!(
+    |  _____________________^
+391 | |             "sfxpost num_tokens mismatch: stored={} expected={}",
+392 | |             stored_num_tokens, num_tokens,
+393 | |         ));
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+
+warning: this function has too many arguments (9/7)
+   --> src/indexer/sfx_merge.rs:438:1
+    |
+438 | / pub(crate) fn write_sfx(
+439 | |     serializer: &mut crate::indexer::SegmentSerializer,
+440 | |     field: Field,
+441 | |     fst_data: Vec<u8>,
+...   |
+447 | |     sibling_data: Option<Vec<u8>>,
+448 | | ) -> crate::Result<()> {
+    | |______________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+    = note: `#[warn(clippy::too_many_arguments)]` on by default
+
+warning: variables can be used directly in the `format!` string
+   --> src/indexer/sfx_dag.rs:134:27
+    |
+134 |                 ctx.warn(&format!("gapmap error {}: {}", i, err));
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+134 -                 ctx.warn(&format!("gapmap error {}: {}", i, err));
+134 +                 ctx.warn(&format!("gapmap error {i}: {err}"));
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> src/indexer/merger.rs:558:9
+    |
+558 |         eprintln!("[MERGE] start: {} segments, {} docs total", num_readers, total_docs);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+558 -         eprintln!("[MERGE] start: {} segments, {} docs total", num_readers, total_docs);
+558 +         eprintln!("[MERGE] start: {num_readers} segments, {total_docs} docs total");
+    |
+
+warning: redundant closure
+   --> src/indexer/segment_updater.rs:318:30
+    |
+318 |                     .map_err(|e| LucivyError::SystemError(e))?;
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `LucivyError::SystemError`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+
+warning: this `map_or` can be simplified
+   --> src/indexer/segment_updater_actor.rs:165:24
+    |
+165 |                     && all_segments.first().map_or(true, |s| s.num_deleted_docs() == 0)
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_map_or
+help: use is_none_or instead
+    |
+165 -                     && all_segments.first().map_or(true, |s| s.num_deleted_docs() == 0)
+165 +                     && all_segments.first().is_none_or(|s| s.num_deleted_docs() == 0)
+    |
+
+warning: this `map_or` can be simplified
+   --> src/indexer/segment_updater_actor.rs:253:16
+    |
+253 |             && all_segments.first().map_or(true, |s| s.num_deleted_docs() == 0)
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_map_or
+help: use is_none_or instead
+    |
+253 -             && all_segments.first().map_or(true, |s| s.num_deleted_docs() == 0)
+253 +             && all_segments.first().is_none_or(|s| s.num_deleted_docs() == 0)
+    |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+  --> src/indexer/segment_writer.rs:72:24
+   |
+72 |     activity_reporter: Option<Box<dyn Fn(&str) + Send>>,
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: variables can be used directly in the `format!` string
+   --> src/aggregation/agg_data.rs:975:53
+    |
+975 |                 crate::LucivyError::InvalidArgument(format!("Invalid regex `{}`: {}", pattern, e))
+    |                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+975 -                 crate::LucivyError::InvalidArgument(format!("Invalid regex `{}`: {}", pattern, e))
+975 +                 crate::LucivyError::InvalidArgument(format!("Invalid regex `{pattern}`: {e}"))
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> src/aggregation/bucket/filter.rs:376:34
+    |
+376 |                 D::Error::custom(format!("Failed to deserialize QueryBuilder: {}", e))
+    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+376 -                 D::Error::custom(format!("Failed to deserialize QueryBuilder: {}", e))
+376 +                 D::Error::custom(format!("Failed to deserialize QueryBuilder: {e}"))
+    |
+
+warning: returning the result of a `let` binding from a block
+   --> src/aggregation/metric/top_hits.rs:338:9
+    |
+271 | /         let doc_value_fields = self
+272 | |             .doc_value_fields
+273 | |             .iter()
+274 | |             .map(|field| {
+...   |
+336 | |             })
+337 | |             .collect();
+    | |_______________________- unnecessary `let` binding
+338 |           doc_value_fields
+    |           ^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#let_and_return
+    = note: `#[warn(clippy::let_and_return)]` on by default
+help: return the expression directly
+    |
+271 ~         
+272 ~         self
+273 +             .doc_value_fields
+274 +             .iter()
+275 +             .map(|field| {
+276 +                 let accessors = accessors
+277 +                     .get(field)
+278 +                     .unwrap_or_else(|| panic!("field '{field}' not found in accessors"));
+279 + 
+280 +                 let values: Vec<FastFieldValue> = accessors
+281 +                     .iter()
+282 +                     .flat_map(|accessor| match accessor {
+283 +                         DynamicColumn::U64(accessor) => accessor
+284 +                             .values_for_doc(doc_id)
+285 +                             .map(FastFieldValue::U64)
+286 +                             .collect::<Vec<_>>(),
+287 +                         DynamicColumn::I64(accessor) => accessor
+288 +                             .values_for_doc(doc_id)
+289 +                             .map(FastFieldValue::I64)
+290 +                             .collect::<Vec<_>>(),
+291 +                         DynamicColumn::F64(accessor) => accessor
+292 +                             .values_for_doc(doc_id)
+293 +                             .map(FastFieldValue::F64)
+294 +                             .collect::<Vec<_>>(),
+295 +                         DynamicColumn::Bytes(accessor) => accessor
+296 +                             .term_ords(doc_id)
+297 +                             .map(|term_ord| {
+298 +                                 let mut buffer = vec![];
+299 +                                 assert!(
+300 +                                     accessor
+301 +                                         .ord_to_bytes(term_ord, &mut buffer)
+302 +                                         .expect("could not read term dictionary"),
+303 +                                     "term corresponding to term_ord does not exist"
+304 +                                 );
+305 +                                 FastFieldValue::Bytes(buffer)
+306 +                             })
+307 +                             .collect::<Vec<_>>(),
+308 +                         DynamicColumn::Str(accessor) => accessor
+309 +                             .term_ords(doc_id)
+310 +                             .map(|term_ord| {
+311 +                                 let mut buffer = vec![];
+312 +                                 assert!(
+313 +                                     accessor
+314 +                                         .ord_to_bytes(term_ord, &mut buffer)
+315 +                                         .expect("could not read term dictionary"),
+316 +                                     "term corresponding to term_ord does not exist"
+317 +                                 );
+318 +                                 FastFieldValue::Str(String::from_utf8(buffer).unwrap())
+319 +                             })
+320 +                             .collect::<Vec<_>>(),
+321 +                         DynamicColumn::Bool(accessor) => accessor
+322 +                             .values_for_doc(doc_id)
+323 +                             .map(FastFieldValue::Bool)
+324 +                             .collect::<Vec<_>>(),
+325 +                         DynamicColumn::IpAddr(accessor) => accessor
+326 +                             .values_for_doc(doc_id)
+327 +                             .map(FastFieldValue::IpAddr)
+328 +                             .collect::<Vec<_>>(),
+329 +                         DynamicColumn::DateTime(accessor) => accessor
+330 +                             .values_for_doc(doc_id)
+331 +                             .map(FastFieldValue::Date)
+332 +                             .collect::<Vec<_>>(),
+333 +                     })
+334 +                     .collect();
+335 + 
+336 +                 (field.to_owned(), FastFieldValue::Array(values))
+337 +             })
+338 +             .collect()
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> src/aggregation/mod.rs:363:9
+    |
+363 | /         panic!(
+364 | |             "ColumnType ID {} cannot be converted to f64 metric",
+365 | |             COLUMN_TYPE_ID
+366 | |         )
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+
+warning: variables can be used directly in the `format!` string
+   --> src/collector/sort_key/sort_by_erased_type.rs:168:68
+    |
+168 |                           return Err(crate::LucivyError::SchemaError(format!(
+    |  ____________________________________________________________________^
+169 | |                             "Field `{}` is of type {column_type:?}, which is not supported for \
+170 | |                              sorting by owned value yet.",
+171 | |                             column_name
+172 | |                         )))
+    | |_________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+
+warning: returning the result of a `let` binding from a block
+   --> src/directory/managed_directory.rs:280:9
+    |
+274 | /         let managed_paths = self
+275 | |             .meta_informations
+276 | |             .read()
+277 | |             .expect("Managed directory rlock poisoned in list damaged.")
+278 | |             .managed_paths
+279 | |             .clone();
+    | |_____________________- unnecessary `let` binding
+280 |           managed_paths
+    |           ^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#let_and_return
+help: return the expression directly
+    |
+274 ~         
+275 ~         self
+276 +             .meta_informations
+277 +             .read()
+278 +             .expect("Managed directory rlock poisoned in list damaged.")
+279 +             .managed_paths
+280 +             .clone()
+    |
+
+warning: returning the result of a `let` binding from a block
+   --> src/fieldnorm/reader.rs:159:17
+    |
+158 |                 let fieldnorm_id = data.as_slice()[doc_id as usize];
+    |                 ---------------------------------------------------- unnecessary `let` binding
+159 |                 fieldnorm_id
+    |                 ^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#let_and_return
+help: return the expression directly
+    |
+158 ~                 
+159 ~                 data.as_slice()[doc_id as usize]
+    |
+
+warning: variables can be used directly in the `format!` string
+  --> src/index/segment_component.rs:71:57
+   |
+71 |             SegmentComponent::SuffixFst { field_id } => format!("{}.sfx", field_id),
+   |                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+   |
+71 -             SegmentComponent::SuffixFst { field_id } => format!("{}.sfx", field_id),
+71 +             SegmentComponent::SuffixFst { field_id } => format!("{field_id}.sfx"),
+   |
+
+warning: variables can be used directly in the `format!` string
+  --> src/index/segment_component.rs:72:58
+   |
+72 |             SegmentComponent::SuffixPost { field_id } => format!("{}.sfxpost", field_id),
+   |                                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+   |
+72 -             SegmentComponent::SuffixPost { field_id } => format!("{}.sfxpost", field_id),
+72 +             SegmentComponent::SuffixPost { field_id } => format!("{field_id}.sfxpost"),
+   |
+
+warning: variables can be used directly in the `format!` string
+  --> src/index/segment_component.rs:73:54
+   |
+73 |             SegmentComponent::PosMap { field_id } => format!("{}.posmap", field_id),
+   |                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+   |
+73 -             SegmentComponent::PosMap { field_id } => format!("{}.posmap", field_id),
+73 +             SegmentComponent::PosMap { field_id } => format!("{field_id}.posmap"),
+   |
+
+warning: variables can be used directly in the `format!` string
+  --> src/index/segment_component.rs:74:55
+   |
+74 |             SegmentComponent::ByteMap { field_id } => format!("{}.bytemap", field_id),
+   |                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+   |
+74 -             SegmentComponent::ByteMap { field_id } => format!("{}.bytemap", field_id),
+74 +             SegmentComponent::ByteMap { field_id } => format!("{field_id}.bytemap"),
+   |
+
+warning: variables can be used directly in the `format!` string
+  --> src/index/segment_component.rs:75:73
+   |
+75 |             SegmentComponent::CustomSfxIndex { field_id, extension } => format!("{}.{}", field_id, extension),
+   |                                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+   |
+75 -             SegmentComponent::CustomSfxIndex { field_id, extension } => format!("{}.{}", field_id, extension),
+75 +             SegmentComponent::CustomSfxIndex { field_id, extension } => format!("{field_id}.{extension}"),
+   |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+  --> src/index/segment_reader.rs:63:59
+   |
+63 |   fn load_sfx_files(segment: &Segment, _schema: &Schema) -> (
+   |  ___________________________________________________________^
+64 | |     FnvHashMap<Field, FileSlice>,
+65 | |     FnvHashMap<Field, FileSlice>,
+66 | |     FnvHashMap<Field, FileSlice>,
+67 | |     FnvHashMap<Field, FileSlice>,
+68 | |     HashMap<(String, Field), FileSlice>,
+69 | | ) {
+   | |_^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: redundant closure
+   --> src/index/segment_reader.rs:493:29
+    |
+493 |             .unwrap_or_else(|| FileSlice::empty());
+    |                             ^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `FileSlice::empty`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+
+warning: doc list item without indentation
+   --> src/query/automaton_weight.rs:161:9
+    |
+161 |     /// Returns (term_bytes, TermInfo) pairs for global doc_freq lookup.
+    |         ^
+    |
+    = help: if this is supposed to be its own paragraph, add a blank line
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_lazy_continuation
+help: indent this line
+    |
+161 |     ///   Returns (term_bytes, TermInfo) pairs for global doc_freq lookup.
+    |         ++
+
+warning: this function has too many arguments (8/7)
+   --> src/query/automaton_weight.rs:233:5
+    |
+233 | /     fn scorer_from_ordinals(
+234 | |         &self,
+235 | |         reader: &SegmentReader,
+236 | |         ordinals: &[u64],
+...   |
+241 | |         max_doc: u32,
+242 | |     ) -> crate::Result<Box<dyn Scorer>> {
+    | |_______________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+
+warning: this function has too many arguments (10/7)
+   --> src/query/phrase_query/automaton_phrase_query.rs:105:5
+    |
+105 | /     pub fn new_with_separators(
+106 | |         field: Field,
+107 | |         stored_field: Option<Field>,
+108 | |         mut phrase_terms: Vec<(usize, String)>,
+...   |
+115 | |         strict_separators: bool,
+116 | |     ) -> AutomatonPhraseQuery {
+    | |_____________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+
+warning: this function has too many arguments (14/7)
+   --> src/query/phrase_query/automaton_phrase_weight.rs:91:5
+    |
+91  | /     pub fn new(
+92  | |         field: Field,
+93  | |         stored_field: Option<Field>,
+94  | |         phrase_terms: Vec<(usize, String)>,
+...   |
+105 | |         highlight_field_name: String,
+106 | |     ) -> Self {
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+
+warning: this function has too many arguments (14/7)
+  --> src/query/phrase_query/contains_scorer.rs:53:5
+   |
+53 | /     pub fn new(
+54 | |         term_postings_with_offset: Vec<(usize, TPostings)>,
+55 | |         similarity_weight_opt: Option<Bm25Weight>,
+56 | |         fieldnorm_reader: FieldNormReader,
+...  |
+67 | |         segment_id: SegmentId,
+68 | |     ) -> ContainsScorer<TPostings> {
+   | |__________________________________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+
+warning: this function has too many arguments (13/7)
+   --> src/query/phrase_query/contains_scorer.rs:444:5
+    |
+444 | /     pub fn new(
+445 | |         bitset_docset: BitSetDocSet,
+446 | |         store_reader: StoreReader,
+447 | |         field: Field,
+...   |
+457 | |         segment_id: SegmentId,
+458 | |     ) -> ContainsSingleScorer {
+    | |_____________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+
+warning: this function has too many arguments (8/7)
+   --> src/query/phrase_query/phrase_scorer.rs:409:5
+    |
+409 | /     fn build(
+410 | |         term_postings_with_offset: Vec<(usize, TPostings)>,
+411 | |         similarity_weight_opt: Option<Bm25Weight>,
+412 | |         fieldnorm_reader: FieldNormReader,
+...   |
+417 | |         segment_id: SegmentId,
+418 | |     ) -> PhraseScorer<TPostings> {
+    | |________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+  --> src/query/phrase_query/regex_continuation_query.rs:53:6
+   |
+53 | ) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)> {
+   |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/query/phrase_query/regex_continuation_query.rs:119:6
+    |
+119 | ) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>)> {
+    |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: variables can be used directly in the `format!` string
+   --> src/query/phrase_query/regex_continuation_query.rs:311:58
+    |
+311 |                 DfaKind::Fuzzy { text, distance, .. } => format!("fuzzy:{}:{}", text, distance),
+    |                                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+311 -                 DfaKind::Fuzzy { text, distance, .. } => format!("fuzzy:{}:{}", text, distance),
+311 +                 DfaKind::Fuzzy { text, distance, .. } => format!("fuzzy:{text}:{distance}"),
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> src/query/phrase_query/regex_continuation_query.rs:368:54
+    |
+368 |             DfaKind::Fuzzy { text, distance, .. } => format!("fuzzy:{}:{}", text, distance),
+    |                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+368 -             DfaKind::Fuzzy { text, distance, .. } => format!("fuzzy:{}:{}", text, distance),
+368 +             DfaKind::Fuzzy { text, distance, .. } => format!("fuzzy:{text}:{distance}"),
+    |
+
+warning: calling `as_bytes` after slicing a string
+   --> src/query/phrase_query/regex_continuation_query.rs:423:29
+    |
+423 |                 let bytes = text_lower[byte_from..].as_bytes();
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `&text_lower.as_bytes()[byte_from..]`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#sliced_string_as_bytes
+    = note: `#[warn(clippy::sliced_string_as_bytes)]` on by default
+
+warning: this `else { if .. }` block can be collapsed
+   --> src/query/phrase_query/regex_continuation_query.rs:663:16
+    |
+663 |           } else {
+    |  ________________^
+664 | |             if in_word {
+665 | |                 current_word += 1;
+666 | |                 in_word = false;
+667 | |             }
+668 | |         }
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_else_if
+    = note: `#[warn(clippy::collapsible_else_if)]` on by default
+help: collapse nested if block
+    |
+663 ~         } else if in_word {
+664 +             current_word += 1;
+665 +             in_word = false;
+666 +         }
+    |
+
+warning: equality checks against false can be replaced by a negation
+   --> src/query/phrase_query/regex_continuation_query.rs:653:29
+    |
+653 |                 if i > 0 && in_word == false && ngrams.len() > 0 {
+    |                             ^^^^^^^^^^^^^^^^ help: try simplifying it as shown: `!in_word`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#bool_comparison
+    = note: `#[warn(clippy::bool_comparison)]` on by default
+
+warning: length comparison to zero
+   --> src/query/phrase_query/regex_continuation_query.rs:653:49
+    |
+653 |                 if i > 0 && in_word == false && ngrams.len() > 0 {
+    |                                                 ^^^^^^^^^^^^^^^^ help: using `!is_empty` is clearer and more explicit: `!ngrams.is_empty()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#len_zero
+    = note: `#[warn(clippy::len_zero)]` on by default
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/query/phrase_query/regex_continuation_query.rs:738:6
+    |
+738 | ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>)> {
+    |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: this function has too many arguments (9/7)
+   --> src/query/phrase_query/regex_continuation_query.rs:728:1
+    |
+728 | / pub fn fuzzy_contains_via_trigram(
+729 | |     query_text: &str,
+730 | |     distance: u8,
+731 | |     prefix: bool,
+...   |
+737 | |     posmap_data: Option<&[u8]>,
+738 | | ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>)> {
+    | |________________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+
+warning: using `clone` on type `u32` which implements the `Copy` trait
+    --> src/query/phrase_query/regex_continuation_query.rs:1015:29
+     |
+1015 |                 let mut s = start_state.clone();
+     |                             ^^^^^^^^^^^^^^^^^^^ help: try removing the `clone` call: `start_state`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#clone_on_copy
+     = note: `#[warn(clippy::clone_on_copy)]` on by default
+
+warning: this `map_or` can be simplified
+    --> src/query/phrase_query/regex_continuation_query.rs:1034:37
+     |
+1034 |                       let dominated = dfa_matches.last()
+     |  _____________________________________^
+1035 | |                         .map_or(false, |&(prev_start, prev_len)| sb < prev_start + prev_len);
+     | |____________________________________________________________________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_map_or
+help: use is_some_and instead
+     |
+1035 -                         .map_or(false, |&(prev_start, prev_len)| sb < prev_start + prev_len);
+1035 +                         .is_some_and(|&(prev_start, prev_len)| sb < prev_start + prev_len);
+     |
+
+warning: variables can be used directly in the `format!` string
+    --> src/query/phrase_query/regex_continuation_query.rs:1118:17
+     |
+1118 |                 format!("fuzzy contains requires PosMap but none found for doc {} — index may need rebuild", doc_id)
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+     |
+1118 -                 format!("fuzzy contains requires PosMap but none found for doc {} — index may need rebuild", doc_id)
+1118 +                 format!("fuzzy contains requires PosMap but none found for doc {doc_id} — index may need rebuild")
+     |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/query/phrase_query/regex_continuation_query.rs:1183:6
+     |
+1183 | ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>)>
+     |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: this function has too many arguments (11/7)
+    --> src/query/phrase_query/regex_continuation_query.rs:1171:1
+     |
+1171 | / pub fn regex_contains_via_literal<A: Automaton>(
+1172 | |     automaton: &A,
+1173 | |     pattern: &str,
+1174 | |     sfx_dict: &SfxTermDictionary,
+...    |
+1182 | |     sepmap_data: Option<&[u8]>,
+1183 | | ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>)>
+     | |________________________________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+
+warning: variables can be used directly in the `format!` string
+    --> src/query/phrase_query/regex_continuation_query.rs:1346:17
+     |
+1346 |                 eprintln!("  doc={} bf={} bt={} si={}", doc_id, first_bf, last_bt, first_si);
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+     |
+1346 -                 eprintln!("  doc={} bf={} bt={} si={}", doc_id, first_bf, last_bt, first_si);
+1346 +                 eprintln!("  doc={doc_id} bf={first_bf} bt={last_bt} si={first_si}");
+     |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/query/phrase_query/regex_continuation_query.rs:1445:6
+     |
+1445 | ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>)>
+     |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/query/phrase_query/regex_continuation_query.rs:1587:25
+     |
+1587 |     store_dfa_verifier: Option<&dyn Fn(DocId, u32, &A, &A::State) -> Option<usize>>,
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/query/phrase_query/regex_continuation_query.rs:1588:6
+     |
+1588 | ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>)>
+     |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/query/phrase_query/regex_continuation_query.rs:1776:10
+     |
+1776 |     ) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>)> {
+     |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/query/phrase_query/suffix_contains.rs:126:21
+    |
+126 |     store_verifier: Option<&dyn Fn(u32, usize, &str) -> bool>,
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: this `map_or` can be simplified
+   --> src/query/phrase_query/suffix_contains.rs:317:34
+    |
+317 |                     let gap_ok = gap_raw.map_or(false, |sep| sep.is_empty());
+    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_map_or
+help: use is_some_and instead
+    |
+317 -                     let gap_ok = gap_raw.map_or(false, |sep| sep.is_empty());
+317 +                     let gap_ok = gap_raw.is_some_and(|sep| sep.is_empty());
+    |
+
+warning: this function has too many arguments (8/7)
+   --> src/query/phrase_query/suffix_contains.rs:582:1
+    |
+582 | / fn cross_token_resolve_for_multi<F>(
+583 | |     sfx_reader: &SfxFileReader<'_>,
+584 | |     sub_token: &str,
+585 | |     raw_term_resolver: &F,
+...   |
+590 | |     fuzzy_distance: u8,
+591 | | ) -> Vec<MultiTokenPosting>
+    | |___________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+
+warning: this `else { if .. }` block can be collapsed
+   --> src/query/phrase_query/suffix_contains.rs:612:16
+    |
+612 |           } else {
+    |  ________________^
+613 | |             if use_si0 { sfx_reader.prefix_walk_si0(&query_lower) }
+614 | |             else { sfx_reader.prefix_walk(&query_lower) }
+615 | |         };
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_else_if
+help: collapse nested if block
+    |
+612 ~         } else if use_si0 { sfx_reader.prefix_walk_si0(&query_lower) }
+613 ~         else { sfx_reader.prefix_walk(&query_lower) };
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> src/query/phrase_query/suffix_contains.rs:990:23
+    |
+990 |             if diag { eprintln!("[multi-token-diag] ABORT: token '{}' has 0 postings", token); }
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+990 -             if diag { eprintln!("[multi-token-diag] ABORT: token '{}' has 0 postings", token); }
+990 +             if diag { eprintln!("[multi-token-diag] ABORT: token '{token}' has 0 postings"); }
+    |
+
+warning: variables can be used directly in the `format!` string
+    --> src/query/phrase_query/suffix_contains.rs:1023:23
+     |
+1023 |             if diag { eprintln!("[multi-token-diag] ABORT: token[{}] empty after pivot filter", i); }
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+     |
+1023 -             if diag { eprintln!("[multi-token-diag] ABORT: token[{}] empty after pivot filter", i); }
+1023 +             if diag { eprintln!("[multi-token-diag] ABORT: token[{i}] empty after pivot filter"); }
+     |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/query/phrase_query/suffix_contains_query.rs:179:10
+    |
+179 |     ) -> crate::Result<(HashMap<(String, SegmentId), CachedSfxResult>, u64)> {
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: variables can be used directly in the `format!` string
+   --> src/query/phrase_query/suffix_contains_query.rs:219:27
+    |
+219 |             let seg_str = format!("{:?}", segment_id);
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+219 -             let seg_str = format!("{:?}", segment_id);
+219 +             let seg_str = format!("{segment_id:?}");
+    |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/query/phrase_query/suffix_contains_query.rs:321:6
+    |
+321 | ) -> (Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)
+    |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: this function has too many arguments (12/7)
+   --> src/query/phrase_query/suffix_contains_query.rs:308:1
+    |
+308 | / pub fn run_sfx_walk<F>(
+309 | |     sfx_reader: &SfxFileReader<'_>,
+310 | |     resolver: &F,
+311 | |     query_text: &str,
+...   |
+320 | |     ord_to_term: Option<&dyn Fn(u64) -> Option<String>>,
+321 | | ) -> (Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)
+    | |____________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+
+warning: variables can be used directly in the `format!` string
+   --> src/query/phrase_query/suffix_contains_query.rs:641:23
+    |
+641 |         let seg_str = format!("{:?}", segment_id);
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+641 -         let seg_str = format!("{:?}", segment_id);
+641 +         let seg_str = format!("{segment_id:?}");
+    |
+
+warning: you seem to want to iterate on a map's keys
+   --> src/query/phrase_query/literal_resolve.rs:123:25
+    |
+123 |     for (&doc_id, _) in &literals_by_doc[smallest_idx] {
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#for_kv_map
+    = note: `#[warn(clippy::for_kv_map)]` on by default
+help: use the corresponding method
+    |
+123 -     for (&doc_id, _) in &literals_by_doc[smallest_idx] {
+123 +     for &doc_id in literals_by_doc[smallest_idx].keys() {
+    |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/query/phrase_query/literal_resolve.rs:183:4
+    |
+183 | -> Vec<(DocId, u32, u32, usize, u16, bool, usize, u32, u16)> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/query/phrase_query/literal_resolve.rs:197:22
+    |
+197 |     let mut results: Vec<(DocId, u32, u32, usize, u16, bool, usize, u32, u16)> = Vec::new();
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/query/phrase_query/literal_resolve.rs:224:80
+    |
+224 | ...ize, u32, u32, u16, u32)], results: &mut Vec<(DocId, u32, u32, usize, u16, bool, usize, u32, u16)>| -> bool {
+    |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: this `map_or` can be simplified
+   --> src/query/phrase_query/literal_resolve.rs:294:29
+    |
+294 |                 .filter(|e| last_tri.map_or(true, |last| e.0 > last))
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_map_or
+help: use is_none_or instead
+    |
+294 -                 .filter(|e| last_tri.map_or(true, |last| e.0 > last))
+294 +                 .filter(|e| last_tri.is_none_or(|last| e.0 > last))
+    |
+
+warning: this function has too many arguments (10/7)
+   --> src/query/phrase_query/literal_resolve.rs:327:1
+    |
+327 | / pub fn validate_path<A: lucivy_fst::Automaton>(
+328 | |     automaton: &A,
+329 | |     dfa_state: &A::State,
+330 | |     posmap: &PosMapReader<'_>,
+...   |
+337 | |     normalize_gaps: bool,
+338 | | ) -> Option<A::State>
+    | |_____________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+
+warning: doc list item overindented
+   --> src/query/phrase_query/literal_pipeline.rs:458:5
+    |
+458 | ///              if false, query must cover token to the end (si + query_len == token_len)
+    |     ^^^^^^^^^^^^^ help: try using `  ` (2 spaces)
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_overindented_list_items
+    = note: `#[warn(clippy::doc_overindented_list_items)]` on by default
+
+warning: using `clone` on type `u32` which implements the `Copy` trait
+   --> src/query/phrase_query/literal_pipeline.rs:568:71
+    |
+568 | ...                   next_active.push((*doc_id, *position + 1, _byte_to.clone(), active[i].3, active[i].4));
+    |                                                                 ^^^^^^^^^^^^^^^^ help: try dereferencing it: `*_byte_to`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#clone_on_copy
+
+warning: this `if` statement can be collapsed
+   --> src/query/phrase_query/regex_gap_analyzer.rs:299:13
+    |
+299 | /             if !sm.sep_bytes_in_ranges(prev, ranges) {
+300 | |                 if !sm.has_contiguous(prev) {
+301 | |                     return Some(false); // never contiguous → impossible
+...   |
+304 | |             }
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+    = note: `#[warn(clippy::collapsible_if)]` on by default
+help: collapse nested if block
+    |
+299 ~             if !sm.sep_bytes_in_ranges(prev, ranges)
+300 ~                 && !sm.has_contiguous(prev) {
+301 |                     return Some(false); // never contiguous → impossible
+302 |                 }
+303 ~                 // Has contiguous → can't reject globally, accept conservatively.
+    |
+
+warning: this function has too many arguments (10/7)
+   --> src/query/phrase_query/fuzzy_contains.rs:218:1
+    |
+218 | / fn find_matches(
+219 | |     hits_by_doc: &HitsByDoc,
+220 | |     threshold: usize,
+221 | |     max_span: u32,
+...   |
+228 | |     diag_docs: Option<&HashSet<DocId>>,
+229 | | ) -> Vec<FuzzyMatch> {
+    | |____________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+
+warning: this `map_or` can be simplified
+   --> src/query/phrase_query/fuzzy_contains.rs:265:24
+    |
+265 |                     if diag_docs.map_or(false, |d| d.contains(&doc_id)) {
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_map_or
+help: use is_some_and instead
+    |
+265 -                     if diag_docs.map_or(false, |d| d.contains(&doc_id)) {
+265 +                     if diag_docs.is_some_and(|d| d.contains(&doc_id)) {
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> src/query/phrase_query/fuzzy_contains.rs:266:25
+    |
+266 |                         eprintln!("[diag] find_matches doc={}: emit zone pos={} miss={}", doc_id, zone_start_pos, miss);
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+266 -                         eprintln!("[diag] find_matches doc={}: emit zone pos={} miss={}", doc_id, zone_start_pos, miss);
+266 +                         eprintln!("[diag] find_matches doc={doc_id}: emit zone pos={zone_start_pos} miss={miss}");
+    |
+
+warning: this `map_or` can be simplified
+   --> src/query/phrase_query/fuzzy_contains.rs:305:33
+    |
+305 |                 let is_better = zone_best.as_ref().map_or(true, |&(_, _, prev_miss, _, _)| real_misses < prev_miss);
+    |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_map_or
+help: use is_none_or instead
+    |
+305 -                 let is_better = zone_best.as_ref().map_or(true, |&(_, _, prev_miss, _, _)| real_misses < prev_miss);
+305 +                 let is_better = zone_best.as_ref().is_none_or(|&(_, _, prev_miss, _, _)| real_misses < prev_miss);
+    |
+
+warning: this `map_or` can be simplified
+   --> src/query/phrase_query/fuzzy_contains.rs:314:16
+    |
+314 |             if diag_docs.map_or(false, |d| d.contains(&doc_id)) {
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_map_or
+help: use is_some_and instead
+    |
+314 -             if diag_docs.map_or(false, |d| d.contains(&doc_id)) {
+314 +             if diag_docs.is_some_and(|d| d.contains(&doc_id)) {
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> src/query/phrase_query/fuzzy_contains.rs:315:17
+    |
+315 |                 eprintln!("[diag] find_matches doc={}: emit final zone pos={} miss={}", doc_id, zone_start_pos, miss);
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+315 -                 eprintln!("[diag] find_matches doc={}: emit final zone pos={} miss={}", doc_id, zone_start_pos, miss);
+315 +                 eprintln!("[diag] find_matches doc={doc_id}: emit final zone pos={zone_start_pos} miss={miss}");
+    |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/query/phrase_query/fuzzy_contains.rs:412:6
+    |
+412 | ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>)> {
+    |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/query/phrase_query/fuzzy_contains.rs:426:6
+    |
+426 | ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>)> {
+    |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/query/phrase_query/fuzzy_contains.rs:439:6
+    |
+439 | ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>)> {
+    |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: this function has too many arguments (8/7)
+   --> src/query/phrase_query/fuzzy_contains.rs:430:1
+    |
+430 | / fn fuzzy_contains_inner(
+431 | |     query_text: &str,
+432 | |     distance: u8,
+433 | |     sfx_reader: &SfxFileReader,
+...   |
+438 | |     diag_docs: Option<&HashSet<DocId>>,
+439 | | ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>)> {
+    | |___________________________________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+
+warning: variables can be used directly in the `format!` string
+   --> src/query/phrase_query/fuzzy_contains.rs:480:9
+    |
+480 | /         eprintln!("[diag] query='{}' concat='{}' ngrams={:?} threshold={} max_span={} n={} boundary_trigrams={:?}",
+481 | |             query_text, concat, ngrams, threshold, max_span, n, boundary_grams);
+    | |_______________________________________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+
+warning: variables can be used directly in the `format!` string
+   --> src/query/phrase_query/fuzzy_contains.rs:621:17
+    |
+621 |                 eprintln!("[diag] doc={}: NOT in hits_by_doc (no trigram hits at all)", target_doc);
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+621 -                 eprintln!("[diag] doc={}: NOT in hits_by_doc (no trigram hits at all)", target_doc);
+621 +                 eprintln!("[diag] doc={target_doc}: NOT in hits_by_doc (no trigram hits at all)");
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> src/query/posting_resolver.rs:151:45
+    |
+151 |           crate::LucivyError::InvalidArgument(format!(
+    |  _____________________________________________^
+152 | |             "no .sfxpost file for field {:?}. PostingResolver requires suffix postings.",
+153 | |             field
+154 | |         ))
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+
+warning: you should consider adding a `Default` implementation for `SuffixFstBuilder`
+   --> src/suffix_fst/builder.rs:157:5
+    |
+157 | /     pub fn new() -> Self {
+158 | |         Self::with_min_suffix_len(default_min_suffix_len())
+159 | |     }
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+    = note: `#[warn(clippy::new_without_default)]` on by default
+help: try adding this
+    |
+155 + impl Default for SuffixFstBuilder {
+156 +     fn default() -> Self {
+157 +         Self::new()
+158 +     }
+159 + }
+    |
+
+warning: you should consider adding a `Default` implementation for `SfxCollector`
+  --> src/suffix_fst/collector.rs:79:5
+   |
+79 | /     pub fn new() -> Self {
+80 | |         let min = std::env::var("LUCIVY_MIN_SUFFIX_LEN")
+81 | |             .ok()
+82 | |             .and_then(|v| v.parse().ok())
+83 | |             .unwrap_or(1);
+84 | |         Self::with_min_suffix_len(min)
+85 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+help: try adding this
+   |
+77 + impl Default for SfxCollector {
+78 +     fn default() -> Self {
+79 +         Self::new()
+80 +     }
+81 + }
+   |
+
+warning: this can be `std::io::Error::other(_)`
+   --> src/suffix_fst/collector.rs:254:26
+    |
+254 |             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("sfx build DAG: {e}")))?;
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#io_other_error
+    = note: `#[warn(clippy::io_other_error)]` on by default
+help: use `std::io::Error::other`
+    |
+254 -             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("sfx build DAG: {e}")))?;
+254 +             .map_err(|e| std::io::Error::other(format!("sfx build DAG: {e}")))?;
+    |
+
+warning: this can be `std::io::Error::other(_)`
+   --> src/suffix_fst/collector.rs:256:28
+    |
+256 |             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "sfx DAG missing output").into())
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#io_other_error
+help: use `std::io::Error::other`
+    |
+256 -             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "sfx DAG missing output").into())
+256 +             .ok_or_else(|| std::io::Error::other("sfx DAG missing output").into())
+    |
+
+warning: casting to the same type is unnecessary (`u32` -> `u32`)
+   --> src/suffix_fst/collector.rs:284:24
+    |
+284 |         let num_docs = self.gapmap_writer.num_docs() as u32;
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `self.gapmap_writer.num_docs()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_cast
+    = note: `#[warn(clippy::unnecessary_cast)]` on by default
+
+warning: you should consider adding a `Default` implementation for `GapMapWriter`
+  --> src/suffix_fst/gapmap.rs:48:5
+   |
+48 | /     pub fn new() -> Self {
+49 | |         Self {
+50 | |             data_buffer: Vec::new(),
+51 | |             doc_offsets: Vec::new(),
+52 | |         }
+53 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+help: try adding this
+   |
+46 + impl Default for GapMapWriter {
+47 +     fn default() -> Self {
+48 +         Self::new()
+49 +     }
+50 + }
+   |
+
+warning: doc list item without indentation
+   --> src/suffix_fst/gapmap.rs:266:9
+    |
+266 |     /// Returns Some(gap_bytes) for a valid separator.
+    |         ^
+    |
+    = help: if this is supposed to be its own paragraph, add a blank line
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_lazy_continuation
+help: indent this line
+    |
+266 |     ///   Returns Some(gap_bytes) for a valid separator.
+    |         ++
+
+warning: variables can be used directly in the `format!` string
+   --> src/suffix_fst/gapmap.rs:466:26
+    |
+466 |                 message: format!("num_values=0 but num_tokens={}", num_tokens),
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+466 -                 message: format!("num_values=0 but num_tokens={}", num_tokens),
+466 +                 message: format!("num_values=0 but num_tokens={num_tokens}"),
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> src/suffix_fst/gapmap.rs:529:26
+    |
+529 |                   message: format!(
+    |  __________________________^
+530 | |                     "too few gaps: found {}, tokens={}, values={}, expected>={}",
+531 | |                     gap_count, num_tokens, num_values, num_tokens,
+532 | |                 ),
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+
+warning: the following explicit lifetimes could be elided: 'a
+   --> src/suffix_fst/gapmap.rs:571:18
+    |
+571 | fn decode_gap_at<'a>(data: &'a [u8], cursor: usize) -> (&'a [u8], usize) {
+    |                  ^^         ^^                           ^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_lifetimes
+    = note: `#[warn(clippy::needless_lifetimes)]` on by default
+help: elide the lifetimes
+    |
+571 - fn decode_gap_at<'a>(data: &'a [u8], cursor: usize) -> (&'a [u8], usize) {
+571 + fn decode_gap_at(data: &[u8], cursor: usize) -> (&[u8], usize) {
+    |
+
+warning: you should consider adding a `Default` implementation for `SiblingIndex`
+   --> src/suffix_fst/sibling_table.rs:216:5
+    |
+216 |     pub fn new() -> Self { Self { data: Vec::new() } }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+help: try adding this
+    |
+215 + impl Default for SiblingIndex {
+216 +     fn default() -> Self {
+217 +         Self::new()
+218 +     }
+219 + }
+    |
+
+warning: redundant closure
+   --> src/suffix_fst/sibling_table.rs:240:63
+    |
+240 |             let tt = match source_termtexts[seg_idx].and_then(|b| TermTextsReader::open(b)) {
+    |                                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `TermTextsReader::open`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+
+warning: redundant closure
+   --> src/suffix_fst/sibling_table.rs:262:63
+    |
+262 |             let tt = match source_termtexts[seg_idx].and_then(|b| TermTextsReader::open(b)) {
+    |                                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `TermTextsReader::open`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+
+warning: you should consider adding a `Default` implementation for `PosMapWriter`
+  --> src/suffix_fst/posmap.rs:24:5
+   |
+24 | /     pub fn new() -> Self {
+25 | |         Self { docs: Vec::new() }
+26 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+help: try adding this
+   |
+23 + impl Default for PosMapWriter {
+24 +     fn default() -> Self {
+25 +         Self::new()
+26 +     }
+27 + }
+   |
+
+warning: you should consider adding a `Default` implementation for `PosMapIndex`
+   --> src/suffix_fst/posmap.rs:217:5
+    |
+217 |     pub fn new() -> Self { Self { writer: PosMapWriter::new() } }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+help: try adding this
+    |
+216 + impl Default for PosMapIndex {
+217 +     fn default() -> Self {
+218 +         Self::new()
+219 +     }
+220 + }
+    |
+
+warning: you should consider adding a `Default` implementation for `ByteBitmapWriter`
+  --> src/suffix_fst/bytemap.rs:20:5
+   |
+20 | /     pub fn new() -> Self {
+21 | |         Self { bitmaps: Vec::new() }
+22 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+help: try adding this
+   |
+19 + impl Default for ByteBitmapWriter {
+20 +     fn default() -> Self {
+21 +         Self::new()
+22 +     }
+23 + }
+   |
+
+warning: you should consider adding a `Default` implementation for `ByteMapIndex`
+   --> src/suffix_fst/bytemap.rs:198:5
+    |
+198 |     pub fn new() -> Self { Self { writer: ByteBitmapWriter::new() } }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+help: try adding this
+    |
+197 + impl Default for ByteMapIndex {
+198 +     fn default() -> Self {
+199 +         Self::new()
+200 +     }
+201 + }
+    |
+
+warning: you should consider adding a `Default` implementation for `SepMapWriter`
+  --> src/suffix_fst/sepmap.rs:27:5
+   |
+27 | /     pub fn new() -> Self {
+28 | |         Self { bitmaps: Vec::new() }
+29 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+help: try adding this
+   |
+26 + impl Default for SepMapWriter {
+27 +     fn default() -> Self {
+28 +         Self::new()
+29 +     }
+30 + }
+   |
+
+warning: doc list item without indentation
+   --> src/suffix_fst/sepmap.rs:134:9
+    |
+134 |     /// Returns false if any separator byte is outside the ranges.
+    |         ^
+    |
+    = help: if this is supposed to be its own paragraph, add a blank line
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_lazy_continuation
+help: indent this line
+    |
+134 |     ///   Returns false if any separator byte is outside the ranges.
+    |         ++
+
+warning: you should consider adding a `Default` implementation for `SepMapIndex`
+   --> src/suffix_fst/sepmap.rs:184:5
+    |
+184 |     pub fn new() -> Self { Self { data: Vec::new() } }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+help: try adding this
+    |
+183 + impl Default for SepMapIndex {
+184 +     fn default() -> Self {
+185 +         Self::new()
+186 +     }
+187 + }
+    |
+
+warning: redundant closure
+   --> src/suffix_fst/sepmap.rs:215:63
+    |
+215 |             let tt = match source_termtexts[seg_idx].and_then(|b| TermTextsReader::open(b)) {
+    |                                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `TermTextsReader::open`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+
+warning: you should consider adding a `Default` implementation for `TermTextsWriter`
+  --> src/suffix_fst/termtexts.rs:27:5
+   |
+27 | /     pub fn new() -> Self {
+28 | |         Self { texts: Vec::new() }
+29 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+help: try adding this
+   |
+26 + impl Default for TermTextsWriter {
+27 +     fn default() -> Self {
+28 +         Self::new()
+29 +     }
+30 + }
+   |
+
+warning: you should consider adding a `Default` implementation for `TermTextsIndex`
+   --> src/suffix_fst/termtexts.rs:116:5
+    |
+116 |     pub fn new() -> Self { Self { writer: TermTextsWriter::new() } }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+help: try adding this
+    |
+115 + impl Default for TermTextsIndex {
+116 +     fn default() -> Self {
+117 +         Self::new()
+118 +     }
+119 + }
+    |
+
+warning: you should consider adding a `Default` implementation for `FreqMapWriter`
+  --> src/suffix_fst/freqmap.rs:30:5
+   |
+30 | /     pub fn new() -> Self {
+31 | |         Self { freqs: HashMap::new(), max_ord: 0 }
+32 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+help: try adding this
+   |
+29 + impl Default for FreqMapWriter {
+30 +     fn default() -> Self {
+31 +         Self::new()
+32 +     }
+33 + }
+   |
+
+warning: you should consider adding a `Default` implementation for `FreqMapIndex`
+   --> src/suffix_fst/freqmap.rs:194:5
+    |
+194 |     pub fn new() -> Self { Self { writer: FreqMapWriter::new() } }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
+help: try adding this
+    |
+193 + impl Default for FreqMapIndex {
+194 +     fn default() -> Self {
+195 +         Self::new()
+196 +     }
+197 + }
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> src/suffix_fst/index_registry.rs:236:33
+    |
+236 |             Self::Custom(id) => write!(f, "{} (.{})", id, id),
+    |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+236 -             Self::Custom(id) => write!(f, "{} (.{})", id, id),
+236 +             Self::Custom(id) => write!(f, "{id} (.{id})"),
+    |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+  --> src/suffix_fst/sfxpost_v2.rs:63:27
+   |
+63 |             let mut docs: Vec<(u32, Vec<(u32, u32, u32)>)> = Vec::new();
+   |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: this `map_or` can be simplified
+  --> src/suffix_fst/sfxpost_v2.rs:65:20
+   |
+65 |                 if docs.last().map_or(true, |d| d.0 != doc_id) {
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_map_or
+help: use is_none_or instead
+   |
+65 -                 if docs.last().map_or(true, |d| d.0 != doc_id) {
+65 +                 if docs.last().is_none_or(|d| d.0 != doc_id) {
+   |
+
+warning: this pattern creates a reference to a reference
+   --> src/suffix_fst/sfxpost_v2.rs:207:25
+    |
+207 |             if let Some(ref f) = filter {
+    |                         ^^^^^ help: try: `f`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_borrow
+    = note: `#[warn(clippy::needless_borrow)]` on by default
+
+warning: this `if` statement can be collapsed
+   --> src/suffix_fst/term_dictionary.rs:193:13
+    |
+193 | /             if p.si == 0 {
+194 | |                 if self.termdict.ord_to_term(p.raw_ordinal, &mut term_buf)? && term_buf == key {
+195 | |                     return Ok(Some(p.raw_ordinal));
+196 | |                 }
+197 | |             }
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+help: collapse nested if block
+    |
+193 ~             if p.si == 0
+194 ~                 && self.termdict.ord_to_term(p.raw_ordinal, &mut term_buf)? && term_buf == key {
+195 |                     return Ok(Some(p.raw_ordinal));
+196 ~                 }
+    |
+
+error: this loop never actually loops
+   --> src/suffix_fst/term_dictionary.rs:217:13
+    |
+217 | /             for p in &parents {
+218 | |                 let term_info = self.termdict.term_info_from_ord(p.raw_ordinal);
+219 | |                 // Strip prefix byte from key
+220 | |                 if key.len() > 1 {
+...   |
+225 | |                 break; // One parent per SI=0 entry
+226 | |             }
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#never_loop
+    = note: `#[deny(clippy::never_loop)]` on by default
+help: if you need the first element of the iterator, try writing
+    |
+217 -             for p in &parents {
+217 +             if let Some(p) = parents.iter().next() {
+    |
+
+error: this loop never actually loops
+   --> src/suffix_fst/term_dictionary.rs:250:13
+    |
+250 | /             for p in &parents {
+251 | |                 let term_info = self.termdict.term_info_from_ord(p.raw_ordinal);
+252 | |                 if key.len() > 1 {
+253 | |                     if let Ok(s) = std::str::from_utf8(&key[1..]) {
+...   |
+257 | |                 break;
+258 | |             }
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#never_loop
+help: if you need the first element of the iterator, try writing
+    |
+250 -             for p in &parents {
+250 +             if let Some(p) = parents.iter().next() {
+    |
+
+error: this loop never actually loops
+   --> src/suffix_fst/term_dictionary.rs:271:13
+    |
+271 | /             for p in &parents {
+272 | |                 if key.len() > 1 {
+273 | |                     if let Ok(s) = std::str::from_utf8(&key[1..]) {
+274 | |                         results.push((s.to_string(), p.raw_ordinal));
+...   |
+277 | |                 break;
+278 | |             }
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#never_loop
+help: if you need the first element of the iterator, try writing
+    |
+271 -             for p in &parents {
+271 +             if let Some(p) = parents.iter().next() {
+    |
+
+error: this loop never actually loops
+   --> src/suffix_fst/term_dictionary.rs:313:13
+    |
+313 | /             for p in &parents {
+314 | |                 if key.len() > 1 {
+315 | |                     if let Ok(s) = std::str::from_utf8(&key[1..]) {
+316 | |                         results.push((s.to_string(), p.raw_ordinal));
+...   |
+319 | |                 break;
+320 | |             }
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#never_loop
+help: if you need the first element of the iterator, try writing
+    |
+313 -             for p in &parents {
+313 +             if let Some(p) = parents.iter().next() {
+    |
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+   --> src/suffix_fst/term_dictionary.rs:398:9
+    |
+398 |         &self.sfx_reader
+    |         ^^^^^^^^^^^^^^^^ help: change this to: `self.sfx_reader`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_borrow
+
+warning: missing documentation for a method
+   --> src/indexer/index_writer.rs:567:5
+    |
+567 |     pub fn prepare_commit(&mut self) -> crate::Result<PreparedCommit<'_, D>> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+note: the lint level is defined here
+   --> src/lib.rs:4:9
+    |
+4   | #![warn(missing_docs)]
+    |         ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/index/segment_component.rs:53:9
+   |
+53 |         field_id: u32,
+   |         ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/index/segment_component.rs:54:9
+   |
+54 |         extension: String,
+   |         ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a module
+ --> src/query/mod.rs:2:1
+  |
+2 | pub mod automaton_weight;
+  | ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a module
+  --> src/query/mod.rs:18:1
+   |
+18 | pub mod phrase_query;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a module
+ --> src/query/phrase_query/mod.rs:1:1
+  |
+1 | pub mod automaton_phrase_query;
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a module
+ --> src/query/phrase_query/mod.rs:7:1
+  |
+7 | pub mod regex_phrase_query;
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> src/query/phrase_query/phrase_scorer.rs:54:1
+   |
+54 | pub struct PhraseScorer<TPostings: Postings> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> src/query/phrase_query/phrase_scorer.rs:360:5
+    |
+360 | /     pub fn new(
+361 | |         term_postings: Vec<(usize, TPostings)>,
+362 | |         similarity_weight_opt: Option<Bm25Weight>,
+363 | |         fieldnorm_reader: FieldNormReader,
+364 | |         slop: u32,
+365 | |     ) -> PhraseScorer<TPostings> {
+    | |________________________________^
+
+warning: missing documentation for a method
+   --> src/query/phrase_query/phrase_scorer.rs:462:5
+    |
+462 |     pub fn phrase_count(&self) -> u32 {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> src/query/phrase_query/phrase_weight.rs:14:1
+   |
+14 | pub struct PhraseWeight {
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> src/query/phrase_query/phrase_weight.rs:39:5
+   |
+39 |     pub fn with_highlight_sink(mut self, sink: Arc<HighlightSink>, field_name: String) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/query/phrase_query/phrase_weight.rs:102:5
+    |
+102 |     pub fn slop(&mut self, slop: u32) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/scoring_utils.rs:109:5
+    |
+109 |     pub doc_id: DocId,
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/scoring_utils.rs:110:5
+    |
+110 |     pub field: String,
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/scoring_utils.rs:111:5
+    |
+111 |     pub offsets: Vec<[usize; 2]>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/query/phrase_query/regex_continuation_query.rs:35:5
+   |
+35 |     pub doc_tf: Vec<(DocId, u32)>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/query/phrase_query/regex_continuation_query.rs:36:5
+   |
+36 |     pub highlights: Vec<(DocId, usize, usize)>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a function
+  --> src/query/phrase_query/suffix_contains.rs:73:1
+   |
+73 | / pub fn suffix_contains_single_token_continuation<F>(
+74 | |     sfx_reader: &SfxFileReader<'_>,
+75 | |     query: &str,
+76 | |     raw_term_resolver: F,
+77 | | ) -> Vec<SuffixContainsMatch>
+78 | | where
+79 | |     F: Fn(u64) -> Vec<RawPostingEntry>,
+   | |_______________________________________^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/suffix_contains.rs:527:5
+    |
+527 |     pub doc_id: u32,
+    |     ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/suffix_contains.rs:528:5
+    |
+528 |     pub token_index: u32,
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/suffix_contains.rs:529:5
+    |
+529 |     pub byte_from: u32,
+    |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/suffix_contains.rs:530:5
+    |
+530 |     pub byte_to: u32,
+    |     ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> src/query/phrase_query/suffix_contains.rs:1161:5
+     |
+1161 |     pub doc_id: u32,
+     |     ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> src/query/phrase_query/suffix_contains.rs:1162:5
+     |
+1162 |     pub byte_from: usize,
+     |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> src/query/phrase_query/suffix_contains.rs:1163:5
+     |
+1163 |     pub byte_to: usize,
+     |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> src/query/phrase_query/suffix_contains.rs:1165:5
+     |
+1165 |     pub token_matches: Vec<SuffixContainsMatch>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> src/query/phrase_query/suffix_contains_query.rs:32:1
+   |
+32 | pub struct SfxCache {
+   | ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> src/query/phrase_query/suffix_contains_query.rs:54:1
+   |
+54 | pub struct CachedSfxResult {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> src/query/phrase_query/suffix_contains_query.rs:60:5
+   |
+60 |     pub fn new(doc_tf: Vec<(DocId, u32)>, highlights: Vec<(DocId, usize, usize)>) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/query/phrase_query/literal_resolve.rs:25:5
+   |
+25 |     pub doc_id: DocId,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/query/phrase_query/literal_resolve.rs:26:5
+   |
+26 |     pub position: u32,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/query/phrase_query/literal_resolve.rs:27:5
+   |
+27 |     pub byte_from: u32,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/query/phrase_query/literal_resolve.rs:28:5
+   |
+28 |     pub byte_to: u32,
+   |     ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/query/phrase_query/literal_pipeline.rs:30:5
+   |
+30 |     pub raw_ordinal: u64,
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/query/phrase_query/literal_pipeline.rs:31:5
+   |
+31 |     pub si: u16,
+   |     ^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/query/phrase_query/literal_pipeline.rs:32:5
+   |
+32 |     pub token_len: u16,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/literal_pipeline.rs:445:5
+    |
+445 |     pub doc_id: u32,
+    |     ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/literal_pipeline.rs:446:5
+    |
+446 |     pub token_index: u32,
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/literal_pipeline.rs:447:5
+    |
+447 |     pub span: u32,
+    |     ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/literal_pipeline.rs:448:5
+    |
+448 |     pub byte_from: u32,
+    |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/literal_pipeline.rs:449:5
+    |
+449 |     pub byte_to: u32,
+    |     ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> src/query/phrase_query/regex_gap_analyzer.rs:30:5
+   |
+30 |     Literal(String),
+   |     ^^^^^^^
+
+warning: missing documentation for a variant
+  --> src/query/phrase_query/regex_gap_analyzer.rs:31:5
+   |
+31 |     Gap(GapKind),
+   |     ^^^
+
+warning: missing documentation for an associated function
+   --> src/query/posting_resolver.rs:115:5
+    |
+115 |     pub fn new(reader: SfxPostReaderV2) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> src/suffix_fst/gapmap.rs:813:1
+    |
+813 | pub struct GapMapIndex;
+    | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> src/suffix_fst/sibling_table.rs:211:1
+    |
+211 | pub struct SiblingIndex {
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> src/suffix_fst/sibling_table.rs:216:5
+    |
+216 |     pub fn new() -> Self { Self { data: Vec::new() } }
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> src/suffix_fst/posmap.rs:24:5
+   |
+24 |     pub fn new() -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> src/suffix_fst/posmap.rs:212:1
+    |
+212 | pub struct PosMapIndex {
+    | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> src/suffix_fst/posmap.rs:217:5
+    |
+217 |     pub fn new() -> Self { Self { writer: PosMapWriter::new() } }
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> src/suffix_fst/bytemap.rs:20:5
+   |
+20 |     pub fn new() -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/suffix_fst/bytemap.rs:142:5
+    |
+142 |     pub fn num_ordinals(&self) -> u32 {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> src/suffix_fst/bytemap.rs:193:1
+    |
+193 | pub struct ByteMapIndex {
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> src/suffix_fst/bytemap.rs:198:5
+    |
+198 |     pub fn new() -> Self { Self { writer: ByteBitmapWriter::new() } }
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> src/suffix_fst/sepmap.rs:27:5
+   |
+27 |     pub fn new() -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> src/suffix_fst/sepmap.rs:31:5
+   |
+31 |     pub fn ensure_capacity(&mut self, num_ordinals: u32) {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> src/suffix_fst/sepmap.rs:80:5
+   |
+80 |     pub fn serialize(&self) -> Vec<u8> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> src/suffix_fst/sepmap.rs:99:5
+   |
+99 |     pub fn open(bytes: &'a [u8]) -> Option<Self> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/suffix_fst/sepmap.rs:114:5
+    |
+114 |     pub fn bitmap(&self, ordinal: u32) -> Option<&[u8; 32]> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/suffix_fst/sepmap.rs:170:5
+    |
+170 |     pub fn num_ordinals(&self) -> u32 {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> src/suffix_fst/sepmap.rs:179:1
+    |
+179 | pub struct SepMapIndex {
+    | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> src/suffix_fst/sepmap.rs:184:5
+    |
+184 |     pub fn new() -> Self { Self { data: Vec::new() } }
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> src/suffix_fst/termtexts.rs:22:1
+   |
+22 | pub struct TermTextsWriter {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> src/suffix_fst/termtexts.rs:27:5
+   |
+27 |     pub fn new() -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> src/suffix_fst/termtexts.rs:31:5
+   |
+31 |     pub fn add(&mut self, ordinal: u32, text: &str) {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> src/suffix_fst/termtexts.rs:39:5
+   |
+39 |     pub fn serialize(&self) -> Vec<u8> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> src/suffix_fst/termtexts.rs:70:1
+   |
+70 | pub struct TermTextsReader<'a> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> src/suffix_fst/termtexts.rs:77:5
+   |
+77 |     pub fn open(bytes: &'a [u8]) -> Option<Self> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> src/suffix_fst/termtexts.rs:97:5
+   |
+97 |     pub fn num_terms(&self) -> u32 {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> src/suffix_fst/termtexts.rs:111:1
+    |
+111 | pub struct TermTextsIndex {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> src/suffix_fst/termtexts.rs:116:5
+    |
+116 |     pub fn new() -> Self { Self { writer: TermTextsWriter::new() } }
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> src/suffix_fst/freqmap.rs:23:1
+   |
+23 | pub struct FreqMapWriter {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> src/suffix_fst/freqmap.rs:30:5
+   |
+30 |     pub fn new() -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> src/suffix_fst/freqmap.rs:34:5
+   |
+34 |     pub fn add(&mut self, ord: u32, doc_id: u32) {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> src/suffix_fst/freqmap.rs:39:5
+   |
+39 |     pub fn serialize(&self) -> Vec<u8> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> src/suffix_fst/freqmap.rs:98:1
+   |
+98 | pub struct FreqMapReader<'a> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> src/suffix_fst/freqmap.rs:106:5
+    |
+106 |     pub fn open(bytes: &'a [u8]) -> Option<Self> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/suffix_fst/freqmap.rs:123:5
+    |
+123 |     pub fn num_terms(&self) -> u32 { self.num_terms }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> src/suffix_fst/freqmap.rs:189:1
+    |
+189 | pub struct FreqMapIndex {
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> src/suffix_fst/freqmap.rs:194:5
+    |
+194 |     pub fn new() -> Self { Self { writer: FreqMapWriter::new() } }
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated constant
+   --> src/suffix_fst/index_registry.rs:225:5
+    |
+225 |     pub const POSMAP: Self = Self::Custom("posmap");
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated constant
+   --> src/suffix_fst/index_registry.rs:226:5
+    |
+226 |     pub const BYTEMAP: Self = Self::Custom("bytemap");
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated constant
+   --> src/suffix_fst/index_registry.rs:227:5
+    |
+227 |     pub const TERMTEXTS: Self = Self::Custom("termtexts");
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> src/suffix_fst/sfxpost_v2.rs:37:5
+   |
+37 |     pub fn new(num_terms: usize) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> src/suffix_fst/sfxpost_v2.rs:476:1
+    |
+476 | pub struct SfxPostIndex;
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `ld-lucivy` (lib) generated 273 warnings
+error: could not compile `ld-lucivy` (lib) due to 4 previous errors; 273 warnings emitted
+warning: build failed, waiting for other jobs to finish...
+warning: unused variable: `positions`
+   --> src/query/phrase_query/fuzzy_contains.rs:701:22
+    |
+701 |         let (ngrams, positions, n) = generate_trigrams("rag3dbvalue", 1);
+    |                      ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_positions`
+
+warning: unused variable: `positions`
+   --> src/query/phrase_query/fuzzy_contains.rs:711:22
+    |
+711 |         let (ngrams, positions, n) = generate_trigrams("ab", 1);
+    |                      ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_positions`
+
+warning: variables can be used directly in the `format!` string
+   --> src/indexer/commit_dag.rs:469:9
+    |
+469 |         eprintln!("DAG executions: {:?}", dag_completions);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+469 -         eprintln!("DAG executions: {:?}", dag_completions);
+469 +         eprintln!("DAG executions: {dag_completions:?}");
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> src/indexer/commit_dag.rs:475:9
+    |
+475 |         eprintln!("segments={}, docs={}", num_segments, num_docs);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+475 -         eprintln!("segments={}, docs={}", num_segments, num_docs);
+475 +         eprintln!("segments={num_segments}, docs={num_docs}");
+    |
+
+warning: variables can be used directly in the `format!` string
+   --> src/indexer/commit_dag.rs:522:9
+    |
+522 |         eprintln!("segments={}, docs={}", num_segments, num_docs);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+522 -         eprintln!("segments={}, docs={}", num_segments, num_docs);
+522 +         eprintln!("segments={num_segments}, docs={num_docs}");
+    |
+
+warning: variables can be used directly in the `format!` string
+    --> src/aggregation/bucket/filter.rs:1529:17
+     |
+1529 |         assert!(format!("{:?}", query).contains("TermQuery"));
+     |                 ^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+     |
+1529 -         assert!(format!("{:?}", query).contains("TermQuery"));
+1529 +         assert!(format!("{query:?}").contains("TermQuery"));
+     |
+
+warning: variables can be used directly in the `format!` string
+    --> src/aggregation/bucket/filter.rs:1534:17
+     |
+1534 |         assert!(format!("{:?}", query2).contains("TermQuery"));
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+     |
+1534 -         assert!(format!("{:?}", query2).contains("TermQuery"));
+1534 +         assert!(format!("{query2:?}").contains("TermQuery"));
+     |
+
+warning: variables can be used directly in the `format!` string
+    --> src/aggregation/bucket/filter.rs:1550:17
+     |
+1550 |         assert!(format!("{:?}", query3).contains("TermQuery"));
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+     |
+1550 -         assert!(format!("{:?}", query3).contains("TermQuery"));
+1550 +         assert!(format!("{query3:?}").contains("TermQuery"));
+     |
+
+warning: variables can be used directly in the `format!` string
+   --> src/query/boolean_query/mod.rs:770:53
+    |
+770 |             .map(|i| schema_builder.add_text_field(&format!("field_{}", i), TEXT))
+    |                                                     ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+770 -             .map(|i| schema_builder.add_text_field(&format!("field_{}", i), TEXT))
+770 +             .map(|i| schema_builder.add_text_field(&format!("field_{i}"), TEXT))
+    |
+
+warning: length comparison to one
+    --> src/query/phrase_query/regex_continuation_query.rs:2014:17
+     |
+2014 |         assert!(results.len() >= 1, "fuzzy d=1 should match doc 1");
+     |                 ^^^^^^^^^^^^^^^^^^ help: using `!is_empty` is clearer and more explicit: `!results.is_empty()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#len_zero
+
+warning: length comparison to one
+    --> src/query/phrase_query/regex_continuation_query.rs:2107:17
+     |
+2107 |         assert!(results.len() >= 1, "regex 'rag[0-9]db' should match rag3db");
+     |                 ^^^^^^^^^^^^^^^^^^ help: using `!is_empty` is clearer and more explicit: `!results.is_empty()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#len_zero
+
+warning: length comparison to one
+    --> src/query/phrase_query/regex_continuation_query.rs:2124:17
+     |
+2124 |         assert!(results.len() >= 1, "regex 'rag3d[a-z]+' should match rag3db");
+     |                 ^^^^^^^^^^^^^^^^^^ help: using `!is_empty` is clearer and more explicit: `!results.is_empty()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#len_zero
+
+warning: length comparison to one
+    --> src/query/phrase_query/regex_continuation_query.rs:2141:17
+     |
+2141 |         assert!(results.len() >= 1, r"regex 'rag\w+' should match rag3db");
+     |                 ^^^^^^^^^^^^^^^^^^ help: using `!is_empty` is clearer and more explicit: `!results.is_empty()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#len_zero
+
+warning: length comparison to one
+    --> src/query/phrase_query/regex_continuation_query.rs:2158:17
+     |
+2158 |         assert!(results.len() >= 1, "regex 'rag3db is' should match 'rag3db is cool'");
+     |                 ^^^^^^^^^^^^^^^^^^ help: using `!is_empty` is clearer and more explicit: `!results.is_empty()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#len_zero
+
+warning: length comparison to one
+    --> src/query/phrase_query/regex_continuation_query.rs:2202:17
+     |
+2202 |         assert!(results.len() >= 1,
+     |                 ^^^^^^^^^^^^^^^^^^ help: using `!is_empty` is clearer and more explicit: `!results.is_empty()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#len_zero
+
+warning: length comparison to one
+    --> src/query/phrase_query/regex_continuation_query.rs:2304:17
+     |
+2304 |         assert!(results.len() >= 1, "'3dbis' d=1 contains should match doc 1");
+     |                 ^^^^^^^^^^^^^^^^^^ help: using `!is_empty` is clearer and more explicit: `!results.is_empty()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#len_zero
+
+warning: length comparison to one
+    --> src/query/phrase_query/regex_continuation_query.rs:2326:17
+     |
+2326 |         assert!(results.len() >= 1, "'rag3dbiscool' d=2 should match 'rag3db is cool'");
+     |                 ^^^^^^^^^^^^^^^^^^ help: using `!is_empty` is clearer and more explicit: `!results.is_empty()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#len_zero
+
+warning: variables can be used directly in the `format!` string
+    --> src/query/phrase_query/regex_continuation_query.rs:2355:9
+     |
+2355 | /         assert!(
+2356 | |             doc1_entries.iter().any(|e| e.offsets.contains(&[0, 6])),
+2357 | |             "doc 1 should have highlight [0,6] for 'rag3db', got {:?}", doc1_entries
+2358 | |         );
+     | |_________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+     |
+2357 -             "doc 1 should have highlight [0,6] for 'rag3db', got {:?}", doc1_entries
+2357 +             "doc 1 should have highlight [0,6] for 'rag3db', got {doc1_entries:?}"
+     |
+
+warning: variables can be used directly in the `format!` string
+    --> src/query/phrase_query/regex_continuation_query.rs:2384:9
+     |
+2384 | /         assert!(
+2385 | |             doc1_entries.iter().any(|e| e.offsets.contains(&[0, 14])),
+2386 | |             "doc 1 should have highlight [0,14], got {:?}", doc1_entries
+2387 | |         );
+     | |_________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+     |
+2386 -             "doc 1 should have highlight [0,14], got {:?}", doc1_entries
+2386 +             "doc 1 should have highlight [0,14], got {doc1_entries:?}"
+     |
+
+warning: variables can be used directly in the `format!` string
+    --> src/query/phrase_query/regex_continuation_query.rs:2415:9
+     |
+2415 | /         assert!(
+2416 | |             doc1_entries.iter().any(|e| {
+2417 | |                 e.offsets.iter().any(|o| o[0] == 3 && o[1] == 9)
+2418 | |             }),
+2419 | |             "doc 1 should have highlight [3,9], got {:?}", doc1_entries
+2420 | |         );
+     | |_________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+     |
+2419 -             "doc 1 should have highlight [3,9], got {:?}", doc1_entries
+2419 +             "doc 1 should have highlight [3,9], got {doc1_entries:?}"
+     |
+
+warning: variables can be used directly in the `format!` string
+    --> src/query/phrase_query/suffix_contains.rs:2084:9
+     |
+2084 |         eprintln!("results for 'function': {:?}", results);
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+     |
+2084 -         eprintln!("results for 'function': {:?}", results);
+2084 +         eprintln!("results for 'function': {results:?}");
+     |
+
+warning: variables can be used directly in the `format!` string
+    --> src/query/phrase_query/suffix_contains.rs:2095:9
+     |
+2095 |         eprintln!("results for 'unction': {:?}", results_unction);
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+     |
+2095 -         eprintln!("results for 'unction': {:?}", results_unction);
+2095 +         eprintln!("results for 'unction': {results_unction:?}");
+     |
+
+warning: variables can be used directly in the `format!` string
+    --> src/query/phrase_query/suffix_contains.rs:2106:9
+     |
+2106 |         eprintln!("results for 'junction': {:?}", results_junction);
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+     |
+2106 -         eprintln!("results for 'junction': {:?}", results_junction);
+2106 +         eprintln!("results for 'junction': {results_junction:?}");
+     |
+
+warning: the borrowed expression implements the required traits
+    --> src/query/phrase_query/suffix_contains.rs:2156:65
+     |
+2156 |             &reader, &["weaver", "for", "search"], &[" ", " "], &resolver,
+     |                                                                 ^^^^^^^^^ help: change this to: `resolver`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_borrows_for_generic_args
+     = note: `#[warn(clippy::needless_borrows_for_generic_args)]` on by default
+
+warning: length comparison to zero
+    --> src/query/phrase_query/suffix_contains.rs:2159:17
+     |
+2159 |         assert!(r1.len() > 0, "'weaver for search' should find doc 0");
+     |                 ^^^^^^^^^^^^ help: using `!is_empty` is clearer and more explicit: `!r1.is_empty()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#len_zero
+
+warning: the borrowed expression implements the required traits
+    --> src/query/phrase_query/suffix_contains.rs:2163:66
+     |
+2163 |             &reader, &["3weaver", "for", "search"], &[" ", " "], &resolver,
+     |                                                                  ^^^^^^^^^ help: change this to: `resolver`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_borrows_for_generic_args
+
+warning: length comparison to zero
+    --> src/query/phrase_query/suffix_contains.rs:2166:17
+     |
+2166 |         assert!(r2.len() > 0, "'3weaver for search' should find doc 0");
+     |                 ^^^^^^^^^^^^ help: using `!is_empty` is clearer and more explicit: `!r2.is_empty()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#len_zero
+
+warning: the borrowed expression implements the required traits
+    --> src/query/phrase_query/suffix_contains.rs:2170:69
+     |
+2170 |             &reader, &["rag3weaver", "for", "search"], &[" ", " "], &resolver,
+     |                                                                     ^^^^^^^^^ help: change this to: `resolver`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_borrows_for_generic_args
+
+warning: length comparison to zero
+    --> src/query/phrase_query/suffix_contains.rs:2173:17
+     |
+2173 |         assert!(r3.len() > 0, "'rag3weaver for search' should find doc 0");
+     |                 ^^^^^^^^^^^^ help: using `!is_empty` is clearer and more explicit: `!r3.is_empty()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#len_zero
+
+warning: the borrowed expression implements the required traits
+    --> src/query/phrase_query/suffix_contains.rs:2177:54
+     |
+2177 |             &reader, &["use", "rag3weaver"], &[" "], &resolver,
+     |                                                      ^^^^^^^^^ help: change this to: `resolver`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_borrows_for_generic_args
+
+warning: length comparison to zero
+    --> src/query/phrase_query/suffix_contains.rs:2180:17
+     |
+2180 |         assert!(r4.len() > 0, "'use rag3weaver' should find doc 0");
+     |                 ^^^^^^^^^^^^ help: using `!is_empty` is clearer and more explicit: `!r4.is_empty()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#len_zero
+
+warning: the borrowed expression implements the required traits
+    --> src/query/phrase_query/suffix_contains.rs:2184:81
+     |
+2184 |             &reader, &["use", "rag3weaver", "for", "search"], &[" ", " ", " "], &resolver,
+     |                                                                                 ^^^^^^^^^ help: change this to: `resolver`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_borrows_for_generic_args
+
+warning: length comparison to zero
+    --> src/query/phrase_query/suffix_contains.rs:2187:17
+     |
+2187 |         assert!(r5.len() > 0, "'use rag3weaver for search' should find doc 0");
+     |                 ^^^^^^^^^^^^ help: using `!is_empty` is clearer and more explicit: `!r5.is_empty()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#len_zero
+
+warning: the borrowed expression implements the required traits
+    --> src/query/phrase_query/suffix_contains.rs:2191:64
+     |
+2191 |             &reader, &["3weaver", "for", "search"], &["", ""], &resolver,
+     |                                                                ^^^^^^^^^ help: change this to: `resolver`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_borrows_for_generic_args
+
+warning: length comparison to zero
+    --> src/query/phrase_query/suffix_contains.rs:2194:17
+     |
+2194 |         assert!(r6.len() > 0, "'3weaver for search' with empty seps should find doc 0");
+     |                 ^^^^^^^^^^^^ help: using `!is_empty` is clearer and more explicit: `!r6.is_empty()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#len_zero
+
+warning: manual `RangeInclusive::contains` implementation
+  --> src/query/phrase_query/dfa_byte_filter.rs:95:23
+   |
+95 |             *state && byte >= b'a' && byte <= b'z'
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use: `(b'a'..=b'z').contains(&byte)`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_range_contains
+   = note: `#[warn(clippy::manual_range_contains)]` on by default
+
+warning: variables can be used directly in the `format!` string
+    --> src/query/query_parser/query_parser.rs:2068:13
+     |
+2068 |             format!("Regex(Field(0), {:#?})", expected_regex).as_str(),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+     |
+2068 -             format!("Regex(Field(0), {:#?})", expected_regex).as_str(),
+2068 +             format!("Regex(Field(0), {expected_regex:#?})").as_str(),
+     |
+
+warning: returning the result of a `let` binding from a block
+   --> src/query/range_query/range_query.rs:691:13
+    |
+688 | /             let range_scorer = range_weight
+689 | |                 .scorer(&searcher.segment_readers()[0], 1.0f32)
+690 | |                 .unwrap();
+    | |__________________________- unnecessary `let` binding
+691 |               range_scorer
+    |               ^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#let_and_return
+help: return the expression directly
+    |
+688 ~             
+689 ~             range_weight
+690 +                 .scorer(&searcher.segment_readers()[0], 1.0f32)
+691 +                 .unwrap()
+    |
+
+warning: the borrowed expression implements the required traits
+   --> src/suffix_fst/builder.rs:404:41
+    |
+404 |         let mut stream = fst.range().ge(&ge).lt(&lt).into_stream();
+    |                                         ^^^ help: change this to: `ge`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_borrows_for_generic_args
+
+warning: the borrowed expression implements the required traits
+   --> src/suffix_fst/builder.rs:404:49
+    |
+404 |         let mut stream = fst.range().ge(&ge).lt(&lt).into_stream();
+    |                                                 ^^^ help: change this to: `lt`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_borrows_for_generic_args
+
+warning: items after a test module
+   --> src/suffix_fst/gapmap.rs:593:1
+    |
+593 | mod tests {
+    | ^^^^^^^^^
+...
+813 | pub struct GapMapIndex;
+    | ^^^^^^^^^^^^^^^^^^^^^^
+814 |
+815 | impl super::index_registry::SfxIndexFile for GapMapIndex {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#items_after_test_module
+    = note: `#[warn(clippy::items_after_test_module)]` on by default
+    = help: move the items to before the test module was defined
+
+warning: items after a test module
+   --> src/suffix_fst/sibling_table.rs:147:1
+    |
+147 | mod tests {
+    | ^^^^^^^^^
+...
+211 | pub struct SiblingIndex {
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+...
+215 | impl SiblingIndex {
+    | ^^^^^^^^^^^^^^^^^
+...
+219 | impl super::index_registry::SfxIndexFile for SiblingIndex {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#items_after_test_module
+    = help: move the items to before the test module was defined
+
+warning: items after a test module
+   --> src/suffix_fst/posmap.rs:163:1
+    |
+163 | mod tests {
+    | ^^^^^^^^^
+...
+212 | pub struct PosMapIndex {
+    | ^^^^^^^^^^^^^^^^^^^^^^
+...
+216 | impl PosMapIndex {
+    | ^^^^^^^^^^^^^^^^
+...
+220 | impl super::index_registry::SfxIndexFile for PosMapIndex {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#items_after_test_module
+    = help: move the items to before the test module was defined
+
+warning: items after a test module
+   --> src/suffix_fst/bytemap.rs:148:1
+    |
+148 | mod tests {
+    | ^^^^^^^^^
+...
+193 | pub struct ByteMapIndex {
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+...
+197 | impl ByteMapIndex {
+    | ^^^^^^^^^^^^^^^^^
+...
+201 | impl super::index_registry::SfxIndexFile for ByteMapIndex {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#items_after_test_module
+    = help: move the items to before the test module was defined
+
+warning: items after a test module
+   --> src/suffix_fst/sfxpost_v2.rs:347:1
+    |
+347 | mod tests {
+    | ^^^^^^^^^
+...
+476 | pub struct SfxPostIndex;
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+477 |
+478 | impl super::index_registry::SfxIndexFile for SfxPostIndex {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#items_after_test_module
+    = help: move the items to before the test module was defined
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+  --> src/suffix_fst/stress_tests.rs:16:26
+   |
+16 |     fn build_index(docs: &[(&str, &[(&str, usize, usize)])]) -> (Vec<u8>, HashMap<u64, Vec<RawPostingEntry>>) {
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/suffix_fst/stress_tests.rs:385:19
+    |
+385 |         let docs: Vec<(&str, Vec<(&str, usize, usize)>)> = (0..20)
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/suffix_fst/stress_tests.rs:395:24
+    |
+395 |         let docs_refs: Vec<(&str, &[(&str, usize, usize)])> = docs
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: `ld-lucivy` (lib test) generated 322 warnings (273 duplicates)
+error: could not compile `ld-lucivy` (lib test) due to 4 previous errors; 322 warnings emitted

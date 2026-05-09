@@ -1,0 +1,862 @@
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /home/luciedefraiteur/LR_CodeRag/community-docs/packages/rag3db/extension/lucivy/ld-lucivy/lucivy-fst/Cargo.toml
+workspace: /home/luciedefraiteur/LR_CodeRag/community-docs/packages/rag3db/extension/lucivy/ld-lucivy/Cargo.toml
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /home/luciedefraiteur/LR_CodeRag/community-docs/packages/rag3db/extension/lucivy/ld-lucivy/lucivy_fts/rust/Cargo.toml
+workspace: /home/luciedefraiteur/LR_CodeRag/community-docs/packages/rag3db/extension/lucivy/ld-lucivy/Cargo.toml
+warning: method `new_state` is never used
+   --> lucivy-fst/src/automaton/levenshtein.rs:394:8
+    |
+262 | impl DfaBuilder {
+    | --------------- method in this implementation
+...
+394 |     fn new_state(&mut self, is_match: bool) -> usize {
+    |        ^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: unused import: `std::collections::HashMap`
+  --> luciole/src/fan_out.rs:16:5
+   |
+16 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `Mailbox`
+  --> luciole/src/async_executor.rs:23:41
+   |
+23 | use crate::mailbox::{mailbox, ActorRef, Mailbox};
+   |                                         ^^^^^^^
+
+warning: unused variable: `i`
+   --> luciole/src/pool.rs:120:14
+    |
+120 |         for (i, worker) in self.workers.iter().enumerate() {
+    |              ^ help: if this is intentional, prefix it with an underscore: `_i`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `label`
+   --> luciole/src/scheduler.rs:913:17
+    |
+913 |             let label = t.label.lock().unwrap().clone();
+    |                 ^^^^^ help: if this is intentional, prefix it with an underscore: `_label`
+
+warning: function `BranchNode` should have a snake case name
+  --> luciole/src/branch.rs:63:8
+   |
+63 | pub fn BranchNode<F: FnMut() -> bool + Send + 'static>(
+   |        ^^^^^^^^^^ help: convert the identifier to snake case: `branch_node`
+   |
+   = note: `#[warn(non_snake_case)]` on by default
+
+warning: `lucivy-fst` (lib) generated 1 warning
+warning: `luciole` (lib) generated 5 warnings (run `cargo fix --lib -p luciole` to apply 2 suggestions)
+   Compiling ld-lucivy v0.27.0 (/home/luciedefraiteur/LR_CodeRag/community-docs/packages/rag3db/extension/lucivy/ld-lucivy)
+warning: unused import: `crate::suffix_fst::encode_vint`
+  --> src/indexer/sfx_merge.rs:32:5
+   |
+32 | use crate::suffix_fst::encode_vint;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `crate::suffix_fst::builder::ParentEntry`
+  --> src/query/phrase_query/suffix_contains.rs:10:5
+   |
+10 | use crate::suffix_fst::builder::ParentEntry;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::suffix_fst::builder::ParentEntry`
+  --> src/query/phrase_query/literal_pipeline.rs:15:5
+   |
+15 | use crate::suffix_fst::builder::ParentEntry;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ClassBytesRange`
+  --> src/query/phrase_query/regex_gap_analyzer.rs:11:46
+   |
+11 | use regex_syntax::hir::{Hir, HirKind, Class, ClassBytesRange};
+   |                                              ^^^^^^^^^^^^^^^
+
+warning: unused import: `super::builder::SuffixFstBuilder`
+ --> src/suffix_fst/collector.rs:3:5
+  |
+3 | use super::builder::SuffixFstBuilder;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::file::SfxFileWriter`
+ --> src/suffix_fst/collector.rs:4:5
+  |
+4 | use super::file::SfxFileWriter;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::sibling_table::SiblingTableWriter`
+ --> src/suffix_fst/collector.rs:7:5
+  |
+7 | use super::sibling_table::SiblingTableWriter;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `BTreeMap` and `HashMap`
+  --> src/suffix_fst/sfxpost_v2.rs:21:24
+   |
+21 | use std::collections::{BTreeMap, HashMap, HashSet};
+   |                        ^^^^^^^^  ^^^^^^^
+
+warning: unused variable: `term_dict`
+   --> src/query/phrase_query/regex_continuation_query.rs:133:9
+    |
+133 |     let term_dict = inverted_index.terms();
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_term_dict`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `prefix`
+   --> src/query/phrase_query/regex_continuation_query.rs:117:5
+    |
+117 |     prefix: bool,
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_prefix`
+
+warning: unused variable: `anchor_start`
+   --> src/query/phrase_query/regex_continuation_query.rs:118:5
+    |
+118 |     anchor_start: bool,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_anchor_start`
+
+warning: unused variable: `match_start`
+    --> src/query/phrase_query/regex_continuation_query.rs:1043:18
+     |
+1043 |             let (match_start, match_len) = dfa_matches.first().copied().unwrap_or((0, 0));
+     |                  ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_match_start`
+
+warning: unused variable: `match_len`
+    --> src/query/phrase_query/regex_continuation_query.rs:1043:31
+     |
+1043 |             let (match_start, match_len) = dfa_matches.first().copied().unwrap_or((0, 0));
+     |                               ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_match_len`
+
+warning: unused variable: `anchor_start`
+   --> src/query/phrase_query/regex_continuation_query.rs:735:5
+    |
+735 |     anchor_start: bool,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_anchor_start`
+
+warning: unused variable: `sepmap`
+    --> src/query/phrase_query/regex_continuation_query.rs:1188:9
+     |
+1188 |     let sepmap = sepmap_data.and_then(crate::suffix_fst::sepmap::SepMapReader::open);
+     |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_sepmap`
+
+warning: unused variable: `find_us`
+    --> src/query/phrase_query/regex_continuation_query.rs:1253:9
+     |
+1253 |     let find_us = t0.elapsed().as_micros();
+     |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_find_us`
+
+warning: unused variable: `t1`
+    --> src/query/phrase_query/regex_continuation_query.rs:1258:9
+     |
+1258 |     let t1 = Instant::now();
+     |         ^^ help: if this is intentional, prefix it with an underscore: `_t1`
+
+warning: unused variable: `sfx_dict`
+    --> src/query/phrase_query/regex_continuation_query.rs:1174:5
+     |
+1174 |     sfx_dict: &SfxTermDictionary,
+     |     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sfx_dict`
+
+warning: unused variable: `anchor_start`
+    --> src/query/phrase_query/regex_continuation_query.rs:1177:5
+     |
+1177 |     anchor_start: bool,
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_anchor_start`
+
+warning: unused variable: `prefix`
+    --> src/query/phrase_query/regex_continuation_query.rs:1812:46
+     |
+1812 |             DfaKind::Fuzzy { text, distance, prefix } if *distance > 0 => {
+     |                                              ^^^^^^ help: try ignoring the field: `prefix: _`
+
+warning: unused variable: `before`
+    --> src/query/phrase_query/suffix_contains.rs:1231:13
+     |
+1231 |         let before = candidates.len();
+     |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_before`
+
+warning: variable does not need to be mutable
+   --> src/query/phrase_query/literal_resolve.rs:224:13
+    |
+224 | ...   let mut check_chain = |chain: &[(usize, u32, u32, u16, u32)], results: &mut Vec<(DocId, u32, u32, usize, u16, bool, usize, u32, u16...
+    |           ----^^^^^^^^^^^
+    |           |
+    |           help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: unused variable: `last_byte_to`
+   --> src/query/phrase_query/literal_pipeline.rs:385:25
+    |
+385 |         for (doc_id, _, last_byte_to, match_bf, first_pos) in &active {
+    |                         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_last_byte_to`
+
+warning: unused variable: `ngrams`
+   --> src/query/phrase_query/fuzzy_contains.rs:227:5
+    |
+227 |     ngrams: &[String],
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_ngrams`
+
+warning: field `finalizer_ref` is never read
+   --> src/indexer/indexer_actor.rs:194:5
+    |
+185 | struct IndexerState<D: Document> {
+    |        ------------ field in this struct
+...
+194 |     finalizer_ref: ActorRef<Envelope>,
+    |     ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: function `merge_sibling_links` is never used
+   --> src/indexer/sfx_merge.rs:285:15
+    |
+285 | pub(crate) fn merge_sibling_links(
+    |               ^^^^^^^^^^^^^^^^^^^
+
+warning: function `decode_vint` is never used
+   --> src/indexer/sfx_merge.rs:417:4
+    |
+417 | fn decode_vint(data: &[u8]) -> (u32, usize) {
+    |    ^^^^^^^^^^^
+
+warning: field `ctx` is never read
+   --> src/indexer/sfx_dag.rs:260:5
+    |
+256 | struct WriteSfxNode {
+    |        ------------ field in this struct
+...
+260 |     ctx: Arc<SfxContext>,
+    |     ^^^
+
+warning: method `get_mergeable_segments` is never used
+  --> src/indexer/segment_manager.rs:79:12
+   |
+66 | impl SegmentManager {
+   | ------------------- method in this implementation
+...
+79 |     pub fn get_mergeable_segments(
+   |            ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `get_mergeable_segments` is never used
+  --> src/indexer/segment_register.rs:47:12
+   |
+42 | impl SegmentRegister {
+   | -------------------- method in this implementation
+...
+47 |     pub fn get_mergeable_segments(
+   |            ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `write_sfxpost`, `write_posmap`, and `write_bytemap` are never used
+   --> src/indexer/segment_serializer.rs:92:12
+    |
+21  | impl SegmentSerializer {
+    | ---------------------- methods in this implementation
+...
+92  |     pub fn write_sfxpost(&mut self, field_id: u32, data: &[u8]) -> crate::Result<()> {
+    |            ^^^^^^^^^^^^^
+...
+102 |     pub fn write_posmap(&mut self, field_id: u32, data: &[u8]) -> crate::Result<()> {
+    |            ^^^^^^^^^^^^
+...
+112 |     pub fn write_bytemap(&mut self, field_id: u32, data: &[u8]) -> crate::Result<()> {
+    |            ^^^^^^^^^^^^^
+
+warning: method `get_mergeable_segments` is never used
+   --> src/indexer/segment_updater.rs:120:19
+    |
+71  | impl SegmentUpdaterShared {
+    | ------------------------- method in this implementation
+...
+120 |     pub(crate) fn get_mergeable_segments(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `run_deferred_merges` and `collect_merge_candidates` are never used
+   --> src/indexer/segment_updater_actor.rs:143:8
+    |
+102 | impl SegmentUpdaterState {
+    | ------------------------ associated items in this implementation
+...
+143 |     fn run_deferred_merges(
+    |        ^^^^^^^^^^^^^^^^^^^
+...
+238 |     fn collect_merge_candidates(&self) -> Vec<MergeOperation> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `extract_all_literals` is never used
+   --> src/query/phrase_query/regex_continuation_query.rs:561:4
+    |
+561 | fn extract_all_literals(pattern: &str) -> Vec<String> {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `pick_best_literal` is never used
+    --> src/query/phrase_query/regex_continuation_query.rs:1146:4
+     |
+1146 | fn pick_best_literal(pattern: &str, fragments: &[String]) -> (String, bool) {
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: function `cross_token_resolve_for_multi` is never used
+   --> src/query/phrase_query/suffix_contains.rs:582:4
+    |
+582 | fn cross_token_resolve_for_multi<F>(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `segments` is never read
+  --> src/query/phrase_query/suffix_contains_query.rs:35:5
+   |
+32 | pub struct SfxCache {
+   |            -------- field in this struct
+...
+35 |     segments: Mutex<HashMap<(String, SegmentId), CachedSfxResult>>,
+   |     ^^^^^^^^
+
+warning: function `byte_in_ranges` is never used
+   --> src/query/phrase_query/regex_gap_analyzer.rs:265:4
+    |
+265 | fn byte_in_ranges(byte: u8, ranges: &[(u8, u8)]) -> bool {
+    |    ^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/indexer/index_writer.rs:567:5
+    |
+567 |     pub fn prepare_commit(&mut self) -> crate::Result<PreparedCommit<'_, D>> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+note: the lint level is defined here
+   --> src/lib.rs:4:9
+    |
+4   | #![warn(missing_docs)]
+    |         ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/index/segment_component.rs:53:9
+   |
+53 |         field_id: u32,
+   |         ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/index/segment_component.rs:54:9
+   |
+54 |         extension: String,
+   |         ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a module
+ --> src/query/mod.rs:2:1
+  |
+2 | pub mod automaton_weight;
+  | ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a module
+  --> src/query/mod.rs:18:1
+   |
+18 | pub mod phrase_query;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a module
+ --> src/query/phrase_query/mod.rs:1:1
+  |
+1 | pub mod automaton_phrase_query;
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a module
+ --> src/query/phrase_query/mod.rs:7:1
+  |
+7 | pub mod regex_phrase_query;
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> src/query/phrase_query/phrase_scorer.rs:54:1
+   |
+54 | pub struct PhraseScorer<TPostings: Postings> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> src/query/phrase_query/phrase_scorer.rs:360:5
+    |
+360 | /     pub fn new(
+361 | |         term_postings: Vec<(usize, TPostings)>,
+362 | |         similarity_weight_opt: Option<Bm25Weight>,
+363 | |         fieldnorm_reader: FieldNormReader,
+364 | |         slop: u32,
+365 | |     ) -> PhraseScorer<TPostings> {
+    | |________________________________^
+
+warning: missing documentation for a method
+   --> src/query/phrase_query/phrase_scorer.rs:462:5
+    |
+462 |     pub fn phrase_count(&self) -> u32 {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> src/query/phrase_query/phrase_weight.rs:14:1
+   |
+14 | pub struct PhraseWeight {
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> src/query/phrase_query/phrase_weight.rs:39:5
+   |
+39 |     pub fn with_highlight_sink(mut self, sink: Arc<HighlightSink>, field_name: String) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/query/phrase_query/phrase_weight.rs:102:5
+    |
+102 |     pub fn slop(&mut self, slop: u32) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/scoring_utils.rs:109:5
+    |
+109 |     pub doc_id: DocId,
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/scoring_utils.rs:110:5
+    |
+110 |     pub field: String,
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/scoring_utils.rs:111:5
+    |
+111 |     pub offsets: Vec<[usize; 2]>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/query/phrase_query/regex_continuation_query.rs:35:5
+   |
+35 |     pub doc_tf: Vec<(DocId, u32)>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/query/phrase_query/regex_continuation_query.rs:36:5
+   |
+36 |     pub highlights: Vec<(DocId, usize, usize)>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a function
+  --> src/query/phrase_query/suffix_contains.rs:73:1
+   |
+73 | / pub fn suffix_contains_single_token_continuation<F>(
+74 | |     sfx_reader: &SfxFileReader<'_>,
+75 | |     query: &str,
+76 | |     raw_term_resolver: F,
+77 | | ) -> Vec<SuffixContainsMatch>
+78 | | where
+79 | |     F: Fn(u64) -> Vec<RawPostingEntry>,
+   | |_______________________________________^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/suffix_contains.rs:527:5
+    |
+527 |     pub doc_id: u32,
+    |     ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/suffix_contains.rs:528:5
+    |
+528 |     pub token_index: u32,
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/suffix_contains.rs:529:5
+    |
+529 |     pub byte_from: u32,
+    |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/suffix_contains.rs:530:5
+    |
+530 |     pub byte_to: u32,
+    |     ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> src/query/phrase_query/suffix_contains.rs:1161:5
+     |
+1161 |     pub doc_id: u32,
+     |     ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> src/query/phrase_query/suffix_contains.rs:1162:5
+     |
+1162 |     pub byte_from: usize,
+     |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> src/query/phrase_query/suffix_contains.rs:1163:5
+     |
+1163 |     pub byte_to: usize,
+     |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> src/query/phrase_query/suffix_contains.rs:1165:5
+     |
+1165 |     pub token_matches: Vec<SuffixContainsMatch>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> src/query/phrase_query/suffix_contains_query.rs:32:1
+   |
+32 | pub struct SfxCache {
+   | ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> src/query/phrase_query/suffix_contains_query.rs:54:1
+   |
+54 | pub struct CachedSfxResult {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> src/query/phrase_query/suffix_contains_query.rs:60:5
+   |
+60 |     pub fn new(doc_tf: Vec<(DocId, u32)>, highlights: Vec<(DocId, usize, usize)>) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/query/phrase_query/literal_resolve.rs:25:5
+   |
+25 |     pub doc_id: DocId,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/query/phrase_query/literal_resolve.rs:26:5
+   |
+26 |     pub position: u32,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/query/phrase_query/literal_resolve.rs:27:5
+   |
+27 |     pub byte_from: u32,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/query/phrase_query/literal_resolve.rs:28:5
+   |
+28 |     pub byte_to: u32,
+   |     ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/query/phrase_query/literal_pipeline.rs:30:5
+   |
+30 |     pub raw_ordinal: u64,
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/query/phrase_query/literal_pipeline.rs:31:5
+   |
+31 |     pub si: u16,
+   |     ^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/query/phrase_query/literal_pipeline.rs:32:5
+   |
+32 |     pub token_len: u16,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/literal_pipeline.rs:445:5
+    |
+445 |     pub doc_id: u32,
+    |     ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/literal_pipeline.rs:446:5
+    |
+446 |     pub token_index: u32,
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/literal_pipeline.rs:447:5
+    |
+447 |     pub span: u32,
+    |     ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/literal_pipeline.rs:448:5
+    |
+448 |     pub byte_from: u32,
+    |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/query/phrase_query/literal_pipeline.rs:449:5
+    |
+449 |     pub byte_to: u32,
+    |     ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> src/query/phrase_query/regex_gap_analyzer.rs:30:5
+   |
+30 |     Literal(String),
+   |     ^^^^^^^
+
+warning: missing documentation for a variant
+  --> src/query/phrase_query/regex_gap_analyzer.rs:31:5
+   |
+31 |     Gap(GapKind),
+   |     ^^^
+
+warning: missing documentation for an associated function
+   --> src/query/posting_resolver.rs:115:5
+    |
+115 |     pub fn new(reader: SfxPostReaderV2) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> src/suffix_fst/gapmap.rs:813:1
+    |
+813 | pub struct GapMapIndex;
+    | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> src/suffix_fst/sibling_table.rs:211:1
+    |
+211 | pub struct SiblingIndex {
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> src/suffix_fst/sibling_table.rs:216:5
+    |
+216 |     pub fn new() -> Self { Self { data: Vec::new() } }
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> src/suffix_fst/posmap.rs:24:5
+   |
+24 |     pub fn new() -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> src/suffix_fst/posmap.rs:212:1
+    |
+212 | pub struct PosMapIndex {
+    | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> src/suffix_fst/posmap.rs:217:5
+    |
+217 |     pub fn new() -> Self { Self { writer: PosMapWriter::new() } }
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> src/suffix_fst/bytemap.rs:20:5
+   |
+20 |     pub fn new() -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/suffix_fst/bytemap.rs:142:5
+    |
+142 |     pub fn num_ordinals(&self) -> u32 {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> src/suffix_fst/bytemap.rs:193:1
+    |
+193 | pub struct ByteMapIndex {
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> src/suffix_fst/bytemap.rs:198:5
+    |
+198 |     pub fn new() -> Self { Self { writer: ByteBitmapWriter::new() } }
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> src/suffix_fst/sepmap.rs:27:5
+   |
+27 |     pub fn new() -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> src/suffix_fst/sepmap.rs:31:5
+   |
+31 |     pub fn ensure_capacity(&mut self, num_ordinals: u32) {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> src/suffix_fst/sepmap.rs:80:5
+   |
+80 |     pub fn serialize(&self) -> Vec<u8> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> src/suffix_fst/sepmap.rs:99:5
+   |
+99 |     pub fn open(bytes: &'a [u8]) -> Option<Self> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/suffix_fst/sepmap.rs:114:5
+    |
+114 |     pub fn bitmap(&self, ordinal: u32) -> Option<&[u8; 32]> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/suffix_fst/sepmap.rs:170:5
+    |
+170 |     pub fn num_ordinals(&self) -> u32 {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> src/suffix_fst/sepmap.rs:179:1
+    |
+179 | pub struct SepMapIndex {
+    | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> src/suffix_fst/sepmap.rs:184:5
+    |
+184 |     pub fn new() -> Self { Self { data: Vec::new() } }
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> src/suffix_fst/termtexts.rs:22:1
+   |
+22 | pub struct TermTextsWriter {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> src/suffix_fst/termtexts.rs:27:5
+   |
+27 |     pub fn new() -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> src/suffix_fst/termtexts.rs:31:5
+   |
+31 |     pub fn add(&mut self, ordinal: u32, text: &str) {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> src/suffix_fst/termtexts.rs:39:5
+   |
+39 |     pub fn serialize(&self) -> Vec<u8> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> src/suffix_fst/termtexts.rs:70:1
+   |
+70 | pub struct TermTextsReader<'a> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> src/suffix_fst/termtexts.rs:77:5
+   |
+77 |     pub fn open(bytes: &'a [u8]) -> Option<Self> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> src/suffix_fst/termtexts.rs:97:5
+   |
+97 |     pub fn num_terms(&self) -> u32 {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> src/suffix_fst/termtexts.rs:111:1
+    |
+111 | pub struct TermTextsIndex {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> src/suffix_fst/termtexts.rs:116:5
+    |
+116 |     pub fn new() -> Self { Self { writer: TermTextsWriter::new() } }
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> src/suffix_fst/freqmap.rs:23:1
+   |
+23 | pub struct FreqMapWriter {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> src/suffix_fst/freqmap.rs:30:5
+   |
+30 |     pub fn new() -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> src/suffix_fst/freqmap.rs:34:5
+   |
+34 |     pub fn add(&mut self, ord: u32, doc_id: u32) {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> src/suffix_fst/freqmap.rs:39:5
+   |
+39 |     pub fn serialize(&self) -> Vec<u8> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> src/suffix_fst/freqmap.rs:98:1
+   |
+98 | pub struct FreqMapReader<'a> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> src/suffix_fst/freqmap.rs:106:5
+    |
+106 |     pub fn open(bytes: &'a [u8]) -> Option<Self> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/suffix_fst/freqmap.rs:123:5
+    |
+123 |     pub fn num_terms(&self) -> u32 { self.num_terms }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> src/suffix_fst/freqmap.rs:189:1
+    |
+189 | pub struct FreqMapIndex {
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> src/suffix_fst/freqmap.rs:194:5
+    |
+194 |     pub fn new() -> Self { Self { writer: FreqMapWriter::new() } }
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated constant
+   --> src/suffix_fst/index_registry.rs:225:5
+    |
+225 |     pub const POSMAP: Self = Self::Custom("posmap");
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated constant
+   --> src/suffix_fst/index_registry.rs:226:5
+    |
+226 |     pub const BYTEMAP: Self = Self::Custom("bytemap");
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated constant
+   --> src/suffix_fst/index_registry.rs:227:5
+    |
+227 |     pub const TERMTEXTS: Self = Self::Custom("termtexts");
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> src/suffix_fst/sfxpost_v2.rs:37:5
+   |
+37 |     pub fn new(num_terms: usize) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> src/suffix_fst/sfxpost_v2.rs:476:1
+    |
+476 | pub struct SfxPostIndex;
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `ld-lucivy` (lib) generated 124 warnings (run `cargo fix --lib -p ld-lucivy` to apply 9 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.54s
