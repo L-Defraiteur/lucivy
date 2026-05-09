@@ -282,9 +282,8 @@ struct ActorSlot {
 
 /// Tracks what an actor is currently doing (lock-free).
 pub struct ActorActivity {
-    /// Pointer to &'static str + length packed in u64: high 32 bits = len, low 32 = ptr offset.
     /// Simpler: just use a Mutex<Option<...>> — contention is negligible since reads are rare (only dumps).
-    state: Mutex<Option<(&'static str, Instant)>>,
+    state: Mutex<Option<(String, Instant)>>,
 }
 
 impl ActorActivity {
@@ -293,8 +292,8 @@ impl ActorActivity {
     }
 
     /// Mark the actor as busy with the given label.
-    pub fn set(&self, label: &'static str) {
-        *self.state.lock().unwrap() = Some((label, Instant::now()));
+    pub fn set(&self, label: impl Into<String>) {
+        *self.state.lock().unwrap() = Some((label.into(), Instant::now()));
     }
 
     /// Mark the actor as idle.
@@ -303,9 +302,9 @@ impl ActorActivity {
     }
 
     /// Read the current activity. Returns (label, elapsed_secs) or None if idle.
-    pub fn get(&self) -> Option<(&'static str, f64)> {
-        self.state.lock().unwrap().map(|(label, since)| {
-            (label, since.elapsed().as_secs_f64())
+    pub fn get(&self) -> Option<(String, f64)> {
+        self.state.lock().unwrap().as_ref().map(|(label, since)| {
+            (label.clone(), since.elapsed().as_secs_f64())
         })
     }
 }
@@ -414,12 +413,26 @@ impl<A: Actor> AnyActor for ActorWrapper<A> {
 pub struct ActorContext {
     actor_id: ActorId,
     shared: Arc<SharedState>,
+    activity: Arc<ActorActivity>,
 }
 
 impl ActorContext {
     /// The identity of this actor in the scheduler.
     pub fn actor_id(&self) -> ActorId {
         self.actor_id
+    }
+
+    /// Set a detailed activity label visible in diagnostic dumps.
+    /// Use this from handlers to report what the actor is doing right now.
+    pub fn set_activity(&self, label: impl Into<String>) {
+        self.activity.set(label);
+    }
+
+    /// Get a clone of the activity tracker Arc.
+    /// Useful for storing in actor state for fine-grained reporting
+    /// from internal methods that don't have access to ctx.
+    pub fn activity(&self) -> Arc<ActorActivity> {
+        Arc::clone(&self.activity)
     }
 
     /// Create a `ResumeHandle` that re-schedules this actor when fired.
@@ -607,9 +620,11 @@ impl Scheduler {
         std::thread::Builder::new()
             .name(format!("pinned-{name}-{}", id.0))
             .spawn(move || {
+                let pinned_activity = Arc::new(ActorActivity::new());
                 let ctx = ActorContext {
                     actor_id: id,
                     shared: Arc::clone(&shared),
+                    activity: Arc::clone(&pinned_activity),
                 };
                 loop {
                     if shared.shutdown.load(Ordering::Acquire) {
@@ -748,6 +763,7 @@ impl Scheduler {
         ActorContext {
             actor_id,
             shared: Arc::clone(&self.shared),
+            activity: Arc::new(ActorActivity::new()),
         }
     }
 
@@ -816,10 +832,12 @@ impl Scheduler {
                     let q = slot.actor.as_ref().map(|a| a.mailbox_len()).unwrap_or(0);
                     let taken = slot.actor.is_none();
                     if taken || q > 0 {
-                        Some(format!("  {:?} {}: {} q:{q}",
-                            id, slot.name,
-                            if taken { "TAKEN" } else { "idle" },
-                        ))
+                        let status = match slot.activity.get() {
+                            Some((label, elapsed)) => format!("BUSY {label} ({elapsed:.1}s)"),
+                            None if taken => "TAKEN".to_string(),
+                            None => "idle".to_string(),
+                        };
+                        Some(format!("  {:?} {}: {status} q:{q}", id, slot.name))
                     } else {
                         None
                     }
@@ -1050,7 +1068,7 @@ fn run_loop_handle_actor(shared: &Arc<SharedState>, actor_id: ActorId, thread_in
 
     thread_info.set_running_actor(actor_id, name);
     activity.set("processing");
-    let result = handle_batch(shared, actor_id, name, &mut actor_box);
+    let result = handle_batch(shared, actor_id, name, &mut actor_box, &activity);
     activity.clear();
     thread_info.set_idle();
 
@@ -1172,11 +1190,13 @@ fn handle_batch(
     actor_id: ActorId,
     actor_name: &'static str,
     actor: &mut Box<dyn AnyActor>,
+    activity: &Arc<ActorActivity>,
 ) -> BatchResult {
     let priority_before = actor.priority();
     let ctx = ActorContext {
         actor_id,
         shared: Arc::clone(shared),
+        activity: Arc::clone(activity),
     };
 
     shared.events.emit(SchedulerEvent::BatchStarted {
@@ -1333,6 +1353,7 @@ fn run_one_step_actor(shared: &Arc<SharedState>, actor_id: ActorId, entry_priori
     let ctx = ActorContext {
         actor_id,
         shared: Arc::clone(&shared),
+        activity: Arc::clone(&activity),
     };
     activity.set("processing");
     let start = Instant::now();

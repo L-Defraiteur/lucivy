@@ -766,9 +766,10 @@ impl luciole::Actor for ShardActor {
         self.self_ref = Some(self_ref);
     }
 
-    fn handle(&mut self, msg: ShardMsg, _ctx: &luciole::ActorContext) -> ActorStatus {
+    fn handle(&mut self, msg: ShardMsg, ctx: &luciole::ActorContext) -> ActorStatus {
         match msg {
             ShardMsg::Search { weight, top_k, filter, reply } => {
+                ctx.set_activity(format!("search shard_{}", self.shard_id));
                 let result = execute_weight_on_shard(
                     &self.handle, self.shard_id, weight.as_ref(), top_k, filter,
                 );
@@ -786,6 +787,7 @@ impl luciole::Actor for ShardActor {
                 }
             }
             ShardMsg::Commit { fast, reply } => {
+                ctx.set_activity(format!("commit_drain shard_{}", self.shard_id));
                 // Step 1: Drain indexers — all pending DocsMsg processed first.
                 // FIFO guarantee: DrainMsg is behind all DocsMsg in the queue.
                 // When all indexers ACK, we know no documents are still being indexed.
@@ -823,6 +825,7 @@ impl luciole::Actor for ShardActor {
                 );
             }
             ShardMsg::IndexersDrained { fast, reply } => {
+                ctx.set_activity(format!("commit_flush shard_{}", self.shard_id));
                 // Step 2: All DocsMsg processed. Now flush indexers.
                 let flush_rxs = {
                     let mut guard = self.handle.writer.lock().unwrap();
@@ -858,7 +861,8 @@ impl luciole::Actor for ShardActor {
                 );
             }
             ShardMsg::FlushDone { results, fast, reply } => {
-                // Step 2: Finalize + commit on a task thread (heavy work:
+                ctx.set_activity(format!("commit_finalize shard_{}", self.shard_id));
+                // Step 3: Finalize + commit on a task thread (heavy work:
                 // finalize_flush_and_prepare, execute_dag, reader reload).
                 let handle = Arc::clone(&self.handle);
                 let shard_id = self.shard_id;
@@ -891,7 +895,8 @@ impl luciole::Actor for ShardActor {
                 );
             }
             ShardMsg::CommitDone { result, reply } => {
-                // Step 3: Forward result to the original caller.
+                ctx.set_activity(format!("commit_done shard_{}", self.shard_id));
+                // Step 4: Forward result to the original caller.
                 reply.send(result);
             }
             ShardMsg::Delete { term } => {

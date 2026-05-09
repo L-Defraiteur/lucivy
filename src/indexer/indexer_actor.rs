@@ -9,12 +9,14 @@
 //! FinalizerActor while the IndexerActor immediately starts a new segment.
 //! This pipelines the expensive finalize with the next batch of documents.
 
+use std::sync::Arc;
+
 use crate::actor::envelope::{type_tag_hash, Envelope, Message};
 use crate::actor::generic_actor::GenericActor;
 use crate::actor::handler::TypedHandler;
 use crate::actor::mailbox::{mailbox, ActorRef};
 use crate::actor::reply::ReplyReceiver;
-use crate::actor::scheduler::global_scheduler;
+use crate::actor::scheduler::{global_scheduler, ActorActivity};
 use crate::actor::{ActorStatus, Priority};
 use crate::index::{Index, Segment};
 use crate::indexer::delete_queue::DeleteCursor;
@@ -195,9 +197,28 @@ struct IndexerState<D: Document> {
     pending_finalize: Option<ReplyReceiver<Result<Vec<u8>, Vec<u8>>>>,
     /// Documents processed since last yield. Reset on Yield.
     docs_since_yield: usize,
+    /// Activity tracker — visible in scheduler dumps for diagnostics.
+    /// Lazily captured from ActorContext on first handler call.
+    activity: Option<Arc<ActorActivity>>,
 }
 
 impl<D: Document> IndexerState<D> {
+    /// Capture the activity tracker from ActorContext (lazy init).
+    fn bind_activity(&mut self, ctx: &crate::actor::scheduler::ActorContext) {
+        if self.activity.is_none() {
+            self.activity = Some(ctx.activity());
+        }
+    }
+
+    /// Update the activity label visible in scheduler dumps.
+    /// Note: use `set_activity_on` for contexts where &self borrows conflict
+    /// (e.g. inside loops that hold &mut self.current).
+    fn set_activity(&self, label: impl Into<String>) {
+        if let Some(ref activity) = self.activity {
+            activity.set(label);
+        }
+    }
+
     /// Process a batch of documents. When memory budget is reached,
     /// submit the finalize as a task (runs on a pool thread, NOT in a
     /// handler). The handler returns immediately — thread freed.
@@ -208,14 +229,20 @@ impl<D: Document> IndexerState<D> {
             return false;
         }
 
+        let batch_len = batch.len();
+        self.set_activity(format!("poll_finalize batch={batch_len}"));
+
         // Poll previous background finalize (non-blocking).
         self.poll_pending_finalize();
 
         let current = match &mut self.current {
             Some(c) => c,
             None => {
+                self.set_activity(format!("skip_to batch={batch_len}"));
                 self.delete_cursor.skip_to(batch[0].opstamp);
+                self.set_activity(format!("new_segment batch={batch_len}"));
                 let segment = self.index.new_segment();
+                self.set_activity(format!("segment_writer_init batch={batch_len}"));
                 let writer = match SegmentWriter::for_segment(self.mem_budget, segment.clone()) {
                     Ok(w) => w,
                     Err(e) => {
@@ -228,15 +255,32 @@ impl<D: Document> IndexerState<D> {
             }
         };
 
-        for doc in batch {
+        // Grab a reference to the activity tracker outside the mutable borrow scope.
+        // This avoids borrow conflicts with &mut self.current held via `current`.
+        let activity = self.activity.clone();
+        let start = std::time::Instant::now();
+        for (i, doc) in batch.into_iter().enumerate() {
+            if i % 16 == 0 {
+                if let Some(ref a) = activity { a.set(format!("add_doc {i}/{batch_len}")); }
+            }
+            let doc_start = std::time::Instant::now();
             if let Err(e) = current.writer.add_document(doc) {
                 self.current.take();
                 self.set_error(e);
                 return false;
             }
+            let doc_elapsed = doc_start.elapsed();
+            if doc_elapsed.as_millis() > 500 {
+                eprintln!("[indexer] SLOW add_document: doc {i}/{batch_len} took {doc_elapsed:?}");
+            }
+        }
+        let total = start.elapsed();
+        if total.as_secs() > 2 {
+            eprintln!("[indexer] batch {batch_len} docs took {total:?} total");
         }
 
         if current.writer.mem_usage() >= self.mem_budget - MARGIN_IN_BYTES {
+            if let Some(ref a) = activity { a.set("finalize_submit"); }
             info!(
                 "Buffer limit reached, flushing segment with maxdoc={}.",
                 current.writer.max_doc()
@@ -252,6 +296,7 @@ impl<D: Document> IndexerState<D> {
         self.docs_since_yield += 1;
         if self.docs_since_yield >= YIELD_EVERY_N_DOCS {
             self.docs_since_yield = 0;
+            self.set_activity("yield");
             return true; // Yield — scheduler can dispatch other work.
         }
         false
@@ -306,6 +351,9 @@ impl<D: Document> IndexerState<D> {
             return;
         }
 
+        let max_doc = current.writer.max_doc();
+        eprintln!("[indexer] submit_finalize_task maxdoc={max_doc}");
+
         let segment = current.segment;
         let writer = current.writer;
         let mut delete_cursor = self.delete_cursor.clone();
@@ -313,9 +361,13 @@ impl<D: Document> IndexerState<D> {
 
         let scheduler = global_scheduler();
         let rx = scheduler.submit_task(crate::actor::Priority::High, move || {
-            finalize_segment(segment, writer, &segment_updater, &mut delete_cursor)
+            let start = std::time::Instant::now();
+            eprintln!("[finalize] START maxdoc={max_doc}");
+            let result = finalize_segment(segment, writer, &segment_updater, &mut delete_cursor)
                 .map(|_| vec![0u8]) // success marker
-                .map_err(|e| e.encode())
+                .map_err(|e| e.encode());
+            eprintln!("[finalize] DONE maxdoc={max_doc} took {:?} ok={}", start.elapsed(), result.is_ok());
+            result
         });
         self.pending_finalize = Some(rx);
     }
@@ -399,21 +451,21 @@ pub(crate) fn create_indexer_actor<D: Document>(
         finalizer_ref,
         pending_finalize: None,
         docs_since_yield: 0,
+        activity: None,
     };
     actor.state_mut().insert::<IndexerState<D>>(indexer_state);
 
     // Docs handler: AddBatch<D> in Envelope.local
     actor.register(TypedHandler::<IndexerDocsMsg, _>::with_priority(
-        |state, _msg, _reply, local, _ctx| {
+        |state, _msg, _reply, local, ctx| {
             let batch = local
                 .and_then(|l| l.downcast::<AddBatch<D>>().ok())
                 .map(|b| *b);
             if let Some(batch) = batch {
                 let s = state.get_mut::<IndexerState<D>>().unwrap();
+                s.bind_activity(ctx);
                 let did_finalize = s.handle_docs(batch);
                 if did_finalize {
-                    // Yield after heavy finalize to free the scheduler thread
-                    // for other actors (drain, commit, etc.).
                     return ActorStatus::Yield;
                 }
             }
@@ -428,8 +480,10 @@ pub(crate) fn create_indexer_actor<D: Document>(
     // immediately. If some, use collect_replies_to on self_ref to get
     // notified when all finalizes complete, then reply.
     actor.register(TypedHandler::<IndexerFlushMsg, _>::with_priority(
-        |state, _msg, reply, _local, _ctx| {
+        |state, _msg, reply, _local, ctx| {
             let s = state.get_mut::<IndexerState<D>>().unwrap();
+            s.bind_activity(ctx);
+            s.set_activity("flush");
             match s.handle_flush() {
                 Err(e) => {
                     if let Some(reply) = reply { reply.send_err(e); }
@@ -485,7 +539,11 @@ pub(crate) fn create_indexer_actor<D: Document>(
 
     // Drain handler: reply immediately (FIFO guarantees all prior DocsMsg processed).
     actor.register(TypedHandler::<IndexerDrainMsg, _>::new(
-        |_state, _msg, reply, _local, _ctx| {
+        |state, _msg, reply, _local, ctx| {
+            if let Some(s) = state.get_mut::<IndexerState<D>>() {
+                s.bind_activity(ctx);
+                s.set_activity("drain_reply");
+            }
             if let Some(reply) = reply {
                 reply.send(IndexerDrainReply);
             }

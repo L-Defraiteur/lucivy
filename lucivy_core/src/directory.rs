@@ -50,11 +50,13 @@ impl StdFsDirectory {
     }
 }
 
-/// Writer that buffers writes in memory and flushes to the filesystem.
+/// Writer that buffers ALL writes in memory. Filesystem I/O happens only at
+/// terminate() — never during write() or flush(). This is critical for WASM/OPFS
+/// where synchronous I/O is slow and would block scheduler threads.
 struct FsWriter {
     path: PathBuf,
     buffer: Vec<u8>,
-    is_flushed: bool,
+    written_to_disk: bool,
 }
 
 impl FsWriter {
@@ -62,36 +64,44 @@ impl FsWriter {
         Self {
             path,
             buffer: Vec::new(),
-            is_flushed: true,
+            written_to_disk: false,
         }
     }
 }
 
 impl Write for FsWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.is_flushed = false;
         self.buffer.extend_from_slice(buf);
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.is_flushed = true;
-        fs::write(&self.path, &self.buffer)
+        // No-op: all data stays in RAM until terminate().
+        // The Directory contract says "writes may be aggressively buffered".
+        // Durability is guaranteed by terminate() called during finalize/commit.
+        Ok(())
     }
 }
 
 impl TerminatingWrite for FsWriter {
     fn terminate_ref(&mut self, _: AntiCallToken) -> io::Result<()> {
-        self.flush()
+        if let Some(parent) = self.path.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        fs::write(&self.path, &self.buffer)?;
+        self.written_to_disk = true;
+        Ok(())
     }
 }
 
 impl Drop for FsWriter {
     fn drop(&mut self) {
-        if !self.is_flushed {
+        if !self.written_to_disk && !self.buffer.is_empty() {
             eprintln!(
-                "Warning: FsWriter for {:?} dropped without flushing. Data may be lost.",
-                self.path
+                "Warning: FsWriter for {:?} dropped with {} bytes unwritten.",
+                self.path, self.buffer.len()
             );
         }
     }
@@ -121,15 +131,9 @@ impl Directory for StdFsDirectory {
 
     fn open_write(&self, path: &Path) -> Result<WritePtr, OpenWriteError> {
         let full = self.resolve(path);
-        if full.exists() {
-            return Err(OpenWriteError::FileAlreadyExists(full));
-        }
-        if let Some(parent) = full.parent() {
-            fs::create_dir_all(parent).map_err(|e| OpenWriteError::IoError {
-                io_error: Arc::new(e),
-                filepath: full.clone(),
-            })?;
-        }
+        // No I/O here — existence check and dir creation are deferred to
+        // FsWriter::terminate(). The WORM contract (enforced by ManagedDirectory)
+        // guarantees callers don't create the same file twice.
         Ok(BufWriter::new(Box::new(FsWriter::new(full))))
     }
 
