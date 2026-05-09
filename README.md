@@ -201,6 +201,8 @@ Benchmarked on 90,000 files from the Linux kernel source tree (top-20 results, 3
 
 Indexation: 90K docs in **50s** (1 shard) / **100s** (4 shards round-robin).
 
+> These are **substring** queries — not simple term dictionary lookups. Every query searches inside tokens, across token boundaries, with BM25 scoring. Direct comparison with traditional full-text engines is not apples-to-apples: they would return 0 results for most of these queries.
+
 ## Architecture
 
 ```
