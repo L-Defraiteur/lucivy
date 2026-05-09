@@ -257,7 +257,6 @@ struct WriteSfxNode {
     segment: Option<crate::index::Segment>,
     field: Field,
     num_docs: u32,
-    ctx: Arc<SfxContext>,
 }
 
 impl Node for WriteSfxNode {
@@ -415,7 +414,6 @@ pub(crate) fn build_sfx_dag(
         segment: Some(segment),
         field,
         num_docs,
-        ctx: ctx.clone(),
     });
     dag.connect("build_fst", "fst", "write", "fst").unwrap();
     dag.connect("validate_gapmap", "gapmap", "write", "gapmap").unwrap();

@@ -391,6 +391,7 @@ impl DfaBuilder {
         }
     }
 
+    #[allow(dead_code)]
     fn new_state(&mut self, is_match: bool) -> usize {
         self.dfa.states.push(State { next: [None; 256], is_match, max_prefix_len: 0 });
         self.dfa.states.len() - 1

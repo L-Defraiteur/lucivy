@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::actor::envelope::{type_tag_hash, Envelope, Message};
 use crate::actor::generic_actor::GenericActor;
 use crate::actor::handler::TypedHandler;
-use crate::actor::mailbox::{mailbox, ActorRef};
+use crate::actor::mailbox::ActorRef;
 use crate::actor::reply::ReplyReceiver;
 use crate::actor::scheduler::{global_scheduler, ActorActivity};
 use crate::actor::{ActorStatus, Priority};
@@ -113,61 +113,6 @@ impl Message for FinalizeReply {
     fn decode(_: &[u8]) -> Result<Self, String> { Ok(Self) }
 }
 
-/// Work payload for the FinalizerActor (passed via Envelope.local).
-struct FinalizeWork {
-    segment: Segment,
-    writer: SegmentWriter,
-    delete_cursor: DeleteCursor,
-    segment_updater: SegmentUpdater,
-}
-
-// ─── FinalizerActor ─────────────────────────────────────────────────────────
-
-/// Create a FinalizerActor — runs finalize_segment() in background.
-///
-/// One FinalizerActor per IndexerActor. Receives FinalizeMsg with work payload,
-/// runs the expensive finalize (SfxCollector.build + remap_and_write), and replies.
-fn create_finalizer_actor() -> GenericActor {
-    let mut actor = GenericActor::new("finalizer");
-
-    actor.register(TypedHandler::<FinalizeMsg, _>::new(
-        |_state, _msg, reply, local, _ctx| {
-            let mut work = *local.unwrap().downcast::<FinalizeWork>().unwrap();
-
-            let result = if work.segment_updater.is_alive() {
-                finalize_segment(
-                    work.segment,
-                    work.writer,
-                    &work.segment_updater,
-                    &mut work.delete_cursor,
-                )
-            } else {
-                Ok(())
-            };
-
-            if let Some(reply) = reply {
-                match result {
-                    Ok(()) => reply.send(FinalizeReply),
-                    Err(e) => reply.send_err(e),
-                }
-            }
-
-            ActorStatus::Continue
-        },
-    ));
-
-    actor
-}
-
-/// Spawn a FinalizerActor in the global scheduler and return its ActorRef.
-fn spawn_finalizer_actor() -> ActorRef<Envelope> {
-    let scheduler = global_scheduler();
-    let actor = create_finalizer_actor();
-    let (mb, mut actor_ref) = mailbox::<Envelope>(4);
-    scheduler.spawn(actor, mb, &mut actor_ref, 4);
-    actor_ref
-}
-
 // ─── State ──────────────────────────────────────────────────────────────────
 
 /// Segment currently being written.
@@ -190,8 +135,6 @@ struct IndexerState<D: Document> {
     bomb: Option<IndexWriterBomb<D>>,
     current: Option<SegmentInProgress>,
     pending_error: Option<crate::LucivyError>,
-    /// ActorRef to the background FinalizerActor.
-    finalizer_ref: ActorRef<Envelope>,
     /// Pending background finalize (at most one).
     /// Ok(bytes) = success, Err(bytes) = serialized LucivyError.
     pending_finalize: Option<ReplyReceiver<Result<Vec<u8>, Vec<u8>>>>,
@@ -418,8 +361,6 @@ pub(crate) fn create_indexer_actor<D: Document>(
     bomb: IndexWriterBomb<D>,
 ) -> GenericActor {
     // Spawn a dedicated FinalizerActor for this IndexerActor.
-    let finalizer_ref = spawn_finalizer_actor();
-
     let mut actor = GenericActor::new("indexer")
         .with_priority_fn(|state| {
             if let Some(s) = state.get::<IndexerState<crate::LucivyDocument>>() {
@@ -438,7 +379,6 @@ pub(crate) fn create_indexer_actor<D: Document>(
         bomb: Some(bomb),
         current: None,
         pending_error: None,
-        finalizer_ref,
         pending_finalize: None,
         docs_since_yield: 0,
         activity: None,

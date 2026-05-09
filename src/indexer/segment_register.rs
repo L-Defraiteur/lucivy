@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::{self, Debug, Display, Formatter};
 
 use crate::index::{SegmentId, SegmentMeta};
@@ -42,17 +42,6 @@ impl Display for SegmentRegister {
 impl SegmentRegister {
     pub fn clear(&mut self) {
         self.segment_states.clear();
-    }
-
-    pub fn get_mergeable_segments(
-        &self,
-        in_merge_segment_ids: &HashSet<SegmentId>,
-    ) -> Vec<SegmentMeta> {
-        self.segment_states
-            .values()
-            .filter(|segment_entry| !in_merge_segment_ids.contains(&segment_entry.segment_id()))
-            .map(|segment_entry| segment_entry.meta().clone())
-            .collect()
     }
 
     pub fn segment_ids(&self) -> Vec<SegmentId> {

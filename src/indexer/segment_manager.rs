@@ -1,4 +1,3 @@
-use std::collections::hash_set::HashSet;
 use std::fmt::{self, Debug, Formatter};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -76,20 +75,6 @@ impl SegmentManager {
         }
     }
 
-    pub fn get_mergeable_segments(
-        &self,
-        in_merge_segment_ids: &HashSet<SegmentId>,
-    ) -> (Vec<SegmentMeta>, Vec<SegmentMeta>) {
-        let registers_lock = self.read();
-        (
-            registers_lock
-                .committed
-                .get_mergeable_segments(in_merge_segment_ids),
-            registers_lock
-                .uncommitted
-                .get_mergeable_segments(in_merge_segment_ids),
-        )
-    }
     /// Returns all of the segment entries (committed or uncommitted)
     pub fn segment_entries(&self) -> Vec<SegmentEntry> {
         let registers_lock = self.read();

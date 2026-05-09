@@ -31,9 +31,6 @@ impl std::fmt::Debug for SfxCache {
 /// Per-segment cache for SFX walk results to avoid redundant computation.
 #[derive(Default)]
 pub struct SfxCache {
-    /// Per-query, per-segment cached results.
-    /// Key: (query_text, segment_id) → cached SFX walk results.
-    segments: Mutex<HashMap<(String, SegmentId), CachedSfxResult>>,
     /// Per-query doc_freq counts. Key: query_text → total doc_freq across segments.
     doc_freq_counts: Mutex<HashMap<String, u64>>,
 }

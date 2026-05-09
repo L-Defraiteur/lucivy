@@ -263,11 +263,6 @@ pub fn token_bytes_in_ranges(
     true
 }
 
-/// Check if a single byte falls within any of the given ranges.
-fn byte_in_ranges(byte: u8, ranges: &[(u8, u8)]) -> bool {
-    ranges.iter().any(|&(lo, hi)| byte >= lo && byte <= hi)
-}
-
 /// Validate a ByteRangeCheck gap between two positions.
 /// Every token between pos_from (exclusive) and pos_to (exclusive) must
 /// have all its bytes within the given ranges. Separator bytes are checked

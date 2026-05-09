@@ -139,74 +139,6 @@ impl SegmentUpdaterState {
         Ok(opstamp)
     }
 
-    /// Run merge cascade in a background task. Fire-and-forget.
-    fn run_deferred_merges(
-        shared: Arc<SegmentUpdaterShared>,
-        opstamp: crate::Opstamp,
-        payload: Option<String>,
-    ) {
-        // Ensure we clear the flag when done (even on early return).
-        struct ClearGuard(Arc<SegmentUpdaterShared>);
-        impl Drop for ClearGuard {
-            fn drop(&mut self) {
-                self.0.pending_merge_tasks.store(false, std::sync::atomic::Ordering::Release);
-            }
-        }
-        let _guard = ClearGuard(shared.clone());
-
-        loop {
-            let merge_candidates = {
-                let (committed, uncommitted) =
-                    shared.get_mergeable_segments(&std::collections::HashSet::new());
-                let mut all_segments: Vec<crate::index::SegmentMeta> = committed;
-                all_segments.extend(uncommitted);
-
-                if all_segments.len() <= 1
-                    && all_segments.first().map_or(true, |s| s.num_deleted_docs() == 0)
-                {
-                    return;
-                }
-
-                let merge_policy = shared.get_merge_policy();
-                merge_policy
-                    .compute_merge_candidates(&all_segments)
-                    .into_iter()
-                    .map(|mc| MergeOperation::new(opstamp, mc.0))
-                    .filter(|op| op.segment_ids().len() > 1)
-                    .collect::<Vec<_>>()
-            };
-
-            if merge_candidates.is_empty() {
-                return;
-            }
-
-            let mut dag = match super::commit_dag::build_commit_dag(
-                shared.clone(),
-                merge_candidates,
-                opstamp,
-                payload.clone(),
-            ) {
-                Ok(d) => d,
-                Err(e) => {
-                    eprintln!("[merge] deferred merge DAG build error: {e}");
-                    return;
-                }
-            };
-
-            match luciole::execute_dag(&mut dag, None) {
-                Ok(result) => {
-                    if crate::diag::is_verbose() {
-                        eprintln!("{}", result.display_summary());
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[merge] deferred merge DAG error: {e}");
-                    return;
-                }
-            }
-        }
-    }
-
     /// Execute an explicit merge via DAG.
     fn handle_merge(
         &mut self,
@@ -235,36 +167,6 @@ impl SegmentUpdaterState {
         garbage_collect_files(&self.shared)
     }
 
-    fn collect_merge_candidates(&self) -> Vec<MergeOperation> {
-        // At commit time, all segments end up in committed (PrepareNode does
-        // segment_manager.commit()). Treat them as one pool so the merge
-        // policy sees the full picture — no more split committed/uncommitted.
-        let (committed, uncommitted) =
-            self.shared.get_mergeable_segments(&std::collections::HashSet::new());
-
-        let mut all_segments: Vec<crate::index::SegmentMeta> = committed;
-        all_segments.extend(uncommitted);
-
-        let docs: Vec<u32> = all_segments.iter().map(|s| s.num_docs()).collect();
-        lucivy_trace!("[merge_policy] segments: {:?}", docs);
-
-        // Single segment with no deletes → nothing to merge
-        if all_segments.len() <= 1
-            && all_segments.first().map_or(true, |s| s.num_deleted_docs() == 0)
-        {
-            return vec![];
-        }
-
-        let merge_policy = self.shared.get_merge_policy();
-        let opstamp = self.shared.load_meta().opstamp;
-
-        merge_policy
-            .compute_merge_candidates(&all_segments)
-            .into_iter()
-            .map(|mc| MergeOperation::new(opstamp, mc.0))
-            .filter(|op| op.segment_ids().len() > 1)
-            .collect()
-    }
 }
 
 // ─── Actor creation ─────────────────────────────────────────────────────────

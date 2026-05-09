@@ -117,13 +117,6 @@ impl SegmentUpdaterShared {
         Ok(segment_entries)
     }
 
-    pub(crate) fn get_mergeable_segments(
-        &self,
-        segments_in_merge: &HashSet<SegmentId>,
-    ) -> (Vec<SegmentMeta>, Vec<SegmentMeta>) {
-        self.segment_manager.get_mergeable_segments(segments_in_merge)
-    }
-
     fn list_files(&self) -> HashSet<PathBuf> {
         let mut files: HashSet<PathBuf> = self
             .index

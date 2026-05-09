@@ -557,62 +557,6 @@ pub(super) fn extract_literals_with_gaps(pattern: &str) -> (Vec<String>, Vec<Gap
     (literals, gap_kinds)
 }
 
-/// Extract ALL literal fragments from a regex pattern, in order.
-/// Splits on metacharacters, skips character classes, handles escapes.
-fn extract_all_literals(pattern: &str) -> Vec<String> {
-    let mut fragments: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let bytes = pattern.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        match b {
-            b'\\' if i + 1 < bytes.len() => {
-                let next = bytes[i + 1];
-                if matches!(next, b'.' | b'[' | b']' | b'(' | b')' | b'{' | b'}'
-                    | b'|' | b'^' | b'$' | b'\\' | b'*' | b'+' | b'?') {
-                    current.push(next as char);
-                    i += 2;
-                } else {
-                    if !current.is_empty() {
-                        fragments.push(std::mem::take(&mut current));
-                    }
-                    i += 2;
-                }
-            }
-            b'[' => {
-                if !current.is_empty() {
-                    fragments.push(std::mem::take(&mut current));
-                }
-                i += 1;
-                while i < bytes.len() && bytes[i] != b']' {
-                    i += 1;
-                }
-                if i < bytes.len() { i += 1; }
-            }
-            b'.' | b'*' | b'+' | b'?' | b'(' | b')'
-            | b'{' | b'}' | b'|' | b'^' | b'$'
-            | b' ' | b'\t' | b'\n' | b'\r' => {
-                // Spaces/whitespace are not regex metacharacters but they ARE
-                // token separators — no single SFX entry spans across spaces.
-                if !current.is_empty() {
-                    fragments.push(std::mem::take(&mut current));
-                }
-                i += 1;
-            }
-            _ => {
-                current.push(b as char);
-                i += 1;
-            }
-        }
-    }
-    if !current.is_empty() {
-        fragments.push(current);
-    }
-
-    fragments.into_iter().map(|f| f.to_lowercase()).collect()
-}
-
 /// Generate n-grams from a query string, adapting n-gram size to query length.
 /// Short queries (< 7 chars) use bigrams, longer queries use trigrams.
 /// Non-alphanumeric characters are treated as separators — n-grams never
@@ -1139,24 +1083,6 @@ pub fn fuzzy_contains_via_trigram(
     // }
 
     Ok((doc_bitset, highlights))
-}
-
-/// Pick the best literal for the primary prefix_walk.
-/// Prefer the prefix (first fragment at start of pattern), fall back to longest.
-/// Returns (literal, is_prefix).
-fn pick_best_literal(pattern: &str, fragments: &[String]) -> (String, bool) {
-    if fragments.is_empty() {
-        return (String::new(), false);
-    }
-    // Prefer first fragment if it's at the pattern start and long enough.
-    let first = &fragments[0];
-    let first_is_prefix = pattern.to_lowercase().starts_with(first.as_str());
-    if first_is_prefix && first.len() >= MIN_LITERAL_LEN {
-        return (first.clone(), true);
-    }
-    // Fall back to longest.
-    let best = fragments.iter().max_by_key(|f| f.len()).unwrap();
-    (best.clone(), false)
 }
 
 /// Fast regex contains via literal extraction + prefix_walk + DFA validation.

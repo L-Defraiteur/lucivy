@@ -88,36 +88,6 @@ impl SegmentSerializer {
         Ok(())
     }
 
-    /// Write a per-field .sfxpost file (sfx postings). `field_id` is used in the filename.
-    pub fn write_sfxpost(&mut self, field_id: u32, data: &[u8]) -> crate::Result<()> {
-        let suffix = format!("{field_id}.sfxpost");
-        let mut writer = self.segment.open_write_custom(&suffix)?;
-        use common::TerminatingWrite;
-        writer.write_all(data)?;
-        writer.terminate()?;
-        Ok(())
-    }
-
-    /// Write a per-field .posmap file (position-to-ordinal map).
-    pub fn write_posmap(&mut self, field_id: u32, data: &[u8]) -> crate::Result<()> {
-        let suffix = format!("{field_id}.posmap");
-        let mut writer = self.segment.open_write_custom(&suffix)?;
-        use common::TerminatingWrite;
-        writer.write_all(data)?;
-        writer.terminate()?;
-        Ok(())
-    }
-
-    /// Write a per-field .bytemap file (byte presence bitmap).
-    pub fn write_bytemap(&mut self, field_id: u32, data: &[u8]) -> crate::Result<()> {
-        let suffix = format!("{field_id}.bytemap");
-        let mut writer = self.segment.open_write_custom(&suffix)?;
-        use common::TerminatingWrite;
-        writer.write_all(data)?;
-        writer.terminate()?;
-        Ok(())
-    }
-
     /// Write a custom per-field index file (generic, used by the registry).
     pub fn write_custom_index(&mut self, field_id: u32, extension: &str, data: &[u8]) -> crate::Result<()> {
         let suffix = format!("{field_id}.{extension}");
