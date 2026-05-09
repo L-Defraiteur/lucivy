@@ -279,7 +279,15 @@ pub fn build_query(
                 build_fuzzy_query(config, schema, index, highlight_sink)
             }
         }
-        "phrase" => build_phrase_query(config, schema, index, highlight_sink),
+        "phrase" => {
+            // Compat: phrase → contains (SFX multi-token handles adjacency,
+            // cross-token, and highlights — superset of PhraseQuery).
+            if index.settings().sfx_enabled {
+                build_contains_query(config, schema, highlight_sink)
+            } else {
+                build_phrase_query(config, schema, index, highlight_sink)
+            }
+        }
         "regex" => {
             // Compat: regex → contains with regex=true.
             if index.settings().sfx_enabled {
@@ -319,8 +327,26 @@ pub fn build_query(
                 .map(|q| q as Box<dyn Query>)
         }
         "boolean" => build_boolean_query(config, schema, index, highlight_sink),
-        "parse" => build_parsed_query(config, schema, index),
-        "phrase_prefix" => build_phrase_prefix_query(config, schema, index, highlight_sink),
+        "parse" => {
+            // Compat: parse → contains for SFX highlights.
+            // QueryParser syntax ("mutex AND lock") is not supported in contains,
+            // so for simple values, route to contains. For complex syntax, keep parse.
+            if index.settings().sfx_enabled && config.value.is_some() {
+                build_contains_query(config, schema, highlight_sink)
+            } else {
+                build_parsed_query(config, schema, index)
+            }
+        }
+        "phrase_prefix" => {
+            // Compat: phrase_prefix → contains (SFX multi-token already does
+            // prefix match on last token — same as PhrasePrefixQuery but with
+            // cross-token awareness and highlights).
+            if index.settings().sfx_enabled {
+                build_contains_query(config, schema, highlight_sink)
+            } else {
+                build_phrase_prefix_query(config, schema, index, highlight_sink)
+            }
+        }
         "disjunction_max" => build_disjunction_max_query(config, schema, index, highlight_sink),
         "more_like_this" => build_more_like_this_query(config, schema),
         other => Err(format!("unknown query type: {other}")),
