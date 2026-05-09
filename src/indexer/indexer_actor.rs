@@ -265,25 +265,15 @@ impl<D: Document> IndexerState<D> {
         // Grab a reference to the activity tracker outside the mutable borrow scope.
         // This avoids borrow conflicts with &mut self.current held via `current`.
         let activity = self.activity.clone();
-        let start = std::time::Instant::now();
         for (i, doc) in batch.into_iter().enumerate() {
             if i % 16 == 0 {
                 if let Some(ref a) = activity { a.set(format!("add_doc {i}/{batch_len}")); }
             }
-            let doc_start = std::time::Instant::now();
             if let Err(e) = current.writer.add_document(doc) {
                 self.current.take();
                 self.set_error(e);
                 return false;
             }
-            let doc_elapsed = doc_start.elapsed();
-            if doc_elapsed.as_millis() > 500 {
-                eprintln!("[indexer] SLOW add_document: doc {i}/{batch_len} took {doc_elapsed:?}");
-            }
-        }
-        let total = start.elapsed();
-        if total.as_secs() > 2 {
-            eprintln!("[indexer] batch {batch_len} docs took {total:?} total");
         }
 
         if current.writer.mem_usage() >= self.mem_budget - MARGIN_IN_BYTES {
@@ -358,9 +348,6 @@ impl<D: Document> IndexerState<D> {
             return;
         }
 
-        let max_doc = current.writer.max_doc();
-        eprintln!("[indexer] submit_finalize_task maxdoc={max_doc}");
-
         let segment = current.segment;
         let writer = current.writer;
         let mut delete_cursor = self.delete_cursor.clone();
@@ -368,13 +355,9 @@ impl<D: Document> IndexerState<D> {
 
         let scheduler = global_scheduler();
         let rx = scheduler.submit_task(crate::actor::Priority::High, move || {
-            let start = std::time::Instant::now();
-            eprintln!("[finalize] START maxdoc={max_doc}");
-            let result = finalize_segment(segment, writer, &segment_updater, &mut delete_cursor)
+            finalize_segment(segment, writer, &segment_updater, &mut delete_cursor)
                 .map(|_| vec![0u8]) // success marker
-                .map_err(|e| e.encode());
-            eprintln!("[finalize] DONE maxdoc={max_doc} took {:?} ok={}", start.elapsed(), result.is_ok());
-            result
+                .map_err(|e| e.encode())
         });
         self.pending_finalize = Some(rx);
     }

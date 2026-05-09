@@ -100,7 +100,6 @@ impl GenericActor {
 
     /// Dispatch an envelope to the matching handler.
     fn dispatch(&mut self, envelope: Envelope, ctx: &crate::ActorContext) -> ActorStatus {
-        eprintln!("[actor:{}] dispatch type_tag={:#018x}", self.name, envelope.type_tag);
         match self.handlers.get(&envelope.type_tag) {
             Some(handler) => handler.handle(
                 &mut self.state,
