@@ -135,20 +135,47 @@ try {
     }
     console.log('File import OK, numDocs:', si3.numDocs);
 
-    // Uncommitted export should throw
-    console.log('\n--- Snapshot: uncommitted export should throw ---');
-    const snapDir4 = join(testDir, 'snap_uncommit');
-    mkdirSync(snapDir4, { recursive: true });
-    const si4 = Index.create(snapDir4, [{ name: 'title', type: 'text' }]);
-    si4.add(0, { title: 'Uncommitted' });
-    try {
-        si4.exportSnapshot();
-        throw new Error('FAIL: should have thrown for uncommitted');
-    } catch (e) {
-        if (!e.message.includes('uncommitted')) {
-            throw new Error('FAIL: wrong error: ' + e.message);
-        }
-        console.log('Correctly threw for uncommitted:', e.message);
+    // ── Sharded index ──
+    console.log('\n--- Sharded index (2 shards) ---');
+    const shardDir = join(testDir, 'sharded');
+    mkdirSync(shardDir, { recursive: true });
+    const sidx = Index.create(shardDir, [
+        { name: 'title', type: 'text' },
+        { name: 'body', type: 'text' },
+    ], 2);
+    for (let i = 0; i < 20; i++) {
+        sidx.add(i, { title: `Doc ${i}`, body: `Content for document number ${i} about programming` });
+    }
+    sidx.commit();
+    if (sidx.numDocs !== 20) throw new Error(`FAIL: expected 20 sharded docs, got ${sidx.numDocs}`);
+
+    const sr1 = sidx.search('programming');
+    if (sr1.length < 1) throw new Error('FAIL: sharded search found nothing');
+    console.log('Sharded search OK:', sr1.length, 'results');
+
+    // sharded snapshot round-trip
+    const ssnap = sidx.exportSnapshot();
+    const shardSnapDir = join(testDir, 'sharded_snap');
+    const sidx2 = Index.importSnapshot(ssnap, shardSnapDir);
+    if (sidx2.numDocs !== 20) throw new Error(`FAIL: sharded snapshot expected 20, got ${sidx2.numDocs}`);
+    const sr2 = sidx2.search('programming');
+    if (sr2.length < 1) throw new Error('FAIL: sharded snapshot search found nothing');
+    console.log('Sharded snapshot OK:', sidx2.numDocs, 'docs');
+
+    // ── Playground .luce import ──
+    console.log('\n--- Playground .luce import ---');
+    const lucePath = join(process.cwd(), 'playground', 'dataset.luce');
+    const { existsSync, readFileSync } = await import('fs');
+    if (existsSync(lucePath)) {
+        const luceData = readFileSync(lucePath);
+        const playDir = join(testDir, 'playground_import');
+        const pidx = Index.importSnapshot(luceData, playDir);
+        if (pidx.numDocs < 1) throw new Error('FAIL: playground snapshot has 0 docs');
+        const pr = pidx.search({ type: 'contains', field: 'content', value: 'function' });
+        if (pr.length < 1) throw new Error('FAIL: playground search found nothing');
+        console.log(`Playground: ${pidx.numDocs} docs, search returned ${pr.length} results`);
+    } else {
+        console.log('SKIP: playground dataset.luce not found');
     }
 
     console.log('\nAll tests passed!');

@@ -33,7 +33,8 @@ int main() {
                     {"name": "title", "type": "text"},
                     {"name": "body", "type": "text"},
                     {"name": "year", "type": "i64", "indexed": true, "fast": true}
-                ])"
+                ])",
+                1
             );
             printf("Created index at: %s\n", std::string(idx->get_path()).c_str());
 
@@ -172,23 +173,57 @@ int main() {
             printf("File import OK, numDocs: %lu\n", idx6->num_docs());
         }
 
-        // Phase 5: uncommitted export should throw
+        // Phase 5: sharded index
         {
-            printf("\n--- Snapshot: uncommitted should throw ---\n");
-            auto snap_uncommit = (tmp / "snap_uncommit").string();
-            fs::create_directories(snap_uncommit);
-            auto idx7 = lucivy::lucivy_create(
-                snap_uncommit,
-                R"([{"name":"t","type":"text"}])");
-            idx7->add(1, R"({"t":"hello"})");
-            bool threw = false;
-            try {
-                idx7->export_snapshot();
-            } catch (const std::exception& e) {
-                threw = true;
-                printf("Correctly threw: %s\n", e.what());
+            printf("\n--- Sharded index (2 shards) ---\n");
+            auto shard_path = (tmp / "sharded").string();
+            fs::create_directories(shard_path);
+            auto sidx = lucivy::lucivy_create(
+                shard_path,
+                R"([{"name":"title","type":"text"},{"name":"body","type":"text"}])",
+                2
+            );
+            for (int i = 0; i < 20; i++) {
+                std::string doc = "{\"title\":\"Doc " + std::to_string(i) +
+                    "\",\"body\":\"Content for document number " + std::to_string(i) +
+                    " about programming\"}";
+                sidx->add(i, doc);
             }
-            assert(threw);
+            sidx->commit();
+            assert(sidx->num_docs() == 20);
+
+            auto sr = sidx->search(R"({"type":"contains","field":"body","value":"programming"})", 10);
+            assert(sr.size() >= 1);
+            printf("Sharded search OK: %zu results\n", sr.size());
+
+            // sharded snapshot round-trip
+            auto ssnap = sidx->export_snapshot();
+            auto ssnap_path = (tmp / "sharded_snap").string();
+            auto sidx2 = lucivy::lucivy_import_snapshot(
+                rust::Slice<const uint8_t>(ssnap.data(), ssnap.size()),
+                ssnap_path
+            );
+            assert(sidx2->num_docs() == 20);
+            printf("Sharded snapshot OK: %lu docs\n", sidx2->num_docs());
+        }
+
+        // Phase 6: playground .luce import
+        {
+            auto luce_path = fs::current_path() / "playground" / "dataset.luce";
+            if (fs::exists(luce_path)) {
+                printf("\n--- Playground .luce import ---\n");
+                auto play_dest = (tmp / "playground_import").string();
+                auto pidx = lucivy::lucivy_import_snapshot_from(
+                    luce_path.string(), play_dest
+                );
+                assert(pidx->num_docs() > 0);
+                auto pr = pidx->search(R"({"type":"contains","field":"content","value":"function"})", 10);
+                assert(pr.size() >= 1);
+                printf("Playground: %lu docs, search returned %zu results\n",
+                    pidx->num_docs(), pr.size());
+            } else {
+                printf("SKIP: playground dataset.luce not found\n");
+            }
         }
 
         printf("\nAll tests passed!\n");

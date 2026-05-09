@@ -201,6 +201,46 @@ jobs:
           idx.commit()
           assert idx.num_docs == 2
 
+          # ── Sharded index ──
+          sidx = lucivy.Index.create('/tmp/ci_sharded', fields=[
+              {'name': 'title', 'type': 'text'},
+              {'name': 'body', 'type': 'text'},
+          ], shards=2)
+          for i in range(20):
+              sidx.add(i, title=f'Doc {i}', body=f'Content for document number {i} about programming')
+          sidx.commit()
+          assert sidx.num_docs == 20, f'Expected 20 sharded docs, got {sidx.num_docs}'
+
+          results = sidx.search('programming', limit=10)
+          assert len(results) >= 1, 'sharded search should find results'
+
+          results = sidx.search({'type': 'contains', 'field': 'body', 'value': 'document', 'distance': 1}, limit=10)
+          assert len(results) >= 1, 'sharded fuzzy should work'
+
+          # sharded snapshot round-trip
+          snap = sidx.export_snapshot()
+          sidx2 = lucivy.Index.import_snapshot(snap, '/tmp/ci_sharded_snap')
+          assert sidx2.num_docs == 20, f'sharded snapshot: expected 20, got {sidx2.num_docs}'
+          results = sidx2.search('programming', limit=10)
+          assert len(results) >= 1, 'sharded snapshot should be searchable'
+
+          # sharded delta sync
+          versions = sidx.shard_versions
+          assert len(versions) == 2, f'expected 2 shard versions, got {len(versions)}'
+
+          # ── Playground .luce import ──
+          import os
+          luce_path = os.path.join(os.getcwd(), 'playground', 'dataset.luce')
+          if os.path.exists(luce_path):
+              pidx = lucivy.Index.import_snapshot_from(luce_path, dest_path='/tmp/ci_playground')
+              assert pidx.num_docs > 0, f'playground snapshot should have docs, got {pidx.num_docs}'
+              results = pidx.search('function', limit=10)
+              assert len(results) >= 1, f'playground search should find results, got {len(results)}'
+              results = pidx.search({'type': 'contains', 'field': 'content', 'value': 'pub.*fn', 'regex': True}, limit=10)
+              print(f'Playground: {pidx.num_docs} docs, regex search returned {len(results)} results')
+          else:
+              print(f'SKIP: playground dataset.luce not found at {luce_path}')
+
           print('All lucivy Python tests passed')
           "
 
