@@ -1281,6 +1281,22 @@ where
             }
             if !alive { continue; }
 
+            // Feed remaining bytes of the current token after the literal.
+            // E.g., for literal "program" in token "programming", feed "ming".
+            let remaining_start = m.si as usize + literal_bytes.len();
+            if remaining_start < m.token_len as usize {
+                if let Some(text) = ord_to_term(m.ordinal as u64) {
+                    let text_bytes = text.as_bytes();
+                    if remaining_start < text_bytes.len() {
+                        for &byte in &text_bytes[remaining_start..] {
+                            state = automaton.accept(&state, byte);
+                            if !automaton.can_match(&state) { alive = false; break; }
+                        }
+                        if !alive { continue; }
+                    }
+                }
+            }
+
             if automaton.is_match(&state) {
                 doc_bitset.insert(m.doc_id);
                 highlights.push((m.doc_id, m.byte_from as usize, m.byte_to as usize));
@@ -2072,6 +2088,120 @@ mod tests {
 
         assert_eq!(results.len(), 1, "regex contains '3db i.' should match doc 1");
         assert_eq!(results[0].1.doc_id, 1);
+    }
+
+    #[test]
+    fn test_continuation_regex_char_class() {
+        // Regex "rag[0-9]db" — character class [0-9] should match '3'
+        let (index, field) = build_continuation_index();
+        let query = RegexContinuationQuery::from_regex(
+            field,
+            "rag[0-9]db".into(),
+            false,
+        );
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let results = searcher
+            .search(&query, &TopDocs::with_limit(10).order_by_score())
+            .unwrap();
+        assert!(results.len() >= 1, "regex 'rag[0-9]db' should match rag3db");
+    }
+
+    #[test]
+    fn test_continuation_regex_char_class_suffix() {
+        // Regex "rag3d[a-z]+" — [a-z]+ should match 'b' (and more)
+        let (index, field) = build_continuation_index();
+        let query = RegexContinuationQuery::from_regex(
+            field,
+            "rag3d[a-z]+".into(),
+            false,
+        );
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let results = searcher
+            .search(&query, &TopDocs::with_limit(10).order_by_score())
+            .unwrap();
+        assert!(results.len() >= 1, "regex 'rag3d[a-z]+' should match rag3db");
+    }
+
+    #[test]
+    fn test_continuation_regex_word_class() {
+        // Regex "rag\\w+" — \w+ should match '3db'
+        let (index, field) = build_continuation_index();
+        let query = RegexContinuationQuery::from_regex(
+            field,
+            r"rag\w+".into(),
+            false,
+        );
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let results = searcher
+            .search(&query, &TopDocs::with_limit(10).order_by_score())
+            .unwrap();
+        assert!(results.len() >= 1, r"regex 'rag\w+' should match rag3db");
+    }
+
+    #[test]
+    fn test_continuation_regex_multi_word() {
+        // "rag3db is" — multi-word regex with space (cross-token)
+        let (index, field) = build_continuation_index();
+        let query = RegexContinuationQuery::from_regex(
+            field,
+            "rag3db is".into(),
+            false,
+        );
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let results = searcher
+            .search(&query, &TopDocs::with_limit(10).order_by_score())
+            .unwrap();
+        assert!(results.len() >= 1, "regex 'rag3db is' should match 'rag3db is cool'");
+    }
+
+    #[test]
+    fn test_continuation_regex_multi_word_custom_data() {
+        // Build a dedicated index with "rag3weaver query engine" etc.
+        let mut schema_builder = SchemaBuilder::new();
+        let raw_opts = TextOptions::default().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer("raw")
+                .set_index_option(IndexRecordOption::WithFreqsAndPositionsAndOffsets),
+        );
+        let field = schema_builder.add_text_field("body._raw", raw_opts);
+        let schema = schema_builder.build();
+
+        let index = Index::create_in_ram(schema);
+        let raw_tokenizer = TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter(LowerCaser)
+            .build();
+        index.tokenizers().register("raw", raw_tokenizer);
+
+        let mut writer = index.writer_for_tests().unwrap();
+
+        let mut doc = LucivyDocument::new();
+        doc.add_text(field, "the rag3weaver query engine is fast");
+        writer.add_document(doc).unwrap();
+
+        let mut doc = LucivyDocument::new();
+        doc.add_text(field, "nothing relevant here");
+        writer.add_document(doc).unwrap();
+
+        writer.commit().unwrap();
+
+        // Test: regex "rag3weaver query" should match
+        let query = RegexContinuationQuery::from_regex(
+            field,
+            "rag3weaver query".into(),
+            false,
+        );
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let results = searcher
+            .search(&query, &TopDocs::with_limit(10).order_by_score())
+            .unwrap();
+        assert!(results.len() >= 1,
+            "regex 'rag3weaver query' should match 'the rag3weaver query engine is fast', got {} results",
+            results.len());
     }
 
     #[test]
