@@ -1,9 +1,11 @@
+/// Automaton-based phrase query implementation.
 pub mod automaton_phrase_query;
 mod automaton_phrase_weight;
 mod contains_scorer;
 mod phrase_query;
 mod phrase_scorer;
 mod phrase_weight;
+/// Regex-based phrase query with wildcard support.
 pub mod regex_phrase_query;
 mod regex_phrase_weight;
 pub mod scoring_utils;

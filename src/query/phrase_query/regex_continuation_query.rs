@@ -32,7 +32,9 @@ use crate::{DocId, LucivyError, Score};
 /// Cached prescan result per segment (used by both regex and fuzzy pipelines).
 #[derive(Clone, Debug)]
 pub struct CachedPrescanResult {
+    /// Per-document term frequency pairs from SFX prescan.
     pub doc_tf: Vec<(DocId, u32)>,
+    /// Highlight byte offset triples (doc_id, start, end) from SFX prescan.
     pub highlights: Vec<(DocId, usize, usize)>,
     /// Per-doc coverage ratio (matched_trigrams / total_trigrams).
     /// Only populated by the fuzzy pipeline. Empty for regex.
@@ -114,8 +116,8 @@ pub fn run_fuzzy_prescan(
     field: Field,
     query_text: &str,
     distance: u8,
-    prefix: bool,
-    anchor_start: bool,
+    _prefix: bool,
+    _anchor_start: bool,
 ) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>)> {
     let sfx_data = match reader.sfx_file(field) {
         Some(d) => d,
@@ -129,8 +131,7 @@ pub fn run_fuzzy_prescan(
 
     let pr = posting_resolver::build_resolver(reader, field)?;
 
-    let inverted_index = reader.inverted_index(field)?;
-    let term_dict = inverted_index.terms();
+    let _inverted_index = reader.inverted_index(field)?;
 
     // TermTexts required — no fallback to tantivy term dict (ordinal mismatch)
     let termtexts_bytes = reader.sfx_index_file("termtexts", field)
@@ -732,7 +733,7 @@ pub fn fuzzy_contains_via_trigram(
     sfx_reader: &SfxFileReader,
     resolver: &dyn PostingResolver,
     ord_to_term: &dyn Fn(u64) -> Option<String>,
-    anchor_start: bool,
+    _anchor_start: bool,
     max_doc: DocId,
     posmap_data: Option<&[u8]>,
 ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>)> {
@@ -1040,7 +1041,7 @@ pub fn fuzzy_contains_via_trigram(
             }
 
             let matched = !dfa_matches.is_empty();
-            let (match_start, match_len) = dfa_matches.first().copied().unwrap_or((0, 0));
+            let (_match_start, _match_len) = dfa_matches.first().copied().unwrap_or((0, 0));
 
 
 
@@ -1171,21 +1172,20 @@ fn pick_best_literal(pattern: &str, fragments: &[String]) -> (String, bool) {
 pub fn regex_contains_via_literal<A: Automaton>(
     automaton: &A,
     pattern: &str,
-    sfx_dict: &SfxTermDictionary,
+    _sfx_dict: &SfxTermDictionary,
     resolver: &dyn PostingResolver,
     sfx_reader: &SfxFileReader,
-    anchor_start: bool,
+    _anchor_start: bool,
     max_doc: DocId,
     ord_to_term: &dyn Fn(u64) -> Option<String>,
     posmap_data: Option<&[u8]>,
     bytemap_data: Option<&[u8]>,
-    sepmap_data: Option<&[u8]>,
+    _sepmap_data: Option<&[u8]>,
 ) -> crate::Result<(BitSet, Vec<(DocId, usize, usize)>)>
 where
     A::State: Clone + Eq + std::hash::Hash,
 {
     let bytemap = bytemap_data.and_then(crate::suffix_fst::bytemap::ByteBitmapReader::open);
-    let sepmap = sepmap_data.and_then(crate::suffix_fst::sepmap::SepMapReader::open);
     use super::literal_resolve::{self, LiteralMatch};
     use std::time::Instant;
     use crate::suffix_fst::posmap::PosMapReader;
@@ -1208,7 +1208,7 @@ where
     // ═══════════════════════════════════════════════════════════════════
     // Step 1: Resolve literals via pipeline (selectivity-ordered, filtered).
     // ═══════════════════════════════════════════════════════════════════
-    let t0 = Instant::now();
+    let _t0 = Instant::now();
 
     // Phase A: estimate selectivity for all literals (no resolve, quasi free)
     let mut lit_fst_cands: Vec<Vec<super::literal_pipeline::FstCandidate>> = Vec::new();
@@ -1250,12 +1250,10 @@ where
         all_matches[lit_idx] = matches;
     }
 
-    let find_us = t0.elapsed().as_micros();
 
     // ═══════════════════════════════════════════════════════════════════
     // Step 2: Single-literal → DFA validate each match. Multi-literal → intersect + PosMap.
     // ═══════════════════════════════════════════════════════════════════
-    let t1 = Instant::now();
 
     let mut doc_bitset = BitSet::with_max_value(max_doc);
     let mut highlights: Vec<(DocId, usize, usize)> = Vec::new();
@@ -1809,7 +1807,7 @@ impl RegexContinuationWeight {
         let use_sibling = sfx_reader.sibling_table().is_some();
 
         let (doc_bitset, highlights, fuzzy_coverage) = match &self.dfa_kind {
-            DfaKind::Fuzzy { text, distance, prefix } if *distance > 0 => {
+            DfaKind::Fuzzy { text, distance, prefix: _ } if *distance > 0 => {
                 // Fuzzy d>=1 via dedicated fuzzy contains pipeline.
                 super::fuzzy_contains::fuzzy_contains(
                     text, *distance, &sfx_reader, &*resolver,

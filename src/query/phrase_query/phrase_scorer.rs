@@ -51,6 +51,7 @@ impl<TPostings: Postings> DocSet for PostingsWithOffset<TPostings> {
     }
 }
 
+/// Scorer for phrase queries with position-based intersection and BM25 scoring.
 pub struct PhraseScorer<TPostings: Postings> {
     intersection_docset: Intersection<PostingsWithOffset<TPostings>, PostingsWithOffset<TPostings>>,
     num_terms: usize,
@@ -356,7 +357,7 @@ fn intersection_count_with_carrying_slop(
 }
 
 impl<TPostings: Postings> PhraseScorer<TPostings> {
-    // If similarity_weight is None, then scoring is disabled.
+    /// Creates a new phrase scorer from term postings with optional BM25 weight.
     pub fn new(
         term_postings: Vec<(usize, TPostings)>,
         similarity_weight_opt: Option<Bm25Weight>,
@@ -459,6 +460,7 @@ impl<TPostings: Postings> PhraseScorer<TPostings> {
         scorer
     }
 
+    /// Returns the number of phrase matches found in the current document.
     pub fn phrase_count(&self) -> u32 {
         self.phrase_count
     }

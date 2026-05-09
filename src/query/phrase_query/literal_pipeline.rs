@@ -26,8 +26,11 @@ use super::literal_resolve::LiteralMatch;
 /// No posting data — just what the FST tells us.
 #[derive(Debug, Clone)]
 pub struct FstCandidate {
+    /// SFX ordinal of the matched suffix entry.
     pub raw_ordinal: u64,
+    /// Suffix index (byte offset within parent token).
     pub si: u16,
+    /// Total byte length of the parent token.
     pub token_len: u16,
 }
 
@@ -381,7 +384,7 @@ pub fn resolve_chains(
         }
 
         // Emit results for surviving chains
-        for (doc_id, _, last_byte_to, match_bf, first_pos) in &active {
+        for (doc_id, _, _last_byte_to, match_bf, first_pos) in &active {
             results.push(LiteralMatch {
                 doc_id: *doc_id,
                 position: *first_pos,
@@ -441,10 +444,15 @@ pub fn find_literal_pipeline(
 /// A resolved posting for multi-token search, with span for cross-token chains.
 #[derive(Debug, Clone)]
 pub struct MultiTokenMatch {
+    /// Document ID.
     pub doc_id: u32,
+    /// Token position of the first token in the match.
     pub token_index: u32,
+    /// Number of indexed tokens covered by this match.
     pub span: u32,
+    /// Start byte offset of the match.
     pub byte_from: u32,
+    /// End byte offset of the match.
     pub byte_to: u32,
 }
 

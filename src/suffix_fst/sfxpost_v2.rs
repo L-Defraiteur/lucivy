@@ -34,6 +34,7 @@ pub struct SfxPostWriterV2 {
 }
 
 impl SfxPostWriterV2 {
+    /// Creates a new SFX posting writer for the specified number of terms.
     pub fn new(num_terms: usize) -> Self {
         Self {
             ordinals: vec![Vec::new(); num_terms],
@@ -473,6 +474,7 @@ mod tests {
 // SfxIndexFile implementation
 // ─────────────────────────────────────────────────────────────────────
 
+/// Index file wrapper for SFX posting lists (SfxIndexFile trait).
 pub struct SfxPostIndex;
 
 impl super::index_registry::SfxIndexFile for SfxPostIndex {

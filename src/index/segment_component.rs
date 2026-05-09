@@ -50,7 +50,9 @@ pub enum SegmentComponent {
     },
     /// Custom per-field SFX index file (from the registry).
     CustomSfxIndex {
+        /// Schema field ID for this custom SFX index file.
         field_id: u32,
+        /// File extension for the custom SFX index file (e.g. "posmap", "bytemap").
         extension: String,
     },
 }

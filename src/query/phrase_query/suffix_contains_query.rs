@@ -28,6 +28,7 @@ impl std::fmt::Debug for SfxCache {
     }
 }
 
+/// Per-segment cache for SFX walk results to avoid redundant computation.
 #[derive(Default)]
 pub struct SfxCache {
     /// Per-query, per-segment cached results.
@@ -50,6 +51,7 @@ impl SfxCache {
     }
 }
 
+/// Cached SFX walk result with document-term frequency pairs and highlights.
 #[derive(Clone, Debug)]
 pub struct CachedSfxResult {
     pub(crate) doc_tf: Vec<(DocId, u32)>,
@@ -57,6 +59,7 @@ pub struct CachedSfxResult {
 }
 
 impl CachedSfxResult {
+    /// Creates a new cached SFX result from term frequency and highlight data.
     pub fn new(doc_tf: Vec<(DocId, u32)>, highlights: Vec<(DocId, usize, usize)>) -> Self {
         Self { doc_tf, highlights }
     }

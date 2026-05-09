@@ -106,8 +106,11 @@ impl Default for HighlightSink {
 /// A single highlight entry returned by `all_entries()`.
 #[derive(Debug, Clone)]
 pub struct HighlightEntry {
+    /// Document ID.
     pub doc_id: DocId,
+    /// Field name where the highlight was found.
     pub field: String,
+    /// Byte offset pairs [start, end] for each highlight span.
     pub offsets: Vec<[usize; 2]>,
 }
 

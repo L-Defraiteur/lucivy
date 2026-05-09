@@ -564,6 +564,7 @@ impl<D: Document> IndexWriter<D> {
         Ok(prepared_commit)
     }
 
+    /// Prepares a commit by flushing pending documents and building segments.
     pub fn prepare_commit(&mut self) -> crate::Result<PreparedCommit<'_, D>> {
         info!("Preparing commit");
 

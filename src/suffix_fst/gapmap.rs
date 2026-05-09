@@ -810,6 +810,7 @@ mod tests {
 // SfxIndexFile implementation
 // ─────────────────────────────────────────────────────────────────────
 
+/// Index file wrapper for gap maps (SfxIndexFile trait).
 pub struct GapMapIndex;
 
 impl super::index_registry::SfxIndexFile for GapMapIndex {

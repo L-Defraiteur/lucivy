@@ -17,6 +17,7 @@ pub struct ByteBitmapWriter {
 }
 
 impl ByteBitmapWriter {
+    /// Creates a new byte presence bitmap writer.
     pub fn new() -> Self {
         Self { bitmaps: Vec::new() }
     }
@@ -139,6 +140,7 @@ impl<'a> ByteBitmapReader<'a> {
         true
     }
 
+    /// Returns the total number of ordinals in the bitmap.
     pub fn num_ordinals(&self) -> u32 {
         self.num_ordinals
     }
@@ -190,11 +192,13 @@ mod tests {
 // SfxIndexFile implementation
 // ─────────────────────────────────────────────────────────────────────
 
+/// Index file wrapper for byte maps (SfxIndexFile trait).
 pub struct ByteMapIndex {
     writer: ByteBitmapWriter,
 }
 
 impl ByteMapIndex {
+    /// Creates a new byte map index file instance.
     pub fn new() -> Self { Self { writer: ByteBitmapWriter::new() } }
 }
 

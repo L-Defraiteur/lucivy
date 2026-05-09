@@ -112,6 +112,7 @@ pub struct SfxPostResolverV2 {
 }
 
 impl SfxPostResolverV2 {
+    /// Creates a new SFX posting resolver from a V2 reader.
     pub fn new(reader: SfxPostReaderV2) -> Self {
         Self { reader }
     }

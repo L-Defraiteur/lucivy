@@ -27,7 +27,9 @@ pub enum GapKind {
 /// A segment of a parsed regex: either a literal or a gap.
 #[derive(Debug, Clone)]
 pub enum RegexSegment {
+    /// A literal text segment extracted from the regex.
     Literal(String),
+    /// A non-literal gap between two literals, classified by validation type.
     Gap(GapKind),
 }
 

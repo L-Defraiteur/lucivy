@@ -22,9 +22,13 @@ use super::suffix_contains;
 /// A match for a literal string in the index.
 #[derive(Debug, Clone)]
 pub struct LiteralMatch {
+    /// Document ID.
     pub doc_id: DocId,
+    /// Token position within the document.
     pub position: u32,
+    /// Start byte offset of the match.
     pub byte_from: u32,
+    /// End byte offset of the match.
     pub byte_to: u32,
     /// Suffix index: byte offset within the parent token where the match starts.
     /// `byte_from - si` gives the content byte start of the parent token.
@@ -221,7 +225,7 @@ pub fn intersect_trigrams_with_threshold(
         let mut current_chain: Vec<(usize, u32, u32, u16, u32)> = Vec::new();
         let results_before = results.len();
 
-        let mut check_chain = |chain: &[(usize, u32, u32, u16, u32)], results: &mut Vec<(DocId, u32, u32, usize, u16, bool, usize, u32, u16)>| -> bool {
+        let check_chain = |chain: &[(usize, u32, u32, u16, u32)], results: &mut Vec<(DocId, u32, u32, usize, u16, bool, usize, u32, u16)>| -> bool {
             if chain.len() < threshold { return false; }
             if results.len() - results_before >= MAX_CHAINS_PER_DOC { return true; }
             let first = &chain[0];

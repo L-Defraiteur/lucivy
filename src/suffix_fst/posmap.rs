@@ -21,6 +21,7 @@ pub struct PosMapWriter {
 }
 
 impl PosMapWriter {
+    /// Creates a new position-to-ordinal map writer.
     pub fn new() -> Self {
         Self { docs: Vec::new() }
     }
@@ -209,11 +210,13 @@ mod tests {
 // SfxIndexFile implementation (Derived)
 // ─────────────────────────────────────────────────────────────────────
 
+/// Index file wrapper for position maps (SfxIndexFile trait).
 pub struct PosMapIndex {
     writer: PosMapWriter,
 }
 
 impl PosMapIndex {
+    /// Creates a new position map index file instance.
     pub fn new() -> Self { Self { writer: PosMapWriter::new() } }
 }
 

@@ -24,10 +24,12 @@ pub struct SepMapWriter {
 }
 
 impl SepMapWriter {
+    /// Creates a new separator byte bitmap writer.
     pub fn new() -> Self {
         Self { bitmaps: Vec::new() }
     }
 
+    /// Ensures capacity for separator bitmaps up to the specified ordinal count.
     pub fn ensure_capacity(&mut self, num_ordinals: u32) {
         let n = num_ordinals as usize;
         if self.bitmaps.len() < n {
@@ -77,6 +79,7 @@ impl SepMapWriter {
         &self.bitmaps
     }
 
+    /// Serializes separator byte bitmaps to binary format.
     pub fn serialize(&self) -> Vec<u8> {
         let num = self.bitmaps.len() as u32;
         let mut buf = Vec::with_capacity(8 + self.bitmaps.len() * 32);
@@ -96,6 +99,7 @@ pub struct SepMapReader<'a> {
 }
 
 impl<'a> SepMapReader<'a> {
+    /// Opens and validates a separator map reader from raw bytes.
     pub fn open(bytes: &'a [u8]) -> Option<Self> {
         if bytes.len() < 8 || &bytes[0..4] != b"SMAP" {
             return None;
@@ -111,6 +115,7 @@ impl<'a> SepMapReader<'a> {
         })
     }
 
+    /// Retrieves the 256-bit byte-presence bitmap for a specific ordinal.
     pub fn bitmap(&self, ordinal: u32) -> Option<&[u8; 32]> {
         if ordinal >= self.num_ordinals {
             return None;
@@ -167,6 +172,7 @@ impl<'a> SepMapReader<'a> {
         bm[0] & 0xFE == 0
     }
 
+    /// Returns the total number of ordinals in the separator map.
     pub fn num_ordinals(&self) -> u32 {
         self.num_ordinals
     }
@@ -176,11 +182,13 @@ impl<'a> SepMapReader<'a> {
 // SfxIndexFile implementation
 // ─────────────────────────────────────────────────────────────────────
 
+/// Index file wrapper for separator maps (SfxIndexFile trait).
 pub struct SepMapIndex {
     data: Vec<u8>,
 }
 
 impl SepMapIndex {
+    /// Creates a new separator map index file instance.
     pub fn new() -> Self { Self { data: Vec::new() } }
 }
 

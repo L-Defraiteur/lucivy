@@ -224,7 +224,7 @@ fn find_matches(
     ngram_size: usize,
     total_ngrams: usize,
     boundary_indices: &HashSet<usize>,
-    ngrams: &[String],
+    _ngrams: &[String],
     diag_docs: Option<&HashSet<DocId>>,
 ) -> Vec<FuzzyMatch> {
     let mut results = Vec::new();

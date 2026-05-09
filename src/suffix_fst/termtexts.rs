@@ -19,15 +19,18 @@ const MAGIC: &[u8; 4] = b"TTXT";
 // Writer
 // ─────────────────────────────────────────────────────────────────────
 
+/// Builds term text index, mapping SFX ordinals to token text for O(1) lookup.
 pub struct TermTextsWriter {
     texts: Vec<Vec<u8>>,
 }
 
 impl TermTextsWriter {
+    /// Creates a new empty term texts writer.
     pub fn new() -> Self {
         Self { texts: Vec::new() }
     }
 
+    /// Records a token text at a specific ordinal position.
     pub fn add(&mut self, ordinal: u32, text: &str) {
         let ord = ordinal as usize;
         if ord >= self.texts.len() {
@@ -36,6 +39,7 @@ impl TermTextsWriter {
         self.texts[ord] = text.as_bytes().to_vec();
     }
 
+    /// Serializes accumulated term texts to binary format.
     pub fn serialize(&self) -> Vec<u8> {
         let num_terms = self.texts.len() as u32;
         let header_size = 4 + 4 + (num_terms as usize + 1) * 4;
@@ -67,6 +71,7 @@ impl TermTextsWriter {
 // Reader
 // ─────────────────────────────────────────────────────────────────────
 
+/// Reads serialized term text data with O(1) lookup by SFX ordinal.
 pub struct TermTextsReader<'a> {
     num_terms: u32,
     offsets: &'a [u8],
@@ -74,6 +79,7 @@ pub struct TermTextsReader<'a> {
 }
 
 impl<'a> TermTextsReader<'a> {
+    /// Opens and validates a term texts reader from raw bytes.
     pub fn open(bytes: &'a [u8]) -> Option<Self> {
         if bytes.len() < 8 { return None; }
         if &bytes[0..4] != MAGIC { return None; }
@@ -94,6 +100,7 @@ impl<'a> TermTextsReader<'a> {
         std::str::from_utf8(&self.data[start..end]).ok()
     }
 
+    /// Returns the total number of indexed terms.
     pub fn num_terms(&self) -> u32 {
         self.num_terms
     }
@@ -108,11 +115,13 @@ impl<'a> TermTextsReader<'a> {
 // SfxIndexFile implementation
 // ─────────────────────────────────────────────────────────────────────
 
+/// Index file wrapper for term texts (SfxIndexFile trait).
 pub struct TermTextsIndex {
     writer: TermTextsWriter,
 }
 
 impl TermTextsIndex {
+    /// Creates a new term texts index file instance.
     pub fn new() -> Self { Self { writer: TermTextsWriter::new() } }
 }
 

@@ -1,4 +1,5 @@
 mod all_query;
+/// Automaton weight: adapts FST automatons into query weights for scoring.
 pub mod automaton_weight;
 mod bitset;
 mod bm25;
@@ -15,6 +16,7 @@ mod fuzzy_query;
 mod intersection;
 mod more_like_this;
 mod phrase_prefix_query;
+/// Phrase query implementations: exact phrase, regex phrase, SFX contains.
 pub mod phrase_query;
 mod query;
 mod query_parser;

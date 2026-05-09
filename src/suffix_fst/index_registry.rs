@@ -222,8 +222,11 @@ pub enum IndexFeature {
 }
 
 impl IndexFeature {
+    /// Index feature identifier for position map files.
     pub const POSMAP: Self = Self::Custom("posmap");
+    /// Index feature identifier for byte map files.
     pub const BYTEMAP: Self = Self::Custom("bytemap");
+    /// Index feature identifier for term text files.
     pub const TERMTEXTS: Self = Self::Custom("termtexts");
 }
 

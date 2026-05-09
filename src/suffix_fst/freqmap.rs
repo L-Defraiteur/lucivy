@@ -20,6 +20,7 @@ const MAGIC: &[u8; 4] = b"FREQ";
 // Writer
 // ─────────────────────────────────────────────────────────────────────
 
+/// Collects document and term frequencies during indexation.
 pub struct FreqMapWriter {
     /// (ord, doc_id) → term_freq
     freqs: HashMap<(u32, u32), u32>,
@@ -27,15 +28,18 @@ pub struct FreqMapWriter {
 }
 
 impl FreqMapWriter {
+    /// Creates a new frequency map writer.
     pub fn new() -> Self {
         Self { freqs: HashMap::new(), max_ord: 0 }
     }
 
+    /// Records an occurrence of a term in a document.
     pub fn add(&mut self, ord: u32, doc_id: u32) {
         *self.freqs.entry((ord, doc_id)).or_insert(0) += 1;
         if ord >= self.max_ord { self.max_ord = ord + 1; }
     }
 
+    /// Serializes frequency data (doc_freq and term_freq) to binary format.
     pub fn serialize(&self) -> Vec<u8> {
         let num_terms = self.max_ord;
         if num_terms == 0 {
@@ -95,6 +99,7 @@ impl FreqMapWriter {
 // Reader
 // ─────────────────────────────────────────────────────────────────────
 
+/// Reads serialized frequency data with O(1) doc_freq lookup.
 pub struct FreqMapReader<'a> {
     num_terms: u32,
     doc_freqs: &'a [u8],    // u32 × num_terms
@@ -103,6 +108,7 @@ pub struct FreqMapReader<'a> {
 }
 
 impl<'a> FreqMapReader<'a> {
+    /// Opens and validates a frequency map reader from raw bytes.
     pub fn open(bytes: &'a [u8]) -> Option<Self> {
         if bytes.len() < 8 { return None; }
         if &bytes[0..4] != MAGIC { return None; }
@@ -120,6 +126,7 @@ impl<'a> FreqMapReader<'a> {
         Some(Self { num_terms, doc_freqs, offsets, tf_data })
     }
 
+    /// Returns the total number of indexed terms.
     pub fn num_terms(&self) -> u32 { self.num_terms }
 
     /// Number of documents containing this ordinal. O(1).
@@ -186,11 +193,13 @@ impl<'a> FreqMapReader<'a> {
 // SfxIndexFile implementation (Derived)
 // ─────────────────────────────────────────────────────────────────────
 
+/// Index file wrapper for frequency maps (SfxIndexFile trait).
 pub struct FreqMapIndex {
     writer: FreqMapWriter,
 }
 
 impl FreqMapIndex {
+    /// Creates a new frequency map index file instance.
     pub fn new() -> Self { Self { writer: FreqMapWriter::new() } }
 }
 

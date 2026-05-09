@@ -910,7 +910,6 @@ impl Scheduler {
         for (i, t) in threads.iter().enumerate() {
             let st = t.state();
             let wait_label = t.wait_label.lock().unwrap().clone();
-            let label = t.label.lock().unwrap().clone();
             let elapsed = t.state_since.lock().unwrap().elapsed().as_secs_f64();
             let actor_info = t.current_actor.lock().unwrap().clone();
 

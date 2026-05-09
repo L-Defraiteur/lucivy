@@ -208,11 +208,13 @@ mod tests {
 // SfxIndexFile implementation
 // ─────────────────────────────────────────────────────────────────────
 
+/// Index file wrapper for sibling tables (SfxIndexFile trait).
 pub struct SiblingIndex {
     data: Vec<u8>,
 }
 
 impl SiblingIndex {
+    /// Creates a new sibling table index file instance.
     pub fn new() -> Self { Self { data: Vec::new() } }
 }
 

@@ -69,6 +69,7 @@ where
     cross_token_search_with_terms(sfx_reader, query, raw_term_resolver, 0, ord_to_term)
 }
 
+/// Single-token contains search with stored text verification for continuation matching.
 pub fn suffix_contains_single_token_continuation<F>(
     sfx_reader: &SfxFileReader<'_>,
     query: &str,
@@ -523,9 +524,13 @@ fn levenshtein_prefix_match(query: &str, text: &str, max_distance: u8) -> bool {
 /// A posting list entry from the ._raw field.
 #[derive(Debug, Clone)]
 pub struct RawPostingEntry {
+    /// Document ID.
     pub doc_id: u32,
+    /// Token position within the document.
     pub token_index: u32,
+    /// Start byte offset of the match.
     pub byte_from: u32,
+    /// End byte offset of the match.
     pub byte_to: u32,
 }
 
@@ -1157,9 +1162,13 @@ where
 /// A multi-token contains match.
 #[derive(Debug, Clone)]
 pub struct SuffixContainsMultiMatch {
+    /// Document ID.
     pub doc_id: u32,
+    /// Start byte offset of the combined match.
     pub byte_from: usize,
+    /// End byte offset of the combined match.
     pub byte_to: usize,
+    /// Individual token matches composing this multi-token result.
     #[allow(dead_code)]
     pub token_matches: Vec<SuffixContainsMatch>,
 }
@@ -1227,7 +1236,6 @@ where
     // 2. Its parent ordinal has contiguous siblings (cross-token chain possible)
     let candidates: Vec<_> = if fuzzy_distance > 0 && has_siblings {
         let sib = sibling_table.unwrap();
-        let before = candidates.len();
         let filtered: Vec<_> = candidates.into_iter().filter(|c| {
             let consumes_all = c.prefix_len >= query_lower.len();
             let has_sibling = !sib.contiguous_siblings(c.parent.raw_ordinal as u32).is_empty();

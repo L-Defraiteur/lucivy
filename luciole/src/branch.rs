@@ -60,6 +60,7 @@ impl<F: FnMut() -> usize + Send> Node for SwitchNode<F> {
 }
 
 /// Convenience: 2-way branch (if/else). Triggers "then" or "else".
+#[allow(non_snake_case)]
 pub fn BranchNode<F: FnMut() -> bool + Send + 'static>(
     mut condition: F,
 ) -> SwitchNode<impl FnMut() -> usize + Send> {

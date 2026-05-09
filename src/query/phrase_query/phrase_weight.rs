@@ -11,6 +11,7 @@ use crate::query::{EmptyScorer, Explanation, Scorer, Weight};
 use crate::schema::{IndexRecordOption, Term};
 use crate::{DocId, DocSet, Score};
 
+/// Weight implementation for phrase queries with BM25 similarity scoring.
 pub struct PhraseWeight {
     phrase_terms: Vec<(usize, Term)>,
     similarity_weight_opt: Option<Bm25Weight>,
@@ -36,6 +37,7 @@ impl PhraseWeight {
         }
     }
 
+    /// Attaches a highlight sink for collecting match byte offsets.
     pub fn with_highlight_sink(mut self, sink: Arc<HighlightSink>, field_name: String) -> Self {
         self.highlight_sink = Some(sink);
         self.highlight_field_name = field_name;
@@ -99,6 +101,7 @@ impl PhraseWeight {
         }
     }
 
+    /// Sets the slop (maximum allowed distance between terms).
     pub fn slop(&mut self, slop: u32) {
         self.slop = slop;
     }
