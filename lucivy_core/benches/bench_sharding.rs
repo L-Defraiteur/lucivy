@@ -379,11 +379,10 @@ fn bench_sharding_comparison() {
         }),
     ];
 
-    eprintln!("{:<35} {:>6} {:>10} {:>10} {:>10}", "Query", "Hits", "1-shard", "TA-4sh", "RR-4sh");
-    eprintln!("{}", "-".repeat(75));
+    let trace_verbose = std::env::var("LUCIVY_VERBOSE").is_ok();
 
     // Traced run: one per query on RR to see per-node timing
-    if do_rr {
+    if do_rr && trace_verbose {
         eprintln!("\n=== DAG node timing (one run per query) ===");
         for (label, config) in &queries {
             if let Some(ref s) = sharded_rr {
@@ -392,6 +391,8 @@ fn bench_sharding_comparison() {
         }
         eprintln!();
     }
+
+    let mut query_rows: Vec<(String, usize, f64, f64, f64)> = Vec::new();
 
     for (label, config) in &queries {
         // Warm up
@@ -421,14 +422,13 @@ fn bench_sharding_comparison() {
                 if hits == 0 { hits = h; }
             }
         }
-        eprintln!("{:<35} {:>6} {:>8.1}ms {:>8.1}ms {:>8.1}ms",
-            label, hits, single_ms / 3.0, ta_ms / 3.0, rr_ms / 3.0);
+        query_rows.push((label.to_string(), hits, single_ms / 3.0, ta_ms / 3.0, rr_ms / 3.0));
     }
 
     let verify = std::env::var("LUCIVY_VERIFY").map(|v| v == "1").unwrap_or(false);
 
     // ── Sanity check: run ALL queries with highlights ─────────────────
-    {
+    if trace_verbose {
         let handle = sharded_rr.as_ref().or(sharded_ta.as_ref());
         let mode = if sharded_rr.is_some() { "RR" } else { "TA" };
         if let Some(handle) = handle {
@@ -478,7 +478,7 @@ fn bench_sharding_comparison() {
                 }
             }
         }
-    }
+    } // if trace_verbose
 
     // ── Diagnostic: multi-token vs single-token hit count ─────────────
     if verify { if let Some(handle) = sharded_rr.as_ref().or(sharded_ta.as_ref()) {
@@ -586,6 +586,13 @@ fn bench_sharding_comparison() {
         single_time, ta_time, rr_time);
     eprintln!("TA distribution: {:?}", ta_counts);
     eprintln!("RR distribution: {:?}", rr_counts);
+
+    eprintln!("\n{:<35} {:>6} {:>10} {:>10} {:>10}", "Query", "Hits", "1-shard", "TA-4sh", "RR-4sh");
+    eprintln!("{}", "-".repeat(75));
+    for (label, hits, single_ms, ta_ms, rr_ms) in &query_rows {
+        eprintln!("{:<35} {:>6} {:>8.1}ms {:>8.1}ms {:>8.1}ms",
+            label, hits, single_ms, ta_ms, rr_ms);
+    }
 
     // Balance metric: stddev of doc counts / mean
     let ta_mean = ta_counts.iter().sum::<u64>() as f64 / ta_counts.len() as f64;
