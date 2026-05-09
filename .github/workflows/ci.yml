@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, feature/startsWith]
+    branches: [main, v2-alpha]
   pull_request:
-    branches: [main]
+    branches: [main, v2-alpha]
 
 env:
   CARGO_TERM_COLOR: always
@@ -78,6 +78,33 @@ jobs:
           -A clippy::assertions_on_constants
           -A dead_code
           -A unused_imports
+
+  thread-spawn-audit:
+    runs-on: ubuntu-latest
+    name: thread-spawn-audit
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for unguarded thread::spawn in non-test code
+        run: |
+          # Find thread::spawn outside of #[cfg(test)] blocks and scheduler.rs
+          # Allowed: luciole/src/scheduler.rs (the scheduler itself spawns threads)
+          #          #[cfg(test)] blocks
+          VIOLATIONS=$(grep -rn "thread::spawn\|thread::Builder" src/ lucivy_core/src/ bindings/ \
+            --include="*.rs" \
+            | grep -v "#\[cfg(test)\]" \
+            | grep -v "// WASM-safe" \
+            | grep -v "test.rs:" \
+            | grep -v "tests::" \
+            || true)
+          if [ -n "$VIOLATIONS" ]; then
+            echo "::warning::Found thread::spawn usage that may break WASM:"
+            echo "$VIOLATIONS"
+            echo ""
+            echo "All threading must go through luciole scheduler (actors/tasks)."
+            echo "Use #[cfg(not(target_arch = \"wasm32\"))] if native-only."
+          fi
 
   lucivy-python:
     runs-on: ubuntu-latest
@@ -162,6 +189,34 @@ jobs:
           assert len(results) >= 1
           assert results[0].highlights is not None
           assert results[0].fields is not None
+
+          # v2 compat: term (cross-token exact match via SFX)
+          results = idx.search({'type': 'term', 'field': 'title', 'value': 'programming'}, limit=10)
+          assert len(results) >= 1, 'term compat should find results'
+
+          # v2 compat: fuzzy via query type
+          results = idx.search({'type': 'fuzzy', 'field': 'body', 'value': 'programing'}, limit=10)
+          assert len(results) >= 1, 'fuzzy compat should catch typo'
+
+          # v2 compat: phrase
+          results = idx.search({'type': 'phrase', 'field': 'body', 'value': 'systems programming'}, limit=10)
+          assert len(results) >= 1, 'phrase compat should find sequence'
+
+          # v2: anchor_start (startsWith behavior)
+          results = idx.search({'type': 'contains', 'field': 'title', 'value': 'rust', 'anchor_start': True}, limit=10)
+          assert len(results) >= 1, 'anchor_start should find Rust'
+
+          # v2: startsWith compat
+          results = idx.search({'type': 'startsWith', 'field': 'title', 'value': 'rust'}, limit=10)
+          assert len(results) >= 1, 'startsWith compat should work'
+
+          # snapshot round-trip
+          snapshot = idx.export_snapshot()
+          assert len(snapshot) > 0, 'snapshot should not be empty'
+          idx2 = lucivy.Index.from_snapshot(snapshot, '/tmp/ci_test_snap')
+          assert idx2.num_docs == idx.num_docs, 'snapshot should preserve docs'
+          results2 = idx2.search('rust', limit=10)
+          assert len(results2) >= 1, 'snapshot index should be searchable'
 
           # delete + update
           idx.delete(2)
