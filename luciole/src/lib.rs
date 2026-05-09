@@ -1,3 +1,10 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::new_without_default,
+    clippy::uninlined_format_args
+)]
+
 pub mod actor_state;
 pub mod checkpoint;
 pub mod dag;

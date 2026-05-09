@@ -1,3 +1,9 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::uninlined_format_args
+)]
+
 pub mod blob_directory;
 pub mod blob_store;
 pub mod bm25_global;

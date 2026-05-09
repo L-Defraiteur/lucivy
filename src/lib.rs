@@ -7,7 +7,12 @@
     clippy::derive_partial_eq_without_eq,
     clippy::module_inception,
     clippy::needless_range_loop,
-    clippy::bool_assert_comparison
+    clippy::bool_assert_comparison,
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::new_without_default,
+    clippy::should_implement_trait,
+    clippy::uninlined_format_args
 )]
 
 //! # `lucivy`
