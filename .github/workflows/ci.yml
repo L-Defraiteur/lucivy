@@ -190,7 +190,7 @@ jobs:
           # snapshot round-trip
           snapshot = idx.export_snapshot()
           assert len(snapshot) > 0, 'snapshot should not be empty'
-          idx2 = lucivy.Index.from_snapshot(snapshot, '/tmp/ci_test_snap')
+          idx2 = lucivy.Index.import_snapshot(snapshot, '/tmp/ci_test_snap')
           assert idx2.num_docs == idx.num_docs, 'snapshot should preserve docs'
           results2 = idx2.search('rust', limit=10)
           assert len(results2) >= 1, 'snapshot index should be searchable'

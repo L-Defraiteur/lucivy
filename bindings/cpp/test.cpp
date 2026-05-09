@@ -33,8 +33,7 @@ int main() {
                     {"name": "title", "type": "text"},
                     {"name": "body", "type": "text"},
                     {"name": "year", "type": "i64", "indexed": true, "fast": true}
-                ])",
-                "english"
+                ])"
             );
             printf("Created index at: %s\n", std::string(idx->get_path()).c_str());
 
@@ -180,8 +179,7 @@ int main() {
             fs::create_directories(snap_uncommit);
             auto idx7 = lucivy::lucivy_create(
                 snap_uncommit,
-                R"([{"name":"t","type":"text"}])",
-                "");
+                R"([{"name":"t","type":"text"}])");
             idx7->add(1, R"({"t":"hello"})");
             bool threw = false;
             try {

@@ -14,7 +14,7 @@ try {
     const idx = Index.create(testDir, [
         { name: 'title', type: 'text' },
         { name: 'body', type: 'text' },
-    ], 'english');
+    ]);
 
     console.log('Created index at:', idx.path);
     console.log('Schema:', idx.schema);
@@ -102,7 +102,7 @@ try {
     const si = Index.create(snapDir1, [
         { name: 'title', type: 'text' },
         { name: 'body', type: 'text' },
-    ], 'english');
+    ]);
     si.add(0, { title: 'Snapshot test', body: 'This is a snapshot roundtrip test' });
     si.add(1, { title: 'Second doc', body: 'Another document for testing' });
     si.commit();
