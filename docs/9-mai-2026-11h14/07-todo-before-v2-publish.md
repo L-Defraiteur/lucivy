@@ -70,7 +70,8 @@ close, search — tout dispo sur les 4 bindings.
 - [ ] Bench de non-régression (37 ground truth checks)
 
 ### Qualité
-- [ ] Audit `thread::spawn` — grep CI
+- [x] Audit `thread::spawn` — grep CI (job thread-spawn-audit ajouté)
+- [ ] Clippy cleanup (~100 pre-existing lints, désactivé en CI pour l'instant)
 - [ ] Retirer les eprintln de diagnostic (ou feature flag)
 
 ### Publish
