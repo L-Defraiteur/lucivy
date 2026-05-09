@@ -99,15 +99,22 @@ where
 
 /// Like `suffix_contains_single_token` but only matches tokens that START
 /// with the query (SI=0 filter). Used for prefix/startsWith queries.
+/// Uses the full cross-token search (which is a superset of single-token)
+/// filtered to SI=0 — handles both "rag3" (single token) and "rag3weaver"
+/// (cross-token: "rag3" + "weaver") in one pass.
 pub fn suffix_contains_single_token_prefix<F>(
     sfx_reader: &SfxFileReader<'_>,
     query: &str,
     raw_term_resolver: F,
+    ord_to_term: Option<&dyn Fn(u64) -> Option<String>>,
 ) -> Vec<SuffixContainsMatch>
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_single_token_inner(sfx_reader, query, &raw_term_resolver, true, false, None)
+    cross_token_search_with_terms(sfx_reader, query, &raw_term_resolver, 0, ord_to_term)
+        .into_iter()
+        .filter(|m| m.si == 0)
+        .collect()
 }
 
 fn suffix_contains_single_token_inner<F>(
@@ -586,7 +593,11 @@ where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
     let query_lower = sub_token.to_lowercase();
-    let use_si0 = anchor_start || !is_first;
+    // anchor_start only constrains the FIRST token to SI=0 (token start).
+    // Non-first tokens always use SI=0 (must be full token matches).
+    // The falling_walk (cross-token) for the first token should NOT be
+    // restricted to SI=0 — it needs to find cross-token splits freely.
+    let use_si0 = if is_first { anchor_start } else { true };
 
     let sibling_table = sfx_reader.sibling_table();
     let mut results: Vec<MultiTokenPosting> = Vec::new();
@@ -677,10 +688,14 @@ where
     };
 
     for cand in &candidates {
-        // Skip non-SI=0 candidates when required (middle/last tokens)
+        // For non-first tokens, require SI=0 (full token match).
+        // For first token with anchor_start, also require SI=0 on the
+        // falling_walk candidate (the query must start at token boundary).
         if use_si0 && cand.parent.si != 0 {
             continue;
         }
+        // For first token WITHOUT anchor_start (contains mode), allow any SI.
+        // The falling_walk finds cross-token splits at any position.
 
         // In fuzzy mode, fst_depth (prefix_len) can exceed query length due to insertions.
         let split_at = cand.prefix_len.min(query_lower.len());

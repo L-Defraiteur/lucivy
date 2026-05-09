@@ -85,6 +85,10 @@ pub struct QueryConfig {
     pub tie_breaker: Option<f32>,
     // PhrasePrefixQuery: max_expansions for last-term prefix
     pub max_expansions: Option<u32>,
+    /// Anchor search to token start (SI=0 only). When true, the query matches
+    /// only at the beginning of tokens — equivalent to the old "startsWith" type.
+    /// Default: false (substring match anywhere in token).
+    pub anchor_start: Option<bool>,
     // MoreLikeThis: tuning parameters
     pub min_doc_frequency: Option<u64>,
     pub max_doc_frequency: Option<u64>,
@@ -192,6 +196,7 @@ fn has_alnum(s: &str) -> bool {
 /// Expand a `_split` query into a boolean should of per-word sub-queries.
 /// Filters out tokens with no alphanumeric characters (e.g. ":" "—").
 /// If only one word remains, returns a single sub-query (no boolean wrapper).
+/// Propagates `anchor_start` and `distance` to each sub-query.
 fn expand_split(config: &QueryConfig, sub_type: &str) -> QueryConfig {
     let value = config.value.as_deref().unwrap_or("");
     let words: Vec<&str> = value.split_whitespace().filter(|w| has_alnum(w)).collect();
@@ -202,6 +207,7 @@ fn expand_split(config: &QueryConfig, sub_type: &str) -> QueryConfig {
             field: config.field.clone(),
             value: Some(if words.is_empty() { value.to_string() } else { words[0].to_string() }),
             distance: config.distance,
+            anchor_start: config.anchor_start,
             ..Default::default()
         };
     }
@@ -212,6 +218,7 @@ fn expand_split(config: &QueryConfig, sub_type: &str) -> QueryConfig {
             field: config.field.clone(),
             value: Some(w.to_string()),
             distance: config.distance,
+            anchor_start: config.anchor_start,
             ..Default::default()
         })
         .collect();
@@ -253,7 +260,9 @@ pub fn build_query(
         }
         "startsWith" => {
             require_sfx(index)?;
-            build_starts_with_query(config, schema, index, highlight_sink)
+            let mut anchored = config.clone();
+            anchored.anchor_start = Some(true);
+            build_contains_query(&anchored, schema, highlight_sink)
         }
         "contains_split" | "sfx_contains_split" => {
             require_sfx(index)?;
@@ -263,7 +272,9 @@ pub fn build_query(
         }
         "startsWith_split" => {
             require_sfx(index)?;
-            let expanded = expand_split(config, "startsWith");
+            let mut anchored = config.clone();
+            anchored.anchor_start = Some(true);
+            let expanded = expand_split(&anchored, "contains");
             build_query(&expanded, schema, index, highlight_sink)
                 .map(|q| q as Box<dyn Query>)
         }
@@ -368,6 +379,7 @@ fn build_phrase_query(
 ///
 /// In regex mode (`regex: true`), uses RegexContinuationQuery for cross-token regex matching.
 /// In fuzzy mode (default), uses SuffixContainsQuery with optional Levenshtein distance.
+/// With `anchor_start=true`, restricts to SI=0 matches (token start = startsWith).
 fn build_contains_query(
     config: &QueryConfig,
     schema: &Schema,
@@ -381,13 +393,14 @@ fn build_contains_query(
     let field = resolve_field(config, schema)?;
     let value = config.value.as_deref().ok_or("contains query requires 'value'")?;
     let distance = config.distance.unwrap_or(0);
+    let anchor_start = config.anchor_start.unwrap_or(false);
 
     // Fuzzy d>=1: use trigram pigeonhole via RegexContinuationQuery (fast + correct ordering).
     if distance > 0 {
         let mut query = RegexContinuationQuery::new(
             field,
             value.to_string(),
-            false /* contains */,
+            anchor_start,
         ).with_fuzzy_distance(distance as u8);
         if let Some(sink) = highlight_sink {
             let field_name = config.field.clone().unwrap_or_default();
@@ -400,6 +413,9 @@ fn build_contains_query(
     let mut query = SuffixContainsQuery::new(field, value.to_string())
         .with_fuzzy_distance(distance)
         .with_strict_separators(config.strict_separators.unwrap_or(false));
+    if anchor_start {
+        query = query.with_anchor_start();
+    }
     if let Some(sink) = highlight_sink {
         let field_name = config.field.clone().unwrap_or_default();
         query = query.with_highlight_sink(sink, field_name);
@@ -430,31 +446,8 @@ fn build_contains_regex(
     Ok(Box::new(query))
 }
 
-/// StartsWith query: FST prefix search with optional fuzzy.
-///
-/// Tokenizes the value, then:
-/// - Non-last tokens: exact or fuzzy match (full terms, no substring)
-/// - Last token: treated as a prefix (FST range or prefix DFA)
-/// - All tokens validated at consecutive positions (phrase adjacency)
-fn build_starts_with_query(
-    config: &QueryConfig,
-    schema: &Schema,
-    _index: &Index,
-    highlight_sink: Option<Arc<HighlightSink>>,
-) -> Result<Box<dyn Query>, String> {
-    let field = resolve_field(config, schema)?;
-    let value = config.value.as_deref().ok_or("startsWith query requires 'value'")?;
-    let fuzzy_distance = config.distance.unwrap_or(0);
-
-    let mut query = SuffixContainsQuery::new(field, value.to_lowercase())
-        .with_anchor_start()
-        .with_fuzzy_distance(fuzzy_distance);
-    if let Some(sink) = highlight_sink {
-        let field_name = config.field.clone().unwrap_or_default();
-        query = query.with_highlight_sink(sink, field_name);
-    }
-    Ok(Box::new(query))
-}
+// build_starts_with_query removed — startsWith is now handled by
+// build_contains_query with anchor_start=true.
 
 /// Escape regex special characters in a string.
 fn regex_escape(s: &str) -> String {

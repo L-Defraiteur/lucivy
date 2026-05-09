@@ -315,7 +315,7 @@ where
         let query = if query_tokens.is_empty() { query_text } else { &query_tokens[0] };
         let matches = if fuzzy_distance == 0 {
             if anchor_start {
-                suffix_contains::suffix_contains_single_token_prefix(sfx_reader, query, resolver)
+                suffix_contains::suffix_contains_single_token_prefix(sfx_reader, query, resolver, ord_to_term)
             } else if continuation {
                 suffix_contains::suffix_contains_single_token_continuation(sfx_reader, query, resolver)
             } else {
