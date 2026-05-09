@@ -197,6 +197,8 @@ Benchmarked on 90,000 files from the Linux kernel source tree (top-20 results, 3
 | `contains 'sched'` | 119ms | 128ms |
 | `startsWith 'sched'` | 185ms | 178ms |
 | `fuzzy 'schdule' (d=1)` | 559ms | 318ms |
+| `regex 'mutex.*lock'` | - | 373ms |
+| `regex 'kmalloc.*sizeof'` | - | 442ms |
 | `contains 'drivers'` (path field) | 7ms | 7ms |
 
 Indexation: 90K docs in **50s** (1 shard) / **100s** (4 shards round-robin).
