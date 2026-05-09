@@ -1113,8 +1113,14 @@ snapshotFileInput.addEventListener('change', async (e) => {
   }
 });
 
-// ── Diag: eval poller for main thread ──────────────────────────────
+// ── Diag: eval poller for main thread (debug mode only) ────────────
+// Only runs when the debug server (serve.mjs) is reachable.
 (async function diagMainEvalPoller() {
+  try {
+    const probe = await fetch('/eval/main/poll', { signal: AbortSignal.timeout(1000) });
+    if (!probe.ok) return;
+  } catch { return; }
+  console.log('[diag] debug server detected — main eval poller enabled');
   while (true) {
     try {
       const resp = await fetch('/eval/main/poll');

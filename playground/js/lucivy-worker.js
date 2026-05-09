@@ -22,11 +22,13 @@ function wlog(...args) {
     console.log(msg);
 }
 
-// ── Diag: send logs to server + poll eval commands ──────────────────────────
+// ── Diag: send logs to server + poll eval commands (debug mode only) ─────────
+// Debug mode is enabled when the debug server (serve.mjs) is reachable.
+// In standalone mode (GitHub Pages, static server), diag is disabled automatically.
 
-const DIAG_URL = self.location.origin; // same server (serve.mjs)
+const DIAG_URL = self.location.origin;
 let diagLogBatch = [];
-let diagEnabled = true;
+let diagEnabled = false; // off by default, enabled after probe
 
 function diagSendLog(line) {
     if (!diagEnabled) return;
@@ -35,23 +37,14 @@ function diagSendLog(line) {
 }
 
 function diagFlush() {
-    if (diagLogBatch.length === 0) return;
+    if (!diagEnabled || diagLogBatch.length === 0) return;
     const batch = diagLogBatch;
     diagLogBatch = [];
-    try {
-        // Use sendBeacon for fire-and-forget (no await needed)
-        const blob = new Blob([batch.join('\n')], { type: 'text/plain' });
-        // sendBeacon not available in workers, use fetch
-        fetch(`${DIAG_URL}/log`, { method: 'POST', body: batch.join('\n') }).catch(() => {});
-    } catch {}
+    fetch(`${DIAG_URL}/log`, { method: 'POST', body: batch.join('\n') }).catch(() => {});
 }
 
-// Flush logs periodically
-setInterval(diagFlush, 500);
-
-// Poll eval commands from the diag server
 async function diagEvalPoller() {
-    while (true) {
+    while (diagEnabled) {
         try {
             const resp = await fetch(`${DIAG_URL}/eval/poll`);
             const cmd = await resp.json();
@@ -74,7 +67,21 @@ async function diagEvalPoller() {
         await new Promise(r => setTimeout(r, 500));
     }
 }
-diagEvalPoller();
+
+// Probe: check if debug server is running. Enable diag only if reachable.
+(async () => {
+    try {
+        const resp = await fetch(`${DIAG_URL}/eval/poll`, { signal: AbortSignal.timeout(1000) });
+        if (resp.ok) {
+            diagEnabled = true;
+            wlog('[diag] debug server detected — diag enabled');
+            setInterval(diagFlush, 500);
+            diagEvalPoller();
+        }
+    } catch {
+        wlog('[diag] no debug server — standalone mode');
+    }
+})();
 
 // Hook: intercept eprintln! (emscripten stderr) and send to diag server.
 // emscripten routes eprintln! → Module.printErr → console.error.
