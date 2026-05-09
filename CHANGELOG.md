@@ -1,3 +1,86 @@
+Lucivy 2.0.0
+================================
+
+Major release: SFX engine, cross-token search, sharding, distributed search, delta sync.
+
+### SFX Engine (Suffix FST)
+
+The search engine has been rewritten around the SFX engine. Every suffix of every
+indexed token is stored in a partitioned FST, enabling substring matching without
+full-index scans. This replaces the previous trigram-based NgramContainsQuery.
+
+- **Suffix FST** (.sfx) — all suffixes partitioned by SI (SI=0 = token start, SI>0 = substring)
+- **Cross-token matching** — `falling_walk` + `sibling_table` reconstruct matches across token boundaries
+- **Fuzzy** — trigram pigeonhole via RegexContinuationQuery (no full scan)
+- **Regex** — literal extraction + SFX lookup + DFA validation (no full scan)
+- **Regex character classes** — `[a-z]+`, `\w+`, `[0-9]+` now work correctly
+
+### Query System
+
+- **`contains`** is the primary query type — handles substring, fuzzy, regex, phrase, and prefix
+- **`anchor_start`** parameter — constrain to SI=0 (token start only)
+- **`exact_match`** parameter — match must cover entire token(s)
+- **Compat layer** — legacy query types (`term`, `fuzzy`, `regex`, `phrase`, `startsWith`, `parse`, `phrase_prefix`) automatically route through the SFX engine
+- **`contains_split`** — split on whitespace, each word becomes a `contains`, OR'd together
+
+### Sharding
+
+- **ShardedHandle** — N shards with configurable routing
+- **`balance_weight`** — 1.0 (round-robin, default) to 0.0 (pure token-aware co-location)
+- **BM25 cross-shard** — `ExportableStats` for correct IDF across shards (diff=0.0000 single vs 4-shard)
+
+### Sync & Distribution
+
+- **LUCE** — full snapshot export/import (all shards in one blob)
+- **LUCID** — incremental delta sync for a single shard (only changed segments)
+- **LUCIDS** — incremental delta sync across multiple shards (only modified shards)
+- **Distributed search** — `export_stats` / `merge` / `search_with_global_stats` pipeline for multi-machine BM25
+
+### luciole — Actor Runtime (new crate)
+
+Extracted the actor/scheduler system into a standalone crate `luciole`:
+
+- Actor trait with priority scheduling, GenericActor with dynamic handlers
+- DAG execution engine (topological, parallel fan-out, checkpoint/restore, undo)
+- StreamDag for streaming pipelines
+- Non-blocking request-reply: `pipe_to`, `collect_replies_to`, `task_pipe_to`
+- WaitGraph for deadlock diagnostics
+- WASM-safe (same code runs native and emscripten)
+
+### Bindings
+
+All 4 bindings now at full feature parity:
+
+- **Python** (PyO3) — `pip install lucivy`
+- **Node.js** (NAPI) — `npm install lucivy`
+- **C++** (cxx bridge)
+- **Emscripten** (WASM) — SharedArrayBuffer + pthreads
+
+Each binding supports: search, highlights, fields, snapshots (export+import),
+delta sync (export+apply, sharded), distributed search (export_stats + search_with_global_stats), close.
+
+The wasm-bindgen (single-threaded) binding has been removed — emscripten is the only WASM target.
+
+### WASM
+
+- **Deferred I/O** — FsWriter buffers all writes in RAM, flushes to OPFS at `terminate()` only
+- **No `thread::spawn`** in actor handlers — docstore compression, watch callbacks, GC all fixed
+- **`WRITER_HEAP_SIZE`** — 15MB (vs 50MB native)
+
+### Scoring
+
+- **Fuzzy scoring tiers** — `miss_penalty * 1000 + bm25_score`. Negative scores are intentional (exact > 1-edit > 2-edit).
+- **BM25 cross-shard** — identical results single-shard vs N-shard
+
+### Breaking Changes
+
+- Default `balance_weight` changed from 0.2 to 1.0 (round-robin)
+- `startsWith` query type removed — use `contains` with `anchor_start: true`
+- wasm-bindgen binding removed — use emscripten
+- Fuzzy scores can be negative (by design)
+
+---
+
 Lucivy 0.25
 ================================
 

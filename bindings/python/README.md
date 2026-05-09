@@ -40,6 +40,9 @@ index = lucivy.Index.create("./my_index", fields=[
     {"name": "year",  "type": "u64"},
 ])
 
+# Create a sharded index (4 shards)
+index = lucivy.Index.create("./my_index", fields=[...], shards=4)
+
 # Open an existing index
 index = lucivy.Index.open("./my_index")
 
@@ -87,11 +90,17 @@ index.search({"type": "contains", "field": "body", "value": "program"})
 # Multi-word phrase
 index.search({"type": "contains", "field": "body", "value": "memory safety"})
 
-# Fuzzy (catches typos, distance=1 by default)
+# Fuzzy (catches typos)
 index.search({"type": "contains", "field": "body", "value": "programing languag", "distance": 1})
 
 # Regex on stored text
 index.search({"type": "contains", "field": "body", "value": "program.*language", "regex": True})
+
+# Prefix — match must start at token boundary
+index.search({"type": "contains", "field": "body", "value": "prog", "anchor_start": True})
+
+# Exact match — match must cover entire token(s)
+index.search({"type": "contains", "field": "body", "value": "rust", "exact_match": True})
 ```
 
 #### contains_split — one word = one contains query, OR'd together
@@ -99,7 +108,7 @@ index.search({"type": "contains", "field": "body", "value": "program.*language",
 Like a string query but targeting a specific field.
 
 ```python
-# "rust safety" → contains("rust") OR contains("safety") on body
+# "rust safety" -> contains("rust") OR contains("safety") on body
 index.search({"type": "contains_split", "field": "body", "value": "rust safety"})
 
 # With fuzzy distance — each word gets fuzzy tolerance
@@ -144,12 +153,43 @@ with open("./backup.luce", "rb") as f:
     restored = lucivy.Index.import_snapshot(f.read(), dest_path="./restored_index")
 ```
 
+### Delta sync (incremental)
+
+Sync only the segments that changed since the client's last version.
+
+```python
+# Get current shard versions
+versions = index.shard_versions()
+
+# Export delta (only changed segments)
+delta = index.export_sharded_delta(client_versions)
+
+# Apply delta on the client side
+client_index.apply_sharded_delta(delta)
+```
+
+### Distributed search
+
+Run BM25 search across multiple machines with correct IDF.
+
+```python
+# On each node: export local stats for this query
+query = {"type": "contains", "field": "body", "value": "rust"}
+stats_json = node.export_stats(query)
+
+# Coordinator: merge stats from all nodes (manual JSON merge)
+
+# On each node: search with global stats
+results = node.search_with_global_stats(query, global_stats_json, limit=10, highlights=True)
+```
+
 ### Info
 
 ```python
 index.num_docs()  # number of documents
 index.path()      # index directory path
 index.schema()    # list of field definitions
+index.close()     # flush + release writer lock
 ```
 
 ## License

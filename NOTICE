@@ -1,11 +1,14 @@
-This software is initially forked from Tantivy (https://github.com/quickwit-oss/tantivy)
-version 0.26.0, which is licensed under the MIT License.
+Lucivy contains code originally derived from Tantivy
+(https://github.com/quickwit-oss/tantivy), version 0.26.0,
+which is licensed under the MIT License.
 
 The original Tantivy MIT License is reproduced below:
 
 ---
 
-Copyright (c) 2018 by the project authors, as listed in the AUTHORS file.
+Copyright (c) 2018 by the Tantivy project authors
+(Paul Masurel, Laurentiu Nicola, Dru Sellers, Ashley Mannix,
+Michael J. Curry, Jason Wolfe, Google LLC).
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

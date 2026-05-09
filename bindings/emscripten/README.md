@@ -1,10 +1,6 @@
 # lucivy-wasm
 
-Fast BM25 full-text search for browsers — WASM build of Lucivy with **threading** (emscripten pthreads), OPFS persistence, and LUCE snapshot support. Runs in a Web Worker.
-
-> **v0.4.0**: Search results can now include stored field values via `{ fields: true }` option.
->
-> **v0.3.0 breaking change**: This package now uses the emscripten build with threading support. The API is now worker-based (async). See below for migration.
+Fast BM25 full-text search for browsers — WASM build with **threading** (emscripten pthreads), OPFS persistence, and snapshot/delta sync support. Runs in a Web Worker.
 
 ## Install
 
@@ -93,24 +89,29 @@ const results2 = await index.search(
     { highlights: true }
 );
 
+// Prefix — match must start at token boundary
+const results3 = await index.search(
+    { type: 'contains', field: 'body', value: 'prog', anchor_start: true }
+);
+
 // contains_split — each word becomes a separate contains query, OR'd together
-const results5 = await index.search(
+const results4 = await index.search(
     { type: 'contains_split', field: 'body', value: 'rust safety' }
 );
 
-// contains_split with fuzzy distance — each word gets fuzzy tolerance
-const results6 = await index.search(
+// contains_split with fuzzy distance
+const results5 = await index.search(
     { type: 'contains_split', field: 'body', value: 'memry safty', distance: 1 }
 );
 
 // Return stored fields with results
-const results3 = await index.search('programming', { fields: true });
-for (const r of results3) {
-    console.log(r.fields.title, r.score);  // stored field values
+const results6 = await index.search('programming', { fields: true });
+for (const r of results6) {
+    console.log(r.fields.title, r.score);
 }
 
 // Pre-filtered by doc IDs
-const results4 = await index.searchFiltered('programming', [1, 3], { highlights: true, fields: true });
+const results7 = await index.searchFiltered('programming', [1, 3], { highlights: true, fields: true });
 
 // Metadata
 const count = await index.numDocs();
@@ -125,6 +126,16 @@ const snapshot = await index.exportSnapshot();
 
 // Import from Uint8Array
 const restored = await lucivy.importSnapshot(snapshot, '/restored');
+```
+
+### Distributed search
+
+```javascript
+// Export local BM25 stats for a query
+const statsJson = await index.exportStats(queryJson);
+
+// Search with merged global stats (correct IDF across nodes)
+const results = await index.searchWithGlobalStats(queryJson, globalStatsJson, limit);
 ```
 
 ### Cleanup

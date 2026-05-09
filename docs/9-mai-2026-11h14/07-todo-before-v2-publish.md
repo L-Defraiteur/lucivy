@@ -60,9 +60,12 @@ close, search — tout dispo sur les 4 bindings.
 - [ ] Licence MIT
 
 ### Documentation
-- [ ] README v2 final (draft dans 06-draft-readme-v2.md)
-- [ ] CHANGELOG v1 → v2
-- [ ] MIGRATION.md
+- [x] README v2 final
+- [x] CHANGELOG v2.0.0 ajouté
+- [x] MIGRATION.md créé
+- [x] READMEs bindings mis à jour (Python, Node.js, Emscripten)
+- [x] AUTHORS supprimé, NOTICE reformulé
+- [x] Bug regex [a-z]+ corrigé + tests
 
 ### Tests
 - [ ] Tests E2E compat layer

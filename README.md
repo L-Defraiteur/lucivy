@@ -1,10 +1,34 @@
 # lucivy
 
-BM25 search engine with cross-token fuzzy matching — it finds substrings, handles typos, and matches across word boundaries. Built for code search, technical docs, and as a BM25 complement to vector databases.
+BM25 full-text search engine with substring matching, fuzzy search, and regex — all cross-token aware.
+
+Built for code search, technical documentation, and as a BM25 complement to vector databases.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
 
 ![Lucivy Playground](docs/8-mars-2026-14h26/image.png)
+
+## What makes lucivy different
+
+Most search engines match **whole tokens**. Search for "mutex" and you'll find the word "mutex" — but not "getMutexHandle" or "lockmutex", because the tokenizer sees those as single opaque tokens. lucivy matches **substrings inside tokens**: "mutex" finds every occurrence, even buried inside compound words, camelCase identifiers, or concatenated strings.
+
+This works because lucivy builds a **Suffix FST** (.sfx) at indexing time. Every suffix of every token is indexed, partitioned by position (SI=0 = token start, SI>0 = substring). This makes substring search as precise as exact-match search, with BM25 scoring.
+
+### Cross-token matching
+
+Tokenizers split text at word boundaries. "rag3weaver" becomes ["rag3", "weaver"]. Traditional search can't find the original compound — lucivy can. The SFX engine follows **sibling links** across token boundaries to reconstruct matches that span multiple tokens.
+
+### Fuzzy with trigram pigeonhole
+
+Fuzzy search (Levenshtein distance) uses a **trigram pigeonhole** strategy: at distance d, at least one trigram of the query must appear exactly. lucivy finds that trigram via the SFX, then validates the full match. This avoids scanning the entire index — only candidates with at least one exact trigram are evaluated.
+
+### Regex with literal extraction
+
+Regex queries are optimized by extracting **literal parts** from the pattern. "log_[a-z]+_error" has literals "log_" and "_error". lucivy searches for these via SFX first, then validates the full regex only on candidates. No full-index scan.
+
+### BM25 scoring — correct across shards
+
+lucivy uses standard BM25 scoring. In sharded mode, global statistics (document frequency, total docs, total tokens) are aggregated before scoring, so results are **identical** whether you use 1 shard or 4. No approximation.
 
 ## Install
 
@@ -15,187 +39,181 @@ Everything is **MIT-licensed**.
 | Python | `pip install lucivy` |
 | Node.js | `npm install lucivy` |
 | WASM (browser) | `npm install lucivy-wasm` |
-| Rust | `cargo add ld-lucivy` |
+| Rust | `cargo add lucivy-core` |
 | C++ | Static library via CXX bridge (build from source) |
 
 ## Quick start
 
+### Python
+
 ```python
 import lucivy
 
-index = lucivy.Index.create("./my_index", fields=[
-    {"name": "title", "type": "text"},
-    {"name": "body", "type": "text"},
+# Create an index
+index = lucivy.Index.create("/tmp/my_index", fields=[
+    {"name": "body", "type": "text", "stored": True}
 ])
 
-index.add(1, title="Rust Programming", body="Systems programming with memory safety")
-index.add(2, title="Python Guide", body="Data science and web development")
+# Add documents
+index.add(1, body="The pthread_mutex_lock function acquires a mutex")
+index.add(2, body="Use std::lock_guard for RAII mutex management")
 index.commit()
 
-results = index.search("programming", highlights=True)
-for r in results:
-    print(r.doc_id, r.score, r.highlights)
+# Substring search — finds "mutex" inside "pthread_mutex_lock"
+results = index.search({"type": "contains", "field": "body", "value": "mutex"})
+
+# Fuzzy search — finds "mutex" even with a typo ("mutx")
+results = index.search({"type": "contains", "field": "body", "value": "mutx", "distance": 1})
+
+# Regex — finds "lock" followed by anything then "mutex"
+results = index.search({"type": "contains", "field": "body", "value": "lock.*mutex", "regex": True})
+
+# Prefix / startsWith — finds tokens starting with "pthread"
+results = index.search({"type": "contains", "field": "body", "value": "pthread", "anchor_start": True})
 ```
 
-See the language-specific READMEs for full API docs:
-- [Python](bindings/python/README.md)
-- [Node.js](bindings/nodejs/README.md)
-- [WASM / browser](bindings/emscripten/README.md)
+### Node.js
 
-## Query types
+```javascript
+const { Index } = require('lucivy');
 
-lucivy queries operate on **stored text** (cross-token). They handle multi-word phrases, substrings, separators, and special characters naturally.
+const index = Index.create('/tmp/my_index', [
+    { name: 'body', type: 'text', stored: true }
+]);
 
-### `contains` — the workhorse query
+index.add(1, { body: 'The pthread_mutex_lock function acquires a mutex' });
+index.commit();
 
-Fuzzy substring match with separator awareness.
+const results = index.search({ type: 'contains', field: 'body', value: 'mutex' });
+```
+
+### Sharded
 
 ```python
-# Exact substring
-index.search({"type": "contains", "field": "body", "value": "programming language"})
-
-# Substring within a token: "program" matches "programming"
-index.search({"type": "contains", "field": "body", "value": "program"})
-
-# Fuzzy tolerance (default distance=1, catches typos)
-index.search({"type": "contains", "field": "body", "value": "programing languag", "distance": 1})
-
-# Strict exact: distance=0 disables fuzzy
-index.search({"type": "contains", "field": "body", "value": "programming", "distance": 0})
+# 4 shards — documents are distributed across shards
+index = lucivy.Index.create("/tmp/sharded", fields=[
+    {"name": "body", "type": "text", "stored": True}
+], shards=4)
 ```
 
-### `contains` + `regex`
-
-Regex on stored text (cross-token).
+### Distributed search (multi-machine)
 
 ```python
-# Matches "programming language" — the .* spans the space between tokens
-index.search({"type": "contains", "field": "body", "value": "program.*language", "regex": True})
+# On each node: export local stats for this query
+stats = node.export_stats(query_config)
 
-# Alternation
-index.search({"type": "contains", "field": "body", "value": "python|rust", "regex": True})
+# Coordinator: merge stats from all nodes
+global_stats = lucivy.merge_stats([stats_node_0, stats_node_1, stats_node_2])
+
+# On each node: search with global stats (correct IDF)
+results = node.search_with_global_stats(query_config, top_k=10, global_stats=global_stats)
+
+# Coordinator: merge top-K results from all nodes
+final_results = merge_top_k(all_results, k=10)
 ```
 
-### `contains_split`
-
-Splits query into words, each word is a `contains`, combined with OR.
+### Incremental sync
 
 ```python
-# String query (auto contains_split across all text fields)
-index.search("rust async programming")
+# Server: export delta (only segments that changed since client's version)
+delta = server_index.export_delta(client_versions)
 
-# Explicit dict query on a specific field
-index.search({"type": "contains_split", "field": "body", "value": "memory safety"})
-
-# With fuzzy distance — each word gets fuzzy tolerance
-index.search({"type": "contains_split", "field": "body", "value": "memry safty", "distance": 1})
+# Client: apply delta (writes new segments, removes old, reloads readers)
+client_index.apply_delta(delta)
 ```
 
-### `boolean`
+## Features
 
-Combine sub-queries with must (AND), should (OR), must_not (NOT).
+### Search
 
-```python
-index.search({
-    "type": "boolean",
-    "must": [
-        {"type": "contains", "field": "body", "value": "rust"},
-        {"type": "contains", "field": "body", "value": "programming"},
-    ],
-    "must_not": [{"type": "contains", "field": "body", "value": "javascript"}],
-})
+- **Substring search** — find text inside tokens, not just whole tokens
+- **Fuzzy search** — Levenshtein distance with trigram acceleration
+- **Regex** — cross-token regex with literal-part optimization
+- **Phrase** — multi-token adjacency with cross-token awareness
+- **Prefix / startsWith** — anchor to token start (SI=0)
+- **Exact match** — cross-token aware full-token matching
+- **Highlights** — byte-offset highlights for all query types
+- **Filters** — non-text field filtering (numeric ranges, equality, membership)
+- **BM25 scoring** — correct cross-shard statistics
+- **More Like This** — find similar documents by reference text
+
+### Indexing
+
+- **Sharded** — configurable routing distributes documents across N shards for parallel search
+- **Incremental** — add, delete, update documents with lazy commit
+- **Background finalize** — segment finalization runs on a pool thread, not in the indexer
+- **Configurable merge policy** — log-based merge with tunable thresholds
+
+### Sync & Distribution
+
+- **LUCE** — full snapshot export/import (all shards in one blob)
+- **LUCID** — incremental delta sync for a single shard (only changed segments)
+- **LUCIDS** — incremental delta sync across multiple shards
+- **Distributed search** — export_stats / merge / search_with_global_stats pipeline
+
+### Platforms
+
+- **Python** (PyO3) — `pip install lucivy` — [README](bindings/python/README.md)
+- **Node.js** (NAPI) — `npm install lucivy` — [README](bindings/nodejs/README.md)
+- **Browser / WASM** (emscripten) — SharedArrayBuffer + multithreaded — [README](bindings/emscripten/README.md)
+- **Rust** — `lucivy-core` on crates.io
+- **C++** — cxx bridge
+
+## Query reference
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `type` | string | required | `"contains"`, `"contains_split"`, `"boolean"`, etc. |
+| `field` | string | required | Field to search |
+| `value` | string | required | Search text or regex pattern |
+| `distance` | int | 0 | Levenshtein distance for fuzzy (0 = exact) |
+| `anchor_start` | bool | false | Match must start at token boundary (SI=0) |
+| `exact_match` | bool | false | Match must cover entire token(s) |
+| `regex` | bool | false | Treat value as regex pattern |
+| `filters` | array | none | Non-text field filters (eq, gt, in, between, ...) |
+
+### Query types
+
+| Type | Description |
+|------|-------------|
+| `contains` | Substring, fuzzy, or regex search (cross-token) |
+| `contains_split` | Split on whitespace, each word is a `contains`, combined with OR |
+| `boolean` | Combine sub-queries with must / should / must_not |
+| `term` | Legacy compat — routes to `contains` + `anchor_start` + `exact_match` |
+| `fuzzy` | Legacy compat — routes to `contains` + `distance` |
+| `regex` | Legacy compat — routes to `contains` + `regex=true` |
+| `phrase` | Legacy compat — routes to `contains` |
+| `startsWith` | Legacy compat — routes to `contains` + `anchor_start` |
+
+## Architecture
+
+```
+Document -> Tokenizer -> Postings (inverted index)
+                      -> SFX (suffix FST + sfxpost)
+                      -> Fast fields
+                      -> Doc store (compressed)
+
+Query -> SFX walk (substring/fuzzy/regex)
+      -> Posting resolve (doc_ids + positions)
+      -> BM25 scoring (with global stats)
+      -> Highlights (byte offsets)
 ```
 
-### Filters on non-text fields
+### SFX file format
 
-Non-text fields (`i64`, `f64`, `u64`, `keyword`) can be filtered via the `filters` key.
+Each indexed segment contains:
+- `.sfx` — Suffix FST with partitioned SI=0 / SI>0 entries
+- `.sfxpost` — Posting lists mapping suffix ordinals to doc_ids
+- `.termtexts` — Token text storage for cross-token sibling chain resolution
+- `.gapmap` — Gap-encoded byte sequences for separator tracking
 
-```python
-index.search({
-    "type": "contains",
-    "field": "body",
-    "value": "programming",
-    "filters": [
-        {"field": "year", "op": "gte", "value": 2023},
-    ],
-})
-# Supported ops: eq, ne, lt, lte, gt, gte, in, not_in, between, starts_with, contains
-```
+### Sharding
 
-### Highlights
+Documents are distributed across shards via configurable routing (`balance_weight`):
 
-All query types support byte-offset highlights. Internal fields (`._raw`, `._ngram`) are automatically filtered out.
-
-```python
-results = index.search("rust programming", highlights=True)
-for r in results:
-    if r.highlights:
-        for field, offsets in r.highlights.items():
-            print(f"  {field}: {offsets}")  # e.g. "body": [(5, 9), (20, 31)]
-```
-
-### Fields (stored values)
-
-Retrieve stored field values alongside search results — useful for displaying file names, titles, or content excerpts.
-
-```python
-results = index.search("rust programming", fields=True)
-for r in results:
-    print(r.doc_id, r.score, r.fields['title'])
-```
-
-### Snapshots (export / import)
-
-Export an index to a portable `.luce` binary blob, import it elsewhere.
-
-```python
-index.export_snapshot_to("./backup.luce")
-restored = lucivy.Index.import_snapshot_from("./backup.luce", dest_path="./restored")
-```
-
-## What `contains` matches
-
-**Fuzzy mode** (default):
-
-| Query | Document | Match? | Why |
-|-------|----------|--------|-----|
-| `programming` | `"Rust programming is fun"` | yes | exact token match |
-| `programing` (typo) | `"Rust programming is fun"` | yes | fuzzy distance=1 |
-| `program` | `"Rust programming is fun"` | yes | substring of token |
-| `programming language` | `"...programming language used..."` | yes | cross-token with separator |
-| `c++` | `"c++ and c# are popular"` | yes | separator-aware |
-| `std::collections` | `"use std::collections::HashMap"` | yes | multi-token + `::` separator |
-
-**Regex mode** (`regex: true`):
-
-| Pattern | Document | Match? | Why |
-|---------|----------|--------|-----|
-| `program.*language` | `"...programming language used..."` | yes | cross-token regex on stored text |
-| `python\|rust` | `"Python is versatile"` | yes | alternation |
-| `v[0-9]+` | `"version v2.0 released"` | yes | full-scan fallback (literal < 3 chars) |
-
-## Internals
-
-### Triple-field layout
-
-Every text field automatically gets 3 sub-fields:
-
-| Sub-field | Tokenizer | Used by |
-|-----------|-----------|---------|
-| `{name}` | stemmed or lowercase | `phrase`, `parse` queries (recall) |
-| `{name}._raw` | lowercase only | `contains` verification (precision) |
-| `{name}._ngram` | character trigrams | `contains` candidate generation |
-
-This is transparent to the user — you always reference the base field name.
-
-### NgramContainsQuery — how `contains` works
-
-1. **Candidate collection** — depends on mode:
-   - *Fuzzy*: term dictionary lookup on `._raw` (O(1) via FST), falling back to trigram intersection on `._ngram` if the exact term isn't found
-   - *Regex*: trigram union on `._ngram` from extracted regex literals
-   - *Short literals*: full segment scan when literals < 3 chars
-2. **Verification** — read stored text, dispatch to fuzzy or regex verifier
-3. **BM25 scoring** — standard `idf * (1 + k1) * tf / (tf + k1 * (1 - b + b * dl / avgdl))`
+- **`balance_weight=1.0`** (default) — round-robin-like. Even distribution, fastest indexation.
+- **`balance_weight=0.2`** — token-aware. Co-locates documents sharing rare tokens.
+- **`balance_weight=0.0`** — pure token-aware. Maximum co-location.
 
 ## Building from source
 
@@ -204,30 +222,19 @@ This is transparent to the user — you always reference the base field name.
 cargo test --lib
 
 # Python bindings
-cd bindings/python
-maturin develop --release
-pytest tests/ -v
+cd bindings/python && maturin develop --release
 
 # Node.js bindings
-cd bindings/nodejs && npm run build
-node test.mjs
+cargo build -p lucivy-napi --release
+cp target/release/liblucivy_napi.so bindings/nodejs/lucivy.node
 
 # C++ bindings
 cargo build -p lucivy-cpp --release
-```
 
-## Lineage
-
-Fork of [tantivy](https://github.com/quickwit-oss/tantivy) v0.26.0 (via [izihawa/tantivy](https://github.com/izihawa/tantivy)).
-
-```
-quickwit-oss/tantivy v0.22
-  -> izihawa/tantivy v0.26.0 (regex phrase queries, FST improvements)
-    -> L-Defraiteur/lucivy (NgramContainsQuery, contains_split, fuzzy/regex/hybrid modes, HighlightSink, Python/Node.js/C++/WASM bindings)
+# WASM (emscripten)
+bash bindings/emscripten/build.sh
 ```
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
-Fork of [tantivy](https://github.com/quickwit-oss/tantivy) v0.26.0, also MIT (see [NOTICE](NOTICE)).

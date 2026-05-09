@@ -40,6 +40,9 @@ const index = Index.create('./my_index', [
     { name: 'year',  type: 'i64', indexed: true, fast: true },
 ]);
 
+// Sharded (4 shards)
+const sharded = Index.create('./my_index', [...], { shards: 4 });
+
 const index2 = Index.open('./my_index');
 ```
 
@@ -83,17 +86,23 @@ index.search({ type: 'contains', field: 'body', value: 'program' });
 // Multi-word phrase
 index.search({ type: 'contains', field: 'body', value: 'memory safety' });
 
-// Fuzzy (catches typos, distance=1 by default)
+// Fuzzy (catches typos)
 index.search({ type: 'contains', field: 'body', value: 'programing languag', distance: 1 });
 
 // Regex on stored text
 index.search({ type: 'contains', field: 'body', value: 'program.*language', regex: true });
+
+// Prefix — match must start at token boundary
+index.search({ type: 'contains', field: 'body', value: 'prog', anchor_start: true });
+
+// Exact match — match must cover entire token(s)
+index.search({ type: 'contains', field: 'body', value: 'rust', exact_match: true });
 ```
 
 #### contains_split — one word = one contains query, OR'd together
 
 ```javascript
-// "rust safety" → contains("rust") OR contains("safety") on body
+// "rust safety" -> contains("rust") OR contains("safety") on body
 index.search({ type: 'contains_split', field: 'body', value: 'rust safety' });
 
 // With fuzzy distance — each word gets fuzzy tolerance
@@ -143,12 +152,42 @@ const restored = Index.importSnapshotFrom('./backup.luce', './restored_index');
 const restored2 = Index.importSnapshot(buf, './restored_index');
 ```
 
+### Delta sync (incremental)
+
+Sync only the segments that changed since the client's last version.
+
+```javascript
+// Get current shard versions
+const versions = index.shardVersions;
+
+// Export delta (only changed segments)
+const delta = index.exportShardedDelta(clientVersions);
+
+// Apply delta on the client side
+clientIndex.applyShardedDelta(delta);
+```
+
+### Distributed search
+
+Run BM25 search across multiple machines with correct IDF.
+
+```javascript
+// On each node: export local stats for this query
+const statsJson = node.exportStats('{"type":"contains","field":"body","value":"rust"}');
+
+// Coordinator: merge stats from all nodes (manual JSON merge)
+
+// On each node: search with global stats
+const results = node.searchWithGlobalStats(queryJson, globalStatsJson, 10, true);
+```
+
 ### Properties
 
 ```javascript
 index.numDocs   // number of documents
 index.path      // index directory path
 index.schema    // array of field definitions
+index.close()   // flush + release writer lock
 ```
 
 ## License
