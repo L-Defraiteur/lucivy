@@ -243,13 +243,20 @@ impl<D: Document> IndexerState<D> {
                 self.set_activity(format!("new_segment batch={batch_len}"));
                 let segment = self.index.new_segment();
                 self.set_activity(format!("segment_writer_init batch={batch_len}"));
-                let writer = match SegmentWriter::for_segment(self.mem_budget, segment.clone()) {
+                let mut writer = match SegmentWriter::for_segment(self.mem_budget, segment.clone()) {
                     Ok(w) => w,
                     Err(e) => {
                         self.set_error(e);
                         return false;
                     }
                 };
+                // Wire activity reporter so add_document steps are visible in dumps.
+                if let Some(ref activity) = self.activity {
+                    let a = activity.clone();
+                    writer.set_activity_reporter(move |step| {
+                        a.set(step);
+                    });
+                }
                 self.current = Some(SegmentInProgress { segment, writer });
                 self.current.as_mut().unwrap()
             }

@@ -66,6 +66,10 @@ pub struct SegmentWriter {
     sfx_collectors: HashMap<u32, SfxCollector>,
     /// Tracks which sfx_collectors were fed during the current document.
     sfx_fed_this_doc: Vec<u32>,
+    /// Optional activity reporter for diagnostics. Called at each major step
+    /// of add_document/finalize so external systems (actor scheduler dumps)
+    /// can show what the writer is doing.
+    activity_reporter: Option<Box<dyn Fn(&str) + Send>>,
 }
 
 impl SegmentWriter {
@@ -142,7 +146,20 @@ impl SegmentWriter {
             },
             sfx_fed_this_doc: Vec::new(),
             schema,
+            activity_reporter: None,
         })
+    }
+
+    /// Set a callback that will be called at each major step of add_document
+    /// and finalize, reporting what the writer is currently doing.
+    pub fn set_activity_reporter(&mut self, f: impl Fn(&str) + Send + 'static) {
+        self.activity_reporter = Some(Box::new(f));
+    }
+
+    fn report_activity(&self, label: &str) {
+        if let Some(ref f) = self.activity_reporter {
+            f(label);
+        }
     }
 
     /// Lay on disk the current content of the `SegmentWriter`
@@ -502,9 +519,12 @@ impl SegmentWriter {
         let AddOperation { document, opstamp, pre_tokenized } = add_operation;
         self.doc_opstamps.push(opstamp);
         self.sfx_fed_this_doc.clear();
+        self.report_activity("fast_fields");
         self.fast_field_writers.add_document(&document)?;
+        self.report_activity("index_doc");
         self.index_document(&document, pre_tokenized)?;
         // Fill empty docs for sfx collectors that were not fed during this document
+        self.report_activity("sfx_empty");
         let fed: Vec<u32> = self.sfx_fed_this_doc.clone();
         for (&field_id, collector) in &mut self.sfx_collectors {
             if !fed.contains(&field_id) {
@@ -512,6 +532,7 @@ impl SegmentWriter {
                 collector.end_doc_empty();
             }
         }
+        self.report_activity("store_doc");
         let doc_writer = self.segment_serializer.get_store_writer();
         doc_writer.store(&document, &self.schema)?;
         self.max_doc += 1;

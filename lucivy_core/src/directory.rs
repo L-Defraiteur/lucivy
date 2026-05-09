@@ -53,6 +53,9 @@ impl StdFsDirectory {
 /// Writer that buffers ALL writes in memory. Filesystem I/O happens only at
 /// terminate() — never during write() or flush(). This is critical for WASM/OPFS
 /// where synchronous I/O is slow and would block scheduler threads.
+///
+/// Memory is bounded by the indexer's mem_budget which triggers finalize
+/// (and thus terminate) before segments grow too large.
 struct FsWriter {
     path: PathBuf,
     buffer: Vec<u8>,

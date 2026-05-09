@@ -81,16 +81,29 @@ impl WatchCallbackList {
             let _ = sender.send(Ok(()));
             return result;
         }
-        let spawn_res = std::thread::Builder::new()
-            .name("watch-callbacks".to_string())
-            .spawn(move || {
-                for callback in callbacks {
-                    callback.call();
-                }
-                let _ = sender.send(Ok(()));
-            });
-        if let Err(err) = spawn_res {
-            error!("Failed to spawn thread to call watch callbacks. Cause: {err:?}");
+        // On WASM, don't spawn a thread — the emscripten pthread pool is limited.
+        // Call callbacks inline instead. This is safe because callbacks are short
+        // (reader reload notifications).
+        #[cfg(target_arch = "wasm32")]
+        {
+            for callback in callbacks {
+                callback.call();
+            }
+            let _ = sender.send(Ok(()));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let spawn_res = std::thread::Builder::new()
+                .name("watch-callbacks".to_string())
+                .spawn(move || {
+                    for callback in callbacks {
+                        callback.call();
+                    }
+                    let _ = sender.send(Ok(()));
+                });
+            if let Err(err) = spawn_res {
+                error!("Failed to spawn thread to call watch callbacks. Cause: {err:?}");
+            }
         }
         result
     }

@@ -46,8 +46,13 @@ pub struct LucivyHandle {
     pub has_uncommitted: AtomicBool,
 }
 
-/// Default writer heap size (50MB).
+/// Default writer heap size.
+/// 50MB on native, 15MB on WASM to reduce memory pressure — browser memory
+/// is limited and segment files are loaded into RAM on reader reload.
+#[cfg(not(target_arch = "wasm32"))]
 const WRITER_HEAP_SIZE: usize = 50_000_000;
+#[cfg(target_arch = "wasm32")]
+const WRITER_HEAP_SIZE: usize = 15_000_000;
 
 /// Config file stored alongside the index for reopening.
 const CONFIG_FILE: &str = "_config.json";

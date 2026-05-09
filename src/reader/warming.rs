@@ -129,19 +129,29 @@ impl WarmingStateInner {
     }
 
     /// Start GC thread if one has not already been started.
+    /// On WASM, skip the GC thread — the emscripten pthread pool is limited.
+    /// GC will happen synchronously during warm() calls instead.
     fn start_gc_thread_maybe(&mut self, this: &Arc<Mutex<Self>>) -> crate::Result<bool> {
-        if self.gc_thread.is_some() {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = this;
             return Ok(false);
         }
-        let weak_inner = Arc::downgrade(this);
-        let handle = std::thread::Builder::new()
-            .name("lucivy-warm-gc".to_owned())
-            .spawn(|| Self::gc_loop(weak_inner))
-            .map_err(|_| {
-                LucivyError::SystemError("Failed to spawn warmer GC thread".to_owned())
-            })?;
-        self.gc_thread = Some(handle);
-        Ok(true)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.gc_thread.is_some() {
+                return Ok(false);
+            }
+            let weak_inner = Arc::downgrade(this);
+            let handle = std::thread::Builder::new()
+                .name("lucivy-warm-gc".to_owned())
+                .spawn(|| Self::gc_loop(weak_inner))
+                .map_err(|_| {
+                    LucivyError::SystemError("Failed to spawn warmer GC thread".to_owned())
+                })?;
+            self.gc_thread = Some(handle);
+            Ok(true)
+        }
     }
 
     /// Every [`GC_INTERVAL`] attempt to GC, with panics caught and logged using

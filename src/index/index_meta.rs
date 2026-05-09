@@ -293,6 +293,13 @@ impl Default for IndexSettings {
         Self {
             docstore_compression: Compressor::default(),
             docstore_blocksize: default_docstore_blocksize(),
+            // On WASM, thread::spawn for the docstore compressor risks deadlock:
+            // the emscripten pthread pool is limited, and a sync_channel(3) blocks
+            // the actor handler when the compression thread can't be scheduled.
+            // Inline compression is safer and fast enough for WASM workloads.
+            #[cfg(target_arch = "wasm32")]
+            docstore_compress_dedicated_thread: false,
+            #[cfg(not(target_arch = "wasm32"))]
             docstore_compress_dedicated_thread: true,
             sfx_enabled: true,
         }
