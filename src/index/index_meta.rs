@@ -471,6 +471,7 @@ mod tests {
                 }),
                 docstore_blocksize: 1_000_000,
                 docstore_compress_dedicated_thread: true,
+                sfx_enabled: true,
             },
             segments: Vec::new(),
             schema,
