@@ -222,14 +222,40 @@ fn bench_sharding_comparison() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(usize::MAX);
 
-    let dataset = std::env::var("BENCH_DATASET").unwrap_or_else(|_| LINUX_CLONE.to_string());
+    let dataset_raw = std::env::var("BENCH_DATASET")
+        .unwrap_or_else(|_| "https://github.com/torvalds/linux".to_string());
+
+    // Auto-clone if BENCH_DATASET is a git URL
+    let dataset = if dataset_raw.starts_with("http://") || dataset_raw.starts_with("https://") || dataset_raw.starts_with("git@") {
+        let clone_dir = format!("/tmp/lucivy_bench_clone_{:x}", {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            dataset_raw.hash(&mut h);
+            h.finish()
+        });
+        if !Path::new(&clone_dir).join(".git").exists() {
+            eprintln!("\n=== Cloning {} → {} ===", dataset_raw, clone_dir);
+            let status = std::process::Command::new("git")
+                .args(["clone", "--depth", "1", &dataset_raw, &clone_dir])
+                .status()
+                .expect("git clone failed — is git installed?");
+            assert!(status.success(), "git clone failed with exit code {:?}", status.code());
+            eprintln!("Clone complete.\n");
+        } else {
+            eprintln!("\n=== Using cached clone at {} ===", clone_dir);
+        }
+        clone_dir
+    } else {
+        dataset_raw
+    };
+
     eprintln!("\n=== Collecting files from {} (max {}) ===", dataset, max_docs);
     let files = collect_files(Path::new(&dataset), max_docs);
     let ndocs = files.len();
     eprintln!("Collected {} text files\n", ndocs);
 
     if ndocs == 0 {
-        eprintln!("No files found at {}. Clone rag3db there first.", RAG3DB_CLONE);
+        eprintln!("No files found at {}. Set BENCH_DATASET to a git URL or local path.", dataset);
         return;
     }
 
