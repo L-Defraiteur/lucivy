@@ -214,15 +214,14 @@ impl<'a> SfxTermDictionary<'a> {
         let mut results = Vec::new();
         while let Some((key, val)) = stream.next() {
             let parents = self.decode_parents(val);
-            for p in &parents {
+            if let Some(p) = parents.first() {
                 let term_info = self.termdict.term_info_from_ord(p.raw_ordinal);
-                // Strip prefix byte from key
+                // Strip SI partition prefix byte from key
                 if key.len() > 1 {
                     if let Ok(s) = std::str::from_utf8(&key[1..]) {
                         results.push((s.to_string(), term_info));
                     }
                 }
-                break; // One parent per SI=0 entry
             }
         }
         results
@@ -247,14 +246,13 @@ impl<'a> SfxTermDictionary<'a> {
         let mut results = Vec::new();
         while let Some((key, val)) = stream.next() {
             let parents = self.decode_parents(val);
-            for p in &parents {
+            if let Some(p) = parents.first() {
                 let term_info = self.termdict.term_info_from_ord(p.raw_ordinal);
                 if key.len() > 1 {
                     if let Ok(s) = std::str::from_utf8(&key[1..]) {
                         results.push((s.to_string(), term_info));
                     }
                 }
-                break;
             }
         }
         results
@@ -268,13 +266,12 @@ impl<'a> SfxTermDictionary<'a> {
         let mut results = Vec::new();
         while let Some((key, val)) = stream.next() {
             let parents = self.decode_parents(val);
-            for p in &parents {
+            if let Some(p) = parents.first() {
                 if key.len() > 1 {
                     if let Ok(s) = std::str::from_utf8(&key[1..]) {
                         results.push((s.to_string(), p.raw_ordinal));
                     }
                 }
-                break;
             }
         }
         results
@@ -310,13 +307,12 @@ impl<'a> SfxTermDictionary<'a> {
         let mut results = Vec::new();
         while let Some((key, val)) = stream.next() {
             let parents = self.decode_parents(val);
-            for p in &parents {
+            if let Some(p) = parents.first() {
                 if key.len() > 1 {
                     if let Ok(s) = std::str::from_utf8(&key[1..]) {
                         results.push((s.to_string(), p.raw_ordinal));
                     }
                 }
-                break;
             }
         }
         results

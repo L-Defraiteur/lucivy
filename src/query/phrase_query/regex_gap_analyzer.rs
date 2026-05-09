@@ -8,7 +8,7 @@
 //! - ByteRangeCheck: `[a-z]+`, `\d*`, `\w+` — ByteMap validation O(1)/token
 //! - DfaValidation: everything else — full DFA validate_path
 
-use regex_syntax::hir::{Hir, HirKind, Class, ClassBytesRange};
+use regex_syntax::hir::{Hir, HirKind, Class};
 
 /// A typed gap between two literals in a regex pattern.
 #[derive(Debug, Clone, PartialEq)]

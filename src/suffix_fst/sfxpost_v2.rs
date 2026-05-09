@@ -18,7 +18,7 @@
 //!   - Single doc lookup: binary search → O(log n) + decode one doc's entries
 //!   - Existence check: binary search only → O(log n), zero decode
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashSet;
 
 use super::collector::encode_vint;
 use super::file::SfxPostingEntry;

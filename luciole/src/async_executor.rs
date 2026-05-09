@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::{Context, Poll, Wake};
 
-use crate::mailbox::{mailbox, ActorRef, Mailbox};
+use crate::mailbox::{mailbox, ActorRef};
 use crate::reply::{reply, Reply, ReplyReceiver};
 use crate::scheduler::{global_scheduler, SchedulerNotifier};
 use crate::{Actor, ActorStatus, Priority};

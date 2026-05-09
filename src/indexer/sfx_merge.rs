@@ -29,7 +29,6 @@ fn should_validate() -> bool {
     enabled
 }
 use crate::suffix_fst::builder::SuffixFstBuilder;
-use crate::suffix_fst::encode_vint;
 use crate::suffix_fst::file::{SfxFileReader, SfxFileWriter};
 use crate::suffix_fst::sfxpost_v2::SfxPostReaderV2;
 use crate::suffix_fst::gapmap::{GapMapReader, GapMapWriter, GapMapError};

@@ -1,10 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use super::builder::SuffixFstBuilder;
-use super::file::SfxFileWriter;
 use super::gapmap::GapMapWriter;
 use super::sepmap::SepMapWriter;
-use super::sibling_table::SiblingTableWriter;
 
 /// Output of SfxCollector::build(). The `.sfx` file is always produced.
 /// All other index files are built via the registry (SfxIndexFile trait).

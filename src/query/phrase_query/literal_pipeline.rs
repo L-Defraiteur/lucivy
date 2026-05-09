@@ -12,7 +12,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::suffix_fst::builder::ParentEntry;
 use crate::suffix_fst::file::SfxFileReader;
 use crate::query::posting_resolver::{PostingResolver, PostingEntry};
 use crate::DocId;

@@ -13,8 +13,6 @@
 //! // Creates: prescan_0..3 (workers) + prescan_merge (merger)
 //! ```
 
-use std::collections::HashMap;
-
 use crate::node::{Node, NodeContext, PortDef};
 use crate::port::{PortType, PortValue};
 use crate::Dag;
