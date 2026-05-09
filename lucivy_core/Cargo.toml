@@ -15,6 +15,7 @@ crate-type = ["lib"]
 
 [dependencies]
 ld-lucivy = { version = "0.27.0", path = "..", default-features = false, features = [
+    "mmap",
     "stopwords",
     "lz4-compression",
 ] }

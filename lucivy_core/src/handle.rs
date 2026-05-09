@@ -47,10 +47,11 @@ pub struct LucivyHandle {
 }
 
 /// Default writer heap size.
-/// 50MB on native, 15MB on WASM to reduce memory pressure — browser memory
+/// 200MB on native, 15MB on WASM to reduce memory pressure — browser memory
 /// is limited and segment files are loaded into RAM on reader reload.
+/// Larger heap = fewer segments = fewer merges = faster indexation.
 #[cfg(not(target_arch = "wasm32"))]
-const WRITER_HEAP_SIZE: usize = 50_000_000;
+const WRITER_HEAP_SIZE: usize = 200_000_000;
 #[cfg(target_arch = "wasm32")]
 const WRITER_HEAP_SIZE: usize = 15_000_000;
 

@@ -1,11 +1,8 @@
-//! Platform-agnostic Directory implementation using std::fs.
+//! Platform-agnostic Directory implementations.
 //!
-//! Works on all targets:
-//! - Native (Linux, macOS, Windows): real filesystem
-//! - Emscripten (WASM): Emscripten VFS (MEMFS/IDBFS)
-//!
-//! For native targets, MmapDirectory would be faster for large indexes.
-//! This can be swapped in later as an optimization.
+//! - `StdFsDirectory` — buffered fs::read/write. Used on WASM (Emscripten VFS).
+//! - `NativeDirectory` — `MmapDirectory` on native (zero-copy reads via mmap),
+//!   falls back to `StdFsDirectory` on WASM where mmap is unavailable.
 
 use std::fs;
 use std::io::{self, BufWriter, Write};
@@ -202,3 +199,13 @@ impl Directory for StdFsDirectory {
         Ok(())
     }
 }
+
+// ── NativeDirectory: best directory for each platform ─────────────────────
+
+/// On native: MmapDirectory (zero-copy reads via mmap, file watcher).
+/// On WASM: StdFsDirectory (buffered I/O via Emscripten VFS).
+#[cfg(all(feature = "mmap", not(target_arch = "wasm32")))]
+pub type NativeDirectory = ld_lucivy::directory::MmapDirectory;
+
+#[cfg(any(not(feature = "mmap"), target_arch = "wasm32"))]
+pub type NativeDirectory = StdFsDirectory;

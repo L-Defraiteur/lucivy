@@ -24,7 +24,7 @@ use ld_lucivy::directory::{
 };
 
 use crate::blob_store::BlobStore;
-use crate::directory::StdFsDirectory;
+use crate::directory::NativeDirectory;
 
 /// Monotonic counter for unique cache dir names.
 static CACHE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -47,7 +47,7 @@ pub struct BlobDirectory<S: BlobStore> {
     store: Arc<S>,
     /// Prefixed index name used for BlobStore keys (e.g. "Lucivy_Product").
     prefixed_name: String,
-    inner: StdFsDirectory,
+    inner: NativeDirectory,
     cache_dir: Arc<PathBuf>,
     watch_router: Arc<RwLock<WatchCallbackList>>,
 }
@@ -89,7 +89,8 @@ impl<S: BlobStore> BlobDirectory<S> {
             std::fs::write(&file_path, &data)?;
         }
 
-        let inner = StdFsDirectory::open(&cache_dir)?;
+        let inner = NativeDirectory::open(&cache_dir)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{e}")))?;
 
         Ok(Self {
             store,

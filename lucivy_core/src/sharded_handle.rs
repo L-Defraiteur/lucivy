@@ -26,7 +26,7 @@ use ld_lucivy::tokenizer::{PreTokenizedString, Token, TokenizerManager};
 use ld_lucivy::indexer::PreTokenizedData;
 use ld_lucivy::{DocAddress, Index, LucivyDocument};
 
-use crate::directory::StdFsDirectory;
+use crate::directory::NativeDirectory;
 use crate::handle::{LucivyHandle, NODE_ID_FIELD};
 use crate::query::{QueryConfig, SchemaConfig};
 use crate::shard_router::ShardRouter;
@@ -89,14 +89,14 @@ impl ShardStorage for FsShardStorage {
         let shard_dir = Path::new(&self.base_path).join(format!("shard_{shard_id}"));
         std::fs::create_dir_all(&shard_dir)
             .map_err(|e| format!("cannot create shard_{shard_id} dir: {e}"))?;
-        let dir = StdFsDirectory::open(shard_dir.to_str().unwrap())
+        let dir = NativeDirectory::open(shard_dir.to_str().unwrap())
             .map_err(|e| format!("cannot open shard_{shard_id} dir: {e}"))?;
         LucivyHandle::create(dir, config)
     }
 
     fn open_shard_handle(&self, shard_id: usize) -> Result<LucivyHandle, String> {
         let shard_dir = Path::new(&self.base_path).join(format!("shard_{shard_id}"));
-        let dir = StdFsDirectory::open(shard_dir.to_str().unwrap())
+        let dir = NativeDirectory::open(shard_dir.to_str().unwrap())
             .map_err(|e| format!("cannot open shard_{shard_id} dir: {e}"))?;
         LucivyHandle::open(dir)
     }
