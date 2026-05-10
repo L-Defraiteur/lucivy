@@ -1,6 +1,6 @@
 [package]
 name = "ld-lucivy-stacker"
-version = "0.26.0"
+version = "0.27.0"
 edition = "2024"
 license = "MIT"
 homepage = "https://github.com/quickwit-oss/tantivy"
@@ -9,7 +9,7 @@ description = "term hashmap used for indexing"
 
 [dependencies]
 murmurhash32 = "0.3"
-common = { version = "0.26.0", path = "../common/", package = "ld-lucivy-common" }
+common = { version = "0.27.0", path = "../common/", package = "ld-lucivy-common" }
 ahash = { version = "0.8.11", default-features = false, optional = true }
 
 

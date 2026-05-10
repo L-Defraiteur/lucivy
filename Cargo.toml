@@ -62,12 +62,12 @@ measure_time = "0.9.0"
 arc-swap = "1.5.0"
 bon = "3.3.1"
 
-columnar = { version = "0.26.0", path = "./columnar", package = "ld-lucivy-columnar" }
-stacker = { version = "0.26.0", path = "./stacker", package = "ld-lucivy-stacker" }
-query-grammar = { version = "0.26.0", path = "./query-grammar", package = "ld-lucivy-query-grammar" }
-lucivy-bitpacker = { version = "0.26.0", path = "./bitpacker", package = "ld-lucivy-bitpacker" }
-common = { version = "0.26.0", path = "./common/", package = "ld-lucivy-common" }
-tokenizer-api = { version = "0.26.0", path = "./tokenizer-api", package = "ld-lucivy-tokenizer-api" }
+columnar = { version = "0.27.0", path = "./columnar", package = "ld-lucivy-columnar" }
+stacker = { version = "0.27.0", path = "./stacker", package = "ld-lucivy-stacker" }
+query-grammar = { version = "0.27.0", path = "./query-grammar", package = "ld-lucivy-query-grammar" }
+lucivy-bitpacker = { version = "0.27.0", path = "./bitpacker", package = "ld-lucivy-bitpacker" }
+common = { version = "0.27.0", path = "./common/", package = "ld-lucivy-common" }
+tokenizer-api = { version = "0.27.0", path = "./tokenizer-api", package = "ld-lucivy-tokenizer-api" }
 sketches-ddsketch = { version = "0.3.0", features = ["use_serde"] }
 hyperloglogplus = { version = "0.4.1", features = ["const-loop"] }
 fnv = "1.0.7"

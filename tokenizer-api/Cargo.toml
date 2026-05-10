@@ -1,6 +1,6 @@
 [package]
 name = "ld-lucivy-tokenizer-api"
-version = "0.26.0"
+version = "0.27.0"
 license = "MIT"
 edition = "2024"
 description = "Tokenizer API of lucivy"

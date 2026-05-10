@@ -1,6 +1,6 @@
 [package]
 name = "ld-lucivy-columnar"
-version = "0.26.0"
+version = "0.27.0"
 edition = "2024"
 license = "MIT"
 homepage = "https://github.com/quickwit-oss/tantivy"
@@ -12,10 +12,10 @@ categories = ["database-implementations", "data-structures", "compression"]
 itertools = "0.14.0"
 fastdivide = "0.4.0"
 
-stacker = { version = "0.26.0", path = "../stacker", package = "ld-lucivy-stacker" }
-sstable = { version = "0.26.0", path = "../sstable", package = "ld-lucivy-sstable" }
-common = { version = "0.26.0", path = "../common", package = "ld-lucivy-common" }
-lucivy-bitpacker = { version = "0.26.0", path = "../bitpacker/", package = "ld-lucivy-bitpacker" }
+stacker = { version = "0.27.0", path = "../stacker", package = "ld-lucivy-stacker" }
+sstable = { version = "0.27.0", path = "../sstable", package = "ld-lucivy-sstable" }
+common = { version = "0.27.0", path = "../common", package = "ld-lucivy-common" }
+lucivy-bitpacker = { version = "0.27.0", path = "../bitpacker/", package = "ld-lucivy-bitpacker" }
 serde = "1.0.152"
 downcast-rs = "2.0.1"
 
