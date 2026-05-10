@@ -213,10 +213,221 @@ fn time_sharded_query_traced(handle: &ShardedHandle, config: &QueryConfig, label
     (results.len(), ms)
 }
 
+// ─── Minimal repro: startsWith prefix match ────────────────────────────────
+
+#[test]
+fn t00_repro_starts_with_prefix() {
+    let dir = "/tmp/lucivy_test_sw_repro";
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).unwrap();
+
+    let config: query::SchemaConfig = serde_json::from_value(serde_json::json!({
+        "fields": [{"name": "content", "type": "text", "stored": true}]
+    })).unwrap();
+
+    let d = lucivy_core::directory::StdFsDirectory::open(dir).unwrap();
+    let handle = LucivyHandle::create(d, &config).unwrap();
+    let content_f = handle.field("content").unwrap();
+    let nid_f = handle.field(lucivy_core::handle::NODE_ID_FIELD).unwrap();
+
+    let docs = vec![
+        "The lock mechanism is simple",           // "lock" exact
+        "Multiple locks are held",                // "locks" starts with "lock"
+        "Locking primitives in kernel",           // "locking" starts with "lock"
+        "The locked state persists",              // "locked" starts with "lock"
+        "lockdep is a debugging tool",            // "lockdep" starts with "lock"
+        "Detecting lockups automatically",        // "lockups" starts with "lock"
+        "unlock the resource",                    // "unlock" does NOT start with "lock"
+        "This has clock hardware",                // "clock" does NOT start with "lock"
+        "This has no matching word at all",       // no match
+    ];
+
+    {
+        let mut guard = handle.writer.lock().unwrap();
+        let w = guard.as_mut().unwrap();
+        for (i, text) in docs.iter().enumerate() {
+            let mut doc = ld_lucivy::LucivyDocument::new();
+            doc.add_u64(nid_f, i as u64);
+            doc.add_text(content_f, text);
+            w.add_document(doc).unwrap();
+        }
+        w.commit().unwrap();
+    }
+    handle.reader.reload().unwrap();
+
+    // startsWith "lock" — should find docs 0-5 (6 docs)
+    let sw_cfg = query::QueryConfig {
+        query_type: "startsWith".into(),
+        field: Some("content".into()),
+        value: Some("lock".into()),
+        ..Default::default()
+    };
+    let sw_query = query::build_query(&sw_cfg, &handle.schema, &handle.index, None).unwrap();
+    let searcher = handle.reader.searcher();
+    let results = searcher.search(&*sw_query, &ld_lucivy::collector::Count).unwrap();
+    eprintln!("\nstartsWith 'lock': {} hits (expected 6)", results);
+
+    // contains "lock" — should find docs 0-7 (all with "lock" anywhere, including "unlock", "clock")
+    let c_cfg = query::QueryConfig {
+        query_type: "contains".into(),
+        field: Some("content".into()),
+        value: Some("lock".into()),
+        ..Default::default()
+    };
+    let c_query = query::build_query(&c_cfg, &handle.schema, &handle.index, None).unwrap();
+    let c_results = searcher.search(&*c_query, &ld_lucivy::collector::Count).unwrap();
+    eprintln!("contains 'lock':   {} hits (expected 8)", c_results);
+
+    // TopDocs to see which docs
+    let top = ld_lucivy::collector::TopDocs::with_limit(20).order_by_score();
+    let sw_top = searcher.search(&*sw_query, &top).unwrap();
+    eprintln!("\nstartsWith hits:");
+    for (score, addr) in &sw_top {
+        let doc = searcher.doc::<ld_lucivy::LucivyDocument>(*addr).unwrap();
+        use ld_lucivy::schema::document::Value;
+        let text = doc.field_values()
+            .find(|(f, _)| *f == content_f)
+            .and_then(|(_, v)| v.as_value().as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        eprintln!("  score={:.4} doc={} text={}", score, addr.doc_id, text);
+    }
+
+    assert_eq!(results, 6, "startsWith 'lock' should find exactly 6 docs");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// ─── Diagnostic: startsWith missing docs ───────────────────────────────────
+
+#[test]
+fn t00_diag_starts_with() {
+    let index_dir = format!("{}/round_robin", BENCH_BASE);
+    if !std::path::Path::new(&index_dir).exists() {
+        eprintln!("Skipping: no persisted index at {}", index_dir);
+        return;
+    }
+
+    let handle = ShardedHandle::open(&index_dir).unwrap();
+    let term = "lock"; // known to FAIL in ground truth
+    let prefix_lower = term.to_lowercase();
+    eprintln!("\n=== Diagnostic: startsWith '{}' — missing docs ===\n", term);
+
+    // 1. Collect ground truth doc IDs (shard, segment_ord, doc_id, matched_token)
+    let mut gt_docs: Vec<(usize, u32, u32, String)> = Vec::new();
+    for shard_idx in 0..handle.num_shards() {
+        let shard = handle.shard(shard_idx).unwrap();
+        let searcher = shard.reader.searcher();
+        let field = shard.field("content").unwrap();
+        for (seg_ord, sr) in searcher.segment_readers().iter().enumerate() {
+            if let Ok(store) = sr.get_store_reader(0) {
+                for did in 0..sr.max_doc() {
+                    if sr.alive_bitset().is_none_or(|bs| bs.is_alive(did)) {
+                        if let Ok(doc) = store.get::<ld_lucivy::LucivyDocument>(did) {
+                            for (f, val) in doc.field_values() {
+                                if f == field {
+                                    use ld_lucivy::schema::document::Value;
+                                    if let Some(text) = val.as_value().as_str() {
+                                        let lower = text.to_lowercase();
+                                        let matched: Vec<String> = lower
+                                            .split(|c: char| !c.is_alphanumeric())
+                                            .filter(|tok| tok.starts_with(&prefix_lower))
+                                            .take(3)
+                                            .map(|s| s.to_string())
+                                            .collect();
+                                        if !matched.is_empty() {
+                                            let tokens_str = matched.join(", ");
+                                            gt_docs.push((shard_idx, seg_ord as u32, did, tokens_str));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Collect startsWith search doc IDs
+    let starts_cfg = query::QueryConfig {
+        query_type: "startsWith".into(),
+        field: Some("content".into()),
+        value: Some(term.to_string()),
+        ..Default::default()
+    };
+    let results = handle.search(&starts_cfg, 100_000, None).unwrap();
+    let mut sw_docs: std::collections::HashSet<(usize, u32)> = std::collections::HashSet::new();
+    for r in &results {
+        sw_docs.insert((r.shard_id, r.doc_address.doc_id));
+    }
+
+    // 3. Find missing docs
+    // Need to map gt (shard, seg_ord, local_did) to global doc_id for comparison
+    // The search results use doc_address which has segment_ord + doc_id
+    let mut sw_docs_full: std::collections::HashSet<(usize, u32, u32)> = std::collections::HashSet::new();
+    for r in &results {
+        sw_docs_full.insert((r.shard_id, r.doc_address.segment_ord, r.doc_address.doc_id));
+    }
+
+    let missing: Vec<_> = gt_docs.iter()
+        .filter(|(shard, seg, did, _)| !sw_docs_full.contains(&(*shard, *seg, *did)))
+        .collect();
+
+    eprintln!("Ground truth: {} docs", gt_docs.len());
+    eprintln!("startsWith:   {} docs", results.len());
+    eprintln!("Missing:      {} docs\n", missing.len());
+
+    // 4. Show first 10 missing docs with context
+    for (shard, seg_ord, did, matched_tokens) in missing.iter().take(10) {
+        let shard_handle = handle.shard(*shard).unwrap();
+        let searcher = shard_handle.reader.searcher();
+        let sr = searcher.segment_reader(*seg_ord);
+        let seg_id = &format!("{}", sr.segment_id())[..8];
+        let num_docs = sr.max_doc();
+
+        // Read the stored path field
+        let path_text = if let Ok(doc) = searcher.doc::<ld_lucivy::LucivyDocument>(
+            ld_lucivy::DocAddress::new(*seg_ord, *did)
+        ) {
+            let path_f = shard_handle.field("path");
+            path_f.and_then(|pf| {
+                doc.field_values()
+                    .find(|(f, _)| *f == pf)
+                    .and_then(|(_, v)| {
+                        use ld_lucivy::schema::document::Value;
+                        v.as_value().as_str().map(|s| s.to_string())
+                    })
+            }).unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        eprintln!("  MISSING shard={} seg={}({} docs) doc={} tokens=[{}] path={}",
+            shard, seg_id, num_docs, did, matched_tokens, path_text);
+    }
+
+    if missing.len() > 10 {
+        eprintln!("  ... and {} more", missing.len() - 10);
+    }
+
+    // 5. Show segment stats per shard
+    eprintln!("\n=== Segment stats ===");
+    for shard_idx in 0..handle.num_shards() {
+        let shard = handle.shard(shard_idx).unwrap();
+        let searcher = shard.reader.searcher();
+        let segs: Vec<String> = searcher.segment_readers().iter().map(|sr| {
+            let has_sfx = sr.inverted_index(shard.field("content").unwrap())
+                .is_ok();
+            format!("{}docs/sfx={}", sr.max_doc(), has_sfx)
+        }).collect();
+        eprintln!("  shard_{}: [{}]", shard_idx, segs.join(", "));
+    }
+}
+
 // ─── Main bench ────────────────────────────────────────────────────────────
 
 #[test]
-fn bench_sharding_comparison() {
+fn t01_bench_sharding_comparison() {
     let max_docs: usize = std::env::var("MAX_DOCS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -601,8 +812,11 @@ fn bench_sharding_comparison() {
     let rr_stddev = (rr_counts.iter().map(|&c| (c as f64 - rr_mean).powi(2)).sum::<f64>() / rr_counts.len() as f64).sqrt();
     eprintln!("Balance CV:  TA {:.3}  |  RR {:.3}  (lower = more balanced)", ta_stddev / ta_mean, rr_stddev / rr_mean);
 
-    // Cleanup
-    // Keep the index for post-mortem inspection
+    // Drop handles to release writer locks before subsequent tests
+    drop(single);
+    drop(sharded_ta);
+    drop(sharded_rr);
+
     eprintln!("\n=== Index preserved at {} ===", BENCH_BASE);
 }
 
@@ -660,8 +874,11 @@ fn ground_truth_starts_with(handle: &ShardedHandle, field_name: &str, prefix: &s
                                     use ld_lucivy::schema::document::Value;
                                     if let Some(text) = val.as_value().as_str() {
                                         // Tokenize like SimpleTokenizer: split on non-alphanumeric
+                                        // NOTE: SimpleTokenizer splits on !is_alphanumeric() (underscore IS a separator),
+                                        // but CamelCaseSplitFilter further splits camelCase.
+                                        // Using the same split as SimpleTokenizer for ground truth.
                                         let has_match = text.to_lowercase()
-                                            .split(|c: char| !c.is_alphanumeric() && c != '_')
+                                            .split(|c: char| !c.is_alphanumeric())
                                             .any(|tok| tok.starts_with(&prefix_lower));
                                         if has_match {
                                             count += 1;
@@ -759,7 +976,7 @@ fn search_count_direct(handle: &ShardedHandle, field_name: &str, term: &str) -> 
 }
 
 #[test]
-fn ground_truth_exhaustive() {
+fn t02_ground_truth_exhaustive() {
     let index_dir = format!("{}/round_robin", BENCH_BASE);
     if !std::path::Path::new(&index_dir).exists() {
         eprintln!("Skipping: no persisted index at {}", index_dir);
@@ -904,7 +1121,7 @@ fn ground_truth_exhaustive() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn bench_query_times() {
+fn t03_bench_query_times() {
     let index_dir = format!("{}/round_robin", BENCH_BASE);
     if !std::path::Path::new(&index_dir).exists() {
         eprintln!("Skipping: no persisted index at {}", index_dir);
@@ -958,15 +1175,15 @@ fn bench_query_times() {
         // ── Phrase queries ──
         ("phrase 'mutex lock'", QueryConfig {
             query_type: "phrase".into(), field: Some("content".into()),
-            terms: Some(vec!["mutex".into(), "lock".into()]), ..Default::default()
+            value: Some("mutex lock".into()), ..Default::default()
         }),
         ("phrase 'struct device'", QueryConfig {
             query_type: "phrase".into(), field: Some("content".into()),
-            terms: Some(vec!["struct".into(), "device".into()]), ..Default::default()
+            value: Some("struct device".into()), ..Default::default()
         }),
         ("phrase 'return error'", QueryConfig {
             query_type: "phrase".into(), field: Some("content".into()),
-            terms: Some(vec!["return".into(), "error".into()]), ..Default::default()
+            value: Some("return error".into()), ..Default::default()
         }),
         ("term 'mutex'", QueryConfig {
             query_type: "term".into(), field: Some("content".into()),
@@ -1032,7 +1249,7 @@ fn bench_query_times() {
         }),
         ("phrase 'mutex lock' +hl", QueryConfig {
             query_type: "phrase".into(), field: Some("content".into()),
-            terms: Some(vec!["mutex".into(), "lock".into()]), ..Default::default()
+            value: Some("mutex lock".into()), ..Default::default()
         }),
         ("contains 'mutex' +hl", QueryConfig {
             query_type: "contains".into(), field: Some("content".into()),
@@ -1054,7 +1271,7 @@ fn bench_query_times() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn test_sfx_disabled() {
+fn t04_test_sfx_disabled() {
     let test_dir = "/tmp/lucivy_test_sfx_disabled";
     let _ = std::fs::remove_dir_all(test_dir);
 
@@ -1119,7 +1336,7 @@ fn test_sfx_disabled() {
     // phrase query should work
     let phrase_results = handle.search(&QueryConfig {
         query_type: "phrase".into(), field: Some("body".into()),
-        terms: Some(vec!["device".into(), "drivers".into()]), ..Default::default()
+        value: Some("device drivers".into()), ..Default::default()
     }, 20, None).unwrap();
     assert!(!phrase_results.is_empty(), "phrase query should find results");
     eprintln!("  phrase 'device drivers': {} hits ✓", phrase_results.len());
@@ -1192,7 +1409,7 @@ fn test_sfx_disabled() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn test_score_consistency_single_vs_sharded() {
+fn t05_test_score_consistency_single_vs_sharded() {
     let single_dir = format!("{}/single", BENCH_BASE);
     let sharded_dir = format!("{}/round_robin", BENCH_BASE);
 
@@ -1207,11 +1424,6 @@ fn test_score_consistency_single_vs_sharded() {
     let single = LucivyHandle::open(d).unwrap();
     let lv1_ndocs = single.reader.searcher().num_docs();
 
-    for p in std::fs::read_dir(&sharded_dir).into_iter().flatten().flatten() {
-        if p.file_name().to_string_lossy().ends_with(".lock") {
-            let _ = std::fs::remove_file(p.path());
-        }
-    }
     let sharded = ShardedHandle::open(&sharded_dir).unwrap();
     let lv4_ndocs = sharded.num_docs();
 
@@ -1225,7 +1437,7 @@ fn test_score_consistency_single_vs_sharded() {
         }),
         ("phrase 'struct device'", QueryConfig {
             query_type: "phrase".into(), field: Some("content".into()),
-            terms: Some(vec!["struct".into(), "device".into()]), ..Default::default()
+            value: Some("struct device".into()), ..Default::default()
         }),
         ("fuzzy 'schdule' d=1", QueryConfig {
             query_type: "fuzzy".into(), field: Some("content".into()),
@@ -1290,7 +1502,7 @@ fn test_score_consistency_single_vs_sharded() {
 }
 
 #[test]
-fn profile_regex_automaton_weight() {
+fn t06_profile_regex_automaton_weight() {
     let single_dir = format!("{}/single", BENCH_BASE);
     if !std::path::Path::new(&single_dir).exists() {
         eprintln!("Skipping: need single index at {}", single_dir);
