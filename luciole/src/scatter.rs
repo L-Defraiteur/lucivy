@@ -90,6 +90,11 @@ impl ScatterResults {
         self.map.len()
     }
 
+    /// Returns true if there are no results.
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
     /// Iterate over names.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.map.keys().map(|s| s.as_str())

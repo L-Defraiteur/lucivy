@@ -29,6 +29,10 @@ impl<M> Mailbox<M> {
     pub fn len(&self) -> usize {
         self.receiver.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.receiver.is_empty()
+    }
 }
 
 /// Handle pour envoyer des messages à un acteur. Clonable.

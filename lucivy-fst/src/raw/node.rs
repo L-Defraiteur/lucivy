@@ -42,7 +42,7 @@ impl<'f> fmt::Debug for Node<'f> {
         writeln!(f, "  # transitions: {}", self.len())?;
         writeln!(f, "  transitions:")?;
         for t in self.transitions() {
-            writeln!(f, "    {:?}", t)?;
+            writeln!(f, "    {t:?}")?;
         }
         Ok(())
     }
@@ -252,15 +252,13 @@ impl<'f> Node<'f> {
             && node.is_final
             && node.final_output.is_zero()
         {
-            return Ok(());
+            Ok(())
         } else if node.trans.len() != 1 || node.is_final {
             StateAnyTrans::compile(wtr, addr, node)
+        } else if node.trans[0].addr == last_addr && node.trans[0].out.is_zero() {
+            StateOneTransNext::compile(wtr, addr, node.trans[0].inp)
         } else {
-            if node.trans[0].addr == last_addr && node.trans[0].out.is_zero() {
-                StateOneTransNext::compile(wtr, addr, node.trans[0].inp)
-            } else {
-                StateOneTrans::compile(wtr, addr, node.trans[0])
-            }
+            StateOneTrans::compile(wtr, addr, node.trans[0])
         }
     }
 }

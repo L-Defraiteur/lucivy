@@ -75,7 +75,7 @@ fn write_crc_tables(out_dir: &Path) -> Result<()> {
 
     writeln!(out, "pub const TABLE: [u32; 256] = [")?;
     for &x in table.iter() {
-        writeln!(out, "    {},", x)?;
+        writeln!(out, "    {x},")?;
     }
     writeln!(out, "];\n")?;
 
@@ -83,7 +83,7 @@ fn write_crc_tables(out_dir: &Path) -> Result<()> {
     for table in table16.iter() {
         writeln!(out, "    [")?;
         for &x in table.iter() {
-            writeln!(out, "        {},", x)?;
+            writeln!(out, "        {x},")?;
         }
         writeln!(out, "    ],")?;
     }

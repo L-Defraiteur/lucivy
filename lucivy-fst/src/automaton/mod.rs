@@ -110,7 +110,7 @@ pub trait Automaton {
     }
 }
 
-impl<'a, T: Automaton> Automaton for &'a T {
+impl<T: Automaton> Automaton for &T {
     type State = T::State;
 
     fn start(&self) -> T::State {
@@ -294,8 +294,7 @@ impl Automaton for AlwaysMatch {
     type State = ();
 
     #[inline]
-    fn start(&self) -> () {
-        ()
+    fn start(&self) {
     }
     #[inline]
     fn is_match(&self, _: &()) -> bool {
@@ -310,8 +309,7 @@ impl Automaton for AlwaysMatch {
         true
     }
     #[inline]
-    fn accept(&self, _: &(), _: u8) -> () {
-        ()
+    fn accept(&self, _: &(), _: u8) {
     }
 }
 

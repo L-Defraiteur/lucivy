@@ -60,6 +60,11 @@ impl<M: Send + 'static> Pool<M> {
         self.workers.len()
     }
 
+    /// Returns true if the pool has no workers.
+    pub fn is_empty(&self) -> bool {
+        self.workers.is_empty()
+    }
+
     /// Send a message to the next worker (round-robin).
     pub fn send(&self, msg: M) -> Result<(), String> {
         let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.workers.len();

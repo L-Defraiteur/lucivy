@@ -350,7 +350,7 @@ impl<D: AsRef<[u8]>> Fst<D> {
         // unexpected EOF. However, we are reading from a byte slice (no
         // IO errors possible) and we've confirmed the byte slice is at least
         // N bytes (no unexpected EOF).
-        let version = bytes::read_u64_le(&bytes);
+        let version = bytes::read_u64_le(bytes);
         if version == 0 || version > VERSION {
             return Err(
                 Error::Version { expected: VERSION, got: version }.into()
@@ -569,7 +569,7 @@ impl<D: AsRef<[u8]>> Fst<D> {
     {
         let mut op = self.op().add(stream).intersection();
         let mut count = 0;
-        while let Some(_) = op.next() {
+        while op.next().is_some() {
             count += 1;
         }
         count == self.len()
@@ -588,7 +588,7 @@ impl<D: AsRef<[u8]>> Fst<D> {
     {
         let mut op = self.op().add(stream).union();
         let mut count = 0;
-        while let Some(_) = op.next() {
+        while op.next().is_some() {
             count += 1;
         }
         count == self.len()
@@ -962,10 +962,7 @@ impl Bound {
 
     #[inline]
     fn is_inclusive(&self) -> bool {
-        match *self {
-            Bound::Excluded(_) => false,
-            _ => true,
-        }
+        !matches!(*self, Bound::Excluded(_))
     }
 }
 
@@ -1316,6 +1313,7 @@ impl Output {
     ///
     /// This function panics if `self < o`.
     #[inline]
+    #[allow(clippy::should_implement_trait)]
     pub fn sub(self, o: Output) -> Output {
         Output(
             self.0

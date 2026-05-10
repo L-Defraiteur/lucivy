@@ -39,6 +39,7 @@ impl Set<Vec<u8>> {
     /// Note that this is a convenience function to build a set in memory.
     /// To build a set that streams to an arbitrary `io::Write`, use
     /// `SetBuilder`.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_iter<T, I>(iter: I) -> Result<Set<Vec<u8>>>
     where
         T: AsRef<[u8]>,
@@ -821,6 +822,12 @@ where
 /// The `'s` lifetime parameter refers to the lifetime of the underlying set.
 pub struct OpBuilder<'s>(raw::OpBuilder<'s>);
 
+impl<'s> Default for OpBuilder<'s> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'s> OpBuilder<'s> {
     /// Create a new set operation builder.
     #[inline]
@@ -835,6 +842,7 @@ impl<'s> OpBuilder<'s> {
     ///
     /// The stream must emit a lexicographically ordered sequence of byte
     /// strings.
+    #[allow(clippy::should_implement_trait)]
     pub fn add<I, S>(mut self, streamable: I) -> OpBuilder<'s>
     where
         I: for<'a> IntoStreamer<'a, Into = S, Item = &'a [u8]>,

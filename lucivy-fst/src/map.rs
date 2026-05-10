@@ -64,6 +64,7 @@ impl Map<Vec<u8>> {
     /// Note that this is a convenience function to build a map in memory.
     /// To build a map that streams to an arbitrary `io::Write`, use
     /// `MapBuilder`.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_iter<K, I>(iter: I) -> Result<Map<Vec<u8>>>
     where
         K: AsRef<[u8]>,
@@ -944,6 +945,12 @@ where
 /// The `'m` lifetime parameter refers to the lifetime of the underlying set.
 pub struct OpBuilder<'m>(raw::OpBuilder<'m>);
 
+impl<'m> Default for OpBuilder<'m> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'m> OpBuilder<'m> {
     /// Create a new set operation builder.
     #[inline]
@@ -958,6 +965,7 @@ impl<'m> OpBuilder<'m> {
     ///
     /// The stream must emit a lexicographically ordered sequence of key-value
     /// pairs.
+    #[allow(clippy::should_implement_trait)]
     pub fn add<I, S>(mut self, streamable: I) -> OpBuilder<'m>
     where
         I: for<'a> IntoStreamer<'a, Into = S, Item = (&'a [u8], u64)>,

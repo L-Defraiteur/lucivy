@@ -45,6 +45,12 @@ pub struct OpBuilder<'f> {
     streams: Vec<BoxedStream<'f>>,
 }
 
+impl<'f> Default for OpBuilder<'f> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'f> OpBuilder<'f> {
     /// Create a new set operation builder.
     #[inline]
@@ -59,6 +65,7 @@ impl<'f> OpBuilder<'f> {
     ///
     /// The stream must emit a lexicographically ordered sequence of key-value
     /// pairs.
+    #[allow(clippy::should_implement_trait)]
     pub fn add<I, S>(mut self, stream: I) -> OpBuilder<'f>
     where
         I: for<'a> IntoStreamer<'a, Into = S, Item = (&'a [u8], Output)>,
@@ -249,10 +256,7 @@ impl<'a, 'f> Streamer<'a> for Intersection<'f> {
             self.heap.refill(slot);
         }
         loop {
-            let slot = match self.heap.pop() {
-                None => return None,
-                Some(slot) => slot,
-            };
+            let slot = self.heap.pop()?;
             self.outs.clear();
             self.outs.push(slot.indexed_value());
             let mut popped: usize = 1;
@@ -334,10 +338,7 @@ impl<'a, 'f> Streamer<'a> for SymmetricDifference<'f> {
             self.heap.refill(slot);
         }
         loop {
-            let slot = match self.heap.pop() {
-                None => return None,
-                Some(slot) => slot,
-            };
+            let slot = self.heap.pop()?;
             self.outs.clear();
             self.outs.push(slot.indexed_value());
             let mut popped: usize = 1;
@@ -444,17 +445,17 @@ impl Slot {
     }
 }
 
-impl PartialOrd for Slot {
-    fn partial_cmp(&self, other: &Slot) -> Option<cmp::Ordering> {
+impl Ord for Slot {
+    fn cmp(&self, other: &Slot) -> cmp::Ordering {
         (&self.input, self.output)
-            .partial_cmp(&(&other.input, other.output))
-            .map(|ord| ord.reverse())
+            .cmp(&(&other.input, other.output))
+            .reverse()
     }
 }
 
-impl Ord for Slot {
-    fn cmp(&self, other: &Slot) -> cmp::Ordering {
-        self.partial_cmp(other).unwrap()
+impl PartialOrd for Slot {
+    fn partial_cmp(&self, other: &Slot) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 

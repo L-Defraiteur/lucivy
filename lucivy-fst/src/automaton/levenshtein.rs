@@ -27,8 +27,7 @@ impl fmt::Display for LevenshteinError {
             LevenshteinError::TooManyStates(size_limit) => write!(
                 f,
                 "Levenshtein automaton exceeds size limit of \
-                           {} states",
-                size_limit
+                           {size_limit} states",
             ),
         }
     }
@@ -58,24 +57,22 @@ impl std::error::Error for LevenshteinError {}
 /// use lucivy_fst::automaton::Levenshtein;
 /// use lucivy_fst::{IntoStreamer, Streamer, Set};
 ///
-/// fn main() {
-///     let keys = vec!["fa", "fo", "fob", "focus", "foo", "food", "foul"];
-///     let set = Set::from_iter(keys).unwrap();
+/// let keys = vec!["fa", "fo", "fob", "focus", "foo", "food", "foul"];
+/// let set = Set::from_iter(keys).unwrap();
 ///
-///     let lev = Levenshtein::new("foo", 1).unwrap();
-///     let mut stream = set.search(&lev).into_stream();
+/// let lev = Levenshtein::new("foo", 1).unwrap();
+/// let mut stream = set.search(&lev).into_stream();
 ///
-///     let mut keys = vec![];
-///     while let Some(key) = stream.next() {
-///         keys.push(key.to_vec());
-///     }
-///     assert_eq!(keys, vec![
-///         "fo".as_bytes(),   // 1 deletion
-///         "fob".as_bytes(),  // 1 substitution
-///         "foo".as_bytes(),  // 0 insertions/deletions/substitutions
-///         "food".as_bytes(), // 1 insertion
-///     ]);
+/// let mut keys = vec![];
+/// while let Some(key) = stream.next() {
+///     keys.push(key.to_vec());
 /// }
+/// assert_eq!(keys, vec![
+///     "fo".as_bytes(),   // 1 deletion
+///     "fob".as_bytes(),  // 1 substitution
+///     "foo".as_bytes(),  // 0 insertions/deletions/substitutions
+///     "food".as_bytes(), // 1 insertion
+/// ]);
 /// ```
 ///
 /// This example only uses ASCII characters, but it will work equally well
@@ -246,7 +243,7 @@ impl fmt::Debug for State {
         writeln!(f, "  is_match: {:?}", self.is_match)?;
         for i in 0..256 {
             if let Some(si) = self.next[i] {
-                writeln!(f, "  {:?}: {:?}", i, si)?;
+                writeln!(f, "  {i:?}: {si:?}")?;
             }
         }
         write!(f, "}}")
@@ -346,7 +343,7 @@ impl DfaBuilder {
             // Some((si, false)) => si,
         };
         self.add_utf8_sequences(false, from_si, to_si, '\u{0}', '\u{10FFFF}');
-        return Some((to_si, mismatch_state));
+        Some((to_si, mismatch_state))
     }
 
     fn add_utf8_sequences(

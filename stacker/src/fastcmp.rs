@@ -8,6 +8,7 @@
 ///          [4, 5, 6, 7]
 ///
 /// This method uses the XMM register for bytes slices bigger than 16, else regular registers.
+#[allow(dead_code)]
 #[inline]
 pub fn fast_short_slice_compare(left: &[u8], right: &[u8]) -> bool {
     let len = left.len();
@@ -41,6 +42,7 @@ pub fn fast_short_slice_compare(left: &[u8], right: &[u8]) -> bool {
 
 // Note: The straightforward left.chunks_exact(SIZE).zip(right.chunks_exact(SIZE)) produces slower
 // assembly
+#[allow(dead_code)]
 #[inline]
 pub fn fast_nbyte_slice_compare<const SIZE: usize>(left: &[u8], right: &[u8]) -> bool {
     let last = left.len() - left.len() % SIZE;
@@ -57,6 +59,7 @@ pub fn fast_nbyte_slice_compare<const SIZE: usize>(left: &[u8], right: &[u8]) ->
     unsafe { left.get_unchecked(left.len() - SIZE..) == right.get_unchecked(right.len() - SIZE..) }
 }
 
+#[allow(dead_code)]
 #[inline(always)]
 fn short_compare(left: &[u8], right: &[u8]) -> bool {
     for (l, r) in left.iter().zip(right) {
@@ -67,6 +70,7 @@ fn short_compare(left: &[u8], right: &[u8]) -> bool {
     true
 }
 
+#[allow(dead_code)]
 #[inline(always)]
 fn double_check_trick<const SIZE: usize>(left: &[u8], right: &[u8]) -> bool {
     left[0..SIZE] == right[0..SIZE] && left[left.len() - SIZE..] == right[right.len() - SIZE..]

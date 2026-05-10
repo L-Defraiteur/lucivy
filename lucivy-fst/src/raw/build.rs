@@ -279,7 +279,7 @@ impl<W: io::Write> Builder<W> {
         {
             return Ok(EMPTY_ADDRESS);
         }
-        let entry = self.registry.entry(&node);
+        let entry = self.registry.entry(node);
         if let RegistryEntry::Found(ref addr) = entry {
             return Ok(*addr);
         }
@@ -390,8 +390,8 @@ impl UnfinishedNodes {
     fn find_common_prefix(&mut self, bs: &[u8]) -> usize {
         bs.iter()
             .zip(&self.stack)
-            .take_while(|&(&b, ref node)| {
-                node.last.as_ref().map(|t| t.inp == b).unwrap_or(false)
+            .take_while(|&(b, node)| {
+                node.last.as_ref().map(|t| t.inp == *b).unwrap_or(false)
             })
             .count()
     }

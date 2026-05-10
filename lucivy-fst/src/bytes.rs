@@ -81,11 +81,11 @@ pub fn pack_uint_in<W: io::Write>(
     mut n: u64,
     nbytes: u8,
 ) -> io::Result<()> {
-    assert!(1 <= nbytes && nbytes <= 8);
+    assert!((1..=8).contains(&nbytes));
     let mut buf = [0u8; 8];
     for i in 0..nbytes {
         buf[i as usize] = n as u8;
-        n = n >> 8;
+        n >>= 8;
     }
     wtr.write_all(&buf[..nbytes as usize])?;
     Ok(())
@@ -97,11 +97,11 @@ pub fn pack_uint_in<W: io::Write>(
 /// `nbytes` must be >= 1 and <= 8.
 #[inline]
 pub fn unpack_uint(slice: &[u8], nbytes: u8) -> u64 {
-    assert!(1 <= nbytes && nbytes <= 8);
+    assert!((1..=8).contains(&nbytes));
 
     let mut n = 0;
     for (i, &b) in slice[..nbytes as usize].iter().enumerate() {
-        n = n | ((b as u64) << (8 * i));
+        n |= (b as u64) << (8 * i);
     }
     n
 }

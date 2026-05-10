@@ -70,7 +70,7 @@
 /// We addressed the above points correspondingly:
 ///
 /// 1. `S` is now bound by `'f`, which corresponds to the lifetime (possibly
-///     `'static`) of the underlying stream.
+///    `'static`) of the underlying stream.
 /// 2. The `I` type parameter has been added to refer to a type that knows how
 ///    to build a stream. Notice that neither of the bounds for `I` or `S`
 ///    share a lifetime parameter. This is because the higher rank trait bound
