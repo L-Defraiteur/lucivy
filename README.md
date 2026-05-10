@@ -6,7 +6,7 @@ Built for code search, technical documentation, and as a BM25 complement to vect
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
 
-![Lucivy Playground](docs/8-mars-2026-14h26/image.png)
+![Lucivy Playground — searching "ror::lucivyer" finds "Error::LucivyError" across token boundaries, 7 results in 24ms](docs/10-mai-2026-05h05/playground_screenshot.png)
 
 ## What makes lucivy different
 

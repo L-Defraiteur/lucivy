@@ -206,11 +206,12 @@ window._allLogs = [];
         <option value="contains" selected>substring</option>
         <option value="contains_split">multi-word</option>
         <option value="startsWith">prefix</option>
+        <option value="fuzzy">fuzzy</option>
         <option value="regex">regex</option>
       </select>
     </label>
-    <label>
-      Fuzzy distance:
+    <label id="distanceLabel">
+      Fuzzy:
       <input type="number" id="distance" value="0" min="0" max="3">
     </label>
     <label>
@@ -433,15 +434,17 @@ tabUser.addEventListener('click', () => switchTab('user'));
 
 function buildQuery(text) {
   const mode = modeEl.value;
-  const distance = parseInt(distanceEl.value) || 0;
   const strict = strictSepEl.checked || undefined;
   const ext = extFilterEl.value;
 
   let contentQuery;
   if (mode === 'regex') {
     contentQuery = { type: 'contains', field: 'content', value: text, regex: true, strict_separators: strict };
+  } else if (mode === 'fuzzy' || mode === 'contains') {
+    const distance = parseInt(distanceEl.value) || 0;
+    contentQuery = { type: 'contains', field: 'content', value: text, distance: distance || undefined, strict_separators: strict };
   } else {
-    contentQuery = { type: mode, field: 'content', value: text, distance, strict_separators: strict };
+    contentQuery = { type: mode, field: 'content', value: text, strict_separators: strict };
   }
 
   // Wrap with extension filter if selected.
@@ -1035,7 +1038,12 @@ queryEl.addEventListener('input', () => {
 queryEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { clearTimeout(searchTimeout); doSearch(); }
 });
-modeEl.addEventListener('change', doSearch);
+modeEl.addEventListener('change', () => {
+  const showDist = modeEl.value === 'fuzzy' || modeEl.value === 'contains';
+  document.getElementById('distanceLabel').style.display = showDist ? '' : 'none';
+  if (modeEl.value === 'fuzzy' && parseInt(distanceEl.value) === 0) distanceEl.value = '1';
+  doSearch();
+});
 distanceEl.addEventListener('change', doSearch);
 highlightsEl.addEventListener('change', doSearch);
 strictSepEl.addEventListener('change', doSearch);
