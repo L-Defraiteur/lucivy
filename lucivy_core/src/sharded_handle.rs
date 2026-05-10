@@ -2464,4 +2464,62 @@ mod tests {
         let results = handle.search(&query, 10, None).unwrap();
         assert_eq!(results.len(), 5);
     }
+
+    #[test]
+    fn test_multifield_string_query_bm25() {
+        let dir = std::env::temp_dir().join("lucivy_test_multifield_bm25");
+        let _ = std::fs::remove_dir_all(&dir);
+        let config: crate::query::SchemaConfig = serde_json::from_value(serde_json::json!({
+            "fields": [
+                {"name": "title", "type": "text", "stored": true},
+                {"name": "body", "type": "text", "stored": true},
+                {"name": "score", "type": "f64", "fast": true},
+            ],
+            "shards": 2
+        })).unwrap();
+        let handle = ShardedHandle::create(dir.to_str().unwrap(), &config).unwrap();
+        let title_f = handle.field("title").unwrap();
+        let body_f = handle.field("body").unwrap();
+        let nid_f = handle.field(NODE_ID_FIELD).unwrap();
+
+        let docs = vec![
+            ("Mutex locking", "The mutex lock mechanism is simple"),
+            ("Spinlocks", "Multiple locks are held for spinlock"),
+            ("Scheduling", "The scheduler handles locking primitives"),
+            ("Unlocking", "Unlock the resource safely"),
+            ("Clock hw", "This clock hardware has no lock"),
+        ];
+        for (i, (title, body)) in docs.iter().enumerate() {
+            let mut doc = ld_lucivy::LucivyDocument::new();
+            doc.add_u64(nid_f, i as u64);
+            doc.add_text(title_f, title);
+            doc.add_text(body_f, body);
+            let score_f = handle.field("score").unwrap();
+            doc.add_f64(score_f, i as f64);
+            handle.add_document(doc, i as u64).unwrap();
+        }
+        handle.commit().unwrap();
+
+        // Exact same structure as Python binding build_contains_split_multi_field:
+        // boolean should [ boolean should [ contains "mutex" on title, contains "mutex" on body ],
+        //                  boolean should [ contains "lock" on title, contains "lock" on body ] ]
+        let query: crate::query::QueryConfig = serde_json::from_value(serde_json::json!({
+            "type": "boolean",
+            "should": [
+                {"type": "boolean", "should": [
+                    {"type": "contains", "field": "title", "value": "mutex"},
+                    {"type": "contains", "field": "body", "value": "mutex"},
+                ]},
+                {"type": "boolean", "should": [
+                    {"type": "contains", "field": "title", "value": "lock"},
+                    {"type": "contains", "field": "body", "value": "lock"},
+                ]},
+            ]
+        })).unwrap();
+        eprintln!("[TEST] boolean(boolean(contains x title, contains x body)) on 2 fields + f64, 2 shards, 5 docs");
+        let results = handle.search(&query, 10, None).unwrap();
+        eprintln!("[TEST] results: {}", results.len());
+        assert!(!results.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

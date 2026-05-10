@@ -263,9 +263,10 @@ impl LucivyHandle {
                         None,
                     );
 
-                    *sfx_freqs.entry(param.query_text.clone()).or_insert(0) += doc_tf.len() as u64;
+                    let freq_key = format!("{}:{}", param.field.field_id(), param.query_text);
+                    *sfx_freqs.entry(freq_key.clone()).or_insert(0) += doc_tf.len() as u64;
                     if !doc_tf.is_empty() {
-                        sfx_cache.insert((param.query_text.clone(), seg_reader.segment_id()), CachedSfxResult::new(doc_tf, highlights));
+                        sfx_cache.insert((freq_key, seg_reader.segment_id()), CachedSfxResult::new(doc_tf, highlights));
                     }
                 }
             }

@@ -224,7 +224,7 @@ impl SuffixContainsQuery {
 
             doc_freq += doc_tf.len() as u64;
             if !doc_tf.is_empty() {
-                cache.insert((self.query_text.clone(), segment_id), CachedSfxResult { doc_tf, highlights });
+                cache.insert((format!("{}:{}", self.raw_field.field_id(), self.query_text), segment_id), CachedSfxResult { doc_tf, highlights });
             }
         }
 
@@ -397,12 +397,13 @@ impl Query for SuffixContainsQuery {
 
     fn collect_prescan_doc_freqs(&self, out: &mut std::collections::HashMap<String, u64>) {
         if let Some(freq) = self.global_doc_freq {
-            out.insert(self.query_text.clone(), freq);
+            out.insert(format!("{}:{}", self.raw_field.field_id(), self.query_text), freq);
         }
     }
 
     fn set_global_contains_doc_freqs(&mut self, freqs: &std::collections::HashMap<String, u64>) {
-        if let Some(&freq) = freqs.get(&self.query_text) {
+        let key = format!("{}:{}", self.raw_field.field_id(), self.query_text);
+        if let Some(&freq) = freqs.get(&key) {
             self.global_doc_freq = Some(freq);
         }
     }
@@ -420,9 +421,10 @@ impl Query for SuffixContainsQuery {
         &mut self,
         cache: std::collections::HashMap<(String, crate::index::SegmentId), CachedSfxResult>,
     ) {
-        // Filter: only take entries matching our query_text.
+        // Filter: only take entries matching our field_id:query_text key.
+        let key = format!("{}:{}", self.raw_field.field_id(), self.query_text);
         let filtered: HashMap<(String, SegmentId), CachedSfxResult> = cache.into_iter()
-            .filter(|((qt, _), _)| qt == &self.query_text)
+            .filter(|((qt, _), _)| qt == &key)
             .collect();
         if filtered.is_empty() { return; }
         if let Some(ref mut existing) = self.prescan_cache {
