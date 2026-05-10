@@ -1,96 +1,250 @@
-/** Field definition for creating an index. */
-export interface FieldDef {
-    name: string;
-    type: 'text' | 'string' | 'u64' | 'i64' | 'f64';
+/**
+ * Lucivy WASM (Emscripten) — TypeScript declarations.
+ *
+ * Usage:
+ *   const Module = await createLucivy();
+ *   const ctx = Module.ccall("lucivy_create", "number", ["string", "string", "number"],
+ *     ["/index", JSON.stringify({fields:[{name:"body",type:"text",stored:true}]}), 1]);
+ */
+
+// ── Query JSON format ──────────────────────────────────────────────
+//
+// All queries are passed as JSON strings to lucivy_search / lucivy_search_filtered.
+//
+// Query types (all substring queries are cross-token):
+//
+//   {"type":"contains","field":"body","value":"lock"}
+//     Substring match. Finds "lock" inside "unlock", "locking", etc.
+//
+//   {"type":"contains","field":"body","value":"lock","distance":1}
+//     Fuzzy substring (Levenshtein). Finds "lock", "look", "lack", etc.
+//
+//   {"type":"contains","field":"body","value":"lock.*init","regex":true}
+//     Regex substring. Cross-token regex matching.
+//
+//   {"type":"startsWith","field":"body","value":"lock"}
+//     Token prefix. Finds tokens starting with "lock" (lock, locks, locking...).
+//
+//   {"type":"contains_split","field":"body","value":"struct device"}
+//     Split on whitespace, each word as contains, combined with boolean OR.
+//
+//   {"type":"term","field":"body","value":"lock"}
+//     Exact whole-token match.
+//
+//   {"type":"fuzzy","field":"body","value":"schdule","distance":1}
+//     Alias for contains + distance.
+//
+//   {"type":"phrase","field":"body","value":"mutex lock"}
+//     Adjacent tokens in order.
+//
+//   {"type":"regex","field":"body","pattern":"sched[a-z]+"}
+//     Regex on individual tokens.
+//
+//   {"type":"boolean","must":[...],"should":[...],"must_not":[...]}
+//     Boolean combination of sub-queries.
+//
+//   {"type":"disjunction_max","queries":[...],"tie_breaker":0.1}
+//     Best-score from sub-queries with tie-breaker.
+//
+//   {"type":"more_like_this","field":"body","value":"sample text",
+//    "min_doc_frequency":1,"min_term_frequency":1,"min_word_length":3}
+//     TF-IDF similarity search.
+//
+// Filtering (in query JSON):
+//   "filters": [
+//     {"field":"category","op":"eq","value":"kernel"},
+//     {"field":"score","op":"gte","value":0.5},
+//     {"field":"status","op":"in","value":["active","review"]}
+//   ]
+//   Ops: eq, ne, lt, lte, gt, gte, in, not_in, between, starts_with, contains
+//   Composite: must, should, must_not with nested "clauses"
+
+/** Opaque pointer to a LucivyContext (WASM heap address). */
+type LucivyCtx = number;
+
+/** Returned C string pointer — read with Module.UTF8ToString(ptr). */
+type CStringPtr = number;
+
+export interface LucivyModule extends EmscriptenModule {
+  // ── Lifecycle ──────────────────────────────────────────────────────
+
+  /** Create a new index. Returns context pointer. */
+  _lucivy_create(
+    path: CStringPtr,
+    config_json: CStringPtr,
+    shards: number,
+  ): LucivyCtx;
+
+  /** Open an existing index. Returns context pointer. */
+  _lucivy_open(path: CStringPtr): LucivyCtx;
+
+  /** Streaming open: begin (creates context, no shards loaded yet). */
+  _lucivy_open_begin(path: CStringPtr): LucivyCtx;
+
+  /** Streaming open: import a .luce snapshot file into the context. */
+  _lucivy_import_file(
+    ctx: LucivyCtx,
+    filename: CStringPtr,
+    data: number,
+    len: number,
+  ): CStringPtr;
+
+  /** Streaming open: finalize after all files imported. Returns final ctx. */
+  _lucivy_open_finish(ctx: LucivyCtx): LucivyCtx;
+
+  /** Close the index (flush + release locks). */
+  _lucivy_close(ctx: LucivyCtx): CStringPtr;
+
+  /** Destroy the context and free memory. */
+  _lucivy_destroy(ctx: LucivyCtx): void;
+
+  // ── Document operations ────────────────────────────────────────────
+
+  /** Add a document. fields_json: {"body":"text","score":3.14} */
+  _lucivy_add(
+    ctx: LucivyCtx,
+    doc_id_lo: number,
+    doc_id_hi: number,
+    fields_json: CStringPtr,
+  ): CStringPtr;
+
+  /** Add multiple documents. docs_json: [{"_node_id":1,"body":"..."},..] */
+  _lucivy_add_many(ctx: LucivyCtx, docs_json: CStringPtr): CStringPtr;
+
+  /** Delete a document by _node_id. */
+  _lucivy_remove(ctx: LucivyCtx, doc_id: number): CStringPtr;
+
+  /** Update a document (delete + re-add). */
+  _lucivy_update(
+    ctx: LucivyCtx,
+    doc_id_lo: number,
+    doc_id_hi: number,
+    fields_json: CStringPtr,
+  ): CStringPtr;
+
+  // ── Transaction ────────────────────────────────────────────────────
+
+  /** Commit pending writes (synchronous). */
+  _lucivy_commit(ctx: LucivyCtx): CStringPtr;
+
+  /** Start async commit (returns immediately). */
+  _lucivy_commit_async(ctx: LucivyCtx): number;
+
+  /** Check async commit status. Returns 1 if done. */
+  _lucivy_commit_status_ptr(ctx: LucivyCtx): number;
+
+  /** Finish async commit (blocks until done). */
+  _lucivy_commit_finish(ctx: LucivyCtx): CStringPtr;
+
+  /** Drain background merges. */
+  _lucivy_drain_merges(ctx: LucivyCtx): CStringPtr;
+
+  // ── Search ─────────────────────────────────────────────────────────
+
+  /**
+   * Search the index. Returns JSON array of results.
+   * @param query_json - Query JSON string (see query types above).
+   * @param limit - Max results.
+   * @param highlights - 1 to include highlight byte offsets, 0 to skip.
+   * @param include_fields - 1 to include stored field values, 0 to skip.
+   */
+  _lucivy_search(
+    ctx: LucivyCtx,
+    query_json: CStringPtr,
+    limit: number,
+    highlights: number,
+    include_fields: number,
+  ): CStringPtr;
+
+  /**
+   * Search with pre-filter by _node_id.
+   * @param allowed_ids_json - JSON array of allowed _node_id values: "[1,2,3]"
+   */
+  _lucivy_search_filtered(
+    ctx: LucivyCtx,
+    query_json: CStringPtr,
+    limit: number,
+    highlights: number,
+    include_fields: number,
+    allowed_ids_json: CStringPtr,
+  ): CStringPtr;
+
+  /** Search with pre-computed global BM25 stats (for distributed search). */
+  _lucivy_search_with_global_stats(
+    ctx: LucivyCtx,
+    query_json: CStringPtr,
+    limit: number,
+    stats_json: CStringPtr,
+  ): CStringPtr;
+
+  // ── Info ────────────────────────────────────────────────────────────
+
+  /** Number of documents in the index. */
+  _lucivy_num_docs(ctx: LucivyCtx): number;
+
+  /** Schema as JSON string. */
+  _lucivy_schema_json(ctx: LucivyCtx): CStringPtr;
+
+  /** Shard versions as JSON. */
+  _lucivy_shard_versions(ctx: LucivyCtx): CStringPtr;
+
+  // ── Snapshot / Delta ───────────────────────────────────────────────
+
+  /** Export full snapshot (.luce). Returns JSON with file list. */
+  _lucivy_export_snapshot(ctx: LucivyCtx, out_dir: CStringPtr): CStringPtr;
+
+  /** Import snapshot from directory. */
+  _lucivy_import_snapshot(ctx: LucivyCtx, snapshot_dir: CStringPtr): CStringPtr;
+
+  /** Export sharded delta (.lucids). */
+  _lucivy_export_sharded_delta(
+    ctx: LucivyCtx,
+    out_dir: CStringPtr,
+    base_versions_json: CStringPtr,
+  ): CStringPtr;
+
+  /** Apply sharded delta. */
+  _lucivy_apply_sharded_delta(
+    ctx: LucivyCtx,
+    delta_dir: CStringPtr,
+  ): CStringPtr;
+
+  /** Merge BM25 stats from multiple nodes into global stats (for distributed search).
+   *  stats_json_array: JSON array of ExportableStats strings: '["{\\"total_num_docs\\":...}", ...]'
+   *  Returns merged JSON string ready for _lucivy_search_with_global_stats(). */
+  _lucivy_merge_stats(stats_json_array: CStringPtr): CStringPtr;
+
+  /** Export BM25 stats for distributed search. */
+  _lucivy_export_stats(ctx: LucivyCtx, query_json: CStringPtr): CStringPtr;
+
+  // ── Diagnostics ────────────────────────────────────────────────────
+
+  /** Read ring buffer logs. */
+  _lucivy_read_logs(): CStringPtr;
+
+  /** Configure logging. config_json: {"log_level":"debug"} */
+  _lucivy_configure(config_json: CStringPtr): CStringPtr;
+
+  /** Dump scheduler DAG as Mermaid. */
+  _lucivy_dump_mermaid(ctx: LucivyCtx): CStringPtr;
+
+  /** Dump scheduler state. */
+  _lucivy_dump_state(ctx: LucivyCtx): CStringPtr;
+
+  /** Dump wait graph as Mermaid. */
+  _lucivy_dump_wait_graph(ctx: LucivyCtx): CStringPtr;
+
+  /** Dump wait graph as text. */
+  _lucivy_dump_wait_graph_text(ctx: LucivyCtx): CStringPtr;
+
+  /** Pointer to the log ring buffer (for direct HEAPU8 access). */
+  _lucivy_log_ring_ptr(): number;
+
+  /** Size of the log ring buffer in bytes. */
+  _lucivy_log_ring_size(): number;
 }
 
-/** Search query — either a plain string or a structured query object. */
-export type SearchQuery = string | {
-    type: 'contains' | 'contains_split' | 'term' | 'boolean';
-    field?: string;
-    value?: string;
-    should?: SearchQuery[];
-    must?: SearchQuery[];
-    must_not?: SearchQuery[];
-};
-
-/** Search options. */
-export interface SearchOptions {
-    limit?: number;
-    highlights?: boolean;
-    /** Include stored fields in results. */
-    fields?: boolean;
-}
-
-/** A single search result. */
-export interface SearchResult {
-    docId: number;
-    score: number;
-    highlights?: Record<string, [number, number][]>;
-    /** Stored field values (when `fields: true`). */
-    fields?: Record<string, string | number>;
-}
-
-/** Main-thread Promise API for lucivy-emscripten. */
-export declare class Lucivy {
-    /** Resolves when the WASM module is loaded and ready. */
-    readonly ready: Promise<boolean>;
-
-    constructor(workerUrl: string);
-
-    /** Create a new index at the given path with the specified fields. */
-    create(path: string, fields: FieldDef[], stemmer?: string): Promise<LucivyIndex>;
-
-    /** Open an existing index from OPFS. */
-    open(path: string): Promise<LucivyIndex>;
-
-    /** Import an index from a LUCE snapshot blob. */
-    importSnapshot(data: Uint8Array, path: string): Promise<LucivyIndex>;
-
-    /** Terminate the worker. */
-    terminate(): void;
-}
-
-/** Handle to an open lucivy index. All operations go through the worker. */
-export declare class LucivyIndex {
-    readonly path: string;
-
-    /** Add a document with the given ID and field values. */
-    add(docId: number, fields: Record<string, string | number>): Promise<boolean>;
-
-    /** Add multiple documents at once. Each doc must have a `docId` key. */
-    addMany(docs: Array<Record<string, string | number> & { docId: number }>): Promise<boolean>;
-
-    /** Remove a document by ID. */
-    remove(docId: number): Promise<boolean>;
-
-    /** Update a document (remove + add). */
-    update(docId: number, fields: Record<string, string | number>): Promise<boolean>;
-
-    /** Commit pending changes and sync to OPFS. */
-    commit(): Promise<{ numDocs: number }>;
-
-    /** Rollback uncommitted changes. */
-    rollback(): Promise<boolean>;
-
-    /** Search the index. */
-    search(query: SearchQuery, options?: SearchOptions): Promise<SearchResult[]>;
-
-    /** Search with an allowed document ID filter. */
-    searchFiltered(query: SearchQuery, allowedIds: number[], options?: SearchOptions): Promise<SearchResult[]>;
-
-    /** Get the number of indexed documents. */
-    numDocs(): Promise<number>;
-
-    /** Get the index schema. */
-    schema(): Promise<FieldDef[] | null>;
-
-    /** Export the index as a LUCE snapshot blob (Uint8Array). */
-    exportSnapshot(): Promise<Uint8Array>;
-
-    /** Close the index (keep OPFS files). */
-    close(): Promise<boolean>;
-
-    /** Close the index and delete OPFS files. */
-    destroy(): Promise<boolean>;
-}
+/** Create and initialize the Lucivy WASM module. */
+export default function createLucivy(
+  moduleArg?: Partial<EmscriptenModule>,
+): Promise<LucivyModule>;
