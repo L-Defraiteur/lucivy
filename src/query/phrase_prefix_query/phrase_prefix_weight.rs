@@ -73,16 +73,6 @@ impl PhrasePrefixWeight {
             stream = stream.lt(&end);
         }
 
-        #[cfg(feature = "quickwit")]
-        {
-            // We don't have this on the fst, hence  we end up needing a feature flag.
-            //
-            // This is not a problem however as we enforce the limit below too.
-            // The point of `stream.limit` is to limit the number of term dictionary
-            // blocks being downloaded.
-            stream = stream.limit(self.max_expansions as u64);
-        }
-
         let mut stream = stream.into_stream()?;
 
         let mut suffixes = Vec::with_capacity(self.max_expansions as usize);

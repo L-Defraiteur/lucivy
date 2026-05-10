@@ -18,15 +18,8 @@
 //!
 //! A second datastructure makes it possible to access a [`TermInfo`].
 
-#[cfg(not(feature = "quickwit"))]
 mod fst_termdict;
-#[cfg(not(feature = "quickwit"))]
 use fst_termdict as termdict;
-
-#[cfg(feature = "quickwit")]
-mod sstable_termdict;
-#[cfg(feature = "quickwit")]
-use sstable_termdict as termdict;
 
 #[cfg(test)]
 mod tests;
@@ -51,7 +44,6 @@ use crate::postings::TermInfo;
 #[repr(u32)]
 enum DictionaryType {
     Fst = 1,
-    SSTable = 2,
 }
 
 impl TryFrom<u32> for DictionaryType {
@@ -60,17 +52,12 @@ impl TryFrom<u32> for DictionaryType {
     fn try_from(value: u32) -> Result<Self, Self::Error> {
         match value {
             1 => Ok(DictionaryType::Fst),
-            2 => Ok(DictionaryType::SSTable),
             _ => Err("Invalid value for DictionaryType"),
         }
     }
 }
 
-#[cfg(not(feature = "quickwit"))]
 const CURRENT_TYPE: DictionaryType = DictionaryType::Fst;
-
-#[cfg(feature = "quickwit")]
-const CURRENT_TYPE: DictionaryType = DictionaryType::SSTable;
 
 // TODO in the future this should become an enum of supported dictionaries
 /// A TermDictionary wrapping either an FST based dictionary or a SSTable based one.
@@ -174,28 +161,6 @@ impl TermDictionary {
         self.0.search(automaton)
     }
 
-    #[cfg(feature = "quickwit")]
-    /// Lookups the value corresponding to the key.
-    pub async fn get_async<K: AsRef<[u8]>>(&self, key: K) -> io::Result<Option<TermInfo>> {
-        self.0.get_async(key).await
-    }
-
-    #[cfg(feature = "quickwit")]
-    #[doc(hidden)]
-    pub async fn warm_up_dictionary(&self) -> io::Result<()> {
-        self.0.warm_up_dictionary().await
-    }
-
-    #[cfg(feature = "quickwit")]
-    /// Returns a file slice covering a set of sstable blocks
-    /// that includes the key range passed in arguments.
-    pub fn file_slice_for_range(
-        &self,
-        key_range: impl std::ops::RangeBounds<[u8]>,
-        limit: Option<u64>,
-    ) -> FileSlice {
-        self.0.file_slice_for_range(key_range, limit)
-    }
 }
 
 /// A TermDictionaryBuilder wrapping either an FST or a SSTable dictionary builder.

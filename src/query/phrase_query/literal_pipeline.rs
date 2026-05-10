@@ -461,8 +461,8 @@ pub struct MultiTokenMatch {
 /// Single source of truth: the same code path as single-token contains,
 /// with additional filters for multi-token constraints:
 /// - `is_first`: if false, only SI=0 matches (token must start at indexed token boundary)
-/// - `is_last`: if true, prefix matches allowed (query can match start of token)
-///              if false, query must cover token to the end (si + query_len == token_len)
+/// - `is_last`: if true, prefix matches allowed (query can match start of token);
+///   if false, query must cover token to the end (si + query_len == token_len)
 ///
 /// `resolve_fn` maps raw ordinal → posting entries (doc_id, position, byte_from, byte_to).
 ///

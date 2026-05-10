@@ -290,6 +290,7 @@ pub(crate) fn validate_gapmap(gapmap_data: &[u8]) -> Vec<GapMapError> {
 /// Checks:
 /// - All doc_ids < num_docs
 /// - Number of ordinals matches num_tokens
+///
 /// Returns error description or None if valid.
 pub(crate) fn validate_sfxpost(
     sfxpost_data: &[u8],

@@ -252,21 +252,9 @@ impl SegmentReader {
         StoreReader::open(self.store_file.clone(), cache_num_blocks)
     }
 
-    /// Accessor to the segment's [`StoreReader`](crate::store::StoreReader) asynchronously.
-    #[cfg(feature = "quickwit")]
-    pub async fn get_store_reader_async(&self, cache_num_blocks: usize) -> io::Result<StoreReader> {
-        StoreReader::open_async(self.store_file.clone(), cache_num_blocks).await
-    }
-
     /// Open a new segment for reading.
     pub fn open(segment: &Segment) -> crate::Result<SegmentReader> {
         Self::open_with_custom_alive_set(segment, None)
-    }
-
-    /// Open a new segment for reading asynchronously.
-    #[cfg(feature = "quickwit")]
-    pub async fn open_async(segment: &Segment) -> crate::Result<SegmentReader> {
-        Self::open_with_custom_alive_set_async(segment, None).await
     }
 
     /// Open a new segment for reading.
@@ -310,84 +298,6 @@ impl SegmentReader {
         let original_bitset = if segment.meta().has_deletes() {
             let alive_doc_file_slice = segment.open_read(SegmentComponent::Delete)?;
             let alive_doc_data = alive_doc_file_slice.read_bytes()?;
-            Some(AliveBitSet::open(alive_doc_data))
-        } else {
-            None
-        };
-
-        let alive_bitset_opt = intersect_alive_bitset(original_bitset, custom_bitset);
-
-        let max_doc = segment.meta().max_doc();
-        let num_docs = alive_bitset_opt
-            .as_ref()
-            .map(|alive_bitset| alive_bitset.num_alive_docs() as u32)
-            .unwrap_or(max_doc);
-
-        let (sfx_files, sfxpost_files, posmap_files, bytemap_files, registry_files) = load_sfx_files(segment, &schema);
-
-        Ok(SegmentReader {
-            inv_idx_reader_cache: Default::default(),
-            num_docs,
-            max_doc,
-            termdict_composite,
-            postings_composite,
-            fast_fields_readers,
-            fieldnorm_readers,
-            segment_id: segment.id(),
-            delete_opstamp: segment.meta().delete_opstamp(),
-            store_file,
-            alive_bitset_opt,
-            positions_composite,
-            offsets_composite,
-            schema: schema.clone(),
-            sfx_files,
-            sfxpost_files,
-            posmap_files,
-            bytemap_files,
-            registry_files,
-        })
-    }
-
-    /// Open a new segment for reading asynchronously with a custom alive set.
-    #[cfg(feature = "quickwit")]
-    pub async fn open_with_custom_alive_set_async(
-        segment: &Segment,
-        custom_bitset: Option<AliveBitSet>,
-    ) -> crate::Result<SegmentReader> {
-        let termdict_file = segment.open_read(SegmentComponent::Terms)?;
-        let termdict_composite = CompositeFile::open_async(&termdict_file).await?;
-
-        let store_file = segment.open_read(SegmentComponent::Store)?;
-
-        let postings_file = segment.open_read(SegmentComponent::Postings)?;
-        let postings_composite = CompositeFile::open_async(&postings_file).await?;
-
-        let positions_composite = {
-            if let Ok(positions_file) = segment.open_read(SegmentComponent::Positions) {
-                CompositeFile::open_async(&positions_file).await?
-            } else {
-                CompositeFile::empty()
-            }
-        };
-
-        let offsets_composite = {
-            if let Ok(offsets_file) = segment.open_read(SegmentComponent::Offsets) {
-                CompositeFile::open_async(&offsets_file).await?
-            } else {
-                CompositeFile::empty()
-            }
-        };
-
-        let schema = segment.schema();
-
-        let fast_fields_data = segment.open_read(SegmentComponent::FastFields)?;
-        let fast_fields_readers = FastFieldReaders::open_async(fast_fields_data, schema.clone()).await?;
-        let fieldnorm_data = segment.open_read(SegmentComponent::FieldNorms)?;
-        let fieldnorm_readers = FieldNormReaders::open_async(fieldnorm_data).await?;
-
-        let original_bitset = if segment.meta().has_deletes() {
-            let alive_doc_file_slice = segment.open_read(SegmentComponent::Delete)?;
-            let alive_doc_data = alive_doc_file_slice.read_bytes_async().await?;
             Some(AliveBitSet::open(alive_doc_data))
         } else {
             None
@@ -502,77 +412,6 @@ impl SegmentReader {
 
         // by releasing the lock in between, we may end up opening the inverting index
         // twice, but this is fine.
-        self.inv_idx_reader_cache
-            .write()
-            .expect("Field reader cache lock poisoned. This should never happen.")
-            .insert(field, Arc::clone(&inv_idx_reader));
-
-        Ok(inv_idx_reader)
-    }
-
-    /// Returns a field reader associated with the field given in argument asynchronously.
-    #[cfg(feature = "quickwit")]
-    pub async fn inverted_index_async(
-        &self,
-        field: Field,
-    ) -> crate::Result<Arc<InvertedIndexReader>> {
-        if let Some(inv_idx_reader) = self
-            .inv_idx_reader_cache
-            .read()
-            .expect("Lock poisoned. This should never happen")
-            .get(&field)
-        {
-            return Ok(Arc::clone(inv_idx_reader));
-        }
-        let field_entry = self.schema.get_field_entry(field);
-        let field_type = field_entry.field_type();
-        let record_option_opt = field_type.get_index_record_option();
-
-        if record_option_opt.is_none() {
-            warn!("Field {:?} does not seem indexed.", field_entry.name());
-        }
-
-        let postings_file_opt = self.postings_composite.open_read(field);
-
-        if postings_file_opt.is_none() || record_option_opt.is_none() {
-            let record_option = record_option_opt.unwrap_or(IndexRecordOption::Basic);
-            return Ok(Arc::new(InvertedIndexReader::empty(record_option)));
-        }
-
-        let record_option = record_option_opt.unwrap();
-        let postings_file = postings_file_opt.unwrap();
-
-        let termdict_file: FileSlice =
-            self.termdict_composite.open_read(field).ok_or_else(|| {
-                DataCorruption::comment_only(format!(
-                    "Failed to open field {:?}'s term dictionary in the composite file. Has the \
-                     schema been modified?",
-                    field_entry.name()
-                ))
-            })?;
-
-        let positions_file = self.positions_composite.open_read(field).ok_or_else(|| {
-            let error_msg = format!(
-                "Failed to open field {:?}'s positions in the composite file. Has the schema been \
-                 modified?",
-                field_entry.name()
-            );
-            DataCorruption::comment_only(error_msg)
-        })?;
-
-        let offsets_file = self
-            .offsets_composite
-            .open_read(field)
-            .unwrap_or_else(|| FileSlice::empty());
-
-        let inv_idx_reader = Arc::new(InvertedIndexReader::new(
-            TermDictionary::open_async(termdict_file).await?,
-            postings_file,
-            positions_file,
-            offsets_file,
-            record_option,
-        )?);
-
         self.inv_idx_reader_cache
             .write()
             .expect("Field reader cache lock poisoned. This should never happen.")

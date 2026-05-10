@@ -203,10 +203,6 @@ impl InvertedIndexRangeWeight {
             Excluded(ref term_val) => term_stream_builder.lt(term_val),
             Unbounded => term_stream_builder,
         };
-        #[cfg(feature = "quickwit")]
-        if let Some(limit) = self.limit {
-            term_stream_builder = term_stream_builder.limit(limit);
-        }
         term_stream_builder.into_stream()
     }
 }

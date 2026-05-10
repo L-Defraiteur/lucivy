@@ -158,6 +158,7 @@ where
     ///   substring/contains queries where the automaton must match suffixes.
     /// - Standard path (prefer_sfxpost=false): walks the term dict FST,
     ///   for whole-token matching (fuzzy, regex on tokens). Same as tantivy.
+    ///
     /// Returns (term_bytes, TermInfo) pairs for global doc_freq lookup.
     fn collect_term_infos(
         &self,

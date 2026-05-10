@@ -23,17 +23,6 @@ pub trait Bm25StatisticsProvider {
     /// The number of documents containing the given term.
     fn doc_freq(&self, term: &Term) -> crate::Result<u64>;
 
-    /// The total number of tokens in a given field across all documents asynchronously.
-    #[cfg(feature = "quickwit")]
-    async fn total_num_tokens_async(&self, field: Field) -> crate::Result<u64> {
-        self.total_num_tokens(field)
-    }
-
-    /// The number of documents containing the given term asynchronously.
-    #[cfg(feature = "quickwit")]
-    async fn doc_freq_async(&self, term: &Term) -> crate::Result<u64> {
-        self.doc_freq(term)
-    }
 }
 
 impl Bm25StatisticsProvider for Searcher {

@@ -238,20 +238,6 @@ impl Directory for RamDirectory {
         Ok(())
     }
 
-    #[cfg(feature = "quickwit")]
-    async fn open_read_async(&self, path: &Path) -> Result<FileSlice, OpenReadError> {
-        self.open_read(path)
-    }
-
-    #[cfg(feature = "quickwit")]
-    async fn delete_async(&self, path: &Path) -> Result<(), DeleteError> {
-        self.delete(path)
-    }
-
-    #[cfg(feature = "quickwit")]
-    async fn atomic_read_async(&self, path: &Path) -> Result<Vec<u8>, OpenReadError> {
-        self.atomic_read(path)
-    }
 }
 
 #[cfg(test)]

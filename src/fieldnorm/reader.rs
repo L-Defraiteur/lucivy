@@ -26,30 +26,10 @@ impl FieldNormReaders {
         })
     }
 
-    /// Creates a field norm reader asynchronously.
-    #[cfg(feature = "quickwit")]
-    pub async fn open_async(file: FileSlice) -> crate::Result<FieldNormReaders> {
-        let data = CompositeFile::open_async(&file).await?;
-        Ok(FieldNormReaders {
-            data: Arc::new(data),
-        })
-    }
-
     /// Returns the FieldNormReader for a specific field.
     pub fn get_field(&self, field: Field) -> crate::Result<Option<FieldNormReader>> {
         if let Some(file) = self.data.open_read(field) {
             let fieldnorm_reader = FieldNormReader::open(file)?;
-            Ok(Some(fieldnorm_reader))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Returns the FieldNormReader for a specific field asynchronously.
-    #[cfg(feature = "quickwit")]
-    pub async fn get_field_async(&self, field: Field) -> crate::Result<Option<FieldNormReader>> {
-        if let Some(file) = self.data.open_read(field) {
-            let fieldnorm_reader = FieldNormReader::open_async(file).await?;
             Ok(Some(fieldnorm_reader))
         } else {
             Ok(None)
@@ -109,13 +89,6 @@ impl FieldNormReader {
     /// Opens a field norm reader given its file.
     pub fn open(fieldnorm_file: FileSlice) -> crate::Result<Self> {
         let data = fieldnorm_file.read_bytes()?;
-        Ok(FieldNormReader::new(data))
-    }
-
-    /// Opens a field norm reader given its file asynchronously.
-    #[cfg(feature = "quickwit")]
-    pub async fn open_async(fieldnorm_file: FileSlice) -> crate::Result<Self> {
-        let data = fieldnorm_file.read_bytes_async().await?;
         Ok(FieldNormReader::new(data))
     }
 

@@ -310,14 +310,12 @@ impl<D: Document> IndexerState<D> {
         if let Some(ref rx) = self.pending_finalize {
             if rx.is_ready() {
                 let rx = self.pending_finalize.take().unwrap();
-                if let Some(result) = rx.take_value() {
-                    if let Err(err_bytes) = result {
-                        let err = crate::LucivyError::decode(&err_bytes)
-                            .unwrap_or_else(|_| {
-                                crate::LucivyError::SystemError("background finalize failed".into())
-                            });
-                        self.set_error(err);
-                    }
+                if let Some(Err(err_bytes)) = rx.take_value() {
+                    let err = crate::LucivyError::decode(&err_bytes)
+                        .unwrap_or_else(|_| {
+                            crate::LucivyError::SystemError("background finalize failed".into())
+                        });
+                    self.set_error(err);
                 }
             }
         }

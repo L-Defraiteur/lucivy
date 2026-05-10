@@ -142,6 +142,7 @@ impl<'a> SepMapReader<'a> {
     /// Returns true if:
     /// - Only contiguous (gap=0) observed, OR
     /// - All non-contiguous separator bytes are in the ranges.
+    ///
     /// Returns false if any separator byte is outside the ranges.
     pub fn sep_bytes_in_ranges(&self, ordinal: u32, ranges: &[(u8, u8)]) -> bool {
         let Some(bm) = self.bitmap(ordinal) else { return true; };

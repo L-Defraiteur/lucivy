@@ -40,8 +40,7 @@ pub(crate) fn save_metas(metas: &IndexMeta, directory: &dyn Directory) -> crate:
     // Just adding a new line at the end of the buffer.
     writeln!(&mut buffer)?;
     crate::fail_point!("save_metas", |msg| Err(crate::LucivyError::from(
-        std::io::Error::new(
-            std::io::ErrorKind::Other,
+        std::io::Error::other(
             msg.unwrap_or_else(|| "Undefined".to_string())
         )
     )));

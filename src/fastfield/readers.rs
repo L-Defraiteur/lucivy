@@ -30,22 +30,8 @@ impl FastFieldReaders {
         Ok(FastFieldReaders { columnar, schema })
     }
 
-    #[cfg(feature = "quickwit")]
-    pub(crate) async fn open_async(
-        fast_field_file: FileSlice,
-        schema: Schema,
-    ) -> io::Result<FastFieldReaders> {
-        let columnar = Arc::new(ColumnarReader::open_async(fast_field_file).await?);
-        Ok(FastFieldReaders { columnar, schema })
-    }
-
     fn resolve_field(&self, column_name: &str) -> crate::Result<Option<String>> {
-        let default_field_opt: Option<Field> = if cfg!(feature = "quickwit") {
-            self.schema.get_field("_dynamic").ok()
-        } else {
-            None
-        };
-        self.resolve_column_name_given_default_field(column_name, default_field_opt)
+        self.resolve_column_name_given_default_field(column_name, None)
     }
 
     pub(crate) fn space_usage(&self) -> io::Result<PerFieldSpaceUsage> {
@@ -385,104 +371,6 @@ impl FastFieldReaders {
     /// If `field` is not a bool fast field, this method returns an Error.
     pub fn bool(&self, field_name: &str) -> crate::Result<Column<bool>> {
         self.column(field_name)
-    }
-}
-
-#[cfg(feature = "quickwit")]
-impl FastFieldReaders {
-    pub async fn column_opt_async<T>(&self, field_name: &str) -> crate::Result<Option<Column<T>>>
-    where
-        T: PartialOrd + Copy + HasAssociatedColumnType + Send + Sync + 'static,
-        DynamicColumn: Into<Option<Column<T>>>,
-    {
-        let column_type = T::column_type();
-        let Some(dynamic_column_handle) = self
-            .dynamic_column_handle_async(field_name, column_type)
-            .await?
-        else {
-            return Ok(None);
-        };
-        let dynamic_column = dynamic_column_handle.open_async().await?;
-        Ok(dynamic_column.into())
-    }
-
-    pub async fn column_async<T>(&self, field: &str) -> crate::Result<Column<T>>
-    where
-        T: PartialOrd + Copy + HasAssociatedColumnType + Send + Sync + 'static,
-        DynamicColumn: Into<Option<Column<T>>>,
-    {
-        let col_opt: Option<Column<T>> = self.column_opt_async(field).await?;
-        col_opt.ok_or_else(|| {
-            crate::LucivyError::SchemaError(format!(
-                "Field `{field}` is missing or is not configured as a fast field."
-            ))
-        })
-    }
-
-    pub async fn dynamic_column_handle_async(
-        &self,
-        field_name: &str,
-        column_type: ColumnType,
-    ) -> crate::Result<Option<DynamicColumnHandle>> {
-        let Some(resolved_field_name) = self.resolve_field(field_name)? else {
-            return Ok(None);
-        };
-        let dynamic_column_handle_opt = self
-            .columnar
-            .read_columns_async(&resolved_field_name)
-            .await?
-            .into_iter()
-            .find(|column| column.column_type() == column_type);
-        Ok(dynamic_column_handle_opt)
-    }
-
-    #[doc(hidden)]
-    pub async fn u64_lenient_for_type_async(
-        &self,
-        type_white_list_opt: Option<&[ColumnType]>,
-        field_name: &str,
-    ) -> crate::Result<Option<(Column<u64>, ColumnType)>> {
-        let Some(resolved_field_name) = self.resolve_field(field_name)? else {
-            return Ok(None);
-        };
-        for col in self
-            .columnar
-            .read_columns_async(&resolved_field_name)
-            .await?
-        {
-            if let Some(type_white_list) = type_white_list_opt {
-                if !type_white_list.contains(&col.column_type()) {
-                    continue;
-                }
-            }
-            if let Some(col_u64) = col.open_u64_lenient_async().await? {
-                return Ok(Some((col_u64, col.column_type())));
-            }
-        }
-        Ok(None)
-    }
-
-    pub async fn u64_lenient_async(
-        &self,
-        field_name: &str,
-    ) -> crate::Result<Option<(Column<u64>, ColumnType)>> {
-        self.u64_lenient_for_type_async(None, field_name).await
-    }
-
-    pub async fn u64_async(&self, field_name: &str) -> crate::Result<Column<u64>> {
-        self.column_async(field_name).await
-    }
-
-    pub async fn i64_async(&self, field_name: &str) -> crate::Result<Column<i64>> {
-        self.column_async(field_name).await
-    }
-
-    pub async fn f64_async(&self, field_name: &str) -> crate::Result<Column<f64>> {
-        self.column_async(field_name).await
-    }
-
-    pub async fn date_async(&self, field_name: &str) -> crate::Result<Column<common::DateTime>> {
-        self.column_async(field_name).await
     }
 }
 

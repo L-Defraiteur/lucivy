@@ -108,67 +108,6 @@ impl Footer {
         Ok((footer, body))
     }
 
-    /// Extracts the lucivy Footer from the file asynchronously
-    #[cfg(feature = "quickwit")]
-    pub async fn extract_footer_async(file: FileSlice) -> io::Result<(Footer, FileSlice)> {
-        if file.len() < 4 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                format!(
-                    "File corrupted. The file is smaller than 4 bytes (len={}).",
-                    file.len()
-                ),
-            ));
-        }
-
-        let footer_metadata_len = <(u32, u32)>::SIZE_IN_BYTES;
-        let (footer_len, footer_magic_byte): (u32, u32) = file
-            .slice_from_end(footer_metadata_len)
-            .read_bytes_async()
-            .await?
-            .as_ref()
-            .deserialize()?;
-
-        if footer_magic_byte != FOOTER_MAGIC_NUMBER {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Footer magic byte mismatch. File corrupted or index was created using old an \
-                 lucivy version which is not supported anymore. Please use lucivy 0.15 or above \
-                 to recreate the index.",
-            ));
-        }
-
-        if footer_len > FOOTER_MAX_LEN {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "Footer seems invalid as it suggests a footer len of {footer_len}. File is \
-                     corrupted, or the index was created with a different & old version of \
-                     lucivy."
-                ),
-            ));
-        }
-        let total_footer_size = footer_len as usize + footer_metadata_len;
-        if file.len() < total_footer_size {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                format!(
-                    "File corrupted. The file is smaller than it's footer bytes \
-                     (len={total_footer_size})."
-                ),
-            ));
-        }
-
-        let footer: Footer = serde_json::from_slice(
-            &file
-                .read_bytes_slice_async(file.len() - total_footer_size..file.len() - footer_metadata_len)
-                .await?,
-        )?;
-
-        let body = file.slice_to(file.len() - total_footer_size);
-        Ok((footer, body))
-    }
-
     /// Confirms that the index will be read correctly by this version of lucivy
     /// Has to be called after `extract_footer` to make sure it's not accessing uninitialised memory
     pub fn is_compatible(&self) -> Result<(), Incompatibility> {

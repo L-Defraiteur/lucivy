@@ -241,17 +241,6 @@ impl InnerIndexReader {
         Ok(segment_readers)
     }
 
-    /// Opens the freshest segments [`SegmentReader`] asynchronously.
-    #[cfg(feature = "quickwit")]
-    async fn open_segment_readers_async(index: &Index) -> crate::Result<Vec<SegmentReader>> {
-        let _meta_lock = index.directory().acquire_lock(&META_LOCK)?;
-        let searchable_segments = index.searchable_segments_async().await?;
-        let segment_readers =
-            futures::future::try_join_all(searchable_segments.iter().map(SegmentReader::open_async))
-                .await?;
-        Ok(segment_readers)
-    }
-
     fn track_segment_readers_in_inventory(
         segment_readers: &[SegmentReader],
         searcher_generation_counter: &Arc<AtomicU64>,

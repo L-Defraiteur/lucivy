@@ -42,7 +42,6 @@ luciole = { path = "luciole" }
 num_cpus = "1.13.1"
 tokio = { version = "1.37", default-features = false, features = ["fs", "io-util"], optional = true }
 futures = "0.3.25"
-async-trait = "0.1.80"
 lockfree-object-pool = "0.1"
 downcast-rs = "2.0.1"
 bitpacking = { version = "0.9.3", default-features = false, features = [
@@ -64,7 +63,6 @@ arc-swap = "1.5.0"
 bon = "3.3.1"
 
 columnar = { version = "0.26.0", path = "./columnar", package = "ld-lucivy-columnar" }
-sstable = { version = "0.26.0", path = "./sstable", package = "ld-lucivy-sstable", optional = true }
 stacker = { version = "0.26.0", path = "./stacker", package = "ld-lucivy-stacker" }
 query-grammar = { version = "0.26.0", path = "./query-grammar", package = "ld-lucivy-query-grammar" }
 lucivy-bitpacker = { version = "0.26.0", path = "./bitpacker", package = "ld-lucivy-bitpacker" }
@@ -72,8 +70,6 @@ common = { version = "0.26.0", path = "./common/", package = "ld-lucivy-common" 
 tokenizer-api = { version = "0.26.0", path = "./tokenizer-api", package = "ld-lucivy-tokenizer-api" }
 sketches-ddsketch = { version = "0.3.0", features = ["use_serde"] }
 hyperloglogplus = { version = "0.4.1", features = ["const-loop"] }
-futures-util = { version = "0.3.28", optional = true }
-futures-channel = { version = "0.3.28", optional = true }
 fnv = "1.0.7"
 typetag = "0.2.21"
 
@@ -133,7 +129,6 @@ columnar-zstd-compression = ["columnar/zstd-compression"]
 failpoints = ["fail", "fail/failpoints"]
 unstable = []                            # useful for benches.
 
-quickwit = ["sstable", "futures-util", "futures-channel"]
 
 # Compares only the hash of a string when indexing data.
 # Increases indexing speed, but may lead to extremely rare missing terms, when there's a hash collision.
@@ -147,7 +142,6 @@ members = [
     "common",
     "ownedbytes",
     "stacker",
-    "sstable",
     "tokenizer-api",
     "columnar",
     "lucivy_core",

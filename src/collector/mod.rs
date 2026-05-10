@@ -81,7 +81,6 @@
 //!
 //! See the `custom_collector` example.
 
-use async_trait::async_trait;
 use downcast_rs::impl_downcast;
 
 use crate::schema::Schema;
@@ -139,7 +138,6 @@ impl<T> Fruit for T where T: Send + downcast_rs::Downcast {}
 /// The collection logic itself is in the `SegmentCollector`.
 ///
 /// Segments are not guaranteed to be visited in any specific order.
-#[async_trait]
 pub trait Collector: Sync + Send {
     /// `Fruit` is the type for the result of our collection.
     /// e.g. `usize` for the `Count` collector.
@@ -184,61 +182,6 @@ pub trait Collector: Sync + Send {
         Ok(segment_collector.harvest())
     }
 
-    /// Creates a segment collector asynchronously
-    #[cfg(feature = "quickwit")]
-    async fn for_segment_async(
-        &self,
-        segment_local_id: SegmentOrdinal,
-        segment: &SegmentReader,
-    ) -> crate::Result<Self::Child> {
-        self.for_segment(segment_local_id, segment)
-    }
-
-    /// Created a segment collector in async way
-    #[cfg(feature = "quickwit")]
-    async fn collect_segment_async(
-        &self,
-        weight: &dyn Weight,
-        segment_ord: u32,
-        reader: &SegmentReader,
-    ) -> crate::Result<<Self::Child as SegmentCollector>::Fruit> {
-        let mut segment_collector = self.for_segment_async(segment_ord, reader).await?;
-        match (reader.alive_bitset(), self.requires_scoring()) {
-            (Some(alive_bitset), true) => {
-                let cb = &mut |doc, score| {
-                    if alive_bitset.is_alive(doc) {
-                        segment_collector.collect(doc, score);
-                    }
-                };
-                weight.for_each_async(reader, cb).await?;
-            }
-            (Some(alive_bitset), false) => {
-                let cb = &mut |docs: &[DocId]| {
-                    for doc in docs.iter().cloned() {
-                        if alive_bitset.is_alive(doc) {
-                            segment_collector.collect(doc, 0.0);
-                        }
-                    }
-                };
-                weight.for_each_no_score_async(reader, cb).await?;
-            }
-            (None, true) => {
-                let cb = &mut |doc, score| {
-                    segment_collector.collect(doc, score);
-                };
-                weight.for_each_async(reader, cb).await?;
-            }
-            (None, false) => {
-                let cb = &mut |docs: &[DocId]| {
-                    for doc in docs.iter().cloned() {
-                        segment_collector.collect(doc, 0.0);
-                    }
-                };
-                weight.for_each_no_score_async(reader, cb).await?;
-            }
-        }
-        Ok(segment_collector.harvest())
-    }
 }
 
 pub(crate) fn default_collect_segment_impl<TSegmentCollector: SegmentCollector>(

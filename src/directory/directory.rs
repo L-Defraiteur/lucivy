@@ -224,23 +224,6 @@ pub trait Directory: DirectoryClone + fmt::Debug + Send + Sync + 'static {
     /// the `OnCommitWithDelay` `ReloadPolicy` to work properly.
     fn watch(&self, watch_callback: WatchCallback) -> crate::Result<WatchHandle>;
 
-    /// Opens a file asynchronously and returns a [`FileSlice`].
-    #[cfg(feature = "quickwit")]
-    async fn open_read_async(&self, path: &Path) -> Result<FileSlice, OpenReadError> {
-        self.open_read(path)
-    }
-
-    /// Removes a file asynchronously.
-    #[cfg(feature = "quickwit")]
-    async fn delete_async(&self, path: &Path) -> Result<(), DeleteError> {
-        self.delete(path)
-    }
-
-    /// Reads the full content file asynchronously.
-    #[cfg(feature = "quickwit")]
-    async fn atomic_read_async(&self, path: &Path) -> Result<Vec<u8>, OpenReadError> {
-        self.atomic_read(path)
-    }
 }
 
 /// DirectoryClone

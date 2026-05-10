@@ -421,7 +421,7 @@ where
             if let Some(text) = val.as_value().as_str() {
                 let text_lower = text.to_lowercase();
                 if byte_from >= text_lower.len() { continue; }
-                let bytes = text_lower[byte_from..].as_bytes();
+                let bytes = &text_lower.as_bytes()[byte_from..];
                 let mut state = start_state.clone();
                 for (i, &byte) in bytes.iter().enumerate() {
                     state = automaton.accept(&state, byte);

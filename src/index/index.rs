@@ -52,15 +52,6 @@ fn load_metas(
     parse_metas(meta_data, inventory)
 }
 
-#[cfg(feature = "quickwit")]
-async fn load_metas_async(
-    directory: &dyn Directory,
-    inventory: &SegmentMetaInventory,
-) -> crate::Result<IndexMeta> {
-    let meta_data = directory.atomic_read_async(&META_FILEPATH).await?;
-    parse_metas(meta_data, inventory)
-}
-
 /// Save the index meta file.
 /// This operation is atomic :
 /// Either
@@ -529,26 +520,9 @@ impl Index {
         Ok(index)
     }
 
-    /// Open the index using the provided directory asynchronously
-    #[cfg(feature = "quickwit")]
-    pub async fn open_async<T: Into<Box<dyn Directory>>>(directory: T) -> crate::Result<Index> {
-        let directory = directory.into();
-        let directory = ManagedDirectory::wrap(directory)?;
-        let inventory = SegmentMetaInventory::default();
-        let metas = load_metas_async(&directory, &inventory).await?;
-        let index = Index::open_from_metas(directory, &metas, inventory);
-        Ok(index)
-    }
-
     /// Reads the index meta file from the directory.
     pub fn load_metas(&self) -> crate::Result<IndexMeta> {
         load_metas(self.directory(), &self.inventory)
-    }
-
-    /// Reads the index meta file from the directory asynchronously.
-    #[cfg(feature = "quickwit")]
-    pub async fn load_metas_async(&self) -> crate::Result<IndexMeta> {
-        load_metas_async(self.directory(), &self.inventory).await
     }
 
     /// Open a new index writer with the given options. Attempts to acquire a lockfile.
@@ -678,17 +652,6 @@ impl Index {
             .collect())
     }
 
-    /// Returns the list of segments that are searchable asynchronously
-    #[cfg(feature = "quickwit")]
-    pub async fn searchable_segments_async(&self) -> crate::Result<Vec<Segment>> {
-        Ok(self
-            .searchable_segment_metas_async()
-            .await?
-            .into_iter()
-            .map(|segment_meta| self.segment(segment_meta))
-            .collect())
-    }
-
     #[doc(hidden)]
     pub fn segment(&self, segment_meta: SegmentMeta) -> Segment {
         Segment::for_index(self.clone(), segment_meta)
@@ -716,13 +679,6 @@ impl Index {
     /// `SegmentMeta` from the last commit.
     pub fn searchable_segment_metas(&self) -> crate::Result<Vec<SegmentMeta>> {
         Ok(self.load_metas()?.segments)
-    }
-
-    /// Reads the meta.json and returns the list of
-    /// `SegmentMeta` from the last commit asynchronously.
-    #[cfg(feature = "quickwit")]
-    pub async fn searchable_segment_metas_async(&self) -> crate::Result<Vec<SegmentMeta>> {
-        Ok(self.load_metas_async().await?.segments)
     }
 
     /// Returns the list of segment ids that are searchable.

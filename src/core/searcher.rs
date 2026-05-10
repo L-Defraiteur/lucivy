@@ -103,17 +103,6 @@ impl Searcher {
         cache_stats
     }
 
-    /// Fetches a document in an asynchronous manner.
-    #[cfg(feature = "quickwit")]
-    pub async fn doc_async<D: DocumentDeserialize>(
-        &self,
-        doc_address: DocAddress,
-    ) -> crate::Result<D> {
-        let executor = self.inner.index.search_executor();
-        let store_reader = &self.inner.store_readers[doc_address.segment_ord as usize];
-        store_reader.get_async(doc_address.doc_id, executor).await
-    }
-
     /// Access the schema associated with the index of this searcher.
     pub fn schema(&self) -> &Schema {
         &self.inner.schema
@@ -135,19 +124,6 @@ impl Searcher {
         for segment_reader in &self.inner.segment_readers {
             let inverted_index = segment_reader.inverted_index(term.field())?;
             let doc_freq = inverted_index.doc_freq(term)?;
-            total_doc_freq += u64::from(doc_freq);
-        }
-        Ok(total_doc_freq)
-    }
-
-    /// Return the overall number of documents containing
-    /// the given term in an asynchronous manner.
-    #[cfg(feature = "quickwit")]
-    pub async fn doc_freq_async(&self, term: &Term) -> crate::Result<u64> {
-        let mut total_doc_freq = 0;
-        for segment_reader in &self.inner.segment_readers {
-            let inverted_index = segment_reader.inverted_index(term.field())?;
-            let doc_freq = inverted_index.doc_freq_async(term).await?;
             total_doc_freq += u64::from(doc_freq);
         }
         Ok(total_doc_freq)
@@ -245,33 +221,6 @@ impl Searcher {
         Ok(space_usage)
     }
 
-    /// Runs a query on the segment readers wrapped by the searcher asynchronously.
-    #[cfg(feature = "quickwit")]
-    pub async fn search_async<C: Collector + Sync>(
-        &self,
-        query: &dyn Query,
-        collector: &C,
-    ) -> crate::Result<C::Fruit>
-    where
-        C::Child: Send,
-    {
-        let enabled_scoring = if collector.requires_scoring() {
-            EnableScoring::enabled_from_searcher(self)
-        } else {
-            EnableScoring::disabled_from_searcher(self)
-        };
-        let weight = query.weight(enabled_scoring)?;
-        collector.check_schema(self.schema())?;
-        let segment_readers = self.segment_readers();
-        let mut fruits = Vec::with_capacity(segment_readers.len());
-        for (segment_ord, segment_reader) in segment_readers.iter().enumerate() {
-            let fruit = collector
-                .collect_segment_async(weight.as_ref(), segment_ord as u32, segment_reader)
-                .await?;
-            fruits.push(fruit);
-        }
-        collector.merge_fruits(fruits)
-    }
 }
 
 impl From<Arc<SearcherInner>> for Searcher {

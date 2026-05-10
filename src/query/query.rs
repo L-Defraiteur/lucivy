@@ -161,12 +161,6 @@ pub trait Query: QueryClone + Send + Sync + downcast_rs::Downcast + fmt::Debug {
         Ok(result)
     }
 
-    /// Returns the number of documents matching the query asynchronously.
-    #[cfg(feature = "quickwit")]
-    async fn count_async(&self, searcher: &Searcher) -> crate::Result<usize> {
-        self.count(searcher)
-    }
-
     /// Extract all of the terms associated with the query and pass them to the
     /// given closure.
     ///

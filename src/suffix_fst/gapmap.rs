@@ -269,6 +269,7 @@ impl<'a> GapMapReader<'a> {
     /// Returns None if:
     /// - Ti_b != Ti_a + 1 (not consecutive)
     /// - The gap is a VALUE_BOUNDARY (cross-value match)
+    ///
     /// Returns Some(gap_bytes) for a valid separator.
     pub fn read_separator(&self, doc_id: u32, ti_a: u32, ti_b: u32) -> Option<&'a [u8]> {
         if ti_b != ti_a + 1 {
