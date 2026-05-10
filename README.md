@@ -99,27 +99,36 @@ index = lucivy.Index.create("/tmp/sharded", fields=[
 ### Distributed search (multi-machine)
 
 ```python
-# On each node: export local stats for this query
-stats = node.export_stats(query_config)
+import lucivy
 
-# Coordinator: merge stats from all nodes
-global_stats = lucivy.merge_stats([stats_node_0, stats_node_1, stats_node_2])
+query = {"type": "contains", "field": "body", "value": "mutex"}
 
-# On each node: search with global stats (correct IDF)
-results = node.search_with_global_stats(query_config, top_k=10, global_stats=global_stats)
+# 1. Each node exports its local BM25 stats
+stats_a = node_a.export_stats(query)  # JSON string
+stats_b = node_b.export_stats(query)  # JSON string
 
-# Coordinator: merge top-K results from all nodes
-final_results = merge_top_k(all_results, k=10)
+# 2. Coordinator merges stats from all nodes
+merged = lucivy.merge_stats([stats_a, stats_b])
+
+# 3. Each node searches with global stats (correct IDF)
+results_a = node_a.search_with_global_stats(query, merged, limit=10)
+results_b = node_b.search_with_global_stats(query, merged, limit=10)
+
+# 4. Coordinator merges top-K results by score
+all_results = sorted(results_a + results_b, key=lambda r: r.score, reverse=True)[:10]
 ```
 
 ### Incremental sync
 
 ```python
+# Client sends its shard versions to the server
+client_versions = client_index.shard_versions
+
 # Server: export delta (only segments that changed since client's version)
-delta = server_index.export_delta(client_versions)
+delta = server_index.export_sharded_delta(client_versions)
 
 # Client: apply delta (writes new segments, removes old, reloads readers)
-client_index.apply_delta(delta)
+client_index.apply_sharded_delta(delta)
 ```
 
 ## Features

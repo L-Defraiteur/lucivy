@@ -191,14 +191,23 @@ client_index.apply_sharded_delta(delta)
 Run BM25 search across multiple machines with correct IDF.
 
 ```python
-# On each node: export local stats for this query
-query = {"type": "contains", "field": "body", "value": "rust"}
-stats_json = node.export_stats(query)
+import lucivy
 
-# Coordinator: merge stats from all nodes (manual JSON merge)
+query = {"type": "contains", "field": "body", "value": "mutex"}
 
-# On each node: search with global stats
-results = node.search_with_global_stats(query, global_stats_json, limit=10, highlights=True)
+# 1. Each node exports its local BM25 stats
+stats_a = node_a.export_stats(query)  # JSON string
+stats_b = node_b.export_stats(query)  # JSON string
+
+# 2. Coordinator merges stats from all nodes
+merged = lucivy.merge_stats([stats_a, stats_b])
+
+# 3. Each node searches with global stats (correct IDF across all nodes)
+results_a = node_a.search_with_global_stats(query, merged, limit=10)
+results_b = node_b.search_with_global_stats(query, merged, limit=10)
+
+# 4. Coordinator merges top-K results by score
+all_results = sorted(results_a + results_b, key=lambda r: r.score, reverse=True)[:10]
 ```
 
 ### Properties

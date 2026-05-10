@@ -209,6 +209,11 @@ export interface LucivyModule extends EmscriptenModule {
     delta_dir: CStringPtr,
   ): CStringPtr;
 
+  /** Merge BM25 stats from multiple nodes into global stats (for distributed search).
+   *  stats_json_array: JSON array of ExportableStats strings: '["{\\"total_num_docs\\":...}", ...]'
+   *  Returns merged JSON string ready for _lucivy_search_with_global_stats(). */
+  _lucivy_merge_stats(stats_json_array: CStringPtr): CStringPtr;
+
   /** Export BM25 stats for distributed search. */
   _lucivy_export_stats(ctx: LucivyCtx, query_json: CStringPtr): CStringPtr;
 

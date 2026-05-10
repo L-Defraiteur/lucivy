@@ -752,6 +752,33 @@ pub unsafe extern "C" fn lucivy_apply_sharded_delta(
 
 // ── Distributed search ──────────────────────────────────────────────────
 
+/// Merge BM25 stats from multiple nodes into global stats (for distributed search).
+/// stats_json_array: JSON array of ExportableStats strings, e.g. '["{...}", "{...}"]'.
+/// Returns merged JSON string ready for lucivy_search_with_global_stats().
+#[no_mangle]
+pub unsafe extern "C" fn lucivy_merge_stats(
+    stats_json_array: *const c_char,
+) -> *const c_char {
+    let json_str = str_from_ptr(stats_json_array);
+    let stats_list: Vec<String> = match serde_json::from_str(&json_str) {
+        Ok(v) => v,
+        Err(e) => return return_error(&format!("invalid stats array JSON: {e}")),
+    };
+    let parsed: Vec<lucivy_core::bm25_global::ExportableStats> = match stats_list
+        .iter()
+        .map(|s| serde_json::from_str(s))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(v) => v,
+        Err(e) => return return_error(&format!("invalid stats JSON: {e}")),
+    };
+    let merged = lucivy_core::bm25_global::ExportableStats::merge(&parsed);
+    match serde_json::to_string(&merged) {
+        Ok(json) => return_str(json),
+        Err(e) => return_error(&format!("serialize merged stats: {e}")),
+    }
+}
+
 /// Export BM25 statistics for a query. Returns JSON string of ExportableStats.
 #[no_mangle]
 pub unsafe extern "C" fn lucivy_export_stats(

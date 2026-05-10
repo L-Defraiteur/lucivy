@@ -217,6 +217,11 @@ mod ffi {
             global_stats_json: &str,
             limit: u32,
         ) -> Result<Vec<SearchResult>>;
+
+        // Merge BM25 stats from multiple nodes into global stats (for distributed search).
+        // stats_json_list: JSON array of ExportableStats strings, one per node.
+        // Returns merged JSON string ready for search_with_global_stats().
+        fn lucivy_merge_stats(stats_json_list: &[String]) -> Result<String>;
     }
 }
 
@@ -450,6 +455,19 @@ impl LucivyIndex {
 
         collect_results(&self.handle, &results)
     }
+}
+
+// ── Merge stats (free-standing) ───────────────────────────────────────────
+
+fn lucivy_merge_stats(stats_json_list: &[String]) -> Result<String, String> {
+    let parsed: Vec<lucivy_core::bm25_global::ExportableStats> = stats_json_list
+        .iter()
+        .map(|s| serde_json::from_str(s))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("invalid stats JSON: {e}"))?;
+    let merged = lucivy_core::bm25_global::ExportableStats::merge(&parsed);
+    serde_json::to_string(&merged)
+        .map_err(|e| format!("serialize merged stats: {e}"))
 }
 
 // ── Search ─────────────────────────────────────────────────────────────────

@@ -539,6 +539,27 @@ impl Index {
     }
 }
 
+/// Merge BM25 stats from multiple nodes into global stats (for distributed search).
+///
+/// Each node calls `index.exportStats(queryJson)` which returns a JSON string.
+/// The coordinator collects all JSON strings and merges them with this function.
+/// The merged result is then passed back to each node via
+/// `index.searchWithGlobalStats(queryJson, mergedJson)`.
+///
+/// @param statsList - Array of JSON strings, one per node (from `exportStats()`).
+/// @returns JSON string of merged `ExportableStats` ready for `searchWithGlobalStats()`.
+#[napi]
+pub fn merge_stats(stats_list: Vec<String>) -> Result<String> {
+    let parsed: Vec<lucivy_core::bm25_global::ExportableStats> = stats_list
+        .iter()
+        .map(|s| serde_json::from_str(s))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| Error::from_reason(format!("invalid stats JSON: {e}")))?;
+    let merged = lucivy_core::bm25_global::ExportableStats::merge(&parsed);
+    serde_json::to_string(&merged)
+        .map_err(|e| Error::from_reason(format!("serialize merged stats: {e}")))
+}
+
 // ─── Query parsing ─────────────────────────────────────────────────────────
 
 impl Index {

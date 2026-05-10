@@ -192,13 +192,23 @@ clientIndex.applyShardedDelta(delta);
 Run BM25 search across multiple machines with correct IDF.
 
 ```javascript
-// On each node: export local stats for this query
-const statsJson = node.exportStats('{"type":"contains","field":"body","value":"rust"}');
+const { mergeStats } = require('lucivy');
 
-// Coordinator: merge stats from all nodes (manual JSON merge)
+const queryJson = '{"type":"contains","field":"body","value":"mutex"}';
 
-// On each node: search with global stats
-const results = node.searchWithGlobalStats(queryJson, globalStatsJson, 10, true);
+// 1. Each node exports its local BM25 stats
+const statsA = nodeA.exportStats(queryJson);  // JSON string
+const statsB = nodeB.exportStats(queryJson);  // JSON string
+
+// 2. Coordinator merges stats from all nodes
+const merged = mergeStats([statsA, statsB]);
+
+// 3. Each node searches with global stats (correct IDF across all nodes)
+const resultsA = nodeA.searchWithGlobalStats(queryJson, merged, 10);
+const resultsB = nodeB.searchWithGlobalStats(queryJson, merged, 10);
+
+// 4. Coordinator merges top-K results by score
+const all = [...resultsA, ...resultsB].sort((a, b) => b.score - a.score).slice(0, 10);
 ```
 
 ### Properties

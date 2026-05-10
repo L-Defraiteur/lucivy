@@ -868,10 +868,43 @@ fn collect_sharded_results(
 
 // ─── Module ────────────────────────────────────────────────────────────────
 
+/// Merge BM25 stats from multiple nodes into global stats (for distributed search).
+///
+/// Each node calls ``index.export_stats(query)`` which returns a JSON string.
+/// The coordinator collects all JSON strings and merges them with this function.
+/// The merged result is then passed back to each node via
+/// ``index.search_with_global_stats(query, merged_json)``.
+///
+/// Args:
+///     stats_list: List of JSON strings, one per node (from ``export_stats()``).
+///
+/// Returns:
+///     JSON string of merged ``ExportableStats`` ready for ``search_with_global_stats()``.
+///
+/// Example::
+///
+///     stats_a = node_a.export_stats({"type": "contains", "field": "body", "value": "mutex"})
+///     stats_b = node_b.export_stats({"type": "contains", "field": "body", "value": "mutex"})
+///     merged = lucivy.merge_stats([stats_a, stats_b])
+///     results_a = node_a.search_with_global_stats(query, merged, limit=10)
+///     results_b = node_b.search_with_global_stats(query, merged, limit=10)
+#[pyfunction]
+fn merge_stats(stats_list: Vec<String>) -> PyResult<String> {
+    let parsed: Vec<lucivy_core::bm25_global::ExportableStats> = stats_list
+        .iter()
+        .map(|s| serde_json::from_str(s))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| PyValueError::new_err(format!("invalid stats JSON: {e}")))?;
+    let merged = lucivy_core::bm25_global::ExportableStats::merge(&parsed);
+    serde_json::to_string(&merged)
+        .map_err(|e| PyValueError::new_err(format!("serialize merged stats: {e}")))
+}
+
 #[pymodule]
 fn lucivy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Index>()?;
     m.add_class::<SearchResult>()?;
+    m.add_function(wrap_pyfunction!(merge_stats, m)?)?;
     Ok(())
 }
 
