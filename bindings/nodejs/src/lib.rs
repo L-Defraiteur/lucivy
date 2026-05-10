@@ -128,7 +128,10 @@ impl Index {
         })
     }
 
-    /// Add a document. `fields` is an object with field names as keys.
+    /// Add a document.
+    ///
+    /// @param docId - Unique document ID (_node_id).
+    /// @param fields - Object with field names as keys: `{title: "Hello", body: "World", score: 3.14}`
     #[napi]
     pub fn add(&self, doc_id: u32, fields: HashMap<String, serde_json::Value>) -> Result<()> {
         let mut doc = LucivyDocument::new();

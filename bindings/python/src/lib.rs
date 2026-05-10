@@ -139,7 +139,15 @@ impl Index {
         })
     }
 
-    /// Add a document.
+    /// Add a document. Fields are passed as keyword arguments.
+    ///
+    /// Example::
+    ///
+    ///     index.add(1, title="Hello", body="World", score=3.14)
+    ///
+    /// Args:
+    ///     doc_id: Unique document ID (_node_id).
+    ///     **kwargs: Field values matching the schema (title=, body=, ...).
     #[pyo3(signature = (doc_id, **kwargs))]
     fn add(&self, doc_id: u64, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
         let kwargs = kwargs.ok_or_else(|| PyValueError::new_err("at least one field is required"))?;
@@ -156,6 +164,15 @@ impl Index {
     }
 
     /// Add multiple documents at once.
+    ///
+    /// Example::
+    ///
+    ///     index.add_many([
+    ///         {"doc_id": 1, "title": "Hello", "body": "World"},
+    ///         {"doc_id": 2, "title": "Foo", "body": "Bar"},
+    ///     ])
+    ///
+    /// Each dict must have a ``doc_id`` key. Other keys are field values.
     fn add_many(&self, docs: &Bound<'_, PyList>) -> PyResult<()> {
         let nid_field = self.handle.field(NODE_ID_FIELD)
             .ok_or_else(|| PyValueError::new_err("no _node_id field in schema"))?;
@@ -187,7 +204,11 @@ impl Index {
             .map_err(|e| PyValueError::new_err(e))
     }
 
-    /// Update a document (delete + re-add).
+    /// Update a document (delete + re-add). Same kwargs syntax as ``add()``.
+    ///
+    /// Example::
+    ///
+    ///     index.update(1, title="New title", body="New body")
     #[pyo3(signature = (doc_id, **kwargs))]
     fn update(&self, doc_id: u64, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
         self.delete(doc_id)?;
@@ -304,21 +325,29 @@ impl Index {
         collect_sharded_results(&self.handle, &results, highlight_sink.as_deref(), fields)
     }
 
+    /// Number of documents in the index (property, no parentheses).
+    ///
+    /// Example::
+    ///
+    ///     count = index.num_docs  # not index.num_docs()
     #[getter]
     fn num_docs(&self) -> u64 {
         self.handle.num_docs()
     }
 
+    /// Number of shards (property).
     #[getter]
     fn num_shards(&self) -> usize {
         self.handle.num_shards()
     }
 
+    /// Index directory path (property).
     #[getter]
     fn path(&self) -> &str {
         &self.index_path
     }
 
+    /// Schema as list of ``{"name": "...", "type": "..."}`` dicts (property).
     #[getter]
     fn schema(&self) -> Vec<HashMap<String, String>> {
         self.user_fields.iter().map(|(name, ft)| {
