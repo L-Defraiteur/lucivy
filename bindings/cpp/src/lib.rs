@@ -58,22 +58,42 @@ mod ffi {
     extern "Rust" {
         type LucivyIndex;
 
-        // Lifecycle
+        // ── Lifecycle ──────────────────────────────────────────────────
+        // fields_json: [{"name":"body","type":"text","stored":true}, ...]
+        // Types: "text" (full-text), "u64", "i64", "f64", "bool", "date"
         fn lucivy_create(path: &str, fields_json: &str, shards: u32) -> Result<Box<LucivyIndex>>;
         fn lucivy_open(path: &str) -> Result<Box<LucivyIndex>>;
 
-        // Document operations
+        // ── Document operations ────────────────────────────────────────
+        // fields_json: {"body": "text content", "score": 3.14}
         fn add(self: &LucivyIndex, doc_id: u64, fields_json: &str) -> Result<()>;
         fn add_many(self: &LucivyIndex, docs_json: &str) -> Result<()>;
         fn remove(self: &LucivyIndex, doc_id: u64) -> Result<()>;
         fn update(self: &LucivyIndex, doc_id: u64, fields_json: &str) -> Result<()>;
 
-        // Transaction
+        // ── Transaction ────────────────────────────────────────────────
         fn commit(self: &LucivyIndex) -> Result<()>;
         fn rollback(self: &LucivyIndex) -> Result<()>;
         fn close(self: &LucivyIndex) -> Result<()>;
 
-        // Search
+        // ── Search ─────────────────────────────────────────────────────
+        // query_json: JSON query object. Query types:
+        //   {"type":"contains","field":"body","value":"lock"}              — substring
+        //   {"type":"contains","field":"body","value":"lock","distance":1} — fuzzy substring
+        //   {"type":"contains","field":"body","value":"a.*b","regex":true} — regex substring
+        //   {"type":"startsWith","field":"body","value":"lock"}            — token prefix
+        //   {"type":"contains_split","field":"body","value":"struct dev"}  — words OR'd
+        //   {"type":"term","field":"body","value":"lock"}                  — exact token
+        //   {"type":"phrase","field":"body","value":"mutex lock"}          — adjacent tokens
+        //   {"type":"regex","field":"body","pattern":"sched[a-z]+"}        — regex on tokens
+        //   {"type":"boolean","must":[...],"should":[...],"must_not":[...]}
+        //   {"type":"disjunction_max","queries":[...],"tie_breaker":0.1}
+        //
+        // Filtering (in query_json):
+        //   "filters": [{"field":"category","op":"eq","value":"kernel"},
+        //               {"field":"score","op":"gte","value":0.5}]
+        //   Ops: eq, ne, lt, lte, gt, gte, in, not_in, between, starts_with, contains
+        //   Composite: must, should, must_not with nested "clauses"
         fn search(
             self: &LucivyIndex,
             query_json: &str,

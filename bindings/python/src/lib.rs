@@ -256,6 +256,24 @@ impl Index {
     ///     ``{"type": "more_like_this", "field": "body", "value": "sample text",``
     ///     ``"min_doc_frequency": 1, "min_term_frequency": 1, "min_word_length": 3}``
     ///         TF-IDF similarity search.
+    ///
+    /// Filtering:
+    ///     ``allowed_ids``: Pre-filter by _node_id (fast, bitmap-based)::
+    ///
+    ///         index.search({"type": "contains", ...}, allowed_ids=[1, 2, 3])
+    ///
+    ///     ``filters`` key in query dict: Filter on non-text fields (combined with AND)::
+    ///
+    ///         {"type": "contains", "field": "body", "value": "lock",
+    ///          "filters": [
+    ///              {"field": "category", "op": "eq", "value": "kernel"},
+    ///              {"field": "score", "op": "gte", "value": 0.5},
+    ///              {"field": "status", "op": "in", "value": ["active", "review"]},
+    ///          ]}
+    ///
+    ///     Filter ops: ``eq``, ``ne``, ``lt``, ``lte``, ``gt``, ``gte``,
+    ///     ``in``, ``not_in``, ``between``, ``starts_with``, ``contains``.
+    ///     Composite: ``must``, ``should``, ``must_not`` with nested ``clauses``.
     #[pyo3(signature = (query, limit=10, highlights=false, allowed_ids=None, fields=false))]
     fn search(
         &self,

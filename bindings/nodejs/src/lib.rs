@@ -221,6 +221,20 @@ impl Index {
     /// - `{type: "disjunction_max", queries: [...], tie_breaker: 0.1}` — best score
     /// - `{type: "more_like_this", field: "body", value: "sample text", min_doc_frequency: 1}` — similarity
     ///
+    /// **Filtering:**
+    /// - `allowed_ids` in options: pre-filter by _node_id (fast, bitmap-based)
+    /// - `filters` key in query: filter on non-text fields (AND'd with search):
+    ///   ```json
+    ///   {type: "contains", field: "body", value: "lock",
+    ///    filters: [
+    ///      {field: "category", op: "eq", value: "kernel"},
+    ///      {field: "score", op: "gte", value: 0.5},
+    ///      {field: "status", op: "in", value: ["active", "review"]}
+    ///    ]}
+    ///   ```
+    ///   Ops: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `not_in`, `between`, `starts_with`, `contains`.
+    ///   Composite: `must`, `should`, `must_not` with nested `clauses`.
+    ///
     /// @param options - `{limit?: number, highlights?: boolean, fields?: boolean, allowed_ids?: number[]}`
     #[napi]
     pub fn search(
