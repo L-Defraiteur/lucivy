@@ -99,9 +99,12 @@ where
 
 /// Like `suffix_contains_single_token` but only matches tokens that START
 /// with the query (SI=0 filter). Used for prefix/startsWith queries.
-/// Uses the full cross-token search (which is a superset of single-token)
-/// filtered to SI=0 — handles both "rag3" (single token) and "rag3weaver"
-/// (cross-token: "rag3" + "weaver") in one pass.
+///
+/// Two paths combined:
+/// 1. `prefix_walk_si0` via `single_token_inner(anchor_start=true)` — finds all
+///    tokens starting with the query prefix (e.g., "lock" → lock, locks, locking).
+/// 2. `cross_token_search` filtered to SI=0 — finds cross-token chains starting
+///    at a token boundary (e.g., "rag3weaver" → "rag3" + "weaver").
 pub fn suffix_contains_single_token_prefix<F>(
     sfx_reader: &SfxFileReader<'_>,
     query: &str,
@@ -111,10 +114,23 @@ pub fn suffix_contains_single_token_prefix<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    cross_token_search_with_terms(sfx_reader, query, &raw_term_resolver, 0, ord_to_term)
-        .into_iter()
-        .filter(|m| m.si == 0)
-        .collect()
+    // Path 1: intra-token prefix matches via prefix_walk_si0
+    let mut results = suffix_contains_single_token_inner(
+        sfx_reader, query, &raw_term_resolver, true, false, None,
+    );
+
+    // Path 2: cross-token matches (query spans multiple tokens)
+    let cross = cross_token_search_with_terms(sfx_reader, query, &raw_term_resolver, 0, ord_to_term);
+    for m in cross {
+        if m.si == 0 {
+            results.push(m);
+        }
+    }
+
+    // Deduplicate by (doc_id, byte_from)
+    results.sort_by_key(|m| (m.doc_id, m.byte_from));
+    results.dedup_by_key(|m| (m.doc_id, m.byte_from));
+    results
 }
 
 fn suffix_contains_single_token_inner<F>(
