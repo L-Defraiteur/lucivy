@@ -1,6 +1,16 @@
-# lucivy
+# lucivy v2
 
 Fast BM25 full-text search for Python — with substring matching, fuzzy search, regex, and highlights. Powered by Rust.
+
+[**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
+
+### What's new in v2
+
+- **SFX-only engine** — all queries route through the Suffix FST, no legacy code paths
+- **Distributed search** — `export_stats` / `merge_stats` / `search_with_global_stats`
+- **Incremental sync** — LUCIDS sharded delta export/apply
+- **Correct BM25 cross-shard** — identical scores whether 1 shard or 4
+- **5 bindings** — Python, Node.js, C++, WASM, Rust
 
 ## Install
 

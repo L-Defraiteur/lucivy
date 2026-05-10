@@ -1,6 +1,15 @@
-# lucivy-wasm
+# lucivy-wasm v2
 
 Fast BM25 full-text search for browsers — WASM build with **threading** (emscripten pthreads), OPFS persistence, and snapshot/delta sync support. Runs in a Web Worker.
+
+[**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
+
+### What's new in v2
+
+- **SFX-only engine** — all queries route through the Suffix FST, no legacy code paths
+- **Distributed search** — `merge_stats` for multi-node BM25
+- **Correct BM25 cross-shard** — identical scores whether 1 shard or 4
+- **5 bindings** — Python, Node.js, C++, WASM, Rust
 
 ## Install
 
