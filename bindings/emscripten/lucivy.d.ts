@@ -231,6 +231,12 @@ export interface LucivyModule extends EmscriptenModule {
 
   /** Dump wait graph as text. */
   _lucivy_dump_wait_graph_text(ctx: LucivyCtx): CStringPtr;
+
+  /** Pointer to the log ring buffer (for direct HEAPU8 access). */
+  _lucivy_log_ring_ptr(): number;
+
+  /** Size of the log ring buffer in bytes. */
+  _lucivy_log_ring_size(): number;
 }
 
 /** Create and initialize the Lucivy WASM module. */
