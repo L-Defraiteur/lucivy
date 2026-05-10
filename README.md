@@ -1,8 +1,17 @@
-# lucivy
+# lucivy v2
 
 BM25 full-text search engine with substring matching, fuzzy search, and regex — all cross-token aware.
 
 Built for code search, technical documentation, and as a BM25 complement to vector databases.
+
+### What's new in v2
+
+- **SFX-only engine** — all queries route through the Suffix FST, no legacy code paths
+- **5 bindings** — Python, Node.js, C++, WASM (emscripten), Rust
+- **Distributed search** — `export_stats` / `merge_stats` / `search_with_global_stats`
+- **Incremental sync** — LUCIDS sharded delta export/apply
+- **Correct BM25 cross-shard** — identical scores whether 1 shard or 4 (diff=0.0000)
+- **0 clippy warnings** — clean CI with `-D warnings`
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
 
@@ -188,11 +197,11 @@ client_index.apply_sharded_delta(delta)
 | `contains` | Substring, fuzzy, or regex search (cross-token) |
 | `contains_split` | Split on whitespace, each word is a `contains`, combined with OR |
 | `boolean` | Combine sub-queries with must / should / must_not |
-| `term` | Legacy compat — routes to `contains` + `anchor_start` + `exact_match` |
-| `fuzzy` | Legacy compat — routes to `contains` + `distance` |
-| `regex` | Legacy compat — routes to `contains` + `regex=true` |
-| `phrase` | Legacy compat — routes to `contains` |
-| `startsWith` | Legacy compat — routes to `contains` + `anchor_start` |
+| `startsWith` | Token prefix — match must start at token boundary (SI=0) |
+| `term` | Exact whole-token match (anchor_start + exact_match) |
+| `fuzzy` | Fuzzy substring (alias for `contains` + `distance`) |
+| `regex` | Regex substring (alias for `contains` + `regex=true`) |
+| `phrase` | Adjacent tokens in order |
 
 ## Performance
 
