@@ -33,9 +33,9 @@ pub struct SchemaConfig {
     /// Weight for total balance in hybrid shard routing, 0.0-1.0 (default 0.2).
     /// 0.0 = pure per-token routing, 1.0 = pure round-robin-like balance.
     pub balance_weight: Option<f64>,
-    /// Build suffix FST (.sfx + .sfxpost) for contains/startsWith queries.
-    /// Default: true. Set to false for faster indexation and smaller indexes
-    /// when only term/phrase/fuzzy/regex queries are needed.
+    /// SFX is always enabled in v2. This field is ignored but kept for
+    /// backwards compatibility with existing JSON configs.
+    #[serde(default)]
     pub sfx: Option<bool>,
 }
 

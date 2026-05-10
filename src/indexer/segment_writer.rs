@@ -84,7 +84,6 @@ impl SegmentWriter {
     /// - schema
     pub fn for_segment(memory_budget_in_bytes: usize, segment: Segment) -> crate::Result<Self> {
         let schema = segment.schema();
-        let sfx_enabled = segment.index().settings().sfx_enabled;
         let tokenizer_manager = segment.index().tokenizers().clone();
         let tokenizer_manager_fast_field = segment.index().fast_field_tokenizer().clone();
         let table_size = compute_initial_table_size(memory_budget_in_bytes)?;
@@ -129,16 +128,14 @@ impl SegmentWriter {
             term_buffer: IndexingTerm::with_capacity(16),
             sfx_collectors: {
                 let mut collectors = HashMap::new();
-                if sfx_enabled {
-                    for (field, field_entry) in schema.fields() {
-                        if let FieldType::Str(opts) = field_entry.field_type() {
-                            if let Some(indexing) = opts.get_indexing_options() {
-                                let tok = indexing.tokenizer();
-                                if tok.contains("ngram") {
-                                    continue;
-                                }
-                                collectors.insert(field.field_id(), SfxCollector::new());
+                for (field, field_entry) in schema.fields() {
+                    if let FieldType::Str(opts) = field_entry.field_type() {
+                        if let Some(indexing) = opts.get_indexing_options() {
+                            let tok = indexing.tokenizer();
+                            if tok.contains("ngram") {
+                                continue;
                             }
+                            collectors.insert(field.field_id(), SfxCollector::new());
                         }
                     }
                 }

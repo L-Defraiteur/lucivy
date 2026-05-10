@@ -277,7 +277,8 @@ pub struct IndexSettings {
     /// The size of each block that will be compressed and written to disk
     pub docstore_blocksize: usize,
     /// Build suffix FST (.sfx + .sfxpost) for contains/startsWith queries.
-    /// Default: true. Set to false for faster indexation and smaller indexes.
+    /// SFX (suffix FST) is always enabled in v2 — required for contains/startsWith/fuzzy/regex.
+    /// Kept as a field for backwards compatibility with serialized IndexSettings, but always true.
     #[serde(default = "return_true")]
     #[serde(skip_serializing_if = "is_true")]
     pub sfx_enabled: bool,

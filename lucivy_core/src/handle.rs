@@ -104,8 +104,7 @@ impl LucivyHandle {
         dir.atomic_write(Path::new(CONFIG_FILE), config_json.as_bytes())
             .map_err(|e| format!("cannot write config: {e}"))?;
 
-        let mut settings = IndexSettings::default();
-        settings.sfx_enabled = config.sfx.unwrap_or(true);
+        let settings = IndexSettings::default(); // sfx_enabled always true in v2
         let index = Index::create(dir, schema.clone(), settings)
             .map_err(|e| format!("cannot create index: {e}"))?;
 
