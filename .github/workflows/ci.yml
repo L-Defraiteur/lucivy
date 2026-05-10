@@ -53,8 +53,16 @@ jobs:
             cargo test --lib --features ${{ matrix.features.flags }} --no-default-features
           fi
 
-  # clippy: disabled for now — ~100 pre-existing lints to clean up.
-  # TODO: re-enable after clippy cleanup session.
+  clippy:
+    runs-on: ubuntu-latest
+    name: clippy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Clippy (default features)
+        run: cargo clippy --lib -- -D warnings
 
   thread-spawn-audit:
     runs-on: ubuntu-latest
