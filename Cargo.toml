@@ -1,6 +1,6 @@
 [package]
 name = "ld-lucivy"
-version = "0.27.0"
+version = "2.0.0"
 authors = ["Luciform Research <luciedefraiteur@luciformresearch.com>"]
 license = "MIT"
 categories = ["database-implementations", "data-structures"]

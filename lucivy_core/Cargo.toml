@@ -1,7 +1,7 @@
 [package]
 name = "lucivy-core"
-version = "0.2.0"
-edition = "2021"
+version = "2.0.0"
+edition = "2024"
 license = "MIT"
 description = "Core library for Lucivy full-text search: schema, query, handle, tokenizer"
 authors = ["Luciform Research <luciedefraiteur@luciformresearch.com>"]
@@ -18,7 +18,7 @@ default = ["mmap"]
 mmap = ["ld-lucivy/mmap"]
 
 [dependencies]
-ld-lucivy = { version = "0.27.0", path = "..", default-features = false, features = [
+ld-lucivy = { version = "2.0.0", path = "..", default-features = false, features = [
     "stopwords",
     "lz4-compression",
 ] }

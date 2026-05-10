@@ -1,6 +1,6 @@
 {
   "name": "lucivy",
-  "version": "0.2.1",
+  "version": "2.0.0",
   "description": "Fast BM25 full-text search with substring matching, fuzzy search, and regex — powered by Rust",
   "main": "index.js",
   "types": "index.d.ts",
@@ -33,7 +33,7 @@
     "README.md"
   ],
   "devDependencies": {
-    "@napi-rs/cli": "^2.18.0"
+    "@napi-rs/cli": "^2.18.4"
   },
   "scripts": {
     "build": "napi build --release",
