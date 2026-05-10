@@ -349,7 +349,7 @@ impl<'a, 'f> Streamer<'a> for SymmetricDifference<'f> {
             }
             // This key is in the symmetric difference if and only if it
             // appears in an odd number of sets.
-            if popped % 2 == 0 {
+            if popped.is_multiple_of(2) {
                 self.heap.refill(slot);
             } else {
                 self.cur_slot = Some(slot);
