@@ -11,7 +11,18 @@ readme = "README.md"
 keywords = ["search", "full-text", "bm25", "fuzzy", "fts"]
 edition = "2024"
 rust-version = "1.85"
-exclude = ["benches/*.json", "benches/*.txt"]
+exclude = [
+    "benches/*.json", "benches/*.txt",
+    "playground/",
+    "bindings/",
+    "docs/",
+    "lucivy_core/",
+    "lucivy_fts/",
+    "lucistore/",
+    "*.luce",
+    "*.wasm",
+    "*.node",
+]
 
 [dependencies]
 oneshot = "0.1.7"
