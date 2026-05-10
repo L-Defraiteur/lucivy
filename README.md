@@ -1,5 +1,12 @@
 # lucivy v2
 
+[![PyPI](https://img.shields.io/pypi/v/lucivy?label=PyPI&color=blue)](https://pypi.org/project/lucivy/)
+[![npm](https://img.shields.io/npm/v/lucivy?label=npm&color=cb3837)](https://www.npmjs.com/package/lucivy)
+[![npm wasm](https://img.shields.io/npm/v/lucivy-wasm?label=npm%20wasm&color=cb3837)](https://www.npmjs.com/package/lucivy-wasm)
+[![crates.io](https://img.shields.io/crates/v/lucivy-core?label=crates.io&color=e6522c)](https://crates.io/crates/lucivy-core)
+[![CI](https://github.com/L-Defraiteur/lucivy/actions/workflows/ci.yml/badge.svg)](https://github.com/L-Defraiteur/lucivy/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 BM25 full-text search engine with substring matching, fuzzy search, and regex — all cross-token aware.
 
 Built for code search, technical documentation, and as a BM25 complement to vector databases.
@@ -43,12 +50,12 @@ lucivy uses standard BM25 scoring. In sharded mode, global statistics (document 
 
 Everything is **MIT-licensed**.
 
-| Language | Install |
-|----------|---------|
-| Python | `pip install lucivy` |
-| Node.js | `npm install lucivy` |
-| WASM (browser) | `npm install lucivy-wasm` |
-| Rust | `cargo add lucivy-core` |
+| Language | Install | Package |
+|----------|---------|---------|
+| Python | `pip install lucivy` | [PyPI](https://pypi.org/project/lucivy/) |
+| Node.js | `npm install lucivy` | [npm](https://www.npmjs.com/package/lucivy) |
+| WASM (browser) | `npm install lucivy-wasm` | [npm](https://www.npmjs.com/package/lucivy-wasm) |
+| Rust | `cargo add lucivy-core` | [crates.io](https://crates.io/crates/lucivy-core) |
 | C++ | Static library via CXX bridge (build from source) |
 
 ## Quick start
