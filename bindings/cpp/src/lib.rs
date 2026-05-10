@@ -59,53 +59,88 @@ mod ffi {
         type LucivyIndex;
 
         // ── Lifecycle ──────────────────────────────────────────────────
-        // fields_json: [{"name":"body","type":"text","stored":true}, ...]
-        // Types: "text" (full-text), "u64", "i64", "f64", "bool", "date"
+
+        // Create a new index at `path` with the given schema and shard count.
+        // fields_json: JSON array of field definitions, e.g.
+        //   [{"name":"body","type":"text","stored":true}, {"name":"score","type":"f64","fast":true}]
+        // Supported types: "text" (full-text tokenized), "u64", "i64", "f64", "bool", "date".
+        // shards: number of shards (1 = single-shard). More shards = faster search on large datasets.
         fn lucivy_create(path: &str, fields_json: &str, shards: u32) -> Result<Box<LucivyIndex>>;
+
+        // Open an existing index at `path`. Reads persisted schema and segment metadata.
+        // The index must have been previously created with lucivy_create().
         fn lucivy_open(path: &str) -> Result<Box<LucivyIndex>>;
 
         // ── Document operations ────────────────────────────────────────
-        // fields_json: {"body": "text content", "score": 3.14}
+
+        // Add a single document with the given _node_id and field values.
+        // fields_json: JSON object with field names as keys, e.g. {"body": "text content", "score": 3.14}
         fn add(self: &LucivyIndex, doc_id: u64, fields_json: &str) -> Result<()>;
+
+        // Add multiple documents at once. Each element must have a "doc_id" key.
+        // docs_json: JSON array of objects, e.g. [{"doc_id": 1, "body": "hello"}, ...]
         fn add_many(self: &LucivyIndex, docs_json: &str) -> Result<()>;
+
+        // Delete a document by its _node_id. The deletion is staged in memory until commit.
         fn remove(self: &LucivyIndex, doc_id: u64) -> Result<()>;
+
+        // Update a document (delete old + re-add with new fields).
+        // fields_json: same format as add().
         fn update(self: &LucivyIndex, doc_id: u64, fields_json: &str) -> Result<()>;
 
         // ── Transaction ────────────────────────────────────────────────
+
+        // Commit pending changes to disk, making them visible to subsequent searches.
+        // Lucivy uses lazy commit: searches auto-flush uncommitted changes before executing.
+        // Call commit() explicitly to control the commit point.
         fn commit(self: &LucivyIndex) -> Result<()>;
+
+        // Discard uncommitted changes (add/delete/update since last commit).
+        // Note: not currently supported on ShardedHandle — returns an error.
         fn rollback(self: &LucivyIndex) -> Result<()>;
+
+        // Flush any pending writes and release the writer lock.
+        // The index data remains on disk and can be re-opened with lucivy_open().
+        // No further mutations are allowed on this instance after close().
         fn close(self: &LucivyIndex) -> Result<()>;
 
         // ── Search ─────────────────────────────────────────────────────
-        // query_json: JSON query object. Query types:
-        //   {"type":"contains","field":"body","value":"lock"}              — substring
-        //   {"type":"contains","field":"body","value":"lock","distance":1} — fuzzy substring
+        // query_json: JSON string — either a plain string (auto contains_split across all text fields)
+        //   or a query object. Query types:
+        //   {"type":"contains","field":"body","value":"lock"}              — substring match
+        //   {"type":"contains","field":"body","value":"lock","distance":1} — fuzzy substring (Levenshtein)
         //   {"type":"contains","field":"body","value":"a.*b","regex":true} — regex substring
         //   {"type":"startsWith","field":"body","value":"lock"}            — token prefix
-        //   {"type":"contains_split","field":"body","value":"struct dev"}  — words OR'd
-        //   {"type":"term","field":"body","value":"lock"}                  — exact token
-        //   {"type":"phrase","field":"body","value":"mutex lock"}          — adjacent tokens
-        //   {"type":"regex","field":"body","pattern":"sched[a-z]+"}        — regex on tokens
-        //   {"type":"boolean","must":[...],"should":[...],"must_not":[...]}
-        //   {"type":"disjunction_max","queries":[...],"tie_breaker":0.1}
+        //   {"type":"contains_split","field":"body","value":"struct dev"}  — words OR'd as contains
+        //   {"type":"term","field":"body","value":"lock"}                  — exact whole-token match
+        //   {"type":"phrase","field":"body","value":"mutex lock"}          — adjacent tokens in order
+        //   {"type":"regex","field":"body","pattern":"sched[a-z]+"}        — regex on individual tokens
+        //   {"type":"boolean","must":[...],"should":[...],"must_not":[...]} — boolean combination
+        //   {"type":"disjunction_max","queries":[...],"tie_breaker":0.1}   — best-score sub-queries
         //
         // Filtering (in query_json):
         //   "filters": [{"field":"category","op":"eq","value":"kernel"},
         //               {"field":"score","op":"gte","value":0.5}]
         //   Ops: eq, ne, lt, lte, gt, gte, in, not_in, between, starts_with, contains
         //   Composite: must, should, must_not with nested "clauses"
+
+        // Search without highlights. Returns top `limit` results sorted by BM25 score.
         fn search(
             self: &LucivyIndex,
             query_json: &str,
             limit: u32,
         ) -> Result<Vec<SearchResult>>;
 
+        // Search with highlight byte offsets. Each result includes per-field
+        // HighlightRange pairs (start, end) marking matched substrings.
         fn search_with_highlights(
             self: &LucivyIndex,
             query_json: &str,
             limit: u32,
         ) -> Result<Vec<SearchResultWithHighlights>>;
 
+        // Search restricted to a whitelist of _node_id values (bitmap-based pre-filter).
+        // Only documents whose _node_id appears in allowed_ids can match.
         fn search_filtered(
             self: &LucivyIndex,
             query_json: &str,
@@ -113,6 +148,7 @@ mod ffi {
             allowed_ids: &[u64],
         ) -> Result<Vec<SearchResult>>;
 
+        // Search restricted to allowed_ids, with highlight byte offsets.
         fn search_filtered_with_highlights(
             self: &LucivyIndex,
             query_json: &str,
@@ -120,25 +156,61 @@ mod ffi {
             allowed_ids: &[u64],
         ) -> Result<Vec<SearchResultWithHighlights>>;
 
-        // Info
+        // ── Info ───────────────────────────────────────────────────────
+
+        // Total number of documents across all shards.
         fn num_docs(self: &LucivyIndex) -> u64;
+
+        // Directory path where the index files are stored.
         fn get_path(self: &LucivyIndex) -> &str;
+
+        // Full schema as a JSON string (includes internal fields).
         fn get_schema_json(self: &LucivyIndex) -> String;
+
+        // Schema as a vector of FieldInfo (name + type), excluding internal fields.
         fn get_schema(self: &LucivyIndex) -> Vec<FieldInfo>;
 
-        // Snapshot (LUCE format)
+        // ── Snapshot (LUCE format) ─────────────────────────────────────
+
+        // Export the full index as a LUCE snapshot (all shards, schema, segments).
+        // Returns raw bytes that can be stored or transferred.
         fn export_snapshot(self: &LucivyIndex) -> Result<Vec<u8>>;
+
+        // Export the full index as a LUCE snapshot directly to a file.
+        // path: destination file path (typically ending in .luce).
         fn export_snapshot_to(self: &LucivyIndex, path: &str) -> Result<()>;
+
+        // Restore a full index from LUCE snapshot bytes.
+        // data: raw snapshot bytes from export_snapshot(). dest_path: directory for restored files.
         fn lucivy_import_snapshot(data: &[u8], dest_path: &str) -> Result<Box<LucivyIndex>>;
+
+        // Restore a full index from a .luce snapshot file.
+        // path: source .luce file. dest_path: directory for restored files.
         fn lucivy_import_snapshot_from(path: &str, dest_path: &str) -> Result<Box<LucivyIndex>>;
 
-        // Delta sync (Tier 2)
+        // ── Delta sync (Tier 2) ────────────────────────────────────────
+
+        // Per-shard version info. Returns {shard_id, version, segment_ids} per shard.
+        // Pass to a remote server's export_sharded_delta() to get only changed segments.
         fn shard_versions(self: &LucivyIndex) -> Result<Vec<ShardVersionInfo>>;
+
+        // Export a LUCIDS delta blob containing only segments changed since the client's versions.
+        // client_versions_json: JSON array of [{shard_id, version, segment_ids}, ...].
         fn export_sharded_delta(self: &LucivyIndex, client_versions_json: &str) -> Result<Vec<u8>>;
+
+        // Apply a LUCIDS delta blob to this index (merges changed segments).
+        // data: raw delta bytes from export_sharded_delta().
         fn apply_sharded_delta(self: &LucivyIndex, data: &[u8]) -> Result<()>;
 
-        // Distributed search (Tier 3)
+        // ── Distributed search (Tier 3) ────────────────────────────────
+
+        // Export local BM25 statistics for a query (document frequencies, doc counts).
+        // Returns JSON string of ExportableStats. Merge stats from all nodes, then use
+        // search_with_global_stats() for consistent cross-node ranking.
         fn export_stats(self: &LucivyIndex, query_json: &str) -> Result<String>;
+
+        // Search using externally-provided global BM25 stats for consistent cross-node ranking.
+        // global_stats_json: JSON string of merged ExportableStats from all nodes.
         fn search_with_global_stats(
             self: &LucivyIndex,
             query_json: &str,

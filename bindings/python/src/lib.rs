@@ -124,6 +124,20 @@ impl Index {
     }
 
     /// Open an existing index at the given path.
+    ///
+    /// Reads the persisted schema and segment metadata from disk.
+    /// The index must have been previously created with ``Index.create()``.
+    ///
+    /// Args:
+    ///     path: Directory path of the existing index (same path used in ``create()``).
+    ///
+    /// Returns:
+    ///     An ``Index`` ready for search, add, delete, etc.
+    ///
+    /// Example::
+    ///
+    ///     index = Index.open("/tmp/my_index")
+    ///     results = index.search("hello")
     #[staticmethod]
     fn open(path: &str) -> PyResult<Self> {
         let handle = ShardedHandle::open(path)
@@ -198,7 +212,18 @@ impl Index {
         Ok(())
     }
 
-    /// Delete a document by doc_id.
+    /// Delete a document by its ``_node_id``.
+    ///
+    /// The deletion is staged in memory. Call ``commit()`` or run a search
+    /// (which auto-commits via lazy commit) to make the deletion visible.
+    ///
+    /// Args:
+    ///     doc_id: The ``_node_id`` of the document to delete.
+    ///
+    /// Example::
+    ///
+    ///     index.delete(42)
+    ///     index.commit()
     fn delete(&self, doc_id: u64) -> PyResult<()> {
         self.handle.delete_by_node_id(doc_id)
             .map_err(|e| PyValueError::new_err(e))
@@ -215,13 +240,33 @@ impl Index {
         self.add(doc_id, kwargs)
     }
 
-    /// Commit pending changes.
+    /// Commit pending changes to disk, making them visible to subsequent searches.
+    ///
+    /// Lucivy uses lazy commit: if you search without calling ``commit()``,
+    /// uncommitted changes are auto-flushed before the search executes.
+    /// Call ``commit()`` explicitly when you need to control the commit point
+    /// (e.g., after a batch of adds/deletes).
+    ///
+    /// Example::
+    ///
+    ///     index.add(1, title="Hello")
+    ///     index.add(2, title="World")
+    ///     index.commit()  # both docs now searchable
     fn commit(&self) -> PyResult<()> {
         self.handle.commit()
             .map_err(|e| PyValueError::new_err(e))
     }
 
-    /// Close the index.
+    /// Flush any pending writes and release the writer lock.
+    ///
+    /// After ``close()``, the index data remains on disk and can be re-opened
+    /// with ``Index.open()``. No further mutations are allowed on this instance.
+    ///
+    /// Example::
+    ///
+    ///     index.close()
+    ///     # later...
+    ///     index = Index.open("/tmp/my_index")
     fn close(&self) -> PyResult<()> {
         self.handle.close()
             .map_err(|e| PyValueError::new_err(e))
@@ -359,6 +404,19 @@ impl Index {
     }
 
     /// Export this index as a LUCE snapshot (bytes).
+    ///
+    /// Returns the full index content as a binary blob that can be stored,
+    /// transferred, or later restored with ``Index.import_snapshot()``.
+    /// Includes all shards, schema, and segment data.
+    ///
+    /// Returns:
+    ///     ``bytes`` containing the LUCE snapshot.
+    ///
+    /// Example::
+    ///
+    ///     blob = index.export_snapshot()
+    ///     with open("backup.luce", "wb") as f:
+    ///         f.write(blob)
     fn export_snapshot<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
         let blob = snapshot::export_to_snapshot(
             &self.handle,
@@ -367,7 +425,18 @@ impl Index {
         Ok(pyo3::types::PyBytes::new(py, &blob))
     }
 
-    /// Export this index as a LUCE snapshot to a file.
+    /// Export this index as a LUCE snapshot directly to a file.
+    ///
+    /// Writes the LUCE binary blob to the given path. Equivalent to
+    /// ``export_snapshot()`` followed by a file write, but avoids
+    /// returning the bytes to Python.
+    ///
+    /// Args:
+    ///     path: Destination file path (typically ending in ``.luce``).
+    ///
+    /// Example::
+    ///
+    ///     index.export_snapshot_to("/backups/my_index.luce")
     fn export_snapshot_to(&self, path: &str) -> PyResult<()> {
         let blob = snapshot::export_to_snapshot(
             &self.handle,
@@ -379,6 +448,23 @@ impl Index {
     }
 
     /// Import an index from a LUCE snapshot (bytes).
+    ///
+    /// Restores a full index from a binary blob previously created by
+    /// ``export_snapshot()``. The index files are written to ``dest_path``.
+    ///
+    /// Args:
+    ///     data: Raw LUCE snapshot bytes.
+    ///     dest_path: Directory to write the restored index into.
+    ///         Defaults to ``"/tmp/lucivy_import"``.
+    ///
+    /// Returns:
+    ///     A new ``Index`` instance ready for search.
+    ///
+    /// Example::
+    ///
+    ///     with open("backup.luce", "rb") as f:
+    ///         blob = f.read()
+    ///     index = Index.import_snapshot(blob, "/data/restored_index")
     #[staticmethod]
     #[pyo3(signature = (data, dest_path=None))]
     fn import_snapshot(data: &[u8], dest_path: Option<&str>) -> PyResult<Self> {
@@ -395,7 +481,22 @@ impl Index {
         })
     }
 
-    /// Import an index from a LUCE snapshot file.
+    /// Import an index from a LUCE snapshot file (.luce).
+    ///
+    /// Reads the snapshot from a file and restores it. Convenience wrapper
+    /// around ``import_snapshot()`` that handles the file read.
+    ///
+    /// Args:
+    ///     path: Path to the ``.luce`` snapshot file.
+    ///     dest_path: Directory to write the restored index into.
+    ///         Defaults to ``"/tmp/lucivy_import"``.
+    ///
+    /// Returns:
+    ///     A new ``Index`` instance ready for search.
+    ///
+    /// Example::
+    ///
+    ///     index = Index.import_snapshot_from("/backups/my_index.luce", "/data/restored")
     #[staticmethod]
     #[pyo3(signature = (path, dest_path=None))]
     fn import_snapshot_from(path: &str, dest_path: Option<&str>) -> PyResult<Self> {
@@ -406,8 +507,20 @@ impl Index {
 
     // ── Delta sync ──────────────────────────────────────────────────────
 
-    /// Per-shard version info (for requesting deltas from a server).
-    /// Returns a list of dicts: [{"shard_id": 0, "version": "abc", "segment_ids": ["x","y"]}, ...]
+    /// Per-shard version info for delta sync (property, no parentheses).
+    ///
+    /// Returns the current version and segment IDs for each shard.
+    /// Pass this to a remote server's ``export_sharded_delta()`` to
+    /// receive only the segments that changed since your last sync.
+    ///
+    /// Returns:
+    ///     ``list[dict]`` — each dict has keys:
+    ///     ``{"shard_id": int, "version": str, "segment_ids": [str, ...]}``.
+    ///
+    /// Example::
+    ///
+    ///     versions = index.shard_versions  # not shard_versions()
+    ///     # [{"shard_id": 0, "version": "abc", "segment_ids": ["x", "y"]}, ...]
     #[getter]
     fn shard_versions(&self) -> PyResult<Vec<HashMap<String, pyo3::Py<pyo3::PyAny>>>> {
         let versions = self.handle.shard_versions()
@@ -424,12 +537,24 @@ impl Index {
         })
     }
 
-    /// Export a sharded delta (LUCIDS blob) from this index.
+    /// Export a sharded delta (LUCIDS blob) containing only segments that
+    /// changed since the client's known versions.
+    ///
+    /// Used for incremental sync: the client sends its ``shard_versions``,
+    /// the server computes and returns only the diff.
     ///
     /// Args:
-    ///     client_versions: list of {"shard_id": int, "version": str, "segment_ids": [str]}
+    ///     client_versions: List of dicts, each with keys
+    ///         ``{"shard_id": int, "version": str, "segment_ids": [str]}``.
+    ///         Typically obtained from the client's ``shard_versions`` property.
     ///
-    /// Returns: bytes (LUCIDS binary blob).
+    /// Returns:
+    ///     ``bytes`` — the LUCIDS binary delta blob.
+    ///
+    /// Example::
+    ///
+    ///     delta = server_index.export_sharded_delta(client_index.shard_versions)
+    ///     client_index.apply_sharded_delta(delta)
     fn export_sharded_delta<'py>(
         &self,
         py: Python<'py>,
@@ -454,6 +579,17 @@ impl Index {
     }
 
     /// Apply a sharded delta (LUCIDS blob) to this index.
+    ///
+    /// Merges the delta's segments into the local index, bringing it
+    /// up to date with the server. Only modified shards are touched.
+    ///
+    /// Args:
+    ///     data: LUCIDS binary blob from ``export_sharded_delta()``.
+    ///
+    /// Example::
+    ///
+    ///     delta = server_index.export_sharded_delta(client_index.shard_versions)
+    ///     client_index.apply_sharded_delta(delta)
     fn apply_sharded_delta(&self, data: &[u8]) -> PyResult<()> {
         self.handle.apply_sharded_delta(&self.index_path, data)
             .map_err(|e| PyValueError::new_err(e))
@@ -461,8 +597,23 @@ impl Index {
 
     // ── Distributed search ──────────────────────────────────────────────
 
-    /// Export BM25 statistics for a query (for distributed search aggregation).
-    /// Returns JSON string of ExportableStats.
+    /// Export BM25 statistics for a query (for distributed search).
+    ///
+    /// In a distributed setup, each node exports its local BM25 stats.
+    /// A coordinator merges them into global stats and sends them back
+    /// for scoring with ``search_with_global_stats()``.
+    ///
+    /// Args:
+    ///     query: Query string or dict (same format as ``search()``).
+    ///
+    /// Returns:
+    ///     JSON string of ``ExportableStats`` (document frequencies, doc counts).
+    ///
+    /// Example::
+    ///
+    ///     stats_a = node_a.export_stats("mutex lock")
+    ///     stats_b = node_b.export_stats("mutex lock")
+    ///     # merge stats_a + stats_b on coordinator, then distribute back
     fn export_stats(&self, query: &Bound<'_, PyAny>) -> PyResult<String> {
         let query_config = self.parse_query(query)?;
         let stats = self.handle.export_stats(&query_config)
@@ -471,8 +622,26 @@ impl Index {
             .map_err(|e| PyValueError::new_err(format!("serialize stats: {e}")))
     }
 
-    /// Search with externally-provided global BM25 stats (distributed mode).
-    /// `global_stats_json`: JSON string of merged ExportableStats from all nodes.
+    /// Search using externally-provided global BM25 stats (distributed mode).
+    ///
+    /// Scores are computed using the merged global stats instead of local-only
+    /// stats, ensuring consistent ranking across nodes.
+    ///
+    /// Args:
+    ///     query: Query string or dict (same format as ``search()``).
+    ///     global_stats_json: JSON string of merged ``ExportableStats``
+    ///         from all nodes (obtained by merging ``export_stats()`` outputs).
+    ///     limit: Maximum number of results (default 10).
+    ///     highlights: If True, return highlight byte offsets per field.
+    ///
+    /// Returns:
+    ///     ``list[SearchResult]`` scored with global BM25 statistics.
+    ///
+    /// Example::
+    ///
+    ///     results = node_a.search_with_global_stats(
+    ///         "mutex lock", merged_stats_json, limit=5
+    ///     )
     #[pyo3(signature = (query, global_stats_json, limit=10, highlights=false))]
     fn search_with_global_stats(
         &self,

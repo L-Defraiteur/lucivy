@@ -113,6 +113,12 @@ impl Index {
     }
 
     /// Open an existing index at the given path.
+    ///
+    /// Reads the persisted schema and segment metadata from disk.
+    /// The index must have been previously created with `Index.create()`.
+    ///
+    /// @param path - Directory path of the existing index (same path used in `create()`).
+    /// @returns An `Index` ready for search, add, delete, etc.
     #[napi(factory)]
     pub fn open(path: String) -> Result<Self> {
         let handle = ShardedHandle::open(&path)
@@ -147,7 +153,10 @@ impl Index {
     }
 
     /// Add multiple documents at once.
-    /// Each element must have a `docId` key and field values.
+    ///
+    /// Each element must have a `docId` (or `doc_id`) key plus field values.
+    ///
+    /// @param docs - Array of objects: `[{docId: 1, title: "Hello"}, {docId: 2, title: "World"}]`.
     #[napi]
     pub fn add_many(&self, docs: Vec<HashMap<String, serde_json::Value>>) -> Result<()> {
         let nid_field = self.handle.field(NODE_ID_FIELD)
@@ -175,14 +184,22 @@ impl Index {
         Ok(())
     }
 
-    /// Delete a document by doc_id.
+    /// Delete a document by its `_node_id`.
+    ///
+    /// The deletion is staged in memory. Call `commit()` or run a search
+    /// (which auto-commits via lazy commit) to make it visible.
+    ///
+    /// @param docId - The `_node_id` of the document to delete.
     #[napi]
     pub fn delete(&self, doc_id: u32) -> Result<()> {
         self.handle.delete_by_node_id(doc_id as u64)
             .map_err(|e| Error::from_reason(e))
     }
 
-    /// Update a document (delete + re-add).
+    /// Update a document (delete old + re-add with new fields).
+    ///
+    /// @param docId - The `_node_id` of the document to update.
+    /// @param fields - New field values: `{title: "Updated", body: "New content"}`.
     #[napi]
     pub fn update(&self, doc_id: u32, fields: HashMap<String, serde_json::Value>) -> Result<()> {
         self.delete(doc_id)?;
@@ -190,14 +207,22 @@ impl Index {
         Ok(())
     }
 
-    /// Commit pending changes (makes added/deleted docs visible to searches).
+    /// Commit pending changes to disk, making them visible to subsequent searches.
+    ///
+    /// Lucivy uses lazy commit: if you search without calling `commit()`,
+    /// uncommitted changes are auto-flushed before the search executes.
+    /// Call `commit()` explicitly when you need to control the commit point
+    /// (e.g., after a batch of adds/deletes).
     #[napi]
     pub fn commit(&self) -> Result<()> {
         self.handle.commit()
             .map_err(|e| Error::from_reason(e))
     }
 
-    /// Close the index: commit pending writes and release the writer lock.
+    /// Flush any pending writes and release the writer lock.
+    ///
+    /// After `close()`, the index data remains on disk and can be re-opened
+    /// with `Index.open()`. No further mutations are allowed on this instance.
     #[napi]
     pub fn close(&self) -> Result<()> {
         self.handle.close()
@@ -276,25 +301,36 @@ impl Index {
         )
     }
 
-    /// Number of documents in the index.
+    /// Number of documents in the index (getter, access as `index.numDocs`).
+    ///
+    /// @returns Total document count across all shards.
     #[napi(getter)]
     pub fn num_docs(&self) -> u32 {
         self.handle.num_docs() as u32
     }
 
-    /// Number of shards.
+    /// Number of shards (getter, access as `index.numShards`).
+    ///
+    /// @returns Shard count (1 for single-shard indexes).
     #[napi(getter)]
     pub fn num_shards(&self) -> u32 {
         self.handle.num_shards() as u32
     }
 
-    /// Index path.
+    /// Index directory path (getter, access as `index.path`).
+    ///
+    /// @returns The directory path where the index files are stored.
     #[napi(getter)]
     pub fn path(&self) -> &str {
         &self.index_path
     }
 
-    /// Export this index as a LUCE snapshot (Buffer).
+    /// Export this index as a LUCE snapshot.
+    ///
+    /// Returns the full index content (all shards, schema, segments) as a
+    /// binary blob. Restore later with `Index.importSnapshot()`.
+    ///
+    /// @returns `Buffer` containing the LUCE snapshot bytes.
     #[napi]
     pub fn export_snapshot(&self) -> Result<Buffer> {
         let blob = snapshot::export_to_snapshot(
@@ -304,7 +340,9 @@ impl Index {
         Ok(blob.into())
     }
 
-    /// Export this index as a LUCE snapshot to a file.
+    /// Export this index as a LUCE snapshot directly to a file.
+    ///
+    /// @param path - Destination file path (typically ending in `.luce`).
     #[napi]
     pub fn export_snapshot_to(&self, path: String) -> Result<()> {
         let blob = snapshot::export_to_snapshot(
@@ -317,7 +355,14 @@ impl Index {
     }
 
     /// Import an index from a LUCE snapshot (Buffer).
-    /// The snapshot must contain exactly one index.
+    ///
+    /// Restores a full index from a binary blob previously created by
+    /// `exportSnapshot()`. The index files are written to `destPath`.
+    ///
+    /// @param data - Raw LUCE snapshot bytes (Buffer).
+    /// @param destPath - Directory to write the restored index into.
+    ///   Defaults to `"/tmp/lucivy_import"`.
+    /// @returns A new `Index` instance ready for search.
     #[napi(factory)]
     pub fn import_snapshot(data: Buffer, dest_path: Option<String>) -> Result<Self> {
         let dest = dest_path.as_deref().unwrap_or("/tmp/lucivy_import");
@@ -335,7 +380,14 @@ impl Index {
         })
     }
 
-    /// Import an index from a LUCE snapshot file.
+    /// Import an index from a LUCE snapshot file (.luce).
+    ///
+    /// Convenience wrapper that reads the file then calls `importSnapshot()`.
+    ///
+    /// @param path - Path to the `.luce` snapshot file.
+    /// @param destPath - Directory to write the restored index into.
+    ///   Defaults to `"/tmp/lucivy_import"`.
+    /// @returns A new `Index` instance ready for search.
     #[napi(factory)]
     pub fn import_snapshot_from(path: String, dest_path: Option<String>) -> Result<Self> {
         let data = std::fs::read(&path)
@@ -343,7 +395,9 @@ impl Index {
         Self::import_snapshot(data.into(), dest_path)
     }
 
-    /// Schema as a list of field definitions.
+    /// Schema as a list of field definitions (getter, access as `index.schema`).
+    ///
+    /// @returns `Array<{name: string, type: string}>` for each user-defined field.
     #[napi(getter)]
     pub fn schema(&self) -> Vec<FieldDef> {
         self.user_fields
@@ -360,7 +414,13 @@ impl Index {
 
     // ── Tier 2 — Delta sync ────────────────────────────────────────────
 
-    /// Per-shard version info (for requesting deltas from a server).
+    /// Per-shard version info for delta sync (getter, access as `index.shardVersions`).
+    ///
+    /// Returns the current version and segment IDs for each shard.
+    /// Pass this to a remote server's `exportShardedDelta()` to
+    /// receive only the segments that changed since your last sync.
+    ///
+    /// @returns `Array<{shardId: number, version: string, segmentIds: string[]}>`.
     #[napi(getter)]
     pub fn shard_versions(&self) -> Result<Vec<ShardVersion>> {
         let versions = self.handle.shard_versions()
@@ -375,10 +435,15 @@ impl Index {
             .collect())
     }
 
-    /// Export a sharded delta (LUCIDS blob) from this index.
+    /// Export a sharded delta (LUCIDS blob) containing only segments that
+    /// changed since the client's known versions.
     ///
-    /// `client_versions`: array of `{ shardId, version, segmentIds }`.
-    /// Returns the binary LUCIDS blob as a Buffer.
+    /// Used for incremental sync: the client sends its `shardVersions`,
+    /// the server computes and returns only the diff.
+    ///
+    /// @param clientVersions - Array of `{shardId, version, segmentIds}`,
+    ///   typically obtained from the client's `shardVersions` getter.
+    /// @returns `Buffer` containing the LUCIDS binary delta blob.
     #[napi]
     pub fn export_sharded_delta(&self, client_versions: Vec<ShardVersion>) -> Result<Buffer> {
         let versions: Vec<lucistore::delta_sharded::ShardVersion> = client_versions
@@ -396,6 +461,11 @@ impl Index {
     }
 
     /// Apply a sharded delta (LUCIDS blob) to this index.
+    ///
+    /// Merges the delta's segments into the local index, bringing it
+    /// up to date with the server. Only modified shards are touched.
+    ///
+    /// @param data - LUCIDS binary blob from `exportShardedDelta()`.
     #[napi]
     pub fn apply_sharded_delta(&self, data: Buffer) -> Result<()> {
         self.handle.apply_sharded_delta(&self.index_path, &data)
@@ -404,8 +474,14 @@ impl Index {
 
     // ── Tier 3 — Distributed search ────────────────────────────────────
 
-    /// Export BM25 statistics for a query (for distributed search aggregation).
-    /// Returns a JSON string of ExportableStats.
+    /// Export BM25 statistics for a query (for distributed search).
+    ///
+    /// In a distributed setup, each node exports its local BM25 stats.
+    /// A coordinator merges them into global stats and sends them back
+    /// for scoring with `searchWithGlobalStats()`.
+    ///
+    /// @param queryJson - JSON string of QueryConfig (same format as `search()` object).
+    /// @returns JSON string of `ExportableStats` (document frequencies, doc counts).
     #[napi]
     pub fn export_stats(&self, query_json: String) -> Result<String> {
         let config: query::QueryConfig = serde_json::from_str(&query_json)
@@ -416,9 +492,17 @@ impl Index {
             .map_err(|e| Error::from_reason(format!("serialize stats: {e}")))
     }
 
-    /// Search with externally-provided global BM25 stats (distributed mode).
-    /// `query_json`: JSON string of QueryConfig.
-    /// `global_stats_json`: JSON string of merged ExportableStats from all nodes.
+    /// Search using externally-provided global BM25 stats (distributed mode).
+    ///
+    /// Scores are computed using the merged global stats instead of local-only
+    /// stats, ensuring consistent ranking across nodes.
+    ///
+    /// @param queryJson - JSON string of QueryConfig.
+    /// @param globalStatsJson - JSON string of merged `ExportableStats`
+    ///   from all nodes (obtained by merging `exportStats()` outputs).
+    /// @param limit - Maximum number of results (default 10).
+    /// @param highlights - If true, return highlight byte offsets per field.
+    /// @returns `Array<SearchResult>` scored with global BM25 statistics.
     #[napi]
     pub fn search_with_global_stats(
         &self,
