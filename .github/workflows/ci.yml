@@ -296,9 +296,11 @@ jobs:
 
       - name: Compile test
         run: |
-          BUILD_DIR=$(find target/release/build -maxdepth 1 -name "lucivy-cpp-*" -type d | grep -v "\.d" | head -1)
+          INCLUDE_DIR=$(find target/release/build -path "*/lucivy-cpp-*/out/cxxbridge/include" -type d | head -1)
+          echo "Include dir: $INCLUDE_DIR"
+          ls -la "$INCLUDE_DIR/lucivy-cpp/src/" || true
           g++ -std=c++17 -o /tmp/test_lucivy_cpp bindings/cpp/test.cpp \
-            -I "$BUILD_DIR/out/cxxbridge/include" \
+            -I "$INCLUDE_DIR" \
             -L target/release -llucivy_cpp \
             -lpthread -ldl -lm
 
