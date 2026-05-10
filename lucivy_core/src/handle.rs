@@ -258,7 +258,7 @@ impl LucivyHandle {
                     let (doc_tf, highlights) = run_sfx_walk(
                         &sfx_reader, &resolver, &param.query_text,
                         &tokens, &seps,
-                        param.fuzzy_distance, param.anchor_start, param.exact_match,
+                        param.anchor_start, param.exact_match,
                         param.continuation, param.strict_separators,
                         Some(&seg_str),
                         None,

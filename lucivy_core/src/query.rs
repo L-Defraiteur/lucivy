@@ -11,8 +11,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use ld_lucivy::query::{
-    AllQuery, BooleanQuery, DisjunctionMaxQuery, FuzzyTermQuery,
-    HighlightSink, MoreLikeThisQuery, Occur, PhrasePrefixQuery, PhraseQuery, Query,
+    AllQuery, BooleanQuery, DisjunctionMaxQuery,
+    HighlightSink, MoreLikeThisQuery, Occur, Query,
     QueryParser, RangeQuery, RegexContinuationQuery, RegexQuery, SuffixContainsQuery, TermQuery,
 };
 use ld_lucivy::schema::OwnedValue;
@@ -104,76 +104,6 @@ pub struct QueryConfig {
     pub boost_factor: Option<f32>,
 }
 
-// ─── Tokenization Helper ────────────────────────────────────────────────────
-
-/// Tokenize text through the tokenizer configured for a field.
-/// Returns the list of tokens (e.g. ["lazy", "dog"] for "lazy dog").
-fn tokenize_for_field(index: &Index, field: Field, schema: &Schema, text: &str) -> Vec<String> {
-    let tokenizer_name = match schema.get_field_entry(field).field_type() {
-        FieldType::Str(opts) => opts
-            .get_indexing_options()
-            .map(|o| o.tokenizer())
-            .unwrap_or("default"),
-        _ => "default",
-    };
-
-    if let Some(mut tokenizer) = index.tokenizers().get(tokenizer_name) {
-        let mut stream = tokenizer.token_stream(text);
-        let mut tokens = Vec::new();
-        while let Some(token) = stream.next() {
-            tokens.push(token.text.clone());
-        }
-        tokens
-    } else {
-        // Fallback: just lowercase
-        vec![text.to_lowercase()]
-    }
-}
-
-/// Token with byte offsets, used to extract separators from the query string.
-#[allow(dead_code)]
-struct TokenWithOffsets {
-    text: String,
-    offset_from: usize,
-    offset_to: usize,
-}
-
-/// Tokenize text through the tokenizer configured for a field, preserving byte offsets.
-#[allow(dead_code)]
-fn tokenize_with_offsets(
-    index: &Index,
-    field: Field,
-    schema: &Schema,
-    text: &str,
-) -> Vec<TokenWithOffsets> {
-    let tokenizer_name = match schema.get_field_entry(field).field_type() {
-        FieldType::Str(opts) => opts
-            .get_indexing_options()
-            .map(|o| o.tokenizer())
-            .unwrap_or("default"),
-        _ => "default",
-    };
-
-    if let Some(mut tokenizer) = index.tokenizers().get(tokenizer_name) {
-        let mut stream = tokenizer.token_stream(text);
-        let mut tokens = Vec::new();
-        while let Some(token) = stream.next() {
-            tokens.push(TokenWithOffsets {
-                text: token.text.clone(),
-                offset_from: token.offset_from,
-                offset_to: token.offset_to,
-            });
-        }
-        tokens
-    } else {
-        vec![TokenWithOffsets {
-            text: text.to_lowercase(),
-            offset_from: 0,
-            offset_to: text.len(),
-        }]
-    }
-}
-
 // ─── Field Resolution ───────────────────────────────────────────────────────
 
 /// Resolve a field by name from the query config.
@@ -258,49 +188,37 @@ pub fn build_query(
         "term" => {
             // Compat: term → contains with anchor_start + exact_match.
             // Cross-token aware: "rag3weaver" matches even if tokenized as "rag3"+"weaver".
-            if index.settings().sfx_enabled {
-                let mut compat = config.clone();
-                compat.anchor_start = Some(true);
-                compat.exact_match = Some(true);
-                build_contains_query(&compat, schema, highlight_sink)
-            } else {
-                build_term_query(config, schema, index, highlight_sink)
-            }
+            require_sfx(index)?;
+            let mut compat = config.clone();
+            compat.anchor_start = Some(true);
+            compat.exact_match = Some(true);
+            build_contains_query(&compat, schema, highlight_sink)
         }
         "fuzzy" => {
             // Compat: fuzzy → contains with distance.
-            if index.settings().sfx_enabled {
-                let mut compat = config.clone();
-                if compat.distance.is_none() {
-                    compat.distance = Some(1);
-                }
-                build_contains_query(&compat, schema, highlight_sink)
-            } else {
-                build_fuzzy_query(config, schema, index, highlight_sink)
+            require_sfx(index)?;
+            let mut compat = config.clone();
+            if compat.distance.is_none() {
+                compat.distance = Some(1);
             }
+            build_contains_query(&compat, schema, highlight_sink)
         }
         "phrase" => {
             // Compat: phrase → contains (SFX multi-token handles adjacency,
             // cross-token, and highlights — superset of PhraseQuery).
-            if index.settings().sfx_enabled {
-                build_contains_query(config, schema, highlight_sink)
-            } else {
-                build_phrase_query(config, schema, index, highlight_sink)
-            }
+            require_sfx(index)?;
+            build_contains_query(config, schema, highlight_sink)
         }
         "regex" => {
             // Compat: regex → contains with regex=true.
-            if index.settings().sfx_enabled {
-                let mut compat = config.clone();
-                compat.regex = Some(true);
-                // Use pattern or value as the regex
-                if compat.value.is_none() {
-                    compat.value = compat.pattern.clone();
-                }
-                build_contains_query(&compat, schema, highlight_sink)
-            } else {
-                build_regex_query(config, schema, highlight_sink)
+            require_sfx(index)?;
+            let mut compat = config.clone();
+            compat.regex = Some(true);
+            // Use pattern or value as the regex
+            if compat.value.is_none() {
+                compat.value = compat.pattern.clone();
             }
+            build_contains_query(&compat, schema, highlight_sink)
         }
         "contains" | "sfx_contains" => {
             require_sfx(index)?;
@@ -331,7 +249,8 @@ pub fn build_query(
             // Compat: parse → contains for SFX highlights.
             // QueryParser syntax ("mutex AND lock") is not supported in contains,
             // so for simple values, route to contains. For complex syntax, keep parse.
-            if index.settings().sfx_enabled && config.value.is_some() {
+            require_sfx(index)?;
+            if config.value.is_some() {
                 build_contains_query(config, schema, highlight_sink)
             } else {
                 build_parsed_query(config, schema, index)
@@ -341,11 +260,8 @@ pub fn build_query(
             // Compat: phrase_prefix → contains (SFX multi-token already does
             // prefix match on last token — same as PhrasePrefixQuery but with
             // cross-token awareness and highlights).
-            if index.settings().sfx_enabled {
-                build_contains_query(config, schema, highlight_sink)
-            } else {
-                build_phrase_prefix_query(config, schema, index, highlight_sink)
-            }
+            require_sfx(index)?;
+            build_contains_query(config, schema, highlight_sink)
         }
         "disjunction_max" => build_disjunction_max_query(config, schema, index, highlight_sink),
         "more_like_this" => build_more_like_this_query(config, schema),
@@ -365,79 +281,6 @@ pub fn build_query(
     }
 
     Ok(text_query)
-}
-
-/// Term query: exact token match on raw field (lowercased only, no stemming).
-/// Use `parse` query for stemmed/analyzed search.
-fn build_term_query(
-    config: &QueryConfig,
-    schema: &Schema,
-    _index: &Index,
-    highlight_sink: Option<Arc<HighlightSink>>,
-) -> Result<Box<dyn Query>, String> {
-    let field = resolve_field(config, schema)?;
-    let value = config.value.as_deref().ok_or("term query requires 'value'")?;
-
-    // Direct lowercase — no tokenizer pipeline, just case-fold for exact token lookup.
-    let term = Term::from_field_text(field, &value.to_lowercase());
-    // Never use sfxpost for term queries — the standard inverted index provides
-    // byte offsets via WithFreqsAndPositionsAndOffsets when highlights are needed.
-    // sfxpost resolves ALL docs (~1000ms), standard postings are streamed (~1ms).
-    let mut query = TermQuery::new(term, IndexRecordOption::WithFreqs);
-    if let Some(sink) = highlight_sink {
-        let field_name = config.field.clone().unwrap_or_default();
-        query = query.with_highlight_sink(sink, field_name);
-    }
-    Ok(Box::new(query))
-}
-
-/// Fuzzy query: Levenshtein match on raw field (lowercased only, no stemming).
-/// Fuzzy query: Levenshtein match on term dict (standard tantivy behavior).
-/// Matches individual tokens within edit distance. Fast (term dict DFA walk).
-/// For cross-token fuzzy substring search, use contains with distance parameter.
-fn build_fuzzy_query(
-    config: &QueryConfig,
-    schema: &Schema,
-    _index: &Index,
-    _highlight_sink: Option<Arc<HighlightSink>>,
-) -> Result<Box<dyn Query>, String> {
-    let field = resolve_field(config, schema)?;
-    let value = config.value.as_deref().ok_or("fuzzy query requires 'value'")?;
-    let distance = config.distance.unwrap_or(1);
-
-    let term = Term::from_field_text(field, &value.to_lowercase());
-    let query = FuzzyTermQuery::new(term, distance, true);
-    Ok(Box::new(query))
-}
-
-/// Phrase query: tokenize each term through stemmed field, search stemmed index.
-fn build_phrase_query(
-    config: &QueryConfig,
-    schema: &Schema,
-    index: &Index,
-    highlight_sink: Option<Arc<HighlightSink>>,
-) -> Result<Box<dyn Query>, String> {
-    let field = resolve_field(config, schema)?;
-    let terms_str = config
-        .terms
-        .as_ref()
-        .ok_or("phrase query requires 'terms'")?;
-
-    let terms: Vec<Term> = terms_str
-        .iter()
-        .map(|t| {
-            let tokens = tokenize_for_field(index, field, schema, t);
-            let stemmed = tokens.first().map(|s| s.as_str()).unwrap_or(t);
-            Term::from_field_text(field, stemmed)
-        })
-        .collect();
-
-    let mut query = PhraseQuery::new(terms);
-    if let Some(sink) = highlight_sink {
-        let field_name = config.field.clone().unwrap_or_default();
-        query = query.with_highlight_sink(sink, field_name);
-    }
-    Ok(Box::new(query))
 }
 
 /// Contains query: substring search via suffix FST (.sfx file).
@@ -478,7 +321,6 @@ fn build_contains_query(
     // Exact (d=0): SuffixContainsQuery.
     let exact_match = config.exact_match.unwrap_or(false);
     let mut query = SuffixContainsQuery::new(field, value.to_string())
-        .with_fuzzy_distance(distance)
         .with_strict_separators(config.strict_separators.unwrap_or(false));
     if anchor_start {
         query = query.with_anchor_start();
@@ -532,26 +374,6 @@ fn regex_escape(s: &str) -> String {
 }
 
 /// Regex query: pattern applies to raw field terms (lowercased, not stemmed).
-/// Regex query: regex match on term dict (standard tantivy behavior).
-/// Matches individual tokens against a regex pattern. Fast (term dict DFA walk).
-/// For cross-token regex substring search, use contains with regex=true.
-fn build_regex_query(
-    config: &QueryConfig,
-    schema: &Schema,
-    _highlight_sink: Option<Arc<HighlightSink>>,
-) -> Result<Box<dyn Query>, String> {
-    let field = resolve_field(config, schema)?;
-    let pattern = config
-        .pattern
-        .as_deref()
-        .or(config.value.as_deref())
-        .ok_or("regex query requires 'pattern' or 'value'")?;
-
-    let query = RegexQuery::from_pattern(pattern, field)
-        .map_err(|e| format!("invalid regex: {e}"))?;
-    Ok(Box::new(query))
-}
-
 fn build_boolean_query(
     config: &QueryConfig,
     schema: &Schema,
@@ -581,45 +403,6 @@ fn build_boolean_query(
     }
 
     Ok(Box::new(BooleanQuery::new(clauses)))
-}
-
-/// Phrase prefix query: "mutex loc" → matches "mutex lock", "mutex local", etc.
-/// Last term is treated as a prefix, preceding terms are exact.
-fn build_phrase_prefix_query(
-    config: &QueryConfig,
-    schema: &Schema,
-    index: &Index,
-    _highlight_sink: Option<Arc<HighlightSink>>,
-) -> Result<Box<dyn Query>, String> {
-    let field = resolve_field(config, schema)?;
-
-    // Accept terms=["mutex", "loc"] or value="mutex loc" (split by whitespace)
-    let terms_owned: Vec<String>;
-    let terms_ref = if let Some(ref terms) = config.terms {
-        terms
-    } else {
-        let value = config.value.as_deref().ok_or("phrase_prefix query requires 'terms' or 'value'")?;
-        terms_owned = value.split_whitespace().map(|w| w.to_string()).collect();
-        &terms_owned
-    };
-
-    if terms_ref.len() < 2 {
-        return Err("phrase_prefix query requires at least 2 terms".into());
-    }
-
-    let terms: Vec<Term> = terms_ref.iter()
-        .map(|t| {
-            let tokens = tokenize_for_field(index, field, schema, t);
-            let stemmed = tokens.first().map(|s| s.as_str()).unwrap_or(t);
-            Term::from_field_text(field, stemmed)
-        })
-        .collect();
-
-    let mut query = PhrasePrefixQuery::new(terms);
-    if let Some(max) = config.max_expansions {
-        query.set_max_expansions(max);
-    }
-    Ok(Box::new(query))
 }
 
 /// Disjunction max query: max score among sub-queries, with optional tie_breaker.

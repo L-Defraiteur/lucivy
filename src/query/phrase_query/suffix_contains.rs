@@ -367,124 +367,6 @@ where
     matches
 }
 
-/// Search for single-token fuzzy contains matches using the suffix FST.
-///
-/// Like `suffix_contains_single_token` but uses Levenshtein DFA with the given
-/// edit distance. Matches suffix terms within `distance` edits of the query.
-pub fn suffix_contains_single_token_fuzzy<F>(
-    sfx_reader: &SfxFileReader<'_>,
-    query: &str,
-    distance: u8,
-    raw_term_resolver: F,
-) -> Vec<SuffixContainsMatch>
-where
-    F: Fn(u64) -> Vec<RawPostingEntry>,
-{
-    // Cross-token search is a superset: fuzzy_falling_walk finds both single-token
-    // matches (prefix_len == query.len, no sibling chain) and cross-token matches.
-    cross_token_search(sfx_reader, query, &raw_term_resolver, distance)
-}
-
-/// Like fuzzy but anchor_start (SI=0 filter).
-pub fn suffix_contains_single_token_fuzzy_prefix<F>(
-    sfx_reader: &SfxFileReader<'_>,
-    query: &str,
-    distance: u8,
-    raw_term_resolver: F,
-) -> Vec<SuffixContainsMatch>
-where
-    F: Fn(u64) -> Vec<RawPostingEntry>,
-{
-    suffix_contains_single_token_fuzzy_inner(sfx_reader, query, distance, &raw_term_resolver, true)
-}
-
-fn suffix_contains_single_token_fuzzy_inner<F>(
-    sfx_reader: &SfxFileReader<'_>,
-    query: &str,
-    distance: u8,
-    raw_term_resolver: &F,
-    anchor_start: bool,
-) -> Vec<SuffixContainsMatch>
-where
-    F: Fn(u64) -> Vec<RawPostingEntry>,
-{
-    if distance == 0 {
-        return suffix_contains_single_token_inner(sfx_reader, query, &raw_term_resolver, anchor_start, false, None);
-    }
-
-    let query_lower = query.to_lowercase();
-    let query_len = query_lower.len();
-
-    // Fuzzy walk: partitioned by prefix byte.
-    let walk_results = if anchor_start {
-        sfx_reader.fuzzy_walk_si0(&query_lower, distance)
-    } else {
-        sfx_reader.fuzzy_walk(&query_lower, distance)
-    };
-
-    let mut matches: Vec<SuffixContainsMatch> = Vec::new();
-
-    for (_suffix_term, parents) in &walk_results {
-        for parent in parents {
-            let postings = raw_term_resolver(parent.raw_ordinal);
-
-            for entry in &postings {
-                matches.push(SuffixContainsMatch {
-                    doc_id: entry.doc_id,
-                    token_index: entry.token_index,
-                    byte_from: entry.byte_from as usize + parent.si as usize,
-                    byte_to: entry.byte_from as usize + parent.si as usize + query_len,
-                    parent_term: String::new(),
-                    si: parent.si,
-                    token_len: parent.token_len,
-                    ordinal: parent.raw_ordinal as u32,
-                });
-            }
-        }
-    }
-
-    matches.sort_by(|a, b| a.doc_id.cmp(&b.doc_id).then(a.byte_from.cmp(&b.byte_from)));
-    matches.dedup_by(|a, b| a.doc_id == b.doc_id && a.byte_from == b.byte_from);
-
-    matches
-}
-
-/// Check if two separator byte slices are within Levenshtein distance `max_distance`.
-fn separator_matches_fuzzy(actual: &[u8], expected: &[u8], max_distance: u8) -> bool {
-    if actual == expected {
-        return true;
-    }
-    if max_distance == 0 {
-        return false;
-    }
-    // Simple byte-level edit distance for short separators
-    let a = actual;
-    let b = expected;
-    let len_a = a.len();
-    let len_b = b.len();
-    // Quick reject: if length difference > max_distance, can't match
-    if (len_a as isize - len_b as isize).unsigned_abs() > max_distance as usize {
-        return false;
-    }
-    // For very short separators (typical case), compute exact edit distance
-    if len_a <= 8 && len_b <= 8 {
-        let mut dp = [[0u8; 9]; 9];
-        for i in 0..=len_a { dp[i][0] = i as u8; }
-        for j in 0..=len_b { dp[0][j] = j as u8; }
-        for i in 1..=len_a {
-            for j in 1..=len_b {
-                let cost = if a[i-1] == b[j-1] { 0 } else { 1 };
-                dp[i][j] = dp[i-1][j-1].saturating_add(cost)
-                    .min(dp[i-1][j].saturating_add(1))
-                    .min(dp[i][j-1].saturating_add(1));
-            }
-        }
-        dp[len_a][len_b] <= max_distance
-    } else {
-        // Long separators: just check exact match (rare case)
-        false
-    }
-}
 
 /// Check if `query` fuzzy-matches a PREFIX of `text` within edit distance `max_distance`.
 ///
@@ -611,7 +493,7 @@ pub fn suffix_contains_multi_token<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, &raw_ordinal_resolver, 0, false, None)
+    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, &raw_ordinal_resolver, false, None)
 }
 
 /// Multi-token prefix search (startsWith). All tokens must be SI=0.
@@ -624,35 +506,7 @@ pub fn suffix_contains_multi_token_prefix<F>(
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, &raw_ordinal_resolver, 0, true, None)
-}
-
-/// Multi-token contains search with optional fuzzy distance.
-pub fn suffix_contains_multi_token_fuzzy<F>(
-    sfx_reader: &SfxFileReader<'_>,
-    query_tokens: &[&str],
-    query_separators: &[&str],
-    raw_ordinal_resolver: F,
-    fuzzy_distance: u8,
-) -> Vec<SuffixContainsMultiMatch>
-where
-    F: Fn(u64) -> Vec<RawPostingEntry>,
-{
-    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, &raw_ordinal_resolver, fuzzy_distance, false, None)
-}
-
-/// Multi-token fuzzy prefix search.
-pub fn suffix_contains_multi_token_fuzzy_prefix<F>(
-    sfx_reader: &SfxFileReader<'_>,
-    query_tokens: &[&str],
-    query_separators: &[&str],
-    raw_ordinal_resolver: F,
-    fuzzy_distance: u8,
-) -> Vec<SuffixContainsMultiMatch>
-where
-    F: Fn(u64) -> Vec<RawPostingEntry>,
-{
-    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, &raw_ordinal_resolver, fuzzy_distance, true, None)
+    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, &raw_ordinal_resolver, true, None)
 }
 
 /// Multi-token search with ord_to_term for sibling-link cross-token on sub-tokens.
@@ -661,14 +515,13 @@ pub fn suffix_contains_multi_token_impl_pub<F>(
     query_tokens: &[&str],
     query_separators: &[&str],
     raw_ordinal_resolver: F,
-    fuzzy_distance: u8,
     anchor_start: bool,
     ord_to_term: Option<&dyn Fn(u64) -> Option<String>>,
 ) -> Vec<SuffixContainsMultiMatch>
 where
     F: Fn(u64) -> Vec<RawPostingEntry>,
 {
-    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, &raw_ordinal_resolver, fuzzy_distance, anchor_start, ord_to_term)
+    suffix_contains_multi_token_impl(sfx_reader, query_tokens, query_separators, &raw_ordinal_resolver, anchor_start, ord_to_term)
 }
 
 fn suffix_contains_multi_token_impl<F>(
@@ -676,7 +529,6 @@ fn suffix_contains_multi_token_impl<F>(
     query_tokens: &[&str],
     query_separators: &[&str],
     raw_ordinal_resolver: &F,
-    fuzzy_distance: u8,
     anchor_start: bool,
     ord_to_term: Option<&dyn Fn(u64) -> Option<String>>,
 ) -> Vec<SuffixContainsMultiMatch>
@@ -687,11 +539,7 @@ where
         return Vec::new();
     }
     if query_tokens.len() == 1 {
-        let results = if fuzzy_distance > 0 {
-            suffix_contains_single_token_fuzzy_inner(sfx_reader, query_tokens[0], fuzzy_distance, &raw_ordinal_resolver, anchor_start)
-        } else {
-            suffix_contains_single_token_inner(sfx_reader, query_tokens[0], &raw_ordinal_resolver, anchor_start, false, None)
-        };
+        let results = suffix_contains_single_token_inner(sfx_reader, query_tokens[0], &raw_ordinal_resolver, anchor_start, false, None);
         return results
             .into_iter()
             .map(|m| SuffixContainsMultiMatch {
@@ -731,7 +579,7 @@ where
 
         let postings = super::literal_pipeline::resolve_token_for_multi(
             sfx_reader, token, &resolve_fn, ord_to_term,
-            is_first, is_last, fuzzy_distance,
+            is_first, is_last, 0, // fuzzy_distance: always 0 (fuzzy d>0 routes through RegexContinuationQuery)
         );
 
         if diag {
@@ -862,7 +710,7 @@ where
 
                 match gapmap.read_separator(doc_id, ti_a, ti_b) {
                     Some(actual_sep) => {
-                        if !separator_matches_fuzzy(actual_sep, expected_sep, fuzzy_distance) {
+                        if actual_sep != expected_sep {
                             seps_valid = false;
                             break;
                         }
@@ -1473,50 +1321,6 @@ mod tests {
         assert!(results.is_empty(), "import and from are not consecutive tokens");
     }
 
-    /// Fuzzy d=3: "is 3db cool" on "is rag3db cool" — middle token "3db" fuzzy
-    /// matches "rag3db" (Levenshtein distance 3: insert r,a,g). Validates that
-    /// fuzzy on middle tokens works with SI=0 filtering and pivot selection.
-    #[test]
-    fn test_multi_token_fuzzy_d3_middle_token() {
-        // Build a standalone index with "is rag3db cool"
-        let mut collector = SfxCollector::new();
-        collector.begin_doc();
-        collector.begin_value("is rag3db cool");
-        collector.add_token("is", 0, 2);
-        collector.add_token("rag3db", 3, 9);
-        collector.add_token("cool", 10, 14);
-        collector.end_value();
-        collector.end_doc();
-
-        let output = collector.build().unwrap();
-        let sfx_bytes = output.sfx;
-        let reader = SfxFileReader::open(&sfx_bytes).unwrap();
-
-        // Sorted unique tokens: cool(0), is(1), rag3db(2)
-        let mut raw_postings: HashMap<u64, Vec<RawPostingEntry>> = HashMap::new();
-        raw_postings.insert(0, vec![
-            RawPostingEntry { doc_id: 0, token_index: 2, byte_from: 10, byte_to: 14 },
-        ]);
-        raw_postings.insert(1, vec![
-            RawPostingEntry { doc_id: 0, token_index: 0, byte_from: 0, byte_to: 2 },
-        ]);
-        raw_postings.insert(2, vec![
-            RawPostingEntry { doc_id: 0, token_index: 1, byte_from: 3, byte_to: 9 },
-        ]);
-
-        // "is 3db cool" with d=3 — "3db" should fuzzy match "rag3db" (distance 3)
-        let results = suffix_contains_multi_token_fuzzy(
-            &reader,
-            &["is", "3db", "cool"],
-            &[" ", " "],
-            |ord| raw_postings.get(&ord).cloned().unwrap_or_default(),
-            3,
-        );
-
-        assert_eq!(results.len(), 1, "should find 'is rag3db cool' via fuzzy d=3 on middle token '3db'");
-        assert_eq!(results[0].doc_id, 0);
-    }
-
     /// Pivot optimization: "is cool" — "is" has few matches but is short,
     /// "cool" is longer and also has few matches. Pivot should pick the
     /// most selective token. Result should still find doc 1.
@@ -1561,44 +1365,6 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].doc_id, 0);
-    }
-
-    /// Fuzzy multi-token with pivot: "iz cool" (d=1) — "iz" fuzzy matches "is",
-    /// pivot should pick "cool" (exact, fewer candidates) and validate backward.
-    #[test]
-    fn test_multi_token_fuzzy_pivot() {
-        let (sfx_bytes, raw_postings) = build_test_index();
-        let reader = SfxFileReader::open(&sfx_bytes).unwrap();
-
-        let results = suffix_contains_multi_token_fuzzy(
-            &reader,
-            &["iz", "cool"],
-            &[" "],
-            |ord| raw_postings.get(&ord).cloned().unwrap_or_default(),
-            1,
-        );
-
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].doc_id, 1);
-    }
-
-    /// Fuzzy multi-token: "rag3db iz kool" (d=1) — 3 tokens, fuzzy on middle and last.
-    /// Pivot should pick the most selective, validate bidirectionally.
-    #[test]
-    fn test_multi_token_fuzzy_three_tokens() {
-        let (sfx_bytes, raw_postings) = build_test_index();
-        let reader = SfxFileReader::open(&sfx_bytes).unwrap();
-
-        let results = suffix_contains_multi_token_fuzzy(
-            &reader,
-            &["rag3db", "iz", "kool"],
-            &[" ", " "],
-            |ord| raw_postings.get(&ord).cloned().unwrap_or_default(),
-            1,
-        );
-
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].doc_id, 1);
     }
 
     /// Integration test: real Index with real ._raw posting lists.
