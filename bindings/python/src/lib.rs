@@ -66,8 +66,18 @@ impl Index {
     ///
     /// Args:
     ///     path: Directory path for the index files.
-    ///     fields: List of field definitions, e.g. [{"name": "body", "type": "text"}].
-    ///     shards: Number of shards (default 1).
+    ///     fields: List of field definitions.
+    ///     shards: Number of shards (default 1). More shards = faster search on large datasets.
+    ///
+    /// Field types: ``"text"`` (full-text, tokenized), ``"u64"``, ``"i64"``, ``"f64"``, ``"bool"``, ``"date"``.
+    ///
+    /// Example::
+    ///
+    ///     index = Index.create("/tmp/my_index", [
+    ///         {"name": "title", "type": "text", "stored": True},
+    ///         {"name": "body", "type": "text", "stored": True},
+    ///         {"name": "score", "type": "f64", "fast": True},
+    ///     ], shards=4)
     #[staticmethod]
     #[pyo3(signature = (path, fields, shards=None))]
     fn create(path: &str, fields: &Bound<'_, PyList>, shards: Option<usize>) -> PyResult<Self> {
@@ -197,6 +207,55 @@ impl Index {
     }
 
     /// Search the index.
+    ///
+    /// Args:
+    ///     query: Either a plain string or a query dict.
+    ///     limit: Maximum number of results (default 10).
+    ///     highlights: If True, return highlight byte offsets per field.
+    ///     allowed_ids: Optional list of _node_id values to filter on.
+    ///     fields: If True, return stored field values with each result.
+    ///
+    /// Query formats:
+    ///     String: ``"hello world"`` — auto contains_split across all text fields.
+    ///
+    ///     Dict with ``type`` key (all substring queries are cross-token):
+    ///
+    ///     ``{"type": "contains", "field": "body", "value": "lock"}``
+    ///         Substring match. Finds "lock" inside "unlock", "locking", etc.
+    ///
+    ///     ``{"type": "contains", "field": "body", "value": "lock", "distance": 1}``
+    ///         Fuzzy substring (Levenshtein). Finds "lock", "look", "lack", etc.
+    ///
+    ///     ``{"type": "contains", "field": "body", "value": "lock.*init", "regex": true}``
+    ///         Regex substring. Cross-token regex matching.
+    ///
+    ///     ``{"type": "startsWith", "field": "body", "value": "lock"}``
+    ///         Token prefix. Finds tokens starting with "lock" (lock, locks, locking...).
+    ///
+    ///     ``{"type": "contains_split", "field": "body", "value": "struct device"}``
+    ///         Split on whitespace, each word as contains, combined with boolean OR.
+    ///
+    ///     ``{"type": "term", "field": "body", "value": "lock"}``
+    ///         Exact whole-token match (anchor_start + exact_match).
+    ///
+    ///     ``{"type": "fuzzy", "field": "body", "value": "schdule", "distance": 1}``
+    ///         Compat alias for contains + distance.
+    ///
+    ///     ``{"type": "phrase", "field": "body", "value": "mutex lock"}``
+    ///         Adjacent tokens in order.
+    ///
+    ///     ``{"type": "regex", "field": "body", "pattern": "sched[a-z]+"}``
+    ///         Standard regex on individual tokens.
+    ///
+    ///     ``{"type": "boolean", "must": [...], "should": [...], "must_not": [...]}``
+    ///         Boolean combination of sub-queries.
+    ///
+    ///     ``{"type": "disjunction_max", "queries": [...], "tie_breaker": 0.1}``
+    ///         Best-score from sub-queries with tie-breaker.
+    ///
+    ///     ``{"type": "more_like_this", "field": "body", "value": "sample text",``
+    ///     ``"min_doc_frequency": 1, "min_term_frequency": 1, "min_word_length": 3}``
+    ///         TF-IDF similarity search.
     #[pyo3(signature = (query, limit=10, highlights=false, allowed_ids=None, fields=false))]
     fn search(
         &self,

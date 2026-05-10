@@ -74,6 +74,11 @@ pub struct Index {
 #[napi]
 impl Index {
     /// Create a new index at the given path.
+    ///
+    /// @param path - Directory path for the index files.
+    /// @param fields - Field definitions: `[{name: "body", type: "text", stored: true}]`.
+    ///   Types: `"text"` (full-text), `"u64"`, `"i64"`, `"f64"`, `"bool"`, `"date"`.
+    /// @param shards - Number of shards (default 1). More shards = faster search on large datasets.
     #[napi(factory)]
     pub fn create(path: String, fields: Vec<FieldDef>, shards: Option<u32>) -> Result<Self> {
         let field_defs: Vec<query::FieldDef> = fields
@@ -197,7 +202,26 @@ impl Index {
     }
 
     /// Search the index.
-    /// `query` can be a string (contains_split on all text fields) or an object (QueryConfig).
+    ///
+    /// @param query - String or query object.
+    ///
+    /// **String**: `"hello world"` — auto contains_split across all text fields.
+    ///
+    /// **Query object** (all substring queries are cross-token):
+    /// - `{type: "contains", field: "body", value: "lock"}` — substring match
+    /// - `{type: "contains", field: "body", value: "lock", distance: 1}` — fuzzy substring
+    /// - `{type: "contains", field: "body", value: "lock.*init", regex: true}` — regex substring
+    /// - `{type: "startsWith", field: "body", value: "lock"}` — token prefix
+    /// - `{type: "contains_split", field: "body", value: "struct device"}` — words OR'd
+    /// - `{type: "term", field: "body", value: "lock"}` — exact whole-token
+    /// - `{type: "fuzzy", field: "body", value: "schdule", distance: 1}` — alias for contains+distance
+    /// - `{type: "phrase", field: "body", value: "mutex lock"}` — adjacent tokens
+    /// - `{type: "regex", field: "body", pattern: "sched[a-z]+"}` — regex on tokens
+    /// - `{type: "boolean", must: [...], should: [...], must_not: [...]}` — boolean combo
+    /// - `{type: "disjunction_max", queries: [...], tie_breaker: 0.1}` — best score
+    /// - `{type: "more_like_this", field: "body", value: "sample text", min_doc_frequency: 1}` — similarity
+    ///
+    /// @param options - `{limit?: number, highlights?: boolean, fields?: boolean, allowed_ids?: number[]}`
     #[napi]
     pub fn search(
         &self,
