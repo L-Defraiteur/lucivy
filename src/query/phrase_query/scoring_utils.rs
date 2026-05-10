@@ -1,7 +1,4 @@
-//! Shared scoring utilities for contains queries (ngram and cascade).
-//!
-//! Consolidates functions previously duplicated between `contains_scorer.rs`,
-//! `ngram_query.rs`, and `matching.rs`.
+//! Shared scoring utilities for contains queries.
 
 use std::cmp::min;
 use std::collections::HashMap;

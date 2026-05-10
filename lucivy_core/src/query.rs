@@ -165,14 +165,8 @@ fn expand_split(config: &QueryConfig, sub_type: &str) -> QueryConfig {
     }
 }
 
-/// Check that SFX indexing is enabled. Returns an error if sfx_enabled=false.
-fn require_sfx(index: &Index) -> Result<(), String> {
-    if !index.settings().sfx_enabled {
-        return Err(
-            "contains/startsWith queries require SFX indexing. \
-             Set sfx: true (default) in schema config.".into()
-        );
-    }
+/// SFX is always enabled in v2 — no-op kept for call-site clarity.
+fn require_sfx(_index: &Index) -> Result<(), String> {
     Ok(())
 }
 

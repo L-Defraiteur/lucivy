@@ -1,7 +1,5 @@
-//! Suffix FST contains query — standalone query type for substring search via .sfx files.
-//!
-//! Unlike NgramContainsQuery which uses trigrams + stored text verification,
-//! this query uses the suffix FST for direct proof. Zero stored text reads.
+//! Suffix FST contains query — substring search via .sfx files.
+//! Uses the suffix FST for direct proof. Zero stored text reads.
 //!
 //! Requires a .sfx file to exist for the target field. If not present,
 //! returns an error — no silent fallback.
