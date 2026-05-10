@@ -425,7 +425,7 @@ impl<'a> SfxFileReader<'a> {
         }
 
         // Sort by prefix_len descending (longest split first = most selective)
-        candidates.sort_by(|a, b| b.prefix_len.cmp(&a.prefix_len));
+        candidates.sort_by_key(|c| std::cmp::Reverse(c.prefix_len));
         candidates
     }
 
@@ -496,7 +496,7 @@ impl<'a> SfxFileReader<'a> {
             }
         }
 
-        candidates.sort_by(|a, b| b.prefix_len.cmp(&a.prefix_len));
+        candidates.sort_by_key(|c| std::cmp::Reverse(c.prefix_len));
         candidates.dedup_by(|a, b| a.prefix_len == b.prefix_len && a.parent.raw_ordinal == b.parent.raw_ordinal);
         candidates
     }

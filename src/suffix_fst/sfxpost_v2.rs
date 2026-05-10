@@ -260,7 +260,7 @@ impl SfxPostReaderV2 {
         u32::from_le_bytes(offsets[pos..pos + 4].try_into().unwrap())
     }
 
-    fn read_ordinal_header(&self, ordinal: u32) -> Option<OrdinalHeader> {
+    fn read_ordinal_header(&self, ordinal: u32) -> Option<OrdinalHeader<'_>> {
         let off_start = self.read_offset(ordinal) as usize;
         let off_end = self.read_offset(ordinal + 1) as usize;
         let entry_data = self.entry_data();

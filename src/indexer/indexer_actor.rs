@@ -92,26 +92,6 @@ impl Message for IndexerShutdownMsg {
     fn decode(_: &[u8]) -> Result<Self, String> { Ok(Self) }
 }
 
-// ─── Finalizer messages ─────────────────────────────────────────────────────
-
-/// Finalize a segment in the background.
-/// Envelope.local: FinalizeWork (Segment, SegmentWriter, DeleteCursor, SegmentUpdater).
-struct FinalizeMsg;
-
-impl Message for FinalizeMsg {
-    fn type_tag() -> u64 { type_tag_hash(b"FinalizeMsg") }
-    fn encode(&self) -> Vec<u8> { vec![] }
-    fn decode(_: &[u8]) -> Result<Self, String> { Ok(Self) }
-}
-
-/// Finalize reply (empty on success, error bytes on failure).
-struct FinalizeReply;
-
-impl Message for FinalizeReply {
-    fn type_tag() -> u64 { type_tag_hash(b"FinalizeReply") }
-    fn encode(&self) -> Vec<u8> { vec![] }
-    fn decode(_: &[u8]) -> Result<Self, String> { Ok(Self) }
-}
 
 // ─── State ──────────────────────────────────────────────────────────────────
 
