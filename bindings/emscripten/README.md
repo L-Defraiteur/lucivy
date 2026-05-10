@@ -20,24 +20,29 @@ npm install lucivy-wasm
 ```javascript
 import { Lucivy } from 'lucivy-wasm';
 
-const lucivy = new Lucivy(new URL('lucivy-wasm/worker', import.meta.url));
+const lucivy = new Lucivy('./lucivy-worker.js');
 await lucivy.ready;
 
-const index = await lucivy.create('/my-index', [
-    { name: 'title', type: 'text' },
-    { name: 'body', type: 'text' },
-], 'english');
+const index = await lucivy.create('/my-index', {
+    fields: [
+        { name: 'title', type: 'text' },
+        { name: 'body', type: 'text' },
+    ],
+    shards: 4,
+});
 
 await index.add(1, { title: 'Rust Programming', body: 'Systems programming with memory safety' });
 await index.add(2, { title: 'Python Guide', body: 'Data science and web development' });
 await index.commit();
 
-const results = await index.search('programming');
+const results = await index.search(
+    { type: 'contains', field: 'body', value: 'program' },
+    { highlights: true, fields: true }
+);
 for (const r of results) {
-    console.log(r.docId, r.score);
+    console.log(r.docId, r.score, r.fields.title);
 }
 
-// Cleanup
 lucivy.terminate();
 ```
 
@@ -48,20 +53,23 @@ lucivy.terminate();
 ```javascript
 import { Lucivy } from 'lucivy-wasm';
 
-const lucivy = new Lucivy('./path/to/lucivy-worker.js');
+const lucivy = new Lucivy('./lucivy-worker.js');
 await lucivy.ready;
 
-// Create a new index
-const index = await lucivy.create('/my-index', [
-    { name: 'title', type: 'text' },
-    { name: 'body', type: 'text' },
-], 'english');
+// Create a new index (config object with fields and optional shards)
+const index = await lucivy.create('/my-index', {
+    fields: [
+        { name: 'title', type: 'text' },
+        { name: 'body', type: 'text' },
+    ],
+    shards: 4,
+});
 
 // Open an existing index from OPFS
 const index2 = await lucivy.open('/my-index');
 
-// Import from a LUCE snapshot
-const index3 = await lucivy.importSnapshot(snapshotBlob, '/restored');
+// Import from a LUCE snapshot (Uint8Array)
+const index3 = await lucivy.importSnapshot(snapshotData, '/restored');
 
 // Terminate the worker (frees all WASM memory)
 lucivy.terminate();
@@ -69,51 +77,89 @@ lucivy.terminate();
 
 ### LucivyIndex
 
+#### Add / update / delete
+
 ```javascript
-// Add / update / delete
 await index.add(1, { title: 'Hello', body: 'World' });
+
 await index.addMany([
     { docId: 2, title: 'Foo', body: 'Bar' },
     { docId: 3, title: 'Baz', body: 'Qux' },
 ]);
+
 await index.update(1, { title: 'Updated', body: 'Content' });
 await index.remove(2);
 await index.commit();
+await index.drainMerges();  // wait for background segment merges
+```
 
-// Search (BM25)
-const results = await index.search('rust programming');
+#### Search
 
-// Structured query with highlights
-const results2 = await index.search(
+All substring queries are cross-token: they match across token boundaries.
+
+```javascript
+// Substring — matches "programming", "programmer", "getProgramHandle", etc.
+const results = await index.search(
     { type: 'contains', field: 'body', value: 'program' },
     { highlights: true }
 );
 
-// Prefix — match must start at token boundary
-const results3 = await index.search(
-    { type: 'contains', field: 'body', value: 'prog', anchor_start: true }
-);
+// Fuzzy substring (Levenshtein distance)
+await index.search({ type: 'contains', field: 'body', value: 'mutx', distance: 1 });
 
-// contains_split — each word becomes a separate contains query, OR'd together
-const results4 = await index.search(
-    { type: 'contains_split', field: 'body', value: 'rust safety' }
-);
+// Regex substring — cross-token regex matching
+await index.search({ type: 'contains', field: 'body', value: 'lock.*mutex', regex: true });
 
-// contains_split with fuzzy distance
-const results5 = await index.search(
-    { type: 'contains_split', field: 'body', value: 'memry safty', distance: 1 }
-);
+// Prefix / startsWith
+await index.search({ type: 'startsWith', field: 'body', value: 'prog' });
 
-// Return stored fields with results
-const results6 = await index.search('programming', { fields: true });
-for (const r of results6) {
-    console.log(r.fields.title, r.score);
-}
+// Multi-word search — each word as contains, combined with OR
+await index.search({ type: 'contains_split', field: 'body', value: 'rust safety' });
+
+// Multi-word with fuzzy distance
+await index.search({ type: 'contains_split', field: 'body', value: 'memry safty', distance: 1 });
+
+// Phrase — adjacent tokens in order
+await index.search({ type: 'phrase', field: 'body', value: 'mutex lock' });
+
+// Boolean
+await index.search({
+    type: 'boolean',
+    must: [{ type: 'contains', field: 'body', value: 'rust' }],
+    must_not: [{ type: 'contains', field: 'body', value: 'deprecated' }],
+});
+
+// Retrieve stored fields with results
+const results2 = await index.search(
+    { type: 'contains', field: 'body', value: 'rust' },
+    { fields: true, limit: 10 }
+);
 
 // Pre-filtered by doc IDs
-const results7 = await index.searchFiltered('programming', [1, 3], { highlights: true, fields: true });
+const results3 = await index.searchFiltered(
+    { type: 'contains', field: 'body', value: 'rust' },
+    [1, 3, 5],
+    { highlights: true, fields: true }
+);
+```
 
-// Metadata
+**Filtering** on non-text fields:
+
+```javascript
+await index.search({
+    type: 'contains', field: 'body', value: 'lock',
+    filters: [
+        { field: 'category', op: 'eq', value: 'kernel' },
+        { field: 'score', op: 'gte', value: 0.5 },
+    ]
+});
+```
+
+Filter ops: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `not_in`, `between`, `starts_with`, `contains`.
+
+#### Metadata
+
+```javascript
 const count = await index.numDocs();
 const schema = await index.schema();
 ```
@@ -128,29 +174,15 @@ const snapshot = await index.exportSnapshot();
 const restored = await lucivy.importSnapshot(snapshot, '/restored');
 ```
 
-### Distributed search
-
-```javascript
-// Export local BM25 stats for a query
-const statsJson = await index.exportStats(queryJson);
-
-// Search with merged global stats (correct IDF across nodes)
-const results = await index.searchWithGlobalStats(queryJson, globalStatsJson, limit);
-```
-
 ### Cleanup
 
 ```javascript
-await index.close();    // Remove from tracking (OPFS files kept)
-await index.destroy();  // Remove from tracking + delete OPFS files
-lucivy.terminate();     // Kill worker, free all WASM memory
+await index.close();    // remove from tracking (OPFS files kept)
+await index.destroy();  // remove from tracking + delete OPFS files
+lucivy.terminate();     // kill worker, free all WASM memory
 ```
 
 > **Note**: Always call `lucivy.terminate()` when done. Individual `close()`/`destroy()` are instant and non-blocking. Actual WASM memory is reclaimed on `terminate()`.
-
-## Supported stemmers
-
-`english`, `french`, `german`, `spanish`, `italian`, `portuguese`, `dutch`, `russian`
 
 ## License
 

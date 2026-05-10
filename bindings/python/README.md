@@ -13,9 +13,9 @@ pip install lucivy
 ```python
 import lucivy
 
-index = lucivy.Index.create("./my_index", fields=[
-    {"name": "title", "type": "text"},
-    {"name": "body", "type": "text"},
+index = lucivy.Index.create("/tmp/my_index", fields=[
+    {"name": "title", "type": "text", "stored": True},
+    {"name": "body", "type": "text", "stored": True},
 ])
 
 index.add(1, title="Rust Programming", body="Systems programming with memory safety")
@@ -33,32 +33,32 @@ for r in results:
 
 ```python
 # Create a new index
-index = lucivy.Index.create("./my_index", fields=[
-    {"name": "title", "type": "text"},
-    {"name": "body",  "type": "text"},
-    {"name": "tag",   "type": "keyword"},
-    {"name": "year",  "type": "u64"},
+index = lucivy.Index.create("/tmp/my_index", fields=[
+    {"name": "title", "type": "text", "stored": True},
+    {"name": "body",  "type": "text", "stored": True},
+    {"name": "score", "type": "f64", "fast": True},
 ])
 
 # Create a sharded index (4 shards)
-index = lucivy.Index.create("./my_index", fields=[...], shards=4)
+index = lucivy.Index.create("/tmp/my_index", fields=[...], shards=4)
 
 # Open an existing index
-index = lucivy.Index.open("./my_index")
-
-# Context manager (auto-commit on exit)
-with lucivy.Index.open("./my_index") as index:
-    index.add(3, title="New doc", body="content")
+index = lucivy.Index.open("/tmp/my_index")
 ```
+
+Field types: `"text"` (full-text, tokenized), `"u64"`, `"i64"`, `"f64"`, `"bool"`, `"date"`.
 
 ### Add / update / delete
 
 ```python
-index.add(1, title="Hello", body="World")
+# Fields are passed as keyword arguments
+index.add(1, title="Hello", body="World", score=3.14)
+
 index.add_many([
+    {"doc_id": 1, "title": "Hello", "body": "World"},
     {"doc_id": 2, "title": "Foo", "body": "Bar"},
-    {"doc_id": 3, "title": "Baz", "body": "Qux"},
 ])
+
 index.update(1, title="Updated title", body="Updated body")
 index.delete(2)
 index.commit()
@@ -81,34 +81,33 @@ for r in results:
 
 #### contains — substring, fuzzy, regex (cross-token)
 
-Searches **stored text**, not individual tokens. Handles multi-word phrases, substrings, typos, and regex across token boundaries.
+All substring queries are cross-token: they match across token boundaries.
 
 ```python
-# Substring — matches "programming", "programmer", etc.
+# Substring — matches "programming", "programmer", "getProgramHandle", etc.
 index.search({"type": "contains", "field": "body", "value": "program"})
 
-# Multi-word phrase
-index.search({"type": "contains", "field": "body", "value": "memory safety"})
+# Fuzzy substring (Levenshtein distance)
+index.search({"type": "contains", "field": "body", "value": "mutx", "distance": 1})
 
-# Fuzzy (catches typos)
-index.search({"type": "contains", "field": "body", "value": "programing languag", "distance": 1})
+# Regex substring — cross-token regex matching
+index.search({"type": "contains", "field": "body", "value": "lock.*mutex", "regex": True})
 
-# Regex on stored text
-index.search({"type": "contains", "field": "body", "value": "program.*language", "regex": True})
+# Prefix / startsWith — match must start at token boundary (SI=0)
+index.search({"type": "startsWith", "field": "body", "value": "prog"})
 
-# Prefix — match must start at token boundary
-index.search({"type": "contains", "field": "body", "value": "prog", "anchor_start": True})
+# Exact whole-token match
+index.search({"type": "term", "field": "body", "value": "lock"})
 
-# Exact match — match must cover entire token(s)
-index.search({"type": "contains", "field": "body", "value": "rust", "exact_match": True})
+# Phrase — adjacent tokens in order
+index.search({"type": "phrase", "field": "body", "value": "mutex lock"})
 ```
 
-#### contains_split — one word = one contains query, OR'd together
+#### contains_split — multi-word search
 
-Like a string query but targeting a specific field.
+Split on whitespace, each word becomes a `contains` query, combined with boolean OR.
 
 ```python
-# "rust safety" -> contains("rust") OR contains("safety") on body
 index.search({"type": "contains_split", "field": "body", "value": "rust safety"})
 
 # With fuzzy distance — each word gets fuzzy tolerance
@@ -132,11 +131,27 @@ index.search({
 })
 ```
 
-#### keyword / range — for non-text fields
+#### Filtering
+
+Filter on non-text fields (combined with AND):
 
 ```python
-index.search({"type": "keyword", "field": "tag", "value": "rust"})
-index.search({"type": "range", "field": "year", "gte": 2020, "lte": 2025})
+index.search({
+    "type": "contains", "field": "body", "value": "lock",
+    "filters": [
+        {"field": "category", "op": "eq", "value": "kernel"},
+        {"field": "score", "op": "gte", "value": 0.5},
+        {"field": "status", "op": "in", "value": ["active", "review"]},
+    ]
+})
+```
+
+Filter ops: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `not_in`, `between`, `starts_with`, `contains`.
+
+Pre-filter by document ID (fast, bitmap-based):
+
+```python
+index.search({"type": "contains", "field": "body", "value": "lock"}, allowed_ids=[1, 2, 3])
 ```
 
 ### Snapshots (export / import)
@@ -144,6 +159,9 @@ index.search({"type": "range", "field": "year", "gte": 2020, "lte": 2025})
 ```python
 # Export index to a .luce file
 index.export_snapshot_to("./backup.luce")
+
+# Export as bytes
+blob = index.export_snapshot()
 
 # Import from .luce file
 restored = lucivy.Index.import_snapshot_from("./backup.luce", dest_path="./restored_index")
@@ -183,12 +201,13 @@ stats_json = node.export_stats(query)
 results = node.search_with_global_stats(query, global_stats_json, limit=10, highlights=True)
 ```
 
-### Info
+### Properties
 
 ```python
-index.num_docs()  # number of documents
-index.path()      # index directory path
-index.schema()    # list of field definitions
+index.num_docs    # number of documents (property, no parentheses)
+index.num_shards  # number of shards (property)
+index.path        # index directory path (property)
+index.schema      # list of {"name": "...", "type": "..."} dicts (property)
 index.close()     # flush + release writer lock
 ```
 

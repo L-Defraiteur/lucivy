@@ -13,16 +13,16 @@ npm install lucivy
 ```javascript
 const { Index } = require('lucivy');
 
-const index = Index.create('./my_index', [
-    { name: 'title', type: 'text' },
-    { name: 'body', type: 'text' },
+const index = Index.create('/tmp/my_index', [
+    { name: 'title', type: 'text', stored: true },
+    { name: 'body', type: 'text', stored: true },
 ]);
 
 index.add(1, { title: 'Rust Programming', body: 'Systems programming with memory safety' });
 index.add(2, { title: 'Python Guide', body: 'Data science and web development' });
 index.commit();
 
-let results = index.search('programming', { highlights: true });
+const results = index.search('programming', { highlights: true });
 for (const r of results) {
     console.log(r.docId, r.score, r.highlights);
 }
@@ -33,27 +33,31 @@ for (const r of results) {
 ### Create / open
 
 ```javascript
-const index = Index.create('./my_index', [
-    { name: 'title', type: 'text' },
-    { name: 'body',  type: 'text' },
-    { name: 'tag',   type: 'keyword' },
-    { name: 'year',  type: 'i64', indexed: true, fast: true },
+const index = Index.create('/tmp/my_index', [
+    { name: 'title', type: 'text', stored: true },
+    { name: 'body',  type: 'text', stored: true },
+    { name: 'score', type: 'f64', fast: true },
 ]);
 
 // Sharded (4 shards)
-const sharded = Index.create('./my_index', [...], { shards: 4 });
+const sharded = Index.create('/tmp/sharded', [...], 4);
 
-const index2 = Index.open('./my_index');
+// Open existing
+const index2 = Index.open('/tmp/my_index');
 ```
+
+Field types: `"text"` (full-text, tokenized), `"u64"`, `"i64"`, `"f64"`, `"bool"`, `"date"`.
 
 ### Add / update / delete
 
 ```javascript
-index.add(1, { title: 'Hello', body: 'World' });
+index.add(1, { title: 'Hello', body: 'World', score: 3.14 });
+
 index.addMany([
     { docId: 2, title: 'Foo', body: 'Bar' },
     { docId: 3, title: 'Baz', body: 'Qux' },
 ]);
+
 index.update(1, { title: 'Updated', body: 'Content' });
 index.delete(2);
 index.commit();
@@ -65,7 +69,7 @@ index.commit();
 // String query — each word searched across all text fields (contains_split)
 let results = index.search('rust async programming');
 
-// Options
+// Options: limit, highlights, allowedIds, fields
 results = index.search('rust', { limit: 20, highlights: true, allowedIds: [1, 3] });
 
 // Retrieve stored field values with results
@@ -77,32 +81,33 @@ for (const r of results) {
 
 #### contains — substring, fuzzy, regex (cross-token)
 
-Searches **stored text**, not individual tokens. Handles multi-word phrases, substrings, typos, and regex across token boundaries.
+All substring queries are cross-token: they match across token boundaries.
 
 ```javascript
-// Substring — matches "programming", "programmer", etc.
+// Substring — matches "programming", "programmer", "getProgramHandle", etc.
 index.search({ type: 'contains', field: 'body', value: 'program' });
 
-// Multi-word phrase
-index.search({ type: 'contains', field: 'body', value: 'memory safety' });
+// Fuzzy substring (Levenshtein distance)
+index.search({ type: 'contains', field: 'body', value: 'mutx', distance: 1 });
 
-// Fuzzy (catches typos)
-index.search({ type: 'contains', field: 'body', value: 'programing languag', distance: 1 });
+// Regex substring — cross-token regex matching
+index.search({ type: 'contains', field: 'body', value: 'lock.*mutex', regex: true });
 
-// Regex on stored text
-index.search({ type: 'contains', field: 'body', value: 'program.*language', regex: true });
+// Prefix / startsWith — match must start at token boundary (SI=0)
+index.search({ type: 'startsWith', field: 'body', value: 'prog' });
 
-// Prefix — match must start at token boundary
-index.search({ type: 'contains', field: 'body', value: 'prog', anchor_start: true });
+// Exact whole-token match
+index.search({ type: 'term', field: 'body', value: 'lock' });
 
-// Exact match — match must cover entire token(s)
-index.search({ type: 'contains', field: 'body', value: 'rust', exact_match: true });
+// Phrase — adjacent tokens in order
+index.search({ type: 'phrase', field: 'body', value: 'mutex lock' });
 ```
 
-#### contains_split — one word = one contains query, OR'd together
+#### contains_split — multi-word search
+
+Split on whitespace, each word becomes a `contains` query, combined with boolean OR.
 
 ```javascript
-// "rust safety" -> contains("rust") OR contains("safety") on body
 index.search({ type: 'contains_split', field: 'body', value: 'rust safety' });
 
 // With fuzzy distance — each word gets fuzzy tolerance
@@ -126,15 +131,30 @@ index.search({
 });
 ```
 
-#### keyword / range — for non-text fields
+#### Filtering
+
+Filter on non-text fields (combined with AND):
 
 ```javascript
-index.search({ type: 'keyword', field: 'tag', value: 'rust' });
 index.search({
-    type: 'contains', field: 'body', value: 'programming',
-    filters: [{ field: 'year', op: 'gte', value: 2023 }],
+    type: 'contains', field: 'body', value: 'lock',
+    filters: [
+        { field: 'category', op: 'eq', value: 'kernel' },
+        { field: 'score', op: 'gte', value: 0.5 },
+        { field: 'status', op: 'in', value: ['active', 'review'] },
+    ]
 });
 ```
+
+Filter ops: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `not_in`, `between`, `starts_with`, `contains`.
+
+Pre-filter by document ID (fast, bitmap-based):
+
+```javascript
+index.search({ type: 'contains', field: 'body', value: 'lock' }, { allowedIds: [1, 2, 3] });
+```
+
+> **Note:** napi-rs converts snake_case to camelCase — use `allowedIds`, `docId`, `numDocs`, etc. in JavaScript.
 
 ### Snapshots (export / import)
 
@@ -184,10 +204,12 @@ const results = node.searchWithGlobalStats(queryJson, globalStatsJson, 10, true)
 ### Properties
 
 ```javascript
-index.numDocs   // number of documents
-index.path      // index directory path
-index.schema    // array of field definitions
-index.close()   // flush + release writer lock
+index.numDocs      // number of documents (getter)
+index.numShards    // number of shards (getter)
+index.path         // index directory path (getter)
+index.schema       // array of {name, type} objects (getter)
+index.shardVersions // per-shard version info for delta sync (getter)
+index.close()      // flush + release writer lock
 ```
 
 ## License
