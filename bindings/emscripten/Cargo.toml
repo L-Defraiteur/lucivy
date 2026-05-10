@@ -1,7 +1,7 @@
 [package]
 name = "lucivy-emscripten"
 version = "2.0.0"
-edition = "2024"
+edition = "2021"
 license = "MIT"
 description = "Emscripten (WASM + pthreads) binding for Lucivy full-text search"
 

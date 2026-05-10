@@ -81,6 +81,7 @@ emcc "$STATIC_LIB" \
         "_lucivy_shard_versions",
         "_lucivy_export_sharded_delta",
         "_lucivy_apply_sharded_delta",
+        "_lucivy_merge_stats",
         "_lucivy_export_stats",
         "_lucivy_search_with_global_stats",
         "_lucivy_num_docs",
