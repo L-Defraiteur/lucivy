@@ -9,7 +9,7 @@ description = "Emscripten (WASM + pthreads) binding for Lucivy full-text search"
 crate-type = ["staticlib"]
 
 [dependencies]
-lucivy-core = { path = "../../lucivy_core" }
+lucivy-core = { path = "../../lucivy_core", default-features = false }
 luciole = { path = "../../luciole" }
 lucistore = { path = "../../lucistore" }
 ld-lucivy = { path = "../..", default-features = false, features = [

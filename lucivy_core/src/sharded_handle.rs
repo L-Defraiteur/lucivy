@@ -2139,6 +2139,16 @@ impl ShardedHandle {
     }
 }
 
+impl Drop for ShardedHandle {
+    fn drop(&mut self) {
+        // Release writer locks on all shards so other processes can open the index.
+        // Best-effort: errors are silently ignored during drop.
+        for shard in &self.shards {
+            let _ = shard.close();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

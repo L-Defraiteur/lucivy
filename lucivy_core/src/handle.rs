@@ -481,6 +481,14 @@ pub fn configure_tokenizers(index: &Index, _config: &SchemaConfig) {
     index.tokenizers().register(RAW_TOKENIZER, raw_tokenizer);
 }
 
+impl Drop for LucivyHandle {
+    fn drop(&mut self) {
+        // Release the writer lock so other processes/tests can open the index.
+        // Errors are silently ignored during drop (best-effort).
+        let _ = self.close();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
