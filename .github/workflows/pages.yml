@@ -27,6 +27,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install maturin + build lucivy
+        run: |
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install maturin
+          cd bindings/python && maturin develop --release
+
+      - name: Build dataset.luce
+        run: |
+          . .venv/bin/activate
+          python3 playground/build_dataset.py --shards 4
+
       - name: Setup Pages
         uses: actions/configure-pages@v4
 
