@@ -8,7 +8,7 @@ Query type guide:
 - String query:                  "hello world" → auto contains_split across all text fields
 - type=contains:                 Substring match on stored text (cross-token, fuzzy by default d=1)
 - type=contains + distance=N:    Fuzzy substring match (Levenshtein tolerance on each token)
-- type=contains + regex=True:    Regex on stored text (cross-token), uses ngram acceleration
+- type=contains + regex=True:    Regex on stored text (cross-token), uses literal extraction + DFA
 - type=contains_split:           Splits on whitespace, each word → contains, combined with boolean should
 - type=boolean:                  Combine sub-queries with must/should/must_not
 """
@@ -341,11 +341,11 @@ class TestFuzzy:
 
 
 class TestRegex:
-    """Regex matching via contains with regex=True (cross-token, ngram-accelerated).
+    """Regex matching via contains with regex=True (cross-token).
 
     - Pattern matches against stored text (the full field value)
     - Cross-token: "program.*language" matches "programming language"
-    - Uses ngram acceleration + regex verification
+    - Uses literal extraction + DFA validation on suffix FST
     """
 
     def test_contains_regex_cross_token(self, index):
@@ -457,13 +457,12 @@ class TestHighlights:
         assert "body" in doc2.highlights
 
     def test_highlights_no_internal_fields(self, index):
-        """Highlights never expose internal ._raw or ._ngram fields."""
+        """Highlights never expose internal ._raw fields."""
         results = index.search("python", highlights=True)
         for r in results:
             if r.highlights:
                 for field_name in r.highlights:
                     assert not field_name.endswith("._raw"), f"internal field leaked: {field_name}"
-                    assert not field_name.endswith("._ngram"), f"internal field leaked: {field_name}"
 
     def test_highlights_with_contains_regex(self, index):
         """Highlights work with contains+regex (cross-token regex)."""

@@ -67,11 +67,10 @@ impl Index {
     /// Args:
     ///     path: Directory path for the index files.
     ///     fields: List of field definitions, e.g. [{"name": "body", "type": "text"}].
-    ///     sfx: Whether to build suffix FST (default True).
     ///     shards: Number of shards (default 1).
     #[staticmethod]
-    #[pyo3(signature = (path, fields, sfx=None, shards=None))]
-    fn create(path: &str, fields: &Bound<'_, PyList>, sfx: Option<bool>, shards: Option<usize>) -> PyResult<Self> {
+    #[pyo3(signature = (path, fields, shards=None))]
+    fn create(path: &str, fields: &Bound<'_, PyList>, shards: Option<usize>) -> PyResult<Self> {
         let mut field_defs = Vec::new();
         for item in fields.iter() {
             let dict: &Bound<'_, PyDict> = item.downcast()?;
@@ -96,7 +95,7 @@ impl Index {
         let config = query::SchemaConfig {
             fields: field_defs,
             tokenizer: None,
-            sfx,
+            sfx: None,
             shards,
             ..Default::default()
         };
