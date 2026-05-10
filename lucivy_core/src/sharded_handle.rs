@@ -2522,4 +2522,66 @@ mod tests {
         assert!(!results.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn test_fuzzy_contains_small_dataset() {
+        let dir = std::env::temp_dir().join("lucivy_test_fuzzy_small");
+        let _ = std::fs::remove_dir_all(&dir);
+        let config: crate::query::SchemaConfig = serde_json::from_value(serde_json::json!({
+            "fields": [
+                {"name": "body", "type": "text", "stored": true},
+            ]
+        })).unwrap();
+        let handle = ShardedHandle::create(dir.to_str().unwrap(), &config).unwrap();
+        let body_f = handle.field("body").unwrap();
+        let nid_f = handle.field(NODE_ID_FIELD).unwrap();
+
+        let docs = vec![
+            "The mutex lock mechanism is simple",
+            "Multiple locks are held for spinlock",
+            "The scheduler handles locking primitives",
+            "Unlock the resource safely",
+            "This clock hardware has no lock",
+        ];
+        for (i, body) in docs.iter().enumerate() {
+            let mut doc = ld_lucivy::LucivyDocument::new();
+            doc.add_u64(nid_f, i as u64);
+            doc.add_text(body_f, body);
+            handle.add_document(doc, i as u64).unwrap();
+        }
+        handle.commit().unwrap();
+        eprintln!("[FUZZY-TEST] {} docs indexed, 1 shard", handle.num_docs());
+
+        // Exact contains "lock" should find 5 docs
+        let q_exact: crate::query::QueryConfig = serde_json::from_value(serde_json::json!({
+            "type": "contains", "field": "body", "value": "lock"
+        })).unwrap();
+        let r = handle.search(&q_exact, 100, None).unwrap();
+        eprintln!("[FUZZY-TEST] contains 'lock': {} hits", r.len());
+        assert_eq!(r.len(), 5);
+
+        // Fuzzy "lok" d=1 should find "lock" → at least the 5 docs with "lock"
+        let q_fuzzy: crate::query::QueryConfig = serde_json::from_value(serde_json::json!({
+            "type": "contains", "field": "body", "value": "lok", "distance": 1
+        })).unwrap();
+        let r = handle.search(&q_fuzzy, 100, None).unwrap();
+        eprintln!("[FUZZY-TEST] fuzzy 'lok' d=1: {} hits", r.len());
+
+        // Fuzzy "lock" d=1 (exact match within distance) should also work
+        let q_fuzzy2: crate::query::QueryConfig = serde_json::from_value(serde_json::json!({
+            "type": "contains", "field": "body", "value": "lock", "distance": 1
+        })).unwrap();
+        let r2 = handle.search(&q_fuzzy2, 100, None).unwrap();
+        eprintln!("[FUZZY-TEST] fuzzy 'lock' d=1: {} hits", r2.len());
+
+        // Fuzzy "mutx" d=1 → "mutex"
+        let q_fuzzy3: crate::query::QueryConfig = serde_json::from_value(serde_json::json!({
+            "type": "contains", "field": "body", "value": "mutx", "distance": 1
+        })).unwrap();
+        let r3 = handle.search(&q_fuzzy3, 100, None).unwrap();
+        eprintln!("[FUZZY-TEST] fuzzy 'mutx' d=1: {} hits", r3.len());
+
+        assert!(r.len() > 0, "fuzzy 'lok' d=1 should find at least 1 doc");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
