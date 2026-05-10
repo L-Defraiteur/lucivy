@@ -1,7 +1,7 @@
 [package]
 name = "lucistore"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "MIT"
 description = "Shared persistence, sync and shard infrastructure for lucivy and friends"
 authors = ["Luciform Research <luciedefraiteur@luciformresearch.com>"]

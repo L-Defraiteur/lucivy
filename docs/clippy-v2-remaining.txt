@@ -1,0 +1,457 @@
+  --> lucivy-fst/build.rs:78:9
+  --> lucivy-fst/build.rs:86:13
+  --> stacker/src/fastcmp.rs:12:8
+  --> stacker/src/fastcmp.rs:45:8
+  --> stacker/src/fastcmp.rs:61:4
+  --> stacker/src/fastcmp.rs:71:4
+   --> lucivy-fst/src/automaton/mod.rs:298:9
+   --> lucivy-fst/src/automaton/mod.rs:314:9
+  --> lucivy-fst/src/bytes.rs:84:13
+  --> lucivy-fst/src/bytes.rs:88:9
+   --> lucivy-fst/src/bytes.rs:100:13
+   --> lucivy-fst/src/bytes.rs:104:9
+  --> lucivy-fst/src/automaton/levenshtein.rs:27:60
+  --> lucivy-fst/src/automaton/levenshtein.rs:58:5
+   --> lucivy-fst/src/automaton/levenshtein.rs:249:17
+   --> lucivy-fst/src/automaton/levenshtein.rs:349:9
+   --> lucivy-fst/src/automaton/mod.rs:113:6
+   --> lucivy-fst/src/automaton/mod.rs:297:20
+   --> lucivy-fst/src/automaton/mod.rs:313:36
+  --> lucivy-fst/src/map.rs:67:5
+   --> lucivy-fst/src/map.rs:950:5
+   --> lucivy-fst/src/map.rs:961:5
+  --> lucivy-fst/src/set.rs:42:5
+   --> lucivy-fst/src/set.rs:827:5
+   --> lucivy-fst/src/set.rs:838:5
+   --> lucivy-fst/src/raw/build.rs:282:41
+   --> lucivy-fst/src/raw/build.rs:393:32
+  --> lucivy-fst/src/raw/error.rs:89:49
+   --> lucivy-fst/src/raw/error.rs:99:39
+   --> lucivy-fst/src/raw/error.rs:106:58
+   --> lucivy-fst/src/raw/error.rs:118:30
+   --> lucivy-fst/src/raw/error.rs:125:30
+   --> lucivy-fst/src/raw/error.rs:126:30
+   --> lucivy-fst/src/raw/error.rs:128:51
+   --> lucivy-fst/src/raw/error.rs:169:19
+  --> lucivy-fst/src/raw/node.rs:45:13
+   --> lucivy-fst/src/raw/node.rs:255:13
+   --> lucivy-fst/src/raw/node.rs:258:16
+  --> lucivy-fst/src/raw/ops.rs:51:5
+  --> lucivy-fst/src/raw/ops.rs:62:5
+   --> lucivy-fst/src/raw/ops.rs:252:24
+   --> lucivy-fst/src/raw/ops.rs:337:24
+   --> lucivy-fst/src/raw/ops.rs:447:1
+   --> lucivy-fst/src/raw/mod.rs:353:42
+   --> lucivy-fst/src/raw/mod.rs:572:19
+   --> lucivy-fst/src/raw/mod.rs:591:19
+   --> lucivy-fst/src/raw/mod.rs:965:9
+    --> lucivy-fst/src/raw/mod.rs:1319:5
+  --> lucivy-fst/src/stream.rs:73:5
+  --> lucivy-fst/src/raw/error.rs:11:1
+  --> lucivy-fst/src/raw/error.rs:82:5
+  --> luciole/src/mailbox.rs:29:5
+  --> luciole/src/pool.rs:59:5
+  --> luciole/src/scatter.rs:89:5
+src/core/searcher.rs:182:17: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/core/searcher.rs:195:17: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/core/searcher.rs:197:34: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/core/searcher.rs:222:17: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/core/searcher.rs:252:17: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/core/searcher.rs:263:28: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/core/searcher.rs:263:22: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/indexer/index_writer.rs:661:43: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/indexer/segment_updater.rs:37:57: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/indexer/segment_updater.rs:399:25: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/indexer/segment_updater.rs:443:35: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/aggregation/bucket/filter.rs:282:28: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/aggregation/bucket/filter.rs:309:28: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/aggregation/bucket/filter.rs:439:20: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/aggregation/bucket/filter.rs:100:28: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/directory/directory.rs:46:20: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/directory.rs:76:17: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/directory.rs:260:16: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/directory.rs:266:42: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/directory.rs:255:32: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/directory.rs:261:15: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/directory.rs:267:22: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/directory.rs:249:32: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:41:20: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:53:17: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:104:31: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:104:21: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:105:26: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:325:24: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:325:9: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:330:24: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:330:9: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:335:41: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:335:26: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:60:31: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:60:21: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:535:25: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:536:48: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:538:38: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:551:26: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/query/boolean_query/boolean_weight.rs:698:46: error[E0061]: this function takes 2 arguments but 1 argument was supplied
+src/directory/managed_directory.rs:64:24: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:96:32: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:103:44: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/ram_directory.rs:158:34: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:48:17: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:57:17: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:74:17: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:200:19: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:231:30: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:260:18: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:298:25: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:356:30: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:381:22: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:523:20: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:534:32: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/query/automaton_weight.rs:66:23: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/automaton_weight.rs:107:44: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/bm25.rs:108:22: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:132:33: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:150:6: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:151:41: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:251:44: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:270:37: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:290:42: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:296:35: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:303:26: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:328:44: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_weight.rs:540:26: error[E0195]: lifetime parameters or bounds on method `scorer_async` do not match the trait declaration: lifetimes do not match method in trait
+src/query/boost_query.rs:14:16: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boost_query.rs:20:27: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/const_score_query.rs:13:16: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/const_score_query.rs:19:27: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/disjunction_max_query.rs:76:24: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/disjunction_max_query.rs:117:28: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/disjunction_max_query.rs:127:35: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/more_like_this/more_like_this.rs:89:34: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/more_like_this/more_like_this.rs:101:34: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/more_like_this/more_like_this.rs:133:34: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/more_like_this/more_like_this.rs:147:34: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/more_like_this/more_like_this.rs:307:34: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/query.rs:25:20: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/query.rs:295:16: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:358:21: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:364:1: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:51:20: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/query.rs:82:40: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/query.rs:290:32: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:296:16: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:300:15: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:304:28: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:308:30: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:312:35: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:316:43: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:321:14: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:328:14: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:334:28: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:338:30: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:343:14: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:349:40: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:353:41: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:359:19: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:284:32: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:917:10: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:1057:86: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:336:58: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:349:60: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:362:21: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:376:15: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/set_query.rs:39:27: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/term_query/term_weight.rs:292:26: error[E0195]: lifetime parameters or bounds on method `scorer_async` do not match the trait declaration: lifetimes do not match method in trait
+src/query/term_query/term_weight.rs:301:25: error[E0195]: lifetime parameters or bounds on method `count_async` do not match the trait declaration: lifetimes do not match method in trait
+src/query/term_query/term_weight.rs:313:28: error[E0195]: lifetime parameters or bounds on method `for_each_async` do not match the trait declaration: lifetimes do not match method in trait
+src/query/term_query/term_weight.rs:334:37: error[E0195]: lifetime parameters or bounds on method `for_each_no_score_async` do not match the trait declaration: lifetimes do not match method in trait
+src/query/term_query/term_weight.rs:358:36: error[E0195]: lifetime parameters or bounds on method `for_each_pruning_async` do not match the trait declaration: lifetimes do not match method in trait
+src/snippet/mod.rs:402:17: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/core/searcher.rs:185:14: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/core/searcher.rs:185:14: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/core/searcher.rs:185:64: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/core/searcher.rs:200:61: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/core/searcher.rs:205:14: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/core/searcher.rs:227:28: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/core/searcher.rs:227:22: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/indexer/index_writer.rs:647:14: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/indexer/index_writer.rs:647:27: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/indexer/index_writer.rs:662:22: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/indexer/segment_updater.rs:48:15: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/indexer/segment_updater.rs:48:5: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/indexer/segment_updater.rs:49:15: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/indexer/segment_updater.rs:49:5: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/indexer/segment_updater.rs:89:37: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/indexer/segment_updater.rs:506:29: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/indexer/single_segment_index_writer.rs:53:33: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/aggregation/agg_data.rs:716:36: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/aggregation/agg_data.rs:716:25: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/aggregation/agg_data.rs:718:17: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/aggregation/bucket/filter.rs:289:22: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/aggregation/bucket/filter.rs:288:17: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/aggregation/bucket/filter.rs:294:25: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/aggregation/bucket/filter.rs:312:18: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/aggregation/bucket/filter.rs:311:52: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/aggregation/bucket/filter.rs:314:46: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/aggregation/bucket/filter.rs:446:12: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/aggregation/bucket/filter.rs:453:22: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/collector/mod.rs:213:47: error[E0277]: `<Self as collector::Collector>::Child` cannot be sent between threads safely: `<Self as collector::Collector>::Child` cannot be sent between threads safely
+src/directory/directory.rs:58:40: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/directory.rs:58:25: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/directory.rs:78:31: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/directory.rs:78:21: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/directory.rs:84:20: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/directory.rs:192:34: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/directory.rs:195:52: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/directory.rs:256:9: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/directory.rs:262:9: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/directory.rs:268:9: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:58:15: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:58:5: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:78:21: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:85:17: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:97:31: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:97:21: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:98:26: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:205:28: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:205:13: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:206:32: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:239:28: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:251:24: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:251:9: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:257:37: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:257:22: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:291:41: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:291:26: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:303:18: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:302:13: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:312:24: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:312:9: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:316:24: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:316:9: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:320:24: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:320:9: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:344:24: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:344:9: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:348:24: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:348:9: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:352:24: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:352:9: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:356:24: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:356:9: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/managed_directory.rs:364:24: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/ram_directory.rs:161:37: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/directory/ram_directory.rs:161:32: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:51:31: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:51:21: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:84:9: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:86:15: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:86:5: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:182:29: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:182:50: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:183:26: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:186:9: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:219:29: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:219:50: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:220:9: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:232:18: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:233:27: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:234:20: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:236:25: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:262:19: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:263:48: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:267:13: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:299:13: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:299:9: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:360:19: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:361:9: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:386:18: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:389:9: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:524:25: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:525:48: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:527:32: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/index/index.rs:545:20: error[E0038]: the trait `directory::directory::Directory` is not dyn compatible: `directory::directory::Directory` is not dyn compatible
+src/query/automaton_weight.rs:84:20: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/automaton_weight.rs:102:20: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/automaton_weight.rs:108:22: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/automaton_weight.rs:221:30: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/automaton_weight.rs:222:29: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/automaton_weight.rs:222:24: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/automaton_weight.rs:224:32: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/automaton_weight.rs:225:29: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/automaton_weight.rs:225:24: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/automaton_weight.rs:331:19: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/automaton_weight.rs:331:13: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/automaton_weight.rs:583:17: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/bm25.rs:121:43: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/bm25.rs:121:32: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/bm25.rs:122:41: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/bm25.rs:122:30: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/bm25.rs:126:44: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/bm25.rs:126:33: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/bm25.rs:135:48: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/bm25.rs:135:37: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:138:26: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:141:19: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:141:47: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:144:13: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:152:27: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:158:27: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:161:19: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:161:50: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:172:35: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:178:35: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:179:13: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:185:35: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:191:35: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:200:35: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:210:35: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:216:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:217:24: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:222:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:223:24: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:231:35: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:237:35: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:243:35: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:256:27: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:265:45: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:274:13: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:291:26: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:291:51: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:292:27: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:297:26: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:297:51: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:298:27: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:306:26: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:308:19: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:310:53: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:316:33: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:319:33: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:320:21: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:316:64: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:324:27: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boolean_query/boolean_query.rs:329:10: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boost_query.rs:21:22: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boost_query.rs:28:20: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boost_query.rs:36:32: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boost_query.rs:43:36: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/boost_query.rs:53:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/const_score_query.rs:20:27: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/const_score_query.rs:27:20: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/const_score_query.rs:35:42: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/const_score_query.rs:42:28: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/const_score_query.rs:51:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/disjunction_max_query.rs:83:13: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/disjunction_max_query.rs:85:23: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/disjunction_max_query.rs:94:25: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/disjunction_max_query.rs:97:19: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/disjunction_max_query.rs:97:48: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/disjunction_max_query.rs:108:25: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/disjunction_max_query.rs:121:13: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/disjunction_max_query.rs:128:47: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/fuzzy_query.rs:222:45: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/fuzzy_query.rs:223:29: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/fuzzy_query.rs:223:40: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/more_like_this/more_like_this.rs:91:32: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/more_like_this/more_like_this.rs:103:32: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/more_like_this/more_like_this.rs:117:28: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/more_like_this/more_like_this.rs:118:17: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/more_like_this/more_like_this.rs:120:50: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/more_like_this/more_like_this.rs:120:25: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/more_like_this/more_like_this.rs:122:13: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/more_like_this/more_like_this.rs:114:27: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/more_like_this/more_like_this.rs:124:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/more_like_this/more_like_this.rs:138:14: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/more_like_this/more_like_this.rs:160:14: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/more_like_this/more_like_this.rs:311:22: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/more_like_this/more_like_this.rs:311:13: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/more_like_this/more_like_this.rs:329:26: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/more_like_this/more_like_this.rs:329:17: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/more_like_this/query.rs:49:80: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/more_like_this/query.rs:49:75: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/more_like_this/query.rs:55:25: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/more_like_this/query.rs:59:18: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/more_like_this/query.rs:68:22: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/phrase_prefix_query/phrase_prefix_query.rs:115:44: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/phrase_query/automaton_phrase_query.rs:192:45: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/phrase_query/phrase_query.rs:138:45: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/phrase_query/regex_phrase_query.rs:149:45: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/phrase_query/regex_continuation_query.rs:321:38: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/phrase_query/regex_continuation_query.rs:321:32: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/phrase_query/regex_continuation_query.rs:322:40: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/phrase_query/regex_continuation_query.rs:322:34: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/phrase_query/suffix_contains_query.rs:469:52: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/phrase_query/suffix_contains_query.rs:469:32: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/phrase_query/suffix_contains_query.rs:470:54: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/phrase_query/suffix_contains_query.rs:470:34: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/query.rs:25:9: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/query.rs:44:20: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/query.rs:54:44: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/query.rs:84:53: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/query.rs:85:47: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/query.rs:291:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:297:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:297:23: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:301:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:301:23: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:305:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:305:23: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:309:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:309:23: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:313:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:313:23: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:317:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:317:23: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:324:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:324:23: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:331:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:331:23: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:335:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:335:23: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:339:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:339:23: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:346:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:346:23: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:350:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:350:23: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:354:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:354:23: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query.rs:360:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:337:27: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:338:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:351:10: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:365:20: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:367:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:378:10: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:922:21: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:928:21: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:935:17: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:944:17: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:946:17: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:949:51: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:950:49: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:951:32: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:953:13: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:1060:36: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:1063:18: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:1065:18: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:1068:40: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:1068:13: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:1071:13: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:1074:25: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:1075:49: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:1076:13: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/query_parser/query_parser.rs:1078:17: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/query/regex_query.rs:111:45: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/regex_query.rs:112:29: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/regex_query.rs:112:40: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/set_query.rs:63:25: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/set_query.rs:63:36: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/set_query.rs:81:36: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/set_query.rs:81:21: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/set_query.rs:82:26: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/query/term_query/term_query.rs:126:40: error[E0038]: the trait `query::bm25::Bm25StatisticsProvider` is not dyn compatible: `query::bm25::Bm25StatisticsProvider` is not dyn compatible
+src/termdict/mod.rs:151:9: error[E0308]: mismatched types: expected `TermInfo`, found `Result<Option<TermInfo>, Error>`
+src/snippet/mod.rs:406:15: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible
+src/snippet/mod.rs:406:9: error[E0038]: the trait `query::query::Query` is not dyn compatible: `query::query::Query` is not dyn compatible

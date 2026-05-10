@@ -7,6 +7,8 @@ Fork of BurntSushi/fst with multi-output support and code-source optimizations.
 """
 license = "MIT"
 edition = "2021"
+repository = "https://github.com/L-Defraiteur/lucivy"
+authors = ["Luciform Research <luciedefraiteur@luciformresearch.com>"]
 
 [features]
 default = []
