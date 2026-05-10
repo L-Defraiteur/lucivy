@@ -250,7 +250,7 @@ impl Index {
     /// - `{type: "more_like_this", field: "body", value: "sample text", min_doc_frequency: 1}` — similarity
     ///
     /// **Filtering:**
-    /// - `allowed_ids` in options: pre-filter by _node_id (fast, bitmap-based)
+    /// - `allowedIds` in options: pre-filter by _node_id (fast, bitmap-based)
     /// - `filters` key in query: filter on non-text fields (AND'd with search):
     ///   ```json
     ///   {type: "contains", field: "body", value: "lock",
@@ -263,7 +263,7 @@ impl Index {
     ///   Ops: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `not_in`, `between`, `starts_with`, `contains`.
     ///   Composite: `must`, `should`, `must_not` with nested `clauses`.
     ///
-    /// @param options - `{limit?: number, highlights?: boolean, fields?: boolean, allowed_ids?: number[]}`
+    /// @param options - `{limit?: number, highlights?: boolean, fields?: boolean, allowedIds?: number[]}`
     #[napi]
     pub fn search(
         &self,
