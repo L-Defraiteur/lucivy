@@ -293,6 +293,7 @@ Everything above that layer has been rewritten or built from scratch:
 | **Regex** | DFA on term dictionary | Literal extraction + SFX lookup + DFA validation |
 | **Substring** | Not supported | Native — every suffix of every token indexed at SI=0/SI>0 |
 | **Cross-token** | Not supported | Sibling table + falling walk reconstruct matches across token boundaries |
+| **Highlights** | Not built-in | Byte-offset highlights for all query types (substring, fuzzy, regex, cross-token) |
 | **Threading** | `thread::spawn` per merge | luciole — custom actor runtime with DAG execution, streaming pipelines, WaitGraph diagnostics, WASM-safe |
 | **Sharding** | Not built-in | ShardedHandle with configurable routing, correct cross-shard BM25 |
 | **Distribution** | Not built-in | export_stats / merge_stats / search_with_global_stats pipeline |
