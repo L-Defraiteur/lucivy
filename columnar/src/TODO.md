@@ -4,7 +4,7 @@
 * add columns from schema on merge
 * Plugging JSON
 * replug examples
-* move datetime to quickwit common
+* move datetime to lucivy common
 * switch to nanos
 * reintroduce the gcd map.
 

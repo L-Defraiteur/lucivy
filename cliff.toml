@@ -2,7 +2,7 @@
 # see https://github.com/orhun/git-cliff#configuration-file
 
 [remote.github]
-owner = "quickwit-oss"
+owner = "L-Defraiteur"
 repo = "lucivy"
 
 [changelog]

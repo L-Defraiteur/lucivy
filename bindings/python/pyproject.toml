@@ -12,7 +12,7 @@ license = "MIT"
 authors = [
     { name = "Luciform Research", email = "luciedefraiteur@luciformresearch.com" },
 ]
-keywords = ["search", "full-text", "bm25", "fuzzy", "substring", "fts", "tantivy"]
+keywords = ["search", "full-text", "bm25", "fuzzy", "substring", "fts", "lucivy"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
