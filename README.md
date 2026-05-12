@@ -280,6 +280,30 @@ cargo build -p lucivy-cpp --release
 bash bindings/emscripten/build.sh
 ```
 
+## Heritage
+
+lucivy started as a fork of [tantivy](https://github.com/quickwit-oss/tantivy) v0.22. The low-level storage layer (segments, postings, doc store, fast fields, tokenizers, aggregations) still derives from tantivy's codebase.
+
+Everything above that layer has been rewritten or built from scratch:
+
+| Component | tantivy | lucivy |
+|-----------|---------|--------|
+| **Search** | Term dictionary lookup (whole tokens) | SFX engine — Suffix FST with cross-token matching via sibling links and falling walk |
+| **Fuzzy** | Levenshtein DFA on term dictionary | Trigram pigeonhole on SFX — no full-index scan |
+| **Regex** | DFA on term dictionary | Literal extraction + SFX lookup + DFA validation |
+| **Substring** | Not supported | Native — every suffix of every token indexed at SI=0/SI>0 |
+| **Cross-token** | Not supported | Sibling table + falling walk reconstruct matches across token boundaries |
+| **Threading** | `thread::spawn` per merge | luciole — custom actor runtime with DAG execution, streaming pipelines, WaitGraph diagnostics, WASM-safe |
+| **Sharding** | Not built-in | ShardedHandle with configurable routing, correct cross-shard BM25 |
+| **Distribution** | Not built-in | export_stats / merge_stats / search_with_global_stats pipeline |
+| **Sync** | Not built-in | LUCE snapshots, LUCID/LUCIDS incremental delta |
+| **WASM** | Not supported | Full emscripten build with pthreads, SharedArrayBuffer, OPFS |
+| **Bindings** | Rust only | Python (PyO3), Node.js (napi-rs), C++ (CXX), WASM (emscripten), Rust |
+
+~40K lines of original lucivy code on top of ~120K lines of tantivy-derived infrastructure.
+
+Thank you to the tantivy team for building a solid foundation.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
