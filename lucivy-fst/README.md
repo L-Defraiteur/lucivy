@@ -1,76 +1,29 @@
-fst
-===
-This crate provides a fast implementation of ordered sets and maps using finite
-state machines. In particular, it makes use of finite state transducers to map
-keys to values as the machine is executed. Using finite state machines as data
-structures enables us to store keys in a compact format that is also easily
-searchable. For example, this crate leverages memory maps to make range queries
-very fast.
+# lucivy-fst
 
-Check out my blog post
-[Index 1,600,000,000 Keys with Automata and
-Rust](https://blog.burntsushi.net/transducers/)
-for extensive background, examples and experiments.
+Finite state transducer library for lucivy. Provides fast ordered sets and maps using FSTs, with multi-output support for the SFX engine.
 
-[![Build status](https://github.com/BurntSushi/fst/workflows/ci/badge.svg)](https://github.com/BurntSushi/fst/actions)
-[![](https://meritbadge.herokuapp.com/fst)](https://crates.io/crates/fst)
+Fork of [BurntSushi/fst](https://github.com/BurntSushi/fst) extended with:
 
-Dual-licensed under MIT or the [UNLICENSE](https://unlicense.org/).
+- **Multi-output values** — `OutputTable` for entries with multiple parent tokens (shared suffixes)
+- **Levenshtein prefix DFA** — fuzzy walk on suffix partitions for cross-token search
+- **Partition-aware construction** — SI=0 (token start) and SI>0 (substring) entries in a single FST
 
+Used internally by lucivy's SFX engine to store all suffixes of all indexed tokens. Not typically used directly — use `lucivy-core` instead.
 
-### Documentation
+## How it fits in lucivy
 
-https://docs.rs/fst
+Each indexed segment has a `.sfx` file containing a lucivy-fst `Map`. The FST keys are `[partition_byte][suffix_bytes]` and values encode `(raw_ordinal, si, token_len)` packed into 64 bits. For shared suffixes (multiple parent tokens), values point into an `OutputTable`.
 
-The
-[`regex-automata`](https://docs.rs/regex-automata)
-crate provides implementations of the `fst::Automata` trait when its
-`transducer` feature is enabled. This permits using DFAs compiled by
-`regex-automata` to search finite state transducers produced by this crate.
+The SFX engine walks this FST byte-by-byte during search (`falling_walk`), detecting split points where a query crosses token boundaries.
 
+## Features
 
-### Installation
+- `levenshtein` — enables Levenshtein automaton for fuzzy search (requires `utf8-ranges`)
 
-Simply add a corresponding entry to your `Cargo.toml` dependency list:
+## Heritage
 
-```toml,ignore
-[dependencies]
-fst = "0.4"
-```
+Based on [BurntSushi/fst](https://github.com/BurntSushi/fst). See the original [blog post](https://blog.burntsushi.net/transducers/) for background on FSTs.
 
+## License
 
-### Example
-
-This example demonstrates building a set in memory and executing a fuzzy query
-against it. You'll need `fst = "0.4"` with the `levenshtein` feature enabled in
-your `Cargo.toml`.
-
-```rust
-use fst::{IntoStreamer, Set};
-use fst::automaton::Levenshtein;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-  // A convenient way to create sets in memory.
-  let keys = vec!["fa", "fo", "fob", "focus", "foo", "food", "foul"];
-  let set = Set::from_iter(keys)?;
-
-  // Build our fuzzy query.
-  let lev = Levenshtein::new("foo", 1)?;
-
-  // Apply our fuzzy query to the set we built.
-  let stream = set.search(lev).into_stream();
-
-  let keys = stream.into_strs()?;
-  assert_eq!(keys, vec!["fo", "fob", "foo", "food"]);
-  Ok(())
-}
-```
-
-Check out the documentation for a lot more examples!
-
-
-### Cargo features
-
-* `levenshtein` - **Disabled** by default. This adds the `Levenshtein`
-  automaton to the `automaton` sub-module. This includes an additional
-  dependency on `utf8-ranges`.
+MIT

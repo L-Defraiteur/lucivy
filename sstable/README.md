@@ -2,18 +2,13 @@
 
 The `lucivy-sstable` crate is yet another sstable crate.
 
-It has been designed to be used in `quickwit`:
-- as an alternative to the default lucivy fst dictionary.
-- as a way to store the column index for dynamic fast fields.
+Used in lucivy as:
+- an alternative to the default lucivy-fst dictionary for term lookups
+- a way to store the column index for dynamic fast fields
 
 The benefit compared to the fst crate is locality.
-Searching a key in the fst crate requires downloading the entire dictionary.
-
-Once the sstable index is downloaded, running a `get` in the sstable
-crate only requires a single fetch.
-
-Right now, the block index and the default block size have been thought
-for quickwit, and the performance of a get is very bad.
+Searching a key in the fst crate requires loading the entire dictionary.
+Once the sstable index is loaded, running a `get` only requires a single fetch.
 
 # Sorted strings?
 

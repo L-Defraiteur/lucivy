@@ -10,7 +10,7 @@ Also available as [Python](https://pypi.org/project/lucivy/), [Node.js](https://
 
 ```toml
 [dependencies]
-lucivy-core = "0.1"
+lucivy-core = "2.0"
 ```
 
 ## Quick start
@@ -289,22 +289,15 @@ Necessary when the host process doesn't drop the handle (e.g. rag3db C++ `~Datab
 
 ## How contains works
 
-Every text field gets 3 sub-fields automatically:
+All text queries route through the SFX engine (Suffix FST). At indexing time, every suffix of every token is stored in a partitioned FST:
 
-| Sub-field | Tokenizer | Purpose |
-|-----------|-----------|---------|
-| `{name}` | stemmed or lowercase | BM25 scoring |
-| `{name}._raw` | lowercase only | contains verification (precision) |
-| `{name}._ngram` | character trigrams | contains candidate generation |
+- **SI=0** (partition 0x00) — token starts, used by `startsWith` / `anchor_start`
+- **SI>0** (partition 0x01) — substrings, used by `contains`
 
-The `contains` query uses trigram-accelerated substring search:
-1. **Candidate collection** via trigram intersection on `._ngram`
-2. **Verification** on stored text (fuzzy or regex)
-3. **BM25 scoring**
+The `contains` query walks the FST byte-by-byte (`falling_walk`), detecting split points where the query crosses token boundaries. Sibling links in the sibling table connect adjacent tokens for cross-token matching.
 
-## Lineage
-
-Fork of [tantivy](https://github.com/quickwit-oss/tantivy) v0.26.0 (via [izihawa/tantivy](https://github.com/izihawa/tantivy)).
+- **Fuzzy**: trigram pigeonhole — at distance d, at least one trigram must appear exactly. SFX finds candidates, Levenshtein validates.
+- **Regex**: literal extraction + SFX lookup + DFA validation. No full-index scan.
 
 ## License
 
