@@ -1,295 +1,271 @@
-# Lucivy
-
-## What is lucivy?
-
-Lucivy is a library that is meant to build search engines. Although it is by no means a port of Lucene, its architecture is strongly inspired by it. If you are familiar with Lucene, you may be struck by the overlapping vocabulary.
-This is not fortuitous.
-
-Lucivy's bread and butter is to address the problem of full-text search :
-
-Given a large set of textual documents, and a text query, return the K-most relevant documents in a very efficient way. To execute these queries rapidly, the lucivy needs to build an index beforehand. The relevance score implemented in the lucivy is not configurable. Lucivy uses the same score as the default similarity used in Lucene / Elasticsearch, called [BM25](https://en.wikipedia.org/wiki/Okapi_BM25).
-
-But lucivy's scope does not stop there. Numerous features are required to power rich-search applications. For instance, one may want to:
-
-- compute the count of documents matching a query in the different section of an e-commerce website,
-- display an average price per meter square for a real estate search engine,
-- take into account historical user data to rank documents in a specific way,
-- or even use lucivy to power an OLAP database.
-
-A more abstract description of the problem space lucivy is trying to address is the following.
-
-Ingest a large set of documents, create an index that makes it possible to
-rapidly select all documents matching a given predicate (also known as a query) and
-collect some information about them ([See collector](#collector-define-what-to-do-with-matched-documents)).
-
-Roughly speaking the design is following these guiding principles:
-
-- Search should be O(1) in memory.
-- Indexing should be O(1) in memory. (In practice it is just sublinear)
-- Search should be as fast as possible
-
-This comes at the cost of the dynamicity of the index: while it is possible to add, and delete documents from our corpus, the lucivy is designed to handle these updates in large batches.
-
-## [core/](src/core): Index, segments, searchers
-
-Core contains all of the high-level code to make it possible to create an index, add documents, delete documents and commit.
-
-This is both the most high-level part of lucivy, the least performance-sensitive one, the seemingly most mundane code... And paradoxically the most complicated part.
-
-### Index and Segments
-
-A lucivy index is a collection of smaller independent immutable segments.
-Each segment contains its own independent set of data structures.
-
-A segment is identified by a segment id that is in fact a UUID.
-The file of a segment has the format
-
- ```segment-id . ext```
-
-The extension signals which data structure (or [`SegmentComponent`](src/index/segment_component.rs)) is stored in the file.
-
-A small `meta.json` file is in charge of keeping track of the list of segments, as well as the schema.
-
-On commit, one segment per indexing thread is written to disk, and the `meta.json` is then updated atomically.
-
-For a better idea of how indexing works, you may read the [following blog post](https://fulmicoton.com/posts/behold-lucivy-part2/).
-
-### Deletes
-
-Deletes happen by deleting a "term". Lucivy does not offer any notion of primary id, so it is up to the user to use a field in their schema as if it was a primary id, and delete the associated term if they want to delete only one specific document.
-
-On commit, lucivy will find all of the segments with documents matching this existing term and remove from [alive bitset file](src/fastfield/alive_bitset.rs) that represents the bitset of the alive document ids.
-Like all segment files, this file is immutable. Because it is possible to have more than one alive bitset file at a given instant, the alive bitset filename has the format ```segment_id . commit_opstamp . del```.
-
-An opstamp is simply an incremental id that identifies any operation applied to the index. For instance, performing a commit or adding a document.
-
-### DocId
-
-Within a segment, all documents are identified by a DocId that ranges within `[0, max_doc)`.
-where `max_doc` is the number of documents in the segment, (deleted or not). Having such a compact `DocId` space is key to the compression of our data structures.
-
-The DocIds are simply allocated in the order documents are added to the index.
-
-### Merges
-
-In separate threads, lucivy's index writer search for opportunities to merge segments.
-The point of segment merge is to:
-
-- eventually get rid of tombstoned documents
-- reduce the otherwise ever-growing number of segments.
-
-Indeed, while having several segments instead of one does not hurt search too much, having hundreds can have a measurable impact on the search performance.
-
-### Searcher
-
-The user of the library usually does not need to know about the existence of Segments.
-Searching is done through an object called a [`Searcher`](src/core/searcher.rs), that captures a
-snapshot of the index at one point of time, by holding a list of [SegmentReader](src/core/segment_reader.rs).
-
-In other words, regardless of commits, file garbage collection, or segment merge that might happen, as long as the user holds and reuse the same [Searcher](src/core/searcher.rs), search will happen on an immutable snapshot of the index.
-
-## [directory/](src/directory): Where should the data be stored?
-
-Lucivy, like Lucene, abstracts the place where the data should be stored in a key-trait
-called [`Directory`](src/directory/directory.rs).
-Contrary to Lucene however, "files" are quite different from some kind of `io::Read` object.
-Check out [`src/directory/directory.rs`](src/directory/directory.rs) trait for more details.
-
-Lucivy ships two main directory implementation: the `MmapDirectory` and the `RamDirectory`,
-but users can extend lucivy with their own implementation.
-
-## [schema/](src/schema): What are documents?
-
-Lucivy's document follows a very strict schema, decided before building any index.
-
-The schema defines all of the fields that the indexes [`Document`](src/schema/document/mod.rs) may and should contain, their types (`text`, `i64`, `u64`, `Date`, ...) as well as how it should be indexed / represented in lucivy.
-
-Depending on the type of the field, you can decide to
-
-- put it in the docstore
-- store it as a fast field
-- index it
-
-Practically, lucivy will push values associated with this type to up to 3 respective
-data structures.
-
-*Limitations*
-
-As of today, lucivy's schema imposes a 1:1 relationship between a field that is being ingested and a field represented in the search index. In sophisticated search application, it is fairly common to want to index a field twice using different tokenizers, or to index the concatenation of several fields together into one field.
-
-This is not something lucivy supports, and it is up to the user to duplicate field / concatenate fields before feeding them to lucivy.
-
-## General information about these data structures
-
-All data structures in lucivy, have:
-
-- a writer
-- a serializer
-- a reader
-
-The writer builds an in-memory representation of a batch of documents. This representation is not searchable. It is just meant as an intermediary mutable representation, to which we can sequentially add
-the document of a batch. At the end of the batch (or if a memory limit is reached), this representation
-is then converted into an on-disk immutable representation, that is extremely compact.
-This conversion is done by the serializer.
-
-Finally, the reader is in charge of offering an API to read on this on-disk read-only representation.
-In lucivy, readers are designed to require very little anonymous memory. The data is read straight from an mmapped file, and loading an index is as fast as mmapping its files.
-
-## [store/](src/store): Here is my DocId, Gimme my document
-
-The docstore is a row-oriented storage that, for each document, stores a subset of the fields
-that are marked as stored in the schema. The docstore is compressed using a general-purpose algorithm
-like LZ4.
-
-**Useful for**
-
-In search engines, it is often used to display search results.
-Once the top 10 documents have been identified, we fetch them from the store, and display them or their snippet on the search result page (aka SERP).
-
-**Not useful for**
-
-Fetching a document from the store is typically a "slow" operation. It usually consists in
-
-- searching into a compact tree-like data structure to find the position of the right block.
-- decompressing a small block
-- returning the document from this block.
-
-It is NOT meant to be called for every document matching a query.
-
-As a rule of thumb, if you hit the docstore more than 100 times per search query, you are probably misusing lucivy.
-
-## [fastfield/](src/fastfield): Here is my DocId, Gimme my value
-
-Fast fields are stored in a column-oriented storage that allows for random access.
-The only compression applied is bitpacking. The column comes with two meta data.
-The minimum value in the column and the number of bits per doc.
-
-Fetching a value for a `DocId` is then as simple as computing
-
-```rust
-min_value + fetch_bits(num_bits * doc_id..num_bits * (doc_id+1))
+# lucivy — Architecture
+
+## Overview
+
+lucivy is a BM25 full-text search engine built for substring matching across token boundaries. It indexes every suffix of every token into a Suffix FST, enabling queries that traditional engines cannot answer: find "mutex" inside "pthread_mutex_lock", or "ror::lucivyer" matching "Error::LucivyError".
+
+The architecture has three layers:
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Bindings (Python, Node.js, C++, WASM, Rust)        │
+├─────────────────────────────────────────────────────┤
+│  lucivy_core — ShardedHandle, query builder,        │
+│                BM25 global, snapshot/delta           │
+├─────────────────────────────────────────────────────┤
+│  ld-lucivy — SFX engine, indexer, segments,         │
+│              postings, doc store, schema             │
+├─────────────────────────────────────────────────────┤
+│  luciole — Actor runtime, DAG execution,            │
+│            scheduler, streaming pipelines            │
+└─────────────────────────────────────────────────────┘
 ```
 
-This operation just requires one memory fetch.
-Because, DocSets are scanned through in order (DocId are iterated in a sorted manner) which
-also help locality.
+## The SFX Engine
 
-In Lucene's jargon, fast fields are called DocValues.
+The core innovation. Every token is decomposed into all its suffixes at indexing time. The token `"lucivy"` (6 bytes) produces 6 entries:
 
-**Useful for**
+```
+SI=0:  lucivy      (full token — partition 0x00)
+SI=1:  ucivy       (partition 0x01)
+SI=2:  civy        (partition 0x01)
+SI=3:  ivy         (partition 0x01)
+SI=4:  vy          (partition 0x01)
+SI=5:  y           (partition 0x01)
+```
 
-They are typically integer values that are useful to either rank or compute aggregate over
-all of the documents matching a query (aka [DocSet](src/docset.rs)).
+All entries are stored in a single FST (Finite State Transducer) — a sorted trie with shared prefixes and compressed outputs. The FST is partitioned by a prefix byte:
 
-For instance, one could define a function to combine upvotes with lucivy's internal relevancy score.
-This can be done by fetching a fast field during scoring.
-One could also compute the mean price of the items matching a query in an e-commerce website.
-This can be done by fetching a fast field in a collector.
-Finally one could decide to post-filter a docset to remove docset with a price within a specific range.
-If the ratio of filtered out documents is not too low, an efficient way to do this is to fetch the price and apply the filter on the collector side.
+- **0x00** — SI=0 entries (token starts). Used by `startsWith` / `anchor_start` queries.
+- **0x01** — SI>0 entries (substrings). Used by `contains` queries.
 
-Aside from integer values, it is also possible to store an actual byte payload.
-For advanced search engine, it is possible to store all of the features required for learning-to-rank in a byte payload, access it during search, and apply the learning-to-rank model.
+Each FST entry stores: `raw_ordinal` (parent token ID), `si` (suffix index), `token_len` (parent token length). This is packed into 64 bits inline, or stored in an OutputTable for multi-parent entries.
 
-Finally facets are a specific kind of fast field, and the associated source code is in [`fastfield/facet_reader.rs`](src/fastfield/facet_reader.rs).
+### Files per segment
 
-# The inverted search index
+| File | Purpose |
+|------|---------|
+| `.sfx` | Suffix FST + parent lists + sibling table + GapMap |
+| `.sfxpost` | Posting lists mapping suffix ordinals to doc_ids |
+| `.termtexts` | Token text storage for cross-token resolution |
+| `.gapmap` | Gap-encoded separators between tokens |
 
-The inverted index is the core part of full-text search.
-When presented a new document with the text field "Hello, happy tax payer!", lucivy breaks it into a list of so-called tokens. In addition to just splitting these strings into tokens, it might also do different kinds of operations like dropping the punctuation, converting the character to lowercase, apply stemming, etc. Lucivy makes it possible to configure the operations to be applied in the schema (tokenizer/ is the place where these operations are implemented).
+### Falling walk — split detection
 
-For instance, the default tokenizer of lucivy would break our text into: `[hello, happy, tax, payer]`.
-The document will therefore be registered in the inverted index as containing the terms
-`[text:hello, text:happy, text:tax, text:payer]`.
+When searching for a query like `"ivy_co"`, the engine walks the FST byte-by-byte:
 
-The role of the inverted index is, when given a term, gives us in return a very fast iterator over the sorted doc ids that match the term.
+1. Enter partition 0x01 (substring)
+2. Walk: `i → v → y` — at byte 3, the FST reaches a final node
+3. Check: `si(3) + prefix_len(3) == token_len(6)` — the suffix covers the exact end of token `"lucivy"`
+4. This is a **split point** — the query can be split here
 
-Such an iterator is called a posting list. In addition to giving us `DocId`, they can also give us optionally the number of occurrence of the term for each document, also called term frequency or TF.
+The split point means the first part of the query matched a suffix that reaches the end of a token. The remaining query bytes need to match the next token.
 
-These iterators being sorted by DocId, one can create an iterator over the document containing `text:tax AND text:payer`, `(text:tax AND text:payer) OR (text:contribuable)` or any boolean expression.
+### Sibling table — cross-token matching
 
-In order to represent the function
-```Term ⟶ Posting```
+The sibling table records which tokens are adjacent in the original text:
 
-The inverted index actually consists of two data structures chained together.
+```
+ordinal=1 (lucivy) → next_ordinal=2 (core), gap_len=1 ("_")
+```
 
-- [Term](src/schema/term.rs) ⟶ [TermInfo](src/postings/term_info.rs) is addressed by the term dictionary.
-- [TermInfo](src/postings/term_info.rs) ⟶ [Posting](src/postings/postings.rs) is addressed by the posting lists.
+At a split point, the engine:
+1. Looks up the sibling table for the matched token's ordinal
+2. Checks that the query bytes at the split point match the gap (separator)
+3. Continues the FST walk on the next token (entering partition 0x00 for SI=0)
 
-Where [TermInfo](src/postings/term_info.rs) is an object containing some meta data about a term.
+This is how `"ivy_co"` matches `"lucivy_core"` across two tokens.
 
-## [termdict/](src/termdict): Here is a term, give me the [TermInfo](src/postings/term_info.rs)
+### Fuzzy search — trigram pigeonhole
 
-Lucivy's term dictionary is mainly in charge of supplying the function
+Fuzzy search (Levenshtein distance d) uses a pigeonhole strategy:
 
-[Term](src/schema/term.rs) ⟶ [TermInfo](src/postings/term_info.rs)
+1. Decompose the query into overlapping trigrams
+2. At distance d, at least `len(trigrams) - 3*d` trigrams must appear exactly
+3. Search each required trigram via the SFX engine
+4. Validate full Levenshtein distance only on candidates
 
-It is itself broken into two parts.
+This avoids scanning the entire index. Only documents containing at least one exact trigram are evaluated.
 
-- [Term](src/schema/term.rs) ⟶ [TermOrdinal](src/termdict/mod.rs) is addressed by a finite state transducer, implemented by the fst crate.
-- [TermOrdinal](src/termdict/mod.rs) ⟶ [TermInfo](src/postings/term_info.rs) is addressed by the term info store.
+### Regex search — literal extraction
 
-## [postings/](src/postings): Iterate over documents... very fast
+Regex queries like `"lock[a-z]*_init"` are optimized:
 
-A posting list makes it possible to store a sorted list of doc ids and for each doc store
-a term frequency as well.
+1. Extract literal parts from the regex: `"lock"`, `"_init"`
+2. Search each literal via the SFX engine
+3. Validate the full regex only on candidate documents
 
-The posting lists are stored in a separate file. The [TermInfo](src/postings/term_info.rs) contains an offset into that file and a number of documents for the given posting list. Both are required and sufficient to read the posting list.
+No full-index scan. The SFX engine acts as an accelerator.
 
-The posting list is organized in block of 128 documents.
-One block of doc ids is followed by one block of term frequencies.
+## Segments and Indexing
 
-The doc ids are delta encoded and bitpacked.
-The term frequencies are bitpacked.
+### Segment structure
 
-Because the number of docs is rarely a multiple of 128, the last block may contain an arbitrary number of docs between 1 and 127 documents. We then use variable int encoding instead of bitpacking.
+An index is a collection of immutable segments. Each segment contains:
 
-## [positions/](src/positions): Where are my terms within the documents?
+- **Inverted index** — term → posting lists (doc_ids + positions + term frequencies)
+- **SFX index** — suffix FST + sfxpost + termtexts + gapmap + sibling table
+- **Doc store** — row-oriented compressed storage for stored fields
+- **Fast fields** — column-oriented storage for numeric/keyword fields (bitpacked)
+- **Fieldnorm** — per-document token counts for BM25 scoring
+- **Alive bitset** — tracks which documents are not deleted
 
-Phrase queries make it possible to search for documents containing a specific sequence of terms.
-For instance, when the phrase query "the art of war" does not match "the war of art".
-To make it possible, it is possible to specify in the schema that a field should store positions in addition to being indexed.
+Segments are identified by UUIDs. The file format is `segment_id.ext`.
 
-The token positions of all of the terms are then stored in a separate file with the extension `.pos`.
-The [TermInfo](src/postings/term_info.rs) gives an offset (expressed in position this time) in this file. As we iterate through the docset,
-we advance the position reader by the number of term frequencies of the current document.
+### Indexing pipeline
 
-## [fieldnorm/](src/fieldnorm): Here is my doc, how many tokens in this field?
+```
+Document
+  → Tokenizer (text → tokens)
+  → Inverted index writer (postings + positions)
+  → SFX writer (suffix FST + sfxpost + sibling table + gapmap)
+  → Fast field writer (column values)
+  → Doc store writer (compressed row storage)
+  → Segment flush to disk
+```
 
-The [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) formula also requires to know the number of tokens stored in a specific field for a given document. We store this information on one byte per document in the fieldnorm.
-The fieldnorm is therefore compressed. Values up to 40 are encoded unchanged.
+Indexing uses lazy commit: mutations set a `dirty` flag, and the next search auto-commits before executing. Explicit `commit()` is also available.
 
-## [tokenizer/](src/tokenizer): How should we process text?
+### Merge
 
-Text processing is key to a good search experience.
-Splits or normalize your text too much, and the search results will have a less precision and a higher recall.
-Do not normalize, or under split your text, you will end up with a higher precision and a lesser recall.
+Background merge combines multiple small segments into larger ones, eliminating deleted documents and reducing segment count. The merge policy is log-based with configurable thresholds.
 
-Text processing can be configured by selecting an off-the-shelf [`Tokenizer`](./src/tokenizer/tokenizer.rs) or implementing your own to first split the text into tokens, and then chain different [`TokenFilter`](src/tokenizer/tokenizer.rs)'s to it.
+In lucivy, merges run through the luciole actor system — no `thread::spawn`.
 
-Lucivy's comes with few tokenizers, but external crates are offering advanced tokenizers, such as [Lindera](https://crates.io/crates/lindera) for Japanese.
+## luciole — Actor Runtime
 
-## [query/](src/query): Define and compose queries
+A standalone crate providing the concurrency layer. Designed to be WASM-safe (same code runs on native threads and emscripten pthreads).
 
-The [Query](src/query/query.rs) trait defines what a query is.
-Due to the necessity for some queries to compute some statistics over the entire index, and because the
-index is composed of several `SegmentReader`, the path from transforming a `Query` to an iterator over documents is slightly convoluted, but fundamentally, this is what a Query is.
+### Core concepts
 
-The iterator over a document comes with some scoring function. The resulting trait is called a
-[Scorer](src/query/scorer.rs) and is specific to a segment.
+- **Actor** — typed message handlers with priority scheduling (Idle → Critical)
+- **GenericActor** — dynamic handler registration by type tag (no enum boilerplate)
+- **Scheduler** — fixed thread pool, cooperative wait, priority dispatch
+- **Envelope** — serialized messages with `local` field for zero-cost local transport
 
-Different queries can be combined using the [BooleanQuery](src/query/boolean_query/).
-Lucivy comes with different types of queries and can be extended by implementing
-the `Query`, `Weight`, and `Scorer` traits.
+### DAG execution
 
-## [collector](src/collector): Define what to do with matched documents
+- **Dag** — directed acyclic graph of computation nodes
+- **execute_dag** — topological execution with parallel fan-out per level
+- **execute_dag_async** — non-blocking DAG execution via DagExecutor actor
+- **BranchNode / GateNode / MergeNode** — control flow nodes
+- **Checkpoint** — save/restore DAG progress
 
-Collectors define how to aggregate the documents matching a query, in the broadest sense possible.
-The search will push matched documents one by one, calling their
-`fn collect(doc: DocId, score: Score);` method.
+### Non-blocking request-reply
 
-Users may implement their own collectors by implementing the [Collector](src/collector/mod.rs) trait.
+- **pipe_to** — send message, get result as message back. Callback registered before send (no race).
+- **collect_replies_to** — N:1 gather. Send N requests, get 1 message when all complete.
+- **task_pipe_to** — submit CPU work to thread pool, pipe result to actor.
 
-## [query-grammar](query-grammar): Defines the grammar of the query parser
+### Streaming
 
-While the [QueryParser](src/query/query_parser/query_parser.rs) struct is located in the `query/` directory, the actual parser combinator used to convert user queries into an AST is in an external crate called `query-grammar`. This part was externalized to lighten the work of the compiler.
+- **StreamDag** — pipeline topology with topological drain. Feed items through a chain of actors.
+
+### Diagnostics
+
+- **WaitGraph** — tracks all inter-thread/inter-actor dependencies. Dump as mermaid or text.
+- **ActorActivity** — dynamic labels visible in scheduler dumps.
+
+## Sharding
+
+`ShardedHandle` distributes documents across N shards:
+
+- **`balance_weight=1.0`** (default) — round-robin. Even distribution, fastest indexation.
+- **`balance_weight=0.2`** — token-aware. Co-locates documents sharing rare tokens.
+- **`balance_weight=0.0`** — pure token-aware. Maximum co-location.
+
+### Cross-shard BM25
+
+BM25 scoring requires global statistics (total docs, total tokens, document frequency per term). In sharded mode, lucivy aggregates statistics from all shards before scoring, so results are **identical** whether you use 1 shard or 4 (measured diff=0.0000).
+
+Implementation: `AggregatedBm25StatsOwned` wraps N searchers and sums their stats via `Bm25StatisticsProvider` trait.
+
+### Distributed search
+
+For multi-machine deployments:
+
+1. Each node calls `export_stats(query)` → serializable `ExportableStats`
+2. Coordinator calls `merge_stats([stats_a, stats_b, ...])` → merged global stats
+3. Each node calls `search_with_global_stats(query, merged_stats)` → results scored with correct global IDF
+4. Coordinator merges top-K results by score
+
+`ExportableStats` includes `total_num_docs`, `total_num_tokens` per field, `doc_freqs` per term, `contains_doc_freqs` (keyed by `field_id:query_text`), and `regex_doc_freqs`.
+
+## Sync and Persistence
+
+### Snapshot formats
+
+| Format | Description |
+|--------|-------------|
+| **LUCE** | Full snapshot — all shards, schema, segments in one blob |
+| **LUCID** | Single-shard incremental delta (only changed segments) |
+| **LUCIDS** | Multi-shard incremental delta (only modified shards) |
+
+### Directory trait
+
+| Implementation | Usage |
+|----------------|-------|
+| `MmapDirectory` | Native — mmap for reads, buffered writes |
+| `RamDirectory` | Tests — pure RAM |
+| `StdFsDirectory` | WASM — deferred I/O (RAM until terminate) |
+| `BlobDirectory` | ACID — pluggable backend (Postgres, S3, etc.) |
+
+## Query System
+
+All text queries route through the SFX engine via a compat layer in `lucivy_core/src/query.rs`:
+
+| Query type | What it does |
+|------------|-------------|
+| `contains` | Substring match (cross-token). Primary query type. |
+| `contains` + `distance` | Fuzzy substring (trigram pigeonhole) |
+| `contains` + `regex` | Regex substring (literal extraction + DFA validation) |
+| `contains` + `anchor_start` | Prefix match (SI=0 only) |
+| `contains` + `exact_match` | Exact whole-token match |
+| `contains_split` | Multi-word: split on whitespace, each word as `contains`, OR'd |
+| `startsWith` | Alias for `contains` + `anchor_start` |
+| `term` | Alias for `contains` + `anchor_start` + `exact_match` |
+| `fuzzy` | Alias for `contains` + `distance` |
+| `phrase` | Adjacent tokens in order |
+| `regex` | Alias for `contains` + `regex` |
+| `boolean` | Combine sub-queries with must / should / must_not |
+| `disjunction_max` | Best score from sub-queries |
+| `more_like_this` | TF-IDF similarity (not SFX-based) |
+
+### Highlights
+
+All query types produce byte-offset highlights via `HighlightSink`. Highlights are computed during scoring — no second pass over stored text. Cross-token matches produce contiguous highlight ranges spanning the matched tokens.
+
+### Filters
+
+Non-text field filters (numeric ranges, equality, membership) are applied as post-filters:
+
+```json
+{"field": "category", "op": "eq", "value": "kernel"}
+{"field": "score", "op": "gte", "value": 0.5}
+{"field": "status", "op": "in", "value": ["active", "review"]}
+```
+
+Ops: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `not_in`, `between`, `starts_with`, `contains`.
+
+Pre-filtering by document ID (`allowed_ids`) uses bitmap intersection before scoring.
+
+## Bindings
+
+| Binding | Technology | Bridge |
+|---------|-----------|--------|
+| Python | PyO3 | Direct Rust → Python |
+| Node.js | napi-rs | Direct Rust → JS |
+| C++ | CXX | Generated headers + static lib |
+| WASM | emscripten | `extern "C"` + pthreads + SharedArrayBuffer |
+| Rust | `lucivy-core` | Native |
+
+All bindings expose the same API surface: create, open, add, update, delete, commit, search (with highlights, fields, filters, allowed_ids), snapshot export/import, delta sync, distributed search.
+
+## WASM considerations
+
+- **No `thread::spawn`** — all threading goes through luciole's scheduler
+- `docstore_compress_dedicated_thread: false` in WASM
+- `StdFsDirectory` buffers in RAM, flushes to OPFS at `terminate()`
+- `WRITER_HEAP_SIZE = 15MB` (vs 50MB native)
+- `MAXIMUM_MEMORY = 4GB` (32-bit WASM limit)
+- pthreads require `Cross-Origin-Opener-Policy: same-origin` + `Cross-Origin-Embedder-Policy: require-corp`
