@@ -184,6 +184,10 @@ impl SuffixContainsQuery {
             };
             let sfx_bytes = sfx_data.read_bytes().map_err(|e|
                 crate::LucivyError::SystemError(format!("prescan read .sfx: {e}")))?;
+            // Skip SFX3 segments — they are handled by the v3 prescan (ContainsQueryV3).
+            if crate::suffix_fst::section_file::detect_sfx_version(sfx_bytes.as_ref()) == Some(3) {
+                continue;
+            }
             let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref()).map_err(|e|
                 crate::LucivyError::SystemError(format!("prescan open .sfx: {e}")))?;
 
@@ -232,6 +236,11 @@ impl SuffixContainsQuery {
     }
 
     /// Attach pre-scanned cache (from prescan()).
+    /// Returns true if no prescan cache has been set yet.
+    pub fn prescan_cache_is_none(&self) -> bool {
+        self.prescan_cache.is_none()
+    }
+
     pub fn with_prescan_cache(mut self, cache: HashMap<(String, SegmentId), CachedSfxResult>) -> Self {
         self.prescan_cache = Some(cache);
         self
@@ -575,7 +584,9 @@ impl Weight for SuffixContainsWeight {
         let segment_id = reader.segment_id();
 
         // Use pre-scanned cache if available (from prescan or auto-prescan in weight()).
-        if let Some(cached) = self.prescan_cache.get(&(self.query_text.clone(), segment_id)) {
+        // Cache key matches prescan format: "field_id:query_text"
+        let cache_key = format!("{}:{}", self.raw_field.field_id(), self.query_text);
+        if let Some(cached) = self.prescan_cache.get(&(cache_key, segment_id)) {
             return self.scorer_from_cached(reader, boost, segment_id, cached.clone());
         }
 
@@ -589,6 +600,11 @@ impl Weight for SuffixContainsWeight {
         let sfx_bytes = sfx_data.read_bytes().map_err(|e| {
             crate::LucivyError::SystemError(format!("read .sfx: {e}"))
         })?;
+        // SFX3 segments are handled by the v3 prescan; if we reach here without
+        // a cache hit, return empty (the prescan should have populated the cache).
+        if crate::suffix_fst::section_file::detect_sfx_version(sfx_bytes.as_ref()) == Some(3) {
+            return Ok(Box::new(crate::query::EmptyScorer));
+        }
         let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref()).map_err(|e| {
             crate::LucivyError::SystemError(format!("open .sfx: {e}"))
         })?;

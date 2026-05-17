@@ -60,6 +60,10 @@ pub fn run_regex_prescan(
     let sfx_bytes = sfx_data
         .read_bytes()
         .map_err(|e| LucivyError::SystemError(format!("read .sfx: {e}")))?;
+    // SFX3 segments handled by v3 prescan path
+    if crate::suffix_fst::section_file::detect_sfx_version(sfx_bytes.as_ref()) == Some(3) {
+        return Ok((vec![], vec![]));
+    }
     let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
         .map_err(|e| LucivyError::SystemError(format!("open .sfx: {e}")))?;
 
@@ -126,6 +130,10 @@ pub fn run_fuzzy_prescan(
     let sfx_bytes = sfx_data
         .read_bytes()
         .map_err(|e| LucivyError::SystemError(format!("read .sfx: {e}")))?;
+    // SFX3 segments handled by v3 prescan path
+    if crate::suffix_fst::section_file::detect_sfx_version(sfx_bytes.as_ref()) == Some(3) {
+        return Ok((vec![], vec![], vec![]));
+    }
     let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
         .map_err(|e| LucivyError::SystemError(format!("open .sfx: {e}")))?;
 
@@ -1705,6 +1713,10 @@ impl RegexContinuationWeight {
         let sfx_bytes = sfx_data
             .read_bytes()
             .map_err(|e| LucivyError::SystemError(format!("read .sfx: {e}")))?;
+        // SFX3 segments should have been handled by v3 prescan cache
+        if crate::suffix_fst::section_file::detect_sfx_version(sfx_bytes.as_ref()) == Some(3) {
+            return Ok((vec![], vec![], vec![]));
+        }
         let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
             .map_err(|e| LucivyError::SystemError(format!("open .sfx: {e}")))?;
 

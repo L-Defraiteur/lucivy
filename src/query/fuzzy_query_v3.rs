@@ -134,10 +134,8 @@ impl Query for FuzzyQueryV3 {
             };
 
             doc_freq += doc_tf.len() as u64;
-            if !doc_tf.is_empty() {
-                let key = format!("{}:{}", self.field.field_id(), self.query_text);
-                cache.insert((key, segment_id), CachedSfxResult::new(doc_tf, highlights));
-            }
+            let key = format!("{}:{}", self.field.field_id(), self.query_text);
+            cache.insert((key, segment_id), CachedSfxResult::new(doc_tf, highlights));
         }
 
         self.prescan_cache = Some(cache);
@@ -172,6 +170,29 @@ impl Query for FuzzyQueryV3 {
     }
 
     fn weight(&self, enable_scoring: EnableScoring) -> crate::Result<Box<dyn Weight>> {
+        // If prescan wasn't called yet, do it now for v3 segments.
+        if self.prescan_cache.is_none() {
+            if let Some(searcher) = enable_scoring.searcher() {
+                let mut clone = self.clone();
+                let seg_refs: Vec<&crate::SegmentReader> = searcher.segment_readers().iter().collect();
+                clone.prescan_segments(&seg_refs)?;
+                // Inject v3 cache into inner (RegexContinuationQuery)
+                if let Some(ref cache) = clone.prescan_cache {
+                    use crate::query::Query as _;
+                    use crate::query::phrase_query::regex_continuation_query::CachedPrescanResult;
+                    let mut regex_cache = HashMap::new();
+                    for ((_, seg_id), sfx_result) in cache {
+                        regex_cache.insert(*seg_id, CachedPrescanResult {
+                            doc_tf: sfx_result.doc_tf.clone(),
+                            highlights: sfx_result.highlights.clone(),
+                            doc_coverage: Vec::new(),
+                        });
+                    }
+                    clone.inner.inject_regex_prescan_cache(regex_cache);
+                }
+                return clone.inner.weight(enable_scoring);
+            }
+        }
         self.inner.weight(enable_scoring)
     }
 }

@@ -348,6 +348,14 @@ mod tests {
     }
 
     #[test]
+    fn fz10_long_cross_token_d1_strict_false() {
+        // Same case as pipeline test: long identifier with typo
+        let idx = build(&["ku_dynamic_cast is used everywhere"]);
+        let docs = query_fuzzy(&idx, "ku_dinamic_cast", 1, false);
+        assert!(!docs.is_empty(), "fuzzy d=1 strict_sep=false should find ku_dynamic_cast with typo y→i");
+    }
+
+    #[test]
     fn fz9_multi_occurrence() {
         let idx = build(&["lock_lock_lock"]);
         let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();

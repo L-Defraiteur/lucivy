@@ -38,6 +38,9 @@ pub struct SchemaConfig {
     /// backwards compatibility with existing JSON configs.
     #[serde(default)]
     pub sfx: Option<bool>,
+    /// SFX version: 2 (default) or 3 (v3 with overlap tokenizer + word-stripped).
+    #[serde(default)]
+    pub sfx_version: Option<u8>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

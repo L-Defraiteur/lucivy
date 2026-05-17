@@ -256,10 +256,10 @@ impl Query for ContainsQueryV3 {
             };
 
             doc_freq += doc_tf.len() as u64;
-            if !doc_tf.is_empty() {
-                let key = format!("{}:{}", field.field_id(), query_text);
-                cache.insert((key, segment_id), CachedSfxResult::new(doc_tf, highlights));
-            }
+            // Always cache — even empty results — so the scorer never falls through
+            // to the v2 code path (which would crash on SFX3 magic bytes).
+            let key = format!("{}:{}", field.field_id(), query_text);
+            cache.insert((key, segment_id), CachedSfxResult::new(doc_tf, highlights));
         }
 
         self.inner = self.inner.clone()
@@ -295,6 +295,16 @@ impl Query for ContainsQueryV3 {
     }
 
     fn weight(&self, enable_scoring: EnableScoring) -> crate::Result<Box<dyn Weight>> {
+        // If prescan wasn't called yet (direct weight() without prescan_segments),
+        // do it now so the cache is populated for v3 segments.
+        if self.inner.prescan_cache_is_none() {
+            if let Some(searcher) = enable_scoring.searcher() {
+                let mut clone = self.clone();
+                let seg_refs: Vec<&SegmentReader> = searcher.segment_readers().iter().collect();
+                clone.prescan_segments(&seg_refs)?;
+                return clone.inner.weight(enable_scoring);
+            }
+        }
         self.inner.weight(enable_scoring)
     }
 }

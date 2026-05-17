@@ -164,7 +164,11 @@ pub fn build_derived_indexes_v3(
     let sfxpost_reader = sfxpost_data
         .and_then(crate::suffix_fst::sfxpost_v2::SfxPostReaderV2::open_slice);
 
-    let mut indexes = all_indexes();
+    // Exclude v2 termtexts and sibling/sepmap — v3 writes its own termtexts (TTX3 format).
+    let mut indexes: Vec<Box<dyn SfxIndexFile>> = all_indexes()
+        .into_iter()
+        .filter(|idx| idx.id() != "termtexts" && idx.id() != "sibling" && idx.id() != "sepmap")
+        .collect();
 
     for (ord, token) in tokens.iter().enumerate() {
         let ord_u32 = ord as u32;

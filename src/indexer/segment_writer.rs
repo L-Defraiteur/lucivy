@@ -209,7 +209,7 @@ impl SegmentWriter {
                         .map_err(|e| crate::LucivyError::SystemError(
                             format!("sfx v3 build DAG field {field_id}: {e}")))?;
                     let output = dag_result
-                        .take_output::<super::sfx_dag_v3::SfxBuildOutputV3>("assemble_v3", "output")
+                        .take_output::<super::sfx_dag_v3::SfxBuildOutputV3>("assemble", "output")
                         .ok_or_else(|| crate::LucivyError::SystemError(
                             format!("sfx v3 DAG missing output for field {field_id}")))?;
                     self.segment_serializer.write_sfx(field_id, &output.sfx)?;

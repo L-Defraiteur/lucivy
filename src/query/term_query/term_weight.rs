@@ -183,10 +183,15 @@ impl Weight for TermWeight {
             let term_info = if let Some(sfx_data) = reader.sfx_file(field) {
                 let sfx_bytes = sfx_data.read_bytes()
                     .map_err(|e| crate::LucivyError::SystemError(format!("read .sfx: {e}")))?;
-                let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
-                    .map_err(|e| crate::LucivyError::SystemError(format!("open .sfx: {e}")))?;
-                let sfx_dict = SfxTermDictionary::new(&sfx_reader, inv_index.terms());
-                sfx_dict.get(self.term.serialized_value_bytes())?
+                // Skip SFX3 segments — v3 uses a different term lookup path
+                if crate::suffix_fst::section_file::detect_sfx_version(sfx_bytes.as_ref()) == Some(3) {
+                    inv_index.get_term_info(&self.term)?
+                } else {
+                    let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
+                        .map_err(|e| crate::LucivyError::SystemError(format!("open .sfx: {e}")))?;
+                    let sfx_dict = SfxTermDictionary::new(&sfx_reader, inv_index.terms());
+                    sfx_dict.get(self.term.serialized_value_bytes())?
+                }
             } else {
                 inv_index.get_term_info(&self.term)?
             };
@@ -344,45 +349,50 @@ impl TermWeight {
         let inverted_index = reader.inverted_index(field)?;
 
         // Ordinal path: use .sfxpost for raw token matching (opt-in via prefer_sfxpost).
+        // Skip for SFX3 segments — v3 uses a different ordinal scheme.
         if self.prefer_sfxpost && reader.sfxpost_file(field).is_some() {
             if let Some(sfx_data) = reader.sfx_file(field) {
                 let sfx_bytes = sfx_data.read_bytes()
                     .map_err(|e| LucivyError::SystemError(format!("read .sfx: {e}")))?;
-                let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
-                    .map_err(|e| LucivyError::SystemError(format!("open .sfx: {e}")))?;
-                let sfx_dict = SfxTermDictionary::new(&sfx_reader, inverted_index.terms());
+                let is_v3 = crate::suffix_fst::section_file::detect_sfx_version(sfx_bytes.as_ref()) == Some(3);
+                if !is_v3 {
+                    let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
+                        .map_err(|e| LucivyError::SystemError(format!("open .sfx: {e}")))?;
+                    let sfx_dict = SfxTermDictionary::new(&sfx_reader, inverted_index.terms());
 
-                if let Some(ordinal) = sfx_dict.get_ordinal(self.term.serialized_value_bytes())? {
-                    let resolver = build_resolver(reader, field)?;
-                    let doc_freq = resolver.doc_freq(ordinal);
+                    if let Some(ordinal) = sfx_dict.get_ordinal(self.term.serialized_value_bytes())? {
+                        let resolver = build_resolver(reader, field)?;
+                        let doc_freq = resolver.doc_freq(ordinal);
 
-                    if doc_freq == 0 {
+                        if doc_freq == 0 {
+                            return Ok(TermOrEmptyOrAllScorer::Empty);
+                        }
+                        if !self.scoring_enabled && doc_freq == reader.max_doc() {
+                            return Ok(TermOrEmptyOrAllScorer::AllMatch(AllScorer::new(
+                                reader.max_doc(),
+                            )));
+                        }
+
+                        let entries = resolver.resolve(ordinal);
+                        let postings = ResolvedPostings::from_entries(entries);
+                        let fieldnorm_reader = self.fieldnorm_reader(reader)?;
+                        let similarity_weight = self.similarity_weight.boost_by(boost);
+                        let mut scorer = ResolvedTermScorer::new(
+                            postings, fieldnorm_reader, similarity_weight,
+                        );
+                        if let Some(ref sink) = self.highlight_sink {
+                            scorer = scorer.with_highlight_sink(
+                                Arc::clone(sink),
+                                self.highlight_field_name.clone(),
+                                reader.segment_id(),
+                            );
+                        }
+                        return Ok(TermOrEmptyOrAllScorer::ResolvedScorer(Box::new(scorer)));
+                    } else {
                         return Ok(TermOrEmptyOrAllScorer::Empty);
                     }
-                    if !self.scoring_enabled && doc_freq == reader.max_doc() {
-                        return Ok(TermOrEmptyOrAllScorer::AllMatch(AllScorer::new(
-                            reader.max_doc(),
-                        )));
-                    }
-
-                    let entries = resolver.resolve(ordinal);
-                    let postings = ResolvedPostings::from_entries(entries);
-                    let fieldnorm_reader = self.fieldnorm_reader(reader)?;
-                    let similarity_weight = self.similarity_weight.boost_by(boost);
-                    let mut scorer = ResolvedTermScorer::new(
-                        postings, fieldnorm_reader, similarity_weight,
-                    );
-                    if let Some(ref sink) = self.highlight_sink {
-                        scorer = scorer.with_highlight_sink(
-                            Arc::clone(sink),
-                            self.highlight_field_name.clone(),
-                            reader.segment_id(),
-                        );
-                    }
-                    return Ok(TermOrEmptyOrAllScorer::ResolvedScorer(Box::new(scorer)));
-                } else {
-                    return Ok(TermOrEmptyOrAllScorer::Empty);
                 }
+                // SFX3: fall through to standard inverted index path below
             }
         }
 

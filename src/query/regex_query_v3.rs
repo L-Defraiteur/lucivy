@@ -158,10 +158,8 @@ impl Query for RegexQueryV3 {
             };
 
             doc_freq += doc_tf.len() as u64;
-            if !doc_tf.is_empty() {
-                let key = format!("{}:regex:{}", self.field.field_id(), self.pattern);
-                cache.insert((key, segment_id), CachedSfxResult::new(doc_tf, highlights));
-            }
+            let key = format!("{}:regex:{}", self.field.field_id(), self.pattern);
+            cache.insert((key, segment_id), CachedSfxResult::new(doc_tf, highlights));
         }
 
         self.prescan_cache = Some(cache);
