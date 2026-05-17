@@ -31,6 +31,9 @@ mod union;
 mod weight;
 pub mod posting_resolver;
 pub mod resolved_postings;
+pub mod contains_query_v3;
+pub mod fuzzy_query_v3;
+pub mod regex_query_v3;
 
 #[cfg(test)]
 mod vec_docset;
@@ -77,6 +80,9 @@ pub use self::union::BufferedUnionScorer;
 #[cfg(test)]
 pub use self::vec_docset::VecDocSet;
 pub use self::weight::Weight;
+pub use self::contains_query_v3::ContainsQueryV3;
+pub use self::fuzzy_query_v3::FuzzyQueryV3;
+pub use self::regex_query_v3::RegexQueryV3;
 
 #[cfg(test)]
 mod tests {
