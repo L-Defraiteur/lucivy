@@ -10,6 +10,17 @@ use lucivy_fst::raw;
 
 use crate::suffix_fst::builder::SI0_PREFIX;
 use crate::suffix_fst::builder::SI_REST_PREFIX;
+
+/// Snap a byte position to the next valid UTF-8 char boundary.
+/// If `pos` is already a boundary, returns it unchanged.
+/// If `pos` is past the end, returns `len`.
+fn snap_to_char_boundary(s: &str, pos: usize) -> usize {
+    let mut p = pos.min(s.len());
+    while p < s.len() && !s.is_char_boundary(p) {
+        p += 1;
+    }
+    p
+}
 use crate::suffix_fst::builder_v3::{
     decode_output_v3, ParentEntryV3, ParentRefV3, SI_STRIPPED_PREFIX,
 };
@@ -273,8 +284,11 @@ pub fn cross_token_chain_v3(
     let splits = falling_walk_v3(reader, query, strict_separators);
     let mut chains = Vec::new();
 
+    let query_lower = query.to_lowercase();
+
     for split in &splits {
-        let remainder = &query[split.remainder_start..];
+        let safe_start = snap_to_char_boundary(&query_lower, split.remainder_start);
+        let remainder = &query_lower[safe_start..];
         if remainder.is_empty() {
             chains.push(TokenChainV3 {
                 ordinals: vec![split.parent.raw_ordinal],
@@ -302,7 +316,8 @@ pub fn cross_token_chain_v3(
             let sub_splits = falling_walk_v3(reader, &rem, strict_separators);
             if let Some(best) = sub_splits.first() {
                 chain_ords.push(best.parent.raw_ordinal);
-                rem = rem[best.remainder_start..].to_string();
+                let safe = snap_to_char_boundary(&rem, best.remainder_start);
+                rem = rem[safe..].to_string();
                 depth += 1;
             } else {
                 break; // No match
