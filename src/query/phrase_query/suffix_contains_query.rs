@@ -46,19 +46,8 @@ impl SfxCache {
     }
 }
 
-/// Cached SFX walk result with document-term frequency pairs and highlights.
-#[derive(Clone, Debug)]
-pub struct CachedSfxResult {
-    pub(crate) doc_tf: Vec<(DocId, u32)>,
-    pub(crate) highlights: Vec<(DocId, usize, usize)>,
-}
-
-impl CachedSfxResult {
-    /// Creates a new cached SFX result from term frequency and highlight data.
-    pub fn new(doc_tf: Vec<(DocId, u32)>, highlights: Vec<(DocId, usize, usize)>) -> Self {
-        Self { doc_tf, highlights }
-    }
-}
+/// Backward compat alias — the real type is now in sfx_scoring.rs.
+pub type CachedSfxResult = super::sfx_scoring::CachedPrescan;
 
 use crate::tokenizer::{SimpleTokenizer, TextAnalyzer, LowerCaser, TokenStream};
 

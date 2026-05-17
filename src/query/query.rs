@@ -197,7 +197,7 @@ pub trait Query: QueryClone + Send + Sync + downcast_rs::Downcast + fmt::Debug {
     /// Default: no-op.
     fn take_prescan_cache(
         &mut self,
-        _out: &mut std::collections::HashMap<(String, crate::index::SegmentId), crate::query::phrase_query::suffix_contains_query::CachedSfxResult>,
+        _out: &mut std::collections::HashMap<(String, crate::index::SegmentId), crate::query::phrase_query::sfx_scoring::CachedPrescan>,
     ) {}
 
     /// Inject prescan cache (merged from multiple shards by the DAG).
@@ -205,7 +205,7 @@ pub trait Query: QueryClone + Send + Sync + downcast_rs::Downcast + fmt::Debug {
     /// Default: no-op.
     fn inject_prescan_cache(
         &mut self,
-        _cache: std::collections::HashMap<(String, crate::index::SegmentId), crate::query::phrase_query::suffix_contains_query::CachedSfxResult>,
+        _cache: std::collections::HashMap<(String, crate::index::SegmentId), crate::query::phrase_query::sfx_scoring::CachedPrescan>,
     ) {
     }
 
@@ -313,14 +313,14 @@ impl Query for Box<dyn Query> {
 
     fn take_prescan_cache(
         &mut self,
-        out: &mut std::collections::HashMap<(String, crate::index::SegmentId), crate::query::phrase_query::suffix_contains_query::CachedSfxResult>,
+        out: &mut std::collections::HashMap<(String, crate::index::SegmentId), crate::query::phrase_query::sfx_scoring::CachedPrescan>,
     ) {
         self.as_mut().take_prescan_cache(out)
     }
 
     fn inject_prescan_cache(
         &mut self,
-        cache: std::collections::HashMap<(String, crate::index::SegmentId), crate::query::phrase_query::suffix_contains_query::CachedSfxResult>,
+        cache: std::collections::HashMap<(String, crate::index::SegmentId), crate::query::phrase_query::sfx_scoring::CachedPrescan>,
     ) {
         self.as_mut().inject_prescan_cache(cache)
     }
