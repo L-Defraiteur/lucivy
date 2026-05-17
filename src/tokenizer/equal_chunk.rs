@@ -6,7 +6,7 @@ pub const DEFAULT_MAX_TOKEN: usize = 8;
 /// Metadata attached to each chunk produced by [`EqualChunkTokenizer`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkMeta {
-    /// Number of alphanumeric content bytes in this chunk.
+    /// Number of content bytes in this chunk (non-separator).
     pub content_len: usize,
     /// Number of trailing separator bytes in this chunk.
     pub sep_len: usize,
@@ -97,8 +97,16 @@ struct Segment<'a> {
     sep: &'a str,
 }
 
-/// Split text into segments: each segment is a word (alphanum run) followed
-/// by its trailing separator (non-alphanum run until next word).
+/// Content = anything that's not ASCII punctuation/whitespace/control.
+/// Non-ASCII chars (emoji, CJK, accented letters, etc.) are always content.
+/// Only ASCII non-alphanumeric chars (_, -, ., ::, spaces, tabs, etc.) are separators.
+#[inline]
+pub fn is_content_char(c: char) -> bool {
+    !c.is_ascii() || c.is_ascii_alphanumeric()
+}
+
+/// Split text into segments: each segment is a word (content run) followed
+/// by its trailing separator (non-content run until next word).
 fn split_into_segments(text: &str) -> Vec<Segment<'_>> {
     let mut segments = Vec::new();
     let bytes = text.as_bytes();
@@ -106,31 +114,31 @@ fn split_into_segments(text: &str) -> Vec<Segment<'_>> {
     let mut pos = 0;
 
     // Skip leading separators (they become a segment with empty content)
-    let first_alnum = text.char_indices()
-        .find(|(_, c)| c.is_alphanumeric())
+    let first_content = text.char_indices()
+        .find(|(_, c)| is_content_char(*c))
         .map(|(i, _)| i)
         .unwrap_or(len);
 
-    if first_alnum > 0 {
+    if first_content > 0 {
         segments.push(Segment {
             content: "",
-            sep: &text[..first_alnum],
+            sep: &text[..first_content],
         });
     }
-    pos = first_alnum;
+    pos = first_content;
 
     while pos < len {
-        // Find end of alphanum content
+        // Find end of content
         let content_start = pos;
         let content_end = text[pos..].char_indices()
-            .find(|(_, c)| !c.is_alphanumeric())
+            .find(|(_, c)| !is_content_char(*c))
             .map(|(i, _)| pos + i)
             .unwrap_or(len);
 
         // Find end of separator
         let sep_start = content_end;
         let sep_end = text[content_end..].char_indices()
-            .find(|(_, c)| c.is_alphanumeric())
+            .find(|(_, c)| is_content_char(*c))
             .map(|(i, _)| content_end + i)
             .unwrap_or(len);
 

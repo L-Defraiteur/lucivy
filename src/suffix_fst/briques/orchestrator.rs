@@ -9,6 +9,8 @@
 
 use std::collections::HashSet;
 
+use crate::tokenizer::equal_chunk::is_content_char;
+
 use common::BitSet;
 
 use crate::DocId;
@@ -53,7 +55,7 @@ pub fn contains_v3(
     // The stripped partition (0x02) in the FST will match content+overlap without seps.
     let effective_query;
     let query_ref = if !strict_separators {
-        effective_query = query.chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+        effective_query = query.chars().filter(|c| is_content_char(*c)).collect::<String>();
         if effective_query.is_empty() {
             return Vec::new();
         }
@@ -112,7 +114,7 @@ pub fn fuzzy_v3(
     // For strict_sep=false: strip non-alphanum from the query
     let effective_query;
     let query_ref = if !strict_separators {
-        effective_query = query.chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+        effective_query = query.chars().filter(|c| is_content_char(*c)).collect::<String>();
         if effective_query.is_empty() {
             return (BitSet::with_max_value(max_doc), Vec::new(), Vec::new());
         }

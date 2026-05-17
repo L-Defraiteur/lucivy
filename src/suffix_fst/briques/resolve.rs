@@ -61,7 +61,7 @@ pub fn resolve_single_v3(
                 position: e.position,
                 span: 1,
                 byte_from: e.byte_from + cand.sti as u32,
-                byte_to: e.byte_from + cand.sti as u32 + cand.own_len as u32 - cand.sep_len as u32,
+                byte_to: e.byte_from + cand.own_len as u32 - cand.sep_len as u32,
                 sti: cand.sti,
                 ordinal: cand.raw_ordinal,
             });
@@ -227,7 +227,9 @@ fn resolve_chains_impl(
 /// are pure non-alphanum (separator-only tokens).
 ///
 /// Uses PosMap (position → ordinal) + ByteMap (ordinal → byte bitmap).
-/// A token is "pure sep" if no alphanumeric byte [a-zA-Z0-9] is in its bitmap.
+/// A token is "pure sep" if it contains no content bytes.
+/// Content bytes = ASCII alphanumeric OR non-ASCII (>= 0x80, i.e. emoji, CJK, accented, etc.).
+/// Consistent with `is_content_char()` in the tokenizer.
 fn intermediates_are_pure_sep(
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
     bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
@@ -235,19 +237,20 @@ fn intermediates_are_pure_sep(
     pos_from: u32,
     pos_to: u32,
 ) -> bool {
-    // Alphanumeric byte ranges to check in the bitmap
-    const ALPHANUM_RANGES: &[(u8, u8)] = &[
+    // Content byte ranges: ASCII alphanumeric + non-ASCII (UTF-8 lead/continuation bytes)
+    const CONTENT_RANGES: &[(u8, u8)] = &[
         (b'0', b'9'),
         (b'A', b'Z'),
         (b'a', b'z'),
+        (0x80, 0xFF), // non-ASCII bytes → content (emoji, CJK, accented, etc.)
     ];
 
     for pos in pos_from..pos_to {
         let Some(ord) = posmap.ordinal_at(doc_id, pos) else {
             return false; // Can't verify → reject
         };
-        // Check via ByteMap: if any alphanum byte is present → not pure sep
-        if bytemap.bytes_in_ranges(ord as u32, ALPHANUM_RANGES) {
+        // Check via ByteMap: if any content byte is present → not pure sep
+        if bytemap.bytes_in_ranges(ord as u32, CONTENT_RANGES) {
             return false;
         }
     }
