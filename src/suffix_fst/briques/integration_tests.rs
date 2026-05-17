@@ -909,8 +909,10 @@ mod tests {
         eprintln!("\n  --- Resolving ordinal postings ---");
         let mut all_ords: HashSet<u64> = HashSet::new();
         for c in &chains {
-            for &o in &c.ordinals {
-                all_ords.insert(o);
+            for alts in &c.ordinals {
+                for &o in alts {
+                    all_ords.insert(o);
+                }
             }
         }
         for c in &cands {
@@ -1141,5 +1143,137 @@ mod tests {
         assert!(!relaxed_docs.contains(&1), "doc 1 (inclusive) should NOT match relaxed");
         // Doc 2: has "doesincludework" → "include" IS a substring
         assert!(relaxed_docs.contains(&2), "doc 2 should match relaxed (include in doesincludework)");
+    }
+
+    #[test]
+    fn diag_function_standalone() {
+        // "function" as a standalone word — should be found in strict mode
+        let texts = &[
+            "Sort on aggregated function\n-CASE Scenario3",
+            "moduloFunctionOnUINT16UINT8Test",
+        ];
+
+        // Dump collector tokens
+        {
+            let mut collector = SfxCollectorV3::new();
+            for text in texts {
+                collector.begin_doc();
+                collector.add_value(text);
+                collector.end_doc();
+            }
+            let data = collector.into_data();
+            eprintln!("\n=== Collector tokens ===");
+            for (i, text) in data.token_texts.iter().enumerate() {
+                let meta = &data.token_meta[i];
+                let escaped = text.replace('\n', "\\n").replace('\r', "\\r");
+                eprintln!("  intern={} text={:?} own={} sep={} ovl={} ws={} word_stripped={}",
+                    i, escaped, meta.own_len, meta.sep_len, meta.overlap_len, meta.is_word_start, meta.is_word_stripped);
+            }
+            eprintln!("sorted_indices: {:?}", data.sorted_indices);
+            eprintln!("intern_to_final: {:?}", data.intern_to_final);
+        }
+
+        let idx = build(texts);
+        let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
+
+        // Dump ALL FST keys to see what's in there
+        {
+            let fst = reader.fst();
+            use lucivy_fst::{IntoStreamer, Streamer};
+            let mut stream = fst.stream();
+            let mut count = 0;
+            while let Some((key, val)) = stream.next() {
+                let key_str = String::from_utf8_lossy(key);
+                let prefix = key[0];
+                let suffix = &key[1..];
+                let suffix_str = String::from_utf8_lossy(suffix);
+                if suffix_str.contains("func") || suffix_str.contains("unct") || (prefix <= 0x01 && suffix.len() > 6 && suffix[0] == b'f') {
+                    let parents = reader.decode_parents(val);
+                    eprintln!("FST key: prefix=0x{:02x} suffix={:?} val={} parents={}",
+                        prefix, suffix_str, val, parents.len());
+                    for p in &parents {
+                        eprintln!("    sti={} ord={} own={} sep={} ovl={} ws={}",
+                            p.sti, p.raw_ordinal, p.own_len, p.sep_len, p.overlap_len, p.is_word_start);
+                    }
+                }
+                count += 1;
+            }
+            eprintln!("Total FST keys: {count}");
+        }
+
+        // Check FST candidates
+        let strict_cands = fst_walk::fst_candidates_v3(&reader, "function", false, true);
+        eprintln!("\nstrict candidates for 'function': {}", strict_cands.len());
+        for c in &strict_cands {
+            eprintln!("  sti={} ord={} own_len={} sep_len={} overlap_len={} is_ws={}",
+                c.sti, c.raw_ordinal, c.own_len, c.sep_len, c.overlap_len, c.is_word_start);
+        }
+
+        let relaxed_cands = fst_walk::fst_candidates_v3(&reader, "function", false, false);
+        eprintln!("relaxed candidates for 'function': {}", relaxed_cands.len());
+        for c in &relaxed_cands {
+            eprintln!("  sti={} ord={} own_len={} sep_len={} overlap_len={} is_ws={}",
+                c.sti, c.raw_ordinal, c.own_len, c.sep_len, c.overlap_len, c.is_word_start);
+        }
+
+        // Also check falling walk
+        let splits = fst_walk::falling_walk_v3(&reader, "function", true);
+        eprintln!("\nfalling walk splits for 'function' strict: {}", splits.len());
+        for s in &splits {
+            eprintln!("  consumed={} remainder_start={} overlap_validated={} sti={} ord={} own_len={}",
+                s.query_consumed, s.remainder_start, s.overlap_validated,
+                s.parent.sti, s.parent.raw_ordinal, s.parent.own_len);
+        }
+
+        // Check via orchestrator
+        let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
+        let strict_matches = orchestrator::contains_v3(&reader, "function", &resolver, false, false, true, None);
+        let relaxed_matches = orchestrator::contains_v3(&reader, "function", &resolver, false, false, false, None);
+        eprintln!("\nstrict matches: {:?}", strict_matches.iter().map(|m| (m.doc_id, m.byte_from, m.byte_to, m.sti)).collect::<Vec<_>>());
+        eprintln!("relaxed matches: {:?}", relaxed_matches.iter().map(|m| (m.doc_id, m.byte_from, m.byte_to, m.sti)).collect::<Vec<_>>());
+
+        // Doc 0 should be found in strict mode
+        let strict_docs: Vec<u32> = strict_matches.iter().map(|m| m.doc_id).collect();
+        let relaxed_docs: Vec<u32> = relaxed_matches.iter().map(|m| m.doc_id).collect();
+        assert!(strict_docs.contains(&0), "doc 0 should match 'function' in strict mode");
+        assert!(relaxed_docs.contains(&0), "doc 0 should match 'function' in relaxed mode");
+    }
+
+    #[test]
+    fn diag_struct_fp() {
+        let idx = build(&[
+            "dataset/shortest-path-tests/eKnows.csv in this folder",  // doc 0 — NO "struct", has "short"
+            "my_struct_field",                      // doc 1 — HAS "struct"
+            "constructor_init",                     // doc 2 — has "truct" in "constructor"
+            "instruction_set",                      // doc 3 — has "struct" in "instruction"
+            "CreationAndDestroyWithNullDatabase",   // doc 4 — NO "struct"
+        ]);
+        let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
+        let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
+
+        let cands = fst_walk::fst_candidates_v3(&reader, "struct", false, true);
+        eprintln!("fst_candidates for 'struct': {}", cands.len());
+        for c in &cands { eprintln!("  sti={} ord={} own={} sep={} ovl={}", c.sti, c.raw_ordinal, c.own_len, c.sep_len, c.overlap_len); }
+
+        let splits = fst_walk::falling_walk_v3(&reader, "struct", true);
+        eprintln!("\nfalling_walk splits: {}", splits.len());
+        for s in &splits {
+            eprintln!("  consumed={} remainder={} ovl_valid={} sti={} ord={} own={}",
+                s.query_consumed, s.remainder_start, s.overlap_validated,
+                s.parent.sti, s.parent.raw_ordinal, s.parent.own_len);
+        }
+
+        let chains = fst_walk::cross_token_chain_v3(&reader, "struct", true);
+        eprintln!("\nchains: {}", chains.len());
+        for c in &chains { eprintln!("  ords={:?} sti={}", c.ordinals, c.first_sti); }
+
+        let matches = orchestrator::contains_v3(&reader, "struct", &resolver, false, false, true, None);
+        eprintln!("\nmatches:");
+        for m in &matches { eprintln!("  doc={} pos={} span={} byte=[{}..{}]", m.doc_id, m.position, m.span, m.byte_from, m.byte_to); }
+
+        let match_docs: Vec<u32> = matches.iter().map(|m| m.doc_id).collect();
+        assert!(!match_docs.contains(&0), "doc 0 (shortest-path) should NOT match 'struct'");
+        assert!(match_docs.contains(&1), "doc 1 (my_struct) should match 'struct'");
+        assert!(!match_docs.contains(&4), "doc 4 (Destroy...) should NOT match 'struct'");
     }
 }

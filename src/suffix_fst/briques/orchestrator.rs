@@ -64,17 +64,62 @@ pub fn contains_v3(
         query
     };
 
+    // Debug: trace chain/candidate details for specific queries
+    let debug_query = std::env::var("V3_DEBUG_QUERY").ok();
+    let do_debug = debug_query.as_deref() == Some(query_ref);
+
+    if do_debug {
+        let cands = super::fst_walk::fst_candidates_v3(reader, query_ref, anchor_start, strict_separators);
+        let chains = super::fst_walk::cross_token_chain_v3(reader, query_ref, strict_separators);
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/v3_debug_trace.txt") {
+            use std::io::Write;
+            writeln!(f, "\n=== contains_v3 query={:?} strict={} ===", query_ref, strict_separators).ok();
+            writeln!(f, "fst_candidates: {}", cands.len()).ok();
+            for c in &cands {
+                writeln!(f, "  sti={} ord={} own={} sep={} ovl={}", c.sti, c.raw_ordinal, c.own_len, c.sep_len, c.overlap_len).ok();
+            }
+            writeln!(f, "chains: {}", chains.len()).ok();
+            for c in &chains {
+                let num_alts: usize = c.ordinals.iter().map(|a| a.len()).sum();
+                writeln!(f, "  ords={:?} sti={} consumed={} total_alts={}", c.ordinals, c.first_sti, c.total_query_consumed, num_alts).ok();
+            }
+            // Log falling walk splits with content_len info
+            writeln!(f, "falling_walk_splits:").ok();
+            let splits = super::fst_walk::falling_walk_v3(reader, query_ref, strict_separators);
+            for s in &splits {
+                let cl = s.parent.own_len.saturating_sub(s.parent.sep_len as u16);
+                writeln!(f, "  sti={} own={} sep={} content_len={} consumed={} ovl_valid={} ord={}",
+                    s.parent.sti, s.parent.own_len, s.parent.sep_len, cl,
+                    s.query_consumed, s.overlap_validated, s.parent.raw_ordinal).ok();
+            }
+        }
+    }
+
     let mut matches = composite::find_literal_v3(
         reader, query_ref, resolver, anchor_start, strict_separators, filter_docs,
     );
 
-    // Filter false positives from content ordinals: with aggregated postings,
-    // a single-token match may cover only the content portion of a token that
-    // shares its content ordinal with tokens in other documents. The match span
-    // (byte_to - byte_from = content_len - sti) must cover at least as many
-    // content bytes as the query has.
+    if do_debug {
+        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("/tmp/v3_debug_trace.txt") {
+            use std::io::Write;
+            writeln!(f, "raw matches (before filter): {}", matches.len()).ok();
+            for m in &matches {
+                writeln!(f, "  doc={} pos={} span={} byte=[{}..{}] sti={} ord={}",
+                    m.doc_id, m.position, m.span, m.byte_from, m.byte_to, m.sti, m.ordinal).ok();
+            }
+        }
+    }
+
+    // Filter false positives from content ordinals on single-token matches.
+    // Content-prefix ordinals aggregate postings across sep variants.
+    // A single-token match where the query is a prefix of a longer token's FST key
+    // may resolve postings from a different word sharing the same content ordinal.
+    // The span (byte_to - byte_from) must cover at least query_content_len.
+    //
+    // Chain matches (span > 1) don't need this: anchor_start=true in the chain
+    // builder ensures only SI=0 candidates, and adjacency check validates the rest.
     let query_content_len = query_ref.chars().filter(|c| is_content_char(*c)).count() as u32;
-    matches.retain(|m| m.byte_to.saturating_sub(m.byte_from) >= query_content_len);
+    matches.retain(|m| m.span > 1 || m.byte_to.saturating_sub(m.byte_from) >= query_content_len);
 
     // Dedup AFTER filtering — ensures we don't discard a valid chain match
     // in favor of a too-short single-token match that gets filtered.
@@ -82,6 +127,7 @@ pub fn contains_v3(
 
     // Apply exact_match filter: match must cover exactly the content of the word(s)
     if exact_match {
+        // TODO: fix once byte_to includes overlap
         matches.retain(|m| m.byte_to.saturating_sub(m.byte_from) == query_content_len);
     }
 

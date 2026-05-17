@@ -91,6 +91,9 @@ impl ContainsQueryV3 {
             self.anchor_start, self.exact_match, self.strict_separators, None,
         );
 
+        // TODO: post-filter chain matches (span > 1) using WordMap for exact
+        // structural verification. See docs/17-mai-2026/02-design-word-map-chain-verification.md
+
         let highlights: Vec<(DocId, usize, usize)> = matches.iter()
             .map(|m| (m.doc_id, m.byte_from as usize, m.byte_to as usize))
             .collect();

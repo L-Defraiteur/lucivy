@@ -129,9 +129,12 @@ fn resolve_chains_impl(
         if chain.ordinals.is_empty() {
             continue;
         }
+
+        // Resolve all alternatives at position 0
+        let first_entries = resolve_alternatives(resolver, &chain.ordinals[0], filter_docs);
+
         if chain.ordinals.len() == 1 {
-            let entries = resolve_ordinal(resolver, chain.ordinals[0], filter_docs);
-            for e in &entries {
+            for e in &first_entries {
                 results.push(MatchV3 {
                     doc_id: e.doc_id,
                     position: e.position,
@@ -139,15 +142,13 @@ fn resolve_chains_impl(
                     byte_from: e.byte_from + chain.first_sti as u32,
                     byte_to: e.byte_to,
                     sti: chain.first_sti,
-                    ordinal: chain.ordinals[0],
+                    ordinal: chain.ordinals[0][0],
                 });
             }
             continue;
         }
 
-        // Multi-ordinal chain
-        let first_entries = resolve_ordinal(resolver, chain.ordinals[0], filter_docs);
-
+        // Multi-position chain
         // Active set: (doc_id, prev_position, byte_from_first, byte_to_prev)
         let mut active: Vec<(DocId, u32, u32, u32)> = first_entries
             .iter()
@@ -159,8 +160,11 @@ fn resolve_chains_impl(
                 break;
             }
 
-            let ord = chain.ordinals[ord_idx];
-            let entries = resolver.resolve(ord);
+            // Union postings from all alternative ordinals at this position
+            let mut entries = Vec::new();
+            for &ord in &chain.ordinals[ord_idx] {
+                entries.extend(resolver.resolve(ord));
+            }
 
             let mut new_active: Vec<(DocId, u32, u32, u32)> = Vec::new();
 
@@ -183,7 +187,6 @@ fn resolve_chains_impl(
                             } else if e.position == prev_pos + 1 {
                                 true // directly adjacent, always OK
                             } else {
-                                // Check intermediate tokens are all pure non-alphanum via ByteMap
                                 intermediates_are_pure_sep(
                                     *posmap, *bytemap,
                                     doc_id, prev_pos + 1, e.position,
@@ -215,7 +218,7 @@ fn resolve_chains_impl(
                 byte_from,
                 byte_to,
                 sti: chain.first_sti,
-                ordinal: chain.ordinals[0],
+                ordinal: chain.ordinals[0][0],
             });
         }
     }
@@ -255,6 +258,19 @@ fn intermediates_are_pure_sep(
         }
     }
     true
+}
+
+/// Resolve alternative ordinals at one chain position, union results.
+fn resolve_alternatives(
+    resolver: &dyn PostingResolver,
+    ordinals: &[u64],
+    filter_docs: Option<&HashSet<DocId>>,
+) -> Vec<PostingEntry> {
+    let mut entries = Vec::new();
+    for &ord in ordinals {
+        entries.extend(resolve_ordinal(resolver, ord, filter_docs));
+    }
+    entries
 }
 
 /// Resolve an ordinal with optional doc filtering.

@@ -273,7 +273,7 @@ impl SfxFileReaderV3 {
         let lower = suffix.to_lowercase();
         let mut results = Vec::new();
 
-        for &prefix in &[super::builder::SI0_PREFIX, super::builder::SI_REST_PREFIX] {
+        for &prefix in &[super::builder::SI0_PREFIX, super::builder::SI_REST_PREFIX, super::builder_v3::SI_STRIPPED_PREFIX] {
             let mut key = vec![prefix];
             key.extend_from_slice(lower.as_bytes());
             if let Some(val) = self.fst.get(&key) {

@@ -8,10 +8,22 @@
 
 use std::collections::HashMap;
 
-use crate::tokenizer::equal_chunk::{segment_and_chunk, ChunkMeta, DEFAULT_MAX_TOKEN};
+use crate::tokenizer::equal_chunk::{is_content_char, segment_and_chunk, ChunkMeta, DEFAULT_MAX_TOKEN};
 
 /// Default overlap size in bytes.
 pub const DEFAULT_OVERLAP: usize = 2;
+
+/// Extract the leading content-char prefix from a token text.
+///
+/// Scans from the start and stops at the first separator (non-content) char.
+/// Works correctly for both regular chunks ("mutex_lo" → "mutex") and
+/// word-stripped entries ("mutexlo" → "mutexlo") since word-stripped texts
+/// have no sep bytes embedded.
+pub fn extract_content_prefix(text: &str) -> String {
+    text.chars()
+        .take_while(|c| is_content_char(*c))
+        .collect()
+}
 
 /// A captured token with its metadata and overlap info.
 #[derive(Debug, Clone)]
@@ -407,17 +419,15 @@ impl SfxCollectorV3 {
             self.token_texts[a as usize].cmp(&self.token_texts[b as usize])
         });
 
-        // Group intern ordinals by content key (text[..own_len]).
-        // Content key = chunk content + sep, WITHOUT overlap.
-        // All overlap variants share the same content ordinal and aggregated postings.
+        // Group intern ordinals by content key = leading content chars of text.
+        // Scanned from the actual bytes (not from metadata) so it works for both
+        // regular chunks ("mutex_lo" → "mutex") and word-stripped entries
+        // ("mutexlo" → "mutexlo", all content chars).
+        // All sep/overlap variants of the same content share one ordinal.
         let mut content_key_map: std::collections::BTreeMap<String, Vec<u32>> =
             std::collections::BTreeMap::new();
         for (intern_ord, text) in self.token_texts.iter().enumerate() {
-            let mut own_len = self.token_meta[intern_ord].own_len as usize;
-            own_len = own_len.min(text.len());
-            // Snap to UTF-8 char boundary
-            while own_len > 0 && !text.is_char_boundary(own_len) { own_len -= 1; }
-            let content_key = text[..own_len].to_string();
+            let content_key = extract_content_prefix(text);
             content_key_map.entry(content_key).or_default().push(intern_ord as u32);
         }
 

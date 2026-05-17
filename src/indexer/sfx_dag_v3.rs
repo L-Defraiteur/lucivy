@@ -207,8 +207,8 @@ impl Node for AssembleV3Node {
         let sfx = sfx_writer.to_bytes();
 
         // EventDriven registry indexes (bytemap, freqmap, posmap, termtexts-v2-compat)
-        // V3: pass own_len per content ordinal so ByteMap excludes overlap bytes.
-        // Content key = text[..own_len], so key.len() == own_len.
+        // V3: pass content_len per content ordinal so ByteMap excludes sep+overlap bytes.
+        // Content key = content chars only, so key.len() == content_len.
         let own_lens: Vec<u16> = data.tokens.iter()
             .map(|key| key.len() as u16)
             .collect();
@@ -362,12 +362,12 @@ pub fn merge_segments_v3(
         token_texts[a as usize].cmp(&token_texts[b as usize])
     });
 
-    // Group intern ordinals by content key (text[..own_len]) to build content ordinals.
+    // Group intern ordinals by content key = leading content chars of text.
+    // Sep-agnostic: "ion " and "ion\n-" share the same content ordinal.
     let mut content_key_map: std::collections::BTreeMap<String, Vec<u32>> =
         std::collections::BTreeMap::new();
     for (intern_ord, text) in token_texts.iter().enumerate() {
-        let own_len = token_meta[intern_ord].own_len as usize;
-        let content_key = text[..own_len.min(text.len())].to_string();
+        let content_key = crate::suffix_fst::collector_v3::extract_content_prefix(text);
         content_key_map.entry(content_key).or_default().push(intern_ord as u32);
     }
 

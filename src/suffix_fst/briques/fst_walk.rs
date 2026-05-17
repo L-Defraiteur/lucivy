@@ -70,9 +70,16 @@ pub struct SplitCandidateV3 {
 }
 
 /// A chain of tokens matching a query across token boundaries.
+///
+/// Each position stores alternative ordinals: different tokens may match
+/// the same query fragment (e.g., "ion" vs "ions" for remainder "ion").
+/// Resolve unions postings from all alternatives before adjacency check.
 #[derive(Debug, Clone)]
 pub struct TokenChainV3 {
-    pub ordinals: Vec<u64>,
+    /// `ordinals[i]` = alternative ordinals at chain position i.
+    /// Typically 1 element; multiple when the query prefix-matches
+    /// several content keys at that position.
+    pub ordinals: Vec<Vec<u64>>,
     pub first_sti: u16,
     pub total_query_consumed: usize,
 }
@@ -223,7 +230,12 @@ pub fn falling_walk_v3(
         );
     }
 
-    candidates.sort_by_key(|c| std::cmp::Reverse(c.query_consumed));
+    // Sort by query_consumed descending, then overlap_validated descending
+    // so dedup keeps the split with the most validated overlap.
+    candidates.sort_by(|a, b| {
+        b.query_consumed.cmp(&a.query_consumed)
+            .then(b.overlap_validated.cmp(&a.overlap_validated))
+    });
     candidates.dedup_by(|a, b| {
         a.parent.raw_ordinal == b.parent.raw_ordinal
             && a.parent.sti == b.parent.sti
@@ -296,42 +308,53 @@ pub fn cross_token_chain_v3(
         let remainder = &query_lower[safe_start..];
         if remainder.is_empty() {
             chains.push(TokenChainV3 {
-                ordinals: vec![split.parent.raw_ordinal],
+                ordinals: vec![vec![split.parent.raw_ordinal]],
                 first_sti: split.parent.sti,
                 total_query_consumed: split.query_consumed,
             });
             continue;
         }
 
-        // Try to extend the chain
-        let mut chain_ords = vec![split.parent.raw_ordinal];
+        // Build chain with alternative ordinals at each position.
+        // No forking — each position stores all matching ordinals.
+        // Resolve unions postings from alternatives before adjacency check.
+        let mut positions: Vec<Vec<u64>> = vec![vec![split.parent.raw_ordinal]];
         let mut rem = remainder.to_string();
         let mut depth = 0;
 
         while !rem.is_empty() && depth < MAX_CHAIN_DEPTH {
-            // First try: does the remainder exist as a substring in a single token?
-            let cands = fst_candidates_v3(reader, &rem, false, strict_separators);
+            // First try: does the remainder match at the START of a token (SI=0)?
+            // anchor_start=true because the remainder is the beginning of the next token.
+            let cands = fst_candidates_v3(reader, &rem, true, strict_separators);
             if !cands.is_empty() {
-                chain_ords.push(cands[0].raw_ordinal);
+                let mut unique_ords: Vec<u64> = cands.iter().map(|c| c.raw_ordinal).collect();
+                unique_ords.sort_unstable();
+                unique_ords.dedup();
+                positions.push(unique_ords);
                 rem.clear();
                 break;
             }
 
             // Second try: falling walk to find next split
             let sub_splits = falling_walk_v3(reader, &rem, strict_separators);
-            if let Some(best) = sub_splits.first() {
-                chain_ords.push(best.parent.raw_ordinal);
-                let safe = snap_to_char_boundary(&rem, best.remainder_start);
-                rem = rem[safe..].to_string();
-                depth += 1;
-            } else {
-                break; // No match
+            if sub_splits.is_empty() {
+                break;
             }
+            // Collect all unique ordinals from all sub-splits at this position
+            let mut unique_ords: Vec<u64> = sub_splits.iter().map(|s| s.parent.raw_ordinal).collect();
+            unique_ords.sort_unstable();
+            unique_ords.dedup();
+            positions.push(unique_ords);
+
+            let best = &sub_splits[0];
+            let safe = snap_to_char_boundary(&rem, best.remainder_start);
+            rem = rem[safe..].to_string();
+            depth += 1;
         }
 
         if rem.is_empty() {
             chains.push(TokenChainV3 {
-                ordinals: chain_ords,
+                ordinals: positions,
                 first_sti: split.parent.sti,
                 total_query_consumed: query.len(),
             });

@@ -355,3 +355,43 @@ fn v3_ground_truth_contains() {
     eprintln!("Report: {REPORT_PATH}");
     assert_eq!(fail, 0, "ground truth mismatch — see {REPORT_PATH}");
 }
+
+/// Debug targeted: for a specific query, dump chains + matches for FP docs.
+/// Run: cargo test -p lucivy-core --test test_sfx_v3_ground_truth debug_struct -- --nocapture
+#[test]
+fn debug_struct_fp() {
+    let files = collect_files(500);
+    if files.is_empty() { return; }
+
+    let handle = create_v3_index(&files);
+    let query = "struct";
+    let grep_set = grep_docs_strict(&files, query);
+    let v3_result = search_v3(&handle, &files, query, true);
+
+    let fp_docs: Vec<usize> = v3_result.doc_indices.difference(&grep_set).copied().collect();
+    eprintln!("\n=== DEBUG struct strict ===");
+    eprintln!("grep={} v3={} FP={}", grep_set.len(), v3_result.doc_indices.len(), fp_docs.len());
+
+    let mut dbg = std::fs::File::create("/tmp/v3_debug_struct.txt").unwrap();
+    writeln!(dbg, "FP docs for 'struct' strict: {} docs\n", fp_docs.len()).ok();
+
+    for &doc_idx in fp_docs.iter().take(5) {
+        let (path, content) = &files[doc_idx];
+        writeln!(dbg, "--- doc={doc_idx} path={path} ---").ok();
+
+        // Show highlights for this doc
+        for &(fidx, bf, bt) in &v3_result.highlights {
+            if fidx == doc_idx {
+                let bf_c = bf.min(content.len());
+                let bt_c = bt.min(content.len());
+                let ctx_s = snap_back(content, bf_c.saturating_sub(30));
+                let ctx_e = snap_fwd(content, (bt_c + 30).min(content.len()));
+                writeln!(dbg, "  highlight [{bf}..{bt}] span={}: ...{}>>{}<<{}...",
+                    bt - bf,
+                    &content[ctx_s..bf_c], &content[bf_c..bt_c], &content[bt_c..ctx_e]).ok();
+            }
+        }
+        writeln!(dbg).ok();
+    }
+    eprintln!("Debug output: /tmp/v3_debug_struct.txt");
+}
