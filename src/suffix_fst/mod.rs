@@ -19,6 +19,8 @@ mod collector;
 pub mod gapmap;
 /// Sibling table: per-ordinal successor links for cross-token search.
 pub mod sibling_table;
+/// Overlap siblings: content ordinal → extended ordinals sharing same content.
+pub mod overlap_siblings;
 /// Position-to-ordinal map: (doc_id, position) → ordinal reverse index.
 pub mod posmap;
 /// Byte presence bitmap: 256-bit bitmap per ordinal for fast pre-filtering.

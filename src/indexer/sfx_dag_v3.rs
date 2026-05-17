@@ -398,6 +398,17 @@ pub fn merge_segments_v3(
         &token_texts, &token_meta, 2,
     );
 
+    // Build overlap sibling table for merged data
+    let mut overlap_siblings = crate::suffix_fst::overlap_siblings::OverlapSiblingWriter::new(
+        content_final_ord as usize,
+    );
+    for (_ck, intern_ords) in &content_key_map {
+        let co = intern_to_final[intern_ords[0] as usize];
+        for &io in intern_ords {
+            overlap_siblings.add(co, io);
+        }
+    }
+
     Ok(SfxCollectorDataV3 {
         tokens,
         sorted_indices,
@@ -408,6 +419,7 @@ pub fn merge_segments_v3(
         token_meta,
         num_docs: total_docs,
         min_suffix_len: 1,
+        overlap_siblings: overlap_siblings.serialize(),
         word_stripped,
     })
 }

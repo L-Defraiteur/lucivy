@@ -436,6 +436,18 @@ impl SfxCollectorV3 {
         // Content keys as BTreeSet (sorted = ordinal order)
         let tokens: std::collections::BTreeSet<String> = content_key_map.keys().cloned().collect();
 
+        // Build overlap sibling table: content_ord → [intern_ords]
+        let mut overlap_siblings = crate::suffix_fst::overlap_siblings::OverlapSiblingWriter::new(
+            content_final_ord as usize,
+        );
+        for (_content_key, intern_ords) in &content_key_map {
+            let content_ord = intern_to_final[intern_ords[0] as usize];
+            for &io in intern_ords {
+                overlap_siblings.add(content_ord, io);
+            }
+        }
+        let overlap_siblings_data = overlap_siblings.serialize();
+
         SfxCollectorDataV3 {
             sorted_indices,
             intern_to_final,
@@ -446,6 +458,7 @@ impl SfxCollectorV3 {
             num_content_ords: content_final_ord as usize,
             num_docs: self.current_doc_id,
             min_suffix_len: self.min_suffix_len,
+            overlap_siblings: overlap_siblings_data,
             word_stripped: self.word_stripped_entries,
         }
     }
@@ -508,6 +521,9 @@ pub struct SfxCollectorDataV3 {
     pub num_content_ords: usize,
     pub num_docs: u32,
     pub min_suffix_len: usize,
+    /// Overlap sibling table: content_ord → [intern_ords with same content].
+    /// Serialized binary format, ready to store alongside the SFX file.
+    pub overlap_siblings: Vec<u8>,
     /// Word-level stripped entries for partition 0x02.
     pub word_stripped: Vec<WordStrippedEntry>,
 }
