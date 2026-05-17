@@ -76,9 +76,10 @@ pub fn find_literal_v3_full(
         results.extend(cross);
     }
 
-    // Dedup by (doc_id, position)
+    // Sort by (doc_id, position) for deterministic output.
+    // No dedup here — the orchestrator filters by content length and callers
+    // dedup by doc_id. Removing valid matches risks false negatives.
     results.sort_by_key(|m| (m.doc_id, m.position));
-    results.dedup_by_key(|m| (m.doc_id, m.position));
 
     results
 }

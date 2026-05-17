@@ -268,18 +268,31 @@ impl SuffixFstBuilderV3 {
             self.key_buf.extend_from_slice(suffix);
             let key_len = (self.key_buf.len() as u32) - key_start;
 
-            self.entries.push((
-                key_start,
-                key_len,
-                ParentEntryV3 {
-                    raw_ordinal,
-                    sti: si as u16,
-                    own_len,
-                    sep_len,
-                    overlap_len,
-                    is_word_start,
-                },
-            ));
+            let parent = ParentEntryV3 {
+                raw_ordinal,
+                sti: si as u16,
+                own_len,
+                sep_len,
+                overlap_len,
+                is_word_start,
+            };
+
+            self.entries.push((key_start, key_len, parent.clone()));
+
+            // Marker entry: if the key extends past own_len (has overlap bytes),
+            // add a truncated key ending at the own_len boundary. This makes the
+            // FST node at own_len final, so the falling walk can detect splits
+            // even when the query ends in the overlap zone.
+            let split_at = (own_len as usize).saturating_sub(si);
+            if split_at > 0 && split_at < suffix.len()
+                && is_utf8_char_boundary(suffix, split_at)
+            {
+                let trunc_start = self.key_buf.len() as u32;
+                self.key_buf.push(prefix);
+                self.key_buf.extend_from_slice(&suffix[..split_at]);
+                let trunc_len = (self.key_buf.len() as u32) - trunc_start;
+                self.entries.push((trunc_start, trunc_len, parent));
+            }
         }
 
         // NOTE: stripped partition (0x02) is now word-level, generated via add_word_stripped().

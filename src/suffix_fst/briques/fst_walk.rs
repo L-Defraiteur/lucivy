@@ -132,14 +132,7 @@ pub fn fst_candidates_v3(
         while let Some((_key, val)) = stream.next() {
             let parents = reader.decode_parents(val);
             for p in parents {
-                // With content ordinals, overlap bytes are context-dependent.
-                // Only accept candidates where the query fits within the token's
-                // own bytes (content + sep). Queries extending into the overlap
-                // zone must go through the cross-token chain path instead.
-                let own_from_sti = (p.own_len as usize).saturating_sub(p.sti as usize);
-                if query_bytes.len() <= own_from_sti {
-                    results.push(FstCandidateV3::from_parent(&p));
-                }
+                results.push(FstCandidateV3::from_parent(&p));
             }
         }
     }

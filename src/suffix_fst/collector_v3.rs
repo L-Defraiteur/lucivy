@@ -413,8 +413,11 @@ impl SfxCollectorV3 {
         let mut content_key_map: std::collections::BTreeMap<String, Vec<u32>> =
             std::collections::BTreeMap::new();
         for (intern_ord, text) in self.token_texts.iter().enumerate() {
-            let own_len = self.token_meta[intern_ord].own_len as usize;
-            let content_key = text[..own_len.min(text.len())].to_string();
+            let mut own_len = self.token_meta[intern_ord].own_len as usize;
+            own_len = own_len.min(text.len());
+            // Snap to UTF-8 char boundary
+            while own_len > 0 && !text.is_char_boundary(own_len) { own_len -= 1; }
+            let content_key = text[..own_len].to_string();
             content_key_map.entry(content_key).or_default().push(intern_ord as u32);
         }
 

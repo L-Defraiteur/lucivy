@@ -68,13 +68,21 @@ pub fn contains_v3(
         reader, query_ref, resolver, anchor_start, strict_separators, filter_docs,
     );
 
+    // Filter false positives from content ordinals: with aggregated postings,
+    // a single-token match may cover only the content portion of a token that
+    // shares its content ordinal with tokens in other documents. The match span
+    // (byte_to - byte_from = content_len - sti) must cover at least as many
+    // content bytes as the query has.
+    let query_content_len = query_ref.chars().filter(|c| is_content_char(*c)).count() as u32;
+    matches.retain(|m| m.byte_to.saturating_sub(m.byte_from) >= query_content_len);
+
+    // Dedup AFTER filtering — ensures we don't discard a valid chain match
+    // in favor of a too-short single-token match that gets filtered.
+    matches.dedup_by_key(|m| (m.doc_id, m.position));
+
     // Apply exact_match filter: match must cover exactly the content of the word(s)
     if exact_match {
-        let query_lower = query.to_lowercase();
-        let query_len = query_lower.len() as u32;
-        matches.retain(|m| {
-            (m.byte_to - m.byte_from) == query_len
-        });
+        matches.retain(|m| m.byte_to.saturating_sub(m.byte_from) == query_content_len);
     }
 
     matches
