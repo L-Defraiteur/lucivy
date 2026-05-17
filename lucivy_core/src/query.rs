@@ -14,6 +14,7 @@ use ld_lucivy::query::{
     AllQuery, BooleanQuery, DisjunctionMaxQuery,
     HighlightSink, MoreLikeThisQuery, Occur, Query,
     QueryParser, RangeQuery, RegexContinuationQuery, RegexQuery, SuffixContainsQuery, TermQuery,
+    ContainsQueryV3, FuzzyQueryV3, RegexQueryV3,
 };
 use ld_lucivy::schema::OwnedValue;
 use ld_lucivy::schema::{Field, FieldType, IndexRecordOption, Schema, Term};
@@ -298,13 +299,10 @@ fn build_contains_query(
     let distance = config.distance.unwrap_or(0);
     let anchor_start = config.anchor_start.unwrap_or(false);
 
-    // Fuzzy d>=1: use trigram pigeonhole via RegexContinuationQuery (fast + correct ordering).
+    // Fuzzy d>=1: FuzzyQueryV3 (trigram pigeonhole, auto-detects SFX3 vs v2).
     if distance > 0 {
-        let mut query = RegexContinuationQuery::new(
-            field,
-            value.to_string(),
-            anchor_start,
-        ).with_fuzzy_distance(distance);
+        let mut query = FuzzyQueryV3::new(field, value.to_string(), distance)
+            .with_strict_separators(config.strict_separators.unwrap_or(false));
         if let Some(sink) = highlight_sink {
             let field_name = config.field.clone().unwrap_or_default();
             query = query.with_highlight_sink(sink, field_name);
@@ -312,9 +310,9 @@ fn build_contains_query(
         return Ok(Box::new(query));
     }
 
-    // Exact (d=0): SuffixContainsQuery.
+    // Exact (d=0): ContainsQueryV3 (auto-detects SFX3 vs v2).
     let exact_match = config.exact_match.unwrap_or(false);
-    let mut query = SuffixContainsQuery::new(field, value.to_string())
+    let mut query = ContainsQueryV3::new(field, value.to_string())
         .with_strict_separators(config.strict_separators.unwrap_or(false));
     if anchor_start {
         query = query.with_anchor_start();
@@ -339,12 +337,7 @@ fn build_contains_regex(
     let pattern = config.value.as_deref().ok_or("contains regex query requires 'value'")?;
     let distance = config.distance.unwrap_or(0);
 
-    let mut query = RegexContinuationQuery::from_regex(
-        field,
-        pattern.to_string(),
-        false /* contains */,
-    );
-    query = query.with_fuzzy_distance(distance);
+    let mut query = RegexQueryV3::new(field, pattern.to_string(), false /* contains */);
     if let Some(sink) = highlight_sink {
         let field_name = config.field.clone().unwrap_or_default();
         query = query.with_highlight_sink(sink, field_name);
