@@ -12,6 +12,8 @@ pub mod section_file;
 pub mod termtexts_v3;
 /// SFX file format v3: section-based, no sibling/gapmap.
 pub mod file_v3;
+/// Unified query building blocks for SFX v3.
+pub mod briques;
 mod collector;
 /// GapMap: binary format for storing inter-token separators per document.
 pub mod gapmap;
