@@ -337,20 +337,28 @@ mod tests {
 
         // Build FST
         let mut builder = SuffixFstBuilderV3::with_min_suffix_len(1);
-        for (final_ord, &intern_ord) in data.sorted_indices.iter().enumerate() {
+        for &intern_ord in &data.sorted_indices {
             let text = &data.token_texts[intern_ord as usize];
             let meta = &data.token_meta[intern_ord as usize];
-            builder.add_token(text, final_ord as u64, meta.own_len, meta.sep_len,
+            let content_ord = data.intern_to_final[intern_ord as usize];
+            builder.add_token(text, content_ord as u64, meta.own_len, meta.sep_len,
                 meta.overlap_len, meta.is_word_start);
+        }
+        for ws in &data.word_stripped {
+            let final_ord = data.intern_to_final[ws.first_intern_ord as usize];
+            builder.add_word_stripped(
+                &ws.word_content, &ws.content_overlap,
+                final_ord as u64, ws.first_own_len, ws.last_sep_len, ws.is_word_start,
+            );
         }
         let (fst_data, parent_data) = builder.build().unwrap();
 
         // Build sfxpost
-        let num_terms = data.tokens.len();
+        let num_terms = data.num_content_ords;
         let mut post_writer = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::new(num_terms);
-        for (final_ord, &old_ord) in data.sorted_indices.iter().enumerate() {
-            for &(doc_id, ti, bf, bt) in &data.token_postings[old_ord as usize] {
-                post_writer.add_entry(final_ord as u32, doc_id, ti, bf, bt);
+        for (content_ord, postings) in data.content_postings.iter().enumerate() {
+            for &(doc_id, ti, bf, bt) in postings {
+                post_writer.add_entry(content_ord as u32, doc_id, ti, bf, bt);
             }
         }
         let sfxpost_data = post_writer.finish();

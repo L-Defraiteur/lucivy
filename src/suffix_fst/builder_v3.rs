@@ -669,6 +669,7 @@ mod tests {
         let mut builder = SuffixFstBuilderV3::with_min_suffix_len(1);
         // "mutex_lo" : content=5 ("mutex"), sep=1 ("_"), overlap=2 ("lo")
         builder.add_token("mutex_lo", 0, 6, 1, 2, true);
+        builder.add_word_stripped("mutex", "lo", 0, 6, 1, true);
 
         let (fst_bytes, _) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
@@ -700,6 +701,7 @@ mod tests {
     fn test_stripped_trigram_cross_sep() {
         let mut builder = SuffixFstBuilderV3::with_min_suffix_len(1);
         builder.add_token("mutex_lo", 0, 6, 1, 2, true);
+        builder.add_word_stripped("mutex", "lo", 0, 6, 1, true);
 
         let (fst_bytes, _) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
@@ -747,6 +749,7 @@ mod tests {
         let mut builder = SuffixFstBuilderV3::with_min_suffix_len(1);
         // "a____bc" : content=1 ("a"), sep=4 ("____"), overlap=2 ("bc")
         builder.add_token("a____bc", 0, 5, 4, 2, true);
+        builder.add_word_stripped("a", "bc", 0, 5, 4, true);
 
         let (fst_bytes, _) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
@@ -771,6 +774,7 @@ mod tests {
     fn test_stripped_preserves_ordinal() {
         let mut builder = SuffixFstBuilderV3::with_min_suffix_len(1);
         builder.add_token("mutex_lo", 42, 6, 1, 2, true);
+        builder.add_word_stripped("mutex", "lo", 42, 6, 1, true);
 
         let (fst_bytes, _) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();

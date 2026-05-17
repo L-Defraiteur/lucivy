@@ -84,12 +84,15 @@ impl Node for BuildFstV3Node {
 
         let mut builder = SuffixFstBuilderV3::with_min_suffix_len(data.min_suffix_len);
         // Chunk-level entries (partitions 0x00/0x01)
-        for (final_ord, &intern_ord) in data.sorted_indices.iter().enumerate() {
+        // Each extended text gets its own FST key, but the raw_ordinal is
+        // the content ordinal (shared across overlap variants).
+        for &intern_ord in &data.sorted_indices {
             let text = &data.token_texts[intern_ord as usize];
             let meta = &data.token_meta[intern_ord as usize];
+            let content_ord = data.intern_to_final[intern_ord as usize];
             builder.add_token(
                 text,
-                final_ord as u64,
+                content_ord as u64,
                 meta.own_len,
                 meta.sep_len,
                 meta.overlap_len,
@@ -98,11 +101,11 @@ impl Node for BuildFstV3Node {
         }
         // Word-level stripped entries (partition 0x02)
         for ws in &data.word_stripped {
-            let final_ord = data.intern_to_final[ws.first_intern_ord as usize];
+            let content_ord = data.intern_to_final[ws.first_intern_ord as usize];
             builder.add_word_stripped(
                 &ws.word_content,
                 &ws.content_overlap,
-                final_ord as u64,
+                content_ord as u64,
                 ws.first_own_len,
                 ws.last_sep_len,
                 ws.is_word_start,
@@ -137,11 +140,11 @@ impl Node for BuildSfxPostV3Node {
             .downcast::<SfxCollectorDataV3>()
             .ok_or("wrong type")?;
 
-        let num_terms = data.tokens.len();
+        let num_terms = data.num_content_ords;
         let mut writer = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::new(num_terms);
-        for (final_ord, &old_ord) in data.sorted_indices.iter().enumerate() {
-            for &(doc_id, ti, bf, bt) in &data.token_postings[old_ord as usize] {
-                writer.add_entry(final_ord as u32, doc_id, ti, bf, bt);
+        for (content_ord, postings) in data.content_postings.iter().enumerate() {
+            for &(doc_id, ti, bf, bt) in postings {
+                writer.add_entry(content_ord as u32, doc_id, ti, bf, bt);
             }
         }
         let sfxpost_data = writer.finish();
@@ -181,12 +184,14 @@ impl Node for AssembleV3Node {
             .downcast::<SfxCollectorDataV3>()
             .ok_or("wrong type")?;
 
-        // Build termtexts v3 (extended texts + metadata)
+        // Build termtexts v3 (extended texts + metadata, keyed by content ordinal).
+        // Multiple extended variants may share the same content ordinal — store all.
         let mut tt_writer = TermTextsWriterV3::new();
-        for (final_ord, &intern_ord) in data.sorted_indices.iter().enumerate() {
+        for &intern_ord in &data.sorted_indices {
             let text = &data.token_texts[intern_ord as usize];
             let meta = &data.token_meta[intern_ord as usize];
-            tt_writer.add(final_ord as u32, text, TermMetaV3 {
+            let content_ord = data.intern_to_final[intern_ord as usize];
+            tt_writer.add(content_ord, text, TermMetaV3 {
                 own_len: meta.own_len,
                 sep_len: meta.sep_len,
                 overlap_len: meta.overlap_len,
@@ -201,9 +206,10 @@ impl Node for AssembleV3Node {
         let sfx = sfx_writer.to_bytes();
 
         // EventDriven registry indexes (bytemap, freqmap, posmap, termtexts-v2-compat)
-        // V3: pass own_len per token so ByteMap excludes overlap bytes
-        let own_lens: Vec<u16> = data.sorted_indices.iter()
-            .map(|&intern_ord| data.token_meta[intern_ord as usize].own_len)
+        // V3: pass own_len per content ordinal so ByteMap excludes overlap bytes.
+        // Content key = text[..own_len], so key.len() == own_len.
+        let own_lens: Vec<u16> = data.tokens.iter()
+            .map(|key| key.len() as u16)
             .collect();
         let derived = crate::suffix_fst::index_registry::build_derived_indexes_v3(
             &data.tokens,
@@ -354,14 +360,33 @@ pub fn merge_segments_v3(
         token_texts[a as usize].cmp(&token_texts[b as usize])
     });
 
-    let mut intern_to_final = vec![0u32; num_tokens];
-    for (new_ord, &old_ord) in sorted_indices.iter().enumerate() {
-        intern_to_final[old_ord as usize] = new_ord as u32;
+    // Group intern ordinals by content key (text[..own_len]) to build content ordinals.
+    let mut content_key_map: std::collections::BTreeMap<String, Vec<u32>> =
+        std::collections::BTreeMap::new();
+    for (intern_ord, text) in token_texts.iter().enumerate() {
+        let own_len = token_meta[intern_ord].own_len as usize;
+        let content_key = text[..own_len.min(text.len())].to_string();
+        content_key_map.entry(content_key).or_default().push(intern_ord as u32);
     }
 
-    let tokens: BTreeSet<String> = sorted_indices.iter()
-        .map(|&old_ord| token_texts[old_ord as usize].clone())
-        .collect();
+    let mut intern_to_final = vec![0u32; num_tokens];
+    let mut content_postings: Vec<Vec<(u32, u32, u32, u32)>> = Vec::new();
+    let mut content_final_ord = 0u32;
+    for (_content_key, intern_ords) in &content_key_map {
+        let mut agg: Vec<(u32, u32, u32, u32)> = Vec::new();
+        for &io in intern_ords {
+            agg.extend_from_slice(&token_postings[io as usize]);
+        }
+        agg.sort();
+        agg.dedup();
+        content_postings.push(agg);
+        for &io in intern_ords {
+            intern_to_final[io as usize] = content_final_ord;
+        }
+        content_final_ord += 1;
+    }
+
+    let tokens: BTreeSet<String> = content_key_map.keys().cloned().collect();
 
     let total_docs = doc_id_remaps.iter()
         .map(|m| m.values().copied().max().unwrap_or(0) + 1)
@@ -378,7 +403,8 @@ pub fn merge_segments_v3(
         sorted_indices,
         intern_to_final,
         token_texts,
-        token_postings,
+        content_postings,
+        num_content_ords: content_final_ord as usize,
         token_meta,
         num_docs: total_docs,
         min_suffix_len: 1,
@@ -572,10 +598,11 @@ mod tests {
 
         // Shared tokens should have merged postings
         // "mutex_lo" should have postings from both doc 0 and doc 1
-        let ord = merged_data.token_texts.iter()
+        let intern_ord = merged_data.token_texts.iter()
             .position(|t| t == "mutex_lo")
             .expect("mutex_lo should exist");
-        let postings = &merged_data.token_postings[ord];
+        let content_ord = merged_data.intern_to_final[intern_ord] as usize;
+        let postings = &merged_data.content_postings[content_ord];
         let doc_ids: std::collections::HashSet<u32> = postings.iter().map(|p| p.0).collect();
         assert!(doc_ids.contains(&0), "should have doc 0");
         assert!(doc_ids.contains(&1), "should have doc 1");
@@ -598,8 +625,9 @@ mod tests {
         // contain docs that are in the remap
         let has_hello = merged_data.token_texts.iter().any(|t| t == "hello_wo");
         if has_hello {
-            let ord = merged_data.token_texts.iter().position(|t| t == "hello_wo").unwrap();
-            let postings = &merged_data.token_postings[ord];
+            let intern_ord = merged_data.token_texts.iter().position(|t| t == "hello_wo").unwrap();
+            let content_ord = merged_data.intern_to_final[intern_ord] as usize;
+            let postings = &merged_data.content_postings[content_ord];
             // Doc 1 was deleted, so no postings should reference the deleted doc
             for p in postings {
                 assert_ne!(p.0, 1, "deleted doc should not be in postings");

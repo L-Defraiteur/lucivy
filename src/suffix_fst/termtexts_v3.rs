@@ -364,10 +364,11 @@ mod tests {
 
         // Write termtexts v3 from collector data
         let mut writer = TermTextsWriterV3::new();
-        for (final_ord, &intern_ord) in data.sorted_indices.iter().enumerate() {
+        for &intern_ord in &data.sorted_indices {
             let text = &data.token_texts[intern_ord as usize];
             let meta = &data.token_meta[intern_ord as usize];
-            writer.add(final_ord as u32, text, TermMetaV3 {
+            let content_ord = data.intern_to_final[intern_ord as usize];
+            writer.add(content_ord, text, TermMetaV3 {
                 own_len: meta.own_len,
                 sep_len: meta.sep_len,
                 overlap_len: meta.overlap_len,

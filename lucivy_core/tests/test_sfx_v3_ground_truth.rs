@@ -4,6 +4,10 @@
 //! then verifies that contains queries return the same docs as naive grep,
 //! and logs highlights + context to a file for investigation.
 //!
+//! Two modes tested:
+//! - strict_sep=true: grep matches the literal query (case-insensitive)
+//! - strict_sep=false: grep strips non-content chars from both query and text
+//!
 //! Run: cargo test -p lucivy-core --test test_sfx_v3_ground_truth -- --nocapture
 //! Output: /tmp/v3_ground_truth_report.txt
 
@@ -16,6 +20,17 @@ use lucivy_core::query::{self, QueryConfig, SchemaConfig};
 const REPO_PATH: &str = "/tmp/rag3db-bench";
 const MAX_FILE_SIZE: u64 = 100_000;
 const REPORT_PATH: &str = "/tmp/v3_ground_truth_report.txt";
+
+// ─── Content char (mirrors tokenizer::equal_chunk::is_content_char) ──────
+
+fn is_content_char(c: char) -> bool {
+    !c.is_ascii() || c.is_ascii_alphanumeric()
+}
+
+/// Strip non-content chars from a string (for sep-agnostic matching).
+fn strip_seps(s: &str) -> String {
+    s.chars().filter(|c| is_content_char(*c)).collect()
+}
 
 // ─── File collection ──────────────────────────────────────────────────────
 
@@ -97,8 +112,8 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
 
 // ─── Ground truth (naive grep) ────────────────────────────────────────────
 
-/// Returns set of file indices that contain needle (case-insensitive substring).
-fn grep_docs(files: &[(String, String)], needle: &str) -> HashSet<usize> {
+/// Literal case-insensitive grep (for strict_sep=true).
+fn grep_docs_strict(files: &[(String, String)], needle: &str) -> HashSet<usize> {
     let lower = needle.to_lowercase();
     files.iter().enumerate()
         .filter(|(_, (_, c))| c.to_lowercase().contains(&lower))
@@ -106,21 +121,39 @@ fn grep_docs(files: &[(String, String)], needle: &str) -> HashSet<usize> {
         .collect()
 }
 
+/// Sep-agnostic grep (for strict_sep=false).
+/// Strips non-content chars from both query and text, then searches.
+fn grep_docs_relaxed(files: &[(String, String)], needle: &str) -> HashSet<usize> {
+    let stripped_query = strip_seps(&needle.to_lowercase());
+    if stripped_query.is_empty() { return HashSet::new(); }
+    files.iter().enumerate()
+        .filter(|(_, (_, c))| {
+            let stripped_content = strip_seps(&c.to_lowercase());
+            stripped_content.contains(&stripped_query)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
 // ─── Search with highlights ───────────────────────────────────────────────
 
 struct SearchResult {
-    /// File indices (into the files vec) that matched.
     doc_indices: HashSet<usize>,
-    /// Per-match: (file_index, byte_from, byte_to).
     highlights: Vec<(usize, usize, usize)>,
 }
 
-fn search_v3(handle: &LucivyHandle, files: &[(String, String)], value: &str) -> SearchResult {
+fn search_v3(
+    handle: &LucivyHandle,
+    files: &[(String, String)],
+    value: &str,
+    strict_separators: bool,
+) -> SearchResult {
     let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
     let config = QueryConfig {
         query_type: "contains".into(),
         field: Some("content".into()),
         value: Some(value.into()),
+        strict_separators: Some(strict_separators),
         ..Default::default()
     };
     let query = query::build_query(&config, &handle.schema, &handle.index, Some(Arc::clone(&sink))).unwrap();
@@ -159,6 +192,7 @@ fn search_v3(handle: &LucivyHandle, files: &[(String, String)], value: &str) -> 
 fn write_report(
     out: &mut dyn Write,
     query: &str,
+    mode: &str,
     files: &[(String, String)],
     grep_set: &HashSet<usize>,
     v3_result: &SearchResult,
@@ -168,20 +202,18 @@ fn write_report(
     let only_v3: Vec<usize> = v3_set.difference(grep_set).copied().collect();
 
     writeln!(out, "\n{}", "=".repeat(60)).ok();
-    writeln!(out, "Query: {:?}  grep={} v3={}", query, grep_set.len(), v3_set.len()).ok();
+    writeln!(out, "Query: {:?} [{}]  grep={} v3={}", query, mode, grep_set.len(), v3_set.len()).ok();
 
     if !only_grep.is_empty() {
         writeln!(out, "\n  FALSE NEGATIVES (grep found, v3 missed): {} docs", only_grep.len()).ok();
         for &idx in only_grep.iter().take(5) {
             let (path, content) = &files[idx];
             writeln!(out, "    doc={idx} path={path}").ok();
-            // Show where grep finds the match
             let lower_content = content.to_lowercase();
             let lower_query = query.to_lowercase();
             if let Some(pos) = lower_content.find(&lower_query) {
                 let ctx_start = pos.saturating_sub(30);
                 let ctx_end = (pos + query.len() + 30).min(content.len());
-                // Snap to char boundaries
                 let cs = snap_back(content, ctx_start);
                 let ce = snap_fwd(content, ctx_end);
                 writeln!(out, "    grep match at byte {pos}: ...{}[{}]{}...",
@@ -196,7 +228,6 @@ fn write_report(
         for &idx in only_v3.iter().take(5) {
             let (path, _content) = &files[idx];
             writeln!(out, "    doc={idx} path={path}").ok();
-            // Show v3 highlights for this doc
             for &(fidx, bf, bt) in &v3_result.highlights {
                 if fidx == idx {
                     let content = &files[idx].1;
@@ -215,7 +246,6 @@ fn write_report(
         writeln!(out, "  OK — perfect match").ok();
     }
 
-    // Show a few highlight samples
     if !v3_result.highlights.is_empty() {
         writeln!(out, "\n  Sample highlights (first 3):").ok();
         for &(fidx, bf, bt) in v3_result.highlights.iter().take(3) {
@@ -242,6 +272,18 @@ fn snap_fwd(s: &str, pos: usize) -> usize {
     p
 }
 
+// ─── Query definitions ──────────────────────────────────────────────────
+
+struct GroundTruthQuery {
+    text: &'static str,
+    strict_sep: bool,
+}
+
+impl GroundTruthQuery {
+    fn strict(text: &'static str) -> Self { Self { text, strict_sep: true } }
+    fn relaxed(text: &'static str) -> Self { Self { text, strict_sep: false } }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 #[test]
@@ -258,36 +300,53 @@ fn v3_ground_truth_contains() {
     let mut report = std::fs::File::create(REPORT_PATH).unwrap();
     writeln!(report, "V3 Ground Truth Report — {} files, indexed in {:.1}s\n", files.len(), index_time).ok();
 
-    let queries = &[
-        "function",
-        "return",
-        "include",
-        "struct",
-        "void",
-        "uint64_t",
-        "std::unique_ptr",
-        "ku_dynamic_cast",
-        "TableFunction",
-        "rag3db",
+    // Each query tested in both modes:
+    // strict_sep=true: literal grep comparison
+    // strict_sep=false: sep-agnostic grep comparison
+    let queries: Vec<GroundTruthQuery> = vec![
+        // Simple words — both modes should agree
+        GroundTruthQuery::strict("function"),
+        GroundTruthQuery::relaxed("function"),
+        GroundTruthQuery::strict("return"),
+        GroundTruthQuery::strict("struct"),
+        GroundTruthQuery::strict("void"),
+        GroundTruthQuery::strict("rag3db"),
+        GroundTruthQuery::strict("include"),
+        // Queries with separators — test both modes explicitly
+        GroundTruthQuery::strict("uint64_t"),
+        GroundTruthQuery::relaxed("uint64_t"),
+        GroundTruthQuery::strict("std::unique_ptr"),
+        GroundTruthQuery::relaxed("std::unique_ptr"),
+        GroundTruthQuery::strict("ku_dynamic_cast"),
+        GroundTruthQuery::relaxed("ku_dynamic_cast"),
+        // Mixed case — relaxed mode expands matches
+        GroundTruthQuery::strict("TableFunction"),
+        GroundTruthQuery::relaxed("TableFunction"),
     ];
 
     let mut pass = 0u32;
     let mut fail = 0u32;
 
-    eprintln!("{:<30} {:>8} {:>8} {:>8}", "Query", "Grep", "V3", "Status");
-    eprintln!("{}", "-".repeat(60));
+    eprintln!("{:<35} {:>5} {:>8} {:>8} {:>8}", "Query", "Mode", "Grep", "V3", "Status");
+    eprintln!("{}", "-".repeat(70));
 
-    for q in queries {
+    for q in &queries {
+        let mode_label = if q.strict_sep { "strict" } else { "relax" };
         let t = std::time::Instant::now();
-        let grep_set = grep_docs(&files, q);
-        let v3_result = search_v3(&handle, &files, q);
+
+        let grep_set = if q.strict_sep {
+            grep_docs_strict(&files, q.text)
+        } else {
+            grep_docs_relaxed(&files, q.text)
+        };
+        let v3_result = search_v3(&handle, &files, q.text, q.strict_sep);
         let ms = t.elapsed().as_secs_f64() * 1000.0;
 
         let status = if v3_result.doc_indices == grep_set { "OK" } else { "FAIL" };
-        eprintln!("{:<30} {:>8} {:>8} {:>6} ({:.1}ms)",
-            q, grep_set.len(), v3_result.doc_indices.len(), status, ms);
+        eprintln!("{:<35} {:>5} {:>8} {:>8} {:>6} ({:.1}ms)",
+            q.text, mode_label, grep_set.len(), v3_result.doc_indices.len(), status, ms);
 
-        write_report(&mut report, q, &files, &grep_set, &v3_result);
+        write_report(&mut report, q.text, mode_label, &files, &grep_set, &v3_result);
 
         if v3_result.doc_indices == grep_set { pass += 1; } else { fail += 1; }
     }

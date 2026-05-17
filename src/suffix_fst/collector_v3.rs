@@ -144,6 +144,8 @@ impl SfxCollectorV3 {
         let num_chunks = chunks.len();
         // Track byte offsets in original text
         let mut offset = 0usize;
+        // Per-chunk posting info: (doc_id, ti, byte_from, byte_to) for word-stripped
+        let mut chunk_posting_info: Vec<(u32, u32, u32, u32)> = Vec::with_capacity(num_chunks);
 
         for i in 0..num_chunks {
             let (ref chunk_text, ref meta) = chunks[i];
@@ -218,6 +220,7 @@ impl SfxCollectorV3 {
             self.token_postings[intern_id as usize].push((
                 self.current_doc_id, ti, byte_from, byte_to,
             ));
+            chunk_posting_info.push((self.current_doc_id, ti, byte_from, byte_to));
 
             offset += chunk_len;
         }
@@ -267,65 +270,83 @@ impl SfxCollectorV3 {
 
                 let first_ci = chunk_idxs[0];
                 let last_ci = *chunk_idxs.last().unwrap();
-                // Get the intern_id of the first chunk for this word
-                // We need the intern_id that was assigned during the loop above.
-                // Reconstruct it by re-interning (it already exists, so returns existing ord).
-                let first_chunk_text = &chunks[first_ci].0;
-                let first_overlap: &str = if first_ci + 1 < num_chunks {
-                    let next_text = &chunks[first_ci + 1].0;
-                    let ov_len = self.overlap.min(next_text.len());
-                    let mut end = ov_len;
-                    while end > 0 && !next_text.is_char_boundary(end) { end -= 1; }
-                    &next_text[..end]
-                } else { "" };
-                let first_extended = if !first_overlap.is_empty() {
-                    format!("{first_chunk_text}{first_overlap}")
+
+                // Intern the word-stripped entry as its OWN token (not reusing the
+                // first chunk's ordinal). The key is word_content + content_overlap,
+                // which is unique per word and won't collide with chunk keys.
+                // This ensures "include" and "inclusive" get distinct ordinals.
+                let ws_extended = if !content_overlap.is_empty() {
+                    format!("{word_content}{content_overlap}")
                 } else {
-                    first_chunk_text.clone()
+                    word_content.clone()
                 };
-                let first_intern = *self.token_intern.get(&first_extended).unwrap_or(&0);
+                let ws_own_len = (word_content.len() + chunks[last_ci].1.sep_len) as u16;
+                let ws_intern = self.intern_extended(&ws_extended, TokenMetaV3 {
+                    own_len: ws_own_len,
+                    sep_len: chunks[last_ci].1.sep_len as u8,
+                    overlap_len: content_overlap.len() as u8,
+                    is_word_start: chunks[first_ci].1.is_word_start,
+                    word_id: chunks[first_ci].1.word_id,
+                    content_overlap: Some(content_overlap.clone()),
+                });
+                // Add posting for this word-stripped ordinal (from first chunk's position)
+                let (doc_id, ti, bf, bt) = chunk_posting_info[first_ci];
+                self.token_postings[ws_intern as usize].push((doc_id, ti, bf, bt));
 
                 let max_token = crate::tokenizer::equal_chunk::DEFAULT_MAX_TOKEN;
 
                 self.word_stripped_entries.push(WordStrippedEntry {
                     word_content: word_content.clone(),
                     content_overlap: content_overlap.clone(),
-                    first_intern_ord: first_intern,
-                    first_own_len: chunks[first_ci].0.len() as u16,
+                    first_intern_ord: ws_intern,
+                    first_own_len: ws_own_len,
                     last_sep_len: chunks[last_ci].1.sep_len as u8,
                     is_word_start: chunks[first_ci].1.is_word_start,
                 });
 
-                // Tail entry for long words: cover the last MAX_TOKEN bytes of word content
-                // so cross-sep queries near the end of the word can be found.
-                if word_content.len() > max_token {
+                // Tail entry for very long words only.
+                // The main word-stripped entry indexes suffixes SI=0 to
+                // SI=min(content_len, MAX_CHUNK_BYTES=256). For words ≤264 bytes,
+                // all suffixes including the last MAX_TOKEN bytes are covered.
+                // For longer words, the tail entry covers the last MAX_TOKEN bytes
+                // so cross-sep queries near the word end can be found.
+                //
+                // Note: tail entries use the last chunk's ordinal, so byte ranges
+                // from resolve_single_v3 may be approximate for very long words.
+                // This is acceptable since the doc match is still correct.
+                const MAX_SUFFIX_INDEX: usize = 256; // mirrors builder_v3::MAX_CHUNK_BYTES
+                if word_content.len() > MAX_SUFFIX_INDEX + max_token {
                     let tail_start = word_content.len().saturating_sub(max_token);
-                    // Snap to UTF-8 char boundary
                     let mut ts = tail_start;
                     while ts < word_content.len() && !word_content.is_char_boundary(ts) { ts += 1; }
                     let tail_content = word_content[ts..].to_string();
 
-                    // Use the last chunk's ordinal for posting resolution
-                    let last_chunk_text = &chunks[last_ci].0;
-                    let last_overlap: &str = if last_ci + 1 < num_chunks {
-                        let next_text = &chunks[last_ci + 1].0;
-                        let ov_len = self.overlap.min(next_text.len());
-                        let mut end = ov_len;
-                        while end > 0 && !next_text.is_char_boundary(end) { end -= 1; }
-                        &next_text[..end]
-                    } else { "" };
-                    let last_extended = if !last_overlap.is_empty() {
-                        format!("{last_chunk_text}{last_overlap}")
+                    // Intern tail as its own token (same approach as main word-stripped)
+                    let tail_extended = if !content_overlap.is_empty() {
+                        format!("{tail_content}{content_overlap}")
                     } else {
-                        last_chunk_text.clone()
+                        tail_content.clone()
                     };
-                    let last_intern = *self.token_intern.get(&last_extended).unwrap_or(&0);
+                    let tail_own_len = (tail_content.len() + chunks[last_ci].1.sep_len) as u16;
+                    let tail_intern = self.intern_extended(&tail_extended, TokenMetaV3 {
+                        own_len: tail_own_len,
+                        sep_len: chunks[last_ci].1.sep_len as u8,
+                        overlap_len: content_overlap.len() as u8,
+                        is_word_start: false,
+                        word_id: chunks[last_ci].1.word_id,
+                        content_overlap: Some(content_overlap.clone()),
+                    });
+                    // Posting from last chunk's position
+                    let (doc_id, _ti, _bf, bt) = chunk_posting_info[last_ci];
+                    let last_ti = chunk_posting_info[last_ci].1;
+                    let last_bf = chunk_posting_info[last_ci].2;
+                    self.token_postings[tail_intern as usize].push((doc_id, last_ti, last_bf, bt));
 
                     self.word_stripped_entries.push(WordStrippedEntry {
                         word_content: tail_content,
                         content_overlap,
-                        first_intern_ord: last_intern,
-                        first_own_len: chunks[last_ci].0.len() as u16,
+                        first_intern_ord: tail_intern,
+                        first_own_len: tail_own_len,
                         last_sep_len: chunks[last_ci].1.sep_len as u8,
                         is_word_start: false,
                     });
@@ -365,31 +386,64 @@ impl SfxCollectorV3 {
     }
 
     /// Extract data for DAG-based build.
+    ///
+    /// Groups extended tokens by content key (text[..own_len], without overlap).
+    /// Tokens with the same content but different overlaps share one content ordinal
+    /// and their postings are aggregated. This ensures cross-token chains resolve
+    /// correctly across all documents regardless of overlap variation.
     pub fn into_data(self) -> SfxCollectorDataV3 {
         let num_tokens = self.token_texts.len();
 
-        // Sort tokens alphabetically → final ordinals
+        // Sort extended tokens alphabetically (for FST building — each unique
+        // extended text becomes a separate FST key, but they may share ordinals).
         let mut sorted_indices: Vec<u32> = (0..num_tokens as u32).collect();
         sorted_indices.sort_by(|&a, &b| {
             self.token_texts[a as usize].cmp(&self.token_texts[b as usize])
         });
 
-        let mut intern_to_final = vec![0u32; num_tokens];
-        for (new_ord, &old_ord) in sorted_indices.iter().enumerate() {
-            intern_to_final[old_ord as usize] = new_ord as u32;
+        // Group intern ordinals by content key (text[..own_len]).
+        // Content key = chunk content + sep, WITHOUT overlap.
+        // All overlap variants share the same content ordinal and aggregated postings.
+        let mut content_key_map: std::collections::BTreeMap<String, Vec<u32>> =
+            std::collections::BTreeMap::new();
+        for (intern_ord, text) in self.token_texts.iter().enumerate() {
+            let own_len = self.token_meta[intern_ord].own_len as usize;
+            let content_key = text[..own_len.min(text.len())].to_string();
+            content_key_map.entry(content_key).or_default().push(intern_ord as u32);
         }
 
-        let tokens: std::collections::BTreeSet<String> = sorted_indices.iter()
-            .map(|&old_ord| self.token_texts[old_ord as usize].clone())
-            .collect();
+        // Assign content final ordinals (sorted alphabetically by content key).
+        let mut intern_to_final = vec![0u32; num_tokens];
+        let mut content_postings: Vec<Vec<(u32, u32, u32, u32)>> = Vec::new();
+        let mut content_final_ord = 0u32;
+        for (_content_key, intern_ords) in &content_key_map {
+            // Aggregate postings from all overlap variants
+            let mut agg: Vec<(u32, u32, u32, u32)> = Vec::new();
+            for &io in intern_ords {
+                agg.extend_from_slice(&self.token_postings[io as usize]);
+            }
+            // Sort postings for deterministic sfxpost
+            agg.sort();
+            agg.dedup();
+            content_postings.push(agg);
+
+            for &io in intern_ords {
+                intern_to_final[io as usize] = content_final_ord;
+            }
+            content_final_ord += 1;
+        }
+
+        // Content keys as BTreeSet (sorted = ordinal order)
+        let tokens: std::collections::BTreeSet<String> = content_key_map.keys().cloned().collect();
 
         SfxCollectorDataV3 {
-            tokens,
             sorted_indices,
             intern_to_final,
             token_texts: self.token_texts,
-            token_postings: self.token_postings,
             token_meta: self.token_meta,
+            tokens,
+            content_postings,
+            num_content_ords: content_final_ord as usize,
             num_docs: self.current_doc_id,
             min_suffix_len: self.min_suffix_len,
             word_stripped: self.word_stripped_entries,
@@ -425,13 +479,33 @@ pub struct WordStrippedEntry {
 }
 
 /// Data extracted from SfxCollectorV3, ready for DAG-based build.
+///
+/// Extended tokens are sorted for FST building (sorted_indices + token_texts).
+/// Postings are aggregated by content ordinal (content_postings).
+/// `intern_to_final` maps each intern ordinal to its content final ordinal.
+/// Data extracted from SfxCollectorV3, ready for DAG-based build.
+///
+/// Extended tokens are sorted for FST building (sorted_indices + token_texts).
+/// Postings are aggregated by content ordinal (content_postings).
+/// `intern_to_final` maps each intern ordinal to its content final ordinal.
 pub struct SfxCollectorDataV3 {
-    pub tokens: std::collections::BTreeSet<String>,
+    /// Intern ordinals sorted by extended text (for FST key iteration).
     pub sorted_indices: Vec<u32>,
+    /// Maps intern ordinal → content final ordinal.
+    /// Multiple extended variants (different overlaps) share the same content ordinal.
     pub intern_to_final: Vec<u32>,
+    /// Extended token texts (indexed by intern ordinal).
     pub token_texts: Vec<String>,
-    pub token_postings: Vec<Vec<(u32, u32, u32, u32)>>,
+    /// Metadata per extended token (indexed by intern ordinal).
     pub token_meta: Vec<TokenMetaV3>,
+    /// Content keys sorted alphabetically (BTreeSet order = content ordinal order).
+    /// Each key = text[..own_len] (content+sep, without overlap).
+    /// Used by derived index builders (bytemap, freqmap, posmap).
+    pub tokens: std::collections::BTreeSet<String>,
+    /// Postings aggregated by content ordinal. Index = content final ordinal.
+    pub content_postings: Vec<Vec<(u32, u32, u32, u32)>>,
+    /// Number of unique content ordinals (= content_postings.len()).
+    pub num_content_ords: usize,
     pub num_docs: u32,
     pub min_suffix_len: usize,
     /// Word-level stripped entries for partition 0x02.
@@ -658,8 +732,9 @@ mod tests {
         let data = c.into_data();
         // Check postings for "foo_ba" (foo_ + overlap "ba")
         // Its ti should be 3 (after value boundary gap at ti=2)
-        let ord = data.token_texts.iter().position(|t| t == "foo_ba").unwrap();
-        let postings = &data.token_postings[ord];
+        let intern_ord = data.token_texts.iter().position(|t| t == "foo_ba").unwrap();
+        let content_ord = data.intern_to_final[intern_ord] as usize;
+        let postings = &data.content_postings[content_ord];
         assert_eq!(postings[0].1, 3); // ti = 3 (after boundary)
     }
 
@@ -729,12 +804,13 @@ mod tests {
 
         // Feed to builder v3
         let mut builder = SuffixFstBuilderV3::with_min_suffix_len(data.min_suffix_len);
-        for (final_ord, &intern_ord) in data.sorted_indices.iter().enumerate() {
+        for &intern_ord in &data.sorted_indices {
             let text = &data.token_texts[intern_ord as usize];
             let meta = &data.token_meta[intern_ord as usize];
+            let content_ord = data.intern_to_final[intern_ord as usize];
             builder.add_token(
                 text,
-                final_ord as u64,
+                content_ord as u64,
                 meta.own_len,
                 meta.sep_len,
                 meta.overlap_len,

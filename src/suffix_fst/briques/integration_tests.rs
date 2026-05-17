@@ -46,28 +46,29 @@ mod tests {
         let data = collector.into_data();
 
         let mut builder = SuffixFstBuilderV3::with_min_suffix_len(1);
-        // Chunk-level (partitions 0x00/0x01)
-        for (final_ord, &intern_ord) in data.sorted_indices.iter().enumerate() {
+        // Chunk-level (partitions 0x00/0x01) — use content ordinals
+        for &intern_ord in &data.sorted_indices {
             let text = &data.token_texts[intern_ord as usize];
             let meta = &data.token_meta[intern_ord as usize];
-            builder.add_token(text, final_ord as u64, meta.own_len, meta.sep_len,
+            let content_ord = data.intern_to_final[intern_ord as usize];
+            builder.add_token(text, content_ord as u64, meta.own_len, meta.sep_len,
                 meta.overlap_len, meta.is_word_start);
         }
         // Word-level stripped (partition 0x02)
         for ws in &data.word_stripped {
-            let final_ord = data.intern_to_final[ws.first_intern_ord as usize];
+            let content_ord = data.intern_to_final[ws.first_intern_ord as usize];
             builder.add_word_stripped(
                 &ws.word_content, &ws.content_overlap,
-                final_ord as u64, ws.first_own_len, ws.last_sep_len, ws.is_word_start,
+                content_ord as u64, ws.first_own_len, ws.last_sep_len, ws.is_word_start,
             );
         }
         let (fst_data, parent_data) = builder.build().unwrap();
 
-        let num_terms = data.tokens.len();
+        let num_terms = data.num_content_ords;
         let mut post_writer = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::new(num_terms);
-        for (final_ord, &old_ord) in data.sorted_indices.iter().enumerate() {
-            for &(doc_id, ti, bf, bt) in &data.token_postings[old_ord as usize] {
-                post_writer.add_entry(final_ord as u32, doc_id, ti, bf, bt);
+        for (content_ord, postings) in data.content_postings.iter().enumerate() {
+            for &(doc_id, ti, bf, bt) in postings {
+                post_writer.add_entry(content_ord as u32, doc_id, ti, bf, bt);
             }
         }
         let sfxpost = post_writer.finish();
@@ -697,5 +698,424 @@ mod tests {
     fn x14e_stripped_after_emoji() {
         let idx = build(&["🦀__rust_lang"]);
         assert!(!query_contains(&idx, "rustlang", false).is_empty());
+    }
+
+    // ─── Bug investigation: false positives cross-token ─────────────
+
+    /// Diagnostic: trace what happens when we search "function" in a corpus
+    /// containing both legitimate matches and the false positive text.
+    #[test]
+    fn diag_false_positive_function() {
+        // Doc 0: legitimate match (has "function")
+        // Doc 1: false positive candidate (has "WriteTransaction\n-STATEMENT")
+        // Doc 2: another false positive candidate (has "dysfunction")
+        let idx = build(&[
+            "function_result",
+            "WriteTransaction\n-STATEMENT BEGIN TRANSACTION",
+            "dysfunction_is_a_word",
+        ]);
+        let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
+        let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
+
+        // strict_sep=false (default for contains queries)
+        let matches = orchestrator::contains_v3(
+            &reader, "function", &resolver, false, false, false, None,
+        );
+
+        eprintln!("\n=== DIAG: 'function' strict_sep=false ===");
+        for m in &matches {
+            eprintln!("  doc={} pos={} span={} byte=[{}..{}] sti={}",
+                m.doc_id, m.position, m.span, m.byte_from, m.byte_to, m.sti);
+        }
+
+        let doc_ids: Vec<u32> = matches.iter().map(|m| m.doc_id).collect();
+        eprintln!("  doc_ids: {:?}", doc_ids);
+
+        // Doc 0 should match (has "function")
+        assert!(doc_ids.contains(&0), "doc 0 should match (has function)");
+
+        // Doc 1 should NOT match (WriteTransaction ≠ function)
+        assert!(!doc_ids.contains(&1),
+            "doc 1 should NOT match (WriteTransaction != function). Matches: {:?}", matches);
+
+        // Doc 2: "dysfunction" DOES contain "function" as substring, should match
+        assert!(doc_ids.contains(&2), "doc 2 should match (dysfunction contains function)");
+    }
+
+    /// Check strict_sep=true vs false for known edge cases.
+    #[test]
+    fn diag_false_positive_uint64t() {
+        let idx = build(&[
+            "uint64_t value",
+            "Uint64ToInt64OutOfRange",
+        ]);
+        let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
+        let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
+
+        // strict_sep=false: strips "_" from query → "uint64t"
+        let matches_relaxed = orchestrator::contains_v3(
+            &reader, "uint64_t", &resolver, false, false, false, None,
+        );
+        eprintln!("\n=== DIAG: 'uint64_t' strict_sep=false ===");
+        for m in &matches_relaxed {
+            eprintln!("  doc={} pos={} span={} byte=[{}..{}]",
+                m.doc_id, m.position, m.span, m.byte_from, m.byte_to);
+        }
+
+        // strict_sep=true: keeps "_" in query → "uint64_t"
+        let matches_strict = orchestrator::contains_v3(
+            &reader, "uint64_t", &resolver, false, false, true, None,
+        );
+        eprintln!("\n=== DIAG: 'uint64_t' strict_sep=true ===");
+        for m in &matches_strict {
+            eprintln!("  doc={} pos={} span={} byte=[{}..{}]",
+                m.doc_id, m.position, m.span, m.byte_from, m.byte_to);
+        }
+
+        let relaxed_docs: Vec<u32> = matches_relaxed.iter().map(|m| m.doc_id).collect();
+        let strict_docs: Vec<u32> = matches_strict.iter().map(|m| m.doc_id).collect();
+
+        // Doc 0 should match in both modes
+        assert!(relaxed_docs.contains(&0), "doc 0 should match relaxed");
+        assert!(strict_docs.contains(&0), "doc 0 should match strict");
+
+        // Doc 1: "Uint64ToInt64OutOfRange" lowered = "uint64toint64outofrange"
+        // stripped query "uint64t" is substring → match in relaxed is expected (sep-agnostic)
+        // BUT is this the intended behavior? Log for investigation.
+        eprintln!("\n  Doc 1 in relaxed: {}", relaxed_docs.contains(&1));
+        eprintln!("  Doc 1 in strict: {}", strict_docs.contains(&1));
+    }
+
+    /// Check TableFunction false positive.
+    #[test]
+    fn diag_false_positive_tablefunction() {
+        let idx = build(&[
+            "TableFunction_entry",
+            "TABLE_FUNCTION_ENTRY",
+            "table function call",
+        ]);
+        let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
+        let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
+
+        let matches_relaxed = orchestrator::contains_v3(
+            &reader, "TableFunction", &resolver, false, false, false, None,
+        );
+        let matches_strict = orchestrator::contains_v3(
+            &reader, "TableFunction", &resolver, false, false, true, None,
+        );
+
+        eprintln!("\n=== DIAG: 'TableFunction' ===");
+        eprintln!("  relaxed matches:");
+        for m in &matches_relaxed {
+            eprintln!("    doc={} pos={} span={} byte=[{}..{}]",
+                m.doc_id, m.position, m.span, m.byte_from, m.byte_to);
+        }
+        eprintln!("  strict matches:");
+        for m in &matches_strict {
+            eprintln!("    doc={} pos={} span={} byte=[{}..{}]",
+                m.doc_id, m.position, m.span, m.byte_from, m.byte_to);
+        }
+
+        let relaxed_docs: HashSet<u32> = matches_relaxed.iter().map(|m| m.doc_id).collect();
+        let strict_docs: HashSet<u32> = matches_strict.iter().map(|m| m.doc_id).collect();
+
+        // Doc 0: "TableFunction_entry" → has "TableFunction" literally
+        assert!(relaxed_docs.contains(&0));
+        assert!(strict_docs.contains(&0));
+
+        eprintln!("  Doc 1 (TABLE_FUNCTION_ENTRY) relaxed: {}", relaxed_docs.contains(&1));
+        eprintln!("  Doc 1 (TABLE_FUNCTION_ENTRY) strict: {}", strict_docs.contains(&1));
+        eprintln!("  Doc 2 (table function call) relaxed: {}", relaxed_docs.contains(&2));
+        eprintln!("  Doc 2 (table function call) strict: {}", strict_docs.contains(&2));
+    }
+
+    /// Trace the FST walking + chain for "function" to understand false positive.
+    #[test]
+    fn diag_trace_function_fst() {
+        let idx = build(&[
+            "function_result",
+            "WriteTransaction\n-STATEMENT BEGIN TRANSACTION",
+        ]);
+        let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
+
+        eprintln!("\n=== TRACE: FST walk for 'function' ===");
+
+        // 1. Single-token candidates
+        let cands = fst_walk::fst_candidates_v3(&reader, "function", false, false);
+        eprintln!("  fst_candidates (strict=false): {} found", cands.len());
+        for c in &cands {
+            eprintln!("    ord={} sti={} own_len={} sep={} overlap={} ws={}",
+                c.raw_ordinal, c.sti, c.own_len, c.sep_len, c.overlap_len, c.is_word_start);
+        }
+
+        let cands_strict = fst_walk::fst_candidates_v3(&reader, "function", false, true);
+        eprintln!("  fst_candidates (strict=true): {} found", cands_strict.len());
+        for c in &cands_strict {
+            eprintln!("    ord={} sti={} own_len={} sep={} overlap={} ws={}",
+                c.raw_ordinal, c.sti, c.own_len, c.sep_len, c.overlap_len, c.is_word_start);
+        }
+
+        // 2. Falling walk splits
+        let splits = fst_walk::falling_walk_v3(&reader, "function", false);
+        eprintln!("\n  falling_walk (strict=false): {} splits", splits.len());
+        for s in &splits {
+            eprintln!("    consumed={} remainder_start={} overlap_validated={} parent: ord={} sti={} own={} sep={}",
+                s.query_consumed, s.remainder_start, s.overlap_validated,
+                s.parent.raw_ordinal, s.parent.sti, s.parent.own_len, s.parent.sep_len);
+        }
+
+        let splits_strict = fst_walk::falling_walk_v3(&reader, "function", true);
+        eprintln!("  falling_walk (strict=true): {} splits", splits_strict.len());
+        for s in &splits_strict {
+            eprintln!("    consumed={} remainder_start={} overlap_validated={} parent: ord={} sti={} own={} sep={}",
+                s.query_consumed, s.remainder_start, s.overlap_validated,
+                s.parent.raw_ordinal, s.parent.sti, s.parent.own_len, s.parent.sep_len);
+        }
+
+        // 3. Cross-token chains
+        let chains = fst_walk::cross_token_chain_v3(&reader, "function", false);
+        eprintln!("\n  cross_token_chain (strict=false): {} chains", chains.len());
+        for c in &chains {
+            eprintln!("    ordinals={:?} first_sti={} consumed={}",
+                c.ordinals, c.first_sti, c.total_query_consumed);
+        }
+
+        // 4. Resolve each chain — show what documents they hit
+        let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
+        eprintln!("\n  --- Resolving ordinal postings ---");
+        let mut all_ords: HashSet<u64> = HashSet::new();
+        for c in &chains {
+            for &o in &c.ordinals {
+                all_ords.insert(o);
+            }
+        }
+        for c in &cands {
+            all_ords.insert(c.raw_ordinal);
+        }
+        for ord in &all_ords {
+            let entries = resolver.resolve(*ord);
+            if !entries.is_empty() {
+                eprintln!("    ord={}: {} postings", ord, entries.len());
+                for e in entries.iter().take(5) {
+                    eprintln!("      doc={} pos={} byte=[{}..{}]",
+                        e.doc_id, e.position, e.byte_from, e.byte_to);
+                }
+            }
+        }
+
+        // 5. Full resolution
+        let chain_matches = resolve::resolve_chains_v3(&chains, &resolver, None);
+        eprintln!("\n  chain_matches (strict adjacency): {} matches", chain_matches.len());
+        for m in &chain_matches {
+            eprintln!("    doc={} pos={} span={} byte=[{}..{}]",
+                m.doc_id, m.position, m.span, m.byte_from, m.byte_to);
+        }
+
+        let chain_matches_relaxed = resolve::resolve_chains_v3_relaxed(&chains, &resolver, None, None, None);
+        eprintln!("  chain_matches (relaxed/byte-ordered): {} matches", chain_matches_relaxed.len());
+        for m in &chain_matches_relaxed {
+            eprintln!("    doc={} pos={} span={} byte=[{}..{}]",
+                m.doc_id, m.position, m.span, m.byte_from, m.byte_to);
+        }
+    }
+
+    // ─── Bug investigation: false negatives std::unique_ptr ──────────
+
+    /// Trace the full pipeline for "std::unique_ptr" to find why 3 docs are missed.
+    #[test]
+    fn diag_false_negative_unique_ptr() {
+        // Reproduce the 3 false negative contexts from the ground truth report
+        let idx = build(&[
+            // Doc 0: simple case — should match
+            "std::unique_ptr<Connection> readConn;",
+            // Doc 1: nested in vector — false negative in ground truth
+            "std::vector<std::unique_ptr<rag3db::common::Value>> ret;",
+            // Doc 2: nested in map — false negative
+            "std::unordered_map<std::string, std::unique_ptr<Value>> params;",
+            // Doc 3: control — no unique_ptr
+            "std::string hello;",
+        ]);
+
+        let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
+        let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
+
+        // Show tokenization
+        eprintln!("\n=== DIAG: std::unique_ptr ===");
+        for (i, text) in [
+            "std::unique_ptr<Connection> readConn;",
+            "std::vector<std::unique_ptr<rag3db::common::Value>> ret;",
+            "std::unordered_map<std::string, std::unique_ptr<Value>> params;",
+        ].iter().enumerate() {
+            let chunks = crate::tokenizer::equal_chunk::segment_and_chunk(text, 8);
+            eprintln!("\n  Doc {i} tokens:");
+            for (j, (t, m)) in chunks.iter().enumerate() {
+                eprintln!("    pos={j}: {:?} content={} sep={} ws={} wid={}",
+                    t, m.content_len, m.sep_len, m.is_word_start, m.word_id);
+            }
+        }
+
+        // Test with strict_sep=true (keeps "::" and "_" in query)
+        let matches_strict = orchestrator::contains_v3(
+            &reader, "std::unique_ptr", &resolver, false, false, true, None,
+        );
+        eprintln!("\n  contains_v3 strict_sep=true:");
+        for m in &matches_strict {
+            eprintln!("    doc={} pos={} span={} byte=[{}..{}] sti={}",
+                m.doc_id, m.position, m.span, m.byte_from, m.byte_to, m.sti);
+        }
+
+        // Test with strict_sep=false (strips "::" and "_" → "stduniqueptr")
+        let matches_relaxed = orchestrator::contains_v3(
+            &reader, "std::unique_ptr", &resolver, false, false, false, None,
+        );
+        eprintln!("\n  contains_v3 strict_sep=false:");
+        for m in &matches_relaxed {
+            eprintln!("    doc={} pos={} span={} byte=[{}..{}] sti={}",
+                m.doc_id, m.position, m.span, m.byte_from, m.byte_to, m.sti);
+        }
+
+        // Trace the FST walk for the STRIPPED query
+        let stripped_query = "stduniqueptr";
+        eprintln!("\n  --- FST walk for stripped query '{}' ---", stripped_query);
+
+        let cands = fst_walk::fst_candidates_v3(&reader, stripped_query, false, false);
+        eprintln!("  fst_candidates: {} found", cands.len());
+        for c in &cands {
+            eprintln!("    ord={} sti={} own_len={} sep={} overlap={}",
+                c.raw_ordinal, c.sti, c.own_len, c.sep_len, c.overlap_len);
+        }
+
+        let splits = fst_walk::falling_walk_v3(&reader, stripped_query, false);
+        eprintln!("\n  falling_walk: {} splits", splits.len());
+        for s in &splits {
+            eprintln!("    consumed={} rem_start={} overlap_val={} ord={} sti={} own={} sep={}",
+                s.query_consumed, s.remainder_start, s.overlap_validated,
+                s.parent.raw_ordinal, s.parent.sti, s.parent.own_len, s.parent.sep_len);
+        }
+
+        let chains = fst_walk::cross_token_chain_v3(&reader, stripped_query, false);
+        eprintln!("\n  cross_token_chain: {} chains", chains.len());
+        for c in &chains {
+            eprintln!("    ordinals={:?} first_sti={} consumed={}",
+                c.ordinals, c.first_sti, c.total_query_consumed);
+        }
+
+        // Resolve chains
+        let chain_matches = resolve::resolve_chains_v3_relaxed(&chains, &resolver, None, None, None);
+        eprintln!("\n  resolved chains (relaxed): {} matches", chain_matches.len());
+        for m in &chain_matches {
+            eprintln!("    doc={} pos={} span={} byte=[{}..{}]",
+                m.doc_id, m.position, m.span, m.byte_from, m.byte_to);
+        }
+
+        // Also trace the strict query "std::unique_ptr" (with seps)
+        eprintln!("\n  --- FST walk for strict query 'std::unique_ptr' ---");
+        let splits_s = fst_walk::falling_walk_v3(&reader, "std::unique_ptr", true);
+        eprintln!("  falling_walk strict: {} splits", splits_s.len());
+        for s in &splits_s {
+            eprintln!("    consumed={} rem_start={} overlap_val={} ord={} sti={} own={} sep={}",
+                s.query_consumed, s.remainder_start, s.overlap_validated,
+                s.parent.raw_ordinal, s.parent.sti, s.parent.own_len, s.parent.sep_len);
+        }
+
+        let chains_s = fst_walk::cross_token_chain_v3(&reader, "std::unique_ptr", true);
+        eprintln!("  cross_token_chain strict: {} chains", chains_s.len());
+        for c in &chains_s {
+            eprintln!("    ordinals={:?} first_sti={} consumed={}",
+                c.ordinals, c.first_sti, c.total_query_consumed);
+        }
+
+        let chain_matches_s = resolve::resolve_chains_v3(&chains_s, &resolver, None);
+        eprintln!("  resolved chains (strict): {} matches", chain_matches_s.len());
+        for m in &chain_matches_s {
+            eprintln!("    doc={} pos={} span={} byte=[{}..{}]",
+                m.doc_id, m.position, m.span, m.byte_from, m.byte_to);
+        }
+
+        // Verify results
+        let strict_docs: HashSet<u32> = matches_strict.iter().map(|m| m.doc_id).collect();
+        let relaxed_docs: HashSet<u32> = matches_relaxed.iter().map(|m| m.doc_id).collect();
+
+        eprintln!("\n  Summary:");
+        eprintln!("    strict docs: {:?}", strict_docs);
+        eprintln!("    relaxed docs: {:?}", relaxed_docs);
+
+        // All 3 docs should match (doc 3 has no unique_ptr)
+        for d in 0..3 {
+            assert!(strict_docs.contains(&d) || relaxed_docs.contains(&d),
+                "doc {d} should match std::unique_ptr in at least one mode");
+        }
+        assert!(!strict_docs.contains(&3) && !relaxed_docs.contains(&3),
+            "doc 3 should NOT match");
+    }
+
+    /// Reproduce false positive: "include" should NOT match "inclusive"
+    #[test]
+    fn diag_include_vs_inclusive() {
+        let idx = build(&[
+            // Doc 0: has "include" literally
+            "#include <stdio.h>",
+            // Doc 1: has "inclusive" — NOT "include"
+            "inclusive disjunction operator",
+            // Doc 2: has "include" within identifier
+            "doesincludework yes",
+        ]);
+        let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
+        let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
+
+        // Trace tokenization
+        eprintln!("\n=== DIAG: include vs inclusive ===");
+        for (i, text) in [
+            "#include <stdio.h>",
+            "inclusive disjunction operator",
+            "doesincludework yes",
+        ].iter().enumerate() {
+            let chunks = crate::tokenizer::equal_chunk::segment_and_chunk(text, 8);
+            eprintln!("  Doc {i}: {:?}", chunks.iter().map(|(t,m)| format!("{:?}(c={},s={})", t, m.content_len, m.sep_len)).collect::<Vec<_>>());
+        }
+
+        let matches_strict = orchestrator::contains_v3(
+            &reader, "include", &resolver, false, false, true, None,
+        );
+        let matches_relaxed = orchestrator::contains_v3(
+            &reader, "include", &resolver, false, false, false, None,
+        );
+
+        // Trace FST walk internals
+        eprintln!("\n  --- FST internals for 'include' strict ---");
+        let cands = fst_walk::fst_candidates_v3(&reader, "include", false, true);
+        eprintln!("  fst_candidates strict: {}", cands.len());
+        for c in &cands { eprintln!("    ord={} sti={} own={} sep={}", c.raw_ordinal, c.sti, c.own_len, c.sep_len); }
+
+        let splits = fst_walk::falling_walk_v3(&reader, "include", true);
+        eprintln!("  falling_walk strict: {} splits", splits.len());
+        for s in &splits { eprintln!("    consumed={} rem={} overlap_val={} ord={} sti={} own={} sep={}",
+            s.query_consumed, s.remainder_start, s.overlap_validated, s.parent.raw_ordinal, s.parent.sti, s.parent.own_len, s.parent.sep_len); }
+
+        let chains = fst_walk::cross_token_chain_v3(&reader, "include", true);
+        eprintln!("  chains strict: {} chains", chains.len());
+        for c in &chains { eprintln!("    ords={:?} sti={}", c.ordinals, c.first_sti); }
+
+        eprintln!("\n  strict matches:");
+        for m in &matches_strict {
+            eprintln!("    doc={} pos={} span={} byte=[{}..{}] sti={}",
+                m.doc_id, m.position, m.span, m.byte_from, m.byte_to, m.sti);
+        }
+        eprintln!("  relaxed matches:");
+        for m in &matches_relaxed {
+            eprintln!("    doc={} pos={} span={} byte=[{}..{}] sti={}",
+                m.doc_id, m.position, m.span, m.byte_from, m.byte_to, m.sti);
+        }
+
+        let strict_docs: HashSet<u32> = matches_strict.iter().map(|m| m.doc_id).collect();
+        let relaxed_docs: HashSet<u32> = matches_relaxed.iter().map(|m| m.doc_id).collect();
+
+        // Doc 0: has "#include" → should match
+        assert!(strict_docs.contains(&0) || relaxed_docs.contains(&0), "doc 0 should match");
+        // Doc 1: has "inclusive" → should NOT match (no "include" substring)
+        assert!(!strict_docs.contains(&1), "doc 1 (inclusive) should NOT match strict");
+        assert!(!relaxed_docs.contains(&1), "doc 1 (inclusive) should NOT match relaxed");
+        // Doc 2: has "doesincludework" → "include" IS a substring
+        assert!(relaxed_docs.contains(&2), "doc 2 should match relaxed (include in doesincludework)");
     }
 }

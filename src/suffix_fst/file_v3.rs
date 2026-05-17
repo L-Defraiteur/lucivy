@@ -320,12 +320,13 @@ mod tests {
 
         // Build FST
         let mut builder = SuffixFstBuilderV3::with_min_suffix_len(data.min_suffix_len);
-        for (final_ord, &intern_ord) in data.sorted_indices.iter().enumerate() {
+        for &intern_ord in &data.sorted_indices {
             let text = &data.token_texts[intern_ord as usize];
             let meta = &data.token_meta[intern_ord as usize];
+            let content_ord = data.intern_to_final[intern_ord as usize];
             builder.add_token(
                 text,
-                final_ord as u64,
+                content_ord as u64,
                 meta.own_len,
                 meta.sep_len,
                 meta.overlap_len,
@@ -335,15 +336,18 @@ mod tests {
         let (fst_bytes, output_table) = builder.build().unwrap();
 
         // Build word map from collector data
-        let num_tokens = data.sorted_indices.len();
+        let num_tokens = data.num_content_ords;
         let mut token_to_word = vec![0u32; num_tokens];
         let mut word_starts: std::collections::BTreeMap<usize, u32> = std::collections::BTreeMap::new();
 
-        for (final_ord, &intern_ord) in data.sorted_indices.iter().enumerate() {
+        for &intern_ord in &data.sorted_indices {
             let meta = &data.token_meta[intern_ord as usize];
-            token_to_word[final_ord] = meta.word_id as u32;
-            if meta.is_word_start {
-                word_starts.entry(meta.word_id).or_insert(final_ord as u32);
+            let content_ord = data.intern_to_final[intern_ord as usize] as usize;
+            if content_ord < num_tokens {
+                token_to_word[content_ord] = meta.word_id as u32;
+                if meta.is_word_start {
+                    word_starts.entry(meta.word_id).or_insert(content_ord as u32);
+                }
             }
         }
 
@@ -361,7 +365,7 @@ mod tests {
 
         // Build next_word
         let mut next_word = vec![u32::MAX; num_tokens];
-        for (final_ord, &intern_ord) in data.sorted_indices.iter().enumerate() {
+        for &intern_ord in &data.sorted_indices {
             let meta = &data.token_meta[intern_ord as usize];
             if !meta.is_word_start { continue; }
             // Find next word_start after this ordinal
@@ -437,10 +441,11 @@ mod tests {
         let data = collector.into_data();
 
         let mut builder = SuffixFstBuilderV3::with_min_suffix_len(1);
-        for (final_ord, &intern_ord) in data.sorted_indices.iter().enumerate() {
+        for &intern_ord in &data.sorted_indices {
             let text = &data.token_texts[intern_ord as usize];
             let meta = &data.token_meta[intern_ord as usize];
-            builder.add_token(text, final_ord as u64, meta.own_len, meta.sep_len, meta.overlap_len, meta.is_word_start);
+            let content_ord = data.intern_to_final[intern_ord as usize];
+            builder.add_token(text, content_ord as u64, meta.own_len, meta.sep_len, meta.overlap_len, meta.is_word_start);
         }
         let (fst_bytes, output_table) = builder.build().unwrap();
 

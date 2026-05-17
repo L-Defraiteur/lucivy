@@ -132,7 +132,14 @@ pub fn fst_candidates_v3(
         while let Some((_key, val)) = stream.next() {
             let parents = reader.decode_parents(val);
             for p in parents {
-                results.push(FstCandidateV3::from_parent(&p));
+                // With content ordinals, overlap bytes are context-dependent.
+                // Only accept candidates where the query fits within the token's
+                // own bytes (content + sep). Queries extending into the overlap
+                // zone must go through the cross-token chain path instead.
+                let own_from_sti = (p.own_len as usize).saturating_sub(p.sti as usize);
+                if query_bytes.len() <= own_from_sti {
+                    results.push(FstCandidateV3::from_parent(&p));
+                }
             }
         }
     }
@@ -278,6 +285,9 @@ const MAX_CHAIN_DEPTH: usize = 8;
 /// For each split candidate, walk the remainder to find the next token.
 /// No sibling table — just another falling walk (TI+1 implicit).
 /// Adjacency verification happens in Tier 2 (resolve).
+///
+/// With content ordinals, all overlap variants of the same token share one ordinal.
+/// A single chain covers all documents — no forking needed.
 pub fn cross_token_chain_v3(
     reader: &SfxFileReaderV3,
     query: &str,
@@ -354,6 +364,15 @@ mod tests {
         let mut builder = SuffixFstBuilderV3::with_min_suffix_len(1);
         for &(text, ord, own_len, sep_len, overlap_len, is_ws) in specs {
             builder.add_token(text, ord, own_len, sep_len, overlap_len, is_ws);
+            if sep_len > 0 {
+                let content_end = (own_len - sep_len as u16) as usize;
+                let overlap_start = own_len as usize;
+                builder.add_word_stripped(
+                    &text[..content_end],
+                    &text[overlap_start..],
+                    ord, own_len, sep_len, is_ws,
+                );
+            }
         }
         let (fst_data, parent_data) = builder.build().unwrap();
         let writer = SfxFileWriterV3::new(fst_data, parent_data, 1);
