@@ -19,9 +19,16 @@ use crate::postings::{
 use crate::schema::document::{Document, Value};
 use crate::schema::{FieldEntry, FieldType, Schema, DATE_TIME_PRECISION_INDEXED};
 use crate::suffix_fst::SfxCollector;
+use crate::suffix_fst::collector_v3::SfxCollectorV3;
 
 use crate::tokenizer::{FacetTokenizer, PreTokenizedStream, PreTokenizedString, TextAnalyzer, Tokenizer};
 use crate::{DocId, Opstamp, LucivyError};
+
+/// Wrapper for v2/v3 SFX collectors.
+enum SfxCollectorSlot {
+    V2(SfxCollector),
+    V3(SfxCollectorV3),
+}
 
 /// Computes the initial size of the hash table.
 ///
@@ -62,8 +69,8 @@ pub struct SegmentWriter {
     per_field_text_analyzers: Vec<TextAnalyzer>,
     term_buffer: IndexingTerm,
     schema: Schema,
-    /// Per-field SfxCollectors for all indexed Str fields.
-    sfx_collectors: HashMap<u32, SfxCollector>,
+    /// Per-field SfxCollectors for all indexed Str fields (v2 or v3).
+    sfx_collectors: HashMap<u32, SfxCollectorSlot>,
     /// Tracks which sfx_collectors were fed during the current document.
     sfx_fed_this_doc: Vec<u32>,
     /// Optional activity reporter for diagnostics. Called at each major step
@@ -86,6 +93,7 @@ impl SegmentWriter {
         let schema = segment.schema();
         let tokenizer_manager = segment.index().tokenizers().clone();
         let tokenizer_manager_fast_field = segment.index().fast_field_tokenizer().clone();
+        let sfx_version = segment.index().settings().sfx_version;
         let table_size = compute_initial_table_size(memory_budget_in_bytes)?;
         let segment_serializer = SegmentSerializer::for_segment(segment)?;
         let per_field_postings_writers = PerFieldPostingsWriter::for_schema(&schema);
@@ -135,7 +143,12 @@ impl SegmentWriter {
                             if tok.contains("ngram") {
                                 continue;
                             }
-                            collectors.insert(field.field_id(), SfxCollector::new());
+                            let slot = if sfx_version >= 3 {
+                                SfxCollectorSlot::V3(SfxCollectorV3::new())
+                            } else {
+                                SfxCollectorSlot::V2(SfxCollector::new())
+                            };
+                            collectors.insert(field.field_id(), slot);
                         }
                     }
                 }
@@ -171,27 +184,44 @@ impl SegmentWriter {
         let sfx_collectors = std::mem::take(&mut self.sfx_collectors);
         let mut sfx_field_ids = Vec::new();
 
-        // Helper: write SfxBuildOutput to serializer (sfx + registry files)
-        let write_output = |serializer: &mut crate::indexer::SegmentSerializer, field_id: u32, output: &crate::suffix_fst::SfxBuildOutput| -> crate::Result<()> {
-            serializer.write_sfx(field_id, &output.sfx)?;
-            for (ext, data) in &output.registry_files {
-                serializer.write_custom_index(field_id, ext, data)?;
-            }
-            Ok(())
-        };
-
         // Build SFX via DAG per field (FST, sfxpost, sibling run in parallel)
-        for (field_id, collector) in sfx_collectors {
-            let data = collector.into_data();
-            let mut dag = super::sfx_dag::build_initial_sfx_dag(data);
-            let mut dag_result = luciole::execute_dag(&mut dag, None)
-                .map_err(|e| crate::LucivyError::SystemError(
-                    format!("sfx build DAG field {field_id}: {e}")))?;
-            let output = dag_result
-                .take_output::<crate::suffix_fst::SfxBuildOutput>("assemble", "output")
-                .ok_or_else(|| crate::LucivyError::SystemError(
-                    format!("sfx DAG missing output for field {field_id}")))?;
-            write_output(&mut self.segment_serializer, field_id, &output)?;
+        for (field_id, slot) in sfx_collectors {
+            match slot {
+                SfxCollectorSlot::V2(collector) => {
+                    let data = collector.into_data();
+                    let mut dag = super::sfx_dag::build_initial_sfx_dag(data);
+                    let mut dag_result = luciole::execute_dag(&mut dag, None)
+                        .map_err(|e| crate::LucivyError::SystemError(
+                            format!("sfx build DAG field {field_id}: {e}")))?;
+                    let output = dag_result
+                        .take_output::<crate::suffix_fst::SfxBuildOutput>("assemble", "output")
+                        .ok_or_else(|| crate::LucivyError::SystemError(
+                            format!("sfx DAG missing output for field {field_id}")))?;
+                    self.segment_serializer.write_sfx(field_id, &output.sfx)?;
+                    for (ext, data) in &output.registry_files {
+                        self.segment_serializer.write_custom_index(field_id, ext, data)?;
+                    }
+                }
+                SfxCollectorSlot::V3(collector) => {
+                    let data = collector.into_data();
+                    let mut dag = super::sfx_dag_v3::build_initial_sfx_dag_v3(data);
+                    let mut dag_result = luciole::execute_dag(&mut dag, None)
+                        .map_err(|e| crate::LucivyError::SystemError(
+                            format!("sfx v3 build DAG field {field_id}: {e}")))?;
+                    let output = dag_result
+                        .take_output::<super::sfx_dag_v3::SfxBuildOutputV3>("assemble_v3", "output")
+                        .ok_or_else(|| crate::LucivyError::SystemError(
+                            format!("sfx v3 DAG missing output for field {field_id}")))?;
+                    self.segment_serializer.write_sfx(field_id, &output.sfx)?;
+                    if let Some(ref sfxpost) = output.sfxpost {
+                        self.segment_serializer.write_custom_index(field_id, "sfxpost", sfxpost)?;
+                    }
+                    self.segment_serializer.write_custom_index(field_id, "termtexts", &output.termtexts)?;
+                    for (ext, data) in &output.registry_files {
+                        self.segment_serializer.write_custom_index(field_id, ext, data)?;
+                    }
+                }
+            }
             sfx_field_ids.push(field_id);
         }
         if !sfx_field_ids.is_empty() {
@@ -273,8 +303,11 @@ impl SegmentWriter {
                     let mut indexing_position = IndexingPosition::default();
 
                     if has_sfx {
-                        let collector = self.sfx_collectors.get_mut(&field.field_id()).unwrap();
-                        collector.begin_doc();
+                        let slot = self.sfx_collectors.get_mut(&field.field_id()).unwrap();
+                        match slot {
+                            SfxCollectorSlot::V2(c) => c.begin_doc(),
+                            SfxCollectorSlot::V3(c) => c.begin_doc(),
+                        }
                     }
 
                     // Extract pre-tokenized tokens for this field (drain from owned vec).
@@ -303,13 +336,20 @@ impl SegmentWriter {
                             assert!(term_buffer.is_empty());
 
                             if has_sfx {
-                                // Feed SfxCollector by reference (borrow before move).
-                                let collector = self.sfx_collectors.get_mut(&field.field_id()).unwrap();
-                                collector.begin_value(&pre_tok.text);
-                                for tok in &pre_tok.tokens {
-                                    collector.add_token(&tok.text, tok.offset_from, tok.offset_to);
+                                let slot = self.sfx_collectors.get_mut(&field.field_id()).unwrap();
+                                match slot {
+                                    SfxCollectorSlot::V2(c) => {
+                                        c.begin_value(&pre_tok.text);
+                                        for tok in &pre_tok.tokens {
+                                            c.add_token(&tok.text, tok.offset_from, tok.offset_to);
+                                        }
+                                        c.end_value();
+                                    }
+                                    SfxCollectorSlot::V3(c) => {
+                                        // V3 does its own tokenization from raw text.
+                                        c.add_value(&pre_tok.text);
+                                    }
                                 }
-                                collector.end_value();
                             }
 
                             // Move into PreTokenizedStream — no clone.
@@ -324,6 +364,10 @@ impl SegmentWriter {
                         }
 
                         // ── Normal path (no pre-tokenized data) ──────────────
+                        let is_v3 = has_sfx && matches!(
+                            self.sfx_collectors.get(&field.field_id()),
+                            Some(SfxCollectorSlot::V3(_))
+                        );
                         let (raw_text_for_sfx, mut token_stream) =
                             if let Some(text) = value.as_str() {
                                 let raw_text = if has_sfx { Some(text.to_string()) } else { None };
@@ -340,32 +384,43 @@ impl SegmentWriter {
                         assert!(term_buffer.is_empty());
 
                         if let Some(ref raw_text) = raw_text_for_sfx {
-                            // Single tokenization: interceptor captures tokens
-                            // for SfxCollector during BM25 indexing.
-                            let mut interceptor =
-                                crate::suffix_fst::SfxTokenInterceptor::wrap(token_stream);
-                            postings_writer.index_text(
-                                doc_id, &mut interceptor, term_buffer, ctx,
-                                &mut indexing_position,
-                            );
-                            let collector = self.sfx_collectors.get_mut(&field.field_id()).unwrap();
-                            collector.begin_value(raw_text);
-                            for tok in interceptor.take_captured() {
-                                {
-                                    let bus = crate::diag::diag_bus();
-                                    if bus.is_active() {
-                                        bus.emit(crate::diag::DiagEvent::TokenCaptured {
-                                            doc_id,
-                                            field_id: field.field_id(),
-                                            token: tok.text.clone(),
-                                            offset_from: tok.offset_from,
-                                            offset_to: tok.offset_to,
-                                        });
-                                    }
+                            if is_v3 {
+                                // V3: feed raw text, BM25 indexing separately.
+                                postings_writer.index_text(
+                                    doc_id, &mut *token_stream, term_buffer, ctx,
+                                    &mut indexing_position,
+                                );
+                                if let Some(SfxCollectorSlot::V3(c)) = self.sfx_collectors.get_mut(&field.field_id()) {
+                                    c.add_value(raw_text);
                                 }
-                                collector.add_token(&tok.text, tok.offset_from, tok.offset_to);
+                            } else {
+                                // V2: interceptor captures tokens for SfxCollector during BM25 indexing.
+                                let mut interceptor =
+                                    crate::suffix_fst::SfxTokenInterceptor::wrap(token_stream);
+                                postings_writer.index_text(
+                                    doc_id, &mut interceptor, term_buffer, ctx,
+                                    &mut indexing_position,
+                                );
+                                if let Some(SfxCollectorSlot::V2(c)) = self.sfx_collectors.get_mut(&field.field_id()) {
+                                    c.begin_value(raw_text);
+                                    for tok in interceptor.take_captured() {
+                                        {
+                                            let bus = crate::diag::diag_bus();
+                                            if bus.is_active() {
+                                                bus.emit(crate::diag::DiagEvent::TokenCaptured {
+                                                    doc_id,
+                                                    field_id: field.field_id(),
+                                                    token: tok.text.clone(),
+                                                    offset_from: tok.offset_from,
+                                                    offset_to: tok.offset_to,
+                                                });
+                                            }
+                                        }
+                                        c.add_token(&tok.text, tok.offset_from, tok.offset_to);
+                                    }
+                                    c.end_value();
+                                }
                             }
-                            collector.end_value();
                         } else {
                             postings_writer.index_text(
                                 doc_id, &mut *token_stream, term_buffer, ctx,
@@ -374,8 +429,11 @@ impl SegmentWriter {
                         }
                     }
                     if has_sfx {
-                        let collector = self.sfx_collectors.get_mut(&field.field_id()).unwrap();
-                        collector.end_doc();
+                        let slot = self.sfx_collectors.get_mut(&field.field_id()).unwrap();
+                        match slot {
+                            SfxCollectorSlot::V2(c) => c.end_doc(),
+                            SfxCollectorSlot::V3(c) => c.end_doc(),
+                        }
                         self.sfx_fed_this_doc.push(field.field_id());
                     }
                     if field_entry.has_fieldnorms() {
@@ -523,10 +581,12 @@ impl SegmentWriter {
         // Fill empty docs for sfx collectors that were not fed during this document
         self.report_activity("sfx_empty");
         let fed: Vec<u32> = self.sfx_fed_this_doc.clone();
-        for (&field_id, collector) in &mut self.sfx_collectors {
+        for (&field_id, slot) in &mut self.sfx_collectors {
             if !fed.contains(&field_id) {
-                collector.begin_doc();
-                collector.end_doc_empty();
+                match slot {
+                    SfxCollectorSlot::V2(c) => { c.begin_doc(); c.end_doc_empty(); }
+                    SfxCollectorSlot::V3(c) => { c.begin_doc(); c.end_doc(); }
+                }
             }
         }
         self.report_activity("store_doc");
