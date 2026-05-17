@@ -46,10 +46,11 @@ mod tests {
         let data = collector.into_data();
 
         let mut builder = SuffixFstBuilderV3::with_min_suffix_len(1);
-        // Chunk-level (partitions 0x00/0x01) — use content ordinals
+        // Chunk-level (partitions 0x00/0x01) — skip word-stripped entries
         for &intern_ord in &data.sorted_indices {
-            let text = &data.token_texts[intern_ord as usize];
             let meta = &data.token_meta[intern_ord as usize];
+            if meta.is_word_stripped { continue; }
+            let text = &data.token_texts[intern_ord as usize];
             let content_ord = data.intern_to_final[intern_ord as usize];
             builder.add_token(text, content_ord as u64, meta.own_len, meta.sep_len,
                 meta.overlap_len, meta.is_word_start);
@@ -436,8 +437,18 @@ mod tests {
     #[test]
     fn h3_second_token() {
         // "lock" → starts at byte 6, ends at 10
-        let hl = query_contains_hl(&build(&["mutex_lock"]), "lock", true);
-        assert_eq!(hl.len(), 1);
+        let idx = build(&["mutex_lock"]);
+        let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
+        let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
+        let matches = orchestrator::contains_v3(&reader, "lock", &resolver, false, false, true, None);
+        eprintln!("h3 all matches:");
+        for m in &matches {
+            eprintln!("  doc={} pos={} span={} byte=[{}..{}] sti={} ord={}",
+                m.doc_id, m.position, m.span, m.byte_from, m.byte_to, m.sti, m.ordinal);
+        }
+        let hl: Vec<(u32, u32, u32)> = matches.iter()
+            .map(|m| (m.doc_id, m.byte_from, m.byte_to)).collect();
+        assert_eq!(hl.len(), 1, "expected 1 highlight, got {:?}", hl);
         assert_eq!(hl[0], (0, 6, 10));
     }
 
@@ -453,8 +464,21 @@ mod tests {
     #[test]
     fn h5_cross_sep_boundary() {
         // "x_l" crosses token boundary, found in overlap zone
-        let hl = query_contains_hl(&build(&["mutex_lock"]), "x_l", true);
-        assert!(!hl.is_empty());
+        let idx = build(&["mutex_lock"]);
+        let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
+        // Trace
+        let cands = fst_walk::fst_candidates_v3(&reader, "x_l", false, true);
+        eprintln!("h5 fst_candidates('x_l' strict): {}", cands.len());
+        let splits = fst_walk::falling_walk_v3(&reader, "x_l", true);
+        eprintln!("h5 falling_walk('x_l' strict): {} splits", splits.len());
+        for s in &splits { eprintln!("  consumed={} rem={} sti={} own={}", s.query_consumed, s.remainder_start, s.parent.sti, s.parent.own_len); }
+        let chains = fst_walk::cross_token_chain_v3(&reader, "x_l", true);
+        eprintln!("h5 chains('x_l' strict): {} chains", chains.len());
+        for c in &chains { eprintln!("  ords={:?} sti={}", c.ordinals, c.first_sti); }
+
+        let hl = query_contains_hl(&idx, "x_l", true);
+        eprintln!("h5 hl: {:?}", hl);
+        assert!(!hl.is_empty(), "x_l should match via cross-token chain");
         assert_eq!(hl[0].1, 4, "x starts at byte 4");
     }
 

@@ -87,8 +87,9 @@ impl Node for BuildFstV3Node {
         // Each extended text gets its own FST key, but the raw_ordinal is
         // the content ordinal (shared across overlap variants).
         for &intern_ord in &data.sorted_indices {
-            let text = &data.token_texts[intern_ord as usize];
             let meta = &data.token_meta[intern_ord as usize];
+            if meta.is_word_stripped { continue; }
+            let text = &data.token_texts[intern_ord as usize];
             let content_ord = data.intern_to_final[intern_ord as usize];
             builder.add_token(
                 text,
@@ -326,6 +327,7 @@ pub fn merge_segments_v3(
                     is_word_start: meta.is_word_start,
                     word_id: 0, // word_id is segment-local, not meaningful across merge
                     content_overlap: None, // Not preserved across merge (re-computed from tokens)
+                    is_word_stripped: false,
                 });
                 token_postings.push(Vec::new());
                 new_ord

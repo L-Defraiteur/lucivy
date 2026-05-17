@@ -376,8 +376,9 @@ mod tests {
 
         let mut builder = SuffixFstBuilderV3::with_min_suffix_len(1);
         for &intern_ord in &data.sorted_indices {
-            let text = &data.token_texts[intern_ord as usize];
             let meta = &data.token_meta[intern_ord as usize];
+            if meta.is_word_stripped { continue; }
+            let text = &data.token_texts[intern_ord as usize];
             let content_ord = data.intern_to_final[intern_ord as usize];
             builder.add_token(text, content_ord as u64, meta.own_len, meta.sep_len,
                 meta.overlap_len, meta.is_word_start);

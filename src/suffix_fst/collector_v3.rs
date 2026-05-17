@@ -81,6 +81,9 @@ pub struct TokenMetaV3 {
     /// CONTENT token (skipping pure-sep tokens). None if same as normal overlap
     /// or if the token has no trailing sep.
     pub content_overlap: Option<String>,
+    /// True if this token was interned for a word-stripped entry (partition 0x02 only).
+    /// Excluded from the build loop for partitions 0x00/0x01.
+    pub is_word_stripped: bool,
 }
 
 impl Default for SfxCollectorV3 {
@@ -212,6 +215,7 @@ impl SfxCollectorV3 {
                 is_word_start: meta.is_word_start,
                 word_id: meta.word_id,
                 content_overlap: content_overlap.clone(),
+                is_word_stripped: false,
             });
 
             // Add posting
@@ -288,6 +292,7 @@ impl SfxCollectorV3 {
                     is_word_start: chunks[first_ci].1.is_word_start,
                     word_id: chunks[first_ci].1.word_id,
                     content_overlap: Some(content_overlap.clone()),
+                    is_word_stripped: true,
                 });
                 // Add posting for this word-stripped ordinal (from first chunk's position)
                 let (doc_id, ti, bf, bt) = chunk_posting_info[first_ci];
@@ -335,6 +340,7 @@ impl SfxCollectorV3 {
                         is_word_start: false,
                         word_id: chunks[last_ci].1.word_id,
                         content_overlap: Some(content_overlap.clone()),
+                        is_word_stripped: true,
                     });
                     // Posting from last chunk's position
                     let (doc_id, _ti, _bf, bt) = chunk_posting_info[last_ci];
@@ -821,8 +827,9 @@ mod tests {
         // Feed to builder v3
         let mut builder = SuffixFstBuilderV3::with_min_suffix_len(data.min_suffix_len);
         for &intern_ord in &data.sorted_indices {
-            let text = &data.token_texts[intern_ord as usize];
             let meta = &data.token_meta[intern_ord as usize];
+            if meta.is_word_stripped { continue; }
+            let text = &data.token_texts[intern_ord as usize];
             let content_ord = data.intern_to_final[intern_ord as usize];
             builder.add_token(
                 text,

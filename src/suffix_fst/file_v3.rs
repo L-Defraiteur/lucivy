@@ -321,8 +321,9 @@ mod tests {
         // Build FST
         let mut builder = SuffixFstBuilderV3::with_min_suffix_len(data.min_suffix_len);
         for &intern_ord in &data.sorted_indices {
-            let text = &data.token_texts[intern_ord as usize];
             let meta = &data.token_meta[intern_ord as usize];
+            if meta.is_word_stripped { continue; }
+            let text = &data.token_texts[intern_ord as usize];
             let content_ord = data.intern_to_final[intern_ord as usize];
             builder.add_token(
                 text,
@@ -342,6 +343,7 @@ mod tests {
 
         for &intern_ord in &data.sorted_indices {
             let meta = &data.token_meta[intern_ord as usize];
+            if meta.is_word_stripped { continue; }
             let content_ord = data.intern_to_final[intern_ord as usize] as usize;
             if content_ord < num_tokens {
                 token_to_word[content_ord] = meta.word_id as u32;
@@ -367,6 +369,7 @@ mod tests {
         let mut next_word = vec![u32::MAX; num_tokens];
         for &intern_ord in &data.sorted_indices {
             let meta = &data.token_meta[intern_ord as usize];
+            if meta.is_word_stripped { continue; }
             if !meta.is_word_start { continue; }
             // Find next word_start after this ordinal
             // (simplified: in a real impl this is per-document, not per-ordinal)
@@ -442,8 +445,9 @@ mod tests {
 
         let mut builder = SuffixFstBuilderV3::with_min_suffix_len(1);
         for &intern_ord in &data.sorted_indices {
-            let text = &data.token_texts[intern_ord as usize];
             let meta = &data.token_meta[intern_ord as usize];
+            if meta.is_word_stripped { continue; }
+            let text = &data.token_texts[intern_ord as usize];
             let content_ord = data.intern_to_final[intern_ord as usize];
             builder.add_token(text, content_ord as u64, meta.own_len, meta.sep_len, meta.overlap_len, meta.is_word_start);
         }
