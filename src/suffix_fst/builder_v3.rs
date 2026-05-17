@@ -29,9 +29,9 @@ fn default_min_suffix_len() -> usize {
 //   [63]     multi_flag = 0
 //   [62]     is_word_start
 //   [61..58] overlap_len    (4 bits, 0..15)
-//   [57..55] sep_len        (3 bits, 0..7)
-//   [54..40] own_len        (15 bits, max 32767)
-//   [39..24] sti            (16 bits)
+//   [57..50] sep_len        (8 bits, 0..255)
+//   [49..36] own_len        (14 bits, max 16383)
+//   [35..24] sti            (12 bits, max 4095)
 //   [23..0]  token_ordinal  (24 bits)
 //
 // Multi parent (bit 63 = 1):
@@ -44,15 +44,15 @@ const ORDINAL_BITS: u32 = 24;
 const ORDINAL_MASK: u64 = (1 << ORDINAL_BITS) - 1;
 
 const STI_SHIFT: u32 = 24;
-const STI_BITS: u32 = 16;
+const STI_BITS: u32 = 12;
 const STI_MASK: u64 = (1 << STI_BITS) - 1;
 
-const OWN_LEN_SHIFT: u32 = 40;
-const OWN_LEN_BITS: u32 = 15;
+const OWN_LEN_SHIFT: u32 = 36;
+const OWN_LEN_BITS: u32 = 14;
 const OWN_LEN_MASK: u64 = (1 << OWN_LEN_BITS) - 1;
 
-const SEP_LEN_SHIFT: u32 = 55;
-const SEP_LEN_BITS: u32 = 3;
+const SEP_LEN_SHIFT: u32 = 50;
+const SEP_LEN_BITS: u32 = 8;
 const SEP_LEN_MASK: u64 = (1 << SEP_LEN_BITS) - 1;
 
 const OVERLAP_SHIFT: u32 = 58;
@@ -214,6 +214,12 @@ impl SuffixFstBuilderV3 {
     /// Suffixes are generated over the full extended token (including overlap),
     /// but own_len in the encoding excludes the overlap — so the falling walk
     /// knows where the token boundary is.
+    /// Register all suffixes of an extended token.
+    ///
+    /// `content_overlap` (optional): for partition 0x02 (sep-stripped), use these
+    /// bytes instead of the normal overlap. This is the content-aware overlap that
+    /// skips pure-sep tokens and takes bytes from the next CONTENT token.
+    /// When None, stripped entries use the normal overlap (from extended_token).
     pub fn add_token(
         &mut self,
         extended_token: &str,
@@ -222,6 +228,22 @@ impl SuffixFstBuilderV3 {
         sep_len: u8,
         overlap_len: u8,
         is_word_start: bool,
+    ) {
+        self.add_token_with_content_overlap(
+            extended_token, raw_ordinal, own_len, sep_len, overlap_len, is_word_start, None,
+        );
+    }
+
+    /// Like `add_token` but with explicit content-aware overlap for stripped partition.
+    pub fn add_token_with_content_overlap(
+        &mut self,
+        extended_token: &str,
+        raw_ordinal: u64,
+        own_len: u16,
+        sep_len: u8,
+        overlap_len: u8,
+        is_word_start: bool,
+        content_overlap: Option<&str>,
     ) {
         let lower = extended_token.to_lowercase();
         let extended_bytes = lower.as_bytes();
@@ -260,48 +282,70 @@ impl SuffixFstBuilderV3 {
             ));
         }
 
-        // ── Sep-stripped suffixes (partition 0x02) ──
-        // Only for tokens with trailing separators.
-        // Stripped text = content[si..] + overlap (sep removed).
-        // Indexed for STI = 0 to content_len-1 (only the ones that differ from normal).
-        if sep_len > 0 && content_len > 0 {
-            let content_bytes = &extended_bytes[..content_len];
-            let overlap_start = own_len as usize;
-            let overlap_bytes = if overlap_start < extended_len {
-                &extended_bytes[overlap_start..extended_len]
-            } else {
-                &[] as &[u8]
-            };
+        // NOTE: stripped partition (0x02) is now word-level, generated via add_word_stripped().
+        // Per-chunk stripped entries are no longer generated here.
+        let _ = content_overlap; // consumed by caller for word-level stripped
+    }
 
-            for si in 0..content_len {
-                if si > 0 && !is_utf8_char_boundary(content_bytes, si) {
-                    continue;
-                }
-                let stripped_suffix_content = &content_bytes[si..];
-                let stripped_suffix_len = stripped_suffix_content.len() + overlap_bytes.len();
-                if si > 0 && stripped_suffix_len < self.min_suffix_len {
-                    break;
-                }
+    /// Register word-level stripped suffixes in partition 0x02.
+    ///
+    /// `word_content` = concatenation of all content bytes of the word's chunks (no seps).
+    /// `content_overlap` = first 2 bytes of the next CONTENT token (from next word).
+    /// `first_ordinal` = ordinal of the first chunk of this word (for posting resolution).
+    /// `first_own_len` = own_len of the first chunk.
+    ///
+    /// This indexes suffixes of the ENTIRE word (not per-chunk), so queries like
+    /// "nationalizationinit" that span multiple chunks within a word are directly
+    /// findable in the FST without multi-hop chaining.
+    pub fn add_word_stripped(
+        &mut self,
+        word_content: &str,
+        content_overlap: &str,
+        first_ordinal: u64,
+        first_own_len: u16,
+        first_sep_len: u8,
+        is_word_start: bool,
+    ) {
+        let lower_content = word_content.to_lowercase();
+        let lower_overlap = content_overlap.to_lowercase();
+        let content_bytes = lower_content.as_bytes();
+        let overlap_bytes = lower_overlap.as_bytes();
+        let content_len = content_bytes.len();
 
-                let key_start = self.key_buf.len() as u32;
-                self.key_buf.push(SI_STRIPPED_PREFIX);
-                self.key_buf.extend_from_slice(stripped_suffix_content);
-                self.key_buf.extend_from_slice(overlap_bytes);
-                let key_len = (self.key_buf.len() as u32) - key_start;
+        if content_len == 0 {
+            return;
+        }
 
-                self.entries.push((
-                    key_start,
-                    key_len,
-                    ParentEntryV3 {
-                        raw_ordinal,
-                        sti: si as u16,
-                        own_len,
-                        sep_len,
-                        overlap_len,
-                        is_word_start,
-                    },
-                ));
+        let max_si = content_len.min(MAX_CHUNK_BYTES);
+
+        for si in 0..max_si {
+            if si > 0 && !is_utf8_char_boundary(content_bytes, si) {
+                continue;
             }
+            let suffix_content = &content_bytes[si..];
+            let suffix_len = suffix_content.len() + overlap_bytes.len();
+            if si > 0 && suffix_len < self.min_suffix_len {
+                break;
+            }
+
+            let key_start = self.key_buf.len() as u32;
+            self.key_buf.push(SI_STRIPPED_PREFIX);
+            self.key_buf.extend_from_slice(suffix_content);
+            self.key_buf.extend_from_slice(overlap_bytes);
+            let key_len = (self.key_buf.len() as u32) - key_start;
+
+            self.entries.push((
+                key_start,
+                key_len,
+                ParentEntryV3 {
+                    raw_ordinal: first_ordinal,
+                    sti: si as u16,
+                    own_len: (content_len + first_sep_len as usize) as u16, // content + sep, like normal tokens
+                    sep_len: first_sep_len,
+                    overlap_len: overlap_bytes.len() as u8,
+                    is_word_start,
+                },
+            ));
         }
     }
 

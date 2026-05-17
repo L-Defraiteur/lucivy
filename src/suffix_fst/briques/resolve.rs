@@ -73,16 +73,55 @@ pub fn resolve_single_v3(
 
 // ─── resolve_chains_v3 ────────────────────────────────────────────────────
 
-/// Resolve cross-token chains to document matches with adjacency verification.
+/// Resolve cross-token chains to document matches with strict adjacency.
 ///
 /// For each chain, resolves posting lists for all ordinals and verifies that
-/// they appear at consecutive positions in the same document.
-///
-/// Adjacency rule: `position[i+1] == position[i] + 1` for each pair.
+/// they appear at consecutive positions (`pos+1`) in the same document.
 pub fn resolve_chains_v3(
     chains: &[TokenChainV3],
     resolver: &dyn PostingResolver,
     filter_docs: Option<&HashSet<DocId>>,
+) -> Vec<MatchV3> {
+    resolve_chains_impl(chains, resolver, filter_docs, AdjacencyMode::Strict)
+}
+
+/// Resolve cross-token chains with relaxed adjacency for strict_sep=false.
+///
+/// Allows gaps between chain ordinals (pure-sep tokens in between).
+/// Verifies that intermediate tokens are all non-alphanum via PosMap + ByteMap.
+pub fn resolve_chains_v3_relaxed(
+    chains: &[TokenChainV3],
+    resolver: &dyn PostingResolver,
+    filter_docs: Option<&HashSet<DocId>>,
+    posmap: Option<&crate::suffix_fst::posmap::PosMapReader<'_>>,
+    bytemap: Option<&crate::suffix_fst::bytemap::ByteBitmapReader<'_>>,
+) -> Vec<MatchV3> {
+    if posmap.is_some() && bytemap.is_some() {
+        resolve_chains_impl(chains, resolver, filter_docs,
+            AdjacencyMode::Relaxed { posmap: posmap.unwrap(), bytemap: bytemap.unwrap() })
+    } else {
+        // No PosMap/ByteMap available — fallback to byte-ordered check
+        resolve_chains_impl(chains, resolver, filter_docs, AdjacencyMode::ByteOrdered)
+    }
+}
+
+enum AdjacencyMode<'a> {
+    /// pos[i+1] == pos[i] + 1
+    Strict,
+    /// pos[i+1] > pos[i], intermediate tokens verified as pure non-alphanum via ByteMap
+    Relaxed {
+        posmap: &'a crate::suffix_fst::posmap::PosMapReader<'a>,
+        bytemap: &'a crate::suffix_fst::bytemap::ByteBitmapReader<'a>,
+    },
+    /// pos[i+1] > pos[i] && byte_from[i+1] >= byte_to[i] (no verification, fallback)
+    ByteOrdered,
+}
+
+fn resolve_chains_impl(
+    chains: &[TokenChainV3],
+    resolver: &dyn PostingResolver,
+    filter_docs: Option<&HashSet<DocId>>,
+    adjacency: AdjacencyMode<'_>,
 ) -> Vec<MatchV3> {
     let mut results = Vec::new();
 
@@ -91,7 +130,6 @@ pub fn resolve_chains_v3(
             continue;
         }
         if chain.ordinals.len() == 1 {
-            // Single-token chain — just resolve directly
             let entries = resolve_ordinal(resolver, chain.ordinals[0], filter_docs);
             for e in &entries {
                 results.push(MatchV3 {
@@ -107,38 +145,56 @@ pub fn resolve_chains_v3(
             continue;
         }
 
-        // Multi-ordinal chain: resolve first ordinal, then verify adjacency
+        // Multi-ordinal chain
         let first_entries = resolve_ordinal(resolver, chain.ordinals[0], filter_docs);
 
-        // Build active set: (doc_id, next_expected_position, byte_from_first, byte_to_prev)
+        // Active set: (doc_id, prev_position, byte_from_first, byte_to_prev)
         let mut active: Vec<(DocId, u32, u32, u32)> = first_entries
             .iter()
-            .map(|e| (e.doc_id, e.position + 1, e.byte_from + chain.first_sti as u32, e.byte_to))
+            .map(|e| (e.doc_id, e.position, e.byte_from + chain.first_sti as u32, e.byte_to))
             .collect();
 
-        // Walk through remaining ordinals in the chain
         for ord_idx in 1..chain.ordinals.len() {
             if active.is_empty() {
                 break;
             }
 
             let ord = chain.ordinals[ord_idx];
-            // Collect all postings for this ordinal (no doc filter — we filter by active set)
             let entries = resolver.resolve(ord);
 
             let mut new_active: Vec<(DocId, u32, u32, u32)> = Vec::new();
 
-            for &(doc_id, expected_pos, byte_from_first, _byte_to_prev) in &active {
-                // Find an entry at the expected position in this document
+            for &(doc_id, prev_pos, byte_from_first, byte_to_prev) in &active {
                 for e in &entries {
-                    if e.doc_id == doc_id && e.position == expected_pos {
-                        new_active.push((
-                            doc_id,
-                            expected_pos + 1,
-                            byte_from_first,
-                            e.byte_to,
-                        ));
-                        break; // One match per active entry per ordinal
+                    if e.doc_id != doc_id {
+                        continue;
+                    }
+
+                    let valid = match &adjacency {
+                        AdjacencyMode::Strict => {
+                            e.position == prev_pos + 1
+                        }
+                        AdjacencyMode::ByteOrdered => {
+                            e.position > prev_pos && e.byte_from >= byte_to_prev
+                        }
+                        AdjacencyMode::Relaxed { posmap, bytemap } => {
+                            if e.position <= prev_pos {
+                                false
+                            } else if e.position == prev_pos + 1 {
+                                true // directly adjacent, always OK
+                            } else {
+                                // Check intermediate tokens are all pure non-alphanum via ByteMap
+                                intermediates_are_pure_sep(
+                                    *posmap, *bytemap,
+                                    doc_id, prev_pos + 1, e.position,
+                                )
+                            }
+                        }
+                    };
+
+                    if valid {
+                        new_active.push((doc_id, e.position, byte_from_first, e.byte_to));
+                        break;
                     }
                 }
             }
@@ -146,28 +202,56 @@ pub fn resolve_chains_v3(
             active = new_active;
         }
 
-        // Emit matches from surviving active entries
-        for (doc_id, _next_pos, byte_from, byte_to) in &active {
+        // Emit matches
+        for &(doc_id, _last_pos, byte_from, byte_to) in &active {
+            let position = first_entries.iter()
+                .find(|e| e.doc_id == doc_id)
+                .map(|e| e.position)
+                .unwrap_or(0);
             results.push(MatchV3 {
-                doc_id: *doc_id,
-                position: 0, // Will be set from first entry
+                doc_id,
+                position,
                 span: chain.ordinals.len() as u32,
-                byte_from: *byte_from,
-                byte_to: *byte_to,
+                byte_from,
+                byte_to,
                 sti: chain.first_sti,
                 ordinal: chain.ordinals[0],
             });
         }
-
-        // Fix position from first entries
-        for m in results.iter_mut().rev().take(active.len()) {
-            if let Some(fe) = first_entries.iter().find(|e| e.doc_id == m.doc_id) {
-                m.position = fe.position;
-            }
-        }
     }
 
     results
+}
+
+/// Check that all tokens between pos_from (inclusive) and pos_to (exclusive)
+/// are pure non-alphanum (separator-only tokens).
+///
+/// Uses PosMap (position → ordinal) + ByteMap (ordinal → byte bitmap).
+/// A token is "pure sep" if no alphanumeric byte [a-zA-Z0-9] is in its bitmap.
+fn intermediates_are_pure_sep(
+    posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
+    bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
+    doc_id: DocId,
+    pos_from: u32,
+    pos_to: u32,
+) -> bool {
+    // Alphanumeric byte ranges to check in the bitmap
+    const ALPHANUM_RANGES: &[(u8, u8)] = &[
+        (b'0', b'9'),
+        (b'A', b'Z'),
+        (b'a', b'z'),
+    ];
+
+    for pos in pos_from..pos_to {
+        let Some(ord) = posmap.ordinal_at(doc_id, pos) else {
+            return false; // Can't verify → reject
+        };
+        // Check via ByteMap: if any alphanum byte is present → not pure sep
+        if bytemap.bytes_in_ranges(ord as u32, ALPHANUM_RANGES) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Resolve an ordinal with optional doc filtering.

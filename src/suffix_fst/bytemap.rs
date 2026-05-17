@@ -146,6 +146,27 @@ impl<'a> ByteBitmapReader<'a> {
         true
     }
 
+    /// Check if the token at `ordinal` has ANY byte within the given ranges.
+    /// Ranges are (lo, hi) inclusive pairs. Returns true if at least one byte
+    /// in the bitmap falls within any of the ranges.
+    ///
+    /// Useful for checking "does this token contain alphanumeric bytes?":
+    /// `bytes_in_ranges(ord, &[(b'0',b'9'), (b'A',b'Z'), (b'a',b'z')])`
+    pub fn bytes_in_ranges(&self, ordinal: u32, ranges: &[(u8, u8)]) -> bool {
+        let bm = match self.bitmap(ordinal) {
+            Some(bm) => bm,
+            None => return false,
+        };
+        for &(lo, hi) in ranges {
+            for byte_val in lo..=hi {
+                if bm[byte_val as usize / 8] & (1 << (byte_val % 8)) != 0 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Returns the total number of ordinals in the bitmap.
     pub fn num_ordinals(&self) -> u32 {
         self.num_ordinals

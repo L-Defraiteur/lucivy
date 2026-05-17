@@ -32,6 +32,24 @@ pub fn find_literal_v3(
     strict_separators: bool,
     filter_docs: Option<&HashSet<DocId>>,
 ) -> Vec<MatchV3> {
+    // Without PosMap, relaxed chains use ByteOrdered fallback (pos_B > pos_A, byte ordered)
+    find_literal_v3_full(reader, query, resolver, anchor_start, strict_separators, filter_docs, None, None)
+}
+
+/// Like `find_literal_v3` but with PosMap + ord_to_term for strict_sep=false.
+
+/// Like `find_literal_v3` but with PosMap + ByteMap for strict_sep=false
+/// intermediate token verification (ensures only sep tokens between matches).
+pub fn find_literal_v3_full(
+    reader: &SfxFileReaderV3,
+    query: &str,
+    resolver: &dyn PostingResolver,
+    anchor_start: bool,
+    strict_separators: bool,
+    filter_docs: Option<&HashSet<DocId>>,
+    posmap: Option<&crate::suffix_fst::posmap::PosMapReader<'_>>,
+    bytemap: Option<&crate::suffix_fst::bytemap::ByteBitmapReader<'_>>,
+) -> Vec<MatchV3> {
     let mut results = Vec::new();
 
     // Single-token matches
@@ -42,7 +60,11 @@ pub fn find_literal_v3(
     // Cross-token matches (only if not anchor_start — anchor means token start)
     if !anchor_start {
         let chains = fst_walk::cross_token_chain_v3(reader, query, strict_separators);
-        let cross = resolve::resolve_chains_v3(&chains, resolver, filter_docs);
+        let cross = if !strict_separators {
+            resolve::resolve_chains_v3_relaxed(&chains, resolver, filter_docs, posmap, bytemap)
+        } else {
+            resolve::resolve_chains_v3(&chains, resolver, filter_docs)
+        };
         results.extend(cross);
     }
 

@@ -83,6 +83,7 @@ impl Node for BuildFstV3Node {
             .ok_or("wrong type")?;
 
         let mut builder = SuffixFstBuilderV3::with_min_suffix_len(data.min_suffix_len);
+        // Chunk-level entries (partitions 0x00/0x01)
         for (final_ord, &intern_ord) in data.sorted_indices.iter().enumerate() {
             let text = &data.token_texts[intern_ord as usize];
             let meta = &data.token_meta[intern_ord as usize];
@@ -93,6 +94,18 @@ impl Node for BuildFstV3Node {
                 meta.sep_len,
                 meta.overlap_len,
                 meta.is_word_start,
+            );
+        }
+        // Word-level stripped entries (partition 0x02)
+        for ws in &data.word_stripped {
+            let final_ord = data.intern_to_final[ws.first_intern_ord as usize];
+            builder.add_word_stripped(
+                &ws.word_content,
+                &ws.content_overlap,
+                final_ord as u64,
+                ws.first_own_len,
+                ws.last_sep_len,
+                ws.is_word_start,
             );
         }
 
@@ -306,6 +319,7 @@ pub fn merge_segments_v3(
                     overlap_len: meta.overlap_len,
                     is_word_start: meta.is_word_start,
                     word_id: 0, // word_id is segment-local, not meaningful across merge
+                    content_overlap: None, // Not preserved across merge (re-computed from tokens)
                 });
                 token_postings.push(Vec::new());
                 new_ord
@@ -354,6 +368,11 @@ pub fn merge_segments_v3(
         .max()
         .unwrap_or(0);
 
+    // Rebuild word_stripped from merged token data
+    let word_stripped = crate::suffix_fst::collector_v3::build_word_stripped_pub(
+        &token_texts, &token_meta, 2,
+    );
+
     Ok(SfxCollectorDataV3 {
         tokens,
         sorted_indices,
@@ -363,6 +382,7 @@ pub fn merge_segments_v3(
         token_meta,
         num_docs: total_docs,
         min_suffix_len: 1,
+        word_stripped,
     })
 }
 

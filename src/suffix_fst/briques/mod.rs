@@ -9,3 +9,5 @@ pub mod resolve;
 pub mod composite;
 pub mod orchestrator;
 pub mod regex_v3;
+#[cfg(test)]
+mod integration_tests;

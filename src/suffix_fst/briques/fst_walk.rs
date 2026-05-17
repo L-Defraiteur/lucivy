@@ -191,6 +191,8 @@ pub fn falling_walk_v3(
     }
 
     // Stripped partition: split at content_len - sti (for strict_sep=false)
+    // For partition 0x02, own_len = word_content_len + sep_len (same convention
+    // as normal tokens), so content_len() correctly returns word_content_len.
     if !strict_separators {
         walk_partition(
             fst, reader, query_bytes, SI_STRIPPED_PREFIX,
