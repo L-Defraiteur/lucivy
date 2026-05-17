@@ -49,8 +49,21 @@ pub fn contains_v3(
         return Vec::new();
     }
 
+    // For strict_sep=false: strip all non-alphanum from the query.
+    // The stripped partition (0x02) in the FST will match content+overlap without seps.
+    let effective_query;
+    let query_ref = if !strict_separators {
+        effective_query = query.chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+        if effective_query.is_empty() {
+            return Vec::new();
+        }
+        effective_query.as_str()
+    } else {
+        query
+    };
+
     let mut matches = composite::find_literal_v3(
-        reader, query, resolver, anchor_start, strict_separators, filter_docs,
+        reader, query_ref, resolver, anchor_start, strict_separators, filter_docs,
     );
 
     // Apply exact_match filter: match must cover exactly the content of the word(s)
@@ -96,9 +109,21 @@ pub fn fuzzy_v3(
         return (BitSet::with_max_value(max_doc), Vec::new(), Vec::new());
     }
 
+    // For strict_sep=false: strip non-alphanum from the query
+    let effective_query;
+    let query_ref = if !strict_separators {
+        effective_query = query.chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+        if effective_query.is_empty() {
+            return (BitSet::with_max_value(max_doc), Vec::new(), Vec::new());
+        }
+        effective_query.as_str()
+    } else {
+        query
+    };
+
     // d=0 → route to exact contains (no trigram overhead)
     if distance == 0 {
-        let matches = contains_v3(reader, query, resolver, false, false, strict_separators, None);
+        let matches = contains_v3(reader, query_ref, resolver, false, false, strict_separators, None);
         let mut bitset = BitSet::with_max_value(max_doc);
         let mut highlights = Vec::new();
         let mut coverage = Vec::new();
@@ -111,7 +136,7 @@ pub fn fuzzy_v3(
     }
 
     composite::resolve_trigrams_v3(
-        reader, query, distance, resolver, strict_separators, max_doc,
+        reader, query_ref, distance, resolver, strict_separators, max_doc,
     )
 }
 

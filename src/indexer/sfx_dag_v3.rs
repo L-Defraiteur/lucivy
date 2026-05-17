@@ -188,9 +188,14 @@ impl Node for AssembleV3Node {
         let sfx = sfx_writer.to_bytes();
 
         // EventDriven registry indexes (bytemap, freqmap, posmap, termtexts-v2-compat)
-        let derived = crate::suffix_fst::index_registry::build_derived_indexes(
+        // V3: pass own_len per token so ByteMap excludes overlap bytes
+        let own_lens: Vec<u16> = data.sorted_indices.iter()
+            .map(|&intern_ord| data.token_meta[intern_ord as usize].own_len)
+            .collect();
+        let derived = crate::suffix_fst::index_registry::build_derived_indexes_v3(
             &data.tokens,
             sfxpost_data.as_deref(),
+            Some(&own_lens),
         );
 
         ctx.set_output("output", PortValue::new(SfxBuildOutputV3 {

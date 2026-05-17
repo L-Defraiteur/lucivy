@@ -149,6 +149,66 @@ pub fn build_derived_indexes(
         .collect()
 }
 
+/// V3 variant: build derived indexes with own_len metadata.
+///
+/// For ByteMap, passes only `token[..own_len]` (without overlap bytes)
+/// so the bitmap doesn't include bytes from the next token.
+///
+/// `token_own_lens[i]` = own_len for the i-th token in sorted order.
+/// If None, falls back to full token text (v2 compat).
+pub fn build_derived_indexes_v3(
+    tokens: &std::collections::BTreeSet<String>,
+    sfxpost_data: Option<&[u8]>,
+    token_own_lens: Option<&[u16]>,
+) -> Vec<(String, Vec<u8>)> {
+    let sfxpost_reader = sfxpost_data
+        .and_then(crate::suffix_fst::sfxpost_v2::SfxPostReaderV2::open_slice);
+
+    let mut indexes = all_indexes();
+
+    for (ord, token) in tokens.iter().enumerate() {
+        let ord_u32 = ord as u32;
+        // For ByteMap: truncate token to own_len (exclude overlap bytes)
+        let effective_text = if let Some(lens) = token_own_lens {
+            let own_len = lens.get(ord).copied().unwrap_or(token.len() as u16) as usize;
+            let end = own_len.min(token.len());
+            // Snap to char boundary
+            let mut e = end;
+            while e < token.len() && !token.is_char_boundary(e) {
+                e += 1;
+            }
+            &token[..e.min(token.len())]
+        } else {
+            token.as_str()
+        };
+
+        for idx in indexes.iter_mut() {
+            if matches!(idx.merge_strategy(), MergeStrategy::EventDriven) {
+                idx.on_token(ord_u32, effective_text);
+            }
+        }
+        if let Some(ref reader) = sfxpost_reader {
+            for entry in reader.entries(ord_u32) {
+                for idx in indexes.iter_mut() {
+                    if matches!(idx.merge_strategy(), MergeStrategy::EventDriven) {
+                        idx.on_posting(ord_u32, entry.doc_id, entry.token_index,
+                                       entry.byte_from, entry.byte_to);
+                    }
+                }
+            }
+        }
+    }
+
+    indexes.iter()
+        .filter(|idx| matches!(idx.merge_strategy(), MergeStrategy::EventDriven))
+        .filter_map(|idx| {
+            let data = idx.serialize();
+            if data.is_empty() { None }
+            else { Some((idx.extension().to_string(), data)) }
+        })
+        .collect()
+}
+
 /// Run the OR-merge for all OrMergeWithRemap indexes.
 ///
 /// Used by OrMergeNode in the merge DAG.
