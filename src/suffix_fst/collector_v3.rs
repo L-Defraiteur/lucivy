@@ -285,14 +285,51 @@ impl SfxCollectorV3 {
                 };
                 let first_intern = *self.token_intern.get(&first_extended).unwrap_or(&0);
 
+                let max_token = crate::tokenizer::equal_chunk::DEFAULT_MAX_TOKEN;
+
                 self.word_stripped_entries.push(WordStrippedEntry {
-                    word_content,
-                    content_overlap,
+                    word_content: word_content.clone(),
+                    content_overlap: content_overlap.clone(),
                     first_intern_ord: first_intern,
                     first_own_len: chunks[first_ci].0.len() as u16,
                     last_sep_len: chunks[last_ci].1.sep_len as u8,
                     is_word_start: chunks[first_ci].1.is_word_start,
                 });
+
+                // Tail entry for long words: cover the last MAX_TOKEN bytes of word content
+                // so cross-sep queries near the end of the word can be found.
+                if word_content.len() > max_token {
+                    let tail_start = word_content.len().saturating_sub(max_token);
+                    // Snap to UTF-8 char boundary
+                    let mut ts = tail_start;
+                    while ts < word_content.len() && !word_content.is_char_boundary(ts) { ts += 1; }
+                    let tail_content = word_content[ts..].to_string();
+
+                    // Use the last chunk's ordinal for posting resolution
+                    let last_chunk_text = &chunks[last_ci].0;
+                    let last_overlap: &str = if last_ci + 1 < num_chunks {
+                        let next_text = &chunks[last_ci + 1].0;
+                        let ov_len = self.overlap.min(next_text.len());
+                        let mut end = ov_len;
+                        while end > 0 && !next_text.is_char_boundary(end) { end -= 1; }
+                        &next_text[..end]
+                    } else { "" };
+                    let last_extended = if !last_overlap.is_empty() {
+                        format!("{last_chunk_text}{last_overlap}")
+                    } else {
+                        last_chunk_text.clone()
+                    };
+                    let last_intern = *self.token_intern.get(&last_extended).unwrap_or(&0);
+
+                    self.word_stripped_entries.push(WordStrippedEntry {
+                        word_content: tail_content,
+                        content_overlap,
+                        first_intern_ord: last_intern,
+                        first_own_len: chunks[last_ci].0.len() as u16,
+                        last_sep_len: chunks[last_ci].1.sep_len as u8,
+                        is_word_start: false,
+                    });
+                }
             }
         }
 

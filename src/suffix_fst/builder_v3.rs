@@ -315,6 +315,15 @@ impl SuffixFstBuilderV3 {
         if content_len == 0 {
             return;
         }
+        // No sep → nothing to strip, chunks in 0x00/0x01 already cover this word.
+        if first_sep_len == 0 {
+            return;
+        }
+        // Clamp: own_len = content_len + sep_len must fit in 14 bits (max 16383).
+        // For very long words (e.g. base64), only index the first portion.
+        let effective_content_len = content_len.min(OWN_LEN_MASK as usize - first_sep_len as usize);
+        let content_bytes = &content_bytes[..effective_content_len];
+        let content_len = effective_content_len;
 
         let max_si = content_len.min(MAX_CHUNK_BYTES);
 

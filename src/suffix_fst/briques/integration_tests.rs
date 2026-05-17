@@ -348,6 +348,24 @@ mod tests {
     }
 
     #[test]
+    fn fz11_very_long_word_with_sep() {
+        // Word of 20K+ chars followed by sep and another word.
+        // Stripped partition should still find cross-sep matches.
+        let long_word = "a".repeat(20_000);
+        let text = format!("{long_word}_short");
+        let idx = build(&[&text]);
+        // "short" in normal partition → found
+        assert!(!query_contains(&idx, "short", true).is_empty());
+        // Substring deep in the long word → found via chunks 0x00/0x01
+        assert!(!query_contains(&idx, "aaaaaaa", true).is_empty());
+        // Cross-sep stripped: "aaaaashort" → needs stripped partition
+        // The query stripped becomes "aaaaashort" which should find
+        // the word content (clamped) + overlap "sh" in partition 0x02
+        assert!(!query_contains(&idx, "aaaaashort", false).is_empty(),
+            "cross-sep query past clamp limit should still work via falling walk chain");
+    }
+
+    #[test]
     fn fz10_long_cross_token_d1_strict_false() {
         // Same case as pipeline test: long identifier with typo
         let idx = build(&["ku_dynamic_cast is used everywhere"]);
