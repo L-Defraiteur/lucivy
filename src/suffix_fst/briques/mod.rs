@@ -8,3 +8,4 @@ pub mod fst_walk;
 pub mod resolve;
 pub mod composite;
 pub mod orchestrator;
+pub mod regex_v3;
