@@ -124,6 +124,7 @@ mod regex_tokenizer;
 mod remove_long;
 mod simple_tokenizer;
 pub(crate) mod camel_case_split;
+pub mod equal_chunk;
 mod split_compound_words;
 mod stop_word_filter;
 mod tokenized_string;
@@ -134,6 +135,7 @@ mod whitespace_tokenizer;
 pub use tokenizer_api::{BoxTokenStream, Token, TokenFilter, TokenStream, Tokenizer};
 
 pub use self::camel_case_split::CamelCaseSplitFilter;
+pub use self::equal_chunk::EqualChunkTokenizer;
 pub use self::alphanum_only::AlphaNumOnlyFilter;
 pub use self::ascii_folding_filter::{AsciiFoldingFilter, to_ascii};
 pub use self::facet_tokenizer::FacetTokenizer;

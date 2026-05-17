@@ -24,6 +24,7 @@ pub(crate) mod commit_dag;
 pub(crate) mod merge_dag;
 pub(crate) mod sfx_merge;
 pub(crate) mod sfx_dag;
+pub(crate) mod sfx_dag_v3;
 pub(crate) mod merge_policy;
 pub(crate) mod merger;
 pub(crate) mod operation;

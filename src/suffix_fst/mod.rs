@@ -2,6 +2,16 @@
 
 /// Suffix FST builder: constructs the FST from unique tokens, encodes parent references.
 pub mod builder;
+/// Suffix FST builder v3: overlap-aware construction with extended encoding.
+pub mod builder_v3;
+/// Collector v3: overlap-aware token collection for indexation.
+pub mod collector_v3;
+/// Section-based binary file format — extensible container for named sections.
+pub mod section_file;
+/// Term texts v3: extended tokens + metadata for merge support.
+pub mod termtexts_v3;
+/// SFX file format v3: section-based, no sibling/gapmap.
+pub mod file_v3;
 mod collector;
 /// GapMap: binary format for storing inter-token separators per document.
 pub mod gapmap;
