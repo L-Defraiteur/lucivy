@@ -69,11 +69,24 @@ pub struct SfxCollectorV3 {
     // Word-level stripped entries, built during add_value().
     word_stripped_entries: Vec<WordStrippedEntry>,
 
+    // Word map: structural verification for cross-token chains.
+    // Interned segments: segment text (content+sep, lowered) → global word_id.
+    word_intern: HashMap<String, u32>,
+    // Per intern ordinal: (global_word_id, chunk_index, total_chunks).
+    // Populated during add_value, consumed by into_data.
+    chunk_to_word: Vec<Vec<(u32, u8, u8)>>,
+    // Observed next-word pairs: (prev_word_id, next_word_id).
+    next_word_pairs: Vec<(u32, u32)>,
+    // Per-doc word position map: (doc_id, position) → word_id_within_doc.
+    word_pos_map: crate::suffix_fst::word_pos_map::WordPosMapWriter,
+
     // Per-document state
     doc_values: Vec<ValueDataV3>,
     doc_active: bool,
     current_doc_id: u32,
     current_value_ti_start: u32,
+    /// Per-doc word counter for word_pos_map (offset per value).
+    current_doc_word_offset: u32,
 
     // Config
     max_token: usize,
@@ -116,10 +129,15 @@ impl SfxCollectorV3 {
             token_postings: Vec::new(),
             token_meta: Vec::new(),
             word_stripped_entries: Vec::new(),
+            word_intern: HashMap::new(),
+            chunk_to_word: Vec::new(),
+            next_word_pairs: Vec::new(),
+            word_pos_map: crate::suffix_fst::word_pos_map::WordPosMapWriter::new(),
             doc_values: Vec::new(),
             doc_active: false,
             current_doc_id: 0,
             current_value_ti_start: 0,
+            current_doc_word_offset: 0,
             max_token: DEFAULT_MAX_TOKEN,
             overlap: DEFAULT_OVERLAP,
             min_suffix_len: min,
@@ -139,6 +157,7 @@ impl SfxCollectorV3 {
         self.doc_values.clear();
         self.doc_active = true;
         self.current_value_ti_start = 0;
+        self.current_doc_word_offset = 0;
     }
 
     /// Tokenize and add a complete value string.
@@ -161,6 +180,8 @@ impl SfxCollectorV3 {
         let mut offset = 0usize;
         // Per-chunk posting info: (doc_id, ti, byte_from, byte_to) for word-stripped
         let mut chunk_posting_info: Vec<(u32, u32, u32, u32)> = Vec::with_capacity(num_chunks);
+        // Per-chunk intern ids for word map building
+        let mut chunk_intern_ids: Vec<u32> = Vec::with_capacity(num_chunks);
 
         for i in 0..num_chunks {
             let (ref chunk_text, ref meta) = chunks[i];
@@ -237,8 +258,63 @@ impl SfxCollectorV3 {
                 self.current_doc_id, ti, byte_from, byte_to,
             ));
             chunk_posting_info.push((self.current_doc_id, ti, byte_from, byte_to));
+            chunk_intern_ids.push(intern_id);
+
+            // Record word position: per-doc word_id = local word_id + offset
+            let doc_word_id = meta.word_id as u32 + self.current_doc_word_offset;
+            self.word_pos_map.add(self.current_doc_id, ti, doc_word_id);
 
             offset += chunk_len;
+        }
+
+        // Update word offset for next value in same doc
+        let max_local_word_id = chunks.iter().map(|(_, m)| m.word_id).max().unwrap_or(0);
+        self.current_doc_word_offset += max_local_word_id as u32 + 1;
+
+        // Build word map: group chunks by word_id, intern segments, record mappings.
+        {
+            let mut segments: std::collections::BTreeMap<usize, Vec<usize>> =
+                std::collections::BTreeMap::new();
+            for (i, (_, meta)) in chunks.iter().enumerate() {
+                segments.entry(meta.word_id).or_default().push(i);
+            }
+
+            let seg_ids: Vec<usize> = segments.keys().copied().collect();
+            let mut prev_global_wid: Option<u32> = None;
+
+            for &local_wid in &seg_ids {
+                let chunk_idxs = &segments[&local_wid];
+                // Reconstruct segment text (content+sep) by concatenating chunks
+                let seg_text: String = chunk_idxs.iter()
+                    .map(|&i| chunks[i].0.to_lowercase())
+                    .collect();
+
+                // Intern globally
+                let next_id = self.word_intern.len() as u32;
+                let global_wid = *self.word_intern.entry(seg_text).or_insert(next_id);
+
+                let total = chunk_idxs.len() as u8;
+                for (ci, &chunk_i) in chunk_idxs.iter().enumerate() {
+                    let iid = chunk_intern_ids[chunk_i];
+                    // Ensure chunk_to_word has enough capacity
+                    while self.chunk_to_word.len() <= iid as usize {
+                        self.chunk_to_word.push(Vec::new());
+                    }
+                    let entry = (global_wid, ci as u8, total);
+                    if !self.chunk_to_word[iid as usize].contains(&entry) {
+                        self.chunk_to_word[iid as usize].push(entry);
+                    }
+                }
+
+                // Record next-word pair
+                if let Some(prev) = prev_global_wid {
+                    let pair = (prev, global_wid);
+                    if !self.next_word_pairs.contains(&pair) {
+                        self.next_word_pairs.push(pair);
+                    }
+                }
+                prev_global_wid = Some(global_wid);
+            }
         }
 
         // Build word-level stripped entries from this value's chunks.
@@ -306,9 +382,8 @@ impl SfxCollectorV3 {
                     content_overlap: Some(content_overlap.clone()),
                     is_word_stripped: true,
                 });
-                // Add posting for this word-stripped ordinal (from first chunk's position)
-                let (doc_id, ti, bf, bt) = chunk_posting_info[first_ci];
-                self.token_postings[ws_intern as usize].push((doc_id, ti, bf, bt));
+                // NO posting: word-stripped uses first chunk's ordinal (via intern_to_final).
+                // The first chunk already has the posting. No duplicate.
 
                 let max_token = crate::tokenizer::equal_chunk::DEFAULT_MAX_TOKEN;
 
@@ -316,6 +391,7 @@ impl SfxCollectorV3 {
                     word_content: word_content.clone(),
                     content_overlap: content_overlap.clone(),
                     first_intern_ord: ws_intern,
+                    first_chunk_intern_ord: chunk_intern_ids[first_ci],
                     first_own_len: ws_own_len,
                     last_sep_len: chunks[last_ci].1.sep_len as u8,
                     is_word_start: chunks[first_ci].1.is_word_start,
@@ -354,16 +430,13 @@ impl SfxCollectorV3 {
                         content_overlap: Some(content_overlap.clone()),
                         is_word_stripped: true,
                     });
-                    // Posting from last chunk's position
-                    let (doc_id, _ti, _bf, bt) = chunk_posting_info[last_ci];
-                    let last_ti = chunk_posting_info[last_ci].1;
-                    let last_bf = chunk_posting_info[last_ci].2;
-                    self.token_postings[tail_intern as usize].push((doc_id, last_ti, last_bf, bt));
+                    // NO posting: tail uses last chunk's ordinal. No duplicate.
 
                     self.word_stripped_entries.push(WordStrippedEntry {
                         word_content: tail_content,
                         content_overlap,
                         first_intern_ord: tail_intern,
+                        first_chunk_intern_ord: chunk_intern_ids[last_ci],
                         first_own_len: tail_own_len,
                         last_sep_len: chunks[last_ci].1.sep_len as u8,
                         is_word_start: false,
@@ -419,15 +492,23 @@ impl SfxCollectorV3 {
             self.token_texts[a as usize].cmp(&self.token_texts[b as usize])
         });
 
-        // Group intern ordinals by content key = leading content chars of text.
-        // Scanned from the actual bytes (not from metadata) so it works for both
-        // regular chunks ("mutex_lo" → "mutex") and word-stripped entries
-        // ("mutexlo" → "mutexlo", all content chars).
-        // All sep/overlap variants of the same content share one ordinal.
+        // Group intern ordinals by text[..own_len] (content + sep, NO overlap).
+        // Overlaps stay in the FST keys (for trigram coverage) but NOT in the ordinal.
+        // This prevents FP from overlap variant mixing while keeping trigrams searchable.
+        // FN from sep differences are handled by Vec<Vec<u64>> alternatives at query time.
+        //
+        // Group chunk ordinals by text[..own_len] (content + sep, NO overlap).
+        // Word-stripped entries are EXCLUDED — they get mapped to first chunk ordinal below.
         let mut content_key_map: std::collections::BTreeMap<String, Vec<u32>> =
             std::collections::BTreeMap::new();
         for (intern_ord, text) in self.token_texts.iter().enumerate() {
-            let content_key = extract_content_prefix(text);
+            if self.token_meta[intern_ord].is_word_stripped {
+                continue;
+            }
+            let mut own_len = self.token_meta[intern_ord].own_len as usize;
+            own_len = own_len.min(text.len());
+            while own_len > 0 && !text.is_char_boundary(own_len) { own_len -= 1; }
+            let content_key = text[..own_len].to_string();
             content_key_map.entry(content_key).or_default().push(intern_ord as u32);
         }
 
@@ -452,6 +533,13 @@ impl SfxCollectorV3 {
             content_final_ord += 1;
         }
 
+        // Map word-stripped intern_ords to their first chunk's content ordinal.
+        // They have no postings — they reuse the first chunk's ordinal in the FST.
+        for ws in &self.word_stripped_entries {
+            let chunk_ord = intern_to_final[ws.first_chunk_intern_ord as usize];
+            intern_to_final[ws.first_intern_ord as usize] = chunk_ord;
+        }
+
         // Content keys as BTreeSet (sorted = ordinal order)
         let tokens: std::collections::BTreeSet<String> = content_key_map.keys().cloned().collect();
 
@@ -467,6 +555,26 @@ impl SfxCollectorV3 {
         }
         let overlap_siblings_data = overlap_siblings.serialize();
 
+        // Build word maps: remap from intern ordinals to content ordinals.
+        let mut chunk_word_writer = crate::suffix_fst::word_map::ChunkWordMapWriter::new(
+            content_final_ord as usize,
+        );
+        for (intern_ord, entries) in self.chunk_to_word.iter().enumerate() {
+            let content_ord = intern_to_final.get(intern_ord).copied().unwrap_or(0);
+            for &(word_id, chunk_idx, total) in entries {
+                chunk_word_writer.add(content_ord, word_id, chunk_idx, total);
+            }
+        }
+        let chunk_word_map_data = chunk_word_writer.serialize();
+
+        let num_words = self.word_intern.len();
+        let mut next_word_writer = crate::suffix_fst::word_map::NextWordMapWriter::new(num_words);
+        for &(prev, next) in &self.next_word_pairs {
+            next_word_writer.add(prev, next);
+        }
+        let next_word_map_data = next_word_writer.serialize();
+        let word_pos_map_data = self.word_pos_map.serialize();
+
         SfxCollectorDataV3 {
             sorted_indices,
             intern_to_final,
@@ -479,6 +587,9 @@ impl SfxCollectorV3 {
             min_suffix_len: self.min_suffix_len,
             overlap_siblings: overlap_siblings_data,
             word_stripped: self.word_stripped_entries,
+            chunk_word_map: chunk_word_map_data,
+            next_word_map: next_word_map_data,
+            word_pos_map: word_pos_map_data,
         }
     }
 
@@ -500,8 +611,12 @@ pub struct WordStrippedEntry {
     pub word_content: String,
     /// Content overlap: first 2 bytes of the next word's content.
     pub content_overlap: String,
-    /// Ordinal of the first chunk of this word.
+    /// Intern ordinal of the word-stripped token itself (partition 0x02 key).
     pub first_intern_ord: u32,
+    /// Intern ordinal of the first CHUNK (partition 0x00/0x01).
+    /// Used to map word-stripped FST keys to the chunk's content ordinal
+    /// so no duplicate postings are needed.
+    pub first_chunk_intern_ord: u32,
     /// own_len of the first chunk.
     pub first_own_len: u16,
     /// sep_len of the last chunk (the one with trailing sep).
@@ -545,6 +660,15 @@ pub struct SfxCollectorDataV3 {
     pub overlap_siblings: Vec<u8>,
     /// Word-level stripped entries for partition 0x02.
     pub word_stripped: Vec<WordStrippedEntry>,
+    /// ChunkWordMap: content_ordinal → [(word_id, chunk_index, total_chunks)].
+    /// Serialized binary format for structural chain verification.
+    pub chunk_word_map: Vec<u8>,
+    /// NextWordMap: word_id → [next_word_ids].
+    /// Serialized binary format for inter-word chain verification.
+    pub next_word_map: Vec<u8>,
+    /// WordPosMap: (doc_id, position) → word_id_within_doc.
+    /// Per-doc word assignment for exact chain verification.
+    pub word_pos_map: Vec<u8>,
 }
 
 /// Build word-level stripped entries from token data.
@@ -634,6 +758,7 @@ fn build_word_stripped(
             word_content,
             content_overlap,
             first_intern_ord: first_idx as u32,
+            first_chunk_intern_ord: first_idx as u32, // in merge, intern = chunk
             first_own_len: token_meta[first_idx].own_len,
             last_sep_len: token_meta[last_idx].sep_len,
             is_word_start: token_meta[first_idx].is_word_start,

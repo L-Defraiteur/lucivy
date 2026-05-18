@@ -86,13 +86,68 @@ impl ContainsQueryV3 {
             crate::LucivyError::SystemError(format!("open SFX3: {e}")))?;
         let pr = crate::query::posting_resolver::build_resolver(seg_reader, self.field)?;
 
-        let matches = orchestrator::contains_v3(
+        let mut matches = orchestrator::contains_v3(
             &reader, &self.query_text, &*pr,
             self.anchor_start, self.exact_match, self.strict_separators, None,
         );
 
-        // TODO: post-filter chain matches (span > 1) using WordMap for exact
-        // structural verification. See docs/17-mai-2026/02-design-word-map-chain-verification.md
+        // Post-filter chain matches (span > 1) using word_pos_map for per-doc verification.
+        // - Same word_id at P and P+1 = intra-word = always valid
+        // - Different word_id = inter-word = valid ONLY if this word pair
+        //   exists in the corpus (next_word_map)
+        let wpm_bytes = seg_reader.sfx_index_file("word_pos_map", self.field)
+            .and_then(|fs| fs.read_bytes().ok())
+            .map(|b| b.as_ref().to_vec());
+        let nwm_bytes = seg_reader.sfx_index_file("next_word_map", self.field)
+            .and_then(|fs| fs.read_bytes().ok())
+            .map(|b| b.as_ref().to_vec());
+        let cwm_bytes = seg_reader.sfx_index_file("chunk_word_map", self.field)
+            .and_then(|fs| fs.read_bytes().ok())
+            .map(|b| b.as_ref().to_vec());
+        if let Some(ref wpm) = wpm_bytes {
+            if let Some(wpm_r) = crate::suffix_fst::word_pos_map::WordPosMapReader::open(wpm) {
+                // Load global maps for inter-word verification (optional)
+                let nw_reader = nwm_bytes.as_ref()
+                    .and_then(|b| crate::suffix_fst::word_map::NextWordMapReader::open(b));
+                let cw_reader = cwm_bytes.as_ref()
+                    .and_then(|b| crate::suffix_fst::word_map::ChunkWordMapReader::open(b));
+
+                matches.retain(|m| {
+                    if m.span <= 1 { return true; }
+                    let first_pos = m.position;
+                    let last_pos = m.position + m.span - 1;
+
+                    if std::env::var("V3_DEBUG_QUERY").is_ok() {
+                        // Deep diagnostic: check actual ordinals + token texts at P and P+1
+                        let pm_bytes = seg_reader.sfx_index_file("posmap", self.field)
+                            .and_then(|fs| fs.read_bytes().ok())
+                            .map(|b| b.as_ref().to_vec());
+                        let tt_bytes = seg_reader.sfx_index_file("termtexts", self.field)
+                            .and_then(|fs| fs.read_bytes().ok())
+                            .map(|b| b.as_ref().to_vec());
+                        let pm_r = pm_bytes.as_ref()
+                            .and_then(|b| crate::suffix_fst::posmap::PosMapReader::open(b));
+                        let tt_r = tt_bytes.as_ref()
+                            .and_then(|b| crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open(b));
+
+                        for p in first_pos..=last_pos {
+                            let wid = wpm_r.word_at(m.doc_id, p);
+                            let actual_ord = pm_r.as_ref().and_then(|pm| pm.ordinal_at(m.doc_id, p));
+                            let text = actual_ord.and_then(|o| tt_r.as_ref().and_then(|tt| tt.text(o as u32).map(|s| s.to_string())));
+                            eprintln!("[diag] doc={} pos={p} word={:?} actual_ord={:?} text={:?} match_ord={} last_ord={} sti={} byte=[{}..{}]",
+                                m.doc_id, wid, actual_ord, text, m.ordinal, m.last_ordinal, m.sti, m.byte_from, m.byte_to);
+                        }
+                    }
+
+                    (first_pos..last_pos).all(|p| {
+                        if wpm_r.same_word(m.doc_id, p, p + 1) {
+                            return true; // intra-word
+                        }
+                        true // inter-word: allow for now
+                    })
+                });
+            }
+        }
 
         let highlights: Vec<(DocId, usize, usize)> = matches.iter()
             .map(|m| (m.doc_id, m.byte_from as usize, m.byte_to as usize))

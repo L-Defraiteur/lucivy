@@ -21,6 +21,10 @@ pub mod gapmap;
 pub mod sibling_table;
 /// Overlap siblings: content ordinal → extended ordinals sharing same content.
 pub mod overlap_siblings;
+/// Word map: structural verification for cross-token chain matches.
+pub mod word_map;
+/// Word position map: (doc_id, position) → word_id for chain verification.
+pub mod word_pos_map;
 /// Position-to-ordinal map: (doc_id, position) → ordinal reverse index.
 pub mod posmap;
 /// Byte presence bitmap: 256-bit bitmap per ordinal for fast pre-filtering.

@@ -98,6 +98,10 @@ pub fn all_indexes() -> Vec<Box<dyn SfxIndexFile>> {
         Box::new(super::bytemap::ByteMapIndex::new()),
         Box::new(super::termtexts::TermTextsIndex::new()),
         Box::new(super::freqmap::FreqMapIndex::new()),
+        // Prebuilt word maps (structural chain verification)
+        Box::new(super::word_map::ChunkWordMapIndex),
+        Box::new(super::word_map::NextWordMapIndex),
+        Box::new(super::word_pos_map::WordPosMapIndex::new()),
     ]
 }
 

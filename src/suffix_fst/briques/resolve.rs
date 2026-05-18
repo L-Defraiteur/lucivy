@@ -33,6 +33,8 @@ pub struct MatchV3 {
     pub sti: u16,
     /// Ordinal of the first token.
     pub ordinal: u64,
+    /// Ordinal of the last token (for chain verification). Same as ordinal when span=1.
+    pub last_ordinal: u64,
 }
 
 // ─── resolve_single_v3 ────────────────────────────────────────────────────
@@ -64,6 +66,7 @@ pub fn resolve_single_v3(
                 byte_to: e.byte_from + cand.own_len as u32 - cand.sep_len as u32,
                 sti: cand.sti,
                 ordinal: cand.raw_ordinal,
+                last_ordinal: cand.raw_ordinal,
             });
         }
     }
@@ -143,16 +146,17 @@ fn resolve_chains_impl(
                     byte_to: e.byte_to,
                     sti: chain.first_sti,
                     ordinal: chain.ordinals[0][0],
+                    last_ordinal: chain.ordinals[0][0],
                 });
             }
             continue;
         }
 
         // Multi-position chain
-        // Active set: (doc_id, prev_position, byte_from_first, byte_to_prev)
-        let mut active: Vec<(DocId, u32, u32, u32)> = first_entries
+        // Active set: (doc_id, prev_position, byte_from_first, byte_to_prev, last_ord_matched)
+        let mut active: Vec<(DocId, u32, u32, u32, u64)> = first_entries
             .iter()
-            .map(|e| (e.doc_id, e.position, e.byte_from + chain.first_sti as u32, e.byte_to))
+            .map(|e| (e.doc_id, e.position, e.byte_from + chain.first_sti as u32, e.byte_to, 0u64))
             .collect();
 
         for ord_idx in 1..chain.ordinals.len() {
@@ -160,16 +164,19 @@ fn resolve_chains_impl(
                 break;
             }
 
-            // Union postings from all alternative ordinals at this position
-            let mut entries = Vec::new();
+            // Union postings from all alternative ordinals at this position,
+            // tagging each with its ordinal for word map verification.
+            let mut entries: Vec<(PostingEntry, u64)> = Vec::new();
             for &ord in &chain.ordinals[ord_idx] {
-                entries.extend(resolver.resolve(ord));
+                for e in resolver.resolve(ord) {
+                    entries.push((e, ord));
+                }
             }
 
-            let mut new_active: Vec<(DocId, u32, u32, u32)> = Vec::new();
+            let mut new_active: Vec<(DocId, u32, u32, u32, u64)> = Vec::new();
 
-            for &(doc_id, prev_pos, byte_from_first, byte_to_prev) in &active {
-                for e in &entries {
+            for &(doc_id, prev_pos, byte_from_first, byte_to_prev, _) in &active {
+                for (e, ord) in &entries {
                     if e.doc_id != doc_id {
                         continue;
                     }
@@ -196,7 +203,7 @@ fn resolve_chains_impl(
                     };
 
                     if valid {
-                        new_active.push((doc_id, e.position, byte_from_first, e.byte_to));
+                        new_active.push((doc_id, e.position, byte_from_first, e.byte_to, *ord));
                         break;
                     }
                 }
@@ -206,7 +213,7 @@ fn resolve_chains_impl(
         }
 
         // Emit matches
-        for &(doc_id, _last_pos, byte_from, byte_to) in &active {
+        for &(doc_id, _last_pos, byte_from, byte_to, last_ord) in &active {
             let position = first_entries.iter()
                 .find(|e| e.doc_id == doc_id)
                 .map(|e| e.position)
@@ -219,6 +226,7 @@ fn resolve_chains_impl(
                 byte_to,
                 sti: chain.first_sti,
                 ordinal: chain.ordinals[0][0],
+                last_ordinal: last_ord,
             });
         }
     }

@@ -189,6 +189,7 @@ pub fn find_multi_token_v3(
                 byte_to,
                 sti: 0,
                 ordinal: pivot_match.ordinal,
+                last_ordinal: pivot_match.ordinal,
             });
         }
     }
