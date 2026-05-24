@@ -544,6 +544,7 @@ pub fn sibling_chain_dfs(
     query: &str,
     sibling_table: &SiblingTableReader<'_>,
     termtexts: &TermTextsReaderV3<'_>,
+    trace_id: Option<u64>,
 ) -> Vec<TokenChainV3> {
     let query_lower = query.to_lowercase();
     let mut chains = Vec::new();
@@ -551,6 +552,18 @@ pub fn sibling_chain_dfs(
     for split in splits {
         let safe_start = snap_to_char_boundary(&query_lower, split.remainder_start);
         let remainder = &query_lower[safe_start..];
+
+        if let Some(tid) = trace_id {
+            let split_text = termtexts.text(split.parent.raw_ordinal as u32)
+                .unwrap_or("?");
+            super::trace::trace_event(tid, "split", &[
+                ("ord", &split.parent.raw_ordinal),
+                ("sti", &split.parent.sti),
+                ("consumed", &split.query_consumed),
+                ("text", &split_text),
+                ("remainder", &remainder),
+            ]);
+        }
 
         if remainder.is_empty() {
             chains.push(TokenChainV3 {
@@ -561,7 +574,6 @@ pub fn sibling_chain_dfs(
             continue;
         }
 
-        // DFS via stack: (current_ordinal, remainder, chain_ordinals, depth)
         let mut stack: Vec<(u64, &str, Vec<Vec<u64>>, usize)> = vec![
             (split.parent.raw_ordinal, remainder,
              vec![vec![split.parent.raw_ordinal]], 0)
@@ -570,10 +582,16 @@ pub fn sibling_chain_dfs(
         while let Some((cur_ord, rem, chain, depth)) = stack.pop() {
             if depth >= MAX_CHAIN_DEPTH { continue; }
 
-            // siblings() returns SiblingEntry { next_ordinal, gap_len }.
-            // In our v3 sibling table, gap_len stores content_len of cur_ord
-            // (how many content bytes the CURRENT token has, excluding overlap).
             let siblings = sibling_table.siblings(cur_ord as u32);
+            if let Some(tid) = trace_id {
+                super::trace::trace_event(tid, "dfs_step", &[
+                    ("ord", &cur_ord),
+                    ("rem", &rem),
+                    ("depth", &depth),
+                    ("num_siblings", &siblings.len()),
+                ]);
+            }
+
             for sib in &siblings {
                 let next_ord = sib.next_ordinal;
                 let next_text = match termtexts.text(next_ord) {
@@ -582,11 +600,6 @@ pub fn sibling_chain_dfs(
                 };
                 let next_lower = next_text.to_lowercase();
 
-                // Use content_len (stored in gap_len) to compare with the
-                // CONTENT portion only, not the full text including overlap.
-                // This prevents over-consuming overlap bytes that belong to
-                // the next sibling (e.g., "uniquept" consuming 8 bytes instead
-                // of 6 for word "unique" with overlap "pt").
                 let content_len = sib.gap_len as usize;
                 let next_content = if content_len > 0 && content_len < next_lower.len() {
                     let cl = snap_to_char_boundary(&next_lower, content_len);
@@ -596,7 +609,13 @@ pub fn sibling_chain_dfs(
                 };
 
                 if rem == next_content || next_content.starts_with(rem) {
-                    // Terminal: sibling content covers the remainder
+                    if let Some(tid) = trace_id {
+                        super::trace::trace_event(tid, "TERMINAL", &[
+                            ("ord", &next_ord),
+                            ("content", &next_content),
+                            ("rem", &rem),
+                        ]);
+                    }
                     let mut c = chain.clone();
                     c.push(vec![next_ord as u64]);
                     chains.push(TokenChainV3 {
@@ -605,7 +624,14 @@ pub fn sibling_chain_dfs(
                         total_query_consumed: query_lower.len(),
                     });
                 } else if rem.starts_with(next_content) {
-                    // Partial: remainder starts with sibling content → consume and continue
+                    if let Some(tid) = trace_id {
+                        super::trace::trace_event(tid, "PARTIAL", &[
+                            ("ord", &next_ord),
+                            ("content", &next_content),
+                            ("consumed", &next_content.len()),
+                            ("new_rem", &&rem[next_content.len()..]),
+                        ]);
+                    }
                     let consumed = next_content.len();
                     let new_rem = &rem[consumed..];
                     let mut c = chain.clone();

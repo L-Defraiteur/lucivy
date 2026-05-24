@@ -62,6 +62,7 @@ pub fn find_literal_v3(
             let sib_chains = fst_walk::sibling_chain_dfs(
                 &all_splits, query,
                 ctx.require_sibling_v3(), ctx.require_termtexts(),
+                ctx.trace_id,
             );
             chains.extend(sib_chains);
         }
@@ -101,6 +102,7 @@ pub fn find_literal_v3(
             let sib_chains = fst_walk::sibling_chain_dfs(
                 &all_splits, query,
                 ctx.require_sibling_v3(), ctx.require_termtexts(),
+                ctx.trace_id,
             );
             ctx.trace_msg(&format!("word_sibling_chains count={}", sib_chains.len()));
             chains.extend(sib_chains);
