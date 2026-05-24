@@ -72,9 +72,22 @@ impl FuzzyQueryV3 {
             crate::LucivyError::SystemError(format!("open SFX3: {e}")))?;
         let pr = crate::query::posting_resolver::build_resolver(seg_reader, self.field)?;
 
+        // Load PosMap + ByteMap for relaxed chain verification
+        let posmap_bytes = seg_reader.sfx_index_file("posmap", self.field)
+            .and_then(|fs| fs.read_bytes().ok())
+            .map(|b| b.as_ref().to_vec());
+        let bytemap_bytes = seg_reader.sfx_index_file("bytemap", self.field)
+            .and_then(|fs| fs.read_bytes().ok())
+            .map(|b| b.as_ref().to_vec());
+        let posmap_reader = posmap_bytes.as_ref()
+            .and_then(|b| crate::suffix_fst::posmap::PosMapReader::open(b));
+        let bytemap_reader = bytemap_bytes.as_ref()
+            .and_then(|b| crate::suffix_fst::bytemap::ByteBitmapReader::open(b));
+
         let (_bitset, highlights, _coverage) = orchestrator::fuzzy_v3(
             &reader, &self.query_text, self.distance,
             &*pr, self.strict_separators, seg_reader.max_doc(),
+            posmap_reader.as_ref(), bytemap_reader.as_ref(),
         );
 
         // Deduplicate doc_tf from highlights

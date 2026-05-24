@@ -224,6 +224,11 @@ where
         .collect();
     lit_selectivity.sort_by_key(|&(_, s)| s);
 
+    // Build PosMap/ByteMap early — needed for both find_literal (relaxed chains)
+    // and DFA gap validation.
+    let posmap = posmap_data.and_then(PosMapReader::open);
+    let bytemap = bytemap_data.and_then(ByteBitmapReader::open);
+
     let mut all_matches: Vec<Vec<MatchV3>> = vec![Vec::new(); viable.len()];
     let mut doc_filter: Option<HashSet<DocId>> = None;
 
@@ -231,6 +236,7 @@ where
         let matches = composite::find_literal_v3(
             reader, viable[lit_idx], resolver, anchor_start && lit_idx == 0,
             strict_sep, doc_filter.as_ref(),
+            posmap.as_ref(), bytemap.as_ref(),
         );
 
         if doc_filter.is_none() && !matches.is_empty() {
@@ -242,8 +248,6 @@ where
 
     // Step 3: intersect by doc (position ordered)
     let start_state = automaton.start();
-    let posmap = posmap_data.and_then(PosMapReader::open);
-    let bytemap = bytemap_data.and_then(ByteBitmapReader::open);
 
     let has_any_dfa_gap = analyzed_gaps.iter()
         .any(|g| matches!(g, crate::query::phrase_query::regex_gap_analyzer::GapKind::DfaValidation));
@@ -463,11 +467,11 @@ mod tests {
         let resolver = MockResolver::new(&post);
 
         // Verify literals are findable
-        let matches = composite::find_literal_v3(&reader, "mutex", &resolver, false, true, None);
+        let matches = composite::find_literal_v3(&reader, "mutex", &resolver, false, true, None, None, None);
         assert!(!matches.is_empty(), "literal 'mutex' should be found");
         assert_eq!(matches[0].doc_id, 0);
 
-        let matches = composite::find_literal_v3(&reader, "lock", &resolver, false, true, None);
+        let matches = composite::find_literal_v3(&reader, "lock", &resolver, false, true, None, None, None);
         assert!(!matches.is_empty(), "literal 'lock' should be found");
     }
 
@@ -477,8 +481,8 @@ mod tests {
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
-        let m1 = composite::find_literal_v3(&reader, "mutex", &resolver, false, true, None);
-        let m2 = composite::find_literal_v3(&reader, "init", &resolver, false, true, None);
+        let m1 = composite::find_literal_v3(&reader, "mutex", &resolver, false, true, None, None, None);
+        let m2 = composite::find_literal_v3(&reader, "init", &resolver, false, true, None, None, None);
 
         let g1 = group_by_doc_v3(&m1);
         let g2 = group_by_doc_v3(&m2);
@@ -495,8 +499,8 @@ mod tests {
         let resolver = MockResolver::new(&post);
 
         // "mutex" in doc 0, "world" in doc 1 → no intersection
-        let m1 = composite::find_literal_v3(&reader, "mutex", &resolver, false, true, None);
-        let m2 = composite::find_literal_v3(&reader, "world", &resolver, false, true, None);
+        let m1 = composite::find_literal_v3(&reader, "mutex", &resolver, false, true, None, None, None);
+        let m2 = composite::find_literal_v3(&reader, "world", &resolver, false, true, None, None, None);
 
         let g1 = group_by_doc_v3(&m1);
         let g2 = group_by_doc_v3(&m2);

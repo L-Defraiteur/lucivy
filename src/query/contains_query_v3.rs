@@ -86,9 +86,24 @@ impl ContainsQueryV3 {
             crate::LucivyError::SystemError(format!("open SFX3: {e}")))?;
         let pr = crate::query::posting_resolver::build_resolver(seg_reader, self.field)?;
 
+        // Load PosMap + ByteMap for relaxed chain intermediate verification.
+        // Without these, relaxed chains fall back to ByteOrdered (no verification),
+        // which causes cross-word FP (matching fragments from unrelated words).
+        let posmap_bytes = seg_reader.sfx_index_file("posmap", self.field)
+            .and_then(|fs| fs.read_bytes().ok())
+            .map(|b| b.as_ref().to_vec());
+        let bytemap_bytes = seg_reader.sfx_index_file("bytemap", self.field)
+            .and_then(|fs| fs.read_bytes().ok())
+            .map(|b| b.as_ref().to_vec());
+        let posmap_reader = posmap_bytes.as_ref()
+            .and_then(|b| crate::suffix_fst::posmap::PosMapReader::open(b));
+        let bytemap_reader = bytemap_bytes.as_ref()
+            .and_then(|b| crate::suffix_fst::bytemap::ByteBitmapReader::open(b));
+
         let mut matches = orchestrator::contains_v3(
             &reader, &self.query_text, &*pr,
             self.anchor_start, self.exact_match, self.strict_separators, None,
+            posmap_reader.as_ref(), bytemap_reader.as_ref(),
         );
 
         // Post-filter chain matches (span > 1) using word_pos_map for per-doc verification.

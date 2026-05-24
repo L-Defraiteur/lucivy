@@ -24,23 +24,12 @@ use super::resolve::{self, MatchV3};
 /// Combines `fst_candidates_v3` (single-token matches) with
 /// `cross_token_chain_v3` (cross-token matches via falling walk chain).
 /// Deduplicates by (doc_id, position).
+/// Find all occurrences of a literal string (single-token + cross-token).
+///
+/// For strict_separators=false, posmap + bytemap are REQUIRED to verify
+/// that intermediate tokens between chain positions are pure-sep.
+/// Without them, relaxed chains are NOT resolved (only single-token matches).
 pub fn find_literal_v3(
-    reader: &SfxFileReaderV3,
-    query: &str,
-    resolver: &dyn PostingResolver,
-    anchor_start: bool,
-    strict_separators: bool,
-    filter_docs: Option<&HashSet<DocId>>,
-) -> Vec<MatchV3> {
-    // Without PosMap, relaxed chains use ByteOrdered fallback (pos_B > pos_A, byte ordered)
-    find_literal_v3_full(reader, query, resolver, anchor_start, strict_separators, filter_docs, None, None)
-}
-
-/// Like `find_literal_v3` but with PosMap + ord_to_term for strict_sep=false.
-
-/// Like `find_literal_v3` but with PosMap + ByteMap for strict_sep=false
-/// intermediate token verification (ensures only sep tokens between matches).
-pub fn find_literal_v3_full(
     reader: &SfxFileReaderV3,
     query: &str,
     resolver: &dyn PostingResolver,
@@ -58,9 +47,6 @@ pub fn find_literal_v3_full(
     results.extend(single);
 
     // Cross-token matches.
-    // For anchor_start: allow chains but only those starting at SI=0 (token start).
-    // The query may extend past own_len into the overlap zone, requiring the
-    // cross-token chain to validate the next token.
     {
         let chains = fst_walk::cross_token_chain_v3(reader, query, strict_separators);
         let chains = if anchor_start {
@@ -69,7 +55,14 @@ pub fn find_literal_v3_full(
             chains
         };
         let cross = if !strict_separators {
-            resolve::resolve_chains_v3_relaxed(&chains, resolver, filter_docs, posmap, bytemap)
+            // Relaxed chains REQUIRE posmap + bytemap for intermediate verification.
+            // Without them, skip relaxed chains entirely (single-token via 0x02 still works).
+            if let (Some(pm), Some(bm)) = (posmap, bytemap) {
+                resolve::resolve_chains_v3_relaxed(&chains, resolver, filter_docs, pm, bm)
+            } else {
+                // Strict-only chains when maps unavailable (tests, lightweight contexts)
+                resolve::resolve_chains_v3(&chains, resolver, filter_docs)
+            }
         } else {
             resolve::resolve_chains_v3(&chains, resolver, filter_docs)
         };
@@ -99,6 +92,8 @@ pub fn find_multi_token_v3(
     exact_match: bool,
     strict_separators: bool,
     filter_docs: Option<&HashSet<DocId>>,
+    posmap: Option<&crate::suffix_fst::posmap::PosMapReader<'_>>,
+    bytemap: Option<&crate::suffix_fst::bytemap::ByteBitmapReader<'_>>,
 ) -> Vec<MatchV3> {
     if query_tokens.is_empty() {
         return Vec::new();
@@ -107,6 +102,7 @@ pub fn find_multi_token_v3(
         return find_literal_v3(
             reader, query_tokens[0], resolver,
             anchor_start, strict_separators, filter_docs,
+            posmap, bytemap,
         );
     }
 
@@ -116,7 +112,8 @@ pub fn find_multi_token_v3(
         .enumerate()
         .map(|(i, token)| {
             let anchor = anchor_start && i == 0;
-            find_literal_v3(reader, token, resolver, anchor, strict_separators, filter_docs)
+            find_literal_v3(reader, token, resolver, anchor, strict_separators, filter_docs,
+                posmap, bytemap)
         })
         .collect();
 
@@ -416,7 +413,7 @@ mod tests {
         let resolver = MockResolver::new(&post);
 
         // "tex" is within a single token
-        let matches = find_literal_v3(&reader, "tex", &resolver, false, true, None);
+        let matches = find_literal_v3(&reader, "tex", &resolver, false, true, None, None, None);
         assert!(!matches.is_empty());
         assert_eq!(matches[0].doc_id, 0);
     }
@@ -428,7 +425,7 @@ mod tests {
         let resolver = MockResolver::new(&post);
 
         // "mutex_lock" spans two tokens
-        let matches = find_literal_v3(&reader, "mutex_lock", &resolver, false, true, None);
+        let matches = find_literal_v3(&reader, "mutex_lock", &resolver, false, true, None, None, None);
         assert!(!matches.is_empty());
         assert_eq!(matches[0].doc_id, 0);
         assert!(matches[0].span >= 2);
@@ -441,7 +438,7 @@ mod tests {
         let resolver = MockResolver::new(&post);
 
         // "mutexlock" (no sep) with strict_sep=false
-        let matches = find_literal_v3(&reader, "mutexlock", &resolver, false, false, None);
+        let matches = find_literal_v3(&reader, "mutexlock", &resolver, false, false, None, None, None);
         assert!(!matches.is_empty(), "sep-skip should find match");
     }
 
@@ -452,12 +449,12 @@ mod tests {
         let resolver = MockResolver::new(&post);
 
         // "mutex" with anchor_start → should find at SI=0
-        let matches = find_literal_v3(&reader, "mutex_lo", &resolver, true, true, None);
+        let matches = find_literal_v3(&reader, "mutex_lo", &resolver, true, true, None, None, None);
         assert!(!matches.is_empty());
         assert!(matches.iter().all(|m| m.sti == 0));
 
         // "tex" with anchor_start → NOT at SI=0
-        let matches = find_literal_v3(&reader, "tex_lo", &resolver, true, true, None);
+        let matches = find_literal_v3(&reader, "tex_lo", &resolver, true, true, None, None, None);
         assert!(matches.is_empty());
     }
 
@@ -470,7 +467,7 @@ mod tests {
         let resolver = MockResolver::new(&post);
 
         let tokens = vec!["mutex_lo", "lock_in", "init"];
-        let matches = find_multi_token_v3(&reader, &tokens, &resolver, false, false, true, None);
+        let matches = find_multi_token_v3(&reader, &tokens, &resolver, false, false, true, None, None, None);
         assert!(!matches.is_empty(), "multi-token should match");
         assert_eq!(matches[0].span, 3);
     }
@@ -483,7 +480,7 @@ mod tests {
 
         // "hello" + "world" not in "mutex_lock"
         let tokens = vec!["hello", "world"];
-        let matches = find_multi_token_v3(&reader, &tokens, &resolver, false, false, true, None);
+        let matches = find_multi_token_v3(&reader, &tokens, &resolver, false, false, true, None, None, None);
         assert!(matches.is_empty());
     }
 

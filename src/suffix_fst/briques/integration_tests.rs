@@ -85,7 +85,7 @@ mod tests {
     fn query_contains(idx: &TestIndex, query: &str, strict_sep: bool) -> Vec<u32> {
         let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
-        let matches = orchestrator::contains_v3(&reader, query, &resolver, false, false, strict_sep, None);
+        let matches = orchestrator::contains_v3(&reader, query, &resolver, false, false, strict_sep, None, None, None);
         let mut docs: Vec<u32> = matches.iter().map(|m| m.doc_id).collect();
         docs.sort_unstable();
         docs.dedup();
@@ -96,7 +96,7 @@ mod tests {
     fn query_starts_with(idx: &TestIndex, query: &str) -> Vec<u32> {
         let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
-        let matches = orchestrator::contains_v3(&reader, query, &resolver, true, false, true, None);
+        let matches = orchestrator::contains_v3(&reader, query, &resolver, true, false, true, None, None, None);
         matches.iter().map(|m| m.doc_id).collect()
     }
 
@@ -104,7 +104,7 @@ mod tests {
     fn query_contains_hl(idx: &TestIndex, query: &str, strict_sep: bool) -> Vec<(u32, u32, u32)> {
         let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
-        let matches = orchestrator::contains_v3(&reader, query, &resolver, false, false, strict_sep, None);
+        let matches = orchestrator::contains_v3(&reader, query, &resolver, false, false, strict_sep, None, None, None);
         let mut hl: Vec<(u32, u32, u32)> = matches.iter()
             .map(|m| (m.doc_id, m.byte_from, m.byte_to))
             .collect();
@@ -117,7 +117,7 @@ mod tests {
     fn query_fuzzy(idx: &TestIndex, query: &str, distance: u8, strict_sep: bool) -> Vec<u32> {
         let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
-        let (bitset, _, _) = orchestrator::fuzzy_v3(&reader, query, distance, &resolver, strict_sep, 100);
+        let (bitset, _, _) = orchestrator::fuzzy_v3(&reader, query, distance, &resolver, strict_sep, 100, None, None);
         (0..100).filter(|&d| bitset.contains(d)).collect()
     }
 
@@ -380,7 +380,7 @@ mod tests {
         let idx = build(&["lock_lock_lock"]);
         let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
-        let matches = orchestrator::contains_v3(&reader, "lock", &resolver, false, false, true, None);
+        let matches = orchestrator::contains_v3(&reader, "lock", &resolver, false, false, true, None, None, None);
         assert!(matches.len() >= 3, "should find 3 occurrences, got {}", matches.len());
     }
 
@@ -440,7 +440,7 @@ mod tests {
         let idx = build(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
-        let matches = orchestrator::contains_v3(&reader, "lock", &resolver, false, false, true, None);
+        let matches = orchestrator::contains_v3(&reader, "lock", &resolver, false, false, true, None, None, None);
         eprintln!("h3 all matches:");
         for m in &matches {
             eprintln!("  doc={} pos={} span={} byte=[{}..{}] sti={} ord={}",
@@ -743,7 +743,7 @@ mod tests {
 
         // strict_sep=false (default for contains queries)
         let matches = orchestrator::contains_v3(
-            &reader, "function", &resolver, false, false, false, None,
+            &reader, "function", &resolver, false, false, false, None, None, None,
         );
 
         eprintln!("\n=== DIAG: 'function' strict_sep=false ===");
@@ -778,7 +778,7 @@ mod tests {
 
         // strict_sep=false: strips "_" from query → "uint64t"
         let matches_relaxed = orchestrator::contains_v3(
-            &reader, "uint64_t", &resolver, false, false, false, None,
+            &reader, "uint64_t", &resolver, false, false, false, None, None, None,
         );
         eprintln!("\n=== DIAG: 'uint64_t' strict_sep=false ===");
         for m in &matches_relaxed {
@@ -788,7 +788,7 @@ mod tests {
 
         // strict_sep=true: keeps "_" in query → "uint64_t"
         let matches_strict = orchestrator::contains_v3(
-            &reader, "uint64_t", &resolver, false, false, true, None,
+            &reader, "uint64_t", &resolver, false, false, true, None, None, None,
         );
         eprintln!("\n=== DIAG: 'uint64_t' strict_sep=true ===");
         for m in &matches_strict {
@@ -822,10 +822,10 @@ mod tests {
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
 
         let matches_relaxed = orchestrator::contains_v3(
-            &reader, "TableFunction", &resolver, false, false, false, None,
+            &reader, "TableFunction", &resolver, false, false, false, None, None, None,
         );
         let matches_strict = orchestrator::contains_v3(
-            &reader, "TableFunction", &resolver, false, false, true, None,
+            &reader, "TableFunction", &resolver, false, false, true, None, None, None,
         );
 
         eprintln!("\n=== DIAG: 'TableFunction' ===");
@@ -937,7 +937,7 @@ mod tests {
                 m.doc_id, m.position, m.span, m.byte_from, m.byte_to);
         }
 
-        let chain_matches_relaxed = resolve::resolve_chains_v3_relaxed(&chains, &resolver, None, None, None);
+        let chain_matches_relaxed = resolve::resolve_chains_v3(&chains, &resolver, None);
         eprintln!("  chain_matches (relaxed/byte-ordered): {} matches", chain_matches_relaxed.len());
         for m in &chain_matches_relaxed {
             eprintln!("    doc={} pos={} span={} byte=[{}..{}]",
@@ -982,7 +982,7 @@ mod tests {
 
         // Test with strict_sep=true (keeps "::" and "_" in query)
         let matches_strict = orchestrator::contains_v3(
-            &reader, "std::unique_ptr", &resolver, false, false, true, None,
+            &reader, "std::unique_ptr", &resolver, false, false, true, None, None, None,
         );
         eprintln!("\n  contains_v3 strict_sep=true:");
         for m in &matches_strict {
@@ -992,7 +992,7 @@ mod tests {
 
         // Test with strict_sep=false (strips "::" and "_" → "stduniqueptr")
         let matches_relaxed = orchestrator::contains_v3(
-            &reader, "std::unique_ptr", &resolver, false, false, false, None,
+            &reader, "std::unique_ptr", &resolver, false, false, false, None, None, None,
         );
         eprintln!("\n  contains_v3 strict_sep=false:");
         for m in &matches_relaxed {
@@ -1027,7 +1027,7 @@ mod tests {
         }
 
         // Resolve chains
-        let chain_matches = resolve::resolve_chains_v3_relaxed(&chains, &resolver, None, None, None);
+        let chain_matches = resolve::resolve_chains_v3(&chains, &resolver, None);
         eprintln!("\n  resolved chains (relaxed): {} matches", chain_matches.len());
         for m in &chain_matches {
             eprintln!("    doc={} pos={} span={} byte=[{}..{}]",
@@ -1101,10 +1101,10 @@ mod tests {
         }
 
         let matches_strict = orchestrator::contains_v3(
-            &reader, "include", &resolver, false, false, true, None,
+            &reader, "include", &resolver, false, false, true, None, None, None,
         );
         let matches_relaxed = orchestrator::contains_v3(
-            &reader, "include", &resolver, false, false, false, None,
+            &reader, "include", &resolver, false, false, false, None, None, None,
         );
 
         // Trace FST walk internals
@@ -1227,8 +1227,8 @@ mod tests {
 
         // Check via orchestrator
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
-        let strict_matches = orchestrator::contains_v3(&reader, "function", &resolver, false, false, true, None);
-        let relaxed_matches = orchestrator::contains_v3(&reader, "function", &resolver, false, false, false, None);
+        let strict_matches = orchestrator::contains_v3(&reader, "function", &resolver, false, false, true, None, None, None);
+        let relaxed_matches = orchestrator::contains_v3(&reader, "function", &resolver, false, false, false, None, None, None);
         eprintln!("\nstrict matches: {:?}", strict_matches.iter().map(|m| (m.doc_id, m.byte_from, m.byte_to, m.sti)).collect::<Vec<_>>());
         eprintln!("relaxed matches: {:?}", relaxed_matches.iter().map(|m| (m.doc_id, m.byte_from, m.byte_to, m.sti)).collect::<Vec<_>>());
 
@@ -1267,7 +1267,7 @@ mod tests {
         eprintln!("\nchains: {}", chains.len());
         for c in &chains { eprintln!("  ords={:?} sti={}", c.ordinals, c.first_sti); }
 
-        let matches = orchestrator::contains_v3(&reader, "struct", &resolver, false, false, true, None);
+        let matches = orchestrator::contains_v3(&reader, "struct", &resolver, false, false, true, None, None, None);
         eprintln!("\nmatches:");
         for m in &matches { eprintln!("  doc={} pos={} span={} byte=[{}..{}]", m.doc_id, m.position, m.span, m.byte_from, m.byte_to); }
 

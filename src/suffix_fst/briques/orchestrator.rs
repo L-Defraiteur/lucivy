@@ -45,6 +45,8 @@ pub fn contains_v3(
     exact_match: bool,
     strict_separators: bool,
     filter_docs: Option<&HashSet<DocId>>,
+    posmap: Option<&crate::suffix_fst::posmap::PosMapReader<'_>>,
+    bytemap: Option<&crate::suffix_fst::bytemap::ByteBitmapReader<'_>>,
 ) -> Vec<MatchV3> {
     // Validate input
     if query.is_empty() || query.len() > MAX_QUERY_LEN {
@@ -97,6 +99,7 @@ pub fn contains_v3(
 
     let mut matches = composite::find_literal_v3(
         reader, query_ref, resolver, anchor_start, strict_separators, filter_docs,
+        posmap, bytemap,
     );
 
     if do_debug {
@@ -161,6 +164,8 @@ pub fn fuzzy_v3(
     resolver: &dyn PostingResolver,
     strict_separators: bool,
     max_doc: DocId,
+    posmap: Option<&crate::suffix_fst::posmap::PosMapReader<'_>>,
+    bytemap: Option<&crate::suffix_fst::bytemap::ByteBitmapReader<'_>>,
 ) -> (BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>) {
     // Validate input
     if query.is_empty() || query.len() > MAX_QUERY_LEN || distance > 3 {
@@ -181,7 +186,8 @@ pub fn fuzzy_v3(
 
     // d=0 → route to exact contains (no trigram overhead)
     if distance == 0 {
-        let matches = contains_v3(reader, query_ref, resolver, false, false, strict_separators, None);
+        let matches = contains_v3(reader, query_ref, resolver, false, false, strict_separators, None,
+            posmap, bytemap);
         let mut bitset = BitSet::with_max_value(max_doc);
         let mut highlights = Vec::new();
         let mut coverage = Vec::new();
@@ -276,7 +282,7 @@ mod tests {
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
-        let matches = contains_v3(&reader, "mutex", &resolver, false, false, true, None);
+        let matches = contains_v3(&reader, "mutex", &resolver, false, false, true, None, None, None);
         assert!(!matches.is_empty());
         assert_eq!(matches[0].doc_id, 0);
     }
@@ -287,7 +293,7 @@ mod tests {
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
-        let matches = contains_v3(&reader, "mutex_lock", &resolver, false, false, true, None);
+        let matches = contains_v3(&reader, "mutex_lock", &resolver, false, false, true, None, None, None);
         assert!(!matches.is_empty());
     }
 
@@ -298,7 +304,7 @@ mod tests {
         let resolver = MockResolver::new(&post);
 
         // "mutexlock" (no sep) → should match "mutex_lock" with strict_sep=false
-        let matches = contains_v3(&reader, "mutexlock", &resolver, false, false, false, None);
+        let matches = contains_v3(&reader, "mutexlock", &resolver, false, false, false, None, None, None);
         assert!(!matches.is_empty(), "sep-skip should work");
     }
 
@@ -309,7 +315,7 @@ mod tests {
         let resolver = MockResolver::new(&post);
 
         // "mutex lock" (space) strict=true → should NOT match "mutex_lock" (underscore)
-        let matches = contains_v3(&reader, "mutex lock", &resolver, false, false, true, None);
+        let matches = contains_v3(&reader, "mutex lock", &resolver, false, false, true, None, None, None);
         assert!(matches.is_empty(), "strict should reject different separator");
     }
 
@@ -320,11 +326,11 @@ mod tests {
         let resolver = MockResolver::new(&post);
 
         // "mutex" with anchor → found (starts at SI=0)
-        let matches = contains_v3(&reader, "mutex_lo", &resolver, true, false, true, None);
+        let matches = contains_v3(&reader, "mutex_lo", &resolver, true, false, true, None, None, None);
         assert!(!matches.is_empty());
 
         // "tex" with anchor → not found (SI>0)
-        let matches = contains_v3(&reader, "tex_lo", &resolver, true, false, true, None);
+        let matches = contains_v3(&reader, "tex_lo", &resolver, true, false, true, None, None, None);
         assert!(matches.is_empty());
     }
 
@@ -334,7 +340,7 @@ mod tests {
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
-        let matches = contains_v3(&reader, "", &resolver, false, false, true, None);
+        let matches = contains_v3(&reader, "", &resolver, false, false, true, None, None, None);
         assert!(matches.is_empty());
     }
 
@@ -347,7 +353,7 @@ mod tests {
         let resolver = MockResolver::new(&post);
 
         // "mutex_lck" d=1 → should find "mutex_lock"
-        let (bitset, highlights, _) = fuzzy_v3(&reader, "mutex_lck", 1, &resolver, true, 2);
+        let (bitset, highlights, _) = fuzzy_v3(&reader, "mutex_lck", 1, &resolver, true, 2, None, None);
         assert!(bitset.contains(0), "doc 0 should match fuzzy");
         assert!(!highlights.is_empty());
     }
@@ -359,7 +365,7 @@ mod tests {
         let resolver = MockResolver::new(&post);
 
         // d=0 → exact match via contains_v3
-        let (bitset, _, coverage) = fuzzy_v3(&reader, "mutex_lo", 0, &resolver, true, 1);
+        let (bitset, _, coverage) = fuzzy_v3(&reader, "mutex_lo", 0, &resolver, true, 1, None, None);
         assert!(bitset.contains(0));
         // Coverage should be 0.0 (perfect match, no misses)
         assert!(coverage.iter().any(|&(_, score)| score == 0.0));
@@ -372,7 +378,7 @@ mod tests {
         let resolver = MockResolver::new(&post);
 
         // "mutexlck" d=1 strict_sep=false
-        let (bitset, _, _) = fuzzy_v3(&reader, "mutexlck", 1, &resolver, false, 1);
+        let (bitset, _, _) = fuzzy_v3(&reader, "mutexlck", 1, &resolver, false, 1, None, None);
         assert!(bitset.contains(0), "fuzzy + sep-skip should find match");
     }
 
@@ -382,7 +388,7 @@ mod tests {
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
-        let (bitset, _, _) = fuzzy_v3(&reader, "zzzzzzzzz", 1, &resolver, true, 1);
+        let (bitset, _, _) = fuzzy_v3(&reader, "zzzzzzzzz", 1, &resolver, true, 1, None, None);
         assert!(!bitset.contains(0));
     }
 
@@ -393,7 +399,7 @@ mod tests {
         let resolver = MockResolver::new(&post);
 
         // d=4 → rejected (max 3)
-        let (bitset, _, _) = fuzzy_v3(&reader, "mutex", 4, &resolver, true, 1);
+        let (bitset, _, _) = fuzzy_v3(&reader, "mutex", 4, &resolver, true, 1, None, None);
         assert!(!bitset.contains(0));
     }
 }

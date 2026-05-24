@@ -96,28 +96,22 @@ pub fn resolve_chains_v3_relaxed(
     chains: &[TokenChainV3],
     resolver: &dyn PostingResolver,
     filter_docs: Option<&HashSet<DocId>>,
-    posmap: Option<&crate::suffix_fst::posmap::PosMapReader<'_>>,
-    bytemap: Option<&crate::suffix_fst::bytemap::ByteBitmapReader<'_>>,
+    posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
+    bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
 ) -> Vec<MatchV3> {
-    if posmap.is_some() && bytemap.is_some() {
-        resolve_chains_impl(chains, resolver, filter_docs,
-            AdjacencyMode::Relaxed { posmap: posmap.unwrap(), bytemap: bytemap.unwrap() })
-    } else {
-        // No PosMap/ByteMap available — fallback to byte-ordered check
-        resolve_chains_impl(chains, resolver, filter_docs, AdjacencyMode::ByteOrdered)
-    }
+    resolve_chains_impl(chains, resolver, filter_docs,
+        AdjacencyMode::Relaxed { posmap, bytemap })
 }
 
 enum AdjacencyMode<'a> {
     /// pos[i+1] == pos[i] + 1
     Strict,
-    /// pos[i+1] > pos[i], intermediate tokens verified as pure non-alphanum via ByteMap
+    /// pos[i+1] > pos[i], intermediate tokens verified as pure non-alphanum via ByteMap.
+    /// PosMap + ByteMap are REQUIRED — no fallback to unverified byte ordering.
     Relaxed {
         posmap: &'a crate::suffix_fst::posmap::PosMapReader<'a>,
         bytemap: &'a crate::suffix_fst::bytemap::ByteBitmapReader<'a>,
     },
-    /// pos[i+1] > pos[i] && byte_from[i+1] >= byte_to[i] (no verification, fallback)
-    ByteOrdered,
 }
 
 fn resolve_chains_impl(
@@ -184,9 +178,6 @@ fn resolve_chains_impl(
                     let valid = match &adjacency {
                         AdjacencyMode::Strict => {
                             e.position == prev_pos + 1
-                        }
-                        AdjacencyMode::ByteOrdered => {
-                            e.position > prev_pos && e.byte_from >= byte_to_prev
                         }
                         AdjacencyMode::Relaxed { posmap, bytemap } => {
                             if e.position <= prev_pos {
