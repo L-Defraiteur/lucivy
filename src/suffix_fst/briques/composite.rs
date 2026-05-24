@@ -43,10 +43,17 @@ pub fn find_literal_v3(
     let candidates = fst_walk::fst_candidates_v3(ctx.reader, query, anchor_start, strict_separators);
     let single = resolve::resolve_single_v3(&candidates, ctx.resolver, ctx.filter_docs);
     ctx.trace_msg(&format!("single_token candidates={} matches={}", candidates.len(), single.len()));
-    if ctx.trace_id.is_some() && candidates.len() < 50 {
-        for c in &candidates {
-            ctx.trace_msg(&format!("  cand sti={} ord={} own={} sep={} ovl={}", c.sti, c.raw_ordinal, c.own_len, c.sep_len, c.overlap_len));
+    if ctx.trace_id.is_some() {
+        if candidates.len() < 50 {
+            for c in &candidates {
+                let postings = ctx.resolver.resolve(c.raw_ordinal);
+                ctx.trace_msg(&format!("  cand sti={} ord={} own={} sep={} ovl={} postings={}",
+                    c.sti, c.raw_ordinal, c.own_len, c.sep_len, c.overlap_len, postings.len()));
+            }
         }
+        // Log unique doc_ids from single-token matches
+        let docs: std::collections::HashSet<u32> = single.iter().map(|m| m.doc_id).collect();
+        ctx.trace_msg(&format!("  single_docs: {} unique", docs.len()));
     }
     results.extend(single);
 
