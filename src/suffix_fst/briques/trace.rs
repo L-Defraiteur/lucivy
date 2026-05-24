@@ -84,6 +84,14 @@ pub fn trace_finish(trace_id: u64) -> Option<QueryTrace> {
     TRACES.lock().unwrap().remove(&trace_id)
 }
 
+/// Drain ALL active traces. Returns them sorted by trace_id.
+pub fn trace_drain_all() -> Vec<(u64, QueryTrace)> {
+    let mut store = TRACES.lock().unwrap();
+    let mut out: Vec<(u64, QueryTrace)> = store.drain().collect();
+    out.sort_by_key(|(tid, _)| *tid);
+    out
+}
+
 /// Push an event to a trace.
 pub fn trace_event(trace_id: u64, label: &str, data: &[(&str, &dyn fmt::Display)]) {
     if let Some(trace) = TRACES.lock().unwrap().get_mut(&trace_id) {

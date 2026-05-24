@@ -448,16 +448,22 @@ fn v3_ground_truth_contains() {
                 eprintln!("  {label:30} FP: {n} docs — grep logic issue?");
             }
 
-            // Re-run with trace enabled — dumps structured trace
+            // Re-run with trace enabled — dumps structured trace per segment
             eprintln!("\n  --- Trace for {query} {mode} ---");
             std::env::set_var("V3_DEBUG_QUERY", query);
             let _ = search_v3(&handle, &files, query, strict);
             std::env::remove_var("V3_DEBUG_QUERY");
-            // Dump all active traces (one per segment)
-            for tid in 1..100u64 {
-                if let Some(trace) = ld_lucivy::suffix_fst::briques::trace::trace_finish(tid) {
-                    if !trace.events.is_empty() {
-                        eprintln!("{}", trace.dump());
+            for (tid, trace) in ld_lucivy::suffix_fst::briques::trace::trace_drain_all() {
+                if !trace.events.is_empty() {
+                    eprintln!("  [trace {tid}] {} events", trace.events.len());
+                    // Only dump first 50 events per trace to keep output manageable
+                    for ev in trace.events.iter().take(50) {
+                        let indent = "    ".repeat(ev.depth + 1);
+                        let data: String = ev.data.iter().map(|(k,v)| format!(" {k}={v}")).collect();
+                        eprintln!("{indent}{}{data}", ev.label);
+                    }
+                    if trace.events.len() > 50 {
+                        eprintln!("    ... and {} more events", trace.events.len() - 50);
                     }
                 }
             }
