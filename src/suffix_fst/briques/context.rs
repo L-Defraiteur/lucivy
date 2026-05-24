@@ -29,6 +29,10 @@ pub struct BriquesContext<'a> {
     // ── Query params ─────────────────────────────────────────────
     pub filter_docs: Option<&'a HashSet<DocId>>,
 
+    /// When true, briques dump detailed traces to /tmp/v3_debug_trace.txt.
+    /// Set by V3_DIAG mode for failing queries only.
+    pub debug: bool,
+
     // ── Optional index files ─────────────────────────────────────
     // Loaded from segment reader. None = file not present in this segment.
     pub posmap: Option<PosMapReader<'a>>,

@@ -194,6 +194,7 @@ mod tests {
         let resolver = MockResolver::new(&idx.sfxpost);
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let matches = contains_v3(&ctx, "mutex", false, false, true);
@@ -208,6 +209,7 @@ mod tests {
         let resolver = MockResolver::new(&idx.sfxpost);
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let matches = contains_v3(&ctx, "mutex_lock", false, false, true);
@@ -224,6 +226,7 @@ mod tests {
         let wsp = crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(&idx.wsp);
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: pm, bytemap: bm, word_sfxpost: wsp, sibling_v3: None, termtexts: None,
         };
         let matches = contains_v3(&ctx, "mutexlock", false, false, false);
@@ -237,6 +240,7 @@ mod tests {
         let resolver = MockResolver::new(&idx.sfxpost);
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let matches = contains_v3(&ctx, "mutex lock", false, false, true);
@@ -250,6 +254,7 @@ mod tests {
         let resolver = MockResolver::new(&idx.sfxpost);
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         assert!(!contains_v3(&ctx, "mutex_lo", true, false, true).is_empty());
@@ -263,6 +268,7 @@ mod tests {
         let resolver = MockResolver::new(&idx.sfxpost);
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         assert!(contains_v3(&ctx, "", false, false, true).is_empty());
@@ -277,6 +283,7 @@ mod tests {
         let resolver = MockResolver::new(&idx.sfxpost);
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let (bitset, highlights, _) = fuzzy_v3(&ctx, "mutex_lck", 1, true, 2);
@@ -291,6 +298,7 @@ mod tests {
         let resolver = MockResolver::new(&idx.sfxpost);
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let (bitset, _, coverage) = fuzzy_v3(&ctx, "mutex_lo", 0, true, 1);
@@ -305,6 +313,7 @@ mod tests {
         let resolver = MockResolver::new(&idx.sfxpost);
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let (bitset, _, _) = fuzzy_v3(&ctx, "zzzzzzzzz", 1, true, 1);
@@ -318,6 +327,7 @@ mod tests {
         let resolver = MockResolver::new(&idx.sfxpost);
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let (bitset, _, _) = fuzzy_v3(&ctx, "mutex", 4, true, 1);

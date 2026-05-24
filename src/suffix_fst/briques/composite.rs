@@ -35,10 +35,15 @@ pub fn find_literal_v3(
     strict_separators: bool,
 ) -> Vec<MatchV3> {
     let mut results = Vec::new();
+    let dbg = ctx.debug;
 
     // ── Single-token matches (all partitions) ────────────────────────
     let candidates = fst_walk::fst_candidates_v3(ctx.reader, query, anchor_start, strict_separators);
     let single = resolve::resolve_single_v3(&candidates, ctx.resolver, ctx.filter_docs);
+    if dbg {
+        eprintln!("[DBG] find_literal_v3 query={query:?} strict={strict_separators} anchor={anchor_start}");
+        eprintln!("[DBG]   fst_candidates: {}, single_matches: {}", candidates.len(), single.len());
+    }
     results.extend(single);
 
     // ── Chunk chains (0x00 + 0x01) — strict adjacency ────────────────
@@ -67,7 +72,9 @@ pub fn find_literal_v3(
         } else {
             chains
         };
+        if dbg { eprintln!("[DBG]   chunk: {} falling_walk chains", chains.len()); }
         let cross = resolve::resolve_chains_v3(&chains, ctx.resolver, ctx.filter_docs);
+        if dbg { eprintln!("[DBG]   chunk: {} resolved matches", cross.len()); }
         results.extend(cross);
     }
 
@@ -78,22 +85,28 @@ pub fn find_literal_v3(
         let wsp = ctx.require_word_sfxpost();
 
         let mut chains = fst_walk::cross_word_chain_v3(ctx.reader, query);
+        if dbg { eprintln!("[DBG]   word: {} falling_walk chains", chains.len()); }
 
         // Sibling chain supplement for word pipeline
         if ctx.has_sibling_chains() {
             let mut all_splits = fst_walk::falling_walk_words(ctx.reader, query);
-            // Add splits from fst_candidates that the falling walk missed
             let query_len = query.to_lowercase().len();
             let extra = fst_walk::splits_from_fst_candidates(&candidates, query_len);
+            if dbg {
+                eprintln!("[DBG]   word: {} falling_walk_splits, {} fst_cand_splits",
+                    all_splits.len(), extra.len());
+            }
             for s in extra {
                 if s.parent.sep_len == 0 { continue; }
                 all_splits.push(s);
             }
             fst_walk::sort_and_dedup_splits(&mut all_splits);
+            if dbg { eprintln!("[DBG]   word: {} total splits after merge", all_splits.len()); }
             let sib_chains = fst_walk::sibling_chain_dfs(
                 &all_splits, query,
                 ctx.require_sibling_v3(), ctx.require_termtexts(),
             );
+            if dbg { eprintln!("[DBG]   word: {} sibling chains", sib_chains.len()); }
             chains.extend(sib_chains);
         }
 
@@ -452,6 +465,7 @@ mod tests {
         // "tex" is within a single token
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let matches = find_literal_v3(&ctx, "tex", false, true);
@@ -468,6 +482,7 @@ mod tests {
         // "mutex_lock" spans two tokens
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let matches = find_literal_v3(&ctx, "mutex_lock", false, true);
@@ -488,6 +503,7 @@ mod tests {
         // "mutexlock" (no sep) with strict_sep=false
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: pm, bytemap: bm, word_sfxpost: wsp, sibling_v3: None, termtexts: None,
         };
         let matches = find_literal_v3(&ctx, "mutexlock", false, false);
@@ -503,6 +519,7 @@ mod tests {
         // "mutex" with anchor_start → should find at SI=0
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let matches = find_literal_v3(&ctx, "mutex_lo", true, true);
@@ -525,6 +542,7 @@ mod tests {
         let tokens = vec!["mutex_lo", "lock_in", "init"];
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let matches = find_multi_token_v3(&ctx, &tokens, false, false, true);
@@ -542,6 +560,7 @@ mod tests {
         let tokens = vec!["hello", "world"];
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let matches = find_multi_token_v3(&ctx, &tokens, false, false, true);
@@ -663,6 +682,7 @@ mod tests {
         // --- Search ---
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: pm, bytemap: bm, word_sfxpost: wsp, sibling_v3: None, termtexts: None,
         };
         let matches = find_literal_v3(&ctx, "tablefunction", false, false);

@@ -97,10 +97,14 @@ impl ContainsQueryV3 {
         let sib_bytes = load("sibling_v3");
         let tt_bytes = load("termtexts");
 
+        let debug_query = std::env::var("V3_DEBUG_QUERY").ok();
+        let do_debug = debug_query.as_deref() == Some(&self.query_text);
+
         let ctx = BriquesContext {
             reader: &reader,
             resolver: &*pr,
             filter_docs: None,
+            debug: do_debug,
             posmap: posmap_bytes.as_ref().and_then(|b| crate::suffix_fst::posmap::PosMapReader::open(b)),
             bytemap: bytemap_bytes.as_ref().and_then(|b| crate::suffix_fst::bytemap::ByteBitmapReader::open(b)),
             word_sfxpost: wsp_bytes.as_ref().and_then(|b| crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(b)),

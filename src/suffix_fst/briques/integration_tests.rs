@@ -110,6 +110,7 @@ mod tests {
         let word_sfxpost = crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(&idx.word_sfxpost_bytes);
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap, bytemap, word_sfxpost, sibling_v3: None, termtexts: None,
         };
         let matches = orchestrator::contains_v3(&ctx, query, false, false, strict_sep);
@@ -125,6 +126,7 @@ mod tests {
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let matches = orchestrator::contains_v3(&ctx, query, true, false, true);
@@ -140,6 +142,7 @@ mod tests {
         let word_sfxpost = crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(&idx.word_sfxpost_bytes);
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap, bytemap, word_sfxpost, sibling_v3: None, termtexts: None,
         };
         let matches = orchestrator::contains_v3(&ctx, query, false, false, strict_sep);
@@ -160,6 +163,7 @@ mod tests {
         let word_sfxpost = crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(&idx.word_sfxpost_bytes);
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap, bytemap, word_sfxpost, sibling_v3: None, termtexts: None,
         };
         let (bitset, _, _) = orchestrator::fuzzy_v3(&ctx, query, distance, strict_sep, 100);
@@ -427,6 +431,7 @@ mod tests {
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let matches = orchestrator::contains_v3(&ctx, "lock", false, false, true);
@@ -491,6 +496,7 @@ mod tests {
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let matches = orchestrator::contains_v3(&ctx, "lock", false, false, true);
@@ -859,6 +865,7 @@ mod tests {
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
 
@@ -896,6 +903,7 @@ mod tests {
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
 
@@ -941,6 +949,7 @@ mod tests {
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
 
@@ -1085,6 +1094,7 @@ mod tests {
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
 
@@ -1209,6 +1219,7 @@ mod tests {
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
 
@@ -1348,6 +1359,7 @@ mod tests {
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let strict_matches = orchestrator::contains_v3(&ctx, "function", false, false, true);
@@ -1375,6 +1387,7 @@ mod tests {
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
 

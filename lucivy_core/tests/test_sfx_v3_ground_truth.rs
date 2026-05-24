@@ -355,6 +355,8 @@ fn v3_ground_truth_contains() {
 
     let mut pass = 0u32;
     let mut fail = 0u32;
+    let mut fail_entries: Vec<serde_json::Value> = Vec::new();
+    let diag_mode = std::env::var("V3_DIAG").is_ok();
 
     eprintln!("{:<35} {:>5} {:>8} {:>8} {:>8}", "Query", "Mode", "Grep", "V3", "Status");
     eprintln!("{}", "-".repeat(70));
@@ -377,11 +379,83 @@ fn v3_ground_truth_contains() {
 
         write_report(&mut report, q.text, mode_label, &files, &grep_set, &v3_result);
 
-        if v3_result.doc_indices == grep_set { pass += 1; } else { fail += 1; }
+        if v3_result.doc_indices == grep_set {
+            pass += 1;
+        } else {
+            fail += 1;
+
+            // Record failure for diag pass
+            let only_grep: Vec<usize> = grep_set.difference(&v3_result.doc_indices).copied().collect();
+            let only_v3: Vec<usize> = v3_result.doc_indices.difference(&grep_set).copied().collect();
+            fail_entries.push(serde_json::json!({
+                "query": q.text,
+                "strict_sep": q.strict_sep,
+                "fn_doc_indices": only_grep,
+                "fp_doc_indices": only_v3,
+                "fn_paths": only_grep.iter().map(|&i| &files[i].0).collect::<Vec<_>>(),
+                "fp_paths": only_v3.iter().map(|&i| &files[i].0).collect::<Vec<_>>(),
+            }));
+        }
     }
 
     eprintln!("\n{pass} pass, {fail} fail");
     eprintln!("Report: {REPORT_PATH}");
+
+    // Export failures to JSON for diag pass
+    if !fail_entries.is_empty() {
+        let json = serde_json::to_string_pretty(&fail_entries).unwrap();
+        std::fs::write("/tmp/v3_ground_truth_fails.json", &json).ok();
+        eprintln!("Failures exported: /tmp/v3_ground_truth_fails.json");
+    }
+
+    // V3_DIAG=1: re-test FN docs in isolation for each failing query
+    if diag_mode && !fail_entries.is_empty() {
+        eprintln!("\n=== DIAG MODE: re-testing FN docs in isolation ===\n");
+        for entry in &fail_entries {
+            let query = entry["query"].as_str().unwrap();
+            let strict = entry["strict_sep"].as_bool().unwrap();
+            let fn_indices: Vec<usize> = entry["fn_doc_indices"].as_array().unwrap()
+                .iter().filter_map(|v| v.as_u64().map(|i| i as usize)).collect();
+            let fp_indices: Vec<usize> = entry["fp_doc_indices"].as_array().unwrap()
+                .iter().filter_map(|v| v.as_u64().map(|i| i as usize)).collect();
+            let mode = if strict { "strict" } else { "relax" };
+
+            if !fn_indices.is_empty() {
+                // Re-index just the FN docs
+                let fn_files: Vec<(String, String)> = fn_indices.iter()
+                    .map(|&i| files[i].clone()).collect();
+                let mini = create_v3_index(&fn_files);
+                let mini_result = search_v3(&mini, &fn_files, query, strict);
+                let found = mini_result.doc_indices.len();
+                let total = fn_files.len();
+                let verdict = if found == total { "SCALE-DEPENDENT" } else { "PER-DOC BUG" };
+                let label = format!("{} {}", query, mode);
+                eprintln!("  {label:30} FN: {found}/{total} in isolation → {verdict}");
+
+                // If per-doc bug, show which docs still fail
+                if found < total {
+                    for (i, (path, _)) in fn_files.iter().enumerate() {
+                        if !mini_result.doc_indices.contains(&(i as usize)) {
+                            eprintln!("    still missing: {path}");
+                        }
+                    }
+                }
+            }
+
+            if !fp_indices.is_empty() {
+                let label = format!("{} {}", query, mode);
+                let n = fp_indices.len();
+                eprintln!("  {label:30} FP: {n} docs — grep logic issue?");
+            }
+
+            // Re-run the query with V3_DEBUG_QUERY env var to get traces
+            eprintln!("\n  --- Re-running {query} {mode} with debug ---");
+            std::env::set_var("V3_DEBUG_QUERY", query);
+            let _ = search_v3(&handle, &files, query, strict);
+            std::env::remove_var("V3_DEBUG_QUERY");
+        }
+    }
+
     assert_eq!(fail, 0, "ground truth mismatch — see {REPORT_PATH}");
 }
 
