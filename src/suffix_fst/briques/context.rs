@@ -29,9 +29,12 @@ pub struct BriquesContext<'a> {
     // ── Query params ─────────────────────────────────────────────
     pub filter_docs: Option<&'a HashSet<DocId>>,
 
-    /// When true, briques dump detailed traces to /tmp/v3_debug_trace.txt.
-    /// Set by V3_DIAG mode for failing queries only.
+    /// When true, briques dump detailed traces to stderr.
     pub debug: bool,
+
+    /// Trace ID for structured QueryTrace. None = no tracing (zero overhead).
+    /// Set via trace::trace_begin() in V3_DIAG mode.
+    pub trace_id: Option<u64>,
 
     // ── Optional index files ─────────────────────────────────────
     // Loaded from segment reader. None = file not present in this segment.
@@ -75,5 +78,32 @@ impl<'a> BriquesContext<'a> {
     /// True if sibling-based chain building is available.
     pub fn has_sibling_chains(&self) -> bool {
         self.sibling_v3.is_some() && self.termtexts.is_some()
+    }
+
+    // ── Trace helpers (no-op when trace_id is None) ──────────────
+
+    pub fn trace(&self, label: &str, data: &[(&str, &dyn std::fmt::Display)]) {
+        if let Some(tid) = self.trace_id {
+            super::trace::trace_event(tid, label, data);
+        }
+    }
+
+    /// Convenience: trace with a pre-formatted message.
+    pub fn trace_msg(&self, msg: &str) {
+        if let Some(tid) = self.trace_id {
+            super::trace::trace_event(tid, msg, &[]);
+        }
+    }
+
+    pub fn trace_enter(&self, label: &str) {
+        if let Some(tid) = self.trace_id {
+            super::trace::trace_enter(tid, label);
+        }
+    }
+
+    pub fn trace_exit(&self) {
+        if let Some(tid) = self.trace_id {
+            super::trace::trace_exit(tid);
+        }
     }
 }

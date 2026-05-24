@@ -111,6 +111,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap, bytemap, word_sfxpost, sibling_v3: None, termtexts: None,
         };
         let matches = orchestrator::contains_v3(&ctx, query, false, false, strict_sep);
@@ -127,6 +128,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let matches = orchestrator::contains_v3(&ctx, query, true, false, true);
@@ -143,6 +145,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap, bytemap, word_sfxpost, sibling_v3: None, termtexts: None,
         };
         let matches = orchestrator::contains_v3(&ctx, query, false, false, strict_sep);
@@ -164,6 +167,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap, bytemap, word_sfxpost, sibling_v3: None, termtexts: None,
         };
         let (bitset, _, _) = orchestrator::fuzzy_v3(&ctx, query, distance, strict_sep, 100);
@@ -432,6 +436,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let matches = orchestrator::contains_v3(&ctx, "lock", false, false, true);
@@ -497,6 +502,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let matches = orchestrator::contains_v3(&ctx, "lock", false, false, true);
@@ -866,6 +872,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
 
@@ -904,6 +911,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
 
@@ -950,6 +958,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
 
@@ -1095,6 +1104,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
 
@@ -1220,6 +1230,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
 
@@ -1360,6 +1371,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let strict_matches = orchestrator::contains_v3(&ctx, "function", false, false, true);
@@ -1388,6 +1400,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
 

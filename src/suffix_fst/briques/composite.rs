@@ -35,15 +35,14 @@ pub fn find_literal_v3(
     strict_separators: bool,
 ) -> Vec<MatchV3> {
     let mut results = Vec::new();
-    let dbg = ctx.debug;
+
+    ctx.trace_enter("find_literal_v3");
+    ctx.trace_msg(&format!("params query={} strict={} anchor={}", query, strict_separators, anchor_start));
 
     // ── Single-token matches (all partitions) ────────────────────────
     let candidates = fst_walk::fst_candidates_v3(ctx.reader, query, anchor_start, strict_separators);
     let single = resolve::resolve_single_v3(&candidates, ctx.resolver, ctx.filter_docs);
-    if dbg {
-        eprintln!("[DBG] find_literal_v3 query={query:?} strict={strict_separators} anchor={anchor_start}");
-        eprintln!("[DBG]   fst_candidates: {}, single_matches: {}", candidates.len(), single.len());
-    }
+    ctx.trace_msg(&format!("single_token candidates={} matches={}", candidates.len(), single.len()));
     results.extend(single);
 
     // ── Chunk chains (0x00 + 0x01) — strict adjacency ────────────────
@@ -72,9 +71,9 @@ pub fn find_literal_v3(
         } else {
             chains
         };
-        if dbg { eprintln!("[DBG]   chunk: {} falling_walk chains", chains.len()); }
+        ctx.trace_msg(&format!("chunk_chains falling_walk={}", chains.len()));
         let cross = resolve::resolve_chains_v3(&chains, ctx.resolver, ctx.filter_docs);
-        if dbg { eprintln!("[DBG]   chunk: {} resolved matches", cross.len()); }
+        ctx.trace_msg(&format!("chunk_resolved matches={}", cross.len()));
         results.extend(cross);
     }
 
@@ -85,28 +84,25 @@ pub fn find_literal_v3(
         let wsp = ctx.require_word_sfxpost();
 
         let mut chains = fst_walk::cross_word_chain_v3(ctx.reader, query);
-        if dbg { eprintln!("[DBG]   word: {} falling_walk chains", chains.len()); }
+        ctx.trace_msg(&format!("word_falling_walk chains={}", chains.len()));
 
         // Sibling chain supplement for word pipeline
         if ctx.has_sibling_chains() {
             let mut all_splits = fst_walk::falling_walk_words(ctx.reader, query);
             let query_len = query.to_lowercase().len();
             let extra = fst_walk::splits_from_fst_candidates(&candidates, query_len);
-            if dbg {
-                eprintln!("[DBG]   word: {} falling_walk_splits, {} fst_cand_splits",
-                    all_splits.len(), extra.len());
-            }
+            ctx.trace_msg(&format!("word_splits falling_walk={} fst_cand={}", all_splits.len(), extra.len()));
             for s in extra {
                 if s.parent.sep_len == 0 { continue; }
                 all_splits.push(s);
             }
             fst_walk::sort_and_dedup_splits(&mut all_splits);
-            if dbg { eprintln!("[DBG]   word: {} total splits after merge", all_splits.len()); }
+            ctx.trace_msg(&format!("word_splits_merged total={}", all_splits.len()));
             let sib_chains = fst_walk::sibling_chain_dfs(
                 &all_splits, query,
                 ctx.require_sibling_v3(), ctx.require_termtexts(),
             );
-            if dbg { eprintln!("[DBG]   word: {} sibling chains", sib_chains.len()); }
+            ctx.trace_msg(&format!("word_sibling_chains count={}", sib_chains.len()));
             chains.extend(sib_chains);
         }
 
@@ -115,11 +111,16 @@ pub fn find_literal_v3(
         } else {
             chains
         };
+        ctx.trace_msg(&format!("word_chains_total count={}", chains.len()));
         let cross = resolve::resolve_word_chains_v3(&chains, wsp, ctx.resolver, ctx.filter_docs, pm, bm);
+        ctx.trace_msg(&format!("word_resolved matches={}", cross.len()));
         results.extend(cross);
     }
 
     results.sort_by_key(|m| (m.doc_id, m.position));
+    let unique_docs: std::collections::HashSet<u32> = results.iter().map(|m| m.doc_id).collect();
+    ctx.trace_msg(&format!("total matches={} unique_docs={}", results.len(), unique_docs.len()));
+    ctx.trace_exit();
     results
 }
 
@@ -466,6 +467,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let matches = find_literal_v3(&ctx, "tex", false, true);
@@ -483,6 +485,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let matches = find_literal_v3(&ctx, "mutex_lock", false, true);
@@ -504,6 +507,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap: pm, bytemap: bm, word_sfxpost: wsp, sibling_v3: None, termtexts: None,
         };
         let matches = find_literal_v3(&ctx, "mutexlock", false, false);
@@ -520,6 +524,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let matches = find_literal_v3(&ctx, "mutex_lo", true, true);
@@ -543,6 +548,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let matches = find_multi_token_v3(&ctx, &tokens, false, false, true);
@@ -561,6 +567,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
         let matches = find_multi_token_v3(&ctx, &tokens, false, false, true);
@@ -683,6 +690,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap: pm, bytemap: bm, word_sfxpost: wsp, sibling_v3: None, termtexts: None,
         };
         let matches = find_literal_v3(&ctx, "tablefunction", false, false);

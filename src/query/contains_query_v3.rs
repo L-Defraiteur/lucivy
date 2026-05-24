@@ -105,6 +105,7 @@ impl ContainsQueryV3 {
             resolver: &*pr,
             filter_docs: None,
             debug: do_debug,
+            trace_id: None,
             posmap: posmap_bytes.as_ref().and_then(|b| crate::suffix_fst::posmap::PosMapReader::open(b)),
             bytemap: bytemap_bytes.as_ref().and_then(|b| crate::suffix_fst::bytemap::ByteBitmapReader::open(b)),
             word_sfxpost: wsp_bytes.as_ref().and_then(|b| crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(b)),

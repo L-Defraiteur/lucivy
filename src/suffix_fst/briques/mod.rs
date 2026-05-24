@@ -5,6 +5,7 @@
 //! - `composite`: Tier 3 — High-level (find_literal, trigrams, DFA continuation)
 
 pub mod context;
+pub mod trace;
 pub mod fst_walk;
 pub mod resolve;
 pub mod composite;

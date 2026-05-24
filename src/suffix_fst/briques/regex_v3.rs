@@ -236,6 +236,7 @@ where
         let ctx = super::context::BriquesContext {
             reader, resolver, filter_docs: doc_filter.as_ref(),
             debug: false,
+            trace_id: None,
             posmap: None, bytemap: None, // regex pipeline uses strict mode
             word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
@@ -473,6 +474,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
 
@@ -493,6 +495,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
 
@@ -515,6 +518,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
+            trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
 
