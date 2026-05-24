@@ -77,6 +77,9 @@ pub struct SfxCollectorV3 {
     chunk_to_word: Vec<Vec<(u32, u8, u8)>>,
     // Observed next-word pairs: (prev_word_id, next_word_id).
     next_word_pairs: Vec<(u32, u32)>,
+    // Sibling pairs: (intern_ord_a, intern_ord_b) for consecutive chunks and words.
+    // Collected during add_value, remapped to final ordinals in into_data.
+    sibling_pairs: Vec<(u32, u32)>,
     // Per-doc word position map: (doc_id, position) → word_id_within_doc.
     word_pos_map: crate::suffix_fst::word_pos_map::WordPosMapWriter,
 
@@ -132,6 +135,7 @@ impl SfxCollectorV3 {
             word_intern: HashMap::new(),
             chunk_to_word: Vec::new(),
             next_word_pairs: Vec::new(),
+            sibling_pairs: Vec::new(),
             word_pos_map: crate::suffix_fst::word_pos_map::WordPosMapWriter::new(),
             doc_values: Vec::new(),
             doc_active: false,
@@ -267,6 +271,11 @@ impl SfxCollectorV3 {
             offset += chunk_len;
         }
 
+        // Collect chunk sibling pairs: consecutive chunks in the same value
+        for w in chunk_intern_ids.windows(2) {
+            self.sibling_pairs.push((w[0], w[1]));
+        }
+
         // Update word offset for next value in same doc
         let max_local_word_id = chunks.iter().map(|(_, m)| m.word_id).max().unwrap_or(0);
         self.current_doc_word_offset += max_local_word_id as u32 + 1;
@@ -327,6 +336,7 @@ impl SfxCollectorV3 {
             }
 
             let word_ids: Vec<usize> = words_in_value.keys().copied().collect();
+            let mut ws_intern_sequence: Vec<u32> = Vec::new();
             for (wi, &word_id) in word_ids.iter().enumerate() {
                 let chunk_idxs = &words_in_value[&word_id];
 
@@ -398,6 +408,7 @@ impl SfxCollectorV3 {
                     is_word_start: chunks[first_ci].1.is_word_start,
                     num_chunks: chunk_idxs.len() as u32,
                 });
+                ws_intern_sequence.push(ws_intern);
 
                 // Tail entry for very long words only.
                 // The main word-stripped entry indexes suffixes SI=0 to
@@ -446,6 +457,11 @@ impl SfxCollectorV3 {
                         num_chunks: 1, // tail entry = single chunk
                     });
                 }
+            }
+
+            // Collect word sibling pairs: consecutive words in the same value
+            for w in ws_intern_sequence.windows(2) {
+                self.sibling_pairs.push((w[0], w[1]));
             }
         }
 
@@ -710,6 +726,15 @@ impl SfxCollectorV3 {
         let next_word_map_data = next_word_writer.serialize();
         let word_pos_map_data = self.word_pos_map.serialize();
 
+        // Build sibling table v3: remap intern ordinals to final ordinals
+        let mut sibling_writer = crate::suffix_fst::sibling_table::SiblingTableWriter::new(final_ord);
+        for &(a, b) in &self.sibling_pairs {
+            let fa = intern_to_final[a as usize];
+            let fb = intern_to_final[b as usize];
+            sibling_writer.add(fa, fb, 0);
+        }
+        let sibling_v3_data = sibling_writer.serialize();
+
         SfxCollectorDataV3 {
             sorted_indices,
             intern_to_final,
@@ -727,6 +752,7 @@ impl SfxCollectorV3 {
             chunk_word_map: chunk_word_map_data,
             next_word_map: next_word_map_data,
             word_pos_map: word_pos_map_data,
+            sibling_v3: sibling_v3_data,
         }
     }
 
@@ -814,6 +840,8 @@ pub struct SfxCollectorDataV3 {
     /// WordPosMap: (doc_id, position) → word_id_within_doc.
     /// Per-doc word assignment for exact chain verification.
     pub word_pos_map: Vec<u8>,
+    /// Sibling table v3: ordinal → [next_ordinals] for both chunks and words.
+    pub sibling_v3: Vec<u8>,
 }
 
 /// Build word-level stripped entries from token data.

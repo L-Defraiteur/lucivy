@@ -104,7 +104,20 @@ pub fn all_indexes() -> Vec<Box<dyn SfxIndexFile>> {
         Box::new(super::word_pos_map::WordPosMapIndex::new()),
         // Word-level sfxpost (prebuilt by DAG, loaded by segment reader)
         Box::new(super::word_sfxpost::WordSfxPostIndex),
+        // Sibling table v3 (prebuilt by DAG, chunk + word siblings)
+        Box::new(SiblingV3Index),
     ]
+}
+
+/// Index file entry for the v3 sibling table.
+struct SiblingV3Index;
+impl SfxIndexFile for SiblingV3Index {
+    fn id(&self) -> &'static str { "sibling_v3" }
+    fn extension(&self) -> &'static str { "sibling_v3" }
+    fn merge_strategy(&self) -> MergeStrategy { MergeStrategy::ExternalDagNode }
+    fn on_token(&mut self, _ord: u32, _text: &str) {}
+    fn on_posting(&mut self, _ord: u32, _doc: u32, _ti: u32, _bf: u32, _bt: u32) {}
+    fn serialize(&self) -> Vec<u8> { Vec::new() }
 }
 
 // ─────────────────────────────────────────────────────────────────────
