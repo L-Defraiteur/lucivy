@@ -384,6 +384,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::suffix_fst::briques::context::BriquesContext;
     use crate::suffix_fst::builder_v3::SuffixFstBuilderV3;
     use crate::suffix_fst::collector_v3::SfxCollectorV3;
     use crate::suffix_fst::file_v3::SfxFileWriterV3;
@@ -468,13 +469,17 @@ mod tests {
         let (sfx, post) = build_index(&["mutex_lock_init", "hello_world"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
+        let ctx = BriquesContext {
+            reader: &reader, resolver: &resolver, filter_docs: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+        };
 
         // Verify literals are findable
-        let matches = composite::find_literal_v3(&reader, "mutex", &resolver, false, true, None, None, None, None);
+        let matches = composite::find_literal_v3(&ctx, "mutex", false, true);
         assert!(!matches.is_empty(), "literal 'mutex' should be found");
         assert_eq!(matches[0].doc_id, 0);
 
-        let matches = composite::find_literal_v3(&reader, "lock", &resolver, false, true, None, None, None, None);
+        let matches = composite::find_literal_v3(&ctx, "lock", false, true);
         assert!(!matches.is_empty(), "literal 'lock' should be found");
     }
 
@@ -483,9 +488,13 @@ mod tests {
         let (sfx, post) = build_index(&["mutex_lock_init"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
+        let ctx = BriquesContext {
+            reader: &reader, resolver: &resolver, filter_docs: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+        };
 
-        let m1 = composite::find_literal_v3(&reader, "mutex", &resolver, false, true, None, None, None, None);
-        let m2 = composite::find_literal_v3(&reader, "init", &resolver, false, true, None, None, None, None);
+        let m1 = composite::find_literal_v3(&ctx, "mutex", false, true);
+        let m2 = composite::find_literal_v3(&ctx, "init", false, true);
 
         let g1 = group_by_doc_v3(&m1);
         let g2 = group_by_doc_v3(&m2);
@@ -500,10 +509,14 @@ mod tests {
         let (sfx, post) = build_index(&["mutex_lock", "hello_world"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
+        let ctx = BriquesContext {
+            reader: &reader, resolver: &resolver, filter_docs: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+        };
 
         // "mutex" in doc 0, "world" in doc 1 → no intersection
-        let m1 = composite::find_literal_v3(&reader, "mutex", &resolver, false, true, None, None, None, None);
-        let m2 = composite::find_literal_v3(&reader, "world", &resolver, false, true, None, None, None, None);
+        let m1 = composite::find_literal_v3(&ctx, "mutex", false, true);
+        let m2 = composite::find_literal_v3(&ctx, "world", false, true);
 
         let g1 = group_by_doc_v3(&m1);
         let g2 = group_by_doc_v3(&m2);

@@ -185,27 +185,6 @@ mod tests {
         TestIndex { sfx: writer.to_bytes(), sfxpost, wsp: data.word_sfxpost, pm, bm }
     }
 
-    /// Build a BriquesContext from a TestIndex + resolver.
-    fn make_ctx<'a>(
-        idx: &'a TestIndex,
-        reader: &'a SfxFileReaderV3,
-        resolver: &'a dyn PostingResolver,
-        pm: &'a Option<crate::suffix_fst::posmap::PosMapReader<'a>>,
-        bm: &'a Option<crate::suffix_fst::bytemap::ByteBitmapReader<'a>>,
-        wsp: &'a Option<crate::suffix_fst::word_sfxpost::WordSfxPostReader<'a>>,
-    ) -> BriquesContext<'a> {
-        BriquesContext {
-            reader,
-            resolver,
-            filter_docs: None,
-            posmap: pm.clone(),
-            bytemap: bm.clone(),
-            word_sfxpost: wsp.clone(),
-            sibling_v3: None,
-            termtexts: None,
-        }
-    }
-
     // ── contains_v3 ──
 
     #[test]

@@ -413,7 +413,11 @@ mod tests {
         let resolver = MockResolver::new(&post);
 
         // "tex" is within a single token
-        let matches = find_literal_v3(&reader, "tex", &resolver, false, true, None, None, None, None);
+        let ctx = BriquesContext {
+            reader: &reader, resolver: &resolver, filter_docs: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+        };
+        let matches = find_literal_v3(&ctx, "tex", false, true);
         assert!(!matches.is_empty());
         assert_eq!(matches[0].doc_id, 0);
     }
@@ -425,7 +429,11 @@ mod tests {
         let resolver = MockResolver::new(&post);
 
         // "mutex_lock" spans two tokens
-        let matches = find_literal_v3(&reader, "mutex_lock", &resolver, false, true, None, None, None, None);
+        let ctx = BriquesContext {
+            reader: &reader, resolver: &resolver, filter_docs: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+        };
+        let matches = find_literal_v3(&ctx, "mutex_lock", false, true);
         assert!(!matches.is_empty());
         assert_eq!(matches[0].doc_id, 0);
         assert!(matches[0].span >= 2);
@@ -441,8 +449,11 @@ mod tests {
         let wsp = crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(&word_sfxpost);
 
         // "mutexlock" (no sep) with strict_sep=false
-        let matches = find_literal_v3(&reader, "mutexlock", &resolver, false, false, None,
-            pm.as_ref(), bm.as_ref(), wsp.as_ref());
+        let ctx = BriquesContext {
+            reader: &reader, resolver: &resolver, filter_docs: None,
+            posmap: pm, bytemap: bm, word_sfxpost: wsp, sibling_v3: None, termtexts: None,
+        };
+        let matches = find_literal_v3(&ctx, "mutexlock", false, false);
         assert!(!matches.is_empty(), "sep-skip should find match");
     }
 
@@ -453,12 +464,16 @@ mod tests {
         let resolver = MockResolver::new(&post);
 
         // "mutex" with anchor_start → should find at SI=0
-        let matches = find_literal_v3(&reader, "mutex_lo", &resolver, true, true, None, None, None, None);
+        let ctx = BriquesContext {
+            reader: &reader, resolver: &resolver, filter_docs: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+        };
+        let matches = find_literal_v3(&ctx, "mutex_lo", true, true);
         assert!(!matches.is_empty());
         assert!(matches.iter().all(|m| m.sti == 0));
 
         // "tex" with anchor_start → NOT at SI=0
-        let matches = find_literal_v3(&reader, "tex_lo", &resolver, true, true, None, None, None, None);
+        let matches = find_literal_v3(&ctx, "tex_lo", true, true);
         assert!(matches.is_empty());
     }
 
@@ -471,7 +486,11 @@ mod tests {
         let resolver = MockResolver::new(&post);
 
         let tokens = vec!["mutex_lo", "lock_in", "init"];
-        let matches = find_multi_token_v3(&reader, &tokens, &resolver, false, false, true, None, None, None, None);
+        let ctx = BriquesContext {
+            reader: &reader, resolver: &resolver, filter_docs: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+        };
+        let matches = find_multi_token_v3(&ctx, &tokens, false, false, true);
         assert!(!matches.is_empty(), "multi-token should match");
         assert_eq!(matches[0].span, 3);
     }
@@ -484,7 +503,11 @@ mod tests {
 
         // "hello" + "world" not in "mutex_lock"
         let tokens = vec!["hello", "world"];
-        let matches = find_multi_token_v3(&reader, &tokens, &resolver, false, false, true, None, None, None, None);
+        let ctx = BriquesContext {
+            reader: &reader, resolver: &resolver, filter_docs: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+        };
+        let matches = find_multi_token_v3(&ctx, &tokens, false, false, true);
         assert!(matches.is_empty());
     }
 
@@ -601,10 +624,11 @@ mod tests {
         let wsp = crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(&word_sfxpost);
 
         // --- Search ---
-        let matches = find_literal_v3(
-            &reader, "tablefunction", &resolver, false, false, None,
-            pm.as_ref(), bm.as_ref(), wsp.as_ref(),
-        );
+        let ctx = BriquesContext {
+            reader: &reader, resolver: &resolver, filter_docs: None,
+            posmap: pm, bytemap: bm, word_sfxpost: wsp, sibling_v3: None, termtexts: None,
+        };
+        let matches = find_literal_v3(&ctx, "tablefunction", false, false);
 
         let mut matched_docs: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for m in &matches {
