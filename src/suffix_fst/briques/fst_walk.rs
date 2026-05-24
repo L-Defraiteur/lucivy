@@ -317,14 +317,18 @@ fn walk_partition<D: AsRef<[u8]>, F>(
 const MAX_CHAIN_DEPTH: usize = 8;
 
 /// Build a chain from a list of initial splits using a given falling_walk function.
-/// All ordinals from all sub_splits are collected at each position (Vec<Vec<u64>>).
-/// No best_consumed filter — all splits within a partition have coherent semantics.
+///
+/// `filter_best_consumed`: if true, only keep sub_split ordinals with the same
+/// consumed as the best. Required for chunk pipeline (0x00/0x01) where marker
+/// entries create multi-parent nodes at different positions → different consumed.
+/// Not needed for word pipeline (0x02) where word-stripped entries have unique prefixes.
 fn build_chains_from_splits(
     reader: &SfxFileReaderV3,
     splits: &[SplitCandidateV3],
     query: &str,
     walk_fn: fn(&SfxFileReaderV3, &str) -> Vec<SplitCandidateV3>,
     strict_sep_for_candidates: bool,
+    filter_best_consumed: bool,
 ) -> Vec<TokenChainV3> {
     let mut chains = Vec::new();
     let query_lower = query.to_lowercase();
@@ -360,15 +364,22 @@ fn build_chains_from_splits(
             if sub_splits.is_empty() {
                 break;
             }
-            // Filter by best consumed: within a single partition, different
-            // consumed values need different chain depths. The chain uses one
-            // remainder (from the best), so only ordinals from splits with the
-            // same consumed are valid at this position.
-            let best_consumed = sub_splits[0].query_consumed;
-            let mut unique_ords: Vec<u64> = sub_splits.iter()
-                .filter(|s| s.query_consumed == best_consumed)
-                .map(|s| s.parent.raw_ordinal)
-                .collect();
+            let mut unique_ords: Vec<u64> = if filter_best_consumed {
+                // Chunk pipeline: marker entries create multi-parent nodes at
+                // different FST positions → different consumed values. Only keep
+                // ordinals from the best consumed to avoid mixing chain positions.
+                let best_consumed = sub_splits[0].query_consumed;
+                sub_splits.iter()
+                    .filter(|s| s.query_consumed == best_consumed)
+                    .map(|s| s.parent.raw_ordinal)
+                    .collect()
+            } else {
+                // Word pipeline: word-stripped entries have unique prefixes,
+                // different consumed values are rare. Collect all.
+                sub_splits.iter()
+                    .map(|s| s.parent.raw_ordinal)
+                    .collect()
+            };
             unique_ords.sort_unstable();
             unique_ords.dedup();
             positions.push(unique_ords);
@@ -398,7 +409,7 @@ pub fn cross_chunk_chain_v3(
     query: &str,
 ) -> Vec<TokenChainV3> {
     let splits = falling_walk_chunks(reader, query);
-    build_chains_from_splits(reader, &splits, query, falling_walk_chunks, true)
+    build_chains_from_splits(reader, &splits, query, falling_walk_chunks, true, true)
 }
 
 /// Cross-word chains (partition 0x02).
@@ -408,7 +419,7 @@ pub fn cross_word_chain_v3(
     query: &str,
 ) -> Vec<TokenChainV3> {
     let splits = falling_walk_words(reader, query);
-    build_chains_from_splits(reader, &splits, query, falling_walk_words, false)
+    build_chains_from_splits(reader, &splits, query, falling_walk_words, false, false)
 }
 
 /// Legacy combined API — builds chains from both partitions mixed.
