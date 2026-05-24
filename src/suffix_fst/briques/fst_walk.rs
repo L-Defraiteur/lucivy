@@ -278,6 +278,13 @@ fn sort_and_dedup_splits(candidates: &mut Vec<SplitCandidateV3>) {
 }
 
 /// Walk a single partition byte-by-byte, calling `check_split` at each final node.
+///
+/// When the query runs out on a non-final node, performs a look-ahead: continues
+/// walking all FST transitions until reaching final nodes. This handles the case
+/// where a word's overlap extends the FST key beyond the query length — e.g.,
+/// query "uint64t" (7 bytes) against word key "uint64to" (8 bytes, overlap "to").
+/// The split was already passed (query consumed > content_len), we just need to
+/// reach the final node to decode the parent entries.
 fn walk_partition<D: AsRef<[u8]>, F>(
     fst: &raw::Fst<D>,
     reader: &SfxFileReaderV3,
@@ -294,11 +301,16 @@ fn walk_partition<D: AsRef<[u8]>, F>(
     let mut output = raw::Output::zero().cat(trans.out);
     let mut node = fst.node(trans.addr);
 
+    let mut fully_consumed = false;
     for (i, &byte) in query_bytes.iter().enumerate() {
         let Some(idx) = node.find_input(byte) else { break };
         let trans = node.transition(idx);
         output = output.cat(trans.out);
         node = fst.node(trans.addr);
+
+        if i + 1 == query_bytes.len() {
+            fully_consumed = true;
+        }
 
         if node.is_final() {
             let val = output.cat(node.final_output()).value();
@@ -311,6 +323,49 @@ fn walk_partition<D: AsRef<[u8]>, F>(
                 }
             }
         }
+    }
+
+    // Look-ahead: query fully consumed on a non-final node. The FST key
+    // continues into the overlap. Walk all remaining transitions to reach
+    // final nodes and decode their parent entries.
+    // The check_split receives prefix_len = query_len (what the query actually
+    // consumed), not the FST depth — the extra bytes are overlap, not query.
+    if fully_consumed && !node.is_final() {
+        overlap_lookahead(fst, reader, &node, output, query_bytes.len(),
+            &check_split, candidates);
+    }
+}
+
+/// DFS through remaining FST transitions after query exhaustion.
+/// Walks until all reachable final nodes are found.
+fn overlap_lookahead<D: AsRef<[u8]>, F>(
+    fst: &raw::Fst<D>,
+    reader: &SfxFileReaderV3,
+    node: &raw::Node<'_>,
+    output: raw::Output,
+    query_len: usize,
+    check_split: &F,
+    candidates: &mut Vec<SplitCandidateV3>,
+) where
+    F: Fn(&ParentEntryV3, usize) -> Option<SplitCandidateV3>,
+{
+    for ti in 0..node.len() {
+        let trans = node.transition(ti);
+        let child_output = output.cat(trans.out);
+        let child = fst.node(trans.addr);
+
+        if child.is_final() {
+            let val = child_output.cat(child.final_output()).value();
+            let parents = reader.decode_parents(val);
+            for parent in &parents {
+                if let Some(split) = check_split(parent, query_len) {
+                    candidates.push(split);
+                }
+            }
+        }
+
+        overlap_lookahead(fst, reader, &child, child_output, query_len,
+            check_split, candidates);
     }
 }
 

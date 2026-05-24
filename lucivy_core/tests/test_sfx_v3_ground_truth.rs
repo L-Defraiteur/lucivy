@@ -122,14 +122,43 @@ fn grep_docs_strict(files: &[(String, String)], needle: &str) -> HashSet<usize> 
 }
 
 /// Sep-agnostic grep (for strict_sep=false).
-/// Strips non-content chars from both query and text, then searches.
+///
+/// Matches by ADJACENT WORDS, not linear concatenation of the whole file.
+/// This mirrors v3 semantics: separators are ignored but word boundaries matter.
+///
+/// Algorithm: split text into words (runs of content chars), strip each word,
+/// then use a sliding window of adjacent stripped words to find the query.
 fn grep_docs_relaxed(files: &[(String, String)], needle: &str) -> HashSet<usize> {
     let stripped_query = strip_seps(&needle.to_lowercase());
     if stripped_query.is_empty() { return HashSet::new(); }
+
     files.iter().enumerate()
-        .filter(|(_, (_, c))| {
-            let stripped_content = strip_seps(&c.to_lowercase());
-            stripped_content.contains(&stripped_query)
+        .filter(|(_, (_, content))| {
+            let lower = content.to_lowercase();
+            // Extract words: runs of content chars
+            let words: Vec<String> = lower
+                .split(|c: char| !is_content_char(c))
+                .filter(|w| !w.is_empty())
+                .map(|w| w.to_string())
+                .collect();
+
+            // Sliding window: concatenate adjacent words and check if query is a substring
+            // The query could span at most ceil(query.len() / 1) = query.len() words
+            // but practically limited. Use a window large enough.
+            let max_window = stripped_query.len().min(words.len());
+            for start in 0..words.len() {
+                let mut concat = String::new();
+                for end in start..words.len().min(start + max_window + 1) {
+                    concat.push_str(&words[end]);
+                    if concat.len() >= stripped_query.len() {
+                        if concat.contains(&stripped_query) {
+                            return true;
+                        }
+                        break; // concat already longer than query, no point adding more
+                    }
+                }
+            }
+            false
         })
         .map(|(i, _)| i)
         .collect()

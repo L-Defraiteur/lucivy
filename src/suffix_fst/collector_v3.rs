@@ -396,6 +396,7 @@ impl SfxCollectorV3 {
                     first_own_len: ws_own_len,
                     last_sep_len: chunks[last_ci].1.sep_len as u8,
                     is_word_start: chunks[first_ci].1.is_word_start,
+                    num_chunks: chunk_idxs.len() as u32,
                 });
 
                 // Tail entry for very long words only.
@@ -442,6 +443,7 @@ impl SfxCollectorV3 {
                         first_own_len: tail_own_len,
                         last_sep_len: chunks[last_ci].1.sep_len as u8,
                         is_word_start: false,
+                        num_chunks: 1, // tail entry = single chunk
                     });
                 }
             }
@@ -549,6 +551,7 @@ impl SfxCollectorV3 {
             intern_ord: u32,
             first_chunk_intern: u32,
             last_chunk_intern: u32,
+            num_chunks: u32,
         }
         let mut deferred_ws: Vec<DeferredWordPostings> = Vec::new();
 
@@ -569,6 +572,7 @@ impl SfxCollectorV3 {
                 intern_ord: ws.first_intern_ord,
                 first_chunk_intern: ws.first_chunk_intern_ord,
                 last_chunk_intern: ws.last_chunk_intern_ord,
+                num_chunks: ws.num_chunks,
             });
         }
 
@@ -623,27 +627,48 @@ impl SfxCollectorV3 {
                     }
                 }
             } else {
-                // Multi-chunk: join by doc_id
-                let mut first_by_doc: std::collections::HashMap<u32, (u32, u32)> =
+                // Multi-chunk: join by doc_id with exact chunk distance.
+                //
+                // content_key_to_interns maps content keys to ALL intern_ords with that
+                // content — including chunks from different words (e.g., "funct" from
+                // "function" and "functions"). Without distance check, this creates
+                // a cross-product: first_chunk from word A × last_chunk from word B
+                // → bogus entries spanning thousands of positions.
+                //
+                // Fix: last_pos - first_pos must equal num_chunks - 1 (exact distance
+                // between first and last chunk of the same word occurrence).
+                let expected_distance = dws.num_chunks - 1;
+
+                // Collect ALL first_chunk postings per doc_id (multiple per doc)
+                let mut first_by_doc: std::collections::HashMap<u32, Vec<(u32, u32)>> =
                     std::collections::HashMap::new();
                 if let Some(variants) = content_key_to_interns.get(&first_ckey) {
                     for &vio in variants {
                         for &(doc_id, ti, bf, _bt) in &self.token_postings[vio as usize] {
-                            first_by_doc.entry(doc_id).or_insert((ti, bf));
+                            first_by_doc.entry(doc_id).or_default().push((ti, bf));
                         }
                     }
                 }
+                for entries in first_by_doc.values_mut() {
+                    entries.sort_by_key(|&(ti, _)| ti);
+                    entries.dedup();
+                }
+
                 if let Some(variants) = content_key_to_interns.get(&last_ckey) {
                     for &vio in variants {
                         for &(doc_id, last_ti, _bf, bt) in &self.token_postings[vio as usize] {
-                            if let Some(&(first_ti, first_bf)) = first_by_doc.get(&doc_id) {
-                                word_sfxpost_writer.add(ws_final_ord, WordPostingEntry {
-                                    doc_id,
-                                    first_position: first_ti,
-                                    last_position: last_ti,
-                                    byte_from: first_bf,
-                                    byte_to: bt,
-                                });
+                            if let Some(firsts) = first_by_doc.get(&doc_id) {
+                                for &(first_ti, first_bf) in firsts {
+                                    if last_ti >= first_ti && last_ti - first_ti == expected_distance {
+                                        word_sfxpost_writer.add(ws_final_ord, WordPostingEntry {
+                                            doc_id,
+                                            first_position: first_ti,
+                                            last_position: last_ti,
+                                            byte_from: first_bf,
+                                            byte_to: bt,
+                                        });
+                                    }
+                                }
                             }
                         }
                     }
@@ -738,6 +763,8 @@ pub struct WordStrippedEntry {
     pub last_sep_len: u8,
     /// is_word_start of the first chunk.
     pub is_word_start: bool,
+    /// Number of chunks composing this word.
+    pub num_chunks: u32,
 }
 
 /// Data extracted from SfxCollectorV3, ready for DAG-based build.
@@ -881,6 +908,7 @@ fn build_word_stripped(
             first_own_len: token_meta[first_idx].own_len,
             last_sep_len: token_meta[last_idx].sep_len,
             is_word_start: token_meta[first_idx].is_word_start,
+            num_chunks: chunk_indices.len() as u32,
         });
     }
 

@@ -588,4 +588,53 @@ mod tests {
 
         assert!(!bitset.contains(0));
     }
+
+    // ── TableFunction FN investigation ──
+
+    /// Reproduces the ground truth FN: "TableFunction" relaxed should match
+    /// doc containing "standalone table functions" (binder_error.test).
+    #[test]
+    fn test_tablefunction_relaxed_real_docs() {
+        // Load real files from the bench repo
+        let fn_path = "/tmp/rag3db-bench/test/test_files/exceptions/binder/binder_error.test";
+        let tp_path = "/tmp/rag3db-bench/extension/delta/src/function/delta_scan.cpp";
+
+        let fn_content = match std::fs::read_to_string(fn_path) {
+            Ok(s) => s,
+            Err(_) => { eprintln!("skip: clone rag3db to /tmp/rag3db-bench"); return; }
+        };
+        let tp_content = std::fs::read_to_string(tp_path).unwrap();
+        let neg_content = "hello world this has nothing to do with anything";
+
+        let texts: Vec<&str> = vec![&fn_content, &tp_content, neg_content];
+        let (sfx, post, word_sfxpost, posmap_bytes, bytemap_bytes) = build_index(&texts);
+        let reader = SfxFileReaderV3::open(&sfx).unwrap();
+        let resolver = MockResolver::new(&post);
+        let pm = crate::suffix_fst::posmap::PosMapReader::open(&posmap_bytes);
+        let bm = crate::suffix_fst::bytemap::ByteBitmapReader::open(&bytemap_bytes);
+        let wsp = crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(&word_sfxpost);
+
+        // --- Search ---
+        let matches = find_literal_v3(
+            &reader, "tablefunction", &resolver, false, false, None,
+            pm.as_ref(), bm.as_ref(), wsp.as_ref(),
+        );
+
+        let mut matched_docs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for m in &matches {
+            matched_docs.insert(m.doc_id);
+        }
+
+        // doc 1 (delta_scan.cpp) should match (has literal "TableFunction")
+        assert!(matched_docs.contains(&1), "delta_scan.cpp should match 'tablefunction'");
+
+        // doc 0 (binder_error.test) should also match ("standalone table functions")
+        // This is the FN we're investigating
+        assert!(matched_docs.contains(&0),
+            "binder_error.test should match 'tablefunction' via 'table' + 'functions' word chain");
+
+        // doc 2 should NOT match
+        assert!(!matched_docs.contains(&2), "unrelated doc should not match");
+    }
+
 }
