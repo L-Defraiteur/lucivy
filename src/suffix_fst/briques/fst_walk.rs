@@ -265,7 +265,7 @@ pub fn falling_walk_v3(
     candidates
 }
 
-fn sort_and_dedup_splits(candidates: &mut Vec<SplitCandidateV3>) {
+pub fn sort_and_dedup_splits(candidates: &mut Vec<SplitCandidateV3>) {
     candidates.sort_by(|a, b| {
         b.query_consumed.cmp(&a.query_consumed)
             .then(b.overlap_validated.cmp(&a.overlap_validated))
@@ -489,6 +489,125 @@ pub fn cross_token_chain_v3(
     if !strict_separators {
         chains.extend(cross_word_chain_v3(reader, query));
     }
+    chains
+}
+
+// ─── Sibling-based chain building ─────────────────────────────────────────
+
+use crate::suffix_fst::sibling_table::SiblingTableReader;
+use crate::suffix_fst::termtexts_v3::TermTextsReaderV3;
+
+/// Extract additional splits from fst_candidates results.
+///
+/// For each candidate where the query extends past the content boundary,
+/// it's a split that the falling walk may have missed (FST node not final).
+/// This catches the "uint64t" case: fst_candidates finds "uint64to",
+/// content_len=6, query_len=7 > 6 → split at byte 6.
+pub fn splits_from_fst_candidates(
+    candidates: &[FstCandidateV3],
+    query_len: usize,
+) -> Vec<SplitCandidateV3> {
+    let mut splits = Vec::new();
+    for cand in candidates {
+        let content_len = cand.content_len() as usize;
+        let split_byte = content_len.saturating_sub(cand.sti as usize);
+        if split_byte == 0 || split_byte >= query_len {
+            continue;
+        }
+        // Query extends past content boundary → split
+        splits.push(SplitCandidateV3 {
+            query_consumed: split_byte,
+            parent: ParentEntryV3 {
+                raw_ordinal: cand.raw_ordinal,
+                sti: cand.sti,
+                own_len: cand.own_len,
+                sep_len: cand.sep_len,
+                overlap_len: cand.overlap_len,
+                is_word_start: cand.is_word_start,
+            },
+            remainder_start: split_byte,
+            overlap_validated: query_len - split_byte,
+        });
+    }
+    splits
+}
+
+/// Build chains using the sibling table instead of re-walking the FST.
+///
+/// Algorithm (same as v2 suffix_contains.rs:880-918):
+/// 1. Start from initial splits (falling walk + fst_candidates)
+/// 2. DFS: follow sibling links, compare remainder with sibling content text
+/// 3. Terminal if sibling content covers the remainder (prefix match)
+/// 4. Partial if remainder starts with sibling content → continue chain
+pub fn sibling_chain_dfs(
+    splits: &[SplitCandidateV3],
+    query: &str,
+    sibling_table: &SiblingTableReader<'_>,
+    termtexts: &TermTextsReaderV3<'_>,
+) -> Vec<TokenChainV3> {
+    let query_lower = query.to_lowercase();
+    let mut chains = Vec::new();
+
+    for split in splits {
+        let safe_start = snap_to_char_boundary(&query_lower, split.remainder_start);
+        let remainder = &query_lower[safe_start..];
+
+        if remainder.is_empty() {
+            chains.push(TokenChainV3 {
+                ordinals: vec![vec![split.parent.raw_ordinal]],
+                first_sti: split.parent.sti,
+                total_query_consumed: split.query_consumed,
+            });
+            continue;
+        }
+
+        // DFS via stack: (current_ordinal, remainder, chain_ordinals, depth)
+        let mut stack: Vec<(u64, &str, Vec<Vec<u64>>, usize)> = vec![
+            (split.parent.raw_ordinal, remainder,
+             vec![vec![split.parent.raw_ordinal]], 0)
+        ];
+
+        while let Some((cur_ord, rem, chain, depth)) = stack.pop() {
+            if depth >= MAX_CHAIN_DEPTH { continue; }
+
+            let siblings = sibling_table.contiguous_siblings(cur_ord as u32);
+            for &next_ord in &siblings {
+                let next_text = match termtexts.text(next_ord) {
+                    Some(t) => t,
+                    None => continue,
+                };
+
+                // In v3, compare remainder with CONTENT portion only (no overlap).
+                // The TermTexts stores the extended text (content+sep+overlap).
+                // We need the content_len to know where content ends.
+                // For simplicity, we compare with the full text — the overlap
+                // bytes are from the NEXT token, so if the remainder matches
+                // a prefix of the full text, it matches the content+overlap
+                // which is correct for chain building.
+                let next_lower = next_text.to_lowercase();
+
+                if rem == next_lower || next_lower.starts_with(rem) {
+                    // Terminal: sibling text covers the remainder
+                    let mut c = chain.clone();
+                    c.push(vec![next_ord as u64]);
+                    chains.push(TokenChainV3 {
+                        ordinals: c,
+                        first_sti: split.parent.sti,
+                        total_query_consumed: query_lower.len(),
+                    });
+                } else if rem.starts_with(&next_lower) {
+                    // Partial: remainder starts with sibling text → consume and continue
+                    let consumed = next_lower.len();
+                    let new_rem = &rem[consumed..];
+                    let mut c = chain.clone();
+                    c.push(vec![next_ord as u64]);
+                    stack.push((next_ord as u64, new_rem, c, depth + 1));
+                }
+                // else: no match, skip this sibling
+            }
+        }
+    }
+
     chains
 }
 

@@ -43,7 +43,25 @@ pub fn find_literal_v3(
 
     // ── Chunk chains (0x00 + 0x01) — strict adjacency ────────────────
     {
-        let chains = fst_walk::cross_chunk_chain_v3(ctx.reader, query);
+        let mut chains = fst_walk::cross_chunk_chain_v3(ctx.reader, query);
+
+        // Sibling chain supplement: if sibling table is available, use it
+        // for continuations. Also catches first splits missed by falling walk.
+        if ctx.has_sibling_chains() {
+            let mut all_splits = fst_walk::falling_walk_chunks(ctx.reader, query);
+            let extra = fst_walk::splits_from_fst_candidates(&candidates, query.to_lowercase().len());
+            // Only chunk candidates (sti-based, non-word-stripped)
+            for s in extra {
+                if !s.parent.is_word_start || s.parent.sep_len == 0 { continue; }
+                all_splits.push(s);
+            }
+            let sib_chains = fst_walk::sibling_chain_dfs(
+                &all_splits, query,
+                ctx.require_sibling_v3(), ctx.require_termtexts(),
+            );
+            chains.extend(sib_chains);
+        }
+
         let chains: Vec<_> = if anchor_start {
             chains.into_iter().filter(|c| c.first_sti == 0).collect()
         } else {
@@ -59,7 +77,26 @@ pub fn find_literal_v3(
         let bm = ctx.require_bytemap();
         let wsp = ctx.require_word_sfxpost();
 
-        let chains = fst_walk::cross_word_chain_v3(ctx.reader, query);
+        let mut chains = fst_walk::cross_word_chain_v3(ctx.reader, query);
+
+        // Sibling chain supplement for word pipeline
+        if ctx.has_sibling_chains() {
+            let mut all_splits = fst_walk::falling_walk_words(ctx.reader, query);
+            // Add splits from fst_candidates that the falling walk missed
+            let query_len = query.to_lowercase().len();
+            let extra = fst_walk::splits_from_fst_candidates(&candidates, query_len);
+            for s in extra {
+                if s.parent.sep_len == 0 { continue; }
+                all_splits.push(s);
+            }
+            fst_walk::sort_and_dedup_splits(&mut all_splits);
+            let sib_chains = fst_walk::sibling_chain_dfs(
+                &all_splits, query,
+                ctx.require_sibling_v3(), ctx.require_termtexts(),
+            );
+            chains.extend(sib_chains);
+        }
+
         let chains: Vec<_> = if anchor_start {
             chains.into_iter().filter(|c| c.first_sti == 0).collect()
         } else {

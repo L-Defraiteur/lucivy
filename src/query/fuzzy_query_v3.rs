@@ -81,6 +81,7 @@ impl FuzzyQueryV3 {
         let bytemap_bytes = load("bytemap");
         let wsp_bytes = load("word_sfxpost");
         let sib_bytes = load("sibling_v3");
+        let tt_bytes = load("termtexts");
 
         let ctx = crate::suffix_fst::briques::context::BriquesContext {
             reader: &reader,
@@ -90,7 +91,7 @@ impl FuzzyQueryV3 {
             bytemap: bytemap_bytes.as_ref().and_then(|b| crate::suffix_fst::bytemap::ByteBitmapReader::open(b)),
             word_sfxpost: wsp_bytes.as_ref().and_then(|b| crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(b)),
             sibling_v3: sib_bytes.as_ref().and_then(|b| crate::suffix_fst::sibling_table::SiblingTableReader::open(b)),
-            termtexts: None,
+            termtexts: tt_bytes.as_ref().and_then(|b| crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open(b)),
         };
 
         let (_bitset, highlights, _coverage) = orchestrator::fuzzy_v3(
