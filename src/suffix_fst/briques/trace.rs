@@ -7,7 +7,6 @@
 //! qtrace!(ctx, "splits", "count" => splits.len());
 //! ```
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -64,52 +63,46 @@ impl QueryTrace {
     }
 }
 
-thread_local! {
-    static TRACES: RefCell<HashMap<u64, QueryTrace>> = RefCell::new(HashMap::new());
-    static NEXT_ID: RefCell<u64> = RefCell::new(1);
-}
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Global trace store — shared across all threads.
+/// Same pattern as luciole's WaitGraph: static Mutex<HashMap>.
+static TRACES: std::sync::LazyLock<Mutex<HashMap<u64, QueryTrace>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Allocate a new trace_id and create an empty trace.
 pub fn trace_begin() -> u64 {
-    NEXT_ID.with(|id| {
-        let mut id = id.borrow_mut();
-        let tid = *id;
-        *id += 1;
-        TRACES.with(|t| t.borrow_mut().insert(tid, QueryTrace::default()));
-        tid
-    })
+    let tid = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    TRACES.lock().unwrap().insert(tid, QueryTrace::default());
+    tid
 }
 
 /// Get the finished trace and remove it from the store.
 pub fn trace_finish(trace_id: u64) -> Option<QueryTrace> {
-    TRACES.with(|t| t.borrow_mut().remove(&trace_id))
+    TRACES.lock().unwrap().remove(&trace_id)
 }
 
 /// Push an event to a trace.
 pub fn trace_event(trace_id: u64, label: &str, data: &[(&str, &dyn fmt::Display)]) {
-    TRACES.with(|t| {
-        if let Some(trace) = t.borrow_mut().get_mut(&trace_id) {
-            trace.push(label, data);
-        }
-    });
+    if let Some(trace) = TRACES.lock().unwrap().get_mut(&trace_id) {
+        trace.push(label, data);
+    }
 }
 
 /// Enter a sub-section (increases depth).
 pub fn trace_enter(trace_id: u64, label: &str) {
-    TRACES.with(|t| {
-        if let Some(trace) = t.borrow_mut().get_mut(&trace_id) {
-            trace.enter(label);
-        }
-    });
+    if let Some(trace) = TRACES.lock().unwrap().get_mut(&trace_id) {
+        trace.enter(label);
+    }
 }
 
 /// Exit a sub-section (decreases depth).
 pub fn trace_exit(trace_id: u64) {
-    TRACES.with(|t| {
-        if let Some(trace) = t.borrow_mut().get_mut(&trace_id) {
-            trace.exit();
-        }
-    });
+    if let Some(trace) = TRACES.lock().unwrap().get_mut(&trace_id) {
+        trace.exit();
+    }
 }
 
 /// Convenience macro — no-op when ctx.trace_id is None.
