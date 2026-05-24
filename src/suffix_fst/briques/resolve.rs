@@ -233,7 +233,6 @@ pub fn resolve_word_chains_v3(
 
                     if valid {
                         new_active.push((doc_id, e.last_position, byte_from_first, e.byte_to, *ord));
-                        break;
                     }
                 }
             }
@@ -355,7 +354,6 @@ fn resolve_chains_impl(
 
                     if valid {
                         new_active.push((doc_id, e.position, byte_from_first, e.byte_to, *ord));
-                        break;
                     }
                 }
             }
