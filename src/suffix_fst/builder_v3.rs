@@ -356,18 +356,16 @@ impl SuffixFstBuilderV3 {
             self.key_buf.extend_from_slice(overlap_bytes);
             let key_len = (self.key_buf.len() as u32) - key_start;
 
-            self.entries.push((
-                key_start,
-                key_len,
-                ParentEntryV3 {
-                    raw_ordinal: first_ordinal,
-                    sti: si as u16,
-                    own_len: (content_len + first_sep_len as usize) as u16, // content + sep, like normal tokens
-                    sep_len: first_sep_len,
-                    overlap_len: overlap_bytes.len() as u8,
-                    is_word_start,
-                },
-            ));
+            let parent = ParentEntryV3 {
+                raw_ordinal: first_ordinal,
+                sti: si as u16,
+                own_len: (content_len + first_sep_len as usize) as u16,
+                sep_len: first_sep_len,
+                overlap_len: overlap_bytes.len() as u8,
+                is_word_start,
+            };
+
+            self.entries.push((key_start, key_len, parent));
         }
     }
 

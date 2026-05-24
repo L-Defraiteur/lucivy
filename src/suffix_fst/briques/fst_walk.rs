@@ -103,8 +103,10 @@ pub fn fst_candidates_v3(
     let fst = reader.fst();
     let mut results = Vec::new();
 
-    let partitions: &[u8] = if anchor_start {
+    let partitions: &[u8] = if anchor_start && strict_separators {
         &[SI0_PREFIX]
+    } else if anchor_start && !strict_separators {
+        &[SI0_PREFIX, SI_STRIPPED_PREFIX]
     } else if strict_separators {
         &[SI0_PREFIX, SI_REST_PREFIX]
     } else {
