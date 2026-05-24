@@ -233,10 +233,13 @@ where
     let mut doc_filter: Option<HashSet<DocId>> = None;
 
     for &(lit_idx, _) in &lit_selectivity {
+        let ctx = super::context::BriquesContext {
+            reader, resolver, filter_docs: doc_filter.as_ref(),
+            posmap: None, bytemap: None, // regex pipeline uses strict mode
+            word_sfxpost: None, sibling_v3: None, termtexts: None,
+        };
         let matches = composite::find_literal_v3(
-            reader, viable[lit_idx], resolver, anchor_start && lit_idx == 0,
-            strict_sep, doc_filter.as_ref(),
-            posmap.as_ref(), bytemap.as_ref(), None,
+            &ctx, viable[lit_idx], anchor_start && lit_idx == 0, strict_sep,
         );
 
         if doc_filter.is_none() && !matches.is_empty() {

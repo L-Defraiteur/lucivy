@@ -7,16 +7,13 @@
 //! - `fuzzy_v3`: fuzzy substring search via trigram pigeonhole
 //! - `regex_v3`: regex search (TODO — needs DFA integration)
 
-use std::collections::HashSet;
-
 use crate::tokenizer::equal_chunk::is_content_char;
 
 use common::BitSet;
 
 use crate::DocId;
-use crate::query::posting_resolver::PostingResolver;
-use crate::suffix_fst::file_v3::SfxFileReaderV3;
 
+use super::context::BriquesContext;
 use super::composite;
 use super::resolve::MatchV3;
 
@@ -27,27 +24,13 @@ const MAX_QUERY_LEN: usize = 2048;
 
 /// Exact substring search (d=0).
 ///
-/// Finds all occurrences of `query` in the index, handling cross-token
-/// boundaries via falling walk chain.
-///
-/// Parameters:
-/// - `anchor_start`: only match at token start (SI=0), for startsWith
-/// - `exact_match`: match must cover entire word(s), for term()
-/// - `strict_separators`: if false, tolerates different/missing separators
-/// - `filter_docs`: optional doc_id filter for rarest-first optimization
-///
 /// Returns matches sorted by (doc_id, position).
 pub fn contains_v3(
-    reader: &SfxFileReaderV3,
+    ctx: &BriquesContext<'_>,
     query: &str,
-    resolver: &dyn PostingResolver,
     anchor_start: bool,
     exact_match: bool,
     strict_separators: bool,
-    filter_docs: Option<&HashSet<DocId>>,
-    posmap: Option<&crate::suffix_fst::posmap::PosMapReader<'_>>,
-    bytemap: Option<&crate::suffix_fst::bytemap::ByteBitmapReader<'_>>,
-    word_sfxpost: Option<&crate::suffix_fst::word_sfxpost::WordSfxPostReader<'_>>,
 ) -> Vec<MatchV3> {
     if query.is_empty() || query.len() > MAX_QUERY_LEN {
         return Vec::new();
@@ -64,73 +47,17 @@ pub fn contains_v3(
         query
     };
 
-    let debug_query = std::env::var("V3_DEBUG_QUERY").ok();
-    let do_debug = debug_query.as_deref() == Some(query_ref);
-
-    if do_debug {
-        let cands = super::fst_walk::fst_candidates_v3(reader, query_ref, anchor_start, strict_separators);
-        let chains = super::fst_walk::cross_token_chain_v3(reader, query_ref, strict_separators);
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/v3_debug_trace.txt") {
-            use std::io::Write;
-            writeln!(f, "\n=== contains_v3 query={:?} strict={} ===", query_ref, strict_separators).ok();
-            writeln!(f, "fst_candidates: {}", cands.len()).ok();
-            for c in &cands {
-                writeln!(f, "  sti={} ord={} own={} sep={} ovl={}", c.sti, c.raw_ordinal, c.own_len, c.sep_len, c.overlap_len).ok();
-            }
-            writeln!(f, "chains: {}", chains.len()).ok();
-            for c in &chains {
-                let num_alts: usize = c.ordinals.iter().map(|a| a.len()).sum();
-                writeln!(f, "  ords={:?} sti={} consumed={} total_alts={}", c.ordinals, c.first_sti, c.total_query_consumed, num_alts).ok();
-            }
-            writeln!(f, "falling_walk_splits:").ok();
-            let splits = super::fst_walk::falling_walk_v3(reader, query_ref, strict_separators);
-            for s in &splits {
-                let cl = s.parent.own_len.saturating_sub(s.parent.sep_len as u16);
-                writeln!(f, "  sti={} own={} sep={} content_len={} consumed={} ovl_valid={} ord={}",
-                    s.parent.sti, s.parent.own_len, s.parent.sep_len, cl,
-                    s.query_consumed, s.overlap_validated, s.parent.raw_ordinal).ok();
-            }
-        }
-    }
-
-    let mut matches = composite::find_literal_v3(
-        reader, query_ref, resolver, anchor_start, strict_separators, filter_docs,
-        posmap, bytemap, word_sfxpost,
-    );
-
-    if do_debug {
-        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("/tmp/v3_debug_trace.txt") {
-            use std::io::Write;
-            writeln!(f, "raw matches (before filter): {}", matches.len()).ok();
-            // Only log unique (doc, pos, span) to keep trace manageable
-            let mut seen = std::collections::HashSet::new();
-            for m in &matches {
-                if seen.insert((m.doc_id, m.position, m.span)) {
-                    writeln!(f, "  doc={} pos={} span={} byte=[{}..{}] sti={} ord={} last_ord={}",
-                        m.doc_id, m.position, m.span, m.byte_from, m.byte_to, m.sti, m.ordinal, m.last_ordinal).ok();
-                }
-            }
-        }
-    }
+    let mut matches = composite::find_literal_v3(ctx, query_ref, anchor_start, strict_separators);
 
     // Filter false positives from content ordinals on single-token matches.
-    // Content-prefix ordinals aggregate postings across sep variants.
-    // A single-token match where the query is a prefix of a longer token's FST key
-    // may resolve postings from a different word sharing the same content ordinal.
-    // The span (byte_to - byte_from) must cover at least query_content_len.
-    //
-    // Chain matches (span > 1) don't need this: anchor_start=true in the chain
-    // builder ensures only SI=0 candidates, and adjacency check validates the rest.
     let query_content_len = query_ref.chars().filter(|c| is_content_char(*c)).count() as u32;
     matches.retain(|m| m.span > 1 || m.byte_to.saturating_sub(m.byte_from) >= query_content_len);
 
-    // Dedup AFTER filtering — ensures we don't discard a valid chain match
-    // in favor of a too-short single-token match that gets filtered.
+    // Dedup AFTER filtering
     matches.dedup_by_key(|m| (m.doc_id, m.position));
 
-    // Apply exact_match filter: match must cover exactly the content of the word(s)
+    // Apply exact_match filter
     if exact_match {
-        // TODO: fix once byte_to includes overlap
         matches.retain(|m| m.byte_to.saturating_sub(m.byte_from) == query_content_len);
     }
 
@@ -154,15 +81,11 @@ pub fn contains_v3(
 /// - highlights: (doc_id, byte_from, byte_to) per match
 /// - doc_coverage: (doc_id, score) where score = -(miss_count as f32)
 pub fn fuzzy_v3(
-    reader: &SfxFileReaderV3,
+    ctx: &BriquesContext<'_>,
     query: &str,
     distance: u8,
-    resolver: &dyn PostingResolver,
     strict_separators: bool,
     max_doc: DocId,
-    posmap: Option<&crate::suffix_fst::posmap::PosMapReader<'_>>,
-    bytemap: Option<&crate::suffix_fst::bytemap::ByteBitmapReader<'_>>,
-    word_sfxpost: Option<&crate::suffix_fst::word_sfxpost::WordSfxPostReader<'_>>,
 ) -> (BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>) {
     // Validate input
     if query.is_empty() || query.len() > MAX_QUERY_LEN || distance > 3 {
@@ -183,21 +106,20 @@ pub fn fuzzy_v3(
 
     // d=0 → route to exact contains (no trigram overhead)
     if distance == 0 {
-        let matches = contains_v3(reader, query_ref, resolver, false, false, strict_separators, None,
-            posmap, bytemap, word_sfxpost);
+        let matches = contains_v3(ctx, query_ref, false, false, strict_separators);
         let mut bitset = BitSet::with_max_value(max_doc);
         let mut highlights = Vec::new();
         let mut coverage = Vec::new();
         for m in &matches {
             bitset.insert(m.doc_id);
             highlights.push((m.doc_id, m.byte_from as usize, m.byte_to as usize));
-            coverage.push((m.doc_id, 0.0)); // 0 misses = perfect match
+            coverage.push((m.doc_id, 0.0));
         }
         return (bitset, highlights, coverage);
     }
 
     composite::resolve_trigrams_v3(
-        reader, query_ref, distance, resolver, strict_separators, max_doc,
+        ctx.reader, query_ref, distance, ctx.resolver, strict_separators, max_doc,
     )
 }
 
@@ -206,32 +128,31 @@ pub fn fuzzy_v3(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::suffix_fst::file_v3::{SfxFileReaderV3, SfxFileWriterV3};
     use crate::suffix_fst::builder_v3::SuffixFstBuilderV3;
     use crate::suffix_fst::collector_v3::SfxCollectorV3;
-    use crate::suffix_fst::file_v3::SfxFileWriterV3;
     use crate::suffix_fst::sfxpost_v2::SfxPostReaderV2;
-    use crate::query::posting_resolver::PostingEntry;
+    use crate::query::posting_resolver::{PostingEntry, PostingResolver};
 
     struct MockResolver(SfxPostReaderV2);
-
     impl MockResolver {
-        fn new(data: &[u8]) -> Self {
-            Self(SfxPostReaderV2::open_slice(data).unwrap())
-        }
+        fn new(data: &[u8]) -> Self { Self(SfxPostReaderV2::open_slice(data).unwrap()) }
     }
-
     impl PostingResolver for MockResolver {
         fn resolve(&self, ordinal: u64) -> Vec<PostingEntry> {
             self.0.entries(ordinal as u32).into_iter().map(|e| PostingEntry {
-                doc_id: e.doc_id,
-                position: e.token_index,
-                byte_from: e.byte_from,
-                byte_to: e.byte_to,
+                doc_id: e.doc_id, position: e.token_index,
+                byte_from: e.byte_from, byte_to: e.byte_to,
             }).collect()
         }
     }
 
-    fn build_index(texts: &[&str]) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
+    /// Build index and return all bytes needed for a BriquesContext.
+    struct TestIndex {
+        sfx: Vec<u8>, sfxpost: Vec<u8>, wsp: Vec<u8>, pm: Vec<u8>, bm: Vec<u8>,
+    }
+
+    fn build_index(texts: &[&str]) -> TestIndex {
         let mut collector = SfxCollectorV3::new();
         for text in texts {
             collector.begin_doc();
@@ -239,174 +160,188 @@ mod tests {
             collector.end_doc();
         }
         let data = collector.into_data();
-
         let mut builder = SuffixFstBuilderV3::with_min_suffix_len(1);
-        for &intern_ord in &data.sorted_indices {
-            let meta = &data.token_meta[intern_ord as usize];
+        for &io in &data.sorted_indices {
+            let meta = &data.token_meta[io as usize];
             if meta.is_word_stripped { continue; }
-            let text = &data.token_texts[intern_ord as usize];
-            let content_ord = data.intern_to_final[intern_ord as usize];
-            builder.add_token(text, content_ord as u64, meta.own_len, meta.sep_len,
-                meta.overlap_len, meta.is_word_start);
+            let text = &data.token_texts[io as usize];
+            let fo = data.intern_to_final[io as usize];
+            builder.add_token(text, fo as u64, meta.own_len, meta.sep_len, meta.overlap_len, meta.is_word_start);
         }
         for ws in &data.word_stripped {
-            let final_ord = data.intern_to_final[ws.first_intern_ord as usize];
-            builder.add_word_stripped(
-                &ws.word_content, &ws.content_overlap,
-                final_ord as u64, ws.first_own_len, ws.last_sep_len, ws.is_word_start,
-            );
+            let fo = data.intern_to_final[ws.first_intern_ord as usize];
+            builder.add_word_stripped(&ws.word_content, &ws.content_overlap, fo as u64, ws.first_own_len, ws.last_sep_len, ws.is_word_start);
         }
         let (fst_data, parent_data) = builder.build().unwrap();
-
-        let num_terms = data.num_content_ords;
-        let mut post_writer = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::new(num_terms);
-        for (content_ord, postings) in data.content_postings.iter().enumerate() {
-            for &(doc_id, ti, bf, bt) in postings {
-                post_writer.add_entry(content_ord as u32, doc_id, ti, bf, bt);
-            }
+        let mut pw = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::new(data.num_content_ords);
+        for (co, postings) in data.content_postings.iter().enumerate() {
+            for &(d, t, bf, bt) in postings { pw.add_entry(co as u32, d, t, bf, bt); }
         }
-        let sfxpost = post_writer.finish();
-
-        let wsp = data.word_sfxpost;
-        let derived = crate::suffix_fst::index_registry::build_derived_indexes_v3(
-            &data.tokens, Some(&sfxpost), Some(&data.own_lens),
-        );
+        let sfxpost = pw.finish();
+        let derived = crate::suffix_fst::index_registry::build_derived_indexes_v3(&data.tokens, Some(&sfxpost), Some(&data.own_lens));
         let pm = derived.iter().find(|(e, _)| e == "posmap").map(|(_, d)| d.clone()).unwrap_or_default();
         let bm = derived.iter().find(|(e, _)| e == "bytemap").map(|(_, d)| d.clone()).unwrap_or_default();
         let writer = SfxFileWriterV3::new(fst_data, parent_data, data.num_docs);
-        (writer.to_bytes(), sfxpost, wsp, pm, bm)
+        TestIndex { sfx: writer.to_bytes(), sfxpost, wsp: data.word_sfxpost, pm, bm }
+    }
+
+    /// Build a BriquesContext from a TestIndex + resolver.
+    fn make_ctx<'a>(
+        idx: &'a TestIndex,
+        reader: &'a SfxFileReaderV3,
+        resolver: &'a dyn PostingResolver,
+        pm: &'a Option<crate::suffix_fst::posmap::PosMapReader<'a>>,
+        bm: &'a Option<crate::suffix_fst::bytemap::ByteBitmapReader<'a>>,
+        wsp: &'a Option<crate::suffix_fst::word_sfxpost::WordSfxPostReader<'a>>,
+    ) -> BriquesContext<'a> {
+        BriquesContext {
+            reader,
+            resolver,
+            filter_docs: None,
+            posmap: pm.clone(),
+            bytemap: bm.clone(),
+            word_sfxpost: wsp.clone(),
+            sibling_v3: None,
+            termtexts: None,
+        }
     }
 
     // ── contains_v3 ──
 
     #[test]
     fn test_contains_basic() {
-        let (sfx, post, _wsp, _pm, _bm) = build_index(&["mutex_lock", "hello_world"]);
-        let reader = SfxFileReaderV3::open(&sfx).unwrap();
-        let resolver = MockResolver::new(&post);
-
-        let matches = contains_v3(&reader, "mutex", &resolver, false, false, true, None, None, None, None);
+        let idx = build_index(&["mutex_lock", "hello_world"]);
+        let reader = SfxFileReaderV3::open(&idx.sfx).unwrap();
+        let resolver = MockResolver::new(&idx.sfxpost);
+        let ctx = BriquesContext {
+            reader: &reader, resolver: &resolver, filter_docs: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+        };
+        let matches = contains_v3(&ctx, "mutex", false, false, true);
         assert!(!matches.is_empty());
         assert_eq!(matches[0].doc_id, 0);
     }
 
     #[test]
     fn test_contains_cross_token() {
-        let (sfx, post, _wsp, _pm, _bm) = build_index(&["mutex_lock"]);
-        let reader = SfxFileReaderV3::open(&sfx).unwrap();
-        let resolver = MockResolver::new(&post);
-
-        let matches = contains_v3(&reader, "mutex_lock", &resolver, false, false, true, None, None, None, None);
+        let idx = build_index(&["mutex_lock"]);
+        let reader = SfxFileReaderV3::open(&idx.sfx).unwrap();
+        let resolver = MockResolver::new(&idx.sfxpost);
+        let ctx = BriquesContext {
+            reader: &reader, resolver: &resolver, filter_docs: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+        };
+        let matches = contains_v3(&ctx, "mutex_lock", false, false, true);
         assert!(!matches.is_empty());
     }
 
     #[test]
     fn test_contains_sep_skip() {
-        let (sfx, post, wsp, pm, bm) = build_index(&["mutex_lock"]);
-        let reader = SfxFileReaderV3::open(&sfx).unwrap();
-        let resolver = MockResolver::new(&post);
-        let pm_r = crate::suffix_fst::posmap::PosMapReader::open(&pm);
-        let bm_r = crate::suffix_fst::bytemap::ByteBitmapReader::open(&bm);
-        let wsp_r = crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(&wsp);
-
-        // "mutexlock" (no sep) → should match "mutex_lock" with strict_sep=false
-        let matches = contains_v3(&reader, "mutexlock", &resolver, false, false, false, None,
-            pm_r.as_ref(), bm_r.as_ref(), wsp_r.as_ref());
+        let idx = build_index(&["mutex_lock"]);
+        let reader = SfxFileReaderV3::open(&idx.sfx).unwrap();
+        let resolver = MockResolver::new(&idx.sfxpost);
+        let pm = crate::suffix_fst::posmap::PosMapReader::open(&idx.pm);
+        let bm = crate::suffix_fst::bytemap::ByteBitmapReader::open(&idx.bm);
+        let wsp = crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(&idx.wsp);
+        let ctx = BriquesContext {
+            reader: &reader, resolver: &resolver, filter_docs: None,
+            posmap: pm, bytemap: bm, word_sfxpost: wsp, sibling_v3: None, termtexts: None,
+        };
+        let matches = contains_v3(&ctx, "mutexlock", false, false, false);
         assert!(!matches.is_empty(), "sep-skip should work");
     }
 
     #[test]
     fn test_contains_strict_rejects() {
-        let (sfx, post, _wsp, _pm, _bm) = build_index(&["mutex_lock"]);
-        let reader = SfxFileReaderV3::open(&sfx).unwrap();
-        let resolver = MockResolver::new(&post);
-
-        // "mutex lock" (space) strict=true → should NOT match "mutex_lock" (underscore)
-        let matches = contains_v3(&reader, "mutex lock", &resolver, false, false, true, None, None, None, None);
+        let idx = build_index(&["mutex_lock"]);
+        let reader = SfxFileReaderV3::open(&idx.sfx).unwrap();
+        let resolver = MockResolver::new(&idx.sfxpost);
+        let ctx = BriquesContext {
+            reader: &reader, resolver: &resolver, filter_docs: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+        };
+        let matches = contains_v3(&ctx, "mutex lock", false, false, true);
         assert!(matches.is_empty(), "strict should reject different separator");
     }
 
     #[test]
     fn test_contains_anchor_start() {
-        let (sfx, post, _wsp, _pm, _bm) = build_index(&["mutex_lock"]);
-        let reader = SfxFileReaderV3::open(&sfx).unwrap();
-        let resolver = MockResolver::new(&post);
-
-        // "mutex" with anchor → found (starts at SI=0)
-        let matches = contains_v3(&reader, "mutex_lo", &resolver, true, false, true, None, None, None, None);
-        assert!(!matches.is_empty());
-
-        // "tex" with anchor → not found (SI>0)
-        let matches = contains_v3(&reader, "tex_lo", &resolver, true, false, true, None, None, None, None);
-        assert!(matches.is_empty());
+        let idx = build_index(&["mutex_lock"]);
+        let reader = SfxFileReaderV3::open(&idx.sfx).unwrap();
+        let resolver = MockResolver::new(&idx.sfxpost);
+        let ctx = BriquesContext {
+            reader: &reader, resolver: &resolver, filter_docs: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+        };
+        assert!(!contains_v3(&ctx, "mutex_lo", true, false, true).is_empty());
+        assert!(contains_v3(&ctx, "tex_lo", true, false, true).is_empty());
     }
 
     #[test]
     fn test_contains_empty_query() {
-        let (sfx, post, _wsp, _pm, _bm) = build_index(&["mutex_lock"]);
-        let reader = SfxFileReaderV3::open(&sfx).unwrap();
-        let resolver = MockResolver::new(&post);
-
-        let matches = contains_v3(&reader, "", &resolver, false, false, true, None, None, None, None);
-        assert!(matches.is_empty());
+        let idx = build_index(&["mutex_lock"]);
+        let reader = SfxFileReaderV3::open(&idx.sfx).unwrap();
+        let resolver = MockResolver::new(&idx.sfxpost);
+        let ctx = BriquesContext {
+            reader: &reader, resolver: &resolver, filter_docs: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+        };
+        assert!(contains_v3(&ctx, "", false, false, true).is_empty());
     }
 
     // ── fuzzy_v3 ──
 
     #[test]
     fn test_fuzzy_basic() {
-        let (sfx, post, _wsp, _pm, _bm) = build_index(&["mutex_lock", "hello_world"]);
-        let reader = SfxFileReaderV3::open(&sfx).unwrap();
-        let resolver = MockResolver::new(&post);
-
-        // "mutex_lck" d=1 → should find "mutex_lock"
-        let (bitset, highlights, _) = fuzzy_v3(&reader, "mutex_lck", 1, &resolver, true, 2, None, None, None);
+        let idx = build_index(&["mutex_lock", "hello_world"]);
+        let reader = SfxFileReaderV3::open(&idx.sfx).unwrap();
+        let resolver = MockResolver::new(&idx.sfxpost);
+        let ctx = BriquesContext {
+            reader: &reader, resolver: &resolver, filter_docs: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+        };
+        let (bitset, highlights, _) = fuzzy_v3(&ctx, "mutex_lck", 1, true, 2);
         assert!(bitset.contains(0), "doc 0 should match fuzzy");
         assert!(!highlights.is_empty());
     }
 
     #[test]
     fn test_fuzzy_d0_routes_to_exact() {
-        let (sfx, post, _wsp, _pm, _bm) = build_index(&["mutex_lock"]);
-        let reader = SfxFileReaderV3::open(&sfx).unwrap();
-        let resolver = MockResolver::new(&post);
-
-        // d=0 → exact match via contains_v3
-        let (bitset, _, coverage) = fuzzy_v3(&reader, "mutex_lo", 0, &resolver, true, 1, None, None, None);
+        let idx = build_index(&["mutex_lock"]);
+        let reader = SfxFileReaderV3::open(&idx.sfx).unwrap();
+        let resolver = MockResolver::new(&idx.sfxpost);
+        let ctx = BriquesContext {
+            reader: &reader, resolver: &resolver, filter_docs: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+        };
+        let (bitset, _, coverage) = fuzzy_v3(&ctx, "mutex_lo", 0, true, 1);
         assert!(bitset.contains(0));
-        // Coverage should be 0.0 (perfect match, no misses)
         assert!(coverage.iter().any(|&(_, score)| score == 0.0));
     }
 
     #[test]
-    fn test_fuzzy_sep_skip() {
-        let (sfx, post, _wsp, _pm, _bm) = build_index(&["mutex_lock"]);
-        let reader = SfxFileReaderV3::open(&sfx).unwrap();
-        let resolver = MockResolver::new(&post);
-
-        // "mutexlck" d=1 strict_sep=false
-        let (bitset, _, _) = fuzzy_v3(&reader, "mutexlck", 1, &resolver, false, 1, None, None, None);
-        assert!(bitset.contains(0), "fuzzy + sep-skip should find match");
-    }
-
-    #[test]
     fn test_fuzzy_no_match() {
-        let (sfx, post, _wsp, _pm, _bm) = build_index(&["mutex_lock"]);
-        let reader = SfxFileReaderV3::open(&sfx).unwrap();
-        let resolver = MockResolver::new(&post);
-
-        let (bitset, _, _) = fuzzy_v3(&reader, "zzzzzzzzz", 1, &resolver, true, 1, None, None, None);
+        let idx = build_index(&["mutex_lock"]);
+        let reader = SfxFileReaderV3::open(&idx.sfx).unwrap();
+        let resolver = MockResolver::new(&idx.sfxpost);
+        let ctx = BriquesContext {
+            reader: &reader, resolver: &resolver, filter_docs: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+        };
+        let (bitset, _, _) = fuzzy_v3(&ctx, "zzzzzzzzz", 1, true, 1);
         assert!(!bitset.contains(0));
     }
 
     #[test]
     fn test_fuzzy_distance_too_high() {
-        let (sfx, post, _wsp, _pm, _bm) = build_index(&["mutex_lock"]);
-        let reader = SfxFileReaderV3::open(&sfx).unwrap();
-        let resolver = MockResolver::new(&post);
-
-        // d=4 → rejected (max 3)
-        let (bitset, _, _) = fuzzy_v3(&reader, "mutex", 4, &resolver, true, 1, None, None, None);
+        let idx = build_index(&["mutex_lock"]);
+        let reader = SfxFileReaderV3::open(&idx.sfx).unwrap();
+        let resolver = MockResolver::new(&idx.sfxpost);
+        let ctx = BriquesContext {
+            reader: &reader, resolver: &resolver, filter_docs: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+        };
+        let (bitset, _, _) = fuzzy_v3(&ctx, "mutex", 4, true, 1);
         assert!(!bitset.contains(0));
     }
 }

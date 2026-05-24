@@ -14,6 +14,7 @@ use crate::DocId;
 use crate::query::posting_resolver::PostingResolver;
 use crate::suffix_fst::file_v3::SfxFileReaderV3;
 
+use super::context::BriquesContext;
 use super::fst_walk::{self, FstCandidateV3, TokenChainV3};
 use super::resolve::{self, MatchV3};
 
@@ -28,49 +29,44 @@ use super::resolve::{self, MatchV3};
 /// No mixing between pipelines. No fallbacks — posmap/bytemap are REQUIRED
 /// for the word pipeline. Without them, only chunk pipeline runs.
 pub fn find_literal_v3(
-    reader: &SfxFileReaderV3,
+    ctx: &BriquesContext<'_>,
     query: &str,
-    resolver: &dyn PostingResolver,
     anchor_start: bool,
     strict_separators: bool,
-    filter_docs: Option<&HashSet<DocId>>,
-    posmap: Option<&crate::suffix_fst::posmap::PosMapReader<'_>>,
-    bytemap: Option<&crate::suffix_fst::bytemap::ByteBitmapReader<'_>>,
-    word_sfxpost: Option<&crate::suffix_fst::word_sfxpost::WordSfxPostReader<'_>>,
 ) -> Vec<MatchV3> {
     let mut results = Vec::new();
 
     // ── Single-token matches (all partitions) ────────────────────────
-    let candidates = fst_walk::fst_candidates_v3(reader, query, anchor_start, strict_separators);
-    let single = resolve::resolve_single_v3(&candidates, resolver, filter_docs);
+    let candidates = fst_walk::fst_candidates_v3(ctx.reader, query, anchor_start, strict_separators);
+    let single = resolve::resolve_single_v3(&candidates, ctx.resolver, ctx.filter_docs);
     results.extend(single);
 
     // ── Chunk chains (0x00 + 0x01) — strict adjacency ────────────────
     {
-        let chains = fst_walk::cross_chunk_chain_v3(reader, query);
+        let chains = fst_walk::cross_chunk_chain_v3(ctx.reader, query);
         let chains: Vec<_> = if anchor_start {
             chains.into_iter().filter(|c| c.first_sti == 0).collect()
         } else {
             chains
         };
-        let cross = resolve::resolve_chains_v3(&chains, resolver, filter_docs);
+        let cross = resolve::resolve_chains_v3(&chains, ctx.resolver, ctx.filter_docs);
         results.extend(cross);
     }
 
     // ── Word chains (0x02) — relaxed adjacency via WordSfxPost ─────
-    if !strict_separators {
-        if let (Some(pm), Some(bm), Some(wsp)) = (posmap, bytemap, word_sfxpost) {
-            let chains = fst_walk::cross_word_chain_v3(reader, query);
-            let chains: Vec<_> = if anchor_start {
-                chains.into_iter().filter(|c| c.first_sti == 0).collect()
-            } else {
-                chains
-            };
-            let cross = resolve::resolve_word_chains_v3(&chains, wsp, resolver, filter_docs, pm, bm);
-            results.extend(cross);
-        }
-        // No posmap/bytemap/word_sfxpost → no word chains. Single-token
-        // matches from partition 0x02 (via fst_candidates) still work.
+    if !strict_separators && ctx.has_word_pipeline() {
+        let pm = ctx.require_posmap();
+        let bm = ctx.require_bytemap();
+        let wsp = ctx.require_word_sfxpost();
+
+        let chains = fst_walk::cross_word_chain_v3(ctx.reader, query);
+        let chains: Vec<_> = if anchor_start {
+            chains.into_iter().filter(|c| c.first_sti == 0).collect()
+        } else {
+            chains
+        };
+        let cross = resolve::resolve_word_chains_v3(&chains, wsp, ctx.resolver, ctx.filter_docs, pm, bm);
+        results.extend(cross);
     }
 
     results.sort_by_key(|m| (m.doc_id, m.position));
@@ -85,26 +81,17 @@ pub fn find_literal_v3(
 /// independently, picks the most selective as pivot, then verifies
 /// adjacency bidirectionally.
 pub fn find_multi_token_v3(
-    reader: &SfxFileReaderV3,
+    ctx: &BriquesContext<'_>,
     query_tokens: &[&str],
-    resolver: &dyn PostingResolver,
     anchor_start: bool,
-    exact_match: bool,
+    _exact_match: bool,
     strict_separators: bool,
-    filter_docs: Option<&HashSet<DocId>>,
-    posmap: Option<&crate::suffix_fst::posmap::PosMapReader<'_>>,
-    bytemap: Option<&crate::suffix_fst::bytemap::ByteBitmapReader<'_>>,
-    word_sfxpost: Option<&crate::suffix_fst::word_sfxpost::WordSfxPostReader<'_>>,
 ) -> Vec<MatchV3> {
     if query_tokens.is_empty() {
         return Vec::new();
     }
     if query_tokens.len() == 1 {
-        return find_literal_v3(
-            reader, query_tokens[0], resolver,
-            anchor_start, strict_separators, filter_docs,
-            posmap, bytemap, word_sfxpost,
-        );
+        return find_literal_v3(ctx, query_tokens[0], anchor_start, strict_separators);
     }
 
     // Resolve each sub-token independently
@@ -113,8 +100,7 @@ pub fn find_multi_token_v3(
         .enumerate()
         .map(|(i, token)| {
             let anchor = anchor_start && i == 0;
-            find_literal_v3(reader, token, resolver, anchor, strict_separators, filter_docs,
-                posmap, bytemap, word_sfxpost)
+            find_literal_v3(ctx, token, anchor, strict_separators)
         })
         .collect();
 

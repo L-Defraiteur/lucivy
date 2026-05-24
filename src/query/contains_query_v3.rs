@@ -80,35 +80,36 @@ impl ContainsQueryV3 {
         sfx_bytes: &[u8],
     ) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)> {
         use crate::suffix_fst::file_v3::SfxFileReaderV3;
-        use crate::suffix_fst::briques::orchestrator;
+        use crate::suffix_fst::briques::{orchestrator, context::BriquesContext};
 
         let reader = SfxFileReaderV3::open(sfx_bytes).map_err(|e|
             crate::LucivyError::SystemError(format!("open SFX3: {e}")))?;
         let pr = crate::query::posting_resolver::build_resolver(seg_reader, self.field)?;
 
-        // Load PosMap + ByteMap for relaxed chain intermediate verification.
-        // Without these, relaxed chains fall back to ByteOrdered (no verification),
-        // which causes cross-word FP (matching fragments from unrelated words).
-        let posmap_bytes = seg_reader.sfx_index_file("posmap", self.field)
-            .and_then(|fs| fs.read_bytes().ok())
-            .map(|b| b.as_ref().to_vec());
-        let bytemap_bytes = seg_reader.sfx_index_file("bytemap", self.field)
-            .and_then(|fs| fs.read_bytes().ok())
-            .map(|b| b.as_ref().to_vec());
-        let posmap_reader = posmap_bytes.as_ref()
-            .and_then(|b| crate::suffix_fst::posmap::PosMapReader::open(b));
-        let bytemap_reader = bytemap_bytes.as_ref()
-            .and_then(|b| crate::suffix_fst::bytemap::ByteBitmapReader::open(b));
-        let word_sfxpost_bytes = seg_reader.sfx_index_file("word_sfxpost", self.field)
-            .and_then(|fs| fs.read_bytes().ok())
-            .map(|b| b.as_ref().to_vec());
-        let word_sfxpost_reader = word_sfxpost_bytes.as_ref()
-            .and_then(|b| crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(b));
+        let load = |ext: &str| -> Option<Vec<u8>> {
+            seg_reader.sfx_index_file(ext, self.field)
+                .and_then(|fs| fs.read_bytes().ok())
+                .map(|b| b.as_ref().to_vec())
+        };
+        let posmap_bytes = load("posmap");
+        let bytemap_bytes = load("bytemap");
+        let wsp_bytes = load("word_sfxpost");
+        let sib_bytes = load("sibling_v3");
+
+        let ctx = BriquesContext {
+            reader: &reader,
+            resolver: &*pr,
+            filter_docs: None,
+            posmap: posmap_bytes.as_ref().and_then(|b| crate::suffix_fst::posmap::PosMapReader::open(b)),
+            bytemap: bytemap_bytes.as_ref().and_then(|b| crate::suffix_fst::bytemap::ByteBitmapReader::open(b)),
+            word_sfxpost: wsp_bytes.as_ref().and_then(|b| crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(b)),
+            sibling_v3: sib_bytes.as_ref().and_then(|b| crate::suffix_fst::sibling_table::SiblingTableReader::open(b)),
+            termtexts: None, // TODO: load when sibling chain building is wired
+        };
 
         let mut matches = orchestrator::contains_v3(
-            &reader, &self.query_text, &*pr,
-            self.anchor_start, self.exact_match, self.strict_separators, None,
-            posmap_reader.as_ref(), bytemap_reader.as_ref(), word_sfxpost_reader.as_ref(),
+            &ctx, &self.query_text,
+            self.anchor_start, self.exact_match, self.strict_separators,
         );
 
         // Post-filter chain matches (span > 1) using word_pos_map for per-doc verification.

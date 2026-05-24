@@ -4,6 +4,7 @@
 //! - `resolve`: Tier 2 — Posting resolution (single-token, chains, adjacency, doc filtering)
 //! - `composite`: Tier 3 — High-level (find_literal, trigrams, DFA continuation)
 
+pub mod context;
 pub mod fst_walk;
 pub mod resolve;
 pub mod composite;

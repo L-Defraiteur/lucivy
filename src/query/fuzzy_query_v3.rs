@@ -72,28 +72,30 @@ impl FuzzyQueryV3 {
             crate::LucivyError::SystemError(format!("open SFX3: {e}")))?;
         let pr = crate::query::posting_resolver::build_resolver(seg_reader, self.field)?;
 
-        // Load PosMap + ByteMap for relaxed chain verification
-        let posmap_bytes = seg_reader.sfx_index_file("posmap", self.field)
-            .and_then(|fs| fs.read_bytes().ok())
-            .map(|b| b.as_ref().to_vec());
-        let bytemap_bytes = seg_reader.sfx_index_file("bytemap", self.field)
-            .and_then(|fs| fs.read_bytes().ok())
-            .map(|b| b.as_ref().to_vec());
-        let posmap_reader = posmap_bytes.as_ref()
-            .and_then(|b| crate::suffix_fst::posmap::PosMapReader::open(b));
-        let bytemap_reader = bytemap_bytes.as_ref()
-            .and_then(|b| crate::suffix_fst::bytemap::ByteBitmapReader::open(b));
+        let load = |ext: &str| -> Option<Vec<u8>> {
+            seg_reader.sfx_index_file(ext, self.field)
+                .and_then(|fs| fs.read_bytes().ok())
+                .map(|b| b.as_ref().to_vec())
+        };
+        let posmap_bytes = load("posmap");
+        let bytemap_bytes = load("bytemap");
+        let wsp_bytes = load("word_sfxpost");
+        let sib_bytes = load("sibling_v3");
 
-        let word_sfxpost_bytes = seg_reader.sfx_index_file("word_sfxpost", self.field)
-            .and_then(|fs| fs.read_bytes().ok())
-            .map(|b| b.as_ref().to_vec());
-        let word_sfxpost_reader = word_sfxpost_bytes.as_ref()
-            .and_then(|b| crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(b));
+        let ctx = crate::suffix_fst::briques::context::BriquesContext {
+            reader: &reader,
+            resolver: &*pr,
+            filter_docs: None,
+            posmap: posmap_bytes.as_ref().and_then(|b| crate::suffix_fst::posmap::PosMapReader::open(b)),
+            bytemap: bytemap_bytes.as_ref().and_then(|b| crate::suffix_fst::bytemap::ByteBitmapReader::open(b)),
+            word_sfxpost: wsp_bytes.as_ref().and_then(|b| crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(b)),
+            sibling_v3: sib_bytes.as_ref().and_then(|b| crate::suffix_fst::sibling_table::SiblingTableReader::open(b)),
+            termtexts: None,
+        };
 
         let (_bitset, highlights, _coverage) = orchestrator::fuzzy_v3(
-            &reader, &self.query_text, self.distance,
-            &*pr, self.strict_separators, seg_reader.max_doc(),
-            posmap_reader.as_ref(), bytemap_reader.as_ref(), word_sfxpost_reader.as_ref(),
+            &ctx, &self.query_text, self.distance,
+            self.strict_separators, seg_reader.max_doc(),
         );
 
         // Deduplicate doc_tf from highlights
