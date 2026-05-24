@@ -589,7 +589,8 @@ pub fn sibling_chain_dfs(
                 // of 6 for word "unique" with overlap "pt").
                 let content_len = sib.gap_len as usize;
                 let next_content = if content_len > 0 && content_len < next_lower.len() {
-                    &next_lower[..content_len]
+                    let cl = snap_to_char_boundary(&next_lower, content_len);
+                    &next_lower[..cl]
                 } else {
                     &next_lower
                 };
