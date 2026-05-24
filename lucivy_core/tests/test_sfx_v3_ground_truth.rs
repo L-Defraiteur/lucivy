@@ -145,16 +145,25 @@ fn grep_docs_relaxed(files: &[(String, String)], needle: &str) -> HashSet<usize>
             // Sliding window: concatenate adjacent words and check if query is a substring
             // The query could span at most ceil(query.len() / 1) = query.len() words
             // but practically limited. Use a window large enough.
-            let max_window = stripped_query.len().min(words.len());
+            // Sliding window: concatenate adjacent words. The query can span
+            // across word boundaries, so we keep adding words as long as the
+            // query could still straddle the junction.
+            let qlen = stripped_query.len();
             for start in 0..words.len() {
                 let mut concat = String::new();
-                for end in start..words.len().min(start + max_window + 1) {
+                for end in start..words.len() {
                     concat.push_str(&words[end]);
-                    if concat.len() >= stripped_query.len() {
+                    if concat.len() >= qlen {
                         if concat.contains(&stripped_query) {
                             return true;
                         }
-                        break; // concat already longer than query, no point adding more
+                        // Only stop if the last qlen-1 bytes of concat can't
+                        // possibly start the query (no overlap with next word).
+                        // Simple bound: stop when concat is qlen bytes longer
+                        // than the query — the query can't straddle further.
+                        if concat.len() >= qlen * 2 {
+                            break;
+                        }
                     }
                 }
             }
