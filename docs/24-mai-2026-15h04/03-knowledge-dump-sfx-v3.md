@@ -64,6 +64,124 @@ Ground truth : 13/15 pass (10/10 strict, 3/5 relaxed)
   - 6 FN relaxed = différence sémantique grep vs v3 (by design)
 ```
 
+## Comment ajouter un nouveau fichier d'index
+
+Pour ajouter un nouveau fichier d'index par segment (comme posmap, bytemap, word_sfxpost) :
+
+### 1. Créer le module writer/reader
+
+```rust
+// src/suffix_fst/mon_index.rs
+pub struct MonIndexWriter { ... }
+impl MonIndexWriter {
+    pub fn new() -> Self { ... }
+    pub fn add(&mut self, ...) { ... }
+    pub fn finish(self) -> Vec<u8> { ... } // sérialise
+}
+
+pub struct MonIndexReader<'a> { data: &'a [u8] }
+impl<'a> MonIndexReader<'a> {
+    pub fn open(data: &'a [u8]) -> Option<Self> { ... }
+    pub fn query(&self, ...) -> ... { ... }
+}
+```
+
+### 2. Ajouter l'entry dans index_registry
+
+```rust
+// src/suffix_fst/mon_index.rs — ajouter à la fin
+pub struct MonIndexEntry;
+impl crate::suffix_fst::index_registry::SfxIndexFile for MonIndexEntry {
+    fn id(&self) -> &'static str { "mon_index" }
+    fn extension(&self) -> &'static str { "mon_index" }  // nom du fichier sur disque
+    fn merge_strategy(&self) -> MergeStrategy {
+        MergeStrategy::ExternalDagNode  // si construit par le DAG
+        // ou MergeStrategy::EventDriven si construit via on_token/on_posting
+    }
+    fn on_token(&mut self, _ord: u32, _text: &str) {}
+    fn on_posting(&mut self, _ord: u32, _doc: u32, _ti: u32, _bf: u32, _bt: u32) {}
+    fn serialize(&self) -> Vec<u8> { Vec::new() }
+}
+```
+
+### 3. Enregistrer dans all_indexes()
+
+```rust
+// src/suffix_fst/index_registry.rs
+pub fn all_indexes() -> Vec<Box<dyn SfxIndexFile>> {
+    vec![
+        // ... existants ...
+        Box::new(super::mon_index::MonIndexEntry),  // ← ajouter
+    ]
+}
+```
+
+**CRITIQUE** : sans cette ligne, le segment reader ne chargera JAMAIS le fichier.
+`sfx_index_file("mon_index", field)` retournera `None`.
+
+### 4. Déclarer le module
+
+```rust
+// src/suffix_fst/mod.rs
+pub mod mon_index;
+```
+
+### 5. Construire les données dans le pipeline d'indexation
+
+**Option A — Prebuilt (données construites dans collector/into_data)** :
+
+```rust
+// collector_v3.rs — ajouter au SfxCollectorDataV3
+pub struct SfxCollectorDataV3 {
+    // ...
+    pub mon_index: Vec<u8>,  // données sérialisées
+}
+
+// sfx_dag_v3.rs — AssembleV3Node, ajouter aux registry_files
+derived.push(("mon_index".to_string(), data.mon_index.clone()));
+```
+
+**Option B — EventDriven (construit via on_token/on_posting)** :
+
+Implémenter `on_token` et `on_posting` dans le trait SfxIndexFile.
+Le builder appelle automatiquement ces méthodes dans `build_derived_indexes_v3`.
+
+### 6. Charger côté query
+
+```rust
+// src/query/contains_query_v3.rs (ou fuzzy_query_v3.rs)
+let mon_index_bytes = seg_reader.sfx_index_file("mon_index", self.field)
+    .and_then(|fs| fs.read_bytes().ok())
+    .map(|b| b.as_ref().to_vec());
+let mon_index_reader = mon_index_bytes.as_ref()
+    .and_then(|b| MonIndexReader::open(b));
+```
+
+### 7. Passer au pipeline query
+
+Ajouter le paramètre aux fonctions : `contains_v3`, `fuzzy_v3`,
+`find_literal_v3`, etc. Propager jusqu'au resolve qui l'utilise.
+
+### 8. Tests
+
+Dans les tests d'intégration (`integration_tests.rs`) et les tests briques
+(`composite.rs`, `orchestrator.rs`) :
+- Ajouter le champ au `TestIndex` struct
+- Le construire dans `build()` / `build_index()`
+- Le passer aux helpers `query_contains`, `query_contains_hl`, `query_fuzzy`
+
+### Checklist
+
+- [ ] Module writer/reader avec tests roundtrip
+- [ ] SfxIndexFile impl avec id() et extension()
+- [ ] Enregistré dans all_indexes()
+- [ ] Déclaré dans mod.rs
+- [ ] Construit dans into_data() ou via EventDriven
+- [ ] Ajouté aux registry_files dans AssembleV3Node
+- [ ] Chargé dans contains_query_v3 / fuzzy_query_v3
+- [ ] Paramètre propagé dans le pipeline query
+- [ ] Tests mis à jour (TestIndex, build_index, helpers)
+
 ## Tokenizer : equal_chunk
 
 **Fichier** : `src/tokenizer/equal_chunk.rs`
