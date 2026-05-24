@@ -77,9 +77,11 @@ pub struct SfxCollectorV3 {
     chunk_to_word: Vec<Vec<(u32, u8, u8)>>,
     // Observed next-word pairs: (prev_word_id, next_word_id).
     next_word_pairs: Vec<(u32, u32)>,
-    // Sibling pairs: (intern_ord_a, intern_ord_b) for consecutive chunks and words.
+    // Sibling pairs: (intern_ord_a, intern_ord_b, content_len_a) for consecutive chunks and words.
+    // content_len_a = content bytes of ordinal A (used by sibling DFS to know how much
+    // of the query the first token consumes, excluding overlap).
     // Collected during add_value, remapped to final ordinals in into_data.
-    sibling_pairs: Vec<(u32, u32)>,
+    sibling_pairs: Vec<(u32, u32, u16)>,
     // Per-doc word position map: (doc_id, position) → word_id_within_doc.
     word_pos_map: crate::suffix_fst::word_pos_map::WordPosMapWriter,
 
@@ -135,7 +137,7 @@ impl SfxCollectorV3 {
             word_intern: HashMap::new(),
             chunk_to_word: Vec::new(),
             next_word_pairs: Vec::new(),
-            sibling_pairs: Vec::new(),
+            sibling_pairs: Vec::new(), // (intern_a, intern_b, content_len_a)
             word_pos_map: crate::suffix_fst::word_pos_map::WordPosMapWriter::new(),
             doc_values: Vec::new(),
             doc_active: false,
@@ -272,8 +274,10 @@ impl SfxCollectorV3 {
         }
 
         // Collect chunk sibling pairs: consecutive chunks in the same value
-        for w in chunk_intern_ids.windows(2) {
-            self.sibling_pairs.push((w[0], w[1]));
+        for (ci, w) in chunk_intern_ids.windows(2).enumerate() {
+            let meta = &self.token_meta[w[0] as usize];
+            let content_len = (meta.own_len as u16).saturating_sub(meta.sep_len as u16);
+            self.sibling_pairs.push((w[0], w[1], content_len));
         }
 
         // Update word offset for next value in same doc
@@ -336,7 +340,7 @@ impl SfxCollectorV3 {
             }
 
             let word_ids: Vec<usize> = words_in_value.keys().copied().collect();
-            let mut ws_intern_sequence: Vec<u32> = Vec::new();
+            let mut ws_intern_sequence: Vec<(u32, u16)> = Vec::new(); // (intern_ord, content_len)
             for (wi, &word_id) in word_ids.iter().enumerate() {
                 let chunk_idxs = &words_in_value[&word_id];
 
@@ -408,7 +412,7 @@ impl SfxCollectorV3 {
                     is_word_start: chunks[first_ci].1.is_word_start,
                     num_chunks: chunk_idxs.len() as u32,
                 });
-                ws_intern_sequence.push(ws_intern);
+                ws_intern_sequence.push((ws_intern, word_content.len() as u16));
 
                 // Tail entry for very long words only.
                 // The main word-stripped entry indexes suffixes SI=0 to
@@ -461,7 +465,7 @@ impl SfxCollectorV3 {
 
             // Collect word sibling pairs: consecutive words in the same value
             for w in ws_intern_sequence.windows(2) {
-                self.sibling_pairs.push((w[0], w[1]));
+                self.sibling_pairs.push((w[0].0, w[1].0, w[0].1));
             }
         }
 
@@ -727,11 +731,14 @@ impl SfxCollectorV3 {
         let word_pos_map_data = self.word_pos_map.serialize();
 
         // Build sibling table v3: remap intern ordinals to final ordinals
+        // Sibling table v3: gap_len field stores content_len of the source ordinal
+        // (used by sibling_chain_dfs to know how many bytes of the query are consumed
+        // by each sibling, excluding the overlap portion).
         let mut sibling_writer = crate::suffix_fst::sibling_table::SiblingTableWriter::new(final_ord);
-        for &(a, b) in &self.sibling_pairs {
+        for &(a, b, content_len) in &self.sibling_pairs {
             let fa = intern_to_final[a as usize];
             let fb = intern_to_final[b as usize];
-            sibling_writer.add(fa, fb, 0);
+            sibling_writer.add(fa, fb, content_len);
         }
         let sibling_v3_data = sibling_writer.serialize();
 

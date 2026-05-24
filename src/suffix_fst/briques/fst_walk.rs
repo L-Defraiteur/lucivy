@@ -570,24 +570,32 @@ pub fn sibling_chain_dfs(
         while let Some((cur_ord, rem, chain, depth)) = stack.pop() {
             if depth >= MAX_CHAIN_DEPTH { continue; }
 
-            let siblings = sibling_table.contiguous_siblings(cur_ord as u32);
-            for &next_ord in &siblings {
+            // siblings() returns SiblingEntry { next_ordinal, gap_len }.
+            // In our v3 sibling table, gap_len stores content_len of cur_ord
+            // (how many content bytes the CURRENT token has, excluding overlap).
+            let siblings = sibling_table.siblings(cur_ord as u32);
+            for sib in &siblings {
+                let next_ord = sib.next_ordinal;
                 let next_text = match termtexts.text(next_ord) {
                     Some(t) => t,
                     None => continue,
                 };
-
-                // In v3, compare remainder with CONTENT portion only (no overlap).
-                // The TermTexts stores the extended text (content+sep+overlap).
-                // We need the content_len to know where content ends.
-                // For simplicity, we compare with the full text — the overlap
-                // bytes are from the NEXT token, so if the remainder matches
-                // a prefix of the full text, it matches the content+overlap
-                // which is correct for chain building.
                 let next_lower = next_text.to_lowercase();
 
-                if rem == next_lower || next_lower.starts_with(rem) {
-                    // Terminal: sibling text covers the remainder
+                // Use content_len (stored in gap_len) to compare with the
+                // CONTENT portion only, not the full text including overlap.
+                // This prevents over-consuming overlap bytes that belong to
+                // the next sibling (e.g., "uniquept" consuming 8 bytes instead
+                // of 6 for word "unique" with overlap "pt").
+                let content_len = sib.gap_len as usize;
+                let next_content = if content_len > 0 && content_len < next_lower.len() {
+                    &next_lower[..content_len]
+                } else {
+                    &next_lower
+                };
+
+                if rem == next_content || next_content.starts_with(rem) {
+                    // Terminal: sibling content covers the remainder
                     let mut c = chain.clone();
                     c.push(vec![next_ord as u64]);
                     chains.push(TokenChainV3 {
@@ -595,15 +603,14 @@ pub fn sibling_chain_dfs(
                         first_sti: split.parent.sti,
                         total_query_consumed: query_lower.len(),
                     });
-                } else if rem.starts_with(&next_lower) {
-                    // Partial: remainder starts with sibling text → consume and continue
-                    let consumed = next_lower.len();
+                } else if rem.starts_with(next_content) {
+                    // Partial: remainder starts with sibling content → consume and continue
+                    let consumed = next_content.len();
                     let new_rem = &rem[consumed..];
                     let mut c = chain.clone();
                     c.push(vec![next_ord as u64]);
                     stack.push((next_ord as u64, new_rem, c, depth + 1));
                 }
-                // else: no match, skip this sibling
             }
         }
     }
