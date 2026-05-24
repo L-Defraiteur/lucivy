@@ -99,13 +99,18 @@ impl ContainsQueryV3 {
 
         let debug_query = std::env::var("V3_DEBUG_QUERY").ok();
         let do_debug = debug_query.as_deref() == Some(&self.query_text);
+        let trace_id = if do_debug {
+            Some(crate::suffix_fst::briques::trace::trace_begin())
+        } else {
+            None
+        };
 
         let ctx = BriquesContext {
             reader: &reader,
             resolver: &*pr,
             filter_docs: None,
             debug: do_debug,
-            trace_id: None,
+            trace_id,
             posmap: posmap_bytes.as_ref().and_then(|b| crate::suffix_fst::posmap::PosMapReader::open(b)),
             bytemap: bytemap_bytes.as_ref().and_then(|b| crate::suffix_fst::bytemap::ByteBitmapReader::open(b)),
             word_sfxpost: wsp_bytes.as_ref().and_then(|b| crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(b)),

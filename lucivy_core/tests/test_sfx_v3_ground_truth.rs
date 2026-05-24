@@ -448,11 +448,19 @@ fn v3_ground_truth_contains() {
                 eprintln!("  {label:30} FP: {n} docs — grep logic issue?");
             }
 
-            // Re-run the query with V3_DEBUG_QUERY env var to get traces
-            eprintln!("\n  --- Re-running {query} {mode} with debug ---");
+            // Re-run with trace enabled — dumps structured trace
+            eprintln!("\n  --- Trace for {query} {mode} ---");
             std::env::set_var("V3_DEBUG_QUERY", query);
             let _ = search_v3(&handle, &files, query, strict);
             std::env::remove_var("V3_DEBUG_QUERY");
+            // Dump all active traces (one per segment)
+            for tid in 1..100u64 {
+                if let Some(trace) = ld_lucivy::suffix_fst::briques::trace::trace_finish(tid) {
+                    if !trace.events.is_empty() {
+                        eprintln!("{}", trace.dump());
+                    }
+                }
+            }
         }
     }
 
