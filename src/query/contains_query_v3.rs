@@ -99,11 +99,16 @@ impl ContainsQueryV3 {
             .and_then(|b| crate::suffix_fst::posmap::PosMapReader::open(b));
         let bytemap_reader = bytemap_bytes.as_ref()
             .and_then(|b| crate::suffix_fst::bytemap::ByteBitmapReader::open(b));
+        let word_sfxpost_bytes = seg_reader.sfx_index_file("word_sfxpost", self.field)
+            .and_then(|fs| fs.read_bytes().ok())
+            .map(|b| b.as_ref().to_vec());
+        let word_sfxpost_reader = word_sfxpost_bytes.as_ref()
+            .and_then(|b| crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(b));
 
         let mut matches = orchestrator::contains_v3(
             &reader, &self.query_text, &*pr,
             self.anchor_start, self.exact_match, self.strict_separators, None,
-            posmap_reader.as_ref(), bytemap_reader.as_ref(),
+            posmap_reader.as_ref(), bytemap_reader.as_ref(), word_sfxpost_reader.as_ref(),
         );
 
         // Post-filter chain matches (span > 1) using word_pos_map for per-doc verification.

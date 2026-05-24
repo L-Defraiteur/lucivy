@@ -47,14 +47,12 @@ pub fn contains_v3(
     filter_docs: Option<&HashSet<DocId>>,
     posmap: Option<&crate::suffix_fst::posmap::PosMapReader<'_>>,
     bytemap: Option<&crate::suffix_fst::bytemap::ByteBitmapReader<'_>>,
+    word_sfxpost: Option<&crate::suffix_fst::word_sfxpost::WordSfxPostReader<'_>>,
 ) -> Vec<MatchV3> {
-    // Validate input
     if query.is_empty() || query.len() > MAX_QUERY_LEN {
         return Vec::new();
     }
 
-    // For strict_sep=false: strip all non-alphanum from the query.
-    // The stripped partition (0x02) in the FST will match content+overlap without seps.
     let effective_query;
     let query_ref = if !strict_separators {
         effective_query = query.chars().filter(|c| is_content_char(*c)).collect::<String>();
@@ -66,7 +64,6 @@ pub fn contains_v3(
         query
     };
 
-    // Debug: trace chain/candidate details for specific queries
     let debug_query = std::env::var("V3_DEBUG_QUERY").ok();
     let do_debug = debug_query.as_deref() == Some(query_ref);
 
@@ -85,7 +82,6 @@ pub fn contains_v3(
                 let num_alts: usize = c.ordinals.iter().map(|a| a.len()).sum();
                 writeln!(f, "  ords={:?} sti={} consumed={} total_alts={}", c.ordinals, c.first_sti, c.total_query_consumed, num_alts).ok();
             }
-            // Log falling walk splits with content_len info
             writeln!(f, "falling_walk_splits:").ok();
             let splits = super::fst_walk::falling_walk_v3(reader, query_ref, strict_separators);
             for s in &splits {
@@ -99,7 +95,7 @@ pub fn contains_v3(
 
     let mut matches = composite::find_literal_v3(
         reader, query_ref, resolver, anchor_start, strict_separators, filter_docs,
-        posmap, bytemap,
+        posmap, bytemap, word_sfxpost,
     );
 
     if do_debug {
@@ -166,6 +162,7 @@ pub fn fuzzy_v3(
     max_doc: DocId,
     posmap: Option<&crate::suffix_fst::posmap::PosMapReader<'_>>,
     bytemap: Option<&crate::suffix_fst::bytemap::ByteBitmapReader<'_>>,
+    word_sfxpost: Option<&crate::suffix_fst::word_sfxpost::WordSfxPostReader<'_>>,
 ) -> (BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>) {
     // Validate input
     if query.is_empty() || query.len() > MAX_QUERY_LEN || distance > 3 {
@@ -187,7 +184,7 @@ pub fn fuzzy_v3(
     // d=0 → route to exact contains (no trigram overhead)
     if distance == 0 {
         let matches = contains_v3(reader, query_ref, resolver, false, false, strict_separators, None,
-            posmap, bytemap);
+            posmap, bytemap, word_sfxpost);
         let mut bitset = BitSet::with_max_value(max_doc);
         let mut highlights = Vec::new();
         let mut coverage = Vec::new();
@@ -234,7 +231,7 @@ mod tests {
         }
     }
 
-    fn build_index(texts: &[&str]) -> (Vec<u8>, Vec<u8>) {
+    fn build_index(texts: &[&str]) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
         let mut collector = SfxCollectorV3::new();
         for text in texts {
             collector.begin_doc();
@@ -270,77 +267,87 @@ mod tests {
         }
         let sfxpost = post_writer.finish();
 
+        let wsp = data.word_sfxpost;
+        let derived = crate::suffix_fst::index_registry::build_derived_indexes_v3(
+            &data.tokens, Some(&sfxpost), Some(&data.own_lens),
+        );
+        let pm = derived.iter().find(|(e, _)| e == "posmap").map(|(_, d)| d.clone()).unwrap_or_default();
+        let bm = derived.iter().find(|(e, _)| e == "bytemap").map(|(_, d)| d.clone()).unwrap_or_default();
         let writer = SfxFileWriterV3::new(fst_data, parent_data, data.num_docs);
-        (writer.to_bytes(), sfxpost)
+        (writer.to_bytes(), sfxpost, wsp, pm, bm)
     }
 
     // ── contains_v3 ──
 
     #[test]
     fn test_contains_basic() {
-        let (sfx, post) = build_index(&["mutex_lock", "hello_world"]);
+        let (sfx, post, _wsp, _pm, _bm) = build_index(&["mutex_lock", "hello_world"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
-        let matches = contains_v3(&reader, "mutex", &resolver, false, false, true, None, None, None);
+        let matches = contains_v3(&reader, "mutex", &resolver, false, false, true, None, None, None, None);
         assert!(!matches.is_empty());
         assert_eq!(matches[0].doc_id, 0);
     }
 
     #[test]
     fn test_contains_cross_token() {
-        let (sfx, post) = build_index(&["mutex_lock"]);
+        let (sfx, post, _wsp, _pm, _bm) = build_index(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
-        let matches = contains_v3(&reader, "mutex_lock", &resolver, false, false, true, None, None, None);
+        let matches = contains_v3(&reader, "mutex_lock", &resolver, false, false, true, None, None, None, None);
         assert!(!matches.is_empty());
     }
 
     #[test]
     fn test_contains_sep_skip() {
-        let (sfx, post) = build_index(&["mutex_lock"]);
+        let (sfx, post, wsp, pm, bm) = build_index(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
+        let pm_r = crate::suffix_fst::posmap::PosMapReader::open(&pm);
+        let bm_r = crate::suffix_fst::bytemap::ByteBitmapReader::open(&bm);
+        let wsp_r = crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(&wsp);
 
         // "mutexlock" (no sep) → should match "mutex_lock" with strict_sep=false
-        let matches = contains_v3(&reader, "mutexlock", &resolver, false, false, false, None, None, None);
+        let matches = contains_v3(&reader, "mutexlock", &resolver, false, false, false, None,
+            pm_r.as_ref(), bm_r.as_ref(), wsp_r.as_ref());
         assert!(!matches.is_empty(), "sep-skip should work");
     }
 
     #[test]
     fn test_contains_strict_rejects() {
-        let (sfx, post) = build_index(&["mutex_lock"]);
+        let (sfx, post, _wsp, _pm, _bm) = build_index(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
         // "mutex lock" (space) strict=true → should NOT match "mutex_lock" (underscore)
-        let matches = contains_v3(&reader, "mutex lock", &resolver, false, false, true, None, None, None);
+        let matches = contains_v3(&reader, "mutex lock", &resolver, false, false, true, None, None, None, None);
         assert!(matches.is_empty(), "strict should reject different separator");
     }
 
     #[test]
     fn test_contains_anchor_start() {
-        let (sfx, post) = build_index(&["mutex_lock"]);
+        let (sfx, post, _wsp, _pm, _bm) = build_index(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
         // "mutex" with anchor → found (starts at SI=0)
-        let matches = contains_v3(&reader, "mutex_lo", &resolver, true, false, true, None, None, None);
+        let matches = contains_v3(&reader, "mutex_lo", &resolver, true, false, true, None, None, None, None);
         assert!(!matches.is_empty());
 
         // "tex" with anchor → not found (SI>0)
-        let matches = contains_v3(&reader, "tex_lo", &resolver, true, false, true, None, None, None);
+        let matches = contains_v3(&reader, "tex_lo", &resolver, true, false, true, None, None, None, None);
         assert!(matches.is_empty());
     }
 
     #[test]
     fn test_contains_empty_query() {
-        let (sfx, post) = build_index(&["mutex_lock"]);
+        let (sfx, post, _wsp, _pm, _bm) = build_index(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
-        let matches = contains_v3(&reader, "", &resolver, false, false, true, None, None, None);
+        let matches = contains_v3(&reader, "", &resolver, false, false, true, None, None, None, None);
         assert!(matches.is_empty());
     }
 
@@ -348,24 +355,24 @@ mod tests {
 
     #[test]
     fn test_fuzzy_basic() {
-        let (sfx, post) = build_index(&["mutex_lock", "hello_world"]);
+        let (sfx, post, _wsp, _pm, _bm) = build_index(&["mutex_lock", "hello_world"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
         // "mutex_lck" d=1 → should find "mutex_lock"
-        let (bitset, highlights, _) = fuzzy_v3(&reader, "mutex_lck", 1, &resolver, true, 2, None, None);
+        let (bitset, highlights, _) = fuzzy_v3(&reader, "mutex_lck", 1, &resolver, true, 2, None, None, None);
         assert!(bitset.contains(0), "doc 0 should match fuzzy");
         assert!(!highlights.is_empty());
     }
 
     #[test]
     fn test_fuzzy_d0_routes_to_exact() {
-        let (sfx, post) = build_index(&["mutex_lock"]);
+        let (sfx, post, _wsp, _pm, _bm) = build_index(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
         // d=0 → exact match via contains_v3
-        let (bitset, _, coverage) = fuzzy_v3(&reader, "mutex_lo", 0, &resolver, true, 1, None, None);
+        let (bitset, _, coverage) = fuzzy_v3(&reader, "mutex_lo", 0, &resolver, true, 1, None, None, None);
         assert!(bitset.contains(0));
         // Coverage should be 0.0 (perfect match, no misses)
         assert!(coverage.iter().any(|&(_, score)| score == 0.0));
@@ -373,33 +380,33 @@ mod tests {
 
     #[test]
     fn test_fuzzy_sep_skip() {
-        let (sfx, post) = build_index(&["mutex_lock"]);
+        let (sfx, post, _wsp, _pm, _bm) = build_index(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
         // "mutexlck" d=1 strict_sep=false
-        let (bitset, _, _) = fuzzy_v3(&reader, "mutexlck", 1, &resolver, false, 1, None, None);
+        let (bitset, _, _) = fuzzy_v3(&reader, "mutexlck", 1, &resolver, false, 1, None, None, None);
         assert!(bitset.contains(0), "fuzzy + sep-skip should find match");
     }
 
     #[test]
     fn test_fuzzy_no_match() {
-        let (sfx, post) = build_index(&["mutex_lock"]);
+        let (sfx, post, _wsp, _pm, _bm) = build_index(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
-        let (bitset, _, _) = fuzzy_v3(&reader, "zzzzzzzzz", 1, &resolver, true, 1, None, None);
+        let (bitset, _, _) = fuzzy_v3(&reader, "zzzzzzzzz", 1, &resolver, true, 1, None, None, None);
         assert!(!bitset.contains(0));
     }
 
     #[test]
     fn test_fuzzy_distance_too_high() {
-        let (sfx, post) = build_index(&["mutex_lock"]);
+        let (sfx, post, _wsp, _pm, _bm) = build_index(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
         // d=4 → rejected (max 3)
-        let (bitset, _, _) = fuzzy_v3(&reader, "mutex", 4, &resolver, true, 1, None, None);
+        let (bitset, _, _) = fuzzy_v3(&reader, "mutex", 4, &resolver, true, 1, None, None, None);
         assert!(!bitset.contains(0));
     }
 }

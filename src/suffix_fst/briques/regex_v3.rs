@@ -236,7 +236,7 @@ where
         let matches = composite::find_literal_v3(
             reader, viable[lit_idx], resolver, anchor_start && lit_idx == 0,
             strict_sep, doc_filter.as_ref(),
-            posmap.as_ref(), bytemap.as_ref(),
+            posmap.as_ref(), bytemap.as_ref(), None,
         );
 
         if doc_filter.is_none() && !matches.is_empty() {
@@ -467,11 +467,11 @@ mod tests {
         let resolver = MockResolver::new(&post);
 
         // Verify literals are findable
-        let matches = composite::find_literal_v3(&reader, "mutex", &resolver, false, true, None, None, None);
+        let matches = composite::find_literal_v3(&reader, "mutex", &resolver, false, true, None, None, None, None);
         assert!(!matches.is_empty(), "literal 'mutex' should be found");
         assert_eq!(matches[0].doc_id, 0);
 
-        let matches = composite::find_literal_v3(&reader, "lock", &resolver, false, true, None, None, None);
+        let matches = composite::find_literal_v3(&reader, "lock", &resolver, false, true, None, None, None, None);
         assert!(!matches.is_empty(), "literal 'lock' should be found");
     }
 
@@ -481,8 +481,8 @@ mod tests {
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
-        let m1 = composite::find_literal_v3(&reader, "mutex", &resolver, false, true, None, None, None);
-        let m2 = composite::find_literal_v3(&reader, "init", &resolver, false, true, None, None, None);
+        let m1 = composite::find_literal_v3(&reader, "mutex", &resolver, false, true, None, None, None, None);
+        let m2 = composite::find_literal_v3(&reader, "init", &resolver, false, true, None, None, None, None);
 
         let g1 = group_by_doc_v3(&m1);
         let g2 = group_by_doc_v3(&m2);
@@ -499,8 +499,8 @@ mod tests {
         let resolver = MockResolver::new(&post);
 
         // "mutex" in doc 0, "world" in doc 1 → no intersection
-        let m1 = composite::find_literal_v3(&reader, "mutex", &resolver, false, true, None, None, None);
-        let m2 = composite::find_literal_v3(&reader, "world", &resolver, false, true, None, None, None);
+        let m1 = composite::find_literal_v3(&reader, "mutex", &resolver, false, true, None, None, None, None);
+        let m2 = composite::find_literal_v3(&reader, "world", &resolver, false, true, None, None, None, None);
 
         let g1 = group_by_doc_v3(&m1);
         let g2 = group_by_doc_v3(&m2);

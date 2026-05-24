@@ -84,10 +84,16 @@ impl FuzzyQueryV3 {
         let bytemap_reader = bytemap_bytes.as_ref()
             .and_then(|b| crate::suffix_fst::bytemap::ByteBitmapReader::open(b));
 
+        let word_sfxpost_bytes = seg_reader.sfx_index_file("word_sfxpost", self.field)
+            .and_then(|fs| fs.read_bytes().ok())
+            .map(|b| b.as_ref().to_vec());
+        let word_sfxpost_reader = word_sfxpost_bytes.as_ref()
+            .and_then(|b| crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(b));
+
         let (_bitset, highlights, _coverage) = orchestrator::fuzzy_v3(
             &reader, &self.query_text, self.distance,
             &*pr, self.strict_separators, seg_reader.max_doc(),
-            posmap_reader.as_ref(), bytemap_reader.as_ref(),
+            posmap_reader.as_ref(), bytemap_reader.as_ref(), word_sfxpost_reader.as_ref(),
         );
 
         // Deduplicate doc_tf from highlights

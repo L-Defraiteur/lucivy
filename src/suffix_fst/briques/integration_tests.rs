@@ -20,6 +20,9 @@ mod tests {
     struct TestIndex {
         sfx_bytes: Vec<u8>,
         sfxpost_bytes: Vec<u8>,
+        posmap_bytes: Vec<u8>,
+        bytemap_bytes: Vec<u8>,
+        word_sfxpost_bytes: Vec<u8>,
     }
 
     struct TestResolver(SfxPostReaderV2);
@@ -75,9 +78,25 @@ mod tests {
         let sfxpost = post_writer.finish();
         let writer = SfxFileWriterV3::new(fst_data, parent_data, data.num_docs);
 
+        // Build derived indexes (posmap, bytemap) for relaxed chain verification
+        let derived = crate::suffix_fst::index_registry::build_derived_indexes_v3(
+            &data.tokens, Some(&sfxpost), Some(&data.own_lens),
+        );
+        let posmap_bytes = derived.iter()
+            .find(|(ext, _)| ext == "posmap")
+            .map(|(_, d)| d.clone())
+            .unwrap_or_default();
+        let bytemap_bytes = derived.iter()
+            .find(|(ext, _)| ext == "bytemap")
+            .map(|(_, d)| d.clone())
+            .unwrap_or_default();
+
         TestIndex {
             sfx_bytes: writer.to_bytes(),
             sfxpost_bytes: sfxpost,
+            posmap_bytes,
+            bytemap_bytes,
+            word_sfxpost_bytes: data.word_sfxpost,
         }
     }
 
@@ -85,7 +104,11 @@ mod tests {
     fn query_contains(idx: &TestIndex, query: &str, strict_sep: bool) -> Vec<u32> {
         let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
-        let matches = orchestrator::contains_v3(&reader, query, &resolver, false, false, strict_sep, None, None, None);
+        let posmap = crate::suffix_fst::posmap::PosMapReader::open(&idx.posmap_bytes);
+        let bytemap = crate::suffix_fst::bytemap::ByteBitmapReader::open(&idx.bytemap_bytes);
+        let word_sfxpost = crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(&idx.word_sfxpost_bytes);
+        let matches = orchestrator::contains_v3(&reader, query, &resolver, false, false, strict_sep, None,
+            posmap.as_ref(), bytemap.as_ref(), word_sfxpost.as_ref());
         let mut docs: Vec<u32> = matches.iter().map(|m| m.doc_id).collect();
         docs.sort_unstable();
         docs.dedup();
@@ -96,7 +119,7 @@ mod tests {
     fn query_starts_with(idx: &TestIndex, query: &str) -> Vec<u32> {
         let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
-        let matches = orchestrator::contains_v3(&reader, query, &resolver, true, false, true, None, None, None);
+        let matches = orchestrator::contains_v3(&reader, query, &resolver, true, false, true, None, None, None, None);
         matches.iter().map(|m| m.doc_id).collect()
     }
 
@@ -104,7 +127,11 @@ mod tests {
     fn query_contains_hl(idx: &TestIndex, query: &str, strict_sep: bool) -> Vec<(u32, u32, u32)> {
         let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
-        let matches = orchestrator::contains_v3(&reader, query, &resolver, false, false, strict_sep, None, None, None);
+        let posmap = crate::suffix_fst::posmap::PosMapReader::open(&idx.posmap_bytes);
+        let bytemap = crate::suffix_fst::bytemap::ByteBitmapReader::open(&idx.bytemap_bytes);
+        let word_sfxpost = crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(&idx.word_sfxpost_bytes);
+        let matches = orchestrator::contains_v3(&reader, query, &resolver, false, false, strict_sep, None,
+            posmap.as_ref(), bytemap.as_ref(), word_sfxpost.as_ref());
         let mut hl: Vec<(u32, u32, u32)> = matches.iter()
             .map(|m| (m.doc_id, m.byte_from, m.byte_to))
             .collect();
@@ -117,7 +144,11 @@ mod tests {
     fn query_fuzzy(idx: &TestIndex, query: &str, distance: u8, strict_sep: bool) -> Vec<u32> {
         let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
-        let (bitset, _, _) = orchestrator::fuzzy_v3(&reader, query, distance, &resolver, strict_sep, 100, None, None);
+        let posmap = crate::suffix_fst::posmap::PosMapReader::open(&idx.posmap_bytes);
+        let bytemap = crate::suffix_fst::bytemap::ByteBitmapReader::open(&idx.bytemap_bytes);
+        let word_sfxpost = crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(&idx.word_sfxpost_bytes);
+        let (bitset, _, _) = orchestrator::fuzzy_v3(&reader, query, distance, &resolver, strict_sep, 100,
+            posmap.as_ref(), bytemap.as_ref(), word_sfxpost.as_ref());
         (0..100).filter(|&d| bitset.contains(d)).collect()
     }
 
@@ -380,7 +411,7 @@ mod tests {
         let idx = build(&["lock_lock_lock"]);
         let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
-        let matches = orchestrator::contains_v3(&reader, "lock", &resolver, false, false, true, None, None, None);
+        let matches = orchestrator::contains_v3(&reader, "lock", &resolver, false, false, true, None, None, None, None);
         assert!(matches.len() >= 3, "should find 3 occurrences, got {}", matches.len());
     }
 
@@ -440,7 +471,7 @@ mod tests {
         let idx = build(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
-        let matches = orchestrator::contains_v3(&reader, "lock", &resolver, false, false, true, None, None, None);
+        let matches = orchestrator::contains_v3(&reader, "lock", &resolver, false, false, true, None, None, None, None);
         eprintln!("h3 all matches:");
         for m in &matches {
             eprintln!("  doc={} pos={} span={} byte=[{}..{}] sti={} ord={}",
@@ -655,7 +686,71 @@ mod tests {
     fn x11b_stripped_traverse_pure_sep() {
         // "nationalizationinit" strict_sep=false → traverse pure-sep TI=3
         let idx = build(&["internationalization________initialization"]);
-        assert!(!query_contains(&idx, "nationalizationinit", false).is_empty());
+        let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
+        // Trace: what does fst_candidates find for the stripped query?
+        let cands = fst_walk::fst_candidates_v3(&reader, "nationalizationinit", false, false);
+        eprintln!("x11b fst_candidates: {}", cands.len());
+        let splits = fst_walk::falling_walk_v3(&reader, "nationalizationinit", false);
+        eprintln!("x11b falling_walk: {} splits", splits.len());
+        for s in &splits {
+            eprintln!("  consumed={} rem={} sti={} own={} ovl_valid={}",
+                s.query_consumed, s.remainder_start, s.parent.sti, s.parent.own_len, s.overlap_validated);
+        }
+        let chains = fst_walk::cross_token_chain_v3(&reader, "nationalizationinit", false);
+        eprintln!("x11b chains: {}", chains.len());
+        for c in &chains {
+            eprintln!("  ords={:?} sti={}", c.ordinals, c.first_sti);
+        }
+        // Manual resolve to trace the issue
+        let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
+        let posmap = crate::suffix_fst::posmap::PosMapReader::open(&idx.posmap_bytes);
+        let bytemap = crate::suffix_fst::bytemap::ByteBitmapReader::open(&idx.bytemap_bytes);
+        eprintln!("x11b posmap={} bytemap={}", posmap.is_some(), bytemap.is_some());
+
+        // Resolve with strict to see if chains match positionally
+        let strict_matches = resolve::resolve_chains_v3(&chains, &resolver, None);
+        eprintln!("x11b strict_resolve: {} matches", strict_matches.len());
+        for m in &strict_matches {
+            eprintln!("  doc={} pos={} span={} byte=[{}..{}]", m.doc_id, m.position, m.span, m.byte_from, m.byte_to);
+        }
+
+        // Trace all chain ordinals and their postings
+        let sfxpost_reader = SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap();
+        eprintln!("x11b sfxpost num_terms={}", sfxpost_reader.num_terms());
+        // Check word sfxpost
+        if let Some(wsp) = crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(&idx.word_sfxpost_bytes) {
+            eprintln!("x11b word_sfxpost num_ords={}", wsp.num_ordinals());
+            for ord in 0..wsp.num_ordinals() {
+                let entries = wsp.entries(ord);
+                if !entries.is_empty() {
+                    eprintln!("x11b word_sfxpost[{ord}]: {:?}",
+                        entries.iter().map(|e| (e.doc_id, e.first_position, e.last_position, e.byte_from, e.byte_to)).collect::<Vec<_>>());
+                }
+            }
+        } else {
+            eprintln!("x11b word_sfxpost: EMPTY/INVALID");
+        }
+        // Dump ALL postings in sfxpost
+        for ord in 0..sfxpost_reader.num_terms() {
+            let entries = sfxpost_reader.entries(ord);
+            if !entries.is_empty() {
+                eprintln!("x11b sfxpost[{ord}]: {:?}",
+                    entries.iter().map(|e| (e.doc_id, e.token_index, e.byte_from, e.byte_to)).collect::<Vec<_>>());
+            }
+        }
+        for (ci, chain) in chains.iter().enumerate() {
+            let all_ords: Vec<Vec<u64>> = chain.ordinals.clone();
+            eprintln!("x11b chain[{ci}] sti={} ords={:?}", chain.first_sti, all_ords);
+        }
+
+        if let (Some(pm), Some(bm)) = (posmap.as_ref(), bytemap.as_ref()) {
+            let relaxed_matches = resolve::resolve_chains_v3_relaxed(&chains, &resolver, None, pm, bm);
+            eprintln!("x11b relaxed_resolve: {} matches", relaxed_matches.len());
+        }
+
+        let docs = query_contains(&idx, "nationalizationinit", false);
+        eprintln!("x11b final result: {:?}", docs);
+        assert!(!docs.is_empty());
     }
 
     #[test]
@@ -743,7 +838,7 @@ mod tests {
 
         // strict_sep=false (default for contains queries)
         let matches = orchestrator::contains_v3(
-            &reader, "function", &resolver, false, false, false, None, None, None,
+            &reader, "function", &resolver, false, false, false, None, None, None, None,
         );
 
         eprintln!("\n=== DIAG: 'function' strict_sep=false ===");
@@ -778,7 +873,7 @@ mod tests {
 
         // strict_sep=false: strips "_" from query → "uint64t"
         let matches_relaxed = orchestrator::contains_v3(
-            &reader, "uint64_t", &resolver, false, false, false, None, None, None,
+            &reader, "uint64_t", &resolver, false, false, false, None, None, None, None,
         );
         eprintln!("\n=== DIAG: 'uint64_t' strict_sep=false ===");
         for m in &matches_relaxed {
@@ -788,7 +883,7 @@ mod tests {
 
         // strict_sep=true: keeps "_" in query → "uint64_t"
         let matches_strict = orchestrator::contains_v3(
-            &reader, "uint64_t", &resolver, false, false, true, None, None, None,
+            &reader, "uint64_t", &resolver, false, false, true, None, None, None, None,
         );
         eprintln!("\n=== DIAG: 'uint64_t' strict_sep=true ===");
         for m in &matches_strict {
@@ -822,10 +917,10 @@ mod tests {
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
 
         let matches_relaxed = orchestrator::contains_v3(
-            &reader, "TableFunction", &resolver, false, false, false, None, None, None,
+            &reader, "TableFunction", &resolver, false, false, false, None, None, None, None,
         );
         let matches_strict = orchestrator::contains_v3(
-            &reader, "TableFunction", &resolver, false, false, true, None, None, None,
+            &reader, "TableFunction", &resolver, false, false, true, None, None, None, None,
         );
 
         eprintln!("\n=== DIAG: 'TableFunction' ===");
@@ -982,7 +1077,7 @@ mod tests {
 
         // Test with strict_sep=true (keeps "::" and "_" in query)
         let matches_strict = orchestrator::contains_v3(
-            &reader, "std::unique_ptr", &resolver, false, false, true, None, None, None,
+            &reader, "std::unique_ptr", &resolver, false, false, true, None, None, None, None,
         );
         eprintln!("\n  contains_v3 strict_sep=true:");
         for m in &matches_strict {
@@ -992,7 +1087,7 @@ mod tests {
 
         // Test with strict_sep=false (strips "::" and "_" → "stduniqueptr")
         let matches_relaxed = orchestrator::contains_v3(
-            &reader, "std::unique_ptr", &resolver, false, false, false, None, None, None,
+            &reader, "std::unique_ptr", &resolver, false, false, false, None, None, None, None,
         );
         eprintln!("\n  contains_v3 strict_sep=false:");
         for m in &matches_relaxed {
@@ -1101,10 +1196,10 @@ mod tests {
         }
 
         let matches_strict = orchestrator::contains_v3(
-            &reader, "include", &resolver, false, false, true, None, None, None,
+            &reader, "include", &resolver, false, false, true, None, None, None, None,
         );
         let matches_relaxed = orchestrator::contains_v3(
-            &reader, "include", &resolver, false, false, false, None, None, None,
+            &reader, "include", &resolver, false, false, false, None, None, None, None,
         );
 
         // Trace FST walk internals
@@ -1227,8 +1322,8 @@ mod tests {
 
         // Check via orchestrator
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
-        let strict_matches = orchestrator::contains_v3(&reader, "function", &resolver, false, false, true, None, None, None);
-        let relaxed_matches = orchestrator::contains_v3(&reader, "function", &resolver, false, false, false, None, None, None);
+        let strict_matches = orchestrator::contains_v3(&reader, "function", &resolver, false, false, true, None, None, None, None);
+        let relaxed_matches = orchestrator::contains_v3(&reader, "function", &resolver, false, false, false, None, None, None, None);
         eprintln!("\nstrict matches: {:?}", strict_matches.iter().map(|m| (m.doc_id, m.byte_from, m.byte_to, m.sti)).collect::<Vec<_>>());
         eprintln!("relaxed matches: {:?}", relaxed_matches.iter().map(|m| (m.doc_id, m.byte_from, m.byte_to, m.sti)).collect::<Vec<_>>());
 
@@ -1267,7 +1362,7 @@ mod tests {
         eprintln!("\nchains: {}", chains.len());
         for c in &chains { eprintln!("  ords={:?} sti={}", c.ordinals, c.first_sti); }
 
-        let matches = orchestrator::contains_v3(&reader, "struct", &resolver, false, false, true, None, None, None);
+        let matches = orchestrator::contains_v3(&reader, "struct", &resolver, false, false, true, None, None, None, None);
         eprintln!("\nmatches:");
         for m in &matches { eprintln!("  doc={} pos={} span={} byte=[{}..{}]", m.doc_id, m.position, m.span, m.byte_from, m.byte_to); }
 

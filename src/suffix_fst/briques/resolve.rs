@@ -103,6 +103,166 @@ pub fn resolve_chains_v3_relaxed(
         AdjacencyMode::Relaxed { posmap, bytemap })
 }
 
+/// Resolve cross-word chains using the WordSfxPost (partition 0x02 postings).
+///
+/// Word postings have `last_position` (for adjacency) and `byte_from` from
+/// the first chunk (for highlights). Relaxed adjacency checks intermediate
+/// tokens via posmap/bytemap.
+/// Resolve cross-word chains using WordSfxPost + chunk PostingResolver.
+///
+/// Word chains may contain ordinals from both partition 0x02 (word-stripped,
+/// resolved via WordSfxPost) and partitions 0x00/0x01 (chunks, resolved via
+/// PostingResolver). Each ordinal is looked up in the word sfxpost first;
+/// if not found, falls back to the chunk resolver.
+pub fn resolve_word_chains_v3(
+    chains: &[TokenChainV3],
+    word_sfxpost: &crate::suffix_fst::word_sfxpost::WordSfxPostReader<'_>,
+    chunk_resolver: &dyn PostingResolver,
+    filter_docs: Option<&HashSet<DocId>>,
+    posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
+    bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
+) -> Vec<MatchV3> {
+    use crate::suffix_fst::word_sfxpost::WordPostingEntry;
+
+    let mut results = Vec::new();
+
+    for chain in chains {
+        if chain.ordinals.is_empty() {
+            continue;
+        }
+
+        // Resolve first position from word sfxpost, fall back to chunk resolver
+        let first_entries: Vec<WordPostingEntry> = chain.ordinals[0].iter()
+            .flat_map(|&ord| {
+                let word_entries = word_sfxpost.entries(ord as u32);
+                let entries: Vec<WordPostingEntry> = if !word_entries.is_empty() {
+                    word_entries
+                } else {
+                    let chunk = if let Some(filter) = filter_docs {
+                        chunk_resolver.resolve_filtered(ord, filter)
+                    } else {
+                        chunk_resolver.resolve(ord)
+                    };
+                    chunk.into_iter().map(|e| WordPostingEntry {
+                        doc_id: e.doc_id,
+                        first_position: e.position,
+                        last_position: e.position,
+                        byte_from: e.byte_from,
+                        byte_to: e.byte_to,
+                    }).collect()
+                };
+                let mut filtered = entries;
+                if let Some(filter) = filter_docs {
+                    filtered.retain(|e| filter.contains(&e.doc_id));
+                }
+                filtered
+            })
+            .collect();
+
+        if chain.ordinals.len() == 1 {
+            for e in &first_entries {
+                results.push(MatchV3 {
+                    doc_id: e.doc_id,
+                    position: e.first_position,
+                    span: 1,
+                    byte_from: e.byte_from + chain.first_sti as u32,
+                    byte_to: e.byte_to,
+                    sti: chain.first_sti,
+                    ordinal: chain.ordinals[0][0],
+                    last_ordinal: chain.ordinals[0][0],
+                });
+            }
+            continue;
+        }
+
+        // Multi-position chain
+        // Active: (doc_id, prev_last_position, byte_from_first, byte_to_prev, last_ord)
+        let mut active: Vec<(DocId, u32, u32, u32, u64)> = first_entries.iter()
+            .map(|e| (e.doc_id, e.last_position, e.byte_from + chain.first_sti as u32, e.byte_to, 0u64))
+            .collect();
+
+        for ord_idx in 1..chain.ordinals.len() {
+            if active.is_empty() { break; }
+
+            // Resolve from word sfxpost first, fall back to chunk resolver
+            let mut entries: Vec<(WordPostingEntry, u64)> = Vec::new();
+            for &ord in &chain.ordinals[ord_idx] {
+                let word_entries = word_sfxpost.entries(ord as u32);
+                if !word_entries.is_empty() {
+                    for e in word_entries {
+                        entries.push((e, ord));
+                    }
+                } else {
+                    // Chunk ordinal — convert PostingEntry to WordPostingEntry
+                    let chunk_entries = if let Some(filter) = filter_docs {
+                        chunk_resolver.resolve_filtered(ord, filter)
+                    } else {
+                        chunk_resolver.resolve(ord)
+                    };
+                    for e in chunk_entries {
+                        entries.push((WordPostingEntry {
+                            doc_id: e.doc_id,
+                            first_position: e.position,
+                            last_position: e.position, // chunk = single position
+                            byte_from: e.byte_from,
+                            byte_to: e.byte_to,
+                        }, ord));
+                    }
+                }
+            }
+
+            let mut new_active: Vec<(DocId, u32, u32, u32, u64)> = Vec::new();
+
+            for &(doc_id, prev_last_pos, byte_from_first, _, _) in &active {
+                for (e, ord) in &entries {
+                    if e.doc_id != doc_id { continue; }
+                    // Use first_position of the next word for adjacency check
+                    // against last_position of the previous word
+                    let next_first_pos = e.first_position;
+                    let valid = if next_first_pos <= prev_last_pos {
+                        false
+                    } else if next_first_pos == prev_last_pos + 1 {
+                        true // directly adjacent
+                    } else {
+                        // Check intermediates between prev last chunk and next first chunk
+                        intermediates_are_pure_sep(
+                            posmap, bytemap,
+                            doc_id, prev_last_pos + 1, next_first_pos,
+                        )
+                    };
+
+                    if valid {
+                        new_active.push((doc_id, e.last_position, byte_from_first, e.byte_to, *ord));
+                        break;
+                    }
+                }
+            }
+
+            active = new_active;
+        }
+
+        // Emit matches
+        for &(doc_id, _, byte_from, byte_to, last_ord) in &active {
+            let position = first_entries.iter()
+                .find(|e| e.doc_id == doc_id)
+                .map(|e| e.first_position)
+                .unwrap_or(0);
+            results.push(MatchV3 {
+                doc_id,
+                position,
+                span: chain.ordinals.len() as u32,
+                byte_from,
+                byte_to,
+                sti: chain.first_sti,
+                ordinal: chain.ordinals[0][0],
+                last_ordinal: last_ord,
+            });
+        }
+    }
+
+    results
+}
+
 enum AdjacencyMode<'a> {
     /// pos[i+1] == pos[i] + 1
     Strict,

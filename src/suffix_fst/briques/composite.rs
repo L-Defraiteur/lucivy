@@ -19,16 +19,14 @@ use super::resolve::{self, MatchV3};
 
 // ─── find_literal_v3 ──────────────────────────────────────────────────────
 
-/// Find all occurrences of a literal string (single-token + cross-token).
+/// Find all occurrences of a literal string.
 ///
-/// Combines `fst_candidates_v3` (single-token matches) with
-/// `cross_token_chain_v3` (cross-token matches via falling walk chain).
-/// Deduplicates by (doc_id, position).
-/// Find all occurrences of a literal string (single-token + cross-token).
+/// Two separate pipelines:
+/// - **Chunk pipeline** (0x00/0x01): fst_candidates + cross_chunk_chain → strict resolve (pos+1)
+/// - **Word pipeline** (0x02): fst_candidates + cross_word_chain → relaxed resolve (posmap/bytemap)
 ///
-/// For strict_separators=false, posmap + bytemap are REQUIRED to verify
-/// that intermediate tokens between chain positions are pure-sep.
-/// Without them, relaxed chains are NOT resolved (only single-token matches).
+/// No mixing between pipelines. No fallbacks — posmap/bytemap are REQUIRED
+/// for the word pipeline. Without them, only chunk pipeline runs.
 pub fn find_literal_v3(
     reader: &SfxFileReaderV3,
     query: &str,
@@ -38,42 +36,44 @@ pub fn find_literal_v3(
     filter_docs: Option<&HashSet<DocId>>,
     posmap: Option<&crate::suffix_fst::posmap::PosMapReader<'_>>,
     bytemap: Option<&crate::suffix_fst::bytemap::ByteBitmapReader<'_>>,
+    word_sfxpost: Option<&crate::suffix_fst::word_sfxpost::WordSfxPostReader<'_>>,
 ) -> Vec<MatchV3> {
     let mut results = Vec::new();
 
-    // Single-token matches
+    // ── Single-token matches (all partitions) ────────────────────────
     let candidates = fst_walk::fst_candidates_v3(reader, query, anchor_start, strict_separators);
     let single = resolve::resolve_single_v3(&candidates, resolver, filter_docs);
     results.extend(single);
 
-    // Cross-token matches.
+    // ── Chunk chains (0x00 + 0x01) — strict adjacency ────────────────
     {
-        let chains = fst_walk::cross_token_chain_v3(reader, query, strict_separators);
-        let chains = if anchor_start {
+        let chains = fst_walk::cross_chunk_chain_v3(reader, query);
+        let chains: Vec<_> = if anchor_start {
             chains.into_iter().filter(|c| c.first_sti == 0).collect()
         } else {
             chains
         };
-        let cross = if !strict_separators {
-            // Relaxed chains REQUIRE posmap + bytemap for intermediate verification.
-            // Without them, skip relaxed chains entirely (single-token via 0x02 still works).
-            if let (Some(pm), Some(bm)) = (posmap, bytemap) {
-                resolve::resolve_chains_v3_relaxed(&chains, resolver, filter_docs, pm, bm)
-            } else {
-                // Strict-only chains when maps unavailable (tests, lightweight contexts)
-                resolve::resolve_chains_v3(&chains, resolver, filter_docs)
-            }
-        } else {
-            resolve::resolve_chains_v3(&chains, resolver, filter_docs)
-        };
+        let cross = resolve::resolve_chains_v3(&chains, resolver, filter_docs);
         results.extend(cross);
     }
 
-    // Sort by (doc_id, position) for deterministic output.
-    // No dedup here — the orchestrator filters by content length and callers
-    // dedup by doc_id. Removing valid matches risks false negatives.
-    results.sort_by_key(|m| (m.doc_id, m.position));
+    // ── Word chains (0x02) — relaxed adjacency via WordSfxPost ─────
+    if !strict_separators {
+        if let (Some(pm), Some(bm), Some(wsp)) = (posmap, bytemap, word_sfxpost) {
+            let chains = fst_walk::cross_word_chain_v3(reader, query);
+            let chains: Vec<_> = if anchor_start {
+                chains.into_iter().filter(|c| c.first_sti == 0).collect()
+            } else {
+                chains
+            };
+            let cross = resolve::resolve_word_chains_v3(&chains, wsp, resolver, filter_docs, pm, bm);
+            results.extend(cross);
+        }
+        // No posmap/bytemap/word_sfxpost → no word chains. Single-token
+        // matches from partition 0x02 (via fst_candidates) still work.
+    }
 
+    results.sort_by_key(|m| (m.doc_id, m.position));
     results
 }
 
@@ -94,6 +94,7 @@ pub fn find_multi_token_v3(
     filter_docs: Option<&HashSet<DocId>>,
     posmap: Option<&crate::suffix_fst::posmap::PosMapReader<'_>>,
     bytemap: Option<&crate::suffix_fst::bytemap::ByteBitmapReader<'_>>,
+    word_sfxpost: Option<&crate::suffix_fst::word_sfxpost::WordSfxPostReader<'_>>,
 ) -> Vec<MatchV3> {
     if query_tokens.is_empty() {
         return Vec::new();
@@ -102,7 +103,7 @@ pub fn find_multi_token_v3(
         return find_literal_v3(
             reader, query_tokens[0], resolver,
             anchor_start, strict_separators, filter_docs,
-            posmap, bytemap,
+            posmap, bytemap, word_sfxpost,
         );
     }
 
@@ -113,7 +114,7 @@ pub fn find_multi_token_v3(
         .map(|(i, token)| {
             let anchor = anchor_start && i == 0;
             find_literal_v3(reader, token, resolver, anchor, strict_separators, filter_docs,
-                posmap, bytemap)
+                posmap, bytemap, word_sfxpost)
         })
         .collect();
 
@@ -364,7 +365,8 @@ mod tests {
         }
     }
 
-    fn build_index(texts: &[&str]) -> (Vec<u8>, Vec<u8>) {
+    /// Returns (sfx_bytes, sfxpost_bytes, word_sfxpost_bytes, posmap_bytes, bytemap_bytes)
+    fn build_index(texts: &[&str]) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
         let mut collector = SfxCollectorV3::new();
         for text in texts {
             collector.begin_doc();
@@ -399,33 +401,45 @@ mod tests {
             }
         }
         let sfxpost = post_writer.finish();
+        let word_sfxpost = data.word_sfxpost;
+
+        // Build derived indexes (posmap, bytemap)
+        let derived = crate::suffix_fst::index_registry::build_derived_indexes_v3(
+            &data.tokens, Some(&sfxpost), Some(&data.own_lens),
+        );
+        let posmap_bytes = derived.iter()
+            .find(|(ext, _)| ext == "posmap")
+            .map(|(_, d)| d.clone()).unwrap_or_default();
+        let bytemap_bytes = derived.iter()
+            .find(|(ext, _)| ext == "bytemap")
+            .map(|(_, d)| d.clone()).unwrap_or_default();
 
         let writer = SfxFileWriterV3::new(fst_data, parent_data, data.num_docs);
-        (writer.to_bytes(), sfxpost)
+        (writer.to_bytes(), sfxpost, word_sfxpost, posmap_bytes, bytemap_bytes)
     }
 
     // ── find_literal_v3 ──
 
     #[test]
     fn test_find_literal_single_token() {
-        let (sfx, post) = build_index(&["mutex_lock", "hello_world"]);
+        let (sfx, post, _word_sfxpost, _posmap, _bytemap) = build_index(&["mutex_lock", "hello_world"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
         // "tex" is within a single token
-        let matches = find_literal_v3(&reader, "tex", &resolver, false, true, None, None, None);
+        let matches = find_literal_v3(&reader, "tex", &resolver, false, true, None, None, None, None);
         assert!(!matches.is_empty());
         assert_eq!(matches[0].doc_id, 0);
     }
 
     #[test]
     fn test_find_literal_cross_token() {
-        let (sfx, post) = build_index(&["mutex_lock"]);
+        let (sfx, post, _word_sfxpost, _posmap, _bytemap) = build_index(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
         // "mutex_lock" spans two tokens
-        let matches = find_literal_v3(&reader, "mutex_lock", &resolver, false, true, None, None, None);
+        let matches = find_literal_v3(&reader, "mutex_lock", &resolver, false, true, None, None, None, None);
         assert!(!matches.is_empty());
         assert_eq!(matches[0].doc_id, 0);
         assert!(matches[0].span >= 2);
@@ -433,28 +447,32 @@ mod tests {
 
     #[test]
     fn test_find_literal_sep_skip() {
-        let (sfx, post) = build_index(&["mutex_lock"]);
+        let (sfx, post, word_sfxpost, posmap_bytes, bytemap_bytes) = build_index(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
+        let pm = crate::suffix_fst::posmap::PosMapReader::open(&posmap_bytes);
+        let bm = crate::suffix_fst::bytemap::ByteBitmapReader::open(&bytemap_bytes);
+        let wsp = crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(&word_sfxpost);
 
         // "mutexlock" (no sep) with strict_sep=false
-        let matches = find_literal_v3(&reader, "mutexlock", &resolver, false, false, None, None, None);
+        let matches = find_literal_v3(&reader, "mutexlock", &resolver, false, false, None,
+            pm.as_ref(), bm.as_ref(), wsp.as_ref());
         assert!(!matches.is_empty(), "sep-skip should find match");
     }
 
     #[test]
     fn test_find_literal_anchor_start() {
-        let (sfx, post) = build_index(&["mutex_lock"]);
+        let (sfx, post, _word_sfxpost, _posmap, _bytemap) = build_index(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
         // "mutex" with anchor_start → should find at SI=0
-        let matches = find_literal_v3(&reader, "mutex_lo", &resolver, true, true, None, None, None);
+        let matches = find_literal_v3(&reader, "mutex_lo", &resolver, true, true, None, None, None, None);
         assert!(!matches.is_empty());
         assert!(matches.iter().all(|m| m.sti == 0));
 
         // "tex" with anchor_start → NOT at SI=0
-        let matches = find_literal_v3(&reader, "tex_lo", &resolver, true, true, None, None, None);
+        let matches = find_literal_v3(&reader, "tex_lo", &resolver, true, true, None, None, None, None);
         assert!(matches.is_empty());
     }
 
@@ -462,25 +480,25 @@ mod tests {
 
     #[test]
     fn test_multi_token_basic() {
-        let (sfx, post) = build_index(&["mutex_lock_init"]);
+        let (sfx, post, _word_sfxpost, _posmap, _bytemap) = build_index(&["mutex_lock_init"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
         let tokens = vec!["mutex_lo", "lock_in", "init"];
-        let matches = find_multi_token_v3(&reader, &tokens, &resolver, false, false, true, None, None, None);
+        let matches = find_multi_token_v3(&reader, &tokens, &resolver, false, false, true, None, None, None, None);
         assert!(!matches.is_empty(), "multi-token should match");
         assert_eq!(matches[0].span, 3);
     }
 
     #[test]
     fn test_multi_token_no_match() {
-        let (sfx, post) = build_index(&["mutex_lock"]);
+        let (sfx, post, _word_sfxpost, _posmap, _bytemap) = build_index(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
         // "hello" + "world" not in "mutex_lock"
         let tokens = vec!["hello", "world"];
-        let matches = find_multi_token_v3(&reader, &tokens, &resolver, false, false, true, None, None, None);
+        let matches = find_multi_token_v3(&reader, &tokens, &resolver, false, false, true, None, None, None, None);
         assert!(matches.is_empty());
     }
 
@@ -518,7 +536,7 @@ mod tests {
 
     #[test]
     fn test_fuzzy_basic() {
-        let (sfx, post) = build_index(&["mutex_lock", "hello_world"]);
+        let (sfx, post, _word_sfxpost, _posmap, _bytemap) = build_index(&["mutex_lock", "hello_world"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
@@ -532,7 +550,7 @@ mod tests {
 
     #[test]
     fn test_fuzzy_no_concat_query() {
-        let (sfx, post) = build_index(&["mutex_lock"]);
+        let (sfx, post, _word_sfxpost, _posmap, _bytemap) = build_index(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
@@ -546,7 +564,7 @@ mod tests {
 
     #[test]
     fn test_fuzzy_sep_skip() {
-        let (sfx, post) = build_index(&["mutex_lock"]);
+        let (sfx, post, _word_sfxpost, _posmap, _bytemap) = build_index(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 
@@ -560,7 +578,7 @@ mod tests {
 
     #[test]
     fn test_fuzzy_no_match() {
-        let (sfx, post) = build_index(&["mutex_lock"]);
+        let (sfx, post, _word_sfxpost, _posmap, _bytemap) = build_index(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
 

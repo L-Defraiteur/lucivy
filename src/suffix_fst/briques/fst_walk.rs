@@ -160,10 +160,14 @@ pub fn fst_candidates_v3(
 /// `prefix_len >= own_len - sti`.
 ///
 /// Returns split candidates sorted by query_consumed descending.
-pub fn falling_walk_v3(
+/// Falling walk on chunk partitions (0x00 + 0x01).
+///
+/// Chunk-level splits. Markers are included (overlap_consumed >= 0).
+/// The chain builder uses best_consumed filter to prevent intra-partition
+/// mixing of different consumed values.
+pub fn falling_walk_chunks(
     reader: &SfxFileReaderV3,
     query: &str,
-    strict_separators: bool,
 ) -> Vec<SplitCandidateV3> {
     let lower = query.to_lowercase();
     let query_bytes = lower.as_bytes();
@@ -171,14 +175,12 @@ pub fn falling_walk_v3(
     let fst = map.as_fst();
     let mut candidates = Vec::new();
 
-    // Normal partitions: split at own_len - sti
     for &partition in &[SI0_PREFIX, SI_REST_PREFIX] {
         walk_partition(
             fst, reader, query_bytes, partition,
             |parent, prefix_len| {
-                // Only parents where suffix starts before own_len can produce a split
                 if parent.sti >= parent.own_len {
-                    return None; // suffix starts in overlap zone, no split possible
+                    return None;
                 }
                 let split_byte = parent.own_len as usize - parent.sti as usize;
                 if prefix_len >= split_byte {
@@ -197,39 +199,71 @@ pub fn falling_walk_v3(
         );
     }
 
-    // Stripped partition: split at content_len - sti (for strict_sep=false)
-    // For partition 0x02, own_len = word_content_len + sep_len (same convention
-    // as normal tokens), so content_len() correctly returns word_content_len.
-    if !strict_separators {
-        walk_partition(
-            fst, reader, query_bytes, SI_STRIPPED_PREFIX,
-            |parent, prefix_len| {
-                if parent.sep_len == 0 {
-                    return None; // No stripping for tokens without sep
-                }
-                let content_len = parent.content_len() as usize;
-                let split_byte = content_len - parent.sti as usize;
-                if split_byte == 0 {
-                    return None; // sti >= content_len, not a useful split
-                }
-                if prefix_len >= split_byte {
-                    let overlap_consumed = prefix_len - split_byte;
-                    Some(SplitCandidateV3 {
-                        query_consumed: split_byte,
-                        parent: parent.clone(),
-                        remainder_start: split_byte,
-                        overlap_validated: overlap_consumed,
-                    })
-                } else {
-                    None
-                }
-            },
-            &mut candidates,
-        );
-    }
+    sort_and_dedup_splits(&mut candidates);
+    candidates
+}
 
-    // Sort by query_consumed descending, then overlap_validated descending
-    // so dedup keeps the split with the most validated overlap.
+/// Falling walk on word-stripped partition (0x02).
+///
+/// For strict_sep=false queries. Word-level splits with content_len boundary.
+/// Markers are kept (overlap_consumed >= 0) because word-level keys are longer
+/// and less prone to collision than chunk-level markers.
+pub fn falling_walk_words(
+    reader: &SfxFileReaderV3,
+    query: &str,
+) -> Vec<SplitCandidateV3> {
+    let lower = query.to_lowercase();
+    let query_bytes = lower.as_bytes();
+    let map = reader.fst();
+    let fst = map.as_fst();
+    let mut candidates = Vec::new();
+
+    walk_partition(
+        fst, reader, query_bytes, SI_STRIPPED_PREFIX,
+        |parent, prefix_len| {
+            if parent.sep_len == 0 {
+                return None;
+            }
+            let content_len = parent.content_len() as usize;
+            let split_byte = content_len - parent.sti as usize;
+            if split_byte == 0 {
+                return None;
+            }
+            if prefix_len >= split_byte {
+                let overlap_consumed = prefix_len - split_byte;
+                Some(SplitCandidateV3 {
+                    query_consumed: split_byte,
+                    parent: parent.clone(),
+                    remainder_start: split_byte,
+                    overlap_validated: overlap_consumed,
+                })
+            } else {
+                None
+            }
+        },
+        &mut candidates,
+    );
+
+    sort_and_dedup_splits(&mut candidates);
+    candidates
+}
+
+/// Combined falling walk (both partitions). Legacy API for callers that
+/// don't need partition separation.
+pub fn falling_walk_v3(
+    reader: &SfxFileReaderV3,
+    query: &str,
+    strict_separators: bool,
+) -> Vec<SplitCandidateV3> {
+    let mut candidates = falling_walk_chunks(reader, query);
+    if !strict_separators {
+        candidates.extend(falling_walk_words(reader, query));
+        sort_and_dedup_splits(&mut candidates);
+    }
+    candidates
+}
+
+fn sort_and_dedup_splits(candidates: &mut Vec<SplitCandidateV3>) {
     candidates.sort_by(|a, b| {
         b.query_consumed.cmp(&a.query_consumed)
             .then(b.overlap_validated.cmp(&a.overlap_validated))
@@ -239,7 +273,6 @@ pub fn falling_walk_v3(
             && a.parent.sti == b.parent.sti
             && a.query_consumed == b.query_consumed
     });
-    candidates
 }
 
 /// Walk a single partition byte-by-byte, calling `check_split` at each final node.
@@ -279,29 +312,24 @@ fn walk_partition<D: AsRef<[u8]>, F>(
     }
 }
 
-// ─── cross_token_chain_v3 ─────────────────────────────────────────────────
+// ─── Chain builders ──────────────────────────────────────────────────────
 
 const MAX_CHAIN_DEPTH: usize = 8;
 
-/// Chain falling walks across token boundaries.
-///
-/// For each split candidate, walk the remainder to find the next token.
-/// No sibling table — just another falling walk (TI+1 implicit).
-/// Adjacency verification happens in Tier 2 (resolve).
-///
-/// With content ordinals, all overlap variants of the same token share one ordinal.
-/// A single chain covers all documents — no forking needed.
-pub fn cross_token_chain_v3(
+/// Build a chain from a list of initial splits using a given falling_walk function.
+/// All ordinals from all sub_splits are collected at each position (Vec<Vec<u64>>).
+/// No best_consumed filter — all splits within a partition have coherent semantics.
+fn build_chains_from_splits(
     reader: &SfxFileReaderV3,
+    splits: &[SplitCandidateV3],
     query: &str,
-    strict_separators: bool,
+    walk_fn: fn(&SfxFileReaderV3, &str) -> Vec<SplitCandidateV3>,
+    strict_sep_for_candidates: bool,
 ) -> Vec<TokenChainV3> {
-    let splits = falling_walk_v3(reader, query, strict_separators);
     let mut chains = Vec::new();
-
     let query_lower = query.to_lowercase();
 
-    for split in &splits {
+    for split in splits {
         let safe_start = snap_to_char_boundary(&query_lower, split.remainder_start);
         let remainder = &query_lower[safe_start..];
         if remainder.is_empty() {
@@ -313,17 +341,12 @@ pub fn cross_token_chain_v3(
             continue;
         }
 
-        // Build chain with alternative ordinals at each position.
-        // No forking — each position stores all matching ordinals.
-        // Resolve unions postings from alternatives before adjacency check.
         let mut positions: Vec<Vec<u64>> = vec![vec![split.parent.raw_ordinal]];
         let mut rem = remainder.to_string();
         let mut depth = 0;
 
         while !rem.is_empty() && depth < MAX_CHAIN_DEPTH {
-            // First try: does the remainder match at the START of a token (SI=0)?
-            // anchor_start=true because the remainder is the beginning of the next token.
-            let cands = fst_candidates_v3(reader, &rem, true, strict_separators);
+            let cands = fst_candidates_v3(reader, &rem, true, strict_sep_for_candidates);
             if !cands.is_empty() {
                 let mut unique_ords: Vec<u64> = cands.iter().map(|c| c.raw_ordinal).collect();
                 unique_ords.sort_unstable();
@@ -333,20 +356,15 @@ pub fn cross_token_chain_v3(
                 break;
             }
 
-            // Second try: falling walk to find next split
-            let sub_splits = falling_walk_v3(reader, &rem, strict_separators);
+            let sub_splits = walk_fn(reader, &rem);
             if sub_splits.is_empty() {
                 break;
             }
-            // Only collect ordinals from sub-splits that consumed the SAME
-            // number of bytes as the best. The chain uses the best split's
-            // remainder, so ordinals from splits with different consumed
-            // would be at the wrong chain position — they'd need a different
-            // number of continuation positions. This is not data loss: those
-            // ordinals' tokens have different overlap bytes at the split point,
-            // meaning the query doesn't match at that boundary in those docs.
-            let best = &sub_splits[0];
-            let best_consumed = best.query_consumed;
+            // Filter by best consumed: within a single partition, different
+            // consumed values need different chain depths. The chain uses one
+            // remainder (from the best), so only ordinals from splits with the
+            // same consumed are valid at this position.
+            let best_consumed = sub_splits[0].query_consumed;
             let mut unique_ords: Vec<u64> = sub_splits.iter()
                 .filter(|s| s.query_consumed == best_consumed)
                 .map(|s| s.parent.raw_ordinal)
@@ -355,6 +373,7 @@ pub fn cross_token_chain_v3(
             unique_ords.dedup();
             positions.push(unique_ords);
 
+            let best = &sub_splits[0];
             let safe = snap_to_char_boundary(&rem, best.remainder_start);
             rem = rem[safe..].to_string();
             depth += 1;
@@ -369,6 +388,39 @@ pub fn cross_token_chain_v3(
         }
     }
 
+    chains
+}
+
+/// Cross-chunk chains (partitions 0x00 + 0x01).
+/// Uses overlap_consumed > 0 (no markers). Resolved with strict adjacency (pos+1).
+pub fn cross_chunk_chain_v3(
+    reader: &SfxFileReaderV3,
+    query: &str,
+) -> Vec<TokenChainV3> {
+    let splits = falling_walk_chunks(reader, query);
+    build_chains_from_splits(reader, &splits, query, falling_walk_chunks, true)
+}
+
+/// Cross-word chains (partition 0x02).
+/// Word-level splits. Resolved with relaxed adjacency (posmap/bytemap required).
+pub fn cross_word_chain_v3(
+    reader: &SfxFileReaderV3,
+    query: &str,
+) -> Vec<TokenChainV3> {
+    let splits = falling_walk_words(reader, query);
+    build_chains_from_splits(reader, &splits, query, falling_walk_words, false)
+}
+
+/// Legacy combined API — builds chains from both partitions mixed.
+pub fn cross_token_chain_v3(
+    reader: &SfxFileReaderV3,
+    query: &str,
+    strict_separators: bool,
+) -> Vec<TokenChainV3> {
+    let mut chains = cross_chunk_chain_v3(reader, query);
+    if !strict_separators {
+        chains.extend(cross_word_chain_v3(reader, query));
+    }
     chains
 }
 
