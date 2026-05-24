@@ -221,6 +221,7 @@ impl Node for AssembleV3Node {
         derived.push(("chunk_word_map".to_string(), data.chunk_word_map.clone()));
         derived.push(("next_word_map".to_string(), data.next_word_map.clone()));
         derived.push(("word_pos_map".to_string(), data.word_pos_map.clone()));
+        derived.push(("word_sfxpost".to_string(), data.word_sfxpost.clone()));
 
         ctx.set_output("output", PortValue::new(SfxBuildOutputV3 {
             sfx,
@@ -431,6 +432,8 @@ pub fn merge_segments_v3(
         min_suffix_len: 1,
         overlap_siblings: overlap_siblings.serialize(),
         word_stripped,
+        // TODO: rebuild word sfxpost from merged token data (currently rebuilt via into_data path)
+        word_sfxpost: crate::suffix_fst::word_sfxpost::WordSfxPostWriter::new(0).finish(),
         // TODO: rebuild word maps from merged token data
         chunk_word_map: crate::suffix_fst::word_map::ChunkWordMapWriter::new(final_ord as usize).serialize(),
         next_word_map: crate::suffix_fst::word_map::NextWordMapWriter::new(0).serialize(),
