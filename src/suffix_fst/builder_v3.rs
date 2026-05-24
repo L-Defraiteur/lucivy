@@ -390,6 +390,16 @@ impl SuffixFstBuilderV3 {
         let mut output_table = OutputTableBuilder::new();
         self.num_terms = 0;
 
+        // Diagnostics: multi-parent stats
+        let do_diag = std::env::var("V3_DIAG_BUILD").is_ok();
+        let mut diag_file = if do_diag {
+            std::fs::OpenOptions::new().create(true).append(true)
+                .open("/tmp/v3_diag_build.txt").ok()
+        } else { None };
+        let mut multi_parent_count = 0u64;
+        let mut max_parents = 0usize;
+        let mut multi_parent_distinct_ords = 0u64;
+
         let mut i = 0;
         while i < self.entries.len() {
             let (ks, kl, _) = self.entries[i];
@@ -402,6 +412,30 @@ impl SuffixFstBuilderV3 {
                 j += 1;
             }
             let num_parents = j - i;
+
+            // Diag: log multi-parent keys with distinct ordinals
+            if num_parents > 1 {
+                multi_parent_count += 1;
+                if num_parents > max_parents { max_parents = num_parents; }
+                let mut ords: Vec<u64> = self.entries[i..j].iter().map(|e| e.2.raw_ordinal).collect();
+                ords.sort_unstable();
+                ords.dedup();
+                if ords.len() > 1 {
+                    multi_parent_distinct_ords += 1;
+                    if let Some(ref mut f) = diag_file {
+                        use std::io::Write;
+                        let key_str = String::from_utf8_lossy(&key[1..]); // skip partition prefix
+                        let partition = key[0];
+                        let parents_info: Vec<String> = self.entries[i..j].iter()
+                            .map(|e| format!("ord={} sti={} own={} sep={}",
+                                e.2.raw_ordinal, e.2.sti, e.2.own_len, e.2.sep_len))
+                            .collect();
+                        writeln!(f, "MULTI_ORD partition=0x{:02x} key={:?} parents=[{}]",
+                            partition, &key_str[..key_str.len().min(30)],
+                            parents_info.join(", ")).ok();
+                    }
+                }
+            }
 
             let output = if num_parents == 1 {
                 encode_single_parent_v3(&self.entries[i].2)
@@ -418,6 +452,14 @@ impl SuffixFstBuilderV3 {
             self.num_terms += 1;
 
             i = j;
+        }
+
+        if do_diag {
+            if let Some(ref mut f) = diag_file {
+                use std::io::Write;
+                writeln!(f, "\n=== SUMMARY: {} total keys, {} multi-parent, {} with distinct ordinals, max_parents={} ===\n",
+                    self.num_terms, multi_parent_count, multi_parent_distinct_ords, max_parents).ok();
+            }
         }
 
         let fst_bytes = fst_builder.into_inner()?;

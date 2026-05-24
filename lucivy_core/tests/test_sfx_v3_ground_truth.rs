@@ -360,6 +360,8 @@ fn v3_ground_truth_contains() {
 /// Run: cargo test -p lucivy-core --test test_sfx_v3_ground_truth debug_struct -- --nocapture
 #[test]
 fn debug_struct_fp() {
+    use ld_lucivy::tokenizer::equal_chunk::segment_and_chunk;
+
     let files = collect_files(500);
     if files.is_empty() { return; }
 
@@ -373,22 +375,49 @@ fn debug_struct_fp() {
     eprintln!("grep={} v3={} FP={}", grep_set.len(), v3_result.doc_indices.len(), fp_docs.len());
 
     let mut dbg = std::fs::File::create("/tmp/v3_debug_struct.txt").unwrap();
-    writeln!(dbg, "FP docs for 'struct' strict: {} docs\n", fp_docs.len()).ok();
+    writeln!(dbg, "FP docs for '{}' strict: {} docs\n", query, fp_docs.len()).ok();
 
-    for &doc_idx in fp_docs.iter().take(5) {
+    for &doc_idx in &fp_docs {
         let (path, content) = &files[doc_idx];
         writeln!(dbg, "--- doc={doc_idx} path={path} ---").ok();
 
         // Show highlights for this doc
         for &(fidx, bf, bt) in &v3_result.highlights {
-            if fidx == doc_idx {
-                let bf_c = bf.min(content.len());
-                let bt_c = bt.min(content.len());
-                let ctx_s = snap_back(content, bf_c.saturating_sub(30));
-                let ctx_e = snap_fwd(content, (bt_c + 30).min(content.len()));
-                writeln!(dbg, "  highlight [{bf}..{bt}] span={}: ...{}>>{}<<{}...",
-                    bt - bf,
-                    &content[ctx_s..bf_c], &content[bf_c..bt_c], &content[bt_c..ctx_e]).ok();
+            if fidx != doc_idx { continue; }
+            let bf_c = bf.min(content.len());
+            let bt_c = bt.min(content.len());
+            let ctx_s = snap_back(content, bf_c.saturating_sub(40));
+            let ctx_e = snap_fwd(content, (bt_c + 40).min(content.len()));
+            let actual_bytes = &content[bf_c..bt_c];
+            let actual_lower = actual_bytes.to_lowercase();
+            writeln!(dbg, "  highlight [{bf}..{bt}] len={}: ...{}>>{}<<{}...",
+                bt - bf,
+                &content[ctx_s..bf_c], actual_bytes, &content[bt_c..ctx_e]).ok();
+            writeln!(dbg, "    actual_bytes_lower={:?} query={:?} match={}",
+                actual_lower, query, actual_lower == query).ok();
+
+            // Tokenize the region around the highlight to show chunks + overlaps
+            let region_start = snap_back(content, bf_c.saturating_sub(30));
+            let region_end = snap_fwd(content, (bt_c + 30).min(content.len()));
+            let region = &content[region_start..region_end];
+            let chunks = segment_and_chunk(region, 8);
+            writeln!(dbg, "    tokenization of [{region_start}..{region_end}] ({} chunks):", chunks.len()).ok();
+            let mut offset = region_start;
+            for (i, (chunk_text, meta)) in chunks.iter().enumerate() {
+                let chunk_end = offset + chunk_text.len();
+                // Compute overlap
+                let ovl = if i + 1 < chunks.len() {
+                    let next = &chunks[i + 1].0;
+                    let ol = 2.min(next.len());
+                    &next[..ol]
+                } else { "" };
+                let extended = format!("{}{}", chunk_text, ovl);
+                let in_hl = offset < bt_c && chunk_end > bf_c;
+                let marker = if in_hl { ">>>" } else { "   " };
+                writeln!(dbg, "      {marker} chunk[{i}] byte=[{offset}..{chunk_end}] content_len={} sep_len={} word_id={} text={:?} extended={:?}",
+                    meta.content_len, meta.sep_len, meta.word_id,
+                    chunk_text, extended).ok();
+                offset += chunk_text.len();
             }
         }
         writeln!(dbg).ok();

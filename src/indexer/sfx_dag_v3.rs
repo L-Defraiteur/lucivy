@@ -84,16 +84,16 @@ impl Node for BuildFstV3Node {
 
         let mut builder = SuffixFstBuilderV3::with_min_suffix_len(data.min_suffix_len);
         // Chunk-level entries (partitions 0x00/0x01)
-        // Each extended text gets its own FST key, but the raw_ordinal is
-        // the content ordinal (shared across overlap variants).
+        // Extended ordinals: each unique extended text → its own FST ordinal.
+        // Overlap variants have different ordinals, preventing FP from mixing.
         for &intern_ord in &data.sorted_indices {
             let meta = &data.token_meta[intern_ord as usize];
             if meta.is_word_stripped { continue; }
             let text = &data.token_texts[intern_ord as usize];
-            let content_ord = data.intern_to_final[intern_ord as usize];
+            let final_ord = data.intern_to_final[intern_ord as usize];
             builder.add_token(
                 text,
-                content_ord as u64,
+                final_ord as u64,
                 meta.own_len,
                 meta.sep_len,
                 meta.overlap_len,
@@ -101,14 +101,14 @@ impl Node for BuildFstV3Node {
             );
         }
         // Word-level stripped entries (partition 0x02)
-        // Use first CHUNK's ordinal so it resolves to the chunk's existing postings.
-        // Word-stripped have no own postings — avoids duplicate (doc, pos) entries.
+        // Each word-stripped has its own ordinal with aggregated postings
+        // from all overlap variants of its first chunk.
         for ws in &data.word_stripped {
-            let content_ord = data.intern_to_final[ws.first_chunk_intern_ord as usize];
+            let ws_ord = data.intern_to_final[ws.first_intern_ord as usize];
             builder.add_word_stripped(
                 &ws.word_content,
                 &ws.content_overlap,
-                content_ord as u64,
+                ws_ord as u64,
                 ws.first_own_len,
                 ws.last_sep_len,
                 ws.is_word_start,
@@ -187,16 +187,15 @@ impl Node for AssembleV3Node {
             .downcast::<SfxCollectorDataV3>()
             .ok_or("wrong type")?;
 
-        // Build termtexts v3 (extended texts + metadata, keyed by content ordinal).
-        // Skip word-stripped entries: they share the first chunk's content ordinal
-        // and would overwrite the correct chunk text with their sep-stripped text.
+        // Build termtexts v3 (extended texts + metadata, keyed by final ordinal).
+        // With extended ordinals, each unique extended text has its own ordinal,
+        // including word-stripped entries.
         let mut tt_writer = TermTextsWriterV3::new();
         for &intern_ord in &data.sorted_indices {
             let meta = &data.token_meta[intern_ord as usize];
-            if meta.is_word_stripped { continue; }
             let text = &data.token_texts[intern_ord as usize];
-            let content_ord = data.intern_to_final[intern_ord as usize];
-            tt_writer.add(content_ord, text, TermMetaV3 {
+            let final_ord = data.intern_to_final[intern_ord as usize];
+            tt_writer.add(final_ord, text, TermMetaV3 {
                 own_len: meta.own_len,
                 sep_len: meta.sep_len,
                 overlap_len: meta.overlap_len,
@@ -211,15 +210,11 @@ impl Node for AssembleV3Node {
         let sfx = sfx_writer.to_bytes();
 
         // EventDriven registry indexes (bytemap, freqmap, posmap, termtexts-v2-compat)
-        // V3: pass content_len per content ordinal so ByteMap excludes sep+overlap bytes.
-        // Content key = content chars only, so key.len() == content_len.
-        let own_lens: Vec<u16> = data.tokens.iter()
-            .map(|key| key.len() as u16)
-            .collect();
+        // V3: pass own_len per ordinal so ByteMap excludes overlap bytes.
         let mut derived = crate::suffix_fst::index_registry::build_derived_indexes_v3(
             &data.tokens,
             sfxpost_data.as_deref(),
-            Some(&own_lens),
+            Some(&data.own_lens),
         );
 
         // Add word maps to registry files
@@ -364,42 +359,43 @@ pub fn merge_segments_v3(
         }
     }
 
-    // Build sorted output
+    // Build sorted output — extended ordinals: 1:1 mapping, no grouping.
     let num_tokens = token_texts.len();
     let mut sorted_indices: Vec<u32> = (0..num_tokens as u32).collect();
     sorted_indices.sort_by(|&a, &b| {
         token_texts[a as usize].cmp(&token_texts[b as usize])
     });
 
-    // Group intern ordinals by text[..own_len] (content + sep, no overlap).
-    // In merge, all tokens have is_word_stripped=false, so no special handling needed.
-    let mut content_key_map: std::collections::BTreeMap<String, Vec<u32>> =
+    // Extended ordinals: each unique extended text → own ordinal.
+    // In merge, all tokens have is_word_stripped=false. Use BTreeMap for order.
+    let mut ord_map: std::collections::BTreeMap<String, (Vec<(u32, u32, u32, u32)>, u16, Vec<u32>)> =
         std::collections::BTreeMap::new();
-    for (intern_ord, text) in token_texts.iter().enumerate() {
-        let mut own_len = token_meta[intern_ord].own_len as usize;
-        own_len = own_len.min(text.len());
-        let content_key = text[..own_len].to_string();
-        content_key_map.entry(content_key).or_default().push(intern_ord as u32);
+    for &io in &sorted_indices {
+        let text = &token_texts[io as usize];
+        let entry = ord_map.entry(text.clone()).or_insert_with(|| {
+            (Vec::new(), token_meta[io as usize].own_len, Vec::new())
+        });
+        entry.0.extend_from_slice(&token_postings[io as usize]);
+        entry.2.push(io);
     }
 
     let mut intern_to_final = vec![0u32; num_tokens];
     let mut content_postings: Vec<Vec<(u32, u32, u32, u32)>> = Vec::new();
-    let mut content_final_ord = 0u32;
-    for (_content_key, intern_ords) in &content_key_map {
-        let mut agg: Vec<(u32, u32, u32, u32)> = Vec::new();
+    let mut own_lens: Vec<u16> = Vec::new();
+    let mut tokens: BTreeSet<String> = BTreeSet::new();
+    let mut final_ord = 0u32;
+    for (text, (postings, own_len, intern_ords)) in &ord_map {
+        tokens.insert(text.clone());
+        let mut p = postings.clone();
+        p.sort();
+        p.dedup();
+        content_postings.push(p);
+        own_lens.push(*own_len);
         for &io in intern_ords {
-            agg.extend_from_slice(&token_postings[io as usize]);
+            intern_to_final[io as usize] = final_ord;
         }
-        agg.sort();
-        agg.dedup();
-        content_postings.push(agg);
-        for &io in intern_ords {
-            intern_to_final[io as usize] = content_final_ord;
-        }
-        content_final_ord += 1;
+        final_ord += 1;
     }
-
-    let tokens: BTreeSet<String> = content_key_map.keys().cloned().collect();
 
     let total_docs = doc_id_remaps.iter()
         .map(|m| m.values().copied().max().unwrap_or(0) + 1)
@@ -411,14 +407,14 @@ pub fn merge_segments_v3(
         &token_texts, &token_meta, 2,
     );
 
-    // Build overlap sibling table for merged data
+    // Build overlap sibling table
     let mut overlap_siblings = crate::suffix_fst::overlap_siblings::OverlapSiblingWriter::new(
-        content_final_ord as usize,
+        final_ord as usize,
     );
-    for (_ck, intern_ords) in &content_key_map {
-        let co = intern_to_final[intern_ords[0] as usize];
+    for (_, (_, _, intern_ords)) in &ord_map {
+        let fo = intern_to_final[intern_ords[0] as usize];
         for &io in intern_ords {
-            overlap_siblings.add(co, io);
+            overlap_siblings.add(fo, io);
         }
     }
 
@@ -428,14 +424,15 @@ pub fn merge_segments_v3(
         intern_to_final,
         token_texts,
         content_postings,
-        num_content_ords: content_final_ord as usize,
+        own_lens,
+        num_content_ords: final_ord as usize,
         token_meta,
         num_docs: total_docs,
         min_suffix_len: 1,
         overlap_siblings: overlap_siblings.serialize(),
         word_stripped,
         // TODO: rebuild word maps from merged token data
-        chunk_word_map: crate::suffix_fst::word_map::ChunkWordMapWriter::new(content_final_ord as usize).serialize(),
+        chunk_word_map: crate::suffix_fst::word_map::ChunkWordMapWriter::new(final_ord as usize).serialize(),
         next_word_map: crate::suffix_fst::word_map::NextWordMapWriter::new(0).serialize(),
         word_pos_map: crate::suffix_fst::word_pos_map::WordPosMapWriter::new().serialize(),
     })

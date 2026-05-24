@@ -217,8 +217,6 @@ pub fn falling_walk_v3(
                     Some(SplitCandidateV3 {
                         query_consumed: split_byte,
                         parent: parent.clone(),
-                        // In stripped walk, remainder starts right after content
-                        // (the sep bytes are skipped implicitly)
                         remainder_start: split_byte,
                         overlap_validated: overlap_consumed,
                     })
@@ -340,13 +338,23 @@ pub fn cross_token_chain_v3(
             if sub_splits.is_empty() {
                 break;
             }
-            // Collect all unique ordinals from all sub-splits at this position
-            let mut unique_ords: Vec<u64> = sub_splits.iter().map(|s| s.parent.raw_ordinal).collect();
+            // Only collect ordinals from sub-splits that consumed the SAME
+            // number of bytes as the best. The chain uses the best split's
+            // remainder, so ordinals from splits with different consumed
+            // would be at the wrong chain position — they'd need a different
+            // number of continuation positions. This is not data loss: those
+            // ordinals' tokens have different overlap bytes at the split point,
+            // meaning the query doesn't match at that boundary in those docs.
+            let best = &sub_splits[0];
+            let best_consumed = best.query_consumed;
+            let mut unique_ords: Vec<u64> = sub_splits.iter()
+                .filter(|s| s.query_consumed == best_consumed)
+                .map(|s| s.parent.raw_ordinal)
+                .collect();
             unique_ords.sort_unstable();
             unique_ords.dedup();
             positions.push(unique_ords);
 
-            let best = &sub_splits[0];
             let safe = snap_to_char_boundary(&rem, best.remainder_start);
             rem = rem[safe..].to_string();
             depth += 1;

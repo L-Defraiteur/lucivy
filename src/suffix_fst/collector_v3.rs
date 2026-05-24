@@ -485,84 +485,126 @@ impl SfxCollectorV3 {
     pub fn into_data(self) -> SfxCollectorDataV3 {
         let num_tokens = self.token_texts.len();
 
-        // Sort extended tokens alphabetically (for FST building — each unique
-        // extended text becomes a separate FST key, but they may share ordinals).
+        // Sort extended tokens alphabetically (for FST building).
         let mut sorted_indices: Vec<u32> = (0..num_tokens as u32).collect();
         sorted_indices.sort_by(|&a, &b| {
             self.token_texts[a as usize].cmp(&self.token_texts[b as usize])
         });
 
-        // Group intern ordinals by text[..own_len] (content + sep, NO overlap).
-        // Overlaps stay in the FST keys (for trigram coverage) but NOT in the ordinal.
-        // This prevents FP from overlap variant mixing while keeping trigrams searchable.
-        // FN from sep differences are handled by Vec<Vec<u64>> alternatives at query time.
-        //
-        // Group chunk ordinals by text[..own_len] (content + sep, NO overlap).
-        // Word-stripped entries are EXCLUDED — they get mapped to first chunk ordinal below.
-        let mut content_key_map: std::collections::BTreeMap<String, Vec<u32>> =
-            std::collections::BTreeMap::new();
-        for (intern_ord, text) in self.token_texts.iter().enumerate() {
-            if self.token_meta[intern_ord].is_word_stripped {
-                continue;
-            }
-            let mut own_len = self.token_meta[intern_ord].own_len as usize;
-            own_len = own_len.min(text.len());
-            while own_len > 0 && !text.is_char_boundary(own_len) { own_len -= 1; }
-            let content_key = text[..own_len].to_string();
-            content_key_map.entry(content_key).or_default().push(intern_ord as u32);
+        // --- Extended ordinals: each unique extended text → own ordinal + own postings ---
+        // No grouping by text[..own_len]. Overlap variants are kept separate in
+        // partitions 0x00/0x01, preventing FP from overlap mixing.
+        // Word-stripped entries (partition 0x02) get their own ordinal with
+        // aggregated postings from all overlap variants of their first chunk.
+
+        // Build content_key → [intern_ords] for word-stripped aggregation.
+        // Content key = text[..own_len] (content + sep, no overlap).
+        let mut content_key_to_interns: std::collections::HashMap<String, Vec<u32>> =
+            std::collections::HashMap::new();
+        for (io, text) in self.token_texts.iter().enumerate() {
+            if self.token_meta[io].is_word_stripped { continue; }
+            let mut ol = self.token_meta[io].own_len as usize;
+            ol = ol.min(text.len());
+            while ol > 0 && !text.is_char_boundary(ol) { ol -= 1; }
+            content_key_to_interns.entry(text[..ol].to_string())
+                .or_default().push(io as u32);
         }
 
-        // Assign content final ordinals (sorted alphabetically by content key).
+        // Collect all ordinal entries into a BTreeMap for deterministic alphabetical order.
+        // Key = token text (extended for chunks, word-stripped+overlap for ws).
+        // Each unique text has exactly one intern_id (enforced by intern_extended).
+        struct OrdEntry {
+            postings: Vec<(u32, u32, u32, u32)>,
+            own_len: u16,
+            intern_ords: Vec<u32>,
+        }
+        let mut ord_map: std::collections::BTreeMap<String, OrdEntry> =
+            std::collections::BTreeMap::new();
+
+        // Add chunk entries (non-word-stripped): each gets its own ordinal
+        for &io in &sorted_indices {
+            if self.token_meta[io as usize].is_word_stripped { continue; }
+            let text = &self.token_texts[io as usize];
+            let entry = ord_map.entry(text.clone()).or_insert_with(|| OrdEntry {
+                postings: Vec::new(),
+                own_len: self.token_meta[io as usize].own_len,
+                intern_ords: Vec::new(),
+            });
+            entry.postings.extend_from_slice(&self.token_postings[io as usize]);
+            entry.intern_ords.push(io);
+        }
+
+        // Add word-stripped entries: own ordinal with aggregated postings
+        let mut ws_processed: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for ws in &self.word_stripped_entries {
+            if !ws_processed.insert(ws.first_intern_ord) { continue; }
+            // If ws text == chunk text, they share intern_id → already in ord_map
+            if !self.token_meta[ws.first_intern_ord as usize].is_word_stripped { continue; }
+
+            let ws_text = &self.token_texts[ws.first_intern_ord as usize];
+
+            // Aggregate postings from all overlap variants of first chunk's content key
+            let first_text = &self.token_texts[ws.first_chunk_intern_ord as usize];
+            let first_meta = &self.token_meta[ws.first_chunk_intern_ord as usize];
+            let mut ol = (first_meta.own_len as usize).min(first_text.len());
+            while ol > 0 && !first_text.is_char_boundary(ol) { ol -= 1; }
+            let ckey = first_text[..ol].to_string();
+
+            let mut agg = Vec::new();
+            if let Some(variants) = content_key_to_interns.get(&ckey) {
+                for &vio in variants {
+                    agg.extend_from_slice(&self.token_postings[vio as usize]);
+                }
+            }
+
+            ord_map.entry(ws_text.clone()).or_insert_with(|| OrdEntry {
+                postings: agg,
+                own_len: ws.first_own_len,
+                intern_ords: vec![ws.first_intern_ord],
+            });
+        }
+
+        // Assign final ordinals in BTreeMap (alphabetical) order
         let mut intern_to_final = vec![0u32; num_tokens];
         let mut content_postings: Vec<Vec<(u32, u32, u32, u32)>> = Vec::new();
-        let mut content_final_ord = 0u32;
-        for (_content_key, intern_ords) in &content_key_map {
-            // Aggregate postings from all overlap variants
-            let mut agg: Vec<(u32, u32, u32, u32)> = Vec::new();
-            for &io in intern_ords {
-                agg.extend_from_slice(&self.token_postings[io as usize]);
-            }
-            // Sort postings for deterministic sfxpost
-            agg.sort();
-            agg.dedup();
-            content_postings.push(agg);
+        let mut tokens: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut own_lens: Vec<u16> = Vec::new();
+        let mut final_ord = 0u32;
 
-            for &io in intern_ords {
-                intern_to_final[io as usize] = content_final_ord;
+        for (text, entry) in &ord_map {
+            tokens.insert(text.clone());
+            let mut p = entry.postings.clone();
+            p.sort();
+            p.dedup();
+            content_postings.push(p);
+            own_lens.push(entry.own_len);
+            for &io in &entry.intern_ords {
+                intern_to_final[io as usize] = final_ord;
             }
-            content_final_ord += 1;
+            final_ord += 1;
         }
 
-        // Map word-stripped intern_ords to their first chunk's content ordinal.
-        // They have no postings — they reuse the first chunk's ordinal in the FST.
-        for ws in &self.word_stripped_entries {
-            let chunk_ord = intern_to_final[ws.first_chunk_intern_ord as usize];
-            intern_to_final[ws.first_intern_ord as usize] = chunk_ord;
-        }
-
-        // Content keys as BTreeSet (sorted = ordinal order)
-        let tokens: std::collections::BTreeSet<String> = content_key_map.keys().cloned().collect();
-
-        // Build overlap sibling table: content_ord → [intern_ords]
+        // Build overlap sibling table (now trivial: each ordinal maps to itself,
+        // but keep it for potential future use)
         let mut overlap_siblings = crate::suffix_fst::overlap_siblings::OverlapSiblingWriter::new(
-            content_final_ord as usize,
+            final_ord as usize,
         );
-        for (_content_key, intern_ords) in &content_key_map {
-            let content_ord = intern_to_final[intern_ords[0] as usize];
-            for &io in intern_ords {
-                overlap_siblings.add(content_ord, io);
+        for (_, entry) in &ord_map {
+            let fo = intern_to_final[entry.intern_ords[0] as usize];
+            for &io in &entry.intern_ords {
+                overlap_siblings.add(fo, io);
             }
         }
         let overlap_siblings_data = overlap_siblings.serialize();
 
-        // Build word maps: remap from intern ordinals to content ordinals.
+        // Build word maps: remap from intern ordinals to final ordinals.
         let mut chunk_word_writer = crate::suffix_fst::word_map::ChunkWordMapWriter::new(
-            content_final_ord as usize,
+            final_ord as usize,
         );
         for (intern_ord, entries) in self.chunk_to_word.iter().enumerate() {
-            let content_ord = intern_to_final.get(intern_ord).copied().unwrap_or(0);
+            let fo = intern_to_final.get(intern_ord).copied().unwrap_or(0);
             for &(word_id, chunk_idx, total) in entries {
-                chunk_word_writer.add(content_ord, word_id, chunk_idx, total);
+                chunk_word_writer.add(fo, word_id, chunk_idx, total);
             }
         }
         let chunk_word_map_data = chunk_word_writer.serialize();
@@ -582,7 +624,8 @@ impl SfxCollectorV3 {
             token_meta: self.token_meta,
             tokens,
             content_postings,
-            num_content_ords: content_final_ord as usize,
+            own_lens,
+            num_content_ords: final_ord as usize,
             num_docs: self.current_doc_id,
             min_suffix_len: self.min_suffix_len,
             overlap_siblings: overlap_siblings_data,
@@ -627,31 +670,30 @@ pub struct WordStrippedEntry {
 
 /// Data extracted from SfxCollectorV3, ready for DAG-based build.
 ///
-/// Extended tokens are sorted for FST building (sorted_indices + token_texts).
-/// Postings are aggregated by content ordinal (content_postings).
-/// `intern_to_final` maps each intern ordinal to its content final ordinal.
-/// Data extracted from SfxCollectorV3, ready for DAG-based build.
-///
-/// Extended tokens are sorted for FST building (sorted_indices + token_texts).
-/// Postings are aggregated by content ordinal (content_postings).
-/// `intern_to_final` maps each intern ordinal to its content final ordinal.
+/// Extended ordinals: each unique extended text gets its own ordinal and postings.
+/// Overlap variants are NOT grouped — they have separate ordinals.
+/// Word-stripped entries get their own ordinal with aggregated postings from
+/// all overlap variants of their first chunk.
 pub struct SfxCollectorDataV3 {
     /// Intern ordinals sorted by extended text (for FST key iteration).
     pub sorted_indices: Vec<u32>,
-    /// Maps intern ordinal → content final ordinal.
-    /// Multiple extended variants (different overlaps) share the same content ordinal.
+    /// Maps intern ordinal → final ordinal.
+    /// Each unique extended text has its own final ordinal (1:1 mapping).
     pub intern_to_final: Vec<u32>,
     /// Extended token texts (indexed by intern ordinal).
     pub token_texts: Vec<String>,
     /// Metadata per extended token (indexed by intern ordinal).
     pub token_meta: Vec<TokenMetaV3>,
-    /// Content keys sorted alphabetically (BTreeSet order = content ordinal order).
-    /// Each key = text[..own_len] (content+sep, without overlap).
+    /// Token texts sorted alphabetically (BTreeSet order = final ordinal order).
+    /// Contains extended texts for chunks and word-stripped texts for ws entries.
     /// Used by derived index builders (bytemap, freqmap, posmap).
     pub tokens: std::collections::BTreeSet<String>,
-    /// Postings aggregated by content ordinal. Index = content final ordinal.
+    /// Postings per final ordinal. Index = final ordinal.
     pub content_postings: Vec<Vec<(u32, u32, u32, u32)>>,
-    /// Number of unique content ordinals (= content_postings.len()).
+    /// own_len per final ordinal (content+sep bytes, excludes overlap).
+    /// Used by derived index builders to truncate extended texts.
+    pub own_lens: Vec<u16>,
+    /// Number of unique final ordinals (= content_postings.len()).
     pub num_content_ords: usize,
     pub num_docs: u32,
     pub min_suffix_len: usize,

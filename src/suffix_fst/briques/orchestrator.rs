@@ -103,9 +103,13 @@ pub fn contains_v3(
         if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("/tmp/v3_debug_trace.txt") {
             use std::io::Write;
             writeln!(f, "raw matches (before filter): {}", matches.len()).ok();
+            // Only log unique (doc, pos, span) to keep trace manageable
+            let mut seen = std::collections::HashSet::new();
             for m in &matches {
-                writeln!(f, "  doc={} pos={} span={} byte=[{}..{}] sti={} ord={}",
-                    m.doc_id, m.position, m.span, m.byte_from, m.byte_to, m.sti, m.ordinal).ok();
+                if seen.insert((m.doc_id, m.position, m.span)) {
+                    writeln!(f, "  doc={} pos={} span={} byte=[{}..{}] sti={} ord={} last_ord={}",
+                        m.doc_id, m.position, m.span, m.byte_from, m.byte_to, m.sti, m.ordinal, m.last_ordinal).ok();
+                }
             }
         }
     }
