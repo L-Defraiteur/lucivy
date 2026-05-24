@@ -317,7 +317,7 @@ impl GroundTruthQuery {
 
 #[test]
 fn v3_ground_truth_contains() {
-    let files = collect_files(500);
+    let files = collect_files(5000);
     if files.is_empty() { return; }
     eprintln!("\n=== V3 Ground Truth: {} files ===\n", files.len());
 
@@ -391,7 +391,7 @@ fn v3_ground_truth_contains() {
 fn debug_struct_fp() {
     use ld_lucivy::tokenizer::equal_chunk::segment_and_chunk;
 
-    let files = collect_files(500);
+    let files = collect_files(5000);
     if files.is_empty() { return; }
 
     let handle = create_v3_index(&files);
