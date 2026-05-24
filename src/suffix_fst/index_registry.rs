@@ -102,6 +102,8 @@ pub fn all_indexes() -> Vec<Box<dyn SfxIndexFile>> {
         Box::new(super::word_map::ChunkWordMapIndex),
         Box::new(super::word_map::NextWordMapIndex),
         Box::new(super::word_pos_map::WordPosMapIndex::new()),
+        // Word-level sfxpost (prebuilt by DAG, loaded by segment reader)
+        Box::new(super::word_sfxpost::WordSfxPostIndex),
     ]
 }
 

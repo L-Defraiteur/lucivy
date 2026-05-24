@@ -134,6 +134,24 @@ impl<'a> WordSfxPostReader<'a> {
     }
 }
 
+// ─── Index registry entry ────────────────────────────────────────────────
+
+/// Prebuilt index entry for the word-level sfxpost.
+/// Data is written by the DAG (not EventDriven). This entry only exists
+/// so that the segment reader discovers and loads the file.
+pub struct WordSfxPostIndex;
+
+impl crate::suffix_fst::index_registry::SfxIndexFile for WordSfxPostIndex {
+    fn id(&self) -> &'static str { "word_sfxpost" }
+    fn extension(&self) -> &'static str { "word_sfxpost" }
+    fn merge_strategy(&self) -> crate::suffix_fst::index_registry::MergeStrategy {
+        crate::suffix_fst::index_registry::MergeStrategy::ExternalDagNode
+    }
+    fn on_token(&mut self, _ord: u32, _text: &str) {}
+    fn on_posting(&mut self, _ord: u32, _doc: u32, _ti: u32, _bf: u32, _bt: u32) {}
+    fn serialize(&self) -> Vec<u8> { Vec::new() }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
