@@ -448,25 +448,31 @@ fn v3_ground_truth_contains() {
                 eprintln!("  {label:30} FP: {n} docs — grep logic issue?");
             }
 
-            // Re-run with trace enabled — dumps structured trace per segment
-            eprintln!("\n  --- Trace for {query} {mode} ---");
+            // Re-run with trace enabled — export to JSON
             std::env::set_var("V3_DEBUG_QUERY", query);
             let _ = search_v3(&handle, &files, query, strict);
             std::env::remove_var("V3_DEBUG_QUERY");
-            for (tid, trace) in ld_lucivy::suffix_fst::briques::trace::trace_drain_all() {
-                if !trace.events.is_empty() {
-                    eprintln!("  [trace {tid}] {} events", trace.events.len());
-                    // Only dump first 50 events per trace to keep output manageable
-                    for ev in trace.events.iter().take(50) {
-                        let indent = "    ".repeat(ev.depth + 1);
-                        let data: String = ev.data.iter().map(|(k,v)| format!(" {k}={v}")).collect();
-                        eprintln!("{indent}{}{data}", ev.label);
-                    }
-                    if trace.events.len() > 50 {
-                        eprintln!("    ... and {} more events", trace.events.len() - 50);
-                    }
-                }
-            }
+            let traces = ld_lucivy::suffix_fst::briques::trace::trace_drain_all();
+            let trace_json: Vec<serde_json::Value> = traces.iter().map(|(tid, trace)| {
+                serde_json::json!({
+                    "trace_id": tid,
+                    "query": query,
+                    "mode": mode,
+                    "num_events": trace.events.len(),
+                    "events": trace.events.iter().map(|ev| {
+                        serde_json::json!({
+                            "label": ev.label,
+                            "depth": ev.depth,
+                            "data": ev.data.iter().map(|(k,v)| (k.clone(), serde_json::Value::String(v.clone()))).collect::<serde_json::Map<String, serde_json::Value>>(),
+                        })
+                    }).collect::<Vec<_>>(),
+                })
+            }).collect();
+            let trace_path = format!("/tmp/v3_trace_{}_{}.json", query.replace("::", "_").replace(" ", "_"), mode);
+            let json = serde_json::to_string_pretty(&trace_json).unwrap();
+            std::fs::write(&trace_path, &json).ok();
+            let total_events: usize = traces.iter().map(|(_, t)| t.events.len()).sum();
+            eprintln!("  Trace: {trace_path} ({} segments, {total_events} events)", traces.len());
         }
     }
 
