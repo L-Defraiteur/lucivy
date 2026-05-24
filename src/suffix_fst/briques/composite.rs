@@ -43,6 +43,11 @@ pub fn find_literal_v3(
     let candidates = fst_walk::fst_candidates_v3(ctx.reader, query, anchor_start, strict_separators);
     let single = resolve::resolve_single_v3(&candidates, ctx.resolver, ctx.filter_docs);
     ctx.trace_msg(&format!("single_token candidates={} matches={}", candidates.len(), single.len()));
+    if ctx.trace_id.is_some() && candidates.len() < 50 {
+        for c in &candidates {
+            ctx.trace_msg(&format!("  cand sti={} ord={} own={} sep={} ovl={}", c.sti, c.raw_ordinal, c.own_len, c.sep_len, c.overlap_len));
+        }
+    }
     results.extend(single);
 
     // ── Chunk chains (0x00 + 0x01) — strict adjacency ────────────────

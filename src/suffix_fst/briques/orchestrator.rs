@@ -51,6 +51,17 @@ pub fn contains_v3(
 
     // Filter false positives from content ordinals on single-token matches.
     let query_content_len = query_ref.chars().filter(|c| is_content_char(*c)).count() as u32;
+    if ctx.debug {
+        let before = matches.len();
+        let rejected: Vec<_> = matches.iter()
+            .filter(|m| !(m.span > 1 || m.byte_to.saturating_sub(m.byte_from) >= query_content_len))
+            .map(|m| format!("doc={} pos={} byte=[{}..{}] span={}", m.doc_id, m.position, m.byte_from, m.byte_to, m.span))
+            .collect();
+        if !rejected.is_empty() {
+            ctx.trace_msg(&format!("content_len_filter rejected={} of {} (qcl={}): {:?}",
+                rejected.len(), before, query_content_len, &rejected[..rejected.len().min(5)]));
+        }
+    }
     matches.retain(|m| m.span > 1 || m.byte_to.saturating_sub(m.byte_from) >= query_content_len);
 
     // Dedup AFTER filtering
