@@ -274,8 +274,9 @@ impl SfxCollectorV3 {
         }
 
         // Collect chunk sibling pairs: consecutive chunks in the same value
-        for (ci, w) in chunk_intern_ids.windows(2).enumerate() {
-            let meta = &self.token_meta[w[0] as usize];
+        // content_len = destination chunk's content length (used by DFS)
+        for w in chunk_intern_ids.windows(2) {
+            let meta = &self.token_meta[w[1] as usize];
             let content_len = (meta.own_len as u16).saturating_sub(meta.sep_len as u16);
             self.sibling_pairs.push((w[0], w[1], content_len));
         }
@@ -464,8 +465,10 @@ impl SfxCollectorV3 {
             }
 
             // Collect word sibling pairs: consecutive words in the same value
+            // content_len = destination word's content length (used by DFS to
+            // know how many bytes of the sibling's text are content vs overlap)
             for w in ws_intern_sequence.windows(2) {
-                self.sibling_pairs.push((w[0].0, w[1].0, w[0].1));
+                self.sibling_pairs.push((w[0].0, w[1].0, w[1].1));
             }
         }
 
