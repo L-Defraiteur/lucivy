@@ -9,6 +9,8 @@ pub mod trace;
 pub mod fst_walk;
 pub mod resolve;
 pub mod composite;
+pub mod dag_nodes;
+pub mod dag_builder;
 pub mod orchestrator;
 pub mod regex_v3;
 #[cfg(test)]

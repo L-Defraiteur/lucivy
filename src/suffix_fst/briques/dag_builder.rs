@@ -1,0 +1,94 @@
+//! DAG builder for find_literal_v3.
+//!
+//! Constructs a LocalDag<BriquesContext> with the right nodes and edges
+//! based on the query config (strict_separators, has_word_pipeline, has_sibling_chains).
+
+use luciole::local_dag::LocalDag;
+use luciole::runtime::DagResult;
+
+use super::context::BriquesContext;
+use super::dag_nodes::*;
+use super::resolve::MatchV3;
+
+/// Build and execute the find_literal_v3 pipeline as a LocalDag.
+///
+/// Returns the same Vec<MatchV3> as the imperative find_literal_v3,
+/// plus a DagResult with per-node metrics for explain.
+pub fn find_literal_v3_dag<'a>(
+    ctx: &BriquesContext<'a>,
+    query: &str,
+    anchor_start: bool,
+    strict_separators: bool,
+) -> (Vec<MatchV3>, DagResult) {
+    let mut dag = build_literal_dag(ctx, query, anchor_start, strict_separators);
+    dag.execute_and_take::<Vec<MatchV3>>(ctx, "merge", "results")
+        .expect("find_literal_v3 DAG execution failed")
+}
+
+fn build_literal_dag<'a>(
+    ctx: &BriquesContext<'a>,
+    query: &str,
+    anchor_start: bool,
+    strict_separators: bool,
+) -> LocalDag<BriquesContext<'a>> {
+    let mut dag = LocalDag::new();
+    let q = query.to_string();
+
+    // ── Always present ──────────────────────────────────────────
+    dag.add_node("fst_candidates", FstCandidatesNode {
+        query: q.clone(),
+        anchor_start,
+        strict_separators,
+    });
+
+    dag.add_node("resolve_single", ResolveSingleNode);
+    dag.connect("fst_candidates", "candidates", "resolve_single", "candidates").unwrap();
+
+    // ── Chunk pipeline ──────────────────────────────────────────
+    dag.add_node("chunk_chain", ChunkChainNode {
+        query: q.clone(),
+        anchor_start,
+    });
+
+    if ctx.has_sibling_chains() {
+        dag.add_node("sibling_chunk", SiblingChunkNode { query: q.clone() });
+        dag.connect("fst_candidates", "candidates", "sibling_chunk", "candidates").unwrap();
+    }
+
+    dag.add_node("resolve_chunk", ResolveChunkNode);
+    dag.connect("chunk_chain", "chains", "resolve_chunk", "chains").unwrap();
+    if ctx.has_sibling_chains() {
+        dag.connect("sibling_chunk", "sib_chains", "resolve_chunk", "sib_chains").unwrap();
+    }
+
+    // ── Word pipeline (conditional) ─────────────────────────────
+    let has_word = !strict_separators && ctx.has_word_pipeline();
+
+    if has_word {
+        dag.add_node("word_chain", WordChainNode {
+            query: q.clone(),
+            anchor_start,
+        });
+
+        if ctx.has_sibling_chains() {
+            dag.add_node("sibling_word", SiblingWordNode { query: q.clone() });
+            dag.connect("fst_candidates", "candidates", "sibling_word", "candidates").unwrap();
+        }
+
+        dag.add_node("resolve_word", ResolveWordNode);
+        dag.connect("word_chain", "chains", "resolve_word", "chains").unwrap();
+        if ctx.has_sibling_chains() {
+            dag.connect("sibling_word", "sib_chains", "resolve_word", "sib_chains").unwrap();
+        }
+    }
+
+    // ── Merge ───────────────────────────────────────────────────
+    dag.add_node("merge", MergeNode);
+    dag.connect("resolve_single", "matches", "merge", "single").unwrap();
+    dag.connect("resolve_chunk", "matches", "merge", "chunk").unwrap();
+    if has_word {
+        dag.connect("resolve_word", "matches", "merge", "word").unwrap();
+    }
+
+    dag
+}
