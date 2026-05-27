@@ -30,6 +30,7 @@ pub use branch::{BranchNode, SwitchNode};
 pub use fan_out::MergeNode;
 pub use gate::GateNode;
 pub use scatter::ScatterResults;
+pub mod local_dag;
 pub mod stream_dag;
 pub mod wait_graph;
 pub mod async_executor;
@@ -50,6 +51,7 @@ pub use checkpoint::{CheckpointStatus, CheckpointStore, DagCheckpoint, FileCheck
 pub use runtime::{display_progress, execute_dag, execute_dag_async, execute_dag_with_checkpoint, execute_sequential, subscribe_dag_events, DagEvent, DagResult, NodeResult};
 pub use scheduler::{ActorContext, ActorId, Scheduler, SchedulerHandle, dump_wait_graph_mermaid, dump_wait_graph_text};
 pub use scope::{Drainable, Scope};
+pub use local_dag::{LocalDag, LocalNode, LocalNodeCtx, LocalPortValue};
 pub use stream_dag::StreamDag;
 pub use async_executor::{AsyncScope, FutureHandle, SignalFuture, SignalDataFuture, SIGNAL_OK, SIGNAL_ERROR, SIGNAL_PENDING};
 
