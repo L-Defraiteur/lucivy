@@ -47,7 +47,7 @@ pub use pool::{DrainMsg, DrainableRef, Pool, ShutdownMsg};
 pub use port::{PortType, PortValue};
 pub use reply::{reply, collect_replies_to, JoinResume, Reply, ReplyReceiver, ResumeHandle};
 pub use checkpoint::{CheckpointStatus, CheckpointStore, DagCheckpoint, FileCheckpointStore, MemoryCheckpointStore};
-pub use runtime::{display_progress, execute_dag, execute_dag_async, execute_dag_with_checkpoint, subscribe_dag_events, DagEvent, DagResult, NodeResult};
+pub use runtime::{display_progress, execute_dag, execute_dag_async, execute_dag_with_checkpoint, execute_sequential, subscribe_dag_events, DagEvent, DagResult, NodeResult};
 pub use scheduler::{ActorContext, ActorId, Scheduler, SchedulerHandle, dump_wait_graph_mermaid, dump_wait_graph_text};
 pub use scope::{Drainable, Scope};
 pub use stream_dag::StreamDag;

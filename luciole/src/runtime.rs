@@ -320,6 +320,62 @@ pub fn execute_dag(
     })
 }
 
+/// Execute a DAG sequentially on the current thread, without scheduler.
+///
+/// Nodes are executed one by one in topological order. No thread pool,
+/// no parallelism, no undo. Useful for:
+/// - Query-time DAGs (grain fin, mono-thread by nature)
+/// - Tests (deterministic, no scheduling non-determinism)
+/// - WASM single-thread targets
+/// - Debug (step-by-step execution)
+///
+/// Returns the same `DagResult` as `execute_dag`.
+pub fn execute_sequential(
+    dag: &mut Dag,
+    on_event: Option<&dyn Fn(DagEvent)>,
+) -> Result<DagResult, String> {
+    let dag_start = Instant::now();
+    let levels = dag.topological_levels()?;
+    let total_nodes = dag.node_count();
+
+    let mut consumer_counts: HashMap<(String, String), usize> = HashMap::new();
+    for edge in dag.edges() {
+        *consumer_counts
+            .entry((edge.from_node.clone(), edge.from_port.clone()))
+            .or_insert(0) += 1;
+    }
+
+    let mut port_data: HashMap<(String, String), PortValue> =
+        std::mem::take(&mut dag.initial_inputs);
+    let mut results: Vec<(String, NodeResult)> = Vec::with_capacity(total_nodes);
+
+    let emit = |evt: DagEvent| {
+        if let Some(cb) = on_event {
+            cb(evt);
+        }
+    };
+
+    for (level_idx, level) in levels.iter().enumerate() {
+        for &node_idx in level {
+            let node_name = dag.node_name(node_idx).to_string();
+            let nr = execute_single_node(
+                dag, node_idx, &mut port_data, &mut consumer_counts,
+                level_idx, &emit,
+            )?;
+            results.push((node_name, nr));
+        }
+    }
+
+    let total_ms = dag_start.elapsed().as_millis() as u64;
+    emit(DagEvent::DagCompleted { total_ms, node_count: total_nodes });
+
+    Ok(DagResult {
+        duration_ms: total_ms,
+        node_results: results,
+        outputs: port_data,
+    })
+}
+
 /// Execute a DAG with checkpoint persistence.
 ///
 /// Same as `execute_dag` but saves progress to a `CheckpointStore`.
@@ -2015,5 +2071,147 @@ mod tests {
         let result = result_store.lock().unwrap().take().unwrap();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("intentional failure"));
+    }
+
+    // -- execute_sequential tests --
+
+    #[test]
+    fn sequential_linear() {
+        let mut dag = Dag::new();
+        dag.add_node("source", EmitNode { value: 7 });
+        dag.add_node("double", DoubleNode);
+        dag.add_node("sink", CollectNode { received: 0 });
+
+        dag.connect("source", "out", "double", "in").unwrap();
+        dag.connect("double", "out", "sink", "in").unwrap();
+
+        let result = execute_sequential(&mut dag, None).unwrap();
+        assert_eq!(result.node_results.len(), 3);
+        let sink_result = result.get("sink").unwrap();
+        assert_eq!(sink_result.metrics[0].1, 14.0); // 7 * 2
+    }
+
+    #[test]
+    fn sequential_fan_out() {
+        // Same output consumed by two nodes via downcast (clone)
+        struct SumNode;
+        impl Node for SumNode {
+            fn node_type(&self) -> &'static str { "sum" }
+            fn inputs(&self) -> Vec<PortDef> {
+                vec![
+                    PortDef::required("a", PortType::of::<i32>()),
+                    PortDef::required("b", PortType::of::<i32>()),
+                ]
+            }
+            fn outputs(&self) -> Vec<PortDef> {
+                vec![PortDef::required("out", PortType::of::<i32>())]
+            }
+            fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+                let a = *ctx.input("a").unwrap().downcast::<i32>().unwrap();
+                let b = *ctx.input("b").unwrap().downcast::<i32>().unwrap();
+                ctx.set_output("out", PortValue::new(a + b));
+                ctx.metric("sum", (a + b) as f64);
+                Ok(())
+            }
+        }
+
+        let mut dag = Dag::new();
+        dag.add_node("source", EmitNode { value: 3 });
+        dag.add_node("d1", DoubleNode);
+        dag.add_node("d2", DoubleNode);
+        dag.add_node("sum", SumNode);
+
+        // fan-out: source -> d1 AND source -> d2
+        dag.connect("source", "out", "d1", "in").unwrap();
+        dag.connect("source", "out", "d2", "in").unwrap();
+        dag.connect("d1", "out", "sum", "a").unwrap();
+        dag.connect("d2", "out", "sum", "b").unwrap();
+
+        let result = execute_sequential(&mut dag, None).unwrap();
+        let sum_result = result.get("sum").unwrap();
+        assert_eq!(sum_result.metrics[0].1, 12.0); // (3*2) + (3*2)
+    }
+
+    #[test]
+    fn sequential_failure() {
+        let mut dag = Dag::new();
+        dag.add_node("source", EmitNode { value: 1 });
+        dag.add_node("fail", FailNode);
+        dag.connect("source", "out", "fail", "in").unwrap();
+
+        let err = execute_sequential(&mut dag, None).unwrap_err();
+        assert!(err.contains("intentional failure"));
+    }
+
+    #[test]
+    fn sequential_with_services() {
+        struct ServiceNode;
+        impl Node for ServiceNode {
+            fn node_type(&self) -> &'static str { "service_reader" }
+            fn outputs(&self) -> Vec<PortDef> {
+                vec![PortDef::required("out", PortType::of::<i32>())]
+            }
+            fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
+                let multiplier = ctx.service::<i32>("multiplier")
+                    .ok_or("missing service")?;
+                ctx.set_output("out", PortValue::new(*multiplier * 10));
+                Ok(())
+            }
+        }
+
+        let mut registry = crate::node::ServiceRegistry::new();
+        registry.register("multiplier", 5i32);
+
+        let mut dag = Dag::new().with_services(Arc::new(registry));
+        dag.add_node("svc", ServiceNode);
+        dag.add_node("sink", CollectNode { received: 0 });
+        dag.connect("svc", "out", "sink", "in").unwrap();
+
+        let result = execute_sequential(&mut dag, None).unwrap();
+        let sink_result = result.get("sink").unwrap();
+        assert_eq!(sink_result.metrics[0].1, 50.0); // 5 * 10
+    }
+
+    #[test]
+    fn sequential_events_emitted() {
+        let events = std::sync::Mutex::new(Vec::new());
+
+        let mut dag = Dag::new();
+        dag.add_node("a", EmitNode { value: 1 });
+        dag.add_node("b", CollectNode { received: 0 });
+        dag.connect("a", "out", "b", "in").unwrap();
+
+        execute_sequential(&mut dag, Some(&|evt| {
+            events.lock().unwrap().push(format!("{:?}", evt));
+        })).unwrap();
+
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|e| e.contains("DagCompleted")));
+        assert!(events.iter().any(|e| e.contains("NodeCompleted")));
+    }
+
+    #[test]
+    fn sequential_matches_execute_dag() {
+        // Same DAG, both runners should produce identical results
+        let build = || {
+            let mut dag = Dag::new();
+            dag.add_node("source", EmitNode { value: 42 });
+            dag.add_node("double", DoubleNode);
+            dag.add_node("sink", CollectNode { received: 0 });
+            dag.connect("source", "out", "double", "in").unwrap();
+            dag.connect("double", "out", "sink", "in").unwrap();
+            dag
+        };
+
+        let mut dag1 = build();
+        let mut dag2 = build();
+
+        let r1 = execute_dag(&mut dag1, None).unwrap();
+        let r2 = execute_sequential(&mut dag2, None).unwrap();
+
+        assert_eq!(r1.node_results.len(), r2.node_results.len());
+        let sink1 = r1.get("sink").unwrap();
+        let sink2 = r2.get("sink").unwrap();
+        assert_eq!(sink1.metrics[0].1, sink2.metrics[0].1); // both 84.0
     }
 }
