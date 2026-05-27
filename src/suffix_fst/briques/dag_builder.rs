@@ -3,6 +3,7 @@
 //! Constructs a LocalDag<BriquesContext> with the right nodes and edges
 //! based on the query config (strict_separators, has_word_pipeline, has_sibling_chains).
 
+use luciole::dag::DagEdge;
 use luciole::local_dag::LocalDag;
 use luciole::runtime::DagResult;
 
@@ -10,19 +11,34 @@ use super::context::BriquesContext;
 use super::dag_nodes::*;
 use super::resolve::MatchV3;
 
+/// Result of a DAG-based find_literal_v3 execution.
+pub struct LiteralDagResult {
+    pub matches: Vec<MatchV3>,
+    pub dag_info: DagResult,
+    pub edges: Vec<DagEdge>,
+}
+
+impl LiteralDagResult {
+    /// Render the DAG as a Mermaid flowchart with per-node metrics.
+    pub fn dump_mermaid(&self) -> String {
+        self.dag_info.dump_mermaid(&self.edges)
+    }
+}
+
 /// Build and execute the find_literal_v3 pipeline as a LocalDag.
 ///
-/// Returns the same Vec<MatchV3> as the imperative find_literal_v3,
-/// plus a DagResult with per-node metrics for explain.
+/// Returns matches + DagResult + edges for explain/mermaid.
 pub fn find_literal_v3_dag<'a>(
     ctx: &BriquesContext<'a>,
     query: &str,
     anchor_start: bool,
     strict_separators: bool,
-) -> (Vec<MatchV3>, DagResult) {
+) -> LiteralDagResult {
     let mut dag = build_literal_dag(ctx, query, anchor_start, strict_separators);
-    dag.execute_and_take::<Vec<MatchV3>>(ctx, "merge", "results")
-        .expect("find_literal_v3 DAG execution failed")
+    let edges = dag.edges().to_vec();
+    let (matches, dag_info) = dag.execute_and_take::<Vec<MatchV3>>(ctx, "merge", "results")
+        .expect("find_literal_v3 DAG execution failed");
+    LiteralDagResult { matches, dag_info, edges }
 }
 
 fn build_literal_dag<'a>(

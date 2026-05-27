@@ -133,6 +133,64 @@ impl DagResult {
         }
         lines.join("\n")
     }
+
+    /// Render the DAG as a Mermaid flowchart with per-node metrics.
+    ///
+    /// Requires the edge list (topology) since DagResult doesn't store it.
+    /// Use `dag.edges()` or `local_dag.edges()` to get the edges.
+    ///
+    /// ```ignore
+    /// let (results, dag_info) = find_literal_v3_dag(&ctx, "mutex", false, true);
+    /// println!("```mermaid\n{}\n```", dag_info.dump_mermaid(dag.edges()));
+    /// ```
+    pub fn dump_mermaid(&self, edges: &[crate::dag::DagEdge]) -> String {
+        let mut out = String::from("graph TD\n");
+
+        // Nodes with metrics annotation
+        for (name, nr) in &self.node_results {
+            let id = sanitize_id(name);
+            let metrics_str = nr.metrics.iter()
+                .map(|(k, v)| {
+                    if *v == ((*v) as u64) as f64 {
+                        format!("{}={}", k, *v as u64)
+                    } else {
+                        format!("{k}={v:.1}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            let label = if metrics_str.is_empty() {
+                format!("{name}<br/>{dur}ms", dur = nr.duration_ms)
+            } else {
+                format!("{name}<br/>{metrics_str}<br/>{dur}ms", dur = nr.duration_ms)
+            };
+            out.push_str(&format!("    {id}[\"{label}\"]\n"));
+        }
+
+        // Edges with port labels
+        for edge in edges {
+            let from_id = sanitize_id(&edge.from_node);
+            let to_id = sanitize_id(&edge.to_node);
+            out.push_str(&format!(
+                "    {from_id} -->|\"{}\"| {to_id}\n",
+                edge.from_port,
+            ));
+        }
+
+        // Style: highlight merge node
+        if self.node_results.iter().any(|(n, _)| n == "merge") {
+            out.push_str("    style merge fill:#e1f5fe\n");
+        }
+
+        out
+    }
+}
+
+fn sanitize_id(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .collect()
 }
 
 impl std::fmt::Display for DagResult {

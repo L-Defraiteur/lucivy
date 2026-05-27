@@ -728,6 +728,8 @@ mod tests {
 
     // ── DAG parity tests ──
 
+    use crate::suffix_fst::briques::dag_builder::find_literal_v3_dag;
+
     #[test]
     fn test_dag_parity_single_token() {
         let (sfx, post, _ws, _pm, _bm) = build_index(&["mutex_lock", "hello_world"]);
@@ -740,15 +742,15 @@ mod tests {
         };
 
         let imperative = find_literal_v3(&ctx, "tex", false, true);
-        let (dag_result, dag_info) = crate::suffix_fst::briques::dag_builder::find_literal_v3_dag(&ctx, "tex", false, true);
+        let r = find_literal_v3_dag(&ctx, "tex", false, true);
 
-        assert_eq!(imperative.len(), dag_result.len(),
+        assert_eq!(imperative.len(), r.matches.len(),
             "DAG should produce same match count as imperative");
-        for (i, (a, b)) in imperative.iter().zip(dag_result.iter()).enumerate() {
+        for (i, (a, b)) in imperative.iter().zip(r.matches.iter()).enumerate() {
             assert_eq!(a.doc_id, b.doc_id, "match {i} doc_id mismatch");
             assert_eq!(a.position, b.position, "match {i} position mismatch");
         }
-        assert!(dag_info.node_results.len() >= 3, "DAG should have at least 3 nodes");
+        assert!(r.dag_info.node_results.len() >= 3, "DAG should have at least 3 nodes");
     }
 
     #[test]
@@ -763,10 +765,10 @@ mod tests {
         };
 
         let imperative = find_literal_v3(&ctx, "mutex_lock", false, true);
-        let (dag_result, _) = crate::suffix_fst::briques::dag_builder::find_literal_v3_dag(&ctx, "mutex_lock", false, true);
+        let r = find_literal_v3_dag(&ctx, "mutex_lock", false, true);
 
-        assert_eq!(imperative.len(), dag_result.len());
-        for (i, (a, b)) in imperative.iter().zip(dag_result.iter()).enumerate() {
+        assert_eq!(imperative.len(), r.matches.len());
+        for (i, (a, b)) in imperative.iter().zip(r.matches.iter()).enumerate() {
             assert_eq!(a.doc_id, b.doc_id, "match {i} doc_id mismatch");
             assert_eq!(a.position, b.position, "match {i} position mismatch");
             assert_eq!(a.span, b.span, "match {i} span mismatch");
@@ -789,12 +791,11 @@ mod tests {
         };
 
         let imperative = find_literal_v3(&ctx, "mutexlock", false, false);
-        let (dag_result, dag_info) = crate::suffix_fst::briques::dag_builder::find_literal_v3_dag(&ctx, "mutexlock", false, false);
+        let r = find_literal_v3_dag(&ctx, "mutexlock", false, false);
 
-        assert_eq!(imperative.len(), dag_result.len(),
-            "DAG relaxed should match imperative: imp={} dag={}", imperative.len(), dag_result.len());
-        // With word pipeline, should have more nodes
-        assert!(dag_info.node_results.len() >= 5, "relaxed DAG should have word pipeline nodes");
+        assert_eq!(imperative.len(), r.matches.len(),
+            "DAG relaxed should match imperative: imp={} dag={}", imperative.len(), r.matches.len());
+        assert!(r.dag_info.node_results.len() >= 5, "relaxed DAG should have word pipeline nodes");
     }
 
     #[test]
@@ -808,16 +809,21 @@ mod tests {
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
         };
 
-        let (_, dag_info) = crate::suffix_fst::briques::dag_builder::find_literal_v3_dag(&ctx, "mutex", false, true);
+        let r = find_literal_v3_dag(&ctx, "mutex", false, true);
 
-        // Verify the explain has per-node metrics
-        let fst = dag_info.get("fst_candidates").expect("fst_candidates node missing");
-        assert!(fst.metrics.iter().any(|(k, _)| k == "candidates"),
-            "fst_candidates should report candidates metric");
+        // Verify metrics
+        let fst = r.dag_info.get("fst_candidates").expect("fst_candidates node missing");
+        assert!(fst.metrics.iter().any(|(k, _)| k == "candidates"));
 
-        let merge = dag_info.get("merge").expect("merge node missing");
-        assert!(merge.metrics.iter().any(|(k, _)| k == "matches"),
-            "merge should report matches metric");
+        let merge = r.dag_info.get("merge").expect("merge node missing");
+        assert!(merge.metrics.iter().any(|(k, _)| k == "matches"));
+
+        // Verify mermaid output
+        let mermaid = r.dump_mermaid();
+        assert!(mermaid.starts_with("graph TD"));
+        assert!(mermaid.contains("fst_candidates"));
+        assert!(mermaid.contains("merge"));
+        assert!(mermaid.contains("-->"));
     }
 
 }
