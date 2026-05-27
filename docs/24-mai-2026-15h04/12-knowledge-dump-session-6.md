@@ -316,3 +316,9 @@ Le query "function" relaxed matche "finition" dans `wal_record.cpp`.
 C'est un FP du chunk pipeline : le falling walk trouve un cross-token
 match qui traverse un mauvais boundary. Devrait être filtré par le
 word_pos_map post-filter.
+
+lucivy claude:
+claude --resume c267404f-7e44-42f7-8b4c-7717ae0b16b2
+
+rag3db claude:
+claude --resume d9be3d17-c972-4416-a522-7c57b26aaeae
