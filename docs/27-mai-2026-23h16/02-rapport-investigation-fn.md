@@ -54,6 +54,117 @@ Le chunk pour "functionality" est bien produit par le tokenizer (pos 96, 7 bytes
 
 C'est un **bug du collector_v3** a l'indexation. Le posting est perdue quelque part entre `add_value()` (qui appelle `token_postings[intern_id].push(...)`) et `into_data()` (qui construit `ord_map` et assigne les ordinals finaux).
 
+## Fix 1 : separation des namespaces intern (11/15 → 13/15)
+
+### Le bug
+
+`collector_v3.rs:intern_extended()` utilise le texte etendu comme cle unique.
+Mais chunk (partition 0x00/0x01) et word-stripped (partition 0x02) peuvent
+avoir le **meme texte etendu** (ex: "functional").
+
+`intern_extended()` retourne l'ord existant sans mettre a jour le meta.
+Si word-stripped est interned en premier → `is_word_stripped: true`.
+Le chunk qui arrive apres herite de ce flag.
+`into_data()` fait `if is_word_stripped { continue }` → **postings du chunk ignorees**.
+
+### Le fix
+
+```rust
+fn intern_extended(&mut self, text: &str, meta: TokenMetaV3) -> u32 {
+    let key = if meta.is_word_stripped {
+        format!("\x00ws:{text}")
+    } else {
+        text.to_string()
+    };
+    // ... lookup par key au lieu de text
+}
+```
+
+Fichier : `src/suffix_fst/collector_v3.rs`, fonction `intern_extended()`.
+
+### Resultat
+
+- `function strict` : 1466 → **1467** = OK
+- `rag3db strict` : 3075 → **3076** = OK
+- Score : 11/15 → 13/15
+
+## Fix 2 : partition du ord_map (elimine 49 FP relax)
+
+### Le bug
+
+Le `ord_map` dans `into_data()` utilisait le texte brut comme cle BTreeMap.
+Meme avec des intern_ids separes (fix 1), chunk "functional" et word-stripped
+"functional" collisionnent dans le ord_map → fusionnes dans le meme OrdEntry.
+
+Consequences :
+- Le word-stripped entry (postings vides dans sfxpost, postings dans WordSfxPost)
+  est fusionne avec le chunk entry → l'ordinal final a des postings chunk mais
+  est aussi utilise comme word-stripped → doublons et FP en mode relax
+- Le `intern_to_final` mapping est incorrect pour l'un des deux
+
+### Le fix
+
+Prefixer les cles du ord_map avec "C:" (chunk) ou "W:" (word-stripped).
+Ajouter `entry.text` pour garder le texte brut (sans prefix) pour le builder.
+
+```rust
+let map_key = if is_word_stripped {
+    format!("W:{text}")
+} else {
+    format!("C:{text}")
+};
+ord_map.entry(map_key).or_insert_with(|| OrdEntry {
+    text: text.clone(), // texte reel sans prefix
+    ...
+});
+```
+
+### Fichier
+
+`src/suffix_fst/collector_v3.rs`, fonction `into_data()`, section ord_map.
+
+### Resultat
+
+- `function relax` FP : 49 → **1**
+- Score maintenu a 13/15
+
+## Fix 3 (en cours) : tokens BTreeSet → Vec
+
+### Le bug
+
+`build_derived_indexes_v3` itere `tokens.iter().enumerate()` pour mapper
+ordinal → texte. Mais `tokens` etait un `BTreeSet<String>` (dedup) tandis que
+`content_postings` et `own_lens` sont indexes par `final_ord` (un par entree
+dans ord_map, y compris les doublons chunk/ws). Desalignement = bytemap/posmap
+corrompus.
+
+### Le fix (en cours)
+
+`tokens: BTreeSet<String>` → `tokens: Vec<String>` avec 1:1 correspondance
+avec `content_postings` et `own_lens`.
+
+### Fichiers
+
+- `src/suffix_fst/collector_v3.rs` — struct `SfxCollectorDataV3`, `into_data()`
+- `src/suffix_fst/index_registry.rs` — `build_derived_indexes_v3` signature
+- `src/indexer/sfx_dag_v3.rs` — `merge_segments_v3`
+
+## Invariant a graver
+
+**Toute structure qui mappe texte → donnee dans le collector doit etre
+partitionnee par type d'entree (chunk vs word-stripped).**
+
+Les structures concernees :
+1. `token_intern` (HashMap cle d'interning) — **fixe** (prefix `\x00ws:`)
+2. `ord_map` (BTreeMap cle d'ordinal final) — **fixe** (prefix `C:`/`W:`)
+3. `tokens` (set/vec de textes) — **fixe** (Vec au lieu de BTreeSet dedup)
+4. `content_key_to_interns` — deja partitionne (filtre `!is_word_stripped`)
+5. `sorted_indices` — utilise par le builder qui filtre par `is_word_stripped`
+
+**Danger futur** : si quelqu'un remplace le Vec par un BTreeSet pour "optimiser",
+les ordinals chunk et word-stripped avec le meme texte seront fusionnes →
+regression silencieuse des memes FN qu'on vient de corriger.
+
 ## Piste pour le fix
 
 Le bug est dans `collector_v3.rs`, probablement dans `into_data()`. Le chunk "functio" + overlap "na" = extended "functiona" est interned normalement via `intern_extended("functiona", ...)`. Le posting est pushee dans `token_postings[intern_id]`. Mais quand `into_data()` construit le `ord_map`, soit :

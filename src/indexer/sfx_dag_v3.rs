@@ -384,10 +384,10 @@ pub fn merge_segments_v3(
     let mut intern_to_final = vec![0u32; num_tokens];
     let mut content_postings: Vec<Vec<(u32, u32, u32, u32)>> = Vec::new();
     let mut own_lens: Vec<u16> = Vec::new();
-    let mut tokens: BTreeSet<String> = BTreeSet::new();
+    let mut tokens: Vec<String> = Vec::new();
     let mut final_ord = 0u32;
     for (text, (postings, own_len, intern_ords)) in &ord_map {
-        tokens.insert(text.clone());
+        tokens.push(text.clone());
         let mut p = postings.clone();
         p.sort();
         p.dedup();

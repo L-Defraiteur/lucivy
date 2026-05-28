@@ -176,7 +176,7 @@ pub fn build_derived_indexes(
 /// `token_own_lens[i]` = own_len for the i-th token in sorted order.
 /// If None, falls back to full token text (v2 compat).
 pub fn build_derived_indexes_v3(
-    tokens: &std::collections::BTreeSet<String>,
+    tokens: &[String],
     sfxpost_data: Option<&[u8]>,
     token_own_lens: Option<&[u16]>,
 ) -> Vec<(String, Vec<u8>)> {

@@ -644,12 +644,14 @@ impl SfxCollectorV3 {
         // Assign final ordinals in BTreeMap (alphabetical) order
         let mut intern_to_final = vec![0u32; num_tokens];
         let mut content_postings: Vec<Vec<(u32, u32, u32, u32)>> = Vec::new();
-        let mut tokens: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        // Use a Vec instead of BTreeSet to keep 1:1 correspondence with final ordinals.
+        // When chunk and word-stripped have the same text, they get separate entries.
+        let mut tokens_vec: Vec<String> = Vec::new();
         let mut own_lens: Vec<u16> = Vec::new();
         let mut final_ord = 0u32;
 
         for (_map_key, entry) in &ord_map {
-            tokens.insert(entry.text.clone());
+            tokens_vec.push(entry.text.clone());
             let mut p = entry.postings.clone();
             let before_dedup = p.len();
             p.sort();
@@ -803,7 +805,7 @@ impl SfxCollectorV3 {
             intern_to_final,
             token_texts: self.token_texts,
             token_meta: self.token_meta,
-            tokens,
+            tokens: tokens_vec,
             content_postings,
             own_lens,
             num_content_ords: final_ord as usize,
@@ -875,7 +877,8 @@ pub struct SfxCollectorDataV3 {
     /// Token texts sorted alphabetically (BTreeSet order = final ordinal order).
     /// Contains extended texts for chunks and word-stripped texts for ws entries.
     /// Used by derived index builders (bytemap, freqmap, posmap).
-    pub tokens: std::collections::BTreeSet<String>,
+    /// Ordered token texts, 1:1 with content_postings and own_lens by final ordinal.
+    pub tokens: Vec<String>,
     /// Postings per final ordinal. Index = final ordinal.
     pub content_postings: Vec<Vec<(u32, u32, u32, u32)>>,
     /// own_len per final ordinal (content+sep bytes, excludes overlap).
