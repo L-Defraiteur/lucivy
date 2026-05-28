@@ -51,6 +51,11 @@ pub fn resolve_single_v3(
     let mut results = Vec::new();
 
     for cand in candidates {
+        // Word-stripped ordinals (partition 0x02) have empty postings in sfxpost.
+        // Their postings are in WordSfxPost, resolved by resolve_word_chains_v3.
+        // Skip them here to avoid phantom matches.
+        if cand.is_word_stripped() { continue; }
+
         let entries = if let Some(filter) = filter_docs {
             resolver.resolve_filtered(cand.raw_ordinal, filter)
         } else {

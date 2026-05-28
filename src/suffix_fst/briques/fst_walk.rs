@@ -37,6 +37,9 @@ pub struct FstCandidateV3 {
     pub sep_len: u8,
     pub overlap_len: u8,
     pub is_word_start: bool,
+    /// Which FST partition this candidate was found in.
+    /// 0x00 = SI0 (token start), 0x01 = SI>0 (suffix), 0x02 = word-stripped.
+    pub partition: u8,
 }
 
 impl FstCandidateV3 {
@@ -44,7 +47,12 @@ impl FstCandidateV3 {
         self.own_len - self.sep_len as u16
     }
 
-    fn from_parent(p: &ParentEntryV3) -> Self {
+    /// True if this candidate is from the word-stripped partition (0x02).
+    pub fn is_word_stripped(&self) -> bool {
+        self.partition == SI_STRIPPED_PREFIX
+    }
+
+    fn from_parent(p: &ParentEntryV3, partition: u8) -> Self {
         Self {
             raw_ordinal: p.raw_ordinal,
             sti: p.sti,
@@ -52,6 +60,7 @@ impl FstCandidateV3 {
             sep_len: p.sep_len,
             overlap_len: p.overlap_len,
             is_word_start: p.is_word_start,
+            partition,
         }
     }
 }
@@ -141,7 +150,7 @@ pub fn fst_candidates_v3(
         while let Some((_key, val)) = stream.next() {
             let parents = reader.decode_parents(val);
             for p in parents {
-                results.push(FstCandidateV3::from_parent(&p));
+                results.push(FstCandidateV3::from_parent(&p, partition));
             }
         }
     }
