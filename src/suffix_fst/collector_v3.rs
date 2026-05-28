@@ -263,6 +263,18 @@ impl SfxCollectorV3 {
             self.token_postings[intern_id as usize].push((
                 self.current_doc_id, ti, byte_from, byte_to,
             ));
+
+            // ── DIAG: trace collector for target word ──
+            if let Ok(target) = std::env::var("V3_DIAG_COLLECTOR") {
+                if extended.to_lowercase().contains(&target) {
+                    eprintln!("[COLLECTOR] add_value doc={} ti={} chunk[{}] text={:?} extended={:?} intern_id={} own_len={} sep={} ovl={} ws={} byte=[{}..{}] postings_count={}",
+                        self.current_doc_id, ti, i, chunk_text, extended,
+                        intern_id, own_len, meta.sep_len, overlap_len,
+                        meta.is_word_start, byte_from, byte_to,
+                        self.token_postings[intern_id as usize].len(),
+                    );
+                }
+            }
             chunk_posting_info.push((self.current_doc_id, ti, byte_from, byte_to));
             chunk_intern_ids.push(intern_id);
 
@@ -549,9 +561,11 @@ impl SfxCollectorV3 {
             std::collections::BTreeMap::new();
 
         // Add chunk entries (non-word-stripped): each gets its own ordinal
+        let diag_target = std::env::var("V3_DIAG_COLLECTOR").ok();
         for &io in &sorted_indices {
             if self.token_meta[io as usize].is_word_stripped { continue; }
             let text = &self.token_texts[io as usize];
+            let postings_before = self.token_postings[io as usize].len();
             let entry = ord_map.entry(text.clone()).or_insert_with(|| OrdEntry {
                 postings: Vec::new(),
                 own_len: self.token_meta[io as usize].own_len,
@@ -559,6 +573,14 @@ impl SfxCollectorV3 {
             });
             entry.postings.extend_from_slice(&self.token_postings[io as usize]);
             entry.intern_ords.push(io);
+
+            if let Some(ref target) = diag_target {
+                if text.to_lowercase().contains(target) {
+                    eprintln!("[COLLECTOR into_data] intern_ord={} text={:?} postings_count={} ord_map_postings_after={} is_ws={}",
+                        io, text, postings_before, entry.postings.len(),
+                        self.token_meta[io as usize].is_word_stripped);
+                }
+            }
         }
 
         // Add word-stripped entries: own ordinal but NO chunk-level postings.
@@ -609,13 +631,24 @@ impl SfxCollectorV3 {
         for (text, entry) in &ord_map {
             tokens.insert(text.clone());
             let mut p = entry.postings.clone();
+            let before_dedup = p.len();
             p.sort();
             p.dedup();
-            content_postings.push(p);
+            content_postings.push(p.clone());
             own_lens.push(entry.own_len);
             for &io in &entry.intern_ords {
                 intern_to_final[io as usize] = final_ord;
             }
+
+            if let Some(ref target) = diag_target {
+                if text.to_lowercase().contains(target) {
+                    eprintln!("[COLLECTOR final_ord] text={:?} final_ord={} intern_ords={:?} postings_before_dedup={} postings_after_dedup={} doc_ids={:?}",
+                        text, final_ord, entry.intern_ords,
+                        before_dedup, p.len(),
+                        p.iter().map(|x| x.0).collect::<Vec<_>>());
+                }
+            }
+
             final_ord += 1;
         }
 
