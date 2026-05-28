@@ -562,12 +562,15 @@ impl SfxCollectorV3 {
         }
 
         // Collect all ordinal entries into a BTreeMap for deterministic alphabetical order.
-        // Key = token text (extended for chunks, word-stripped+overlap for ws).
-        // Each unique text has exactly one intern_id (enforced by intern_extended).
+        // Chunk and word-stripped entries use SEPARATE keys (prefixed) to prevent
+        // collision when their text is identical (e.g., "functional" as chunk
+        // from "functionality" vs word-stripped "functional").
         struct OrdEntry {
+            text: String, // actual text (no prefix)
             postings: Vec<(u32, u32, u32, u32)>,
             own_len: u16,
             intern_ords: Vec<u32>,
+            is_word_stripped: bool,
         }
         let mut ord_map: std::collections::BTreeMap<String, OrdEntry> =
             std::collections::BTreeMap::new();
@@ -577,20 +580,22 @@ impl SfxCollectorV3 {
         for &io in &sorted_indices {
             if self.token_meta[io as usize].is_word_stripped { continue; }
             let text = &self.token_texts[io as usize];
+            let map_key = format!("C:{text}"); // "C:" = chunk namespace
             let postings_before = self.token_postings[io as usize].len();
-            let entry = ord_map.entry(text.clone()).or_insert_with(|| OrdEntry {
+            let entry = ord_map.entry(map_key).or_insert_with(|| OrdEntry {
+                text: text.clone(),
                 postings: Vec::new(),
                 own_len: self.token_meta[io as usize].own_len,
                 intern_ords: Vec::new(),
+                is_word_stripped: false,
             });
             entry.postings.extend_from_slice(&self.token_postings[io as usize]);
             entry.intern_ords.push(io);
 
             if let Some(ref target) = diag_target {
                 if text.to_lowercase().contains(target) {
-                    eprintln!("[COLLECTOR into_data] intern_ord={} text={:?} postings_count={} ord_map_postings_after={} is_ws={}",
-                        io, text, postings_before, entry.postings.len(),
-                        self.token_meta[io as usize].is_word_stripped);
+                    eprintln!("[COLLECTOR into_data] intern_ord={} text={:?} postings_count={} ord_map_postings_after={} is_ws=false",
+                        io, text, postings_before, entry.postings.len());
                 }
             }
         }
@@ -617,12 +622,15 @@ impl SfxCollectorV3 {
             if !self.token_meta[ws.first_intern_ord as usize].is_word_stripped { continue; }
 
             let ws_text = &self.token_texts[ws.first_intern_ord as usize];
+            let map_key = format!("W:{ws_text}"); // "W:" = word-stripped namespace
 
             // Add to ord_map with EMPTY postings — word postings go to WordSfxPost
-            ord_map.entry(ws_text.clone()).or_insert_with(|| OrdEntry {
+            ord_map.entry(map_key).or_insert_with(|| OrdEntry {
+                text: ws_text.clone(),
                 postings: Vec::new(), // empty! word postings are separate
                 own_len: ws.first_own_len,
                 intern_ords: vec![ws.first_intern_ord],
+                is_word_stripped: true,
             });
 
             deferred_ws.push(DeferredWordPostings {
@@ -640,8 +648,8 @@ impl SfxCollectorV3 {
         let mut own_lens: Vec<u16> = Vec::new();
         let mut final_ord = 0u32;
 
-        for (text, entry) in &ord_map {
-            tokens.insert(text.clone());
+        for (_map_key, entry) in &ord_map {
+            tokens.insert(entry.text.clone());
             let mut p = entry.postings.clone();
             let before_dedup = p.len();
             p.sort();
@@ -653,9 +661,9 @@ impl SfxCollectorV3 {
             }
 
             if let Some(ref target) = diag_target {
-                if text.to_lowercase().contains(target) {
-                    eprintln!("[COLLECTOR final_ord] text={:?} final_ord={} intern_ords={:?} postings_before_dedup={} postings_after_dedup={} doc_ids={:?}",
-                        text, final_ord, entry.intern_ords,
+                if entry.text.to_lowercase().contains(target) {
+                    eprintln!("[COLLECTOR final_ord] text={:?} final_ord={} intern_ords={:?} ws={} postings_before_dedup={} postings_after_dedup={} doc_ids={:?}",
+                        entry.text, final_ord, entry.intern_ords, entry.is_word_stripped,
                         before_dedup, p.len(),
                         p.iter().map(|x| x.0).collect::<Vec<_>>());
                 }
