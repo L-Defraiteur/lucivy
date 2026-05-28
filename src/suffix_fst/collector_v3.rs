@@ -503,13 +503,25 @@ impl SfxCollectorV3 {
     }
 
     /// Intern an extended token, returning its ordinal.
+    ///
+    /// Chunk entries and word-stripped entries use separate namespaces even
+    /// when their text is identical (e.g., "functional" from chunking
+    /// "functionality" vs "functional" as a word-stripped entry).
+    /// This prevents word-stripped meta from poisoning chunk entries,
+    /// which would cause their postings to be skipped in into_data().
     fn intern_extended(&mut self, text: &str, meta: TokenMetaV3) -> u32 {
-        if let Some(&ord) = self.token_intern.get(text) {
+        // Separate namespace: word-stripped entries get a prefix to avoid collision
+        let key = if meta.is_word_stripped {
+            format!("\x00ws:{text}")
+        } else {
+            text.to_string()
+        };
+        if let Some(&ord) = self.token_intern.get(&key) {
             return ord;
         }
         let ord = self.token_texts.len() as u32;
-        self.token_intern.insert(text.to_string(), ord);
-        self.token_texts.push(text.to_string());
+        self.token_intern.insert(key, ord);
+        self.token_texts.push(text.to_string()); // store actual text, not the prefixed key
         self.token_postings.push(Vec::new());
         self.token_meta.push(meta);
         ord

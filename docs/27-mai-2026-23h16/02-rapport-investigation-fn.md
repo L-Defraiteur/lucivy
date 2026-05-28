@@ -87,3 +87,25 @@ c985f45 diag: deep DAG explain — FST keys + per-candidate postings
 dd8b24e diag: doc forensics — find FN doc segment, tokenize, check candidates + postings
 321a94b diag: deep forensics — wider prefix scan + reverse ordinal scan
 ```
+● VOILA LE BUG !                                     
+                                                                             
+  intern_extended retourne l'ord existant si le texte existe deja (ligne     
+  507-508), mais il ne met PAS a jour les meta. La meta est seulement        
+  enregistree a la PREMIERE insertion (ligne 514).                           
+                                                                             
+  Si le texte "functional" a ete interned en premier par la word-stripped    
+  path (avec is_word_stripped: true), alors l'intern_id 3545 a meta          
+  is_word_stripped: true. Quand le chunk "function" + overlap "al" essaie de 
+  s'interner avec le meme texte "functional" mais is_word_stripped: false, il
+   recoit l'intern_id deja existant avec les meta word_stripped.
+
+  Ensuite, into_data() fait if self.token_meta[io as usize].is_word_stripped 
+  { continue; } → saute l'intern 3545 parce que ses meta disent
+  word_stripped. Les postings du chunk (doc 30) sont ignorees.               
+                                                                           
+  C'est le bug. Un conflit de meta quand le meme texte etendu est interned a 
+  la fois comme chunk et comme word-stripped.
+                                                                             
+  Tu veux qu'on fixe ca maintenant ?                                         
+   
+✻ Cogitated for 1m 11s                          
