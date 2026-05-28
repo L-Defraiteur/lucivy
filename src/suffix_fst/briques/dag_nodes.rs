@@ -7,7 +7,14 @@ use luciole::local_dag::{LocalNode, LocalNodeCtx};
 use luciole::node::PortDef;
 use luciole::port::PortType;
 
+use crate::query::posting_resolver::PostingResolver;
+use crate::suffix_fst::file_v3::SfxFileReaderV3;
+
 use super::context::BriquesContext;
+use crate::suffix_fst::builder::SI0_PREFIX;
+use crate::suffix_fst::builder::SI_REST_PREFIX;
+use crate::suffix_fst::builder_v3::SI_STRIPPED_PREFIX;
+
 use super::fst_walk::{self, FstCandidateV3, TokenChainV3};
 use super::resolve::{self, MatchV3};
 
@@ -30,6 +37,71 @@ fn format_matches(matches: &[MatchV3]) -> String {
             m.doc_id, m.position, m.span, m.byte_from, m.byte_to,
         )
     }).collect();
+    format!("[{}]", items.join(","))
+}
+
+/// Dump all FST keys that start with the query in each partition.
+fn dump_fst_keys(reader: &SfxFileReaderV3, query_bytes: &[u8],
+    anchor_start: bool, strict_separators: bool) -> String
+{
+    use lucivy_fst::{IntoStreamer, Streamer};
+
+    let fst = reader.fst();
+    let partitions: &[u8] = if anchor_start && strict_separators {
+        &[SI0_PREFIX]
+    } else if anchor_start && !strict_separators {
+        &[SI0_PREFIX, SI_STRIPPED_PREFIX]
+    } else if strict_separators {
+        &[SI0_PREFIX, SI_REST_PREFIX]
+    } else {
+        &[SI0_PREFIX, SI_REST_PREFIX, SI_STRIPPED_PREFIX]
+    };
+
+    let mut items = Vec::new();
+    for &partition in partitions {
+        let mut ge_key = vec![partition];
+        ge_key.extend_from_slice(query_bytes);
+        let mut lt_key = ge_key.clone();
+        if let Some(last) = lt_key.last_mut() {
+            if *last < 0xFF { *last += 1; }
+        }
+
+        let mut stream = fst.range().ge(&ge_key).lt(&lt_key).into_stream();
+        while let Some((key, val)) = stream.next() {
+            // key[0] is partition byte, rest is the text
+            let text_bytes = &key[1..];
+            let text = String::from_utf8_lossy(text_bytes);
+            let parents = reader.decode_parents(val);
+            let parent_strs: Vec<String> = parents.iter().map(|p| {
+                format!("{{\"ord\":{},\"sti\":{},\"own\":{},\"sep\":{},\"ovl\":{},\"ws\":{}}}",
+                    p.raw_ordinal, p.sti, p.own_len, p.sep_len, p.overlap_len, p.is_word_start)
+            }).collect();
+            items.push(format!(
+                "{{\"part\":{},\"key\":\"{}\",\"parents\":[{}]}}",
+                partition, text, parent_strs.join(","),
+            ));
+        }
+    }
+    format!("[{}]", items.join(","))
+}
+
+/// Format per-candidate posting details: ordinal → [doc_ids] (capped at 20).
+fn format_candidate_postings(candidates: &[FstCandidateV3], resolver: &dyn PostingResolver) -> String {
+    let mut items = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for c in candidates {
+        if !seen.insert(c.raw_ordinal) { continue; }
+        let postings = resolver.resolve(c.raw_ordinal);
+        let doc_ids: Vec<u32> = postings.iter().map(|p| p.doc_id).collect();
+        let total = doc_ids.len();
+        let preview: Vec<String> = doc_ids.iter().take(30).map(|d| d.to_string()).collect();
+        items.push(format!(
+            "{{\"ord\":{},\"own\":{},\"sep\":{},\"ws\":{},\"total_postings\":{},\"docs\":[{}]{}}}",
+            c.raw_ordinal, c.own_len, c.sep_len, c.is_word_start,
+            total, preview.join(","),
+            if total > 30 { ",\"truncated\":true" } else { "" },
+        ));
+    }
     format!("[{}]", items.join(","))
 }
 
@@ -74,7 +146,14 @@ impl<'a> LocalNode<BriquesContext<'a>> for FstCandidatesNode {
         );
         ctx.metric("candidates", candidates.len() as f64);
         if ctx.explain() {
-            ctx.annotate_output("candidates", format_candidates(&candidates));
+            let mut detail = format_candidates(&candidates);
+
+            // Dump raw FST keys that match the query prefix
+            let lower = self.query.to_lowercase();
+            let fst_keys = dump_fst_keys(svc.reader, lower.as_bytes(), self.anchor_start, self.strict_separators);
+            detail = format!("{{\"candidates\":{},\"fst_keys\":{}}}", detail, fst_keys);
+
+            ctx.annotate_output("candidates", detail);
         }
         ctx.set_output("candidates", candidates);
         Ok(())
@@ -98,12 +177,22 @@ impl<'a> LocalNode<BriquesContext<'a>> for ResolveSingleNode {
     }
 
     fn execute(&mut self, svc: &BriquesContext<'a>, ctx: &mut LocalNodeCtx) -> Result<(), String> {
+        let explain = ctx.explain();
         let candidates = ctx.input::<Vec<FstCandidateV3>>("candidates")
             .ok_or("missing candidates input")?;
         let matches = resolve::resolve_single_v3(candidates, svc.resolver, svc.filter_docs);
+        // Build annotation while we still borrow candidates
+        let annotation = if explain {
+            let postings_detail = format_candidate_postings(candidates, svc.resolver);
+            let matches_json = format_matches(&matches);
+            Some(format!("{{\"postings\":{},\"matches\":{}}}", postings_detail, matches_json))
+        } else {
+            None
+        };
+        // Now we can mutably borrow ctx
         ctx.metric("matches", matches.len() as f64);
-        if ctx.explain() {
-            ctx.annotate_output("matches", format_matches(&matches));
+        if let Some(a) = annotation {
+            ctx.annotate_output("matches", a);
         }
         ctx.set_output("matches", matches);
         Ok(())

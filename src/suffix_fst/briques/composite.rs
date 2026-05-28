@@ -843,11 +843,12 @@ mod tests {
         assert!(!r.annotations.entries.is_empty(),
             "explained mode should produce edge annotations");
 
-        // Candidates annotation should be JSON array
+        // Candidates annotation should contain candidates + fst_keys
         let cand_data = r.annotations.get("fst_candidates", "candidates")
             .expect("fst_candidates.candidates annotation missing");
-        assert!(cand_data.starts_with('['), "candidates should be JSON array: {}", cand_data);
-        assert!(cand_data.contains("\"sti\""), "candidates should contain sti field");
+        assert!(cand_data.contains("\"candidates\""), "should contain candidates: {}", cand_data);
+        assert!(cand_data.contains("\"fst_keys\""), "should contain fst_keys: {}", cand_data);
+        assert!(cand_data.contains("\"sti\""), "should contain sti field");
 
         // Merge results annotation
         let merge_data = r.annotations.get("merge", "results")
