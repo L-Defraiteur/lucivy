@@ -11,6 +11,47 @@ use super::context::BriquesContext;
 use super::fst_walk::{self, FstCandidateV3, TokenChainV3};
 use super::resolve::{self, MatchV3};
 
+// ─── Formatting helpers (explain mode) ──────────────────────────────────
+
+fn format_candidates(candidates: &[FstCandidateV3]) -> String {
+    let items: Vec<String> = candidates.iter().map(|c| {
+        format!(
+            "{{\"sti\":{},\"ord\":{},\"own\":{},\"sep\":{},\"ovl\":{},\"ws\":{}}}",
+            c.sti, c.raw_ordinal, c.own_len, c.sep_len, c.overlap_len, c.is_word_start,
+        )
+    }).collect();
+    format!("[{}]", items.join(","))
+}
+
+fn format_matches(matches: &[MatchV3]) -> String {
+    let items: Vec<String> = matches.iter().map(|m| {
+        format!(
+            "{{\"doc\":{},\"pos\":{},\"span\":{},\"bytes\":[{},{}]}}",
+            m.doc_id, m.position, m.span, m.byte_from, m.byte_to,
+        )
+    }).collect();
+    format!("[{}]", items.join(","))
+}
+
+fn format_chains(chains: &[TokenChainV3]) -> String {
+    let items: Vec<String> = chains.iter().map(|c| {
+        let ords: Vec<String> = c.ordinals.iter()
+            .map(|alts| {
+                if alts.len() == 1 {
+                    format!("{}", alts[0])
+                } else {
+                    format!("[{}]", alts.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(","))
+                }
+            })
+            .collect();
+        format!(
+            "{{\"first_sti\":{},\"consumed\":{},\"ords\":[{}]}}",
+            c.first_sti, c.total_query_consumed, ords.join(","),
+        )
+    }).collect();
+    format!("[{}]", items.join(","))
+}
+
 // ─── FstCandidatesNode ───────────────────────────────────────────────────
 
 /// Tier 1: walk the FST and produce candidate ordinals.
@@ -32,6 +73,9 @@ impl<'a> LocalNode<BriquesContext<'a>> for FstCandidatesNode {
             svc.reader, &self.query, self.anchor_start, self.strict_separators,
         );
         ctx.metric("candidates", candidates.len() as f64);
+        if ctx.explain() {
+            ctx.annotate_output("candidates", format_candidates(&candidates));
+        }
         ctx.set_output("candidates", candidates);
         Ok(())
     }
@@ -58,6 +102,9 @@ impl<'a> LocalNode<BriquesContext<'a>> for ResolveSingleNode {
             .ok_or("missing candidates input")?;
         let matches = resolve::resolve_single_v3(candidates, svc.resolver, svc.filter_docs);
         ctx.metric("matches", matches.len() as f64);
+        if ctx.explain() {
+            ctx.annotate_output("matches", format_matches(&matches));
+        }
         ctx.set_output("matches", matches);
         Ok(())
     }
@@ -86,6 +133,7 @@ impl<'a> LocalNode<BriquesContext<'a>> for ChunkChainNode {
             chains
         };
         ctx.metric("chains", chains.len() as f64);
+        if ctx.explain() { ctx.annotate_output("chains", format_chains(&chains)); }
         ctx.set_output("chains", chains);
         Ok(())
     }
@@ -127,6 +175,7 @@ impl<'a> LocalNode<BriquesContext<'a>> for SiblingChunkNode {
             svc.trace_id,
         );
         ctx.metric("sib_chains", sib_chains.len() as f64);
+        if ctx.explain() { ctx.annotate_output("sib_chains", format_chains(&sib_chains)); }
         ctx.set_output("sib_chains", sib_chains);
         Ok(())
     }
@@ -163,6 +212,7 @@ impl<'a> LocalNode<BriquesContext<'a>> for ResolveChunkNode {
         let matches = resolve::resolve_chains_v3(&chains, svc.resolver, svc.filter_docs);
         ctx.metric("chains_total", chains.len() as f64);
         ctx.metric("matches", matches.len() as f64);
+        if ctx.explain() { ctx.annotate_output("matches", format_matches(&matches)); }
         ctx.set_output("matches", matches);
         Ok(())
     }
@@ -191,6 +241,7 @@ impl<'a> LocalNode<BriquesContext<'a>> for WordChainNode {
             chains
         };
         ctx.metric("chains", chains.len() as f64);
+        if ctx.explain() { ctx.annotate_output("chains", format_chains(&chains)); }
         ctx.set_output("chains", chains);
         Ok(())
     }
@@ -234,6 +285,7 @@ impl<'a> LocalNode<BriquesContext<'a>> for SiblingWordNode {
         );
         ctx.metric("splits", all_splits.len() as f64);
         ctx.metric("sib_chains", sib_chains.len() as f64);
+        if ctx.explain() { ctx.annotate_output("sib_chains", format_chains(&sib_chains)); }
         ctx.set_output("sib_chains", sib_chains);
         Ok(())
     }
@@ -272,6 +324,7 @@ impl<'a> LocalNode<BriquesContext<'a>> for ResolveWordNode {
         let matches = resolve::resolve_word_chains_v3(&chains, wsp, svc.resolver, svc.filter_docs, pm, bm);
         ctx.metric("chains_total", chains.len() as f64);
         ctx.metric("matches", matches.len() as f64);
+        if ctx.explain() { ctx.annotate_output("matches", format_matches(&matches)); }
         ctx.set_output("matches", matches);
         Ok(())
     }
@@ -313,6 +366,7 @@ impl<'a> LocalNode<BriquesContext<'a>> for MergeNode {
         let unique_docs: std::collections::HashSet<u32> = results.iter().map(|m| m.doc_id).collect();
         ctx.metric("matches", results.len() as f64);
         ctx.metric("unique_docs", unique_docs.len() as f64);
+        if ctx.explain() { ctx.annotate_output("results", format_matches(&results)); }
         ctx.set_output("results", results);
         Ok(())
     }

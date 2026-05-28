@@ -79,15 +79,22 @@ pub struct LocalNodeCtx {
     outputs: HashMap<String, LocalPortValue>,
     metrics: Vec<(String, f64)>,
     logs: Vec<(LogLevel, String)>,
+    /// Per-output-port annotations (JSON or human-readable summaries).
+    /// Written by the node via `annotate_output()`, collected by the DAG runner.
+    annotations: HashMap<String, String>,
+    /// Whether explain mode is active (nodes should annotate their outputs).
+    explain: bool,
 }
 
 impl LocalNodeCtx {
-    fn new(inputs: HashMap<String, LocalPortValue>) -> Self {
+    fn new(inputs: HashMap<String, LocalPortValue>, explain: bool) -> Self {
         Self {
             inputs,
             outputs: HashMap::new(),
             metrics: Vec::new(),
             logs: Vec::new(),
+            annotations: HashMap::new(),
+            explain,
         }
     }
 
@@ -133,10 +140,78 @@ impl LocalNodeCtx {
         self.logs.push((LogLevel::Warn, msg.to_string()));
     }
 
+    // -- edge annotations --
+
+    /// Whether explain mode is active. Nodes should check this before
+    /// doing expensive annotation work.
+    pub fn explain(&self) -> bool {
+        self.explain
+    }
+
+    /// Annotate an output port with a summary (JSON string, human-readable, etc.).
+    /// Only meaningful when `explain()` is true. The DAG runner collects these
+    /// and attaches them to the corresponding edge in the result.
+    pub fn annotate_output(&mut self, port: &str, summary: String) {
+        self.annotations.insert(port.to_string(), summary);
+    }
+
     // -- internals --
 
     fn take_outputs(&mut self) -> HashMap<String, LocalPortValue> {
         std::mem::take(&mut self.outputs)
+    }
+
+    fn take_annotations(&mut self) -> HashMap<String, String> {
+        std::mem::take(&mut self.annotations)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EdgeAnnotations — explain data collected during execution
+// ---------------------------------------------------------------------------
+
+/// A single edge annotation: the data summary that flowed on an edge.
+#[derive(Debug, Clone)]
+pub struct EdgeAnnotation {
+    pub from_node: String,
+    pub from_port: String,
+    pub to_node: String,
+    pub to_port: String,
+    /// Summary of the data that flowed on this edge (JSON, text, etc.)
+    pub data: String,
+}
+
+/// Collection of edge annotations from an explained execution.
+#[derive(Debug, Clone)]
+pub struct EdgeAnnotations {
+    pub entries: Vec<EdgeAnnotation>,
+}
+
+impl EdgeAnnotations {
+    pub fn new() -> Self {
+        Self { entries: Vec::new() }
+    }
+
+    /// Get annotation for a specific edge.
+    pub fn get(&self, from_node: &str, from_port: &str) -> Option<&str> {
+        self.entries.iter()
+            .find(|e| e.from_node == from_node && e.from_port == from_port)
+            .map(|e| e.data.as_str())
+    }
+
+    /// Dump all annotations as a JSON-like string.
+    pub fn dump_json(&self) -> String {
+        let mut out = String::from("{\n");
+        for (i, e) in self.entries.iter().enumerate() {
+            out.push_str(&format!(
+                "  \"{}.{} -> {}.{}\": {}{}",
+                e.from_node, e.from_port, e.to_node, e.to_port,
+                e.data,
+                if i + 1 < self.entries.len() { ",\n" } else { "\n" },
+            ));
+        }
+        out.push('}');
+        out
     }
 }
 
@@ -245,7 +320,7 @@ impl<S> LocalDag<S> {
 
     /// Execute the DAG sequentially, passing `services` to every node.
     pub fn execute(&mut self, services: &S) -> Result<DagResult, String> {
-        let (_, result) = self.execute_inner(services, None::<(&str, &str)>)?;
+        let (_, result, _) = self.execute_inner(services, false)?;
         Ok(result)
     }
 
@@ -256,7 +331,7 @@ impl<S> LocalDag<S> {
         node: &str,
         port: &str,
     ) -> Result<(T, DagResult), String> {
-        let (mut port_data, result) = self.execute_inner(services, Some((node, port)))?;
+        let (mut port_data, result, _) = self.execute_inner(services, false)?;
 
         let key = (node.to_string(), port.to_string());
         let value = port_data.remove(&key)
@@ -267,11 +342,30 @@ impl<S> LocalDag<S> {
         Ok((value, result))
     }
 
+    /// Execute with explain mode: nodes annotate their outputs and
+    /// edge annotations are collected in the result.
+    pub fn execute_and_take_explained<T: 'static>(
+        &mut self,
+        services: &S,
+        node: &str,
+        port: &str,
+    ) -> Result<(T, DagResult, EdgeAnnotations), String> {
+        let (mut port_data, result, annotations) = self.execute_inner(services, true)?;
+
+        let key = (node.to_string(), port.to_string());
+        let value = port_data.remove(&key)
+            .ok_or_else(|| format!("output '{}.{}' not found", node, port))?
+            .take::<T>()
+            .ok_or_else(|| format!("type mismatch for '{}.{}'", node, port))?;
+
+        Ok((value, result, annotations))
+    }
+
     fn execute_inner(
         &mut self,
         services: &S,
-        keep_output: Option<(&str, &str)>,
-    ) -> Result<(HashMap<(String, String), LocalPortValue>, DagResult), String> {
+        explain: bool,
+    ) -> Result<(HashMap<(String, String), LocalPortValue>, DagResult, EdgeAnnotations), String> {
         let dag_start = Instant::now();
         let levels = self.topological_levels()?;
 
@@ -285,6 +379,8 @@ impl<S> LocalDag<S> {
 
         let mut port_data: HashMap<(String, String), LocalPortValue> = HashMap::new();
         let mut results: Vec<(String, NodeResult)> = Vec::with_capacity(self.nodes.len());
+        // (node_name, port_name) -> annotation string
+        let mut port_annotations: HashMap<(String, String), String> = HashMap::new();
 
         for level in &levels {
             for &node_idx in level {
@@ -294,13 +390,22 @@ impl<S> LocalDag<S> {
                 let inputs = collect_local_inputs(
                     &node_name, &self.edges, &mut port_data, &mut consumer_counts,
                 );
-                let mut ctx = LocalNodeCtx::new(inputs);
+                let mut ctx = LocalNodeCtx::new(inputs, explain);
 
                 self.nodes[node_idx].node.execute(services, &mut ctx)?;
 
                 let duration_ms = node_start.elapsed().as_millis() as u64;
                 let metrics = ctx.metrics.clone();
                 let logs = ctx.logs.clone();
+
+                // Collect output annotations (explain mode)
+                if explain {
+                    for (port_name, annotation) in ctx.take_annotations() {
+                        port_annotations.insert(
+                            (node_name.clone(), port_name), annotation,
+                        );
+                    }
+                }
 
                 for (port_name, value) in ctx.take_outputs() {
                     port_data.insert((node_name.clone(), port_name), value);
@@ -317,7 +422,41 @@ impl<S> LocalDag<S> {
             outputs: HashMap::new(),
         };
 
-        Ok((port_data, dag_result))
+        // Map port annotations to edges + leaf outputs
+        let mut edge_annotations = EdgeAnnotations::new();
+        if explain {
+            // Track which (node, port) have edges
+            let mut has_edge: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+
+            for edge in &self.edges {
+                let key = (edge.from_node.clone(), edge.from_port.clone());
+                has_edge.insert(key.clone());
+                if let Some(annotation) = port_annotations.get(&key) {
+                    edge_annotations.entries.push(EdgeAnnotation {
+                        from_node: edge.from_node.clone(),
+                        from_port: edge.from_port.clone(),
+                        to_node: edge.to_node.clone(),
+                        to_port: edge.to_port.clone(),
+                        data: annotation.clone(),
+                    });
+                }
+            }
+
+            // Leaf outputs (no outgoing edge) — still useful for explain
+            for (key, annotation) in &port_annotations {
+                if !has_edge.contains(key) {
+                    edge_annotations.entries.push(EdgeAnnotation {
+                        from_node: key.0.clone(),
+                        from_port: key.1.clone(),
+                        to_node: "(output)".to_string(),
+                        to_port: key.1.clone(),
+                        data: annotation.clone(),
+                    });
+                }
+            }
+        }
+
+        Ok((port_data, dag_result, edge_annotations))
     }
 
     // -- internal --

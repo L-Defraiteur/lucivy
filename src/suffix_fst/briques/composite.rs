@@ -728,7 +728,7 @@ mod tests {
 
     // ── DAG parity tests ──
 
-    use crate::suffix_fst::briques::dag_builder::find_literal_v3_dag;
+    use crate::suffix_fst::briques::dag_builder::{find_literal_v3_dag, find_literal_v3_dag_explained};
 
     #[test]
     fn test_dag_parity_single_token() {
@@ -824,6 +824,39 @@ mod tests {
         assert!(mermaid.contains("fst_candidates"));
         assert!(mermaid.contains("merge"));
         assert!(mermaid.contains("-->"));
+    }
+
+    #[test]
+    fn test_dag_explained_has_edge_data() {
+        let (sfx, post, _ws, _pm, _bm) = build_index(&["mutex_lock", "hello_world"]);
+        let reader = SfxFileReaderV3::open(&sfx).unwrap();
+        let resolver = MockResolver::new(&post);
+        let ctx = BriquesContext {
+            reader: &reader, resolver: &resolver, filter_docs: None,
+            debug: false, trace_id: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+        };
+
+        let r = find_literal_v3_dag_explained(&ctx, "mutex", false, true);
+
+        // Should have edge annotations
+        assert!(!r.annotations.entries.is_empty(),
+            "explained mode should produce edge annotations");
+
+        // Candidates annotation should be JSON array
+        let cand_data = r.annotations.get("fst_candidates", "candidates")
+            .expect("fst_candidates.candidates annotation missing");
+        assert!(cand_data.starts_with('['), "candidates should be JSON array: {}", cand_data);
+        assert!(cand_data.contains("\"sti\""), "candidates should contain sti field");
+
+        // Merge results annotation
+        let merge_data = r.annotations.get("merge", "results")
+            .expect("merge.results annotation missing");
+        assert!(merge_data.starts_with('['), "results should be JSON array: {}", merge_data);
+
+        // dump_edge_data should produce valid JSON-like output
+        let json = r.dump_edge_data();
+        assert!(json.contains("fst_candidates.candidates"));
     }
 
 }

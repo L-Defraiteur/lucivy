@@ -4,7 +4,7 @@
 //! based on the query config (strict_separators, has_word_pipeline, has_sibling_chains).
 
 use luciole::dag::DagEdge;
-use luciole::local_dag::LocalDag;
+use luciole::local_dag::{EdgeAnnotations, LocalDag};
 use luciole::runtime::DagResult;
 
 use super::context::BriquesContext;
@@ -16,6 +16,8 @@ pub struct LiteralDagResult {
     pub matches: Vec<MatchV3>,
     pub dag_info: DagResult,
     pub edges: Vec<DagEdge>,
+    /// Edge annotations (only populated in explain mode).
+    pub annotations: EdgeAnnotations,
 }
 
 impl LiteralDagResult {
@@ -23,11 +25,14 @@ impl LiteralDagResult {
     pub fn dump_mermaid(&self) -> String {
         self.dag_info.dump_mermaid(&self.edges)
     }
+
+    /// Dump edge annotations as JSON.
+    pub fn dump_edge_data(&self) -> String {
+        self.annotations.dump_json()
+    }
 }
 
 /// Build and execute the find_literal_v3 pipeline as a LocalDag.
-///
-/// Returns matches + DagResult + edges for explain/mermaid.
 pub fn find_literal_v3_dag<'a>(
     ctx: &BriquesContext<'a>,
     query: &str,
@@ -38,7 +43,22 @@ pub fn find_literal_v3_dag<'a>(
     let edges = dag.edges().to_vec();
     let (matches, dag_info) = dag.execute_and_take::<Vec<MatchV3>>(ctx, "merge", "results")
         .expect("find_literal_v3 DAG execution failed");
-    LiteralDagResult { matches, dag_info, edges }
+    LiteralDagResult { matches, dag_info, edges, annotations: EdgeAnnotations::new() }
+}
+
+/// Build and execute with explain: nodes annotate their outputs with JSON data.
+pub fn find_literal_v3_dag_explained<'a>(
+    ctx: &BriquesContext<'a>,
+    query: &str,
+    anchor_start: bool,
+    strict_separators: bool,
+) -> LiteralDagResult {
+    let mut dag = build_literal_dag(ctx, query, anchor_start, strict_separators);
+    let edges = dag.edges().to_vec();
+    let (matches, dag_info, annotations) = dag
+        .execute_and_take_explained::<Vec<MatchV3>>(ctx, "merge", "results")
+        .expect("find_literal_v3 DAG execution failed");
+    LiteralDagResult { matches, dag_info, edges, annotations }
 }
 
 fn build_literal_dag<'a>(
