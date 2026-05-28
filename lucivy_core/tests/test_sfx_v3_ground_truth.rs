@@ -482,6 +482,81 @@ fn v3_ground_truth_contains() {
             std::fs::write(&trace_path, &json).ok();
             let total_events: usize = traces.iter().map(|(_, t)| t.events.len()).sum();
             eprintln!("  Trace: {trace_path} ({} segments, {total_events} events)", traces.len());
+
+            // DAG explain: run find_literal_v3_dag_explained per segment
+            {
+                use ld_lucivy::suffix_fst::file_v3::SfxFileReaderV3;
+                use ld_lucivy::suffix_fst::briques::context::BriquesContext;
+                use ld_lucivy::suffix_fst::briques::dag_builder::find_literal_v3_dag_explained;
+                use ld_lucivy::tokenizer::equal_chunk::is_content_char;
+
+                let effective_query: String = if strict {
+                    query.to_string()
+                } else {
+                    query.chars().filter(|c| is_content_char(*c)).collect()
+                };
+
+                let searcher = handle.reader.searcher();
+                let content_f = handle.field("content").unwrap();
+                let mut dag_explains = Vec::new();
+
+                for (seg_ord, seg_reader) in searcher.segment_readers().iter().enumerate() {
+                    let sfx_bytes = match seg_reader.sfx_file(content_f)
+                        .and_then(|fs| fs.read_bytes().ok()) {
+                        Some(b) => b.as_ref().to_vec(),
+                        None => continue,
+                    };
+                    let reader = match SfxFileReaderV3::open(&sfx_bytes) {
+                        Ok(r) => r,
+                        Err(_) => continue,
+                    };
+                    let pr = ld_lucivy::query::posting_resolver::build_resolver(seg_reader, content_f).unwrap();
+
+                    let load = |ext: &str| -> Option<Vec<u8>> {
+                        seg_reader.sfx_index_file(ext, content_f)
+                            .and_then(|fs| fs.read_bytes().ok())
+                            .map(|b| b.as_ref().to_vec())
+                    };
+                    let posmap_bytes = load("posmap");
+                    let bytemap_bytes = load("bytemap");
+                    let wsp_bytes = load("word_sfxpost");
+                    let sib_bytes = load("sibling_v3");
+                    let tt_bytes = load("termtexts");
+
+                    let ctx = BriquesContext {
+                        reader: &reader,
+                        resolver: &*pr,
+                        filter_docs: None,
+                        debug: false,
+                        trace_id: None,
+                        posmap: posmap_bytes.as_ref().and_then(|b| ld_lucivy::suffix_fst::posmap::PosMapReader::open(b)),
+                        bytemap: bytemap_bytes.as_ref().and_then(|b| ld_lucivy::suffix_fst::bytemap::ByteBitmapReader::open(b)),
+                        word_sfxpost: wsp_bytes.as_ref().and_then(|b| ld_lucivy::suffix_fst::word_sfxpost::WordSfxPostReader::open(b)),
+                        sibling_v3: sib_bytes.as_ref().and_then(|b| ld_lucivy::suffix_fst::sibling_table::SiblingTableReader::open(b)),
+                        termtexts: tt_bytes.as_ref().and_then(|b| ld_lucivy::suffix_fst::termtexts_v3::TermTextsReaderV3::open(b)),
+                    };
+
+                    let r = find_literal_v3_dag_explained(&ctx, &effective_query, false, strict);
+
+                    dag_explains.push(serde_json::json!({
+                        "segment": seg_ord,
+                        "segment_id": format!("{:?}", seg_reader.segment_id()),
+                        "query": query,
+                        "effective_query": effective_query,
+                        "mode": mode,
+                        "matches_count": r.matches.len(),
+                        "mermaid": r.dump_mermaid(),
+                        "dag_summary": r.dag_info.display_summary(),
+                        "edge_data": r.dump_edge_data(),
+                    }));
+                }
+
+                let dag_path = format!("/tmp/v3_dag_{}_{}.json",
+                    query.replace("::", "_").replace(" ", "_"), mode);
+                let json = serde_json::to_string_pretty(&dag_explains).unwrap();
+                std::fs::write(&dag_path, &json).ok();
+                eprintln!("  DAG explain: {dag_path} ({} segments)", dag_explains.len());
+            }
         }
     }
 
