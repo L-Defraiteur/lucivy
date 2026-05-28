@@ -557,6 +557,155 @@ fn v3_ground_truth_contains() {
                 std::fs::write(&dag_path, &json).ok();
                 eprintln!("  DAG explain: {dag_path} ({} segments)", dag_explains.len());
             }
+
+            // ── Doc Forensics: find the FN doc's segment, tokenize, check FST ──
+            if !fn_indices.is_empty() {
+                use ld_lucivy::suffix_fst::file_v3::SfxFileReaderV3;
+                use ld_lucivy::suffix_fst::briques::fst_walk;
+                use ld_lucivy::tokenizer::equal_chunk::{segment_and_chunk, is_content_char};
+
+                let effective_query: String = if strict {
+                    query.to_string()
+                } else {
+                    query.chars().filter(|c| is_content_char(*c)).collect()
+                };
+
+                let searcher = handle.reader.searcher();
+                let content_f = handle.field("content").unwrap();
+                let nid_f = handle.field(NODE_ID_FIELD).unwrap();
+
+                let mut forensics = Vec::new();
+
+                for &global_idx in &fn_indices {
+                    let (path, content) = &files[global_idx];
+                    let mut doc_forensic = serde_json::json!({
+                        "global_doc_idx": global_idx,
+                        "path": path,
+                        "query": query,
+                        "effective_query": effective_query,
+                    });
+
+                    // 1. Tokenize the doc and find chunks containing the query
+                    let chunks = segment_and_chunk(content, 8);
+                    let lower_q = effective_query.to_lowercase();
+                    let mut relevant_chunks: Vec<serde_json::Value> = Vec::new();
+                    let mut offset = 0usize;
+                    for (ci, (chunk_text, meta)) in chunks.iter().enumerate() {
+                        let chunk_lower = chunk_text.to_lowercase();
+                        let ovl_text = if ci + 1 < chunks.len() {
+                            let next = &chunks[ci + 1].0;
+                            &next[..2.min(next.len())]
+                        } else { "" };
+                        let extended = format!("{}{}", chunk_lower, ovl_text.to_lowercase());
+                        if extended.contains(&lower_q) || lower_q.contains(&chunk_lower) {
+                            relevant_chunks.push(serde_json::json!({
+                                "chunk_idx": ci,
+                                "byte_offset": offset,
+                                "text": chunk_text,
+                                "extended": format!("{}{}", chunk_text, ovl_text),
+                                "content_len": meta.content_len,
+                                "sep_len": meta.sep_len,
+                                "word_id": meta.word_id,
+                            }));
+                        }
+                        offset += chunk_text.len();
+                    }
+                    doc_forensic["relevant_chunks"] = serde_json::json!(relevant_chunks);
+
+                    // 2. Find which segment contains this doc
+                    for seg_ord in 0..searcher.segment_readers().len() {
+                        let seg_reader = searcher.segment_reader(seg_ord as u32);
+                        let max_doc = seg_reader.max_doc();
+
+                        let mut found_local_id = None;
+                        for local_doc in 0..max_doc {
+                            let doc = searcher.doc::<ld_lucivy::LucivyDocument>(
+                                ld_lucivy::DocAddress::new(seg_ord as u32, local_doc)
+                            );
+                            if let Ok(doc) = doc {
+                                use ld_lucivy::schema::document::Value;
+                                let nid = doc.field_values()
+                                    .find(|(f, _)| *f == nid_f)
+                                    .and_then(|(_, v)| v.as_value().as_u64());
+                                if nid == Some(global_idx as u64) {
+                                    found_local_id = Some(local_doc);
+                                    break;
+                                }
+                            }
+                        }
+
+                        let Some(local_doc_id) = found_local_id else { continue };
+
+                        doc_forensic["segment"] = serde_json::json!(seg_ord);
+                        doc_forensic["segment_id"] = serde_json::json!(format!("{:?}", seg_reader.segment_id()));
+                        doc_forensic["local_doc_id"] = serde_json::json!(local_doc_id);
+                        doc_forensic["segment_max_doc"] = serde_json::json!(max_doc);
+
+                        // 3. Use fst_candidates_v3 + postings to check
+                        let sfx_bytes = match seg_reader.sfx_file(content_f)
+                            .and_then(|fs| fs.read_bytes().ok()) {
+                            Some(b) => b.as_ref().to_vec(),
+                            None => continue,
+                        };
+                        let sfx_reader = match SfxFileReaderV3::open(&sfx_bytes) {
+                            Ok(r) => r,
+                            Err(_) => continue,
+                        };
+                        let pr = ld_lucivy::query::posting_resolver::build_resolver(seg_reader, content_f).unwrap();
+
+                        // Get candidates for the query
+                        let candidates = fst_walk::fst_candidates_v3(&sfx_reader, &effective_query, false, strict);
+
+                        let mut cand_details: Vec<serde_json::Value> = Vec::new();
+                        for c in &candidates {
+                            let postings = pr.resolve(c.raw_ordinal);
+                            let has_our_doc = postings.iter().any(|pe| pe.doc_id == local_doc_id);
+                            let doc_ids: Vec<u32> = postings.iter().map(|pe| pe.doc_id).collect();
+                            cand_details.push(serde_json::json!({
+                                "ordinal": c.raw_ordinal,
+                                "sti": c.sti,
+                                "own_len": c.own_len,
+                                "sep_len": c.sep_len,
+                                "overlap_len": c.overlap_len,
+                                "ws": c.is_word_start,
+                                "total_postings": postings.len(),
+                                "has_fn_doc": has_our_doc,
+                                "doc_ids": &doc_ids[..doc_ids.len().min(30)],
+                            }));
+                        }
+                        doc_forensic["candidates"] = serde_json::json!(cand_details);
+                        let with_doc = cand_details.iter()
+                            .filter(|e| e["has_fn_doc"].as_bool() == Some(true)).count();
+                        doc_forensic["candidates_with_fn_doc"] = serde_json::json!(with_doc);
+
+                        // 4. Also try falling walk splits to see if cross-token would help
+                        let splits = fst_walk::falling_walk_chunks(&sfx_reader, &effective_query);
+                        let mut split_details: Vec<serde_json::Value> = Vec::new();
+                        for s in &splits {
+                            let postings = pr.resolve(s.parent.raw_ordinal);
+                            let has_our_doc = postings.iter().any(|pe| pe.doc_id == local_doc_id);
+                            split_details.push(serde_json::json!({
+                                "query_consumed": s.query_consumed,
+                                "ordinal": s.parent.raw_ordinal,
+                                "sti": s.parent.sti,
+                                "own_len": s.parent.own_len,
+                                "has_fn_doc": has_our_doc,
+                            }));
+                        }
+                        doc_forensic["splits"] = serde_json::json!(split_details);
+
+                        break;
+                    }
+
+                    forensics.push(doc_forensic);
+                }
+
+                let forensics_path = format!("/tmp/v3_forensics_{}_{}.json",
+                    query.replace("::", "_").replace(" ", "_"), mode);
+                let json = serde_json::to_string_pretty(&forensics).unwrap();
+                std::fs::write(&forensics_path, &json).ok();
+                eprintln!("  Forensics: {forensics_path}");
+            }
         }
     }
 
