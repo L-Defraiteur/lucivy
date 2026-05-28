@@ -694,6 +694,87 @@ fn v3_ground_truth_contains() {
                         }
                         doc_forensic["splits"] = serde_json::json!(split_details);
 
+                        // 5. Wider scan: search with shorter prefix to find variants
+                        let short_prefix = if lower_q.len() > 4 { &lower_q[..lower_q.len()-2] } else { &lower_q };
+                        let wide_cands = fst_walk::fst_candidates_v3(&sfx_reader, short_prefix, false, strict);
+                        let mut wide_with_doc: Vec<serde_json::Value> = Vec::new();
+                        for c in &wide_cands {
+                            let postings = pr.resolve(c.raw_ordinal);
+                            if postings.iter().any(|pe| pe.doc_id == local_doc_id) {
+                                // This ordinal has our doc! What's its text?
+                                let doc_postings: Vec<_> = postings.iter()
+                                    .filter(|pe| pe.doc_id == local_doc_id)
+                                    .map(|pe| serde_json::json!({
+                                        "pos": pe.position, "bf": pe.byte_from, "bt": pe.byte_to,
+                                    }))
+                                    .collect();
+                                wide_with_doc.push(serde_json::json!({
+                                    "ordinal": c.raw_ordinal,
+                                    "sti": c.sti,
+                                    "own_len": c.own_len,
+                                    "sep_len": c.sep_len,
+                                    "overlap_len": c.overlap_len,
+                                    "ws": c.is_word_start,
+                                    "postings_for_doc": doc_postings,
+                                }));
+                            }
+                        }
+                        doc_forensic["wider_prefix"] = serde_json::json!(short_prefix);
+                        doc_forensic["wider_candidates_with_fn_doc"] = serde_json::json!(wide_with_doc);
+
+                        // 6. Reverse scan: find ALL ordinals that have doc 30
+                        //    by scanning sfxpost sequentially (brute force but definitive)
+                        let sfxpost_bytes = seg_reader.sfx_index_file("sfxpost", content_f)
+                            .and_then(|fs| fs.read_bytes().ok())
+                            .map(|b| b.as_ref().to_vec());
+                        if let Some(ref _spb) = sfxpost_bytes {
+                            // Scan ordinals 0..max_ord for doc_id == local_doc_id
+                            // Use posting resolver — try a reasonable range
+                            let max_ord = wide_cands.iter()
+                                .map(|c| c.raw_ordinal).max().unwrap_or(0) + 1000;
+                            let mut doc_ordinals: Vec<serde_json::Value> = Vec::new();
+                            for ord in 0..max_ord.min(100_000) {
+                                let postings = pr.resolve(ord);
+                                if postings.iter().any(|pe| pe.doc_id == local_doc_id) {
+                                    // Found! Get the byte range to see what text this ordinal covers
+                                    let doc_entries: Vec<_> = postings.iter()
+                                        .filter(|pe| pe.doc_id == local_doc_id)
+                                        .map(|pe| {
+                                            let bf = pe.byte_from as usize;
+                                            let bt = pe.byte_to as usize;
+                                            let text = if bt <= content.len() && bf < bt {
+                                                content[bf..bt].to_string()
+                                            } else {
+                                                format!("[{bf}..{bt} out of range]")
+                                            };
+                                            serde_json::json!({
+                                                "pos": pe.position,
+                                                "bf": pe.byte_from,
+                                                "bt": pe.byte_to,
+                                                "text": text,
+                                            })
+                                        })
+                                        .collect();
+                                    doc_ordinals.push(serde_json::json!({
+                                        "ordinal": ord,
+                                        "entries": doc_entries,
+                                    }));
+                                }
+                            }
+                            doc_forensic["all_ordinals_with_fn_doc"] = serde_json::json!(doc_ordinals);
+                            doc_forensic["all_ordinals_count"] = serde_json::json!(doc_ordinals.len());
+                            // Filter to ordinals whose text contains the query
+                            let matching: Vec<_> = doc_ordinals.iter()
+                                .filter(|o| {
+                                    o["entries"].as_array().unwrap().iter().any(|e| {
+                                        e["text"].as_str().unwrap_or("").to_lowercase().contains(&lower_q)
+                                    })
+                                })
+                                .cloned()
+                                .collect();
+                            doc_forensic["ordinals_with_query_in_text"] = serde_json::json!(matching);
+                        }
+
                         break;
                     }
 
