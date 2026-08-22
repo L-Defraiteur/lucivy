@@ -87,7 +87,7 @@ fn build_literal_dag<'a>(
     });
 
     if ctx.has_sibling_chains() {
-        dag.add_node("sibling_chunk", SiblingChunkNode { query: q.clone() });
+        dag.add_node("sibling_chunk", SiblingChunkNode { query: q.clone(), strict_separators });
         dag.connect("fst_candidates", "candidates", "sibling_chunk", "candidates").unwrap();
     }
 

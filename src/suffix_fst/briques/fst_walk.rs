@@ -565,6 +565,7 @@ pub fn sibling_chain_dfs(
     query: &str,
     sibling_table: &SiblingTableReader<'_>,
     termtexts: &TermTextsReaderV3<'_>,
+    strict_separators: bool,
     trace_id: Option<u64>,
 ) -> Vec<TokenChainV3> {
     let query_lower = query.to_lowercase();
@@ -622,9 +623,23 @@ pub fn sibling_chain_dfs(
                 };
                 let next_lower = next_text.to_lowercase();
 
-                let content_len = sib.gap_len as usize;
-                let next_content = if content_len > 0 && content_len < next_lower.len() {
-                    let cl = snap_to_char_boundary(&next_lower, content_len);
+                // How much of the next token the query must cover to step onto it.
+                //
+                // `gap_len` is the destination's CONTENT length, separator excluded —
+                // which means the query is allowed to skip over the separator. That
+                // is the relaxed contract, and it used to be applied in strict mode
+                // too: a strict search for "TableFunction" then matched
+                // "migra|table function| configuration", because the step from
+                // "table" to "function" jumped the space. Under strict separators the
+                // query has to cover content AND separator, i.e. own_len.
+                let step_len = if strict_separators {
+                    termtexts.meta(next_ord).map(|m| m.own_len as usize)
+                        .unwrap_or(sib.gap_len as usize)
+                } else {
+                    sib.gap_len as usize
+                };
+                let next_content = if step_len > 0 && step_len < next_lower.len() {
+                    let cl = snap_to_char_boundary(&next_lower, step_len);
                     &next_lower[..cl]
                 } else {
                     &next_lower

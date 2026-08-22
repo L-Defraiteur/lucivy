@@ -269,6 +269,9 @@ impl<'a> LocalNode<BriquesContext<'a>> for ChunkChainNode {
 /// Uses falling_walk_chunks + splits_from_fst_candidates + sibling_chain_dfs.
 pub struct SiblingChunkNode {
     pub query: String,
+    /// Under strict separators a chain step must cover the next token's separator
+    /// too, not just its content — otherwise a strict search jumps over spaces.
+    pub strict_separators: bool,
 }
 
 impl<'a> LocalNode<BriquesContext<'a>> for SiblingChunkNode {
@@ -302,7 +305,7 @@ impl<'a> LocalNode<BriquesContext<'a>> for SiblingChunkNode {
         let sib_chains = fst_walk::sibling_chain_dfs(
             &all_splits, &self.query,
             svc.require_sibling_v3(), svc.require_termtexts(),
-            svc.trace_id,
+            self.strict_separators, svc.trace_id,
         );
         ctx.metric("sib_chains", sib_chains.len() as f64);
         if ctx.explain() { ctx.annotate_output("sib_chains", format_chains(&sib_chains)); }
@@ -418,6 +421,7 @@ impl<'a> LocalNode<BriquesContext<'a>> for SiblingWordNode {
         let sib_chains = fst_walk::sibling_chain_dfs(
             &all_splits, &self.query,
             svc.require_sibling_v3(), svc.require_termtexts(),
+            false, // the word pipeline only runs with relaxed separators
             svc.trace_id,
         );
         ctx.metric("splits", all_splits.len() as f64);

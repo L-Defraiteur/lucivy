@@ -89,7 +89,7 @@ pub fn find_literal_v3(
             let sib_chains = fst_walk::sibling_chain_dfs(
                 &all_splits, query,
                 ctx.require_sibling_v3(), ctx.require_termtexts(),
-                ctx.trace_id,
+                strict_separators, ctx.trace_id,
             );
             chains.extend(sib_chains);
         }
@@ -129,7 +129,7 @@ pub fn find_literal_v3(
             let sib_chains = fst_walk::sibling_chain_dfs(
                 &all_splits, query,
                 ctx.require_sibling_v3(), ctx.require_termtexts(),
-                ctx.trace_id,
+                strict_separators, ctx.trace_id,
             );
             ctx.trace_msg(&format!("word_sibling_chains count={}", sib_chains.len()));
             chains.extend(sib_chains);
@@ -579,7 +579,15 @@ pub fn resolve_trigrams_v3(
         return (BitSet::with_max_value(max_doc), Vec::new(), Vec::new());
     }
 
-    let threshold = (ngrams.len() as i32 - n as i32 * distance as i32).max(2) as usize;
+    // Floor of 1, not 2.
+    //
+    // The threshold used to be the only thing standing between the pigeonhole and
+    // the result set, so it had to be defensive — and being defensive on a
+    // necessary-but-insufficient condition buys false negatives, not precision.
+    // Now that verify_candidates re-checks every survivor against the text, the
+    // threshold is purely a recall/cost knob: lowering it can only add candidates,
+    // and every added candidate is exactly checked.
+    let threshold = (ngrams.len() as i32 - n as i32 * distance as i32).max(1) as usize;
     let hits = resolve_all_trigrams(ctx, &ngrams, strict_separators);
     let chains = build_trigram_chains(&hits, &query_positions, distance);
     let (bitset, highlights, coverage) =

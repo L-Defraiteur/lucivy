@@ -17,7 +17,21 @@ use std::sync::Arc;
 use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD};
 use lucivy_core::query::{self, QueryConfig, SchemaConfig};
 
-const REPO_PATH: &str = "/tmp/rag3db-bench";
+const DEFAULT_REPO_PATH: &str = "/tmp/rag3db-bench";
+
+/// Corpus root. Override with `V3_CORPUS=/path/to/tree` to run the same checks at
+/// a different scale — 5k documents is small enough that timings and error counts
+/// say little about behaviour on a real index.
+fn repo_path() -> String {
+    std::env::var("V3_CORPUS").unwrap_or_else(|_| DEFAULT_REPO_PATH.to_string())
+}
+
+/// Cap on documents collected. `V3_MAX_DOCS` overrides the per-test default.
+fn max_docs(default: usize) -> usize {
+    std::env::var("V3_MAX_DOCS").ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
 const MAX_FILE_SIZE: u64 = 100_000;
 const REPORT_PATH: &str = "/tmp/v3_ground_truth_report.txt";
 
@@ -34,11 +48,14 @@ fn strip_seps(s: &str) -> String {
 
 // ─── File collection ──────────────────────────────────────────────────────
 
-fn collect_files(max_docs: usize) -> Vec<(String, String)> {
-    let root = std::path::Path::new(REPO_PATH);
+fn collect_files(max_docs_arg: usize) -> Vec<(String, String)> {
+    let root_owned = repo_path();
+    let root = std::path::Path::new(&root_owned);
+    let max_docs = max_docs(max_docs_arg);
     if !root.exists() {
-        eprintln!("Skipping: clone rag3db to {REPO_PATH} first");
-        eprintln!("  git clone --depth=1 https://github.com/L-Defraiteur/rag3db.git {REPO_PATH}");
+        eprintln!("Skipping: corpus not found at {root_owned}");
+        eprintln!("  git clone --depth=1 https://github.com/L-Defraiteur/rag3db.git {DEFAULT_REPO_PATH}");
+        eprintln!("  or set V3_CORPUS=/path/to/another/tree");
         return vec![];
     }
     let exclude_dirs = ["target", "node_modules", ".git", "build", "__pycache__", "playground"];
@@ -186,6 +203,18 @@ struct SearchResult {
     highlights: Vec<(usize, usize, usize)>,
 }
 
+/// Result cap for the ground-truth searches.
+///
+/// A fixed 10_000 silently turned every high-recall query into a failure the
+/// moment the corpus grew: at 50k kernel documents `include` has 36824 true hits
+/// and the run reported "36824 vs 10000 FAIL" — a truncation, not a defect.
+/// Defaults to the corpus size, i.e. no cap. `V3_LIMIT` overrides it.
+fn result_limit(files: &[(String, String)]) -> usize {
+    std::env::var("V3_LIMIT").ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| files.len().max(1))
+}
+
 fn search_v3(
     handle: &LucivyHandle,
     files: &[(String, String)],
@@ -202,7 +231,7 @@ fn search_v3(
     };
     let query = query::build_query(&config, &handle.schema, &handle.index, Some(Arc::clone(&sink))).unwrap();
     let searcher = handle.reader.searcher();
-    let collector = ld_lucivy::collector::TopDocs::with_limit(10_000).order_by_score();
+    let collector = ld_lucivy::collector::TopDocs::with_limit(result_limit(files)).order_by_score();
     let results = searcher.search(&*query, &collector).unwrap();
 
     let nid_f = handle.field(NODE_ID_FIELD).unwrap();
@@ -347,7 +376,29 @@ fn v3_ground_truth_contains() {
     // Each query tested in both modes:
     // strict_sep=true: literal grep comparison
     // strict_sep=false: sep-agnostic grep comparison
-    let queries: Vec<GroundTruthQuery> = vec![
+    // Queries must actually occur in the corpus under test: half the rag3db set
+    // (rag3db, std::unique_ptr, ku_dynamic_cast) returns 0 hits on the kernel, which
+    // measures nothing. `V3_QUERIES` takes a comma-separated list of `value` or
+    // `value:relax` entries.
+    let custom_queries: Option<Vec<GroundTruthQuery>> = std::env::var("V3_QUERIES").ok()
+        .map(|spec| spec.split(',').map(|s| s.to_string()).collect::<Vec<_>>().into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .map(|item| {
+                // GroundTruthQuery holds &'static str; these come from the
+                // environment, so leak them — a handful of strings in a test binary.
+                let item = item.trim();
+                let (value, strict) = match item.rsplit_once(':') {
+                    Some((v, "relax")) => (v.trim(), false),
+                    Some((v, "strict")) => (v.trim(), true),
+                    _ => (item, true),
+                };
+                let leaked: &'static str = Box::leak(value.to_string().into_boxed_str());
+                if strict { GroundTruthQuery::strict(leaked) }
+                else { GroundTruthQuery::relaxed(leaked) }
+            })
+            .collect());
+
+    let default_queries: Vec<GroundTruthQuery> = vec![
         // Simple words — both modes should agree
         GroundTruthQuery::strict("function"),
         GroundTruthQuery::relaxed("function"),
@@ -367,6 +418,9 @@ fn v3_ground_truth_contains() {
         GroundTruthQuery::strict("TableFunction"),
         GroundTruthQuery::relaxed("TableFunction"),
     ];
+
+    let queries = custom_queries.unwrap_or(default_queries);
+    eprintln!("  {} queries, result cap {}", queries.len(), result_limit(&files));
 
     let mut pass = 0u32;
     let mut fail = 0u32;
@@ -887,7 +941,7 @@ fn search_v3_fuzzy(
     };
     let query = query::build_query(&config, &handle.schema, &handle.index, Some(Arc::clone(&sink))).unwrap();
     let searcher = handle.reader.searcher();
-    let collector = ld_lucivy::collector::TopDocs::with_limit(10_000).order_by_score();
+    let collector = ld_lucivy::collector::TopDocs::with_limit(result_limit(files)).order_by_score();
     let results = searcher.search(&*query, &collector).unwrap();
 
     let nid_f = handle.field(NODE_ID_FIELD).unwrap();
@@ -921,7 +975,7 @@ fn search_v3_regex(
     };
     let query = query::build_query(&config, &handle.schema, &handle.index, Some(Arc::clone(&sink))).unwrap();
     let searcher = handle.reader.searcher();
-    let collector = ld_lucivy::collector::TopDocs::with_limit(10_000).order_by_score();
+    let collector = ld_lucivy::collector::TopDocs::with_limit(result_limit(files)).order_by_score();
     let results = searcher.search(&*query, &collector).unwrap();
 
     let nid_f = handle.field(NODE_ID_FIELD).unwrap();
@@ -998,7 +1052,13 @@ fn grep_docs_regex(files: &[(String, String)], pattern: &str) -> HashSet<usize> 
 }
 
 /// Ground truth cache for fuzzy/regex — avoids recomputing slow grep each run.
-const GT_CACHE_PATH: &str = "/tmp/v3_fuzzy_regex_ground_truth.json";
+/// Ground-truth cache. Keyed by corpus and size: a cache computed on one tree is
+/// meaningless for another, and silently reusing it would fake a green run.
+fn gt_cache_path() -> String {
+    let key: String = repo_path().chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
+    format!("/tmp/v3_fuzzy_regex_gt_{}_{}.json", key, max_docs(500))
+}
 
 /// Compute or load cached ground truth for fuzzy/regex queries.
 fn load_or_compute_ground_truth(
@@ -1006,7 +1066,7 @@ fn load_or_compute_ground_truth(
     queries: &[(&str, &str, &str)], // (value, type "fz1"|"regex", label)
 ) -> HashMap<String, Vec<usize>> {
     // Try loading cache
-    if let Ok(data) = std::fs::read_to_string(GT_CACHE_PATH) {
+    if let Ok(data) = std::fs::read_to_string(gt_cache_path()) {
         if let Ok(cache) = serde_json::from_str::<HashMap<String, Vec<usize>>>(&data) {
             // Validate: cache has all queries and was built with same file count
             let meta_key = "__meta_file_count__".to_string();
@@ -1016,7 +1076,7 @@ fn load_or_compute_ground_truth(
                         cache.contains_key(&format!("{t}:{v}"))
                     });
                     if all_present {
-                        eprintln!("  Ground truth loaded from cache ({GT_CACHE_PATH})");
+                        eprintln!("  Ground truth loaded from cache ({})", gt_cache_path());
                         return cache;
                     }
                 }
@@ -1024,7 +1084,7 @@ fn load_or_compute_ground_truth(
         }
     }
 
-    eprintln!("  Computing ground truth (will cache to {GT_CACHE_PATH})...");
+    eprintln!("  Computing ground truth (will cache to {})...", gt_cache_path());
     let mut cache: HashMap<String, Vec<usize>> = HashMap::new();
     cache.insert("__meta_file_count__".into(), vec![files.len()]);
 
@@ -1043,7 +1103,7 @@ fn load_or_compute_ground_truth(
 
     // Save cache
     if let Ok(json) = serde_json::to_string_pretty(&cache) {
-        std::fs::write(GT_CACHE_PATH, json).ok();
+        std::fs::write(gt_cache_path(), json).ok();
     }
     cache
 }
@@ -1063,7 +1123,7 @@ fn baseline_fuzzy_regex() {
 
     // Delete cache if forced
     if std::env::var("RECOMPUTE_GT").is_ok() {
-        std::fs::remove_file(GT_CACHE_PATH).ok();
+        std::fs::remove_file(gt_cache_path()).ok();
     }
 
     let files = collect_files(500);
