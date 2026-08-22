@@ -258,6 +258,22 @@ impl Node for SfxNode {
             .map(|(field, _)| field)
             .collect();
 
+        // SFX v3 has no merge path. The sub-DAG below is the v2 one: its
+        // CollectTokensNode reads the inverted index term dictionary, which in v3
+        // holds a different alphabet than the SFX ordinal space (analyzer tokens vs
+        // extended/word-stripped texts). Running it on v3 segments produces a
+        // well-formed v2 segment whose postings point at the wrong terms — silently,
+        // since every self-consistency check still passes. Refuse instead.
+        let sfx_version = segment.index().settings().sfx_version;
+        if sfx_version >= 3 && !sfx_fields.is_empty() {
+            return Err(format!(
+                "sfx merge not supported for sfx_version={sfx_version}: the v2 merge DAG \
+                 would corrupt the v3 ordinal space (see docs/22-aout-2026-19h47/\
+                 02-verites-dichotomiques.md §1). Disable merges or reindex with \
+                 sfx_version=2 until a v3 merge path exists."
+            ));
+        }
+
         let reverse_doc_map = super::sfx_merge::build_reverse_doc_map(
             &doc_mapping, readers.len(),
         );

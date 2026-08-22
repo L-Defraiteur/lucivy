@@ -274,14 +274,28 @@ use crate::suffix_fst::section_file::detect_termtexts_version;
 use crate::suffix_fst::sfxpost_v2::SfxPostReaderV2;
 use crate::suffix_fst::termtexts_v3::TermTextsReaderV3;
 
-/// Merge data from multiple v3 segments into a single SfxCollectorDataV3.
+/// Merge the CHUNK half only (partitions 0x00/0x01) of multiple v3 segments.
 ///
-/// Reads termtexts v3 (extended tokens + metadata) and sfxpost (postings)
-/// from each source segment, remaps doc_ids, and produces a merged dataset
-/// ready for `build_initial_sfx_dag_v3`.
+/// **This is not a complete v3 merge and must not be wired into the merge DAG.**
+/// It reads termtexts v3 (extended tokens + metadata) and sfxpost (postings) from
+/// each source segment, remaps doc_ids, and produces a dataset for
+/// `build_initial_sfx_dag_v3` — but the entire word half of the model is dropped:
+///
+/// - `word_sfxpost`, `chunk_word_map`, `next_word_map`, `word_pos_map` and
+///   `sibling_v3` come out EMPTY (see the TODOs at the end of this function).
+///   Losing `sibling_v3` breaks strict cross-token contains too, not just relaxed.
+/// - `word_id` and `is_word_stripped` are forced to `0` / `false`, because
+///   `TermMetaV3` persists neither. With every `word_id` at 0, the downstream
+///   `build_word_stripped_pub` groups ALL tokens into a single word.
+/// - Interning is keyed on text alone (`global_intern`, `ord_map`), so a chunk
+///   ordinal and a word-stripped ordinal sharing the same text would be fused —
+///   the partition-leak this codebase has fought since May.
+///
+/// A real merge needs the partition tag and `content_overlap` persisted in the
+/// segment first. See `docs/22-aout-2026-19h47/02-verites-dichotomiques.md` §1.
 ///
 /// `doc_id_remaps[seg_idx]` maps old_doc_id → new_doc_id for each segment.
-pub fn merge_segments_v3(
+pub fn merge_segments_v3_chunks_only(
     termtexts_per_segment: &[&[u8]],
     sfxpost_per_segment: &[Option<&[u8]>],
     doc_id_remaps: &[&std::collections::HashMap<u32, u32>],
@@ -593,7 +607,7 @@ mod tests {
         let remap_a: std::collections::HashMap<u32, u32> = [(0, 0), (1, 1)].into();
         let remap_b: std::collections::HashMap<u32, u32> = [(0, 2), (1, 3)].into();
 
-        let merged_data = merge_segments_v3(
+        let merged_data = merge_segments_v3_chunks_only(
             &[&seg_a.termtexts, &seg_b.termtexts],
             &[seg_a.sfxpost.as_deref(), seg_b.sfxpost.as_deref()],
             &[&remap_a, &remap_b],
@@ -622,7 +636,7 @@ mod tests {
         let remap_a: std::collections::HashMap<u32, u32> = [(0, 0)].into();
         let remap_b: std::collections::HashMap<u32, u32> = [(0, 1)].into();
 
-        let merged_data = merge_segments_v3(
+        let merged_data = merge_segments_v3_chunks_only(
             &[&seg_a.termtexts, &seg_b.termtexts],
             &[seg_a.sfxpost.as_deref(), seg_b.sfxpost.as_deref()],
             &[&remap_a, &remap_b],
@@ -647,7 +661,7 @@ mod tests {
         // Only remap docs 0 and 2, doc 1 is deleted
         let remap_a: std::collections::HashMap<u32, u32> = [(0, 0), (2, 1)].into();
 
-        let merged_data = merge_segments_v3(
+        let merged_data = merge_segments_v3_chunks_only(
             &[&seg_a.termtexts],
             &[seg_a.sfxpost.as_deref()],
             &[&remap_a],
@@ -673,7 +687,7 @@ mod tests {
 
         let remap_a: std::collections::HashMap<u32, u32> = [(0, 0)].into();
 
-        let merged_data = merge_segments_v3(
+        let merged_data = merge_segments_v3_chunks_only(
             &[&seg_a.termtexts],
             &[seg_a.sfxpost.as_deref()],
             &[&remap_a],

@@ -71,8 +71,14 @@ impl<'a> BriquesContext<'a> {
     // ── Convenience: check if word pipeline is available ─────────
 
     /// True if all files needed for the word pipeline (relaxed mode) are loaded.
+    ///
+    /// Presence is not enough: an empty `.word_sfxpost` (0 ordinals) opens fine and
+    /// would make every partition 0x02 resolution silently return nothing. Require
+    /// actual content so a degraded index fails visibly instead.
     pub fn has_word_pipeline(&self) -> bool {
-        self.posmap.is_some() && self.bytemap.is_some() && self.word_sfxpost.is_some()
+        self.posmap.is_some()
+            && self.bytemap.is_some()
+            && self.word_sfxpost.as_ref().is_some_and(|w| w.num_ordinals() > 0)
     }
 
     /// True if sibling-based chain building is available.
