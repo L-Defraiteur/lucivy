@@ -68,6 +68,10 @@ pub struct SfxCollectorV3 {
     token_meta: Vec<TokenMetaV3>,
     // Word-level stripped entries, built during add_value().
     word_stripped_entries: Vec<WordStrippedEntry>,
+    // Direct word postings: (doc_id, first_ti, last_ti, byte_from, byte_to)
+    // indexed by ws intern_ord. Captured directly in add_value() where we know
+    // the exact word identity — eliminates the lossy content_key join.
+    word_postings: Vec<Vec<(u32, u32, u32, u32, u32)>>,
 
     // Word map: structural verification for cross-token chains.
     // Interned segments: segment text (content+sep, lowered) → global word_id.
@@ -134,6 +138,7 @@ impl SfxCollectorV3 {
             token_postings: Vec::new(),
             token_meta: Vec::new(),
             word_stripped_entries: Vec::new(),
+            word_postings: Vec::new(),
             word_intern: HashMap::new(),
             chunk_to_word: Vec::new(),
             next_word_pairs: Vec::new(),
@@ -409,8 +414,8 @@ impl SfxCollectorV3 {
                     content_overlap: Some(content_overlap.clone()),
                     is_word_stripped: true,
                 });
-                // NO posting: word-stripped uses first chunk's ordinal (via intern_to_final).
-                // The first chunk already has the posting. No duplicate.
+                // NO chunk-level posting here. Word postings are captured directly
+                // below and stored in self.word_postings for WordSfxPost.
 
                 let max_token = crate::tokenizer::equal_chunk::DEFAULT_MAX_TOKEN;
 
@@ -425,6 +430,21 @@ impl SfxCollectorV3 {
                     is_word_start: chunks[first_ci].1.is_word_start,
                     num_chunks: chunk_idxs.len() as u32,
                 });
+
+                // Capture word posting directly — we know the exact word identity here.
+                let first_posting = &chunk_posting_info[first_ci];
+                let last_posting = &chunk_posting_info[last_ci];
+                while self.word_postings.len() <= ws_intern as usize {
+                    self.word_postings.push(Vec::new());
+                }
+                self.word_postings[ws_intern as usize].push((
+                    self.current_doc_id,
+                    first_posting.1, // first_ti (position of first chunk)
+                    last_posting.1,  // last_ti (position of last chunk)
+                    first_posting.2, // byte_from (start of first chunk)
+                    last_posting.3,  // byte_to (end of last chunk)
+                ));
+
                 ws_intern_sequence.push((ws_intern, word_content.len() as u16));
 
                 // Tail entry for very long words only.
@@ -460,7 +480,7 @@ impl SfxCollectorV3 {
                         content_overlap: Some(content_overlap.clone()),
                         is_word_stripped: true,
                     });
-                    // NO posting: tail uses last chunk's ordinal. No duplicate.
+                    // NO chunk-level posting. Tail word posting captured below.
 
                     self.word_stripped_entries.push(WordStrippedEntry {
                         word_content: tail_content,
@@ -473,6 +493,19 @@ impl SfxCollectorV3 {
                         is_word_start: false,
                         num_chunks: 1, // tail entry = single chunk
                     });
+
+                    // Capture tail posting directly (same as last chunk's posting)
+                    let tail_posting = &chunk_posting_info[last_ci];
+                    while self.word_postings.len() <= tail_intern as usize {
+                        self.word_postings.push(Vec::new());
+                    }
+                    self.word_postings[tail_intern as usize].push((
+                        self.current_doc_id,
+                        tail_posting.1, // first_ti = last_ti for tail
+                        tail_posting.1, // same position
+                        tail_posting.2, // byte_from
+                        tail_posting.3, // byte_to
+                    ));
                 }
             }
 
@@ -547,19 +580,6 @@ impl SfxCollectorV3 {
         // partitions 0x00/0x01, preventing FP from overlap mixing.
         // Word-stripped entries (partition 0x02) get their own ordinal with
         // aggregated postings from all overlap variants of their first chunk.
-
-        // Build content_key → [intern_ords] for word-stripped aggregation.
-        // Content key = text[..own_len] (content + sep, no overlap).
-        let mut content_key_to_interns: std::collections::HashMap<String, Vec<u32>> =
-            std::collections::HashMap::new();
-        for (io, text) in self.token_texts.iter().enumerate() {
-            if self.token_meta[io].is_word_stripped { continue; }
-            let mut ol = self.token_meta[io].own_len as usize;
-            ol = ol.min(text.len());
-            while ol > 0 && !text.is_char_boundary(ol) { ol -= 1; }
-            content_key_to_interns.entry(text[..ol].to_string())
-                .or_default().push(io as u32);
-        }
 
         // Collect all ordinal entries into a BTreeMap for deterministic alphabetical order.
         // Chunk and word-stripped entries use SEPARATE keys (prefixed) to prevent
@@ -675,81 +695,23 @@ impl SfxCollectorV3 {
         }
 
         // Build word postings (WordSfxPost) — now that ordinals are assigned.
-        // Join first/last chunk postings by doc_id for hybrid position/byte_from.
-        let content_key_of = |intern_ord: u32| -> String {
-            let text = &self.token_texts[intern_ord as usize];
-            let meta = &self.token_meta[intern_ord as usize];
-            let mut ol = (meta.own_len as usize).min(text.len());
-            while ol > 0 && !text.is_char_boundary(ol) { ol -= 1; }
-            text[..ol].to_string()
-        };
-
+        // Word postings were captured directly in add_value() where we know the
+        // exact word identity. No content_key join needed — zero cross-word leaks.
         let mut word_sfxpost_writer = crate::suffix_fst::word_sfxpost::WordSfxPostWriter::new(
             final_ord as usize,
         );
         for dws in &deferred_ws {
             let ws_final_ord = intern_to_final[dws.intern_ord as usize];
-            let first_ckey = content_key_of(dws.first_chunk_intern);
-            let last_ckey = content_key_of(dws.last_chunk_intern);
-
-            if dws.first_chunk_intern == dws.last_chunk_intern {
-                // Mono-chunk word: same position and bytes
-                if let Some(variants) = content_key_to_interns.get(&first_ckey) {
-                    for &vio in variants {
-                        for &(doc_id, ti, bf, bt) in &self.token_postings[vio as usize] {
-                            word_sfxpost_writer.add(ws_final_ord, WordPostingEntry {
-                                doc_id, first_position: ti, last_position: ti,
-                                byte_from: bf, byte_to: bt,
-                            });
-                        }
-                    }
-                }
-            } else {
-                // Multi-chunk: join by doc_id with exact chunk distance.
-                //
-                // content_key_to_interns maps content keys to ALL intern_ords with that
-                // content — including chunks from different words (e.g., "funct" from
-                // "function" and "functions"). Without distance check, this creates
-                // a cross-product: first_chunk from word A × last_chunk from word B
-                // → bogus entries spanning thousands of positions.
-                //
-                // Fix: last_pos - first_pos must equal num_chunks - 1 (exact distance
-                // between first and last chunk of the same word occurrence).
-                let expected_distance = dws.num_chunks - 1;
-
-                // Collect ALL first_chunk postings per doc_id (multiple per doc)
-                let mut first_by_doc: std::collections::HashMap<u32, Vec<(u32, u32)>> =
-                    std::collections::HashMap::new();
-                if let Some(variants) = content_key_to_interns.get(&first_ckey) {
-                    for &vio in variants {
-                        for &(doc_id, ti, bf, _bt) in &self.token_postings[vio as usize] {
-                            first_by_doc.entry(doc_id).or_default().push((ti, bf));
-                        }
-                    }
-                }
-                for entries in first_by_doc.values_mut() {
-                    entries.sort_by_key(|&(ti, _)| ti);
-                    entries.dedup();
-                }
-
-                if let Some(variants) = content_key_to_interns.get(&last_ckey) {
-                    for &vio in variants {
-                        for &(doc_id, last_ti, _bf, bt) in &self.token_postings[vio as usize] {
-                            if let Some(firsts) = first_by_doc.get(&doc_id) {
-                                for &(first_ti, first_bf) in firsts {
-                                    if last_ti >= first_ti && last_ti - first_ti == expected_distance {
-                                        word_sfxpost_writer.add(ws_final_ord, WordPostingEntry {
-                                            doc_id,
-                                            first_position: first_ti,
-                                            last_position: last_ti,
-                                            byte_from: first_bf,
-                                            byte_to: bt,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
+            let io = dws.intern_ord as usize;
+            if io < self.word_postings.len() {
+                for &(doc_id, first_ti, last_ti, bf, bt) in &self.word_postings[io] {
+                    word_sfxpost_writer.add(ws_final_ord, WordPostingEntry {
+                        doc_id,
+                        first_position: first_ti,
+                        last_position: last_ti,
+                        byte_from: bf,
+                        byte_to: bt,
+                    });
                 }
             }
         }

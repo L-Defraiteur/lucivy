@@ -130,7 +130,7 @@ pub fn fuzzy_v3(
     }
 
     composite::resolve_trigrams_v3(
-        ctx.reader, query_ref, distance, ctx.resolver, strict_separators, max_doc,
+        ctx, query_ref, distance, strict_separators, max_doc,
     )
 }
 

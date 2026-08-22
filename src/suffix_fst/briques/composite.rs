@@ -250,111 +250,347 @@ pub fn find_multi_token_v3(
     results
 }
 
-// ─── resolve_trigrams_v3 ──────────────────────────────────────────────────
+// ─── Fuzzy briques ───────────────────────────────────────────────────────
 
-/// Trigram hit for position-based matching.
+/// A single trigram hit in a document.
 #[derive(Debug, Clone)]
-struct TrigramHit {
-    tri_idx: usize,
-    doc_id: DocId,
-    position: u32,
-    byte_from: u32,
-    byte_to: u32,
+pub struct TrigramHit {
+    pub tri_idx: usize,
+    pub doc_id: DocId,
+    pub position: u32,
+    pub byte_from: u32,
+    pub byte_to: u32,
 }
 
-/// Generate n-grams from query text.
+/// Generate n-grams from query text with their position in the query.
 /// n=2 if query is short (len ≤ 3*(distance+1)), n=3 otherwise.
-fn generate_trigrams(query: &str, distance: u8) -> (Vec<String>, usize) {
+/// Returns (ngrams, query_positions, n) where query_positions[i] = byte offset
+/// of ngram i within the query. Used for ordered matching.
+fn generate_trigrams(query: &str, distance: u8) -> (Vec<String>, Vec<usize>, usize) {
     let lower = query.to_lowercase();
     let bytes = lower.as_bytes();
     let n = if bytes.len() <= 3 * (distance as usize + 1) { 2 } else { 3 };
 
     let mut ngrams = Vec::new();
+    let mut positions = Vec::new();
     if bytes.len() < n {
-        return (ngrams, n);
+        return (ngrams, positions, n);
     }
     for i in 0..=bytes.len() - n {
-        // Respect UTF-8 boundaries
         if !lower.is_char_boundary(i) || !lower.is_char_boundary(i + n) {
             continue;
         }
         ngrams.push(lower[i..i + n].to_string());
+        positions.push(i);
     }
-    (ngrams, n)
+    (ngrams, positions, n)
 }
+
+// ─── Brique 2: resolve_all_trigrams ──────────────────────────────────────
+
+/// Resolve all trigrams against the index, returning hits.
+/// Uses both chunk (0x00/0x01) and word-stripped (0x02) resolution.
+/// Trigrams are resolved rarest-first (by FST selectivity) for efficiency.
+pub fn resolve_all_trigrams(
+    ctx: &BriquesContext<'_>,
+    ngrams: &[String],
+    strict_separators: bool,
+) -> Vec<TrigramHit> {
+    let mut selectivity: Vec<(usize, usize)> = ngrams.iter().enumerate()
+        .map(|(i, gram)| {
+            let count = fst_walk::fst_candidates_v3(ctx.reader, gram, false, strict_separators).len();
+            (i, count)
+        }).collect();
+    selectivity.sort_by_key(|&(_, count)| count);
+
+    let has_wsp = ctx.has_word_pipeline();
+    let mut all_hits = Vec::new();
+
+    for &(gram_idx, _) in &selectivity {
+        let cands = fst_walk::fst_candidates_v3(ctx.reader, &ngrams[gram_idx], false, strict_separators);
+        let chunk_matches = resolve::resolve_single_v3(&cands, ctx.resolver, None);
+        let word_matches = if has_wsp {
+            resolve::resolve_single_word_v3(&cands, ctx.require_word_sfxpost(), None)
+        } else { Vec::new() };
+
+        for m in chunk_matches.iter().chain(word_matches.iter()) {
+            all_hits.push(TrigramHit {
+                tri_idx: gram_idx, doc_id: m.doc_id, position: m.position,
+                byte_from: m.byte_from, byte_to: m.byte_to,
+            });
+        }
+    }
+    all_hits
+}
+
+// ─── Brique 3: build_trigram_chains ─────────────────────────────────────
+
+/// A chain of adjacent trigram hits in a document.
+#[derive(Debug, Clone)]
+pub struct TrigramChain {
+    pub doc_id: DocId,
+    /// Trigram indices in chain order (matching query order).
+    pub trigram_indices: Vec<usize>,
+    /// Byte range of the chain.
+    pub byte_from: u32,
+    pub byte_to: u32,
+}
+
+/// Build chains of adjacent trigram hits per document.
+///
+/// For each doc, sorts hits by byte_from. Builds chains where consecutive
+/// trigrams satisfy:
+/// - query_positions[next] > query_positions[prev] (correct order)
+/// - byte_from[next] - byte_from[prev] == query_positions[next] - query_positions[prev] ± distance
+///
+/// This is much more selective than windowed counting because it verifies
+/// that trigrams form a coherent subsequence at the correct relative offsets.
+pub fn build_trigram_chains(
+    hits: &[TrigramHit],
+    query_positions: &[usize],
+    distance: u8,
+) -> Vec<TrigramChain> {
+    let d = distance as i32;
+
+    let mut hits_by_doc: std::collections::HashMap<DocId, Vec<&TrigramHit>> =
+        std::collections::HashMap::new();
+    for hit in hits {
+        hits_by_doc.entry(hit.doc_id).or_default().push(hit);
+    }
+
+    let mut chains = Vec::new();
+
+    for (&doc_id, doc_hits) in &hits_by_doc {
+        let mut sorted: Vec<&TrigramHit> = doc_hits.iter().copied().collect();
+        sorted.sort_by_key(|h| h.byte_from);
+
+        // For each hit as potential chain start, extend greedily.
+        // Track the best chain per doc.
+        let mut best_chain: Vec<usize> = Vec::new();
+        let mut best_bf = 0u32;
+        let mut best_bt = 0u32;
+
+        for start in 0..sorted.len() {
+            let mut chain = vec![sorted[start].tri_idx];
+            let mut prev_bf = sorted[start].byte_from as i32;
+            let mut prev_qp = query_positions[sorted[start].tri_idx] as i32;
+
+            for j in (start + 1)..sorted.len() {
+                let h = sorted[j];
+                let qp = query_positions[h.tri_idx] as i32;
+
+                // Must be a later trigram in the query
+                if qp <= prev_qp { continue; }
+
+                // Check byte adjacency: the byte gap should match the query gap ± d
+                let expected_gap = qp - prev_qp;
+                let actual_gap = h.byte_from as i32 - prev_bf;
+                if (actual_gap - expected_gap).abs() <= d {
+                    chain.push(h.tri_idx);
+                    prev_bf = h.byte_from as i32;
+                    prev_qp = qp;
+                }
+            }
+
+            if chain.len() > best_chain.len() {
+                best_chain = chain;
+                best_bf = sorted[start].byte_from;
+                // Find byte_to from the last hit in the chain
+                let last_tri = *best_chain.last().unwrap();
+                best_bt = sorted.iter()
+                    .filter(|h| h.tri_idx == last_tri && h.byte_from >= best_bf)
+                    .map(|h| h.byte_to)
+                    .next()
+                    .unwrap_or(best_bf);
+            }
+        }
+
+        if !best_chain.is_empty() {
+            chains.push(TrigramChain {
+                doc_id,
+                trigram_indices: best_chain,
+                byte_from: best_bf,
+                byte_to: best_bt,
+            });
+        }
+    }
+
+    chains
+}
+
+// ─── Brique 4: filter_by_chain_threshold ────────────────────────────────
+
+/// Filter chains by minimum length (pigeonhole threshold).
+/// Returns accepted doc_ids with their highlight spans and coverage scores.
+pub fn filter_by_chain_threshold(
+    chains: &[TrigramChain],
+    threshold: usize,
+    total_trigrams: usize,
+    max_doc: DocId,
+) -> (BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>) {
+    let mut bitset = BitSet::with_max_value(max_doc);
+    let mut highlights = Vec::new();
+    let mut coverage = Vec::new();
+
+    for chain in chains {
+        if chain.trigram_indices.len() >= threshold {
+            bitset.insert(chain.doc_id);
+            highlights.push((chain.doc_id, chain.byte_from as usize, chain.byte_to as usize));
+            let miss_count = total_trigrams - chain.trigram_indices.len();
+            coverage.push((chain.doc_id, -(miss_count as f32)));
+        }
+    }
+
+    (bitset, highlights, coverage)
+}
+
+// ─── resolve_trigrams_v3 (composed from briques) ────────────────────────
 
 /// Fuzzy trigram pigeonhole resolution.
 ///
-/// Pipeline:
-/// 1. Generate trigrams from query (no concat_query — query stays as-is with seps)
-/// 2. Estimate selectivity per trigram via fst_candidates_v3
-/// 3. Resolve rarest first → build doc filter → resolve rest
-/// 4. Two-pointer sliding window → find compact match zones
-/// 5. Score by miss_count
+/// Composed from briques:
+/// 1. generate_trigrams — extract n-grams with query positions
+/// 2. resolve_all_trigrams — resolve each via chunk + word-stripped
+/// 3. build_trigram_chains — adjacency-checked chains per doc
+/// 4. filter_by_chain_threshold — pigeonhole filter
 ///
 /// Returns: (doc_bitset, highlights, doc_coverage)
 pub fn resolve_trigrams_v3(
-    reader: &SfxFileReaderV3,
+    ctx: &BriquesContext<'_>,
     query: &str,
     distance: u8,
-    resolver: &dyn PostingResolver,
     strict_separators: bool,
     max_doc: DocId,
 ) -> (BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>) {
-    let mut doc_bitset = BitSet::with_max_value(max_doc);
-    let mut highlights: Vec<(DocId, usize, usize)> = Vec::new();
-    let mut doc_coverage: Vec<(DocId, f32)> = Vec::new();
-
-    let (ngrams, n) = generate_trigrams(query, distance);
+    let (ngrams, query_positions, n) = generate_trigrams(query, distance);
     if ngrams.is_empty() {
-        return (doc_bitset, highlights, doc_coverage);
+        return (BitSet::with_max_value(max_doc), Vec::new(), Vec::new());
     }
 
-    // Threshold: pigeonhole principle. No boundary correction (overlap covers all).
-    let threshold = (ngrams.len() as i32 - n as i32 * distance as i32).max(1) as usize;
-    let max_span = (query.len() as u32 / 4 + 1) + distance as u32;
+    let threshold = (ngrams.len() as i32 - n as i32 * distance as i32).max(2) as usize;
+    let hits = resolve_all_trigrams(ctx, &ngrams, strict_separators);
+    let chains = build_trigram_chains(&hits, &query_positions, distance);
+    filter_by_chain_threshold(&chains, threshold, ngrams.len(), max_doc)
+}
 
-    // Phase A: estimate selectivity per trigram (no posting resolution)
-    let mut selectivity: Vec<(usize, usize)> = ngrams
-        .iter()
-        .enumerate()
+// ─── Fuzzy explain ───────────────────────────────────────────────────────
+
+/// Diagnostic data for a fuzzy trigram resolution.
+#[derive(Debug, Clone)]
+pub struct FuzzyExplain {
+    pub query: String,
+    pub distance: u8,
+    pub ngrams: Vec<String>,
+    pub query_positions: Vec<usize>,
+    pub n: usize,
+    pub threshold: usize,
+    pub max_window: u32,
+    /// Per-trigram: (trigram_text, selectivity, chunk_matches, word_matches)
+    pub per_trigram: Vec<TrigramExplain>,
+    /// Per-doc verdict: (doc_id, best_ordered_count, accepted, best_byte_from, best_byte_to, matching_trigram_indices)
+    pub per_doc: Vec<DocVerdict>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TrigramExplain {
+    pub idx: usize,
+    pub text: String,
+    pub selectivity: usize,
+    pub chunk_matches: usize,
+    pub word_matches: usize,
+    pub total_hits: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct DocVerdict {
+    pub doc_id: DocId,
+    pub best_ordered: usize,
+    pub accepted: bool,
+    pub byte_from: u32,
+    pub byte_to: u32,
+    pub trigram_indices: Vec<usize>,
+}
+
+impl FuzzyExplain {
+    pub fn dump_json(&self) -> String {
+        let trigrams: Vec<String> = self.per_trigram.iter().map(|t| {
+            format!("{{\"idx\":{},\"text\":\"{}\",\"sel\":{},\"chunk\":{},\"word\":{},\"hits\":{}}}",
+                t.idx, t.text, t.selectivity, t.chunk_matches, t.word_matches, t.total_hits)
+        }).collect();
+        let docs: Vec<String> = self.per_doc.iter().map(|d| {
+            format!("{{\"doc\":{},\"ordered\":{},\"ok\":{},\"bytes\":[{},{}],\"tris\":{:?}}}",
+                d.doc_id, d.best_ordered, d.accepted, d.byte_from, d.byte_to, d.trigram_indices)
+        }).collect();
+        format!("{{\"query\":\"{}\",\"d\":{},\"n\":{},\"threshold\":{},\"window\":{},\"ngrams\":{:?},\"trigrams\":[{}],\"docs\":[{}]}}",
+            self.query, self.distance, self.n, self.threshold, self.max_window,
+            self.ngrams, trigrams.join(","), docs.join(","))
+    }
+}
+
+/// Explained version of resolve_trigrams_v3 — returns both results and diagnostic data.
+pub fn resolve_trigrams_v3_explained(
+    ctx: &BriquesContext<'_>,
+    query: &str,
+    distance: u8,
+    strict_separators: bool,
+    max_doc: DocId,
+) -> (BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>, FuzzyExplain) {
+    let (ngrams, query_positions, n) = generate_trigrams(query, distance);
+    let threshold = (ngrams.len() as i32 - n as i32 * distance as i32).max(2) as usize;
+    let max_window = (query.len() as u32 + distance as u32 * 2 + n as u32) as u32;
+
+    let mut explain = FuzzyExplain {
+        query: query.to_string(),
+        distance,
+        ngrams: ngrams.clone(),
+        query_positions: query_positions.clone(),
+        n,
+        threshold,
+        max_window,
+        per_trigram: Vec::new(),
+        per_doc: Vec::new(),
+    };
+
+    if ngrams.is_empty() {
+        let bs = BitSet::with_max_value(max_doc);
+        return (bs, Vec::new(), Vec::new(), explain);
+    }
+
+    let mut selectivity: Vec<(usize, usize)> = ngrams.iter().enumerate()
         .map(|(i, gram)| {
-            let count = fst_walk::fst_candidates_v3(reader, gram, false, strict_separators).len();
+            let count = fst_walk::fst_candidates_v3(ctx.reader, gram, false, strict_separators).len();
             (i, count)
-        })
-        .collect();
+        }).collect();
     selectivity.sort_by_key(|&(_, count)| count);
 
-    // Phase B: resolve trigrams, rarest first
     let mut all_hits: Vec<TrigramHit> = Vec::new();
-    let mut doc_filter: Option<HashSet<DocId>> = None;
+    let has_wsp = ctx.has_word_pipeline();
 
-    for &(gram_idx, _) in &selectivity {
-        let cands = fst_walk::fst_candidates_v3(reader, &ngrams[gram_idx], false, strict_separators);
-        let matches = resolve::resolve_single_v3(&cands, resolver, doc_filter.as_ref());
+    for &(gram_idx, sel) in &selectivity {
+        let cands = fst_walk::fst_candidates_v3(ctx.reader, &ngrams[gram_idx], false, strict_separators);
+        let chunk_matches = resolve::resolve_single_v3(&cands, ctx.resolver, None);
+        let word_matches = if has_wsp {
+            resolve::resolve_single_word_v3(&cands, ctx.require_word_sfxpost(), None)
+        } else { Vec::new() };
 
-        for m in &matches {
+        let cm = chunk_matches.len();
+        let wm = word_matches.len();
+        for m in chunk_matches.iter().chain(word_matches.iter()) {
             all_hits.push(TrigramHit {
-                tri_idx: gram_idx,
-                doc_id: m.doc_id,
-                position: m.position,
-                byte_from: m.byte_from,
-                byte_to: m.byte_to,
+                tri_idx: gram_idx, doc_id: m.doc_id, position: m.position,
+                byte_from: m.byte_from, byte_to: m.byte_to,
             });
         }
-
-        // Build doc filter from first few resolved trigrams
-        if doc_filter.is_none() && !matches.is_empty() {
-            let docs: HashSet<DocId> = matches.iter().map(|m| m.doc_id).collect();
-            doc_filter = Some(docs);
-        } else if let Some(ref mut filter) = doc_filter {
-            for m in &matches {
-                filter.insert(m.doc_id);
-            }
-        }
+        explain.per_trigram.push(TrigramExplain {
+            idx: gram_idx, text: ngrams[gram_idx].clone(),
+            selectivity: sel, chunk_matches: cm, word_matches: wm, total_hits: cm + wm,
+        });
     }
 
-    // Phase C: group hits by doc, find matching windows
+    let mut doc_bitset = BitSet::with_max_value(max_doc);
+    let mut highlights = Vec::new();
+    let mut doc_coverage = Vec::new();
+
     let mut hits_by_doc: std::collections::HashMap<DocId, Vec<&TrigramHit>> =
         std::collections::HashMap::new();
     for hit in &all_hits {
@@ -362,28 +598,52 @@ pub fn resolve_trigrams_v3(
     }
 
     for (&doc_id, hits) in &hits_by_doc {
-        // Sort by position
-        let mut sorted: Vec<&&TrigramHit> = hits.iter().collect();
-        sorted.sort_by_key(|h| h.position);
+        let mut sorted: Vec<&TrigramHit> = hits.iter().copied().collect();
+        sorted.sort_by_key(|h| h.byte_from);
 
-        // Count distinct trigram indices hit
-        let distinct: HashSet<usize> = sorted.iter().map(|h| h.tri_idx).collect();
+        let mut best_ordered = 0usize;
+        let mut best_bf = 0u32;
+        let mut best_bt = 0u32;
+        let mut best_tris: Vec<usize> = Vec::new();
+        let mut left = 0usize;
 
-        if distinct.len() >= threshold {
-            doc_bitset.insert(doc_id);
-
-            // Compute highlight span
-            let min_bf = sorted.iter().map(|h| h.byte_from).min().unwrap_or(0);
-            let max_bt = sorted.iter().map(|h| h.byte_to).max().unwrap_or(0);
-            highlights.push((doc_id, min_bf as usize, max_bt as usize));
-
-            // Coverage score: negative miss count
-            let miss_count = ngrams.len() - distinct.len();
-            doc_coverage.push((doc_id, -(miss_count as f32)));
+        for right in 0..sorted.len() {
+            while left < right && sorted[right].byte_from - sorted[left].byte_from > max_window {
+                left += 1;
+            }
+            let mut ordered_count = 0usize;
+            let mut last_qpos = usize::MAX;
+            let mut seen = HashSet::new();
+            let mut tris = Vec::new();
+            for h in &sorted[left..=right] {
+                let qp = query_positions[h.tri_idx];
+                if seen.insert(h.tri_idx) && (last_qpos == usize::MAX || qp > last_qpos) {
+                    ordered_count += 1;
+                    last_qpos = qp;
+                    tris.push(h.tri_idx);
+                }
+            }
+            if ordered_count > best_ordered {
+                best_ordered = ordered_count;
+                best_bf = sorted[left].byte_from;
+                best_bt = sorted[right].byte_to;
+                best_tris = tris;
+            }
         }
+
+        let accepted = best_ordered >= threshold;
+        if accepted {
+            doc_bitset.insert(doc_id);
+            highlights.push((doc_id, best_bf as usize, best_bt as usize));
+            doc_coverage.push((doc_id, -(ngrams.len() as f32 - best_ordered as f32)));
+        }
+        explain.per_doc.push(DocVerdict {
+            doc_id, best_ordered, accepted, byte_from: best_bf, byte_to: best_bt,
+            trigram_indices: best_tris,
+        });
     }
 
-    (doc_bitset, highlights, doc_coverage)
+    (doc_bitset, highlights, doc_coverage, explain)
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────────
@@ -592,7 +852,7 @@ mod tests {
 
     #[test]
     fn test_trigrams_basic() {
-        let (grams, n) = generate_trigrams("mutex_lock", 1);
+        let (grams, _positions, n) = generate_trigrams("mutex_lock", 1);
         assert_eq!(n, 3);
         assert!(grams.contains(&"mut".to_string()));
         assert!(grams.contains(&"x_l".to_string()));
@@ -601,7 +861,7 @@ mod tests {
 
     #[test]
     fn test_trigrams_short_query() {
-        let (grams, n) = generate_trigrams("abc", 1);
+        let (grams, _positions, n) = generate_trigrams("abc", 1);
         // len=3 <= 3*(1+1)=6 → bigrams
         assert_eq!(n, 2);
         assert_eq!(grams, vec!["ab", "bc"]);
@@ -610,25 +870,53 @@ mod tests {
     #[test]
     fn test_trigrams_with_seps() {
         // Query keeps seps — no concat_query
-        let (grams, n) = generate_trigrams("mutex_lock", 1);
+        let (grams, positions, n) = generate_trigrams("mutex_lock", 1);
         assert_eq!(n, 3);
         // Sep byte "_" is part of the trigrams
         assert!(grams.contains(&"x_l".to_string()), "sep bytes should be in trigrams");
         assert!(grams.contains(&"ex_".to_string()));
         assert!(grams.contains(&"_lo".to_string()));
+        // Positions are sequential
+        assert_eq!(positions[0], 0); // "mut" at byte 0
+        assert_eq!(positions[1], 1); // "ute" at byte 1
     }
 
     // ── resolve_trigrams_v3 ──
 
+    fn make_ctx<'a>(
+        reader: &'a SfxFileReaderV3,
+        resolver: &'a dyn PostingResolver,
+        wsp: &'a [u8],
+        pm: &'a [u8],
+        bm: &'a [u8],
+    ) -> BriquesContext<'a> {
+        use crate::suffix_fst::word_sfxpost::WordSfxPostReader;
+        use crate::suffix_fst::posmap::PosMapReader;
+        use crate::suffix_fst::bytemap::ByteBitmapReader;
+        BriquesContext {
+            reader,
+            resolver,
+            filter_docs: None,
+            debug: false,
+            trace_id: None,
+            posmap: PosMapReader::open(pm),
+            bytemap: ByteBitmapReader::open(bm),
+            word_sfxpost: WordSfxPostReader::open(wsp),
+            sibling_v3: None,
+            termtexts: None,
+        }
+    }
+
     #[test]
     fn test_fuzzy_basic() {
-        let (sfx, post, _word_sfxpost, _posmap, _bytemap) = build_index(&["mutex_lock", "hello_world"]);
+        let (sfx, post, wsp, pm, bm) = build_index(&["mutex_lock", "hello_world"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
+        let ctx = make_ctx(&reader, &resolver, &wsp, &pm, &bm);
 
         // "mutex_lck" d=1 (missing 'o') should find "mutex_lock"
-        let (bitset, highlights, coverage) =
-            resolve_trigrams_v3(&reader, "mutex_lck", 1, &resolver, true, 2);
+        let (bitset, highlights, _) =
+            resolve_trigrams_v3(&ctx, "mutex_lck", 1, true, 2);
 
         assert!(bitset.contains(0), "doc 0 should match fuzzy");
         assert!(!highlights.is_empty());
@@ -636,41 +924,44 @@ mod tests {
 
     #[test]
     fn test_fuzzy_no_concat_query() {
-        let (sfx, post, _word_sfxpost, _posmap, _bytemap) = build_index(&["mutex_lock"]);
+        let (sfx, post, wsp, pm, bm) = build_index(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
+        let ctx = make_ctx(&reader, &resolver, &wsp, &pm, &bm);
 
         // Query with sep "_" kept as-is (NOT stripped by concat_query)
         // Trigrams include "x_l" which is in the FST thanks to overlap
         let (bitset, _, _) =
-            resolve_trigrams_v3(&reader, "mutex_lock", 0, &resolver, true, 1);
+            resolve_trigrams_v3(&ctx, "mutex_lock", 0, true, 1);
 
         assert!(bitset.contains(0), "exact query should match via trigrams");
     }
 
     #[test]
     fn test_fuzzy_sep_skip() {
-        let (sfx, post, _word_sfxpost, _posmap, _bytemap) = build_index(&["mutex_lock"]);
+        let (sfx, post, wsp, pm, bm) = build_index(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
+        let ctx = make_ctx(&reader, &resolver, &wsp, &pm, &bm);
 
         // "mutexlock" (no seps) d=1 strict_sep=false
         // Trigrams "exl" and "xlo" found in stripped partition
         let (bitset, _, _) =
-            resolve_trigrams_v3(&reader, "mutexlock", 1, &resolver, false, 1);
+            resolve_trigrams_v3(&ctx, "mutexlock", 1, false, 1);
 
         assert!(bitset.contains(0), "fuzzy with sep-skip should find match");
     }
 
     #[test]
     fn test_fuzzy_no_match() {
-        let (sfx, post, _word_sfxpost, _posmap, _bytemap) = build_index(&["mutex_lock"]);
+        let (sfx, post, wsp, pm, bm) = build_index(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&sfx).unwrap();
         let resolver = MockResolver::new(&post);
+        let ctx = make_ctx(&reader, &resolver, &wsp, &pm, &bm);
 
         // "zzzzzzzzz" should not match anything
         let (bitset, _, _) =
-            resolve_trigrams_v3(&reader, "zzzzzzzzz", 1, &resolver, true, 1);
+            resolve_trigrams_v3(&ctx, "zzzzzzzzz", 1, true, 1);
 
         assert!(!bitset.contains(0));
     }

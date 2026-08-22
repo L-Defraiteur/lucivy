@@ -79,6 +79,52 @@ pub fn resolve_single_v3(
     results
 }
 
+// ─── resolve_single_word_v3 ───────────────────────────────────────────────
+
+/// Resolve word-stripped candidates (partition 0x02) directly via WordSfxPost.
+///
+/// Symmetric to resolve_single_v3 for chunks: candidates that match within a
+/// single word-stripped token are resolved here instead of depending on the
+/// chain pipeline. This guarantees word-level single matches are found by
+/// construction, not by luck of chain formation.
+pub fn resolve_single_word_v3(
+    candidates: &[FstCandidateV3],
+    word_sfxpost: &crate::suffix_fst::word_sfxpost::WordSfxPostReader<'_>,
+    filter_docs: Option<&HashSet<DocId>>,
+) -> Vec<MatchV3> {
+    let mut results = Vec::new();
+
+    for cand in candidates {
+        if !cand.is_word_stripped() { continue; }
+
+        let entries = word_sfxpost.entries(cand.raw_ordinal as u32);
+        for e in &entries {
+            if let Some(filter) = filter_docs {
+                if !filter.contains(&e.doc_id) { continue; }
+            }
+            // byte_from/byte_to from WordSfxPost are word-level coordinates.
+            // Adjust byte_from by sti (suffix offset within the word) and
+            // compute byte_to to cover exactly the query match, not the whole word.
+            let content_len = cand.content_len() as u32;
+            let query_byte_len = content_len - cand.sti as u32;
+            results.push(MatchV3 {
+                doc_id: e.doc_id,
+                position: e.first_position,
+                span: if e.last_position > e.first_position {
+                    e.last_position - e.first_position + 1
+                } else { 1 },
+                byte_from: e.byte_from + cand.sti as u32,
+                byte_to: e.byte_from + cand.sti as u32 + query_byte_len,
+                sti: cand.sti,
+                ordinal: cand.raw_ordinal,
+                last_ordinal: cand.raw_ordinal,
+            });
+        }
+    }
+
+    results
+}
+
 // ─── resolve_chains_v3 ────────────────────────────────────────────────────
 
 /// Resolve cross-token chains to document matches with strict adjacency.
@@ -166,12 +212,15 @@ pub fn resolve_word_chains_v3(
 
         if chain.ordinals.len() == 1 {
             for e in &first_entries {
+                let bf = e.byte_from + chain.first_sti as u32;
                 results.push(MatchV3 {
                     doc_id: e.doc_id,
                     position: e.first_position,
-                    span: 1,
-                    byte_from: e.byte_from + chain.first_sti as u32,
-                    byte_to: e.byte_to,
+                    span: if e.last_position > e.first_position {
+                        e.last_position - e.first_position + 1
+                    } else { 1 },
+                    byte_from: bf,
+                    byte_to: bf + chain.total_query_consumed as u32,
                     sti: chain.first_sti,
                     ordinal: chain.ordinals[0][0],
                     last_ordinal: chain.ordinals[0][0],

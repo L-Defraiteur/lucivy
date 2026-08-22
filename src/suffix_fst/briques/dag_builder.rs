@@ -101,6 +101,10 @@ fn build_literal_dag<'a>(
     let has_word = !strict_separators && ctx.has_word_pipeline();
 
     if has_word {
+        // Direct resolution of word-stripped candidates (no chain dependency)
+        dag.add_node("resolve_single_word", ResolveSingleWordNode);
+        dag.connect("fst_candidates", "candidates", "resolve_single_word", "candidates").unwrap();
+
         dag.add_node("word_chain", WordChainNode {
             query: q.clone(),
             anchor_start,
@@ -123,6 +127,7 @@ fn build_literal_dag<'a>(
     dag.connect("resolve_single", "matches", "merge", "single").unwrap();
     dag.connect("resolve_chunk", "matches", "merge", "chunk").unwrap();
     if has_word {
+        dag.connect("resolve_single_word", "matches", "merge", "single_word").unwrap();
         dag.connect("resolve_word", "matches", "merge", "word").unwrap();
     }
 

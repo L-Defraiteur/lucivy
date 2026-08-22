@@ -199,6 +199,35 @@ impl<'a> LocalNode<BriquesContext<'a>> for ResolveSingleNode {
     }
 }
 
+// ─── ResolveSingleWordNode ──────────────────────────────────────────────
+
+/// Resolve word-stripped candidates (0x02) directly via WordSfxPost.
+/// Symmetric to ResolveSingleNode for chunks — no chain dependency.
+pub struct ResolveSingleWordNode;
+
+impl<'a> LocalNode<BriquesContext<'a>> for ResolveSingleWordNode {
+    fn node_type(&self) -> &'static str { "resolve_single_word" }
+
+    fn inputs(&self) -> Vec<PortDef> {
+        vec![PortDef::required("candidates", PortType::of::<Vec<FstCandidateV3>>())]
+    }
+
+    fn outputs(&self) -> Vec<PortDef> {
+        vec![PortDef::required("matches", PortType::of::<Vec<MatchV3>>())]
+    }
+
+    fn execute(&mut self, svc: &BriquesContext<'a>, ctx: &mut LocalNodeCtx) -> Result<(), String> {
+        let candidates = ctx.input::<Vec<FstCandidateV3>>("candidates")
+            .ok_or("missing candidates input")?;
+        let wsp = svc.require_word_sfxpost();
+        let matches = resolve::resolve_single_word_v3(candidates, wsp, svc.filter_docs);
+        ctx.metric("matches", matches.len() as f64);
+        if ctx.explain() { ctx.annotate_output("matches", format_matches(&matches)); }
+        ctx.set_output("matches", matches);
+        Ok(())
+    }
+}
+
 // ─── ChunkChainNode ─────────────────────────────────────────────────────
 
 /// Build cross-chunk chains via falling walk (partitions 0x00 + 0x01).
@@ -252,7 +281,13 @@ impl<'a> LocalNode<BriquesContext<'a>> for SiblingChunkNode {
             .ok_or("missing candidates input")?;
 
         let mut all_splits = fst_walk::falling_walk_chunks(svc.reader, &self.query);
-        let extra = fst_walk::splits_from_fst_candidates(candidates, self.query.to_lowercase().len());
+        // Only use chunk candidates (partitions 0x00/0x01) for the chunk pipeline.
+        // Word-stripped ordinals (0x02) have empty sfxpost → chain resolution would fail.
+        let chunk_candidates: Vec<_> = candidates.iter()
+            .filter(|c| !c.is_word_stripped())
+            .cloned()
+            .collect();
+        let extra = fst_walk::splits_from_fst_candidates(&chunk_candidates, self.query.to_lowercase().len());
         for s in extra {
             if !s.parent.is_word_start || s.parent.sep_len == 0 { continue; }
             all_splits.push(s);
@@ -360,7 +395,14 @@ impl<'a> LocalNode<BriquesContext<'a>> for SiblingWordNode {
 
         let mut all_splits = fst_walk::falling_walk_words(svc.reader, &self.query);
         let query_len = self.query.to_lowercase().len();
-        let extra = fst_walk::splits_from_fst_candidates(candidates, query_len);
+        // Only use word-stripped candidates (partition 0x02) for the word pipeline.
+        // Chunk ordinals (0x00/0x01) have empty WordSfxPost → fallback to chunk_resolver
+        // in resolve_word_chains_v3 would produce false positives.
+        let ws_candidates: Vec<_> = candidates.iter()
+            .filter(|c| c.is_word_stripped())
+            .cloned()
+            .collect();
+        let extra = fst_walk::splits_from_fst_candidates(&ws_candidates, query_len);
         for s in extra {
             if s.parent.sep_len == 0 { continue; }
             all_splits.push(s);
@@ -431,6 +473,7 @@ impl<'a> LocalNode<BriquesContext<'a>> for MergeNode {
         vec![
             PortDef::required("single", PortType::of::<Vec<MatchV3>>()),
             PortDef::optional("chunk", PortType::of::<Vec<MatchV3>>()),
+            PortDef::optional("single_word", PortType::of::<Vec<MatchV3>>()),
             PortDef::optional("word", PortType::of::<Vec<MatchV3>>()),
         ]
     }
@@ -445,6 +488,9 @@ impl<'a> LocalNode<BriquesContext<'a>> for MergeNode {
 
         if let Some(chunk) = ctx.take_input::<Vec<MatchV3>>("chunk") {
             results.extend(chunk);
+        }
+        if let Some(single_word) = ctx.take_input::<Vec<MatchV3>>("single_word") {
+            results.extend(single_word);
         }
         if let Some(word) = ctx.take_input::<Vec<MatchV3>>("word") {
             results.extend(word);

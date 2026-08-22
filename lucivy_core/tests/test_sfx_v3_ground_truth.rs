@@ -861,3 +861,325 @@ fn debug_struct_fp() {
     }
     eprintln!("Debug output: /tmp/v3_debug_struct.txt");
 }
+
+// ─── Fuzzy / Regex baseline ─────────────────────────────────────────────
+
+fn search_v3_fuzzy(
+    handle: &LucivyHandle,
+    files: &[(String, String)],
+    value: &str,
+    distance: u8,
+) -> SearchResult {
+    let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
+    let config = QueryConfig {
+        query_type: "contains".into(),
+        field: Some("content".into()),
+        value: Some(value.into()),
+        distance: Some(distance),
+        strict_separators: Some(false),
+        ..Default::default()
+    };
+    let query = query::build_query(&config, &handle.schema, &handle.index, Some(Arc::clone(&sink))).unwrap();
+    let searcher = handle.reader.searcher();
+    let collector = ld_lucivy::collector::TopDocs::with_limit(10_000).order_by_score();
+    let results = searcher.search(&*query, &collector).unwrap();
+
+    let nid_f = handle.field(NODE_ID_FIELD).unwrap();
+    let mut doc_indices = HashSet::new();
+    let highlights = Vec::new();
+    for (_, addr) in &results {
+        let doc = searcher.doc::<ld_lucivy::LucivyDocument>(*addr).unwrap();
+        use ld_lucivy::schema::document::Value;
+        let file_idx = doc.field_values()
+            .find(|(f, _)| *f == nid_f)
+            .and_then(|(_, v)| v.as_value().as_u64())
+            .unwrap_or(0) as usize;
+        doc_indices.insert(file_idx);
+    }
+    SearchResult { doc_indices, highlights }
+}
+
+fn search_v3_regex(
+    handle: &LucivyHandle,
+    files: &[(String, String)],
+    pattern: &str,
+) -> SearchResult {
+    let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
+    let config = QueryConfig {
+        query_type: "contains".into(),
+        field: Some("content".into()),
+        value: Some(pattern.into()),
+        regex: Some(true),
+        strict_separators: Some(false),
+        ..Default::default()
+    };
+    let query = query::build_query(&config, &handle.schema, &handle.index, Some(Arc::clone(&sink))).unwrap();
+    let searcher = handle.reader.searcher();
+    let collector = ld_lucivy::collector::TopDocs::with_limit(10_000).order_by_score();
+    let results = searcher.search(&*query, &collector).unwrap();
+
+    let nid_f = handle.field(NODE_ID_FIELD).unwrap();
+    let mut doc_indices = HashSet::new();
+    let highlights = Vec::new();
+    for (_, addr) in &results {
+        let doc = searcher.doc::<ld_lucivy::LucivyDocument>(*addr).unwrap();
+        use ld_lucivy::schema::document::Value;
+        let file_idx = doc.field_values()
+            .find(|(f, _)| *f == nid_f)
+            .and_then(|(_, v)| v.as_value().as_u64())
+            .unwrap_or(0) as usize;
+        doc_indices.insert(file_idx);
+    }
+    SearchResult { doc_indices, highlights }
+}
+
+/// Semi-global Levenshtein substring match: find if `pattern` appears as a
+/// fuzzy substring of `text` within edit distance `max_d`.
+/// O(n × m) where n = text length, m = pattern length.
+/// Uses free-start DP (curr[0] = 0) so the pattern can start anywhere.
+fn fuzzy_substring_exists(text: &[u8], pattern: &[u8], max_d: u32) -> bool {
+    let m = pattern.len();
+    if m == 0 { return true; }
+    let n = text.len();
+    if n == 0 { return false; }
+    let mut prev: Vec<u32> = (0..=m as u32).collect();
+    for i in 1..=n {
+        let mut curr = vec![0u32; m + 1];
+        curr[0] = 0; // free prefix — match can start anywhere
+        for j in 1..=m {
+            let cost = if text[i - 1] == pattern[j - 1] { 0 } else { 1 };
+            curr[j] = (curr[j - 1] + 1)
+                .min(prev[j] + 1)
+                .min(prev[j - 1] + cost);
+        }
+        if curr[m] <= max_d {
+            return true; // early exit — found a match
+        }
+        prev = curr;
+    }
+    false
+}
+
+/// Fuzzy grep using semi-global Levenshtein on lowercased text.
+/// Strips separators from both query and text (sep-agnostic matching).
+fn grep_docs_fuzzy(files: &[(String, String)], needle: &str, max_distance: u8) -> HashSet<usize> {
+    let pattern: Vec<u8> = needle.to_lowercase()
+        .chars().filter(|c| is_content_char(*c))
+        .collect::<String>().into_bytes();
+
+    files.iter().enumerate()
+        .filter(|(_, (_, content))| {
+            // Strip non-content chars and lowercase — same as what the index does
+            let text: Vec<u8> = content.to_lowercase()
+                .chars().filter(|c| is_content_char(*c))
+                .collect::<String>().into_bytes();
+            fuzzy_substring_exists(&text, &pattern, max_distance as u32)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Naive regex grep: find docs matching the pattern (case-insensitive).
+fn grep_docs_regex(files: &[(String, String)], pattern: &str) -> HashSet<usize> {
+    let re = regex::RegexBuilder::new(pattern)
+        .case_insensitive(true)
+        .build()
+        .expect("invalid regex pattern");
+    files.iter().enumerate()
+        .filter(|(_, (_, content))| re.is_match(content))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Ground truth cache for fuzzy/regex — avoids recomputing slow grep each run.
+const GT_CACHE_PATH: &str = "/tmp/v3_fuzzy_regex_ground_truth.json";
+
+/// Compute or load cached ground truth for fuzzy/regex queries.
+fn load_or_compute_ground_truth(
+    files: &[(String, String)],
+    queries: &[(&str, &str, &str)], // (value, type "fz1"|"regex", label)
+) -> HashMap<String, Vec<usize>> {
+    // Try loading cache
+    if let Ok(data) = std::fs::read_to_string(GT_CACHE_PATH) {
+        if let Ok(cache) = serde_json::from_str::<HashMap<String, Vec<usize>>>(&data) {
+            // Validate: cache has all queries and was built with same file count
+            let meta_key = "__meta_file_count__".to_string();
+            if let Some(count) = cache.get(&meta_key) {
+                if count.first().copied() == Some(files.len()) {
+                    let all_present = queries.iter().all(|(v, t, _)| {
+                        cache.contains_key(&format!("{t}:{v}"))
+                    });
+                    if all_present {
+                        eprintln!("  Ground truth loaded from cache ({GT_CACHE_PATH})");
+                        return cache;
+                    }
+                }
+            }
+        }
+    }
+
+    eprintln!("  Computing ground truth (will cache to {GT_CACHE_PATH})...");
+    let mut cache: HashMap<String, Vec<usize>> = HashMap::new();
+    cache.insert("__meta_file_count__".into(), vec![files.len()]);
+
+    for &(value, qtype, label) in queries {
+        let key = format!("{qtype}:{value}");
+        let t = std::time::Instant::now();
+        let docs: Vec<usize> = if qtype == "fz1" {
+            grep_docs_fuzzy(files, value, 1).into_iter().collect()
+        } else {
+            grep_docs_regex(files, value).into_iter().collect()
+        };
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        eprintln!("    {label:<25} {qtype:>5} -> {} docs ({:.0}ms)", docs.len(), ms);
+        cache.insert(key, docs);
+    }
+
+    // Save cache
+    if let Ok(json) = serde_json::to_string_pretty(&cache) {
+        std::fs::write(GT_CACHE_PATH, json).ok();
+    }
+    cache
+}
+
+/// Baseline test for fuzzy and regex — report only, no assert.
+///
+/// Env vars:
+///   QUERY=retrun        — run only this query
+///   MODE=fuzzy|regex    — run only fuzzy or regex queries
+///   RECOMPUTE_GT=1      — force recompute ground truth cache
+///
+/// Run: cargo test -p lucivy-core --test test_sfx_v3_ground_truth baseline_fuzzy_regex -- --nocapture
+#[test]
+fn baseline_fuzzy_regex() {
+    let query_filter = std::env::var("QUERY").ok();
+    let mode_filter = std::env::var("MODE").ok();
+
+    // Delete cache if forced
+    if std::env::var("RECOMPUTE_GT").is_ok() {
+        std::fs::remove_file(GT_CACHE_PATH).ok();
+    }
+
+    let files = collect_files(500);
+    if files.is_empty() { return; }
+    eprintln!("\n=== Fuzzy/Regex Baseline: {} files ===\n", files.len());
+
+    // All queries: (value, type, label)
+    let all_queries: Vec<(&str, &str, &str)> = vec![
+        ("functin",     "fz1",   "functin"),
+        ("strcuture",   "fz1",   "strcuture"),
+        ("inclde",      "fz1",   "inclde"),
+        ("retrun",      "fz1",   "retrun"),
+        ("rag3db",      "fz1",   "rag3db"),
+        ("uint64",      "fz1",   "uint64"),
+        (r#"function\s*\("#,       "regex", "func call"),
+        (r#"uint\d+_t"#,          "regex", "uint types"),
+        (r#"std::\w+"#,           "regex", "std namespace"),
+        (r#"#include\s*[<"]"#,    "regex", "include dir"),
+        (r#"Table\w+Function"#,   "regex", "Table*Func"),
+    ];
+
+    // Filter queries by env vars
+    let queries: Vec<(&str, &str, &str)> = all_queries.iter()
+        .filter(|(v, t, label)| {
+            if let Some(ref q) = query_filter {
+                return *v == q.as_str() || *label == q.as_str();
+            }
+            if let Some(ref m) = mode_filter {
+                return (m == "fuzzy" && *t == "fz1") || (m == "regex" && *t == "regex");
+            }
+            true
+        })
+        .copied()
+        .collect();
+
+    if queries.is_empty() {
+        eprintln!("No queries match filter. Available: {:?}",
+            all_queries.iter().map(|(v,_,_)| *v).collect::<Vec<_>>());
+        return;
+    }
+
+    // Step 1: compute/load ground truth (slow part — cached)
+    let t_gt = std::time::Instant::now();
+    let gt_cache = load_or_compute_ground_truth(&files, &all_queries);
+    eprintln!("  Ground truth: {:.1}s\n", t_gt.elapsed().as_secs_f64());
+
+    // Step 2: index (independent of GT)
+    let t0 = std::time::Instant::now();
+    let handle = create_v3_index(&files);
+    eprintln!("  Index time: {:.1}s\n", t0.elapsed().as_secs_f64());
+
+    eprintln!("  Ready — running V3 queries:\n");
+
+    eprintln!("{:<25} {:>5} {:>6} {:>6} {:>4} {:>4} {:>8} {:>8}",
+        "Query", "Type", "Grep", "V3", "FN", "FP", "V3 ms", "Status");
+    eprintln!("{}", "-".repeat(80));
+
+    let mut total = 0u32;
+    let mut pass = 0u32;
+
+    for &(value, qtype, label) in &queries {
+        let key = format!("{qtype}:{value}");
+        let grep_set: HashSet<usize> = gt_cache.get(&key)
+            .map(|v| v.iter().copied().collect())
+            .unwrap_or_default();
+
+        let t = std::time::Instant::now();
+        let v3_result = if qtype == "fz1" {
+            search_v3_fuzzy(&handle, &files, value, 1)
+        } else {
+            search_v3_regex(&handle, &files, value)
+        };
+        let v3_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        let fn_count = grep_set.difference(&v3_result.doc_indices).count();
+        let fp_count = v3_result.doc_indices.difference(&grep_set).count();
+        let status = if fn_count == 0 && fp_count == 0 { "OK" } else { "DIFF" };
+        if fn_count == 0 && fp_count == 0 { pass += 1; }
+        total += 1;
+
+        eprintln!("{:<25} {:>5} {:>6} {:>6} {:>4} {:>4} {:>7.0} {:>8}",
+            label, qtype, grep_set.len(), v3_result.doc_indices.len(),
+            fn_count, fp_count, v3_ms, status);
+
+        // Show FN/FP details
+        if fn_count > 0 && fn_count <= 10 {
+            let fns: Vec<usize> = grep_set.difference(&v3_result.doc_indices).copied().collect();
+            for idx in &fns {
+                eprintln!("  FN doc {}: {}", idx, files[*idx].0);
+            }
+        }
+        if fp_count > 0 && fp_count <= 10 {
+            let fps: Vec<usize> = v3_result.doc_indices.difference(&grep_set).copied().collect();
+            for idx in &fps {
+                eprintln!("  FP doc {}: {}", idx, files[*idx].0);
+            }
+        }
+        if fp_count > 10 || fn_count > 10 {
+            eprintln!("  ({} FN + {} FP — too many to show inline)", fn_count, fp_count);
+        }
+
+        // Export JSON for investigation
+        if fn_count > 0 || fp_count > 0 {
+            let fns: Vec<usize> = grep_set.difference(&v3_result.doc_indices).copied().collect();
+            let fps: Vec<usize> = v3_result.doc_indices.difference(&grep_set).copied().collect();
+            let safe_label = label.replace(|c: char| !c.is_alphanumeric(), "_");
+            let path = format!("/tmp/v3_baseline_{}_{}.json", safe_label, qtype);
+            let json = serde_json::json!({
+                "query": value,
+                "type": qtype,
+                "label": label,
+                "grep_count": grep_set.len(),
+                "v3_count": v3_result.doc_indices.len(),
+                "fn_count": fn_count,
+                "fp_count": fp_count,
+                "fn_docs": fns.iter().map(|&i| serde_json::json!({"idx": i, "path": &files[i].0})).collect::<Vec<_>>(),
+                "fp_docs": fps.iter().map(|&i| serde_json::json!({"idx": i, "path": &files[i].0})).collect::<Vec<_>>(),
+            });
+            std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).ok();
+            eprintln!("  → {path}");
+        }
+    }
+
+    eprintln!("\n{pass}/{total} pass (baseline, no assert)");
+}
