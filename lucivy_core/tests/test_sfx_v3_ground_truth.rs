@@ -1338,3 +1338,91 @@ fn perf_shape_sharded() {
     }
     eprintln!();
 }
+
+/// Distributed v3: two independent nodes, stats exported / merged / injected.
+///
+/// The multi-machine path (export_stats -> ExportableStats::merge ->
+/// search_with_global_stats) is only exercised in acid_postgres.rs, which is
+/// #[ignore] by default, needs a Postgres, and does not set sfx_version — so it
+/// runs v2. v3 over that path had never been executed, exactly like v3 over
+/// sharding. This runs it in RAM, no external service.
+///
+/// What it must prove: the union of what the two nodes return equals what a single
+/// node holding all the documents returns. Scores may differ (that is the point of
+/// global stats), the document SET must not.
+#[test]
+fn v3_distributed_two_nodes() {
+    use lucivy_core::sharded_handle::{ShardedHandle, RamShardStorage};
+    use lucivy_core::bm25_global::ExportableStats;
+
+    // Enough files that both halves actually contain source code: the first few
+    // hundred entries of the corpus are datasets and licences, and a green run on a
+    // corpus with 5 hits proves nothing.
+    let files = collect_files(3000);
+    if files.is_empty() { return; }
+    // Interleave rather than split in half, so neither node ends up with only the
+    // non-code prefix of the walk order.
+    let left: Vec<_> = files.iter().step_by(2).cloned().collect();
+    let right: Vec<_> = files.iter().skip(1).step_by(2).cloned().collect();
+    let (left, right) = (&left[..], &right[..]);
+
+    let build = |docs: &[(String, String)], shards: usize| -> ShardedHandle {
+        let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+            "fields": [
+                {"name": "path", "type": "text", "stored": true},
+                {"name": "content", "type": "text", "stored": true}
+            ],
+            "sfx_version": 3,
+            "shards": shards
+        })).unwrap();
+        let h = ShardedHandle::create_with_storage(
+            Box::new(RamShardStorage::new()), &config).unwrap();
+        let path_f = h.field("path").unwrap();
+        let content_f = h.field("content").unwrap();
+        for (i, (path, content)) in docs.iter().enumerate() {
+            let mut doc = ld_lucivy::LucivyDocument::new();
+            doc.add_text(path_f, path);
+            doc.add_text(content_f, content);
+            h.add_document(doc, i as u64).unwrap();
+        }
+        h.commit().unwrap();
+        h
+    };
+
+    let node_a = build(left, 2);
+    let node_b = build(right, 2);
+    let node_all = build(&files, 4);
+
+    for (value, strict) in [("function", true), ("uint64_t", false), ("std::unique_ptr", false)] {
+        let query = QueryConfig {
+            query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some(value.into()),
+            strict_separators: Some(strict),
+            ..Default::default()
+        };
+
+        // Coordinator: gather stats, round-trip through JSON like a real network hop.
+        let sa = node_a.export_stats(&query).unwrap();
+        let sb = node_b.export_stats(&query).unwrap();
+        let sa: ExportableStats = serde_json::from_str(&serde_json::to_string(&sa).unwrap()).unwrap();
+        let sb: ExportableStats = serde_json::from_str(&serde_json::to_string(&sb).unwrap()).unwrap();
+        let global = ExportableStats::merge(&[sa, sb]);
+
+        let ra = node_a.search_with_global_stats(&query, 10_000, &global, None).unwrap();
+        let rb = node_b.search_with_global_stats(&query, 10_000, &global, None).unwrap();
+        let distributed = ra.len() + rb.len();
+
+        let single = node_all.search(&query, 10_000, None).unwrap().len();
+
+        eprintln!("  {:<18} {:>6} — distributed {} (A {} + B {}) vs single {}",
+            value, if strict { "strict" } else { "relax" },
+            distributed, ra.len(), rb.len(), single);
+
+        assert_eq!(distributed, single,
+            "distributed v3 lost or invented documents for '{value}' \
+             (A={} B={} vs single={single})", ra.len(), rb.len());
+        assert!(global.total_num_docs >= distributed as u64,
+            "merged stats must cover at least the returned docs");
+    }
+}
