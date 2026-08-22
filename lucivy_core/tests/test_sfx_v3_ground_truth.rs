@@ -107,6 +107,12 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
         w.commit().unwrap();
     }
     handle.reader.reload().unwrap();
+    // Shape of what we are timing: 1 shard, single-thread search executor
+    // (Index::search_executor defaults to Executor::single_thread and nothing here
+    // overrides it), NoMergePolicy + a commit every 500 docs. Query timings below
+    // are therefore a SERIAL walk over every segment, with no parallelism at all.
+    eprintln!("  index shape: 1 shard, {} segments, single-thread executor",
+        handle.reader.searcher().segment_readers().len());
     handle
 }
 
@@ -1182,4 +1188,153 @@ fn baseline_fuzzy_regex() {
     }
 
     eprintln!("\n{pass}/{total} pass (baseline, no assert)");
+}
+
+/// PERF SHAPE — same index, same queries, only the search executor changes.
+///
+/// The ground truth test above runs 1 shard / 80 segments / single-thread, which
+/// makes its timings a SERIAL walk over every segment. This isolates how much of
+/// that is just missing parallelism, on the exact same searcher, so the numbers
+/// are comparable line by line. Report only, no assertions.
+///
+/// Run: cargo test --release -p lucivy-core --test test_sfx_v3_ground_truth
+///      perf_shape_executor -- --nocapture
+#[test]
+fn perf_shape_executor() {
+    use ld_lucivy::Executor;
+    use ld_lucivy::query::{Bm25StatisticsProvider, EnableScoring};
+
+    let files = collect_files(5000);
+    if files.is_empty() { return; }
+
+    let handle = create_v3_index(&files);
+    let searcher = handle.reader.searcher();
+    let n_seg = searcher.segment_readers().len();
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+
+    let single = Executor::single_thread();
+    let multi = Executor::multi_thread(threads, "gt-perf-").unwrap();
+
+    eprintln!("\n=== Executor shape: {n_seg} segments, {threads} threads ===\n");
+    eprintln!("{:<28} {:>7} {:>10} {:>10} {:>8}", "Query", "Mode", "1 thread", "N threads", "speedup");
+    eprintln!("{}", "-".repeat(68));
+
+    let queries: [(&str, bool); 6] = [
+        ("function", true), ("function", false),
+        ("include", true),
+        ("uint64_t", true), ("uint64_t", false),
+        ("std::unique_ptr", false),
+    ];
+
+    for (value, strict) in queries {
+        let run = |exec: &Executor| -> (u128, usize) {
+            let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
+            let config = QueryConfig {
+                query_type: "contains".into(),
+                field: Some("content".into()),
+                value: Some(value.into()),
+                strict_separators: Some(strict),
+                ..Default::default()
+            };
+            let query = query::build_query(&config, &handle.schema, &handle.index, Some(sink)).unwrap();
+            let collector = ld_lucivy::collector::TopDocs::with_limit(10_000).order_by_score();
+            let stats: Arc<dyn Bm25StatisticsProvider + Send + Sync> = Arc::new(searcher.clone());
+            let scoring = EnableScoring::enabled_from_statistics_provider(stats, &searcher);
+            let t = std::time::Instant::now();
+            let res = searcher.search_with_executor(&*query, &collector, exec, scoring).unwrap();
+            (t.elapsed().as_millis(), res.len())
+        };
+
+        let (ms1, n1) = run(&single);
+        let (msn, nn) = run(&multi);
+        assert_eq!(n1, nn, "executor changed the result set for '{value}'");
+        let speedup = if msn > 0 { ms1 as f64 / msn as f64 } else { f64::NAN };
+        eprintln!("{:<28} {:>7} {:>9}ms {:>9}ms {:>7.1}x",
+            value, if strict { "strict" } else { "relax" }, ms1, msn, speedup);
+    }
+    eprintln!();
+}
+
+/// PERF SHAPE — sharding, the only parallelism that actually applies here.
+///
+/// ContainsQueryV3::weight() calls prescan_segments, which walks every segment
+/// SERIALLY and does all the SFX work there. In search_with_executor, weight() runs
+/// BEFORE executor.map, so a multi-thread executor parallelises the phase that costs
+/// nothing (measured: 1.0x, see perf_shape_executor). Sharding is different: each
+/// shard is its own index with its own weight(), so the prescan itself splits.
+///
+/// Same corpus, same RAM storage, same queries. Report only, no assertions.
+///
+/// Run: cargo test --release -p lucivy-core --test test_sfx_v3_ground_truth
+///      perf_shape_sharded -- --nocapture
+#[test]
+fn perf_shape_sharded() {
+    use lucivy_core::sharded_handle::{ShardedHandle, RamShardStorage};
+
+    let files = collect_files(5000);
+    if files.is_empty() { return; }
+
+    let queries: [(&str, bool); 5] = [
+        ("function", true), ("function", false),
+        ("include", true),
+        ("uint64_t", false),
+        ("std::unique_ptr", false),
+    ];
+
+    eprintln!("\n=== Sharding shape: {} docs ===\n", files.len());
+    eprintln!("{:<22} {:>7} {:>9} {:>9} {:>9} {:>9}",
+        "Query", "Mode", "1 shard", "4 shards", "8 shards", "8sh gain");
+    eprintln!("{}", "-".repeat(70));
+
+    let build = |n: usize| -> ShardedHandle {
+        let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+            "fields": [
+                {"name": "path", "type": "text", "stored": true},
+                {"name": "content", "type": "text", "stored": true}
+            ],
+            "sfx_version": 3,
+            "shards": n
+        })).unwrap();
+        let h = ShardedHandle::create_with_storage(
+            Box::new(RamShardStorage::new()), &config).unwrap();
+        let path_f = h.field("path").unwrap();
+        let content_f = h.field("content").unwrap();
+        for (i, (path, content)) in files.iter().enumerate() {
+            let mut doc = ld_lucivy::LucivyDocument::new();
+            doc.add_text(path_f, path);
+            doc.add_text(content_f, content);
+            h.add_document(doc, i as u64).unwrap();
+            if (i + 1) % 500 == 0 { h.commit().unwrap(); }
+        }
+        h.commit().unwrap();
+        h
+    };
+
+    let t = std::time::Instant::now();
+    let h1 = build(1);
+    let h4 = build(4);
+    let h8 = build(8);
+    eprintln!("  (index build: {:.1}s total)\n", t.elapsed().as_secs_f64());
+
+    for (value, strict) in queries {
+        let run = |h: &ShardedHandle| -> (u128, usize) {
+            let config = QueryConfig {
+                query_type: "contains".into(),
+                field: Some("content".into()),
+                value: Some(value.into()),
+                strict_separators: Some(strict),
+                ..Default::default()
+            };
+            let t = std::time::Instant::now();
+            let res = h.search(&config, 10_000, None).unwrap();
+            (t.elapsed().as_millis(), res.len())
+        };
+        let (m1, n1) = run(&h1);
+        let (m4, _) = run(&h4);
+        let (m8, n8) = run(&h8);
+        let gain = if m8 > 0 { m1 as f64 / m8 as f64 } else { f64::NAN };
+        eprintln!("{:<22} {:>7} {:>8}ms {:>8}ms {:>8}ms {:>8.1}x  (hits {} / {})",
+            value, if strict { "strict" } else { "relax" }, m1, m4, m8, gain, n1, n8);
+    }
+    eprintln!();
 }

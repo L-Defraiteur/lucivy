@@ -80,7 +80,7 @@ pub use self::union::BufferedUnionScorer;
 #[cfg(test)]
 pub use self::vec_docset::VecDocSet;
 pub use self::weight::Weight;
-pub use self::contains_query_v3::ContainsQueryV3;
+pub use self::contains_query_v3::{ContainsQueryV3, run_sfx_v3_prescan};
 pub use self::fuzzy_query_v3::FuzzyQueryV3;
 pub use self::regex_query_v3::RegexQueryV3;
 

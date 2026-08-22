@@ -38,6 +38,82 @@ pub struct ContainsQueryV3 {
     global_doc_freq: u64,
 }
 
+/// Prescan one segment with the SFX v3 pipeline.
+///
+/// Free function on purpose: the sharded search DAG needs the exact same walk as
+/// ContainsQueryV3, and used to hand-roll its own — with the v1/v2 reader, which
+/// simply fails on an SFX3 file. `Query::sfx_prescan_params` exists so the DAG can
+/// run "the exact same parameters as the query itself, no duplication, no
+/// mismatch"; this is the other half of that promise.
+pub fn run_sfx_v3_prescan(
+seg_reader: &SegmentReader,
+sfx_bytes: &[u8],
+field: crate::schema::Field,
+query_text: &str,
+anchor_start: bool,
+exact_match: bool,
+strict_separators: bool,
+) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)> {
+    use crate::suffix_fst::file_v3::SfxFileReaderV3;
+    use crate::suffix_fst::briques::{orchestrator, context::BriquesContext};
+
+    let reader = SfxFileReaderV3::open(sfx_bytes).map_err(|e|
+        crate::LucivyError::SystemError(format!("open SFX3: {e}")))?;
+    let pr = crate::query::posting_resolver::build_resolver(seg_reader, field)?;
+
+    let load = |ext: &str| -> Option<Vec<u8>> {
+        seg_reader.sfx_index_file(ext, field)
+            .and_then(|fs| fs.read_bytes().ok())
+            .map(|b| b.as_ref().to_vec())
+    };
+    let posmap_bytes = load("posmap");
+    let bytemap_bytes = load("bytemap");
+    let wsp_bytes = load("word_sfxpost");
+    let sib_bytes = load("sibling_v3");
+    let tt_bytes = load("termtexts");
+
+    let debug_query = std::env::var("V3_DEBUG_QUERY").ok();
+    let do_debug = debug_query.as_deref() == Some(query_text);
+    let trace_id = if do_debug {
+        Some(crate::suffix_fst::briques::trace::trace_begin())
+    } else {
+        None
+    };
+
+    let ctx = BriquesContext {
+        reader: &reader,
+        resolver: &*pr,
+        filter_docs: None,
+        debug: do_debug,
+        trace_id,
+        posmap: posmap_bytes.as_ref().and_then(|b| crate::suffix_fst::posmap::PosMapReader::open(b)),
+        bytemap: bytemap_bytes.as_ref().and_then(|b| crate::suffix_fst::bytemap::ByteBitmapReader::open(b)),
+        word_sfxpost: wsp_bytes.as_ref().and_then(|b| crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(b)),
+        sibling_v3: sib_bytes.as_ref().and_then(|b| crate::suffix_fst::sibling_table::SiblingTableReader::open(b)),
+        termtexts: tt_bytes.as_ref().and_then(|b| crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open(b)),
+    };
+
+    let mut matches = orchestrator::contains_v3(
+        &ctx, query_text,
+        anchor_start, exact_match, strict_separators,
+    );
+
+    // A word_pos_map post-filter used to sit here. Its retain closure returned
+    // `true` from both branches — intra-word and inter-word alike — so it never
+    // rejected anything, while loading word_pos_map, next_word_map and
+    // chunk_word_map on every segment scan. It read as a safety net and was not
+    // one. Removed rather than left in place; if inter-word verification is
+    // wanted, it has to be written, not resurrected.
+
+    let highlights: Vec<(DocId, usize, usize)> = matches.iter()
+        .map(|m| (m.doc_id, m.byte_from as usize, m.byte_to as usize))
+        .collect();
+    let mut doc_ids: Vec<DocId> = matches.iter().map(|m| m.doc_id).collect();
+    doc_ids.sort_unstable();
+    Ok((count_tf_sorted(&doc_ids), highlights))
+}
+
+
 impl ContainsQueryV3 {
     pub fn new(raw_field: Field, query_text: String) -> Self {
         Self {
@@ -79,63 +155,10 @@ impl ContainsQueryV3 {
         seg_reader: &SegmentReader,
         sfx_bytes: &[u8],
     ) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)> {
-        use crate::suffix_fst::file_v3::SfxFileReaderV3;
-        use crate::suffix_fst::briques::{orchestrator, context::BriquesContext};
-
-        let reader = SfxFileReaderV3::open(sfx_bytes).map_err(|e|
-            crate::LucivyError::SystemError(format!("open SFX3: {e}")))?;
-        let pr = crate::query::posting_resolver::build_resolver(seg_reader, self.field)?;
-
-        let load = |ext: &str| -> Option<Vec<u8>> {
-            seg_reader.sfx_index_file(ext, self.field)
-                .and_then(|fs| fs.read_bytes().ok())
-                .map(|b| b.as_ref().to_vec())
-        };
-        let posmap_bytes = load("posmap");
-        let bytemap_bytes = load("bytemap");
-        let wsp_bytes = load("word_sfxpost");
-        let sib_bytes = load("sibling_v3");
-        let tt_bytes = load("termtexts");
-
-        let debug_query = std::env::var("V3_DEBUG_QUERY").ok();
-        let do_debug = debug_query.as_deref() == Some(&self.query_text);
-        let trace_id = if do_debug {
-            Some(crate::suffix_fst::briques::trace::trace_begin())
-        } else {
-            None
-        };
-
-        let ctx = BriquesContext {
-            reader: &reader,
-            resolver: &*pr,
-            filter_docs: None,
-            debug: do_debug,
-            trace_id,
-            posmap: posmap_bytes.as_ref().and_then(|b| crate::suffix_fst::posmap::PosMapReader::open(b)),
-            bytemap: bytemap_bytes.as_ref().and_then(|b| crate::suffix_fst::bytemap::ByteBitmapReader::open(b)),
-            word_sfxpost: wsp_bytes.as_ref().and_then(|b| crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(b)),
-            sibling_v3: sib_bytes.as_ref().and_then(|b| crate::suffix_fst::sibling_table::SiblingTableReader::open(b)),
-            termtexts: tt_bytes.as_ref().and_then(|b| crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open(b)),
-        };
-
-        let mut matches = orchestrator::contains_v3(
-            &ctx, &self.query_text,
+        run_sfx_v3_prescan(
+            seg_reader, sfx_bytes, self.field, &self.query_text,
             self.anchor_start, self.exact_match, self.strict_separators,
-        );
-
-        // A word_pos_map post-filter used to sit here. Its retain closure returned
-        // `true` from both branches — intra-word and inter-word alike — so it never
-        // rejected anything, while loading word_pos_map, next_word_map and
-        // chunk_word_map on every segment scan. It read as a safety net and was not
-        // one. Removed rather than left in place; if inter-word verification is
-        // wanted, it has to be written, not resurrected.
-
-        let highlights: Vec<(DocId, usize, usize)> = matches.iter()
-            .map(|m| (m.doc_id, m.byte_from as usize, m.byte_to as usize))
-            .collect();
-        let mut doc_ids: Vec<DocId> = matches.iter().map(|m| m.doc_id).collect();
-        doc_ids.sort_unstable();
-        Ok((count_tf_sorted(&doc_ids), highlights))
+        )
     }
 
     fn prescan_segment_v2(
@@ -181,24 +204,18 @@ impl ContainsQueryV3 {
     // ─── Weight creation ──────────────────────────────────────────────
 
     fn make_weight(&self, enable_scoring: EnableScoring) -> crate::Result<Box<dyn Weight>> {
+        // Read the global statistics provider, never the local searcher.
+        //
+        // Summing max_doc() over the searcher's own segments gives THIS shard's doc
+        // count, while global_doc_freq is aggregated across ALL shards by the search
+        // DAG. Mixing the two makes doc_freq exceed doc_count and trips the
+        // assertion in bm25::idf (observed: "1291 >= 1400" on a 4-shard v3 index).
+        // `stats` is exactly the abstraction for this — "same stats whether local
+        // multi-shard or distributed" — and the v2 path has always used it.
         let (scoring_enabled, global_num_docs, global_num_tokens) = match enable_scoring {
-            EnableScoring::Enabled { searcher, .. } => {
-                let schema = searcher.schema();
-                let (nd, nt) = schema.fields()
-                    .find(|(f, _)| *f == self.field)
-                    .map(|_| {
-                        let searcher_ref = &searcher;
-                        let mut nd = 0u64;
-                        let mut nt = 0u64;
-                        for sr in searcher_ref.segment_readers() {
-                            nd += sr.max_doc() as u64;
-                            if let Ok(inv) = sr.inverted_index(self.field) {
-                                nt += inv.total_num_tokens();
-                            }
-                        }
-                        (nd.max(1), nt)
-                    })
-                    .unwrap_or((1, 0));
+            EnableScoring::Enabled { stats, .. } => {
+                let nd = stats.total_num_docs().unwrap_or(0).max(1);
+                let nt = stats.total_num_tokens(self.field).unwrap_or(0);
                 (true, nd, nt)
             }
             _ => (false, 0, 0),

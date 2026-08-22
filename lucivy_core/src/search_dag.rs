@@ -139,9 +139,10 @@ impl Node for PrescanShardNode {
 
         use ld_lucivy::query::{
             run_sfx_walk, tokenize_query, CachedSfxResult, CachedRegexResult,
-            RawPostingEntry, build_resolver, run_regex_prescan,
+            RawPostingEntry, build_resolver, run_regex_prescan, run_sfx_v3_prescan,
         };
         use ld_lucivy::suffix_fst::file::SfxFileReader;
+        use ld_lucivy::suffix_fst::section_file::detect_sfx_version;
 
         let searcher = self.shard.reader.searcher();
         let mut sfx_cache = HashMap::new();
@@ -158,30 +159,45 @@ impl Node for PrescanShardNode {
                 };
                 let sfx_bytes = sfx_data.read_bytes()
                     .map_err(|e| format!("read sfx: {e}"))?;
-                let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
-                    .map_err(|e| format!("open sfx: {e}"))?;
 
-                let pr = build_resolver(seg_reader, param.field)
-                    .map_err(|e| format!("resolver: {e}"))?;
-                let resolver = |ord: u64| -> Vec<RawPostingEntry> {
-                    pr.resolve(ord).into_iter().map(|e| {
-                        RawPostingEntry {
-                            doc_id: e.doc_id, token_index: e.position,
-                            byte_from: e.byte_from, byte_to: e.byte_to,
-                        }
-                    }).collect()
+                // Dispatch on the on-disk format, exactly like
+                // ContainsQueryV3::prescan_segments does. This node used to open
+                // every .sfx with the v1/v2 reader unconditionally, so any v3 index
+                // reached through ShardedHandle failed outright on "invalid .sfx
+                // magic bytes" — v3 + sharding had simply never been wired.
+                let version = detect_sfx_version(sfx_bytes.as_ref()).unwrap_or(1);
+                let (doc_tf, highlights) = if version == 3 {
+                    run_sfx_v3_prescan(
+                        seg_reader, sfx_bytes.as_ref(), param.field,
+                        &param.query_text, param.anchor_start,
+                        param.exact_match, param.strict_separators,
+                    ).map_err(|e| format!("v3 prescan: {e}"))?
+                } else {
+                    let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
+                        .map_err(|e| format!("open sfx: {e}"))?;
+
+                    let pr = build_resolver(seg_reader, param.field)
+                        .map_err(|e| format!("resolver: {e}"))?;
+                    let resolver = |ord: u64| -> Vec<RawPostingEntry> {
+                        pr.resolve(ord).into_iter().map(|e| {
+                            RawPostingEntry {
+                                doc_id: e.doc_id, token_index: e.position,
+                                byte_from: e.byte_from, byte_to: e.byte_to,
+                            }
+                        }).collect()
+                    };
+
+                    let (tokens, seps) = tokenize_query(&param.query_text);
+                    let seg_str = format!("{:?}", seg_reader.segment_id());
+                    run_sfx_walk(
+                        &sfx_reader, &resolver, &param.query_text,
+                        &tokens, &seps,
+                        param.anchor_start, param.exact_match,
+                        param.continuation, param.strict_separators,
+                        Some(&seg_str),
+                        None,
+                    )
                 };
-
-                let (tokens, seps) = tokenize_query(&param.query_text);
-                let seg_str = format!("{:?}", seg_reader.segment_id());
-                let (doc_tf, highlights) = run_sfx_walk(
-                    &sfx_reader, &resolver, &param.query_text,
-                    &tokens, &seps,
-                    param.anchor_start, param.exact_match,
-                    param.continuation, param.strict_separators,
-                    Some(&seg_str),
-                    None,
-                );
 
                 let freq_key = format!("{}:{}", param.field.field_id(), param.query_text);
                 *sfx_freqs.entry(freq_key.clone()).or_insert(0) += doc_tf.len() as u64;
