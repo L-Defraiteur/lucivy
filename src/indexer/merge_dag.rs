@@ -27,7 +27,7 @@ use crate::indexer::delete_queue::DeleteCursor;
 use crate::postings::InvertedIndexSerializer;
 use crate::schema::Field;
 use crate::store::StoreWriter;
-use crate::{DocAddress, Opstamp};
+use crate::{DocAddress, Opstamp, SegmentReader};
 
 // ---------------------------------------------------------------------------
 // Shared merge context (read-only, Arc'd)
@@ -214,6 +214,82 @@ struct SfxNode {
     ctx: Arc<MergeContext>,
 }
 
+
+impl SfxNode {
+    /// Re-run the v3 collector over the merged document order.
+    ///
+    /// `doc_mapping[new_doc_id] = (source segment, source doc)`, so walking it in
+    /// order feeds the collector exactly the documents the merged segment will
+    /// hold, in exactly its doc_id order — the same input the initial build path
+    /// receives, hence the same output.
+    fn rebuild_sfx_v3(
+        readers: &[SegmentReader],
+        doc_mapping: &[DocAddress],
+        field: Field,
+    ) -> crate::Result<super::sfx_dag_v3::SfxBuildOutputV3> {
+        use crate::suffix_fst::collector_v3::SfxCollectorV3;
+
+        let store_readers: Vec<_> = readers.iter()
+            .map(|r| r.get_store_reader(1))
+            .collect::<std::io::Result<Vec<_>>>()?;
+
+        let mut collector = SfxCollectorV3::new();
+        for addr in doc_mapping {
+            collector.begin_doc();
+            let store = &store_readers[addr.segment_ord as usize];
+            if let Ok(doc) = store.get::<crate::LucivyDocument>(addr.doc_id) {
+                use crate::schema::document::{Document, Value};
+                for (f, v) in doc.field_values() {
+                    if f == field {
+                        if let Some(text) = v.as_value().as_str() {
+                            collector.add_value(text);
+                        }
+                    }
+                }
+            }
+            collector.end_doc();
+        }
+
+        let data = collector.into_data();
+        let mut dag = super::sfx_dag_v3::build_initial_sfx_dag_v3(data);
+        let mut result = luciole::execute_dag(&mut dag, None)
+            .map_err(|e| crate::LucivyError::SystemError(format!("sfx v3 merge DAG: {e}")))?;
+        result.take_output::<super::sfx_dag_v3::SfxBuildOutputV3>("assemble", "output")
+            .ok_or_else(|| crate::LucivyError::SystemError(
+                "sfx v3 merge DAG: missing output".into()))
+    }
+
+    /// Write a v3 build output into the merged segment.
+    ///
+    /// Same file set as the initial build path in segment_writer, so a merged
+    /// segment is indistinguishable from a freshly indexed one.
+    fn write_sfx_v3(
+        segment: &mut crate::index::Segment,
+        field: Field,
+        output: &super::sfx_dag_v3::SfxBuildOutputV3,
+    ) -> crate::Result<()> {
+        use common::TerminatingWrite;
+        let field_id = field.field_id();
+
+        let mut write_file = |ext: &str, data: &[u8]| -> crate::Result<()> {
+            let mut w = segment.open_write_custom(&format!("{field_id}.{ext}"))?;
+            std::io::Write::write_all(&mut w, data)?;
+            w.terminate()?;
+            Ok(())
+        };
+
+        write_file("sfx", &output.sfx)?;
+        if let Some(ref sfxpost) = output.sfxpost {
+            write_file("sfxpost", sfxpost)?;
+        }
+        write_file("termtexts", &output.termtexts)?;
+        for (ext, data) in &output.registry_files {
+            write_file(ext, data)?;
+        }
+        Ok(())
+    }
+}
+
 impl Node for SfxNode {
     fn node_type(&self) -> &'static str { "sfx" }
     fn inputs(&self) -> Vec<PortDef> {
@@ -258,27 +334,51 @@ impl Node for SfxNode {
             .map(|(field, _)| field)
             .collect();
 
-        // SFX v3 has no merge path. The sub-DAG below is the v2 one: its
-        // CollectTokensNode reads the inverted index term dictionary, which in v3
-        // holds a different alphabet than the SFX ordinal space (analyzer tokens vs
-        // extended/word-stripped texts). Running it on v3 segments produces a
-        // well-formed v2 segment whose postings point at the wrong terms — silently,
-        // since every self-consistency check still passes. Refuse instead.
         let sfx_version = segment.index().settings().sfx_version;
-        if sfx_version >= 3 && !sfx_fields.is_empty() {
-            return Err(format!(
-                "sfx merge not supported for sfx_version={sfx_version}: the v2 merge DAG \
-                 would corrupt the v3 ordinal space (see docs/22-aout-2026-19h47/\
-                 02-verites-dichotomiques.md §1). Disable merges or reindex with \
-                 sfx_version=2 until a v3 merge path exists."
-            ));
-        }
 
         let reverse_doc_map = super::sfx_merge::build_reverse_doc_map(
             &doc_mapping, readers.len(),
         );
 
         let mut sfx_field_ids = Vec::new();
+
+        // v3 merges by RE-INDEXING, not by remapping.
+        //
+        // The v2 sub-DAG below cannot be reused: its CollectTokensNode reads the
+        // inverted index term dictionary, which in v3 holds a different alphabet
+        // than the SFX ordinal space (analyzer tokens vs extended and word-stripped
+        // texts). Running it on v3 segments yields a well-formed v2 segment whose
+        // postings point at the wrong terms, silently, because every
+        // self-consistency check still passes.
+        //
+        // Remapping instead would mean re-deriving word identity and the inter-word
+        // overlap, neither of which the segment persists — a second implementation
+        // of the collector's invariants, uncoupled from it by any type. Feeding the
+        // source text back through the collector keeps ONE code path and gets the
+        // invariants for free. It costs a full re-tokenisation and requires the
+        // field to be STORED.
+        if sfx_version >= 3 {
+            let mut segment = segment;
+            for &field in &sfx_fields {
+                let (_, any_has_sfx) = super::sfx_merge::load_sfx_data(&readers, field);
+                if !any_has_sfx { continue; }
+
+                let output = Self::rebuild_sfx_v3(&readers, &doc_mapping, field)
+                    .map_err(|e| format!("sfx v3 merge field {}: {e}", field.field_id()))?;
+                Self::write_sfx_v3(&mut segment, field, &output)
+                    .map_err(|e| format!("sfx v3 write field {}: {e}", field.field_id()))?;
+                sfx_field_ids.push(field.field_id());
+            }
+
+            nctx.metric("sfx_fields", sfx_field_ids.len() as f64);
+            nctx.metric("sfx_v3_reindexed_docs", doc_mapping.len() as f64);
+            nctx.set_output("segment", PortValue::new(segment));
+            nctx.set_output("sfx_field_ids", PortValue::new(sfx_field_ids));
+            nctx.set_output("postings_ser", postings_ser);
+            nctx.set_output("store_writer", store_writer);
+            nctx.set_output("ff_write", ff_write);
+            return Ok(());
+        }
 
         for &field in &sfx_fields {
             let (sfx_data, any_has_sfx) = super::sfx_merge::load_sfx_data(&readers, field);
