@@ -18,6 +18,7 @@ use crate::suffix_fst::file_v3::SfxFileReaderV3;
 use super::context::BriquesContext;
 use super::fst_walk::{self, FstCandidateV3, TokenChainV3};
 use super::resolve::{self, MatchV3};
+use super::profile;
 
 // ─── find_literal_v3 ──────────────────────────────────────────────────────
 
@@ -42,9 +43,11 @@ pub fn find_literal_v3(
     let dbg = std::env::var("V3_DIAG_LITERAL").ok().as_deref() == Some(query);
 
     // ── Single-token matches (all partitions) ────────────────────────
+    let _t = profile::Timer::start();
     let candidates = fst_walk::fst_candidates_v3(ctx.reader, query, anchor_start, strict_separators);
     let query_len = query.len() as u32;
     let single = resolve::resolve_single_v3(&candidates, ctx.resolver, ctx.filter_docs, query_len);
+    _t.stop(|c| &c.ns_single);
     ctx.trace_msg(&format!("single_token candidates={} matches={}", candidates.len(), single.len()));
     if ctx.trace_id.is_some() {
         if candidates.len() < 50 {
@@ -76,11 +79,14 @@ pub fn find_literal_v3(
 
     // ── Chunk chains (0x00 + 0x01) — strict adjacency ────────────────
     {
+        let _t = profile::Timer::start();
         let mut chains = fst_walk::cross_chunk_chain_v3(ctx.reader, query);
+        _t.stop(|c| &c.ns_chunk_walk);
 
         // Sibling chain supplement: if sibling table is available, use it
         // for continuations. Also catches first splits missed by falling walk.
         if ctx.has_sibling_chains() {
+            let _t = profile::Timer::start();
             let mut all_splits = fst_walk::falling_walk_chunks(ctx.reader, query);
             let extra = fst_walk::splits_from_fst_candidates(&candidates, query.to_lowercase().len());
             // Only chunk candidates (sti-based, non-word-stripped)
@@ -94,6 +100,7 @@ pub fn find_literal_v3(
                 strict_separators, ctx.trace_id,
             );
             chains.extend(sib_chains);
+            _t.stop(|c| &c.ns_chunk_sibling);
         }
 
         let chains: Vec<_> = if anchor_start {
@@ -102,7 +109,10 @@ pub fn find_literal_v3(
             chains
         };
         ctx.trace_msg(&format!("chunk_chains falling_walk={}", chains.len()));
+        profile::bump(|c| &c.n_chunk_chains, chains.len() as u64);
+        let _t = profile::Timer::start();
         let cross = resolve::resolve_chains_v3(&chains, ctx.resolver, ctx.filter_docs);
+        _t.stop(|c| &c.ns_chunk_resolve);
         ctx.trace_msg(&format!("chunk_resolved matches={}", cross.len()));
         if dbg {
             eprintln!("[lit]   chunk_chains={} -> matches={}", chains.len(), cross.len());
@@ -125,11 +135,14 @@ pub fn find_literal_v3(
         let bm = ctx.require_bytemap();
         let wsp = ctx.require_word_sfxpost();
 
+        let _t = profile::Timer::start();
         let mut chains = fst_walk::cross_word_chain_v3(ctx.reader, query);
+        _t.stop(|c| &c.ns_word_walk);
         ctx.trace_msg(&format!("word_falling_walk chains={}", chains.len()));
 
         // Sibling chain supplement for word pipeline
         if ctx.has_sibling_chains() {
+            let _t = profile::Timer::start();
             let mut all_splits = fst_walk::falling_walk_words(ctx.reader, query);
             let query_len = query.to_lowercase().len();
             let extra = fst_walk::splits_from_fst_candidates(&candidates, query_len);
@@ -147,6 +160,7 @@ pub fn find_literal_v3(
             );
             ctx.trace_msg(&format!("word_sibling_chains count={}", sib_chains.len()));
             chains.extend(sib_chains);
+            _t.stop(|c| &c.ns_word_sibling);
         }
 
         let chains: Vec<_> = if anchor_start {
@@ -155,7 +169,10 @@ pub fn find_literal_v3(
             chains
         };
         ctx.trace_msg(&format!("word_chains_total count={}", chains.len()));
+        profile::bump(|c| &c.n_word_chains, chains.len() as u64);
+        let _t = profile::Timer::start();
         let cross = resolve::resolve_word_chains_v3(&chains, wsp, ctx.resolver, ctx.filter_docs, pm, bm);
+        _t.stop(|c| &c.ns_word_resolve);
         ctx.trace_msg(&format!("word_resolved matches={}", cross.len()));
         results.extend(cross);
     }

@@ -13,5 +13,6 @@ pub mod dag_nodes;
 pub mod dag_builder;
 pub mod orchestrator;
 pub mod regex_v3;
+pub mod profile;
 #[cfg(test)]
 mod integration_tests;

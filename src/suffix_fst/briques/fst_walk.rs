@@ -405,10 +405,25 @@ fn build_chains_from_splits(
     let mut chains = Vec::new();
     let query_lower = query.to_lowercase();
 
+    // Every remainder this loop ever walks is a suffix of `query_lower`: the
+    // first one is `query_lower[safe_start..]`, and each step only trims from
+    // the front. A suffix is identified uniquely by where it starts, so the byte
+    // offset is a complete cache key — and there are at most `query_lower.len()`
+    // of them, however many splits come in.
+    //
+    // Without this, each of the tens of thousands of splits re-walked the FST
+    // over the same handful of suffixes: measured at 15x redundancy on
+    // `kmalloc`, 25x on `uint64_t`, 78x on `include`, for a stage that was
+    // 78-96% of query time.
+    let mut fst_memo: FnvHashMap<usize, Vec<u64>> = FnvHashMap::default();
+    let mut walk_memo: FnvHashMap<usize, Option<(Vec<u64>, usize, usize)>> =
+        FnvHashMap::default();
+
+    super::profile::bump(|c| &c.n_bcfs_splits, splits.len() as u64);
+
     for split in splits {
         let safe_start = snap_to_char_boundary(&query_lower, split.remainder_start);
-        let remainder = &query_lower[safe_start..];
-        if remainder.is_empty() {
+        if safe_start >= query_lower.len() {
             chains.push(TokenChainV3 {
                 ordinals: vec![vec![split.parent.raw_ordinal]],
                 first_sti: split.parent.sti,
@@ -419,55 +434,75 @@ fn build_chains_from_splits(
         }
 
         let mut positions: Vec<Vec<u64>> = vec![vec![split.parent.raw_ordinal]];
-        let mut rem = remainder.to_string();
+        let mut rem_off = safe_start;
         let mut depth = 0;
         let mut last_consumed = split.query_consumed;
 
-        while !rem.is_empty() && depth < MAX_CHAIN_DEPTH {
-            let cands = fst_candidates_v3(reader, &rem, true, strict_sep_for_candidates);
-            if !cands.is_empty() {
-                let mut unique_ords: Vec<u64> = cands.iter().map(|c| c.raw_ordinal).collect();
+        while rem_off < query_lower.len() && depth < MAX_CHAIN_DEPTH {
+            let rem = &query_lower[rem_off..];
+
+            super::profile::bump(|c| &c.n_bcfs_fst_reqs, 1);
+            if !fst_memo.contains_key(&rem_off) {
+                super::profile::bump(|c| &c.n_bcfs_fst_calls, 1);
+                let cands = fst_candidates_v3(reader, rem, true, strict_sep_for_candidates);
+                let mut unique_ords: Vec<u64> =
+                    cands.iter().map(|c| c.raw_ordinal).collect();
                 unique_ords.sort_unstable();
                 unique_ords.dedup();
-                positions.push(unique_ords);
+                fst_memo.insert(rem_off, unique_ords);
+            }
+            let hit = &fst_memo[&rem_off];
+            if !hit.is_empty() {
+                positions.push(hit.clone());
                 // This position swallows the whole remainder.
                 last_consumed = rem.len();
-                rem.clear();
+                rem_off = query_lower.len();
                 break;
             }
 
-            let sub_splits = walk_fn(reader, &rem);
-            if sub_splits.is_empty() {
-                break;
+            super::profile::bump(|c| &c.n_bcfs_walk_reqs, 1);
+            if !walk_memo.contains_key(&rem_off) {
+                super::profile::bump(|c| &c.n_bcfs_walk_calls, 1);
+                let sub_splits = walk_fn(reader, rem);
+                let entry = if sub_splits.is_empty() {
+                    None
+                } else {
+                    let mut unique_ords: Vec<u64> = if filter_best_consumed {
+                        // Chunk pipeline: marker entries create multi-parent nodes at
+                        // different FST positions → different consumed values. Only keep
+                        // ordinals from the best consumed to avoid mixing chain positions.
+                        let best_consumed = sub_splits[0].query_consumed;
+                        sub_splits.iter()
+                            .filter(|s| s.query_consumed == best_consumed)
+                            .map(|s| s.parent.raw_ordinal)
+                            .collect()
+                    } else {
+                        // Word pipeline: word-stripped entries have unique prefixes,
+                        // different consumed values are rare. Collect all.
+                        sub_splits.iter()
+                            .map(|s| s.parent.raw_ordinal)
+                            .collect()
+                    };
+                    unique_ords.sort_unstable();
+                    unique_ords.dedup();
+                    let best = &sub_splits[0];
+                    Some((unique_ords, best.query_consumed, best.remainder_start))
+                };
+                walk_memo.insert(rem_off, entry);
             }
-            let mut unique_ords: Vec<u64> = if filter_best_consumed {
-                // Chunk pipeline: marker entries create multi-parent nodes at
-                // different FST positions → different consumed values. Only keep
-                // ordinals from the best consumed to avoid mixing chain positions.
-                let best_consumed = sub_splits[0].query_consumed;
-                sub_splits.iter()
-                    .filter(|s| s.query_consumed == best_consumed)
-                    .map(|s| s.parent.raw_ordinal)
-                    .collect()
-            } else {
-                // Word pipeline: word-stripped entries have unique prefixes,
-                // different consumed values are rare. Collect all.
-                sub_splits.iter()
-                    .map(|s| s.parent.raw_ordinal)
-                    .collect()
+            let Some((unique_ords, best_consumed, best_rem_start)) =
+                walk_memo[&rem_off].clone()
+            else {
+                break;
             };
-            unique_ords.sort_unstable();
-            unique_ords.dedup();
-            positions.push(unique_ords);
 
-            let best = &sub_splits[0];
-            last_consumed = best.query_consumed;
-            let safe = snap_to_char_boundary(&rem, best.remainder_start);
-            rem = rem[safe..].to_string();
+            positions.push(unique_ords);
+            last_consumed = best_consumed;
+            rem_off += snap_to_char_boundary(rem, best_rem_start);
             depth += 1;
         }
 
-        if rem.is_empty() {
+        if rem_off >= query_lower.len() {
             chains.push(TokenChainV3 {
                 ordinals: positions,
                 first_sti: split.parent.sti,
@@ -476,6 +511,8 @@ fn build_chains_from_splits(
             });
         }
     }
+
+    super::profile::bump(|c| &c.n_bcfs_distinct_rem, fst_memo.len() as u64);
 
     chains
 }
@@ -515,6 +552,7 @@ pub fn cross_token_chain_v3(
 
 // ─── Sibling-based chain building ─────────────────────────────────────────
 
+use fnv::FnvHashMap;
 use crate::suffix_fst::sibling_table::SiblingTableReader;
 use crate::suffix_fst::termtexts_v3::TermTextsReaderV3;
 

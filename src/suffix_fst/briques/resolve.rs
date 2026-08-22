@@ -305,10 +305,16 @@ pub fn resolve_word_chains_v3(
                 }
             }
 
+            super::profile::bump(|c| &c.n_word_entries, entries.len() as u64);
+
             let mut new_active: Vec<(DocId, u32, u32, u32, u32, u64)> = Vec::new();
 
             for &(doc_id, prev_last_pos, byte_from_first, _, _, _) in &active {
                 for (e, ord) in &entries {
+                    // Counted per iteration: the inner loop breaks on the first
+                    // valid entry, so active.len() * entries.len() would be an
+                    // upper bound, not the scan actually performed.
+                    super::profile::bump(|c| &c.n_word_pairs, 1);
                     if e.doc_id != doc_id { continue; }
                     // Use first_position of the next word for adjacency check
                     // against last_position of the previous word
@@ -511,7 +517,12 @@ fn intermediates_are_pure_sep(
         (0x80, 0xFF), // non-ASCII bytes → content (emoji, CJK, accented, etc.)
     ];
 
+    super::profile::bump(|c| &c.n_puresep_calls, 1);
+
     for pos in pos_from..pos_to {
+        // Counted inside the loop, not from the range: the loop bails on the
+        // first content byte, so the range width measures intent, not work.
+        super::profile::bump(|c| &c.n_puresep_positions, 1);
         let Some(ord) = posmap.ordinal_at(doc_id, pos) else {
             return false; // Can't verify → reject
         };

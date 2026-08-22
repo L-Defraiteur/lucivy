@@ -16,6 +16,7 @@ use std::io::Write;
 use std::sync::Arc;
 use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD};
 use lucivy_core::query::{self, QueryConfig, SchemaConfig};
+use ld_lucivy::suffix_fst::briques::profile;
 
 const DEFAULT_REPO_PATH: &str = "/tmp/rag3db-bench";
 
@@ -517,19 +518,28 @@ fn v3_ground_truth_contains() {
 
     for q in &queries {
         let mode_label = if q.strict_sep { "strict" } else { "relax" };
-        let t = std::time::Instant::now();
-
+        // Time the two independently. They used to share one timer, so every
+        // reported latency silently carried a full grep over the corpus — a
+        // constant that dilutes any engine-side comparison.
+        let t_grep = std::time::Instant::now();
         let grep_set = if q.strict_sep {
             grep_docs_strict(&files, q.text)
         } else {
             grep_docs_relaxed(&files, q.text)
         };
+        let grep_ms = t_grep.elapsed().as_secs_f64() * 1000.0;
+
+        profile::reset();
+        let t = std::time::Instant::now();
         let v3_result = search_v3(&handle, &files, q.text, q.strict_sep);
         let ms = t.elapsed().as_secs_f64() * 1000.0;
 
         let status = if v3_result.doc_indices == grep_set { "OK" } else { "FAIL" };
-        eprintln!("{:<35} {:>5} {:>8} {:>8} {:>6} ({:.1}ms)",
-            q.text, mode_label, grep_set.len(), v3_result.doc_indices.len(), status, ms);
+        eprintln!("{:<35} {:>5} {:>8} {:>8} {:>6} ({:.1}ms v3, {:.1}ms grep)",
+            q.text, mode_label, grep_set.len(), v3_result.doc_indices.len(), status, ms, grep_ms);
+        if std::env::var("V3_PROFILE").is_ok() {
+            eprint!("{}", profile::dump());
+        }
 
         write_report(&mut report, q.text, mode_label, &files, &grep_set, &v3_result);
 
