@@ -102,22 +102,30 @@ impl Node for FlushNode {
 }
 
 // ---------------------------------------------------------------------------
-// PrescanShardNode — SFX walk on one shard's segments (parallel per shard)
+// PrescanShardNode — SFX walk on ONE segment (one node per shard x segment)
 // ---------------------------------------------------------------------------
+//
+// This used to be one node per shard, each looping over that shard's segments
+// sequentially. Because the loop ran inside an actor handler, nothing underneath
+// it could fan out again: execute_dag deliberately runs nested DAGs inline to
+// avoid pool starvation, so a shard's segments were always walked one by one.
+// Flattening the fan-out to (shard, segment) puts every unit of prescan work at
+// the same DAG level, so the scheduler parallelises all of it at once and the two
+// levers — sharding and per-segment parallelism — finally compose.
 
 pub(crate) struct PrescanShardNode {
-    shard: Arc<LucivyHandle>,
+    segments: Vec<ld_lucivy::index::SegmentReader>,
     sfx_prescan_params: Vec<ld_lucivy::query::SfxPrescanParam>,
     regex_prescan_params: Vec<ld_lucivy::query::RegexPrescanParam>,
 }
 
 impl PrescanShardNode {
     pub fn new(
-        shard: Arc<LucivyHandle>,
+        segments: Vec<ld_lucivy::index::SegmentReader>,
         sfx_prescan_params: Vec<ld_lucivy::query::SfxPrescanParam>,
         regex_prescan_params: Vec<ld_lucivy::query::RegexPrescanParam>,
     ) -> Self {
-        Self { shard, sfx_prescan_params, regex_prescan_params }
+        Self { segments, sfx_prescan_params, regex_prescan_params }
     }
 }
 
@@ -144,14 +152,13 @@ impl Node for PrescanShardNode {
         use ld_lucivy::suffix_fst::file::SfxFileReader;
         use ld_lucivy::suffix_fst::section_file::detect_sfx_version;
 
-        let searcher = self.shard.reader.searcher();
         let mut sfx_cache = HashMap::new();
         let mut sfx_freqs: HashMap<String, u64> = HashMap::new();
         let mut regex_cache = HashMap::new();
         let mut regex_freqs: HashMap<String, u64> = HashMap::new();
 
         // --- SFX prescan (existing logic, unchanged) ---
-        for seg_reader in searcher.segment_readers() {
+        for seg_reader in &self.segments {
             for param in &self.sfx_prescan_params {
                 let sfx_data = match seg_reader.sfx_file(param.field) {
                     Some(d) => d,
@@ -210,7 +217,7 @@ impl Node for PrescanShardNode {
         // --- Regex prescan (NEW) ---
         // DFA compiled inside run_regex_prescan per segment.
         for param in &self.regex_prescan_params {
-            for seg_reader in searcher.segment_readers() {
+            for seg_reader in &self.segments {
                 let (doc_tf, highlights) = run_regex_prescan(
                     seg_reader, param.field, &param.pattern, param.anchor_start,
                 ).map_err(|e| format!("regex prescan: {e}"))?;
@@ -237,12 +244,13 @@ impl Node for PrescanShardNode {
 // ---------------------------------------------------------------------------
 
 pub(crate) struct MergePrescanNode {
+    /// Number of prescan nodes to gather — one per (shard, segment) pair.
     num_shards: usize,
 }
 
 impl MergePrescanNode {
-    pub fn new(num_shards: usize) -> Self {
-        Self { num_shards }
+    pub fn new(num_prescan_nodes: usize) -> Self {
+        Self { num_shards: num_prescan_nodes }
     }
 }
 
@@ -541,10 +549,26 @@ pub(crate) fn build_search_dag(
     // N>1: prescan_0..N ∥ → merge_prescan → build_weight
     // N=1: prescan_0 ──────────────────────→ build_weight  (no merge)
 
-    for i in 0..num_shards {
+    // One prescan node per (shard, segment), not per shard. Flat fan-out means the
+    // scheduler runs every segment concurrently; grouping by shard would force each
+    // shard's segments to be walked sequentially inside an actor handler.
+    let mut prescan_units: Vec<Vec<ld_lucivy::index::SegmentReader>> = Vec::new();
+    for shard in shards.iter() {
+        let searcher = shard.reader.searcher();
+        for seg in searcher.segment_readers() {
+            prescan_units.push(vec![seg.clone()]);
+        }
+    }
+    // No segment anywhere (empty index): keep one node so the wiring below holds.
+    if prescan_units.is_empty() {
+        prescan_units.push(Vec::new());
+    }
+    let num_prescan = prescan_units.len();
+
+    for (i, segments) in prescan_units.into_iter().enumerate() {
         let node_name = format!("prescan_{i}");
         dag.add_node(&node_name, PrescanShardNode::new(
-            shards[i].clone(),
+            segments,
             sfx_prescan_params.clone(),
             regex_prescan_params.clone(),
         ));
@@ -554,9 +578,9 @@ pub(crate) fn build_search_dag(
     dag.add_node("build_weight", BuildWeightNode::new(shards.to_vec(), query));
     dag.connect("needs_prescan", "else", "build_weight", "trigger")?;
 
-    if is_multi {
-        dag.add_node("merge_prescan", MergePrescanNode::new(num_shards));
-        for i in 0..num_shards {
+    if num_prescan > 1 {
+        dag.add_node("merge_prescan", MergePrescanNode::new(num_prescan));
+        for i in 0..num_prescan {
             dag.connect(
                 &format!("prescan_{i}"), "prescan",
                 "merge_prescan", &format!("prescan_{i}"),
