@@ -109,7 +109,13 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
     {
         let mut guard = handle.writer.lock().unwrap();
         let w = guard.as_mut().unwrap();
-        w.set_merge_policy(Box::new(ld_lucivy::indexer::NoMergePolicy));
+        // NoMergePolicy by default: it keeps the corpus split into many small
+        // segments — the worst case for per-segment cost, and the only shape v3
+        // could take while merges were refused. `V3_MERGE=1` keeps the handle's
+        // default LogMergePolicy instead, which is what a real index looks like.
+        if std::env::var("V3_MERGE").is_err() {
+            w.set_merge_policy(Box::new(ld_lucivy::indexer::NoMergePolicy));
+        }
         for (i, (path, content)) in files.iter().enumerate() {
             let mut doc = ld_lucivy::LucivyDocument::new();
             doc.add_u64(nid_f, i as u64);
@@ -123,6 +129,58 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
         }
         w.commit().unwrap();
     }
+
+    // Drive the merges ourselves, in bounded tiers.
+    //
+    // Nothing consults the merge policy automatically: segment_updater_actor
+    // defers merges to an explicit drain_merges()/start_merge() "to avoid thread
+    // starvation during commit", and drain_merges only WAITS for merges already
+    // in flight. So an index built through LucivyHandle never fuses anything —
+    // which is why every measurement so far ran on 800 segments.
+    //
+    // Merging all of them at once is the one thing no policy would do, and it
+    // showed: 18 GB re-indexing, 30 GB remapping. max_docs_before_merge exists to
+    // bound exactly that, so respect it and merge in groups.
+    if std::env::var("V3_MERGE").is_ok() {
+        const GROUP: usize = 8;
+        let t = std::time::Instant::now();
+        handle.reader.reload().unwrap();
+        let before = handle.reader.searcher().segment_readers().len();
+
+        let mut round = 0;
+        loop {
+            let ids = handle.index.searchable_segment_ids().unwrap();
+            if ids.len() <= 1 || round > 8 { break; }
+            let groups: Vec<Vec<_>> = ids.chunks(GROUP)
+                .filter(|c| c.len() > 1)
+                .map(|c| c.to_vec())
+                .collect();
+            if groups.is_empty() { break; }
+            {
+                let mut guard = handle.writer.lock().unwrap();
+                let w = guard.as_mut().unwrap();
+                for g in &groups {
+                    w.merge(g).unwrap();
+                }
+                w.commit().unwrap();
+            }
+            handle.reader.reload().unwrap();
+            let now = handle.reader.searcher().segment_readers().len();
+            eprintln!("    merge round {round}: -> {now} segments ({:.1}s)",
+                t.elapsed().as_secs_f64());
+            round += 1;
+        }
+
+        {
+            let mut guard = handle.writer.lock().unwrap();
+            if let Some(w) = guard.take() { w.wait_merging_threads().unwrap(); }
+        }
+        handle.reader.reload().unwrap();
+        let after = handle.reader.searcher().segment_readers().len();
+        eprintln!("  merge (tiered, groups of {GROUP}): {before} -> {after} segments in {:.1}s",
+            t.elapsed().as_secs_f64());
+    }
+
     handle.reader.reload().unwrap();
     // Shape of what we are timing: 1 shard, single-thread search executor
     // (Index::search_executor defaults to Executor::single_thread and nothing here

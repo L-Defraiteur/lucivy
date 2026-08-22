@@ -99,6 +99,19 @@ impl<'a> WordPosMapReader<'a> {
     }
 
     /// Get word_id at (doc_id, position). Returns None if out of range.
+    /// Number of documents covered.
+    pub fn num_docs(&self) -> u32 { self.num_docs }
+
+    /// Number of recorded positions for a document — the merge walks these rather
+    /// than probing position by position with no idea where to stop.
+    pub fn num_positions(&self, doc_id: u32) -> u32 {
+        if doc_id >= self.num_docs { return 0; }
+        let i = doc_id as usize * 8;
+        let start = u64::from_le_bytes(self.offsets[i..i + 8].try_into().unwrap()) as usize;
+        let end = u64::from_le_bytes(self.offsets[i + 8..i + 16].try_into().unwrap()) as usize;
+        ((end - start) / 4) as u32
+    }
+
     pub fn word_at(&self, doc_id: u32, position: u32) -> Option<u32> {
         if doc_id >= self.num_docs { return None; }
         let start = self.read_offset(doc_id) as usize;

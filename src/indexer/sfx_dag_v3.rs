@@ -275,167 +275,276 @@ use crate::suffix_fst::section_file::detect_termtexts_version;
 use crate::suffix_fst::sfxpost_v2::SfxPostReaderV2;
 use crate::suffix_fst::termtexts_v3::TermTextsReaderV3;
 
-/// Merge the CHUNK half only (partitions 0x00/0x01) of multiple v3 segments.
-///
-/// **This is not a complete v3 merge and must not be wired into the merge DAG.**
-/// It reads termtexts v3 (extended tokens + metadata) and sfxpost (postings) from
-/// each source segment, remaps doc_ids, and produces a dataset for
-/// `build_initial_sfx_dag_v3` — but the entire word half of the model is dropped:
-///
-/// - `word_sfxpost`, `chunk_word_map`, `next_word_map`, `word_pos_map` and
-///   `sibling_v3` come out EMPTY (see the TODOs at the end of this function).
-///   Losing `sibling_v3` breaks strict cross-token contains too, not just relaxed.
-/// - `word_id` and `is_word_stripped` are forced to `0` / `false`, because
-///   `TermMetaV3` persists neither. With every `word_id` at 0, the downstream
-///   `build_word_stripped_pub` groups ALL tokens into a single word.
-/// - Interning is keyed on text alone (`global_intern`, `ord_map`), so a chunk
-///   ordinal and a word-stripped ordinal sharing the same text would be fused —
-///   the partition-leak this codebase has fought since May.
-///
-/// A real merge needs the partition tag and `content_overlap` persisted in the
-/// segment first. See `docs/22-aout-2026-19h47/02-verites-dichotomiques.md` §1.
-///
-/// `doc_id_remaps[seg_idx]` maps old_doc_id → new_doc_id for each segment.
-pub fn merge_segments_v3_chunks_only(
-    termtexts_per_segment: &[&[u8]],
-    sfxpost_per_segment: &[Option<&[u8]>],
-    doc_id_remaps: &[&std::collections::HashMap<u32, u32>],
-) -> Result<SfxCollectorDataV3, String> {
-    use std::collections::{BTreeSet, HashMap};
+/// All persisted SFX v3 files of one source segment, plus its doc_id remap.
+pub struct SegmentSfxV3<'a> {
+    pub termtexts: &'a [u8],
+    pub sfxpost: Option<&'a [u8]>,
+    pub word_sfxpost: Option<&'a [u8]>,
+    pub sibling_v3: Option<&'a [u8]>,
+    pub word_pos_map: Option<&'a [u8]>,
+    pub chunk_word_map: Option<&'a [u8]>,
+    pub next_word_map: Option<&'a [u8]>,
+    /// old_doc_id → new_doc_id. Absent key = deleted document.
+    pub doc_remap: &'a std::collections::HashMap<u32, u32>,
+}
 
-    // Validate all termtexts are v3
-    for (i, tt_bytes) in termtexts_per_segment.iter().enumerate() {
-        match detect_termtexts_version(tt_bytes) {
+/// Merge v3 segments by REMAPPING ordinals, without re-tokenising anything.
+///
+/// The alternative — feeding the source text back through the collector — keeps a
+/// single code path but rebuilds every intern table, posting list and word posting
+/// in RAM: measured at ~18 GB to fuse 50k kernel documents into one segment. This
+/// walks the persisted files instead and never holds more than the merged output.
+///
+/// What makes it possible without a format change is the partition tag now carried
+/// in TTX3: a word-stripped entry stores `word_content + content_overlap` as its
+/// text and `overlap_len` says where to cut, so both halves come back exactly.
+/// Everything else — postings, siblings, word maps — is a remap of doc_ids,
+/// ordinals and word_ids.
+///
+/// The intern key is `(is_word_stripped, text)`, NOT the text alone. Chunk and
+/// word-stripped entries can share a text while their postings live in different
+/// files with different coordinate semantics; keying on text alone is the exact
+/// partition leak this codebase has been paying for since May.
+pub fn merge_segments_v3(
+    segments: &[SegmentSfxV3<'_>],
+) -> Result<SfxCollectorDataV3, String> {
+    use std::collections::HashMap;
+    use crate::suffix_fst::collector_v3::WordStrippedEntry;
+
+    for (i, seg) in segments.iter().enumerate() {
+        match detect_termtexts_version(seg.termtexts) {
             Some(3) => {}
             Some(v) => return Err(format!("segment {i}: termtexts version {v}, expected 3 — reindex required")),
             None => return Err(format!("segment {i}: invalid termtexts format")),
         }
     }
 
-    // Global intern map: extended_text → intern_id
-    let mut global_intern: HashMap<String, u32> = HashMap::new();
+    let mut global_intern: HashMap<(bool, String), u32> = HashMap::new();
     let mut token_texts: Vec<String> = Vec::new();
     let mut token_meta: Vec<TokenMetaV3> = Vec::new();
     let mut token_postings: Vec<Vec<(u32, u32, u32, u32)>> = Vec::new();
+    let mut word_postings: Vec<Vec<crate::suffix_fst::word_sfxpost::WordPostingEntry>> = Vec::new();
 
-    for (seg_idx, tt_bytes) in termtexts_per_segment.iter().enumerate() {
-        let tt = TermTextsReaderV3::open(tt_bytes)
+    let mut sibling_pairs: Vec<(u32, u32, u16)> = Vec::new();
+    let mut wpm_writer = crate::suffix_fst::word_pos_map::WordPosMapWriter::new();
+    let mut chunk_word_entries: Vec<Vec<(u32, u8, u8)>> = Vec::new();
+    let mut next_word_pairs: Vec<(u32, u32)> = Vec::new();
+    // word_ids are segment-local; shift each segment past the previous ones so two
+    // different words can never collide into one.
+    let mut word_id_offset: u32 = 0;
+
+    for (seg_idx, seg) in segments.iter().enumerate() {
+        let tt = TermTextsReaderV3::open(seg.termtexts)
             .ok_or_else(|| format!("segment {seg_idx}: failed to open termtexts v3"))?;
+        let sfxpost = seg.sfxpost.and_then(SfxPostReaderV2::open_slice);
+        let wsp = seg.word_sfxpost
+            .and_then(crate::suffix_fst::word_sfxpost::WordSfxPostReader::open);
 
-        let doc_remap = doc_id_remaps[seg_idx];
-
-        // Read sfxpost for this segment (if present)
-        let sfxpost_reader: Option<SfxPostReaderV2> = sfxpost_per_segment[seg_idx]
-            .and_then(|data| SfxPostReaderV2::open_slice(data));
-
-        // Build old_ordinal → new_ordinal mapping for this segment
         let mut seg_ord_to_global: Vec<u32> = Vec::with_capacity(tt.num_terms() as usize);
-
         for old_ord in 0..tt.num_terms() {
             let (text, meta) = tt.entry(old_ord)
                 .ok_or_else(|| format!("segment {seg_idx}: missing entry at ordinal {old_ord}"))?;
-
-            let global_ord = if let Some(&existing) = global_intern.get(text) {
+            let key = (meta.is_word_stripped, text.to_string());
+            let global_ord = if let Some(&existing) = global_intern.get(&key) {
                 existing
             } else {
                 let new_ord = token_texts.len() as u32;
-                global_intern.insert(text.to_string(), new_ord);
+                global_intern.insert(key, new_ord);
                 token_texts.push(text.to_string());
                 token_meta.push(TokenMetaV3 {
                     own_len: meta.own_len,
                     sep_len: meta.sep_len,
                     overlap_len: meta.overlap_len,
                     is_word_start: meta.is_word_start,
-                    word_id: 0, // word_id is segment-local, not meaningful across merge
-                    content_overlap: None, // Not preserved across merge (re-computed from tokens)
-                    // Now persisted in TTX3. Segments written before that carry 0
-                    // and read back as false — same as the old hardcode.
+                    // Only used while collecting; the merged word maps carry the
+                    // word identity from here on.
+                    word_id: 0,
+                    content_overlap: None,
                     is_word_stripped: meta.is_word_stripped,
                 });
                 token_postings.push(Vec::new());
+                word_postings.push(Vec::new());
+                chunk_word_entries.push(Vec::new());
                 new_ord
             };
             seg_ord_to_global.push(global_ord);
-        }
 
-        // Remap postings from this segment
-        if let Some(reader) = &sfxpost_reader {
-            for old_ord in 0..tt.num_terms() {
-                let global_ord = seg_ord_to_global[old_ord as usize];
-                let entries = reader.entries(old_ord);
-                for entry in entries {
-                    if let Some(&new_doc_id) = doc_remap.get(&entry.doc_id) {
-                        token_postings[global_ord as usize].push((
-                            new_doc_id,
-                            entry.token_index,
-                            entry.byte_from,
-                            entry.byte_to,
-                        ));
+            // Chunk postings (.sfxpost) — chunk-level coordinates.
+            if let Some(r) = &sfxpost {
+                for e in r.entries(old_ord) {
+                    if let Some(&doc) = seg.doc_remap.get(&e.doc_id) {
+                        token_postings[global_ord as usize]
+                            .push((doc, e.token_index, e.byte_from, e.byte_to));
                     }
-                    // If doc_id not in remap → doc was deleted, skip
+                }
+            }
+            // Word postings (.word_sfxpost) — word-level coordinates, own file.
+            if let Some(r) = &wsp {
+                for e in r.entries(old_ord) {
+                    if let Some(&doc) = seg.doc_remap.get(&e.doc_id) {
+                        word_postings[global_ord as usize]
+                            .push(crate::suffix_fst::word_sfxpost::WordPostingEntry {
+                                doc_id: doc, ..e
+                            });
+                    }
                 }
             }
         }
+
+        // Sibling table: both ends are ordinals of THIS segment.
+        if let Some(data) = seg.sibling_v3 {
+            if let Some(sib) = crate::suffix_fst::sibling_table::SiblingTableReader::open(data) {
+                for ord in 0..sib.num_ordinals().min(seg_ord_to_global.len() as u32) {
+                    let from = seg_ord_to_global[ord as usize];
+                    for e in sib.siblings(ord) {
+                        if (e.next_ordinal as usize) < seg_ord_to_global.len() {
+                            sibling_pairs.push((
+                                from,
+                                seg_ord_to_global[e.next_ordinal as usize],
+                                e.gap_len,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut max_word_id = 0u32;
+
+        // Word position map: positions are intra-document, only doc_id and word_id move.
+        if let Some(data) = seg.word_pos_map {
+            if let Some(r) = crate::suffix_fst::word_pos_map::WordPosMapReader::open(data) {
+                for old_doc in 0..r.num_docs() {
+                    let Some(&new_doc) = seg.doc_remap.get(&old_doc) else { continue };
+                    for pos in 0..r.num_positions(old_doc) {
+                        if let Some(w) = r.word_at(old_doc, pos) {
+                            if w == u32::MAX { continue; }
+                            max_word_id = max_word_id.max(w);
+                            wpm_writer.add(new_doc, pos, w + word_id_offset);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(data) = seg.chunk_word_map {
+            if let Some(r) = crate::suffix_fst::word_map::ChunkWordMapReader::open(data) {
+                for ord in 0..r.num_ords().min(seg_ord_to_global.len() as u32) {
+                    let g = seg_ord_to_global[ord as usize] as usize;
+                    for e in r.lookup(ord) {
+                        max_word_id = max_word_id.max(e.word_id);
+                        chunk_word_entries[g].push((
+                            e.word_id + word_id_offset, e.chunk_index, e.total_chunks,
+                        ));
+                    }
+                }
+            }
+        }
+
+        if let Some(data) = seg.next_word_map {
+            if let Some(r) = crate::suffix_fst::word_map::NextWordMapReader::open(data) {
+                for w in 0..r.num_words() {
+                    for n in r.next_words(w) {
+                        max_word_id = max_word_id.max(w.max(n));
+                        next_word_pairs.push((w + word_id_offset, n + word_id_offset));
+                    }
+                }
+            }
+        }
+
+        word_id_offset += max_word_id + 1;
     }
 
-    // Build sorted output — extended ordinals: 1:1 mapping, no grouping.
+    // Assign final ordinals in text order. Chunk and word-stripped entries keep
+    // separate ordinals even when their texts match — that is the whole point.
     let num_tokens = token_texts.len();
     let mut sorted_indices: Vec<u32> = (0..num_tokens as u32).collect();
     sorted_indices.sort_by(|&a, &b| {
         token_texts[a as usize].cmp(&token_texts[b as usize])
+            .then(token_meta[a as usize].is_word_stripped.cmp(&token_meta[b as usize].is_word_stripped))
     });
 
-    // Extended ordinals: each unique extended text → own ordinal.
-    // In merge, all tokens have is_word_stripped=false. Use BTreeMap for order.
-    let mut ord_map: std::collections::BTreeMap<String, (Vec<(u32, u32, u32, u32)>, u16, Vec<u32>)> =
-        std::collections::BTreeMap::new();
-    for &io in &sorted_indices {
-        let text = &token_texts[io as usize];
-        let entry = ord_map.entry(text.clone()).or_insert_with(|| {
-            (Vec::new(), token_meta[io as usize].own_len, Vec::new())
-        });
-        entry.0.extend_from_slice(&token_postings[io as usize]);
-        entry.2.push(io);
-    }
-
     let mut intern_to_final = vec![0u32; num_tokens];
-    let mut content_postings: Vec<Vec<(u32, u32, u32, u32)>> = Vec::new();
-    let mut own_lens: Vec<u16> = Vec::new();
-    let mut tokens: Vec<String> = Vec::new();
-    let mut final_ord = 0u32;
-    for (text, (postings, own_len, intern_ords)) in &ord_map {
-        tokens.push(text.clone());
-        let mut p = postings.clone();
+    for (final_ord, &io) in sorted_indices.iter().enumerate() {
+        intern_to_final[io as usize] = final_ord as u32;
+    }
+    let final_count = num_tokens as u32;
+
+    let mut tokens: Vec<String> = Vec::with_capacity(num_tokens);
+    let mut own_lens: Vec<u16> = Vec::with_capacity(num_tokens);
+    let mut content_postings: Vec<Vec<(u32, u32, u32, u32)>> = Vec::with_capacity(num_tokens);
+    let mut wsp_writer = crate::suffix_fst::word_sfxpost::WordSfxPostWriter::new(num_tokens);
+    let mut word_stripped: Vec<WordStrippedEntry> = Vec::new();
+
+    for &io in &sorted_indices {
+        let i = io as usize;
+        let fo = intern_to_final[i];
+        tokens.push(token_texts[i].clone());
+        own_lens.push(token_meta[i].own_len);
+
+        let mut p = std::mem::take(&mut token_postings[i]);
         p.sort();
         p.dedup();
         content_postings.push(p);
-        own_lens.push(*own_len);
-        for &io in intern_ords {
-            intern_to_final[io as usize] = final_ord;
+
+        let mut wp = std::mem::take(&mut word_postings[i]);
+        wp.sort();
+        wp.dedup();
+        for e in wp {
+            wsp_writer.add(fo, e);
         }
-        final_ord += 1;
+
+        if token_meta[i].is_word_stripped {
+            // The 0x02 key is word_content + content_overlap; overlap_len says
+            // where to cut. Nothing else is needed to re-emit the FST entry.
+            let text = &token_texts[i];
+            let ovl = (token_meta[i].overlap_len as usize).min(text.len());
+            let split = text.len() - ovl;
+            let split = (0..=split).rev().find(|&b| text.is_char_boundary(b)).unwrap_or(0);
+            word_stripped.push(WordStrippedEntry {
+                word_content: text[..split].to_string(),
+                content_overlap: text[split..].to_string(),
+                first_intern_ord: io,
+                first_chunk_intern_ord: io,
+                last_chunk_intern_ord: io,
+                first_own_len: token_meta[i].own_len,
+                last_sep_len: token_meta[i].sep_len,
+                is_word_start: token_meta[i].is_word_start,
+                num_chunks: 1,
+            });
+        }
     }
 
-    let total_docs = doc_id_remaps.iter()
-        .map(|m| m.values().copied().max().unwrap_or(0) + 1)
-        .max()
-        .unwrap_or(0);
-
-    // Rebuild word_stripped from merged token data
-    let word_stripped = crate::suffix_fst::collector_v3::build_word_stripped_pub(
-        &token_texts, &token_meta, 2,
-    );
-
-    // Build overlap sibling table
-    let mut overlap_siblings = crate::suffix_fst::overlap_siblings::OverlapSiblingWriter::new(
-        final_ord as usize,
-    );
-    for (_, (_, _, intern_ords)) in &ord_map {
-        let fo = intern_to_final[intern_ords[0] as usize];
-        for &io in intern_ords {
-            overlap_siblings.add(fo, io);
+    let mut chunk_word_writer =
+        crate::suffix_fst::word_map::ChunkWordMapWriter::new(final_count as usize);
+    for (i, entries) in chunk_word_entries.iter().enumerate() {
+        let fo = intern_to_final[i];
+        for &(w, idx, total) in entries {
+            chunk_word_writer.add(fo, w, idx, total);
         }
     }
+
+    let mut next_word_writer =
+        crate::suffix_fst::word_map::NextWordMapWriter::new(word_id_offset as usize);
+    for &(a, b) in &next_word_pairs {
+        next_word_writer.add(a, b);
+    }
+
+    let mut sibling_writer =
+        crate::suffix_fst::sibling_table::SiblingTableWriter::new(final_count);
+    for &(a, b, gap) in &sibling_pairs {
+        sibling_writer.add(intern_to_final[a as usize], intern_to_final[b as usize], gap);
+    }
+
+    let mut overlap_siblings =
+        crate::suffix_fst::overlap_siblings::OverlapSiblingWriter::new(final_count as usize);
+    for &io in &sorted_indices {
+        overlap_siblings.add(intern_to_final[io as usize], io);
+    }
+
+    let total_docs = segments.iter()
+        .flat_map(|s| s.doc_remap.values().copied())
+        .max().map(|m| m + 1).unwrap_or(0);
 
     Ok(SfxCollectorDataV3 {
         tokens,
@@ -444,20 +553,17 @@ pub fn merge_segments_v3_chunks_only(
         token_texts,
         content_postings,
         own_lens,
-        num_content_ords: final_ord as usize,
+        num_content_ords: final_count as usize,
         token_meta,
         num_docs: total_docs,
         min_suffix_len: 1,
         overlap_siblings: overlap_siblings.serialize(),
         word_stripped,
-        // TODO: rebuild word sfxpost from merged token data (currently rebuilt via into_data path)
-        word_sfxpost: crate::suffix_fst::word_sfxpost::WordSfxPostWriter::new(0).finish(),
-        // TODO: rebuild word maps from merged token data
-        chunk_word_map: crate::suffix_fst::word_map::ChunkWordMapWriter::new(final_ord as usize).serialize(),
-        next_word_map: crate::suffix_fst::word_map::NextWordMapWriter::new(0).serialize(),
-        word_pos_map: crate::suffix_fst::word_pos_map::WordPosMapWriter::new().serialize(),
-        // TODO: rebuild sibling table from merged token data
-        sibling_v3: crate::suffix_fst::sibling_table::SiblingTableWriter::new(0).serialize(),
+        word_sfxpost: wsp_writer.finish(),
+        chunk_word_map: chunk_word_writer.serialize(),
+        next_word_map: next_word_writer.serialize(),
+        word_pos_map: wpm_writer.serialize(),
+        sibling_v3: sibling_writer.serialize(),
     })
 }
 
@@ -601,6 +707,25 @@ mod tests {
         result.take_output::<SfxBuildOutputV3>("assemble", "output").unwrap()
     }
 
+    /// View a build output as a merge input, pulling the registry files by name.
+    fn as_merge_input<'a>(
+        out: &'a SfxBuildOutputV3,
+        remap: &'a std::collections::HashMap<u32, u32>,
+    ) -> SegmentSfxV3<'a> {
+        let f = |ext: &str| out.registry_files.iter()
+            .find(|(e, _)| e == ext).map(|(_, d)| d.as_slice());
+        SegmentSfxV3 {
+            termtexts: &out.termtexts,
+            sfxpost: out.sfxpost.as_deref(),
+            word_sfxpost: f("word_sfxpost"),
+            sibling_v3: f("sibling_v3"),
+            word_pos_map: f("word_pos_map"),
+            chunk_word_map: f("chunk_word_map"),
+            next_word_map: f("next_word_map"),
+            doc_remap: remap,
+        }
+    }
+
     #[test]
     fn test_merge_two_segments() {
         let seg_a = build_segment(&["mutex_lock", "hello_world"]);
@@ -610,11 +735,10 @@ mod tests {
         let remap_a: std::collections::HashMap<u32, u32> = [(0, 0), (1, 1)].into();
         let remap_b: std::collections::HashMap<u32, u32> = [(0, 2), (1, 3)].into();
 
-        let merged_data = merge_segments_v3_chunks_only(
-            &[&seg_a.termtexts, &seg_b.termtexts],
-            &[seg_a.sfxpost.as_deref(), seg_b.sfxpost.as_deref()],
-            &[&remap_a, &remap_b],
-        ).unwrap();
+        let merged_data = merge_segments_v3(&[
+            as_merge_input(&seg_a, &remap_a),
+            as_merge_input(&seg_b, &remap_b),
+        ]).unwrap();
 
         // Rebuild from merged data
         let mut dag = build_initial_sfx_dag_v3(merged_data);
@@ -639,11 +763,10 @@ mod tests {
         let remap_a: std::collections::HashMap<u32, u32> = [(0, 0)].into();
         let remap_b: std::collections::HashMap<u32, u32> = [(0, 1)].into();
 
-        let merged_data = merge_segments_v3_chunks_only(
-            &[&seg_a.termtexts, &seg_b.termtexts],
-            &[seg_a.sfxpost.as_deref(), seg_b.sfxpost.as_deref()],
-            &[&remap_a, &remap_b],
-        ).unwrap();
+        let merged_data = merge_segments_v3(&[
+            as_merge_input(&seg_a, &remap_a),
+            as_merge_input(&seg_b, &remap_b),
+        ]).unwrap();
 
         // Shared tokens should have merged postings
         // "mutex_lo" should have postings from both doc 0 and doc 1
@@ -664,11 +787,7 @@ mod tests {
         // Only remap docs 0 and 2, doc 1 is deleted
         let remap_a: std::collections::HashMap<u32, u32> = [(0, 0), (2, 1)].into();
 
-        let merged_data = merge_segments_v3_chunks_only(
-            &[&seg_a.termtexts],
-            &[seg_a.sfxpost.as_deref()],
-            &[&remap_a],
-        ).unwrap();
+        let merged_data = merge_segments_v3(&[as_merge_input(&seg_a, &remap_a)]).unwrap();
 
         // "hello_wo" was in doc 1 which is deleted → its postings should only
         // contain docs that are in the remap
@@ -690,11 +809,7 @@ mod tests {
 
         let remap_a: std::collections::HashMap<u32, u32> = [(0, 0)].into();
 
-        let merged_data = merge_segments_v3_chunks_only(
-            &[&seg_a.termtexts],
-            &[seg_a.sfxpost.as_deref()],
-            &[&remap_a],
-        ).unwrap();
+        let merged_data = merge_segments_v3(&[as_merge_input(&seg_a, &remap_a)]).unwrap();
 
         // Rebuild and check metadata survives the round-trip
         let mut dag = build_initial_sfx_dag_v3(merged_data);

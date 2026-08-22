@@ -216,41 +216,59 @@ struct SfxNode {
 
 
 impl SfxNode {
-    /// Re-run the v3 collector over the merged document order.
+    /// Merge the v3 SFX files of the source segments by remapping.
     ///
-    /// `doc_mapping[new_doc_id] = (source segment, source doc)`, so walking it in
-    /// order feeds the collector exactly the documents the merged segment will
-    /// hold, in exactly its doc_id order — the same input the initial build path
-    /// receives, hence the same output.
+    /// The first implementation re-indexed from the docstore: one code path, but it
+    /// rebuilt every intern table and posting list in RAM, measured at ~18 GB to
+    /// fuse 50k kernel documents into a single segment. Remapping walks the
+    /// persisted files instead — the partition tag in TTX3 is what makes the
+    /// word-stripped half recoverable without re-tokenising.
     fn rebuild_sfx_v3(
         readers: &[SegmentReader],
-        doc_mapping: &[DocAddress],
+        reverse_doc_map: &[std::collections::HashMap<u32, u32>],
         field: Field,
     ) -> crate::Result<super::sfx_dag_v3::SfxBuildOutputV3> {
-        use crate::suffix_fst::collector_v3::SfxCollectorV3;
+        use super::sfx_dag_v3::SegmentSfxV3;
 
-        let store_readers: Vec<_> = readers.iter()
-            .map(|r| r.get_store_reader(1))
-            .collect::<std::io::Result<Vec<_>>>()?;
+        let read_ext = |r: &SegmentReader, ext: &str| -> Option<Vec<u8>> {
+            r.sfx_index_file(ext, field)
+                .and_then(|f| f.read_bytes().ok())
+                .map(|b| b.as_ref().to_vec())
+        };
 
-        let mut collector = SfxCollectorV3::new();
-        for addr in doc_mapping {
-            collector.begin_doc();
-            let store = &store_readers[addr.segment_ord as usize];
-            if let Ok(doc) = store.get::<crate::LucivyDocument>(addr.doc_id) {
-                use crate::schema::document::{Document, Value};
-                for (f, v) in doc.field_values() {
-                    if f == field {
-                        if let Some(text) = v.as_value().as_str() {
-                            collector.add_value(text);
-                        }
-                    }
-                }
-            }
-            collector.end_doc();
+        // Hold the bytes alive for the duration of the merge.
+        let owned: Vec<_> = readers.iter().map(|r| (
+            read_ext(r, "termtexts"),
+            read_ext(r, "sfxpost"),
+            read_ext(r, "word_sfxpost"),
+            read_ext(r, "sibling_v3"),
+            read_ext(r, "word_pos_map"),
+            read_ext(r, "chunk_word_map"),
+            read_ext(r, "next_word_map"),
+        )).collect();
+
+        let mut segs: Vec<SegmentSfxV3<'_>> = Vec::new();
+        for (i, o) in owned.iter().enumerate() {
+            let Some(tt) = o.0.as_deref() else { continue };
+            segs.push(SegmentSfxV3 {
+                termtexts: tt,
+                sfxpost: o.1.as_deref(),
+                word_sfxpost: o.2.as_deref(),
+                sibling_v3: o.3.as_deref(),
+                word_pos_map: o.4.as_deref(),
+                chunk_word_map: o.5.as_deref(),
+                next_word_map: o.6.as_deref(),
+                doc_remap: &reverse_doc_map[i],
+            });
+        }
+        if segs.is_empty() {
+            return Err(crate::LucivyError::SystemError(
+                "sfx v3 merge: no segment carries termtexts".into()));
         }
 
-        let data = collector.into_data();
+        let data = super::sfx_dag_v3::merge_segments_v3(&segs)
+            .map_err(crate::LucivyError::SystemError)?;
+
         let mut dag = super::sfx_dag_v3::build_initial_sfx_dag_v3(data);
         let mut result = luciole::execute_dag(&mut dag, None)
             .map_err(|e| crate::LucivyError::SystemError(format!("sfx v3 merge DAG: {e}")))?;
@@ -342,7 +360,7 @@ impl Node for SfxNode {
 
         let mut sfx_field_ids = Vec::new();
 
-        // v3 merges by RE-INDEXING, not by remapping.
+        // v3 merges by REMAPPING the persisted files.
         //
         // The v2 sub-DAG below cannot be reused: its CollectTokensNode reads the
         // inverted index term dictionary, which in v3 holds a different alphabet
@@ -351,19 +369,17 @@ impl Node for SfxNode {
         // postings point at the wrong terms, silently, because every
         // self-consistency check still passes.
         //
-        // Remapping instead would mean re-deriving word identity and the inter-word
-        // overlap, neither of which the segment persists — a second implementation
-        // of the collector's invariants, uncoupled from it by any type. Feeding the
-        // source text back through the collector keeps ONE code path and gets the
-        // invariants for free. It costs a full re-tokenisation and requires the
-        // field to be STORED.
+        // Re-indexing from the docstore was tried first: a single code path, and the
+        // invariants come for free from the collector. But it rebuilds every intern
+        // table and posting list in RAM — ~18 GB to fuse 50k kernel documents into
+        // one segment — so it does not survive contact with a real corpus.
         if sfx_version >= 3 {
             let mut segment = segment;
             for &field in &sfx_fields {
                 let (_, any_has_sfx) = super::sfx_merge::load_sfx_data(&readers, field);
                 if !any_has_sfx { continue; }
 
-                let output = Self::rebuild_sfx_v3(&readers, &doc_mapping, field)
+                let output = Self::rebuild_sfx_v3(&readers, &reverse_doc_map, field)
                     .map_err(|e| format!("sfx v3 merge field {}: {e}", field.field_id()))?;
                 Self::write_sfx_v3(&mut segment, field, &output)
                     .map_err(|e| format!("sfx v3 write field {}: {e}", field.field_id()))?;
@@ -371,7 +387,7 @@ impl Node for SfxNode {
             }
 
             nctx.metric("sfx_fields", sfx_field_ids.len() as f64);
-            nctx.metric("sfx_v3_reindexed_docs", doc_mapping.len() as f64);
+            nctx.metric("sfx_v3_merged_docs", doc_mapping.len() as f64);
             nctx.set_output("segment", PortValue::new(segment));
             nctx.set_output("sfx_field_ids", PortValue::new(sfx_field_ids));
             nctx.set_output("postings_ser", postings_ser);

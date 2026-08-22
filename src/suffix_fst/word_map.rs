@@ -92,6 +92,10 @@ impl<'a> ChunkWordMapReader<'a> {
     }
 
     /// Get all word entries for a content ordinal.
+    /// Number of ordinals covered. Needed to walk the map during a merge, which
+    /// has to remap every entry rather than look one up.
+    pub fn num_ords(&self) -> u32 { self.num_ords }
+
     pub fn lookup(&self, ord: u32) -> Vec<ChunkWordEntry> {
         if ord >= self.num_ords { return Vec::new(); }
         let start = self.read_offset(ord) as usize;
@@ -196,6 +200,9 @@ impl<'a> NextWordMapReader<'a> {
     }
 
     /// Get all words that can follow `word_id`.
+    /// Number of words covered — see ChunkWordMapReader::num_ords.
+    pub fn num_words(&self) -> u32 { self.num_words }
+
     pub fn next_words(&self, word_id: u32) -> Vec<u32> {
         if word_id >= self.num_words { return Vec::new(); }
         let start = self.read_offset(word_id) as usize;
