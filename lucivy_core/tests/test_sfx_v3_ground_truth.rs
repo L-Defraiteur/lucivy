@@ -1496,7 +1496,10 @@ fn regex_v2_vs_v3() {
     eprintln!("{}", "-".repeat(62));
 
     for pat in patterns {
-        let re = regex::Regex::new(&format!("(?i){pat}")).unwrap();
+        // Exact pattern semantics: FST retrieval is case-insensitive (a superset),
+        // the verification pass narrows it. Grepping with (?i) would measure a
+        // different contract than the one the engine now implements.
+        let re = regex::Regex::new(pat).unwrap();
         let truth: HashSet<usize> = files.iter().enumerate()
             .filter(|(_, (_, c))| re.is_match(c))
             .map(|(i, _)| i)

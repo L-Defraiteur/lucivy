@@ -158,6 +158,71 @@ where
     Some(state)
 }
 
+
+/// True if every byte present in `ordinal`'s bitmap falls inside one of `ranges`.
+///
+/// `GapKind::ByteRangeCheck` was analysed by the gap analyzer since day one but
+/// never acted upon: regex_v3 only ever tested for DfaValidation and
+/// AcceptAnything, so a `[a-z]+` or `\w+` gap fell through to the generic DFA
+/// walk. That walk feeds whole tokens through a whole-input automaton and
+/// over-rejects badly (measured: 5636 rejections for 40 accepts on
+/// `Table\w+Function`). Checking the class directly is both cheaper and closer to
+/// what the gap actually means.
+/// Exact class membership.
+///
+/// FST retrieval is case-insensitive (keys are lowercased at build time), so it
+/// yields a SUPERSET of candidates. Narrowing on case is the verification pass's
+/// job — folding the class here instead would make `[a-z]` and `[A-Z]` mean the
+/// same thing, i.e. a pattern that does not do what it says.
+fn byte_in_ranges(b: u8, ranges: &[(u8, u8)]) -> bool {
+    ranges.iter().any(|&(lo, hi)| b >= lo && b <= hi)
+}
+
+fn all_bytes_in_ranges(
+    bytemap: &ByteBitmapReader<'_>,
+    ordinal: u32,
+    ranges: &[(u8, u8)],
+) -> bool {
+    let Some(bitmap) = bytemap.bitmap(ordinal) else { return false };
+    for byte in 0u16..=255 {
+        let b = byte as u8;
+        if bitmap[(b >> 3) as usize] & (1u8 << (b & 7)) == 0 {
+            continue;
+        }
+        if !byte_in_ranges(b, ranges) {
+            return false;
+        }
+    }
+    true
+}
+
+
+/// Rebuild the raw document text covering token positions `[from, to]`.
+///
+/// Each token contributes `text[..own_len]` — content plus separator. The trailing
+/// overlap belongs to the next token and would otherwise be duplicated, so the
+/// concatenation of own-parts is exactly the source text over that range.
+///
+/// termtexts keeps the ORIGINAL case (only the FST keys are lowercased), which is
+/// what makes case-sensitive verification possible at all.
+fn reconstruct_span(
+    posmap: &PosMapReader<'_>,
+    ord_to_term: &dyn Fn(u64) -> Option<String>,
+    own_len_of: &dyn Fn(u64) -> Option<usize>,
+    doc_id: DocId,
+    from: u32,
+    to: u32,
+) -> String {
+    let mut out = String::new();
+    for pos in from..=to {
+        let Some(ord) = posmap.ordinal_at(doc_id, pos) else { break };
+        let Some(text) = ord_to_term(ord as u64) else { break };
+        let end = own_len_of(ord as u64).unwrap_or(text.len()).min(text.len());
+        out.push_str(&text[..end]);
+    }
+    out
+}
+
 /// Check if DFA accepts any input from this state (fast path for `.*` gaps).
 fn dfa_accepts_anything_v3<A: Automaton>(automaton: &A, state: &A::State) -> bool
 where
@@ -241,6 +306,31 @@ where
     // and DFA gap validation.
     let posmap = posmap_data.and_then(PosMapReader::open);
     let bytemap = bytemap_data.and_then(ByteBitmapReader::open);
+    let tt_meta = termtexts_data
+        .and_then(crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open);
+    let own_len_of = |ord: u64| -> Option<usize> {
+        tt_meta.as_ref().and_then(|tt| tt.meta(ord as u32)).map(|m| m.own_len as usize)
+    };
+
+    // Verification runs ONLY where it can change the answer.
+    //
+    // Two accept paths are approximations: `all_accept` takes any ordered pair of
+    // literals without looking at what lies between them, and the class path checks
+    // a byte class rather than the actual arrangement. Both over-generate (measured:
+    // 254 extra docs on `rag3.*ver`, 65 on `Table\w+Function`). The DFA paths are
+    // already exact, and a gapless pattern is resolved exactly by the literal walk —
+    // in those cases verification would cost a text rebuild for nothing.
+    let approximated = analyzed_gaps.iter().any(|g| matches!(g,
+        crate::query::phrase_query::regex_gap_analyzer::GapKind::AcceptAnything |
+        crate::query::phrase_query::regex_gap_analyzer::GapKind::ByteRangeCheck(_)));
+    let verifier = if approximated {
+        regex::Regex::new(pattern).ok()
+    } else {
+        None
+    };
+    if diag {
+        eprintln!("[rx]   approximated={approximated} verifier={}", verifier.is_some());
+    }
 
     let mut all_matches: Vec<Vec<MatchV3>> = vec![Vec::new(); viable.len()];
     let mut doc_filter: Option<HashSet<DocId>> = None;
@@ -283,6 +373,16 @@ where
         .any(|g| matches!(g, crate::query::phrase_query::regex_gap_analyzer::GapKind::DfaValidation));
     let all_accept = !has_any_dfa_gap && analyzed_gaps.iter()
         .all(|g| matches!(g, crate::query::phrase_query::regex_gap_analyzer::GapKind::AcceptAnything));
+
+    // Single character-class gap between exactly two literals: validate the gap by
+    // its byte class instead of walking a whole-input DFA over full tokens.
+    let class_ranges: Option<Vec<(u8, u8)>> = if !has_any_dfa_gap && analyzed_gaps.len() == 1 {
+        match &analyzed_gaps[0] {
+            crate::query::phrase_query::regex_gap_analyzer::GapKind::ByteRangeCheck(r) =>
+                Some(r.clone()),
+            _ => None,
+        }
+    } else { None };
 
     if diag {
         eprintln!("[rx]   has_any_dfa_gap={has_any_dfa_gap} all_accept={all_accept} n_literals={}",
@@ -366,12 +466,104 @@ where
         let mut rej_walk = 0usize;
         let mut acc_first = 0usize;
         let mut acc_walk = 0usize;
+        let mut acc_class = 0usize;
+        let mut rej_class = 0usize;
 
         if all_accept {
-            // All gaps are .* → accept all ordered matches
+            // `.*` gaps: ordering alone says nothing about what lies between the
+            // literals, so this path is a pure over-approximation. Verify when we
+            // can rebuild the text; without a posmap there is nothing to check
+            // against and the old permissive behaviour stands.
             for &(doc_id, first_bf, last_bt, _) in &ordered {
+                if let (Some(rx), Some(pm)) = (&verifier, &posmap) {
+                    let first_pos = grouped[0].get(&doc_id)
+                        .and_then(|v| v.iter().find(|&&(_, bf, _, _)| bf == first_bf))
+                        .map(|&(p, _, _, _)| p);
+                    let last_pos = grouped.last().unwrap().get(&doc_id)
+                        .and_then(|v| v.iter().find(|&&(_, _, bt, _)| bt == last_bt))
+                        .map(|&(p, _, _, _)| p);
+                    if let (Some(fp), Some(lp)) = (first_pos, last_pos) {
+                        let span = reconstruct_span(pm, ord_to_term, &own_len_of,
+                            doc_id, fp, lp);
+                        if !rx.is_match(&span) { continue; }
+                    }
+                }
                 doc_bitset.insert(doc_id);
                 highlights.push((doc_id, first_bf as usize, last_bt as usize));
+            }
+        } else if let (Some(ranges), Some(pm), Some(bm)) =
+            (class_ranges.as_ref(), &posmap, &bytemap)
+        {
+            let first_lit_len = viable[0].len();
+            for &(doc_id, first_bf, last_bt, first_si) in &ordered {
+                let first_entry = grouped[0].get(&doc_id)
+                    .and_then(|v| v.iter().find(|&&(_, bf, _, _)| bf == first_bf));
+                let Some(&(first_pos, _, _, _)) = first_entry else { continue; };
+                let last_entry = grouped.last().unwrap().get(&doc_id)
+                    .and_then(|v| v.iter().find(|&&(_, _, bt, _)| bt == last_bt));
+                let (last_pos, last_si) = last_entry
+                    .map(|&(p, _, _, si)| (p, si))
+                    .unwrap_or((first_pos, 0));
+
+                // The gap runs from the end of the first literal to the start of the
+                // last one. Checking only the tokens strictly between them leaves the
+                // bytes inside the two boundary tokens unverified — and when the
+                // literals are adjacent or share a token, nothing is checked at all.
+                let in_class = |txt: &str| txt.bytes().all(|b| byte_in_ranges(b, ranges));
+                let slice_ok = |ord: u32, from: usize, to: usize| -> bool {
+                    match ord_to_term(ord as u64) {
+                        Some(t) => {
+                            let end = to.min(t.len());
+                            from >= end || in_class(&t[from.min(end)..end])
+                        }
+                        None => false,
+                    }
+                };
+
+                let mut ok = true;
+                if first_pos == last_pos {
+                    // Both literals inside one token: check the span between them.
+                    if let Some(ord) = pm.ordinal_at(doc_id, first_pos) {
+                        ok = slice_ok(ord, first_si as usize + first_lit_len, last_si as usize);
+                    } else { ok = false; }
+                } else {
+                    // Tail of the first token, after the literal, up to own_len.
+                    if let Some(ord) = pm.ordinal_at(doc_id, first_pos) {
+                        let stop = own_len_of(ord as u64).unwrap_or(usize::MAX);
+                        ok = slice_ok(ord, first_si as usize + first_lit_len, stop);
+                    } else { ok = false; }
+                    // Head of the last token, before the literal.
+                    if ok {
+                        if let Some(ord) = pm.ordinal_at(doc_id, last_pos) {
+                            ok = slice_ok(ord, 0, last_si as usize);
+                        } else { ok = false; }
+                    }
+                }
+
+                // Whole tokens strictly between: the bitmap answers without reading
+                // the text.
+                if ok {
+                    for pos in (first_pos + 1)..last_pos {
+                        match pm.ordinal_at(doc_id, pos) {
+                            Some(ord) if all_bytes_in_ranges(bm, ord, ranges) => {}
+                            _ => { ok = false; break; }
+                        }
+                    }
+                }
+                if ok {
+                    if let Some(rx) = &verifier {
+                        let span = reconstruct_span(pm, ord_to_term, &own_len_of,
+                            doc_id, first_pos, last_pos);
+                        ok = rx.is_match(&span);
+                    }
+                }
+                if ok {
+                    acc_class += 1;
+                    doc_bitset.insert(doc_id);
+                    highlights.push((doc_id, first_bf as usize, last_bt as usize));
+                } else {
+                    rej_class += 1;
+                }
             }
         } else if let Some(pm) = &posmap {
             for &(doc_id, first_bf, last_bt, first_si) in &ordered {
@@ -426,8 +618,8 @@ where
             }
         }
         if diag {
-            eprintln!("[rx]   accepted: first_token={acc_first} walk={acc_walk} | \
-rejected: no_posmap={rej_no_posmap} first_token_dfa={rej_first_token} walk={rej_walk}");
+            eprintln!("[rx]   accepted: first_token={acc_first} walk={acc_walk} class={acc_class} | \
+rejected: no_posmap={rej_no_posmap} first_token_dfa={rej_first_token} walk={rej_walk} class={rej_class}");
         }
     }
 
