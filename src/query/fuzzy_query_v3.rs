@@ -72,10 +72,10 @@ impl FuzzyQueryV3 {
             crate::LucivyError::SystemError(format!("open SFX3: {e}")))?;
         let pr = crate::query::posting_resolver::build_resolver(seg_reader, self.field)?;
 
-        let load = |ext: &str| -> Option<Vec<u8>> {
+        // No copy: see the note in contains_query_v3::run_sfx_v3_prescan.
+        let load = |ext: &str| -> Option<common::OwnedBytes> {
             seg_reader.sfx_index_file(ext, self.field)
                 .and_then(|fs| fs.read_bytes().ok())
-                .map(|b| b.as_ref().to_vec())
         };
         let posmap_bytes = load("posmap");
         let bytemap_bytes = load("bytemap");

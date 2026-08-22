@@ -69,9 +69,9 @@ impl RegexQueryV3 {
             crate::LucivyError::InvalidArgument(format!("regex: {e}")))?;
         let automaton = crate::query::automaton_weight::SfxAutomatonAdapter(&regex);
 
+        // No copy: see the note in contains_query_v3::run_sfx_v3_prescan.
         let termtexts_bytes = seg_reader.sfx_index_file("termtexts", self.field)
-            .and_then(|fs| fs.read_bytes().ok())
-            .map(|b| b.as_ref().to_vec());
+            .and_then(|fs| fs.read_bytes().ok());
         let tt_v3 = termtexts_bytes.as_ref()
             .and_then(|b| crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open(b));
         let tt_v2 = if tt_v3.is_none() {
@@ -88,15 +88,12 @@ impl RegexQueryV3 {
         };
 
         let posmap_bytes = seg_reader.posmap_file(self.field)
-            .and_then(|d| d.read_bytes().ok())
-            .map(|b| b.as_ref().to_vec());
+            .and_then(|d| d.read_bytes().ok());
         let bytemap_bytes = seg_reader.bytemap_file(self.field)
-            .and_then(|d| d.read_bytes().ok())
-            .map(|b| b.as_ref().to_vec());
+            .and_then(|d| d.read_bytes().ok());
 
         let sibling_bytes = seg_reader.sfx_index_file("sibling_v3", self.field)
-            .and_then(|d| d.read_bytes().ok())
-            .map(|b| b.as_ref().to_vec());
+            .and_then(|d| d.read_bytes().ok());
 
         let (_bitset, highlights) = regex_v3::regex_v3(
             &automaton, &self.pattern, &reader, &*pr, &ord_to_term,

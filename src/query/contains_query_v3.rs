@@ -61,10 +61,14 @@ strict_separators: bool,
         crate::LucivyError::SystemError(format!("open SFX3: {e}")))?;
     let pr = crate::query::posting_resolver::build_resolver(seg_reader, field)?;
 
-    let load = |ext: &str| -> Option<Vec<u8>> {
+    // The FileSlice is already held by the SegmentReader, and read_bytes() on a
+    // RAM- or mmap-backed handle is an Arc slice, not I/O. The `.to_vec()` that
+    // used to sit here was the only real cost: a full copy of every sidecar, on
+    // every segment, on every query. Keep the OwnedBytes — it derefs to [u8], so
+    // every reader below opens over the borrow unchanged.
+    let load = |ext: &str| -> Option<common::OwnedBytes> {
         seg_reader.sfx_index_file(ext, field)
             .and_then(|fs| fs.read_bytes().ok())
-            .map(|b| b.as_ref().to_vec())
     };
     let posmap_bytes = load("posmap");
     let bytemap_bytes = load("bytemap");

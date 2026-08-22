@@ -161,15 +161,47 @@ regarder d'où viennent les splits.
 
 ### 4.3 Le pipeline word — voir §5
 
-### 4.4 Le prescan charge les fichiers par segment et par requête
+### 4.4 Le prescan copiait les sidecars par segment et par requête — CORRIGÉ [mesuré]
 
-`prescan_segment_v3` fait `load("posmap")`, `load("bytemap")`, `load("word_sfxpost")`,
-`load("sibling_v3")`, `load("termtexts")` — cinq lectures **avec `.to_vec()`**, donc
-cinq copies, à chaque segment et à chaque requête. Sur 800 segments c'est 4 000 copies
-par requête.
+**Diagnostic.** `prescan_segment_v3` faisait `load("posmap")`, `load("bytemap")`,
+`load("word_sfxpost")`, `load("sibling_v3")`, `load("termtexts")` — cinq lectures
+terminées par `.to_vec()`.
 
-Piste : mmap ou cache par segment. C'est probablement significatif sur le relax, qui
-charge les cinq, contre trois pour le strict.
+Il n'y avait là **aucune I/O** : `SegmentReader` détient déjà les `FileSlice` dans
+`registry_files` (`segment_reader.rs:101`), et `read_bytes()` sur un handle adossé
+à la RAM ou à un mmap ne fait que découper un `Arc` (`ram_directory.rs:84`,
+`file_slice.rs:332`). Le `.to_vec()` était donc le coût réel et le seul : une copie
+intégrale de chaque sidecar, à chaque segment, à chaque requête.
+
+`MmapDirectory` existe déjà (`src/directory/mmap_directory/`, avec cache de mmap en
+weak-ref), mais il n'était pas en cause — le harnais de bench tourne sur
+`RamDirectory`. Rien à écrire côté directory.
+
+**Correctif.** Ne plus copier : garder l'`OwnedBytes`. Il implémente
+`Deref<Target = [u8]>`, donc les `open(b)` et les `.as_deref()` en aval compilent
+inchangés. Appliqué aux trois prescans v3 — contains, fuzzy, regex.
+
+**Mesure** (20 000 fichiers kernel, 320 segments, moyenne sur 2–3 runs ; l'écart
+run-à-run est de ~4 ms, très en dessous des gains) :
+
+| Query | avant | après | |
+|---|---|---|---|
+| `spin_lock` strict | ~161 ms | ~128 ms | **−21 %** |
+| `kmalloc` strict | ~143 ms | ~104 ms | **−27 %** |
+| `include` strict | ~360 ms | ~329 ms | −9 % |
+| `kmalloc` relax | ~1600 ms | ~1590 ms | ≈ 0 |
+| `uint64_t` relax | ~1698 ms | ~1674 ms | ≈ 0 |
+
+**La prédiction de cette section était fausse**, et à l'envers. Elle annonçait un gain
+« probablement significatif sur le relax, qui charge les cinq fichiers, contre trois
+pour le strict ». C'est le **strict** qui gagne 21–27 % ; le relax ne bouge pas d'un
+pouce.
+
+Le raisonnement comptait les fichiers chargés au lieu de comparer le coût du
+chargement au coût du reste. Sur le strict, la copie pesait un cinquième du temps
+total. Sur le relax, les mêmes copies sont noyées dans un travail dix fois plus long
+— celui du pipeline word (§5), désormais seul suspect restant. Le résultat resserre
+donc §5 : le coût du relax n'est ni l'I/O ni le chargement, il est bien dans le walk.
 
 ### 4.5 Le seuil pigeonhole peut être baissé
 
@@ -236,7 +268,8 @@ n-gramme et par requête, plus le décodage des parents associés.
 ### H4 — Deux fichiers de plus à charger par segment
 
 Le strict n'a besoin ni de `posmap` ni de `bytemap` ni de `word_sfxpost`. Le relax charge
-les cinq, avec `.to_vec()` (§4.4). Sur 800 segments ça se voit.
+les cinq (§4.4). Mais les copies liées à ce chargement ont été supprimées et le relax
+n'a rien gagné — ce n'est donc pas là.
 
 ### H5 — Le DFS de siblings branche davantage en word
 
