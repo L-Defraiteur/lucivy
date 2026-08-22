@@ -76,7 +76,55 @@ pub fn contains_v3(
         matches.retain(|m| m.token_end.saturating_sub(m.byte_from) == query_content_len);
     }
 
+    verify_literal(ctx, query_ref, strict_separators, &mut matches);
     matches
+}
+
+/// Drop matches whose text does not actually contain the query.
+///
+/// Chain construction is an over-approximation: it walks the FST and stitches
+/// tokens together, and a stitch that should not have happened produces a match
+/// no filter downstream can recognise as wrong. Two such leaks were found by
+/// scaling to 50k kernel documents — a strict `TableFunction` matching
+/// "migra|table function|", and a strict `__init` chaining `_` + a whole
+/// intermediate token + `init` to hit "spin|_lock_init|".
+///
+/// Rather than chase each stitching rule, check the answer: the predicate here is
+/// exactly the one the ground truth uses — does the text contain the query,
+/// lowercased, separators stripped on both sides in relaxed mode. posmap and
+/// termtexts make that possible without touching the docstore.
+///
+/// Skipped when either file is missing: the pipeline then keeps its previous
+/// behaviour rather than silently dropping everything.
+fn verify_literal(
+    ctx: &BriquesContext<'_>,
+    query: &str,
+    strict_separators: bool,
+    matches: &mut Vec<MatchV3>,
+) {
+    if matches.is_empty() || ctx.posmap.is_none() || ctx.termtexts.is_none() {
+        return;
+    }
+    let strip = !strict_separators;
+    let mut needle = String::with_capacity(query.len());
+    for c in query.chars() {
+        if strip && !is_content_char(c) { continue; }
+        for lc in c.to_lowercase() { needle.push(lc); }
+    }
+    if needle.is_empty() { return; }
+
+    // A chain can span several tokens; one token of slack on each side covers a
+    // match that starts or ends inside a neighbour.
+    let margin = 1u32;
+    let mut window = String::new();
+    matches.retain(|m| {
+        let last_pos = m.position + m.span.saturating_sub(1);
+        if !composite::rebuild_window(ctx, m.doc_id, m.position, last_pos,
+                                      margin, strip, &mut window) {
+            return true; // cannot rebuild — keep, do not invent a rejection
+        }
+        window.contains(&needle)
+    });
 }
 
 // ─── fuzzy_v3 ─────────────────────────────────────────────────────────────

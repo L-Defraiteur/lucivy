@@ -39,6 +39,7 @@ pub fn find_literal_v3(
 
     ctx.trace_enter("find_literal_v3");
     ctx.trace_msg(&format!("params query={} strict={} anchor={}", query, strict_separators, anchor_start));
+    let dbg = std::env::var("V3_DIAG_LITERAL").ok().as_deref() == Some(query);
 
     // ── Single-token matches (all partitions) ────────────────────────
     let candidates = fst_walk::fst_candidates_v3(ctx.reader, query, anchor_start, strict_separators);
@@ -57,6 +58,7 @@ pub fn find_literal_v3(
         let docs: std::collections::HashSet<u32> = single.iter().map(|m| m.doc_id).collect();
         ctx.trace_msg(&format!("  single_docs: {} unique", docs.len()));
     }
+    if dbg { eprintln!("[lit] {query:?} strict={strict_separators} single={}", single.len()); }
     results.extend(single);
 
     // Word-stripped singles (0x02). resolve_single_v3 skips them — their postings
@@ -102,6 +104,18 @@ pub fn find_literal_v3(
         ctx.trace_msg(&format!("chunk_chains falling_walk={}", chains.len()));
         let cross = resolve::resolve_chains_v3(&chains, ctx.resolver, ctx.filter_docs);
         ctx.trace_msg(&format!("chunk_resolved matches={}", cross.len()));
+        if dbg {
+            eprintln!("[lit]   chunk_chains={} -> matches={}", chains.len(), cross.len());
+            for c in chains.iter().take(4) {
+                let texts: Vec<String> = c.ordinals.iter()
+                    .map(|alts| alts.iter().take(2)
+                        .filter_map(|&o| ctx.termtexts.as_ref().and_then(|t| t.text(o as u32)))
+                        .collect::<Vec<_>>().join("|"))
+                    .collect();
+                eprintln!("[lit]     chain sti={} consumed={} last={} tokens={:?}",
+                    c.first_sti, c.total_query_consumed, c.last_consumed, texts);
+            }
+        }
         results.extend(cross);
     }
 
@@ -498,7 +512,7 @@ fn within_edit_distance(query: &[u8], window: &[u8], d: usize, buf: &mut Vec<u32
 /// the fuzzy candidate set can be large, so an allocation per token would be felt.
 /// Each token contributes `text[..own_len]` — the overlap tail belongs to the next
 /// token and would be duplicated.
-fn rebuild_window(
+pub(super) fn rebuild_window(
     ctx: &BriquesContext<'_>,
     doc_id: DocId,
     first_pos: u32,
