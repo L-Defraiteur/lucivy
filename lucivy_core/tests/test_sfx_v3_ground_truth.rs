@@ -33,6 +33,40 @@ fn max_docs(default: usize) -> usize {
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
 }
+/// Parse `V3_QUERIES` into `(value, strict_separators)` pairs.
+///
+/// Accepts `value`, `value:strict` or `value:relax`, comma separated. Shared by
+/// every bench in this file so one spec drives them all — the sharding bench used
+/// to carry its own rag3db-flavoured list, which measures nothing on a kernel tree.
+///
+/// The values come from the environment and are handed to APIs wanting `&'static
+/// str`, so they are leaked: a handful of strings in a test binary.
+fn query_spec() -> Option<Vec<(&'static str, bool)>> {
+    std::env::var("V3_QUERIES").ok().map(|spec| {
+        spec.split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|item| {
+                let (value, strict) = match item.rsplit_once(':') {
+                    Some((v, "relax")) => (v.trim(), false),
+                    Some((v, "strict")) => (v.trim(), true),
+                    _ => (item, true),
+                };
+                let leaked: &'static str = Box::leak(value.to_string().into_boxed_str());
+                (leaked, strict)
+            })
+            .collect()
+    })
+}
+
+/// Documents per commit, i.e. the knob that sets the segment count.
+fn commit_every(default: usize) -> usize {
+    std::env::var("V3_COMMIT_EVERY").ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(default)
+}
+
 const MAX_FILE_SIZE: u64 = 100_000;
 const REPORT_PATH: &str = "/tmp/v3_ground_truth_report.txt";
 
@@ -92,6 +126,53 @@ fn collect_files(max_docs_arg: usize) -> Vec<(String, String)> {
 
 // ─── Index creation ───────────────────────────────────────────────────────
 
+/// Merge parameters, read once from the environment.
+///
+/// `target` is a floor, not a goal to beat: segment count is the prescan's only
+/// unit of parallelism, so merging past it is a pessimisation. Measured on 50k
+/// kernel docs, target 32 overshot to 7 segments and `__init` went from 9.3s to
+/// 18 minutes.
+fn merge_params() -> Option<(usize, usize, bool)> {
+    if std::env::var("V3_MERGE").is_err() { return None; }
+    let target = std::env::var("V3_MERGE_TARGET").ok()
+        .and_then(|v| v.parse().ok()).filter(|&n: &usize| n > 0).unwrap_or(1);
+    let group = std::env::var("V3_MERGE_GROUP").ok()
+        .and_then(|v| v.parse().ok()).filter(|&n: &usize| n > 1).unwrap_or(8);
+    // Merge as we index instead of once at the end. Nothing in the engine
+    // triggers merges on commit — segment_updater_actor::handle_commit defers
+    // them to an explicit start_merge() — so if the harness does not ask
+    // during the loop, every merge lands after the last document.
+    let progressive = std::env::var("V3_MERGE_AT_END").is_err();
+    Some((target, group, progressive))
+}
+
+/// Run one merge round over `ids`, reducing the count towards `target` without
+/// ever going below it. Returns false when nothing is left to do.
+///
+/// A group of `k` segments removes `k - 1` of them, so the number of groups is
+/// chosen from the excess rather than from the total. The previous version
+/// chunked the whole list by a fixed size and divided the count by 8 every
+/// round, which is how a target of 32 became 7.
+fn merge_round(
+    w: &mut ld_lucivy::IndexWriter,
+    ids: &[ld_lucivy::index::SegmentId],
+    target: usize,
+    group: usize,
+) -> bool {
+    let len = ids.len();
+    if len <= target { return false; }
+    let excess = len - target;
+    let k = group.min(excess + 1).max(2);
+    if k > len { return false; }
+    let groups = (excess / (k - 1)).min(len / k);
+    if groups == 0 { return false; }
+    for g in ids[..groups * k].chunks(k) {
+        w.merge(g).unwrap();
+    }
+    true
+}
+
+
 fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
     let config: SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [
@@ -131,6 +212,17 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
             w.add_document(doc).unwrap();
             if (i + 1) % commit_every == 0 {
                 w.commit().unwrap();
+                // Keep the segment count bounded as we go. Left to the end, this
+                // same work merges a much larger pile in one burst — which is what
+                // made every previous run finish with a multi-minute merge.
+                if let Some((target, group, true)) = merge_params() {
+                    let ids = handle.index.searchable_segment_ids().unwrap();
+                    if ids.len() > target.saturating_mul(2) {
+                        if merge_round(w, &ids, target, group) {
+                            w.commit().unwrap();
+                        }
+                    }
+                }
                 if (i + 1) % 5000 == 0 || files.len() < 5000 {
                     eprintln!("  indexed {}/{}", i + 1, files.len());
                 }
@@ -150,15 +242,7 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
     // Merging all of them at once is the one thing no policy would do, and it
     // showed: 18 GB re-indexing, 30 GB remapping. max_docs_before_merge exists to
     // bound exactly that, so respect it and merge in groups.
-    if std::env::var("V3_MERGE").is_ok() {
-        // Stop once few enough segments remain. Merging all the way down to 1 is a
-        // pessimisation: it removes the per-segment parallelism the prescan relies on
-        // (measured 40-49x slower on selective queries). Aim for the core count.
-        let target: usize = std::env::var("V3_MERGE_TARGET").ok()
-            .and_then(|v| v.parse().ok()).filter(|&n| n > 0)
-            .unwrap_or(1);
-        let group: usize = std::env::var("V3_MERGE_GROUP").ok()
-            .and_then(|v| v.parse().ok()).filter(|&n| n > 1).unwrap_or(8);
+    if let Some((target, group, _)) = merge_params() {
         let t = std::time::Instant::now();
         handle.reader.reload().unwrap();
         let before = handle.reader.searcher().segment_readers().len();
@@ -166,20 +250,15 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
         let mut round = 0;
         loop {
             let ids = handle.index.searchable_segment_ids().unwrap();
-            if ids.len() <= target.max(1) || round > 12 { break; }
-            let groups: Vec<Vec<_>> = ids.chunks(group)
-                .filter(|c| c.len() > 1)
-                .map(|c| c.to_vec())
-                .collect();
-            if groups.is_empty() { break; }
-            {
+            if ids.len() <= target || round > 24 { break; }
+            let merged = {
                 let mut guard = handle.writer.lock().unwrap();
                 let w = guard.as_mut().unwrap();
-                for g in &groups {
-                    w.merge(g).unwrap();
-                }
-                w.commit().unwrap();
-            }
+                let did = merge_round(w, &ids, target, group);
+                if did { w.commit().unwrap(); }
+                did
+            };
+            if !merged { break; }
             handle.reader.reload().unwrap();
             let now = handle.reader.searcher().segment_readers().len();
             eprintln!("    merge round {round}: -> {now} segments ({:.1}s)",
@@ -1381,7 +1460,7 @@ fn perf_shape_executor() {
         ("std::unique_ptr", false),
     ];
 
-    for (value, strict) in queries {
+    for (value, strict) in queries.iter().copied() {
         let run = |exec: &Executor| -> (u128, usize) {
             let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
             let config = QueryConfig {
@@ -1429,12 +1508,12 @@ fn perf_shape_sharded() {
     let files = collect_files(5000);
     if files.is_empty() { return; }
 
-    let queries: [(&str, bool); 5] = [
+    let queries: Vec<(&str, bool)> = query_spec().unwrap_or_else(|| vec![
         ("function", true), ("function", false),
         ("include", true),
         ("uint64_t", false),
         ("std::unique_ptr", false),
-    ];
+    ]);
 
     eprintln!("\n=== Sharding shape: {} docs ===\n", files.len());
     // Shard counts to compare. `V3_SHARDS=1,4,8,16` overrides.
@@ -1464,7 +1543,7 @@ fn perf_shape_sharded() {
             doc.add_text(path_f, path);
             doc.add_text(content_f, content);
             h.add_document(doc, i as u64).unwrap();
-            if (i + 1) % 500 == 0 { h.commit().unwrap(); }
+            if (i + 1) % commit_every(500) == 0 { h.commit().unwrap(); }
         }
         h.commit().unwrap();
         h
@@ -1476,7 +1555,7 @@ fn perf_shape_sharded() {
         .collect();
     eprintln!("  (index build: {:.1}s total)\n", t.elapsed().as_secs_f64());
 
-    for (value, strict) in queries {
+    for (value, strict) in queries.iter().copied() {
         let run = |h: &ShardedHandle| -> (u128, usize) {
             let config = QueryConfig {
                 query_type: "contains".into(),

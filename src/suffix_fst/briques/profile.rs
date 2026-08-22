@@ -48,6 +48,12 @@ pub struct Counters {
     pub n_bcfs_walk_reqs: AtomicU64,
     pub n_bcfs_walk_calls: AtomicU64,
     pub n_bcfs_distinct_rem: AtomicU64,
+
+    /// Postings materialised by the chunk chain resolve, and the pair iterations
+    /// they feed.
+    pub n_chain_first: AtomicU64,
+    pub n_chain_entries: AtomicU64,
+    pub n_chain_pairs: AtomicU64,
 }
 
 fn counters() -> &'static Counters {
@@ -116,6 +122,7 @@ pub fn reset() {
         &c.n_puresep_calls, &c.n_puresep_positions,
         &c.n_bcfs_splits, &c.n_bcfs_fst_reqs, &c.n_bcfs_fst_calls,
         &c.n_bcfs_walk_reqs, &c.n_bcfs_walk_calls, &c.n_bcfs_distinct_rem,
+        &c.n_chain_first, &c.n_chain_entries, &c.n_chain_pairs,
     ] {
         a.store(0, Ordering::Relaxed);
     }
@@ -160,6 +167,10 @@ pub fn dump() -> String {
         g(&c.n_bcfs_fst_calls), g(&c.n_bcfs_fst_reqs),
         g(&c.n_bcfs_walk_calls), g(&c.n_bcfs_walk_reqs),
         g(&c.n_bcfs_distinct_rem),
+    ));
+    s.push_str(&format!(
+        "  chunk resolve: {} first-position postings, {} entries, {} pair iterations\n",
+        g(&c.n_chain_first), g(&c.n_chain_entries), g(&c.n_chain_pairs),
     ));
     s
 }

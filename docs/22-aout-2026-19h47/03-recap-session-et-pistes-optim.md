@@ -234,63 +234,100 @@ chargeait **tous** les fichiers de **tous** les segments avant de commencer : 30
 
 ---
 
-## 5. Le pipeline word — pourquoi il est lent
+## 5. Le pipeline word n'est pas lent — la mesure l'était [mesuré]
 
-Mesuré : le relax coûte **~15× le strict**. Sur 50k docs / 800 segments,
-`spin_lock relax` 6,9 s contre 0,5 s en strict ; `ku_dynamic_cast` 605 ms contre 45 ms
-sur rag3db. Soit ~10 ms par segment contre 0,7 ms.
+**Cette section disait le contraire, et se trompait entièrement.** Elle annonçait un
+relax à ~15× le strict, listait six hypothèses classées par suspicion, et désignait
+`intermediates_are_pure_sep` comme suspect principal. Rien de tout cela ne tient.
 
-Aucune de ces hypothèses n'est mesurée — elles sont classées par suspicion décroissante,
-et la première chose à faire est d'**instrumenter le temps par étage** dans
-`find_literal_v3`, comme `V3_DIAG_LITERAL` le fait déjà pour les comptages.
+### La cause : le grep de référence était dans le chronomètre
 
-### H1 — Le relax exécute les deux pipelines, pas un seul
+Le harnais de bench n'avait qu'un seul `Instant`, démarré **avant** le calcul de la
+vérité terrain :
 
-`find_literal_v3` fait toujours les chaînes chunk, **puis** ajoute les chaînes word si
-`!strict_separators`. Le relax ne remplace donc pas le strict, il s'y ajoute. À lui seul
-ça expliquerait un facteur 2, pas 15.
+```rust
+let t = std::time::Instant::now();
+let grep_set = if q.strict_sep { grep_docs_strict(..) } else { grep_docs_relaxed(..) };
+let v3_result = search_v3(..);
+let ms = t.elapsed()...;   // grep + moteur
+```
 
-### H2 — `intermediates_are_pure_sep` est un balayage par position
+Toutes les latences publiées dans les rapports de session portaient donc un scan complet
+du corpus. Et l'écart entre modes n'était pas neutre : `grep_docs_relaxed` applique
+`strip_seps` à chaque fichier avant de chercher, là où `grep_docs_strict` ne fait qu'un
+`contains`. Le prétendu « ×15 du relax » était cette différence-là.
 
-`resolve_chains_v3_relaxed` et `resolve_word_chains_v3` acceptent des trous entre
-positions, et vérifient chaque position intermédiaire via `posmap.ordinal_at` puis
-`bytemap`. Le coût est donc `O(taille du trou)` **par paire de candidats**, alors que le
-strict exige `pos+1` et ne vérifie rien.
+Séparés (20 000 fichiers kernel, 320 segments) :
 
-C'est mon suspect principal : le coût est quadratique en densité de candidats, et les
-requêtes lentes sont précisément celles à fort rappel.
+| Query | v3 | grep | ce qu'on lisait |
+|---|---|---|---|
+| `kmalloc` strict | 63 ms | 34 ms | ~150 ms |
+| `kmalloc` relax | **60 ms** | **1500 ms** | ~1600 ms |
+| `spin_lock` strict | 84 ms | 30 ms | ~160 ms |
+| `spin_lock` relax | **72 ms** | 1691 ms | — |
 
-### H3 — Trois partitions scannées au lieu de deux
+En relax, le moteur est à 60 ms. Sur `spin_lock` il est même **plus rapide** que le
+strict. Les deux chronomètres sont désormais distincts et le rapport affiche
+`(… ms v3, … ms grep)`.
 
-En relax, `fst_candidates_v3` scanne `[0x00, 0x01, 0x02]`. Un range scan de plus par
-n-gramme et par requête, plus le décodage des parents associés.
+### Ce que le profilage a réellement montré
 
-### H4 — Deux fichiers de plus à charger par segment
+Répartition CPU par étage (`V3_PROFILE=1`, cumul sur les segments) :
 
-Le strict n'a besoin ni de `posmap` ni de `bytemap` ni de `word_sfxpost`. Le relax charge
-les cinq (§4.4). Mais les copies liées à ce chargement ont été supprimées et le relax
-n'a rien gagné — ce n'est donc pas là.
+| | kmalloc str | kmalloc rlx | include str | uint64_t rlx |
+|---|---|---|---|---|
+| **chunk walk** | **86,0 %** | **78,0 %** | **93,3 %** | **96,6 %** |
+| chunk resolve | 6,6 % | 6,5 % | 5,3 % | 1,1 % |
+| chunk sibling DFS | 5,2 % | 4,4 % | 1,2 % | 0,4 % |
+| single | 2,1 % | 2,6 % | 0,2 % | 0,1 % |
+| tout le pipeline word | 0 % | 8,4 % | 0 % | 1,8 % |
 
-### H5 — Le DFS de siblings branche davantage en word
+Sort de H1 à H6 :
 
-`falling_walk_words` + `splits_from_fst_candidates` produisent les splits, puis
-`sibling_chain_dfs` explore. Les entrées word-stripped ont un overlap de contenu, donc
-davantage de clés partagent un préfixe, donc plus de branches.
+- **H2 (suspect principal) — mort.** `intermediates_are_pure_sep` : 409 appels pour 409
+  positions balayées, 11 780 pour 11 780. Exactement une position par appel : la boucle
+  ne boucle jamais. Coût nul.
+- **H1 — vrai mais négligeable.** Le relax ajoute bien le pipeline word au pipeline
+  chunk, mais cet ajout pèse 1,8 à 8,4 %, pas un facteur 2.
+- **H3, H5, H6 — sans objet.** Le pipeline word entier tient sous 10 %.
+- **H4 — déjà réfutée** en §4.4, pour une raison distincte.
 
-### H6 — La vérification a plus de matches à traiter
+### Le vrai point chaud, et son correctif
 
-`verify_literal` reconstruit une fenêtre par match. Le relax produit mécaniquement plus
-de matches que le strict, donc paie plus. Effet réel mais probablement du second ordre —
-et c'est le prix de la correction, pas un défaut.
+`cross_chunk_chain_v3`, via `build_chains_from_splits`, pesait 78 à 96 % du temps moteur
+**dans les deux modes**. Le pipeline word n'y était pour rien.
 
-### Comment trancher
+La cause est une redondance. Tout remainder walké par cette boucle est un **suffixe de la
+requête** : le premier est `query_lower[safe_start..]` et chaque étape ne rogne que par
+l'avant. Il y en a donc au plus `query_lower.len()`, quel que soit le nombre de splits —
+mais le walk FST était refait pour chacun des dizaines de milliers de splits :
 
-1. Chronométrer chaque étage de `find_literal_v3` (single / chunk chains / word chains /
-   verify) et sortir la répartition sur `ku_dynamic_cast` strict vs relax. Une seule
-   mesure suffit à éliminer trois hypothèses.
-2. Si H2 se confirme, borner la taille des trous acceptés en relax : au-delà de N
-   positions, la vérification finale tranchera de toute façon.
-3. H4 se teste en mesurant le temps de `prescan_segment_v3` hors résolution.
+| query | appels `fst_candidates` | remainders distincts | redondance |
+|---|---|---|---|
+| `kmalloc` | 11 679 | 756 | 15× |
+| `uint64_t` | 56 609 | 2 228 | 25× |
+| `include` | 94 414 | 1 212 | **78×** |
+
+Correctif : mémo sur l'offset de début, qui identifie un suffixe de façon unique.
+
+| | chunk walk avant | après | mural avant | après |
+|---|---|---|---|---|
+| `include` strict | 2675 ms | 213 ms (−92 %) | 303 ms | 147 ms |
+| `uint64_t` relax | 2690 ms | 277 ms (−90 %) | 169 ms | 71 ms |
+| `spin_lock` strict | 586 ms | 143 ms (−76 %) | 84 ms | 65 ms |
+| `kmalloc` strict | 178 ms | 60 ms (−66 %) | 63 ms | 62 ms |
+
+(Les totaux CPU dépassent le temps mural : le prescan est parallélisé par segment via
+luciole, ce sont des temps cumulés sur les threads. À lire comme des parts.)
+
+### La leçon
+
+Six hypothèses ont été formulées, classées et argumentées sur un chiffre que personne
+n'avait vérifié. Le suspect principal ne consommait rien ; le vrai coupable n'était dans
+aucune des six, et n'était même pas dans le pipeline incriminé.
+
+**Avant d'expliquer un écart, vérifier qu'il existe.** Un chronomètre qui englobe la
+vérité terrain ne mesure pas le moteur.
 
 ---
 

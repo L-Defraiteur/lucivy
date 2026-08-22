@@ -8,6 +8,7 @@
 //! - `selectivity_v3`: estimate selectivity without resolving postings
 
 use std::collections::HashSet;
+use fnv::FnvHashMap;
 
 use crate::DocId;
 use crate::query::posting_resolver::{PostingEntry, PostingResolver};
@@ -279,20 +280,21 @@ pub fn resolve_word_chains_v3(
             if active.is_empty() { break; }
 
             // Resolve from word sfxpost first, fall back to chunk resolver
+            // Only active documents can extend a chain — see the note in
+            // resolve_chains_impl.
+            let active_docs: HashSet<DocId> =
+                active.iter().map(|&(doc_id, ..)| doc_id).collect();
             let mut entries: Vec<(WordPostingEntry, u64)> = Vec::new();
             for &ord in &chain.ordinals[ord_idx] {
                 let word_entries = word_sfxpost.entries(ord as u32);
                 if !word_entries.is_empty() {
                     for e in word_entries {
+                        if !active_docs.contains(&e.doc_id) { continue; }
                         entries.push((e, ord));
                     }
                 } else {
                     // Chunk ordinal — convert PostingEntry to WordPostingEntry
-                    let chunk_entries = if let Some(filter) = filter_docs {
-                        chunk_resolver.resolve_filtered(ord, filter)
-                    } else {
-                        chunk_resolver.resolve(ord)
-                    };
+                    let chunk_entries = chunk_resolver.resolve_filtered(ord, &active_docs);
                     for e in chunk_entries {
                         entries.push((WordPostingEntry {
                             doc_id: e.doc_id,
@@ -307,15 +309,24 @@ pub fn resolve_word_chains_v3(
 
             super::profile::bump(|c| &c.n_word_entries, entries.len() as u64);
 
+            // Same quadratic as in resolve_chains_impl, same fix: index by
+            // document first. Measured 175 million pair iterations on
+            // `uint64_t` relax over 50k documents.
+            let mut by_doc: FnvHashMap<DocId, Vec<u32>> = FnvHashMap::default();
+            for (i, (e, _)) in entries.iter().enumerate() {
+                by_doc.entry(e.doc_id).or_default().push(i as u32);
+            }
+
             let mut new_active: Vec<(DocId, u32, u32, u32, u32, u64)> = Vec::new();
 
             for &(doc_id, prev_last_pos, byte_from_first, _, _, _) in &active {
-                for (e, ord) in &entries {
+                let Some(idxs) = by_doc.get(&doc_id) else { continue };
+                for &i in idxs {
+                    let (e, ord) = &entries[i as usize];
                     // Counted per iteration: the inner loop breaks on the first
                     // valid entry, so active.len() * entries.len() would be an
                     // upper bound, not the scan actually performed.
                     super::profile::bump(|c| &c.n_word_pairs, 1);
-                    if e.doc_id != doc_id { continue; }
                     // Use first_position of the next word for adjacency check
                     // against last_position of the previous word
                     let next_first_pos = e.first_position;
@@ -384,16 +395,33 @@ fn resolve_chains_impl(
 ) -> Vec<MatchV3> {
     let mut results = Vec::new();
 
+    // Position 0 has no active set to prune against, so its postings are resolved
+    // in full — and chains overwhelmingly share their starting ordinals. Caching
+    // by that ordinal list turned 39 million first-position postings into the
+    // handful of distinct lists actually involved, on `include`.
+    let mut first_memo: FnvHashMap<Vec<u64>, std::rc::Rc<Vec<PostingEntry>>> =
+        FnvHashMap::default();
+
     for chain in chains {
         if chain.ordinals.is_empty() {
             continue;
         }
 
         // Resolve all alternatives at position 0
-        let first_entries = resolve_alternatives(resolver, &chain.ordinals[0], filter_docs);
+        let first_entries = match first_memo.get(&chain.ordinals[0]) {
+            Some(hit) => hit.clone(),
+            None => {
+                let v = std::rc::Rc::new(
+                    resolve_alternatives(resolver, &chain.ordinals[0], filter_docs));
+                super::profile::bump(|c| &c.n_chain_first, v.len() as u64);
+                first_memo.insert(chain.ordinals[0].clone(), v.clone());
+                v
+            }
+        };
+        let first_entries: &[PostingEntry] = &first_entries;
 
         if chain.ordinals.len() == 1 {
-            for e in &first_entries {
+            for e in first_entries {
                 let bf = e.byte_from + chain.first_sti as u32;
                 results.push(MatchV3 {
                     doc_id: e.doc_id,
@@ -428,20 +456,43 @@ fn resolve_chains_impl(
 
             // Union postings from all alternative ordinals at this position,
             // tagging each with its ordinal for word map verification.
+            //
+            // Only documents still in the active set can extend a chain, so ask
+            // the resolver for those and nothing else. Materialising the full
+            // posting list and discarding it in the pairing loop cost 264 million
+            // entries on `spin_lock` over a 32-segment merged index, against
+            // 1.8 million that were actually paired.
+            let active_docs: HashSet<DocId> =
+                active.iter().map(|&(doc_id, ..)| doc_id).collect();
             let mut entries: Vec<(PostingEntry, u64)> = Vec::new();
             for &ord in &chain.ordinals[ord_idx] {
-                for e in resolver.resolve(ord) {
+                for e in resolver.resolve_filtered(ord, &active_docs) {
                     entries.push((e, ord));
                 }
+            }
+            super::profile::bump(|c| &c.n_chain_entries, entries.len() as u64);
+
+            // Index the postings by document before pairing them with the active
+            // set. Both lists grow linearly with the segment, so scanning all of
+            // `entries` for every active element is quadratic in segment size —
+            // invisible across many small segments, dominant on merged ones
+            // (measured 98.9% of query time on a 32-segment merged index).
+            //
+            // Indices are pushed in order and walked in order, so each active
+            // element still sees its candidates exactly as before: the `break` on
+            // first match picks the same entry it used to.
+            let mut by_doc: FnvHashMap<DocId, Vec<u32>> = FnvHashMap::default();
+            for (i, (e, _)) in entries.iter().enumerate() {
+                by_doc.entry(e.doc_id).or_default().push(i as u32);
             }
 
             let mut new_active: Vec<(DocId, u32, u32, u32, u32, u64)> = Vec::new();
 
             for &(doc_id, prev_pos, byte_from_first, byte_to_prev, _, _) in &active {
-                for (e, ord) in &entries {
-                    if e.doc_id != doc_id {
-                        continue;
-                    }
+                let Some(idxs) = by_doc.get(&doc_id) else { continue };
+                for &i in idxs {
+                    super::profile::bump(|c| &c.n_chain_pairs, 1);
+                    let (e, ord) = &entries[i as usize];
 
                     let valid = match &adjacency {
                         AdjacencyMode::Strict => {
