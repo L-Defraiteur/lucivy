@@ -200,6 +200,7 @@ impl Node for AssembleV3Node {
                 sep_len: meta.sep_len,
                 overlap_len: meta.overlap_len,
                 is_word_start: meta.is_word_start,
+                is_word_stripped: meta.is_word_stripped,
             });
         }
         let termtexts = tt_writer.serialize();
@@ -347,7 +348,9 @@ pub fn merge_segments_v3_chunks_only(
                     is_word_start: meta.is_word_start,
                     word_id: 0, // word_id is segment-local, not meaningful across merge
                     content_overlap: None, // Not preserved across merge (re-computed from tokens)
-                    is_word_stripped: false,
+                    // Now persisted in TTX3. Segments written before that carry 0
+                    // and read back as false — same as the old hardcode.
+                    is_word_stripped: meta.is_word_stripped,
                 });
                 token_postings.push(Vec::new());
                 new_ord
@@ -703,8 +706,15 @@ mod tests {
 
         for ord in 0..tt.num_terms() {
             let (text, meta) = tt.entry(ord).unwrap();
+            // Word-stripped entries (partition 0x02) are deliberately absent from
+            // the chunk partitions — BuildFstV3Node skips them. Before the tag was
+            // persisted in TTX3, the merge path marked every entry as chunk, so
+            // they were wrongly fed to add_token and did resolve here. They must
+            // not any more.
+            if meta.is_word_stripped { continue; }
             let parents = reader.resolve_suffix(text);
-            let p = parents.iter().find(|p| p.sti == 0).unwrap();
+            let p = parents.iter().find(|p| p.sti == 0)
+                .unwrap_or_else(|| panic!("no sti=0 parent for chunk entry '{text}'"));
             assert_eq!(p.own_len, meta.own_len, "own_len roundtrip for '{text}'");
             assert_eq!(p.sep_len, meta.sep_len, "sep_len roundtrip for '{text}'");
             assert_eq!(p.overlap_len, meta.overlap_len, "overlap roundtrip for '{text}'");

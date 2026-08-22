@@ -4,7 +4,8 @@
 //!
 //! Sections:
 //!   0x01 — TEXTS: offset table + concatenated UTF-8 texts (same as v2 TTXT)
-//!   0x02 — META:  per-ordinal metadata array (own_len, sep_len, overlap_len, is_word_start)
+//!   0x02 — META:  per-ordinal metadata array (own_len, sep_len, overlap_len,
+//!                is_word_start, is_word_stripped)
 //!
 //! The texts are the EXTENDED tokens (e.g., "mutex_lo" not "mutex_").
 //! The metadata allows the merge process to re-feed tokens to the builder
@@ -25,6 +26,15 @@ pub struct TermMetaV3 {
     pub sep_len: u8,
     pub overlap_len: u8,
     pub is_word_start: bool,
+    /// Which half of the model this ordinal belongs to: chunk (partitions
+    /// 0x00/0x01, postings in `.sfxpost`, chunk-level coordinates) or
+    /// word-stripped (partition 0x02, postings in `.word_sfxpost`, word-level).
+    ///
+    /// The collector separates the two by prefixing intern keys — but those
+    /// prefixes only ever existed in memory. Persisting the tag is what lets a
+    /// reader rebuild the partition instead of guessing; without it, any structure
+    /// keyed on text alone silently fuses the two.
+    pub is_word_stripped: bool,
 }
 
 // ─── Writer ────────────────────────────────────────────────────────────────
@@ -55,8 +65,7 @@ impl TermTextsWriterV3 {
         if ord >= self.texts.len() {
             self.texts.resize(ord + 1, Vec::new());
             self.metas.resize(ord + 1, TermMetaV3 {
-                own_len: 0, sep_len: 0, overlap_len: 0, is_word_start: false,
-            });
+                own_len: 0, sep_len: 0, overlap_len: 0, is_word_start: false, is_word_stripped: false });
         }
         self.texts[ord] = text.as_bytes().to_vec();
         self.metas[ord] = meta;
@@ -99,7 +108,7 @@ impl TermTextsWriterV3 {
     }
 
     fn serialize_meta(&self) -> Vec<u8> {
-        // 6 bytes per entry: own_len(2) + sep_len(1) + overlap_len(1) + is_word_start(1) + reserved(1)
+        // 6 bytes/entry: own_len(2) sep_len(1) overlap_len(1) is_word_start(1) is_word_stripped(1)
         let num = self.metas.len() as u32;
         let mut buf = Vec::with_capacity(4 + self.metas.len() * 6);
         buf.extend_from_slice(&num.to_le_bytes());
@@ -108,7 +117,9 @@ impl TermTextsWriterV3 {
             buf.push(m.sep_len);
             buf.push(m.overlap_len);
             buf.push(if m.is_word_start { 1 } else { 0 });
-            buf.push(0); // reserved
+            // Was `reserved`. Old files carry 0 here, which reads back as
+            // is_word_stripped=false — the same value the merge path hardcoded.
+            buf.push(if m.is_word_stripped { 1 } else { 0 });
         }
         buf
     }
@@ -192,6 +203,7 @@ impl<'a> TermTextsReaderV3<'a> {
             sep_len: data[pos + 2],
             overlap_len: data[pos + 3],
             is_word_start: data[pos + 4] != 0,
+            is_word_stripped: data[pos + 5] != 0,
         })
     }
 
@@ -230,11 +242,9 @@ mod tests {
     fn test_roundtrip_basic() {
         let mut writer = TermTextsWriterV3::new();
         writer.add(0, "mutex_lo", TermMetaV3 {
-            own_len: 6, sep_len: 1, overlap_len: 2, is_word_start: true,
-        });
+            own_len: 6, sep_len: 1, overlap_len: 2, is_word_start: true, is_word_stripped: true });
         writer.add(1, "lock", TermMetaV3 {
-            own_len: 4, sep_len: 0, overlap_len: 0, is_word_start: true,
-        });
+            own_len: 4, sep_len: 0, overlap_len: 0, is_word_start: true, is_word_stripped: false });
 
         let bytes = writer.serialize();
         let reader = TermTextsReaderV3::open(&bytes).unwrap();
@@ -254,6 +264,13 @@ mod tests {
         assert_eq!(meta1.sep_len, 0);
         assert_eq!(meta1.overlap_len, 0);
         assert!(meta1.is_word_start);
+
+        // The partition tag must survive the round-trip: it is the only thing that
+        // tells a reader whether an ordinal's postings live in .sfxpost (chunk) or
+        // .word_sfxpost (word-stripped). Losing it is what lets a text-keyed
+        // structure fuse the two halves of the model.
+        assert!(meta0.is_word_stripped, "partition tag lost for ordinal 0");
+        assert!(!meta1.is_word_stripped, "partition tag wrong for ordinal 1");
     }
 
     #[test]
@@ -266,6 +283,7 @@ mod tests {
                 sep_len: 0,
                 overlap_len: if i < 99 { 2 } else { 0 },
                 is_word_start: i % 3 == 0,
+                is_word_stripped: i % 7 == 0,
             });
         }
 
@@ -273,6 +291,10 @@ mod tests {
         let reader = TermTextsReaderV3::open(&bytes).unwrap();
 
         assert_eq!(reader.num_terms(), 100);
+        for i in 0..100u32 {
+            assert_eq!(reader.meta(i).unwrap().is_word_stripped, i % 7 == 0,
+                "partition tag mismatch at ordinal {i}");
+        }
         for i in 0..100 {
             let expected = format!("token_{i}");
             assert_eq!(reader.text(i), Some(expected.as_str()));
@@ -286,8 +308,7 @@ mod tests {
     fn test_entry() {
         let mut writer = TermTextsWriterV3::new();
         writer.add(0, "getEleme", TermMetaV3 {
-            own_len: 8, sep_len: 0, overlap_len: 2, is_word_start: true,
-        });
+            own_len: 8, sep_len: 0, overlap_len: 2, is_word_start: true, is_word_stripped: false });
 
         let bytes = writer.serialize();
         let reader = TermTextsReaderV3::open(&bytes).unwrap();
@@ -301,8 +322,8 @@ mod tests {
     #[test]
     fn test_iter() {
         let mut writer = TermTextsWriterV3::new();
-        writer.add(0, "aaa", TermMetaV3 { own_len: 3, sep_len: 0, overlap_len: 0, is_word_start: true });
-        writer.add(1, "bbb", TermMetaV3 { own_len: 3, sep_len: 0, overlap_len: 0, is_word_start: false });
+        writer.add(0, "aaa", TermMetaV3 { own_len: 3, sep_len: 0, overlap_len: 0, is_word_start: true, is_word_stripped: false });
+        writer.add(1, "bbb", TermMetaV3 { own_len: 3, sep_len: 0, overlap_len: 0, is_word_start: false, is_word_stripped: false });
 
         let bytes = writer.serialize();
         let reader = TermTextsReaderV3::open(&bytes).unwrap();
@@ -318,7 +339,7 @@ mod tests {
     #[test]
     fn test_out_of_bounds() {
         let mut writer = TermTextsWriterV3::new();
-        writer.add(0, "hello", TermMetaV3 { own_len: 5, sep_len: 0, overlap_len: 0, is_word_start: true });
+        writer.add(0, "hello", TermMetaV3 { own_len: 5, sep_len: 0, overlap_len: 0, is_word_start: true, is_word_stripped: false });
 
         let bytes = writer.serialize();
         let reader = TermTextsReaderV3::open(&bytes).unwrap();
@@ -342,8 +363,7 @@ mod tests {
     fn test_utf8_text() {
         let mut writer = TermTextsWriterV3::new();
         writer.add(0, "café_la", TermMetaV3 {
-            own_len: 6, sep_len: 1, overlap_len: 2, is_word_start: true,
-        });
+            own_len: 6, sep_len: 1, overlap_len: 2, is_word_start: true, is_word_stripped: false });
 
         let bytes = writer.serialize();
         let reader = TermTextsReaderV3::open(&bytes).unwrap();
@@ -372,8 +392,7 @@ mod tests {
                 own_len: meta.own_len,
                 sep_len: meta.sep_len,
                 overlap_len: meta.overlap_len,
-                is_word_start: meta.is_word_start,
-            });
+                is_word_start: meta.is_word_start, is_word_stripped: false });
         }
 
         let bytes = writer.serialize();
