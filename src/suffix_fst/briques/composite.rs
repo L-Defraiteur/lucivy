@@ -359,6 +359,16 @@ pub struct TrigramChain {
     pub last_pos: u32,
 }
 
+/// How many raw bytes of separators a chain step may span beyond the query gap.
+///
+/// Only meaningful because the query is compared in stripped space while hits are
+/// in raw space. Loose retrieval is safe here: `verify_candidates` re-checks every
+/// surviving document against the real text.
+const MAX_SEPARATOR_SLACK: i32 = 8;
+
+/// How many distinct chains we keep per document.
+const MAX_CHAINS_PER_DOC: usize = 8;
+
 /// Build chains of adjacent trigram hits per document.
 ///
 /// For each doc, sorts hits by byte_from. Builds chains where consecutive
@@ -387,61 +397,60 @@ pub fn build_trigram_chains(
         let mut sorted: Vec<&TrigramHit> = doc_hits.iter().copied().collect();
         sorted.sort_by_key(|h| h.byte_from);
 
-        // For each hit as potential chain start, extend greedily.
-        // Track the best chain per doc.
-        let mut best_chain: Vec<usize> = Vec::new();
-        let mut best_bf = 0u32;
-        let mut best_bt = 0u32;
-        let mut best_first_pos = 0u32;
-        let mut best_last_pos = 0u32;
+        // Keep several chains per doc, not just the longest one.
+        //
+        // Anchoring a document on its single best chain means a longer decoy hides a
+        // real match elsewhere in the same file — and the real one is often exactly
+        // at the threshold. `retrun` chains only 3 bigrams over
+        // "asse|rt run|scripts" (tr, ru, un), so any 4-bigram coincidence elsewhere
+        // in the document evicted it. Only worth doing together with the separator
+        // slack above: without it that chain never formed in the first place.
+        // It also unpins doc_tf, which was stuck at 1 for every document.
+        let mut found: Vec<(Vec<usize>, u32, u32, u32, u32)> = Vec::new();
 
         for start in 0..sorted.len() {
             let mut chain = vec![sorted[start].tri_idx];
             let mut prev_bf = sorted[start].byte_from as i32;
             let mut prev_qp = query_positions[sorted[start].tri_idx] as i32;
             let mut chain_last_pos = sorted[start].position;
+            let mut last_bt = sorted[start].byte_to;
 
             for j in (start + 1)..sorted.len() {
                 let h = sorted[j];
                 let qp = query_positions[h.tri_idx] as i32;
-
-                // Must be a later trigram in the query
                 if qp <= prev_qp { continue; }
 
-                // Check byte adjacency: the byte gap should match the query gap ± d
                 let expected_gap = qp - prev_qp;
                 let actual_gap = h.byte_from as i32 - prev_bf;
-                if (actual_gap - expected_gap).abs() <= d {
+                let delta = actual_gap - expected_gap;
+                if delta >= -d && delta <= d + MAX_SEPARATOR_SLACK {
                     chain.push(h.tri_idx);
                     prev_bf = h.byte_from as i32;
                     prev_qp = qp;
                     chain_last_pos = h.position;
+                    last_bt = h.byte_to;
                 }
             }
 
-            if chain.len() > best_chain.len() {
-                best_chain = chain;
-                best_bf = sorted[start].byte_from;
-                best_first_pos = sorted[start].position;
-                best_last_pos = chain_last_pos;
-                // Find byte_to from the last hit in the chain
-                let last_tri = *best_chain.last().unwrap();
-                best_bt = sorted.iter()
-                    .filter(|h| h.tri_idx == last_tri && h.byte_from >= best_bf)
-                    .map(|h| h.byte_to)
-                    .next()
-                    .unwrap_or(best_bf);
-            }
+            found.push((chain, sorted[start].byte_from, last_bt,
+                        sorted[start].position, chain_last_pos));
         }
 
-        if !best_chain.is_empty() {
+        // Longest first, then a bounded, distinct sample: wide enough to cover
+        // several locations, bounded so a hit-dense document cannot explode the
+        // candidate set. Verification prunes whatever survives.
+        found.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        let mut seen_starts: HashSet<u32> = HashSet::new();
+        for (chain, bf, bt, first_pos, last_pos) in found {
+            if seen_starts.len() >= MAX_CHAINS_PER_DOC { break; }
+            if !seen_starts.insert(bf) { continue; }
             chains.push(TrigramChain {
                 doc_id,
-                trigram_indices: best_chain,
-                byte_from: best_bf,
-                byte_to: best_bt,
-                first_pos: best_first_pos,
-                last_pos: best_last_pos.max(best_first_pos),
+                trigram_indices: chain,
+                byte_from: bf,
+                byte_to: bt.max(bf),
+                first_pos,
+                last_pos: last_pos.max(first_pos),
             });
         }
     }
