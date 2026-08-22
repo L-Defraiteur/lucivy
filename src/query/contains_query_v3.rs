@@ -115,6 +115,43 @@ strict_separators: bool,
 
 
 impl ContainsQueryV3 {
+    /// Prescan a single segment. `None` when the segment has no SFX file.
+    fn prescan_one(
+        &self,
+        seg_reader: &SegmentReader,
+    ) -> crate::Result<Option<(crate::index::SegmentId, Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)>> {
+        use crate::suffix_fst::section_file::detect_sfx_version;
+
+        let segment_id = seg_reader.segment_id();
+        let sfx_data = match seg_reader.sfx_file(self.field) {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+        let sfx_bytes = sfx_data.read_bytes().map_err(|e|
+            crate::LucivyError::SystemError(format!("prescan read .sfx: {e}")))?;
+
+        let version = detect_sfx_version(sfx_bytes.as_ref()).unwrap_or(1);
+        let (doc_tf, highlights) = if version == 3 {
+            self.prescan_segment_v3(seg_reader, &sfx_bytes)?
+        } else {
+            self.prescan_segment_v2(seg_reader, &sfx_bytes)?
+        };
+        Ok(Some((segment_id, doc_tf, highlights)))
+    }
+
+    fn record_prescan(
+        &mut self,
+        segment_id: crate::index::SegmentId,
+        doc_tf: Vec<(DocId, u32)>,
+        highlights: Vec<(DocId, usize, usize)>,
+    ) {
+        self.global_doc_freq += doc_tf.len() as u64;
+        self.prescan_cache.insert(
+            (self.cache_key(), segment_id),
+            CachedPrescan::new(doc_tf, highlights),
+        );
+    }
+
     pub fn new(raw_field: Field, query_text: String) -> Self {
         Self {
             field: raw_field,
@@ -238,33 +275,64 @@ impl ContainsQueryV3 {
 // ─── Query trait ──────────────────────────────────────────────────────────
 
 impl Query for ContainsQueryV3 {
+    /// Prescan every segment, in parallel when the caller allows it.
+    ///
+    /// This is where a contains query spends essentially all its time: weight() is
+    /// called before executor.map in Searcher::search_with_executor, so a
+    /// multi-thread search executor parallelises a phase that costs nothing while
+    /// this loop stays serial (measured: 1.0x speedup on 80 segments / 24 threads).
+    ///
+    /// Fan-out goes through luciole, never through raw threads: the scheduler is the
+    /// only construct that survives the WASM build. execute_dag additionally runs
+    /// every node inline when it detects a scheduler thread, an actor handler, or a
+    /// cooperative wait, so the sharded path — where this already runs inside an
+    /// actor — degrades to the sequential loop instead of nesting pools. Nothing to
+    /// lose there: the shards are parallel with each other already.
     fn prescan_segments(&mut self, segments: &[&SegmentReader]) -> crate::Result<()> {
-        use crate::suffix_fst::section_file::detect_sfx_version;
-
         self.prescan_cache.clear();
         self.global_doc_freq = 0;
 
-        for seg_reader in segments {
-            let segment_id = seg_reader.segment_id();
-            let sfx_data = match seg_reader.sfx_file(self.field) {
-                Some(d) => d,
-                None => continue,
-            };
-            let sfx_bytes = sfx_data.read_bytes().map_err(|e|
-                crate::LucivyError::SystemError(format!("prescan read .sfx: {e}")))?;
+        // One segment, or nothing to do: not worth building a DAG.
+        if segments.len() <= 1 {
+            for seg_reader in segments {
+                if let Some((segment_id, doc_tf, highlights)) = self.prescan_one(seg_reader)? {
+                    self.record_prescan(segment_id, doc_tf, highlights);
+                }
+            }
+            return Ok(());
+        }
 
-            let version = detect_sfx_version(sfx_bytes.as_ref()).unwrap_or(1);
-            let (doc_tf, highlights) = if version == 3 {
-                self.prescan_segment_v3(seg_reader, &sfx_bytes)?
-            } else {
-                self.prescan_segment_v2(seg_reader, &sfx_bytes)?
-            };
+        type SegOutcome = Option<(crate::index::SegmentId, Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)>;
 
-            self.global_doc_freq += doc_tf.len() as u64;
-            self.prescan_cache.insert(
-                (self.cache_key(), segment_id),
-                CachedPrescan::new(doc_tf, highlights),
-            );
+        let names: Vec<String> = (0..segments.len()).map(|i| format!("seg_{i}")).collect();
+        let mut tasks: Vec<(&str, Box<dyn FnOnce() -> Result<luciole::port::PortValue, String> + Send + 'static>)> =
+            Vec::with_capacity(segments.len());
+
+        for (i, seg_reader) in segments.iter().enumerate() {
+            // SegmentReader is Arc-backed, so this clone is cheap and gives the
+            // closure the 'static ownership the scheduler requires.
+            let seg = (*seg_reader).clone();
+            let probe = self.clone();
+            tasks.push((names[i].as_str(), Box::new(move || {
+                let outcome: SegOutcome = probe.prescan_one(&seg)
+                    .map_err(|e| format!("prescan segment: {e}"))?;
+                Ok(luciole::port::PortValue::new(outcome))
+            })));
+        }
+
+        let mut dag = luciole::scatter::build_scatter_dag(tasks);
+        let mut result = luciole::execute_dag(&mut dag, None)
+            .map_err(|e| crate::LucivyError::SystemError(format!("prescan DAG: {e}")))?;
+        let map = result
+            .take_output::<std::collections::HashMap<String, luciole::port::PortValue>>("collect", "results")
+            .ok_or_else(|| crate::LucivyError::SystemError("prescan DAG: no results".into()))?;
+        let mut scatter = luciole::ScatterResults::from(map);
+
+        // Drain in segment order so the cache is built deterministically.
+        for name in &names {
+            if let Some(Some((segment_id, doc_tf, highlights))) = scatter.take::<SegOutcome>(name) {
+                self.record_prescan(segment_id, doc_tf, highlights);
+            }
         }
         Ok(())
     }
