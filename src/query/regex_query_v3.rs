@@ -94,10 +94,15 @@ impl RegexQueryV3 {
             .and_then(|d| d.read_bytes().ok())
             .map(|b| b.as_ref().to_vec());
 
+        let sibling_bytes = seg_reader.sfx_index_file("sibling_v3", self.field)
+            .and_then(|d| d.read_bytes().ok())
+            .map(|b| b.as_ref().to_vec());
+
         let (_bitset, highlights) = regex_v3::regex_v3(
             &automaton, &self.pattern, &reader, &*pr, &ord_to_term,
             self.anchor_start, seg_reader.max_doc(),
             posmap_bytes.as_deref(), bytemap_bytes.as_deref(),
+            sibling_bytes.as_deref(), termtexts_bytes.as_deref(),
         );
 
         let mut tf_map: HashMap<DocId, u32> = HashMap::new();

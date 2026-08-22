@@ -141,6 +141,9 @@ where
         // But we don't know own_len here... for now feed full text.
         // TODO: pass own_len via termtexts metadata if needed.
         for &byte in text.as_bytes() {
+            if automaton.is_match(&state) {
+                return Some(state);
+            }
             state = automaton.accept(&state, byte);
             if !automaton.can_match(&state) {
                 return None;
@@ -194,6 +197,8 @@ pub fn regex_v3<A: Automaton>(
     max_doc: DocId,
     posmap_data: Option<&[u8]>,
     bytemap_data: Option<&[u8]>,
+    sibling_data: Option<&[u8]>,
+    termtexts_data: Option<&[u8]>,
 ) -> (BitSet, Vec<(DocId, usize, usize)>)
 where
     A::State: Clone + Eq + std::hash::Hash,
@@ -209,7 +214,15 @@ where
         .filter(|l| l.len() >= MIN_LITERAL_LEN)
         .collect();
 
+    let diag = std::env::var("V3_DIAG_REGEX").is_ok();
+    if diag {
+        eprintln!("[rx] pattern={pattern:?}");
+        eprintln!("[rx]   literals={all_literals:?} viable={viable:?}");
+        eprintln!("[rx]   gaps={analyzed_gaps:?}");
+    }
+
     if viable.is_empty() {
+        if diag { eprintln!("[rx]   ABORT: no viable literal (MIN_LITERAL_LEN={MIN_LITERAL_LEN})"); }
         return (doc_bitset, highlights);
     }
 
@@ -237,8 +250,15 @@ where
             reader, resolver, filter_docs: doc_filter.as_ref(),
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, // regex pipeline uses strict mode
-            word_sfxpost: None, sibling_v3: None, termtexts: None,
+            // Strict mode: no word pipeline. But chunk chains ARE needed — a v3
+            // chunk is at most 8 bytes, so any literal straddling a boundary is
+            // only reachable through chain building, and has_sibling_chains()
+            // requires sibling_v3 AND termtexts.
+            posmap: None, bytemap: None, word_sfxpost: None,
+            sibling_v3: sibling_data
+                .and_then(crate::suffix_fst::sibling_table::SiblingTableReader::open),
+            termtexts: termtexts_data
+                .and_then(crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open),
         };
         let matches = composite::find_literal_v3(
             &ctx, viable[lit_idx], anchor_start && lit_idx == 0, strict_sep,
@@ -248,6 +268,11 @@ where
             doc_filter = Some(matches.iter().map(|m| m.doc_id).collect());
         }
 
+        if diag {
+            let docs: HashSet<DocId> = matches.iter().map(|m| m.doc_id).collect();
+            eprintln!("[rx]   literal {:?} -> {} matches in {} docs",
+                viable[lit_idx], matches.len(), docs.len());
+        }
         all_matches[lit_idx] = matches;
     }
 
@@ -258,6 +283,11 @@ where
         .any(|g| matches!(g, crate::query::phrase_query::regex_gap_analyzer::GapKind::DfaValidation));
     let all_accept = !has_any_dfa_gap && analyzed_gaps.iter()
         .all(|g| matches!(g, crate::query::phrase_query::regex_gap_analyzer::GapKind::AcceptAnything));
+
+    if diag {
+        eprintln!("[rx]   has_any_dfa_gap={has_any_dfa_gap} all_accept={all_accept} n_literals={}",
+            all_matches.len());
+    }
 
     if all_matches.len() == 1 {
         // Single literal: DFA validate each match
@@ -280,10 +310,15 @@ where
                 let text_bytes = text.as_bytes();
                 if remaining_start < text_bytes.len() {
                     for &byte in &text_bytes[remaining_start..] {
+                        // Check BEFORE consuming more: tantivy_fst::Regex is a
+                        // whole-input automaton, so a match that ends mid-token is
+                        // destroyed by the bytes that follow it. Substring search
+                        // needs the leftmost accepting prefix, not the full token.
+                        if automaton.is_match(&state) { break; }
                         state = automaton.accept(&state, byte);
                         if !automaton.can_match(&state) { alive = false; break; }
                     }
-                    if !alive { continue; }
+                    if !alive && !automaton.is_match(&state) { continue; }
                 }
             }
 
@@ -323,6 +358,14 @@ where
             .collect();
 
         let ordered = intersect_ordered_v3(&grouped);
+        if diag {
+            eprintln!("[rx]   ordered intersection -> {} candidate docs", ordered.len());
+        }
+        let mut rej_no_posmap = 0usize;
+        let mut rej_first_token = 0usize;
+        let mut rej_walk = 0usize;
+        let mut acc_first = 0usize;
+        let mut acc_walk = 0usize;
 
         if all_accept {
             // All gaps are .* → accept all ordered matches
@@ -334,7 +377,7 @@ where
             for &(doc_id, first_bf, last_bt, first_si) in &ordered {
                 let first_entry = grouped[0].get(&doc_id)
                     .and_then(|v| v.iter().find(|&&(_, bf, _, _)| bf == first_bf));
-                let Some(&(first_pos, _, _, _)) = first_entry else { continue; };
+                let Some(&(first_pos, _, _, _)) = first_entry else { rej_no_posmap += 1; continue; };
 
                 let last_entry = grouped.last().unwrap().get(&doc_id)
                     .and_then(|v| v.iter().find(|&&(_, _, bt, _)| bt == last_bt));
@@ -347,15 +390,17 @@ where
                     if let Some(text) = ord_to_term(tok_ord as u64) {
                         let offset = first_si as usize;
                         for &byte in &text.as_bytes()[offset..] {
+                            if automaton.is_match(&state) { break; }
                             state = automaton.accept(&state, byte);
                             if !automaton.can_match(&state) { alive = false; break; }
                         }
-                    } else { continue; }
-                } else { continue; }
+                    } else { rej_no_posmap += 1; continue; }
+                } else { rej_no_posmap += 1; continue; }
 
-                if !alive { continue; }
+                if !alive && !automaton.is_match(&state) { rej_first_token += 1; continue; }
 
                 if automaton.is_match(&state) {
+                    acc_first += 1;
                     doc_bitset.insert(doc_id);
                     highlights.push((doc_id, first_bf as usize, last_bt as usize));
                     continue;
@@ -363,19 +408,31 @@ where
 
                 // Walk DFA through remaining tokens
                 if last_pos > first_pos {
-                    if let Some(final_state) = validate_path_v3(
+                    match validate_path_v3(
                         automaton, &state, pm, ord_to_term,
                         doc_id, first_pos, last_pos,
                         bytemap.as_ref(),
                     ) {
-                        if automaton.is_match(&final_state) {
+                        Some(final_state) if automaton.is_match(&final_state) => {
+                            acc_walk += 1;
                             doc_bitset.insert(doc_id);
                             highlights.push((doc_id, first_bf as usize, last_bt as usize));
                         }
+                        _ => { rej_walk += 1; }
                     }
+                } else {
+                    rej_walk += 1;
                 }
             }
         }
+        if diag {
+            eprintln!("[rx]   accepted: first_token={acc_first} walk={acc_walk} | \
+rejected: no_posmap={rej_no_posmap} first_token_dfa={rej_first_token} walk={rej_walk}");
+        }
+    }
+
+    if diag {
+        eprintln!("[rx]   FINAL -> {} docs\n", doc_bitset.len());
     }
 
     (doc_bitset, highlights)

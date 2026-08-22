@@ -1426,3 +1426,93 @@ fn v3_distributed_two_nodes() {
             "merged stats must cover at least the returned docs");
     }
 }
+
+/// REGEX v2 vs v3, same corpus, same patterns, same brute-force reference.
+///
+/// The project's only real regex test (test_regex_ground_truth.rs) builds its
+/// index with `SchemaConfig { ..Default::default() }`, i.e. sfx_version = 2. So
+/// regex has never been measured on v3 outside the report-only fuzzy baseline.
+/// Running both side by side is what localises the regression.
+///
+/// Report only, no assertions — this is a diagnostic, and asserting a target we
+/// have not chosen yet would just freeze today's behaviour.
+///
+/// Run: cargo test --release -p lucivy-core --test test_sfx_v3_ground_truth
+///      regex_v2_vs_v3 -- --nocapture
+#[test]
+fn regex_v2_vs_v3() {
+    let files = collect_files(2000);
+    if files.is_empty() { return; }
+
+    let build = |version: u8| -> LucivyHandle {
+        let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+            "fields": [
+                {"name": "path", "type": "text", "stored": true},
+                {"name": "content", "type": "text", "stored": true}
+            ],
+            "sfx_version": version
+        })).unwrap();
+        let dir = ld_lucivy::directory::RamDirectory::default();
+        let handle = LucivyHandle::create(dir, &config).unwrap();
+        let path_f = handle.field("path").unwrap();
+        let content_f = handle.field("content").unwrap();
+        let nid_f = handle.field(NODE_ID_FIELD).unwrap();
+        {
+            let mut guard = handle.writer.lock().unwrap();
+            let w = guard.as_mut().unwrap();
+            w.set_merge_policy(Box::new(ld_lucivy::indexer::NoMergePolicy));
+            for (i, (path, content)) in files.iter().enumerate() {
+                let mut doc = ld_lucivy::LucivyDocument::new();
+                doc.add_u64(nid_f, i as u64);
+                doc.add_text(path_f, path);
+                doc.add_text(content_f, content);
+                w.add_document(doc).unwrap();
+                if (i + 1) % 500 == 0 { w.commit().unwrap(); }
+            }
+            w.commit().unwrap();
+        }
+        handle.reader.reload().unwrap();
+        handle
+    };
+
+    let patterns: [&str; 10] = [
+        r#"rag3[a-z]+ver"#,      // character class + quantifier
+        r#"uint\d+_t"#,          // \d class, one of the v3 FN
+        r#"std::\w+"#,           // \w class after separators
+        r#"function\s*\("#,      // \s class + literal paren, one of the v3 FN
+        r#"#include\s*[<"]"#,    // \s + explicit class, one of the v3 FN
+        r#"rag3.*ver"#,          // .* gap
+        r#"impl.*fn.*self"#,     // multiple .* gaps
+        r#"pub.*struct"#,        // .* common
+        r#"Table\w+Function"#,   // \w between literals
+        r#"[A-Z][a-z]+Error"#,   // leading class — no anchor literal at all
+    ];
+
+    let h2 = build(2);
+    let h3 = build(3);
+
+    eprintln!("\n=== Regex v2 vs v3: {} docs ===\n", files.len());
+    eprintln!("{:<24} {:>6} {:>14} {:>14}", "Pattern", "Grep", "v2 (FN/FP)", "v3 (FN/FP)");
+    eprintln!("{}", "-".repeat(62));
+
+    for pat in patterns {
+        let re = regex::Regex::new(&format!("(?i){pat}")).unwrap();
+        let truth: HashSet<usize> = files.iter().enumerate()
+            .filter(|(_, (_, c))| re.is_match(c))
+            .map(|(i, _)| i)
+            .collect();
+
+        let run = |h: &LucivyHandle| -> (usize, usize) {
+            let got = search_v3_regex(h, &files, pat).doc_indices;
+            (truth.difference(&got).count(), got.difference(&truth).count())
+        };
+        let (fn2, fp2) = run(&h2);
+        let (fn3, fp3) = run(&h3);
+
+        let mark = |f: usize, p: usize| if f == 0 && p == 0 { "OK".to_string() }
+                   else { format!("{f}/{p}") };
+        eprintln!("{:<24} {:>6} {:>14} {:>14}",
+            pat, truth.len(), mark(fn2, fp2), mark(fn3, fp3));
+    }
+    eprintln!();
+}
