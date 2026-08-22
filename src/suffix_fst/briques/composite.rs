@@ -58,6 +58,19 @@ pub fn find_literal_v3(
     }
     results.extend(single);
 
+    // Word-stripped singles (0x02). resolve_single_v3 skips them — their postings
+    // live in WordSfxPost, not sfxpost — so without this the production path had no
+    // direct resolution for that partition at all and depended entirely on chains
+    // catching the case. The DAG and the fuzzy pipeline already resolved it; only
+    // find_literal_v3 did not.
+    if ctx.has_word_pipeline() {
+        let single_word = resolve::resolve_single_word_v3(
+            &candidates, ctx.require_word_sfxpost(), ctx.filter_docs, query_len,
+        );
+        ctx.trace_msg(&format!("single_word matches={}", single_word.len()));
+        results.extend(single_word);
+    }
+
     // ── Chunk chains (0x00 + 0x01) — strict adjacency ────────────────
     {
         let mut chains = fst_walk::cross_chunk_chain_v3(ctx.reader, query);

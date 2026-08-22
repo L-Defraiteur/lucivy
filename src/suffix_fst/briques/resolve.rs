@@ -23,7 +23,11 @@ pub struct MatchV3 {
     pub doc_id: DocId,
     /// Token position of the first token in the match.
     pub position: u32,
-    /// Number of tokens covered by the match.
+    /// Number of TOKEN POSITIONS covered by the match, inclusive.
+    ///
+    /// Always `last_position - position + 1`. It used to be the chunk count on one
+    /// path and the chain-position count (i.e. words) on another, which made any
+    /// consumer walking `position..position+span` walk the wrong range.
     pub span: u32,
     /// Start byte offset of the MATCH in the original text.
     pub byte_from: u32,
@@ -333,7 +337,7 @@ pub fn resolve_word_chains_v3(
         }
 
         // Emit matches
-        for &(doc_id, _, byte_from, token_end, last_bf, last_ord) in &active {
+        for &(doc_id, last_pos, byte_from, token_end, last_bf, last_ord) in &active {
             let position = first_entries.iter()
                 .find(|e| e.doc_id == doc_id)
                 .map(|e| e.first_position)
@@ -341,7 +345,7 @@ pub fn resolve_word_chains_v3(
             results.push(MatchV3 {
                 doc_id,
                 position,
-                span: chain.ordinals.len() as u32,
+                span: last_pos.saturating_sub(position) + 1,
                 byte_from,
                 byte_to: (last_bf + chain.last_consumed as u32).max(byte_from).min(token_end),
                 token_end,
@@ -463,7 +467,7 @@ fn resolve_chains_impl(
         }
 
         // Emit matches
-        for &(doc_id, _last_pos, byte_from, token_end, last_bf, last_ord) in &active {
+        for &(doc_id, last_pos, byte_from, token_end, last_bf, last_ord) in &active {
             let position = first_entries.iter()
                 .find(|e| e.doc_id == doc_id)
                 .map(|e| e.position)
@@ -471,7 +475,7 @@ fn resolve_chains_impl(
             results.push(MatchV3 {
                 doc_id,
                 position,
-                span: chain.ordinals.len() as u32,
+                span: last_pos.saturating_sub(position) + 1,
                 byte_from,
                 byte_to: (last_bf + chain.last_consumed as u32).max(byte_from).min(token_end),
                 token_end,
