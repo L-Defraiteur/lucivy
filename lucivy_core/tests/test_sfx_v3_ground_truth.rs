@@ -106,6 +106,12 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
     let content_f = handle.field("content").unwrap();
     let nid_f = handle.field(NODE_ID_FIELD).unwrap();
 
+    // Documents per commit. Each commit closes segments, so this is the direct knob
+    // on segment count — and segment count is the unit of prescan parallelism, so it
+    // drives query latency more than anything else measured today.
+    let commit_every: usize = std::env::var("V3_COMMIT_EVERY").ok()
+        .and_then(|v| v.parse().ok()).filter(|&n| n > 0).unwrap_or(500);
+
     {
         let mut guard = handle.writer.lock().unwrap();
         let w = guard.as_mut().unwrap();
@@ -122,9 +128,11 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
             doc.add_text(path_f, path);
             doc.add_text(content_f, content);
             w.add_document(doc).unwrap();
-            if (i + 1) % 500 == 0 {
+            if (i + 1) % commit_every == 0 {
                 w.commit().unwrap();
-                eprintln!("  indexed {}/{}", i + 1, files.len());
+                if (i + 1) % 5000 == 0 || files.len() < 5000 {
+                    eprintln!("  indexed {}/{}", i + 1, files.len());
+                }
             }
         }
         w.commit().unwrap();
@@ -142,7 +150,14 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
     // showed: 18 GB re-indexing, 30 GB remapping. max_docs_before_merge exists to
     // bound exactly that, so respect it and merge in groups.
     if std::env::var("V3_MERGE").is_ok() {
-        const GROUP: usize = 8;
+        // Stop once few enough segments remain. Merging all the way down to 1 is a
+        // pessimisation: it removes the per-segment parallelism the prescan relies on
+        // (measured 40-49x slower on selective queries). Aim for the core count.
+        let target: usize = std::env::var("V3_MERGE_TARGET").ok()
+            .and_then(|v| v.parse().ok()).filter(|&n| n > 0)
+            .unwrap_or(1);
+        let group: usize = std::env::var("V3_MERGE_GROUP").ok()
+            .and_then(|v| v.parse().ok()).filter(|&n| n > 1).unwrap_or(8);
         let t = std::time::Instant::now();
         handle.reader.reload().unwrap();
         let before = handle.reader.searcher().segment_readers().len();
@@ -150,8 +165,8 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
         let mut round = 0;
         loop {
             let ids = handle.index.searchable_segment_ids().unwrap();
-            if ids.len() <= 1 || round > 8 { break; }
-            let groups: Vec<Vec<_>> = ids.chunks(GROUP)
+            if ids.len() <= target.max(1) || round > 12 { break; }
+            let groups: Vec<Vec<_>> = ids.chunks(group)
                 .filter(|c| c.len() > 1)
                 .map(|c| c.to_vec())
                 .collect();
@@ -177,8 +192,20 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
         }
         handle.reader.reload().unwrap();
         let after = handle.reader.searcher().segment_readers().len();
-        eprintln!("  merge (tiered, groups of {GROUP}): {before} -> {after} segments in {:.1}s",
+        eprintln!("  merge (tiered, groups of {group}, target {target}): {before} -> {after} segments in {:.1}s",
             t.elapsed().as_secs_f64());
+    }
+
+    // Search executor. Note this changes very little for SFX queries: all the work
+    // happens in Query::weight (prescan), which runs BEFORE executor.map — measured
+    // 1.0x on 80 segments / 24 threads. Exposed so that can be re-checked, not
+    // because it is expected to help.
+    if let Some(n) = std::env::var("V3_THREADS").ok().and_then(|v| v.parse::<usize>().ok()) {
+        if n > 1 {
+            let mut idx = handle.index.clone();
+            idx.set_multithread_executor(n).unwrap();
+            eprintln!("  search executor: {n} threads");
+        }
     }
 
     handle.reader.reload().unwrap();
@@ -1400,9 +1427,14 @@ fn perf_shape_sharded() {
     ];
 
     eprintln!("\n=== Sharding shape: {} docs ===\n", files.len());
-    eprintln!("{:<22} {:>7} {:>9} {:>9} {:>9} {:>9}",
-        "Query", "Mode", "1 shard", "4 shards", "8 shards", "8sh gain");
-    eprintln!("{}", "-".repeat(70));
+    // Shard counts to compare. `V3_SHARDS=1,4,8,16` overrides.
+    let shard_counts: Vec<usize> = std::env::var("V3_SHARDS").ok()
+        .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+        .filter(|v: &Vec<usize>| !v.is_empty())
+        .unwrap_or_else(|| vec![1, 4, 8]);
+
+    eprintln!("  shard counts: {shard_counts:?}");
+    eprintln!("{}", "-".repeat(78));
 
     let build = |n: usize| -> ShardedHandle {
         let config: SchemaConfig = serde_json::from_value(serde_json::json!({
@@ -1429,9 +1461,9 @@ fn perf_shape_sharded() {
     };
 
     let t = std::time::Instant::now();
-    let h1 = build(1);
-    let h4 = build(4);
-    let h8 = build(8);
+    let handles: Vec<(usize, ShardedHandle)> = shard_counts.iter()
+        .map(|&n| (n, build(n)))
+        .collect();
     eprintln!("  (index build: {:.1}s total)\n", t.elapsed().as_secs_f64());
 
     for (value, strict) in queries {
@@ -1447,12 +1479,19 @@ fn perf_shape_sharded() {
             let res = h.search(&config, 10_000, None).unwrap();
             (t.elapsed().as_millis(), res.len())
         };
-        let (m1, n1) = run(&h1);
-        let (m4, _) = run(&h4);
-        let (m8, n8) = run(&h8);
-        let gain = if m8 > 0 { m1 as f64 / m8 as f64 } else { f64::NAN };
-        eprintln!("{:<22} {:>7} {:>8}ms {:>8}ms {:>8}ms {:>8.1}x  (hits {} / {})",
-            value, if strict { "strict" } else { "relax" }, m1, m4, m8, gain, n1, n8);
+        let measured: Vec<(usize, u128, usize)> = handles.iter()
+            .map(|(n, h)| { let (ms, hits) = run(h); (*n, ms, hits) })
+            .collect();
+        let base = measured[0].1;
+        let cells: Vec<String> = measured.iter()
+            .map(|(n, ms, _)| format!("{n}sh {ms}ms"))
+            .collect();
+        let hits: Vec<String> = measured.iter().map(|(_, _, h)| h.to_string()).collect();
+        let last = measured.last().unwrap().1;
+        let gain = if last > 0 { base as f64 / last as f64 } else { f64::NAN };
+        eprintln!("{:<22} {:>7}  {}  gain {:.1}x  hits {}",
+            value, if strict { "strict" } else { "relax" },
+            cells.join("  "), gain, hits.join("/"));
     }
     eprintln!();
 }
