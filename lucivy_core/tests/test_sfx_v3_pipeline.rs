@@ -229,3 +229,55 @@ fn v3_multi_doc_correct_ids() {
     let docs_delta = search(&handle, "contains", "delta");
     assert_eq!(docs_delta.len(), 1, "delta should be in 1 doc");
 }
+
+/// `term` must be a whole-token match, not a prefix.
+///
+/// `term` is routed to `contains + anchor_start + exact_match`
+/// (`lucivy_core/src/query.rs`), and `exact_match` is the ONLY thing separating it
+/// from `contains`. Nothing else in the suite covers the negative direction, so any
+/// change that makes the exact_match filter always-true would silently turn `term`
+/// into `contains` and stay green. This test is that guard.
+#[test]
+fn v3_term_is_whole_token_not_prefix() {
+    let handle = make_handle(&[
+        "mutex lock implementation",
+        "alpha beta gamma",
+    ]);
+
+    // Positive: the full token matches.
+    let full = search(&handle, "term", "mutex");
+    assert_eq!(full.len(), 1, "term 'mutex' should match the whole token, got {full:?}");
+
+    // Negative: a strict prefix of the token must NOT match.
+    let prefix = search(&handle, "term", "mut");
+    assert!(prefix.is_empty(), "term 'mut' must not match 'mutex' — exact_match is broken, got {prefix:?}");
+
+    // Negative: a strict suffix must not match either.
+    let suffix = search(&handle, "term", "utex");
+    assert!(suffix.is_empty(), "term 'utex' must not match 'mutex', got {suffix:?}");
+
+    // Sanity: the same strings DO match as `contains`, proving the corpus is right
+    // and that only the exact_match filter separates the two behaviours.
+    assert_eq!(search(&handle, "contains", "mut").len(), 1, "contains 'mut' should match");
+    assert_eq!(search(&handle, "contains", "utex").len(), 1, "contains 'utex' should match");
+}
+
+/// PROBE — prints current behaviour of exact_match edge cases. No assertions.
+#[test]
+fn probe_exact_match_edge_cases() {
+    let handle = make_handle(&[
+        "mutex_lock implementation",
+        "le café est chaud",
+        "alpha beta gamma",
+    ]);
+    for (label, q) in [
+        ("term mutex_lock (cross-chunk + sep)", "mutex_lock"),
+        ("term mutex (prefix of mutex_lock)", "mutex"),
+        ("term café (unicode)", "café"),
+        ("term alpha (plain ascii word)", "alpha"),
+        ("term implementation (>8 bytes, multi-chunk)", "implementation"),
+        ("term gamma (last word, no trailing sep)", "gamma"),
+    ] {
+        eprintln!("  {label:45} -> {:?}", search(&handle, "term", q));
+    }
+}

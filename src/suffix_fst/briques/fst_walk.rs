@@ -91,6 +91,12 @@ pub struct TokenChainV3 {
     pub ordinals: Vec<Vec<u64>>,
     pub first_sti: u16,
     pub total_query_consumed: usize,
+    /// Query bytes consumed by the LAST position of the chain.
+    ///
+    /// Needed to compute a match end that measures the match itself rather than
+    /// the end of the containing token. Without it, `byte_to` falls back to the
+    /// last token's own end — separator included — which makes the span lie.
+    pub last_consumed: usize,
 }
 
 // ─── fst_candidates_v3 ────────────────────────────────────────────────────
@@ -407,6 +413,7 @@ fn build_chains_from_splits(
                 ordinals: vec![vec![split.parent.raw_ordinal]],
                 first_sti: split.parent.sti,
                 total_query_consumed: split.query_consumed,
+                last_consumed: split.query_consumed,
             });
             continue;
         }
@@ -414,6 +421,7 @@ fn build_chains_from_splits(
         let mut positions: Vec<Vec<u64>> = vec![vec![split.parent.raw_ordinal]];
         let mut rem = remainder.to_string();
         let mut depth = 0;
+        let mut last_consumed = split.query_consumed;
 
         while !rem.is_empty() && depth < MAX_CHAIN_DEPTH {
             let cands = fst_candidates_v3(reader, &rem, true, strict_sep_for_candidates);
@@ -422,6 +430,8 @@ fn build_chains_from_splits(
                 unique_ords.sort_unstable();
                 unique_ords.dedup();
                 positions.push(unique_ords);
+                // This position swallows the whole remainder.
+                last_consumed = rem.len();
                 rem.clear();
                 break;
             }
@@ -451,6 +461,7 @@ fn build_chains_from_splits(
             positions.push(unique_ords);
 
             let best = &sub_splits[0];
+            last_consumed = best.query_consumed;
             let safe = snap_to_char_boundary(&rem, best.remainder_start);
             rem = rem[safe..].to_string();
             depth += 1;
@@ -461,6 +472,7 @@ fn build_chains_from_splits(
                 ordinals: positions,
                 first_sti: split.parent.sti,
                 total_query_consumed: query.len(),
+                last_consumed,
             });
         }
     }
@@ -579,6 +591,7 @@ pub fn sibling_chain_dfs(
                 ordinals: vec![vec![split.parent.raw_ordinal]],
                 first_sti: split.parent.sti,
                 total_query_consumed: split.query_consumed,
+                last_consumed: split.query_consumed,
             });
             continue;
         }
@@ -631,6 +644,7 @@ pub fn sibling_chain_dfs(
                         ordinals: c,
                         first_sti: split.parent.sti,
                         total_query_consumed: query_lower.len(),
+                        last_consumed: rem.len(),
                     });
                 } else if rem.starts_with(next_content) {
                     if let Some(tid) = trace_id {

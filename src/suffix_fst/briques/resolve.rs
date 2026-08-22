@@ -25,10 +25,23 @@ pub struct MatchV3 {
     pub position: u32,
     /// Number of tokens covered by the match.
     pub span: u32,
-    /// Start byte offset in the original text.
+    /// Start byte offset of the MATCH in the original text.
     pub byte_from: u32,
-    /// End byte offset (exclusive) in the original text.
+    /// End byte offset (exclusive) of the MATCH in the original text.
+    ///
+    /// This measures the match itself. It used to mean "end of the containing
+    /// token" — four different variants of it depending on the resolution path,
+    /// separator sometimes included — which made every span comparison unreliable.
+    /// For the container end, use `token_end`.
     pub byte_to: u32,
+    /// End byte offset (exclusive) of the CONTAINING token, separator excluded.
+    ///
+    /// For a chain, the end of its last token. Only the `exact_match` filter reads
+    /// this: `token_end - byte_from == query_content_len` is what makes a `term`
+    /// query a whole-token match instead of a substring one. Keeping it in its own
+    /// field means a change to `byte_to` can no longer silently turn `term` into
+    /// `contains`.
+    pub token_end: u32,
     /// STI in the first token.
     pub sti: u16,
     /// Ordinal of the first token.
@@ -43,10 +56,15 @@ pub struct MatchV3 {
 ///
 /// Each candidate is an FST entry where the query matches within a single token.
 /// Resolves posting lists and optionally filters by doc_id set.
+///
+/// `query_len` is the byte length of the query as matched against the FST keys
+/// (already separator-stripped in relaxed mode). It is what makes `byte_to`
+/// measure the match rather than the token.
 pub fn resolve_single_v3(
     candidates: &[FstCandidateV3],
     resolver: &dyn PostingResolver,
     filter_docs: Option<&HashSet<DocId>>,
+    query_len: u32,
 ) -> Vec<MatchV3> {
     let mut results = Vec::new();
 
@@ -62,13 +80,19 @@ pub fn resolve_single_v3(
             resolver.resolve(cand.raw_ordinal)
         };
 
+        // Content end of the chunk: keys in 0x00/0x01 are contiguous raw text
+        // (content + sep + overlap), so this is a real offset in the source.
+        let content_end = |bf: u32| bf + cand.own_len as u32 - cand.sep_len as u32;
+
         for e in &entries {
+            let byte_from = e.byte_from + cand.sti as u32;
             results.push(MatchV3 {
                 doc_id: e.doc_id,
                 position: e.position,
                 span: 1,
-                byte_from: e.byte_from + cand.sti as u32,
-                byte_to: e.byte_from + cand.own_len as u32 - cand.sep_len as u32,
+                byte_from,
+                byte_to: byte_from + query_len,
+                token_end: content_end(e.byte_from),
                 sti: cand.sti,
                 ordinal: cand.raw_ordinal,
                 last_ordinal: cand.raw_ordinal,
@@ -87,10 +111,13 @@ pub fn resolve_single_v3(
 /// single word-stripped token are resolved here instead of depending on the
 /// chain pipeline. This guarantees word-level single matches are found by
 /// construction, not by luck of chain formation.
+///
+/// `query_len` is the byte length of the query as matched against the FST keys.
 pub fn resolve_single_word_v3(
     candidates: &[FstCandidateV3],
     word_sfxpost: &crate::suffix_fst::word_sfxpost::WordSfxPostReader<'_>,
     filter_docs: Option<&HashSet<DocId>>,
+    query_len: u32,
 ) -> Vec<MatchV3> {
     let mut results = Vec::new();
 
@@ -102,19 +129,23 @@ pub fn resolve_single_word_v3(
             if let Some(filter) = filter_docs {
                 if !filter.contains(&e.doc_id) { continue; }
             }
-            // byte_from/byte_to from WordSfxPost are word-level coordinates.
-            // Adjust byte_from by sti (suffix offset within the word) and
-            // compute byte_to to cover exactly the query match, not the whole word.
+            // `word_content` is a contiguous run of source bytes (the tokenizer
+            // puts separators only on the last chunk of a segment), so
+            // byte_from + sti is a real source offset.
             let content_len = cand.content_len() as u32;
-            let query_byte_len = content_len - cand.sti as u32;
+            let content_end = e.byte_from + content_len;
+            let byte_from = e.byte_from + cand.sti as u32;
             results.push(MatchV3 {
                 doc_id: e.doc_id,
                 position: e.first_position,
                 span: if e.last_position > e.first_position {
                     e.last_position - e.first_position + 1
                 } else { 1 },
-                byte_from: e.byte_from + cand.sti as u32,
-                byte_to: e.byte_from + cand.sti as u32 + query_byte_len,
+                byte_from,
+                // Clamped: past the word's content the match would cross a
+                // separator whose source offset this entry does not know.
+                byte_to: (byte_from + query_len).min(content_end),
+                token_end: content_end,
                 sti: cand.sti,
                 ordinal: cand.raw_ordinal,
                 last_ordinal: cand.raw_ordinal,
@@ -221,6 +252,7 @@ pub fn resolve_word_chains_v3(
                     } else { 1 },
                     byte_from: bf,
                     byte_to: bf + chain.total_query_consumed as u32,
+                    token_end: bf + chain.total_query_consumed as u32,
                     sti: chain.first_sti,
                     ordinal: chain.ordinals[0][0],
                     last_ordinal: chain.ordinals[0][0],
@@ -230,9 +262,13 @@ pub fn resolve_word_chains_v3(
         }
 
         // Multi-position chain
-        // Active: (doc_id, prev_last_position, byte_from_first, byte_to_prev, last_ord)
-        let mut active: Vec<(DocId, u32, u32, u32, u64)> = first_entries.iter()
-            .map(|e| (e.doc_id, e.last_position, e.byte_from + chain.first_sti as u32, e.byte_to, 0u64))
+        // Active: (doc_id, prev_last_position, byte_from_first, token_end_last,
+        //          byte_from_last, last_ord)
+        // byte_from_last is what lets the emitted byte_to measure the match instead
+        // of running to the end of the tail token.
+        let mut active: Vec<(DocId, u32, u32, u32, u32, u64)> = first_entries.iter()
+            .map(|e| (e.doc_id, e.last_position, e.byte_from + chain.first_sti as u32,
+                      e.byte_to, e.byte_from, 0u64))
             .collect();
 
         for ord_idx in 1..chain.ordinals.len() {
@@ -265,9 +301,9 @@ pub fn resolve_word_chains_v3(
                 }
             }
 
-            let mut new_active: Vec<(DocId, u32, u32, u32, u64)> = Vec::new();
+            let mut new_active: Vec<(DocId, u32, u32, u32, u32, u64)> = Vec::new();
 
-            for &(doc_id, prev_last_pos, byte_from_first, _, _) in &active {
+            for &(doc_id, prev_last_pos, byte_from_first, _, _, _) in &active {
                 for (e, ord) in &entries {
                     if e.doc_id != doc_id { continue; }
                     // Use first_position of the next word for adjacency check
@@ -286,7 +322,8 @@ pub fn resolve_word_chains_v3(
                     };
 
                     if valid {
-                        new_active.push((doc_id, e.last_position, byte_from_first, e.byte_to, *ord));
+                        new_active.push((doc_id, e.last_position, byte_from_first,
+                                         e.byte_to, e.byte_from, *ord));
                         break;
                     }
                 }
@@ -296,7 +333,7 @@ pub fn resolve_word_chains_v3(
         }
 
         // Emit matches
-        for &(doc_id, _, byte_from, byte_to, last_ord) in &active {
+        for &(doc_id, _, byte_from, token_end, last_bf, last_ord) in &active {
             let position = first_entries.iter()
                 .find(|e| e.doc_id == doc_id)
                 .map(|e| e.first_position)
@@ -306,7 +343,8 @@ pub fn resolve_word_chains_v3(
                 position,
                 span: chain.ordinals.len() as u32,
                 byte_from,
-                byte_to,
+                byte_to: (last_bf + chain.last_consumed as u32).max(byte_from).min(token_end),
+                token_end,
                 sti: chain.first_sti,
                 ordinal: chain.ordinals[0][0],
                 last_ordinal: last_ord,
@@ -346,12 +384,14 @@ fn resolve_chains_impl(
 
         if chain.ordinals.len() == 1 {
             for e in &first_entries {
+                let bf = e.byte_from + chain.first_sti as u32;
                 results.push(MatchV3 {
                     doc_id: e.doc_id,
                     position: e.position,
                     span: 1,
-                    byte_from: e.byte_from + chain.first_sti as u32,
-                    byte_to: e.byte_to,
+                    byte_from: bf,
+                    byte_to: (bf + chain.total_query_consumed as u32).min(e.byte_to),
+                    token_end: e.byte_to,
                     sti: chain.first_sti,
                     ordinal: chain.ordinals[0][0],
                     last_ordinal: chain.ordinals[0][0],
@@ -361,10 +401,14 @@ fn resolve_chains_impl(
         }
 
         // Multi-position chain
-        // Active set: (doc_id, prev_position, byte_from_first, byte_to_prev, last_ord_matched)
-        let mut active: Vec<(DocId, u32, u32, u32, u64)> = first_entries
+        // Active set: (doc_id, prev_position, byte_from_first, token_end_last,
+        //              byte_from_last, last_ord_matched)
+        // byte_from_last is what lets the emitted byte_to measure the match instead
+        // of running to the end of the tail token.
+        let mut active: Vec<(DocId, u32, u32, u32, u32, u64)> = first_entries
             .iter()
-            .map(|e| (e.doc_id, e.position, e.byte_from + chain.first_sti as u32, e.byte_to, 0u64))
+            .map(|e| (e.doc_id, e.position, e.byte_from + chain.first_sti as u32,
+                      e.byte_to, e.byte_from, 0u64))
             .collect();
 
         for ord_idx in 1..chain.ordinals.len() {
@@ -381,9 +425,9 @@ fn resolve_chains_impl(
                 }
             }
 
-            let mut new_active: Vec<(DocId, u32, u32, u32, u64)> = Vec::new();
+            let mut new_active: Vec<(DocId, u32, u32, u32, u32, u64)> = Vec::new();
 
-            for &(doc_id, prev_pos, byte_from_first, byte_to_prev, _) in &active {
+            for &(doc_id, prev_pos, byte_from_first, byte_to_prev, _, _) in &active {
                 for (e, ord) in &entries {
                     if e.doc_id != doc_id {
                         continue;
@@ -408,7 +452,8 @@ fn resolve_chains_impl(
                     };
 
                     if valid {
-                        new_active.push((doc_id, e.position, byte_from_first, e.byte_to, *ord));
+                        new_active.push((doc_id, e.position, byte_from_first,
+                                         e.byte_to, e.byte_from, *ord));
                         break;
                     }
                 }
@@ -418,7 +463,7 @@ fn resolve_chains_impl(
         }
 
         // Emit matches
-        for &(doc_id, _last_pos, byte_from, byte_to, last_ord) in &active {
+        for &(doc_id, _last_pos, byte_from, token_end, last_bf, last_ord) in &active {
             let position = first_entries.iter()
                 .find(|e| e.doc_id == doc_id)
                 .map(|e| e.position)
@@ -428,7 +473,8 @@ fn resolve_chains_impl(
                 position,
                 span: chain.ordinals.len() as u32,
                 byte_from,
-                byte_to,
+                byte_to: (last_bf + chain.last_consumed as u32).max(byte_from).min(token_end),
+                token_end,
                 sti: chain.first_sti,
                 ordinal: chain.ordinals[0][0],
                 last_ordinal: last_ord,
@@ -606,7 +652,7 @@ mod tests {
         let resolver = MockResolver::new(&post, nt);
 
         let cands = super::super::fst_walk::fst_candidates_v3(&reader, "mutex_lo", false, true);
-        let matches = resolve_single_v3(&cands, &resolver, None);
+        let matches = resolve_single_v3(&cands, &resolver, None, "mutex_lo".len() as u32);
 
         assert!(!matches.is_empty(), "should find matches");
         assert_eq!(matches[0].doc_id, 0);
@@ -623,7 +669,7 @@ mod tests {
 
         // Filter to doc 0 only
         let filter: HashSet<DocId> = [0].into();
-        let matches = resolve_single_v3(&cands, &resolver, Some(&filter));
+        let matches = resolve_single_v3(&cands, &resolver, Some(&filter), "mutex_lo".len() as u32);
 
         assert!(matches.iter().all(|m| m.doc_id == 0), "should only have doc 0");
     }

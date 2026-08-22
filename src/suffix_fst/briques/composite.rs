@@ -41,7 +41,8 @@ pub fn find_literal_v3(
 
     // ── Single-token matches (all partitions) ────────────────────────
     let candidates = fst_walk::fst_candidates_v3(ctx.reader, query, anchor_start, strict_separators);
-    let single = resolve::resolve_single_v3(&candidates, ctx.resolver, ctx.filter_docs);
+    let query_len = query.len() as u32;
+    let single = resolve::resolve_single_v3(&candidates, ctx.resolver, ctx.filter_docs, query_len);
     ctx.trace_msg(&format!("single_token candidates={} matches={}", candidates.len(), single.len()));
     if ctx.trace_id.is_some() {
         if candidates.len() < 50 {
@@ -211,6 +212,7 @@ pub fn find_multi_token_v3(
 
         // Check forward: tokens after pivot must be at consecutive positions
         let mut byte_to = pivot_match.byte_to;
+        let mut token_end = pivot_match.token_end;
 
         for step in (pivot_idx + 1)..query_tokens.len() {
             let expected_pos = pivot_pos + (step - pivot_idx) as u32;
@@ -226,6 +228,7 @@ pub fn find_multi_token_v3(
                 .find(|m| m.doc_id == doc_id && m.position == expected_pos)
             {
                 byte_to = m.byte_to;
+                token_end = m.token_end;
             }
         }
 
@@ -236,6 +239,7 @@ pub fn find_multi_token_v3(
                 span: query_tokens.len() as u32,
                 byte_from,
                 byte_to,
+                token_end,
                 sti: 0,
                 ordinal: pivot_match.ordinal,
                 last_ordinal: pivot_match.ordinal,
@@ -308,9 +312,10 @@ pub fn resolve_all_trigrams(
 
     for &(gram_idx, _) in &selectivity {
         let cands = fst_walk::fst_candidates_v3(ctx.reader, &ngrams[gram_idx], false, strict_separators);
-        let chunk_matches = resolve::resolve_single_v3(&cands, ctx.resolver, None);
+        let gram_len = ngrams[gram_idx].len() as u32;
+        let chunk_matches = resolve::resolve_single_v3(&cands, ctx.resolver, None, gram_len);
         let word_matches = if has_wsp {
-            resolve::resolve_single_word_v3(&cands, ctx.require_word_sfxpost(), None)
+            resolve::resolve_single_word_v3(&cands, ctx.require_word_sfxpost(), None, gram_len)
         } else { Vec::new() };
 
         for m in chunk_matches.iter().chain(word_matches.iter()) {
@@ -568,9 +573,10 @@ pub fn resolve_trigrams_v3_explained(
 
     for &(gram_idx, sel) in &selectivity {
         let cands = fst_walk::fst_candidates_v3(ctx.reader, &ngrams[gram_idx], false, strict_separators);
-        let chunk_matches = resolve::resolve_single_v3(&cands, ctx.resolver, None);
+        let gram_len = ngrams[gram_idx].len() as u32;
+        let chunk_matches = resolve::resolve_single_v3(&cands, ctx.resolver, None, gram_len);
         let word_matches = if has_wsp {
-            resolve::resolve_single_word_v3(&cands, ctx.require_word_sfxpost(), None)
+            resolve::resolve_single_word_v3(&cands, ctx.require_word_sfxpost(), None, gram_len)
         } else { Vec::new() };
 
         let cm = chunk_matches.len();

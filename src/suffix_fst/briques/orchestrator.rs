@@ -49,27 +49,31 @@ pub fn contains_v3(
 
     let mut matches = composite::find_literal_v3(ctx, query_ref, anchor_start, strict_separators);
 
-    // Filter false positives from content ordinals on single-token matches.
-    let query_content_len = query_ref.chars().filter(|c| is_content_char(*c)).count() as u32;
-    if ctx.debug {
-        let before = matches.len();
-        let rejected: Vec<_> = matches.iter()
-            .filter(|m| !(m.span > 1 || m.byte_to.saturating_sub(m.byte_from) >= query_content_len))
-            .map(|m| format!("doc={} pos={} byte=[{}..{}] span={}", m.doc_id, m.position, m.byte_from, m.byte_to, m.span))
-            .collect();
-        if !rejected.is_empty() {
-            ctx.trace_msg(&format!("content_len_filter rejected={} of {} (qcl={}): {:?}",
-                rejected.len(), before, query_content_len, &rejected[..rejected.len().min(5)]));
-        }
-    }
-    matches.retain(|m| m.span > 1 || m.byte_to.saturating_sub(m.byte_from) >= query_content_len);
+    // Content length of the query, in BYTES — it is compared against byte spans
+    // (`byte_to - byte_from`) below. Counting chars here silently broke every
+    // non-ASCII query and every strict query containing a separator.
+    let query_content_len = query_ref
+        .chars()
+        .filter(|c| is_content_char(*c))
+        .map(|c| c.len_utf8() as u32)
+        .sum::<u32>();
+    // The old `content_len` retain lived here. It compensated for `byte_to` meaning
+    // "end of the containing token": a single-token match whose query ran past the
+    // token content produced a span shorter than the query and got dropped, even
+    // when the match was real. Now that `byte_to` measures the match itself, the
+    // condition is tautological — ordinals in 0x00/0x01 are extended, so the FST
+    // key text IS the text present at every posting, and a prefix match proves the
+    // occurrence. Nothing left to filter.
 
-    // Dedup AFTER filtering
+    // Dedup adjacent duplicates (matches are sorted by (doc_id, position)).
     matches.dedup_by_key(|m| (m.doc_id, m.position));
 
-    // Apply exact_match filter
+    // exact_match reads `token_end`, never the match span: `term` means "the query
+    // covers the whole token", which is a statement about the container, not about
+    // how many bytes matched. Deriving it from `byte_to` is what made it possible
+    // to silently turn `term` into `contains`.
     if exact_match {
-        matches.retain(|m| m.byte_to.saturating_sub(m.byte_from) == query_content_len);
+        matches.retain(|m| m.token_end.saturating_sub(m.byte_from) == query_content_len);
     }
 
     matches

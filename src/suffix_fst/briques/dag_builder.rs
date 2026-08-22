@@ -77,7 +77,7 @@ fn build_literal_dag<'a>(
         strict_separators,
     });
 
-    dag.add_node("resolve_single", ResolveSingleNode);
+    dag.add_node("resolve_single", ResolveSingleNode { query_len: q.len() as u32 });
     dag.connect("fst_candidates", "candidates", "resolve_single", "candidates").unwrap();
 
     // ── Chunk pipeline ──────────────────────────────────────────
@@ -102,7 +102,7 @@ fn build_literal_dag<'a>(
 
     if has_word {
         // Direct resolution of word-stripped candidates (no chain dependency)
-        dag.add_node("resolve_single_word", ResolveSingleWordNode);
+        dag.add_node("resolve_single_word", ResolveSingleWordNode { query_len: q.len() as u32 });
         dag.connect("fst_candidates", "candidates", "resolve_single_word", "candidates").unwrap();
 
         dag.add_node("word_chain", WordChainNode {

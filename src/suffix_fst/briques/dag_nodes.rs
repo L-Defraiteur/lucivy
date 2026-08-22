@@ -163,7 +163,10 @@ impl<'a> LocalNode<BriquesContext<'a>> for FstCandidatesNode {
 // ─── ResolveSingleNode ───────────────────────────────────────────────────
 
 /// Resolve single-token matches from FST candidates.
-pub struct ResolveSingleNode;
+pub struct ResolveSingleNode {
+    /// Query byte length, so `byte_to` measures the match and not the token.
+    pub query_len: u32,
+}
 
 impl<'a> LocalNode<BriquesContext<'a>> for ResolveSingleNode {
     fn node_type(&self) -> &'static str { "resolve_single" }
@@ -180,7 +183,7 @@ impl<'a> LocalNode<BriquesContext<'a>> for ResolveSingleNode {
         let explain = ctx.explain();
         let candidates = ctx.input::<Vec<FstCandidateV3>>("candidates")
             .ok_or("missing candidates input")?;
-        let matches = resolve::resolve_single_v3(candidates, svc.resolver, svc.filter_docs);
+        let matches = resolve::resolve_single_v3(candidates, svc.resolver, svc.filter_docs, self.query_len);
         // Build annotation while we still borrow candidates
         let annotation = if explain {
             let postings_detail = format_candidate_postings(candidates, svc.resolver);
@@ -203,7 +206,10 @@ impl<'a> LocalNode<BriquesContext<'a>> for ResolveSingleNode {
 
 /// Resolve word-stripped candidates (0x02) directly via WordSfxPost.
 /// Symmetric to ResolveSingleNode for chunks — no chain dependency.
-pub struct ResolveSingleWordNode;
+pub struct ResolveSingleWordNode {
+    /// Query byte length, so `byte_to` measures the match and not the token.
+    pub query_len: u32,
+}
 
 impl<'a> LocalNode<BriquesContext<'a>> for ResolveSingleWordNode {
     fn node_type(&self) -> &'static str { "resolve_single_word" }
@@ -220,7 +226,7 @@ impl<'a> LocalNode<BriquesContext<'a>> for ResolveSingleWordNode {
         let candidates = ctx.input::<Vec<FstCandidateV3>>("candidates")
             .ok_or("missing candidates input")?;
         let wsp = svc.require_word_sfxpost();
-        let matches = resolve::resolve_single_word_v3(candidates, wsp, svc.filter_docs);
+        let matches = resolve::resolve_single_word_v3(candidates, wsp, svc.filter_docs, self.query_len);
         ctx.metric("matches", matches.len() as f64);
         if ctx.explain() { ctx.annotate_output("matches", format_matches(&matches)); }
         ctx.set_output("matches", matches);
