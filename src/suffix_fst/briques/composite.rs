@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use common::BitSet;
 
 use crate::DocId;
+use crate::tokenizer::equal_chunk::is_content_char;
 use crate::query::posting_resolver::PostingResolver;
 use crate::suffix_fst::file_v3::SfxFileReaderV3;
 
@@ -352,6 +353,10 @@ pub struct TrigramChain {
     /// Byte range of the chain.
     pub byte_from: u32,
     pub byte_to: u32,
+    /// Token positions of the chain ends. Byte offsets alone are not enough to
+    /// rebuild the source text: posmap is keyed by position, not by byte.
+    pub first_pos: u32,
+    pub last_pos: u32,
 }
 
 /// Build chains of adjacent trigram hits per document.
@@ -387,11 +392,14 @@ pub fn build_trigram_chains(
         let mut best_chain: Vec<usize> = Vec::new();
         let mut best_bf = 0u32;
         let mut best_bt = 0u32;
+        let mut best_first_pos = 0u32;
+        let mut best_last_pos = 0u32;
 
         for start in 0..sorted.len() {
             let mut chain = vec![sorted[start].tri_idx];
             let mut prev_bf = sorted[start].byte_from as i32;
             let mut prev_qp = query_positions[sorted[start].tri_idx] as i32;
+            let mut chain_last_pos = sorted[start].position;
 
             for j in (start + 1)..sorted.len() {
                 let h = sorted[j];
@@ -407,12 +415,15 @@ pub fn build_trigram_chains(
                     chain.push(h.tri_idx);
                     prev_bf = h.byte_from as i32;
                     prev_qp = qp;
+                    chain_last_pos = h.position;
                 }
             }
 
             if chain.len() > best_chain.len() {
                 best_chain = chain;
                 best_bf = sorted[start].byte_from;
+                best_first_pos = sorted[start].position;
+                best_last_pos = chain_last_pos;
                 // Find byte_to from the last hit in the chain
                 let last_tri = *best_chain.last().unwrap();
                 best_bt = sorted.iter()
@@ -429,11 +440,85 @@ pub fn build_trigram_chains(
                 trigram_indices: best_chain,
                 byte_from: best_bf,
                 byte_to: best_bt,
+                first_pos: best_first_pos,
+                last_pos: best_last_pos.max(best_first_pos),
             });
         }
     }
 
     chains
+}
+
+
+// ─── Brique 5: verify_candidate ─────────────────────────────────────────
+
+/// Does `window` contain a substring within edit distance `d` of `query`?
+///
+/// Semi-global DP: row 0 is all zeros, so a match may start anywhere; the answer
+/// is the minimum of the last row. Two rows of `window.len()+1` cells, reused by
+/// the caller — no allocation per candidate.
+fn within_edit_distance(query: &[u8], window: &[u8], d: usize, buf: &mut Vec<u32>) -> bool {
+    let n = window.len();
+    if query.is_empty() { return true; }
+    buf.clear();
+    buf.resize(2 * (n + 1), 0);
+    let (mut cur, mut prev) = (0usize, n + 1);
+    for j in 0..=n { buf[prev + j] = 0; }
+
+    for (i, &qb) in query.iter().enumerate() {
+        buf[cur] = i as u32 + 1;
+        let mut row_min = buf[cur];
+        for j in 1..=n {
+            let cost = u32::from(qb != window[j - 1]);
+            let v = (buf[prev + j] + 1)
+                .min(buf[cur + j - 1] + 1)
+                .min(buf[prev + j - 1] + cost);
+            buf[cur + j] = v;
+            row_min = row_min.min(v);
+        }
+        // Every remaining query byte can only add to the distance.
+        if row_min > d as u32 + (query.len() - i - 1) as u32 { return false; }
+        std::mem::swap(&mut cur, &mut prev);
+    }
+    (0..=n).any(|j| buf[prev + j] <= d as u32)
+}
+
+/// Rebuild the source text around a trigram chain, bounded by the query length.
+///
+/// Zero-copy on termtexts (`text()` returns `&str`) into a caller-owned buffer:
+/// the fuzzy candidate set can be large, so an allocation per token would be felt.
+/// Each token contributes `text[..own_len]` — the overlap tail belongs to the next
+/// token and would be duplicated.
+fn rebuild_window(
+    ctx: &BriquesContext<'_>,
+    doc_id: DocId,
+    first_pos: u32,
+    last_pos: u32,
+    margin: u32,
+    strip_separators: bool,
+    out: &mut String,
+) -> bool {
+    let (Some(pm), Some(tt)) = (ctx.posmap.as_ref(), ctx.termtexts.as_ref()) else {
+        return false;
+    };
+    out.clear();
+    let from = first_pos.saturating_sub(margin);
+    let to = last_pos.saturating_add(margin);
+    for pos in from..=to {
+        let Some(ord) = pm.ordinal_at(doc_id, pos) else { break };
+        let Some(text) = tt.text(ord) else { break };
+        let own = tt.meta(ord).map(|m| m.own_len as usize).unwrap_or(text.len());
+        let end = own.min(text.len());
+        // Lowercase to match the index: FST keys are built lowercased and the
+        // query arrives lowercased, so the engine is case-insensitive for fuzzy.
+        // termtexts keeps the ORIGINAL case, so comparing raw bytes here rejects
+        // "Functions" for the query "functin" — a match the index did find.
+        for c in text[..end].chars() {
+            if strip_separators && !is_content_char(c) { continue; }
+            for lc in c.to_lowercase() { out.push(lc); }
+        }
+    }
+    !out.is_empty()
 }
 
 // ─── Brique 4: filter_by_chain_threshold ────────────────────────────────
@@ -488,7 +573,97 @@ pub fn resolve_trigrams_v3(
     let threshold = (ngrams.len() as i32 - n as i32 * distance as i32).max(2) as usize;
     let hits = resolve_all_trigrams(ctx, &ngrams, strict_separators);
     let chains = build_trigram_chains(&hits, &query_positions, distance);
-    filter_by_chain_threshold(&chains, threshold, ngrams.len(), max_doc)
+    let (bitset, highlights, coverage) =
+        filter_by_chain_threshold(&chains, threshold, ngrams.len(), max_doc);
+
+    // The pigeonhole threshold is a NECESSARY condition and never a sufficient one:
+    // it says "enough n-grams of the query appear here", not "some substring is
+    // within edit distance d". Raising it only trades false positives for false
+    // negatives. The only way to reach zero FP is to check the text — which posmap
+    // and termtexts already allow, without touching the docstore.
+    verify_candidates(
+        ctx, query, distance, strict_separators, max_doc,
+        &chains, threshold, bitset, highlights, coverage,
+    )
+}
+
+/// Drop candidates whose text holds no substring within `distance` of the query.
+///
+/// Skipped entirely when posmap or termtexts are absent — the pipeline then keeps
+/// its previous, permissive behaviour rather than silently dropping everything.
+#[allow(clippy::too_many_arguments)]
+fn verify_candidates(
+    ctx: &BriquesContext<'_>,
+    query: &str,
+    distance: u8,
+    strict_separators: bool,
+    max_doc: DocId,
+    chains: &[TrigramChain],
+    threshold: usize,
+    bitset: BitSet,
+    highlights: Vec<(DocId, usize, usize)>,
+    coverage: Vec<(DocId, f32)>,
+) -> (BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>) {
+    if ctx.posmap.is_none() || ctx.termtexts.is_none() {
+        return (bitset, highlights, coverage);
+    }
+
+    // In relaxed mode the query arrives already separator-stripped, so the window
+    // has to be stripped too or the two are not in the same space.
+    let strip = !strict_separators;
+    let mut needle_s = String::with_capacity(query.len());
+    for c in query.chars() {
+        if strip && !is_content_char(c) { continue; }
+        for lc in c.to_lowercase() { needle_s.push(lc); }
+    }
+    let needle: Vec<u8> = needle_s.into_bytes();
+    // Enough slack for the match to start or end outside the chain's own tokens.
+    let margin = 1 + (distance as u32);
+
+    let mut kept: HashSet<DocId> = HashSet::new();
+    let mut window = String::new();
+    let mut buf: Vec<u32> = Vec::new();
+
+    let diag = std::env::var("V3_DIAG_FUZZY").is_ok();
+    let mut n_cand = 0usize;
+    let mut n_no_window = 0usize;
+    let mut n_rejected = 0usize;
+
+    for chain in chains {
+        if chain.trigram_indices.len() < threshold { continue; }
+        if kept.contains(&chain.doc_id) { continue; }
+        n_cand += 1;
+        if !rebuild_window(ctx, chain.doc_id, chain.first_pos, chain.last_pos,
+                           margin, strip, &mut window) {
+            n_no_window += 1;
+            if diag && n_no_window <= 3 {
+                eprintln!("[fz] doc={} pos={}..{} NO WINDOW",
+                    chain.doc_id, chain.first_pos, chain.last_pos);
+            }
+            continue;
+        }
+        if within_edit_distance(&needle, window.as_bytes(), distance as usize, &mut buf) {
+            kept.insert(chain.doc_id);
+        } else {
+            n_rejected += 1;
+            if diag && n_rejected <= 5 {
+                eprintln!("[fz] doc={} pos={}..{} REJECT needle={:?} window={:?}",
+                    chain.doc_id, chain.first_pos, chain.last_pos,
+                    String::from_utf8_lossy(&needle),
+                    &window[..window.len().min(80)]);
+            }
+        }
+    }
+    if diag {
+        eprintln!("[fz] query={query:?} d={distance} strip={strip} cand={n_cand} \
+kept={} no_window={n_no_window} rejected={n_rejected}", kept.len());
+    }
+
+    let mut out_bitset = BitSet::with_max_value(max_doc);
+    for &doc in &kept { out_bitset.insert(doc); }
+    let out_hl = highlights.into_iter().filter(|(d, _, _)| kept.contains(d)).collect();
+    let out_cov = coverage.into_iter().filter(|(d, _)| kept.contains(d)).collect();
+    (out_bitset, out_hl, out_cov)
 }
 
 // The fuzzy explain block (FuzzyExplain / TrigramExplain /
