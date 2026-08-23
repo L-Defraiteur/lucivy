@@ -74,6 +74,11 @@ pub struct Counters {
     pub n_chains_raw: AtomicU64,
     pub n_chains_distinct: AtomicU64,
     pub n_matches_emitted: AtomicU64,
+    /// Strict posmap resolution: chains with a shared first list, groups formed,
+    /// and dispatch-map inserts made for them.
+    pub n_chains_shared: AtomicU64,
+    pub n_groups_shared: AtomicU64,
+    pub n_dispatch_inserts: AtomicU64,
 }
 
 fn counters() -> &'static Counters {
@@ -147,6 +152,7 @@ pub fn reset() {
         &c.n_posmap_collisions, &c.n_wordmap_collisions,
         &c.n_wordmap_lookups, &c.n_wordmap_survivors, &c.n_wordmap_mismatch,
         &c.n_chains_raw, &c.n_chains_distinct, &c.n_matches_emitted,
+        &c.n_chains_shared, &c.n_groups_shared, &c.n_dispatch_inserts,
     ] {
         a.store(0, Ordering::Relaxed);
     }
@@ -207,8 +213,9 @@ pub fn dump() -> String {
         g(&c.n_wordmap_mismatch), g(&c.n_wordmap_collisions),
     ));
     s.push_str(&format!(
-        "  chains: {} raw -> {} distinct | {} matches emitted\n",
+        "  chains: {} raw -> {} distinct | {} matches emitted | shared-head {} chains in {} groups, {} dispatch inserts\n",
         g(&c.n_chains_raw), g(&c.n_chains_distinct), g(&c.n_matches_emitted),
+        g(&c.n_chains_shared), g(&c.n_groups_shared), g(&c.n_dispatch_inserts),
     ));
     s
 }

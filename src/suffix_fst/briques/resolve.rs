@@ -587,6 +587,190 @@ pub fn resolve_word_chains_v3_wordmap(
     results
 }
 
+/// Strict resolution through posmap, with chains grouped by their first list.
+///
+/// Memoising position 0 saved the *resolution* of a shared list, but every
+/// chain sharing it still walked the whole list to do its own lookups: 28 261
+/// chains over lists of ~16 000 postings made 459 million posmap lookups on
+/// `include` over a 32-segment merged index, for 817 310 survivors — fifty
+/// times the lookups of the same query over small segments.
+///
+/// Here the first step is done once per distinct first list: each active
+/// element is looked up once, and the ordinal found at the next position is
+/// dispatched to every chain of the group that wants it there. From the second
+/// step on, each chain continues alone with its own survivors, as before.
+///
+/// Same results as the per-chain walk: a chain sees exactly the survivors it
+/// would have found itself, in the same order.
+fn resolve_chains_posmap_grouped(
+    chains: &[TokenChainV3],
+    resolver: &dyn PostingResolver,
+    filter_docs: Option<&HashSet<DocId>>,
+    posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
+    first_memo: &mut FnvHashMap<Vec<u64>, std::rc::Rc<Vec<PostingEntry>>>,
+) -> Vec<MatchV3> {
+    let mut results = Vec::new();
+
+    // Group chain indices by first list. Keyed on content, like the memo.
+    let mut groups: FnvHashMap<Vec<u64>, Vec<usize>> = FnvHashMap::default();
+    for (i, chain) in chains.iter().enumerate() {
+        if chain.ordinals.is_empty() { continue; }
+        groups.entry(chain.ordinals[0].as_ref().clone()).or_default().push(i);
+    }
+
+    // Active survivor: (doc, last_pos, byte_from_first, last_ord)
+    type Active = (DocId, u32, u32, u64);
+
+    super::profile::bump(|c| &c.n_groups_shared, groups.len() as u64);
+    for (first_key, members) in groups {
+        let first_entries = match first_memo.get(first_key.as_slice()) {
+            Some(hit) => hit.clone(),
+            None => {
+                let v = std::rc::Rc::new(
+                    resolve_alternatives(resolver, &first_key, filter_docs));
+                super::profile::bump(|c| &c.n_chain_first, v.len() as u64);
+                first_memo.insert(first_key.clone(), v.clone());
+                v
+            }
+        };
+
+        // Single-position chains emit straight from the first list.
+        // Multi-position chains register what they want at position 1.
+        //
+        // A dispatch map only pays when several chains share the list. A lone
+        // chain keeps a binary search on its own wanted slice: building a map
+        // from a tail list of hundreds of ordinals, for each of the 3.4 million
+        // single-member groups of `__init`, cost 30 seconds.
+        let shared_head = members.len() > 1;
+        // Distinct tail lists of the group, with the chains wanting each. Tail
+        // lists are Arc-shared and few; the ordinals in them are many (3 000
+        // alternatives for `init…`). Keying a map by ordinal made 55 million
+        // inserts on `__init`; keying by list and binary-searching makes none.
+        let mut tails: Vec<(std::sync::Arc<Vec<u64>>, Vec<usize>)> = Vec::new();
+        let mut survivors: FnvHashMap<usize, Vec<Active>> = FnvHashMap::default();
+        for &ci in &members {
+            let chain = &chains[ci];
+            if chain.ordinals.len() == 1 {
+                for e in first_entries.iter() {
+                    let bf = e.byte_from + chain.first_sti as u32;
+                    results.push(MatchV3 {
+                        doc_id: e.doc_id,
+                        position: e.position,
+                        span: 1,
+                        byte_from: bf,
+                        byte_to: (bf + chain.total_query_consumed as u32).min(e.byte_to),
+                        token_end: e.byte_to,
+                        sti: chain.first_sti,
+                        ordinal: chain.ordinals[0][0],
+                        last_ordinal: chain.ordinals[0][0],
+                    });
+                }
+            } else if shared_head {
+                let list = &chain.ordinals[1];
+                match tails.iter_mut().find(|(l, _)| std::sync::Arc::ptr_eq(l, list) || **l == **list) {
+                    Some((_, cs)) => cs.push(ci),
+                    None => {
+                        super::profile::bump(|c| &c.n_dispatch_inserts, 1);
+                        tails.push((std::sync::Arc::clone(list), vec![ci]));
+                    }
+                }
+            } else {
+                // Lone chain: step 1 with a binary search, no map.
+                let wanted: &[u64] = chain.ordinals[1].as_slice();
+                let mut found: Vec<Active> = Vec::new();
+                for e in first_entries.iter() {
+                    let next_pos = e.position + 1;
+                    super::profile::bump(|c| &c.n_posmap_lookups, 1);
+                    let Some(ord) = posmap.ordinal_at(e.doc_id, next_pos) else { continue };
+                    let ord = ord as u64;
+                    if wanted.binary_search(&ord).is_err() { continue; }
+                    super::profile::bump(|c| &c.n_posmap_survivors, 1);
+                    found.push((e.doc_id, next_pos, e.byte_from + chain.first_sti as u32, ord));
+                }
+                if !found.is_empty() { survivors.insert(ci, found); }
+            }
+        }
+
+        // Step 1, once for the whole group: one lookup per entry, one binary
+        // search per distinct tail list.
+        if !tails.is_empty() {
+            for e in first_entries.iter() {
+                let next_pos = e.position + 1;
+                super::profile::bump(|c| &c.n_posmap_lookups, 1);
+                let Some(ord) = posmap.ordinal_at(e.doc_id, next_pos) else { continue };
+                let ord = ord as u64;
+                for (list, wanting) in &tails {
+                    if list.binary_search(&ord).is_err() { continue; }
+                    super::profile::bump(|c| &c.n_posmap_survivors, wanting.len() as u64);
+                    for &ci in wanting {
+                        survivors.entry(ci).or_default().push((
+                            e.doc_id, next_pos, e.byte_from + chains[ci].first_sti as u32, ord,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // First position per document, for the emitted match's `position`.
+        // Built once per group: built per chain it re-walked the shared list
+        // for every member — the very cost this function exists to remove.
+        let mut span_first: FnvHashMap<DocId, u32> = FnvHashMap::default();
+        if !survivors.is_empty() {
+            for e in first_entries.iter() {
+                span_first.entry(e.doc_id).or_insert(e.position);
+            }
+        }
+
+        // Steps 2+, per chain.
+        for &ci in &members {
+            let chain = &chains[ci];
+            if chain.ordinals.len() == 1 { continue; }
+            let Some(mut active) = survivors.remove(&ci) else { continue };
+
+            for ord_idx in 2..chain.ordinals.len() {
+                if active.is_empty() { break; }
+                let wanted: &[u64] = chain.ordinals[ord_idx].as_slice();
+                let mut next = Vec::new();
+                for &(doc_id, prev_pos, bf_first, _) in &active {
+                    let next_pos = prev_pos + 1;
+                    super::profile::bump(|c| &c.n_posmap_lookups, 1);
+                    let Some(ord) = posmap.ordinal_at(doc_id, next_pos) else { continue };
+                    let ord = ord as u64;
+                    if wanted.binary_search(&ord).is_err() { continue; }
+                    super::profile::bump(|c| &c.n_posmap_survivors, 1);
+                    next.push((doc_id, next_pos, bf_first, ord));
+                }
+                active = next;
+            }
+
+            // Emit: fetch the last token's posting once per match, and let it
+            // confirm the position posmap claimed.
+            for &(doc_id, last_pos, byte_from, last_ord) in &active {
+                let Some(e) = resolver.resolve_doc(last_ord, doc_id)
+                    .into_iter().find(|e| e.position == last_pos)
+                else {
+                    super::profile::bump(|c| &c.n_posmap_mismatch, 1);
+                    continue;
+                };
+                let position = span_first.get(&doc_id).copied().unwrap_or(0);
+                results.push(MatchV3 {
+                    doc_id,
+                    position,
+                    span: last_pos.saturating_sub(position) + 1,
+                    byte_from,
+                    byte_to: (e.byte_from + chain.last_consumed as u32).max(byte_from).min(e.byte_to),
+                    token_end: e.byte_to,
+                    sti: chain.first_sti,
+                    ordinal: chain.ordinals[0][0],
+                    last_ordinal: last_ord,
+                });
+            }
+        }
+    }
+
+    results
+}
+
 enum AdjacencyMode<'a> {
     /// pos[i+1] == pos[i] + 1
     Strict,
@@ -627,7 +811,34 @@ fn resolve_chains_impl(
     let mut first_memo: FnvHashMap<Vec<u64>, std::rc::Rc<Vec<PostingEntry>>> =
         FnvHashMap::default();
 
-    for chain in chains {
+    // Chains that share their first list are resolved as a group (one pass over
+    // the shared list, see resolve_chains_posmap_grouped). Chains whose first
+    // list is unique gain nothing from grouping and must not pay for it: on
+    // `__init` 3.4 million lone chains paid a map and a key clone each, for 2x.
+    let mut lone: Vec<&TokenChainV3> = Vec::new();
+    if let AdjacencyMode::StrictPosmap { posmap } = &adjacency {
+        let mut count: FnvHashMap<&[u64], u32> = FnvHashMap::default();
+        for chain in chains {
+            if chain.ordinals.is_empty() { continue; }
+            *count.entry(chain.ordinals[0].as_slice()).or_insert(0) += 1;
+        }
+        let mut shared: Vec<TokenChainV3> = Vec::new();
+        for chain in chains {
+            if chain.ordinals.is_empty() { continue; }
+            if count[chain.ordinals[0].as_slice()] > 1 {
+                shared.push(chain.clone());
+            } else {
+                lone.push(chain);
+            }
+        }
+        super::profile::bump(|c| &c.n_chains_shared, shared.len() as u64);
+        results.extend(resolve_chains_posmap_grouped(
+            &shared, resolver, filter_docs, posmap, &mut first_memo));
+    } else {
+        lone.extend(chains.iter());
+    }
+
+    for chain in lone {
         if chain.ordinals.is_empty() {
             continue;
         }

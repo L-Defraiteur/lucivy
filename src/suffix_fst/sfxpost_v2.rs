@@ -192,18 +192,18 @@ impl SfxPostReaderV2 {
     /// Whichever side is smaller drives the loop. Indices come back sorted, so
     /// the entries land in the same order the linear scan produced — callers
     /// that stop at the first match still stop at the same one.
-    fn filtered_indices(doc_ids: &[u32], filter: &HashSet<u32>) -> Vec<usize> {
-        let n = doc_ids.len();
+    fn filtered_indices(header: &OrdinalHeader<'_>, filter: &HashSet<u32>) -> Vec<usize> {
+        let n = header.num_docs;
         // Rough break-even: a binary search costs ~log2(n) probes.
         let probe_cost = (usize::BITS - n.leading_zeros()) as usize;
         if filter.len().saturating_mul(probe_cost) < n {
             let mut idx: Vec<usize> = filter.iter()
-                .filter_map(|d| doc_ids.binary_search(d).ok())
+                .filter_map(|&d| header.find_doc(d))
                 .collect();
             idx.sort_unstable();
             idx
         } else {
-            (0..n).filter(|&i| filter.contains(&doc_ids[i])).collect()
+            (0..n).filter(|&i| filter.contains(&header.doc_id(i))).collect()
         }
     }
 
@@ -242,11 +242,11 @@ impl SfxPostReaderV2 {
 
         let mut result = Vec::new();
         let indices: Vec<usize> = match filter {
-            Some(f) => Self::filtered_indices(&header.doc_ids, f),
+            Some(f) => Self::filtered_indices(&header, f),
             None => (0..header.num_docs).collect(),
         };
         for i in indices {
-            let doc_id = header.doc_ids[i];
+            let doc_id = header.doc_id(i);
             let entries = self.decode_doc_payload(&header, i);
             for (ti, bf, bt) in entries {
                 result.push(SfxPostingEntry {
@@ -265,14 +265,14 @@ impl SfxPostReaderV2 {
     pub fn has_doc(&self, ordinal: u32, doc_id: u32) -> bool {
         if ordinal >= self.num_terms { return false; }
         let Some(header) = self.read_ordinal_header(ordinal) else { return false };
-        header.doc_ids.binary_search(&doc_id).is_ok()
+        header.find_doc(doc_id).is_some()
     }
 
     /// Get entries for a single doc_id. O(log n) search + decode only that doc's payload.
     pub fn entries_for_doc(&self, ordinal: u32, target_doc: u32) -> Vec<SfxPostingEntry> {
         if ordinal >= self.num_terms { return Vec::new(); }
         let Some(header) = self.read_ordinal_header(ordinal) else { return Vec::new() };
-        let Ok(idx) = header.doc_ids.binary_search(&target_doc) else { return Vec::new() };
+        let Some(idx) = header.find_doc(target_doc) else { return Vec::new() };
         self.decode_doc_payload(&header, idx)
             .into_iter()
             .map(|(ti, bf, bt)| SfxPostingEntry {
@@ -313,39 +313,23 @@ impl SfxPostReaderV2 {
         let header_size = 4 + num_docs * 4 + num_docs * 4 + num_docs * 2;
         if data.len() < header_size { return None; }
 
-        let mut pos = 4;
-        let mut doc_ids = Vec::with_capacity(num_docs);
-        for _ in 0..num_docs {
-            doc_ids.push(u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?));
-            pos += 4;
-        }
-
-        let mut payload_offsets = Vec::with_capacity(num_docs);
-        for _ in 0..num_docs {
-            payload_offsets.push(u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?));
-            pos += 4;
-        }
-
-        let mut entry_counts = Vec::with_capacity(num_docs);
-        for _ in 0..num_docs {
-            entry_counts.push(u16::from_le_bytes(data[pos..pos + 2].try_into().ok()?));
-            pos += 2;
-        }
-
-        let payload_start = pos;
+        let d0 = 4;
+        let p0 = d0 + num_docs * 4;
+        let c0 = p0 + num_docs * 4;
+        let payload_start = c0 + num_docs * 2;
 
         Some(OrdinalHeader {
             num_docs,
-            doc_ids,
-            payload_offsets,
-            entry_counts,
+            doc_ids: &data[d0..p0],
+            payload_offsets: &data[p0..c0],
+            entry_counts: &data[c0..payload_start],
             payload_data: &data[payload_start..],
         })
     }
 
     fn decode_doc_payload(&self, header: &OrdinalHeader, doc_idx: usize) -> Vec<(u32, u32, u32)> {
-        let offset = header.payload_offsets[doc_idx] as usize;
-        let count = header.entry_counts[doc_idx] as usize;
+        let offset = header.payload_offset(doc_idx) as usize;
+        let count = header.entry_count(doc_idx) as usize;
         let data = &header.payload_data[offset..];
 
         let mut pos = 0;
@@ -360,12 +344,43 @@ impl SfxPostReaderV2 {
     }
 }
 
+/// View over one ordinal's block. Borrows; decodes fields on access.
+///
+/// It used to materialise `doc_ids`, `payload_offsets` and `entry_counts` as
+/// three `Vec`s on every call — including from `has_doc`, `doc_freq` and
+/// `entries_for_doc`, which need one lookup. Over a merged segment an ordinal
+/// spans thousands of documents, and `include` fetches one posting per emitted
+/// match, a million times: ~40 GB of allocation traffic to read 1 M u32s.
 struct OrdinalHeader<'a> {
     num_docs: usize,
-    doc_ids: Vec<u32>,
-    payload_offsets: Vec<u32>,
-    entry_counts: Vec<u16>,
+    doc_ids: &'a [u8],
+    payload_offsets: &'a [u8],
+    entry_counts: &'a [u8],
     payload_data: &'a [u8],
+}
+
+impl<'a> OrdinalHeader<'a> {
+    #[inline]
+    fn doc_id(&self, i: usize) -> u32 {
+        u32::from_le_bytes(self.doc_ids[i * 4..i * 4 + 4].try_into().unwrap())
+    }
+    #[inline]
+    fn payload_offset(&self, i: usize) -> u32 {
+        u32::from_le_bytes(self.payload_offsets[i * 4..i * 4 + 4].try_into().unwrap())
+    }
+    #[inline]
+    fn entry_count(&self, i: usize) -> u16 {
+        u16::from_le_bytes(self.entry_counts[i * 2..i * 2 + 2].try_into().unwrap())
+    }
+    /// Binary search over the little-endian doc_id array.
+    fn find_doc(&self, doc_id: u32) -> Option<usize> {
+        let (mut lo, mut hi) = (0usize, self.num_docs);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.doc_id(mid) < doc_id { lo = mid + 1; } else { hi = mid; }
+        }
+        if lo < self.num_docs && self.doc_id(lo) == doc_id { Some(lo) } else { None }
+    }
 }
 
 fn decode_vint(data: &[u8]) -> (u32, usize) {
