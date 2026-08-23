@@ -420,6 +420,11 @@ fn result_limit(files: &[(String, String)]) -> usize {
         .unwrap_or_else(|| files.len().max(1))
 }
 
+thread_local! {
+    /// Engine-only time of the last search_v3 call (search, no doc fetch).
+    static LAST_SEARCH_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
 fn search_v3(
     handle: &LucivyHandle,
     files: &[(String, String)],
@@ -437,7 +442,13 @@ fn search_v3(
     let query = query::build_query(&config, &handle.schema, &handle.index, Some(Arc::clone(&sink))).unwrap();
     let searcher = handle.reader.searcher();
     let collector = ld_lucivy::collector::TopDocs::with_limit(result_limit(files)).order_by_score();
+    let t_search = std::time::Instant::now();
     let results = searcher.search(&*query, &collector).unwrap();
+    let search_ms = t_search.elapsed().as_secs_f64() * 1000.0;
+    // What follows — one docstore fetch per hit, to recover the file index for
+    // the ground-truth comparison — is harness work, not the engine. It was
+    // silently inside the reported latency: 36 824 fetches on `include`.
+    LAST_SEARCH_MS.with(|c| c.set(search_ms));
 
     let nid_f = handle.field(NODE_ID_FIELD).unwrap();
     let mut doc_indices = HashSet::new();
@@ -654,8 +665,10 @@ fn v3_ground_truth_contains() {
         let ms = t.elapsed().as_secs_f64() * 1000.0;
 
         let status = if v3_result.doc_indices == grep_set { "OK" } else { "FAIL" };
-        eprintln!("{:<35} {:>5} {:>8} {:>8} {:>6} ({:.1}ms v3, {:.1}ms grep)",
-            q.text, mode_label, grep_set.len(), v3_result.doc_indices.len(), status, ms, grep_ms);
+        let search_ms = LAST_SEARCH_MS.with(|c| c.get());
+        eprintln!("{:<35} {:>5} {:>8} {:>8} {:>6} ({:.1}ms search, {:.1}ms +fetch, {:.1}ms grep)",
+            q.text, mode_label, grep_set.len(), v3_result.doc_indices.len(), status,
+            search_ms, ms - search_ms, grep_ms);
         if std::env::var("V3_PROFILE").is_ok() {
             eprint!("{}", profile::dump());
         }
