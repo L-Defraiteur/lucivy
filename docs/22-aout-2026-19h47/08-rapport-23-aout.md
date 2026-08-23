@@ -95,6 +95,7 @@ Tout est dans `07` (B2 bis, C bis, E) ; le résumé :
 | Nettoyage index — `.freqmap`, `.chunk_word_map`, `.next_word_map`, sections mortes du `.sfx`, `overlap_siblings`, regex legacy | `e164437` | −2 270 lignes, 8 sidecars par champ au lieu de 11 |
 | Avertissements honnêtes — `query_warnings` dans core et les 5 bindings | `8e7b07d` | 12 règles, tests unitaires + bout en bout |
 | `sfx_version = 3` par défaut | `132ae15` | a révélé et corrigé : `startsWith`/`term` faux sur v3, `close()` sous merge en vol, course de `LucivyDeltaExporter` |
+| Panel de cohérence « requêtes de RAG » | `20c0a48` | 32 requêtes (littéraux longs, sw/term, typos, accents, CJK, emoji) ; 3 bugs moteur sur le strict long corrigés (voir 07 §F) |
 
 Le dernier point est celui qui a rapporté le plus : trois bugs réels que la suite
 ne voyait pas parce que tout tournait en v2 par défaut. `startsWith` était faux
@@ -105,8 +106,10 @@ depuis `8aeb093` et son test ignoré « parce que pas sur le chemin critique ».
 1. `LucivyDeltaExporter` : fait pour la course ; vérifier que les bindings qui
    exportent des snapshots drainent aussi (`export_snapshot` pendant un merge).
 2. Compteurs `n_rx_*` dédiés ; littéraux préfixes/suffixes par coût avec intersection.
-3. Emscripten n'a jamais été compilé depuis le début du v3 (`lucivy_query_warnings`
-   y est ajouté sans compilation).
+3. Emscripten : `cargo check -p lucivy-emscripten --target wasm32-unknown-emscripten`
+   passe (23 août, soir) — tout l'arbre v3 type-checke sur la cible. Le lien
+   (`bash bindings/emscripten/build.sh`) demande emsdk + nightly + `-Z build-std`,
+   absents de la machine : à faire sur un poste équipé avant livraison.
 4. Mode « identifiant entier » pour `term` (délimité par des blancs, pas par `_`) —
    si un utilisateur le demande.
 5. Les trois échecs unitaires pré-existants (fixtures mortes) : réparer ou supprimer.
