@@ -1281,3 +1281,116 @@ fn v3_migration_from_v2_index() {
     }
     let _ = std::fs::remove_dir_all(&dir_path);
 }
+
+/// Unicode grep with the engine's folding rules, for the tests below: char
+/// by char lowercase (a fold can change byte LENGTH: Kelvin K → k, İ → i̇),
+/// separators stripped in relaxed mode, spans on the source bytes.
+fn grep_fold(text: &str, needle: &str, strict: bool) -> Vec<[usize; 2]> {
+    use ld_lucivy::tokenizer::equal_chunk::is_content_char;
+    let fold = |t: &str| -> (String, Vec<(usize, usize)>) {
+        let mut out = String::new();
+        let mut back = Vec::new();
+        for (off, ch) in t.char_indices() {
+            if !strict && !is_content_char(ch) { continue; }
+            for lc in ch.to_lowercase() {
+                let start = out.len();
+                out.push(lc);
+                for _ in start..out.len() { back.push((off, ch.len_utf8())); }
+            }
+        }
+        (out, back)
+    };
+    let (hay, back) = fold(text);
+    let (nd, _) = fold(needle);
+    let mut spans = Vec::new();
+    if nd.is_empty() { return spans; }
+    let mut from = 0;
+    while let Some(rel) = hay[from..].find(&nd) {
+        let at = from + rel;
+        let (a, _) = back[at];
+        let (b, n) = back[at + nd.len() - 1];
+        spans.push([a, b + n]);
+        from = at + 1;
+        while from < hay.len() && !hay.is_char_boundary(from) { from += 1; }
+    }
+    spans
+}
+
+/// Case folds that change byte length used to shift spans: suffix indexes
+/// are counted on the LOWERCASED key and were applied to source bytes, so
+/// `->` in `'K' -> 'K'` (Kelvin sign, 3 bytes → `k`, 1) came out two bytes
+/// early (re2's unicode_casefold.h, coherence panel, 23 August). Same for
+/// `İ` (2 bytes → `i̇`, 3) and for plain uppercase accents (`DÉJÀ`, same
+/// length — must simply match). Empirically fixed on the corpus; pinned
+/// here without a corpus.
+#[test]
+fn v3_case_fold_length_changes() {
+    let docs = [
+        "//     'k' -> '\u{212A}'  (Kelvin symbol)\n//     '\u{212A}' -> 'K'\n",
+        "\u{130}stanbul kelvin i\u{307}stanbul plain",
+        "DÉJÀ vu and déjà encore",
+        "no funny chars -> here",
+    ];
+    let handle = make_handle(&docs);
+    for (q, strict) in [
+        ("->", true),
+        ("déjà", true), ("déjà", false),
+        ("kelvin", true),
+        ("i\u{307}stanbul", false),
+    ] {
+        let spans = doc_spans(&handle, q, strict, docs.len());
+        let expect: std::collections::BTreeMap<u64, Vec<[usize; 2]>> = docs.iter().enumerate()
+            .map(|(i, d)| (i as u64, grep_fold(d, q, strict)))
+            .filter(|(_, v)| !v.is_empty())
+            .collect();
+        assert_eq!(spans, expect, "{q:?} strict={strict}");
+    }
+}
+
+/// Fuzzy and regex through ShardedHandle must reach EVERY shard: the search
+/// DAG used to leave their prescan to `weight()`, which saw shard 0 only —
+/// a 4-shard index returned a quarter of the fuzzy results, and regex
+/// tripped `bm25::idf` (global doc_freq vs one shard's doc count). Found on
+/// the rag3db distributed panel, 23 August; pinned here without a corpus.
+#[test]
+fn v3_sharded_fuzzy_regex_reach_all_shards() {
+    use lucivy_core::sharded_handle::{ShardedHandle, RamShardStorage};
+    let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+        "fields": [{"name": "content", "type": "text", "stored": true}],
+        "sfx_version": 3,
+        "shards": 4
+    })).unwrap();
+    let h = ShardedHandle::create_with_storage(Box::new(RamShardStorage::new()), &config).unwrap();
+    let content_f = h.field("content").unwrap();
+    let nid_f = h.field(NODE_ID_FIELD).unwrap();
+    let n_docs = 16u64;
+    for i in 0..n_docs {
+        let mut doc = ld_lucivy::LucivyDocument::new();
+        doc.add_u64(nid_f, i);
+        doc.add_text(content_f, &format!("kmalloc buffer_{i:04} spin_lock"));
+        h.add_document(doc, i).unwrap();
+    }
+    h.commit().unwrap();
+
+    let q = |value: &str, distance: Option<u8>, regex: bool| QueryConfig {
+        query_type: "contains".into(),
+        field: Some("content".into()),
+        value: Some(value.into()),
+        distance,
+        regex: if regex { Some(true) } else { None },
+        ..Default::default()
+    };
+    // Every document matches each query; anything less means a shard was
+    // skipped. And none of these may panic in idf.
+    for (label, config) in [
+        ("contains", q("kmalloc", None, false)),
+        ("fuzzy d=1", q("kmallc", Some(1), false)),
+        ("regex", q("buffer_[0-9]{4}", None, true)),
+        ("regex full scan", q("[0-9]{4}", None, true)),
+    ] {
+        let r = h.search(&config, 1000, None).unwrap();
+        assert_eq!(r.len(), n_docs as usize, "{label}: {} of {n_docs}", r.len());
+        let shards: std::collections::HashSet<usize> = r.iter().map(|x| x.shard_id).collect();
+        assert!(shards.len() > 1, "{label}: all results from shard(s) {shards:?}");
+    }
+}
