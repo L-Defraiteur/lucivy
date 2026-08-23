@@ -211,3 +211,57 @@ théorie.
      Tout fichier d'un segment encore dans l'inventaire est vivant, quel que soit son
      meta — lu depuis `.managed.json` sans verrou (le premier essai a déverrouillé un
      deadlock lecteur/écrivain sur `meta_informations`).
+
+## Nuit — fuzzy : les mêmes leçons, appliquées
+
+Point de départ : C4 du doc 07. `baseline_fuzzy_regex` comparait des documents sur
+500 fichiers, et `test_fuzzy_ground_truth` tournait sur le moteur **v2** (le défaut
+de `sfx_version` est 2 ; il jugeait un highlight « OK » à distance ≤ d, pas à sa
+place).
+
+**Mesuré avant de corriger** (rag3db, vérité terrain par spans depuis le disque,
+définition partagée `fuzzy_spans`) : documents quasi exacts (1 doc d'écart sur
+`functin`, `inclde`, `uint64`), **spans 0/8 exacts** — les highlights étaient les
+étendues des chaînes de trigrammes (26-40 octets pour 10) parce que
+`verify_candidates` vérifiait le document, jamais le span. `inclde` 1 254 ms,
+`uint64` 1 503 ms sur 4 600 fichiers.
+
+**Après** (`e96dc11`) :
+
+| rag3db (4 600 fichiers) | avant | après |
+|---|---|---|
+| spans exacts | 0 / 8 | **11 / 11** |
+| documents exacts | 5 / 8 | 11 / 11 |
+| `inclde` fz1 | 1 254 ms | 305 ms |
+| `uint64` fz1 | 1 503 ms | 314 ms |
+
+| kernel 50k naturel | docs | spans | search |
+|---|---|---|---|
+| requête sans résultat fz1 | 0 | exact | 17 ms |
+| `kmallc` fz1 | 1 494 | 3 053 exact | 1 855 ms |
+| `spinlock` fz1 | 4 000 | 21 205 exact | 670 ms |
+| `net_devce` fz1 | 656 | 2 448 exact | 456 ms |
+| `inclde` fz1 | 37 115 | 216 996 exact | 7 343 ms |
+| `__init` fz1 | 44 579 | 1 815 246, **1 manquant** | 11 175 ms |
+| `uint64` fz1 | 1 316 | 32 708 exact | 2 913 ms |
+| `mutex_unlok` fz1 | 2 276 | 10 622 exact | 189 ms |
+| `kmalloc` fz2 | 13 613 | 77 050 exact | 5 807 ms |
+
+(grep fuzzy depuis le disque : 4 à 7 s par requête — la DP sur chaque fichier.)
+
+Ce qui a été trouvé, par reproductions de 10 ms (`v3_fuzzy_span_inside_long_token`) :
+- `MAX_CHAINS_PER_DOC = 8` : un plafond silencieux, 280 occurrences de `rag3weaver`
+  perdues sur 1 107. Remplacé par des régions (hits proches), sans plafond.
+- Un hit de la partition word porte la position du **premier** chunk de son mot :
+  « dernier hit par octet » n'était pas « dernière position », la fenêtre s'arrêtait
+  avant l'occurrence (`rePrun|ing` pour `retrun`). Positions min/max.
+- Marge de fenêtre en positions : une suite de séparateurs est plusieurs chunks.
+  Marge en octets de contenu.
+- Un span tronqué au bord d'une fenêtre coupée (`uint6|`) : laissé à la fenêtre de
+  sa propre région, qui le voit entier.
+- **`LucivyHandle::search` ne marchait pas sur un index v3** (« invalid .sfx magic
+  bytes ») : prescan v2 inconditionnel. C'est l'API des bindings.
+
+Reste : la perf fuzzy à grande échelle (`__init` fz1 11 s, `inclde` 7 s — à profiler,
+probablement `rebuild_window_mapped` et les hits des bigrammes fréquents), et le
+défaut `sfx_version = 2` à trancher.

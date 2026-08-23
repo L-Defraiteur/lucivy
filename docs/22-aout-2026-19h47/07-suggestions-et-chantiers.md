@@ -200,13 +200,18 @@ documents pour diagnostiquer.
 29 ms aujourd'hui. Si ce chiffre bouge, c'est le plancher qui bouge, et aucun
 compteur interne ne le dira.
 
-### C4. Le fuzzy et le regex n'ont pas eu la journée
+### C4. Le fuzzy et le regex n'ont pas eu la journée — fuzzy FAIT le 23 août au soir
 
-Tout ce qui précède concerne `contains`. `fuzzy_v3` et `regex_v3` partagent le
-prescan (donc le plancher tombé leur profite) mais pas les correctifs de résolution,
-et leur vérité terrain (`baseline_fuzzy_regex`) compare des **documents**, pas des
-spans, sur 500 fichiers. Même traitement à leur appliquer : spans depuis le disque,
-panel kernel, requête vide.
+Fuzzy : vérité terrain par spans depuis le disque (`V3_QUERIES=…:fz1`), définition
+partagée moteur/harnais (`briques/fuzzy_spans.rs`), rag3db 11/11 exacts, kernel 50k
+9/9 documents et 8/9 spans (1 sur 1,8 M). Voir 06-progression. **Reste** : la perf à
+grande échelle (`__init` fz1 11 s sur 50k — profiler `rebuild_window_mapped` et la
+résolution des bigrammes fréquents), le test fusionné = frais en fuzzy, et le regex,
+qui n'a toujours rien eu : même traitement (spans depuis le disque, panel kernel,
+requête vide).
+
+**À trancher** : `sfx_version` vaut 2 par défaut (`index_meta.rs:293`). Deux anciens
+tests fuzzy mesuraient v2 sans le savoir.
 
 ### C5. Emscripten n'a jamais été compilé depuis le début du v3
 
