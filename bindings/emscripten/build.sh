@@ -76,6 +76,7 @@ emcc "$STATIC_LIB" \
         "_lucivy_dump_wait_graph_text",
         "_lucivy_search",
         "_lucivy_search_filtered",
+        "_lucivy_query_warnings",
         "_lucivy_export_snapshot",
         "_lucivy_import_snapshot",
         "_lucivy_shard_versions",
