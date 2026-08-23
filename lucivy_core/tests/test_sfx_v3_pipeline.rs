@@ -479,3 +479,410 @@ fn v3_span_relaxed_two_real_files() {
     let spans = spans_for(&handle, "uint64_t", false);
     eprintln!("spans={spans:?}");
 }
+
+// ─── A merged segment must be indistinguishable from a fresh one ─────────────
+
+/// Per-document spans, keyed by node id so two indexes of the same corpus can
+/// be compared document by document regardless of segment layout.
+fn doc_spans(handle: &LucivyHandle, value: &str, strict: bool, n_docs: usize)
+    -> std::collections::BTreeMap<u64, Vec<[usize; 2]>>
+{
+    use ld_lucivy::schema::document::Value;
+    let config = QueryConfig {
+        query_type: "contains".into(),
+        field: Some("content".into()),
+        value: Some(value.into()),
+        strict_separators: Some(strict),
+        ..Default::default()
+    };
+    let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
+    let query = query::build_query(&config, &handle.schema, &handle.index, Some(Arc::clone(&sink))).unwrap();
+    let searcher = handle.reader.searcher();
+    let collector = ld_lucivy::collector::TopDocs::with_limit(n_docs.max(1)).order_by_score();
+    let results = searcher.search(&*query, &collector).unwrap();
+    let nid_f = handle.field(NODE_ID_FIELD).unwrap();
+    let mut out = std::collections::BTreeMap::new();
+    for (_, addr) in &results {
+        let doc = searcher.doc::<ld_lucivy::LucivyDocument>(*addr).unwrap();
+        let nid = doc.field_values()
+            .find(|(f, _)| *f == nid_f)
+            .and_then(|(_, v)| v.as_value().as_u64())
+            .unwrap();
+        let seg_id = searcher.segment_reader(addr.segment_ord).segment_id();
+        let mut spans = sink.get(seg_id, addr.doc_id)
+            .and_then(|m| m.get("content").cloned())
+            .unwrap_or_default();
+        spans.sort();
+        spans.dedup();
+        out.insert(nid, spans);
+    }
+    out
+}
+
+/// All strict occurrences of `needle` in `text` (ASCII case-fold, overlapping).
+fn grep_strict(text: &str, needle: &str) -> Vec<[usize; 2]> {
+    let hay: Vec<u8> = text.bytes().map(|b| b.to_ascii_lowercase()).collect();
+    let nd: Vec<u8> = needle.bytes().map(|b| b.to_ascii_lowercase()).collect();
+    let mut out = Vec::new();
+    if nd.is_empty() || hay.len() < nd.len() { return out; }
+    for s in 0..=hay.len() - nd.len() {
+        if hay[s..s + nd.len()] == nd[..] { out.push([s, s + nd.len()]); }
+    }
+    out
+}
+
+/// Corpus for the merge-equivalence test: real kernel sources when the bench
+/// tree is present (`V3_CORPUS`, default `/tmp/linux-bench`), otherwise a
+/// synthetic corpus with enough shared vocabulary to make interning matter.
+fn merge_corpus() -> Vec<String> {
+    let n: usize = std::env::var("V3_MERGE_DOCS").ok().and_then(|v| v.parse().ok()).unwrap_or(400);
+    let root = std::env::var("V3_CORPUS").unwrap_or_else(|_| "/tmp/linux-bench".into());
+    let root = std::path::Path::new(&root);
+    let mut docs = Vec::new();
+    if root.exists() {
+        let mut paths: Vec<std::path::PathBuf> = walkdir(root)
+            .into_iter()
+            .filter(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("c") | Some("h") | Some("rst")))
+            .collect();
+        paths.sort();
+        // Spread over the tree rather than taking one directory.
+        let step = (paths.len() / n).max(1);
+        for p in paths.iter().step_by(step).take(n) {
+            if let Ok(s) = std::fs::read_to_string(p) {
+                if s.len() < 64 * 1024 { docs.push(s); }
+            }
+        }
+    }
+    if docs.is_empty() {
+        for i in 0..n {
+            docs.push(format!(
+                "#include <linux/init.h>\nstatic int __init mod{i}_init(void)\n{{\n\tspin_lock(&lock{i});\n\t\
+                 uint64_t v = kmalloc(sizeof(struct net_device), GFP_KERNEL);\n\treturn {};\n}}\n",
+                i % 7
+            ));
+        }
+    }
+    docs
+}
+
+fn walkdir(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() { stack.push(p); } else { out.push(p); }
+        }
+    }
+    out
+}
+
+fn handle_with_commits(docs: &[String], commit_every: usize) -> LucivyHandle {
+    let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+        "fields": [{"name": "content", "type": "text", "stored": true}],
+        "sfx_version": 3
+    })).unwrap();
+    let dir = ld_lucivy::directory::RamDirectory::default();
+    let handle = LucivyHandle::create(dir, &config).unwrap();
+    let content_f = handle.field("content").unwrap();
+    let nid_f = handle.field(NODE_ID_FIELD).unwrap();
+    {
+        let mut guard = handle.writer.lock().unwrap();
+        let w = guard.as_mut().unwrap();
+        w.set_merge_policy(Box::new(ld_lucivy::indexer::NoMergePolicy));
+        for (i, text) in docs.iter().enumerate() {
+            let mut doc = ld_lucivy::LucivyDocument::new();
+            doc.add_u64(nid_f, i as u64);
+            doc.add_text(content_f, text);
+            w.add_document(doc).unwrap();
+            if (i + 1) % commit_every == 0 { w.commit().unwrap(); }
+        }
+        w.commit().unwrap();
+    }
+    handle.reader.reload().unwrap();
+    handle
+}
+
+/// Two-level merge: groups of `group` segments first, then everything — so a
+/// merged segment is itself an input of a merge, as in a real progressive policy.
+fn merge_all(handle: &LucivyHandle, group: usize) -> (usize, usize) {
+    let before = handle.reader.searcher().segment_readers().len();
+    {
+        let mut guard = handle.writer.lock().unwrap();
+        let w = guard.as_mut().unwrap();
+        let mut ids = handle.index.searchable_segment_ids().unwrap();
+        ids.sort();
+        let groups: Vec<Vec<_>> = ids.chunks(group).filter(|c| c.len() > 1).map(|c| c.to_vec()).collect();
+        w.merge_many(&groups).unwrap();
+        w.commit().unwrap();
+        let ids = handle.index.searchable_segment_ids().unwrap();
+        eprintln!("  level 1: {before} -> {} segments", ids.len());
+        w.merge(&ids).unwrap();
+        w.commit().unwrap();
+    }
+    {
+        let mut guard = handle.writer.lock().unwrap();
+        if let Some(w) = guard.take() { w.wait_merging_threads().unwrap(); }
+    }
+    handle.reader.reload().unwrap();
+    (before, handle.reader.searcher().segment_readers().len())
+}
+
+/// `merge(A, B)` must answer exactly like `index(A ∪ B)` — same documents,
+/// same spans, strict and relaxed.
+///
+/// The 50k kernel bench showed a 32-segment merged index missing 11 spans on
+/// `include` that the unmerged index of the same corpus found. The merge tests
+/// in `sfx_dag_v3.rs` only check that the output is self-consistent; this one
+/// checks it against the reference the merge is supposed to reproduce.
+/// `V3_MERGE_DOCS` sizes the corpus, `V3_CORPUS` points at a source tree.
+#[test]
+fn v3_merge_equals_fresh_by_spans() {
+    let docs = merge_corpus();
+    let n = docs.len();
+    let fresh = handle_with_commits(&docs, usize::MAX);
+    let merged = handle_with_commits(&docs, (n / 8).max(1));
+    let (before, after) = merge_all(&merged, 8);
+    let n_fresh = fresh.reader.searcher().segment_readers().len();
+    // One commit still yields one segment per indexing thread; the reference
+    // is "never merged", not "one segment".
+    eprintln!("  docs={n} fresh segments={n_fresh} merged {before} -> {after}");
+    assert!(after < before, "merge did not happen");
+
+    let queries = [
+        "include", "__init", "uint64_t", "spin_lock", "function", "struct",
+        "static int", "net_device", "kmalloc", "->", "zzqqxxyyww",
+    ];
+    let mut failures = Vec::new();
+    for strict in [true, false] {
+        for q in queries {
+            let a = doc_spans(&fresh, q, strict, n);
+            let b = doc_spans(&merged, q, strict, n);
+            let mode = if strict { "strict" } else { "relax" };
+            let na: usize = a.values().map(|v| v.len()).sum();
+            let nb: usize = b.values().map(|v| v.len()).sum();
+            let mut line = format!("  {q:<12} {mode:<6} fresh docs={:<4} spans={na:<6} merged docs={:<4} spans={nb:<6}", a.len(), b.len());
+            if strict {
+                let g: usize = docs.iter().map(|d| grep_strict(d, q).len()).sum();
+                line.push_str(&format!(" grep spans={g}"));
+            }
+            eprintln!("{line}");
+            if a != b {
+                for nid in a.keys().chain(b.keys()).collect::<std::collections::BTreeSet<_>>() {
+                    let sa = a.get(nid).cloned().unwrap_or_default();
+                    let sb = b.get(nid).cloned().unwrap_or_default();
+                    if sa != sb {
+                        let miss: Vec<_> = sa.iter().filter(|s| !sb.contains(s)).collect();
+                        let extra: Vec<_> = sb.iter().filter(|s| !sa.contains(s)).collect();
+                        let ctx = |s: &[usize; 2]| {
+                            let d = &docs[*nid as usize];
+                            let lo = s[0].saturating_sub(12);
+                            let hi = (s[1] + 12).min(d.len());
+                            let lo = (lo..=s[0]).find(|&i| d.is_char_boundary(i)).unwrap_or(s[0]);
+                            let hi = (s[1]..=hi).rev().find(|&i| d.is_char_boundary(i)).unwrap_or(s[1]);
+                            d[lo..hi].replace('\n', "\\n")
+                        };
+                        let show = |v: &[&[usize; 2]]| v.iter().take(4)
+                            .map(|s| format!("{:?} {:?}", s, ctx(s))).collect::<Vec<_>>().join(", ");
+                        eprintln!("    doc {nid}: merged misses {} [{}] / extra {} [{}]",
+                                  miss.len(), show(&miss), extra.len(), show(&extra));
+                    }
+                }
+                failures.push(format!("{q} {mode}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "merged index differs from fresh on: {failures:?}");
+}
+
+/// One 0x02 key, several word shapes: "init" is the word `init`, or `in` +
+/// overlap `it`, or `in` + overlap `i` + … — each with its own content length.
+/// Interned under one ordinal they shared the first occurrence's metadata, and
+/// which occurrence came first depended on segment order, so a merged index
+/// and a fresh one disagreed (and both were sometimes wrong). Each shape now
+/// gets its own ordinal; the posting carries the content end (WSP2).
+#[test]
+fn v3_word_shapes_share_key_not_ordinal() {
+    let docs: Vec<String> = [
+        "init the module",
+        "bugs in it even",
+        "events in i-th last",
+        "in_i, todo",
+        "security bugs in it even\n * harmless",
+    ].iter().map(|s| s.to_string()).collect();
+    let expect: std::collections::BTreeMap<u64, Vec<[usize; 2]>> = [
+        (0u64, vec![[0usize, 4usize]]),
+        (1, vec![[5, 10]]),
+        (2, vec![[7, 13]]),
+        (3, vec![[0, 7]]),
+        (4, vec![[14, 19]]),
+    ].into_iter().collect();
+
+    let fresh = handle_with_commits(&docs, usize::MAX);
+    assert_eq!(doc_spans(&fresh, "__init", false, docs.len()), expect, "fresh index");
+
+    // One document per segment, in every order the merge could see them.
+    let merged = handle_with_commits(&docs, 1);
+    let (before, after) = merge_all(&merged, 2);
+    assert!(after < before);
+    assert_eq!(doc_spans(&merged, "__init", false, docs.len()), expect, "merged index");
+
+    let reversed: Vec<String> = docs.iter().rev().cloned().collect();
+    let merged_rev = handle_with_commits(&reversed, 1);
+    merge_all(&merged_rev, 2);
+    let got = doc_spans(&merged_rev, "__init", false, docs.len());
+    let expect_rev: std::collections::BTreeMap<u64, Vec<[usize; 2]>> = expect.iter()
+        .map(|(k, v)| ((docs.len() - 1) as u64 - k, v.clone())).collect();
+    assert_eq!(got, expect_rev, "merged index, reversed insertion order");
+}
+
+#[test]
+fn v3_merge_non_ascii_neighbours() {
+    let docs: Vec<String> = [
+        "结构体（struct）、共用",
+        "序通常在spinlock保护的临",
+        "plain struct here",
+    ].iter().map(|s| s.to_string()).collect();
+    let fresh = handle_with_commits(&docs, usize::MAX);
+    let merged = handle_with_commits(&docs, 1);
+    merge_all(&merged, 2);
+    for (q, strict) in [("struct", true), ("spin_lock", false)] {
+        let a = doc_spans(&fresh, q, strict, docs.len());
+        let b = doc_spans(&merged, q, strict, docs.len());
+        eprintln!("{q} strict={strict}: fresh={a:?} merged={b:?}");
+        assert_eq!(a, b, "{q}");
+    }
+}
+
+/// Delta-debugging helper: shrink the set of "other" documents for which a
+/// merged index disagrees with a fresh one on `target`. Opt-in, prints the
+/// minimal corpus.
+#[test]
+#[ignore]
+fn v3_merge_bisect() {
+    let target = std::env::var("V3_BISECT_TARGET").unwrap();
+    let query = std::env::var("V3_BISECT_QUERY").unwrap_or("spin_lock".into());
+    let strict = std::env::var("V3_BISECT_STRICT").is_ok();
+    let corpus = merge_corpus();
+    let target_text = std::fs::read_to_string(&target).unwrap();
+    let diverges = |others: &[String]| -> bool {
+        let mut docs = others.to_vec();
+        docs.push(target_text.clone());
+        let fresh = handle_with_commits(&docs, usize::MAX);
+        let grep_mode = std::env::var("V3_BISECT_GREP").is_ok();
+        let merged = handle_with_commits(&docs, if grep_mode { usize::MAX } else { (docs.len() / 8).max(1) });
+        if !grep_mode { merge_all(&merged, 8); }
+        let tid = (docs.len() - 1) as u64;
+        let a = doc_spans(&fresh, &query, strict, docs.len()).remove(&tid).unwrap_or_default();
+        // V3_BISECT_GREP: shrink for "fresh differs from grep" (strict only)
+        // instead of "fresh differs from merged".
+        let b = if std::env::var("V3_BISECT_GREP").is_ok() {
+            grep_strict(&target_text, &query)
+        } else {
+            doc_spans(&merged, &query, strict, docs.len()).remove(&tid).unwrap_or_default()
+        };
+        a != b
+    };
+    let mut others: Vec<String> = corpus.into_iter().filter(|d| *d != target_text).collect();
+    assert!(diverges(&others), "no divergence on the full corpus");
+    let mut chunk = others.len() / 2;
+    while chunk >= 1 {
+        let mut i = 0;
+        let mut progressed = false;
+        while i < others.len() {
+            let end = (i + chunk).min(others.len());
+            let mut trial = others.clone();
+            trial.drain(i..end);
+            if !trial.is_empty() && diverges(&trial) {
+                others = trial;
+                progressed = true;
+            } else {
+                i = end;
+            }
+        }
+        eprintln!("  chunk {chunk}: {} others remain", others.len());
+        if !progressed { chunk /= 2; }
+    }
+    eprintln!("MINIMAL: {} other docs", others.len());
+    for (i, d) in others.iter().enumerate() {
+        let p = format!("/tmp/bisect_other_{i}.txt");
+        std::fs::write(&p, d).unwrap();
+        eprintln!("  {p} ({} bytes)", d.len());
+    }
+    std::fs::write("/tmp/bisect_target.txt", &target_text).unwrap();
+}
+
+#[test]
+#[ignore]
+fn v3_merge_repro_files() {
+    let files: Vec<String> = std::env::var("V3_REPRO_FILES").unwrap().split(',').map(String::from).collect();
+    let docs: Vec<String> = files.iter().map(|f| std::fs::read_to_string(f).unwrap()).collect();
+    let query = std::env::var("V3_BISECT_QUERY").unwrap_or("spin_lock".into());
+    let strict = std::env::var("V3_BISECT_STRICT").is_ok();
+    let fresh = handle_with_commits(&docs, usize::MAX);
+    eprintln!("===== FRESH");
+    let a = doc_spans(&fresh, &query, strict, docs.len());
+    let merged = handle_with_commits(&docs, 1);
+    merge_all(&merged, 8);
+    eprintln!("===== MERGED");
+    let b = doc_spans(&merged, &query, strict, docs.len());
+    eprintln!("fresh={a:?}\nmerged={b:?}");
+    assert_eq!(a, b);
+}
+
+#[test]
+fn v3_span_non_ascii_neighbours() {
+    let cases: &[(&str, &str, bool)] = &[
+        ("殊的部分；用 ``__init`` 标记的函数和", "__init", true),
+        ("锁可以通过使用spin_lock_irqsave()\n或spin_l", "spin_lock", true),
+        ("Drivers using affinity‑managed interrupts", "__init", false),
+        ("namespace rag3db\n", "rag3db", true),
+        ("see rag3db → here", "rag3db", true),
+        ("MTHCA_TRANS_INIT2INIT,\n", "init", true),
+    ];
+    let mut bad = Vec::new();
+    for (doc, q, strict) in cases {
+        let handle = make_handle(&[doc]);
+        let spans = spans_for(&handle, q, *strict);
+        let needle: String = if *strict { q.to_lowercase() } else { q.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase() };
+        let expect = if *strict { doc.to_lowercase().find(&needle).map(|s| [s, s + needle.len()]) } else { None };
+        eprintln!("{q:?} strict={strict} in {doc:?}: spans={spans:?} expect={expect:?}");
+        let all: Vec<[usize; 2]> = if *strict { grep_strict(doc, q) } else { Vec::new() };
+        if spans.is_empty() { bad.push(format!("{q} in {doc:?}")); }
+        else if *strict && spans != all { bad.push(format!("{q} in {doc:?}: {spans:?} != {all:?}")); }
+        let _ = expect;
+    }
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
+#[test]
+#[ignore]
+fn v3_a2_probe() {
+    let full = std::fs::read_to_string("/tmp/a2_line.txt").unwrap();
+    let chars: Vec<char> = full.chars().collect();
+    let q = "__init";
+    for cut in 0..chars.len() {
+        let doc: String = chars[cut..].iter().collect();
+        let Some(first) = doc.find(q) else { break };
+        let handle = make_handle(&[&doc]);
+        let spans = spans_for(&handle, q, true);
+        let ok = spans.iter().any(|s| s[0] == first);
+        eprintln!("cut={cut:>3} first_at={first:>3} found={ok} spans={spans:?} doc={:?}", doc.chars().take(20).collect::<String>());
+    }
+}
+
+#[test]
+#[ignore]
+fn v3_a2_chunks() {
+    use ld_lucivy::tokenizer::equal_chunk::{segment_and_chunk, DEFAULT_MAX_TOKEN};
+    let full = std::fs::read_to_string("/tmp/a2_line.txt").unwrap();
+    let chars: Vec<char> = full.chars().collect();
+    for cut in [0usize, 1] {
+        let doc: String = chars[cut..].iter().collect();
+        eprintln!("--- cut={cut}");
+        for (i, (t, m)) in segment_and_chunk(&doc, DEFAULT_MAX_TOKEN).iter().enumerate() {
+            eprintln!("  {i:>2} {t:?} content={} sep={} ws={} word={}", m.content_len, m.sep_len, m.is_word_start, m.word_id);
+        }
+    }
+}

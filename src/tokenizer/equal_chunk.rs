@@ -181,6 +181,13 @@ fn equal_chunks(content: &str, sep: &str, max_token: usize) -> Vec<(String, usiz
     let mut offset = 0;
 
     for i in 0..num_chunks {
+        // Snapping to char boundaries makes chunks run ahead of the plan; on
+        // multi-byte text the last planned chunks can start past the end.
+        // An empty chunk is a real position with no text: a match whose
+        // neighbour it is can never be verified against it.
+        if offset >= total {
+            break;
+        }
         let target = if i < extra { base + 1 } else { base };
         let mut end = offset + target;
 
@@ -271,6 +278,16 @@ impl TokenStream for EqualChunkStream<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn no_empty_chunk_on_multibyte_text() {
+        // 54 bytes of CJK + 5 separator bytes: the plan is 8 chunks of 7-8
+        // bytes, the snaps push every end forward, the last chunk was empty.
+        let text = "引导之后，内核释放一个特殊的部分；用 ``__init";
+        for (t, m) in super::segment_and_chunk(text, super::DEFAULT_MAX_TOKEN) {
+            assert!(!t.is_empty(), "empty chunk: {m:?}");
+        }
+    }
+
     use super::*;
 
     fn chunks(text: &str, max_token: usize) -> Vec<(String, ChunkMeta)> {

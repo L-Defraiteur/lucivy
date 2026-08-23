@@ -2,11 +2,17 @@
 //!
 //! Separate from the chunk-level SfxPostV2 because word postings have
 //! different semantics: position = last chunk of the word (for cross-word
-//! chain adjacency), byte_from = first chunk start (for highlights).
+//! chain adjacency), byte_from = first chunk start (for highlights),
+//! byte_to = end of the word's content bytes (separators excluded).
+//!
+//! `WSP2` changed the meaning of byte_to from "end of the last chunk" to
+//! "end of the content". A 0x02 key does not fix its word's length ("0ui" is
+//! "0"+"ui" or "0u"+"i" under one ordinal), so the posting has to carry it;
+//! readers must not derive it from the FST entry's metadata.
 //!
 //! Format:
 //! ```text
-//! [4 bytes] magic "WSP1"
+//! [4 bytes] magic "WSP2"
 //! [4 bytes] num_ordinals (u32 LE)
 //! [num_ordinals * 4 bytes] offset table (u32 LE per ordinal → byte offset into entries)
 //! [4 bytes] sentinel offset (= end of entries)
@@ -23,12 +29,13 @@ pub struct WordPostingEntry {
     pub last_position: u32,
     /// Start byte offset in the original text (first chunk start).
     pub byte_from: u32,
-    /// End byte offset in the original text (last chunk end).
+    /// End byte offset of the word's content in the original text. Content
+    /// is contiguous from `byte_from`; separators come after.
     pub byte_to: u32,
 }
 
 const ENTRY_SIZE: usize = 20; // 5 × u32
-const MAGIC: &[u8; 4] = b"WSP1";
+const MAGIC: &[u8; 4] = b"WSP2";
 
 // ─── Writer ──────────────────────────────────────────────────────────────
 

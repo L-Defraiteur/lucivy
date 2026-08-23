@@ -144,16 +144,16 @@ pub fn resolve_single_word_v3(
             if let Some(filter) = filter_docs {
                 if !filter.contains(&e.doc_id) { continue; }
             }
-            // `word_content` is a contiguous run of source bytes (the tokenizer
-            // puts separators only on the last chunk of a segment), so
-            // byte_from + sti is a real source offset.
-            let content_len = cand.content_len() as u32;
-            let content_end = e.byte_from + content_len;
-            // A 0x02 key does not fix where its word ends: "0ui" is "0"+"ui" in
-            // one document and "0u"+"i" in another, under one ordinal. Only the
-            // posting knows this word's length. A match starting at or past it
-            // lives in the content overlap — the next word's bytes — and the
-            // next word reports it itself at sti 0.
+            // `word_content` is a contiguous run of source bytes, so
+            // byte_from + sti is a real source offset. A 0x02 key does not fix
+            // where its word ends: "0ui" is "0"+"ui" in one document and
+            // "0u"+"i" in another, under one ordinal — and the FST entry's
+            // metadata belongs to whichever occurrence was interned first, which
+            // a merge reorders. Only the posting knows this word's content end
+            // (WSP2). A match starting at or past it lives in the content
+            // overlap — the next word's bytes — and the next word reports it
+            // itself at sti 0.
+            let content_end = e.byte_to;
             if cand.sti as u32 >= (e.byte_to - e.byte_from) { continue; }
             let byte_from = e.byte_from + cand.sti as u32;
             results.push(MatchV3 {
@@ -281,16 +281,12 @@ pub fn resolve_word_chains_v3(
 
         // The head must start inside this posting's own word. A 0x02 key does
         // not fix where its word ends ("0ui" is "0"+"ui" or "0u"+"i" under one
-        // ordinal), and the posting's byte_to includes trailing separators. The
-        // exact content end comes from the word's LAST chunk, whose key is
-        // unambiguous: posmap names it, termtexts gives own_len - sep_len.
+        // ordinal); the posting's byte_to is the content end (WSP2).
         // Checked here, not inside the memoised resolution: the memo is keyed
         // by ordinal list alone and is shared across chains with different
-        // first_sti. Heads at sti 0 skip the lookups.
+        // first_sti.
         let head_ok = |e: &WordPostingEntry| {
-            if chain.first_sti == 0 { return true; }
-            let content_end = word_content_end(posmap, chunk_resolver, termtexts, e);
-            (e.byte_from + chain.first_sti as u32) < content_end
+            (e.byte_from + chain.first_sti as u32) < e.byte_to
         };
 
         if chain.ordinals.len() == 1 {
@@ -511,16 +507,12 @@ pub fn resolve_word_chains_v3_wordmap(
 
         // The head must start inside this posting's own word. A 0x02 key does
         // not fix where its word ends ("0ui" is "0"+"ui" or "0u"+"i" under one
-        // ordinal), and the posting's byte_to includes trailing separators. The
-        // exact content end comes from the word's LAST chunk, whose key is
-        // unambiguous: posmap names it, termtexts gives own_len - sep_len.
+        // ordinal); the posting's byte_to is the content end (WSP2).
         // Checked here, not inside the memoised resolution: the memo is keyed
         // by ordinal list alone and is shared across chains with different
-        // first_sti. Heads at sti 0 skip the lookups.
+        // first_sti.
         let head_ok = |e: &WordPostingEntry| {
-            if chain.first_sti == 0 { return true; }
-            let content_end = word_content_end(posmap, chunk_resolver, termtexts, e);
-            (e.byte_from + chain.first_sti as u32) < content_end
+            (e.byte_from + chain.first_sti as u32) < e.byte_to
         };
 
         if chain.ordinals.len() == 1 {
@@ -821,35 +813,6 @@ fn resolve_chains_posmap_grouped(
     results
 }
 
-/// Exclusive end of a word's content bytes, from its last chunk's metadata.
-///
-/// Falls back to the posting's byte_to (which includes trailing separators)
-/// when any lookup fails — a looser bound, never a tighter one.
-fn word_content_end(
-    posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
-    chunk_resolver: &dyn PostingResolver,
-    termtexts: Option<&crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>>,
-    e: &crate::suffix_fst::word_sfxpost::WordPostingEntry,
-) -> u32 {
-    let Some(tt) = termtexts else { return e.byte_to };
-    // A word's content is contiguous from its first chunk and ends in the
-    // first chunk that carries a separator. A long separator run spills into
-    // further pure-separator chunks, still part of the word's position span —
-    // so the LAST chunk can have no content at all, and the first one with a
-    // separator is the one to read.
-    for pos in e.first_position..=e.last_position {
-        let Some(ord) = posmap.ordinal_at(e.doc_id, pos) else { return e.byte_to };
-        let Some(m) = tt.meta(ord) else { return e.byte_to };
-        if m.sep_len > 0 || pos == e.last_position {
-            let Some(p) = chunk_resolver.resolve_doc(ord as u64, e.doc_id)
-                .into_iter().find(|p| p.position == pos)
-            else { return e.byte_to };
-            return p.byte_from + (m.own_len as u32).saturating_sub(m.sep_len as u32);
-        }
-    }
-    e.byte_to
-}
-
 /// Word chains through word_pos_map, grouped by head.
 ///
 /// `resolve_word_chains_v3_wordmap` walks every chain on its own: the head's
@@ -960,7 +923,7 @@ pub fn resolve_word_chains_v3_wordmap_grouped(
         let mut survivors: FnvHashMap<usize, Vec<Active>> = FnvHashMap::default();
         for e in first_entries.iter() {
             if first_sti > 0 {
-                let content_end = word_content_end(posmap, chunk_resolver, termtexts, e);
+                let content_end = e.byte_to;
                 if e.byte_from + first_sti as u32 >= content_end { continue; }
             }
             let Some((p, last, ord, is_word)) = step(e.doc_id, e.last_position) else { continue };

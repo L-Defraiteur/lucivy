@@ -9,42 +9,72 @@ sans mesurer, je me suis trompée.
 
 ## A. Correction — ce qui rend encore un résultat faux
 
-### A1. Un segment fusionné n'est pas indiscernable d'un segment frais
+### A1. Un segment fusionné n'est pas indiscernable d'un segment frais — FAIT le 23 août
 
-**Mesuré** : `include` sur l'index fusionné à 32 segments manque 11 spans, contre 3 sur
-l'index naturel du même corpus. Les tests de merge (`sfx_dag_v3.rs:769-877`) ne
-vérifient que la cohérence interne de la sortie.
+**Le test** : `v3_merge_equals_fresh_by_spans` (`test_sfx_v3_pipeline.rs`) indexe le
+même corpus deux fois — une fois sans fusion, une fois en 67 segments fusionnés en
+deux niveaux (8 par 8, puis tout) — et compare les spans document par document, en
+strict et en relaxed, plus un grep strict sur le texte. `V3_MERGE_DOCS` fixe la taille
+(400 par défaut, 3 s ; 3 000 en 18 s), `V3_CORPUS` la source (kernel si présent).
 
-**Causes probables** (audit des contrats, P3/P4) : l'internement « premier gagnant »
-au merge ne désigne pas le même gagnant qu'à l'indexation — même texte étendu, métas
-(`own_len`, `sep_len`, `overlap_len`, `is_word_start`) différentes selon l'ordre des
-segments — et les `gap_len` de la sibling table sont copiés verbatim alors qu'ils
-dérivent des métas de la destination.
+**Ce qu'il a trouvé en 3 secondes** : c'était A3, pas un bug du merge. La cause
+exacte est dans A3 ; la conséquence était que le « gagnant » d'une clé 0x02 changeait
+avec l'ordre des segments, donc fusionné ≠ frais — et les deux pouvaient être faux
+(`"in i-th"` pour `__init` relaxed était tronqué sur l'index **frais** selon le run).
 
-**Par où commencer** : le test qui manque. Indexer A∪B en un segment, fusionner A et B,
-comparer l'ensemble des clés FST, des textes termtexts, et le résultat de N requêtes
-**avec spans**. Ce test aurait trouvé A1 hier.
+**Deuxième trouvaille, même test sur les traductions chinoises** (`V3_CORPUS=…/zh_CN`,
+3 s) : la même collision existe pour les **chunks**. `"spinlock"` est un chunk entier
+(own_len 8, overlap 0) dans un document, et `spinlo` + overlap `ck` (own_len 6) dans
+un autre : même texte étendu, un ordinal, métas du premier. Tout ce qui reconstruit du
+texte depuis termtexts (`verify_literal`, la fenêtre relaxed) lit `own_len` et tombait
+faux pour l'autre forme. Réduit à **3 fichiers** par `v3_merge_bisect` (delta-debugging,
+`#[ignore]`, `V3_BISECT_TARGET`), reproduit en 30 ms par `v3_merge_repro_files`.
+Correctif : internement chunk par (texte, own_len, sep_len, is_word_start), collector
+et merge. Effet de bord : `include` sur zh_CN passe de 528 à 529 = grep.
 
-### A2. Occurrences manquantes en fin de fichier ou devant un caractère non-ASCII
+**Reste de A1** (non vérifié, pas de symptôme après le correctif) : les `gap_len` de la
+sibling table copiés verbatim au merge. Le test ci-dessus est maintenant le filet.
 
-**Mesuré** : `rag3db` 144 / 15 128 spans manquants, tous suivis de `\n` en fin de
-fichier ou de `→`, `│`, `─`. `function`, `return`, `struct` : 1-2 chacun, même profil.
+### A2. Occurrences manquantes en fin de fichier ou devant un caractère non-ASCII — FAIT le 23 août (la cause principale)
 
-**Supposé** : l'overlap de 2 octets coupe un caractère UTF-8 de 3 octets ; le snap à la
-frontière de caractère rend un overlap vide ou différent de ce que la marche attend.
+**Mesuré avant** : `rag3db` 144 / 15 128 spans manquants ; sur le kernel naturel,
+`include` 3, `spin_lock` 1, `__init` 1, `__init` relax 161.
 
-**Par où commencer** : un test minimal `"namespace rag3db\n"` et `"rag3db →"` dans
-`test_sfx_v3_pipeline.rs`, avec `V3_DIAG_LITERAL` pour voir les clés produites.
+**Supposé hier** : l'overlap de 2 octets coupant un caractère UTF-8. **Faux.** Réduit par
+`v3_merge_bisect` en mode grep (`V3_BISECT_GREP=1`) à un fichier, puis par
+`v3_a2_probe` (le même texte coupé d'un caractère à la fois : échec tous les 3
+caractères CJK) et `v3_a2_chunks` (dump du tokenizer) : **`equal_chunks` émettait un
+chunk vide**. Il planifie N chunks de 7-8 octets, le snap aux frontières UTF-8 avance
+chaque fin de 1-2 octets, et les derniers chunks planifiés commencent après la fin du
+texte. Un chunk vide est une position sans texte : le chemin ancré sur le deuxième
+token regarde `position - 1`, tombe dessus, et rejette un match réel.
 
-### A3. La collision de clé 0x02 est structurelle
+**Correctif** : `equal_chunks` s'arrête quand le texte est consommé (+ test unitaire
+`no_empty_chunk_on_multibyte_text`). Il change la numérotation des positions sur les
+textes multi-octets : index à reconstruire (`v=6` dans la clé du cache du harnais).
 
-**Mesuré** : `"0ui"` = `"0"+"ui"` ou `"0u"+"i"` sous un seul ordinal ; les postings des
-deux lectures sont mélangés. Contourné le 23 août (fin de contenu lue depuis les
-chunks), pas résolu.
+**Résidu** : les quelques spans qui manquent encore sur zh_CN en strict sont
+à remesurer après ce correctif (voir 06-progression pour les chiffres 50k).
 
-**Ce que je ferais** : inclure la longueur de l'overlap dans la clé 0x02, ou stocker
-`content_len` dans l'entrée `word_sfxpost` (elle a 20 octets fixes, un u16 de plus ne
-change pas l'ordre). La seconde est plus simple et rend le contournement inutile.
+### A3. La collision de clé 0x02 est structurelle — FAIT le 23 août
+
+**Mesuré** : `"0ui"` = `"0"+"ui"` ou `"0u"+"i"` sous un seul ordinal ; de même `"init"`
+= mot `init`, ou `in`+overlap `it`, ou `in`+overlap `i`+… Un ordinal portait les métas
+(`own_len`, `overlap_len`) de la **première** occurrence internée, et la marche de
+chaîne reprenait la requête au mauvais octet pour toutes les autres formes.
+
+**Correctif** (deux parties) :
+- L'internement 0x02 est clé par **(texte, content_len)**, dans le collector et dans
+  `merge_segments_v3`. La fabrique FST acceptait déjà plusieurs parents sous une clé :
+  chaque forme a son ordinal, ses métas, ses postings. Plus de gagnant.
+- Le posting `word_sfxpost` porte la **fin de contenu** dans `byte_to` (format `WSP2`,
+  avant : fin du dernier chunk, séparateurs compris). `resolve_single_word_v3` et les
+  chaînes la lisent depuis le posting ; `word_content_end` (le contournement du 23 août
+  via posmap + termtexts) est supprimé. Les entrées « tail » des mots > 264 octets ont
+  maintenant un `byte_from` exact aussi.
+
+**Test** : `v3_word_shapes_share_key_not_ordinal` — cinq documents, un par segment,
+dans les deux ordres d'insertion ; échouait avant sur l'index frais déjà.
 
 ### A4. Deux falaises d'encodage silencieuses en release
 

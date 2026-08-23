@@ -186,7 +186,7 @@ fn index_shape_key(num_files: usize) -> String {
         None => (-1, -1, false),
     };
     format!(
-        "corpus={} files={} commit_every={} merge_target={} merge_group={} progressive={} v=3",
+        "corpus={} files={} commit_every={} merge_target={} merge_group={} progressive={} v=6",
         repo_path(), num_files, commit_every(500), target, group, progressive,
     )
 }

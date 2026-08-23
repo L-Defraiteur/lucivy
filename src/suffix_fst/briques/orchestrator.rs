@@ -114,8 +114,11 @@ pub fn contains_v3(
         }
     }
 
-    // Dedup adjacent duplicates (matches are sorted by (doc_id, position)).
-    matches.dedup_by_key(|m| (m.doc_id, m.position));
+    // Dedup exact duplicates. Two occurrences can share a position — the
+    // query twice inside one word, `INIT2INIT` for `init` — and differ only
+    // by their byte offset; both are real.
+    matches.sort_by_key(|m| (m.doc_id, m.position, m.byte_from));
+    matches.dedup_by_key(|m| (m.doc_id, m.position, m.byte_from));
 
     // exact_match reads `token_end`, never the match span: `term` means "the query
     // covers the whole token", which is a statement about the container, not about

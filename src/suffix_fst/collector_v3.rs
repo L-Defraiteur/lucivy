@@ -429,12 +429,17 @@ impl SfxCollectorV3 {
                 while self.word_postings.len() <= ws_intern as usize {
                     self.word_postings.push(Vec::new());
                 }
+                // byte_to is the end of the word's CONTENT, not of its last
+                // chunk: the key "init" is "in"+"it" in one document and the
+                // word "init" in another, under one ordinal, so only the
+                // posting can say where this occurrence's content stops. The
+                // content is contiguous from the first chunk start.
                 self.word_postings[ws_intern as usize].push((
                     self.current_doc_id,
                     first_posting.1, // first_ti (position of first chunk)
                     last_posting.1,  // last_ti (position of last chunk)
                     first_posting.2, // byte_from (start of first chunk)
-                    last_posting.3,  // byte_to (end of last chunk)
+                    first_posting.2 + word_content.len() as u32, // content end
                 ));
 
                 ws_intern_sequence.push((ws_intern, word_content.len() as u16));
@@ -455,6 +460,7 @@ impl SfxCollectorV3 {
                     let mut ts = tail_start;
                     while ts < word_content.len() && !word_content.is_char_boundary(ts) { ts += 1; }
                     let tail_content = word_content[ts..].to_string();
+                    let tail_len = tail_content.len() as u32;
 
                     // Intern tail as its own token (same approach as main word-stripped)
                     let tail_extended = if !content_overlap.is_empty() {
@@ -486,8 +492,11 @@ impl SfxCollectorV3 {
                         num_chunks: 1, // tail entry = single chunk
                     });
 
-                    // Capture tail posting directly (same as last chunk's posting)
+                    // Tail posting: the tail's bytes are the last `max_token`
+                    // content bytes of the word, contiguous from the first
+                    // chunk start — not necessarily aligned on the last chunk.
                     let tail_posting = &chunk_posting_info[last_ci];
+                    let tail_from = first_posting.2 + ts as u32;
                     while self.word_postings.len() <= tail_intern as usize {
                         self.word_postings.push(Vec::new());
                     }
@@ -495,8 +504,8 @@ impl SfxCollectorV3 {
                         self.current_doc_id,
                         tail_posting.1, // first_ti = last_ti for tail
                         tail_posting.1, // same position
-                        tail_posting.2, // byte_from
-                        tail_posting.3, // byte_to
+                        tail_from,
+                        tail_from + tail_len, // content end
                     ));
                 }
             }
@@ -535,11 +544,22 @@ impl SfxCollectorV3 {
     /// This prevents word-stripped meta from poisoning chunk entries,
     /// which would cause their postings to be skipped in into_data().
     fn intern_extended(&mut self, text: &str, meta: TokenMetaV3) -> u32 {
-        // Separate namespace: word-stripped entries get a prefix to avoid collision
+        // Separate namespace: word-stripped entries get a prefix to avoid collision.
+        // They are also keyed by their content length: the key "init" is the
+        // word "init" in one document and "in" + overlap "it" in another. One
+        // ordinal for both would carry a single (own_len, overlap_len) — the
+        // first occurrence's — and the chain walk would resume the query at the
+        // wrong byte for every posting of the other shape. The FST takes several
+        // parents per key, so each shape gets its own ordinal.
+        // Chunks have the same problem with their own metadata: "spinlock" is
+        // a whole chunk (own_len 8) in one document and "spinlo" + overlap
+        // "ck" (own_len 6) in another. Anything that rebuilds text from
+        // termtexts — the literal verification, the window for relaxed
+        // matches — reads own_len, so each shape needs its own ordinal.
         let key = if meta.is_word_stripped {
-            format!("\x00ws:{text}")
+            format!("\x00ws:{text}\x00{}", meta.own_len - meta.sep_len as u16)
         } else {
-            text.to_string()
+            format!("{text}\x00{}:{}:{}", meta.own_len, meta.sep_len, meta.is_word_start as u8)
         };
         if let Some(&ord) = self.token_intern.get(&key) {
             return ord;
@@ -550,6 +570,17 @@ impl SfxCollectorV3 {
         self.token_postings.push(Vec::new());
         self.token_meta.push(meta);
         ord
+    }
+
+    /// Test helper: ordinal of the chunk entry with this extended text,
+    /// whatever its shape (intern keys carry the shape after a NUL).
+    #[cfg(test)]
+    fn chunk_ord(&self, text: &str) -> Option<u32> {
+        let prefix = format!("{text}\x00");
+        self.token_intern.iter()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .map(|(_, &v)| v)
+            .min()
     }
 
     /// Extract data for DAG-based build.
@@ -592,7 +623,9 @@ impl SfxCollectorV3 {
         for &io in &sorted_indices {
             if self.token_meta[io as usize].is_word_stripped { continue; }
             let text = &self.token_texts[io as usize];
-            let map_key = format!("C:{text}"); // "C:" = chunk namespace
+            // "C:" = chunk namespace, keyed by shape like intern_extended.
+            let cm = &self.token_meta[io as usize];
+            let map_key = format!("C:{text}\x00{}:{}:{}", cm.own_len, cm.sep_len, cm.is_word_start as u8);
             let postings_before = self.token_postings[io as usize].len();
             let entry = ord_map.entry(map_key).or_insert_with(|| OrdEntry {
                 text: text.clone(),
@@ -634,7 +667,8 @@ impl SfxCollectorV3 {
             if !self.token_meta[ws.first_intern_ord as usize].is_word_stripped { continue; }
 
             let ws_text = &self.token_texts[ws.first_intern_ord as usize];
-            let map_key = format!("W:{ws_text}"); // "W:" = word-stripped namespace
+            // "W:" = word-stripped namespace, keyed by shape like intern_extended.
+            let map_key = format!("W:{ws_text}\x00{}", ws.first_own_len - ws.last_sep_len as u16);
 
             // Add to ord_map with EMPTY postings — word postings go to WordSfxPost
             ord_map.entry(map_key).or_insert_with(|| OrdEntry {
@@ -997,9 +1031,9 @@ mod tests {
         c.end_doc();
 
         // Check that "mutex_lo" (extended) is interned, not "mutex_"
-        assert!(c.token_intern.contains_key("mutex_lo"), "should intern extended token");
-        assert!(!c.token_intern.contains_key("mutex_"), "should NOT intern base token");
-        assert!(c.token_intern.contains_key("lock"), "last token has no overlap");
+        assert!(c.chunk_ord("mutex_lo").is_some(), "should intern extended token");
+        assert!(!c.chunk_ord("mutex_").is_some(), "should NOT intern base token");
+        assert!(c.chunk_ord("lock").is_some(), "last token has no overlap");
     }
 
     #[test]
@@ -1010,11 +1044,11 @@ mod tests {
         c.end_doc();
 
         // "mutex_" + overlap "lo" → "mutex_lo"
-        assert!(c.token_intern.contains_key("mutex_lo"));
+        assert!(c.chunk_ord("mutex_lo").is_some());
         // "lock_" + overlap "in" → "lock_in"
-        assert!(c.token_intern.contains_key("lock_in"));
+        assert!(c.chunk_ord("lock_in").is_some());
         // "init" → no overlap
-        assert!(c.token_intern.contains_key("init"));
+        assert!(c.chunk_ord("init").is_some());
     }
 
     #[test]
@@ -1024,7 +1058,7 @@ mod tests {
         c.add_value("mutex_lock");
         c.end_doc();
 
-        let ord = c.token_intern["mutex_lo"];
+        let ord = c.chunk_ord("mutex_lo").unwrap();
         let meta = &c.token_meta[ord as usize];
         assert_eq!(meta.own_len, 6); // "mutex_" = 6 bytes
         assert_eq!(meta.sep_len, 1); // "_"
@@ -1032,7 +1066,7 @@ mod tests {
         assert!(meta.is_word_start);
         assert_eq!(meta.word_id, 0);
 
-        let ord = c.token_intern["lock"];
+        let ord = c.chunk_ord("lock").unwrap();
         let meta = &c.token_meta[ord as usize];
         assert_eq!(meta.own_len, 4);
         assert_eq!(meta.sep_len, 0);
@@ -1048,7 +1082,7 @@ mod tests {
         c.add_value("mutex_lock");
         c.end_doc();
 
-        let ord = c.token_intern["mutex_lo"];
+        let ord = c.chunk_ord("mutex_lo").unwrap();
         let postings = &c.token_postings[ord as usize];
         assert_eq!(postings.len(), 1);
         assert_eq!(postings[0].0, 0); // doc_id = 0
@@ -1056,7 +1090,7 @@ mod tests {
         assert_eq!(postings[0].2, 0); // byte_from = 0
         assert_eq!(postings[0].3, 6); // byte_to = 6 ("mutex_")
 
-        let ord = c.token_intern["lock"];
+        let ord = c.chunk_ord("lock").unwrap();
         let postings = &c.token_postings[ord as usize];
         assert_eq!(postings[0].1, 1); // ti = 1
         assert_eq!(postings[0].2, 6); // byte_from = 6
@@ -1078,8 +1112,8 @@ mod tests {
         // "mutex_" followed by "lock" → "mutex_lo"
         // "mutex_" followed by "core" → "mutex_co"
         // These are DIFFERENT extended tokens → different ordinals
-        assert!(c.token_intern.contains_key("mutex_lo"));
-        assert!(c.token_intern.contains_key("mutex_co"));
+        assert!(c.chunk_ord("mutex_lo").is_some());
+        assert!(c.chunk_ord("mutex_co").is_some());
     }
 
     #[test]
@@ -1149,7 +1183,7 @@ mod tests {
         c.end_doc();
 
         // Same text → same extended tokens → shared ordinals
-        let ord = c.token_intern["mutex_lo"];
+        let ord = c.chunk_ord("mutex_lo").unwrap();
         assert_eq!(c.token_postings[ord as usize].len(), 2); // 2 docs
     }
 

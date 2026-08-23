@@ -331,7 +331,9 @@ pub fn merge_segments_v3(
     let mut ns_cwm = 0u128;
     let mut ns_nwm = 0u128;
 
-    let mut global_intern: HashMap<(bool, String), u32> = HashMap::new();
+    // Word-stripped entries are keyed by (text, content_len), as in the
+    // collector: one key may hold several word shapes, each its own ordinal.
+    let mut global_intern: HashMap<(bool, String, u16, u8, bool), u32> = HashMap::new();
     let mut token_texts: Vec<String> = Vec::new();
     let mut token_meta: Vec<TokenMetaV3> = Vec::new();
     let mut token_postings: Vec<Vec<(u32, u32, u32, u32)>> = Vec::new();
@@ -357,7 +359,9 @@ pub fn merge_segments_v3(
         for old_ord in 0..tt.num_terms() {
             let (text, meta) = tt.entry(old_ord)
                 .ok_or_else(|| format!("segment {seg_idx}: missing entry at ordinal {old_ord}"))?;
-            let key = (meta.is_word_stripped, text.to_string());
+            // Same shape key as the collector: a text carries one set of
+            // (own_len, sep_len, is_word_start) per ordinal, never a winner's.
+            let key = (meta.is_word_stripped, text.to_string(), meta.own_len, meta.sep_len, meta.is_word_start);
             let global_ord = if let Some(&existing) = global_intern.get(&key) {
                 existing
             } else {
