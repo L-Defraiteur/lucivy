@@ -164,6 +164,9 @@ cargo test --release -p lucivy-core --test test_sfx_v3_ground_truth  # rag3db, 4
 #   séparateurs, sw/term, typos dedans, accents, CJK, emoji/ZWJ), 32 lignes, ~10 s
 cargo test --release -p lucivy-core --test test_fuzzy_ground_truth --test test_fuzzy_monotonicity
 cargo test --release -p luciole --lib
+# bindings, en direct (voir l'en-tête de chaque script pour le build) :
+#   python3 bindings/python/tests/smoke_warnings.py <dir du .so renommé lucivy.so>
+#   node bindings/nodejs/tests/smoke_warnings.mjs <chemin du .so napi>
 ```
 
 Dans `test_sfx_v3_pipeline.rs`, les tests qui ont trouvé les bugs de la journée :

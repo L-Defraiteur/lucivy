@@ -433,3 +433,20 @@ de l'ancien design :
 
 **`cargo test --lib` : 1415 passed, 0 failed — premier tout-vert.**
 
+## J. Bindings vérifiés en direct + gardes sans corpus — FAIT le 23 août (nuit)
+
+Python (`liblucivy.so` chargé dans python3) et Node (napi `.so` chargé dans
+node 22) : `query_warnings`/`queryWarnings` renvoient les bons messages
+(`__init` → "searched as init", `[0-9]{8}` → full scan, fuzzy `init` d=1),
+`search` + highlights exacts (`spin_lock` à [21..30]). Scripts rejouables :
+`bindings/python/tests/smoke_warnings.py`, `bindings/nodejs/tests/smoke_warnings.mjs`
+(build en tête de fichier), mentionnés dans BENCHMARKS.md.
+
+Et deux gardes indépendants du corpus pour les découvertes du jour qui ne
+tenaient que par les panels rag3db :
+- `v3_case_fold_length_changes` : Kelvin (3 octets → 1), `İ` (2 → 3), `DÉJÀ`,
+  spans exactes contre un grep Unicode local ;
+- `v3_sharded_fuzzy_regex_reach_all_shards` : 4 shards RAM, fuzzy et regex
+  (bornée et full-scan) doivent rendre tous les documents, depuis plusieurs
+  shards — épingle le prescan du DAG et le compte global de `idf`.
+
