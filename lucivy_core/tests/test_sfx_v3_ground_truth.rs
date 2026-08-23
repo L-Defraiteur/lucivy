@@ -173,6 +173,44 @@ fn merge_round(
 }
 
 
+/// Identity of the index a given set of knobs produces.
+///
+/// Two runs with the same key build byte-identical indexes, so the second can
+/// open the first instead of rebuilding it.
+fn index_shape_key(num_files: usize) -> String {
+    let (target, group, progressive) = match merge_params() {
+        Some((t, g, p)) => (t as i64, g as i64, p),
+        None => (-1, -1, false),
+    };
+    format!(
+        "corpus={} files={} commit_every={} merge_target={} merge_group={} progressive={} v=1",
+        repo_path(), num_files, commit_every(500), target, group, progressive,
+    )
+}
+
+/// Reuse a persisted index when one matching the current knobs is on disk.
+///
+/// Indexing 50k documents costs 82s and merging them another 190s to 1150s, to
+/// measure queries that run in 300ms. `V3_INDEX_DIR=/path` persists the built
+/// index there and reopens it on later runs, which is what makes iterating on
+/// query performance practical.
+///
+/// Note this also swaps RamDirectory for MmapDirectory: closer to production,
+/// but timings taken with and without the cache are not directly comparable.
+fn try_reuse_index(files: &[(String, String)]) -> Option<LucivyHandle> {
+    let dir_path = std::env::var("V3_INDEX_DIR").ok()?;
+    let key_path = std::path::Path::new(&dir_path).join(".v3_shape");
+    let want = index_shape_key(files.len());
+    if std::fs::read_to_string(&key_path).ok()? != want {
+        return None;
+    }
+    let dir = ld_lucivy::directory::MmapDirectory::open(&dir_path).ok()?;
+    let handle = LucivyHandle::open(dir).ok()?;
+    let segs = handle.reader.searcher().segment_readers().len();
+    eprintln!("  index reused from {dir_path} ({segs} segments) — delete it to force a rebuild");
+    Some(handle)
+}
+
 fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
     let config: SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [
@@ -182,8 +220,26 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
         "sfx_version": 3
     })).unwrap();
 
-    let dir = ld_lucivy::directory::RamDirectory::default();
-    let handle = LucivyHandle::create(dir, &config).unwrap();
+    if let Some(h) = try_reuse_index(files) {
+        return h;
+    }
+
+    // Persisting to disk is what makes the index reusable across runs; without
+    // V3_INDEX_DIR everything stays in RAM as before.
+    let handle = match std::env::var("V3_INDEX_DIR").ok() {
+        Some(path) => {
+            // A stale index under the same path would be reopened by shape key
+            // alone, so clear it before writing a different shape.
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            let dir = ld_lucivy::directory::MmapDirectory::open(&path).unwrap();
+            LucivyHandle::create(dir, &config).unwrap()
+        }
+        None => {
+            let dir = ld_lucivy::directory::RamDirectory::default();
+            LucivyHandle::create(dir, &config).unwrap()
+        }
+    };
     let path_f = handle.field("path").unwrap();
     let content_f = handle.field("content").unwrap();
     let nid_f = handle.field(NODE_ID_FIELD).unwrap();
@@ -289,6 +345,15 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
     }
 
     handle.reader.reload().unwrap();
+
+    // Stamp the shape last: a key on disk means the index next to it is complete.
+    if let Some(path) = std::env::var("V3_INDEX_DIR").ok() {
+        let _ = std::fs::write(
+            std::path::Path::new(&path).join(".v3_shape"),
+            index_shape_key(files.len()),
+        );
+    }
+
     // Shape of what we are timing: 1 shard, single-thread search executor
     // (Index::search_executor defaults to Executor::single_thread and nothing here
     // overrides it), NoMergePolicy + a commit every 500 docs. Query timings below

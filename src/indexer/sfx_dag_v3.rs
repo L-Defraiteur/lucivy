@@ -319,6 +319,18 @@ pub fn merge_segments_v3(
         }
     }
 
+    // Phase timings, printed under V3_PROFILE. Merging is the slowest step in any
+    // bench that wants a realistic index shape, so it gets the same treatment as
+    // the query path: measure the phases, do not guess which one is heavy.
+    let prof = crate::suffix_fst::briques::profile::enabled();
+    let t_start = std::time::Instant::now();
+    let mut ns_intern = 0u128;
+    let mut ns_postings = 0u128;
+    let mut ns_sibling = 0u128;
+    let mut ns_wpm = 0u128;
+    let mut ns_cwm = 0u128;
+    let mut ns_nwm = 0u128;
+
     let mut global_intern: HashMap<(bool, String), u32> = HashMap::new();
     let mut token_texts: Vec<String> = Vec::new();
     let mut token_meta: Vec<TokenMetaV3> = Vec::new();
@@ -341,6 +353,7 @@ pub fn merge_segments_v3(
             .and_then(crate::suffix_fst::word_sfxpost::WordSfxPostReader::open);
 
         let mut seg_ord_to_global: Vec<u32> = Vec::with_capacity(tt.num_terms() as usize);
+        let t_seg = std::time::Instant::now();
         for old_ord in 0..tt.num_terms() {
             let (text, meta) = tt.entry(old_ord)
                 .ok_or_else(|| format!("segment {seg_idx}: missing entry at ordinal {old_ord}"))?;
@@ -391,7 +404,10 @@ pub fn merge_segments_v3(
             }
         }
 
+        ns_postings += t_seg.elapsed().as_nanos();
+
         // Sibling table: both ends are ordinals of THIS segment.
+        let t_sib = std::time::Instant::now();
         if let Some(data) = seg.sibling_v3 {
             if let Some(sib) = crate::suffix_fst::sibling_table::SiblingTableReader::open(data) {
                 for ord in 0..sib.num_ordinals().min(seg_ord_to_global.len() as u32) {
@@ -409,9 +425,12 @@ pub fn merge_segments_v3(
             }
         }
 
+        ns_sibling += t_sib.elapsed().as_nanos();
+
         let mut max_word_id = 0u32;
 
         // Word position map: positions are intra-document, only doc_id and word_id move.
+        let t_wpm = std::time::Instant::now();
         if let Some(data) = seg.word_pos_map {
             if let Some(r) = crate::suffix_fst::word_pos_map::WordPosMapReader::open(data) {
                 for old_doc in 0..r.num_docs() {
@@ -427,6 +446,9 @@ pub fn merge_segments_v3(
             }
         }
 
+        ns_wpm += t_wpm.elapsed().as_nanos();
+
+        let t_cwm = std::time::Instant::now();
         if let Some(data) = seg.chunk_word_map {
             if let Some(r) = crate::suffix_fst::word_map::ChunkWordMapReader::open(data) {
                 for ord in 0..r.num_ords().min(seg_ord_to_global.len() as u32) {
@@ -441,6 +463,9 @@ pub fn merge_segments_v3(
             }
         }
 
+        ns_cwm += t_cwm.elapsed().as_nanos();
+
+        let t_nwm = std::time::Instant::now();
         if let Some(data) = seg.next_word_map {
             if let Some(r) = crate::suffix_fst::word_map::NextWordMapReader::open(data) {
                 for w in 0..r.num_words() {
@@ -452,8 +477,11 @@ pub fn merge_segments_v3(
             }
         }
 
+        ns_nwm += t_nwm.elapsed().as_nanos();
         word_id_offset += max_word_id + 1;
     }
+    let ns_seg_loop = t_start.elapsed().as_nanos();
+    let t_final = std::time::Instant::now();
 
     // Assign final ordinals in text order. Chunk and word-stripped entries keep
     // separate ordinals even when their texts match — that is the whole point.
@@ -540,6 +568,18 @@ pub fn merge_segments_v3(
         crate::suffix_fst::overlap_siblings::OverlapSiblingWriter::new(final_count as usize);
     for &io in &sorted_indices {
         overlap_siblings.add(intern_to_final[io as usize], io);
+    }
+
+    if prof {
+        let ms = |n: u128| n as f64 / 1e6;
+        eprintln!(
+            "  [merge] {} segments, {} tokens | seg loop {:.0}ms (intern+postings {:.0}, sibling {:.0}, word_pos_map {:.0}, chunk_word_map {:.0}, next_word_map {:.0}) | finalize {:.0}ms | writers {:.0}ms",
+            segments.len(), num_tokens,
+            ms(ns_seg_loop), ms(ns_postings + ns_intern), ms(ns_sibling),
+            ms(ns_wpm), ms(ns_cwm), ms(ns_nwm),
+            ms(t_final.elapsed().as_nanos()),
+            ms(t_start.elapsed().as_nanos() - ns_seg_loop),
+        );
     }
 
     let total_docs = segments.iter()

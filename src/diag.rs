@@ -227,8 +227,19 @@ pub fn set_verbose(enabled: bool) {
 }
 
 /// Check if verbose output is enabled.
+///
+/// Reads `LUCIVY_VERBOSE` once, on first call. The flag was documented as
+/// settable that way but nothing ever read it, so the environment variable was
+/// inert — only `set_verbose` worked. Reading it here can only turn verbosity
+/// on, so an explicit `set_verbose(true)` before the first call still stands.
 #[inline]
 pub fn is_verbose() -> bool {
+    static ENV_INIT: OnceLock<()> = OnceLock::new();
+    ENV_INIT.get_or_init(|| {
+        if std::env::var("LUCIVY_VERBOSE").is_ok() {
+            VERBOSE.store(true, Ordering::Relaxed);
+        }
+    });
     VERBOSE.load(Ordering::Relaxed)
 }
 
