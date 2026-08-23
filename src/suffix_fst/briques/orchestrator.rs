@@ -259,7 +259,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let matches = contains_v3(&ctx, "mutex", false, false, true);
         assert!(!matches.is_empty());
@@ -275,7 +275,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let matches = contains_v3(&ctx, "mutex_lock", false, false, true);
         assert!(!matches.is_empty());
@@ -293,7 +293,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: pm, bytemap: bm, word_sfxpost: wsp, sibling_v3: None, termtexts: None,
+            posmap: pm, bytemap: bm, word_sfxpost: wsp, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let matches = contains_v3(&ctx, "mutexlock", false, false, false);
         assert!(!matches.is_empty(), "sep-skip should work");
@@ -308,7 +308,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let matches = contains_v3(&ctx, "mutex lock", false, false, true);
         assert!(matches.is_empty(), "strict should reject different separator");
@@ -323,7 +323,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         assert!(!contains_v3(&ctx, "mutex_lo", true, false, true).is_empty());
         assert!(contains_v3(&ctx, "tex_lo", true, false, true).is_empty());
@@ -338,7 +338,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         assert!(contains_v3(&ctx, "", false, false, true).is_empty());
     }
@@ -354,7 +354,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let (bitset, highlights, _) = fuzzy_v3(&ctx, "mutex_lck", 1, true, 2);
         assert!(bitset.contains(0), "doc 0 should match fuzzy");
@@ -370,7 +370,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let (bitset, _, coverage) = fuzzy_v3(&ctx, "mutex_lo", 0, true, 1);
         assert!(bitset.contains(0));
@@ -386,7 +386,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let (bitset, _, _) = fuzzy_v3(&ctx, "zzzzzzzzz", 1, true, 1);
         assert!(!bitset.contains(0));
@@ -401,7 +401,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let (bitset, _, _) = fuzzy_v3(&ctx, "mutex", 4, true, 1);
         assert!(!bitset.contains(0));

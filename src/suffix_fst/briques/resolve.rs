@@ -390,6 +390,203 @@ pub fn resolve_word_chains_v3(
     results
 }
 
+/// Word chains resolved through word_pos_map — the word pipeline's counterpart
+/// of `resolve_chains_v3_posmap`.
+///
+/// Same contract as `resolve_word_chains_v3`: the next word must start right
+/// after the previous one, or after intermediate positions that hold nothing
+/// but separators. Instead of materialising the postings of every candidate
+/// ordinal and pairing them with the active set (57 million pair iterations on
+/// `uint64_t` relaxed over 50k files), this walks forward from the previous
+/// word's end: at each position it asks word_pos_map which word starts there
+/// and posmap which chunk sits there, and stops at the first content.
+///
+/// Exact: word_pos_map is derived from the same entries as word_sfxpost, posmap
+/// from the same entries as sfxpost. Write collisions are counted, and every
+/// emitted match is re-read from its real posting.
+pub fn resolve_word_chains_v3_wordmap(
+    chains: &[TokenChainV3],
+    word_sfxpost: &crate::suffix_fst::word_sfxpost::WordSfxPostReader<'_>,
+    chunk_resolver: &dyn PostingResolver,
+    filter_docs: Option<&HashSet<DocId>>,
+    posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
+    bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
+    word_posmap: &crate::suffix_fst::word_pos_map::WordPosMapReader<'_>,
+) -> Vec<MatchV3> {
+    use crate::suffix_fst::word_sfxpost::WordPostingEntry;
+    use crate::suffix_fst::word_pos_map::SPAN_OVERFLOW;
+
+    const CONTENT_RANGES: &[(u8, u8)] = &[
+        (b'0', b'9'), (b'A', b'Z'), (b'a', b'z'), (0x80, 0xFF),
+    ];
+
+    let mut results = Vec::new();
+
+    // Position 0 has no active set to prune against; chains share their first
+    // ordinal lists heavily, so resolve each distinct list once.
+    let mut first_memo: FnvHashMap<Vec<u64>, std::rc::Rc<Vec<WordPostingEntry>>> =
+        FnvHashMap::default();
+
+    for chain in chains {
+        if chain.ordinals.is_empty() {
+            continue;
+        }
+
+        let first_entries = match first_memo.get(chain.ordinals[0].as_slice()) {
+            Some(hit) => hit.clone(),
+            None => {
+                let v: Vec<WordPostingEntry> = chain.ordinals[0].iter()
+                    .flat_map(|&ord| {
+                        let word_entries = word_sfxpost.entries(ord as u32);
+                        let entries: Vec<WordPostingEntry> = if !word_entries.is_empty() {
+                            word_entries
+                        } else {
+                            let chunk = if let Some(filter) = filter_docs {
+                                chunk_resolver.resolve_filtered(ord, filter)
+                            } else {
+                                chunk_resolver.resolve(ord)
+                            };
+                            chunk.into_iter().map(|e| WordPostingEntry {
+                                doc_id: e.doc_id,
+                                first_position: e.position,
+                                last_position: e.position,
+                                byte_from: e.byte_from,
+                                byte_to: e.byte_to,
+                            }).collect()
+                        };
+                        let mut filtered = entries;
+                        if let Some(filter) = filter_docs {
+                            filtered.retain(|e| filter.contains(&e.doc_id));
+                        }
+                        filtered
+                    })
+                    .collect();
+                let v = std::rc::Rc::new(v);
+                first_memo.insert(chain.ordinals[0].as_ref().clone(), v.clone());
+                v
+            }
+        };
+
+        if chain.ordinals.len() == 1 {
+            for e in first_entries.iter() {
+                let bf = e.byte_from + chain.first_sti as u32;
+                results.push(MatchV3 {
+                    doc_id: e.doc_id,
+                    position: e.first_position,
+                    span: if e.last_position > e.first_position {
+                        e.last_position - e.first_position + 1
+                    } else { 1 },
+                    byte_from: bf,
+                    byte_to: bf + chain.total_query_consumed as u32,
+                    token_end: bf + chain.total_query_consumed as u32,
+                    sti: chain.first_sti,
+                    ordinal: chain.ordinals[0][0],
+                    last_ordinal: chain.ordinals[0][0],
+                });
+            }
+            continue;
+        }
+
+        // Active: (doc, last_word_first_pos, last_pos, byte_from_first, last_ord, last_is_word)
+        let mut active: Vec<(DocId, u32, u32, u32, u64, bool)> = first_entries.iter()
+            .map(|e| (e.doc_id, e.first_position, e.last_position,
+                      e.byte_from + chain.first_sti as u32, 0u64, false))
+            .collect();
+
+        for ord_idx in 1..chain.ordinals.len() {
+            if active.is_empty() { break; }
+            let wanted: &[u64] = chain.ordinals[ord_idx].as_slice();
+
+            let mut new_active = Vec::new();
+            'next_active: for &(doc_id, _, prev_last, byte_from_first, _, _) in &active {
+                let mut p = prev_last + 1;
+                loop {
+                    super::profile::bump(|c| &c.n_wordmap_lookups, 1);
+
+                    // A word starting here?
+                    if let Some((word_ord, span)) = word_posmap.word_start_at(doc_id, p) {
+                        if wanted.binary_search(&(word_ord as u64)).is_ok() {
+                            let last = if span >= SPAN_OVERFLOW {
+                                // Span did not fit in 8 bits: read the true end.
+                                match word_sfxpost.entry_at(word_ord, doc_id, p) {
+                                    Some(e) => e.last_position,
+                                    None => {
+                                        super::profile::bump(|c| &c.n_wordmap_mismatch, 1);
+                                        continue 'next_active;
+                                    }
+                                }
+                            } else {
+                                p + span
+                            };
+                            super::profile::bump(|c| &c.n_wordmap_survivors, 1);
+                            new_active.push((doc_id, p, last, byte_from_first,
+                                             word_ord as u64, true));
+                            continue 'next_active;
+                        }
+                    }
+
+                    // A chunk here? Chains may carry chunk ordinals as alternatives.
+                    let Some(chunk_ord) = posmap.ordinal_at(doc_id, p) else {
+                        continue 'next_active; // end of document
+                    };
+                    if wanted.binary_search(&(chunk_ord as u64)).is_ok() {
+                        super::profile::bump(|c| &c.n_wordmap_survivors, 1);
+                        new_active.push((doc_id, p, p, byte_from_first, chunk_ord as u64, false));
+                        continue 'next_active;
+                    }
+
+                    // Neither. Step over it only if it holds no content at all.
+                    if bytemap.bytes_in_ranges(chunk_ord, CONTENT_RANGES) {
+                        continue 'next_active;
+                    }
+                    p += 1;
+                }
+            }
+            active = new_active;
+        }
+
+        // Emit, reading each survivor's last posting for its byte span.
+        for &(doc_id, last_first, last_pos, byte_from, last_ord, last_is_word) in &active {
+            let (token_end, last_bf) = if last_is_word {
+                match word_sfxpost.entry_at(last_ord as u32, doc_id, last_first) {
+                    Some(e) => (e.byte_to, e.byte_from),
+                    None => {
+                        super::profile::bump(|c| &c.n_wordmap_mismatch, 1);
+                        continue;
+                    }
+                }
+            } else {
+                match chunk_resolver.resolve_doc(last_ord, doc_id)
+                    .into_iter().find(|e| e.position == last_pos)
+                {
+                    Some(e) => (e.byte_to, e.byte_from),
+                    None => {
+                        super::profile::bump(|c| &c.n_wordmap_mismatch, 1);
+                        continue;
+                    }
+                }
+            };
+            let position = first_entries.iter()
+                .find(|e| e.doc_id == doc_id)
+                .map(|e| e.first_position)
+                .unwrap_or(0);
+            results.push(MatchV3 {
+                doc_id,
+                position,
+                span: last_pos.saturating_sub(position) + 1,
+                byte_from,
+                byte_to: (last_bf + chain.last_consumed as u32).max(byte_from).min(token_end),
+                token_end,
+                sti: chain.first_sti,
+                ordinal: chain.ordinals[0][0],
+                last_ordinal: last_ord,
+            });
+        }
+    }
+
+    results
+}
+
 enum AdjacencyMode<'a> {
     /// pos[i+1] == pos[i] + 1
     Strict,

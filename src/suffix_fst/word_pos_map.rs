@@ -1,19 +1,28 @@
-//! Word-position map: for each (doc_id, position) → word_id within doc.
+//! Word-position map: for each (doc_id, position) → the word-stripped ordinal
+//! whose word STARTS at that position, plus the word's length in chunks.
 //!
-//! Enables O(1) verification that two adjacent tokens are from the same word
-//! (intra-word) or different words (inter-word). Used by cross-token chain
-//! verification to filter false positives from content-prefix ordinals.
+//! This is to `.word_sfxpost` what `.posmap` is to `.sfxpost`: the exact inverse,
+//! built from the same entries. It lets the word pipeline answer "which word
+//! begins at position p of doc d?" with one lookup, instead of materialising
+//! the posting list of every candidate ordinal and pairing it against the
+//! active set — 57 million pair iterations on `uint64_t` relaxed over 50k files.
 //!
-//! word_id is a per-doc counter incremented at each new segment (word boundary).
-//! Two positions with the same word_id = same word = intra-word = always valid.
+//! The file used to hold a per-document word counter. Nothing read it at query
+//! time; the merge read it only to write it back. Same shape, new content, new
+//! magic so an old file is rejected rather than misread.
 //!
-//! Format: same as PosMap but stores word_id instead of ordinal.
+//! Slot layout (u32): `ordinal | span << 24`. The ordinal takes 24 bits — the
+//! FST output already caps ordinals there (`builder_v3::ORDINAL_BITS`) — and
+//! `span = last_position - first_position` takes 8. A span of 255 means "255 or
+//! more": the reader then falls back to the posting list for the true end.
+//! Positions where no word starts hold u32::MAX.
+//!
 //! ```text
-//! [4 bytes] magic "WMAP"
+//! [4 bytes] magic "WMP2"
 //! [4 bytes] num_docs: u32 LE
 //! [8 bytes × (num_docs + 1)] offset table
 //! Data section (per doc):
-//!   [4 bytes × num_tokens] word_ids: u32 LE, one per position
+//!   [4 bytes × num_tokens] slots: u32 LE, one per position
 //! ```
 
 use super::index_registry::{SfxIndexFile, MergeStrategy};
@@ -21,7 +30,16 @@ use super::index_registry::{SfxIndexFile, MergeStrategy};
 /// Builds a word-position map during indexation.
 pub struct WordPosMapWriter {
     docs: Vec<Vec<u32>>,
+    /// An ordinal did not fit in 24 bits. The map would then lie by omission,
+    /// so `serialize` emits nothing and readers fall back to the posting path.
+    overflow: bool,
 }
+
+/// Ordinal bits in a slot; mirrors `builder_v3::ORDINAL_BITS`.
+pub const SLOT_ORDINAL_BITS: u32 = 24;
+const SLOT_ORDINAL_MASK: u32 = (1 << SLOT_ORDINAL_BITS) - 1;
+/// Span value meaning "255 or more, ask the posting list".
+pub const SPAN_OVERFLOW: u32 = 255;
 
 impl Default for WordPosMapWriter {
     fn default() -> Self {
@@ -31,11 +49,39 @@ impl Default for WordPosMapWriter {
 
 impl WordPosMapWriter {
     pub fn new() -> Self {
-        Self { docs: Vec::new() }
+        Self { docs: Vec::new(), overflow: false }
     }
 
-    /// Record that position `pos` in `doc_id` belongs to word `word_id`.
-    pub fn add(&mut self, doc_id: u32, position: u32, word_id: u32) {
+    /// Record that the word-stripped `ordinal` starts at `first` in `doc_id` and
+    /// ends at `last` (inclusive, chunk positions).
+    pub fn add_word(&mut self, doc_id: u32, first: u32, last: u32, ordinal: u32) {
+        if ordinal > SLOT_ORDINAL_MASK {
+            self.overflow = true;
+            return;
+        }
+        let span = last.saturating_sub(first).min(SPAN_OVERFLOW);
+        let slot = ordinal | (span << SLOT_ORDINAL_BITS);
+
+        let d = doc_id as usize;
+        if d >= self.docs.len() {
+            self.docs.resize(d + 1, Vec::new());
+        }
+        let p = first as usize;
+        let doc = &mut self.docs[d];
+        if p >= doc.len() {
+            doc.resize(p + 1, u32::MAX);
+        }
+        // One word start per position is what makes this an exact inverse. The
+        // collector guarantees it (a tail entry sits on the word's LAST chunk,
+        // never its first); count rather than trust.
+        if doc[p] != u32::MAX && doc[p] != slot {
+            crate::suffix_fst::briques::profile::bump(|c| &c.n_wordmap_collisions, 1);
+        }
+        doc[p] = slot;
+    }
+
+    /// Raw slot write. Kept for the unit tests of the container format.
+    pub fn add(&mut self, doc_id: u32, position: u32, slot: u32) {
         let d = doc_id as usize;
         if d >= self.docs.len() {
             self.docs.resize(d + 1, Vec::new());
@@ -45,17 +91,21 @@ impl WordPosMapWriter {
         if p >= doc.len() {
             doc.resize(p + 1, u32::MAX);
         }
-        doc[p] = word_id;
+        doc[p] = slot;
     }
 
-    /// Serialize to binary format.
+    /// Serialize to binary format. Empty on ordinal overflow, so that
+    /// `WordPosMapReader::open` fails and callers take the posting path.
     pub fn serialize(&self) -> Vec<u8> {
+        if self.overflow {
+            return Vec::new();
+        }
         let num_docs = self.docs.len() as u32;
         let header_size = 4 + 4 + (num_docs as usize + 1) * 8;
         let data_size: usize = self.docs.iter().map(|d| d.len() * 4).sum();
         let mut buf = Vec::with_capacity(header_size + data_size);
 
-        buf.extend_from_slice(b"WMAP");
+        buf.extend_from_slice(b"WMP2");
         buf.extend_from_slice(&num_docs.to_le_bytes());
 
         // Offset table
@@ -87,7 +137,7 @@ pub struct WordPosMapReader<'a> {
 impl<'a> WordPosMapReader<'a> {
     pub fn open(bytes: &'a [u8]) -> Option<Self> {
         if bytes.len() < 8 { return None; }
-        if &bytes[0..4] != b"WMAP" { return None; }
+        if &bytes[0..4] != b"WMP2" { return None; }
         let num_docs = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
         let offsets_size = (num_docs as usize + 1) * 8;
         if bytes.len() < 8 + offsets_size { return None; }
@@ -124,12 +174,12 @@ impl<'a> WordPosMapReader<'a> {
         if wid == u32::MAX { None } else { Some(wid) }
     }
 
-    /// Check if two adjacent positions are in the same word.
-    pub fn same_word(&self, doc_id: u32, pos_a: u32, pos_b: u32) -> bool {
-        match (self.word_at(doc_id, pos_a), self.word_at(doc_id, pos_b)) {
-            (Some(a), Some(b)) => a == b,
-            _ => true, // no data → don't filter
-        }
+    /// The word-stripped ordinal whose word starts at `position`, with its span
+    /// in chunks. `span == SPAN_OVERFLOW` means the true span is at least that
+    /// and must be read from the posting list.
+    pub fn word_start_at(&self, doc_id: u32, position: u32) -> Option<(u32, u32)> {
+        let slot = self.word_at(doc_id, position)?;
+        Some((slot & SLOT_ORDINAL_MASK, slot >> SLOT_ORDINAL_BITS))
     }
 
     fn read_offset(&self, idx: u32) -> u64 {
@@ -185,24 +235,38 @@ mod tests {
     }
 
     #[test]
-    fn test_same_word() {
+    fn test_word_start_at() {
         let mut w = WordPosMapWriter::new();
-        // "internationalization" → 3 chunks, all word 0
-        w.add(0, 0, 0);
-        w.add(0, 1, 0);
-        w.add(0, 2, 0);
-        // "mutex_lock" → word 1 (1 chunk), word 2 (1 chunk)
-        w.add(0, 3, 1);
-        w.add(0, 4, 2);
+        // "internationalization" → one word of 3 chunks, ordinal 7, at positions 0..=2
+        w.add_word(0, 0, 2, 7);
+        // "mutex_lock" → two one-chunk words, ordinals 11 and 12
+        w.add_word(0, 3, 3, 11);
+        w.add_word(0, 4, 4, 12);
 
         let data = w.serialize();
         let r = WordPosMapReader::open(&data).unwrap();
 
-        // Intra-word
-        assert!(r.same_word(0, 0, 1));  // chunks 0,1 of same word
-        assert!(r.same_word(0, 1, 2));  // chunks 1,2 of same word
-        // Inter-word
-        assert!(!r.same_word(0, 2, 3)); // end of word 0 → start of word 1
-        assert!(!r.same_word(0, 3, 4)); // word 1 → word 2
+        assert_eq!(r.word_start_at(0, 0), Some((7, 2)));
+        assert_eq!(r.word_start_at(0, 1), None); // inside a word, no word starts here
+        assert_eq!(r.word_start_at(0, 2), None);
+        assert_eq!(r.word_start_at(0, 3), Some((11, 0)));
+        assert_eq!(r.word_start_at(0, 4), Some((12, 0)));
+        assert_eq!(r.word_start_at(0, 5), None);
+        assert_eq!(r.word_start_at(1, 0), None);
+    }
+
+    #[test]
+    fn test_span_overflow_and_ordinal_overflow() {
+        let mut w = WordPosMapWriter::new();
+        w.add_word(0, 0, 1000, 3);
+        let r_data = w.serialize();
+        let r = WordPosMapReader::open(&r_data).unwrap();
+        assert_eq!(r.word_start_at(0, 0), Some((3, SPAN_OVERFLOW)));
+
+        // An ordinal that does not fit in 24 bits disables the whole map.
+        let mut w = WordPosMapWriter::new();
+        w.add_word(0, 0, 0, 1 << 24);
+        assert!(w.serialize().is_empty());
+        assert!(WordPosMapReader::open(&w.serialize()).is_none());
     }
 }

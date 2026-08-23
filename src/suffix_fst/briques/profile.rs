@@ -63,6 +63,12 @@ pub struct Counters {
     pub n_posmap_mismatch: AtomicU64,
     /// (doc, position) written twice with different ordinals at index time.
     pub n_posmap_collisions: AtomicU64,
+    /// Same for word_pos_map: two words starting at one position.
+    pub n_wordmap_collisions: AtomicU64,
+    /// Word-pipeline resolution through word_pos_map/posmap.
+    pub n_wordmap_lookups: AtomicU64,
+    pub n_wordmap_survivors: AtomicU64,
+    pub n_wordmap_mismatch: AtomicU64,
 
     /// Chunk chains before and after structural dedup, and matches emitted.
     pub n_chains_raw: AtomicU64,
@@ -138,7 +144,8 @@ pub fn reset() {
         &c.n_bcfs_walk_reqs, &c.n_bcfs_walk_calls, &c.n_bcfs_distinct_rem,
         &c.n_chain_first, &c.n_chain_entries, &c.n_chain_pairs,
         &c.n_posmap_lookups, &c.n_posmap_survivors, &c.n_posmap_mismatch,
-        &c.n_posmap_collisions,
+        &c.n_posmap_collisions, &c.n_wordmap_collisions,
+        &c.n_wordmap_lookups, &c.n_wordmap_survivors, &c.n_wordmap_mismatch,
         &c.n_chains_raw, &c.n_chains_distinct, &c.n_matches_emitted,
     ] {
         a.store(0, Ordering::Relaxed);
@@ -193,6 +200,11 @@ pub fn dump() -> String {
         "  posmap resolve: {} lookups, {} survivors, {} mismatches | {} write collisions\n",
         g(&c.n_posmap_lookups), g(&c.n_posmap_survivors),
         g(&c.n_posmap_mismatch), g(&c.n_posmap_collisions),
+    ));
+    s.push_str(&format!(
+        "  wordmap resolve: {} lookups, {} survivors, {} mismatches | {} write collisions\n",
+        g(&c.n_wordmap_lookups), g(&c.n_wordmap_survivors),
+        g(&c.n_wordmap_mismatch), g(&c.n_wordmap_collisions),
     ));
     s.push_str(&format!(
         "  chains: {} raw -> {} distinct | {} matches emitted\n",

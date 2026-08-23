@@ -429,23 +429,9 @@ pub fn merge_segments_v3(
 
         let mut max_word_id = 0u32;
 
-        // Word position map: positions are intra-document, only doc_id and word_id move.
+        // word_pos_map is not read from the sources: it is derived below from the
+        // merged word postings, exactly as the collector derives it from its own.
         let t_wpm = std::time::Instant::now();
-        if let Some(data) = seg.word_pos_map {
-            if let Some(r) = crate::suffix_fst::word_pos_map::WordPosMapReader::open(data) {
-                for old_doc in 0..r.num_docs() {
-                    let Some(&new_doc) = seg.doc_remap.get(&old_doc) else { continue };
-                    for pos in 0..r.num_positions(old_doc) {
-                        if let Some(w) = r.word_at(old_doc, pos) {
-                            if w == u32::MAX { continue; }
-                            max_word_id = max_word_id.max(w);
-                            wpm_writer.add(new_doc, pos, w + word_id_offset);
-                        }
-                    }
-                }
-            }
-        }
-
         ns_wpm += t_wpm.elapsed().as_nanos();
 
         let t_cwm = std::time::Instant::now();
@@ -519,6 +505,7 @@ pub fn merge_segments_v3(
         wp.sort();
         wp.dedup();
         for e in wp {
+            wpm_writer.add_word(e.doc_id, e.first_position, e.last_position, fo);
             wsp_writer.add(fo, e);
         }
 

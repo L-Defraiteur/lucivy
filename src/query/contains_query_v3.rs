@@ -75,6 +75,7 @@ strict_separators: bool,
     let wsp_bytes = load("word_sfxpost");
     let sib_bytes = load("sibling_v3");
     let tt_bytes = load("termtexts");
+    let wpm_bytes = load("word_pos_map");
 
     let debug_query = std::env::var("V3_DEBUG_QUERY").ok();
     let do_debug = debug_query.as_deref() == Some(query_text);
@@ -95,6 +96,7 @@ strict_separators: bool,
         word_sfxpost: wsp_bytes.as_ref().and_then(|b| crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(b)),
         sibling_v3: sib_bytes.as_ref().and_then(|b| crate::suffix_fst::sibling_table::SiblingTableReader::open(b)),
         termtexts: tt_bytes.as_ref().and_then(|b| crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open(b)),
+        word_posmap: wpm_bytes.as_ref().and_then(|b| crate::suffix_fst::word_pos_map::WordPosMapReader::open(b)),
     };
 
     let mut matches = orchestrator::contains_v3(

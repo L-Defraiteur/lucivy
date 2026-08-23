@@ -176,7 +176,12 @@ pub fn find_literal_v3(
         ctx.trace_msg(&format!("word_chains_total count={}", chains.len()));
         profile::bump(|c| &c.n_word_chains, chains.len() as u64);
         let _t = profile::Timer::start();
-        let cross = resolve::resolve_word_chains_v3(&chains, wsp, ctx.resolver, ctx.filter_docs, pm, bm);
+        let cross = match ctx.word_posmap.as_ref() {
+            Some(wpm) => resolve::resolve_word_chains_v3_wordmap(
+                &chains, wsp, ctx.resolver, ctx.filter_docs, pm, bm, wpm),
+            None => resolve::resolve_word_chains_v3(
+                &chains, wsp, ctx.resolver, ctx.filter_docs, pm, bm),
+        };
         _t.stop(|c| &c.ns_word_resolve);
         ctx.trace_msg(&format!("word_resolved matches={}", cross.len()));
         results.extend(cross);
@@ -825,7 +830,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let matches = find_literal_v3(&ctx, "tex", false, true);
         assert!(!matches.is_empty());
@@ -843,7 +848,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let matches = find_literal_v3(&ctx, "mutex_lock", false, true);
         assert!(!matches.is_empty());
@@ -865,7 +870,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: pm, bytemap: bm, word_sfxpost: wsp, sibling_v3: None, termtexts: None,
+            posmap: pm, bytemap: bm, word_sfxpost: wsp, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let matches = find_literal_v3(&ctx, "mutexlock", false, false);
         assert!(!matches.is_empty(), "sep-skip should find match");
@@ -882,7 +887,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let matches = find_literal_v3(&ctx, "mutex_lo", true, true);
         assert!(!matches.is_empty());
@@ -906,7 +911,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let matches = find_multi_token_v3(&ctx, &tokens, false, false, true);
         assert!(!matches.is_empty(), "multi-token should match");
@@ -925,7 +930,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let matches = find_multi_token_v3(&ctx, &tokens, false, false, true);
         assert!(matches.is_empty());
@@ -986,7 +991,7 @@ mod tests {
             bytemap: ByteBitmapReader::open(bm),
             word_sfxpost: WordSfxPostReader::open(wsp),
             sibling_v3: None,
-            termtexts: None,
+            termtexts: None, word_posmap: None,
         }
     }
 
@@ -1079,7 +1084,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: pm, bytemap: bm, word_sfxpost: wsp, sibling_v3: None, termtexts: None,
+            posmap: pm, bytemap: bm, word_sfxpost: wsp, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let matches = find_literal_v3(&ctx, "tablefunction", false, false);
 
@@ -1112,7 +1117,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false, trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
 
         let imperative = find_literal_v3(&ctx, "tex", false, true);
@@ -1135,7 +1140,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false, trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
 
         let imperative = find_literal_v3(&ctx, "mutex_lock", false, true);
@@ -1161,7 +1166,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false, trace_id: None,
-            posmap: pm, bytemap: bm, word_sfxpost: wsp, sibling_v3: None, termtexts: None,
+            posmap: pm, bytemap: bm, word_sfxpost: wsp, sibling_v3: None, termtexts: None, word_posmap: None,
         };
 
         let imperative = find_literal_v3(&ctx, "mutexlock", false, false);
@@ -1180,7 +1185,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false, trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
 
         let r = find_literal_v3_dag(&ctx, "mutex", false, true);
@@ -1208,7 +1213,7 @@ mod tests {
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false, trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
 
         let r = find_literal_v3_dag_explained(&ctx, "mutex", false, true);

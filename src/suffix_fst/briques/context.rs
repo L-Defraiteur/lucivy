@@ -14,6 +14,7 @@ use crate::suffix_fst::bytemap::ByteBitmapReader;
 use crate::suffix_fst::word_sfxpost::WordSfxPostReader;
 use crate::suffix_fst::sibling_table::SiblingTableReader;
 use crate::suffix_fst::termtexts_v3::TermTextsReaderV3;
+use crate::suffix_fst::word_pos_map::WordPosMapReader;
 
 /// Unified context for all query-time briques.
 ///
@@ -43,6 +44,10 @@ pub struct BriquesContext<'a> {
     pub word_sfxpost: Option<WordSfxPostReader<'a>>,
     pub sibling_v3: Option<SiblingTableReader<'a>>,
     pub termtexts: Option<TermTextsReaderV3<'a>>,
+    /// Inverse of word_sfxpost: word-stripped ordinal starting at (doc, pos).
+    /// None on segments written before the map carried ordinals; the word
+    /// pipeline then resolves through posting lists as before.
+    pub word_posmap: Option<WordPosMapReader<'a>>,
 }
 
 impl<'a> BriquesContext<'a> {

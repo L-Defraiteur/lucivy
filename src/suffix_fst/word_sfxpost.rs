@@ -107,6 +107,45 @@ impl<'a> WordSfxPostReader<'a> {
         self.num_ordinals
     }
 
+    /// The entry of `ordinal` whose word starts at (`doc_id`, `first_position`).
+    ///
+    /// Entries are written sorted by (doc_id, first_position, ...), so this is a
+    /// binary search over the fixed-size records — no list materialised. Used by
+    /// the word_pos_map-driven resolver, once per emitted match.
+    pub fn entry_at(&self, ordinal: u32, doc_id: u32, first_position: u32) -> Option<WordPostingEntry> {
+        if ordinal >= self.num_ordinals {
+            return None;
+        }
+        let off_base = 8 + ordinal as usize * 4;
+        let start = u32::from_le_bytes(self.data[off_base..off_base + 4].try_into().ok()?) as usize;
+        let end = u32::from_le_bytes(self.data[off_base + 4..off_base + 8].try_into().ok()?) as usize;
+        if start >= end || end > self.data.len() {
+            return None;
+        }
+        let num = (end - start) / ENTRY_SIZE;
+        let key = |i: usize| -> (u32, u32) {
+            let b = &self.data[start + i * ENTRY_SIZE..];
+            (u32::from_le_bytes(b[0..4].try_into().unwrap()),
+             u32::from_le_bytes(b[4..8].try_into().unwrap()))
+        };
+        let (mut lo, mut hi) = (0usize, num);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if key(mid) < (doc_id, first_position) { lo = mid + 1; } else { hi = mid; }
+        }
+        if lo >= num || key(lo) != (doc_id, first_position) {
+            return None;
+        }
+        let b = &self.data[start + lo * ENTRY_SIZE..start + (lo + 1) * ENTRY_SIZE];
+        Some(WordPostingEntry {
+            doc_id,
+            first_position,
+            last_position: u32::from_le_bytes(b[8..12].try_into().ok()?),
+            byte_from: u32::from_le_bytes(b[12..16].try_into().ok()?),
+            byte_to: u32::from_le_bytes(b[16..20].try_into().ok()?),
+        })
+    }
+
     pub fn entries(&self, ordinal: u32) -> Vec<WordPostingEntry> {
         if ordinal >= self.num_ordinals {
             return Vec::new();

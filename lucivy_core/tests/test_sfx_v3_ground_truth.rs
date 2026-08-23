@@ -183,7 +183,7 @@ fn index_shape_key(num_files: usize) -> String {
         None => (-1, -1, false),
     };
     format!(
-        "corpus={} files={} commit_every={} merge_target={} merge_group={} progressive={} v=2",
+        "corpus={} files={} commit_every={} merge_target={} merge_group={} progressive={} v=3",
         repo_path(), num_files, commit_every(500), target, group, progressive,
     )
 }
@@ -810,6 +810,7 @@ fn v3_ground_truth_contains() {
                         word_sfxpost: wsp_bytes.as_ref().and_then(|b| ld_lucivy::suffix_fst::word_sfxpost::WordSfxPostReader::open(b)),
                         sibling_v3: sib_bytes.as_ref().and_then(|b| ld_lucivy::suffix_fst::sibling_table::SiblingTableReader::open(b)),
                         termtexts: tt_bytes.as_ref().and_then(|b| ld_lucivy::suffix_fst::termtexts_v3::TermTextsReaderV3::open(b)),
+                        word_posmap: None,
                     };
 
                     let r = find_literal_v3_dag_explained(&ctx, &effective_query, false, strict);

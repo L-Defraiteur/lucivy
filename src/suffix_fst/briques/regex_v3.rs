@@ -349,6 +349,7 @@ where
                 .and_then(crate::suffix_fst::sibling_table::SiblingTableReader::open),
             termtexts: termtexts_data
                 .and_then(crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open),
+            word_posmap: None,
         };
         let matches = composite::find_literal_v3(
             &ctx, viable[lit_idx], anchor_start && lit_idx == 0, strict_sep,
@@ -724,7 +725,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
 
         // Verify literals are findable
@@ -745,7 +746,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
 
         let m1 = composite::find_literal_v3(&ctx, "mutex", false, true);
@@ -768,7 +769,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None,
+            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
 
         // "mutex" in doc 0, "world" in doc 1 → no intersection

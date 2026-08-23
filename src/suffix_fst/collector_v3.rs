@@ -86,16 +86,12 @@ pub struct SfxCollectorV3 {
     // of the query the first token consumes, excluding overlap).
     // Collected during add_value, remapped to final ordinals in into_data.
     sibling_pairs: Vec<(u32, u32, u16)>,
-    // Per-doc word position map: (doc_id, position) → word_id_within_doc.
-    word_pos_map: crate::suffix_fst::word_pos_map::WordPosMapWriter,
 
     // Per-document state
     doc_values: Vec<ValueDataV3>,
     doc_active: bool,
     current_doc_id: u32,
     current_value_ti_start: u32,
-    /// Per-doc word counter for word_pos_map (offset per value).
-    current_doc_word_offset: u32,
 
     // Config
     max_token: usize,
@@ -143,12 +139,10 @@ impl SfxCollectorV3 {
             chunk_to_word: Vec::new(),
             next_word_pairs: Vec::new(),
             sibling_pairs: Vec::new(), // (intern_a, intern_b, content_len_a)
-            word_pos_map: crate::suffix_fst::word_pos_map::WordPosMapWriter::new(),
             doc_values: Vec::new(),
             doc_active: false,
             current_doc_id: 0,
             current_value_ti_start: 0,
-            current_doc_word_offset: 0,
             max_token: DEFAULT_MAX_TOKEN,
             overlap: DEFAULT_OVERLAP,
             min_suffix_len: min,
@@ -168,7 +162,6 @@ impl SfxCollectorV3 {
         self.doc_values.clear();
         self.doc_active = true;
         self.current_value_ti_start = 0;
-        self.current_doc_word_offset = 0;
     }
 
     /// Tokenize and add a complete value string.
@@ -284,8 +277,8 @@ impl SfxCollectorV3 {
             chunk_intern_ids.push(intern_id);
 
             // Record word position: per-doc word_id = local word_id + offset
-            let doc_word_id = meta.word_id as u32 + self.current_doc_word_offset;
-            self.word_pos_map.add(self.current_doc_id, ti, doc_word_id);
+            // word_pos_map is no longer written here: it is derived in into_data
+            // from word_postings, the same data word_sfxpost is built from.
 
             offset += chunk_len;
         }
@@ -297,10 +290,6 @@ impl SfxCollectorV3 {
             let content_len = (meta.own_len as u16).saturating_sub(meta.sep_len as u16);
             self.sibling_pairs.push((w[0], w[1], content_len));
         }
-
-        // Update word offset for next value in same doc
-        let max_local_word_id = chunks.iter().map(|(_, m)| m.word_id).max().unwrap_or(0);
-        self.current_doc_word_offset += max_local_word_id as u32 + 1;
 
         // Build word map: group chunks by word_id, intern segments, record mappings.
         {
@@ -703,6 +692,9 @@ impl SfxCollectorV3 {
         let mut word_sfxpost_writer = crate::suffix_fst::word_sfxpost::WordSfxPostWriter::new(
             final_ord as usize,
         );
+        // word_pos_map is fed from the same loop, so it is the exact inverse of
+        // word_sfxpost by construction.
+        let mut word_pos_map = crate::suffix_fst::word_pos_map::WordPosMapWriter::new();
         for dws in &deferred_ws {
             let ws_final_ord = intern_to_final[dws.intern_ord as usize];
             let io = dws.intern_ord as usize;
@@ -715,6 +707,7 @@ impl SfxCollectorV3 {
                         byte_from: bf,
                         byte_to: bt,
                     });
+                    word_pos_map.add_word(doc_id, first_ti, last_ti, ws_final_ord);
                 }
             }
         }
@@ -754,7 +747,7 @@ impl SfxCollectorV3 {
             next_word_writer.add(prev, next);
         }
         let next_word_map_data = next_word_writer.serialize();
-        let word_pos_map_data = self.word_pos_map.serialize();
+        let word_pos_map_data = word_pos_map.serialize();
 
         // Build sibling table v3: remap intern ordinals to final ordinals
         // Sibling table v3: gap_len field stores content_len of the source ordinal
