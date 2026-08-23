@@ -210,7 +210,14 @@ documents pour diagnostiquer.
 29 ms aujourd'hui. Si ce chiffre bouge, c'est le plancher qui bouge, et aucun
 compteur interne ne le dira.
 
-### C4. Le fuzzy et le regex n'ont pas eu la journée — fuzzy FAIT le 23 août au soir
+### C4. Le fuzzy et le regex n'ont pas eu la journée — FAIT le 23 août (fuzzy au soir, regex tard)
+
+Regex : `briques/regex_verified.rs`, rag3db 19/19, kernel 50k 11/11, voir 06. Reste :
+supprimer `regex_v3.rs` / `regex_gap_analyzer.rs` / `automaton_weight.rs` et
+`V3_REGEX_MODE` (−1 900 lignes), compteurs `n_rx_*`, jeu de littéraux par coût avec
+intersection préfixes/suffixes, et ajouter au panel par défaut les motifs qui ont
+cassé (`/\*[^*]*\*/`, `(?s)#if.*?#endif`, `(?-i)Table`, `[0-9]{8}`).
+
 
 Fuzzy : vérité terrain par spans depuis le disque (`V3_QUERIES=…:fz1`), définition
 partagée moteur/harnais (`briques/fuzzy_spans.rs`), rag3db 11/11 exacts, kernel 50k

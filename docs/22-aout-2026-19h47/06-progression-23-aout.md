@@ -305,3 +305,38 @@ un match simple, la chaîne était redondante (`fst_walk`, −700 chaînes sur `
 
 Contains sur le même index : 30-80 ms. Le fuzzy est à ×1,5-3 (hors `__init`, qui
 est une question de sémantique : `init` d=1 admet `int`, `unit`, `inet`).
+
+## Tard — le regex, même méthode, même résultat
+
+Audit agent contains/fuzzy vs regex, puis réécriture par vérification
+(`briques/regex_verified.rs`, `922a2db`, `a7c60d9`). L'ancien chemin approximait le
+motif sur l'index (classes de gaps, DFA sur les ordinaux) : sur rag3db,
+`std::[a-z_]+_ptr` 0 doc sur 1 142, `[A-Z][a-z]+Function` 0 sur 588, `function\s*\(`
+13 sur 160, highlights réduits au littéral, `\b` en erreur. Gardé sous
+`V3_REGEX_MODE=legacy` le temps de le supprimer.
+
+**Nouveau** : littéraux requis par `regex-syntax` (préfixes exacts, sinon suffixes —
+sur le motif brut : en insensible à la casse `function` devient 64 variantes),
+occurrences par le contains strict, fenêtre **prouvée** par `maximum_len()` du motif
+(marge n+1, régions fusionnées sous 2n+2 octets : aucun match ne traverse un bord,
+donc `find_iter` sur la fenêtre ≡ sur le fichier), sinon document entier reconstruit ;
+`regex::Regex` — le même que la vérité terrain — décide.
+
+| rag3db (19 motifs) | kernel 50k (11 motifs) |
+|---|---|
+| 19/19 exacts, 3-25 ms | 11/11 exacts, 23-190 ms |
+
+Dont : `/\*[^*]*\*/` (421 036 spans, 191 ms), `(?s)#ifdef CONFIG_[A-Z0-9_]+.*?#endif`
+imbriqués, `(?-i)Table`, `\bkfree\b`, et `[0-9]{8}` **sans aucun littéral** : les
+50 000 documents reconstruits depuis termtexts et balayés, 190 ms — exact, et c'est
+la borne basse du « grep » que l'index sait faire.
+
+L'agent a trouvé au passage un **double free dans luciole** : à la première erreur
+d'une tâche du scatter, les nœuds des autres tâches étaient libérés deux fois.
+Latent pour contains et fuzzy ; le regex (motif sans littéral → erreur) l'a déclenché
+trois fois sur trois. Corrigé dans `execute_level_parallel`.
+
+Ce qui reste en regex : compteurs dédiés (ceux du fuzzy sont réutilisés), choisir
+préfixes/suffixes par coût et intersecter quand les deux sont finis (`return ` 36 k
+hits pour 138 spans), supprimer le legacy (−1 900 lignes), et les avertissements
+(motif non borné sur 50k = balayage complet, à dire à l'utilisateur).
