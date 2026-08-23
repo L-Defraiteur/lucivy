@@ -436,3 +436,46 @@ fn v3_span_exact_relaxed_trailing_token() {
     eprintln!("spans={spans:?} expect=[{}..{}]", expect, expect + 8);
     assert_eq!(spans, vec![[expect, expect + 8]]);
 }
+
+#[test]
+fn v3_span_starts_at_match_not_at_head_token() {
+    let doc = "sh_machine_vector mv_vapor __init mv = {\n\t\t.mv_name = ";
+    let handle = make_handle(&[doc]);
+    let spans = spans_for(&handle, "__init", true);
+    let expect = doc.find("__init").unwrap();
+    eprintln!("spans={spans:?} expect=[{}..{}]", expect, expect + 6);
+    assert_eq!(spans, vec![[expect, expect + 6]]);
+}
+
+#[test]
+fn v3_span_relaxed_starts_at_content() {
+    let doc = "4_t numBytesRead = 0;\n    uint64_t offsetToWrite = 0";
+    let handle = make_handle(&[doc]);
+    let spans = spans_for(&handle, "uint64_t", false);
+    let expect = doc.find("uint64_t").unwrap();
+    eprintln!("spans={spans:?} expect=[{}..{}]", expect, expect + 8);
+    assert_eq!(spans, vec![[expect, expect + 8]]);
+}
+
+#[test]
+fn v3_span_relaxed_real_file_head() {
+    let doc = std::fs::read_to_string("/tmp/s3fs_head.txt").unwrap_or_default();
+    if doc.is_empty() { return; }
+    let handle = make_handle(&[&doc]);
+    let spans = spans_for(&handle, "uint64_t", false);
+    let mut expect = Vec::new();
+    let mut i = 0;
+    while let Some(p) = doc[i..].find("uint64_t") { expect.push([i + p, i + p + 8]); i += p + 1; }
+    eprintln!("spans={spans:?}\nexpect={expect:?}");
+    assert_eq!(spans, expect);
+}
+
+#[test]
+fn v3_span_relaxed_two_real_files() {
+    let a = std::fs::read_to_string("/tmp/s3fs_head.txt").unwrap_or_default();
+    let b = std::fs::read_to_string("/tmp/cfm_head.txt").unwrap_or_default();
+    if a.is_empty() || b.is_empty() { return; }
+    let handle = make_handle(&[&a, &b]);
+    let spans = spans_for(&handle, "uint64_t", false);
+    eprintln!("spans={spans:?}");
+}

@@ -88,8 +88,17 @@ pub fn find_literal_v3(
         if ctx.has_sibling_chains() {
             let _t = profile::Timer::start();
             let mut all_splits = fst_walk::falling_walk_chunks(ctx.reader, query);
-            let extra = fst_walk::splits_from_fst_candidates(&candidates, query.to_lowercase().len());
-            // Only chunk candidates (sti-based, non-word-stripped)
+            // Chunk candidates only. In relaxed mode fst_candidates_v3 scans the
+            // 0x02 partition too, and a word-stripped head leaking into the chunk
+            // DFS produced chains like ["0ui"@1, "uint64t"] whose span started
+            // on the separator before `uint64_t` — 52 extra spans on the panel,
+            // surviving every other filter because this is the one place the
+            // partition invariant was not enforced.
+            let chunk_cands: Vec<_> = candidates.iter()
+                .filter(|c| c.partition != 0x02)
+                .cloned()
+                .collect();
+            let extra = fst_walk::splits_from_fst_candidates(&chunk_cands, query.to_lowercase().len());
             for s in extra {
                 if !s.parent.is_word_start || s.parent.sep_len == 0 { continue; }
                 all_splits.push(s);
@@ -103,11 +112,28 @@ pub fn find_literal_v3(
             _t.stop(|c| &c.ns_chunk_sibling);
         }
 
-        let chains: Vec<_> = if anchor_start {
+        let mut chains: Vec<_> = if anchor_start {
             chains.into_iter().filter(|c| c.first_sti == 0).collect()
         } else {
             chains
         };
+        // Relaxed: separators do not count, so a head entered inside its own
+        // separator zone consumes nothing but its overlap — the next token's
+        // first bytes, which that token also matches at sti 0. Such a head is
+        // redundant and reports its span from the separator (`>>;\n    uint64<<`
+        // for `uint64_t`, 72 spans on the rag3db panel). Strict keeps them: a
+        // query may legitimately start with a separator.
+        if !strict_separators {
+            if let Some(tt) = ctx.termtexts.as_ref() {
+                chains.retain(|c| {
+                    let ord = c.ordinals[0][0] as u32;
+                    match tt.meta(ord) {
+                        Some(m) => (c.first_sti as u32) < (m.own_len as u32).saturating_sub(m.sep_len as u32),
+                        None => true,
+                    }
+                });
+            }
+        }
         ctx.trace_msg(&format!("chunk_chains falling_walk={}", chains.len()));
         profile::bump(|c| &c.n_chunk_chains, chains.len() as u64);
         profile::bump(|c| &c.n_chains_raw, chains.len() as u64);
@@ -178,9 +204,9 @@ pub fn find_literal_v3(
         let _t = profile::Timer::start();
         let cross = match ctx.word_posmap.as_ref() {
             Some(wpm) => resolve::resolve_word_chains_v3_wordmap(
-                &chains, wsp, ctx.resolver, ctx.filter_docs, pm, bm, wpm),
+                &chains, wsp, ctx.resolver, ctx.filter_docs, pm, bm, wpm, ctx.termtexts.as_ref()),
             None => resolve::resolve_word_chains_v3(
-                &chains, wsp, ctx.resolver, ctx.filter_docs, pm, bm),
+                &chains, wsp, ctx.resolver, ctx.filter_docs, pm, bm, ctx.termtexts.as_ref()),
         };
         _t.stop(|c| &c.ns_word_resolve);
         ctx.trace_msg(&format!("word_resolved matches={}", cross.len()));

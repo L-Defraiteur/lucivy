@@ -101,9 +101,16 @@ pub fn contains_v3(
     // occurrence. Nothing left to filter.
 
     if std::env::var("V3_DIAG_LITERAL").ok().as_deref() == Some(query_ref) {
+        let only_byte: Option<u32> = std::env::var("V3_DIAG_BYTE").ok().and_then(|v| v.parse().ok());
+        let text = |o: u64| ctx.termtexts.as_ref().and_then(|t| t.text(o as u32)).unwrap_or("?").to_string();
         for m in &matches {
-            eprintln!("[match] doc={} pos={} span={} byte=[{}..{}] token_end={} sti={} ord={} last_ord={}",
-                m.doc_id, m.position, m.span, m.byte_from, m.byte_to, m.token_end, m.sti, m.ordinal, m.last_ordinal);
+            if only_byte.is_some_and(|b| b != m.byte_from) { continue; }
+            let chunk_n = ctx.resolver.resolve(m.ordinal).len();
+            let word_n = ctx.word_sfxpost.as_ref().map(|w| w.entries(m.ordinal as u32).len()).unwrap_or(0);
+            let ws = ctx.termtexts.as_ref().and_then(|t| t.meta(m.ordinal as u32)).map(|mm| mm.is_word_stripped);
+            eprintln!("[match] doc={} pos={} span={} byte=[{}..{}] token_end={} sti={} head={:?} last={:?} ovf={} head_chunk_postings={} head_word_postings={} head_is_ws={:?}",
+                m.doc_id, m.position, m.span, m.byte_from, m.byte_to, m.token_end, m.sti,
+                text(m.ordinal), text(m.last_ordinal), m.overlap_overflow, chunk_n, word_n, ws);
         }
     }
 

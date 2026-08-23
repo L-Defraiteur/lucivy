@@ -792,7 +792,7 @@ fn v3_ground_truth_contains() {
                 eprintln!("    missing  doc={fi} [{a}..{b}] {}", span_context(&files[*fi].1, *a, *b));
             }
             for (fi, a, b) in ext.iter().take(3) {
-                eprintln!("    extra    doc={fi} [{a}..{b}] {}", span_context(&files[*fi].1, *a, *b));
+                eprintln!("    extra    doc={fi} [{a}..{b}] {} ({})", span_context(&files[*fi].1, *a, *b), files[*fi].0);
             }
         }
         if std::env::var("V3_PROFILE").is_ok() {

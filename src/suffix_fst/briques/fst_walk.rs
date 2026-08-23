@@ -469,7 +469,17 @@ fn build_chains_from_splits(
             super::profile::bump(|c| &c.n_bcfs_walk_reqs, 1);
             if !walk_memo.contains_key(&rem_off) {
                 super::profile::bump(|c| &c.n_bcfs_walk_calls, 1);
-                let sub_splits = walk_fn(reader, rem);
+                let mut sub_splits = walk_fn(reader, rem);
+                // Past the head, the query continues at the START of the next
+                // token: the text is contiguous, and a token before the last
+                // consumes exactly its own content. A split entering the next
+                // token at sti > 0 skips that token's leading bytes — the chain
+                // `[mv_ @2, vapor__ @7, init]` matched `_`+`_`+`init` with
+                // `vapor _` silently in between, and reported the span from the
+                // first `_`. verify_literal kept the document honest (a real
+                // occurrence sat in the window); the span was wrong in 8% of
+                // `__init` highlights on the kernel.
+                sub_splits.retain(|s| s.parent.sti == 0);
                 let entry = if sub_splits.is_empty() {
                     None
                 } else {

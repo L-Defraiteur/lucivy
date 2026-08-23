@@ -149,6 +149,12 @@ pub fn resolve_single_word_v3(
             // byte_from + sti is a real source offset.
             let content_len = cand.content_len() as u32;
             let content_end = e.byte_from + content_len;
+            // A 0x02 key does not fix where its word ends: "0ui" is "0"+"ui" in
+            // one document and "0u"+"i" in another, under one ordinal. Only the
+            // posting knows this word's length. A match starting at or past it
+            // lives in the content overlap — the next word's bytes — and the
+            // next word reports it itself at sti 0.
+            if cand.sti as u32 >= (e.byte_to - e.byte_from) { continue; }
             let byte_from = e.byte_from + cand.sti as u32;
             results.push(MatchV3 {
                 doc_id: e.doc_id,
@@ -234,6 +240,7 @@ pub fn resolve_word_chains_v3(
     filter_docs: Option<&HashSet<DocId>>,
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
     bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
+    termtexts: Option<&crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>>,
 ) -> Vec<MatchV3> {
     use crate::suffix_fst::word_sfxpost::WordPostingEntry;
 
@@ -272,8 +279,22 @@ pub fn resolve_word_chains_v3(
             })
             .collect();
 
+        // The head must start inside this posting's own word. A 0x02 key does
+        // not fix where its word ends ("0ui" is "0"+"ui" or "0u"+"i" under one
+        // ordinal), and the posting's byte_to includes trailing separators. The
+        // exact content end comes from the word's LAST chunk, whose key is
+        // unambiguous: posmap names it, termtexts gives own_len - sep_len.
+        // Checked here, not inside the memoised resolution: the memo is keyed
+        // by ordinal list alone and is shared across chains with different
+        // first_sti. Heads at sti 0 skip the lookups.
+        let head_ok = |e: &WordPostingEntry| {
+            if chain.first_sti == 0 { return true; }
+            let content_end = word_content_end(posmap, chunk_resolver, termtexts, e);
+            (e.byte_from + chain.first_sti as u32) < content_end
+        };
+
         if chain.ordinals.len() == 1 {
-            for e in &first_entries {
+            for e in first_entries.iter().filter(|e| head_ok(e)) {
                 let bf = e.byte_from + chain.first_sti as u32;
                 results.push(MatchV3 {
                     doc_id: e.doc_id,
@@ -304,6 +325,7 @@ pub fn resolve_word_chains_v3(
         // for every match in the doc, which the (doc, position) dedup then
         // collapsed to one occurrence per document.
         let mut active: Vec<(DocId, u32, u32, u32, u32, u64, u32)> = first_entries.iter()
+            .filter(|e| head_ok(e))
             .map(|e| (e.doc_id, e.last_position, e.byte_from + chain.first_sti as u32,
                       e.byte_to, e.byte_from, 0u64, e.first_position))
             .collect();
@@ -431,6 +453,7 @@ pub fn resolve_word_chains_v3_wordmap(
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
     bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
     word_posmap: &crate::suffix_fst::word_pos_map::WordPosMapReader<'_>,
+    termtexts: Option<&crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>>,
 ) -> Vec<MatchV3> {
     use crate::suffix_fst::word_sfxpost::WordPostingEntry;
     use crate::suffix_fst::word_pos_map::SPAN_OVERFLOW;
@@ -486,8 +509,22 @@ pub fn resolve_word_chains_v3_wordmap(
             }
         };
 
+        // The head must start inside this posting's own word. A 0x02 key does
+        // not fix where its word ends ("0ui" is "0"+"ui" or "0u"+"i" under one
+        // ordinal), and the posting's byte_to includes trailing separators. The
+        // exact content end comes from the word's LAST chunk, whose key is
+        // unambiguous: posmap names it, termtexts gives own_len - sep_len.
+        // Checked here, not inside the memoised resolution: the memo is keyed
+        // by ordinal list alone and is shared across chains with different
+        // first_sti. Heads at sti 0 skip the lookups.
+        let head_ok = |e: &WordPostingEntry| {
+            if chain.first_sti == 0 { return true; }
+            let content_end = word_content_end(posmap, chunk_resolver, termtexts, e);
+            (e.byte_from + chain.first_sti as u32) < content_end
+        };
+
         if chain.ordinals.len() == 1 {
-            for e in first_entries.iter() {
+            for e in first_entries.iter().filter(|e| head_ok(e)) {
                 let bf = e.byte_from + chain.first_sti as u32;
                 results.push(MatchV3 {
                     doc_id: e.doc_id,
@@ -509,6 +546,7 @@ pub fn resolve_word_chains_v3_wordmap(
 
         // Active: (doc, last_word_first_pos, last_pos, byte_from_first, last_ord, last_is_word, first_pos)
         let mut active: Vec<(DocId, u32, u32, u32, u64, bool, u32)> = first_entries.iter()
+            .filter(|e| head_ok(e))
             .map(|e| (e.doc_id, e.first_position, e.last_position,
                       e.byte_from + chain.first_sti as u32, 0u64, false, e.first_position))
             .collect();
@@ -783,6 +821,35 @@ fn resolve_chains_posmap_grouped(
     results
 }
 
+/// Exclusive end of a word's content bytes, from its last chunk's metadata.
+///
+/// Falls back to the posting's byte_to (which includes trailing separators)
+/// when any lookup fails — a looser bound, never a tighter one.
+fn word_content_end(
+    posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
+    chunk_resolver: &dyn PostingResolver,
+    termtexts: Option<&crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>>,
+    e: &crate::suffix_fst::word_sfxpost::WordPostingEntry,
+) -> u32 {
+    let Some(tt) = termtexts else { return e.byte_to };
+    // A word's content is contiguous from its first chunk and ends in the
+    // first chunk that carries a separator. A long separator run spills into
+    // further pure-separator chunks, still part of the word's position span —
+    // so the LAST chunk can have no content at all, and the first one with a
+    // separator is the one to read.
+    for pos in e.first_position..=e.last_position {
+        let Some(ord) = posmap.ordinal_at(e.doc_id, pos) else { return e.byte_to };
+        let Some(m) = tt.meta(ord) else { return e.byte_to };
+        if m.sep_len > 0 || pos == e.last_position {
+            let Some(p) = chunk_resolver.resolve_doc(ord as u64, e.doc_id)
+                .into_iter().find(|p| p.position == pos)
+            else { return e.byte_to };
+            return p.byte_from + (m.own_len as u32).saturating_sub(m.sep_len as u32);
+        }
+    }
+    e.byte_to
+}
+
 enum AdjacencyMode<'a> {
     /// pos[i+1] == pos[i] + 1
     Strict,
@@ -925,6 +992,10 @@ fn resolve_chains_impl(
                     let Some(ord) = posmap.ordinal_at(doc_id, next_pos) else { continue };
                     let ord = ord as u64;
                     if wanted.binary_search(&ord).is_err() { continue; }
+                    if std::env::var("V3_DIAG_RESOLVE").is_ok() {
+                        eprintln!("[resolve] doc={doc_id} pos={next_pos} ord={ord} wanted={:?} sorted={}",
+                            wanted, wanted.windows(2).all(|w| w[0] < w[1]));
+                    }
                     super::profile::bump(|c| &c.n_posmap_survivors, 1);
                     new_active.push((doc_id, next_pos, byte_from_first, 0, 0, ord, first_pos));
                 }
