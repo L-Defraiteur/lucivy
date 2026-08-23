@@ -110,46 +110,92 @@ pour les maps), une casse connue du WIP (`tokens` passé de `BTreeSet` à `Vec`)
 
 ---
 
-## 3. La découverte qui inverse la prémisse
+## 3. Le nombre de segments — ce que j'avais conclu, et ce qui était vrai
 
-**Moins de segments rend les requêtes plus lentes.** Même corpus de 20 000 documents du
-kernel, mêmes requêtes :
+**La conclusion écrite ici était fausse.** Elle disait : « moins de segments rend les
+requêtes plus lentes », le segment étant l'unité de parallélisme du prescan.
+
+Les mesures d'origine, conservées telles quelles :
 
 | Query | 320 segments | 1 segment | Écart |
 |---|---|---|---|
-| `spin_lock` strict | 159 ms | 7 376 ms | **46×** |
-| `struct file` strict | 211 ms | 8 380 ms | **40×** |
-| `net_device` strict | 161 ms | 7 942 ms | **49×** |
+| `spin_lock` strict | 159 ms | 7 376 ms | 46× |
+| `struct file` strict | 211 ms | 8 380 ms | 40× |
+| `net_device` strict | 161 ms | 7 942 ms | 49× |
 | `kmalloc` strict | 136 ms | 400 ms | 3× |
 | `__init` strict | 9 264 ms | 28 114 ms | 3× |
 
-Le segment est l'unité de parallélisme du prescan : 320 segments donnent un fan-out de
-320 sur 24 cœurs, un seul n'en donne aucun. J'ai affirmé plusieurs fois dans la journée
-que « les 800 segments dominent le coût et le merge va aider » — **c'était faux**.
+Les chiffres sont exacts. L'explication ne l'était pas. Les index à peu de segments
+avaient tous été obtenus **par fusion**, et la lenteur ne venait pas de la perte de
+fan-out : elle venait d'un coût quadratique en taille de segment dans la résolution de
+chaînes, que 320 petits segments masquaient et que la fusion exposait.
 
-Corollaire : le merge sert à **borner** le nombre de segments, pas à le minimiser.
-L'optimum est vraisemblablement de l'ordre du nombre de cœurs.
+La mesure qui l'établit — même corpus, **même nombre de segments**, obtenus des deux
+façons (20 000 documents kernel, 32 segments) :
 
-Et un fait à connaître : **aucun merge ne se déclenche automatiquement.**
-`segment_updater_actor.rs:135` diffère les merges à un `drain_merges()`/`start_merge()`
-explicite « pour éviter la famine de threads pendant le commit », et `drain_merges` se
-contente d'attendre ceux déjà en vol. Un index construit via `LucivyHandle` ne fusionne
-jamais tout seul.
+| Query | 32 seg par commits | 32 seg par fusion | |
+|---|---|---|---|
+| `kmalloc` strict | 58 ms | 308 ms | 5× |
+| `include` strict | 157 ms | 2 716 ms | 17× |
+| `spin_lock` strict | 123 ms | 3 546 ms | **29×** |
+
+À forme d'index identique, l'écart est entier. Ce n'était donc pas le nombre de segments.
+
+Les trois causes, trouvées par le profilage et corrigées (`4eaf367`) :
+
+1. `resolve_chains_impl` appariait l'ensemble actif avec la **totalité** des postings de
+   chaque ordinal. Les deux listes croissent avec le segment → quadratique en taille de
+   segment. Corrigé en indexant les postings par document.
+2. Les postings étaient matérialisés sans élagage : 264 173 480 entrées sur `spin_lock`
+   pour 1,8 million réellement appariées. Corrigé en ne demandant au resolver que les
+   documents encore actifs.
+3. La position 0, qui n'a aucun ensemble actif pour s'élaguer, était résolue par chaîne
+   alors que les chaînes partagent massivement leurs ordinaux de départ : 39 122 783
+   postings sur `include`. Corrigé par mémoïsation.
+
+Après correction, sur index fusionné 32 segments / 20k : `spin_lock` 3 546 → 324 ms,
+`include` 2 716 → 1 264 ms, `kmalloc` 308 → 148 ms. Et un index fusionné de 1 667
+documents par segment tient 333 ms, contre 269 ms pour un index naturel de 568 documents
+par segment — l'écart structurel a disparu.
+
+**Ce qui reste ouvert** : à 50 000 documents, un index fusionné à 32 segments met encore
+3 526 ms sur `spin_lock`, là où 72 segments naturels du même corpus tiennent 233 ms. Ni
+la taille de segment ni le nombre de passes de fusion ne l'expliquent — les deux ont été
+testés et écartés. Cause non identifiée.
+
+**La leçon** : trois formes d'index avaient été comparées sans que la variable « fusionné
+ou non » soit isolée. Le corollaire qu'on en avait tiré — « le merge sert à borner le
+nombre de segments, pas à le minimiser » — reposait donc sur rien.
+
+Et un fait à connaître, celui-là vérifié : **aucun merge ne se déclenche
+automatiquement.** `segment_updater_actor.rs:137` diffère les merges à un
+`drain_merges()`/`start_merge()` explicite « pour éviter la famine de threads pendant le
+commit », et `drain_merges` se contente d'attendre ceux déjà en vol. Un index construit
+via `LucivyHandle` ne fusionne jamais tout seul.
 
 ---
 
 ## 4. Pistes d'optimisation pour la prochaine session
 
-### 4.1 Trouver le bon nombre de segments — le plus rentable
+### 4.1 Le résidu de lenteur sur index fusionné à 50k — le plus rentable
 
-On a les deux extrêmes (320 et 1), il manque la courbe. Faire varier le nombre de
-segments à corpus constant et tracer la latence. Hypothèse : un plateau autour de
-`n_cœurs` à `4 × n_cœurs`, puis dégradation lente quand le coût fixe par segment domine.
+Voir la fin de la §3. À corpus et requête identiques, 32 segments fusionnés donnent
+3 526 ms contre 233 ms pour 72 segments naturels. Deux explications ont été testées et
+écartées : la taille de segment (1 667 documents par segment fusionné tiennent 333 ms à
+20k) et le nombre de passes de fusion (l'index rapide en a subi davantage).
 
-C'est la mesure la moins chère et la plus directement exploitable : elle donne un
-réglage de politique de merge, pas un chantier de code.
+La méthode qui a marché trois fois de suite : profiler la forme lente avec `V3_PROFILE=1`
+et chercher le compteur qui explose. Les compteurs de `chunk resolve`
+(`first-position postings`, `entries`, `pair iterations`) ont désigné les trois causes
+précédentes sans ambiguïté.
+
+Coût : ~19 min d'indexation par itération avec merge progressif, ~5 min avec
+`V3_MERGE_AT_END=1`. Chercher d'abord une reproduction moins chère.
 
 ### 4.2 `__init` — pathologie de requête
+
+Non re-mesuré depuis les correctifs de `1f4d19e` et `4eaf367` : le run 50k qui devait le
+faire a été interrompu. Le chiffre ci-dessous est antérieur.
 
 9,3 s à 320 segments contre 160 ms pour les autres requêtes du même corpus. La requête
 commence par deux séparateurs, ce qui fait exploser la construction de chaînes : le diag
