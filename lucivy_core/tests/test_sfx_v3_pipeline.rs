@@ -376,3 +376,63 @@ fn v3_merge_preserves_results() {
         assert!(a > 0, "query {q:?} should match something");
     }
 }
+
+/// Every span the engine reports must be the exact byte range of an occurrence.
+///
+/// The ground-truth bench compares highlights against every occurrence on disk
+/// and found three shapes of wrong span: matches straddling a chunk boundary
+/// cut short by one or two bytes (`Functio`), and relaxed matches stopping
+/// before a trailing separator-led token (`uint64` for `uint64_t`).
+fn spans_for(handle: &LucivyHandle, value: &str, strict: bool) -> Vec<[usize; 2]> {
+    let config = QueryConfig {
+        query_type: "contains".into(),
+        field: Some("content".into()),
+        value: Some(value.into()),
+        strict_separators: Some(strict),
+        ..Default::default()
+    };
+    let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
+    let query = query::build_query(&config, &handle.schema, &handle.index, Some(Arc::clone(&sink))).unwrap();
+    let searcher = handle.reader.searcher();
+    let collector = ld_lucivy::collector::TopDocs::with_limit(100).order_by_score();
+    let results = searcher.search(&*query, &collector).unwrap();
+    let mut out = Vec::new();
+    for (_, addr) in &results {
+        let seg_id = searcher.segment_reader(addr.segment_ord).segment_id();
+        if let Some(m) = sink.get(seg_id, addr.doc_id) {
+            out.extend(m.get("content").cloned().unwrap_or_default());
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn v3_span_exact_across_chunk_boundary() {
+    let doc = "       false\n  AfterFunction:   false\n  AfterNam";
+    let handle = make_handle(&[doc]);
+    let spans = spans_for(&handle, "function", true);
+    let expect = doc.to_lowercase().find("function").unwrap();
+    eprintln!("spans={spans:?} expect=[{}..{}]", expect, expect + 8);
+    assert_eq!(spans, vec![[expect, expect + 8]]);
+}
+
+#[test]
+fn v3_span_exact_three_chunks() {
+    let doc = "clause.constCast<BoundTableFunctionCall>();\n    auto bi";
+    let handle = make_handle(&[doc]);
+    let spans = spans_for(&handle, "TableFunction", true);
+    let expect = doc.to_lowercase().find("tablefunction").unwrap();
+    eprintln!("spans={spans:?} expect=[{}..{}]", expect, expect + 13);
+    assert_eq!(spans, vec![[expect, expect + 13]]);
+}
+
+#[test]
+fn v3_span_exact_relaxed_trailing_token() {
+    let doc = "2\"\n#endif\nconstexpr uint64_t DEFAULT_VECTOR_CAPA";
+    let handle = make_handle(&[doc]);
+    let spans = spans_for(&handle, "uint64_t", false);
+    let expect = doc.find("uint64_t").unwrap();
+    eprintln!("spans={spans:?} expect=[{}..{}]", expect, expect + 8);
+    assert_eq!(spans, vec![[expect, expect + 8]]);
+}

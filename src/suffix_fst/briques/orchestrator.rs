@@ -25,6 +25,40 @@ const MAX_QUERY_LEN: usize = 2048;
 /// Exact substring search (d=0).
 ///
 /// Returns matches sorted by (doc_id, position).
+/// Extend matches whose tail was found through a word's content overlap.
+///
+/// A 0x02 key carries the first two content bytes of the next word; a match
+/// consuming them ends, in the text, inside that next word — after whatever
+/// separators sit between. The resolver cannot know where, so it reports the
+/// excess in `overlap_overflow` and stops `byte_to` at the word's content end.
+/// Here the next content chunk is found through posmap/bytemap and the end is
+/// placed at its `byte_from + excess`.
+///
+/// Without posmap the span is left clamped: short, never wrong.
+fn place_overlap_overflow(ctx: &BriquesContext<'_>, matches: &mut [MatchV3]) {
+    const CONTENT_RANGES: &[(u8, u8)] = &[
+        (b'0', b'9'), (b'A', b'Z'), (b'a', b'z'), (0x80, 0xFF),
+    ];
+    let (Some(pm), Some(bm)) = (ctx.posmap.as_ref(), ctx.bytemap.as_ref()) else { return };
+    for m in matches.iter_mut() {
+        if m.overlap_overflow == 0 { continue; }
+        let mut p = m.position + m.span;
+        // Skip pure-separator chunks; stop at the first with content.
+        let next = loop {
+            let Some(ord) = pm.ordinal_at(m.doc_id, p) else { break None };
+            if bm.bytes_in_ranges(ord, CONTENT_RANGES) { break Some(ord as u64); }
+            p += 1;
+        };
+        let Some(ord) = next else { continue };
+        if let Some(e) = ctx.resolver.resolve_doc(ord, m.doc_id)
+            .into_iter().find(|e| e.position == p)
+        {
+            m.byte_to = e.byte_from + m.overlap_overflow as u32;
+            m.overlap_overflow = 0;
+        }
+    }
+}
+
 pub fn contains_v3(
     ctx: &BriquesContext<'_>,
     query: &str,
@@ -48,6 +82,7 @@ pub fn contains_v3(
     };
 
     let mut matches = composite::find_literal_v3(ctx, query_ref, anchor_start, strict_separators);
+    place_overlap_overflow(ctx, &mut matches);
 
     // Content length of the query, in BYTES — it is compared against byte spans
     // (`byte_to - byte_from`) below. Counting chars here silently broke every
@@ -64,6 +99,13 @@ pub fn contains_v3(
     // condition is tautological — ordinals in 0x00/0x01 are extended, so the FST
     // key text IS the text present at every posting, and a prefix match proves the
     // occurrence. Nothing left to filter.
+
+    if std::env::var("V3_DIAG_LITERAL").ok().as_deref() == Some(query_ref) {
+        for m in &matches {
+            eprintln!("[match] doc={} pos={} span={} byte=[{}..{}] token_end={} sti={} ord={} last_ord={}",
+                m.doc_id, m.position, m.span, m.byte_from, m.byte_to, m.token_end, m.sti, m.ordinal, m.last_ordinal);
+        }
+    }
 
     // Dedup adjacent duplicates (matches are sorted by (doc_id, position)).
     matches.dedup_by_key(|m| (m.doc_id, m.position));

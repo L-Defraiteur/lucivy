@@ -364,6 +364,99 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
 // ─── Ground truth (naive grep) ────────────────────────────────────────────
 
 /// Literal case-insensitive grep (for strict_sep=true).
+/// Ground truth doing the engine's exact job: for every file, read from disk,
+/// every occurrence of the query as a byte span in the original text.
+///
+/// Strict: case-insensitive (ASCII folding, which keeps byte offsets exact —
+/// the kernel corpus is ASCII; Unicode case changes are out of this scope).
+/// Overlapping occurrences are all reported, as the engine's suffix walk does.
+///
+/// Relaxed: separators do not exist. The file is stripped to its content bytes
+/// with a map back to original offsets, the query is searched there, and each
+/// hit is mapped back to the span from its first content byte to its last.
+///
+/// Reading from disk is deliberate: the engine serves from an mmap'd index, so
+/// the reference must pay the same page-cache reality, not a pre-loaded Vec.
+struct GrepSpans {
+    docs: HashSet<usize>,
+    spans: HashSet<(usize, usize, usize)>,
+}
+
+fn grep_spans(files: &[(String, String)], needle: &str, strict: bool) -> GrepSpans {
+    let root = repo_path();
+    let root = std::path::Path::new(&root);
+    let mut docs = HashSet::new();
+    let mut spans = HashSet::new();
+
+    let needle_l: Vec<u8> = if strict {
+        needle.to_ascii_lowercase().into_bytes()
+    } else {
+        strip_seps(&needle.to_ascii_lowercase()).into_bytes()
+    };
+    if needle_l.is_empty() { return GrepSpans { docs, spans }; }
+
+    for (i, (rel, _)) in files.iter().enumerate() {
+        let Ok(bytes) = std::fs::read(root.join(rel)) else { continue };
+        let lower: Vec<u8> = bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+        if strict {
+            let mut hit = false;
+            for start in find_all(&lower, &needle_l) {
+                spans.insert((i, start, start + needle_l.len()));
+                hit = true;
+            }
+            if hit { docs.insert(i); }
+        } else {
+            // Content bytes only, each remembering where it came from.
+            let text = String::from_utf8_lossy(&lower);
+            let mut stripped: Vec<u8> = Vec::with_capacity(lower.len());
+            let mut back: Vec<usize> = Vec::with_capacity(lower.len());
+            for (off, ch) in text.char_indices() {
+                if is_content_char(ch) {
+                    let mut buf = [0u8; 4];
+                    for (k, b) in ch.encode_utf8(&mut buf).bytes().enumerate() {
+                        stripped.push(b);
+                        back.push(off + k);
+                    }
+                }
+            }
+            let mut hit = false;
+            for start in find_all(&stripped, &needle_l) {
+                let end_idx = start + needle_l.len() - 1;
+                let from = back[start];
+                let last = back[end_idx];
+                // to = end of the char holding the last content byte
+                let to = last + text[last..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                spans.insert((i, from, to));
+                hit = true;
+            }
+            if hit { docs.insert(i); }
+        }
+    }
+    GrepSpans { docs, spans }
+}
+
+/// All start offsets of `needle` in `hay`, overlapping included.
+fn find_all(hay: &[u8], needle: &[u8]) -> Vec<usize> {
+    let mut out = Vec::new();
+    if needle.is_empty() || hay.len() < needle.len() { return out; }
+    let first = needle[0];
+    let mut i = 0;
+    while i + needle.len() <= hay.len() {
+        match hay[i..].iter().position(|&b| b == first) {
+            None => break,
+            Some(p) => {
+                let s = i + p;
+                if s + needle.len() <= hay.len() && &hay[s..s + needle.len()] == needle {
+                    out.push(s);
+                }
+                i = s + 1;
+            }
+        }
+    }
+    out
+}
+
 fn grep_docs_strict(files: &[(String, String)], needle: &str) -> HashSet<usize> {
     let lower = needle.to_lowercase();
     files.iter().enumerate()
@@ -549,6 +642,17 @@ fn write_report(
     }
 }
 
+/// `...before>>match<<after...` around a byte span, for span diagnostics.
+fn span_context(content: &str, a: usize, b: usize) -> String {
+    let a = a.min(content.len());
+    let b = b.min(content.len()).max(a);
+    let cs = snap_back(content, a.saturating_sub(20));
+    let ce = snap_fwd(content, (b + 20).min(content.len()));
+    let a2 = snap_back(content, a);
+    let b2 = snap_fwd(content, b);
+    format!("{:?}", format!("{}>>{}<<{}", &content[cs..a2], &content[a2..b2], &content[b2..ce]))
+}
+
 fn snap_back(s: &str, pos: usize) -> usize {
     let mut p = pos.min(s.len());
     while p > 0 && !s.is_char_boundary(p) { p -= 1; }
@@ -652,12 +756,9 @@ fn v3_ground_truth_contains() {
         // reported latency silently carried a full grep over the corpus — a
         // constant that dilutes any engine-side comparison.
         let t_grep = std::time::Instant::now();
-        let grep_set = if q.strict_sep {
-            grep_docs_strict(&files, q.text)
-        } else {
-            grep_docs_relaxed(&files, q.text)
-        };
+        let gt = grep_spans(&files, q.text, q.strict_sep);
         let grep_ms = t_grep.elapsed().as_secs_f64() * 1000.0;
+        let grep_set = gt.docs;
 
         profile::reset();
         let t = std::time::Instant::now();
@@ -666,9 +767,34 @@ fn v3_ground_truth_contains() {
 
         let status = if v3_result.doc_indices == grep_set { "OK" } else { "FAIL" };
         let search_ms = LAST_SEARCH_MS.with(|c| c.get());
-        eprintln!("{:<35} {:>5} {:>8} {:>8} {:>6} ({:.1}ms search, {:.1}ms +fetch, {:.1}ms grep)",
+
+        // Spans: the engine's highlights against every occurrence on disk.
+        // Reported, not asserted — the doc set is the pass criterion — so the
+        // state of highlights is visible without blocking the suite.
+        let v3_spans: HashSet<(usize, usize, usize)> =
+            v3_result.highlights.iter().copied().collect();
+        let missing = gt.spans.difference(&v3_spans).count();
+        let extra = v3_spans.difference(&gt.spans).count();
+        let hl = if missing == 0 && extra == 0 {
+            format!("spans {} exact", gt.spans.len())
+        } else {
+            format!("spans gt={} v3={} miss={} extra={}", gt.spans.len(), v3_spans.len(), missing, extra)
+        };
+        eprintln!("{:<35} {:>5} {:>8} {:>8} {:>6} ({:.1}ms search, {:.1}ms +fetch, {:.1}ms grep) {hl}",
             q.text, mode_label, grep_set.len(), v3_result.doc_indices.len(), status,
             search_ms, ms - search_ms, grep_ms);
+        if missing > 0 || extra > 0 {
+            let mut miss: Vec<_> = gt.spans.difference(&v3_spans).copied().collect();
+            miss.sort();
+            let mut ext: Vec<_> = v3_spans.difference(&gt.spans).copied().collect();
+            ext.sort();
+            for (fi, a, b) in miss.iter().take(3) {
+                eprintln!("    missing  doc={fi} [{a}..{b}] {}", span_context(&files[*fi].1, *a, *b));
+            }
+            for (fi, a, b) in ext.iter().take(3) {
+                eprintln!("    extra    doc={fi} [{a}..{b}] {}", span_context(&files[*fi].1, *a, *b));
+            }
+        }
         if std::env::var("V3_PROFILE").is_ok() {
             eprint!("{}", profile::dump());
         }

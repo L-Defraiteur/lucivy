@@ -294,6 +294,7 @@ pub fn find_multi_token_v3(
                 position: pivot_pos - pivot_idx as u32,
                 span: query_tokens.len() as u32,
                 byte_from,
+                overlap_overflow: 0,
                 byte_to,
                 token_end,
                 sti: 0,

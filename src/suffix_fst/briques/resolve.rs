@@ -32,6 +32,15 @@ pub struct MatchV3 {
     pub span: u32,
     /// Start byte offset of the MATCH in the original text.
     pub byte_from: u32,
+    /// Bytes of the match that lie in the NEXT content token, when the match was
+    /// found through a word-stripped key's content overlap (partition 0x02).
+    ///
+    /// A 0x02 key is `word + first two content bytes of the next word`, and those
+    /// two bytes may sit after separators in the text. `byte_to` then stops at
+    /// the word's own content end and the orchestrator extends it to
+    /// `next_word.byte_from + overlap_overflow`, using posmap. Chunk keys need
+    /// none of this: their overlap is the next chunk's first bytes, contiguous.
+    pub overlap_overflow: u8,
     /// End byte offset (exclusive) of the MATCH in the original text.
     ///
     /// This measures the match itself. It used to mean "end of the containing
@@ -96,6 +105,7 @@ pub fn resolve_single_v3(
                 position: e.position,
                 span: 1,
                 byte_from,
+                overlap_overflow: 0,
                 byte_to: byte_from + query_len,
                 token_end: content_end(e.byte_from),
                 sti: cand.sti,
@@ -148,7 +158,9 @@ pub fn resolve_single_word_v3(
                 } else { 1 },
                 byte_from,
                 // Clamped: past the word's content the match would cross a
-                // separator whose source offset this entry does not know.
+                // separator whose source offset this entry does not know. The
+                // excess is reported and placed by the orchestrator.
+                overlap_overflow: (byte_from + query_len).saturating_sub(content_end) as u8,
                 byte_to: (byte_from + query_len).min(content_end),
                 token_end: content_end,
                 sti: cand.sti,
@@ -270,6 +282,7 @@ pub fn resolve_word_chains_v3(
                         e.last_position - e.first_position + 1
                     } else { 1 },
                     byte_from: bf,
+                    overlap_overflow: 0,
                     byte_to: bf + chain.total_query_consumed as u32,
                     token_end: bf + chain.total_query_consumed as u32,
                     sti: chain.first_sti,
@@ -285,9 +298,14 @@ pub fn resolve_word_chains_v3(
         //          byte_from_last, last_ord)
         // byte_from_last is what lets the emitted byte_to measure the match instead
         // of running to the end of the tail token.
-        let mut active: Vec<(DocId, u32, u32, u32, u32, u64)> = first_entries.iter()
+        // Tuple: (doc, prev_last_pos, byte_from_first, token_end, byte_from_last, last_ord, first_pos)
+        // first_pos is the position of THIS match's first word. It used to be
+        // recovered at emit time as the first entry of the doc — the same value
+        // for every match in the doc, which the (doc, position) dedup then
+        // collapsed to one occurrence per document.
+        let mut active: Vec<(DocId, u32, u32, u32, u32, u64, u32)> = first_entries.iter()
             .map(|e| (e.doc_id, e.last_position, e.byte_from + chain.first_sti as u32,
-                      e.byte_to, e.byte_from, 0u64))
+                      e.byte_to, e.byte_from, 0u64, e.first_position))
             .collect();
 
         for ord_idx in 1..chain.ordinals.len() {
@@ -331,9 +349,9 @@ pub fn resolve_word_chains_v3(
                 by_doc.entry(e.doc_id).or_default().push(i as u32);
             }
 
-            let mut new_active: Vec<(DocId, u32, u32, u32, u32, u64)> = Vec::new();
+            let mut new_active: Vec<(DocId, u32, u32, u32, u32, u64, u32)> = Vec::new();
 
-            for &(doc_id, prev_last_pos, byte_from_first, _, _, _) in &active {
+            for &(doc_id, prev_last_pos, byte_from_first, _, _, _, first_pos) in &active {
                 let Some(idxs) = by_doc.get(&doc_id) else { continue };
                 for &i in idxs {
                     let (e, ord) = &entries[i as usize];
@@ -358,7 +376,7 @@ pub fn resolve_word_chains_v3(
 
                     if valid {
                         new_active.push((doc_id, e.last_position, byte_from_first,
-                                         e.byte_to, e.byte_from, *ord));
+                                         e.byte_to, e.byte_from, *ord, first_pos));
                         break;
                     }
                 }
@@ -368,16 +386,17 @@ pub fn resolve_word_chains_v3(
         }
 
         // Emit matches
-        for &(doc_id, last_pos, byte_from, token_end, last_bf, last_ord) in &active {
-            let position = first_entries.iter()
-                .find(|e| e.doc_id == doc_id)
-                .map(|e| e.first_position)
-                .unwrap_or(0);
+        for &(doc_id, last_pos, byte_from, token_end, last_bf, last_ord, position) in &active {
             results.push(MatchV3 {
                 doc_id,
                 position,
                 span: last_pos.saturating_sub(position) + 1,
                 byte_from,
+                // The key's consumed bytes may run past the word's content end
+                // into the next word's first bytes (its content overlap). Those
+                // are real text but not contiguous: report the excess and let the
+                // orchestrator place it after the separators.
+                overlap_overflow: (last_bf + chain.last_consumed as u32).saturating_sub(token_end) as u8,
                 byte_to: (last_bf + chain.last_consumed as u32).max(byte_from).min(token_end),
                 token_end,
                 sti: chain.first_sti,
@@ -477,6 +496,7 @@ pub fn resolve_word_chains_v3_wordmap(
                         e.last_position - e.first_position + 1
                     } else { 1 },
                     byte_from: bf,
+                    overlap_overflow: 0,
                     byte_to: bf + chain.total_query_consumed as u32,
                     token_end: bf + chain.total_query_consumed as u32,
                     sti: chain.first_sti,
@@ -487,10 +507,10 @@ pub fn resolve_word_chains_v3_wordmap(
             continue;
         }
 
-        // Active: (doc, last_word_first_pos, last_pos, byte_from_first, last_ord, last_is_word)
-        let mut active: Vec<(DocId, u32, u32, u32, u64, bool)> = first_entries.iter()
+        // Active: (doc, last_word_first_pos, last_pos, byte_from_first, last_ord, last_is_word, first_pos)
+        let mut active: Vec<(DocId, u32, u32, u32, u64, bool, u32)> = first_entries.iter()
             .map(|e| (e.doc_id, e.first_position, e.last_position,
-                      e.byte_from + chain.first_sti as u32, 0u64, false))
+                      e.byte_from + chain.first_sti as u32, 0u64, false, e.first_position))
             .collect();
 
         for ord_idx in 1..chain.ordinals.len() {
@@ -498,7 +518,7 @@ pub fn resolve_word_chains_v3_wordmap(
             let wanted: &[u64] = chain.ordinals[ord_idx].as_slice();
 
             let mut new_active = Vec::new();
-            'next_active: for &(doc_id, _, prev_last, byte_from_first, _, _) in &active {
+            'next_active: for &(doc_id, _, prev_last, byte_from_first, _, _, first_pos) in &active {
                 let mut p = prev_last + 1;
                 loop {
                     super::profile::bump(|c| &c.n_wordmap_lookups, 1);
@@ -520,7 +540,7 @@ pub fn resolve_word_chains_v3_wordmap(
                             };
                             super::profile::bump(|c| &c.n_wordmap_survivors, 1);
                             new_active.push((doc_id, p, last, byte_from_first,
-                                             word_ord as u64, true));
+                                             word_ord as u64, true, first_pos));
                             continue 'next_active;
                         }
                     }
@@ -531,7 +551,7 @@ pub fn resolve_word_chains_v3_wordmap(
                     };
                     if wanted.binary_search(&(chunk_ord as u64)).is_ok() {
                         super::profile::bump(|c| &c.n_wordmap_survivors, 1);
-                        new_active.push((doc_id, p, p, byte_from_first, chunk_ord as u64, false));
+                        new_active.push((doc_id, p, p, byte_from_first, chunk_ord as u64, false, first_pos));
                         continue 'next_active;
                     }
 
@@ -546,7 +566,7 @@ pub fn resolve_word_chains_v3_wordmap(
         }
 
         // Emit, reading each survivor's last posting for its byte span.
-        for &(doc_id, last_first, last_pos, byte_from, last_ord, last_is_word) in &active {
+        for &(doc_id, last_first, last_pos, byte_from, last_ord, last_is_word, position) in &active {
             let (token_end, last_bf) = if last_is_word {
                 match word_sfxpost.entry_at(last_ord as u32, doc_id, last_first) {
                     Some(e) => (e.byte_to, e.byte_from),
@@ -566,15 +586,16 @@ pub fn resolve_word_chains_v3_wordmap(
                     }
                 }
             };
-            let position = first_entries.iter()
-                .find(|e| e.doc_id == doc_id)
-                .map(|e| e.first_position)
-                .unwrap_or(0);
             results.push(MatchV3 {
                 doc_id,
                 position,
                 span: last_pos.saturating_sub(position) + 1,
                 byte_from,
+                // The key's consumed bytes may run past the word's content end
+                // into the next word's first bytes (its content overlap). Those
+                // are real text but not contiguous: report the excess and let the
+                // orchestrator place it after the separators.
+                overlap_overflow: (last_bf + chain.last_consumed as u32).saturating_sub(token_end) as u8,
                 byte_to: (last_bf + chain.last_consumed as u32).max(byte_from).min(token_end),
                 token_end,
                 sti: chain.first_sti,
@@ -618,8 +639,8 @@ fn resolve_chains_posmap_grouped(
         groups.entry(chain.ordinals[0].as_ref().clone()).or_default().push(i);
     }
 
-    // Active survivor: (doc, last_pos, byte_from_first, last_ord)
-    type Active = (DocId, u32, u32, u64);
+    // Active survivor: (doc, last_pos, byte_from_first, last_ord, first_pos)
+    type Active = (DocId, u32, u32, u64, u32);
 
     super::profile::bump(|c| &c.n_groups_shared, groups.len() as u64);
     for (first_key, members) in groups {
@@ -658,6 +679,7 @@ fn resolve_chains_posmap_grouped(
                         position: e.position,
                         span: 1,
                         byte_from: bf,
+                        overlap_overflow: 0,
                         byte_to: (bf + chain.total_query_consumed as u32).min(e.byte_to),
                         token_end: e.byte_to,
                         sti: chain.first_sti,
@@ -685,7 +707,7 @@ fn resolve_chains_posmap_grouped(
                     let ord = ord as u64;
                     if wanted.binary_search(&ord).is_err() { continue; }
                     super::profile::bump(|c| &c.n_posmap_survivors, 1);
-                    found.push((e.doc_id, next_pos, e.byte_from + chain.first_sti as u32, ord));
+                    found.push((e.doc_id, next_pos, e.byte_from + chain.first_sti as u32, ord, e.position));
                 }
                 if !found.is_empty() { survivors.insert(ci, found); }
             }
@@ -704,20 +726,10 @@ fn resolve_chains_posmap_grouped(
                     super::profile::bump(|c| &c.n_posmap_survivors, wanting.len() as u64);
                     for &ci in wanting {
                         survivors.entry(ci).or_default().push((
-                            e.doc_id, next_pos, e.byte_from + chains[ci].first_sti as u32, ord,
+                            e.doc_id, next_pos, e.byte_from + chains[ci].first_sti as u32, ord, e.position,
                         ));
                     }
                 }
-            }
-        }
-
-        // First position per document, for the emitted match's `position`.
-        // Built once per group: built per chain it re-walked the shared list
-        // for every member — the very cost this function exists to remove.
-        let mut span_first: FnvHashMap<DocId, u32> = FnvHashMap::default();
-        if !survivors.is_empty() {
-            for e in first_entries.iter() {
-                span_first.entry(e.doc_id).or_insert(e.position);
             }
         }
 
@@ -731,34 +743,34 @@ fn resolve_chains_posmap_grouped(
                 if active.is_empty() { break; }
                 let wanted: &[u64] = chain.ordinals[ord_idx].as_slice();
                 let mut next = Vec::new();
-                for &(doc_id, prev_pos, bf_first, _) in &active {
+                for &(doc_id, prev_pos, bf_first, _, first_pos) in &active {
                     let next_pos = prev_pos + 1;
                     super::profile::bump(|c| &c.n_posmap_lookups, 1);
                     let Some(ord) = posmap.ordinal_at(doc_id, next_pos) else { continue };
                     let ord = ord as u64;
                     if wanted.binary_search(&ord).is_err() { continue; }
                     super::profile::bump(|c| &c.n_posmap_survivors, 1);
-                    next.push((doc_id, next_pos, bf_first, ord));
+                    next.push((doc_id, next_pos, bf_first, ord, first_pos));
                 }
                 active = next;
             }
 
             // Emit: fetch the last token's posting once per match, and let it
             // confirm the position posmap claimed.
-            for &(doc_id, last_pos, byte_from, last_ord) in &active {
+            for &(doc_id, last_pos, byte_from, last_ord, position) in &active {
                 let Some(e) = resolver.resolve_doc(last_ord, doc_id)
                     .into_iter().find(|e| e.position == last_pos)
                 else {
                     super::profile::bump(|c| &c.n_posmap_mismatch, 1);
                     continue;
                 };
-                let position = span_first.get(&doc_id).copied().unwrap_or(0);
                 results.push(MatchV3 {
                     doc_id,
                     position,
                     span: last_pos.saturating_sub(position) + 1,
                     byte_from,
-                    byte_to: (e.byte_from + chain.last_consumed as u32).max(byte_from).min(e.byte_to),
+                    overlap_overflow: 0,
+                    byte_to: (e.byte_from + chain.last_consumed as u32).max(byte_from),
                     token_end: e.byte_to,
                     sti: chain.first_sti,
                     ordinal: chain.ordinals[0][0],
@@ -864,6 +876,7 @@ fn resolve_chains_impl(
                     position: e.position,
                     span: 1,
                     byte_from: bf,
+                    overlap_overflow: 0,
                     byte_to: (bf + chain.total_query_consumed as u32).min(e.byte_to),
                     token_end: e.byte_to,
                     sti: chain.first_sti,
@@ -879,10 +892,11 @@ fn resolve_chains_impl(
         //              byte_from_last, last_ord_matched)
         // byte_from_last is what lets the emitted byte_to measure the match instead
         // of running to the end of the tail token.
-        let mut active: Vec<(DocId, u32, u32, u32, u32, u64)> = first_entries
+        // (doc, prev_pos, byte_from_first, token_end_last, byte_from_last, last_ord, first_pos)
+        let mut active: Vec<(DocId, u32, u32, u32, u32, u64, u32)> = first_entries
             .iter()
             .map(|e| (e.doc_id, e.position, e.byte_from + chain.first_sti as u32,
-                      e.byte_to, e.byte_from, 0u64))
+                      e.byte_to, e.byte_from, 0u64, e.position))
             .collect();
 
         for ord_idx in 1..chain.ordinals.len() {
@@ -904,15 +918,15 @@ fn resolve_chains_impl(
                 // survivors for 287 matches on `__init`). The tuple keeps
                 // placeholders; the emit loop below fetches the real posting for
                 // whatever is still active, and validates posmap's claim there.
-                let mut new_active: Vec<(DocId, u32, u32, u32, u32, u64)> = Vec::new();
-                for &(doc_id, prev_pos, byte_from_first, _, _, _) in &active {
+                let mut new_active: Vec<(DocId, u32, u32, u32, u32, u64, u32)> = Vec::new();
+                for &(doc_id, prev_pos, byte_from_first, _, _, _, first_pos) in &active {
                     let next_pos = prev_pos + 1;
                     super::profile::bump(|c| &c.n_posmap_lookups, 1);
                     let Some(ord) = posmap.ordinal_at(doc_id, next_pos) else { continue };
                     let ord = ord as u64;
                     if wanted.binary_search(&ord).is_err() { continue; }
                     super::profile::bump(|c| &c.n_posmap_survivors, 1);
-                    new_active.push((doc_id, next_pos, byte_from_first, 0, 0, ord));
+                    new_active.push((doc_id, next_pos, byte_from_first, 0, 0, ord, first_pos));
                 }
                 active = new_active;
                 continue;
@@ -950,9 +964,9 @@ fn resolve_chains_impl(
                 by_doc.entry(e.doc_id).or_default().push(i as u32);
             }
 
-            let mut new_active: Vec<(DocId, u32, u32, u32, u32, u64)> = Vec::new();
+            let mut new_active: Vec<(DocId, u32, u32, u32, u32, u64, u32)> = Vec::new();
 
-            for &(doc_id, prev_pos, byte_from_first, byte_to_prev, _, _) in &active {
+            for &(doc_id, prev_pos, byte_from_first, byte_to_prev, _, _, first_pos) in &active {
                 let Some(idxs) = by_doc.get(&doc_id) else { continue };
                 for &i in idxs {
                     super::profile::bump(|c| &c.n_chain_pairs, 1);
@@ -978,7 +992,7 @@ fn resolve_chains_impl(
 
                     if valid {
                         new_active.push((doc_id, e.position, byte_from_first,
-                                         e.byte_to, e.byte_from, *ord));
+                                         e.byte_to, e.byte_from, *ord, first_pos));
                         break;
                     }
                 }
@@ -988,7 +1002,7 @@ fn resolve_chains_impl(
         }
 
         // Emit matches
-        for &(doc_id, last_pos, byte_from, token_end, last_bf, last_ord) in &active {
+        for &(doc_id, last_pos, byte_from, token_end, last_bf, last_ord, position) in &active {
             // Under posmap resolution the last token's bytes are still unknown
             // (see above). Fetch its posting now — once per emitted match — and
             // let it confirm the position posmap claimed.
@@ -1007,16 +1021,13 @@ fn resolve_chains_impl(
             } else {
                 (token_end, last_bf)
             };
-            let position = first_entries.iter()
-                .find(|e| e.doc_id == doc_id)
-                .map(|e| e.position)
-                .unwrap_or(0);
             results.push(MatchV3 {
                 doc_id,
                 position,
                 span: last_pos.saturating_sub(position) + 1,
                 byte_from,
-                byte_to: (last_bf + chain.last_consumed as u32).max(byte_from).min(token_end),
+                overlap_overflow: 0,
+                byte_to: (last_bf + chain.last_consumed as u32).max(byte_from),
                 token_end,
                 sti: chain.first_sti,
                 ordinal: chain.ordinals[0][0],
