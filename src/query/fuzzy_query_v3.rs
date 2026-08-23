@@ -126,17 +126,16 @@ impl FuzzyQueryV3 {
     }
 
     fn make_weight(&self, enable_scoring: EnableScoring) -> crate::Result<Box<dyn Weight>> {
+        // The global statistics provider, never the local searcher: summing
+        // max_doc() over this searcher gives ONE shard's doc count while
+        // global_doc_freq is aggregated across all of them, and doc_freq >
+        // doc_count trips bm25::idf ("754 >= 763" on a 4-shard v3 index,
+        // distributed coherence panel). Same fix as ContainsQueryV3.
         let (scoring_enabled, global_num_docs, global_num_tokens) = match enable_scoring {
-            EnableScoring::Enabled { searcher, .. } => {
-                let mut nd = 0u64;
-                let mut nt = 0u64;
-                for sr in searcher.segment_readers() {
-                    nd += sr.max_doc() as u64;
-                    if let Ok(inv) = sr.inverted_index(self.field) {
-                        nt += inv.total_num_tokens();
-                    }
-                }
-                (true, nd.max(1), nt)
+            EnableScoring::Enabled { stats, .. } => {
+                let nd = stats.total_num_docs().unwrap_or(0).max(1);
+                let nt = stats.total_num_tokens(self.field).unwrap_or(0);
+                (true, nd, nt)
             }
             _ => (false, 0, 0),
         };

@@ -173,19 +173,19 @@ impl Node for PrescanShardNode {
                 // reached through ShardedHandle failed outright on "invalid .sfx
                 // magic bytes" — v3 + sharding had simply never been wired.
                 let version = detect_sfx_version(sfx_bytes.as_ref()).unwrap_or(1);
-                // `run_sfx_v3_prescan` is the CONTAINS walk. A fuzzy query's
-                // parameters through it would inject exact-match results into
-                // a fuzzy query; fuzzy v3 prescans itself in `weight()`.
-                if version == 3 && param.fuzzy_distance > 0 {
+                // v3 segments are not prescanned here: `BuildWeightNode` hands
+                // every v3 segment of every shard to `Query::prescan_segments`
+                // at once — the same call `search_with_global_stats` makes —
+                // which is the only place that knows how to prescan contains,
+                // fuzzy AND regex v3 (each is parallel inside). This node used
+                // to run the contains walk for v3 and skip fuzzy, so fuzzy and
+                // regex prescanned themselves in `weight()` on shard 0 only:
+                // a 4-shard index answered a quarter of the fuzzy results
+                // (distributed coherence panel, 23 August).
+                if version == 3 {
                     continue;
                 }
-                let (doc_tf, highlights) = if version == 3 {
-                    run_sfx_v3_prescan(
-                        seg_reader, &sfx_bytes, param.field,
-                        &param.query_text, param.anchor_start,
-                        param.exact_match, param.strict_separators,
-                    ).map_err(|e| format!("v3 prescan: {e}"))?
-                } else {
+                let (doc_tf, highlights) = {
                     let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
                         .map_err(|e| format!("open sfx: {e}"))?;
 
@@ -224,6 +224,12 @@ impl Node for PrescanShardNode {
         // DFA compiled inside run_regex_prescan per segment.
         for param in &self.regex_prescan_params {
             for seg_reader in &self.segments {
+                // v3 segments: see above, prescanned by the query itself.
+                let is_v3 = seg_reader.sfx_file(param.field)
+                    .and_then(|d| d.read_bytes().ok())
+                    .and_then(|b| detect_sfx_version(b.as_ref()))
+                    == Some(3);
+                if is_v3 { continue; }
                 let (doc_tf, highlights) = run_regex_prescan(
                     seg_reader, param.field, &param.pattern, param.anchor_start,
                 ).map_err(|e| format!("regex prescan: {e}"))?;
@@ -342,13 +348,37 @@ impl Node for BuildWeightNode {
             .and_then(|v| v.take::<PrescanResult>())
             .unwrap_or_default();
 
-        // Inject SFX prescan results
+        // v3 segments of every shard, prescanned by the query itself (see
+        // PrescanShardNode). Sets each sub-query's cache and its doc_freq
+        // summed over all shards of this node.
+        let v3_segments: Vec<ld_lucivy::SegmentReader> = self.shards.iter()
+            .flat_map(|s| s.reader.searcher().segment_readers().to_vec())
+            .filter(|seg| {
+                let Some(field) = seg.sfx_fields().next() else { return false };
+                seg.sfx_file(field)
+                    .and_then(|d| d.read_bytes().ok())
+                    .and_then(|b| ld_lucivy::suffix_fst::section_file::detect_sfx_version(b.as_ref()))
+                    == Some(3)
+            })
+            .collect();
+        let mut sfx_freqs = sfx_freqs;
+        if !v3_segments.is_empty() {
+            let refs: Vec<&ld_lucivy::SegmentReader> = v3_segments.iter().collect();
+            self.query.prescan_segments(&refs).map_err(|e| format!("v3 prescan: {e}"))?;
+            let mut v3_freqs = HashMap::new();
+            self.query.collect_prescan_doc_freqs(&mut v3_freqs);
+            for (k, v) in v3_freqs {
+                *sfx_freqs.entry(k).or_insert(0) += v;
+            }
+        }
+
+        // Inject SFX prescan results (v2 segments' cache extends the v3 one)
         if !sfx_freqs.is_empty() {
             self.query.set_global_contains_doc_freqs(&sfx_freqs);
             self.query.inject_prescan_cache(sfx_cache);
         }
 
-        // Inject regex prescan results
+        // Inject regex prescan results (v2 segments)
         if !regex_freqs.is_empty() {
             self.query.set_global_regex_doc_freqs(&regex_freqs);
             self.query.inject_regex_prescan_cache(regex_cache);

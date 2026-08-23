@@ -2158,3 +2158,157 @@ fn regex_v2_vs_v3() {
     }
     eprintln!();
 }
+
+/// The coherence panel through sharding and distribution, spans included.
+///
+/// `v3_distributed_two_nodes` only compared document COUNTS for three contains
+/// queries. This runs the whole RAG-shaped panel (strict/relaxed long literals,
+/// startsWith/term, fuzzy, regex, non-ASCII) on three shapes of the same
+/// corpus — one shard, four shards, and two nodes with stats exported,
+/// merged and injected like over a network — and requires the highlights of
+/// each shape to be exactly the occurrences on disk, hence identical to each
+/// other. Scores may differ between shapes; spans may not.
+#[test]
+fn v3_distributed_coherence() {
+    use lucivy_core::sharded_handle::{ShardedHandle, ShardedSearchResult, RamShardStorage};
+    use lucivy_core::bm25_global::ExportableStats;
+
+    let files = collect_files(3000);
+    if files.is_empty() { return; }
+    let left: Vec<_> = files.iter().step_by(2).cloned().collect();
+    let right: Vec<_> = files.iter().skip(1).step_by(2).cloned().collect();
+
+    let build = |docs: &[(String, String)], shards: usize| -> ShardedHandle {
+        let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+            "fields": [
+                {"name": "path", "type": "text", "stored": true},
+                {"name": "content", "type": "text", "stored": true}
+            ],
+            "sfx_version": 3,
+            "shards": shards
+        })).unwrap();
+        let h = ShardedHandle::create_with_storage(
+            Box::new(RamShardStorage::new()), &config).unwrap();
+        let path_f = h.field("path").unwrap();
+        let content_f = h.field("content").unwrap();
+        let nid_f = h.field(NODE_ID_FIELD).unwrap();
+        for (path, content) in docs {
+            // The node id is the file's index in `files`, on every node. The
+            // id given to `add_document` only feeds the router; the stored
+            // field is the caller's (the bindings add it the same way).
+            let idx = files.iter().position(|(p, _)| p == path).unwrap();
+            let mut doc = ld_lucivy::LucivyDocument::new();
+            doc.add_u64(nid_f, idx as u64);
+            doc.add_text(path_f, path);
+            doc.add_text(content_f, content);
+            h.add_document(doc, idx as u64).unwrap();
+        }
+        h.commit().unwrap();
+        h
+    };
+    let node_1 = build(&files, 1);
+    let node_4 = build(&files, 4);
+    let node_a = build(&left, 2);
+    let node_b = build(&right, 2);
+
+    // Highlights of a sharded result set, keyed by file index.
+    let collect = |h: &ShardedHandle, results: &[ShardedSearchResult],
+                   sink: &ld_lucivy::query::HighlightSink| -> SearchResult {
+        let mut doc_indices = HashSet::new();
+        let mut highlights = Vec::new();
+        for r in results {
+            let shard = h.shard(r.shard_id).unwrap();
+            let searcher = shard.reader.searcher();
+            let doc: ld_lucivy::LucivyDocument = searcher.doc(r.doc_address).unwrap();
+            let nid_f = shard.field(NODE_ID_FIELD).unwrap();
+            use ld_lucivy::schema::document::Value;
+            let idx = doc.field_values().find(|(f, _)| *f == nid_f)
+                .and_then(|(_, v)| v.as_value().as_u64()).unwrap() as usize;
+            doc_indices.insert(idx);
+            let seg_id = searcher.segment_reader(r.doc_address.segment_ord).segment_id();
+            if let Some(hl) = sink.get(seg_id, r.doc_address.doc_id) {
+                if let Some(offs) = hl.get("content") {
+                    for [a, b] in offs { highlights.push((idx, *a, *b)); }
+                }
+            }
+        }
+        SearchResult { doc_indices, highlights }
+    };
+
+    let q = |t: &'static str, m: &str| GroundTruthQuery::from_mode(t, m).unwrap();
+    let queries = query_spec().unwrap_or_else(|| vec![
+        q("std::shared_ptr<binder::Expression>", "strict"),
+        q("std::shared_ptr<binder::Expression>", "relax"),
+        q("#include \"common/types/types.h\"", "strict"),
+        q("ku_dynamic_cast<const TARGET*>", "strict"),
+        q("if (result == nullptr)", "relax"),
+        q("::", "strict"),
+        q("lock", "sw"),
+        q("std::shared", "sws"),
+        q("ptr", "term"),
+        q("unique_ptr", "terms"),
+        q("std::shared_ptr<bindr::Expression>", "fz1"),
+        q("ku_dynamc_cast", "fz1"),
+        q("unique_ptr", "fz2"),
+        q("std::[a-z_]+_ptr<", "rx"),
+        q("[0-9]{8}", "rx"),
+        q("déjà", "relax"),
+        q("entité", "sw"),
+        q("🦆🦆🦆", "strict"),
+        q("🧘🏻‍♂️🌍", "strict"),
+    ]);
+
+    let mut fails = 0;
+    for gq in &queries {
+        let config = QueryConfig {
+            query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some(gq.text.into()),
+            strict_separators: Some(gq.strict_sep),
+            distance: if gq.distance > 0 && gq.distance != RX { Some(gq.distance) } else { None },
+            regex: if gq.distance == RX { Some(true) } else { None },
+            anchor_start: if gq.anchor { Some(true) } else { None },
+            exact_match: if gq.exact { Some(true) } else { None },
+            ..Default::default()
+        };
+        let gt = if gq.is_regex() { grep_spans_regex(&files, gq.text) }
+                 else if gq.distance > 0 { grep_spans_fuzzy(&files, gq.text, gq.distance) }
+                 else { filter_boundaries(grep_spans(&files, gq.text, gq.strict_sep), &files, gq.anchor, gq.exact) };
+
+        let run = |h: &ShardedHandle| -> SearchResult {
+            let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
+            let r = h.search(&config, 100_000, Some(sink.clone())).unwrap();
+            collect(h, &r, &sink)
+        };
+        let r1 = run(&node_1);
+        let r4 = run(&node_4);
+
+        let sa = node_a.export_stats(&config).unwrap();
+        let sb = node_b.export_stats(&config).unwrap();
+        let sa: ExportableStats = serde_json::from_str(&serde_json::to_string(&sa).unwrap()).unwrap();
+        let sb: ExportableStats = serde_json::from_str(&serde_json::to_string(&sb).unwrap()).unwrap();
+        let global = ExportableStats::merge(&[sa, sb]);
+        let sink_a = Arc::new(ld_lucivy::query::HighlightSink::new());
+        let sink_b = Arc::new(ld_lucivy::query::HighlightSink::new());
+        let ra = node_a.search_with_global_stats(&config, 100_000, &global, Some(sink_a.clone())).unwrap();
+        let rb = node_b.search_with_global_stats(&config, 100_000, &global, Some(sink_b.clone())).unwrap();
+        let mut rd = collect(&node_a, &ra, &sink_a);
+        let rbb = collect(&node_b, &rb, &sink_b);
+        rd.doc_indices.extend(rbb.doc_indices);
+        rd.highlights.extend(rbb.highlights);
+
+        let mut line = format!("  {:<36} {:>5} gt docs={} spans={}", gq.text, gq.mode_label(), gt.docs.len(), gt.spans.len());
+        let mut ok = true;
+        for (label, r) in [("1 shard", &r1), ("4 shards", &r4), ("2 nodes", &rd)] {
+            let spans: HashSet<(usize, usize, usize)> = r.highlights.iter().copied().collect();
+            let miss = gt.spans.difference(&spans).count();
+            let extra = spans.difference(&gt.spans).count();
+            let docs_ok = r.doc_indices == gt.docs;
+            if miss > 0 || extra > 0 || !docs_ok { ok = false; }
+            line.push_str(&format!(" | {label}: docs={} spans={} miss={miss} extra={extra}", r.doc_indices.len(), spans.len()));
+        }
+        eprintln!("{line} {}", if ok { "OK" } else { "FAIL" });
+        if !ok { fails += 1; }
+    }
+    assert_eq!(fails, 0, "{fails} queries differ between shapes or from the disk");
+}

@@ -360,3 +360,31 @@ Après : 32/32 exacts, panel par défaut 15/15, 50k inchangé (`uint64_t` relax 
 pèse 40-70 % du CPU sur les requêtes à gros volume (`->` : 281 ms sur 129 de wall) —
 nouvelle ligne profile `verify_literal (window+contains)`.
 
+## G. Sharding et distribué en v3, spans comprises — FAIT le 23 août (soir)
+
+`v3_distributed_coherence` : 19 requêtes du panel de cohérence (strict/relaxed
+longs, sw/term, fz1/fz2, deux regex, accents, emoji) sur **trois formes du même
+corpus** — 1 shard, 4 shards, 2 nœuds avec `export_stats → merge → 
+search_with_global_stats` (aller-retour JSON) — highlights exigés identiques aux
+occurrences du disque sur les trois. Avant, `v3_distributed_two_nodes` comparait
+des comptes de documents sur trois contains.
+
+Trouvé à la première exécution :
+
+- **Fuzzy sur 4 shards : un quart des résultats** (16/55, 18/86, 180/673). Le DAG
+  sharded ne prescannait en v3 que le contains (nœuds par segment) et laissait
+  fuzzy/regex se prescanner dans `weight()` — sur le searcher du **shard 0**.
+  `search_with_global_stats` faisait, lui, `query.prescan_segments(tous)`.
+  Unifié : les nœuds par segment ne traitent plus que les segments v2 ;
+  `BuildWeightNode` passe tous les segments v3 de tous les shards à
+  `Query::prescan_segments` (parallèle en interne) et fusionne les fréquences.
+- **Regex sur 4 shards : panique `bm25::idf` « 754 >= 763 »**. `fuzzy_query_v3`
+  et `regex_query_v3::make_weight` sommaient les docs du searcher local (un
+  shard) face à une fréquence globale — le bug déjà corrigé dans `contains` en
+  mai et jamais reporté sur ses deux voisins. Les trois lisent le fournisseur de
+  stats.
+
+Après : 19/19 sur les trois formes ; `perf_shape_sharded` inchangé.
+Hors champ : le routage par node_id (`delete_by_node_id`) et les deltas sharded
+ne sont pas couverts par ce panel.
+

@@ -143,6 +143,11 @@ impl SegmentReader {
         self.sfx_files.get(&field)
     }
 
+    /// Fields of this segment that carry a `.sfx` file.
+    pub fn sfx_fields(&self) -> impl Iterator<Item = Field> + '_ {
+        self.sfx_files.keys().copied()
+    }
+
     /// Access a pre-loaded .sfxpost file for the given field, if one exists.
     pub fn sfxpost_file(&self, field: Field) -> Option<&FileSlice> {
         self.sfxpost_files.get(&field)
