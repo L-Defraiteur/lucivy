@@ -125,8 +125,8 @@ strict_separators: bool,
 
     // A word_pos_map post-filter used to sit here. Its retain closure returned
     // `true` from both branches — intra-word and inter-word alike — so it never
-    // rejected anything, while loading word_pos_map, next_word_map and
-    // chunk_word_map on every segment scan. It read as a safety net and was not
+    // rejected anything, while loading three word-map sidecars on every
+    // segment scan. It read as a safety net and was not
     // one. Removed rather than left in place; if inter-word verification is
     // wanted, it has to be written, not resurrected.
 

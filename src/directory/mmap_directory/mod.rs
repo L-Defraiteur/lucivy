@@ -679,7 +679,7 @@ mod tests {
             let num_components_except_deletes_and_tempstore =
                 crate::index::SegmentComponent::iterator().len() - 2;
             // Per-field SFX index files are custom (not in SegmentComponent enum):
-            // .sfx, .sfxpost, .posmap, .bytemap, .termtexts, .gapmap, .sibling, .sepmap, .freqmap
+            // .sfx, .sfxpost, .posmap, .bytemap, .termtexts, .gapmap, .sibling, .sepmap
             // Allow extra headroom for these per-segment files.
             let sfx_extra_per_segment = 10;
             let max_num_mmapped =

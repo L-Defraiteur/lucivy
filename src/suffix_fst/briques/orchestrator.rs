@@ -5,7 +5,7 @@
 //!
 //! - `contains_v3`: exact substring search (single + cross-token)
 //! - `fuzzy_v3`: fuzzy substring search via trigram pigeonhole
-//! - `regex_v3`: regex search (TODO — needs DFA integration)
+//! - regex: see `regex_verified` (required literals + regex on rebuilt windows)
 
 use crate::tokenizer::equal_chunk::is_content_char;
 
@@ -296,7 +296,7 @@ mod tests {
         let derived = crate::suffix_fst::index_registry::build_derived_indexes_v3(&data.tokens, Some(&sfxpost), Some(&data.own_lens));
         let pm = derived.iter().find(|(e, _)| e == "posmap").map(|(_, d)| d.clone()).unwrap_or_default();
         let bm = derived.iter().find(|(e, _)| e == "bytemap").map(|(_, d)| d.clone()).unwrap_or_default();
-        let writer = SfxFileWriterV3::new(fst_data, parent_data, data.num_docs);
+        let writer = SfxFileWriterV3::new(fst_data, parent_data);
         TestIndex { sfx: writer.to_bytes(), sfxpost, wsp: data.word_sfxpost, pm, bm }
     }
 

@@ -220,9 +220,10 @@ compteur interne ne le dira.
 
 ### C4. Le fuzzy et le regex n'ont pas eu la journée — FAIT le 23 août (fuzzy au soir, regex tard)
 
-Regex : `briques/regex_verified.rs`, rag3db 19/19, kernel 50k 11/11, voir 06. Reste :
-supprimer `regex_v3.rs` / `regex_gap_analyzer.rs` / `automaton_weight.rs` et
-`V3_REGEX_MODE` (−1 900 lignes), compteurs `n_rx_*`, jeu de littéraux par coût avec
+Regex : `briques/regex_verified.rs`, rag3db 19/19, kernel 50k 11/11, voir 06.
+`regex_v3.rs` et `V3_REGEX_MODE` sont supprimés (le chemin vérifié est le seul) ;
+`regex_gap_analyzer.rs` / `automaton_weight.rs` restent car vivants côté v2. Reste :
+compteurs `n_rx_*`, jeu de littéraux par coût avec
 intersection préfixes/suffixes, et ajouter au panel par défaut les motifs qui ont
 cassé (`/\*[^*]*\*/`, `(?s)#if.*?#endif`, `(?-i)Table`, `[0-9]{8}`).
 

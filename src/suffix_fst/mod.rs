@@ -19,10 +19,6 @@ mod collector;
 pub mod gapmap;
 /// Sibling table: per-ordinal successor links for cross-token search.
 pub mod sibling_table;
-/// Overlap siblings: content ordinal → extended ordinals sharing same content.
-pub mod overlap_siblings;
-/// Word map: structural verification for cross-token chain matches.
-pub mod word_map;
 /// Word position map: (doc_id, position) → word_id for chain verification.
 pub mod word_pos_map;
 /// Word-level sfxpost for partition 0x02 (word-stripped entries).
@@ -35,8 +31,6 @@ pub mod bytemap;
 pub mod sepmap;
 /// Term texts: O(1) SFX ordinal → token text (fixes ordinal mismatch with tantivy term dict).
 pub mod termtexts;
-/// FreqMap: doc_freq and term_freq for BM25 scoring via SFX ordinals.
-pub mod freqmap;
 /// SFX index file abstraction: trait + registry for per-field index files.
 pub mod index_registry;
 /// File I/O for `.sfx` and `.sfxpost` formats (reader/writer).
@@ -63,8 +57,6 @@ pub use bytemap::{ByteBitmapWriter, ByteBitmapReader};
 pub use sepmap::{SepMapWriter, SepMapReader};
 /// Term texts writer/reader for SFX ordinal → token text lookup.
 pub use termtexts::{TermTextsWriter, TermTextsReader};
-/// FreqMap writer/reader for BM25 scoring.
-pub use freqmap::{FreqMapWriter, FreqMapReader};
 /// Writer and reader for the `.sfx` file format, plus per-ordinal postings reader.
 pub use file::{SfxFileWriter, SfxFileReader, SfxPostingsReader, SfxPostingEntry};
 /// Token interceptor that captures tokens during indexing for suffix FST construction.

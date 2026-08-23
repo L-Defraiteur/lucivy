@@ -166,9 +166,7 @@ impl Node for BuildSfxPostV3Node {
 // AssembleV3Node — produce SfxBuildOutputV3
 // ---------------------------------------------------------------------------
 
-struct AssembleV3Node {
-    num_docs: u32,
-}
+struct AssembleV3Node;
 
 impl Node for AssembleV3Node {
     fn node_type(&self) -> &'static str { "sfx_v3_assemble" }
@@ -211,11 +209,10 @@ impl Node for AssembleV3Node {
         let termtexts = tt_writer.serialize();
 
         // Build .sfx v3 file
-        let sfx_writer = SfxFileWriterV3::new(fst_data, parent_data, self.num_docs);
-        // TODO: word_map and next_word will be added when we wire the collector to track them
+        let sfx_writer = SfxFileWriterV3::new(fst_data, parent_data);
         let sfx = sfx_writer.to_bytes();
 
-        // EventDriven registry indexes (bytemap, freqmap, posmap, termtexts-v2-compat)
+        // EventDriven registry indexes (bytemap, posmap, termtexts-v2-compat)
         // V3: pass own_len per ordinal so ByteMap excludes overlap bytes.
         let mut derived = crate::suffix_fst::index_registry::build_derived_indexes_v3(
             &data.tokens,
@@ -223,9 +220,7 @@ impl Node for AssembleV3Node {
             Some(&data.own_lens),
         );
 
-        // Add word maps to registry files
-        derived.push(("chunk_word_map".to_string(), data.chunk_word_map.clone()));
-        derived.push(("next_word_map".to_string(), data.next_word_map.clone()));
+        // Add word-level indexes to registry files
         derived.push(("word_pos_map".to_string(), data.word_pos_map.clone()));
         derived.push(("word_sfxpost".to_string(), data.word_sfxpost.clone()));
         derived.push(("sibling_v3".to_string(), data.sibling_v3.clone()));
@@ -253,7 +248,6 @@ impl Node for AssembleV3Node {
 pub(crate) fn build_initial_sfx_dag_v3(
     data: SfxCollectorDataV3,
 ) -> Dag {
-    let num_docs = data.num_docs;
     let mut dag = Dag::new();
 
     dag.add_node("prepare", PrepareDataV3Node { data: Some(data) });
@@ -264,7 +258,7 @@ pub(crate) fn build_initial_sfx_dag_v3(
     dag.add_node("build_sfxpost", BuildSfxPostV3Node);
     dag.connect("prepare", "collector_data", "build_sfxpost", "collector_data").unwrap();
 
-    dag.add_node("assemble", AssembleV3Node { num_docs });
+    dag.add_node("assemble", AssembleV3Node);
     dag.connect("build_fst", "fst", "assemble", "fst").unwrap();
     dag.connect("build_sfxpost", "sfxpost", "assemble", "sfxpost").unwrap();
     dag.connect("prepare", "collector_data", "assemble", "collector_data").unwrap();
@@ -286,9 +280,6 @@ pub struct SegmentSfxV3<'a> {
     pub sfxpost: Option<&'a [u8]>,
     pub word_sfxpost: Option<&'a [u8]>,
     pub sibling_v3: Option<&'a [u8]>,
-    pub word_pos_map: Option<&'a [u8]>,
-    pub chunk_word_map: Option<&'a [u8]>,
-    pub next_word_map: Option<&'a [u8]>,
     /// old_doc_id → new_doc_id. Absent key = deleted document.
     pub doc_remap: &'a std::collections::HashMap<u32, u32>,
 }
@@ -303,8 +294,7 @@ pub struct SegmentSfxV3<'a> {
 /// What makes it possible without a format change is the partition tag now carried
 /// in TTX3: a word-stripped entry stores `word_content + content_overlap` as its
 /// text and `overlap_len` says where to cut, so both halves come back exactly.
-/// Everything else — postings, siblings, word maps — is a remap of doc_ids,
-/// ordinals and word_ids.
+/// Everything else — postings, siblings — is a remap of doc_ids and ordinals.
 ///
 /// The intern key is `(is_word_stripped, text)`, NOT the text alone. Chunk and
 /// word-stripped entries can share a text while their postings live in different
@@ -332,9 +322,6 @@ pub fn merge_segments_v3(
     let mut ns_intern = 0u128;
     let mut ns_postings = 0u128;
     let mut ns_sibling = 0u128;
-    let mut ns_wpm = 0u128;
-    let mut ns_cwm = 0u128;
-    let mut ns_nwm = 0u128;
 
     // Word-stripped entries are keyed by (text, content_len), as in the
     // collector: one key may hold several word shapes, each its own ordinal.
@@ -346,11 +333,6 @@ pub fn merge_segments_v3(
 
     let mut sibling_pairs: Vec<(u32, u32, u16)> = Vec::new();
     let mut wpm_writer = crate::suffix_fst::word_pos_map::WordPosMapWriter::new();
-    let mut chunk_word_entries: Vec<Vec<(u32, u8, u8)>> = Vec::new();
-    let mut next_word_pairs: Vec<(u32, u32)> = Vec::new();
-    // word_ids are segment-local; shift each segment past the previous ones so two
-    // different words can never collide into one.
-    let mut word_id_offset: u32 = 0;
 
     for (seg_idx, seg) in segments.iter().enumerate() {
         let tt = TermTextsReaderV3::open(seg.termtexts)
@@ -378,15 +360,13 @@ pub fn merge_segments_v3(
                     sep_len: meta.sep_len,
                     overlap_len: meta.overlap_len,
                     is_word_start: meta.is_word_start,
-                    // Only used while collecting; the merged word maps carry the
-                    // word identity from here on.
+                    // Only used while collecting (word-stripped grouping).
                     word_id: 0,
                     content_overlap: None,
                     is_word_stripped: meta.is_word_stripped,
                 });
                 token_postings.push(Vec::new());
                 word_postings.push(Vec::new());
-                chunk_word_entries.push(Vec::new());
                 new_ord
             };
             seg_ord_to_global.push(global_ord);
@@ -436,44 +416,8 @@ pub fn merge_segments_v3(
 
         ns_sibling += t_sib.elapsed().as_nanos();
 
-        let mut max_word_id = 0u32;
-
         // word_pos_map is not read from the sources: it is derived below from the
         // merged word postings, exactly as the collector derives it from its own.
-        let t_wpm = std::time::Instant::now();
-        ns_wpm += t_wpm.elapsed().as_nanos();
-
-        let t_cwm = std::time::Instant::now();
-        if let Some(data) = seg.chunk_word_map {
-            if let Some(r) = crate::suffix_fst::word_map::ChunkWordMapReader::open(data) {
-                for ord in 0..r.num_ords().min(seg_ord_to_global.len() as u32) {
-                    let g = seg_ord_to_global[ord as usize] as usize;
-                    for e in r.lookup(ord) {
-                        max_word_id = max_word_id.max(e.word_id);
-                        chunk_word_entries[g].push((
-                            e.word_id + word_id_offset, e.chunk_index, e.total_chunks,
-                        ));
-                    }
-                }
-            }
-        }
-
-        ns_cwm += t_cwm.elapsed().as_nanos();
-
-        let t_nwm = std::time::Instant::now();
-        if let Some(data) = seg.next_word_map {
-            if let Some(r) = crate::suffix_fst::word_map::NextWordMapReader::open(data) {
-                for w in 0..r.num_words() {
-                    for n in r.next_words(w) {
-                        max_word_id = max_word_id.max(w.max(n));
-                        next_word_pairs.push((w + word_id_offset, n + word_id_offset));
-                    }
-                }
-            }
-        }
-
-        ns_nwm += t_nwm.elapsed().as_nanos();
-        word_id_offset += max_word_id + 1;
     }
     let ns_seg_loop = t_start.elapsed().as_nanos();
     let t_final = std::time::Instant::now();
@@ -548,40 +492,18 @@ pub fn merge_segments_v3(
         }
     }
 
-    let mut chunk_word_writer =
-        crate::suffix_fst::word_map::ChunkWordMapWriter::new(final_count as usize);
-    for (i, entries) in chunk_word_entries.iter().enumerate() {
-        let fo = intern_to_final[i];
-        for &(w, idx, total) in entries {
-            chunk_word_writer.add(fo, w, idx, total);
-        }
-    }
-
-    let mut next_word_writer =
-        crate::suffix_fst::word_map::NextWordMapWriter::new(word_id_offset as usize);
-    for &(a, b) in &next_word_pairs {
-        next_word_writer.add(a, b);
-    }
-
     let mut sibling_writer =
         crate::suffix_fst::sibling_table::SiblingTableWriter::new(final_count);
     for &(a, b, gap) in &sibling_pairs {
         sibling_writer.add(intern_to_final[a as usize], intern_to_final[b as usize], gap);
     }
 
-    let mut overlap_siblings =
-        crate::suffix_fst::overlap_siblings::OverlapSiblingWriter::new(final_count as usize);
-    for &io in &sorted_indices {
-        overlap_siblings.add(intern_to_final[io as usize], io);
-    }
-
     if prof {
         let ms = |n: u128| n as f64 / 1e6;
         eprintln!(
-            "  [merge] {} segments, {} tokens | seg loop {:.0}ms (intern+postings {:.0}, sibling {:.0}, word_pos_map {:.0}, chunk_word_map {:.0}, next_word_map {:.0}) | finalize {:.0}ms | writers {:.0}ms",
+            "  [merge] {} segments, {} tokens | seg loop {:.0}ms (intern+postings {:.0}, sibling {:.0}) | finalize {:.0}ms | writers {:.0}ms",
             segments.len(), num_tokens,
             ms(ns_seg_loop), ms(ns_postings + ns_intern), ms(ns_sibling),
-            ms(ns_wpm), ms(ns_cwm), ms(ns_nwm),
             ms(t_final.elapsed().as_nanos()),
             ms(t_start.elapsed().as_nanos() - ns_seg_loop),
         );
@@ -602,11 +524,8 @@ pub fn merge_segments_v3(
         token_meta,
         num_docs: total_docs,
         min_suffix_len: 1,
-        overlap_siblings: overlap_siblings.serialize(),
         word_stripped,
         word_sfxpost: wsp_writer.finish(),
-        chunk_word_map: chunk_word_writer.serialize(),
-        next_word_map: next_word_writer.serialize(),
         word_pos_map: wpm_writer.serialize(),
         sibling_v3: sibling_writer.serialize(),
     })
@@ -764,9 +683,6 @@ mod tests {
             sfxpost: out.sfxpost.as_deref(),
             word_sfxpost: f("word_sfxpost"),
             sibling_v3: f("sibling_v3"),
-            word_pos_map: f("word_pos_map"),
-            chunk_word_map: f("chunk_word_map"),
-            next_word_map: f("next_word_map"),
             doc_remap: remap,
         }
     }

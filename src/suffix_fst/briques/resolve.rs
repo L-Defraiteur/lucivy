@@ -1404,7 +1404,7 @@ mod tests {
         }
         let sfxpost_data = post_writer.finish();
 
-        let writer = SfxFileWriterV3::new(fst_data, parent_data, data.num_docs);
+        let writer = SfxFileWriterV3::new(fst_data, parent_data);
         (writer.to_bytes(), sfxpost_data, num_terms)
     }
 

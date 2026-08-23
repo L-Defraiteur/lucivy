@@ -77,7 +77,7 @@ mod tests {
             }
         }
         let sfxpost = post_writer.finish();
-        let writer = SfxFileWriterV3::new(fst_data, parent_data, data.num_docs);
+        let writer = SfxFileWriterV3::new(fst_data, parent_data);
 
         // Build derived indexes (posmap, bytemap) for relaxed chain verification
         let derived = crate::suffix_fst::index_registry::build_derived_indexes_v3(

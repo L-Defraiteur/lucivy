@@ -175,8 +175,9 @@ d'avertissement à l'utilisateur, pas d'algorithme.
 4. `regex::Regex` insensible à la casse, `find_iter`, matchs vides ignorés, spans
    mappés à la source, dédupliqués.
 
-L'ancien chemin (`regex_v3.rs`, `regex_gap_analyzer.rs`, `automaton_weight.rs`,
-`V3_REGEX_MODE=legacy`) est à supprimer.
+L'ancien chemin v3 (`regex_v3.rs`, `V3_REGEX_MODE=legacy`) est supprimé ; le
+chemin vérifié est inconditionnel. `regex_gap_analyzer.rs` et `automaton_weight.rs`
+restent : ils servent le chemin v2.
 
 ## 5. Luciole, en deux règles
 

@@ -1337,7 +1337,7 @@ mod tests {
             .find(|(ext, _)| ext == "bytemap")
             .map(|(_, d)| d.clone()).unwrap_or_default();
 
-        let writer = SfxFileWriterV3::new(fst_data, parent_data, data.num_docs);
+        let writer = SfxFileWriterV3::new(fst_data, parent_data);
         (writer.to_bytes(), sfxpost, word_sfxpost, posmap_bytes, bytemap_bytes)
     }
 

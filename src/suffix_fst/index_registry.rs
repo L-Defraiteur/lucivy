@@ -4,7 +4,7 @@
 //! Two build strategies:
 //!
 //! - **EventDriven**: built by single-pass events (`on_token`/`on_posting`)
-//!   during one loop over tokens + sfxpost. (posmap, bytemap, termtexts, freqmap)
+//!   during one loop over tokens + sfxpost. (posmap, bytemap, termtexts)
 //! - **OrMergeWithRemap**: OR-merge source data with ordinal remapping at merge,
 //!   pre-built by the SfxCollector at segment creation. (sibling, sepmap)
 //! - **ExternalDagNode**: managed by dedicated DAG nodes, too complex to generalize.
@@ -97,10 +97,7 @@ pub fn all_indexes() -> Vec<Box<dyn SfxIndexFile>> {
         Box::new(super::posmap::PosMapIndex::new()),
         Box::new(super::bytemap::ByteMapIndex::new()),
         Box::new(super::termtexts::TermTextsIndex::new()),
-        Box::new(super::freqmap::FreqMapIndex::new()),
-        // Prebuilt word maps (structural chain verification)
-        Box::new(super::word_map::ChunkWordMapIndex),
-        Box::new(super::word_map::NextWordMapIndex),
+        // Word position map (prebuilt by collector / merge)
         Box::new(super::word_pos_map::WordPosMapIndex::new()),
         // Word-level sfxpost (prebuilt by DAG, loaded by segment reader)
         Box::new(super::word_sfxpost::WordSfxPostIndex),
@@ -285,41 +282,4 @@ pub fn or_merge_indexes(
     }
 
     results
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// Feature checking
-// ─────────────────────────────────────────────────────────────────────
-
-/// An index feature that a query can require.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum IndexFeature {
-    /// The core .sfx file (suffix FST + gapmap).
-    SuffixFst,
-    /// The .sfxpost posting index.
-    SuffixPost,
-    /// The sibling table (inside .sfx, but may be absent).
-    SiblingTable,
-    /// A custom per-field index file, identified by SfxIndexFile::id().
-    Custom(&'static str),
-}
-
-impl IndexFeature {
-    /// Index feature identifier for position map files.
-    pub const POSMAP: Self = Self::Custom("posmap");
-    /// Index feature identifier for byte map files.
-    pub const BYTEMAP: Self = Self::Custom("bytemap");
-    /// Index feature identifier for term text files.
-    pub const TERMTEXTS: Self = Self::Custom("termtexts");
-}
-
-impl std::fmt::Display for IndexFeature {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::SuffixFst => write!(f, "SuffixFst (.sfx)"),
-            Self::SuffixPost => write!(f, "SuffixPost (.sfxpost)"),
-            Self::SiblingTable => write!(f, "SiblingTable (in .sfx)"),
-            Self::Custom(id) => write!(f, "{id} (.{id})"),
-        }
-    }
 }

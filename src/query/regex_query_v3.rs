@@ -59,91 +59,43 @@ impl RegexQueryV3 {
         sfx_bytes: &common::OwnedBytes,
     ) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)> {
         use crate::suffix_fst::file_v3::SfxFileReaderV3;
-        use crate::suffix_fst::briques::regex_v3;
+        use crate::suffix_fst::briques::regex_verified;
 
         let reader = SfxFileReaderV3::open_owned(sfx_bytes.clone()).map_err(|e|
             crate::LucivyError::SystemError(format!("open SFX3: {e}")))?;
         let pr = crate::query::posting_resolver::build_resolver(seg_reader, self.field)?;
 
-        // Verified path (default): required literals + the real regex on
-        // rebuilt windows. `V3_REGEX_MODE=legacy` keeps the approximation
-        // for comparison.
-        if std::env::var("V3_REGEX_MODE").as_deref() != Ok("legacy") {
-            use crate::suffix_fst::briques::regex_verified;
-            let load = |ext: &str| -> Option<common::OwnedBytes> {
-                seg_reader.sfx_index_file(ext, self.field)
-                    .and_then(|fs| fs.read_bytes().ok())
-            };
-            let posmap_bytes = load("posmap");
-            let bytemap_bytes = load("bytemap");
-            let wsp_bytes = load("word_sfxpost");
-            let sib_bytes = load("sibling_v3");
-            let tt_bytes = load("termtexts");
-            let wpm_bytes = load("word_pos_map");
-            let ctx = crate::suffix_fst::briques::context::BriquesContext {
-                reader: &reader,
-                resolver: &*pr,
-                filter_docs: None,
-                debug: false,
-                trace_id: None,
-                posmap: posmap_bytes.as_ref().and_then(|b| crate::suffix_fst::posmap::PosMapReader::open(b)),
-                bytemap: bytemap_bytes.as_ref().and_then(|b| crate::suffix_fst::bytemap::ByteBitmapReader::open(b)),
-                word_sfxpost: wsp_bytes.as_ref().and_then(|b| crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(b)),
-                sibling_v3: sib_bytes.as_ref().and_then(|b| crate::suffix_fst::sibling_table::SiblingTableReader::open(b)),
-                termtexts: tt_bytes.as_ref().and_then(|b| crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open(b)),
-                word_posmap: wpm_bytes.as_ref().and_then(|b| crate::suffix_fst::word_pos_map::WordPosMapReader::open(b)),
-            };
-            let Some(plan) = regex_verified::plan(&self.pattern) else {
-                return Err(crate::LucivyError::InvalidArgument(format!(
-                    "regex {:?}: cannot be parsed", self.pattern)));
-            };
-            let re = regex::RegexBuilder::new(&self.pattern).case_insensitive(true).build()
-                .map_err(|e| crate::LucivyError::InvalidArgument(format!("regex: {e}")))?;
-            let highlights = regex_verified::regex_verified(&ctx, &self.pattern, &plan, &re, seg_reader.max_doc());
-            let mut tf_map: HashMap<DocId, u32> = HashMap::new();
-            for &(doc_id, _, _) in &highlights {
-                *tf_map.entry(doc_id).or_insert(0) += 1;
-            }
-            return Ok((tf_map.into_iter().collect(), highlights));
-        }
-
-        let regex = tantivy_fst::Regex::new(&self.pattern).map_err(|e|
-            crate::LucivyError::InvalidArgument(format!("regex: {e}")))?;
-        let automaton = crate::query::automaton_weight::SfxAutomatonAdapter(&regex);
-
-        // No copy: see the note in contains_query_v3::run_sfx_v3_prescan.
-        let termtexts_bytes = seg_reader.sfx_index_file("termtexts", self.field)
-            .and_then(|fs| fs.read_bytes().ok());
-        let tt_v3 = termtexts_bytes.as_ref()
-            .and_then(|b| crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open(b));
-        let tt_v2 = if tt_v3.is_none() {
-            termtexts_bytes.as_ref()
-                .and_then(|b| crate::suffix_fst::termtexts::TermTextsReader::open(b))
-        } else { None };
-
-        let ord_to_term = |ord: u64| -> Option<String> {
-            if let Some(ref tt) = tt_v3 {
-                tt.text(ord as u32).map(|s| s.to_string())
-            } else if let Some(ref tt) = tt_v2 {
-                tt.text(ord as u32).map(|s| s.to_string())
-            } else { None }
+        // Required literals + the real regex on rebuilt windows.
+        let load = |ext: &str| -> Option<common::OwnedBytes> {
+            seg_reader.sfx_index_file(ext, self.field)
+                .and_then(|fs| fs.read_bytes().ok())
         };
-
-        let posmap_bytes = seg_reader.posmap_file(self.field)
-            .and_then(|d| d.read_bytes().ok());
-        let bytemap_bytes = seg_reader.bytemap_file(self.field)
-            .and_then(|d| d.read_bytes().ok());
-
-        let sibling_bytes = seg_reader.sfx_index_file("sibling_v3", self.field)
-            .and_then(|d| d.read_bytes().ok());
-
-        let (_bitset, highlights) = regex_v3::regex_v3(
-            &automaton, &self.pattern, &reader, &*pr, &ord_to_term,
-            self.anchor_start, seg_reader.max_doc(),
-            posmap_bytes.as_deref(), bytemap_bytes.as_deref(),
-            sibling_bytes.as_deref(), termtexts_bytes.as_deref(),
-        );
-
+        let posmap_bytes = load("posmap");
+        let bytemap_bytes = load("bytemap");
+        let wsp_bytes = load("word_sfxpost");
+        let sib_bytes = load("sibling_v3");
+        let tt_bytes = load("termtexts");
+        let wpm_bytes = load("word_pos_map");
+        let ctx = crate::suffix_fst::briques::context::BriquesContext {
+            reader: &reader,
+            resolver: &*pr,
+            filter_docs: None,
+            debug: false,
+            trace_id: None,
+            posmap: posmap_bytes.as_ref().and_then(|b| crate::suffix_fst::posmap::PosMapReader::open(b)),
+            bytemap: bytemap_bytes.as_ref().and_then(|b| crate::suffix_fst::bytemap::ByteBitmapReader::open(b)),
+            word_sfxpost: wsp_bytes.as_ref().and_then(|b| crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(b)),
+            sibling_v3: sib_bytes.as_ref().and_then(|b| crate::suffix_fst::sibling_table::SiblingTableReader::open(b)),
+            termtexts: tt_bytes.as_ref().and_then(|b| crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open(b)),
+            word_posmap: wpm_bytes.as_ref().and_then(|b| crate::suffix_fst::word_pos_map::WordPosMapReader::open(b)),
+        };
+        let Some(plan) = regex_verified::plan(&self.pattern) else {
+            return Err(crate::LucivyError::InvalidArgument(format!(
+                "regex {:?}: cannot be parsed", self.pattern)));
+        };
+        let re = regex::RegexBuilder::new(&self.pattern).case_insensitive(true).build()
+            .map_err(|e| crate::LucivyError::InvalidArgument(format!("regex: {e}")))?;
+        let highlights = regex_verified::regex_verified(&ctx, &self.pattern, &plan, &re, seg_reader.max_doc());
         let mut tf_map: HashMap<DocId, u32> = HashMap::new();
         for &(doc_id, _, _) in &highlights {
             *tf_map.entry(doc_id).or_insert(0) += 1;

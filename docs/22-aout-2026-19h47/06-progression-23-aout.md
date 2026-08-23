@@ -312,8 +312,8 @@ Audit agent contains/fuzzy vs regex, puis réécriture par vérification
 (`briques/regex_verified.rs`, `922a2db`, `a7c60d9`). L'ancien chemin approximait le
 motif sur l'index (classes de gaps, DFA sur les ordinaux) : sur rag3db,
 `std::[a-z_]+_ptr` 0 doc sur 1 142, `[A-Z][a-z]+Function` 0 sur 588, `function\s*\(`
-13 sur 160, highlights réduits au littéral, `\b` en erreur. Gardé sous
-`V3_REGEX_MODE=legacy` le temps de le supprimer.
+13 sur 160, highlights réduits au littéral, `\b` en erreur. Gardé un temps sous
+`V3_REGEX_MODE=legacy`, puis supprimé (`regex_v3.rs` retiré, chemin vérifié seul).
 
 **Nouveau** : littéraux requis par `regex-syntax` (préfixes exacts, sinon suffixes —
 sur le motif brut : en insensible à la casse `function` devient 64 variantes),

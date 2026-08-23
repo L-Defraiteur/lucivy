@@ -73,14 +73,6 @@ pub struct SfxCollectorV3 {
     // the exact word identity — eliminates the lossy content_key join.
     word_postings: Vec<Vec<(u32, u32, u32, u32, u32)>>,
 
-    // Word map: structural verification for cross-token chains.
-    // Interned segments: segment text (content+sep, lowered) → global word_id.
-    word_intern: HashMap<String, u32>,
-    // Per intern ordinal: (global_word_id, chunk_index, total_chunks).
-    // Populated during add_value, consumed by into_data.
-    chunk_to_word: Vec<Vec<(u32, u8, u8)>>,
-    // Observed next-word pairs: (prev_word_id, next_word_id).
-    next_word_pairs: Vec<(u32, u32)>,
     // Sibling pairs: (intern_ord_a, intern_ord_b, content_len_a) for consecutive chunks and words.
     // content_len_a = content bytes of ordinal A (used by sibling DFS to know how much
     // of the query the first token consumes, excluding overlap).
@@ -135,9 +127,6 @@ impl SfxCollectorV3 {
             token_meta: Vec::new(),
             word_stripped_entries: Vec::new(),
             word_postings: Vec::new(),
-            word_intern: HashMap::new(),
-            chunk_to_word: Vec::new(),
-            next_word_pairs: Vec::new(),
             sibling_pairs: Vec::new(), // (intern_a, intern_b, content_len_a)
             doc_values: Vec::new(),
             doc_active: false,
@@ -184,7 +173,7 @@ impl SfxCollectorV3 {
         let mut offset = 0usize;
         // Per-chunk posting info: (doc_id, ti, byte_from, byte_to) for word-stripped
         let mut chunk_posting_info: Vec<(u32, u32, u32, u32)> = Vec::with_capacity(num_chunks);
-        // Per-chunk intern ids for word map building
+        // Per-chunk intern ids for sibling pairs and word-stripped entries
         let mut chunk_intern_ids: Vec<u32> = Vec::with_capacity(num_chunks);
 
         for i in 0..num_chunks {
@@ -289,55 +278,6 @@ impl SfxCollectorV3 {
             let meta = &self.token_meta[w[1] as usize];
             let content_len = (meta.own_len as u16).saturating_sub(meta.sep_len as u16);
             self.sibling_pairs.push((w[0], w[1], content_len));
-        }
-
-        // Build word map: group chunks by word_id, intern segments, record mappings.
-        {
-            let mut segments: std::collections::BTreeMap<usize, Vec<usize>> =
-                std::collections::BTreeMap::new();
-            for (i, (_, meta)) in chunks.iter().enumerate() {
-                segments.entry(meta.word_id).or_default().push(i);
-            }
-
-            let seg_ids: Vec<usize> = segments.keys().copied().collect();
-            let mut prev_global_wid: Option<u32> = None;
-
-            for &local_wid in &seg_ids {
-                let chunk_idxs = &segments[&local_wid];
-                // Reconstruct segment text (content+sep) by concatenating chunks
-                let seg_text: String = chunk_idxs.iter()
-                    .map(|&i| chunks[i].0.to_lowercase())
-                    .collect();
-
-                // Intern globally
-                let next_id = self.word_intern.len() as u32;
-                let global_wid = *self.word_intern.entry(seg_text).or_insert(next_id);
-
-                let total = chunk_idxs.len() as u8;
-                for (ci, &chunk_i) in chunk_idxs.iter().enumerate() {
-                    let iid = chunk_intern_ids[chunk_i];
-                    // Ensure chunk_to_word has enough capacity
-                    while self.chunk_to_word.len() <= iid as usize {
-                        self.chunk_to_word.push(Vec::new());
-                    }
-                    let entry = (global_wid, ci as u8, total);
-                    if !self.chunk_to_word[iid as usize].contains(&entry) {
-                        self.chunk_to_word[iid as usize].push(entry);
-                    }
-                }
-
-                // Record next-word pair.
-                //
-                // This used to dedup with a linear `contains` over a Vec that
-                // accumulates across the whole segment, once per word occurrence:
-                // O(occurrences x distinct pairs), measured at roughly a billion
-                // comparisons for a single 62-document segment. Deduplication
-                // happens once, in into_data, where it costs a sort.
-                if let Some(prev) = prev_global_wid {
-                    self.next_word_pairs.push((prev, global_wid));
-                }
-                prev_global_wid = Some(global_wid);
-            }
         }
 
         // Build word-level stripped entries from this value's chunks.
@@ -749,40 +689,6 @@ impl SfxCollectorV3 {
         }
         let word_sfxpost_data = word_sfxpost_writer.finish();
 
-        // Build overlap sibling table (now trivial: each ordinal maps to itself,
-        // but keep it for potential future use)
-        let mut overlap_siblings = crate::suffix_fst::overlap_siblings::OverlapSiblingWriter::new(
-            final_ord as usize,
-        );
-        for (_, entry) in &ord_map {
-            let fo = intern_to_final[entry.intern_ords[0] as usize];
-            for &io in &entry.intern_ords {
-                overlap_siblings.add(fo, io);
-            }
-        }
-        let overlap_siblings_data = overlap_siblings.serialize();
-
-        // Build word maps: remap from intern ordinals to final ordinals.
-        let mut chunk_word_writer = crate::suffix_fst::word_map::ChunkWordMapWriter::new(
-            final_ord as usize,
-        );
-        for (intern_ord, entries) in self.chunk_to_word.iter().enumerate() {
-            let fo = intern_to_final.get(intern_ord).copied().unwrap_or(0);
-            for &(word_id, chunk_idx, total) in entries {
-                chunk_word_writer.add(fo, word_id, chunk_idx, total);
-            }
-        }
-        let chunk_word_map_data = chunk_word_writer.serialize();
-
-        let num_words = self.word_intern.len();
-        let mut next_word_writer = crate::suffix_fst::word_map::NextWordMapWriter::new(num_words);
-        let mut pairs = self.next_word_pairs.clone();
-        pairs.sort_unstable();
-        pairs.dedup();
-        for &(prev, next) in &pairs {
-            next_word_writer.add(prev, next);
-        }
-        let next_word_map_data = next_word_writer.serialize();
         let word_pos_map_data = word_pos_map.serialize();
 
         // Build sibling table v3: remap intern ordinals to final ordinals
@@ -808,11 +714,8 @@ impl SfxCollectorV3 {
             num_content_ords: final_ord as usize,
             num_docs: self.current_doc_id,
             min_suffix_len: self.min_suffix_len,
-            overlap_siblings: overlap_siblings_data,
             word_stripped: self.word_stripped_entries,
             word_sfxpost: word_sfxpost_data,
-            chunk_word_map: chunk_word_map_data,
-            next_word_map: next_word_map_data,
             word_pos_map: word_pos_map_data,
             sibling_v3: sibling_v3_data,
         }
@@ -873,7 +776,7 @@ pub struct SfxCollectorDataV3 {
     pub token_meta: Vec<TokenMetaV3>,
     /// Token texts sorted alphabetically (BTreeSet order = final ordinal order).
     /// Contains extended texts for chunks and word-stripped texts for ws entries.
-    /// Used by derived index builders (bytemap, freqmap, posmap).
+    /// Used by derived index builders (bytemap, posmap).
     /// Ordered token texts, 1:1 with content_postings and own_lens by final ordinal.
     pub tokens: Vec<String>,
     /// Postings per final ordinal. Index = final ordinal.
@@ -885,21 +788,12 @@ pub struct SfxCollectorDataV3 {
     pub num_content_ords: usize,
     pub num_docs: u32,
     pub min_suffix_len: usize,
-    /// Overlap sibling table: content_ord → [intern_ords with same content].
-    /// Serialized binary format, ready to store alongside the SFX file.
-    pub overlap_siblings: Vec<u8>,
     /// Word-level stripped entries for partition 0x02.
     pub word_stripped: Vec<WordStrippedEntry>,
     /// Word-level sfxpost (serialized). Separate from chunk sfxpost because
     /// word postings have different semantics: position = last chunk,
     /// byte_from = first chunk start (entire word span).
     pub word_sfxpost: Vec<u8>,
-    /// ChunkWordMap: content_ordinal → [(word_id, chunk_index, total_chunks)].
-    /// Serialized binary format for structural chain verification.
-    pub chunk_word_map: Vec<u8>,
-    /// NextWordMap: word_id → [next_word_ids].
-    /// Serialized binary format for inter-word chain verification.
-    pub next_word_map: Vec<u8>,
     /// WordPosMap: (doc_id, position) → word_id_within_doc.
     /// Per-doc word assignment for exact chain verification.
     pub word_pos_map: Vec<u8>,

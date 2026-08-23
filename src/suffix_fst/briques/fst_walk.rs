@@ -788,7 +788,7 @@ mod tests {
             }
         }
         let (fst_data, parent_data) = builder.build().unwrap();
-        let writer = SfxFileWriterV3::new(fst_data, parent_data, 1);
+        let writer = SfxFileWriterV3::new(fst_data, parent_data);
         let sfx_bytes = writer.to_bytes();
         let reader = SfxFileReaderV3::open(&sfx_bytes).unwrap();
         f(&reader);

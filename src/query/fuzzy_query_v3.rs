@@ -83,7 +83,6 @@ impl FuzzyQueryV3 {
         let sib_bytes = load("sibling_v3");
         let tt_bytes = load("termtexts");
         let wpm_bytes = load("word_pos_map");
-    let wpm_bytes = load("word_pos_map");
 
         let ctx = crate::suffix_fst::briques::context::BriquesContext {
             reader: &reader,

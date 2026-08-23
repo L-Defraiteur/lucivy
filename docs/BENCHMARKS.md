@@ -151,7 +151,6 @@ Policy 10k : `include` 79 ms, `__init` relax 85 ms.
 | variable | valeurs | sert à |
 |---|---|---|
 | `V3_FUZZY_MODE` | `auto` (défaut), `pieces`, `pivot`, `ngram` | générateur de candidats fuzzy — mêmes spans attendus dans les quatre |
-| `V3_REGEX_MODE` | (défaut vérifié), `legacy` | l'ancien regex approximatif, à supprimer |
 
 ## 6. Tests rapides (secondes) à lancer avant tout commit moteur
 
