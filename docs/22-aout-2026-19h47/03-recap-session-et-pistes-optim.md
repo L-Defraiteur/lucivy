@@ -406,6 +406,67 @@ merge en deviendrait une instance générique.
 
 ---
 
+## 5 ter. État au 23 août, 14h — mesuré, commité
+
+### Perf, 50k fichiers kernel, 800 segments naturels, index mmap en cache
+
+| Query | moteur | grep depuis le disque |
+|---|---|---|
+| `spin_lock` strict | 210 ms | 312 ms |
+| `include` strict (36 824 docs) | 212 ms | 346 ms |
+| `net_device` strict | 190 ms | 296 ms |
+| `EXPORT_SYMBOL` strict | 198 ms | 413 ms |
+| `__init` strict | 328 ms | 329 ms |
+| `kmalloc` relax | 179 ms | 1 080 ms |
+| `uint64_t` relax | 208 ms | 1 113 ms |
+
+Ce matin : `__init` 49 s, index fusionné 3,5 s par requête. Le « grep » de la
+colonne de droite fait désormais **le même travail** que le moteur — lire chaque
+fichier depuis le disque, trouver toutes les occurrences en spans d'octets — et non
+un `contains` sur un `Vec` préchargé, qui était la comparaison précédente (et qui
+donnait 90 ms, d'où l'impression d'être « plus lent que grep »).
+
+Index fusionné à 32 segments : `include` 999 ms, `spin_lock` 256, `__init` 340,
+`net_device` 212 — au niveau du naturel sauf `uint64_t` relax (1 119 contre 251).
+
+### Correction : les highlights étaient faux (`456bd58`)
+
+Les documents étaient exacts ; les spans ne l'étaient pas, et rien ne les vérifiait.
+Trois bugs, dont un ancien : une seule occurrence émise par document sur les chaînes
+(`position` d'émission écrasée par le dedup), fins tronquées à la frontière de chunk
+(clamp sur le contenu propre alors que l'overlap est du texte), relaxed s'arrêtant
+avant le token suivant (l'overlap 0x02 est après des séparateurs → `overlap_overflow`
+placé via posmap).
+
+Panel rag3db : 9 requêtes sur 15 exactes au span près. 50k kernel : `include`
+214 689 / 214 692, `net_device` et `kmalloc` exacts.
+
+**Résidus connus, non traités** :
+- Occurrences manquantes en fin de fichier ou devant un caractère non-ASCII
+  (`rag3db` 144 / 15 128 ; `function`, `return`, `struct` 1-2). Hypothèse : l'overlap
+  de 2 octets coupe un caractère UTF-8 de 3 octets.
+- Spans qui **démarrent trop tôt**, sur un séparateur antérieur, quand la tête de
+  chaîne est un token finissant par un séparateur : `__init` 1 404 / 18 149
+  (`>>_vapor __init<<`) ; relaxed `uint64_t` 72 (`>>;\n    uint64<<`). C'est
+  `byte_from_first = e.byte_from + first_sti` qui ne pointe pas sur le dernier
+  séparateur du token.
+
+### Harnais
+
+- `V3_INDEX_DIR` : index construit en RAM, copié sans fsync, rouvert en mmap
+  (`cdd577d`). 50k : 64 s à construire, 0 s à rouvrir. Sur ce disque (btrfs+zstd) un
+  fsync coûte 65 ms, et MmapDirectory en fait un par fichier, 25 par segment.
+- Merge parallèle (`2eb6426`) : `IndexWriter::merge_many`, fusions en tâches
+  luciole, réponse par continuation. 10k : 18,9 → 5,6 s.
+- Le merge **progressif** du harnais reste mauvais : 660 s sur 886 s du run 50k
+  fusionné, parce qu'il re-fusionne sans cesse des segments moyens. La
+  `LogMergePolicy` existe et n'est jamais consultée (`handle_commit` diffère tout).
+- Le rapport affiche `(search, +fetch, grep)` et `spans gt=… v3=… miss=… extra=…`.
+
+### Pivot sur la position rare : toujours pas fait — voir `05-pivot-position-rare.md`.
+
+---
+
 ## 6. Ce qu'il ne faut pas refaire
 
 **Cinq hypothèses fausses dans cette session**, dont deux justes mais incomplètes :
