@@ -124,6 +124,11 @@ mod ffi {
         //   Ops: eq, ne, lt, lte, gt, gte, in, not_in, between, starts_with, contains
         //   Composite: must, should, must_not with nested "clauses"
 
+        // Honest warnings for a query, without running it: what the engine
+        // will actually search and where it falls back to brute force.
+        // Empty when nothing applies.
+        fn query_warnings(self: &LucivyIndex, query_json: &str) -> Result<Vec<String>>;
+
         // Search without highlights. Returns top `limit` results sorted by BM25 score.
         fn search(
             self: &LucivyIndex,
@@ -473,6 +478,11 @@ fn lucivy_merge_stats(stats_json_list: &[String]) -> Result<String, String> {
 // ── Search ─────────────────────────────────────────────────────────────────
 
 impl LucivyIndex {
+    fn query_warnings(&self, query_json: &str) -> Result<Vec<String>, String> {
+        let query_config = self.parse_query(query_json)?;
+        Ok(self.handle.query_warnings(&query_config))
+    }
+
     fn search(
         &self,
         query_json: &str,

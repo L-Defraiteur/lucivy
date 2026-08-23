@@ -347,6 +347,32 @@ impl LucivyHandle {
             .map_err(|e| format!("merge: {e}"))
     }
 
+    /// SFX format version of every segment file of this index, one entry per
+    /// (segment, text field) that carries one. Feeds `index_warnings`.
+    pub fn sfx_versions(&self) -> Vec<Option<u8>> {
+        let searcher = self.reader.searcher();
+        let mut out = Vec::new();
+        for seg in searcher.segment_readers() {
+            for (_, field) in &self.field_map {
+                if let Some(fs) = seg.sfx_file(*field) {
+                    let v = fs.read_bytes().ok()
+                        .and_then(|b| ld_lucivy::suffix_fst::section_file::detect_sfx_version(b.as_ref()));
+                    out.push(v);
+                }
+            }
+        }
+        out
+    }
+
+    /// Honest warnings for a query on this index: what will actually be
+    /// searched and where the engine falls back to brute force. Pure, runs
+    /// nothing; call it next to `search` and show the result to the user.
+    pub fn query_warnings(&self, query_config: &QueryConfig) -> Vec<String> {
+        let mut w = crate::warnings::query_warnings(query_config);
+        w.extend(crate::warnings::index_warnings(&self.sfx_versions()));
+        w
+    }
+
     /// Search with prescan + global IDF.
     pub fn search(
         &self,

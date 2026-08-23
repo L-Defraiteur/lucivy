@@ -855,6 +855,24 @@ pub unsafe extern "C" fn lucivy_search_with_global_stats(
 
 // ── Search ───────────────────────────────────────────────────────────────
 
+/// Honest warnings for a query, without running it. Returns a JSON array of
+/// strings (empty when nothing applies) or `{"error": ...}`.
+#[no_mangle]
+pub unsafe extern "C" fn lucivy_query_warnings(
+    ctx: *mut LucivyContext,
+    query_json: *const c_char,
+) -> *const c_char {
+    if ctx.is_null() { return return_error("null context"); }
+    let ctx = &*ctx;
+    let query_json = str_from_ptr(query_json);
+    let query_config = match parse_query(ctx, query_json) {
+        Ok(q) => q,
+        Err(e) => return return_error(&e),
+    };
+    let warnings = ctx.handle.query_warnings(&query_config);
+    return_str(serde_json::to_string(&warnings).unwrap_or_else(|_| "[]".into()))
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn lucivy_search(
     ctx: *mut LucivyContext,

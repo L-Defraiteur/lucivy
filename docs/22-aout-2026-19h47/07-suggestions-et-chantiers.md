@@ -246,17 +246,37 @@ tests fuzzy mesuraient v2 sans le savoir.
 
 ---
 
-## C bis. Avertissements honnêtes à la requête
+## C bis. Avertissements honnêtes à la requête — FAIT le 23 août
 
-Quand la couverture aura été poussée autant que possible, ce qui reste comme
-limitation **connue** doit remonter à l'utilisateur au moment de la recherche, pas
-rester un silence : regex sans littéral exploitable (`MIN_LITERAL_LEN`) ou dont les
-gaps dépassent ce que l'index sait vérifier, fuzzy dont la distance avale la
-requête (`__init` relaxed → `init` d=1 admet `int`, `unit`, `inet` : 44 579 docs sur
-50 000), mot plus long que le plafond de suffixes des entrées word, requête vide
-après retrait des séparateurs, plafond de résultats atteint. Forme : un champ
-`warnings: Vec<String>` dans le résultat de recherche, propagé par les bindings.
-À faire après la couverture, pas à la place.
+`lucivy_core/src/warnings.rs` : `query_warnings(&QueryConfig)` (pur, récursif sur
+boolean / dismax) + `index_warnings(&[Option<u8>])`. Exposé par
+`LucivyHandle::query_warnings` et `ShardedHandle::query_warnings`, et dans chaque
+binding à côté de `search` : Python `index.query_warnings(q)`, Node
+`index.queryWarnings(q)`, C++ `query_warnings(json)`, bridge rag3db
+`query_warnings(handle, json)`, emscripten `lucivy_query_warnings(ctx, json)`
+(tableau JSON). Choix : une fonction à part plutôt qu'un champ dans les résultats,
+parce que toutes les limitations se déduisent de la requête et de l'index **avant**
+exécution, et que `search` reste un `Vec` nu dans tous les bindings.
+
+Règles (messages en anglais, c'est de l'API) :
+
+| Cas | Règle |
+|---|---|
+| relaxed, séparateurs dans la requête | « `__init` is searched as `init` » |
+| relaxed, que des séparateurs | retourne rien |
+| strict, que des séparateurs | coût : millions de spans (mesuré `\t\t` 7,2 M) |
+| littéral < 3 octets | la plupart des documents matchent, coût ∝ corpus |
+| fuzzy, séparateurs | ignorés, idem |
+| fuzzy, `chars ≤ 3·d + 1` | un quart de la requête réécrit (`init` d=1 : 44 579 / 50 000) |
+| fuzzy, d > 3 | générateur calibré pour 1-3 |
+| regex invalide | retourne rien |
+| regex sans littéral (`[0-9]{8}`) | balayage complet |
+| regex à littéral < 3 octets (`/\*[^*]*\*/` → `/*`) | la plupart des docs candidats |
+| regex à longueur non bornée | documents candidats scannés entiers |
+| segments SFX v2 dans l'index | pipeline legacy pour relaxed / fuzzy / regex |
+
+Tests : 7 unitaires dans le module, `test_query_warnings.rs` de bout en bout.
+Non couvert (pas déductible avant exécution) : plafond de résultats atteint.
 
 ## D. Hygiène — petit, sûr, sans urgence
 

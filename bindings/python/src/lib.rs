@@ -340,6 +340,23 @@ impl Index {
     ///     Filter ops: ``eq``, ``ne``, ``lt``, ``lte``, ``gt``, ``gte``,
     ///     ``in``, ``not_in``, ``between``, ``starts_with``, ``contains``.
     ///     Composite: ``must``, ``should``, ``must_not`` with nested ``clauses``.
+    /// Honest warnings for a query, without running it.
+    ///
+    /// Returns a list of plain-text warnings describing what the engine will
+    /// actually search and where it falls back to brute force: separators
+    /// ignored in relaxed mode, fuzzy distance too loose for the query
+    /// length, regex without a usable literal (full scan), segments written
+    /// by the legacy indexer. Empty when nothing applies.
+    ///
+    /// Example::
+    ///
+    ///     for w in index.query_warnings({"type": "regex", "value": "[0-9]{8}"}):
+    ///         print("warning:", w)
+    fn query_warnings(&self, query: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+        let query_config = self.parse_query(query)?;
+        Ok(self.handle.query_warnings(&query_config))
+    }
+
     #[pyo3(signature = (query, limit=10, highlights=false, allowed_ids=None, fields=false))]
     fn search(
         &self,

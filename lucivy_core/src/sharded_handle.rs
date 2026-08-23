@@ -1655,6 +1655,15 @@ impl ShardedHandle {
         self.search_internal(query_config, top_k, highlight_sink, None)
     }
 
+    /// Honest warnings for a query across all shards — see
+    /// `LucivyHandle::query_warnings`. Pure, runs nothing.
+    pub fn query_warnings(&self, query_config: &QueryConfig) -> Vec<String> {
+        let mut w = crate::warnings::query_warnings(query_config);
+        let versions: Vec<Option<u8>> = self.shards.iter().flat_map(|s| s.sfx_versions()).collect();
+        w.extend(crate::warnings::index_warnings(&versions));
+        w
+    }
+
     /// Search with node_id filter (only return docs whose _node_id is in allowed_ids).
     pub fn search_filtered(
         &self,

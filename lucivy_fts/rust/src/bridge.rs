@@ -121,6 +121,10 @@ mod ffi {
         fn rollback(handle: &LucivyHandle);
         fn reload_reader(handle: &LucivyHandle);
 
+        // Honest warnings for a query, without running it: what the engine
+        // will actually search and where it falls back to brute force.
+        fn query_warnings(handle: &LucivyHandle, query_json: &str) -> Result<Vec<String>>;
+
         // Search (query stays JSON — flexible, not a hot path)
         fn search(
             handle: &LucivyHandle,
@@ -295,6 +299,12 @@ fn reload_reader(_handle: &LucivyHandle) {
 }
 
 // ── Search ─────────────────────────���───────────────────────────────────────
+
+fn query_warnings(handle: &LucivyHandle, query_json: &str) -> Result<Vec<String>, String> {
+    let config: query::QueryConfig = serde_json::from_str(query_json)
+        .map_err(|e| format!("invalid query JSON: {e}"))?;
+    Ok(handle.query_warnings(&config))
+}
 
 fn search(
     handle: &LucivyHandle,

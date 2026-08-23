@@ -210,6 +210,22 @@ client_index.apply_sharded_delta(delta)
 | `regex` | Regex substring (alias for `contains` + `regex=true`) |
 | `phrase` | Adjacent tokens in order |
 
+### Query warnings
+
+Some queries hit known limits of the engine: separators are ignored in relaxed
+mode (`__init` is searched as `init`), a fuzzy distance can rewrite most of a
+short query, a regex without a usable literal (`[0-9]{8}`) scans every
+document. `query_warnings(query)` returns these as plain-text warnings, without
+running the search — show them next to the results.
+
+```python
+for w in index.query_warnings({"type": "regex", "value": "[0-9]{8}"}):
+    print("warning:", w)
+# warning: "[0-9]{8}" requires no literal the index can look up: every document is scanned whole (full scan, cost grows with corpus size)
+```
+
+Node: `index.queryWarnings(query)`; C++ / rag3db bridge: `query_warnings(json)`.
+
 ## Benchmarks
 
 Comment lancer les mesures et la vérité terrain par spans (contains, fuzzy, regex,

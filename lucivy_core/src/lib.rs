@@ -16,3 +16,4 @@ pub(crate) mod search_dag;
 pub mod sharded_handle;
 pub mod snapshot;
 pub mod sync;
+pub mod warnings;
