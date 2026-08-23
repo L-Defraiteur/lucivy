@@ -1472,19 +1472,12 @@ mod tests {
         assert!(!doc_ids.contains(&1), "doc 1 should not match");
     }
 
-    #[test]
-    fn test_resolve_chain_sep_skip() {
-        let (sfx, post, nt) = build_index(&["mutex_lock"]);
-        let reader = SfxFileReaderV3::open(&sfx).unwrap();
-        let resolver = MockResolver::new(&post, nt);
-
-        // "mutexlock" strict_sep=false → should find via stripped partition
-        let chains = super::super::fst_walk::cross_token_chain_v3(&reader, "mutexlock", false);
-        let matches = resolve_chains_v3(&chains, &resolver, None);
-
-        assert!(!matches.is_empty(), "sep-skip chain should resolve");
-        assert_eq!(matches[0].doc_id, 0);
-    }
+    // test_resolve_chain_sep_skip was deleted here: it resolved a RELAXED
+    // cross-token chain through the chunk resolver alone, which stopped
+    // being the relaxed path when partition 0x02 moved to `.word_sfxpost`
+    // (a word-stripped ordinal has no chunk postings to resolve). The
+    // relaxed path is covered end-to-end, spans asserted, by
+    // test_sfx_v3_pipeline and the ground-truth coherence panels.
 
     // ── selectivity_v3 ──
 

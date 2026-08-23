@@ -157,7 +157,7 @@ Policy 10k : `include` 79 ms, `__init` relax 85 ms.
 ## 6. Tests rapides (secondes) à lancer avant tout commit moteur
 
 ```bash
-cargo test --release --lib                                  # 3 échecs pré-existants connus (fixtures mortes)
+cargo test --release --lib                                  # tout vert depuis le 23 août
 cargo test --release -p lucivy-core --test test_sfx_v3_pipeline   # 25 tests, 3 s
 cargo test --release -p lucivy-core --test test_sfx_v3_ground_truth  # rag3db, 45 s
 #   dont v3_ground_truth_coherence : panel fixe « requêtes de RAG » (littéraux longs à

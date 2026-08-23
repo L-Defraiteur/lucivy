@@ -412,3 +412,24 @@ Mais le delta pesait **379 Mo pour un index de 366 Mo**. Deux bugs, tous deux de
 Après : **293 Ko**. Reste inhérent : si la policy fusionne un gros segment après des
 suppressions, le delta le renvoie entier (à borner côté policy si ça gêne).
 
+## I. Migration v2→v3 et les trois tests rouges — FAIT le 23 août (nuit)
+
+`v3_migration_from_v2_index` : un index sans `sfx_version` dans sa config part en
+v3 ; un index v2 existant (meta.json sans le champ) rouvert par le nouveau code
+reste v2, cherchable, nouveaux segments v2 ; la bascule du champ à 3 dans
+meta.json donne un index **mixte** qui répond l'union (contains et startsWith)
+et que `query_warnings` signale ("N segment file(s) written by the v2 indexer").
+
+Les trois rouges historiques, réparés ou retirés — ils affirmaient des invariants
+de l'ancien design :
+- `test_into_data_sorted` : "tokens triés par texte" n'existe plus (clés
+  d'internement à préfixe de partition + suffixe de forme) ; l'invariant réel est
+  `sorted_indices` ordonné + alignement texte/postings par ordinal. Réécrit.
+- `test_resolve_chain_sep_skip` : résolvait une chaîne relaxed par le resolver
+  chunk seul — le relaxed passe par `.word_sfxpost` depuis la partition 0x02.
+  Supprimé (couvert bout-en-bout par les panels).
+- `diag_false_positive_uint64t` : contexte main-nue sans sidecars ; l'assertion
+  relaxed y est impossible par construction. Réduit au strict.
+
+**`cargo test --lib` : 1415 passed, 0 failed — premier tout-vert.**
+

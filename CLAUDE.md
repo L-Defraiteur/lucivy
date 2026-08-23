@@ -134,9 +134,8 @@ Emscripten manque : export_snapshot, export_sharded_delta, apply_sharded_delta.
 
 ## Tests
 
-- `cargo test --lib` : 1413 passed, 16 ignored, **3 échecs pré-existants connus**
-  (`diag_false_positive_uint64t`, `test_resolve_chain_sep_skip`, `test_into_data_sorted` :
-  fixtures mortes, voir docs/22-aout-2026-19h47/07 §D)
+- `cargo test --lib` : 1415 passed, 0 failed, 16 ignored (les 3 anciens rouges
+  réparés/retirés le 23 août : invariants de l'ancien design)
 - `cargo test -p lucivy-core` : tout vert sauf `bench_sharding` t01 (clone réseau) et
   t04 (sfx:false n'existe plus) — pré-existants
 - Vérité terrain : `docs/BENCHMARKS.md`

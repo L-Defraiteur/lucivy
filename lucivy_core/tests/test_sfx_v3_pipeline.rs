@@ -1163,3 +1163,121 @@ fn v3_strict_sep_head_three_chunks() {
         assert_eq!(got, expect, "strict {q:?}");
     }
 }
+
+/// Migration: what happens to yesterday's v2 indexes now that new indexes
+/// default to v3.
+///
+/// Three promises, each asserted here:
+/// 1. a fresh index with no `sfx_version` in its config builds v3;
+/// 2. an existing v2 index (meta.json without the field) reopened by the new
+///    code keeps building v2 segments — nothing changes behind the user;
+/// 3. an index whose meta.json was switched to 3 (the migration gesture)
+///    keeps its old v2 segments readable next to new v3 ones: a search
+///    returns the union, and `query_warnings` names the v2 segments.
+#[test]
+fn v3_migration_from_v2_index() {
+    let scratch = std::env::var("V3_SCRATCH").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+    let dir_path = format!("{scratch}/v3_migration");
+    let _ = std::fs::remove_dir_all(&dir_path);
+    std::fs::create_dir_all(&dir_path).unwrap();
+
+    // 1. Fresh index, no sfx_version in the config → v3.
+    let plain_config: SchemaConfig = serde_json::from_value(serde_json::json!({
+        "fields": [{"name": "content", "type": "text", "stored": true}]
+    })).unwrap();
+    {
+        let h = LucivyHandle::create(ld_lucivy::directory::RamDirectory::default(), &plain_config).unwrap();
+        assert_eq!(h.index.settings().sfx_version, 3, "new indexes must default to v3");
+    }
+
+    // 2. A v2 index on disk...
+    let v2_config: SchemaConfig = serde_json::from_value(serde_json::json!({
+        "fields": [{"name": "content", "type": "text", "stored": true}],
+        "sfx_version": 2
+    })).unwrap();
+    let add_commit = |h: &LucivyHandle, from: u64, texts: &[&str]| {
+        let content_f = h.field("content").unwrap();
+        let nid_f = h.field(NODE_ID_FIELD).unwrap();
+        let mut guard = h.writer.lock().unwrap();
+        let w = guard.as_mut().unwrap();
+        for (i, t) in texts.iter().enumerate() {
+            let mut doc = ld_lucivy::LucivyDocument::new();
+            doc.add_u64(nid_f, from + i as u64);
+            doc.add_text(content_f, t);
+            w.add_document(doc).unwrap();
+        }
+        w.commit().unwrap();
+        w.drain_merges().unwrap();
+        drop(guard);
+        h.reader.reload().unwrap();
+    };
+    {
+        let dir = lucivy_core::directory::StdFsDirectory::open(&dir_path).unwrap();
+        let h = LucivyHandle::create(dir, &v2_config).unwrap();
+        add_commit(&h, 0, &["mutex_lock in the old segment", "spin_lock everywhere"]);
+        h.close().unwrap();
+    }
+    // meta.json of a v2 index: the field is written explicitly since v3
+    // became the default; older files omitted it. Erase it to simulate a
+    // genuinely old index, and check it reads back as 2.
+    let meta_path = format!("{dir_path}/meta.json");
+    let set_meta_version = |v: Option<u64>| {
+        let mut m: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+        let settings = m.get_mut("index_settings").unwrap().as_object_mut().unwrap();
+        match v {
+            Some(v) => { settings.insert("sfx_version".into(), v.into()); }
+            None => { assert!(settings.remove("sfx_version").is_some(),
+                "expected the field in a fresh v2 meta.json"); }
+        }
+        std::fs::write(&meta_path, serde_json::to_string_pretty(&m).unwrap()).unwrap();
+    };
+    set_meta_version(None);
+
+    // ...reopened by the new code: still v2, still searchable, new segments v2.
+    {
+        let dir = lucivy_core::directory::StdFsDirectory::open(&dir_path).unwrap();
+        let h = LucivyHandle::open(dir).unwrap();
+        assert_eq!(h.index.settings().sfx_version, 2,
+            "an old meta.json without the field is a v2 index");
+        add_commit(&h, 10, &["mutex_lock in a second v2 segment"]);
+        let docs = search(&h, "contains", "mutex_lock");
+        assert_eq!(docs.len(), 2, "v2 index reopened: {docs:?}");
+        let versions = h.sfx_versions();
+        // The v2 writer produces the original file layout, which
+        // detect_sfx_version labels 1; only "not 3" matters here.
+        assert!(versions.iter().all(|v| *v != Some(3)), "{versions:?}");
+        h.close().unwrap();
+    }
+
+    // 3. The migration gesture: switch meta.json to 3, then keep working.
+    set_meta_version(Some(3));
+    {
+        let dir = lucivy_core::directory::StdFsDirectory::open(&dir_path).unwrap();
+        let h = LucivyHandle::open(dir).unwrap();
+        assert_eq!(h.index.settings().sfx_version, 3);
+        add_commit(&h, 20, &["mutex_lock arrives in a v3 segment"]);
+
+        let versions = h.sfx_versions();
+        assert!(versions.contains(&Some(3)) && versions.iter().any(|v| *v != Some(3)),
+            "expected a mixed index, got {versions:?}");
+
+        // Union across formats, for the type the compat layer routes.
+        let docs = search(&h, "contains", "mutex_lock");
+        assert_eq!(docs.len(), 3, "mixed index must return both formats: {docs:?}");
+        let docs = search(&h, "startsWith", "mutex");
+        assert_eq!(docs.len(), 3, "{docs:?}");
+
+        // The user is told, not left to wonder.
+        let config = QueryConfig {
+            query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some("mutex_lock".into()),
+            ..Default::default()
+        };
+        let w = h.query_warnings(&config);
+        assert!(w.iter().any(|m| m.contains("v2 indexer")), "{w:?}");
+        h.close().unwrap();
+    }
+    let _ = std::fs::remove_dir_all(&dir_path);
+}

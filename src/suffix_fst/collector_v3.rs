@@ -1036,12 +1036,26 @@ mod tests {
         c.begin_doc();
         c.add_value("zebra_alpha");
         c.end_doc();
+        // Two shapes of the same text (a whole chunk and a word-stripped
+        // entry can share their extended text): equal neighbours are legal
+        // since interning went by (text, shape). The builder needs the
+        // texts NON-DECREASING; strict order was the pre-shape invariant.
+        c.begin_doc();
+        c.add_value("zebra alphazeb ra");
+        c.end_doc();
 
         let data = c.into_data();
-        let sorted: Vec<&String> = data.tokens.iter().collect();
-        // BTreeSet is sorted
-        for i in 1..sorted.len() {
-            assert!(sorted[i - 1] < sorted[i], "tokens should be sorted");
+        // The pre-shape invariant "tokens sorted by text" is gone: interning
+        // keys carry a shape suffix and a partition prefix, so `tokens`
+        // (final-ordinal order) interleaves. What must hold instead:
+        // `sorted_indices` orders the extended texts for the FST builder,
+        // and every final ordinal has a text and a posting list.
+        assert_eq!(data.tokens.len(), data.content_postings.len());
+        assert_eq!(data.tokens.len(), data.num_content_ords);
+        assert!(data.tokens.iter().all(|t| !t.is_empty()));
+        for w in data.sorted_indices.windows(2) {
+            let (a, b) = (&data.token_texts[w[0] as usize], &data.token_texts[w[1] as usize]);
+            assert!(a <= b, "sorted_indices out of order: {a:?} > {b:?}");
         }
     }
 
