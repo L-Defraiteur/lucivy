@@ -642,7 +642,7 @@ mod tests {
         let field = schema_builder.add_text_field("text", opts);
         let schema = schema_builder.build();
 
-        let index = Index::create_in_ram(schema);
+        let index = Index::create_in_ram_sfx2(schema);
         // Case-sensitive tokenizer: SimpleTokenizer without LowerCaser
         let tokenizer = TextAnalyzer::builder(SimpleTokenizer::default()).build();
         index.tokenizers().register("no_lower", tokenizer);
@@ -783,7 +783,7 @@ mod tests {
         let body_raw = schema_builder.add_text_field("body._raw", raw_opts);
         let schema = schema_builder.build();
 
-        let index = Index::create_in_ram(schema);
+        let index = Index::create_in_ram_sfx2(schema);
         let raw_tokenizer = TextAnalyzer::builder(SimpleTokenizer::default())
             .filter(LowerCaser)
             .build();

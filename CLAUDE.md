@@ -55,7 +55,12 @@ Suffix FST avec partitionnement SI=0/SI>0 pour le substring matching.
 - **Fuzzy** : trigram pigeonhole via RegexContinuationQuery
 - **Regex** : extraction de littéraux, validation regex sur candidats
 
-Fichiers par segment : `.sfx`, `.sfxpost`, `.termtexts`, `.gapmap`, `.sepmap`
+Fichiers par segment (v3, par champ) : `.sfx`, `.sfxpost`, `.termtexts`, `.posmap`,
+`.bytemap`, `.word_sfxpost`, `.word_pos_map`, `.sibling_v3`. (`.gapmap`, `.sepmap` : v2.)
+
+**`sfx_version` par défaut = 3** depuis le 23 août 2026. Un `meta.json` sans le champ
+est un index v2 (le champ est maintenant toujours écrit). Les tests du moteur v2
+utilisent `Index::create_in_ram_sfx2`.
 
 ## Sharding
 
@@ -129,9 +134,12 @@ Emscripten manque : export_snapshot, export_sharded_delta, apply_sharded_delta.
 
 ## Tests
 
-- `cargo test --lib` : 1200 tests, 0 failed, 16 ignored
-- 9 ignored : merge-timing (async merge dans actor system, pas de régression)
-- 7 ignored : doc tests
+- `cargo test --lib` : 1413 passed, 16 ignored, **3 échecs pré-existants connus**
+  (`diag_false_positive_uint64t`, `test_resolve_chain_sep_skip`, `test_into_data_sorted` :
+  fixtures mortes, voir docs/22-aout-2026-19h47/07 §D)
+- `cargo test -p lucivy-core` : tout vert sauf `bench_sharding` t01 (clone réseau) et
+  t04 (sfx:false n'existe plus) — pré-existants
+- Vérité terrain : `docs/BENCHMARKS.md`
 - Bench sharding : `bench_sharding.rs` (90K docs Linux kernel)
 - Bench vs tantivy : `bench_vs_tantivy.rs`
 - IMPORTANT : toujours `> /tmp/fichier.txt 2>&1`, JAMAIS `| tail`

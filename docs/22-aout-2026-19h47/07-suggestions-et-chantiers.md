@@ -303,3 +303,29 @@ Non couvert (pas déductible avant exécution) : plafond de résultats atteint.
 - Livrer une optimisation sans la requête vide et sans la vérité terrain par spans
   dans le même run.
 - Lancer un run de 19 minutes avant d'avoir une reproduction à 5 secondes.
+
+## E. v3 par défaut — FAIT le 23 août
+
+`IndexSettings::default().sfx_version = 3` ; un `meta.json` sans le champ reste v2
+(le champ n'était pas écrit pour v2, il l'est toujours maintenant). Ce que le
+basculement a révélé, tout corrigé le jour même :
+
+- **`startsWith` / `term` faux sur v3** (`t00` : `lock` matchait `unlock`, `clock` ;
+  `term mut` matchait `mutex`, test ignoré depuis `8aeb093`). Les tests sur la
+  chaîne (`sti == 0`, `token_end`) ne savent pas le dire ; `verify_boundaries`
+  relit le texte (`rebuild_window_opts` sans strip) et exige un séparateur ou le
+  bord du document avant le match, et après pour `exact_match`. Sémantique v3 :
+  `_` est un séparateur, donc `term lock` couvre `lock` dans `spin_lock_init`.
+  Il n'y a pas de mode « identifiant entier délimité par des blancs ».
+- **`LucivyHandle::close()` lâchait le writer sous un merge de policy en vol** :
+  le merge finissait contre un répertoire dont les writers différés étaient
+  morts, `meta.json` nommait un segment sans fichiers, la réouverture échouait
+  (`test_handle_reopen_cycles`). `close()` draine les merges d'abord.
+- **`LucivyDeltaExporter` relisait `meta.json` à chaque question** ; un merge
+  entre deux lectures → « segment … not found in meta ». Une seule lecture,
+  `Index::parse_metas`.
+- Tests du moteur v2 (`suffix_contains_query`, `regex_continuation_query`,
+  `term_dictionary`, `phrase_query`) : `Index::create_in_ram_sfx2`.
+- `rag3weaverr` d=1 : v2 ne le trouvait pas (« edge case »), v3 oui — attente corrigée.
+- Tests qui copient un répertoire à la main : `drain_merges()` après commit.
+

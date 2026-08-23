@@ -250,7 +250,6 @@ fn v3_multi_doc_correct_ids() {
 /// change that makes the exact_match filter always-true would silently turn `term`
 /// into `contains` and stay green. This test is that guard.
 #[test]
-#[ignore = "regression introduced by 8aeb093; term is not on the critical path"]
 fn v3_term_is_whole_token_not_prefix() {
     let handle = make_handle(&[
         "mutex lock implementation",
@@ -273,6 +272,32 @@ fn v3_term_is_whole_token_not_prefix() {
     // and that only the exact_match filter separates the two behaviours.
     assert_eq!(search(&handle, "contains", "mut").len(), 1, "contains 'mut' should match");
     assert_eq!(search(&handle, "contains", "utex").len(), 1, "contains 'utex' should match");
+}
+
+/// `startsWith` is "the match begins a word": `unlock` and `clock` contain
+/// `lock` but do not start with it. Mirrors bench_sharding `t00`, which found
+/// v3 answering 8 instead of 6.
+#[test]
+fn v3_starts_with_is_word_start() {
+    let handle = make_handle(&[
+        "The lock mechanism is simple",
+        "Multiple locks are held",
+        "Locking primitives in kernel",
+        "lockdep is a debugging tool",
+        "unlock the resource",
+        "This has clock hardware",
+        "spin_lock_init(&x)",
+    ]);
+    // `make_handle` gives every document its own segment, so the returned
+    // ids are all 0: only the counts carry information here.
+    let sw = search(&handle, "startsWith", "lock");
+    assert_eq!(sw.len(), 5, "startsWith lock: docs 0-3 and spin_lock_init (lock after `_`), not unlock/clock; got {sw:?}");
+    assert_eq!(search(&handle, "contains", "lock").len(), 7);
+    // term: a whole word. `_` is a separator for v3, so `lock` inside
+    // `spin_lock_init` is a whole word too — `locks`, `locking`, `lockdep`,
+    // `unlock`, `clock` are not.
+    let t = search(&handle, "term", "lock");
+    assert_eq!(t.len(), 2, "term lock: `The lock` and `spin_lock_init`, got {t:?}");
 }
 
 /// PROBE — prints current behaviour of exact_match edge cases. No assertions.

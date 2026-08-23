@@ -282,16 +282,20 @@ pub struct IndexSettings {
     #[serde(default = "return_true")]
     #[serde(skip_serializing_if = "is_true")]
     pub sfx_enabled: bool,
-    /// SFX version: 2 (default, v2 with sibling table + gapmap) or 3 (v3 with overlap + word-stripped).
-    /// New segments are built with this version. Existing segments keep their version.
-    /// Query layer auto-detects version from magic bytes (SFX2 vs SFX3).
-    #[serde(default = "default_sfx_version")]
-    #[serde(skip_serializing_if = "is_sfx_v2")]
+    /// SFX version: 2 (legacy, sibling table + gapmap) or 3 (overlap +
+    /// word-stripped, the documented engine). New segments are built with this
+    /// version; existing segments keep theirs and the query layer detects the
+    /// version from the file magic.
+    ///
+    /// New indexes default to 3 (`Default`). A meta.json WITHOUT the field was
+    /// written by a version that omitted it for v2, so the serde default stays
+    /// 2; the field is now always written so the two never get confused.
+    #[serde(default = "sfx_version_when_absent")]
     pub sfx_version: u8,
 }
 
-fn default_sfx_version() -> u8 { 2 }
-fn is_sfx_v2(v: &u8) -> bool { *v == 2 }
+/// Version of an index whose meta.json predates the field: those were v2.
+fn sfx_version_when_absent() -> u8 { 2 }
 
 /// Must be a function to be compatible with serde defaults
 fn default_docstore_blocksize() -> usize {
@@ -312,7 +316,7 @@ impl Default for IndexSettings {
             #[cfg(not(target_arch = "wasm32"))]
             docstore_compress_dedicated_thread: true,
             sfx_enabled: true,
-            sfx_version: 2,
+            sfx_version: 3,
         }
     }
 }
@@ -458,7 +462,7 @@ mod tests {
         let json = serde_json::ser::to_string(&index_metas).expect("serialization failed");
         assert_eq!(
             json,
-            r#"{"index_settings":{"docstore_compression":"none","docstore_blocksize":16384},"segments":[],"schema":[{"name":"text","type":"text","options":{"indexing":{"record":"position","fieldnorms":true,"tokenizer":"default"},"stored":false,"fast":false}}],"opstamp":0}"#
+            r#"{"index_settings":{"docstore_compression":"none","docstore_blocksize":16384,"sfx_version":3},"segments":[],"schema":[{"name":"text","type":"text","options":{"indexing":{"record":"position","fieldnorms":true,"tokenizer":"default"},"stored":false,"fast":false}}],"opstamp":0}"#
         );
 
         let deser_meta: UntrackedIndexMeta = serde_json::from_str(&json).unwrap();
@@ -550,7 +554,7 @@ mod tests {
                 docstore_compress_dedicated_thread: true,
                 docstore_blocksize: 16_384,
                 sfx_enabled: true,
-                sfx_version: 2,
+                sfx_version: 3,
             }
         );
         {
@@ -559,7 +563,8 @@ mod tests {
                 index_settings_json,
                 serde_json::json!({
                     "docstore_compression": "lz4",
-                    "docstore_blocksize": 16384
+                    "docstore_blocksize": 16384,
+                    "sfx_version": 3
                 })
             );
             let index_settings_deser: IndexSettings =
@@ -575,6 +580,7 @@ mod tests {
                     "docstore_compression": "lz4",
                     "docstore_blocksize": 16384,
                     "docstore_compress_dedicated_thread": false,
+                    "sfx_version": 3,
                 })
             );
             let index_settings_deser: IndexSettings =

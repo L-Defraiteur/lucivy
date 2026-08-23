@@ -328,6 +328,15 @@ impl Index {
         IndexBuilder::new().schema(schema).create_in_ram().unwrap()
     }
 
+    /// RAM index whose segments carry SFX **v2** files. For tests of the
+    /// legacy engine (`SuffixContainsQuery`, `RegexContinuationQuery`,
+    /// `SfxTermDict`…), which reads the v2 layout directly: new indexes
+    /// default to v3 and those readers find nothing in a v3 `.sfx`.
+    pub fn create_in_ram_sfx2(schema: Schema) -> Index {
+        let settings = IndexSettings { sfx_version: 2, ..Default::default() };
+        IndexBuilder::new().schema(schema).settings(settings).create_in_ram().unwrap()
+    }
+
     /// Creates a new index in a given filepath.
     /// The index will use the [`MmapDirectory`].
     ///
@@ -523,6 +532,16 @@ impl Index {
     /// Reads the index meta file from the directory.
     pub fn load_metas(&self) -> crate::Result<IndexMeta> {
         load_metas(self.directory(), &self.inventory)
+    }
+
+    /// Parse a `meta.json` payload against this index's segment inventory.
+    /// Lets a caller read the file once and derive everything from that
+    /// single snapshot, instead of re-reading it per question and racing
+    /// with a merge landing in between.
+    pub fn parse_metas(&self, meta_json: &str) -> crate::Result<IndexMeta> {
+        IndexMeta::deserialize(meta_json, &self.inventory).map_err(|e| {
+            crate::LucivyError::SystemError(format!("invalid meta.json: {e}"))
+        })
     }
 
     /// Open a new index writer with the given options. Attempts to acquire a lockfile.

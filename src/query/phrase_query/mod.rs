@@ -41,7 +41,7 @@ pub(crate) mod tests {
         let mut schema_builder = Schema::builder();
         let text_field = schema_builder.add_text_field("text", TEXT);
         let schema = schema_builder.build();
-        let index = Index::create_in_ram(schema);
+        let index = Index::create_in_ram_sfx2(schema);
         {
             let mut index_writer: IndexWriter = index.writer_for_tests()?;
             for text in texts {
@@ -151,7 +151,7 @@ pub(crate) mod tests {
 
         let text_field = schema_builder.add_text_field("text", no_positions);
         let schema = schema_builder.build();
-        let index = Index::create_in_ram(schema);
+        let index = Index::create_in_ram_sfx2(schema);
         {
             let mut index_writer: IndexWriter = index.writer_for_tests()?;
             index_writer.add_document(doc!(text_field=>"a b c"))?;
@@ -294,7 +294,7 @@ pub(crate) mod tests {
         let mut schema_builder = Schema::builder();
         let text_field = schema_builder.add_text_field("text", TEXT);
         let schema = schema_builder.build();
-        let index = Index::create_in_ram(schema);
+        let index = Index::create_in_ram_sfx2(schema);
         {
             let mut index_writer: IndexWriter = index.writer_for_tests()?;
             index_writer.add_document(doc!(text_field=>"b"))?;
@@ -326,7 +326,7 @@ pub(crate) mod tests {
         let mut schema_builder = Schema::builder();
         let text_field = schema_builder.add_text_field("text", TEXT);
         let schema = schema_builder.build();
-        let index = Index::create_in_ram(schema);
+        let index = Index::create_in_ram_sfx2(schema);
         {
             let mut index_writer: IndexWriter = index.writer_for_tests()?;
             index_writer.add_document(doc!(text_field=>"a b c d e f g h"))?;
@@ -364,7 +364,7 @@ pub(crate) mod tests {
         let mut schema_builder = Schema::builder();
         let json_field = schema_builder.add_json_field("json", TEXT);
         let schema = schema_builder.build();
-        let index = Index::create_in_ram(schema);
+        let index = Index::create_in_ram_sfx2(schema);
         {
             let mut index_writer: IndexWriter = index.writer_for_tests()?;
             index_writer.add_document(doc!(json_field=>json!({

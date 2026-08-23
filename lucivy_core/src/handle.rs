@@ -208,6 +208,14 @@ impl LucivyHandle {
             if self.has_uncommitted() {
                 writer.commit().map_err(|e| format!("commit on close: {e}"))?;
             }
+            // Policy merges started by the last commit run on the scheduler
+            // and outlive this handle. Dropping the writer under them lets
+            // the merge finish against a directory whose deferred writers
+            // are gone: meta.json then names a segment whose files never
+            // reached disk, and the next open fails with a missing `.store`
+            // (test_handle_reopen_cycles, first seen when v3 became the
+            // default and the policy actually produced merges).
+            writer.drain_merges().map_err(|e| format!("drain merges on close: {e}"))?;
             // writer dropped here → IndexWriter dropped → DirectoryLock dropped → flock released
         }
         self.mark_committed();
@@ -1243,7 +1251,7 @@ mod tests {
             ("rag3weavr", 1, true),       // fuzzy cross-token (typo right)
             ("rak3weaver", 1, true),      // fuzzy cross-token (typo left)
             ("rag3we4ver", 1, true),      // fuzzy cross-token (typo middle)
-            ("rag3weaverr", 1, false),    // insertion at end — not found (edge case)
+            ("rag3weaverr", 1, true),     // one deletion: found by v3 (v2 missed it)
         ];
 
         let mut all_ok = true;

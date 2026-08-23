@@ -124,12 +124,86 @@ pub fn contains_v3(
     // covers the whole token", which is a statement about the container, not about
     // how many bytes matched. Deriving it from `byte_to` is what made it possible
     // to silently turn `term` into `contains`.
-    if exact_match {
+    let can_verify = ctx.posmap.is_some() && ctx.termtexts.is_some();
+    if exact_match && !can_verify {
         matches.retain(|m| m.token_end.saturating_sub(m.byte_from) == query_content_len);
     }
 
     verify_literal(ctx, query_ref, strict_separators, &mut matches);
+    if (anchor_start || exact_match) && can_verify {
+        verify_boundaries(ctx, query_ref, strict_separators, anchor_start, exact_match, &mut matches);
+    }
     matches
+}
+
+/// `anchor_start` / `exact_match`, checked on the text rather than on the
+/// chain: the occurrence must begin right after a separator (or at the
+/// document start), and for `exact_match` also end right before one (or at
+/// the document end). Chain-level tests (`sti == 0`, `token_end`) could not
+/// say this reliably — a chunk starts at SI 0 in the middle of a long word,
+/// and a suffix entering through the word pipeline carried no usable
+/// `token_end` — which is how `startsWith lock` came to match `unlock` and
+/// `clock` (bench_sharding `t00`) and `term mut` to match `mutex`.
+///
+/// Relaxed mode compares with separators stripped on both sides, so
+/// `rag3weaver` as a `term` covers `rag3_weaver` whole: the boundaries are
+/// still read on the unstripped text.
+fn verify_boundaries(
+    ctx: &BriquesContext<'_>,
+    query: &str,
+    strict_separators: bool,
+    anchor_start: bool,
+    exact_match: bool,
+    matches: &mut Vec<MatchV3>,
+) {
+    let strip = !strict_separators;
+    let mut needle = String::with_capacity(query.len());
+    for c in query.chars() {
+        if strip && !is_content_char(c) { continue; }
+        for lc in c.to_lowercase() { needle.push(lc); }
+    }
+    if needle.is_empty() { return; }
+
+    let mut win = String::new();
+    let mut back: Vec<(u32, u8)> = Vec::new();
+    // Stripped view of the window and, per byte of it, its byte index in `win`.
+    let mut view = String::new();
+    let mut vmap: Vec<usize> = Vec::new();
+    matches.retain(|m| {
+        let last_pos = m.position + m.span.saturating_sub(1);
+        let Some((cut_start, cut_end)) = composite::rebuild_window_opts(
+            ctx, m.doc_id, m.position, last_pos, 1, false, true, 64, &mut win, &mut back,
+        ) else {
+            return true; // cannot rebuild — keep, do not invent a rejection
+        };
+        view.clear();
+        vmap.clear();
+        for (i, c) in win.char_indices() {
+            if strip && !is_content_char(c) { continue; }
+            let start = view.len();
+            view.push(c);
+            for _ in start..view.len() { vmap.push(i); }
+        }
+        // The occurrence this match reports, by source offset; else the first.
+        let mut occ = None;
+        let mut from = 0usize;
+        while let Some(rel) = view[from..].find(&needle) {
+            let at = from + rel;
+            if back.get(vmap[at]).map(|b| b.0) == Some(m.byte_from) { occ = Some(at); break; }
+            if occ.is_none() { occ = Some(at); }
+            from = at + 1;
+            while from < view.len() && !view.is_char_boundary(from) { from += 1; }
+        }
+        let Some(at) = occ else { return false };
+        let start_w = vmap[at];
+        let mut end_w = vmap[at + needle.len() - 1] + 1;
+        while end_w < win.len() && !win.is_char_boundary(end_w) { end_w += 1; }
+        let before = win[..start_w].chars().last();
+        let after = win[end_w..].chars().next();
+        let starts_word = before.map_or(!cut_start, |c| !is_content_char(c));
+        let ends_word = after.map_or(!cut_end, |c| !is_content_char(c));
+        (!anchor_start || starts_word) && (!exact_match || starts_word && ends_word)
+    });
 }
 
 /// Drop matches whose text does not actually contain the query.

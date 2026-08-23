@@ -40,22 +40,43 @@ pub fn compute_version(handle: &LucivyHandle) -> Result<String, String> {
 pub struct LucivyDeltaExporter<'a> {
     pub handle: &'a LucivyHandle,
     pub index_path: &'a Path,
+    /// `meta.json` read once, and the metas parsed from those same bytes.
+    /// The exporter is asked three separate questions (manifest, bundle
+    /// ids, files of a bundle); answering each from a fresh read let a
+    /// policy merge land in between and replace the segments it had just
+    /// listed ("segment … not found in meta").
+    snapshot: std::cell::OnceCell<(Vec<u8>, ld_lucivy::IndexMeta)>,
+}
+
+impl<'a> LucivyDeltaExporter<'a> {
+    pub fn new(handle: &'a LucivyHandle, index_path: &'a Path) -> Self {
+        Self { handle, index_path, snapshot: std::cell::OnceCell::new() }
+    }
+
+    fn snapshot(&self) -> Result<&(Vec<u8>, ld_lucivy::IndexMeta), String> {
+        if let Some(s) = self.snapshot.get() {
+            return Ok(s);
+        }
+        let bytes = read_meta_bytes(&self.handle.index)?;
+        let text = std::str::from_utf8(&bytes).map_err(|e| format!("meta.json is not UTF-8: {e}"))?;
+        let meta = self.handle.index.parse_metas(text)
+            .map_err(|e| format!("cannot load index metas: {e}"))?;
+        Ok(self.snapshot.get_or_init(|| (bytes, meta)))
+    }
 }
 
 impl<'a> DeltaExporter for LucivyDeltaExporter<'a> {
     fn current_bundle_ids(&self) -> Result<HashSet<String>, String> {
-        let meta = self.handle.index.load_metas()
-            .map_err(|e| format!("cannot load index metas: {e}"))?;
+        let (_, meta) = self.snapshot()?;
         Ok(meta.segments.iter().map(|s| s.id().uuid_string()).collect())
     }
 
     fn read_manifest(&self) -> Result<Vec<u8>, String> {
-        read_meta_bytes(&self.handle.index)
+        Ok(self.snapshot()?.0.clone())
     }
 
     fn read_bundle_files(&self, bundle_id: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
-        let meta = self.handle.index.load_metas()
-            .map_err(|e| format!("cannot load index metas: {e}"))?;
+        let (_, meta) = self.snapshot()?;
         let seg_meta = meta.segments.iter()
             .find(|s| s.id().uuid_string() == bundle_id)
             .ok_or_else(|| format!("segment {bundle_id} not found in meta"))?;
@@ -91,7 +112,7 @@ pub fn export_delta(
     client_segment_ids: &HashSet<String>,
     client_version: &str,
 ) -> Result<IndexDelta, String> {
-    let exporter = LucivyDeltaExporter { handle, index_path };
+    let exporter = LucivyDeltaExporter::new(handle, index_path);
     export_delta_from(&exporter, client_segment_ids, client_version)
 }
 
@@ -191,6 +212,9 @@ mod tests {
             w.add_document(doc).unwrap();
         }
         w.commit().unwrap();
+        // The test copies the directory raw afterwards: let the policy
+        // merges and their GC finish first.
+        w.drain_merges().unwrap();
     }
 
     // ── Single shard delta E2E ───────────────────────────────────────────
@@ -286,7 +310,13 @@ mod tests {
             w.add_document(doc).unwrap();
         }
         for h in &handles {
-            h.writer.lock().unwrap().as_mut().unwrap().commit().unwrap();
+            let mut g = h.writer.lock().unwrap();
+            let w = g.as_mut().unwrap();
+            w.commit().unwrap();
+            // The commit starts policy merges on the scheduler; a merge
+            // landing after the snapshot below is a legitimate change of
+            // that shard and would show up in the delta.
+            w.drain_merges().unwrap();
             h.reader.reload().unwrap();
         }
 
@@ -313,6 +343,7 @@ mod tests {
                 w.add_document(doc).unwrap();
             }
             w.commit().unwrap();
+            w.drain_merges().unwrap();
         }
         handles[0].reader.reload().unwrap();
 
