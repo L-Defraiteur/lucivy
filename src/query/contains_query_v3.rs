@@ -140,6 +140,9 @@ strict_separators: bool,
 
 
 static PRESCAN_ONE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRESCAN_ONE_MAX_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRESCAN_INFLIGHT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRESCAN_INFLIGHT_MAX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// sfx open, resolver, sidecar loads, context (reader opens), contains_v3.
 static OPEN_NS: [std::sync::atomic::AtomicU64; 5] = [
     std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
@@ -154,9 +157,15 @@ impl ContainsQueryV3 {
         seg_reader: &SegmentReader,
     ) -> crate::Result<Option<(crate::index::SegmentId, Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)>> {
         use crate::suffix_fst::section_file::detect_sfx_version;
+        use std::sync::atomic::Ordering::Relaxed;
         let _t0 = std::time::Instant::now();
+        let now = PRESCAN_INFLIGHT.fetch_add(1, Relaxed) + 1;
+        PRESCAN_INFLIGHT_MAX.fetch_max(now, Relaxed);
         let r = self.prescan_one_inner(seg_reader);
-        PRESCAN_ONE_NS.fetch_add(_t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        PRESCAN_INFLIGHT.fetch_sub(1, Relaxed);
+        let ns = _t0.elapsed().as_nanos() as u64;
+        PRESCAN_ONE_NS.fetch_add(ns, Relaxed);
+        PRESCAN_ONE_MAX_NS.fetch_max(ns, Relaxed);
         r
     }
 
@@ -370,9 +379,11 @@ impl Query for ContainsQueryV3 {
             .map_err(|e| crate::LucivyError::SystemError(format!("prescan DAG: {e}")))?;
         if crate::suffix_fst::briques::profile::enabled() {
             let g = |i: usize| OPEN_NS[i].swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1e6;
-            eprintln!("  [prescan] {} segments, scatter DAG wall {:.1}ms, per-segment CPU sum {:.1}ms | sfx open {:.0} resolver {:.0} sidecar loads {:.0} reader opens {:.0} contains_v3 {:.0}",
+            eprintln!("  [prescan] {} segments, scatter DAG wall {:.1}ms, per-segment CPU sum {:.1}ms, max {:.1}ms, peak concurrency {} | sfx open {:.0} resolver {:.0} sidecar loads {:.0} reader opens {:.0} contains_v3 {:.0}",
                 segments.len(), t_dag.elapsed().as_secs_f64() * 1e3,
                 PRESCAN_ONE_NS.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+                PRESCAN_ONE_MAX_NS.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+                PRESCAN_INFLIGHT_MAX.swap(0, std::sync::atomic::Ordering::Relaxed),
                 g(0), g(1), g(2), g(3), g(4));
         }
         let map = result

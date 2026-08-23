@@ -117,18 +117,40 @@ impl SegmentUpdaterShared {
     }
 
     fn list_files(&self) -> HashSet<PathBuf> {
-        let mut files: HashSet<PathBuf> = self
-            .index
-            .list_all_segment_metas()
-            .into_iter()
+        let metas = self.index.list_all_segment_metas();
+        let mut files: HashSet<PathBuf> = metas
+            .iter()
             .flat_map(|segment_meta| segment_meta.list_files())
             .collect();
         files.insert(META_FILEPATH.to_path_buf());
 
-        // Per-field .sfx/.sfxpost files are included by segment_meta.list_files()
-        // via sfx_field_ids stored in meta.json.
-        // No gc_protected_segments needed: merges run inside the DAG,
-        // GC runs AFTER finalize — no concurrent merge to protect.
+        // A segment's SFX sidecars are only named by `list_files` once
+        // `sfx_field_ids` is on its meta — which happens AFTER the files are
+        // written (index_writer::finalize, merge_dag). Since merges run as
+        // tasks and the policy fires on commit, a GC can land while an
+        // indexing thread or a merge is still writing: its .sfx files looked
+        // like orphans and were deleted, leaving a segment that answers no
+        // substring query (measured: `include` 36 824 → 14 247 documents).
+        // Every managed file that belongs to a segment still in the inventory
+        // is alive, whatever its meta says yet.
+        // Read from the persisted list, not through `list_managed_files`:
+        // garbage_collect calls this while holding the meta-information lock,
+        // and std's RwLock hands a queued writer priority over a new reader —
+        // an indexer registering a file in between made it a deadlock. The
+        // file is rewritten under the write lock before any managed file is
+        // created, so it is always a superset of what the lock would show.
+        let prefixes: Vec<String> = metas.iter().map(|m| m.id().uuid_string()).collect();
+        let managed: HashSet<PathBuf> = self.index.directory()
+            .atomic_read(&crate::core::MANAGED_FILEPATH)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        for path in managed {
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            if prefixes.iter().any(|p| name.starts_with(p.as_str())) {
+                files.insert(path);
+            }
+        }
         files
     }
 }

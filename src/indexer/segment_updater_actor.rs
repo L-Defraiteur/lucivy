@@ -92,6 +92,9 @@ pub(crate) struct MergesDone {
     /// First task error, if any.
     pub errors: Vec<String>,
     pub reply: Option<crate::actor::envelope::ReplyPort>,
+    /// Every segment the batch took, to release from `merging` whether its
+    /// task succeeded or not.
+    pub segment_ids: Vec<crate::index::SegmentId>,
 }
 
 pub(crate) struct SuKillMsg;
@@ -125,6 +128,9 @@ impl Message for SuOpsReply {
 
 pub(crate) struct SegmentUpdaterState {
     shared: Arc<SegmentUpdaterShared>,
+    /// Segments handed to an in-flight merge task. The merge policy must not
+    /// see them again before `handle_merges_done` registers the result.
+    merging: std::collections::HashSet<crate::index::SegmentId>,
 }
 
 impl SegmentUpdaterState {
@@ -137,6 +143,7 @@ impl SegmentUpdaterState {
         &mut self,
         opstamp: crate::Opstamp,
         payload: Option<String>,
+        self_ref: Option<crate::actor::mailbox::ActorRef<crate::actor::envelope::Envelope>>,
     ) -> crate::Result<crate::Opstamp> {
         let start = std::time::Instant::now();
         self.shared.event_bus.emit(IndexEvent::CommitStarted { opstamp });
@@ -161,10 +168,50 @@ impl SegmentUpdaterState {
             duration: start.elapsed(),
         });
 
-        // Merges are deferred — they run when drain_merges() or start_merge()
-        // is called explicitly. This avoids thread starvation during commit.
+        if let Some(self_ref) = self_ref {
+            self.policy_merges(opstamp, None, self_ref)?;
+        }
 
         Ok(opstamp)
+    }
+
+    /// Ask the merge policy and start what it proposes. Until 23 August 2026
+    /// nothing consulted it: every merge came from an explicit start_merge(),
+    /// and a writer left alone produced one segment per commit forever.
+    /// Merges no longer block the actor (they are scheduler tasks, see
+    /// handle_start_merges), so there is no reason left to defer them.
+    /// Segments already in a running merge are skipped; the policy's caps
+    /// keep segments from growing past what the v3 encoding can address.
+    /// Called after each commit and after each finished batch (cascade).
+    /// Returns true when a batch was started.
+    fn policy_merges(
+        &mut self,
+        opstamp: crate::Opstamp,
+        payload: Option<String>,
+        self_ref: crate::actor::mailbox::ActorRef<crate::actor::envelope::Envelope>,
+    ) -> crate::Result<bool> {
+        let policy = self.shared.merge_policy.read().unwrap().clone();
+        let metas: Vec<crate::index::SegmentMeta> = self.shared.segment_manager
+            .committed_segment_metas()
+            .into_iter()
+            .filter(|m| !self.merging.contains(&m.id()))
+            .collect();
+        let ops: Vec<MergeOperation> = policy
+            .compute_merge_candidates(&metas)
+            .into_iter()
+            .filter(|c| c.0.len() > 1)
+            .map(|c| MergeOperation::new(opstamp, c.0))
+            .collect();
+        if ops.is_empty() {
+            return Ok(false);
+        }
+        if crate::diag::is_verbose() {
+            eprintln!("[segment_updater] policy: {} merge(s) at opstamp {opstamp}: {:?}",
+                ops.len(), ops.iter().map(|o| o.segment_ids().len()).collect::<Vec<_>>());
+        }
+        let _ = payload;
+        self.handle_start_merges(ops, None, self_ref)?;
+        Ok(true)
     }
 
     /// Prepare several merges inline, then run each one as a scheduler task.
@@ -194,9 +241,13 @@ impl SegmentUpdaterState {
         let segment_entries = self.shared.purge_deletes(opstamp)?;
         self.shared.segment_manager.commit(segment_entries);
 
+        let batch_ids: Vec<crate::index::SegmentId> = merge_ops.iter()
+            .flat_map(|op| op.segment_ids().iter().copied()).collect();
+        self.refuse_if_merging(&batch_ids)?;
         let mut prepared: Vec<(MergeOperation, Vec<SegmentEntry>)> = Vec::new();
         for op in &merge_ops {
             let entries = self.shared.segment_manager.start_merge(op.segment_ids())?;
+            self.merging.extend(op.segment_ids().iter().copied());
             self.shared.event_bus.emit(IndexEvent::MergeStarted {
                 segment_ids: op.segment_ids().to_vec(),
                 target_opstamp: op.target_opstamp(),
@@ -234,7 +285,7 @@ impl SegmentUpdaterState {
                 let errors: Vec<String> = task_results.into_iter()
                     .filter_map(|r| r.err()).collect();
                 let local: Box<dyn std::any::Any + Send> =
-                    Box::new((MergesDone { results, errors, reply }, opstamp, payload));
+                    Box::new((MergesDone { results, errors, reply, segment_ids: batch_ids.clone() }, opstamp, payload));
                 crate::actor::envelope::Envelope {
                     type_tag: SuMergesDoneMsg::type_tag(),
                     payload: SuMergesDoneMsg.encode(),
@@ -253,8 +304,31 @@ impl SegmentUpdaterState {
         done: MergesDone,
         opstamp: crate::Opstamp,
         payload: Option<String>,
+        self_ref: Option<crate::actor::mailbox::ActorRef<crate::actor::envelope::Envelope>>,
     ) -> crate::Result<()> {
-        self.shared.pending_merge_tasks.store(false, std::sync::atomic::Ordering::Release);
+        for id in &done.segment_ids { self.merging.remove(id); }
+        // `pending_merge_tasks` stays up until the cascade below decides
+        // nothing else starts: drain_merges() polls it, and a reader that
+        // persists or queries between two batches sees half-written files.
+        let mut still_pending = false;
+        let r = self.merges_done_inner(done, opstamp, payload.clone());
+        if r.is_ok() {
+            if let Some(self_ref) = self_ref {
+                still_pending = self.policy_merges(opstamp, payload, self_ref)?;
+            }
+        }
+        if !still_pending {
+            self.shared.pending_merge_tasks.store(false, std::sync::atomic::Ordering::Release);
+        }
+        r
+    }
+
+    fn merges_done_inner(
+        &mut self,
+        done: MergesDone,
+        opstamp: crate::Opstamp,
+        payload: Option<String>,
+    ) -> crate::Result<()> {
 
         let results: Vec<Option<super::commit_dag::MergeResult>> =
             std::mem::take(&mut *done.results.lock().unwrap());
@@ -275,10 +349,25 @@ impl SegmentUpdaterState {
     }
 
     /// Execute an explicit merge via DAG.
+    /// Two merges over one segment corrupt the index: both read it, both
+    /// register a replacement, and the second registration drops documents
+    /// (measured: 400 → 269 on `v3_merge_preserves_results` the day the
+    /// policy was wired to commit). Explicit merges that overlap a running
+    /// one are refused, not queued — the caller can retry after
+    /// `wait_merging_threads`, or set `NoMergePolicy` to drive merges itself.
+    fn refuse_if_merging(&self, ids: &[crate::index::SegmentId]) -> crate::Result<()> {
+        if let Some(id) = ids.iter().find(|id| self.merging.contains(id)) {
+            return Err(crate::LucivyError::InvalidArgument(format!(
+                "segment {} is being merged by a running merge", id.short_uuid_string())));
+        }
+        Ok(())
+    }
+
     fn handle_merge(
         &mut self,
         merge_operation: MergeOperation,
     ) -> crate::Result<()> {
+        self.refuse_if_merging(merge_operation.segment_ids())?;
         let meta = self.shared.load_meta();
 
         let mut dag = super::commit_dag::build_commit_dag(
@@ -311,7 +400,7 @@ pub(crate) fn create_segment_updater_actor(
 ) -> GenericActor {
     let mut actor = GenericActor::new("segment_updater");
 
-    let su_state = SegmentUpdaterState { shared };
+    let su_state = SegmentUpdaterState { shared, merging: Default::default() };
     actor.state_mut().insert::<SegmentUpdaterState>(su_state);
 
     // AddSegment: SegmentEntry in local
@@ -331,8 +420,11 @@ pub(crate) fn create_segment_updater_actor(
     // migrated to submit_task once actor lifecycle management is in place).
     actor.register(TypedHandler::<SuCommitMsg, _>::new(
         |state, msg, reply, _local, _ctx| {
+            let self_ref = state
+                .get::<crate::actor::mailbox::ActorRef<crate::actor::envelope::Envelope>>()
+                .cloned();
             let su = state.get_mut::<SegmentUpdaterState>().unwrap();
-            let result = su.handle_commit(msg.opstamp, msg.payload);
+            let result = su.handle_commit(msg.opstamp, msg.payload, self_ref);
             if let Some(reply) = reply {
                 match result {
                     Ok(opstamp) => reply.send(SuOpsReply { opstamp }),
@@ -399,8 +491,11 @@ pub(crate) fn create_segment_updater_actor(
             else { return ActorStatus::Continue };
             let (mut done, opstamp, payload) = *boxed;
             let reply = done.reply.take();
+            let self_ref = state
+                .get::<crate::actor::mailbox::ActorRef<crate::actor::envelope::Envelope>>()
+                .cloned();
             let su = state.get_mut::<SegmentUpdaterState>().unwrap();
-            match su.handle_merges_done(done, opstamp, payload) {
+            match su.handle_merges_done(done, opstamp, payload, self_ref) {
                 Ok(()) => { if let Some(r) = reply { r.send(SuOkReply); } }
                 Err(e) => { if let Some(r) = reply { r.send_err(e); } }
             }

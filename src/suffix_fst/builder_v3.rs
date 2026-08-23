@@ -127,12 +127,16 @@ pub fn decode_output_v3(value: u64) -> ParentRefV3 {
 }
 
 /// Encode v3 parent entries into bytes for the OutputTable.
-/// Format per entry: [u32 ordinal][u16 sti][u16 own_len][u8 sep_len][u8 overlap_len][u8 flags] = 11 bytes.
+/// Header: [u32 count]. Per entry: [u32 ordinal][u16 sti][u16 own_len][u8 sep_len][u8 overlap_len][u8 flags] = 11 bytes.
+///
+/// The count was a u16 until 23 August 2026: a 50k-document kernel index merged
+/// into one segment reached 64 461 parents under one key, and the next merge
+/// would have truncated the list — occurrences lost, no error.
 pub fn encode_parent_entries_v3(parents: &[ParentEntryV3]) -> Vec<u8> {
     let mut sorted = parents.to_vec();
     sorted.sort_by_key(|p| p.sti);
-    let mut buf = Vec::with_capacity(2 + sorted.len() * 11);
-    buf.extend_from_slice(&(sorted.len() as u16).to_le_bytes());
+    let mut buf = Vec::with_capacity(4 + sorted.len() * 11);
+    buf.extend_from_slice(&(sorted.len() as u32).to_le_bytes());
     for p in &sorted {
         buf.extend_from_slice(&(p.raw_ordinal as u32).to_le_bytes());
         buf.extend_from_slice(&p.sti.to_le_bytes());
@@ -146,8 +150,8 @@ pub fn encode_parent_entries_v3(parents: &[ParentEntryV3]) -> Vec<u8> {
 
 /// Decode v3 parent entries from OutputTable bytes.
 pub fn decode_parent_entries_v3(data: &[u8]) -> Vec<ParentEntryV3> {
-    let num = u16::from_le_bytes([data[0], data[1]]) as usize;
-    let mut cursor = 2;
+    let num = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    let mut cursor = 4;
     let mut entries = Vec::with_capacity(num);
     for _ in 0..num {
         let raw_ordinal = u32::from_le_bytes([
@@ -184,6 +188,7 @@ pub struct SuffixFstBuilderV3 {
     entries: Vec<(u32, u32, ParentEntryV3)>,
     min_suffix_len: usize,
     num_terms: usize,
+    max_parents: usize,
 }
 
 impl Default for SuffixFstBuilderV3 {
@@ -203,6 +208,7 @@ impl SuffixFstBuilderV3 {
             entries: Vec::new(),
             min_suffix_len: min,
             num_terms: 0,
+            max_parents: 0,
         }
     }
 
@@ -431,6 +437,7 @@ impl SuffixFstBuilderV3 {
         let mut multi_parent_count = 0u64;
         let mut max_parents = 0usize;
         let mut multi_parent_distinct_ords = 0u64;
+        let mut max_ordinal = 0u64;
 
         let mut i = 0;
         while i < self.entries.len() {
@@ -469,6 +476,29 @@ impl SuffixFstBuilderV3 {
                 }
             }
 
+            // Hard errors, not debug_asserts: release builds disable those
+            // (Cargo.toml), and past either limit the index is silently wrong —
+            // a term serving another term's postings, or parents dropped and
+            // occurrences lost. Merges are exactly the operation that crosses
+            // these thresholds.
+            if num_parents == 1 {
+                let p = &self.entries[i].2;
+                if p.raw_ordinal > ORDINAL_MASK {
+                    return Err(std::io::Error::other(format!(
+                        "sfx v3: ordinal {} exceeds the {ORDINAL_BITS}-bit single-parent encoding; \
+                         the segment holds too many distinct terms (split it instead of merging)",
+                        p.raw_ordinal)).into());
+                }
+            } else if num_parents > u32::MAX as usize {
+                return Err(std::io::Error::other(format!(
+                    "sfx v3: key {:?} has {num_parents} parents, above the u32 limit",
+                    String::from_utf8_lossy(&key[1..key.len().min(24)]))).into());
+            }
+            if num_parents > self.max_parents { self.max_parents = num_parents; }
+            for e in &self.entries[i..j] {
+                if e.2.raw_ordinal > max_ordinal { max_ordinal = e.2.raw_ordinal; }
+            }
+
             let output = if num_parents == 1 {
                 encode_single_parent_v3(&self.entries[i].2)
             } else {
@@ -496,11 +526,13 @@ impl SuffixFstBuilderV3 {
 
         let fst_bytes = fst_builder.into_inner()?;
         if crate::suffix_fst::briques::profile::enabled() {
-            eprintln!("  [fst] {} entries, key_buf {}KB | sort {:.0}ms | build+serialize {:.0}ms | fst {}KB",
+            eprintln!("  [fst] {} entries, key_buf {}KB | sort {:.0}ms | build+serialize {:.0}ms | fst {}KB | {} keys, max_parents {}, ordinal headroom {:.1}%",
                 n_entries, buf.len() / 1024,
                 ns_sort as f64 / 1e6,
                 _t_rest.elapsed().as_nanos() as f64 / 1e6,
-                fst_bytes.len() / 1024);
+                fst_bytes.len() / 1024,
+                self.num_terms, self.max_parents,
+                100.0 * max_ordinal as f64 / ORDINAL_MASK as f64);
         }
         Ok((fst_bytes, output_table.into_inner()))
     }
@@ -508,6 +540,14 @@ impl SuffixFstBuilderV3 {
     pub fn num_terms(&self) -> usize {
         self.num_terms
     }
+
+    /// Largest parent list under one key in the last `build()`.
+    pub fn max_parents(&self) -> usize {
+        self.max_parents
+    }
+
+    /// Headroom of the single-parent ordinal encoding.
+    pub const MAX_ORDINAL: u64 = ORDINAL_MASK;
 }
 
 /// Check if position `i` is a UTF-8 char boundary in a byte slice.

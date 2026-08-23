@@ -76,16 +76,24 @@ chaîne reprenait la requête au mauvais octet pour toutes les autres formes.
 **Test** : `v3_word_shapes_share_key_not_ordinal` — cinq documents, un par segment,
 dans les deux ordres d'insertion ; échouait avant sur l'index frais déjà.
 
-### A4. Deux falaises d'encodage silencieuses en release
+### A4. Deux falaises d'encodage silencieuses en release — FAIT le 23 août
 
-**Vérifié dans le code, non déclenché** : `ORDINAL_BITS = 24` (au-delà de 16,7 M
-ordinaux, un terme sert les postings d'un autre) et le compteur de parents en `u16`
-(au-delà de 65 535 parents pour une clé, les suivants sont perdus → faux négatifs).
-Gardés par des `debug_assert!` seulement ; `Cargo.toml:117` désactive les assertions
-en release. La fusion est exactement l'opération qui franchit ces seuils.
+**Mesuré avant de corriger** : fusionner les 50k docs kernel vers un segment faisait
+monter le compteur de parents d'une clé à 63 242, puis 64 461 — la limite `u16` est
+65 535. Le merge suivant aurait tronqué la liste sans un mot. Le garde posé juste
+avant l'a refusé proprement.
 
-**Ce que je ferais** : une erreur franche au build FST, et un garde dans
-`merge_segments_v3`. Coût nul.
+**Correctifs** : erreurs franches dans `build()` (ordinal > 24 bits, parents > limite),
+garde en amont dans `merge_segments_v3` (avant de calculer les index dérivés), en-tête
+de liste de parents passé en **u32** (2 octets de plus par clé multi-parent, format
+`v=7`), message d'erreur réel remonté (la conversion `lucivy_fst::Error` l'écrasait
+en « I/O error »). Métriques `[fst]` : nombre de clés, `max_parents`, marge d'ordinaux.
+
+**Ce que la fusion complète a ensuite révélé** : 50 000 docs dans un segment =
+138 M d'entrées, FST de 427 Mo, 30,8 M de clés, une clé à 3 248 834 parents, et
+**82,7 % des 16,7 M d'ordinaux adressables**. Résultats exacts, mais `include` y coûte
+718 ms contre 55 sur 800 segments. Un chunk de 8 octets + overlap est quasi unique :
+les ordinaux croissent avec le texte, pas le vocabulaire. Conclusion pour B2 et B4.
 
 ### A5. `min_suffix_len` codé à 1 dans le merge
 
@@ -114,16 +122,18 @@ Résidus observés en chemin, pré-existants (vérifiés avec l'ancienne fonctio
 `__init` relax perd un document sur l'index fusionné (A1), et manque 161 spans sur le
 naturel (classe A2 probablement).
 
-### B2. Un gros segment = un thread
+### B2. Un gros segment = un thread — reformulé le 23 août
 
-**Mesuré** : `include` 58 ms sur 800 segments, **434 ms** sur 32 fusionnés, avec un seul
-thread occupé dans les dumps luciole. Le segment est l'unité de parallélisme du
-prescan ; un index « sain » (quelques dizaines de gros segments) le perd.
+**Mesuré** : `include` 55 ms sur 800 segments, 410 sur 32, **718 sur 1**. Sur le 32,
+un seul segment prend 407 ms des 435 de CPU (concurrence de pointe 24 : le pool fait
+son travail, c'est la répartition qui est mauvaise).
 
-**Ce que je ferais** : paralléliser **dans** le segment — par tranche de documents
-(posmap est indexé par doc, les chaînes peuvent être résolues par plage de docs), ou
-par groupe de chaînes. C'est le vrai chantier perf qui reste, et il conditionne
-l'intérêt du merge.
+**Ce que j'avais écrit** : paralléliser dans le segment. **Ce que A4 a montré** : les
+gros segments sont mauvais sur tous les axes — FST, temps de merge, falaises, requête.
+Le naturel à 800 segments est le meilleur index mesuré, pas un accident. Le chantier
+n'est pas d'accélérer les gros segments, c'est de ne pas en fabriquer : voir B4. La
+parallélisation intra-segment reste possible (posmap par doc, chaînes par plage de
+docs) mais n'est plus prioritaire.
 
 ### B3. Le chemin ancré sur le deuxième token coûte parfois plus qu'il n'économise
 
@@ -133,15 +143,22 @@ parce que le mural n'a pas bougé et que le plancher dominait ; **à remesurer**
 maintenant que le plancher a disparu, et probablement à borner : n'ancrer que si le
 reste fait ≥ 4 octets, laisser la marche avant pour le reste.
 
-### B4. Le merge progressif du harnais est une mauvaise politique
+### B4. Le merge progressif du harnais est une mauvaise politique — FAIT le 23 août
 
-**Mesuré** : 660 s sur 886 s du run 50k fusionné. Ma politique « par taille de groupe »
-re-fusionne sans cesse des segments moyens. `LogMergePolicy` existe, est la policy par
-défaut du writer, et **n'est jamais consultée** (`handle_commit` diffère tout). Depuis
-`2eb6426`, les merges ne bloquent plus l'acteur — la raison de les différer a disparu.
+**Avant** : `LogMergePolicy` était la policy par défaut et **jamais consultée** ;
+chaque merge venait d'un `start_merge()` explicite, un writer laissé seul produisait
+un segment par commit pour toujours, et le harnais simulait une policy à la main.
 
-**Ce que je ferais** : brancher la policy au commit avec `merge_many`. Le harnais n'a
-plus à simuler.
+**Correctif** : `handle_commit` consulte la policy après chaque commit et lance les
+candidats par le chemin non bloquant (`handle_start_merges`). Segments en vol suivis
+dans l'acteur (`merging`) ; un merge explicite qui recouvre une fusion en cours est
+**refusé** (avant : deux fusions sur un segment, 400 docs → 269, mesuré le jour même).
+`LogMergePolicy::set_max_merged_docs` : plafond de **sortie** (les niveaux sont
+empaquetés dessous), en plus du plafond d'entrée hérité de tantivy. `LucivyHandle`
+pose les deux à 10 000 docs.
+
+Harnais : `NoMergePolicy` dès qu'il pilote lui-même (`V3_MERGE`), `V3_POLICY=1` pour
+laisser faire la policy et mesurer l'index « réel ».
 
 ### B5. Le merge lui-même, ~700 ms par fusion de 8 segments
 

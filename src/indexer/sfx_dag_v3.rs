@@ -115,8 +115,13 @@ impl Node for BuildFstV3Node {
             );
         }
 
+        // lucivy_fst::Error's Display hides the io::Error message ("I/O error");
+        // surface the inner text, it is the only thing worth reading.
         let (fst_data, parent_data) = builder.build()
-            .map_err(|e| format!("build_fst_v3: {e}"))?;
+            .map_err(|e| match e {
+                lucivy_fst::Error::Io(io) => format!("build_fst_v3: {io}"),
+                other => format!("build_fst_v3: {other}"),
+            })?;
         ctx.metric("fst_bytes", fst_data.len() as f64);
         ctx.set_output("fst", PortValue::new((fst_data, parent_data)));
         Ok(())
@@ -476,6 +481,15 @@ pub fn merge_segments_v3(
     // Assign final ordinals in text order. Chunk and word-stripped entries keep
     // separate ordinals even when their texts match — that is the whole point.
     let num_tokens = token_texts.len();
+    // The single-parent FST value holds a 24-bit ordinal. The build would
+    // refuse the segment anyway; refuse here, before the derived indexes are
+    // computed, and say which merge did it.
+    if num_tokens as u64 > crate::suffix_fst::builder_v3::SuffixFstBuilderV3::MAX_ORDINAL {
+        return Err(format!(
+            "merge_segments_v3: {num_tokens} distinct terms across {} segments exceed the \
+             {} ordinals the v3 encoding can address; merge fewer segments",
+            segments.len(), crate::suffix_fst::builder_v3::SuffixFstBuilderV3::MAX_ORDINAL + 1));
+    }
     let mut sorted_indices: Vec<u32> = (0..num_tokens as u32).collect();
     sorted_indices.sort_by(|&a, &b| {
         token_texts[a as usize].cmp(&token_texts[b as usize])

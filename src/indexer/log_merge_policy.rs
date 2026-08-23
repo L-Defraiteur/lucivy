@@ -20,6 +20,7 @@ const DEFAULT_DEL_DOCS_RATIO_BEFORE_MERGE: f32 = 1.0f32;
 pub struct LogMergePolicy {
     min_num_segments: usize,
     max_docs_before_merge: usize,
+    max_merged_docs: Option<usize>,
     min_layer_size: u32,
     level_log_size: f64,
     del_docs_ratio_before_merge: f32,
@@ -40,6 +41,13 @@ impl LogMergePolicy {
     /// smaller ones.
     pub fn set_max_docs_before_merge(&mut self, max_docs_merge_size: usize) {
         self.max_docs_before_merge = max_docs_merge_size;
+    }
+
+    /// Cap the number of documents a single merge may produce. Candidates
+    /// are packed under it; a group too small for `min_num_segments` waits.
+    /// `None` (default) keeps tantivy's behaviour, where a level merges whole.
+    pub fn set_max_merged_docs(&mut self, max_merged_docs: Option<usize>) {
+        self.max_merged_docs = max_merged_docs;
     }
 
     /// Set the minimum segment size under which all segment belong
@@ -116,14 +124,43 @@ impl MergePolicy for LogMergePolicy {
             levels.push(merge_group.collect::<Vec<&SegmentMeta>>());
         }
 
-        levels
-            .iter()
-            .filter(|level| {
-                level.len() >= self.min_num_segments
-                    || self.has_segment_above_deletes_threshold(level)
-            })
-            .map(|segments| MergeCandidate(segments.iter().map(|&seg| seg.id()).collect()))
-            .collect()
+        // `max_docs_before_merge` bounds the INPUTS (a bigger segment is never
+        // picked again), as in tantivy. `max_merged_docs`, when set, bounds the
+        // OUTPUT: a level is packed into groups whose documents sum to at most
+        // that. The SFX v3 encoding addresses 2^24 ordinals per segment and a
+        // 50k-document kernel segment already uses 83% of them; without this a
+        // policy proposing 8 × 10k would be refused by the builder at every
+        // commit, and retried at the next one.
+        let mut out = Vec::new();
+        for level in &levels {
+            let forced = self.has_segment_above_deletes_threshold(level);
+            let groups: Vec<Vec<&SegmentMeta>> = match self.max_merged_docs {
+                None => vec![level.clone()],
+                Some(cap) => {
+                    let cap = cap as u64;
+                    let mut groups = Vec::new();
+                    let mut group: Vec<&SegmentMeta> = Vec::new();
+                    let mut docs = 0u64;
+                    for seg in level {
+                        let n = seg.num_docs() as u64;
+                        if !group.is_empty() && docs + n > cap {
+                            groups.push(std::mem::take(&mut group));
+                            docs = 0;
+                        }
+                        group.push(seg);
+                        docs += n;
+                    }
+                    if !group.is_empty() { groups.push(group); }
+                    groups
+                }
+            };
+            for g in groups {
+                if g.len() >= self.min_num_segments || forced {
+                    out.push(MergeCandidate(g.iter().map(|seg| seg.id()).collect()));
+                }
+            }
+        }
+        out
     }
 }
 
@@ -132,6 +169,7 @@ impl Default for LogMergePolicy {
         LogMergePolicy {
             min_num_segments: DEFAULT_MIN_NUM_SEGMENTS_IN_MERGE,
             max_docs_before_merge: DEFAULT_MAX_DOCS_BEFORE_MERGE,
+            max_merged_docs: None,
             min_layer_size: DEFAULT_MIN_LAYER_SIZE,
             level_log_size: DEFAULT_LEVEL_LOG_SIZE,
             del_docs_ratio_before_merge: DEFAULT_DEL_DOCS_RATIO_BEFORE_MERGE,
@@ -326,6 +364,27 @@ mod tests {
         assert_eq!(result_list[0].0[0], test_input[2].id());
         assert_eq!(result_list[0].0[1], test_input[4].id());
         assert_eq!(result_list[0].0[2], test_input[5].id());
+    }
+
+    #[test]
+    fn test_max_merged_docs_packs_levels() {
+        let mut policy = test_merge_policy();
+        policy.set_max_merged_docs(Some(25_000));
+        let input: Vec<SegmentMeta> = (0..7).map(|_| create_random_segment_meta(10_000)).collect();
+        let result = policy.compute_merge_candidates(&input);
+        // 7 × 10k under a 25k cap: two groups of 2 and one of 3 would be the
+        // packing, but min_num_segments is 3 — only full groups merge.
+        for c in &result {
+            assert!(c.0.len() >= 3);
+            let docs: u32 = c.0.iter()
+                .map(|id| input.iter().find(|m| m.id() == *id).unwrap().num_docs()).sum();
+            assert!(docs <= 25_000, "candidate produces {docs} docs");
+        }
+        // Without the cap the whole level merges at once.
+        policy.set_max_merged_docs(None);
+        let result = policy.compute_merge_candidates(&input);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0.len(), 7);
     }
 
     #[test]

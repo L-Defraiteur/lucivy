@@ -327,6 +327,10 @@ fn v3_merge_preserves_results() {
     {
         let mut guard = merged.writer.lock().unwrap();
         let w = guard.as_mut().unwrap();
+        // The default policy now merges on commit; this test drives the merge
+        // itself, and an explicit merge over segments a policy merge is
+        // already reading is refused.
+        w.set_merge_policy(Box::new(ld_lucivy::indexer::NoMergePolicy));
         for (i, text) in refs.iter().enumerate() {
             let mut doc = ld_lucivy::LucivyDocument::new();
             doc.add_u64(nid_f, i as u64);
@@ -884,5 +888,73 @@ fn v3_a2_chunks() {
         for (i, (t, m)) in segment_and_chunk(&doc, DEFAULT_MAX_TOKEN).iter().enumerate() {
             eprintln!("  {i:>2} {t:?} content={} sep={} ws={} word={}", m.content_len, m.sep_len, m.is_word_start, m.word_id);
         }
+    }
+}
+
+/// Merges driven by the writer's own policy at commit time (wired on
+/// 23 August) must lose nothing: every document, every span.
+#[test]
+fn v3_policy_merges_preserve_everything() {
+    let docs = merge_corpus();
+    let n = docs.len();
+    let fresh = handle_with_commits(&docs, usize::MAX);
+
+    let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+        "fields": [{"name": "content", "type": "text", "stored": true}],
+        "sfx_version": 3
+    })).unwrap();
+    let dir = ld_lucivy::directory::RamDirectory::default();
+    let handle = LucivyHandle::create(dir, &config).unwrap();
+    let content_f = handle.field("content").unwrap();
+    let nid_f = handle.field(NODE_ID_FIELD).unwrap();
+    {
+        let mut guard = handle.writer.lock().unwrap();
+        let w = guard.as_mut().unwrap();
+        let mut policy = ld_lucivy::indexer::LogMergePolicy::default();
+        policy.set_min_num_segments(3);
+        policy.set_max_docs_before_merge(n / 3);
+        policy.set_max_merged_docs(Some(n / 3));
+        w.set_merge_policy(Box::new(policy));
+        for (i, text) in docs.iter().enumerate() {
+            let mut doc = ld_lucivy::LucivyDocument::new();
+            doc.add_u64(nid_f, i as u64);
+            doc.add_text(content_f, text);
+            w.add_document(doc).unwrap();
+            if (i + 1) % 20 == 0 {
+                w.commit().unwrap();
+                if std::env::var("V3_DRAIN_EACH").is_ok() { w.drain_merges().unwrap(); }
+            }
+        }
+        w.commit().unwrap();
+        w.drain_merges().unwrap();
+    }
+    handle.reader.reload().unwrap();
+    let searcher = handle.reader.searcher();
+    let mut sizes: Vec<u32> = searcher.segment_readers().iter().map(|r| r.num_docs()).collect();
+    sizes.sort_unstable_by(|a, b| b.cmp(a));
+    let total: u32 = sizes.iter().sum();
+    eprintln!("  docs={n} policy-merged segments={} sizes={sizes:?}", sizes.len());
+    assert_eq!(total as usize, n, "documents lost by policy merges");
+
+    for (q, strict) in [("include", true), ("__init", false), ("struct", true), ("->", true)] {
+        let a = doc_spans(&fresh, q, strict, n);
+        let b = doc_spans(&handle, q, strict, n);
+        eprintln!("  {q:<8} strict={strict} fresh docs={} merged docs={}", a.len(), b.len());
+        if a != b {
+            // Where are the holes: per segment, expected hits (by text) vs found.
+            use ld_lucivy::schema::document::Value;
+            for (si, sr) in searcher.segment_readers().iter().enumerate() {
+                let store = sr.get_store_reader(0).unwrap();
+                let mut expect = 0; let mut ids = Vec::new();
+                for d in 0..sr.max_doc() {
+                    let doc: ld_lucivy::LucivyDocument = store.get(d).unwrap();
+                    let nid = doc.field_values().find(|(f, _)| *f == nid_f)
+                        .and_then(|(_, v)| v.as_value().as_u64()).unwrap();
+                    if a.contains_key(&nid) { expect += 1; if !b.contains_key(&nid) { ids.push(nid); } }
+                }
+                eprintln!("    seg {si}: docs={} expected hits={expect} missing={} {:?}", sr.max_doc(), ids.len(), &ids[..ids.len().min(10)]);
+            }
+        }
+        assert_eq!(a, b, "{q} strict={strict}");
     }
 }

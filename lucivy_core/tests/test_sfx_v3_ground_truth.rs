@@ -133,7 +133,7 @@ fn collect_files(max_docs_arg: usize) -> Vec<(String, String)> {
 /// kernel docs, target 32 overshot to 7 segments and `__init` went from 9.3s to
 /// 18 minutes.
 fn merge_params() -> Option<(usize, usize, bool)> {
-    if std::env::var("V3_MERGE").is_err() { return None; }
+    if std::env::var("V3_MERGE").is_err() || std::env::var("V3_POLICY").is_ok() { return None; }
     let target = std::env::var("V3_MERGE_TARGET").ok()
         .and_then(|v| v.parse().ok()).filter(|&n: &usize| n > 0).unwrap_or(1);
     let group = std::env::var("V3_MERGE_GROUP").ok()
@@ -186,8 +186,9 @@ fn index_shape_key(num_files: usize) -> String {
         None => (-1, -1, false),
     };
     format!(
-        "corpus={} files={} commit_every={} merge_target={} merge_group={} progressive={} v=6",
+        "corpus={} files={} commit_every={} merge_target={} merge_group={} progressive={} policy={} v=7",
         repo_path(), num_files, commit_every(500), target, group, progressive,
+        std::env::var("V3_POLICY").is_ok(),
     )
 }
 
@@ -200,6 +201,15 @@ fn index_shape_key(num_files: usize) -> String {
 ///
 /// Note this also swaps RamDirectory for MmapDirectory: closer to production,
 /// but timings taken with and without the cache are not directly comparable.
+fn print_shape(handle: &LucivyHandle) {
+    let searcher = handle.reader.searcher();
+    let mut sizes: Vec<u32> = searcher.segment_readers().iter().map(|r| r.max_doc()).collect();
+    sizes.sort_unstable_by(|a, b| b.cmp(a));
+    let shown: Vec<String> = sizes.iter().take(12).map(|n| n.to_string()).collect();
+    eprintln!("  index shape: 1 shard, {} segments (prescan on the luciole pool), docs per segment, largest first: {}{}",
+        sizes.len(), shown.join(" "), if sizes.len() > 12 { " …" } else { "" });
+}
+
 fn try_reuse_index(files: &[(String, String)]) -> Option<LucivyHandle> {
     let dir_path = std::env::var("V3_INDEX_DIR").ok()?;
     let key_path = std::path::Path::new(&dir_path).join(".v3_shape");
@@ -211,6 +221,7 @@ fn try_reuse_index(files: &[(String, String)]) -> Option<LucivyHandle> {
     let handle = LucivyHandle::open(dir).ok()?;
     let segs = handle.reader.searcher().segment_readers().len();
     eprintln!("  index reused from {dir_path} ({segs} segments) — delete it to force a rebuild");
+    print_shape(&handle);
     Some(handle)
 }
 
@@ -247,11 +258,12 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
     {
         let mut guard = handle.writer.lock().unwrap();
         let w = guard.as_mut().unwrap();
-        // NoMergePolicy by default: it keeps the corpus split into many small
-        // segments — the worst case for per-segment cost, and the only shape v3
-        // could take while merges were refused. `V3_MERGE=1` keeps the handle's
-        // default LogMergePolicy instead, which is what a real index looks like.
-        if std::env::var("V3_MERGE").is_err() {
+        // The harness drives every merge itself (`merge_round`, `merge_many`),
+        // so the writer's policy must stay out of the way: since 23 August
+        // the policy fires on commit, and an explicit merge overlapping a
+        // running one is refused. `V3_POLICY=1` hands the index to the
+        // handle's LogMergePolicy instead and skips the harness merges.
+        if std::env::var("V3_POLICY").is_err() {
             w.set_merge_policy(Box::new(ld_lucivy::indexer::NoMergePolicy));
         }
         for (i, (path, content)) in files.iter().enumerate() {
@@ -279,6 +291,10 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
             }
         }
         w.commit().unwrap();
+        // Policy merges started by the last commit are still running as
+        // scheduler tasks; persisting or querying now reads half-written
+        // segment files (measured: SIGSEGV through mmap on the first run).
+        w.drain_merges().unwrap();
     }
 
     // Drive the merges ourselves, in bounded tiers.
@@ -356,8 +372,7 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
     // (Index::search_executor defaults to Executor::single_thread and nothing here
     // overrides it), NoMergePolicy + a commit every 500 docs. Query timings below
     // are therefore a SERIAL walk over every segment, with no parallelism at all.
-    eprintln!("  index shape: 1 shard, {} segments, single-thread executor",
-        handle.reader.searcher().segment_readers().len());
+    print_shape(&handle);
     handle
 }
 

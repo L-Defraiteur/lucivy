@@ -180,3 +180,34 @@ suite, l'explication plausible était fausse (A1 « le merge », A2 « l'overlap
 « le vocabulaire des autres segments ») et la reproduction minimale a dit autre chose
 en moins d'une minute. Le bisect a coûté 40 lignes ; il a remplacé trois heures de
 théorie.
+
+## Soir — la policy de merge au commit, et ce qu'elle a révélé
+
+| index 50k | segments | construction | `include` | `__init` relax | `uint64_t` relax | spans |
+|---|---|---|---|---|---|---|
+| naturel (`NoMergePolicy`) | 800 × 62 | 64 s | 55 ms | 63 | 40 | 9/9 exacts |
+| « fusionné 32 » du harnais | **48 078** + 31 × 62 | 64 s + 660 s | 410 | 297 | 211 | 9/9 exacts |
+| fusionné 1 | 1 × 50 000 | 64 s + 212 s | 718 | 348 | — | exacts |
+| **policy au commit, plafond 10k** | 78 (10000, 8500, 7500, 4000…) | **72 s** | **79** | **85** | **84** | 9/9 exacts |
+
+- **A4** : en fusionnant vers un segment, le compteur de parents d'une clé a atteint
+  63 242 puis 64 461 — limite u16 65 535. Garde posé (refus propre), en-tête passé en
+  u32, fusion complète refaite : une clé à 3 248 834 parents, 82,7 % des ordinaux
+  24 bits consommés par 50k docs. Les gros segments sont mauvais sur tous les axes.
+- L'index « 32 segments » d'hier était un segment de 48 078 docs plus des miettes : le
+  merge par paliers du harnais avait tout avalé. B2 (« un gros segment = un thread »)
+  mesurait ça, pas un défaut de parallélisme.
+- **B4** : `handle_commit` consulte la policy, qui cascade en fin de fusion ; segments
+  en vol suivis, merge explicite recouvrant refusé (sinon 400 docs → 269, mesuré) ;
+  `max_merged_docs` plafonne la **sortie** des fusions ; `LucivyHandle` pose 10k.
+- Deux bugs que la policy a fait sortir en une heure, parce que pour la première fois
+  des fusions tournaient **pendant** l'indexation :
+  1. `persist` pendant une fusion en vol → fichier tronqué → **SIGSEGV** en mmap.
+     `drain_merges()` avant de persister ; le drapeau `pending` ne tombe qu'après la
+     cascade.
+  2. **Le GC supprimait les `.sfx` des segments en cours d'écriture** : `sfx_field_ids`
+     n'est posé sur le meta qu'après l'écriture, donc `list_files` ne les nommait pas.
+     `include` 36 824 → 14 247 documents, trous alignés sur les threads d'indexation.
+     Tout fichier d'un segment encore dans l'inventaire est vivant, quel que soit son
+     meta — lu depuis `.managed.json` sans verrou (le premier essai a déverrouillé un
+     deadlock lecteur/écrivain sur `meta_informations`).

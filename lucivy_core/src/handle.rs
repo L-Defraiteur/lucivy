@@ -82,9 +82,16 @@ fn create_writer(index: &Index) -> Result<IndexWriter, String> {
         }
     };
 
-    // Cap segment size to bound SuffixFstBuilder memory usage.
+    // Cap segment size: the SFX v3 encoding addresses 2^24 ordinals per
+    // segment and a chunk token is nearly unique, so ordinals grow with the
+    // text, not the vocabulary — 50k kernel files in one segment use 83% of
+    // them, and query time grows with segment size too (`include`: 55ms on
+    // 800 segments, 718ms on one). Both knobs: a segment above
+    // MAX_DOCS_BEFORE_MERGE is never merged again, and no merge may produce
+    // more than that.
     let mut policy = ld_lucivy::indexer::LogMergePolicy::default();
     policy.set_max_docs_before_merge(MAX_DOCS_BEFORE_MERGE);
+    policy.set_max_merged_docs(Some(MAX_DOCS_BEFORE_MERGE));
     writer.set_merge_policy(Box::new(policy));
 
     Ok(writer)
