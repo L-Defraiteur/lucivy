@@ -47,7 +47,7 @@ pub struct ContainsQueryV3 {
 /// mismatch"; this is the other half of that promise.
 pub fn run_sfx_v3_prescan(
 seg_reader: &SegmentReader,
-sfx_bytes: &[u8],
+sfx_bytes: &common::OwnedBytes,
 field: crate::schema::Field,
 query_text: &str,
 anchor_start: bool,
@@ -57,9 +57,14 @@ strict_separators: bool,
     use crate::suffix_fst::file_v3::SfxFileReaderV3;
     use crate::suffix_fst::briques::{orchestrator, context::BriquesContext};
 
-    let reader = SfxFileReaderV3::open(sfx_bytes).map_err(|e|
+    let t_open = std::time::Instant::now();
+    let reader = SfxFileReaderV3::open_owned(sfx_bytes.clone()).map_err(|e|
         crate::LucivyError::SystemError(format!("open SFX3: {e}")))?;
+    let ns_sfx = t_open.elapsed().as_nanos() as u64;
+    let t_open = std::time::Instant::now();
     let pr = crate::query::posting_resolver::build_resolver(seg_reader, field)?;
+    let ns_resolver = t_open.elapsed().as_nanos() as u64;
+    let t_open = std::time::Instant::now();
 
     // The FileSlice is already held by the SegmentReader, and read_bytes() on a
     // RAM- or mmap-backed handle is an Arc slice, not I/O. The `.to_vec()` that
@@ -85,6 +90,13 @@ strict_separators: bool,
         None
     };
 
+    let ns_sidecars = t_open.elapsed().as_nanos() as u64;
+    if crate::suffix_fst::briques::profile::enabled() {
+        OPEN_NS[0].fetch_add(ns_sfx, std::sync::atomic::Ordering::Relaxed);
+        OPEN_NS[1].fetch_add(ns_resolver, std::sync::atomic::Ordering::Relaxed);
+        OPEN_NS[2].fetch_add(ns_sidecars, std::sync::atomic::Ordering::Relaxed);
+    }
+    let t_open = std::time::Instant::now();
     let ctx = BriquesContext {
         reader: &reader,
         resolver: &*pr,
@@ -99,10 +111,17 @@ strict_separators: bool,
         word_posmap: wpm_bytes.as_ref().and_then(|b| crate::suffix_fst::word_pos_map::WordPosMapReader::open(b)),
     };
 
+    if crate::suffix_fst::briques::profile::enabled() {
+        OPEN_NS[3].fetch_add(t_open.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+    let t_q = std::time::Instant::now();
     let mut matches = orchestrator::contains_v3(
         &ctx, query_text,
         anchor_start, exact_match, strict_separators,
     );
+    if crate::suffix_fst::briques::profile::enabled() {
+        OPEN_NS[4].fetch_add(t_q.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
 
     // A word_pos_map post-filter used to sit here. Its retain closure returned
     // `true` from both branches — intra-word and inter-word alike — so it never
@@ -120,9 +139,28 @@ strict_separators: bool,
 }
 
 
+static PRESCAN_ONE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// sfx open, resolver, sidecar loads, context (reader opens), contains_v3.
+static OPEN_NS: [std::sync::atomic::AtomicU64; 5] = [
+    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
 impl ContainsQueryV3 {
     /// Prescan a single segment. `None` when the segment has no SFX file.
     fn prescan_one(
+        &self,
+        seg_reader: &SegmentReader,
+    ) -> crate::Result<Option<(crate::index::SegmentId, Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)>> {
+        use crate::suffix_fst::section_file::detect_sfx_version;
+        let _t0 = std::time::Instant::now();
+        let r = self.prescan_one_inner(seg_reader);
+        PRESCAN_ONE_NS.fetch_add(_t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        r
+    }
+
+    fn prescan_one_inner(
         &self,
         seg_reader: &SegmentReader,
     ) -> crate::Result<Option<(crate::index::SegmentId, Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)>> {
@@ -196,7 +234,7 @@ impl ContainsQueryV3 {
     fn prescan_segment_v3(
         &self,
         seg_reader: &SegmentReader,
-        sfx_bytes: &[u8],
+        sfx_bytes: &common::OwnedBytes,
     ) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)> {
         run_sfx_v3_prescan(
             seg_reader, sfx_bytes, self.field, &self.query_text,
@@ -326,9 +364,17 @@ impl Query for ContainsQueryV3 {
             })));
         }
 
+        let t_dag = std::time::Instant::now();
         let mut dag = luciole::scatter::build_scatter_dag(tasks);
         let mut result = luciole::execute_dag(&mut dag, None)
             .map_err(|e| crate::LucivyError::SystemError(format!("prescan DAG: {e}")))?;
+        if crate::suffix_fst::briques::profile::enabled() {
+            let g = |i: usize| OPEN_NS[i].swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1e6;
+            eprintln!("  [prescan] {} segments, scatter DAG wall {:.1}ms, per-segment CPU sum {:.1}ms | sfx open {:.0} resolver {:.0} sidecar loads {:.0} reader opens {:.0} contains_v3 {:.0}",
+                segments.len(), t_dag.elapsed().as_secs_f64() * 1e3,
+                PRESCAN_ONE_NS.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+                g(0), g(1), g(2), g(3), g(4));
+        }
         let map = result
             .take_output::<std::collections::HashMap<String, luciole::port::PortValue>>("collect", "results")
             .ok_or_else(|| crate::LucivyError::SystemError("prescan DAG: no results".into()))?;

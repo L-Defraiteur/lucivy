@@ -22,6 +22,7 @@ pub struct Counters {
     pub ns_chunk_walk: AtomicU64,
     pub ns_chunk_sibling: AtomicU64,
     pub ns_chunk_resolve: AtomicU64,
+    pub ns_chunk_anchored: AtomicU64,
     pub ns_word_walk: AtomicU64,
     pub ns_word_sibling: AtomicU64,
     pub ns_word_resolve: AtomicU64,
@@ -141,7 +142,7 @@ impl Timer {
 pub fn reset() {
     let c = counters();
     for a in [
-        &c.ns_single, &c.ns_chunk_walk, &c.ns_chunk_sibling, &c.ns_chunk_resolve,
+        &c.ns_single, &c.ns_chunk_walk, &c.ns_chunk_sibling, &c.ns_chunk_resolve, &c.ns_chunk_anchored,
         &c.ns_word_walk, &c.ns_word_sibling, &c.ns_word_resolve,
         &c.n_chunk_chains, &c.n_word_chains, &c.n_word_entries, &c.n_word_pairs,
         &c.n_puresep_calls, &c.n_puresep_positions,
@@ -165,7 +166,7 @@ pub fn dump() -> String {
     let ms = |a: &AtomicU64| g(a) as f64 / 1e6;
 
     let total = ms(&c.ns_single) + ms(&c.ns_chunk_walk) + ms(&c.ns_chunk_sibling)
-        + ms(&c.ns_chunk_resolve) + ms(&c.ns_word_walk) + ms(&c.ns_word_sibling)
+        + ms(&c.ns_chunk_resolve) + ms(&c.ns_chunk_anchored) + ms(&c.ns_word_walk) + ms(&c.ns_word_sibling)
         + ms(&c.ns_word_resolve);
     let pct = |v: f64| if total > 0.0 { v / total * 100.0 } else { 0.0 };
 
@@ -176,6 +177,7 @@ pub fn dump() -> String {
         ("chunk walk", ms(&c.ns_chunk_walk)),
         ("chunk sibling DFS", ms(&c.ns_chunk_sibling)),
         ("chunk resolve", ms(&c.ns_chunk_resolve)),
+        ("chunk 2nd-token anchored", ms(&c.ns_chunk_anchored)),
         ("word walk", ms(&c.ns_word_walk)),
         ("word sibling DFS", ms(&c.ns_word_sibling)),
         ("word resolve", ms(&c.ns_word_resolve)),

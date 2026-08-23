@@ -175,7 +175,7 @@ impl Node for PrescanShardNode {
                 let version = detect_sfx_version(sfx_bytes.as_ref()).unwrap_or(1);
                 let (doc_tf, highlights) = if version == 3 {
                     run_sfx_v3_prescan(
-                        seg_reader, sfx_bytes.as_ref(), param.field,
+                        seg_reader, &sfx_bytes, param.field,
                         &param.query_text, param.anchor_start,
                         param.exact_match, param.strict_separators,
                     ).map_err(|e| format!("v3 prescan: {e}"))?

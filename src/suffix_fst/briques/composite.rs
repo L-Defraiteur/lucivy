@@ -78,9 +78,31 @@ pub fn find_literal_v3(
     }
 
     // ── Chunk chains (0x00 + 0x01) — strict adjacency ────────────────
+    //
+    // Strict mode splits the work by where the head ends. A head consuming
+    // more than half the query is rare (few tokens end with "net_devi"), and
+    // the forward walk enumerates it cheaply. A head consuming half or less is
+    // the wide side — every token ending in "n" — and is not enumerated at all:
+    // those occurrences are anchored on their SECOND token, which starts with
+    // the narrow remainder, and the head is checked one step backwards. See
+    // `second_token_anchored_v3`. The two sets are disjoint by construction.
+    // 137 715 head splits for `net_device` over 50k kernel files, for 121 hits.
+    // Only when the backward check can run: without posmap and termtexts the
+    // forward walk must enumerate every head, as it always did.
+    let half = if strict_separators && ctx.posmap.is_some() && ctx.termtexts.is_some() {
+        query.len() / 2
+    } else {
+        0
+    };
     {
         let _t = profile::Timer::start();
-        let mut chains = fst_walk::cross_chunk_chain_v3(ctx.reader, query);
+        let mut chains = if half > 0 {
+            let mut splits = fst_walk::falling_walk_chunks(ctx.reader, query);
+            splits.retain(|s| s.query_consumed > half);
+            fst_walk::cross_chunk_chain_from_splits(ctx.reader, &splits, query)
+        } else {
+            fst_walk::cross_chunk_chain_v3(ctx.reader, query)
+        };
         _t.stop(|c| &c.ns_chunk_walk);
 
         // Sibling chain supplement: if sibling table is available, use it
@@ -88,6 +110,7 @@ pub fn find_literal_v3(
         if ctx.has_sibling_chains() {
             let _t = profile::Timer::start();
             let mut all_splits = fst_walk::falling_walk_chunks(ctx.reader, query);
+            if half > 0 { all_splits.retain(|s| s.query_consumed > half); }
             // Chunk candidates only. In relaxed mode fst_candidates_v3 scans the
             // 0x02 partition too, and a word-stripped head leaking into the chunk
             // DFS produced chains like ["0ui"@1, "uint64t"] whose span started
@@ -101,6 +124,7 @@ pub fn find_literal_v3(
             let extra = fst_walk::splits_from_fst_candidates(&chunk_cands, query.to_lowercase().len());
             for s in extra {
                 if !s.parent.is_word_start || s.parent.sep_len == 0 { continue; }
+                if half > 0 && s.query_consumed <= half { continue; }
                 all_splits.push(s);
             }
             let sib_chains = fst_walk::sibling_chain_dfs(
@@ -158,6 +182,15 @@ pub fn find_literal_v3(
             }
         }
         results.extend(cross);
+    }
+
+    // ── Short-head occurrences, anchored on the second token ──────────
+    if half > 0 {
+        let _t = profile::Timer::start();
+        let found = second_token_anchored_v3(ctx, query, half);
+        _t.stop(|c| &c.ns_chunk_anchored);
+        if dbg { eprintln!("[lit]   second-token anchored matches={}", found.len()); }
+        results.extend(found);
     }
 
     // ── Word chains (0x02) — relaxed adjacency via WordSfxPost ─────
@@ -219,6 +252,92 @@ pub fn find_literal_v3(
     ctx.trace_msg(&format!("total matches={} unique_docs={}", results.len(), unique_docs.len()));
     ctx.trace_exit();
     results
+}
+
+/// Strict occurrences whose head consumes at most `half` bytes of the query.
+///
+/// For each head length `h` in `1..=half`, the token after the head starts
+/// with `query[h..]` at sti 0. That remainder is matched forward with the
+/// ordinary chain machinery (anchored single candidates plus sti-0 walk
+/// splits), and each resulting match is then checked one position backwards:
+/// the token at `position - 1` must end, within its own content, with
+/// `query[..h]`. posmap names that token, termtexts gives its text and its
+/// own length, one posting fetch gives its byte offset.
+///
+/// Each occurrence has exactly one head length, so nothing is found twice;
+/// and `h <= half` is disjoint from the forward path's `consumed > half`.
+fn second_token_anchored_v3(
+    ctx: &BriquesContext<'_>,
+    query: &str,
+    half: usize,
+) -> Vec<MatchV3> {
+    let (Some(pm), Some(tt)) = (ctx.posmap.as_ref(), ctx.termtexts.as_ref()) else {
+        return Vec::new();
+    };
+    let query_lower = query.to_lowercase();
+    let mut out = Vec::new();
+
+    for h in 1..=half {
+        if !query_lower.is_char_boundary(h) { continue; }
+        let head = &query_lower[..h];
+        let rest = &query_lower[h..];
+        if rest.is_empty() { break; }
+
+        // The second token, entered at sti 0: either it holds all of `rest`
+        // (a single anchored candidate) or `rest` runs past it (a walk split).
+        let mut chains: Vec<TokenChainV3> = Vec::new();
+        let cands = fst_walk::fst_candidates_v3(ctx.reader, rest, true, true);
+        let mut single_ords: Vec<u64> = cands.iter()
+            .filter(|c| c.partition != 0x02 && c.sti == 0)
+            .map(|c| c.raw_ordinal).collect();
+        single_ords.sort_unstable();
+        single_ords.dedup();
+        if !single_ords.is_empty() {
+            chains.push(TokenChainV3 {
+                ordinals: vec![std::sync::Arc::new(single_ords)],
+                first_sti: 0,
+                total_query_consumed: rest.len(),
+                last_consumed: rest.len(),
+            });
+        }
+        let mut splits = fst_walk::falling_walk_chunks(ctx.reader, rest);
+        splits.retain(|s| s.parent.sti == 0);
+        chains.extend(fst_walk::cross_chunk_chain_from_splits(ctx.reader, &splits, rest));
+        if chains.is_empty() { continue; }
+
+        let tail_matches = resolve::resolve_chains_v3_posmap(
+            &chains, ctx.resolver, ctx.filter_docs, pm);
+
+        for m in tail_matches {
+            if m.position == 0 { continue; }
+            let prev_pos = m.position - 1;
+            let Some(ord) = pm.ordinal_at(m.doc_id, prev_pos) else { continue };
+            let (Some(text), Some(meta)) = (tt.text(ord), tt.meta(ord)) else { continue };
+            // termtexts keeps the original case; the FST and the query are
+            // lowercase. Compare in lowercase, on a char boundary of the text.
+            let own = (meta.own_len as usize).min(text.len());
+            let own = (0..=own).rev().find(|&b| text.is_char_boundary(b)).unwrap_or(0);
+            let own_text = text[..own].to_lowercase();
+            if own_text.len() < h || !own_text.ends_with(head) { continue; }
+            let sti = own - h;
+            let Some(p) = ctx.resolver.resolve_doc(ord as u64, m.doc_id)
+                .into_iter().find(|p| p.position == prev_pos)
+            else { continue };
+            out.push(MatchV3 {
+                doc_id: m.doc_id,
+                position: prev_pos,
+                span: m.span + 1,
+                byte_from: p.byte_from + sti as u32,
+                overlap_overflow: 0,
+                byte_to: m.byte_to,
+                token_end: m.token_end,
+                sti: sti as u16,
+                ordinal: ord as u64,
+                last_ordinal: m.last_ordinal,
+            });
+        }
+    }
+    out
 }
 
 // ─── find_multi_token_v3 ──────────────────────────────────────────────────

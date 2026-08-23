@@ -56,12 +56,12 @@ impl RegexQueryV3 {
     fn prescan_segment_v3(
         &self,
         seg_reader: &SegmentReader,
-        sfx_bytes: &[u8],
+        sfx_bytes: &common::OwnedBytes,
     ) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)> {
         use crate::suffix_fst::file_v3::SfxFileReaderV3;
         use crate::suffix_fst::briques::regex_v3;
 
-        let reader = SfxFileReaderV3::open(sfx_bytes).map_err(|e|
+        let reader = SfxFileReaderV3::open_owned(sfx_bytes.clone()).map_err(|e|
             crate::LucivyError::SystemError(format!("open SFX3: {e}")))?;
         let pr = crate::query::posting_resolver::build_resolver(seg_reader, self.field)?;
 

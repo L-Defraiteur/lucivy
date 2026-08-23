@@ -544,6 +544,18 @@ pub fn cross_chunk_chain_v3(
     build_chains_from_splits(reader, &splits, query, falling_walk_chunks, true, true)
 }
 
+/// Chunk chains from caller-chosen head splits (see `cross_chunk_chain_v3`).
+///
+/// Lets `find_literal_v3` keep only long heads on the forward path and anchor
+/// short-head occurrences on their second token instead.
+pub fn cross_chunk_chain_from_splits(
+    reader: &SfxFileReaderV3,
+    splits: &[SplitCandidateV3],
+    query: &str,
+) -> Vec<TokenChainV3> {
+    build_chains_from_splits(reader, splits, query, falling_walk_chunks, true, true)
+}
+
 /// Cross-word chains (partition 0x02).
 /// Word-level splits. Resolved with relaxed adjacency (posmap/bytemap required).
 pub fn cross_word_chain_v3(

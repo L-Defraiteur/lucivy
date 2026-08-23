@@ -211,8 +211,12 @@ impl std::error::Error for SfxV3Error {}
 
 /// Reads a .sfx v3 file.
 pub struct SfxFileReaderV3 {
-    fst: Map<Vec<u8>>,
-    parent_list_data: Vec<u8>,
+    /// FST over an Arc-backed slice of the file: opening is O(1) and copies
+    /// nothing. It used to be `Map<Vec<u8>>` built from `to_vec()`, and the
+    /// prescan opens one reader per segment per query — 3.8 s of CPU per query
+    /// on 800 segments, for a query with no results, before any search began.
+    fst: Map<common::OwnedBytes>,
+    parent_list_data: common::OwnedBytes,
     word_map: Option<WordMap>,
     next_word: Option<Vec<u32>>,
     num_docs: u32,
@@ -220,39 +224,57 @@ pub struct SfxFileReaderV3 {
 
 impl SfxFileReaderV3 {
     /// Open from raw bytes.
+    /// Open from a borrowed slice. Copies the data once into owned bytes;
+    /// prefer `open_owned` on the query path, where the bytes already live in
+    /// an `OwnedBytes` (mmap or RAM directory) and can be sliced for free.
     pub fn open(data: &[u8]) -> Result<Self, SfxV3Error> {
-        let file = SectionFileReader::open(data, &MAGIC)
+        Self::open_owned(common::OwnedBytes::new(data.to_vec()))
+    }
+
+    /// Open over Arc-backed bytes without copying any section.
+    ///
+    /// The in-file word map and next-word sections are not deserialised: no
+    /// query path reads `word_map()` / `next_word()`, and decoding them was
+    /// part of the per-segment, per-query cost this constructor removes. They
+    /// stay available through `open_with_word_maps` for tooling.
+    pub fn open_owned(data: common::OwnedBytes) -> Result<Self, SfxV3Error> {
+        let file = SectionFileReader::open(&data, &MAGIC)
             .ok_or(SfxV3Error::InvalidFormat)?;
+        let base = data.as_slice().as_ptr() as usize;
+        let sub = |sec: &[u8]| -> common::OwnedBytes {
+            let off = sec.as_ptr() as usize - base;
+            data.slice(off..off + sec.len())
+        };
 
         let fst_bytes = file.get_section(SECTION_FST)
             .ok_or(SfxV3Error::MissingSection("FST"))?;
         let fst = if fst_bytes.is_empty() {
-            Map::new(lucivy_fst::MapBuilder::memory().into_inner().unwrap_or_default())
+            let empty = lucivy_fst::MapBuilder::memory().into_inner().unwrap_or_default();
+            Map::new(common::OwnedBytes::new(empty))
                 .map_err(|e| SfxV3Error::FstError(e.to_string()))?
         } else {
-            Map::new(fst_bytes.to_vec())
+            Map::new(sub(fst_bytes))
                 .map_err(|e| SfxV3Error::FstError(e.to_string()))?
         };
 
-        let parent_list_data = file.get_section(SECTION_PARENTS)
-            .ok_or(SfxV3Error::MissingSection("PARENTS"))?
-            .to_vec();
+        let parent_list_data = sub(file.get_section(SECTION_PARENTS)
+            .ok_or(SfxV3Error::MissingSection("PARENTS"))?);
 
-        let word_map = file.get_section(SECTION_WORD_MAP)
-            .and_then(WordMap::deserialize);
+        Ok(Self { fst, parent_list_data, word_map: None, next_word: None, num_docs: 0 })
+    }
 
-        let next_word = file.get_section(SECTION_NEXT_WORD)
-            .and_then(deserialize_next_word);
-
-        // Derive num_docs from word_map or default to 0
-        // (actual num_docs is tracked externally by the segment, not in the .sfx file)
-        let num_docs = 0;
-
-        Ok(Self { fst, parent_list_data, word_map, next_word, num_docs })
+    /// `open`, plus the in-file word map sections (not used by queries).
+    pub fn open_with_word_maps(data: &[u8]) -> Result<Self, SfxV3Error> {
+        let mut r = Self::open(data)?;
+        let file = SectionFileReader::open(data, &MAGIC)
+            .ok_or(SfxV3Error::InvalidFormat)?;
+        r.word_map = file.get_section(SECTION_WORD_MAP).and_then(WordMap::deserialize);
+        r.next_word = file.get_section(SECTION_NEXT_WORD).and_then(deserialize_next_word);
+        Ok(r)
     }
 
     /// Access the FST.
-    pub fn fst(&self) -> &Map<Vec<u8>> {
+    pub fn fst(&self) -> &Map<common::OwnedBytes> {
         &self.fst
     }
 
@@ -385,7 +407,7 @@ mod tests {
     #[test]
     fn test_write_read_roundtrip() {
         let bytes = build_sfx_v3(&["mutex_lock"]);
-        let reader = SfxFileReaderV3::open(&bytes).unwrap();
+        let reader = SfxFileReaderV3::open_with_word_maps(&bytes).unwrap();
 
         assert!(reader.num_suffix_terms() > 0);
         assert!(reader.word_map().is_some());
