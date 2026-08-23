@@ -17,7 +17,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::binary::{read_u32, read_string};
+use crate::binary::read_u32;
 use crate::delta::{IndexDelta, serialize_delta, deserialize_delta};
 use crate::version::compute_version_from_bytes;
 

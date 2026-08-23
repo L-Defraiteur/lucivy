@@ -8,8 +8,6 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use crate::delta::IndexDelta;
-use crate::delta_sharded::ShardedDelta;
 
 /// A version snapshot: version string + the bundle IDs at that point.
 #[derive(Debug, Clone)]
