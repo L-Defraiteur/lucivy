@@ -6,6 +6,10 @@
 //!   0x01 — TEXTS: offset table + concatenated UTF-8 texts (same as v2 TTXT)
 //!   0x02 — META:  per-ordinal metadata array (own_len, sep_len, overlap_len,
 //!                is_word_start, is_word_stripped)
+//!   0x03 — STATS: segment-wide facts derived from META at write time
+//!                (max word-stripped content length). Optional: files
+//!                written before it read back as "unknown", which every
+//!                consumer must treat as the pessimistic answer.
 //!
 //! The texts are the EXTENDED tokens (e.g., "mutex_lo" not "mutex_").
 //! The metadata allows the merge process to re-feed tokens to the builder
@@ -18,6 +22,12 @@ const VERSION: u8 = 1;
 
 const SECTION_TEXTS: u16 = 0x01;
 const SECTION_META: u16 = 0x02;
+const SECTION_STATS: u16 = 0x03;
+
+/// Suffix indexes a word-stripped entry carries (SI 0..=MAX). A match that
+/// starts deeper inside a word is only reachable through the chunk chains.
+/// Mirrors `builder_v3::MAX_CHUNK_BYTES` and the collector's MAX_SUFFIX_INDEX.
+pub const WORD_SUFFIX_CAP: u16 = 256;
 
 /// Per-ordinal metadata stored alongside the token text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +91,14 @@ impl TermTextsWriterV3 {
         // Section META: packed metadata array
         file.add_section(SECTION_META, &self.serialize_meta());
 
+        // Section STATS: max word-stripped content length (u16).
+        let max_word: u16 = self.metas.iter()
+            .filter(|m| m.is_word_stripped)
+            .map(|m| m.own_len.saturating_sub(m.sep_len as u16))
+            .max()
+            .unwrap_or(0);
+        file.add_section(SECTION_STATS, &max_word.to_le_bytes());
+
         file.serialize()
     }
 
@@ -134,6 +152,7 @@ pub struct TermTextsReaderV3<'a> {
     text_data: &'a [u8],
     meta_data: Option<&'a [u8]>,
     meta_count: u32,
+    max_word_content_len: Option<u16>,
 }
 
 impl<'a> TermTextsReaderV3<'a> {
@@ -166,12 +185,17 @@ impl<'a> TermTextsReaderV3<'a> {
             (None, 0)
         };
 
+        let max_word_content_len = file.get_section(SECTION_STATS)
+            .filter(|s| s.len() >= 2)
+            .map(|s| u16::from_le_bytes([s[0], s[1]]));
+
         Some(Self {
             num_terms,
             text_offsets,
             text_data,
             meta_data,
             meta_count,
+            max_word_content_len,
         })
     }
 
@@ -210,6 +234,19 @@ impl<'a> TermTextsReaderV3<'a> {
     /// Get text + metadata together for an ordinal.
     pub fn entry(&self, ordinal: u32) -> Option<(&'a str, TermMetaV3)> {
         Some((self.text(ordinal)?, self.meta(ordinal)?))
+    }
+
+    /// Longest word-stripped content in this segment, if the file records it.
+    /// `None` on files written before the STATS section.
+    pub fn max_word_content_len(&self) -> Option<u16> {
+        self.max_word_content_len
+    }
+
+    /// True unless the file proves that every word fits under
+    /// [`WORD_SUFFIX_CAP`] — i.e. that the word pipeline alone reaches every
+    /// in-word occurrence. Unknown is treated as "maybe".
+    pub fn may_have_long_words(&self) -> bool {
+        self.max_word_content_len.map_or(true, |m| m > WORD_SUFFIX_CAP)
     }
 
     /// Number of terms.
@@ -404,5 +441,31 @@ mod tests {
             assert!(!text.is_empty());
             assert!(meta.own_len > 0 || meta.sep_len > 0);
         }
+    }
+
+    #[test]
+    fn stats_section_records_longest_word() {
+        let meta = |own: u16, ws: bool| TermMetaV3 {
+            own_len: own, sep_len: 1, overlap_len: 0, is_word_start: true, is_word_stripped: ws,
+        };
+        let mut w = TermTextsWriterV3::new();
+        w.add(0, "chunk", meta(300, false)); // chunk shapes never count
+        w.add(1, "short", meta(6, true));
+        let bytes = w.serialize();
+        let r = TermTextsReaderV3::open(&bytes).unwrap();
+        assert_eq!(r.max_word_content_len(), Some(5));
+        assert!(!r.may_have_long_words());
+
+        let mut w = TermTextsWriterV3::new();
+        w.add(0, "long", meta(WORD_SUFFIX_CAP + 2, true)); // content = cap + 1
+        let bytes = w.serialize();
+        let r = TermTextsReaderV3::open(&bytes).unwrap();
+        assert_eq!(r.max_word_content_len(), Some(WORD_SUFFIX_CAP + 1));
+        assert!(r.may_have_long_words());
+
+        // Empty file: no word at all, still provable.
+        let bytes = TermTextsWriterV3::new().serialize();
+        let r = TermTextsReaderV3::open(&bytes).unwrap();
+        assert!(!r.may_have_long_words());
     }
 }

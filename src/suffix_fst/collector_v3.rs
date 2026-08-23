@@ -396,7 +396,9 @@ impl SfxCollectorV3 {
                 } else {
                     word_content.clone()
                 };
-                let ws_own_len = (word_content.len() + chunks[last_ci].1.sep_len) as u16;
+                // Saturating: a word beyond u16 must still read back as "long",
+                // the STATS section of `.termtexts` depends on it.
+                let ws_own_len = (word_content.len() + chunks[last_ci].1.sep_len).min(u16::MAX as usize) as u16;
                 let ws_intern = self.intern_extended(&ws_extended, TokenMetaV3 {
                     own_len: ws_own_len,
                     sep_len: chunks[last_ci].1.sep_len as u8,

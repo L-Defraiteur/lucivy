@@ -42,6 +42,12 @@ pub struct Counters {
     pub n_fz_window_derive_miss: AtomicU64,
     pub n_fz_spans: AtomicU64,
 
+    /// Relaxed literal: segments where the chunk chains were skipped because
+    /// `.termtexts` proves no word exceeds the suffix cap, vs segments that
+    /// still had to walk them (long word present, or stat unknown).
+    pub n_relaxed_chunk_skipped: AtomicU64,
+    pub n_relaxed_chunk_walked: AtomicU64,
+
     /// Chains handed to each resolve stage.
     pub n_chunk_chains: AtomicU64,
     pub n_word_chains: AtomicU64,
@@ -159,6 +165,7 @@ pub fn reset() {
     for a in [
         &c.ns_single, &c.ns_chunk_walk, &c.ns_chunk_sibling, &c.ns_chunk_resolve, &c.ns_chunk_anchored,
         &c.ns_word_walk, &c.ns_word_sibling, &c.ns_word_resolve,
+        &c.n_relaxed_chunk_skipped, &c.n_relaxed_chunk_walked,
         &c.n_chunk_chains, &c.n_word_chains, &c.n_word_entries, &c.n_word_pairs,
         &c.n_puresep_calls, &c.n_puresep_positions,
         &c.n_bcfs_splits, &c.n_bcfs_fst_reqs, &c.n_bcfs_fst_calls,
@@ -210,9 +217,10 @@ pub fn dump() -> String {
             g(&c.n_fz_window_postings), g(&c.n_fz_window_derive_miss), g(&c.n_fz_spans)));
     }
     s.push_str(&format!(
-        "  chains: chunk={} word={}  word_entries={}  word_pairs={}\n",
+        "  chains: chunk={} word={}  word_entries={}  word_pairs={}  relaxed chunk walk: skipped={} walked={}\n",
         g(&c.n_chunk_chains), g(&c.n_word_chains),
         g(&c.n_word_entries), g(&c.n_word_pairs),
+        g(&c.n_relaxed_chunk_skipped), g(&c.n_relaxed_chunk_walked),
     ));
     s.push_str(&format!(
         "  intermediates_are_pure_sep: {} calls, {} positions scanned\n",

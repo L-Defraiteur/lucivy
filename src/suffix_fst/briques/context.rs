@@ -86,6 +86,14 @@ impl<'a> BriquesContext<'a> {
             && self.word_sfxpost.as_ref().is_some_and(|w| w.num_ordinals() > 0)
     }
 
+    /// True unless `.termtexts` proves every word of this segment fits under
+    /// the word suffix cap. When false, the word pipeline alone reaches every
+    /// in-word occurrence and the relaxed literal can skip the chunk chains.
+    /// Missing file or pre-STATS file → true (pessimistic).
+    pub fn may_have_long_words(&self) -> bool {
+        self.termtexts.as_ref().map_or(true, |t| t.may_have_long_words())
+    }
+
     /// True if sibling-based chain building is available.
     pub fn has_sibling_chains(&self) -> bool {
         self.sibling_v3.is_some() && self.termtexts.is_some()

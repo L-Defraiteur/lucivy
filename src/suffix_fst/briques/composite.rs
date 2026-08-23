@@ -94,13 +94,26 @@ pub fn find_literal_v3(
     } else {
         0
     };
-    // Not skipped in relaxed mode even though the word pipeline covers most
-    // occurrences on its own: a word entry indexes suffixes up to
-    // MAX_SUFFIX_INDEX (256 bytes) plus a tail, so a match deep inside a
-    // 400-byte identifier is only found through the chunk chains (tried on
-    // 23 August: `deepmark` in a synthetic SKU corpus lost 10 of 20). It
-    // would need a per-segment "no word longer than the cap" flag to be safe.
-    {
+    // Relaxed mode: the word pipeline covers every occurrence on its own
+    // EXCEPT matches starting deeper than WORD_SUFFIX_CAP (256 bytes) inside
+    // a word — a word entry indexes that many suffixes plus a tail, so
+    // `deepmark` at the bottom of a 400-byte identifier is only reachable
+    // through the chunk chains (synthetic SKU corpus, 23 August: 10 of 20
+    // lost without them). `.termtexts` now records the longest word of the
+    // segment; when it proves no word reaches the cap, the chunk chains are
+    // pure duplicate work and are skipped. Unknown (old file) → walked.
+    let skip_chunk_chains = !strict_separators
+        && ctx.has_word_pipeline()
+        && !ctx.may_have_long_words()
+        && std::env::var("V3_RELAXED_CHUNK_CHAINS").map_or(true, |v| v != "1");
+    if !strict_separators && ctx.has_word_pipeline() {
+        if skip_chunk_chains {
+            profile::bump(|c| &c.n_relaxed_chunk_skipped, 1);
+        } else {
+            profile::bump(|c| &c.n_relaxed_chunk_walked, 1);
+        }
+    }
+    if !skip_chunk_chains {
         let _t = profile::Timer::start();
         let mut chains = if half > 0 {
             let mut splits = fst_walk::falling_walk_chunks(ctx.reader, query);
