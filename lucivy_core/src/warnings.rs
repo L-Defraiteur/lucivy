@@ -155,10 +155,6 @@ fn regex_warnings(pattern: &str, out: &mut Vec<String>) {
             "{pattern:?} has no bounded match length: candidate documents are scanned \
              whole instead of a window around each literal"));
     }
-    if !pattern.is_ascii() {
-        out.push(format!(
-            "{pattern:?} contains non-ASCII: matching is case-insensitive on ASCII only"));
-    }
 }
 
 /// Index-level warnings: segments the v3 pipeline cannot serve.

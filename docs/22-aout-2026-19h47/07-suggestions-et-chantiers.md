@@ -329,3 +329,34 @@ basculement a révélé, tout corrigé le jour même :
 - `rag3weaverr` d=1 : v2 ne le trouvait pas (« edge case »), v3 oui — attente corrigée.
 - Tests qui copient un répertoire à la main : `drain_merges()` après commit.
 
+## F. Panel de cohérence « requêtes de RAG » — FAIT le 23 août (soir)
+
+`v3_ground_truth_coherence` : 32 requêtes sur rag3db, la forme de ce qu'un RAG de
+code envoie — `std::shared_ptr<binder::Expression>`, `#include "common/types/types.h"`,
+`ku_dynamic_cast<const TARGET*>`, `if (result == nullptr)`, `->`, `::` en strict et
+relaxed ; `sw`/`sws`/`term`/`terms` ; typos dans ces littéraux en fz1/fz2 ; `déjà`,
+`entité`, `成績評価`, `🦆🦆🦆`, `😂😃`, `🧘🏻‍♂️🌍` (ZWJ), `🌍🌦️🍞🚗 movies`. Le harnais a
+gagné les modes ancrés (vérité terrain : séparateur ou bord de fichier avant, et
+après pour `term`) et un repli de casse Unicode dans le grep (il était ASCII : `DÉJÀ`
+comptait comme faux positif alors que le moteur avait raison).
+
+Trois bugs moteur trouvés en une passe, tous dans le strict sur littéraux longs :
+
+1. **Split dont l'overlap contredit la requête** (`TARGET>\n` pour `target*>`) : gardé,
+   il surclassait le vrai `TARGE|T*` (6 consommés contre 5). `falling_walk_chunks`
+   exige maintenant que l'overlap disponible concorde.
+2. **`build_chains_from_splits` ne gardait que le groupe « meilleur consumed »** —
+   c'est-à-dire le token le plus long vu dans le segment, pas celui du document :
+   `Expressi|on` (8) évinçait `Expres|si` (6) alors que le fichier est découpé 6+6.
+   61 fichiers perdus sur `<binder::Expression>`. Maintenant une branche par valeur
+   de consumed (DFS, profondeur ≤ 8, mémo par offset de reste inchangée).
+3. **Repli de casse qui change la longueur** : le signe Kelvin `K` (3 octets) devient
+   `k` (1), le `sti` est compté en minuscules et appliqué aux octets source → `->`
+   décalé de 2 dans `'K' -> 'K'` (re2). `verify_literal` replace la span via la carte
+   octet→source, uniquement quand la source n'est pas ASCII (coût nul sinon).
+
+Après : 32/32 exacts, panel par défaut 15/15, 50k inchangé (`uint64_t` relax 34 ms,
+`include` 40, `__init` 47, `kmallc` 45). Piste d'optim notée : `verify_literal`
+pèse 40-70 % du CPU sur les requêtes à gros volume (`->` : 281 ms sur 129 de wall) —
+nouvelle ligne profile `verify_literal (window+contains)`.
+

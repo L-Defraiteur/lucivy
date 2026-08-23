@@ -60,6 +60,8 @@ V3_QUERIES='valeur:mode,valeur:mode,...'
 | `relax` | contains, séparateurs ignorés |
 | `fz1` `fz2` `fz3` | fuzzy (Levenshtein ≤ d), toujours relaxed |
 | `rx` | regex (syntaxe du crate `regex`) |
+| `sw` / `sws` | startsWith (le match commence un mot), relaxed / strict |
+| `term` / `terms` | mots entiers (startsWith + fin de mot), relaxed / strict |
 
 Le mode est ce qui suit le **dernier** `:`, donc `std::[a-z_]+_ptr:rx` va bien.
 Les blancs sont avalés par le trim : écrire `\s` (espace), `\t`, `\n`. Exemple de
@@ -158,6 +160,8 @@ Policy 10k : `include` 79 ms, `__init` relax 85 ms.
 cargo test --release --lib                                  # 3 échecs pré-existants connus (fixtures mortes)
 cargo test --release -p lucivy-core --test test_sfx_v3_pipeline   # 25 tests, 3 s
 cargo test --release -p lucivy-core --test test_sfx_v3_ground_truth  # rag3db, 45 s
+#   dont v3_ground_truth_coherence : panel fixe « requêtes de RAG » (littéraux longs à
+#   séparateurs, sw/term, typos dedans, accents, CJK, emoji/ZWJ), 32 lignes, ~10 s
 cargo test --release -p lucivy-core --test test_fuzzy_ground_truth --test test_fuzzy_monotonicity
 cargo test --release -p luciole --lib
 ```

@@ -46,27 +46,19 @@ const RX: u8 = 255;
 
 /// `V3_QUERIES=a:strict,b:relax,c:fz1,d:fz2,e:rx` → (value, strict, distance).
 /// Fuzzy is always relaxed (the query is separator-stripped before matching).
-fn query_spec() -> Option<Vec<(&'static str, bool, u8)>> {
+fn query_spec() -> Option<Vec<GroundTruthQuery>> {
     std::env::var("V3_QUERIES").ok().map(|spec| {
         spec.split(',')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .map(|item| {
-                let (value, strict, distance) = match item.rsplit_once(':') {
-                    Some((v, "relax")) => (v.trim(), false, 0),
-                    Some((v, "strict")) => (v.trim(), true, 0),
-                    Some((v, "fz1")) => (v.trim(), false, 1),
-                    Some((v, "fz2")) => (v.trim(), false, 2),
-                    Some((v, "fz3")) => (v.trim(), false, 3),
-                    // regex: distance 255 is the marker, see GroundTruthQuery
-                    Some((v, "rx")) => (v.trim(), false, RX),
-                    _ => (item, true, 0),
-                };
+                let (value, mode) = item.rsplit_once(':').unwrap_or((item, "strict"));
                 // Whitespace cannot survive the trim: `\s`, `\t`, `\n` stand
                 // for a space, a tab, a newline.
-                let value = value.replace("\\s", " ").replace("\\t", "\t").replace("\\n", "\n");
+                let value = value.trim().replace("\\s", " ").replace("\\t", "\t").replace("\\n", "\n");
                 let leaked: &'static str = Box::leak(value.into_boxed_str());
-                (leaked, strict, distance)
+                GroundTruthQuery::from_mode(leaked, mode)
+                    .unwrap_or_else(|| panic!("unknown mode {mode:?} in V3_QUERIES item {item:?}"))
             })
             .collect()
     })
@@ -416,50 +408,42 @@ fn grep_spans(files: &[(String, String)], needle: &str, strict: bool) -> GrepSpa
     let mut docs = HashSet::new();
     let mut spans = HashSet::new();
 
-    let needle_l: Vec<u8> = if strict {
-        needle.to_ascii_lowercase().into_bytes()
-    } else {
-        strip_seps(&needle.to_ascii_lowercase()).into_bytes()
+    // Unicode lowercase, like the engine (`DÉJÀ` matches `déjà`); separators
+    // stripped in relaxed mode. Each byte of the folded text remembers the
+    // source offset and length of the char it came from, so spans are
+    // reported on the original bytes even where folding changes the length.
+    let fold = |text: &str, strip: bool| -> (Vec<u8>, Vec<(usize, usize)>) {
+        let mut out = Vec::with_capacity(text.len());
+        let mut back = Vec::with_capacity(text.len());
+        for (off, ch) in text.char_indices() {
+            if strip && !is_content_char(ch) { continue; }
+            let n = ch.len_utf8();
+            for lc in ch.to_lowercase() {
+                let mut buf = [0u8; 4];
+                for b in lc.encode_utf8(&mut buf).bytes() {
+                    out.push(b);
+                    back.push((off, n));
+                }
+            }
+        }
+        (out, back)
     };
+    let (needle_l, _) = fold(needle, !strict);
     if needle_l.is_empty() { return GrepSpans { docs, spans }; }
 
     for (i, (rel, _)) in files.iter().enumerate() {
         let Ok(bytes) = std::fs::read(root.join(rel)) else { continue };
-        let lower: Vec<u8> = bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
-
-        if strict {
-            let mut hit = false;
-            for start in find_all(&lower, &needle_l) {
-                spans.insert((i, start, start + needle_l.len()));
-                hit = true;
-            }
-            if hit { docs.insert(i); }
-        } else {
-            // Content bytes only, each remembering where it came from.
-            let text = String::from_utf8_lossy(&lower);
-            let mut stripped: Vec<u8> = Vec::with_capacity(lower.len());
-            let mut back: Vec<usize> = Vec::with_capacity(lower.len());
-            for (off, ch) in text.char_indices() {
-                if is_content_char(ch) {
-                    let mut buf = [0u8; 4];
-                    for (k, b) in ch.encode_utf8(&mut buf).bytes().enumerate() {
-                        stripped.push(b);
-                        back.push(off + k);
-                    }
-                }
-            }
-            let mut hit = false;
-            for start in find_all(&stripped, &needle_l) {
-                let end_idx = start + needle_l.len() - 1;
-                let from = back[start];
-                let last = back[end_idx];
-                // to = end of the char holding the last content byte
-                let to = last + text[last..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-                spans.insert((i, from, to));
-                hit = true;
-            }
-            if hit { docs.insert(i); }
+        let text = String::from_utf8_lossy(&bytes);
+        let (hay, back) = fold(&text, !strict);
+        let mut hit = false;
+        for start in find_all(&hay, &needle_l) {
+            let end_idx = start + needle_l.len() - 1;
+            let from = back[start].0;
+            let (last, n) = back[end_idx];
+            spans.insert((i, from, last + n));
+            hit = true;
         }
+        if hit { docs.insert(i); }
     }
     GrepSpans { docs, spans }
 }
@@ -625,6 +609,18 @@ fn search_v3_d(
     strict_separators: bool,
     distance: u8,
 ) -> SearchResult {
+    search_v3_q(handle, files, value, strict_separators, distance, false, false)
+}
+
+fn search_v3_q(
+    handle: &LucivyHandle,
+    files: &[(String, String)],
+    value: &str,
+    strict_separators: bool,
+    distance: u8,
+    anchor: bool,
+    exact: bool,
+) -> SearchResult {
     let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
     let config = QueryConfig {
         query_type: "contains".into(),
@@ -633,6 +629,8 @@ fn search_v3_d(
         strict_separators: Some(strict_separators),
         distance: if distance > 0 && distance != RX { Some(distance) } else { None },
         regex: if distance == RX { Some(true) } else { None },
+        anchor_start: if anchor { Some(true) } else { None },
+        exact_match: if exact { Some(true) } else { None },
         ..Default::default()
     };
     let query = query::build_query(&config, &handle.schema, &handle.index, Some(Arc::clone(&sink))).unwrap();
@@ -774,18 +772,67 @@ struct GroundTruthQuery {
     text: &'static str,
     strict_sep: bool,
     distance: u8,
+    /// `startsWith`: the occurrence begins a word (separator or file start before it).
+    anchor: bool,
+    /// `term`: the occurrence is whole words (anchor + separator or file end after it).
+    exact: bool,
 }
 
 impl GroundTruthQuery {
-    fn strict(text: &'static str) -> Self { Self { text, strict_sep: true, distance: 0 } }
-    fn relaxed(text: &'static str) -> Self { Self { text, strict_sep: false, distance: 0 } }
-    fn fuzzy(text: &'static str, distance: u8) -> Self { Self { text, strict_sep: false, distance } }
+    fn strict(text: &'static str) -> Self { Self { text, strict_sep: true, distance: 0, anchor: false, exact: false } }
+    fn relaxed(text: &'static str) -> Self { Self { text, strict_sep: false, distance: 0, anchor: false, exact: false } }
+    fn fuzzy(text: &'static str, distance: u8) -> Self { Self { text, strict_sep: false, distance, anchor: false, exact: false } }
     fn is_regex(&self) -> bool { self.distance == RX }
+    /// Mode suffix of `V3_QUERIES`: `strict`, `relax`, `fz1`-`fz3`, `rx`,
+    /// `sw` (startsWith, relaxed), `sws` (startsWith, strict), `term`
+    /// (whole words, relaxed), `terms` (whole words, strict).
+    fn from_mode(text: &'static str, mode: &str) -> Option<Self> {
+        Some(match mode {
+            "strict" => Self::strict(text),
+            "relax" => Self::relaxed(text),
+            "fz1" => Self::fuzzy(text, 1),
+            "fz2" => Self::fuzzy(text, 2),
+            "fz3" => Self::fuzzy(text, 3),
+            "rx" => Self::fuzzy(text, RX),
+            "sw" => Self { anchor: true, ..Self::relaxed(text) },
+            "sws" => Self { anchor: true, ..Self::strict(text) },
+            "term" => Self { anchor: true, exact: true, ..Self::relaxed(text) },
+            "terms" => Self { anchor: true, exact: true, ..Self::strict(text) },
+            _ => return None,
+        })
+    }
     fn mode_label(&self) -> String {
         if self.is_regex() { "rx".into() }
         else if self.distance > 0 { format!("fz{}", self.distance) }
+        else if self.exact { if self.strict_sep { "terms".into() } else { "term".into() } }
+        else if self.anchor { if self.strict_sep { "sws".into() } else { "sw".into() } }
         else if self.strict_sep { "strict".into() } else { "relax".into() }
     }
+}
+
+/// Word-boundary filter for the anchored modes, on the source bytes: a span
+/// starts a word when the character before it is a separator (or the file
+/// starts there), and is a whole word when the character after it is one too
+/// (or the file ends there). Separators are ASCII non-alphanumerics, exactly
+/// the engine's `is_content_char`.
+fn filter_boundaries(gt: GrepSpans, files: &[(String, String)], anchor: bool, exact: bool) -> GrepSpans {
+    if !anchor && !exact { return gt; }
+    let root = repo_path();
+    let root = std::path::Path::new(&root);
+    let mut cache: HashMap<usize, Vec<u8>> = HashMap::new();
+    let mut spans = HashSet::new();
+    let mut docs = HashSet::new();
+    for (fi, from, to) in gt.spans {
+        let bytes = cache.entry(fi).or_insert_with(|| std::fs::read(root.join(&files[fi].0)).unwrap_or_default());
+        let text = String::from_utf8_lossy(bytes);
+        let before_ok = from == 0 || text.get(..from).and_then(|t| t.chars().last()).map_or(true, |c| !is_content_char(c));
+        let after_ok = to >= bytes.len() || text.get(to..).and_then(|t| t.chars().next()).map_or(true, |c| !is_content_char(c));
+        if before_ok && (!exact || after_ok) {
+            spans.insert((fi, from, to));
+            docs.insert(fi);
+        }
+    }
+    GrepSpans { docs, spans }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────
@@ -811,13 +858,7 @@ fn v3_ground_truth_contains() {
     // (rag3db, std::unique_ptr, ku_dynamic_cast) returns 0 hits on the kernel, which
     // measures nothing. `V3_QUERIES` takes a comma-separated list of `value` or
     // `value:relax` entries.
-    let custom_queries: Option<Vec<GroundTruthQuery>> = query_spec().map(|v| v.into_iter()
-        .map(|(value, strict, distance)| {
-            if distance > 0 { GroundTruthQuery::fuzzy(value, distance) }
-            else if strict { GroundTruthQuery::strict(value) }
-            else { GroundTruthQuery::relaxed(value) }
-        })
-        .collect());
+    let custom_queries: Option<Vec<GroundTruthQuery>> = query_spec();
 
     let default_queries: Vec<GroundTruthQuery> = vec![
         // Simple words — both modes should agree
@@ -841,7 +882,71 @@ fn v3_ground_truth_contains() {
     ];
 
     let queries = custom_queries.unwrap_or(default_queries);
-    eprintln!("  {} queries, result cap {}", queries.len(), result_limit(&files));
+    run_panel(&handle, &files, &queries, &mut report);
+}
+
+/// The coherence panel: the shape of queries a code RAG actually sends —
+/// long literals full of separators, anchored and whole-word forms, typos
+/// in them, and the non-ASCII the corpus really contains (accents, CJK,
+/// emoji and ZWJ sequences). Every line is exact against the disk or the
+/// test fails. Not a benchmark: rag3db, ~5 s.
+#[test]
+fn v3_ground_truth_coherence() {
+    let files = collect_files(5000);
+    if files.is_empty() { return; }
+    let handle = create_v3_index(&files);
+    let mut report = std::fs::File::create("/tmp/v3_coherence_report.txt").unwrap();
+    let q = |t: &'static str, m: &str| GroundTruthQuery::from_mode(t, m).unwrap();
+    let queries = query_spec().unwrap_or_else(|| vec![
+        // Long literals with separators, strict and relaxed
+        q("std::shared_ptr<binder::Expression>", "strict"),
+        q("std::shared_ptr<binder::Expression>", "relax"),
+        q("#include \"common/types/types.h\"", "strict"),
+        q("#include \"common/types/types.h\"", "relax"),
+        q("ku_dynamic_cast<const TARGET*>", "strict"),
+        q("if (result == nullptr)", "strict"),
+        q("if (result == nullptr)", "relax"),
+        q("->", "strict"),
+        q("::", "strict"),
+        // Anchored and whole-word
+        q("lock", "sw"),
+        q("Expression", "sw"),
+        q("shared_ptr", "sws"),
+        q("std::shared", "sws"),
+        q("ptr", "term"),
+        q("Expression", "term"),
+        q("unique_ptr", "terms"),
+        // Typos inside long separated literals
+        q("std::shared_ptr<bindr::Expression>", "fz1"),
+        q("ku_dynamc_cast", "fz1"),
+        q("client_contxt.h", "fz1"),
+        q("unique_ptr", "fz2"),
+        // Non-ASCII: accents, CJK, emoji, ZWJ sequence
+        q("déjà", "strict"),
+        q("déjà", "relax"),
+        q("entité", "sw"),
+        q("成績評価", "strict"),
+        q("成績評価", "fz1"),
+        q("🦆🦆🦆", "strict"),
+        q("🦆🦆🦆", "relax"),
+        q("😂😃", "relax"),
+        q("🧘🏻‍♂️🌍", "strict"),
+        q("🌍🌦️🍞🚗 movies", "strict"),
+        q("🍞🚗", "sw"),
+    ]);
+    run_panel(&handle, &files, &queries, &mut report);
+}
+
+fn run_panel(
+    handle: &LucivyHandle,
+    files: &[(String, String)],
+    queries: &[GroundTruthQuery],
+    report: &mut std::fs::File,
+) {
+    let files = files;
+    let handle = handle;
+    let mut report = report;
+    eprintln!("  {} queries, result cap {}", queries.len(), result_limit(files));
 
     let mut pass = 0u32;
     let mut fail = 0u32;
@@ -851,21 +956,21 @@ fn v3_ground_truth_contains() {
     eprintln!("{:<35} {:>5} {:>8} {:>8} {:>8}", "Query", "Mode", "Grep", "V3", "Status");
     eprintln!("{}", "-".repeat(70));
 
-    for q in &queries {
+    for q in queries {
         let mode_label = q.mode_label();
         // Time the two independently. They used to share one timer, so every
         // reported latency silently carried a full grep over the corpus — a
         // constant that dilutes any engine-side comparison.
         let t_grep = std::time::Instant::now();
-        let gt = if q.is_regex() { grep_spans_regex(&files, q.text) }
-                 else if q.distance > 0 { grep_spans_fuzzy(&files, q.text, q.distance) }
-                 else { grep_spans(&files, q.text, q.strict_sep) };
+        let gt = if q.is_regex() { grep_spans_regex(files, q.text) }
+                 else if q.distance > 0 { grep_spans_fuzzy(files, q.text, q.distance) }
+                 else { filter_boundaries(grep_spans(files, q.text, q.strict_sep), files, q.anchor, q.exact) };
         let grep_ms = t_grep.elapsed().as_secs_f64() * 1000.0;
         let grep_set = gt.docs;
 
         profile::reset();
         let t = std::time::Instant::now();
-        let v3_result = search_v3_d(&handle, &files, q.text, q.strict_sep, q.distance);
+        let v3_result = search_v3_q(handle, files, q.text, q.strict_sep, q.distance, q.anchor, q.exact);
         let ms = t.elapsed().as_secs_f64() * 1000.0;
 
         let search_ms = LAST_SEARCH_MS.with(|c| c.get());
@@ -1796,7 +1901,7 @@ fn perf_shape_sharded() {
     let files = collect_files(5000);
     if files.is_empty() { return; }
 
-    let queries: Vec<(&str, bool)> = query_spec().map(|v| v.into_iter().map(|(a, b, _)| (a, b)).collect()).unwrap_or_else(|| vec![
+    let queries: Vec<(&str, bool)> = query_spec().map(|v| v.into_iter().map(|q| (q.text, q.strict_sep)).collect()).unwrap_or_else(|| vec![
         ("function", true), ("function", false),
         ("include", true),
         ("uint64_t", false),

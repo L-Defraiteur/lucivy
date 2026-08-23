@@ -311,6 +311,7 @@ fn second_token_anchored_v3(
             .map(|c| c.raw_ordinal).collect();
         single_ords.sort_unstable();
         single_ords.dedup();
+        let n_single = single_ords.len();
         if !single_ords.is_empty() {
             chains.push(TokenChainV3 {
                 ordinals: vec![std::sync::Arc::new(single_ords)],
@@ -320,12 +321,28 @@ fn second_token_anchored_v3(
             });
         }
         let mut splits = fst_walk::falling_walk_chunks(ctx.reader, rest);
+        let n_splits_all = splits.len();
         splits.retain(|s| s.parent.sti == 0);
         chains.extend(fst_walk::cross_chunk_chain_from_splits(ctx.reader, &splits, rest));
+        if ctx.debug {
+            eprintln!("[anch] h={h} head={head:?} rest={rest:?} cands={} single={} splits={}/{} chains={}",
+                cands.len(), n_single, splits.len(), n_splits_all, chains.len());
+            for sp in splits.iter().take(4) {
+                eprintln!("[anch]   split parent={:?} sti={} own={} consumed={} rem_start={} ovl_ok={}",
+                    tt.text(sp.parent.raw_ordinal as u32), sp.parent.sti, sp.parent.own_len,
+                    sp.query_consumed, sp.remainder_start, sp.overlap_validated);
+            }
+            for c in chains.iter().take(3) {
+                let texts: Vec<String> = c.ordinals.iter().map(|alts| alts.iter().take(3)
+                    .map(|&o| format!("{:?}", tt.text(o as u32).unwrap_or("?"))).collect::<Vec<_>>().join("|")).collect();
+                eprintln!("[anch]   chain sti={} consumed={} last={} len={} toks={:?}", c.first_sti, c.total_query_consumed, c.last_consumed, c.ordinals.len(), texts);
+            }
+        }
         if chains.is_empty() { continue; }
 
         let tail_matches = resolve::resolve_chains_v3_posmap(
             &chains, ctx.resolver, ctx.filter_docs, pm);
+        if ctx.debug { eprintln!("[anch]   tail_matches={}", tail_matches.len()); }
 
         for m in tail_matches {
             if m.position == 0 { continue; }
@@ -844,10 +861,27 @@ pub(super) fn rebuild_window(
     strip_separators: bool,
     out: &mut String,
 ) -> bool {
+    rebuild_window_src(ctx, doc_id, first_pos, last_pos, margin, strip_separators, out).is_some()
+}
+
+/// `rebuild_window`, also reporting whether the SOURCE text of the window
+/// was pure ASCII. The window itself is lowercased, and folding can turn a
+/// non-ASCII char into ASCII (the Kelvin sign to `k`), so the window cannot
+/// answer that question about its source.
+pub(super) fn rebuild_window_src(
+    ctx: &BriquesContext<'_>,
+    doc_id: DocId,
+    first_pos: u32,
+    last_pos: u32,
+    margin: u32,
+    strip_separators: bool,
+    out: &mut String,
+) -> Option<bool> {
     let (Some(pm), Some(tt)) = (ctx.posmap.as_ref(), ctx.termtexts.as_ref()) else {
-        return false;
+        return None;
     };
     out.clear();
+    let mut ascii = true;
     let from = first_pos.saturating_sub(margin);
     let to = last_pos.saturating_add(margin);
     for pos in from..=to {
@@ -855,16 +889,18 @@ pub(super) fn rebuild_window(
         let Some(text) = tt.text(ord) else { break };
         let own = tt.meta(ord).map(|m| m.own_len as usize).unwrap_or(text.len());
         let end = own.min(text.len());
+        let src = &text[..end];
+        if !src.is_ascii() { ascii = false; }
         // Lowercase to match the index: FST keys are built lowercased and the
         // query arrives lowercased, so the engine is case-insensitive for fuzzy.
         // termtexts keeps the ORIGINAL case, so comparing raw bytes here rejects
         // "Functions" for the query "functin" — a match the index did find.
-        for c in text[..end].chars() {
+        for c in src.chars() {
             if strip_separators && !is_content_char(c) { continue; }
             for lc in c.to_lowercase() { out.push(lc); }
         }
     }
-    !out.is_empty()
+    if out.is_empty() { None } else { Some(ascii) }
 }
 
 /// `rebuild_window` with a back-map: for every byte of `out`, the source

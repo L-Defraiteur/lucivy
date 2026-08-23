@@ -215,6 +215,19 @@ pub fn falling_walk_chunks(
                 let split_byte = parent.own_len as usize - parent.sti as usize;
                 if prefix_len >= split_byte {
                     let overlap_consumed = prefix_len - split_byte;
+                    // The key carries the next token's first bytes. When the
+                    // query goes on past this token and those bytes are
+                    // there, they must agree: a split of `TARGET>\n` for
+                    // `target*>` contradicts itself at `*`. Kept, it outranked
+                    // the real `TARGE|T*` split (6 bytes consumed against 5)
+                    // and `build_chains_from_splits` keeps only the best
+                    // consumed — `<const TARGET*>` then found nothing in 17
+                    // rag3db files (coherence panel, 23 August).
+                    let available = (parent.overlap_len as usize)
+                        .min(query_bytes.len() - split_byte);
+                    if overlap_consumed < available {
+                        return None;
+                    }
                     Some(SplitCandidateV3 {
                         query_consumed: split_byte,
                         parent: parent.clone(),
@@ -432,8 +445,16 @@ fn build_chains_from_splits(
     // `kmalloc`, 25x on `uint64_t`, 78x on `include`, for a stage that was
     // 78-96% of query time.
     let mut fst_memo: FnvHashMap<usize, std::sync::Arc<Vec<u64>>> = FnvHashMap::default();
-    let mut walk_memo: FnvHashMap<usize, Option<(std::sync::Arc<Vec<u64>>, usize, usize)>> =
-        FnvHashMap::default();
+    // Per remainder offset: the next-token alternatives, grouped by how much
+    // of the remainder each group consumes (`ordinals`, consumed, where the
+    // rest starts). One chain position holds ordinals that all consume the
+    // same bytes, so groups with different consumed are different BRANCHES,
+    // not alternatives — they used to be cut down to the first group ("best
+    // consumed"), which is the longest token seen, not the one in the
+    // document: `expression>` over `Expressi|on` (8) and `Expres|si` (6),
+    // where the file is chunked 6+6, found nothing in 61 rag3db files.
+    type Group = (std::sync::Arc<Vec<u64>>, usize, usize);
+    let mut walk_memo: FnvHashMap<usize, std::sync::Arc<Vec<Group>>> = FnvHashMap::default();
 
     super::profile::bump(|c| &c.n_bcfs_splits, splits.len() as u64);
 
@@ -449,13 +470,24 @@ fn build_chains_from_splits(
             continue;
         }
 
-        let mut positions: Vec<std::sync::Arc<Vec<u64>>> =
+        // Depth-first over the branches; `stack` holds (positions so far,
+        // remainder offset, depth, consumed by the last position).
+        let head: Vec<std::sync::Arc<Vec<u64>>> =
             vec![std::sync::Arc::new(vec![split.parent.raw_ordinal])];
-        let mut rem_off = safe_start;
-        let mut depth = 0;
-        let mut last_consumed = split.query_consumed;
+        let mut stack: Vec<(Vec<std::sync::Arc<Vec<u64>>>, usize, usize, usize)> =
+            vec![(head, safe_start, 0, split.query_consumed)];
 
-        while rem_off < query_lower.len() && depth < MAX_CHAIN_DEPTH {
+        while let Some((positions, rem_off, depth, last_consumed)) = stack.pop() {
+            if rem_off >= query_lower.len() {
+                chains.push(TokenChainV3 {
+                    ordinals: positions,
+                    first_sti: split.parent.sti,
+                    total_query_consumed: query.len(),
+                    last_consumed,
+                });
+                continue;
+            }
+            if depth >= MAX_CHAIN_DEPTH { continue; }
             let rem = &query_lower[rem_off..];
 
             super::profile::bump(|c| &c.n_bcfs_fst_reqs, 1);
@@ -470,11 +502,16 @@ fn build_chains_from_splits(
             }
             let hit = &fst_memo[&rem_off];
             if !hit.is_empty() {
-                positions.push(std::sync::Arc::clone(hit));
                 // This position swallows the whole remainder.
-                last_consumed = rem.len();
-                rem_off = query_lower.len();
-                break;
+                let mut positions = positions;
+                positions.push(std::sync::Arc::clone(hit));
+                chains.push(TokenChainV3 {
+                    ordinals: positions,
+                    first_sti: split.parent.sti,
+                    total_query_consumed: query.len(),
+                    last_consumed: rem.len(),
+                });
+                continue;
             }
 
             super::profile::bump(|c| &c.n_bcfs_walk_reqs, 1);
@@ -491,52 +528,40 @@ fn build_chains_from_splits(
                 // occurrence sat in the window); the span was wrong in 8% of
                 // `__init` highlights on the kernel.
                 sub_splits.retain(|s| s.parent.sti == 0);
-                let entry = if sub_splits.is_empty() {
-                    None
-                } else {
-                    let mut unique_ords: Vec<u64> = if filter_best_consumed {
-                        // Chunk pipeline: marker entries create multi-parent nodes at
-                        // different FST positions → different consumed values. Only keep
-                        // ordinals from the best consumed to avoid mixing chain positions.
-                        let best_consumed = sub_splits[0].query_consumed;
-                        sub_splits.iter()
-                            .filter(|s| s.query_consumed == best_consumed)
-                            .map(|s| s.parent.raw_ordinal)
-                            .collect()
-                    } else {
-                        // Word pipeline: word-stripped entries have unique prefixes,
-                        // different consumed values are rare. Collect all.
-                        sub_splits.iter()
-                            .map(|s| s.parent.raw_ordinal)
-                            .collect()
-                    };
-                    unique_ords.sort_unstable();
-                    unique_ords.dedup();
-                    let best = &sub_splits[0];
-                    Some((std::sync::Arc::new(unique_ords), best.query_consumed, best.remainder_start))
-                };
-                walk_memo.insert(rem_off, entry);
+                let mut groups: Vec<Group> = Vec::new();
+                if filter_best_consumed {
+                    // Chunk pipeline: one group per distinct consumed, each a
+                    // branch of its own (sub_splits is sorted by consumed).
+                    let mut i = 0;
+                    while i < sub_splits.len() {
+                        let consumed = sub_splits[i].query_consumed;
+                        let rem_start = sub_splits[i].remainder_start;
+                        let mut ords: Vec<u64> = Vec::new();
+                        while i < sub_splits.len() && sub_splits[i].query_consumed == consumed {
+                            ords.push(sub_splits[i].parent.raw_ordinal);
+                            i += 1;
+                        }
+                        ords.sort_unstable();
+                        ords.dedup();
+                        groups.push((std::sync::Arc::new(ords), consumed, rem_start));
+                    }
+                } else if let Some(best) = sub_splits.first() {
+                    // Word pipeline: word-stripped entries have unique prefixes,
+                    // different consumed values are rare. Collect all.
+                    let mut ords: Vec<u64> = sub_splits.iter().map(|s| s.parent.raw_ordinal).collect();
+                    ords.sort_unstable();
+                    ords.dedup();
+                    groups.push((std::sync::Arc::new(ords), best.query_consumed, best.remainder_start));
+                }
+                walk_memo.insert(rem_off, std::sync::Arc::new(groups));
             }
-            let Some((unique_ords, best_consumed, best_rem_start)) =
-                walk_memo[&rem_off].as_ref()
-                    .map(|(o, c, r)| (std::sync::Arc::clone(o), *c, *r))
-            else {
-                break;
-            };
-
-            positions.push(unique_ords);
-            last_consumed = best_consumed;
-            rem_off += snap_to_char_boundary(rem, best_rem_start);
-            depth += 1;
-        }
-
-        if rem_off >= query_lower.len() {
-            chains.push(TokenChainV3 {
-                ordinals: positions,
-                first_sti: split.parent.sti,
-                total_query_consumed: query.len(),
-                last_consumed,
-            });
+            let groups = std::sync::Arc::clone(&walk_memo[&rem_off]);
+            for (ords, consumed, rem_start) in groups.iter() {
+                let mut positions = positions.clone();
+                positions.push(std::sync::Arc::clone(ords));
+                let next = rem_off + snap_to_char_boundary(rem, *rem_start);
+                stack.push((positions, next, depth + 1, *consumed));
+            }
         }
     }
 

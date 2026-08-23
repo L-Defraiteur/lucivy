@@ -15,6 +15,7 @@ use crate::DocId;
 
 use super::context::BriquesContext;
 use super::composite;
+use super::profile;
 use super::resolve::MatchV3;
 
 /// Maximum query length in bytes. Queries longer than this are rejected.
@@ -243,14 +244,69 @@ fn verify_literal(
     // match that starts or ends inside a neighbour.
     let margin = 1u32;
     let mut window = String::new();
-    matches.retain(|m| {
+    let mut back: Vec<(u32, u8)> = Vec::new();
+    let mut refolded = false;
+    let _t = profile::Timer::start();
+    matches.retain_mut(|m| {
         let last_pos = m.position + m.span.saturating_sub(1);
-        if !composite::rebuild_window(ctx, m.doc_id, m.position, last_pos,
-                                      margin, strip, &mut window) {
+        let Some(src_ascii) = composite::rebuild_window_src(ctx, m.doc_id, m.position, last_pos,
+                                                            margin, strip, &mut window) else {
             return true; // cannot rebuild — keep, do not invent a rejection
+        };
+        if !window.contains(&needle) { return false; }
+        // ASCII folds byte for byte: the offsets are right, and the
+        // back-map below is the expensive part — only build it when the
+        // source holds a char that could fold to another length.
+        if src_ascii { return true; }
+        if composite::rebuild_window_opts(ctx, m.doc_id, m.position, last_pos,
+                                          margin, strip, true, 64, &mut window, &mut back).is_none() {
+            return true;
         }
-        window.contains(&needle)
+
+        // Offsets were derived from suffix indexes counted on the LOWERCASED
+        // key, and applied to the source bytes. They agree unless a char
+        // folds to a different byte length — the Kelvin sign `K` (3 bytes)
+        // to `k` (1), `İ` (2) to `i̇` (3). `'K' -> 'K'` then reported `->`
+        // two bytes early (re2 unicode_casefold.h, coherence panel). The
+        // back-map knows the source offset of every folded byte: when the
+        // window folded to a different length, re-place the span on the
+        // occurrence the match pointed at.
+        let mut src_len = 0usize;
+        let mut last_src = u32::MAX;
+        for &(src, n) in &back {
+            if src != last_src { src_len += n as usize; last_src = src; }
+        }
+        if src_len == window.len() { return true; }
+        let mut from = 0usize;
+        let mut best: Option<(u32, u32)> = None;
+        while let Some(rel) = window[from..].find(&needle) {
+            let at = from + rel;
+            let (s_from, _) = back[at];
+            let (s_last, n) = back[at + needle.len() - 1];
+            let cand = (s_from, s_last + n as u32);
+            best = match best {
+                None => Some(cand),
+                Some(b) if (cand.0 as i64 - m.byte_from as i64).abs()
+                    < (b.0 as i64 - m.byte_from as i64).abs() => Some(cand),
+                b => b,
+            };
+            from = at + 1;
+            while from < window.len() && !window.is_char_boundary(from) { from += 1; }
+        }
+        if let Some((bf, bt)) = best {
+            if bf != m.byte_from || bt != m.byte_to {
+                m.byte_from = bf;
+                m.byte_to = bt;
+                refolded = true;
+            }
+        }
+        true
     });
+    _t.stop(|c| &c.ns_verify);
+    if refolded {
+        matches.sort_by_key(|m| (m.doc_id, m.position, m.byte_from));
+        matches.dedup_by_key(|m| (m.doc_id, m.position, m.byte_from));
+    }
 }
 
 // ─── fuzzy_v3 ─────────────────────────────────────────────────────────────

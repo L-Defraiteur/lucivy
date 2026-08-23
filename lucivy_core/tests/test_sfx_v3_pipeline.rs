@@ -1128,3 +1128,38 @@ fn v3_relaxed_sku_corpus_matches_grep() {
     }
     assert!(bad.is_empty(), "relaxed differs from grep on {bad:?}");
 }
+
+/// Strict literals that enter their first token through its separator zone
+/// and then run over three chunks: `<const TARGET*>` over
+/// `cast<const TARGET*>(this)`. Found by the rag3db coherence panel (0 of
+/// 17 files), along with `<binder::Expression>`.
+#[test]
+fn v3_strict_sep_head_three_chunks() {
+    let docs = [
+        "return common::ku_dynamic_cast<const TARGET*>(this);",
+        "std::shared_ptr<binder::Expression> query;",
+        "auto x = f<T>(y);",
+        // Noise: other continuations of the same words, so the walk has
+        // several alternatives per position like on a real corpus.
+        "const TARGET target) targeti TARGET; TARGETCB targets targetTy",
+        "binder::ExpressionType binder::Expressions Expression; ExpressionUtil",
+        "const Target* const TARGET& <const TARGET>",
+        // The real layout from rag3db function.h, where the panel missed it.
+        "    template<class TARGET>\n    const TARGET* constPtrCast() const {\n        return common::ku_dynamic_cast<const TARGET*>(this);\n    }\n    template<class TARGET>\n    TARGET* ptrCast() {\n        return common::ku_dynamic_cast<TARGET*>(this);\n    }\n",
+        // Real layout from rag3db gds.h (61 files missed).
+        "    static std::shared_ptr<binder::Expression> bindRelOutput(const TableFuncBindInput& bindInput,\n        std::shared_ptr<binder::NodeExpression> dstNode,\n        const std::optional<std::string>& name = std::nullopt);\n    static std::shared_ptr<binder::Expression> bindNodeOutput(const TableFuncBindInput& bindInput,\n",
+    ];
+    let handle = make_handle(&docs);
+    for q in [
+        "<const TARGET*>", "const TARGET*>", "<const TARGET", "<const TARGET*",
+        "<binder::Expression>", "<binder::Expression", "binder::Expression>", "<T>(y",
+    ] {
+        let spans = doc_spans(&handle, q, true, docs.len());
+        let got: Vec<(u64, Vec<[usize; 2]>)> = spans.into_iter().collect();
+        let expect: Vec<(u64, Vec<[usize; 2]>)> = docs.iter().enumerate()
+            .map(|(i, d)| (i as u64, grep_strict(d, q)))
+            .filter(|(_, v)| !v.is_empty())
+            .collect();
+        assert_eq!(got, expect, "strict {q:?}");
+    }
+}
