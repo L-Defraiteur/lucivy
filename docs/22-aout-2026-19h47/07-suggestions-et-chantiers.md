@@ -135,6 +135,16 @@ n'est pas d'accélérer les gros segments, c'est de ne pas en fabriquer : voir B
 parallélisation intra-segment reste possible (posmap par doc, chaînes par plage de
 docs) mais n'est plus prioritaire.
 
+### B2 bis. Le contains sur littéraux courts en relaxed
+
+**Mesuré** : `inc` relax = 120 ms CPU sur rag3db, 26 000 chaînes chunk à travers les
+séparateurs, pour 20 677 spans ; c'est ce qui borne le mode `pieces` du fuzzy.
+**Essayé** : désactiver les chaînes chunk en relaxed (le pipeline word couvre le
+reste) — faux : les entrées word n'indexent que 256 octets de suffixes + une queue,
+`deepmark` au fond d'un identifiant de 400 octets perd 10 occurrences sur 20
+(`v3_relaxed_sku_corpus_matches_grep`). Voie possible : un drapeau par segment
+« aucun mot plus long que le plafond », posé à l'indexation, qui autorise le saut.
+
 ### B3. Le chemin ancré sur le deuxième token coûte parfois plus qu'il n'économise
 
 **Mesuré** : `net_device` chunk walk 245 → 67 ms CPU et DFS 246 → 6 ms, mais l'ancrage

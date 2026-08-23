@@ -1011,3 +1011,95 @@ fn v3_fuzzy_span_inside_long_token() {
     }
     assert!(bad.is_empty(), "{bad:#?}");
 }
+
+/// Relaxed ground truth on a synthetic text: lowercase, separators stripped,
+/// every occurrence mapped back to source bytes (same rules as the harness).
+fn grep_relaxed(text: &str, needle: &str) -> Vec<[usize; 2]> {
+    let nd: String = needle.to_lowercase().chars()
+        .filter(|c| ld_lucivy::tokenizer::equal_chunk::is_content_char(*c)).collect();
+    let mut stripped = Vec::new(); let mut back = Vec::new();
+    for (off, ch) in text.char_indices() {
+        if !ld_lucivy::tokenizer::equal_chunk::is_content_char(ch) { continue; }
+        for lc in ch.to_lowercase() { let mut b = [0u8; 4]; for x in lc.encode_utf8(&mut b).bytes() { stripped.push(x); back.push(off); } }
+    }
+    let mut out = Vec::new();
+    let n = nd.as_bytes();
+    if n.is_empty() || stripped.len() < n.len() { return out; }
+    for s in 0..=stripped.len() - n.len() {
+        if &stripped[s..s + n.len()] == n {
+            let last = back[s + n.len() - 1];
+            out.push([back[s], last + text[last..].chars().next().unwrap().len_utf8()]);
+        }
+    }
+    out
+}
+
+/// Deterministic SKU / identifier corpus: the shapes a product catalogue or a
+/// log file throws at a substring engine — long digit runs, separators inside
+/// tokens, identifiers far longer than the 264-byte word-entry limit, matches
+/// at every position of those, and occurrences straddling separator runs.
+fn sku_corpus() -> Vec<String> {
+    let mut docs = Vec::new();
+    let mut seed = 12345u64;
+    let mut rnd = || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed };
+    for i in 0..200 {
+        let mut line = String::new();
+        for _ in 0..20 {
+            let r = rnd();
+            let kind = r % 6;
+            match kind {
+                0 => line.push_str(&format!("SKU-{:05}-{}{}", r % 100_000, (b'A' + (r % 26) as u8) as char, (b'A' + ((r / 26) % 26) as u8) as char)),
+                1 => line.push_str(&format!("ABC{:08}", r % 100_000_000)),
+                2 => line.push_str(&format!("ref_{}_{}", r % 1000, r % 77)),
+                3 => line.push_str(&format!("{}", r % 10_000_000_000)),
+                4 => line.push_str(&format!("part/{}/{}", r % 500, (r / 500) % 500)),
+                _ => line.push_str("widget"),
+            }
+            line.push_str(match r % 4 { 0 => " ", 1 => ", ", 2 => "\n\t", _ => " | " });
+        }
+        // One very long identifier per 10 docs: a 400-byte hex token with a
+        // marker planted deep inside it.
+        if i % 10 == 0 {
+            let mut long = String::new();
+            for k in 0..50 { long.push_str(&format!("{:08x}", rnd() ^ k)); }
+            let at = 300 + (i * 7) % 80;
+            long.replace_range(at..at + 8, "deepmark");
+            line.push_str(&long);
+            line.push('\n');
+        }
+        docs.push(line);
+    }
+    docs
+}
+
+#[test]
+fn v3_relaxed_sku_corpus_matches_grep() {
+    let docs = sku_corpus();
+    let handle = handle_with_commits(&docs, 25);
+    let queries = ["SKU-0", "ABC00", "ref_1", "widget", "part/1", "deepmark", "00000", "AB", "0-1", "mark", "SKU", "et, A"];
+    let mut bad = Vec::new();
+    for q in queries {
+        let got = doc_spans(&handle, q, false, docs.len());
+        let mut expect = std::collections::BTreeMap::new();
+        for (i, d) in docs.iter().enumerate() {
+            let sp = grep_relaxed(d, q);
+            if !sp.is_empty() { expect.insert(i as u64, sp); }
+        }
+        let ng: usize = got.values().map(|v| v.len()).sum();
+        let ne: usize = expect.values().map(|v| v.len()).sum();
+        eprintln!("  {q:<10} docs got={} expect={} spans got={ng} expect={ne}", got.len(), expect.len());
+        if got != expect {
+            for (k, v) in &expect {
+                let g = got.get(k).cloned().unwrap_or_default();
+                if g != *v {
+                    let miss: Vec<_> = v.iter().filter(|s| !g.contains(s)).take(3).collect();
+                    let extra: Vec<_> = g.iter().filter(|s| !v.contains(s)).take(3).collect();
+                    eprintln!("    doc {k}: miss {miss:?} extra {extra:?}");
+                    break;
+                }
+            }
+            bad.push(q);
+        }
+    }
+    assert!(bad.is_empty(), "relaxed differs from grep on {bad:?}");
+}

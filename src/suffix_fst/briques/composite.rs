@@ -94,6 +94,12 @@ pub fn find_literal_v3(
     } else {
         0
     };
+    // Not skipped in relaxed mode even though the word pipeline covers most
+    // occurrences on its own: a word entry indexes suffixes up to
+    // MAX_SUFFIX_INDEX (256 bytes) plus a tail, so a match deep inside a
+    // 400-byte identifier is only found through the chunk chains (tried on
+    // 23 August: `deepmark` in a synthetic SKU corpus lost 10 of 20). It
+    // would need a per-segment "no word longer than the cap" flag to be safe.
     {
         let _t = profile::Timer::start();
         let mut chains = if half > 0 {

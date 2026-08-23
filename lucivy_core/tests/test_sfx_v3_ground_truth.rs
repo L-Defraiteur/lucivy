@@ -57,7 +57,10 @@ fn query_spec() -> Option<Vec<(&'static str, bool, u8)>> {
                     Some((v, "fz3")) => (v.trim(), false, 3),
                     _ => (item, true, 0),
                 };
-                let leaked: &'static str = Box::leak(value.to_string().into_boxed_str());
+                // Whitespace cannot survive the trim: `\s`, `\t`, `\n` stand
+                // for a space, a tab, a newline.
+                let value = value.replace("\\s", " ").replace("\\t", "\t").replace("\\n", "\n");
+                let leaked: &'static str = Box::leak(value.into_boxed_str());
                 (leaked, strict, distance)
             })
             .collect()
