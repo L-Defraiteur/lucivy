@@ -765,16 +765,21 @@ fn v3_ground_truth_contains() {
         let v3_result = search_v3(&handle, &files, q.text, q.strict_sep);
         let ms = t.elapsed().as_secs_f64() * 1000.0;
 
-        let status = if v3_result.doc_indices == grep_set { "OK" } else { "FAIL" };
         let search_ms = LAST_SEARCH_MS.with(|c| c.get());
 
         // Spans: the engine's highlights against every occurrence on disk.
-        // Reported, not asserted — the doc set is the pass criterion — so the
-        // state of highlights is visible without blocking the suite.
+        // Asserted since 23 August, when the 50k kernel panel went exact on
+        // both the natural and the merged index: a missing or extra span is
+        // a failure, not a remark. `V3_SPANS_REPORT_ONLY=1` restores the old
+        // doc-set-only criterion for diagnosis.
         let v3_spans: HashSet<(usize, usize, usize)> =
             v3_result.highlights.iter().copied().collect();
         let missing = gt.spans.difference(&v3_spans).count();
         let extra = v3_spans.difference(&gt.spans).count();
+        let spans_ok = (missing == 0 && extra == 0)
+            || std::env::var("V3_SPANS_REPORT_ONLY").is_ok();
+        let docs_ok = v3_result.doc_indices == grep_set;
+        let status = if docs_ok && spans_ok { "OK" } else { "FAIL" };
         let hl = if missing == 0 && extra == 0 {
             format!("spans {} exact", gt.spans.len())
         } else {
@@ -801,7 +806,7 @@ fn v3_ground_truth_contains() {
 
         write_report(&mut report, q.text, mode_label, &files, &grep_set, &v3_result);
 
-        if v3_result.doc_indices == grep_set {
+        if docs_ok && spans_ok {
             pass += 1;
         } else {
             fail += 1;

@@ -124,3 +124,59 @@ Sortie par requête : `(search, +fetch, grep) spans gt=… v3=… miss=… extra
 trois premiers spans manquants/en trop avec contexte et chemin de fichier.
 Ajouts du jour : `V3_INDEX_DIR`, `V3_PROFILE`, `V3_MERGE_AT_END`, `V3_DIAG_LITERAL`,
 `V3_DIAG_BYTE`, `V3_DIAG_RESOLVE`, `LUCIVY_VERBOSE` (fonctionne maintenant).
+
+## Suite, 23 août après-midi — fusionné = frais = disque
+
+Point de départ : `07-suggestions-et-chantiers.md`, A1 en tête. Le test demandé par A1
+(`v3_merge_equals_fresh_by_spans`) a été écrit d'abord ; tout le reste en découle.
+
+| Query | naturel 800 seg. | fusionné 32 seg. | spans (les deux) |
+|---|---|---|---|
+| requête sans résultat | 29 ms | 2 ms | 0, exact |
+| `kmalloc` strict | 30 | 86 | 2 417 exact |
+| `spin_lock` strict | 32 | 35 | 11 893 exact (1 manquant avant) |
+| `net_device` strict | 33 | 82 | 854 exact |
+| `include` strict | 55 | 410 | 214 692 exact (3 / 11 manquants avant) |
+| `__init` strict | 28 | 41 | 16 746 exact (1 manquant avant) |
+| `kmalloc` relax | 27 | 70 | 2 420 exact |
+| `uint64_t` relax | 40 | 211 | 31 194 exact |
+| `__init` relax | 63 | 297 | 214 121 exact (161 / 7 manquants, 1 doc perdu avant) |
+
+rag3db (15 requêtes) : 15/15 exacts, `rag3db` 15 128 / 15 128 (144 manquants hier).
+zh_CN 600 docs : fusionné = frais = grep sur 11 requêtes.
+
+### Ce qui a été trouvé, dans l'ordre, par des reproductions de 3 s
+
+- `43fb110` — **Quatre causes, un commit.**
+  1. Une clé 0x02 couvre plusieurs *formes* de mot (`init` = mot `init`, ou `in` +
+     overlap `it`, ou `in` + overlap `i` + …) ; une clé chunk aussi (`spinlock` entier,
+     ou `spinlo` + overlap `ck`). Un seul ordinal portait les métas de la première
+     occurrence internée, et l'ordre des segments changeait laquelle. C'était « A1 » :
+     pas un bug du merge, un bug d'internement que le merge rend visible. Internement
+     par (texte, forme) ; la fabrique FST prenait déjà plusieurs parents par clé.
+  2. `word_sfxpost` WSP2 : `byte_to` = fin de contenu du posting, lue par tout le
+     monde ; le contournement `word_content_end` d'hier disparaît.
+  3. **`equal_chunks` émettait un chunk vide** sur les textes multi-octets (le snap UTF-8
+     prend de l'avance sur le plan de découpe). C'était « A2 » : pas l'overlap, pas
+     l'EOF — un chunk sans texte à `position - 1`, que le chemin ancré rejetait.
+  4. Dedup des matchs par (doc, position, **byte_from**) : `INIT2INIT` pour `init`.
+- Harnais : spans **assertés** (C2), `V3_SPANS_REPORT_ONLY=1` pour revenir au critère
+  documents.
+
+### Outils ajoutés (tous dans `test_sfx_v3_pipeline.rs`)
+
+- `v3_merge_equals_fresh_by_spans` — A∪B frais contre merge(A,B) à deux niveaux, spans
+  par document, strict + relaxed + grep. `V3_MERGE_DOCS`, `V3_CORPUS`.
+- `v3_merge_bisect` (`#[ignore]`) — delta-debugging : réduit le corpus au minimum qui
+  fait diverger fusionné/frais (`V3_BISECT_TARGET`) ou frais/grep (`V3_BISECT_GREP`).
+  332 docs → 3 en 6 s, 600 → 1 en 0,7 s.
+- `v3_merge_repro_files`, `v3_a2_probe`, `v3_a2_chunks` (`#[ignore]`) — rejouer une
+  liste de fichiers, couper un texte caractère par caractère, dumper le tokenizer.
+
+### La leçon du jour
+
+Hier : « estimer avant de mesurer, trois fois faux ». Aujourd'hui : trois fois de
+suite, l'explication plausible était fausse (A1 « le merge », A2 « l'overlap UTF-8 »,
+« le vocabulaire des autres segments ») et la reproduction minimale a dit autre chose
+en moins d'une minute. Le bisect a coûté 40 lignes ; il a remplacé trois heures de
+théorie.

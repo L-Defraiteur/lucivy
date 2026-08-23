@@ -53,8 +53,8 @@ token regarde `position - 1`, tombe dessus, et rejette un match réel.
 `no_empty_chunk_on_multibyte_text`). Il change la numérotation des positions sur les
 textes multi-octets : index à reconstruire (`v=6` dans la clé du cache du harnais).
 
-**Résidu** : les quelques spans qui manquent encore sur zh_CN en strict sont
-à remesurer après ce correctif (voir 06-progression pour les chiffres 50k).
+**Après** : 50k naturel et fusionné 9/9 exacts, rag3db 15/15, zh_CN fusionné = frais =
+grep. Plus un seul span manquant ou en trop connu.
 
 ### A3. La collision de clé 0x02 est structurelle — FAIT le 23 août
 
@@ -172,11 +172,11 @@ Le chemin spécial que j'ai ajouté pour le merge parallèle est une instance d'
 général : fan-out par continuation, sûr en emscripten parce qu'aucun thread n'attend.
 `DagExecutor` existe. Généraliser, et supprimer le chemin spécial. Voir §5 bis du recap.
 
-### C2. La vérité terrain par spans comme test de CI, pas seulement de bench
+### C2. La vérité terrain par spans comme test de CI — FAIT le 23 août
 
-`test_sfx_v3_ground_truth` tourne sur rag3db en 45 s. Les spans y sont **rapportés**,
-pas assertés. Les asserter sur les requêtes aujourd'hui exactes (11 sur 15) transforme
-une heure de diagnostic en un échec immédiat.
+Les spans sont assertés dans `test_sfx_v3_ground_truth` (15/15 exacts sur rag3db,
+9/9 sur 50k naturel et fusionné). `V3_SPANS_REPORT_ONLY=1` revient au critère
+documents pour diagnostiquer.
 
 ### C3. Une requête vide dans chaque panel
 
