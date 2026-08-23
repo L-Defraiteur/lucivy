@@ -25,25 +25,29 @@ use super::context::BriquesContext;
 use super::profile;
 use crate::DocId;
 
-/// Longest window rebuilt around one literal hit, in content bytes per side.
-const MAX_WINDOW_BYTES: u32 = 65_536;
-/// First window size, per side.
-const FIRST_WINDOW_BYTES: u32 = 128;
 /// Shortest literal worth looking up: a one-byte literal hits everything.
 const MIN_LITERAL_LEN: usize = 2;
 
 /// What the pattern lets the index locate.
 pub struct RegexPlan {
-    /// Literals such that every match contains at least one of them.
+    /// Literals such that every match contains at least one of them. Empty
+    /// when the pattern requires none (`[0-9]{8}`): every document is then a
+    /// candidate and is scanned whole.
     pub literals: Vec<String>,
     /// Which side they sit on: `true` = prefixes (match starts with one).
     pub prefix: bool,
+    /// Longest possible match in bytes, when the pattern bounds it. `None`
+    /// (`.*`, `[^*]*`, `+`): candidate documents are scanned whole.
+    pub max_len: Option<usize>,
 }
 
 /// Required literals of `pattern`: the longest finite set of exact prefixes,
 /// else of exact suffixes. `None` when neither exists (`[a-z]+`, `.*`): the
 /// index cannot locate candidates and the query must say so.
 pub fn plan(pattern: &str) -> Option<RegexPlan> {
+    let hir_props = regex_syntax::ParserBuilder::new().build().parse(pattern).ok()?;
+    let max_len = hir_props.properties().maximum_len();
+    let pick_plan = |literals: Vec<String>, prefix: bool| RegexPlan { literals, prefix, max_len };
     // Parsed case-SENSITIVE on purpose: the contains pipeline is already
     // case-insensitive, and a case-insensitive HIR turns `function` into a
     // class per byte that the extractor expands into 64 variants — 64
@@ -71,21 +75,38 @@ pub fn plan(pattern: &str) -> Option<RegexPlan> {
         if out.is_empty() { None } else { Some(out) }
     };
     if let Some(p) = pick(ExtractKind::Prefix) {
-        return Some(RegexPlan { literals: p, prefix: true });
+        return Some(pick_plan(p, true));
     }
     if let Some(s) = pick(ExtractKind::Suffix) {
-        return Some(RegexPlan { literals: s, prefix: false });
+        return Some(pick_plan(s, false));
     }
-    None
+    // No literal: every document is a candidate. Exact, as slow as a grep.
+    Some(pick_plan(Vec::new(), true))
 }
 
 /// Every match of `pattern` in the segment, as `(doc, from, to)` source byte
 /// spans, found through `plan` and verified by `regex::Regex`.
+///
+/// Two regimes, both exact by construction:
+/// - bounded pattern (`max_len = Some(n)`): every match is at most `n` bytes
+///   and contains a literal hit; hits closer than `2n + 2` bytes share a
+///   region; the window is the region plus `n + 1` raw bytes on each side.
+///   A match of the file that crosses a window edge would have to contain
+///   a hit of ANOTHER region within `n` bytes of this one — excluded by the
+///   merge — so `find_iter` on the window sees exactly what it sees on the
+///   file, leftmost-first and non-overlapping included.
+/// - unbounded pattern (`.*`, `[^*]*`) or no literal: the candidate
+///   documents (those with a hit, or all of them) are rebuilt whole and
+///   scanned once. The first version grew windows until a match stopped
+///   touching an edge, which never triggers for a match that is simply
+///   cut with no partial match inside the window: 469 of 6 796 comment
+///   spans lost on `/\*[^*]*\*/`, 2 764 on `(?s)/\*.*?\*/`.
 pub fn regex_verified(
     ctx: &BriquesContext<'_>,
     pattern: &str,
     plan: &RegexPlan,
     re: &regex::Regex,
+    max_doc: DocId,
 ) -> Vec<(DocId, usize, usize)> {
     let diag = std::env::var("V3_DIAG_REGEX").is_ok();
     if ctx.posmap.is_none() || ctx.termtexts.is_none() {
@@ -96,79 +117,89 @@ pub fn regex_verified(
     // Literal hits: exact contains, strict separators (the regex sees the
     // raw text). No verify_literal: the regex is the verification.
     let t = profile::Timer::start();
-    let mut hits: Vec<(DocId, u32, u32)> = Vec::new(); // (doc, first_pos, last_pos)
+    let mut hits: Vec<(DocId, u32, u32, u32, u32)> = Vec::new(); // (doc, first_pos, last_pos, byte_from, byte_to)
     for lit in &plan.literals {
         for m in composite::find_literal_v3(ctx, lit, false, true) {
-            hits.push((m.doc_id, m.position, m.position + m.span.saturating_sub(1)));
+            hits.push((m.doc_id, m.position, m.position + m.span.saturating_sub(1), m.byte_from, m.byte_to));
         }
     }
     t.stop(|c| &c.ns_fz_resolve);
     hits.sort_unstable();
     hits.dedup();
     profile::bump(|c| &c.n_fz_hits, hits.len() as u64);
-    // One window per cluster of nearby hits, not per hit: `return` has
-    // 36 000 hits on rag3db, mostly a few lines apart, and every window
-    // rebuilds 2 × FIRST_WINDOW_BYTES of text around it. Hits within
-    // CLUSTER_POSITIONS chunk positions of each other share a window; the
-    // margin on each side is unchanged, so nothing is seen less.
-    const CLUSTER_POSITIONS: u32 = 24;
-    let mut regions: Vec<(DocId, u32, u32)> = Vec::with_capacity(hits.len());
-    for &(doc, first_pos, last_pos) in &hits {
-        match regions.last_mut() {
-            Some((d, _, b)) if *d == doc && first_pos <= *b + CLUSTER_POSITIONS => {
-                if last_pos > *b { *b = last_pos; }
-            }
-            _ => regions.push((doc, first_pos, last_pos)),
-        }
-    }
-    profile::bump(|c| &c.n_fz_regions, regions.len() as u64);
 
     let mut spans: HashSet<(DocId, u32, u32)> = HashSet::new();
     let mut window = String::new();
     let mut back: Vec<(u32, u8)> = Vec::new();
     let mut n_windows = 0u64;
-    let mut n_grown = 0u64;
-    let mut n_truncated = 0u64;
-    for &(doc, first_pos, last_pos) in &regions {
-        let mut margin = FIRST_WINDOW_BYTES;
-        loop {
-            let t = profile::Timer::start();
-            let built = composite::rebuild_window_mapped(
-                ctx, doc, first_pos, last_pos, margin, false, &mut window, &mut back);
-            t.stop(|c| &c.ns_fz_window);
-            n_windows += 1;
-            let Some((cut_start, cut_end)) = built else { break };
-            let wlen = window.len();
-            let mut touches_edge = false;
-            let t = profile::Timer::start();
-            let found: Vec<(usize, usize)> = re.find_iter(&window)
-                .filter(|m| m.end() > m.start())
-                .map(|m| (m.start(), m.end()))
-                .collect();
-            t.stop(|c| &c.ns_fz_dp);
-            for (s, e) in &found {
-                if (cut_start && *s == 0) || (cut_end && *e == wlen) { touches_edge = true; }
+    let mut n_docs_whole = 0u64;
+
+    let mut scan = |window: &str, back: &[(u32, u8)], doc: DocId, cut_start: bool, cut_end: bool,
+                    spans: &mut HashSet<(DocId, u32, u32)>| {
+        let wlen = window.len();
+        let t = profile::Timer::start();
+        for m in re.find_iter(window) {
+            let (s, e) = (m.start(), m.end());
+            if e == s { continue; }
+            // Cannot happen with proven margins or whole documents; kept as
+            // the invariant it is.
+            if (cut_start && s == 0) || (cut_end && e == wlen) { continue; }
+            let (from, _) = back[s];
+            let (last, len) = back[e - 1];
+            spans.insert((doc, from, last + len as u32));
+        }
+        t.stop(|c| &c.ns_fz_dp);
+    };
+
+    match (plan.literals.is_empty(), plan.max_len) {
+        (true, _) | (false, None) => {
+            // Whole documents: all of them, or those with a hit.
+            let docs: Vec<DocId> = if plan.literals.is_empty() {
+                (0..max_doc).collect()
+            } else {
+                let mut d: Vec<DocId> = hits.iter().map(|h| h.0).collect();
+                d.dedup();
+                d
+            };
+            for doc in docs {
+                let t = profile::Timer::start();
+                let built = composite::rebuild_window_opts(
+                    ctx, doc, 0, u32::MAX - 1, 0, false, false, 0, &mut window, &mut back);
+                t.stop(|c| &c.ns_fz_window);
+                n_docs_whole += 1;
+                if built.is_none() { continue; }
+                scan(&window, &back, doc, false, false, &mut spans);
             }
-            if touches_edge && margin < MAX_WINDOW_BYTES {
-                margin *= 4;
-                n_grown += 1;
-                continue;
+        }
+        (false, Some(n)) => {
+            let n = n as u32;
+            let mut regions: Vec<(DocId, u32, u32, u32)> = Vec::with_capacity(hits.len()); // (doc, first_pos, last_pos, byte_to)
+            for &(doc, first_pos, last_pos, byte_from, byte_to) in &hits {
+                match regions.last_mut() {
+                    Some((d, _, lp, bt)) if *d == doc && byte_from <= *bt + 2 * n + 2 => {
+                        if last_pos > *lp { *lp = last_pos; }
+                        if byte_to > *bt { *bt = byte_to; }
+                    }
+                    _ => regions.push((doc, first_pos, last_pos, byte_to)),
+                }
             }
-            if touches_edge { n_truncated += 1; }
-            for (s, e) in found {
-                if (cut_start && s == 0) || (cut_end && e == wlen) { continue; }
-                let (from, _) = back[s];
-                let (last, len) = back[e - 1];
-                spans.insert((doc, from, last + len as u32));
+            profile::bump(|c| &c.n_fz_regions, regions.len() as u64);
+            for &(doc, first_pos, last_pos, _) in &regions {
+                let t = profile::Timer::start();
+                let built = composite::rebuild_window_opts(
+                    ctx, doc, first_pos, last_pos, n + 1, false, false, u32::MAX, &mut window, &mut back);
+                t.stop(|c| &c.ns_fz_window);
+                n_windows += 1;
+                let Some((cut_start, cut_end)) = built else { continue };
+                scan(&window, &back, doc, cut_start, cut_end, &mut spans);
             }
-            break;
         }
     }
-    profile::bump(|c| &c.n_fz_windows, n_windows);
+    profile::bump(|c| &c.n_fz_windows, n_windows + n_docs_whole);
     profile::bump(|c| &c.n_fz_spans, spans.len() as u64);
     if diag {
-        eprintln!("[rx] {pattern:?}: literals={:?} ({}) hits={} regions={} windows={n_windows} grown={n_grown} truncated={n_truncated} spans={}",
-            plan.literals, if plan.prefix { "prefix" } else { "suffix" }, hits.len(), regions.len(), spans.len());
+        eprintln!("[rx] {pattern:?}: literals={:?} ({}) max_len={:?} hits={} windows={n_windows} whole_docs={n_docs_whole} spans={}",
+            plan.literals, if plan.prefix { "prefix" } else { "suffix" }, plan.max_len, hits.len(), spans.len());
     }
     let mut out: Vec<(DocId, usize, usize)> = spans.into_iter()
         .map(|(d, f, t)| (d, f as usize, t as usize)).collect();

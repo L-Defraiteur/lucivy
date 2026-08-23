@@ -881,12 +881,33 @@ pub(super) fn rebuild_window_mapped(
     out: &mut String,
     back: &mut Vec<(u32, u8)>,
 ) -> Option<(bool, bool)> {
+    rebuild_window_opts(ctx, doc_id, first_pos, last_pos, margin, strip_separators, true, 64, out, back)
+}
+
+/// `lowercase`: fold the window (the fuzzy alignment compares bytes against
+/// a lowercased needle); the regex path keeps the source case, its matcher
+/// is case-insensitive by itself and `(?-i)` must keep working.
+/// `max_extra_positions`: how far past `first_pos`/`last_pos` the margin may
+/// walk, per side — a silent cap for the fuzzy (64 positions of pure
+/// separators), lifted by the regex path which proves its margins.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn rebuild_window_opts(
+    ctx: &BriquesContext<'_>,
+    doc_id: DocId,
+    first_pos: u32,
+    last_pos: u32,
+    margin: u32,
+    strip_separators: bool,
+    lowercase: bool,
+    max_extra_positions: u32,
+    out: &mut String,
+    back: &mut Vec<(u32, u8)>,
+) -> Option<(bool, bool)> {
     let (Some(pm), Some(tt)) = (ctx.posmap.as_ref(), ctx.termtexts.as_ref()) else {
         return None;
     };
     out.clear();
     back.clear();
-    const MAX_EXTRA_POSITIONS: u32 = 64;
 
     // One pass per position: text, own length, content byte count.
     struct Tok<'t> { text: &'t str, own: usize, content: usize }
@@ -906,9 +927,12 @@ pub(super) fn rebuild_window_mapped(
         toks.push_back((pos, t));
     }
     if toks.is_empty() { return None; }
+    // The caller may ask past the document's end (whole-document rebuild
+    // passes u32::MAX): clamp to what exists.
+    let last_pos = toks.back().map(|(p, _)| *p).unwrap_or(last_pos);
     let mut have = 0usize;
     let mut from = first_pos;
-    while from > 0 && have < margin as usize && first_pos - from < MAX_EXTRA_POSITIONS {
+    while from > 0 && have < margin as usize && first_pos - from < max_extra_positions {
         let Some(t) = tok(from - 1) else { break };
         have += t.content;
         from -= 1;
@@ -917,7 +941,7 @@ pub(super) fn rebuild_window_mapped(
     let cut_start = from > 0;
     have = 0;
     let mut to = last_pos;
-    while have < margin as usize && to - last_pos < MAX_EXTRA_POSITIONS {
+    while have < margin as usize && to - last_pos < max_extra_positions {
         let Some(t) = tok(to + 1) else { break };
         have += t.content;
         to += 1;
@@ -953,10 +977,15 @@ pub(super) fn rebuild_window_mapped(
             if strip_separators && !is_content_char(c) { continue; }
             let src = bf + off as u32;
             let len = c.len_utf8() as u8;
-            for lc in c.to_lowercase() {
-                let start = out.len();
-                out.push(lc);
-                for _ in start..out.len() { back.push((src, len)); }
+            if lowercase {
+                for lc in c.to_lowercase() {
+                    let start = out.len();
+                    out.push(lc);
+                    for _ in start..out.len() { back.push((src, len)); }
+                }
+            } else {
+                out.push(c);
+                for _ in 0..len { back.push((src, len)); }
             }
         }
     }

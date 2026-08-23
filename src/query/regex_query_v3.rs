@@ -95,12 +95,11 @@ impl RegexQueryV3 {
             };
             let Some(plan) = regex_verified::plan(&self.pattern) else {
                 return Err(crate::LucivyError::InvalidArgument(format!(
-                    "regex {:?}: no literal of at least 2 bytes is required by every match; \
-                     the index cannot locate candidates for this pattern", self.pattern)));
+                    "regex {:?}: cannot be parsed", self.pattern)));
             };
             let re = regex::RegexBuilder::new(&self.pattern).case_insensitive(true).build()
                 .map_err(|e| crate::LucivyError::InvalidArgument(format!("regex: {e}")))?;
-            let highlights = regex_verified::regex_verified(&ctx, &self.pattern, &plan, &re);
+            let highlights = regex_verified::regex_verified(&ctx, &self.pattern, &plan, &re, seg_reader.max_doc());
             let mut tf_map: HashMap<DocId, u32> = HashMap::new();
             for &(doc_id, _, _) in &highlights {
                 *tf_map.entry(doc_id).or_insert(0) += 1;

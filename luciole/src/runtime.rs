@@ -811,14 +811,23 @@ fn execute_level_parallel(
                     let nr = NodeResult { duration_ms, metrics, logs };
                     Ok((node_idx, node_name, nr, outputs, node_box))
                 }
-                Err(e) => Err((node_name, e))
+                // The node goes back with the error: its slot in the DAG
+                // was emptied by ptr::read above, and dropping the box here
+                // would free it a second time when the DAG is dropped.
+                Err(e) => Err((node_idx, node_name, e, node_box))
             }
         });
         receivers.push(rx);
     }
 
-    // Wait for all tasks
+    // Wait for all tasks. Every receiver is drained even after a failure:
+    // each carries a node box that must be written back into the DAG.
+    // Returning early on the first error abandoned the others — their boxes
+    // were dropped with the receivers and then again with the DAG
+    // ("double free or corruption", found the first time a regex prescan
+    // task returned an error for a pattern with no literal).
     let mut level_results = Vec::new();
+    let mut first_err: Option<String> = None;
     for rx in receivers {
         let task_result = scheduler.wait(rx, "dag_node");
         match task_result {
@@ -829,6 +838,7 @@ fn execute_level_parallel(
                     let ptr = &mut entry.node as *mut Box<dyn crate::node::Node>;
                     std::ptr::write(ptr, node_box);
                 }
+                if first_err.is_some() { continue; }
 
                 emit(DagEvent::NodeCompleted {
                     node: node_name.clone(),
@@ -859,11 +869,21 @@ fn execute_level_parallel(
 
                 level_results.push((node_name, nr));
             }
-            Err((node_name, e)) => {
-                emit(DagEvent::DagFailed { error: e.clone() });
-                return Err(format!("node '{node_name}' failed: {e}"));
+            Err((node_idx, node_name, e, node_box)) => {
+                let entry = &mut dag.nodes_mut()[node_idx];
+                unsafe {
+                    let ptr = &mut entry.node as *mut Box<dyn crate::node::Node>;
+                    std::ptr::write(ptr, node_box);
+                }
+                if first_err.is_none() {
+                    emit(DagEvent::DagFailed { error: e.clone() });
+                    first_err = Some(format!("node '{node_name}' failed: {e}"));
+                }
             }
         }
+    }
+    if let Some(e) = first_err {
+        return Err(e);
     }
 
     level_results.extend(skipped_results);
