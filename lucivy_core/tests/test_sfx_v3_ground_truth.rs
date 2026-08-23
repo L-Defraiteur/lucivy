@@ -382,45 +382,22 @@ fn grep_docs_strict(files: &[(String, String)], needle: &str) -> HashSet<usize> 
 /// Algorithm: split text into words (runs of content chars), strip each word,
 /// then use a sliding window of adjacent stripped words to find the query.
 fn grep_docs_relaxed(files: &[(String, String)], needle: &str) -> HashSet<usize> {
+    // Relaxed means separators do not exist: the query is a substring of the
+    // document with every non-content char removed. That is the whole
+    // definition, so that is the whole check.
+    //
+    // This used to walk a sliding window over words and stop once the window
+    // reached twice the query length — which a single long word reaches on its
+    // own, before its junction with the next word is ever tested. `maintain its`
+    // was never concatenated into `maintainits`, so the `init` straddling the
+    // space went unseen, and v3 was charged with a false positive for finding
+    // it. Three such "false positives" on the kernel corpus, all the harness.
     let stripped_query = strip_seps(&needle.to_lowercase());
     if stripped_query.is_empty() { return HashSet::new(); }
 
     files.iter().enumerate()
         .filter(|(_, (_, content))| {
-            let lower = content.to_lowercase();
-            // Extract words: runs of content chars
-            let words: Vec<String> = lower
-                .split(|c: char| !is_content_char(c))
-                .filter(|w| !w.is_empty())
-                .map(|w| w.to_string())
-                .collect();
-
-            // Sliding window: concatenate adjacent words and check if query is a substring
-            // The query could span at most ceil(query.len() / 1) = query.len() words
-            // but practically limited. Use a window large enough.
-            // Sliding window: concatenate adjacent words. The query can span
-            // across word boundaries, so we keep adding words as long as the
-            // query could still straddle the junction.
-            let qlen = stripped_query.len();
-            for start in 0..words.len() {
-                let mut concat = String::new();
-                for end in start..words.len() {
-                    concat.push_str(&words[end]);
-                    if concat.len() >= qlen {
-                        if concat.contains(&stripped_query) {
-                            return true;
-                        }
-                        // Only stop if the last qlen-1 bytes of concat can't
-                        // possibly start the query (no overlap with next word).
-                        // Simple bound: stop when concat is qlen bytes longer
-                        // than the query — the query can't straddle further.
-                        if concat.len() >= qlen * 2 {
-                            break;
-                        }
-                    }
-                }
-            }
-            false
+            strip_seps(&content.to_lowercase()).contains(&stripped_query)
         })
         .map(|(i, _)| i)
         .collect()
