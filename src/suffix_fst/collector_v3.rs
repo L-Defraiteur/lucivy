@@ -337,12 +337,15 @@ impl SfxCollectorV3 {
                     }
                 }
 
-                // Record next-word pair
+                // Record next-word pair.
+                //
+                // This used to dedup with a linear `contains` over a Vec that
+                // accumulates across the whole segment, once per word occurrence:
+                // O(occurrences x distinct pairs), measured at roughly a billion
+                // comparisons for a single 62-document segment. Deduplication
+                // happens once, in into_data, where it costs a sort.
                 if let Some(prev) = prev_global_wid {
-                    let pair = (prev, global_wid);
-                    if !self.next_word_pairs.contains(&pair) {
-                        self.next_word_pairs.push(pair);
-                    }
+                    self.next_word_pairs.push((prev, global_wid));
                 }
                 prev_global_wid = Some(global_wid);
             }
@@ -744,7 +747,10 @@ impl SfxCollectorV3 {
 
         let num_words = self.word_intern.len();
         let mut next_word_writer = crate::suffix_fst::word_map::NextWordMapWriter::new(num_words);
-        for &(prev, next) in &self.next_word_pairs {
+        let mut pairs = self.next_word_pairs.clone();
+        pairs.sort_unstable();
+        pairs.dedup();
+        for &(prev, next) in &pairs {
             next_word_writer.add(prev, next);
         }
         let next_word_map_data = next_word_writer.serialize();

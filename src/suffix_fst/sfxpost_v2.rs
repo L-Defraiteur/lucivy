@@ -141,7 +141,7 @@ pub fn build_sfxpost_v2(
 /// Owns its data (Vec<u8>) — Send + Sync, no lifetimes.
 /// Can be constructed from OwnedBytes (mmap) or Vec<u8> (in-memory).
 pub struct SfxPostReaderV2 {
-    data: Vec<u8>,
+    data: common::OwnedBytes,
     num_terms: u32,
     offsets_start: usize,
     entry_data_start: usize,
@@ -151,6 +151,19 @@ impl SfxPostReaderV2 {
     /// Open a sfxpost V2 file from owned bytes.
     /// Returns None if the data is not V2 format (no "SFP2" magic).
     pub fn open(data: Vec<u8>) -> Option<Self> {
+        Self::open_owned(common::OwnedBytes::new(data))
+    }
+
+    /// Open without copying, from bytes a `FileSlice` already holds.
+    ///
+    /// The reader was made owning to keep it `Send + Sync` and free of lifetime
+    /// propagation, and reached that through `Vec<u8>` — with `.to_vec()` named
+    /// in the commit as the bridge from `OwnedBytes`. `OwnedBytes` has those same
+    /// properties on its own (it is `'static`, `Send + Sync`, and owns its
+    /// backing through an `Arc`), so the copy bought nothing. It was paid once
+    /// per segment per query: 72 copies of the postings file per query on a
+    /// 50k-document bench index.
+    pub fn open_owned(data: common::OwnedBytes) -> Option<Self> {
         if data.len() < 8 || &data[0..4] != MAGIC_V2 {
             return None;
         }
@@ -167,6 +180,31 @@ impl SfxPostReaderV2 {
     /// Open from a byte slice (copies into owned Vec).
     pub fn open_slice(data: &[u8]) -> Option<Self> {
         Self::open(data.to_vec())
+    }
+
+    /// Indices of `doc_ids` matching the filter, in ascending index order.
+    ///
+    /// The doc-comment on `entries_filtered` promised a binary search per
+    /// filtered document; the code scanned every document in the ordinal and did
+    /// a hash lookup for each. For a frequent ordinal spanning 50 000 documents
+    /// with 5 active ones that is 50 000 lookups where 5 searches suffice.
+    ///
+    /// Whichever side is smaller drives the loop. Indices come back sorted, so
+    /// the entries land in the same order the linear scan produced — callers
+    /// that stop at the first match still stop at the same one.
+    fn filtered_indices(doc_ids: &[u32], filter: &HashSet<u32>) -> Vec<usize> {
+        let n = doc_ids.len();
+        // Rough break-even: a binary search costs ~log2(n) probes.
+        let probe_cost = (usize::BITS - n.leading_zeros()) as usize;
+        if filter.len().saturating_mul(probe_cost) < n {
+            let mut idx: Vec<usize> = filter.iter()
+                .filter_map(|d| doc_ids.binary_search(d).ok())
+                .collect();
+            idx.sort_unstable();
+            idx
+        } else {
+            (0..n).filter(|&i| filter.contains(&doc_ids[i])).collect()
+        }
     }
 
     fn offsets(&self) -> &[u8] {
@@ -203,11 +241,12 @@ impl SfxPostReaderV2 {
         };
 
         let mut result = Vec::new();
-        for i in 0..header.num_docs {
+        let indices: Vec<usize> = match filter {
+            Some(f) => Self::filtered_indices(&header.doc_ids, f),
+            None => (0..header.num_docs).collect(),
+        };
+        for i in indices {
             let doc_id = header.doc_ids[i];
-            if let Some(f) = filter {
-                if !f.contains(&doc_id) { continue; }
-            }
             let entries = self.decode_doc_payload(&header, i);
             for (ti, bf, bt) in entries {
                 result.push(SfxPostingEntry {

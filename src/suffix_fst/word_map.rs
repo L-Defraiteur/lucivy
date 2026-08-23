@@ -12,7 +12,7 @@
 // ─── ChunkWordMap ──────────────────────────────────────────────────────
 
 /// Entry: (word_id, chunk_index, total_chunks).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ChunkWordEntry {
     pub word_id: u32,
     pub chunk_index: u8,
@@ -34,19 +34,27 @@ impl ChunkWordMapWriter {
 
     /// Record that content ordinal `ord` is chunk `chunk_index` of `total_chunks`
     /// in word `word_id`.
+    /// Deduplication is deferred to `serialize`, where it costs one sort.
+    ///
+    /// It used to happen here, with a linear `contains` per insertion: quadratic
+    /// in the group size, and group size grows linearly with the documents merged
+    /// into a segment. Measured at 268 million comparisons for one merge of eight
+    /// 500-document segments — comparisons that found nothing, since the merged
+    /// sources are already deduplicated and their word ids are disjoint.
+    /// `SiblingTableWriter` has always done it this way.
     pub fn add(&mut self, ord: u32, word_id: u32, chunk_index: u8, total_chunks: u8) {
         if (ord as usize) < self.groups.len() {
-            let entry = ChunkWordEntry { word_id, chunk_index, total_chunks };
-            // Dedup: don't add the same entry twice
-            if !self.groups[ord as usize].contains(&entry) {
-                self.groups[ord as usize].push(entry);
-            }
+            self.groups[ord as usize].push(ChunkWordEntry { word_id, chunk_index, total_chunks });
         }
     }
 
     /// Serialize to binary.
     /// Format: [4B num_ords] [4B × (num_ords+1) offsets] [6B × N entries]
-    pub fn serialize(&self) -> Vec<u8> {
+    pub fn serialize(&mut self) -> Vec<u8> {
+        for g in &mut self.groups {
+            g.sort_unstable();
+            g.dedup();
+        }
         let num = self.groups.len() as u32;
         let mut offsets: Vec<u32> = Vec::with_capacity(self.groups.len() + 1);
         let mut entries: Vec<u8> = Vec::new();
@@ -141,17 +149,20 @@ impl NextWordMapWriter {
     }
 
     /// Record that word `next` can follow word `prev`.
+    ///
+    /// Deduplicated once in `serialize` — see the note on ChunkWordMapWriter::add.
     pub fn add(&mut self, prev: u32, next: u32) {
         self.ensure_capacity(prev);
-        let group = &mut self.groups[prev as usize];
-        if !group.contains(&next) {
-            group.push(next);
-        }
+        self.groups[prev as usize].push(next);
     }
 
     /// Serialize to binary.
     /// Format: [4B num_words] [4B × (num_words+1) offsets] [4B × N entries]
-    pub fn serialize(&self) -> Vec<u8> {
+    pub fn serialize(&mut self) -> Vec<u8> {
+        for g in &mut self.groups {
+            g.sort_unstable();
+            g.dedup();
+        }
         let num = self.groups.len() as u32;
         let mut offsets: Vec<u32> = Vec::with_capacity(self.groups.len() + 1);
         let mut entries: Vec<u8> = Vec::new();
@@ -332,7 +343,7 @@ mod tests {
         cw.add(0, 10, 0, 2); // ord 0 = chunk 0 of word 10 (2 chunks)
         cw.add(1, 10, 1, 2); // ord 1 = chunk 1 of word 10
 
-        let nw = NextWordMapWriter::new(1);
+        let mut nw = NextWordMapWriter::new(1);
 
         let cw_data = cw.serialize();
         let nw_data = nw.serialize();

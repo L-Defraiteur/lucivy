@@ -157,7 +157,7 @@ pub fn build_resolver(reader: &SegmentReader, field: crate::schema::Field) -> Re
         crate::LucivyError::SystemError(format!("read .sfxpost: {e}"))
     })?;
 
-    let v2_reader = SfxPostReaderV2::open(bytes.to_vec()).ok_or_else(|| {
+    let v2_reader = SfxPostReaderV2::open_owned(bytes).ok_or_else(|| {
         crate::LucivyError::SystemError("sfxpost: invalid V2 format (missing SFP2 magic)".into())
     })?;
     Ok(Box::new(SfxPostResolverV2::new(v2_reader)))

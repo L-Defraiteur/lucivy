@@ -48,15 +48,15 @@ struct PrepareDataV3Node {
 impl Node for PrepareDataV3Node {
     fn node_type(&self) -> &'static str { "sfx_v3_prepare" }
     fn outputs(&self) -> Vec<PortDef> {
-        vec![
-            PortDef::required("tokens", PortType::of::<BTreeSet<String>>()),
-            PortDef::required("collector_data", PortType::of::<SfxCollectorDataV3>()),
-        ]
+        // No `tokens` port: nothing connects it in this DAG, and publishing it
+        // cloned the whole Vec<String> — one allocation per token, 335k of them
+        // on a merged segment — straight into the bin. It also declared
+        // BTreeSet<String> while holding a Vec<String>.
+        vec![PortDef::required("collector_data", PortType::of::<SfxCollectorDataV3>())]
     }
     fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
         let data = self.data.take().ok_or("data already consumed")?;
         ctx.metric("tokens", data.tokens.len() as f64);
-        ctx.set_output("tokens", PortValue::new(data.tokens.clone()));
         ctx.set_output("collector_data", PortValue::new(data));
         Ok(())
     }

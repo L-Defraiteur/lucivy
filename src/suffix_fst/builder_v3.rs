@@ -371,18 +371,52 @@ impl SuffixFstBuilderV3 {
 
     /// Build the FST and output table bytes.
     pub fn build(mut self) -> Result<(Vec<u8>, Vec<u8>), lucivy_fst::Error> {
+        // Sort on a cached 8-byte prefix first.
+        //
+        // Every comparison used to be a memcmp behind two random reads into
+        // key_buf — around 100 million of them, two cache misses each, on a
+        // merged segment with 4.7 million entries. It was the single largest
+        // cost of a merge. Nearly all of them separate on the first few bytes.
+        //
+        // The prefix is the first up-to-8 key bytes, zero-padded, read big-endian,
+        // so its numeric order is the keys' lexicographic order: a shorter key
+        // pads with zeros and sorts before any key extending it. Keys that agree
+        // on those 8 bytes — including keys holding real zero bytes, which the
+        // partition prefixes 0x00/0x01/0x02 guarantee — fall through to the full
+        // slice comparison, so the order is unchanged, not merely close.
+        fn prefix8(buf: &[u8], start: u32, len: u32) -> u64 {
+            let s = start as usize;
+            let n = (len as usize).min(8);
+            let mut p = [0u8; 8];
+            p[..n].copy_from_slice(&buf[s..s + n]);
+            u64::from_be_bytes(p)
+        }
+
+        let _t_sort = std::time::Instant::now();
+        let n_entries = self.entries.len();
         let buf = &self.key_buf;
-        self.entries.sort_by(|a, b| {
-            buf[a.0 as usize..(a.0 + a.1) as usize]
-                .cmp(&buf[b.0 as usize..(b.0 + b.1) as usize])
-                .then(a.2.raw_ordinal.cmp(&b.2.raw_ordinal))
-                .then(a.2.sti.cmp(&b.2.sti))
+        let mut keyed: Vec<(u64, u32, u32, ParentEntryV3)> = std::mem::take(&mut self.entries)
+            .into_iter()
+            .map(|(start, len, parent)| (prefix8(buf, start, len), start, len, parent))
+            .collect();
+
+        keyed.sort_unstable_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| buf[a.1 as usize..(a.1 + a.2) as usize]
+                    .cmp(&buf[b.1 as usize..(b.1 + b.2) as usize]))
+                .then(a.3.raw_ordinal.cmp(&b.3.raw_ordinal))
+                .then(a.3.sti.cmp(&b.3.sti))
         });
-        self.entries.dedup_by(|a, b| {
-            buf[a.0 as usize..(a.0 + a.1) as usize] == buf[b.0 as usize..(b.0 + b.1) as usize]
-                && a.2.raw_ordinal == b.2.raw_ordinal
-                && a.2.sti == b.2.sti
+        keyed.dedup_by(|a, b| {
+            a.0 == b.0
+                && buf[a.1 as usize..(a.1 + a.2) as usize] == buf[b.1 as usize..(b.1 + b.2) as usize]
+                && a.3.raw_ordinal == b.3.raw_ordinal
+                && a.3.sti == b.3.sti
         });
+
+        self.entries = keyed.into_iter().map(|(_, s, l, p)| (s, l, p)).collect();
+        let ns_sort = _t_sort.elapsed().as_nanos();
+        let _t_rest = std::time::Instant::now();
 
         let mut fst_builder = MapBuilder::memory();
         let mut output_table = OutputTableBuilder::new();
@@ -461,6 +495,13 @@ impl SuffixFstBuilderV3 {
         }
 
         let fst_bytes = fst_builder.into_inner()?;
+        if crate::suffix_fst::briques::profile::enabled() {
+            eprintln!("  [fst] {} entries, key_buf {}KB | sort {:.0}ms | build+serialize {:.0}ms | fst {}KB",
+                n_entries, buf.len() / 1024,
+                ns_sort as f64 / 1e6,
+                _t_rest.elapsed().as_nanos() as f64 / 1e6,
+                fst_bytes.len() / 1024);
+        }
         Ok((fst_bytes, output_table.into_inner()))
     }
 

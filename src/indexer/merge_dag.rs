@@ -230,10 +230,14 @@ impl SfxNode {
     ) -> crate::Result<super::sfx_dag_v3::SfxBuildOutputV3> {
         use super::sfx_dag_v3::SegmentSfxV3;
 
-        let read_ext = |r: &SegmentReader, ext: &str| -> Option<Vec<u8>> {
+        // No copy: the SegmentReader already holds these FileSlices, and
+        // read_bytes on a RAM- or mmap-backed handle only slices an Arc. The
+        // `.to_vec()` that used to close this materialised all seven sidecars of
+        // every source segment — around 280 MB for a round merging eight
+        // 500-document segments — to read them sequentially once.
+        let read_ext = |r: &SegmentReader, ext: &str| -> Option<common::OwnedBytes> {
             r.sfx_index_file(ext, field)
                 .and_then(|f| f.read_bytes().ok())
-                .map(|b| b.as_ref().to_vec())
         };
 
         // Hold the bytes alive for the duration of the merge.
@@ -249,15 +253,18 @@ impl SfxNode {
 
         let mut segs: Vec<SegmentSfxV3<'_>> = Vec::new();
         for (i, o) in owned.iter().enumerate() {
-            let Some(tt) = o.0.as_deref() else { continue };
+            fn sl(b: &Option<common::OwnedBytes>) -> Option<&[u8]> {
+                b.as_ref().map(|x| x.as_slice())
+            }
+            let Some(tt) = sl(&o.0) else { continue };
             segs.push(SegmentSfxV3 {
                 termtexts: tt,
-                sfxpost: o.1.as_deref(),
-                word_sfxpost: o.2.as_deref(),
-                sibling_v3: o.3.as_deref(),
-                word_pos_map: o.4.as_deref(),
-                chunk_word_map: o.5.as_deref(),
-                next_word_map: o.6.as_deref(),
+                sfxpost: sl(&o.1),
+                word_sfxpost: sl(&o.2),
+                sibling_v3: sl(&o.3),
+                word_pos_map: sl(&o.4),
+                chunk_word_map: sl(&o.5),
+                next_word_map: sl(&o.6),
                 doc_remap: &reverse_doc_map[i],
             });
         }
@@ -376,8 +383,11 @@ impl Node for SfxNode {
         if sfx_version >= 3 {
             let mut segment = segment;
             for &field in &sfx_fields {
-                let (_, any_has_sfx) = super::sfx_merge::load_sfx_data(&readers, field);
-                if !any_has_sfx { continue; }
+                // Existence check only. This used to call load_sfx_data, which
+                // copies every source segment's whole .sfx — 43 MB each once the
+                // sources are themselves merged segments — and then discarded the
+                // data, keeping just the boolean.
+                if !readers.iter().any(|r| r.sfx_file(field).is_some()) { continue; }
 
                 let output = Self::rebuild_sfx_v3(&readers, &reverse_doc_map, field)
                     .map_err(|e| format!("sfx v3 merge field {}: {e}", field.field_id()))?;
