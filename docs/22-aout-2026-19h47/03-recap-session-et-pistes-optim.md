@@ -467,6 +467,63 @@ Panel rag3db : 9 requêtes sur 15 exactes au span près. 50k kernel : `include`
 
 ---
 
+## 5 quater. 23 août, 16h — le plancher est tombé
+
+### Perf, 50k kernel, 800 segments naturels, mmap, spans vérifiés (`4f3e7a9`)
+
+| Query | ce matin | 14h | **16h** | grep disque |
+|---|---|---|---|---|
+| sans résultat | — | 190 ms | **29 ms** | 172 ms |
+| `kmalloc` strict | 1 208 ms* | 177 ms | **29 ms** | 199 ms |
+| `net_device` strict | 14 001 ms* | 207 ms | **34 ms** | 292 ms |
+| `spin_lock` strict | 3 526 ms* | 183 ms | **28 ms** | 318 ms |
+| `include` strict | 34 891 ms* | 205 ms | **58 ms** | 342 ms |
+| `__init` strict | 49 000 ms | 328 ms | **42 ms** | 323 ms |
+| `uint64_t` relax | 1 353 ms | 216 ms | 170 ms | 1 126 ms |
+
+(*) sur index fusionné. Six à onze fois plus rapide que grep en strict.
+
+### Ce que c'était
+
+Une requête **sans aucun résultat** coûtait 190 ms pour 82 ms de CPU dans les étapes de
+`find_literal_v3`. Chronométré au-dessus : 4 052 ms de CPU par requête dans
+`prescan_one`, dont **3 803 dans `SfxFileReaderV3::open`** — `Map::new(fst_bytes.to_vec())`,
+une copie du FST entier, plus la table des parents, plus la désérialisation des word
+maps du `.sfx` que rien ne lit. Par segment, par requête, depuis le début du projet.
+`open_owned` emprunte le slice mmap ; 3 803 → 2 ms.
+
+### Ce qu'il faut en retenir
+
+Toute la journée, les compteurs de `profile.rs` ne mesuraient que l'**intérieur** de
+`find_literal_v3`. Le plancher était à l'extérieur, dans une ligne d'ouverture de
+fichier, et aucun chronomètre ne le couvrait. **Une requête vide est la mesure du
+plancher** ; elle aurait dû être la première du panel.
+
+Le pivot sur la position rare (`05-pivot-position-rare.md`) a été implémenté sous la
+forme « ancrage sur le deuxième token + vérification arrière de la tête » et gardé —
+il divise les splits de tête par quatre — mais son gain est marginal devant celui-ci,
+et son coût CPU propre est à remesurer maintenant que le plancher a disparu.
+
+### Highlights (`456bd58`, `4779915`)
+
+La vérité terrain fait le travail exact du moteur — fichiers lus depuis le disque,
+toutes les occurrences en spans, strict et relaxed — et a trouvé six bugs de span, dont
+une seule occurrence émise par document sur les chaînes (pré-existant), des fins
+tronquées à la frontière de chunk, des milieux de chaîne entrés à sti > 0, une fuite de
+partition 0x02 dans le DFS chunk, et la collision de clé 0x02 (`"0ui"` = `"0"+"ui"` ou
+`"0u"+"i"`, même ordinal — la P5 de l'audit, réelle). Plus aucun span en trop ; les
+manques restants sont en fin de fichier ou devant un caractère non-ASCII.
+
+### Résidus, index fusionné à 32 segments
+
+`spin_lock` 28 ms, `__init` 42 ms — mais `include` 434 ms (peu de segments, donc peu
+de parallélisme : un gros segment = un thread) et `uint64_t` relax 788 ms (pipeline
+word sur gros segments, même classe que les 264 M d'entrées d'hier). Et `include` y
+manque 11 spans contre 3 sur l'index naturel : **un segment fusionné n'est pas encore
+indiscernable d'un segment frais**, comme l'audit des contrats le prédisait (P3/P4).
+
+---
+
 ## 6. Ce qu'il ne faut pas refaire
 
 **Cinq hypothèses fausses dans cette session**, dont deux justes mais incomplètes :
