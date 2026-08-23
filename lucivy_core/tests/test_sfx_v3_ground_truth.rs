@@ -2312,3 +2312,232 @@ fn v3_distributed_coherence() {
     }
     assert_eq!(fails, 0, "{fails} queries differ between shapes or from the disk");
 }
+
+/// Node-id filtering, deletion by node id, and the sharded delta (LUCIDS)
+/// on a v3 index, spans included.
+///
+/// A database that already knows which documents qualify hands the engine a
+/// set of node ids: the answer must be exactly the ground truth restricted
+/// to that set, on every shard. A deletion by node id must remove every
+/// occurrence of that document and nothing else. And a client holding a
+/// snapshot, given the delta of those deletions and of new documents, must
+/// answer exactly like the source. All of it on disk, 4 shards, v3.
+#[test]
+fn v3_sharded_filter_delete_delta() {
+    use lucivy_core::sharded_handle::{ShardedHandle, ShardedSearchResult};
+    use lucistore::delta_sharded::compute_shard_versions;
+
+    let files = collect_files(2000);
+    if files.is_empty() { return; }
+    let scratch = std::env::var("V3_SCRATCH").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+    let src_dir = format!("{scratch}/v3_fdd_src");
+    let dst_dir = format!("{scratch}/v3_fdd_dst");
+    let _ = std::fs::remove_dir_all(&src_dir);
+    let _ = std::fs::remove_dir_all(&dst_dir);
+    std::fs::create_dir_all(&src_dir).unwrap();
+
+    let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+        "fields": [
+            {"name": "path", "type": "text", "stored": true},
+            {"name": "content", "type": "text", "stored": true}
+        ],
+        "sfx_version": 3,
+        "shards": 4
+    })).unwrap();
+    let src = ShardedHandle::create(&src_dir, &config).unwrap();
+    let path_f = src.field("path").unwrap();
+    let content_f = src.field("content").unwrap();
+    let nid_f = src.field(NODE_ID_FIELD).unwrap();
+    let add = |h: &ShardedHandle, idx: usize, path: &str, content: &str| {
+        let mut doc = ld_lucivy::LucivyDocument::new();
+        doc.add_u64(nid_f, idx as u64);
+        doc.add_text(path_f, path);
+        doc.add_text(content_f, content);
+        h.add_document(doc, idx as u64).unwrap();
+    };
+    for (i, (p, c)) in files.iter().enumerate() { add(&src, i, p, c); }
+    src.commit().unwrap();
+    // Raw copy below: let the policy merges and their GC finish first.
+    let drain = |h: &ShardedHandle| {
+        for i in 0.. {
+            let Some(s) = h.shard(i) else { break };
+            s.writer.lock().unwrap().as_ref().unwrap().drain_merges().unwrap();
+            s.reader.reload().unwrap();
+        }
+    };
+    drain(&src);
+
+    let collect = |h: &ShardedHandle, results: &[ShardedSearchResult],
+                   sink: &ld_lucivy::query::HighlightSink| -> SearchResult {
+        let mut doc_indices = HashSet::new();
+        let mut highlights = Vec::new();
+        for r in results {
+            let shard = h.shard(r.shard_id).unwrap();
+            let searcher = shard.reader.searcher();
+            let doc: ld_lucivy::LucivyDocument = searcher.doc(r.doc_address).unwrap();
+            use ld_lucivy::schema::document::Value;
+            let idx = doc.field_values().find(|(f, _)| *f == nid_f)
+                .and_then(|(_, v)| v.as_value().as_u64()).unwrap() as usize;
+            doc_indices.insert(idx);
+            let seg_id = searcher.segment_reader(r.doc_address.segment_ord).segment_id();
+            if let Some(hl) = sink.get(seg_id, r.doc_address.doc_id) {
+                if let Some(offs) = hl.get("content") {
+                    for [a, b] in offs { highlights.push((idx, *a, *b)); }
+                }
+            }
+        }
+        SearchResult { doc_indices, highlights }
+    };
+    let q = |t: &'static str, m: &str| GroundTruthQuery::from_mode(t, m).unwrap();
+    let queries = vec![
+        q("std::shared_ptr<binder::Expression>", "strict"),
+        q("if (result == nullptr)", "relax"),
+        q("::", "strict"),
+        q("Expression", "sw"),
+        q("ptr", "term"),
+        q("ku_dynamc_cast", "fz1"),
+        q("unique_ptr", "fz2"),
+        q("std::[a-z_]+_ptr<", "rx"),
+        q("déjà", "relax"),
+    ];
+    let config_of = |gq: &GroundTruthQuery| QueryConfig {
+        query_type: "contains".into(),
+        field: Some("content".into()),
+        value: Some(gq.text.into()),
+        strict_separators: Some(gq.strict_sep),
+        distance: if gq.distance > 0 && gq.distance != RX { Some(gq.distance) } else { None },
+        regex: if gq.distance == RX { Some(true) } else { None },
+        anchor_start: if gq.anchor { Some(true) } else { None },
+        exact_match: if gq.exact { Some(true) } else { None },
+        ..Default::default()
+    };
+    let truth = |gq: &GroundTruthQuery| -> GrepSpans {
+        if gq.is_regex() { grep_spans_regex(&files, gq.text) }
+        else if gq.distance > 0 { grep_spans_fuzzy(&files, gq.text, gq.distance) }
+        else { filter_boundaries(grep_spans(&files, gq.text, gq.strict_sep), &files, gq.anchor, gq.exact) }
+    };
+    let restrict = |gt: &GrepSpans, keep: &dyn Fn(usize) -> bool| -> GrepSpans {
+        GrepSpans {
+            docs: gt.docs.iter().copied().filter(|d| keep(*d)).collect(),
+            spans: gt.spans.iter().copied().filter(|(d, _, _)| keep(*d)).collect(),
+        }
+    };
+    let check = |label: &str, gq: &GroundTruthQuery, gt: &GrepSpans, r: &SearchResult, fails: &mut u32| {
+        let spans: HashSet<(usize, usize, usize)> = r.highlights.iter().copied().collect();
+        let miss = gt.spans.difference(&spans).count();
+        let extra = spans.difference(&gt.spans).count();
+        let ok = miss == 0 && extra == 0 && r.doc_indices == gt.docs;
+        eprintln!("  {label:<10} {:<36} {:>5} gt docs={} spans={} | docs={} spans={} miss={miss} extra={extra} {}",
+            gq.text, gq.mode_label(), gt.docs.len(), gt.spans.len(), r.doc_indices.len(), spans.len(),
+            if ok { "OK" } else { "FAIL" });
+        if !ok { *fails += 1; }
+    };
+    let mut fails = 0u32;
+
+    // ── Filter by node id: the database pre-filtered, the engine must not scan past it.
+    let allowed: HashSet<u64> = (0..files.len() as u64).filter(|i| i % 3 == 0).collect();
+    for gq in &queries {
+        let gt = restrict(&truth(gq), &|d| d % 3 == 0);
+        let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
+        let r = src.search_filtered(&config_of(gq), 100_000, Some(sink.clone()), allowed.clone()).unwrap();
+        check("filter", gq, &gt, &collect(&src, &r, &sink), &mut fails);
+    }
+
+    // ── Snapshot for the delta client, taken before the changes below.
+    std::fs::create_dir_all(&dst_dir).unwrap();
+    fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+        for e in std::fs::read_dir(from).unwrap().flatten() {
+            let p = e.path();
+            let t = to.join(e.file_name());
+            if p.is_dir() { std::fs::create_dir_all(&t).unwrap(); copy_tree(&p, &t); }
+            else { std::fs::copy(&p, &t).unwrap(); }
+        }
+    }
+    copy_tree(std::path::Path::new(&src_dir), std::path::Path::new(&dst_dir));
+    let client_versions = compute_shard_versions(std::path::Path::new(&dst_dir), 4).unwrap();
+
+    // ── Delete by node id, add new documents.
+    let deleted: HashSet<usize> = (0..files.len()).filter(|i| i % 7 == 0).collect();
+    for &d in &deleted { src.delete_by_node_id(d as u64).unwrap(); }
+    let new_docs: Vec<(usize, String)> = (0..20).map(|k| (files.len() + k,
+        format!("// added after snapshot {k}\nstd::shared_ptr<binder::Expression> added_{k} = nullptr;\nif (result == nullptr) {{ return déjà_{k}; }}\n"))).collect();
+    for (idx, c) in &new_docs { add(&src, *idx, &format!("added_{idx}.cpp"), c); }
+    src.commit().unwrap();
+    drain(&src);
+    // Ground truth for the new state: disk files minus the deleted ones, with
+    // exact spans; the added documents are judged on membership only (they
+    // are not on disk for the grep), so their spans are left out of the
+    // comparison on both sides.
+    let n_files = files.len();
+    let contains_new = |gq: &GroundTruthQuery, c: &str| -> bool {
+        if gq.is_regex() {
+            regex::RegexBuilder::new(gq.text).case_insensitive(true).build().unwrap().is_match(c)
+        } else if gq.distance > 0 {
+            !ld_lucivy::suffix_fst::briques::fuzzy_spans::fuzzy_spans(
+                strip_seps(&c.to_lowercase()).as_bytes(), strip_seps(&gq.text.to_lowercase()).as_bytes(),
+                gq.distance as usize).is_empty()
+        } else if gq.strict_sep {
+            c.to_lowercase().contains(&gq.text.to_lowercase())
+        } else {
+            strip_seps(&c.to_lowercase()).contains(&strip_seps(&gq.text.to_lowercase()))
+        }
+    };
+    let truth_after = |gq: &GroundTruthQuery| -> GrepSpans {
+        let mut gt = restrict(&truth(gq), &|d| !deleted.contains(&d));
+        if !(gq.anchor || gq.exact) {
+            for (idx, c) in &new_docs {
+                if contains_new(gq, c) { gt.docs.insert(*idx); }
+            }
+        }
+        gt
+    };
+    let without_new = |r: SearchResult| SearchResult {
+        doc_indices: r.doc_indices,
+        highlights: r.highlights.into_iter().filter(|(d, _, _)| *d < n_files).collect(),
+    };
+    // Anchored modes: the added docs would need a boundary truth; the
+    // membership check above is plain contains, so skip them for new docs.
+    let after_queries: Vec<&GroundTruthQuery> = queries.iter().filter(|g| !(g.anchor || g.exact)).collect();
+
+    for gq in &after_queries {
+        let gt = truth_after(gq);
+        let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
+        let r = src.search(&config_of(gq), 100_000, Some(sink.clone())).unwrap();
+        let r = without_new(collect(&src, &r, &sink));
+        check("deleted", gq, &gt, &r, &mut fails);
+    }
+
+    // ── Delta to the client, then the client must answer like the source.
+    let blob = src.export_sharded_delta(&src_dir, &client_versions).unwrap();
+    eprintln!("  delta blob: {} bytes", blob.len());
+    {
+        let d = lucistore::delta_sharded::deserialize_sharded_delta(&blob).unwrap();
+        for (sid, sd) in &d.shard_deltas {
+            let added: Vec<String> = sd.added_segments.iter()
+                .map(|b| format!("{}:{}B", &b.segment_id[..6], b.files.iter().map(|(_, f)| f.len()).sum::<usize>())).collect();
+            eprintln!("    shard_{sid}: removed={:?} added={added:?}",
+                sd.removed_segment_ids.iter().map(|x| &x[..6]).collect::<Vec<_>>());
+        }
+    }
+    src.close().unwrap();
+    for i in 0..4 { remove_lock_files_dir(&format!("{dst_dir}/shard_{i}")); }
+    let dst = ShardedHandle::open(&dst_dir).unwrap();
+    dst.apply_sharded_delta(&dst_dir, &blob).unwrap();
+    for gq in &after_queries {
+        let gt = truth_after(gq);
+        let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
+        let r = dst.search(&config_of(gq), 100_000, Some(sink.clone())).unwrap();
+        let r = without_new(collect(&dst, &r, &sink));
+        check("delta", gq, &gt, &r, &mut fails);
+    }
+    dst.close().unwrap();
+    assert_eq!(fails, 0, "{fails} checks failed");
+}
+
+fn remove_lock_files_dir(dir: &str) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().ends_with(".lock") { let _ = std::fs::remove_file(e.path()); }
+        }
+    }
+}

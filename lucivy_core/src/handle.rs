@@ -200,6 +200,28 @@ impl LucivyHandle {
         self.has_uncommitted.load(Ordering::Relaxed)
     }
 
+    /// Run `change` on the index files with the writer released, then
+    /// recreate the writer from the directory's new state. For deltas and
+    /// snapshots applied under an open handle: the writer's segment
+    /// inventory is read once at creation and would otherwise commit a
+    /// meta.json naming segments that no longer exist.
+    pub fn reopen_writer_after(
+        &self,
+        change: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut guard = self.writer.lock().map_err(|_| "writer lock poisoned".to_string())?;
+        if let Some(writer) = guard.take() {
+            if self.has_uncommitted() {
+                return Err("uncommitted changes: commit before applying a delta".into());
+            }
+            writer.drain_merges().map_err(|e| format!("drain merges: {e}"))?;
+            drop(writer);
+        }
+        change()?;
+        *guard = Some(create_writer(&self.index)?);
+        Ok(())
+    }
+
     /// Close the index: commit pending writes and release the IndexWriter (flock).
     /// After close, the index files remain on disk but the handle cannot write anymore.
     pub fn close(&self) -> Result<(), String> {

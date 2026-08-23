@@ -388,3 +388,27 @@ Après : 19/19 sur les trois formes ; `perf_shape_sharded` inchangé.
 Hors champ : le routage par node_id (`delete_by_node_id`) et les deltas sharded
 ne sont pas couverts par ce panel.
 
+## H. Filtre par node_id, suppression, delta sharded — FAIT le 23 août (nuit)
+
+`v3_sharded_filter_delete_delta` : index disque 4 shards v3, 2000 fichiers rag3db,
+9 requêtes (strict/relaxed longs, sw, term, fz1/fz2, regex, accent).
+1. `search_filtered(allowed_ids)` = vérité terrain restreinte aux ids, spans exactes —
+   le cas « la BDD a déjà filtré » : juste du premier coup.
+2. `delete_by_node_id` × 1/7 + 20 ajouts, commit : exact.
+3. Snapshot pris avant, LUCIDS exporté puis appliqué sur le client, réouvert : exact.
+
+Mais le delta pesait **379 Mo pour un index de 366 Mo**. Deux bugs, tous deux de l'ère v2 :
+- `meta.json` écrit les uuid **avec tirets**, `current_bundle_ids()` les compare à la
+  forme simple : les ensembles ne se croisaient jamais, chaque delta renvoyait tout
+  (`segment_ids_from_meta` normalise maintenant ; le test `test_sharded_delta_e2e`
+  ne comptait que les shards touchés, pas les octets).
+- Une suppression est un nouveau fichier `.N.del` à côté d'un segment inchangé :
+  l'exporteur, par id, ne l'envoyait pas et le client ne s'ouvrait plus
+  (`FileDoesNotExist(….587.del)`). Les segments communs envoient leurs `.del` (160 o).
+- Et `apply_sharded_delta` sous un handle ouvert : le writer gardait l'inventaire
+  d'avant et `close()` recommitait un `meta.json` nommant des segments supprimés.
+  `LucivyHandle::reopen_writer_after` libère le writer, applique, le recrée.
+
+Après : **293 Ko**. Reste inhérent : si la policy fusionne un gros segment après des
+suppressions, le delta le renvoie entier (à borner côté policy si ça gêne).
+

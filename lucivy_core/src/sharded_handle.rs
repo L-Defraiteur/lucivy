@@ -2138,9 +2138,15 @@ impl ShardedHandle {
             }
 
             let shard_path = base.join(format!("shard_{shard_id}"));
-            lucistore::fs_utils::apply_delta(&shard_path, shard_delta)?;
+            let shard = &self.shards[*shard_id];
+            // The writer's segment inventory was read at open and knows
+            // nothing of what the delta just did on disk: its next commit —
+            // `close()` included — would write a meta.json naming segments
+            // the delta removed. Release it before touching the files,
+            // recreate it from the new meta after.
+            shard.reopen_writer_after(|| lucistore::fs_utils::apply_delta(&shard_path, shard_delta))?;
 
-            self.shards[*shard_id].reader.reload()
+            shard.reader.reload()
                 .map_err(|e| format!("shard_{shard_id} reload: {e}"))?;
         }
 

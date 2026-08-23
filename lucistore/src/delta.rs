@@ -184,7 +184,12 @@ pub fn segment_ids_from_meta(meta_bytes: &[u8]) -> Result<HashSet<String>, Strin
     let mut ids = HashSet::new();
     for seg in segments {
         if let Some(id) = seg.get("segment_id").and_then(|s| s.as_str()) {
-            ids.insert(id.to_string());
+            // meta.json writes the hyphenated uuid; bundle ids, file names
+            // and `current_bundle_ids` use the simple form. Compared as-is,
+            // the two sets never intersected and EVERY delta re-sent the
+            // whole index (379 MB for 1/7 deletions on a 366 MB index,
+            // 23 August 2026). Normalise to the simple form here.
+            ids.insert(id.replace('-', ""));
         }
     }
     Ok(ids)
@@ -244,6 +249,23 @@ pub fn export_delta_from(
             segment_id: bundle_id.clone(),
             files,
         });
+    }
+
+    // A bundle the client already has can still have changed: deletions
+    // are a new, opstamp-named `.del` file next to unchanged segment files,
+    // and the new manifest names it. Ship those files alone — the apply
+    // side writes bundle files and only removes ids listed as removed, so
+    // the client gains the delete file and keeps the segment (a client
+    // without it failed to open the shard: "FileDoesNotExist(….587.del)").
+    // Stale generations left behind are harmless; the manifest decides.
+    for bundle_id in current_ids.intersection(client_bundle_ids) {
+        let files: Vec<(String, Vec<u8>)> = exporter.read_bundle_files(bundle_id)?
+            .into_iter()
+            .filter(|(name, _)| name.ends_with(".del"))
+            .collect();
+        if !files.is_empty() {
+            added_segments.push(SegmentBundle { segment_id: bundle_id.clone(), files });
+        }
     }
 
     let config = exporter.read_config();
@@ -308,11 +330,12 @@ mod tests {
 
     #[test]
     fn test_segment_ids_from_meta() {
-        let meta = r#"{"segments":[{"segment_id":"abc"},{"segment_id":"def"}]}"#;
+        let meta = r#"{"segments":[{"segment_id":"abc"},{"segment_id":"11e2d2c1-8a07-4485-ae3c-34c20a2adf3d"}]}"#;
         let ids = segment_ids_from_meta(meta.as_bytes()).unwrap();
         assert_eq!(ids.len(), 2);
         assert!(ids.contains("abc"));
-        assert!(ids.contains("def"));
+        // Hyphenated in meta.json, simple form everywhere else.
+        assert!(ids.contains("11e2d2c18a074485ae3c34c20a2adf3d"));
     }
 
     // ── DeltaExporter tests ──────────────────────────────────────────────
@@ -331,10 +354,30 @@ mod tests {
             Ok(self.manifest.clone())
         }
         fn read_bundle_files(&self, bundle_id: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
-            self.bundles.get(bundle_id)
-                .cloned()
-                .ok_or_else(|| format!("bundle {bundle_id} not found"))
+            // Bundles the mock does not describe have no files (the exporter
+            // also asks about bundles both sides hold, for their delete files).
+            Ok(self.bundles.get(bundle_id).cloned().unwrap_or_default())
         }
+    }
+
+    #[test]
+    fn test_export_delta_ships_delete_files_of_common_bundles() {
+        let mut bundles = std::collections::HashMap::new();
+        bundles.insert("seg_a".into(), vec![
+            ("seg_a.term".into(), vec![1; 100]),
+            ("seg_a.12.del".into(), vec![9, 9]),
+        ]);
+        let exporter = MockExporter {
+            bundle_ids: ["seg_a".into()].into(),
+            manifest: b"{}".to_vec(),
+            bundles,
+        };
+        let client_ids: HashSet<String> = ["seg_a".into()].into();
+        let delta = export_delta_from(&exporter, &client_ids, "v1").unwrap();
+        assert!(delta.removed_segment_ids.is_empty());
+        assert_eq!(delta.added_segments.len(), 1);
+        assert_eq!(delta.added_segments[0].segment_id, "seg_a");
+        assert_eq!(delta.added_segments[0].files, vec![("seg_a.12.del".to_string(), vec![9, 9])]);
     }
 
     #[test]
