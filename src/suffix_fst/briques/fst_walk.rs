@@ -204,6 +204,14 @@ pub fn falling_walk_chunks(
                 if parent.sti >= parent.own_len {
                     return None;
                 }
+                // The whole query sits inside this key (own bytes + overlap):
+                // that is a single-token match, already found by
+                // fst_candidates_v3. A chain from here only re-derives it —
+                // 26 438 chains for `inc` over rag3db, every one redundant,
+                // which is what made a 3-byte literal cost 120 ms of CPU.
+                if prefix_len >= query_bytes.len() {
+                    return None;
+                }
                 let split_byte = parent.own_len as usize - parent.sti as usize;
                 if prefix_len >= split_byte {
                     let overlap_consumed = prefix_len - split_byte;
@@ -244,6 +252,9 @@ pub fn falling_walk_words(
         fst, reader, query_bytes, SI_STRIPPED_PREFIX,
         |parent, prefix_len| {
             if parent.sep_len == 0 {
+                return None;
+            }
+            if prefix_len >= query_bytes.len() {
                 return None;
             }
             let content_len = parent.content_len() as usize;
@@ -870,12 +881,15 @@ mod tests {
         with_reader(&[
             ("mutex_lo", 0, 6, 1, 2, true),
         ], |r| {
-            // "mutexlo" strict_sep=false → stripped partition "mutexlo" matches
-            // split_byte = content_len(5) - sti(0) = 5
-            // prefix_len = 7 (full key), 7 >= 5 → split
+            // "mutexlo" strict_sep=false → stripped partition key "mutexlo"
+            // holds the WHOLE query (content "mutex" + overlap "lo"): that is
+            // a single-token match, and the walk emits no split for it — a
+            // chain from here would only re-derive what fst_candidates_v3
+            // already found. A query running past the key does split.
             let s = falling_walk_v3(r, "mutexlo", false);
-            assert!(!s.is_empty(), "stripped walk should find split for 'mutexlo'");
-            let split = s.iter().find(|s| s.query_consumed == 5).unwrap();
+            assert!(s.is_empty(), "whole query inside one key: no split, it is a single match");
+            let s = falling_walk_v3(r, "mutexlock", false);
+            let split = s.iter().find(|s| s.query_consumed == 5).expect("split for the longer query");
             assert_eq!(split.overlap_validated, 2); // "lo" validated
         });
     }

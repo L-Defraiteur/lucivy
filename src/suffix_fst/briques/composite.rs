@@ -505,6 +505,7 @@ pub fn resolve_all_trigrams(
     ctx: &BriquesContext<'_>,
     ngrams: &[String],
     strict_separators: bool,
+    keep_rarest: Option<usize>,
 ) -> Vec<TrigramHit> {
     // One FST walk per n-gram: the selectivity pass used to walk, drop the
     // candidates, and walk again (0.5 s of 9 s on `inclde` over 50k docs).
@@ -514,6 +515,7 @@ pub fn resolve_all_trigrams(
     let mut selectivity: Vec<(usize, usize)> = all_cands.iter().enumerate()
         .map(|(i, c)| (i, c.len())).collect();
     selectivity.sort_by_key(|&(_, count)| count);
+    if let Some(k) = keep_rarest { selectivity.truncate(k.max(1)); }
 
     let has_wsp = ctx.has_word_pipeline();
     let mut all_hits = Vec::new();
@@ -552,6 +554,125 @@ pub fn resolve_all_trigrams(
         }
     }
     all_hits
+}
+
+/// Candidate generation by exact pieces.
+///
+/// Cut `query` into `d + 1` contiguous pieces; every occurrence within edit
+/// distance `d` contains at least one of them unchanged, so the union of the
+/// pieces' exact occurrences covers every fuzzy occurrence. Each piece is a
+/// contains query (`find_literal_v3`, without its own verification: the
+/// fuzzy alignment verifies anyway). Among all partitions the one with the
+/// fewest FST candidates in total is used — `inc|lde`, not `i|nclde`.
+/// Returns hits in the region format (piece index as `tri_idx`, piece
+/// offset in the query as its position) or `None` when the query is too
+/// short to cut into pieces of at least two bytes.
+/// Sum of FST candidate counts of the `keep` rarest n-grams: what the pivot
+/// generator would resolve. Same unit as the piece partition cost.
+fn pivot_cost_estimate(
+    ctx: &BriquesContext<'_>,
+    ngrams: &[String],
+    strict_separators: bool,
+    keep: usize,
+) -> usize {
+    let mut counts: Vec<usize> = ngrams.iter()
+        .map(|g| fst_walk::fst_candidates_v3(ctx.reader, g, false, strict_separators).len())
+        .collect();
+    counts.sort_unstable();
+    counts.iter().take(keep.max(1)).sum()
+}
+
+/// `max_cost`: give up (return `None`) when the best partition costs more
+/// than this — the caller then uses the pivot generator instead.
+fn resolve_pieces(
+    ctx: &BriquesContext<'_>,
+    query: &str,
+    distance: u8,
+    strict_separators: bool,
+    max_cost: Option<usize>,
+) -> Option<(Vec<TrigramHit>, Vec<usize>)> {
+    let lower = query.to_lowercase();
+    let k = distance as usize + 1;
+    const MIN_PIECE: usize = 2;
+    let cuts: Vec<usize> = (1..lower.len()).filter(|&i| lower.is_char_boundary(i)).collect();
+    if lower.len() < k * MIN_PIECE || cuts.len() + 1 < k { return None; }
+
+    // Selectivity of every candidate piece [a, b): FST candidate count.
+    let bounds: Vec<usize> = std::iter::once(0).chain(cuts.iter().copied()).chain(std::iter::once(lower.len())).collect();
+    let mut cost: std::collections::HashMap<(usize, usize), usize> = std::collections::HashMap::new();
+    let mut piece_cost = |a: usize, b: usize| -> usize {
+        *cost.entry((a, b)).or_insert_with(|| {
+            fst_walk::fst_candidates_v3(ctx.reader, &lower[a..b], false, strict_separators).len()
+        })
+    };
+
+    // Enumerate partitions into k pieces of >= MIN_PIECE bytes; queries are
+    // short (<= 64 bytes) and k <= 4, the count stays small.
+    let mut best: Option<(usize, Vec<(usize, usize)>)> = None;
+    fn rec(
+        bounds: &[usize], start_idx: usize, left: usize, acc: &mut Vec<(usize, usize)>,
+        acc_cost: usize, best: &mut Option<(usize, Vec<(usize, usize)>)>,
+        piece_cost: &mut dyn FnMut(usize, usize) -> usize,
+    ) {
+        let a = bounds[start_idx];
+        if left == 1 {
+            let b = *bounds.last().unwrap();
+            if b - a < MIN_PIECE { return; }
+            let c = acc_cost + piece_cost(a, b);
+            if best.as_ref().map_or(true, |(bc, _)| c < *bc) {
+                let mut p = acc.clone(); p.push((a, b));
+                *best = Some((c, p));
+            }
+            return;
+        }
+        for j in (start_idx + 1)..bounds.len() - 1 {
+            let b = bounds[j];
+            if b - a < MIN_PIECE { continue; }
+            if bounds[bounds.len() - 1] - b < (left - 1) * MIN_PIECE { break; }
+            let c = acc_cost + piece_cost(a, b);
+            if best.as_ref().is_some_and(|(bc, _)| c >= *bc) { continue; }
+            acc.push((a, b));
+            rec(bounds, j, left - 1, acc, c, best, piece_cost);
+            acc.pop();
+        }
+    }
+    let mut acc = Vec::new();
+    rec(&bounds, 0, k, &mut acc, 0, &mut best, &mut piece_cost);
+    let (best_cost, pieces) = best?;
+    if let Some(limit) = max_cost {
+        // A piece goes through the contains pipeline — chains across
+        // separators and chunks — which costs more per candidate than a
+        // plain n-gram posting list. Weigh it accordingly (measured ratio
+        // of resolve CPU per hit on rag3db: roughly 2).
+        if best_cost * 2 > limit {
+            if std::env::var("V3_DIAG_FUZZY").is_ok() {
+                eprintln!("[fz] auto: pivot (pieces cost {best_cost} x2 > pivot {limit})");
+            }
+            return None;
+        }
+    }
+
+    let mut hits = Vec::new();
+    let mut positions = Vec::with_capacity(pieces.len());
+    for (idx, &(a, b)) in pieces.iter().enumerate() {
+        positions.push(a);
+        let matches = find_literal_v3(ctx, &lower[a..b], false, strict_separators);
+        for m in matches {
+            hits.push(TrigramHit {
+                tri_idx: idx,
+                doc_id: m.doc_id,
+                position: m.position,
+                last_position: m.position + m.span.saturating_sub(1),
+                byte_from: m.byte_from,
+                byte_to: m.byte_to,
+            });
+        }
+    }
+    if std::env::var("V3_DIAG_FUZZY").is_ok() {
+        eprintln!("[fz] pieces for {query:?} d={distance}: {:?} -> {} hits",
+            pieces.iter().map(|&(a, b)| &lower[a..b]).collect::<Vec<_>>(), hits.len());
+    }
+    Some((hits, positions))
 }
 
 // ─── Brique 3: build_trigram_chains ─────────────────────────────────────
@@ -893,13 +1014,57 @@ pub fn resolve_trigrams_v3(
     // Now that verify_candidates re-checks every survivor against the text, the
     // threshold is purely a recall/cost knob: lowering it can only add candidates,
     // and every added candidate is exactly checked.
-    let threshold = (ngrams.len() as i32 - n as i32 * distance as i32).max(1) as usize;
+    let mut threshold = (ngrams.len() as i32 - n as i32 * distance as i32).max(1) as usize;
+
+    // Three candidate generators, selectable for benchmarking
+    // (`V3_FUZZY_MODE=ngram|pivot|pieces`, default `pieces`). All three
+    // feed the same regions → windows → alignment, so their results must be
+    // identical; only the cost of finding where to look differs.
+    //
+    // - `ngram`: every n-gram resolved in full, pigeonhole threshold on the
+    //   region. 26 M hits for 217 k spans on `inclde` over 50k files: with
+    //   bigrams and a threshold of 1-2 the pigeonhole filters nothing.
+    // - `pivot`: only the `N - t + 1` rarest n-grams are resolved. Any
+    //   occurrence holds at least `t` of the N, so it holds at least one of
+    //   these; the region threshold becomes 1 (find_multi_token_v3's
+    //   "pivot on the most selective" applied to n-grams).
+    // - `pieces`: the query is cut into `d + 1` contiguous pieces; an
+    //   occurrence within distance `d` contains at least one piece intact
+    //   (classic pigeonhole). Pieces are resolved exactly by the contains
+    //   pipeline, the partition chosen to minimise the posting count.
+    // - `auto` (default): `pieces` or `pivot`, whichever promises fewer
+    //   postings — both estimates come from the same FST candidate counts,
+    //   before anything is resolved. Measured over 50k kernel files, neither
+    //   generator wins alone: pieces 129 ms vs pivot 198 on `inclde`, but
+    //   78 vs 59 on `spinlock` and 575 vs 480 on `__init` (a piece `in`).
+    let mode = std::env::var("V3_FUZZY_MODE").unwrap_or_else(|_| "auto".into());
     let t = profile::Timer::start();
-    let hits = resolve_all_trigrams(ctx, &ngrams, strict_separators);
+    let pivot_keep = ngrams.len() + 1 - threshold;
+    let (hits, positions) = match mode.as_str() {
+        "pieces" => match resolve_pieces(ctx, query, distance, strict_separators, None) {
+            Some(r) => { threshold = 1; r }
+            None => (resolve_all_trigrams(ctx, &ngrams, strict_separators, None), query_positions.clone()),
+        },
+        "pivot" => {
+            threshold = 1;
+            (resolve_all_trigrams(ctx, &ngrams, strict_separators, Some(pivot_keep)), query_positions.clone())
+        }
+        "auto" => {
+            let pivot_cost = pivot_cost_estimate(ctx, &ngrams, strict_separators, pivot_keep);
+            match resolve_pieces(ctx, query, distance, strict_separators, Some(pivot_cost)) {
+                Some(r) => { threshold = 1; r }
+                None => {
+                    threshold = 1;
+                    (resolve_all_trigrams(ctx, &ngrams, strict_separators, Some(pivot_keep)), query_positions.clone())
+                }
+            }
+        }
+        _ => (resolve_all_trigrams(ctx, &ngrams, strict_separators, None), query_positions.clone()),
+    };
     t.stop(|c| &c.ns_fz_resolve);
     profile::bump(|c| &c.n_fz_hits, hits.len() as u64);
     let t = profile::Timer::start();
-    let chains = build_trigram_chains(&hits, &query_positions, distance);
+    let chains = build_trigram_chains(&hits, &positions, distance);
     t.stop(|c| &c.ns_fz_chains);
     profile::bump(|c| &c.n_fz_regions, chains.len() as u64);
     let (bitset, highlights, coverage) =

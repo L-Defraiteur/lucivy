@@ -265,3 +265,43 @@ Ce qui a été trouvé, par reproductions de 10 ms (`v3_fuzzy_span_inside_long_t
 Reste : la perf fuzzy à grande échelle (`__init` fz1 11 s, `inclde` 7 s — à profiler,
 probablement `rebuild_window_mapped` et les hits des bigrammes fréquents), et le
 défaut `sfx_version = 2` à trancher.
+
+### Fuzzy, suite : l'audit agent, et trois générateurs de candidats
+
+Un agent en lecture seule a comparé les pipelines contains et fuzzy avec les
+compteurs — **mesuré**, pas estimé. Enseignements non appliqués au fuzzy : prescan
+séquentiel (wall = CPU, contains à 24 de concurrence), FST parcouru deux fois par
+n-gramme, 96 % des hits word en écho des hits chunk, `resolve_doc` par position de
+fenêtre (49 postings décodés pour 1), pas de compteurs. Corrigés (`4fbf6dd`) :
+kernel 50k `inclde` fz1 7 343 → 297 ms, `__init` 11 175 → 476, `kmalloc` fz2 5 807 →
+233, spans identiques.
+
+Puis trois générateurs de candidats derrière `V3_FUZZY_MODE`, même vérification,
+spans identiques dans les trois (kernel 50k, wall ms) :
+
+| requête | ngram | pivot | pieces | **auto** |
+|---|---|---|---|---|
+| `kmallc` fz1 | 114 | 120 | 66 | 71 |
+| `spinlock` fz1 | 50 | 59 | 78 | 79 |
+| `net_devce` fz1 | 43 | 43 | 41 | 42 |
+| `inclde` fz1 | 295 | 198 | 129 | 142 |
+| `__init` fz1 (→ `init`) | 485 | 480 | 575 | 499 |
+| `uint64` fz1 | 143 | 64 | 63 | 67 |
+| `mutex_unlok` fz1 | 26 | 26 | 31 | 32 |
+| `kmalloc` fz2 | 228 | 261 | 189 | 201 |
+
+- `ngram` : tous les n-grammes résolus, seuil pigeonhole sur la région.
+- `pivot` : seuls les `N − t + 1` n-grammes les plus rares (toute occurrence en
+  contient un), seuil 1.
+- `pieces` : requête coupée en d+1 pièces, chaque pièce résolue exactement par le
+  pipeline contains, partition choisie par coût FST minimal. Ce n'est pas « gratuit » :
+  le contains sur un littéral de 3 octets coûte 120 ms CPU sur rag3db (chaînes à
+  travers les séparateurs en relaxed, légitimes). Les pièces gagnent quand elles
+  sont rares, perdent quand l'une est `in`.
+- `auto` (défaut) : pièces si leur coût FST × 2 ≤ coût pivot, sinon pivot.
+
+Au passage : un split dont la clé contient toute la requête (contenu + overlap) est
+un match simple, la chaîne était redondante (`fst_walk`, −700 chaînes sur `inc`).
+
+Contains sur le même index : 30-80 ms. Le fuzzy est à ×1,5-3 (hors `__init`, qui
+est une question de sémantique : `init` d=1 admet `int`, `unit`, `inet`).
