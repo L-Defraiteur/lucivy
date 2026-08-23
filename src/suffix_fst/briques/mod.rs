@@ -15,5 +15,6 @@ pub mod orchestrator;
 pub mod regex_v3;
 pub mod profile;
 pub mod fuzzy_spans;
+pub mod regex_verified;
 #[cfg(test)]
 mod integration_tests;

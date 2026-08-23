@@ -230,6 +230,18 @@ tests fuzzy mesuraient v2 sans le savoir.
 
 ---
 
+## C bis. Avertissements honnêtes à la requête
+
+Quand la couverture aura été poussée autant que possible, ce qui reste comme
+limitation **connue** doit remonter à l'utilisateur au moment de la recherche, pas
+rester un silence : regex sans littéral exploitable (`MIN_LITERAL_LEN`) ou dont les
+gaps dépassent ce que l'index sait vérifier, fuzzy dont la distance avale la
+requête (`__init` relaxed → `init` d=1 admet `int`, `unit`, `inet` : 44 579 docs sur
+50 000), mot plus long que le plafond de suffixes des entrées word, requête vide
+après retrait des séparateurs, plafond de résultats atteint. Forme : un champ
+`warnings: Vec<String>` dans le résultat de recherche, propagé par les bindings.
+À faire après la couverture, pas à la place.
+
 ## D. Hygiène — petit, sûr, sans urgence
 
 - `resolve_doc` et `first_entries.iter().find(doc_id)` : ce dernier a été remplacé

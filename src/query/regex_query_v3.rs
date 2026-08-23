@@ -65,6 +65,49 @@ impl RegexQueryV3 {
             crate::LucivyError::SystemError(format!("open SFX3: {e}")))?;
         let pr = crate::query::posting_resolver::build_resolver(seg_reader, self.field)?;
 
+        // Verified path (default): required literals + the real regex on
+        // rebuilt windows. `V3_REGEX_MODE=legacy` keeps the approximation
+        // for comparison.
+        if std::env::var("V3_REGEX_MODE").as_deref() != Ok("legacy") {
+            use crate::suffix_fst::briques::regex_verified;
+            let load = |ext: &str| -> Option<common::OwnedBytes> {
+                seg_reader.sfx_index_file(ext, self.field)
+                    .and_then(|fs| fs.read_bytes().ok())
+            };
+            let posmap_bytes = load("posmap");
+            let bytemap_bytes = load("bytemap");
+            let wsp_bytes = load("word_sfxpost");
+            let sib_bytes = load("sibling_v3");
+            let tt_bytes = load("termtexts");
+            let wpm_bytes = load("word_pos_map");
+            let ctx = crate::suffix_fst::briques::context::BriquesContext {
+                reader: &reader,
+                resolver: &*pr,
+                filter_docs: None,
+                debug: false,
+                trace_id: None,
+                posmap: posmap_bytes.as_ref().and_then(|b| crate::suffix_fst::posmap::PosMapReader::open(b)),
+                bytemap: bytemap_bytes.as_ref().and_then(|b| crate::suffix_fst::bytemap::ByteBitmapReader::open(b)),
+                word_sfxpost: wsp_bytes.as_ref().and_then(|b| crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(b)),
+                sibling_v3: sib_bytes.as_ref().and_then(|b| crate::suffix_fst::sibling_table::SiblingTableReader::open(b)),
+                termtexts: tt_bytes.as_ref().and_then(|b| crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open(b)),
+                word_posmap: wpm_bytes.as_ref().and_then(|b| crate::suffix_fst::word_pos_map::WordPosMapReader::open(b)),
+            };
+            let Some(plan) = regex_verified::plan(&self.pattern) else {
+                return Err(crate::LucivyError::InvalidArgument(format!(
+                    "regex {:?}: no literal of at least 2 bytes is required by every match; \
+                     the index cannot locate candidates for this pattern", self.pattern)));
+            };
+            let re = regex::RegexBuilder::new(&self.pattern).case_insensitive(true).build()
+                .map_err(|e| crate::LucivyError::InvalidArgument(format!("regex: {e}")))?;
+            let highlights = regex_verified::regex_verified(&ctx, &self.pattern, &plan, &re);
+            let mut tf_map: HashMap<DocId, u32> = HashMap::new();
+            for &(doc_id, _, _) in &highlights {
+                *tf_map.entry(doc_id).or_insert(0) += 1;
+            }
+            return Ok((tf_map.into_iter().collect(), highlights));
+        }
+
         let regex = tantivy_fst::Regex::new(&self.pattern).map_err(|e|
             crate::LucivyError::InvalidArgument(format!("regex: {e}")))?;
         let automaton = crate::query::automaton_weight::SfxAutomatonAdapter(&regex);
@@ -151,34 +194,85 @@ impl RegexQueryV3 {
     }
 }
 
-impl Query for RegexQueryV3 {
-    fn prescan_segments(&mut self, segments: &[&SegmentReader]) -> crate::Result<()> {
+impl RegexQueryV3 {
+    fn prescan_one(
+        &self,
+        seg_reader: &SegmentReader,
+    ) -> crate::Result<Option<(crate::index::SegmentId, Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)>> {
         use crate::suffix_fst::section_file::detect_sfx_version;
+        let segment_id = seg_reader.segment_id();
+        let Some(sfx_data) = seg_reader.sfx_file(self.field) else { return Ok(None) };
+        let sfx_bytes = sfx_data.read_bytes().map_err(|e|
+            crate::LucivyError::SystemError(format!("prescan read .sfx: {e}")))?;
+        let version = detect_sfx_version(sfx_bytes.as_ref()).unwrap_or(1);
+        let (doc_tf, highlights) = if version == 3 {
+            self.prescan_segment_v3(seg_reader, &sfx_bytes)?
+        } else {
+            self.prescan_segment_v2(seg_reader, &sfx_bytes)?
+        };
+        Ok(Some((segment_id, doc_tf, highlights)))
+    }
 
+    fn record_prescan(
+        &mut self,
+        segment_id: crate::index::SegmentId,
+        doc_tf: Vec<(DocId, u32)>,
+        highlights: Vec<(DocId, usize, usize)>,
+    ) {
+        self.global_doc_freq += doc_tf.len() as u64;
+        self.prescan_cache.insert(
+            (self.cache_key(), segment_id),
+            CachedPrescan::new(doc_tf, highlights),
+        );
+    }
+}
+
+impl Query for RegexQueryV3 {
+    /// Prescan every segment on the luciole pool, as contains and fuzzy do.
+    /// The loop was sequential: wall time equalled the CPU sum over segments.
+    fn prescan_segments(&mut self, segments: &[&SegmentReader]) -> crate::Result<()> {
         self.prescan_cache.clear();
         self.global_doc_freq = 0;
 
-        for seg_reader in segments {
-            let segment_id = seg_reader.segment_id();
-            let sfx_data = match seg_reader.sfx_file(self.field) {
-                Some(d) => d,
-                None => continue,
-            };
-            let sfx_bytes = sfx_data.read_bytes().map_err(|e|
-                crate::LucivyError::SystemError(format!("prescan read .sfx: {e}")))?;
+        type SegOutcome = Option<(crate::index::SegmentId, Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)>;
 
-            let version = detect_sfx_version(sfx_bytes.as_ref()).unwrap_or(1);
-            let (doc_tf, highlights) = if version == 3 {
-                self.prescan_segment_v3(seg_reader, &sfx_bytes)?
-            } else {
-                self.prescan_segment_v2(seg_reader, &sfx_bytes)?
-            };
+        if segments.len() <= 1 {
+            for seg_reader in segments {
+                if let Some((segment_id, doc_tf, highlights)) = self.prescan_one(seg_reader)? {
+                    self.record_prescan(segment_id, doc_tf, highlights);
+                }
+            }
+            return Ok(());
+        }
 
-            self.global_doc_freq += doc_tf.len() as u64;
-            self.prescan_cache.insert(
-                (self.cache_key(), segment_id),
-                CachedPrescan::new(doc_tf, highlights),
-            );
+        let names: Vec<String> = (0..segments.len()).map(|i| format!("seg_{i}")).collect();
+        let mut tasks: Vec<(&str, Box<dyn FnOnce() -> Result<luciole::port::PortValue, String> + Send + 'static>)> =
+            Vec::with_capacity(segments.len());
+        for (i, seg_reader) in segments.iter().enumerate() {
+            let seg = (*seg_reader).clone();
+            let probe = self.clone();
+            tasks.push((names[i].as_str(), Box::new(move || {
+                let outcome: SegOutcome = probe.prescan_one(&seg)
+                    .map_err(|e| format!("regex prescan segment: {e}"))?;
+                Ok(luciole::port::PortValue::new(outcome))
+            })));
+        }
+        let t_dag = std::time::Instant::now();
+        let mut dag = luciole::scatter::build_scatter_dag(tasks);
+        let mut result = luciole::execute_dag(&mut dag, None)
+            .map_err(|e| crate::LucivyError::SystemError(format!("regex prescan DAG: {e}")))?;
+        if crate::suffix_fst::briques::profile::enabled() {
+            eprintln!("  [rx prescan] {} segments, scatter DAG wall {:.1}ms",
+                segments.len(), t_dag.elapsed().as_secs_f64() * 1e3);
+        }
+        let map = result
+            .take_output::<std::collections::HashMap<String, luciole::port::PortValue>>("collect", "results")
+            .ok_or_else(|| crate::LucivyError::SystemError("regex prescan DAG: no results".into()))?;
+        let mut scatter = luciole::ScatterResults::from(map);
+        for name in &names {
+            if let Some(Some((segment_id, doc_tf, highlights))) = scatter.take::<SegOutcome>(name) {
+                self.record_prescan(segment_id, doc_tf, highlights);
+            }
         }
         Ok(())
     }

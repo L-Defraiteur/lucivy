@@ -41,7 +41,10 @@ fn max_docs(default: usize) -> usize {
 ///
 /// The values come from the environment and are handed to APIs wanting `&'static
 /// str`, so they are leaked: a handful of strings in a test binary.
-/// `V3_QUERIES=a:strict,b:relax,c:fz1,d:fz2` → (value, strict, distance).
+/// Marker in the `distance` slot for a regex query.
+const RX: u8 = 255;
+
+/// `V3_QUERIES=a:strict,b:relax,c:fz1,d:fz2,e:rx` → (value, strict, distance).
 /// Fuzzy is always relaxed (the query is separator-stripped before matching).
 fn query_spec() -> Option<Vec<(&'static str, bool, u8)>> {
     std::env::var("V3_QUERIES").ok().map(|spec| {
@@ -55,6 +58,8 @@ fn query_spec() -> Option<Vec<(&'static str, bool, u8)>> {
                     Some((v, "fz1")) => (v.trim(), false, 1),
                     Some((v, "fz2")) => (v.trim(), false, 2),
                     Some((v, "fz3")) => (v.trim(), false, 3),
+                    // regex: distance 255 is the marker, see GroundTruthQuery
+                    Some((v, "rx")) => (v.trim(), false, RX),
                     _ => (item, true, 0),
                 };
                 // Whitespace cannot survive the trim: `\s`, `\t`, `\n` stand
@@ -499,6 +504,29 @@ fn grep_spans_fuzzy(files: &[(String, String)], needle: &str, distance: u8) -> G
     GrepSpans { docs, spans }
 }
 
+/// Regex ground truth from disk: every non-overlapping, leftmost-first match
+/// of the pattern (case-insensitive, as the engine), in source bytes.
+fn grep_spans_regex(files: &[(String, String)], pattern: &str) -> GrepSpans {
+    let root = repo_path();
+    let root = std::path::Path::new(&root);
+    let mut docs = HashSet::new();
+    let mut spans = HashSet::new();
+    let re = regex::RegexBuilder::new(pattern).case_insensitive(true).build()
+        .expect("invalid regex pattern");
+    for (i, (rel, _)) in files.iter().enumerate() {
+        let Ok(bytes) = std::fs::read(root.join(rel)) else { continue };
+        let text = String::from_utf8_lossy(&bytes);
+        let mut hit = false;
+        for m in re.find_iter(&text) {
+            if m.start() == m.end() { continue; }
+            spans.insert((i, m.start(), m.end()));
+            hit = true;
+        }
+        if hit { docs.insert(i); }
+    }
+    GrepSpans { docs, spans }
+}
+
 /// All start offsets of `needle` in `hay`, overlapping included.
 fn find_all(hay: &[u8], needle: &[u8]) -> Vec<usize> {
     let mut out = Vec::new();
@@ -603,7 +631,8 @@ fn search_v3_d(
         field: Some("content".into()),
         value: Some(value.into()),
         strict_separators: Some(strict_separators),
-        distance: if distance > 0 { Some(distance) } else { None },
+        distance: if distance > 0 && distance != RX { Some(distance) } else { None },
+        regex: if distance == RX { Some(true) } else { None },
         ..Default::default()
     };
     let query = query::build_query(&config, &handle.schema, &handle.index, Some(Arc::clone(&sink))).unwrap();
@@ -751,8 +780,10 @@ impl GroundTruthQuery {
     fn strict(text: &'static str) -> Self { Self { text, strict_sep: true, distance: 0 } }
     fn relaxed(text: &'static str) -> Self { Self { text, strict_sep: false, distance: 0 } }
     fn fuzzy(text: &'static str, distance: u8) -> Self { Self { text, strict_sep: false, distance } }
+    fn is_regex(&self) -> bool { self.distance == RX }
     fn mode_label(&self) -> String {
-        if self.distance > 0 { format!("fz{}", self.distance) }
+        if self.is_regex() { "rx".into() }
+        else if self.distance > 0 { format!("fz{}", self.distance) }
         else if self.strict_sep { "strict".into() } else { "relax".into() }
     }
 }
@@ -826,7 +857,8 @@ fn v3_ground_truth_contains() {
         // reported latency silently carried a full grep over the corpus — a
         // constant that dilutes any engine-side comparison.
         let t_grep = std::time::Instant::now();
-        let gt = if q.distance > 0 { grep_spans_fuzzy(&files, q.text, q.distance) }
+        let gt = if q.is_regex() { grep_spans_regex(&files, q.text) }
+                 else if q.distance > 0 { grep_spans_fuzzy(&files, q.text, q.distance) }
                  else { grep_spans(&files, q.text, q.strict_sep) };
         let grep_ms = t_grep.elapsed().as_secs_f64() * 1000.0;
         let grep_set = gt.docs;
