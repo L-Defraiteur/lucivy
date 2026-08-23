@@ -135,15 +135,23 @@ n'est pas d'accélérer les gros segments, c'est de ne pas en fabriquer : voir B
 parallélisation intra-segment reste possible (posmap par doc, chaînes par plage de
 docs) mais n'est plus prioritaire.
 
-### B2 bis. Le contains sur littéraux courts en relaxed
+### B2 bis. Le contains sur littéraux courts en relaxed — FAIT le 23 août (`70bd8bc`)
 
 **Mesuré** : `inc` relax = 120 ms CPU sur rag3db, 26 000 chaînes chunk à travers les
 séparateurs, pour 20 677 spans ; c'est ce qui borne le mode `pieces` du fuzzy.
 **Essayé** : désactiver les chaînes chunk en relaxed (le pipeline word couvre le
 reste) — faux : les entrées word n'indexent que 256 octets de suffixes + une queue,
 `deepmark` au fond d'un identifiant de 400 octets perd 10 occurrences sur 20
-(`v3_relaxed_sku_corpus_matches_grep`). Voie possible : un drapeau par segment
-« aucun mot plus long que le plafond », posé à l'indexation, qui autorise le saut.
+(`v3_relaxed_sku_corpus_matches_grep`).
+
+**Correctif** : section optionnelle `STATS` dans `.termtexts` = longueur du plus long
+mot du segment, écrite par `TermTextsWriterV3` (donc aussi au merge). Quand elle
+prouve qu'aucun mot ne dépasse `WORD_SUFFIX_CAP` (256), le littéral relaxed saute
+les chaînes chunk (`ctx.may_have_long_words()`) ; fichier ancien ou mot long →
+marche comme avant. Kernel 50k : 798 segments sur 800 sautent, spans exacts ;
+`uint64_t` relax 40 → 32 ms, `__init` 63 → 49, fuzzy `inclde` 142 → 109,
+`kmallc` 71 → 56, `kmalloc` d=2 201 → 175. Ligne profile
+`relaxed chunk walk: skipped=N walked=M` ; `V3_RELAXED_CHUNK_CHAINS=1` pour A/B.
 
 ### B3. Le chemin ancré sur le deuxième token coûte parfois plus qu'il n'économise
 
