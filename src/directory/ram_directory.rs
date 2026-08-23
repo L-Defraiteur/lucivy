@@ -164,6 +164,27 @@ impl RamDirectory {
         }
         Ok(())
     }
+
+    /// Write every file under `root` with plain filesystem writes — no fsync.
+    ///
+    /// `persist` goes through the target directory's `open_write`, which syncs
+    /// each file on terminate. That is the right contract for an index, and the
+    /// wrong one for a cache: on btrfs with compression an fdatasync costs ~65ms,
+    /// and an 800-segment index holds ~24 000 files. A cache gets its safety from
+    /// a marker the caller writes last — a torn copy has no marker and is simply
+    /// rebuilt — so it must not pay for durability it does not rely on.
+    pub fn persist_unsynced(&self, root: &Path) -> crate::Result<()> {
+        let rlock = self.fs.read().unwrap();
+        std::fs::create_dir_all(root)?;
+        for (path, file) in rlock.fs.iter() {
+            let target = root.join(path);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&target, file.read_bytes()?.as_slice())?;
+        }
+        Ok(())
+    }
 }
 
 impl Directory for RamDirectory {

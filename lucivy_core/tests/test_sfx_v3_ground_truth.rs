@@ -224,22 +224,13 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
         return h;
     }
 
-    // Persisting to disk is what makes the index reusable across runs; without
-    // V3_INDEX_DIR everything stays in RAM as before.
-    let handle = match std::env::var("V3_INDEX_DIR").ok() {
-        Some(path) => {
-            // A stale index under the same path would be reopened by shape key
-            // alone, so clear it before writing a different shape.
-            let _ = std::fs::remove_dir_all(&path);
-            std::fs::create_dir_all(&path).unwrap();
-            let dir = ld_lucivy::directory::MmapDirectory::open(&path).unwrap();
-            LucivyHandle::create(dir, &config).unwrap()
-        }
-        None => {
-            let dir = ld_lucivy::directory::RamDirectory::default();
-            LucivyHandle::create(dir, &config).unwrap()
-        }
-    };
+    // Always build in RAM. Building straight into an MmapDirectory was tried:
+    // every sidecar is fsynced on close, eight finalizes run concurrently, and
+    // on btrfs+zstd one fdatasync costs ~65ms — 10k documents took 464s against
+    // 5s in RAM. The index is copied out once at the end instead, unsynced; the
+    // shape marker written after it is what makes the copy trustworthy.
+    let ram_dir = ld_lucivy::directory::RamDirectory::default();
+    let handle = LucivyHandle::create(ram_dir.clone(), &config).unwrap();
     let path_f = handle.field("path").unwrap();
     let content_f = handle.field("content").unwrap();
     let nid_f = handle.field(NODE_ID_FIELD).unwrap();
@@ -346,12 +337,16 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
 
     handle.reader.reload().unwrap();
 
-    // Stamp the shape last: a key on disk means the index next to it is complete.
+    // Persist once, then stamp the shape last: a key on disk means the index
+    // next to it is complete. The handle keeps serving from RAM for this run;
+    // the next run reopens the copy through MmapDirectory.
     if let Some(path) = std::env::var("V3_INDEX_DIR").ok() {
-        let _ = std::fs::write(
-            std::path::Path::new(&path).join(".v3_shape"),
-            index_shape_key(files.len()),
-        );
+        let t = std::time::Instant::now();
+        let root = std::path::Path::new(&path);
+        let _ = std::fs::remove_dir_all(root);
+        ram_dir.persist_unsynced(root).unwrap();
+        std::fs::write(root.join(".v3_shape"), index_shape_key(files.len())).unwrap();
+        eprintln!("  index persisted to {path} in {:.1}s", t.elapsed().as_secs_f64());
     }
 
     // Shape of what we are timing: 1 shard, single-thread search executor

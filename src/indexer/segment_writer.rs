@@ -203,6 +203,7 @@ impl SegmentWriter {
                     }
                 }
                 SfxCollectorSlot::V3(collector) => {
+                    let t_sfx = std::time::Instant::now();
                     let data = collector.into_data();
                     let mut dag = super::sfx_dag_v3::build_initial_sfx_dag_v3(data);
                     let mut dag_result = luciole::execute_dag(&mut dag, None)
@@ -212,13 +213,23 @@ impl SegmentWriter {
                         .take_output::<super::sfx_dag_v3::SfxBuildOutputV3>("assemble", "output")
                         .ok_or_else(|| crate::LucivyError::SystemError(
                             format!("sfx v3 DAG missing output for field {field_id}")))?;
+                    let t_build = t_sfx.elapsed();
+                    let t_w = std::time::Instant::now();
                     self.segment_serializer.write_sfx(field_id, &output.sfx)?;
                     if let Some(ref sfxpost) = output.sfxpost {
                         self.segment_serializer.write_custom_index(field_id, "sfxpost", sfxpost)?;
                     }
                     self.segment_serializer.write_custom_index(field_id, "termtexts", &output.termtexts)?;
+                    let mut bytes = output.sfx.len() + output.termtexts.len();
                     for (ext, data) in &output.registry_files {
+                        bytes += data.len();
                         self.segment_serializer.write_custom_index(field_id, ext, data)?;
+                    }
+                    if crate::diag::is_verbose() {
+                        eprintln!("[finalize] field {field_id}: sfx build {:.0}ms, write {} files / {}KB in {:.0}ms",
+                            t_build.as_secs_f64() * 1e3,
+                            3 + output.registry_files.len(), bytes / 1024,
+                            t_w.elapsed().as_secs_f64() * 1e3);
                     }
                 }
             }
@@ -227,6 +238,7 @@ impl SegmentWriter {
         if !sfx_field_ids.is_empty() {
             self.segment_serializer.write_sfx_manifest(&sfx_field_ids)?;
         }
+        let t_remap = std::time::Instant::now();
         remap_and_write(
             self.schema,
             &self.per_field_postings_writers,
@@ -235,6 +247,9 @@ impl SegmentWriter {
             &self.fieldnorms_writer,
             self.segment_serializer,
         )?;
+        if crate::diag::is_verbose() {
+            eprintln!("[finalize] remap_and_write {:.0}ms", t_remap.elapsed().as_secs_f64() * 1e3);
+        }
         Ok((self.doc_opstamps, sfx_field_ids))
     }
 
