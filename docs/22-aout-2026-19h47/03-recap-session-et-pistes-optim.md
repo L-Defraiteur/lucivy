@@ -377,6 +377,35 @@ vérité terrain ne mesure pas le moteur.
 
 ---
 
+## 5 bis. Fan-out dans un acteur : la règle exacte [vérifié le 23 août]
+
+`execute_dag` exécute tout inline dès qu'il tourne dans un acteur ou sur un
+thread du pool (`luciole/src/runtime.rs`, « avoid thread pool starvation »). C'est ce
+qui rendait le merge séquentiel : le DAG de commit a un nœud `merge_i` par opération,
+mais il tourne dans `segment_updater`, donc les nœuds s'enchaînent.
+
+La règle protège emscripten, qui n'a que quelques pthreads. Mais ce qu'elle interdit
+est plus large que ce qui est dangereux :
+
+- **Dangereux** : fan-out **puis attente bloquante** dans l'acteur. Un thread du pool
+  immobilisé à attendre des tâches qui ont besoin du pool → interblocage dès que le
+  pool est petit.
+- **Sûr** : fan-out **puis continuation**. L'acteur soumet les tâches et rend la main ;
+  `collect_replies_to` / `pipe_to` lui renvoie un message quand tout est fini. Aucun
+  thread n'attend.
+
+Le merge parallèle (`2eb6426`) est du second type : `handle_start_merges` soumet N
+tâches et retourne, `SuMergesDoneMsg` fait la comptabilité. C'est le motif que
+l'indexer applique déjà à ses finalizes. Il est donc sûr en emscripten **sur le
+papier** — non testé dessus.
+
+**La vraie correction**, plutôt qu'un chemin spécial par DAG : faire passer le DAG de
+commit par `execute_dag_async` (le `DagExecutor` niveau par niveau existe), qui donne le
+fan-out par continuation à tout DAG exécuté depuis un acteur. Le chemin ajouté pour le
+merge en deviendrait une instance générique.
+
+---
+
 ## 6. Ce qu'il ne faut pas refaire
 
 **Cinq hypothèses fausses dans cette session**, dont deux justes mais incomplètes :
