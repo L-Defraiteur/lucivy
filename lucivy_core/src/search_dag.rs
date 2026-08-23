@@ -173,6 +173,12 @@ impl Node for PrescanShardNode {
                 // reached through ShardedHandle failed outright on "invalid .sfx
                 // magic bytes" — v3 + sharding had simply never been wired.
                 let version = detect_sfx_version(sfx_bytes.as_ref()).unwrap_or(1);
+                // `run_sfx_v3_prescan` is the CONTAINS walk. A fuzzy query's
+                // parameters through it would inject exact-match results into
+                // a fuzzy query; fuzzy v3 prescans itself in `weight()`.
+                if version == 3 && param.fuzzy_distance > 0 {
+                    continue;
+                }
                 let (doc_tf, highlights) = if version == 3 {
                     run_sfx_v3_prescan(
                         seg_reader, &sfx_bytes, param.field,

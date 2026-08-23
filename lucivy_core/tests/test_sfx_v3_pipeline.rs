@@ -958,3 +958,56 @@ fn v3_policy_merges_preserve_everything() {
         assert_eq!(a, b, "{q} strict={strict}");
     }
 }
+
+fn fuzzy_spans_for(handle: &LucivyHandle, value: &str, distance: u8) -> Vec<[usize; 2]> {
+    let config = QueryConfig {
+        query_type: "contains".into(),
+        field: Some("content".into()),
+        value: Some(value.into()),
+        distance: Some(distance),
+        strict_separators: Some(false),
+        ..Default::default()
+    };
+    let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
+    let query = query::build_query(&config, &handle.schema, &handle.index, Some(Arc::clone(&sink))).unwrap();
+    let searcher = handle.reader.searcher();
+    let collector = ld_lucivy::collector::TopDocs::with_limit(100).order_by_score();
+    let results = searcher.search(&*query, &collector).unwrap();
+    let mut out = Vec::new();
+    for (_, addr) in &results {
+        let seg_id = searcher.segment_reader(addr.segment_ord).segment_id();
+        if let Some(m) = sink.get(seg_id, addr.doc_id) {
+            out.extend(m.get("content").cloned().unwrap_or_default());
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Fuzzy occurrences inside long tokens, at the token's middle or end.
+#[test]
+fn v3_fuzzy_span_inside_long_token() {
+    let cases: &[(&str, &str, u8)] = &[
+        ("on(AllSPDestinationsFunction::getAlgorithm());", "functin", 1),
+        ("Function→CALLS→Function, Class→INHERITS", "functin", 1),
+        ("cast(12, \"UINT64\"), cast(4324.123, ", "uint64", 1),
+        ("ions(expressionsBeforePruning);\n    if (expres", "retrun", 1),
+        ("plain functin here", "functin", 1),
+    ];
+    let mut bad = Vec::new();
+    for (doc, q, d) in cases {
+        let handle = make_handle(&[doc]);
+        let got = fuzzy_spans_for(&handle, q, *d);
+        // Expected: the shared definition on the stripped, lowercased text.
+        let mut stripped = Vec::new(); let mut back = Vec::new();
+        for (off, ch) in doc.char_indices() {
+            if !ld_lucivy::tokenizer::equal_chunk::is_content_char(ch) { continue; }
+            for lc in ch.to_lowercase() { let mut b = [0u8; 4]; for x in lc.encode_utf8(&mut b).bytes() { stripped.push(x); back.push(off); } }
+        }
+        let expect: Vec<[usize; 2]> = ld_lucivy::suffix_fst::briques::fuzzy_spans::fuzzy_spans(q.as_bytes(), &stripped, *d as usize)
+            .into_iter().map(|(s, e, _)| { let last = back[e - 1]; [back[s], last + doc[last..].chars().next().unwrap().len_utf8()] }).collect();
+        eprintln!("{q:?} d={d} in {doc:?}: got={got:?} expect={expect:?}");
+        if got != expect { bad.push(format!("{q} in {doc:?}: {got:?} != {expect:?}")); }
+    }
+    assert!(bad.is_empty(), "{bad:#?}");
+}

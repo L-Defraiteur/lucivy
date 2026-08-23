@@ -95,6 +95,7 @@ fn build_index(files: &[(String, String)], drain: bool) -> (LucivyHandle, ld_luc
             query::FieldDef { name: "path".into(), field_type: "text".into(),
                 stored: Some(true), indexed: Some(false), fast: None },
         ],
+        sfx_version: Some(3),
         ..Default::default()
     };
     let dir = StdFsDirectory::open(&tmp).unwrap();
@@ -374,6 +375,7 @@ fn test_fuzzy_sku_catalog() {
             query::FieldDef { name: "content".into(), field_type: "text".into(),
                 stored: Some(true), indexed: Some(true), fast: None },
         ],
+        sfx_version: Some(3),
         ..Default::default()
     };
     let dir = StdFsDirectory::open(tmp).unwrap();
@@ -503,6 +505,7 @@ fn test_fuzzy_long_api_keys() {
             query::FieldDef { name: "content".into(), field_type: "text".into(),
                 stored: Some(true), indexed: Some(true), fast: None },
         ],
+        sfx_version: Some(3),
         ..Default::default()
     };
     let dir = StdFsDirectory::open(tmp).unwrap();
@@ -610,6 +613,7 @@ fn test_diag_miss_count() {
             query::FieldDef { name: "content".into(), field_type: "text".into(),
                 stored: Some(true), indexed: Some(true), fast: None },
         ],
+        sfx_version: Some(2), // reads the .sfx with the v2 reader directly,
         ..Default::default()
     };
     let dir = StdFsDirectory::open(tmp).unwrap();
@@ -715,6 +719,7 @@ fn test_camelcase_matched_by_underscore_query() {
             query::FieldDef { name: "content".into(), field_type: "text".into(),
                 stored: Some(true), indexed: Some(true), fast: None },
         ],
+        sfx_version: Some(3),
         ..Default::default()
     };
     let dir = StdFsDirectory::open(tmp).unwrap();

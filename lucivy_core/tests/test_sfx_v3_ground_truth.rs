@@ -41,19 +41,24 @@ fn max_docs(default: usize) -> usize {
 ///
 /// The values come from the environment and are handed to APIs wanting `&'static
 /// str`, so they are leaked: a handful of strings in a test binary.
-fn query_spec() -> Option<Vec<(&'static str, bool)>> {
+/// `V3_QUERIES=a:strict,b:relax,c:fz1,d:fz2` → (value, strict, distance).
+/// Fuzzy is always relaxed (the query is separator-stripped before matching).
+fn query_spec() -> Option<Vec<(&'static str, bool, u8)>> {
     std::env::var("V3_QUERIES").ok().map(|spec| {
         spec.split(',')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .map(|item| {
-                let (value, strict) = match item.rsplit_once(':') {
-                    Some((v, "relax")) => (v.trim(), false),
-                    Some((v, "strict")) => (v.trim(), true),
-                    _ => (item, true),
+                let (value, strict, distance) = match item.rsplit_once(':') {
+                    Some((v, "relax")) => (v.trim(), false, 0),
+                    Some((v, "strict")) => (v.trim(), true, 0),
+                    Some((v, "fz1")) => (v.trim(), false, 1),
+                    Some((v, "fz2")) => (v.trim(), false, 2),
+                    Some((v, "fz3")) => (v.trim(), false, 3),
+                    _ => (item, true, 0),
                 };
                 let leaked: &'static str = Box::leak(value.to_string().into_boxed_str());
-                (leaked, strict)
+                (leaked, strict, distance)
             })
             .collect()
     })
@@ -451,6 +456,46 @@ fn grep_spans(files: &[(String, String)], needle: &str, strict: bool) -> GrepSpa
     GrepSpans { docs, spans }
 }
 
+/// Fuzzy ground truth: the engine's own occurrence definition
+/// (`fuzzy_spans`, one per run of acceptable end offsets) applied to each
+/// file read from disk — lowercase, separators stripped, mapped back to
+/// source bytes exactly like the relaxed grep.
+fn grep_spans_fuzzy(files: &[(String, String)], needle: &str, distance: u8) -> GrepSpans {
+    let root = repo_path();
+    let root = std::path::Path::new(&root);
+    let mut docs = HashSet::new();
+    let mut spans = HashSet::new();
+    let needle_l: Vec<u8> = strip_seps(&needle.to_lowercase()).into_bytes();
+    if needle_l.is_empty() { return GrepSpans { docs, spans }; }
+
+    for (i, (rel, _)) in files.iter().enumerate() {
+        let Ok(bytes) = std::fs::read(root.join(rel)) else { continue };
+        let text = String::from_utf8_lossy(&bytes);
+        let mut stripped: Vec<u8> = Vec::with_capacity(bytes.len());
+        let mut back: Vec<usize> = Vec::with_capacity(bytes.len());
+        for (off, ch) in text.char_indices() {
+            if !is_content_char(ch) { continue; }
+            for lc in ch.to_lowercase() {
+                let mut buf = [0u8; 4];
+                for b in lc.encode_utf8(&mut buf).bytes() {
+                    stripped.push(b);
+                    back.push(off);
+                }
+            }
+        }
+        let mut hit = false;
+        for (s, e, _) in ld_lucivy::suffix_fst::briques::fuzzy_spans::fuzzy_spans(&needle_l, &stripped, distance as usize) {
+            let from = back[s];
+            let last = back[e - 1];
+            let to = last + text[last..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+            spans.insert((i, from, to));
+            hit = true;
+        }
+        if hit { docs.insert(i); }
+    }
+    GrepSpans { docs, spans }
+}
+
 /// All start offsets of `needle` in `hay`, overlapping included.
 fn find_all(hay: &[u8], needle: &[u8]) -> Vec<usize> {
     let mut out = Vec::new();
@@ -539,12 +584,23 @@ fn search_v3(
     value: &str,
     strict_separators: bool,
 ) -> SearchResult {
+    search_v3_d(handle, files, value, strict_separators, 0)
+}
+
+fn search_v3_d(
+    handle: &LucivyHandle,
+    files: &[(String, String)],
+    value: &str,
+    strict_separators: bool,
+    distance: u8,
+) -> SearchResult {
     let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
     let config = QueryConfig {
         query_type: "contains".into(),
         field: Some("content".into()),
         value: Some(value.into()),
         strict_separators: Some(strict_separators),
+        distance: if distance > 0 { Some(distance) } else { None },
         ..Default::default()
     };
     let query = query::build_query(&config, &handle.schema, &handle.index, Some(Arc::clone(&sink))).unwrap();
@@ -685,11 +741,17 @@ fn snap_fwd(s: &str, pos: usize) -> usize {
 struct GroundTruthQuery {
     text: &'static str,
     strict_sep: bool,
+    distance: u8,
 }
 
 impl GroundTruthQuery {
-    fn strict(text: &'static str) -> Self { Self { text, strict_sep: true } }
-    fn relaxed(text: &'static str) -> Self { Self { text, strict_sep: false } }
+    fn strict(text: &'static str) -> Self { Self { text, strict_sep: true, distance: 0 } }
+    fn relaxed(text: &'static str) -> Self { Self { text, strict_sep: false, distance: 0 } }
+    fn fuzzy(text: &'static str, distance: u8) -> Self { Self { text, strict_sep: false, distance } }
+    fn mode_label(&self) -> String {
+        if self.distance > 0 { format!("fz{}", self.distance) }
+        else if self.strict_sep { "strict".into() } else { "relax".into() }
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────
@@ -715,23 +777,13 @@ fn v3_ground_truth_contains() {
     // (rag3db, std::unique_ptr, ku_dynamic_cast) returns 0 hits on the kernel, which
     // measures nothing. `V3_QUERIES` takes a comma-separated list of `value` or
     // `value:relax` entries.
-    let custom_queries: Option<Vec<GroundTruthQuery>> = std::env::var("V3_QUERIES").ok()
-        .map(|spec| spec.split(',').map(|s| s.to_string()).collect::<Vec<_>>().into_iter()
-            .filter(|s| !s.trim().is_empty())
-            .map(|item| {
-                // GroundTruthQuery holds &'static str; these come from the
-                // environment, so leak them — a handful of strings in a test binary.
-                let item = item.trim();
-                let (value, strict) = match item.rsplit_once(':') {
-                    Some((v, "relax")) => (v.trim(), false),
-                    Some((v, "strict")) => (v.trim(), true),
-                    _ => (item, true),
-                };
-                let leaked: &'static str = Box::leak(value.to_string().into_boxed_str());
-                if strict { GroundTruthQuery::strict(leaked) }
-                else { GroundTruthQuery::relaxed(leaked) }
-            })
-            .collect());
+    let custom_queries: Option<Vec<GroundTruthQuery>> = query_spec().map(|v| v.into_iter()
+        .map(|(value, strict, distance)| {
+            if distance > 0 { GroundTruthQuery::fuzzy(value, distance) }
+            else if strict { GroundTruthQuery::strict(value) }
+            else { GroundTruthQuery::relaxed(value) }
+        })
+        .collect());
 
     let default_queries: Vec<GroundTruthQuery> = vec![
         // Simple words — both modes should agree
@@ -766,18 +818,19 @@ fn v3_ground_truth_contains() {
     eprintln!("{}", "-".repeat(70));
 
     for q in &queries {
-        let mode_label = if q.strict_sep { "strict" } else { "relax" };
+        let mode_label = q.mode_label();
         // Time the two independently. They used to share one timer, so every
         // reported latency silently carried a full grep over the corpus — a
         // constant that dilutes any engine-side comparison.
         let t_grep = std::time::Instant::now();
-        let gt = grep_spans(&files, q.text, q.strict_sep);
+        let gt = if q.distance > 0 { grep_spans_fuzzy(&files, q.text, q.distance) }
+                 else { grep_spans(&files, q.text, q.strict_sep) };
         let grep_ms = t_grep.elapsed().as_secs_f64() * 1000.0;
         let grep_set = gt.docs;
 
         profile::reset();
         let t = std::time::Instant::now();
-        let v3_result = search_v3(&handle, &files, q.text, q.strict_sep);
+        let v3_result = search_v3_d(&handle, &files, q.text, q.strict_sep, q.distance);
         let ms = t.elapsed().as_secs_f64() * 1000.0;
 
         let search_ms = LAST_SEARCH_MS.with(|c| c.get());
@@ -819,7 +872,7 @@ fn v3_ground_truth_contains() {
             eprint!("{}", profile::dump());
         }
 
-        write_report(&mut report, q.text, mode_label, &files, &grep_set, &v3_result);
+        write_report(&mut report, q.text, &mode_label, &files, &grep_set, &v3_result);
 
         if docs_ok && spans_ok {
             pass += 1;
@@ -1708,7 +1761,7 @@ fn perf_shape_sharded() {
     let files = collect_files(5000);
     if files.is_empty() { return; }
 
-    let queries: Vec<(&str, bool)> = query_spec().unwrap_or_else(|| vec![
+    let queries: Vec<(&str, bool)> = query_spec().map(|v| v.into_iter().map(|(a, b, _)| (a, b)).collect()).unwrap_or_else(|| vec![
         ("function", true), ("function", false),
         ("include", true),
         ("uint64_t", false),

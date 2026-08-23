@@ -14,5 +14,6 @@ pub mod dag_builder;
 pub mod orchestrator;
 pub mod regex_v3;
 pub mod profile;
+pub mod fuzzy_spans;
 #[cfg(test)]
 mod integration_tests;

@@ -248,6 +248,14 @@ impl LucivyHandle {
                     };
                     let sfx_bytes = sfx_data.read_bytes()
                         .map_err(|e| format!("read sfx: {e}"))?;
+                    // SFX3 segments are prescanned by the query itself, in
+                    // `weight()`, on the luciole pool — contains, fuzzy and
+                    // regex alike. This loop is the v2 walk: run on an SFX3
+                    // file it failed with "invalid .sfx magic bytes", which is
+                    // what every `LucivyHandle::search` on a v3 index did.
+                    if ld_lucivy::suffix_fst::section_file::detect_sfx_version(sfx_bytes.as_ref()) == Some(3) {
+                        continue;
+                    }
                     let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
                         .map_err(|e| format!("open sfx: {e}"))?;
 

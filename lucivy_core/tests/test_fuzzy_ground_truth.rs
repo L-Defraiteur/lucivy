@@ -350,6 +350,7 @@ fn test_fuzzy_ground_truth() {
                 fast: None,
             },
         ],
+        sfx_version: Some(3),
         ..Default::default()
     };
     let dir = StdFsDirectory::open(tmp_path).unwrap();

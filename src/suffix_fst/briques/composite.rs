@@ -463,7 +463,11 @@ pub fn find_multi_token_v3(
 pub struct TrigramHit {
     pub tri_idx: usize,
     pub doc_id: DocId,
+    /// First chunk position of the token holding the hit.
     pub position: u32,
+    /// Last chunk position: equal to `position` for a chunk hit, the word's
+    /// last chunk for a hit in the word-stripped partition.
+    pub last_position: u32,
     pub byte_from: u32,
     pub byte_to: u32,
 }
@@ -520,9 +524,16 @@ pub fn resolve_all_trigrams(
             resolve::resolve_single_word_v3(&cands, ctx.require_word_sfxpost(), None, gram_len)
         } else { Vec::new() };
 
+        if std::env::var("V3_DIAG_FUZZY").is_ok() {
+            eprintln!("[fz] gram {:?}: {} chunk hits, {} word hits: {:?}", ngrams[gram_idx],
+                chunk_matches.len(), word_matches.len(),
+                chunk_matches.iter().chain(word_matches.iter()).take(8)
+                    .map(|m| (m.doc_id, m.position, m.byte_from)).collect::<Vec<_>>());
+        }
         for m in chunk_matches.iter().chain(word_matches.iter()) {
             all_hits.push(TrigramHit {
                 tri_idx: gram_idx, doc_id: m.doc_id, position: m.position,
+                last_position: m.position + m.span.saturating_sub(1),
                 byte_from: m.byte_from, byte_to: m.byte_to,
             });
         }
@@ -552,26 +563,34 @@ pub struct TrigramChain {
 /// Only meaningful because the query is compared in stripped space while hits are
 /// in raw space. Loose retrieval is safe here: `verify_candidates` re-checks every
 /// surviving document against the real text.
-const MAX_SEPARATOR_SLACK: i32 = 8;
+const MAX_SEPARATOR_SLACK: i32 = 32;
 
 /// How many distinct chains we keep per document.
-const MAX_CHAINS_PER_DOC: usize = 8;
 
-/// Build chains of adjacent trigram hits per document.
+/// Group each document's n-gram hits into regions — one chain per region.
 ///
-/// For each doc, sorts hits by byte_from. Builds chains where consecutive
-/// trigrams satisfy:
-/// - query_positions[next] > query_positions[prev] (correct order)
-/// - byte_from[next] - byte_from[prev] == query_positions[next] - query_positions[prev] ± distance
+/// A chain is a place to look, nothing more: `verify_candidates` rebuilds the
+/// text there and aligns it. So the right unit is the *region*, a run of hits
+/// whose neighbours are no further apart than the query could stretch. This
+/// replaces the chain-per-starting-hit walk, which produced one window per
+/// hit on the same occurrence and then capped itself at eight chains per
+/// document — a silent cap that dropped the ninth occurrence of `rag3weaver`
+/// in a design note (280 of 1 107 occurrences missing on rag3db).
 ///
-/// This is much more selective than windowed counting because it verifies
-/// that trigrams form a coherent subsequence at the correct relative offsets.
+/// `trigram_indices` holds the DISTINCT query n-grams seen in the region, in
+/// query order, so the pigeonhole threshold keeps its meaning. Very long
+/// regions (repetitive text) are cut at `MAX_REGION_BYTES`; the verification
+/// window's margin covers the cut.
 pub fn build_trigram_chains(
     hits: &[TrigramHit],
     query_positions: &[usize],
     distance: u8,
 ) -> Vec<TrigramChain> {
-    let d = distance as i32;
+    const MAX_REGION_BYTES: u32 = 4096;
+    let query_len = query_positions.iter().copied().max().unwrap_or(0) as i64 + 3;
+    // Two hits of one occurrence are at most a query length apart, plus the
+    // edits and the separators relaxed mode skips.
+    let max_gap = query_len + distance as i64 + MAX_SEPARATOR_SLACK as i64;
 
     let mut hits_by_doc: std::collections::HashMap<DocId, Vec<&TrigramHit>> =
         std::collections::HashMap::new();
@@ -580,69 +599,46 @@ pub fn build_trigram_chains(
     }
 
     let mut chains = Vec::new();
-
     for (&doc_id, doc_hits) in &hits_by_doc {
         let mut sorted: Vec<&TrigramHit> = doc_hits.iter().copied().collect();
-        sorted.sort_by_key(|h| h.byte_from);
+        sorted.sort_by_key(|h| (h.byte_from, h.tri_idx));
 
-        // Keep several chains per doc, not just the longest one.
-        //
-        // Anchoring a document on its single best chain means a longer decoy hides a
-        // real match elsewhere in the same file — and the real one is often exactly
-        // at the threshold. `retrun` chains only 3 bigrams over
-        // "asse|rt run|scripts" (tr, ru, un), so any 4-bigram coincidence elsewhere
-        // in the document evicted it. Only worth doing together with the separator
-        // slack above: without it that chain never formed in the first place.
-        // It also unpins doc_tf, which was stuck at 1 for every document.
-        let mut found: Vec<(Vec<usize>, u32, u32, u32, u32)> = Vec::new();
-
-        for start in 0..sorted.len() {
-            let mut chain = vec![sorted[start].tri_idx];
-            let mut prev_bf = sorted[start].byte_from as i32;
-            let mut prev_qp = query_positions[sorted[start].tri_idx] as i32;
-            let mut chain_last_pos = sorted[start].position;
-            let mut last_bt = sorted[start].byte_to;
-
-            for j in (start + 1)..sorted.len() {
+        let mut i = 0;
+        while i < sorted.len() {
+            let first = sorted[i];
+            let mut last = first;
+            let mut idx: Vec<usize> = vec![first.tri_idx];
+            // Positions are tracked as min/max, not "first/last hit by byte":
+            // a word-partition hit carries its word's FIRST chunk position, so
+            // the last hit by byte can sit at an earlier position than a
+            // chunk hit before it — and the window then stopped short of the
+            // occurrence (`rePrun|ing` for `retrun`).
+            let mut first_pos = first.position;
+            let mut last_pos = first.last_position;
+            let mut j = i + 1;
+            while j < sorted.len() {
                 let h = sorted[j];
-                let qp = query_positions[h.tri_idx] as i32;
-                if qp <= prev_qp { continue; }
-
-                let expected_gap = qp - prev_qp;
-                let actual_gap = h.byte_from as i32 - prev_bf;
-                let delta = actual_gap - expected_gap;
-                if delta >= -d && delta <= d + MAX_SEPARATOR_SLACK {
-                    chain.push(h.tri_idx);
-                    prev_bf = h.byte_from as i32;
-                    prev_qp = qp;
-                    chain_last_pos = h.position;
-                    last_bt = h.byte_to;
-                }
+                if h.byte_from as i64 - last.byte_from as i64 > max_gap { break; }
+                if h.byte_from - first.byte_from > MAX_REGION_BYTES { break; }
+                idx.push(h.tri_idx);
+                first_pos = first_pos.min(h.position);
+                last_pos = last_pos.max(h.last_position);
+                last = h;
+                j += 1;
             }
-
-            found.push((chain, sorted[start].byte_from, last_bt,
-                        sorted[start].position, chain_last_pos));
-        }
-
-        // Longest first, then a bounded, distinct sample: wide enough to cover
-        // several locations, bounded so a hit-dense document cannot explode the
-        // candidate set. Verification prunes whatever survives.
-        found.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-        let mut seen_starts: HashSet<u32> = HashSet::new();
-        for (chain, bf, bt, first_pos, last_pos) in found {
-            if seen_starts.len() >= MAX_CHAINS_PER_DOC { break; }
-            if !seen_starts.insert(bf) { continue; }
+            idx.sort_unstable();
+            idx.dedup();
             chains.push(TrigramChain {
                 doc_id,
-                trigram_indices: chain,
-                byte_from: bf,
-                byte_to: bt.max(bf),
+                trigram_indices: idx,
+                byte_from: first.byte_from,
+                byte_to: last.byte_to.max(first.byte_from),
                 first_pos,
                 last_pos: last_pos.max(first_pos),
             });
+            i = j;
         }
     }
-
     chains
 }
 
@@ -716,6 +712,89 @@ pub(super) fn rebuild_window(
         }
     }
     !out.is_empty()
+}
+
+/// `rebuild_window` with a back-map: for every byte of `out`, the source
+/// offset of the character it came from and that character's source length.
+/// Lowercasing can change a character's byte length, so the map is per window
+/// byte, not per source byte.
+pub(super) fn rebuild_window_mapped(
+    ctx: &BriquesContext<'_>,
+    doc_id: DocId,
+    first_pos: u32,
+    last_pos: u32,
+    margin: u32,
+    strip_separators: bool,
+    out: &mut String,
+    back: &mut Vec<(u32, u8)>,
+) -> Option<(bool, bool)> {
+    let (Some(pm), Some(tt)) = (ctx.posmap.as_ref(), ctx.termtexts.as_ref()) else {
+        return None;
+    };
+    out.clear();
+    back.clear();
+    // `margin` is in CONTENT bytes on each side of the hit region, not in
+    // positions: a pure-separator run (" = ...` |\n| `") is several chunks
+    // long, and a margin of two positions stopped inside it — the `in` of
+    // `func … in` for `functin` sat just past the window. Walk positions
+    // outwards until that many content bytes are in hand (or 64 positions).
+    const MAX_EXTRA_POSITIONS: u32 = 64;
+    let content_len = |ord: u32| -> usize {
+        let Some(text) = tt.text(ord) else { return 0 };
+        let own = tt.meta(ord).map(|m| m.own_len as usize).unwrap_or(text.len()).min(text.len());
+        text[..own].chars().filter(|c| !strip_separators || is_content_char(*c)).count()
+    };
+    let mut from = first_pos;
+    let mut have = 0usize;
+    while from > 0 && have < margin as usize && first_pos - from < MAX_EXTRA_POSITIONS {
+        let Some(ord) = pm.ordinal_at(doc_id, from - 1) else { break };
+        have += content_len(ord);
+        from -= 1;
+    }
+    let cut_start = from > 0;
+    let mut to = last_pos;
+    have = 0;
+    while have < margin as usize && to - last_pos < MAX_EXTRA_POSITIONS {
+        let Some(ord) = pm.ordinal_at(doc_id, to + 1) else { break };
+        have += content_len(ord);
+        to += 1;
+    }
+    let cut_end = pm.ordinal_at(doc_id, to + 1).is_some();
+    let diag = std::env::var("V3_DIAG_FUZZY").is_ok();
+    if diag {
+        eprintln!("[fz] window doc={doc_id} hits {first_pos}..{last_pos} -> {from}..{to} (margin {margin})");
+        for pos in from..=to {
+            if let Some(ord) = pm.ordinal_at(doc_id, pos) {
+                eprintln!("[fz]   pos {pos} ord {ord} text={:?} meta={:?}", tt.text(ord), tt.meta(ord).map(|m| (m.own_len, m.sep_len, m.overlap_len)));
+            }
+        }
+    }
+    for pos in from..=to {
+        let Some(ord) = pm.ordinal_at(doc_id, pos) else {
+            if diag { eprintln!("[fz] window doc={doc_id} pos={pos}: no ordinal (from={from} to={to})"); }
+            break
+        };
+        let Some(text) = tt.text(ord) else { break };
+        let Some(p) = ctx.resolver.resolve_doc(ord as u64, doc_id)
+            .into_iter().find(|p| p.position == pos)
+        else {
+            if diag { eprintln!("[fz] window doc={doc_id} pos={pos} ord={ord} text={text:?}: no posting at this position"); }
+            break
+        };
+        let own = tt.meta(ord).map(|m| m.own_len as usize).unwrap_or(text.len());
+        let end = own.min(text.len());
+        for (off, c) in text[..end].char_indices() {
+            if strip_separators && !is_content_char(c) { continue; }
+            let src = p.byte_from + off as u32;
+            let len = c.len_utf8() as u8;
+            for lc in c.to_lowercase() {
+                let start = out.len();
+                out.push(lc);
+                for _ in start..out.len() { back.push((src, len)); }
+            }
+        }
+    }
+    if out.is_empty() { None } else { Some((cut_start, cut_end)) }
 }
 
 // ─── Brique 4: filter_by_chain_threshold ────────────────────────────────
@@ -822,12 +901,24 @@ fn verify_candidates(
         for lc in c.to_lowercase() { needle_s.push(lc); }
     }
     let needle: Vec<u8> = needle_s.into_bytes();
-    // Enough slack for the match to start or end outside the chain's own tokens.
-    let margin = 1 + (distance as u32);
+    // Content bytes to add on each side of the hit region: a whole query
+    // plus the edits, so an occurrence whose hits sit at one end is seen
+    // entirely, with one byte of context for the alignment to settle.
+    let margin = needle.len() as u32 + distance as u32 + 1;
 
     let mut kept: HashSet<DocId> = HashSet::new();
     let mut window = String::new();
+    let mut back: Vec<(u32, u8)> = Vec::new();
     let mut buf: Vec<u32> = Vec::new();
+    // The highlights are NOT the chain extents any more: a chain only says
+    // where to look. Each window is aligned with the shared occurrence
+    // definition (`fuzzy_spans`) and every occurrence it holds is mapped back
+    // to source bytes. Windows of neighbouring chains overlap, so spans are
+    // deduplicated per document; every chain is visited, not just the first
+    // per document, or the second occurrence in a file is never reported.
+    let mut spans: HashSet<(DocId, u32, u32)> = HashSet::new();
+    // (first_pos, last_pos) windows already aligned for a doc.
+    let mut seen_windows: HashSet<(DocId, u32, u32)> = HashSet::new();
 
     let diag = std::env::var("V3_DIAG_FUZZY").is_ok();
     let mut n_cand = 0usize;
@@ -836,20 +927,21 @@ fn verify_candidates(
 
     for chain in chains {
         if chain.trigram_indices.len() < threshold { continue; }
-        if kept.contains(&chain.doc_id) { continue; }
+        if !seen_windows.insert((chain.doc_id, chain.first_pos, chain.last_pos)) { continue; }
         n_cand += 1;
-        if !rebuild_window(ctx, chain.doc_id, chain.first_pos, chain.last_pos,
-                           margin, strip, &mut window) {
+        let Some((cut_start, cut_end)) = rebuild_window_mapped(
+            ctx, chain.doc_id, chain.first_pos, chain.last_pos, margin, strip, &mut window, &mut back)
+        else {
             n_no_window += 1;
             if diag && n_no_window <= 3 {
                 eprintln!("[fz] doc={} pos={}..{} NO WINDOW",
                     chain.doc_id, chain.first_pos, chain.last_pos);
             }
             continue;
-        }
-        if within_edit_distance(&needle, window.as_bytes(), distance as usize, &mut buf) {
-            kept.insert(chain.doc_id);
-        } else {
+        };
+        // Cheap reject first: the full alignment only runs on windows that
+        // hold something.
+        if !within_edit_distance(&needle, window.as_bytes(), distance as usize, &mut buf) {
             n_rejected += 1;
             if diag && n_rejected <= 5 {
                 eprintln!("[fz] doc={} pos={}..{} REJECT needle={:?} window={:?}",
@@ -857,16 +949,36 @@ fn verify_candidates(
                     String::from_utf8_lossy(&needle),
                     &window[..window.len().min(80)]);
             }
+            continue;
         }
+        let found = super::fuzzy_spans::fuzzy_spans(&needle, window.as_bytes(), distance as usize);
+        if found.is_empty() { continue; }
+        let wlen = window.len();
+        let mut any = false;
+        for (s, e, _) in found {
+            // An occurrence touching a cut edge of the window is only partly
+            // seen here (`uint6|` at the end of a window was reported as a
+            // d=1 match); the margin guarantees the window of its own region
+            // sees it whole, and that one reports it.
+            if (cut_start && s == 0) || (cut_end && e == wlen) { continue; }
+            any = true;
+            let (from, _) = back[s];
+            let (last, len) = back[e - 1];
+            spans.insert((chain.doc_id, from, last + len as u32));
+        }
+        if any { kept.insert(chain.doc_id); }
     }
     if diag {
         eprintln!("[fz] query={query:?} d={distance} strip={strip} cand={n_cand} \
-kept={} no_window={n_no_window} rejected={n_rejected}", kept.len());
+kept={} no_window={n_no_window} rejected={n_rejected} spans={}", kept.len(), spans.len());
     }
 
     let mut out_bitset = BitSet::with_max_value(max_doc);
     for &doc in &kept { out_bitset.insert(doc); }
-    let out_hl = highlights.into_iter().filter(|(d, _, _)| kept.contains(d)).collect();
+    let _ = highlights;
+    let mut out_hl: Vec<(DocId, usize, usize)> = spans.into_iter()
+        .map(|(d, f, t)| (d, f as usize, t as usize)).collect();
+    out_hl.sort_unstable();
     let out_cov = coverage.into_iter().filter(|(d, _)| kept.contains(d)).collect();
     (out_bitset, out_hl, out_cov)
 }
