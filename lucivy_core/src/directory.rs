@@ -174,7 +174,20 @@ impl Directory for StdFsDirectory {
         if let Some(parent) = full.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&full, data)?;
+        // Temp file + rename: `fs::write` truncates before it writes, and a
+        // reader reloading between the two sees an empty meta.json
+        // ("Meta file cannot be deserialized … Content: \"\""). Rare while
+        // metas were saved once per commit; routine now that every finished
+        // merge saves them. Rename is atomic on POSIX and on Emscripten's FS.
+        let tmp = full.with_extension(format!(
+            "{}.tmp.{}",
+            full.extension().and_then(|e| e.to_str()).unwrap_or(""),
+            std::process::id()));
+        fs::write(&tmp, data)?;
+        if let Err(e) = fs::rename(&tmp, &full) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
         if path == Path::new("meta.json") {
             if let Ok(router) = self.watch_router.read() {
                 let _ = router.broadcast();
