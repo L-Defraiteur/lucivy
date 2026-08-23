@@ -89,10 +89,22 @@ Tout se pilote par variables d'environnement, sans toucher au code.
 | `V3_THREADS` | 1 | threads de l'exécuteur de recherche |
 | `V3_SHARDS` | `1,4,8` | nombre de shards comparés (`perf_shape_sharded`) |
 | `RECOMPUTE_GT` | absent | recalcule le cache de ground truth |
+| `V3_INDEX_DIR` | absent | persiste l'index (construit en RAM, copié sans fsync) et le rouvre en mmap aux runs suivants ; clefé sur la forme, invalidé par `.v3_shape` |
+| `V3_MERGE_AT_END` | absent | désactive le merge progressif pendant l'indexation |
+| `V3_PROFILE` | absent | compteurs par étage (`briques/profile.rs`), timings `[prescan]`, `[merge]`, `[fst]` |
+| `V3_DIAG_LITERAL=<query>` | absent | dump des chaînes et des matchs (`[lit]`, `[match]`) pour cette requête |
+| `V3_DIAG_BYTE=<n>` | absent | restreint `[match]` au `byte_from` donné |
+| `LUCIVY_VERBOSE` | absent | résumés de DAG par nœud, timings `[finalize]` — fonctionne depuis `83d9695` |
 | `QUERY`, `MODE` | absent | filtre le baseline fuzzy/regex |
 
 Le cache de ground truth est **clefé par corpus et par taille** : réutiliser celui d'un
 autre arbre ferait passer un run au vert pour rien.
+
+Depuis le 23 août, la vérité terrain de `v3_ground_truth_contains` lit chaque fichier
+**depuis le disque** et compare **tous les spans** (strict et relaxed). La ligne de
+sortie est `(search, +fetch, grep) spans gt=… v3=… miss=… extra=…` ; les documents
+restent le critère de passage, les spans sont rapportés. Mettre une requête **sans
+résultat** dans chaque panel : c'est la mesure du plancher (29 ms à 50k).
 
 ### Diagnostics
 
