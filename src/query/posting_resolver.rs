@@ -35,6 +35,19 @@ pub trait PostingResolver: Send + Sync {
             .collect()
     }
 
+    /// Entries of one ordinal in one document.
+    ///
+    /// The chain resolver calls this once per surviving (doc, position) pair,
+    /// after posmap has already said which ordinal sits there — so only the
+    /// survivors' bytes are ever decoded. Default: filtered resolve on a
+    /// singleton set. V2 overrides with a binary search and a single payload
+    /// decode.
+    fn resolve_doc(&self, ordinal: u64, doc_id: u32) -> Vec<PostingEntry> {
+        let mut one = HashSet::with_capacity(1);
+        one.insert(doc_id);
+        self.resolve_filtered(ordinal, &one)
+    }
+
     /// Check if a doc_id has entries for this ordinal. Default: resolve and check.
     /// V2 overrides with O(log n) binary search, zero payload decode.
     fn has_doc(&self, ordinal: u64, doc_id: u32) -> bool {
@@ -130,6 +143,15 @@ impl PostingResolver for SfxPostResolverV2 {
 
     fn resolve_filtered(&self, ordinal: u64, doc_ids: &HashSet<u32>) -> Vec<PostingEntry> {
         self.reader.entries_filtered(ordinal as u32, Some(doc_ids)).into_iter().map(|e| PostingEntry {
+            doc_id: e.doc_id,
+            position: e.token_index,
+            byte_from: e.byte_from,
+            byte_to: e.byte_to,
+        }).collect()
+    }
+
+    fn resolve_doc(&self, ordinal: u64, doc_id: u32) -> Vec<PostingEntry> {
+        self.reader.entries_for_doc(ordinal as u32, doc_id).into_iter().map(|e| PostingEntry {
             doc_id: e.doc_id,
             position: e.token_index,
             byte_from: e.byte_from,

@@ -54,6 +54,20 @@ pub struct Counters {
     pub n_chain_first: AtomicU64,
     pub n_chain_entries: AtomicU64,
     pub n_chain_pairs: AtomicU64,
+
+    /// posmap-driven chain resolution: lookups made, survivors whose posting was
+    /// then fetched, and survivors whose posting did NOT hold the position posmap
+    /// claimed (must stay 0 — anything else means posmap and sfxpost disagree).
+    pub n_posmap_lookups: AtomicU64,
+    pub n_posmap_survivors: AtomicU64,
+    pub n_posmap_mismatch: AtomicU64,
+    /// (doc, position) written twice with different ordinals at index time.
+    pub n_posmap_collisions: AtomicU64,
+
+    /// Chunk chains before and after structural dedup, and matches emitted.
+    pub n_chains_raw: AtomicU64,
+    pub n_chains_distinct: AtomicU64,
+    pub n_matches_emitted: AtomicU64,
 }
 
 fn counters() -> &'static Counters {
@@ -123,6 +137,9 @@ pub fn reset() {
         &c.n_bcfs_splits, &c.n_bcfs_fst_reqs, &c.n_bcfs_fst_calls,
         &c.n_bcfs_walk_reqs, &c.n_bcfs_walk_calls, &c.n_bcfs_distinct_rem,
         &c.n_chain_first, &c.n_chain_entries, &c.n_chain_pairs,
+        &c.n_posmap_lookups, &c.n_posmap_survivors, &c.n_posmap_mismatch,
+        &c.n_posmap_collisions,
+        &c.n_chains_raw, &c.n_chains_distinct, &c.n_matches_emitted,
     ] {
         a.store(0, Ordering::Relaxed);
     }
@@ -171,6 +188,15 @@ pub fn dump() -> String {
     s.push_str(&format!(
         "  chunk resolve: {} first-position postings, {} entries, {} pair iterations\n",
         g(&c.n_chain_first), g(&c.n_chain_entries), g(&c.n_chain_pairs),
+    ));
+    s.push_str(&format!(
+        "  posmap resolve: {} lookups, {} survivors, {} mismatches | {} write collisions\n",
+        g(&c.n_posmap_lookups), g(&c.n_posmap_survivors),
+        g(&c.n_posmap_mismatch), g(&c.n_posmap_collisions),
+    ));
+    s.push_str(&format!(
+        "  chains: {} raw -> {} distinct | {} matches emitted\n",
+        g(&c.n_chains_raw), g(&c.n_chains_distinct), g(&c.n_matches_emitted),
     ));
     s
 }

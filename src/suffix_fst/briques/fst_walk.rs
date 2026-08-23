@@ -88,7 +88,12 @@ pub struct TokenChainV3 {
     /// `ordinals[i]` = alternative ordinals at chain position i.
     /// Typically 1 element; multiple when the query prefix-matches
     /// several content keys at that position.
-    pub ordinals: Vec<Vec<u64>>,
+    ///
+    /// Shared, not owned: every chain built from the same query remainder
+    /// carries the same alternatives list at that position, and a query such as
+    /// `__init` produces 3.4 million chains over 50k documents. Cloning the list
+    /// per chain was the bulk of `build_chains_from_splits`.
+    pub ordinals: Vec<std::sync::Arc<Vec<u64>>>,
     pub first_sti: u16,
     pub total_query_consumed: usize,
     /// Query bytes consumed by the LAST position of the chain.
@@ -415,8 +420,8 @@ fn build_chains_from_splits(
     // over the same handful of suffixes: measured at 15x redundancy on
     // `kmalloc`, 25x on `uint64_t`, 78x on `include`, for a stage that was
     // 78-96% of query time.
-    let mut fst_memo: FnvHashMap<usize, Vec<u64>> = FnvHashMap::default();
-    let mut walk_memo: FnvHashMap<usize, Option<(Vec<u64>, usize, usize)>> =
+    let mut fst_memo: FnvHashMap<usize, std::sync::Arc<Vec<u64>>> = FnvHashMap::default();
+    let mut walk_memo: FnvHashMap<usize, Option<(std::sync::Arc<Vec<u64>>, usize, usize)>> =
         FnvHashMap::default();
 
     super::profile::bump(|c| &c.n_bcfs_splits, splits.len() as u64);
@@ -425,7 +430,7 @@ fn build_chains_from_splits(
         let safe_start = snap_to_char_boundary(&query_lower, split.remainder_start);
         if safe_start >= query_lower.len() {
             chains.push(TokenChainV3 {
-                ordinals: vec![vec![split.parent.raw_ordinal]],
+                ordinals: vec![std::sync::Arc::new(vec![split.parent.raw_ordinal])],
                 first_sti: split.parent.sti,
                 total_query_consumed: split.query_consumed,
                 last_consumed: split.query_consumed,
@@ -433,7 +438,8 @@ fn build_chains_from_splits(
             continue;
         }
 
-        let mut positions: Vec<Vec<u64>> = vec![vec![split.parent.raw_ordinal]];
+        let mut positions: Vec<std::sync::Arc<Vec<u64>>> =
+            vec![std::sync::Arc::new(vec![split.parent.raw_ordinal])];
         let mut rem_off = safe_start;
         let mut depth = 0;
         let mut last_consumed = split.query_consumed;
@@ -449,11 +455,11 @@ fn build_chains_from_splits(
                     cands.iter().map(|c| c.raw_ordinal).collect();
                 unique_ords.sort_unstable();
                 unique_ords.dedup();
-                fst_memo.insert(rem_off, unique_ords);
+                fst_memo.insert(rem_off, std::sync::Arc::new(unique_ords));
             }
             let hit = &fst_memo[&rem_off];
             if !hit.is_empty() {
-                positions.push(hit.clone());
+                positions.push(std::sync::Arc::clone(hit));
                 // This position swallows the whole remainder.
                 last_consumed = rem.len();
                 rem_off = query_lower.len();
@@ -486,12 +492,13 @@ fn build_chains_from_splits(
                     unique_ords.sort_unstable();
                     unique_ords.dedup();
                     let best = &sub_splits[0];
-                    Some((unique_ords, best.query_consumed, best.remainder_start))
+                    Some((std::sync::Arc::new(unique_ords), best.query_consumed, best.remainder_start))
                 };
                 walk_memo.insert(rem_off, entry);
             }
             let Some((unique_ords, best_consumed, best_rem_start)) =
-                walk_memo[&rem_off].clone()
+                walk_memo[&rem_off].as_ref()
+                    .map(|(o, c, r)| (std::sync::Arc::clone(o), *c, *r))
             else {
                 break;
             };
@@ -627,7 +634,7 @@ pub fn sibling_chain_dfs(
 
         if remainder.is_empty() {
             chains.push(TokenChainV3 {
-                ordinals: vec![vec![split.parent.raw_ordinal]],
+                ordinals: vec![std::sync::Arc::new(vec![split.parent.raw_ordinal])],
                 first_sti: split.parent.sti,
                 total_query_consumed: split.query_consumed,
                 last_consumed: split.query_consumed,
@@ -635,9 +642,9 @@ pub fn sibling_chain_dfs(
             continue;
         }
 
-        let mut stack: Vec<(u64, &str, Vec<Vec<u64>>, usize)> = vec![
+        let mut stack: Vec<(u64, &str, Vec<std::sync::Arc<Vec<u64>>>, usize)> = vec![
             (split.parent.raw_ordinal, remainder,
-             vec![vec![split.parent.raw_ordinal]], 0)
+             vec![std::sync::Arc::new(vec![split.parent.raw_ordinal])], 0)
         ];
 
         while let Some((cur_ord, rem, chain, depth)) = stack.pop() {
@@ -692,7 +699,7 @@ pub fn sibling_chain_dfs(
                         ]);
                     }
                     let mut c = chain.clone();
-                    c.push(vec![next_ord as u64]);
+                    c.push(std::sync::Arc::new(vec![next_ord as u64]));
                     chains.push(TokenChainV3 {
                         ordinals: c,
                         first_sti: split.parent.sti,
@@ -711,7 +718,7 @@ pub fn sibling_chain_dfs(
                     let consumed = next_content.len();
                     let new_rem = &rem[consumed..];
                     let mut c = chain.clone();
-                    c.push(vec![next_ord as u64]);
+                    c.push(std::sync::Arc::new(vec![next_ord as u64]));
                     stack.push((next_ord as u64, new_rem, c, depth + 1));
                 }
             }

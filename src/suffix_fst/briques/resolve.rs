@@ -175,6 +175,20 @@ pub fn resolve_chains_v3(
     resolve_chains_impl(chains, resolver, filter_docs, AdjacencyMode::Strict)
 }
 
+/// Strict adjacency resolved through posmap — see `AdjacencyMode::StrictPosmap`.
+///
+/// Same results as `resolve_chains_v3`; what changes is the work. On `__init`
+/// over 5 000 kernel files the posting path materialised 10.2 million entries
+/// and ran 25.3 million pair iterations for 15 hits.
+pub fn resolve_chains_v3_posmap(
+    chains: &[TokenChainV3],
+    resolver: &dyn PostingResolver,
+    filter_docs: Option<&HashSet<DocId>>,
+    posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
+) -> Vec<MatchV3> {
+    resolve_chains_impl(chains, resolver, filter_docs, AdjacencyMode::StrictPosmap { posmap })
+}
+
 /// Resolve cross-token chains with relaxed adjacency for strict_sep=false.
 ///
 /// Allows gaps between chain ordinals (pure-sep tokens in between).
@@ -285,7 +299,7 @@ pub fn resolve_word_chains_v3(
             let active_docs: HashSet<DocId> =
                 active.iter().map(|&(doc_id, ..)| doc_id).collect();
             let mut entries: Vec<(WordPostingEntry, u64)> = Vec::new();
-            for &ord in &chain.ordinals[ord_idx] {
+            for &ord in chain.ordinals[ord_idx].iter() {
                 let word_entries = word_sfxpost.entries(ord as u32);
                 if !word_entries.is_empty() {
                     for e in word_entries {
@@ -379,6 +393,20 @@ pub fn resolve_word_chains_v3(
 enum AdjacencyMode<'a> {
     /// pos[i+1] == pos[i] + 1
     Strict,
+    /// Same contract as Strict, answered the other way round.
+    ///
+    /// Strict asks the resolver for every posting of the next ordinals, then looks
+    /// for one at pos[i] + 1. This asks posmap which ordinal sits at pos[i] + 1 and
+    /// checks it against the chain's set — one O(1) lookup per active element, no
+    /// posting list materialised. Only the survivors have their bytes fetched.
+    ///
+    /// Exact, not approximate: posmap is built from the very sfxpost entries the
+    /// resolver serves (PosMapIndex::on_posting), and each (doc, position) carries
+    /// one content ordinal. Collisions are counted at write time, and every
+    /// survivor is re-checked against its real posting here.
+    StrictPosmap {
+        posmap: &'a crate::suffix_fst::posmap::PosMapReader<'a>,
+    },
     /// pos[i+1] > pos[i], intermediate tokens verified as pure non-alphanum via ByteMap.
     /// PosMap + ByteMap are REQUIRED — no fallback to unverified byte ordering.
     Relaxed {
@@ -408,13 +436,13 @@ fn resolve_chains_impl(
         }
 
         // Resolve all alternatives at position 0
-        let first_entries = match first_memo.get(&chain.ordinals[0]) {
+        let first_entries = match first_memo.get(chain.ordinals[0].as_slice()) {
             Some(hit) => hit.clone(),
             None => {
                 let v = std::rc::Rc::new(
                     resolve_alternatives(resolver, &chain.ordinals[0], filter_docs));
                 super::profile::bump(|c| &c.n_chain_first, v.len() as u64);
-                first_memo.insert(chain.ordinals[0].clone(), v.clone());
+                first_memo.insert(chain.ordinals[0].as_ref().clone(), v.clone());
                 v
             }
         };
@@ -454,6 +482,34 @@ fn resolve_chains_impl(
                 break;
             }
 
+            if let AdjacencyMode::StrictPosmap { posmap } = &adjacency {
+                // Which ordinals may sit at the next position. Chains carry a
+                // handful of alternatives; a sorted Vec beats a set at that size.
+                // The memoised lists come out of build_chains_from_splits already
+                // sorted and deduplicated; sibling-DFS singletons trivially are.
+                let wanted: &[u64] = chain.ordinals[ord_idx].as_slice();
+                debug_assert!(wanted.windows(2).all(|w| w[0] < w[1]));
+
+                // Bytes are not fetched here. An intermediate position's span is
+                // never used — only the last token's reaches the emitted match —
+                // and most survivors of one position die at the next (52 702
+                // survivors for 287 matches on `__init`). The tuple keeps
+                // placeholders; the emit loop below fetches the real posting for
+                // whatever is still active, and validates posmap's claim there.
+                let mut new_active: Vec<(DocId, u32, u32, u32, u32, u64)> = Vec::new();
+                for &(doc_id, prev_pos, byte_from_first, _, _, _) in &active {
+                    let next_pos = prev_pos + 1;
+                    super::profile::bump(|c| &c.n_posmap_lookups, 1);
+                    let Some(ord) = posmap.ordinal_at(doc_id, next_pos) else { continue };
+                    let ord = ord as u64;
+                    if wanted.binary_search(&ord).is_err() { continue; }
+                    super::profile::bump(|c| &c.n_posmap_survivors, 1);
+                    new_active.push((doc_id, next_pos, byte_from_first, 0, 0, ord));
+                }
+                active = new_active;
+                continue;
+            }
+
             // Union postings from all alternative ordinals at this position,
             // tagging each with its ordinal for word map verification.
             //
@@ -465,7 +521,7 @@ fn resolve_chains_impl(
             let active_docs: HashSet<DocId> =
                 active.iter().map(|&(doc_id, ..)| doc_id).collect();
             let mut entries: Vec<(PostingEntry, u64)> = Vec::new();
-            for &ord in &chain.ordinals[ord_idx] {
+            for &ord in chain.ordinals[ord_idx].iter() {
                 for e in resolver.resolve_filtered(ord, &active_docs) {
                     entries.push((e, ord));
                 }
@@ -495,7 +551,7 @@ fn resolve_chains_impl(
                     let (e, ord) = &entries[i as usize];
 
                     let valid = match &adjacency {
-                        AdjacencyMode::Strict => {
+                        AdjacencyMode::Strict | AdjacencyMode::StrictPosmap { .. } => {
                             e.position == prev_pos + 1
                         }
                         AdjacencyMode::Relaxed { posmap, bytemap } => {
@@ -525,6 +581,24 @@ fn resolve_chains_impl(
 
         // Emit matches
         for &(doc_id, last_pos, byte_from, token_end, last_bf, last_ord) in &active {
+            // Under posmap resolution the last token's bytes are still unknown
+            // (see above). Fetch its posting now — once per emitted match — and
+            // let it confirm the position posmap claimed.
+            let (token_end, last_bf) = if matches!(adjacency, AdjacencyMode::StrictPosmap { .. })
+                && chain.ordinals.len() > 1
+            {
+                match resolver.resolve_doc(last_ord, doc_id)
+                    .into_iter().find(|e| e.position == last_pos)
+                {
+                    Some(e) => (e.byte_to, e.byte_from),
+                    None => {
+                        super::profile::bump(|c| &c.n_posmap_mismatch, 1);
+                        continue;
+                    }
+                }
+            } else {
+                (token_end, last_bf)
+            };
             let position = first_entries.iter()
                 .find(|e| e.doc_id == doc_id)
                 .map(|e| e.position)

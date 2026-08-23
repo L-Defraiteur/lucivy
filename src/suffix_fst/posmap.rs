@@ -43,6 +43,13 @@ impl PosMapWriter {
         if p >= doc.len() {
             doc.resize(p + 1, u32::MAX);
         }
+        // One ordinal per (doc, position) is what makes posmap an exact inverse
+        // of sfxpost — and what the chain resolver relies on to replace posting
+        // materialisation with a lookup. A second writer here would be silently
+        // overwritten, so count it instead of assuming it never happens.
+        if doc[p] != u32::MAX && doc[p] != ordinal {
+            crate::suffix_fst::briques::profile::bump(|c| &c.n_posmap_collisions, 1);
+        }
         doc[p] = ordinal;
     }
 

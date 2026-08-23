@@ -110,8 +110,13 @@ pub fn find_literal_v3(
         };
         ctx.trace_msg(&format!("chunk_chains falling_walk={}", chains.len()));
         profile::bump(|c| &c.n_chunk_chains, chains.len() as u64);
+        profile::bump(|c| &c.n_chains_raw, chains.len() as u64);
         let _t = profile::Timer::start();
-        let cross = resolve::resolve_chains_v3(&chains, ctx.resolver, ctx.filter_docs);
+        let cross = match ctx.posmap.as_ref() {
+            Some(pm) => resolve::resolve_chains_v3_posmap(
+                &chains, ctx.resolver, ctx.filter_docs, pm),
+            None => resolve::resolve_chains_v3(&chains, ctx.resolver, ctx.filter_docs),
+        };
         _t.stop(|c| &c.ns_chunk_resolve);
         ctx.trace_msg(&format!("chunk_resolved matches={}", cross.len()));
         if dbg {
@@ -178,6 +183,7 @@ pub fn find_literal_v3(
     }
 
     results.sort_by_key(|m| (m.doc_id, m.position));
+    profile::bump(|c| &c.n_matches_emitted, results.len() as u64);
     let unique_docs: std::collections::HashSet<u32> = results.iter().map(|m| m.doc_id).collect();
     ctx.trace_msg(&format!("total matches={} unique_docs={}", results.len(), unique_docs.len()));
     ctx.trace_exit();
