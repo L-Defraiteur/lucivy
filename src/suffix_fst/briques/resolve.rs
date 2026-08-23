@@ -850,6 +850,178 @@ fn word_content_end(
     e.byte_to
 }
 
+/// Word chains through word_pos_map, grouped by head.
+///
+/// `resolve_word_chains_v3_wordmap` walks every chain on its own: the head's
+/// posting list is resolved once (memo) but re-scanned per chain, and the
+/// forward scan from each posting — over pure-separator chunks, up to the next
+/// content — is redone per chain too. Relaxed `uint64_t` over a 32-segment
+/// merged index: 1 741 chains, 17.5 million lookups for 62 736 survivors,
+/// because hundreds of chains start on the same frequent words (`u`, `ui`,
+/// `uint`…).
+///
+/// Here chains are grouped by (head list, first_sti). The forward scan from
+/// each head posting happens once per group and lands on one (ordinal, span);
+/// that ordinal is then dispatched to every member whose second list wants it.
+/// Members continue alone from their third position, as before. Same results.
+pub fn resolve_word_chains_v3_wordmap_grouped(
+    chains: &[TokenChainV3],
+    word_sfxpost: &crate::suffix_fst::word_sfxpost::WordSfxPostReader<'_>,
+    chunk_resolver: &dyn PostingResolver,
+    filter_docs: Option<&HashSet<DocId>>,
+    posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
+    bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
+    word_posmap: &crate::suffix_fst::word_pos_map::WordPosMapReader<'_>,
+    termtexts: Option<&crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>>,
+) -> Vec<MatchV3> {
+    use crate::suffix_fst::word_sfxpost::WordPostingEntry;
+    use crate::suffix_fst::word_pos_map::SPAN_OVERFLOW;
+
+    const CONTENT_RANGES: &[(u8, u8)] = &[
+        (b'0', b'9'), (b'A', b'Z'), (b'a', b'z'), (0x80, 0xFF),
+    ];
+
+    // Single-position chains have no step to share: the per-chain walker
+    // handles them exactly. Multi-position chains are grouped.
+    let (singles, multis): (Vec<TokenChainV3>, Vec<TokenChainV3>) = chains.iter()
+        .filter(|c| !c.ordinals.is_empty())
+        .cloned()
+        .partition(|c| c.ordinals.len() == 1);
+    let mut results = resolve_word_chains_v3_wordmap(
+        &singles, word_sfxpost, chunk_resolver, filter_docs, posmap, bytemap, word_posmap, termtexts);
+
+    // One forward step from (doc, prev_last): the next content position, the
+    // ordinal there (word or chunk), its last position, and whether it is a word.
+    let step = |doc_id: DocId, prev_last: u32| -> Option<(u32, u32, u64, bool)> {
+        let mut p = prev_last + 1;
+        loop {
+            super::profile::bump(|c| &c.n_wordmap_lookups, 1);
+            if let Some((word_ord, span)) = word_posmap.word_start_at(doc_id, p) {
+                let last = if span >= SPAN_OVERFLOW {
+                    word_sfxpost.entry_at(word_ord, doc_id, p)?.last_position
+                } else { p + span };
+                return Some((p, last, word_ord as u64, true));
+            }
+            let chunk_ord = posmap.ordinal_at(doc_id, p)?;
+            if bytemap.bytes_in_ranges(chunk_ord, CONTENT_RANGES) {
+                // Content chunk that starts no word: only a chunk alternative can
+                // take it. The caller checks membership; report it as a chunk.
+                return Some((p, p, chunk_ord as u64, false));
+            }
+            p += 1;
+        }
+    };
+
+    let mut groups: FnvHashMap<(Vec<u64>, u16), Vec<usize>> = FnvHashMap::default();
+    for (i, c) in multis.iter().enumerate() {
+        groups.entry((c.ordinals[0].as_ref().clone(), c.first_sti)).or_default().push(i);
+    }
+    let mut first_memo: FnvHashMap<Vec<u64>, std::rc::Rc<Vec<WordPostingEntry>>> = FnvHashMap::default();
+
+    // Active: (doc, last_word_first_pos, last_pos, byte_from_first, last_ord, last_is_word, first_pos)
+    type Active = (DocId, u32, u32, u32, u64, bool, u32);
+
+    for ((head_key, first_sti), members) in groups {
+        let first_entries = match first_memo.get(head_key.as_slice()) {
+            Some(hit) => hit.clone(),
+            None => {
+                let v: Vec<WordPostingEntry> = head_key.iter().flat_map(|&ord| {
+                    let we = word_sfxpost.entries(ord as u32);
+                    let entries: Vec<WordPostingEntry> = if !we.is_empty() { we } else {
+                        let chunk = if let Some(f) = filter_docs {
+                            chunk_resolver.resolve_filtered(ord, f)
+                        } else { chunk_resolver.resolve(ord) };
+                        chunk.into_iter().map(|e| WordPostingEntry {
+                            doc_id: e.doc_id, first_position: e.position, last_position: e.position,
+                            byte_from: e.byte_from, byte_to: e.byte_to,
+                        }).collect()
+                    };
+                    let mut f = entries;
+                    if let Some(filter) = filter_docs { f.retain(|e| filter.contains(&e.doc_id)); }
+                    f
+                }).collect();
+                let v = std::rc::Rc::new(v);
+                first_memo.insert(head_key.clone(), v.clone());
+                v
+            }
+        };
+
+        // Distinct second lists of the group, with the members wanting each.
+        let mut tails: Vec<(std::sync::Arc<Vec<u64>>, Vec<usize>)> = Vec::new();
+        for &ci in &members {
+            let list = &multis[ci].ordinals[1];
+            match tails.iter_mut().find(|(l, _)| std::sync::Arc::ptr_eq(l, list) || **l == **list) {
+                Some((_, cs)) => cs.push(ci),
+                None => tails.push((std::sync::Arc::clone(list), vec![ci])),
+            }
+        }
+
+        // Step 1, once per head posting.
+        let mut survivors: FnvHashMap<usize, Vec<Active>> = FnvHashMap::default();
+        for e in first_entries.iter() {
+            if first_sti > 0 {
+                let content_end = word_content_end(posmap, chunk_resolver, termtexts, e);
+                if e.byte_from + first_sti as u32 >= content_end { continue; }
+            }
+            let Some((p, last, ord, is_word)) = step(e.doc_id, e.last_position) else { continue };
+            for (list, wanting) in &tails {
+                if list.binary_search(&ord).is_err() { continue; }
+                super::profile::bump(|c| &c.n_wordmap_survivors, wanting.len() as u64);
+                for &ci in wanting {
+                    survivors.entry(ci).or_default().push((
+                        e.doc_id, p, last, e.byte_from + first_sti as u32, ord, is_word, e.first_position,
+                    ));
+                }
+            }
+        }
+
+        // Steps 2+ and emit, per member.
+        for &ci in &members {
+            let chain = &multis[ci];
+            let Some(mut active) = survivors.remove(&ci) else { continue };
+            for ord_idx in 2..chain.ordinals.len() {
+                if active.is_empty() { break; }
+                let wanted: &[u64] = chain.ordinals[ord_idx].as_slice();
+                let mut next = Vec::new();
+                for &(doc_id, _, prev_last, bf_first, _, _, first_pos) in &active {
+                    let Some((p, last, ord, is_word)) = step(doc_id, prev_last) else { continue };
+                    if wanted.binary_search(&ord).is_err() { continue; }
+                    super::profile::bump(|c| &c.n_wordmap_survivors, 1);
+                    next.push((doc_id, p, last, bf_first, ord, is_word, first_pos));
+                }
+                active = next;
+            }
+            for &(doc_id, last_first, last_pos, byte_from, last_ord, last_is_word, position) in &active {
+                let (token_end, last_bf) = if last_is_word {
+                    match word_sfxpost.entry_at(last_ord as u32, doc_id, last_first) {
+                        Some(e) => (e.byte_to, e.byte_from),
+                        None => { super::profile::bump(|c| &c.n_wordmap_mismatch, 1); continue; }
+                    }
+                } else {
+                    match chunk_resolver.resolve_doc(last_ord, doc_id).into_iter().find(|e| e.position == last_pos) {
+                        Some(e) => (e.byte_to, e.byte_from),
+                        None => { super::profile::bump(|c| &c.n_wordmap_mismatch, 1); continue; }
+                    }
+                };
+                results.push(MatchV3 {
+                    doc_id,
+                    position,
+                    span: last_pos.saturating_sub(position) + 1,
+                    byte_from,
+                    overlap_overflow: (last_bf + chain.last_consumed as u32).saturating_sub(token_end) as u8,
+                    byte_to: (last_bf + chain.last_consumed as u32).max(byte_from).min(token_end),
+                    token_end,
+                    sti: chain.first_sti,
+                    ordinal: chain.ordinals[0][0],
+                    last_ordinal: last_ord,
+                });
+            }
+        }
+    }
+
+    results
+}
+
 enum AdjacencyMode<'a> {
     /// pos[i+1] == pos[i] + 1
     Strict,

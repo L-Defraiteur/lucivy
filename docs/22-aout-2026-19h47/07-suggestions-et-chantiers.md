@@ -72,15 +72,17 @@ s'en fichait, et c'est documenté. Je le laisse ici pour qu'il ne disparaisse pa
 
 ## B. Perf — ce qui reste lent, mesuré
 
-### B1. Le pipeline word sur gros segments
+### B1. Le pipeline word sur gros segments — FAIT le 23 août, 17h
 
-**Mesuré** : `uint64_t` relax 170 ms sur 800 segments naturels, **788 ms** sur 32
-fusionnés. Même classe que les 264 M d'entrées du chunk hier : le pipeline word n'a
-pas reçu les mêmes traitements (groupement par tête commune, élagage par docs actifs
-à la position 0, `entry_at` à l'émission seulement).
+**Mesuré avant** : `uint64_t` relax 809 ms sur 32 segments fusionnés, 17,5 M de
+lookups wordmap pour 62 736 survivants. **Après** (`resolve_word_chains_v3_wordmap_grouped`,
+chaînes groupées par (tête, sti), un balayage avant par posting de tête, dispatch par
+liste de queue distincte) : **214 ms**, 48 k lookups, mêmes survivants, spans
+identiques à l'octet près sur naturel et fusionné.
 
-**Par où commencer** : `V3_PROFILE=1` sur l'index fusionné, lire `wordmap resolve` et
-`word_entries`.
+Résidus observés en chemin, pré-existants (vérifiés avec l'ancienne fonction) :
+`__init` relax perd un document sur l'index fusionné (A1), et manque 161 spans sur le
+naturel (classe A2 probablement).
 
 ### B2. Un gros segment = un thread
 

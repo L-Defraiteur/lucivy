@@ -236,7 +236,7 @@ pub fn find_literal_v3(
         profile::bump(|c| &c.n_word_chains, chains.len() as u64);
         let _t = profile::Timer::start();
         let cross = match ctx.word_posmap.as_ref() {
-            Some(wpm) => resolve::resolve_word_chains_v3_wordmap(
+            Some(wpm) => resolve::resolve_word_chains_v3_wordmap_grouped(
                 &chains, wsp, ctx.resolver, ctx.filter_docs, pm, bm, wpm, ctx.termtexts.as_ref()),
             None => resolve::resolve_word_chains_v3(
                 &chains, wsp, ctx.resolver, ctx.filter_docs, pm, bm, ctx.termtexts.as_ref()),
