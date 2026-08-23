@@ -66,6 +66,34 @@ impl Message for SuStartMergeMsg {
     fn decode(_: &[u8]) -> Result<Self, String> { Ok(Self) }
 }
 
+/// Start several merges at once. The operations travel in `local` as a
+/// `Vec<MergeOperation>`; the heavy work runs as scheduler tasks, and the actor
+/// is notified through `SuMergesDoneMsg` when all of them have finished.
+pub(crate) struct SuStartMergesMsg;
+impl Message for SuStartMergesMsg {
+    fn type_tag() -> u64 { type_tag_hash(b"SuStartMergesMsg") }
+    fn encode(&self) -> Vec<u8> { vec![] }
+    fn decode(_: &[u8]) -> Result<Self, String> { Ok(Self) }
+}
+
+/// Internal: the merge tasks of one `SuStartMergesMsg` have all completed.
+/// `local` carries `MergesDone`.
+pub(crate) struct SuMergesDoneMsg;
+impl Message for SuMergesDoneMsg {
+    fn type_tag() -> u64 { type_tag_hash(b"SuMergesDoneMsg") }
+    fn encode(&self) -> Vec<u8> { vec![] }
+    fn decode(_: &[u8]) -> Result<Self, String> { Ok(Self) }
+}
+
+/// What a finished batch of merge tasks hands back to the actor.
+pub(crate) struct MergesDone {
+    /// One slot per operation, filled by its task. `None` = the task failed.
+    pub results: Arc<std::sync::Mutex<Vec<Option<super::commit_dag::MergeResult>>>>,
+    /// First task error, if any.
+    pub errors: Vec<String>,
+    pub reply: Option<crate::actor::envelope::ReplyPort>,
+}
+
 pub(crate) struct SuKillMsg;
 impl Message for SuKillMsg {
     fn type_tag() -> u64 { type_tag_hash(b"SuKillMsg") }
@@ -137,6 +165,113 @@ impl SegmentUpdaterState {
         // is called explicitly. This avoids thread starvation during commit.
 
         Ok(opstamp)
+    }
+
+    /// Prepare several merges inline, then run each one as a scheduler task.
+    ///
+    /// The commit DAG has always had one `merge_i` node per operation, fanned
+    /// out from `prepare` — but `execute_dag` runs every level inline when it
+    /// is called from an actor, which is exactly where this DAG runs. So the
+    /// fan-out was parallel on paper and sequential in practice: twenty merges
+    /// of ~700ms cost fourteen seconds, on a machine with twenty-four cores.
+    ///
+    /// What must stay inside the actor is the bookkeeping: purging, committing
+    /// the segment manager, marking segments as merging, and later registering
+    /// the results. What does not is the merge itself — reading source segments
+    /// and writing a new one — which touches nothing but `shared.index`. That
+    /// part goes to the scheduler as one task per operation, and the actor is
+    /// told through `SuMergesDoneMsg` when all are done. It never waits.
+    fn handle_start_merges(
+        &mut self,
+        merge_ops: Vec<MergeOperation>,
+        reply: Option<crate::actor::envelope::ReplyPort>,
+        self_ref: crate::actor::mailbox::ActorRef<crate::actor::envelope::Envelope>,
+    ) -> crate::Result<()> {
+        let meta = self.shared.load_meta();
+        let opstamp = meta.opstamp;
+
+        // Prepare, exactly as PrepareNode does.
+        let segment_entries = self.shared.purge_deletes(opstamp)?;
+        self.shared.segment_manager.commit(segment_entries);
+
+        let mut prepared: Vec<(MergeOperation, Vec<SegmentEntry>)> = Vec::new();
+        for op in &merge_ops {
+            let entries = self.shared.segment_manager.start_merge(op.segment_ids())?;
+            self.shared.event_bus.emit(IndexEvent::MergeStarted {
+                segment_ids: op.segment_ids().to_vec(),
+                target_opstamp: op.target_opstamp(),
+            });
+            prepared.push((MergeOperation::new(op.target_opstamp(), op.segment_ids().to_vec()), entries));
+        }
+
+        let results: Arc<std::sync::Mutex<Vec<Option<super::commit_dag::MergeResult>>>> =
+            Arc::new(std::sync::Mutex::new((0..prepared.len()).map(|_| None).collect()));
+
+        let scheduler = crate::actor::scheduler::global_scheduler();
+        let mut rxs = Vec::with_capacity(prepared.len());
+        for (i, (op, entries)) in prepared.into_iter().enumerate() {
+            let shared = self.shared.clone();
+            let slot = results.clone();
+            rxs.push(scheduler.submit_task(crate::actor::Priority::High, move || {
+                match super::commit_dag::run_merge(&shared, op, entries) {
+                    Ok(r) => {
+                        slot.lock().unwrap()[i] = Some(r);
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }));
+        }
+
+        self.shared.pending_merge_tasks.store(true, std::sync::atomic::Ordering::Release);
+
+        let payload = meta.payload.clone();
+        crate::actor::reply::collect_replies_to(
+            rxs,
+            &self_ref,
+            "start_merges",
+            move |task_results: Vec<Result<(), String>>| {
+                let errors: Vec<String> = task_results.into_iter()
+                    .filter_map(|r| r.err()).collect();
+                let local: Box<dyn std::any::Any + Send> =
+                    Box::new((MergesDone { results, errors, reply }, opstamp, payload));
+                crate::actor::envelope::Envelope {
+                    type_tag: SuMergesDoneMsg::type_tag(),
+                    payload: SuMergesDoneMsg.encode(),
+                    reply: None,
+                    local: Some(local),
+                }
+            },
+        );
+        Ok(())
+    }
+
+    /// Register finished merges: end_merge per result, save metas, GC. This is
+    /// FinalizeNode + SaveMetasNode + GCNode, run inline — all bookkeeping.
+    fn handle_merges_done(
+        &mut self,
+        done: MergesDone,
+        opstamp: crate::Opstamp,
+        payload: Option<String>,
+    ) -> crate::Result<()> {
+        self.shared.pending_merge_tasks.store(false, std::sync::atomic::Ordering::Release);
+
+        let results: Vec<Option<super::commit_dag::MergeResult>> =
+            std::mem::take(&mut *done.results.lock().unwrap());
+
+        let mut first_err: Option<String> = done.errors.first().cloned();
+        for result in results.into_iter().flatten() {
+            if let Err(e) = super::commit_dag::register_merge_result(&self.shared, result) {
+                first_err.get_or_insert(e);
+            }
+        }
+        if let Some(e) = first_err {
+            return Err(crate::LucivyError::SystemError(format!("merge: {e}")));
+        }
+
+        self.shared.save_metas(opstamp, payload)?;
+        let _ = garbage_collect_files(&self.shared)?;
+        Ok(())
     }
 
     /// Execute an explicit merge via DAG.
@@ -233,6 +368,41 @@ pub(crate) fn create_segment_updater_actor(
                     Ok(()) => reply.send(SuOkReply),
                     Err(e) => reply.send_err(e),
                 }
+            }
+            ActorStatus::Continue
+        },
+    ));
+
+    // StartMerges: Vec<MergeOperation> in local — prepares inline, runs the
+    // merges as tasks, replies from the SuMergesDoneMsg handler.
+    actor.register(TypedHandler::<SuStartMergesMsg, _>::new(
+        |state, _msg, reply, local, _ctx| {
+            let ops = local.and_then(|l| l.downcast::<Vec<MergeOperation>>().ok()).map(|m| *m);
+            let Some(ops) = ops else { return ActorStatus::Continue };
+            let self_ref = state
+                .get::<crate::actor::mailbox::ActorRef<crate::actor::envelope::Envelope>>()
+                .unwrap().clone();
+            let su = state.get_mut::<SegmentUpdaterState>().unwrap();
+            if let Err(e) = su.handle_start_merges(ops, reply, self_ref) {
+                // `reply` moved into the call; on a prepare failure it was
+                // consumed there and nothing answers. Keep the failure loud.
+                eprintln!("[segment_updater] start_merges failed: {e}");
+            }
+            ActorStatus::Continue
+        },
+    ));
+
+    actor.register(TypedHandler::<SuMergesDoneMsg, _>::new(
+        |state, _msg, _reply, local, _ctx| {
+            let Some(local) = local else { return ActorStatus::Continue };
+            let Ok(boxed) = local.downcast::<(MergesDone, crate::Opstamp, Option<String>)>()
+            else { return ActorStatus::Continue };
+            let (mut done, opstamp, payload) = *boxed;
+            let reply = done.reply.take();
+            let su = state.get_mut::<SegmentUpdaterState>().unwrap();
+            match su.handle_merges_done(done, opstamp, payload) {
+                Ok(()) => { if let Some(r) = reply { r.send(SuOkReply); } }
+                Err(e) => { if let Some(r) = reply { r.send_err(e); } }
             }
             ActorStatus::Continue
         },

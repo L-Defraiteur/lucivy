@@ -166,9 +166,12 @@ fn merge_round(
     if k > len { return false; }
     let groups = (excess / (k - 1)).min(len / k);
     if groups == 0 { return false; }
-    for g in ids[..groups * k].chunks(k) {
-        w.merge(g).unwrap();
-    }
+    // One call for all groups: they are disjoint, and merge_many runs them as
+    // concurrent tasks. Calling merge() per group serialised them — 20 groups
+    // of ~700ms made a 14s round on a 24-core machine.
+    let batch: Vec<Vec<ld_lucivy::index::SegmentId>> =
+        ids[..groups * k].chunks(k).map(|g| g.to_vec()).collect();
+    w.merge_many(&batch).unwrap();
     true
 }
 

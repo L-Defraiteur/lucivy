@@ -120,6 +120,71 @@ impl Node for PrepareNode {
 // MergeNode — executes a merge DAG (postings ∥ store ∥ fast_fields → sfx)
 // ---------------------------------------------------------------------------
 
+/// The work of one merge: read the source segments, write the merged one.
+///
+/// Touches nothing but `shared.index` and the event bus, so it is safe to run
+/// as a scheduler task outside the actor. `MergeNode` calls it from inside the
+/// commit DAG; `handle_start_merges` calls it from N tasks at once.
+pub(crate) fn run_merge(
+    shared: &Arc<SegmentUpdaterShared>,
+    op: MergeOperation,
+    entries: Vec<SegmentEntry>,
+) -> Result<MergeResult, String> {
+    let start = std::time::Instant::now();
+    let num_segments = op.segment_ids().len();
+
+    let merge_dag = super::merge_dag::build_merge_dag(
+        &shared.index, entries, op.target_opstamp(),
+    ).map_err(|e| format!("build_merge_dag: {e}"))?;
+
+    let (segment_entry, docs_merged) = match merge_dag {
+        Some(mut dag) => {
+            let mut dag_result = luciole::execute_dag(&mut dag, None)
+                .map_err(|e| format!("merge DAG: {e}"))?;
+            if crate::diag::is_verbose() {
+                eprintln!("    merge ({} segments) — {}", num_segments, dag_result.display_summary());
+            }
+            let entry = dag_result.take_output::<SegmentEntry>("close", "entry");
+            let docs = entry.as_ref().map(|e| e.meta().num_docs()).unwrap_or(0);
+            (entry, docs)
+        }
+        None => (None, 0),
+    };
+
+    shared.event_bus.emit(IndexEvent::MergeCompleted {
+        segment_ids: op.segment_ids().to_vec(),
+        duration: start.elapsed(),
+        result_num_docs: docs_merged,
+    });
+    Ok(MergeResult { merge_op: op, segment_entry, docs_merged })
+}
+
+/// Register one finished merge with the segment manager — FinalizeNode's
+/// per-result body. Bookkeeping only; must run inside the actor.
+pub(crate) fn register_merge_result(
+    shared: &Arc<SegmentUpdaterShared>,
+    result: MergeResult,
+) -> Result<(), String> {
+    let after_entry = if let Some(mut entry) = result.segment_entry {
+        let mut delete_cursor = entry.delete_cursor().clone();
+        if let Some(delete_op) = delete_cursor.get() {
+            let committed_opstamp = shared.load_meta().opstamp;
+            if delete_op.opstamp < committed_opstamp {
+                let segment = shared.index.segment(entry.meta().clone());
+                crate::indexer::index_writer::advance_deletes(
+                    segment, &mut entry, committed_opstamp,
+                ).map_err(|e| format!("advance_deletes: {e}"))?;
+            }
+        }
+        Some(entry)
+    } else {
+        None
+    };
+    shared.segment_manager.end_merge(result.merge_op.segment_ids(), after_entry)
+        .map_err(|e| format!("end_merge: {e}"))?;
+    Ok(())
+}
+
 pub(crate) struct MergeNode {
     shared: Arc<SegmentUpdaterShared>,
 }

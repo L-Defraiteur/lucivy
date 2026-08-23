@@ -456,6 +456,19 @@ impl<D: Document> IndexWriter<D> {
         self.segment_updater.start_merge(merge_operation)
     }
 
+    /// Merge several disjoint groups of segments concurrently.
+    ///
+    /// `merge` handles one group and blocks until it is written; calling it in
+    /// a loop serialises groups that have nothing to do with each other. This
+    /// runs them as parallel tasks and returns when all are registered.
+    pub fn merge_many(&mut self, groups: &[Vec<SegmentId>]) -> crate::Result<()> {
+        let ops: Vec<_> = groups.iter()
+            .filter(|g| !g.is_empty())
+            .map(|g| self.segment_updater.make_merge_operation(g))
+            .collect();
+        self.segment_updater.start_merges(ops)
+    }
+
     /// Rollback to the last commit
     ///
     /// This cancels all of the updates that

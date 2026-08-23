@@ -368,6 +368,38 @@ impl SegmentUpdater {
         }
     }
 
+    /// Start several merges at once and wait for all of them.
+    ///
+    /// Unlike `start_merge`, the merges run concurrently as scheduler tasks;
+    /// the actor only does the bookkeeping around them. See
+    /// `SegmentUpdaterState::handle_start_merges`.
+    pub fn start_merges(
+        &self,
+        merge_operations: Vec<MergeOperation>,
+    ) -> crate::Result<()> {
+        if merge_operations.is_empty() {
+            return Ok(());
+        }
+        for op in &merge_operations {
+            assert!(!op.segment_ids().is_empty(), "Segment_ids cannot be empty.");
+        }
+        if !self.is_alive() {
+            return Err(LucivyError::SystemError("Segment updater killed".to_string()));
+        }
+        let (env, rx) = super::segment_updater_actor::SuStartMergesMsg
+            .into_request_with_local(merge_operations);
+        self.actor_ref
+            .send(env)
+            .map_err(|_| LucivyError::SystemError("Segment updater actor died".to_string()))?;
+        match crate::actor::scheduler::global_scheduler().wait(rx, "start_merges") {
+            Ok(_) => Ok(()),
+            Err(err_bytes) => Err(
+                LucivyError::decode(&err_bytes)
+                    .unwrap_or_else(|e| LucivyError::SystemError(format!("decode: {e}")))
+            ),
+        }
+    }
+
     /// No-op: merges are now synchronous within the DAG.
     /// Kept for API compatibility with IndexWriter::wait_merging_threads().
     pub fn wait_merging_thread(&self) -> crate::Result<()> {
