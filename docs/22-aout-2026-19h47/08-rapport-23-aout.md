@@ -85,15 +85,28 @@ l'expérience « sauter les chaînes chunk en relaxed » passait tout le panel r
 avec moitié moins de CPU — un corpus SKU synthétique l'a réfutée en 0,1 s
 (identifiants de 400 octets). Les cas spéciaux avant la conclusion.
 
+## Suite, même jour (après-midi) — les quatre points dans l'ordre inverse
+
+Tout est dans `07` (B2 bis, C bis, E) ; le résumé :
+
+| Chantier | Commit | Résultat |
+|---|---|---|
+| B2 bis — saut des chaînes chunk en relaxed, prouvé par `.termtexts` | `70bd8bc` | 798/800 segments sautent ; `uint64_t` relax 40 → 32 ms, `__init` 63 → 49, fuzzy `inclde` 142 → 109, `kmallc` 71 → 56, d=2 201 → 175 |
+| Nettoyage index — `.freqmap`, `.chunk_word_map`, `.next_word_map`, sections mortes du `.sfx`, `overlap_siblings`, regex legacy | `e164437` | −2 270 lignes, 8 sidecars par champ au lieu de 11 |
+| Avertissements honnêtes — `query_warnings` dans core et les 5 bindings | `8e7b07d` | 12 règles, tests unitaires + bout en bout |
+| `sfx_version = 3` par défaut | `132ae15` | a révélé et corrigé : `startsWith`/`term` faux sur v3, `close()` sous merge en vol, course de `LucivyDeltaExporter` |
+
+Le dernier point est celui qui a rapporté le plus : trois bugs réels que la suite
+ne voyait pas parce que tout tournait en v2 par défaut. `startsWith` était faux
+depuis `8aeb093` et son test ignoré « parce que pas sur le chemin critique ».
+
 ## À faire, par ordre
 
-1. **Avertissements honnêtes à la requête** (`warnings` dans le résultat, propagés par
-   les bindings) : motif regex non borné = balayage complet ; fuzzy dont la distance
-   avale la requête (`init` d=1 : 44 579 docs sur 50 000) ; mot au-delà du plafond de
-   suffixes ; requête vide après retrait des séparateurs.
-2. Supprimer le regex legacy (−1 900 lignes) ; compteurs `n_rx_*` ; littéraux
-   préfixes/suffixes par coût avec intersection.
-3. Le défaut `sfx_version = 2` (`index_meta.rs:293`) : à trancher.
-4. B2 bis : drapeau par segment « aucun mot au-delà du plafond » pour sauter les
-   chaînes chunk en relaxed (×2 de CPU sur les littéraux courts, donc sur `pieces`).
-5. Emscripten n'a jamais été compilé depuis le début du v3.
+1. `LucivyDeltaExporter` : fait pour la course ; vérifier que les bindings qui
+   exportent des snapshots drainent aussi (`export_snapshot` pendant un merge).
+2. Compteurs `n_rx_*` dédiés ; littéraux préfixes/suffixes par coût avec intersection.
+3. Emscripten n'a jamais été compilé depuis le début du v3 (`lucivy_query_warnings`
+   y est ajouté sans compilation).
+4. Mode « identifiant entier » pour `term` (délimité par des blancs, pas par `_`) —
+   si un utilisateur le demande.
+5. Les trois échecs unitaires pré-existants (fixtures mortes) : réparer ou supprimer.
