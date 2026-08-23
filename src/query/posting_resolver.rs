@@ -48,6 +48,13 @@ pub trait PostingResolver: Send + Sync {
         self.resolve_filtered(ordinal, &one)
     }
 
+    /// The posting of (`ordinal`, `doc_id`) at `position`, if any.
+    /// Default: resolve the document and look. V2 overrides with a scan
+    /// that stops at the position, without allocating.
+    fn resolve_doc_at(&self, ordinal: u64, doc_id: u32, position: u32) -> Option<PostingEntry> {
+        self.resolve_doc(ordinal, doc_id).into_iter().find(|p| p.position == position)
+    }
+
     /// Check if a doc_id has entries for this ordinal. Default: resolve and check.
     /// V2 overrides with O(log n) binary search, zero payload decode.
     fn has_doc(&self, ordinal: u64, doc_id: u32) -> bool {
@@ -157,6 +164,12 @@ impl PostingResolver for SfxPostResolverV2 {
             byte_from: e.byte_from,
             byte_to: e.byte_to,
         }).collect()
+    }
+
+    fn resolve_doc_at(&self, ordinal: u64, doc_id: u32, position: u32) -> Option<PostingEntry> {
+        self.reader.entry_at(ordinal as u32, doc_id, position).map(|(byte_from, byte_to)| PostingEntry {
+            doc_id, position, byte_from, byte_to,
+        })
     }
 
     fn has_doc(&self, ordinal: u64, doc_id: u32) -> bool {

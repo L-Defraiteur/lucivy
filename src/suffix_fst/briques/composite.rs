@@ -506,23 +506,36 @@ pub fn resolve_all_trigrams(
     ngrams: &[String],
     strict_separators: bool,
 ) -> Vec<TrigramHit> {
-    let mut selectivity: Vec<(usize, usize)> = ngrams.iter().enumerate()
-        .map(|(i, gram)| {
-            let count = fst_walk::fst_candidates_v3(ctx.reader, gram, false, strict_separators).len();
-            (i, count)
-        }).collect();
+    // One FST walk per n-gram: the selectivity pass used to walk, drop the
+    // candidates, and walk again (0.5 s of 9 s on `inclde` over 50k docs).
+    let mut all_cands: Vec<Vec<FstCandidateV3>> = ngrams.iter()
+        .map(|gram| fst_walk::fst_candidates_v3(ctx.reader, gram, false, strict_separators))
+        .collect();
+    let mut selectivity: Vec<(usize, usize)> = all_cands.iter().enumerate()
+        .map(|(i, c)| (i, c.len())).collect();
     selectivity.sort_by_key(|&(_, count)| count);
 
     let has_wsp = ctx.has_word_pipeline();
     let mut all_hits = Vec::new();
+    let mut seen: HashSet<(DocId, u32)> = HashSet::new();
 
     for &(gram_idx, _) in &selectivity {
-        let cands = fst_walk::fst_candidates_v3(ctx.reader, &ngrams[gram_idx], false, strict_separators);
+        let cands = std::mem::take(&mut all_cands[gram_idx]);
         let gram_len = ngrams[gram_idx].len() as u32;
         let chunk_matches = resolve::resolve_single_v3(&cands, ctx.resolver, None, gram_len);
-        let word_matches = if has_wsp {
+        // The word partition repeats 96% of the chunk hits at the same
+        // (doc, byte) — it only adds the n-grams straddling a chunk boundary
+        // inside a word. Keep those; drop the echo before it is hashed,
+        // sorted and regrouped downstream (10.5 M of 11 M word hits on
+        // `inclde`, 50k docs).
+        let mut word_matches = if has_wsp {
             resolve::resolve_single_word_v3(&cands, ctx.require_word_sfxpost(), None, gram_len)
         } else { Vec::new() };
+        if !word_matches.is_empty() {
+            seen.clear();
+            seen.extend(chunk_matches.iter().map(|m| (m.doc_id, m.byte_from)));
+            word_matches.retain(|m| !seen.contains(&(m.doc_id, m.byte_from)));
+        }
 
         if std::env::var("V3_DIAG_FUZZY").is_ok() {
             eprintln!("[fz] gram {:?}: {} chunk hits, {} word hits: {:?}", ngrams[gram_idx],
@@ -718,6 +731,19 @@ pub(super) fn rebuild_window(
 /// offset of the character it came from and that character's source length.
 /// Lowercasing can change a character's byte length, so the map is per window
 /// byte, not per source byte.
+///
+/// `margin` is in CONTENT bytes on each side of the hit region, not in
+/// positions: a pure-separator run (" = ...` |\n| `") is several chunks
+/// long, and a margin of two positions stopped inside it — the `in` of
+/// `func … in` for `functin` sat just past the window.
+///
+/// Source offsets are derived, not looked up: within a value, chunk p+1
+/// starts at `byte_from(p) + own_len(p)` (collector_v3: `offset += chunk_len`).
+/// One posting lookup anchors the first position and one checks the last;
+/// a disagreement (a value boundary, where offsets restart) falls back to a
+/// lookup per position and is counted in `n_fz_window_derive_miss`. The
+/// per-position lookup decoded a document's whole payload for one entry —
+/// 675 M postings for 14 M used on `inclde` over 50k files.
 pub(super) fn rebuild_window_mapped(
     ctx: &BriquesContext<'_>,
     doc_id: DocId,
@@ -733,59 +759,72 @@ pub(super) fn rebuild_window_mapped(
     };
     out.clear();
     back.clear();
-    // `margin` is in CONTENT bytes on each side of the hit region, not in
-    // positions: a pure-separator run (" = ...` |\n| `") is several chunks
-    // long, and a margin of two positions stopped inside it — the `in` of
-    // `func … in` for `functin` sat just past the window. Walk positions
-    // outwards until that many content bytes are in hand (or 64 positions).
     const MAX_EXTRA_POSITIONS: u32 = 64;
-    let content_len = |ord: u32| -> usize {
-        let Some(text) = tt.text(ord) else { return 0 };
+
+    // One pass per position: text, own length, content byte count.
+    struct Tok<'t> { text: &'t str, own: usize, content: usize }
+    let tok = |pos: u32| -> Option<Tok<'_>> {
+        let ord = pm.ordinal_at(doc_id, pos)?;
+        let text = tt.text(ord)?;
         let own = tt.meta(ord).map(|m| m.own_len as usize).unwrap_or(text.len()).min(text.len());
-        text[..own].chars().filter(|c| !strip_separators || is_content_char(*c)).count()
+        let content = if strip_separators {
+            text[..own].chars().filter(|c| is_content_char(*c)).map(|c| c.len_utf8()).sum()
+        } else { own };
+        Some(Tok { text, own, content })
     };
-    let mut from = first_pos;
+
+    let mut toks: std::collections::VecDeque<(u32, Tok<'_>)> = std::collections::VecDeque::new();
+    for pos in first_pos..=last_pos {
+        let Some(t) = tok(pos) else { break };
+        toks.push_back((pos, t));
+    }
+    if toks.is_empty() { return None; }
     let mut have = 0usize;
+    let mut from = first_pos;
     while from > 0 && have < margin as usize && first_pos - from < MAX_EXTRA_POSITIONS {
-        let Some(ord) = pm.ordinal_at(doc_id, from - 1) else { break };
-        have += content_len(ord);
+        let Some(t) = tok(from - 1) else { break };
+        have += t.content;
         from -= 1;
+        toks.push_front((from, t));
     }
     let cut_start = from > 0;
-    let mut to = last_pos;
     have = 0;
+    let mut to = last_pos;
     while have < margin as usize && to - last_pos < MAX_EXTRA_POSITIONS {
-        let Some(ord) = pm.ordinal_at(doc_id, to + 1) else { break };
-        have += content_len(ord);
+        let Some(t) = tok(to + 1) else { break };
+        have += t.content;
         to += 1;
+        toks.push_back((to, t));
     }
     let cut_end = pm.ordinal_at(doc_id, to + 1).is_some();
-    let diag = std::env::var("V3_DIAG_FUZZY").is_ok();
-    if diag {
-        eprintln!("[fz] window doc={doc_id} hits {first_pos}..{last_pos} -> {from}..{to} (margin {margin})");
-        for pos in from..=to {
-            if let Some(ord) = pm.ordinal_at(doc_id, pos) {
-                eprintln!("[fz]   pos {pos} ord {ord} text={:?} meta={:?}", tt.text(ord), tt.meta(ord).map(|m| (m.own_len, m.sep_len, m.overlap_len)));
-            }
+
+    // Anchor, derive, check.
+    let first_ord = pm.ordinal_at(doc_id, from)?;
+    let base = ctx.resolver.resolve_doc_at(first_ord as u64, doc_id, from)?.byte_from;
+    profile::bump(|c| &c.n_fz_window_postings, 2);
+    let mut offsets: Vec<u32> = Vec::with_capacity(toks.len());
+    let mut acc = base;
+    for (_, t) in &toks {
+        offsets.push(acc);
+        acc += t.own as u32;
+    }
+    let last_ord = pm.ordinal_at(doc_id, to)?;
+    let derived_last = *offsets.last().unwrap();
+    let actual_last = ctx.resolver.resolve_doc_at(last_ord as u64, doc_id, to)?.byte_from;
+    if derived_last != actual_last {
+        profile::bump(|c| &c.n_fz_window_derive_miss, 1);
+        offsets.clear();
+        for (pos, _) in &toks {
+            let ord = pm.ordinal_at(doc_id, *pos)?;
+            profile::bump(|c| &c.n_fz_window_postings, 1);
+            offsets.push(ctx.resolver.resolve_doc_at(ord as u64, doc_id, *pos)?.byte_from);
         }
     }
-    for pos in from..=to {
-        let Some(ord) = pm.ordinal_at(doc_id, pos) else {
-            if diag { eprintln!("[fz] window doc={doc_id} pos={pos}: no ordinal (from={from} to={to})"); }
-            break
-        };
-        let Some(text) = tt.text(ord) else { break };
-        let Some(p) = ctx.resolver.resolve_doc(ord as u64, doc_id)
-            .into_iter().find(|p| p.position == pos)
-        else {
-            if diag { eprintln!("[fz] window doc={doc_id} pos={pos} ord={ord} text={text:?}: no posting at this position"); }
-            break
-        };
-        let own = tt.meta(ord).map(|m| m.own_len as usize).unwrap_or(text.len());
-        let end = own.min(text.len());
-        for (off, c) in text[..end].char_indices() {
+
+    for ((_, t), &bf) in toks.iter().zip(offsets.iter()) {
+        for (off, c) in t.text[..t.own].char_indices() {
             if strip_separators && !is_content_char(c) { continue; }
-            let src = p.byte_from + off as u32;
+            let src = bf + off as u32;
             let len = c.len_utf8() as u8;
             for lc in c.to_lowercase() {
                 let start = out.len();
@@ -855,8 +894,14 @@ pub fn resolve_trigrams_v3(
     // threshold is purely a recall/cost knob: lowering it can only add candidates,
     // and every added candidate is exactly checked.
     let threshold = (ngrams.len() as i32 - n as i32 * distance as i32).max(1) as usize;
+    let t = profile::Timer::start();
     let hits = resolve_all_trigrams(ctx, &ngrams, strict_separators);
+    t.stop(|c| &c.ns_fz_resolve);
+    profile::bump(|c| &c.n_fz_hits, hits.len() as u64);
+    let t = profile::Timer::start();
     let chains = build_trigram_chains(&hits, &query_positions, distance);
+    t.stop(|c| &c.ns_fz_chains);
+    profile::bump(|c| &c.n_fz_regions, chains.len() as u64);
     let (bitset, highlights, coverage) =
         filter_by_chain_threshold(&chains, threshold, ngrams.len(), max_doc);
 
@@ -929,9 +974,11 @@ fn verify_candidates(
         if chain.trigram_indices.len() < threshold { continue; }
         if !seen_windows.insert((chain.doc_id, chain.first_pos, chain.last_pos)) { continue; }
         n_cand += 1;
-        let Some((cut_start, cut_end)) = rebuild_window_mapped(
-            ctx, chain.doc_id, chain.first_pos, chain.last_pos, margin, strip, &mut window, &mut back)
-        else {
+        let t = profile::Timer::start();
+        let built = rebuild_window_mapped(
+            ctx, chain.doc_id, chain.first_pos, chain.last_pos, margin, strip, &mut window, &mut back);
+        t.stop(|c| &c.ns_fz_window);
+        let Some((cut_start, cut_end)) = built else {
             n_no_window += 1;
             if diag && n_no_window <= 3 {
                 eprintln!("[fz] doc={} pos={}..{} NO WINDOW",
@@ -941,7 +988,10 @@ fn verify_candidates(
         };
         // Cheap reject first: the full alignment only runs on windows that
         // hold something.
-        if !within_edit_distance(&needle, window.as_bytes(), distance as usize, &mut buf) {
+        let t = profile::Timer::start();
+        let ok = within_edit_distance(&needle, window.as_bytes(), distance as usize, &mut buf);
+        t.stop(|c| &c.ns_fz_dp);
+        if !ok {
             n_rejected += 1;
             if diag && n_rejected <= 5 {
                 eprintln!("[fz] doc={} pos={}..{} REJECT needle={:?} window={:?}",
@@ -968,6 +1018,9 @@ fn verify_candidates(
         }
         if any { kept.insert(chain.doc_id); }
     }
+    profile::bump(|c| &c.n_fz_windows, n_cand as u64);
+    profile::bump(|c| &c.n_fz_rejected, n_rejected as u64);
+    profile::bump(|c| &c.n_fz_spans, spans.len() as u64);
     if diag {
         eprintln!("[fz] query={query:?} d={distance} strip={strip} cand={n_cand} \
 kept={} no_window={n_no_window} rejected={n_rejected} spans={}", kept.len(), spans.len());

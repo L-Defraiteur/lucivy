@@ -284,6 +284,29 @@ impl SfxPostReaderV2 {
             .collect()
     }
 
+    /// The entry of (`ordinal`, `doc`) at token `position`, without
+    /// materialising the document's payload. Entries are written in token
+    /// order, so the scan stops at the first position past the target.
+    /// Rebuilding a fuzzy window asked `entries_for_doc` once per position
+    /// and kept one entry of ~50: 675 M decoded for 14 M used on `inclde`.
+    pub fn entry_at(&self, ordinal: u32, doc_id: u32, position: u32) -> Option<(u32, u32)> {
+        if ordinal >= self.num_terms { return None; }
+        let header = self.read_ordinal_header(ordinal)?;
+        let idx = header.find_doc(doc_id)?;
+        let offset = header.payload_offset(idx) as usize;
+        let count = header.entry_count(idx) as usize;
+        let data = &header.payload_data[offset..];
+        let mut pos = 0;
+        for _ in 0..count {
+            let (ti, n) = decode_vint(&data[pos..]); pos += n;
+            let (bf, n) = decode_vint(&data[pos..]); pos += n;
+            let (bt, n) = decode_vint(&data[pos..]); pos += n;
+            if ti == position { return Some((bf, bt)); }
+            if ti > position { return None; }
+        }
+        None
+    }
+
     /// doc_freq: number of unique docs for an ordinal. O(1) — just read the header.
     pub fn doc_freq(&self, ordinal: u32) -> u32 {
         if ordinal >= self.num_terms { return 0; }

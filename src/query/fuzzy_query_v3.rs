@@ -156,34 +156,109 @@ impl FuzzyQueryV3 {
     }
 }
 
-impl Query for FuzzyQueryV3 {
-    fn prescan_segments(&mut self, segments: &[&SegmentReader]) -> crate::Result<()> {
+static FZ_ONE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FZ_ONE_MAX_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FZ_INFLIGHT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FZ_INFLIGHT_MAX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl FuzzyQueryV3 {
+    fn prescan_one(
+        &self,
+        seg_reader: &SegmentReader,
+    ) -> crate::Result<Option<(crate::index::SegmentId, Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)>> {
         use crate::suffix_fst::section_file::detect_sfx_version;
-
-        self.prescan_cache.clear();
-        self.global_doc_freq = 0;
-
-        for seg_reader in segments {
+        use std::sync::atomic::Ordering::Relaxed;
+        let t0 = std::time::Instant::now();
+        let now = FZ_INFLIGHT.fetch_add(1, Relaxed) + 1;
+        FZ_INFLIGHT_MAX.fetch_max(now, Relaxed);
+        let r = (|| {
             let segment_id = seg_reader.segment_id();
-            let sfx_data = match seg_reader.sfx_file(self.field) {
-                Some(d) => d,
-                None => continue,
-            };
+            let Some(sfx_data) = seg_reader.sfx_file(self.field) else { return Ok(None) };
             let sfx_bytes = sfx_data.read_bytes().map_err(|e|
                 crate::LucivyError::SystemError(format!("prescan read .sfx: {e}")))?;
-
             let version = detect_sfx_version(sfx_bytes.as_ref()).unwrap_or(1);
             let (doc_tf, highlights) = if version == 3 {
                 self.prescan_segment_v3(seg_reader, &sfx_bytes)?
             } else {
                 self.prescan_segment_v2(seg_reader, &sfx_bytes)?
             };
+            Ok(Some((segment_id, doc_tf, highlights)))
+        })();
+        FZ_INFLIGHT.fetch_sub(1, Relaxed);
+        let ns = t0.elapsed().as_nanos() as u64;
+        FZ_ONE_NS.fetch_add(ns, Relaxed);
+        FZ_ONE_MAX_NS.fetch_max(ns, Relaxed);
+        r
+    }
 
-            self.global_doc_freq += doc_tf.len() as u64;
-            self.prescan_cache.insert(
-                (self.cache_key(), segment_id),
-                CachedPrescan::new(doc_tf, highlights),
-            );
+    fn record_prescan(
+        &mut self,
+        segment_id: crate::index::SegmentId,
+        doc_tf: Vec<(DocId, u32)>,
+        highlights: Vec<(DocId, usize, usize)>,
+    ) {
+        self.global_doc_freq += doc_tf.len() as u64;
+        self.prescan_cache.insert(
+            (self.cache_key(), segment_id),
+            CachedPrescan::new(doc_tf, highlights),
+        );
+    }
+}
+
+impl Query for FuzzyQueryV3 {
+    /// Prescan every segment on the luciole pool, as ContainsQueryV3 does.
+    ///
+    /// This loop was sequential: on 800 kernel segments the fuzzy wall time
+    /// equalled its CPU sum while contains ran at a concurrency of 24 — a
+    /// good part of the 50× between the two was this loop alone.
+    fn prescan_segments(&mut self, segments: &[&SegmentReader]) -> crate::Result<()> {
+        self.prescan_cache.clear();
+        self.global_doc_freq = 0;
+
+        type SegOutcome = Option<(crate::index::SegmentId, Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)>;
+
+        if segments.len() <= 1 {
+            for seg_reader in segments {
+                if let Some((segment_id, doc_tf, highlights)) = self.prescan_one(seg_reader)? {
+                    self.record_prescan(segment_id, doc_tf, highlights);
+                }
+            }
+            return Ok(());
+        }
+
+        let names: Vec<String> = (0..segments.len()).map(|i| format!("seg_{i}")).collect();
+        let mut tasks: Vec<(&str, Box<dyn FnOnce() -> Result<luciole::port::PortValue, String> + Send + 'static>)> =
+            Vec::with_capacity(segments.len());
+        for (i, seg_reader) in segments.iter().enumerate() {
+            let seg = (*seg_reader).clone();
+            let probe = self.clone();
+            tasks.push((names[i].as_str(), Box::new(move || {
+                let outcome: SegOutcome = probe.prescan_one(&seg)
+                    .map_err(|e| format!("fuzzy prescan segment: {e}"))?;
+                Ok(luciole::port::PortValue::new(outcome))
+            })));
+        }
+
+        let t_dag = std::time::Instant::now();
+        let mut dag = luciole::scatter::build_scatter_dag(tasks);
+        let mut result = luciole::execute_dag(&mut dag, None)
+            .map_err(|e| crate::LucivyError::SystemError(format!("fuzzy prescan DAG: {e}")))?;
+        if crate::suffix_fst::briques::profile::enabled() {
+            use std::sync::atomic::Ordering::Relaxed;
+            eprintln!("  [fz prescan] {} segments, scatter DAG wall {:.1}ms, per-segment CPU sum {:.1}ms, max {:.1}ms, peak concurrency {}",
+                segments.len(), t_dag.elapsed().as_secs_f64() * 1e3,
+                FZ_ONE_NS.swap(0, Relaxed) as f64 / 1e6,
+                FZ_ONE_MAX_NS.swap(0, Relaxed) as f64 / 1e6,
+                FZ_INFLIGHT_MAX.swap(0, Relaxed));
+        }
+        let map = result
+            .take_output::<std::collections::HashMap<String, luciole::port::PortValue>>("collect", "results")
+            .ok_or_else(|| crate::LucivyError::SystemError("fuzzy prescan DAG: no results".into()))?;
+        let mut scatter = luciole::ScatterResults::from(map);
+        for name in &names {
+            if let Some(Some((segment_id, doc_tf, highlights))) = scatter.take::<SegOutcome>(name) {
+                self.record_prescan(segment_id, doc_tf, highlights);
+            }
         }
         Ok(())
     }
