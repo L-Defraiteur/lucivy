@@ -210,6 +210,12 @@ client_index.apply_sharded_delta(delta)
 | `regex` | Regex substring (alias for `contains` + `regex=true`) |
 | `phrase` | Adjacent tokens in order |
 
+## Benchmarks
+
+Comment lancer les mesures et la vérité terrain par spans (contains, fuzzy, regex,
+rag3db et kernel 50k), quelles variables, comment lire la sortie :
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+
 ## Performance
 
 Benchmarked on 90,000 files from the Linux kernel source tree (top-20 results, 3-run average):
