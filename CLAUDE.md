@@ -161,7 +161,10 @@ cd playground && node serve.mjs
 
 ## Docs
 
-Les docs sont dans `docs/` organisés par dossier horodaté.
+Les docs sont dans `docs/` organisés par dossier daté. Convention depuis le
+24 août 2026 : `JJ-MM-AAAA` (triable). Dossier courant : `24-08-2026/`
+(rapport, architecture, features/tests). Dialogue avec la session rag3weaver :
+`../rag3db/extension/rag3weaver/docs/23-aout-2026-20h33/`.
 - `9-mai-2026-11h14/` — session courante (deadlock fix, compat layer, feature inventory)
 - `24-mars-2026-20h35/` — knowledge dump complet
 - `3-mai-2026-15h00/` — design pipe_to, execute_dag_async
