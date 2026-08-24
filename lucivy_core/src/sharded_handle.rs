@@ -60,6 +60,14 @@ pub trait ShardStorage: Send + Sync {
     /// Read a root-level file.
     fn read_root_file(&self, name: &str) -> Result<Vec<u8>, String>;
 
+    /// Destroy everything this storage holds for the index — shard files
+    /// and root files. Called by [`ShardedHandle::drop_index`] after the
+    /// handle is closed. Default: unsupported, so external implementations
+    /// keep compiling; implement it to opt in.
+    fn drop_storage(&self, _num_shards: usize) -> Result<(), String> {
+        Err("dropping this storage backend is not supported".into())
+    }
+
     /// Check if a root-level file exists.
     fn root_file_exists(&self, name: &str) -> bool;
 }
@@ -114,6 +122,11 @@ impl ShardStorage for FsShardStorage {
     fn root_file_exists(&self, name: &str) -> bool {
         Path::new(&self.base_path).join(name).exists()
     }
+    fn drop_storage(&self, _num_shards: usize) -> Result<(), String> {
+        std::fs::remove_dir_all(&self.base_path)
+            .map_err(|e| format!("cannot remove {}: {e}", self.base_path))
+    }
+
 }
 
 /// In-memory shard storage using RamDirectory (no filesystem).
@@ -191,6 +204,12 @@ impl ShardStorage for RamShardStorage {
             .map(|f| f.contains_key(name))
             .unwrap_or(false)
     }
+    fn drop_storage(&self, _num_shards: usize) -> Result<(), String> {
+        self.shard_dirs.lock().map_err(|_| "lock poisoned")?.clear();
+        self.root_files.lock().map_err(|_| "lock poisoned")?.clear();
+        Ok(())
+    }
+
 }
 
 /// BlobStore-backed shard storage for ACID persistence.
@@ -299,6 +318,25 @@ impl<S: crate::blob_store::BlobStore> ShardStorage for BlobShardStorage<S> {
             .exists(self.root_blob_name(), name)
             .unwrap_or(false)
     }
+    fn drop_storage(&self, num_shards: usize) -> Result<(), String> {
+        use crate::blob_directory::BLOB_PREFIX;
+        // Shard blobs live under "Lucivy_{index}/shard_{i}", root files under
+        // the bare index name (see write_root_file). Delete both namespaces.
+        let mut names: Vec<String> = (0..num_shards)
+            .map(|i| format!("{BLOB_PREFIX}{}", self.shard_name(i)))
+            .collect();
+        names.push(self.root_blob_name().to_string());
+        for index_name in names {
+            let files = self.store.list(&index_name)
+                .map_err(|e| format!("cannot list {index_name}: {e}"))?;
+            for f in files {
+                self.store.delete(&index_name, &f)
+                    .map_err(|e| format!("cannot delete {index_name}/{f}: {e}"))?;
+            }
+        }
+        Ok(())
+    }
+
 }
 
 /// File storing shard router state (counters, thresholds).
@@ -2078,6 +2116,16 @@ impl ShardedHandle {
     }
 
     /// Close all shards (drain pipeline, commit pending writes, release locks).
+    /// Delete the whole index: commit and release everything (`close`),
+    /// then destroy the storage — shard files or blobs, root files
+    /// included. The Cypher `DROP_LUCIVY_INDEX` equivalent. Consumes the
+    /// handle: there is nothing left to hold.
+    pub fn drop_index(self) -> Result<(), String> {
+        self.close()?;
+        let num_shards = self.shards.len();
+        self.storage.drop_storage(num_shards)
+    }
+
     pub fn close(&self) -> Result<(), String> {
         self.drain_pipeline();
 

@@ -38,7 +38,7 @@ est le modèle à suivre.
 | delete (implicite) | `delete_by_node_id(offset)` |
 | `FLUSH_LUCIVY_INDEX` | `commit()` (idempotent, merges policy auto) |
 | `CLOSE_LUCIVY_INDEX` | `close()` |
-| `DROP_LUCIVY_INDEX` | manque — faire `store.list(prefix)` + `delete` (ou exposer une API) |
+| `DROP_LUCIVY_INDEX` | `handle.drop_index()` (ferme puis détruit blobs/fichiers + root files ; consomme le handle) |
 | `QUERY_LUCIVY_INDEX(json, limit, allowed_ids)` | `search_filtered(&QueryConfig, limit, sink, allowed_ids)` — même JSON (`serde` QueryConfig), tous les modes BM25Mode couverts par le compat layer |
 | highlights JSON `{"field":[[a,b]]}` | `search_with_docs` → `SearchHit.highlights: HashMap<String, Vec<[usize;2]>>` (1:1) |
 | `filter_fields` | `QueryConfig.filters` (FilterClause) — parité à vérifier au branchement |
@@ -63,8 +63,7 @@ shard, cf. tests).
    un instantané pré-v3 ; le workspace local est aussi en 2.0.0 (non publié
    depuis). Bump 2.1.0 + publish (avec `ld-lucivy`, `luciole`, `lucistore`), ou
    dépendance par chemin/git en attendant.
-3. API « drop index » (suppression des blobs d'un index) à exposer si on ne
-   veut pas la logique préfixe côté rag3weaver.
+3. ~~API « drop index »~~ FAIT le 24 août : `ShardedHandle::drop_index()`.
 4. WASM : rag3weaver compile déjà son Rust en wasm ; utiliser `lucivy_core`
    directement dans ce build (StdFsDirectory/OPFS, règles WASM du CLAUDE.md)
    au lieu du pont C emscripten — plus simple que le binding C.

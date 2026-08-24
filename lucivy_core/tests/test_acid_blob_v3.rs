@@ -184,3 +184,40 @@ fn v3_blob_storage_lazy_open_matches_eager() {
     let _ = std::fs::remove_dir_all(&cache_l);
 }
 
+
+/// `drop_index` must leave the store empty — shard blobs AND root files —
+/// and the filesystem storage must remove its directory. The Cypher
+/// `DROP_LUCIVY_INDEX` equivalent, previously left to callers as
+/// "list + delete by prefix".
+#[test]
+fn v3_drop_index_leaves_nothing() {
+    use lucistore::blob_store::BlobStore as _;
+    let store = Arc::new(MemBlobStore::new());
+    let scratch = std::env::var("V3_SCRATCH")
+        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+    let cache = format!("{scratch}/blob_v3_drop");
+    let _ = std::fs::remove_dir_all(&cache);
+    let docs = docs();
+
+    {
+        let storage = BlobShardStorage::new(store.clone(), "drop_v3", &cache);
+        let h = ShardedHandle::create_with_storage(Box::new(storage), &config(2)).unwrap();
+        add_all(&h, &docs);
+        assert!(!store.list("Lucivy_drop_v3/shard_0").unwrap().is_empty());
+        assert!(!store.list("drop_v3").unwrap().is_empty(), "root files expected");
+        h.drop_index().unwrap();
+    }
+    for ns in ["Lucivy_drop_v3/shard_0", "Lucivy_drop_v3/shard_1", "drop_v3"] {
+        assert!(store.list(ns).unwrap().is_empty(), "{ns} not empty after drop");
+    }
+
+    // Filesystem storage: the directory itself goes.
+    let fs_dir = format!("{scratch}/fs_v3_drop");
+    let _ = std::fs::remove_dir_all(&fs_dir);
+    let h = ShardedHandle::create(&fs_dir, &config(2)).unwrap();
+    add_all(&h, &docs[..4].to_vec());
+    assert!(std::path::Path::new(&fs_dir).join("shard_0").exists());
+    h.drop_index().unwrap();
+    assert!(!std::path::Path::new(&fs_dir).exists(), "fs dir survived drop");
+    let _ = std::fs::remove_dir_all(&cache);
+}
