@@ -65,6 +65,124 @@ fn commit_floor_profile() {
     }
 }
 
+/// Every store call is a round trip for a database-backed store: count them
+/// per phase so the cost model is explicit, whatever the store charges.
+struct CountingStore {
+    inner: MemBlobStore,
+    calls: std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
+}
+impl CountingStore {
+    fn new() -> Self {
+        Self { inner: MemBlobStore::new(), calls: std::sync::Mutex::new(Default::default()) }
+    }
+    fn note(&self, what: &str, file: &str) {
+        let key = if file.ends_with(".managed.json") || file == "meta.json" {
+            format!("{what} {file}")
+        } else {
+            format!("{what} <segment files>")
+        };
+        *self.calls.lock().unwrap().entry(key).or_insert(0) += 1;
+    }
+    fn drain(&self) -> String {
+        let mut calls = self.calls.lock().unwrap();
+        let s: Vec<String> = calls.iter().map(|(k, v)| format!("{v}× {k}")).collect();
+        calls.clear();
+        s.join(", ")
+    }
+}
+impl lucistore::blob_store::BlobStore for CountingStore {
+    fn load(&self, i: &str, f: &str) -> std::io::Result<Vec<u8>> {
+        self.note("load", f); self.inner.load(i, f)
+    }
+    fn save(&self, i: &str, f: &str, d: &[u8]) -> std::io::Result<()> {
+        self.note("save", f); self.inner.save(i, f, d)
+    }
+    fn delete(&self, i: &str, f: &str) -> std::io::Result<()> {
+        self.note("delete", f); self.inner.delete(i, f)
+    }
+    fn exists(&self, i: &str, f: &str) -> std::io::Result<bool> {
+        self.note("exists", f); self.inner.exists(i, f)
+    }
+    fn list(&self, i: &str) -> std::io::Result<Vec<String>> {
+        self.note("list", ""); self.inner.list(i)
+    }
+}
+
+#[test]
+#[ignore]
+fn commit_floor_store_calls() {
+    let scratch = std::env::var("V3_SCRATCH")
+        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+    let cache = format!("{scratch}/commit_floor_calls_cache");
+    let _ = std::fs::remove_dir_all(&cache);
+    let store = Arc::new(CountingStore::new());
+    {
+        let storage = BlobShardStorage::new(store.clone(), "commit_floor_calls", &cache);
+        let h = ShardedHandle::create_with_storage(Box::new(storage), &schema(2)).unwrap();
+        println!("create        : {}", store.drain());
+        add_docs(&h, 9, 0);
+        h.commit().unwrap();
+        println!("commit 9 docs : {}", store.drain());
+        h.commit().unwrap();
+        println!("commit clean  : {}", store.drain());
+        add_docs(&h, 9, 100);
+        h.commit().unwrap();
+        println!("commit 9 more : {}", store.drain());
+        h.close().unwrap();
+        println!("close         : {}", store.drain());
+    }
+    let storage = BlobShardStorage::new(store.clone(), "commit_floor_calls", &cache);
+    let h = ShardedHandle::open_with_storage(Box::new(storage)).unwrap();
+    println!("reopen        : {}", store.drain());
+    add_docs(&h, 9, 200);
+    h.commit().unwrap();
+    println!("commit reopen : {}", store.drain());
+    h.close().unwrap();
+    println!("close         : {}", store.drain());
+}
+
+/// Reopen scenario (rag3weaver doc 19): create → add → commit → close,
+/// then open the same store again and commit a small batch. Reported as
+/// 25-40 s of waiting per commit after reopen.
+#[test]
+#[ignore]
+fn commit_floor_profile_reopen() {
+    let scratch = std::env::var("V3_SCRATCH")
+        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+    let cache = format!("{scratch}/commit_floor_reopen_cache");
+    let _ = std::fs::remove_dir_all(&cache);
+    let store = Arc::new(MemBlobStore::new());
+    let shards = 2u32;
+    let t = Instant::now();
+    {
+        let storage = BlobShardStorage::new(store.clone(), "commit_floor_reopen", &cache);
+        let h = ShardedHandle::create_with_storage(Box::new(storage), &schema(shards)).unwrap();
+        add_docs(&h, 9, 0);
+        h.commit().unwrap();
+        h.close().unwrap();
+    }
+    println!("create+commit+close {:8.1}ms", t.elapsed().as_secs_f64() * 1e3);
+    for cycle in 0..3u64 {
+        let t = Instant::now();
+        let storage = BlobShardStorage::new(store.clone(), "commit_floor_reopen", &cache);
+        let h = ShardedHandle::open_with_storage(Box::new(storage)).unwrap();
+        let opened = t.elapsed();
+        add_docs(&h, 9, 100 * (cycle + 1));
+        let t = Instant::now();
+        h.commit().unwrap();
+        let committed = t.elapsed();
+        let t = Instant::now();
+        h.close().unwrap();
+        let closed = t.elapsed();
+        println!(
+            "reopen#{cycle} open {:8.1}ms  commit {:8.1}ms  close {:8.1}ms",
+            opened.as_secs_f64() * 1e3,
+            committed.as_secs_f64() * 1e3,
+            closed.as_secs_f64() * 1e3
+        );
+    }
+}
+
 #[test]
 #[ignore]
 fn commit_floor_profile_blob() {

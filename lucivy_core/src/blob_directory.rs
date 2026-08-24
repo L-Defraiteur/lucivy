@@ -55,7 +55,16 @@ pub struct BlobDirectory<S: BlobStore> {
     /// with their size when the store can tell (`blob_len`). Eager mode
     /// leaves this empty. Shared across clones (locks clone the directory).
     pending: Arc<Mutex<HashMap<String, Option<u64>>>>,
+    /// `.managed.json` was rewritten locally and not yet saved to the store.
+    /// The managed directory rewrites it once per registered file; saving
+    /// it at each commit point (meta.json) instead turns ~150 store round
+    /// trips per commit into one. Shared across clones.
+    managed_dirty: Arc<std::sync::atomic::AtomicBool>,
 }
+
+/// The managed directory's file registry (`ld_lucivy::core::MANAGED_FILEPATH`,
+/// private to the engine crate).
+const MANAGED_FILE: &str = ".managed.json";
 
 /// When `BlobDirectory` pulls blobs from the store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -136,7 +145,25 @@ impl<S: BlobStore> BlobDirectory<S> {
             cache_dir: Arc::new(cache_dir),
             watch_router: Arc::new(RwLock::new(WatchCallbackList::default())),
             pending: Arc::new(Mutex::new(pending)),
+            managed_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
+    }
+
+    /// Save the local `.managed.json` to the store if it changed since the
+    /// last save. Called at every commit point and on close, so the store
+    /// never sees a `meta.json` whose files are not registered.
+    fn flush_managed(&self) -> io::Result<()> {
+        if !self.managed_dirty.swap(false, Ordering::AcqRel) {
+            return Ok(());
+        }
+        match std::fs::read(self.cache_dir.as_ref().join(MANAGED_FILE)) {
+            Ok(data) => self.store.save(&self.prefixed_name, MANAGED_FILE, &data),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => {
+                self.managed_dirty.store(true, Ordering::Release);
+                Err(e)
+            }
+        }
     }
 
     /// Lazy mode: pull `name` from the store into the cache if it is still
@@ -177,6 +204,7 @@ impl<S: BlobStore> Clone for BlobDirectory<S> {
             cache_dir: self.cache_dir.clone(),
             watch_router: self.watch_router.clone(),
             pending: self.pending.clone(),
+            managed_dirty: self.managed_dirty.clone(),
         }
     }
 }
@@ -336,20 +364,33 @@ impl<S: BlobStore> Directory for BlobDirectory<S> {
         std::fs::rename(&tmp_path, &full_path)?;
 
         // A fresh write supersedes any not-yet-materialized blob.
-        self.pending.lock().unwrap().remove(&Self::file_name(path));
+        let fname = Self::file_name(path);
+        self.pending.lock().unwrap().remove(&fname);
 
         // Don't persist lock files to the blob store — they are process-local
         // and would block reopen after a crash.
-        let fname = Self::file_name(path);
         if fname.ends_with(".lock") {
             return Ok(());
+        }
+
+        // The file registry is saved at the next commit point, not per file.
+        if path == Path::new(MANAGED_FILE) {
+            self.managed_dirty.store(true, Ordering::Release);
+            return Ok(());
+        }
+
+        // Commit point: the registry goes first so the store never holds a
+        // meta.json ahead of its registry, then the meta itself.
+        let is_meta = path == Path::new("meta.json");
+        if is_meta {
+            self.flush_managed()?;
         }
 
         // Sync to blob store (durable)
         self.store.save(&self.prefixed_name, &fname, data)?;
 
         // Notify watchers on meta.json write (commit point)
-        if path == Path::new("meta.json") {
+        if is_meta {
             if let Ok(router) = self.watch_router.read() {
                 let _ = router.broadcast();
             }
@@ -368,8 +409,9 @@ impl<S: BlobStore> Directory for BlobDirectory<S> {
     }
 
     fn sync_directory(&self) -> io::Result<()> {
-        // Local cache is already on disk. BlobStore handles its own durability.
-        Ok(())
+        // Local cache needs no fsync (disposable). The store is the durable
+        // side: push the file registry if it changed.
+        self.flush_managed()
     }
 }
 
@@ -379,6 +421,7 @@ impl<S: BlobStore> Drop for BlobDirectory<S> {
         // Lucivy's lock system clones the directory (via box_clone), so
         // multiple BlobDirectory instances may share the same cache_dir.
         if Arc::strong_count(&self.cache_dir) == 1 {
+            let _ = self.flush_managed();
             let _ = std::fs::remove_dir_all(self.cache_dir.as_ref());
         }
     }
