@@ -1454,3 +1454,44 @@ fn v3_node_id_is_stamped_automatically() {
     let left = h.search(&q, 10, None).unwrap();
     assert_eq!(left.len(), 1, "delete by stamped id must work");
 }
+
+/// A config typo must fail loudly at creation with a message naming what
+/// exists — and a config STORED by another version of the struct must not
+/// prevent reopening the index it created.
+#[test]
+fn v3_schema_config_errors_speak() {
+    // Unknown key: serde itself names the valid ones.
+    let e = serde_json::from_value::<SchemaConfig>(serde_json::json!({
+        "fields": [{"name": "content", "type": "text"}], "shard": 4
+    })).unwrap_err().to_string();
+    assert!(e.contains("unknown field `shard`") && e.contains("shards"), "{e}");
+    // Same inside a field definition.
+    let e = serde_json::from_value::<SchemaConfig>(serde_json::json!({
+        "fields": [{"name": "content", "type": "text", "storde": true}]
+    })).unwrap_err().to_string();
+    assert!(e.contains("unknown field `storde`") && e.contains("stored"), "{e}");
+
+    // Value checks: type list, reserved name, duplicates, ranges.
+    let cfg = |v: serde_json::Value| serde_json::from_value::<SchemaConfig>(v).unwrap();
+    let create = |c: &SchemaConfig| LucivyHandle::create(ld_lucivy::directory::RamDirectory::default(), c)
+        .map(|_| ()).map_err(|e| e);
+    let e = create(&cfg(serde_json::json!({"fields": [{"name": "c", "type": "txet"}]}))).unwrap_err();
+    assert!(e.contains("unknown type") && e.contains("text"), "{e}");
+    let e = create(&cfg(serde_json::json!({"fields": [{"name": "_node_id", "type": "u64"}]}))).unwrap_err();
+    assert!(e.contains("reserved"), "{e}");
+    let e = create(&cfg(serde_json::json!({"fields": [
+        {"name": "c", "type": "text"}, {"name": "c", "type": "text"}]}))).unwrap_err();
+    assert!(e.contains("duplicate"), "{e}");
+    let e = create(&cfg(serde_json::json!({"fields": []}))).unwrap_err();
+    assert!(e.contains("no fields"), "{e}");
+    let e = create(&cfg(serde_json::json!({"fields": [{"name": "c", "type": "text"}], "sfx_version": 4}))).unwrap_err();
+    assert!(e.contains("2 or 3"), "{e}");
+
+    // Stored config with a key this version does not know: reopen survives.
+    let stored = serde_json::json!({
+        "fields": [{"name": "c", "type": "text", "future_flag": true}],
+        "some_removed_key": {"x": 1}
+    });
+    let parsed = SchemaConfig::from_stored_json(stored.to_string().as_bytes()).unwrap();
+    assert_eq!(parsed.fields.len(), 1);
+}

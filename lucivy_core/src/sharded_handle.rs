@@ -1517,7 +1517,8 @@ impl ShardedHandle {
     pub fn open_with_storage(storage: Box<dyn ShardStorage>) -> Result<Self, String> {
         // Read shard config.
         let config_data = storage.read_root_file(SHARD_CONFIG_FILE)?;
-        let config: SchemaConfig = serde_json::from_slice(&config_data)
+        // Stored config: tolerate keys written by other versions of the struct.
+        let config = SchemaConfig::from_stored_json(&config_data)
             .map_err(|e| format!("cannot parse shard config: {e}"))?;
 
         let num_shards = config.shards.unwrap_or(1);

@@ -23,6 +23,7 @@ use ld_lucivy::Index;
 // ─── Schema Config ──────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SchemaConfig {
     pub fields: Vec<FieldDef>,
     pub tokenizer: Option<String>,
@@ -44,6 +45,7 @@ pub struct SchemaConfig {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FieldDef {
     pub name: String,
     #[serde(rename = "type")]
@@ -52,6 +54,77 @@ pub struct FieldDef {
     pub indexed: Option<bool>,
     pub fast: Option<bool>,
 }
+
+impl SchemaConfig {
+    /// The field types `build_schema` accepts.
+    pub const FIELD_TYPES: [&'static str; 5] = ["text", "string", "u64", "i64", "f64"];
+
+    /// Reject a config that would build a broken or surprising index, with
+    /// messages that say what was expected. Serde already refuses unknown
+    /// KEYS (`deny_unknown_fields`: a `"shard"` typo names the valid keys);
+    /// this checks what serde cannot: values.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.fields.is_empty() {
+            return Err("schema has no fields — declare at least one, e.g. \
+                        {\"fields\":[{\"name\":\"content\",\"type\":\"text\"}]}".into());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for f in &self.fields {
+            if f.name == crate::handle::NODE_ID_FIELD {
+                return Err(format!(
+                    "field name {:?} is reserved (added automatically, u64, stamped by add_document)",
+                    f.name));
+            }
+            if !seen.insert(f.name.as_str()) {
+                return Err(format!("duplicate field name {:?}", f.name));
+            }
+            if !Self::FIELD_TYPES.contains(&f.field_type.as_str()) {
+                return Err(format!(
+                    "field {:?}: unknown type {:?} — expected one of {:?}",
+                    f.name, f.field_type, Self::FIELD_TYPES));
+            }
+        }
+        if self.shards == Some(0) {
+            return Err("shards must be >= 1 (omit the key for a single shard)".into());
+        }
+        if let Some(w) = self.balance_weight {
+            if !(0.0..=1.0).contains(&w) {
+                return Err(format!("balance_weight must be within 0.0..=1.0, got {w}"));
+            }
+        }
+        if let Some(v) = self.sfx_version {
+            if v != 2 && v != 3 {
+                return Err(format!("sfx_version must be 2 or 3, got {v}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Parse a STORED `_config.json`, surviving keys written by other
+    /// versions of this struct: unknown keys are dropped (they were already
+    /// accepted when the index was created), then the strict path runs.
+    /// For user-provided configs, deserialize normally instead — a typo
+    /// must fail loudly, not vanish.
+    pub fn from_stored_json(data: &[u8]) -> Result<SchemaConfig, String> {
+        let mut v: serde_json::Value = serde_json::from_slice(data)
+            .map_err(|e| format!("invalid config JSON: {e}"))?;
+        let known = ["fields", "tokenizer", "shards", "df_threshold",
+                     "balance_weight", "sfx", "sfx_version"];
+        let known_field = ["name", "type", "stored", "indexed", "fast"];
+        if let Some(obj) = v.as_object_mut() {
+            obj.retain(|k, _| known.contains(&k.as_str()));
+            if let Some(fields) = obj.get_mut("fields").and_then(|f| f.as_array_mut()) {
+                for f in fields {
+                    if let Some(fo) = f.as_object_mut() {
+                        fo.retain(|k, _| known_field.contains(&k.as_str()));
+                    }
+                }
+            }
+        }
+        serde_json::from_value(v).map_err(|e| format!("invalid config: {e}"))
+    }
+}
+
 
 // ─── Query Config ───────────────────────────────────────────────────────────
 

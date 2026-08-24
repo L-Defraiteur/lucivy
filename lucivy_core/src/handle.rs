@@ -150,7 +150,9 @@ impl LucivyHandle {
         // Use the pre-read config to re-register tokenizers.
         let config = match config_bytes {
             Some(config_data) => {
-                match serde_json::from_slice::<SchemaConfig>(&config_data) {
+                match SchemaConfig::from_stored_json(&config_data).map_err(|e| {
+                    eprintln!("Warning: stored _config.json rejected: {e}");
+                }) {
                     Ok(config) => {
                         configure_tokenizers(&index, &config);
                         Some(config)
@@ -454,6 +456,8 @@ impl LucivyHandle {
 pub fn build_schema(
     config: &SchemaConfig,
 ) -> Result<(Schema, Vec<(String, Field)>), String> {
+    config.validate()?;
+
     let mut builder = Schema::builder();
     let mut field_map = Vec::new();
 
