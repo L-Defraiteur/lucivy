@@ -190,3 +190,38 @@ segments baisse (deux tours sans progrès consécutifs = fini). Natif,
 15 440 docs, 10 k docs/segment : **5 fusions, 43 s, 285 → 15 `.sfx`,
 5 580 → 4 339 Mo** (`sfx` 2 150 → 1 544). Rejeu dans le navigateur après
 rebuild.
+
+## ≈01:30 — navigateur : compaction lente et partielle, requêtes inchangées
+
+Run complet `?corpus&compact=10000` avec la boucle patiente : indexation +
+compaction **1 274 s**, dont **524 s de compaction** pour passer de ~75 à
+35-67 segments par shard seulement (natif : 15 `.sfx` en 43 s). Parité
+toujours 20/21 + ex æquo. **Temps de requête inchangés** (4-13 s) : le
+nombre de segments n'est pas la variable, ce sont les octets relus par
+requête. Deux leçons :
+- en wasm, une fusion à la fois + cascades de la policy = files d'attente
+  de tâches coopératives et compaction qui tourne en rond ; il faudrait
+  suspendre la policy pendant un chargement en masse et fusionner large une
+  fois à la fin (ou remonter le permis à 2 avec le cache lazy en place) ;
+- la compaction n'est pas le levier des requêtes navigateur ; seuls le
+  format (11× le texte) et des lecteurs par plage le sont.
+
+## Bilan de la nuit (pour le réveil)
+
+Fait : parité navigateur/natif sur 15 440 fichiers (20/21 + 1 ex æquo,
+tous modes) ; Asyncify retiré (cause du blocage OPFS) ; commit et
+compaction sur pthread + SAB ; lectures paresseuses + cache borné +
+sémantique unlink dans `StdFsDirectory` ; permis de fusion ; fusion v3 en
+arènes (643 → 406 ms, sortie identique) ; `ShardedHandle::compact` planifié
+par l'acteur (natif 285 → 15 `.sfx`) ; préparation de lot atomique et refus
+qui répond ; harnais de parité et d'analyse de tailles ; docs 41-42
+rag3weaver ; journal ; suites vertes (lib 1416, lucivy-core 23 binaires).
+Commits `a3693ff` → `8b58881`, tout poussé sur `wip/publication-3.0.0`.
+
+À décider : (1) pour 15-20 k docs dans le navigateur, le vrai chantier est
+format + lecteurs par plage (2,5 Go de fichiers indexés par ordinal
+lisibles par plage, `.sfx` résident) — ou un corpus plus petit / un index
+serveur + deltas ; (2) policy de fusion pendant un chargement en masse ;
+(3) `SfxCollectorDataV3` en arène (suite naturelle du merge) ; (4) le
+montage OPFS qui échoue parfois juste après un rechargement (retry ajouté,
+à observer) ; (5) publication 3.0.0 (dry-run vert, inchangé).
