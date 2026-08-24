@@ -150,6 +150,21 @@ pub fn search_mmap<F: Fn(u64) -> bool>(
     run_search(query, dim_map, limit, filter, |dim| mmap.cursor(dim as usize))
 }
 
+/// [`search_mmap`] restricted to `allowed` ids (see
+/// [`run_search_allowed`](crate::index::run_search_allowed)).
+pub fn search_mmap_allowed(
+    mmap: &MmapPostingData,
+    dim_map: &HashMap<u32, usize>,
+    query: &SparseVector,
+    limit: usize,
+    allowed: &[u64],
+) -> Vec<(u64, f32)> {
+    if query.is_empty() || mmap.num_vectors() == 0 {
+        return Vec::new();
+    }
+    crate::index::run_search_allowed(query, dim_map, limit, allowed, |dim| mmap.cursor(dim as usize))
+}
+
 // ---------------------------------------------------------------------------
 // Write mmap format
 // ---------------------------------------------------------------------------

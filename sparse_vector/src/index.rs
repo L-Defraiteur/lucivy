@@ -90,6 +90,63 @@ where
     })
 }
 
+/// [`run_search`] restricted to `allowed`: seeks the lanes to each allowed
+/// id when that is cheaper than walking the postings (a database
+/// pre-filter with few survivors), otherwise a window search with a set
+/// filter. Both give the same scores.
+pub(crate) fn run_search_allowed<C, R>(
+    query: &SparseVector,
+    dim_map: &HashMap<u32, usize>,
+    limit: usize,
+    allowed: &[u64],
+    mut cursors: R,
+) -> Vec<(u64, f32)>
+where
+    C: PostingCursor,
+    R: FnMut(DimId) -> Option<C>,
+{
+    if allowed.is_empty() {
+        return Vec::new();
+    }
+    let lanes: Vec<(DimId, f32)> = query
+        .indices
+        .iter()
+        .zip(&query.values)
+        .filter_map(|(token, &w)| dim_map.get(token).map(|&dim| (dim as DimId, w)))
+        .collect();
+    if lanes.is_empty() {
+        return Vec::new();
+    }
+    let mut ids: Vec<u64> = allowed.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    // A seek is a binary search per lane; a window walk touches every
+    // posting of every lane once. Compare the two, seek weighed by a
+    // conservative constant.
+    let postings: usize = lanes
+        .iter()
+        .filter_map(|&(dim, _)| cursors(dim))
+        .map(|c| c.remaining())
+        .sum();
+    let seek_work = ids.len().saturating_mul(lanes.len()).saturating_mul(8);
+    SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        if seek_work < postings {
+            wand::search_ids(&lanes, &ids, cursors, TopKSink::new(limit), &mut scratch)
+        } else {
+            let set: std::collections::HashSet<u64> = ids.into_iter().collect();
+            wand::search_with(
+                &lanes,
+                |id| set.contains(&id),
+                cursors,
+                TopKSink::new(limit),
+                SearchOptions::default(),
+                &mut scratch,
+            )
+        }
+    })
+}
+
 /// In-memory inverted index for sparse vectors.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SparseIndex {
@@ -252,11 +309,15 @@ impl SparseIndex {
         limit: usize,
         allowed_ids: &[u64],
     ) -> Vec<(u64, f32)> {
-        if allowed_ids.is_empty() {
+        if allowed_ids.is_empty() || query.is_empty() || self.is_empty() {
             return Vec::new();
         }
-        let allowed: std::collections::HashSet<u64> = allowed_ids.iter().copied().collect();
-        self.search_with_filter(query, limit, &|id| allowed.contains(&id))
+        run_search_allowed(query, &self.dim_map, limit, allowed_ids, |dim| {
+            self.postings
+                .get(dim as usize)
+                .filter(|p| !p.is_empty())
+                .map(Postings::cursor)
+        })
     }
 
     fn search_with_filter<F: Fn(u64) -> bool>(

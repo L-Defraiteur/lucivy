@@ -549,11 +549,52 @@ impl ShardedSparseHandle {
         limit: usize,
         allowed_ids: &[u64],
     ) -> Result<Vec<(u64, f32)>, String> {
-        if allowed_ids.is_empty() {
-            self.ensure_open()?;
+        self.ensure_open()?;
+        if allowed_ids.is_empty() || limit == 0 || query.indices.is_empty() {
             return Ok(Vec::new());
         }
-        self.search_inner(query, limit, Some(Arc::new(allowed_ids.to_vec())))
+        // The router knows where every inserted id lives: give each shard
+        // only its share and leave the others idle. An id the router never
+        // saw (an index older than routing persistence) sends the whole set
+        // everywhere, as before.
+        let per_shard: Option<Vec<Vec<u64>>> = {
+            let router = self.router.lock().map_err(|_| "router lock poisoned")?;
+            let mut groups: Vec<Vec<u64>> = vec![Vec::new(); self.shards.len()];
+            let mut all_known = true;
+            for &id in allowed_ids {
+                match router.shard_for_node_id(id) {
+                    Some(sid) if sid < groups.len() => groups[sid].push(id),
+                    _ => {
+                        all_known = false;
+                        break;
+                    }
+                }
+            }
+            all_known.then_some(groups)
+        };
+        let Some(groups) = per_shard else {
+            return self.search_inner(query, limit, Some(Arc::new(allowed_ids.to_vec())));
+        };
+        let targets: Vec<usize> = (0..groups.len()).filter(|&i| !groups[i].is_empty()).collect();
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let query = Arc::new(query.clone());
+        let shares: Vec<Option<Arc<Vec<u64>>>> = groups
+            .into_iter()
+            .map(|g| (!g.is_empty()).then(|| Arc::new(g)))
+            .collect();
+        let per_shard = self.pool.scatter_to(
+            &targets,
+            |sid, r| SparseShardMsg::Search {
+                query: Arc::clone(&query),
+                limit,
+                filter: shares[sid].clone(),
+                reply: r,
+            },
+            "sparse_search_routed",
+        );
+        Ok(merge_top_k(per_shard.into_iter().map(|(_, hits)| hits).collect(), limit))
     }
 
     fn search_inner(
@@ -810,6 +851,39 @@ mod tests {
         for ns in ["Sparse_vectors", "Sparse_vectors/shard_0", "Sparse_vectors/shard_1"] {
             assert!(store.list(ns).unwrap().is_empty(), "{ns} not empty");
         }
+    }
+
+    /// `search_filtered` picks a seek path for small allowed sets and a
+    /// window path for large ones, per shard; every combination must give
+    /// the single-handle answer, and the answer must be the unfiltered
+    /// ranking restricted to the allowed ids.
+    #[test]
+    fn filtered_search_agrees_across_paths_and_sizes() {
+        let docs = corpus();
+        let single = reference(&docs, "paths");
+        let base = tmp("fs_paths");
+        let h = ShardedSparseHandle::create(&base.to_string_lossy(), &ShardedSparseConfig::new(4)).unwrap();
+        for (id, v) in &docs {
+            h.insert(*id, v).unwrap();
+        }
+        h.commit().unwrap();
+        for (qi, q) in queries().iter().enumerate() {
+            let full = h.search(q, 240).unwrap();
+            for size in [1usize, 2, 5, 17, 60, 240] {
+                let allowed: Vec<u64> = (0..240u64).filter(|id| (id * 7 + qi as u64) % 240 < size as u64).collect();
+                let got = h.search_filtered(q, 10, &allowed).unwrap();
+                let want = single.search_filtered(q, 10, &allowed);
+                assert_same(&format!("q{qi} size {size}"), &got, &want);
+                let expect: Vec<(u64, f32)> = full
+                    .iter()
+                    .filter(|(id, _)| allowed.contains(id))
+                    .take(10)
+                    .copied()
+                    .collect();
+                assert_same(&format!("q{qi} size {size} vs unfiltered"), &got, &expect);
+            }
+        }
+        h.close().unwrap();
     }
 
     #[test]

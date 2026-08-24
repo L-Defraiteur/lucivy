@@ -349,17 +349,12 @@ impl SparseHandle {
         let inner = self.inner.lock().unwrap();
         if !inner.dirty {
             if let Some(ref mmap) = inner.mmap {
-                if allowed_ids.is_empty() {
-                    return Vec::new();
-                }
-                let allowed: std::collections::HashSet<u64> =
-                    allowed_ids.iter().copied().collect();
-                return mmap_index::search_mmap(
+                return mmap_index::search_mmap_allowed(
                     mmap,
                     inner.index.dim_map(),
                     query,
                     limit,
-                    &|id| allowed.contains(&id),
+                    allowed_ids,
                 );
             }
         }

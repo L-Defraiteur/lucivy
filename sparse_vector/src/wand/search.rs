@@ -115,6 +115,49 @@ where
     )
 }
 
+/// Score only `ids` — sorted ascending, without duplicates — by seeking
+/// every lane to each of them, and offer the ones present in at least one
+/// lane to the sink. Cost O(|ids| × lanes × log): the path for a caller who
+/// already knows the candidates (a database pre-filter) when they are few
+/// against the postings a window search would walk. Scores are the same
+/// f32 sums as [`search_with`]: contributions added lane by lane in query
+/// order.
+pub fn search_ids<C, R, S>(
+    query: &[(DimId, Weight)],
+    ids: &[RecordId],
+    mut cursors: R,
+    mut sink: S,
+    scratch: &mut Scratch,
+) -> Vec<(RecordId, f32)>
+where
+    C: PostingCursor,
+    R: FnMut(DimId) -> Option<C>,
+    S: ScoreSink,
+{
+    debug_assert!(ids.windows(2).all(|w| w[0] < w[1]), "ids must be sorted and unique");
+    let mut lanes: Vec<(Weight, C)> = scratch
+        .merge_query(query)
+        .iter()
+        .filter_map(|&(dim, w)| cursors(dim).map(|c| (w, c)))
+        .collect();
+    for &id in ids {
+        let mut score = 0.0f32;
+        let mut seen = false;
+        for (w, cursor) in lanes.iter_mut() {
+            if let Some(p) = cursor.seek(id) {
+                if p.id == id {
+                    score += *w * p.weight;
+                    seen = true;
+                }
+            }
+        }
+        if seen {
+            sink.offer(id, score);
+        }
+    }
+    sink.into_results()
+}
+
 /// [`search`] with an explicit sink, options and scratch buffers.
 ///
 /// Before any lane is built the query is normalised: duplicated dimensions

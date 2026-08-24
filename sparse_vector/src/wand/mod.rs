@@ -107,3 +107,5 @@ impl Posting {
         }
     }
 }
+
+pub use search::search_ids;
