@@ -157,8 +157,20 @@ impl<T> Drop for Reply<T> {
 
         let mut state = self.inner.state.lock().unwrap();
         state.closed = true;
+        // A pipe has no value to deliver: the pipe_to target never hears
+        // back and a collect_replies_to stays at k/n forever. Nothing can
+        // be invented here, but the silence can be broken — a blocked
+        // collect with all threads idle is otherwise undiagnosable.
+        let orphaned_pipe = state.on_send.take().is_some();
         self.inner.ready.notify_one();
         drop(state);
+        if orphaned_pipe {
+            eprintln!(
+                "[luciole] WARNING: Reply dropped without send() while a pipe was \
+                 attached — the pipe_to target / collect_replies_to waiting on it \
+                 will never complete"
+            );
+        }
         // Fire resume even on drop (actor died without replying — the
         // suspended actor should be woken to discover the error).
         if let Some(handle) = self.inner.resume.lock().unwrap().take() {
@@ -391,6 +403,16 @@ impl<T: Send + 'static> ReplyReceiver<T> {
             drop(state);
             callback(value);
             return true;
+        }
+        // Sender already gone without a value: storing the callback would
+        // wait forever. Say so instead.
+        if state.closed {
+            drop(state);
+            eprintln!(
+                "[luciole] WARNING: pipe attached to a Reply whose sender was \
+                 already dropped without send() — it will never be called"
+            );
+            return false;
         }
         // Otherwise, store for later — Reply::send will call it.
         state.on_send = Some(Box::new(callback));
