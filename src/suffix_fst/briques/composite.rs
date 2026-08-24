@@ -345,6 +345,14 @@ fn second_token_anchored_v3(
         if ctx.debug { eprintln!("[anch]   tail_matches={}", tail_matches.len()); }
 
         for m in tail_matches {
+            if ctx.debug {
+                let prev = if m.position > 0 {
+                    pm.ordinal_at(m.doc_id, m.position - 1)
+                        .map(|o| format!("{:?} own={:?}", tt.text(o), tt.meta(o).map(|mm| mm.own_len)))
+                } else { None };
+                eprintln!("[anch]   tail doc={} pos={} span={} byte=[{}..{}] prev={:?}",
+                    m.doc_id, m.position, m.span, m.byte_from, m.byte_to, prev);
+            }
             if m.position == 0 { continue; }
             let prev_pos = m.position - 1;
             let Some(ord) = pm.ordinal_at(m.doc_id, prev_pos) else { continue };

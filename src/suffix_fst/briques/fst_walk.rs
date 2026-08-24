@@ -502,16 +502,21 @@ fn build_chains_from_splits(
             }
             let hit = &fst_memo[&rem_off];
             if !hit.is_empty() {
-                // This position swallows the whole remainder.
-                let mut positions = positions;
-                positions.push(std::sync::Arc::clone(hit));
+                // This position swallows the whole remainder — one branch,
+                // not the only one. The same text is chunked differently
+                // from one document to the next, so a key holding all of
+                // `expression` (doc A: `Expressi`+`on`) must not stop the
+                // walk for the split shape (doc B: `Expres|si` then `sion>`).
+                // Stopping here lost `<binder::Expression` in every document
+                // sharing a segment with doc A (pipeline test, 24 August).
+                let mut swallowed = positions.clone();
+                swallowed.push(std::sync::Arc::clone(hit));
                 chains.push(TokenChainV3 {
-                    ordinals: positions,
+                    ordinals: swallowed,
                     first_sti: split.parent.sti,
                     total_query_consumed: query.len(),
                     last_consumed: rem.len(),
                 });
-                continue;
             }
 
             super::profile::bump(|c| &c.n_bcfs_walk_reqs, 1);
