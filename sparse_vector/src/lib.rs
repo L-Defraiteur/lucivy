@@ -16,3 +16,4 @@ pub mod posting_list_common;
 pub mod scores_memory_pool;
 pub mod search_context;
 pub mod top_k;
+pub mod wand;
