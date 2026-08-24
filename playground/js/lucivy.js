@@ -105,6 +105,12 @@ export class Lucivy {
         return new LucivyIndex(this, path);
     }
 
+    /** Open an index that already lives in OPFS, in place. */
+    async openDirect(path) {
+        await this._call('openDirect', { path });
+        return new LucivyIndex(this, path);
+    }
+
     async importSnapshot(data, path) {
         const res = await this._call('importSnapshot', { data, path });
         return new LucivyIndex(this, path);

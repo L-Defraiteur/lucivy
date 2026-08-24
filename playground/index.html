@@ -393,6 +393,18 @@ async function startup() {
       await importFiles([new File([blob], name)]);
       return;
     }
+    // `?open=user_index` — reopen an index persisted in OPFS by a previous
+    // session (no re-indexing; highlights need userFiles, which are gone).
+    const openPath = params.get('open');
+    if (openPath) {
+      statusEl.textContent = `Opening /${openPath} from OPFS...`;
+      userIndex = await lucivy.openDirect('/' + openPath);
+      userNumDocs = await userIndex.numDocs();
+      tabUser.classList.remove('disabled');
+      tabUserCount.textContent = `(${userNumDocs})`;
+      switchTab('user');
+      return;
+    }
     if (params.has('nodemo')) {
       setReady('No dataset loaded — drop files or clone a repo');
       return;

@@ -187,9 +187,44 @@ impl FileCache {
 }
 
 /// Read handle over a file on disk that is read only when asked to.
+///
+/// `pinned` emulates POSIX unlink semantics: when the directory deletes a
+/// file that live handles still reference (a searcher holding segments a
+/// merge just replaced), the bytes are captured into every such handle
+/// first, so the reader keeps working exactly as it would over an mmap.
 struct LazyFsHandle {
     path: PathBuf,
     len: usize,
+    pinned: std::sync::OnceLock<ld_lucivy::directory::OwnedBytes>,
+}
+
+/// Live handles per path, so `delete` can pin what is still referenced.
+fn live_handles() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<std::sync::Weak<LazyFsHandle>>>> {
+    static LIVE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<std::sync::Weak<LazyFsHandle>>>>> =
+        std::sync::OnceLock::new();
+    LIVE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Capture the bytes of `path` into every live handle, then forget the
+/// registry entry. Returns how many handles were pinned.
+fn pin_live_handles(path: &Path) -> usize {
+    let handles: Vec<Arc<LazyFsHandle>> = {
+        let mut live = live_handles().lock().unwrap();
+        match live.remove(path) {
+            Some(weaks) => weaks.iter().filter_map(|w| w.upgrade()).collect(),
+            None => Vec::new(),
+        }
+    };
+    let mut pinned = 0;
+    for h in handles {
+        if h.pinned.get().is_none() {
+            if let Ok(bytes) = h.whole() {
+                let _ = h.pinned.set(bytes);
+            }
+        }
+        pinned += 1;
+    }
+    pinned
 }
 
 impl std::fmt::Debug for LazyFsHandle {
@@ -206,6 +241,9 @@ impl ld_lucivy::HasLen for LazyFsHandle {
 
 impl LazyFsHandle {
     fn whole(&self) -> io::Result<ld_lucivy::directory::OwnedBytes> {
+        if let Some(bytes) = self.pinned.get() {
+            return Ok(bytes.clone());
+        }
         if let Some(bytes) = FileCache::global().lock().unwrap().get(&self.path) {
             return Ok(bytes);
         }
@@ -219,6 +257,9 @@ impl LazyFsHandle {
 impl FileHandle for LazyFsHandle {
     fn read_bytes(&self, range: std::ops::Range<usize>) -> io::Result<ld_lucivy::directory::OwnedBytes> {
         let range = range.start.min(self.len)..range.end.min(self.len);
+        if let Some(bytes) = self.pinned.get() {
+            return Ok(bytes.slice(range));
+        }
         if range.end - range.start <= SMALL_READ_MAX && range.end - range.start < self.len {
             if let Some(bytes) = FileCache::global().lock().unwrap().get(&self.path) {
                 return Ok(bytes.slice(range));
@@ -249,7 +290,14 @@ impl Directory for StdFsDirectory {
                 }
             })?
             .len() as usize;
-        Ok(Arc::new(LazyFsHandle { path: full, len }))
+        let handle = Arc::new(LazyFsHandle { path: full.clone(), len, pinned: std::sync::OnceLock::new() });
+        {
+            let mut live = live_handles().lock().unwrap();
+            let entry = live.entry(full).or_default();
+            entry.retain(|w| w.strong_count() > 0);
+            entry.push(Arc::downgrade(&handle));
+        }
+        Ok(handle)
     }
 
     fn open_read(&self, path: &Path) -> Result<FileSlice, OpenReadError> {
@@ -266,6 +314,10 @@ impl Directory for StdFsDirectory {
 
     fn delete(&self, path: &Path) -> Result<(), DeleteError> {
         let full = self.resolve(path);
+        let pinned = pin_live_handles(&full);
+        if pinned > 0 && std::env::var("LUCIVY_VERBOSE").is_ok() {
+            eprintln!("[fs] delete {}: pinned for {pinned} live handle(s)", full.display());
+        }
         FileCache::global().lock().unwrap().remove(&full);
         fs::remove_file(&full).map_err(|e| {
             if e.kind() == io::ErrorKind::NotFound {

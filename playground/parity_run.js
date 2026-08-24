@@ -7,6 +7,11 @@
 //   curl -s localhost:9877/eval/main -d @/tmp/req.json > /tmp/parity_wasm.json
 //
 // Then: python3 playground/parity_diff.py /tmp/parity_native.json /tmp/parity_wasm.json
+// The debug server's eval times out after a few seconds; the panel takes
+// minutes on a debug wasm build. So this only STARTS the run and returns:
+// the report lands in window._parityResult (null while running, then the
+// JSON string), poll it with `window._parityResult`.
+window._parityResult = null;
 (async () => {
   const limit = 100000;
   const panel = await (await fetch('parity_panel.json')).json();
@@ -26,5 +31,6 @@
       report.push({ name: entry.name, error: String(e && e.message || e) });
     }
   }
-  return JSON.stringify(report);
-})()
+  window._parityResult = JSON.stringify(report);
+})();
+'started'

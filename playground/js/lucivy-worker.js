@@ -339,6 +339,17 @@ self.onmessage = async (e) => {
                 break;
             }
 
+            case 'openDirect': {
+                // The index already lives in OPFS through WASMFS: open it in
+                // place (no JS-side file import).
+                const { path } = args;
+                const ctx = await Module.ccall('lucivy_open', 'number', ['string'], [path], { async: true });
+                if (!ctx) throw new Error(`lucivy_open failed for ${path}`);
+                indexes.set(path, ctx);
+                result = { path, numDocs: await Module.ccall('lucivy_num_docs', 'number', ['number'], [ctx], { async: true }) };
+                break;
+            }
+
             case 'open': {
                 const { path } = args;
                 const files = await readAllFiles(path);

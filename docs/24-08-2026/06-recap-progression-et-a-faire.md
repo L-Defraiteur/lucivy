@@ -5,7 +5,7 @@ est à faire tout de suite, ce qui vient après. Le détail commit par commit
 est dans `01-rapport-progression.md` ; l'architecture dans `07-architecture.md` ;
 les tests, benchs et points critiques dans `08-knowledge-dump-tests-benchs.md`.
 Branche : `v3-recovery` HEAD `e8b5414` (la session rag3weaver y est pinnée) ; la
-finalisation se fait sur `wip/publication-2.1.0`, fusionnée point complet par
+finalisation se fait sur `wip/publication-3.0.0`, fusionnée point complet par
 point complet.
 
 ## 1. Où on en est
@@ -51,24 +51,31 @@ déterministes ; `node_ids_of(&results)` évite de recharger les documents.
 
 ## 2. À faire dans l'immédiat
 
-1. **Publication crates.io 2.1.0** — `ld-lucivy`, `lucivy-core`, `luciole`
+1. **Publication crates.io 3.0.0** — `ld-lucivy`, `lucivy-core`, `luciole`
    0.2.0, `lucistore` 0.2.0, `sparse-vector` 0.3.0 (nouveau). rag3weaver vit
    sur `[patch.crates-io]` + chemins en attendant ; c'est ce qui les débloque
-   pour livrer. **Préparé sur la branche `wip/publication-2.1.0`**
+   pour livrer. **Préparé sur la branche `wip/publication-3.0.0`**
    (`fb7e2af`, 24 août soir) : versions et dépendances bumpées, READMEs
    `lucistore`/`sparse-vector`, exclusions du paquet `ld-lucivy` (394
-   fichiers), CHANGELOG 2.1.0, imports morts nettoyés,
+   fichiers), CHANGELOG 3.0.0, imports morts nettoyés,
    `cargo publish --dry-run` des cinq crates dans l'ordre passe. Reste :
    le go, puis
    `cargo publish -p luciole -p lucistore -p ld-lucivy -p lucivy-core -p sparse-vector`
-   (cargo ≥ 1.90 publie le lot dans l'ordre), tag `v2.1.0`, fusion dans
+   (cargo ≥ 1.90 publie le lot dans l'ordre), tag `v3.0.0`, fusion dans
    `v3-recovery`.
-2. **Emscripten** : le build passe (`lucivy.wasm` 8,5 Mo, emsdk 6.0.8 +
-   nightly), l'exécution sous Node pend (main proxifié sorti, `ccall`
-   orphelins). À tester dans son vrai habitat, le playground navigateur
-   (`cd playground && node serve.mjs`) — le snapshot `playground/dataset.luce`
-   est un **v2** (67 Mo commité, non régénéré exprès). Si ça pend aussi dans
-   le navigateur : revoir `PROXY_TO_PTHREAD` / le cycle de vie du main.
+2. **Emscripten** — testé dans le navigateur la nuit du 24 au 25 sur un
+   corpus kernel de 15 440 fichiers indexé en direct (`?corpus=`, tar.gz
+   servi par `serve.mjs` ; le snapshot `dataset.luce` commité est un v2,
+   ignoré). Trois causes trouvées et corrigées (`a3693ff`, `1fb67ec`, doc 41
+   rag3weaver) : ccall de commit synchrone qui bloquait le thread JS →
+   `lucivy_commit_async` + SAB ; **`-sASYNCIFY` incompatible avec le backend
+   OPFS de WASMFS sur pthreads** (Asyncify réentré par `checkMailbox`) →
+   retiré ; 4 Go atteints par 4 fusions simultanées sans mmap →
+   `merge_permits` (1 fusion à la fois en wasm) + lectures paresseuses de
+   `StdFsDirectory` (cache LRU borné). Premier commit passé, tas ~0,9-1,6 Go.
+   Reste : finir l'indexation complète, panel de parité vs natif
+   (`playground/parity_*`), build release (le debug est ~18× plus lent que
+   le natif 32 bits sur le build v3), régénérer un dataset de démo v3.
 3. ~~**Bindings natifs** : recompiler et rejouer les smokes~~ — fait le 24 au
    soir sur la branche wip : Python et Node recompilés, smokes étendus aux
    deux formes de `parse` (warnings, highlights, `AND` avec mot absent → 0),
@@ -94,6 +101,17 @@ déterministes ; `node_ids_of(&results)` évite de recharger les documents.
 8. **Perf FTS** : `verify_literal` = 40-70 % du CPU des requêtes à gros
    volume de spans ; deltas LUCIDS après grosses fusions (un segment fusionné
    repart entier — à borner côté policy si ça gêne).
+   **Fusion v3 en arènes** (`merge_segments_v3`, trouvé dans le navigateur
+   la nuit du 24) : la clé d'intern `(bool, String, u16, u8, bool)` alloue
+   un `String` par entrée *avant* le `get` (650 k pour 500 docs),
+   `token_texts` = 650 k `String`, `token_postings`/`word_postings` = 2 ×
+   650 k `Vec`. À remplacer par une recherche empruntée (ou empreinte u64 +
+   arène), une arène `Vec<u8>` + `(start, len)` comme le `key_buf` du
+   builder, et des postings plats en deux passes (compter, remplir) — le
+   tout pré-dimensionné avec la somme des `num_terms`. En WASM la boucle
+   intern+postings pèse 9,2 s sur 14 s de fusion ; en natif ~0,45 s par
+   500 docs, soit ~45 s par tranche de 50 k sous policy. Natif d'abord
+   (bench 50k, tests de merge), navigateur ensuite.
 9. **`is_content_char`** : tout non-ASCII est contenu (`→`, `«`, `—` sont des
    mots). Cohérent, sans perte, mais discutable ; changement de format si on
    y touche (bump de `v=` dans le harnais, STATS déjà versionné).
