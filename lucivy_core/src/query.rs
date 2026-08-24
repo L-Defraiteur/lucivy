@@ -192,7 +192,13 @@ fn resolve_field(
     let name = config
         .field
         .as_deref()
-        .ok_or("query requires 'field'")?;
+        .ok_or_else(|| if config.fields.is_some() {
+            "this query type reads 'field' (singular); 'fields' only applies to \
+             'parse' and 'boolean' — wrap per-field queries in boolean.should \
+             to search several fields".to_string()
+        } else {
+            "query requires 'field'".to_string()
+        })?;
     schema
         .get_field(name)
         .map_err(|_| format!("unknown field: {name}"))
@@ -317,14 +323,29 @@ pub fn build_query(
         }
         "boolean" => build_boolean_query(config, schema, index, highlight_sink),
         "parse" => {
-            // Compat: parse → contains for SFX highlights.
-            // QueryParser syntax ("mutex AND lock") is not supported in contains,
-            // so for simple values, route to contains. For complex syntax, keep parse.
+            // Two honest behaviours, picked by the VALUE (24 August 2026):
+            //
+            // - boolean syntax (AND/OR/NOT, quotes, +/-) → the real
+            //   QueryParser: whole-term matching over `fields`, no substring,
+            //   no highlights. This branch had been unreachable since the
+            //   compat layer: the dispatch sent every value to contains and
+            //   only reached the parser when `value` was absent — whose first
+            //   line requires `value`. Plain values then did LITERAL substring
+            //   ("Rust safety" no longer found "Rust … safety"), a silent
+            //   change of meaning from v2 that rag3weaver had to work around.
+            //
+            // - plain words → OR of substring `contains`, per word and per
+            //   field: the v2 parser's OR-of-terms semantics, with highlights.
+            //
+            // `query_warnings` names which branch a value takes.
             require_sfx(index)?;
-            if config.value.is_some() {
-                build_contains_query(config, schema, highlight_sink)
-            } else {
+            let value = config.value.as_deref()
+                .ok_or("parse query requires 'value'")?;
+            if value_has_parser_syntax(value) {
                 build_parsed_query(config, schema, index)
+            } else {
+                let expanded = expand_parse_simple(config);
+                build_query(&expanded, schema, index, highlight_sink)
             }
         }
         "phrase_prefix" => {
@@ -515,6 +536,57 @@ fn build_more_like_this_query(
 }
 
 /// Parse query: already uses the field's configured tokenizer (stemmed pipeline).
+/// True when `value` uses QueryParser syntax: boolean operators as whole
+/// uppercase words, quoted phrases, or +/- prefixes on a word.
+pub fn value_has_parser_syntax(value: &str) -> bool {
+    if value.contains('"') {
+        return true;
+    }
+    value.split_whitespace().any(|w| {
+        matches!(w, "AND" | "OR" | "NOT")
+            || (w.len() > 1 && (w.starts_with('+') || w.starts_with('-')))
+    })
+}
+
+/// `parse` with a plain value: OR of substring `contains`, one per word and
+/// per field (`fields` if given, else `field`).
+fn expand_parse_simple(config: &QueryConfig) -> QueryConfig {
+    let value = config.value.as_deref().unwrap_or("");
+    let field_names: Vec<Option<String>> = match &config.fields {
+        Some(fs) if !fs.is_empty() => fs.iter().cloned().map(Some).collect(),
+        _ => vec![config.field.clone()],
+    };
+    let words: Vec<&str> = value.split_whitespace().filter(|w| has_alnum(w)).collect();
+    let mut should = Vec::new();
+    for field in &field_names {
+        if words.is_empty() {
+            should.push(QueryConfig {
+                query_type: "contains".into(),
+                field: field.clone(),
+                value: Some(value.to_string()),
+                ..Default::default()
+            });
+            continue;
+        }
+        for w in &words {
+            should.push(QueryConfig {
+                query_type: "contains".into(),
+                field: field.clone(),
+                value: Some(w.to_string()),
+                ..Default::default()
+            });
+        }
+    }
+    if should.len() == 1 {
+        return should.pop().unwrap();
+    }
+    QueryConfig {
+        query_type: "boolean".into(),
+        should: Some(should),
+        ..Default::default()
+    }
+}
+
 fn build_parsed_query(
     config: &QueryConfig,
     schema: &Schema,

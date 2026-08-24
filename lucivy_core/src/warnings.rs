@@ -40,7 +40,31 @@ fn collect(config: &QueryConfig, out: &mut Vec<String>) {
     }
 
     let value = config.value.as_deref().or(config.pattern.as_deref()).unwrap_or("");
+
+    // `fields` (plural) is only read by `parse` and the boolean composites;
+    // everywhere else it is silently unused and the single `field` decides —
+    // an afternoon was lost to exactly that silence (rag3weaver, 24 August).
+    if config.fields.is_some()
+        && !matches!(config.query_type.as_str(), "parse" | "boolean" | "disjunction_max")
+    {
+        out.push(format!(
+            "'fields' is not read by query type {:?} — use 'field', or wrap \
+             per-field queries in boolean.should",
+            config.query_type));
+    }
+
     match config.query_type.as_str() {
+        "parse" => {
+            if crate::query::value_has_parser_syntax(value) {
+                out.push(format!(
+                    "{value:?} has boolean syntax: QueryParser semantics — whole terms \
+                     (no substring matching) and no highlights"));
+            } else if value.split_whitespace().count() > 1 {
+                out.push(format!(
+                    "parse without boolean operators: {value:?} runs as OR of substring \
+                     contains, one per word"));
+            }
+        }
         "regex" => regex_warnings(value, out),
         "contains" | "sfx_contains" if config.regex == Some(true) => regex_warnings(value, out),
         "fuzzy" => fuzzy_warnings(value, config.distance.unwrap_or(1), out),

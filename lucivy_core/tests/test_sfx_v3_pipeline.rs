@@ -1495,3 +1495,61 @@ fn v3_schema_config_errors_speak() {
     let parsed = SchemaConfig::from_stored_json(stored.to_string().as_bytes()).unwrap();
     assert_eq!(parsed.fields.len(), 1);
 }
+
+/// `parse` was dead code: every value routed to literal-substring contains
+/// and the QueryParser branch required the value its guard excluded —
+/// "Rust safety" silently stopped meaning "Rust OR safety" (found by
+/// rag3weaver during the FTS migration, 24 August). Now: plain values are
+/// per-word OR of contains (v2's OR-of-terms, with highlights), boolean
+/// syntax reaches the real QueryParser, and warnings say which is which.
+#[test]
+fn v3_parse_is_alive_and_honest() {
+    let docs = [
+        "Rust is here and safety matters",
+        "Rust alone",
+        "safety alone",
+        "nothing relevant",
+        "the exact phrase Rust safety together",
+    ];
+    let handle = make_handle(&docs);
+
+    // Plain multi-word value: OR of the words, not the literal substring.
+    let or_docs = search(&handle, "parse", "Rust safety");
+    assert_eq!(or_docs.len(), 4, "parse 'Rust safety' must match any word: {or_docs:?}");
+
+    // fields (plural) works for parse.
+    let q = QueryConfig {
+        query_type: "parse".into(),
+        fields: Some(vec!["content".into()]),
+        value: Some("Rust safety".into()),
+        ..Default::default()
+    };
+    let query = query::build_query(&q, &handle.schema, &handle.index, None).unwrap();
+    let searcher = handle.reader.searcher();
+    let collector = ld_lucivy::collector::TopDocs::with_limit(100).order_by_score();
+    assert_eq!(searcher.search(&*query, &collector).unwrap().len(), 4);
+
+    // Boolean syntax reaches the QueryParser: AND is conjunctive now.
+    let and_docs = search(&handle, "parse", "Rust AND safety");
+    assert_eq!(and_docs.len(), 2, "parse 'Rust AND safety': {and_docs:?}");
+    let phrase_docs = search(&handle, "parse", "\"Rust safety\"");
+    assert_eq!(phrase_docs.len(), 1, "quoted phrase: {phrase_docs:?}");
+
+    // The warnings say which semantics apply, and that `fields` is ignored
+    // elsewhere.
+    let w = handle.query_warnings(&QueryConfig {
+        query_type: "parse".into(), field: Some("content".into()),
+        value: Some("Rust safety".into()), ..Default::default()
+    });
+    assert!(w.iter().any(|m| m.contains("OR of substring")), "{w:?}");
+    let w = handle.query_warnings(&QueryConfig {
+        query_type: "parse".into(), field: Some("content".into()),
+        value: Some("Rust AND safety".into()), ..Default::default()
+    });
+    assert!(w.iter().any(|m| m.contains("QueryParser")), "{w:?}");
+    let w = handle.query_warnings(&QueryConfig {
+        query_type: "contains".into(), fields: Some(vec!["content".into()]),
+        value: Some("rust".into()), ..Default::default()
+    });
+    assert!(w.iter().any(|m| m.contains("'fields' is not read")), "{w:?}");
+}
