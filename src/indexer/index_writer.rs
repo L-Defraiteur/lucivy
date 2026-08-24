@@ -487,6 +487,10 @@ impl<D: Document> IndexWriter<D> {
     /// merges in flight, so it never races the policy. Returns when the
     /// merges of that plan are registered; a policy cascade may follow.
     pub fn compact(&mut self, max_docs: usize) -> crate::Result<()> {
+        // Segments held by a merge in flight are not candidates; with one
+        // merge at a time (wasm) a policy cascade keeps most of them held,
+        // and a plan made then finds nothing. Wait for a quiet index first.
+        self.segment_updater.wait_merging_thread()?;
         self.segment_updater.compact(max_docs)
     }
 

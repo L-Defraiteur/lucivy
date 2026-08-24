@@ -3,7 +3,8 @@
 Suite directe du 24 (`docs/24-08-2026/06-recap-progression-et-a-faire.md`,
 doc 41 rag3weaver). Branche `wip/publication-3.0.0`. Priorités données avant
 de dormir : (1) finir le débogage WASM/parité, (2) la fusion v3 en arènes.
-Entrées horodatées, les plus récentes en bas.
+Entrées horodatées (heures approximatives, recalées sur le journal du
+playground), les plus récentes en bas.
 
 ## 00:05 — état au départ
 
@@ -22,7 +23,7 @@ Entrées horodatées, les plus récentes en bas.
   (ENOTDIR de `wasmfs_create_directory("/opfs")`), reproductible deux fois,
   alors que le montage réussissait au chargement précédent. En cours.
 
-## 00:25 — parité navigateur / natif : acquise
+## ≈00:20 — parité navigateur / natif : acquise
 
 - Le montage OPFS a réussi au 3e chargement (`?nodemo`) ; le panel a tourné
   **depuis le worker** (`playground/parity_worker.js` : `lucivy_open` sur
@@ -41,7 +42,7 @@ Entrées horodatées, les plus récentes en bas.
   de code. Hypothèse : access handles OPFS de l'ancien worker pas encore
   libérés (course), à confirmer avec un délai/retry au montage.
 
-## 00:30 — fusion v3 en arènes : écrite, en test
+## ≈00:25 — fusion v3 en arènes : écrite, en test
 
 `merge_segments_v3` : arène de textes `(start, len)`, table d'intern en
 adressage ouvert (FxHash de la forme + texte, comparaison contre l'arène,
@@ -52,7 +53,7 @@ puis découpe par ordinal ; lecteurs `for_each_entry` sans allocation dans
 (`SfxCollectorDataV3`) — l'étape suivante serait de le passer en arène
 aussi. Tests de merge et bench 2 000 docs en cours.
 
-## 00:50 — build release : même parité, mêmes temps → l'I/O, pas le CPU
+## ≈00:35 — build release : même parité, mêmes temps → l'I/O, pas le CPU
 
 - Build release (5,2 Mo) sur l'index OPFS : 20/21 identiques + 1 ex æquo
   (filtre `path`, 382 docs au même score, fenêtre top-10 arbitraire).
@@ -70,7 +71,7 @@ aussi. Tests de merge et bench 2 000 docs en cours.
   remplacé par un bucketing stable par ordinal (les buckets arrivent triés
   par construction, vérifié en debug) — bench en cours.
 
-## 01:00 — la taille de l'index est le vrai plafond du navigateur
+## ≈00:40 — la taille de l'index est le vrai plafond du navigateur
 
 Mesuré dans OPFS après le run complet (15 440 fichiers, ~400 Mo de texte) :
 **5 904 Mo** vivants — par shard ~1 450 Mo dont `.sfx` 610-680 Mo,
@@ -93,7 +94,7 @@ Leviers, par ordre de rendement probable :
    l'ordinal ; le FST lui-même a besoin d'un `&[u8]` contigu (fork
    BurntSushi), donc résident — d'où l'importance de 1 et 2.
 
-## 01:15 — fusion en arènes : mesurée, commitée
+## ≈00:42 — fusion en arènes : mesurée, commitée
 
 Natif i686 release, fusion `content` de 14 segments (~650 k tokens,
 ~10 M postings), moyenne sur 3 shards :
@@ -116,7 +117,7 @@ chaque shard sous `max_docs` et les fusionne (`merge_many`), commit avant
 et après. Mesure en cours sur les 15 440 fichiers (natif) : tailles des
 sidecars avant/après compaction à 10 k docs/segment.
 
-## 01:45 — compaction : deux courses corrigées, mesure en cours
+## ≈00:45 — compaction : deux courses corrigées, mesure en cours
 
 - Index natif complet (15 440 docs) avant compaction : **5 553 Mo, 264
   `.sfx`** (~88 segments par champ) — `sfx` 2 168, `word_sfxpost` 749,
@@ -132,7 +133,7 @@ sidecars avant/après compaction à 10 k docs/segment.
   `compact`, `index.compact(maxDocs)`, `?compact=N` en fin d'import.
 - Mesure « avant/après compaction à 10 k docs/segment » relancée.
 
-## 02:20 — compaction mesurée ; la course est réglée à la source
+## ≈00:50 — compaction mesurée ; la course est réglée à la source
 
 - `compact` planifié **dans l'acteur** `segment_updater` (`SuCompactMsg`) :
   il seul sait quels segments une fusion tient, donc son plan ne peut pas
@@ -157,10 +158,35 @@ sidecars avant/après compaction à 10 k docs/segment.
   cible réaliste immédiate est un corpus plus petit ou un index côté
   serveur + deltas ; à décider au réveil.
 
-## 02:35 — suites complètes vertes, commit
+## ≈00:52 — suites complètes vertes, commit
 
 lib **1416** (le test des permis de fusion en plus), lucivy-core 23
 binaires verts hors `bench_sharding` t01/t04 (pré-existants), WASM release
 rebâti avec la compaction. Commit + push ci-dessous. Lancé ensuite : le
 corpus complet dans le navigateur avec `?compact=10000` pour mesurer les
 requêtes sur 21 `.sfx` au lieu de 300.
+
+## ≈00:55 — navigateur : indexation 809 s en release, compaction sans effet
+
+- Run complet `?corpus&compact=10000` en release : **809 s** (13,5 min),
+  parité 20/21 + ex æquo, temps de requête inchangés (5-17 s).
+- La compaction a « tourné » 24 s sans rien fusionner : 69-90 segments par
+  shard après. Cause : en WASM (une fusion à la fois), les lots de la policy
+  s'empilent en attente du permis (`start_merges` en attente 80-296 s dans
+  le graphe) et **tous leurs segments sont marqués en fusion** → le plan de
+  compaction ne voit aucun candidat. Correction : `IndexWriter::compact`
+  attend un index calme, `ShardedHandle::compact` refait des tours tant que
+  le nombre de segments baisse.
+- À reconsidérer au réveil : le permis unique + cascades = files
+  d'attente de tâches cooperatives ; une policy plus large en fin de lot
+  (ou pas de cascade pendant un chargement) serait plus sain que de
+  compacter après coup.
+
+## ≈01:05 — compaction itérative : natif 285 → 15 `.sfx`
+
+`IndexWriter::compact` attend un index calme avant de planifier ;
+`ShardedHandle::compact` refait des tours par shard tant que le nombre de
+segments baisse (deux tours sans progrès consécutifs = fini). Natif,
+15 440 docs, 10 k docs/segment : **5 fusions, 43 s, 285 → 15 `.sfx`,
+5 580 → 4 339 Mo** (`sfx` 2 150 → 1 544). Rejeu dans le navigateur après
+rebuild.
