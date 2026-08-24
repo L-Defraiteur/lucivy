@@ -136,6 +136,32 @@ impl<M: Send + 'static> Pool<M> {
             .collect()
     }
 
+    /// Scatter to a SUBSET of workers, each with its own message, and collect
+    /// the replies as `(worker index, reply)` in `targets` order. Workers
+    /// that are gone (send failed) or die without answering are skipped.
+    ///
+    /// The tool for a search whose caller already knows which shards hold
+    /// the candidates: only those shards work, each on its own share.
+    pub fn scatter_to<R, F>(&self, targets: &[usize], make_msg: F, label: &str) -> Vec<(usize, R)>
+    where
+        R: Send + 'static,
+        F: Fn(usize, Reply<R>) -> M,
+    {
+        let scheduler = global_scheduler();
+        let mut receivers = Vec::with_capacity(targets.len());
+        for &t in targets {
+            let idx = t % self.workers.len();
+            let (tx, rx) = reply::<R>();
+            if self.workers[idx].send(make_msg(idx, tx)).is_ok() {
+                receivers.push((idx, rx));
+            }
+        }
+        receivers
+            .into_iter()
+            .filter_map(|(idx, rx)| scheduler.try_wait(rx, label).ok().map(|r| (idx, r)))
+            .collect()
+    }
+
     /// Drain: wait until all workers have processed their pending messages.
     ///
     /// Sends a "ping" reply to each worker and waits for all responses.
