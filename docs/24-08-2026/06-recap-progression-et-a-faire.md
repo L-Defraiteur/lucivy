@@ -72,10 +72,16 @@ déterministes ; `node_ids_of(&results)` évite de recharger les documents.
    OPFS de WASMFS sur pthreads** (Asyncify réentré par `checkMailbox`) →
    retiré ; 4 Go atteints par 4 fusions simultanées sans mmap →
    `merge_permits` (1 fusion à la fois en wasm) + lectures paresseuses de
-   `StdFsDirectory` (cache LRU borné). Premier commit passé, tas ~0,9-1,6 Go.
-   Reste : finir l'indexation complète, panel de parité vs natif
-   (`playground/parity_*`), build release (le debug est ~18× plus lent que
-   le natif 32 bits sur le build v3), régénérer un dataset de démo v3.
+   `StdFsDirectory` (cache LRU borné). **Nuit du 24 au 25** (journal
+   `docs/25-08-2026/01-journal-nuit.md`, doc 42 rag3weaver) : les 15 440
+   fichiers indexés (~15 min), **parité 20/21 + 1 ex æquo** avec le natif
+   sur 21 requêtes tous modes ; handles paresseux qui épinglent les fichiers
+   supprimés (sémantique unlink) ; `?open=`, `?compact=`, `?cache=`.
+   Le mur : l'index fait 11× le texte même compacté (4,4 Go pour 400 Mo),
+   requêtes 4-14 s en release comme en debug parce que les sidecars sont
+   relus depuis OPFS à chaque requête. Reste : décider entre corpus plus
+   petit / index serveur + deltas / lecteurs par plage + format ;
+   régénérer un dataset de démo v3.
 3. ~~**Bindings natifs** : recompiler et rejouer les smokes~~ — fait le 24 au
    soir sur la branche wip : Python et Node recompilés, smokes étendus aux
    deux formes de `parse` (warnings, highlights, `AND` avec mot absent → 0),
@@ -101,8 +107,10 @@ déterministes ; `node_ids_of(&results)` évite de recharger les documents.
 8. **Perf FTS** : `verify_literal` = 40-70 % du CPU des requêtes à gros
    volume de spans ; deltas LUCIDS après grosses fusions (un segment fusionné
    repart entier — à borner côté policy si ça gêne).
-   **Fusion v3 en arènes** (`merge_segments_v3`, trouvé dans le navigateur
-   la nuit du 24) : la clé d'intern `(bool, String, u16, u8, bool)` alloue
+   **Fusion v3 en arènes** — *fait la nuit du 24 au 25* (`ab441ad` et
+   suite) : 643 → 406 ms sur 14 segments / 650 k tokens, sortie identique ;
+   reste le type de sortie (`SfxCollectorDataV3`, 650 k `String`) à passer
+   en arène. Contexte d'origine : la clé d'intern `(bool, String, u16, u8, bool)` alloue
    un `String` par entrée *avant* le `get` (650 k pour 500 docs),
    `token_texts` = 650 k `String`, `token_postings`/`word_postings` = 2 ×
    650 k `Vec`. À remplacer par une recherche empruntée (ou empreinte u64 +

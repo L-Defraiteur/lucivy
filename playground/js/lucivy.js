@@ -155,6 +155,11 @@ export class LucivyIndex {
         return this._lucivy._call('rollback', { path: this.path });
     }
 
+    /** Merge every shard down to segments of at most `maxDocs` documents. */
+    compact(maxDocs = 10000) {
+        return this._lucivy._call('compact', { path: this.path, maxDocs });
+    }
+
     drainMerges() {
         return this._lucivy._call('drainMerges', { path: this.path });
     }

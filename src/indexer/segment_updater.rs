@@ -395,6 +395,28 @@ impl SegmentUpdater {
     /// Unlike `start_merge`, the merges run concurrently as scheduler tasks;
     /// the actor only does the bookkeeping around them. See
     /// `SegmentUpdaterState::handle_start_merges`.
+    /// Merge the committed segments into groups of at most `max_docs`
+    /// documents (planned by the actor, see `SuCompactMsg`); returns once
+    /// the batch is registered.
+    pub fn compact(&self, max_docs: usize) -> crate::Result<()> {
+        if !self.is_alive() {
+            return Err(LucivyError::SystemError("Segment updater killed".to_string()));
+        }
+        let (env, rx) = super::segment_updater_actor::SuCompactMsg {
+            max_docs: max_docs.min(u32::MAX as usize) as u32,
+        }.into_request();
+        self.actor_ref
+            .send(env)
+            .map_err(|_| LucivyError::SystemError("Segment updater actor died".to_string()))?;
+        match crate::actor::scheduler::global_scheduler().wait(rx, "compact") {
+            Ok(_) => Ok(()),
+            Err(err_bytes) => Err(
+                LucivyError::decode(&err_bytes)
+                    .unwrap_or_else(|e| LucivyError::SystemError(format!("decode: {e}")))
+            ),
+        }
+    }
+
     pub fn start_merges(
         &self,
         merge_operations: Vec<MergeOperation>,

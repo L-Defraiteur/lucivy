@@ -765,6 +765,15 @@ async function importFiles(fileList) {
     await userIndex.commit();
     statusEl.textContent = `Merging segments...`;
     await userIndex.drainMerges();
+    // `?compact=N`: merge down to segments of at most N docs once the load
+    // is done — hundreds of small segments mean hundreds of suffix FSTs.
+    const compactDocs = parseInt(new URLSearchParams(location.search).get('compact') || '0', 10);
+    if (compactDocs > 0) {
+      statusEl.textContent = `Compacting to ${compactDocs} docs per segment...`;
+      const t = performance.now();
+      await userIndex.compact(compactDocs);
+      console.log(`[playground] compact(${compactDocs}) in ${((performance.now() - t) / 1000).toFixed(1)}s`);
+    }
     userNumDocs = await userIndex.numDocs();
 
     tabUser.classList.remove('disabled');

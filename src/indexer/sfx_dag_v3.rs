@@ -302,7 +302,6 @@ pub struct SegmentSfxV3<'a> {
 pub fn merge_segments_v3(
     segments: &[SegmentSfxV3<'_>],
 ) -> Result<SfxCollectorDataV3, String> {
-    use std::collections::HashMap;
     use crate::suffix_fst::collector_v3::WordStrippedEntry;
 
     for (i, seg) in segments.iter().enumerate() {

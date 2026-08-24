@@ -2111,37 +2111,16 @@ impl ShardedHandle {
     /// 15,440 kernel files left 400 segments and 2.5 GB of `.sfx` where
     /// the suffixes are largely shared. Call this once the load is done.
     /// Groups are merged in parallel where the merge permits allow it
-    /// (`LUCIVY_MERGE_CONCURRENCY`); returns the number of merges run.
+    /// (`LUCIVY_MERGE_CONCURRENCY`); returns the number of shards compacted.
     pub fn compact(&self, max_docs: usize) -> Result<usize, String> {
         self.ensure_open()?;
         self.commit()?;
         let mut merges = 0usize;
         for (i, shard) in self.shards.iter().enumerate() {
-            let metas = shard.index.searchable_segment_metas()
-                .map_err(|e| format!("compact shard_{i}: {e}"))?;
-            let mut metas: Vec<_> = metas.into_iter().filter(|m| m.num_docs() > 0).collect();
-            metas.sort_by_key(|m| m.num_docs());
-            // Greedy packing under max_docs; a segment already above the cap
-            // stays alone, a group of one is not a merge.
-            let mut groups: Vec<Vec<ld_lucivy::index::SegmentId>> = Vec::new();
-            let mut current: Vec<ld_lucivy::index::SegmentId> = Vec::new();
-            let mut current_docs = 0usize;
-            for m in &metas {
-                let n = m.num_docs() as usize;
-                if !current.is_empty() && current_docs + n > max_docs {
-                    groups.push(std::mem::take(&mut current));
-                    current_docs = 0;
-                }
-                current.push(m.id());
-                current_docs += n;
-            }
-            if !current.is_empty() { groups.push(current); }
-            let groups: Vec<Vec<ld_lucivy::index::SegmentId>> = groups.into_iter().filter(|g| g.len() >= 2).collect();
-            if groups.is_empty() { continue; }
-            merges += groups.len();
             let mut guard = shard.writer.lock().map_err(|_| "writer lock poisoned")?;
             if let Some(ref mut writer) = *guard {
-                writer.merge_many(&groups).map_err(|e| format!("compact shard_{i}: {e}"))?;
+                writer.compact(max_docs).map_err(|e| format!("compact shard_{i}: {e}"))?;
+                merges += 1;
             }
         }
         // The commit waits for the merges it finds in flight and reloads.

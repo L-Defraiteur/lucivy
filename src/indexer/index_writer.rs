@@ -482,6 +482,22 @@ impl<D: Document> IndexWriter<D> {
         self.segment_updater.start_merges(ops)
     }
 
+    /// Merge the committed segments into groups of at most `max_docs`
+    /// documents. The segment updater plans it with full knowledge of the
+    /// merges in flight, so it never races the policy. Returns when the
+    /// merges of that plan are registered; a policy cascade may follow.
+    pub fn compact(&mut self, max_docs: usize) -> crate::Result<()> {
+        self.segment_updater.compact(max_docs)
+    }
+
+    /// Block until no merge task is in flight (the ones a commit or an
+    /// explicit `merge_many` started). A caller planning its own merges
+    /// waits here first: a segment already in a running merge cannot be
+    /// merged again.
+    pub fn wait_pending_merges(&self) -> crate::Result<()> {
+        self.segment_updater.wait_merging_thread()
+    }
+
     /// Rollback to the last commit
     ///
     /// This cancels all of the updates that

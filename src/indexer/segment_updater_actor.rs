@@ -76,6 +76,22 @@ impl Message for SuStartMergesMsg {
     fn decode(_: &[u8]) -> Result<Self, String> { Ok(Self) }
 }
 
+/// Compaction: pack the committed segments not already in a merge into
+/// groups of at most `max_docs` documents and merge each group. Planned
+/// inside the actor — it alone knows which segments a running merge holds,
+/// so a plan made here cannot be refused. Answered when the batch is done.
+pub(crate) struct SuCompactMsg {
+    pub max_docs: u32,
+}
+impl Message for SuCompactMsg {
+    fn type_tag() -> u64 { type_tag_hash(b"SuCompactMsg") }
+    fn encode(&self) -> Vec<u8> { self.max_docs.to_le_bytes().to_vec() }
+    fn decode(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() < 4 { return Err("too short".into()); }
+        Ok(Self { max_docs: u32::from_le_bytes(bytes[..4].try_into().unwrap()) })
+    }
+}
+
 /// Internal: the merge tasks of one `SuStartMergesMsg` have all completed.
 /// `local` carries `MergesDone`.
 pub(crate) struct SuMergesDoneMsg;
@@ -237,23 +253,44 @@ impl SegmentUpdaterState {
         let meta = self.shared.load_meta();
         let opstamp = meta.opstamp;
 
-        // Prepare, exactly as PrepareNode does.
-        let segment_entries = self.shared.purge_deletes(opstamp)?;
-        self.shared.segment_manager.commit(segment_entries);
-
         let batch_ids: Vec<crate::index::SegmentId> = merge_ops.iter()
             .flat_map(|op| op.segment_ids().iter().copied()).collect();
-        self.refuse_if_merging(&batch_ids)?;
-        let mut prepared: Vec<(MergeOperation, Vec<SegmentEntry>)> = Vec::new();
-        for op in &merge_ops {
-            let entries = self.shared.segment_manager.start_merge(op.segment_ids())?;
-            self.merging.extend(op.segment_ids().iter().copied());
-            self.shared.event_bus.emit(IndexEvent::MergeStarted {
-                segment_ids: op.segment_ids().to_vec(),
-                target_opstamp: op.target_opstamp(),
-            });
-            prepared.push((MergeOperation::new(op.target_opstamp(), op.segment_ids().to_vec()), entries));
-        }
+
+        // Prepare, exactly as PrepareNode does. A failure here (a segment
+        // already in a running merge, typically a caller's explicit merge
+        // racing the policy's) must still answer the waiter: an unanswered
+        // request is a panic on its side ("actor died without replying").
+        let prepare = |this: &mut Self| -> crate::Result<Vec<(MergeOperation, Vec<SegmentEntry>)>> {
+            let segment_entries = this.shared.purge_deletes(opstamp)?;
+            this.shared.segment_manager.commit(segment_entries);
+            this.refuse_if_merging(&batch_ids)?;
+            // Validate every operation before marking anything: a plan made
+            // a moment ago can name a segment a cascade has merged away, and
+            // marking the earlier operations' segments before that failure
+            // left them "in merge" forever (no batch would ever release them).
+            let mut prepared: Vec<(MergeOperation, Vec<SegmentEntry>)> = Vec::new();
+            for op in &merge_ops {
+                let entries = this.shared.segment_manager.start_merge(op.segment_ids())?;
+                prepared.push((MergeOperation::new(op.target_opstamp(), op.segment_ids().to_vec()), entries));
+            }
+            for op in &merge_ops {
+                this.merging.extend(op.segment_ids().iter().copied());
+                this.shared.event_bus.emit(IndexEvent::MergeStarted {
+                    segment_ids: op.segment_ids().to_vec(),
+                    target_opstamp: op.target_opstamp(),
+                });
+            }
+            Ok(prepared)
+        };
+        let prepared = match prepare(self) {
+            Ok(p) => p,
+            Err(e) => {
+                if let Some(r) = reply {
+                    r.send_err(crate::LucivyError::SystemError(format!("start_merges: {e}")));
+                }
+                return Err(e);
+            }
+        };
 
         let results: Arc<std::sync::Mutex<Vec<Option<super::commit_dag::MergeResult>>>> =
             Arc::new(std::sync::Mutex::new((0..prepared.len()).map(|_| None).collect()));
@@ -469,6 +506,52 @@ pub(crate) fn create_segment_updater_actor(
 
     // StartMerges: Vec<MergeOperation> in local — prepares inline, runs the
     // merges as tasks, replies from the SuMergesDoneMsg handler.
+    actor.register(TypedHandler::<SuCompactMsg, _>::new(
+        |state, msg, reply, _local, _ctx| {
+            let self_ref = state
+                .get::<crate::actor::mailbox::ActorRef<crate::actor::envelope::Envelope>>()
+                .unwrap().clone();
+            let su = state.get_mut::<SegmentUpdaterState>().unwrap();
+            let max_docs = msg.max_docs as usize;
+            let mut metas: Vec<crate::index::SegmentMeta> = su.shared.segment_manager
+                .committed_segment_metas()
+                .into_iter()
+                .filter(|m| m.num_docs() > 0 && !su.merging.contains(&m.id()))
+                .collect();
+            metas.sort_by_key(|m| m.num_docs());
+            let mut groups: Vec<Vec<crate::index::SegmentId>> = Vec::new();
+            let mut current: Vec<crate::index::SegmentId> = Vec::new();
+            let mut current_docs = 0usize;
+            for m in &metas {
+                let n = m.num_docs() as usize;
+                if !current.is_empty() && current_docs + n > max_docs {
+                    groups.push(std::mem::take(&mut current));
+                    current_docs = 0;
+                }
+                current.push(m.id());
+                current_docs += n;
+            }
+            if !current.is_empty() { groups.push(current); }
+            let opstamp = su.shared.load_meta().opstamp;
+            let ops: Vec<MergeOperation> = groups.into_iter()
+                .filter(|g| g.len() >= 2)
+                .map(|g| MergeOperation::new(opstamp, g))
+                .collect();
+            if ops.is_empty() {
+                if let Some(r) = reply { r.send(SuOkReply); }
+                return ActorStatus::Continue;
+            }
+            if crate::diag::is_verbose() {
+                eprintln!("[segment_updater] compact({max_docs}): {} merge(s): {:?}",
+                    ops.len(), ops.iter().map(|o| o.segment_ids().len()).collect::<Vec<_>>());
+            }
+            if let Err(e) = su.handle_start_merges(ops, reply, self_ref) {
+                eprintln!("[segment_updater] compact failed: {e}");
+            }
+            ActorStatus::Continue
+        },
+    ));
+
     actor.register(TypedHandler::<SuStartMergesMsg, _>::new(
         |state, _msg, reply, local, _ctx| {
             let ops = local.and_then(|l| l.downcast::<Vec<MergeOperation>>().ok()).map(|m| *m);

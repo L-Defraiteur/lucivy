@@ -683,6 +683,34 @@ pub extern "C" fn lucivy_commit_finish() -> *const c_char {
     }
 }
 
+/// Merge every shard's segments under `max_docs` documents and commit
+/// (`ShardedHandle::compact`). Runs on its own thread like the commit;
+/// poll `lucivy_commit_status_ptr` and finish with `lucivy_commit_finish`.
+#[no_mangle]
+pub unsafe extern "C" fn lucivy_compact_async(ctx: *mut LucivyContext, max_docs: u32) -> i32 {
+    if COMMIT_STATUS.load(Ordering::Relaxed) == 1 {
+        ring_write("[compact] commit already running!");
+        return -1;
+    }
+    COMMIT_STATUS.store(1, Ordering::Release);
+    let ctx_ptr = ctx as usize;
+    std::thread::spawn(move || {
+        let ctx = &*(ctx_ptr as *const LucivyContext);
+        ring_write("[compact-thread] started");
+        match ctx.handle.compact(max_docs as usize) {
+            Ok(n) => {
+                ring_write(&format!("[compact-thread] done, {n} merges"));
+                COMMIT_STATUS.store(2, Ordering::Release);
+            }
+            Err(e) => {
+                ring_write(&format!("[compact-thread] error: {e}"));
+                COMMIT_STATUS.store(3, Ordering::Release);
+            }
+        }
+    });
+    0
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn lucivy_drain_merges(ctx: *mut LucivyContext) -> *const c_char {
     // Reuse lucivy_commit (thread-based) — same commit logic.

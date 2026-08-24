@@ -115,3 +115,52 @@ Ajouté `ShardedHandle::compact(max_docs)` : regroupe les segments de
 chaque shard sous `max_docs` et les fusionne (`merge_many`), commit avant
 et après. Mesure en cours sur les 15 440 fichiers (natif) : tailles des
 sidecars avant/après compaction à 10 k docs/segment.
+
+## 01:45 — compaction : deux courses corrigées, mesure en cours
+
+- Index natif complet (15 440 docs) avant compaction : **5 553 Mo, 264
+  `.sfx`** (~88 segments par champ) — `sfx` 2 168, `word_sfxpost` 749,
+  `sfxpost` 611, `bytemap` 567, `termtexts` 308, `sibling_v3` 291,
+  `offsets` 209, `posmap` 167. Même ordre que le navigateur (5 904 Mo).
+- `compact()` a d'abord fait paniquer luciole : `start_merges` refusait un
+  segment déjà pris par une fusion de la policy et lâchait le `Reply` sans
+  répondre (« actor died without replying »). Corrigé : l'acteur répond
+  l'erreur ; `IndexWriter::wait_pending_merges()` ; `compact` planifie sur
+  un index calme et **re-planifie** si une fusion en cascade s'est
+  glissée entre-temps (20 essais, 100 ms).
+- Navigateur : `lucivy_compact_async` (thread + statut SAB), cas worker
+  `compact`, `index.compact(maxDocs)`, `?compact=N` en fin d'import.
+- Mesure « avant/après compaction à 10 k docs/segment » relancée.
+
+## 02:20 — compaction mesurée ; la course est réglée à la source
+
+- `compact` planifié **dans l'acteur** `segment_updater` (`SuCompactMsg`) :
+  il seul sait quels segments une fusion tient, donc son plan ne peut pas
+  être refusé ; `IndexWriter::compact(max_docs)` envoie et attend
+  `MergesDone` ; `ShardedHandle::compact` = par shard + commit. Au passage :
+  la préparation d'un lot de fusions est atomique (tout valider avant de
+  marquer — une 2e op qui échouait laissait la 1re « en fusion » pour
+  toujours) et un refus répond au demandeur au lieu de le faire paniquer.
+- **Natif, 15 440 fichiers, compaction à 10 k docs/segment : 4 fusions,
+  16,2 s, 294 → 21 `.sfx`, 5 642 → 4 449 Mo (−21 %)** : `sfx` 2 215 →
+  1 613 (le FST partage les suffixes), `bytemap` 568 → 425, `termtexts` 306
+  → 230 ; `word_sfxpost` (750 → 731) et `sfxpost` (614 → 559) ne bougent
+  pas — ce sont des postings, rien à partager. Mêmes comptes de hits,
+  requêtes 0,5-660 ms.
+- Conclusion pour le navigateur : même compacté, l'index fait **11× le
+  texte** (4,4 Go pour 400 Mo) ; un tas wasm de 4 Go ne le tiendra pas.
+  Les 2,5 Go de fichiers indexés par ordinal/doc (`word_sfxpost`,
+  `sfxpost`, `bytemap`, `sibling_v3`, `termtexts`, `posmap`,
+  `word_pos_map`) sont lisibles par plage ; le `.sfx` (1,6 Go) doit rester
+  résident tel quel (`&[u8]` contigu pour le FST). C'est un chantier de
+  format + lecteurs, pas un réglage. Pour 15-20 k docs en navigateur, la
+  cible réaliste immédiate est un corpus plus petit ou un index côté
+  serveur + deltas ; à décider au réveil.
+
+## 02:35 — suites complètes vertes, commit
+
+lib **1416** (le test des permis de fusion en plus), lucivy-core 23
+binaires verts hors `bench_sharding` t01/t04 (pré-existants), WASM release
+rebâti avec la compaction. Commit + push ci-dessous. Lancé ensuite : le
+corpus complet dans le navigateur avec `?compact=10000` pour mesurer les
+requêtes sur 21 `.sfx` au lieu de 300.

@@ -454,6 +454,20 @@ self.onmessage = async (e) => {
                 break;
             }
 
+            case 'compact': {
+                // Merge every shard down to segments of at most maxDocs
+                // documents (same thread + SAB status pattern as commit).
+                const ctx = getCtx(args.path);
+                const started = await Module.ccall('lucivy_compact_async', 'number', ['number', 'number'], [ctx, args.maxDocs || 10000], { async: true });
+                if (started !== 0) throw new Error('commit already running');
+                while (Atomics.load(self._commitStatusView, 0) === 1) {
+                    await new Promise(r => setTimeout(r, 50));
+                }
+                checkResult(await callStr('lucivy_commit_finish'));
+                result = true;
+                break;
+            }
+
             case 'drainMerges': {
                 // Same commit path as 'commit' (drain_merges is an alias in the
                 // binding); goes through the pthread + SAB status for the same reason.

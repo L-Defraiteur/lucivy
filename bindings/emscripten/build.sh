@@ -73,6 +73,7 @@ emcc "$STATIC_LIB" \
         "_lucivy_commit_async",
         "_lucivy_commit_status_ptr",
         "_lucivy_commit_finish",
+        "_lucivy_compact_async",
         "_lucivy_drain_merges",
         "_lucivy_dump_mermaid",
         "_lucivy_dump_state",

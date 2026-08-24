@@ -368,6 +368,7 @@ impl SfxPostReaderV2 {
                 let (bf, n) = decode_vint(&data[pos..]); pos += n;
                 let (bt, n) = decode_vint(&data[pos..]); pos += n;
                 f(doc_id, ti, bf, bt);
+                let _ = pos;
             }
         }
     }
