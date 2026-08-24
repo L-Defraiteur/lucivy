@@ -39,7 +39,10 @@ fn test_luce_playground_search() {
 
     let handle = snapshot::import_index(&data, dest).unwrap();
     let ndocs = handle.reader.searcher().num_docs();
-    eprintln!("Imported: {} docs\n", ndocs);
+    // The playground snapshot predates the v3 default (22 August): this is
+    // a migration test — a v2 index read by the current code. Its fuzzy
+    // highlights are v2 token-level spans, not the byte-exact v3 ones.
+    eprintln!("Imported: {} docs, sfx versions {:?}\n", ndocs, handle.sfx_versions());
 
     // === Contains exact ===
     for q in ["rag3weaver", "weaver", "rag3db"] {
@@ -88,8 +91,12 @@ fn test_luce_playground_search() {
             if let Some(fields) = hl_map {
                 if let Some(offsets) = fields.get("content") {
                     for hl in offsets {
-                        let start = hl[0];
-                        let end = hl[1].min(content.len());
+                        // Display only: a v2 snapshot reports token-level
+                        // spans that may land inside a multi-byte char.
+                        let mut start = hl[0].min(content.len());
+                        while start > 0 && !content.is_char_boundary(start) { start -= 1; }
+                        let mut end = hl[1].min(content.len());
+                        while end < content.len() && !content.is_char_boundary(end) { end += 1; }
                         let matched = &content[start..end];
                         let mut context_start = start.saturating_sub(10);
                         while context_start > 0 && !content.is_char_boundary(context_start) {
