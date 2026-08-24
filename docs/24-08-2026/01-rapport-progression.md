@@ -19,6 +19,15 @@ menée en tandem avec la session rag3weaver qui migre son FTS vers le
 | `close()` arrête les acteurs | `6e6bd24` | poursuite du SIGSEGV rag3db ; test-sentinelle « aucun appel au store après close » |
 | Emscripten : build OK | — | `lucivy.wasm` 8,5 Mo produit (emsdk 6.0.8 + nightly installés) ; exécution Node pend sur les ccall proxifiés — à reprendre |
 | lucistore : imports morts | `b09667e` | leur `-D warnings` passe |
+| Contrat highlights de `parse` pinné | `19f5133` | branche simple surligne, branche QueryParser laisse le sink vide (jamais faux) |
+| Plancher de commit : fsync du cache jetable | `9a66fbf` | 9 docs / 2 shards : 733 → 9,6 ms ; 4 shards 900 docs : 17,2 s → 38 ms |
+| `.managed.json` sauvé au point de commit | `e8ace07` | 135 → 2 sauvegardes au store par commit |
+| Routage collant (64 docs par indexeur) | `8e2db07` | 9 docs = 1 segment/shard : 340 → 81 fichiers, 232 → 6 suppressions |
+| Bug de chaîne « clé avalante » (v3) | `4d00531` | `<binder::Expression` retrouvé quand les chunkings diffèrent dans un segment ; panel 50k inchangé |
+| luciole : `Reply` lâché sous un pipe avertit | `e6176f5` | plus de collect muet |
+
+Harnais ajouté : `lucivy_core/tests/test_commit_floor.rs` (chronos et
+comptage des appels au store, `--ignored`).
 
 Suites à `6e6bd24` : **lib 1415/1415**, lucivy-core complet vert (t01/t04 de
 bench_sharding pré-existants, hors sujet), luciole 166, bindings natifs
@@ -59,3 +68,9 @@ nouvelle pour les dossiers docs : `JJ-MM-AAAA` (triable), ce dossier inaugure.
 4. `verify_literal` = 40-70 % du CPU des requêtes à gros volume (piste perf).
 5. Fusion post-suppressions : un gros segment fusionné repart entier dans un
    delta LUCIDS (à borner côté policy si ça gêne).
+6. `test_luce_playground_search` : pré-existant, un highlight fuzzy finissant
+   au milieu d'un `→` (invisible tant que `cargo test` s'arrêtait à
+   `bench_sharding` — lancer `--no-fail-fast`).
+7. Blob : ~91 appels au store par commit de petit lot (un par fichier de
+   segment). Palier suivant si un store à base le justifie : un blob par
+   segment.
