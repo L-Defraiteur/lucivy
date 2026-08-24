@@ -39,6 +39,9 @@ pub const MAX_NUM_THREAD: usize = 8;
 // reaches `PIPELINE_MAX_SIZE_IN_DOCS`
 const PIPELINE_MAX_SIZE_IN_DOCS: usize = 10_000;
 
+/// Documents routed to one indexer worker before moving to the next.
+const STICKY_DOCS_PER_WORKER: u64 = 64;
+
 fn error_in_index_worker_thread(context: &str) -> LucivyError {
     LucivyError::ErrorInThread(format!(
         "{context}. A worker thread encountered an error (io::Error most likely) or panicked."
@@ -78,8 +81,13 @@ pub struct IndexWriter<D: Document = LucivyDocument> {
 
     options: IndexWriterOptions,
 
-    /// Pool of indexer worker actors (round-robin dispatch).
+    /// Pool of indexer worker actors. Dispatch is sticky by runs of
+    /// `STICKY_DOCS_PER_WORKER` documents rather than per document: a
+    /// small batch lands in ONE segment instead of one per worker (each
+    /// segment is ~35 files, a store round trip each on blob storage),
+    /// while a bulk load still spreads over every worker.
     worker_pool: luciole::Pool<Envelope>,
+    dispatch_seq: std::sync::atomic::AtomicU64,
 
     index_writer_status: IndexWriterStatus<D>,
 
@@ -324,6 +332,7 @@ impl<D: Document> IndexWriter<D> {
             options: options.clone(),
             index: index.clone(),
             worker_pool,
+            dispatch_seq: std::sync::atomic::AtomicU64::new(0),
             index_writer_status,
             segment_updater,
             delete_queue,
@@ -795,8 +804,12 @@ impl<D: Document> IndexWriter<D> {
             return Err(error_in_index_worker_thread("An index writer was killed."));
         }
         let env = IndexerDocsMsg.into_envelope_with_local(add_ops);
+        let seq = self
+            .dispatch_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let worker = (seq / STICKY_DOCS_PER_WORKER) as usize;
         self.worker_pool
-            .send(env)
+            .send_to(worker, env)
             .map_err(|_| error_in_index_worker_thread("An index writer was killed."))
     }
 }
