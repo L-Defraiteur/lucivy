@@ -31,7 +31,7 @@ menée en tandem avec la session rag3weaver qui migre son FTS vers le
 | `ShardedHandle` fermé refuse proprement (`closed`) | `3c282c7` | search/commit/add_document → « handle is closed » |
 | **Scorer non monotone** : prescans fuzzy/regex v3 rendaient un `doc_tf` dans l'ordre d'un `HashMap` → underflow dans l'union `should`, `seek` qui sautait des docs | `8a91053` | la panique derrière le double free (doc 28) ; `debug_assert` de monotonie dans `CachedPrescan::new` |
 | `Pool::drain/shutdown/scatter` : worker parti ≠ panique dans `close()` | `a37d330` | dernier `Reply` lâché nommé par leur trace |
-| **`sparse_vector/`** : l'index sparse de rag3db rejoint le workspace, sur `lucistore`, sans pont C++ | `` | licence corrigée MIT → **Apache-2.0** (3 fichiers dérivés de Qdrant à 53-77 % verbatim, `NOTICE`) ; 34 tests |
+| **`sparse_vector/`** : l'index sparse de rag3db rejoint le workspace, sur `lucistore`, sans pont C++ | `e344b93` | licence corrigée MIT → **Apache-2.0** (3 fichiers dérivés de Qdrant à 53-77 % verbatim, `NOTICE`) ; 34 tests |
 | `parse` booléen → composite de contains (fin du QueryParser) | `8f14edc` | AND/OR/NOT, +/-, guillemets, parenthèses ; highlights et sous-chaîne dans les deux formes ; refus des négations pures |
 
 Harnais ajouté : `lucivy_core/tests/test_commit_floor.rs` (chronos et
