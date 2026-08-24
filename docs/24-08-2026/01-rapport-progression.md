@@ -73,11 +73,17 @@ nouvelle pour les dossiers docs : `JJ-MM-AAAA` (triable), ce dossier inaugure.
 ## Reste ouvert
 
 1. Publication crates.io 2.1.0 (`lucivy-core`, `ld-lucivy`, `luciole`,
-   `lucistore`) — rag3weaver vit sur `[patch.crates-io]` + chemin en attendant.
+   `lucistore`, et maintenant `sparse-vector`) — rag3weaver vit sur
+   `[patch.crates-io]` + chemin en attendant.
 2. Emscripten : exécuter (playground navigateur, son vrai habitat ; sous Node
    le main proxifié sort et les ccall pendent).
-3. SIGSEGV rag3db : attendre leur rejeu sur `6e6bd24` ; sinon gdb
-   (`thread apply all bt`) et la durée de vie de la connexion C++ chez eux.
+3. ~~SIGSEGV rag3db~~ : fermé (double free luciole `3675c3d`, scorer non
+   monotone `8a91053`, `Pool` tolérant `a37d330`) ; valgrind à 0 chez eux.
+9. Sparse : deltas LUCIDS (un shard modifié repart entier — il faudrait des
+   générations de postings), plafonds par bloc pour que l'élagage morde sur
+   les longues listes (0,1-0,4 % de postings sautés aujourd'hui), `tail_min`
+   pour élaguer aussi avec des poids négatifs, partage du seuil top-k entre
+   shards en distribué (`docs/24-08-2026/04-sparse-sharding-design.md`).
 4. `verify_literal` = 40-70 % du CPU des requêtes à gros volume (piste perf).
 5. Fusion post-suppressions : un gros segment fusionné repart entier dans un
    delta LUCIDS (à borner côté policy si ça gêne).
