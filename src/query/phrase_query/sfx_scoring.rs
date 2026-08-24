@@ -30,6 +30,11 @@ pub struct CachedPrescan {
 
 impl CachedPrescan {
     pub fn new(doc_tf: Vec<(DocId, u32)>, highlights: Vec<(DocId, usize, usize)>) -> Self {
+        // The scorer built on this list is a DocSet: monotonic by contract.
+        debug_assert!(
+            doc_tf.windows(2).all(|w| w[0].0 < w[1].0),
+            "prescan doc_tf must be sorted by doc and free of duplicates"
+        );
         Self { doc_tf, highlights }
     }
 

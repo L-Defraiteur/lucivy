@@ -103,12 +103,17 @@ impl FuzzyQueryV3 {
             self.strict_separators, seg_reader.max_doc(),
         );
 
-        // Deduplicate doc_tf from highlights
+        // Term frequency per doc: the map counts in O(n) over the
+        // highlights; the RESULT must be sorted by doc — a scorer built on
+        // it is a DocSet, and a union of DocSets reads `doc - window_start`
+        // (buffered_union): an unsorted list panicked there, and made
+        // `seek` skip documents.
         let mut tf_map: HashMap<DocId, u32> = HashMap::new();
         for &(doc_id, _, _) in &highlights {
             *tf_map.entry(doc_id).or_insert(0) += 1;
         }
-        let doc_tf: Vec<(DocId, u32)> = tf_map.into_iter().collect();
+        let mut doc_tf: Vec<(DocId, u32)> = tf_map.into_iter().collect();
+        doc_tf.sort_unstable_by_key(|&(d, _)| d);
 
         Ok((doc_tf, highlights))
     }

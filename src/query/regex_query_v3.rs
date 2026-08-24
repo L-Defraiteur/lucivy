@@ -96,11 +96,15 @@ impl RegexQueryV3 {
         let re = regex::RegexBuilder::new(&self.pattern).case_insensitive(true).build()
             .map_err(|e| crate::LucivyError::InvalidArgument(format!("regex: {e}")))?;
         let highlights = regex_verified::regex_verified(&ctx, &self.pattern, &plan, &re, seg_reader.max_doc());
+        // O(n) count over the highlights; the result is a DocSet source
+        // and must come out sorted by doc (see fuzzy_query_v3).
         let mut tf_map: HashMap<DocId, u32> = HashMap::new();
         for &(doc_id, _, _) in &highlights {
             *tf_map.entry(doc_id).or_insert(0) += 1;
         }
-        Ok((tf_map.into_iter().collect(), highlights))
+        let mut doc_tf: Vec<(DocId, u32)> = tf_map.into_iter().collect();
+        doc_tf.sort_unstable_by_key(|&(d, _)| d);
+        Ok((doc_tf, highlights))
     }
 
     fn prescan_segment_v2(

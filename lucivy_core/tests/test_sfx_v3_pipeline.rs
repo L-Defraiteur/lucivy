@@ -1512,6 +1512,38 @@ fn v3_sharded_fuzzy_regex_reach_all_shards() {
     }
 }
 
+/// A DocSet must be monotonic. The fuzzy v3 prescan built its per-segment
+/// doc list from a HashMap, so under a `should` union the buffered union
+/// read a doc below its window start — `doc - min_doc` underflow in
+/// debug, bitset index out of range in release (rag3weaver doc 28, the
+/// panic that became the double free). Many matching docs in ONE segment
+/// make an unsorted HashMap order near-certain.
+#[test]
+fn v3_fuzzy_union_docsets_are_sorted() {
+    let docs: Vec<String> = (0..48).map(|i| format!("rag3weaver number {i} safety")).collect();
+    let refs: Vec<&str> = docs.iter().map(|s| s.as_str()).collect();
+    let handle = make_handle(&refs);
+    let leaf = |value: &str, distance: u8| QueryConfig {
+        query_type: "contains".into(),
+        field: Some("content".into()),
+        value: Some(value.into()),
+        distance: Some(distance),
+        ..Default::default()
+    };
+    for _ in 0..8 {
+        let config = QueryConfig {
+            query_type: "boolean".into(),
+            should: Some(vec![leaf("rak3weaver", 1), leaf("safty", 1), leaf("numbr", 1)]),
+            ..Default::default()
+        };
+        let query = query::build_query(&config, &handle.schema, &handle.index, None).unwrap();
+        let searcher = handle.reader.searcher();
+        let collector = ld_lucivy::collector::TopDocs::with_limit(100).order_by_score();
+        let hits = searcher.search(&*query, &collector).unwrap();
+        assert_eq!(hits.len(), docs.len());
+    }
+}
+
 /// After `close()` every entry point answers with an error: the actor pools
 /// are stopped, and a request queued on a stopped actor would otherwise be
 /// dropped with its Reply (rag3weaver doc 26).
