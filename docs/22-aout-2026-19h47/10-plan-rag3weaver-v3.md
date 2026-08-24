@@ -49,11 +49,16 @@ shard, cf. tests).
 
 ## Les manques, à traiter côté lucivy
 
-1. **Chargement paresseux** : `BlobDirectory::new` matérialise TOUS les blobs à
-   l'ouverture (`list` + `load` de chaque fichier). Le but « blob chargé à
-   l'usage en mmap » demande une matérialisation par fichier au premier
-   `open_read`/`get_file_handle`/`atomic_read`. Palliatif immédiat : ouvrir les
-   handles par entité à la première requête (lazy au niveau index, pas fichier).
+1. **Chargement paresseux — FAIT le 24 août, optionnel.**
+   `BlobShardStorage::new(...).with_load_mode(BlobLoadMode::Lazy)` : rien à
+   l'ouverture sauf `meta.json`/`.managed.json`/`_config.json` (3,6 Ko mesurés
+   sur un index de 104 Ko) ; les sondes de footer sont servies par plage
+   depuis le store (`load_range`, ≤ 64 Ko) ; à la 4e lecture distante d'un
+   fichier, il est matérialisé en cache mmap. Le défaut reste **Eager**
+   (latence d'ouverture prévisible, premier search gratuit) — à benchmarker
+   par cas. Prérequis côté store pour le plein effet : implémenter
+   `blob_len` et `load_range` (défauts rétro-compatibles : `None` = repli
+   sur téléchargement complet au premier accès).
 2. **Publication crates.io** : le pin `lucivy-core = "2.0.0"` de rag3weaver est
    un instantané pré-v3 ; le workspace local est aussi en 2.0.0 (non publié
    depuis). Bump 2.1.0 + publish (avec `ld-lucivy`, `luciole`, `lucistore`), ou

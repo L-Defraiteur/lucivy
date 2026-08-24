@@ -111,3 +111,76 @@ fn v3_blob_storage_create_reopen_search() {
     }
     let _ = std::fs::remove_dir_all(&cache_b);
 }
+
+/// Same store, opened lazily: identical answers, and the open itself must
+/// NOT have pulled the whole index — that is the point of the mode.
+#[test]
+fn v3_blob_storage_lazy_open_matches_eager() {
+    use lucivy_core::blob_directory::BlobLoadMode;
+
+    let store = Arc::new(MemBlobStore::new());
+    let scratch = std::env::var("V3_SCRATCH")
+        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+    let cache_e = format!("{scratch}/blob_v3_lazy_e");
+    let cache_l = format!("{scratch}/blob_v3_lazy_l");
+    let _ = std::fs::remove_dir_all(&cache_e);
+    let _ = std::fs::remove_dir_all(&cache_l);
+    let docs = docs();
+    let all: HashSet<u64> = (0..docs.len() as u64).collect();
+
+    {
+        let storage = BlobShardStorage::new(store.clone(), "lazy_v3", &cache_e);
+        let h = ShardedHandle::create_with_storage(Box::new(storage), &config(2)).unwrap();
+        add_all(&h, &docs);
+        h.close().unwrap();
+    }
+
+    fn cache_bytes(dir: &str) -> u64 {
+        fn walk(p: &std::path::Path, acc: &mut u64) {
+            if let Ok(rd) = std::fs::read_dir(p) {
+                for e in rd.flatten() {
+                    let path = e.path();
+                    if path.is_dir() { walk(&path, acc); }
+                    else if let Ok(m) = path.metadata() { *acc += m.len(); }
+                }
+            }
+        }
+        let mut n = 0; walk(std::path::Path::new(dir), &mut n); n
+    }
+
+    let storage = BlobShardStorage::new(store.clone(), "lazy_v3", &cache_l)
+        .with_load_mode(BlobLoadMode::Lazy);
+    let h = ShardedHandle::open_with_storage(Box::new(storage)).unwrap();
+    let after_open = cache_bytes(&cache_l);
+    let total: u64 = {
+        // Everything the store holds for this index, i.e. what eager pulls.
+        use lucistore::blob_store::BlobStore as _;
+        let mut n = 0;
+        for shard in ["Lucivy_lazy_v3/shard_0", "Lucivy_lazy_v3/shard_1"] {
+            for f in store.list(shard).unwrap() {
+                n += store.blob_len(shard, &f).unwrap().unwrap_or(0);
+            }
+        }
+        n
+    };
+    assert!(after_open < total / 2,
+        "lazy open pulled {after_open} of {total} bytes — not lazy");
+
+    for (label, query, expect) in [
+        ("strict long", q("shared_ptr<binder::Expression>", None, false), all.clone()),
+        ("relaxed", q("spinlockinit", None, false), all.clone()),
+        ("fuzzy d=1", q("kmalloc", Some(1), false), all.clone()),
+        ("regex", q(r"expr_[0-9]+", None, true), all.clone()),
+    ] {
+        let got = search_ids(&h, &query);
+        assert_eq!(got, expect, "{label} (lazy)");
+    }
+    let after_search = cache_bytes(&cache_l);
+    eprintln!("  lazy: {after_open} bytes after open, {after_search} after searches, {total} in store");
+    assert!(after_search > after_open,
+        "searches materialized nothing — repeated reads should switch to local");
+    h.close().unwrap();
+    let _ = std::fs::remove_dir_all(&cache_e);
+    let _ = std::fs::remove_dir_all(&cache_l);
+}
+

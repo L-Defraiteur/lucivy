@@ -211,6 +211,8 @@ pub struct BlobShardStorage<S: crate::blob_store::BlobStore> {
     index_name: String,
     /// Local cache base directory for mmap files.
     cache_base: std::path::PathBuf,
+    /// When blobs are pulled from the store (default: everything at open).
+    load_mode: crate::blob_directory::BlobLoadMode,
 }
 
 impl<S: crate::blob_store::BlobStore> BlobShardStorage<S> {
@@ -228,7 +230,17 @@ impl<S: crate::blob_store::BlobStore> BlobShardStorage<S> {
             store,
             index_name: index_name.into(),
             cache_base: cache_base.into(),
+            load_mode: crate::blob_directory::BlobLoadMode::Eager,
         }
+    }
+
+    /// Choose when blobs are pulled — see [`crate::blob_directory::BlobLoadMode`].
+    /// Lazy defers each file to its first byte read (first query pays for what
+    /// it touches); keep the default when predictable open-time loading is
+    /// preferable, or when the store cannot report sizes (`blob_len`).
+    pub fn with_load_mode(mut self, mode: crate::blob_directory::BlobLoadMode) -> Self {
+        self.load_mode = mode;
+        self
     }
 
     fn shard_name(&self, shard_id: usize) -> String {
@@ -248,10 +260,11 @@ impl<S: crate::blob_store::BlobStore> ShardStorage for BlobShardStorage<S> {
         config: &SchemaConfig,
     ) -> Result<LucivyHandle, String> {
         let shard_name = self.shard_name(shard_id);
-        let dir = crate::blob_directory::BlobDirectory::new(
+        let dir = crate::blob_directory::BlobDirectory::new_with_mode(
             self.store.clone(),
             &shard_name,
             &self.cache_base,
+            self.load_mode,
         )
         .map_err(|e| format!("cannot create blob dir shard_{shard_id}: {e}"))?;
         LucivyHandle::create(dir, config)
@@ -259,10 +272,11 @@ impl<S: crate::blob_store::BlobStore> ShardStorage for BlobShardStorage<S> {
 
     fn open_shard_handle(&self, shard_id: usize) -> Result<LucivyHandle, String> {
         let shard_name = self.shard_name(shard_id);
-        let dir = crate::blob_directory::BlobDirectory::new(
+        let dir = crate::blob_directory::BlobDirectory::new_with_mode(
             self.store.clone(),
             &shard_name,
             &self.cache_base,
+            self.load_mode,
         )
         .map_err(|e| format!("cannot open blob dir shard_{shard_id}: {e}"))?;
         LucivyHandle::open(dir)

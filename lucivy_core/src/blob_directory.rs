@@ -12,10 +12,11 @@
 //! - **Read**: delegate to `StdFsDirectory` (mmap-capable, zero-copy)
 //! - **Drop**: cleanup cache_dir
 
+use std::collections::HashMap;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use ld_lucivy::directory::error::{DeleteError, OpenReadError, OpenWriteError};
 use ld_lucivy::directory::{
@@ -50,6 +51,24 @@ pub struct BlobDirectory<S: BlobStore> {
     inner: NativeDirectory,
     cache_dir: Arc<PathBuf>,
     watch_router: Arc<RwLock<WatchCallbackList>>,
+    /// Lazy mode only: files known to the store but not yet in the cache,
+    /// with their size when the store can tell (`blob_len`). Eager mode
+    /// leaves this empty. Shared across clones (locks clone the directory).
+    pending: Arc<Mutex<HashMap<String, Option<u64>>>>,
+}
+
+/// When `BlobDirectory` pulls blobs from the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlobLoadMode {
+    /// Everything at open (the historical behaviour, and the default):
+    /// predictable latency, the first query pays nothing.
+    #[default]
+    Eager,
+    /// Nothing at open. A file whose size the store reports (`blob_len`)
+    /// is downloaded on its first BYTE read — index structures load when a
+    /// query first touches them; a file with unknown size is downloaded on
+    /// first open. First-query latency pays for what it touches.
+    Lazy,
 }
 
 impl<S: BlobStore> BlobDirectory<S> {
@@ -65,6 +84,16 @@ impl<S: BlobStore> BlobDirectory<S> {
     /// Materializes all existing blobs from the store into a local cache directory.
     /// If no blobs exist (fresh index), the cache dir is created empty.
     pub fn new(store: Arc<S>, index_name: impl Into<String>, cache_base: &Path) -> io::Result<Self> {
+        Self::new_with_mode(store, index_name, cache_base, BlobLoadMode::Eager)
+    }
+
+    /// `new`, choosing when blobs are pulled — see [`BlobLoadMode`].
+    pub fn new_with_mode(
+        store: Arc<S>,
+        index_name: impl Into<String>,
+        cache_base: &Path,
+        mode: BlobLoadMode,
+    ) -> io::Result<Self> {
         let index_name = index_name.into();
         let prefixed_name = format!("{BLOB_PREFIX}{index_name}");
         let seq = CACHE_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -77,16 +106,24 @@ impl<S: BlobStore> BlobDirectory<S> {
         let _ = std::fs::remove_dir_all(&cache_dir);
         std::fs::create_dir_all(&cache_dir)?;
 
-        // Materialize all blobs from the store (skip lock files — they are process-local)
+        // Skip lock files — they are process-local.
         let files = store.list(&prefixed_name)?;
+        let mut pending: HashMap<String, Option<u64>> = HashMap::new();
         for file_name in &files {
             if file_name.ends_with(".lock") { continue; }
-            let data = store.load(&prefixed_name, file_name)?;
-            let file_path = cache_dir.join(file_name);
-            if let Some(parent) = file_path.parent() {
-                std::fs::create_dir_all(parent)?;
+            match mode {
+                BlobLoadMode::Eager => {
+                    let data = store.load(&prefixed_name, file_name)?;
+                    let file_path = cache_dir.join(file_name);
+                    if let Some(parent) = file_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&file_path, &data)?;
+                }
+                BlobLoadMode::Lazy => {
+                    pending.insert(file_name.clone(), store.blob_len(&prefixed_name, file_name)?);
+                }
             }
-            std::fs::write(&file_path, &data)?;
         }
 
         let inner = NativeDirectory::open(&cache_dir)
@@ -98,7 +135,31 @@ impl<S: BlobStore> BlobDirectory<S> {
             inner,
             cache_dir: Arc::new(cache_dir),
             watch_router: Arc::new(RwLock::new(WatchCallbackList::default())),
+            pending: Arc::new(Mutex::new(pending)),
         })
+    }
+
+    /// Lazy mode: pull `name` from the store into the cache if it is still
+    /// pending. Returns whether the file is known at all (pending or local).
+    fn materialize(&self, name: &str) -> io::Result<()> {
+        let is_pending = self.pending.lock().unwrap().contains_key(name);
+        if !is_pending {
+            return Ok(());
+        }
+        if std::env::var("LUCIVY_BLOB_DEBUG").is_ok() {
+            eprintln!("[blob lazy] materialize {}/{name}", self.prefixed_name);
+            if std::env::var("LUCIVY_BLOB_TRACE").map_or(false, |v| name.ends_with(&v)) {
+                eprintln!("{}", std::backtrace::Backtrace::force_capture());
+            }
+        }
+        let data = self.store.load(&self.prefixed_name, name)?;
+        let file_path = self.cache_dir.join(name);
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&file_path, &data)?;
+        self.pending.lock().unwrap().remove(name);
+        Ok(())
     }
 
     /// Convert a Path to a file_name string for the blob store.
@@ -115,6 +176,7 @@ impl<S: BlobStore> Clone for BlobDirectory<S> {
             inner: self.inner.clone(),
             cache_dir: self.cache_dir.clone(),
             watch_router: self.watch_router.clone(),
+            pending: self.pending.clone(),
         }
     }
 }
@@ -172,21 +234,36 @@ impl<S: BlobStore> Drop for BlobWriter<S> {
 
 impl<S: BlobStore> Directory for BlobDirectory<S> {
     fn get_file_handle(&self, path: &Path) -> Result<Arc<dyn FileHandle>, OpenReadError> {
-        // Delegate to inner StdFsDirectory — reads from local cache (mmap-capable)
+        let name = Self::file_name(path);
+        if let Some(len) = self.pending.lock().unwrap().get(&name).copied() {
+            if let Some(len) = len {
+                // Known size: hand out a handle that downloads on first
+                // byte read. Opening a segment touches every file handle;
+                // only the structures a query actually reads get pulled.
+                return Ok(Arc::new(LazyBlobHandle {
+                    dir: self.clone(),
+                    name,
+                    len: len as usize,
+                    local: std::sync::OnceLock::new(),
+                    remote_reads: std::sync::atomic::AtomicU32::new(0),
+                }));
+            }
+            // Unknown size: the handle must answer len() now — download.
+            self.materialize(&name).map_err(|e| OpenReadError::wrap_io_error(e, path.to_path_buf()))?;
+        }
         self.inner.get_file_handle(path)
     }
 
     fn open_read(&self, path: &Path) -> Result<FileSlice, OpenReadError> {
-        // Delegate to inner — reads from local cache
-        self.inner.open_read(path)
+        Ok(FileSlice::new(self.get_file_handle(path)?))
     }
 
     fn open_write(&self, path: &Path) -> Result<WritePtr, OpenWriteError> {
         let fname = Self::file_name(path);
         let cache_path = self.cache_dir.as_ref().join(path);
 
-        // WORM semantics: fail if file already exists in cache
-        if cache_path.exists() {
+        // WORM semantics: fail if file already exists in cache or in the store
+        if cache_path.exists() || self.pending.lock().unwrap().contains_key(&fname) {
             return Err(OpenWriteError::FileAlreadyExists(cache_path));
         }
         if let Some(parent) = cache_path.parent() {
@@ -210,8 +287,14 @@ impl<S: BlobStore> Directory for BlobDirectory<S> {
     fn delete(&self, path: &Path) -> Result<(), DeleteError> {
         let fname = Self::file_name(path);
 
+        // A pending file has nothing local to delete.
+        let was_pending = self.pending.lock().unwrap().remove(&fname).is_some();
+
         // Delete from local cache
-        self.inner.delete(path)?;
+        match self.inner.delete(path) {
+            Err(DeleteError::FileDoesNotExist(_)) if was_pending => {}
+            other => other?,
+        }
 
         // Delete from blob store (best effort — cache is authoritative during runtime)
         let _ = self.store.delete(&self.prefixed_name, &fname);
@@ -219,11 +302,16 @@ impl<S: BlobStore> Directory for BlobDirectory<S> {
     }
 
     fn exists(&self, path: &Path) -> Result<bool, OpenReadError> {
+        if self.pending.lock().unwrap().contains_key(&Self::file_name(path)) {
+            return Ok(true);
+        }
         // Check local cache (authoritative during runtime)
         self.inner.exists(path)
     }
 
     fn atomic_read(&self, path: &Path) -> Result<Vec<u8>, OpenReadError> {
+        self.materialize(&Self::file_name(path))
+            .map_err(|e| OpenReadError::wrap_io_error(e, path.to_path_buf()))?;
         // Read from local cache
         self.inner.atomic_read(path)
     }
@@ -516,3 +604,78 @@ mod tests {
         assert_eq!(handle.reader.searcher().num_docs(), 50);
     }
 }
+
+// ─── Lazy handle ───────────────────────────────────────────────────────────
+
+/// A [`FileHandle`] over a blob that has not been downloaded yet. The size
+/// comes from [`BlobStore::blob_len`]; the first `read_bytes` materializes
+/// the blob into the cache and every read after that is served by the inner
+/// mmap-backed handle.
+struct LazyBlobHandle<S: BlobStore> {
+    dir: BlobDirectory<S>,
+    name: String,
+    len: usize,
+    local: std::sync::OnceLock<Arc<dyn FileHandle>>,
+    /// Remote range reads served so far — see `LAZY_REMOTE_READS_MAX`.
+    remote_reads: std::sync::atomic::AtomicU32,
+}
+
+impl<S: BlobStore> LazyBlobHandle<S> {
+    fn local(&self) -> io::Result<&Arc<dyn FileHandle>> {
+        if let Some(h) = self.local.get() {
+            return Ok(h);
+        }
+        self.dir.materialize(&self.name)?;
+        let handle = self.dir.inner.get_file_handle(Path::new(&self.name))
+            .map_err(|e| io::Error::other(format!("{e}")))?;
+        Ok(self.local.get_or_init(|| handle))
+    }
+}
+
+impl<S: BlobStore> std::fmt::Debug for LazyBlobHandle<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "LazyBlobHandle({}/{}, {} bytes)", self.dir.prefixed_name, self.name, self.len)
+    }
+}
+
+impl<S: BlobStore> ld_lucivy::HasLen for LazyBlobHandle<S> {
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+
+/// Reads at most this many bytes are served straight from the store
+/// (`load_range`) without materializing the blob. Footer and header probes
+/// at segment open fit far under it; anything bigger is real usage and
+/// pulls the file for mmap service.
+const LAZY_REMOTE_READ_MAX: usize = 64 * 1024;
+
+/// After this many remote range reads the file is materialized anyway:
+/// opening a segment probes a footer two or three times, a query that
+/// actually uses the structure reads it over and over — the switch point
+/// between "not worth downloading" and "stop paying a round-trip per read".
+const LAZY_REMOTE_READS_MAX: u32 = 4;
+
+impl<S: BlobStore> FileHandle for LazyBlobHandle<S> {
+    fn read_bytes(&self, range: std::ops::Range<usize>) -> io::Result<ld_lucivy::directory::OwnedBytes> {
+        if self.local.get().is_none()
+            && range.end - range.start <= LAZY_REMOTE_READ_MAX
+            && self.remote_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < LAZY_REMOTE_READS_MAX
+            && self.dir.pending.lock().unwrap().contains_key(&self.name)
+        {
+            if let Some(data) = self.dir.store.load_range(
+                &self.dir.prefixed_name,
+                &self.name,
+                range.start as u64..range.end as u64,
+            )? {
+                if std::env::var("LUCIVY_BLOB_DEBUG").is_ok() {
+                    eprintln!("[blob lazy] range {}..{} of {}/{}", range.start, range.end,
+                        self.dir.prefixed_name, self.name);
+                }
+                return Ok(ld_lucivy::directory::OwnedBytes::new(data));
+            }
+        }
+        self.local()?.read_bytes(range)
+    }
+}
+

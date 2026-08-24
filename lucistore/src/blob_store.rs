@@ -33,6 +33,28 @@ pub trait BlobStore: Send + Sync + 'static {
 
     /// List all file names for a given index.
     fn list(&self, index_name: &str) -> io::Result<Vec<String>>;
+
+    /// Size of a blob in bytes WITHOUT loading it, when the backend can
+    /// answer cheaply (`LENGTH(_data)` in SQL, HEAD on S3…). `Ok(None)` —
+    /// the default — means "unknown": lazy consumers then fall back to
+    /// materialising the file on first open instead of first byte read.
+    fn blob_len(&self, _index_name: &str, _file_name: &str) -> io::Result<Option<u64>> {
+        Ok(None)
+    }
+
+    /// Read a byte range of a blob without loading it whole, when the
+    /// backend can (`SUBSTRING(_data FROM … FOR …)` in SQL, ranged GET on
+    /// S3…). `Ok(None)` — the default — means "unsupported": lazy consumers
+    /// then materialise the whole blob instead. Out-of-bounds ranges are the
+    /// caller's bug; backends may truncate or error.
+    fn load_range(
+        &self,
+        _index_name: &str,
+        _file_name: &str,
+        _range: std::ops::Range<u64>,
+    ) -> io::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
 }
 
 /// In-memory blob store for testing.
@@ -57,6 +79,25 @@ impl Default for MemBlobStore {
 }
 
 impl BlobStore for MemBlobStore {
+    fn blob_len(&self, index_name: &str, file_name: &str) -> io::Result<Option<u64>> {
+        Ok(self.data.read().unwrap()
+            .get(index_name)
+            .and_then(|files| files.get(file_name))
+            .map(|b| b.len() as u64))
+    }
+
+    fn load_range(
+        &self,
+        index_name: &str,
+        file_name: &str,
+        range: std::ops::Range<u64>,
+    ) -> io::Result<Option<Vec<u8>>> {
+        Ok(self.data.read().unwrap()
+            .get(index_name)
+            .and_then(|files| files.get(file_name))
+            .map(|b| b[range.start as usize..(range.end as usize).min(b.len())].to_vec()))
+    }
+
     fn load(&self, index_name: &str, file_name: &str) -> io::Result<Vec<u8>> {
         let guard = self.data.read().map_err(|_| {
             io::Error::new(io::ErrorKind::Other, "lock poisoned")
