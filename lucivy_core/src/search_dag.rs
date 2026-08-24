@@ -556,11 +556,26 @@ pub(crate) fn build_search_dag(
     query_config: &QueryConfig,
     top_k: usize,
     highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
-    filter: Option<Arc<HashSet<u64>>>,
+    filter: ShardFilter,
 ) -> Result<Dag, String> {
     let mut dag = Dag::new();
     let num_shards = shards.len();
-    let is_multi = num_shards > 1;
+    // Shards that will run a search node, each with its filter. With a
+    // per-shard filter, shards holding none of the allowed ids stay idle:
+    // no bitset scan, no scoring, nothing to merge from them.
+    let active: Vec<(usize, Option<Arc<HashSet<u64>>>)> = match &filter {
+        ShardFilter::None => (0..num_shards).map(|i| (i, None)).collect(),
+        ShardFilter::All(set) => (0..num_shards).map(|i| (i, Some(Arc::clone(set)))).collect(),
+        ShardFilter::PerShard(per) => per
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| f.as_ref().map(|s| (i, Some(Arc::clone(s)))))
+            .collect(),
+    };
+    if active.is_empty() {
+        return Err("no shard holds any of the allowed ids".into());
+    }
+    let is_multi = active.len() > 1;
 
     // Build the query once BEFORE the DAG — avoids DFA/regex compilation inside the DAG.
     let query = crate::query::build_query(
@@ -632,29 +647,42 @@ pub(crate) fn build_search_dag(
     // N>1: search_0..N ∥ → merge_results → output
     // N=1: search_0 ─────────────────────→ output  (no merge)
 
-    for i in 0..num_shards {
-        let mut node = SearchShardNode::new(shard_pool.clone(), i, top_k);
-        if let Some(ref f) = filter {
+    for (shard_id, f) in &active {
+        let mut node = SearchShardNode::new(shard_pool.clone(), *shard_id, top_k);
+        if let Some(f) = f {
             node = node.with_filter(Arc::clone(f));
         }
-        dag.add_node(&format!("search_{i}"), node);
-        dag.connect("build_weight", "weight", &format!("search_{i}"), "weight")?;
+        dag.add_node(&format!("search_{shard_id}"), node);
+        dag.connect("build_weight", "weight", &format!("search_{shard_id}"), "weight")?;
     }
 
     dag.add_node("output", OutputNode);
 
     if is_multi {
-        dag.add_node("merge", MergeResultsNode::new(num_shards, top_k));
-        for i in 0..num_shards {
+        // Merge inputs are numbered by position among the active shards,
+        // not by shard id.
+        dag.add_node("merge", MergeResultsNode::new(active.len(), top_k));
+        for (pos, (shard_id, _)) in active.iter().enumerate() {
             dag.connect(
-                &format!("search_{i}"), "hits",
-                "merge", &format!("hits_{i}"),
+                &format!("search_{shard_id}"), "hits",
+                "merge", &format!("hits_{pos}"),
             )?;
         }
         dag.connect("merge", "results", "output", "results")?;
     } else {
-        dag.connect("search_0", "hits", "output", "results")?;
+        dag.connect(&format!("search_{}", active[0].0), "hits", "output", "results")?;
     }
 
     Ok(dag)
+}
+
+/// Which shards a search visits, and with which allowed-id filter.
+pub(crate) enum ShardFilter {
+    /// Every shard, unfiltered.
+    None,
+    /// Every shard, the same allowed set (the router could not place every id).
+    All(Arc<HashSet<u64>>),
+    /// One entry per shard: its share of the allowed ids, `None` when it
+    /// holds none of them and can stay idle.
+    PerShard(Vec<Option<Arc<HashSet<u64>>>>),
 }

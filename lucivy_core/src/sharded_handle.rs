@@ -1354,9 +1354,15 @@ pub(crate) struct ScoredEntry {
     pub doc_address: DocAddress,
 }
 
+impl ScoredEntry {
+    fn position(&self) -> (usize, u32, u32) {
+        (self.shard_id, self.doc_address.segment_ord, self.doc_address.doc_id)
+    }
+}
+
 impl PartialEq for ScoredEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.score == other.score
+        self.score == other.score && self.position() == other.position()
     }
 }
 
@@ -1369,12 +1375,16 @@ impl PartialOrd for ScoredEntry {
 }
 
 impl Ord for ScoredEntry {
+    /// Reversed on score (min-heap: the lowest score is evicted first) and
+    /// deterministic on ties: equal scores order by (shard, segment, doc)
+    /// ascending, so a merged ranking is reproducible and a search that
+    /// visits fewer shards returns a subsequence of the full one.
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Reverse: min-heap so we evict the lowest score when over capacity.
         other
             .score
             .partial_cmp(&self.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| self.position().cmp(&other.position()))
     }
 }
 
@@ -1866,7 +1876,45 @@ impl ShardedHandle {
         highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
         filter: Option<Arc<HashSet<u64>>>,
     ) -> Result<Vec<ShardedSearchResult>, String> {
+        use crate::search_dag::ShardFilter;
         self.ensure_open()?;
+        // A pre-filtered search goes only to the shards holding the allowed
+        // ids, each with its own share — the router knows where every id
+        // was inserted. An id it never saw sends the whole set everywhere.
+        let shard_filter = match filter {
+            None => ShardFilter::None,
+            Some(set) if set.is_empty() => return Ok(Vec::new()),
+            Some(set) => {
+                let router = self.router.lock().map_err(|_| "router lock poisoned")?;
+                let mut groups: Vec<HashSet<u64>> = vec![HashSet::new(); self.shards.len()];
+                let mut all_known = true;
+                for &id in set.iter() {
+                    match router.shard_for_node_id(id) {
+                        Some(sid) if sid < groups.len() => {
+                            groups[sid].insert(id);
+                        }
+                        _ => {
+                            all_known = false;
+                            break;
+                        }
+                    }
+                }
+                drop(router);
+                if all_known {
+                    if groups.iter().all(HashSet::is_empty) {
+                        return Ok(Vec::new());
+                    }
+                    ShardFilter::PerShard(
+                        groups
+                            .into_iter()
+                            .map(|g| (!g.is_empty()).then(|| Arc::new(g)))
+                            .collect(),
+                    )
+                } else {
+                    ShardFilter::All(set)
+                }
+            }
+        };
         let mut dag = crate::search_dag::build_search_dag(
             &self.shards,
             &self.shard_pool,
@@ -1875,7 +1923,7 @@ impl ShardedHandle {
             query_config,
             top_k,
             highlight_sink,
-            filter,
+            shard_filter,
         )?;
 
         let mut result = luciole::execute_dag(&mut dag, None)
@@ -1999,6 +2047,29 @@ impl ShardedHandle {
         all_hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         all_hits.truncate(top_k);
         Ok(all_hits)
+    }
+
+    /// The `_node_id` of each result, read from the fast field — no document
+    /// fetch. What a host needs to join hits with its own records.
+    pub fn node_ids_of(&self, results: &[ShardedSearchResult]) -> Result<Vec<u64>, String> {
+        results
+            .iter()
+            .map(|r| {
+                let shard = self
+                    .shards
+                    .get(r.shard_id)
+                    .ok_or_else(|| format!("shard {} not found", r.shard_id))?;
+                let searcher = shard.reader.searcher();
+                let seg = searcher.segment_reader(r.doc_address.segment_ord);
+                let column = seg
+                    .fast_fields()
+                    .u64(NODE_ID_FIELD)
+                    .map_err(|e| format!("fast field {NODE_ID_FIELD}: {e}"))?;
+                column
+                    .first(r.doc_address.doc_id)
+                    .ok_or_else(|| format!("doc {:?} has no {NODE_ID_FIELD}", r.doc_address))
+            })
+            .collect()
     }
 
     /// Search and return results with resolved documents and highlights.
@@ -2270,6 +2341,12 @@ impl ShardedHandle {
     }
 
     /// Get router statistics (doc counts per shard, etc.).
+    /// Shard holding `node_id`, if the router saw it inserted — what a
+    /// pre-filtered search uses to visit only the shards that matter.
+    pub fn shard_for_node_id(&self, node_id: u64) -> Option<usize> {
+        self.router.lock().ok()?.shard_for_node_id(node_id)
+    }
+
     pub fn router_stats(&self) -> Result<(Vec<u64>, u64), String> {
         let router = self.router.lock().map_err(|_| "router lock poisoned")?;
         Ok((router.shard_doc_counts().to_vec(), router.total_docs()))

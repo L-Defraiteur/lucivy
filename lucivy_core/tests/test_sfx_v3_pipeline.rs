@@ -1544,6 +1544,61 @@ fn v3_fuzzy_union_docsets_are_sorted() {
     }
 }
 
+/// A pre-filtered search goes only to the shards holding the allowed ids
+/// (the router knows where each id was inserted). Whatever the subset —
+/// one id, one shard's worth, ids spread everywhere — the answer is the
+/// unfiltered ranking restricted to the allowed ids, with the same scores:
+/// BM25 statistics stay global, only the visits are pruned.
+#[test]
+fn v3_sharded_filter_routes_to_holding_shards() {
+    use lucivy_core::sharded_handle::{ShardedHandle, RamShardStorage};
+    use std::collections::HashSet;
+    let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+        "fields": [{"name": "content", "type": "text", "stored": true}],
+        "sfx_version": 3,
+        "shards": 4
+    })).unwrap();
+    let h = ShardedHandle::create_with_storage(Box::new(RamShardStorage::new()), &config).unwrap();
+    let content_f = h.field("content").unwrap();
+    let n = 24u64;
+    for i in 0..n {
+        let mut doc = ld_lucivy::LucivyDocument::new();
+        doc.add_text(content_f, &format!("kmalloc buffer_{i:04} {}", if i % 2 == 0 { "spin_lock" } else { "mutex" }));
+        h.add_document(doc, i).unwrap();
+    }
+    h.commit().unwrap();
+    let q = QueryConfig {
+        query_type: "contains".into(), field: Some("content".into()),
+        value: Some("kmalloc".into()), ..Default::default()
+    };
+    let full = h.search(&q, 100, None).unwrap();
+    assert_eq!(full.len(), n as usize);
+    let scored = |results: &[lucivy_core::sharded_handle::ShardedSearchResult]| -> Vec<(u64, f32)> {
+        h.node_ids_of(results).unwrap().into_iter().zip(results.iter().map(|r| r.score)).collect()
+    };
+    let full_scored = scored(&full);
+    let one_shard: Vec<u64> = (0..n).filter(|id| h.shard_for_node_id(*id) == Some(0)).collect();
+    assert!(!one_shard.is_empty());
+    for (label, allowed) in [
+        ("one id", vec![5u64]),
+        ("one shard", one_shard),
+        ("spread", (0..n).step_by(5).collect()),
+        ("all", (0..n).collect()),
+        ("unknown ids too", vec![3u64, 900, 901]),
+    ] {
+        let set: HashSet<u64> = allowed.iter().copied().collect();
+        let got = h.search_filtered(&q, 100, None, set.clone()).unwrap();
+        let got_scored = scored(&got);
+        let expect: Vec<(u64, f32)> = full_scored.iter().filter(|(id, _)| set.contains(id)).copied().collect();
+        assert_eq!(got_scored.len(), expect.len(), "{label}: {got_scored:?} vs {expect:?}");
+        for (g, e) in got_scored.iter().zip(&expect) {
+            assert_eq!(g.0, e.0, "{label}: order differs: {got_scored:?} vs {expect:?}");
+            assert!((g.1 - e.1).abs() < 1e-5, "{label}: score differs for {}: {} vs {}", g.0, g.1, e.1);
+        }
+    }
+    assert!(h.search_filtered(&q, 100, None, HashSet::new()).unwrap().is_empty());
+}
+
 /// After `close()` every entry point answers with an error: the actor pools
 /// are stopped, and a request queued on a stopped actor would otherwise be
 /// dropped with its Reply (rag3weaver doc 26).
