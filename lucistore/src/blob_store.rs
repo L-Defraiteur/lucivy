@@ -57,6 +57,38 @@ pub trait BlobStore: Send + Sync + 'static {
     }
 }
 
+/// Every method forwards, so `Arc<dyn BlobStore>` (and `Arc<Concrete>`) can
+/// be used directly wherever an `S: BlobStore` is expected — e.g.
+/// `BlobShardStorage<Arc<dyn BlobStore>>` — without a hand-written bridge.
+impl<T: BlobStore + ?Sized> BlobStore for std::sync::Arc<T> {
+    fn load(&self, index_name: &str, file_name: &str) -> io::Result<Vec<u8>> {
+        (**self).load(index_name, file_name)
+    }
+    fn save(&self, index_name: &str, file_name: &str, data: &[u8]) -> io::Result<()> {
+        (**self).save(index_name, file_name, data)
+    }
+    fn delete(&self, index_name: &str, file_name: &str) -> io::Result<()> {
+        (**self).delete(index_name, file_name)
+    }
+    fn exists(&self, index_name: &str, file_name: &str) -> io::Result<bool> {
+        (**self).exists(index_name, file_name)
+    }
+    fn list(&self, index_name: &str) -> io::Result<Vec<String>> {
+        (**self).list(index_name)
+    }
+    fn blob_len(&self, index_name: &str, file_name: &str) -> io::Result<Option<u64>> {
+        (**self).blob_len(index_name, file_name)
+    }
+    fn load_range(
+        &self,
+        index_name: &str,
+        file_name: &str,
+        range: std::ops::Range<u64>,
+    ) -> io::Result<Option<Vec<u8>>> {
+        (**self).load_range(index_name, file_name, range)
+    }
+}
+
 /// In-memory blob store for testing.
 #[derive(Debug, Clone)]
 pub struct MemBlobStore {
