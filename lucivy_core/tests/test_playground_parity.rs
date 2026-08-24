@@ -73,6 +73,18 @@ fn playground_parity_native() {
         t0.elapsed().as_secs_f64(),
         h.num_docs()
     );
+    eprintln!("[parity] on disk before compaction: {}", dir_sizes(&dir));
+    // PARITY_COMPACT=<max docs per segment>: merge everything down, then
+    // measure again — the sidecar volume is what a browser has to hold.
+    if let Some(max_docs) = std::env::var("PARITY_COMPACT").ok().and_then(|v| v.parse::<usize>().ok()) {
+        let t = Instant::now();
+        let merges = h.compact(max_docs).unwrap();
+        eprintln!(
+            "[parity] compact({max_docs}): {merges} merges in {:.1}s\n[parity] on disk after compaction: {}",
+            t.elapsed().as_secs_f64(),
+            dir_sizes(&dir)
+        );
+    }
 
     let panel: Vec<serde_json::Value> =
         serde_json::from_str(&std::fs::read_to_string(&panel_path).unwrap()).unwrap();
@@ -108,4 +120,31 @@ fn playground_parity_native() {
     std::fs::write(&out, serde_json::to_string_pretty(&report).unwrap()).unwrap();
     eprintln!("[parity] written {out}");
     h.close().unwrap();
+}
+
+/// Bytes on disk under `dir`, per file extension, biggest first, plus the
+/// number of `.sfx` files (= segments carrying the content field).
+fn dir_sizes(dir: &Path) -> String {
+    use std::collections::HashMap;
+    let mut by_ext: HashMap<String, u64> = HashMap::new();
+    let mut total = 0u64;
+    let mut segments = 0usize;
+    fn walk(p: &Path, by_ext: &mut HashMap<String, u64>, total: &mut u64, segments: &mut usize) {
+        if let Ok(rd) = std::fs::read_dir(p) {
+            for e in rd.flatten() {
+                let path = e.path();
+                if path.is_dir() { walk(&path, by_ext, total, segments); continue; }
+                let len = e.metadata().map(|m| m.len()).unwrap_or(0);
+                let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("").to_string();
+                if ext == "sfx" { *segments += 1; }
+                *by_ext.entry(ext).or_default() += len;
+                *total += len;
+            }
+        }
+    }
+    walk(dir, &mut by_ext, &mut total, &mut segments);
+    let mut v: Vec<_> = by_ext.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    let parts: Vec<String> = v.iter().take(8).map(|(e, s)| format!("{e}:{}MB", s >> 20)).collect();
+    format!("{}MB total, {} .sfx files | {}", total >> 20, segments, parts.join(" "))
 }

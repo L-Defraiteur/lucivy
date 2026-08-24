@@ -32,7 +32,16 @@ for name, n in native.items():
     ok_top = n_ids == w_ids
     ok_score = all(abs(a['score'] - b['score']) < 1e-4 for a, b in zip(n['top'], w['top']))
     ok_spans = [t['spans'] for t in n['top']] == [t['spans'] for t in w['top']]
-    status = 'OK ' if (ok and ok_top and ok_score and ok_spans) else 'DIFF'
+    # Same documents, same scores, same spans, different order: ties broken
+    # by (shard, segment, doc), which depends on the segment layout — a
+    # browser-built index and a native one merge differently. Not a defect.
+    same_set = sorted(n_ids) == sorted(w_ids) \
+        and sorted(t['spans'] for t in n['top']) == sorted(t['spans'] for t in w['top'])
+    # Or every score in both top-10s is the same value: the top-10 is then an
+    # arbitrary window on a larger tie (a path filter where all hits score alike).
+    flat = len({round(t['score'], 4) for t in n['top']} | {round(t['score'], 4) for t in w['top']}) <= 1
+    tie = (not ok_top) and ok and (same_set and ok_score or flat)
+    status = 'OK ' if (ok and ok_top and ok_score and ok_spans) else ('TIE ' if tie else 'DIFF')
     if status == 'DIFF': fails += 1
     print(f"{status} {name:40} count {n['count']:6}/{w['count']:6}  "
           f"native {n['ms']:7.1f}ms  wasm {w['ms']:8.1f}ms  "

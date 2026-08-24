@@ -375,6 +375,7 @@ async function startup() {
     lucivy = new Lucivy('./js/lucivy-worker.js', {
       noOpfs: startupParams.has('noopfs'),
       verbose: startupParams.has('verbose'), // engine diagnostics (LUCIVY_VERBOSE, V3_PROFILE)
+      fileCacheMb: parseInt(startupParams.get('cache') || '0', 10) || 0, // ?cache=3000 (MB)
     });
     window._lucivy = lucivy;
     await lucivy.ready;

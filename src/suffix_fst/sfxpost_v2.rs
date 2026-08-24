@@ -350,6 +350,28 @@ impl SfxPostReaderV2 {
         })
     }
 
+    /// Visit every entry of an ordinal as `(doc_id, token_index, byte_from,
+    /// byte_to)` without allocating. The merge walks every ordinal of every
+    /// source segment this way — `entries()` built one `Vec` per ordinal
+    /// per segment on that path.
+    pub fn for_each_entry(&self, ordinal: u32, mut f: impl FnMut(u32, u32, u32, u32)) {
+        if ordinal >= self.num_terms { return; }
+        let Some(header) = self.read_ordinal_header(ordinal) else { return };
+        for i in 0..header.num_docs {
+            let doc_id = header.doc_id(i);
+            let offset = header.payload_offset(i) as usize;
+            let count = header.entry_count(i) as usize;
+            let data = &header.payload_data[offset..];
+            let mut pos = 0;
+            for _ in 0..count {
+                let (ti, n) = decode_vint(&data[pos..]); pos += n;
+                let (bf, n) = decode_vint(&data[pos..]); pos += n;
+                let (bt, n) = decode_vint(&data[pos..]); pos += n;
+                f(doc_id, ti, bf, bt);
+            }
+        }
+    }
+
     fn decode_doc_payload(&self, header: &OrdinalHeader, doc_idx: usize) -> Vec<(u32, u32, u32)> {
         let offset = header.payload_offset(doc_idx) as usize;
         let count = header.entry_count(doc_idx) as usize;

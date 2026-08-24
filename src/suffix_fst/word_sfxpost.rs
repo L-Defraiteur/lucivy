@@ -153,6 +153,30 @@ impl<'a> WordSfxPostReader<'a> {
         })
     }
 
+    /// Visit every entry of an ordinal without allocating (the merge path).
+    pub fn for_each_entry(&self, ordinal: u32, mut f: impl FnMut(WordPostingEntry)) {
+        if ordinal >= self.num_ordinals {
+            return;
+        }
+        let off_base = 8 + ordinal as usize * 4;
+        let start = u32::from_le_bytes(self.data[off_base..off_base + 4].try_into().unwrap()) as usize;
+        let end = u32::from_le_bytes(self.data[off_base + 4..off_base + 8].try_into().unwrap()) as usize;
+        if start >= end || end > self.data.len() {
+            return;
+        }
+        for base in (start..end).step_by(ENTRY_SIZE) {
+            if base + ENTRY_SIZE > end { break; }
+            let b = &self.data[base..base + ENTRY_SIZE];
+            f(WordPostingEntry {
+                doc_id: u32::from_le_bytes(b[0..4].try_into().unwrap()),
+                first_position: u32::from_le_bytes(b[4..8].try_into().unwrap()),
+                last_position: u32::from_le_bytes(b[8..12].try_into().unwrap()),
+                byte_from: u32::from_le_bytes(b[12..16].try_into().unwrap()),
+                byte_to: u32::from_le_bytes(b[16..20].try_into().unwrap()),
+            });
+        }
+    }
+
     pub fn entries(&self, ordinal: u32) -> Vec<WordPostingEntry> {
         if ordinal >= self.num_ordinals {
             return Vec::new();

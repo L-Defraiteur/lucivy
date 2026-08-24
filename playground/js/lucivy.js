@@ -43,7 +43,11 @@ export class Lucivy {
             }
         };
 
-        this.ready = this._call('init', { noOpfs: !!options.noOpfs, verbose: !!options.verbose });
+        this.ready = this._call('init', {
+            noOpfs: !!options.noOpfs,
+            verbose: !!options.verbose,
+            fileCacheMb: options.fileCacheMb || 0,
+        });
     }
 
     _startLogRingPoller(sab, ringPtr, ringSize) {

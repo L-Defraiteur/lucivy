@@ -322,14 +322,49 @@ pub fn merge_segments_v3(
     let mut ns_postings = 0u128;
     let mut ns_sibling = 0u128;
 
-    // Word-stripped entries are keyed by (text, content_len), as in the
-    // collector: one key may hold several word shapes, each its own ordinal.
-    let mut global_intern: HashMap<(bool, String, u16, u8, bool), u32> = HashMap::new();
-    let mut token_texts: Vec<String> = Vec::new();
-    let mut token_meta: Vec<TokenMetaV3> = Vec::new();
-    let mut token_postings: Vec<Vec<(u32, u32, u32, u32)>> = Vec::new();
-    let mut word_postings: Vec<Vec<crate::suffix_fst::word_sfxpost::WordPostingEntry>> = Vec::new();
+    // ── Arenas ─────────────────────────────────────────────────────────
+    // Everything below is sized once from the sources and never
+    // reallocated: the merge of 14 kernel segments interns ~650k tokens and
+    // ~10M postings, and doing that with a String per key, a String per
+    // token and a Vec per ordinal meant millions of small allocations —
+    // 9 s of the 14 s a merge took in the browser, measurable natively too.
+    //
+    // - texts live in one byte arena, addressed by (start, len);
+    // - the intern table is open addressing over a hash of (shape, text),
+    //   compared against the arena, so a hit allocates nothing;
+    // - chunk and word postings go to two flat vectors tagged with their
+    //   intern ordinal, sorted once, then cut per ordinal.
+    let term_counts: Vec<u32> = segments.iter()
+        .map(|s| TermTextsReaderV3::open(s.termtexts).map(|t| t.num_terms()).unwrap_or(0))
+        .collect();
+    let total_terms: usize = term_counts.iter().map(|&n| n as usize).sum();
+    let total_text_bytes: usize = segments.iter().map(|s| s.termtexts.len()).sum();
 
+    let mut text_buf: Vec<u8> = Vec::with_capacity(total_text_bytes);
+    let mut text_start: Vec<u32> = Vec::with_capacity(total_terms);
+    let mut text_len: Vec<u32> = Vec::with_capacity(total_terms);
+    let mut token_meta: Vec<TokenMetaV3> = Vec::with_capacity(total_terms);
+    let mut token_hash: Vec<u64> = Vec::with_capacity(total_terms);
+
+    // Distinct tokens never exceed the sum of the sources' terms, so a table
+    // of twice that never needs to grow.
+    let table_cap = (total_terms * 2).next_power_of_two().max(1024);
+    let table_mask = table_cap - 1;
+    let mut table: Vec<u32> = vec![u32::MAX; table_cap];
+
+    fn shape_hash(is_ws: bool, own_len: u16, sep_len: u8, is_word_start: bool, text: &[u8]) -> u64 {
+        use std::hash::Hasher;
+        let mut h = rustc_hash::FxHasher::default();
+        h.write_u8(is_ws as u8);
+        h.write_u16(own_len);
+        h.write_u8(sep_len);
+        h.write_u8(is_word_start as u8);
+        h.write(text);
+        h.finish()
+    }
+
+    let mut chunk_post: Vec<(u32, u32, u32, u32, u32)> = Vec::new();
+    let mut word_post: Vec<(u32, crate::suffix_fst::word_sfxpost::WordPostingEntry)> = Vec::new();
     let mut sibling_pairs: Vec<(u32, u32, u16)> = Vec::new();
     let mut wpm_writer = crate::suffix_fst::word_pos_map::WordPosMapWriter::new();
 
@@ -341,13 +376,26 @@ pub fn merge_segments_v3(
             .and_then(crate::suffix_fst::word_sfxpost::WordSfxPostReader::open);
 
         let mut seg_ord_to_global: Vec<u32> = Vec::with_capacity(tt.num_terms() as usize);
+        // The doc remap is consulted once per posting (millions per
+        // segment): a dense table beats a hash lookup by a wide margin.
+        let remap_len = seg.doc_remap.keys().max().map(|&d| d as usize + 1).unwrap_or(0);
+        let mut remap: Vec<u32> = vec![u32::MAX; remap_len];
+        for (&old, &new) in seg.doc_remap.iter() {
+            remap[old as usize] = new;
+        }
+        let remap_doc = |d: u32| -> Option<u32> {
+            match remap.get(d as usize) {
+                Some(&n) if n != u32::MAX => Some(n),
+                _ => None,
+            }
+        };
         if prof {
             let len = |b: Option<&[u8]>| b.map(|x| x.len()).unwrap_or(0);
             eprintln!(
                 "  [merge] seg {seg_idx}: {} terms, {} docs kept | termtexts {} B, sfxpost {} B, word_sfxpost {} B, sibling {} B | global tokens so far {}",
                 tt.num_terms(), seg.doc_remap.len(),
                 seg.termtexts.len(), len(seg.sfxpost), len(seg.word_sfxpost), len(seg.sibling_v3),
-                token_texts.len(),
+                text_start.len(),
             );
         }
         let t_seg = std::time::Instant::now();
@@ -356,48 +404,64 @@ pub fn merge_segments_v3(
                 .ok_or_else(|| format!("segment {seg_idx}: missing entry at ordinal {old_ord}"))?;
             // Same shape key as the collector: a text carries one set of
             // (own_len, sep_len, is_word_start) per ordinal, never a winner's.
-            let key = (meta.is_word_stripped, text.to_string(), meta.own_len, meta.sep_len, meta.is_word_start);
-            let global_ord = if let Some(&existing) = global_intern.get(&key) {
-                existing
-            } else {
-                let new_ord = token_texts.len() as u32;
-                global_intern.insert(key, new_ord);
-                token_texts.push(text.to_string());
-                token_meta.push(TokenMetaV3 {
-                    own_len: meta.own_len,
-                    sep_len: meta.sep_len,
-                    overlap_len: meta.overlap_len,
-                    is_word_start: meta.is_word_start,
-                    // Only used while collecting (word-stripped grouping).
-                    word_id: 0,
-                    content_overlap: None,
-                    is_word_stripped: meta.is_word_stripped,
-                });
-                token_postings.push(Vec::new());
-                word_postings.push(Vec::new());
-                new_ord
+            let h = shape_hash(meta.is_word_stripped, meta.own_len, meta.sep_len, meta.is_word_start, text.as_bytes());
+            let mut slot = (h as usize) & table_mask;
+            let global_ord = loop {
+                let cand = table[slot];
+                if cand == u32::MAX {
+                    let new_ord = text_start.len() as u32;
+                    table[slot] = new_ord;
+                    text_start.push(text_buf.len() as u32);
+                    text_len.push(text.len() as u32);
+                    text_buf.extend_from_slice(text.as_bytes());
+                    token_hash.push(h);
+                    token_meta.push(TokenMetaV3 {
+                        own_len: meta.own_len,
+                        sep_len: meta.sep_len,
+                        overlap_len: meta.overlap_len,
+                        is_word_start: meta.is_word_start,
+                        // Only used while collecting (word-stripped grouping).
+                        word_id: 0,
+                        content_overlap: None,
+                        is_word_stripped: meta.is_word_stripped,
+                    });
+                    break new_ord;
+                }
+                let c = cand as usize;
+                if token_hash[c] == h {
+                    let m = &token_meta[c];
+                    let s = text_start[c] as usize;
+                    let l = text_len[c] as usize;
+                    if m.is_word_stripped == meta.is_word_stripped
+                        && m.own_len == meta.own_len
+                        && m.sep_len == meta.sep_len
+                        && m.is_word_start == meta.is_word_start
+                        && &text_buf[s..s + l] == text.as_bytes()
+                    {
+                        break cand;
+                    }
+                }
+                slot = (slot + 1) & table_mask;
             };
             seg_ord_to_global.push(global_ord);
 
             // Chunk postings (.sfxpost) — chunk-level coordinates.
             if let Some(r) = &sfxpost {
-                for e in r.entries(old_ord) {
-                    if let Some(&doc) = seg.doc_remap.get(&e.doc_id) {
-                        token_postings[global_ord as usize]
-                            .push((doc, e.token_index, e.byte_from, e.byte_to));
+                r.for_each_entry(old_ord, |doc_id, ti, bf, bt| {
+                    if let Some(doc) = remap_doc(doc_id) {
+                        chunk_post.push((global_ord, doc, ti, bf, bt));
                     }
-                }
+                });
             }
             // Word postings (.word_sfxpost) — word-level coordinates, own file.
             if let Some(r) = &wsp {
-                for e in r.entries(old_ord) {
-                    if let Some(&doc) = seg.doc_remap.get(&e.doc_id) {
-                        word_postings[global_ord as usize]
-                            .push(crate::suffix_fst::word_sfxpost::WordPostingEntry {
-                                doc_id: doc, ..e
-                            });
+                r.for_each_entry(old_ord, |e| {
+                    if let Some(doc) = remap_doc(e.doc_id) {
+                        word_post.push((global_ord, crate::suffix_fst::word_sfxpost::WordPostingEntry {
+                            doc_id: doc, ..e
+                        }));
                     }
-                }
+                });
             }
         }
 
@@ -427,12 +491,65 @@ pub fn merge_segments_v3(
         // word_pos_map is not read from the sources: it is derived below from the
         // merged word postings, exactly as the collector derives it from its own.
     }
+    drop(table);
     let ns_seg_loop = t_start.elapsed().as_nanos();
     let t_final = std::time::Instant::now();
 
+    let text_of = |i: usize| -> &str {
+        let s = text_start[i] as usize;
+        let l = text_len[i] as usize;
+        // The arena only ever receives whole `&str`s.
+        unsafe { std::str::from_utf8_unchecked(&text_buf[s..s + l]) }
+    };
+
+    // Group the flat postings by ordinal with a stable counting pass: the
+    // sources were walked in segment order and remapped doc ids grow with
+    // the segment, and each source lists an ordinal's entries in (doc,
+    // position) order, so every bucket comes out already sorted — the
+    // order the per-ordinal sort used to produce, byte-identical output.
+    // A bucket that is not sorted (it never happens; asserted in debug)
+    // is sorted on the spot rather than trusted.
+    let num_tokens = text_start.len();
+    fn bucket_by_ordinal<T: Clone + Ord>(items: Vec<(u32, T)>, num: usize) -> (Vec<(u32, T)>, Vec<u32>) {
+        let mut starts = vec![0u32; num + 1];
+        for (o, _) in &items {
+            starts[*o as usize + 1] += 1;
+        }
+        for o in 0..num {
+            starts[o + 1] += starts[o];
+        }
+        let mut fill = starts.clone();
+        let mut out: Vec<(u32, T)> = Vec::with_capacity(items.len());
+        // SAFETY-free version: place through an index vector, then gather.
+        let mut place: Vec<u32> = vec![0; items.len()];
+        for (i, (o, _)) in items.iter().enumerate() {
+            let slot = fill[*o as usize];
+            fill[*o as usize] += 1;
+            place[slot as usize] = i as u32;
+        }
+        for &i in &place {
+            out.push(items[i as usize].clone());
+        }
+        drop(items);
+        for o in 0..num {
+            let (a, b) = (starts[o] as usize, starts[o + 1] as usize);
+            let bucket = &mut out[a..b];
+            if !bucket.windows(2).all(|w| w[0].1 <= w[1].1) {
+                debug_assert!(false, "merge_segments_v3: bucket {o} arrived unsorted");
+                bucket.sort_unstable();
+            }
+        }
+        (out, starts)
+    }
+    let (chunk_post, chunk_starts) = {
+        let tagged: Vec<(u32, (u32, u32, u32, u32))> = chunk_post.into_iter()
+            .map(|(o, d, t, f, b)| (o, (d, t, f, b))).collect();
+        bucket_by_ordinal(tagged, num_tokens)
+    };
+    let (word_post, word_starts) = bucket_by_ordinal(word_post, num_tokens);
+
     // Assign final ordinals in text order. Chunk and word-stripped entries keep
     // separate ordinals even when their texts match — that is the whole point.
-    let num_tokens = token_texts.len();
     // The single-parent FST value holds a 24-bit ordinal. The build would
     // refuse the segment anyway; refuse here, before the derived indexes are
     // computed, and say which merge did it.
@@ -443,8 +560,8 @@ pub fn merge_segments_v3(
             segments.len(), crate::suffix_fst::builder_v3::SuffixFstBuilderV3::MAX_ORDINAL + 1));
     }
     let mut sorted_indices: Vec<u32> = (0..num_tokens as u32).collect();
-    sorted_indices.sort_by(|&a, &b| {
-        token_texts[a as usize].cmp(&token_texts[b as usize])
+    sorted_indices.sort_unstable_by(|&a, &b| {
+        text_of(a as usize).cmp(text_of(b as usize))
             .then(token_meta[a as usize].is_word_stripped.cmp(&token_meta[b as usize].is_word_stripped))
     });
 
@@ -454,6 +571,10 @@ pub fn merge_segments_v3(
     }
     let final_count = num_tokens as u32;
 
+    let mut token_texts: Vec<String> = Vec::with_capacity(num_tokens);
+    for i in 0..num_tokens {
+        token_texts.push(text_of(i).to_string());
+    }
     let mut tokens: Vec<String> = Vec::with_capacity(num_tokens);
     let mut own_lens: Vec<u16> = Vec::with_capacity(num_tokens);
     let mut content_postings: Vec<Vec<(u32, u32, u32, u32)>> = Vec::with_capacity(num_tokens);
@@ -466,17 +587,18 @@ pub fn merge_segments_v3(
         tokens.push(token_texts[i].clone());
         own_lens.push(token_meta[i].own_len);
 
-        let mut p = std::mem::take(&mut token_postings[i]);
-        p.sort();
+        let (cs, ce) = (chunk_starts[i] as usize, chunk_starts[i + 1] as usize);
+        let mut p: Vec<(u32, u32, u32, u32)> = chunk_post[cs..ce].iter().map(|&(_, e)| e).collect();
         p.dedup();
         content_postings.push(p);
 
-        let mut wp = std::mem::take(&mut word_postings[i]);
-        wp.sort();
-        wp.dedup();
-        for e in wp {
+        let (ws, we) = (word_starts[i] as usize, word_starts[i + 1] as usize);
+        let mut prev: Option<&crate::suffix_fst::word_sfxpost::WordPostingEntry> = None;
+        for (_, e) in &word_post[ws..we] {
+            if prev == Some(e) { continue; }
+            prev = Some(e);
             wpm_writer.add_word(e.doc_id, e.first_position, e.last_position, fo);
-            wsp_writer.add(fo, e);
+            wsp_writer.add(fo, e.clone());
         }
 
         if token_meta[i].is_word_stripped {

@@ -264,6 +264,7 @@ self.onmessage = async (e) => {
                     arguments: [
                         ...(args.noOpfs ? ['--no-opfs'] : []),
                         ...(args.verbose ? ['--verbose'] : []),
+                        ...(args.fileCacheMb ? [`--file-cache-mb=${args.fileCacheMb}`] : []),
                     ],
                 });
 

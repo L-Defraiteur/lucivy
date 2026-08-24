@@ -203,6 +203,18 @@ pub extern "C" fn __main_argc_argv(argc: i32, argv: *const *const c_char) -> i32
         !p.is_null() && CStr::from_ptr(p).to_bytes() == flag
     });
     let no_opfs = has_arg(b"--no-opfs");
+    // `--file-cache-mb=N`: budget of the lazy directory's whole-file cache
+    // (LUCIVY_FILE_CACHE_BYTES, 768 MB by default on wasm32).
+    for i in 0..argc.max(0) as usize {
+        let p = unsafe { *argv.add(i) };
+        if p.is_null() { continue; }
+        let a = unsafe { CStr::from_ptr(p) }.to_string_lossy();
+        if let Some(mb) = a.strip_prefix("--file-cache-mb=") {
+            if let Ok(mb) = mb.parse::<u64>() {
+                std::env::set_var("LUCIVY_FILE_CACHE_BYTES", (mb << 20).to_string());
+            }
+        }
+    }
     // `--verbose`: the engine's diagnostic prints (LUCIVY_VERBOSE, V3_PROFILE),
     // routed to the page through printErr.
     if has_arg(b"--verbose") {
@@ -221,7 +233,17 @@ pub extern "C" fn __main_argc_argv(argc: i32, argv: *const *const c_char) -> i32
         unsafe {
             let backend = wasmfs_create_opfs_backend();
             let path = CString::new("/opfs").unwrap();
-            let ret = wasmfs_create_directory(path.as_ptr(), 0o777, backend);
+            // Right after a page reload the mount can fail (ret=-20) while
+            // the previous worker's OPFS access handles are still being
+            // released; seen twice in a row, then a success with no change.
+            // A few short retries cover that window.
+            let mut ret = -1;
+            for attempt in 0..5 {
+                ret = wasmfs_create_directory(path.as_ptr(), 0o777, backend);
+                if ret == 0 { break; }
+                rlog!("[lucivy-wasm] OPFS mount attempt {} failed (ret={ret}), retrying", attempt + 1);
+                std::thread::sleep(std::time::Duration::from_millis(200 * (attempt + 1) as u64));
+            }
             if ret == 0 {
                 // OPFS mounted successfully.
                 // Create the base directory for indexes.
