@@ -1577,7 +1577,92 @@ impl ShardedHandle {
     /// For multi-shard: sends to ReaderActor (round-robin) for parallel tokenization,
     /// then RouterActor routes to the right shard.
     /// For single-shard: direct path (tokenize + send to shard, no pipeline overhead).
-    pub fn add_document(&self, doc: LucivyDocument, node_id: u64) -> Result<(), String> {
+    /// Make sure the document carries `node_id` in its `_node_id` field.
+    ///
+    /// The id given to `add_document` feeds the router; the field is what
+    /// search results, `search_filtered` and `delete_by_node_id` read back.
+    /// Forgetting the field used to "work" — until hits resolved to id 0 and
+    /// filters matched nothing — so it is stamped here, and a document that
+    /// already carries a DIFFERENT id is refused as a caller bug.
+    fn stamp_node_id(&self, doc: &mut LucivyDocument, node_id: u64) -> Result<(), String> {
+        use ld_lucivy::schema::document::Value;
+        let Some(nid_f) = self.field(NODE_ID_FIELD) else {
+            return Err(format!("schema has no {NODE_ID_FIELD} field"));
+        };
+        if let Some((_, v)) = doc.field_values().find(|(f, _)| *f == nid_f) {
+            return match v.as_value().as_u64() {
+                Some(e) if e == node_id => Ok(()),
+                other => Err(format!(
+                    "document carries {NODE_ID_FIELD}={other:?} but add_document was called                      with node_id={node_id}; pass the same id, or leave the field out —                      it is stamped automatically")),
+            };
+        }
+        doc.add_u64(nid_f, node_id);
+        Ok(())
+    }
+
+    /// Build a document from named fields and add it — no `Field` lookups,
+    /// no `_node_id` to remember. `fields` must be a JSON object; values are
+    /// checked against the schema (`text` wants a string, `u64` a number…)
+    /// and an unknown name says which fields exist instead of guessing.
+    ///
+    /// ```ignore
+    /// handle.add_document_json(42, &serde_json::json!({
+    ///     "title": "spin_lock", "content": "…", "stars": 5
+    /// }))?;
+    /// ```
+    pub fn add_document_json(&self, node_id: u64, fields: &serde_json::Value) -> Result<(), String> {
+        let obj = fields.as_object()
+            .ok_or_else(|| format!("fields must be a JSON object, got: {fields}"))?;
+        let mut doc = LucivyDocument::new();
+        for (name, value) in obj {
+            self.add_field_value(&mut doc, name, value)?;
+        }
+        self.add_document(doc, node_id)
+    }
+
+    /// One named field into `doc`, typed by the schema.
+    fn add_field_value(
+        &self,
+        doc: &mut LucivyDocument,
+        field_name: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), String> {
+        use ld_lucivy::schema::FieldType;
+        let field = self.field(field_name).ok_or_else(|| {
+            let known: Vec<&str> = self.field_map.iter()
+                .map(|(n, _)| n.as_str())
+                .filter(|n| *n != NODE_ID_FIELD)
+                .collect();
+            format!("unknown field {field_name:?} — schema fields: {known:?}")
+        })?;
+        match self.schema.get_field_entry(field).field_type() {
+            FieldType::Str(_) => {
+                let text = value.as_str()
+                    .ok_or_else(|| format!("field {field_name:?} is text, got: {value}"))?;
+                doc.add_text(field, text);
+            }
+            FieldType::U64(_) => {
+                let v = value.as_u64()
+                    .ok_or_else(|| format!("field {field_name:?} is u64, got: {value}"))?;
+                doc.add_u64(field, v);
+            }
+            FieldType::I64(_) => {
+                let v = value.as_i64()
+                    .ok_or_else(|| format!("field {field_name:?} is i64, got: {value}"))?;
+                doc.add_i64(field, v);
+            }
+            FieldType::F64(_) => {
+                let v = value.as_f64()
+                    .ok_or_else(|| format!("field {field_name:?} is f64, got: {value}"))?;
+                doc.add_f64(field, v);
+            }
+            other => return Err(format!("field {field_name:?}: unsupported type {other:?}")),
+        }
+        Ok(())
+    }
+
+    pub fn add_document(&self, mut doc: LucivyDocument, node_id: u64) -> Result<(), String> {
+        self.stamp_node_id(&mut doc, node_id)?;
         if self.shards.len() == 1 {
             // Direct path: no pipeline overhead for single shard.
             let hashes = extract_token_hashes_from(
@@ -1597,6 +1682,10 @@ impl ShardedHandle {
     /// tokenization. Each sub-batch is a single message — much less overhead
     /// than N individual add_document calls.
     pub fn add_documents(&self, docs: Vec<(LucivyDocument, u64)>) -> Result<(), String> {
+        let mut docs = docs;
+        for (doc, node_id) in &mut docs {
+            self.stamp_node_id(doc, *node_id)?;
+        }
         let n = self.reader_pool.len();
         let mut batches: Vec<Vec<(LucivyDocument, u64)>> = (0..n).map(|_| Vec::new()).collect();
         for (i, doc) in docs.into_iter().enumerate() {
@@ -1614,10 +1703,11 @@ impl ShardedHandle {
     /// Add a document with pre-computed token hashes (bypasses reader actors).
     pub fn add_document_with_hashes(
         &self,
-        doc: LucivyDocument,
+        mut doc: LucivyDocument,
         node_id: u64,
         token_hashes: &[u64],
     ) -> Result<usize, String> {
+        self.stamp_node_id(&mut doc, node_id)?;
         self.route_and_send(doc, node_id, token_hashes)
     }
 

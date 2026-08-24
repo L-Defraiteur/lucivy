@@ -1394,3 +1394,63 @@ fn v3_sharded_fuzzy_regex_reach_all_shards() {
         assert!(shards.len() > 1, "{label}: all results from shard(s) {shards:?}");
     }
 }
+
+/// The node id travels with `add_document` now: the field is stamped into
+/// the document, a mismatching explicit id is refused, and the JSON entry
+/// point needs neither `Field` lookups nor knowledge of `_node_id`.
+#[test]
+fn v3_node_id_is_stamped_automatically() {
+    use lucivy_core::sharded_handle::{ShardedHandle, RamShardStorage};
+    use std::collections::HashSet;
+    let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+        "fields": [
+            {"name": "content", "type": "text", "stored": true},
+            {"name": "stars", "type": "u64", "stored": true}
+        ],
+        "shards": 2
+    })).unwrap();
+    let h = ShardedHandle::create_with_storage(Box::new(RamShardStorage::new()), &config).unwrap();
+    let content_f = h.field("content").unwrap();
+
+    // 1. No _node_id in the doc: stamped from the argument.
+    let mut doc = ld_lucivy::LucivyDocument::new();
+    doc.add_text(content_f, "kmalloc without explicit node id");
+    h.add_document(doc, 7).unwrap();
+
+    // 2. JSON entry point: named fields, typed by the schema.
+    h.add_document_json(8, &serde_json::json!({
+        "content": "kmalloc via json", "stars": 5
+    })).unwrap();
+
+    // 3. Mismatching explicit id: refused loudly, not silently wrong.
+    let nid_f = h.field(NODE_ID_FIELD).unwrap();
+    let mut doc = ld_lucivy::LucivyDocument::new();
+    doc.add_u64(nid_f, 999);
+    doc.add_text(content_f, "mismatch");
+    let err = h.add_document(doc, 9).unwrap_err();
+    assert!(err.contains("_node_id"), "{err}");
+
+    // 4. Unknown field and wrong type: told what exists, not left guessing.
+    let err = h.add_document_json(10, &serde_json::json!({"contnt": "typo"})).unwrap_err();
+    assert!(err.contains("unknown field") && err.contains("content"), "{err}");
+    let err = h.add_document_json(10, &serde_json::json!({"stars": "five"})).unwrap_err();
+    assert!(err.contains("u64"), "{err}");
+
+    h.commit().unwrap();
+
+    // The stamped ids resolve: filter by them, delete by them.
+    let q = QueryConfig {
+        query_type: "contains".into(),
+        field: Some("content".into()),
+        value: Some("kmalloc".into()),
+        ..Default::default()
+    };
+    let all = h.search(&q, 10, None).unwrap();
+    assert_eq!(all.len(), 2);
+    let only_7 = h.search_filtered(&q, 10, None, HashSet::from([7])).unwrap();
+    assert_eq!(only_7.len(), 1);
+    h.delete_by_node_id(7).unwrap();
+    h.commit().unwrap();
+    let left = h.search(&q, 10, None).unwrap();
+    assert_eq!(left.len(), 1, "delete by stamped id must work");
+}

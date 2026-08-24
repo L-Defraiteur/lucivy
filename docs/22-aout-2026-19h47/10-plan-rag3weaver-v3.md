@@ -34,7 +34,7 @@ est le modèle à suivre.
 | rag3weaver (Cypher) | ShardedHandle |
 |---|---|
 | `CREATE_LUCIVY_INDEX(table, fields, filter_fields)` | `create_with_storage(BlobShardStorage::new(store, table, cache), &SchemaConfig{fields, sfx_version: 3, shards})` |
-| insert (hook C++) | `add_document(doc, offset)` avec `doc.add_u64(nid_f, offset)` **obligatoire** + champs texte |
+| insert (hook C++) | `add_document_json(offset, &fields)` (champs par nom, types vérifiés, erreurs explicites) ou `add_document(doc, offset)` — `_node_id` estampillé automatiquement depuis le 24 août, id contradictoire refusé |
 | delete (implicite) | `delete_by_node_id(offset)` |
 | `FLUSH_LUCIVY_INDEX` | `commit()` (idempotent, merges policy auto) |
 | `CLOSE_LUCIVY_INDEX` | `close()` |
