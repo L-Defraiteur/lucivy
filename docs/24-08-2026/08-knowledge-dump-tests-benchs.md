@@ -138,3 +138,43 @@ insertion 50k en 139 ms.
   luciole, lucistore ; `~/.ssh/config` `Host github.com` → clé perso,
   `Host github-sairen` → clé pro. Réécriture d'historique : branche de
   sauvegarde, `--force-with-lease`, `git diff` vide entre sauvegarde et HEAD.
+
+## Ajout nuit du 24 au 25 août — playground navigateur et WASM
+
+Build : `bash bindings/emscripten/build.sh` (release ; `LUCIVY_WASM_DEBUG=1`
+garde les noms de fonctions, `ASSERTIONS`, cookies de pile — pour lire une
+pile de trap dans la console, 2× plus lent). Plus d'Asyncify : incompatible
+avec le backend OPFS de WASMFS sur pthreads.
+
+Serveur : `cd playground && node serve.mjs 9877` (COOP/COEP, `diag.log`,
+`POST /eval` (worker) et `POST /eval/main` (page) pour exécuter du JS).
+
+Paramètres d'URL : `?corpus=<tar.gz servi>` (indexation directe, ex.
+`corpus-kernel-16k.tar.gz` généré depuis `/tmp/linux-bench`, non commité),
+`?open=<index>` (réouverture OPFS en place), `?compact=N` (compaction en fin
+d'import), `?cache=<Mo>` (budget du cache de fichiers), `?noopfs`,
+`?nodemo`, `?verbose` (`LUCIVY_VERBOSE` + `V3_PROFILE` dans le wasm).
+
+Parité : `playground/parity_panel.json` (21 requêtes) ; référence native
+`PARITY_ROOT=/tmp/linux-bench PARITY_LIST=/tmp/corpus_indexed.list
+PARITY_OUT=/tmp/parity_native.json cargo test --release -p lucivy-core
+--test test_playground_parity -- --ignored --nocapture` (+ `PARITY_MAX_DOCS`,
+`PARITY_COMPACT=<max docs>`, `LUCIVY_WRITER_HEAP`, `LUCIVY_WRITER_THREADS`,
+`LUCIVY_SCHEDULER_THREADS` pour reproduire la forme WASM) ; côté navigateur
+`playground/parity_run.js` (page, fire-and-poll `window._parityResult`) ou
+`parity_worker.js` (worker, ouvre l'index OPFS lui-même — pas si la page
+l'a déjà ouvert : verrou writer) ; `playground/parity_diff.py` (OK / TIE /
+DIFF).
+
+Diagnostic dans le wasm : ring SAB lu depuis le worker
+(`Module._lucivy_log_ring_ptr()`), hook de panic et allocateur qui y
+écrivent la pile ; `lucivy_dump_state`, `lucivy_dump_wait_graph_text`,
+`lucivy_test_fs_task` (FS depuis un thread scheduler). Mémoire :
+`Module.HEAPU8.length` (plafond mesuré 4 068 Mo). Tailles OPFS depuis la
+page : `navigator.storage.getDirectory()`.
+
+Points critiques appris : le thread JS du worker est le « main » du
+runtime — ne jamais le bloquer dans un ccall long (commit et compaction
+passent par un pthread + statut SAB) ; `LUCIVY_MERGE_CONCURRENCY` = 1 en
+wasm ; les handles de `StdFsDirectory` sont paresseux et épinglent un
+fichier supprimé tant qu'un searcher le tient.
