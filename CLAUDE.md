@@ -7,6 +7,9 @@ Moteur full-text search Rust avec substring matching via Suffix FST. Trois couch
 - **ld-lucivy** : moteur core (index, query, scoring, merger, segments, SFX engine)
 - **lucivy_core** : handle unifié (`ShardedHandle`), query builder, tokenizers, snapshot/delta, blob store
 - **luciole** : framework actor/DAG (crate séparé, WASM-safe)
+- **lucistore** : persistance partagée (BlobStore, ShardStorage, snapshot/delta, sync)
+- **sparse_vector** : index sparse (postings + WAND) sur lucistore — crate ami, **Apache-2.0**
+  (dérivé en partie de Qdrant, voir `sparse_vector/NOTICE`) ; les crates MIT n'en dépendent pas
 - **Bindings** (5 crates) :
   - CXX bridge rag3db : `lucivy_fts/rust/src/bridge.rs`
   - WASM emscripten : `bindings/emscripten/src/lib.rs` (extern "C" + SharedArrayBuffer + pthreads)

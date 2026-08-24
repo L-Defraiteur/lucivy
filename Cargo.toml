@@ -164,6 +164,7 @@ members = [
     "lucivy-fst",
     "luciole",
     "lucistore",
+    "sparse_vector",
 ]
 
 # Following the "fail" crate best practises, we isolate

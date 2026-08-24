@@ -1,0 +1,14 @@
+[package]
+name = "sparse-vector"
+version = "0.3.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Sparse vector inverted index with WAND pruning, persisted through lucistore — a lucivy friend crate. Derived in part from Qdrant's sparse index (Apache-2.0, see NOTICE)."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+ordered-float = "4"
+parking_lot = "0.12"
+memmap2 = "0.9"
+lucistore = { path = "../lucistore" }
