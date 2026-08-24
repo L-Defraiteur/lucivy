@@ -115,7 +115,7 @@ strict_separators: bool,
         OPEN_NS[3].fetch_add(t_open.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     }
     let t_q = std::time::Instant::now();
-    let mut matches = orchestrator::contains_v3(
+    let matches = orchestrator::contains_v3(
         &ctx, query_text,
         anchor_start, exact_match, strict_separators,
     );
@@ -156,7 +156,6 @@ impl ContainsQueryV3 {
         &self,
         seg_reader: &SegmentReader,
     ) -> crate::Result<Option<(crate::index::SegmentId, Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)>> {
-        use crate::suffix_fst::section_file::detect_sfx_version;
         use std::sync::atomic::Ordering::Relaxed;
         let _t0 = std::time::Instant::now();
         let now = PRESCAN_INFLIGHT.fetch_add(1, Relaxed) + 1;

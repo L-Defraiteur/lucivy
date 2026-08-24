@@ -22,7 +22,7 @@ fn snap_to_char_boundary(s: &str, pos: usize) -> usize {
     p
 }
 use crate::suffix_fst::builder_v3::{
-    decode_output_v3, ParentEntryV3, ParentRefV3, SI_STRIPPED_PREFIX,
+    ParentEntryV3, SI_STRIPPED_PREFIX,
 };
 use crate::suffix_fst::file_v3::SfxFileReaderV3;
 

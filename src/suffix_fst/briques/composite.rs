@@ -12,7 +12,9 @@ use common::BitSet;
 
 use crate::DocId;
 use crate::tokenizer::equal_chunk::is_content_char;
+#[cfg(test)]
 use crate::query::posting_resolver::PostingResolver;
+#[cfg(test)]
 use crate::suffix_fst::file_v3::SfxFileReaderV3;
 
 use super::context::BriquesContext;

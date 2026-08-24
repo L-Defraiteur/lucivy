@@ -16,6 +16,7 @@ use std::time::Instant;
 
 use crate::dag::DagEdge;
 use crate::node::{LogLevel, PortDef};
+#[cfg(test)]
 use crate::port::PortType;
 use crate::runtime::{DagResult, NodeResult};
 

@@ -240,7 +240,7 @@ pub fn resolve_word_chains_v3(
     filter_docs: Option<&HashSet<DocId>>,
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
     bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
-    termtexts: Option<&crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>>,
+    _termtexts: Option<&crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>>,
 ) -> Vec<MatchV3> {
     use crate::suffix_fst::word_sfxpost::WordPostingEntry;
 
@@ -449,7 +449,7 @@ pub fn resolve_word_chains_v3_wordmap(
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
     bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
     word_posmap: &crate::suffix_fst::word_pos_map::WordPosMapReader<'_>,
-    termtexts: Option<&crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>>,
+    _termtexts: Option<&crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>>,
 ) -> Vec<MatchV3> {
     use crate::suffix_fst::word_sfxpost::WordPostingEntry;
     use crate::suffix_fst::word_pos_map::SPAN_OVERFLOW;
@@ -1172,7 +1172,7 @@ fn resolve_chains_impl(
 
             let mut new_active: Vec<(DocId, u32, u32, u32, u32, u64, u32)> = Vec::new();
 
-            for &(doc_id, prev_pos, byte_from_first, byte_to_prev, _, _, first_pos) in &active {
+            for &(doc_id, prev_pos, byte_from_first, _byte_to_prev, _, _, first_pos) in &active {
                 let Some(idxs) = by_doc.get(&doc_id) else { continue };
                 for &i in idxs {
                     super::profile::bump(|c| &c.n_chain_pairs, 1);

@@ -14,7 +14,6 @@
 //!                     └── merge_sfxpost ──────────┼── write_v3
 //! ```
 
-use std::collections::BTreeSet;
 
 use luciole::node::{Node, NodeContext, PortDef};
 use luciole::port::{PortType, PortValue};
@@ -319,7 +318,7 @@ pub fn merge_segments_v3(
     // the query path: measure the phases, do not guess which one is heavy.
     let prof = crate::suffix_fst::briques::profile::enabled();
     let t_start = std::time::Instant::now();
-    let mut ns_intern = 0u128;
+    let ns_intern = 0u128;
     let mut ns_postings = 0u128;
     let mut ns_sibling = 0u128;
 

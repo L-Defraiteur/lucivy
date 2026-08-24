@@ -121,7 +121,7 @@ impl FuzzyQueryV3 {
     fn prescan_segment_v2(
         &self,
         seg_reader: &SegmentReader,
-        sfx_bytes: &[u8],
+        _sfx_bytes: &[u8],
     ) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)> {
         use crate::query::phrase_query::regex_continuation_query::run_fuzzy_prescan;
         let (doc_tf, highlights, _coverage) = run_fuzzy_prescan(

@@ -1,11 +1,12 @@
 [package]
 name = "lucistore"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 description = "Shared persistence, sync and shard infrastructure for lucivy and friends"
 authors = ["Luciform Research <luciedefraiteur@luciformresearch.com>"]
 repository = "https://github.com/L-Defraiteur/lucivy"
+readme = "README.md"
 keywords = ["storage", "sync", "blob", "shard"]
 
 [dependencies]

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use ld_lucivy::query::{
     AllQuery, BooleanQuery, DisjunctionMaxQuery,
     HighlightSink, MoreLikeThisQuery, Occur, Query,
-    RangeQuery, RegexContinuationQuery, RegexQuery, SuffixContainsQuery, TermQuery,
+    RangeQuery, RegexQuery, TermQuery,
     ContainsQueryV3, FuzzyQueryV3, RegexQueryV3,
 };
 use ld_lucivy::schema::OwnedValue;
@@ -431,7 +431,7 @@ fn build_contains_regex(
 ) -> Result<Box<dyn Query>, String> {
     let field = resolve_field(config, schema)?;
     let pattern = config.value.as_deref().ok_or("contains regex query requires 'value'")?;
-    let distance = config.distance.unwrap_or(0);
+    let _distance = config.distance.unwrap_or(0);
 
     let mut query = RegexQueryV3::new(field, pattern.to_string(), false /* contains */);
     if let Some(sink) = highlight_sink {

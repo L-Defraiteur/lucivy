@@ -1,3 +1,108 @@
+Lucivy 2.1.0
+================================
+
+SFX v3 by default, exact spans on every query mode, ACID blob storage with
+lazy loading, routed filtered search, and a new friend crate `sparse-vector`.
+Companion crates: `luciole` 0.2.0, `lucistore` 0.2.0, `sparse-vector` 0.3.0.
+
+### SFX v3 (new index format, default)
+
+- **`sfx_version = 3` by default.** A `meta.json` without the field is a v2
+  index and keeps working; v2 test harnesses use `Index::create_in_ram_sfx2`.
+- 8 sidecars per field (`.sfx`, `.sfxpost`, `.termtexts`, `.posmap`, `.bytemap`,
+  `.word_sfxpost`, `.word_pos_map`, `.sibling_v3`); dead artefacts removed.
+- **Exact highlights**: contains (strict and relaxed), fuzzy and regex return
+  byte spans verified one by one against a grep of the source files (rag3db
+  4,600 files, Linux kernel 50,000 files), on the fresh index and on the merged
+  one. Reference numbers (kernel 50k, 24 cores): floor 25-27 ms, `include`
+  (36,824 docs, 214,692 spans) 46 ms, fuzzy d=1 56-110 ms, d=2 171 ms,
+  regex ~190 ms.
+- **Fuzzy v3**: real spans, parallel prescan, one FST walk per n-gram,
+  candidate generators `ngram` / `pivot` / `pieces` / `auto`.
+- **Regex v3 by verification**: required literals (`regex-syntax`) resolved by
+  the contains engine, proven windows, `regex::Regex` decides. Character
+  classes and literal-free patterns fall back to a full scan.
+- **Merge = fresh**: ordinals interned per (text, form), empty chunks on
+  multibyte text fixed, encoding cliffs guarded (u32 parent counters).
+- Merge policy consulted at commit, output cap, GC no longer deletes `.sfx`
+  files of segments being written.
+- Words without a trailing separator (last word of a value) are indexed in
+  the word partition; `.termtexts` STATS section is versioned.
+- Sticky document dispatch (64 docs per indexer): small commits yield one
+  segment per shard instead of one per worker.
+
+### Queries
+
+- **`parse`** works again (it was unreachable): a plain value is an OR of
+  substring `contains` per word × field; boolean syntax (`AND`/`OR`/`NOT`,
+  `+`/`-`, quotes, parentheses) is lowered to `boolean` over `contains`
+  (NOT > AND > OR, side-by-side words are OR). Highlights on both shapes.
+  The old `QueryParser` path is gone.
+- **`query_warnings`**: every query answers with honest warnings (which
+  semantics was chosen, what was ignored) — in core and in the 5 bindings.
+- `startsWith` / `term` fixed on v3; `LucivyHandle::search` works on v3.
+- Fuzzy/regex through `ShardedHandle` prescan all shards with a global doc
+  count (same scores as single-shard).
+
+### Sharding, persistence, lifecycle
+
+- **Routed filtered search**: with `allowed_ids`, only the shards holding
+  those ids work, each on its own share; ties are deterministic
+  (score desc, then shard/segment/doc). `node_ids_of(&results)` and
+  `shard_for_node_id(id)` avoid reloading documents.
+- **`BlobDirectory` / `BlobShardStorage`**: blobs are the source of truth,
+  the mmap cache is disposable. Optional **lazy loading** (`BlobLoadMode::Lazy`,
+  ranged remote reads through `BlobStore::load_range` / `blob_len`): open
+  reads 3.6 KB instead of 104 KB.
+- Commit floor: no fsync of the disposable cache, `.managed.json` written at
+  the commit point only — 9 docs / 2 shards: 733 ms → 5.6 ms; reopen after
+  commit no longer stalls.
+- `_node_id` stamped by `add_document`; `add_document_json` (named fields);
+  strict `ShardedConfig` (unknown keys are errors) with tolerant reopen of
+  stored configs; `drop_index()`; `close()` stops every actor and the handle
+  refuses further calls (`handle is closed`).
+- Sharded deltas ship `.del` files and only the changed shards (they were
+  full re-sends); writer recreated on apply.
+- `impl BlobStore for Arc<T>` (so `Arc<dyn BlobStore>` works everywhere).
+- `ShardRouter` moved to `lucistore` (re-exported by `lucivy-core`).
+
+### luciole 0.2.0
+
+- DAG nodes are taken/put back through a sentinel (no more `ptr::read`), a
+  panicking node is a failed node, not a double free.
+- `Reply` dropped without an answer warns (`LUCIOLE_REPLY_TRACE=1` for a
+  backtrace); `ActorRef::request` returns `Err` instead of hanging;
+  `Scheduler::try_wait`, `wait_*_result` variants.
+- `Pool::scatter_to(targets, …)` and pools tolerant to workers that left.
+
+### lucistore 0.2.0
+
+- `ShardRouter` (node-id map, `resync`), `BlobStore::load_range` / `blob_len`,
+  `ShardStorage` trait with `FsShardStorage` and `BlobShardStorage`.
+
+### sparse-vector 0.3.0 (new crate)
+
+Inverted index for sparse vectors with WAND pruning, mmap or RAM, filtered
+search, `ShardedSparseHandle` on the same router / actor pool / storages as
+the full-text index. Original code (MIT), design inspired by Qdrant's sparse
+index — see its `NOTICE`.
+
+### Bindings
+
+Native bindings (Python, Node.js, C++) expose `query_warnings`; emscripten
+builds against the v3 tree (execution to be re-validated in the browser
+playground). PyPI/npm releases follow this crate release.
+
+### Fixed
+
+- Double free under luciole when a scatter task failed (latent since the
+  parallel merge), and the panic behind it: fuzzy/regex prescans handed the
+  scorer an unsorted doc list.
+- `close()` under in-flight merges; `LucivyDeltaExporter` race.
+- `StdFsDirectory::atomic_write` truncated before writing (empty `meta.json`
+  on reload).
+- Lucistore compiles under `-D warnings`.
+
 Lucivy 2.0.0
 ================================
 

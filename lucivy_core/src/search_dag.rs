@@ -147,7 +147,7 @@ impl Node for PrescanShardNode {
 
         use ld_lucivy::query::{
             run_sfx_walk, tokenize_query, CachedSfxResult, CachedRegexResult,
-            RawPostingEntry, build_resolver, run_regex_prescan, run_sfx_v3_prescan,
+            RawPostingEntry, build_resolver, run_regex_prescan,
         };
         use ld_lucivy::suffix_fst::file::SfxFileReader;
         use ld_lucivy::suffix_fst::section_file::detect_sfx_version;

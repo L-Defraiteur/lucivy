@@ -256,7 +256,7 @@ impl SuffixFstBuilderV3 {
         let extended_len = extended_bytes.len();
         let max_si = extended_len.min(MAX_CHUNK_BYTES);
 
-        let content_len = own_len as usize - sep_len as usize;
+        let _content_len = own_len as usize - sep_len as usize;
 
         // ── Normal suffixes (partitions 0x00 and 0x01) ──
         for si in 0..max_si {
@@ -321,7 +321,7 @@ impl SuffixFstBuilderV3 {
         word_content: &str,
         content_overlap: &str,
         first_ordinal: u64,
-        first_own_len: u16,
+        _first_own_len: u16,
         first_sep_len: u8,
         is_word_start: bool,
     ) {

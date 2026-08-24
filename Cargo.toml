@@ -1,6 +1,6 @@
 [package]
 name = "ld-lucivy"
-version = "2.0.0"
+version = "2.1.0"
 authors = ["Luciform Research <luciedefraiteur@luciformresearch.com>"]
 license = "MIT"
 categories = ["database-implementations", "data-structures"]
@@ -16,9 +16,18 @@ exclude = [
     "playground/",
     "bindings/",
     "docs/",
+    "doc/",
+    ".github/",
     "lucivy_core/",
     "lucivy_fts/",
     "lucistore/",
+    "luciole/",
+    "sparse_vector/",
+    "CLAUDE.md",
+    "TODO.txt",
+    "Makefile",
+    "cliff.toml",
+    "docker-compose.test.yml",
     "*.luce",
     "*.wasm",
     "*.node",
@@ -49,7 +58,7 @@ fs4 = { version = "0.13.1", optional = true }
 levenshtein_automata = "0.2.1"
 uuid = { version = "1.0.0", features = ["v4", "serde"] }
 flume = "0.11"
-luciole = { version = "0.1.0", path = "luciole" }
+luciole = { version = "0.2.0", path = "luciole" }
 num_cpus = "1.13.1"
 tokio = { version = "1.37", default-features = false, features = ["fs", "io-util"], optional = true }
 futures = "0.3.25"

@@ -134,7 +134,7 @@ pub fn regex_verified(
     let mut n_windows = 0u64;
     let mut n_docs_whole = 0u64;
 
-    let mut scan = |window: &str, back: &[(u32, u8)], doc: DocId, cut_start: bool, cut_end: bool,
+    let scan = |window: &str, back: &[(u32, u8)], doc: DocId, cut_start: bool, cut_end: bool,
                     spans: &mut HashSet<(DocId, u32, u32)>| {
         let wlen = window.len();
         let t = profile::Timer::start();
