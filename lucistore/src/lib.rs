@@ -2,6 +2,7 @@ pub mod binary;
 pub mod blob_store;
 pub mod blob_cache;
 pub mod shard_storage;
+pub mod shard_router;
 pub mod snapshot;
 pub mod delta;
 pub mod delta_sharded;

@@ -271,7 +271,7 @@ impl ShardRouter {
         let above_threshold: Vec<u64> = self
             .global_token_counts
             .iter()
-            .filter(|(_, &count)| count >= threshold)
+            .filter(|(_, count)| **count >= threshold)
             .map(|(&h, _)| h)
             .collect();
         for h in &above_threshold {

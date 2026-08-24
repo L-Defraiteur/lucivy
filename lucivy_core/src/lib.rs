@@ -11,7 +11,11 @@ pub mod diagnostics;
 pub mod directory;
 pub mod handle;
 pub mod query;
-pub mod shard_router;
+/// Document routing across shards lives in lucistore (shared with the
+/// sparse index); kept here as a path for existing users.
+pub mod shard_router {
+    pub use lucistore::shard_router::*;
+}
 pub(crate) mod search_dag;
 pub mod sharded_handle;
 pub mod snapshot;
