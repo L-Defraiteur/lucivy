@@ -317,8 +317,26 @@ impl<S: BlobStore> Directory for BlobDirectory<S> {
     }
 
     fn atomic_write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
-        // Write to local cache
-        self.inner.atomic_write(path, data)?;
+        // Write to the local cache WITHOUT fsync: the cache is disposable,
+        // durability comes from the blob store below. Delegating to the mmap
+        // directory would fsync per call — and the managed directory calls
+        // this once per registered file, which turns a commit into dozens of
+        // fsyncs (~65 ms each on btrfs): the commit floor rag3weaver measured.
+        // Temp + rename keeps the local read path atomic.
+        let full_path = self.cache_dir.as_ref().join(path);
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file_name = full_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "atomic".to_string());
+        let tmp_path = full_path.with_file_name(format!(".{file_name}.atomic_tmp"));
+        std::fs::write(&tmp_path, data)?;
+        std::fs::rename(&tmp_path, &full_path)?;
+
+        // A fresh write supersedes any not-yet-materialized blob.
+        self.pending.lock().unwrap().remove(&Self::file_name(path));
 
         // Don't persist lock files to the blob store — they are process-local
         // and would block reopen after a crash.
