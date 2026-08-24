@@ -166,7 +166,7 @@ cargo test --release -p lucivy-core --test test_fuzzy_ground_truth --test test_f
 cargo test --release -p luciole --lib
 # bindings, en direct (voir l'en-tête de chaque script pour le build) :
 #   python3 bindings/python/tests/smoke_warnings.py <dir du .so renommé lucivy.so>
-#   node bindings/nodejs/tests/smoke_warnings.mjs <chemin du .so napi>
+#   node bindings/nodejs/tests/smoke_warnings.mjs <chemin ABSOLU du .so napi copié en .node>
 ```
 
 Dans `test_sfx_v3_pipeline.rs`, les tests qui ont trouvé les bugs de la journée :

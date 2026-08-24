@@ -17,6 +17,9 @@ cases = [
     ({"type": "contains", "field": "body", "value": "__init"}, 1),
     ({"type": "regex", "field": "body", "value": "[0-9]{8}"}, 1),
     ({"type": "fuzzy", "field": "body", "value": "init"}, 1),
+    ({"type": "parse", "field": "body", "value": "kmalloc"}, 0),
+    ({"type": "parse", "field": "body", "value": "kmalloc spin"}, 1),
+    ({"type": "parse", "field": "body", "value": "kmalloc AND NOT vfree"}, 1),
 ]
 fails = 0
 for q, expect in cases:
@@ -27,5 +30,15 @@ for q, expect in cases:
 r = idx.search({"type": "contains", "field": "body", "value": "spin_lock"}, highlights=True)
 print("search spin_lock:", len(r), "hit(s), highlights:", r[0].highlights if r else None)
 assert r, "search must find the doc"
+for value in ("kmalloc spin", "kmalloc AND NOT vfree", "\"spin_lock\" -vfree"):
+    r = idx.search({"type": "parse", "field": "body", "value": value}, highlights=True)
+    print("parse", json.dumps(value), "->", len(r), "hit(s), highlights:", r[0].highlights if r else None)
+    if not r or not r[0].highlights:
+        print("  EXPECTED one hit with highlights"); fails += 1
+r = idx.search({"type": "parse", "field": "body", "value": "kmalloc AND vfree"}, highlights=True)
+print("parse AND with absent word ->", len(r), "hit(s)")
+if r:
+    print("  EXPECTED no hit"); fails += 1
 print("FAILS", fails)
+sys.exit(1 if fails else 0)
 sys.exit(1 if fails else 0)

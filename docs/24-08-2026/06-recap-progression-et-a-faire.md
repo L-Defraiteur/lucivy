@@ -4,7 +4,9 @@ Document autonome pour reprendre une session fraîche : où on en est, ce qui
 est à faire tout de suite, ce qui vient après. Le détail commit par commit
 est dans `01-rapport-progression.md` ; l'architecture dans `07-architecture.md` ;
 les tests, benchs et points critiques dans `08-knowledge-dump-tests-benchs.md`.
-Branche : `v3-recovery` (796 commits), HEAD `1c21142`, tout poussé, arbre propre.
+Branche : `v3-recovery` HEAD `e8b5414` (la session rag3weaver y est pinnée) ; la
+finalisation se fait sur `wip/publication-2.1.0`, fusionnée point complet par
+point complet.
 
 ## 1. Où on en est
 
@@ -49,23 +51,29 @@ déterministes ; `node_ids_of(&results)` évite de recharger les documents.
 
 ## 2. À faire dans l'immédiat
 
-1. **Publication crates.io 2.1.0** — `ld-lucivy`, `lucivy-core`, `luciole`,
-   `lucistore`, `sparse-vector` (nouveau). rag3weaver vit sur
-   `[patch.crates-io]` + chemins en attendant ; c'est ce qui les débloque
-   pour livrer. Vérifier avant : `cargo publish --dry-run` par crate dans
-   l'ordre des dépendances (luciole → lucistore → ld-lucivy → lucivy-core →
-   sparse-vector), versions cohérentes, `license`/`description`/`repository`
-   remplis, `README` du crate sparse (il n'en a pas).
+1. **Publication crates.io 2.1.0** — `ld-lucivy`, `lucivy-core`, `luciole`
+   0.2.0, `lucistore` 0.2.0, `sparse-vector` 0.3.0 (nouveau). rag3weaver vit
+   sur `[patch.crates-io]` + chemins en attendant ; c'est ce qui les débloque
+   pour livrer. **Préparé sur la branche `wip/publication-2.1.0`**
+   (`fb7e2af`, 24 août soir) : versions et dépendances bumpées, READMEs
+   `lucistore`/`sparse-vector`, exclusions du paquet `ld-lucivy` (394
+   fichiers), CHANGELOG 2.1.0, imports morts nettoyés,
+   `cargo publish --dry-run` des cinq crates dans l'ordre passe. Reste :
+   le go, puis
+   `cargo publish -p luciole -p lucistore -p ld-lucivy -p lucivy-core -p sparse-vector`
+   (cargo ≥ 1.90 publie le lot dans l'ordre), tag `v2.1.0`, fusion dans
+   `v3-recovery`.
 2. **Emscripten** : le build passe (`lucivy.wasm` 8,5 Mo, emsdk 6.0.8 +
    nightly), l'exécution sous Node pend (main proxifié sorti, `ccall`
    orphelins). À tester dans son vrai habitat, le playground navigateur
    (`cd playground && node serve.mjs`) — le snapshot `playground/dataset.luce`
    est un **v2** (67 Mo commité, non régénéré exprès). Si ça pend aussi dans
    le navigateur : revoir `PROXY_TO_PTHREAD` / le cycle de vie du main.
-3. **Bindings natifs** : recompiler et rejouer les smokes
-   (`bindings/python/tests/smoke_warnings.py`, `bindings/nodejs/tests/smoke_warnings.mjs`)
-   après les changements de `parse` et de `query_warnings` — les messages
-   ont changé (« boolean syntax … lowered to boolean over substring contains »).
+3. ~~**Bindings natifs** : recompiler et rejouer les smokes~~ — fait le 24 au
+   soir sur la branche wip : Python et Node recompilés, smokes étendus aux
+   deux formes de `parse` (warnings, highlights, `AND` avec mot absent → 0),
+   0 échec. Le script Node veut un chemin absolu vers une copie `.node`
+   (en-tête du script).
 4. **rag3weaver** : attendre leur retour sur le doc 36 (filtre routé) et le
    basculement de leur dépendance sparse sur `lucivy/sparse_vector`.
 
