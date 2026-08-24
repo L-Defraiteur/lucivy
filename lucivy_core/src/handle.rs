@@ -67,18 +67,29 @@ const MAX_DOCS_BEFORE_MERGE: usize = 10_000;
 /// On WASM, limit to 1 thread to avoid exhausting the emscripten pthread pool.
 /// Configures the merge policy with a bounded max_docs_before_merge.
 fn create_writer(index: &Index) -> Result<IndexWriter, String> {
+    // Diagnostic knobs: reproduce another target's writer shape natively
+    // (`LUCIVY_WRITER_HEAP=15000000 LUCIVY_WRITER_THREADS=1` is the WASM one).
+    let heap = std::env::var("LUCIVY_WRITER_HEAP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(WRITER_HEAP_SIZE);
+    let threads: Option<usize> = std::env::var("LUCIVY_WRITER_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok());
     let writer = {
         #[cfg(target_arch = "wasm32")]
         {
             index
-                .writer_with_num_threads(1, WRITER_HEAP_SIZE)
+                .writer_with_num_threads(threads.unwrap_or(1), heap)
                 .map_err(|e| format!("cannot create writer: {e}"))?
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            index
-                .writer(WRITER_HEAP_SIZE)
-                .map_err(|e| format!("cannot create writer: {e}"))?
+            match threads {
+                Some(n) => index.writer_with_num_threads(n, heap),
+                None => index.writer(heap),
+            }
+            .map_err(|e| format!("cannot create writer: {e}"))?
         }
     };
 

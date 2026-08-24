@@ -1,0 +1,23 @@
+[
+  {"name": "contains strict kmalloc", "query": {"type": "contains", "field": "content", "value": "kmalloc", "strict_separators": true}},
+  {"name": "contains relaxed kmalloc", "query": {"type": "contains", "field": "content", "value": "kmalloc"}},
+  {"name": "contains strict spin_lock_init", "query": {"type": "contains", "field": "content", "value": "spin_lock_init", "strict_separators": true}},
+  {"name": "contains relaxed spin_lock_init", "query": {"type": "contains", "field": "content", "value": "spin_lock_init"}},
+  {"name": "contains strict ->next", "query": {"type": "contains", "field": "content", "value": "->next", "strict_separators": true}},
+  {"name": "contains strict return -ENOMEM;", "query": {"type": "contains", "field": "content", "value": "return -ENOMEM;", "strict_separators": true}},
+  {"name": "split spin lock init", "query": {"type": "contains_split", "field": "content", "value": "spin lock init"}},
+  {"name": "startsWith netdev", "query": {"type": "startsWith", "field": "content", "value": "netdev"}},
+  {"name": "term kfree", "query": {"type": "term", "field": "content", "value": "kfree"}},
+  {"name": "phrase return -ENOMEM", "query": {"type": "phrase", "field": "content", "value": "return -ENOMEM"}},
+  {"name": "fuzzy d1 kmallc", "query": {"type": "contains", "field": "content", "value": "kmallc", "distance": 1}},
+  {"name": "fuzzy d1 spin_lock_ini", "query": {"type": "contains", "field": "content", "value": "spin_lock_ini", "distance": 1}},
+  {"name": "fuzzy d2 kmalloc", "query": {"type": "contains", "field": "content", "value": "kmalloc", "distance": 2}},
+  {"name": "regex spin_lock_[a-z]+", "query": {"type": "contains", "field": "content", "value": "spin_lock_[a-z]+", "regex": true}},
+  {"name": "regex ETH_P_[0-9A-Z]+", "query": {"type": "contains", "field": "content", "value": "ETH_P_[0-9A-Z]+", "regex": true}},
+  {"name": "parse simple mutex unlock", "query": {"type": "parse", "field": "content", "value": "mutex unlock"}},
+  {"name": "parse boolean kmalloc AND NOT kfree", "query": {"type": "parse", "field": "content", "value": "kmalloc AND NOT kfree"}},
+  {"name": "parse boolean quoted", "query": {"type": "parse", "field": "content", "value": "\"spin_lock_init\" -kfree"}},
+  {"name": "ext filter netdev .h", "query": {"type": "boolean", "must": [{"type": "contains", "field": "content", "value": "netdev"}, {"type": "term", "field": "extension", "value": "h"}]}},
+  {"name": "path contains ethernet/intel", "query": {"type": "contains", "field": "path", "value": "ethernet/intel"}},
+  {"name": "no hit zzqqxx", "query": {"type": "contains", "field": "content", "value": "zzqqxxwwvv"}}
+]

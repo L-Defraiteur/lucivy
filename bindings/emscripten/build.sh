@@ -99,10 +99,14 @@ emcc "$STATIC_LIB" \
     -sEXPORT_ES6=1 \
     -sPROXY_TO_PTHREAD \
     -sASYNCIFY \
-    -sASYNCIFY_STACK_SIZE=65536 \
+    -sASYNCIFY_STACK_SIZE=1048576 \
     -fexceptions \
     -sDISABLE_EXCEPTION_CATCHING=0 \
-    -O2
+    -O2 \
+    ${LUCIVY_WASM_DEBUG:+-g2 -sASSERTIONS=1 -sSTACK_OVERFLOW_CHECK=2}
+# LUCIVY_WASM_DEBUG=1: keep function names (symbolised traps in the browser
+# console), runtime assertions and stack-overflow cookies. Bigger and slower —
+# for diagnosing a "memory access out of bounds" in a pthread, not for shipping.
 
 echo "=== Step 3: Copy to playground ==="
 PLAYGROUND_PKG="$ROOT_DIR/playground/pkg"

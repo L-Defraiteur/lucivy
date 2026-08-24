@@ -260,6 +260,11 @@ self.onmessage = async (e) => {
                     printErr: function(text) {
                         diagSendLog(text);
                     },
+                    // `--no-opfs`: in-memory filesystem, index lost at reload.
+                    arguments: [
+                        ...(args.noOpfs ? ['--no-opfs'] : []),
+                        ...(args.verbose ? ['--verbose'] : []),
+                    ],
                 });
 
                 // Scheduler is configured to 4 threads by default in main().
@@ -401,9 +406,24 @@ self.onmessage = async (e) => {
             case 'commit': {
                 const ctx = getCtx(args.path);
 
-                // Synchronous commit via ASYNCIFY (avoids deadlocks with actor system).
-                const res = await callStr('lucivy_commit', ctx);
-                checkResult(res);
+                // Commit on a pthread, status polled through the SAB: this JS
+                // thread is the emscripten runtime's main thread, and blocking
+                // it inside a synchronous ccall starves everything the pthreads
+                // proxy to it (OPFS, thread spawn) — the 2000-doc commit of the
+                // playground stalled forever that way. Falls back to the
+                // synchronous call when the SAB status view is not available.
+                if (self._commitStatusView) {
+                    const started = await Module.ccall('lucivy_commit_async', 'number', ['number'], [ctx], { async: true });
+                    if (started !== 0) throw new Error('commit already running');
+                    while (Atomics.load(self._commitStatusView, 0) === 1) {
+                        await new Promise(r => setTimeout(r, 20));
+                    }
+                    const res = await callStr('lucivy_commit_finish');
+                    checkResult(res);
+                } else {
+                    const res = await callStr('lucivy_commit', ctx);
+                    checkResult(res);
+                }
 
                 result = { numDocs: await Module.ccall('lucivy_num_docs', 'number', ['number'], [ctx], { async: true }) };
                 break;
@@ -418,9 +438,19 @@ self.onmessage = async (e) => {
             }
 
             case 'drainMerges': {
+                // Same commit path as 'commit' (drain_merges is an alias in the
+                // binding); goes through the pthread + SAB status for the same reason.
                 const ctx = getCtx(args.path);
-                const res = await callStr('lucivy_drain_merges', ctx);
-                checkResult(res);
+                if (self._commitStatusView) {
+                    const started = await Module.ccall('lucivy_commit_async', 'number', ['number'], [ctx], { async: true });
+                    if (started !== 0) throw new Error('commit already running');
+                    while (Atomics.load(self._commitStatusView, 0) === 1) {
+                        await new Promise(r => setTimeout(r, 20));
+                    }
+                    checkResult(await callStr('lucivy_commit_finish'));
+                } else {
+                    checkResult(await callStr('lucivy_drain_merges', ctx));
+                }
                 result = true;
                 break;
             }

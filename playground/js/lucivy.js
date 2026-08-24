@@ -16,8 +16,9 @@
 //   const results = await index.search('hello');
 
 export class Lucivy {
-    constructor(workerUrl) {
+    constructor(workerUrl, options = {}) {
         this._worker = new Worker(workerUrl, { type: 'module' });
+        this._options = options; // { noOpfs?: boolean }
         this._nextId = 1;
         this._pending = new Map();
 
@@ -42,7 +43,7 @@ export class Lucivy {
             }
         };
 
-        this.ready = this._call('init');
+        this.ready = this._call('init', { noOpfs: !!options.noOpfs, verbose: !!options.verbose });
     }
 
     _startLogRingPoller(sab, ringPtr, ringSize) {

@@ -341,6 +341,15 @@ pub fn merge_segments_v3(
             .and_then(crate::suffix_fst::word_sfxpost::WordSfxPostReader::open);
 
         let mut seg_ord_to_global: Vec<u32> = Vec::with_capacity(tt.num_terms() as usize);
+        if prof {
+            let len = |b: Option<&[u8]>| b.map(|x| x.len()).unwrap_or(0);
+            eprintln!(
+                "  [merge] seg {seg_idx}: {} terms, {} docs kept | termtexts {} B, sfxpost {} B, word_sfxpost {} B, sibling {} B | global tokens so far {}",
+                tt.num_terms(), seg.doc_remap.len(),
+                seg.termtexts.len(), len(seg.sfxpost), len(seg.word_sfxpost), len(seg.sibling_v3),
+                token_texts.len(),
+            );
+        }
         let t_seg = std::time::Instant::now();
         for old_ord in 0..tt.num_terms() {
             let (text, meta) = tt.entry(old_ord)

@@ -83,6 +83,98 @@ fn rlog(msg: &str) {
     eprintln!("{msg}");
 }
 
+// ── Call stacks and allocation failures → SAB ring ────────────────
+// Output written by a pthread to stderr lands in that pthread's own worker
+// console, invisible to the page; the ring is the only channel that survives
+// the thread. `emscripten_get_callstack` gives symbolised frames when the
+// module keeps its names (LUCIVY_WASM_DEBUG=1 in build.sh).
+#[cfg(target_os = "emscripten")]
+extern "C" {
+    fn emscripten_get_callstack(flags: i32, out: *mut c_char, maxbytes: i32) -> i32;
+}
+
+fn ring_callstack(tag: &str) {
+    #[cfg(target_os = "emscripten")]
+    unsafe {
+        const EM_LOG_C_STACK: i32 = 8;
+        const EM_LOG_JS_STACK: i32 = 16;
+        const EM_LOG_NO_PATHS: i32 = 64;
+        let mut buf = vec![0u8; 16384];
+        let n = emscripten_get_callstack(
+            EM_LOG_C_STACK | EM_LOG_JS_STACK | EM_LOG_NO_PATHS,
+            buf.as_mut_ptr() as *mut c_char,
+            buf.len() as i32,
+        );
+        if n > 0 {
+            let text = String::from_utf8_lossy(&buf[..(n as usize).min(buf.len())]);
+            for line in text.lines().take(60) {
+                ring_write(&format!("{tag} {}", line.trim()));
+            }
+        }
+    }
+    #[cfg(not(target_os = "emscripten"))]
+    let _ = tag;
+}
+
+/// System allocator that reports a failed allocation (size, alignment,
+/// call stack) into the ring before returning null — the runtime then
+/// aborts with a bare `unreachable`, and this is the only trace left.
+struct DiagAlloc;
+
+impl DiagAlloc {
+    fn report(what: &str, layout: std::alloc::Layout) {
+        ring_write(&format!(
+            "[alloc] {what} failed: {} bytes, align {}",
+            layout.size(),
+            layout.align()
+        ));
+        ring_callstack("[alloc]");
+    }
+}
+
+unsafe impl std::alloc::GlobalAlloc for DiagAlloc {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        let p = std::alloc::System.alloc(layout);
+        if p.is_null() { Self::report("alloc", layout); }
+        p
+    }
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        let p = std::alloc::System.alloc_zeroed(layout);
+        if p.is_null() { Self::report("alloc_zeroed", layout); }
+        p
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        std::alloc::System.dealloc(ptr, layout)
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new_size: usize) -> *mut u8 {
+        let p = std::alloc::System.realloc(ptr, layout, new_size);
+        if p.is_null() {
+            Self::report("realloc", std::alloc::Layout::from_size_align_unchecked(new_size, layout.align()));
+        }
+        p
+    }
+}
+
+#[global_allocator]
+static GLOBAL_ALLOC: DiagAlloc = DiagAlloc;
+
+// ── Panic hook → SAB ring ─────────────────────────────────────────
+// A panic in a pthread ends as `RuntimeError: unreachable` on the JS side
+// with the message lost (stderr is proxied to the main thread, which the
+// abort beats). Writing the location into the ring first makes it visible
+// from the page even after the thread died.
+fn ensure_panic_hook() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            let msg = format!("[panic] {info}");
+            ring_write(&msg);
+            ring_callstack("[panic]");
+            eprintln!("{msg}");
+        }));
+    });
+}
+
 macro_rules! rlog {
     ($($arg:tt)*) => { rlog(&format!($($arg)*)) };
 }
@@ -100,8 +192,28 @@ extern "C" {
 const OPFS_BASE: &str = "/opfs/lucivy";
 
 #[no_mangle]
-pub extern "C" fn __main_argc_argv(_argc: i32, _argv: *const *const c_char) -> i32 {
+pub extern "C" fn __main_argc_argv(argc: i32, argv: *const *const c_char) -> i32 {
     std::env::set_var("LUCIVY_SCHEDULER_THREADS", "4");
+
+    // `--no-opfs` (Module.arguments): keep the in-memory WASMFS backend. The
+    // index then lives for the session only (export a snapshot to keep it);
+    // used to tell an OPFS problem from an engine one.
+    let has_arg = |flag: &[u8]| (0..argc.max(0) as usize).any(|i| unsafe {
+        let p = *argv.add(i);
+        !p.is_null() && CStr::from_ptr(p).to_bytes() == flag
+    });
+    let no_opfs = has_arg(b"--no-opfs");
+    // `--verbose`: the engine's diagnostic prints (LUCIVY_VERBOSE, V3_PROFILE),
+    // routed to the page through printErr.
+    if has_arg(b"--verbose") {
+        std::env::set_var("LUCIVY_VERBOSE", "1");
+        std::env::set_var("V3_PROFILE", "1");
+    }
+    if no_opfs {
+        let _ = std::fs::create_dir_all(OPFS_BASE);
+        rlog!("[lucivy-wasm] --no-opfs: in-memory filesystem");
+        return 0;
+    }
 
     // Mount OPFS as filesystem backend (persistent across sessions).
     #[cfg(target_os = "emscripten")]
@@ -128,6 +240,7 @@ pub unsafe extern "C" fn lucivy_configure(
     scheduler_threads: u32,
     thread_pool_size: u32,
 ) {
+    ensure_panic_hook();
     if scheduler_threads > 0 {
         std::env::set_var(
             "LUCIVY_SCHEDULER_THREADS",
@@ -211,6 +324,7 @@ pub unsafe extern "C" fn lucivy_create(
     path: *const c_char,
     config_json: *const c_char,
 ) -> *mut LucivyContext {
+    ensure_panic_hook();
     let path = str_from_ptr(path);
     let config_json = str_from_ptr(config_json);
 
@@ -258,6 +372,7 @@ pub unsafe extern "C" fn lucivy_create(
 /// The index must have been previously created with lucivy_create.
 #[no_mangle]
 pub unsafe extern "C" fn lucivy_open(path: *const c_char) -> *mut LucivyContext {
+    ensure_panic_hook();
     let path = str_from_ptr(path);
     let index_path = format!("{OPFS_BASE}/{path}");
 
@@ -283,6 +398,7 @@ pub unsafe extern "C" fn lucivy_open(path: *const c_char) -> *mut LucivyContext 
 /// Files are written to the WASMFS filesystem, then opened as ShardedHandle.
 #[no_mangle]
 pub unsafe extern "C" fn lucivy_open_begin(path: *const c_char) -> *mut LucivyContext {
+    ensure_panic_hook();
     let path = str_from_ptr(path);
     let index_path = format!("{OPFS_BASE}/{path}");
     // Create the shard_0 directory for file imports.
@@ -646,6 +762,7 @@ pub unsafe extern "C" fn lucivy_import_snapshot(
     len: usize,
     path: *const c_char,
 ) -> *mut LucivyContext {
+    ensure_panic_hook();
     if data.is_null() || len == 0 { return std::ptr::null_mut(); }
     let path = str_from_ptr(path);
     let blob = std::slice::from_raw_parts(data, len);

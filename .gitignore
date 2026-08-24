@@ -18,3 +18,4 @@ variable
 .env
 docker-compose.test.yml
 playground/diag.log
+playground/corpus-*.tar.gz

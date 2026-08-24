@@ -204,8 +204,10 @@ impl SegmentWriter {
                 }
                 SfxCollectorSlot::V3(collector) => {
                     let t_sfx = std::time::Instant::now();
+                    luciole::scheduler::set_task_label(&format!("finalize:sfx_collect f{field_id}"));
                     let data = collector.into_data();
                     let mut dag = super::sfx_dag_v3::build_initial_sfx_dag_v3(data);
+                    luciole::scheduler::set_task_label(&format!("finalize:sfx_dag f{field_id}"));
                     let mut dag_result = luciole::execute_dag(&mut dag, None)
                         .map_err(|e| crate::LucivyError::SystemError(
                             format!("sfx v3 build DAG field {field_id}: {e}")))?;
@@ -215,6 +217,7 @@ impl SegmentWriter {
                             format!("sfx v3 DAG missing output for field {field_id}")))?;
                     let t_build = t_sfx.elapsed();
                     let t_w = std::time::Instant::now();
+                    luciole::scheduler::set_task_label(&format!("finalize:sfx_write f{field_id}"));
                     self.segment_serializer.write_sfx(field_id, &output.sfx)?;
                     if let Some(ref sfxpost) = output.sfxpost {
                         self.segment_serializer.write_custom_index(field_id, "sfxpost", sfxpost)?;

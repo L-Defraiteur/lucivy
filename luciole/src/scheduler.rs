@@ -92,6 +92,11 @@ impl ThreadInfo {
         self.state.store(ThreadState::RunningActor as u8, Ordering::Release);
     }
 
+    /// Free-form label for the current activity (see [`set_task_label`]).
+    pub fn set_label(&self, label: &str) {
+        *self.label.lock().unwrap() = label.to_string();
+    }
+
     pub fn set_running_task(&self) {
         *self.label.lock().unwrap() = "task".to_string();
         *self.state_since.lock().unwrap() = Instant::now();
@@ -146,6 +151,15 @@ fn register_thread(name: String) -> Arc<ThreadInfo> {
 /// Get the current thread's info (for cooperative wait tracking).
 pub fn current_thread_info() -> Option<Arc<ThreadInfo>> {
     CURRENT_THREAD_INFO.with(|c| c.borrow().clone())
+}
+
+/// Name what the current scheduler thread is doing inside a task, for the
+/// thread dumps (`TASK (task)` becomes `TASK (finalize:sfx_build f1)`).
+/// No-op off a scheduler thread. Cheap: one small string per call.
+pub fn set_task_label(label: &str) {
+    if let Some(info) = current_thread_info() {
+        info.set_label(label);
+    }
 }
 
 // ---------------------------------------------------------------------------

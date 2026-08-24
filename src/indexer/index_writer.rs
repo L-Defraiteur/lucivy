@@ -202,11 +202,13 @@ pub(super) fn finalize_segment(
     let t0 = std::time::Instant::now();
     let verbose = crate::diag::is_verbose();
     if verbose { eprintln!("[finalize] segment_writer.finalize() {max_doc} docs..."); }
+    luciole::scheduler::set_task_label(&format!("finalize:writer {max_doc} docs"));
     let (doc_opstamps, sfx_field_ids) = segment_writer.finalize()?;
     if verbose { eprintln!("[finalize] finalize() done in {:.1}s", t0.elapsed().as_secs_f64()); }
 
     let segment_with_max_doc = segment.with_max_doc(max_doc);
     if verbose { eprintln!("[finalize] apply_deletes..."); }
+    luciole::scheduler::set_task_label("finalize:apply_deletes");
     let alive_bitset_opt = apply_deletes(&segment_with_max_doc, delete_cursor, &doc_opstamps)?;
     if verbose { eprintln!("[finalize] apply_deletes done in {:.1}s", t0.elapsed().as_secs_f64()); }
 
@@ -214,8 +216,10 @@ pub(super) fn finalize_segment(
     meta.untrack_temp_docstore();
     let segment_entry = SegmentEntry::new(meta, delete_cursor.clone(), alive_bitset_opt);
     if verbose { eprintln!("[finalize] schedule_add_segment..."); }
+    luciole::scheduler::set_task_label("finalize:schedule_add_segment");
     segment_updater.schedule_add_segment(segment_entry)?;
     if verbose { eprintln!("[finalize] done ({} docs, total {:.1}s)", max_doc, t0.elapsed().as_secs_f64()); }
+    luciole::scheduler::set_task_label("finalize:done");
     Ok(())
 }
 

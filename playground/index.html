@@ -369,9 +369,34 @@ function getActiveIndex() {
 async function startup() {
   try {
     statusEl.textContent = 'Loading WASM engine (threading)...';
-    lucivy = new Lucivy('./js/lucivy-worker.js');
+    // `?noopfs`: in-memory filesystem (index lost at reload) — isolates
+    // OPFS from the engine when something stalls.
+    const startupParams = new URLSearchParams(location.search);
+    lucivy = new Lucivy('./js/lucivy-worker.js', {
+      noOpfs: startupParams.has('noopfs'),
+      verbose: startupParams.has('verbose'), // engine diagnostics (LUCIVY_VERBOSE, V3_PROFILE)
+    });
     window._lucivy = lucivy;
     await lucivy.ready;
+
+    // `?corpus=<url>` — skip the bundled snapshot and index a .tar.gz / .zip
+    // served next to the page (same path as a dropped archive). `?nodemo`
+    // only skips the snapshot.
+    const params = new URLSearchParams(location.search);
+    const corpusUrl = params.get('corpus');
+    if (corpusUrl) {
+      statusEl.textContent = `Downloading ${corpusUrl}...`;
+      const resp = await fetch(corpusUrl);
+      if (!resp.ok) throw new Error(`Failed to fetch corpus: ${resp.status}`);
+      const blob = await resp.blob();
+      const name = corpusUrl.split('/').pop() || 'corpus.tar.gz';
+      await importFiles([new File([blob], name)]);
+      return;
+    }
+    if (params.has('nodemo')) {
+      setReady('No dataset loaded — drop files or clone a repo');
+      return;
+    }
 
     let datasetName = 'dataset.luce';
     statusEl.textContent = 'Loading dataset...';
@@ -1022,6 +1047,17 @@ async function cloneGitRepo() {
     btnCloneGit.textContent = 'Clone repo';
   }
 }
+
+// Automation hook (tests drive the page through the debug server or devtools).
+window._playground = {
+  importFiles,
+  doSearch,
+  buildQuery,
+  getActiveIndex,
+  search: (query, opts) => getActiveIndex().search(query, opts || {}),
+  numDocs: () => activeTab === 'demo' ? demoNumDocs : userNumDocs,
+  userFile: (docId) => userFiles.get(docId),
+};
 
 btnCloneGit.addEventListener('click', cloneGitRepo);
 gitUrlEl.addEventListener('keydown', (e) => {
