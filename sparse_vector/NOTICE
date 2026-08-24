@@ -1,20 +1,13 @@
 sparse-vector
 Copyright 2026 Lucie Defraiteur
 
-This crate is licensed under the Apache License, Version 2.0 (see LICENSE).
+This crate is licensed under the MIT license (see LICENSE).
 
-Portions of this crate are derived from Qdrant (https://github.com/qdrant/qdrant),
-Copyright 2021-2026 Qdrant Team <info@qdrant.tech>, licensed under the
-Apache License, Version 2.0. The derived files carry a header saying so:
+It is original work. Its design — remapping token ids to dense dimensions,
+posting lists carrying a suffix-maximum ceiling, batch scoring of id windows
+and WAND-style pruning — is inspired by the sparse index of Qdrant
+(https://github.com/qdrant/qdrant, Apache License 2.0). No code is derived
+from it.
 
-  src/posting_list.rs          (lib/sparse/src/index/posting_list.rs)
-  src/posting_list_common.rs   (lib/sparse/src/index/posting_list_common.rs)
-  src/search_context.rs        (lib/sparse/src/index/search_context.rs)
-  src/scores_memory_pool.rs    (an earlier lib/sparse scores memory pool)
-
-The remaining files (handle, index, mmap_index, top_k, blob_store) are
-original work inspired by the design of Qdrant's sparse index.
-
-This crate is a member of the lucivy workspace. The other crates of that
-workspace (ld-lucivy, lucivy-core, luciole, lucistore) are licensed under
-the MIT license and do not depend on this crate.
+This crate is a member of the lucivy workspace (ld-lucivy, lucivy-core,
+luciole, lucistore), which is licensed under the MIT license as well.

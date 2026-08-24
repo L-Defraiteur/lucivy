@@ -526,6 +526,52 @@ fn ceilings_hold_under_random_mutation() {
 }
 
 #[test]
+fn in_order_appends_keep_ceilings_and_match_builder() {
+    let mut rng = Rng::new(0xA11);
+    let pairs: Vec<(RecordId, Weight)> = (0..3_000u64)
+        .map(|i| (i * 2, rng.unit() * 2.0 - 0.5))
+        .collect();
+    let mut appended = Postings::new();
+    for &(id, w) in &pairs {
+        assert_eq!(appended.upsert(id, w), None);
+    }
+    assert_ceilings(&appended);
+    assert_eq!(appended, Postings::from_sorted_pairs(&pairs));
+
+    // Rising weights: every append raises every ceiling before it.
+    let mut rising = Postings::new();
+    for i in 0..500u64 {
+        rising.upsert(i, i as f32);
+    }
+    assert_ceilings(&rising);
+    assert!(rising.as_slice().iter().all(|p| p.tail_max == 499.0));
+
+    // Re-upserting the same weight is a no-op that reports the old weight.
+    let before = rising.clone();
+    assert_eq!(rising.upsert(10, 10.0), Some(10.0));
+    assert_eq!(rising, before);
+}
+
+#[test]
+fn duplicate_query_dimensions_are_summed() {
+    let mut rng = Rng::new(0xD0B);
+    let corpus = random_corpus(&mut rng, 200, 50);
+    for round in 0..20 {
+        let query = random_query(&mut rng, 50, true);
+        // Split every weight in two and add a zero-weight repeat.
+        let mut split: Vec<(DimId, Weight)> = Vec::new();
+        for &(d, w) in &query {
+            split.push((d, w * 0.25));
+            split.push((d, 0.0));
+            split.push((d, w * 0.75));
+        }
+        let expected = brute_force(&corpus, &query, 10, |_| true);
+        let got = run(&corpus, &split, 10, SearchOptions::default(), |_| true);
+        assert_same_hits(&expected, &got, &format!("round {round} split query"));
+    }
+}
+
+#[test]
 fn invariant_checker_catches_violations() {
     let ok = Postings::from_pairs([(1u64, 1.0f32), (2, 2.0)]);
     assert!(check_ceilings(ok.as_slice().iter().copied()).is_ok());
@@ -775,19 +821,8 @@ impl Drop for TempDir {
 
 /// Write `postings` in the crate's mmap format through its own writer.
 fn write_mmap(dir: &TempDir, postings: &[Postings], num_vectors: u32) -> std::path::PathBuf {
-    use crate::posting_list::PostingBuilder;
-    let lists: Vec<crate::posting_list::PostingList> = postings
-        .iter()
-        .map(|p| {
-            let mut b = PostingBuilder::new();
-            for x in p.as_slice() {
-                b.add(x.id, x.weight);
-            }
-            b.build()
-        })
-        .collect();
     let path = dir.0.join("sparse.mmap");
-    crate::mmap_index::write_mmap_file(&path, &lists, num_vectors).unwrap();
+    crate::mmap_index::write_mmap_file(&path, postings, num_vectors).unwrap();
     path
 }
 

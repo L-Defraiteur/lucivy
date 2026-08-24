@@ -1,106 +1,91 @@
-//! Adapter exposing `mmap_index` posting data as a [`PostingCursor`].
+//! Cursor over the posting entries of an mmap'd index.
 //!
 //! The mmap file stores, per entry, a record id, a weight and a
-//! `max_next_weight` ceiling. The adapter folds that ceiling into the
+//! `max_next_weight` ceiling. The cursor folds that ceiling into the
 //! inclusive form used here (`tail_max = max(weight, max_next_weight)`),
 //! which is correct whether the file's ceiling includes the entry itself or
 //! only the entries after it.
 
-use crate::mmap_index::{MmapPostingData, MmapPostingListIterator};
-use crate::posting_list_common::PostingListIter;
+use crate::mmap_index::{MmapPostingData, PostingEntry};
 
 use super::cursor::PostingCursor;
 use super::{DimId, Posting, RecordId, Weight};
 
-/// Cursor over one dimension of an mmap'd index.
+/// Cursor over one dimension of an mmap'd index: a position within the
+/// dimension's entries, read straight from the mapping.
+#[derive(Clone, Debug)]
 pub struct MmapCursor<'a> {
-    inner: MmapPostingListIterator<'a>,
-    /// Cached current element, refreshed after every move so that `peek`
-    /// needs no mutable access to the underlying iterator.
-    current: Option<Posting>,
-    last_id: Option<RecordId>,
+    entries: &'a [PostingEntry],
+    pos: usize,
 }
 
 impl<'a> MmapCursor<'a> {
-    /// Wrap an iterator obtained from [`MmapPostingData::iter`].
-    pub fn new(mut inner: MmapPostingListIterator<'a>) -> Self {
-        let last_id = inner.last_id();
-        let current = Self::snapshot(&mut inner);
-        Self {
-            inner,
-            current,
-            last_id,
-        }
+    /// Cursor at the start of `entries`, which must be sorted by id with no
+    /// duplicates (the writer guarantees it).
+    pub fn new(entries: &'a [PostingEntry]) -> Self {
+        Self { entries, pos: 0 }
     }
 
     /// Cursor for `dim` (a remapped dimension index), `None` when the
     /// dimension has no postings.
     pub fn open(data: &'a MmapPostingData, dim: DimId) -> Option<Self> {
-        data.iter(dim as usize).map(Self::new)
+        let entries = data.entries(dim as usize);
+        (!entries.is_empty()).then(|| Self::new(entries))
     }
 
-    fn snapshot(inner: &mut MmapPostingListIterator<'a>) -> Option<Posting> {
-        inner.peek().map(|e| Posting {
+    #[inline]
+    fn fold(e: &PostingEntry) -> Posting {
+        Posting {
             id: e.record_id,
             weight: e.weight,
             tail_max: e.weight.max(e.max_next_weight),
-        })
-    }
-
-    fn refresh(&mut self) {
-        self.current = Self::snapshot(&mut self.inner);
+        }
     }
 }
 
 impl PostingCursor for MmapCursor<'_> {
     #[inline]
     fn peek(&self) -> Option<Posting> {
-        self.current
+        self.entries.get(self.pos).map(Self::fold)
     }
 
+    #[inline]
     fn advance(&mut self) {
-        if let Some(cur) = self.current {
-            // Consuming everything up to the current id consumes exactly
-            // the current element, since ids are unique and sorted.
-            self.inner.for_each_till_id(cur.id, &mut (), |_, _, _| {});
-            self.refresh();
+        if self.pos < self.entries.len() {
+            self.pos += 1;
         }
     }
 
     fn seek(&mut self, target: RecordId) -> Option<Posting> {
-        match self.current {
-            Some(cur) if cur.id >= target => Some(cur),
-            Some(_) => {
-                // Positions on the exact id, or on the next larger one.
-                let _ = self.inner.skip_to(target);
-                self.refresh();
-                self.current
-            }
-            None => None,
-        }
+        let rest = &self.entries[self.pos.min(self.entries.len())..];
+        self.pos += rest.partition_point(|e| e.record_id < target);
+        self.peek()
     }
 
     #[inline]
     fn remaining(&self) -> usize {
-        self.inner.len_to_end()
+        self.entries.len().saturating_sub(self.pos)
     }
 
     #[inline]
     fn last_id(&self) -> Option<RecordId> {
-        self.last_id
+        self.entries.last().map(|e| e.record_id)
     }
 
     fn exhaust(&mut self) {
-        self.inner.skip_to_end();
-        self.current = None;
+        self.pos = self.entries.len();
     }
 
     fn drain_through(&mut self, hi: RecordId, mut visit: impl FnMut(RecordId, Weight)) {
-        if self.current.is_none() {
-            return;
+        let rest = &self.entries[self.pos.min(self.entries.len())..];
+        let mut taken = 0;
+        for e in rest {
+            if e.record_id > hi {
+                break;
+            }
+            visit(e.record_id, e.weight);
+            taken += 1;
         }
-        self.inner
-            .for_each_till_id(hi, &mut (), |_, id, w| visit(id, w));
-        self.refresh();
+        self.pos += taken;
     }
 }

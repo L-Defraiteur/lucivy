@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use crate::blob_store::BlobStore;
 use crate::index::{SparseIndex, SparseVector};
 use crate::mmap_index::{self, MmapPostingData};
-use crate::posting_list::PostingList;
+use crate::wand::Postings;
 
 const MMAP_FILE: &str = "sparse.mmap";
 const VECTORS_FILE: &str = "sparse_vectors.bin";
@@ -224,8 +224,7 @@ impl SparseHandle {
 
         let num_dims = mmap.num_dims();
         let num_vectors = mmap.num_vectors();
-        let empty_postings: Vec<PostingList> =
-            (0..num_dims).map(|_| PostingList::default()).collect();
+        let empty_postings: Vec<Postings> = (0..num_dims).map(|_| Postings::new()).collect();
         // Empty vectors — will be loaded lazily on first mutation
         let index =
             SparseIndex::from_parts(dim_map, dim_reverse, empty_postings, HashMap::new());
@@ -278,7 +277,7 @@ impl SparseHandle {
         if let Some(ref mmap) = inner.mmap {
             let postings = inner.index.postings_mut();
             for (i, pl) in postings.iter_mut().enumerate() {
-                *pl = mmap.load_posting_list(i);
+                *pl = mmap.load_postings(i);
             }
         }
         inner.postings_loaded = true;
@@ -332,7 +331,6 @@ impl SparseHandle {
                 return mmap_index::search_mmap(
                     mmap,
                     inner.index.dim_map(),
-                    inner.index.pool(),
                     query,
                     limit,
                     &|_| true,
@@ -359,7 +357,6 @@ impl SparseHandle {
                 return mmap_index::search_mmap(
                     mmap,
                     inner.index.dim_map(),
-                    inner.index.pool(),
                     query,
                     limit,
                     &|id| allowed.contains(&id),
@@ -371,6 +368,10 @@ impl SparseHandle {
 
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap().num_vectors
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Write index to disk in the new mmap format, then re-mmap.
@@ -807,7 +808,8 @@ mod tests {
         assert_eq!(handle2.len(), 50);
 
         let results = handle2.search(&SparseVector::new(vec![0], vec![1.0]), 5);
-        // Docs with token 0: 0 (w=0.0), 10, 20, 30, 40. Doc 0 has weight 0 → no score.
+        // Docs with token 0: 0 (w=0.0), 10, 20, 30, 40. Doc 0 has weight 0,
+        // which is not indexed (see `index`), so it is not a hit.
         assert_eq!(results.len(), 4);
         assert_eq!(results[0].0, 40);
     }

@@ -1,17 +1,24 @@
-// Sparse vector inverted index V2 — inspired by Qdrant (Apache 2.0).
-//
-// Replaces the naive HashMap<u32, Vec<(u64, f32)>> with sorted PostingLists,
-// batch scoring via SearchContext, and WAND-like pruning.
-//
-// API is unchanged: insert(), remove(), search(), search_filtered().
+//! In-RAM sparse-vector inverted index.
+//!
+//! Token ids (which can be sparse and large) are remapped to dense
+//! dimension indices; each dimension owns one [`Postings`] list of the
+//! `wand` module, and the original vectors are kept so a record can be
+//! removed or replaced. Searches run through [`wand::search_with`] with a
+//! per-thread [`Scratch`].
+//!
+//! # Zero weights
+//!
+//! A coordinate whose weight is exactly `0.0` contributes nothing to any
+//! dot product, so it is not indexed: the record does not appear in that
+//! dimension's postings and a query on that dimension alone does not
+//! return it. The stored vector keeps the coordinate as given.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
-use crate::posting_list::{PostingBuilder, PostingList};
-use crate::posting_list_common::PostingElementEx;
-use crate::scores_memory_pool::ScoresMemoryPool;
-use crate::search_context::SearchContext;
+use crate::wand::{self, DimId, PostingCursor, Postings, Scratch, SearchOptions, TopKSink};
 
 /// A sparse vector: parallel arrays of token IDs and weights.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -39,10 +46,51 @@ impl SparseVector {
     }
 }
 
-/// In-memory inverted index for sparse vectors (V2).
-///
-/// Uses sorted PostingLists with max_next_weight for WAND pruning,
-/// dimension remapping for dense Vec access, and batch scoring via SearchContext.
+thread_local! {
+    /// Window buffers reused by every search on this thread.
+    static SCRATCH: RefCell<Scratch> = RefCell::new(Scratch::new());
+}
+
+/// Top-`limit` search with the crate's default options and the thread's
+/// scratch buffers. Token ids of `query` are translated through `dim_map`;
+/// unknown ones are ignored, and `cursors` receives the dense dimension
+/// indices. Repeated token ids in the query are summed (see
+/// [`wand::search_with`]).
+pub(crate) fn run_search<C, F, R>(
+    query: &SparseVector,
+    dim_map: &HashMap<u32, usize>,
+    limit: usize,
+    filter: F,
+    cursors: R,
+) -> Vec<(u64, f32)>
+where
+    C: PostingCursor,
+    F: Fn(u64) -> bool,
+    R: FnMut(DimId) -> Option<C>,
+{
+    let lanes: Vec<(DimId, f32)> = query
+        .indices
+        .iter()
+        .zip(&query.values)
+        .filter_map(|(token, &w)| dim_map.get(token).map(|&dim| (dim as DimId, w)))
+        .collect();
+    if lanes.is_empty() {
+        return Vec::new();
+    }
+    SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        wand::search_with(
+            &lanes,
+            filter,
+            cursors,
+            TopKSink::new(limit),
+            SearchOptions::default(),
+            &mut scratch,
+        )
+    })
+}
+
+/// In-memory inverted index for sparse vectors.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SparseIndex {
     /// Dimension remapping: global token_id → dense index into `postings`.
@@ -50,48 +98,38 @@ pub struct SparseIndex {
     /// Reverse map: dense index → global token_id.
     dim_reverse: Vec<u32>,
     /// Posting lists indexed by remapped dimension.
-    #[serde(serialize_with = "serialize_postings", deserialize_with = "deserialize_postings")]
-    postings: Vec<PostingList>,
+    #[serde(with = "postings_serde")]
+    postings: Vec<Postings>,
     /// Original vectors stored for delete/update support.
     vectors: HashMap<u64, SparseVector>,
-    /// Score buffer pool (not serialized).
-    #[serde(skip, default = "ScoresMemoryPool::new")]
-    pool: ScoresMemoryPool,
 }
 
-// Custom serde for PostingList (which doesn't derive Serialize/Deserialize).
-// We serialize as Vec<Vec<(u64, f32)>> for simplicity and compatibility.
-fn serialize_postings<S: serde::Serializer>(
-    postings: &[PostingList],
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    use serde::ser::SerializeSeq;
-    let mut seq = serializer.serialize_seq(Some(postings.len()))?;
-    for pl in postings {
-        let elements: Vec<(u64, f32)> = pl
-            .elements
-            .iter()
-            .map(|e| (e.record_id, e.weight))
-            .collect();
-        seq.serialize_element(&elements)?;
+/// Posting lists travel as `Vec<Vec<(id, weight)>>`: the ceilings are
+/// derived data, and the shape is the one older `sparse.bin` files carry.
+mod postings_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use crate::wand::Postings;
+
+    pub fn serialize<S: Serializer>(postings: &[Postings], s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq(postings.iter().map(|p| {
+            p.as_slice()
+                .iter()
+                .map(|x| (x.id, x.weight))
+                .collect::<Vec<(u64, f32)>>()
+        }))
     }
-    seq.end()
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Postings>, D::Error> {
+        let lists: Vec<Vec<(u64, f32)>> = Deserialize::deserialize(d)?;
+        Ok(lists.into_iter().map(Postings::from_pairs).collect())
+    }
 }
 
-fn deserialize_postings<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Vec<PostingList>, D::Error> {
-    let raw: Vec<Vec<(u64, f32)>> = Deserialize::deserialize(deserializer)?;
-    Ok(raw
-        .into_iter()
-        .map(|elements| {
-            let mut builder = PostingBuilder::new();
-            for (id, weight) in elements {
-                builder.add(id, weight);
-            }
-            builder.build()
-        })
-        .collect())
+impl Default for SparseIndex {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SparseIndex {
@@ -101,7 +139,6 @@ impl SparseIndex {
             dim_reverse: Vec::new(),
             postings: Vec::new(),
             vectors: HashMap::new(),
-            pool: ScoresMemoryPool::new(),
         }
     }
 
@@ -109,7 +146,7 @@ impl SparseIndex {
     pub fn from_parts(
         dim_map: HashMap<u32, usize>,
         dim_reverse: Vec<u32>,
-        postings: Vec<PostingList>,
+        postings: Vec<Postings>,
         vectors: HashMap<u64, SparseVector>,
     ) -> Self {
         Self {
@@ -117,11 +154,10 @@ impl SparseIndex {
             dim_reverse,
             postings,
             vectors,
-            pool: ScoresMemoryPool::new(),
         }
     }
 
-    // -- Accessors for persistence layer --
+    // -- Accessors for the persistence layer --
 
     pub fn dim_map(&self) -> &HashMap<u32, usize> {
         &self.dim_map
@@ -131,11 +167,11 @@ impl SparseIndex {
         &self.dim_reverse
     }
 
-    pub fn postings(&self) -> &[PostingList] {
+    pub fn postings(&self) -> &[Postings] {
         &self.postings
     }
 
-    pub fn postings_mut(&mut self) -> &mut Vec<PostingList> {
+    pub fn postings_mut(&mut self) -> &mut Vec<Postings> {
         &mut self.postings
     }
 
@@ -147,10 +183,6 @@ impl SparseIndex {
         self.vectors = vectors;
     }
 
-    pub fn pool(&self) -> &ScoresMemoryPool {
-        &self.pool
-    }
-
     pub fn len(&self) -> usize {
         self.vectors.len()
     }
@@ -159,58 +191,61 @@ impl SparseIndex {
         self.vectors.is_empty()
     }
 
-    /// Get or create a remapped dimension index for the given token_id.
+    /// Dense index of `token_id`, allocating one on first sight.
     fn get_or_create_dim(&mut self, token_id: u32) -> usize {
         if let Some(&idx) = self.dim_map.get(&token_id) {
-            idx
-        } else {
-            let idx = self.postings.len();
-            self.dim_map.insert(token_id, idx);
-            self.dim_reverse.push(token_id);
-            self.postings.push(PostingList::default());
-            idx
+            return idx;
         }
+        let idx = self.postings.len();
+        self.dim_map.insert(token_id, idx);
+        self.dim_reverse.push(token_id);
+        self.postings.push(Postings::new());
+        idx
     }
 
-    /// Get the remapped dimension index for the given token_id, if it exists.
+    /// Dense index of `token_id`, if it has been seen.
     fn get_dim(&self, token_id: u32) -> Option<usize> {
         self.dim_map.get(&token_id).copied()
     }
 
-    /// Insert a document's sparse vector. Replaces if node_id already exists.
+    /// Index a record's vector, replacing any previous vector under the
+    /// same id. Zero weights are not indexed (see the module docs).
     pub fn insert(&mut self, node_id: u64, vector: &SparseVector) {
         if self.vectors.contains_key(&node_id) {
             self.remove(node_id);
         }
 
-        for (i, &token_id) in vector.indices.iter().enumerate() {
+        for (&token_id, &weight) in vector.indices.iter().zip(&vector.values) {
+            if weight == 0.0 {
+                continue;
+            }
             let dim_idx = self.get_or_create_dim(token_id);
-            self.postings[dim_idx].upsert(PostingElementEx::new(node_id, vector.values[i]));
+            self.postings[dim_idx].upsert(node_id, weight);
         }
 
         self.vectors.insert(node_id, vector.clone());
     }
 
-    /// Remove a document from the index. Returns true if it existed.
+    /// Remove a record. Returns true if it existed.
     pub fn remove(&mut self, node_id: u64) -> bool {
-        if let Some(vector) = self.vectors.remove(&node_id) {
-            for &token_id in &vector.indices {
-                if let Some(dim_idx) = self.get_dim(token_id) {
-                    self.postings[dim_idx].delete(node_id);
-                }
+        let Some(vector) = self.vectors.remove(&node_id) else {
+            return false;
+        };
+        for &token_id in &vector.indices {
+            if let Some(dim_idx) = self.get_dim(token_id) {
+                self.postings[dim_idx].delete(node_id);
             }
-            true
-        } else {
-            false
         }
+        true
     }
 
-    /// Search: top-k by dot product score, using batch scoring + WAND pruning.
+    /// Top-`limit` records by dot product with `query`, score descending
+    /// then id ascending.
     pub fn search(&self, query: &SparseVector, limit: usize) -> Vec<(u64, f32)> {
         self.search_with_filter(query, limit, &|_| true)
     }
 
-    /// Search with allowed_ids filter.
+    /// [`search`](Self::search) restricted to `allowed_ids`.
     pub fn search_filtered(
         &self,
         query: &SparseVector,
@@ -224,7 +259,6 @@ impl SparseIndex {
         self.search_with_filter(query, limit, &|id| allowed.contains(&id))
     }
 
-    /// Internal search with arbitrary filter predicate.
     fn search_with_filter<F: Fn(u64) -> bool>(
         &self,
         query: &SparseVector,
@@ -234,43 +268,12 @@ impl SparseIndex {
         if query.is_empty() || self.is_empty() {
             return Vec::new();
         }
-
-        let pooled = self.pool.get();
-
-        // Remap query dimensions to our dense indices
-        let mut remapped_indices: Vec<u32> = Vec::with_capacity(query.indices.len());
-        let mut remapped_values: Vec<f32> = Vec::with_capacity(query.values.len());
-        for (i, &token_id) in query.indices.iter().enumerate() {
-            if let Some(&dim_idx) = self.dim_map.get(&token_id) {
-                remapped_indices.push(dim_idx as u32);
-                remapped_values.push(query.values[i]);
-            }
-        }
-
-        if remapped_indices.is_empty() {
-            return Vec::new();
-        }
-
-        let mut ctx = SearchContext::new(
-            &remapped_indices,
-            &remapped_values,
-            limit,
-            |dim_idx| {
-                let pl = &self.postings[dim_idx as usize];
-                if pl.is_empty() {
-                    None
-                } else {
-                    Some(pl.iter())
-                }
-            },
-            pooled,
-        );
-
-        let results = ctx.search(filter);
-        results
-            .into_iter()
-            .map(|sp| (sp.idx, sp.score))
-            .collect()
+        run_search(query, &self.dim_map, limit, filter, |dim| {
+            self.postings
+                .get(dim as usize)
+                .filter(|p| !p.is_empty())
+                .map(Postings::cursor)
+        })
     }
 
     /// Clear the entire index.
@@ -365,6 +368,9 @@ mod tests {
         let results = index.search(&query, 5);
         assert_eq!(results.len(), 5);
         assert_eq!(results[0].0, 99);
+        for p in index.postings() {
+            p.check_invariants().unwrap();
+        }
     }
 
     #[test]
@@ -402,9 +408,40 @@ mod tests {
         let mut index = SparseIndex::new();
         index.insert(1, &SparseVector::new(vec![42], vec![1.0]));
         index.remove(1);
-        // Posting list still exists (dimension was created) but is empty
+        // The dimension survives, its posting list is empty.
         let dim_idx = index.get_dim(42).unwrap();
         assert!(index.postings[dim_idx].is_empty());
+    }
+
+    #[test]
+    fn zero_weights_are_not_indexed() {
+        let mut index = SparseIndex::new();
+        index.insert(1, &SparseVector::new(vec![1, 2], vec![0.0, 0.5]));
+        index.insert(2, &SparseVector::new(vec![1], vec![0.0]));
+        assert_eq!(index.len(), 2, "the records themselves are kept");
+        // Dimension 1 only ever saw zeros: nothing to search there.
+        assert!(index
+            .search(&SparseVector::new(vec![1], vec![1.0]), 10)
+            .is_empty());
+        let hits = index.search(&SparseVector::new(vec![1, 2], vec![1.0, 1.0]), 10);
+        assert_eq!(hits, vec![(1, 0.5)]);
+        // Replacing a record with a non-zero weight on that dimension works.
+        index.insert(2, &SparseVector::new(vec![1], vec![0.7]));
+        let hits = index.search(&SparseVector::new(vec![1], vec![1.0]), 10);
+        assert_eq!(hits, vec![(2, 0.7)]);
+        assert!(index.remove(1));
+        assert!(index.remove(2));
+        assert!(index.is_empty());
+    }
+
+    #[test]
+    fn duplicate_query_dimensions_are_summed() {
+        let mut index = SparseIndex::new();
+        index.insert(1, &SparseVector::new(vec![7], vec![0.5]));
+        let once = index.search(&SparseVector::new(vec![7], vec![1.5]), 10);
+        let twice = index.search(&SparseVector::new(vec![7, 7], vec![1.0, 0.5]), 10);
+        assert_eq!(once, twice);
+        assert_eq!(twice, vec![(1, 0.75)]);
     }
 
     #[test]
@@ -428,7 +465,7 @@ mod tests {
 
     #[test]
     fn persistence_compat() {
-        // Verify bincode round-trip works
+        // bincode round-trip through the legacy `Vec<Vec<(id, weight)>>` shape.
         let mut index = SparseIndex::new();
         index.insert(42, &SparseVector::new(vec![1, 2], vec![0.5, 0.3]));
         index.insert(99, &SparseVector::new(vec![2, 3], vec![0.8, 0.2]));
@@ -437,6 +474,7 @@ mod tests {
         let index2: SparseIndex = bincode::deserialize(&data).unwrap();
 
         assert_eq!(index2.len(), 2);
+        assert_eq!(index2.postings(), index.postings());
         let results = index2.search(&SparseVector::new(vec![2], vec![1.0]), 10);
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, 99);

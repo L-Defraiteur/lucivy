@@ -37,8 +37,7 @@ impl Postings {
             .iter()
             .map(|&(id, w)| Posting::solo(id, w))
             .collect();
-        let n = items.len();
-        refresh_tail_max(&mut items, n);
+        rebuild_tail_max(&mut items);
         Self { items }
     }
 
@@ -67,19 +66,34 @@ impl Postings {
 
     /// Insert `id` with `weight`, or replace its weight if it is already
     /// present. Returns the previous weight when replacing.
+    ///
+    /// Appending an id above every existing one costs O(1) unless the new
+    /// weight raises existing ceilings, and then only the raised prefix is
+    /// rewritten: inserting a corpus in id order is amortised O(1) per
+    /// element for weights without a rising trend.
     pub fn upsert(&mut self, id: RecordId, weight: Weight) -> Option<Weight> {
         match self.locate(id) {
             Ok(i) => {
                 let old = self.items[i].weight;
+                if old == weight {
+                    return Some(old);
+                }
                 self.items[i].weight = weight;
-                // Elements after `i` keep their suffixes; everything up to
-                // and including `i` sees a changed suffix.
-                refresh_tail_max(&mut self.items, i + 1);
+                self.items[i].tail_max = weight.max(suffix_ceiling(&self.items, i + 1));
+                repair_tail_max(&mut self.items, i);
                 Some(old)
             }
             Err(i) => {
-                self.items.insert(i, Posting::solo(id, weight));
-                refresh_tail_max(&mut self.items, i + 1);
+                let tail_max = weight.max(suffix_ceiling(&self.items, i));
+                self.items.insert(
+                    i,
+                    Posting {
+                        id,
+                        weight,
+                        tail_max,
+                    },
+                );
+                repair_tail_max(&mut self.items, i);
                 None
             }
         }
@@ -91,15 +105,14 @@ impl Postings {
         let removed = self.items.remove(i);
         // Elements now at `i..` are unchanged; the ones before lost a
         // member of their suffix.
-        refresh_tail_max(&mut self.items, i);
+        repair_tail_max(&mut self.items, i);
         Some(removed.weight)
     }
 
     /// Recompute every ceiling from scratch (after bulk edits through
     /// [`items_mut`](Self::items_mut)).
     pub fn recompute_tail_max(&mut self) {
-        let n = self.items.len();
-        refresh_tail_max(&mut self.items, n);
+        rebuild_tail_max(&mut self.items);
     }
 
     /// Mutable access to the raw elements for bulk edits. The caller must
@@ -121,15 +134,40 @@ impl Postings {
     }
 }
 
-/// Recompute `tail_max` for positions `0..end`, assuming the ceilings at
-/// `end..` are already correct.
-fn refresh_tail_max(items: &mut [Posting], end: usize) {
+/// Ceiling of the suffix starting at `from`: `tail_max` of that element, or
+/// `-inf` past the end.
+#[inline]
+fn suffix_ceiling(items: &[Posting], from: usize) -> Weight {
+    items.get(from).map_or(Weight::NEG_INFINITY, |p| p.tail_max)
+}
+
+/// Recompute every ceiling from the weights alone.
+fn rebuild_tail_max(items: &mut [Posting]) {
+    let mut running = Weight::NEG_INFINITY;
+    for p in items.iter_mut().rev() {
+        running = running.max(p.weight);
+        p.tail_max = running;
+    }
+}
+
+/// Bring the ceilings of `0..end` back in line after a change confined to
+/// the suffix `end..`, whose ceilings are already correct, given that the
+/// ceilings of `0..end` were correct before the change.
+///
+/// Walking leftwards, the recomputed ceiling at `j` depends only on the
+/// weights of `j..end` and on the ceiling at `end`. Once the recomputed
+/// value equals the stored one at some `j`, every ceiling left of `j`
+/// derives from the same unchanged weights and that same value, so it is
+/// already right: the walk stops there. A change that raises no ceiling
+/// costs a single comparison.
+fn repair_tail_max(items: &mut [Posting], end: usize) {
     let end = end.min(items.len());
-    let mut running = items
-        .get(end)
-        .map_or(Weight::NEG_INFINITY, |p| p.tail_max);
+    let mut running = suffix_ceiling(items, end);
     for p in items[..end].iter_mut().rev() {
         running = running.max(p.weight);
+        if p.tail_max == running {
+            break;
+        }
         p.tail_max = running;
     }
 }

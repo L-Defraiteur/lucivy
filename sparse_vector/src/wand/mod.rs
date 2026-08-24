@@ -14,7 +14,7 @@
 //!   postings.
 //! - [`postings`] — [`Postings`], the in-RAM list with upsert / delete and
 //!   ceiling maintenance, plus [`PostingsBuilder`].
-//! - [`mmap`] — [`MmapCursor`], an adapter over `mmap_index` posting data.
+//! - [`mmap`] — [`MmapCursor`], a cursor over `mmap_index` posting entries.
 //! - [`frontier`] — [`Frontier`], the set of active cursors for a query.
 //! - [`sink`] — the [`ScoreSink`] trait, [`TopKSink`] and [`CollectAll`].
 //! - [`search`] — [`search`](search::search) and [`search_with`].
@@ -50,6 +50,14 @@
 //! # Ordering
 //!
 //! Results are sorted by score descending, then by record id ascending.
+//!
+//! # Queries
+//!
+//! A query is a list of `(dimension, weight)`. A dimension repeated in the
+//! query is merged by summing its weights before the lanes are built, and
+//! zero weights are dropped. Weights stored in posting lists are expected
+//! to be non-zero (the index strips zeros at insert time); a stored zero is
+//! still a presence and would be returned with a zero score.
 
 pub mod cursor;
 pub mod frontier;
