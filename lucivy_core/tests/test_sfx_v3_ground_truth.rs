@@ -191,7 +191,7 @@ fn index_shape_key(num_files: usize) -> String {
         None => (-1, -1, false),
     };
     format!(
-        "corpus={} files={} commit_every={} merge_target={} merge_group={} progressive={} policy={} v=9",
+        "corpus={} files={} commit_every={} merge_target={} merge_group={} progressive={} policy={} v=10",
         repo_path(), num_files, commit_every(500), target, group, progressive,
         std::env::var("V3_POLICY").is_ok(),
     )

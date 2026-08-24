@@ -1164,6 +1164,85 @@ fn v3_strict_sep_head_three_chunks() {
     }
 }
 
+/// Fuzzy highlights next to multi-byte punctuation (`→`, `—`, `«»`, CJK)
+/// land on the word, on char boundaries. The playground's v2 snapshot
+/// reported a fuzzy span ending inside a `→`; v3 must never (rag3weaver
+/// doc 21 suggested the em dash case).
+#[test]
+fn v3_fuzzy_spans_beside_multibyte_punctuation() {
+    // Substitution typos only: with a deletion (`rag3weavr`) the shared
+    // span definition legitimately aligns on `rag3weav`, which is not
+    // what this test is about.
+    let cases: &[(&str, &str, &str)] = &[
+        ("rag3weaver → recherche", "rak3weaver", "rag3weaver"),
+        ("recherche → rag3weaver", "rak3weaver", "rag3weaver"),
+        ("accents — rag3weaver — fin", "rag3wesver", "rag3weaver"),
+        ("→rag3weaver←", "weaber", "weaver"),
+        ("«rag3weaver»", "rak3weaver", "rag3weaver"),
+        ("日本語 rag3weaver 日本語", "rak3weaver", "rag3weaver"),
+        ("voilà → rag3weaver — déjà", "rak3weaver", "rag3weaver"),
+    ];
+    let mut bad = Vec::new();
+    for (text, query, word) in cases {
+        let handle = make_handle(&[text]);
+        let docs = search_fuzzy_docs(&handle, query, 1);
+        let spans = fuzzy_spans_for(&handle, query, 1);
+        for s in &spans {
+            assert!(
+                text.is_char_boundary(s[0]) && text.is_char_boundary(s[1]),
+                "{text:?} fuzzy {query:?}: span {s:?} is not on char boundaries"
+            );
+        }
+        let expect = grep_strict(text, word);
+        if spans != expect {
+            bad.push(format!("{text:?} fuzzy {query:?}: docs={docs} spans={spans:?} expected {expect:?}"));
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+/// Same texts, plain contains (relaxed and strict): the literal pipeline the
+/// fuzzy pieces go through must see a word sitting next to `→`, `«»`, `—`.
+#[test]
+fn v3_contains_beside_multibyte_punctuation() {
+    let texts = [
+        "recherche → rag3weaver",
+        "«rag3weaver»",
+        "→rag3weaver←",
+        "accents — rag3weaver — fin",
+        "日本語 rag3weaver 日本語",
+    ];
+    let mut bad = Vec::new();
+    for text in texts {
+        let handle = make_handle(&[text]);
+        for q in ["rag3weaver", "3weaver", "weaver", "rag3"] {
+            for strict in [false, true] {
+                let got: Vec<[usize; 2]> = doc_spans(&handle, q, strict, 1)
+                    .remove(&0).unwrap_or_default();
+                let expect = grep_strict(text, q);
+                if got != expect {
+                    bad.push(format!("{text:?} contains {q:?} strict={strict}: {got:?} expected {expect:?}"));
+                }
+            }
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+fn search_fuzzy_docs(handle: &LucivyHandle, value: &str, distance: u8) -> usize {
+    let config = QueryConfig {
+        query_type: "contains".into(),
+        field: Some("content".into()),
+        value: Some(value.into()),
+        distance: Some(distance),
+        ..Default::default()
+    };
+    let query = query::build_query(&config, &handle.schema, &handle.index, None).unwrap();
+    let searcher = handle.reader.searcher();
+    let collector = ld_lucivy::collector::TopDocs::with_limit(100).order_by_score();
+    searcher.search(&*query, &collector).unwrap().len()
+}
+
 /// Migration: what happens to yesterday's v2 indexes now that new indexes
 /// default to v3.
 ///

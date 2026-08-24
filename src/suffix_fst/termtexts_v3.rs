@@ -23,6 +23,8 @@ const VERSION: u8 = 1;
 const SECTION_TEXTS: u16 = 0x01;
 const SECTION_META: u16 = 0x02;
 const SECTION_STATS: u16 = 0x03;
+/// STATS layout version — see `serialize`.
+const STATS_VERSION: u16 = 1;
 
 /// Suffix indexes a word-stripped entry carries (SI 0..=MAX). A match that
 /// starts deeper inside a word is only reachable through the chunk chains.
@@ -91,13 +93,19 @@ impl TermTextsWriterV3 {
         // Section META: packed metadata array
         file.add_section(SECTION_META, &self.serialize_meta());
 
-        // Section STATS: max word-stripped content length (u16).
+        // Section STATS: max word-stripped content length (u16), then the
+        // STATS layout version (u16). The version says what the word
+        // partition is complete for: a reader that finds an older layout
+        // must not trust `max_word` to skip the chunk chains.
         let max_word: u16 = self.metas.iter()
             .filter(|m| m.is_word_stripped)
             .map(|m| m.own_len.saturating_sub(m.sep_len as u16))
             .max()
             .unwrap_or(0);
-        file.add_section(SECTION_STATS, &max_word.to_le_bytes());
+        let mut stats = Vec::with_capacity(4);
+        stats.extend_from_slice(&max_word.to_le_bytes());
+        stats.extend_from_slice(&STATS_VERSION.to_le_bytes());
+        file.add_section(SECTION_STATS, &stats);
 
         file.serialize()
     }
@@ -185,8 +193,12 @@ impl<'a> TermTextsReaderV3<'a> {
             (None, 0)
         };
 
+        // Layout 1 (24 August): the word partition holds every word,
+        // including words without a trailing separator. A 2-byte STATS
+        // (23 August) was written by builders that skipped those words;
+        // its max_word is unusable for skipping chunk chains → None.
         let max_word_content_len = file.get_section(SECTION_STATS)
-            .filter(|s| s.len() >= 2)
+            .filter(|s| s.len() >= 4 && u16::from_le_bytes([s[2], s[3]]) == STATS_VERSION)
             .map(|s| u16::from_le_bytes([s[0], s[1]]));
 
         Some(Self {

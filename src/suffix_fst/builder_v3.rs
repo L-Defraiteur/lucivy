@@ -334,10 +334,13 @@ impl SuffixFstBuilderV3 {
         if content_len == 0 {
             return;
         }
-        // No sep → nothing to strip, chunks in 0x00/0x01 already cover this word.
-        if first_sep_len == 0 {
-            return;
-        }
+        // A word without a trailing separator (the last word of a value, or
+        // a value that is one word) is indexed like any other. It used to be
+        // skipped — "the chunks already cover it" — which held only while
+        // relaxed queries also walked the chunk chains. Since those chains
+        // are skipped when the segment has no long word (B2 bis, 23 August),
+        // the word partition must hold every word: `rag3weaver` at the end
+        // of a value, chunked `rag3w|eaver`, was unreachable for `weaver`.
         // Clamp: own_len = content_len + sep_len must fit in 14 bits (max 16383).
         // For very long words (e.g. base64), only index the first portion.
         let effective_content_len = content_len.min(OWN_LEN_MASK as usize - first_sep_len as usize);
