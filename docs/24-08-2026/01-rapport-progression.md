@@ -35,6 +35,8 @@ menée en tandem avec la session rag3weaver qui migre son FTS vers le
 | `ShardRouter` déplacé dans lucistore (ré-exporté par lucivy_core) | `ac0e66a` | routage partagé FTS / sparse ; ne dépend que de `std` |
 | **`sparse_vector/src/wand/`** : cœur WAND original écrit sur spécification (agent, fichiers dérivés jamais ouverts) | `34ec432` | 26 tests (vérité terrain brute, élagage on/off, mmap) ; 0-10 % de lignes communes avec Qdrant = bruit ; pas encore branché sur `index.rs` |
 | Design sharding / distribué / persistance du sparse | `52e907c` | `docs/24-08-2026/04-sparse-sharding-design.md` |
+| Comparaison wand vs dérivé (agent) | `913d941` | parité de résultats sur 200 requêtes × 12 configs ; nouveau +34 % plus lent par défaut, cause et remède chiffrés (doc 05) |
+| **wand branché, dérivés supprimés, crate MIT, `ShardedSparseHandle`** (agent + relecture) | `845c05e` | 147 → 137 µs RAM, 154 → 127 mmap, insert 3,2 s → 139 ms ; audit : 0-10 % de lignes communes sur tout le crate ; 61 tests |
 | `parse` booléen → composite de contains (fin du QueryParser) | `8f14edc` | AND/OR/NOT, +/-, guillemets, parenthèses ; highlights et sous-chaîne dans les deux formes ; refus des négations pures |
 
 Harnais ajouté : `lucivy_core/tests/test_commit_floor.rs` (chronos et
