@@ -1512,6 +1512,37 @@ fn v3_sharded_fuzzy_regex_reach_all_shards() {
     }
 }
 
+/// After `close()` every entry point answers with an error: the actor pools
+/// are stopped, and a request queued on a stopped actor would otherwise be
+/// dropped with its Reply (rag3weaver doc 26).
+#[test]
+fn v3_closed_handle_refuses_cleanly() {
+    use lucivy_core::sharded_handle::{ShardedHandle, RamShardStorage};
+    let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+        "fields": [{"name": "content", "type": "text", "stored": true}],
+        "sfx_version": 3,
+        "shards": 2
+    })).unwrap();
+    let h = ShardedHandle::create_with_storage(Box::new(RamShardStorage::new()), &config).unwrap();
+    let content_f = h.field("content").unwrap();
+    let mut doc = ld_lucivy::LucivyDocument::new();
+    doc.add_text(content_f, "rust safety");
+    h.add_document(doc, 1).unwrap();
+    h.commit().unwrap();
+    h.close().unwrap();
+
+    let q = QueryConfig {
+        query_type: "contains".into(), field: Some("content".into()),
+        value: Some("rust".into()), ..Default::default()
+    };
+    let err = h.search(&q, 10, None).unwrap_err();
+    assert!(err.contains("closed"), "{err}");
+    assert!(h.commit().unwrap_err().contains("closed"));
+    let mut doc = ld_lucivy::LucivyDocument::new();
+    doc.add_text(content_f, "late");
+    assert!(h.add_document(doc, 2).unwrap_err().contains("closed"));
+}
+
 /// The node id travels with `add_document` now: the field is stamped into
 /// the document, a mismatching explicit id is refused, and the JSON entry
 /// point needs neither `Field` lookups nor knowledge of `_node_id`.

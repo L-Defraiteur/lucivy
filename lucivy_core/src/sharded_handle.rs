@@ -1400,6 +1400,9 @@ pub struct ShardedHandle {
     pub config: SchemaConfig,
     /// True if deletes happened since last resync.
     has_deletes: AtomicBool,
+    /// Set by `close()`: the actor pools are stopped, every entry point
+    /// answers with an error instead of queueing on a dead actor.
+    closed: AtomicBool,
     /// Text field IDs (for tokenization at add_document).
     text_fields: Vec<Field>,
     /// Pipeline: reader pool (typed, round-robin).
@@ -1571,6 +1574,7 @@ impl ShardedHandle {
             field_map,
             config: config.clone(),
             has_deletes: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
             text_fields,
             reader_pool,
             router_ref,
@@ -1631,6 +1635,7 @@ impl ShardedHandle {
             field_map,
             config,
             has_deletes: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
             text_fields,
             reader_pool,
             router_ref,
@@ -1728,6 +1733,7 @@ impl ShardedHandle {
     }
 
     pub fn add_document(&self, mut doc: LucivyDocument, node_id: u64) -> Result<(), String> {
+        self.ensure_open()?;
         self.stamp_node_id(&mut doc, node_id)?;
         if self.shards.len() == 1 {
             // Direct path: no pipeline overhead for single shard.
@@ -1800,6 +1806,14 @@ impl ShardedHandle {
     }
 
     /// Drain all pipeline actors: wait for readers then router to finish pending work.
+    fn ensure_open(&self) -> Result<(), String> {
+        if self.closed.load(Ordering::Acquire) {
+            Err("handle is closed".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
     fn drain_pipeline(&self) {
         self.reader_pool.drain("drain_readers");
         self.router_ref.request(
@@ -1852,6 +1866,7 @@ impl ShardedHandle {
         highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
         filter: Option<Arc<HashSet<u64>>>,
     ) -> Result<Vec<ShardedSearchResult>, String> {
+        self.ensure_open()?;
         let mut dag = crate::search_dag::build_search_dag(
             &self.shards,
             &self.shard_pool,
@@ -2019,6 +2034,7 @@ impl ShardedHandle {
     /// Drains the ingestion pipeline first (readers → router → shards), then commits.
     /// If deletes happened since last commit, resyncs the router's token counters.
     pub fn commit(&self) -> Result<(), String> {
+        self.ensure_open()?;
         self.drain_pipeline();
 
         // Scatter commit to all shards in parallel.
@@ -2128,6 +2144,7 @@ impl ShardedHandle {
     /// Fast commit: persist data but skip suffix FST rebuild.
     /// Use during bulk indexation. Call commit() at the end to rebuild FSTs.
     pub fn commit_fast(&self) -> Result<(), String> {
+        self.ensure_open()?;
         self.drain_pipeline();
         let results: Vec<Result<(), String>> = self.shard_pool.scatter(
             |r| ShardMsg::Commit { fast: true, reply: r },
@@ -2189,6 +2206,7 @@ impl ShardedHandle {
         self.router_ref.send(luciole::ShutdownMsg(luciole::reply::<()>().0).into())
             .map_err(|_| "router actor channel closed".to_string())?;
         self.shard_pool.shutdown("close_shards");
+        self.closed.store(true, Ordering::Release);
         Ok(())
     }
 
