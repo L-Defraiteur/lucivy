@@ -80,11 +80,6 @@ nouvelle pour les dossiers docs : `JJ-MM-AAAA` (triable), ce dossier inaugure.
    le main proxifié sort et les ccall pendent).
 3. ~~SIGSEGV rag3db~~ : fermé (double free luciole `3675c3d`, scorer non
    monotone `8a91053`, `Pool` tolérant `a37d330`) ; valgrind à 0 chez eux.
-9. Sparse : deltas LUCIDS (un shard modifié repart entier — il faudrait des
-   générations de postings), plafonds par bloc pour que l'élagage morde sur
-   les longues listes (0,1-0,4 % de postings sautés aujourd'hui), `tail_min`
-   pour élaguer aussi avec des poids négatifs, partage du seuil top-k entre
-   shards en distribué (`docs/24-08-2026/04-sparse-sharding-design.md`).
 4. `verify_literal` = 40-70 % du CPU des requêtes à gros volume (piste perf).
 5. Fusion post-suppressions : un gros segment fusionné repart entier dans un
    delta LUCIDS (à borner côté policy si ça gêne).
@@ -96,3 +91,13 @@ nouvelle pour les dossiers docs : `JJ-MM-AAAA` (triable), ce dossier inaugure.
    comme un mot se discute ; changement de format si on y touche.
 8. Toujours lancer `cargo test -p lucivy-core --no-fail-fast` : sans, la
    suite s'arrête à `bench_sharding` et les binaires suivants ne tournent pas.
+9. Sparse : deltas LUCIDS (un shard modifié repart entier — il faudrait des
+   générations de postings), plafonds par bloc pour que l'élagage morde sur
+   les longues listes (0,1-0,4 % de postings sautés aujourd'hui), `tail_min`
+   pour élaguer aussi avec des poids négatifs, partage du seuil top-k entre
+   shards en distribué (`docs/24-08-2026/04-sparse-sharding-design.md`).
+10. Unification FTS / sparse sur un `Sharded<I: ShardIndex>` générique dans
+   lucistore (stats en phase 1 pour le FTS, vide pour le sparse), puis un
+   transport réseau commun : le distribué devient le même objet avec un
+   autre transport. Le sparse d'abord (petit), le FTS quand la fiabilisation
+   est jugée finie.
