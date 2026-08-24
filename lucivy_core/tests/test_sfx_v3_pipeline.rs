@@ -1535,6 +1535,45 @@ fn v3_parse_is_alive_and_honest() {
     let phrase_docs = search(&handle, "parse", "\"Rust safety\"");
     assert_eq!(phrase_docs.len(), 1, "quoted phrase: {phrase_docs:?}");
 
+    // Highlight contract per branch: the simple-value branch fills the sink;
+    // the QueryParser branch never touches it — hits come back with NO
+    // highlight entry, never with stale or garbage spans. Consumers that
+    // align on highlight byte ranges need "absent", not "wrong".
+    let run_with_sink = |value: &str| {
+        let config = QueryConfig {
+            query_type: "parse".into(),
+            field: Some("content".into()),
+            value: Some(value.into()),
+            ..Default::default()
+        };
+        let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
+        let query =
+            query::build_query(&config, &handle.schema, &handle.index, Some(Arc::clone(&sink)))
+                .unwrap();
+        let searcher = handle.reader.searcher();
+        let collector = ld_lucivy::collector::TopDocs::with_limit(100).order_by_score();
+        let results = searcher.search(&*query, &collector).unwrap();
+        let with_hl = results
+            .iter()
+            .filter(|(_, addr)| {
+                let seg_id = searcher.segment_reader(addr.segment_ord).segment_id();
+                sink.get(seg_id, addr.doc_id).is_some_and(|m| !m.is_empty())
+            })
+            .count();
+        (results.len(), with_hl)
+    };
+    assert_eq!(
+        run_with_sink("Rust safety"),
+        (4, 4),
+        "simple-value parse must highlight every hit"
+    );
+    let (qp_hits, qp_with_hl) = run_with_sink("Rust AND safety");
+    assert_eq!(qp_hits, 2);
+    assert_eq!(
+        qp_with_hl, 0,
+        "QueryParser branch must leave the highlight sink empty"
+    );
+
     // The warnings say which semantics apply, and that `fields` is ignored
     // elsewhere.
     let w = handle.query_warnings(&QueryConfig {
