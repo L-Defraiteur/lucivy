@@ -264,6 +264,8 @@ impl SegmentUpdaterState {
             let shared = self.shared.clone();
             let slot = results.clone();
             rxs.push(scheduler.submit_task(crate::actor::Priority::High, move || {
+                // One slot per merge (see merge_permits): waiting runs other work.
+                let _permit = super::merge_permits::acquire();
                 match super::commit_dag::run_merge(&shared, op, entries) {
                     Ok(r) => {
                         slot.lock().unwrap()[i] = Some(r);

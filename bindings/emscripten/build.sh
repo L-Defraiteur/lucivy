@@ -39,6 +39,12 @@ echo "Static lib: $STATIC_LIB"
 echo "=== Step 2: Link with emcc ==="
 mkdir -p "$OUT_DIR"
 
+# No ASYNCIFY: with the WASMFS OPFS backend on pthreads, every OPFS call in
+# the proxy worker went through Asyncify while checkMailbox re-entered the
+# next call inside the unwound stack (nested handleSleep -> `unreachable`,
+# seen as a hang of the first segment write). Nothing here sleeps: blocking
+# waits are futexes on pthreads, the commit runs on its own thread and the
+# worker polls its status through the SharedArrayBuffer.
 emcc "$STATIC_LIB" \
     -o "$OUT_DIR/lucivy.js" \
     -pthread \
@@ -72,6 +78,7 @@ emcc "$STATIC_LIB" \
         "_lucivy_dump_state",
         "_lucivy_test_condvar",
         "_lucivy_test_coop",
+        "_lucivy_test_fs_task",
         "_lucivy_dump_wait_graph",
         "_lucivy_dump_wait_graph_text",
         "_lucivy_search",
@@ -98,8 +105,6 @@ emcc "$STATIC_LIB" \
     -sWASM_BIGINT \
     -sEXPORT_ES6=1 \
     -sPROXY_TO_PTHREAD \
-    -sASYNCIFY \
-    -sASYNCIFY_STACK_SIZE=1048576 \
     -fexceptions \
     -sDISABLE_EXCEPTION_CATCHING=0 \
     -O2 \

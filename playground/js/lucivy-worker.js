@@ -321,13 +321,18 @@ self.onmessage = async (e) => {
                 await new Promise(r => setTimeout(r, 0));
 
                 // Export all files to OPFS for initial persistence (best-effort).
-                try {
-                    const allJson = await callStr('lucivy_export_all', ctx);
-                    const allFiles = JSON.parse(allJson);
-                    const modified = allFiles.map(([name, b64]) => [name, base64ToUint8Array(b64)]);
-                    await writeFiles(path, modified, []);
-                } catch (e) {
-                    console.warn('[lucivy-worker] OPFS initial sync skipped:', e.message);
+                // Only when the binding exports it: the index already lives in
+                // OPFS through WASMFS, and calling an unknown export aborts the
+                // runtime under ASSERTIONS.
+                if (Module._lucivy_export_all) {
+                    try {
+                        const allJson = await callStr('lucivy_export_all', ctx);
+                        const allFiles = JSON.parse(allJson);
+                        const modified = allFiles.map(([name, b64]) => [name, base64ToUint8Array(b64)]);
+                        await writeFiles(path, modified, []);
+                    } catch (e) {
+                        console.warn('[lucivy-worker] OPFS initial sync skipped:', e.message);
+                    }
                 }
 
                 result = { path, numDocs: await Module.ccall('lucivy_num_docs', 'number', ['number'], [ctx], { async: true }) };

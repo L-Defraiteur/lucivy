@@ -711,6 +711,37 @@ pub extern "C" fn lucivy_test_condvar() -> *const c_char {
     return_str(format!("ok: {val}"))
 }
 
+/// Minimal reproduction of "filesystem from a scheduler thread": a task on a
+/// pool thread writes `{OPFS_BASE}/{name}` (create, write, rename, read
+/// back). Reports each step; a step that never returns is the hang.
+#[no_mangle]
+pub unsafe extern "C" fn lucivy_test_fs_task(name: *const c_char) -> *const c_char {
+    ensure_panic_hook();
+    let name = str_from_ptr(name).to_string();
+    let path = format!("{OPFS_BASE}/{name}");
+    let scheduler = luciole::scheduler::global_scheduler();
+    let rx = scheduler.submit_task(luciole::Priority::High, move || -> Result<String, String> {
+        let t0 = std::time::Instant::now();
+        let step = |s: &str| eprintln!("[fs-task] {s} ({:.1}ms)", t0.elapsed().as_secs_f64() * 1e3);
+        let tmp = format!("{path}.tmp");
+        step("write tmp");
+        std::fs::write(&tmp, b"hello from a scheduler thread").map_err(|e| format!("write: {e}"))?;
+        step("rename");
+        std::fs::rename(&tmp, &path).map_err(|e| format!("rename: {e}"))?;
+        step("read back");
+        let back = std::fs::read(&path).map_err(|e| format!("read: {e}"))?;
+        step("remove");
+        std::fs::remove_file(&path).map_err(|e| format!("remove: {e}"))?;
+        step("done");
+        Ok(format!("ok: {} bytes read back", back.len()))
+    });
+    match scheduler.try_wait(rx, "test_fs_task") {
+        Ok(Ok(s)) => return_str(s),
+        Ok(Err(e)) => return_error(&e),
+        Err(_) => return_error("task died"),
+    }
+}
+
 /// Test cooperative wait. Same as above but uses cooperative wait (scheduler thread path).
 #[no_mangle]
 pub extern "C" fn lucivy_test_coop() -> *const c_char {
