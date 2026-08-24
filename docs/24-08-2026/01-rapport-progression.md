@@ -27,6 +27,7 @@ menée en tandem avec la session rag3weaver qui migre son FTS vers le
 | luciole : `Reply` lâché sous un pipe avertit | `e6176f5` | plus de collect muet |
 | **Mot sans séparateur final absent de la partition mots** (v3) | `36b1edd` | dernier mot d'une valeur introuvable en relaxed dès que la requête chevauchait ses chunks ; STATS versionné, anciens segments en repli chaînes ; clé de cache `v=10` |
 | Test luce : snapshot v2 dit tel quel, affichage sûr | `a59e4a8` | plus de panic sur `→` |
+| `parse` booléen → composite de contains (fin du QueryParser) | soir | AND/OR/NOT, +/-, guillemets, parenthèses ; highlights et sous-chaîne dans les deux formes ; refus des négations pures |
 
 Harnais ajouté : `lucivy_core/tests/test_commit_floor.rs` (chronos et
 comptage des appels au store, `--ignored`).

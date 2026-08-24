@@ -31,7 +31,7 @@ Les anciens types sont routés automatiquement via `build_query()` dans `lucivy_
 | `phrase` | → contains | multi-token adjacency |
 | `startsWith` | → contains + anchor_start | SI=0 only |
 | `startsWith_split` | → contains_split + anchor_start | |
-| `parse` | value simple → OR de contains par mot×champ ; syntaxe booléenne (AND/OR/NOT, guillemets, +/-) → QueryParser (termes entiers, multi-`fields`, pas de highlights) | `query_warnings` dit laquelle |
+| `parse` | value simple → OR de contains par mot×champ ; syntaxe booléenne (AND/OR/NOT, guillemets, +/-, parenthèses autonomes) → `boolean` de contains (NOT > AND > OR, mots côte à côte = OR) ; highlights dans les deux cas, multi-`fields` | `query_warnings` dit laquelle |
 | `phrase_prefix` | → contains | prefix match dernier token |
 | `boolean` | composite | must/should/must_not |
 | `disjunction_max` | composite | max score sub-queries |

@@ -12,7 +12,7 @@ Toujours `> /tmp/fichier.txt 2>&1`, jamais `| tail`.
 | startsWith / term (frontières de mots) | `v3_starts_with_is_word_start`, `v3_term_is_whole_token_not_prefix` + modes `sw/sws/term/terms` du harnais | idem, `V3_QUERIES='lock:sw,ptr:term'` |
 | fuzzy d=1..3 | `test_fuzzy_ground_truth`, `test_fuzzy_monotonicity`, panels | 50k : `kmallc:fz1` ~56 ms, `kmalloc:fz2` ~175 ms |
 | regex (littéraux prouvés / full scan) | `regex_v2_vs_v3`, panels | 50k : `/\*[^*]*\*/:rx` ~191 ms |
-| `parse` (OU par mot×champ / QueryParser) | `v3_parse_is_alive_and_honest` | — |
+| `parse` (OU par mot×champ / syntaxe booléenne → `boolean` de contains, highlights partout) | `v3_parse_is_alive_and_honest`, `v3_parse_boolean_syntax_is_composite` | — |
 | repli de casse (Kelvin, İ, DÉJÀ) | `v3_case_fold_length_changes` (sans corpus) | — |
 | warnings honnêtes | module `warnings` (7 tests) + `test_query_warnings` + `v3_parse_…` | smoke bindings : `bindings/{python,nodejs}/tests/smoke_warnings.*` |
 

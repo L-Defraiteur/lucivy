@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use ld_lucivy::query::{
     AllQuery, BooleanQuery, DisjunctionMaxQuery,
     HighlightSink, MoreLikeThisQuery, Occur, Query,
-    QueryParser, RangeQuery, RegexContinuationQuery, RegexQuery, SuffixContainsQuery, TermQuery,
+    RangeQuery, RegexContinuationQuery, RegexQuery, SuffixContainsQuery, TermQuery,
     ContainsQueryV3, FuzzyQueryV3, RegexQueryV3,
 };
 use ld_lucivy::schema::OwnedValue;
@@ -323,30 +323,29 @@ pub fn build_query(
         }
         "boolean" => build_boolean_query(config, schema, index, highlight_sink),
         "parse" => {
-            // Two honest behaviours, picked by the VALUE (24 August 2026):
+            // Two shapes, picked by the VALUE, one semantics (24 August 2026):
             //
-            // - boolean syntax (AND/OR/NOT, quotes, +/-) → the real
-            //   QueryParser: whole-term matching over `fields`, no substring,
-            //   no highlights. This branch had been unreachable since the
-            //   compat layer: the dispatch sent every value to contains and
-            //   only reached the parser when `value` was absent — whose first
-            //   line requires `value`. Plain values then did LITERAL substring
-            //   ("Rust safety" no longer found "Rust … safety"), a silent
-            //   change of meaning from v2 that rag3weaver had to work around.
+            // - boolean syntax (AND/OR/NOT, quotes, +/-, parentheses) →
+            //   lowered to `boolean` over substring `contains`, one leaf per
+            //   term and field. It went to the QueryParser until today —
+            //   whole terms on the inverted index, no highlights — and before
+            //   that the branch was unreachable: the dispatch sent every value
+            //   to contains, and plain values did LITERAL substring ("Rust
+            //   safety" no longer found "Rust … safety").
             //
             // - plain words → OR of substring `contains`, per word and per
-            //   field: the v2 parser's OR-of-terms semantics, with highlights.
+            //   field: the v2 parser's OR-of-terms semantics.
             //
-            // `query_warnings` names which branch a value takes.
+            // Both report highlights. `query_warnings` names the shape.
             require_sfx(index)?;
             let value = config.value.as_deref()
                 .ok_or("parse query requires 'value'")?;
-            if value_has_parser_syntax(value) {
-                build_parsed_query(config, schema, index)
+            let expanded = if value_has_parser_syntax(value) {
+                expand_parse_boolean(config)?
             } else {
-                let expanded = expand_parse_simple(config);
-                build_query(&expanded, schema, index, highlight_sink)
-            }
+                expand_parse_simple(config)
+            };
+            build_query(&expanded, schema, index, highlight_sink)
         }
         "phrase_prefix" => {
             // Compat: phrase_prefix → contains (SFX multi-token already does
@@ -587,37 +586,220 @@ fn expand_parse_simple(config: &QueryConfig) -> QueryConfig {
     }
 }
 
-fn build_parsed_query(
-    config: &QueryConfig,
-    schema: &Schema,
-    index: &Index,
-) -> Result<Box<dyn Query>, String> {
-    let value = config
-        .value
-        .as_deref()
-        .ok_or("parse query requires 'value'")?;
+// ─── parse: boolean syntax → composite of contains ─────────────────────────
+//
+// `AND` / `OR` / `NOT` (whole uppercase words), `+word` (required), `-word`
+// (excluded), `"quoted phrase"` (one contains over the whole phrase — SFX
+// adjacency), and parentheses standing on their own for grouping. Every
+// leaf is a substring `contains` over `fields`, so the boolean branch keeps
+// the semantics of the plain branch and reports highlights. The QueryParser
+// it replaces matched whole terms on the inverted index and could not.
+//
+// Precedence: NOT > AND > OR; words side by side are OR (the parser's
+// default). A group needs at least one positive clause — `NOT foo` alone
+// matches nothing meaningful and is refused rather than silently empty.
 
-    let fields: Vec<Field> = if let Some(ref field_names) = config.fields {
-        field_names
-            .iter()
-            .map(|n| {
-                schema
-                    .get_field(n)
-                    .map_err(|_| format!("unknown field: {n}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?
-    } else if let Some(ref field_name) = config.field {
-        vec![schema
-            .get_field(field_name)
-            .map_err(|_| format!("unknown field: {field_name}"))?]
-    } else {
-        return Err("parse query requires 'field' or 'fields'".to_string());
+#[derive(Debug, Clone, PartialEq)]
+enum ParseAst {
+    Leaf(String),
+    Required(Box<ParseAst>),
+    Not(Box<ParseAst>),
+    And(Vec<ParseAst>),
+    Or(Vec<ParseAst>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ParseTok {
+    LParen,
+    RParen,
+    And,
+    Or,
+    Not,
+    Plus,
+    Minus,
+    Text(String),
+}
+
+fn tokenize_parse_syntax(value: &str) -> Vec<ParseTok> {
+    let mut out = Vec::new();
+    let chars: Vec<char> = value.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() { i += 1; continue; }
+        if c == '"' {
+            let start = i + 1;
+            let mut j = start;
+            while j < chars.len() && chars[j] != '"' { j += 1; }
+            let text: String = chars[start..j].iter().collect();
+            if !text.trim().is_empty() { out.push(ParseTok::Text(text.trim().to_string())); }
+            i = if j < chars.len() { j + 1 } else { j };
+            continue;
+        }
+        // `+word` / `-word` / `+"phrase"`: the sign is its own token only
+        // when followed by something; a lone `-` is a word.
+        if (c == '+' || c == '-') && i + 1 < chars.len() && !chars[i + 1].is_whitespace() {
+            out.push(if c == '+' { ParseTok::Plus } else { ParseTok::Minus });
+            i += 1;
+            continue;
+        }
+        // A parenthesis is grouping when it stands alone or opens/closes a
+        // word (`(foo`, `foo)`), never inside one (`printf(`, `f(x)`).
+        if c == '(' {
+            out.push(ParseTok::LParen);
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && !chars[i].is_whitespace() && chars[i] != '"' { i += 1; }
+        let mut word: String = chars[start..i].iter().collect();
+        let mut closers = 0;
+        while word.len() > 1 && word.ends_with(')') && !word.contains('(') {
+            word.pop();
+            closers += 1;
+        }
+        match word.as_str() {
+            "AND" => out.push(ParseTok::And),
+            "OR" => out.push(ParseTok::Or),
+            "NOT" => out.push(ParseTok::Not),
+            _ => out.push(ParseTok::Text(word)),
+        }
+        for _ in 0..closers { out.push(ParseTok::RParen); }
+    }
+    out
+}
+
+struct ParseCursor<'a> {
+    toks: &'a [ParseTok],
+    pos: usize,
+}
+
+impl<'a> ParseCursor<'a> {
+    fn peek(&self) -> Option<&'a ParseTok> { self.toks.get(self.pos) }
+    fn bump(&mut self) -> Option<&'a ParseTok> { let t = self.toks.get(self.pos); self.pos += 1; t }
+
+    fn parse_or(&mut self) -> Result<ParseAst, String> {
+        let mut items = vec![self.parse_and()?];
+        loop {
+            match self.peek() {
+                Some(ParseTok::Or) => { self.bump(); items.push(self.parse_and()?); }
+                Some(ParseTok::RParen) | None => break,
+                Some(ParseTok::And) => return Err("dangling AND".into()),
+                Some(_) => items.push(self.parse_and()?),
+            }
+        }
+        Ok(if items.len() == 1 { items.pop().unwrap() } else { ParseAst::Or(items) })
+    }
+
+    fn parse_and(&mut self) -> Result<ParseAst, String> {
+        let mut items = vec![self.parse_unary()?];
+        while let Some(ParseTok::And) = self.peek() {
+            self.bump();
+            items.push(self.parse_unary()?);
+        }
+        Ok(if items.len() == 1 { items.pop().unwrap() } else { ParseAst::And(items) })
+    }
+
+    fn parse_unary(&mut self) -> Result<ParseAst, String> {
+        match self.peek() {
+            Some(ParseTok::Not) | Some(ParseTok::Minus) => {
+                self.bump();
+                Ok(ParseAst::Not(Box::new(self.parse_unary()?)))
+            }
+            Some(ParseTok::Plus) => {
+                self.bump();
+                Ok(ParseAst::Required(Box::new(self.parse_unary()?)))
+            }
+            _ => self.parse_atom(),
+        }
+    }
+
+    fn parse_atom(&mut self) -> Result<ParseAst, String> {
+        match self.bump() {
+            Some(ParseTok::LParen) => {
+                let inner = self.parse_or()?;
+                match self.peek() {
+                    Some(ParseTok::RParen) => { self.bump(); }
+                    _ => return Err("unbalanced '(' — a parenthesis inside a word (`f(x`) is literal, one standing alone groups".into()),
+                }
+                Ok(inner)
+            }
+            Some(ParseTok::Text(t)) => Ok(ParseAst::Leaf(t.clone())),
+            Some(ParseTok::RParen) => Err("unbalanced ')'".into()),
+            Some(other) => Err(format!("unexpected {other:?}")),
+            None => Err("expected a term".into()),
+        }
+    }
+}
+
+fn parse_boolean_syntax(value: &str) -> Result<ParseAst, String> {
+    let toks = tokenize_parse_syntax(value);
+    if toks.is_empty() { return Err("parse query has no terms".into()); }
+    let mut cur = ParseCursor { toks: &toks, pos: 0 };
+    let ast = cur.parse_or()?;
+    if cur.pos < toks.len() {
+        return Err(format!("unexpected {:?} after the query", toks[cur.pos]));
+    }
+    Ok(ast)
+}
+
+/// `parse` with boolean syntax: the syntax tree lowered to `boolean` /
+/// `contains` configs, every leaf spread over `fields`.
+fn expand_parse_boolean(config: &QueryConfig) -> Result<QueryConfig, String> {
+    let value = config.value.as_deref().unwrap_or("");
+    let field_names: Vec<Option<String>> = match &config.fields {
+        Some(fs) if !fs.is_empty() => fs.iter().cloned().map(Some).collect(),
+        _ => vec![config.field.clone()],
     };
+    let ast = parse_boolean_syntax(value).map_err(|e| format!("parse query {value:?}: {e}"))?;
+    lower_parse_ast(&ast, &field_names)
+}
 
-    let parser = QueryParser::for_index(index, fields);
-    parser
-        .parse_query(value)
-        .map_err(|e| format!("query parse error: {e}"))
+fn lower_parse_ast(ast: &ParseAst, fields: &[Option<String>]) -> Result<QueryConfig, String> {
+    let leaf = |text: &str| -> QueryConfig {
+        let mut should: Vec<QueryConfig> = fields.iter().map(|f| QueryConfig {
+            query_type: "contains".into(),
+            field: f.clone(),
+            value: Some(text.to_string()),
+            ..Default::default()
+        }).collect();
+        if should.len() == 1 { should.pop().unwrap() } else {
+            QueryConfig { query_type: "boolean".into(), should: Some(should), ..Default::default() }
+        }
+    };
+    // Split a group's members into must / should / must_not.
+    let group = |items: &[ParseAst], conjunctive: bool| -> Result<QueryConfig, String> {
+        let (mut must, mut should, mut must_not) = (Vec::new(), Vec::new(), Vec::new());
+        for it in items {
+            match it {
+                ParseAst::Not(inner) => must_not.push(lower_parse_ast(inner, fields)?),
+                ParseAst::Required(inner) => must.push(lower_parse_ast(inner, fields)?),
+                other => if conjunctive {
+                    must.push(lower_parse_ast(other, fields)?)
+                } else {
+                    should.push(lower_parse_ast(other, fields)?)
+                },
+            }
+        }
+        if must.is_empty() && should.is_empty() {
+            return Err("a group needs at least one positive term (NOT/- alone matches nothing)".into());
+        }
+        // Lucene rule: once something is required, bare terms only score.
+        Ok(QueryConfig {
+            query_type: "boolean".into(),
+            must: if must.is_empty() { None } else { Some(must) },
+            should: if should.is_empty() { None } else { Some(should) },
+            must_not: if must_not.is_empty() { None } else { Some(must_not) },
+            ..Default::default()
+        })
+    };
+    match ast {
+        ParseAst::Leaf(t) => Ok(leaf(t)),
+        ParseAst::Required(inner) => lower_parse_ast(inner, fields),
+        ParseAst::Not(_) => Err("a query cannot be only a negation".into()),
+        ParseAst::And(items) => group(items, true),
+        ParseAst::Or(items) => group(items, false),
+    }
 }
 
 // ─── Filter Clause Building ────────────────────────────────────────────────

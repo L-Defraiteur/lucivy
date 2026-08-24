@@ -57,8 +57,9 @@ fn collect(config: &QueryConfig, out: &mut Vec<String>) {
         "parse" => {
             if crate::query::value_has_parser_syntax(value) {
                 out.push(format!(
-                    "{value:?} has boolean syntax: QueryParser semantics — whole terms \
-                     (no substring matching) and no highlights"));
+                    "{value:?} has boolean syntax: AND/OR/NOT, +/-, quotes and \
+                     parentheses lowered to boolean over substring contains \
+                     (NOT > AND > OR, side-by-side words are OR)"));
             } else if value.split_whitespace().count() > 1 {
                 out.push(format!(
                     "parse without boolean operators: {value:?} runs as OR of substring \

@@ -1164,6 +1164,44 @@ fn v3_strict_sep_head_three_chunks() {
     }
 }
 
+/// The boolean shape of `parse`, clause by clause: operators, precedence,
+/// +/- prefixes, quoted phrases, standalone parentheses versus literal
+/// ones, several fields, and the refusals.
+#[test]
+fn v3_parse_boolean_syntax_is_composite() {
+    let docs = [
+        "rust safety matters",            // 0
+        "rust alone",                     // 1
+        "safety alone",                   // 2
+        "nothing relevant",               // 3
+        "the phrase rust safety together",// 4
+        "rust with go and safety",        // 5
+        "call f(x) in rust",              // 6
+    ];
+    let handle = make_handle(&docs);
+    let ids = |v: &str| -> Vec<u32> { let mut d = search(&handle, "parse", v); d.sort(); d };
+    assert_eq!(ids("rust AND safety"), vec![0, 4, 5]);
+    assert_eq!(ids("rust OR go"), vec![0, 1, 4, 5, 6]);
+    assert_eq!(ids("rust NOT safety"), vec![1, 6]);
+    assert_eq!(ids("rust -safety"), vec![1, 6]);
+    assert_eq!(ids("+rust safety"), vec![0, 1, 4, 5, 6], "bare term only scores once something is required");
+    assert_eq!(ids("\"rust safety\""), vec![0, 4], "quoted = one contains over the phrase");
+    assert_eq!(ids("(rust OR go) AND safety"), vec![0, 4, 5]);
+    assert_eq!(ids("rust AND safety OR nothing"), vec![0, 3, 4, 5], "AND binds tighter than OR");
+    assert_eq!(ids("f(x) AND rust"), vec![6], "a parenthesis inside a word is literal");
+    assert_eq!(ids("safety AND NOT (go OR phrase)"), vec![0, 2]);
+    let err = |v: &str| {
+        let q = QueryConfig {
+            query_type: "parse".into(), field: Some("content".into()),
+            value: Some(v.into()), ..Default::default()
+        };
+        query::build_query(&q, &handle.schema, &handle.index, None).err().unwrap_or_default()
+    };
+    assert!(err("NOT rust").contains("negation"), "{}", err("NOT rust"));
+    assert!(err("rust AND").contains("expected a term"), "{}", err("rust AND"));
+    assert!(err("(rust AND safety").contains("unbalanced"), "{}", err("(rust AND safety"));
+}
+
 /// Fuzzy highlights next to multi-byte punctuation (`→`, `—`, `«»`, CJK)
 /// land on the word, on char boundaries. The playground's v2 snapshot
 /// reported a fuzzy span ending inside a `→`; v3 must never (rag3weaver
@@ -1614,10 +1652,9 @@ fn v3_parse_is_alive_and_honest() {
     let phrase_docs = search(&handle, "parse", "\"Rust safety\"");
     assert_eq!(phrase_docs.len(), 1, "quoted phrase: {phrase_docs:?}");
 
-    // Highlight contract per branch: the simple-value branch fills the sink;
-    // the QueryParser branch never touches it — hits come back with NO
-    // highlight entry, never with stale or garbage spans. Consumers that
-    // align on highlight byte ranges need "absent", not "wrong".
+    // Highlight contract: BOTH shapes fill the sink. The boolean shape went
+    // to the QueryParser until 24 August (whole terms, no highlights); it is
+    // now lowered to boolean-over-contains, so every hit carries its spans.
     let run_with_sink = |value: &str| {
         let config = QueryConfig {
             query_type: "parse".into(),
@@ -1646,11 +1683,10 @@ fn v3_parse_is_alive_and_honest() {
         (4, 4),
         "simple-value parse must highlight every hit"
     );
-    let (qp_hits, qp_with_hl) = run_with_sink("Rust AND safety");
-    assert_eq!(qp_hits, 2);
     assert_eq!(
-        qp_with_hl, 0,
-        "QueryParser branch must leave the highlight sink empty"
+        run_with_sink("Rust AND safety"),
+        (2, 2),
+        "boolean parse must highlight every hit"
     );
 
     // The warnings say which semantics apply, and that `fields` is ignored
@@ -1664,7 +1700,7 @@ fn v3_parse_is_alive_and_honest() {
         query_type: "parse".into(), field: Some("content".into()),
         value: Some("Rust AND safety".into()), ..Default::default()
     });
-    assert!(w.iter().any(|m| m.contains("QueryParser")), "{w:?}");
+    assert!(w.iter().any(|m| m.contains("boolean syntax")), "{w:?}");
     let w = handle.query_warnings(&QueryConfig {
         query_type: "contains".into(), fields: Some(vec!["content".into()]),
         value: Some("rust".into()), ..Default::default()
