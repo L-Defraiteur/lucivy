@@ -801,6 +801,11 @@ pub(crate) enum ShardMsg {
         result: Result<(), String>,
         reply: luciole::Reply<Result<(), String>>,
     },
+    Shutdown(luciole::ShutdownMsg),
+}
+
+impl From<luciole::ShutdownMsg> for ShardMsg {
+    fn from(m: luciole::ShutdownMsg) -> Self { ShardMsg::Shutdown(m) }
 }
 
 impl From<luciole::DrainMsg> for ShardMsg {
@@ -967,6 +972,10 @@ impl luciole::Actor for ShardActor {
             ShardMsg::Drain(d) => {
                 d.ack();
             }
+            ShardMsg::Shutdown(m) => {
+                m.ack();
+                return ActorStatus::Stop;
+            }
         }
         ActorStatus::Continue
     }
@@ -996,6 +1005,11 @@ pub(crate) enum RouterMsg {
         pre_tokenized: PreTokenizedData,
     },
     Drain(luciole::DrainMsg),
+    Shutdown(luciole::ShutdownMsg),
+}
+
+impl From<luciole::ShutdownMsg> for RouterMsg {
+    fn from(m: luciole::ShutdownMsg) -> Self { RouterMsg::Shutdown(m) }
 }
 
 impl From<luciole::DrainMsg> for RouterMsg {
@@ -1030,6 +1044,10 @@ impl luciole::Actor for RouterActor {
             RouterMsg::Drain(d) => {
                 d.ack();
             }
+            RouterMsg::Shutdown(m) => {
+                m.ack();
+                return ActorStatus::Stop;
+            }
         }
         ActorStatus::Continue
     }
@@ -1054,6 +1072,11 @@ pub(crate) enum ReaderMsg {
     Tokenize { doc: LucivyDocument, node_id: u64 },
     Batch { docs: Vec<(LucivyDocument, u64)> },
     Drain(luciole::DrainMsg),
+    Shutdown(luciole::ShutdownMsg),
+}
+
+impl From<luciole::ShutdownMsg> for ReaderMsg {
+    fn from(m: luciole::ShutdownMsg) -> Self { ReaderMsg::Shutdown(m) }
 }
 
 impl From<luciole::DrainMsg> for ReaderMsg {
@@ -1094,6 +1117,10 @@ impl luciole::Actor for ReaderActor {
             }
             ReaderMsg::Drain(d) => {
                 d.ack();
+            }
+            ReaderMsg::Shutdown(m) => {
+                m.ack();
+                return ActorStatus::Stop;
             }
         }
         ActorStatus::Continue
@@ -2145,12 +2172,23 @@ impl ShardedHandle {
             self.storage.write_root_file(SHARD_STATS_FILE, &stats_bytes)?;
         }
 
-        // Release writer locks.
+        // Release writer locks (commit + drain merges per shard).
         for (i, shard) in self.shards.iter().enumerate() {
             shard
                 .close()
                 .map_err(|e| format!("close shard_{i}: {e}"))?;
         }
+
+        // Stop the actor pools. They hold Arc clones of the shard handles —
+        // and through them the storage backend; left running, "closed" only
+        // meant "idle", and nothing PROVED no late task could still reach a
+        // store whose backing (a database connection on the other side of an
+        // FFI) the caller is about to free. After close() the handle is
+        // inert: nothing lucivy holds can touch the storage again.
+        self.reader_pool.shutdown("close_readers");
+        self.router_ref.send(luciole::ShutdownMsg(luciole::reply::<()>().0).into())
+            .map_err(|_| "router actor channel closed".to_string())?;
+        self.shard_pool.shutdown("close_shards");
         Ok(())
     }
 

@@ -221,3 +221,80 @@ fn v3_drop_index_leaves_nothing() {
     assert!(!std::path::Path::new(&fs_dir).exists(), "fs dir survived drop");
     let _ = std::fs::remove_dir_all(&cache);
 }
+
+/// After `close()`, NOTHING lucivy holds may touch the blob store again —
+/// the caller may be about to free what backs it (a database connection on
+/// the other side of an FFI, in rag3weaver's case; their Catalog teardown
+/// segfaulted on exactly this suspicion). The store below records every
+/// call made after arming; the test writes enough to have had merges,
+/// closes, arms, drops the handle, and requires silence.
+#[test]
+fn v3_close_means_no_more_store_calls() {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use lucistore::blob_store::BlobStore;
+
+    struct ArmedStore {
+        inner: MemBlobStore,
+        armed: AtomicBool,
+        late: Mutex<Vec<String>>,
+    }
+    impl ArmedStore {
+        fn note(&self, what: &str, index: &str, file: &str) {
+            if self.armed.load(Ordering::SeqCst) {
+                self.late.lock().unwrap().push(format!("{what} {index}/{file}"));
+            }
+        }
+    }
+    impl BlobStore for ArmedStore {
+        fn load(&self, i: &str, f: &str) -> std::io::Result<Vec<u8>> {
+            self.note("load", i, f); self.inner.load(i, f)
+        }
+        fn save(&self, i: &str, f: &str, d: &[u8]) -> std::io::Result<()> {
+            self.note("save", i, f); self.inner.save(i, f, d)
+        }
+        fn delete(&self, i: &str, f: &str) -> std::io::Result<()> {
+            self.note("delete", i, f); self.inner.delete(i, f)
+        }
+        fn exists(&self, i: &str, f: &str) -> std::io::Result<bool> {
+            self.note("exists", i, f); self.inner.exists(i, f)
+        }
+        fn list(&self, i: &str) -> std::io::Result<Vec<String>> {
+            self.note("list", i, ""); self.inner.list(i)
+        }
+        fn blob_len(&self, i: &str, f: &str) -> std::io::Result<Option<u64>> {
+            self.note("blob_len", i, f); self.inner.blob_len(i, f)
+        }
+        fn load_range(&self, i: &str, f: &str, r: std::ops::Range<u64>) -> std::io::Result<Option<Vec<u8>>> {
+            self.note("load_range", i, f); self.inner.load_range(i, f, r)
+        }
+    }
+
+    let store = Arc::new(ArmedStore {
+        inner: MemBlobStore::new(),
+        armed: AtomicBool::new(false),
+        late: Mutex::new(Vec::new()),
+    });
+    let scratch = std::env::var("V3_SCRATCH")
+        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+    let cache = format!("{scratch}/blob_v3_armed");
+    let _ = std::fs::remove_dir_all(&cache);
+
+    {
+        let storage = BlobShardStorage::new(store.clone(), "armed_v3", &cache);
+        let h = ShardedHandle::create_with_storage(Box::new(storage), &config(2)).unwrap();
+        // Several commits so the merge policy has real work in flight.
+        let docs = docs();
+        for chunk in docs.chunks(8) {
+            add_all(&h, &chunk.to_vec());
+        }
+        assert!(!search_ids(&h, &q("kmalloc", None, false)).is_empty());
+        h.close().unwrap();
+        store.armed.store(true, Ordering::SeqCst);
+        drop(h);
+    }
+    // Anything asynchronous that survived close() gets a moment to show up.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let late = store.late.lock().unwrap();
+    assert!(late.is_empty(), "store touched after close(): {late:?}");
+}
