@@ -29,6 +29,8 @@ menée en tandem avec la session rag3weaver qui migre son FTS vers le
 | Test luce : snapshot v2 dit tel quel, affichage sûr | `a59e4a8` | plus de panic sur `→` |
 | **Double free luciole** : `ptr::read` des nœuds de DAG remplacé par sentinelle + `catch_unwind` ; `request` rend `Err` sur `Reply` lâché ; tout `Reply` lâché avertit (`LUCIOLE_REPLY_TRACE=1` = backtrace) | `3675c3d` | valgrind rag3weaver (doc 26) ; test « nœud qui panique » abortait avant |
 | `ShardedHandle` fermé refuse proprement (`closed`) | `3c282c7` | search/commit/add_document → « handle is closed » |
+| **Scorer non monotone** : prescans fuzzy/regex v3 rendaient un `doc_tf` dans l'ordre d'un `HashMap` → underflow dans l'union `should`, `seek` qui sautait des docs | `8a91053` | la panique derrière le double free (doc 28) ; `debug_assert` de monotonie dans `CachedPrescan::new` |
+| `Pool::drain/shutdown/scatter` : worker parti ≠ panique dans `close()` | `a37d330` | dernier `Reply` lâché nommé par leur trace |
 | `parse` booléen → composite de contains (fin du QueryParser) | `8f14edc` | AND/OR/NOT, +/-, guillemets, parenthèses ; highlights et sous-chaîne dans les deux formes ; refus des négations pures |
 
 Harnais ajouté : `lucivy_core/tests/test_commit_floor.rs` (chronos et
