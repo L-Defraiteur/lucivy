@@ -25,6 +25,8 @@ menée en tandem avec la session rag3weaver qui migre son FTS vers le
 | Routage collant (64 docs par indexeur) | `8e2db07` | 9 docs = 1 segment/shard : 340 → 81 fichiers, 232 → 6 suppressions |
 | Bug de chaîne « clé avalante » (v3) | `4d00531` | `<binder::Expression` retrouvé quand les chunkings diffèrent dans un segment ; panel 50k inchangé |
 | luciole : `Reply` lâché sous un pipe avertit | `e6176f5` | plus de collect muet |
+| **Mot sans séparateur final absent de la partition mots** (v3) | `36b1edd` | dernier mot d'une valeur introuvable en relaxed dès que la requête chevauchait ses chunks ; STATS versionné, anciens segments en repli chaînes ; clé de cache `v=10` |
+| Test luce : snapshot v2 dit tel quel, affichage sûr | `a59e4a8` | plus de panic sur `→` |
 
 Harnais ajouté : `lucivy_core/tests/test_commit_floor.rs` (chronos et
 comptage des appels au store, `--ignored`).
@@ -68,9 +70,11 @@ nouvelle pour les dossiers docs : `JJ-MM-AAAA` (triable), ce dossier inaugure.
 4. `verify_literal` = 40-70 % du CPU des requêtes à gros volume (piste perf).
 5. Fusion post-suppressions : un gros segment fusionné repart entier dans un
    delta LUCIDS (à borner côté policy si ça gêne).
-6. `test_luce_playground_search` : pré-existant, un highlight fuzzy finissant
-   au milieu d'un `→` (invisible tant que `cargo test` s'arrêtait à
-   `bench_sharding` — lancer `--no-fail-fast`).
-7. Blob : ~91 appels au store par commit de petit lot (un par fichier de
-   segment). Palier suivant si un store à base le justifie : un blob par
-   segment.
+6. Blob : ~91 appels au store par commit de petit lot (un par fichier de
+   segment). rag3weaver les regroupe en une requête (4,5 ms) : pas de blob
+   composite chez nous tant que le volume ne le justifie pas.
+7. `is_content_char` : tout non-ASCII est contenu (`→`, `«`, `—` sont des
+   mots). Cohérent et sans perte, mais une ponctuation Unicode qui compte
+   comme un mot se discute ; changement de format si on y touche.
+8. Toujours lancer `cargo test -p lucivy-core --no-fail-fast` : sans, la
+   suite s'arrête à `bench_sharding` et les binaires suivants ne tournent pas.
