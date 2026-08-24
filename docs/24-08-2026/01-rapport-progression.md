@@ -27,6 +27,8 @@ menée en tandem avec la session rag3weaver qui migre son FTS vers le
 | luciole : `Reply` lâché sous un pipe avertit | `e6176f5` | plus de collect muet |
 | **Mot sans séparateur final absent de la partition mots** (v3) | `36b1edd` | dernier mot d'une valeur introuvable en relaxed dès que la requête chevauchait ses chunks ; STATS versionné, anciens segments en repli chaînes ; clé de cache `v=10` |
 | Test luce : snapshot v2 dit tel quel, affichage sûr | `a59e4a8` | plus de panic sur `→` |
+| **Double free luciole** : `ptr::read` des nœuds de DAG remplacé par sentinelle + `catch_unwind` ; `request` rend `Err` sur `Reply` lâché ; tout `Reply` lâché avertit (`LUCIOLE_REPLY_TRACE=1` = backtrace) | `3675c3d` | valgrind rag3weaver (doc 26) ; test « nœud qui panique » abortait avant |
+| `ShardedHandle` fermé refuse proprement (`closed`) | `3c282c7` | search/commit/add_document → « handle is closed » |
 | `parse` booléen → composite de contains (fin du QueryParser) | `8f14edc` | AND/OR/NOT, +/-, guillemets, parenthèses ; highlights et sous-chaîne dans les deux formes ; refus des négations pures |
 
 Harnais ajouté : `lucivy_core/tests/test_commit_floor.rs` (chronos et
