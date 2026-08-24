@@ -778,13 +778,25 @@ impl Scheduler {
     /// This eliminates cooperative wait nesting in multi-thread mode.
     /// Emits periodic diagnostics if the wait exceeds a threshold.
     pub fn wait<T>(&self, rx: crate::reply::ReplyReceiver<T>, label: &str) -> T {
+        self.try_wait(rx, label)
+            .unwrap_or_else(|_| panic!("[luciole] actor died without replying (wait {label:?})"))
+    }
+
+    /// `wait` that reports a sender dropped without answering as
+    /// `Err(ReplyClosed)` — for callers that must turn it into their own
+    /// error instead of unwinding (a DAG node, a request from a handle).
+    pub fn try_wait<T>(
+        &self,
+        rx: crate::reply::ReplyReceiver<T>,
+        label: &str,
+    ) -> Result<T, crate::reply::ReplyClosed> {
         if self.is_single_threaded() {
-            rx.wait_cooperative_named(label, || self.run_one_step())
+            rx.wait_cooperative_named_result(label, || self.run_one_step())
         } else if is_scheduler_thread() {
             // Scheduler thread: MUST use cooperative wait to avoid deadlock.
             // If we wait_blocking here, we capture a pool thread that might be
             // needed to dispatch the actor we're waiting on.
-            rx.wait_cooperative_named(label, || self.run_one_step())
+            rx.wait_cooperative_named_result(label, || self.run_one_step())
         } else {
             // External thread: safe to block — scheduler threads do the work.
             self.wait_blocking_diag(rx, label)
@@ -792,7 +804,11 @@ impl Scheduler {
     }
 
     /// Blocking wait with periodic diagnostics — no thread spawning, safe for WASM.
-    fn wait_blocking_diag<T>(&self, rx: crate::reply::ReplyReceiver<T>, label: &str) -> T {
+    fn wait_blocking_diag<T>(
+        &self,
+        rx: crate::reply::ReplyReceiver<T>,
+        label: &str,
+    ) -> Result<T, crate::reply::ReplyClosed> {
         use std::time::Duration;
 
         let label_owned = label.to_string();
@@ -801,7 +817,7 @@ impl Scheduler {
 
         let _guard = crate::wait_graph::WaitGuard::current(label_owned.clone());
 
-        let value = rx.wait_blocking_with_diag(Duration::from_secs(10), |elapsed_s| {
+        rx.wait_blocking_with_diag_result(Duration::from_secs(10), |elapsed_s| {
             warn_count += 1;
             // Dump thread registry.
             let threads: Vec<String> = THREAD_REGISTRY.lock().unwrap()
@@ -856,9 +872,7 @@ impl Scheduler {
                 threads.join("\n"),
                 if actors.is_empty() { "  (all idle)".into() } else { actors.join("\n") },
             );
-        });
-
-        value
+        })
     }
 
     pub fn subscribe_events(&self) -> EventReceiver<SchedulerEvent> {

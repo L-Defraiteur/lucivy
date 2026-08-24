@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::events::EventReceiver;
-use crate::node::{Node, PollNode, PollNodeAdapter};
+use crate::node::{Node, NodeContext, PollNode, PollNodeAdapter};
 use crate::observe::{TapEvent, TapRegistry};
 use crate::port::{PortType, PortValue};
 
@@ -25,6 +25,21 @@ pub struct DagEdge {
 pub(crate) struct DagNodeEntry {
     pub(crate) name: String,
     pub(crate) node: Box<dyn Node>,
+}
+
+/// What sits in a DAG slot while the runtime runs its node on a task
+/// thread. The runtime used to move the box out with `ptr::read` and rely
+/// on every path handing it back; a panic inside `execute` unwound the
+/// task's copy and the DAG later dropped the same bytes again (valgrind,
+/// rag3weaver doc 26). With a real value in the slot, the worst case is a
+/// lost node, never a double free.
+pub(crate) struct TakenNode;
+
+impl Node for TakenNode {
+    fn node_type(&self) -> &'static str { "taken" }
+    fn execute(&mut self, _ctx: &mut NodeContext) -> Result<(), String> {
+        Err("node is being executed by the runtime (or was lost to a panic)".into())
+    }
 }
 
 /// Directed acyclic graph of nodes with typed port connections.
@@ -76,6 +91,17 @@ impl Dag {
             name: name.to_string(),
             node: Box::new(node),
         });
+    }
+
+    /// Move a node out of its slot for execution, leaving [`TakenNode`]
+    /// behind. Pair with [`Dag::put_node`].
+    pub(crate) fn take_node(&mut self, idx: usize) -> Box<dyn Node> {
+        std::mem::replace(&mut self.nodes[idx].node, Box::new(TakenNode))
+    }
+
+    /// Put an executed node back into its slot.
+    pub(crate) fn put_node(&mut self, idx: usize, node: Box<dyn Node>) {
+        self.nodes[idx].node = node;
     }
 
     /// Register a pre-boxed node in the DAG.

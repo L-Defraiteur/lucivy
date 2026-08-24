@@ -95,9 +95,16 @@ struct Inner<T> {
     pipe_edge_id: AtomicU64,
 }
 
+/// The sender went away without ever calling `send`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplyClosed;
+
 struct State<T> {
     value: Option<T>,
     closed: bool,
+    /// `send` ran (value stored or piped). Distinguishes a Reply dropped
+    /// after answering from one dropped without answering.
+    sent: bool,
     /// Optional pipe callback — called by Reply::send() instead of storing
     /// the value. Set by set_pipe(). Protected by the same Mutex as value
     /// to prevent race conditions (check value + set callback is atomic).
@@ -121,6 +128,7 @@ impl<T> Reply<T> {
 
         // Pipe path: if a pipe callback is registered, deliver the value
         // directly to it (pipe_to / collect_to). Skip the normal path.
+        state.sent = true;
         if let Some(pipe) = state.on_send.take() {
             state.closed = true;
             drop(state);
@@ -157,19 +165,25 @@ impl<T> Drop for Reply<T> {
 
         let mut state = self.inner.state.lock().unwrap();
         state.closed = true;
-        // A pipe has no value to deliver: the pipe_to target never hears
-        // back and a collect_replies_to stays at k/n forever. Nothing can
-        // be invented here, but the silence can be broken — a blocked
-        // collect with all threads idle is otherwise undiagnosable.
-        let orphaned_pipe = state.on_send.take().is_some();
+        // Dropped without answering: a blocking waiter gets an error (or a
+        // panic through the legacy `wait`), a pipe_to target never hears
+        // back, a collect_replies_to stays at k/n forever. Nothing can be
+        // invented here, but the silence can be broken — and with
+        // LUCIOLE_REPLY_TRACE=1 the backtrace names the culprit.
+        let unanswered = !state.sent;
+        let piped = state.on_send.take().is_some();
         self.inner.ready.notify_one();
         drop(state);
-        if orphaned_pipe {
+        if unanswered {
             eprintln!(
-                "[luciole] WARNING: Reply dropped without send() while a pipe was \
-                 attached — the pipe_to target / collect_replies_to waiting on it \
-                 will never complete"
+                "[luciole] WARNING: Reply dropped without send(){} — the waiter gets \
+                 'actor died without replying'{}",
+                if piped { " while a pipe was attached" } else { "" },
+                if piped { "; the pipe_to target / collect_replies_to will never complete" } else { "" },
             );
+            if std::env::var("LUCIOLE_REPLY_TRACE").is_ok() {
+                eprintln!("{}", std::backtrace::Backtrace::force_capture());
+            }
         }
         // Fire resume even on drop (actor died without replying — the
         // suspended actor should be woken to discover the error).
@@ -220,7 +234,21 @@ impl<T> ReplyReceiver<T> {
     ///
     /// `on_timeout(elapsed_secs)` is called each time the wait times out.
     /// Returns the value when the reply arrives.
-    pub fn wait_blocking_with_diag<F>(self, interval: std::time::Duration, mut on_timeout: F) -> T
+    pub fn wait_blocking_with_diag<F>(self, interval: std::time::Duration, on_timeout: F) -> T
+    where
+        F: FnMut(f64),
+    {
+        self.wait_blocking_with_diag_result(interval, on_timeout)
+            .unwrap_or_else(|_| panic!("actor died without replying"))
+    }
+
+    /// `wait_blocking_with_diag` that reports a dead sender as
+    /// `Err(ReplyClosed)` instead of panicking.
+    pub fn wait_blocking_with_diag_result<F>(
+        self,
+        interval: std::time::Duration,
+        mut on_timeout: F,
+    ) -> Result<T, ReplyClosed>
     where
         F: FnMut(f64),
     {
@@ -230,10 +258,10 @@ impl<T> ReplyReceiver<T> {
         let mut state = self.inner.state.lock().unwrap();
         loop {
             if let Some(value) = state.value.take() {
-                return value;
+                return Ok(value);
             }
             if state.closed {
-                panic!("actor died without replying");
+                return Err(ReplyClosed);
             }
             let (new_state, timeout_result) = self.inner.ready.wait_timeout(state, interval).unwrap();
             state = new_state;
@@ -263,7 +291,17 @@ impl<T> ReplyReceiver<T> {
     /// dépasse le seuil (LUCIVY_WAIT_WARN_SECS, défaut 10s).
     ///
     /// `run_step` retourne `true` si du travail a été effectué.
-    pub fn wait_cooperative_named<F>(self, label: &str, mut run_step: F) -> T
+    pub fn wait_cooperative_named<F>(self, label: &str, run_step: F) -> T
+    where
+        F: FnMut() -> bool,
+    {
+        self.wait_cooperative_named_result(label, run_step)
+            .unwrap_or_else(|_| panic!("[luciole] actor died without replying (wait {label:?})"))
+    }
+
+    /// `wait_cooperative_named` that reports a dead sender as
+    /// `Err(ReplyClosed)` instead of panicking.
+    pub fn wait_cooperative_named_result<F>(self, label: &str, mut run_step: F) -> Result<T, ReplyClosed>
     where
         F: FnMut() -> bool,
     {
@@ -293,7 +331,7 @@ impl<T> ReplyReceiver<T> {
         result
     }
 
-    fn wait_cooperative_inner<F>(self, label: &str, run_step: &mut F) -> T
+    fn wait_cooperative_inner<F>(self, label: &str, run_step: &mut F) -> Result<T, ReplyClosed>
     where
         F: FnMut() -> bool,
     {
@@ -328,11 +366,10 @@ impl<T> ReplyReceiver<T> {
                         eprintln!("[luciole] {:?} resolved after {:.1}s",
                             label, start.elapsed().as_secs_f64());
                     }
-                    return value;
+                    return Ok(value);
                 }
                 if state.closed {
-                    panic!("[luciole] actor died without replying (wait {:?}, {:.1}s)",
-                        label, start.elapsed().as_secs_f64());
+                    return Err(ReplyClosed);
                 }
             }
 
@@ -360,11 +397,10 @@ impl<T> ReplyReceiver<T> {
                         eprintln!("[luciole] {:?} resolved after {:.1}s",
                             label, start.elapsed().as_secs_f64());
                     }
-                    return value;
+                    return Ok(value);
                 }
                 if state.closed {
-                    panic!("[luciole] actor died without replying (wait {:?}, {:.1}s)",
-                        label, start.elapsed().as_secs_f64());
+                    return Err(ReplyClosed);
                 }
                 let (mut state, _) = self
                     .inner
@@ -376,7 +412,7 @@ impl<T> ReplyReceiver<T> {
                         eprintln!("[luciole] {:?} resolved after {:.1}s",
                             label, start.elapsed().as_secs_f64());
                     }
-                    return value;
+                    return Ok(value);
                 }
             }
         }
@@ -522,6 +558,7 @@ pub fn reply<T>() -> (Reply<T>, ReplyReceiver<T>) {
         state: Mutex::new(State {
             value: None,
             closed: false,
+            sent: false,
             on_send: None,
         }),
         ready: Condvar::new(),

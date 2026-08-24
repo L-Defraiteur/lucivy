@@ -354,6 +354,8 @@ mod tests {
         Inc,
         GetCount(Reply<u32>),
         GetId(Reply<usize>),
+        /// Handler drops the reply without answering.
+        Ignore(Reply<u32>),
         Drain(DrainMsg),
         Shutdown(ShutdownMsg),
     }
@@ -383,6 +385,7 @@ mod tests {
                     r.send(self.id);
                     ActorStatus::Continue
                 }
+                WorkerMsg::Ignore(_dropped) => ActorStatus::Continue,
                 WorkerMsg::Drain(d) => {
                     d.ack();
                     ActorStatus::Continue
@@ -502,6 +505,20 @@ mod tests {
         // Request from worker 0 specifically
         let c = pool.request_to(0, |r| WorkerMsg::GetCount(r), "count_0").unwrap();
         assert_eq!(c, 5);
+    }
+
+    /// A Reply dropped by the actor is an error for the requester, never a
+    /// panic on its thread — a panic inside a DAG node used to unwind the
+    /// node's task and corrupt the heap.
+    #[test]
+    fn request_dropped_reply_is_an_error() {
+        let count = Arc::new(AtomicU32::new(0));
+        let pool = make_pool(2, count.clone());
+        let err = pool.request(|r| WorkerMsg::Ignore(r), "ignored").unwrap_err();
+        assert!(err.contains("died without replying"), "{err}");
+        // The pool is still alive afterwards.
+        assert_eq!(pool.request(|r| WorkerMsg::GetCount(r), "count").unwrap(), 0);
+        pool.shutdown("done");
     }
 
     #[test]

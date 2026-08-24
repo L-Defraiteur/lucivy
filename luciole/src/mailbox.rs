@@ -102,7 +102,12 @@ impl<M> ActorRef<M> {
         let (tx, rx) = crate::reply::reply::<R>();
         self.send(make_msg(tx)).map_err(|_| "actor disconnected".to_string())?;
         let scheduler = crate::scheduler::global_scheduler();
-        Ok(scheduler.wait(rx, label))
+        // An actor that stops (or panics) with this request in its mailbox
+        // drops the Reply: that is an error for the caller, not a panic —
+        // a panic here inside a DAG node used to corrupt the heap.
+        scheduler
+            .try_wait(rx, label)
+            .map_err(|_| format!("actor died without replying ({label})"))
     }
 
     /// Access the wake handle (for async executor waker integration).

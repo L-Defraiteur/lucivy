@@ -735,6 +735,17 @@ fn execute_single_node(
 // Internal: execute a level of nodes via scheduler tasks
 // ---------------------------------------------------------------------------
 
+/// The text of a panic payload, for a DAG error message.
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
 fn execute_level_parallel(
     dag: &mut Dag,
     level: &[usize],
@@ -782,12 +793,8 @@ fn execute_level_parallel(
 
         let inputs = collect_inputs(&node_name, &edges, port_data, consumer_counts);
 
-        // Take node out (like the scheduler take pattern for actors)
-        let entry = &mut dag.nodes_mut()[node_idx];
-        let node_box = unsafe {
-            let ptr = &mut entry.node as *mut Box<dyn crate::node::Node>;
-            std::ptr::read(ptr)
-        };
+        // Take node out; a sentinel keeps the slot valid meanwhile.
+        let node_box = dag.take_node(node_idx);
         taken.push((node_idx, node_name, inputs, node_box));
     }
 
@@ -802,8 +809,13 @@ fn execute_level_parallel(
             if let Some(s) = svc {
                 ctx = ctx.with_services(s);
             }
-            match node_box.execute(&mut ctx) {
-                Ok(()) => {
+            // A panic inside a node is a DAG error, not a crash of the
+            // scheduler thread — and the box comes back either way.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                || node_box.execute(&mut ctx),
+            ));
+            match outcome {
+                Ok(Ok(())) => {
                     let duration_ms = start.elapsed().as_millis() as u64;
                     let outputs = ctx.take_outputs();
                     let metrics = ctx.metrics().to_vec();
@@ -811,10 +823,9 @@ fn execute_level_parallel(
                     let nr = NodeResult { duration_ms, metrics, logs };
                     Ok((node_idx, node_name, nr, outputs, node_box))
                 }
-                // The node goes back with the error: its slot in the DAG
-                // was emptied by ptr::read above, and dropping the box here
-                // would free it a second time when the DAG is dropped.
-                Err(e) => Err((node_idx, node_name, e, node_box))
+                // The node goes back with the error so the DAG owns it again.
+                Ok(Err(e)) => Err((node_idx, node_name, e, node_box)),
+                Err(payload) => Err((node_idx, node_name, panic_message(payload), node_box)),
             }
         });
         receivers.push(rx);
@@ -832,12 +843,7 @@ fn execute_level_parallel(
         let task_result = scheduler.wait(rx, "dag_node");
         match task_result {
             Ok((node_idx, node_name, nr, outputs, node_box)) => {
-                // Put node back in the DAG
-                let entry = &mut dag.nodes_mut()[node_idx];
-                unsafe {
-                    let ptr = &mut entry.node as *mut Box<dyn crate::node::Node>;
-                    std::ptr::write(ptr, node_box);
-                }
+                dag.put_node(node_idx, node_box);
                 if first_err.is_some() { continue; }
 
                 emit(DagEvent::NodeCompleted {
@@ -870,11 +876,7 @@ fn execute_level_parallel(
                 level_results.push((node_name, nr));
             }
             Err((node_idx, node_name, e, node_box)) => {
-                let entry = &mut dag.nodes_mut()[node_idx];
-                unsafe {
-                    let ptr = &mut entry.node as *mut Box<dyn crate::node::Node>;
-                    std::ptr::write(ptr, node_box);
-                }
+                dag.put_node(node_idx, node_box);
                 if first_err.is_none() {
                     emit(DagEvent::DagFailed { error: e.clone() });
                     first_err = Some(format!("node '{node_name}' failed: {e}"));
@@ -1102,11 +1104,7 @@ impl<R: Send + 'static> DagExecutor<R> {
                         HashMap::new(),
                         // Skipped node — take it out and put it back immediately.
                         // We need the Box<dyn Node> in the result for uniform handling.
-                        unsafe {
-                            let entry = &mut self.dag.nodes_mut()[node_idx];
-                            let ptr = &mut entry.node as *mut Box<dyn crate::node::Node>;
-                            std::ptr::read(ptr)
-                        },
+                        self.dag.take_node(node_idx),
                     )),
                 });
                 continue;
@@ -1121,11 +1119,7 @@ impl<R: Send + 'static> DagExecutor<R> {
             );
 
             // Take node out of the DAG (like execute_level_parallel).
-            let node_box = unsafe {
-                let entry = &mut self.dag.nodes_mut()[node_idx];
-                let ptr = &mut entry.node as *mut Box<dyn crate::node::Node>;
-                std::ptr::read(ptr)
-            };
+            let node_box = self.dag.take_node(node_idx);
 
             let services = self.dag.services.clone();
 
@@ -1137,8 +1131,11 @@ impl<R: Send + 'static> DagExecutor<R> {
                     ctx = ctx.with_services(s);
                 }
                 let mut node = node_box;
-                match node.execute(&mut ctx) {
-                    Ok(()) => {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                    || node.execute(&mut ctx),
+                ));
+                match outcome {
+                    Ok(Ok(())) => {
                         let duration_ms = start.elapsed().as_millis() as u64;
                         let outputs = ctx.take_outputs();
                         let metrics = ctx.metrics().to_vec();
@@ -1153,10 +1150,17 @@ impl<R: Send + 'static> DagExecutor<R> {
                             )),
                         }
                     }
-                    Err(e) => NodeTaskResult {
+                    // The DAG keeps a sentinel in this slot: the failed node
+                    // is dropped here, once.
+                    Ok(Err(e)) => NodeTaskResult {
                         node_idx,
                         node_name: node_name.clone(),
                         result: Err(format!("node '{node_name}' failed: {e}")),
+                    },
+                    Err(payload) => NodeTaskResult {
+                        node_idx,
+                        node_name: node_name.clone(),
+                        result: Err(format!("node '{node_name}' panicked: {}", panic_message(payload))),
                     },
                 }
             });
@@ -1203,12 +1207,7 @@ impl<R: Send + 'static> DagExecutor<R> {
         for ntr in results {
             match ntr.result {
                 Ok((nr, outputs, node_box)) => {
-                    // Put node back in the DAG.
-                    let entry = &mut self.dag.nodes_mut()[ntr.node_idx];
-                    unsafe {
-                        let ptr = &mut entry.node as *mut Box<dyn crate::node::Node>;
-                        std::ptr::write(ptr, node_box);
-                    }
+                    self.dag.put_node(ntr.node_idx, node_box);
 
                     // Undo context.
                     if self.dag.node_mut(ntr.node_idx).can_undo() {
@@ -1475,6 +1474,32 @@ mod tests {
         assert_eq!(result.node_results.len(), 3);
         let sink_result = result.get("sink").unwrap();
         assert_eq!(sink_result.metrics[0].1, 10.0);
+    }
+
+    struct PanicNode;
+    impl Node for PanicNode {
+        fn node_type(&self) -> &'static str { "panic" }
+        fn execute(&mut self, _ctx: &mut NodeContext) -> Result<(), String> {
+            panic!("boom in a parallel level");
+        }
+    }
+
+    /// A node panicking on a task thread is a DAG error, and the DAG can be
+    /// dropped afterwards. With the node moved out by `ptr::read`, the
+    /// unwinding task freed the box and the DAG freed it again (valgrind on
+    /// rag3weaver, 24 August): this test aborted the process.
+    #[test]
+    fn panicking_node_is_a_dag_error_not_a_double_free() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut dag = Dag::new();
+        dag.add_node("a", CounterNode { counter: counter.clone() });
+        dag.add_node("boom", PanicNode);
+        dag.add_node("b", CounterNode { counter: counter.clone() });
+
+        let err = execute_dag(&mut dag, None).err().expect("the DAG must fail");
+        assert!(err.contains("boom"), "{err}");
+        assert_eq!(counter.load(Ordering::Relaxed), 2, "the other nodes of the level still ran");
+        drop(dag);
     }
 
     #[test]
