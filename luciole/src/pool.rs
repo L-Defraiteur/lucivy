@@ -122,14 +122,17 @@ impl<M: Send + 'static> Pool<M> {
         let scheduler = global_scheduler();
         let mut receivers = Vec::with_capacity(self.workers.len());
 
+        // A worker that is gone fails the send and drops the Reply with the
+        // SendError; waiting on that receiver would panic. Skip it.
         for worker in self.workers.iter() {
             let (tx, rx) = reply::<R>();
-            let _ = worker.send(make_msg(tx));
-            receivers.push(rx);
+            if worker.send(make_msg(tx)).is_ok() {
+                receivers.push(rx);
+            }
         }
 
         receivers.into_iter()
-            .map(|rx| scheduler.wait(rx, label))
+            .filter_map(|rx| scheduler.try_wait(rx, label).ok())
             .collect()
     }
 
@@ -144,14 +147,17 @@ impl<M: Send + 'static> Pool<M> {
         let scheduler = global_scheduler();
         let mut receivers = Vec::with_capacity(self.workers.len());
 
+        // Called from close(): a worker already gone must not turn a
+        // destructor into a panic (rag3weaver doc 28, LUCIOLE_REPLY_TRACE).
         for worker in &self.workers {
             let (tx, rx) = reply::<()>();
-            let _ = worker.send(DrainMsg(tx).into());
-            receivers.push(rx);
+            if worker.send(DrainMsg(tx).into()).is_ok() {
+                receivers.push(rx);
+            }
         }
 
         for rx in receivers {
-            scheduler.wait(rx, label);
+            let _ = scheduler.try_wait(rx, label);
         }
     }
 
@@ -168,12 +174,13 @@ impl<M: Send + 'static> Pool<M> {
 
         for worker in &self.workers {
             let (tx, rx) = reply::<()>();
-            let _ = worker.send(ShutdownMsg(tx).into());
-            receivers.push(rx);
+            if worker.send(ShutdownMsg(tx).into()).is_ok() {
+                receivers.push(rx);
+            }
         }
 
         for rx in receivers {
-            scheduler.wait(rx, label);
+            let _ = scheduler.try_wait(rx, label);
         }
     }
 
@@ -519,6 +526,20 @@ mod tests {
         // The pool is still alive afterwards.
         assert_eq!(pool.request(|r| WorkerMsg::GetCount(r), "count").unwrap(), 0);
         pool.shutdown("done");
+    }
+
+    /// drain / shutdown / scatter on a pool whose workers are already gone
+    /// return instead of panicking: they run inside close() and Drop.
+    #[test]
+    fn drain_and_shutdown_after_workers_left_do_not_panic() {
+        let count = Arc::new(AtomicU32::new(0));
+        let pool = make_pool(2, count.clone());
+        pool.shutdown("first");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        pool.drain("drain_after");
+        pool.shutdown("shutdown_after");
+        let replies: Vec<u32> = pool.scatter(|r| WorkerMsg::GetCount(r), "scatter_after");
+        assert!(replies.is_empty(), "{replies:?}");
     }
 
     #[test]
