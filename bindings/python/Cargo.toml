@@ -16,5 +16,8 @@ ld-lucivy = { path = "../..", default-features = false, features = [
     "lz4-compression",
 ] }
 lucistore = { path = "../../lucistore" }
-pyo3 = { version = "0.24", features = ["extension-module"] }
+# abi3-py39: one wheel for every CPython >= 3.9 (the stable ABI), instead of
+# one per interpreter version — and the build no longer depends on the
+# machine's Python matching pyo3's supported range.
+pyo3 = { version = "0.24", features = ["extension-module", "abi3-py39"] }
 serde_json = "1"

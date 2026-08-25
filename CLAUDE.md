@@ -194,8 +194,11 @@ Les docs sont dans `docs/` organisés par dossier daté. Convention depuis le
 | PyPI | `lucivy` | 2.0.1 | 3.0.0 |
 | npm | `lucivy` | 2.0.2 | 3.0.0 |
 | crates.io | `ld-lucivy`, `lucivy-core` | 2.0.0 | 3.0.0 |
-| crates.io | `luciole`, `lucistore` | 0.1.0 | 0.2.0 |
-| crates.io | `sparse-vector` | jamais publié | 0.3.0 |
+| crates.io | `luciole`, `lucistore` | 0.1.0 | 3.0.0 |
+| crates.io | `sparse-vector` | jamais publié | 3.0.0 |
+
+Règle : **tout le workspace porte le même numéro** (décision du 25 août) —
+une seule version à retenir pour les utilisateurs.
 
 Ordre de publication crates.io : `luciole` → `lucistore` → `ld-lucivy` →
 `lucivy-core` (→ `sparse-vector`). Jamais de `cargo publish` sans le feu vert

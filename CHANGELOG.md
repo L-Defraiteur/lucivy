@@ -2,8 +2,14 @@ Lucivy 3.0.0
 ================================
 
 SFX v3 by default, exact spans on every query mode, ACID blob storage with
-lazy loading, routed filtered search, and a new friend crate `sparse-vector`.
-Companion crates: `luciole` 0.2.0, `lucistore` 0.2.0, `sparse-vector` 0.3.0.
+lazy loading, routed filtered search, a new friend crate `sparse-vector`, and
+a browser build that indexes 10 000 kernel files in under a minute and answers
+in ~1.5x the native time. Every crate of the workspace ships as **3.0.0**:
+`ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector`, and the
+Python / Node.js / C++ / emscripten bindings.
+
+Previous release: 2.0.x (`ld-lucivy` / `lucivy-core` 2.0.0, `luciole` /
+`lucistore` 0.1.0, PyPI 2.0.1, npm 2.0.2).
 
 ### SFX v3 (new index format, default)
 
@@ -35,6 +41,25 @@ Companion crates: `luciole` 0.2.0, `lucistore` 0.2.0, `sparse-vector` 0.3.0.
   the word partition; `.termtexts` STATS section is versioned.
 - Sticky document dispatch (64 docs per indexer): small commits yield one
   segment per shard instead of one per worker.
+- **Denser sidecars, same readers**: `.word_sfxpost` (WSP3), `.sibling_v3`
+  (SIB2) and `.sfxpost` (SFP3) are delta + varint encoded with checkpoints
+  where random access needs them — 4 339 → 3 392 MB on 15 440 kernel files
+  (−22 %, 220 KB per document). Readers accept the previous layouts; nothing
+  to migrate. `SegmentMeta::list_files_for(version)` names only the files a
+  pipeline version writes.
+- **Bounded segments**: the SFX collectors carry a memory estimate and the
+  indexer cuts a segment on `LUCIVY_SFX_HEAP` (1 GB native, 128 MB wasm) as
+  well as on the postings heap — nothing bounded a v3 segment before. Segment
+  builds take a permit (`LUCIVY_MAX_PENDING_FINALIZE`), the API queues at
+  most `LUCIVY_MAX_INFLIGHT_DOCS` documents, and the finalize queue no longer
+  drops receivers (a commit could publish 1 551 of 2 000 documents).
+- Merges capped per target (`LUCIVY_MAX_MERGED_DOCS`: 10 000 native, 800
+  wasm); `ShardedHandle::wait_merges_quiet()`; `Residency` (`InMemory` /
+  `Streaming`, `LUCIVY_RAM_INDEX_MAX`), `preload()`, `memory_warnings()`;
+  a LUCE snapshot can be **served without extraction**
+  (`ShardedHandle::open_snapshot`, `SnapshotDirectory`, `read_manifest`);
+  snapshot export packs live segments only (28 % dead weight before) from
+  one read of `meta.json`.
 
 ### Queries
 
@@ -71,7 +96,7 @@ Companion crates: `luciole` 0.2.0, `lucistore` 0.2.0, `sparse-vector` 0.3.0.
 - `impl BlobStore for Arc<T>` (so `Arc<dyn BlobStore>` works everywhere).
 - `ShardRouter` moved to `lucistore` (re-exported by `lucivy-core`).
 
-### luciole 0.2.0
+### luciole 3.0.0 (was 0.1.0)
 
 - DAG nodes are taken/put back through a sentinel (no more `ptr::read`), a
   panicking node is a failed node, not a double free.
@@ -80,12 +105,12 @@ Companion crates: `luciole` 0.2.0, `lucistore` 0.2.0, `sparse-vector` 0.3.0.
   `Scheduler::try_wait`, `wait_*_result` variants.
 - `Pool::scatter_to(targets, …)` and pools tolerant to workers that left.
 
-### lucistore 0.2.0
+### lucistore 3.0.0 (was 0.1.0)
 
 - `ShardRouter` (node-id map, `resync`), `BlobStore::load_range` / `blob_len`,
   `ShardStorage` trait with `FsShardStorage` and `BlobShardStorage`.
 
-### sparse-vector 0.3.0 (new crate)
+### sparse-vector 3.0.0 (new crate)
 
 Inverted index for sparse vectors with WAND pruning, mmap or RAM, filtered
 search, `ShardedSparseHandle` on the same router / actor pool / storages as
@@ -94,9 +119,32 @@ index — see its `NOTICE`.
 
 ### Bindings
 
-Native bindings (Python, Node.js, C++) expose `query_warnings`; emscripten
-builds against the v3 tree (execution to be re-validated in the browser
-playground). PyPI/npm releases follow this crate release.
+Native bindings (Python, Node.js, C++) expose `query_warnings`; the Python
+wheel is `abi3` (one wheel for every CPython ≥ 3.9). PyPI and npm ship
+3.0.0 with this release.
+
+### WebAssembly (emscripten) and the playground
+
+Measured on 10 000 Linux kernel files, 8 threads, same page:
+
+- **Indexing in 55 s** (was ~25 min), **124-133 ms per query** (median
+  69-92 ms; native 79 / 49), counts identical to native on the 21-query
+  panel. The engine now runs on **mimalloc** (`-sMALLOC=mimalloc`): dlmalloc
+  serialised every thread on one lock, which was the whole gap — the same
+  page went from 551 to 188 ms per query with that single flag.
+- Scheduler threads `min(cores, 8)`, pthread pool sized at startup; index
+  held in memory up to 3 GB (`LUCIVY_RAM_INDEX_MAX`), preloaded once quiet;
+  background merges capped at 800 documents (48 small segments fill eight
+  threads where 19 large ones fed one); two segment builds at a time.
+- Runtime kept alive after `main`; OPFS mount retried from every entry point
+  and given up after two failed rounds; `lucivy_memory_status`,
+  `lucivy_preload`; flags `--scheduler-threads`, `--writer-threads`,
+  `--max-merged-docs`, `--max-builds`, `--ram-index-max-mb`,
+  `--file-cache-mb`, `--verbose`, `--no-opfs`.
+- Playground: clones lucivy's own source from GitHub and indexes it in the
+  page (983 files, 3 s), `postgres/postgres` as the example repository
+  (4 373 files, 13 s); every query mode exposed, Jaro-Winkler included,
+  relaxed / strict separators as a selector; no bundled dataset any more.
 
 ### Fixed
 

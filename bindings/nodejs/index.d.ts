@@ -30,11 +30,15 @@ export interface SearchOptions {
 /**
  * Merge BM25 stats from multiple nodes into global stats (for distributed search).
  *
+ * Each node calls `index.exportStats(queryJson)` which returns a JSON string.
+ * The coordinator collects all JSON strings and merges them with this function.
+ * The merged result is then passed back to each node via
+ * `index.searchWithGlobalStats(queryJson, mergedJson)`.
+ *
  * @param statsList - Array of JSON strings, one per node (from `exportStats()`).
  * @returns JSON string of merged `ExportableStats` ready for `searchWithGlobalStats()`.
  */
 export declare function mergeStats(statsList: Array<string>): string
-
 export declare class Index {
   /**
    * Create a new index at the given path.
@@ -124,7 +128,7 @@ export declare class Index {
    * - `{type: "more_like_this", field: "body", value: "sample text", min_doc_frequency: 1}` — similarity
    *
    * **Filtering:**
-   * - `allowed_ids` in options: pre-filter by _node_id (fast, bitmap-based)
+   * - `allowedIds` in options: pre-filter by _node_id (fast, bitmap-based)
    * - `filters` key in query: filter on non-text fields (AND'd with search):
    *   ```json
    *   {type: "contains", field: "body", value: "lock",
@@ -137,8 +141,16 @@ export declare class Index {
    *   Ops: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `not_in`, `between`, `starts_with`, `contains`.
    *   Composite: `must`, `should`, `must_not` with nested `clauses`.
    *
-   * @param options - `{limit?: number, highlights?: boolean, fields?: boolean, allowed_ids?: number[]}`
+   * Honest warnings for a query, without running it.
+   *
+   * Plain-text warnings describing what the engine will actually search
+   * and where it falls back to brute force: separators ignored in relaxed
+   * mode, fuzzy distance too loose for the query length, regex without a
+   * usable literal (full scan), segments written by the legacy indexer.
+   * Empty array when nothing applies.
    */
+  queryWarnings(query: any): Array<string>
+  /** @param options - `{limit?: number, highlights?: boolean, fields?: boolean, allowedIds?: number[]}` */
   search(query: any, options?: SearchOptions | undefined | null): Array<SearchResult>
   /**
    * Number of documents in the index (getter, access as `index.numDocs`).

@@ -1,6 +1,6 @@
 [package]
 name = "lucistore"
-version = "0.2.0"
+version = "3.0.0"
 edition = "2024"
 license = "MIT"
 description = "Shared persistence, sync and shard infrastructure for lucivy and friends"
