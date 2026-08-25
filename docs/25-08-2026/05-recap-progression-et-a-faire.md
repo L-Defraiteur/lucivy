@@ -220,10 +220,19 @@ qui reste : un ratio de 1,0 à 2,2× par requête, et surtout un **coût fixe pa
 requête** (97 ms pour 2 hits sur `path`, 14 ms pour zéro hit) qui n'existe
 pas en natif. Les prochains essais, dans l'ordre, chacun avec le panel :
 
-- **décomposer le coût fixe** : `[search] done` donne search / collect /
-  serialize ; le prescan est 1 nœud par segment × champ — sur 48 segments,
-  regarder ce que coûte l'ouverture d'un segment qui n'a rien (`no hit` :
-  14 ms) et la partie hors prescan (poids, recherche par shard, fusion) ;
+- **le coût fixe, cerné mais pas résolu** (25 au soir, 20 min dessus) :
+  `no hit` = 7 ms moteur + 7 ms d'aller-retour worker/JSON — rien à faire.
+  `path contains ethernet/intel` = 61 ms moteur dont **328 ms de CPU en
+  « sidecar loads » et 61 en resolver** sur 48 segments, soit ~1 ms par
+  `read_bytes()` de données **déjà en cache** (0 `[fs] load` après le
+  preload) ; en natif la même requête fait 0,5 ms avec sidecars 0. Seul le
+  champ `path` est touché (`content` : 5-7 ms au total). Deux hypothèses à
+  départager avec un compteur dans `LazyFsHandle::read_bytes` (chemin pris,
+  temps sous le mutex) : contention futex sur `FileCache::global().lock()`
+  quand 48 tâches lisent en même temps sans marche FST pour les étaler ;
+  ou des sous-tranches de fichier composite < 64 Ko qui prennent le chemin
+  `read_direct` sans passer par le cache. Compte pour ~50 ms sur les
+  requêtes de champ court, rien sur `content` ;
 - `-C target-feature=+simd128` côté Rust et `-msimd128` côté emcc ;
 - `-O3` à remesurer **avec mimalloc** (jugé dans le bruit avec dlmalloc, qui
   écrasait tout) ;
