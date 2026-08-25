@@ -244,6 +244,13 @@ tout ce qui a été mesuré tient.
 | §2.8 | plus de `Vec` par document dans `SfxPostWriterV2` : une passe sur les entrées triées |
 | §3 | 03, 04 §12, 05, 06, 07, `build.sh`, note du playground, CLAUDE.md corrigés |
 
+**Réindexation navigateur rejouée** (05 §5.0) : deux morts en fusion de
+fond — 603 Mo dans une fusion de niveau 2 (~10 000 docs), puis un realloc
+de 2 Mo dans une fusion que le preload avait privée d'espace. Corrigé par
+`LUCIVY_MAX_MERGED_DOCS` (2 000 en wasm) et `wait_merges_quiet()` avant tout
+preload/drain. Résultat, session fraîche sans paramètre : **551 ms/requête,
+médiane 244, 21/21 identiques** (après-midi : 567 / 281 avec `?rammax`).
+
 Faits ensuite, à la demande de Lucie : `entry_count` est un `u32` de bout
 en bout (le lecteur ne plafonne plus à 65 535 ; V2 lit son `u16` et
 l'élargit), les en-têtes SFP3 se lisent en `read_varint_u32` (une valeur

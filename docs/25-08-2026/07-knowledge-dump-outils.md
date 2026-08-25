@@ -138,6 +138,7 @@ nécessaires aux SharedArrayBuffer, et expose :
 | `?rammax=N` | `LUCIVY_RAM_INDEX_MAX` en Mo — au-delà, l'index est streamé |
 | `?threads=N` | threads du planificateur luciole |
 | `?wthreads=N` | threads d'écriture (le tas suit automatiquement) |
+| `?maxmerged=N` | `LUCIVY_MAX_MERGED_DOCS` (2 000 par défaut) |
 | `?compact=N` | compacte à N docs/segment après ouverture |
 
 Corpus prêts (ignorés par git) : `playground/corpus-kernel-16k.tar.gz`,
@@ -254,6 +255,7 @@ grep -o 'finalize() [0-9]* docs' playground/diag.log | awk '{s+=$2;n++} END {pri
 | `LUCIVY_SFX_HEAP` | 1 Go / **128 Mo wasm** | ce que les collecteurs SFX tiennent avant de couper un segment — **global, divisé par les threads** |
 | `LUCIVY_MERGE_CONCURRENCY` | ∞ / **1 wasm** | fusions simultanées |
 | `LUCIVY_MAX_PENDING_FINALIZE` | 4 / **1 wasm** | segments en construction en plus de celui qu'on remplit ; au-delà l'indexeur attend |
+| `LUCIVY_MAX_MERGED_DOCS` | 10 000 / **2 000 wasm** | plus gros segment qu'une fusion de fond peut produire ou reprendre |
 | `LUCIVY_SCHEDULER_THREADS` | `available_parallelism()` / **4 wasm** | pool luciole |
 | `LUCIVY_FILE_CACHE_BYTES` | 4 Go / **768 Mo wasm** | cache de fichiers entiers ; s'il est posé, il **fige** le budget |
 | `LUCIVY_RAM_INDEX_MAX` | ∞ / **3 Go wasm** (2 Go avant le soir du 25) | au-delà, l'index est streamé |
@@ -287,12 +289,16 @@ soir du 25) — 2 305 Mo, indexation 25,7 s, panel 1 664 ms soit
 **79 ms/requête (médiane 49 ms)**. Avant la correction du soir, même
 protocole : 1 943 ms, 93 ms/requête, médiane 59.
 
-**Navigateur, même corpus, tout en RAM (mesuré avec `?rammax=3000` ; le
-défaut est 3 Go depuis le soir, 2 Go avant)** — 2 600 Mo, panel 567 ms/requête (médiane 281 ms),
-preload 837 fichiers / 2 600 Mo en 2,5 s. **Mesuré avec le SFP3 de
-l'après-midi** : l'index OPFS ne se lit plus depuis la correction et doit
-être reconstruit avant toute comparaison (05 §5.0) ; le chiffre à battre
-est celui-là.
+**Navigateur, même corpus, session fraîche `?open=user_index`, aucun autre
+paramètre** (soir du 25 : SFP3 `headers_len`, fusions plafonnées à 2 000,
+défaut 3 Go) — 2 492 Mo en mémoire, preload 589 fichiers en 2,8 s, panel
+**551 ms/requête (médiane 244 ms)**, second passage 553 / 269, 21 comptes
+identiques. Détail : `contains strict kmalloc` 98 ms (natif 35),
+`fuzzy d1` ~1 050 ms (natif 69), `fuzzy d2` 3 728 ms (natif 436),
+`parse` booléen ~500 ms (natif 24-32). L'après-midi (SFP3 sans
+`headers_len`, `?rammax=3000`, 50 segments) : 567 / 281.
+
+Le fichier de résultat navigateur est `/tmp/parity_wasm_pass1.json`.
 
 **Natif, 15 440 fichiers, compacté** — 3 392 Mo, soit 220 Ko/document.
 
@@ -321,3 +327,11 @@ est celui-là.
   handles du worker précédent) : `ensure_opfs_mounted` réessaie à chaque point
   d'entrée.
 - **`usize` fait 32 bits en wasm32.** Toute somme d'octets doit être en `u64`.
+- **« Indexation terminée » ne veut pas dire « plus rien ne tourne »** : les
+  fusions de fond continuent après le dernier commit. Avant de mesurer, de
+  précharger ou d'exporter : `wait_merges_quiet()`.
+- **Après avoir nettoyé `diag.log`, l'ancien worker peut encore y écrire**
+  ses `Aborted()` quelques secondes : un moniteur qui greppe le fichier doit
+  ne regarder qu'après la dernière ligne `[scheduler] starting`.
+- **Le panel après indexation dans la même page échoue toujours** (allocation
+  de 4 Mo) : recharger avec `?open=user_index` avant de mesurer.

@@ -205,6 +205,14 @@ fichier sont gardés sur son handle — les en-têtes sont relus sans cesse.
   peuvent tenir avant de couper un segment. **Global, divisé par le nombre de
   threads** — sinon le pic réel se multiplie par le nombre de threads.
 - **Fusions** : `LUCIVY_MERGE_CONCURRENCY`, 1 en wasm.
+- **Taille des fusions** : `LUCIVY_MAX_MERGED_DOCS`, 10 000 natif, **2 000 en
+  wasm** — borne ce qu'une fusion produit *et* ce qu'elle reprend (un segment
+  déjà à la borne n'est plus fusionné). Une fusion dimensionne ses arènes sur
+  ses entrées ; 8 segments / 1,4 M tokens passent dans le navigateur, le
+  niveau suivant (~10 000 docs) meurt sur 603 Mo.
+- **Index calme** : `ShardedHandle::wait_merges_quiet()` — un commit
+  n'implique pas « rien ne fusionne » (la politique replanifie après). Appelé
+  par `preload()` et `drainMerges` avant de réclamer l'espace d'adressage.
 - **Finalisations en vol** : `LUCIVY_MAX_PENDING_FINALIZE`, 1 en wasm, 4
   natif. Au-delà, l'indexeur attend la plus ancienne avant de continuer :
   c'est ce qui borne le pic *par construction* et non par le hasard des

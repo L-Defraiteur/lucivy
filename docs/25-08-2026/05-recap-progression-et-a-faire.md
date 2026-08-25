@@ -13,21 +13,30 @@ Document autonome : il doit suffire pour reprendre sans relire l'historique.
 **Le navigateur indexe et sert 10 000 documents.** C'était l'objectif ; il est
 atteint.
 
+Chiffres du **soir** (après les corrections de `08-relecture-commits-journee.md`,
+index reconstruit des deux côtés, navigateur **sans aucun paramètre d'URL**) :
+
 | | natif | navigateur |
 |---|---|---|
-| index compacté, 10 000 docs | 2 273 Mo | 2 600 Mo (non compacté) |
-| indexation | 27,6 s | ~25 min |
-| requête, **moyenne** | 85 ms | **567 ms** |
-| requête, **médiane** | 49 ms | **281 ms** |
-| `contains kmalloc` | 37 ms | ~290 ms |
+| index, 10 000 docs | 2 305 Mo (compacté) | 2 492 Mo (fusions plafonnées à 2 000 docs) |
+| indexation | 25,7 s | ~6 min + fusions |
+| requête, **moyenne** | 79 ms | **551 ms** |
+| requête, **médiane** | 49 ms | **244 ms** |
+| `contains strict kmalloc` | 35 ms | 98 ms |
+| `fuzzy d2 kmalloc` | 436 ms | 3 728 ms |
 
 **Comptes identiques au natif sur les 21 requêtes du panel**, tous modes
 confondus (contains strict/relax, split, startsWith, term, phrase, fuzzy d1/d2,
-regex, parse simple et booléen, filtre, no-hit).
+regex, parse simple et booléen, filtre, no-hit) — et cette fois pas même un
+ex æquo différent.
 
-Le ratio navigateur/natif est de **6,7× sur la moyenne, 5,6× en médiane**.
-C'est ce que le playground annonce maintenant, avec un encadré et un
-pictogramme d'avertissement.
+Le ratio navigateur/natif est de **7× sur la moyenne, 5× en médiane**, mais
+il est très inégal : `contains strict` 2,8×, `regex` 2×, `fuzzy d1` 15×,
+`parse` booléen 17-20×. C'est ce qui oriente le profil (§5.1) : chercher
+d'abord ce que fuzzy et parse font de plus que contains.
+
+L'après-midi (SFP3 sans `headers_len`, `?rammax=3000`, 50 segments) donnait
+567 ms / 281 ms.
 
 **Condition de mesure** : ces chiffres navigateur ont été pris avec
 `?rammax=3000`, parce que le défaut de `LUCIVY_RAM_INDEX_MAX` était **2 Go**
@@ -99,6 +108,18 @@ trait contre des allocations entrelacées avec le travail de requête).
 indexé 10 000 documents, le premier `search` échoue sur une allocation de
 10 Mo — 2 727 Mo d'index plus ce que l'indexation laisse dépassent les 4 Go
 adressables. La même page rechargée ouvre le même index et répond.
+Reconfirmé le soir, index reconstruit : le preload passe (2 185 Mo), la
+première recherche échoue sur 4 Mo ; la page rechargée avec `?open=`
+sert à 551 ms.
+
+**Et une fusion peut tourner encore après « indexation terminée ».** Un
+commit attend les fusions qu'il trouve en cours, puis la politique en
+planifie d'autres sur ce qu'il vient de publier. Le soir, le preload a
+chargé 2,4 Go pendant qu'une fusion construisait son FST : elle est morte
+sur un realloc de 2 Mo. `wait_merges_quiet()` est maintenant appelé par
+`preload()` et par `drainMerges`. Et les fusions sont **plafonnées à
+2 000 documents en wasm** (`LUCIVY_MAX_MERGED_DOCS`) : la fusion de niveau 2
+(~10 000 docs) meurt sur 603 Mo, et n'a jamais abouti dans un navigateur.
 
 Ce n'est pas une préférence de conception. **Indexer et servir doivent être
 deux espaces d'adressage.**
@@ -127,13 +148,14 @@ d'écriture) étaient déjà les bons réglages, pour d'autres raisons que celle
 
 Par ordre de valeur, avec ce que chacun demande.
 
-### 5.0 Rejouer une indexation **et un compactage** navigateur
+### 5.0 ✅ Indexation navigateur rejouée (soir)
 
-Les trois formats ont changé dans la journée, SFP3 a changé une seconde fois
-le soir, et le compactage navigateur n'a pas été rejoué depuis la nuit.
-C'est le préalable à tout le reste : reconstruire l'index 10 k (corpus
-`playground/corpus-kernel-10k.tar.gz`, ~25 min), le compacter, rejouer le
-panel, puis reconstruire la référence native (`test_playground_parity`).
+Fait : index 10 k reconstruit dans le navigateur avec les formats du soir,
+fusions de fond plafonnées, panel rejoué (§1). Deux échecs en route, tous
+deux dans une fusion de fond, tous deux corrigés (§3). **Non fait** : un
+`?compact=N` explicite après chargement — les fusions plafonnées à 2 000
+donnent déjà ~35 segments ; compacter plus haut est précisément ce qui ne
+tient pas.
 
 ### 5.1 Profiler le module WASM ⭐ le vrai prochain pas
 
