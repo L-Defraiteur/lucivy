@@ -1825,6 +1825,11 @@ impl ShardedHandle {
 
     pub fn add_document(&self, mut doc: LucivyDocument, node_id: u64) -> Result<(), String> {
         self.ensure_open()?;
+        // Back-pressure on the caller's thread: no more documents queued than
+        // the indexers can absorb without starting builds the address space
+        // cannot hold (see the engine's `wait_docs_capacity`). The pipeline
+        // behind this call is all actors, which must not block.
+        ld_lucivy::indexer::wait_docs_capacity(1);
         self.stamp_node_id(&mut doc, node_id)?;
         if self.shards.len() == 1 {
             // Direct path: no pipeline overhead for single shard.
@@ -1845,6 +1850,7 @@ impl ShardedHandle {
     /// tokenization. Each sub-batch is a single message — much less overhead
     /// than N individual add_document calls.
     pub fn add_documents(&self, docs: Vec<(LucivyDocument, u64)>) -> Result<(), String> {
+        ld_lucivy::indexer::wait_docs_capacity(docs.len());
         let mut docs = docs;
         for (doc, node_id) in &mut docs {
             self.stamp_node_id(doc, *node_id)?;
@@ -1870,6 +1876,7 @@ impl ShardedHandle {
         node_id: u64,
         token_hashes: &[u64],
     ) -> Result<usize, String> {
+        ld_lucivy::indexer::wait_docs_capacity(1);
         self.stamp_node_id(&mut doc, node_id)?;
         self.route_and_send(doc, node_id, token_hashes)
     }

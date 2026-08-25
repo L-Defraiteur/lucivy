@@ -51,6 +51,7 @@ export class Lucivy {
             schedulerThreads: options.schedulerThreads || 0,
             writerThreads: options.writerThreads || 0,
             maxMergedDocs: options.maxMergedDocs || 0,
+            maxBuilds: options.maxBuilds || 0,
         });
     }
 

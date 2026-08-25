@@ -292,6 +292,14 @@ pub extern "C" fn __main_argc_argv(argc: i32, argv: *const *const c_char) -> i32
                 std::env::set_var("LUCIVY_MAX_MERGED_DOCS", n.to_string());
             }
         }
+        // `--max-builds=N`: segment builds allowed at once
+        // (LUCIVY_MAX_PENDING_FINALIZE, 4 on wasm32). Each is a 170-400 MB
+        // peak; a commit starts one per shard at the same moment.
+        if let Some(n) = a.strip_prefix("--max-builds=") {
+            if let Ok(n) = n.parse::<usize>() {
+                std::env::set_var("LUCIVY_MAX_PENDING_FINALIZE", n.to_string());
+            }
+        }
         // `--scheduler-threads=N`: size of the luciole pool
         // (LUCIVY_SCHEDULER_THREADS). Left alone it asks
         // `available_parallelism`, which does not answer on every emscripten

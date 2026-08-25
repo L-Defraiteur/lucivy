@@ -16,6 +16,8 @@ mod flat_map_with_buffer;
 pub(crate) mod index_writer;
 pub(crate) mod index_writer_status;
 pub(crate) mod indexer_actor;
+pub use indexer_actor::{docs_in_flight, max_inflight_docs, wait_docs_capacity};
+pub use merge_permits::active_builds;
 pub(crate) mod indexing_term;
 mod log_merge_policy;
 mod merge_index_test;

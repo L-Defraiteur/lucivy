@@ -269,6 +269,7 @@ self.onmessage = async (e) => {
                         ...(args.schedulerThreads ? [`--scheduler-threads=${args.schedulerThreads}`] : []),
                         ...(args.writerThreads ? [`--writer-threads=${args.writerThreads}`] : []),
                         ...(args.maxMergedDocs ? [`--max-merged-docs=${args.maxMergedDocs}`] : []),
+                        ...(args.maxBuilds ? [`--max-builds=${args.maxBuilds}`] : []),
                     ],
                 });
 

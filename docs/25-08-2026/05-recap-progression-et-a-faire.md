@@ -241,6 +241,25 @@ distincts sur 256) et redondant entre ordinaux. Sparsité + déduplication, ou
 suppression pure puisqu'il est marqué **dérivable** depuis `.termtexts`.
 Gagnerait ~194 Ko/doc, soit ~1 940 Mo pour 10 000 documents.
 
+### 5.5 bis Fuzzy : Jaro-Winkler en option (noté le 25 au soir)
+
+Le chemin fuzzy v3 (`src/suffix_fst/briques/composite.rs`) fait déjà trois
+étapes : pigeonhole par trigrammes (chaînes gardant ≥ n − d trigrammes),
+**validation Levenshtein** sur la fenêtre source reconstruite
+(`within_edit_distance`, DP semi-globale, deux lignes réutilisées), puis
+`fuzzy_spans` pour le span exact. Jaro-Winkler se branche à l'étape 2 :
+
+- `enum FuzzyMetric { Levenshtein, JaroWinkler { threshold } }` dans
+  `QueryConfig`, propagé jusqu'à la boucle de validation ; JW sans
+  allocation, ~40 lignes ;
+- JW n'est pas semi-global : comparer le needle au **token porteur** de la
+  chaîne (`back[]` donne la correspondance fenêtre → tokens), pas à la
+  fenêtre entière ;
+- le rappel reste celui du pigeonhole à distance `d` — JW ne peut que
+  resserrer parmi ces candidats, ce qui est voulu (coût borné) ;
+- score : la similarité JW elle-même plutôt que l'étage par trigrammes
+  manqués ; span : celui du token comparé.
+
 ### 5.6 Publication crates.io 3.0.0
 
 `cargo publish --dry-run` vert sur les 5 crates. **En attente du feu vert de

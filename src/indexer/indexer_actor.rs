@@ -63,19 +63,56 @@ fn sfx_budget() -> usize {
     })
 }
 
-/// Segments an indexer may have under construction at once beyond the one it
-/// is filling: `LUCIVY_MAX_PENDING_FINALIZE`, 1 on wasm32 (one build at a
-/// time next to the writer, the address space is the constraint) and 4
-/// elsewhere.
-fn max_pending_finalize() -> usize {
+/// Documents accepted by an API call and not yet consumed by an indexer.
+static DOCS_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many documents may be queued between the API and the indexers:
+/// `LUCIVY_MAX_INFLIGHT_DOCS`, 512 on wasm32 and 50 000 elsewhere.
+///
+/// Two bounds together hold the indexing peak by construction. A segment
+/// build takes a permit before it starts (`merge_permits::acquire_build`,
+/// `LUCIVY_MAX_PENDING_FINALIZE`) — but an indexer cannot refuse the
+/// documents already in its mailbox, and an API that returns as soon as a
+/// document is queued lets a caller queue thousands before the first
+/// segment is even cut, each one a collector waiting for a build. This is
+/// the second bound: the caller's thread waits while the queue is full.
+///
+/// The first attempt put a blocking wait inside the indexer's handler, which
+/// luciole forbids — a handler that blocks holds a scheduler thread the
+/// build it waits for may need — and it panicked the first time indexing was
+/// fast enough to reach it (mimalloc, 8 threads).
+pub fn max_inflight_docs() -> usize {
     static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *MAX.get_or_init(|| {
-        std::env::var("LUCIVY_MAX_PENDING_FINALIZE")
+        std::env::var("LUCIVY_MAX_INFLIGHT_DOCS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(if cfg!(target_arch = "wasm32") { 1 } else { 4 })
+            .unwrap_or(if cfg!(target_arch = "wasm32") { 512 } else { 50_000 })
             .max(1)
     })
+}
+
+/// Documents queued between the API and the indexers.
+pub fn docs_in_flight() -> usize {
+    DOCS_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Back-pressure for whoever feeds documents: block **the calling thread**
+/// until the queue has room for `n` more, then count them. Never call this
+/// from an actor handler. Bounded to ten seconds so an indexer that died
+/// with documents in its mailbox cannot hang the caller forever — the
+/// error surfaces at the next commit.
+pub fn wait_docs_capacity(n: usize) {
+    let max = max_inflight_docs();
+    if docs_in_flight() + n > max {
+        debug_assert!(!crate::actor::scheduler::in_actor_handler(),
+            "wait_docs_capacity called inside an actor handler");
+        let t0 = std::time::Instant::now();
+        while docs_in_flight() + n > max && t0.elapsed().as_secs() < 10 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+    DOCS_IN_FLIGHT.fetch_add(n, std::sync::atomic::Ordering::AcqRel);
 }
 use crate::indexer::index_writer_status::IndexWriterBomb;
 use crate::indexer::segment_updater::SegmentUpdater;
@@ -217,6 +254,12 @@ impl<D: Document> IndexerState<D> {
         }
 
         let batch_len = batch.len();
+        // These documents are no longer queued (see `wait_docs_capacity`).
+        DOCS_IN_FLIGHT.fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |n| Some(n.saturating_sub(batch_len)),
+        ).ok();
         self.set_activity(format!("poll_finalize batch={batch_len}"));
 
         // Poll previous background finalize (non-blocking).
@@ -276,7 +319,6 @@ impl<D: Document> IndexerState<D> {
                 current.writer.max_doc()
             );
             self.submit_finalize_task();
-            self.bound_pending_finalize();
             self.docs_since_yield = 0;
             return true; // Yield to free the scheduler thread.
         }
@@ -345,34 +387,17 @@ impl<D: Document> IndexerState<D> {
 
         let scheduler = global_scheduler();
         let rx = scheduler.submit_task(crate::actor::Priority::High, move || {
+            // At most `LUCIVY_MAX_PENDING_FINALIZE` builds at once, process-
+            // wide: the wait runs other scheduler work meanwhile, like a
+            // merge waiting for its permit. A commit flushes every shard's
+            // segment at the same moment, and eight builds in flight on
+            // eight threads is what exhausted the browser's address space.
+            let _permit = crate::indexer::merge_permits::acquire_build();
             finalize_segment(segment, writer, &segment_updater, &mut delete_cursor)
                 .map(|_| vec![0u8]) // success marker
                 .map_err(|e| e.encode())
         });
         self.pending_finalize.push(rx);
-    }
-
-    /// Back-pressure: never let more than `max_pending_finalize()` segments
-    /// be under construction at once.
-    ///
-    /// The queue replaced a single slot that dropped receivers, but a queue
-    /// alone bounds nothing: with segments cut every ~166 documents, an FST
-    /// build that takes longer than indexing the next 166 lets builds pile up,
-    /// each with its own peak — the very sum the SFX budget exists to bound.
-    /// It held on 10 000 documents by timing, not by construction. Waiting on
-    /// the oldest build here makes it hold by construction.
-    fn bound_pending_finalize(&mut self) {
-        let max = max_pending_finalize();
-        while self.pending_finalize.len() > max {
-            let rx = self.pending_finalize.remove(0);
-            if let Some(ref a) = self.activity { a.set("finalize_backpressure"); }
-            if let Err(err_bytes) = global_scheduler().wait(rx, "pending_finalize") {
-                let err = crate::LucivyError::decode(&err_bytes).unwrap_or_else(|_| {
-                    crate::LucivyError::SystemError("background finalize failed".into())
-                });
-                self.set_error(err);
-            }
-        }
     }
 
     /// Non-blocking poll: check if the pending finalize completed.
