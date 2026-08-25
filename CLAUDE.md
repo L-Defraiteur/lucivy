@@ -54,7 +54,7 @@ Les anciens types sont routés automatiquement via `build_query()` dans `lucivy_
 - `LUCIVY_HIGHLIGHT_SPAN_CAP` (4 M natif / 1 M wasm) : le sink d'highlights
   s'arrête là ; `ShardedHandle` relance alors la recherche filtrée aux ids du
   top-k pour ne remplir que leurs spans (scores/ordre de la 1ʳᵉ passe).
-- `LUCIVY_MAX_MATCHES_PER_SEGMENT` (4 M natif / 50 k wasm) : plafond de
+- `LUCIVY_MAX_MATCHES_PER_SEGMENT` (4 M natif / 20 k wasm) : plafond de
   `MatchV3` par segment et par requête ; au-delà la requête est tronquée sur
   ce segment (`briques::resolve::truncations()`), jamais d'abort. Le panel de
   21 requêtes ne l'atteint pas ; « t » sur 10k fichiers kernel l'atteint.
@@ -153,6 +153,9 @@ Emscripten manque : export_snapshot, export_sharded_delta, apply_sharded_delta.
 
 - BM25 standard, correct cross-shard (diff=0.0000 single vs 4-shard)
 - Fuzzy : tiers par miss count (`miss_penalty * 1000 + bm25`). Scores négatifs voulus.
+  Jaro-Winkler : tier `-(1 - sim) * 10`. En v3 le tier transite par
+  `CachedPrescan.coverage` → `SfxWeight` → `SfxScorer::with_coverage`
+  (raccordé le 25 août au soir ; avant, jeté par `FuzzyQueryV3`).
 - `ExportableStats` : sérialisable (Serialize/Deserialize) pour distributed search
 
 ## Tests

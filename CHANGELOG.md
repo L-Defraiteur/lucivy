@@ -23,13 +23,16 @@ build down.
 - **Matches bounded per segment.** The sink was only the first structure to
   give: the v3 resolvers build a 40-byte `MatchV3` per occurrence, and the
   browser index of that corpus has 48 segments. `LUCIVY_MAX_MATCHES_PER_SEGMENT`
-  (4 M native, 50 k wasm) stops a segment's resolution there; the query is
+  (4 M native, 20 k wasm) stops a segment's resolution there; the query is
   then truncated on that segment — counted by `briques::resolve::truncations()`,
   traced under `LUCIVY_VERBOSE` — instead of the process dying. The 21-query
   parity panel never reaches it (counts identical to native, 114 ms/query);
-  typing `t`, `te`, `tes`, `test` in the playground now answers in 857, 531,
-  86, 49 ms where 3.0.1 killed the worker. Surfacing the truncation in the
-  search reply is a follow-up (the reply is a bare array).
+  typing `t`, `te`, `tes`, `test` in the playground now answers in ~200,
+  130, 46, 30 ms — after the full panel, on a 2.9 GB index resident in a
+  4 GB heap — where 3.0.1 killed the worker. Surfacing the truncation in the
+  search reply is a follow-up (the reply is a bare array). Native and browser
+  fuzzy scores can differ in the 4th decimal: `tier * 1000 + bm25` in `f32`
+  leaves three digits to BM25 at a tier of -7000; same documents, same order.
 
 - `cargo clippy --lib -- -D warnings` passes on Rust 1.98: 164 public items of
   the v3 engine (`suffix_fst::briques`, `collector_v3`, `builder_v3`, the v3
@@ -46,6 +49,20 @@ build down.
 - luciole: two tests asserted on the global wait-graph *count* and flaked
   under the parallel test runner; they now check their own edge
   (`wait_graph::contains(id)`, new).
+- **Fuzzy score tiers reach the v3 scorer.** `fuzzy_v3` computed them —
+  `-(miss count)` under Levenshtein, `-(1 - similarity) * 10` under
+  Jaro-Winkler — and `FuzzyQueryV3` dropped them on the floor: the cached
+  prescan had no field for them and `SfxWeight` never called
+  `with_coverage`, so v3 fuzzy hits were ordered by BM25 alone and the
+  Jaro-Winkler test passed only when the physical order happened to agree
+  (one run in three did not). `CachedPrescan` carries `coverage`, the scorer
+  applies it as `tier * 1000 + bm25` as documented. Counts are unchanged;
+  fuzzy ordering now puts the closer match first.
+- `export_snapshot` right after `add` could succeed instead of refusing: the
+  "uncommitted" flag was set by the shard actor when it wrote the document,
+  not when the API accepted it. `ShardedHandle` now marks every shard on
+  `add_document` / `delete_by_node_id`; `commit` clears them (the Python
+  test `test_export_uncommitted_raises` flaked one run in three).
 - Playground: dropped files and `?corpus=` had their own indexing loop and
   skipped the "reload to serve" step above 2 GB that the git clone path had;
   a 10 000-file archive was then served from the page that indexed it, and a

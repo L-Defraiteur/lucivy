@@ -109,11 +109,23 @@ temps, chacun mesuré dans le navigateur :
    enregistrait tout le segment. Test `test_highlight_cap.rs`.
 2. plafond `LUCIVY_MAX_MATCHES_PER_SEGMENT` dans les 11 sites de `push` de
    `resolve.rs` (script), 250 k d'abord — encore trop avec 48 segments
-   (480 Mo) → 50 k en wasm, 4 M natif. Compteur `truncations()`, trace en
+   (480 Mo) → 50 k puis **20 k** en wasm (après le panel, un doublement de Vec à 4 Mo échouait encore), 4 M natif. Compteur `truncations()`, trace en
    verbeux.
 3. résultat : « t » 857 ms, « te » 531, « tes » 86, « test » 49,
    « kmalloc » 25, 0 erreur ; panel 21/21 identique, 114 ms, **aucune
    troncature** sur les requêtes normales.
+
+Deux autres trouvés en relançant les suites après ces changements :
+`test_export_uncommitted_raises` (Python) flakait 1/3 — le drapeau
+« uncommitted » n'était posé que par l'acteur du shard, après coup ;
+`ShardedHandle::add_document`/`delete_by_node_id` marquent maintenant tous
+les shards à l'entrée. Et `jaro_winkler_fuzzy_end_to_end` flakait 2/3 : le
+palier fuzzy (`coverage`) calculé par `fuzzy_v3` était **jeté** par
+`FuzzyQueryV3` et `SfxWeight` n'appelait jamais `with_coverage` — en v3 ni
+le palier Levenshtein ni le JW n'entraient dans le score, l'ordre des ex
+æquo dépendait du découpage en segments. Raccordé (`CachedPrescan.coverage`).
+Les comptes ne changent pas, l'ordre des requêtes fuzzy si : référence
+native du panel à régénérer (`/tmp/parity_native_10k_302c.json`).
 
 Suites notées : signaler la troncature dans la réponse (tableau nu
 aujourd'hui) ; câbler `filter_docs` jusqu'aux resolvers v3 (toujours `None`

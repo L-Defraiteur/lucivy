@@ -84,7 +84,7 @@ impl FuzzyQueryV3 {
         &self,
         seg_reader: &SegmentReader,
         sfx_bytes: &common::OwnedBytes,
-    ) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)> {
+    ) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>)> {
         use crate::suffix_fst::file_v3::SfxFileReaderV3;
         use crate::suffix_fst::briques::orchestrator;
 
@@ -118,7 +118,7 @@ impl FuzzyQueryV3 {
             word_posmap: wpm_bytes.as_ref().and_then(|b| crate::suffix_fst::word_pos_map::WordPosMapReader::open(b)),
         };
 
-        let (_bitset, highlights, _coverage) = orchestrator::fuzzy_v3(
+        let (_bitset, highlights, coverage) = orchestrator::fuzzy_v3(
             &ctx, &self.query_text, self.distance,
             self.strict_separators, seg_reader.max_doc(), self.metric,
         );
@@ -135,19 +135,19 @@ impl FuzzyQueryV3 {
         let mut doc_tf: Vec<(DocId, u32)> = tf_map.into_iter().collect();
         doc_tf.sort_unstable_by_key(|&(d, _)| d);
 
-        Ok((doc_tf, highlights))
+        Ok((doc_tf, highlights, coverage))
     }
 
     fn prescan_segment_v2(
         &self,
         seg_reader: &SegmentReader,
         _sfx_bytes: &[u8],
-    ) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)> {
+    ) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>)> {
         use crate::query::phrase_query::regex_continuation_query::run_fuzzy_prescan;
-        let (doc_tf, highlights, _coverage) = run_fuzzy_prescan(
+        let (doc_tf, highlights, coverage) = run_fuzzy_prescan(
             seg_reader, self.field, &self.query_text, self.distance, false, false,
         )?;
-        Ok((doc_tf, highlights))
+        Ok((doc_tf, highlights, coverage))
     }
 
     fn make_weight(&self, enable_scoring: EnableScoring) -> crate::Result<Box<dyn Weight>> {
@@ -188,7 +188,7 @@ impl FuzzyQueryV3 {
     fn prescan_one(
         &self,
         seg_reader: &SegmentReader,
-    ) -> crate::Result<Option<(crate::index::SegmentId, Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)>> {
+    ) -> crate::Result<Option<(crate::index::SegmentId, Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>)>> {
         use crate::suffix_fst::section_file::detect_sfx_version;
         use std::sync::atomic::Ordering::Relaxed;
         let t0 = std::time::Instant::now();
@@ -200,12 +200,12 @@ impl FuzzyQueryV3 {
             let sfx_bytes = sfx_data.read_bytes().map_err(|e|
                 crate::LucivyError::SystemError(format!("prescan read .sfx: {e}")))?;
             let version = detect_sfx_version(sfx_bytes.as_ref()).unwrap_or(1);
-            let (doc_tf, highlights) = if version == 3 {
+            let (doc_tf, highlights, coverage) = if version == 3 {
                 self.prescan_segment_v3(seg_reader, &sfx_bytes)?
             } else {
                 self.prescan_segment_v2(seg_reader, &sfx_bytes)?
             };
-            Ok(Some((segment_id, doc_tf, highlights)))
+            Ok(Some((segment_id, doc_tf, highlights, coverage)))
         })();
         FZ_INFLIGHT.fetch_sub(1, Relaxed);
         let ns = t0.elapsed().as_nanos() as u64;
@@ -219,11 +219,12 @@ impl FuzzyQueryV3 {
         segment_id: crate::index::SegmentId,
         doc_tf: Vec<(DocId, u32)>,
         highlights: Vec<(DocId, usize, usize)>,
+        coverage: Vec<(DocId, f32)>,
     ) {
         self.global_doc_freq += doc_tf.len() as u64;
         self.prescan_cache.insert(
             (self.cache_key(), segment_id),
-            CachedPrescan::new(doc_tf, highlights),
+            CachedPrescan::new(doc_tf, highlights).with_coverage(coverage),
         );
     }
 }
@@ -242,12 +243,12 @@ impl Query for FuzzyQueryV3 {
 
     fn prescan_segments_more(&mut self, segments: &[&SegmentReader]) -> crate::Result<()> {
 
-        type SegOutcome = Option<(crate::index::SegmentId, Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)>;
+        type SegOutcome = Option<(crate::index::SegmentId, Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>)>;
 
         if segments.len() <= 1 {
             for seg_reader in segments {
-                if let Some((segment_id, doc_tf, highlights)) = self.prescan_one(seg_reader)? {
-                    self.record_prescan(segment_id, doc_tf, highlights);
+                if let Some((segment_id, doc_tf, highlights, coverage)) = self.prescan_one(seg_reader)? {
+                    self.record_prescan(segment_id, doc_tf, highlights, coverage);
                 }
             }
             return Ok(());
@@ -283,8 +284,8 @@ impl Query for FuzzyQueryV3 {
             .ok_or_else(|| crate::LucivyError::SystemError("fuzzy prescan DAG: no results".into()))?;
         let mut scatter = luciole::ScatterResults::from(map);
         for name in &names {
-            if let Some(Some((segment_id, doc_tf, highlights))) = scatter.take::<SegOutcome>(name) {
-                self.record_prescan(segment_id, doc_tf, highlights);
+            if let Some(Some((segment_id, doc_tf, highlights, coverage))) = scatter.take::<SegOutcome>(name) {
+                self.record_prescan(segment_id, doc_tf, highlights, coverage);
             }
         }
         Ok(())

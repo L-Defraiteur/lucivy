@@ -26,6 +26,10 @@ pub struct CachedPrescan {
     pub doc_tf: Vec<(DocId, u32)>,
     /// Highlight byte offsets: (doc_id, byte_from, byte_to).
     pub highlights: Vec<(DocId, usize, usize)>,
+    /// Per-document score tier for fuzzy matches, added to BM25 as
+    /// `tier * 1000` by the scorer: `-(miss count)` under Levenshtein,
+    /// `-(1 - similarity) * 10` under Jaro-Winkler. Empty for exact queries.
+    pub coverage: Vec<(DocId, f32)>,
 }
 
 impl CachedPrescan {
@@ -36,12 +40,18 @@ impl CachedPrescan {
             doc_tf.windows(2).all(|w| w[0].0 < w[1].0),
             "prescan doc_tf must be sorted by doc and free of duplicates"
         );
-        Self { doc_tf, highlights }
+        Self { doc_tf, highlights, coverage: Vec::new() }
+    }
+
+    /// Attaches the fuzzy score tiers the scorer will add to BM25.
+    pub fn with_coverage(mut self, coverage: Vec<(DocId, f32)>) -> Self {
+        self.coverage = coverage;
+        self
     }
 
     /// A prescan result with no matching documents.
     pub fn empty() -> Self {
-        Self { doc_tf: Vec::new(), highlights: Vec::new() }
+        Self { doc_tf: Vec::new(), highlights: Vec::new(), coverage: Vec::new() }
     }
 }
 
@@ -110,6 +120,7 @@ impl SfxWeight {
     fn build_scorer(
         &self, reader: &SegmentReader, boost: Score,
         doc_tf: Vec<(DocId, u32)>,
+        coverage: &[(DocId, f32)],
     ) -> crate::Result<Box<dyn Scorer>> {
         let fieldnorm_reader = if let Some(fnr) = reader
             .fieldnorms_readers()
@@ -134,11 +145,12 @@ impl SfxWeight {
             Bm25Weight::for_one_term(0, 1, 1.0)
         };
 
-        Ok(Box::new(SfxScorer::new(
-            doc_tf,
-            bm25_weight.boost_by(boost),
-            fieldnorm_reader,
-        )))
+        let scorer = SfxScorer::new(doc_tf, bm25_weight.boost_by(boost), fieldnorm_reader);
+        Ok(Box::new(if coverage.is_empty() {
+            scorer
+        } else {
+            scorer.with_coverage(coverage.to_vec())
+        }))
     }
 }
 
@@ -151,7 +163,7 @@ impl Weight for SfxWeight {
                 return Ok(Box::new(EmptyScorer));
             }
             self.emit_highlights(reader, &cached.highlights);
-            return self.build_scorer(reader, boost, cached.doc_tf.clone());
+            return self.build_scorer(reader, boost, cached.doc_tf.clone(), &cached.coverage);
         }
 
         // No cache hit — prescan should have populated this. Return empty.

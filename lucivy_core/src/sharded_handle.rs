@@ -1794,6 +1794,17 @@ impl ShardedHandle {
     ///     "title": "spin_lock", "content": "…", "stars": 5
     /// }))?;
     /// ```
+    /// The index is uncommitted from the moment a change is accepted, not from
+    /// the moment a shard actor gets to it: the actor marks its own shard when
+    /// it writes, but an export right after `add` could slip in between and
+    /// see nothing pending. Every shard is marked (the router decides later
+    /// which one takes the document); `commit` clears them all.
+    fn mark_uncommitted(&self) {
+        for shard in &self.shards {
+            shard.mark_uncommitted();
+        }
+    }
+
     pub fn add_document_json(&self, node_id: u64, fields: &serde_json::Value) -> Result<(), String> {
         let obj = fields.as_object()
             .ok_or_else(|| format!("fields must be a JSON object, got: {fields}"))?;
@@ -1848,6 +1859,7 @@ impl ShardedHandle {
     pub fn add_document(&self, mut doc: LucivyDocument, node_id: u64) -> Result<(), String> {
         self.ensure_open()?;
         self.ensure_writable()?;
+        self.mark_uncommitted();
         // Back-pressure on the caller's thread: no more documents queued than
         // the indexers can absorb without starting builds the address space
         // cannot hold (see the engine's `wait_docs_capacity`). The pipeline
@@ -2888,6 +2900,7 @@ impl ShardedHandle {
     /// If the mapping is missing, broadcasts the delete to all shards.
     pub fn delete_by_node_id(&self, node_id: u64) -> Result<(), String> {
         self.ensure_writable()?;
+        self.mark_uncommitted();
         let nid_field = self
             .field(NODE_ID_FIELD)
             .ok_or("_node_id field not found")?;

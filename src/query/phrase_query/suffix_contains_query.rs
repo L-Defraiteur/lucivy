@@ -217,7 +217,7 @@ impl SuffixContainsQuery {
 
             doc_freq += doc_tf.len() as u64;
             if !doc_tf.is_empty() {
-                cache.insert((format!("{}:{}", self.raw_field.field_id(), self.query_text), segment_id), CachedSfxResult { doc_tf, highlights });
+                cache.insert((format!("{}:{}", self.raw_field.field_id(), self.query_text), segment_id), CachedSfxResult::new(doc_tf, highlights));
             }
         }
 

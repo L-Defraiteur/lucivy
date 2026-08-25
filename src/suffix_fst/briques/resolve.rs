@@ -24,7 +24,7 @@ use super::fst_walk::{FstCandidateV3, TokenChainV3};
 pub fn max_matches_per_segment() -> usize {
     static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CAP.get_or_init(|| {
-        let default = if cfg!(target_arch = "wasm32") { 50_000 } else { 4_000_000 };
+        let default = if cfg!(target_arch = "wasm32") { 20_000 } else { 4_000_000 };
         std::env::var("LUCIVY_MAX_MATCHES_PER_SEGMENT")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
