@@ -168,6 +168,14 @@ impl SfxPostWriterV2 {
             entry_data.extend_from_slice(&headers);
             entry_data.extend_from_slice(&payload_data);
         }
+        // The offset table is u32: a sidecar past 4 GB cannot be addressed,
+        // and writing a wrapped table would be silent corruption. A segment
+        // is bounded well below this (LUCIVY_SFX_HEAP); refuse loudly if not.
+        assert!(
+            entry_data.len() <= u32::MAX as usize,
+            "sfxpost: {} bytes of entry data exceed the 32-bit offset table",
+            entry_data.len()
+        );
         offset_table.push(entry_data.len() as u32);
 
         // Assemble final binary
@@ -512,12 +520,14 @@ impl<'a> OrdinalHeader<'a> {
     /// and decodes at most `CHECKPOINT_EVERY` header triples — the deltas are
     /// cumulative, so there is no way to read the `i`-th without the ones
     /// before it in its run, and the run is bounded on purpose.
-    fn doc_at(&self, i: usize) -> (u32, u32, u16) {
+    fn doc_at(&self, i: usize) -> (u32, u32, u32) {
         match &self.layout {
+            // V2 stored the count in a `u16` (and wrapped above it); V3
+            // stores the full count, so the count is a `u32` throughout.
             HeaderLayout::V2 { doc_ids, payload_offsets, entry_counts } => (
                 u32::from_le_bytes(doc_ids[i * 4..i * 4 + 4].try_into().unwrap()),
                 u32::from_le_bytes(payload_offsets[i * 4..i * 4 + 4].try_into().unwrap()),
-                u16::from_le_bytes(entry_counts[i * 2..i * 2 + 2].try_into().unwrap()),
+                u16::from_le_bytes(entry_counts[i * 2..i * 2 + 2].try_into().unwrap()) as u32,
             ),
             HeaderLayout::V3 { checkpoints, headers } => {
                 let k = i / CHECKPOINT_EVERY;
@@ -531,19 +541,19 @@ impl<'a> OrdinalHeader<'a> {
                 };
                 let mut count = 0u32;
                 for j in (k * CHECKPOINT_EVERY)..=i {
-                    let Some(d_doc) = read_varint(headers, &mut pos) else { break };
-                    let Some(len) = read_varint(headers, &mut pos) else { break };
-                    let Some(n) = read_varint(headers, &mut pos) else { break };
-                    doc = doc.wrapping_add(d_doc as u32);
-                    count = n as u32;
+                    let Some(d_doc) = read_varint_u32(headers, &mut pos) else { break };
+                    let Some(len) = read_varint_u32(headers, &mut pos) else { break };
+                    let Some(n) = read_varint_u32(headers, &mut pos) else { break };
+                    doc = doc.wrapping_add(d_doc);
+                    count = n;
                     if j == i {
                         break;
                     }
                     // `offset` is where the *next* document's payload starts,
                     // so a length is added only once its document is passed.
-                    offset = offset.wrapping_add(len as u32);
+                    offset = offset.wrapping_add(len);
                 }
-                (doc, offset, count.min(u16::MAX as u32) as u16)
+                (doc, offset, count)
             }
         }
     }
@@ -556,7 +566,7 @@ impl<'a> OrdinalHeader<'a> {
     /// run length if it is used index by index. Measured on the 21-query panel:
     /// 2 405 ms with the fixed-width headers, 2 721 ms once `entries_filtered`
     /// and `for_each_entry` reached V3 through `doc_at`. They stream instead.
-    fn for_each_doc(&self, mut f: impl FnMut(usize, u32, u32, u16) -> bool) {
+    fn for_each_doc(&self, mut f: impl FnMut(usize, u32, u32, u32) -> bool) {
         match &self.layout {
             HeaderLayout::V2 { .. } => {
                 for i in 0..self.num_docs {
@@ -568,13 +578,13 @@ impl<'a> OrdinalHeader<'a> {
                 let (mut doc, mut offset, mut pos) = (0u32, 0u32, 0usize);
                 for i in 0..self.num_docs {
                     let (Some(d_doc), Some(len), Some(n)) = (
-                        read_varint(headers, &mut pos),
-                        read_varint(headers, &mut pos),
-                        read_varint(headers, &mut pos),
+                        read_varint_u32(headers, &mut pos),
+                        read_varint_u32(headers, &mut pos),
+                        read_varint_u32(headers, &mut pos),
                     ) else { return };
-                    doc = doc.wrapping_add(d_doc as u32);
-                    if !f(i, doc, offset, n.min(u16::MAX as u64) as u16) { return; }
-                    offset = offset.wrapping_add(len as u32);
+                    doc = doc.wrapping_add(d_doc);
+                    if !f(i, doc, offset, n) { return; }
+                    offset = offset.wrapping_add(len);
                 }
             }
         }
@@ -626,7 +636,7 @@ impl<'a> OrdinalHeader<'a> {
     #[inline]
     fn payload_offset(&self, i: usize) -> u32 { self.doc_at(i).1 }
     #[inline]
-    fn entry_count(&self, i: usize) -> u16 { self.doc_at(i).2 }
+    fn entry_count(&self, i: usize) -> u32 { self.doc_at(i).2 }
 
     #[inline]
     fn find_doc(&self, doc_id: u32) -> Option<usize> {
@@ -639,7 +649,7 @@ impl<'a> OrdinalHeader<'a> {
     /// once. Returning the triple is what keeps a lookup to a single scan:
     /// every caller needs the payload right after, and `doc_at(i)` would
     /// restart the same run from its checkpoint.
-    fn find_doc_full(&self, doc_id: u32) -> Option<(usize, u32, u16)> {
+    fn find_doc_full(&self, doc_id: u32) -> Option<(usize, u32, u32)> {
         match &self.layout {
             HeaderLayout::V2 { .. } => {
                 let (mut lo, mut hi) = (0usize, self.num_docs);
@@ -681,17 +691,17 @@ impl<'a> OrdinalHeader<'a> {
                 };
                 for i in start..end {
                     let (Some(d_doc), Some(len), Some(n)) = (
-                        read_varint(headers, &mut pos),
-                        read_varint(headers, &mut pos),
-                        read_varint(headers, &mut pos),
+                        read_varint_u32(headers, &mut pos),
+                        read_varint_u32(headers, &mut pos),
+                        read_varint_u32(headers, &mut pos),
                     ) else { return None };
-                    doc = doc.wrapping_add(d_doc as u32);
+                    doc = doc.wrapping_add(d_doc);
                     match doc.cmp(&doc_id) {
                         std::cmp::Ordering::Less => {
-                            offset = offset.wrapping_add(len as u32);
+                            offset = offset.wrapping_add(len);
                             continue;
                         }
-                        std::cmp::Ordering::Equal => return Some((i, offset, n.min(u16::MAX as u64) as u16)),
+                        std::cmp::Ordering::Equal => return Some((i, offset, n)),
                         std::cmp::Ordering::Greater => return None,
                     }
                 }

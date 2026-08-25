@@ -110,6 +110,12 @@ impl SiblingTableWriter {
                 cursor += 1;
             }
         }
+        // u32 offsets: refuse a table past 4 GB rather than write a wrapped one.
+        assert!(
+            entries_data.len() <= u32::MAX as usize,
+            "sibling table: {} bytes exceed the 32-bit offset table",
+            entries_data.len()
+        );
         offsets.push(entries_data.len() as u32); // sentinel
 
         let mut buf = Vec::with_capacity(header_size + entries_data.len());
@@ -175,7 +181,10 @@ impl<'a> SiblingTableReader<'a> {
             let mut next_ordinal = 0u32;
             while pos < slice.len() {
                 let Some(token) = read_varint(slice, &mut pos) else { break };
-                next_ordinal = next_ordinal.wrapping_add((token >> 1) as u32);
+                // The delta is a u32 at the writer; wider means a corrupt
+                // file, and a truncated delta would be a plausible wrong link.
+                let Ok(delta) = u32::try_from(token >> 1) else { break };
+                next_ordinal = next_ordinal.wrapping_add(delta);
                 // `gap_len` is a u16 at the writer, so a wider value here means
                 // a corrupt file: stop reading this ordinal rather than
                 // truncate the value and hand back a plausible-looking link.

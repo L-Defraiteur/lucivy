@@ -160,6 +160,12 @@ impl WordSfxPostWriter {
             offsets.push(header_size as u32 + entries_data.len() as u32);
             encode_block_into(&mut entries_data, entries, &mut body, &mut checkpoints);
         }
+        // u32 offsets: refuse a file past 4 GB rather than write a wrapped table.
+        assert!(
+            header_size + entries_data.len() <= u32::MAX as usize,
+            "word_sfxpost: {} bytes exceed the 32-bit offset table",
+            header_size + entries_data.len()
+        );
         offsets.push(header_size as u32 + entries_data.len() as u32); // sentinel
 
         let mut buf = Vec::with_capacity(header_size + entries_data.len());
