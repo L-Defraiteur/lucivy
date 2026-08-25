@@ -259,3 +259,37 @@ Fait : champs texte en `IndexRecordOption::WithFreqs` quand
 servent qu'aux scorers v2). Mesuré : suites vertes, parité identique,
 **4 339 → 4 162 Mo** après compaction (−177 Mo), ingestion 26,6 s.
 Un index v2 (`sfx_version: 2`) garde positions + offsets.
+
+## ≈02:40 — recherche par lots de shards (idée de Lucie)
+
+Plutôt que le LRU fichier par fichier : les shards passent par lots
+dimensionnés par un budget mémoire (`LUCIVY_SHARD_BATCH_BYTES`, défaut
+1 Go en wasm, illimité en natif = un seul lot = chemin strictement
+identique). Un lot est lu une fois, cherché en parallèle tout en RAM,
+fusionné dans le top-k courant (même ordre déterministe de `ScoredEntry`,
+stats BM25 globales inchangées car calculées sur tous les shards), puis
+ses fichiers sont libérés du cache (`evict_cached_files_named`). Nouveau
+`ShardFilter::Subset`. Taille d'un shard = somme des longueurs de ses
+fichiers (un `stat` par fichier avec les handles paresseux).
+Ne réduit pas les octets lus par requête (ça, c'est le saut de shard par
+bloom et la pagination) mais supprime le thrash et borne la mémoire.
+Validation : parité native avec un budget forcé (4 lots), puis navigateur.
+
+## ≈03:10 — recherche par lots : deux passes comme le distribué, bug en cours
+
+Lucie a redressé la structure : comme dans le distribué, **passe 1** =
+prescan de chaque lot (lecture des sidecars, puis libération), **fusion
+globale** des prescans (fréquences pour l'IDF), **un seul poids**, **passe
+2** = recherche lot par lot avec ce poids. Fait : `prescan_segments_more`
+(accumulatif, forwardé par `Box` et `BooleanQuery`), `BuildWeightNode
+::prescanned`, `build_search_dag_with_query`, deux boucles dans
+`search_internal`. Premier reset trouvé (`global_doc_freq = 0` en tête du
+corps accumulatif). Symptôme restant : comptes identiques mais chaque hit
+avec 1 span et tf = 1 (top doc 9869 à 0,75 au lieu de 330 à 5,49). Un
+agent frais est sur la cause (repro 3 000 docs, 40 s). Natif : un seul
+lot par défaut, chemin strictement inchangé (suites vertes).
+
+Pistes de Lucie notées pour la suite : shards fins (~500 docs) + file
+d'admission threads × mémoire pour borner l'indexation ; bloom de
+trigrammes par shard pour sauter des lots entiers ; matérialiser/libérer
+par lot plutôt que par fichier (c'est ce que fait la passe 1).
