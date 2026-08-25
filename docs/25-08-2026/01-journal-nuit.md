@@ -521,3 +521,45 @@ Nouveau classement du jeu de travail de `kmalloc` : `sfx` 314 Mo,
 `word_pos_map` 65, `termtexts` 4. `sibling_v3` est maintenant le deuxième
 sidecar le plus lu — et c'est le plus facile à encoder (lecture
 séquentielle, pas de recherche binaire à préserver).
+
+## ≈14:30 — SIB2 : `.sibling_v3` en delta-varint, sans points de reprise
+
+Le fichier disait « le token X est suivi du token `next_ordinal`, avec
+`gap_len` octets entre » en 6 octets fixes. Deux observations sur les vraies
+données : les liens d'un ordinal sont **triés et dédupliqués** (donc
+`next_ordinal` ne fait que croître) et `gap_len` vaut **0** dans l'immense
+majorité des cas — c'est même exactement ce que garde
+`contiguous_siblings`, le lecteur chaud. Deux octets pour un bit.
+
+Un lien devient donc un seul varint `(écart << 1) | (gap ≠ 0)`, suivi de
+`gap_len` **seulement s'il est non nul**. Trois liens contigus vers 1000,
+1003, 1010 : 18 octets → 4.
+
+Contrairement à WSP3, **aucun point de reprise** : tous les appelants
+(`siblings`, `contiguous_siblings`, la fusion, le merge_from_sources) lisent
+du début à la fin. Il n'y avait pas de recherche binaire à préserver.
+
+Discriminant de format : un fichier v1 commence par `num_ordinals`, SIB2
+commence par `0xFFFFFFFF` puis `"SIB2"` — aucun v1 ne peut commencer ainsi
+(4 milliards d'ordinaux voudraient 16 Go de table d'offsets).
+
+Résultat sur l'index kernel 15 440 docs compacté (WSP3 déjà en place) :
+
+| | v1 | SIB2 |
+|---|---|---|
+| `.sibling_v3` | 251 Mo | **160 Mo** (1,57×) |
+| touché par `kmalloc` | 176 Mo (67 %) | **90 Mo (54 %)** |
+| `kmalloc` touché au total | 928 Mo | **845 Mo** |
+| `kmalloc` à froid | 160 ms | **136 ms** |
+| panel 21 requêtes | 2 494 ms | **2 405 ms** |
+
+Cumul depuis WSP2+v1 : panel 2 738 → **2 405 ms** (−12,2 %), requête à
+froid 381 → **136 ms** (2,8×), octets touchés 1 330 → **845 Mo** (−36 %).
+Comptes identiques sur les 21 requêtes, seul DIFF celui d'avant (ordre
+d'ex æquo).
+
+Les varints sont désormais dans `src/suffix_fst/varint.rs`, partagés,
+avec leurs propres tests (aller-retour aux bornes, tronqué, trop long,
+valeur trop large pour un `u32`). Un `gap_len` plus large qu'un `u16` ne
+peut venir que d'un fichier corrompu : la lecture s'arrête au lieu de
+tronquer et de rendre un lien plausible.

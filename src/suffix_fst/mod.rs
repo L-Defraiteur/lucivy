@@ -22,6 +22,7 @@ pub mod sibling_table;
 /// Word position map: (doc_id, position) → word_id for chain verification.
 pub mod word_pos_map;
 /// Word-level sfxpost for partition 0x02 (word-stripped entries).
+pub mod varint;
 pub mod word_sfxpost;
 /// Position-to-ordinal map: (doc_id, position) → ordinal reverse index.
 pub mod posmap;

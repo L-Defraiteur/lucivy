@@ -3,7 +3,7 @@
 //! Built during SFX construction from consecutive tokens observed in the same value.
 //! Used by cross-token search to follow token chains without query-time graph/DP.
 //!
-//! Format:
+//! Format v1 (read-only now):
 //! ```text
 //! [4 bytes] num_ordinals
 //! [4 bytes × (num_ordinals + 1)] offset table (byte offset into entries_data)
@@ -12,6 +12,42 @@
 //!     [4 bytes] next_ordinal
 //!     [2 bytes] gap_len (0 = contiguous, >0 = separator bytes between tokens)
 //! ```
+//!
+//! Format `SIB2` (written since 25 August 2026): the six fixed bytes become a
+//! varint. This file is the second most-read sidecar of a query — 176 MB of
+//! its 263 MB are faulted in by a common one
+//! (`lucivy_core/tests/test_touched_bytes.rs`) — and it is the cheapest to
+//! encode: an ordinal's entries are sorted and deduplicated, so
+//! `next_ordinal` only grows, and every reader walks them start to end
+//! (`siblings`, `contiguous_siblings`), so there is no random access to keep
+//! and no checkpoint to pay for, unlike `.word_sfxpost` (WSP3).
+//!
+//! ```text
+//! [4 bytes] 0xFFFFFFFF        (a v1 file's first word is num_ordinals, and
+//!                              u32::MAX ordinals would need a 16 GB offset
+//!                              table: unambiguous)
+//! [4 bytes] magic "SIB2"
+//! [4 bytes] num_ordinals
+//! [4 bytes × (num_ordinals + 1)] offset table (byte offset into entries_data)
+//! Entries data (per ordinal): sequence of
+//!   [varint] (next_ordinal - previous) << 1 | (gap_len != 0)
+//!   [varint] gap_len, only when the low bit above is set
+//! ```
+//!
+//! `gap_len` spends two bytes on a value that is 0 for the overwhelming
+//! majority of links (contiguous tokens) — `contiguous_siblings`, the hot
+//! reader, keeps exactly those. One bit carries that case, and the delta on
+//! `next_ordinal` shrinks the rest.
+
+use super::varint::{read_varint, write_varint};
+
+/// First word of a `SIB2` file. A v1 file starts with `num_ordinals`, and
+/// `u32::MAX` ordinals would need a 16 GB offset table, so no v1 file can
+/// begin with this.
+const V2_SENTINEL: u32 = u32::MAX;
+const MAGIC_V2: &[u8; 4] = b"SIB2";
+/// Bytes of one v1 entry: `next_ordinal` (u32) + `gap_len` (u16).
+const V1_ENTRY_SIZE: usize = 6;
 
 /// A single sibling link: this token is followed by `next_ordinal` with `gap_len` bytes between.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -52,23 +88,33 @@ impl SiblingTableWriter {
         self.pairs.dedup();
 
         let num = self.num_ordinals;
-        let header_size = 4 + (num as usize + 1) * 4;
+        let header_size = 12 + (num as usize + 1) * 4;
         let mut offsets: Vec<u32> = Vec::with_capacity(num as usize + 1);
         let mut entries_data: Vec<u8> = Vec::new();
 
         let mut cursor = 0usize;
         for ord in 0..num {
             offsets.push(entries_data.len() as u32);
+            // `next_ordinal` restarts from zero at each ordinal: the deltas of
+            // one ordinal never depend on the previous one's, so a reader can
+            // start at any offset of the table.
+            let mut prev_next = 0u32;
             while cursor < self.pairs.len() && self.pairs[cursor].0 == ord {
                 let (_, next_ord, gap_len) = self.pairs[cursor];
-                entries_data.extend_from_slice(&next_ord.to_le_bytes());
-                entries_data.extend_from_slice(&gap_len.to_le_bytes());
+                let delta = next_ord.wrapping_sub(prev_next) as u64;
+                write_varint(&mut entries_data, (delta << 1) | u64::from(gap_len != 0));
+                if gap_len != 0 {
+                    write_varint(&mut entries_data, gap_len as u64);
+                }
+                prev_next = next_ord;
                 cursor += 1;
             }
         }
         offsets.push(entries_data.len() as u32); // sentinel
 
         let mut buf = Vec::with_capacity(header_size + entries_data.len());
+        buf.extend_from_slice(&V2_SENTINEL.to_le_bytes());
+        buf.extend_from_slice(MAGIC_V2);
         buf.extend_from_slice(&num.to_le_bytes());
         for off in &offsets {
             buf.extend_from_slice(&off.to_le_bytes());
@@ -83,6 +129,8 @@ pub struct SiblingTableReader<'a> {
     num_ordinals: u32,
     offsets: &'a [u8],      // (num_ordinals + 1) × 4 bytes
     entries_data: &'a [u8],
+    /// `SIB2`: varint entries. v1 files keep their fixed 6-byte records.
+    v2: bool,
 }
 
 impl<'a> SiblingTableReader<'a> {
@@ -91,14 +139,23 @@ impl<'a> SiblingTableReader<'a> {
         if data.len() < 4 {
             return None;
         }
-        let num_ordinals = u32::from_le_bytes(data[0..4].try_into().ok()?);
+        let v2 = u32::from_le_bytes(data[0..4].try_into().ok()?) == V2_SENTINEL;
+        let head = if v2 {
+            if data.len() < 12 || &data[4..8] != MAGIC_V2 {
+                return None;
+            }
+            12
+        } else {
+            4
+        };
+        let num_ordinals = u32::from_le_bytes(data[head - 4..head].try_into().ok()?);
         let offsets_size = (num_ordinals as usize + 1) * 4;
-        if data.len() < 4 + offsets_size {
+        if data.len() < head + offsets_size {
             return None;
         }
-        let offsets = &data[4..4 + offsets_size];
-        let entries_data = &data[4 + offsets_size..];
-        Some(Self { num_ordinals, offsets, entries_data })
+        let offsets = &data[head..head + offsets_size];
+        let entries_data = &data[head + offsets_size..];
+        Some(Self { num_ordinals, offsets, entries_data, v2 })
     }
 
     /// Get all sibling entries for a given ordinal.
@@ -114,11 +171,31 @@ impl<'a> SiblingTableReader<'a> {
         let slice = &self.entries_data[start..end.min(self.entries_data.len())];
         let mut entries = Vec::new();
         let mut pos = 0;
-        while pos + 6 <= slice.len() {
+        if self.v2 {
+            let mut next_ordinal = 0u32;
+            while pos < slice.len() {
+                let Some(token) = read_varint(slice, &mut pos) else { break };
+                next_ordinal = next_ordinal.wrapping_add((token >> 1) as u32);
+                // `gap_len` is a u16 at the writer, so a wider value here means
+                // a corrupt file: stop reading this ordinal rather than
+                // truncate the value and hand back a plausible-looking link.
+                let gap_len = if token & 1 == 1 {
+                    match read_varint(slice, &mut pos).and_then(|g| u16::try_from(g).ok()) {
+                        Some(g) => g,
+                        None => break,
+                    }
+                } else {
+                    0
+                };
+                entries.push(SiblingEntry { next_ordinal, gap_len });
+            }
+            return entries;
+        }
+        while pos + V1_ENTRY_SIZE <= slice.len() {
             let next_ordinal = u32::from_le_bytes(slice[pos..pos + 4].try_into().unwrap());
             let gap_len = u16::from_le_bytes(slice[pos + 4..pos + 6].try_into().unwrap());
             entries.push(SiblingEntry { next_ordinal, gap_len });
-            pos += 6;
+            pos += V1_ENTRY_SIZE;
         }
         entries
     }
@@ -278,6 +355,113 @@ mod tests {
         assert_eq!(contiguous.len(), 2);
         assert!(contiguous.contains(&1));
         assert!(contiguous.contains(&2));
+    }
+
+    /// The v1 writer, kept in the tests only: SIB2 has to keep reading the
+    /// segments written before 25 August 2026.
+    fn write_v1(num: u32, pairs: &mut Vec<(u32, u32, u16)>) -> Vec<u8> {
+        pairs.sort_unstable();
+        pairs.dedup();
+        let mut offsets = Vec::new();
+        let mut entries_data: Vec<u8> = Vec::new();
+        let mut cursor = 0usize;
+        for ord in 0..num {
+            offsets.push(entries_data.len() as u32);
+            while cursor < pairs.len() && pairs[cursor].0 == ord {
+                entries_data.extend_from_slice(&pairs[cursor].1.to_le_bytes());
+                entries_data.extend_from_slice(&pairs[cursor].2.to_le_bytes());
+                cursor += 1;
+            }
+        }
+        offsets.push(entries_data.len() as u32);
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&num.to_le_bytes());
+        for off in &offsets {
+            buf.extend_from_slice(&off.to_le_bytes());
+        }
+        buf.extend_from_slice(&entries_data);
+        buf
+    }
+
+    /// Links over several ordinals: contiguous ones (the common case), a few
+    /// with a gap, ordinals with none, and one very long run.
+    fn sample_pairs() -> Vec<(u32, u32, u16)> {
+        let mut v = Vec::new();
+        for ord in [0u32, 1, 5, 9] {
+            for i in 0..(3 + ord * 7) {
+                let next = ord * 13 + i * 3 + 1;
+                let gap = if i % 5 == 4 { (i % 7 + 1) as u16 } else { 0 };
+                v.push((ord, next, gap));
+            }
+        }
+        // A run long enough that the deltas dominate, and a large ordinal.
+        for i in 0..500u32 {
+            v.push((3, i * 2 + 1, if i % 11 == 10 { 300 } else { 0 }));
+        }
+        v.push((7, 4_000_000, 65535));
+        v.push((7, 4_000_001, 0));
+        v
+    }
+
+    #[test]
+    fn v2_matches_v1_exactly_and_is_smaller() {
+        let num = 12;
+        let pairs = sample_pairs();
+        let mut w = SiblingTableWriter::new(num);
+        for (o, n, g) in &pairs {
+            w.add(*o, *n, *g);
+        }
+        let v2 = w.serialize();
+        assert_eq!(&v2[0..4], &u32::MAX.to_le_bytes(), "SIB2 must start with the sentinel");
+        assert_eq!(&v2[4..8], MAGIC_V2);
+
+        let mut p = pairs.clone();
+        let v1 = write_v1(num, &mut p);
+
+        let r2 = SiblingTableReader::open(&v2).unwrap();
+        let r1 = SiblingTableReader::open(&v1).unwrap();
+        assert_eq!(r2.num_ordinals(), num);
+        for ord in 0..num + 3 {
+            assert_eq!(r2.siblings(ord), r1.siblings(ord), "ordinal {ord}: siblings differ");
+            assert_eq!(
+                r2.contiguous_siblings(ord), r1.contiguous_siblings(ord),
+                "ordinal {ord}: contiguous_siblings differ"
+            );
+        }
+        // The links of ordinal 3 are a long ascending run: exactly what the
+        // deltas are for.
+        assert_eq!(r2.siblings(3).len(), 500);
+        assert!(v2.len() < v1.len(), "SIB2 {} B is not smaller than v1 {} B", v2.len(), v1.len());
+    }
+
+    #[test]
+    fn v2_reader_still_reads_v1() {
+        let mut pairs = sample_pairs();
+        let v1 = write_v1(12, &mut pairs);
+        let r = SiblingTableReader::open(&v1).unwrap();
+        assert_eq!(r.siblings(0).len(), 3);
+        assert_eq!(r.siblings(3).len(), 500);
+        assert_eq!(r.siblings(7), vec![
+            SiblingEntry { next_ordinal: 4_000_000, gap_len: 65535 },
+            SiblingEntry { next_ordinal: 4_000_001, gap_len: 0 },
+        ]);
+    }
+
+    #[test]
+    fn v2_survives_a_truncated_file() {
+        let mut w = SiblingTableWriter::new(12);
+        for (o, n, g) in sample_pairs() {
+            w.add(o, n, g);
+        }
+        let data = w.serialize();
+        for cut in [data.len() / 3, data.len() / 2, data.len() - 1] {
+            if let Some(r) = SiblingTableReader::open(&data[..cut]) {
+                for ord in 0..12 {
+                    let _ = r.siblings(ord);
+                    let _ = r.contiguous_siblings(ord);
+                }
+            }
+        }
     }
 
     #[test]

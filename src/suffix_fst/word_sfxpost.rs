@@ -56,6 +56,8 @@
 //! the checkpoints on `(doc, first)` narrows to one run of 32 entries, so a
 //! lookup stays logarithmic and the checkpoints cost 1.5 MB on a 177 MB file.
 
+use super::varint::{read_varint_u32, write_varint};
+
 /// A single word-level posting entry.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct WordPostingEntry {
@@ -85,29 +87,6 @@ fn checkpoints_for(n: usize) -> usize {
     if n == 0 { 0 } else { (n - 1) / CHECKPOINT_EVERY }
 }
 
-fn write_varint(buf: &mut Vec<u8>, mut v: u32) {
-    while v >= 0x80 {
-        buf.push((v as u8) | 0x80);
-        v >>= 7;
-    }
-    buf.push(v as u8);
-}
-
-/// Reads a LEB128 varint at `*pos`, advancing it. `None` on a truncated or
-/// over-long encoding — a corrupt file must not loop or panic.
-fn read_varint(data: &[u8], pos: &mut usize) -> Option<u32> {
-    let mut v: u32 = 0;
-    for shift in [0u32, 7, 14, 21, 28] {
-        let b = *data.get(*pos)?;
-        *pos += 1;
-        v |= ((b & 0x7f) as u32).checked_shl(shift)?;
-        if b & 0x80 == 0 {
-            return Some(v);
-        }
-    }
-    None
-}
-
 /// Decoder state carried from one entry to the next.
 #[derive(Clone, Copy, Default)]
 struct DeltaState {
@@ -118,11 +97,11 @@ struct DeltaState {
 
 /// Decodes one entry at `*pos` and advances both the position and the state.
 fn decode_entry(data: &[u8], pos: &mut usize, st: &mut DeltaState) -> Option<WordPostingEntry> {
-    let d_doc = read_varint(data, pos)?;
-    let d_first = read_varint(data, pos)?;
-    let d_last = read_varint(data, pos)?;
-    let d_from = read_varint(data, pos)?;
-    let len = read_varint(data, pos)?;
+    let d_doc = read_varint_u32(data, pos)?;
+    let d_first = read_varint_u32(data, pos)?;
+    let d_last = read_varint_u32(data, pos)?;
+    let d_from = read_varint_u32(data, pos)?;
+    let len = read_varint_u32(data, pos)?;
     let doc = st.doc.wrapping_add(d_doc);
     let same_doc = d_doc == 0;
     let first = if same_doc { st.first.wrapping_add(d_first) } else { d_first };
@@ -215,17 +194,17 @@ fn encode_block(entries: &[WordPostingEntry]) -> Vec<u8> {
         // no special case is needed, and none may be introduced: the decoder
         // has only `d_doc` to go on.
         let same_doc = e.doc_id == st.doc;
-        write_varint(&mut body, e.doc_id.wrapping_sub(st.doc));
-        write_varint(&mut body, if same_doc { e.first_position.wrapping_sub(st.first) } else { e.first_position });
-        write_varint(&mut body, e.last_position.wrapping_sub(e.first_position));
-        write_varint(&mut body, if same_doc { e.byte_from.wrapping_sub(st.from) } else { e.byte_from });
-        write_varint(&mut body, e.byte_to.wrapping_sub(e.byte_from));
+        write_varint(&mut body, (e.doc_id.wrapping_sub(st.doc)) as u64);
+        write_varint(&mut body, (if same_doc { e.first_position.wrapping_sub(st.first) } else { e.first_position }) as u64);
+        write_varint(&mut body, (e.last_position.wrapping_sub(e.first_position)) as u64);
+        write_varint(&mut body, (if same_doc { e.byte_from.wrapping_sub(st.from) } else { e.byte_from }) as u64);
+        write_varint(&mut body, (e.byte_to.wrapping_sub(e.byte_from)) as u64);
         st = DeltaState { doc: e.doc_id, first: e.first_position, from: e.byte_from };
     }
 
     // Pass 2: header + checkpoints + entries.
     let mut out = Vec::with_capacity(body.len() + checkpoints.len() * CHECKPOINT_SIZE + 5);
-    write_varint(&mut out, n as u32);
+    write_varint(&mut out, n as u64);
     for (st, off) in &checkpoints {
         out.extend_from_slice(&st.doc.to_le_bytes());
         out.extend_from_slice(&st.first.to_le_bytes());
@@ -282,7 +261,7 @@ impl<'a> WordSfxPostReader<'a> {
     /// first entry)` for a WSP3 block.
     fn block_header(&self, start: usize) -> Option<(usize, usize, usize)> {
         let mut pos = start;
-        let n = read_varint(self.data, &mut pos)? as usize;
+        let n = read_varint_u32(self.data, &mut pos)? as usize;
         let checkpoints = pos;
         let entries = checkpoints + checkpoints_for(n) * CHECKPOINT_SIZE;
         if entries > self.data.len() {
