@@ -204,6 +204,8 @@ window._allLogs = [];
     font: inherit; color: var(--text-dim);
   }
 
+  .mode-hint { font-size: 12px; color: var(--text-dim); margin: -6px 0 12px; min-height: 16px; }
+  .mode-hint code { color: var(--text); }
   /* Footer */
   footer {
     margin-top: 40px; text-align: center;
@@ -217,7 +219,7 @@ window._allLogs = [];
 <div class="container">
   <header>
     <h1><span>lucivy</span> playground</h1>
-    <p>BM25 full-text search &mdash; substring, fuzzy, regex &mdash; running in your browser via WASM</p>
+    <p>BM25 full-text search &mdash; substring, prefix, exact word, phrase, fuzzy (Levenshtein or Jaro-Winkler), regex, boolean query syntax &mdash; across word boundaries, with separators relaxed or strict, and exact highlights &mdash; running in your browser via WASM</p>
     <p class="wasm-note">
       <svg class="warn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -235,7 +237,7 @@ window._allLogs = [];
   </header>
 
   <div class="search-bar">
-    <input type="text" id="query" placeholder='Try: "ShardedHandle", "AsyncScope", "BranchNode", "AliveBitSet", "poll_idle"...' disabled>
+    <input type="text" id="query" placeholder='Try: ShardedHandle, wait_merges_quiet, mimaloc (fuzzy), Sharded[A-Z]\w+ (regex), "contains AND NOT regex" (query syntax)...' disabled>
   </div>
 
   <div class="options">
@@ -245,19 +247,37 @@ window._allLogs = [];
         <option value="contains" selected>substring</option>
         <option value="contains_split">multi-word</option>
         <option value="startsWith">prefix</option>
+        <option value="term">exact word</option>
+        <option value="phrase">phrase</option>
         <option value="fuzzy">fuzzy</option>
         <option value="regex">regex</option>
+        <option value="parse">query syntax</option>
       </select>
     </label>
     <label id="distanceLabel">
       Fuzzy:
       <input type="number" id="distance" value="0" min="0" max="3">
     </label>
+    <label id="metricLabel" style="display:none">
+      Metric:
+      <select id="fuzzyMetric">
+        <option value="levenshtein" selected>Levenshtein</option>
+        <option value="jaro_winkler">Jaro-Winkler</option>
+      </select>
+    </label>
+    <label id="similarityLabel" style="display:none">
+      Min similarity:
+      <input type="number" id="minSimilarity" value="0.9" min="0.5" max="1" step="0.01" style="width:64px">
+    </label>
     <label>
       <input type="checkbox" id="highlights" checked> Highlights
     </label>
     <label>
-      <input type="checkbox" id="strictSeparators" style="display:none"> <span style="display:none">Strict separators</span>
+      Separators:
+      <select id="separators" title="relaxed: _ - . / and spaces are ignored on both sides, so rag3weaver matches rag3_weaver and rag3-weaver; strict: they must match exactly">
+        <option value="relaxed" selected>relaxed</option>
+        <option value="strict">strict</option>
+      </select>
     </label>
     <label>
       Limit:
@@ -283,9 +303,12 @@ window._allLogs = [];
     </label>
   </div>
 
+  <p class="mode-hint" id="modeHint"></p>
+
   <div class="index-tabs">
     <div class="index-tab active" id="tabDemo" data-index="demo">
-      Lucivy source code <span class="tab-count" id="tabDemoCount"></span>
+      lucivy source (from GitHub) <span class="tab-count" id="tabDemoCount"></span>
+      <span id="btnRefreshDemo" title="Clone github.com/L-Defraiteur/lucivy again and re-index it here" style="cursor:pointer; opacity:0.7; margin-left:6px;">&#x21bb;</span>
     </div>
     <div class="index-tab disabled" id="tabUser" data-index="user">
       Your files <span class="tab-count" id="tabUserCount"></span>
@@ -340,6 +363,10 @@ window._allLogs = [];
       </label>
     </div>
     <p class="import-info">
+      A good repository to try: <a href="#" id="exampleRepo" style="color:var(--accent)">postgres/postgres</a>
+      &mdash; about 4&nbsp;400 files, indexed here in about 15 seconds (measured: 13 s, 972 MB in memory).
+      Around 10&nbsp;000 files of C the index stops fitting in a browser's memory; the page then reloads on
+      the persisted index to serve it, or streams it when even that does not fit.
       Imported files are indexed in a separate index. Switch between indexes using the tabs above.
       Everything runs locally in your browser &mdash; no data is uploaded.
       If you hit a rate limit or want to index your private repos, you can use a
@@ -384,7 +411,10 @@ const queryEl = document.getElementById('query');
 const modeEl = document.getElementById('mode');
 const distanceEl = document.getElementById('distance');
 const highlightsEl = document.getElementById('highlights');
-const strictSepEl = document.getElementById('strictSeparators');
+const separatorsEl = document.getElementById('separators');
+const fuzzyMetricEl = document.getElementById('fuzzyMetric');
+const minSimilarityEl = document.getElementById('minSimilarity');
+const modeHintEl = document.getElementById('modeHint');
 const limitEl = document.getElementById('limit');
 const extFilterEl = document.getElementById('extFilter');
 const statusEl = document.getElementById('status');
@@ -472,26 +502,22 @@ async function startup() {
       return;
     }
 
-    let datasetName = 'dataset.luce';
-    statusEl.textContent = 'Loading dataset...';
-    let resp = await fetch('./' + datasetName);
-    if (!resp.ok) throw new Error(`Failed to fetch dataset: ${resp.status}`);
-    const blob = await resp.arrayBuffer();
-    const data = new Uint8Array(blob);
-
-    const isRag3db = datasetName.includes('rag3db');
-    const demoLabel = isRag3db
-      ? 'rag3db source code (5k+ full code documents)'
-      : 'lucivy source code';
-
-    statusEl.textContent = `Importing ${datasetName}...`;
-    demoIndex = await lucivy.importSnapshot(data, '/playground');
-    demoNumDocs = await demoIndex.numDocs();
-
-    demoLabelText = demoLabel;
-    tabDemo.childNodes[0].textContent = isRag3db ? 'rag3db source code ' : 'Lucivy source code ';
-    tabDemoCount.textContent = `(${demoNumDocs})`;
-    setReady(`${demoNumDocs} documents indexed (${demoLabel})`);
+    // The demo index is lucivy's own source, cloned from GitHub and indexed
+    // right here; it persists in OPFS, so a later visit opens it directly
+    // (the tab's refresh icon clones again).
+    let opened = false;
+    try {
+      statusEl.textContent = 'Opening the lucivy source index...';
+      demoIndex = await lucivy.openDirect(DEMO_REPO.path);
+      demoNumDocs = await demoIndex.numDocs();
+      opened = demoNumDocs > 0;
+    } catch (_) { opened = false; }
+    if (opened) {
+      tabDemoCount.textContent = `(${demoNumDocs})`;
+      setReady(`${demoNumDocs} files of lucivy's source, from github.com/${DEMO_REPO.owner}/${DEMO_REPO.repo}@${DEMO_REPO.branch} (indexed here earlier — \u21bb to refresh)`);
+    } else {
+      await cloneAndIndex(DEMO_REPO.owner, DEMO_REPO.repo, DEMO_REPO.branch, 'demo');
+    }
   } catch (e) {
     statusEl.className = 'status error';
     statusEl.textContent = `Error: ${e.message}`;
@@ -563,15 +589,27 @@ tabUser.addEventListener('click', () => switchTab('user'));
 
 function buildQuery(text) {
   const mode = modeEl.value;
-  const strict = strictSepEl.checked || undefined;
+  const strict = separatorsEl.value === 'strict' || undefined;
   const ext = extFilterEl.value;
 
   let contentQuery;
   if (mode === 'regex') {
     contentQuery = { type: 'contains', field: 'content', value: text, regex: true, strict_separators: strict };
-  } else if (mode === 'fuzzy' || mode === 'contains') {
+  } else if (mode === 'fuzzy') {
+    const distance = parseInt(distanceEl.value) || 1;
+    contentQuery = { type: 'contains', field: 'content', value: text, distance, strict_separators: strict };
+    if (fuzzyMetricEl.value === 'jaro_winkler') {
+      // Candidates come from the trigram pigeonhole at `distance`;
+      // Jaro-Winkler decides among them and tiers the hits by similarity.
+      contentQuery.fuzzy_metric = 'jaro_winkler';
+      contentQuery.min_similarity = parseFloat(minSimilarityEl.value) || 0.9;
+    }
+  } else if (mode === 'contains') {
     const distance = parseInt(distanceEl.value) || 0;
     contentQuery = { type: 'contains', field: 'content', value: text, distance: distance || undefined, strict_separators: strict };
+  } else if (mode === 'parse') {
+    // Boolean syntax (AND / OR / NOT, quotes, +/-, parentheses) over content and path.
+    contentQuery = { type: 'parse', fields: ['content', 'path'], value: text, strict_separators: strict };
   } else {
     contentQuery = { type: mode, field: 'content', value: text, strict_separators: strict };
   }
@@ -1046,6 +1084,130 @@ function ghHeaders() {
   return h;
 }
 
+const DEMO_REPO = { owner: 'L-Defraiteur', repo: 'lucivy', branch: 'main', path: '/lucivy_source' };
+const PROXY = 'https://lucivy-proxy.luciedefraiteur.workers.dev';
+// Above this the page that indexed cannot also serve: the index plus what
+// indexing leaves behind exceeds the 4 GB a browser addresses (measured:
+// the first search fails on a 4 MB allocation). The index is persisted in
+// OPFS, so the page reloads on it, which is what a fresh page does anyway.
+const RELOAD_TO_SERVE_BYTES = 2 * 1024 * 1024 * 1024;
+
+// The repository as a list of text files, through the CORS proxy (one
+// tarball request), GitHub's "owner-repo-sha/" prefix stripped.
+async function downloadRepoTarball(owner, repo, branch) {
+  const url = `${PROXY}/https://api.github.com/repos/${owner}/${repo}/tarball/${branch}`;
+  const headers = {};
+  const token = gitTokenEl.value.trim();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const resp = await fetch(url, { headers });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.message || `GitHub API error ${resp.status}`);
+  }
+  const textFiles = await extractTarGz(await resp.blob());
+  for (const f of textFiles) {
+    const slash = f.path.indexOf('/');
+    if (slash > 0) f.path = f.path.slice(slash + 1);
+  }
+  // Files above 100 KB are skipped: one document is one FST build unit.
+  const MAX_FILE_SIZE = 100_000;
+  const kept = textFiles.filter(f => f.content.length <= MAX_FILE_SIZE);
+  if (kept.length < textFiles.length) {
+    console.log(`Skipped ${textFiles.length - kept.length} files larger than ${MAX_FILE_SIZE} bytes`);
+  }
+  return kept;
+}
+
+// Index `files` into the OPFS index at `path`, with progress in the status
+// line; `keep` (a Map) receives the files for the result view when given.
+// Returns the open index and the seconds it took — or reloads the page on
+// the persisted index when it is too big to be served from here.
+async function indexFiles(files, path, label, keep) {
+  const t0 = performance.now();
+  const index = await lucivy.create(path, {
+    fields: [
+      { name: 'path', type: 'text' },
+      { name: 'content', type: 'text' },
+      { name: 'extension', type: 'text' },
+    ],
+    shards: 4,
+  });
+  const COMMIT_EVERY = 2000;
+  for (let i = 0; i < files.length; i++) {
+    const { path: filePath, content } = files[i];
+    const ext = filePath.includes('.') ? filePath.split('.').pop() : '';
+    await index.add(i, { path: filePath, content, extension: ext });
+    if (keep) keep.set(i, { path: filePath, content, extension: ext });
+    if ((i + 1) % 100 === 0) {
+      statusEl.textContent = `Indexing ${label}... ${i + 1}/${files.length}`;
+    }
+    if ((i + 1) % COMMIT_EVERY === 0) {
+      statusEl.textContent = `Indexing ${label}... ${i + 1}/${files.length} (committing...)`;
+      await index.commit({ sync: false });
+    }
+  }
+  statusEl.textContent = 'Final commit...';
+  await index.commit();
+  statusEl.textContent = 'Merging segments...';
+  await index.drainMerges();
+  const seconds = Math.round((performance.now() - t0) / 1000);
+  const st = await index.memoryStatus().catch(() => null);
+  if (st && st.index_bytes > RELOAD_TO_SERVE_BYTES) {
+    statusEl.textContent = `${files.length} files indexed in ${seconds}s (${(st.index_bytes / (1 << 20)).toFixed(0)} MB) — reloading the page to serve it...`;
+    await index.close().catch(() => {});
+    location.replace(`${location.pathname}?open=${encodeURIComponent(path.replace(/^\//, ''))}`);
+    await new Promise(() => {});
+  }
+  return { index, seconds };
+}
+
+// Clone `owner/repo@branch` through the proxy and index it, as the demo
+// index (`target === 'demo'`) or as the user's (`'user'`).
+async function cloneAndIndex(owner, repo, branch, target) {
+  const path = target === 'demo' ? DEMO_REPO.path : '/user_index';
+  const label = `${owner}/${repo}`;
+  statusEl.className = 'status loading';
+  queryEl.disabled = true;
+  resultsEl.innerHTML = '';
+  resultsHeaderEl.textContent = '';
+  let dots = 0;
+  const tick = setInterval(() => {
+    dots = (dots + 1) % 4;
+    statusEl.textContent = `Downloading ${label}${'.'.repeat(dots || 1)}`;
+  }, 400);
+  let files;
+  try {
+    files = await downloadRepoTarball(owner, repo, branch);
+  } finally {
+    clearInterval(tick);
+  }
+  if (files.length === 0) throw new Error('No text files found in repository');
+  statusEl.textContent = `Indexing ${files.length} files from ${label}...`;
+  if (target === 'user') {
+    if (userIndex) { await userIndex.close().catch(() => {}); }
+    userFiles.clear();
+  } else if (demoIndex) {
+    await demoIndex.close().catch(() => {});
+    demoIndex = null;
+  }
+  const { index, seconds } = await indexFiles(files, path, label, target === 'user' ? userFiles : null);
+  const n = await index.numDocs();
+  if (target === 'user') {
+    userIndex = index;
+    userNumDocs = n;
+    tabUser.classList.remove('disabled');
+    tabUserCount.textContent = `(${n})`;
+    switchTab('user');
+  } else {
+    demoIndex = index;
+    demoNumDocs = n;
+    tabDemoCount.textContent = `(${n})`;
+    switchTab('demo');
+  }
+  setReady(`${n} files from github.com/${label}@${branch} indexed here in ${seconds}s`);
+  return index;
+}
+
 async function cloneGitRepo() {
   const parsed = parseGitHubUrl(gitUrlEl.value);
   if (!parsed) {
@@ -1055,101 +1217,15 @@ async function cloneGitRepo() {
   }
   const { owner, repo } = parsed;
   const branch = gitBranchEl.value.trim() || 'HEAD';
-  const headers = ghHeaders();
-
-  // Save token if checkbox checked
   if (gitTokenSaveEl.checked && gitTokenEl.value.trim()) {
     localStorage.setItem('lucivy_gh_token', gitTokenEl.value.trim());
   } else {
     localStorage.removeItem('lucivy_gh_token');
   }
-
-  statusEl.className = 'status loading';
-  queryEl.disabled = true;
-  resultsEl.innerHTML = '';
-  resultsHeaderEl.textContent = '';
   btnCloneGit.disabled = true;
   btnCloneGit.textContent = 'Cloning...';
-
   try {
-    // 1. Download entire repo as tarball via CORS proxy (single request)
-    let dotCount = 0;
-    const dotInterval = setInterval(() => {
-      dotCount = (dotCount + 1) % 4;
-      statusEl.textContent = `Downloading ${owner}/${repo}${'.'.repeat(dotCount || 1)}`;
-    }, 400);
-
-    const PROXY = 'https://lucivy-proxy.luciedefraiteur.workers.dev';
-    const tarballUrl = `${PROXY}/https://api.github.com/repos/${owner}/${repo}/tarball/${branch}`;
-    const fetchHeaders = {};
-    const token = gitTokenEl.value.trim();
-    if (token) fetchHeaders['Authorization'] = `Bearer ${token}`;
-    const resp = await fetch(tarballUrl, { headers: fetchHeaders });
-    if (!resp.ok) {
-      clearInterval(dotInterval);
-      const err = await resp.json().catch(() => ({}));
-      throw new Error(err.message || `GitHub API error ${resp.status}`);
-    }
-
-    // 2. Extract tar.gz (reuse existing extractTarGz logic)
-    const blob = await resp.blob();
-    const textFiles = await extractTarGz(blob);
-    clearInterval(dotInterval);
-
-    // Strip the GitHub-generated prefix (e.g. "owner-repo-sha/")
-    for (const f of textFiles) {
-      const slash = f.path.indexOf('/');
-      if (slash > 0) f.path = f.path.slice(slash + 1);
-    }
-
-    // Skip files larger than 100KB to avoid WASM OOM
-    const MAX_FILE_SIZE = 100_000;
-    const skipped = textFiles.filter(f => f.content.length > MAX_FILE_SIZE).length;
-    const filtered = textFiles.filter(f => f.content.length <= MAX_FILE_SIZE);
-    if (skipped > 0) console.log(`Skipped ${skipped} files larger than ${MAX_FILE_SIZE} bytes`);
-    textFiles.length = 0;
-    textFiles.push(...filtered);
-
-    if (textFiles.length === 0) throw new Error('No text files found in repository');
-
-    // 3. Index
-    statusEl.textContent = `Indexing ${textFiles.length} files from ${owner}/${repo}...`;
-
-    if (userIndex) { await userIndex.close().catch(() => {}); }
-    userFiles.clear();
-
-    userIndex = await lucivy.create('/user_index', {
-      fields: [
-        { name: 'path', type: 'text' },
-        { name: 'content', type: 'text' },
-        { name: 'extension', type: 'text' },
-      ],
-      shards: 4,
-    });
-
-    const COMMIT_EVERY = 2000;
-    for (let i = 0; i < textFiles.length; i++) {
-      const { path, content } = textFiles[i];
-      const ext = path.includes('.') ? path.split('.').pop() : '';
-      await userIndex.add(i, { path, content, extension: ext });
-      userFiles.set(i, { path, content, extension: ext });
-      if ((i + 1) % 100 === 0) {
-        statusEl.textContent = `Indexing ${owner}/${repo}... ${i + 1}/${textFiles.length}`;
-      }
-      if ((i + 1) % COMMIT_EVERY === 0) {
-        statusEl.textContent = `Indexing ${owner}/${repo}... ${i + 1}/${textFiles.length} (committing...)`;
-        await userIndex.commit({ sync: false });
-      }
-    }
-    statusEl.textContent = `Final commit...`;
-    await userIndex.commit();
-    statusEl.textContent = `Merging segments...`;
-    await userIndex.drainMerges();
-    userNumDocs = await userIndex.numDocs();
-
-    tabUser.classList.remove('disabled');
-    tabUserCount.textContent = `(${userNumDocs})`;
-    switchTab('user');
+    await cloneAndIndex(owner, repo, branch, 'user');
   } catch (e) {
     statusEl.className = 'status error';
     statusEl.textContent = `Clone error: ${e.message}`;
@@ -1160,6 +1236,23 @@ async function cloneGitRepo() {
     btnCloneGit.textContent = 'Clone repo';
   }
 }
+
+document.getElementById('btnRefreshDemo').addEventListener('click', async (e) => {
+  e.stopPropagation();
+  try {
+    await cloneAndIndex(DEMO_REPO.owner, DEMO_REPO.repo, DEMO_REPO.branch, 'demo');
+  } catch (err) {
+    statusEl.className = 'status error';
+    statusEl.textContent = `Refresh error: ${err.message}`;
+    queryEl.disabled = false;
+  }
+});
+document.getElementById('exampleRepo').addEventListener('click', (e) => {
+  e.preventDefault();
+  gitUrlEl.value = 'https://github.com/postgres/postgres';
+  gitBranchEl.value = 'master';
+  gitUrlEl.focus();
+});
 
 // Automation hook (tests drive the page through the debug server or devtools).
 window._playground = {
@@ -1188,15 +1281,35 @@ queryEl.addEventListener('input', () => {
 queryEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { clearTimeout(searchTimeout); doSearch(); }
 });
-modeEl.addEventListener('change', () => {
-  const showDist = modeEl.value === 'fuzzy' || modeEl.value === 'contains';
-  document.getElementById('distanceLabel').style.display = showDist ? '' : 'none';
-  if (modeEl.value === 'fuzzy' && parseInt(distanceEl.value) === 0) distanceEl.value = '1';
-  doSearch();
-});
+const MODE_HINTS = {
+  contains: 'Substring anywhere, across token boundaries. <code>Fuzzy</code> above 0 tolerates that many edits.',
+  contains_split: 'Every word is a substring query; results match any of them, best first.',
+  startsWith: 'Substring at the start of a word.',
+  term: 'The query must cover whole words exactly (<code>lock</code> does not match <code>unlock</code>).',
+  phrase: 'The words in this order, adjacent.',
+  fuzzy: 'Trigram candidates within <code>Fuzzy</code> edits, validated on the source text by Levenshtein — or by Jaro-Winkler, which ranks a typo at the end of a word above one at its start.',
+  regex: 'A regular expression; its literals drive the search, the regex validates. Try <code>Sharded[A-Z]\\w+</code>.',
+  parse: 'Query syntax over content and path: <code>a AND b</code>, <code>a OR b</code>, <code>NOT c</code>, <code>"exact phrase"</code>, <code>+must -mustnot</code>, parentheses. Words side by side are OR.',
+};
+function refreshModeControls() {
+  const mode = modeEl.value;
+  document.getElementById('distanceLabel').style.display = (mode === 'fuzzy' || mode === 'contains') ? '' : 'none';
+  document.getElementById('metricLabel').style.display = mode === 'fuzzy' ? '' : 'none';
+  document.getElementById('similarityLabel').style.display =
+    (mode === 'fuzzy' && fuzzyMetricEl.value === 'jaro_winkler') ? '' : 'none';
+  if (mode === 'fuzzy' && parseInt(distanceEl.value) === 0) distanceEl.value = '1';
+  const sepHint = (mode === 'regex' || mode === 'parse') ? '' : (separatorsEl.value === 'strict'
+    ? ' <b>Strict separators</b>: <code>_</code>, <code>-</code>, <code>.</code>, spaces must match exactly.'
+    : ' <b>Relaxed separators</b>: <code>rag3weaver</code> also matches <code>rag3_weaver</code> and <code>rag3-weaver</code>; the highlight covers the real text.');
+  modeHintEl.innerHTML = (MODE_HINTS[mode] || '') + sepHint;
+}
+modeEl.addEventListener('change', () => { refreshModeControls(); doSearch(); });
+fuzzyMetricEl.addEventListener('change', () => { refreshModeControls(); doSearch(); });
+minSimilarityEl.addEventListener('change', doSearch);
+refreshModeControls();
 distanceEl.addEventListener('change', doSearch);
 highlightsEl.addEventListener('change', doSearch);
-strictSepEl.addEventListener('change', doSearch);
+separatorsEl.addEventListener('change', () => { refreshModeControls(); doSearch(); });
 limitEl.addEventListener('change', doSearch);
 extFilterEl.addEventListener('change', doSearch);
 

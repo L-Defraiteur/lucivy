@@ -297,6 +297,29 @@ Gagnerait ~194 Ko/doc, soit ~1 940 Mo pour 10 000 documents.
   Levenshtein ne distingue pas. Test : `test_fuzzy_jaro_winkler`.
 - Métrique inconnue → erreur explicite, pas d'ignorance silencieuse.
 
+### 5.5 ter ✅ Playground prêt pour la vitrine (fait le 25 au soir)
+
+Design retenu (Lucie) : **pas de dataset embarqué**. La page d'accueil clone
+`github.com/L-Defraiteur/lucivy@main` par le proxy CORS et l'indexe dans la
+page — 983 fichiers en 3 s, 213 Mo — puis le garde en OPFS (`/lucivy_source`,
+ouverture instantanée aux visites suivantes, ↻ pour recloner). Le mode
+« importer un dépôt » propose `postgres/postgres` comme exemple : 4 373
+fichiers en 13 s, 972 Mo, servi dans la même session. `dataset.luce` (67 Mo,
+v2) est sorti du dépôt ; le LUCE reste l'export/import de *son* index.
+
+L'UI expose maintenant tout ce que le moteur sait faire : substring,
+multi-mots, préfixe, mot exact, phrase, fuzzy (Levenshtein **ou
+Jaro-Winkler** avec seuil), regex, syntaxe booléenne, **séparateurs relaxed /
+strict** avec explication, filtre d'extension, surlignage. Une ligne d'aide
+décrit le mode choisi.
+
+Garde-fou : au-delà de 2 Go d'index, la page qui a indexé se recharge sur
+`?open=` pour servir (une session qui indexe ne sert pas au-delà, mesuré).
+
+Attention : tant que `main` n'est pas poussé sur GitHub, la démo indexe
+l'ancien code — les exemples du placeholder (`wait_merges_quiet`,
+`mimaloc`) n'y sont pas encore.
+
 ### 5.6 Publication crates.io 3.0.0
 
 `cargo publish --dry-run` vert sur les 5 crates. **En attente du feu vert de

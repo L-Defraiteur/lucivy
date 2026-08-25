@@ -129,9 +129,10 @@ nécessaires aux SharedArrayBuffer, et expose :
 
 | paramètre | effet |
 |---|---|
-| `?corpus=<fichier.tar.gz>` | télécharge et indexe une archive (dans `playground/`) |
-| `?open=<nom>` | ouvre un index OPFS existant, sans réindexer |
-| `?nodemo` | ne charge pas le dataset embarqué |
+| (aucun) | clone `L-Defraiteur/lucivy@main` via le proxy et l'indexe dans `/lucivy_source` (OPFS) ; réouvert tel quel ensuite |
+| `?corpus=<fichier.tar.gz>` | télécharge et indexe une archive (dans `playground/`) dans `/user_index` |
+| `?open=<nom>` | ouvre un index OPFS existant, sans réindexer (`user_index`, `lucivy_source`) |
+| `?nodemo` | ne clone pas lucivy au démarrage |
 | `?verbose` | `LUCIVY_VERBOSE` + `V3_PROFILE` |
 | `?noopfs` | système de fichiers en mémoire (index perdu au rechargement) |
 | `?cache=N` | `LUCIVY_FILE_CACHE_BYTES` en Mo |
