@@ -136,8 +136,29 @@ export interface LucivyModule extends EmscriptenModule {
   /** Finish async commit (blocks until done). */
   _lucivy_commit_finish(ctx: LucivyCtx): CStringPtr;
 
-  /** Drain background merges. */
+  /** Wait for a quiet index: commit, then every background merge running or about to start. */
   _lucivy_drain_merges(ctx: LucivyCtx): CStringPtr;
+
+  /** Start a background compaction to segments of at most max_docs documents. */
+  _lucivy_compact_async(ctx: LucivyCtx, max_docs: number): number;
+
+  // ── Memory (3.0.0) ─────────────────────────────────────────────────
+
+  /**
+   * JSON: {"index_bytes", "in_memory", "num_docs", "warnings": [...], "shards": [...]}.
+   * A browser addresses at most 4 GB; above LUCIVY_RAM_INDEX_MAX (3 GB by default)
+   * the index is streamed from storage instead of held, and `warnings` says so.
+   */
+  _lucivy_memory_status(ctx: LucivyCtx): CStringPtr;
+
+  /**
+   * Wait for background merges to be quiet, then read the whole index into memory
+   * when it fits. JSON: {"bytes", "files", "ms", "skipped"}.
+   */
+  _lucivy_preload(ctx: LucivyCtx): CStringPtr;
+
+  /** Honest warnings for a query, without running it. JSON array of strings. */
+  _lucivy_query_warnings(ctx: LucivyCtx, query_json: CStringPtr): CStringPtr;
 
   // ── Search ─────────────────────────────────────────────────────────
 
@@ -248,3 +269,111 @@ export interface LucivyModule extends EmscriptenModule {
 export default function createLucivy(
   moduleArg?: Partial<EmscriptenModule>,
 ): Promise<LucivyModule>;
+
+
+// ── High-level API (js/lucivy.js, runs the module in a Web Worker) ──────
+
+/** Startup options: each maps to a module argument read before the engine starts. */
+export interface LucivyOptions {
+  /** In-memory filesystem: the index lives for the session only. */
+  noOpfs?: boolean;
+  /** Engine diagnostics (LUCIVY_VERBOSE, V3_PROFILE). */
+  verbose?: boolean;
+  /** Whole-file cache budget in MB; pins it when set (default: the index size). */
+  fileCacheMb?: number;
+  /** Largest index held in memory, MB; above it the index is streamed (default 3072). */
+  ramIndexMaxMb?: number;
+  /** luciole scheduler threads (default min(cores, 8)). */
+  schedulerThreads?: number;
+  /** Indexer threads (default 1; the writer heap follows). */
+  writerThreads?: number;
+  /** Largest segment a background merge may produce (default 800). */
+  maxMergedDocs?: number;
+  /** Segment builds allowed at once (default 2). */
+  maxBuilds?: number;
+}
+
+export interface FieldDef {
+  name: string;
+  type: 'text' | 'u64' | 'i64' | 'f64' | 'bool' | 'date' | 'bytes' | string;
+  stored?: boolean;
+  fast?: boolean;
+  indexed?: boolean;
+}
+
+export interface IndexConfig {
+  fields: FieldDef[];
+  shards?: number;
+  sfx_version?: number;
+  [key: string]: unknown;
+}
+
+export interface SearchOptions {
+  limit?: number;
+  /** Include byte spans per field (default true). */
+  highlights?: boolean;
+  /** Include stored field values (default true). */
+  fields?: boolean;
+}
+
+export interface SearchResult {
+  docId: number;
+  score: number;
+  highlights?: Record<string, [number, number][]>;
+  fields?: Record<string, unknown>;
+}
+
+export interface MemoryStatus {
+  index_bytes: number;
+  in_memory: boolean;
+  num_docs: number;
+  /** Empty when the index is held in memory; a sentence for the user otherwise. */
+  warnings: string[];
+  shards: { shard: number; bytes: number; opened: number; listed: number }[];
+}
+
+export interface PreloadResult {
+  bytes: number;
+  files: number;
+  ms: number;
+  /** True when the index is streamed and nothing was loaded. */
+  skipped: boolean;
+}
+
+export class Lucivy {
+  constructor(workerUrl: string | URL, options?: LucivyOptions);
+  /** Resolves once the worker and the WASM module are ready. */
+  readonly ready: Promise<void>;
+  create(path: string, fieldsOrConfig: FieldDef[] | IndexConfig): Promise<LucivyIndex>;
+  open(path: string): Promise<LucivyIndex>;
+  /** Open an index persisted in OPFS in place (no copy). */
+  openDirect(path: string): Promise<LucivyIndex>;
+  importSnapshot(data: Uint8Array, path: string): Promise<LucivyIndex>;
+  /** Terminate the worker and free every byte of WASM memory. */
+  terminate(): void;
+}
+
+export class LucivyIndex {
+  readonly path: string;
+  add(docId: number, fields: Record<string, unknown>): Promise<void>;
+  addMany(docs: Array<{ docId: number } & Record<string, unknown>>): Promise<void>;
+  remove(docId: number): Promise<void>;
+  update(docId: number, fields: Record<string, unknown>): Promise<void>;
+  commit(options?: { sync?: boolean }): Promise<void>;
+  /** Not supported on a sharded index: rejects with the reason. */
+  rollback(): Promise<never>;
+  /** Merge down to segments of at most maxDocs documents. Not for the browser's own indexes: small segments are what fills the threads. */
+  compact(maxDocs?: number): Promise<number>;
+  /** Commit, then wait until no background merge is running or about to start. */
+  drainMerges(): Promise<void>;
+  /** Read the whole index into memory when it fits (after merges are quiet). */
+  preload(): Promise<PreloadResult>;
+  memoryStatus(): Promise<MemoryStatus>;
+  search(query: string | object, options?: SearchOptions): Promise<SearchResult[]>;
+  searchFiltered(query: string | object, allowedIds: number[], options?: SearchOptions): Promise<SearchResult[]>;
+  numDocs(): Promise<number>;
+  schema(): Promise<IndexConfig>;
+  exportSnapshot(): Promise<Uint8Array>;
+  close(): Promise<void>;
+  destroy(): Promise<void>;
+}
