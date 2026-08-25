@@ -58,6 +58,20 @@ struct ValueDataV3 {
 /// collector.end_doc();
 /// let data = collector.into_data();
 /// ```
+/// `(doc_id, token_index, byte_from, byte_to)` plus the amortised cost of the
+/// per-ordinal `Vec` that holds it.
+const CHUNK_POSTING_BYTES: usize = 16 + 8;
+/// `(doc_id, first_ti, last_ti, byte_from, byte_to)`, same amortisation.
+const WORD_POSTING_BYTES: usize = 20 + 8;
+/// `(u32, u32, u16)`, padded.
+const SIBLING_PAIR_BYTES: usize = 12;
+/// What one interned token costs beyond its two copies of the text: a `String`
+/// header, its `Vec` of postings, its metadata and a hash slot.
+const INTERNED_TOKEN_OVERHEAD: usize = 24 + 24 + 24 + 16;
+
+/// One word-stripped entry beyond its two strings.
+const WORD_STRIPPED_OVERHEAD: usize = 24 + 24 + 32;
+
 pub struct SfxCollectorV3 {
     // Interned extended tokens: each unique extended text stored once.
     token_intern: HashMap<String, u32>,
@@ -84,6 +98,21 @@ pub struct SfxCollectorV3 {
     doc_active: bool,
     current_doc_id: u32,
     current_value_ti_start: u32,
+
+    /// Running estimate of what this collector holds, in bytes.
+    ///
+    /// The segment writer decides to flush from `mem_usage()`, which counted
+    /// the postings, the fieldnorms, the fast fields and the serializer — and
+    /// never this. It was safe only by accident: positions and offsets filled
+    /// the postings budget first and cut segments early. Once a v3 index
+    /// stopped recording them (25 August), nothing bounded a segment any more:
+    /// the same 2 000 documents went from ~56 segments to 4, and the FST
+    /// builder, whose peak scales with a segment's tokens, asked for 384 MB in
+    /// a browser and aborted the commit.
+    ///
+    /// Maintained incrementally: `mem_usage` is called once per document, so
+    /// it cannot walk millions of interned texts.
+    mem_estimate: usize,
 
     // Config
     max_token: usize,
@@ -132,6 +161,7 @@ impl SfxCollectorV3 {
             doc_active: false,
             current_doc_id: 0,
             current_value_ti_start: 0,
+            mem_estimate: 0,
             max_token: DEFAULT_MAX_TOKEN,
             overlap: DEFAULT_OVERLAP,
             min_suffix_len: min,
@@ -140,6 +170,7 @@ impl SfxCollectorV3 {
 
     pub fn with_config(max_token: usize, overlap: usize, min_suffix_len: usize) -> Self {
         Self {
+            mem_estimate: 0,
             max_token,
             overlap,
             min_suffix_len,
@@ -247,6 +278,7 @@ impl SfxCollectorV3 {
             // Add posting
             let byte_from = offset as u32;
             let byte_to = (offset + meta.content_len + meta.sep_len) as u32;
+            self.mem_estimate += CHUNK_POSTING_BYTES;
             self.token_postings[intern_id as usize].push((
                 self.current_doc_id, ti, byte_from, byte_to,
             ));
@@ -277,6 +309,7 @@ impl SfxCollectorV3 {
         for w in chunk_intern_ids.windows(2) {
             let meta = &self.token_meta[w[1] as usize];
             let content_len = (meta.own_len as u16).saturating_sub(meta.sep_len as u16);
+            self.mem_estimate += SIBLING_PAIR_BYTES;
             self.sibling_pairs.push((w[0], w[1], content_len));
         }
 
@@ -353,6 +386,7 @@ impl SfxCollectorV3 {
 
                 let max_token = crate::tokenizer::equal_chunk::DEFAULT_MAX_TOKEN;
 
+                self.mem_estimate += WORD_STRIPPED_OVERHEAD;
                 self.word_stripped_entries.push(WordStrippedEntry {
                     word_content: word_content.clone(),
                     content_overlap: content_overlap.clone(),
@@ -376,6 +410,7 @@ impl SfxCollectorV3 {
                 // word "init" in another, under one ordinal, so only the
                 // posting can say where this occurrence's content stops. The
                 // content is contiguous from the first chunk start.
+                self.mem_estimate += WORD_POSTING_BYTES;
                 self.word_postings[ws_intern as usize].push((
                     self.current_doc_id,
                     first_posting.1, // first_ti (position of first chunk)
@@ -422,7 +457,8 @@ impl SfxCollectorV3 {
                     });
                     // NO chunk-level posting. Tail word posting captured below.
 
-                    self.word_stripped_entries.push(WordStrippedEntry {
+                    self.mem_estimate += WORD_STRIPPED_OVERHEAD;
+                self.word_stripped_entries.push(WordStrippedEntry {
                         word_content: tail_content,
                         content_overlap,
                         first_intern_ord: tail_intern,
@@ -442,6 +478,7 @@ impl SfxCollectorV3 {
                     while self.word_postings.len() <= tail_intern as usize {
                         self.word_postings.push(Vec::new());
                     }
+                    self.mem_estimate += WORD_POSTING_BYTES;
                     self.word_postings[tail_intern as usize].push((
                         self.current_doc_id,
                         tail_posting.1, // first_ti = last_ti for tail
@@ -456,6 +493,7 @@ impl SfxCollectorV3 {
             // content_len = destination word's content length (used by DFS to
             // know how many bytes of the sibling's text are content vs overlap)
             for w in ws_intern_sequence.windows(2) {
+                self.mem_estimate += SIBLING_PAIR_BYTES;
                 self.sibling_pairs.push((w[0].0, w[1].0, w[1].1));
             }
         }
@@ -507,11 +545,23 @@ impl SfxCollectorV3 {
             return ord;
         }
         let ord = self.token_texts.len() as u32;
+        // The text lives twice (the intern key carries the shape) and the
+        // per-ordinal Vec, meta and hash slot come with it.
+        self.mem_estimate += key.len() + text.len() + INTERNED_TOKEN_OVERHEAD;
         self.token_intern.insert(key, ord);
         self.token_texts.push(text.to_string()); // store actual text, not the prefixed key
         self.token_postings.push(Vec::new());
         self.token_meta.push(meta);
         ord
+    }
+
+    /// What this collector currently holds, in bytes — an estimate, maintained
+    /// as tokens and postings are added.
+    ///
+    /// This is what the segment writer has to include in its budget: the FST
+    /// builder's peak scales with these, and nothing else bounds a v3 segment.
+    pub fn mem_usage(&self) -> usize {
+        self.mem_estimate
     }
 
     /// Test helper: ordinal of the chunk entry with this extended text,

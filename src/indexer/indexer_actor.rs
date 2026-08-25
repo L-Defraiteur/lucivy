@@ -21,6 +21,24 @@ use crate::actor::{ActorStatus, Priority};
 use crate::index::{Index, Segment};
 use crate::indexer::delete_queue::DeleteCursor;
 use crate::indexer::index_writer::{finalize_segment, MARGIN_IN_BYTES};
+
+/// How much a segment's SFX collectors may hold before the segment is cut:
+/// `LUCIVY_SFX_HEAP`, 128 MB on wasm32 and 1 GB elsewhere.
+///
+/// This bounds what the FST builder will be asked to allocate when the segment
+/// is written — measured at roughly 0.8 MB per kernel document, so 128 MB is
+/// about 160 documents, the size the browser was indexing at when it last
+/// worked (117 segments for 15 440 documents). Native takes a larger budget
+/// because it has the address space and larger segments merge less.
+fn sfx_budget() -> usize {
+    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        std::env::var("LUCIVY_SFX_HEAP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(if cfg!(target_arch = "wasm32") { 128 << 20 } else { 1 << 30 })
+    })
+}
 use crate::indexer::index_writer_status::IndexWriterBomb;
 use crate::indexer::segment_updater::SegmentUpdater;
 use crate::indexer::{AddBatch, SegmentWriter};
@@ -117,7 +135,15 @@ struct IndexerState<D: Document> {
     pending_error: Option<crate::LucivyError>,
     /// Pending background finalize (at most one).
     /// Ok(bytes) = success, Err(bytes) = serialized LucivyError.
-    pending_finalize: Option<ReplyReceiver<Result<Vec<u8>, Vec<u8>>>>,
+    /// Segments handed to the scheduler and not yet accounted for.
+    ///
+    /// This was a single slot: a second finalize submitted before the first was
+    /// polled dropped the first receiver, so the drain that a commit waits on
+    /// only ever waited for the last segment. It went unnoticed while a segment
+    /// held every document of a commit batch — there was never a second one to
+    /// lose. With segments cut by memory again, 2 000 documents came back as
+    /// 1 551. All of them are kept now.
+    pending_finalize: Vec<ReplyReceiver<Result<Vec<u8>, Vec<u8>>>>,
     /// Documents processed since last yield. Reset on Yield.
     docs_since_yield: usize,
     /// Activity tracker — visible in scheduler dumps for diagnostics.
@@ -199,7 +225,13 @@ impl<D: Document> IndexerState<D> {
             }
         }
 
-        if current.writer.mem_usage() >= self.mem_budget - MARGIN_IN_BYTES {
+        // Two budgets, because a v3 segment has two costs that do not scale
+        // together: the postings hash table (`mem_budget`) and what the SFX
+        // collectors hold, which is what the FST builder will consume when the
+        // segment is written. Only the first was ever checked.
+        if current.writer.mem_usage() >= self.mem_budget - MARGIN_IN_BYTES
+            || current.writer.sfx_mem_usage() >= sfx_budget()
+        {
             if let Some(ref a) = activity { a.set("finalize_submit"); }
             info!(
                 "Buffer limit reached, flushing segment with maxdoc={}.",
@@ -231,16 +263,12 @@ impl<D: Document> IndexerState<D> {
         if let Some(err) = self.pending_error.take() {
             return Err(err);
         }
-        let mut rxs = Vec::new();
-        // Collect any pending finalize from handle_docs.
-        if let Some(rx) = self.pending_finalize.take() {
-            rxs.push(rx);
-        }
-        // Submit current segment to background (if any).
+        // Everything still in flight, plus the segment being written: a
+        // commit that waits on fewer than all of them publishes an index
+        // missing the documents of the segments it did not wait for.
+        let mut rxs = std::mem::take(&mut self.pending_finalize);
         self.submit_finalize_task();
-        if let Some(rx) = self.pending_finalize.take() {
-            rxs.push(rx);
-        }
+        rxs.append(&mut self.pending_finalize);
         Ok(rxs)
     }
 
@@ -282,14 +310,18 @@ impl<D: Document> IndexerState<D> {
                 .map(|_| vec![0u8]) // success marker
                 .map_err(|e| e.encode())
         });
-        self.pending_finalize = Some(rx);
+        self.pending_finalize.push(rx);
     }
 
     /// Non-blocking poll: check if the pending finalize completed.
     fn poll_pending_finalize(&mut self) {
-        if let Some(ref rx) = self.pending_finalize {
-            if rx.is_ready() {
-                let rx = self.pending_finalize.take().unwrap();
+        let mut still_running = Vec::with_capacity(self.pending_finalize.len());
+        for rx in std::mem::take(&mut self.pending_finalize) {
+            if !rx.is_ready() {
+                still_running.push(rx);
+                continue;
+            }
+            {
                 if let Some(Err(err_bytes)) = rx.take_value() {
                     let err = crate::LucivyError::decode(&err_bytes)
                         .unwrap_or_else(|_| {
@@ -299,24 +331,26 @@ impl<D: Document> IndexerState<D> {
                 }
             }
         }
+        self.pending_finalize = still_running;
     }
 
     /// Blocking wait for pending finalize. Used by handle_flush (after drain).
     fn wait_pending_finalize(&mut self) -> crate::Result<()> {
-        if let Some(rx) = self.pending_finalize.take() {
-            let scheduler = global_scheduler();
-            match scheduler.wait(rx, "pending_finalize") {
-                Ok(_) => Ok(()),
-                Err(err_bytes) => {
-                    let err = crate::LucivyError::decode(&err_bytes)
+        let scheduler = global_scheduler();
+        let mut first_error = None;
+        for rx in std::mem::take(&mut self.pending_finalize) {
+            if let Err(err_bytes) = scheduler.wait(rx, "pending_finalize") {
+                if first_error.is_none() {
+                    first_error = Some(crate::LucivyError::decode(&err_bytes)
                         .unwrap_or_else(|_| {
                             crate::LucivyError::SystemError("background finalize failed".into())
-                        });
-                    Err(err)
+                        }));
                 }
             }
-        } else {
-            Ok(())
+        }
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
         }
     }
 
@@ -357,7 +391,7 @@ pub(crate) fn create_indexer_actor<D: Document>(
         bomb: Some(bomb),
         current: None,
         pending_error: None,
-        pending_finalize: None,
+        pending_finalize: Vec::new(),
         docs_since_yield: 0,
         activity: None,
     };

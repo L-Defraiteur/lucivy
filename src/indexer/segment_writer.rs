@@ -265,6 +265,33 @@ impl SegmentWriter {
             + self.segment_serializer.mem_usage()
     }
 
+    /// What the SFX collectors hold — the interned tokens, their postings and
+    /// their sibling pairs.
+    ///
+    /// Nothing bounded this, and a v3 segment was bounded only by accident:
+    /// positions and offsets filled the postings budget first and cut segments
+    /// early. When a v3 index stopped recording them, the same 2 000 kernel
+    /// documents went from ~56 segments to 4, and the FST builder — whose peak
+    /// scales with a segment's tokens — asked a browser for 384 MB and aborted
+    /// the commit.
+    ///
+    /// It is deliberately *not* added to `mem_usage`: that budget sizes the
+    /// postings hash table, and a collector an order of magnitude larger would
+    /// cut segments to a few documents each (measured: 629 segments for 2 000
+    /// documents, and 117 s to index them instead of 5). The indexer compares
+    /// it against its own budget.
+    pub fn sfx_mem_usage(&self) -> usize {
+        self.sfx_collectors
+            .values()
+            .map(|slot| match slot {
+                SfxCollectorSlot::V3(c) => c.mem_usage(),
+                // The v2 collector has no estimate; its segments are cut by the
+                // positions and offsets it still records.
+                SfxCollectorSlot::V2(_) => 0,
+            })
+            .sum()
+    }
+
     fn index_document<D: Document>(
         &mut self,
         doc: &D,

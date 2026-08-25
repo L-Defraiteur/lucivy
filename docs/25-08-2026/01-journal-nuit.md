@@ -698,3 +698,57 @@ le petit index, **69 % → 95 % de vivant**, et 100 % sur les 3 000 fichiers.
 - Brancher la modale sur la taille du LUCE avant de le charger.
 - Bénéfice au passage, déjà mesuré ce matin : un seul fichier au lieu de
   ~900, soit ~3 ms d'ouverture × 900 en moins (~40 % du temps de chargement).
+
+## ≈19:00 — 10 000 documents dans le navigateur, tout en RAM : le chiffre
+
+Après les deux correctifs (budget SFX, file de finalisation), le navigateur
+indexe les **10 000 fichiers** : 50 segments de ~200 documents, **zéro échec
+d'allocation** — le premier succès depuis la nuit.
+
+**Mais la session qui indexe ne peut pas servir.** Au premier `search`, des
+allocations de 10 Mo et 4 Mo échouent : 2 727 Mo d'index plus ce que
+l'indexation laisse derrière elle dépassent les 4 Go adressables. Rechargée,
+la page ouvre le même index sans difficulté. C'est l'argument de Lucie,
+mesuré : **indexer et servir ne peuvent pas partager le même espace
+d'adressage.**
+
+Panel de 21 requêtes, index rouvert (2 600 Mo, `held in memory`), second
+passage :
+
+| | natif 10k | navigateur 10k | ratio |
+|---|---|---|---|
+| moyenne | 85 ms | **893 ms** | 10,5× |
+| médiane | — | **614 ms** | — |
+| `contains kmalloc` | 37 ms | 293 ms | 7,8× |
+| `contains ->next` | 20 ms | 265 ms | 13× |
+| `no hit zzqqxx` | 0 ms | 5 ms | — |
+| `fuzzy d2 kmalloc` | 515 ms | 5 290 ms | 10,3× |
+| `split spin lock init` | 301 ms | 2 906 ms | 9,7× |
+
+**Comptes identiques au natif sur les 21 requêtes.**
+
+Trois choses à retenir :
+
+1. **~10× le natif, uniformément.** Le ratio est stable de 4× à 19× selon la
+   requête, sans corrélation avec le volume lu — c'est du CPU, pas de l'I/O.
+2. **Chauffe quasi nulle** : passage 1 à 1 013 ms/requête, passage 2 à
+   893 ms. Douze pour cent d'écart : une fois résident, le chargement n'est
+   plus le sujet. Tout le reste du travail d'aujourd'hui sur les octets
+   (WSP3, SIB2, SFP3, en-têtes) sert à **faire tenir** l'index, plus à le
+   rendre rapide.
+3. **La moyenne est trompeuse** : 893 ms de moyenne pour 614 ms de médiane,
+   parce que `fuzzy d2` (5,3 s) et `split` (2,9 s) tirent tout. Une démo qui
+   montre du `contains` est à **~300 ms**, ce qui est présentable ; le fuzzy
+   distance 2 ne l'est pas.
+
+Reste à faire, dans l'ordre où ça paie :
+
+- **Profiler le WASM** : le facteur 10× est mesuré de bout en bout, jamais
+  décomposé. Le build est en `-O2` sans SIMD — `-O3` et `-msimd128` sont
+  gratuits à essayer avant toute optimisation de fond.
+- **Chargement anticipé** sur le chemin `InMemory` : une requête charge ~930
+  fichiers, donc le lazy n'économise rien et déplace juste le coût dans la
+  première requête. Sous sa meilleure forme c'est une lecture du LUCE.
+- **Exporteur LUCE en flux**, pour que l'empaquetage ne double pas la
+  mémoire — le seul maillon manquant de la chaîne indexer → empaqueter →
+  servir.
