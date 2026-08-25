@@ -254,8 +254,13 @@ self.onmessage = async (e) => {
 
         switch (type) {
             case 'init': {
-                const { default: createLucivy } = await import('../pkg/lucivy.js');
+                // The page's cache-buster (`?v=`) rides on this worker's URL;
+                // pass it on to the engine script and, through locateFile, to
+                // the wasm it fetches.
+                const bust = self.location.search || '';
+                const { default: createLucivy } = await import('../pkg/lucivy.js' + bust);
                 Module = await createLucivy({
+                    locateFile: (path, prefix) => prefix + path + (path.endsWith('.wasm') ? bust : ''),
                     // Intercept eprintln! from ALL pthreads and send to diag server.
                     printErr: function(text) {
                         diagSendLog(text);
