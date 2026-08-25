@@ -33,10 +33,48 @@ use crate::indexer::index_writer::{finalize_segment, MARGIN_IN_BYTES};
 fn sfx_budget() -> usize {
     static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *BUDGET.get_or_init(|| {
-        std::env::var("LUCIVY_SFX_HEAP")
+        let total = std::env::var("LUCIVY_SFX_HEAP")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(if cfg!(target_arch = "wasm32") { 128 << 20 } else { 1 << 30 })
+            .unwrap_or(if cfg!(target_arch = "wasm32") { 128 << 20 } else { 1 << 30 });
+        // Divided among the writer threads, the way the postings budget already
+        // is: each indexer holds its own collectors and its own segment, so a
+        // per-thread budget would multiply the real peak by the thread count —
+        // which is exactly how the address space was exhausted before. The
+        // total is what must stay bounded.
+        // The thread count mirrors `create_writer` in lucivy_core: the
+        // variable when set, one on wasm32, and the engine's default of
+        // `min(available_parallelism, MAX_NUM_THREAD)` elsewhere.
+        let threads = std::env::var("LUCIVY_WRITER_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or_else(|| {
+                if cfg!(target_arch = "wasm32") {
+                    1
+                } else {
+                    std::thread::available_parallelism()
+                        .map(|n| n.get())
+                        .unwrap_or(1)
+                        .min(crate::indexer::index_writer::MAX_NUM_THREAD)
+                }
+            })
+            .max(1);
+        (total / threads).max(8 << 20)
+    })
+}
+
+/// Segments an indexer may have under construction at once beyond the one it
+/// is filling: `LUCIVY_MAX_PENDING_FINALIZE`, 1 on wasm32 (one build at a
+/// time next to the writer, the address space is the constraint) and 4
+/// elsewhere.
+fn max_pending_finalize() -> usize {
+    static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("LUCIVY_MAX_PENDING_FINALIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(if cfg!(target_arch = "wasm32") { 1 } else { 4 })
+            .max(1)
     })
 }
 use crate::indexer::index_writer_status::IndexWriterBomb;
@@ -238,6 +276,7 @@ impl<D: Document> IndexerState<D> {
                 current.writer.max_doc()
             );
             self.submit_finalize_task();
+            self.bound_pending_finalize();
             self.docs_since_yield = 0;
             return true; // Yield to free the scheduler thread.
         }
@@ -311,6 +350,29 @@ impl<D: Document> IndexerState<D> {
                 .map_err(|e| e.encode())
         });
         self.pending_finalize.push(rx);
+    }
+
+    /// Back-pressure: never let more than `max_pending_finalize()` segments
+    /// be under construction at once.
+    ///
+    /// The queue replaced a single slot that dropped receivers, but a queue
+    /// alone bounds nothing: with segments cut every ~166 documents, an FST
+    /// build that takes longer than indexing the next 166 lets builds pile up,
+    /// each with its own peak — the very sum the SFX budget exists to bound.
+    /// It held on 10 000 documents by timing, not by construction. Waiting on
+    /// the oldest build here makes it hold by construction.
+    fn bound_pending_finalize(&mut self) {
+        let max = max_pending_finalize();
+        while self.pending_finalize.len() > max {
+            let rx = self.pending_finalize.remove(0);
+            if let Some(ref a) = self.activity { a.set("finalize_backpressure"); }
+            if let Err(err_bytes) = global_scheduler().wait(rx, "pending_finalize") {
+                let err = crate::LucivyError::decode(&err_bytes).unwrap_or_else(|_| {
+                    crate::LucivyError::SystemError("background finalize failed".into())
+                });
+                self.set_error(err);
+            }
+        }
     }
 
     /// Non-blocking poll: check if the pending finalize completed.
