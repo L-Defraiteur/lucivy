@@ -262,8 +262,8 @@ C'est **obligatoire**, pas préférable : une session qui vient d'indexer
 - **Acteur** : trait avec priorités (Idle → Critical), `GenericActor` avec
   handlers typés.
 - **Scheduler** : pool de threads persistants, compatible WASM. Se dimensionne
-  par `available_parallelism()` — **mais en WASM une variable posée en dur le
-  court-circuitait** ; c'est maintenant un défaut mesuré (4) et affiché.
+  par `available_parallelism()` — en WASM, `min(cœurs, 8)` posé par le
+  binding (mesuré le soir : plateau à 8 avec mimalloc), affiché au démarrage.
 - **DAG** : construction et exécution topologique, undo, checkpoint.
 - **StreamDag** : pipeline en flux avec drain topologique.
 - **`pipe_to` / `collect_replies_to` / `task_pipe_to`** : requête-réponse non
@@ -288,4 +288,11 @@ pas d'I/O dans un handler d'acteur ; callbacks de watch en ligne.
   dur avant la lecture des drapeaux. Le mesurer donne raison au 4.
 - Le pool de pthreads (8) n'a jamais été le plafond du parallélisme observé.
 - **Le parallélisme n'est pas le levier en WASM.** Sur quatre essais, seul
-  celui qui *réduit le travail mémoire* a payé.
+  celui qui *réduit le travail mémoire* a payé. — **Réinfirmé le soir** : le
+  levier était l'allocateur. `dlmalloc` sérialise les threads sur un verrou
+  global ; avec `mimalloc` (défaut du build désormais) la même page passe de
+  551 à 188 ms/requête, et 8 threads gagnent encore 8 %. Le ratio au natif
+  est passé de « 2× à 20× selon la requête » à un **2-3× plat**.
+- **« Le preload bat un cache chaud à cause de la disposition mémoire »** :
+  cohérent avec un allocateur qui souffre de la fragmentation — le vrai
+  coupable est le même.

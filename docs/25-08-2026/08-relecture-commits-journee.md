@@ -251,6 +251,12 @@ de 2 Mo dans une fusion que le preload avait privée d'espace. Corrigé par
 preload/drain. Résultat, session fraîche sans paramètre : **551 ms/requête,
 médiane 244, 21/21 identiques** (après-midi : 567 / 281 avec `?rammax`).
 
+**Puis l'allocateur** : le profil du panel montrait un écart strict/relaxed
+de 14× sur le même terme, tout en CPU ; `-sMALLOC=mimalloc` (un drapeau) :
+**551 → 188 ms/requête**, 172 avec 8 threads, médiane 244 → 97, ratio au
+natif plat à 2-3×. La conclusion « le parallélisme ne paie pas » (04 §9-11,
+05 §4) était un artefact du verrou global de `dlmalloc`.
+
 Faits ensuite, à la demande de Lucie : `entry_count` est un `u32` de bout
 en bout (le lecteur ne plafonne plus à 65 535 ; V2 lit son `u16` et
 l'élargit), les en-têtes SFP3 se lisent en `read_varint_u32` (une valeur

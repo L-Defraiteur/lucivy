@@ -20,23 +20,47 @@ index reconstruit des deux côtés, navigateur **sans aucun paramètre d'URL**) 
 |---|---|---|
 | index, 10 000 docs | 2 305 Mo (compacté) | 2 492 Mo (fusions plafonnées à 2 000 docs) |
 | indexation | 25,7 s | ~6 min + fusions |
-| requête, **moyenne** | 79 ms | **551 ms** |
-| requête, **médiane** | 49 ms | **244 ms** |
-| `contains strict kmalloc` | 35 ms | 98 ms |
-| `fuzzy d2 kmalloc` | 436 ms | 3 728 ms |
+| requête, **moyenne** | 79 ms | **172 ms** |
+| requête, **médiane** | 49 ms | **97 ms** |
+| `contains strict kmalloc` | 35 ms | 104 ms |
+| `contains relaxed kmalloc` | 44 ms | 106 ms |
+| `fuzzy d1 kmallc` | 69 ms | 184 ms |
+| `fuzzy d2 kmalloc` | 436 ms | 1 041 ms |
+| `parse booléen` | 24-32 ms | 59-66 ms |
 
 **Comptes identiques au natif sur les 21 requêtes du panel**, tous modes
 confondus (contains strict/relax, split, startsWith, term, phrase, fuzzy d1/d2,
-regex, parse simple et booléen, filtre, no-hit) — et cette fois pas même un
-ex æquo différent.
+regex, parse simple et booléen, filtre, no-hit) — et pas même un ex æquo
+différent.
 
-Le ratio navigateur/natif est de **7× sur la moyenne, 5× en médiane**, mais
-il est très inégal : `contains strict` 2,8×, `regex` 2×, `fuzzy d1` 15×,
-`parse` booléen 17-20×. C'est ce qui oriente le profil (§5.1) : chercher
-d'abord ce que fuzzy et parse font de plus que contains.
+Le ratio navigateur/natif est maintenant **plat, 2-3× sur toutes les
+requêtes** (2,2× en moyenne, 2× en médiane).
 
-L'après-midi (SFP3 sans `headers_len`, `?rammax=3000`, 50 segments) donnait
-567 ms / 281 ms.
+### Comment on est passé de 551 à 172 ms — l'allocateur
+
+Le profil de la soirée (`V3_PROFILE`) montrait le temps entièrement dans
+`contains_v3`, zéro I/O, et surtout un écart **strict / relaxed de 14× sur le
+même terme** (106 → 1 454 ms de CPU pour `kmalloc`) là où le natif fait
+1,25×. Fuzzy 15×, parse booléen 20× — les chemins qui traversent les
+frontières de tokens, ceux qui allouent. Et ajouter des threads dégradait.
+
+Une seule cause explique les trois : **`dlmalloc`, l'allocateur par défaut
+d'emscripten, prend un verrou global en pthreads**. `-sMALLOC=mimalloc`
+(tas par thread), même index, même page :
+
+| | dlmalloc | mimalloc | mimalloc, 8 threads |
+|---|---|---|---|
+| moyenne | 551 ms | 188 ms | **172 ms** |
+| médiane | 244 ms | 107 ms | **97 ms** |
+| `contains relaxed kmalloc` | 429 | 106 | |
+| `fuzzy d1 kmallc` | 1 057 | 184 | |
+| `parse booléen` | 498-526 | 59-66 | |
+
+12 threads = 8 threads (172 / 99) : le plateau est à 8, c'est le nouveau
+défaut (`min(cœurs, 8)`). mimalloc est le défaut du build.
+
+Historique de la journée sur la même mesure : 893 (matin) → 567 (preload) →
+551 (SFP3 corrigé, fusions plafonnées) → **172** (mimalloc + 8 threads).
 
 **Condition de mesure** : ces chiffres navigateur ont été pris avec
 `?rammax=3000`, parce que le défaut de `LUCIVY_RAM_INDEX_MAX` était **2 Go**
@@ -142,6 +166,12 @@ disponible en WASM.** Les défauts (4 threads de planificateur, 1 thread
 d'écriture) étaient déjà les bons réglages, pour d'autres raisons que celles
 écrites dans les commentaires.
 
+**Infirmé le soir** (§1) : ce que ces requêtes attendaient, c'était le verrou
+global de `dlmalloc`. Avec mimalloc, 4 → 8 threads gagne 8 % et 8 → 12 ne
+gagne plus rien. La conclusion « le parallélisme ne paie pas » était vraie
+*à cause de l'allocateur*, pas du moteur. Les threads d'écriture n'ont pas
+été remesurés avec mimalloc.
+
 ---
 
 ## 5. À faire dans l'immédiat
@@ -157,21 +187,19 @@ deux dans une fusion de fond, tous deux corrigés (§3). **Non fait** : un
 donnent déjà ~35 segments ; compacter plus haut est précisément ce qui ne
 tient pas.
 
-### 5.1 Profiler le module WASM ⭐ le vrai prochain pas
+### 5.1 ✅ L'allocateur (soir) — et ce qui reste : un 2× plat
 
-Le facteur ~6× est mesuré **de bout en bout et jamais décomposé**. On a
-éliminé aujourd'hui le parallélisme, le niveau d'optimisation et le
-chargement. Ce qui reste est dans le code.
+Fait, voir §1 : mimalloc, 551 → 172 ms. Le facteur restant est **plat, 2-3×
+sur toutes les requêtes**, ce qui est la signature d'un coût uniforme (code
+généré, bounds checks, pas de SIMD) et non d'un chemin pathologique. Les
+prochains essais, dans l'ordre, chacun avec le panel :
 
-**Ne plus tenter de drapeau à l'aveugle.** Profileur de Chrome sur le module
-(les symboles s'obtiennent avec `LUCIVY_WASM_DEBUG=1 bash
-bindings/emscripten/build.sh`), ou instrumentation du chemin chaud
-(`contains_v3` dans `src/query/contains_query_v3.rs`, les briques dans
-`src/suffix_fst/briques/`).
-
-Piste ouverte par le résultat du preload : si la disposition mémoire compte
-autant, regarder l'allocateur (`dlmalloc` par défaut en emscripten ;
-`-sMALLOC=mimalloc` existe) avant le code métier.
+- `-C target-feature=+simd128` côté Rust et `-msimd128` côté emcc ;
+- `-O3` à remesurer **avec mimalloc** (il avait été jugé dans le bruit avec
+  dlmalloc, qui écrasait tout) ;
+- threads d'écriture 1 → 2 à remesurer avec mimalloc (même raison) ;
+- profil Chrome de `contains strict kmalloc` (104 ms contre 35) sur le build
+  `LUCIVY_WASM_DEBUG=1` si les deux premiers ne rendent rien.
 
 ### 5.2 Exporteur LUCE en flux ⭐ maillon manquant de l'architecture
 

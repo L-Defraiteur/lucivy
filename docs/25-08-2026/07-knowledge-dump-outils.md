@@ -158,8 +158,9 @@ curl -s localhost:9877/eval/main -d '{"js":"document.getElementById(\"memory\").
 ### Build WASM
 
 ```bash
-bash bindings/emscripten/build.sh                      # release, ~3 min
+bash bindings/emscripten/build.sh                      # release, ~3 min, mimalloc
 LUCIVY_WASM_DEBUG=1 bash bindings/emscripten/build.sh  # + symboles, assertions
+LUCIVY_WASM_MALLOC=dlmalloc bash bindings/emscripten/build.sh  # l'ancien allocateur (3× plus lent)
 ```
 
 Le build debug est **indispensable pour lire une pile d'allocation** : sans
@@ -256,7 +257,7 @@ grep -o 'finalize() [0-9]* docs' playground/diag.log | awk '{s+=$2;n++} END {pri
 | `LUCIVY_MERGE_CONCURRENCY` | ∞ / **1 wasm** | fusions simultanées |
 | `LUCIVY_MAX_PENDING_FINALIZE` | 4 / **1 wasm** | segments en construction en plus de celui qu'on remplit ; au-delà l'indexeur attend |
 | `LUCIVY_MAX_MERGED_DOCS` | 10 000 / **2 000 wasm** | plus gros segment qu'une fusion de fond peut produire ou reprendre |
-| `LUCIVY_SCHEDULER_THREADS` | `available_parallelism()` / **4 wasm** | pool luciole |
+| `LUCIVY_SCHEDULER_THREADS` | `available_parallelism()` / **min(cœurs, 8) wasm** | pool luciole (plateau mesuré à 8 avec mimalloc) |
 | `LUCIVY_FILE_CACHE_BYTES` | 4 Go / **768 Mo wasm** | cache de fichiers entiers ; s'il est posé, il **fige** le budget |
 | `LUCIVY_RAM_INDEX_MAX` | ∞ / **3 Go wasm** (2 Go avant le soir du 25) | au-delà, l'index est streamé |
 | `LUCIVY_SHARD_BATCH_BYTES` | ∞ / **1 Go wasm** | taille d'un lot de shards |
@@ -291,14 +292,21 @@ protocole : 1 943 ms, 93 ms/requête, médiane 59.
 
 **Navigateur, même corpus, session fraîche `?open=user_index`, aucun autre
 paramètre** (soir du 25 : SFP3 `headers_len`, fusions plafonnées à 2 000,
-défaut 3 Go) — 2 492 Mo en mémoire, preload 589 fichiers en 2,8 s, panel
-**551 ms/requête (médiane 244 ms)**, second passage 553 / 269, 21 comptes
-identiques. Détail : `contains strict kmalloc` 98 ms (natif 35),
-`fuzzy d1` ~1 050 ms (natif 69), `fuzzy d2` 3 728 ms (natif 436),
-`parse` booléen ~500 ms (natif 24-32). L'après-midi (SFP3 sans
-`headers_len`, `?rammax=3000`, 50 segments) : 567 / 281.
+défaut 3 Go, **mimalloc, 8 threads**) — 2 492 Mo en mémoire, preload 589
+fichiers en 2,7 s, panel **172 ms/requête (médiane 97 ms)**, second passage
+166 / 95, 21 comptes identiques. Build final par défaut (sans aucun
+paramètre d'URL), trois passages : 173 / 108, 162 / 99, 163 / 108. Détail : `contains strict kmalloc` 104 ms
+(natif 35), `relaxed` 106 (44), `fuzzy d1` ~180 (69), `fuzzy d2` 1 041 (436),
+`parse` booléen 59-66 (24-32). Ratio plat 2-3×.
 
-Le fichier de résultat navigateur est `/tmp/parity_wasm_pass1.json`.
+Même page avec `dlmalloc` (le défaut emscripten, jusqu'au soir) : 551 / 244 —
+`relaxed kmalloc` 429, `fuzzy d1` ~1 050, `parse` booléen ~500.
+L'après-midi (SFP3 sans `headers_len`, `?rammax=3000`, 50 segments) : 567 / 281.
+
+Fichiers de résultat : `/tmp/parity_wasm_pass1.json` (dlmalloc),
+`/tmp/parity_wasm_mimalloc_1.json`, `/tmp/parity_wasm_mi8_1.json`,
+`/tmp/parity_wasm_mi12_1.json`. Script : `/tmp/run_panel.sh <tag> [passes]`
+(attend le preload, lance le panel, diffère contre la référence native).
 
 **Natif, 15 440 fichiers, compacté** — 3 392 Mo, soit 220 Ko/document.
 
