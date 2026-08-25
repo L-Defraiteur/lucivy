@@ -105,6 +105,14 @@ window._allLogs = [];
   .status.loading { border-color: var(--accent-dim); }
   .status.ready { border-color: var(--green); color: var(--green); }
   .status.error { border-color: var(--red); color: var(--red); }
+  /* Residency: whether the index is held in memory or streamed from storage. */
+  .memory {
+    font-size: 12px; line-height: 1.5; margin: -8px 0 16px; color: var(--text-dim);
+  }
+  .memory:empty { display: none; }
+  .memory.warn {
+    color: var(--red); border-left: 2px solid var(--red); padding-left: 10px;
+  }
 
   /* Import */
   .import-section {
@@ -310,6 +318,7 @@ window._allLogs = [];
   </details>
 
   <div class="status loading" id="status">Loading WASM + dataset...</div>
+  <div class="memory" id="memory"></div>
 
   <div id="queryWarning" class="query-warning" style="display:none"></div>
   <div id="resultsHeader" class="results-header"></div>
@@ -348,6 +357,7 @@ const strictSepEl = document.getElementById('strictSeparators');
 const limitEl = document.getElementById('limit');
 const extFilterEl = document.getElementById('extFilter');
 const statusEl = document.getElementById('status');
+const memoryEl = document.getElementById('memory');
 const resultsEl = document.getElementById('results');
 const resultsHeaderEl = document.getElementById('resultsHeader');
 const dropZone = document.getElementById('dropZone');
@@ -444,6 +454,26 @@ function setReady(msg) {
   queryEl.disabled = false;
   btnExportSnapshot.disabled = !getActiveIndex();
   queryEl.focus();
+  showMemoryStatus();
+}
+
+// WebAssembly addresses at most 4 GB. Under the residency limit the index is
+// held whole and a search is milliseconds; above it the same search answers
+// the same hits but reads the index from storage and takes seconds. Say which
+// one is happening — a user watching a slow search should not have to guess.
+async function showMemoryStatus() {
+  const index = getActiveIndex();
+  if (!index || !index.memoryStatus) return;
+  try {
+    const st = await index.memoryStatus();
+    const mb = (st.index_bytes / (1 << 20)).toFixed(0);
+    memoryEl.className = st.in_memory ? 'memory ok' : 'memory warn';
+    memoryEl.textContent = st.in_memory
+      ? `index ${mb} MB, held in memory`
+      : `${st.warnings[0] || `index ${mb} MB: streamed from storage`}`;
+  } catch (e) {
+    memoryEl.textContent = '';
+  }
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────
@@ -1078,6 +1108,7 @@ window._playground = {
   getActiveIndex,
   search: (query, opts) => getActiveIndex().search(query, opts || {}),
   numDocs: () => activeTab === 'demo' ? demoNumDocs : userNumDocs,
+  memoryStatus: () => getActiveIndex().memoryStatus(),
   userFile: (docId) => userFiles.get(docId),
 };
 

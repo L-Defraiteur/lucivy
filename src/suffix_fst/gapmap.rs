@@ -605,6 +605,8 @@ pub struct GapMapIndex;
 impl super::index_registry::SfxIndexFile for GapMapIndex {
     fn id(&self) -> &'static str { "gapmap" }
     fn extension(&self) -> &'static str { "gapmap" }
+    /// v2 only: the v3 pipeline writes `.sibling_v3` and no gap or separator map.
+    fn written_for(&self, sfx_version: u8) -> bool { sfx_version < 3 }
     fn merge_strategy(&self) -> super::index_registry::MergeStrategy { super::index_registry::MergeStrategy::ExternalDagNode }
     fn prebuilt_by_collector(&self) -> bool { true }
 }

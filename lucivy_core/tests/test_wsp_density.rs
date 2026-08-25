@@ -31,6 +31,12 @@ struct Stats {
     entries: u64,
     current_bytes: u64,
     varint_bytes: u64,
+    /// Variant B: byte_from delta'd within the document too (it is monotone
+    /// there: entries of one doc are sorted by position, bytes follow).
+    varint_b_bytes: u64,
+    /// Variant C: B plus a skip checkpoint every 32 entries (12 B each) so
+    /// `entry_at` keeps a binary search instead of scanning the ordinal.
+    varint_c_bytes: u64,
     /// Entries per ordinal, bucketed: 1, 2-4, 5-16, 17-64, 65-256, >256.
     buckets: [u64; 6],
     /// Entries in each bucket.
@@ -84,11 +90,13 @@ fn word_sfxpost_density() {
             let b = bucket(n);
             s.buckets[b] += 1;
             s.bucket_entries[b] += n as u64;
+            // One checkpoint per 32 entries after the first block.
+            s.varint_c_bytes += (n.saturating_sub(1) / 32 * 12) as u64;
 
             // Entries are sorted by (doc_id, first_position, last_position,
             // byte_from, byte_to). Delta the two monotone fields, and store
             // the others as the small quantities they are.
-            let (mut prev_doc, mut prev_first) = (0u32, 0u32);
+            let (mut prev_doc, mut prev_first, mut prev_from) = (0u32, 0u32, 0u32);
             for k in 0..n {
                 let o = start + k * 20;
                 let g = |j: usize| u32::from_le_bytes(data[o + j * 4..o + j * 4 + 4].try_into().unwrap());
@@ -96,13 +104,16 @@ fn word_sfxpost_density() {
                 let d_doc = doc.wrapping_sub(prev_doc);
                 // first_position restarts at each new document.
                 let d_first = if doc == prev_doc { first.wrapping_sub(prev_first) } else { first };
-                s.varint_bytes += varint_len(d_doc as u64) as u64
+                let common = varint_len(d_doc as u64) as u64
                     + varint_len(d_first as u64) as u64
                     + varint_len(last.wrapping_sub(first) as u64) as u64
-                    + varint_len(from as u64) as u64
                     + varint_len(to.wrapping_sub(from) as u64) as u64;
+                s.varint_bytes += common + varint_len(from as u64) as u64;
+                let d_from = if doc == prev_doc { from.wrapping_sub(prev_from) } else { from };
+                s.varint_b_bytes += common + varint_len(d_from as u64) as u64;
                 prev_doc = doc;
                 prev_first = first;
+                prev_from = from;
             }
         }
         eprintln!(
@@ -129,6 +140,20 @@ fn word_sfxpost_density() {
         s.varint_bytes as f64 / 1e6,
         s.varint_bytes as f64 / s.entries.max(1) as f64,
         s.current_bytes as f64 / s.varint_bytes.max(1) as f64,
+    );
+    eprintln!(
+        "[wsp] variant B (byte_from delta'd in the doc): {:.1} MB ({:.2} B/entry, {:.2}x)",
+        s.varint_b_bytes as f64 / 1e6,
+        s.varint_b_bytes as f64 / s.entries.max(1) as f64,
+        s.current_bytes as f64 / s.varint_b_bytes.max(1) as f64,
+    );
+    let c = s.varint_b_bytes + s.varint_c_bytes;
+    eprintln!(
+        "[wsp] variant C (B + a skip checkpoint every 32 entries, keeps the binary search): {:.1} MB ({:.2} B/entry, {:.2}x) — checkpoints {:.1} MB",
+        c as f64 / 1e6,
+        c as f64 / s.entries.max(1) as f64,
+        s.current_bytes as f64 / c.max(1) as f64,
+        s.varint_c_bytes as f64 / 1e6,
     );
     eprintln!(
         "[wsp] offset table: {:.1} MB ({:.1} % of the file today)",

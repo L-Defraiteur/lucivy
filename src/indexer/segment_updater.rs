@@ -118,9 +118,10 @@ impl SegmentUpdaterShared {
 
     fn list_files(&self) -> HashSet<PathBuf> {
         let metas = self.index.list_all_segment_metas();
+        let sfx_version = self.index.settings().sfx_version;
         let mut files: HashSet<PathBuf> = metas
             .iter()
-            .flat_map(|segment_meta| segment_meta.list_files())
+            .flat_map(|segment_meta| segment_meta.list_files_for(sfx_version))
             .collect();
         files.insert(META_FILEPATH.to_path_buf());
 

@@ -486,6 +486,13 @@ self.onmessage = async (e) => {
                 break;
             }
 
+            case 'memoryStatus': {
+                const ctx = getCtx(args.path);
+                result = JSON.parse(await callStr('lucivy_memory_status', ctx));
+                if (result.error) throw new Error(result.error);
+                break;
+            }
+
             case 'search': {
                 const ctx = getCtx(args.path);
                 const queryJson = typeof args.query === 'string' && !args.query.startsWith('{')

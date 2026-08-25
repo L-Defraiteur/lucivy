@@ -1,4 +1,4 @@
-Lucivy 2.1.0
+Lucivy 3.0.0
 ================================
 
 SFX v3 by default, exact spans on every query mode, ACID blob storage with

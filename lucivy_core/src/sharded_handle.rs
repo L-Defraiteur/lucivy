@@ -1348,6 +1348,47 @@ fn shard_batch_budget() -> usize {
     })
 }
 
+/// Largest index this build will hold whole in memory: `LUCIVY_RAM_INDEX_MAX`,
+/// default 2 GB on wasm32, unlimited elsewhere.
+///
+/// WebAssembly addresses at most 4 GB (measured cap: 4 068 MB), and the index
+/// is not the only tenant — the query's working set, the document store, the
+/// runtime and, while indexing, the writer heap and the merge buffers all live
+/// in the same address space. Half of it is what an index may claim.
+fn ram_index_max() -> u64 {
+    static MAX: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("LUCIVY_RAM_INDEX_MAX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(if cfg!(target_arch = "wasm32") { 2 << 30 } else { u64::MAX })
+    })
+}
+
+/// How an index is served: held whole, or streamed a batch of shards at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Residency {
+    /// The index fits: one batch, nothing evicted, queries touch RAM only.
+    /// This is what every native search does and what the browser did before
+    /// bounded caching — the difference is that it is now a measured decision
+    /// rather than an assumption that held until it did not.
+    InMemory { index_bytes: u64 },
+    /// The index does not fit: shards go through a memory budget, each batch
+    /// read and released. Correct, and bound by storage reads, not by the CPU.
+    Streaming { index_bytes: u64, batch_bytes: usize },
+}
+
+impl Residency {
+    pub fn index_bytes(&self) -> u64 {
+        match self {
+            Residency::InMemory { index_bytes } | Residency::Streaming { index_bytes, .. } => *index_bytes,
+        }
+    }
+    pub fn is_in_memory(&self) -> bool {
+        matches!(self, Residency::InMemory { .. })
+    }
+}
+
 // ─── Search Result ──────────────────────────────────────────────────────────
 
 /// A search result from a sharded search: score, shard index, document address.
@@ -1437,7 +1478,7 @@ pub struct ShardedHandle {
     /// Text field IDs (for tokenization at add_document).
     text_fields: Vec<Field>,
     /// On-disk bytes per shard, keyed by its segment list (see `shard_bytes`).
-    shard_bytes_cache: Mutex<std::collections::HashMap<usize, (Vec<(String, u32)>, usize)>>,
+    shard_bytes_cache: Mutex<std::collections::HashMap<usize, (Vec<(String, u32)>, u64)>>,
     /// Pipeline: reader pool (typed, round-robin).
     reader_pool: luciole::Pool<ReaderMsg>,
     /// Pipeline: single router actor (typed).
@@ -1953,7 +1994,14 @@ impl ShardedHandle {
         // ordering is the deterministic one of `ScoredEntry`. Native keeps
         // the default budget of "everything": one batch, the exact path
         // below, no eviction calls.
-        let budget = shard_batch_budget();
+        // An index that fits in memory is served the way it was before
+        // bounded caching existed: one batch, nothing evicted, everything
+        // resident after the first touch. Batching is the answer to an index
+        // that does not fit, not a tax on every index.
+        let budget = match self.residency() {
+            Residency::InMemory { .. } => usize::MAX,
+            Residency::Streaming { batch_bytes, .. } => batch_bytes,
+        };
         let batches = if budget == usize::MAX || self.shards.len() <= 1 {
             Vec::new()
         } else {
@@ -2072,10 +2120,10 @@ impl ShardedHandle {
     fn batches_by_bytes(&self, shards: &[usize], budget: usize) -> Vec<Vec<usize>> {
         let mut batches: Vec<Vec<usize>> = Vec::new();
         let mut current: Vec<usize> = Vec::new();
-        let mut current_bytes = 0usize;
+        let mut current_bytes = 0u64;
         for &i in shards {
-            let bytes = self.shard_bytes(i);
-            if !current.is_empty() && current_bytes + bytes > budget {
+            let bytes = self.shard_bytes_checked(i).0;
+            if !current.is_empty() && current_bytes + bytes > budget as u64 {
                 batches.push(std::mem::take(&mut current));
                 current_bytes = 0;
             }
@@ -2090,19 +2138,118 @@ impl ShardedHandle {
     /// unique across shards thanks to the segment id).
     fn shard_file_names(&self, shard: usize) -> Vec<std::ffi::OsString> {
         let Some(h) = self.shards.get(shard) else { return Vec::new() };
+        let sfx_version = h.index.settings().sfx_version;
         h.index.searchable_segment_metas().map(|metas| {
-            metas.iter().flat_map(|m| m.list_files()).filter_map(|p| p.file_name().map(|n| n.to_os_string())).collect()
+            metas.iter().flat_map(|m| m.list_files_for(sfx_version))
+                .filter_map(|p| p.file_name().map(|n| n.to_os_string())).collect()
         }).unwrap_or_default()
     }
 
     /// On-disk bytes of a shard's searchable segments (lazy handles: a
     /// stat per file, nothing read).
+    /// Bytes of one shard's searchable segments, with how many of the files
+    /// its metas name could actually be opened.
+    ///
+    /// A segment's meta lists files that may legitimately not be there (a
+    /// component a field does not carry) and files that are there but not yet
+    /// reachable — right after a reload the OPFS mount can still be settling,
+    /// and every `open_read` fails. The two look identical from here, so the
+    /// count is only trustworthy when nothing was missing; that is what the
+    /// caller memoizes on.
+    pub fn shard_bytes_and_files(&self, shard: usize) -> (u64, usize, usize) {
+        let Some(h) = self.shards.get(shard) else { return (0, 0, 0) };
+        let Ok(metas) = h.index.searchable_segment_metas() else { return (0, 0, 0) };
+        let dir = h.index.directory();
+        let sfx_version = h.index.settings().sfx_version;
+        let (mut bytes, mut opened, mut listed) = (0u64, 0usize, 0usize);
+        for p in metas.iter().flat_map(|m| m.list_files_for(sfx_version)) {
+            listed += 1;
+            if let Ok(f) = ld_lucivy::Directory::open_read(dir, &p) {
+                bytes += ld_lucivy::HasLen::len(&f) as u64;
+                opened += 1;
+            }
+        }
+        (bytes, opened, listed)
+    }
+
+    /// On-disk bytes of every searchable segment of every shard.
+    pub fn index_bytes(&self) -> u64 {
+        self.index_bytes_checked().0
+    }
+
+    /// The same total, with whether every file could be read. A count that is
+    /// not complete is a floor, not a measurement.
+    ///
+    /// The accumulator is a `u64`, not a `usize`: on wasm32 `usize` is 32 bits,
+    /// and a 5.7 GB index summed there wrapped to 1.4 GB — reported as fitting
+    /// in memory, which is exactly the index for which that answer is fatal.
+    /// Release builds wrap silently, so nothing but the arithmetic protects it.
+    fn index_bytes_checked(&self) -> (u64, bool) {
+        let mut total = 0u64;
+        let mut complete = true;
+        for i in 0..self.shards.len() {
+            let (bytes, ok) = self.shard_bytes_checked(i);
+            total += bytes;
+            complete &= ok;
+        }
+        (total, complete)
+    }
+
+    /// Whether this index is held whole or streamed, and — when it is held —
+    /// raising the whole-file cache so holding it is actually what happens.
+    ///
+    /// Called at each search: `index_bytes` is memoized per shard against its
+    /// segment list, so this costs nothing until a commit or a merge changes
+    /// one. Native is unlimited, so it always answers `InMemory` and takes the
+    /// unbatched path unchanged.
+    pub fn residency(&self) -> Residency {
+        let (index_bytes, complete) = self.index_bytes_checked();
+        // An incomplete count is a floor: the index is at least this big. Only
+        // a complete one may conclude that it fits — being wrong that way
+        // exhausts the address space, being wrong the other way is a slow
+        // search that corrects itself on the next one.
+        if complete && index_bytes <= ram_index_max() {
+            // On wasm32 `usize` is 32-bit; an index under the residency limit
+            // always fits, but the conversion has to be explicit.
+            crate::directory::raise_file_cache_budget(index_bytes.min(usize::MAX as u64) as usize);
+            Residency::InMemory { index_bytes }
+        } else {
+            Residency::Streaming { index_bytes, batch_bytes: shard_batch_budget() }
+        }
+    }
+
+    /// What the caller should tell the user about this index's memory, if
+    /// anything. Empty when the index is held in memory.
+    pub fn memory_warnings(&self) -> Vec<String> {
+        match self.residency() {
+            Residency::InMemory { .. } => Vec::new(),
+            Residency::Streaming { index_bytes, batch_bytes } => {
+                let mb = index_bytes >> 20;
+                let max_mb = ram_index_max() >> 20;
+                let docs = self.num_docs().max(1) as u64;
+                // What the same index says a comfortable corpus would be, from
+                // its own measured bytes per document rather than a guess.
+                let fits = ram_index_max() / (index_bytes / docs).max(1);
+                vec![format!(
+                    "this index is {mb} MB and this build holds at most {max_mb} MB in memory, \
+                     so searches stream it from storage a batch of {} MB at a time: expect \
+                     seconds, not milliseconds. At {} KB per document, about {fits} documents \
+                     would fit — this one has {docs}. Indexing fewer files, or serving the \
+                     index natively, is what makes it fast.",
+                    batch_bytes >> 20,
+                    (index_bytes / docs) >> 10,
+                )]
+            }
+        }
+    }
+
     /// Memoized per shard: a stat of ~900 files is a few milliseconds each on
     /// WASMFS/OPFS (proxied), which was seconds per search. The cache key is
     /// the shard's segment list, so a commit or a merge invalidates it.
-    fn shard_bytes(&self, shard: usize) -> usize {
-        let Some(h) = self.shards.get(shard) else { return 0 };
-        let Ok(metas) = h.index.searchable_segment_metas() else { return 0 };
+    /// Bytes of a shard, and whether every file its metas name could be read.
+    fn shard_bytes_checked(&self, shard: usize) -> (u64, bool) {
+        let Some(h) = self.shards.get(shard) else { return (0, true) };
+        let Ok(metas) = h.index.searchable_segment_metas() else { return (0, false) };
         let key: Vec<(String, u32)> = metas.iter()
             .map(|m| (m.id().uuid_string(), m.max_doc()))
             .collect();
@@ -2110,16 +2257,31 @@ impl ShardedHandle {
             let cache = self.shard_bytes_cache.lock().unwrap();
             if let Some((cached_key, bytes)) = cache.get(&shard) {
                 if *cached_key == key {
-                    return *bytes;
+                    if std::env::var("LUCIVY_VERBOSE").is_ok() {
+                        eprintln!("[bytes] shard {shard}: cached {} MB, {} segments", bytes >> 20, key.len());
+                    }
+                    return (*bytes, true);
                 }
             }
         }
-        let dir = h.index.directory();
-        let bytes: usize = metas.iter().flat_map(|m| m.list_files())
-            .filter_map(|p| ld_lucivy::Directory::open_read(dir, &p).ok().map(|f| ld_lucivy::HasLen::len(&f)))
-            .sum();
-        self.shard_bytes_cache.lock().unwrap().insert(shard, (key, bytes));
-        bytes
+        let (bytes, opened, listed) = self.shard_bytes_and_files(shard);
+        // Cache only a complete count, and say so. Right after a reload the
+        // OPFS mount can still be settling and every open fails; memoizing that
+        // answer against a segment list that will not change again pinned a
+        // fourfold undercount — and an undercount is what makes an index that
+        // cannot fit in memory look like one that can (5.7 GB reported as
+        // 1.4 GB, declared resident). Now that a segment's meta only names the
+        // files its pipeline actually wrote, a failed open means the file is
+        // unreachable, not absent by design.
+        let complete = opened == listed;
+        if std::env::var("LUCIVY_VERBOSE").is_ok() {
+            eprintln!("[bytes] shard {shard}: computed {} MB, {opened}/{listed} files, {} segments, complete={complete}",
+                bytes >> 20, key.len());
+        }
+        if complete {
+            self.shard_bytes_cache.lock().unwrap().insert(shard, (key, bytes));
+        }
+        (bytes, complete)
     }
 
     // ── Distributed search support ──────────────────────────────────────

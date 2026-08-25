@@ -208,6 +208,8 @@ impl SepMapIndex {
 impl super::index_registry::SfxIndexFile for SepMapIndex {
     fn id(&self) -> &'static str { "sepmap" }
     fn extension(&self) -> &'static str { "sepmap" }
+    /// v2 only: the v3 pipeline writes `.sibling_v3` and no gap or separator map.
+    fn written_for(&self, sfx_version: u8) -> bool { sfx_version < 3 }
     fn merge_strategy(&self) -> super::index_registry::MergeStrategy {
         super::index_registry::MergeStrategy::OrMergeWithRemap
     }

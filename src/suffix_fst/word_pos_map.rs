@@ -202,6 +202,8 @@ impl WordPosMapIndex {
 impl SfxIndexFile for WordPosMapIndex {
     fn id(&self) -> &'static str { "word_pos_map" }
     fn extension(&self) -> &'static str { "word_pos_map" }
+    /// v3 only: word-level partitioning does not exist in v2.
+    fn written_for(&self, sfx_version: u8) -> bool { sfx_version >= 3 }
     fn merge_strategy(&self) -> MergeStrategy { MergeStrategy::OrMergeWithRemap }
     fn prebuilt_by_collector(&self) -> bool { true }
     fn serialize(&self) -> Vec<u8> { self.writer.serialize() }

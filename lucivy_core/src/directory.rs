@@ -121,14 +121,39 @@ impl Drop for FsWriter {
 
 const SMALL_READ_MAX: usize = 64 * 1024;
 
+/// The budget is an atomic, not a constant: an index small enough to be held
+/// whole raises it once at open (`raise_file_cache_budget`), so nothing is
+/// ever evicted and a query touches RAM only. `LUCIVY_FILE_CACHE_BYTES` still
+/// sets the floor, and setting it explicitly pins the budget: an operator who
+/// caps the cache is not overridden by an index that would like more.
+static FILE_CACHE_BUDGET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static FILE_CACHE_PINNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn file_cache_budget() -> usize {
-    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *BUDGET.get_or_init(|| {
-        std::env::var("LUCIVY_FILE_CACHE_BYTES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(if cfg!(target_arch = "wasm32") { 768 << 20 } else { 4 << 30 })
-    })
+    use std::sync::atomic::Ordering::Relaxed;
+    let current = FILE_CACHE_BUDGET.load(Relaxed);
+    if current != 0 {
+        return current;
+    }
+    let (budget, pinned) = match std::env::var("LUCIVY_FILE_CACHE_BYTES").ok().and_then(|v| v.parse().ok()) {
+        Some(v) => (v, true),
+        None => (if cfg!(target_arch = "wasm32") { 768 << 20 } else { 4 << 30 }, false),
+    };
+    FILE_CACHE_PINNED.store(pinned, Relaxed);
+    FILE_CACHE_BUDGET.store(budget, Relaxed);
+    budget
+}
+
+/// Raise the whole-file cache so it can hold `bytes`, unless
+/// `LUCIVY_FILE_CACHE_BYTES` pinned it. Returns the budget in force.
+pub fn raise_file_cache_budget(bytes: usize) -> usize {
+    use std::sync::atomic::Ordering::Relaxed;
+    let current = file_cache_budget();
+    if FILE_CACHE_PINNED.load(Relaxed) || bytes <= current {
+        return current;
+    }
+    FILE_CACHE_BUDGET.store(bytes, Relaxed);
+    bytes
 }
 
 struct FileCache {

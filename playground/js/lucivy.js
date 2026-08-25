@@ -164,6 +164,18 @@ export class LucivyIndex {
         return this._lucivy._call('drainMerges', { path: this.path });
     }
 
+    /**
+     * Whether the index is held in memory or streamed from storage:
+     * `{ index_bytes, in_memory, num_docs, warnings }`. WebAssembly addresses
+     * at most 4 GB; above the residency limit searches answer the same hits
+     * but read the index batch by batch and take seconds. `warnings` is empty
+     * when the index is held in memory, and carries a sentence to show the
+     * user when it is not.
+     */
+    memoryStatus() {
+        return this._lucivy._call('memoryStatus', { path: this.path });
+    }
+
     search(query, options = {}) {
         return this._lucivy._call('search', {
             path: this.path,

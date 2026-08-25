@@ -130,15 +130,31 @@ impl SegmentMeta {
     /// is by removing all files that have been created by lucivy
     /// and are not used by any segment anymore.
     pub fn list_files(&self) -> HashSet<PathBuf> {
+        self.list_files_for(crate::index::segment_component::ANY_SFX_VERSION)
+    }
+
+    /// The files of this segment, as written by the `sfx_version` pipeline.
+    ///
+    /// `ANY_SFX_VERSION` names every registry file — the superset, and what
+    /// `list_files` answers. A caller that knows the index's `sfx_version`
+    /// should pass it: a v3 segment does not carry `.gapmap`, `.sepmap` or
+    /// `.sibling`, and naming them costs an open that always fails, on every
+    /// garbage collection pass and every walk of an index's size.
+    ///
+    /// A segment with no deletes has no `.del` file either: naming
+    /// `<segment>.0.del` was the same kind of phantom.
+    pub fn list_files_for(&self, sfx_version: u8) -> HashSet<PathBuf> {
         let include_temp = self
             .tracked
             .include_temp_doc_store
             .load(std::sync::atomic::Ordering::Relaxed);
+        let has_deletes = self.delete_opstamp().is_some();
 
         let sfx_fields = &self.tracked.sfx_field_ids;
-        SegmentComponent::all_components(sfx_fields)
+        SegmentComponent::components_for(sfx_fields, sfx_version)
             .into_iter()
             .filter(|comp| include_temp || *comp != SegmentComponent::TempStore)
+            .filter(|comp| has_deletes || *comp != SegmentComponent::Delete)
             .map(|component| self.relative_path(component))
             .collect::<HashSet<PathBuf>>()
     }

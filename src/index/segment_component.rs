@@ -57,6 +57,9 @@ pub enum SegmentComponent {
     },
 }
 
+/// "I do not know how this segment was written": keep every registry file.
+pub const ANY_SFX_VERSION: u8 = 0;
+
 impl SegmentComponent {
     /// File extension for this component.
     pub fn extension(&self) -> String {
@@ -102,11 +105,26 @@ impl SegmentComponent {
     /// List ALL components for a segment, including per-field SFX.
     /// Uses the SFX index registry so new index types are automatically protected from GC.
     pub fn all_components(sfx_field_ids: &[u32]) -> Vec<SegmentComponent> {
+        Self::components_for(sfx_field_ids, ANY_SFX_VERSION)
+    }
+
+    /// Components a segment written by the `sfx_version` pipeline carries.
+    ///
+    /// `ANY_SFX_VERSION` keeps every registry file, which is the superset a
+    /// caller wants when it does not know how a segment was written. Passing
+    /// the real version drops the files that pipeline never writes: three are
+    /// v2 only (`gapmap`, `sepmap`, `sibling`) and three are v3 only
+    /// (`word_sfxpost`, `word_pos_map`, `sibling_v3`), so a v3 segment used to
+    /// name nine files per segment that could never be found.
+    pub fn components_for(sfx_field_ids: &[u32], sfx_version: u8) -> Vec<SegmentComponent> {
         let mut components: Vec<SegmentComponent> = Self::fixed_components().to_vec();
         for &fid in sfx_field_ids {
             components.push(SegmentComponent::SuffixFst { field_id: fid });
             // All registry index files (sfxpost, posmap, bytemap, termtexts, ...)
             for index in crate::suffix_fst::index_registry::all_indexes() {
+                if sfx_version != ANY_SFX_VERSION && !index.written_for(sfx_version) {
+                    continue;
+                }
                 components.push(SegmentComponent::CustomSfxIndex {
                     field_id: fid,
                     extension: index.extension().to_string(),

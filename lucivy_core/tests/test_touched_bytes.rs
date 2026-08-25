@@ -31,6 +31,43 @@ fn touched_bytes_per_query() {
     let files = list_files(&root);
     let total: u64 = files.iter().map(|(_, len)| *len).sum();
     eprintln!("[touched] {} files, {:.1} MB on disk", files.len(), total as f64 / 1e6);
+    // What the residency decision sees must match what is actually there: an
+    // undercount would claim an index fits in memory when it does not.
+    for i in 0..h.num_shards() {
+        let (b, opened, listed) = h.shard_bytes_and_files(i);
+        eprintln!("[touched] shard {i}: {:.1} MB, {opened} files opened of {listed} listed", b as f64 / 1e6);
+    }
+    // Which listed components have no file: those are what every count, every
+    // GC pass and every snapshot walk pays for and never finds.
+    {
+        use std::collections::BTreeMap;
+        let mut missing: BTreeMap<String, usize> = BTreeMap::new();
+        let mut present: BTreeMap<String, usize> = BTreeMap::new();
+        for i in 0..h.num_shards() {
+            let Some(sh) = h.shard(i) else { continue };
+            let Ok(metas) = sh.index.searchable_segment_metas() else { continue };
+            let dir = sh.index.directory();
+            let sfx_version = sh.index.settings().sfx_version;
+            for p in metas.iter().flat_map(|m| m.list_files_for(sfx_version)) {
+                let name = p.to_string_lossy();
+                let ext = name.splitn(2, '.').nth(1).unwrap_or("").to_string();
+                if ld_lucivy::Directory::open_read(dir, &p).is_ok() {
+                    *present.entry(ext).or_insert(0) += 1;
+                } else {
+                    *missing.entry(ext).or_insert(0) += 1;
+                }
+            }
+        }
+        eprintln!("[touched] components PRESENT: {present:?}");
+        eprintln!("[touched] components MISSING: {missing:?}");
+        // A segment's meta must name what the segment carries and nothing else:
+        // a phantom file costs an open on every walk, and it hides a file that
+        // is genuinely unreachable behind one that was never meant to be there.
+        assert!(missing.is_empty(), "list_files_for names files that do not exist: {missing:?}");
+    }
+    let counted = h.index_bytes() as f64 / 1e6;
+    eprintln!("[touched] index_bytes() says {counted:.1} MB ({:.1} % of the directory), residency {:?}",
+        counted * 100.0 / (total as f64 / 1e6), h.residency());
 
     // A first query so lazy structures (schema, tokenizers, segment metas) are
     // already in place: we want the cost of a query, not of the first one.

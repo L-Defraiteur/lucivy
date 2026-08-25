@@ -48,6 +48,19 @@ pub trait SfxIndexFile: Send {
     /// and passes it as serialized data. If false, built by events or DAG.
     fn prebuilt_by_collector(&self) -> bool { false }
 
+    /// Whether a segment written by the `sfx_version` pipeline carries this
+    /// file. Most do in both; three belong to v2 only (`gapmap`, `sepmap`,
+    /// `sibling`) and three to v3 only (`word_sfxpost`, `word_pos_map`,
+    /// `sibling_v3`).
+    ///
+    /// This is what keeps `SegmentMeta::list_files` honest. Naming a file that
+    /// the pipeline never wrote costs an open that always fails — nine per
+    /// segment on a v3 index, on every garbage collection pass, every checksum
+    /// walk and every measurement of an index's size — and it removes the only
+    /// signal that would tell a partial read (a filesystem not ready yet) from
+    /// a component that was never there.
+    fn written_for(&self, _sfx_version: u8) -> bool { true }
+
     // ── Events (EventDriven) ─────────────────────────────────────
 
     /// Called once per token in ordinal order.
@@ -111,6 +124,8 @@ struct SiblingV3Index;
 impl SfxIndexFile for SiblingV3Index {
     fn id(&self) -> &'static str { "sibling_v3" }
     fn extension(&self) -> &'static str { "sibling_v3" }
+    /// v3 only: v2 segments carry `.sibling`.
+    fn written_for(&self, sfx_version: u8) -> bool { sfx_version >= 3 }
     fn merge_strategy(&self) -> MergeStrategy { MergeStrategy::ExternalDagNode }
     fn on_token(&mut self, _ord: u32, _text: &str) {}
     fn on_posting(&mut self, _ord: u32, _doc: u32, _ti: u32, _bf: u32, _bt: u32) {}

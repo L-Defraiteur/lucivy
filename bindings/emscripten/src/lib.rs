@@ -1078,6 +1078,37 @@ pub unsafe extern "C" fn lucivy_search_with_global_stats(
 
 // ── Search ───────────────────────────────────────────────────────────────
 
+/// Whether this index is held in memory or streamed from storage, and what to
+/// tell the user about it. JSON:
+/// `{"index_bytes": N, "in_memory": bool, "num_docs": N, "warnings": [..]}`.
+///
+/// WebAssembly addresses at most 4 GB. An index under the residency limit is
+/// served the way a native one is — one batch, nothing evicted. Above it,
+/// searches still answer exactly the same hits, but they read the index from
+/// storage batch by batch and take seconds. A caller that shows a corpus to
+/// its users should say which of the two is happening rather than let them
+/// guess from the latency.
+#[no_mangle]
+pub unsafe extern "C" fn lucivy_memory_status(ctx: *mut LucivyContext) -> *const c_char {
+    if ctx.is_null() { return return_error("null context"); }
+    let ctx = &*ctx;
+    let residency = ctx.handle.residency();
+    let per_shard: Vec<serde_json::Value> = (0..ctx.handle.num_shards())
+        .map(|i| {
+            let (bytes, opened, listed) = ctx.handle.shard_bytes_and_files(i);
+            serde_json::json!({"shard": i, "bytes": bytes, "opened": opened, "listed": listed})
+        })
+        .collect();
+    let status = serde_json::json!({
+        "shards": per_shard,
+        "index_bytes": residency.index_bytes(),
+        "in_memory": residency.is_in_memory(),
+        "num_docs": ctx.handle.num_docs(),
+        "warnings": ctx.handle.memory_warnings(),
+    });
+    return_str(status.to_string())
+}
+
 /// Honest warnings for a query, without running it. Returns a JSON array of
 /// strings (empty when nothing applies) or `{"error": ...}`.
 #[no_mangle]
@@ -1121,21 +1152,28 @@ pub unsafe extern "C" fn lucivy_search(
     };
 
     rlog!("[search] {} shards, {} docs", ctx.handle.num_shards(), ctx.handle.num_docs());
+    let t0 = std::time::Instant::now();
 
     let results = match ctx.handle.search(&query_config, limit as usize, highlight_sink.clone()) {
         Ok(r) => r,
         Err(e) => return return_error(&e),
     };
+    let t_search = t0.elapsed().as_secs_f64() * 1e3;
 
     let json_results = match collect_sharded_results(&ctx.handle, &results, highlight_sink.as_deref(), want_fields) {
         Ok(r) => r,
         Err(e) => return return_error(&e),
     };
+    let t_collect = t0.elapsed().as_secs_f64() * 1e3 - t_search;
 
-    match serde_json::to_string(&json_results) {
-        Ok(s) => return_str(s),
-        Err(e) => return_error(&format!("serialize error: {e}")),
-    }
+    let out = match serde_json::to_string(&json_results) {
+        Ok(s) => s,
+        Err(e) => return return_error(&format!("serialize error: {e}")),
+    };
+    rlog!("[search] done: search {:.0}ms, collect {:.0}ms, serialize {:.0}ms, {} B",
+        t_search, t_collect,
+        t0.elapsed().as_secs_f64() * 1e3 - t_search - t_collect, out.len());
+    return_str(out)
 }
 
 #[no_mangle]

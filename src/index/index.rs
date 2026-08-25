@@ -712,10 +712,11 @@ impl Index {
     /// Returns the set of corrupted files
     pub fn validate_checksum(&self) -> crate::Result<HashSet<PathBuf>> {
         let managed_files = self.directory.list_managed_files();
+        let sfx_version = self.settings.sfx_version;
         let active_segments_files: HashSet<PathBuf> = self
             .searchable_segment_metas()?
             .iter()
-            .flat_map(|segment_meta| segment_meta.list_files())
+            .flat_map(|segment_meta| segment_meta.list_files_for(sfx_version))
             .collect();
         let active_existing_files: HashSet<&PathBuf> =
             active_segments_files.intersection(&managed_files).collect();

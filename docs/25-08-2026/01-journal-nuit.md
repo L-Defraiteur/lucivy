@@ -563,3 +563,84 @@ avec leurs propres tests (aller-retour aux bornes, tronqué, trop long,
 valeur trop large pour un `u32`). Un `gap_len` plus large qu'un `u16` ne
 peut venir que d'un fichier corrompu : la lecture s'arrête au lieu de
 tronquer et de rendre un lien plausible.
+
+## ≈16:00 — deux modes de résidence, et deux bugs trouvés en les branchant
+
+Objectif de Lucie : que 10 000 docs tiennent **entièrement en RAM** dans le
+navigateur, qu'on se passe du contournement par lots quand c'est possible,
+et qu'un dépôt trop gros reçoive un avertissement clair au lieu d'une
+lenteur inexpliquée.
+
+L'ancien standard (avant `1fb67ec`) était `fs::read` du fichier entier à
+chaque `open_read`, **une copie par ouverture**. Les deux modes existaient
+déjà dans le code actuel, en boutons jamais reliés à une décision :
+`LUCIVY_FILE_CACHE_BYTES` (assez grand → rien n'est jamais évincé) et
+`LUCIVY_SHARD_BATCH_BYTES` (infini → un seul lot, le chemin natif). Il n'y
+avait rien à ressusciter, juste à **décider**.
+
+`ShardedHandle::residency()` mesure l'index et tranche :
+`InMemory` (un lot, cache relevé à la taille de l'index, rien d'évincé) ou
+`Streaming` (lots + éviction). Limite `LUCIVY_RAM_INDEX_MAX`, 2 Go en
+wasm32, illimitée ailleurs — le natif répond donc toujours `InMemory` et
+garde exactement son chemin. `lucivy_memory_status` l'expose au binding, le
+playground l'affiche.
+
+Deux vrais bugs sont sortis de ce branchement :
+
+**1. La somme des tailles débordait sur 32 bits.** Sur wasm32 `usize` fait
+32 bits : 5 695 795 643 octets d'index sommés en `usize` donnent
+1 400 828 347 — exactement ce que la page affichait. Un index de plus de
+4 Go paraissait petit, **précisément le cas où il ne faut pas dire « tient
+en RAM »**. En release ça déborde en silence. Accumulateur en `u64`.
+
+**2. `list_files()` nommait des fichiers fantômes.** `all_components`
+générait chaque entrée du registre pour chaque champ, quelle que soit la
+version : un segment v3 nommait `.gapmap`, `.sepmap` et `.sibling` (v2), soit
+**neuf ouvertures vouées à l'échec par segment**, à chaque passe du
+ramasse-miettes, chaque vérification de sommes et chaque mesure de taille.
+Et surtout ça noyait le seul signal utile : un fichier illisible parce que
+le montage OPFS n'est pas prêt ne se distinguait plus d'un composant qui
+n'a jamais existé. Le registre déclare maintenant `written_for(version)`,
+`SegmentMeta::list_files_for(version)` en tient compte, et un segment sans
+suppressions ne nomme plus son `.del`. Mesure : **62 fichiers ouverts sur
+62 listés** (avant 62 sur 82), et le test l'affirme.
+
+Le comptage est donc fiable, et la décision est prudente : un compte
+incomplet est un plancher, pas une mesure — sans compte complet on ne
+prétend pas tenir en RAM (se tromper dans ce sens épuise l'espace
+d'adressage ; dans l'autre c'est une recherche lente qui se corrige d'elle
+même au coup suivant).
+
+Vérifié dans le navigateur, sur l'index de 15 440 fichiers (5 431 Mo) :
+
+> this index is 5431 MB and this build holds at most 2048 MB in memory, so
+> searches stream it from storage a batch of 1024 MB at a time: expect
+> seconds, not milliseconds. At 360 KB per document, about 5821 documents
+> would fit — this one has 15440.
+
+Le chiffre « 5 821 documents » vient des octets par document de **cet**
+index, pas d'une estimation.
+
+### Ce qu'il reste pour tenir 10 000 docs en RAM
+
+L'index natif compacté (WSP3 + SIB2) fait 3 641 Mo pour 15 440 docs, soit
+**236 Ko/doc → 2 360 Mo pour 10 000 docs**. Ça passe sous 4 Go mais pas
+sous une limite prudente de 2 Go. Deux leviers mesurés restent :
+
+- `.sfxpost` en delta-varint : **1,91×** mesuré sur de vraies données
+  (`test_sfxpost_density`, 1,24 M docs et 2,95 M entrées) — en-tête
+  12,0 → 4,0 o/doc, payload 6,80 → 4,47 o/entrée, points de reprise
+  0,1 Mo. Soit ~280 Mo de moins sur 15k. Chirurgie plus lourde que les deux
+  précédentes : `find_doc` est une recherche binaire et `payload_offset(i)`
+  / `entry_count(i)` sont des accès O(1).
+- `.bytemap` (396 Mo) : pas du varint — c'est un bitmap 256 bits par
+  ordinal, très creux (5-15 octets distincts sur 256) et redondant entre
+  ordinaux. Sparsité + déduplication, ou suppression (il est marqué
+  dérivable).
+
+Avec les deux : ~198 Ko/doc, soit **~1 980 Mo pour 10 000 docs**.
+
+Note honnête : **indexer** coûte plus cher que **servir** (le pic est dans
+les fusions, pas dans les requêtes). Une démo qui *importe* un index prêt
+tiendra 10 000 docs bien plus facilement qu'une démo qui les indexe ; le
+seuil n'est pas le même et l'avertissement devra distinguer les deux.

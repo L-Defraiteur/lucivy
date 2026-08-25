@@ -426,6 +426,8 @@ pub struct WordSfxPostIndex;
 impl crate::suffix_fst::index_registry::SfxIndexFile for WordSfxPostIndex {
     fn id(&self) -> &'static str { "word_sfxpost" }
     fn extension(&self) -> &'static str { "word_sfxpost" }
+    /// v3 only: word-level partitioning does not exist in v2.
+    fn written_for(&self, sfx_version: u8) -> bool { sfx_version >= 3 }
     fn merge_strategy(&self) -> crate::suffix_fst::index_registry::MergeStrategy {
         crate::suffix_fst::index_registry::MergeStrategy::ExternalDagNode
     }
