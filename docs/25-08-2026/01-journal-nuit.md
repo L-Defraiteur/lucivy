@@ -391,3 +391,41 @@ Trois conclusions chiffrées :
 
 À froid, la même requête met 381 ms en natif (contre 21-55 ms à chaud) :
 l'I/O domine aussi en natif, la différence est que mmap ne lit que 30 %.
+
+## ≈12:00 — « compresser word_sfxpost, mais il faut le décompresser » (Lucie)
+
+Objection juste, et elle sépare deux choses :
+
+- **Compression par blocs** (zstd/lz4) : douteux. En WASM il faudrait
+  décompresser à 1-2 Go/s pour économiser des lectures à 1,15 Go/s (débit
+  OPFS mesuré) — à peu près nul ; et en natif, où mmap ne lit que les pages
+  utiles, c'est du CPU ajouté pour rien : régression.
+- **Encodage plus dense** (delta + varint) : pas de passe de
+  décompression. Les entrées sont déjà décodées champ par champ pendant la
+  marche ; lire un varint au lieu d'un `u32` coûte quelques ns.
+
+Mesure sur de vraies données (`test_wsp_density`, 4 fichiers, 8,87 M
+entrées) : les cinq `u32` fixes (20 o) tombent à **7,22 o/entrée, soit
+2,77× plus petit** en delta-varint (`doc_id` delta, `first_position` delta
+dans le doc, `last-first`, `byte_from`, `byte_to-byte_from`).
+
+| entrées/ordinal | ordinaux | part des entrées | aujourd'hui | varint |
+|---|---|---|---|---|
+| 1 | 51,0 % | 8,2 % | 20 o | 7 o |
+| 2-4 | 29,6 % | 12,4 % | 52 o | 19 o |
+| 5-16 | 13,8 % | 18,5 % | 166 o | 60 o |
+| 17-64 | 4,4 % | 21,6 % | 603 o | 218 o |
+| 65-256 | 1,0 % | 18,3 % | 2 293 o | 828 o |
+| > 256 | 0,2 % | 21,0 % | 14 253 o | 5 143 o |
+
+Aussi : 56,4 % des ordinaux sont vides et la table d'offsets pèse 6,9 % du
+fichier (13,1 Mo pour 3,3 M ordinaux) — deuxième cible, séparée.
+
+Donc le gain est réel mais il faut le dire honnêtement : 2,77× de lecture
+en moins sur 17 % de l'index (et le sidecar le plus touché : 78-82 %),
+contre ~5 varints à décoder par entrée. Gain net certain en navigateur (on
+lit moins, on ne décompresse rien), gain à froid en natif, coût CPU
+marginal à chaud — à vérifier au panel 50 k avant de garder.
+
+Mise en œuvre additive : le writer émet `WSP3`, le lecteur accepte `WSP2`
+et `WSP3`. Les index existants continuent de se lire.
