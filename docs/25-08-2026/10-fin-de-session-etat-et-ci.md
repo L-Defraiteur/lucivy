@@ -197,3 +197,32 @@ blob store ACID exposé dans les trois bindings natifs, Jaro-Winkler,
 playground qui clone lucivy depuis GitHub. Prochain chantier technique :
 le coût fixe par requête sur les champs courts (05 §5.1), puis SIMD /
 `-O3` à remesurer avec mimalloc.
+
+## 6. Après la publication — le playground sur téléphone (00h-00h30)
+
+Lucie a testé `l-defraiteur.github.io/lucivy` sur son tel : premier essai
+« commit failed » (mode mobile), deuxième en « version ordinateur » ouvert
+sur l'index du premier essai avec un message rouge absurde (« 271 Mo… index
+fewer files »). Diagnostic grâce au panneau **Logs** ajouté dans la page
+(ring buffer + console, bouton Copy) : l'index stocké avait **24 fichiers
+sur 124 jamais écrits** (commits intermédiaires en `sync:false`, commit
+final mort), et `residency()` passe en streaming dès que le compte est
+incomplet — d'où le message. Corrigé, non publié (dans « Unreleased » du
+CHANGELOG, playground déployé par Pages) :
+
+- réglages « petit appareil » (`deviceMemory ≤ 4` ou UA mobile, `?desktop`
+  pour forcer) : 2 threads, 1 writer, 1 build, fusions à 400, 1 Go en
+  mémoire max — avec ça la démo de 1101 fichiers s'indexe en ~30 s sur le tel ;
+- un index stocké à qui il manque des fichiers est **reconstruit** à
+  l'ouverture au lieu d'être servi troué ; `memory_warnings` dit « N fichiers
+  non ouvrables » au lieu du conseil de taille quand c'est la cause ;
+- montage OPFS : le perdant de deux montages concurrents s'arrête dès que
+  l'autre a monté (avant : 4 échecs -20 et un faux « in-memory FS ») ;
+- cache-buster `?v=<BUILD>` sur le worker et le wasm (le tel a servi un
+  vieux wasm pendant tout le débogage) — à bumper dans `index.html` à chaque
+  changement du moteur ou du worker.
+
+Non reproduit ensuite (l'index reconstruit est complet). Le vrai fond du
+sujet reste ouvert : un commit qui meurt ne devrait pas laisser un
+`meta.json` qui nomme des fichiers absents — l'ouverture devrait vérifier
+la présence des fichiers listés (côté moteur, pas seulement dans la page).
