@@ -1,6 +1,28 @@
-//! sfxpost V2 format: binary-searchable doc_ids for filtered access.
+//! sfxpost: binary-searchable doc_ids for filtered access.
 //!
-//! Format:
+//! `SFP3` (written since 25 August 2026) is `SFP2` with the per-document
+//! header delta-encoded and varint-packed, and the payload delta-encoded
+//! within a document. V2 spends ten fixed bytes per document — `doc_id`
+//! (u32), `payload_offset` (u32), `entry_count` (u16) — and stores the
+//! payload's `(token_index, byte_from, byte_to)` as absolute varints, though
+//! all three only grow inside a document. Measured over 1.24 M documents and
+//! 2.95 M entries of a real index (`lucivy_core/tests/test_sfxpost_density.rs`):
+//! header 12.0 -> 4.0 B/doc, payload 6.80 -> 4.47 B/entry, 1.91x overall.
+//!
+//! `SFP3` block, per ordinal:
+//! ```text
+//!   [varint] num_docs
+//!   [c * 12] checkpoints, c = (num_docs - 1) / 32:
+//!            doc_id (u32), cumulative payload offset (u32), header offset (u32)
+//!   [num_docs * varints] doc headers: d_doc, payload_len, entry_count
+//!   [payloads] per document: (d_token_index, d_byte_from, byte_to - byte_from)
+//! ```
+//!
+//! The reader accepts both; `SegmentComponent` names this file for either
+//! pipeline version, so an index written before the change keeps working with
+//! nothing to migrate.
+//!
+//! V2 format:
 //!   [4 bytes] magic: "SFP2"
 //!   [4 bytes] num_terms: u32 LE
 //!   [4 bytes × (num_terms + 1)] offset table: byte offsets into entry_data
@@ -20,10 +42,28 @@
 
 use std::collections::HashSet;
 
-use super::collector::encode_vint;
 use super::file::SfxPostingEntry;
+use super::varint::{read_varint, write_varint};
 
 const MAGIC_V2: &[u8; 4] = b"SFP2";
+const MAGIC_V3: &[u8; 4] = b"SFP3";
+/// Documents between two checkpoints in an `SFP3` block. `find_doc` is a
+/// binary search over fixed records in V2; varints break that, so a checkpoint
+/// every `CHECKPOINT_EVERY` documents restores it — one search over the
+/// checkpoints, then at most that many header decodes.
+///
+/// 8, not 32: the run length is what a lookup pays, and `entry_at` runs one
+/// lookup per emitted match (a fuzzy query does about a million). Checkpoints
+/// are 12 bytes each, so 8 costs 1.5 B/doc against the 8 B/doc the encoding
+/// saves — on a real index, 0.4 MB where the encoding saves 16.7
+/// (`test_sfxpost_density`).
+const CHECKPOINT_EVERY: usize = 8;
+/// doc_id, cumulative payload offset, header offset.
+const CHECKPOINT_SIZE: usize = 12;
+
+fn checkpoints_for(n: usize) -> usize {
+    if n == 0 { 0 } else { (n - 1) / CHECKPOINT_EVERY }
+}
 
 // ─── Writer ──────────────────────────────────────────────────────────────────
 
@@ -69,39 +109,43 @@ impl SfxPostWriterV2 {
                 docs.last_mut().unwrap().1.push((ti, bf, bt));
             }
 
-            let num_unique_docs = docs.len() as u32;
-            entry_data.extend_from_slice(&num_unique_docs.to_le_bytes());
-
-            // Doc IDs (sorted, binary searchable)
-            for &(doc_id, _) in &docs {
-                entry_data.extend_from_slice(&doc_id.to_le_bytes());
-            }
-
-            // Encode payloads to compute offsets
+            // Payloads first: their lengths are the header's, and a
+            // document's three fields only grow inside it.
             let mut payloads: Vec<Vec<u8>> = Vec::with_capacity(docs.len());
             for (_, doc_entries) in &docs {
                 let mut payload = Vec::new();
+                let (mut prev_ti, mut prev_bf) = (0u32, 0u32);
                 for &(ti, bf, bt) in doc_entries {
-                    encode_vint(ti, &mut payload);
-                    encode_vint(bf, &mut payload);
-                    encode_vint(bt, &mut payload);
+                    write_varint(&mut payload, ti.wrapping_sub(prev_ti) as u64);
+                    write_varint(&mut payload, bf.wrapping_sub(prev_bf) as u64);
+                    write_varint(&mut payload, bt.wrapping_sub(bf) as u64);
+                    prev_ti = ti;
+                    prev_bf = bf;
                 }
                 payloads.push(payload);
             }
 
-            // Payload offsets (relative to payload start)
-            let mut cumulative = 0u32;
-            for payload in &payloads {
-                entry_data.extend_from_slice(&cumulative.to_le_bytes());
+            // Document headers, with a checkpoint every CHECKPOINT_EVERY so
+            // `find_doc` keeps a binary search (see the module header).
+            let mut headers: Vec<u8> = Vec::with_capacity(docs.len() * 3);
+            let mut checkpoints: Vec<u8> = Vec::with_capacity(checkpoints_for(docs.len()) * CHECKPOINT_SIZE);
+            let (mut prev_doc, mut cumulative) = (0u32, 0u32);
+            for (i, ((doc_id, doc_entries), payload)) in docs.iter().zip(payloads.iter()).enumerate() {
+                if i > 0 && i % CHECKPOINT_EVERY == 0 {
+                    checkpoints.extend_from_slice(&prev_doc.to_le_bytes());
+                    checkpoints.extend_from_slice(&cumulative.to_le_bytes());
+                    checkpoints.extend_from_slice(&(headers.len() as u32).to_le_bytes());
+                }
+                write_varint(&mut headers, doc_id.wrapping_sub(prev_doc) as u64);
+                write_varint(&mut headers, payload.len() as u64);
+                write_varint(&mut headers, doc_entries.len() as u64);
+                prev_doc = *doc_id;
                 cumulative += payload.len() as u32;
             }
 
-            // Entry counts per doc
-            for (_, doc_entries) in &docs {
-                entry_data.extend_from_slice(&(doc_entries.len() as u16).to_le_bytes());
-            }
-
-            // Payload data
+            write_varint(&mut entry_data, docs.len() as u64);
+            entry_data.extend_from_slice(&checkpoints);
+            entry_data.extend_from_slice(&headers);
             for payload in &payloads {
                 entry_data.extend_from_slice(payload);
             }
@@ -110,7 +154,7 @@ impl SfxPostWriterV2 {
 
         // Assemble final binary
         let mut out = Vec::new();
-        out.extend_from_slice(MAGIC_V2);
+        out.extend_from_slice(MAGIC_V3);
         out.extend_from_slice(&(num_terms as u32).to_le_bytes());
         for &off in &offset_table {
             out.extend_from_slice(&off.to_le_bytes());
@@ -145,6 +189,8 @@ pub struct SfxPostReaderV2 {
     num_terms: u32,
     offsets_start: usize,
     entry_data_start: usize,
+    /// `SFP3`: varint blocks. `SFP2` files keep their fixed-width arrays.
+    v3: bool,
 }
 
 impl SfxPostReaderV2 {
@@ -164,9 +210,14 @@ impl SfxPostReaderV2 {
     /// per segment per query: 72 copies of the postings file per query on a
     /// 50k-document bench index.
     pub fn open_owned(data: common::OwnedBytes) -> Option<Self> {
-        if data.len() < 8 || &data[0..4] != MAGIC_V2 {
+        if data.len() < 8 {
             return None;
         }
+        let v3 = match &data[0..4] {
+            m if m == MAGIC_V3 => true,
+            m if m == MAGIC_V2 => false,
+            _ => return None,
+        };
         let num_terms = u32::from_le_bytes(data[4..8].try_into().ok()?);
         let offsets_size = (num_terms as usize + 1) * 4;
         if data.len() < 8 + offsets_size {
@@ -174,7 +225,7 @@ impl SfxPostReaderV2 {
         }
         let offsets_start = 8;
         let entry_data_start = 8 + offsets_size;
-        Some(Self { data, num_terms, offsets_start, entry_data_start })
+        Some(Self { data, num_terms, offsets_start, entry_data_start, v3 })
     }
 
     /// Open from a byte slice (copies into owned Vec).
@@ -203,7 +254,12 @@ impl SfxPostReaderV2 {
             idx.sort_unstable();
             idx
         } else {
-            (0..n).filter(|&i| filter.contains(&header.doc_id(i))).collect()
+            let mut idx = Vec::new();
+            header.for_each_doc(|i, doc_id, _, _| {
+                if filter.contains(&doc_id) { idx.push(i); }
+                true
+            });
+            idx
         }
     }
 
@@ -241,21 +297,24 @@ impl SfxPostReaderV2 {
         };
 
         let mut result = Vec::new();
-        let indices: Vec<usize> = match filter {
-            Some(f) => Self::filtered_indices(&header, f),
-            None => (0..header.num_docs).collect(),
-        };
-        for i in indices {
-            let doc_id = header.doc_id(i);
-            let entries = self.decode_doc_payload(&header, i);
-            for (ti, bf, bt) in entries {
-                result.push(SfxPostingEntry {
-                    doc_id,
-                    token_index: ti,
-                    byte_from: bf,
-                    byte_to: bt,
+        let Some(filter) = filter else {
+            // Every document: one pass over the headers, not one restart per
+            // document (see `for_each_doc`).
+            header.for_each_doc(|_, doc_id, offset, count| {
+                header.walk_payload(offset as usize, count as usize, |ti, bf, bt| {
+                    result.push(SfxPostingEntry { doc_id, token_index: ti, byte_from: bf, byte_to: bt });
+                    true
                 });
-            }
+                true
+            });
+            return result;
+        };
+        for i in Self::filtered_indices(&header, filter) {
+            let (doc_id, offset, count) = header.doc_at(i);
+            header.walk_payload(offset as usize, count as usize, |ti, bf, bt| {
+                result.push(SfxPostingEntry { doc_id, token_index: ti, byte_from: bf, byte_to: bt });
+                true
+            });
         }
         result
     }
@@ -272,9 +331,13 @@ impl SfxPostReaderV2 {
     pub fn entries_for_doc(&self, ordinal: u32, target_doc: u32) -> Vec<SfxPostingEntry> {
         if ordinal >= self.num_terms { return Vec::new(); }
         let Some(header) = self.read_ordinal_header(ordinal) else { return Vec::new() };
-        let Some(idx) = header.find_doc(target_doc) else { return Vec::new() };
-        self.decode_doc_payload(&header, idx)
-            .into_iter()
+        let Some((_, offset, count)) = header.find_doc_full(target_doc) else { return Vec::new() };
+        let mut out = Vec::with_capacity(count as usize);
+        header.walk_payload(offset as usize, count as usize, |ti, bf, bt| {
+            out.push((ti, bf, bt));
+            true
+        });
+        out.into_iter()
             .map(|(ti, bf, bt)| SfxPostingEntry {
                 doc_id: target_doc,
                 token_index: ti,
@@ -292,19 +355,14 @@ impl SfxPostReaderV2 {
     pub fn entry_at(&self, ordinal: u32, doc_id: u32, position: u32) -> Option<(u32, u32)> {
         if ordinal >= self.num_terms { return None; }
         let header = self.read_ordinal_header(ordinal)?;
-        let idx = header.find_doc(doc_id)?;
-        let offset = header.payload_offset(idx) as usize;
-        let count = header.entry_count(idx) as usize;
-        let data = &header.payload_data[offset..];
-        let mut pos = 0;
-        for _ in 0..count {
-            let (ti, n) = decode_vint(&data[pos..]); pos += n;
-            let (bf, n) = decode_vint(&data[pos..]); pos += n;
-            let (bt, n) = decode_vint(&data[pos..]); pos += n;
-            if ti == position { return Some((bf, bt)); }
-            if ti > position { return None; }
-        }
-        None
+        let (_, offset, count) = header.find_doc_full(doc_id)?;
+        let mut found = None;
+        header.walk_payload(offset as usize, count as usize, |ti, bf, bt| {
+            if ti == position { found = Some((bf, bt)); return false; }
+            // Entries are written in token order: past the target, stop.
+            ti < position
+        });
+        found
     }
 
     /// doc_freq: number of unique docs for an ordinal. O(1) — just read the header.
@@ -332,6 +390,36 @@ impl SfxPostReaderV2 {
         let data = &entry_data[off_start..off_end.min(entry_data.len())];
         if data.len() < 4 { return None; }
 
+        if self.v3 {
+            let mut pos = 0usize;
+            let num_docs = read_varint(data, &mut pos)? as usize;
+            let cp_start = pos;
+            let cp_len = checkpoints_for(num_docs) * CHECKPOINT_SIZE;
+            let headers_start = cp_start + cp_len;
+            if headers_start > data.len() { return None; }
+            // The header region ends where the first payload begins, which the
+            // last header's cumulative length gives — but the reader never needs
+            // that boundary: it decodes exactly `num_docs` triples and stops.
+            // Payloads are addressed from the end of the headers, so find it by
+            // decoding the headers once, at open, which is `num_docs` varint
+            // triples and nothing more.
+            let mut pos = headers_start;
+            for _ in 0..num_docs {
+                read_varint(data, &mut pos)?;
+                read_varint(data, &mut pos)?;
+                read_varint(data, &mut pos)?;
+            }
+            if pos > data.len() { return None; }
+            return Some(OrdinalHeader {
+                num_docs,
+                layout: HeaderLayout::V3 {
+                    checkpoints: &data[cp_start..headers_start],
+                    headers: &data[headers_start..pos],
+                },
+                payload_data: &data[pos..],
+            });
+        }
+
         let num_docs = u32::from_le_bytes(data[0..4].try_into().ok()?) as usize;
         let header_size = 4 + num_docs * 4 + num_docs * 4 + num_docs * 2;
         if data.len() < header_size { return None; }
@@ -343,9 +431,11 @@ impl SfxPostReaderV2 {
 
         Some(OrdinalHeader {
             num_docs,
-            doc_ids: &data[d0..p0],
-            payload_offsets: &data[p0..c0],
-            entry_counts: &data[c0..payload_start],
+            layout: HeaderLayout::V2 {
+                doc_ids: &data[d0..p0],
+                payload_offsets: &data[p0..c0],
+                entry_counts: &data[c0..payload_start],
+            },
             payload_data: &data[payload_start..],
         })
     }
@@ -357,35 +447,22 @@ impl SfxPostReaderV2 {
     pub fn for_each_entry(&self, ordinal: u32, mut f: impl FnMut(u32, u32, u32, u32)) {
         if ordinal >= self.num_terms { return; }
         let Some(header) = self.read_ordinal_header(ordinal) else { return };
-        for i in 0..header.num_docs {
-            let doc_id = header.doc_id(i);
-            let offset = header.payload_offset(i) as usize;
-            let count = header.entry_count(i) as usize;
-            let data = &header.payload_data[offset..];
-            let mut pos = 0;
-            for _ in 0..count {
-                let (ti, n) = decode_vint(&data[pos..]); pos += n;
-                let (bf, n) = decode_vint(&data[pos..]); pos += n;
-                let (bt, n) = decode_vint(&data[pos..]); pos += n;
+        header.for_each_doc(|_, doc_id, offset, count| {
+            header.walk_payload(offset as usize, count as usize, |ti, bf, bt| {
                 f(doc_id, ti, bf, bt);
-                let _ = pos;
-            }
-        }
+                true
+            });
+            true
+        });
     }
 
     fn decode_doc_payload(&self, header: &OrdinalHeader, doc_idx: usize) -> Vec<(u32, u32, u32)> {
-        let offset = header.payload_offset(doc_idx) as usize;
-        let count = header.entry_count(doc_idx) as usize;
-        let data = &header.payload_data[offset..];
-
-        let mut pos = 0;
-        let mut entries = Vec::with_capacity(count);
-        for _ in 0..count {
-            let (ti, n) = decode_vint(&data[pos..]); pos += n;
-            let (bf, n) = decode_vint(&data[pos..]); pos += n;
-            let (bt, n) = decode_vint(&data[pos..]); pos += n;
+        let (_, offset, count) = header.doc_at(doc_idx);
+        let mut entries = Vec::with_capacity(count as usize);
+        header.walk_payload(offset as usize, count as usize, |ti, bf, bt| {
             entries.push((ti, bf, bt));
-        }
+            true
+        });
         entries
     }
 }
@@ -399,35 +476,216 @@ impl SfxPostReaderV2 {
 /// match, a million times: ~40 GB of allocation traffic to read 1 M u32s.
 struct OrdinalHeader<'a> {
     num_docs: usize,
-    doc_ids: &'a [u8],
-    payload_offsets: &'a [u8],
-    entry_counts: &'a [u8],
+    /// V2: three fixed-width arrays. V3: checkpoints and varint headers.
+    layout: HeaderLayout<'a>,
     payload_data: &'a [u8],
 }
 
+enum HeaderLayout<'a> {
+    V2 {
+        doc_ids: &'a [u8],
+        payload_offsets: &'a [u8],
+        entry_counts: &'a [u8],
+    },
+    V3 {
+        checkpoints: &'a [u8],
+        headers: &'a [u8],
+    },
+}
+
 impl<'a> OrdinalHeader<'a> {
-    #[inline]
-    fn doc_id(&self, i: usize) -> u32 {
-        u32::from_le_bytes(self.doc_ids[i * 4..i * 4 + 4].try_into().unwrap())
-    }
-    #[inline]
-    fn payload_offset(&self, i: usize) -> u32 {
-        u32::from_le_bytes(self.payload_offsets[i * 4..i * 4 + 4].try_into().unwrap())
-    }
-    #[inline]
-    fn entry_count(&self, i: usize) -> u16 {
-        u16::from_le_bytes(self.entry_counts[i * 2..i * 2 + 2].try_into().unwrap())
-    }
-    /// Binary search over the little-endian doc_id array.
-    fn find_doc(&self, doc_id: u32) -> Option<usize> {
-        let (mut lo, mut hi) = (0usize, self.num_docs);
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            if self.doc_id(mid) < doc_id { lo = mid + 1; } else { hi = mid; }
+    /// `(doc_id, payload offset, entry count)` of the `i`-th document.
+    ///
+    /// V2 reads three fixed slots. V3 restarts from the checkpoint before `i`
+    /// and decodes at most `CHECKPOINT_EVERY` header triples — the deltas are
+    /// cumulative, so there is no way to read the `i`-th without the ones
+    /// before it in its run, and the run is bounded on purpose.
+    fn doc_at(&self, i: usize) -> (u32, u32, u16) {
+        match &self.layout {
+            HeaderLayout::V2 { doc_ids, payload_offsets, entry_counts } => (
+                u32::from_le_bytes(doc_ids[i * 4..i * 4 + 4].try_into().unwrap()),
+                u32::from_le_bytes(payload_offsets[i * 4..i * 4 + 4].try_into().unwrap()),
+                u16::from_le_bytes(entry_counts[i * 2..i * 2 + 2].try_into().unwrap()),
+            ),
+            HeaderLayout::V3 { checkpoints, headers } => {
+                let k = i / CHECKPOINT_EVERY;
+                let (mut doc, mut offset, mut pos) = if k == 0 {
+                    (0u32, 0u32, 0usize)
+                } else {
+                    let c = (k - 1) * CHECKPOINT_SIZE;
+                    let g = |j: usize| u32::from_le_bytes(
+                        checkpoints[c + j * 4..c + j * 4 + 4].try_into().unwrap());
+                    (g(0), g(1), g(2) as usize)
+                };
+                let mut count = 0u32;
+                for j in (k * CHECKPOINT_EVERY)..=i {
+                    let Some(d_doc) = read_varint(headers, &mut pos) else { break };
+                    let Some(len) = read_varint(headers, &mut pos) else { break };
+                    let Some(n) = read_varint(headers, &mut pos) else { break };
+                    doc = doc.wrapping_add(d_doc as u32);
+                    count = n as u32;
+                    if j == i {
+                        break;
+                    }
+                    // `offset` is where the *next* document's payload starts,
+                    // so a length is added only once its document is passed.
+                    offset = offset.wrapping_add(len as u32);
+                }
+                (doc, offset, count.min(u16::MAX as u32) as u16)
+            }
         }
-        if lo < self.num_docs && self.doc_id(lo) == doc_id { Some(lo) } else { None }
+    }
+
+    /// Visit every document as `(doc_id, payload offset, entry count)`,
+    /// decoding the headers once.
+    ///
+    /// `doc_at(i)` restarts from the checkpoint before `i`, which is what makes
+    /// random access bounded — and what makes a sequential walk quadratic in the
+    /// run length if it is used index by index. Measured on the 21-query panel:
+    /// 2 405 ms with the fixed-width headers, 2 721 ms once `entries_filtered`
+    /// and `for_each_entry` reached V3 through `doc_at`. They stream instead.
+    fn for_each_doc(&self, mut f: impl FnMut(usize, u32, u32, u16) -> bool) {
+        match &self.layout {
+            HeaderLayout::V2 { .. } => {
+                for i in 0..self.num_docs {
+                    let (doc, off, n) = self.doc_at(i);
+                    if !f(i, doc, off, n) { return; }
+                }
+            }
+            HeaderLayout::V3 { headers, .. } => {
+                let (mut doc, mut offset, mut pos) = (0u32, 0u32, 0usize);
+                for i in 0..self.num_docs {
+                    let (Some(d_doc), Some(len), Some(n)) = (
+                        read_varint(headers, &mut pos),
+                        read_varint(headers, &mut pos),
+                        read_varint(headers, &mut pos),
+                    ) else { return };
+                    doc = doc.wrapping_add(d_doc as u32);
+                    if !f(i, doc, offset, n.min(u16::MAX as u64) as u16) { return; }
+                    offset = offset.wrapping_add(len as u32);
+                }
+            }
+        }
+    }
+
+    /// Walk one document's payload, stopping when `f` returns `false`.
+    ///
+    /// V2 stores `(token_index, byte_from, byte_to)` absolute; V3 stores them
+    /// delta-encoded within the document, where all three only grow. Both are
+    /// decoded here so the three callers — full decode, the merge walk and the
+    /// single-position lookup — cannot drift apart.
+    fn walk_payload(&self, offset: usize, count: usize, mut f: impl FnMut(u32, u32, u32) -> bool) {
+        let data = &self.payload_data[offset.min(self.payload_data.len())..];
+        let mut pos = 0usize;
+        let v3 = matches!(self.layout, HeaderLayout::V3 { .. });
+        // The payload is the hot loop — one pass per matching document, and
+        // `entry_at` runs one per emitted match. It uses `decode_vint`, the
+        // same tight decoder V2 always used; the bounds-checked `read_varint`
+        // of the shared module costs 14 % on the 21-query panel here, and this
+        // loop cannot read past its slice anyway: a short read decodes a
+        // truncated value and the `pos >= data.len()` guard ends the walk.
+        let (mut prev_ti, mut prev_bf) = (0u32, 0u32);
+        for _ in 0..count {
+            if pos >= data.len() { return }
+            let (a, n) = decode_vint(&data[pos..]); pos += n;
+            if pos >= data.len() { return }
+            let (b, n) = decode_vint(&data[pos..]); pos += n;
+            if pos > data.len() { return }
+            let (c, n) = decode_vint(&data[pos..]); pos += n;
+            let (ti, bf, bt) = if v3 {
+                let ti = prev_ti.wrapping_add(a);
+                let bf = prev_bf.wrapping_add(b);
+                prev_ti = ti;
+                prev_bf = bf;
+                (ti, bf, bf.wrapping_add(c))
+            } else {
+                (a, b, c)
+            };
+            if !f(ti, bf, bt) {
+                return;
+            }
+        }
+    }
+
+    #[inline]
+    fn doc_id(&self, i: usize) -> u32 { self.doc_at(i).0 }
+    #[inline]
+    fn payload_offset(&self, i: usize) -> u32 { self.doc_at(i).1 }
+    #[inline]
+    fn entry_count(&self, i: usize) -> u16 { self.doc_at(i).2 }
+
+    #[inline]
+    fn find_doc(&self, doc_id: u32) -> Option<usize> {
+        self.find_doc_full(doc_id).map(|(i, _, _)| i)
+    }
+
+    /// Binary search on doc_id, returning the document's index, payload offset
+    /// and entry count. V2 probes three arrays; V3 narrows to one run of
+    /// `CHECKPOINT_EVERY` documents through the checkpoints, then decodes it —
+    /// once. Returning the triple is what keeps a lookup to a single scan:
+    /// every caller needs the payload right after, and `doc_at(i)` would
+    /// restart the same run from its checkpoint.
+    fn find_doc_full(&self, doc_id: u32) -> Option<(usize, u32, u16)> {
+        match &self.layout {
+            HeaderLayout::V2 { .. } => {
+                let (mut lo, mut hi) = (0usize, self.num_docs);
+                while lo < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    if self.doc_id(mid) < doc_id { lo = mid + 1; } else { hi = mid; }
+                }
+                if lo < self.num_docs {
+                    let (d, off, n) = self.doc_at(lo);
+                    if d == doc_id { return Some((lo, off, n)); }
+                }
+                None
+            }
+            HeaderLayout::V3 { checkpoints, headers } => {
+                // Largest checkpoint whose document is below the target: the
+                // answer, if any, is in the 32 documents that follow it.
+                let c = checkpoints_for(self.num_docs);
+                let (mut lo, mut hi) = (0usize, c);
+                while lo < hi {
+                    let mid = lo + (hi - lo) / 2 + 1;
+                    let at = (mid - 1) * CHECKPOINT_SIZE;
+                    let cp_doc = u32::from_le_bytes(checkpoints[at..at + 4].try_into().unwrap());
+                    if cp_doc < doc_id { lo = mid; } else { hi = mid - 1; }
+                }
+                let start = lo * CHECKPOINT_EVERY;
+                let end = (start + CHECKPOINT_EVERY).min(self.num_docs);
+                // Decode the run once. Calling `doc_id(i)` here would restart
+                // from the checkpoint at every step — 32 x 32 decodes for a
+                // lookup that needs 32, and `entry_at` runs one per emitted
+                // match (measured: the 21-query panel went 2 405 -> 2 781 ms).
+                let (mut doc, mut offset, mut pos) = if lo == 0 {
+                    (0u32, 0u32, 0usize)
+                } else {
+                    let at = (lo - 1) * CHECKPOINT_SIZE;
+                    let g = |j: usize| u32::from_le_bytes(
+                        checkpoints[at + j * 4..at + j * 4 + 4].try_into().unwrap());
+                    (g(0), g(1), g(2) as usize)
+                };
+                for i in start..end {
+                    let (Some(d_doc), Some(len), Some(n)) = (
+                        read_varint(headers, &mut pos),
+                        read_varint(headers, &mut pos),
+                        read_varint(headers, &mut pos),
+                    ) else { return None };
+                    doc = doc.wrapping_add(d_doc as u32);
+                    match doc.cmp(&doc_id) {
+                        std::cmp::Ordering::Less => {
+                            offset = offset.wrapping_add(len as u32);
+                            continue;
+                        }
+                        std::cmp::Ordering::Equal => return Some((i, offset, n.min(u16::MAX as u64) as u16)),
+                        std::cmp::Ordering::Greater => return None,
+                    }
+                }
+                None
+            }
+        }
     }
 }
+
 
 fn decode_vint(data: &[u8]) -> (u32, usize) {
     let mut result = 0u32;
@@ -573,6 +831,157 @@ mod tests {
 
         assert!(reader.entries(0).is_empty());
         assert!(reader.entries(1).is_empty());
+    }
+
+    /// The V2 writer, kept in the tests only: SFP3 has to keep reading the
+    /// segments written before 25 August 2026.
+    fn write_v2(ordinals: &[Vec<(u32, u32, u32, u32)>]) -> Vec<u8> {
+        use super::super::collector::encode_vint;
+        let mut entry_data = Vec::new();
+        let mut offset_table: Vec<u32> = Vec::new();
+        for entries in ordinals {
+            offset_table.push(entry_data.len() as u32);
+            let mut sorted = entries.clone();
+            sorted.sort_unstable();
+            let mut docs: Vec<(u32, Vec<(u32, u32, u32)>)> = Vec::new();
+            for &(doc_id, ti, bf, bt) in sorted.iter() {
+                if docs.last().is_none_or(|d| d.0 != doc_id) {
+                    docs.push((doc_id, Vec::new()));
+                }
+                docs.last_mut().unwrap().1.push((ti, bf, bt));
+            }
+            entry_data.extend_from_slice(&(docs.len() as u32).to_le_bytes());
+            for &(doc_id, _) in &docs {
+                entry_data.extend_from_slice(&doc_id.to_le_bytes());
+            }
+            let mut payloads: Vec<Vec<u8>> = Vec::new();
+            for (_, de) in &docs {
+                let mut payload = Vec::new();
+                for &(ti, bf, bt) in de {
+                    encode_vint(ti, &mut payload);
+                    encode_vint(bf, &mut payload);
+                    encode_vint(bt, &mut payload);
+                }
+                payloads.push(payload);
+            }
+            let mut cumulative = 0u32;
+            for payload in &payloads {
+                entry_data.extend_from_slice(&cumulative.to_le_bytes());
+                cumulative += payload.len() as u32;
+            }
+            for (_, de) in &docs {
+                entry_data.extend_from_slice(&(de.len() as u16).to_le_bytes());
+            }
+            for payload in &payloads {
+                entry_data.extend_from_slice(payload);
+            }
+        }
+        offset_table.push(entry_data.len() as u32);
+        let mut out = Vec::new();
+        out.extend_from_slice(MAGIC_V2);
+        out.extend_from_slice(&(ordinals.len() as u32).to_le_bytes());
+        for &off in &offset_table {
+            out.extend_from_slice(&off.to_le_bytes());
+        }
+        out.extend_from_slice(&entry_data);
+        out
+    }
+
+    /// `n` documents, several entries each, spanning more than one checkpoint
+    /// run, with a token index that jumps and a byte offset that occasionally
+    /// goes backwards — so the wrapping deltas are exercised.
+    fn sample(n: u32) -> Vec<(u32, u32, u32, u32)> {
+        let mut v = Vec::new();
+        for d in 0..n {
+            let doc = d * 3 + 1;
+            for k in 0..(1 + d % 4) {
+                let ti = k * 5 + d % 7;
+                let bf = if d % 29 == 28 { 3 } else { ti * 9 + 11 };
+                v.push((doc, ti, bf, bf + 4 + k % 3));
+            }
+        }
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    #[test]
+    fn v3_matches_v2_exactly() {
+        for n in [1u32, 2, 31, 32, 33, 64, 65, 200, 1000] {
+            let entries = sample(n);
+            let mut w = SfxPostWriterV2::new(2);
+            for &(d, ti, bf, bt) in &entries {
+                w.add_entry(1, d, ti, bf, bt);
+            }
+            let v3 = w.finish();
+            assert_eq!(&v3[0..4], MAGIC_V3, "the writer must emit SFP3");
+            let v2 = write_v2(&[Vec::new(), entries.clone()]);
+
+            let r3 = SfxPostReaderV2::open(v3.clone()).unwrap();
+            let r2 = SfxPostReaderV2::open(v2.clone()).unwrap();
+
+            assert_eq!(r3.entries(1), r2.entries(1), "n={n}: entries()");
+            assert_eq!(r3.doc_freq(1), r2.doc_freq(1), "n={n}: doc_freq()");
+            assert!(r3.entries(0).is_empty(), "n={n}: empty ordinal");
+
+            let mut w3 = Vec::new();
+            let mut w2 = Vec::new();
+            r3.for_each_entry(1, |d, ti, bf, bt| w3.push((d, ti, bf, bt)));
+            r2.for_each_entry(1, |d, ti, bf, bt| w2.push((d, ti, bf, bt)));
+            assert_eq!(w3, w2, "n={n}: for_each_entry");
+            assert_eq!(w3, entries, "n={n}: for_each_entry against the source");
+
+            // Every document, present and absent, through every lookup path.
+            for d in 0..(n * 3 + 4) {
+                assert_eq!(r3.has_doc(1, d), r2.has_doc(1, d), "n={n}: has_doc({d})");
+                assert_eq!(r3.entries_for_doc(1, d), r2.entries_for_doc(1, d), "n={n}: entries_for_doc({d})");
+                for pos in 0..8 {
+                    assert_eq!(r3.entry_at(1, d, pos), r2.entry_at(1, d, pos), "n={n}: entry_at({d}, {pos})");
+                }
+            }
+
+            // Filtered resolve takes the binary-search branch or the scan
+            // depending on the filter's size: exercise both.
+            for take in [1usize, 3, n as usize] {
+                let filter: HashSet<u32> = entries.iter().map(|e| e.0).take(take).collect();
+                assert_eq!(
+                    r3.entries_filtered(1, Some(&filter)), r2.entries_filtered(1, Some(&filter)),
+                    "n={n}: entries_filtered with {} docs", filter.len()
+                );
+            }
+
+            if n > CHECKPOINT_EVERY as u32 {
+                assert!(v3.len() < v2.len(), "n={n}: SFP3 {} B is not smaller than SFP2 {} B", v3.len(), v2.len());
+            }
+        }
+    }
+
+    #[test]
+    fn v3_reader_still_reads_v2() {
+        let entries = sample(100);
+        let v2 = write_v2(&[entries.clone()]);
+        let r = SfxPostReaderV2::open(v2).unwrap();
+        let mut got = Vec::new();
+        r.for_each_entry(0, |d, ti, bf, bt| got.push((d, ti, bf, bt)));
+        assert_eq!(got, entries);
+    }
+
+    #[test]
+    fn v3_survives_a_truncated_file() {
+        let mut w = SfxPostWriterV2::new(1);
+        for &(d, ti, bf, bt) in &sample(200) {
+            w.add_entry(0, d, ti, bf, bt);
+        }
+        let data = w.finish();
+        for cut in [data.len() / 3, data.len() / 2, data.len() - 1] {
+            if let Some(r) = SfxPostReaderV2::open(data[..cut].to_vec()) {
+                let _ = r.entries(0);
+                let _ = r.doc_freq(0);
+                let _ = r.has_doc(0, 7);
+                let _ = r.entry_at(0, 7, 2);
+                r.for_each_entry(0, |_, _, _, _| {});
+            }
+        }
     }
 
     #[test]
