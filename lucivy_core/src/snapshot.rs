@@ -42,6 +42,52 @@ fn is_temp_name(name: &str) -> bool {
     name.starts_with(".tmp") || name.contains(".tmp.")
 }
 
+/// The files a shard's searchable segments actually need, plus the two the
+/// index itself needs (`meta.json`, `.managed.json`).
+///
+/// Copying the whole directory instead carries every segment a merge has
+/// superseded and the garbage collector has not yet taken: measured at 75
+/// files and 28 % of a snapshot right after indexing. On a 2.3 GB index that
+/// is some 650 MB of dead weight — the difference between a snapshot that
+/// fits in a browser's memory and one that does not.
+fn read_live_files(
+    shard_dir: &Path,
+    shard: &crate::handle::LucivyHandle,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let sfx_version = shard.index.settings().sfx_version;
+    let metas = shard.index.searchable_segment_metas()
+        .map_err(|e| format!("cannot list segments of {}: {e}", shard_dir.display()))?;
+
+    let mut names: Vec<String> = Vec::new();
+    // meta.json is the segment list; .managed.json is the file registry a
+    // writable copy of this index will need.
+    for name in ["meta.json", ".managed.json"] {
+        if shard_dir.join(name).exists() {
+            names.push(name.to_string());
+        }
+    }
+    for p in metas.iter().flat_map(|m| m.list_files_for(sfx_version)) {
+        if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+            names.push(name.to_string());
+        }
+    }
+    names.sort();
+    names.dedup();
+
+    let mut files = Vec::with_capacity(names.len());
+    for name in names {
+        let path = shard_dir.join(&name);
+        match std::fs::read(&path) {
+            Ok(data) => files.push((name, data)),
+            // A meta may name a component this segment does not carry; that is
+            // the same absence `list_files_for` already narrows, not an error.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("cannot read '{}': {e}", path.display())),
+        }
+    }
+    Ok(files)
+}
+
 /// Read all files from a filesystem directory.
 /// Excludes lock files that should not be part of a snapshot.
 pub fn read_directory_files(path: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
@@ -106,7 +152,8 @@ pub fn export_to_snapshot(handle: &ShardedHandle, base_path: &Path) -> Result<Ve
     let mut shard_indexes = Vec::with_capacity(num_shards);
     for (i, path_str) in shard_paths.iter().enumerate() {
         let shard_dir = base_path.join(format!("shard_{i}"));
-        let files = read_directory_files(&shard_dir)?;
+        let shard = handle.shard(i).ok_or_else(|| format!("shard {i} not found"))?;
+        let files = read_live_files(&shard_dir, shard)?;
         shard_indexes.push(SnapshotIndex {
             path: path_str,
             files,

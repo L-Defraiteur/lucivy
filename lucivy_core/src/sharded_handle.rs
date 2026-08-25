@@ -1593,6 +1593,18 @@ impl ShardedHandle {
         Self::open_with_storage(Box::new(storage))
     }
 
+    /// Serve a LUCE snapshot held in memory, without extracting it.
+    ///
+    /// `import_from_snapshot` writes every file out, so the blob and the files
+    /// exist at once — 4.6 GB to open a 2.3 GB index, against the 4 GB
+    /// WebAssembly can address. Here the blob is the index: readers get slices
+    /// of it, so the memory cost is the blob's own length, known before it is
+    /// read. Read-only, by construction: a snapshot cannot be indexed into.
+    pub fn open_snapshot(blob: ld_lucivy::directory::OwnedBytes) -> Result<Self, String> {
+        let storage = crate::snapshot_directory::SnapshotShardStorage::open(blob)?;
+        Self::open_with_storage(Box::new(storage))
+    }
+
     /// Create a new sharded index with a custom storage backend.
     ///
     /// Use this for BlobStore-backed indexes, in-memory indexes, etc.

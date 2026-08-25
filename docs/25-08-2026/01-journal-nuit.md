@@ -644,3 +644,57 @@ Note honnête : **indexer** coûte plus cher que **servir** (le pic est dans
 les fusions, pas dans les requêtes). Une démo qui *importe* un index prêt
 tiendra 10 000 docs bien plus facilement qu'une démo qui les indexe ; le
 seuil n'est pas le même et l'avertissement devra distinguer les deux.
+
+## ≈17:30 — indexer sur OPFS, empaqueter en LUCE, servir le LUCE (idée de Lucie)
+
+Trois phases, avec le LUCE comme frontière — et sa taille connue **avant**
+d'engager la moindre mémoire, donc c'est là que la modale d'avertissement se
+décide :
+
+| phase | où | mémoire |
+|---|---|---|
+| indexer | OPFS, par lots | bornée (pic dans les fusions) |
+| empaqueter | un LUCE sur OPFS | bornée (à faire : exporteur en flux) |
+| servir | lire le LUCE une fois, servir des tranches | = taille du LUCE |
+
+Le piège de « charger d'un coup » : `import_from_snapshot` extrait chaque
+fichier, donc le blob **et** les fichiers coexistent — 4,6 Go pour ouvrir un
+index de 2,3 Go, au-dessus des 4 Go adressables. La sortie est de **ne pas
+extraire** : le LUCE porte déjà un manifeste nom → (offset, longueur).
+
+Fait :
+
+- `lucistore::snapshot::read_manifest` — la table des matières sans les
+  octets. Testée contre `import_snapshot` : mêmes fichiers, mêmes octets,
+  blob tronqué refusé.
+- `SnapshotDirectory` — un `Directory` en lecture seule qui rend des
+  `FileSlice` pointant **dans** le blob. `OwnedBytes` est un `Arc`, donc N
+  shards partagent une copie, pas N. Le verrou d'écriture est accordé sans
+  fichier : les octets d'un snapshot sont immuables et appartiennent à ce
+  handle, il n'y a rien à garder.
+- `ShardedHandle::open_snapshot(blob)`.
+
+Vérifié sur 3 000 fichiers kernel : snapshot de **1 091,8 Mo**, servi
+directement, **9/9 requêtes identiques** (comptes, top-10, scores au bit,
+spans). `index_bytes()` fonctionne sur un index servi — il mesure 1 089,8 Mo,
+soit **100 % du blob** : la décision de résidence marche telle quelle.
+
+### Le snapshot portait 28 % de poids mort
+
+`export_to_snapshot` copiait le répertoire entier, donc tous les segments
+qu'une fusion a remplacés et que le ramasse-miettes n'a pas encore repris :
+mesuré **75 fichiers, 28 % du blob** juste après indexation. Sur un index de
+2,3 Go ça ferait ~650 Mo — exactement la marge qui décide si ça tient en RAM.
+L'export ne prend plus que les fichiers que les segments consultables nomment
+(plus `meta.json` et `.managed.json`) : le blob passe de 6,53 à 4,68 Mo sur
+le petit index, **69 % → 95 % de vivant**, et 100 % sur les 3 000 fichiers.
+
+### Reste à faire
+
+- **Exporteur en flux** : `export_to_snapshot` construit tout en RAM
+  (`Vec<(String, Vec<u8>)>` puis concaténation), donc la phase 2 doublerait
+  la mémoire dans le navigateur. Il faut écrire dans un fichier OPFS au fil
+  de l'eau.
+- Brancher la modale sur la taille du LUCE avant de le charger.
+- Bénéfice au passage, déjà mesuré ce matin : un seul fichier au lieu de
+  ~900, soit ~3 ms d'ouverture × 900 en moins (~40 % du temps de chargement).

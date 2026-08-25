@@ -19,5 +19,6 @@ pub mod shard_router {
 pub(crate) mod search_dag;
 pub mod sharded_handle;
 pub mod snapshot;
+pub mod snapshot_directory;
 pub mod sync;
 pub mod warnings;

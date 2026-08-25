@@ -96,6 +96,93 @@ pub fn export_snapshot_sharded(
     buf
 }
 
+/// Where one file lives inside a LUCE blob.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotEntry {
+    pub name: String,
+    /// Byte offset of the file's content in the blob.
+    pub offset: usize,
+    pub len: usize,
+}
+
+/// A LUCE blob's table of contents, without its bytes.
+///
+/// `import_snapshot` copies every file out of the blob, which costs a second
+/// copy of the whole index — 2.3 GB for 10 000 kernel files, against a 4 GB
+/// address space in WebAssembly. A reader that keeps the blob and serves
+/// slices of it needs only where each file is, which is what this returns.
+#[derive(Debug, Clone)]
+pub struct SnapshotManifest {
+    pub is_sharded: bool,
+    pub root_files: Vec<SnapshotEntry>,
+    /// `(index path, its files)`.
+    pub indexes: Vec<(String, Vec<SnapshotEntry>)>,
+    /// Bytes the blob must hold for every entry to be readable.
+    pub end: usize,
+}
+
+/// Read a LUCE blob's table of contents. Walks the same structure
+/// `import_snapshot` does and records offsets instead of copying.
+pub fn read_manifest(data: &[u8]) -> Result<SnapshotManifest, String> {
+    let mut pos = 0;
+    if data.len() < 12 {
+        return Err("snapshot too small: missing header".into());
+    }
+    if &data[pos..pos + 4] != MAGIC {
+        return Err("invalid snapshot: bad magic (expected LUCE)".into());
+    }
+    pos += 4;
+    let version = read_u32(data, &mut pos)?;
+
+    // One file: name, length, then the bytes, which are skipped.
+    let mut entry = |pos: &mut usize| -> Result<SnapshotEntry, String> {
+        let name = read_string(data, pos)?;
+        let len = read_u32(data, pos)? as usize;
+        if *pos + len > data.len() {
+            return Err(format!("snapshot truncated: expected {len} bytes for '{name}'"));
+        }
+        let offset = *pos;
+        *pos += len;
+        Ok(SnapshotEntry { name, offset, len })
+    };
+
+    let (is_sharded, root_files) = match version {
+        1 => (false, Vec::new()),
+        2 => {
+            if pos >= data.len() {
+                return Err("snapshot truncated: missing is_sharded byte".into());
+            }
+            let flag = data[pos];
+            pos += 1;
+            if flag == 1 {
+                let num_root = read_u32(data, &mut pos)? as usize;
+                let mut files = Vec::with_capacity(num_root);
+                for _ in 0..num_root {
+                    files.push(entry(&mut pos)?);
+                }
+                (true, files)
+            } else {
+                (false, Vec::new())
+            }
+        }
+        _ => return Err(format!("unsupported snapshot version: {version} (expected 1 or 2)")),
+    };
+
+    let num_indexes = read_u32(data, &mut pos)?;
+    let mut indexes = Vec::with_capacity(num_indexes as usize);
+    for _ in 0..num_indexes {
+        let path = read_string(data, &mut pos)?;
+        let num_files = read_u32(data, &mut pos)?;
+        let mut files = Vec::with_capacity(num_files as usize);
+        for _ in 0..num_files {
+            files.push(entry(&mut pos)?);
+        }
+        indexes.push((path, files));
+    }
+
+    Ok(SnapshotManifest { is_sharded, root_files, indexes, end: pos })
+}
+
 /// Deserialize a LUCE snapshot blob (v1 or v2).
 pub fn import_snapshot(data: &[u8]) -> Result<ImportedSnapshot, String> {
     let mut pos = 0;
@@ -174,6 +261,62 @@ pub fn import_snapshot(data: &[u8]) -> Result<ImportedSnapshot, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The manifest must describe exactly what `import_snapshot` extracts:
+    /// same files, same order, same bytes — read as slices of the blob.
+    #[test]
+    fn manifest_agrees_with_import() {
+        let idx1 = SnapshotIndex {
+            path: "shard_0",
+            files: vec![
+                ("meta.json".into(), b"{\"a\":1}".to_vec()),
+                ("0.sfx".into(), vec![7u8; 1000]),
+                ("empty.bin".into(), Vec::new()),
+            ],
+        };
+        let idx2 = SnapshotIndex {
+            path: "shard_1",
+            files: vec![("0.sfx".into(), vec![9u8; 5])],
+        };
+        let root = vec![
+            ("_shard_config.json".to_string(), b"{}".to_vec()),
+            ("_shard_stats.bin".to_string(), vec![1, 2, 3]),
+        ];
+        let blob = export_snapshot_sharded(&[idx1, idx2], &root);
+
+        let imported = import_snapshot(&blob).unwrap();
+        let manifest = read_manifest(&blob).unwrap();
+
+        assert_eq!(manifest.is_sharded, imported.is_sharded);
+        assert_eq!(manifest.end, blob.len(), "the manifest must account for every byte");
+        assert_eq!(manifest.root_files.len(), imported.root_files.len());
+        for (e, (name, data)) in manifest.root_files.iter().zip(&imported.root_files) {
+            assert_eq!(&e.name, name);
+            assert_eq!(&blob[e.offset..e.offset + e.len], &data[..], "root file {name}");
+        }
+        assert_eq!(manifest.indexes.len(), imported.indexes.len());
+        for ((path, entries), idx) in manifest.indexes.iter().zip(&imported.indexes) {
+            assert_eq!(path, &idx.path);
+            assert_eq!(entries.len(), idx.files.len());
+            for (e, (name, data)) in entries.iter().zip(&idx.files) {
+                assert_eq!(&e.name, name);
+                assert_eq!(&blob[e.offset..e.offset + e.len], &data[..], "{path}/{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn manifest_refuses_a_truncated_blob() {
+        let snap = SnapshotIndex {
+            path: "shard_0",
+            files: vec![("0.sfx".into(), vec![3u8; 500])],
+        };
+        let blob = export_snapshot(&[snap]);
+        for cut in [4, 11, blob.len() / 2, blob.len() - 1] {
+            assert!(read_manifest(&blob[..cut]).is_err(), "a blob cut at {cut} must be refused");
+        }
+        assert!(read_manifest(&blob).is_ok());
+    }
 
     #[test]
     fn test_roundtrip_empty() {
