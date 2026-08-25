@@ -363,3 +363,31 @@ passes 1+2. Piste : les lectures « petites » (en-tête de version, 4
 octets) font open+seek+read à chaque appel — ~3 ms sur OPFS × 117
 segments × (filtre + poids par lot + prescan) ≈ 2-3 s. Cache des 4 premiers
 Ko sur le handle (`head`), une ouverture par handle. Mesure en cours.
+
+## ≈11:30 — combien d'octets une requête touche vraiment (mmap + mincore)
+
+`test_touched_bytes` (ignoré par défaut) : ouvrir l'index, chauffer avec un
+terme **différent**, `posix_fadvise(DONTNEED)` sur les 208 fichiers, mesurer
+les pages résidentes (`mincore`) avant/après la requête. L'éviction laisse
+17 Mo, donc le delta est bien le coût marginal d'une requête. Index kernel
+15 440 docs compacté, 4 378 Mo :
+
+| requête | touché | sfx | word_sfxpost | sibling_v3 | posmap | word_pos_map | termtexts |
+|---|---|---|---|---|---|---|---|
+| `kmalloc` (1 216 hits) | **1 330 Mo (30 %)** | 341 (21 %) | 598 (78 %) | 177 (66 %) | 73 (43 %) | 60 (35 %) | 4 (1,7 %) |
+| `spin_lock_init` (1 112) | **1 298 Mo (30 %)** | 354 (22 %) | 628 (82 %) | 180 (67 %) | 75 (44 %) | 59 (35 %) | 2 (0,8 %) |
+| `zzqqxxwwvv` (0 hit) | **67 Mo (1,5 %)** | 46 (2,8 %) | 0 | 20 (7,6 %) | 0 | 0 | 0,3 |
+
+Trois conclusions chiffrées :
+
+1. **La pagination vaut 3,3× sur un terme fréquent et ~70× sur un terme
+   rare.** Le navigateur paie aujourd'hui les 5,4 Go dans tous les cas ;
+   `zzqqxxwwvv` n'a besoin que de 67 Mo. C'est le levier principal.
+2. **`word_sfxpost` est le vrai poids du jeu de travail** : 765 Mo (17 % de
+   l'index) dont 78-82 % touchés par une requête courante. C'est le fichier
+   non compressé à 20 o/entrée repéré à l'audit ; le compresser réduit le
+   coût natif *et* navigateur, indépendamment de la pagination.
+3. `termtexts` (235 Mo) n'est touché qu'à 1-2 % : il se pagine idéalement.
+
+À froid, la même requête met 381 ms en natif (contre 21-55 ms à chaud) :
+l'I/O domine aussi en natif, la différence est que mmap ne lit que 30 %.

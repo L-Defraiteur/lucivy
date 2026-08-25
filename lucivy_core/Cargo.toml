@@ -1,6 +1,6 @@
 [package]
 name = "lucivy-core"
-version = "2.1.0"
+version = "3.0.0"
 edition = "2021"
 license = "MIT"
 description = "Core library for Lucivy full-text search: schema, query, handle, tokenizer"
@@ -18,7 +18,7 @@ default = ["mmap"]
 mmap = ["ld-lucivy/mmap"]
 
 [dependencies]
-ld-lucivy = { version = "2.1.0", path = "..", default-features = false, features = [
+ld-lucivy = { version = "3.0.0", path = "..", default-features = false, features = [
     "stopwords",
     "lz4-compression",
 ] }
@@ -31,6 +31,8 @@ regex-syntax = "0.8"
 
 [dev-dependencies]
 postgres = "0.19"
+# test_touched_bytes: posix_fadvise / mincore, to count the bytes a query faults in
+libc = "0.2"
 tantivy = "0.25"
 
 [[test]]
