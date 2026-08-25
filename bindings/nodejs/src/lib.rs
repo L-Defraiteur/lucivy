@@ -65,10 +65,50 @@ pub struct SearchOptions {
 
 #[napi]
 pub struct Index {
-    handle: ShardedHandle,
+    /// `None` once `dropIndex()` consumed the handle: every later call errors.
+    handle: Option<ShardedHandle>,
+    /// Empty for a snapshot-backed index (`openSnapshot`): it has no directory.
     index_path: String,
     user_fields: Vec<(String, String)>,
     text_fields: Vec<String>,
+}
+
+impl Index {
+    fn h(&self) -> Result<&ShardedHandle> {
+        self.handle.as_ref().ok_or_else(|| Error::from_reason(
+            "index was dropped with dropIndex(): no further calls allowed",
+        ))
+    }
+
+    fn is_snapshot(&self) -> bool {
+        self.index_path.is_empty()
+    }
+
+    /// The handle, for operations that write. A served snapshot buffers
+    /// documents happily and only fails at commit — which a later search
+    /// would trigger on its own — so writes are refused here, up front.
+    fn writable(&self) -> Result<&ShardedHandle> {
+        let handle = self.h()?;
+        if self.is_snapshot() {
+            return Err(Error::from_reason(
+                "a snapshot opened with openSnapshot() is read-only: \
+                 import it with Index.importSnapshot() to get a writable index",
+            ));
+        }
+        Ok(handle)
+    }
+
+    /// The index directory, for the operations that read or write files
+    /// next to the shards (snapshot export, delta sync).
+    fn dir(&self) -> Result<&str> {
+        if self.index_path.is_empty() {
+            return Err(Error::from_reason(
+                "a snapshot-backed index (openSnapshot) has no directory: \
+                 import it with Index.importSnapshot() first",
+            ));
+        }
+        Ok(&self.index_path)
+    }
 }
 
 #[napi]
@@ -105,7 +145,7 @@ impl Index {
         let (user_fields, text_fields) = extract_user_fields(&config);
 
         Ok(Self {
-            handle,
+            handle: Some(handle),
             index_path: path,
             user_fields,
             text_fields,
@@ -127,7 +167,7 @@ impl Index {
         let (user_fields, text_fields) = extract_user_fields(&handle.config);
 
         Ok(Self {
-            handle,
+            handle: Some(handle),
             index_path: path,
             user_fields,
             text_fields,
@@ -140,15 +180,16 @@ impl Index {
     /// @param fields - Object with field names as keys: `{title: "Hello", body: "World", score: 3.14}`
     #[napi]
     pub fn add(&self, doc_id: u32, fields: HashMap<String, serde_json::Value>) -> Result<()> {
+        let handle = self.writable()?;
         let mut doc = LucivyDocument::new();
 
-        let nid_field = self.handle.field(NODE_ID_FIELD)
+        let nid_field = handle.field(NODE_ID_FIELD)
             .ok_or_else(|| Error::from_reason("no _node_id field in schema"))?;
         doc.add_u64(nid_field, doc_id as u64);
 
-        add_fields_from_map(&self.handle, &mut doc, &fields)?;
+        add_fields_from_map(handle, &mut doc, &fields)?;
 
-        self.handle.add_document(doc, doc_id as u64)
+        handle.add_document(doc, doc_id as u64)
             .map_err(|e| Error::from_reason(e))
     }
 
@@ -159,7 +200,8 @@ impl Index {
     /// @param docs - Array of objects: `[{docId: 1, title: "Hello"}, {docId: 2, title: "World"}]`.
     #[napi]
     pub fn add_many(&self, docs: Vec<HashMap<String, serde_json::Value>>) -> Result<()> {
-        let nid_field = self.handle.field(NODE_ID_FIELD)
+        let handle = self.writable()?;
+        let nid_field = handle.field(NODE_ID_FIELD)
             .ok_or_else(|| Error::from_reason("no _node_id field in schema"))?;
 
         for map in &docs {
@@ -175,10 +217,10 @@ impl Index {
                 if key == "docId" || key == "doc_id" {
                     continue;
                 }
-                add_field_value(&self.handle, &mut doc, key, value)?;
+                add_field_value(handle, &mut doc, key, value)?;
             }
 
-            self.handle.add_document(doc, doc_id)
+            handle.add_document(doc, doc_id)
                 .map_err(|e| Error::from_reason(e))?;
         }
         Ok(())
@@ -192,7 +234,7 @@ impl Index {
     /// @param docId - The `_node_id` of the document to delete.
     #[napi]
     pub fn delete(&self, doc_id: u32) -> Result<()> {
-        self.handle.delete_by_node_id(doc_id as u64)
+        self.writable()?.delete_by_node_id(doc_id as u64)
             .map_err(|e| Error::from_reason(e))
     }
 
@@ -215,7 +257,7 @@ impl Index {
     /// (e.g., after a batch of adds/deletes).
     #[napi]
     pub fn commit(&self) -> Result<()> {
-        self.handle.commit()
+        self.writable()?.commit()
             .map_err(|e| Error::from_reason(e))
     }
 
@@ -223,9 +265,16 @@ impl Index {
     ///
     /// After `close()`, the index data remains on disk and can be re-opened
     /// with `Index.open()`. No further mutations are allowed on this instance.
+    ///
+    /// On a snapshot served with `openSnapshot()` there is nothing to flush
+    /// and no lock to release: `close()` is a no-op.
     #[napi]
     pub fn close(&self) -> Result<()> {
-        self.handle.close()
+        let handle = self.h()?;
+        if self.is_snapshot() {
+            return Ok(());
+        }
+        handle.close()
             .map_err(|e| Error::from_reason(e))
     }
 
@@ -273,7 +322,7 @@ impl Index {
     #[napi]
     pub fn query_warnings(&self, query: serde_json::Value) -> Result<Vec<String>> {
         let query_config = self.parse_query(&query)?;
-        Ok(self.handle.query_warnings(&query_config))
+        Ok(self.h()?.query_warnings(&query_config))
     }
 
     /// @param options - `{limit?: number, highlights?: boolean, fields?: boolean, allowedIds?: number[]}`
@@ -299,15 +348,15 @@ impl Index {
         let results = match allowed_ids {
             Some(ids) => {
                 let id_set: HashSet<u64> = ids.into_iter().map(|id| id as u64).collect();
-                self.handle.search_filtered(&query_config, limit as usize, highlight_sink.clone(), id_set)
+                self.h()?.search_filtered(&query_config, limit as usize, highlight_sink.clone(), id_set)
                     .map_err(|e| Error::from_reason(e))?
             }
-            None => self.handle.search(&query_config, limit as usize, highlight_sink.clone())
+            None => self.h()?.search(&query_config, limit as usize, highlight_sink.clone())
                 .map_err(|e| Error::from_reason(e))?,
         };
 
         collect_sharded_results(
-            &self.handle,
+            self.h()?,
             &results,
             highlight_sink.as_deref(),
             want_fields,
@@ -318,16 +367,16 @@ impl Index {
     ///
     /// @returns Total document count across all shards.
     #[napi(getter)]
-    pub fn num_docs(&self) -> u32 {
-        self.handle.num_docs() as u32
+    pub fn num_docs(&self) -> Result<u32> {
+        Ok(self.h()?.num_docs() as u32)
     }
 
     /// Number of shards (getter, access as `index.numShards`).
     ///
     /// @returns Shard count (1 for single-shard indexes).
     #[napi(getter)]
-    pub fn num_shards(&self) -> u32 {
-        self.handle.num_shards() as u32
+    pub fn num_shards(&self) -> Result<u32> {
+        Ok(self.h()?.num_shards() as u32)
     }
 
     /// Index directory path (getter, access as `index.path`).
@@ -347,8 +396,8 @@ impl Index {
     #[napi]
     pub fn export_snapshot(&self) -> Result<Buffer> {
         let blob = snapshot::export_to_snapshot(
-            &self.handle,
-            std::path::Path::new(&self.index_path),
+            self.h()?,
+            std::path::Path::new(self.dir()?),
         ).map_err(|e| Error::from_reason(e))?;
         Ok(blob.into())
     }
@@ -359,8 +408,8 @@ impl Index {
     #[napi]
     pub fn export_snapshot_to(&self, path: String) -> Result<()> {
         let blob = snapshot::export_to_snapshot(
-            &self.handle,
-            std::path::Path::new(&self.index_path),
+            self.h()?,
+            std::path::Path::new(self.dir()?),
         ).map_err(|e| Error::from_reason(e))?;
         std::fs::write(&path, &blob)
             .map_err(|e| Error::from_reason(format!("cannot write snapshot: {e}")))?;
@@ -386,7 +435,7 @@ impl Index {
         let (user_fields, text_fields) = extract_user_fields(&handle.config);
 
         Ok(Self {
-            handle,
+            handle: Some(handle),
             index_path: dest.to_string(),
             user_fields,
             text_fields,
@@ -406,6 +455,104 @@ impl Index {
         let data = std::fs::read(&path)
             .map_err(|e| Error::from_reason(format!("cannot read snapshot: {e}")))?;
         Self::import_snapshot(data.into(), dest_path)
+    }
+
+    /// Serve a LUCE snapshot (Buffer) directly, without extracting it.
+    ///
+    /// The blob itself is the index: readers get slices of it, nothing is
+    /// written to disk and the memory cost is the blob's own length. The
+    /// result is **read-only** — `add()`, `delete()`, `commit()`, `compact()`
+    /// and the delta/snapshot exports fail with a clear error. To get a
+    /// writable index back, use `Index.importSnapshot()` instead.
+    ///
+    /// @param data - Raw LUCE snapshot bytes (Buffer), as produced by `exportSnapshot()`.
+    /// @returns A read-only `Index` ready for search. Its `path` is `""`.
+    #[napi(factory)]
+    pub fn open_snapshot(data: Buffer) -> Result<Self> {
+        let bytes = ld_lucivy::directory::OwnedBytes::new(data.to_vec());
+        let handle = ShardedHandle::open_snapshot(bytes)
+            .map_err(|e| Error::from_reason(e))?;
+
+        let (user_fields, text_fields) = extract_user_fields(&handle.config);
+
+        Ok(Self {
+            handle: Some(handle),
+            index_path: String::new(),
+            user_fields,
+            text_fields,
+        })
+    }
+
+    /// Serve a LUCE snapshot file (.luce) directly, without extracting it.
+    ///
+    /// Convenience wrapper that reads the file then calls `openSnapshot()`.
+    /// Same read-only semantics.
+    ///
+    /// @param path - Path to the `.luce` snapshot file.
+    /// @returns A read-only `Index` ready for search.
+    #[napi(factory)]
+    pub fn open_snapshot_from(path: String) -> Result<Self> {
+        let data = std::fs::read(&path)
+            .map_err(|e| Error::from_reason(format!("cannot read snapshot: {e}")))?;
+        Self::open_snapshot(data.into())
+    }
+
+    // ── Maintenance ────────────────────────────────────────────────────
+
+    /// Merge every shard's segments into segments of at most `maxDocs`
+    /// documents, then commit.
+    ///
+    /// Bulk loading leaves many small segments behind; one `compact()` after
+    /// the load makes searches faster and the index smaller on disk. Not
+    /// something to call on every commit.
+    ///
+    /// @param maxDocs - Upper bound on documents per merged segment (default 10000).
+    /// @returns Number of merge rounds that actually reduced a shard's segment count.
+    #[napi]
+    pub fn compact(&self, max_docs: Option<u32>) -> Result<u32> {
+        let max_docs = max_docs.unwrap_or(10_000) as usize;
+        let merges = self.writable()?.compact(max_docs)
+            .map_err(|e| Error::from_reason(e))?;
+        Ok(merges as u32)
+    }
+
+    /// Block until no background merge is running or about to start.
+    ///
+    /// Segment merges run in the background after commits. Call this before
+    /// anything that needs a stable set of files or the full address space —
+    /// measuring `indexBytes()`, copying the directory, exporting a snapshot
+    /// under memory pressure.
+    ///
+    /// @returns Number of rounds that still saw merge activity (0 = already quiet).
+    #[napi]
+    pub fn wait_merges_quiet(&self) -> Result<u32> {
+        let rounds = self.h()?.wait_merges_quiet()
+            .map_err(|e| Error::from_reason(e))?;
+        Ok(rounds as u32)
+    }
+
+    /// On-disk bytes of every searchable segment of every shard.
+    ///
+    /// Sums the segment files; the number moves while merges run, so call
+    /// `waitMergesQuiet()` first for a stable figure.
+    ///
+    /// @returns Total size in bytes (a `number`; exact below 2^53).
+    #[napi]
+    pub fn index_bytes(&self) -> Result<f64> {
+        Ok(self.h()?.index_bytes() as f64)
+    }
+
+    /// Delete the whole index: commit and release everything (like `close()`),
+    /// then remove the index files from disk.
+    ///
+    /// This consumes the underlying handle. After `dropIndex()` every other
+    /// method on this instance throws; create or open a new `Index` instead.
+    #[napi]
+    pub fn drop_index(&mut self) -> Result<()> {
+        let handle = self.handle.take().ok_or_else(|| Error::from_reason(
+            "index was already dropped with dropIndex()",
+        ))?;
+        handle.drop_index().map_err(|e| Error::from_reason(e))
     }
 
     /// Schema as a list of field definitions (getter, access as `index.schema`).
@@ -436,7 +583,7 @@ impl Index {
     /// @returns `Array<{shardId: number, version: string, segmentIds: string[]}>`.
     #[napi(getter)]
     pub fn shard_versions(&self) -> Result<Vec<ShardVersion>> {
-        let versions = self.handle.shard_versions()
+        let versions = self.h()?.shard_versions()
             .map_err(|e| Error::from_reason(e))?;
         Ok(versions
             .iter()
@@ -468,7 +615,7 @@ impl Index {
             })
             .collect();
 
-        let blob = self.handle.export_sharded_delta(&self.index_path, &versions)
+        let blob = self.h()?.export_sharded_delta(self.dir()?, &versions)
             .map_err(|e| Error::from_reason(e))?;
         Ok(blob.into())
     }
@@ -481,7 +628,7 @@ impl Index {
     /// @param data - LUCIDS binary blob from `exportShardedDelta()`.
     #[napi]
     pub fn apply_sharded_delta(&self, data: Buffer) -> Result<()> {
-        self.handle.apply_sharded_delta(&self.index_path, &data)
+        self.h()?.apply_sharded_delta(self.dir()?, &data)
             .map_err(|e| Error::from_reason(e))
     }
 
@@ -499,7 +646,7 @@ impl Index {
     pub fn export_stats(&self, query_json: String) -> Result<String> {
         let config: query::QueryConfig = serde_json::from_str(&query_json)
             .map_err(|e| Error::from_reason(format!("invalid query JSON: {e}")))?;
-        let stats = self.handle.export_stats(&config)
+        let stats = self.h()?.export_stats(&config)
             .map_err(|e| Error::from_reason(e))?;
         serde_json::to_string(&stats)
             .map_err(|e| Error::from_reason(format!("serialize stats: {e}")))
@@ -539,12 +686,12 @@ impl Index {
             None
         };
 
-        let results = self.handle.search_with_global_stats(
+        let results = self.h()?.search_with_global_stats(
             &query_config, limit, &global_stats, highlight_sink.clone(),
         ).map_err(|e| Error::from_reason(e))?;
 
         collect_sharded_results(
-            &self.handle,
+            self.h()?,
             &results,
             highlight_sink.as_deref(),
             false,

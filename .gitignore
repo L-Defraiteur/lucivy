@@ -19,3 +19,7 @@ variable
 docker-compose.test.yml
 playground/diag.log
 playground/corpus-*.tar.gz
+
+# Python bytecode caches (bindings/python/tests)
+__pycache__/
+*.pyc

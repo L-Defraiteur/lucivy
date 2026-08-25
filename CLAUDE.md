@@ -114,14 +114,18 @@ Crate séparé dans `luciole/`. WASM-safe.
 - **ActorActivity** : labels dynamiques (String) dans les dumps scheduler
 - **BranchNode** : FONCTION pas struct (`BranchNode(|| cond)`)
 
-## Bindings — état v2
+## Bindings — état 3.0.0 (25 août 2026)
 
-| Binding | v2 Ready | Snapshot | Delta | Query passthrough |
-|---------|----------|----------|-------|-------------------|
-| Python | READY | export+import | export+apply (sharded) | JSON QueryConfig |
-| Node.js | READY | export+import | export+apply (sharded) | JSON QueryConfig |
-| C++ (cxx) | READY | export+import | export+apply (sharded) | JSON QueryConfig |
-| Emscripten | PARTIAL | import only | manquant | JSON QueryConfig |
+| Binding | Snapshot | Delta | 3.0.0 : `query_warnings`, `compact`, `wait_merges_quiet`, `index_bytes`, `drop_index`, `open_snapshot(_from)` | Filtré (`allowed_ids`) |
+|---------|----------|-------|------|------|
+| Python | export+import+**servi en place** | export+apply (sharded) | oui — tests `tests/test_v3_api.py` (93 verts, 4 skip documentés) | oui |
+| Node.js | export+import+**servi en place** | export+apply (sharded) | oui — `tests/v3_api.mjs` | oui |
+| C++ (cxx) | export+import+**servi en place** | export+apply (sharded) | oui — tests Rust dans `lib.rs` ; `rollback` = erreur honnête | oui |
+| Emscripten | import only | manquant | `memory_status`, `preload`, drapeaux (`--scheduler-threads`, `--max-merged-docs`, `--max-builds`, `--ram-index-max-mb`…) | non |
+
+Stockage blob ACID (`BlobStore`, `BlobShardStorage`, lazy) : API Rust
+(`lucivy-core` / `lucistore`), utilisée par rag3db via `lucivy_fts` — pas
+exposée dans Python/Node/C++ (dit dans leurs README).
 
 Emscripten manque : export_snapshot, export_sharded_delta, apply_sharded_delta.
 

@@ -54,10 +54,50 @@ impl SearchResult {
 
 #[pyclass]
 struct Index {
-    handle: ShardedHandle,
-    index_path: String,
+    /// `None` once `drop_index()` has consumed the handle (or `close()` released
+    /// a served snapshot): every method then raises instead of touching it.
+    handle: Option<ShardedHandle>,
+    /// Index directory. `None` for an index served from a snapshot in memory
+    /// (`open_snapshot`), which has no files of its own.
+    index_path: Option<String>,
     user_fields: Vec<(String, String)>,
     text_fields: Vec<String>,
+}
+
+impl Index {
+    fn from_handle(handle: ShardedHandle, index_path: Option<String>) -> Self {
+        let (user_fields, text_fields) = extract_user_fields(&handle.config);
+        Self { handle: Some(handle), index_path, user_fields, text_fields }
+    }
+
+    /// The live handle, or a clear error once the index has been dropped.
+    fn h(&self) -> PyResult<&ShardedHandle> {
+        self.handle.as_ref().ok_or_else(|| PyValueError::new_err(
+            "index has been dropped (drop_index) or released: open it again with Index.open()",
+        ))
+    }
+
+    /// The live handle for a mutation. An index served from a snapshot has a
+    /// writer that buffers adds and deletes in memory, then fails at commit
+    /// when the directory refuses the write — refuse the mutation itself
+    /// instead, with the reason.
+    fn writable(&self) -> PyResult<&ShardedHandle> {
+        let handle = self.h()?;
+        if self.index_path.is_none() {
+            return Err(PyValueError::new_err(
+                "a snapshot is read-only: use Index.import_snapshot() to get an editable copy",
+            ));
+        }
+        Ok(handle)
+    }
+
+    /// The index directory, or a clear error for an index served from a snapshot.
+    fn dir(&self) -> PyResult<&str> {
+        self.index_path.as_deref().ok_or_else(|| PyValueError::new_err(
+            "this index is served from a snapshot in memory and has no directory: \
+             export from the source index instead",
+        ))
+    }
 }
 
 #[pymethods]
@@ -113,14 +153,7 @@ impl Index {
         let handle = ShardedHandle::create(path, &config)
             .map_err(|e| PyValueError::new_err(e))?;
 
-        let (user_fields, text_fields) = extract_user_fields(&config);
-
-        Ok(Self {
-            handle,
-            index_path: path.to_string(),
-            user_fields,
-            text_fields,
-        })
+        Ok(Self::from_handle(handle, Some(path.to_string())))
     }
 
     /// Open an existing index at the given path.
@@ -143,14 +176,7 @@ impl Index {
         let handle = ShardedHandle::open(path)
             .map_err(|e| PyValueError::new_err(e))?;
 
-        let (user_fields, text_fields) = extract_user_fields(&handle.config);
-
-        Ok(Self {
-            handle,
-            index_path: path.to_string(),
-            user_fields,
-            text_fields,
-        })
+        Ok(Self::from_handle(handle, Some(path.to_string())))
     }
 
     /// Add a document. Fields are passed as keyword arguments.
@@ -167,13 +193,13 @@ impl Index {
         let kwargs = kwargs.ok_or_else(|| PyValueError::new_err("at least one field is required"))?;
         let mut doc = LucivyDocument::new();
 
-        let nid_field = self.handle.field(NODE_ID_FIELD)
+        let nid_field = self.writable()?.field(NODE_ID_FIELD)
             .ok_or_else(|| PyValueError::new_err("no _node_id field in schema"))?;
         doc.add_u64(nid_field, doc_id);
 
-        add_fields_from_dict(&self.handle, &mut doc, kwargs)?;
+        add_fields_from_dict(self.h()?, &mut doc, kwargs)?;
 
-        self.handle.add_document(doc, doc_id)
+        self.h()?.add_document(doc, doc_id)
             .map_err(|e| PyValueError::new_err(e))
     }
 
@@ -188,7 +214,7 @@ impl Index {
     ///
     /// Each dict must have a ``doc_id`` key. Other keys are field values.
     fn add_many(&self, docs: &Bound<'_, PyList>) -> PyResult<()> {
-        let nid_field = self.handle.field(NODE_ID_FIELD)
+        let nid_field = self.writable()?.field(NODE_ID_FIELD)
             .ok_or_else(|| PyValueError::new_err("no _node_id field in schema"))?;
 
         for item in docs.iter() {
@@ -203,10 +229,10 @@ impl Index {
             for (key, value) in dict.iter() {
                 let field_name: String = key.extract()?;
                 if field_name == "doc_id" { continue; }
-                add_field_value(&self.handle, &mut doc, &field_name, &value)?;
+                add_field_value(self.h()?, &mut doc, &field_name, &value)?;
             }
 
-            self.handle.add_document(doc, doc_id)
+            self.h()?.add_document(doc, doc_id)
                 .map_err(|e| PyValueError::new_err(e))?;
         }
         Ok(())
@@ -225,7 +251,7 @@ impl Index {
     ///     index.delete(42)
     ///     index.commit()
     fn delete(&self, doc_id: u64) -> PyResult<()> {
-        self.handle.delete_by_node_id(doc_id)
+        self.writable()?.delete_by_node_id(doc_id)
             .map_err(|e| PyValueError::new_err(e))
     }
 
@@ -253,7 +279,7 @@ impl Index {
     ///     index.add(2, title="World")
     ///     index.commit()  # both docs now searchable
     fn commit(&self) -> PyResult<()> {
-        self.handle.commit()
+        self.writable()?.commit()
             .map_err(|e| PyValueError::new_err(e))
     }
 
@@ -261,14 +287,21 @@ impl Index {
     ///
     /// After ``close()``, the index data remains on disk and can be re-opened
     /// with ``Index.open()``. No further mutations are allowed on this instance.
+    /// On an index served from a snapshot (``Index.open_snapshot()``) there is
+    /// nothing to flush: ``close()`` releases the blob and the instance is done.
     ///
     /// Example::
     ///
     ///     index.close()
     ///     # later...
     ///     index = Index.open("/tmp/my_index")
-    fn close(&self) -> PyResult<()> {
-        self.handle.close()
+    fn close(&mut self) -> PyResult<()> {
+        if self.index_path.is_none() {
+            self.h()?;
+            self.handle = None;
+            return Ok(());
+        }
+        self.h()?.close()
             .map_err(|e| PyValueError::new_err(e))
     }
 
@@ -354,7 +387,7 @@ impl Index {
     ///         print("warning:", w)
     fn query_warnings(&self, query: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
         let query_config = self.parse_query(query)?;
-        Ok(self.handle.query_warnings(&query_config))
+        Ok(self.h()?.query_warnings(&query_config))
     }
 
     #[pyo3(signature = (query, limit=10, highlights=false, allowed_ids=None, fields=false))]
@@ -377,14 +410,14 @@ impl Index {
         let results = match allowed_ids {
             Some(ids) => {
                 let id_set: HashSet<u64> = ids.into_iter().collect();
-                self.handle.search_filtered(&query_config, limit as usize, highlight_sink.clone(), id_set)
+                self.h()?.search_filtered(&query_config, limit as usize, highlight_sink.clone(), id_set)
                     .map_err(|e| PyValueError::new_err(e))?
             }
-            None => self.handle.search(&query_config, limit as usize, highlight_sink.clone())
+            None => self.h()?.search(&query_config, limit as usize, highlight_sink.clone())
                 .map_err(|e| PyValueError::new_err(e))?,
         };
 
-        collect_sharded_results(&self.handle, &results, highlight_sink.as_deref(), fields)
+        collect_sharded_results(self.h()?, &results, highlight_sink.as_deref(), fields)
     }
 
     /// Number of documents in the index (property, no parentheses).
@@ -393,20 +426,100 @@ impl Index {
     ///
     ///     count = index.num_docs  # not index.num_docs()
     #[getter]
-    fn num_docs(&self) -> u64 {
-        self.handle.num_docs()
+    fn num_docs(&self) -> PyResult<u64> {
+        Ok(self.h()?.num_docs())
     }
 
     /// Number of shards (property).
     #[getter]
-    fn num_shards(&self) -> usize {
-        self.handle.num_shards()
+    fn num_shards(&self) -> PyResult<usize> {
+        Ok(self.h()?.num_shards())
     }
 
-    /// Index directory path (property).
+    /// Index directory path (property). ``None`` for an index served from a
+    /// snapshot in memory (``Index.open_snapshot()``).
     #[getter]
-    fn path(&self) -> &str {
-        &self.index_path
+    fn path(&self) -> Option<&str> {
+        self.index_path.as_deref()
+    }
+
+    /// On-disk bytes of every searchable segment, across all shards.
+    ///
+    /// Counts the files the current segments actually reference (not
+    /// leftovers awaiting garbage collection), so it is the size a snapshot
+    /// export or a full in-memory load will cost. For an index served from a
+    /// snapshot it measures the live slices of the blob.
+    ///
+    /// Example::
+    ///
+    ///     index.commit()
+    ///     print(index.index_bytes() >> 20, "MB")
+    fn index_bytes(&self) -> PyResult<u64> {
+        Ok(self.h()?.index_bytes())
+    }
+
+    /// Merge every shard's segments into segments of at most ``max_docs``
+    /// documents, then commit. Returns the number of merges performed.
+    ///
+    /// Call it once after a bulk load: search time grows with the segment
+    /// count, and the background merge policy only catches up gradually.
+    /// Blocks until the merges are done. Not for the browser build — a
+    /// compaction sizes its arenas from its inputs.
+    ///
+    /// Args:
+    ///     max_docs: Upper bound on documents per merged segment (default 10000).
+    ///
+    /// Example::
+    ///
+    ///     index.add_many(docs)
+    ///     merges = index.compact()
+    #[pyo3(signature = (max_docs=10000))]
+    fn compact(&self, max_docs: usize) -> PyResult<usize> {
+        self.writable()?.compact(max_docs)
+            .map_err(|e| PyValueError::new_err(e))
+    }
+
+    /// Block until no background merge is running or about to start.
+    ///
+    /// ``commit()`` returning never meant nothing was merging: the merge
+    /// policy plans its next round from the segments a commit just
+    /// published. Call this before anything that will claim a lot of
+    /// memory — an ``export_snapshot()`` of a large index, a full preload —
+    /// so it does not race a merge for the address space.
+    ///
+    /// Returns:
+    ///     The number of rounds that still saw merge activity (0 = it was
+    ///     already quiet).
+    ///
+    /// Example::
+    ///
+    ///     index.commit()
+    ///     index.wait_merges_quiet()
+    ///     blob = index.export_snapshot()
+    fn wait_merges_quiet(&self) -> PyResult<usize> {
+        self.h()?.wait_merges_quiet()
+            .map_err(|e| PyValueError::new_err(e))
+    }
+
+    /// Delete the whole index: commit and release everything, then remove
+    /// the index directory (shard files and root files included).
+    ///
+    /// Consumes the handle: after ``drop_index()`` every method of this
+    /// instance raises ``ValueError``, like after ``close()`` but with the
+    /// files gone too. Raises ``ValueError`` for an index served from a
+    /// snapshot (nothing on disk to drop).
+    ///
+    /// Example::
+    ///
+    ///     index.drop_index()
+    ///     assert not os.path.exists(path)
+    fn drop_index(&mut self) -> PyResult<()> {
+        self.dir()?;
+        let handle = self.handle.take().ok_or_else(|| PyValueError::new_err(
+            "index has already been dropped",
+        ))?;
+        handle.drop_index()
+            .map_err(|e| PyValueError::new_err(e))
     }
 
     /// Schema as list of ``{"name": "...", "type": "..."}`` dicts (property).
@@ -436,8 +549,8 @@ impl Index {
     ///         f.write(blob)
     fn export_snapshot<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
         let blob = snapshot::export_to_snapshot(
-            &self.handle,
-            std::path::Path::new(&self.index_path),
+            self.h()?,
+            std::path::Path::new(self.dir()?),
         ).map_err(|e| PyValueError::new_err(e))?;
         Ok(pyo3::types::PyBytes::new(py, &blob))
     }
@@ -456,8 +569,8 @@ impl Index {
     ///     index.export_snapshot_to("/backups/my_index.luce")
     fn export_snapshot_to(&self, path: &str) -> PyResult<()> {
         let blob = snapshot::export_to_snapshot(
-            &self.handle,
-            std::path::Path::new(&self.index_path),
+            self.h()?,
+            std::path::Path::new(self.dir()?),
         ).map_err(|e| PyValueError::new_err(e))?;
         std::fs::write(path, &blob)
             .map_err(|e| PyValueError::new_err(format!("cannot write snapshot: {e}")))?;
@@ -489,13 +602,7 @@ impl Index {
         let dest_path = std::path::Path::new(dest);
         let handle = snapshot::import_from_snapshot(data, dest_path)
             .map_err(|e| PyValueError::new_err(e))?;
-        let (user_fields, text_fields) = extract_user_fields(&handle.config);
-        Ok(Self {
-            handle,
-            index_path: dest.to_string(),
-            user_fields,
-            text_fields,
-        })
+        Ok(Self::from_handle(handle, Some(dest.to_string())))
     }
 
     /// Import an index from a LUCE snapshot file (.luce).
@@ -522,6 +629,59 @@ impl Index {
         Self::import_snapshot(&data, dest_path)
     }
 
+    /// Serve a LUCE snapshot straight from memory, without extracting it.
+    ///
+    /// ``import_snapshot()`` writes every file out, so the blob and the files
+    /// exist at once. Here the blob *is* the index: readers get slices of it,
+    /// nothing is written to disk, and the memory cost is the blob's own
+    /// length. Search, highlights, ``index_bytes()`` and the distributed
+    /// helpers all work.
+    ///
+    /// Read-only by construction: ``add()``, ``delete()``, ``update()``,
+    /// ``commit()`` and ``compact()`` raise ``ValueError``, ``path`` is
+    /// ``None``, and the export / delta methods raise because there is no
+    /// directory to export from. To edit, ``import_snapshot()`` it instead.
+    ///
+    /// Args:
+    ///     data: Raw LUCE snapshot bytes (from ``export_snapshot()``).
+    ///
+    /// Returns:
+    ///     A read-only ``Index`` backed by the bytes.
+    ///
+    /// Example::
+    ///
+    ///     blob = source.export_snapshot()
+    ///     served = Index.open_snapshot(blob)
+    ///     served.search("hello")  # same answers as source.search("hello")
+    #[staticmethod]
+    fn open_snapshot(data: &[u8]) -> PyResult<Self> {
+        let bytes = ld_lucivy::directory::OwnedBytes::new(data.to_vec());
+        let handle = ShardedHandle::open_snapshot(bytes)
+            .map_err(|e| PyValueError::new_err(e))?;
+        Ok(Self::from_handle(handle, None))
+    }
+
+    /// Serve a LUCE snapshot file (.luce) straight from memory.
+    ///
+    /// Reads the file once and hands it to ``open_snapshot()``: the index is
+    /// read-only and nothing is extracted next to the file.
+    ///
+    /// Args:
+    ///     path: Path to the ``.luce`` snapshot file.
+    ///
+    /// Returns:
+    ///     A read-only ``Index`` backed by the file's bytes.
+    ///
+    /// Example::
+    ///
+    ///     served = Index.open_snapshot_from("/backups/my_index.luce")
+    #[staticmethod]
+    fn open_snapshot_from(path: &str) -> PyResult<Self> {
+        let data = std::fs::read(path)
+            .map_err(|e| PyValueError::new_err(format!("cannot read snapshot: {e}")))?;
+        Self::open_snapshot(&data)
+    }
+
     // ── Delta sync ──────────────────────────────────────────────────────
 
     /// Per-shard version info for delta sync (property, no parentheses).
@@ -540,7 +700,7 @@ impl Index {
     ///     # [{"shard_id": 0, "version": "abc", "segment_ids": ["x", "y"]}, ...]
     #[getter]
     fn shard_versions(&self) -> PyResult<Vec<HashMap<String, pyo3::Py<pyo3::PyAny>>>> {
-        let versions = self.handle.shard_versions()
+        let versions = self.h()?.shard_versions()
             .map_err(|e| PyValueError::new_err(e))?;
         Python::with_gil(|py| {
             Ok(versions.iter().map(|sv| {
@@ -590,7 +750,7 @@ impl Index {
             })
             .collect();
 
-        let blob = self.handle.export_sharded_delta(&self.index_path, &versions)
+        let blob = self.h()?.export_sharded_delta(self.dir()?, &versions)
             .map_err(|e| PyValueError::new_err(e))?;
         Ok(pyo3::types::PyBytes::new(py, &blob))
     }
@@ -608,7 +768,7 @@ impl Index {
     ///     delta = server_index.export_sharded_delta(client_index.shard_versions)
     ///     client_index.apply_sharded_delta(delta)
     fn apply_sharded_delta(&self, data: &[u8]) -> PyResult<()> {
-        self.handle.apply_sharded_delta(&self.index_path, data)
+        self.h()?.apply_sharded_delta(self.dir()?, data)
             .map_err(|e| PyValueError::new_err(e))
     }
 
@@ -633,7 +793,7 @@ impl Index {
     ///     # merge stats_a + stats_b on coordinator, then distribute back
     fn export_stats(&self, query: &Bound<'_, PyAny>) -> PyResult<String> {
         let query_config = self.parse_query(query)?;
-        let stats = self.handle.export_stats(&query_config)
+        let stats = self.h()?.export_stats(&query_config)
             .map_err(|e| PyValueError::new_err(e))?;
         serde_json::to_string(&stats)
             .map_err(|e| PyValueError::new_err(format!("serialize stats: {e}")))
@@ -678,11 +838,11 @@ impl Index {
             None
         };
 
-        let results = self.handle.search_with_global_stats(
+        let results = self.h()?.search_with_global_stats(
             &query_config, limit as usize, &global_stats, highlight_sink.clone(),
         ).map_err(|e| PyValueError::new_err(e))?;
 
-        collect_sharded_results(&self.handle, &results, highlight_sink.as_deref(), false)
+        collect_sharded_results(self.h()?, &results, highlight_sink.as_deref(), false)
     }
 
     fn __enter__(slf: Py<Self>) -> Py<Self> {
@@ -699,8 +859,15 @@ impl Index {
     }
 
     fn __repr__(&self) -> String {
-        format!("Index(path='{}', num_docs={}, shards={})",
-            self.index_path, self.num_docs(), self.num_shards())
+        let Some(handle) = self.handle.as_ref() else {
+            return "Index(dropped)".to_string();
+        };
+        format!("Index(path={}, num_docs={}, shards={})",
+            match self.index_path.as_deref() {
+                Some(p) => format!("'{p}'"),
+                None => "<snapshot>".to_string(),
+            },
+            handle.num_docs(), handle.num_shards())
     }
 }
 

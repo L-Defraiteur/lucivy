@@ -104,6 +104,9 @@ export declare class Index {
    *
    * After `close()`, the index data remains on disk and can be re-opened
    * with `Index.open()`. No further mutations are allowed on this instance.
+   *
+   * On a snapshot served with `openSnapshot()` there is nothing to flush
+   * and no lock to release: `close()` is a no-op.
    */
   close(): void
   /**
@@ -208,6 +211,69 @@ export declare class Index {
    * @returns A new `Index` instance ready for search.
    */
   static importSnapshotFrom(path: string, destPath?: string | undefined | null): Index
+  /**
+   * Serve a LUCE snapshot (Buffer) directly, without extracting it.
+   *
+   * The blob itself is the index: readers get slices of it, nothing is
+   * written to disk and the memory cost is the blob's own length. The
+   * result is **read-only** — `add()`, `delete()`, `commit()`, `compact()`
+   * and the delta/snapshot exports fail with a clear error. To get a
+   * writable index back, use `Index.importSnapshot()` instead.
+   *
+   * @param data - Raw LUCE snapshot bytes (Buffer), as produced by `exportSnapshot()`.
+   * @returns A read-only `Index` ready for search. Its `path` is `""`.
+   */
+  static openSnapshot(data: Buffer): Index
+  /**
+   * Serve a LUCE snapshot file (.luce) directly, without extracting it.
+   *
+   * Convenience wrapper that reads the file then calls `openSnapshot()`.
+   * Same read-only semantics.
+   *
+   * @param path - Path to the `.luce` snapshot file.
+   * @returns A read-only `Index` ready for search.
+   */
+  static openSnapshotFrom(path: string): Index
+  /**
+   * Merge every shard's segments into segments of at most `maxDocs`
+   * documents, then commit.
+   *
+   * Bulk loading leaves many small segments behind; one `compact()` after
+   * the load makes searches faster and the index smaller on disk. Not
+   * something to call on every commit.
+   *
+   * @param maxDocs - Upper bound on documents per merged segment (default 10000).
+   * @returns Number of merge rounds that actually reduced a shard's segment count.
+   */
+  compact(maxDocs?: number | undefined | null): number
+  /**
+   * Block until no background merge is running or about to start.
+   *
+   * Segment merges run in the background after commits. Call this before
+   * anything that needs a stable set of files or the full address space —
+   * measuring `indexBytes()`, copying the directory, exporting a snapshot
+   * under memory pressure.
+   *
+   * @returns Number of rounds that still saw merge activity (0 = already quiet).
+   */
+  waitMergesQuiet(): number
+  /**
+   * On-disk bytes of every searchable segment of every shard.
+   *
+   * Sums the segment files; the number moves while merges run, so call
+   * `waitMergesQuiet()` first for a stable figure.
+   *
+   * @returns Total size in bytes (a `number`; exact below 2^53).
+   */
+  indexBytes(): number
+  /**
+   * Delete the whole index: commit and release everything (like `close()`),
+   * then remove the index files from disk.
+   *
+   * This consumes the underlying handle. After `dropIndex()` every other
+   * method on this instance throws; create or open a new `Index` instead.
+   */
+  dropIndex(): void
   /**
    * Schema as a list of field definitions (getter, access as `index.schema`).
    *

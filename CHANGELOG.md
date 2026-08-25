@@ -119,9 +119,16 @@ index — see its `NOTICE`.
 
 ### Bindings
 
-Native bindings (Python, Node.js, C++) expose `query_warnings`; the Python
-wheel is `abi3` (one wheel for every CPython ≥ 3.9). PyPI and npm ship
-3.0.0 with this release.
+Native bindings (Python, Node.js, C++) expose what the core gained:
+`query_warnings`, `compact(max_docs)`, `wait_merges_quiet()`, `index_bytes()`,
+`drop_index()`, and `open_snapshot(bytes)` / `open_snapshot_from(path)` — a
+LUCE served in place, read-only, without extraction (the core refuses writes
+on it up front, and `close()` no longer tries to commit into it). Filtered
+search (`allowed_ids`) was already in all three. The Python wheel is `abi3`
+(one wheel for every CPython ≥ 3.9, `manylinux_2_28`). PyPI and npm ship
+3.0.0 with this release. ACID blob storage stays a Rust-level API
+(`BlobStore`, `BlobShardStorage`, lazy loading — used by rag3db through
+`lucivy_fts`); the bindings' READMEs say so.
 
 ### WebAssembly (emscripten) and the playground
 

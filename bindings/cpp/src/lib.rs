@@ -5,10 +5,12 @@
 //! Distributed under the MIT License.
 //!
 //! API mirrors the Node.js and Python bindings:
-//!   create/open, add/add_many/delete/update, commit/close, search, num_docs/path/schema
+//!   create/open/open_snapshot, add/add_many/delete/update, commit/close/drop_index,
+//!   search, num_docs/path/schema, compact/wait_merges_quiet/index_bytes
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::ops::Deref;
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use ld_lucivy::query::HighlightSink;
 use ld_lucivy::schema::{FieldType, Value as LucivyValue};
@@ -71,6 +73,17 @@ mod ffi {
         // The index must have been previously created with lucivy_create().
         fn lucivy_open(path: &str) -> Result<Box<LucivyIndex>>;
 
+        // Serve a LUCE snapshot straight from its bytes, without extracting it.
+        // The blob is the index: nothing is written to disk and the memory cost
+        // is the blob's own length. Read-only by construction: add/update/remove
+        // are queued but commit() (and close(), which commits) fail; export_snapshot,
+        // delta sync and drop_index are refused; get_path() is empty.
+        // For a writable copy use lucivy_import_snapshot() instead.
+        fn lucivy_open_snapshot(data: &[u8]) -> Result<Box<LucivyIndex>>;
+
+        // Same as lucivy_open_snapshot(), reading the blob from a .luce file.
+        fn lucivy_open_snapshot_from(path: &str) -> Result<Box<LucivyIndex>>;
+
         // ── Document operations ────────────────────────────────────────
 
         // Add a single document with the given _node_id and field values.
@@ -95,14 +108,41 @@ mod ffi {
         // Call commit() explicitly to control the commit point.
         fn commit(self: &LucivyIndex) -> Result<()>;
 
-        // Discard uncommitted changes (add/delete/update since last commit).
-        // Note: not currently supported on ShardedHandle — returns an error.
+        // NOT SUPPORTED. Always returns an error and discards nothing: the
+        // sharded handle has no rollback, pending documents stay queued and
+        // land at the next commit (searches auto-flush them). Kept for
+        // signature compatibility with the 2.x header only.
         fn rollback(self: &LucivyIndex) -> Result<()>;
 
         // Flush any pending writes and release the writer lock.
         // The index data remains on disk and can be re-opened with lucivy_open().
         // No further mutations are allowed on this instance after close().
         fn close(self: &LucivyIndex) -> Result<()>;
+
+        // Delete the whole index: close() it, then remove its directory
+        // (every shard and the root files). Consumes the underlying handle:
+        // afterwards every call on this instance fails with an error
+        // (num_docs()/index_bytes() answer 0, get_schema() is empty).
+        // Refused on a served snapshot (lucivy_open_snapshot).
+        fn drop_index(self: &LucivyIndex) -> Result<()>;
+
+        // ── Maintenance ────────────────────────────────────────────────
+
+        // Commit, then merge the committed segments of every shard into
+        // groups of at most `max_docs` documents (use SIZE_MAX for one
+        // segment per shard). Blocks until the merges are done. Returns how
+        // many merge rounds actually reduced a shard's segment count.
+        fn compact(self: &LucivyIndex, max_docs: usize) -> Result<usize>;
+
+        // Wait until no background merge is running on any shard (two
+        // consecutive looks at a stable segment count). Call it before
+        // anything that is about to claim memory, e.g. export_snapshot().
+        // Returns how many rounds saw merge activity.
+        fn wait_merges_quiet(self: &LucivyIndex) -> Result<usize>;
+
+        // On-disk bytes of every searchable segment across all shards
+        // (for a served snapshot: the live bytes of the blob). 0 after drop_index().
+        fn index_bytes(self: &LucivyIndex) -> u64;
 
         // ── Search ─────────────────────────────────────────────────────
         // query_json: JSON string — either a plain string (auto contains_split across all text fields)
@@ -185,8 +225,9 @@ mod ffi {
         // path: destination file path (typically ending in .luce).
         fn export_snapshot_to(self: &LucivyIndex, path: &str) -> Result<()>;
 
-        // Restore a full index from LUCE snapshot bytes.
+        // Restore a full index from LUCE snapshot bytes (extracts every file).
         // data: raw snapshot bytes from export_snapshot(). dest_path: directory for restored files.
+        // To serve the blob in place, read-only, see lucivy_open_snapshot().
         fn lucivy_import_snapshot(data: &[u8], dest_path: &str) -> Result<Box<LucivyIndex>>;
 
         // Restore a full index from a .luce snapshot file.
@@ -233,9 +274,61 @@ mod ffi {
 // ── LucivyIndex wrapper ────────────────────────────────────────────────────
 
 pub struct LucivyIndex {
-    handle: ShardedHandle,
+    /// `None` once `drop_index()` has consumed the handle. Every call goes
+    /// through `handle()`, which answers with a clear error from then on.
+    handle: RwLock<Option<ShardedHandle>>,
+    /// Empty for a served snapshot (`lucivy_open_snapshot`).
     index_path: String,
     text_fields: Vec<String>,
+    /// Served from a LUCE blob: read-only, and no directory behind it.
+    served_snapshot: bool,
+}
+
+const DROPPED: &str = "index was dropped (drop_index): this instance no longer holds a handle";
+
+/// Read guard that dereferences straight to the handle. Only built by
+/// `LucivyIndex::handle()`, which has already checked the `Option`.
+struct HandleRef<'a>(RwLockReadGuard<'a, Option<ShardedHandle>>);
+
+impl Deref for HandleRef<'_> {
+    type Target = ShardedHandle;
+    fn deref(&self) -> &ShardedHandle {
+        self.0.as_ref().expect("HandleRef is only built over Some")
+    }
+}
+
+impl LucivyIndex {
+    fn wrap(handle: ShardedHandle, index_path: &str, served_snapshot: bool) -> Box<LucivyIndex> {
+        let text_fields = extract_text_fields(&handle.config);
+        Box::new(LucivyIndex {
+            handle: RwLock::new(Some(handle)),
+            index_path: index_path.to_string(),
+            text_fields,
+            served_snapshot,
+        })
+    }
+
+    fn handle(&self) -> Result<HandleRef<'_>, String> {
+        let guard = self.handle.read().map_err(|_| "handle lock poisoned".to_string())?;
+        if guard.is_none() {
+            return Err(DROPPED.to_string());
+        }
+        Ok(HandleRef(guard))
+    }
+
+    /// Operations that need the index directory (snapshot export, delta
+    /// sync, drop) have nothing to work on for a served snapshot.
+    fn require_directory(&self, what: &str) -> Result<(), String> {
+        if self.served_snapshot {
+            Err(format!(
+                "{what} is not available on a served snapshot (lucivy_open_snapshot): \
+                 it is read-only and has no directory; keep the original blob, or \
+                 lucivy_import_snapshot() it into a writable directory"
+            ))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -252,24 +345,24 @@ fn lucivy_create(path: &str, fields_json: &str, shards: u32) -> Result<Box<Luciv
     };
 
     let handle = ShardedHandle::create(path, &config)?;
-    let text_fields = extract_text_fields(&config);
-
-    Ok(Box::new(LucivyIndex {
-        handle,
-        index_path: path.to_string(),
-        text_fields,
-    }))
+    Ok(LucivyIndex::wrap(handle, path, false))
 }
 
 fn lucivy_open(path: &str) -> Result<Box<LucivyIndex>, String> {
     let handle = ShardedHandle::open(path)?;
-    let text_fields = extract_text_fields(&handle.config);
+    Ok(LucivyIndex::wrap(handle, path, false))
+}
 
-    Ok(Box::new(LucivyIndex {
-        handle,
-        index_path: path.to_string(),
-        text_fields,
-    }))
+fn lucivy_open_snapshot(data: &[u8]) -> Result<Box<LucivyIndex>, String> {
+    let blob = ld_lucivy::directory::OwnedBytes::new(data.to_vec());
+    let handle = ShardedHandle::open_snapshot(blob)?;
+    Ok(LucivyIndex::wrap(handle, "", true))
+}
+
+fn lucivy_open_snapshot_from(path: &str) -> Result<Box<LucivyIndex>, String> {
+    let data = std::fs::read(path)
+        .map_err(|e| format!("cannot read snapshot {path}: {e}"))?;
+    lucivy_open_snapshot(&data)
 }
 
 // ── Document operations ────────────────────────────────────────────────────
@@ -279,25 +372,25 @@ impl LucivyIndex {
         let fields: HashMap<String, serde_json::Value> = serde_json::from_str(fields_json)
             .map_err(|e| format!("invalid fields JSON: {e}"))?;
 
+        let handle = self.handle()?;
         let mut doc = LucivyDocument::new();
 
-        let nid_field = self
-            .handle
+        let nid_field = handle
             .field(NODE_ID_FIELD)
             .ok_or("no _node_id field in schema")?;
         doc.add_u64(nid_field, doc_id);
 
-        add_fields_from_map(&self.handle, &mut doc, &fields)?;
+        add_fields_from_map(&handle, &mut doc, &fields)?;
 
-        self.handle.add_document(doc, doc_id)
+        handle.add_document(doc, doc_id)
     }
 
     fn add_many(&self, docs_json: &str) -> Result<(), String> {
         let docs: Vec<serde_json::Value> = serde_json::from_str(docs_json)
             .map_err(|e| format!("invalid docs JSON: {e}"))?;
 
-        let nid_field = self
-            .handle
+        let handle = self.handle()?;
+        let nid_field = handle
             .field(NODE_ID_FIELD)
             .ok_or("no _node_id field in schema")?;
 
@@ -319,16 +412,16 @@ impl LucivyIndex {
                 if key == "docId" || key == "doc_id" {
                     continue;
                 }
-                add_field_value(&self.handle, &mut doc, key, value)?;
+                add_field_value(&handle, &mut doc, key, value)?;
             }
 
-            self.handle.add_document(doc, doc_id)?;
+            handle.add_document(doc, doc_id)?;
         }
         Ok(())
     }
 
     fn remove(&self, doc_id: u64) -> Result<(), String> {
-        self.handle.delete_by_node_id(doc_id)
+        self.handle()?.delete_by_node_id(doc_id)
     }
 
     fn update(&self, doc_id: u64, fields_json: &str) -> Result<(), String> {
@@ -338,15 +431,47 @@ impl LucivyIndex {
     }
 
     fn commit(&self) -> Result<(), String> {
-        self.handle.commit()
+        self.handle()?.commit()
     }
 
+    /// Honest stub: the sharded handle has no rollback. Nothing is discarded;
+    /// queued documents still land at the next commit or auto-flush.
     fn rollback(&self) -> Result<(), String> {
-        Err("rollback is not supported on ShardedHandle".to_string())
+        self.handle()?;
+        Err("rollback is not supported on ShardedHandle: nothing was discarded, \
+             pending documents will land at the next commit"
+            .to_string())
     }
 
     fn close(&self) -> Result<(), String> {
-        self.handle.close()
+        self.handle()?.close()
+    }
+
+    fn drop_index(&self) -> Result<(), String> {
+        self.require_directory("drop_index")?;
+        // Take the handle out under the write lock so no reader can observe
+        // it half-dropped; the lock is released before the (slow) close+remove.
+        let handle = {
+            let mut guard = self.handle.write().map_err(|_| "handle lock poisoned".to_string())?;
+            guard.take().ok_or_else(|| DROPPED.to_string())?
+        };
+        handle.drop_index()
+    }
+}
+
+// ── Maintenance ───────────────────────────────────────────────────────────
+
+impl LucivyIndex {
+    fn compact(&self, max_docs: usize) -> Result<usize, String> {
+        self.handle()?.compact(max_docs)
+    }
+
+    fn wait_merges_quiet(&self) -> Result<usize, String> {
+        self.handle()?.wait_merges_quiet()
+    }
+
+    fn index_bytes(&self) -> u64 {
+        self.handle().map(|h| h.index_bytes()).unwrap_or(0)
     }
 }
 
@@ -354,10 +479,9 @@ impl LucivyIndex {
 
 impl LucivyIndex {
     fn export_snapshot(&self) -> Result<Vec<u8>, String> {
-        snapshot::export_to_snapshot(
-            &self.handle,
-            std::path::Path::new(&self.index_path),
-        )
+        self.require_directory("export_snapshot")?;
+        let handle = self.handle()?;
+        snapshot::export_to_snapshot(&handle, std::path::Path::new(&self.index_path))
     }
 
     fn export_snapshot_to(&self, path: &str) -> Result<(), String> {
@@ -371,13 +495,7 @@ impl LucivyIndex {
 fn lucivy_import_snapshot(data: &[u8], dest_path: &str) -> Result<Box<LucivyIndex>, String> {
     let dest = std::path::Path::new(dest_path);
     let handle = snapshot::import_from_snapshot(data, dest)?;
-    let text_fields = extract_text_fields(&handle.config);
-
-    Ok(Box::new(LucivyIndex {
-        handle,
-        index_path: dest_path.to_string(),
-        text_fields,
-    }))
+    Ok(LucivyIndex::wrap(handle, dest_path, false))
 }
 
 fn lucivy_import_snapshot_from(path: &str, dest_path: &str) -> Result<Box<LucivyIndex>, String> {
@@ -390,7 +508,7 @@ fn lucivy_import_snapshot_from(path: &str, dest_path: &str) -> Result<Box<Lucivy
 
 impl LucivyIndex {
     fn shard_versions(&self) -> Result<Vec<ffi::ShardVersionInfo>, String> {
-        let versions = self.handle.shard_versions()?;
+        let versions = self.handle()?.shard_versions()?;
         Ok(versions
             .into_iter()
             .map(|sv| ffi::ShardVersionInfo {
@@ -422,11 +540,13 @@ impl LucivyIndex {
             })
             .collect();
 
-        self.handle.export_sharded_delta(&self.index_path, &versions)
+        self.require_directory("export_sharded_delta")?;
+        self.handle()?.export_sharded_delta(&self.index_path, &versions)
     }
 
     fn apply_sharded_delta(&self, data: &[u8]) -> Result<(), String> {
-        self.handle.apply_sharded_delta(&self.index_path, data)
+        self.require_directory("apply_sharded_delta")?;
+        self.handle()?.apply_sharded_delta(&self.index_path, data)
     }
 }
 
@@ -435,7 +555,7 @@ impl LucivyIndex {
 impl LucivyIndex {
     fn export_stats(&self, query_json: &str) -> Result<String, String> {
         let query_config = self.parse_query(query_json)?;
-        let stats = self.handle.export_stats(&query_config)?;
+        let stats = self.handle()?.export_stats(&query_config)?;
         serde_json::to_string(&stats)
             .map_err(|e| format!("serialize stats: {e}"))
     }
@@ -451,14 +571,15 @@ impl LucivyIndex {
             serde_json::from_str(global_stats_json)
                 .map_err(|e| format!("invalid global_stats JSON: {e}"))?;
 
-        let results = self.handle.search_with_global_stats(
+        let handle = self.handle()?;
+        let results = handle.search_with_global_stats(
             &query_config,
             limit as usize,
             &global_stats,
             None,
         )?;
 
-        collect_results(&self.handle, &results)
+        collect_results(&handle, &results)
     }
 }
 
@@ -480,7 +601,7 @@ fn lucivy_merge_stats(stats_json_list: &[String]) -> Result<String, String> {
 impl LucivyIndex {
     fn query_warnings(&self, query_json: &str) -> Result<Vec<String>, String> {
         let query_config = self.parse_query(query_json)?;
-        Ok(self.handle.query_warnings(&query_config))
+        Ok(self.handle()?.query_warnings(&query_config))
     }
 
     fn search(
@@ -489,8 +610,9 @@ impl LucivyIndex {
         limit: u32,
     ) -> Result<Vec<ffi::SearchResult>, String> {
         let query_config = self.parse_query(query_json)?;
-        let results = self.handle.search(&query_config, limit as usize, None)?;
-        collect_results(&self.handle, &results)
+        let handle = self.handle()?;
+        let results = handle.search(&query_config, limit as usize, None)?;
+        collect_results(&handle, &results)
     }
 
     fn search_with_highlights(
@@ -501,8 +623,9 @@ impl LucivyIndex {
         let query_config = self.parse_query(query_json)?;
         let highlight_sink = Arc::new(HighlightSink::new());
 
-        let results = self.handle.search(&query_config, limit as usize, Some(highlight_sink.clone()))?;
-        collect_results_with_highlights(&self.handle, &results, Some(&highlight_sink))
+        let handle = self.handle()?;
+        let results = handle.search(&query_config, limit as usize, Some(highlight_sink.clone()))?;
+        collect_results_with_highlights(&handle, &results, Some(&highlight_sink))
     }
 
     fn search_filtered(
@@ -513,8 +636,9 @@ impl LucivyIndex {
     ) -> Result<Vec<ffi::SearchResult>, String> {
         let query_config = self.parse_query(query_json)?;
         let id_set: HashSet<u64> = allowed_ids.iter().copied().collect();
-        let results = self.handle.search_filtered(&query_config, limit as usize, None, id_set)?;
-        collect_results(&self.handle, &results)
+        let handle = self.handle()?;
+        let results = handle.search_filtered(&query_config, limit as usize, None, id_set)?;
+        collect_results(&handle, &results)
     }
 
     fn search_filtered_with_highlights(
@@ -527,8 +651,9 @@ impl LucivyIndex {
         let highlight_sink = Arc::new(HighlightSink::new());
 
         let id_set: HashSet<u64> = allowed_ids.iter().copied().collect();
-        let results = self.handle.search_filtered(&query_config, limit as usize, Some(highlight_sink.clone()), id_set)?;
-        collect_results_with_highlights(&self.handle, &results, Some(&highlight_sink))
+        let handle = self.handle()?;
+        let results = handle.search_filtered(&query_config, limit as usize, Some(highlight_sink.clone()), id_set)?;
+        collect_results_with_highlights(&handle, &results, Some(&highlight_sink))
     }
 }
 
@@ -536,7 +661,7 @@ impl LucivyIndex {
 
 impl LucivyIndex {
     fn num_docs(&self) -> u64 {
-        self.handle.num_docs()
+        self.handle().map(|h| h.num_docs()).unwrap_or(0)
     }
 
     fn get_path(&self) -> &str {
@@ -544,18 +669,23 @@ impl LucivyIndex {
     }
 
     fn get_schema_json(&self) -> String {
-        serde_json::to_string(&self.handle.config).unwrap_or_default()
+        self.handle()
+            .map(|h| serde_json::to_string(&h.config).unwrap_or_default())
+            .unwrap_or_default()
     }
 
     fn get_schema(&self) -> Vec<ffi::FieldInfo> {
-        self.handle
+        let Ok(handle) = self.handle() else {
+            return Vec::new();
+        };
+        handle
             .field_map
             .iter()
             .filter(|(name, _)| {
                 name != NODE_ID_FIELD
             })
             .map(|(name, field)| {
-                let ft = match self.handle.schema.get_field_entry(*field).field_type() {
+                let ft = match handle.schema.get_field_entry(*field).field_type() {
                     FieldType::Str(_) => "text",
                     FieldType::U64(_) => "u64",
                     FieldType::I64(_) => "i64",
@@ -828,5 +958,220 @@ mod tests {
         assert_eq!(q.query_type, "contains_split");
         assert_eq!(q.field.as_deref(), Some("content"));
         assert_eq!(q.distance, Some(3));
+    }
+
+    // ── Bridge-level tests: go through the same functions the C++ side calls ──
+
+    const SCHEMA: &str = r#"[{"name":"title","type":"text"},{"name":"body","type":"text"}]"#;
+    const QUERY: &str = r#"{"type":"contains","field":"body","value":"mutex"}"#;
+
+    /// Fresh, unique directory under the system temp dir; removed on drop.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir()
+                .join(format!("lucivy_cpp_{name}_{}_{nanos}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            TempDir(dir)
+        }
+        fn path(&self) -> String {
+            self.0.to_str().unwrap().to_string()
+        }
+        fn join(&self, name: &str) -> String {
+            self.0.join(name).to_str().unwrap().to_string()
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// `n` documents in `commits` separate commits, so the shard holds
+    /// several segments (one per commit) for compact() to work on.
+    fn populate(idx: &LucivyIndex, n: u64, commits: u64) {
+        for i in 0..n {
+            let body = if i % 2 == 0 {
+                format!("pthread_mutex_lock acquires the mutex number {i}")
+            } else {
+                format!("plain document number {i} about nothing")
+            };
+            idx.add(i, &serde_json::json!({"title": format!("doc {i}"), "body": body}).to_string())
+                .unwrap();
+            if commits > 1 && (i + 1) % (n / commits) == 0 {
+                idx.commit().unwrap();
+            }
+        }
+        idx.commit().unwrap();
+    }
+
+    fn segments(idx: &LucivyIndex, shard: usize) -> usize {
+        let h = idx.handle().unwrap();
+        h.shard(shard).unwrap().index.searchable_segment_metas().unwrap().len()
+    }
+
+    #[test]
+    fn compact_merges_committed_segments() {
+        let dir = TempDir::new("compact");
+        let idx = lucivy_create(&dir.path(), SCHEMA, 1).unwrap();
+        populate(&idx, 30, 3);
+        assert!(segments(&idx, 0) >= 2, "several commits should leave several segments");
+
+        let merges = idx.compact(usize::MAX).unwrap();
+        assert!(merges >= 1, "compact should have merged at least once, got {merges}");
+        assert_eq!(segments(&idx, 0), 1, "SIZE_MAX means one segment per shard");
+        assert_eq!(idx.num_docs(), 30);
+        let hits = idx.search(QUERY, 100).unwrap();
+        assert_eq!(hits.len(), 15, "compaction must not lose documents");
+
+        // Nothing left to do: a second pass is a no-op.
+        assert_eq!(idx.compact(usize::MAX).unwrap(), 0);
+        idx.close().unwrap();
+    }
+
+    #[test]
+    fn wait_merges_quiet_returns_on_idle_index() {
+        let dir = TempDir::new("quiet");
+        let idx = lucivy_create(&dir.path(), SCHEMA, 2).unwrap();
+        populate(&idx, 20, 2);
+        let rounds = idx.wait_merges_quiet().unwrap();
+        // Bounded by the 60-round cap per shard; an idle index is quiet fast.
+        assert!(rounds < 120, "unexpected merge activity: {rounds} rounds");
+        // And it is callable again without side effects.
+        idx.wait_merges_quiet().unwrap();
+        assert_eq!(idx.num_docs(), 20);
+        idx.close().unwrap();
+    }
+
+    #[test]
+    fn index_bytes_counts_committed_segments() {
+        let dir = TempDir::new("bytes");
+        let idx = lucivy_create(&dir.path(), SCHEMA, 1).unwrap();
+        assert_eq!(idx.index_bytes(), 0, "empty index has no segment");
+        populate(&idx, 10, 1);
+        let bytes = idx.index_bytes();
+        assert!(bytes > 0, "committed segments occupy bytes");
+        populate(&idx, 10, 1);
+        assert!(idx.index_bytes() > bytes, "more documents, more bytes");
+        idx.close().unwrap();
+    }
+
+    #[test]
+    fn open_snapshot_answers_like_its_source_and_is_read_only() {
+        let dir = TempDir::new("served");
+        let src = lucivy_create(&dir.path(), SCHEMA, 2).unwrap();
+        populate(&src, 40, 2);
+        let expected = src.search(QUERY, 100).unwrap();
+        assert_eq!(expected.len(), 20);
+        let expected_hl = src.search_with_highlights(QUERY, 5).unwrap();
+        let blob = src.export_snapshot().unwrap();
+        src.close().unwrap();
+
+        // ── From bytes ──
+        let served = lucivy_open_snapshot(&blob).unwrap();
+        assert_eq!(served.num_docs(), 40);
+        assert_eq!(served.get_path(), "", "a served snapshot has no directory");
+        assert_eq!(served.get_schema().len(), 2);
+        assert!(served.index_bytes() > 0 && served.index_bytes() <= blob.len() as u64);
+
+        let got = served.search(QUERY, 100).unwrap();
+        let key = |r: &ffi::SearchResult| (r.doc_id, r.score.to_bits());
+        assert_eq!(
+            got.iter().map(key).collect::<Vec<_>>(),
+            expected.iter().map(key).collect::<Vec<_>>(),
+            "served snapshot must rank exactly like the index it came from"
+        );
+        let got_hl = served.search_with_highlights(QUERY, 5).unwrap();
+        for (a, b) in expected_hl.iter().zip(got_hl.iter()) {
+            assert_eq!(a.doc_id, b.doc_id);
+            assert_eq!(a.highlights.len(), b.highlights.len());
+        }
+        assert!(served.query_warnings(QUERY).is_ok());
+        let filtered = served.search_filtered(QUERY, 100, &[0, 2, 999]).unwrap();
+        assert_eq!(filtered.len(), 2);
+
+        // Read-only: the write is queued through the pipeline, the commit is
+        // where it fails (as in the core test), and close() commits too.
+        let _ = served.add(999_999, r#"{"title":"x","body":"mutex"}"#);
+        assert!(served.commit().is_err(), "commit into a served snapshot must fail");
+        let err = served.export_snapshot().unwrap_err();
+        assert!(err.contains("served snapshot"), "{err}");
+        assert!(served.export_sharded_delta("[]").unwrap_err().contains("served snapshot"));
+        assert!(served.apply_sharded_delta(&[]).unwrap_err().contains("served snapshot"));
+        assert!(served.drop_index().unwrap_err().contains("served snapshot"));
+        assert_eq!(served.num_docs(), 40, "refused operations leave the snapshot intact");
+        let _ = served.close();
+
+        // ── From a file ──
+        let file = dir.join("snap.luce");
+        std::fs::write(&file, &blob).unwrap();
+        let served2 = lucivy_open_snapshot_from(&file).unwrap();
+        assert_eq!(served2.num_docs(), 40);
+        assert_eq!(served2.search(QUERY, 100).unwrap().len(), 20);
+        let _ = served2.close();
+
+        assert!(lucivy_open_snapshot(b"not a snapshot").is_err());
+        assert!(lucivy_open_snapshot_from(&dir.join("missing.luce")).is_err());
+    }
+
+    #[test]
+    fn drop_index_removes_the_directory_and_disarms_the_instance() {
+        let dir = TempDir::new("drop");
+        let path = dir.path();
+        let idx = lucivy_create(&path, SCHEMA, 2).unwrap();
+        populate(&idx, 10, 1);
+        assert!(std::path::Path::new(&path).join("shard_0").exists());
+
+        idx.drop_index().unwrap();
+        assert!(!std::path::Path::new(&path).exists(), "drop_index removes the index directory");
+
+        // Every call is refused from now on, with the same clear error.
+        let dropped = |r: Result<(), String>| {
+            let e = r.unwrap_err();
+            assert!(e.contains("dropped"), "unexpected error: {e}");
+        };
+        dropped(idx.add(1, r#"{"title":"a","body":"b"}"#));
+        dropped(idx.add_many(r#"[{"doc_id":1,"title":"a","body":"b"}]"#));
+        dropped(idx.remove(1));
+        dropped(idx.commit());
+        dropped(idx.close());
+        dropped(idx.drop_index());
+        dropped(idx.compact(usize::MAX).map(|_| ()));
+        dropped(idx.wait_merges_quiet().map(|_| ()));
+        dropped(idx.search(QUERY, 10).map(|_| ()));
+        dropped(idx.search_with_highlights(QUERY, 10).map(|_| ()));
+        dropped(idx.search_filtered(QUERY, 10, &[1]).map(|_| ()));
+        dropped(idx.query_warnings(QUERY).map(|_| ()));
+        dropped(idx.export_snapshot().map(|_| ()));
+        dropped(idx.shard_versions().map(|_| ()));
+        dropped(idx.export_stats(QUERY).map(|_| ()));
+        dropped(idx.rollback());
+        assert_eq!(idx.num_docs(), 0);
+        assert_eq!(idx.index_bytes(), 0);
+        assert!(idx.get_schema().is_empty());
+        assert_eq!(idx.get_schema_json(), "");
+        assert_eq!(idx.get_path(), path, "the path is still reported, for the caller's logs");
+
+        // The directory is gone: reopening fails.
+        assert!(lucivy_open(&path).is_err());
+    }
+
+    #[test]
+    fn rollback_is_an_honest_error() {
+        let dir = TempDir::new("rollback");
+        let idx = lucivy_create(&dir.path(), SCHEMA, 1).unwrap();
+        idx.add(1, r#"{"title":"a","body":"mutex"}"#).unwrap();
+        let err = idx.rollback().unwrap_err();
+        assert!(err.contains("not supported"), "{err}");
+        // Nothing was discarded: the document lands at the next commit.
+        idx.commit().unwrap();
+        assert_eq!(idx.num_docs(), 1);
+        idx.close().unwrap();
     }
 }

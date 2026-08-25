@@ -1,21 +1,23 @@
-# lucivy v2
+# lucivy 3.0.0
 
 Fast BM25 full-text search for Node.js — with substring matching, fuzzy search, regex, and highlights. Powered by Rust via napi-rs.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
 
-### What's new in v2
+### What's new in 3.0.0
 
-- **SFX-only engine** — all queries route through the Suffix FST, no legacy code paths
-- **Distributed search** — `exportStats` / `mergeStats` / `searchWithGlobalStats`
-- **Incremental sync** — LUCIDS sharded delta export/apply
-- **Correct BM25 cross-shard** — identical scores whether 1 shard or 4
-- **5 bindings** — Python, Node.js, C++, WASM, Rust
+- **SFX v3 segment format** — per-field suffix FST files, the default for every new index; v2 indexes still open
+- **`parse` query type** — boolean syntax (`AND` / `OR` / `NOT`, quotes, `+` / `-`, parentheses) on top of substring matching
+- **`queryWarnings()`** — what the engine will really search, and where it falls back to a scan, before running the query
+- **Snapshots served in place** — `Index.openSnapshot()` reads a LUCE blob without extracting it
+- **Maintenance** — `compact()`, `waitMergesQuiet()`, `indexBytes()`, `dropIndex()`
+
+Still there from 2.x: SFX-only engine, distributed search (`exportStats` / `mergeStats` / `searchWithGlobalStats`), incremental LUCIDS delta sync, BM25 scores identical across 1 or N shards, bindings for Python, Node.js, C++, WASM and Rust.
 
 ## Install
 
 ```bash
-npm install lucivy
+npm install lucivy@3.0.0
 ```
 
 ## Quick start
@@ -146,6 +148,45 @@ index.search({
 });
 ```
 
+#### parse — boolean syntax in one string
+
+A plain value (no operators) is an OR of substring `contains` queries, one per word
+and per field. With boolean syntax the string is compiled into a `boolean` query of
+`contains` clauses: `AND` / `OR` / `NOT`, `"quoted phrases"`, `+required` / `-excluded`,
+and parentheses. Precedence is `NOT` > `AND` > `OR`; words side by side are OR'd.
+Highlights work in both cases. `fields` takes several fields at once.
+
+```javascript
+// Plain value: OR of contains per word x field
+index.search({ type: 'parse', field: 'body', value: 'kmalloc spin_lock' });
+
+// Boolean syntax
+index.search({ type: 'parse', field: 'body', value: 'kmalloc AND NOT vfree' });
+index.search({ type: 'parse', field: 'body', value: '"spin_lock" -vfree' });
+index.search({ type: 'parse', fields: ['title', 'body'], value: '(mutex OR spinlock) AND init' });
+```
+
+#### queryWarnings — know what will run before running it
+
+Returns plain-text warnings for a query, without executing it: separators ignored
+in relaxed mode, a fuzzy distance too loose for the query length, a regex without a
+usable literal (full scan), segments written by the legacy indexer. Empty array when
+nothing applies. For `parse`, the warnings say which of the two modes the value
+selected.
+
+```javascript
+index.queryWarnings({ type: 'contains', field: 'body', value: 'kmalloc' });
+// []
+index.queryWarnings({ type: 'contains', field: 'body', value: '__init' });
+// ['separators are ignored (strict_separators=false): "__init" is searched as "init"']
+index.queryWarnings({ type: 'regex', field: 'body', value: '[0-9]{8}' });
+// ['"[0-9]{8}" requires no literal the index can look up: every document is scanned whole (full scan, ...)']
+index.queryWarnings({ type: 'fuzzy', field: 'body', value: 'init' });
+// ['distance 1 on "init" (4 chars) rewrites a quarter of the query or more: unrelated short words will match (...)']
+index.queryWarnings({ type: 'parse', field: 'body', value: 'kmalloc spin' });
+// ['parse without boolean operators: "kmalloc spin" runs as OR of substring contains, one per word']
+```
+
 #### Filtering
 
 Filter on non-text fields (combined with AND):
@@ -185,6 +226,35 @@ const restored = Index.importSnapshotFrom('./backup.luce', './restored_index');
 
 // Import from Buffer
 const restored2 = Index.importSnapshot(buf, './restored_index');
+
+// Serve a snapshot in place — nothing extracted, nothing written to disk.
+// Memory cost = the blob's length. Read-only: add / delete / commit / compact
+// and the snapshot or delta exports throw. Use importSnapshot() for a writable copy.
+const served = Index.openSnapshot(buf);
+const served2 = Index.openSnapshotFrom('./backup.luce');
+served.search('programming');   // same results as the source index
+served.path;                    // '' — a served snapshot has no directory
+```
+
+### Maintenance
+
+```javascript
+// Once after a bulk load: merge every shard's segments into segments of at
+// most maxDocs documents (default 10000), then commit. Returns the number of
+// merge rounds that reduced a shard's segment count.
+const merges = index.compact();          // or index.compact(50000)
+
+// Block until no background merge is running or about to start.
+// Returns the number of rounds that still saw activity (0 = already quiet).
+index.waitMergesQuiet();
+
+// On-disk bytes of every searchable segment, all shards. Call waitMergesQuiet()
+// first for a stable figure.
+const bytes = index.indexBytes();
+
+// Delete the whole index: close, then remove its files. The instance is
+// consumed — every later call on it throws.
+index.dropIndex();
 ```
 
 ### Delta sync (incremental)
@@ -234,8 +304,18 @@ index.numShards    // number of shards (getter)
 index.path         // index directory path (getter)
 index.schema       // array of {name, type} objects (getter)
 index.shardVersions // per-shard version info for delta sync (getter)
+index.indexBytes() // on-disk size of all searchable segments
 index.close()      // flush + release writer lock
+index.dropIndex()  // close + delete the index files (instance unusable afterwards)
 ```
+
+## Storage backends
+
+The Node binding stores indexes on the filesystem. ACID blob storage — the
+`BlobStore` trait, `BlobShardStorage` and lazy segment loading, where an index
+lives in a transactional store such as a database — is a Rust-level API
+(`lucivy-core` / `lucistore`) used by rag3db; it is not exposed in the Node
+binding yet.
 
 ## License
 

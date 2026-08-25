@@ -1482,6 +1482,9 @@ pub struct ShardedHandle {
     text_fields: Vec<Field>,
     /// On-disk bytes per shard, keyed by its segment list (see `shard_bytes`).
     shard_bytes_cache: Mutex<std::collections::HashMap<usize, (Vec<(String, u32)>, u64)>>,
+    /// A served snapshot (`open_snapshot`): nothing may be written, and
+    /// `close()` has nothing to commit or persist — it only stops the actors.
+    read_only: bool,
     /// Pipeline: reader pool (typed, round-robin).
     reader_pool: luciole::Pool<ReaderMsg>,
     /// Pipeline: single router actor (typed).
@@ -1605,7 +1608,24 @@ impl ShardedHandle {
     /// read. Read-only, by construction: a snapshot cannot be indexed into.
     pub fn open_snapshot(blob: ld_lucivy::directory::OwnedBytes) -> Result<Self, String> {
         let storage = crate::snapshot_directory::SnapshotShardStorage::open(blob)?;
-        Self::open_with_storage(Box::new(storage))
+        let mut handle = Self::open_with_storage(Box::new(storage))?;
+        handle.read_only = true;
+        Ok(handle)
+    }
+
+    /// Whether this handle serves a snapshot: writes are refused up front
+    /// (`add_document`, `commit`, `compact`, `delete_by_node_id`) instead of
+    /// being buffered and failing at the next commit.
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    fn ensure_writable(&self) -> Result<(), String> {
+        if self.read_only {
+            return Err("this index serves a snapshot and is read-only: create or open a writable \
+                        index to add, delete or commit".into());
+        }
+        Ok(())
     }
 
     /// Create a new sharded index with a custom storage backend.
@@ -1666,6 +1686,7 @@ impl ShardedHandle {
             closed: AtomicBool::new(false),
             text_fields,
             shard_bytes_cache: Mutex::new(std::collections::HashMap::new()),
+            read_only: false,
             reader_pool,
             router_ref,
             pipeline,
@@ -1728,6 +1749,7 @@ impl ShardedHandle {
             closed: AtomicBool::new(false),
             text_fields,
             shard_bytes_cache: Mutex::new(std::collections::HashMap::new()),
+            read_only: false,
             reader_pool,
             router_ref,
             pipeline,
@@ -1825,6 +1847,7 @@ impl ShardedHandle {
 
     pub fn add_document(&self, mut doc: LucivyDocument, node_id: u64) -> Result<(), String> {
         self.ensure_open()?;
+        self.ensure_writable()?;
         // Back-pressure on the caller's thread: no more documents queued than
         // the indexers can absorb without starting builds the address space
         // cannot hold (see the engine's `wait_docs_capacity`). The pipeline
@@ -1850,6 +1873,7 @@ impl ShardedHandle {
     /// tokenization. Each sub-batch is a single message — much less overhead
     /// than N individual add_document calls.
     pub fn add_documents(&self, docs: Vec<(LucivyDocument, u64)>) -> Result<(), String> {
+        self.ensure_writable()?;
         ld_lucivy::indexer::wait_docs_capacity(docs.len());
         let mut docs = docs;
         for (doc, node_id) in &mut docs {
@@ -1876,6 +1900,7 @@ impl ShardedHandle {
         node_id: u64,
         token_hashes: &[u64],
     ) -> Result<usize, String> {
+        self.ensure_writable()?;
         ld_lucivy::indexer::wait_docs_capacity(1);
         self.stamp_node_id(&mut doc, node_id)?;
         self.route_and_send(doc, node_id, token_hashes)
@@ -2589,6 +2614,7 @@ impl ShardedHandle {
 
     pub fn compact(&self, max_docs: usize) -> Result<usize, String> {
         self.ensure_open()?;
+        self.ensure_writable()?;
         self.commit()?;
         let mut merges = 0usize;
         for (i, shard) in self.shards.iter().enumerate() {
@@ -2624,6 +2650,7 @@ impl ShardedHandle {
 
     pub fn commit(&self) -> Result<(), String> {
         self.ensure_open()?;
+        self.ensure_writable()?;
         self.drain_pipeline();
 
         // Scatter commit to all shards in parallel.
@@ -2762,27 +2789,32 @@ impl ShardedHandle {
     pub fn close(&self) -> Result<(), String> {
         self.drain_pipeline();
 
-        // Commit all shards in parallel.
-        let results: Vec<Result<(), String>> = self.shard_pool.scatter(
-            |r| ShardMsg::Commit { fast: false, reply: r },
-            "close_shard",
-        );
-        for (i, result) in results.into_iter().enumerate() {
-            result.map_err(|e| format!("close shard_{i}: {e}"))?;
-        }
+        // A served snapshot has nothing to commit and nowhere to persist:
+        // its bytes are immutable. Committing into it wrote `meta.json` into
+        // a read-only directory and failed the close of every snapshot.
+        if !self.read_only {
+            // Commit all shards in parallel.
+            let results: Vec<Result<(), String>> = self.shard_pool.scatter(
+                |r| ShardMsg::Commit { fast: false, reply: r },
+                "close_shard",
+            );
+            for (i, result) in results.into_iter().enumerate() {
+                result.map_err(|e| format!("close shard_{i}: {e}"))?;
+            }
 
-        // Persist router state.
-        {
-            let router = self.router.lock().map_err(|_| "router lock poisoned")?;
-            let stats_bytes = router.to_bytes();
-            self.storage.write_root_file(SHARD_STATS_FILE, &stats_bytes)?;
-        }
+            // Persist router state.
+            {
+                let router = self.router.lock().map_err(|_| "router lock poisoned")?;
+                let stats_bytes = router.to_bytes();
+                self.storage.write_root_file(SHARD_STATS_FILE, &stats_bytes)?;
+            }
 
-        // Release writer locks (commit + drain merges per shard).
-        for (i, shard) in self.shards.iter().enumerate() {
-            shard
-                .close()
-                .map_err(|e| format!("close shard_{i}: {e}"))?;
+            // Release writer locks (commit + drain merges per shard).
+            for (i, shard) in self.shards.iter().enumerate() {
+                shard
+                    .close()
+                    .map_err(|e| format!("close shard_{i}: {e}"))?;
+            }
         }
 
         // Stop the actor pools. They hold Arc clones of the shard handles —
@@ -2804,6 +2836,7 @@ impl ShardedHandle {
     /// Uses the node_id → shard_id mapping to target only the correct shard.
     /// If the mapping is missing, broadcasts the delete to all shards.
     pub fn delete_by_node_id(&self, node_id: u64) -> Result<(), String> {
+        self.ensure_writable()?;
         let nid_field = self
             .field(NODE_ID_FIELD)
             .ok_or("_node_id field not found")?;

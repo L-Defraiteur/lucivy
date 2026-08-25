@@ -1,8 +1,28 @@
-# lucivy-wasm v2
+# lucivy-wasm 3.0.0
 
 Fast BM25 full-text search for browsers — WASM build with **threading** (emscripten pthreads), OPFS persistence, and snapshot/delta sync support. Runs in a Web Worker.
 
-[**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
+[**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — it clones lucivy's own source from GitHub and indexes it in your browser.
+
+### What's new in 3.0.0
+
+Measured on 10 000 Linux kernel files, in the browser, 8 threads:
+
+- **Indexing in 55 s** (was ~25 min) and **~1.5x the native query time**
+  (124-133 ms per query, median 69-92 ms; native 79 / 49) — the engine now
+  runs on **mimalloc**; emscripten's default allocator serialised every thread
+  on one lock.
+- **SFX v3 index format** with denser sidecars (−22 %), exact highlights on
+  every query mode, `parse` boolean syntax, `queryWarnings`, fuzzy by
+  Levenshtein or **Jaro-Winkler** (`fuzzy_metric`, `min_similarity`).
+- **Memory made explicit**: `memoryStatus()` says whether the index is held
+  in memory (up to 3 GB by default) or streamed from OPFS, and `preload()`
+  loads it once, after every background merge is done. A page that has just
+  indexed several GB cannot also serve them (4 GB address space): persist,
+  reload, open.
+- Bounded by construction: SFX segment budget, two segment builds at a time,
+  merges capped at 800 documents (48 small segments fill eight threads where
+  19 large ones fed one), at most 512 documents queued.
 
 ### What's new in v2
 
@@ -83,6 +103,38 @@ const index3 = await lucivy.importSnapshot(snapshotData, '/restored');
 // Terminate the worker (frees all WASM memory)
 lucivy.terminate();
 ```
+
+#### Startup options
+
+`new Lucivy(workerUrl, options)` — every option maps to a module argument
+read before the engine starts; the defaults are the measured ones:
+
+| option | default | effect |
+|---|---|---|
+| `noOpfs` | `false` | in-memory filesystem, the index lives for the session |
+| `verbose` | `false` | engine diagnostics (`LUCIVY_VERBOSE`, `V3_PROFILE`) |
+| `fileCacheMb` | index size | whole-file cache; pins the budget when set |
+| `ramIndexMaxMb` | `3072` | above this the index is streamed from OPFS instead of held |
+| `schedulerThreads` | `min(cores, 8)` | luciole scheduler pool (12 gains nothing over 8) |
+| `writerThreads` | `1` | indexer threads; the writer heap follows |
+| `maxMergedDocs` | `800` | largest segment a background merge may produce |
+| `maxBuilds` | `2` | segment builds at once (four exhaust the address space) |
+
+#### Memory
+
+```javascript
+const st = await index.memoryStatus();
+// { index_bytes, in_memory, num_docs, warnings: [..], shards: [..] }
+if (st.in_memory) {
+    const pre = await index.preload();   // { bytes, files, ms, skipped }
+}
+```
+
+`preload()` waits for background merges to be quiet, then reads every file
+of the index into memory once — a single substring query opens nearly every
+sidecar of every segment, so lazy reading only hides that cost in the first
+search. It does nothing when the index is streamed. `warnings` carries the
+sentence to show a user when the index does not fit.
 
 ### LucivyIndex
 
