@@ -1349,19 +1349,22 @@ fn shard_batch_budget() -> usize {
 }
 
 /// Largest index this build will hold whole in memory: `LUCIVY_RAM_INDEX_MAX`,
-/// default 2 GB on wasm32, unlimited elsewhere.
+/// default 3 GB on wasm32, unlimited elsewhere.
 ///
 /// WebAssembly addresses at most 4 GB (measured cap: 4 068 MB), and the index
-/// is not the only tenant — the query's working set, the document store, the
-/// runtime and, while indexing, the writer heap and the merge buffers all live
-/// in the same address space. Half of it is what an index may claim.
+/// is not the only tenant — the query's working set, the document store and
+/// the runtime share the address space. The default was 2 GB, sized for a
+/// page that also indexes (writer heap, merge buffers); measured on 25 August,
+/// a page that has just indexed cannot serve at all — its first search fails
+/// on a 10 MB allocation — while a page that only serves held a 2 600 MB
+/// index over three panel passes. Serving is the case this limit is for.
 fn ram_index_max() -> u64 {
     static MAX: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *MAX.get_or_init(|| {
         std::env::var("LUCIVY_RAM_INDEX_MAX")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(if cfg!(target_arch = "wasm32") { 2 << 30 } else { u64::MAX })
+            .unwrap_or(if cfg!(target_arch = "wasm32") { 3 << 30 } else { u64::MAX })
     })
 }
 

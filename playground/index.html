@@ -417,9 +417,9 @@ async function startup() {
       noOpfs: startupParams.has('noopfs'),
       verbose: startupParams.has('verbose'), // engine diagnostics (LUCIVY_VERBOSE, V3_PROFILE)
       fileCacheMb: parseInt(startupParams.get('cache') || '0', 10) || 0, // ?cache=3000 (MB)
-      // `?rammax=3000` (MB): largest index served entirely from memory. The
-      // default is 2 GB; raising it is how a demo is measured in the condition
-      // it is meant to run in — everything resident, nothing streamed.
+      // `?rammax=N` (MB): largest index served entirely from memory. The
+      // default is 3 GB (a 10 000-file kernel index is 2 600 MB); lowering it
+      // is how the streamed path is exercised on an index that would fit.
       ramIndexMaxMb: parseInt(startupParams.get('rammax') || '0', 10) || 0,
       // `?threads=16`: size of the luciole scheduler pool.
       schedulerThreads: parseInt(startupParams.get('threads') || '0', 10) || 0,
