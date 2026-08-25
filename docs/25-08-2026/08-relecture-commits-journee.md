@@ -232,7 +232,7 @@ tout ce qui a été mesuré tient.
 | point | fait |
 |---|---|
 | §1.1 | `validate_sfxpost` accepte `SFP2` et `SFP3` ; tests `merge_tests::a_v2_index_still_merges` / `a_v3_index_merges` |
-| §1.2 | SFP3 porte `headers_len` après `num_docs` ; le lecteur saute aux payloads sans décoder. **Format changé sur place** (jamais publié) : les index SFP3 de l'après-midi sont à reconstruire |
+| §1.2 | SFP3 porte `headers_len` après `num_docs` ; le lecteur saute aux payloads sans décoder. **Format changé sur place** (jamais publié) : les index SFP3 de l'après-midi sont à reconstruire. Remesuré en natif sur l'index 10 k reconstruit : 93 → 79 ms/requête, médiane 59 → 49, −14 %, 21 comptes identiques |
 | §1.3 | `sfx_budget()` divisé par les threads d'écriture, aligné sur le vrai défaut natif (`min(available_parallelism, 8)`), commité |
 | §2.1 | `read_live_files` lit `meta.json` une fois et en dérive tout ; `NotFound` relance depuis le nouveau `meta.json`, trois fois, puis erreur |
 | §2.2 | **non tranché** — documenté dans 05 §1 et §5.4, à décider |

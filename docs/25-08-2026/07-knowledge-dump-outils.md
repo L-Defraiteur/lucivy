@@ -282,16 +282,17 @@ Vérité terrain historique : `docs/BENCHMARKS.md`.
 
 ## 8. Chiffres de référence (25 août, à comparer après un changement)
 
-**Natif, 10 000 fichiers kernel, compacté** — 2 273 Mo, indexation 27,6 s,
-panel 1 789 ms soit 85 ms/requête (médiane 49 ms).
+**Natif, 10 000 fichiers kernel, compacté** (SFP3 avec `headers_len`,
+soir du 25) — 2 305 Mo, indexation 25,7 s, panel 1 664 ms soit
+**79 ms/requête (médiane 49 ms)**. Avant la correction du soir, même
+protocole : 1 943 ms, 93 ms/requête, médiane 59.
 
 **Navigateur, même corpus, tout en RAM (`?rammax=3000` obligatoire : le
 défaut est 2 Go)** — 2 600 Mo, panel 567 ms/requête (médiane 281 ms),
-preload 837 fichiers / 2 600 Mo en 2,5 s.
-
-⚠️ Ces deux index ont été écrits avec le SFP3 de l'après-midi, sans
-`headers_len` : **ils ne se lisent plus** depuis la correction du soir et
-sont à reconstruire avant toute comparaison (05 §5.0).
+preload 837 fichiers / 2 600 Mo en 2,5 s. **Mesuré avec le SFP3 de
+l'après-midi** : l'index OPFS ne se lit plus depuis la correction et doit
+être reconstruit avant toute comparaison (05 §5.0) ; le chiffre à battre
+est celui-là.
 
 **Natif, 15 440 fichiers, compacté** — 3 392 Mo, soit 220 Ko/document.
 

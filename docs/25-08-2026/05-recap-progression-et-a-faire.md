@@ -57,8 +57,10 @@ Soit **220 Ko par document**.
 n'écrivait pas la longueur des en-têtes, et chaque lookup les décodait tous
 — O(n) par accès, ce qui était la vraie cause des « 12 % inhérents ». Le
 bloc SFP3 porte maintenant `headers_len`. **Les index écrits en SFP3 dans la
-journée (`/tmp/lucivy_parity_native`, l'index OPFS du navigateur) ne se
-lisent plus et sont à reconstruire.** Le natif à chaud est à remesurer.
+journée ne se lisent plus** : la référence native est reconstruite
+(`/tmp/lucivy_parity_native`, 2 305 Mo compacté), l'index OPFS du
+navigateur reste à refaire. Remesuré en natif, même protocole, 21 comptes
+identiques : **93 → 79 ms/requête, médiane 59 → 49, total −14 %**.
 Même commit : `validate_sfxpost` acceptait `SFP2` seulement, donc **tout
 merge d'un index v2 échouait** depuis 14h50 — test de merge v2 ajouté.
 
