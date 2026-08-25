@@ -50,42 +50,73 @@ fn is_temp_name(name: &str) -> bool {
 /// files and 28 % of a snapshot right after indexing. On a 2.3 GB index that
 /// is some 650 MB of dead weight — the difference between a snapshot that
 /// fits in a browser's memory and one that does not.
+///
+/// `meta.json` is read **once**, and every file the snapshot carries is
+/// derived from that one read: the segment list, the pipeline version, the
+/// bytes of `meta.json` itself. The first version asked the index for its
+/// segment metas, then read `meta.json` from disk — two reads, and a merge
+/// landing between them (they run in the background after every commit)
+/// produced a `meta.json` naming a segment whose files were not packed.
+///
+/// A file that vanishes between the read of `meta.json` and its own read is
+/// a segment a merge retired and the collector removed: the snapshot restarts
+/// from the new `meta.json`. It is **not** skipped — since `list_files_for`
+/// names exactly what a segment carries, a missing file is a loss, and a
+/// snapshot missing one is worse than no snapshot.
 fn read_live_files(
     shard_dir: &Path,
     shard: &crate::handle::LucivyHandle,
 ) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let sfx_version = shard.index.settings().sfx_version;
-    let metas = shard.index.searchable_segment_metas()
-        .map_err(|e| format!("cannot list segments of {}: {e}", shard_dir.display()))?;
+    const ATTEMPTS: usize = 3;
+    let mut last_missing = String::new();
+    for _ in 0..ATTEMPTS {
+        let meta_path = shard_dir.join("meta.json");
+        let meta_bytes = std::fs::read(&meta_path)
+            .map_err(|e| format!("cannot read '{}': {e}", meta_path.display()))?;
+        let meta_json = std::str::from_utf8(&meta_bytes)
+            .map_err(|e| format!("'{}' is not UTF-8: {e}", meta_path.display()))?;
+        let meta = shard.index.parse_metas(meta_json)
+            .map_err(|e| format!("'{}': {e}", meta_path.display()))?;
+        let sfx_version = meta.index_settings.sfx_version;
 
-    let mut names: Vec<String> = Vec::new();
-    // meta.json is the segment list; .managed.json is the file registry a
-    // writable copy of this index will need.
-    for name in ["meta.json", ".managed.json"] {
-        if shard_dir.join(name).exists() {
-            names.push(name.to_string());
+        // .managed.json is the file registry a writable copy of this index
+        // will need; meta.json is already in hand.
+        let mut names: Vec<String> = Vec::new();
+        if shard_dir.join(".managed.json").exists() {
+            names.push(".managed.json".to_string());
         }
-    }
-    for p in metas.iter().flat_map(|m| m.list_files_for(sfx_version)) {
-        if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-            names.push(name.to_string());
+        for p in meta.segments.iter().flat_map(|m| m.list_files_for(sfx_version)) {
+            if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                names.push(name.to_string());
+            }
         }
-    }
-    names.sort();
-    names.dedup();
+        names.sort();
+        names.dedup();
 
-    let mut files = Vec::with_capacity(names.len());
-    for name in names {
-        let path = shard_dir.join(&name);
-        match std::fs::read(&path) {
-            Ok(data) => files.push((name, data)),
-            // A meta may name a component this segment does not carry; that is
-            // the same absence `list_files_for` already narrows, not an error.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(format!("cannot read '{}': {e}", path.display())),
+        let mut files = Vec::with_capacity(names.len() + 1);
+        files.push(("meta.json".to_string(), meta_bytes));
+        let mut restart = false;
+        for name in names {
+            let path = shard_dir.join(&name);
+            match std::fs::read(&path) {
+                Ok(data) => files.push((name, data)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    last_missing = path.display().to_string();
+                    restart = true;
+                    break;
+                }
+                Err(e) => return Err(format!("cannot read '{}': {e}", path.display())),
+            }
+        }
+        if !restart {
+            return Ok(files);
         }
     }
-    Ok(files)
+    Err(format!(
+        "snapshot of '{}': '{last_missing}' vanished under the export {ATTEMPTS} times — \
+         a merge is rewriting the shard; retry once it is quiet",
+        shard_dir.display()
+    ))
 }
 
 /// Read all files from a filesystem directory.
