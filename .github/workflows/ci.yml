@@ -300,7 +300,7 @@ jobs:
           echo "Include dir: $INCLUDE_DIR"
           ls -la "$INCLUDE_DIR/lucivy-cpp/src/" || true
           g++ -std=c++17 -o /tmp/test_lucivy_cpp bindings/cpp/test.cpp \
-            -I "$INCLUDE_DIR" \
+            -I "$INCLUDE_DIR" -I bindings/cpp/include \
             -L target/release -llucivy_cpp \
             -lpthread -ldl -lm
 
