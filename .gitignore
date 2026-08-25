@@ -23,3 +23,5 @@ playground/corpus-*.tar.gz
 # Python bytecode caches (bindings/python/tests)
 __pycache__/
 *.pyc
+bindings/python/dist/
+target/.cargo-docker/
