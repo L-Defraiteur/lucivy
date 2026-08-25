@@ -149,6 +149,13 @@ pub struct QueryConfig {
     pub terms: Option<Vec<String>>,
     pub pattern: Option<String>,
     pub distance: Option<u8>,
+    /// Fuzzy validation metric: `"levenshtein"` (default, a substring within
+    /// `distance` edits) or `"jaro_winkler"` (a substring whose Jaro-Winkler
+    /// similarity is at least `min_similarity`; `distance` then only sizes
+    /// the candidate set, default 2).
+    pub fuzzy_metric: Option<String>,
+    /// Jaro-Winkler acceptance threshold, `0.0..=1.0` (default 0.9).
+    pub min_similarity: Option<f32>,
     pub strict_separators: Option<bool>,
     pub regex: Option<bool>,
     // Boolean query sub-clauses
@@ -225,6 +232,8 @@ fn expand_split(config: &QueryConfig, sub_type: &str) -> QueryConfig {
             field: config.field.clone(),
             value: Some(if words.is_empty() { value.to_string() } else { words[0].to_string() }),
             distance: config.distance,
+            fuzzy_metric: config.fuzzy_metric.clone(),
+            min_similarity: config.min_similarity,
             anchor_start: config.anchor_start,
             ..Default::default()
         };
@@ -236,6 +245,8 @@ fn expand_split(config: &QueryConfig, sub_type: &str) -> QueryConfig {
             field: config.field.clone(),
             value: Some(w.to_string()),
             distance: config.distance,
+            fuzzy_metric: config.fuzzy_metric.clone(),
+            min_similarity: config.min_similarity,
             anchor_start: config.anchor_start,
             ..Default::default()
         })
@@ -392,13 +403,31 @@ fn build_contains_query(
 
     let field = resolve_field(config, schema)?;
     let value = config.value.as_deref().ok_or("contains query requires 'value'")?;
-    let distance = config.distance.unwrap_or(0);
+    let jaro_winkler = match config.fuzzy_metric.as_deref().map(|m| m.to_ascii_lowercase()) {
+        None => false,
+        Some(m) if m == "levenshtein" => false,
+        Some(m) if m == "jaro_winkler" || m == "jaro-winkler" || m == "jw" => true,
+        Some(m) => return Err(format!("unknown fuzzy_metric '{m}' (levenshtein | jaro_winkler)")),
+    };
+    // Jaro-Winkler decides among the pigeonhole's candidates, so it needs a
+    // distance to generate them: 2 unless the caller said otherwise.
+    let distance = if jaro_winkler {
+        config.distance.filter(|&d| d > 0).unwrap_or(2)
+    } else {
+        config.distance.unwrap_or(0)
+    };
     let anchor_start = config.anchor_start.unwrap_or(false);
 
     // Fuzzy d>=1: FuzzyQueryV3 (trigram pigeonhole, auto-detects SFX3 vs v2).
     if distance > 0 {
         let mut query = FuzzyQueryV3::new(field, value.to_string(), distance)
             .with_strict_separators(config.strict_separators.unwrap_or(false));
+        if jaro_winkler {
+            let min_similarity = config.min_similarity.unwrap_or(0.9).clamp(0.0, 1.0);
+            query = query.with_metric(
+                ld_lucivy::suffix_fst::briques::jaro_winkler::FuzzyMetric::JaroWinkler { min_similarity },
+            );
+        }
         if let Some(sink) = highlight_sink {
             let field_name = config.field.clone().unwrap_or_default();
             query = query.with_highlight_sink(sink, field_name);

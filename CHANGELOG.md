@@ -19,6 +19,11 @@ Companion crates: `luciole` 0.2.0, `lucistore` 0.2.0, `sparse-vector` 0.3.0.
   regex ~190 ms.
 - **Fuzzy v3**: real spans, parallel prescan, one FST walk per n-gram,
   candidate generators `ngram` / `pivot` / `pieces` / `auto`.
+- **Jaro-Winkler as an optional fuzzy metric**: `fuzzy_metric: "jaro_winkler"`
+  with `min_similarity` (default 0.9) validates the pigeonhole's candidates by
+  Jaro-Winkler instead of Levenshtein; `distance` then only sizes the
+  candidate set (default 2). Hits are tiered by similarity, so a typo at the
+  end of a word ranks above one at its start.
 - **Regex v3 by verification**: required literals (`regex-syntax`) resolved by
   the contains engine, proven windows, `regex::Regex` decides. Character
   classes and literal-free patterns fall back to a full scan.

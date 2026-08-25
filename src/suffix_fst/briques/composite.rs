@@ -1094,6 +1094,7 @@ pub fn resolve_trigrams_v3(
     distance: u8,
     strict_separators: bool,
     max_doc: DocId,
+    metric: super::jaro_winkler::FuzzyMetric,
 ) -> (BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>) {
     let (ngrams, query_positions, n) = generate_trigrams(query, distance);
     if ngrams.is_empty() {
@@ -1171,7 +1172,7 @@ pub fn resolve_trigrams_v3(
     // and termtexts already allow, without touching the docstore.
     verify_candidates(
         ctx, query, distance, strict_separators, max_doc,
-        &chains, threshold, bitset, highlights, coverage,
+        &chains, threshold, bitset, highlights, coverage, metric,
     )
 }
 
@@ -1191,10 +1192,15 @@ fn verify_candidates(
     bitset: BitSet,
     highlights: Vec<(DocId, usize, usize)>,
     coverage: Vec<(DocId, f32)>,
+    metric: super::jaro_winkler::FuzzyMetric,
 ) -> (BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>) {
+    use super::jaro_winkler::FuzzyMetric;
     if ctx.posmap.is_none() || ctx.termtexts.is_none() {
         return (bitset, highlights, coverage);
     }
+    // Jaro-Winkler: the best similarity seen per document, which becomes
+    // its score tier in place of the trigram miss count.
+    let mut best_sim: std::collections::HashMap<DocId, f32> = std::collections::HashMap::new();
 
     // In relaxed mode the query arrives already separator-stripped, so the window
     // has to be stripped too or the two are not in the same space.
@@ -1245,26 +1251,51 @@ fn verify_candidates(
             }
             continue;
         };
-        // Cheap reject first: the full alignment only runs on windows that
-        // hold something.
-        let t = profile::Timer::start();
-        let ok = within_edit_distance(&needle, window.as_bytes(), distance as usize, &mut buf);
-        t.stop(|c| &c.ns_fz_dp);
-        if !ok {
-            n_rejected += 1;
-            if diag && n_rejected <= 5 {
-                eprintln!("[fz] doc={} pos={}..{} REJECT needle={:?} window={:?}",
-                    chain.doc_id, chain.first_pos, chain.last_pos,
-                    String::from_utf8_lossy(&needle),
-                    &window[..window.len().min(80)]);
+        let found: Vec<(usize, usize)> = match metric {
+            FuzzyMetric::Levenshtein => {
+                // Cheap reject first: the full alignment only runs on windows
+                // that hold something.
+                let t = profile::Timer::start();
+                let ok = within_edit_distance(&needle, window.as_bytes(), distance as usize, &mut buf);
+                t.stop(|c| &c.ns_fz_dp);
+                if !ok {
+                    n_rejected += 1;
+                    if diag && n_rejected <= 5 {
+                        eprintln!("[fz] doc={} pos={}..{} REJECT needle={:?} window={:?}",
+                            chain.doc_id, chain.first_pos, chain.last_pos,
+                            String::from_utf8_lossy(&needle),
+                            &window[..window.len().min(80)]);
+                    }
+                    continue;
+                }
+                super::fuzzy_spans::fuzzy_spans(&needle, window.as_bytes(), distance as usize)
+                    .into_iter().map(|(s, e, _)| (s, e)).collect()
             }
-            continue;
-        }
-        let found = super::fuzzy_spans::fuzzy_spans(&needle, window.as_bytes(), distance as usize);
+            FuzzyMetric::JaroWinkler { min_similarity } => {
+                // The candidates come from the pigeonhole at distance `d`;
+                // Jaro-Winkler decides among them. The best substring of the
+                // window within `d` chars of the needle's length is the
+                // occurrence, and its similarity the document's tier.
+                let t = profile::Timer::start();
+                let best = super::jaro_winkler::best_window(&needle, window.as_bytes(), distance as usize);
+                t.stop(|c| &c.ns_fz_dp);
+                match best {
+                    Some((s, e, sim)) if sim >= min_similarity => {
+                        let cur = best_sim.entry(chain.doc_id).or_insert(0.0);
+                        if sim > *cur { *cur = sim; }
+                        vec![(s, e)]
+                    }
+                    _ => {
+                        n_rejected += 1;
+                        continue;
+                    }
+                }
+            }
+        };
         if found.is_empty() { continue; }
         let wlen = window.len();
         let mut any = false;
-        for (s, e, _) in found {
+        for (s, e) in found {
             // An occurrence touching a cut edge of the window is only partly
             // seen here (`uint6|` at the end of a window was reported as a
             // d=1 match); the margin guarantees the window of its own region
@@ -1291,7 +1322,15 @@ kept={} no_window={n_no_window} rejected={n_rejected} spans={}", kept.len(), spa
     let mut out_hl: Vec<(DocId, usize, usize)> = spans.into_iter()
         .map(|(d, f, t)| (d, f as usize, t as usize)).collect();
     out_hl.sort_unstable();
-    let out_cov = coverage.into_iter().filter(|(d, _)| kept.contains(d)).collect();
+    let out_cov = match metric {
+        FuzzyMetric::Levenshtein => coverage.into_iter().filter(|(d, _)| kept.contains(d)).collect(),
+        // Same scale as the miss count (`penalty * 1000 + bm25` in the
+        // scorer): similarity 1.0 is tier 0, 0.9 is one tier down, so a
+        // closer match always ranks above a more frequent one.
+        FuzzyMetric::JaroWinkler { .. } => best_sim.into_iter()
+            .map(|(d, s)| (d, -((1.0 - s) * 10.0)))
+            .collect(),
+    };
     (out_bitset, out_hl, out_cov)
 }
 
@@ -1574,7 +1613,7 @@ mod tests {
 
         // "mutex_lck" d=1 (missing 'o') should find "mutex_lock"
         let (bitset, highlights, _) =
-            resolve_trigrams_v3(&ctx, "mutex_lck", 1, true, 2);
+            resolve_trigrams_v3(&ctx, "mutex_lck", 1, true, 2, Default::default());
 
         assert!(bitset.contains(0), "doc 0 should match fuzzy");
         assert!(!highlights.is_empty());
@@ -1590,7 +1629,7 @@ mod tests {
         // Query with sep "_" kept as-is (NOT stripped by concat_query)
         // Trigrams include "x_l" which is in the FST thanks to overlap
         let (bitset, _, _) =
-            resolve_trigrams_v3(&ctx, "mutex_lock", 0, true, 1);
+            resolve_trigrams_v3(&ctx, "mutex_lock", 0, true, 1, Default::default());
 
         assert!(bitset.contains(0), "exact query should match via trigrams");
     }
@@ -1605,7 +1644,7 @@ mod tests {
         // "mutexlock" (no seps) d=1 strict_sep=false
         // Trigrams "exl" and "xlo" found in stripped partition
         let (bitset, _, _) =
-            resolve_trigrams_v3(&ctx, "mutexlock", 1, false, 1);
+            resolve_trigrams_v3(&ctx, "mutexlock", 1, false, 1, Default::default());
 
         assert!(bitset.contains(0), "fuzzy with sep-skip should find match");
     }
@@ -1619,7 +1658,7 @@ mod tests {
 
         // "zzzzzzzzz" should not match anything
         let (bitset, _, _) =
-            resolve_trigrams_v3(&ctx, "zzzzzzzzz", 1, true, 1);
+            resolve_trigrams_v3(&ctx, "zzzzzzzzz", 1, true, 1, Default::default());
 
         assert!(!bitset.contains(0));
     }

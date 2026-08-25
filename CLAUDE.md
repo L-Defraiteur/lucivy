@@ -30,7 +30,7 @@ Les anciens types sont routés automatiquement via `build_query()` dans `lucivy_
 | `contains` | natif SFX | `field, value, distance, anchor_start, exact_match, regex, strict_separators` |
 | `contains_split` | natif SFX | split whitespace → boolean should de contains |
 | `term` | → contains + anchor_start + exact_match | cross-token exact match |
-| `fuzzy` | → contains + distance | cross-token fuzzy via trigram pigeonhole |
+| `fuzzy` | → contains + distance | cross-token fuzzy via trigram pigeonhole ; `fuzzy_metric: "jaro_winkler"` + `min_similarity` (0.9) valide les candidats par Jaro-Winkler au lieu de Levenshtein |
 | `regex` | → contains + regex=true | cross-token regex via literal extraction |
 | `phrase` | → contains | multi-token adjacency |
 | `startsWith` | → contains + anchor_start | SI=0 only |
@@ -189,8 +189,14 @@ Les docs sont dans `docs/` organisés par dossier daté. Convention depuis le
 
 ## Packages publiés
 
-| Registre | Package | Version |
-|----------|---------|---------|
-| PyPI | `lucivy` | 0.3.2 |
-| npm | `lucivy` | 0.2.1 |
-| crates.io | `lucivy-core` | 0.1.1 |
+| Registre | Package | Publié (25 août 2026) | Workspace |
+|----------|---------|---------|---------|
+| PyPI | `lucivy` | 2.0.1 | 3.0.0 |
+| npm | `lucivy` | 2.0.2 | 3.0.0 |
+| crates.io | `ld-lucivy`, `lucivy-core` | 2.0.0 | 3.0.0 |
+| crates.io | `luciole`, `lucistore` | 0.1.0 | 0.2.0 |
+| crates.io | `sparse-vector` | jamais publié | 0.3.0 |
+
+Ordre de publication crates.io : `luciole` → `lucistore` → `ld-lucivy` →
+`lucivy-core` (→ `sparse-vector`). Jamais de `cargo publish` sans le feu vert
+explicite de Lucie.

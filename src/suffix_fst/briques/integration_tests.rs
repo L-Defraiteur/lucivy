@@ -170,7 +170,7 @@ mod tests {
             trace_id: None,
             posmap, bytemap, word_sfxpost, sibling_v3: None, termtexts: None, word_posmap: None,
         };
-        let (bitset, _, _) = orchestrator::fuzzy_v3(&ctx, query, distance, strict_sep, 100);
+        let (bitset, _, _) = orchestrator::fuzzy_v3(&ctx, query, distance, strict_sep, 100, Default::default());
         (0..100).filter(|&d| bitset.contains(d)).collect()
     }
 

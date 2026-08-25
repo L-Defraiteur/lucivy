@@ -44,9 +44,13 @@ N octets entre ». `contiguous_siblings` (gap = 0) est le chemin chaud.
 
 ### Fuzzy et regex
 
-- **Fuzzy** : pigeonhole par trigrammes, via `RegexContinuationQuery`. Les
-  scores sont étagés par nombre de « miss » (`miss_penalty * 1000 + bm25`) —
-  les scores négatifs sont voulus.
+- **Fuzzy** : pigeonhole par trigrammes (`FuzzyQueryV3` → `orchestrator::
+  fuzzy_v3` → `composite::resolve_trigrams_v3`), puis **validation sur le
+  texte source** reconstruit autour de chaque chaîne (`verify_candidates`) :
+  Levenshtein semi-global par défaut, ou **Jaro-Winkler** en option
+  (`fuzzy_metric`, `min_similarity`, module `briques/jaro_winkler.rs`). Les
+  scores sont étagés (`penalty * 1000 + bm25`) : par trigrammes manqués en
+  Levenshtein, par similarité en JW — les scores négatifs sont voulus.
 - **Regex** : extraction des littéraux, marche sur les candidats, validation
   de la regex ensuite.
 

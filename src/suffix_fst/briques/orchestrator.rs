@@ -331,6 +331,7 @@ pub fn fuzzy_v3(
     distance: u8,
     strict_separators: bool,
     max_doc: DocId,
+    metric: super::jaro_winkler::FuzzyMetric,
 ) -> (BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>) {
     // Validate input
     if query.is_empty() || query.len() > MAX_QUERY_LEN || distance > 3 {
@@ -364,7 +365,7 @@ pub fn fuzzy_v3(
     }
 
     composite::resolve_trigrams_v3(
-        ctx, query_ref, distance, strict_separators, max_doc,
+        ctx, query_ref, distance, strict_separators, max_doc, metric,
     )
 }
 
@@ -538,7 +539,7 @@ mod tests {
             trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
-        let (bitset, highlights, _) = fuzzy_v3(&ctx, "mutex_lck", 1, true, 2);
+        let (bitset, highlights, _) = fuzzy_v3(&ctx, "mutex_lck", 1, true, 2, Default::default());
         assert!(bitset.contains(0), "doc 0 should match fuzzy");
         assert!(!highlights.is_empty());
     }
@@ -554,7 +555,7 @@ mod tests {
             trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
-        let (bitset, _, coverage) = fuzzy_v3(&ctx, "mutex_lo", 0, true, 1);
+        let (bitset, _, coverage) = fuzzy_v3(&ctx, "mutex_lo", 0, true, 1, Default::default());
         assert!(bitset.contains(0));
         assert!(coverage.iter().any(|&(_, score)| score == 0.0));
     }
@@ -570,7 +571,7 @@ mod tests {
             trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
-        let (bitset, _, _) = fuzzy_v3(&ctx, "zzzzzzzzz", 1, true, 1);
+        let (bitset, _, _) = fuzzy_v3(&ctx, "zzzzzzzzz", 1, true, 1, Default::default());
         assert!(!bitset.contains(0));
     }
 
@@ -585,7 +586,7 @@ mod tests {
             trace_id: None,
             posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
-        let (bitset, _, _) = fuzzy_v3(&ctx, "mutex", 4, true, 1);
+        let (bitset, _, _) = fuzzy_v3(&ctx, "mutex", 4, true, 1, Default::default());
         assert!(!bitset.contains(0));
     }
 }

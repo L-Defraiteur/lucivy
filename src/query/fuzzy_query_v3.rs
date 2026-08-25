@@ -23,6 +23,10 @@ pub struct FuzzyQueryV3 {
     query_text: String,
     distance: u8,
     strict_separators: bool,
+    /// How a candidate window is validated: Levenshtein within `distance`
+    /// (default) or Jaro-Winkler above a similarity. The pigeonhole at
+    /// `distance` generates the candidates either way.
+    metric: crate::suffix_fst::briques::jaro_winkler::FuzzyMetric,
     highlight_sink: Option<Arc<HighlightSink>>,
     highlight_field_name: String,
     prescan_cache: HashMap<(String, SegmentId), CachedPrescan>,
@@ -36,11 +40,17 @@ impl FuzzyQueryV3 {
             query_text,
             distance,
             strict_separators: false,
+            metric: Default::default(),
             highlight_sink: None,
             highlight_field_name: String::new(),
             prescan_cache: HashMap::new(),
             global_doc_freq: 0,
         }
+    }
+
+    pub fn with_metric(mut self, metric: crate::suffix_fst::briques::jaro_winkler::FuzzyMetric) -> Self {
+        self.metric = metric;
+        self
     }
 
     pub fn with_highlight_sink(mut self, sink: Arc<HighlightSink>, field_name: String) -> Self {
@@ -55,7 +65,13 @@ impl FuzzyQueryV3 {
     }
 
     fn cache_key(&self) -> String {
-        format!("{}:fuzzy:{}:{}", self.field.field_id(), self.query_text, self.distance)
+        use crate::suffix_fst::briques::jaro_winkler::FuzzyMetric;
+        match self.metric {
+            FuzzyMetric::Levenshtein =>
+                format!("{}:fuzzy:{}:{}", self.field.field_id(), self.query_text, self.distance),
+            FuzzyMetric::JaroWinkler { min_similarity } =>
+                format!("{}:fuzzy:{}:{}:jw{:.3}", self.field.field_id(), self.query_text, self.distance, min_similarity),
+        }
     }
 
     // ─── Prescan per segment ──────────────────────────────────────────
@@ -100,7 +116,7 @@ impl FuzzyQueryV3 {
 
         let (_bitset, highlights, _coverage) = orchestrator::fuzzy_v3(
             &ctx, &self.query_text, self.distance,
-            self.strict_separators, seg_reader.max_doc(),
+            self.strict_separators, seg_reader.max_doc(), self.metric,
         );
 
         // Term frequency per doc: the map counts in O(n) over the

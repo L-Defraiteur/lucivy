@@ -280,24 +280,22 @@ distincts sur 256) et redondant entre ordinaux. Sparsité + déduplication, ou
 suppression pure puisqu'il est marqué **dérivable** depuis `.termtexts`.
 Gagnerait ~194 Ko/doc, soit ~1 940 Mo pour 10 000 documents.
 
-### 5.5 bis Fuzzy : Jaro-Winkler en option (noté le 25 au soir)
+### 5.5 bis ✅ Fuzzy : Jaro-Winkler en option (fait le 25 au soir)
 
-Le chemin fuzzy v3 (`src/suffix_fst/briques/composite.rs`) fait déjà trois
-étapes : pigeonhole par trigrammes (chaînes gardant ≥ n − d trigrammes),
-**validation Levenshtein** sur la fenêtre source reconstruite
-(`within_edit_distance`, DP semi-globale, deux lignes réutilisées), puis
-`fuzzy_spans` pour le span exact. Jaro-Winkler se branche à l'étape 2 :
+`src/suffix_fst/briques/jaro_winkler.rs` + branchement dans
+`verify_candidates` (`composite.rs`). Dans le JSON :
+`{"type":"fuzzy","value":"kmalloc","fuzzy_metric":"jaro_winkler","min_similarity":0.9}`.
 
-- `enum FuzzyMetric { Levenshtein, JaroWinkler { threshold } }` dans
-  `QueryConfig`, propagé jusqu'à la boucle de validation ; JW sans
-  allocation, ~40 lignes ;
-- JW n'est pas semi-global : comparer le needle au **token porteur** de la
-  chaîne (`back[]` donne la correspondance fenêtre → tokens), pas à la
-  fenêtre entière ;
-- le rappel reste celui du pigeonhole à distance `d` — JW ne peut que
-  resserrer parmi ces candidats, ce qui est voulu (coût borné) ;
-- score : la similarité JW elle-même plutôt que l'étage par trigrammes
-  manqués ; span : celui du token comparé.
+- Les candidats restent ceux du pigeonhole à distance `d` (2 par défaut
+  pour cette métrique) ; JW décide parmi eux — il ne peut que resserrer,
+  coût borné.
+- JW n'est pas semi-global : le needle glisse sur la fenêtre reconstruite
+  en sous-chaînes de longueur `n ± d` caractères, la meilleure gagne
+  (`best_window`), alignée sur les caractères UTF-8 ; le span est le sien.
+- Score : `-(1 − similarité) × 10` dans l'étage du scorer (`× 1000 + bm25`),
+  donc un typo en fin de mot passe devant un typo en début — ce que
+  Levenshtein ne distingue pas. Test : `test_fuzzy_jaro_winkler`.
+- Métrique inconnue → erreur explicite, pas d'ignorance silencieuse.
 
 ### 5.6 Publication crates.io 3.0.0
 

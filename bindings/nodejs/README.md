@@ -100,6 +100,11 @@ index.search({ type: 'contains', field: 'body', value: 'program' });
 // Fuzzy substring (Levenshtein distance)
 index.search({ type: 'contains', field: 'body', value: 'mutx', distance: 1 });
 
+// Fuzzy with Jaro-Winkler instead of Levenshtein: candidates come from the
+// trigram pigeonhole at `distance` (default 2), Jaro-Winkler decides, and
+// hits are tiered by similarity (a typo at the end ranks above one at the start)
+index.search({ type: 'fuzzy', field: 'body', value: 'kmalloc', fuzzy_metric: 'jaro_winkler', min_similarity: 0.9 });
+
 // Regex substring — cross-token regex matching
 index.search({ type: 'contains', field: 'body', value: 'lock.*mutex', regex: true });
 
