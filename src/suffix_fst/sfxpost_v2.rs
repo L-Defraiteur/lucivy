@@ -12,11 +12,19 @@
 //! `SFP3` block, per ordinal:
 //! ```text
 //!   [varint] num_docs
-//!   [c * 12] checkpoints, c = (num_docs - 1) / 32:
+//!   [varint] headers_len — bytes of the doc headers, so the payloads are
+//!            addressable without decoding every header first
+//!   [c * 12] checkpoints, c = (num_docs - 1) / CHECKPOINT_EVERY:
 //!            doc_id (u32), cumulative payload offset (u32), header offset (u32)
-//!   [num_docs * varints] doc headers: d_doc, payload_len, entry_count
+//!   [headers_len] doc headers, varints: d_doc, payload_len, entry_count
 //!   [payloads] per document: (d_token_index, d_byte_from, byte_to - byte_from)
 //! ```
+//!
+//! `headers_len` was missing from the first `SFP3` (25 August, afternoon):
+//! the reader found the payloads by decoding all `num_docs` headers on every
+//! lookup, which made `has_doc` / `entry_at` linear in the ordinal's document
+//! count — measured 245 ms for 2 000 lookups on 1 000 documents, 249 s on a
+//! million. No such file was ever published.
 //!
 //! The reader accepts both; `SegmentComponent` names this file for either
 //! pipeline version, so an index written before the change keeps working with
@@ -43,7 +51,7 @@
 use std::collections::HashSet;
 
 use super::file::SfxPostingEntry;
-use super::varint::{read_varint, write_varint};
+use super::varint::{read_varint, read_varint_u32, write_varint};
 
 const MAGIC_V2: &[u8; 4] = b"SFP2";
 const MAGIC_V3: &[u8; 4] = b"SFP3";
@@ -93,44 +101,43 @@ impl SfxPostWriterV2 {
         let num_terms = self.ordinals.len();
         let mut entry_data = Vec::new();
         let mut offset_table: Vec<u32> = Vec::with_capacity(num_terms + 1);
-        // Scratch buffers reused across ordinals. A `Vec` per ordinal — three
-        // million on a kernel segment — is what made the browser abort on a
-        // 402 MB allocation during a commit: the churn and the fragmentation,
-        // not the bytes.
+        // Scratch buffers reused across ordinals, and nothing allocated per
+        // document: a `Vec` per ordinal — three million on a kernel segment —
+        // is what made the browser abort on a 402 MB allocation during a
+        // commit, and a `Vec` per document per ordinal was the same churn one
+        // level down.
         let mut payload_data: Vec<u8> = Vec::new();
-        let mut payload_ends: Vec<usize> = Vec::new();
+        // `(doc_id, entry count, end of its payload in `payload_data`)`.
+        let mut doc_runs: Vec<(u32, u32, usize)> = Vec::new();
         let mut headers: Vec<u8> = Vec::new();
         let mut checkpoints: Vec<u8> = Vec::new();
 
         for entries in &mut self.ordinals {
             offset_table.push(entry_data.len() as u32);
 
-            // Sort by (doc_id, token_index)
+            // Sort by (doc_id, token_index): a document is then one run.
             entries.sort_unstable();
-
-            // Group by doc_id (already sorted)
-            let mut docs: Vec<(u32, Vec<(u32, u32, u32)>)> = Vec::new();
-            for &(doc_id, ti, bf, bt) in entries.iter() {
-                if docs.last().is_none_or(|d| d.0 != doc_id) {
-                    docs.push((doc_id, Vec::new()));
-                }
-                docs.last_mut().unwrap().1.push((ti, bf, bt));
-            }
 
             // Payloads first, all in one buffer: their lengths are the
             // header's, and a document's three fields only grow inside it.
             payload_data.clear();
-            payload_ends.clear();
-            for (_, doc_entries) in &docs {
+            doc_runs.clear();
+            let mut i = 0;
+            while i < entries.len() {
+                let doc_id = entries[i].0;
                 let (mut prev_ti, mut prev_bf) = (0u32, 0u32);
-                for &(ti, bf, bt) in doc_entries {
+                let mut count = 0u32;
+                while i < entries.len() && entries[i].0 == doc_id {
+                    let (_, ti, bf, bt) = entries[i];
                     write_varint(&mut payload_data, ti.wrapping_sub(prev_ti) as u64);
                     write_varint(&mut payload_data, bf.wrapping_sub(prev_bf) as u64);
                     write_varint(&mut payload_data, bt.wrapping_sub(bf) as u64);
                     prev_ti = ti;
                     prev_bf = bf;
+                    count += 1;
+                    i += 1;
                 }
-                payload_ends.push(payload_data.len());
+                doc_runs.push((doc_id, count, payload_data.len()));
             }
 
             // Document headers, with a checkpoint every CHECKPOINT_EVERY so
@@ -138,9 +145,9 @@ impl SfxPostWriterV2 {
             headers.clear();
             checkpoints.clear();
             let (mut prev_doc, mut cumulative) = (0u32, 0u32);
-            for (i, (doc_id, doc_entries)) in docs.iter().enumerate() {
-                let start = if i == 0 { 0 } else { payload_ends[i - 1] };
-                let len = payload_ends[i] - start;
+            for (i, &(doc_id, count, end)) in doc_runs.iter().enumerate() {
+                let start = if i == 0 { 0 } else { doc_runs[i - 1].2 };
+                let len = end - start;
                 if i > 0 && i % CHECKPOINT_EVERY == 0 {
                     checkpoints.extend_from_slice(&prev_doc.to_le_bytes());
                     checkpoints.extend_from_slice(&cumulative.to_le_bytes());
@@ -148,12 +155,15 @@ impl SfxPostWriterV2 {
                 }
                 write_varint(&mut headers, doc_id.wrapping_sub(prev_doc) as u64);
                 write_varint(&mut headers, len as u64);
-                write_varint(&mut headers, doc_entries.len() as u64);
-                prev_doc = *doc_id;
+                write_varint(&mut headers, count as u64);
+                prev_doc = doc_id;
                 cumulative += len as u32;
             }
 
-            write_varint(&mut entry_data, docs.len() as u64);
+            write_varint(&mut entry_data, doc_runs.len() as u64);
+            // Where the payloads start, so a lookup never decodes headers it
+            // does not need (see the module header).
+            write_varint(&mut entry_data, headers.len() as u64);
             entry_data.extend_from_slice(&checkpoints);
             entry_data.extend_from_slice(&headers);
             entry_data.extend_from_slice(&payload_data);
@@ -400,31 +410,25 @@ impl SfxPostReaderV2 {
 
         if self.v3 {
             let mut pos = 0usize;
-            let num_docs = read_varint(data, &mut pos)? as usize;
+            // Both counts come from the file: bound them by the block before
+            // any arithmetic on them. A document costs at least three header
+            // bytes, so `num_docs` cannot exceed the block's length — and the
+            // checkpoint arithmetic below then cannot overflow either.
+            let num_docs = read_varint_u32(data, &mut pos)? as usize;
+            if num_docs > data.len() { return None; }
+            let headers_len = read_varint_u32(data, &mut pos)? as usize;
             let cp_start = pos;
             let cp_len = checkpoints_for(num_docs) * CHECKPOINT_SIZE;
-            let headers_start = cp_start + cp_len;
-            if headers_start > data.len() { return None; }
-            // The header region ends where the first payload begins, which the
-            // last header's cumulative length gives — but the reader never needs
-            // that boundary: it decodes exactly `num_docs` triples and stops.
-            // Payloads are addressed from the end of the headers, so find it by
-            // decoding the headers once, at open, which is `num_docs` varint
-            // triples and nothing more.
-            let mut pos = headers_start;
-            for _ in 0..num_docs {
-                read_varint(data, &mut pos)?;
-                read_varint(data, &mut pos)?;
-                read_varint(data, &mut pos)?;
-            }
-            if pos > data.len() { return None; }
+            let headers_start = cp_start.checked_add(cp_len)?;
+            let payload_start = headers_start.checked_add(headers_len)?;
+            if payload_start > data.len() { return None; }
             return Some(OrdinalHeader {
                 num_docs,
                 layout: HeaderLayout::V3 {
                     checkpoints: &data[cp_start..headers_start],
-                    headers: &data[headers_start..pos],
+                    headers: &data[headers_start..payload_start],
                 },
-                payload_data: &data[pos..],
+                payload_data: &data[payload_start..],
             });
         }
 
@@ -589,9 +593,11 @@ impl<'a> OrdinalHeader<'a> {
         // The payload is the hot loop — one pass per matching document, and
         // `entry_at` runs one per emitted match. It uses `decode_vint`, the
         // same tight decoder V2 always used; the bounds-checked `read_varint`
-        // of the shared module costs 14 % on the 21-query panel here, and this
-        // loop cannot read past its slice anyway: a short read decodes a
-        // truncated value and the `pos >= data.len()` guard ends the walk.
+        // of the shared module costs 14 % on the 21-query panel here. The
+        // loop cannot read past its slice: a short read decodes a truncated
+        // value and the `pos >= data.len()` guard ends the walk; and
+        // `decode_vint` stops after five bytes, so a corrupt run of
+        // continuation bits cannot shift past 32 bits.
         let (mut prev_ti, mut prev_bf) = (0u32, 0u32);
         for _ in 0..count {
             if pos >= data.len() { return }
@@ -649,7 +655,8 @@ impl<'a> OrdinalHeader<'a> {
             }
             HeaderLayout::V3 { checkpoints, headers } => {
                 // Largest checkpoint whose document is below the target: the
-                // answer, if any, is in the 32 documents that follow it.
+                // answer, if any, is in the CHECKPOINT_EVERY documents that
+                // follow it.
                 let c = checkpoints_for(self.num_docs);
                 let (mut lo, mut hi) = (0usize, c);
                 while lo < hi {
@@ -661,8 +668,8 @@ impl<'a> OrdinalHeader<'a> {
                 let start = lo * CHECKPOINT_EVERY;
                 let end = (start + CHECKPOINT_EVERY).min(self.num_docs);
                 // Decode the run once. Calling `doc_id(i)` here would restart
-                // from the checkpoint at every step — 32 x 32 decodes for a
-                // lookup that needs 32, and `entry_at` runs one per emitted
+                // from the checkpoint at every step — a quadratic run for a
+                // lookup that needs one, and `entry_at` runs one per emitted
                 // match (measured: the 21-query panel went 2 405 -> 2 781 ms).
                 let (mut doc, mut offset, mut pos) = if lo == 0 {
                     (0u32, 0u32, 0usize)
@@ -695,17 +702,20 @@ impl<'a> OrdinalHeader<'a> {
 }
 
 
+/// Decode one `u32` vint. At most five bytes are consumed: a sixth byte
+/// with the continuation bit set would shift by 35, which a corrupt file
+/// can ask for and which panics in debug builds.
 fn decode_vint(data: &[u8]) -> (u32, usize) {
     let mut result = 0u32;
     let mut shift = 0;
-    for (i, &byte) in data.iter().enumerate() {
+    for (i, &byte) in data.iter().enumerate().take(5) {
         result |= ((byte & 0x7F) as u32) << shift;
         if byte & 0x80 == 0 {
             return (result, i + 1);
         }
         shift += 7;
     }
-    (result, data.len())
+    (result, data.len().min(5))
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -990,6 +1000,42 @@ mod tests {
                 r.for_each_entry(0, |_, _, _, _| {});
             }
         }
+    }
+
+    /// A corrupt `num_docs` or `headers_len` must be refused, not trusted:
+    /// the first `SFP3` reader multiplied `num_docs` before bounding it
+    /// (overflow in debug, a wrapped size in release, a truncated one on
+    /// wasm32).
+    #[test]
+    fn v3_refuses_corrupt_block_counts() {
+        let mut w = SfxPostWriterV2::new(1);
+        for &(d, ti, bf, bt) in &sample(20) {
+            w.add_entry(0, d, ti, bf, bt);
+        }
+        let good = w.finish();
+        let entry_data_start = 8 + 2 * 4;
+        for bad in [u32::MAX as u64, u32::MAX as u64 - 1, 1u64 << 40, 100_000] {
+            // Overwrite the block's leading varint(s) with `bad`.
+            let mut data = good[..entry_data_start].to_vec();
+            write_varint(&mut data, bad);
+            write_varint(&mut data, bad);
+            data.extend_from_slice(&good[entry_data_start + 2..]);
+            if let Some(r) = SfxPostReaderV2::open(data) {
+                assert!(r.entries(0).is_empty(), "bad count {bad} must read as an empty ordinal");
+                assert!(!r.has_doc(0, 1));
+                assert_eq!(r.doc_freq(0), 0);
+            }
+        }
+        // Six continuation bytes in a payload: `decode_vint` must stop.
+        let r = SfxPostReaderV2::open(good.clone()).unwrap();
+        let payload = [0xFFu8; 12];
+        let mut pos = 0;
+        while pos < payload.len() {
+            let (_, n) = decode_vint(&payload[pos..]);
+            assert!(n > 0 && n <= 5);
+            pos += n;
+        }
+        assert!(!r.entries(0).is_empty());
     }
 
     #[test]

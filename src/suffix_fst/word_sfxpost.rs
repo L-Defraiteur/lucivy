@@ -400,7 +400,9 @@ impl<'a> WordSfxPostReader<'a> {
         let Some((start, end)) = self.block_range(ordinal) else { return Vec::new() };
         if self.v3 {
             let n = self.block_header(start).map(|(n, _, _)| n).unwrap_or(0);
-            let mut out = Vec::with_capacity(n);
+            // `n` comes from the file: an entry is at least five varint bytes,
+            // so the block bounds what a corrupt count may reserve.
+            let mut out = Vec::with_capacity(n.min((end - start) / 5));
             self.walk_v3(start, end, |e| { out.push(e); true });
             return out;
         }

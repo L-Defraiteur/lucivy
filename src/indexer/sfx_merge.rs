@@ -300,9 +300,13 @@ pub(crate) fn validate_sfxpost(
     if !should_validate() { return None; }
     if sfxpost_data.len() < 8 { return Some("sfxpost too short".into()); }
 
-    // V2 format: "SFP2" magic + u32 num_terms + offset table + entry data
-    if &sfxpost_data[0..4] != b"SFP2" {
-        return Some("sfxpost: missing SFP2 magic".into());
+    // "SFP2" or "SFP3" magic + u32 num_terms + offset table + entry data.
+    // The writer emits SFP3 for every pipeline version since 25 August 2026;
+    // requiring SFP2 here made every merge of a v2 index reject its own
+    // output ("missing SFP2 magic") — the reader below accepts both, so
+    // let it be the judge of the layout.
+    if &sfxpost_data[0..4] != b"SFP2" && &sfxpost_data[0..4] != b"SFP3" {
+        return Some("sfxpost: missing SFP2/SFP3 magic".into());
     }
 
     let stored_num_tokens = u32::from_le_bytes(
@@ -369,4 +373,67 @@ pub(crate) fn write_sfx(
         serializer.write_custom_index(field.field_id(), "sfxpost", sfxpost)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use crate::index::Index;
+    use crate::schema::{IndexRecordOption, SchemaBuilder, TextFieldIndexing, TextOptions, Document as _};
+    use crate::tokenizer::{LowerCaser, SimpleTokenizer, TextAnalyzer};
+    use crate::LucivyDocument;
+
+    /// Two committed segments with an SFX field, then one merge.
+    fn merge_two_segments(index: Index) -> crate::Result<usize> {
+        index.tokenizers().register(
+            "raw",
+            TextAnalyzer::builder(SimpleTokenizer::default()).filter(LowerCaser).build(),
+        );
+        let field = index.schema().get_field("body._raw").unwrap();
+        let mut writer = index.writer_for_tests()?;
+        for batch in [["import rag3db from core", "kmalloc(sizeof *p, GFP_KERNEL)"],
+                      ["spin_lock_init(&lock)", "netdev_info(dev, \"probe\")"]] {
+            for text in batch {
+                let mut doc = LucivyDocument::new();
+                doc.add_text(field, text);
+                writer.add_document(doc)?;
+            }
+            writer.commit()?;
+        }
+        let ids = index.searchable_segment_ids()?;
+        assert_eq!(ids.len(), 2, "two segments before the merge");
+        writer.merge(&ids)?;
+        writer.wait_merging_threads()?;
+        Ok(index.searchable_segment_ids()?.len())
+    }
+
+    fn sfx_schema() -> crate::schema::Schema {
+        let mut b = SchemaBuilder::new();
+        b.add_text_field(
+            "body._raw",
+            TextOptions::default().set_indexing_options(
+                TextFieldIndexing::default()
+                    .set_tokenizer("raw")
+                    .set_index_option(IndexRecordOption::WithFreqsAndPositionsAndOffsets),
+            ),
+        );
+        b.build()
+    }
+
+    /// The v2 merge DAG validates the `.sfxpost` it writes. The writer has
+    /// emitted `SFP3` for every pipeline version since 25 August 2026, and the
+    /// validation required `SFP2`: every merge of a v2 index failed with
+    /// "missing SFP2 magic". No test merged a v2 index, so it stayed green.
+    #[test]
+    fn a_v2_index_still_merges() {
+        let segments = merge_two_segments(Index::create_in_ram_sfx2(sfx_schema()))
+            .expect("merging a v2 index");
+        assert_eq!(segments, 1);
+    }
+
+    #[test]
+    fn a_v3_index_merges() {
+        let segments = merge_two_segments(Index::create_in_ram(sfx_schema()))
+            .expect("merging a v3 index");
+        assert_eq!(segments, 1);
+    }
 }
