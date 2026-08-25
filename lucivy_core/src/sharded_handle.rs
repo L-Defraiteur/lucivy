@@ -2398,6 +2398,21 @@ impl ShardedHandle {
             Residency::Streaming { index_bytes, batch_bytes } => {
                 let mb = index_bytes >> 20;
                 let max_mb = ram_index_max() >> 20;
+                // Streamed because the count is a floor, not because the index
+                // is big: some files could not be opened (a storage that is
+                // still mounting after a reload). Saying "index fewer files"
+                // to a 271 MB index would be nonsense; say what happened.
+                let (opened, listed) = (0..self.shards.len())
+                    .map(|i| { let (_, o, l) = self.shard_bytes_and_files(i); (o, l) })
+                    .fold((0usize, 0usize), |(a, b), (o, l)| (a + o, b + l));
+                if opened < listed {
+                    return vec![format!(
+                        "{} of {listed} index files could not be opened yet (at least {mb} MB \
+                         counted), so searches read the index from storage for now; the \
+                         count is retried at the next search.",
+                        listed - opened,
+                    )];
+                }
                 let docs = self.num_docs().max(1) as u64;
                 // What the same index says a comfortable corpus would be, from
                 // its own measured bytes per document rather than a guess.

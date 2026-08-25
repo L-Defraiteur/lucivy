@@ -382,6 +382,38 @@ window._allLogs = [];
   <div id="resultsHeader" class="results-header"></div>
   <div id="results"></div>
 
+  <!-- The engine's log ring and the page's console, readable where there is
+       no devtools (a phone). Refreshed while open; "Copy" puts it on the
+       clipboard to paste into an issue. -->
+  <details class="import-section" id="logsSection">
+    <summary>Logs <button id="copyLogs" style="margin-left:8px;font-size:12px;">Copy</button></summary>
+    <pre id="logsPre" style="max-height:40vh;overflow:auto;font-size:11px;white-space:pre-wrap;margin-top:8px;color:var(--text-dim);"></pre>
+  </details>
+  <script>
+  (() => {
+    const section = document.getElementById('logsSection');
+    const pre = document.getElementById('logsPre');
+    const render = () => {
+      const lines = (window._allLogs || []).slice(-400)
+        .map(l => `${new Date(l.t).toISOString().slice(11, 19)} ${l.level === 'log' ? '' : l.level + ' '}${l.msg}`);
+      pre.textContent = lines.join('\n');
+      pre.scrollTop = pre.scrollHeight;
+    };
+    let timer = null;
+    section.addEventListener('toggle', () => {
+      if (section.open) { render(); timer = setInterval(render, 1000); }
+      else { clearInterval(timer); timer = null; }
+    });
+    document.getElementById('copyLogs').addEventListener('click', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      render();
+      navigator.clipboard.writeText(pre.textContent).then(
+        () => { e.target.textContent = 'Copied'; setTimeout(() => e.target.textContent = 'Copy', 1500); },
+        () => { e.target.textContent = 'Select and copy'; });
+    });
+  })();
+  </script>
+
   <footer>
     <a href="https://github.com/L-Defraiteur/lucivy">GitHub</a> &middot;
     <a href="https://pypi.org/project/lucivy/">PyPI</a> &middot;
@@ -443,6 +475,17 @@ async function startup() {
     // `?noopfs`: in-memory filesystem (index lost at reload) — isolates
     // OPFS from the engine when something stalls.
     const startupParams = new URLSearchParams(location.search);
+    // A phone gives a tab a fraction of what a desktop does — the commit of
+    // the 1 100-file demo died on one. Fewer threads (each costs a 2 MB stack
+    // and a share of the SFX heap), one build at a time, smaller merges, and
+    // an index held in memory only up to 1 GB. `?desktop` or any explicit
+    // parameter overrides.
+    const smallDevice = !startupParams.has('desktop') && (
+      (navigator.deviceMemory && navigator.deviceMemory <= 4) ||
+      /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent));
+    const param = (name, mobileDefault) =>
+      parseInt(startupParams.get(name) || '0', 10) || (smallDevice ? mobileDefault : 0);
+    if (smallDevice) console.log('[playground] small device: threads 2, writer 1, builds 1, merges 400, rammax 1024');
     lucivy = new Lucivy('./js/lucivy-worker.js', {
       noOpfs: startupParams.has('noopfs'),
       verbose: startupParams.has('verbose'), // engine diagnostics (LUCIVY_VERBOSE, V3_PROFILE)
@@ -450,16 +493,16 @@ async function startup() {
       // `?rammax=N` (MB): largest index served entirely from memory. The
       // default is 3 GB (a 10 000-file kernel index is 2 600 MB); lowering it
       // is how the streamed path is exercised on an index that would fit.
-      ramIndexMaxMb: parseInt(startupParams.get('rammax') || '0', 10) || 0,
+      ramIndexMaxMb: param('rammax', 1024),
       // `?threads=16`: size of the luciole scheduler pool.
-      schedulerThreads: parseInt(startupParams.get('threads') || '0', 10) || 0,
+      schedulerThreads: param('threads', 2),
       // `?wthreads=4`: indexer threads. The SFX budget is split between them.
-      writerThreads: parseInt(startupParams.get('wthreads') || '0', 10) || 0,
+      writerThreads: param('wthreads', 1),
       // `?maxmerged=N`: largest segment a background merge may produce
       // (default 2 000 in the browser; 10 000 dies on a 600 MB allocation).
-      maxMergedDocs: parseInt(startupParams.get('maxmerged') || '0', 10) || 0,
+      maxMergedDocs: param('maxmerged', 400),
       // `?builds=N`: segment builds allowed at once (default 4).
-      maxBuilds: parseInt(startupParams.get('builds') || '0', 10) || 0,
+      maxBuilds: param('builds', 1),
     });
     window._lucivy = lucivy;
     // Ring messages (allocation failures, panics, their call stacks) go to the
@@ -542,7 +585,17 @@ async function showMemoryStatus() {
   const index = getActiveIndex();
   if (!index || !index.memoryStatus) return;
   try {
-    const st = await index.memoryStatus();
+    let st = await index.memoryStatus();
+    // Right after a reload the storage can still be mounting: files that
+    // cannot be opened are not counted, the count is a floor, and the index
+    // is streamed "for now". Retry a few times before saying anything.
+    const unreadable = (s) => (s.shards || []).reduce((n, sh) => n + (sh.listed - sh.opened), 0);
+    for (let attempt = 0; attempt < 5 && !st.in_memory && unreadable(st) > 0; attempt++) {
+      memoryEl.className = 'memory';
+      memoryEl.textContent = `${unreadable(st)} index files not readable yet — retrying…`;
+      await new Promise(r => setTimeout(r, 1000));
+      st = await index.memoryStatus();
+    }
     const mb = (st.index_bytes / (1 << 20)).toFixed(0);
     memoryEl.className = st.in_memory ? 'memory ok' : 'memory warn';
     if (!st.in_memory) {

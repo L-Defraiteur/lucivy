@@ -1,3 +1,17 @@
+Unreleased
+================================
+
+- Playground on a phone: the 1 100-file demo died at commit, and an index
+  opened right after a reload was declared "streamed from storage" at 271 MB
+  with advice to index fewer files — the storage was still mounting and the
+  byte count was a floor. Small devices (`deviceMemory` ≤ 4 or a mobile UA,
+  `?desktop` to override) now run 2 scheduler threads, 1 writer thread, 1
+  build, merges of 400 and hold at most 1 GB in memory; the page retries the
+  count a few times before showing anything; `memory_warnings` says "N files
+  could not be opened yet" instead of the size advice when that is the cause;
+  a collapsible **Logs** panel shows the engine's log ring and the console
+  where there is no devtools, with a Copy button.
+
 Lucivy 3.0.2
 ================================
 
