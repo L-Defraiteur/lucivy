@@ -348,6 +348,13 @@ puis `lucivy-wasm` (OTP donnés en direct ; le paquet WASM était resté en
 2.0.1 avec le JS de mai — synchronisé sur `playground/js` avant). Tag
 `v3.0.0` sur `main`.
 
+Puis **3.0.1**, même ordre, tag `v3.0.1` : les crates 3.0.0 avaient été
+publiés avant deux correctifs du cœur (interblocage lazy, message de
+finalisation) et avec les README 2.x de `ld-lucivy` / `lucivy-core` ; le
+README racine, ARCHITECTURE, RELEASE, MIGRATION et celui de `lucivy-core`
+ont été réécrits entre les deux. Règle retenue : les crates se publient en
+dernier.
+
 ### 5.7 Pagination fine du `.sfx`
 
 Design écrit : `02-design-bytes-pagine.md`. 1 508 Mo dont 18 % touchés par une

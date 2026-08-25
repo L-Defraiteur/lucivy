@@ -200,10 +200,15 @@ Les docs sont dans `docs/` organisés par dossier daté. Convention depuis le
 
 | Registre | Package | Publié | Date |
 |----------|---------|---------|---------|
-| PyPI | `lucivy` | **3.0.0** (wheel `cp39-abi3-manylinux_2_28_x86_64` + sdist) | 25 août 2026 |
-| npm | `lucivy` | **3.0.0** (Linux x64) | 25 août 2026 |
-| npm | `lucivy-wasm` | **3.0.0** (worker + pkg WASM, `bindings/emscripten`) | 25 août 2026 |
-| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` | **3.0.0** | 25 août 2026 |
+| PyPI | `lucivy` | **3.0.1** (wheel `cp39-abi3-manylinux_2_28_x86_64` + sdist) | 25 août 2026 |
+| npm | `lucivy` | **3.0.1** (Linux x64) | 25 août 2026 |
+| npm | `lucivy-wasm` | **3.0.1** (worker + pkg WASM, `bindings/emscripten`) | 25 août 2026 |
+| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` | **3.0.1** | 25 août 2026 |
+
+3.0.0 puis 3.0.1 le même soir : les crates 3.0.0 étaient partis avant deux
+correctifs du cœur (interblocage lazy sans `blob_len`, message de
+finalisation perdu) et avec leurs README 2.x. Leçon : **publier les crates en
+dernier**, après les bindings et les README, pas en premier.
 
 Précédent : `ld-lucivy` / `lucivy-core` 2.0.0, `luciole` / `lucistore` 0.1.0,
 PyPI 2.0.1, npm 2.0.2. Tokens de publication : `.vault/` (ignoré par git),
