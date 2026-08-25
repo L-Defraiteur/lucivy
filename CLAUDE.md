@@ -165,6 +165,11 @@ cd playground && node serve.mjs
 
 ## Docs
 
+**Dossier courant : `docs/25-08-2026/` — lire d'abord `05-recap-progression-et-a-faire.md`,
+`06-architecture.md`, `07-knowledge-dump-outils.md`** (autonomes, écrits pour
+remplacer la lecture de l'historique). 01-04 sont le détail de la journée :
+journal, design de la pagination, rapport de régression, rapport de journée.
+
 Les docs sont dans `docs/` organisés par dossier daté. Convention depuis le
 24 août 2026 : `JJ-MM-AAAA` (triable). Dossier courant : `24-08-2026/` —
 **lire d'abord `06-recap-progression-et-a-faire.md`, `07-architecture.md`,
