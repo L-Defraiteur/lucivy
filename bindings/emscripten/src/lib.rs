@@ -223,6 +223,15 @@ fn ensure_opfs_mounted(attempts: u32) -> bool {
             rlog!("[lucivy-wasm] OPFS mount attempt {} failed (ret={ret})", attempt + 1);
             std::thread::sleep(std::time::Duration::from_millis(200 * (attempt + 1) as u64));
         }
+        // A whole round of retries costs seconds of blocking sleep (8
+        // attempts: 7.2 s). One failed round after the startup one means
+        // OPFS is not coming — a browser without it, a blocked origin — and
+        // every create/open must not pay that again: fall back for good.
+        static FAILED_ROUNDS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if FAILED_ROUNDS.fetch_add(1, Ordering::AcqRel) + 1 >= 2 {
+            OPFS_DISABLED.store(true, Ordering::Release);
+            rlog!("[lucivy-wasm] OPFS unavailable after two rounds of retries: in-memory filesystem for this session");
+        }
         false
     }
     #[cfg(not(target_os = "emscripten"))]

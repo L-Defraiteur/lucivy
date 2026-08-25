@@ -53,10 +53,13 @@ mkdir -p "$OUT_DIR"
 # the actors hold. Capped at 16: each thread costs a 2 MB stack against a 4 GB
 # address space, and beyond that the queries stop being the bottleneck.
 #
-# Careful: more threads is free for queries, which are CPU-bound, and is not
-# free for indexing — merge parallelism is what exhausted the address space on
-# 24 August (LUCIVY_MERGE_CONCURRENCY is 1 on wasm) and segment size is what
-# did on 25 August. Raising this does not raise those.
+# Careful: more threads did not help queries either (measured 25 August:
+# 4 -> 12 scheduler threads made the panel 7 % slower — the engine waits on
+# memory in WASM, not on CPU), and it is actively harmful for indexing —
+# merge parallelism is what exhausted the address space on 24 August
+# (LUCIVY_MERGE_CONCURRENCY is 1 on wasm) and segment size is what did on
+# 25 August. Raising this raises none of those; the scheduler is sized by
+# LUCIVY_SCHEDULER_THREADS (default 4, measured).
 emcc "$STATIC_LIB" \
     -o "$OUT_DIR/lucivy.js" \
     -pthread \
