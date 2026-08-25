@@ -35,6 +35,13 @@ pub fn check_committed(handle: &LucivyHandle, path: &str) -> Result<(), String> 
 /// Files to exclude from snapshots (lock files, managed.json).
 const EXCLUDED_FILES: &[&str] = &[".lock", ".tantivy-writer.lock", ".lucivy-writer.lock", ".managed.json"];
 
+/// Half-written files of an atomic write: `meta.json.tmp.<pid>` (this crate's
+/// directory) and `.tmpXXXXXX` (the tempfile crate, used by the mmap
+/// directory). Never part of an index.
+fn is_temp_name(name: &str) -> bool {
+    name.starts_with(".tmp") || name.contains(".tmp.")
+}
+
 /// Read all files from a filesystem directory.
 /// Excludes lock files that should not be part of a snapshot.
 pub fn read_directory_files(path: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
@@ -48,11 +55,17 @@ pub fn read_directory_files(path: &Path) -> Result<Vec<(String, Vec<u8>)>, Strin
             .map_err(|e| format!("file type error: {e}"))?;
         if ft.is_file() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if EXCLUDED_FILES.contains(&name.as_str()) {
+            if EXCLUDED_FILES.contains(&name.as_str()) || is_temp_name(&name) {
                 continue;
             }
-            let data = std::fs::read(entry.path())
-                .map_err(|e| format!("cannot read file '{}': {e}", entry.path().display()))?;
+            let data = match std::fs::read(entry.path()) {
+                Ok(d) => d,
+                // A file listed a moment ago and gone now is a temp file of a
+                // concurrent write, or a segment a merge just retired: neither
+                // belongs in the snapshot. Anything else is a real error.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("cannot read file '{}': {e}", entry.path().display())),
+            };
             files.push((name, data));
         }
     }

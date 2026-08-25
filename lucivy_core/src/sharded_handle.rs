@@ -1436,6 +1436,8 @@ pub struct ShardedHandle {
     closed: AtomicBool,
     /// Text field IDs (for tokenization at add_document).
     text_fields: Vec<Field>,
+    /// On-disk bytes per shard, keyed by its segment list (see `shard_bytes`).
+    shard_bytes_cache: Mutex<std::collections::HashMap<usize, (Vec<(String, u32)>, usize)>>,
     /// Pipeline: reader pool (typed, round-robin).
     reader_pool: luciole::Pool<ReaderMsg>,
     /// Pipeline: single router actor (typed).
@@ -1607,6 +1609,7 @@ impl ShardedHandle {
             has_deletes: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             text_fields,
+            shard_bytes_cache: Mutex::new(std::collections::HashMap::new()),
             reader_pool,
             router_ref,
             pipeline,
@@ -1668,6 +1671,7 @@ impl ShardedHandle {
             has_deletes: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             text_fields,
+            shard_bytes_cache: Mutex::new(std::collections::HashMap::new()),
             reader_pool,
             router_ref,
             pipeline,
@@ -2093,14 +2097,29 @@ impl ShardedHandle {
 
     /// On-disk bytes of a shard's searchable segments (lazy handles: a
     /// stat per file, nothing read).
+    /// Memoized per shard: a stat of ~900 files is a few milliseconds each on
+    /// WASMFS/OPFS (proxied), which was seconds per search. The cache key is
+    /// the shard's segment list, so a commit or a merge invalidates it.
     fn shard_bytes(&self, shard: usize) -> usize {
         let Some(h) = self.shards.get(shard) else { return 0 };
+        let Ok(metas) = h.index.searchable_segment_metas() else { return 0 };
+        let key: Vec<(String, u32)> = metas.iter()
+            .map(|m| (m.id().uuid_string(), m.max_doc()))
+            .collect();
+        {
+            let cache = self.shard_bytes_cache.lock().unwrap();
+            if let Some((cached_key, bytes)) = cache.get(&shard) {
+                if *cached_key == key {
+                    return *bytes;
+                }
+            }
+        }
         let dir = h.index.directory();
-        h.index.searchable_segment_metas().map(|metas| {
-            metas.iter().flat_map(|m| m.list_files())
-                .filter_map(|p| ld_lucivy::Directory::open_read(dir, &p).ok().map(|f| ld_lucivy::HasLen::len(&f)))
-                .sum()
-        }).unwrap_or(0)
+        let bytes: usize = metas.iter().flat_map(|m| m.list_files())
+            .filter_map(|p| ld_lucivy::Directory::open_read(dir, &p).ok().map(|f| ld_lucivy::HasLen::len(&f)))
+            .sum();
+        self.shard_bytes_cache.lock().unwrap().insert(shard, (key, bytes));
+        bytes
     }
 
     // ── Distributed search support ──────────────────────────────────────
