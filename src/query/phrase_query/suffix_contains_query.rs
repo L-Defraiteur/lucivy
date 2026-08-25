@@ -387,9 +387,22 @@ where
 
 impl Query for SuffixContainsQuery {
     fn prescan_segments(&mut self, segments: &[&crate::SegmentReader]) -> crate::Result<()> {
+        self.prescan_cache = None;
+        self.global_doc_freq = None;
+        self.prescan_segments_more(segments)
+    }
+
+    /// Keeps what earlier calls recorded: a search that streams the shards
+    /// through a memory budget prescans them batch by batch. Without this
+    /// override the default fell back to `prescan_segments`, and only the
+    /// last batch answered.
+    fn prescan_segments_more(&mut self, segments: &[&crate::SegmentReader]) -> crate::Result<()> {
         let (cache, doc_freq) = self.prescan(segments)?;
-        self.prescan_cache = Some(cache);
-        self.global_doc_freq = Some(doc_freq);
+        match self.prescan_cache.as_mut() {
+            Some(existing) => existing.extend(cache),
+            None => self.prescan_cache = Some(cache),
+        }
+        *self.global_doc_freq.get_or_insert(0) += doc_freq;
         Ok(())
     }
 

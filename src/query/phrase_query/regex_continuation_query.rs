@@ -274,6 +274,14 @@ impl RegexContinuationQuery {
 
 impl Query for RegexContinuationQuery {
     fn prescan_segments(&mut self, segments: &[&crate::SegmentReader]) -> crate::Result<()> {
+        self.regex_prescan_cache = None;
+        self.global_regex_doc_freq = None;
+        self.prescan_segments_more(segments)
+    }
+
+    /// Keeps what earlier calls recorded — a batched search prescans the
+    /// shards batch by batch and needs the union (see `Query`).
+    fn prescan_segments_more(&mut self, segments: &[&crate::SegmentReader]) -> crate::Result<()> {
         let mut cache = HashMap::new();
         let mut doc_freq = 0u64;
         match &self.dfa_kind {
@@ -308,8 +316,11 @@ impl Query for RegexContinuationQuery {
                 }
             }
         }
-        self.regex_prescan_cache = Some(cache);
-        self.global_regex_doc_freq = Some(doc_freq);
+        match self.regex_prescan_cache.as_mut() {
+            Some(existing) => existing.extend(cache),
+            None => self.regex_prescan_cache = Some(cache),
+        }
+        *self.global_regex_doc_freq.get_or_insert(0) += doc_freq;
         Ok(())
     }
 
