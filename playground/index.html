@@ -50,10 +50,19 @@ window._allLogs = [];
      latency. The figures are measured, not estimated — see
      docs/25-08-2026/04-rapport-journee.md. */
   header p.wasm-note {
-    font-size: 12px; line-height: 1.6; margin: 10px auto 0; max-width: 620px;
-    color: var(--text-dim); opacity: 0.85;
+    font-size: 12px; line-height: 1.6; margin: 14px auto 0; max-width: 660px;
+    color: var(--text-dim);
+    display: flex; align-items: flex-start; gap: 10px; text-align: left;
+    padding: 10px 14px; border-radius: 6px;
+    background: rgba(255, 166, 87, 0.06);
+    border: 1px solid rgba(255, 166, 87, 0.25);
   }
   header p.wasm-note strong { color: var(--highlight); font-weight: 600; }
+  /* Inline so it survives the offline playground and any CSP: no asset to fetch. */
+  header p.wasm-note .warn-icon {
+    flex: none; width: 18px; height: 18px; margin-top: 1px;
+    color: var(--highlight);
+  }
 
   /* Search bar */
   .search-bar {
@@ -210,10 +219,18 @@ window._allLogs = [];
     <h1><span>lucivy</span> playground</h1>
     <p>BM25 full-text search &mdash; substring, fuzzy, regex &mdash; running in your browser via WASM</p>
     <p class="wasm-note">
+      <svg class="warn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+        <line x1="12" y1="9" x2="12" y2="13"/>
+        <line x1="12" y1="17" x2="12.01" y2="17"/>
+      </svg>
+      <span>
       WebAssembly runs this engine about <strong>6&times; slower than native</strong>
       &mdash; measured on 10&nbsp;000 Linux kernel files, held in memory:
       a median query takes 317&nbsp;ms here against 49&nbsp;ms natively, for identical results.
       A browser also addresses at most 4&nbsp;GB, which is what limits the corpus size.
+      </span>
     </p>
   </header>
 
