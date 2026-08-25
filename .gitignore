@@ -25,3 +25,8 @@ __pycache__/
 *.pyc
 bindings/python/dist/
 target/.cargo-docker/
+
+# Local credential vault: everything inside is ignored except the README and the loader.
+.vault/*
+!.vault/README.md
+!.vault/load.sh
