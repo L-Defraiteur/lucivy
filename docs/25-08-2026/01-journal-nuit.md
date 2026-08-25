@@ -429,3 +429,74 @@ marginal à chaud — à vérifier au panel 50 k avant de garder.
 
 Mise en œuvre additive : le writer émet `WSP3`, le lecteur accepte `WSP2`
 et `WSP3`. Les index existants continuent de se lire.
+
+## ≈13:00 — WSP3 : `.word_sfxpost` en delta-varint
+
+Écrit. Le writer émet `WSP3`, le lecteur accepte `WSP2` **et** `WSP3` : les
+index existants continuent de se lire, rien à migrer.
+
+Format d'un bloc : `n` en varint, puis `c = (n-1)/32` points de reprise de
+16 octets, puis les entrées. Une entrée = `d_doc`, `d_first`, `last-first`,
+`d_from`, `to-from`, en varints ; `d_first` et `d_from` sont des deltas
+quand le document est le même que l'entrée précédente (signalé par
+`d_doc == 0`), absolus sinon. Les deltas se calculent en `wrapping_sub` et
+s'appliquent en `wrapping_add` : un champ non monotone fait un aller-retour
+exact, il coûte seulement un varint plus large.
+
+Le point délicat était `entry_at`, une **recherche binaire** sur des
+enregistrements de taille fixe que le varint casse. Le point de reprise `k`
+garde l'état du décodeur après l'entrée `k*32-1` — `(doc, first, from)` — et
+le décalage de l'entrée `k*32`. Une recherche binaire sur les points de
+reprise réduit à une plage de 32 entrées : la recherche reste
+logarithmique, pour 1,5 Mo sur un fichier de 177 Mo.
+
+Résultat sur l'index kernel 15 440 docs compacté :
+
+| | WSP2 | WSP3 |
+|---|---|---|
+| `.word_sfxpost` | 738 Mo | **292 Mo** (2,53×) |
+| index total | 4 339 Mo | **3 708 Mo** (−14,5 %) |
+| panel 21 requêtes | 2 738 ms | **2 494 ms** (−8,9 %) |
+
+Les 21 requêtes rendent les **mêmes comptes** ; le seul DIFF est celui qui
+existait déjà (ordre d'ex æquo sur `path contains`). Le panel est plus
+rapide, pas plus lent : le décodage varint coûte moins que les octets qu'on
+ne lit plus, même à chaud. Une seule requête est plus lente (`kmalloc`,
+54,9 → 105,8 ms) et c'est la première du panel — chauffe, pas régression :
+la même requête relancée à froid est mesurée séparément.
+
+Tests : 1 419 (moteur) + suites `lucivy-core`, dont un test qui compare
+WSP3 et WSP2 entrée par entrée sur 9 tailles (1, 2, 31, 32, 33, 64, 65,
+200, 1 000), vérifie `entry_at` sur toutes les clés présentes *et*
+absentes, et qu'un fichier tronqué ne boucle ni ne panique.
+
+## ≈13:10 — les autres sidecars : où le varint mord encore
+
+Relevé des formats croisé avec « octets touchés par requête ».
+
+| fichier | taille | touché | verdict |
+|---|---|---|---|
+| `.sibling_v3` | 254 Mo | 66 % | ✅ meilleure cible suivante |
+| `.sfxpost` | 555 Mo | — | ✅ bon, points de reprise obligatoires |
+| `.termtexts` | 221 Mo | 1,7 % | ✅ gain disque seul |
+| `.posmap` / `.word_pos_map` | 322 Mo | 43 / 35 % | ❌ rien à mordre |
+| `.bytemap` | 408 Mo | — | ❌ déjà un bitmap |
+
+- `.sibling_v3` est **plus simple** que `word_sfxpost` : entrées de 6 o
+  fixes, `next_ordinal` croissant et dédupliqué dans chaque ordinal, et
+  lecture **strictement séquentielle** (`siblings()` boucle `pos += 6`, pas
+  de recherche binaire) — donc **pas de points de reprise à payer**. En
+  prime `gap_len` occupe 2 octets pour une valeur qui vaut 0 ou 1 presque
+  toujours : `(delta_next << 1) | (gap != 0)` puis `gap` seulement s'il est
+  non nul.
+- `.sfxpost` a la structure de `word_sfxpost` d'avant : `doc_ids`
+  strictement croissants, `payload_offsets` cumulatifs (redondants : c'est
+  le préfixe des longueurs), payload déjà varint mais **absolu**. Mêmes
+  points de reprise que WSP3, `find_doc` étant une recherche binaire.
+- `.posmap` / `.word_pos_map` : tableaux **denses positionnels** à valeur
+  arbitraire, accès `data[p*4]` en O(1) — le varint le détruirait sans rien
+  gagner. Deux autres défauts nets : table d'offsets en **u64** pour des
+  fichiers de moins de 200 Mo, et l'audit les marque **dérivables**. La
+  bonne optimisation là-bas est la suppression, pas l'encodage.
+- `.bytemap` : bitmap 256 bits par ordinal. Le levier est la **sparsité**
+  (5-15 octets distincts sur 256) et la déduplication.
