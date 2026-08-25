@@ -45,10 +45,22 @@ mkdir -p "$OUT_DIR"
 # seen as a hang of the first segment write). Nothing here sleeps: blocking
 # waits are futexes on pthreads, the commit runs on its own thread and the
 # worker polls its status through the SharedArrayBuffer.
+# The pthread pool is sized at startup, not at build time: emscripten accepts a
+# JavaScript expression here, so one binary adapts to the machine instead of
+# needing one build per core count. It was a fixed 8 while the luciole
+# scheduler asked for `available_parallelism()` — 24 on the development
+# machine — and the observed concurrency of a query was 4, the pool minus what
+# the actors hold. Capped at 16: each thread costs a 2 MB stack against a 4 GB
+# address space, and beyond that the queries stop being the bottleneck.
+#
+# Careful: more threads is free for queries, which are CPU-bound, and is not
+# free for indexing — merge parallelism is what exhausted the address space on
+# 24 August (LUCIVY_MERGE_CONCURRENCY is 1 on wasm) and segment size is what
+# did on 25 August. Raising this does not raise those.
 emcc "$STATIC_LIB" \
     -o "$OUT_DIR/lucivy.js" \
     -pthread \
-    -sPTHREAD_POOL_SIZE=8 \
+    -sPTHREAD_POOL_SIZE='Math.min(navigator.hardwareConcurrency || 4, 8)' \
     -sPTHREAD_POOL_SIZE_STRICT=0 \
     -sALLOW_MEMORY_GROWTH=1 \
     -sMAXIMUM_MEMORY=4GB \

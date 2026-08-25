@@ -390,6 +390,8 @@ async function startup() {
       // default is 2 GB; raising it is how a demo is measured in the condition
       // it is meant to run in — everything resident, nothing streamed.
       ramIndexMaxMb: parseInt(startupParams.get('rammax') || '0', 10) || 0,
+      // `?threads=16`: size of the luciole scheduler pool.
+      schedulerThreads: parseInt(startupParams.get('threads') || '0', 10) || 0,
     });
     window._lucivy = lucivy;
     // Ring messages (allocation failures, panics, their call stacks) go to the

@@ -256,6 +256,15 @@ pub extern "C" fn __main_argc_argv(argc: i32, argv: *const *const c_char) -> i32
         // (LUCIVY_RAM_INDEX_MAX, 2 GB by default on wasm32). Above it a search
         // streams the shards; below it the index is held whole, which is what
         // a browser demo wants and what this flag exists to measure.
+        // `--scheduler-threads=N`: size of the luciole pool
+        // (LUCIVY_SCHEDULER_THREADS). Left alone it asks
+        // `available_parallelism`, which does not answer on every emscripten
+        // build — and the fallback is small and silent.
+        if let Some(n) = a.strip_prefix("--scheduler-threads=") {
+            if let Ok(n) = n.parse::<usize>() {
+                std::env::set_var("LUCIVY_SCHEDULER_THREADS", n.to_string());
+            }
+        }
         if let Some(mb) = a.strip_prefix("--ram-index-max-mb=") {
             if let Ok(mb) = mb.parse::<u64>() {
                 std::env::set_var("LUCIVY_RAM_INDEX_MAX", (mb << 20).to_string());

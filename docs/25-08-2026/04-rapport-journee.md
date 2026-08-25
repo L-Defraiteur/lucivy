@@ -211,3 +211,50 @@ mesurer les requêtes, et **ne toucher au parallélisme d'indexation qu'après**
 - Le compactage navigateur avec les nouveaux formats : pas rejoué depuis
   cette nuit.
 - La publication crates.io 3.0.0 : `--dry-run` vert, en attente du feu vert.
+
+## 9. Addendum : les threads, mesurés — l'hypothèse était fausse
+
+Suite du §6, où j'annonçais qu'on utilisait 4 cœurs sur 24 et que le pool de
+pthreads était le plafond. **C'était faux, et voici les trois mesures.**
+
+Le pool a d'abord été dimensionné à l'exécution
+(`-sPTHREAD_POOL_SIZE='Math.min(navigator.hardwareConcurrency || 4, 16)'`,
+soit 16 ici) : **aucun gain, 0,99×**, et la concurrence observée restait
+**exactement 4**. Le pool n'était donc pas le plafond.
+
+Le vrai plafond était une ligne : `LUCIVY_SCHEDULER_THREADS = "4"` **en dur**
+au début de `__main_argc_argv`, avant même la lecture des drapeaux. Le
+planificateur luciole demande bien `available_parallelism()` — il ne l'a
+jamais vu, la variable était déjà posée.
+
+Rendu réglable (`--scheduler-threads=N`, `?threads=N`) et rendu visible
+(`[scheduler] starting with N threads (source)`), le panel sur l'index de
+10 000 documents donne :
+
+| threads | moyenne | médiane | `fuzzy d2` | `contains kmalloc` |
+|---|---|---|---|---|
+| **4** (défaut) | **893 ms** | 614 ms | **5 290 ms** | 293 ms |
+| 8 | 960 ms | 633 ms | 5 993 ms | 241 ms |
+| 12 | 949 ms | 587 ms | 6 262 ms | 276 ms |
+
+La concurrence suit bien (12 threads → « peak concurrency 12 »), mais **le
+temps monte**. Les requêtes lourdes se dégradent régulièrement — `fuzzy d2`
+perd 18 % entre 4 et 12 threads — pendant que les légères gagnent à peine.
+Ces requêtes ne parallélisent donc pas : elles attendent autre chose que du
+CPU disponible, et douze threads qui traversent des centaines de mégaoctets
+dans un même tas WASM se gênent (bande passante mémoire, allocateur).
+
+`-O3` a été essayé dans la foulée : **918 ms contre 893, soit 0,97×** — dans
+le bruit, médiane un peu meilleure (558 contre 614), rien qui justifie le
+changement. Le build reste en `-O2`.
+
+**Ce qui est conservé** : le pool s'adapte vers le bas
+(`min(hardwareConcurrency, 8)`) pour une petite machine, le nombre de threads
+est réglable et affiché, et le défaut de 4 est désormais un choix mesuré et
+non un chiffre en dur oublié.
+
+**Ce que ça redirige** : le facteur 10× entre navigateur et natif ne vient ni
+du parallélisme ni du niveau d'optimisation. Il faut un **profil réel** — le
+profileur de Chrome sur le module, ou une instrumentation du chemin chaud —
+avant d'essayer un drapeau de plus. Les deux essais d'aujourd'hui étaient
+gratuits ; le suivant ne doit plus être à l'aveugle.

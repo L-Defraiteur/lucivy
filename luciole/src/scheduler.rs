@@ -201,8 +201,19 @@ pub fn global_scheduler() -> &'static Arc<Scheduler> {
                         .map(|n| n.get())
                         .unwrap_or(2)
                 });
-            if cfg!(debug_assertions) {
-                eprintln!("[scheduler] starting with {num_threads} threads");
+            if cfg!(debug_assertions) || std::env::var("LUCIVY_VERBOSE").is_ok() {
+                // Also says where the number came from: on emscripten
+                // `available_parallelism` may not answer, and the fallback is
+                // silent — a pool of 16 threads with a scheduler of 2 looks
+                // exactly like a pool of 8.
+                let source = if std::env::var("LUCIVY_SCHEDULER_THREADS").is_ok() {
+                    "LUCIVY_SCHEDULER_THREADS"
+                } else if std::thread::available_parallelism().is_ok() {
+                    "available_parallelism"
+                } else {
+                    "fallback (available_parallelism unsupported here)"
+                };
+                eprintln!("[scheduler] starting with {num_threads} threads ({source})");
             }
             let scheduler = Arc::new(Scheduler::new(num_threads));
             let handle = scheduler.start();

@@ -48,6 +48,7 @@ export class Lucivy {
             verbose: !!options.verbose,
             fileCacheMb: options.fileCacheMb || 0,
             ramIndexMaxMb: options.ramIndexMaxMb || 0,
+            schedulerThreads: options.schedulerThreads || 0,
         });
     }
 
