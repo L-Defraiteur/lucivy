@@ -186,6 +186,29 @@ impl FileCache {
     }
 }
 
+/// Drop from the whole-file cache every entry whose file name is in
+/// `names` (segment file names are unique: the segment id is in them).
+/// Used to release a batch of shards once a search is done with them;
+/// pinned bytes held by live handles are unaffected.
+pub fn evict_cached_files_named(names: &std::collections::HashSet<std::ffi::OsString>) -> usize {
+    let mut cache = FileCache::global().lock().unwrap();
+    let victims: Vec<PathBuf> = cache
+        .entries
+        .keys()
+        .filter(|p| p.file_name().map(|n| names.contains(n)).unwrap_or(false))
+        .cloned()
+        .collect();
+    for v in &victims {
+        cache.remove(v);
+    }
+    victims.len()
+}
+
+/// Bytes currently held by the whole-file cache (diagnostics).
+pub fn file_cache_bytes() -> usize {
+    FileCache::global().lock().unwrap().total
+}
+
 /// Read handle over a file on disk that is read only when asked to.
 ///
 /// `pinned` emulates POSIX unlink semantics: when the directory deletes a

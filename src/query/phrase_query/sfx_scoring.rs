@@ -143,6 +143,10 @@ impl Weight for SfxWeight {
         }
 
         // No cache hit — prescan should have populated this. Return empty.
+        if crate::diag::is_verbose() {
+            eprintln!("[sfx_weight] cache miss for segment {:?} key {:?} ({} cached)",
+                segment_id, self.cache_key, self.prescan_cache.len());
+        }
         Ok(Box::new(EmptyScorer))
     }
 

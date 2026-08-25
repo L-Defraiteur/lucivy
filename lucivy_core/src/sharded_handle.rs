@@ -1327,6 +1327,18 @@ fn create_shard_actor(shard_id: usize, handle: Arc<LucivyHandle>) -> GenericActo
     actor
 }
 
+/// Memory budget for one batch of shards in a search: `LUCIVY_SHARD_BATCH_BYTES`,
+/// default 1 GB on wasm32 (no mmap, files read whole), unlimited elsewhere.
+fn shard_batch_budget() -> usize {
+    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        std::env::var("LUCIVY_SHARD_BATCH_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(if cfg!(target_arch = "wasm32") { 1 << 30 } else { usize::MAX })
+    })
+}
+
 // ─── Search Result ──────────────────────────────────────────────────────────
 
 /// A search result from a sharded search: score, shard index, document address.
@@ -1915,22 +1927,172 @@ impl ShardedHandle {
                 }
             }
         };
-        let mut dag = crate::search_dag::build_search_dag(
-            &self.shards,
-            &self.shard_pool,
-            &self.pipeline,
-            &self.schema,
-            query_config,
-            top_k,
-            highlight_sink,
-            shard_filter,
+        // ── Streaming the shards through a memory budget ───────────────
+        //
+        // Without mmap (WASM: files are read whole into a bounded cache), a
+        // query over every shard materialises more than the cache holds and
+        // evicts what it just read. Instead the shards go through in
+        // batches sized by `LUCIVY_SHARD_BATCH_BYTES`: a batch is read once,
+        // searched in parallel with everything in RAM, merged into the
+        // running top-k, then released before the next one. Scores are
+        // identical whatever the batching: the BM25 statistics come from
+        // every shard (`AggregatedBm25StatsOwned` over all searchers) and the
+        // ordering is the deterministic one of `ScoredEntry`. Native keeps
+        // the default budget of "everything": one batch, the exact path
+        // below, no eviction calls.
+        let budget = shard_batch_budget();
+        let batches = if budget == usize::MAX || self.shards.len() <= 1 {
+            Vec::new()
+        } else {
+            let active: Vec<usize> = match &shard_filter {
+                ShardFilter::None | ShardFilter::All(_) => (0..self.shards.len()).collect(),
+                ShardFilter::PerShard(per) => per.iter().enumerate()
+                    .filter_map(|(i, f)| f.as_ref().map(|_| i)).collect(),
+                ShardFilter::Subset(ids) => ids.clone(),
+            };
+            self.batches_by_bytes(&active, budget)
+        };
+        if batches.len() <= 1 {
+            let mut dag = crate::search_dag::build_search_dag(
+                &self.shards,
+                &self.shard_pool,
+                &self.pipeline,
+                &self.schema,
+                query_config,
+                top_k,
+                highlight_sink,
+                shard_filter,
+            )?;
+
+            let mut result = luciole::execute_dag(&mut dag, None)
+                .map_err(|e| format!("search DAG: {e}"))?;
+
+            return result.take_output::<Vec<ShardedSearchResult>>("output", "results")
+                .ok_or_else(|| "search DAG: no results from output node".to_string());
+        }
+
+        let verbose = std::env::var("LUCIVY_VERBOSE").is_ok();
+        // Pass 1 — prescan, batch by batch: the query reads the sidecars of
+        // the batch's segments and keeps their doc lists; the files are then
+        // released. The weight compiled afterwards sees every shard, so
+        // the scores are the ones of a one-batch search.
+        let mut query = crate::query::build_query(
+            query_config, &self.schema, &self.shards[0].index, highlight_sink.clone(),
         )?;
+        for (b, batch) in batches.iter().enumerate() {
+            let t = std::time::Instant::now();
+            let searchers: Vec<_> = batch.iter().map(|&i| self.shards[i].reader.searcher()).collect();
+            let refs: Vec<&ld_lucivy::SegmentReader> = searchers.iter()
+                .flat_map(|s| s.segment_readers().iter())
+                .filter(|seg| {
+                    let Some(field) = seg.sfx_fields().next() else { return false };
+                    seg.sfx_file(field)
+                        .and_then(|d| d.read_bytes().ok())
+                        .and_then(|b| ld_lucivy::suffix_fst::section_file::detect_sfx_version(b.as_ref()))
+                        == Some(3)
+                })
+                .collect();
+            query.prescan_segments_more(&refs).map_err(|e| format!("prescan batch {b}: {e}"))?;
+            let names: std::collections::HashSet<std::ffi::OsString> = batch.iter()
+                .flat_map(|&i| self.shard_file_names(i))
+                .collect();
+            let evicted = crate::directory::evict_cached_files_named(&names);
+            if verbose {
+                eprintln!("[search] prescan batch {}/{}: shards {:?}, {} segments, {evicted} files released in {:.0}ms",
+                    b + 1, batches.len(), batch, refs.len(), t.elapsed().as_secs_f64() * 1e3);
+            }
+        }
+        // Pass 2 — search, batch by batch, with the fully prescanned query.
+        let mut heap: std::collections::BinaryHeap<ScoredEntry> =
+            std::collections::BinaryHeap::with_capacity(top_k + 1);
+        for (b, batch) in batches.iter().enumerate() {
+            let batch_filter = match &shard_filter {
+                ShardFilter::None => ShardFilter::Subset(batch.clone()),
+                ShardFilter::All(set) => ShardFilter::PerShard(
+                    (0..self.shards.len())
+                        .map(|i| batch.contains(&i).then(|| Arc::clone(set)))
+                        .collect(),
+                ),
+                ShardFilter::PerShard(per) => ShardFilter::PerShard(
+                    per.iter().enumerate()
+                        .map(|(i, f)| if batch.contains(&i) { f.clone() } else { None })
+                        .collect(),
+                ),
+                ShardFilter::Subset(_) => ShardFilter::Subset(batch.clone()),
+            };
+            let t = std::time::Instant::now();
+            let mut dag = crate::search_dag::build_search_dag_with_query(
+                &self.shards,
+                &self.shard_pool,
+                &self.pipeline,
+                top_k,
+                batch_filter,
+                query.box_clone(),
+                true,
+            )?;
+            let mut result = luciole::execute_dag(&mut dag, None)
+                .map_err(|e| format!("search DAG (batch {b}): {e}"))?;
+            let partial = result.take_output::<Vec<ShardedSearchResult>>("output", "results")
+                .ok_or_else(|| "search DAG: no results from output node".to_string())?;
+            let found = partial.len();
+            for r in partial {
+                heap.push(ScoredEntry { score: r.score, shard_id: r.shard_id, doc_address: r.doc_address });
+                if heap.len() > top_k { heap.pop(); }
+            }
+            if verbose {
+                eprintln!("[search] batch {}/{}: shards {:?}, {found} hits in {:.0}ms",
+                    b + 1, batches.len(), batch, t.elapsed().as_secs_f64() * 1e3);
+            }
+        }
+        // `ScoredEntry`'s Ord is already reversed on score (min-heap), so
+        // ascending Ord is best first, with the deterministic tie order —
+        // the same `into_sorted_vec()` `MergeResultsNode` uses. A
+        // `sort_by(|a, b| b.cmp(a))` on top of that reversal put the
+        // weakest hits first.
+        let merged: Vec<ScoredEntry> = heap.into_sorted_vec();
+        Ok(merged.into_iter().map(|e| ShardedSearchResult {
+            score: e.score, shard_id: e.shard_id, doc_address: e.doc_address,
+        }).collect())
+    }
 
-        let mut result = luciole::execute_dag(&mut dag, None)
-            .map_err(|e| format!("search DAG: {e}"))?;
+    /// Group `shards` into batches whose on-disk bytes stay under `budget`
+    /// (a shard larger than the budget forms a batch of its own).
+    fn batches_by_bytes(&self, shards: &[usize], budget: usize) -> Vec<Vec<usize>> {
+        let mut batches: Vec<Vec<usize>> = Vec::new();
+        let mut current: Vec<usize> = Vec::new();
+        let mut current_bytes = 0usize;
+        for &i in shards {
+            let bytes = self.shard_bytes(i);
+            if !current.is_empty() && current_bytes + bytes > budget {
+                batches.push(std::mem::take(&mut current));
+                current_bytes = 0;
+            }
+            current.push(i);
+            current_bytes += bytes;
+        }
+        if !current.is_empty() { batches.push(current); }
+        batches
+    }
 
-        result.take_output::<Vec<ShardedSearchResult>>("output", "results")
-            .ok_or_else(|| "search DAG: no results from output node".to_string())
+    /// File names of every searchable segment of a shard (relative names,
+    /// unique across shards thanks to the segment id).
+    fn shard_file_names(&self, shard: usize) -> Vec<std::ffi::OsString> {
+        let Some(h) = self.shards.get(shard) else { return Vec::new() };
+        h.index.searchable_segment_metas().map(|metas| {
+            metas.iter().flat_map(|m| m.list_files()).filter_map(|p| p.file_name().map(|n| n.to_os_string())).collect()
+        }).unwrap_or_default()
+    }
+
+    /// On-disk bytes of a shard's searchable segments (lazy handles: a
+    /// stat per file, nothing read).
+    fn shard_bytes(&self, shard: usize) -> usize {
+        let Some(h) = self.shards.get(shard) else { return 0 };
+        let dir = h.index.directory();
+        h.index.searchable_segment_metas().map(|metas| {
+            metas.iter().flat_map(|m| m.list_files())
+                .filter_map(|p| ld_lucivy::Directory::open_read(dir, &p).ok().map(|f| ld_lucivy::HasLen::len(&f)))
+                .sum()
+        }).unwrap_or(0)
     }
 
     // ── Distributed search support ──────────────────────────────────────

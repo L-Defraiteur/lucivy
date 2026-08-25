@@ -187,6 +187,10 @@ impl Query for RegexQueryV3 {
     fn prescan_segments(&mut self, segments: &[&SegmentReader]) -> crate::Result<()> {
         self.prescan_cache.clear();
         self.global_doc_freq = 0;
+        self.prescan_segments_more(segments)
+    }
+
+    fn prescan_segments_more(&mut self, segments: &[&SegmentReader]) -> crate::Result<()> {
 
         type SegOutcome = Option<(crate::index::SegmentId, Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)>;
 

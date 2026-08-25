@@ -293,3 +293,16 @@ Pistes de Lucie notées pour la suite : shards fins (~500 docs) + file
 d'admission threads × mémoire pour borner l'indexation ; bloom de
 trigrammes par shard pour sauter des lots entiers ; matérialiser/libérer
 par lot plutôt que par fichier (c'est ce que fait la passe 1).
+
+## ≈03:35 — le « reset » n'en était pas un
+
+Un agent frais a instrumenté le repro (3 000 docs, 4 lots) : après la
+passe 1 chaque lot voit 52 segments en cache et `global_doc_freq` 494,
+aucun cache miss du scorer, `take_prescan_cache` sans appelant, prescan du
+DAG qui saute les v3. Hits et scores justes ; c'était le **tri final** de
+la fusion des lots : `ScoredEntry::cmp` est déjà inversé sur le score
+(min-tas), `sort_by(|a, b| b.cmp(a))` rendait donc la liste par score
+croissant — le « top 10 » du JSON était les 10 pires hits (tf = 1, 1 span).
+Corrigé par `into_sorted_vec()`, comme `MergeResultsNode`. Preuve 3 000
+docs : top-10, scores et spans identiques. Validation 15 440 docs + suites
++ build WASM en cours.

@@ -181,6 +181,14 @@ pub trait Query: QueryClone + Send + Sync + downcast_rs::Downcast + fmt::Debug {
         Ok(())
     }
 
+    /// Like `prescan_segments`, but keeps what earlier calls recorded: a
+    /// search that streams the shards through a memory budget prescans
+    /// them batch by batch and needs the union. Segments must not repeat
+    /// across calls (their document counts would be summed twice).
+    fn prescan_segments_more(&mut self, segments: &[&crate::SegmentReader]) -> crate::Result<()> {
+        self.prescan_segments(segments)
+    }
+
     /// Collect contains/substring doc_freqs from prescan results.
     /// Used to build ExportableStats for distributed search.
     /// BooleanQuery propagates to sub-queries.
@@ -301,6 +309,9 @@ impl Query for Box<dyn Query> {
 
     fn prescan_segments(&mut self, segments: &[&crate::SegmentReader]) -> crate::Result<()> {
         self.as_mut().prescan_segments(segments)
+    }
+    fn prescan_segments_more(&mut self, segments: &[&crate::SegmentReader]) -> crate::Result<()> {
+        self.as_mut().prescan_segments_more(segments)
     }
 
     fn collect_prescan_doc_freqs(&self, out: &mut std::collections::HashMap<String, u64>) {

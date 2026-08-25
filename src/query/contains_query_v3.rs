@@ -343,6 +343,10 @@ impl Query for ContainsQueryV3 {
     fn prescan_segments(&mut self, segments: &[&SegmentReader]) -> crate::Result<()> {
         self.prescan_cache.clear();
         self.global_doc_freq = 0;
+        self.prescan_segments_more(segments)
+    }
+
+    fn prescan_segments_more(&mut self, segments: &[&SegmentReader]) -> crate::Result<()> {
 
         // One segment, or nothing to do: not worth building a DAG.
         if segments.len() <= 1 {
@@ -400,6 +404,10 @@ impl Query for ContainsQueryV3 {
     }
 
     fn weight(&self, enable_scoring: EnableScoring) -> crate::Result<Box<dyn Weight>> {
+        if crate::diag::is_verbose() {
+            eprintln!("[contains_v3] weight: cache {} segments, global_doc_freq {}, key {:?}",
+                self.prescan_cache.len(), self.global_doc_freq, self.cache_key());
+        }
         if self.prescan_cache.is_empty() {
             if let Some(searcher) = enable_scoring.searcher() {
                 let mut clone = self.clone();

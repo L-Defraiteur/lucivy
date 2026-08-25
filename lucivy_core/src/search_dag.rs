@@ -317,6 +317,9 @@ pub(crate) struct BuildWeightNode {
     shards: Vec<Arc<LucivyHandle>>,
     /// Pre-built query (constructed once before the DAG, not inside it).
     query: Box<dyn ld_lucivy::query::Query>,
+    /// The query already prescanned every v3 segment (a batched search did
+    /// it shard batch by shard batch): do not prescan again here.
+    prescanned: bool,
 }
 
 impl BuildWeightNode {
@@ -324,7 +327,12 @@ impl BuildWeightNode {
         shards: Vec<Arc<LucivyHandle>>,
         query: Box<dyn ld_lucivy::query::Query>,
     ) -> Self {
-        Self { shards, query }
+        Self { shards, query, prescanned: false }
+    }
+
+    pub fn prescanned(mut self, yes: bool) -> Self {
+        self.prescanned = yes;
+        self
     }
 }
 
@@ -364,7 +372,9 @@ impl Node for BuildWeightNode {
         let mut sfx_freqs = sfx_freqs;
         if !v3_segments.is_empty() {
             let refs: Vec<&ld_lucivy::SegmentReader> = v3_segments.iter().collect();
-            self.query.prescan_segments(&refs).map_err(|e| format!("v3 prescan: {e}"))?;
+            if !self.prescanned {
+                self.query.prescan_segments(&refs).map_err(|e| format!("v3 prescan: {e}"))?;
+            }
             let mut v3_freqs = HashMap::new();
             self.query.collect_prescan_doc_freqs(&mut v3_freqs);
             for (k, v) in v3_freqs {
@@ -558,6 +568,27 @@ pub(crate) fn build_search_dag(
     highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
     filter: ShardFilter,
 ) -> Result<Dag, String> {
+    // Build the query once BEFORE the DAG — avoids DFA/regex compilation inside the DAG.
+    let query = crate::query::build_query(
+        query_config, schema, &shards[0].index, highlight_sink,
+    )?;
+    build_search_dag_with_query(shards, shard_pool, pipeline, top_k, filter, query, false)
+}
+
+/// The search DAG over a query built by the caller. `prescanned` says the
+/// query already holds every v3 segment's prescan (see the batched search
+/// in `ShardedHandle::search_internal`); the weight is then compiled from
+/// that state and the global statistics, without prescanning again.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_search_dag_with_query(
+    shards: &[Arc<LucivyHandle>],
+    shard_pool: &luciole::Pool<ShardMsg>,
+    pipeline: &Arc<luciole::StreamDag>,
+    top_k: usize,
+    filter: ShardFilter,
+    query: Box<dyn ld_lucivy::query::Query>,
+    prescanned: bool,
+) -> Result<Dag, String> {
     let mut dag = Dag::new();
     let num_shards = shards.len();
     // Shards that will run a search node, each with its filter. With a
@@ -571,16 +602,13 @@ pub(crate) fn build_search_dag(
             .enumerate()
             .filter_map(|(i, f)| f.as_ref().map(|s| (i, Some(Arc::clone(s)))))
             .collect(),
+        ShardFilter::Subset(ids) => ids.iter().map(|&i| (i, None)).collect(),
     };
     if active.is_empty() {
         return Err("no shard holds any of the allowed ids".into());
     }
     let is_multi = active.len() > 1;
 
-    // Build the query once BEFORE the DAG — avoids DFA/regex compilation inside the DAG.
-    let query = crate::query::build_query(
-        query_config, schema, &shards[0].index, highlight_sink,
-    )?;
     let sfx_prescan_params = query.sfx_prescan_params();
     let regex_prescan_params = query.regex_prescan_params();
 
@@ -626,7 +654,7 @@ pub(crate) fn build_search_dag(
         dag.connect("needs_prescan", "then", &node_name, "trigger")?;
     }
 
-    dag.add_node("build_weight", BuildWeightNode::new(shards.to_vec(), query));
+    dag.add_node("build_weight", BuildWeightNode::new(shards.to_vec(), query).prescanned(prescanned));
     dag.connect("needs_prescan", "else", "build_weight", "trigger")?;
 
     if num_prescan > 1 {
@@ -685,4 +713,7 @@ pub(crate) enum ShardFilter {
     /// One entry per shard: its share of the allowed ids, `None` when it
     /// holds none of them and can stay idle.
     PerShard(Vec<Option<Arc<HashSet<u64>>>>),
+    /// Only these shards, unfiltered — one batch of a search that streams
+    /// the shards through a memory budget (see `ShardedHandle::search_internal`).
+    Subset(Vec<usize>),
 }

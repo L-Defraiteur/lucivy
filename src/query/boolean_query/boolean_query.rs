@@ -181,6 +181,13 @@ impl Query for BooleanQuery {
         Ok(())
     }
 
+    fn prescan_segments_more(&mut self, segments: &[&crate::SegmentReader]) -> crate::Result<()> {
+        for (_occur, subquery) in &mut self.subqueries {
+            subquery.prescan_segments_more(segments)?;
+        }
+        Ok(())
+    }
+
     fn collect_prescan_doc_freqs(&self, out: &mut std::collections::HashMap<String, u64>) {
         for (_occur, subquery) in &self.subqueries {
             subquery.collect_prescan_doc_freqs(out);
