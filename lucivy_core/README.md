@@ -1,304 +1,212 @@
 # lucivy-core
 
-High-level Rust API for [ld-lucivy](https://crates.io/crates/ld-lucivy) — BM25 full-text search with cross-token fuzzy matching, substring search, regex, and highlights.
+The Rust API of [lucivy](https://github.com/L-Defraiteur/lucivy) — BM25
+full-text search with **substring matching across token boundaries**, fuzzy
+search (Levenshtein or Jaro-Winkler), regex, boolean query syntax and exact
+byte-offset highlights. This crate is the recommended entry point: it wraps the
+[`ld-lucivy`](https://crates.io/crates/ld-lucivy) engine with a sharded handle,
+a JSON query builder, snapshots and deltas, and pluggable storage.
 
-This is the recommended way to use Lucivy from Rust. It wraps `ld-lucivy` with schema management, query building, index handles, and snapshot export/import.
-
-Also available as [Python](https://pypi.org/project/lucivy/), [Node.js](https://www.npmjs.com/package/lucivy), and [WASM](https://www.npmjs.com/package/lucivy-wasm) packages.
-
-## Install
+Also available as [Python](https://pypi.org/project/lucivy/),
+[Node.js](https://www.npmjs.com/package/lucivy),
+[browser (WASM)](https://www.npmjs.com/package/lucivy-wasm) and C++ packages,
+all on this crate. Everything is MIT.
 
 ```toml
 [dependencies]
-lucivy-core = "2.0"
+lucivy-core = "3.0"
 ```
 
 ## Quick start
 
 ```rust
-use lucivy_core::handle::LucivyHandle;
-use lucivy_core::query::{SchemaConfig, FieldDef, QueryConfig};
-use lucivy_core::directory::StdFsDirectory;
-use std::sync::Arc;
+use lucivy_core::sharded_handle::ShardedHandle;
+use lucivy_core::query::{QueryConfig, SchemaConfig};
 
-// Define schema
-let config = SchemaConfig {
-    fields: vec![
-        FieldDef { name: "title".into(), field_type: "text".into(), ..Default::default() },
-        FieldDef { name: "body".into(), field_type: "text".into(), ..Default::default() },
-        FieldDef { name: "tag".into(), field_type: "keyword".into(), ..Default::default() },
-        FieldDef { name: "year".into(), field_type: "u64".into(),
-                   indexed: Some(true), fast: Some(true), ..Default::default() },
+// A schema is JSON — the same shape every binding takes.
+let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+    "fields": [
+        { "name": "path",    "type": "text" },
+        { "name": "content", "type": "text" },
+        { "name": "stars",   "type": "u64", "fast": true }
     ],
-    tokenizer: None,
-    stemmer: None,
-};
+    "shards": 4
+}))?;
 
-// Create index
-let dir = StdFsDirectory::open("./my_index").unwrap();
-let handle = LucivyHandle::create(dir, &config).unwrap();
+let index = ShardedHandle::create("/tmp/my_index", &config)?;
+index.add_document_json(1, &serde_json::json!({
+    "path": "src/lock.c",
+    "content": "void *buf = kmalloc(size, GFP_KERNEL); spin_lock_init(&lock);",
+    "stars": 3
+}))?;
+index.commit()?;
 
-// Add documents (via the IndexWriter)
-let title = handle.field("title").unwrap();
-let body = handle.field("body").unwrap();
-{
-    let mut writer = handle.writer.lock().unwrap();
-    let mut doc = ld_lucivy::TantivyDocument::new();
-    doc.add_text(title, "Rust Programming");
-    doc.add_text(body, "Systems programming with memory safety");
-    writer.add_document(doc).unwrap();
-    writer.commit().unwrap();
-}
-handle.reader.reload().unwrap();
-
-// Search
+// Substring, across token boundaries, with byte spans per field.
 let query = QueryConfig {
     query_type: "contains".into(),
-    field: Some("body".into()),
-    value: Some("programming".into()),
+    field: Some("content".into()),
+    value: Some("lock_init".into()),
     ..Default::default()
 };
-let built = lucivy_core::query::build_query(
-    &query, &handle.schema, &handle.index,
-    &handle.raw_field_pairs, &handle.ngram_field_pairs, None,
-).unwrap();
-
-let searcher = handle.reader.searcher();
-let top_docs = searcher.search(
-    &built,
-    &ld_lucivy::collector::TopDocs::with_limit(10),
-).unwrap();
-```
-
-## Query types
-
-All queries are built via `QueryConfig` structs, serializable to/from JSON.
-
-### contains — substring, fuzzy, regex (cross-token)
-
-Searches **stored text**, not individual tokens. Handles multi-word phrases, substrings, typos, and regex across token boundaries.
-
-```rust
-// Substring — matches "programming", "programmer", etc.
-let q = QueryConfig {
-    query_type: "contains".into(),
-    field: Some("body".into()),
-    value: Some("program".into()),
-    ..Default::default()
-};
-
-// Fuzzy (catches typos, distance=1 by default)
-let q = QueryConfig {
-    query_type: "contains".into(),
-    field: Some("body".into()),
-    value: Some("programing languag".into()),
-    distance: Some(1),
-    ..Default::default()
-};
-
-// Regex on stored text (cross-token)
-let q = QueryConfig {
-    query_type: "contains".into(),
-    field: Some("body".into()),
-    value: Some("program.*language".into()),
-    regex: Some(true),
-    ..Default::default()
-};
-```
-
-### contains_split — one word = one contains, OR'd together
-
-```rust
-let q = QueryConfig {
-    query_type: "contains_split".into(),
-    field: Some("body".into()),
-    value: Some("rust safety".into()),
-    ..Default::default()
-};
-```
-
-### startsWith — FST prefix search (faster than contains)
-
-```rust
-// Single token: direct prefix match via FST
-let q = QueryConfig {
-    query_type: "startsWith".into(),
-    field: Some("body".into()),
-    value: Some("program".into()),
-    ..Default::default()
-};
-
-// Multi-token: phrase prefix ("programming lang" matches "programming language")
-let q = QueryConfig {
-    query_type: "startsWith".into(),
-    field: Some("body".into()),
-    value: Some("programming lang".into()),
-    ..Default::default()
-};
-
-// Split mode: each word is a separate startsWith, OR'd together
-let q = QueryConfig {
-    query_type: "startsWith_split".into(),
-    field: Some("body".into()),
-    value: Some("rust program".into()),
-    ..Default::default()
-};
-```
-
-### boolean — combine queries with must / should / must_not
-
-```rust
-let q = QueryConfig {
-    query_type: "boolean".into(),
-    must: Some(vec![
-        QueryConfig {
-            query_type: "contains".into(),
-            field: Some("body".into()),
-            value: Some("rust".into()),
-            ..Default::default()
-        },
-    ]),
-    must_not: Some(vec![
-        QueryConfig {
-            query_type: "contains".into(),
-            field: Some("body".into()),
-            value: Some("javascript".into()),
-            ..Default::default()
-        },
-    ]),
-    ..Default::default()
-};
-```
-
-### keyword / range — for non-text fields
-
-```rust
-// Exact keyword match
-let q = QueryConfig {
-    query_type: "keyword".into(),
-    field: Some("tag".into()),
-    value: Some("rust".into()),
-    ..Default::default()
-};
-
-// Via filters on any query
-let q = QueryConfig {
-    query_type: "contains".into(),
-    field: Some("body".into()),
-    value: Some("programming".into()),
-    filters: Some(vec![
-        lucivy_core::query::FilterClause {
-            field: Some("year".into()),
-            op: "gte".into(),
-            value: Some(serde_json::json!(2023)),
-            ..Default::default()
-        },
-    ]),
-    ..Default::default()
-};
-```
-
-### Highlights
-
-All query types support byte-offset highlights via `HighlightSink`.
-
-```rust
-use ld_lucivy::query::HighlightSink;
-use std::sync::Arc;
-
-let sink = Arc::new(HighlightSink::new());
-let built = lucivy_core::query::build_query(
-    &query, &handle.schema, &handle.index,
-    &handle.raw_field_pairs, &handle.ngram_field_pairs,
-    Some(sink.clone()),
-).unwrap();
-
-// After search, read highlights:
-let highlights = sink.take(); // HashMap<String, Vec<(u32, u32)>>
-```
-
-## Snapshots (export / import)
-
-Portable `.luce` binary format — export an index, import it elsewhere.
-
-```rust
-use lucivy_core::snapshot;
-use std::path::Path;
-
-// Export to bytes
-let data = snapshot::export_index(&handle, Path::new("./my_index")).unwrap();
-
-// Import from bytes
-let restored = snapshot::import_index(&data, Path::new("./restored_index")).unwrap();
-```
-
-## Directory backends
-
-`LucivyHandle::create(dir, &config)` accepts any `Directory` implementation. Choose the backend that fits your storage:
-
-| Directory | Module | Storage | Use case |
-|-----------|--------|---------|----------|
-| **StdFsDirectory** | `lucivy_core::directory` | Local filesystem (mmap) | Default for Node.js, Python, C++ bindings |
-| **BlobDirectory\<S\>** | `lucivy_core::blob_directory` | Any `BlobStore` (DB, S3, Postgres) + local mmap cache | Durable remote storage — data lives in the store, local cache is ephemeral |
-| **MemoryDirectory** | emscripten binding | In-memory (WASM) | Browser / WASM environments |
-| **RamDirectory** | `ld_lucivy::directory` | In-memory | Tests |
-| **MmapDirectory** | `ld_lucivy::directory` | Local filesystem (mmap) | Low-level, used internally by StdFsDirectory |
-
-### BlobDirectory — "DB stores, mmap serves"
-
-```rust
-use lucivy_core::blob_directory::BlobDirectory;
-use lucivy_core::blob_store::MemBlobStore; // or CypherBlobStore, S3BlobStore, etc.
-use std::sync::Arc;
-
-let store = Arc::new(MemBlobStore::new());
-let cache_base = std::env::temp_dir();
-let dir = BlobDirectory::new(store, "my_index", &cache_base).unwrap();
-let handle = LucivyHandle::create(dir, &config).unwrap();
-```
-
-All index files are synced to the `BlobStore` on write, and materialized from it on open. The local cache dir is reference-counted and cleaned up on drop. Index names are auto-prefixed with `Lucivy_` in the store to avoid collisions with other subsystems.
-
-### Implementing a custom BlobStore
-
-```rust
-use lucivy_core::blob_store::BlobStore;
-
-impl BlobStore for MyStore {
-    fn load(&self, index_name: &str, file_name: &str) -> io::Result<Vec<u8>> { ... }
-    fn save(&self, index_name: &str, file_name: &str, data: &[u8]) -> io::Result<()> { ... }
-    fn delete(&self, index_name: &str, file_name: &str) -> io::Result<()> { ... }
-    fn exists(&self, index_name: &str, file_name: &str) -> io::Result<bool> { ... }
-    fn list(&self, index_name: &str) -> io::Result<Vec<String>> { ... }
+for hit in index.search_with_docs(&query, 10)? {
+    println!("{:.3} shard {} spans {:?}", hit.score, hit.shard_id, hit.highlights);
+    // hit.doc is the stored document (ld_lucivy::LucivyDocument)
 }
+index.close()?;
+# Ok::<(), String>(())
 ```
 
-## close() — releasing the writer lock
+## Queries
+
+One `QueryConfig` (also deserialised from JSON) covers every query type:
+
+| `query_type` | what runs |
+|---|---|
+| `contains` | substring across tokens — `distance` makes it fuzzy, `regex: true` a regex, `anchor_start` / `exact_match` bound it to words |
+| `contains_split` | each whitespace-separated word is a `contains`, OR'd |
+| `startsWith`, `term`, `phrase` | at a word start · covering whole words · adjacent words in order |
+| `fuzzy`, `regex` | aliases of `contains` + `distance` / `+ regex` |
+| `parse` | plain value: OR of `contains` per word × field; boolean syntax `AND` / `OR` / `NOT`, quotes, `+` / `-`, parentheses |
+| `boolean`, `disjunction_max` | composition (`must` / `should` / `must_not`) |
+| `more_like_this` | TF-IDF similarity |
 
 ```rust
-// Commit pending writes and release the writer lock.
-// After close, reads continue but writes return Err("index is closed").
-handle.close()?;
+# use lucivy_core::query::QueryConfig;
+// Fuzzy by Jaro-Winkler: the trigram pigeonhole at `distance` (default 2)
+// generates candidates, the similarity decides and ranks.
+let jw = QueryConfig {
+    query_type: "fuzzy".into(),
+    field: Some("content".into()),
+    value: Some("kmaloc".into()),
+    fuzzy_metric: Some("jaro_winkler".into()),
+    min_similarity: Some(0.9),
+    ..Default::default()
+};
 
-// Reopen later (e.g. after process restart)
-let dir = StdFsDirectory::open("./my_index")?;
-let handle = LucivyHandle::open(dir)?;
+// Boolean syntax over several fields.
+let parsed = QueryConfig {
+    query_type: "parse".into(),
+    fields: Some(vec!["content".into(), "path".into()]),
+    value: Some("kmalloc AND NOT kfree".into()),
+    ..Default::default()
+};
+
+// Strict separators: `spin_lock` must not match `spin-lock`.
+let strict = QueryConfig {
+    query_type: "contains".into(),
+    field: Some("content".into()),
+    value: Some("spin_lock".into()),
+    strict_separators: Some(true),
+    ..Default::default()
+};
 ```
 
-Necessary when the host process doesn't drop the handle (e.g. rag3db C++ `~Database()` doesn't cascade destruction to extension indexes).
+Separators are *relaxed* by default: `_`, `-`, `.`, `/` and spaces are ignored
+on both sides, so `rag3weaver` finds `rag3_weaver`; the highlight covers the
+real bytes. Non-text fields are filtered with `filters` (`eq`, `ne`, `lt`,
+`lte`, `gt`, `gte`, `in`, `not_in`, `between`, `starts_with`, `contains`).
 
-## How contains works
+`index.query_warnings(&query)` returns, without running anything, what the
+engine will really do — separators ignored, a distance that rewrites most of a
+short query, a regex with no usable literal that has to scan.
 
-All text queries route through the SFX engine (Suffix FST). At indexing time, every suffix of every token is stored in a partitioned FST:
+`index.search_filtered(&query, limit, None, allowed_ids)` (a `HashSet<u64>`)
+pre-filters by document id and only wakes the shards that hold those ids.
 
-- **SI=0** (partition 0x00) — token starts, used by `startsWith` / `anchor_start`
-- **SI>0** (partition 0x01) — substrings, used by `contains`
+## Sharding and distribution
 
-The `contains` query walks the FST byte-by-byte (`falling_walk`), detecting split points where the query crosses token boundaries. Sibling links in the sibling table connect adjacent tokens for cross-token matching.
+`ShardedHandle` runs N shards in parallel over a shared actor pool
+([`luciole`](https://crates.io/crates/luciole)); BM25 statistics are aggregated
+over every shard before scoring, so scores are **identical** with 1 or 4 shards.
+Routing is `balance_weight = 1.0` (round-robin, fastest indexing) or lower
+(token-aware, co-locates similar documents).
 
-- **Fuzzy**: trigram pigeonhole — at distance d, at least one trigram must appear exactly. SFX finds candidates, Levenshtein validates.
-- **Regex**: literal extraction + SFX lookup + DFA validation. No full-index scan.
+For several machines: `export_stats(&query)` on each node,
+`ExportableStats::merge(&stats)` on the coordinator,
+`search_with_global_stats(&query, &merged, limit)` on each node, then merge the
+top-k — every node scores with the global IDF.
+
+## Snapshots and deltas
+
+```rust
+# use lucivy_core::sharded_handle::ShardedHandle;
+# use lucivy_core::snapshot;
+# fn demo(index: &ShardedHandle) -> Result<(), String> {
+// LUCE: every shard's live files in one blob.
+let blob: Vec<u8> = snapshot::export_to_snapshot(index, std::path::Path::new("/tmp/my_index"))?;
+
+// Extract it into a fresh directory…
+let copy = snapshot::import_from_snapshot(&blob, std::path::Path::new("/tmp/copy"))?;
+
+// …or serve it in place, read-only, without extracting: the blob *is* the
+// index, its files are slices of it. Memory cost = the blob's length.
+let served = ShardedHandle::open_snapshot(ld_lucivy::directory::OwnedBytes::new(blob))?;
+assert!(served.is_read_only());
+# Ok(()) }
+```
+
+Incremental sync: `export_sharded_delta(&client_versions)` on the server ships
+only the shards that changed (LUCIDS, with their `.del` files);
+`apply_sharded_delta(&delta)` on the client writes the new segments and reloads.
+
+## Bring your own storage (ACID)
+
+An index's files are blobs. Implement `lucistore::BlobStore` — `load`, `save`,
+`delete`, `exists`, `list`, plus the optional `blob_len` / `load_range` pair —
+and lucivy runs on it: the blobs are the truth, the local mmap cache is
+disposable. A transactional database becomes the store; rag3db does this over
+Postgres.
+
+```rust
+# use std::sync::Arc;
+# use lucivy_core::sharded_handle::ShardedHandle;
+# use lucivy_core::query::SchemaConfig;
+use lucivy_core::blob_directory::{BlobShardStorage, BlobLoadMode};
+use lucistore::blob_store::MemBlobStore;   // your own BlobStore in real life
+
+# fn demo(config: &SchemaConfig) -> Result<(), String> {
+let store = Arc::new(MemBlobStore::new());
+let cache = std::env::temp_dir().join("lucivy-cache");
+let storage = BlobShardStorage::new(store.clone(), "my_index", &cache);
+let index = ShardedHandle::create_with_storage(Box::new(storage), config)?;
+// …
+index.close()?;
+
+// Reopen lazily: a file is pulled on its first byte read (blob_len / load_range).
+let storage = BlobShardStorage::new(store, "my_index", &cache).with_load_mode(BlobLoadMode::Lazy);
+let index = ShardedHandle::open_with_storage(Box::new(storage))?;
+# let _ = index; Ok(()) }
+```
+
+The store's methods run on lucivy's scheduler threads: they must be thread-safe
+and must not call back into the index.
+
+## Maintenance and memory
+
+- `compact(max_docs)` — merge every shard down to segments of at most `max_docs`
+  documents, then commit; once after a bulk load.
+- `wait_merges_quiet()` — a commit returning never meant "nothing is merging";
+  call this before measuring, exporting or preloading.
+- `index_bytes()`, `residency()`, `memory_warnings()`, `preload()` — how big
+  the index is, whether this build holds it in memory or streams it
+  (`LUCIVY_RAM_INDEX_MAX`, 3 GB on wasm32), and loading it once.
+- `drop_index()` — close and delete every file, through the store if any.
+
+Environment knobs (`LUCIVY_SFX_HEAP`, `LUCIVY_MAX_PENDING_FINALIZE`,
+`LUCIVY_MAX_INFLIGHT_DOCS`, `LUCIVY_MAX_MERGED_DOCS`, `LUCIVY_MERGE_CONCURRENCY`,
+`LUCIVY_SCHEDULER_THREADS`, `LUCIVY_VERBOSE`) bound indexing memory and
+parallelism; the defaults are the measured ones on native and on wasm32.
+
+## How it works
+
+Every suffix of every token goes into a Suffix FST, partitioned by where it
+starts (token start, inside a token, whole word); a sibling table records which
+token follows which, so a walk can cross token boundaries; every match is then
+verified on the source text — Levenshtein or Jaro-Winkler for fuzzy, the regex
+itself for regex — which is what makes the spans exact. The design, the segment
+files and the measurements are in the repository's
+[ARCHITECTURE.md](https://github.com/L-Defraiteur/lucivy/blob/main/ARCHITECTURE.md).
 
 ## License
 
-MIT. See [LICENSE](https://github.com/L-Defraiteur/lucivy/blob/main/LICENSE).
+MIT.
