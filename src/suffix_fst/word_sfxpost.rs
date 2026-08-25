@@ -145,44 +145,51 @@ impl WordSfxPostWriter {
             entries.dedup();
         }
 
-        // One block per ordinal, assembled first so the offset table is exact.
+        // Blocks go into one buffer, with two scratch buffers reused across
+        // ordinals. Collecting a `Vec` per ordinal instead — three million of
+        // them on a kernel segment — is what made the browser abort on a
+        // 402 MB allocation during its first commit: not the bytes themselves
+        // but the churn and the fragmentation they leave in a 4 GB address
+        // space. The writer allocates a bounded amount whatever the index.
         let header_size = 4 + 4 + (num_ords as usize + 1) * 4;
-        let mut blocks: Vec<Vec<u8>> = Vec::with_capacity(num_ords as usize);
-        for entries in &self.entries {
-            blocks.push(encode_block(entries));
-        }
-
+        let mut entries_data: Vec<u8> = Vec::new();
         let mut offsets: Vec<u32> = Vec::with_capacity(num_ords as usize + 1);
-        let mut current = header_size as u32;
-        for b in &blocks {
-            offsets.push(current);
-            current += b.len() as u32;
+        let mut body = Vec::new();
+        let mut checkpoints = Vec::new();
+        for entries in &self.entries {
+            offsets.push(header_size as u32 + entries_data.len() as u32);
+            encode_block_into(&mut entries_data, entries, &mut body, &mut checkpoints);
         }
-        offsets.push(current); // sentinel
+        offsets.push(header_size as u32 + entries_data.len() as u32); // sentinel
 
-        let mut buf = Vec::with_capacity(current as usize);
+        let mut buf = Vec::with_capacity(header_size + entries_data.len());
         buf.extend_from_slice(MAGIC_V3);
         buf.extend_from_slice(&num_ords.to_le_bytes());
         for &off in &offsets {
             buf.extend_from_slice(&off.to_le_bytes());
         }
-        for b in blocks {
-            buf.extend_from_slice(&b);
-        }
+        buf.extend_from_slice(&entries_data);
         buf
     }
 }
 
-/// One ordinal's block: `n`, its checkpoints, then the delta-varint entries.
-fn encode_block(entries: &[WordPostingEntry]) -> Vec<u8> {
+/// Append one ordinal's block to `out`: `n`, its checkpoints, then the
+/// delta-varint entries. `body` and `checkpoints` are scratch buffers owned by
+/// the caller and reused across ordinals — see `finish`.
+fn encode_block_into(
+    out: &mut Vec<u8>,
+    entries: &[WordPostingEntry],
+    body: &mut Vec<u8>,
+    checkpoints: &mut Vec<(DeltaState, u32)>,
+) {
     if entries.is_empty() {
-        return Vec::new();
+        return;
     }
     let n = entries.len();
 
     // Pass 1: the entries, recording the state and offset at each checkpoint.
-    let mut body: Vec<u8> = Vec::with_capacity(n * 8);
-    let mut checkpoints: Vec<(DeltaState, u32)> = Vec::with_capacity(checkpoints_for(n));
+    body.clear();
+    checkpoints.clear();
     let mut st = DeltaState::default();
     for (i, e) in entries.iter().enumerate() {
         if i > 0 && i % CHECKPOINT_EVERY == 0 {
@@ -194,25 +201,23 @@ fn encode_block(entries: &[WordPostingEntry]) -> Vec<u8> {
         // no special case is needed, and none may be introduced: the decoder
         // has only `d_doc` to go on.
         let same_doc = e.doc_id == st.doc;
-        write_varint(&mut body, (e.doc_id.wrapping_sub(st.doc)) as u64);
-        write_varint(&mut body, (if same_doc { e.first_position.wrapping_sub(st.first) } else { e.first_position }) as u64);
-        write_varint(&mut body, (e.last_position.wrapping_sub(e.first_position)) as u64);
-        write_varint(&mut body, (if same_doc { e.byte_from.wrapping_sub(st.from) } else { e.byte_from }) as u64);
-        write_varint(&mut body, (e.byte_to.wrapping_sub(e.byte_from)) as u64);
+        write_varint(body, (e.doc_id.wrapping_sub(st.doc)) as u64);
+        write_varint(body, (if same_doc { e.first_position.wrapping_sub(st.first) } else { e.first_position }) as u64);
+        write_varint(body, (e.last_position.wrapping_sub(e.first_position)) as u64);
+        write_varint(body, (if same_doc { e.byte_from.wrapping_sub(st.from) } else { e.byte_from }) as u64);
+        write_varint(body, (e.byte_to.wrapping_sub(e.byte_from)) as u64);
         st = DeltaState { doc: e.doc_id, first: e.first_position, from: e.byte_from };
     }
 
     // Pass 2: header + checkpoints + entries.
-    let mut out = Vec::with_capacity(body.len() + checkpoints.len() * CHECKPOINT_SIZE + 5);
-    write_varint(&mut out, n as u64);
-    for (st, off) in &checkpoints {
+    write_varint(out, n as u64);
+    for (st, off) in checkpoints.iter() {
         out.extend_from_slice(&st.doc.to_le_bytes());
         out.extend_from_slice(&st.first.to_le_bytes());
         out.extend_from_slice(&st.from.to_le_bytes());
         out.extend_from_slice(&off.to_le_bytes());
     }
-    out.extend_from_slice(&body);
-    out
+    out.extend_from_slice(body);
 }
 
 // ─── Reader ──────────────────────────────────────────────────────────────

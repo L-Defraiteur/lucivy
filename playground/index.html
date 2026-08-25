@@ -386,6 +386,10 @@ async function startup() {
       noOpfs: startupParams.has('noopfs'),
       verbose: startupParams.has('verbose'), // engine diagnostics (LUCIVY_VERBOSE, V3_PROFILE)
       fileCacheMb: parseInt(startupParams.get('cache') || '0', 10) || 0, // ?cache=3000 (MB)
+      // `?rammax=3000` (MB): largest index served entirely from memory. The
+      // default is 2 GB; raising it is how a demo is measured in the condition
+      // it is meant to run in — everything resident, nothing streamed.
+      ramIndexMaxMb: parseInt(startupParams.get('rammax') || '0', 10) || 0,
     });
     window._lucivy = lucivy;
     await lucivy.ready;

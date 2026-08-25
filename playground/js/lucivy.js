@@ -47,6 +47,7 @@ export class Lucivy {
             noOpfs: !!options.noOpfs,
             verbose: !!options.verbose,
             fileCacheMb: options.fileCacheMb || 0,
+            ramIndexMaxMb: options.ramIndexMaxMb || 0,
         });
     }
 

@@ -252,6 +252,15 @@ pub extern "C" fn __main_argc_argv(argc: i32, argv: *const *const c_char) -> i32
                 std::env::set_var("LUCIVY_FILE_CACHE_BYTES", (mb << 20).to_string());
             }
         }
+        // `--ram-index-max-mb=N`: largest index served entirely from memory
+        // (LUCIVY_RAM_INDEX_MAX, 2 GB by default on wasm32). Above it a search
+        // streams the shards; below it the index is held whole, which is what
+        // a browser demo wants and what this flag exists to measure.
+        if let Some(mb) = a.strip_prefix("--ram-index-max-mb=") {
+            if let Ok(mb) = mb.parse::<u64>() {
+                std::env::set_var("LUCIVY_RAM_INDEX_MAX", (mb << 20).to_string());
+            }
+        }
     }
     // `--verbose`: the engine's diagnostic prints (LUCIVY_VERBOSE, V3_PROFILE),
     // routed to the page through printErr.

@@ -93,6 +93,14 @@ impl SfxPostWriterV2 {
         let num_terms = self.ordinals.len();
         let mut entry_data = Vec::new();
         let mut offset_table: Vec<u32> = Vec::with_capacity(num_terms + 1);
+        // Scratch buffers reused across ordinals. A `Vec` per ordinal — three
+        // million on a kernel segment — is what made the browser abort on a
+        // 402 MB allocation during a commit: the churn and the fragmentation,
+        // not the bytes.
+        let mut payload_data: Vec<u8> = Vec::new();
+        let mut payload_ends: Vec<usize> = Vec::new();
+        let mut headers: Vec<u8> = Vec::new();
+        let mut checkpoints: Vec<u8> = Vec::new();
 
         for entries in &mut self.ordinals {
             offset_table.push(entry_data.len() as u32);
@@ -109,46 +117,46 @@ impl SfxPostWriterV2 {
                 docs.last_mut().unwrap().1.push((ti, bf, bt));
             }
 
-            // Payloads first: their lengths are the header's, and a
-            // document's three fields only grow inside it.
-            let mut payloads: Vec<Vec<u8>> = Vec::with_capacity(docs.len());
+            // Payloads first, all in one buffer: their lengths are the
+            // header's, and a document's three fields only grow inside it.
+            payload_data.clear();
+            payload_ends.clear();
             for (_, doc_entries) in &docs {
-                let mut payload = Vec::new();
                 let (mut prev_ti, mut prev_bf) = (0u32, 0u32);
                 for &(ti, bf, bt) in doc_entries {
-                    write_varint(&mut payload, ti.wrapping_sub(prev_ti) as u64);
-                    write_varint(&mut payload, bf.wrapping_sub(prev_bf) as u64);
-                    write_varint(&mut payload, bt.wrapping_sub(bf) as u64);
+                    write_varint(&mut payload_data, ti.wrapping_sub(prev_ti) as u64);
+                    write_varint(&mut payload_data, bf.wrapping_sub(prev_bf) as u64);
+                    write_varint(&mut payload_data, bt.wrapping_sub(bf) as u64);
                     prev_ti = ti;
                     prev_bf = bf;
                 }
-                payloads.push(payload);
+                payload_ends.push(payload_data.len());
             }
 
             // Document headers, with a checkpoint every CHECKPOINT_EVERY so
             // `find_doc` keeps a binary search (see the module header).
-            let mut headers: Vec<u8> = Vec::with_capacity(docs.len() * 3);
-            let mut checkpoints: Vec<u8> = Vec::with_capacity(checkpoints_for(docs.len()) * CHECKPOINT_SIZE);
+            headers.clear();
+            checkpoints.clear();
             let (mut prev_doc, mut cumulative) = (0u32, 0u32);
-            for (i, ((doc_id, doc_entries), payload)) in docs.iter().zip(payloads.iter()).enumerate() {
+            for (i, (doc_id, doc_entries)) in docs.iter().enumerate() {
+                let start = if i == 0 { 0 } else { payload_ends[i - 1] };
+                let len = payload_ends[i] - start;
                 if i > 0 && i % CHECKPOINT_EVERY == 0 {
                     checkpoints.extend_from_slice(&prev_doc.to_le_bytes());
                     checkpoints.extend_from_slice(&cumulative.to_le_bytes());
                     checkpoints.extend_from_slice(&(headers.len() as u32).to_le_bytes());
                 }
                 write_varint(&mut headers, doc_id.wrapping_sub(prev_doc) as u64);
-                write_varint(&mut headers, payload.len() as u64);
+                write_varint(&mut headers, len as u64);
                 write_varint(&mut headers, doc_entries.len() as u64);
                 prev_doc = *doc_id;
-                cumulative += payload.len() as u32;
+                cumulative += len as u32;
             }
 
             write_varint(&mut entry_data, docs.len() as u64);
             entry_data.extend_from_slice(&checkpoints);
             entry_data.extend_from_slice(&headers);
-            for payload in &payloads {
-                entry_data.extend_from_slice(payload);
-            }
+            entry_data.extend_from_slice(&payload_data);
         }
         offset_table.push(entry_data.len() as u32);
 
