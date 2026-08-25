@@ -179,6 +179,16 @@ export class LucivyIndex {
      * when the index is held in memory, and carries a sentence to show the
      * user when it is not.
      */
+    /**
+     * Read the whole index into memory when it fits, so the first query does
+     * not pay for it: `{ bytes, files, ms, skipped }`. A single substring
+     * query opens nearly every file of the index anyway, so lazy reading only
+     * moves that cost into the first search.
+     */
+    preload() {
+        return this._lucivy._call('preload', { path: this.path });
+    }
+
     memoryStatus() {
         return this._lucivy._call('memoryStatus', { path: this.path });
     }

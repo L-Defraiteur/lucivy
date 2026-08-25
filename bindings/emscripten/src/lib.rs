@@ -1127,6 +1127,25 @@ pub unsafe extern "C" fn lucivy_memory_status(ctx: *mut LucivyContext) -> *const
     return_str(status.to_string())
 }
 
+/// Read the whole index into memory, so the first query does not pay for it.
+/// JSON: `{"bytes": N, "files": N, "ms": N, "skipped": bool}`.
+///
+/// `skipped` when the index is streamed rather than held: there, loading
+/// everything is exactly what does not fit. A caller should show progress
+/// around this — it is seconds on a large index — rather than let a first
+/// query look mysteriously slow.
+#[no_mangle]
+pub unsafe extern "C" fn lucivy_preload(ctx: *mut LucivyContext) -> *const c_char {
+    if ctx.is_null() { return return_error("null context"); }
+    let ctx = &*ctx;
+    let in_memory = ctx.handle.residency().is_in_memory();
+    let (bytes, files, ms) = ctx.handle.preload();
+    rlog!("[preload] {files} files, {} MB in {ms:.0}ms", bytes >> 20);
+    return_str(serde_json::json!({
+        "bytes": bytes, "files": files, "ms": ms, "skipped": !in_memory,
+    }).to_string())
+}
+
 /// Honest warnings for a query, without running it. Returns a JSON array of
 /// strings (empty when nothing applies) or `{"error": ...}`.
 #[no_mangle]

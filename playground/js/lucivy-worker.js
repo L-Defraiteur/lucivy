@@ -488,6 +488,13 @@ self.onmessage = async (e) => {
                 break;
             }
 
+            case 'preload': {
+                const ctx = getCtx(args.path);
+                result = JSON.parse(await callStr('lucivy_preload', ctx));
+                if (result.error) throw new Error(result.error);
+                break;
+            }
+
             case 'memoryStatus': {
                 const ctx = getCtx(args.path);
                 result = JSON.parse(await callStr('lucivy_memory_status', ctx));

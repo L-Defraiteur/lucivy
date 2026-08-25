@@ -258,3 +258,48 @@ du parallélisme ni du niveau d'optimisation. Il faut un **profil réel** — le
 profileur de Chrome sur le module, ou une instrumentation du chemin chaud —
 avant d'essayer un drapeau de plus. Les deux essais d'aujourd'hui étaient
 gratuits ; le suivant ne doit plus être à l'aveugle.
+
+## 10. Chargement anticipé : le seul levier qui a payé
+
+Le raisonnement du §5 disait que le lazy n'économise rien en navigateur —
+une seule requête `contains` ouvre ~930 fichiers, soit à peu près tous les
+sidecars de tous les segments. Il ne supprime donc pas le travail, il le cache
+dans la première requête.
+
+`ShardedHandle::preload()` lit tout l'index dans le cache quand la résidence
+le permet, et ne fait rien quand l'index est streamé (là, tout tenir est
+précisément ce qui ne rentre pas). La page l'appelle avant de se déclarer
+prête et affiche ce qu'elle charge.
+
+**Mesure sur l'index de 10 000 documents (2 600 Mo) :**
+
+```
+[preload] 837 fichiers, 2600 Mo en 2516 ms      (~1,03 Go/s, conforme au débit OPFS mesuré)
+```
+
+| panel | ms/requête | médiane |
+|---|---|---|
+| 1er passage, sans preload (froid) | 1 013 ms | — |
+| 2e passage, sans preload (cache chaud) | 893 ms | 614 ms |
+| **1er passage après preload** | **567 ms** | **281 ms** |
+| 2e passage après preload | 559 ms | 302 ms |
+| 3e passage après preload | 572 ms | 317 ms |
+
+**567 ms contre 893 : 1,57× plus rapide, et stable sur trois passages.**
+Comptes identiques.
+
+Le résultat surprend : le chargement anticipé bat un cache *déjà chaud*. Les
+octets sont pourtant les mêmes. L'explication la plus plausible est la
+disposition mémoire — le préchargement alloue 2,6 Go d'un trait, en séquence,
+tandis que le chargement paresseux entrelace ces allocations avec le travail
+de requête et fragmente le tas linéaire WASM. **Non vérifiée** : c'est une
+hypothèse, pas une mesure.
+
+Ce sont les requêtes lourdes qui gagnent le plus (`split` 1,80×, `regex`
+1,27×, `fuzzy d2` 1,22×) — celles-là mêmes qui se dégradaient quand on
+ajoutait des threads. Les deux observations pointent dans la même direction :
+ce que ces requêtes attendent, c'est la mémoire, pas le CPU.
+
+**Bilan de la journée sur la vitesse navigateur : 893 → 567 ms/requête en
+moyenne, 614 → 281 ms en médiane.** Une démonstration `contains` est
+maintenant à **~250-300 ms**.

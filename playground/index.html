@@ -481,9 +481,19 @@ async function showMemoryStatus() {
     const st = await index.memoryStatus();
     const mb = (st.index_bytes / (1 << 20)).toFixed(0);
     memoryEl.className = st.in_memory ? 'memory ok' : 'memory warn';
-    memoryEl.textContent = st.in_memory
+    if (!st.in_memory) {
+      memoryEl.textContent = st.warnings[0] || `index ${mb} MB: streamed from storage`;
+      return;
+    }
+    // An index that fits is read whole here rather than file by file during
+    // the first query: a single substring search opens nearly every file of
+    // every segment, so lazy reading does not save the work, it only hides it
+    // in the first search. Paid here it is paid once, and it can be shown.
+    memoryEl.textContent = `index ${mb} MB — loading into memory…`;
+    const pre = await index.preload();
+    memoryEl.textContent = pre.skipped
       ? `index ${mb} MB, held in memory`
-      : `${st.warnings[0] || `index ${mb} MB: streamed from storage`}`;
+      : `index ${mb} MB in memory — ${pre.files} files read in ${(pre.ms / 1000).toFixed(1)}s`;
   } catch (e) {
     memoryEl.textContent = '';
   }

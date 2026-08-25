@@ -2230,6 +2230,55 @@ impl ShardedHandle {
         }
     }
 
+    /// Read every file of every shard into the whole-file cache, so the first
+    /// query finds the index in memory instead of paying for it.
+    ///
+    /// Returns `(bytes, files, milliseconds)`, and does nothing at all when the
+    /// index is streamed — there, holding everything is precisely what does not
+    /// fit.
+    ///
+    /// Worth doing because lazy reading buys nothing here: a single `contains`
+    /// query opens about 930 files, essentially every sidecar of every segment,
+    /// since a substring search has to visit them all. The cost is the same
+    /// either way; paid up front it is paid once, it is measurable, and a
+    /// caller can tell the user the index is loading instead of showing a first
+    /// query that inexplicably takes seconds.
+    ///
+    /// This is a browser concern. Natively the granularity is the 4 KB page and
+    /// mmap already reads only what is touched — a common query faults 853 MB
+    /// of a 3 392 MB index — so preloading there would be four times the work.
+    /// `residency()` answers `InMemory` on native, so callers must decide for
+    /// themselves; nothing calls this implicitly.
+    pub fn preload(&self) -> (u64, usize, f64) {
+        let t0 = std::time::Instant::now();
+        if !self.residency().is_in_memory() {
+            return (0, 0, 0.0);
+        }
+        let verbose = std::env::var("LUCIVY_VERBOSE").is_ok();
+        let (mut bytes, mut files) = (0u64, 0usize);
+        for i in 0..self.shards.len() {
+            let Some(h) = self.shards.get(i) else { continue };
+            let Ok(metas) = h.index.searchable_segment_metas() else { continue };
+            let sfx_version = h.index.settings().sfx_version;
+            let dir = h.index.directory();
+            for p in metas.iter().flat_map(|m| m.list_files_for(sfx_version)) {
+                let Ok(slice) = ld_lucivy::Directory::open_read(dir, &p) else { continue };
+                // `read_bytes` on a lazy handle is what materialises the file
+                // into the cache; the bytes are dropped here and the cache
+                // keeps them.
+                if let Ok(b) = slice.read_bytes() {
+                    bytes += b.len() as u64;
+                    files += 1;
+                }
+            }
+        }
+        let ms = t0.elapsed().as_secs_f64() * 1e3;
+        if verbose {
+            eprintln!("[preload] {files} files, {} MB in {ms:.0}ms", bytes >> 20);
+        }
+        (bytes, files, ms)
+    }
+
     /// What the caller should tell the user about this index's memory, if
     /// anything. Empty when the index is held in memory.
     pub fn memory_warnings(&self) -> Vec<String> {
