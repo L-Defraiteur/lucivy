@@ -500,3 +500,24 @@ Relevé des formats croisé avec « octets touchés par requête ».
   bonne optimisation là-bas est la suppression, pas l'encodage.
 - `.bytemap` : bitmap 256 bits par ordinal. Le levier est la **sparsité**
   (5-15 octets distincts sur 256) et la déduplication.
+
+## ≈13:40 — ce que WSP3 change au jeu de travail (et pas qu'au disque)
+
+Même mesure `test_touched_bytes` sur l'index reconstruit en WSP3, chauffe
+sur `netdev`, éviction, puis la requête :
+
+| | WSP2 (4 378 Mo) | WSP3 (3 818 Mo) |
+|---|---|---|
+| `kmalloc` touché | 1 330 Mo (30,4 %) | **928 Mo (24,3 %)** |
+| dont `word_sfxpost` | 598 Mo (78 %) | **219 Mo (72 %)** |
+| `kmalloc` à froid | 381 ms | **160 ms** |
+| `zzqqxxwwvv` touché | 67 Mo | 63 Mo |
+
+Le jeu de travail baisse de 30 % et la requête à froid est **2,4× plus
+rapide** — c'est bien les octets lus qui commandent, pas le CPU.
+
+Nouveau classement du jeu de travail de `kmalloc` : `sfx` 314 Mo,
+`word_sfxpost` 219, `sibling_v3` 176, `posmap` 82, `sfxpost` 66,
+`word_pos_map` 65, `termtexts` 4. `sibling_v3` est maintenant le deuxième
+sidecar le plus lu — et c'est le plus facile à encoder (lecture
+séquentielle, pas de recherche binaire à préserver).
