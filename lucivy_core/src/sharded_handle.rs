@@ -2254,10 +2254,23 @@ impl ShardedHandle {
     /// themselves; nothing calls this implicitly.
     pub fn preload(&self) -> (u64, usize, f64) {
         let t0 = std::time::Instant::now();
+        let verbose = std::env::var("LUCIVY_VERBOSE").is_ok();
+        // Nothing may still be merging: a merge builds its output's FST in
+        // the same address space, and loading 2.4 GB next to it killed one
+        // on a 2 MB realloc. Also, the segment list settles only once the
+        // merges are done — measuring residency before that is measuring
+        // segments that are about to disappear.
+        match self.wait_merges_quiet() {
+            Ok(rounds) if verbose && rounds > 0 => {
+                eprintln!("[preload] waited for merges ({rounds} active rounds) in {:.0}ms",
+                    t0.elapsed().as_secs_f64() * 1e3);
+            }
+            Err(e) => eprintln!("[preload] cannot wait for merges: {e}"),
+            _ => {}
+        }
         if !self.residency().is_in_memory() {
             return (0, 0, 0.0);
         }
-        let verbose = std::env::var("LUCIVY_VERBOSE").is_ok();
         let (mut bytes, mut files) = (0u64, 0usize);
         for i in 0..self.shards.len() {
             let Some(h) = self.shards.get(i) else { continue };
@@ -2527,6 +2540,46 @@ impl ShardedHandle {
     /// the suffixes are largely shared. Call this once the load is done.
     /// Groups are merged in parallel where the merge permits allow it
     /// (`LUCIVY_MERGE_CONCURRENCY`); returns the number of shards compacted.
+    /// Block until no shard has a merge in flight or about to start.
+    ///
+    /// A commit waits for the merges it finds running, then the policy
+    /// plans the next round from the segments it just published — so
+    /// "commit returned" never meant "nothing is merging". Measured 25
+    /// August: the playground preloaded a 2.4 GB index into memory while a
+    /// background merge was still building its FST, and the merge died on a
+    /// 2 MB realloc. Anything that is about to claim the address space —
+    /// preload, a snapshot export — waits here first.
+    ///
+    /// Per shard: wait for the running merges, look at the segment count,
+    /// give the updater a moment to plan, wait again; quiet is two looks at
+    /// the same count with nothing running in between. Returns how many
+    /// rounds saw activity.
+    pub fn wait_merges_quiet(&self) -> Result<usize, String> {
+        let mut active_rounds = 0usize;
+        for (i, shard) in self.shards.iter().enumerate() {
+            let segments = || shard.index.searchable_segment_metas().map(|m| m.len()).unwrap_or(0);
+            let wait = || -> Result<(), String> {
+                let guard = shard.writer.lock().map_err(|_| "writer lock poisoned")?;
+                if let Some(ref writer) = *guard {
+                    writer.wait_pending_merges().map_err(|e| format!("shard_{i}: {e}"))?;
+                }
+                Ok(())
+            };
+            let mut before = usize::MAX;
+            for _round in 0..60 {
+                wait()?;
+                let now = segments();
+                if now == before {
+                    break;
+                }
+                if before != usize::MAX { active_rounds += 1; }
+                before = now;
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
+        Ok(active_rounds)
+    }
+
     pub fn compact(&self, max_docs: usize) -> Result<usize, String> {
         self.ensure_open()?;
         self.commit()?;

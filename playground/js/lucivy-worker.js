@@ -268,6 +268,7 @@ self.onmessage = async (e) => {
                         ...(args.ramIndexMaxMb ? [`--ram-index-max-mb=${args.ramIndexMaxMb}`] : []),
                         ...(args.schedulerThreads ? [`--scheduler-threads=${args.schedulerThreads}`] : []),
                         ...(args.writerThreads ? [`--writer-threads=${args.writerThreads}`] : []),
+                        ...(args.maxMergedDocs ? [`--max-merged-docs=${args.maxMergedDocs}`] : []),
                     ],
                 });
 

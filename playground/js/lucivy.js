@@ -50,6 +50,7 @@ export class Lucivy {
             ramIndexMaxMb: options.ramIndexMaxMb || 0,
             schedulerThreads: options.schedulerThreads || 0,
             writerThreads: options.writerThreads || 0,
+            maxMergedDocs: options.maxMergedDocs || 0,
         });
     }
 

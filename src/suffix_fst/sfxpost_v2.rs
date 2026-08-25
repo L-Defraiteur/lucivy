@@ -51,7 +51,7 @@
 use std::collections::HashSet;
 
 use super::file::SfxPostingEntry;
-use super::varint::{read_varint, read_varint_u32, write_varint};
+use super::varint::{read_varint_u32, write_varint};
 
 const MAGIC_V2: &[u8; 4] = b"SFP2";
 const MAGIC_V3: &[u8; 4] = b"SFP3";

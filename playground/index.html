@@ -425,6 +425,9 @@ async function startup() {
       schedulerThreads: parseInt(startupParams.get('threads') || '0', 10) || 0,
       // `?wthreads=4`: indexer threads. The SFX budget is split between them.
       writerThreads: parseInt(startupParams.get('wthreads') || '0', 10) || 0,
+      // `?maxmerged=N`: largest segment a background merge may produce
+      // (default 2 000 in the browser; 10 000 dies on a 600 MB allocation).
+      maxMergedDocs: parseInt(startupParams.get('maxmerged') || '0', 10) || 0,
     });
     window._lucivy = lucivy;
     // Ring messages (allocation failures, panics, their call stacks) go to the

@@ -274,6 +274,15 @@ pub extern "C" fn __main_argc_argv(argc: i32, argv: *const *const c_char) -> i32
                 std::env::set_var("LUCIVY_WRITER_THREADS", n.to_string());
             }
         }
+        // `--max-merged-docs=N`: largest segment a background merge may
+        // produce (LUCIVY_MAX_MERGED_DOCS, 2 000 on wasm32). A merge sizes
+        // its arenas from its inputs; ~10 000 documents dies on a 600 MB
+        // allocation next to four indexers.
+        if let Some(n) = a.strip_prefix("--max-merged-docs=") {
+            if let Ok(n) = n.parse::<usize>() {
+                std::env::set_var("LUCIVY_MAX_MERGED_DOCS", n.to_string());
+            }
+        }
         // `--scheduler-threads=N`: size of the luciole pool
         // (LUCIVY_SCHEDULER_THREADS). Left alone it asks
         // `available_parallelism`, which does not answer on every emscripten
@@ -773,8 +782,17 @@ pub unsafe extern "C" fn lucivy_compact_async(ctx: *mut LucivyContext, max_docs:
 
 #[no_mangle]
 pub unsafe extern "C" fn lucivy_drain_merges(ctx: *mut LucivyContext) -> *const c_char {
-    // Reuse lucivy_commit (thread-based) — same commit logic.
-    lucivy_commit(ctx)
+    // A commit waits for the merges it finds running, then the policy plans
+    // the next round from what it just published: "drained" has to mean
+    // quiet, not "the commit returned" (see ShardedHandle::wait_merges_quiet).
+    let out = lucivy_commit(ctx);
+    if !ctx.is_null() {
+        let ctx = &*ctx;
+        if let Err(e) = ctx.handle.wait_merges_quiet() {
+            return return_error(&e);
+        }
+    }
+    out
 }
 
 // ── Diagnostics ──────────────────────────────────────────────────────────
