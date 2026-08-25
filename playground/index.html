@@ -554,6 +554,28 @@ async function startup() {
       demoIndex = await lucivy.openDirect(DEMO_REPO.path);
       demoNumDocs = await demoIndex.numDocs();
       opened = demoNumDocs > 0;
+      // An index whose commit died half-way (a phone, out of memory) can
+      // still open: its meta names files that were never written. Count them
+      // — the storage may also just be mounting, hence the retries — and
+      // rebuild rather than serve an index with holes.
+      if (opened && demoIndex.memoryStatus) {
+        const missing = async () => {
+          const st = await demoIndex.memoryStatus();
+          return (st.shards || []).reduce((n, sh) => n + (sh.listed - sh.opened), 0);
+        };
+        let n = await missing();
+        for (let i = 0; i < 5 && n > 0; i++) {
+          await new Promise(r => setTimeout(r, 1000));
+          n = await missing();
+        }
+        if (n > 0) {
+          console.warn(`[playground] demo index: ${n} files missing, rebuilding it`);
+          statusEl.textContent = `The stored index is missing ${n} files (an earlier indexing was interrupted) — rebuilding it...`;
+          await demoIndex.close().catch(() => {});
+          demoIndex = null;
+          opened = false;
+        }
+      }
     } catch (_) { opened = false; }
     if (opened) {
       tabDemoCount.textContent = `(${demoNumDocs})`;

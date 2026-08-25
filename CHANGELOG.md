@@ -11,6 +11,12 @@ Unreleased
   could not be opened yet" instead of the size advice when that is the cause;
   a collapsible **Logs** panel shows the engine's log ring and the console
   where there is no devtools, with a Copy button.
+- Playground: a stored demo index whose earlier indexing was interrupted
+  (its meta names files that were never written — 24 of 124 on a phone) is
+  detected at open and rebuilt instead of served with holes.
+- Emscripten: two concurrent OPFS mount attempts (startup and the first
+  open) had the loser retry four times and warn "mount failed, in-memory
+  FS" over a mounted filesystem; it now sees the winner's flag and stops.
 
 Lucivy 3.0.2
 ================================

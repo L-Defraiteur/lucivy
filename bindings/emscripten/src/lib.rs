@@ -213,6 +213,11 @@ fn ensure_opfs_mounted(attempts: u32) -> bool {
         let backend = *BACKEND.get_or_init(|| wasmfs_create_opfs_backend());
         let path = CString::new("/opfs").unwrap();
         for attempt in 0..attempts {
+            // Two entry points can race here (startup and the first open):
+            // the loser's create fails with ENOTDIR (-20) because the winner
+            // just mounted, then kept retrying and logged "mount failed at
+            // startup" over a mounted filesystem.
+            if OPFS_MOUNTED.load(Ordering::Acquire) { return true; }
             let ret = wasmfs_create_directory(path.as_ptr(), 0o777, backend);
             if ret == 0 {
                 let _ = std::fs::create_dir_all(OPFS_BASE);
@@ -223,6 +228,7 @@ fn ensure_opfs_mounted(attempts: u32) -> bool {
             rlog!("[lucivy-wasm] OPFS mount attempt {} failed (ret={ret})", attempt + 1);
             std::thread::sleep(std::time::Duration::from_millis(200 * (attempt + 1) as u64));
         }
+        if OPFS_MOUNTED.load(Ordering::Acquire) { return true; }
         // A whole round of retries costs seconds of blocking sleep (8
         // attempts: 7.2 s). One failed round after the startup one means
         // OPFS is not coming — a browser without it, a blocked origin — and
