@@ -186,6 +186,9 @@ macro_rules! rlog {
 extern "C" {
     fn wasmfs_create_opfs_backend() -> i32; // returns backend_t
     fn wasmfs_create_directory(path: *const c_char, mode: u32, backend: i32) -> i32;
+    /// Return from `main` without ending the runtime: the exports keep
+    /// being called from JS for the life of the page.
+    fn emscripten_exit_with_live_runtime() -> !;
 }
 
 /// Base path for all lucivy indexes in the OPFS-backed filesystem.
@@ -254,6 +257,13 @@ pub extern "C" fn __main_argc_argv(argc: i32, argv: *const *const c_char) -> i32
         }
     }
 
+    // `main` returning would let the runtime consider itself exited
+    // ("Program terminated with exit(0)" on the next ccall, seen after a
+    // reload whose mount retries kept main busy while the page was already
+    // calling in). Stay alive explicitly.
+    #[cfg(target_os = "emscripten")]
+    unsafe { emscripten_exit_with_live_runtime() }
+    #[cfg(not(target_os = "emscripten"))]
     0
 }
 
