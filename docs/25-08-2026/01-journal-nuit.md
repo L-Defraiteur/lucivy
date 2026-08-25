@@ -244,3 +244,18 @@ montage OPFS qui échoue parfois juste après un rechargement (retry ajouté,
   luciole : détection d'un thread mort (une tâche qui trap ne répond
   jamais), famine par files coopératives, graphe d'attente aveugle aux
   mutex/canaux/syscalls.
+
+## ≈02:05 — audit de l'index : `.pos` et `.offsets` retirés des index v3
+
+Audit fichier par fichier (tableau dans la conversation, à reporter dans
+le doc d'architecture) : sur 4,34 Go compactés, `.sfx` 36 %, postings
+mots 17 % (non compressés, 20 o/entrée), postings chunks 13 %, `bytemap`
+9 % et `word_pos_map` 4 % (dérivables), `sibling_v3` 6 % (non compressé),
+`termtexts` 5 %, `posmap` 4 %, **`.offsets` 3 % lu par personne**, **`.pos`
+2 % lu par les scorers v2 seulement**, docstore 2 %, index inversé 0,3 %.
+
+Fait : champs texte en `IndexRecordOption::WithFreqs` quand
+`sfx_version ≥ 3` (BM25 garde les fréquences ; positions/offsets tantivy ne
+servent qu'aux scorers v2). Mesuré : suites vertes, parité identique,
+**4 339 → 4 162 Mo** après compaction (−177 Mo), ingestion 26,6 s.
+Un index v2 (`sfx_version: 2`) garde positions + offsets.

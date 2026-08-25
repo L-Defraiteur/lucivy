@@ -482,9 +482,21 @@ pub fn build_schema(
             "text" => {
                 // RAW_TOKENIZER: CamelCaseSplit + lowercase. Gives good code search
                 // (camelCase → ["camel", "case"]).
+                //
+                // Positions and offsets of the inverted index are read by the
+                // v2 scorers only (contains_scorer, phrase_prefix_scorer); on a
+                // v3 index every text query goes through the SFX sidecars,
+                // BM25 needs the frequencies and nothing needs `.pos` /
+                // `.offsets` — 200 MB of 4.3 GB on 15,440 kernel files, plus
+                // the CPU to encode them at every commit.
+                let record = if config.sfx_version.unwrap_or(3) >= 3 {
+                    IndexRecordOption::WithFreqs
+                } else {
+                    IndexRecordOption::WithFreqsAndPositionsAndOffsets
+                };
                 let indexing = TextFieldIndexing::default()
                     .set_tokenizer(RAW_TOKENIZER)
-                    .set_index_option(IndexRecordOption::WithFreqsAndPositionsAndOffsets);
+                    .set_index_option(record);
                 let mut opts = TextOptions::default().set_indexing_options(indexing);
                 if field_def.stored.unwrap_or(true) {
                     opts = opts.set_stored();
