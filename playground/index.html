@@ -392,6 +392,13 @@ async function startup() {
       ramIndexMaxMb: parseInt(startupParams.get('rammax') || '0', 10) || 0,
     });
     window._lucivy = lucivy;
+    // Ring messages (allocation failures, panics, their call stacks) go to the
+    // debug server so a thread that dies still leaves a trace.
+    window._ringLog = [];
+    lucivy._onRing = (msg) => {
+      window._ringLog.push(msg);
+      if (window._ringLog.length > 4000) window._ringLog.shift();
+    };
     await lucivy.ready;
 
     // `?corpus=<url>` — skip the bundled snapshot and index a .tar.gz / .zip

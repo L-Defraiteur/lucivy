@@ -72,7 +72,12 @@ export class Lucivy {
                     if (len === 0 || readPos + 2 + len > ringSize) break;
                     const msgBytes = bytes.slice(readPos + 2, readPos + 2 + len);
                     const msg = new TextDecoder().decode(msgBytes);
-                    // rust ring buffer logs visible in worker console
+                    // The ring is the only channel that survives a dying
+                    // pthread: allocation failures and their call stacks are
+                    // written there and nowhere else. Discarding it here left
+                    // "memory allocation of N bytes failed" with no site.
+                    console.log('[ring]', msg);
+                    if (this._onRing) this._onRing(msg);
                     readPos += 2 + len;
                 }
             } catch (e) { /* ignore read errors */ }
