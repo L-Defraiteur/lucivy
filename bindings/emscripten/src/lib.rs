@@ -240,7 +240,16 @@ fn ensure_opfs_mounted(attempts: u32) -> bool {
 
 #[no_mangle]
 pub extern "C" fn __main_argc_argv(argc: i32, argv: *const *const c_char) -> i32 {
-    std::env::set_var("LUCIVY_SCHEDULER_THREADS", "4");
+    // Scheduler threads: min(cores, 8). Measured 25 August on the 10 000-file
+    // panel, same page: with dlmalloc more threads made queries slower (they
+    // serialised on the allocator's global lock); with mimalloc 4 -> 8 gains
+    // 8 % (188 -> 172 ms/query) and 8 -> 12 gains nothing. The pthread pool
+    // is sized the same way in build.sh; `--scheduler-threads=N` overrides.
+    let default_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(2, 8);
+    std::env::set_var("LUCIVY_SCHEDULER_THREADS", default_threads.to_string());
 
     // `--no-opfs` (Module.arguments): keep the in-memory WASMFS backend. The
     // index then lives for the session only (export a snapshot to keep it);

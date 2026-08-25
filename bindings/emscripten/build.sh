@@ -63,7 +63,7 @@ mkdir -p "$OUT_DIR"
 emcc "$STATIC_LIB" \
     -o "$OUT_DIR/lucivy.js" \
     -pthread \
-    -sPTHREAD_POOL_SIZE='Math.min(navigator.hardwareConcurrency || 4, 8)' \
+    -sPTHREAD_POOL_SIZE='Math.min(navigator.hardwareConcurrency || 4, 16)' \
     -sPTHREAD_POOL_SIZE_STRICT=0 \
     -sALLOW_MEMORY_GROWTH=1 \
     -sMAXIMUM_MEMORY=4GB \
@@ -126,7 +126,16 @@ emcc "$STATIC_LIB" \
     -fexceptions \
     -sDISABLE_EXCEPTION_CATCHING=0 \
     -O2 \
+    -sMALLOC=${LUCIVY_WASM_MALLOC:-mimalloc} \
     ${LUCIVY_WASM_DEBUG:+-g2 -sASSERTIONS=1 -sSTACK_OVERFLOW_CHECK=2}
+# LUCIVY_WASM_MALLOC=mimalloc|dlmalloc|emmalloc: the allocator. Emscripten's
+# default, dlmalloc, takes one global lock under pthreads; the query paths that
+# cross token boundaries (relaxed contains, fuzzy, boolean parse) allocate a
+# lot, and four threads serialised on that lock. Measured 25 August, 10 000
+# kernel files, 21-query panel, same index and same page: dlmalloc 551 ms per
+# query (median 244), mimalloc 188 (median 107) — relaxed `kmalloc` 429 -> 106,
+# fuzzy d1 1 057 -> 184, boolean parse 498 -> 59. The ratio to native went from
+# 2x-20x depending on the query to a flat 2-3x. mimalloc is the default.
 # LUCIVY_WASM_DEBUG=1: keep function names (symbolised traps in the browser
 # console), runtime assertions and stack-overflow cookies. Bigger and slower —
 # for diagnosing a "memory access out of bounds" in a pthread, not for shipping.
