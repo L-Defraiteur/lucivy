@@ -8,6 +8,9 @@ if [ -s "$_vault/crates-io.token" ]; then
 else _missing="$_missing crates.io"; fi
 if [ -s "$_vault/pypi.token" ]; then
     export MATURIN_PYPI_TOKEN="$(tr -d '\n' < "$_vault/pypi.token")"; _loaded="$_loaded pypi"
+elif [ -s "$_vault/.env" ] && grep -q '^PYPI_TOKEN=' "$_vault/.env"; then
+    # A dotenv-style file: PYPI_TOKEN=pypi-... (quotes tolerated).
+    export MATURIN_PYPI_TOKEN="$(sed -n 's/^PYPI_TOKEN=//p' "$_vault/.env" | tr -d '"'"'"' \n')"; _loaded="$_loaded pypi(.env)"
 else _missing="$_missing pypi"; fi
 if [ -s "$_vault/npm.token" ]; then
     # npm reads its token from an npmrc: generate one here (ignored) and
