@@ -89,15 +89,18 @@ mod tests {
 static BUILDS_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 /// How many segment builds (FST construction and sidecar writing) may run at
-/// once: `LUCIVY_MAX_PENDING_FINALIZE`, 4 on wasm32 and unlimited elsewhere.
+/// once: `LUCIVY_MAX_PENDING_FINALIZE`, 2 on wasm32 and unlimited elsewhere.
 ///
 /// A build's peak scales with its segment's tokens — 170-400 MB for ~250
 /// kernel files — and a commit flushes every shard's current segment at
 /// once. With four scheduler threads that was at most four builds; with
 /// eight (mimalloc made them worthwhile) the first commit of the playground
-/// ran eight and died on a 169 MB allocation. The same cooperative wait as
-/// the merges: a build waiting for a slot keeps its thread running other
-/// ready work, so it can never deadlock the actors it depends on.
+/// ran eight and died on a 169 MB allocation. Four is what dlmalloc holds;
+/// under mimalloc, whose freed pages stay with the thread that freed them,
+/// four concurrent builds died on the first commit three times and two
+/// indexed 10 000 files (25 August). The same cooperative wait as the
+/// merges: a build waiting for a slot keeps its thread running other ready
+/// work, so it can never deadlock the actors it depends on.
 fn build_limit() -> usize {
     static LIMIT: OnceLock<usize> = OnceLock::new();
     *LIMIT.get_or_init(|| {
@@ -105,7 +108,7 @@ fn build_limit() -> usize {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|&n| n > 0)
-            .unwrap_or(if cfg!(target_arch = "wasm32") { 4 } else { usize::MAX })
+            .unwrap_or(if cfg!(target_arch = "wasm32") { 2 } else { usize::MAX })
     })
 }
 

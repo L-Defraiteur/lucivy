@@ -293,8 +293,10 @@ pub extern "C" fn __main_argc_argv(argc: i32, argv: *const *const c_char) -> i32
             }
         }
         // `--max-builds=N`: segment builds allowed at once
-        // (LUCIVY_MAX_PENDING_FINALIZE, 4 on wasm32). Each is a 170-400 MB
-        // peak; a commit starts one per shard at the same moment.
+        // (LUCIVY_MAX_PENDING_FINALIZE, 2 on wasm32). Each is a 170-400 MB
+        // peak; a commit starts one per shard at the same moment, and under
+        // mimalloc four of them exhausted the address space where two index
+        // 10 000 files in a minute.
         if let Some(n) = a.strip_prefix("--max-builds=") {
             if let Ok(n) = n.parse::<usize>() {
                 std::env::set_var("LUCIVY_MAX_PENDING_FINALIZE", n.to_string());

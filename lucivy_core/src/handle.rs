@@ -64,7 +64,7 @@ const CONFIG_FILE: &str = "_config.json";
 const MAX_DOCS_BEFORE_MERGE: usize = 10_000;
 
 /// Largest segment a merge may produce, and above which a segment is left
-/// alone: `LUCIVY_MAX_MERGED_DOCS`, `MAX_DOCS_BEFORE_MERGE` natively, 2 000
+/// alone: `LUCIVY_MAX_MERGED_DOCS`, `MAX_DOCS_BEFORE_MERGE` natively, 800
 /// on wasm32 (see `create_writer`).
 pub fn max_merged_docs() -> usize {
     static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -72,7 +72,7 @@ pub fn max_merged_docs() -> usize {
         std::env::var("LUCIVY_MAX_MERGED_DOCS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(if cfg!(target_arch = "wasm32") { 2_000 } else { MAX_DOCS_BEFORE_MERGE })
+            .unwrap_or(if cfg!(target_arch = "wasm32") { 800 } else { MAX_DOCS_BEFORE_MERGE })
             .max(1)
     })
 }
@@ -127,16 +127,24 @@ fn create_writer(index: &Index) -> Result<IndexWriter, String> {
     // more than that.
     //
     // The cap is per target: `LUCIVY_MAX_MERGED_DOCS`, 10 000 natively and
-    // 2 000 on wasm32. A merge sizes its arenas from its inputs — text,
+    // 800 on wasm32. A merge sizes its arenas from its inputs — text,
     // hashes, two flat posting vectors, then the FST build of the output —
     // and the address space it shares with four indexers is 4 GB. Measured
     // 25 August: merges of 8-9 segments (~2 000 documents, 1.4-1.9 M
     // tokens) pass in the browser; the next level, ~10 000 documents, dies
     // on a 603 MB allocation, and the night before, browser compaction at
-    // 10 000 never finished. Segments that already hold the cap are never
-    // picked again, so the browser converges to ~5 segments per 10 000
-    // documents instead of 50, without ever attempting the merge it cannot
-    // afford.
+    // 10 000 never finished.
+    //
+    // 800 rather than 2 000 because of the queries, not the memory: a
+    // query's prescan runs one task per segment and its wall time is the
+    // biggest segment's. With ~200-document segments (what the SFX budget
+    // cuts) and 800 as the cap the log policy never finds eight segments to
+    // merge, so the browser keeps ~48 segments per 10 000 documents; with
+    // 2 000 it merged down to 19. Same index, same page, mimalloc, eight
+    // threads: 19 segments 172 ms per query (median 97), 48 segments
+    // 117-132 ms (median 59-86) — the CPU sum is the same, it just spreads
+    // over eight threads instead of waiting on one. Cost: +16 % on disk and
+    // 2.5x the files to open.
     let max_merged = max_merged_docs();
     let mut policy = ld_lucivy::indexer::LogMergePolicy::default();
     policy.set_max_docs_before_merge(max_merged);
