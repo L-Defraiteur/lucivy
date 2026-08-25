@@ -2,7 +2,7 @@
 
 Écrit en urgence à la fin de la session (contexte épuisé). Autonome.
 
-## 1. Publié — tout est en 3.0.1
+## 1. Publié — tout est en 3.0.2 depuis la nuit du 25 au 26 (3.0.1 avant)
 
 | registre | paquet | version | vérifié |
 |---|---|---|---|

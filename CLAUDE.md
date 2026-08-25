@@ -213,12 +213,13 @@ Les docs sont dans `docs/` organisés par dossier daté. Convention depuis le
 
 | Registre | Package | Publié | Date |
 |----------|---------|---------|---------|
-| PyPI | `lucivy` | **3.0.1** (wheel `cp39-abi3-manylinux_2_28_x86_64` + sdist) | 25 août 2026 |
-| npm | `lucivy` | **3.0.1** (Linux x64) | 25 août 2026 |
-| npm | `lucivy-wasm` | **3.0.1** (worker + pkg WASM, `bindings/emscripten`) | 25 août 2026 |
-| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` | **3.0.1** | 25 août 2026 |
+| PyPI | `lucivy` | **3.0.2** (wheel `cp39-abi3-manylinux_2_28_x86_64` + sdist) | 26 août 2026 (00h) |
+| npm | `lucivy` | **3.0.2** (Linux x64) | 26 août 2026 (00h) |
+| npm | `lucivy-wasm` | **3.0.2** (worker + pkg WASM, `bindings/emscripten`) | 26 août 2026 (00h) |
+| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` | **3.0.2** | 26 août 2026 (00h) |
 
-3.0.0 puis 3.0.1 le même soir : les crates 3.0.0 étaient partis avant deux
+3.0.2 dans la nuit du 25 au 26 : CI verte, bornes mémoire côté requête, paliers fuzzy
+raccordés (voir `CHANGELOG.md`). Avant : 3.0.0 puis 3.0.1 le même soir : les crates 3.0.0 étaient partis avant deux
 correctifs du cœur (interblocage lazy sans `blob_len`, message de
 finalisation perdu) et avec leurs README 2.x. Leçon : **publier les crates en
 dernier**, après les bindings et les README, pas en premier.
