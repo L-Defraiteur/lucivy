@@ -150,7 +150,7 @@ impl Node for PrescanShardNode {
             RawPostingEntry, build_resolver, run_regex_prescan,
         };
         use ld_lucivy::suffix_fst::file::SfxFileReader;
-        use ld_lucivy::suffix_fst::section_file::detect_sfx_version;
+        use ld_lucivy::suffix_fst::section_file::detect_sfx_version_of;
 
         let mut sfx_cache = HashMap::new();
         let mut sfx_freqs: HashMap<String, u64> = HashMap::new();
@@ -164,15 +164,18 @@ impl Node for PrescanShardNode {
                     Some(d) => d,
                     None => continue,
                 };
-                let sfx_bytes = sfx_data.read_bytes()
-                    .map_err(|e| format!("read sfx: {e}"))?;
-
                 // Dispatch on the on-disk format, exactly like
                 // ContainsQueryV3::prescan_segments does. This node used to open
                 // every .sfx with the v1/v2 reader unconditionally, so any v3 index
                 // reached through ShardedHandle failed outright on "invalid .sfx
                 // magic bytes" — v3 + sharding had simply never been wired.
-                let version = detect_sfx_version(sfx_bytes.as_ref()).unwrap_or(1);
+                //
+                // The version comes from a four-byte header read: on a lazy
+                // directory, `read_bytes()` of the whole slice materialised every
+                // .sfx of every shard on every search (a batched search did it once
+                // per batch — 572 loads of 117 files, 11.6 GB, for one query in the
+                // browser) only to skip the segment as v3 right after.
+                let version = detect_sfx_version_of(sfx_data).unwrap_or(1);
                 // v3 segments are not prescanned here: `BuildWeightNode` hands
                 // every v3 segment of every shard to `Query::prescan_segments`
                 // at once — the same call `search_with_global_stats` makes —
@@ -185,6 +188,8 @@ impl Node for PrescanShardNode {
                 if version == 3 {
                     continue;
                 }
+                let sfx_bytes = sfx_data.read_bytes()
+                    .map_err(|e| format!("read sfx: {e}"))?;
                 let (doc_tf, highlights) = {
                     let sfx_reader = SfxFileReader::open(sfx_bytes.as_ref())
                         .map_err(|e| format!("open sfx: {e}"))?;
@@ -629,8 +634,17 @@ pub(crate) fn build_search_dag_with_query(
     // One prescan node per (shard, segment), not per shard. Flat fan-out means the
     // scheduler runs every segment concurrently; grouping by shard would force each
     // shard's segments to be walked sequentially inside an actor handler.
+    //
+    // A batched search (`prescanned`) runs one DAG per batch of shards: only
+    // the batch's shards get prescan nodes, the others were or will be
+    // covered by their own batch. The unbatched search keeps every shard.
     let mut prescan_units: Vec<Vec<ld_lucivy::index::SegmentReader>> = Vec::new();
-    for shard in shards.iter() {
+    let prescan_shards: Vec<&Arc<LucivyHandle>> = if prescanned {
+        active.iter().map(|(i, _)| &shards[*i]).collect()
+    } else {
+        shards.iter().collect()
+    };
+    for shard in prescan_shards {
         let searcher = shard.reader.searcher();
         for seg in searcher.segment_readers() {
             prescan_units.push(vec![seg.clone()]);

@@ -321,3 +321,45 @@ essais (~4 s) à réussir après le rechargement : le réessai à la demande
 (`ensure_opfs_mounted` dans open/create) est en place.
 Conclusion inchangée : le volume lu par requête est le levier (saut de
 shard, pagination), pas le CPU.
+
+## ≈10:10 — trace des chargements : chaque `.sfx` était lu 5 fois par requête
+
+Trace `[fs] load` (nom, octets, ms) sur chaque matérialisation de fichier
+entier du répertoire paresseux (`LUCIVY_VERBOSE`). Une requête `kmalloc`,
+117 segments : **572 chargements de `.sfx`, 11,6 Go, 28 s CPU** ; les
+autres sidecars 117 fois chacun (normal). La recherche dans le shard
+elle-même : 5-18 ms.
+
+Coupable : `PrescanShardNode` (prescan v2 du DAG) faisait `read_bytes()`
+du `.sfx` **entier** de chaque segment pour lire sa version, puis sautait
+le segment (v3). Un DAG par lot → tous les `.sfx` de tous les shards
+rechargés à chaque lot (1 + 4). Même motif dans `LucivyHandle::search`.
+Corrigé : en-tête de 4 octets (`detect_sfx_version_of`), et les nœuds de
+prescan d'un DAG « déjà prescanné » ne couvrent que les shards du lot.
+
+Après : 117 chargements de `.sfx` (2,3 Go), passe 2 à 50-350 ms par lot.
+Panel 21 requêtes : 9-16 s → **5,3-12,9 s**, mêmes résultats (20 OK +
+ex æquo ; le seul DIFF, `path contains`, est un ordre d'ex æquo).
+
+Débit OPFS mesuré sur les 23 105 chargements du panel (fixe par
+ouverture + débit asymptotique) :
+
+| taille | chargements | moyenne | débit |
+|---|---|---|---|
+| < 1 Mo | 7 518 | 3,8 ms | 143 Mo/s |
+| 1-4 Mo | 9 142 | 5,5 ms | 321 Mo/s |
+| 4-16 Mo | 4 447 | 10,2 ms | 806 Mo/s |
+| 16-64 Mo | 1 698 | 26,3 ms | 1 109 Mo/s |
+| > 64 Mo | 300 | 78,6 ms | 1 155 Mo/s |
+
+Soit ~3 ms de fixe par ouverture et ~1,15 Go/s. 72 % des chargements font
+moins de 4 Mo : à débit constant de 1,15 Go/s le panel lirait en 116 s de
+CPU au lieu de 192. **Un paquet par shard** (un fichier, un manifeste,
+tranches sans copie) vaut donc ~40 % du temps de chargement — l'idée de
+Lucie du matin ; à faire après le cache d'en-tête.
+
+Reste inexpliqué sur la requête unitaire : 7,1 s côté page pour 3,7 s de
+passes 1+2. Piste : les lectures « petites » (en-tête de version, 4
+octets) font open+seek+read à chaque appel — ~3 ms sur OPFS × 117
+segments × (filtre + poids par lot + prescan) ≈ 2-3 s. Cache des 4 premiers
+Ko sur le handle (`head`), une ouverture par handle. Mesure en cours.

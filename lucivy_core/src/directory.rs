@@ -219,6 +219,8 @@ struct LazyFsHandle {
     path: PathBuf,
     len: usize,
     pinned: std::sync::OnceLock<ld_lucivy::directory::OwnedBytes>,
+    /// First `HEAD_CACHE_BYTES` of the file, read once (see `read_bytes`).
+    head: std::sync::OnceLock<ld_lucivy::directory::OwnedBytes>,
 }
 
 /// Live handles per path, so `delete` can pin what is still referenced.
@@ -226,6 +228,13 @@ fn live_handles() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf
     static LIVE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<std::sync::Weak<LazyFsHandle>>>>> =
         std::sync::OnceLock::new();
     LIVE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// `LUCIVY_VERBOSE` set: trace every whole-file materialisation (`[fs] load`),
+/// which is what a query costs on a lazy directory. Checked once.
+fn fs_trace_loads() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("LUCIVY_VERBOSE").is_ok())
 }
 
 /// Capture the bytes of `path` into every live handle, then forget the
@@ -270,7 +279,13 @@ impl LazyFsHandle {
         if let Some(bytes) = FileCache::global().lock().unwrap().get(&self.path) {
             return Ok(bytes);
         }
+        let t0 = std::time::Instant::now();
         let data = fs::read(&self.path)?;
+        if fs_trace_loads() {
+            eprintln!("[fs] load {} {} B {:.1}ms",
+                self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                data.len(), t0.elapsed().as_secs_f64() * 1e3);
+        }
         let bytes = ld_lucivy::directory::OwnedBytes::new(data);
         FileCache::global().lock().unwrap().insert(self.path.clone(), bytes.clone());
         Ok(bytes)
@@ -287,14 +302,39 @@ impl FileHandle for LazyFsHandle {
             if let Some(bytes) = FileCache::global().lock().unwrap().get(&self.path) {
                 return Ok(bytes.slice(range));
             }
-            use std::io::{Read, Seek, SeekFrom};
-            let mut file = fs::File::open(&self.path)?;
-            file.seek(SeekFrom::Start(range.start as u64))?;
-            let mut buf = vec![0u8; range.end - range.start];
-            file.read_exact(&mut buf)?;
-            return Ok(ld_lucivy::directory::OwnedBytes::new(buf));
+            // Header reads (format version, section table) come back for the
+            // same file on every search — once per segment per DAG node on a
+            // 117-segment index. Each one is an open + seek + read, which on
+            // WASMFS/OPFS is a proxied access-handle creation of several ms.
+            // Keep the head of the file on the handle: one open per handle.
+            if range.end <= HEAD_CACHE_BYTES {
+                let head = self.head.get_or_init(|| {
+                    let n = self.len.min(HEAD_CACHE_BYTES);
+                    self.read_direct(0..n).ok()
+                        .unwrap_or_else(|| ld_lucivy::directory::OwnedBytes::new(Vec::new()))
+                });
+                if head.len() >= range.end {
+                    return Ok(head.slice(range));
+                }
+            }
+            return self.read_direct(range);
         }
         Ok(self.whole()?.slice(range))
+    }
+}
+
+/// Bytes of a file's head kept on its lazy handle (see `read_bytes`).
+const HEAD_CACHE_BYTES: usize = 4096;
+
+impl LazyFsHandle {
+    /// One open + seek + read of `range`, no caching.
+    fn read_direct(&self, range: std::ops::Range<usize>) -> io::Result<ld_lucivy::directory::OwnedBytes> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = fs::File::open(&self.path)?;
+        file.seek(SeekFrom::Start(range.start as u64))?;
+        let mut buf = vec![0u8; range.end - range.start];
+        file.read_exact(&mut buf)?;
+        Ok(ld_lucivy::directory::OwnedBytes::new(buf))
     }
 }
 
@@ -313,7 +353,11 @@ impl Directory for StdFsDirectory {
                 }
             })?
             .len() as usize;
-        let handle = Arc::new(LazyFsHandle { path: full.clone(), len, pinned: std::sync::OnceLock::new() });
+        let handle = Arc::new(LazyFsHandle {
+            path: full.clone(), len,
+            pinned: std::sync::OnceLock::new(),
+            head: std::sync::OnceLock::new(),
+        });
         {
             let mut live = live_handles().lock().unwrap();
             let entry = live.entry(full).or_default();

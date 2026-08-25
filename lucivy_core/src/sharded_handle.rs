@@ -729,11 +729,16 @@ fn execute_weight_on_shard(
     top_k: usize,
     filter: Option<Arc<HashSet<u64>>>,
 ) -> Result<Vec<(f32, DocAddress)>, String> {
+    let t0 = std::time::Instant::now();
     let searcher = handle.reader.searcher();
     let collector = ld_lucivy::collector::TopDocs::with_limit(top_k).order_by_score();
 
     let segment_readers = searcher.segment_readers();
     let mut fruits = Vec::with_capacity(segment_readers.len());
+    if std::env::var("LUCIVY_VERBOSE").is_ok() {
+        eprintln!("[search] shard_{shard_id}: searcher ({} segments) in {:.1}ms",
+            segment_readers.len(), t0.elapsed().as_secs_f64() * 1e3);
+    }
 
     for (seg_ord, seg_reader) in segment_readers.iter().enumerate() {
         if let Some(ref allowed_ids) = filter {
@@ -753,6 +758,10 @@ fn execute_weight_on_shard(
         }
     }
 
+    if std::env::var("LUCIVY_VERBOSE").is_ok() {
+        eprintln!("[search] shard_{shard_id}: collected {} segments in {:.1}ms",
+            segment_readers.len(), t0.elapsed().as_secs_f64() * 1e3);
+    }
     collector
         .merge_fruits(fruits)
         .map_err(|e| format!("merge shard_{shard_id}: {e}"))
