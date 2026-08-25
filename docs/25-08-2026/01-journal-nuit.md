@@ -225,3 +225,22 @@ serveur + deltas ; (2) policy de fusion pendant un chargement en masse ;
 (3) `SfxCollectorDataV3` en arène (suite naturelle du merge) ; (4) le
 montage OPFS qui échoue parfois juste après un rechargement (retry ajouté,
 à observer) ; (5) publication 3.0.0 (dry-run vert, inchangé).
+
+## ≈01:50 — non-régression natif (réponses aux questions du matin)
+
+- Ingestion native 15 440 docs (x86_64 release, fusions incluses) : 38,1 s
+  hier soir → 24,5-29,3 s cette nuit (5 runs), −33 % ; un seul point
+  « avant », à prendre comme un ordre de grandeur (A/B propre possible sur
+  `ab441ad^`).
+- Requêtes natives 15 440 docs : mêmes 21 comptes, temps de même ordre dans
+  les deux sens selon la forme des segments (`kmalloc` 55 → 77 ms sur des
+  segments plus gros, regex 299 → 224, startsWith 118 → 91).
+- **Panel 50 k à chaud : identique au 23 août**, spans exacts — plancher
+  26 ms, `kmalloc` 27, `spin_lock` 28, `include` 46, `__init` 29,
+  relaxed `kmalloc` 26 / `uint64_t` 47 / `__init` 47.
+- luciole : cette nuit seulement `set_task_label` ; les consolidations sont
+  dans ses utilisateurs (segment_updater : refus qui répond, lot atomique,
+  compaction dans l'acteur ; permis de fusion coopératifs). Ouvert dans
+  luciole : détection d'un thread mort (une tâche qui trap ne répond
+  jamais), famine par files coopératives, graphe d'attente aveugle aux
+  mutex/canaux/syscalls.
