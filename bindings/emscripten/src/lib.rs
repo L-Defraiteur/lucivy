@@ -256,6 +256,15 @@ pub extern "C" fn __main_argc_argv(argc: i32, argv: *const *const c_char) -> i32
         // (LUCIVY_RAM_INDEX_MAX, 2 GB by default on wasm32). Above it a search
         // streams the shards; below it the index is held whole, which is what
         // a browser demo wants and what this flag exists to measure.
+        // `--writer-threads=N`: indexer threads (LUCIVY_WRITER_THREADS).
+        // One on wasm since the beginning, "to avoid exhausting the emscripten
+        // pthread pool" — worth revisiting now that the pool adapts and that
+        // the SFX budget is shared between threads rather than per thread.
+        if let Some(n) = a.strip_prefix("--writer-threads=") {
+            if let Ok(n) = n.parse::<usize>() {
+                std::env::set_var("LUCIVY_WRITER_THREADS", n.to_string());
+            }
+        }
         // `--scheduler-threads=N`: size of the luciole pool
         // (LUCIVY_SCHEDULER_THREADS). Left alone it asks
         // `available_parallelism`, which does not answer on every emscripten

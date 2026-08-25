@@ -303,3 +303,60 @@ ce que ces requêtes attendent, c'est la mémoire, pas le CPU.
 **Bilan de la journée sur la vitesse navigateur : 893 → 567 ms/requête en
 moyenne, 614 → 281 ms en médiane.** Une démonstration `contains` est
 maintenant à **~250-300 ms**.
+
+## 11. Le threading de l'indexation : le défaut de 1 était déjà le bon
+
+Suite du §9, même méthode, même conclusion — mais il fallait la mesurer.
+
+`--writer-threads=N` (`?wthreads=N`) a d'abord révélé un piège dans le bouton
+lui-même : le tas de l'écrivain est un **total** réparti entre ses threads,
+avec un plancher que le moteur impose à chaque part. Demander 2 threads sans
+toucher au tas donnait *« the memory arena in bytes per thread needs to be at
+least 15000000 »* — une combinaison invalide qu'un bouton ne devrait pas
+permettre de produire. Le défaut se dimensionne maintenant avec le nombre de
+threads ; un `LUCIVY_WRITER_HEAP` explicite reste honoré tel quel.
+
+**Natif, 2 000 fichiers kernel** (tas de 15 Mo × threads, budget SFX partagé) :
+
+| threads | temps | segments | index |
+|---|---|---|---|
+| 1 | 4,8 s | 12 | 659 Mo |
+| **2** | **3,0 s** (1,6×) | 23 | 743 Mo (+13 %) |
+| 4 | 3,7 s | 43 | 808 Mo (+23 %) |
+
+**Navigateur, mêmes 2 000 fichiers :**
+
+| threads | temps | segments |
+|---|---|---|
+| **1** (défaut) | **82 s** | 24 |
+| 2 | 94 s (1,15× plus **lent**) | 44 |
+
+Le natif gagne 1,6× à 2 threads ; le navigateur perd 15 %. C'est exactement le
+comportement observé sur les requêtes au §9 — en WASM, ajouter du parallélisme
+dégrade. Deux mesures indépendantes, sur deux chemins qui n'ont rien en
+commun, disent la même chose : **ce que ce moteur attend en WASM n'est pas du
+CPU disponible.**
+
+Et le coût ne s'arrête pas au temps d'indexation : 2 threads doublent le
+nombre de segments (24 → 44), donc grossissent l'index et ralentissent les
+requêtes ensuite.
+
+**Conclusion : le `unwrap_or(1)` en WASM, posé à l'origine « pour ne pas
+épuiser le pool de pthreads », se trouve être le bon réglage — pour une autre
+raison que celle écrite.** Le commentaire est faux, le chiffre est juste.
+
+Ce qui est conservé : le bouton existe, il est réglable et documenté, et le
+tas suit le nombre de threads au lieu de produire une configuration invalide.
+
+### Bilan des trois essais de parallélisme
+
+| levier | attendu | mesuré |
+|---|---|---|
+| pool de pthreads 8 → 16 | plus de threads utiles | 0,99× — la concurrence restait 4 |
+| threads du planificateur 4 → 8 → 12 | requêtes plus rapides | 1,00× → 0,93× — dégrade |
+| threads d'écriture 1 → 2 (navigateur) | indexation plus rapide | 0,87× — dégrade |
+| **chargement anticipé** | supprimer la première lecture | **1,57×** |
+
+Le seul levier qui a payé aujourd'hui est celui qui **réduit le travail
+mémoire**, pas celui qui ajoute des cœurs. C'est l'indication la plus nette
+qu'on ait sur où chercher ensuite.

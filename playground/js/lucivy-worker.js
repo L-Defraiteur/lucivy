@@ -267,6 +267,7 @@ self.onmessage = async (e) => {
                         ...(args.fileCacheMb ? [`--file-cache-mb=${args.fileCacheMb}`] : []),
                         ...(args.ramIndexMaxMb ? [`--ram-index-max-mb=${args.ramIndexMaxMb}`] : []),
                         ...(args.schedulerThreads ? [`--scheduler-threads=${args.schedulerThreads}`] : []),
+                        ...(args.writerThreads ? [`--writer-threads=${args.writerThreads}`] : []),
                     ],
                 });
 

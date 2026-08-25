@@ -69,13 +69,24 @@ const MAX_DOCS_BEFORE_MERGE: usize = 10_000;
 fn create_writer(index: &Index) -> Result<IndexWriter, String> {
     // Diagnostic knobs: reproduce another target's writer shape natively
     // (`LUCIVY_WRITER_HEAP=15000000 LUCIVY_WRITER_THREADS=1` is the WASM one).
-    let heap = std::env::var("LUCIVY_WRITER_HEAP")
+    let heap_set = std::env::var("LUCIVY_WRITER_HEAP")
         .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(WRITER_HEAP_SIZE);
+        .and_then(|v| v.parse::<usize>().ok());
     let threads: Option<usize> = std::env::var("LUCIVY_WRITER_THREADS")
         .ok()
         .and_then(|v| v.parse().ok());
+    // The heap is a total, split between the writer's threads, and each share
+    // has a floor the engine enforces. Asking for more threads without also
+    // raising the heap therefore produces an invalid writer — "the memory arena
+    // in bytes per thread needs to be at least 15000000" — which is a trap for
+    // anyone turning the thread knob alone. Scale the default with the thread
+    // count; an explicit LUCIVY_WRITER_HEAP is still honoured as written, since
+    // someone setting both means it.
+    let heap = match (heap_set, threads) {
+        (Some(h), _) => h,
+        (None, Some(n)) => WRITER_HEAP_SIZE * n.max(1),
+        (None, None) => WRITER_HEAP_SIZE,
+    };
     let writer = {
         #[cfg(target_arch = "wasm32")]
         {

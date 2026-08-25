@@ -46,6 +46,14 @@ window._allLogs = [];
   header h1 { font-size: 28px; font-weight: 600; margin-bottom: 6px; }
   header h1 span { color: var(--accent); }
   header p { color: var(--text-dim); font-size: 14px; }
+  /* What WASM costs, said up front rather than left to be guessed from the
+     latency. The figures are measured, not estimated — see
+     docs/25-08-2026/04-rapport-journee.md. */
+  header p.wasm-note {
+    font-size: 12px; line-height: 1.6; margin: 10px auto 0; max-width: 620px;
+    color: var(--text-dim); opacity: 0.85;
+  }
+  header p.wasm-note strong { color: var(--highlight); font-weight: 600; }
 
   /* Search bar */
   .search-bar {
@@ -201,6 +209,12 @@ window._allLogs = [];
   <header>
     <h1><span>lucivy</span> playground</h1>
     <p>BM25 full-text search &mdash; substring, fuzzy, regex &mdash; running in your browser via WASM</p>
+    <p class="wasm-note">
+      WebAssembly runs this engine about <strong>6&times; slower than native</strong>
+      &mdash; measured on 10&nbsp;000 Linux kernel files, held in memory:
+      a median query takes 317&nbsp;ms here against 49&nbsp;ms natively, for identical results.
+      A browser also addresses at most 4&nbsp;GB, which is what limits the corpus size.
+    </p>
   </header>
 
   <div class="search-bar">
@@ -392,6 +406,8 @@ async function startup() {
       ramIndexMaxMb: parseInt(startupParams.get('rammax') || '0', 10) || 0,
       // `?threads=16`: size of the luciole scheduler pool.
       schedulerThreads: parseInt(startupParams.get('threads') || '0', 10) || 0,
+      // `?wthreads=4`: indexer threads. The SFX budget is split between them.
+      writerThreads: parseInt(startupParams.get('wthreads') || '0', 10) || 0,
     });
     window._lucivy = lucivy;
     // Ring messages (allocation failures, panics, their call stacks) go to the
