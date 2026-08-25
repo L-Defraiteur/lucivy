@@ -202,6 +202,7 @@ Les docs sont dans `docs/` organisés par dossier daté. Convention depuis le
 |----------|---------|---------|---------|
 | PyPI | `lucivy` | **3.0.0** (wheel `cp39-abi3-manylinux_2_28_x86_64` + sdist) | 25 août 2026 |
 | npm | `lucivy` | **3.0.0** (Linux x64) | 25 août 2026 |
+| npm | `lucivy-wasm` | **3.0.0** (worker + pkg WASM, `bindings/emscripten`) | 25 août 2026 |
 | crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` | **3.0.0** | 25 août 2026 |
 
 Précédent : `ld-lucivy` / `lucivy-core` 2.0.0, `luciole` / `lucistore` 0.1.0,

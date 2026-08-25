@@ -343,8 +343,10 @@ perdu derrière « background finalize failed ».
 
 Dans l'ordre, chacun vérifié sur le registre : `main` poussé (`069055b`),
 crates.io `luciole` → `lucistore` → `ld-lucivy` → `lucivy-core` →
-`sparse-vector`, PyPI (wheel abi3 manylinux_2_28 + sdist), npm (OTP donné
-en direct). Tag `v3.0.0` sur `main`.
+`sparse-vector`, PyPI (wheel abi3 manylinux_2_28 + sdist), npm `lucivy`
+puis `lucivy-wasm` (OTP donnés en direct ; le paquet WASM était resté en
+2.0.1 avec le JS de mai — synchronisé sur `playground/js` avant). Tag
+`v3.0.0` sur `main`.
 
 ### 5.7 Pagination fine du `.sfx`
 
