@@ -29,12 +29,13 @@ Le ratio navigateur/natif est de **6,7× sur la moyenne, 5,6× en médiane**.
 C'est ce que le playground annonce maintenant, avec un encadré et un
 pictogramme d'avertissement.
 
-**Condition de mesure à ne pas oublier** : ces chiffres navigateur sont pris
-avec `?rammax=3000`. L'index de 10 000 documents fait 2 600 Mo et le défaut
-de `LUCIVY_RAM_INDEX_MAX` est **2 Go** en wasm : sans le paramètre, il est
-`Streaming` (avertissement, preload sauté, recherches par lots). L'objectif
-« 10 k en RAM sans contournement » est atteint techniquement, pas dans la
-configuration par défaut — voir §5.4.
+**Condition de mesure** : ces chiffres navigateur ont été pris avec
+`?rammax=3000`, parce que le défaut de `LUCIVY_RAM_INDEX_MAX` était **2 Go**
+et l'index fait 2 600 Mo — sans le paramètre il était `Streaming`
+(avertissement, preload sauté, recherches par lots). **Le défaut est passé
+à 3 Go le soir** : la démo tient en RAM sans paramètre. L'argument du 2 Go
+(indexer + servir dans une même page dépasse 4 Go) reste vrai, mais §3 dit
+qu'une page qui vient d'indexer ne sert pas de toute façon.
 
 ## 2. Ce qui a été fait aujourd'hui
 
@@ -172,11 +173,9 @@ avant de bâtir dessus.
 (`lucivy_memory_status`). Il manque le moment : décider **avant** de charger,
 depuis la taille du fichier LUCE, plutôt qu'après avoir ouvert l'index.
 
-Et une **décision** : le défaut de 2 Go ne couvre pas l'index 10 k
-(2 600 Mo). Le monter à 3 Go rend la démo « par défaut », mais l'argument
-pour 2 Go tient toujours (2 727 Mo d'index + ce que laisse l'indexation
-dépasse 4 Go) ; il ne vaut que pour une page qui ne fait que servir — ce que
-la phase 3 garantit. À trancher avec la modale.
+Décision prise le soir : **défaut à 3 Go**. Il ne vaut que pour une page
+qui ne fait que servir — ce que la phase 3 garantit, et ce que la modale
+doit dire quand un index entre 3 et 4 Go se présente.
 
 ### 5.4 bis Reportés, pas abandonnés
 

@@ -256,7 +256,7 @@ grep -o 'finalize() [0-9]* docs' playground/diag.log | awk '{s+=$2;n++} END {pri
 | `LUCIVY_MAX_PENDING_FINALIZE` | 4 / **1 wasm** | segments en construction en plus de celui qu'on remplit ; au-delà l'indexeur attend |
 | `LUCIVY_SCHEDULER_THREADS` | `available_parallelism()` / **4 wasm** | pool luciole |
 | `LUCIVY_FILE_CACHE_BYTES` | 4 Go / **768 Mo wasm** | cache de fichiers entiers ; s'il est posé, il **fige** le budget |
-| `LUCIVY_RAM_INDEX_MAX` | ∞ / **2 Go wasm** | au-delà, l'index est streamé |
+| `LUCIVY_RAM_INDEX_MAX` | ∞ / **3 Go wasm** (2 Go avant le soir du 25) | au-delà, l'index est streamé |
 | `LUCIVY_SHARD_BATCH_BYTES` | ∞ / **1 Go wasm** | taille d'un lot de shards |
 | `LUCIVY_MIN_SUFFIX_LEN` | | longueur minimale de suffixe indexée |
 
@@ -287,8 +287,8 @@ soir du 25) — 2 305 Mo, indexation 25,7 s, panel 1 664 ms soit
 **79 ms/requête (médiane 49 ms)**. Avant la correction du soir, même
 protocole : 1 943 ms, 93 ms/requête, médiane 59.
 
-**Navigateur, même corpus, tout en RAM (`?rammax=3000` obligatoire : le
-défaut est 2 Go)** — 2 600 Mo, panel 567 ms/requête (médiane 281 ms),
+**Navigateur, même corpus, tout en RAM (mesuré avec `?rammax=3000` ; le
+défaut est 3 Go depuis le soir, 2 Go avant)** — 2 600 Mo, panel 567 ms/requête (médiane 281 ms),
 preload 837 fichiers / 2 600 Mo en 2,5 s. **Mesuré avec le SFP3 de
 l'après-midi** : l'index OPFS ne se lit plus depuis la correction et doit
 être reconstruit avant toute comparaison (05 §5.0) ; le chiffre à battre

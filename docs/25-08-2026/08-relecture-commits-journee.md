@@ -235,7 +235,7 @@ tout ce qui a été mesuré tient.
 | §1.2 | SFP3 porte `headers_len` après `num_docs` ; le lecteur saute aux payloads sans décoder. **Format changé sur place** (jamais publié) : les index SFP3 de l'après-midi sont à reconstruire. Remesuré en natif sur l'index 10 k reconstruit : 93 → 79 ms/requête, médiane 59 → 49, −14 %, 21 comptes identiques |
 | §1.3 | `sfx_budget()` divisé par les threads d'écriture, aligné sur le vrai défaut natif (`min(available_parallelism, 8)`), commité |
 | §2.1 | `read_live_files` lit `meta.json` une fois et en dérive tout ; `NotFound` relance depuis le nouveau `meta.json`, trois fois, puis erreur |
-| §2.2 | **non tranché** — documenté dans 05 §1 et §5.4, à décider |
+| §2.2 | défaut `LUCIVY_RAM_INDEX_MAX` monté à **3 Go** en wasm (décision de Lucie, soir) |
 | §2.3 | `num_docs` et `headers_len` lus en `read_varint_u32` et bornés par le bloc ; `decode_vint` s'arrête à 5 octets ; test `v3_refuses_corrupt_block_counts` |
 | §2.4 | `OPFS_DISABLED` posé après deux tours de tentatives échoués |
 | §2.5 | `LUCIVY_MAX_PENDING_FINALIZE` (1 wasm / 4 natif), attente sur la plus ancienne |
@@ -244,6 +244,9 @@ tout ce qui a été mesuré tient.
 | §2.8 | plus de `Vec` par document dans `SfxPostWriterV2` : une passe sur les entrées triées |
 | §3 | 03, 04 §12, 05, 06, 07, `build.sh`, note du playground, CLAUDE.md corrigés |
 
-Non fait, volontairement : les troncatures `as u32` (§7 de l'agent) et le
-plafond `u16` de `entry_count` (§8) sont pré-existants et sans scénario réel
-— notés ici, pas corrigés à l'aveugle.
+Faits ensuite, à la demande de Lucie : `entry_count` est un `u32` de bout
+en bout (le lecteur ne plafonne plus à 65 535 ; V2 lit son `u16` et
+l'élargit), les en-têtes SFP3 se lisent en `read_varint_u32` (une valeur
+trop large arrête la lecture au lieu d'être tronquée), et les trois writers
+refusent d'écrire un sidecar dont les offsets ne tiennent pas sur 32 bits
+plutôt que d'écrire une table fausse.

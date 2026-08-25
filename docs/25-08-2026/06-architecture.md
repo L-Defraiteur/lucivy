@@ -162,7 +162,10 @@ WebAssembly adresse **4 Go** (mesuré : 4 068 Mo). Tout le reste en découle.
 - **`Streaming`** — les shards passent par lots, chacun lu puis libéré.
   Correct, mais borné par les lectures.
 
-Seuil : `LUCIVY_RAM_INDEX_MAX`, 2 Go en wasm32, illimité ailleurs.
+Seuil : `LUCIVY_RAM_INDEX_MAX`, **3 Go** en wasm32 (2 Go jusqu'au soir du
+25 août : l'index 10 k fait 2 600 Mo et une page qui ne fait que servir l'a
+tenu sur trois passages ; une page qui vient d'indexer ne sert de toute
+façon pas, voir §5), illimité ailleurs.
 
 **Un compte incomplet est un plancher, pas une mesure** : si un fichier ne
 peut être ouvert, on ne conclut pas que l'index tient. Se tromper dans ce sens
