@@ -339,10 +339,12 @@ store ne sait pas répondre `blob_len` (`MutexGuard` gardé pendant un `if
 let`) ; le message d'un `save` refusé pendant une finalisation de fond
 perdu derrière « background finalize failed ».
 
-### 5.6 Publication crates.io 3.0.0
+### 5.6 ✅ Publication 3.0.0 (25 août, 21h50-22h)
 
-`cargo publish --dry-run` vert sur les 5 crates. **En attente du feu vert de
-Lucie**, jamais publié sans.
+Dans l'ordre, chacun vérifié sur le registre : `main` poussé (`069055b`),
+crates.io `luciole` → `lucistore` → `ld-lucivy` → `lucivy-core` →
+`sparse-vector`, PyPI (wheel abi3 manylinux_2_28 + sdist), npm (OTP donné
+en direct). Tag `v3.0.0` sur `main`.
 
 ### 5.7 Pagination fine du `.sfx`
 

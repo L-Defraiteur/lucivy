@@ -198,13 +198,15 @@ Les docs sont dans `docs/` organisés par dossier daté. Convention depuis le
 
 ## Packages publiés
 
-| Registre | Package | Publié (25 août 2026) | Workspace |
+| Registre | Package | Publié | Date |
 |----------|---------|---------|---------|
-| PyPI | `lucivy` | 2.0.1 | 3.0.0 |
-| npm | `lucivy` | 2.0.2 | 3.0.0 |
-| crates.io | `ld-lucivy`, `lucivy-core` | 2.0.0 | 3.0.0 |
-| crates.io | `luciole`, `lucistore` | 0.1.0 | 3.0.0 |
-| crates.io | `sparse-vector` | jamais publié | 3.0.0 |
+| PyPI | `lucivy` | **3.0.0** (wheel `cp39-abi3-manylinux_2_28_x86_64` + sdist) | 25 août 2026 |
+| npm | `lucivy` | **3.0.0** (Linux x64) | 25 août 2026 |
+| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` | **3.0.0** | 25 août 2026 |
+
+Précédent : `ld-lucivy` / `lucivy-core` 2.0.0, `luciole` / `lucistore` 0.1.0,
+PyPI 2.0.1, npm 2.0.2. Tokens de publication : `.vault/` (ignoré par git),
+`source .vault/load.sh` ; npm demande un OTP en direct.
 
 Règle : **tout le workspace porte le même numéro** (décision du 25 août) —
 une seule version à retenir pour les utilisateurs.
