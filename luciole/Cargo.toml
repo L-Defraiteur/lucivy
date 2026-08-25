@@ -1,6 +1,6 @@
 [package]
 name = "luciole"
-version = "3.0.0"
+version = "3.0.1"
 edition = "2021"
 license = "MIT"
 description = "Actor runtime + DAG execution engine. WASM-safe, deadlock-aware, with pipe_to, WaitGraph, and streaming pipelines."

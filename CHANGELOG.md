@@ -1,3 +1,20 @@
+Lucivy 3.0.1
+================================
+
+The 3.0.0 crates went to crates.io a few hours before two engine fixes
+landed, and with their 2.x READMEs; the wheels and npm packages of 3.0.0
+already carried the fixes. 3.0.1 aligns everything again.
+
+- `BlobDirectory::get_file_handle` self-deadlocked in lazy mode when the store
+  could not answer `blob_len` (a `MutexGuard` temporary lived through an
+  `if let` body that locked the same mutex); pinned by a core test with a
+  store that has no `blob_len`.
+- The message of a segment-write failure in a background finalize was
+  reduced to "background finalize failed"; the first error now reaches the
+  commit's reply — a store that refuses a `save` says why.
+- READMEs of `ld-lucivy` and `lucivy-core` rewritten for 3.x (the sharded
+  handle, queries, snapshots served in place, bring-your-own storage).
+
 Lucivy 3.0.0
 ================================
 
