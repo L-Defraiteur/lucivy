@@ -35,6 +35,12 @@ cargo test -p lucivy-core --no-fail-fast \
 Connus non verts et **pré-existants** : `bench_sharding` t01 (clone réseau) et
 t04 (`sfx:false` n'existe plus).
 
+Deux tests que la journée a montré manquants, ajoutés le soir :
+`cargo test --lib merge_tests` (un merge sur un index **v2** et sur un v3 —
+le merge v2 était cassé sans qu'aucun test le voie) et
+`cargo test --lib v3_refuses_corrupt_block_counts` (comptes corrompus dans
+un bloc SFP3).
+
 ### Tests de mesure (marqués `#[ignore]`, à lancer à la main)
 
 | test | ce qu'il répond | commande |
@@ -247,6 +253,7 @@ grep -o 'finalize() [0-9]* docs' playground/diag.log | awk '{s+=$2;n++} END {pri
 | `LUCIVY_WRITER_THREADS` | auto / **1 wasm** | threads d'écriture ; le tas par défaut suit |
 | `LUCIVY_SFX_HEAP` | 1 Go / **128 Mo wasm** | ce que les collecteurs SFX tiennent avant de couper un segment — **global, divisé par les threads** |
 | `LUCIVY_MERGE_CONCURRENCY` | ∞ / **1 wasm** | fusions simultanées |
+| `LUCIVY_MAX_PENDING_FINALIZE` | 4 / **1 wasm** | segments en construction en plus de celui qu'on remplit ; au-delà l'indexeur attend |
 | `LUCIVY_SCHEDULER_THREADS` | `available_parallelism()` / **4 wasm** | pool luciole |
 | `LUCIVY_FILE_CACHE_BYTES` | 4 Go / **768 Mo wasm** | cache de fichiers entiers ; s'il est posé, il **fige** le budget |
 | `LUCIVY_RAM_INDEX_MAX` | ∞ / **2 Go wasm** | au-delà, l'index est streamé |
@@ -278,8 +285,13 @@ Vérité terrain historique : `docs/BENCHMARKS.md`.
 **Natif, 10 000 fichiers kernel, compacté** — 2 273 Mo, indexation 27,6 s,
 panel 1 789 ms soit 85 ms/requête (médiane 49 ms).
 
-**Navigateur, même corpus, tout en RAM** — 2 600 Mo, panel 567 ms/requête
-(médiane 281 ms), preload 837 fichiers / 2 600 Mo en 2,5 s.
+**Navigateur, même corpus, tout en RAM (`?rammax=3000` obligatoire : le
+défaut est 2 Go)** — 2 600 Mo, panel 567 ms/requête (médiane 281 ms),
+preload 837 fichiers / 2 600 Mo en 2,5 s.
+
+⚠️ Ces deux index ont été écrits avec le SFP3 de l'après-midi, sans
+`headers_len` : **ils ne se lisent plus** depuis la correction du soir et
+sont à reconstruire avant toute comparaison (05 §5.0).
 
 **Natif, 15 440 fichiers, compacté** — 3 392 Mo, soit 220 Ko/document.
 

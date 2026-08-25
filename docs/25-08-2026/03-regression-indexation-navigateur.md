@@ -85,6 +85,12 @@ Or l'index construit la nuit compte **117 segments pour 15 440 documents**
 **Les segments sont donc ~3,8× plus gros qu'à la nuit, pour le même corpus et
 le même seuil de commit (2 000 documents).**
 
+*Correction (relecture du soir)* : les 117 segments sont comptés **après le
+compactage navigateur de 00:53**, pas à l'indexation — le rapport de journée
+(§3.1) mesure ~56 segments pour 2 000 documents avec positions, soit ~36
+docs/segment à l'écriture. Le raisonnement tient (les segments ont bien
+grossi), le chiffre de 132 n'est pas la taille d'écriture.
+
 Le mécanisme tient en une phrase : `ba48e60` (*« v3 indexes record term
 frequencies only: positions and offsets were read by v2 scorers alone »*,
 25/08 09:06) a **réduit** ce que l'index inversé stocke par document. Le tas

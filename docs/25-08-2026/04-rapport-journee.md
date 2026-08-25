@@ -360,3 +360,13 @@ tas suit le nombre de threads au lieu de produire une configuration invalide.
 Le seul levier qui a payé aujourd'hui est celui qui **réduit le travail
 mémoire**, pas celui qui ajoute des cœurs. C'est l'indication la plus nette
 qu'on ait sur où chercher ensuite.
+
+## 12. Correctif du soir
+
+Relecture à froid dans `08-relecture-commits-journee.md`. Deux points de ce
+rapport sont faux : le §2 (« ce qui reste est inhérent » pour SFP3 — c'était
+un scan O(n) des en-têtes à chaque lookup, corrigé) et le §3.1 tel que commité
+(la division du budget SFX par les threads décrite ici n'était dans aucun
+commit). Le merge d'un index v2 était cassé depuis 14h50 (`validate_sfxpost`).
+Le §11 sur les threads d'écriture a été mesuré avec le code non commité, il
+reste valable.

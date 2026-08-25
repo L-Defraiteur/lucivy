@@ -29,6 +29,13 @@ Le ratio navigateur/natif est de **6,7× sur la moyenne, 5,6× en médiane**.
 C'est ce que le playground annonce maintenant, avec un encadré et un
 pictogramme d'avertissement.
 
+**Condition de mesure à ne pas oublier** : ces chiffres navigateur sont pris
+avec `?rammax=3000`. L'index de 10 000 documents fait 2 600 Mo et le défaut
+de `LUCIVY_RAM_INDEX_MAX` est **2 Go** en wasm : sans le paramètre, il est
+`Streaming` (avertissement, preload sauté, recherches par lots). L'objectif
+« 10 k en RAM sans contournement » est atteint techniquement, pas dans la
+configuration par défaut — voir §5.4.
+
 ## 2. Ce qui a été fait aujourd'hui
 
 ### Formats (index −22 %)
@@ -45,6 +52,15 @@ migrer :
 | **total 15 440 docs** | **4 339 Mo** | **3 392 Mo** |
 
 Soit **220 Ko par document**.
+
+**Corrigé le soir** (`08-relecture-commits-journee.md`) : le premier SFP3
+n'écrivait pas la longueur des en-têtes, et chaque lookup les décodait tous
+— O(n) par accès, ce qui était la vraie cause des « 12 % inhérents ». Le
+bloc SFP3 porte maintenant `headers_len`. **Les index écrits en SFP3 dans la
+journée (`/tmp/lucivy_parity_native`, l'index OPFS du navigateur) ne se
+lisent plus et sont à reconstruire.** Le natif à chaud est à remesurer.
+Même commit : `validate_sfxpost` acceptait `SFP2` seulement, donc **tout
+merge d'un index v2 échouait** depuis 14h50 — test de merge v2 ajouté.
 
 ### Deux défauts, dont un corrompait les index
 
@@ -108,6 +124,14 @@ d'écriture) étaient déjà les bons réglages, pour d'autres raisons que celle
 
 Par ordre de valeur, avec ce que chacun demande.
 
+### 5.0 Rejouer une indexation **et un compactage** navigateur
+
+Les trois formats ont changé dans la journée, SFP3 a changé une seconde fois
+le soir, et le compactage navigateur n'a pas été rejoué depuis la nuit.
+C'est le préalable à tout le reste : reconstruire l'index 10 k (corpus
+`playground/corpus-kernel-10k.tar.gz`, ~25 min), le compacter, rejouer le
+panel, puis reconstruire la référence native (`test_playground_parity`).
+
 ### 5.1 Profiler le module WASM ⭐ le vrai prochain pas
 
 Le facteur ~6× est mesuré **de bout en bout et jamais décomposé**. On a
@@ -146,6 +170,19 @@ avant de bâtir dessus.
 (`lucivy_memory_status`). Il manque le moment : décider **avant** de charger,
 depuis la taille du fichier LUCE, plutôt qu'après avoir ouvert l'index.
 
+Et une **décision** : le défaut de 2 Go ne couvre pas l'index 10 k
+(2 600 Mo). Le monter à 3 Go rend la démo « par défaut », mais l'argument
+pour 2 Go tient toujours (2 727 Mo d'index + ce que laisse l'indexation
+dépasse 4 Go) ; il ne vaut que pour une page qui ne fait que servir — ce que
+la phase 3 garantit. À trancher avec la modale.
+
+### 5.4 bis Reportés, pas abandonnés
+
+Les idées du matin (`02-design-bytes-pagine.md` §7) — **shards fins + file
+d'admission** et **bloom de trigrammes par shard** — ne sont ni faites ni
+contredites : le choix « tout en RAM quand ça tient » les rend inutiles pour
+la démo et les garde pertinentes pour un index qui ne tient pas.
+
 ### 5.5 `.bytemap` — 396 Mo, 12 % de l'index
 
 Pas du varint : c'est un bitmap 256 bits par ordinal, très creux (5-15 octets
@@ -177,9 +214,17 @@ donc **après** le profil.
   l'écrivain est un *total* réparti entre les threads, avec un plancher par
   part ; le budget SFX est global et divisé. Les deux sont liés au nombre de
   threads.
-- **SFP3 est un échange RAM contre CPU** : −247 Mo, mais ~12 % de temps de
-  requête natif à chaud en plus. Favorable au navigateur, défavorable au natif
-  à chaud. Réversible par `git revert` si le natif devient prioritaire.
+- **SFP3 n'est plus un échange RAM contre CPU connu** : les ~12 % mesurés à
+  chaud venaient d'un scan O(n) des en-têtes à chaque lookup, corrigé le soir
+  (`headers_len`). Le coût résiduel, s'il existe, est **à remesurer** sur le
+  panel natif avant d'écrire quoi que ce soit dessus.
+- **Contre-pression sur la finalisation** : `LUCIVY_MAX_PENDING_FINALIZE`
+  (1 en wasm, 4 natif) borne le nombre de segments en construction. Avant, la
+  file était sans limite et l'indexation 10 k tenait par le timing, pas par
+  construction.
+- **Export LUCE** : `meta.json` est lu une fois et tout en dérive ; un fichier
+  qui disparaît sous l'export (fusion + ramasse-miettes) relance depuis le
+  nouveau `meta.json`, trois fois, puis échoue — il n'est plus ignoré.
 - **`available_parallelism()` n'est pas consulté en WASM** : une ligne posait
   `LUCIVY_SCHEDULER_THREADS = "4"` en dur avant la lecture des drapeaux. C'est
   maintenant un défaut mesuré et affiché, mais toujours un défaut fixe.

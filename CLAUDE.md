@@ -138,7 +138,7 @@ Emscripten manque : export_snapshot, export_sharded_delta, apply_sharded_delta.
 
 ## Tests
 
-- `cargo test --lib` : 1415 passed, 0 failed, 16 ignored (les 3 anciens rouges
+- `cargo test --lib` : 1431 passed, 0 failed, 16 ignored (les 3 anciens rouges
   réparés/retirés le 23 août : invariants de l'ancien design)
 - `cargo test -p lucivy-core` : tout vert sauf `bench_sharding` t01 (clone réseau) et
   t04 (sfx:false n'existe plus) — pré-existants
@@ -167,7 +167,8 @@ cd playground && node serve.mjs
 
 **Dossier courant : `docs/25-08-2026/` — lire d'abord `05-recap-progression-et-a-faire.md`,
 `06-architecture.md`, `07-knowledge-dump-outils.md`** (autonomes, écrits pour
-remplacer la lecture de l'historique). 01-04 sont le détail de la journée :
+remplacer la lecture de l'historique), puis `08-relecture-commits-journee.md`
+(relecture critique de la journée : ce qui a été corrigé le soir et pourquoi). 01-04 sont le détail de la journée :
 journal, design de la pagination, rapport de régression, rapport de journée.
 
 Les docs sont dans `docs/` organisés par dossier daté. Convention depuis le

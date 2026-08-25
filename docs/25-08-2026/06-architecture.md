@@ -83,14 +83,24 @@ qui décodait déjà champ par champ — donc **pas de passe de décompression**
 - **SIB2** (`.sibling_v3`) : un varint `(écart << 1) | (gap ≠ 0)`, puis `gap`
   seulement s'il est non nul. **Pas de points de reprise** : tous les lecteurs
   parcourent l'ordinal du début à la fin.
-- **SFP3** (`.sfxpost`) : en-tête par document en varints, payload delta-encodé
-  dans le document. Points de reprise tous les **8** documents (12 octets) —
-  `find_doc` est une recherche binaire et `entry_at` est appelé une fois par
-  match émis.
+- **SFP3** (`.sfxpost`) : `num_docs`, **`headers_len`**, points de reprise,
+  en-têtes par document en varints, payloads delta-encodés dans le document.
+  Points de reprise tous les **8** documents (12 octets) — `find_doc` est une
+  recherche binaire et `entry_at` est appelé une fois par match émis.
+  `headers_len` a manqué au premier SFP3 (après-midi du 25 août) : sans lui
+  le lecteur décodait tous les en-têtes à chaque lookup, O(n). Les fichiers
+  de cette version-là ne se lisent plus ; aucun n'a été publié.
 
 **La règle apprise** : avant de convertir un format, vérifier **qui le lit et
 s'il saute dedans**. Séquentiel → gratuit. Accès aléatoire → il faut des
-points de reprise, et leur pas se règle sur la fréquence des accès.
+points de reprise, et leur pas se règle sur la fréquence des accès. Et la
+seconde, apprise le soir : **une régression de performance mesurée n'est
+« inhérente » qu'une fois la complexité de chaque accès vérifiée** — 12 % à
+chaud était un O(n), pas un prix.
+
+**Le merge v2 valide ce qu'il écrit** (`validate_sfxpost`) : depuis que le
+writer émet `SFP3` pour les deux pipelines, cette validation doit accepter
+les deux magics. Un test merge maintenant un index v2 et un index v3.
 
 **Compatibilité** : chaque lecteur accepte l'ancien et le nouveau. Le
 discriminant est le magic (`WSP2`/`WSP3`, `SFP2`/`SFP3`) sauf pour
@@ -192,6 +202,10 @@ fichier sont gardés sur son handle — les en-têtes sont relus sans cesse.
   peuvent tenir avant de couper un segment. **Global, divisé par le nombre de
   threads** — sinon le pic réel se multiplie par le nombre de threads.
 - **Fusions** : `LUCIVY_MERGE_CONCURRENCY`, 1 en wasm.
+- **Finalisations en vol** : `LUCIVY_MAX_PENDING_FINALIZE`, 1 en wasm, 4
+  natif. Au-delà, l'indexeur attend la plus ancienne avant de continuer :
+  c'est ce qui borne le pic *par construction* et non par le hasard des
+  durées.
 
 **Ce qui borne réellement un segment**, c'est le budget SFX, parce que le pic
 du constructeur de FST est proportionnel aux tokens du segment. Le tas de
