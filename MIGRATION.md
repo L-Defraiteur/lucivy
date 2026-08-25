@@ -1,4 +1,37 @@
-# Migration guide: v1 to v2
+# Migration guide
+
+## v2 to v3 (3.0.0)
+
+Nothing to change in your code; two things to know.
+
+**Indexes.** A new index is written in the SFX v3 format (`sfx_version = 3` in
+`meta.json`). A v2 index still opens, searches, merges and syncs — its
+`meta.json` has no `sfx_version` field, which means 2 — and keeps its own
+format; it is never upgraded in place. To get v3 (exact spans on every query
+mode, denser files, cross-word matching in relaxed mode), rebuild the index.
+
+**Versions.** Every crate and binding is now 3.0.0 (`luciole` and `lucistore`
+jumped from 0.1). The Python wheel is `abi3`: one file for every CPython ≥ 3.9.
+
+**Behaviour that changed.**
+
+- Fuzzy scores are still tiered (negative scores are intended); with
+  `fuzzy_metric: "jaro_winkler"` the tier is the similarity instead of the
+  trigram miss count.
+- `parse` works again and is the boolean syntax entry point; the old
+  `QueryParser` path is gone.
+- On a sharded index, `commit()` returning no longer implies that background
+  merges are finished: call `wait_merges_quiet()` (`drainMerges()` in the
+  browser) before measuring, exporting or preloading.
+- A served snapshot (`open_snapshot`) is read-only and refuses writes up front.
+- `Index.rollback()` (C++) says it is unsupported instead of failing later.
+
+**New, no migration needed.** `query_warnings`, `compact`, `index_bytes`,
+`drop_index`, `open_snapshot`, `create_with_blob_store` / `BlobIndex` /
+`BlobBackend` (bring your own ACID storage), the browser's `memoryStatus` /
+`preload` and startup options. See [CHANGELOG.md](CHANGELOG.md).
+
+## v1 to v2
 
 ## Query types
 

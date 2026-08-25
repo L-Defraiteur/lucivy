@@ -1,4 +1,4 @@
-# lucivy v2
+# lucivy 3.0.0
 
 [![PyPI](https://img.shields.io/pypi/v/lucivy?label=PyPI&color=blue)](https://pypi.org/project/lucivy/)
 [![npm](https://img.shields.io/npm/v/lucivy?label=npm&color=cb3837)](https://www.npmjs.com/package/lucivy)
@@ -7,56 +7,91 @@
 [![CI](https://github.com/L-Defraiteur/lucivy/actions/workflows/ci.yml/badge.svg)](https://github.com/L-Defraiteur/lucivy/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-BM25 full-text search engine with substring matching, fuzzy search, and regex — all cross-token aware.
+BM25 full-text search engine with substring matching, fuzzy search and regex — all
+across token boundaries, with exact highlights — in Rust, Python, Node.js, C++ and
+the browser.
 
-Built for code search, technical documentation, and as a BM25 complement to vector databases.
+Built for code search, technical documentation, and as the BM25 side of a vector
+database. Everything is MIT.
 
-### What's new in v2
+[**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — it clones
+lucivy's own source from GitHub and indexes it in your browser in a few seconds.
 
-- **SFX-only engine** — all queries route through the Suffix FST, no legacy code paths
-- **5 bindings** — Python, Node.js, C++, WASM (emscripten), Rust
-- **Distributed search** — `export_stats` / `merge_stats` / `search_with_global_stats`
-- **Incremental sync** — LUCIDS sharded delta export/apply
-- **Correct BM25 cross-shard** — identical scores whether 1 shard or 4 (diff=0.0000)
-- **0 clippy warnings** — clean CI with `-D warnings`
+![Lucivy playground — the lucivy source indexed in the browser, searching "ror::lucivyer" across token boundaries](docs/25-08-2026/playground_screenshot.jpg)
 
-[**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
+### What's new in 3.0.0
 
-![Lucivy Playground — searching "ror::lucivyer" finds "Error::LucivyError" across token boundaries, 7 results in 24ms](docs/10-mai-2026-05h05/playground_screenshot.png)
+- **SFX v3** — a new index format: chunked tokens with overlap, a word partition,
+  a sibling table, and **exact byte spans** on every query mode, verified one by
+  one against `grep` on 50 000 kernel files.
+- **Boolean query syntax** (`parse`): `kmalloc AND NOT kfree`, `"exact phrase"`,
+  `+must -mustnot`, parentheses — lowered to substring queries with highlights.
+- **Fuzzy by Levenshtein or Jaro-Winkler** (`fuzzy_metric`, `min_similarity`):
+  a typo at the end of a word now ranks above one at its start.
+- **Query warnings**: what the engine will really search, before running it.
+- **Bring your own storage (ACID)** in every binding: your object implements
+  `load` / `save` / `delete` / `exists` / `list`, lucivy runs on it — a
+  transactional database becomes the truth, the mmap cache is disposable.
+- **Snapshots served in place**: open a LUCE blob without extracting it.
+- **The browser build indexes 10 000 kernel files in 55 s** and answers in
+  ~1.5× the native time (it was ~25 minutes and 10×): the engine runs on
+  mimalloc, and its memory is bounded by construction.
+- One version number for the whole workspace: `ld-lucivy`, `lucivy-core`,
+  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 3.0.0.
+
+Full list: [CHANGELOG.md](CHANGELOG.md). Design: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## What makes lucivy different
 
-Most search engines match **whole tokens**. Search for "mutex" and you'll find the word "mutex" — but not "getMutexHandle" or "lockmutex", because the tokenizer sees those as single opaque tokens. lucivy matches **substrings inside tokens**: "mutex" finds every occurrence, even buried inside compound words, camelCase identifiers, or concatenated strings.
+**Substrings, first.** Most search engines match whole tokens: search for `mutex`
+and you find the word `mutex` — not `getMutexHandle`, `pthread_mutex_lock` or
+`lockmutex`, because the tokenizer sees those as opaque tokens. lucivy matches
+**substrings inside tokens**: `mutex` finds every occurrence, buried in compound
+words, camelCase identifiers, paths, URLs or concatenated strings, and highlights
+exactly the bytes that matched. That is what searching **code** needs — an
+identifier fragment, an error message, a config key — and it is where whole-token
+engines return nothing.
 
-This works because lucivy builds a **Suffix FST** (.sfx) at indexing time. Every suffix of every token is indexed, partitioned by position (SI=0 = token start, SI>0 = substring). This makes substring search as precise as exact-match search, with BM25 scoring.
+It works because lucivy builds a **Suffix FST** at indexing time: every suffix of
+every token is indexed, partitioned by where it starts (token start, inside a
+token, whole word). Substring search becomes as precise as exact-match search,
+with BM25 scoring.
 
-### Cross-token matching
-
-Tokenizers split text at word boundaries. "rag3weaver" becomes ["rag3", "weaver"]. Traditional search can't find the original compound — lucivy can. The SFX engine follows **sibling links** across token boundaries to reconstruct matches that span multiple tokens.
-
-### Fuzzy with trigram pigeonhole
-
-Fuzzy search (Levenshtein distance) uses a **trigram pigeonhole** strategy: at distance d, at least one trigram of the query must appear exactly. lucivy finds that trigram via the SFX, then validates the full match. This avoids scanning the entire index — only candidates with at least one exact trigram are evaluated.
-
-### Regex with literal extraction
-
-Regex queries are optimized by extracting **literal parts** from the pattern. "log_[a-z]+_error" has literals "log_" and "_error". lucivy searches for these via SFX first, then validates the full regex only on candidates. No full-index scan.
-
-### BM25 scoring — correct across shards
-
-lucivy uses standard BM25 scoring. In sharded mode, global statistics (document frequency, total docs, total tokens) are aggregated before scoring, so results are **identical** whether you use 1 shard or 4. No approximation.
+- **Across token boundaries, separators included.** Tokenizers split
+  `rag3_weaver` into `rag3` and `weaver`; a **sibling table** records who follows
+  whom and with which separator, so `rag3weaver`, `rag3_weaver` and
+  `rag3-weaver` are all found — separators **relaxed** by default (`_`, `-`,
+  `.`, `/`, spaces ignored on both sides), **strict** on request when
+  `spin_lock` must not match `spin-lock`. `Error::LucivyError` is found by
+  `ror::lucivyer`.
+- **Unicode as content.** Accented letters, CJK, **emoji and ZWJ sequences** are
+  searchable text like any other and highlighted at their exact bytes — the span
+  ground truth is checked against `grep` on files that contain them.
+- **Fuzzy with trigram pigeonhole.** At distance *d*, enough trigrams of the
+  query must appear exactly; those come from the FST, then the candidate text is
+  validated — by **Levenshtein**, or by **Jaro-Winkler** above a similarity, which
+  ranks a typo at the end of a word above one at its start. No full scan.
+- **Regex by verification.** The required literals of the pattern drive the
+  search, `regex::Regex` decides on the rebuilt windows — `spin_lock_[a-z]+`
+  costs the price of `spin_lock_`. Patterns with no usable literal fall back to a
+  scan, and `query_warnings` tells you so before you run them.
+- **Boolean syntax** for humans: `kmalloc AND NOT kfree`, `"exact phrase"`,
+  `+must -mustnot`, parentheses — all lowered to substring queries, with
+  highlights.
+- **BM25 that is correct across shards** — identical scores with 1 or 4 shards
+  (diff = 0.0000) — and across machines, through exportable statistics.
 
 ## Install
 
-Everything is **MIT-licensed**.
-
 | Language | Install | Package |
 |----------|---------|---------|
-| Python | `pip install lucivy` | [PyPI](https://pypi.org/project/lucivy/) |
+| Python ≥ 3.9 | `pip install lucivy` | [PyPI](https://pypi.org/project/lucivy/) — one `abi3` wheel |
 | Node.js | `npm install lucivy` | [npm](https://www.npmjs.com/package/lucivy) |
-| WASM (browser) | `npm install lucivy-wasm` | [npm](https://www.npmjs.com/package/lucivy-wasm) |
+| Browser (WASM) | `npm install lucivy-wasm` | [npm](https://www.npmjs.com/package/lucivy-wasm) |
 | Rust | `cargo add lucivy-core` | [crates.io](https://crates.io/crates/lucivy-core) |
-| C++ | Static library via CXX bridge (build from source) |
+| C++ | cxx bridge, build from source — [README](bindings/cpp/README.md) | |
+
+Prebuilt binaries are Linux x86_64; everything builds from source elsewhere.
 
 ## Quick start
 
@@ -65,27 +100,30 @@ Everything is **MIT-licensed**.
 ```python
 import lucivy
 
-# Create an index
 index = lucivy.Index.create("/tmp/my_index", fields=[
     {"name": "body", "type": "text", "stored": True}
 ])
-
-# Add documents
 index.add(1, body="The pthread_mutex_lock function acquires a mutex")
 index.add(2, body="Use std::lock_guard for RAII mutex management")
 index.commit()
 
-# Substring search — finds "mutex" inside "pthread_mutex_lock"
-results = index.search({"type": "contains", "field": "body", "value": "mutex"})
+# Substring — finds "mutex" inside "pthread_mutex_lock", with byte spans
+index.search({"type": "contains", "field": "body", "value": "mutex"}, highlights=True)
 
-# Fuzzy search — finds "mutex" even with a typo ("mutx")
-results = index.search({"type": "contains", "field": "body", "value": "mutx", "distance": 1})
+# Fuzzy — Levenshtein, or Jaro-Winkler above a similarity
+index.search({"type": "contains", "field": "body", "value": "mutx", "distance": 1})
+index.search({"type": "fuzzy", "field": "body", "value": "mutx",
+              "fuzzy_metric": "jaro_winkler", "min_similarity": 0.9})
 
-# Regex — finds "lock" followed by anything then "mutex"
-results = index.search({"type": "contains", "field": "body", "value": "lock.*mutex", "regex": True})
+# Regex — literals drive the search, the regex validates
+index.search({"type": "contains", "field": "body", "value": "lock.*mutex", "regex": True})
 
-# Prefix / startsWith — finds tokens starting with "pthread"
-results = index.search({"type": "contains", "field": "body", "value": "pthread", "anchor_start": True})
+# Boolean syntax over several fields
+index.search({"type": "parse", "fields": ["body"], "value": "mutex AND NOT guard"})
+
+# What will really run
+index.query_warnings({"type": "contains", "field": "body", "value": "__init"})
+# ['separators are ignored (strict_separators=false): "__init" is searched as "init"']
 ```
 
 ### Node.js
@@ -93,239 +131,167 @@ results = index.search({"type": "contains", "field": "body", "value": "pthread",
 ```javascript
 const { Index } = require('lucivy');
 
-const index = Index.create('/tmp/my_index', [
-    { name: 'body', type: 'text', stored: true }
-]);
-
+const index = Index.create('/tmp/my_index', [{ name: 'body', type: 'text', stored: true }]);
 index.add(1, { body: 'The pthread_mutex_lock function acquires a mutex' });
 index.commit();
-
-const results = index.search({ type: 'contains', field: 'body', value: 'mutex' });
+index.search({ type: 'contains', field: 'body', value: 'mutex' }, { highlights: true });
 ```
 
-### Sharded
+### Browser
+
+```javascript
+import { Lucivy } from 'lucivy-wasm';
+
+const lucivy = new Lucivy('./lucivy-worker.js');   // a Web Worker, pthreads, OPFS
+await lucivy.ready;
+const index = await lucivy.create('/my-index', { fields: [{ name: 'body', type: 'text' }], shards: 4 });
+await index.add(1, { body: 'The pthread_mutex_lock function acquires a mutex' });
+await index.commit();
+await index.preload();                             // hold the index in memory, once
+await index.search({ type: 'contains', field: 'body', value: 'mutex' });
+```
+
+### Bring your own storage (ACID)
+
+The index's files are blobs; give lucivy an object that stores them and it runs
+on it. A transactional database becomes the source of truth.
 
 ```python
-# 4 shards — documents are distributed across shards
-index = lucivy.Index.create("/tmp/sharded", fields=[
-    {"name": "body", "type": "text", "stored": True}
-], shards=4)
+class SqliteStore:                      # any object with these five methods
+    def load(self, index_name, file_name) -> bytes: ...     # FileNotFoundError when absent
+    def save(self, index_name, file_name, data: bytes): ...
+    def delete(self, index_name, file_name): ...
+    def exists(self, index_name, file_name) -> bool: ...
+    def list(self, index_name) -> list[str]: ...
+    # optional, for lazy loading: blob_len(...), load_range(..., offset, length)
+
+index = lucivy.Index.create_with_blob_store(SqliteStore("blobs.db"), "acid",
+                                            fields=[{"name": "body", "type": "text"}])
 ```
 
-### Distributed search (multi-machine)
+Same contract in Node.js (`BlobIndex`, asynchronous) and C++ (`lucivy::BlobBackend`).
+The store's methods run on lucivy's own threads: thread-safe, and never calling
+back into the index.
+
+### Sharded, distributed, synchronised
 
 ```python
-import lucivy
+index = lucivy.Index.create("/tmp/sharded", fields=[...], shards=4)   # parallel search
 
-query = {"type": "contains", "field": "body", "value": "mutex"}
+# Distributed: correct IDF across machines
+merged = lucivy.merge_stats([node_a.export_stats(q), node_b.export_stats(q)])
+hits = node_a.search_with_global_stats(q, merged, limit=10)
 
-# 1. Each node exports its local BM25 stats
-stats_a = node_a.export_stats(query)  # JSON string
-stats_b = node_b.export_stats(query)  # JSON string
-
-# 2. Coordinator merges stats from all nodes
-merged = lucivy.merge_stats([stats_a, stats_b])
-
-# 3. Each node searches with global stats (correct IDF)
-results_a = node_a.search_with_global_stats(query, merged, limit=10)
-results_b = node_b.search_with_global_stats(query, merged, limit=10)
-
-# 4. Coordinator merges top-K results by score
-all_results = sorted(results_a + results_b, key=lambda r: r.score, reverse=True)[:10]
+# Snapshots and deltas
+blob = index.export_snapshot()                    # LUCE: every shard in one blob
+served = lucivy.Index.open_snapshot(blob)         # read-only, nothing extracted
+delta = server.export_sharded_delta(client.shard_versions)   # LUCIDS: changed shards only
+client.apply_sharded_delta(delta)
 ```
-
-### Incremental sync
-
-```python
-# Client sends its shard versions to the server
-client_versions = client_index.shard_versions
-
-# Server: export delta (only segments that changed since client's version)
-delta = server_index.export_sharded_delta(client_versions)
-
-# Client: apply delta (writes new segments, removes old, reloads readers)
-client_index.apply_sharded_delta(delta)
-```
-
-## Features
-
-### Search
-
-- **Substring search** — find text inside tokens, not just whole tokens
-- **Fuzzy search** — Levenshtein distance with trigram acceleration
-- **Regex** — cross-token regex with literal-part optimization
-- **Phrase** — multi-token adjacency with cross-token awareness
-- **Prefix / startsWith** — anchor to token start (SI=0)
-- **Exact match** — cross-token aware full-token matching
-- **Highlights** — byte-offset highlights for all query types
-- **Filters** — non-text field filtering (numeric ranges, equality, membership)
-- **BM25 scoring** — correct cross-shard statistics
-- **More Like This** — find similar documents by reference text
-
-### Indexing
-
-- **Sharded** — configurable routing distributes documents across N shards for parallel search
-- **Incremental** — add, delete, update documents with lazy commit
-- **Background finalize** — segment finalization runs on a pool thread, not in the indexer
-- **Configurable merge policy** — log-based merge with tunable thresholds
-
-### Sync & Distribution
-
-- **LUCE** — full snapshot export/import (all shards in one blob)
-- **LUCID** — incremental delta sync for a single shard (only changed segments)
-- **LUCIDS** — incremental delta sync across multiple shards
-- **Distributed search** — export_stats / merge / search_with_global_stats pipeline
-
-### Platforms
-
-- **Python** (PyO3) — `pip install lucivy` — [README](bindings/python/README.md)
-- **Node.js** (NAPI) — `npm install lucivy` — [README](bindings/nodejs/README.md)
-- **Browser / WASM** (emscripten) — SharedArrayBuffer + multithreaded — [README](bindings/emscripten/README.md)
-- **Rust** — `lucivy-core` on crates.io
-- **C++** — cxx bridge
 
 ## Query reference
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `type` | string | required | `"contains"`, `"contains_split"`, `"boolean"`, etc. |
-| `field` | string | required | Field to search |
-| `value` | string | required | Search text or regex pattern |
-| `distance` | int | 0 | Levenshtein distance for fuzzy (0 = exact) |
-| `anchor_start` | bool | false | Match must start at token boundary (SI=0) |
-| `exact_match` | bool | false | Match must cover entire token(s) |
-| `regex` | bool | false | Treat value as regex pattern |
-| `filters` | array | none | Non-text field filters (eq, gt, in, between, ...) |
+| `type` | string | required | `contains`, `contains_split`, `startsWith`, `term`, `phrase`, `fuzzy`, `regex`, `parse`, `boolean`, `disjunction_max`, `more_like_this` |
+| `field` / `fields` | string / list | required | Field(s) to search |
+| `value` | string | required | Text, pattern, or query syntax |
+| `distance` | int | 0 | Edit distance for fuzzy (0 = exact); sizes the candidate set for Jaro-Winkler (default 2) |
+| `fuzzy_metric` | string | `levenshtein` | `levenshtein` or `jaro_winkler` |
+| `min_similarity` | float | 0.9 | Jaro-Winkler acceptance threshold |
+| `strict_separators` | bool | false | Relaxed: `_`, `-`, `.`, spaces ignored on both sides; strict: they must match |
+| `anchor_start` | bool | false | Match must start a word |
+| `exact_match` | bool | false | Match must cover whole words |
+| `regex` | bool | false | Treat `value` as a regular expression |
+| `filters` | array | none | Non-text filters: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `not_in`, `between`, `starts_with`, `contains` |
 
-### Query types
+| Type | Meaning |
+|------|---------|
+| `contains` | Substring, fuzzy or regex, across token boundaries — the primary query |
+| `contains_split` | Every whitespace-separated word is a `contains`, OR'd |
+| `startsWith` / `term` | Substring at the start of a word / covering whole words |
+| `phrase` | Adjacent words in order |
+| `fuzzy` / `regex` | Aliases for `contains` + `distance` / `+ regex` |
+| `parse` | Plain value: OR of `contains` per word × field. Boolean syntax: `AND` / `OR` / `NOT`, quotes, `+` / `-`, parentheses (`NOT` > `AND` > `OR`) |
+| `boolean` / `disjunction_max` | Compose sub-queries |
+| `more_like_this` | TF-IDF similarity from a reference text |
 
-| Type | Description |
-|------|-------------|
-| `contains` | Substring, fuzzy, or regex search (cross-token) |
-| `contains_split` | Split on whitespace, each word is a `contains`, combined with OR |
-| `boolean` | Combine sub-queries with must / should / must_not |
-| `startsWith` | Token prefix — match must start at token boundary (SI=0) |
-| `term` | Exact whole-token match (anchor_start + exact_match) |
-| `fuzzy` | Fuzzy substring (alias for `contains` + `distance`) |
-| `regex` | Regex substring (alias for `contains` + `regex=true`) |
-| `phrase` | Adjacent tokens in order |
-
-### Query warnings
-
-Some queries hit known limits of the engine: separators are ignored in relaxed
-mode (`__init` is searched as `init`), a fuzzy distance can rewrite most of a
-short query, a regex without a usable literal (`[0-9]{8}`) scans every
-document. `query_warnings(query)` returns these as plain-text warnings, without
-running the search — show them next to the results.
-
-```python
-for w in index.query_warnings({"type": "regex", "value": "[0-9]{8}"}):
-    print("warning:", w)
-# warning: "[0-9]{8}" requires no literal the index can look up: every document is scanned whole (full scan, cost grows with corpus size)
-```
-
-Node: `index.queryWarnings(query)`; C++ / rag3db bridge: `query_warnings(json)`.
-
-## Benchmarks
-
-Comment lancer les mesures et la vérité terrain par spans (contains, fuzzy, regex,
-rag3db et kernel 50k), quelles variables, comment lire la sortie :
-[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+Every hit carries byte-offset highlights per field. `query_warnings(query)` returns,
+without running the search, the honest caveats: separators ignored, a distance
+that rewrites most of a short query, a regex that has to scan.
 
 ## Performance
 
-Benchmarked on 90,000 files from the Linux kernel source tree (top-20 results, 3-run average):
+Measured on 25 August 2026, 10 000 files of the Linux kernel source, 4 shards,
+the same 21-query panel on both sides, identical hit counts (24-core machine;
+the browser is Chrome, 8 threads).
 
-| Query | 1 shard | 4 shards |
-|-------|---------|----------|
-| `contains 'mutex_lock'` | 261ms | 137ms |
-| `contains 'function'` | 127ms | 131ms |
-| `contains_split 'struct device'` | 338ms | 347ms |
-| `contains 'sched'` | 119ms | 128ms |
-| `startsWith 'sched'` | 185ms | 178ms |
-| `fuzzy 'schdule' (d=1)` | 559ms | 318ms |
-| `regex 'mutex.*lock'` | - | 373ms |
-| `regex 'kmalloc.*sizeof'` | - | 442ms |
-| `contains 'drivers'` (path field) | 7ms | 7ms |
+| | native (Rust) | browser (WASM) |
+|---|---|---|
+| index on disk | 2 305 MB | 2 879 MB, held in memory |
+| indexing | 25.7 s | 55 s |
+| `contains kmalloc` | 35 ms | 45 ms |
+| `contains` relaxed `kmalloc` | 44 ms | 42 ms |
+| `startsWith netdev` | 52 ms | 113 ms |
+| `phrase return -ENOMEM` | 53 ms | 92 ms |
+| `fuzzy kmallc` (d = 1) | 69 ms | 117 ms |
+| `fuzzy kmalloc` (d = 2) | 436 ms | 651 ms |
+| `regex spin_lock_[a-z]+` | 162 ms | 201 ms |
+| `parse kmalloc AND NOT kfree` | 24 ms | 26 ms |
+| **panel mean / median** | **79 / 49 ms** | **124-133 / 69-92 ms** |
 
-Indexation: 90K docs in **50s** (1 shard) / **100s** (4 shards round-robin).
+On 50 000 kernel files, natively: floor 25-27 ms, `include` (36 824 documents,
+214 692 spans) 46 ms, fuzzy d = 1 56-110 ms, d = 2 171 ms, regex ~190 ms.
 
-> These are **substring** queries — not simple term dictionary lookups. Every query searches inside tokens, across token boundaries, with BM25 scoring. Direct comparison with traditional full-text engines is not apples-to-apples: they would return 0 results for most of these queries.
+> These are **substring** queries across token boundaries with BM25 scoring and
+> exact spans — most full-text engines return nothing for them. How to run the
+> measurements and the span ground truth: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-## Architecture
+## Architecture in one picture
 
 ```
-Document -> Tokenizer -> Postings (inverted index)
-                      -> SFX (suffix FST + sfxpost)
-                      -> Fast fields
-                      -> Doc store (compressed)
+Document ─ tokenizer ─┬─ inverted index (postings, term frequencies)
+                      ├─ SFX v3: suffix FST + 7 sidecars per field
+                      ├─ fast fields
+                      └─ doc store
 
-Query -> SFX walk (substring/fuzzy/regex)
-      -> Posting resolve (doc_ids + positions)
-      -> BM25 scoring (with global stats)
-      -> Highlights (byte offsets)
+Query ─ FST walk (substring / trigrams / literals) ─ sibling chains across tokens
+      ─ validation on the source text (Levenshtein, Jaro-Winkler, regex)
+      ─ BM25 with global statistics ─ byte spans
 ```
 
-### SFX file format
-
-Each indexed segment contains:
-- `.sfx` — Suffix FST with partitioned SI=0 / SI>0 entries
-- `.sfxpost` — Posting lists mapping suffix ordinals to doc_ids
-- `.termtexts` — Token text storage for cross-token sibling chain resolution
-- `.gapmap` — Gap-encoded byte sequences for separator tracking
-
-### Sharding
-
-Documents are distributed across shards via configurable routing (`balance_weight`):
-
-- **`balance_weight=1.0`** (default) — round-robin-like. Even distribution, fastest indexation.
-- **`balance_weight=0.2`** — token-aware. Co-locates documents sharing rare tokens.
-- **`balance_weight=0.0`** — pure token-aware. Maximum co-location.
+Four crates and four bindings: `ld-lucivy` (engine), `lucivy-core` (`ShardedHandle`,
+queries, snapshots, storage), `luciole` (actor runtime and DAGs, WASM-safe),
+`lucistore` (blob storage, snapshots, deltas), plus `sparse-vector` (a sparse
+vector index with WAND pruning on the same storage and sharding). The whole
+design — the SFX engine, sharding, memory, the browser — is in
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Building from source
 
 ```bash
-# Rust library tests
-cargo test --lib
-
-# Python bindings
-cd bindings/python && maturin develop --release
-
-# Node.js bindings
-cargo build -p lucivy-napi --release
-cp target/release/liblucivy_napi.so bindings/nodejs/lucivy.node
-
-# C++ bindings
-cargo build -p lucivy-cpp --release
-
-# WASM (emscripten)
-bash bindings/emscripten/build.sh
+cargo test --lib                                   # engine, ~1 400 tests
+cargo test -p lucivy-core --no-fail-fast           # integration
+cd bindings/python && bash build.sh                # maturin develop, then .venv/bin/python -m pytest tests
+cd bindings/python && bash build-wheel.sh          # abi3 manylinux_2_28 wheel + sdist (docker)
+cd bindings/nodejs && npm run build && node test.mjs
+cargo test -p lucivy-cpp
+bash bindings/emscripten/build.sh                  # emcc, mimalloc, pthreads; playground/pkg/
+cd playground && node serve.mjs                    # http://localhost:9877
 ```
 
 ## Heritage
 
-lucivy started as a fork of [tantivy](https://github.com/quickwit-oss/tantivy) v0.22. The low-level storage layer (segments, postings, doc store, fast fields, tokenizers, aggregations) still derives from tantivy's codebase.
+lucivy started as a fork of [tantivy](https://github.com/quickwit-oss/tantivy)
+v0.22. The low-level storage layer (segments, postings, doc store, fast fields,
+tokenizers, aggregations) still derives from tantivy's codebase. Everything above
+it — the SFX engine, the query system, sharding, distribution, snapshots, the
+actor runtime, the blob storage, the bindings and the browser build — was
+rewritten or built from scratch. Thank you to the tantivy team for a solid
+foundation.
 
-Everything above that layer has been rewritten or built from scratch:
-
-| Component | tantivy | lucivy |
-|-----------|---------|--------|
-| **Search** | Term dictionary lookup (whole tokens) | SFX engine — Suffix FST with cross-token matching via sibling links and falling walk |
-| **Fuzzy** | Levenshtein DFA on term dictionary | Trigram pigeonhole on SFX — no full-index scan |
-| **Regex** | DFA on term dictionary | Literal extraction + SFX lookup + DFA validation |
-| **Substring** | Not supported | Native — every suffix of every token indexed at SI=0/SI>0 |
-| **Cross-token** | Not supported | Sibling table + falling walk reconstruct matches across token boundaries |
-| **Highlights** | Not built-in | Byte-offset highlights for all query types (substring, fuzzy, regex, cross-token) |
-| **Threading** | `thread::spawn` per merge | luciole — custom actor runtime with DAG execution, streaming pipelines, WaitGraph diagnostics, WASM-safe |
-| **Sharding** | Not built-in | ShardedHandle with configurable routing, correct cross-shard BM25 |
-| **Distribution** | Not built-in | export_stats / merge_stats / search_with_global_stats pipeline |
-| **Sync** | Not built-in | LUCE snapshots, LUCID/LUCIDS incremental delta |
-| **WASM** | Not supported | Full emscripten build with pthreads, SharedArrayBuffer, OPFS |
-| **Bindings** | Rust only | Python (PyO3), Node.js (napi-rs), C++ (CXX), WASM (emscripten), Rust |
-
-~40K lines of original lucivy code on top of ~120K lines of tantivy-derived infrastructure.
-
-Thank you to the tantivy team for building a solid foundation.
+`sparse-vector` is original code, MIT, whose design is inspired by Qdrant's
+sparse index — see its [NOTICE](sparse_vector/NOTICE).
 
 ## License
 
