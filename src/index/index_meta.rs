@@ -501,8 +501,7 @@ mod tests {
                     compression_level: Some(4),
                 }),
                 docstore_blocksize: 1_000_000,
-                docstore_compress_dedicated_thread: true,
-                sfx_enabled: true,
+                ..Default::default()
             },
             segments: Vec::new(),
             schema,
@@ -512,7 +511,7 @@ mod tests {
         let json = serde_json::ser::to_string(&index_metas).expect("serialization failed");
         assert_eq!(
             json,
-            r#"{"index_settings":{"docstore_compression":"zstd(compression_level=4)","docstore_blocksize":1000000},"segments":[],"schema":[{"name":"text","type":"text","options":{"indexing":{"record":"position","fieldnorms":true,"tokenizer":"default"},"stored":false,"fast":false}}],"opstamp":0}"#
+            r#"{"index_settings":{"docstore_compression":"zstd(compression_level=4)","docstore_blocksize":1000000,"sfx_version":3},"segments":[],"schema":[{"name":"text","type":"text","options":{"indexing":{"record":"position","fieldnorms":true,"tokenizer":"default"},"stored":false,"fast":false}}],"opstamp":0}"#
         );
 
         let deser_meta: UntrackedIndexMeta = serde_json::from_str(&json).unwrap();

@@ -63,7 +63,7 @@ fn dump_fst_keys(reader: &SfxFileReaderV3, query_bytes: &[u8],
         ge_key.extend_from_slice(query_bytes);
         let mut lt_key = ge_key.clone();
         if let Some(last) = lt_key.last_mut() {
-            if *last < 0xFF { *last += 1; }
+            *last = last.saturating_add(1);
         }
 
         let mut stream = fst.range().ge(&ge_key).lt(&lt_key).into_stream();
@@ -128,8 +128,11 @@ fn format_chains(chains: &[TokenChainV3]) -> String {
 
 /// Tier 1: walk the FST and produce candidate ordinals.
 pub struct FstCandidatesNode {
+    /// Literal to look up (lowercased before the walk).
     pub query: String,
+    /// Restrict to token starts (partition 0x00, plus 0x02 when separators are relaxed).
     pub anchor_start: bool,
+    /// When false, also search the sep-stripped partition (0x02).
     pub strict_separators: bool,
 }
 
@@ -238,7 +241,9 @@ impl<'a> LocalNode<BriquesContext<'a>> for ResolveSingleWordNode {
 
 /// Build cross-chunk chains via falling walk (partitions 0x00 + 0x01).
 pub struct ChunkChainNode {
+    /// Literal to chain across chunk boundaries.
     pub query: String,
+    /// Keep only chains whose first token matches at a token start (`first_sti == 0`).
     pub anchor_start: bool,
 }
 
@@ -268,6 +273,7 @@ impl<'a> LocalNode<BriquesContext<'a>> for ChunkChainNode {
 /// Sibling chain supplement for chunk pipeline.
 /// Uses falling_walk_chunks + splits_from_fst_candidates + sibling_chain_dfs.
 pub struct SiblingChunkNode {
+    /// Literal whose splits seed the sibling depth-first search.
     pub query: String,
     /// Under strict separators a chain step must cover the next token's separator
     /// too, not just its content — otherwise a strict search jumps over spaces.
@@ -355,7 +361,9 @@ impl<'a> LocalNode<BriquesContext<'a>> for ResolveChunkNode {
 
 /// Build cross-word chains via falling walk (partition 0x02).
 pub struct WordChainNode {
+    /// Literal to chain across word boundaries.
     pub query: String,
+    /// Keep only chains whose first token matches at a token start (`first_sti == 0`).
     pub anchor_start: bool,
 }
 
@@ -384,6 +392,7 @@ impl<'a> LocalNode<BriquesContext<'a>> for WordChainNode {
 
 /// Sibling chain supplement for word pipeline.
 pub struct SiblingWordNode {
+    /// Literal whose word-level splits seed the sibling depth-first search.
     pub query: String,
 }
 

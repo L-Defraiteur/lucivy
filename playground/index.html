@@ -867,33 +867,10 @@ async function importFiles(fileList) {
     if (userIndex) { await userIndex.close().catch(() => {}); }
     userFiles.clear();
 
-    userIndex = await lucivy.create('/user_index', {
-      fields: [
-        { name: 'path', type: 'text' },
-        { name: 'content', type: 'text' },
-        { name: 'extension', type: 'text' },
-      ],
-      shards: 4,
-    });
-
-    const COMMIT_EVERY = 2000;
-    for (let i = 0; i < textFiles.length; i++) {
-      const { path, content } = textFiles[i];
-      const ext = path.includes('.') ? path.split('.').pop() : '';
-      await userIndex.add(i, { path, content, extension: ext });
-      userFiles.set(i, { path, content, extension: ext });
-      if ((i + 1) % 100 === 0) {
-        statusEl.textContent = `Indexing ${textFiles.length} file(s)... ${i + 1}/${textFiles.length}`;
-      }
-      if ((i + 1) % COMMIT_EVERY === 0) {
-        statusEl.textContent = `Indexing ${textFiles.length} file(s)... ${i + 1}/${textFiles.length} (committing...)`;
-        await userIndex.commit({ sync: false });
-      }
-    }
-    statusEl.textContent = `Final commit...`;
-    await userIndex.commit();
-    statusEl.textContent = `Merging segments...`;
-    await userIndex.drainMerges();
+    // Same path as the git clone: above RELOAD_TO_SERVE_BYTES the page that
+    // indexed cannot also serve, and indexFiles reloads on `?open=`.
+    const built = await indexFiles(textFiles, '/user_index', `${textFiles.length} file(s)`, userFiles);
+    userIndex = built.index;
     // `?compact=N`: merge down to segments of at most N docs once the load
     // is done — hundreds of small segments mean hundreds of suffix FSTs.
     const compactDocs = parseInt(new URLSearchParams(location.search).get('compact') || '0', 10);

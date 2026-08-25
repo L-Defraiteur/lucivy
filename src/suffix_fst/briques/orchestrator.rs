@@ -23,9 +23,6 @@ const MAX_QUERY_LEN: usize = 2048;
 
 // ─── contains_v3 ──────────────────────────────────────────────────────────
 
-/// Exact substring search (d=0).
-///
-/// Returns matches sorted by (doc_id, position).
 /// Extend matches whose tail was found through a word's content overlap.
 ///
 /// A 0x02 key carries the first two content bytes of the next word; a match
@@ -60,6 +57,14 @@ fn place_overlap_overflow(ctx: &BriquesContext<'_>, matches: &mut [MatchV3]) {
     }
 }
 
+/// Exact substring search (d=0): the entry point for `contains` and its
+/// derived query types (`term`, `startsWith`, `phrase`).
+///
+/// Relaxed mode strips separators from the query before the walk. Returns
+/// deduplicated matches sorted by (doc_id, position, byte_from), verified on
+/// the rebuilt text and, when `anchor_start` / `exact_match` are set and the
+/// segment has posmap + termtexts, checked on their token boundaries.
+/// Empty or over-long queries (> 2048 bytes) return nothing.
 pub fn contains_v3(
     ctx: &BriquesContext<'_>,
     query: &str,

@@ -16,29 +16,72 @@ use crate::index::SegmentId;
 /// segment all share the same key space.
 type HighlightKey = (SegmentId, DocId);
 
+/// One recorded span: interned field index, byte range. The engine's postings
+/// carry byte offsets as `u32` already (`sfxpost`, `posmap`), so nothing is
+/// lost here; what is gained is 12 bytes per span instead of a `String`.
+type Span = (u16, u32, u32);
+
+#[derive(Debug, Default)]
+struct SinkInner {
+    fields: Vec<String>,
+    spans: HashMap<HighlightKey, Vec<Span>>,
+    total: usize,
+    overflowed: bool,
+}
+
+/// Upper bound on the spans a sink records before it gives up
+/// (`LUCIVY_HIGHLIGHT_SPAN_CAP`). A search records the spans of every
+/// document it verifies, not only the top-k it returns: a one-letter query
+/// over a large corpus produces tens of millions of them, which is what took
+/// a 4 GB WebAssembly heap down. Past the cap the sink stops recording and
+/// reports `overflowed()`; the caller then asks again for its top-k only.
+pub fn highlight_span_cap() -> usize {
+    static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        let default = if cfg!(target_arch = "wasm32") { 1_000_000 } else { 4_000_000 };
+        std::env::var("LUCIVY_HIGHLIGHT_SPAN_CAP")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(default)
+    })
+}
+
 /// Side-channel for highlight byte offsets, shared between caller and scorers.
 ///
 /// The caller creates an `Arc<HighlightSink>` and passes it to the query via
 /// `with_highlight_sink()`. During scoring, when a match is confirmed, the
 /// scorer inserts byte offsets into the sink tagged with a field name.
 /// After search, the caller reads the sink to populate highlights per field.
+///
+/// The sink is bounded by [`highlight_span_cap`]: once reached it records
+/// nothing more and `overflowed()` is true — the spans it holds are then
+/// incomplete and the search should be repeated restricted to the documents
+/// whose highlights are wanted (`ShardedHandle` does this by itself).
 #[derive(Debug)]
 pub struct HighlightSink {
-    #[allow(clippy::type_complexity)]
-    data: Mutex<HashMap<HighlightKey, Vec<(String, usize, usize)>>>,
+    data: Mutex<SinkInner>,
+    cap: usize,
 }
 
 impl HighlightSink {
-    /// Creates a new empty highlight sink.
+    /// Creates a new empty highlight sink bounded by [`highlight_span_cap`].
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
+        Self::with_cap(highlight_span_cap())
+    }
+
+    /// Creates a sink that stops recording after `cap` spans.
+    pub fn with_cap(cap: usize) -> Self {
         HighlightSink {
-            data: Mutex::new(HashMap::new()),
+            data: Mutex::new(SinkInner::default()),
+            cap: cap.max(1),
         }
     }
 
     /// Called by scorers when a match is confirmed.
     /// Appends offsets tagged with `field_name` (does not overwrite previous entries).
+    /// Silently records nothing once the sink has overflowed.
     pub fn insert(
         &self,
         segment_id: SegmentId,
@@ -46,16 +89,31 @@ impl HighlightSink {
         field_name: &str,
         offsets: Vec<[usize; 2]>,
     ) {
-        let entries: Vec<(String, usize, usize)> = offsets
-            .into_iter()
-            .map(|[s, e]| (field_name.to_string(), s, e))
-            .collect();
-        self.data
-            .lock()
-            .unwrap()
-            .entry((segment_id, doc_id))
-            .or_default()
-            .extend(entries);
+        if offsets.is_empty() {
+            return;
+        }
+        let mut inner = self.data.lock().unwrap();
+        if inner.overflowed {
+            return;
+        }
+        if inner.total + offsets.len() > self.cap {
+            inner.overflowed = true;
+            return;
+        }
+        let field = match inner.fields.iter().position(|f| f == field_name) {
+            Some(i) => i as u16,
+            None => {
+                inner.fields.push(field_name.to_string());
+                (inner.fields.len() - 1) as u16
+            }
+        };
+        inner.total += offsets.len();
+        let entry = inner.spans.entry((segment_id, doc_id)).or_default();
+        entry.reserve(offsets.len());
+        for [s, e] in offsets {
+            debug_assert!(s <= u32::MAX as usize && e <= u32::MAX as usize, "highlight offset beyond u32");
+            entry.push((field, s.min(u32::MAX as usize) as u32, e.min(u32::MAX as usize) as u32));
+        }
     }
 
     /// Called after search to retrieve offsets grouped by field name.
@@ -64,14 +122,14 @@ impl HighlightSink {
         segment_id: SegmentId,
         doc_id: DocId,
     ) -> Option<HashMap<String, Vec<[usize; 2]>>> {
-        let data = self.data.lock().unwrap();
-        let entries = data.get(&(segment_id, doc_id))?;
+        let inner = self.data.lock().unwrap();
+        let entries = inner.spans.get(&(segment_id, doc_id))?;
         let mut by_field: HashMap<String, Vec<[usize; 2]>> = HashMap::new();
-        for (field, start, end) in entries {
+        for &(field, start, end) in entries {
             by_field
-                .entry(field.clone())
+                .entry(inner.fields[field as usize].clone())
                 .or_default()
-                .push([*start, *end]);
+                .push([start as usize, end as usize]);
         }
         Some(by_field)
     }
@@ -79,18 +137,33 @@ impl HighlightSink {
     /// Returns all highlight entries across all segments, flattened.
     /// Useful for inspecting results without knowing segment IDs.
     pub fn all_entries(&self) -> Vec<HighlightEntry> {
-        let data = self.data.lock().unwrap();
+        let inner = self.data.lock().unwrap();
         let mut out = Vec::new();
-        for (&(_seg, doc_id), entries) in data.iter() {
-            for (field, start, end) in entries {
+        for (&(_seg, doc_id), entries) in inner.spans.iter() {
+            for &(field, start, end) in entries {
                 out.push(HighlightEntry {
                     doc_id,
-                    field: field.clone(),
-                    offsets: vec![[*start, *end]],
+                    field: inner.fields[field as usize].clone(),
+                    offsets: vec![[start as usize, end as usize]],
                 });
             }
         }
         out
+    }
+
+    /// True once the cap was hit: the recorded spans are incomplete.
+    pub fn overflowed(&self) -> bool {
+        self.data.lock().unwrap().overflowed
+    }
+
+    /// Spans recorded so far.
+    pub fn span_count(&self) -> usize {
+        self.data.lock().unwrap().total
+    }
+
+    /// Forget everything, including the overflow flag.
+    pub fn clear(&self) {
+        *self.data.lock().unwrap() = SinkInner::default();
     }
 }
 

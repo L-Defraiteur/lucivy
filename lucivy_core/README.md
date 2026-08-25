@@ -196,6 +196,12 @@ Environment knobs (`LUCIVY_SFX_HEAP`, `LUCIVY_MAX_PENDING_FINALIZE`,
 `LUCIVY_MAX_INFLIGHT_DOCS`, `LUCIVY_MAX_MERGED_DOCS`, `LUCIVY_MERGE_CONCURRENCY`,
 `LUCIVY_SCHEDULER_THREADS`, `LUCIVY_VERBOSE`) bound indexing memory and
 parallelism; the defaults are the measured ones on native and on wasm32.
+`LUCIVY_HIGHLIGHT_SPAN_CAP` (4 M native, 1 M wasm) bounds the spans a search
+records before it repeats itself for its top-k only, and
+`LUCIVY_MAX_MATCHES_PER_SEGMENT` (4 M native, 50 k wasm) bounds what one
+segment resolves for one query — a one-letter query over a large corpus
+otherwise produces tens of millions of both; past the cap it is truncated on
+that segment rather than killing the process.
 
 ## How it works
 

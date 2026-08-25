@@ -1,0 +1,3 @@
+# Workspace MSRV (see rust-version in Cargo.toml). Lints that would push code
+# onto a newer std API (as_chunks, ...) are gated on it.
+msrv = "1.85"

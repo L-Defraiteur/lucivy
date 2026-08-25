@@ -224,12 +224,12 @@ impl SuffixContainsQuery {
         Ok((cache, doc_freq))
     }
 
-    /// Attach pre-scanned cache (from prescan()).
     /// Returns true if no prescan cache has been set yet.
     pub fn prescan_cache_is_none(&self) -> bool {
         self.prescan_cache.is_none()
     }
 
+    /// Installs per-segment results produced by `prescan()`, keyed by (cache key, segment id).
     pub fn with_prescan_cache(mut self, cache: HashMap<(String, SegmentId), CachedSfxResult>) -> Self {
         self.prescan_cache = Some(cache);
         self

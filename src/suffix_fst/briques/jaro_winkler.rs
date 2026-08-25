@@ -18,17 +18,17 @@
 //! multi-byte character counts once.
 
 /// How a fuzzy candidate window is validated.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum FuzzyMetric {
     /// A substring within the query's edit distance (default).
+    #[default]
     Levenshtein,
     /// A substring whose Jaro-Winkler similarity to the query is at least
     /// `min_similarity` (0.0..=1.0; 0.9 is the usual threshold).
-    JaroWinkler { min_similarity: f32 },
-}
-
-impl Default for FuzzyMetric {
-    fn default() -> Self { FuzzyMetric::Levenshtein }
+    JaroWinkler {
+        /// Similarity threshold a window must reach to be accepted.
+        min_similarity: f32,
+    },
 }
 
 /// Jaro similarity of two char slices, in `0.0..=1.0`.

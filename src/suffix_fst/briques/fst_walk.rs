@@ -31,11 +31,17 @@ use crate::suffix_fst::file_v3::SfxFileReaderV3;
 /// A candidate from a direct FST lookup.
 #[derive(Debug, Clone)]
 pub struct FstCandidateV3 {
+    /// Token ordinal, the key into the posting lists.
     pub raw_ordinal: u64,
+    /// Suffix start index: byte offset of the matched suffix within the token.
     pub sti: u16,
+    /// Byte length of the token itself (content + trailing separators, overlap excluded).
     pub own_len: u16,
+    /// Number of trailing separator bytes included in `own_len`.
     pub sep_len: u8,
+    /// Bytes of the next token appended to this key beyond `own_len`.
     pub overlap_len: u8,
+    /// True if this token is the first chunk of its word.
     pub is_word_start: bool,
     /// Which FST partition this candidate was found in.
     /// 0x00 = SI0 (token start), 0x01 = SI>0 (suffix), 0x02 = word-stripped.
@@ -43,6 +49,7 @@ pub struct FstCandidateV3 {
 }
 
 impl FstCandidateV3 {
+    /// Content byte length: `own_len` minus the trailing separators.
     pub fn content_len(&self) -> u16 {
         self.own_len - self.sep_len as u16
     }
@@ -94,7 +101,9 @@ pub struct TokenChainV3 {
     /// `__init` produces 3.4 million chains over 50k documents. Cloning the list
     /// per chain was the bulk of `build_chains_from_splits`.
     pub ordinals: Vec<std::sync::Arc<Vec<u64>>>,
+    /// Suffix start index of the first token: 0 when the match begins at a token start.
     pub first_sti: u16,
+    /// Query bytes consumed by the whole chain.
     pub total_query_consumed: usize,
     /// Query bytes consumed by the LAST position of the chain.
     ///
@@ -309,6 +318,8 @@ pub fn falling_walk_v3(
     candidates
 }
 
+/// Sort splits by `query_consumed` then `overlap_validated`, both descending,
+/// and drop duplicates sharing the same (ordinal, sti, query_consumed).
 pub fn sort_and_dedup_splits(candidates: &mut Vec<SplitCandidateV3>) {
     candidates.sort_by(|a, b| {
         b.query_consumed.cmp(&a.query_consumed)
@@ -491,14 +502,14 @@ fn build_chains_from_splits(
             let rem = &query_lower[rem_off..];
 
             super::profile::bump(|c| &c.n_bcfs_fst_reqs, 1);
-            if !fst_memo.contains_key(&rem_off) {
+            if let std::collections::hash_map::Entry::Vacant(slot) = fst_memo.entry(rem_off) {
                 super::profile::bump(|c| &c.n_bcfs_fst_calls, 1);
                 let cands = fst_candidates_v3(reader, rem, true, strict_sep_for_candidates);
                 let mut unique_ords: Vec<u64> =
                     cands.iter().map(|c| c.raw_ordinal).collect();
                 unique_ords.sort_unstable();
                 unique_ords.dedup();
-                fst_memo.insert(rem_off, std::sync::Arc::new(unique_ords));
+                slot.insert(std::sync::Arc::new(unique_ords));
             }
             let hit = &fst_memo[&rem_off];
             if !hit.is_empty() {
@@ -520,7 +531,7 @@ fn build_chains_from_splits(
             }
 
             super::profile::bump(|c| &c.n_bcfs_walk_reqs, 1);
-            if !walk_memo.contains_key(&rem_off) {
+            if let std::collections::hash_map::Entry::Vacant(slot) = walk_memo.entry(rem_off) {
                 super::profile::bump(|c| &c.n_bcfs_walk_calls, 1);
                 let mut sub_splits = walk_fn(reader, rem);
                 // Past the head, the query continues at the START of the next
@@ -558,7 +569,7 @@ fn build_chains_from_splits(
                     ords.dedup();
                     groups.push((std::sync::Arc::new(ords), best.query_consumed, best.remainder_start));
                 }
-                walk_memo.insert(rem_off, std::sync::Arc::new(groups));
+                slot.insert(std::sync::Arc::new(groups));
             }
             let groups = std::sync::Arc::clone(&walk_memo[&rem_off]);
             for (ords, consumed, rem_start) in groups.iter() {
@@ -769,17 +780,15 @@ pub fn sibling_chain_dfs(
                         total_query_consumed: query_lower.len(),
                         last_consumed: rem.len(),
                     });
-                } else if rem.starts_with(next_content) {
+                } else if let Some(new_rem) = rem.strip_prefix(next_content) {
                     if let Some(tid) = trace_id {
                         super::trace::trace_event(tid, "PARTIAL", &[
                             ("ord", &next_ord),
                             ("content", &next_content),
                             ("consumed", &next_content.len()),
-                            ("new_rem", &&rem[next_content.len()..]),
+                            ("new_rem", &new_rem),
                         ]);
                     }
-                    let consumed = next_content.len();
-                    let new_rem = &rem[consumed..];
                     let mut c = chain.clone();
                     c.push(std::sync::Arc::new(vec![next_ord as u64]));
                     stack.push((next_ord as u64, new_rem, c, depth + 1));

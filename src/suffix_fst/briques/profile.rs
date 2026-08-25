@@ -18,40 +18,59 @@ use std::sync::OnceLock;
 /// Wall-clock nanoseconds per stage.
 #[derive(Default)]
 pub struct Counters {
+    /// Single-token stage: FST candidates plus their direct posting resolution.
     pub ns_single: AtomicU64,
     /// `verify_literal`: window rebuild + contains check per match.
     pub ns_verify: AtomicU64,
+    /// Chunk pipeline: falling walk building cross-chunk chains.
     pub ns_chunk_walk: AtomicU64,
+    /// Chunk pipeline: sibling-table DFS supplementing the chains.
     pub ns_chunk_sibling: AtomicU64,
+    /// Chunk pipeline: resolving chains against postings (posmap or strict).
     pub ns_chunk_resolve: AtomicU64,
+    /// Strict mode: short-head occurrences anchored on their second token.
     pub ns_chunk_anchored: AtomicU64,
+    /// Word pipeline: falling walk building cross-word chains.
     pub ns_word_walk: AtomicU64,
+    /// Word pipeline: sibling-table DFS supplementing the chains.
     pub ns_word_sibling: AtomicU64,
+    /// Word pipeline: resolving chains through WordSfxPost / posmap / bytemap.
     pub ns_word_resolve: AtomicU64,
 
     /// Fuzzy pipeline stages.
+    /// Time resolving the query's trigrams (or pieces) into hits.
     pub ns_fz_resolve: AtomicU64,
+    /// Time grouping trigram hits into per-document candidate chains.
     pub ns_fz_chains: AtomicU64,
+    /// Time rebuilding the text window around each candidate chain.
     pub ns_fz_window: AtomicU64,
+    /// Time in the edit-distance / Jaro-Winkler alignment over the windows.
     pub ns_fz_dp: AtomicU64,
+    /// Trigram hits produced by the resolve stage.
     pub n_fz_hits: AtomicU64,
+    /// Candidate chains (hit regions) built from the trigram hits.
     pub n_fz_regions: AtomicU64,
+    /// Windows actually aligned (candidate chains above the pigeonhole threshold).
     pub n_fz_windows: AtomicU64,
+    /// Windows rejected by the alignment as holding no occurrence.
     pub n_fz_rejected: AtomicU64,
     /// Postings decoded by resolve_doc while rebuilding windows.
     pub n_fz_window_postings: AtomicU64,
     /// Windows whose derived offsets disagreed with the posting (value boundary).
     pub n_fz_window_derive_miss: AtomicU64,
+    /// Distinct (doc, byte range) fuzzy occurrences reported after verification.
     pub n_fz_spans: AtomicU64,
 
     /// Relaxed literal: segments where the chunk chains were skipped because
     /// `.termtexts` proves no word exceeds the suffix cap, vs segments that
     /// still had to walk them (long word present, or stat unknown).
     pub n_relaxed_chunk_skipped: AtomicU64,
+    /// Relaxed-literal segments where the chunk chains still had to be walked.
     pub n_relaxed_chunk_walked: AtomicU64,
 
     /// Chains handed to each resolve stage.
     pub n_chunk_chains: AtomicU64,
+    /// Word chains (0x02 partition) handed to the word resolve stage.
     pub n_word_chains: AtomicU64,
     /// Postings materialised per chain position in the word resolve.
     pub n_word_entries: AtomicU64,
@@ -59,6 +78,7 @@ pub struct Counters {
     pub n_word_pairs: AtomicU64,
     /// Calls to `intermediates_are_pure_sep`, and positions it scanned.
     pub n_puresep_calls: AtomicU64,
+    /// Positions scanned across all `intermediates_are_pure_sep` calls.
     pub n_puresep_positions: AtomicU64,
 
     /// Splits fed to `build_chains_from_splits`, and the FST work they trigger.
@@ -68,22 +88,30 @@ pub struct Counters {
     /// `_reqs` = times a remainder was needed; `_calls` = times it was actually
     /// computed. The gap is what the memo saves.
     pub n_bcfs_fst_reqs: AtomicU64,
+    /// FST lookups of a remainder actually computed (memo misses).
     pub n_bcfs_fst_calls: AtomicU64,
+    /// Falling walks of a remainder requested.
     pub n_bcfs_walk_reqs: AtomicU64,
+    /// Falling walks of a remainder actually computed (memo misses).
     pub n_bcfs_walk_calls: AtomicU64,
+    /// Distinct remainders seen, i.e. the size of the FST memo.
     pub n_bcfs_distinct_rem: AtomicU64,
 
     /// Postings materialised by the chunk chain resolve, and the pair iterations
     /// they feed.
     pub n_chain_first: AtomicU64,
+    /// Postings materialised for the non-head positions of chunk chains.
     pub n_chain_entries: AtomicU64,
+    /// Pair iterations performed while joining consecutive chunk-chain positions.
     pub n_chain_pairs: AtomicU64,
 
     /// posmap-driven chain resolution: lookups made, survivors whose posting was
     /// then fetched, and survivors whose posting did NOT hold the position posmap
     /// claimed (must stay 0 — anything else means posmap and sfxpost disagree).
     pub n_posmap_lookups: AtomicU64,
+    /// posmap survivors whose posting was then fetched.
     pub n_posmap_survivors: AtomicU64,
+    /// posmap survivors whose posting did not hold the claimed position (must stay 0).
     pub n_posmap_mismatch: AtomicU64,
     /// (doc, position) written twice with different ordinals at index time.
     pub n_posmap_collisions: AtomicU64,
@@ -91,17 +119,23 @@ pub struct Counters {
     pub n_wordmap_collisions: AtomicU64,
     /// Word-pipeline resolution through word_pos_map/posmap.
     pub n_wordmap_lookups: AtomicU64,
+    /// Word-map survivors whose posting was then fetched.
     pub n_wordmap_survivors: AtomicU64,
+    /// Word-map survivors whose posting did not hold the claimed position (must stay 0).
     pub n_wordmap_mismatch: AtomicU64,
 
     /// Chunk chains before and after structural dedup, and matches emitted.
     pub n_chains_raw: AtomicU64,
+    /// Chunk chains remaining after structural dedup.
     pub n_chains_distinct: AtomicU64,
+    /// Matches returned by `find_literal_v3`, summed over segments.
     pub n_matches_emitted: AtomicU64,
     /// Strict posmap resolution: chains with a shared first list, groups formed,
     /// and dispatch-map inserts made for them.
     pub n_chains_shared: AtomicU64,
+    /// Groups formed from chains sharing their first posting list.
     pub n_groups_shared: AtomicU64,
+    /// Entries inserted into the dispatch map for those groups.
     pub n_dispatch_inserts: AtomicU64,
 }
 
@@ -137,6 +171,7 @@ pub struct Timer {
 }
 
 impl Timer {
+    /// Start a timer; a no-op holding `None` when profiling is off.
     #[inline]
     pub fn start() -> Timer {
         #[cfg(not(target_arch = "wasm32"))]

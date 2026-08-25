@@ -311,10 +311,6 @@ impl Dag {
 
     // -- internal accessors used by the runtime --
 
-    pub(crate) fn nodes_mut(&mut self) -> &mut Vec<DagNodeEntry> {
-        &mut self.nodes
-    }
-
     pub(crate) fn node_name(&self, idx: usize) -> &str {
         &self.nodes[idx].name
     }

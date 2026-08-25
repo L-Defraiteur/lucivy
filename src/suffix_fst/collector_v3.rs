@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use crate::tokenizer::equal_chunk::{is_content_char, segment_and_chunk, ChunkMeta, DEFAULT_MAX_TOKEN};
+use crate::tokenizer::equal_chunk::{is_content_char, segment_and_chunk, DEFAULT_MAX_TOKEN};
 
 /// Default overlap size in bytes.
 pub const DEFAULT_OVERLAP: usize = 2;
@@ -25,39 +25,7 @@ pub fn extract_content_prefix(text: &str) -> String {
         .collect()
 }
 
-/// A captured token with its metadata and overlap info.
-#[derive(Debug, Clone)]
-struct TokenCaptureV3 {
-    /// Interned ordinal of the EXTENDED token (content + sep + overlap).
-    intern_id: u32,
-    /// Byte offset in original text where this chunk starts.
-    offset_from: usize,
-    /// Byte offset in original text where this chunk ends (exclusive, before overlap).
-    offset_to: usize,
-    /// Chunk metadata from the tokenizer.
-    meta: ChunkMeta,
-    /// Number of overlap bytes appended from the next token.
-    overlap_len: u8,
-    /// own_len = content_len + sep_len (the chunk's own bytes, without overlap).
-    own_len: u16,
-}
-
-/// Collected data for one value within a document.
-struct ValueDataV3 {
-    ti_start: u32,
-    num_tokens: u32,
-}
-
-/// V3 collector: gathers tokens with overlap for SFX indexation.
-///
-/// Usage:
-/// ```ignore
-/// let mut collector = SfxCollectorV3::new();
-/// collector.begin_doc();
-/// collector.add_value("pthread_mutex_lock");
-/// collector.end_doc();
-/// let data = collector.into_data();
-/// ```
+/// Estimated bytes of one chunk posting:
 /// `(doc_id, token_index, byte_from, byte_to)` plus the amortised cost of the
 /// per-ordinal `Vec` that holds it.
 const CHUNK_POSTING_BYTES: usize = 16 + 8;
@@ -72,6 +40,17 @@ const INTERNED_TOKEN_OVERHEAD: usize = 24 + 24 + 24 + 16;
 /// One word-stripped entry beyond its two strings.
 const WORD_STRIPPED_OVERHEAD: usize = 24 + 24 + 32;
 
+/// V3 collector: interns overlap-extended chunks and word-stripped entries with
+/// their postings and sibling pairs, one document at a time, for the SFX build.
+///
+/// Usage:
+/// ```ignore
+/// let mut collector = SfxCollectorV3::new();
+/// collector.begin_doc();
+/// collector.add_value("pthread_mutex_lock");
+/// collector.end_doc();
+/// let data = collector.into_data();
+/// ```
 pub struct SfxCollectorV3 {
     // Interned extended tokens: each unique extended text stored once.
     token_intern: HashMap<String, u32>,
@@ -94,7 +73,6 @@ pub struct SfxCollectorV3 {
     sibling_pairs: Vec<(u32, u32, u16)>,
 
     // Per-document state
-    doc_values: Vec<ValueDataV3>,
     doc_active: bool,
     current_doc_id: u32,
     current_value_ti_start: u32,
@@ -123,10 +101,15 @@ pub struct SfxCollectorV3 {
 /// Metadata stored per unique extended token.
 #[derive(Debug, Clone)]
 pub struct TokenMetaV3 {
+    /// Bytes owned by the chunk itself: content + trailing separators, no overlap.
     pub own_len: u16,
+    /// Trailing separator bytes included in `own_len`.
     pub sep_len: u8,
+    /// Bytes borrowed from the next token and appended to the extended text.
     pub overlap_len: u8,
+    /// True when this chunk is the first chunk of a word.
     pub is_word_start: bool,
+    /// Index of the word this chunk belongs to, within its value (from the tokenizer).
     pub word_id: usize,
     /// Content-aware overlap for stripped partition: first 2 bytes of the next
     /// CONTENT token (skipping pure-sep tokens). None if same as normal overlap
@@ -144,6 +127,8 @@ impl Default for SfxCollectorV3 {
 }
 
 impl SfxCollectorV3 {
+    /// Empty collector with default chunk size and overlap; the minimum suffix
+    /// length comes from `LUCIVY_MIN_SUFFIX_LEN` (default 1).
     pub fn new() -> Self {
         let min = std::env::var("LUCIVY_MIN_SUFFIX_LEN")
             .ok()
@@ -157,7 +142,6 @@ impl SfxCollectorV3 {
             word_stripped_entries: Vec::new(),
             word_postings: Vec::new(),
             sibling_pairs: Vec::new(), // (intern_a, intern_b, content_len_a)
-            doc_values: Vec::new(),
             doc_active: false,
             current_doc_id: 0,
             current_value_ti_start: 0,
@@ -168,6 +152,7 @@ impl SfxCollectorV3 {
         }
     }
 
+    /// Collector with explicit chunk size, overlap bytes and minimum suffix length.
     pub fn with_config(max_token: usize, overlap: usize, min_suffix_len: usize) -> Self {
         Self {
             mem_estimate: 0,
@@ -178,8 +163,8 @@ impl SfxCollectorV3 {
         }
     }
 
+    /// Start a new document: resets per-document state and the token index.
     pub fn begin_doc(&mut self) {
-        self.doc_values.clear();
         self.doc_active = true;
         self.current_value_ti_start = 0;
     }
@@ -191,10 +176,6 @@ impl SfxCollectorV3 {
     pub fn add_value(&mut self, text: &str) {
         let chunks = segment_and_chunk(text, self.max_token);
         if chunks.is_empty() {
-            self.doc_values.push(ValueDataV3 {
-                ti_start: self.current_value_ti_start,
-                num_tokens: 0,
-            });
             self.current_value_ti_start += 1; // value boundary gap
             return;
         }
@@ -243,10 +224,8 @@ impl SfxCollectorV3 {
                     }
                     // Pure-sep chunk — skip
                 }
-                if co.is_empty() && overlap_bytes.is_empty() {
-                    None // No content overlap available
-                } else if co == overlap_bytes {
-                    None // Same as normal overlap, no need for separate
+                if co == overlap_bytes {
+                    None // Same as the normal overlap (or both empty): nothing separate to keep
                 } else {
                     Some(co)
                 }
@@ -308,7 +287,7 @@ impl SfxCollectorV3 {
         // content_len = destination chunk's content length (used by DFS)
         for w in chunk_intern_ids.windows(2) {
             let meta = &self.token_meta[w[1] as usize];
-            let content_len = (meta.own_len as u16).saturating_sub(meta.sep_len as u16);
+            let content_len = meta.own_len.saturating_sub(meta.sep_len as u16);
             self.mem_estimate += SIBLING_PAIR_BYTES;
             self.sibling_pairs.push((w[0], w[1], content_len));
         }
@@ -498,19 +477,18 @@ impl SfxCollectorV3 {
             }
         }
 
-        self.doc_values.push(ValueDataV3 {
-            ti_start: self.current_value_ti_start,
-            num_tokens: num_chunks as u32,
-        });
         // Advance: tokens + 1 boundary gap between values
         self.current_value_ti_start += num_chunks as u32 + 1;
     }
 
+    /// Close the current document and advance to the next doc_id.
     pub fn end_doc(&mut self) {
         self.doc_active = false;
         self.current_doc_id += 1;
     }
 
+    /// Close a document that received no values; still consumes a doc_id so
+    /// that doc ids stay aligned with the segment's.
     pub fn end_doc_empty(&mut self) {
         self.doc_active = false;
         self.current_doc_id += 1;
@@ -646,13 +624,7 @@ impl SfxCollectorV3 {
 
         let mut ws_processed: std::collections::HashSet<u32> = std::collections::HashSet::new();
         // Deferred: word postings collected after ordinal assignment (need final_ord)
-        struct DeferredWordPostings {
-            intern_ord: u32,
-            first_chunk_intern: u32,
-            last_chunk_intern: u32,
-            num_chunks: u32,
-        }
-        let mut deferred_ws: Vec<DeferredWordPostings> = Vec::new();
+        let mut deferred_ws: Vec<u32> = Vec::new();
 
         for ws in &self.word_stripped_entries {
             if !ws_processed.insert(ws.first_intern_ord) { continue; }
@@ -671,12 +643,7 @@ impl SfxCollectorV3 {
                 is_word_stripped: true,
             });
 
-            deferred_ws.push(DeferredWordPostings {
-                intern_ord: ws.first_intern_ord,
-                first_chunk_intern: ws.first_chunk_intern_ord,
-                last_chunk_intern: ws.last_chunk_intern_ord,
-                num_chunks: ws.num_chunks,
-            });
+            deferred_ws.push(ws.first_intern_ord);
         }
 
         // Assign final ordinals in BTreeMap (alphabetical) order
@@ -688,7 +655,7 @@ impl SfxCollectorV3 {
         let mut own_lens: Vec<u16> = Vec::new();
         let mut final_ord = 0u32;
 
-        for (_map_key, entry) in &ord_map {
+        for entry in ord_map.values() {
             tokens_vec.push(entry.text.clone());
             let mut p = entry.postings.clone();
             let before_dedup = p.len();
@@ -721,9 +688,9 @@ impl SfxCollectorV3 {
         // word_pos_map is fed from the same loop, so it is the exact inverse of
         // word_sfxpost by construction.
         let mut word_pos_map = crate::suffix_fst::word_pos_map::WordPosMapWriter::new();
-        for dws in &deferred_ws {
-            let ws_final_ord = intern_to_final[dws.intern_ord as usize];
-            let io = dws.intern_ord as usize;
+        for &intern_ord in &deferred_ws {
+            let ws_final_ord = intern_to_final[intern_ord as usize];
+            let io = intern_ord as usize;
             if io < self.word_postings.len() {
                 for &(doc_id, first_ti, last_ti, bf, bt) in &self.word_postings[io] {
                     word_sfxpost_writer.add(ws_final_ord, WordPostingEntry {
@@ -836,7 +803,9 @@ pub struct SfxCollectorDataV3 {
     pub own_lens: Vec<u16>,
     /// Number of unique final ordinals (= content_postings.len()).
     pub num_content_ords: usize,
+    /// Number of documents the collector saw (`end_doc` calls).
     pub num_docs: u32,
+    /// Shortest suffix (in bytes) the FST builder should index for SI>0.
     pub min_suffix_len: usize,
     /// Word-level stripped entries for partition 0x02.
     pub word_stripped: Vec<WordStrippedEntry>,

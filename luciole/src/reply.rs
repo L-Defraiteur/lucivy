@@ -704,20 +704,20 @@ mod tests {
         let called2 = called.clone();
 
         let (tx, rx) = reply::<u32>();
-        let edge_before = crate::wait_graph::len();
-        rx.set_pipe_edge(crate::wait_graph::register(
+        // Other tests register edges concurrently: check this edge, not the count.
+        let edge = crate::wait_graph::register(
             crate::wait_graph::WaiterKind::Thread("test".into()),
             "test_pipe",
-        ));
+        );
+        rx.set_pipe_edge(edge);
         rx.set_pipe(move |_| { called2.store(true, Ordering::Release); });
-        let edge_during = crate::wait_graph::len();
-        assert_eq!(edge_during, edge_before + 1);
+        assert!(crate::wait_graph::contains(edge));
 
         drop(tx);  // Sender dies without sending
 
         assert!(!called.load(Ordering::Acquire), "callback should not fire");
         // Edge should be cleaned up by Reply::drop
-        assert_eq!(crate::wait_graph::len(), edge_before);
+        assert!(!crate::wait_graph::contains(edge));
     }
 
     #[test]

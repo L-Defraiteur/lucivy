@@ -1982,7 +1982,58 @@ impl ShardedHandle {
         self.search_internal(query_config, top_k, highlight_sink, Some(Arc::new(allowed_ids)))
     }
 
+    /// One search, plus the highlight repair pass when the sink overflowed.
+    ///
+    /// Scorers record the spans of every document they verify, not only of
+    /// the top-k returned — a one-letter query over a large corpus produces
+    /// tens of millions of spans, which is what took a 4 GB WebAssembly heap
+    /// down. The sink is capped (`LUCIVY_HIGHLIGHT_SPAN_CAP`); when it reports
+    /// an overflow the search runs again restricted to the ids it just
+    /// returned, into the emptied sink. Scores and ordering are those of the
+    /// first pass; the second one only fills the highlights, and the filter
+    /// makes it verify — and record — those documents alone.
     fn search_internal(
+        &self,
+        query_config: &QueryConfig,
+        top_k: usize,
+        highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
+        filter: Option<Arc<HashSet<u64>>>,
+    ) -> Result<Vec<ShardedSearchResult>, String> {
+        let results = self.search_once(query_config, top_k, highlight_sink.clone(), filter.clone())?;
+        let Some(sink) = highlight_sink else { return Ok(results) };
+        if !sink.overflowed() || results.is_empty() {
+            return Ok(results);
+        }
+        // With a caller-supplied filter the second pass would be the same
+        // search: the cap is smaller than the top-k's own spans. Leave the
+        // partial highlights rather than loop.
+        if filter.is_some() {
+            if std::env::var("LUCIVY_VERBOSE").is_ok() {
+                eprintln!("[search] highlight sink overflowed on a filtered search; highlights incomplete");
+            }
+            return Ok(results);
+        }
+        let mut ids: HashSet<u64> = HashSet::with_capacity(results.len());
+        for r in &results {
+            let shard = self.shard(r.shard_id).ok_or_else(|| format!("shard {} not found", r.shard_id))?;
+            let searcher = shard.reader.searcher();
+            let seg_reader = searcher.segment_reader(r.doc_address.segment_ord);
+            let column = seg_reader.fast_fields().u64(NODE_ID_FIELD)
+                .map_err(|e| format!("node_id fast field: {e}"))?;
+            if let Some(id) = column.first(r.doc_address.doc_id) {
+                ids.insert(id);
+            }
+        }
+        if std::env::var("LUCIVY_VERBOSE").is_ok() {
+            eprintln!("[search] highlight sink overflowed ({} spans); repairing for {} documents",
+                sink.span_count(), ids.len());
+        }
+        sink.clear();
+        let _ = self.search_once(query_config, top_k, Some(sink), Some(Arc::new(ids)))?;
+        Ok(results)
+    }
+
+    fn search_once(
         &self,
         query_config: &QueryConfig,
         top_k: usize,

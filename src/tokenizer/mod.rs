@@ -124,6 +124,8 @@ mod regex_tokenizer;
 mod remove_long;
 mod simple_tokenizer;
 pub(crate) mod camel_case_split;
+/// Tokenizer that splits text into words with their trailing separators, then
+/// cuts each into roughly equal-sized chunks (the SFX index's token unit).
 pub mod equal_chunk;
 mod split_compound_words;
 mod stop_word_filter;

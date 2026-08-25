@@ -221,13 +221,8 @@ impl<'a, 'f> Streamer<'a> for Union<'f> {
         if let Some(slot) = self.cur_slot.take() {
             self.heap.refill(slot);
         }
-        let slot = match self.heap.pop() {
-            None => return None,
-            Some(slot) => {
-                self.cur_slot = Some(slot);
-                self.cur_slot.as_ref().unwrap()
-            }
-        };
+        self.cur_slot = Some(self.heap.pop()?);
+        let slot = self.cur_slot.as_ref().unwrap();
         self.outs.clear();
         self.outs.push(slot.indexed_value());
         while let Some(slot2) = self.heap.pop_if_equal(slot.input()) {
@@ -349,7 +344,7 @@ impl<'a, 'f> Streamer<'a> for SymmetricDifference<'f> {
             }
             // This key is in the symmetric difference if and only if it
             // appears in an odd number of sets.
-            if popped.is_multiple_of(2) {
+            if popped % 2 == 0 {
                 self.heap.refill(slot);
             } else {
                 self.cur_slot = Some(slot);

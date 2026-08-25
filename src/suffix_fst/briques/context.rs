@@ -24,10 +24,13 @@ use crate::suffix_fst::word_pos_map::WordPosMapReader;
 /// silently degrading.
 pub struct BriquesContext<'a> {
     // ── Required (always present) ────────────────────────────────
+    /// The segment's suffix FST (`.sfx`) with its decoded parent entries.
     pub reader: &'a SfxFileReaderV3,
+    /// Resolves a token ordinal to its posting list (doc, position).
     pub resolver: &'a dyn PostingResolver,
 
     // ── Query params ─────────────────────────────────────────────
+    /// When set, only matches in these documents are kept.
     pub filter_docs: Option<&'a HashSet<DocId>>,
 
     /// When true, briques dump detailed traces to stderr.
@@ -39,10 +42,15 @@ pub struct BriquesContext<'a> {
 
     // ── Optional index files ─────────────────────────────────────
     // Loaded from segment reader. None = file not present in this segment.
+    /// `.posmap`: (doc, position) → token ordinal, the reverse of the posting index.
     pub posmap: Option<PosMapReader<'a>>,
+    /// `.bytemap`: per-ordinal 256-bit bitmap of the byte values present in the token text.
     pub bytemap: Option<ByteBitmapReader<'a>>,
+    /// `.word_sfxpost`: postings of the word-stripped partition (0x02).
     pub word_sfxpost: Option<WordSfxPostReader<'a>>,
+    /// `.sibling_v3`: for each token ordinal, the ordinals that follow it in the text.
     pub sibling_v3: Option<SiblingTableReader<'a>>,
+    /// `.termtexts`: token ordinal → token text, with segment-level word stats.
     pub termtexts: Option<TermTextsReaderV3<'a>>,
     /// Inverse of word_sfxpost: word-stripped ordinal starting at (doc, pos).
     /// None on segments written before the map carried ordinals; the word
@@ -53,22 +61,27 @@ pub struct BriquesContext<'a> {
 impl<'a> BriquesContext<'a> {
     // ── Require methods (panic if missing) ───────────────────────
 
+    /// The posmap reader; panics if `.posmap` was not loaded for this segment.
     pub fn require_posmap(&self) -> &PosMapReader<'a> {
         self.posmap.as_ref().expect("posmap required but not loaded — check index config")
     }
 
+    /// The bytemap reader; panics if `.bytemap` was not loaded for this segment.
     pub fn require_bytemap(&self) -> &ByteBitmapReader<'a> {
         self.bytemap.as_ref().expect("bytemap required but not loaded — check index config")
     }
 
+    /// The word-stripped postings reader; panics if `.word_sfxpost` was not loaded.
     pub fn require_word_sfxpost(&self) -> &WordSfxPostReader<'a> {
         self.word_sfxpost.as_ref().expect("word_sfxpost required but not loaded — check index config")
     }
 
+    /// The sibling table reader; panics if `.sibling_v3` was not loaded.
     pub fn require_sibling_v3(&self) -> &SiblingTableReader<'a> {
         self.sibling_v3.as_ref().expect("sibling_v3 required but not loaded — check index config")
     }
 
+    /// The term texts reader; panics if `.termtexts` was not loaded.
     pub fn require_termtexts(&self) -> &TermTextsReaderV3<'a> {
         self.termtexts.as_ref().expect("termtexts required but not loaded — check index config")
     }
@@ -91,7 +104,7 @@ impl<'a> BriquesContext<'a> {
     /// in-word occurrence and the relaxed literal can skip the chunk chains.
     /// Missing file or pre-STATS file → true (pessimistic).
     pub fn may_have_long_words(&self) -> bool {
-        self.termtexts.as_ref().map_or(true, |t| t.may_have_long_words())
+        self.termtexts.as_ref().is_none_or(|t| t.may_have_long_words())
     }
 
     /// True if sibling-based chain building is available.
@@ -101,6 +114,7 @@ impl<'a> BriquesContext<'a> {
 
     // ── Trace helpers (no-op when trace_id is None) ──────────────
 
+    /// Push a labelled event with key/value data to the query trace, if tracing is on.
     pub fn trace(&self, label: &str, data: &[(&str, &dyn std::fmt::Display)]) {
         if let Some(tid) = self.trace_id {
             super::trace::trace_event(tid, label, data);
@@ -114,12 +128,14 @@ impl<'a> BriquesContext<'a> {
         }
     }
 
+    /// Open a nested trace section (increases depth), if tracing is on.
     pub fn trace_enter(&self, label: &str) {
         if let Some(tid) = self.trace_id {
             super::trace::trace_enter(tid, label);
         }
     }
 
+    /// Close the current trace section opened by `trace_enter`, if tracing is on.
     pub fn trace_exit(&self) {
         if let Some(tid) = self.trace_id {
             super::trace::trace_exit(tid);

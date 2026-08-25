@@ -20,6 +20,7 @@ const VERSION: u8 = 3;
 
 /// Section IDs for the .sfx v3 file.
 pub const SECTION_FST: u16 = 0x01;
+/// Section holding the OutputTable bytes (multi-parent records, v3 encoding).
 pub const SECTION_PARENTS: u16 = 0x02;
 // ─── Writer ────────────────────────────────────────────────────────────────
 
@@ -30,6 +31,7 @@ pub struct SfxFileWriterV3 {
 }
 
 impl SfxFileWriterV3 {
+    /// Writer over already-built FST bytes and OutputTable (parent list) bytes.
     pub fn new(fst_data: Vec<u8>, parent_list_data: Vec<u8>) -> Self {
         Self { fst_data, parent_list_data }
     }
@@ -48,8 +50,11 @@ impl SfxFileWriterV3 {
 /// Error type for SFX v3 file operations.
 #[derive(Debug)]
 pub enum SfxV3Error {
+    /// The bytes are not a valid `SFX3` section file (bad magic or truncated header).
     InvalidFormat,
+    /// A required section is absent; carries the section's name.
     MissingSection(&'static str),
+    /// The FST section could not be opened; carries the underlying error message.
     FstError(String),
 }
 

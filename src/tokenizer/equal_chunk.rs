@@ -50,6 +50,7 @@ impl Default for EqualChunkTokenizer {
 }
 
 impl EqualChunkTokenizer {
+    /// Creates a tokenizer whose chunks are at most `max_token` bytes; panics if `max_token < 2`.
     pub fn with_max_token(max_token: usize) -> Self {
         assert!(max_token >= 2, "max_token must be at least 2");
         Self {
@@ -69,9 +70,8 @@ impl EqualChunkTokenizer {
 pub fn segment_and_chunk(text: &str, max_token: usize) -> Vec<(String, ChunkMeta)> {
     let segments = split_into_segments(text);
     let mut result = Vec::new();
-    let mut word_id = 0usize;
 
-    for seg in &segments {
+    for (word_id, seg) in segments.iter().enumerate() {
         let chunks = equal_chunks(seg.content, seg.sep, max_token);
         for (i, (chunk_str, content_len, sep_len)) in chunks.into_iter().enumerate() {
             result.push((
@@ -84,7 +84,6 @@ pub fn segment_and_chunk(text: &str, max_token: usize) -> Vec<(String, ChunkMeta
                 },
             ));
         }
-        word_id += 1;
     }
 
     result
@@ -111,7 +110,6 @@ fn split_into_segments(text: &str) -> Vec<Segment<'_>> {
     let mut segments = Vec::new();
     let bytes = text.as_bytes();
     let len = bytes.len();
-    let mut pos = 0;
 
     // Skip leading separators (they become a segment with empty content)
     let first_content = text.char_indices()
@@ -125,7 +123,7 @@ fn split_into_segments(text: &str) -> Vec<Segment<'_>> {
             sep: &text[..first_content],
         });
     }
-    pos = first_content;
+    let mut pos = first_content;
 
     while pos < len {
         // Find end of content
@@ -173,7 +171,7 @@ fn equal_chunks(content: &str, sep: &str, max_token: usize) -> Vec<(String, usiz
         )];
     }
 
-    let num_chunks = (total + max_token - 1) / max_token;
+    let num_chunks = total.div_ceil(max_token);
     let base = total / num_chunks;
     let extra = total % num_chunks;
 
@@ -223,6 +221,8 @@ fn equal_chunks(content: &str, sep: &str, max_token: usize) -> Vec<(String, usiz
 
 // ─── TokenStream implementation ────────────────────────────────────────────
 
+/// Token stream yielded by [`EqualChunkTokenizer`]: emits the pre-computed chunks
+/// one by one and records each chunk's [`ChunkMeta`] back into the tokenizer.
 pub struct EqualChunkStream<'a> {
     chunks: Vec<(String, ChunkMeta)>,
     index: usize,

@@ -48,6 +48,7 @@ impl Default for WordPosMapWriter {
 }
 
 impl WordPosMapWriter {
+    /// Empty map with no documents.
     pub fn new() -> Self {
         Self { docs: Vec::new(), overflow: false }
     }
@@ -135,6 +136,8 @@ pub struct WordPosMapReader<'a> {
 }
 
 impl<'a> WordPosMapReader<'a> {
+    /// Open a `WMP2` file over borrowed bytes; `None` on a different magic
+    /// (including the older per-document counter format) or a truncated header.
     pub fn open(bytes: &'a [u8]) -> Option<Self> {
         if bytes.len() < 8 { return None; }
         if &bytes[0..4] != b"WMP2" { return None; }
@@ -148,7 +151,6 @@ impl<'a> WordPosMapReader<'a> {
         })
     }
 
-    /// Get word_id at (doc_id, position). Returns None if out of range.
     /// Number of documents covered.
     pub fn num_docs(&self) -> u32 { self.num_docs }
 
@@ -162,6 +164,9 @@ impl<'a> WordPosMapReader<'a> {
         ((end - start) / 4) as u32
     }
 
+    /// Raw slot at (doc_id, position): `ordinal | span << 24`, or `None` when
+    /// out of range or when no word starts there. See `word_start_at` for the
+    /// decoded form.
     pub fn word_at(&self, doc_id: u32, position: u32) -> Option<u32> {
         if doc_id >= self.num_docs { return None; }
         let start = self.read_offset(doc_id) as usize;
@@ -194,6 +199,7 @@ pub struct WordPosMapIndex {
 }
 
 impl WordPosMapIndex {
+    /// Registry entry with an empty writer.
     pub fn new() -> Self {
         Self { writer: WordPosMapWriter::new() }
     }

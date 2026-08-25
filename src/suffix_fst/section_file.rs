@@ -113,8 +113,11 @@ pub struct SectionFileReader<'a> {
 /// A section descriptor from the section table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SectionDesc {
+    /// Caller-defined section identifier.
     pub id: u16,
+    /// Byte offset of the payload, relative to the start of the data area.
     pub offset: u32,
+    /// Payload length in bytes.
     pub length: u32,
 }
 
@@ -225,6 +228,8 @@ pub fn detect_sfx_version_of(slice: &crate::directory::FileSlice) -> Option<u8> 
     slice.slice(0..n).read_bytes().ok().and_then(|b| detect_sfx_version(b.as_ref()))
 }
 
+/// SFX file version (1, 2 or 3) from the magic in the first four bytes;
+/// `None` if the bytes are too short or the magic is unknown.
 pub fn detect_sfx_version(bytes: &[u8]) -> Option<u8> {
     if bytes.len() < 4 {
         return None;

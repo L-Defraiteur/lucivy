@@ -62,7 +62,7 @@ pub fn acquire() -> MergePermit {
     }
 }
 
-/// Merges currently holding a permit (diagnostics).
+/// Merges currently holding a permit (diagnostics; `indexer::active_merges`).
 pub fn active() -> usize {
     ACTIVE.load(Ordering::Acquire)
 }

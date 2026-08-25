@@ -15,6 +15,39 @@ use crate::query::posting_resolver::{PostingEntry, PostingResolver};
 
 use super::fst_walk::{FstCandidateV3, TokenChainV3};
 
+/// Upper bound on the matches one segment resolves for one query
+/// (`LUCIVY_MAX_MATCHES_PER_SEGMENT`). A one-letter query touches nearly every
+/// token: 10 000 kernel files hold tens of millions of `t`, and a `MatchV3`
+/// is 40 bytes — the vectors alone outgrew a 4 GB WebAssembly heap with the
+/// index resident. Past the cap the resolver returns what it has, the query
+/// is truncated (counted in [`truncations`]) instead of aborting the process.
+pub fn max_matches_per_segment() -> usize {
+    static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        let default = if cfg!(target_arch = "wasm32") { 50_000 } else { 4_000_000 };
+        std::env::var("LUCIVY_MAX_MATCHES_PER_SEGMENT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(default)
+    })
+}
+
+static TRUNCATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many segment resolutions hit [`max_matches_per_segment`] so far.
+pub fn truncations() -> u64 {
+    TRUNCATIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cold]
+fn note_truncated(len: usize) {
+    TRUNCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if std::env::var("LUCIVY_VERBOSE").is_ok() {
+        eprintln!("[v3] match cap reached ({len}); query truncated on this segment");
+    }
+}
+
 // ─── Types ─────────────────────────────────────────────────────────────────
 
 /// Unified match result from posting resolution.
@@ -100,6 +133,7 @@ pub fn resolve_single_v3(
 
         for e in &entries {
             let byte_from = e.byte_from + cand.sti as u32;
+            if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
             results.push(MatchV3 {
                 doc_id: e.doc_id,
                 position: e.position,
@@ -156,6 +190,7 @@ pub fn resolve_single_word_v3(
             let content_end = e.byte_to;
             if cand.sti as u32 >= (e.byte_to - e.byte_from) { continue; }
             let byte_from = e.byte_from + cand.sti as u32;
+            if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
             results.push(MatchV3 {
                 doc_id: e.doc_id,
                 position: e.first_position,
@@ -292,6 +327,7 @@ pub fn resolve_word_chains_v3(
         if chain.ordinals.len() == 1 {
             for e in first_entries.iter().filter(|e| head_ok(e)) {
                 let bf = e.byte_from + chain.first_sti as u32;
+                if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
                 results.push(MatchV3 {
                     doc_id: e.doc_id,
                     position: e.first_position,
@@ -405,6 +441,7 @@ pub fn resolve_word_chains_v3(
 
         // Emit matches
         for &(doc_id, last_pos, byte_from, token_end, last_bf, last_ord, position) in &active {
+            if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
             results.push(MatchV3 {
                 doc_id,
                 position,
@@ -518,6 +555,7 @@ pub fn resolve_word_chains_v3_wordmap(
         if chain.ordinals.len() == 1 {
             for e in first_entries.iter().filter(|e| head_ok(e)) {
                 let bf = e.byte_from + chain.first_sti as u32;
+                if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
                 results.push(MatchV3 {
                     doc_id: e.doc_id,
                     position: e.first_position,
@@ -616,6 +654,7 @@ pub fn resolve_word_chains_v3_wordmap(
                     }
                 }
             };
+            if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
             results.push(MatchV3 {
                 doc_id,
                 position,
@@ -704,6 +743,7 @@ fn resolve_chains_posmap_grouped(
             if chain.ordinals.len() == 1 {
                 for e in first_entries.iter() {
                     let bf = e.byte_from + chain.first_sti as u32;
+                    if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
                     results.push(MatchV3 {
                         doc_id: e.doc_id,
                         position: e.position,
@@ -794,6 +834,7 @@ fn resolve_chains_posmap_grouped(
                     super::profile::bump(|c| &c.n_posmap_mismatch, 1);
                     continue;
                 };
+                if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
                 results.push(MatchV3 {
                     doc_id,
                     position,
@@ -966,6 +1007,7 @@ pub fn resolve_word_chains_v3_wordmap_grouped(
                         None => { super::profile::bump(|c| &c.n_wordmap_mismatch, 1); continue; }
                     }
                 };
+                if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
                 results.push(MatchV3 {
                     doc_id,
                     position,
@@ -1073,6 +1115,7 @@ fn resolve_chains_impl(
         if chain.ordinals.len() == 1 {
             for e in first_entries {
                 let bf = e.byte_from + chain.first_sti as u32;
+                if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
                 results.push(MatchV3 {
                     doc_id: e.doc_id,
                     position: e.position,
@@ -1189,7 +1232,7 @@ fn resolve_chains_impl(
                                 true // directly adjacent, always OK
                             } else {
                                 intermediates_are_pure_sep(
-                                    *posmap, *bytemap,
+                                    posmap, bytemap,
                                     doc_id, prev_pos + 1, e.position,
                                 )
                             }
@@ -1227,6 +1270,7 @@ fn resolve_chains_impl(
             } else {
                 (token_end, last_bf)
             };
+            if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
             results.push(MatchV3 {
                 doc_id,
                 position,
@@ -1277,7 +1321,7 @@ fn intermediates_are_pure_sep(
             return false; // Can't verify → reject
         };
         // Check via ByteMap: if any content byte is present → not pure sep
-        if bytemap.bytes_in_ranges(ord as u32, CONTENT_RANGES) {
+        if bytemap.bytes_in_ranges(ord, CONTENT_RANGES) {
             return false;
         }
     }

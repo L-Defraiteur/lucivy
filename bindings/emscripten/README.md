@@ -1,4 +1,4 @@
-# lucivy-wasm 3.0.1
+# lucivy-wasm 3.0.2
 
 Fast BM25 full-text search for browsers — WASM build with **threading** (emscripten pthreads), OPFS persistence, and snapshot/delta sync support. Runs in a Web Worker.
 

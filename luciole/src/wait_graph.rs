@@ -116,6 +116,12 @@ pub fn len() -> usize {
     EDGES.lock().unwrap().len()
 }
 
+/// Whether the edge `id` is still registered (for diagnostics and tests:
+/// the count moves under concurrent waiters, an id does not).
+pub fn contains(id: u64) -> bool {
+    EDGES.lock().unwrap().iter().any(|e| e.id == id)
+}
+
 /// Dump the wait graph as a Mermaid diagram.
 pub fn dump_mermaid() -> String {
     let edges = EDGES.lock().unwrap();
@@ -211,12 +217,13 @@ mod tests {
 
     #[test]
     fn test_guard_auto_unregister() {
-        let before = len();
-        {
-            let _g = WaitGuard::new(WaiterKind::Thread("guard-test".into()), "test_wait");
-            assert_eq!(len(), before + 1);
-        }
-        assert_eq!(len(), before);
+        // Other tests register edges concurrently: check this edge, not the count.
+        let id = {
+            let g = WaitGuard::new(WaiterKind::Thread("guard-test".into()), "test_wait");
+            assert!(contains(g.edge_id));
+            g.edge_id
+        };
+        assert!(!contains(id));
     }
 
     #[test]

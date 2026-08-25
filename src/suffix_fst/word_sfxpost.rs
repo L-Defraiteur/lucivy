@@ -61,6 +61,7 @@ use super::varint::{read_varint_u32, write_varint};
 /// A single word-level posting entry.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct WordPostingEntry {
+    /// Segment-local document id.
     pub doc_id: u32,
     /// Token index of the first chunk of the word.
     pub first_position: u32,
@@ -120,23 +121,27 @@ fn decode_entry(data: &[u8], pos: &mut usize, st: &mut DeltaState) -> Option<Wor
 
 // ─── Writer ──────────────────────────────────────────────────────────────
 
+/// Accumulates word postings per ordinal and serializes them in `WSP3` layout.
 pub struct WordSfxPostWriter {
     entries: Vec<Vec<WordPostingEntry>>,
 }
 
 impl WordSfxPostWriter {
+    /// Writer with one (initially empty) posting list per ordinal.
     pub fn new(num_ordinals: usize) -> Self {
         Self {
             entries: vec![Vec::new(); num_ordinals],
         }
     }
 
+    /// Append a posting to `ordinal`; silently ignored if the ordinal is out of range.
     pub fn add(&mut self, ordinal: u32, entry: WordPostingEntry) {
         if (ordinal as usize) < self.entries.len() {
             self.entries[ordinal as usize].push(entry);
         }
     }
 
+    /// Sort and dedup every list, then serialize the whole file as `WSP3` bytes.
     pub fn finish(mut self) -> Vec<u8> {
         let num_ords = self.entries.len() as u32;
         // Sort and dedup each ordinal's entries
@@ -228,6 +233,7 @@ fn encode_block_into(
 
 // ─── Reader ──────────────────────────────────────────────────────────────
 
+/// Zero-copy reader over a `.word_sfxpost` file, in either `WSP2` or `WSP3` layout.
 pub struct WordSfxPostReader<'a> {
     data: &'a [u8],
     num_ordinals: u32,
@@ -237,6 +243,8 @@ pub struct WordSfxPostReader<'a> {
 }
 
 impl<'a> WordSfxPostReader<'a> {
+    /// Open a `WSP2` or `WSP3` file over borrowed bytes; `None` if the magic
+    /// is unknown or the header is truncated.
     pub fn open(data: &'a [u8]) -> Option<Self> {
         if data.len() < 8 { return None; }
         let v3 = match &data[0..4] {
@@ -250,6 +258,7 @@ impl<'a> WordSfxPostReader<'a> {
         Some(Self { data, num_ordinals, v3 })
     }
 
+    /// Number of ordinals the offset table covers (including empty ones).
     pub fn num_ordinals(&self) -> u32 {
         self.num_ordinals
     }
@@ -402,6 +411,8 @@ impl<'a> WordSfxPostReader<'a> {
         }
     }
 
+    /// All entries of an ordinal, decoded into a `Vec`; empty for an unknown
+    /// or empty ordinal. Prefer `for_each_entry` when no list is needed.
     pub fn entries(&self, ordinal: u32) -> Vec<WordPostingEntry> {
         let Some((start, end)) = self.block_range(ordinal) else { return Vec::new() };
         if self.v3 {

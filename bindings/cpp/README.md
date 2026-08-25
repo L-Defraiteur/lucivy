@@ -2,7 +2,7 @@
 
 Fast BM25 full-text search for C++ — with substring matching, fuzzy search, regex, and highlights. Powered by Rust via CXX bridge.
 
-Version 3.0.1 — built on the Lucivy 3.0.1 engine (SFX v3 suffix index).
+Version 3.0.2 — built on the Lucivy 3.0.2 engine (SFX v3 suffix index).
 
 ## Build
 

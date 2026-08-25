@@ -62,11 +62,17 @@ const OVERLAP_MASK: u64 = (1 << OVERLAP_BITS) - 1;
 /// A parent entry with v3 metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParentEntryV3 {
+    /// Ordinal of the token this suffix belongs to (24 bits in the single-parent encoding).
     pub raw_ordinal: u64,
+    /// Suffix start index: byte offset of this suffix within the extended token.
     pub sti: u16,
+    /// Bytes owned by the token: content + trailing separators, no overlap.
     pub own_len: u16,
+    /// Trailing separator bytes included in `own_len`.
     pub sep_len: u8,
+    /// Bytes borrowed from the next token at the end of the extended text.
     pub overlap_len: u8,
+    /// True when the token is the first chunk of a word.
     pub is_word_start: bool,
 }
 
@@ -104,8 +110,13 @@ pub fn encode_multi_parent_v3(offset: u64) -> u64 {
 /// Decoded v3 parent reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParentRefV3 {
+    /// One parent, decoded inline from the 64-bit FST output.
     Single(ParentEntryV3),
-    Multi { offset: u64 },
+    /// Several parents, stored as a record in the OutputTable.
+    Multi {
+        /// Offset of the encoded parent list in the OutputTable.
+        offset: u64,
+    },
 }
 
 /// Decode a v3 u64 FST output value.
@@ -198,10 +209,13 @@ impl Default for SuffixFstBuilderV3 {
 }
 
 impl SuffixFstBuilderV3 {
+    /// Empty builder; the minimum suffix length comes from
+    /// `LUCIVY_MIN_SUFFIX_LEN` (default 1).
     pub fn new() -> Self {
         Self::with_min_suffix_len(default_min_suffix_len())
     }
 
+    /// Empty builder that stops generating SI>0 suffixes shorter than `min` bytes.
     pub fn with_min_suffix_len(min: usize) -> Self {
         Self {
             key_buf: Vec::new(),
@@ -540,6 +554,7 @@ impl SuffixFstBuilderV3 {
         Ok((fst_bytes, output_table.into_inner()))
     }
 
+    /// Number of distinct keys inserted into the FST by the last `build()`.
     pub fn num_terms(&self) -> usize {
         self.num_terms
     }

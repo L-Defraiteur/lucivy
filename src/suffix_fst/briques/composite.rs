@@ -507,14 +507,18 @@ pub fn find_multi_token_v3(
 /// A single trigram hit in a document.
 #[derive(Debug, Clone)]
 pub struct TrigramHit {
+    /// Index of the n-gram (or exact piece) within the query's n-gram list.
     pub tri_idx: usize,
+    /// Document containing the hit.
     pub doc_id: DocId,
     /// First chunk position of the token holding the hit.
     pub position: u32,
     /// Last chunk position: equal to `position` for a chunk hit, the word's
     /// last chunk for a hit in the word-stripped partition.
     pub last_position: u32,
+    /// Start byte offset of the hit in the original text.
     pub byte_from: u32,
+    /// End byte offset (exclusive) of the hit in the original text.
     pub byte_to: u32,
 }
 
@@ -665,7 +669,7 @@ fn resolve_pieces(
             let b = *bounds.last().unwrap();
             if b - a < MIN_PIECE { return; }
             let c = acc_cost + piece_cost(a, b);
-            if best.as_ref().map_or(true, |(bc, _)| c < *bc) {
+            if best.as_ref().is_none_or(|(bc, _)| c < *bc) {
                 let mut p = acc.clone(); p.push((a, b));
                 *best = Some((c, p));
             }
@@ -726,15 +730,18 @@ fn resolve_pieces(
 /// A chain of adjacent trigram hits in a document.
 #[derive(Debug, Clone)]
 pub struct TrigramChain {
+    /// Document containing the chain.
     pub doc_id: DocId,
     /// Trigram indices in chain order (matching query order).
     pub trigram_indices: Vec<usize>,
     /// Byte range of the chain.
     pub byte_from: u32,
+    /// End byte offset (exclusive) of the chain.
     pub byte_to: u32,
     /// Token positions of the chain ends. Byte offsets alone are not enough to
     /// rebuild the source text: posmap is keyed by position, not by byte.
     pub first_pos: u32,
+    /// Token position of the last hit in the chain.
     pub last_pos: u32,
 }
 
@@ -744,8 +751,6 @@ pub struct TrigramChain {
 /// in raw space. Loose retrieval is safe here: `verify_candidates` re-checks every
 /// surviving document against the real text.
 const MAX_SEPARATOR_SLACK: i32 = 32;
-
-/// How many distinct chains we keep per document.
 
 /// Group each document's n-gram hits into regions — one chain per region.
 ///
@@ -780,7 +785,7 @@ pub fn build_trigram_chains(
 
     let mut chains = Vec::new();
     for (&doc_id, doc_hits) in &hits_by_doc {
-        let mut sorted: Vec<&TrigramHit> = doc_hits.iter().copied().collect();
+        let mut sorted: Vec<&TrigramHit> = doc_hits.to_vec();
         sorted.sort_by_key(|h| (h.byte_from, h.tri_idx));
 
         let mut i = 0;
@@ -856,26 +861,13 @@ fn within_edit_distance(query: &[u8], window: &[u8], d: usize, buf: &mut Vec<u32
     (0..=n).any(|j| buf[prev + j] <= d as u32)
 }
 
-/// Rebuild the source text around a trigram chain, bounded by the query length.
+/// Rebuild the source text around a trigram chain, bounded by the query length,
+/// also reporting whether the SOURCE text of the window was pure ASCII.
 ///
 /// Zero-copy on termtexts (`text()` returns `&str`) into a caller-owned buffer:
 /// the fuzzy candidate set can be large, so an allocation per token would be felt.
 /// Each token contributes `text[..own_len]` — the overlap tail belongs to the next
-/// token and would be duplicated.
-pub(super) fn rebuild_window(
-    ctx: &BriquesContext<'_>,
-    doc_id: DocId,
-    first_pos: u32,
-    last_pos: u32,
-    margin: u32,
-    strip_separators: bool,
-    out: &mut String,
-) -> bool {
-    rebuild_window_src(ctx, doc_id, first_pos, last_pos, margin, strip_separators, out).is_some()
-}
-
-/// `rebuild_window`, also reporting whether the SOURCE text of the window
-/// was pure ASCII. The window itself is lowercased, and folding can turn a
+/// token and would be duplicated. The window itself is lowercased, and folding can turn a
 /// non-ASCII char into ASCII (the Kelvin sign to `k`), so the window cannot
 /// answer that question about its source.
 pub(super) fn rebuild_window_src(

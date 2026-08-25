@@ -1,3 +1,57 @@
+Lucivy 3.0.2
+================================
+
+The CI is green again on current stable, the workspace really builds on its
+declared MSRV, and one real fix: a one-letter query could take the browser
+build down.
+
+- **Highlight sink bounded.** Scorers record the spans of every document they
+  verify, not only of the top-k returned, and each span cost a `String` plus
+  an allocation; typing `t` over 10 000 kernel files produced tens of
+  millions of them and killed the 4 GB WebAssembly heap (`memory allocation
+  of 25165824 bytes failed`). Spans are now 12 bytes (interned field, `u32`
+  offsets — the postings already carry them as `u32`), and the sink stops at
+  `LUCIVY_HIGHLIGHT_SPAN_CAP` (4 M native, 1 M wasm). When it overflows,
+  `ShardedHandle` repeats the search restricted to the ids it just returned
+  — scores and order come from the first pass, the second only fills the
+  top-k's highlights. The v3 weight also stopped handing the sink the spans
+  of documents the reader's alive bitset excludes, which is what makes a
+  filtered search (and that repair pass) record only what it returns.
+  `HighlightSink::{with_cap, overflowed, span_count, clear}` and
+  `query::highlight_span_cap()` are public. Test:
+  `lucivy_core/tests/test_highlight_cap.rs`.
+- **Matches bounded per segment.** The sink was only the first structure to
+  give: the v3 resolvers build a 40-byte `MatchV3` per occurrence, and the
+  browser index of that corpus has 48 segments. `LUCIVY_MAX_MATCHES_PER_SEGMENT`
+  (4 M native, 50 k wasm) stops a segment's resolution there; the query is
+  then truncated on that segment — counted by `briques::resolve::truncations()`,
+  traced under `LUCIVY_VERBOSE` — instead of the process dying. The 21-query
+  parity panel never reaches it (counts identical to native, 114 ms/query);
+  typing `t`, `te`, `tes`, `test` in the playground now answers in 857, 531,
+  86, 49 ms where 3.0.1 killed the worker. Surfacing the truncation in the
+  search reply is a follow-up (the reply is a bare array).
+
+- `cargo clippy --lib -- -D warnings` passes on Rust 1.98: 164 public items of
+  the v3 engine (`suffix_fst::briques`, `collector_v3`, `builder_v3`, the v3
+  query types) now carry doc comments; dead code left by the v3 migration is
+  removed (`TokenCaptureV3`, the write-only `doc_values`, unused SFP3
+  accessors); a few sites use the cheaper form the lint asked for (one hash
+  lookup instead of two in the FST walk memo, `strip_prefix`, `to_vec`).
+- `clippy.toml` pins `msrv = "1.85"` so style lints cannot push the code onto
+  newer std APIs — which caught `is_multiple_of` (Rust 1.87) in `lucivy-fst`.
+- The `zstd-compression` feature's test set compiles again (`IndexSettings`
+  gained `sfx_version` in 3.0.0).
+- CI: the C++ compile test includes `bindings/cpp/include` (the generated
+  header now pulls `lucivy/blob_backend.h`).
+- luciole: two tests asserted on the global wait-graph *count* and flaked
+  under the parallel test runner; they now check their own edge
+  (`wait_graph::contains(id)`, new).
+- Playground: dropped files and `?corpus=` had their own indexing loop and
+  skipped the "reload to serve" step above 2 GB that the git clone path had;
+  a 10 000-file archive was then served from the page that indexed it, and a
+  query typed during a benchmark could take the worker down. Both paths now
+  share `indexFiles`.
+
 Lucivy 3.0.1
 ================================
 

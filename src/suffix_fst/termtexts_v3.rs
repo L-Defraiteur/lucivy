@@ -34,9 +34,13 @@ pub const WORD_SUFFIX_CAP: u16 = 256;
 /// Per-ordinal metadata stored alongside the token text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TermMetaV3 {
+    /// Bytes owned by the token: content + trailing separators, no overlap.
     pub own_len: u16,
+    /// Trailing separator bytes included in `own_len`.
     pub sep_len: u8,
+    /// Bytes borrowed from the next token at the end of the extended text.
     pub overlap_len: u8,
+    /// True when the token is the first chunk of a word.
     pub is_word_start: bool,
     /// Which half of the model this ordinal belongs to: chunk (partitions
     /// 0x00/0x01, postings in `.sfxpost`, chunk-level coordinates) or
@@ -64,6 +68,7 @@ impl Default for TermTextsWriterV3 {
 }
 
 impl TermTextsWriterV3 {
+    /// Empty writer; ordinals are filled in by `add`.
     pub fn new() -> Self {
         Self {
             texts: Vec::new(),
@@ -258,7 +263,7 @@ impl<'a> TermTextsReaderV3<'a> {
     /// [`WORD_SUFFIX_CAP`] — i.e. that the word pipeline alone reaches every
     /// in-word occurrence. Unknown is treated as "maybe".
     pub fn may_have_long_words(&self) -> bool {
-        self.max_word_content_len.map_or(true, |m| m > WORD_SUFFIX_CAP)
+        self.max_word_content_len.is_none_or(|m| m > WORD_SUFFIX_CAP)
     }
 
     /// Number of terms.

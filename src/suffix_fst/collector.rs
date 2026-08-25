@@ -336,6 +336,8 @@ pub struct SfxCollectorData {
 }
 
 /// Encode a u32 as a variable-length integer (1-5 bytes, little-endian, MSB continuation).
+/// The production writers encode inline; this is the reference used by the tests.
+#[cfg(test)]
 pub(crate) fn encode_vint(mut val: u32, out: &mut Vec<u8>) {
     loop {
         let byte = (val & 0x7F) as u8;

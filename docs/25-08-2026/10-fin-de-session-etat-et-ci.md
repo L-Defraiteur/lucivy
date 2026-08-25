@@ -55,6 +55,78 @@ Dernier run analysé : `gh run view 32893577439`.
 Ces trois correctifs ne touchent pas le comportement : pas de 3.0.2 requis
 pour la CI seule.
 
+### Suite (nuit du 25 au 26) — corrigé, mesuré, 3.0.2 préparée
+
+Décision : republier en **3.0.2** une fois la CI GitHub verte (pas avant,
+pour ne pas devoir faire une .3). Fait dans cet ordre :
+
+- `index_meta.rs` : `..Default::default()` dans le test zstd, JSON attendu
+  avec `"sfx_version":3`.
+- clippy : les 6 lints des crates dérivées, puis — la CI n'était jamais
+  arrivée jusqu'au moteur — **194 erreurs dans `ld-lucivy`** : 164
+  `missing_docs` (écrites en quatre lots parallèles, tous les items publics
+  du v3), ~30 vraies lints (code mort `TokenCaptureV3`, `doc_values`
+  write-only, accesseurs SFP3 inutilisés ; `Entry::Vacant` au lieu de
+  `contains_key`+`insert` dans le memo du walk, `strip_prefix`, `to_vec`,
+  `is_none_or`, `div_ceil`…). Aucune ne coûte : vérifié au bench.
+- `clippy.toml` avec `msrv = "1.85"` : évite que clippy pousse vers des API
+  std trop récentes (`as_chunks` est 1.88) — et a révélé un
+  `is_multiple_of` (1.87) déjà présent dans `lucivy-fst`, remis en `% 2`.
+- luciole : `test_set_pipe_sender_dies` et `test_guard_auto_unregister`
+  comparaient le **compte global** du wait-graph et flakaient sous le runner
+  parallèle (2 échecs sur 6 runs) ; ils vérifient leur propre edge via
+  `wait_graph::contains(id)` (nouveau). 8/8 verts ensuite.
+- Playground : `importFiles` (drop et `?corpus=`) dupliquait la boucle
+  d'indexation sans le rechargement `?open=` au-delà de 2 Go ; la page qui
+  avait indexé servait, et une requête tapée pendant le panel a tué le worker
+  (`memory access out of bounds`, 3ᵉ passe). Passe maintenant par
+  `indexFiles` comme le clone git. Revérifié : rechargement, 3 passes + 11
+  requêtes concurrentes, 0 erreur.
+
+Mesures après les fixs, même protocole que §8 du knowledge dump :
+**natif** 10k compacté 79 → 79 ms/requête (1664 → 1667 ms), 21/21 comptes
+identiques, indexation 19,5 s, 2307 Mo ; **navigateur** indexation 40 s,
+préchargement 4,8 s, panel **117 / 115 ms** (médiane 65 / 63) contre
+124-133 hier, 21/21 comptes identiques. Fichiers :
+`/tmp/parity_native_10k_302.json`, `/tmp/parity_wasm_302c_{1,2}.json`.
+
+**Et un vrai bug trouvé par Lucie en tapant « t » puis « te », « tes »,
+« test »** dans le playground sur le corpus 10k : le worker mourait
+(`memory allocation of 25165824 bytes failed`, puis `unwind` sur toute
+requête suivante). Trois structures explosaient sur une lettre (des dizaines
+de millions d'occurrences) : le `HighlightSink` (un `String` par span !),
+les `Vec<MatchV3>` des resolvers (40 o/occurrence, × 48 segments), et par
+ricochet le cache de fichiers (une relecture qui échoue sous pression donne
+une tranche courte → `data[addr]` panique dans le FST). Corrigé en trois
+temps, chacun mesuré dans le navigateur :
+
+1. sink compact (champ interné, offsets `u32` : les postings les portent
+   déjà en `u32`) + plafond `LUCIVY_HIGHLIGHT_SPAN_CAP` (4 M / 1 M wasm) ;
+   au débordement `ShardedHandle::search_internal` relance la recherche
+   filtrée aux ids du top-k dans le sink vidé. Pour que ça serve, le
+   `SfxWeight` n'émet plus dans le sink les docs que le bitset alive du
+   lecteur exclut (`emit_highlights`) — avant, une recherche filtrée
+   enregistrait tout le segment. Test `test_highlight_cap.rs`.
+2. plafond `LUCIVY_MAX_MATCHES_PER_SEGMENT` dans les 11 sites de `push` de
+   `resolve.rs` (script), 250 k d'abord — encore trop avec 48 segments
+   (480 Mo) → 50 k en wasm, 4 M natif. Compteur `truncations()`, trace en
+   verbeux.
+3. résultat : « t » 857 ms, « te » 531, « tes » 86, « test » 49,
+   « kmalloc » 25, 0 erreur ; panel 21/21 identique, 114 ms, **aucune
+   troncature** sur les requêtes normales.
+
+Suites notées : signaler la troncature dans la réponse (tableau nu
+aujourd'hui) ; câbler `filter_docs` jusqu'aux resolvers v3 (toujours `None`
+dans `contains/fuzzy/regex_query_v3`) pour que la recherche filtrée ne
+*vérifie* que les docs autorisés.
+
+Local avant push : `cargo clippy --lib -- -D warnings` vert, `cargo test
+--lib` 1435 / all 1440 / minimal 1401 verts, luciole 169, lucivy-core vert
+sauf `bench_sharding` t01/t04 (connus), job C++ reproduit (build, g++,
+`All tests passed!`) dans `target/ci-cpp` — `target/release` contient 368
+fichiers **root** laissés par le build docker du wheel :
+`sudo chown -R lucied:lucied target/release`.
+
 ## 4. Comment publier (procédure validée ce soir)
 
 Détail dans `RELEASE.md` (réécrit ce soir). Résumé :

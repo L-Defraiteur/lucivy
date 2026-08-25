@@ -13,19 +13,25 @@ use std::fmt;
 /// A single trace event.
 #[derive(Debug, Clone)]
 pub struct TraceEvent {
+    /// Short name of the step or brique that emitted the event.
     pub label: String,
+    /// Key/value pairs attached to the event, already rendered as strings.
     pub data: Vec<(String, String)>,
+    /// Nesting level at emission time, used for indentation in [`QueryTrace::dump`].
     pub depth: usize,
 }
 
 /// Trace for one query execution.
 #[derive(Debug, Default)]
 pub struct QueryTrace {
+    /// Events in emission order.
     pub events: Vec<TraceEvent>,
+    /// Current nesting level; incremented by [`enter`](Self::enter), decremented by [`exit`](Self::exit).
     pub depth: usize,
 }
 
 impl QueryTrace {
+    /// Record one event at the current depth with its key/value data.
     pub fn push(&mut self, label: &str, data: &[(&str, &dyn fmt::Display)]) {
         self.events.push(TraceEvent {
             label: label.to_string(),
@@ -34,6 +40,7 @@ impl QueryTrace {
         });
     }
 
+    /// Record a scope-opening event and increase the nesting depth.
     pub fn enter(&mut self, label: &str) {
         self.events.push(TraceEvent {
             label: format!("→ {label}"),
@@ -43,6 +50,7 @@ impl QueryTrace {
         self.depth += 1;
     }
 
+    /// Close the innermost scope; a no-op at depth 0.
     pub fn exit(&mut self) {
         if self.depth > 0 { self.depth -= 1; }
     }

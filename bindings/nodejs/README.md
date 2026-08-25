@@ -1,4 +1,4 @@
-# lucivy 3.0.1
+# lucivy 3.0.2
 
 Fast BM25 full-text search for Node.js — with substring matching, fuzzy search, regex, and highlights. Powered by Rust via napi-rs.
 

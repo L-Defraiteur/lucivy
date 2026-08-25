@@ -683,14 +683,9 @@ impl<'f> FstRef<'f> {
         let mut node = self.root();
         let mut out = Output::zero();
         for &b in key {
-            node = match node.find_input(b) {
-                None => return None,
-                Some(i) => {
-                    let t = node.transition(i);
-                    out = out.cat(t.out);
-                    self.node(t.addr)
-                }
-            }
+            let t = node.transition(node.find_input(b)?);
+            out = out.cat(t.out);
+            node = self.node(t.addr);
         }
         if !node.is_final() {
             None

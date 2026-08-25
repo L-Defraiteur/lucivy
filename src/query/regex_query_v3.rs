@@ -29,6 +29,7 @@ pub struct RegexQueryV3 {
 }
 
 impl RegexQueryV3 {
+    /// Creates a regex query on `raw_field`; `anchor_start` restricts matches to the start of a token.
     pub fn new(raw_field: Field, pattern: String, anchor_start: bool) -> Self {
         Self {
             field: raw_field,
@@ -41,6 +42,7 @@ impl RegexQueryV3 {
         }
     }
 
+    /// Attaches a sink receiving match byte offsets, grouped under `field_name`.
     pub fn with_highlight_sink(mut self, sink: Arc<HighlightSink>, field_name: String) -> Self {
         self.highlight_sink = Some(sink);
         self.highlight_field_name = field_name;

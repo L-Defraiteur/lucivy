@@ -13,8 +13,11 @@ use super::resolve::MatchV3;
 
 /// Result of a DAG-based find_literal_v3 execution.
 pub struct LiteralDagResult {
+    /// Literal matches produced by the final merge node.
     pub matches: Vec<MatchV3>,
+    /// Per-node execution metrics and timings from the DAG runtime.
     pub dag_info: DagResult,
+    /// Edges of the executed DAG, for rendering.
     pub edges: Vec<DagEdge>,
     /// Edge annotations (only populated in explain mode).
     pub annotations: EdgeAnnotations,

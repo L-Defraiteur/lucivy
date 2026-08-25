@@ -1,6 +1,6 @@
 [package]
 name = "sparse-vector"
-version = "3.0.1"
+version = "3.0.2"
 edition = "2021"
 license = "MIT"
 authors = ["Luciform Research <luciedefraiteur@luciformresearch.com>"]
@@ -17,5 +17,5 @@ serde_json = "1"
 bincode = "1"
 ordered-float = "4"
 memmap2 = "0.9"
-lucistore = { version = "3.0.1", path = "../lucistore" }
-luciole = { version = "3.0.1", path = "../luciole" }
+lucistore = { version = "3.0.2", path = "../lucistore" }
+luciole = { version = "3.0.2", path = "../luciole" }

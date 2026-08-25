@@ -475,16 +475,6 @@ impl SfxPostReaderV2 {
             true
         });
     }
-
-    fn decode_doc_payload(&self, header: &OrdinalHeader, doc_idx: usize) -> Vec<(u32, u32, u32)> {
-        let (_, offset, count) = header.doc_at(doc_idx);
-        let mut entries = Vec::with_capacity(count as usize);
-        header.walk_payload(offset as usize, count as usize, |ti, bf, bt| {
-            entries.push((ti, bf, bt));
-            true
-        });
-        entries
-    }
 }
 
 /// View over one ordinal's block. Borrows; decodes fields on access.
@@ -633,10 +623,6 @@ impl<'a> OrdinalHeader<'a> {
 
     #[inline]
     fn doc_id(&self, i: usize) -> u32 { self.doc_at(i).0 }
-    #[inline]
-    fn payload_offset(&self, i: usize) -> u32 { self.doc_at(i).1 }
-    #[inline]
-    fn entry_count(&self, i: usize) -> u32 { self.doc_at(i).2 }
 
     #[inline]
     fn find_doc(&self, doc_id: u32) -> Option<usize> {

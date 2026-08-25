@@ -49,6 +49,16 @@ Les anciens types sont routés automatiquement via `build_query()` dans `lucivy_
 - `regex: bool` — pattern regex cross-token
 - `strict_separators: bool` — valider les séparateurs entre tokens
 
+### Bornes mémoire côté requête (3.0.2)
+
+- `LUCIVY_HIGHLIGHT_SPAN_CAP` (4 M natif / 1 M wasm) : le sink d'highlights
+  s'arrête là ; `ShardedHandle` relance alors la recherche filtrée aux ids du
+  top-k pour ne remplir que leurs spans (scores/ordre de la 1ʳᵉ passe).
+- `LUCIVY_MAX_MATCHES_PER_SEGMENT` (4 M natif / 50 k wasm) : plafond de
+  `MatchV3` par segment et par requête ; au-delà la requête est tronquée sur
+  ce segment (`briques::resolve::truncations()`), jamais d'abort. Le panel de
+  21 requêtes ne l'atteint pas ; « t » sur 10k fichiers kernel l'atteint.
+
 ## SFX Engine
 
 Suffix FST avec partitionnement SI=0/SI>0 pour le substring matching.

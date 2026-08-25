@@ -29,6 +29,7 @@ pub struct CachedPrescan {
 }
 
 impl CachedPrescan {
+    /// Wraps a prescan result; `doc_tf` must be sorted by doc id without duplicates (checked in debug builds).
     pub fn new(doc_tf: Vec<(DocId, u32)>, highlights: Vec<(DocId, usize, usize)>) -> Self {
         // The scorer built on this list is a DocSet: monotonic by contract.
         debug_assert!(
@@ -38,6 +39,7 @@ impl CachedPrescan {
         Self { doc_tf, highlights }
     }
 
+    /// A prescan result with no matching documents.
     pub fn empty() -> Self {
         Self { doc_tf: Vec::new(), highlights: Vec::new() }
     }
@@ -82,16 +84,26 @@ pub struct SfxWeight {
 }
 
 impl SfxWeight {
-    fn emit_highlights(&self, segment_id: SegmentId, highlights: &[(DocId, usize, usize)]) {
-        if let Some(ref sink) = self.highlight_sink {
-            for &(doc_id, byte_from, byte_to) in highlights {
-                sink.insert(
-                    segment_id,
-                    doc_id,
-                    &self.highlight_field_name,
-                    vec![[byte_from, byte_to]],
-                );
+    /// Hand the prescan's spans to the sink, one insert per document.
+    ///
+    /// Only the documents the reader holds alive: a filtered search (and the
+    /// highlight repair pass of `ShardedHandle`) narrows the reader's alive
+    /// bitset to the allowed ids, and the sink must not see the rest — that
+    /// is what keeps the repair pass under the span cap.
+    fn emit_highlights(&self, reader: &SegmentReader, highlights: &[(DocId, usize, usize)]) {
+        let Some(ref sink) = self.highlight_sink else { return };
+        let segment_id = reader.segment_id();
+        let alive = reader.alive_bitset();
+        let mut i = 0;
+        while i < highlights.len() {
+            let doc_id = highlights[i].0;
+            let mut j = i;
+            while j < highlights.len() && highlights[j].0 == doc_id { j += 1; }
+            if alive.is_none_or(|a| a.is_alive(doc_id)) {
+                let spans: Vec<[usize; 2]> = highlights[i..j].iter().map(|&(_, f, t)| [f, t]).collect();
+                sink.insert(segment_id, doc_id, &self.highlight_field_name, spans);
             }
+            i = j;
         }
     }
 
@@ -138,7 +150,7 @@ impl Weight for SfxWeight {
             if cached.doc_tf.is_empty() {
                 return Ok(Box::new(EmptyScorer));
             }
-            self.emit_highlights(segment_id, &cached.highlights);
+            self.emit_highlights(reader, &cached.highlights);
             return self.build_scorer(reader, boost, cached.doc_tf.clone());
         }
 
@@ -175,6 +187,7 @@ pub struct SfxScorer {
 }
 
 impl SfxScorer {
+    /// Builds a scorer over sorted `(doc_id, tf)` candidates with the given BM25 weight and field norms.
     pub fn new(
         candidates: Vec<(DocId, u32)>,
         bm25_weight: Bm25Weight,
@@ -183,6 +196,7 @@ impl SfxScorer {
         Self { candidates, cursor: 0, bm25_weight, fieldnorm_reader, coverage_boost: HashMap::new() }
     }
 
+    /// Attaches per-document fuzzy penalties, added to the BM25 score as `penalty * 1000`.
     pub fn with_coverage(mut self, coverage: Vec<(DocId, f32)>) -> Self {
         self.coverage_boost = coverage.into_iter().collect();
         self

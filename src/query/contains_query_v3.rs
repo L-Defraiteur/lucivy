@@ -204,6 +204,7 @@ impl ContainsQueryV3 {
         );
     }
 
+    /// Creates a plain substring query on `raw_field` with no anchoring, exact-match or separator constraints.
     pub fn new(raw_field: Field, query_text: String) -> Self {
         Self {
             field: raw_field,
@@ -218,18 +219,26 @@ impl ContainsQueryV3 {
         }
     }
 
+    /// Restricts matches to the start of a token (suffix index 0 only).
     pub fn with_anchor_start(mut self) -> Self { self.anchor_start = true; self }
+    /// Requires the match to cover whole token(s) rather than a substring of them.
     pub fn with_exact_match(mut self) -> Self { self.exact_match = true; self }
+    /// Accepted for API compatibility; v3 always matches across token boundaries.
     pub fn with_continuation(self, _enabled: bool) -> Self { self } // v3 always does cross-token
+    /// Sets whether separators between tokens must match those of the query text.
     pub fn with_strict_separators(mut self, enabled: bool) -> Self { self.strict_separators = enabled; self }
+    /// Attaches a sink receiving match byte offsets, grouped under `field_name`.
     pub fn with_highlight_sink(mut self, sink: Arc<HighlightSink>, field_name: String) -> Self {
         self.highlight_sink = Some(sink);
         self.highlight_field_name = field_name;
         self
     }
+    /// Overrides the doc frequency used for BM25 IDF with an aggregated value (cross-shard search).
     pub fn with_global_doc_freq(mut self, doc_freq: u64) -> Self { self.global_doc_freq = doc_freq; self }
 
+    /// The substring being searched for.
     pub fn query_text(&self) -> &str { &self.query_text }
+    /// Number of matching documents accumulated by prescans so far (or the value set via `with_global_doc_freq`).
     pub fn prescan_doc_freq(&self) -> u64 { self.global_doc_freq }
 
     /// Cache key: "field_id:query_text" — consistent across prescan, weight, scorer.

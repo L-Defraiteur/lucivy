@@ -257,6 +257,8 @@ pub const COMMON_INPUTS: [u8; 256] = [
     255, // 'ÿ'
 ];
 
+// A lookup table, one byte per line group: kept as byte chars for readability.
+#[allow(clippy::byte_char_slices)]
 pub const COMMON_INPUTS_INV: [u8; 256] = [
     b't', b'e', b'/', b'o', b'a', b's', b'r', b'i', b'p', b'c', b'n', b'w',
     b'.', b'h', b'l', b'm', b'-', b'd', b'u', b'0', b'1', b'2', b'g', b'=',

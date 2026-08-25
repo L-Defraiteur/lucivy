@@ -34,6 +34,7 @@ pub struct FuzzyQueryV3 {
 }
 
 impl FuzzyQueryV3 {
+    /// Creates a fuzzy substring query on `raw_field` allowing up to `distance` edits, validated by Levenshtein.
     pub fn new(raw_field: Field, query_text: String, distance: u8) -> Self {
         Self {
             field: raw_field,
@@ -48,17 +49,20 @@ impl FuzzyQueryV3 {
         }
     }
 
+    /// Selects how candidate windows are validated (Levenshtein by default, or Jaro-Winkler with a similarity floor).
     pub fn with_metric(mut self, metric: crate::suffix_fst::briques::jaro_winkler::FuzzyMetric) -> Self {
         self.metric = metric;
         self
     }
 
+    /// Attaches a sink receiving match byte offsets, grouped under `field_name`.
     pub fn with_highlight_sink(mut self, sink: Arc<HighlightSink>, field_name: String) -> Self {
         self.highlight_sink = Some(sink);
         self.highlight_field_name = field_name;
         self
     }
 
+    /// Sets whether separators between tokens must match those of the query text.
     pub fn with_strict_separators(mut self, enabled: bool) -> Self {
         self.strict_separators = enabled;
         self
