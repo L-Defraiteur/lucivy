@@ -398,8 +398,7 @@ impl LucivyHandle {
         for seg in searcher.segment_readers() {
             for (_, field) in &self.field_map {
                 if let Some(fs) = seg.sfx_file(*field) {
-                    let v = fs.read_bytes().ok()
-                        .and_then(|b| ld_lucivy::suffix_fst::section_file::detect_sfx_version(b.as_ref()));
+                    let v = ld_lucivy::suffix_fst::section_file::detect_sfx_version_of(fs);
                     out.push(v);
                 }
             }

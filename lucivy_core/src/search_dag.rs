@@ -226,8 +226,7 @@ impl Node for PrescanShardNode {
             for seg_reader in &self.segments {
                 // v3 segments: see above, prescanned by the query itself.
                 let is_v3 = seg_reader.sfx_file(param.field)
-                    .and_then(|d| d.read_bytes().ok())
-                    .and_then(|b| detect_sfx_version(b.as_ref()))
+                    .and_then(ld_lucivy::suffix_fst::section_file::detect_sfx_version_of)
                     == Some(3);
                 if is_v3 { continue; }
                 let (doc_tf, highlights) = run_regex_prescan(
@@ -364,8 +363,7 @@ impl Node for BuildWeightNode {
             .filter(|seg| {
                 let Some(field) = seg.sfx_fields().next() else { return false };
                 seg.sfx_file(field)
-                    .and_then(|d| d.read_bytes().ok())
-                    .and_then(|b| ld_lucivy::suffix_fst::section_file::detect_sfx_version(b.as_ref()))
+                    .and_then(ld_lucivy::suffix_fst::section_file::detect_sfx_version_of)
                     == Some(3)
             })
             .collect();

@@ -194,6 +194,41 @@ extern "C" {
 /// Base path for all lucivy indexes in the OPFS-backed filesystem.
 const OPFS_BASE: &str = "/opfs/lucivy";
 
+/// Whether `/opfs` is backed by OPFS (mounted) — false after `--no-opfs`
+/// or while the mount keeps failing.
+static OPFS_MOUNTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static OPFS_DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Mount `/opfs` on the OPFS backend, `attempts` times with a growing
+/// pause. Right after a reload the mount fails (ret=-20) while the
+/// previous worker's OPFS handles are still being released — sometimes for
+/// longer than the startup retries; every entry point calls this again, so
+/// an index opened a few seconds later still lands on OPFS.
+fn ensure_opfs_mounted(attempts: u32) -> bool {
+    if OPFS_MOUNTED.load(Ordering::Acquire) { return true; }
+    if OPFS_DISABLED.load(Ordering::Acquire) { return false; }
+    #[cfg(target_os = "emscripten")]
+    unsafe {
+        static BACKEND: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+        let backend = *BACKEND.get_or_init(|| wasmfs_create_opfs_backend());
+        let path = CString::new("/opfs").unwrap();
+        for attempt in 0..attempts {
+            let ret = wasmfs_create_directory(path.as_ptr(), 0o777, backend);
+            if ret == 0 {
+                let _ = std::fs::create_dir_all(OPFS_BASE);
+                OPFS_MOUNTED.store(true, Ordering::Release);
+                rlog!("[lucivy-wasm] OPFS mounted (attempt {})", attempt + 1);
+                return true;
+            }
+            rlog!("[lucivy-wasm] OPFS mount attempt {} failed (ret={ret})", attempt + 1);
+            std::thread::sleep(std::time::Duration::from_millis(200 * (attempt + 1) as u64));
+        }
+        false
+    }
+    #[cfg(not(target_os = "emscripten"))]
+    { let _ = attempts; false }
+}
+
 #[no_mangle]
 pub extern "C" fn __main_argc_argv(argc: i32, argv: *const *const c_char) -> i32 {
     std::env::set_var("LUCIVY_SCHEDULER_THREADS", "4");
@@ -225,36 +260,12 @@ pub extern "C" fn __main_argc_argv(argc: i32, argv: *const *const c_char) -> i32
         std::env::set_var("V3_PROFILE", "1");
     }
     if no_opfs {
+        OPFS_DISABLED.store(true, Ordering::Release);
         let _ = std::fs::create_dir_all(OPFS_BASE);
         rlog!("[lucivy-wasm] --no-opfs: in-memory filesystem");
-        return 0;
-    }
-
-    // Mount OPFS as filesystem backend (persistent across sessions).
-    #[cfg(target_os = "emscripten")]
-    {
-        unsafe {
-            let backend = wasmfs_create_opfs_backend();
-            let path = CString::new("/opfs").unwrap();
-            // Right after a page reload the mount can fail (ret=-20) while
-            // the previous worker's OPFS access handles are still being
-            // released; seen twice in a row, then a success with no change.
-            // A few short retries cover that window.
-            let mut ret = -1;
-            for attempt in 0..5 {
-                ret = wasmfs_create_directory(path.as_ptr(), 0o777, backend);
-                if ret == 0 { break; }
-                rlog!("[lucivy-wasm] OPFS mount attempt {} failed (ret={ret}), retrying", attempt + 1);
-                std::thread::sleep(std::time::Duration::from_millis(200 * (attempt + 1) as u64));
-            }
-            if ret == 0 {
-                // OPFS mounted successfully.
-                // Create the base directory for indexes.
-                let _ = std::fs::create_dir_all(OPFS_BASE);
-            } else {
-                rlog!("[lucivy-wasm] WARNING: OPFS mount failed (ret={ret}), using in-memory FS");
-            }
-        }
+    } else if !ensure_opfs_mounted(5) {
+        let _ = std::fs::create_dir_all(OPFS_BASE);
+        rlog!("[lucivy-wasm] WARNING: OPFS mount failed at startup, in-memory FS until an open/create retries it");
     }
 
     // `main` returning would let the runtime consider itself exited
@@ -357,6 +368,7 @@ pub unsafe extern "C" fn lucivy_create(
     config_json: *const c_char,
 ) -> *mut LucivyContext {
     ensure_panic_hook();
+    ensure_opfs_mounted(8);
     let path = str_from_ptr(path);
     let config_json = str_from_ptr(config_json);
 
@@ -405,6 +417,7 @@ pub unsafe extern "C" fn lucivy_create(
 #[no_mangle]
 pub unsafe extern "C" fn lucivy_open(path: *const c_char) -> *mut LucivyContext {
     ensure_panic_hook();
+    ensure_opfs_mounted(8);
     let path = str_from_ptr(path);
     let index_path = format!("{OPFS_BASE}/{path}");
 
@@ -431,6 +444,7 @@ pub unsafe extern "C" fn lucivy_open(path: *const c_char) -> *mut LucivyContext 
 #[no_mangle]
 pub unsafe extern "C" fn lucivy_open_begin(path: *const c_char) -> *mut LucivyContext {
     ensure_panic_hook();
+    ensure_opfs_mounted(8);
     let path = str_from_ptr(path);
     let index_path = format!("{OPFS_BASE}/{path}");
     // Create the shard_0 directory for file imports.
@@ -854,6 +868,7 @@ pub unsafe extern "C" fn lucivy_import_snapshot(
     path: *const c_char,
 ) -> *mut LucivyContext {
     ensure_panic_hook();
+    ensure_opfs_mounted(8);
     if data.is_null() || len == 0 { return std::ptr::null_mut(); }
     let path = str_from_ptr(path);
     let blob = std::slice::from_raw_parts(data, len);

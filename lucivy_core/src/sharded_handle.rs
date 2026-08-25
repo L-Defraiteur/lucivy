@@ -1987,8 +1987,7 @@ impl ShardedHandle {
                 .filter(|seg| {
                     let Some(field) = seg.sfx_fields().next() else { return false };
                     seg.sfx_file(field)
-                        .and_then(|d| d.read_bytes().ok())
-                        .and_then(|b| ld_lucivy::suffix_fst::section_file::detect_sfx_version(b.as_ref()))
+                        .and_then(ld_lucivy::suffix_fst::section_file::detect_sfx_version_of)
                         == Some(3)
                 })
                 .collect();

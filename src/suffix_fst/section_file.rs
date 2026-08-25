@@ -216,6 +216,15 @@ impl<'a> SectionFileReader<'a> {
 
 /// Detect the SFX file version from raw bytes by reading the magic.
 /// Returns None if the bytes are too short or unrecognized.
+/// Version of an SFX file from its first bytes only — a header read, not
+/// the whole file. On a lazy or remote handle `read_bytes()` of the slice
+/// materialises the entire sidecar (2.5 GB of FSTs across a 15k-file
+/// index) to look at four bytes; this reads four.
+pub fn detect_sfx_version_of(slice: &crate::directory::FileSlice) -> Option<u8> {
+    let n = common::HasLen::len(slice).min(4);
+    slice.slice(0..n).read_bytes().ok().and_then(|b| detect_sfx_version(b.as_ref()))
+}
+
 pub fn detect_sfx_version(bytes: &[u8]) -> Option<u8> {
     if bytes.len() < 4 {
         return None;

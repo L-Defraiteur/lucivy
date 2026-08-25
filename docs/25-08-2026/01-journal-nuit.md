@@ -306,3 +306,18 @@ croissant — le « top 10 » du JSON était les 10 pires hits (tf = 1, 1 span).
 Corrigé par `into_sorted_vec()`, comme `MergeResultsNode`. Preuve 3 000
 docs : top-10, scores et spans identiques. Validation 15 440 docs + suites
 + build WASM en cours.
+
+## ≈09:55 — profil navigateur : 99 % chargement, 1 % recherche
+
+Panel par lots (4 lots) sur l'index OPFS, `V3_PROFILE` : par lot de 45
+segments, marche FST `contains_v3` **26 ms**, chargement des sidecars
+1 577 ms, ouverture du résolveur (`.sfxpost`) 452 ms, lecture du `.sfx`
+avant la marche ~1 200 ms (somme CPU sur 4 threads, ~0,8-1 s de mur). La
+passe 2 coûtait encore 0,8-1,2 s par lot : la **détection de version**
+faisait `read_bytes()` du `.sfx` entier de chaque segment pour lire 4
+octets (DAG, poids, mon filtre) → `detect_sfx_version_of` lit 4 octets.
+Résultats par lots : mêmes 20 OK + ex æquo. Le montage OPFS a mis 9
+essais (~4 s) à réussir après le rechargement : le réessai à la demande
+(`ensure_opfs_mounted` dans open/create) est en place.
+Conclusion inchangée : le volume lu par requête est le levier (saut de
+shard, pagination), pas le CPU.
