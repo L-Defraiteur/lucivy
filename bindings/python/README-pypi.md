@@ -11,7 +11,7 @@ Fast BM25 full-text search for Python — with substring matching, fuzzy search,
 - **Index maintenance** — `compact`, `wait_merges_quiet`, `index_bytes`, `drop_index`
 - **Honest queries** — `query_warnings` says what the engine will really search before it runs
 - **`parse` query type** — boolean syntax (AND / OR / NOT, quotes, `+`/`-`, parentheses) over substring matching
-- **ACID blob storage** — index files stored in a transactional blob store with lazy loading, at the Rust level (see below)
+- **Bring your own storage** — `Index.create_with_blob_store(store, ...)`: index files in any Python object with `load` / `save` / `delete` / `exists` / `list` (a SQLite table, a Postgres `bytea` column, S3...), with lazy loading
 
 ### Still there from v2
 
@@ -318,19 +318,175 @@ all_results = sorted(results_a + results_b, key=lambda r: r.score, reverse=True)
 ### Properties
 
 ```python
-index.num_docs    # number of documents (property, no parentheses)
-index.num_shards  # number of shards (property)
-index.path        # index directory path (property; None for a served snapshot)
-index.schema      # list of {"name": "...", "type": "..."} dicts (property)
-index.close()     # flush + release writer lock
+index.num_docs         # number of documents (property, no parentheses)
+index.num_shards       # number of shards (property)
+index.path             # index directory path (property; None for a served snapshot or a blob store)
+index.blob_index_name  # name inside the blob store (property; None otherwise)
+index.schema           # list of {"name": "...", "type": "..."} dicts (property)
+index.close()          # flush + release writer lock
 ```
 
-### ACID blob storage
+### Bring your own storage (ACID)
 
-Index files can live in a transactional blob store instead of a directory:
-the `BlobStore` trait, `BlobShardStorage` and lazy loading of segment files
-on first read. This is a Rust-level API (`lucivy-core` / `lucistore`), used
-by the rag3db extension; it is not exposed in the Python binding yet.
+An index does not have to live in a directory. Hand it a *blob store* — any
+Python object with five methods — and every file the engine writes goes
+through it: a SQLite table, a Postgres `bytea` column, S3, anything. The
+store is the truth; a local mmap cache is rebuilt from it on every open, so
+one database holds the index and any process with a connection can open it.
+
+#### The protocol
+
+```python
+class MyBlobStore:
+    def load(self, index_name: str, file_name: str) -> bytes: ...
+        # Raise FileNotFoundError (or KeyError) when the blob does not exist.
+    def save(self, index_name: str, file_name: str, data: bytes) -> None: ...
+        # Create or overwrite.
+    def delete(self, index_name: str, file_name: str) -> None: ...
+        # No error when the blob does not exist.
+    def exists(self, index_name: str, file_name: str) -> bool: ...
+    def list(self, index_name: str) -> list[str]: ...
+        # Every file_name saved under index_name.
+
+    # Optional pair, only for lazy=True (blob_len is required by it):
+    def blob_len(self, index_name: str, file_name: str) -> int | None: ...
+        # Size in bytes without loading (LENGTH(data) in SQL, HEAD on S3).
+    def load_range(self, index_name: str, file_name: str, offset: int, length: int) -> bytes | None: ...
+        # A byte range without loading the whole blob (SUBSTR in SQL, a ranged GET).
+        # Return None if the backend cannot: the whole blob is loaded instead.
+```
+
+`load` and `load_range` may return `bytes`, `bytearray` or a `memoryview`.
+`index_name` is a namespace, not the name you passed: shard files are saved
+under `"Lucivy_<name>/shard_<i>"`, the root files (`_shard_config.json`,
+`_shard_stats.bin`) under `"<name>"` itself. Any other exception raised by
+a method is reported by the binding call that needed it (`commit()`,
+`search()`, the constructors...) as a `ValueError` carrying its text.
+
+#### Example: SQLite
+
+`save` and `delete` run inside a transaction; a commit that fails halfway
+leaves the previous, consistent set of blobs in the table.
+
+```python
+import sqlite3, threading
+
+class SqliteBlobStore:
+    def __init__(self, path):
+        self.lock = threading.Lock()
+        # Called from lucivy's threads, hence check_same_thread=False + the lock.
+        self.conn = sqlite3.connect(path, check_same_thread=False)
+        with self.conn:
+            self.conn.execute(
+                "CREATE TABLE IF NOT EXISTS blobs ("
+                " index_name TEXT NOT NULL, file_name TEXT NOT NULL, data BLOB NOT NULL,"
+                " PRIMARY KEY (index_name, file_name))")
+
+    def load(self, index_name, file_name):
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT data FROM blobs WHERE index_name = ? AND file_name = ?",
+                (index_name, file_name)).fetchone()
+        if row is None:
+            raise FileNotFoundError(f"{index_name}/{file_name}")
+        return row[0]
+
+    def save(self, index_name, file_name, data):
+        with self.lock, self.conn:   # a transaction
+            self.conn.execute(
+                "INSERT OR REPLACE INTO blobs (index_name, file_name, data) VALUES (?, ?, ?)",
+                (index_name, file_name, sqlite3.Binary(data)))
+
+    def delete(self, index_name, file_name):
+        with self.lock, self.conn:
+            self.conn.execute(
+                "DELETE FROM blobs WHERE index_name = ? AND file_name = ?",
+                (index_name, file_name))
+
+    def exists(self, index_name, file_name):
+        with self.lock:
+            return self.conn.execute(
+                "SELECT 1 FROM blobs WHERE index_name = ? AND file_name = ?",
+                (index_name, file_name)).fetchone() is not None
+
+    def list(self, index_name):
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT file_name FROM blobs WHERE index_name = ?", (index_name,)).fetchall()
+        return [r[0] for r in rows]
+
+    # Optional: lets lazy=True size and probe files without downloading them.
+    def blob_len(self, index_name, file_name):
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT length(data) FROM blobs WHERE index_name = ? AND file_name = ?",
+                (index_name, file_name)).fetchone()
+        return None if row is None else row[0]
+
+    def load_range(self, index_name, file_name, offset, length):
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT substr(data, ?, ?) FROM blobs WHERE index_name = ? AND file_name = ?",
+                (offset + 1, length, index_name, file_name)).fetchone()
+        return None if row is None else row[0]
+```
+
+#### The two constructors
+
+```python
+store = SqliteBlobStore("/data/blobs.sqlite")
+
+# Create: same fields / shards as Index.create, plus a name inside the store
+index = lucivy.Index.create_with_blob_store(store, "products", fields=[
+    {"name": "title", "type": "text", "stored": True},
+    {"name": "body",  "type": "text", "stored": True},
+], shards=2)
+index.add(1, title="Hello", body="World")
+index.commit()          # the blobs are in the table now
+index.close()
+
+# Open, from any process with the same database — nothing on disk needed
+index = lucivy.Index.open_with_blob_store(store, "products")
+
+# Lazy: pull files on first read instead of all at open. Requires blob_len
+# on the store (ValueError otherwise); with load_range as well, the small
+# probes made while opening a segment do not download anything, and a query
+# only pulls what it touches — the suffix FSTs are never downloaded whole.
+index = lucivy.Index.open_with_blob_store(store, "products", lazy=True)
+
+# Delete everything through the store (list + delete on every namespace)
+index.drop_index()
+```
+
+`index.path` is `None` on such an index (`index.blob_index_name` is the
+name). Snapshot and delta export read from a directory and raise
+`ValueError` here; `close()`, `compact()`, `wait_merges_quiet()`,
+`drop_index()` and everything else work as usual.
+
+#### The cache directory
+
+Reads are served from mmap files, so the engine keeps a local copy of what it
+uses under `cache_dir` (default: `lucivy-blob-cache` under the system temp
+dir). Each open gets a fresh subdirectory, removed when the index is
+released. It is disposable: delete it at any time between two opens, the
+blobs are the truth.
+
+#### The store runs on lucivy's threads
+
+The store's methods are **not** called from your thread. Commits, merges and
+searches run on the engine's own threads, and those threads call the store —
+taking the GIL for each call, released again when the call returns. That has
+three consequences:
+
+- the store must be **thread-safe**: a lock around a shared connection, or
+  one connection per thread (`threading.local()`);
+- SQLite specifically needs `check_same_thread=False`;
+- a store method must **never call back into the index** (no `search()`,
+  no `commit()` from inside `save()`): the index is waiting on that very
+  call.
+
+Call `close()` (or `drop_index()`) before the interpreter exits: releasing
+an index commits and closes it, which goes through the store one last time.
 
 ## License
 

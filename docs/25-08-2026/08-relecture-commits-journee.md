@@ -263,6 +263,12 @@ natif plat à 2-3×. La conclusion « le parallélisme ne paie pas » (04 §9-11
 propre erreur en route : une attente bloquante dans un handler d'acteur,
 que luciole refuse — corrigée par des permis coopératifs.
 
+**Puis les bindings natifs**, oubliés de la journée (Python/Node/C++
+n'avaient reçu que `query_warnings`) : API 3.0.0 alignée sur le cœur, et le
+stockage blob ACID exposé dans les trois — ce qui a fait tomber trois
+défauts du cœur (snapshot servi non protégé en écriture, interblocage lazy
+sans `blob_len`, message de finalisation perdu). Détail dans 05 §5.5 quater.
+
 Faits ensuite, à la demande de Lucie : `entry_count` est un `u32` de bout
 en bout (le lecteur ne plafonne plus à 65 535 ; V2 lit son `u16` et
 l'élargit), les en-têtes SFP3 se lisent en `read_varint_u32` (une valeur

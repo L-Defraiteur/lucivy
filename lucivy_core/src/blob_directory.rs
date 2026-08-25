@@ -263,7 +263,14 @@ impl<S: BlobStore> Drop for BlobWriter<S> {
 impl<S: BlobStore> Directory for BlobDirectory<S> {
     fn get_file_handle(&self, path: &Path) -> Result<Arc<dyn FileHandle>, OpenReadError> {
         let name = Self::file_name(path);
-        if let Some(len) = self.pending.lock().unwrap().get(&name).copied() {
+        // Bound first, then tested: written as `if let ... = self.pending
+        // .lock()...` the guard lived for the whole body, and `materialize`
+        // below locks `pending` again — a self-deadlock on the first segment
+        // open in lazy mode whenever the store cannot answer `blob_len`.
+        // `MemBlobStore` can, so the core test never met it; a Python store
+        // without it did.
+        let pending = self.pending.lock().unwrap().get(&name).copied();
+        if let Some(len) = pending {
             if let Some(len) = len {
                 // Known size: hand out a handle that downloads on first
                 // byte read. Opening a segment touches every file handle;

@@ -123,9 +123,14 @@ Crate séparé dans `luciole/`. WASM-safe.
 | C++ (cxx) | export+import+**servi en place** | export+apply (sharded) | oui — tests Rust dans `lib.rs` ; `rollback` = erreur honnête | oui |
 | Emscripten | import only | manquant | `memory_status`, `preload`, drapeaux (`--scheduler-threads`, `--max-merged-docs`, `--max-builds`, `--ram-index-max-mb`…) | non |
 
-Stockage blob ACID (`BlobStore`, `BlobShardStorage`, lazy) : API Rust
-(`lucivy-core` / `lucistore`), utilisée par rag3db via `lucivy_fts` — pas
-exposée dans Python/Node/C++ (dit dans leurs README).
+Stockage blob ACID (`BlobStore`, `BlobShardStorage`, lazy) : **exposé dans
+les trois bindings natifs** depuis le 25 août au soir — Python
+(`Index.create_with_blob_store` / `open_with_blob_store`, objet duck-typé,
+GIL relâché sur tout appel), Node (`BlobIndex`, classe asynchrone, callbacks
+via `ThreadsafeFunction`), C++ (`lucivy::BlobBackend`, classe abstraite dans
+`include/lucivy/blob_backend.h`). Règle : les méthodes du store tournent sur
+les threads du scheduler ; thread-safe, jamais de réentrance dans l'index,
+et le thread appelant ne doit pas tenir GIL / boucle d'événements.
 
 Emscripten manque : export_snapshot, export_sharded_delta, apply_sharded_delta.
 

@@ -7,24 +7,84 @@
 //! API mirrors the Node.js and Python bindings:
 //!   create/open/open_snapshot, add/add_many/delete/update, commit/close/drop_index,
 //!   search, num_docs/path/schema, compact/wait_merges_quiet/index_bytes
+//!
+//! Plus, specific to C++: bring-your-own storage. A C++ subclass of
+//! `lucivy::BlobBackend` (include/lucivy/blob_backend.h) becomes the
+//! `BlobStore` behind a `BlobShardStorage`, via
+//! `lucivy_create_with_blob_store` / `lucivy_open_with_blob_store`.
 
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::ops::Deref;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
+
+use cxx::{CxxVector, UniquePtr};
 
 use ld_lucivy::query::HighlightSink;
 use ld_lucivy::schema::{FieldType, Value as LucivyValue};
 use ld_lucivy::LucivyDocument;
 
+use lucistore::blob_store::BlobStore;
+use lucivy_core::blob_directory::BlobLoadMode;
 use lucivy_core::handle::NODE_ID_FIELD;
 use lucivy_core::query;
-use lucivy_core::sharded_handle::{ShardedHandle, ShardedSearchResult};
+use lucivy_core::sharded_handle::{BlobShardStorage, ShardedHandle, ShardedSearchResult};
 use lucivy_core::snapshot;
 
 // ── CXX bridge ─────────────────────────────────────────────────────────────
 
+// The factories of the in-memory backend are called from C++ (and from
+// this crate's tests), not from the library itself.
+#[allow(dead_code)]
 #[cxx::bridge(namespace = "lucivy")]
 mod ffi {
+    // ── Bring your own storage: C++ side ───────────────────────────────
+    //
+    // `BlobBackend` is the abstract class of include/lucivy/blob_backend.h.
+    // Every method is const and may be called concurrently from lucivy's
+    // scheduler threads. A C++ exception becomes the `Err` of the lucivy
+    // call that triggered the I/O; `load`/`load_range` answering `false`
+    // is "not found"/"unsupported", not an error.
+    unsafe extern "C++" {
+        include!("lucivy/blob_backend.h");
+        include!("lucivy/mem_blob_backend.h");
+
+        type BlobBackend;
+
+        fn load(
+            self: &BlobBackend,
+            index_name: &str,
+            file_name: &str,
+            out: Pin<&mut CxxVector<u8>>,
+        ) -> Result<bool>;
+        fn save(self: &BlobBackend, index_name: &str, file_name: &str, data: &[u8]) -> Result<()>;
+        fn remove(self: &BlobBackend, index_name: &str, file_name: &str) -> Result<()>;
+        fn exists(self: &BlobBackend, index_name: &str, file_name: &str) -> Result<bool>;
+        fn list(self: &BlobBackend, index_name: &str) -> Result<Vec<String>>;
+        fn blob_len(
+            self: &BlobBackend,
+            index_name: &str,
+            file_name: &str,
+            out: &mut u64,
+        ) -> Result<bool>;
+        fn load_range(
+            self: &BlobBackend,
+            index_name: &str,
+            file_name: &str,
+            offset: u64,
+            len: u64,
+            out: Pin<&mut CxxVector<u8>>,
+        ) -> Result<bool>;
+
+        // In-memory reference backend (include/lucivy/mem_blob_backend.h):
+        // a std::map behind a std::mutex, shareable between backends.
+        type MemBlobMap;
+        fn new_mem_blob_map() -> SharedPtr<MemBlobMap>;
+        fn new_mem_blob_backend(map: SharedPtr<MemBlobMap>) -> UniquePtr<BlobBackend>;
+    }
+
     struct SearchResult {
         doc_id: u64,
         score: f32,
@@ -83,6 +143,38 @@ mod ffi {
 
         // Same as lucivy_open_snapshot(), reading the blob from a .luce file.
         fn lucivy_open_snapshot_from(path: &str) -> Result<Box<LucivyIndex>>;
+
+        // ── Bring your own storage (ACID) ──────────────────────────────
+        //
+        // Create an index whose files live in `backend` (a C++ subclass of
+        // lucivy::BlobBackend, see include/lucivy/blob_backend.h) under the
+        // name `index_name`. The backend is the durable truth; `cache_dir`
+        // only holds a disposable mmap cache of the blobs (empty string: a
+        // fresh temporary directory, removed when the index is destroyed).
+        // config_json: either the fields array of lucivy_create(), or a full
+        // schema object {"fields":[...],"shards":2,"sfx_version":3,...}.
+        // lazy: pull each blob on its first read instead of at open (needs
+        // blob_len()/load_range() in the backend to pay off).
+        // The backend must be thread-safe: its methods run concurrently on
+        // lucivy's scheduler threads. Snapshot export and delta sync are
+        // not available on a blob-backed index (its files are not on disk);
+        // drop_index() deletes every blob of the index from the backend.
+        fn lucivy_create_with_blob_store(
+            backend: UniquePtr<BlobBackend>,
+            index_name: &str,
+            config_json: &str,
+            cache_dir: &str,
+            lazy: bool,
+        ) -> Result<Box<LucivyIndex>>;
+
+        // Open an index previously created with lucivy_create_with_blob_store()
+        // from the blobs `backend` holds under `index_name`.
+        fn lucivy_open_with_blob_store(
+            backend: UniquePtr<BlobBackend>,
+            index_name: &str,
+            cache_dir: &str,
+            lazy: bool,
+        ) -> Result<Box<LucivyIndex>>;
 
         // ── Document operations ────────────────────────────────────────
 
@@ -206,7 +298,8 @@ mod ffi {
         // Total number of documents across all shards.
         fn num_docs(self: &LucivyIndex) -> u64;
 
-        // Directory path where the index files are stored.
+        // Directory path where the index files are stored. For a blob-backed
+        // index: the local cache directory (disposable, see above).
         fn get_path(self: &LucivyIndex) -> &str;
 
         // Full schema as a JSON string (includes internal fields).
@@ -271,17 +364,226 @@ mod ffi {
     }
 }
 
+#[cfg(test)]
+mod test_bridge;
+
+// ── C++ BlobBackend as a BlobStore ────────────────────────────────────────
+
+/// A C++ `lucivy::BlobBackend` seen from Rust as a [`BlobStore`].
+///
+/// Error mapping: a C++ exception thrown by any method becomes an
+/// `io::Error` (kind `Other`) carrying `what()`; `load` answering `false`
+/// becomes `io::ErrorKind::NotFound`; `blob_len`/`load_range` answering
+/// `false` become `Ok(None)`, i.e. "unknown"/"unsupported" for lazy loading.
+struct CxxBlobStore {
+    backend: UniquePtr<ffi::BlobBackend>,
+}
+
+// SAFETY: `UniquePtr<T>` is neither Send nor Sync for an opaque C++ `T`
+// because cxx cannot know how the C++ class behaves. The BlobBackend
+// contract (include/lucivy/blob_backend.h) requires the implementation to
+// be thread-safe: every method is const and lucivy calls them concurrently
+// from its scheduler threads (shard actors, merge threads). The only Rust
+// access is through `&self`, forwarding to those const methods.
+unsafe impl Send for CxxBlobStore {}
+unsafe impl Sync for CxxBlobStore {}
+
+impl CxxBlobStore {
+    fn new(backend: UniquePtr<ffi::BlobBackend>) -> Result<Self, String> {
+        if backend.is_null() {
+            return Err("blob backend is null: pass a std::unique_ptr to a lucivy::BlobBackend subclass".into());
+        }
+        Ok(Self { backend })
+    }
+}
+
+fn cxx_io_error(what: &str, index_name: &str, file_name: &str, e: cxx::Exception) -> io::Error {
+    io::Error::other(format!("blob backend {what} {index_name}/{file_name}: {}", e.what()))
+}
+
+impl BlobStore for CxxBlobStore {
+    fn load(&self, index_name: &str, file_name: &str) -> io::Result<Vec<u8>> {
+        let mut out = CxxVector::<u8>::new();
+        let found = self
+            .backend
+            .load(index_name, file_name, out.pin_mut())
+            .map_err(|e| cxx_io_error("load", index_name, file_name, e))?;
+        if !found {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{index_name}/{file_name} not found in blob backend"),
+            ));
+        }
+        Ok(out.as_slice().to_vec())
+    }
+
+    fn save(&self, index_name: &str, file_name: &str, data: &[u8]) -> io::Result<()> {
+        self.backend
+            .save(index_name, file_name, data)
+            .map_err(|e| cxx_io_error("save", index_name, file_name, e))
+    }
+
+    fn delete(&self, index_name: &str, file_name: &str) -> io::Result<()> {
+        self.backend
+            .remove(index_name, file_name)
+            .map_err(|e| cxx_io_error("remove", index_name, file_name, e))
+    }
+
+    fn exists(&self, index_name: &str, file_name: &str) -> io::Result<bool> {
+        self.backend
+            .exists(index_name, file_name)
+            .map_err(|e| cxx_io_error("exists", index_name, file_name, e))
+    }
+
+    fn list(&self, index_name: &str) -> io::Result<Vec<String>> {
+        self.backend
+            .list(index_name)
+            .map_err(|e| cxx_io_error("list", index_name, "", e))
+    }
+
+    fn blob_len(&self, index_name: &str, file_name: &str) -> io::Result<Option<u64>> {
+        let mut len = 0u64;
+        let known = self
+            .backend
+            .blob_len(index_name, file_name, &mut len)
+            .map_err(|e| cxx_io_error("blob_len", index_name, file_name, e))?;
+        Ok(known.then_some(len))
+    }
+
+    fn load_range(
+        &self,
+        index_name: &str,
+        file_name: &str,
+        range: std::ops::Range<u64>,
+    ) -> io::Result<Option<Vec<u8>>> {
+        let mut out = CxxVector::<u8>::new();
+        let supported = self
+            .backend
+            .load_range(index_name, file_name, range.start, range.end - range.start, out.pin_mut())
+            .map_err(|e| cxx_io_error("load_range", index_name, file_name, e))?;
+        Ok(supported.then(|| out.as_slice().to_vec()))
+    }
+}
+
+/// Where a blob-backed index keeps its mmap cache. `owned` when the caller
+/// passed an empty `cache_dir` and the binding made a temporary one, to be
+/// removed with the index.
+struct BlobCache {
+    path: PathBuf,
+    owned: bool,
+}
+
+static CACHE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+impl BlobCache {
+    fn resolve(cache_dir: &str) -> Result<Self, String> {
+        if !cache_dir.is_empty() {
+            std::fs::create_dir_all(cache_dir)
+                .map_err(|e| format!("cannot create cache dir {cache_dir}: {e}"))?;
+            return Ok(Self { path: PathBuf::from(cache_dir), owned: false });
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!(
+            "lucivy_blob_cache_{}_{nanos}_{}",
+            std::process::id(),
+            CACHE_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path)
+            .map_err(|e| format!("cannot create cache dir {}: {e}", path.display()))?;
+        Ok(Self { path, owned: true })
+    }
+}
+
+fn blob_storage(
+    backend: UniquePtr<ffi::BlobBackend>,
+    index_name: &str,
+    cache: &BlobCache,
+    lazy: bool,
+) -> Result<BlobShardStorage<CxxBlobStore>, String> {
+    if index_name.is_empty() {
+        return Err("index_name must not be empty".into());
+    }
+    let store = Arc::new(CxxBlobStore::new(backend)?);
+    let mode = if lazy { BlobLoadMode::Lazy } else { BlobLoadMode::Eager };
+    Ok(BlobShardStorage::new(store, index_name, cache.path.clone()).with_load_mode(mode))
+}
+
+/// `config_json` is either the fields array `lucivy_create` takes, or a full
+/// `SchemaConfig` object (`{"fields":[...],"shards":2,...}`).
+fn parse_schema_config(config_json: &str) -> Result<query::SchemaConfig, String> {
+    let value: serde_json::Value = serde_json::from_str(config_json)
+        .map_err(|e| format!("invalid config JSON: {e}"))?;
+    match value {
+        serde_json::Value::Array(_) => {
+            let fields: Vec<query::FieldDef> = serde_json::from_value(value)
+                .map_err(|e| format!("invalid fields JSON: {e}"))?;
+            Ok(query::SchemaConfig { fields, tokenizer: None, shards: None, ..Default::default() })
+        }
+        serde_json::Value::Object(_) => serde_json::from_value(value)
+            .map_err(|e| format!("invalid schema config JSON: {e}")),
+        _ => Err("config JSON must be a fields array or a schema object".into()),
+    }
+}
+
+fn lucivy_create_with_blob_store(
+    backend: UniquePtr<ffi::BlobBackend>,
+    index_name: &str,
+    config_json: &str,
+    cache_dir: &str,
+    lazy: bool,
+) -> Result<Box<LucivyIndex>, String> {
+    let config = parse_schema_config(config_json)?;
+    let cache = BlobCache::resolve(cache_dir)?;
+    let storage = blob_storage(backend, index_name, &cache, lazy)?;
+    let handle = ShardedHandle::create_with_storage(Box::new(storage), &config)?;
+    Ok(LucivyIndex::wrap_blob(handle, cache))
+}
+
+fn lucivy_open_with_blob_store(
+    backend: UniquePtr<ffi::BlobBackend>,
+    index_name: &str,
+    cache_dir: &str,
+    lazy: bool,
+) -> Result<Box<LucivyIndex>, String> {
+    let cache = BlobCache::resolve(cache_dir)?;
+    let storage = blob_storage(backend, index_name, &cache, lazy)?;
+    let handle = ShardedHandle::open_with_storage(Box::new(storage))?;
+    Ok(LucivyIndex::wrap_blob(handle, cache))
+}
+
 // ── LucivyIndex wrapper ────────────────────────────────────────────────────
 
 pub struct LucivyIndex {
     /// `None` once `drop_index()` has consumed the handle. Every call goes
     /// through `handle()`, which answers with a clear error from then on.
     handle: RwLock<Option<ShardedHandle>>,
-    /// Empty for a served snapshot (`lucivy_open_snapshot`).
+    /// Empty for a served snapshot (`lucivy_open_snapshot`); the cache
+    /// directory for a blob-backed index.
     index_path: String,
     text_fields: Vec<String>,
     /// Served from a LUCE blob: read-only, and no directory behind it.
     served_snapshot: bool,
+    /// Set for an index whose files live in a C++ `BlobBackend`.
+    blob_cache: Option<BlobCache>,
+}
+
+impl Drop for LucivyIndex {
+    fn drop(&mut self) {
+        let Some(cache) = self.blob_cache.take() else { return };
+        if !cache.owned {
+            return;
+        }
+        // The handle goes first: each shard's BlobDirectory removes its own
+        // cache subdirectory when its last clone drops. Then the base we
+        // made for it. Best effort: the cache is disposable by definition.
+        if let Ok(slot) = self.handle.get_mut() {
+            slot.take();
+        }
+        let _ = std::fs::remove_dir_all(&cache.path);
+    }
 }
 
 const DROPPED: &str = "index was dropped (drop_index): this instance no longer holds a handle";
@@ -305,6 +607,18 @@ impl LucivyIndex {
             index_path: index_path.to_string(),
             text_fields,
             served_snapshot,
+            blob_cache: None,
+        })
+    }
+
+    fn wrap_blob(handle: ShardedHandle, cache: BlobCache) -> Box<LucivyIndex> {
+        let text_fields = extract_text_fields(&handle.config);
+        Box::new(LucivyIndex {
+            handle: RwLock::new(Some(handle)),
+            index_path: cache.path.to_string_lossy().to_string(),
+            text_fields,
+            served_snapshot: false,
+            blob_cache: Some(cache),
         })
     }
 
@@ -324,6 +638,22 @@ impl LucivyIndex {
                 "{what} is not available on a served snapshot (lucivy_open_snapshot): \
                  it is read-only and has no directory; keep the original blob, or \
                  lucivy_import_snapshot() it into a writable directory"
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Snapshot export and delta sync read the shard files from the index
+    /// directory on disk. A blob-backed index has none: its files are in
+    /// the backend, its cache directory has another layout.
+    fn require_filesystem(&self, what: &str) -> Result<(), String> {
+        self.require_directory(what)?;
+        if self.blob_cache.is_some() {
+            Err(format!(
+                "{what} is not available on a blob-backed index (lucivy_*_with_blob_store): \
+                 its files live in the BlobBackend, not in a directory; the blobs themselves \
+                 are the durable copy"
             ))
         } else {
             Ok(())
@@ -479,7 +809,7 @@ impl LucivyIndex {
 
 impl LucivyIndex {
     fn export_snapshot(&self) -> Result<Vec<u8>, String> {
-        self.require_directory("export_snapshot")?;
+        self.require_filesystem("export_snapshot")?;
         let handle = self.handle()?;
         snapshot::export_to_snapshot(&handle, std::path::Path::new(&self.index_path))
     }
@@ -540,12 +870,12 @@ impl LucivyIndex {
             })
             .collect();
 
-        self.require_directory("export_sharded_delta")?;
+        self.require_filesystem("export_sharded_delta")?;
         self.handle()?.export_sharded_delta(&self.index_path, &versions)
     }
 
     fn apply_sharded_delta(&self, data: &[u8]) -> Result<(), String> {
-        self.require_directory("apply_sharded_delta")?;
+        self.require_filesystem("apply_sharded_delta")?;
         self.handle()?.apply_sharded_delta(&self.index_path, data)
     }
 }
@@ -1160,6 +1490,322 @@ mod tests {
 
         // The directory is gone: reopening fails.
         assert!(lucivy_open(&path).is_err());
+    }
+
+    // ── Bring your own storage: through the C++ BlobBackend ──────────────
+
+    use crate::test_bridge::ffi as probe_ffi;
+
+    const BLOB_CONFIG: &str = r#"{"fields":[{"name":"title","type":"text"},{"name":"body","type":"text"}],"shards":2}"#;
+
+    /// (doc_id, score bits), sorted: the documents of these tests all score
+    /// the same, and the order of tied hits follows segment order, which a
+    /// reopen or a lazy open may change.
+    fn hits_key(hits: &[ffi::SearchResult]) -> Vec<(u64, u32)> {
+        let mut keys: Vec<(u64, u32)> = hits.iter().map(|r| (r.doc_id, r.score.to_bits())).collect();
+        keys.sort();
+        keys
+    }
+
+    /// A direct view on the same map, to inspect what lucivy stored.
+    fn store_view(map: &cxx::SharedPtr<ffi::MemBlobMap>) -> CxxBlobStore {
+        CxxBlobStore::new(ffi::new_mem_blob_backend(map.clone())).unwrap()
+    }
+
+    /// Run `f` on a helper thread; fail the test instead of hanging forever.
+    fn with_timeout<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(secs))
+            .unwrap_or_else(|_| panic!("operation did not finish within {secs}s"))
+    }
+
+    #[test]
+    fn blob_store_create_reopen_search_and_keep_writing() {
+        let map = ffi::new_mem_blob_map();
+        let view = store_view(&map);
+        let expected;
+        let expected_hl;
+        let cache_path;
+        {
+            let idx = lucivy_create_with_blob_store(
+                ffi::new_mem_blob_backend(map.clone()), "acid", BLOB_CONFIG, "", false,
+            ).unwrap();
+            cache_path = idx.get_path().to_string();
+            assert!(std::path::Path::new(&cache_path).is_dir(), "empty cache_dir → a temp dir is made");
+            populate(&idx, 40, 2);
+            assert_eq!(idx.num_docs(), 40);
+            expected = idx.search(QUERY, 100).unwrap();
+            assert_eq!(expected.len(), 20);
+            expected_hl = idx.search_with_highlights(QUERY, 5).unwrap();
+            idx.close().unwrap();
+
+            // What the backend holds: shards under the prefixed namespace,
+            // root files under the bare name.
+            assert!(!view.list("Lucivy_acid/shard_0").unwrap().is_empty());
+            assert!(!view.list("Lucivy_acid/shard_1").unwrap().is_empty());
+            assert!(view.exists("acid", "_shard_config.json").unwrap());
+            assert!(view.exists("acid", "_shard_stats.bin").unwrap());
+            assert!(view.exists("Lucivy_acid/shard_0", "meta.json").unwrap());
+            assert!(!view.list("Lucivy_acid/shard_0").unwrap().iter().any(|f| f.ends_with(".lock")),
+                "lock files are process-local and never stored");
+        }
+        assert!(!std::path::Path::new(&cache_path).exists(),
+            "the temporary cache goes with the index; the blobs are the truth");
+
+        // "Another process": a new backend over the same map, own cache dir.
+        let dir = TempDir::new("blob_reopen");
+        let idx = lucivy_open_with_blob_store(
+            ffi::new_mem_blob_backend(map.clone()), "acid", &dir.path(), false,
+        ).unwrap();
+        assert_eq!(idx.get_path(), dir.path(), "a caller-supplied cache dir is used as is");
+        assert_eq!(idx.num_docs(), 40);
+        assert_eq!(idx.get_schema().len(), 2);
+        assert_eq!(hits_key(&idx.search(QUERY, 100).unwrap()), hits_key(&expected),
+            "reopened from blobs: same hits, same scores");
+        let got_hl = idx.search_with_highlights(QUERY, 5).unwrap();
+        for (a, b) in expected_hl.iter().zip(got_hl.iter()) {
+            assert_eq!(a.doc_id, b.doc_id);
+            assert_eq!(a.highlights.len(), b.highlights.len());
+        }
+        assert_eq!(idx.search_filtered(QUERY, 100, &[0, 2, 999]).unwrap().len(), 2);
+
+        // Still writable, and the write lands in the backend.
+        idx.add(1000, r#"{"title":"late","body":"a late mutex"}"#).unwrap();
+        idx.commit().unwrap();
+        assert_eq!(idx.search(QUERY, 100).unwrap().len(), 21);
+        idx.close().unwrap();
+        drop(idx);
+
+        let idx = lucivy_open_with_blob_store(
+            ffi::new_mem_blob_backend(map.clone()), "acid", "", false,
+        ).unwrap();
+        assert_eq!(idx.num_docs(), 41);
+        idx.close().unwrap();
+    }
+
+    #[test]
+    fn blob_store_config_forms_and_bad_input() {
+        // Fields array, like lucivy_create.
+        let map = ffi::new_mem_blob_map();
+        let idx = lucivy_create_with_blob_store(
+            ffi::new_mem_blob_backend(map.clone()), "arr", SCHEMA, "", false,
+        ).unwrap();
+        populate(&idx, 4, 1);
+        assert_eq!(idx.num_docs(), 4);
+        idx.close().unwrap();
+
+        // Null backend, empty name, bad config: clear errors, nothing stored.
+        let map2 = ffi::new_mem_blob_map();
+        let err = lucivy_create_with_blob_store(UniquePtr::null(), "x", SCHEMA, "", false).err().expect("an error");
+        assert!(err.contains("null"), "{err}");
+        let err = lucivy_create_with_blob_store(
+            ffi::new_mem_blob_backend(map2.clone()), "", SCHEMA, "", false,
+        ).err().expect("an error");
+        assert!(err.contains("index_name"), "{err}");
+        let err = lucivy_create_with_blob_store(
+            ffi::new_mem_blob_backend(map2.clone()), "x", r#"{"fields":[],"shard":2}"#, "", false,
+        ).err().expect("an error");
+        assert!(err.contains("schema config"), "{err}");
+        assert!(lucivy_create_with_blob_store(
+            ffi::new_mem_blob_backend(map2.clone()), "x", "42", "", false,
+        ).is_err());
+        assert!(store_view(&map2).list("x").unwrap().is_empty());
+
+        // Opening a name the backend has never seen.
+        let err = lucivy_open_with_blob_store(
+            ffi::new_mem_blob_backend(map2.clone()), "nowhere", "", false,
+        ).err().expect("an error");
+        assert!(err.contains("_shard_config.json"), "{err}");
+    }
+
+    #[test]
+    fn blob_store_save_failure_surfaces_in_commit_without_hanging() {
+        let map = ffi::new_mem_blob_map();
+        let probe = probe_ffi::new_backend_probe();
+        let idx = lucivy_create_with_blob_store(
+            probe_ffi::new_probed_backend(map.clone(), probe.clone()), "faulty", BLOB_CONFIG, "", false,
+        ).unwrap();
+        populate(&idx, 10, 1);
+        assert_eq!(idx.search(QUERY, 100).unwrap().len(), 5);
+
+        probe_ffi::probe_set_fail_saves(&probe, true);
+        idx.add(100, r#"{"title":"x","body":"mutex after the outage"}"#).unwrap();
+        let idx = Arc::new(idx);
+        let idx2 = Arc::clone(&idx);
+        let err = with_timeout(60, move || idx2.commit()).err().expect("an error");
+        // The message depends on which save fails first. meta.json (the
+        // commit point) fails on the commit path and carries the exception
+        // text; a segment file fails inside the background finalize, whose
+        // error the engine replaces by a generic one (indexer_actor.rs,
+        // IndexerFinalizeCompleteMsg keeps only `success`).
+        assert!(
+            err.contains("injected save failure") || err.contains("background finalize failed"),
+            "unexpected error: {err}"
+        );
+
+        // Real behaviour, pinned: the documents of the failed commit are
+        // lost (the segment that could not be persisted is discarded), the
+        // committed state is untouched, and the index stays usable.
+        assert_eq!(idx.search(QUERY, 100).unwrap().len(), 5);
+        assert_eq!(idx.num_docs(), 10);
+        probe_ffi::probe_set_fail_saves(&probe, false);
+        let idx2 = Arc::clone(&idx);
+        with_timeout(60, move || idx2.commit()).unwrap();
+        assert_eq!(idx.num_docs(), 10, "a retry does not resurrect the lost document");
+        idx.add(101, r#"{"title":"y","body":"mutex after recovery"}"#).unwrap();
+        idx.commit().unwrap();
+        assert_eq!(idx.search(QUERY, 100).unwrap().len(), 6);
+        idx.close().unwrap();
+
+        // And what the backend holds is a consistent index.
+        let reopened = lucivy_open_with_blob_store(
+            ffi::new_mem_blob_backend(map.clone()), "faulty", "", false,
+        ).unwrap();
+        assert_eq!(reopened.num_docs(), 11);
+        assert_eq!(reopened.search(QUERY, 100).unwrap().len(), 6);
+        reopened.close().unwrap();
+
+        // A backend that fails at creation time: the create itself errors.
+        let probe2 = probe_ffi::new_backend_probe();
+        probe_ffi::probe_set_fail_saves(&probe2, true);
+        let err = lucivy_create_with_blob_store(
+            probe_ffi::new_probed_backend(ffi::new_mem_blob_map(), probe2), "dead", BLOB_CONFIG, "", false,
+        ).err().expect("an error");
+        assert!(err.contains("injected save failure"), "{err}");
+    }
+
+    #[test]
+    fn blob_store_lazy_open_pulls_on_demand() {
+        let map = ffi::new_mem_blob_map();
+        let probe = probe_ffi::new_backend_probe();
+        let view = store_view(&map);
+
+        // Build eagerly with bodies big enough that some blobs exceed the
+        // 64 KiB remote-read window of the lazy handle.
+        let expected;
+        {
+            let idx = lucivy_create_with_blob_store(
+                probe_ffi::new_probed_backend(map.clone(), probe.clone()), "lazy", BLOB_CONFIG, "", false,
+            ).unwrap();
+            for i in 0..300u64 {
+                let filler: String = (0..40).map(|k| format!("word{}_{} ", i, (k * 7919) % 1000)).collect();
+                let body = if i % 2 == 0 {
+                    format!("pthread_mutex_lock acquires the mutex number {i} {filler}")
+                } else {
+                    format!("plain document number {i} {filler}")
+                };
+                idx.add(i, &serde_json::json!({"title": format!("doc {i}"), "body": body}).to_string()).unwrap();
+            }
+            idx.commit().unwrap();
+            expected = idx.search(QUERY, 1000).unwrap();
+            assert_eq!(expected.len(), 150);
+            idx.close().unwrap();
+        }
+
+        // Everything the backend holds for the index, with sizes.
+        let mut sizes: Vec<(String, u64)> = Vec::new();
+        for ns in ["Lucivy_lazy/shard_0", "Lucivy_lazy/shard_1"] {
+            for f in view.list(ns).unwrap() {
+                sizes.push((format!("{ns}/{f}"), view.blob_len(ns, &f).unwrap().unwrap()));
+            }
+        }
+        let total: u64 = sizes.iter().map(|(_, n)| n).sum();
+        let (largest, largest_len) = sizes.iter().max_by_key(|(_, n)| *n).cloned().unwrap();
+        assert!(largest_len > 64 * 1024, "test needs a blob over 64 KiB, largest is {largest_len}");
+
+        // Eager open: every blob is loaded whole at open, blob_len unused.
+        probe_ffi::probe_reset(&probe);
+        {
+            let idx = lucivy_open_with_blob_store(
+                probe_ffi::new_probed_backend(map.clone(), probe.clone()), "lazy", "", false,
+            ).unwrap();
+            for (key, _) in &sizes {
+                assert!(probe_ffi::probe_loads(&probe, key) >= 1, "eager open must load {key}");
+            }
+            assert_eq!(probe_ffi::probe_range_loads(&probe), 0);
+            idx.close().unwrap();
+        }
+
+        // Lazy open, backend answering blob_len/load_range.
+        probe_ffi::probe_set_lazy(&probe, true);
+        probe_ffi::probe_reset(&probe);
+        let idx = lucivy_open_with_blob_store(
+            probe_ffi::new_probed_backend(map.clone(), probe.clone()), "lazy", "", true,
+        ).unwrap();
+        let loaded_at_open = probe_ffi::probe_loaded_keys(&probe);
+        let loaded_bytes: u64 = sizes.iter()
+            .filter(|(k, _)| loaded_at_open.iter().any(|l| l == k))
+            .map(|(_, n)| n)
+            .sum();
+        assert!(loaded_bytes < total / 2,
+            "lazy open loaded {loaded_bytes} of {total} bytes whole ({loaded_at_open:?}) — not lazy");
+        assert_eq!(probe_ffi::probe_loads(&probe, &largest), 0,
+            "the largest blob ({largest}, {largest_len} bytes) must not be loaded whole at open");
+        assert!(probe_ffi::probe_range_loads(&probe) > 0,
+            "open probes headers/footers through load_range");
+
+        // Same answers as the eager index; the search pulls what it touches.
+        assert_eq!(idx.num_docs(), 300);
+        assert_eq!(hits_key(&idx.search(QUERY, 1000).unwrap()), hits_key(&expected),
+            "lazy: same hits and scores as eager");
+        let loaded_after_search = probe_ffi::probe_loaded_keys(&probe);
+        assert!(loaded_after_search.len() > loaded_at_open.len(),
+            "a query materializes the structures it reads");
+        idx.close().unwrap();
+    }
+
+    #[test]
+    fn blob_store_drop_index_deletes_every_blob() {
+        let map = ffi::new_mem_blob_map();
+        let view = store_view(&map);
+        let idx = lucivy_create_with_blob_store(
+            ffi::new_mem_blob_backend(map.clone()), "gone", BLOB_CONFIG, "", false,
+        ).unwrap();
+        populate(&idx, 10, 1);
+        let cache_path = idx.get_path().to_string();
+        assert!(!view.list("Lucivy_gone/shard_0").unwrap().is_empty());
+        assert!(!view.list("gone").unwrap().is_empty());
+
+        idx.drop_index().unwrap();
+        for ns in ["Lucivy_gone/shard_0", "Lucivy_gone/shard_1", "gone"] {
+            assert!(view.list(ns).unwrap().is_empty(), "{ns} still has blobs after drop_index");
+        }
+        // Disarmed like a filesystem index.
+        let err = idx.search(QUERY, 10).err().expect("an error");
+        assert!(err.contains("dropped"), "{err}");
+        assert_eq!(idx.num_docs(), 0);
+        drop(idx);
+        assert!(!std::path::Path::new(&cache_path).exists(), "temporary cache removed");
+
+        // Nothing to reopen.
+        assert!(lucivy_open_with_blob_store(
+            ffi::new_mem_blob_backend(map.clone()), "gone", "", false,
+        ).is_err());
+    }
+
+    #[test]
+    fn blob_store_refuses_filesystem_only_operations() {
+        let map = ffi::new_mem_blob_map();
+        let idx = lucivy_create_with_blob_store(
+            ffi::new_mem_blob_backend(map.clone()), "nofs", BLOB_CONFIG, "", false,
+        ).unwrap();
+        populate(&idx, 4, 1);
+        for (what, r) in [
+            ("export_snapshot", idx.export_snapshot().map(|_| ())),
+            ("export_sharded_delta", idx.export_sharded_delta("[]").map(|_| ())),
+            ("apply_sharded_delta", idx.apply_sharded_delta(&[])),
+        ] {
+            let err = r.err().expect("an error");
+            assert!(err.contains("blob-backed") && err.contains(what), "{what}: {err}");
+        }
+        // The rest works as usual.
+        assert!(idx.shard_versions().unwrap().len() == 2);
+        assert!(idx.compact(usize::MAX).is_ok());
+        assert!(idx.index_bytes() > 0);
+        idx.close().unwrap();
     }
 
     #[test]

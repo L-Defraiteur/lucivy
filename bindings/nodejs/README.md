@@ -11,6 +11,7 @@ Fast BM25 full-text search for Node.js — with substring matching, fuzzy search
 - **`queryWarnings()`** — what the engine will really search, and where it falls back to a scan, before running the query
 - **Snapshots served in place** — `Index.openSnapshot()` reads a LUCE blob without extracting it
 - **Maintenance** — `compact()`, `waitMergesQuiet()`, `indexBytes()`, `dropIndex()`
+- **Bring your own storage** — `BlobIndex` keeps an index in the transactional store of your choice through a plain object of callbacks; asynchronous API
 
 Still there from 2.x: SFX-only engine, distributed search (`exportStats` / `mergeStats` / `searchWithGlobalStats`), incremental LUCIDS delta sync, BM25 scores identical across 1 or N shards, bindings for Python, Node.js, C++, WASM and Rust.
 
@@ -309,13 +310,143 @@ index.close()      // flush + release writer lock
 index.dropIndex()  // close + delete the index files (instance unusable afterwards)
 ```
 
-## Storage backends
+## Bring your own storage (ACID)
 
-The Node binding stores indexes on the filesystem. ACID blob storage — the
-`BlobStore` trait, `BlobShardStorage` and lazy segment loading, where an index
-lives in a transactional store such as a database — is a Rust-level API
-(`lucivy-core` / `lucistore`) used by rag3db; it is not exposed in the Node
-binding yet.
+`Index` stores its files on the filesystem. `BlobIndex` stores them wherever
+you say: every file of the index becomes a blob that your JavaScript object
+loads and saves — a transactional database, an object store, a `Map`. The
+store is the source of truth; a local directory only caches the blobs for
+mmap reads and can be thrown away. `meta.json` is written last at each commit,
+so a store with transactions gives you an index that is either at the previous
+commit or at the new one, never in between.
+
+### The store object
+
+```javascript
+const store = {
+    load(indexName, fileName)          // → Buffer | Uint8Array | null (null = does not exist)
+    save(indexName, fileName, data)    // data: Buffer; create or overwrite
+    delete(indexName, fileName)        // a missing blob is not an error
+    exists(indexName, fileName)        // → boolean
+    list(indexName)                    // → string[]: every fileName under indexName
+    // optional, for lazy loading:
+    blobLen(indexName, fileName)       // → number | null (null = unknown)
+    loadRange(indexName, fileName, offset, length)  // → Buffer | Uint8Array | null (null = unsupported)
+};
+```
+
+Each method may return its value directly or a Promise of it. A thrown error
+or a rejection is reported as the rejection of the `BlobIndex` call that
+needed it. Methods are called with the store as `this`.
+
+`indexName` is a namespace, not just the name you gave: segment files live
+under `"Lucivy_<name>/shard_<i>"`, the root files (`_shard_config.json`,
+`_shard_stats.bin`) under the bare `"<name>"`. Keep blobs keyed by the pair
+`(indexName, fileName)` and `list()` cheap. Opening an index takes the writer
+lock through the store (`.lucivy-writer.lock` is saved, then deleted) and
+`close()` always commits, so `save` and `delete` must work even in a process
+that only searches.
+
+### Why `BlobIndex` is asynchronous
+
+The engine calls the store from its own threads — segment writers, merges,
+lazy loads — while a JavaScript callback can only run on the JavaScript
+thread. If that thread were blocked inside a synchronous call such as
+`index.commit()`, the callbacks it waits for could never run. So every
+`BlobIndex` method runs its work on the Node.js thread pool and returns a
+Promise; while you `await` it, the event loop is free and the store
+callbacks are dispatched through it (one `ThreadsafeFunction` per method;
+the engine thread blocks on a channel until the callback answered).
+
+The corollary: **the JavaScript thread must stay free while a `BlobIndex`
+call is pending.** Never `await` a `BlobIndex` call from inside a store
+callback, and do not block the event loop with synchronous work (a
+`readFileSync` inside `load` is fine; a `while` loop waiting for something
+is not). Store callbacks that return Promises are awaited normally.
+
+### Example: a Map
+
+```javascript
+const { BlobIndex } = require('lucivy');
+
+const blobs = new Map();
+const key = (indexName, fileName) => `${indexName}|${fileName}`;
+const store = {
+    load: (i, f) => blobs.get(key(i, f)) ?? null,
+    save: (i, f, data) => { blobs.set(key(i, f), Buffer.from(data)); },
+    delete: (i, f) => { blobs.delete(key(i, f)); },
+    exists: (i, f) => blobs.has(key(i, f)),
+    list: (i) => [...blobs.keys()].filter(k => k.startsWith(i + '|')).map(k => k.slice(i.length + 1)),
+};
+
+const index = await BlobIndex.create(store, 'articles', [
+    { name: 'body', type: 'text', stored: true },
+], { shards: 2 });
+await index.addMany([{ docId: 1, body: 'kmalloc' }, { docId: 2, body: 'spin_lock_init' }]);
+await index.commit();
+const hits = await index.search('kmalloc', { highlights: true });
+await index.close();
+
+// Later, elsewhere — same blobs, same answers:
+const again = await BlobIndex.open(store, 'articles');
+await again.search({ type: 'contains', field: 'body', value: 'lock' });
+await again.close();
+```
+
+With a database, `save` is an upsert, `load` a select, and `commit()` can be
+wrapped in a transaction by the store itself.
+
+### API
+
+```javascript
+BlobIndex.create(store, indexName, fields, options?)   // → Promise<BlobIndex>
+BlobIndex.open(store, indexName, options?)             // → Promise<BlobIndex>
+// options: { cacheDir?: string, lazy?: boolean, shards?: number (create only) }
+
+await index.add(docId, fields);       await index.addMany(docs);
+await index.delete(docId);            await index.update(docId, fields);
+await index.commit();                 await index.search(query, options);
+await index.queryWarnings(query);     await index.numDocs();
+await index.compact(maxDocs?);        await index.waitMergesQuiet();
+await index.indexBytes();             await index.close();
+await index.dropIndex();
+index.indexName; index.numShards; index.schema   // synchronous getters
+```
+
+Queries, options and results are exactly those of `Index`. `dropIndex()`
+closes the index, then deletes every blob it owns: it lists and deletes the
+`Lucivy_<name>/shard_<i>` namespaces and the `<name>` namespace through
+`store.list()` / `store.delete()`; other indexes in the same store are
+untouched. As with `Index`, the instance is consumed — every later call
+rejects.
+
+### Cache directory and lazy loading
+
+`cacheDir` (default: `lucivy_blob_cache` under the OS temp dir) receives a
+`<pid>/<namespace>_<n>/` directory per shard, filled from the store and
+removed when the index is dropped from memory. It is disposable; it must be
+on a local filesystem that supports mmap.
+
+By default every blob is pulled at `open()`. With `lazy: true` — worth it
+only when the store implements `blobLen` and `loadRange` — `open()` reads
+the metadata files and probes segment footers with small `loadRange` calls;
+each other file is loaded whole the first time a query needs more than a few
+kilobytes of it. Searches give the same answers either way; the first query
+pays for what it touches.
+
+### Close before exit
+
+`close()` waits for background merges, commits, releases the lock and
+guarantees that nothing touches the store afterwards — call it before tearing
+down a database connection and before the process exits. A store that stays
+idle does not keep the process alive; if an index is garbage-collected
+without `close()`, a flush that would have needed the JavaScript thread is
+refused rather than deadlocked, and only the last uncommitted changes are
+lost.
+
+A store error — thrown or rejected, from a segment write in the background
+or from `meta.json` at the commit point — comes back as the rejection of the
+`BlobIndex` call that needed it, with the store's own message.
 
 ## License
 

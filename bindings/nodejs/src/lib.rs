@@ -121,23 +121,7 @@ impl Index {
     /// @param shards - Number of shards (default 1). More shards = faster search on large datasets.
     #[napi(factory)]
     pub fn create(path: String, fields: Vec<FieldDef>, shards: Option<u32>) -> Result<Self> {
-        let field_defs: Vec<query::FieldDef> = fields
-            .iter()
-            .map(|f| query::FieldDef {
-                name: f.name.clone(),
-                field_type: f.r#type.clone(),
-                stored: f.stored,
-                indexed: f.indexed,
-                fast: f.fast,
-            })
-            .collect();
-
-        let config = query::SchemaConfig {
-            fields: field_defs,
-            tokenizer: None,
-            shards: shards.map(|s| s as usize),
-            ..Default::default()
-        };
+        let config = schema_config(&fields, shards);
 
         let handle = ShardedHandle::create(&path, &config)
             .map_err(|e| Error::from_reason(e))?;
@@ -180,17 +164,7 @@ impl Index {
     /// @param fields - Object with field names as keys: `{title: "Hello", body: "World", score: 3.14}`
     #[napi]
     pub fn add(&self, doc_id: u32, fields: HashMap<String, serde_json::Value>) -> Result<()> {
-        let handle = self.writable()?;
-        let mut doc = LucivyDocument::new();
-
-        let nid_field = handle.field(NODE_ID_FIELD)
-            .ok_or_else(|| Error::from_reason("no _node_id field in schema"))?;
-        doc.add_u64(nid_field, doc_id as u64);
-
-        add_fields_from_map(handle, &mut doc, &fields)?;
-
-        handle.add_document(doc, doc_id as u64)
-            .map_err(|e| Error::from_reason(e))
+        add_one(self.writable()?, doc_id, &fields)
     }
 
     /// Add multiple documents at once.
@@ -200,30 +174,7 @@ impl Index {
     /// @param docs - Array of objects: `[{docId: 1, title: "Hello"}, {docId: 2, title: "World"}]`.
     #[napi]
     pub fn add_many(&self, docs: Vec<HashMap<String, serde_json::Value>>) -> Result<()> {
-        let handle = self.writable()?;
-        let nid_field = handle.field(NODE_ID_FIELD)
-            .ok_or_else(|| Error::from_reason("no _node_id field in schema"))?;
-
-        for map in &docs {
-            let doc_id = map.get("docId")
-                .or_else(|| map.get("doc_id"))
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| Error::from_reason("each doc must have a 'docId' (number) key"))?;
-
-            let mut doc = LucivyDocument::new();
-            doc.add_u64(nid_field, doc_id);
-
-            for (key, value) in map {
-                if key == "docId" || key == "doc_id" {
-                    continue;
-                }
-                add_field_value(handle, &mut doc, key, value)?;
-            }
-
-            handle.add_document(doc, doc_id)
-                .map_err(|e| Error::from_reason(e))?;
-        }
-        Ok(())
+        add_many_docs(self.writable()?, &docs)
     }
 
     /// Delete a document by its `_node_id`.
@@ -321,7 +272,7 @@ impl Index {
     /// Empty array when nothing applies.
     #[napi]
     pub fn query_warnings(&self, query: serde_json::Value) -> Result<Vec<String>> {
-        let query_config = self.parse_query(&query)?;
+        let query_config = parse_query(&query, &self.text_fields)?;
         Ok(self.h()?.query_warnings(&query_config))
     }
 
@@ -332,35 +283,7 @@ impl Index {
         query: serde_json::Value,
         options: Option<SearchOptions>,
     ) -> Result<Vec<SearchResult>> {
-        let limit = options.as_ref().and_then(|o| o.limit).unwrap_or(10);
-        let want_highlights = options.as_ref().and_then(|o| o.highlights).unwrap_or(false);
-        let want_fields = options.as_ref().and_then(|o| o.fields).unwrap_or(false);
-        let allowed_ids = options.as_ref().and_then(|o| o.allowed_ids.clone());
-
-        let query_config = self.parse_query(&query)?;
-
-        let highlight_sink = if want_highlights {
-            Some(Arc::new(HighlightSink::new()))
-        } else {
-            None
-        };
-
-        let results = match allowed_ids {
-            Some(ids) => {
-                let id_set: HashSet<u64> = ids.into_iter().map(|id| id as u64).collect();
-                self.h()?.search_filtered(&query_config, limit as usize, highlight_sink.clone(), id_set)
-                    .map_err(|e| Error::from_reason(e))?
-            }
-            None => self.h()?.search(&query_config, limit as usize, highlight_sink.clone())
-                .map_err(|e| Error::from_reason(e))?,
-        };
-
-        collect_sharded_results(
-            self.h()?,
-            &results,
-            highlight_sink.as_deref(),
-            want_fields,
-        )
+        run_search(self.h()?, &self.text_fields, &query, options)
     }
 
     /// Number of documents in the index (getter, access as `index.numDocs`).
@@ -722,27 +645,61 @@ pub fn merge_stats(stats_list: Vec<String>) -> Result<String> {
 
 // ─── Query parsing ─────────────────────────────────────────────────────────
 
-impl Index {
-    fn parse_query(&self, query: &serde_json::Value) -> Result<query::QueryConfig> {
-        match query {
-            serde_json::Value::String(s) => {
-                if self.text_fields.is_empty() {
-                    return Err(Error::from_reason(
-                        "no text fields in schema for string query",
-                    ));
-                }
-                Ok(build_contains_split_multi_field(s, &self.text_fields, None))
+/// A `search()` / `queryWarnings()` argument: a string (contains_split over
+/// every text field) or a QueryConfig object.
+fn parse_query(query: &serde_json::Value, text_fields: &[String]) -> Result<query::QueryConfig> {
+    match query {
+        serde_json::Value::String(s) => {
+            if text_fields.is_empty() {
+                return Err(Error::from_reason(
+                    "no text fields in schema for string query",
+                ));
             }
-            serde_json::Value::Object(_) => {
-                let config: query::QueryConfig = serde_json::from_value(query.clone())
-                    .map_err(|e| Error::from_reason(format!("invalid query object: {e}")))?;
-                Ok(config)
-            }
-            _ => Err(Error::from_reason(
-                "query must be a string or an object",
-            )),
+            Ok(build_contains_split_multi_field(s, text_fields, None))
         }
+        serde_json::Value::Object(_) => {
+            let config: query::QueryConfig = serde_json::from_value(query.clone())
+                .map_err(|e| Error::from_reason(format!("invalid query object: {e}")))?;
+            Ok(config)
+        }
+        _ => Err(Error::from_reason(
+            "query must be a string or an object",
+        )),
     }
+}
+
+/// The whole of `search()`: parse, run (filtered or not), convert. Shared by
+/// the synchronous `Index` and the promise-based `BlobIndex`.
+fn run_search(
+    handle: &ShardedHandle,
+    text_fields: &[String],
+    query: &serde_json::Value,
+    options: Option<SearchOptions>,
+) -> Result<Vec<SearchResult>> {
+    let limit = options.as_ref().and_then(|o| o.limit).unwrap_or(10);
+    let want_highlights = options.as_ref().and_then(|o| o.highlights).unwrap_or(false);
+    let want_fields = options.as_ref().and_then(|o| o.fields).unwrap_or(false);
+    let allowed_ids = options.and_then(|o| o.allowed_ids);
+
+    let query_config = parse_query(query, text_fields)?;
+
+    let highlight_sink = if want_highlights {
+        Some(Arc::new(HighlightSink::new()))
+    } else {
+        None
+    };
+
+    let results = match allowed_ids {
+        Some(ids) => {
+            let id_set: HashSet<u64> = ids.into_iter().map(|id| id as u64).collect();
+            handle.search_filtered(&query_config, limit as usize, highlight_sink.clone(), id_set)
+                .map_err(|e| Error::from_reason(e))?
+        }
+        None => handle.search(&query_config, limit as usize, highlight_sink.clone())
+            .map_err(|e| Error::from_reason(e))?,
+    };
+
+    collect_sharded_results(handle, &results, highlight_sink.as_deref(), want_fields)
 }
 
 // ─── Contains split helpers ────────────────────────────────────────────────
@@ -795,6 +752,74 @@ fn build_contains_split_multi_field(value: &str, text_fields: &[String], distanc
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
+
+fn schema_config(fields: &[FieldDef], shards: Option<u32>) -> query::SchemaConfig {
+    let field_defs: Vec<query::FieldDef> = fields
+        .iter()
+        .map(|f| query::FieldDef {
+            name: f.name.clone(),
+            field_type: f.r#type.clone(),
+            stored: f.stored,
+            indexed: f.indexed,
+            fast: f.fast,
+        })
+        .collect();
+
+    query::SchemaConfig {
+        fields: field_defs,
+        tokenizer: None,
+        shards: shards.map(|s| s as usize),
+        ..Default::default()
+    }
+}
+
+/// `add()`: one document with its `_node_id` and user fields.
+fn add_one(
+    handle: &ShardedHandle,
+    doc_id: u32,
+    fields: &HashMap<String, serde_json::Value>,
+) -> Result<()> {
+    let mut doc = LucivyDocument::new();
+
+    let nid_field = handle.field(NODE_ID_FIELD)
+        .ok_or_else(|| Error::from_reason("no _node_id field in schema"))?;
+    doc.add_u64(nid_field, doc_id as u64);
+
+    add_fields_from_map(handle, &mut doc, fields)?;
+
+    handle.add_document(doc, doc_id as u64)
+        .map_err(|e| Error::from_reason(e))
+}
+
+/// `addMany()`: each map carries its own `docId` (or `doc_id`).
+fn add_many_docs(
+    handle: &ShardedHandle,
+    docs: &[HashMap<String, serde_json::Value>],
+) -> Result<()> {
+    let nid_field = handle.field(NODE_ID_FIELD)
+        .ok_or_else(|| Error::from_reason("no _node_id field in schema"))?;
+
+    for map in docs {
+        let doc_id = map.get("docId")
+            .or_else(|| map.get("doc_id"))
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| Error::from_reason("each doc must have a 'docId' (number) key"))?;
+
+        let mut doc = LucivyDocument::new();
+        doc.add_u64(nid_field, doc_id);
+
+        for (key, value) in map {
+            if key == "docId" || key == "doc_id" {
+                continue;
+            }
+            add_field_value(handle, &mut doc, key, value)?;
+        }
+
+        handle.add_document(doc, doc_id)
+            .map_err(|e| Error::from_reason(e))?;
+    }
+    Ok(())
+}
 
 fn extract_user_fields(config: &query::SchemaConfig) -> (Vec<(String, String)>, Vec<String>) {
     let user_fields: Vec<(String, String)> = config
@@ -947,6 +972,658 @@ fn collect_sharded_results(
         });
     }
     Ok(out)
+}
+
+// ─── Bring your own storage: JsBlobStore ───────────────────────────────────
+//
+// A `lucistore::BlobStore` whose methods are JavaScript functions. The trait
+// is synchronous and lucivy calls it from its own scheduler threads (segment
+// writers, merges, lazy loads), never from the JS thread. Each call is
+// shipped to the event loop through a ThreadsafeFunction and the calling
+// thread blocks on a channel until the JS side answered — which is why the
+// JS thread must be free while an index backed by such a store works: every
+// `BlobIndex` operation runs on the libuv pool and returns a Promise.
+
+use std::io;
+use std::sync::mpsc::Sender;
+use std::sync::RwLock;
+use std::thread::ThreadId;
+
+use napi::threadsafe_function::{
+    ErrorStrategy, ThreadSafeCallContext, ThreadsafeFunction, ThreadsafeFunctionCallMode,
+};
+use napi::{JsFunction, JsObject, JsUnknown, NapiRaw, NapiValue, ValueType};
+
+use lucistore::blob_store::BlobStore;
+use lucivy_core::blob_directory::BlobLoadMode;
+use lucivy_core::sharded_handle::BlobShardStorage;
+
+/// The object a JavaScript program hands to `BlobIndex.create()` /
+/// `BlobIndex.open()`. Methods are called with the object as `this`. Each may
+/// return its value directly or a Promise of it.
+///
+/// Keys: `indexName` is `"Lucivy_<name>/shard_<i>"` for segment files and the
+/// bare `<name>` for the root files (`_shard_config.json`, `_shard_stats.bin`);
+/// `fileName` is the file within that namespace.
+#[napi(object)]
+pub struct BlobStoreCallbacks {
+    /// Bytes of a blob, or `null` when it does not exist.
+    #[napi(ts_type = "(indexName: string, fileName: string) => Buffer | Uint8Array | null | Promise<Buffer | Uint8Array | null>")]
+    pub load: JsFunction,
+    /// Create or overwrite a blob.
+    #[napi(ts_type = "(indexName: string, fileName: string, data: Buffer) => void | Promise<void>")]
+    pub save: JsFunction,
+    /// Remove a blob; a missing blob is not an error.
+    #[napi(ts_type = "(indexName: string, fileName: string) => void | Promise<void>")]
+    pub delete: JsFunction,
+    #[napi(ts_type = "(indexName: string, fileName: string) => boolean | Promise<boolean>")]
+    pub exists: JsFunction,
+    /// Every file name stored under `indexName`.
+    #[napi(ts_type = "(indexName: string) => string[] | Promise<string[]>")]
+    pub list: JsFunction,
+    /// Optional, for `lazy: true`: size of a blob without loading it
+    /// (`null` = unknown, the file is then loaded whole on first open).
+    #[napi(ts_type = "(indexName: string, fileName: string) => number | null | Promise<number | null>")]
+    pub blob_len: Option<JsFunction>,
+    /// Optional, for `lazy: true`: `length` bytes of a blob from `offset`
+    /// (`null` = unsupported, the file is then loaded whole).
+    #[napi(ts_type = "(indexName: string, fileName: string, offset: number, length: number) => Buffer | Uint8Array | null | Promise<Buffer | Uint8Array | null>")]
+    pub load_range: Option<JsFunction>,
+}
+
+/// Options of `BlobIndex.create()` / `BlobIndex.open()`.
+#[napi(object)]
+#[derive(Default)]
+pub struct BlobIndexOptions {
+    /// Local directory for the mmap cache of the blobs (default: `lucivy_blob_cache`
+    /// under the OS temp dir). Disposable: the store is the source of truth.
+    pub cache_dir: Option<String>,
+    /// Pull blobs on first use instead of all at open. Needs `blobLen` and
+    /// `loadRange` on the store to be worth it.
+    pub lazy: Option<bool>,
+    /// `create()` only: number of shards (default 1).
+    pub shards: Option<u32>,
+}
+
+/// One argument of a store callback, built on the JS thread.
+enum Arg {
+    Str(String),
+    Bytes(Vec<u8>),
+    Num(f64),
+}
+
+fn arg_to_js(env: &Env, arg: Arg) -> Result<JsUnknown> {
+    Ok(match arg {
+        Arg::Str(s) => env.create_string(&s)?.into_unknown(),
+        Arg::Bytes(b) => env.create_buffer_with_data(b)?.into_raw().into_unknown(),
+        Arg::Num(n) => env.create_double(n)?.into_unknown(),
+    })
+}
+
+type StoreFn = ThreadsafeFunction<Vec<Arg>, ErrorStrategy::Fatal>;
+
+/// Decodes the value a store callback settled with, on the JS thread.
+type Decoder<R> = fn(&Env, JsUnknown) -> Result<R>;
+
+/// `(env, value)` of a callback's return, kept raw: the conversion happens in
+/// the return-value closure, which is the only place that knows what to
+/// expect and which must never fail (see `deliver`).
+struct RawReturn {
+    env: napi::sys::napi_env,
+    value: napi::sys::napi_value,
+}
+
+impl FromNapiValue for RawReturn {
+    unsafe fn from_napi_value(
+        env: napi::sys::napi_env,
+        napi_val: napi::sys::napi_value,
+    ) -> Result<Self> {
+        Ok(Self { env, value: napi_val })
+    }
+}
+
+/// Wraps `store[name]` so that, whatever the user wrote, the function the
+/// ThreadsafeFunction calls never throws and never rejects: it returns
+/// `{ok: value}` / `{err: message}`, or a Promise settling to one of those.
+/// napi turns an exception thrown inside a threadsafe call with a return
+/// value into a fatal error (process abort), so the exception must be caught
+/// in JavaScript, before napi sees it. Also binds `this` to the store.
+const WRAP_METHOD_JS: &str = r#"(function (store, name) {
+  const method = store[name];
+  const message = (e) => (e instanceof Error ? e.message : String(e));
+  return function () {
+    let r;
+    try { r = method.apply(store, arguments); }
+    catch (e) { return { err: message(e) }; }
+    if (r !== null && typeof r === 'object' && typeof r.then === 'function') {
+      return r.then((v) => ({ ok: v }), (e) => ({ err: message(e) }));
+    }
+    return { ok: r };
+  };
+})"#;
+
+fn napi_to_io(e: Error) -> io::Error {
+    io::Error::other(e.reason)
+}
+
+/// `{ok}` / `{err}` object → the typed value, on the JS thread.
+fn decode_settled<R>(env: &Env, settled: JsUnknown, decode: Decoder<R>) -> io::Result<R> {
+    let obj = settled.coerce_to_object().map_err(napi_to_io)?;
+    if obj.has_named_property("err").map_err(napi_to_io)? {
+        let msg: String = obj.get_named_property("err").map_err(napi_to_io)?;
+        return Err(io::Error::other(msg));
+    }
+    let ok: JsUnknown = obj.get_named_property("ok").map_err(napi_to_io)?;
+    decode(env, ok).map_err(napi_to_io)
+}
+
+/// Runs on the JS thread with the callback's return value: decodes it now,
+/// or after the Promise settles, and sends the outcome to the waiting
+/// scheduler thread. Never returns an error to napi.
+fn deliver<R: Send + 'static>(
+    env: &Env,
+    value: napi::sys::napi_value,
+    tx: Sender<io::Result<R>>,
+    decode: Decoder<R>,
+) {
+    let outcome = (|| -> Result<()> {
+        let value = unsafe { JsUnknown::from_raw(env.raw(), value) }?;
+        if !value.is_promise()? {
+            let _ = tx.send(decode_settled(env, value, decode));
+            return Ok(());
+        }
+        let promise = value.coerce_to_object()?;
+        let then: JsFunction = promise.get_named_property("then")?;
+        let tx_ok = tx.clone();
+        let on_settled = env.create_function_from_closure("lucivyStoreSettled", move |ctx| {
+            let settled: JsUnknown = ctx.get(0)?;
+            let _ = tx_ok.send(decode_settled(ctx.env, settled, decode));
+            ctx.env.get_undefined()
+        })?;
+        // The wrapper maps rejections to `{err}`; this only covers a Promise
+        // whose `then` misbehaves, so the scheduler thread never waits forever.
+        let tx_err = tx.clone();
+        let on_rejected = env.create_function_from_closure("lucivyStoreRejected", move |ctx| {
+            let reason: JsUnknown = ctx.get(0)?;
+            let msg = reason
+                .coerce_to_string()
+                .and_then(|s| s.into_utf8())
+                .and_then(|s| s.into_owned())
+                .unwrap_or_else(|_| "store callback rejected".to_string());
+            let _ = tx_err.send(Err(io::Error::other(msg)));
+            ctx.env.get_undefined()
+        })?;
+        then.call(Some(&promise), &[on_settled, on_rejected])?;
+        Ok(())
+    })();
+    if let Err(e) = outcome {
+        let _ = tx.send(Err(napi_to_io(e)));
+    }
+}
+
+fn decode_unit(_: &Env, _: JsUnknown) -> Result<()> {
+    Ok(())
+}
+
+fn decode_bytes(env: &Env, value: JsUnknown) -> Result<Option<Vec<u8>>> {
+    match value.get_type()? {
+        ValueType::Null | ValueType::Undefined => Ok(None),
+        _ if value.is_typedarray()? => {
+            let bytes = unsafe { Uint8Array::from_napi_value(env.raw(), value.raw()) }?;
+            Ok(Some(bytes.to_vec()))
+        }
+        other => Err(Error::from_reason(format!(
+            "store callback must return a Buffer, a Uint8Array or null, got {other}"
+        ))),
+    }
+}
+
+fn decode_bool(_: &Env, value: JsUnknown) -> Result<bool> {
+    value.coerce_to_bool()?.get_value()
+}
+
+fn decode_strings(env: &Env, value: JsUnknown) -> Result<Vec<String>> {
+    match value.get_type()? {
+        ValueType::Null | ValueType::Undefined => Ok(Vec::new()),
+        _ => unsafe { Vec::<String>::from_napi_value(env.raw(), value.raw()) },
+    }
+}
+
+fn decode_len(_: &Env, value: JsUnknown) -> Result<Option<u64>> {
+    match value.get_type()? {
+        ValueType::Null | ValueType::Undefined => Ok(None),
+        ValueType::Number => Ok(Some(value.coerce_to_number()?.get_double()? as u64)),
+        other => Err(Error::from_reason(format!(
+            "blobLen must return a number or null, got {other}"
+        ))),
+    }
+}
+
+/// A `BlobStore` implemented by JavaScript callbacks. See the module note.
+pub struct JsBlobStore {
+    load: StoreFn,
+    save: StoreFn,
+    delete: StoreFn,
+    exists: StoreFn,
+    list: StoreFn,
+    blob_len: Option<StoreFn>,
+    load_range: Option<StoreFn>,
+    /// The JS thread. A store call from it can never be answered (the
+    /// callback would have to run on the very thread that is waiting), so
+    /// it is refused instead of deadlocking — it only happens when an index
+    /// is garbage-collected without `close()` and its drop flushes.
+    js_thread: ThreadId,
+}
+
+impl JsBlobStore {
+    fn from_object(env: &Env, store: JsObject) -> Result<Arc<Self>> {
+        let wrap: JsFunction = env.run_script(WRAP_METHOD_JS)?;
+        let method = |name: &str, required: bool| -> Result<Option<StoreFn>> {
+            let prop: JsUnknown = store.get_named_property(name)?;
+            match prop.get_type()? {
+                ValueType::Function => {}
+                ValueType::Undefined | ValueType::Null if !required => return Ok(None),
+                other => {
+                    return Err(Error::from_reason(format!(
+                        "store.{name} must be a function, got {other}"
+                    )))
+                }
+            }
+            let store_arg = unsafe { JsUnknown::from_raw(env.raw(), store.raw()) }?;
+            let name_arg = env.create_string(name)?.into_unknown();
+            let wrapped = wrap.call(None, &[store_arg, name_arg])?;
+            let func: JsFunction = unsafe { wrapped.cast() };
+            let mut tsfn: StoreFn = func.create_threadsafe_function(
+                0,
+                |ctx: ThreadSafeCallContext<Vec<Arg>>| {
+                    ctx.value.into_iter().map(|a| arg_to_js(&ctx.env, a)).collect()
+                },
+            )?;
+            // The store must not keep the event loop alive by itself: work in
+            // flight on the libuv pool does, and that is exactly when the
+            // callbacks are needed.
+            tsfn.unref(env)?;
+            Ok(Some(tsfn))
+        };
+        Ok(Arc::new(Self {
+            load: method("load", true)?.unwrap(),
+            save: method("save", true)?.unwrap(),
+            delete: method("delete", true)?.unwrap(),
+            exists: method("exists", true)?.unwrap(),
+            list: method("list", true)?.unwrap(),
+            blob_len: method("blobLen", false)?,
+            load_range: method("loadRange", false)?,
+            js_thread: std::thread::current().id(),
+        }))
+    }
+
+    /// Ship one call to the JS thread and wait for its answer.
+    fn invoke<R: Send + 'static>(
+        &self,
+        what: &str,
+        tsfn: &StoreFn,
+        args: Vec<Arg>,
+        decode: Decoder<R>,
+    ) -> io::Result<R> {
+        if std::thread::current().id() == self.js_thread {
+            return Err(io::Error::other(format!(
+                "store.{what} was needed on the JavaScript thread, which cannot answer it \
+                 (index dropped without close()?)"
+            )));
+        }
+        let (tx, rx) = std::sync::mpsc::channel::<io::Result<R>>();
+        let status = tsfn.call_with_return_value(
+            args,
+            ThreadsafeFunctionCallMode::NonBlocking,
+            move |raw: RawReturn| {
+                let env = unsafe { Env::from_raw(raw.env) };
+                deliver(&env, raw.value, tx, decode);
+                Ok(())
+            },
+        );
+        if status != Status::Ok {
+            return Err(io::Error::other(format!(
+                "store.{what} could not be scheduled on the JavaScript thread: {status:?}"
+            )));
+        }
+        rx.recv().map_err(|_| {
+            io::Error::other(format!("store.{what}: the JavaScript side never answered"))
+        })?
+    }
+}
+
+impl BlobStore for JsBlobStore {
+    fn load(&self, index_name: &str, file_name: &str) -> io::Result<Vec<u8>> {
+        let args = vec![Arg::Str(index_name.into()), Arg::Str(file_name.into())];
+        self.invoke("load", &self.load, args, decode_bytes)?
+            .ok_or_else(|| io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{index_name}/{file_name} not found"),
+            ))
+    }
+
+    fn save(&self, index_name: &str, file_name: &str, data: &[u8]) -> io::Result<()> {
+        let args = vec![
+            Arg::Str(index_name.into()),
+            Arg::Str(file_name.into()),
+            Arg::Bytes(data.to_vec()),
+        ];
+        self.invoke("save", &self.save, args, decode_unit)
+    }
+
+    fn delete(&self, index_name: &str, file_name: &str) -> io::Result<()> {
+        let args = vec![Arg::Str(index_name.into()), Arg::Str(file_name.into())];
+        self.invoke("delete", &self.delete, args, decode_unit)
+    }
+
+    fn exists(&self, index_name: &str, file_name: &str) -> io::Result<bool> {
+        let args = vec![Arg::Str(index_name.into()), Arg::Str(file_name.into())];
+        self.invoke("exists", &self.exists, args, decode_bool)
+    }
+
+    fn list(&self, index_name: &str) -> io::Result<Vec<String>> {
+        self.invoke("list", &self.list, vec![Arg::Str(index_name.into())], decode_strings)
+    }
+
+    fn blob_len(&self, index_name: &str, file_name: &str) -> io::Result<Option<u64>> {
+        let Some(tsfn) = &self.blob_len else { return Ok(None) };
+        let args = vec![Arg::Str(index_name.into()), Arg::Str(file_name.into())];
+        self.invoke("blobLen", tsfn, args, decode_len)
+    }
+
+    fn load_range(
+        &self,
+        index_name: &str,
+        file_name: &str,
+        range: std::ops::Range<u64>,
+    ) -> io::Result<Option<Vec<u8>>> {
+        let Some(tsfn) = &self.load_range else { return Ok(None) };
+        let args = vec![
+            Arg::Str(index_name.into()),
+            Arg::Str(file_name.into()),
+            Arg::Num(range.start as f64),
+            Arg::Num((range.end - range.start) as f64),
+        ];
+        self.invoke("loadRange", tsfn, args, decode_bytes)
+    }
+}
+
+// ─── BlobIndex ─────────────────────────────────────────────────────────────
+
+/// One `BlobIndex` operation, run on the libuv pool so the JS thread is free
+/// to serve the store callbacks it triggers. `R` is delivered as the
+/// Promise's value.
+pub struct BlobTask<R> {
+    op: Option<Box<dyn FnOnce() -> Result<R> + Send>>,
+}
+
+impl<R: Send + ToNapiValue + TypeName + 'static> Task for BlobTask<R> {
+    type Output = R;
+    type JsValue = R;
+
+    fn compute(&mut self) -> Result<R> {
+        let op = self.op.take().ok_or_else(|| Error::from_reason("task already run"))?;
+        op()
+    }
+
+    fn resolve(&mut self, _env: Env, output: R) -> Result<R> {
+        Ok(output)
+    }
+}
+
+fn blob_task<R>(op: impl FnOnce() -> Result<R> + Send + 'static) -> AsyncTask<BlobTask<R>>
+where
+    R: Send + ToNapiValue + TypeName + 'static,
+{
+    AsyncTask::new(BlobTask { op: Some(Box::new(op)) })
+}
+
+struct BlobInner {
+    /// `None` once `dropIndex()` consumed the handle.
+    handle: RwLock<Option<ShardedHandle>>,
+    text_fields: Vec<String>,
+}
+
+impl BlobInner {
+    fn with_handle<R>(&self, op: impl FnOnce(&ShardedHandle) -> Result<R>) -> Result<R> {
+        let guard = self.handle.read()
+            .map_err(|_| Error::from_reason("index lock poisoned"))?;
+        let handle = guard.as_ref().ok_or_else(|| Error::from_reason(
+            "index was dropped with dropIndex(): no further calls allowed",
+        ))?;
+        op(handle)
+    }
+}
+
+fn blob_storage(
+    store: Arc<JsBlobStore>,
+    index_name: &str,
+    options: &BlobIndexOptions,
+) -> BlobShardStorage<JsBlobStore> {
+    let cache_dir = options.cache_dir.clone()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("lucivy_blob_cache"));
+    let mode = if options.lazy.unwrap_or(false) { BlobLoadMode::Lazy } else { BlobLoadMode::Eager };
+    BlobShardStorage::new(store, index_name, cache_dir).with_load_mode(mode)
+}
+
+/// An index whose files live in a storage you provide — a transactional
+/// database, an object store, a Map — through the `BlobStoreCallbacks`
+/// object. Every method returns a Promise: the work runs off the JS thread,
+/// which stays free to serve the store callbacks.
+#[napi]
+pub struct BlobIndex {
+    inner: Arc<BlobInner>,
+    index_name: String,
+    user_fields: Vec<(String, String)>,
+}
+
+impl BlobIndex {
+    fn from_handle(handle: ShardedHandle, index_name: String) -> Self {
+        let (user_fields, text_fields) = extract_user_fields(&handle.config);
+        Self {
+            inner: Arc::new(BlobInner {
+                handle: RwLock::new(Some(handle)),
+                text_fields,
+            }),
+            index_name,
+            user_fields,
+        }
+    }
+
+    fn run<R>(&self, op: impl FnOnce(&ShardedHandle, &[String]) -> Result<R> + Send + 'static)
+        -> AsyncTask<BlobTask<R>>
+    where
+        R: Send + ToNapiValue + TypeName + 'static,
+    {
+        let inner = Arc::clone(&self.inner);
+        blob_task(move || inner.with_handle(|h| op(h, &inner.text_fields)))
+    }
+}
+
+#[napi]
+impl BlobIndex {
+    /// Create a new index in the given store.
+    ///
+    /// @param store - Object implementing the store protocol (`load`, `save`, `delete`, `exists`, `list`, optional `blobLen` / `loadRange`).
+    /// @param indexName - Name of the index inside the store.
+    /// @param fields - Field definitions, as for `Index.create()`.
+    /// @param options - `{cacheDir?, lazy?, shards?}`.
+    #[napi(ts_return_type = "Promise<BlobIndex>")]
+    pub fn create(
+        env: Env,
+        #[napi(ts_arg_type = "BlobStoreCallbacks")] store: JsObject,
+        index_name: String,
+        fields: Vec<FieldDef>,
+        options: Option<BlobIndexOptions>,
+    ) -> Result<AsyncTask<BlobTask<BlobIndex>>> {
+        let store = JsBlobStore::from_object(&env, store)?;
+        let options = options.unwrap_or_default();
+        let config = schema_config(&fields, options.shards);
+        Ok(blob_task(move || {
+            let storage = blob_storage(store, &index_name, &options);
+            let handle = ShardedHandle::create_with_storage(Box::new(storage), &config)
+                .map_err(|e| Error::from_reason(e))?;
+            Ok(BlobIndex::from_handle(handle, index_name))
+        }))
+    }
+
+    /// Open an index that already exists in the store.
+    ///
+    /// @param store - Same protocol as for `create()`.
+    /// @param indexName - Name given at creation.
+    /// @param options - `{cacheDir?, lazy?}`.
+    #[napi(ts_return_type = "Promise<BlobIndex>")]
+    pub fn open(
+        env: Env,
+        #[napi(ts_arg_type = "BlobStoreCallbacks")] store: JsObject,
+        index_name: String,
+        options: Option<BlobIndexOptions>,
+    ) -> Result<AsyncTask<BlobTask<BlobIndex>>> {
+        let store = JsBlobStore::from_object(&env, store)?;
+        let options = options.unwrap_or_default();
+        Ok(blob_task(move || {
+            let storage = blob_storage(store, &index_name, &options);
+            let handle = ShardedHandle::open_with_storage(Box::new(storage))
+                .map_err(|e| Error::from_reason(e))?;
+            Ok(BlobIndex::from_handle(handle, index_name))
+        }))
+    }
+
+    /// Add a document. Same arguments as `Index.add()`.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn add(&self, doc_id: u32, fields: HashMap<String, serde_json::Value>)
+        -> AsyncTask<BlobTask<()>>
+    {
+        self.run(move |h, _| add_one(h, doc_id, &fields))
+    }
+
+    /// Add multiple documents. Same arguments as `Index.addMany()`.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn add_many(&self, docs: Vec<HashMap<String, serde_json::Value>>)
+        -> AsyncTask<BlobTask<()>>
+    {
+        self.run(move |h, _| add_many_docs(h, &docs))
+    }
+
+    /// Delete a document by its `_node_id` (staged until `commit()`).
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn delete(&self, doc_id: u32) -> AsyncTask<BlobTask<()>> {
+        self.run(move |h, _| h.delete_by_node_id(doc_id as u64).map_err(|e| Error::from_reason(e)))
+    }
+
+    /// Update a document (delete old + re-add with new fields).
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn update(&self, doc_id: u32, fields: HashMap<String, serde_json::Value>)
+        -> AsyncTask<BlobTask<()>>
+    {
+        self.run(move |h, _| {
+            h.delete_by_node_id(doc_id as u64).map_err(|e| Error::from_reason(e))?;
+            add_one(h, doc_id, &fields)
+        })
+    }
+
+    /// Commit pending changes to the store: segment files are saved through
+    /// `store.save()`, `meta.json` last (the commit point).
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn commit(&self) -> AsyncTask<BlobTask<()>> {
+        self.run(|h, _| h.commit().map_err(|e| Error::from_reason(e)))
+    }
+
+    /// Search. Same arguments and results as `Index.search()`.
+    #[napi(ts_return_type = "Promise<Array<SearchResult>>")]
+    pub fn search(&self, query: serde_json::Value, options: Option<SearchOptions>)
+        -> AsyncTask<BlobTask<Vec<SearchResult>>>
+    {
+        self.run(move |h, text_fields| run_search(h, text_fields, &query, options))
+    }
+
+    /// Honest warnings for a query, without running it. See `Index.queryWarnings()`.
+    #[napi(ts_return_type = "Promise<Array<string>>")]
+    pub fn query_warnings(&self, query: serde_json::Value) -> AsyncTask<BlobTask<Vec<String>>> {
+        self.run(move |h, text_fields| {
+            let query_config = parse_query(&query, text_fields)?;
+            Ok(h.query_warnings(&query_config))
+        })
+    }
+
+    /// Number of documents across all shards.
+    #[napi(ts_return_type = "Promise<number>")]
+    pub fn num_docs(&self) -> AsyncTask<BlobTask<u32>> {
+        self.run(|h, _| Ok(h.num_docs() as u32))
+    }
+
+    /// Flush pending writes, wait for merges, release the writer lock.
+    /// After `close()` the store is not touched again: it is safe to tear
+    /// down whatever backs it. Always call it before the process exits.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn close(&self) -> AsyncTask<BlobTask<()>> {
+        self.run(|h, _| h.close().map_err(|e| Error::from_reason(e)))
+    }
+
+    /// Merge every shard's segments into segments of at most `maxDocs`
+    /// documents, then commit. See `Index.compact()`.
+    #[napi(ts_return_type = "Promise<number>")]
+    pub fn compact(&self, max_docs: Option<u32>) -> AsyncTask<BlobTask<u32>> {
+        let max_docs = max_docs.unwrap_or(10_000) as usize;
+        self.run(move |h, _| h.compact(max_docs).map(|n| n as u32).map_err(|e| Error::from_reason(e)))
+    }
+
+    /// Block until no background merge is running or about to start.
+    #[napi(ts_return_type = "Promise<number>")]
+    pub fn wait_merges_quiet(&self) -> AsyncTask<BlobTask<u32>> {
+        self.run(|h, _| h.wait_merges_quiet().map(|n| n as u32).map_err(|e| Error::from_reason(e)))
+    }
+
+    /// Bytes of every searchable segment of every shard, as cached locally.
+    #[napi(ts_return_type = "Promise<number>")]
+    pub fn index_bytes(&self) -> AsyncTask<BlobTask<f64>> {
+        self.run(|h, _| Ok(h.index_bytes() as f64))
+    }
+
+    /// Delete the whole index: `close()`, then every blob the store holds
+    /// for it — the `Lucivy_<name>/shard_<i>` namespaces and the root
+    /// `<name>` namespace, each listed with `store.list()` and removed with
+    /// `store.delete()`. Consumes the handle: every later call throws.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn drop_index(&self) -> AsyncTask<BlobTask<()>> {
+        let inner = Arc::clone(&self.inner);
+        blob_task(move || {
+            let mut guard = inner.handle.write()
+                .map_err(|_| Error::from_reason("index lock poisoned"))?;
+            let handle = guard.take().ok_or_else(|| Error::from_reason(
+                "index was already dropped with dropIndex()",
+            ))?;
+            handle.drop_index().map_err(|e| Error::from_reason(e))
+        })
+    }
+
+    /// Name of the index inside the store (getter).
+    #[napi(getter)]
+    pub fn index_name(&self) -> &str {
+        &self.index_name
+    }
+
+    /// Number of shards (getter).
+    #[napi(getter)]
+    pub fn num_shards(&self) -> Result<u32> {
+        self.inner.with_handle(|h| Ok(h.num_shards() as u32))
+    }
+
+    /// Schema as a list of field definitions (getter).
+    #[napi(getter)]
+    pub fn schema(&self) -> Vec<FieldDef> {
+        self.user_fields
+            .iter()
+            .map(|(name, ft)| FieldDef {
+                name: name.clone(),
+                r#type: ft.clone(),
+                stored: None,
+                indexed: None,
+                fast: None,
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

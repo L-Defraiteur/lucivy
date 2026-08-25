@@ -298,3 +298,57 @@ fn v3_close_means_no_more_store_calls() {
     let late = store.late.lock().unwrap();
     assert!(late.is_empty(), "store touched after close(): {late:?}");
 }
+
+/// A store that cannot answer `blob_len` (the trait's default), in lazy
+/// mode: every file's size is unknown, so `get_file_handle` materialises it
+/// under the `pending` lock — and used to lock it again inside, a
+/// self-deadlock on the first segment open. `MemBlobStore` answers
+/// `blob_len`, which is why no core test met it; a Python store without the
+/// optional method did.
+#[test]
+fn lazy_open_with_a_store_that_cannot_size_blobs_does_not_deadlock() {
+    use lucistore::blob_store::BlobStore;
+    use lucivy_core::blob_directory::BlobLoadMode;
+
+    struct NoLen(MemBlobStore);
+    impl BlobStore for NoLen {
+        fn load(&self, i: &str, f: &str) -> std::io::Result<Vec<u8>> { self.0.load(i, f) }
+        fn save(&self, i: &str, f: &str, d: &[u8]) -> std::io::Result<()> { self.0.save(i, f, d) }
+        fn delete(&self, i: &str, f: &str) -> std::io::Result<()> { self.0.delete(i, f) }
+        fn exists(&self, i: &str, f: &str) -> std::io::Result<bool> { self.0.exists(i, f) }
+        fn list(&self, i: &str) -> std::io::Result<Vec<String>> { self.0.list(i) }
+        // blob_len / load_range: the defaults (unknown / unsupported).
+    }
+
+    let store = Arc::new(NoLen(MemBlobStore::new()));
+    let cache_a = std::env::temp_dir().join("lucivy_nolen_a");
+    let cache_b = std::env::temp_dir().join("lucivy_nolen_b");
+    let _ = std::fs::remove_dir_all(&cache_a);
+    let _ = std::fs::remove_dir_all(&cache_b);
+    {
+        let storage = BlobShardStorage::new(store.clone(), "nolen", &cache_a);
+        let h = ShardedHandle::create_with_storage(Box::new(storage), &config(2)).unwrap();
+        for i in 0..40u64 {
+            h.add_document_json(i, &serde_json::json!({"content": format!("kmalloc probe {i} spin_lock_init")})).unwrap();
+        }
+        h.commit().unwrap();
+        h.close().unwrap();
+    }
+    // The open must return; a watchdog turns a hang into a failure.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let store2 = store.clone();
+    std::thread::spawn(move || {
+        let storage = BlobShardStorage::new(store2, "nolen", &cache_b).with_load_mode(BlobLoadMode::Lazy);
+        let h = ShardedHandle::open_with_storage(Box::new(storage)).unwrap();
+        let q = lucivy_core::query::QueryConfig {
+            query_type: "contains".into(), field: Some("content".into()), value: Some("kmalloc".into()),
+            ..Default::default()
+        };
+        let n = h.search_with_docs(&q, 100).unwrap().len();
+        h.close().unwrap();
+        tx.send(n).unwrap();
+    });
+    let n = rx.recv_timeout(std::time::Duration::from_secs(60))
+        .expect("lazy open with an unsized store hung (get_file_handle self-deadlock)");
+    assert_eq!(n, 40);
+}

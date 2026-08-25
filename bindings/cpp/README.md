@@ -10,7 +10,7 @@ Version 3.0.0 — built on the Lucivy 3.0.0 engine (SFX v3 suffix index).
 cargo build -p lucivy-cpp --release
 ```
 
-This produces a static library and CXX-generated headers. Link against `liblucivy_cpp.a` and include the generated `lib.rs.h`.
+This produces a static library and CXX-generated headers. Link against `liblucivy_cpp.a` and include the generated `lib.rs.h`; add `-I bindings/cpp/include` for the `lucivy/blob_backend.h` header it depends on. The in-memory reference backend (`mem_blob_backend.cc`) is compiled into the library.
 
 ## Quick start
 
@@ -234,9 +234,200 @@ auto results_a = node_a->search_with_global_stats(query_json, merged, 10);
 auto results_b = node_b->search_with_global_stats(query_json, merged, 10);
 ```
 
-## Storage backends
+## Bring your own storage (ACID)
 
-This binding stores indexes on the filesystem (`lucivy_create` / `lucivy_open`) or serves them from a LUCE blob in memory (`lucivy_open_snapshot`). ACID blob storage — the `BlobStore` trait, `BlobShardStorage`, lazy loading of shards from a database — is a Rust-level API of `lucivy-core` / `lucistore`; rag3db uses it through its own bridge (`lucivy_fts`). It is not part of this standalone binding.
+Besides the filesystem (`lucivy_create` / `lucivy_open`) and in-memory snapshots (`lucivy_open_snapshot`), an index can live in **your** storage: a database table, an object store, anything you can address by `(index_name, file_name)`. Subclass `lucivy::BlobBackend` from `include/lucivy/blob_backend.h` and hand it to the index. The backend is the durable truth; a local cache directory only serves reads through mmap and can be thrown away at any time. This is the standalone equivalent of what rag3db does over Postgres through its own bridge.
+
+Add `-I bindings/cpp/include` to your compiler flags (the generated `lib.rs.h` includes `lucivy/blob_backend.h`).
+
+### The abstract class
+
+```cpp
+#include "lucivy/blob_backend.h"
+
+namespace lucivy {
+class BlobBackend {
+public:
+  virtual ~BlobBackend() = default;
+
+  // Fill `out` and return true; return false when the blob does not exist.
+  virtual bool load(rust::Str index_name, rust::Str file_name,
+                    std::vector<uint8_t>& out) const = 0;
+  // Create or overwrite.
+  virtual void save(rust::Str index_name, rust::Str file_name,
+                    rust::Slice<const uint8_t> data) const = 0;
+  // Removing a missing blob is not an error.
+  virtual void remove(rust::Str index_name, rust::Str file_name) const = 0;
+  virtual bool exists(rust::Str index_name, rust::Str file_name) const = 0;
+  // Every file_name under index_name (empty for an unknown index).
+  virtual rust::Vec<rust::String> list(rust::Str index_name) const = 0;
+
+  // Optional, for lazy loading. Return false when unknown / unsupported.
+  virtual bool blob_len(rust::Str index_name, rust::Str file_name,
+                        uint64_t& out) const { return false; }
+  virtual bool load_range(rust::Str index_name, rust::Str file_name,
+                          uint64_t offset, uint64_t len,
+                          std::vector<uint8_t>& out) const { return false; }
+};
+}
+```
+
+`rust::Str` converts to `std::string` with `std::string(s)`; `rust::Slice<const uint8_t>` has `data()` and `size()`.
+
+**Errors and "not found".** Throw any `std::exception` for a failure: the message becomes the error string of the lucivy call that triggered the I/O (`commit()`, `search()`, the open itself). Do not throw for a missing blob: `load` returns `false`, and lucivy treats that as *not found*, a normal answer while opening an index. `blob_len` / `load_range` returning `false` mean "I cannot", and lucivy falls back to loading the whole blob.
+
+**Thread safety.** Every method is `const` and is called **concurrently** from lucivy's scheduler threads: one actor per shard commits in parallel, background merges write while you search. Guard your state with a mutex (make it `mutable`), or use a connection pool, one connection per calling thread.
+
+**No re-entrancy.** A backend must not call back into the index it stores: no `search`, `add` or `commit` from inside `save()`. The calling thread may be the one holding the shard's writer lock.
+
+**Namespaces.** An index created under the name `"products"` stores its per-shard files under `"Lucivy_products/shard_0"`, `"Lucivy_products/shard_1"`, ... and its two root files (`_shard_config.json`, `_shard_stats.bin`) under `"products"`. Treat `index_name` and `file_name` as opaque strings and store both; lock files are never sent to the backend.
+
+### Entry points
+
+```cpp
+// Create: config_json is either the fields array of lucivy_create(), or a
+// full schema object with the shard count and engine options.
+auto index = lucivy::lucivy_create_with_blob_store(
+    std::make_unique<MyBackend>(connection_string),
+    "products",                                           // index_name
+    R"({"fields":[{"name":"body","type":"text"}],"shards":2})",
+    "",                                                   // cache_dir: "" = temporary
+    false);                                               // lazy
+
+// Open what a previous run (or another machine) stored under that name.
+auto index = lucivy::lucivy_open_with_blob_store(
+    std::make_unique<MyBackend>(connection_string), "products", "/var/cache/lucivy", true);
+```
+
+Everything else is the same object: `add`, `commit`, `search`, `compact`, `close`, `drop_index`. What differs:
+
+- **`cache_dir`** holds the mmap cache of the blobs, one subdirectory per shard and per open (`{cache_dir}/{pid}/Lucivy_products/shard_0_{n}/`). It is disposable: the blobs are the truth, a fresh cache is rebuilt from them at the next open. An empty string asks the binding for a temporary directory, removed when the index object is destroyed (call `close()` first, as always). `get_path()` returns the cache directory.
+- **`lazy`** — `false`: every blob is loaded at open, predictable latency. `true`: nothing is loaded at open; a file whose size the backend reports (`blob_len`) is pulled on its first *byte read* — the header and footer probes at segment open go through `load_range`, and only the structures a query touches get loaded whole. A backend without `blob_len` / `load_range` still works in lazy mode, it just loads each file when it is first opened.
+- **A failed `save()`** makes `commit()` (or `close()`, which commits) return an error and never hangs. The documents of that commit are lost: the segment that could not be persisted is discarded, the committed state is untouched, the index stays usable, and the next `commit()` succeeds with whatever you add afterwards. Re-add what was pending. Segment blobs saved before the failing one may remain in the backend as orphans (never referenced by a `meta.json`). Note that when the failing save is a segment file written by the background finalize, the engine reports a generic `background finalize failed` rather than your exception text; a failing `meta.json` (the commit point) carries it.
+- **`drop_index()`** deletes every blob of the index from the backend — the shard namespaces and the root one (`list` + `remove`) — then disarms the instance like a filesystem drop.
+- **Not available:** `export_snapshot`, `export_sharded_delta` and `apply_sharded_delta` read shard files from an index directory on disk, which a blob-backed index does not have; they return an explicit error. Your backend already holds the durable copy.
+
+### Reference implementation: in memory
+
+`include/lucivy/mem_blob_backend.h` / `src/mem_blob_backend.cc` is a complete backend over a `std::map` behind a `std::mutex`, shareable between backends through a `std::shared_ptr` (the binding's own tests run on it). Its `load`:
+
+```cpp
+bool MemBlobBackend::load(rust::Str index_name, rust::Str file_name,
+                          std::vector<uint8_t>& out) const {
+  std::lock_guard<std::mutex> lock(map_->mutex);
+  auto index = map_->blobs.find(std::string(index_name));
+  if (index == map_->blobs.end()) return false;
+  auto file = index->second.find(std::string(file_name));
+  if (file == index->second.end()) return false;
+  out = file->second;
+  return true;
+}
+```
+
+```cpp
+#include "lucivy/mem_blob_backend.h"
+
+auto map = lucivy::new_mem_blob_map();
+auto index = lucivy::lucivy_create_with_blob_store(
+    lucivy::new_mem_blob_backend(map), "demo", fields_json, "", false);
+index->add(1, R"({"body":"pthread_mutex_lock"})");
+index->close();
+
+// "Another process": a second backend over the same map.
+auto again = lucivy::lucivy_open_with_blob_store(
+    lucivy::new_mem_blob_backend(map), "demo", "", true);
+```
+
+### Postgres sketch
+
+Pseudo-code, not compiled: one table, `SUBSTRING` for ranges.
+
+```sql
+CREATE TABLE lucivy_blobs (
+  _index TEXT NOT NULL,
+  _file  TEXT NOT NULL,
+  _data  BYTEA NOT NULL,
+  PRIMARY KEY (_index, _file)
+);
+```
+
+```cpp
+class PgBackend : public lucivy::BlobBackend {
+  // One connection per calling thread (thread_local, or a pool):
+  // lucivy calls these methods concurrently.
+  pqxx::connection& conn() const;
+
+public:
+  bool load(rust::Str index, rust::Str file, std::vector<uint8_t>& out) const override {
+    pqxx::work tx(conn());
+    auto rows = tx.exec_params(
+        "SELECT _data FROM lucivy_blobs WHERE _index = $1 AND _file = $2",
+        std::string(index), std::string(file));
+    if (rows.empty()) return false;                  // NotFound, not an error
+    auto bytes = rows[0][0].as<pqxx::binarystring>();
+    out.assign(bytes.data(), bytes.data() + bytes.size());
+    return true;
+  }
+
+  void save(rust::Str index, rust::Str file, rust::Slice<const uint8_t> data) const override {
+    pqxx::work tx(conn());
+    tx.exec_params(
+        "INSERT INTO lucivy_blobs (_index, _file, _data) VALUES ($1, $2, $3) "
+        "ON CONFLICT (_index, _file) DO UPDATE SET _data = EXCLUDED._data",
+        std::string(index), std::string(file),
+        pqxx::binarystring(data.data(), data.size()));
+    tx.commit();                                     // throws on failure -> commit() error
+  }
+
+  void remove(rust::Str index, rust::Str file) const override {
+    pqxx::work tx(conn());
+    tx.exec_params("DELETE FROM lucivy_blobs WHERE _index = $1 AND _file = $2",
+                   std::string(index), std::string(file));
+    tx.commit();
+  }
+
+  bool exists(rust::Str index, rust::Str file) const override {
+    pqxx::work tx(conn());
+    return !tx.exec_params("SELECT 1 FROM lucivy_blobs WHERE _index = $1 AND _file = $2",
+                           std::string(index), std::string(file)).empty();
+  }
+
+  rust::Vec<rust::String> list(rust::Str index) const override {
+    pqxx::work tx(conn());
+    rust::Vec<rust::String> names;
+    for (auto row : tx.exec_params("SELECT _file FROM lucivy_blobs WHERE _index = $1",
+                                   std::string(index)))
+      names.push_back(row[0].as<std::string>());
+    return names;
+  }
+
+  // Lazy loading: sizes and ranges without pulling the blob.
+  bool blob_len(rust::Str index, rust::Str file, uint64_t& out) const override {
+    pqxx::work tx(conn());
+    auto rows = tx.exec_params(
+        "SELECT LENGTH(_data) FROM lucivy_blobs WHERE _index = $1 AND _file = $2",
+        std::string(index), std::string(file));
+    if (rows.empty()) return false;
+    out = rows[0][0].as<uint64_t>();
+    return true;
+  }
+
+  bool load_range(rust::Str index, rust::Str file, uint64_t offset, uint64_t len,
+                  std::vector<uint8_t>& out) const override {
+    pqxx::work tx(conn());
+    auto rows = tx.exec_params(                      // SUBSTRING is 1-based
+        "SELECT SUBSTRING(_data FROM $3 FOR $4) FROM lucivy_blobs "
+        "WHERE _index = $1 AND _file = $2",
+        std::string(index), std::string(file), offset + 1, len);
+    if (rows.empty()) return false;
+    auto bytes = rows[0][0].as<pqxx::binarystring>();
+    out.assign(bytes.data(), bytes.data() + bytes.size());
+    return true;
+  }
+};
+```
+
+A shard's commit point is its `meta.json`: segment files are saved first, the file registry (`.managed.json`) right before it, then `meta.json` itself. A reader that only trusts files referenced by `meta.json` never sees a half-written commit.
 
 ## License
 

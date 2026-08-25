@@ -2,21 +2,187 @@
 //!
 //! Unified on ShardedHandle (even single-shard uses ShardedHandle with shards=1).
 
+//!
+//! Threading rule: every call into the engine that may block on lucivy's own
+//! scheduler threads (commits, merges, searches, and every blob-store call
+//! made on the engine's behalf) runs inside `py.allow_threads`. A Python
+//! blob store is called back from those threads under `Python::with_gil`;
+//! if the calling thread still held the GIL while waiting for them, nothing
+//! would ever finish.
+
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::sync::Arc;
 
 use ld_lucivy::query::HighlightSink;
 use ld_lucivy::schema::{FieldType, Value as LucivyValue};
 use ld_lucivy::LucivyDocument;
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyFileNotFoundError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyByteArray, PyBytes, PyDict, PyList, PyString};
 
+use lucistore::blob_store::BlobStore;
+use lucivy_core::blob_directory::BlobLoadMode;
 use lucivy_core::handle::NODE_ID_FIELD;
 use lucivy_core::query;
 use lucivy_core::snapshot;
-use lucivy_core::sharded_handle::{ShardedHandle, ShardedSearchResult};
+use lucivy_core::sharded_handle::{BlobShardStorage, ShardedHandle, ShardedSearchResult};
+
+// ─── PyBlobStore ───────────────────────────────────────────────────────────
+
+/// A [`BlobStore`] that forwards every call to a Python object.
+///
+/// The object provides ``load``, ``save``, ``delete``, ``exists`` and
+/// ``list``; ``blob_len`` and ``load_range`` are optional and only used when
+/// present (lazy loading). Calls come from lucivy's scheduler threads, each
+/// one taking the GIL for its duration.
+struct PyBlobStore {
+    obj: Py<PyAny>,
+    has_blob_len: bool,
+    has_load_range: bool,
+}
+
+const REQUIRED_STORE_METHODS: [&str; 5] = ["load", "save", "delete", "exists", "list"];
+
+impl PyBlobStore {
+    fn new(obj: &Bound<'_, PyAny>) -> PyResult<Self> {
+        for name in REQUIRED_STORE_METHODS {
+            if !obj.hasattr(name)? {
+                return Err(PyTypeError::new_err(format!(
+                    "blob store object has no '{name}' method (required: load, save, delete, exists, list)"
+                )));
+            }
+        }
+        Ok(Self {
+            obj: obj.clone().unbind(),
+            has_blob_len: obj.hasattr("blob_len")?,
+            has_load_range: obj.hasattr("load_range")?,
+        })
+    }
+
+    /// Run `f` on the store object under the GIL, mapping a Python exception
+    /// to an `io::Error`: ``FileNotFoundError`` / ``KeyError`` become
+    /// `NotFound` (the trait's "absent blob" signal), anything else carries
+    /// the exception text.
+    fn with<T>(&self, f: impl FnOnce(Python<'_>, &Bound<'_, PyAny>) -> PyResult<T>) -> io::Result<T> {
+        Python::with_gil(|py| f(py, self.obj.bind(py)).map_err(|e| py_err_to_io(py, e)))
+    }
+}
+
+fn py_err_to_io(py: Python<'_>, e: PyErr) -> io::Error {
+    let kind = if e.is_instance_of::<PyFileNotFoundError>(py) || e.is_instance_of::<PyKeyError>(py) {
+        io::ErrorKind::NotFound
+    } else {
+        io::ErrorKind::Other
+    };
+    io::Error::new(kind, format!("blob store raised {e}"))
+}
+
+/// Bytes out of whatever the store returned: ``bytes``, ``bytearray``, or
+/// anything ``bytes()`` accepts (``memoryview``, a buffer).
+fn bytes_of(value: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    if let Ok(b) = value.downcast::<PyBytes>() {
+        return Ok(b.as_bytes().to_vec());
+    }
+    if let Ok(b) = value.downcast::<PyByteArray>() {
+        return Ok(b.to_vec());
+    }
+    if value.is_none() || value.is_instance_of::<PyString>() || value.extract::<i64>().is_ok() {
+        return Err(PyTypeError::new_err(format!(
+            "blob store must return bytes-like data, got {}", value.get_type().name()?
+        )));
+    }
+    let converted = value.py().get_type::<PyBytes>().call1((value,))?;
+    Ok(converted.downcast_into::<PyBytes>()?.as_bytes().to_vec())
+}
+
+impl BlobStore for PyBlobStore {
+    fn load(&self, index_name: &str, file_name: &str) -> io::Result<Vec<u8>> {
+        self.with(|_, obj| bytes_of(&obj.call_method1("load", (index_name, file_name))?))
+    }
+
+    fn save(&self, index_name: &str, file_name: &str, data: &[u8]) -> io::Result<()> {
+        self.with(|py, obj| {
+            obj.call_method1("save", (index_name, file_name, PyBytes::new(py, data)))?;
+            Ok(())
+        })
+    }
+
+    fn delete(&self, index_name: &str, file_name: &str) -> io::Result<()> {
+        self.with(|_, obj| {
+            obj.call_method1("delete", (index_name, file_name))?;
+            Ok(())
+        })
+    }
+
+    fn exists(&self, index_name: &str, file_name: &str) -> io::Result<bool> {
+        self.with(|_, obj| obj.call_method1("exists", (index_name, file_name))?.is_truthy())
+    }
+
+    fn list(&self, index_name: &str) -> io::Result<Vec<String>> {
+        self.with(|_, obj| obj.call_method1("list", (index_name,))?.extract())
+    }
+
+    fn blob_len(&self, index_name: &str, file_name: &str) -> io::Result<Option<u64>> {
+        if !self.has_blob_len {
+            return Ok(None);
+        }
+        self.with(|_, obj| {
+            let value = obj.call_method1("blob_len", (index_name, file_name))?;
+            if value.is_none() { Ok(None) } else { value.extract().map(Some) }
+        })
+    }
+
+    fn load_range(
+        &self,
+        index_name: &str,
+        file_name: &str,
+        range: std::ops::Range<u64>,
+    ) -> io::Result<Option<Vec<u8>>> {
+        if !self.has_load_range {
+            return Ok(None);
+        }
+        self.with(|_, obj| {
+            let value = obj.call_method1(
+                "load_range",
+                (index_name, file_name, range.start, range.end - range.start),
+            )?;
+            if value.is_none() { Ok(None) } else { bytes_of(&value).map(Some) }
+        })
+    }
+}
+
+/// Default mmap cache root for blob-backed indexes. `BlobShardStorage` adds
+/// `<pid>/<Lucivy_name>_<n>/` under it, so every open gets a fresh leaf, and
+/// removes that leaf when the index is released.
+fn default_cache_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join("lucivy-blob-cache")
+}
+
+/// The storage backend of a Python-driven blob-backed index.
+fn blob_storage(
+    store: &Bound<'_, PyAny>,
+    index_name: &str,
+    cache_dir: Option<&str>,
+    lazy: bool,
+) -> PyResult<Box<BlobShardStorage<PyBlobStore>>> {
+    let store = Arc::new(PyBlobStore::new(store)?);
+    // Lazy mode with a file of unknown size downloads it at first open —
+    // and the engine's lazy directory takes its `pending` lock twice on
+    // that path (`get_file_handle` holds it across `materialize`), so a
+    // store without `blob_len` would hang on the first segment open, not
+    // degrade. Refuse up front until the core handles unknown sizes.
+    if lazy && !store.has_blob_len {
+        return Err(PyValueError::new_err(
+            "lazy=True needs a blob_len(index_name, file_name) method on the store \
+             (the size of a blob without loading it); add it, or open without lazy",
+        ));
+    }
+    let cache = cache_dir.map(std::path::PathBuf::from).unwrap_or_else(default_cache_dir);
+    let mode = if lazy { BlobLoadMode::Lazy } else { BlobLoadMode::Eager };
+    Ok(Box::new(BlobShardStorage::new(store, index_name, cache).with_load_mode(mode)))
+}
 
 // ─── SearchResult ──────────────────────────────────────────────────────────
 
@@ -52,22 +218,33 @@ impl SearchResult {
 
 // ─── Index ─────────────────────────────────────────────────────────────────
 
+/// Where an index's files live.
+enum Backing {
+    /// A directory on disk (`create`, `open`, `import_snapshot`).
+    Dir(String),
+    /// A LUCE snapshot served from memory: read-only, no files of its own.
+    Snapshot,
+    /// A Python blob store (`create_with_blob_store`, `open_with_blob_store`):
+    /// writable, no directory. The store object is held here for the
+    /// index's lifetime, on top of the reference the storage backend keeps
+    /// (which `drop_index` consumes with the handle).
+    Blob { index_name: String, _store: Py<PyAny> },
+}
+
 #[pyclass]
 struct Index {
     /// `None` once `drop_index()` has consumed the handle (or `close()` released
     /// a served snapshot): every method then raises instead of touching it.
     handle: Option<ShardedHandle>,
-    /// Index directory. `None` for an index served from a snapshot in memory
-    /// (`open_snapshot`), which has no files of its own.
-    index_path: Option<String>,
+    backing: Backing,
     user_fields: Vec<(String, String)>,
     text_fields: Vec<String>,
 }
 
 impl Index {
-    fn from_handle(handle: ShardedHandle, index_path: Option<String>) -> Self {
+    fn from_handle(handle: ShardedHandle, backing: Backing) -> Self {
         let (user_fields, text_fields) = extract_user_fields(&handle.config);
-        Self { handle: Some(handle), index_path, user_fields, text_fields }
+        Self { handle: Some(handle), backing, user_fields, text_fields }
     }
 
     /// The live handle, or a clear error once the index has been dropped.
@@ -83,7 +260,7 @@ impl Index {
     /// instead, with the reason.
     fn writable(&self) -> PyResult<&ShardedHandle> {
         let handle = self.h()?;
-        if self.index_path.is_none() {
+        if matches!(self.backing, Backing::Snapshot) {
             return Err(PyValueError::new_err(
                 "a snapshot is read-only: use Index.import_snapshot() to get an editable copy",
             ));
@@ -91,13 +268,63 @@ impl Index {
         Ok(handle)
     }
 
-    /// The index directory, or a clear error for an index served from a snapshot.
+    /// The index directory, or a clear error when the index has none.
     fn dir(&self) -> PyResult<&str> {
-        self.index_path.as_deref().ok_or_else(|| PyValueError::new_err(
-            "this index is served from a snapshot in memory and has no directory: \
-             export from the source index instead",
-        ))
+        match &self.backing {
+            Backing::Dir(path) => Ok(path),
+            Backing::Snapshot => Err(PyValueError::new_err(
+                "this index is served from a snapshot in memory and has no directory: \
+                 export from the source index instead",
+            )),
+            Backing::Blob { .. } => Err(PyValueError::new_err(
+                "this index lives in a blob store and has no directory: snapshot and \
+                 delta export are not available on it",
+            )),
+        }
     }
+}
+
+/// Releasing the handle commits and closes every shard, which may wait on
+/// lucivy's threads — and, for a blob-backed index, on the Python store they
+/// call. Dealloc runs with the GIL held: give it up for the duration.
+impl Drop for Index {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            Python::with_gil(|py| py.allow_threads(move || drop(handle)));
+        }
+    }
+}
+
+/// `SchemaConfig` out of the Python field list, as `Index.create` takes it.
+fn schema_config(fields: &Bound<'_, PyList>, shards: Option<usize>) -> PyResult<query::SchemaConfig> {
+    let mut field_defs = Vec::new();
+    for item in fields.iter() {
+        let dict: &Bound<'_, PyDict> = item.downcast()?;
+        let name: String = dict.get_item("name")?
+            .ok_or_else(|| PyValueError::new_err("field missing 'name'"))?
+            .extract()?;
+        let field_type: String = dict.get_item("type")?
+            .ok_or_else(|| PyValueError::new_err("field missing 'type'"))?
+            .extract()?;
+        let stored: Option<bool> = dict.get_item("stored")?.and_then(|v| v.extract().ok());
+        let indexed: Option<bool> = dict.get_item("indexed")?.and_then(|v| v.extract().ok());
+        let fast: Option<bool> = dict.get_item("fast")?.and_then(|v| v.extract().ok());
+        field_defs.push(query::FieldDef {
+            name,
+            field_type,
+            stored,
+            indexed,
+            fast,
+        });
+    }
+
+    Ok(query::SchemaConfig {
+        fields: field_defs,
+        tokenizer: None,
+        sfx: None,
+        shards,
+        ..Default::default()
+    })
 }
 
 #[pymethods]
@@ -120,40 +347,12 @@ impl Index {
     ///     ], shards=4)
     #[staticmethod]
     #[pyo3(signature = (path, fields, shards=None))]
-    fn create(path: &str, fields: &Bound<'_, PyList>, shards: Option<usize>) -> PyResult<Self> {
-        let mut field_defs = Vec::new();
-        for item in fields.iter() {
-            let dict: &Bound<'_, PyDict> = item.downcast()?;
-            let name: String = dict.get_item("name")?
-                .ok_or_else(|| PyValueError::new_err("field missing 'name'"))?
-                .extract()?;
-            let field_type: String = dict.get_item("type")?
-                .ok_or_else(|| PyValueError::new_err("field missing 'type'"))?
-                .extract()?;
-            let stored: Option<bool> = dict.get_item("stored")?.and_then(|v| v.extract().ok());
-            let indexed: Option<bool> = dict.get_item("indexed")?.and_then(|v| v.extract().ok());
-            let fast: Option<bool> = dict.get_item("fast")?.and_then(|v| v.extract().ok());
-            field_defs.push(query::FieldDef {
-                name,
-                field_type,
-                stored,
-                indexed,
-                fast,
-            });
-        }
-
-        let config = query::SchemaConfig {
-            fields: field_defs,
-            tokenizer: None,
-            sfx: None,
-            shards,
-            ..Default::default()
-        };
-
-        let handle = ShardedHandle::create(path, &config)
+    fn create(py: Python<'_>, path: &str, fields: &Bound<'_, PyList>, shards: Option<usize>) -> PyResult<Self> {
+        let config = schema_config(fields, shards)?;
+        let handle = py.allow_threads(|| ShardedHandle::create(path, &config))
             .map_err(|e| PyValueError::new_err(e))?;
 
-        Ok(Self::from_handle(handle, Some(path.to_string())))
+        Ok(Self::from_handle(handle, Backing::Dir(path.to_string())))
     }
 
     /// Open an existing index at the given path.
@@ -172,11 +371,87 @@ impl Index {
     ///     index = Index.open("/tmp/my_index")
     ///     results = index.search("hello")
     #[staticmethod]
-    fn open(path: &str) -> PyResult<Self> {
-        let handle = ShardedHandle::open(path)
+    fn open(py: Python<'_>, path: &str) -> PyResult<Self> {
+        let handle = py.allow_threads(|| ShardedHandle::open(path))
             .map_err(|e| PyValueError::new_err(e))?;
 
-        Ok(Self::from_handle(handle, Some(path.to_string())))
+        Ok(Self::from_handle(handle, Backing::Dir(path.to_string())))
+    }
+
+    /// Create an index whose files live in a Python blob store.
+    ///
+    /// The store is any object with ``load``, ``save``, ``delete``,
+    /// ``exists`` and ``list`` methods (``blob_len`` and ``load_range`` are
+    /// optional, see ``lazy``). Blobs are the truth; the mmap cache under
+    /// ``cache_dir`` is disposable and rebuilt on every open.
+    ///
+    /// The store's methods run on lucivy's own threads, not the caller's:
+    /// they must be thread-safe and must not call back into the index.
+    ///
+    /// Args:
+    ///     store: The blob store object.
+    ///     index_name: Name of the index inside the store. Shard files are
+    ///         saved under ``"Lucivy_<index_name>/shard_<i>"``, root files
+    ///         under ``index_name`` itself.
+    ///     fields: List of field definitions, as for ``create()``.
+    ///     shards: Number of shards (default 1).
+    ///     cache_dir: Root of the local mmap cache. Defaults to
+    ///         ``lucivy-blob-cache`` under the system temp dir; each open
+    ///         gets a fresh subdirectory, removed when the index is released.
+    ///     lazy: Pull files from the store on first read instead of all at
+    ///         open. Needs ``blob_len`` on the store to be effective;
+    ///         ``load_range`` lets small probes skip the download entirely.
+    ///
+    /// Example::
+    ///
+    ///     index = Index.create_with_blob_store(store, "products", [
+    ///         {"name": "title", "type": "text", "stored": True},
+    ///     ])
+    #[staticmethod]
+    #[pyo3(signature = (store, index_name, fields, shards=1, cache_dir=None, lazy=false))]
+    fn create_with_blob_store(
+        py: Python<'_>,
+        store: &Bound<'_, PyAny>,
+        index_name: &str,
+        fields: &Bound<'_, PyList>,
+        shards: usize,
+        cache_dir: Option<&str>,
+        lazy: bool,
+    ) -> PyResult<Self> {
+        let config = schema_config(fields, Some(shards))?;
+        let storage = blob_storage(store, index_name, cache_dir, lazy)?;
+        let handle = py.allow_threads(|| ShardedHandle::create_with_storage(storage, &config))
+            .map_err(|e| PyValueError::new_err(e))?;
+        Ok(Self::from_handle(handle, Backing::Blob {
+            index_name: index_name.to_string(),
+            _store: store.clone().unbind(),
+        }))
+    }
+
+    /// Open an index previously created with ``create_with_blob_store()``.
+    ///
+    /// Reads the schema and every shard back from the store. Same ``store``
+    /// protocol, ``cache_dir`` and ``lazy`` as ``create_with_blob_store()``.
+    ///
+    /// Example::
+    ///
+    ///     index = Index.open_with_blob_store(store, "products", lazy=True)
+    #[staticmethod]
+    #[pyo3(signature = (store, index_name, cache_dir=None, lazy=false))]
+    fn open_with_blob_store(
+        py: Python<'_>,
+        store: &Bound<'_, PyAny>,
+        index_name: &str,
+        cache_dir: Option<&str>,
+        lazy: bool,
+    ) -> PyResult<Self> {
+        let storage = blob_storage(store, index_name, cache_dir, lazy)?;
+        let handle = py.allow_threads(|| ShardedHandle::open_with_storage(storage))
+            .map_err(|e| PyValueError::new_err(e))?;
+        Ok(Self::from_handle(handle, Backing::Blob {
+            index_name: index_name.to_string(),
+            _store: store.clone().unbind(),
+        }))
     }
 
     /// Add a document. Fields are passed as keyword arguments.
@@ -189,17 +464,18 @@ impl Index {
     ///     doc_id: Unique document ID (_node_id).
     ///     **kwargs: Field values matching the schema (title=, body=, ...).
     #[pyo3(signature = (doc_id, **kwargs))]
-    fn add(&self, doc_id: u64, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    fn add(&self, py: Python<'_>, doc_id: u64, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
         let kwargs = kwargs.ok_or_else(|| PyValueError::new_err("at least one field is required"))?;
         let mut doc = LucivyDocument::new();
 
-        let nid_field = self.writable()?.field(NODE_ID_FIELD)
+        let handle = self.writable()?;
+        let nid_field = handle.field(NODE_ID_FIELD)
             .ok_or_else(|| PyValueError::new_err("no _node_id field in schema"))?;
         doc.add_u64(nid_field, doc_id);
 
-        add_fields_from_dict(self.h()?, &mut doc, kwargs)?;
+        add_fields_from_dict(handle, &mut doc, kwargs)?;
 
-        self.h()?.add_document(doc, doc_id)
+        py.allow_threads(|| handle.add_document(doc, doc_id))
             .map_err(|e| PyValueError::new_err(e))
     }
 
@@ -213,8 +489,9 @@ impl Index {
     ///     ])
     ///
     /// Each dict must have a ``doc_id`` key. Other keys are field values.
-    fn add_many(&self, docs: &Bound<'_, PyList>) -> PyResult<()> {
-        let nid_field = self.writable()?.field(NODE_ID_FIELD)
+    fn add_many(&self, py: Python<'_>, docs: &Bound<'_, PyList>) -> PyResult<()> {
+        let handle = self.writable()?;
+        let nid_field = handle.field(NODE_ID_FIELD)
             .ok_or_else(|| PyValueError::new_err("no _node_id field in schema"))?;
 
         for item in docs.iter() {
@@ -229,10 +506,10 @@ impl Index {
             for (key, value) in dict.iter() {
                 let field_name: String = key.extract()?;
                 if field_name == "doc_id" { continue; }
-                add_field_value(self.h()?, &mut doc, &field_name, &value)?;
+                add_field_value(handle, &mut doc, &field_name, &value)?;
             }
 
-            self.h()?.add_document(doc, doc_id)
+            py.allow_threads(|| handle.add_document(doc, doc_id))
                 .map_err(|e| PyValueError::new_err(e))?;
         }
         Ok(())
@@ -250,8 +527,9 @@ impl Index {
     ///
     ///     index.delete(42)
     ///     index.commit()
-    fn delete(&self, doc_id: u64) -> PyResult<()> {
-        self.writable()?.delete_by_node_id(doc_id)
+    fn delete(&self, py: Python<'_>, doc_id: u64) -> PyResult<()> {
+        let handle = self.writable()?;
+        py.allow_threads(|| handle.delete_by_node_id(doc_id))
             .map_err(|e| PyValueError::new_err(e))
     }
 
@@ -261,9 +539,9 @@ impl Index {
     ///
     ///     index.update(1, title="New title", body="New body")
     #[pyo3(signature = (doc_id, **kwargs))]
-    fn update(&self, doc_id: u64, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
-        self.delete(doc_id)?;
-        self.add(doc_id, kwargs)
+    fn update(&self, py: Python<'_>, doc_id: u64, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+        self.delete(py, doc_id)?;
+        self.add(py, doc_id, kwargs)
     }
 
     /// Commit pending changes to disk, making them visible to subsequent searches.
@@ -278,8 +556,9 @@ impl Index {
     ///     index.add(1, title="Hello")
     ///     index.add(2, title="World")
     ///     index.commit()  # both docs now searchable
-    fn commit(&self) -> PyResult<()> {
-        self.writable()?.commit()
+    fn commit(&self, py: Python<'_>) -> PyResult<()> {
+        let handle = self.writable()?;
+        py.allow_threads(|| handle.commit())
             .map_err(|e| PyValueError::new_err(e))
     }
 
@@ -295,13 +574,16 @@ impl Index {
     ///     index.close()
     ///     # later...
     ///     index = Index.open("/tmp/my_index")
-    fn close(&mut self) -> PyResult<()> {
-        if self.index_path.is_none() {
-            self.h()?;
-            self.handle = None;
+    fn close(&mut self, py: Python<'_>) -> PyResult<()> {
+        if matches!(self.backing, Backing::Snapshot) {
+            let handle = self.handle.take().ok_or_else(|| PyValueError::new_err(
+                "index has been dropped (drop_index) or released: open it again with Index.open()",
+            ))?;
+            py.allow_threads(move || drop(handle));
             return Ok(());
         }
-        self.h()?.close()
+        let handle = self.h()?;
+        py.allow_threads(|| handle.close())
             .map_err(|e| PyValueError::new_err(e))
     }
 
@@ -385,14 +667,16 @@ impl Index {
     ///
     ///     for w in index.query_warnings({"type": "regex", "value": "[0-9]{8}"}):
     ///         print("warning:", w)
-    fn query_warnings(&self, query: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+    fn query_warnings(&self, py: Python<'_>, query: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
         let query_config = self.parse_query(query)?;
-        Ok(self.h()?.query_warnings(&query_config))
+        let handle = self.h()?;
+        Ok(py.allow_threads(|| handle.query_warnings(&query_config)))
     }
 
     #[pyo3(signature = (query, limit=10, highlights=false, allowed_ids=None, fields=false))]
     fn search(
         &self,
+        py: Python<'_>,
         query: &Bound<'_, PyAny>,
         limit: u32,
         highlights: bool,
@@ -400,6 +684,7 @@ impl Index {
         fields: bool,
     ) -> PyResult<Vec<SearchResult>> {
         let query_config = self.parse_query(query)?;
+        let handle = self.h()?;
 
         let highlight_sink = if highlights {
             Some(Arc::new(HighlightSink::new()))
@@ -407,17 +692,18 @@ impl Index {
             None
         };
 
-        let results = match allowed_ids {
-            Some(ids) => {
-                let id_set: HashSet<u64> = ids.into_iter().collect();
-                self.h()?.search_filtered(&query_config, limit as usize, highlight_sink.clone(), id_set)
-                    .map_err(|e| PyValueError::new_err(e))?
-            }
-            None => self.h()?.search(&query_config, limit as usize, highlight_sink.clone())
-                .map_err(|e| PyValueError::new_err(e))?,
-        };
-
-        collect_sharded_results(self.h()?, &results, highlight_sink.as_deref(), fields)
+        py.allow_threads(|| {
+            let results = match allowed_ids {
+                Some(ids) => {
+                    let id_set: HashSet<u64> = ids.into_iter().collect();
+                    handle.search_filtered(&query_config, limit as usize, highlight_sink.clone(), id_set)
+                        .map_err(|e| PyValueError::new_err(e))?
+                }
+                None => handle.search(&query_config, limit as usize, highlight_sink.clone())
+                    .map_err(|e| PyValueError::new_err(e))?,
+            };
+            collect_sharded_results(handle, &results, highlight_sink.as_deref(), fields)
+        })
     }
 
     /// Number of documents in the index (property, no parentheses).
@@ -426,8 +712,9 @@ impl Index {
     ///
     ///     count = index.num_docs  # not index.num_docs()
     #[getter]
-    fn num_docs(&self) -> PyResult<u64> {
-        Ok(self.h()?.num_docs())
+    fn num_docs(&self, py: Python<'_>) -> PyResult<u64> {
+        let handle = self.h()?;
+        Ok(py.allow_threads(|| handle.num_docs()))
     }
 
     /// Number of shards (property).
@@ -437,10 +724,24 @@ impl Index {
     }
 
     /// Index directory path (property). ``None`` for an index served from a
-    /// snapshot in memory (``Index.open_snapshot()``).
+    /// snapshot in memory (``Index.open_snapshot()``) or living in a blob
+    /// store (``Index.create_with_blob_store()``).
     #[getter]
     fn path(&self) -> Option<&str> {
-        self.index_path.as_deref()
+        match &self.backing {
+            Backing::Dir(path) => Some(path),
+            _ => None,
+        }
+    }
+
+    /// Name of the index inside its blob store (property). ``None`` unless
+    /// the index was created or opened with a blob store.
+    #[getter]
+    fn blob_index_name(&self) -> Option<&str> {
+        match &self.backing {
+            Backing::Blob { index_name, .. } => Some(index_name),
+            _ => None,
+        }
     }
 
     /// On-disk bytes of every searchable segment, across all shards.
@@ -454,8 +755,9 @@ impl Index {
     ///
     ///     index.commit()
     ///     print(index.index_bytes() >> 20, "MB")
-    fn index_bytes(&self) -> PyResult<u64> {
-        Ok(self.h()?.index_bytes())
+    fn index_bytes(&self, py: Python<'_>) -> PyResult<u64> {
+        let handle = self.h()?;
+        Ok(py.allow_threads(|| handle.index_bytes()))
     }
 
     /// Merge every shard's segments into segments of at most ``max_docs``
@@ -474,8 +776,9 @@ impl Index {
     ///     index.add_many(docs)
     ///     merges = index.compact()
     #[pyo3(signature = (max_docs=10000))]
-    fn compact(&self, max_docs: usize) -> PyResult<usize> {
-        self.writable()?.compact(max_docs)
+    fn compact(&self, py: Python<'_>, max_docs: usize) -> PyResult<usize> {
+        let handle = self.writable()?;
+        py.allow_threads(|| handle.compact(max_docs))
             .map_err(|e| PyValueError::new_err(e))
     }
 
@@ -496,13 +799,17 @@ impl Index {
     ///     index.commit()
     ///     index.wait_merges_quiet()
     ///     blob = index.export_snapshot()
-    fn wait_merges_quiet(&self) -> PyResult<usize> {
-        self.h()?.wait_merges_quiet()
+    fn wait_merges_quiet(&self, py: Python<'_>) -> PyResult<usize> {
+        let handle = self.h()?;
+        py.allow_threads(|| handle.wait_merges_quiet())
             .map_err(|e| PyValueError::new_err(e))
     }
 
     /// Delete the whole index: commit and release everything, then remove
-    /// the index directory (shard files and root files included).
+    /// the index directory (shard files and root files included). For an
+    /// index in a blob store, every blob is deleted through the store —
+    /// the shard namespaces ``"Lucivy_<name>/shard_<i>"`` and the root
+    /// namespace ``"<name>"`` are listed and emptied one file at a time.
     ///
     /// Consumes the handle: after ``drop_index()`` every method of this
     /// instance raises ``ValueError``, like after ``close()`` but with the
@@ -513,12 +820,14 @@ impl Index {
     ///
     ///     index.drop_index()
     ///     assert not os.path.exists(path)
-    fn drop_index(&mut self) -> PyResult<()> {
-        self.dir()?;
+    fn drop_index(&mut self, py: Python<'_>) -> PyResult<()> {
+        if matches!(self.backing, Backing::Snapshot) {
+            self.dir()?;
+        }
         let handle = self.handle.take().ok_or_else(|| PyValueError::new_err(
             "index has already been dropped",
         ))?;
-        handle.drop_index()
+        py.allow_threads(move || handle.drop_index())
             .map_err(|e| PyValueError::new_err(e))
     }
 
@@ -547,12 +856,13 @@ impl Index {
     ///     blob = index.export_snapshot()
     ///     with open("backup.luce", "wb") as f:
     ///         f.write(blob)
-    fn export_snapshot<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
-        let blob = snapshot::export_to_snapshot(
-            self.h()?,
-            std::path::Path::new(self.dir()?),
-        ).map_err(|e| PyValueError::new_err(e))?;
-        Ok(pyo3::types::PyBytes::new(py, &blob))
+    fn export_snapshot<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let handle = self.h()?;
+        let dir = self.dir()?;
+        let blob = py.allow_threads(|| {
+            snapshot::export_to_snapshot(handle, std::path::Path::new(dir))
+        }).map_err(|e| PyValueError::new_err(e))?;
+        Ok(PyBytes::new(py, &blob))
     }
 
     /// Export this index as a LUCE snapshot directly to a file.
@@ -567,14 +877,15 @@ impl Index {
     /// Example::
     ///
     ///     index.export_snapshot_to("/backups/my_index.luce")
-    fn export_snapshot_to(&self, path: &str) -> PyResult<()> {
-        let blob = snapshot::export_to_snapshot(
-            self.h()?,
-            std::path::Path::new(self.dir()?),
-        ).map_err(|e| PyValueError::new_err(e))?;
-        std::fs::write(path, &blob)
-            .map_err(|e| PyValueError::new_err(format!("cannot write snapshot: {e}")))?;
-        Ok(())
+    fn export_snapshot_to(&self, py: Python<'_>, path: &str) -> PyResult<()> {
+        let handle = self.h()?;
+        let dir = self.dir()?;
+        py.allow_threads(|| {
+            let blob = snapshot::export_to_snapshot(handle, std::path::Path::new(dir))
+                .map_err(|e| PyValueError::new_err(e))?;
+            std::fs::write(path, &blob)
+                .map_err(|e| PyValueError::new_err(format!("cannot write snapshot: {e}")))
+        })
     }
 
     /// Import an index from a LUCE snapshot (bytes).
@@ -597,12 +908,12 @@ impl Index {
     ///     index = Index.import_snapshot(blob, "/data/restored_index")
     #[staticmethod]
     #[pyo3(signature = (data, dest_path=None))]
-    fn import_snapshot(data: &[u8], dest_path: Option<&str>) -> PyResult<Self> {
+    fn import_snapshot(py: Python<'_>, data: &[u8], dest_path: Option<&str>) -> PyResult<Self> {
         let dest = dest_path.unwrap_or("/tmp/lucivy_import");
         let dest_path = std::path::Path::new(dest);
-        let handle = snapshot::import_from_snapshot(data, dest_path)
+        let handle = py.allow_threads(|| snapshot::import_from_snapshot(data, dest_path))
             .map_err(|e| PyValueError::new_err(e))?;
-        Ok(Self::from_handle(handle, Some(dest.to_string())))
+        Ok(Self::from_handle(handle, Backing::Dir(dest.to_string())))
     }
 
     /// Import an index from a LUCE snapshot file (.luce).
@@ -623,10 +934,10 @@ impl Index {
     ///     index = Index.import_snapshot_from("/backups/my_index.luce", "/data/restored")
     #[staticmethod]
     #[pyo3(signature = (path, dest_path=None))]
-    fn import_snapshot_from(path: &str, dest_path: Option<&str>) -> PyResult<Self> {
+    fn import_snapshot_from(py: Python<'_>, path: &str, dest_path: Option<&str>) -> PyResult<Self> {
         let data = std::fs::read(path)
             .map_err(|e| PyValueError::new_err(format!("cannot read snapshot: {e}")))?;
-        Self::import_snapshot(&data, dest_path)
+        Self::import_snapshot(py, &data, dest_path)
     }
 
     /// Serve a LUCE snapshot straight from memory, without extracting it.
@@ -654,11 +965,11 @@ impl Index {
     ///     served = Index.open_snapshot(blob)
     ///     served.search("hello")  # same answers as source.search("hello")
     #[staticmethod]
-    fn open_snapshot(data: &[u8]) -> PyResult<Self> {
+    fn open_snapshot(py: Python<'_>, data: &[u8]) -> PyResult<Self> {
         let bytes = ld_lucivy::directory::OwnedBytes::new(data.to_vec());
-        let handle = ShardedHandle::open_snapshot(bytes)
+        let handle = py.allow_threads(|| ShardedHandle::open_snapshot(bytes))
             .map_err(|e| PyValueError::new_err(e))?;
-        Ok(Self::from_handle(handle, None))
+        Ok(Self::from_handle(handle, Backing::Snapshot))
     }
 
     /// Serve a LUCE snapshot file (.luce) straight from memory.
@@ -676,10 +987,10 @@ impl Index {
     ///
     ///     served = Index.open_snapshot_from("/backups/my_index.luce")
     #[staticmethod]
-    fn open_snapshot_from(path: &str) -> PyResult<Self> {
+    fn open_snapshot_from(py: Python<'_>, path: &str) -> PyResult<Self> {
         let data = std::fs::read(path)
             .map_err(|e| PyValueError::new_err(format!("cannot read snapshot: {e}")))?;
-        Self::open_snapshot(&data)
+        Self::open_snapshot(py, &data)
     }
 
     // ── Delta sync ──────────────────────────────────────────────────────
@@ -699,19 +1010,18 @@ impl Index {
     ///     versions = index.shard_versions  # not shard_versions()
     ///     # [{"shard_id": 0, "version": "abc", "segment_ids": ["x", "y"]}, ...]
     #[getter]
-    fn shard_versions(&self) -> PyResult<Vec<HashMap<String, pyo3::Py<pyo3::PyAny>>>> {
-        let versions = self.h()?.shard_versions()
+    fn shard_versions(&self, py: Python<'_>) -> PyResult<Vec<HashMap<String, Py<PyAny>>>> {
+        let handle = self.h()?;
+        let versions = py.allow_threads(|| handle.shard_versions())
             .map_err(|e| PyValueError::new_err(e))?;
-        Python::with_gil(|py| {
-            Ok(versions.iter().map(|sv| {
-                let mut m = HashMap::new();
-                m.insert("shard_id".into(), sv.shard_id.into_pyobject(py).unwrap().into_any().unbind());
-                m.insert("version".into(), sv.version.clone().into_pyobject(py).unwrap().into_any().unbind());
-                let ids: Vec<String> = sv.segment_ids.iter().cloned().collect();
-                m.insert("segment_ids".into(), ids.into_pyobject(py).unwrap().into_any().unbind());
-                m
-            }).collect())
-        })
+        Ok(versions.iter().map(|sv| {
+            let mut m = HashMap::new();
+            m.insert("shard_id".into(), sv.shard_id.into_pyobject(py).unwrap().into_any().unbind());
+            m.insert("version".into(), sv.version.clone().into_pyobject(py).unwrap().into_any().unbind());
+            let ids: Vec<String> = sv.segment_ids.iter().cloned().collect();
+            m.insert("segment_ids".into(), ids.into_pyobject(py).unwrap().into_any().unbind());
+            m
+        }).collect())
     }
 
     /// Export a sharded delta (LUCIDS blob) containing only segments that
@@ -735,24 +1045,29 @@ impl Index {
     fn export_sharded_delta<'py>(
         &self,
         py: Python<'py>,
-        client_versions: Vec<HashMap<String, pyo3::Py<pyo3::PyAny>>>,
-    ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        client_versions: Vec<HashMap<String, Py<PyAny>>>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
         let versions: Vec<lucistore::delta_sharded::ShardVersion> = client_versions.iter()
             .map(|m| {
-                let shard_id: usize = Python::with_gil(|py| m.get("shard_id").unwrap().extract(py).unwrap());
-                let version: String = Python::with_gil(|py| m.get("version").unwrap().extract(py).unwrap());
-                let ids: Vec<String> = Python::with_gil(|py| m.get("segment_ids").unwrap().extract(py).unwrap());
-                lucistore::delta_sharded::ShardVersion {
+                let get = |key: &str| m.get(key).ok_or_else(|| {
+                    PyValueError::new_err(format!("shard version missing '{key}'"))
+                });
+                let shard_id: usize = get("shard_id")?.extract(py)?;
+                let version: String = get("version")?.extract(py)?;
+                let ids: Vec<String> = get("segment_ids")?.extract(py)?;
+                Ok(lucistore::delta_sharded::ShardVersion {
                     shard_id,
                     version,
                     segment_ids: ids.into_iter().collect(),
-                }
+                })
             })
-            .collect();
+            .collect::<PyResult<_>>()?;
 
-        let blob = self.h()?.export_sharded_delta(self.dir()?, &versions)
+        let handle = self.h()?;
+        let dir = self.dir()?;
+        let blob = py.allow_threads(|| handle.export_sharded_delta(dir, &versions))
             .map_err(|e| PyValueError::new_err(e))?;
-        Ok(pyo3::types::PyBytes::new(py, &blob))
+        Ok(PyBytes::new(py, &blob))
     }
 
     /// Apply a sharded delta (LUCIDS blob) to this index.
@@ -767,8 +1082,10 @@ impl Index {
     ///
     ///     delta = server_index.export_sharded_delta(client_index.shard_versions)
     ///     client_index.apply_sharded_delta(delta)
-    fn apply_sharded_delta(&self, data: &[u8]) -> PyResult<()> {
-        self.h()?.apply_sharded_delta(self.dir()?, data)
+    fn apply_sharded_delta(&self, py: Python<'_>, data: &[u8]) -> PyResult<()> {
+        let handle = self.h()?;
+        let dir = self.dir()?;
+        py.allow_threads(|| handle.apply_sharded_delta(dir, data))
             .map_err(|e| PyValueError::new_err(e))
     }
 
@@ -791,9 +1108,10 @@ impl Index {
     ///     stats_a = node_a.export_stats("mutex lock")
     ///     stats_b = node_b.export_stats("mutex lock")
     ///     # merge stats_a + stats_b on coordinator, then distribute back
-    fn export_stats(&self, query: &Bound<'_, PyAny>) -> PyResult<String> {
+    fn export_stats(&self, py: Python<'_>, query: &Bound<'_, PyAny>) -> PyResult<String> {
         let query_config = self.parse_query(query)?;
-        let stats = self.h()?.export_stats(&query_config)
+        let handle = self.h()?;
+        let stats = py.allow_threads(|| handle.export_stats(&query_config))
             .map_err(|e| PyValueError::new_err(e))?;
         serde_json::to_string(&stats)
             .map_err(|e| PyValueError::new_err(format!("serialize stats: {e}")))
@@ -822,6 +1140,7 @@ impl Index {
     #[pyo3(signature = (query, global_stats_json, limit=10, highlights=false))]
     fn search_with_global_stats(
         &self,
+        py: Python<'_>,
         query: &Bound<'_, PyAny>,
         global_stats_json: &str,
         limit: u32,
@@ -831,6 +1150,7 @@ impl Index {
         let global_stats: lucivy_core::bm25_global::ExportableStats =
             serde_json::from_str(global_stats_json)
                 .map_err(|e| PyValueError::new_err(format!("invalid stats JSON: {e}")))?;
+        let handle = self.h()?;
 
         let highlight_sink = if highlights {
             Some(Arc::new(HighlightSink::new()))
@@ -838,11 +1158,12 @@ impl Index {
             None
         };
 
-        let results = self.h()?.search_with_global_stats(
-            &query_config, limit as usize, &global_stats, highlight_sink.clone(),
-        ).map_err(|e| PyValueError::new_err(e))?;
-
-        collect_sharded_results(self.h()?, &results, highlight_sink.as_deref(), false)
+        py.allow_threads(|| {
+            let results = handle.search_with_global_stats(
+                &query_config, limit as usize, &global_stats, highlight_sink.clone(),
+            ).map_err(|e| PyValueError::new_err(e))?;
+            collect_sharded_results(handle, &results, highlight_sink.as_deref(), false)
+        })
     }
 
     fn __enter__(slf: Py<Self>) -> Py<Self> {
@@ -863,9 +1184,10 @@ impl Index {
             return "Index(dropped)".to_string();
         };
         format!("Index(path={}, num_docs={}, shards={})",
-            match self.index_path.as_deref() {
-                Some(p) => format!("'{p}'"),
-                None => "<snapshot>".to_string(),
+            match &self.backing {
+                Backing::Dir(p) => format!("'{p}'"),
+                Backing::Snapshot => "<snapshot>".to_string(),
+                Backing::Blob { index_name, .. } => format!("<blob:{index_name}>"),
             },
             handle.num_docs(), handle.num_shards())
     }

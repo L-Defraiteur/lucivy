@@ -39,6 +39,51 @@ export interface SearchOptions {
  * @returns JSON string of merged `ExportableStats` ready for `searchWithGlobalStats()`.
  */
 export declare function mergeStats(statsList: Array<string>): string
+/**
+ * The object a JavaScript program hands to `BlobIndex.create()` /
+ * `BlobIndex.open()`. Methods are called with the object as `this`. Each may
+ * return its value directly or a Promise of it.
+ *
+ * Keys: `indexName` is `"Lucivy_<name>/shard_<i>"` for segment files and the
+ * bare `<name>` for the root files (`_shard_config.json`, `_shard_stats.bin`);
+ * `fileName` is the file within that namespace.
+ */
+export interface BlobStoreCallbacks {
+  /** Bytes of a blob, or `null` when it does not exist. */
+  load: (indexName: string, fileName: string) => Buffer | Uint8Array | null | Promise<Buffer | Uint8Array | null>
+  /** Create or overwrite a blob. */
+  save: (indexName: string, fileName: string, data: Buffer) => void | Promise<void>
+  /** Remove a blob; a missing blob is not an error. */
+  delete: (indexName: string, fileName: string) => void | Promise<void>
+  exists: (indexName: string, fileName: string) => boolean | Promise<boolean>
+  /** Every file name stored under `indexName`. */
+  list: (indexName: string) => string[] | Promise<string[]>
+  /**
+   * Optional, for `lazy: true`: size of a blob without loading it
+   * (`null` = unknown, the file is then loaded whole on first open).
+   */
+  blobLen?: (indexName: string, fileName: string) => number | null | Promise<number | null>
+  /**
+   * Optional, for `lazy: true`: `length` bytes of a blob from `offset`
+   * (`null` = unsupported, the file is then loaded whole).
+   */
+  loadRange?: (indexName: string, fileName: string, offset: number, length: number) => Buffer | Uint8Array | null | Promise<Buffer | Uint8Array | null>
+}
+/** Options of `BlobIndex.create()` / `BlobIndex.open()`. */
+export interface BlobIndexOptions {
+  /**
+   * Local directory for the mmap cache of the blobs (default: `lucivy_blob_cache`
+   * under the OS temp dir). Disposable: the store is the source of truth.
+   */
+  cacheDir?: string
+  /**
+   * Pull blobs on first use instead of all at open. Needs `blobLen` and
+   * `loadRange` on the store to be worth it.
+   */
+  lazy?: boolean
+  /** `create()` only: number of shards (default 1). */
+  shards?: number
+}
 export declare class Index {
   /**
    * Create a new index at the given path.
@@ -336,4 +381,76 @@ export declare class Index {
    * @returns `Array<SearchResult>` scored with global BM25 statistics.
    */
   searchWithGlobalStats(queryJson: string, globalStatsJson: string, limit?: number | undefined | null, highlights?: boolean | undefined | null): Array<SearchResult>
+}
+/**
+ * An index whose files live in a storage you provide — a transactional
+ * database, an object store, a Map — through the `BlobStoreCallbacks`
+ * object. Every method returns a Promise: the work runs off the JS thread,
+ * which stays free to serve the store callbacks.
+ */
+export declare class BlobIndex {
+  /**
+   * Create a new index in the given store.
+   *
+   * @param store - Object implementing the store protocol (`load`, `save`, `delete`, `exists`, `list`, optional `blobLen` / `loadRange`).
+   * @param indexName - Name of the index inside the store.
+   * @param fields - Field definitions, as for `Index.create()`.
+   * @param options - `{cacheDir?, lazy?, shards?}`.
+   */
+  static create(store: BlobStoreCallbacks, indexName: string, fields: Array<FieldDef>, options?: BlobIndexOptions | undefined | null): Promise<BlobIndex>
+  /**
+   * Open an index that already exists in the store.
+   *
+   * @param store - Same protocol as for `create()`.
+   * @param indexName - Name given at creation.
+   * @param options - `{cacheDir?, lazy?}`.
+   */
+  static open(store: BlobStoreCallbacks, indexName: string, options?: BlobIndexOptions | undefined | null): Promise<BlobIndex>
+  /** Add a document. Same arguments as `Index.add()`. */
+  add(docId: number, fields: Record<string, any>): Promise<void>
+  /** Add multiple documents. Same arguments as `Index.addMany()`. */
+  addMany(docs: Array<Record<string, any>>): Promise<void>
+  /** Delete a document by its `_node_id` (staged until `commit()`). */
+  delete(docId: number): Promise<void>
+  /** Update a document (delete old + re-add with new fields). */
+  update(docId: number, fields: Record<string, any>): Promise<void>
+  /**
+   * Commit pending changes to the store: segment files are saved through
+   * `store.save()`, `meta.json` last (the commit point).
+   */
+  commit(): Promise<void>
+  /** Search. Same arguments and results as `Index.search()`. */
+  search(query: any, options?: SearchOptions | undefined | null): Promise<Array<SearchResult>>
+  /** Honest warnings for a query, without running it. See `Index.queryWarnings()`. */
+  queryWarnings(query: any): Promise<Array<string>>
+  /** Number of documents across all shards. */
+  numDocs(): Promise<number>
+  /**
+   * Flush pending writes, wait for merges, release the writer lock.
+   * After `close()` the store is not touched again: it is safe to tear
+   * down whatever backs it. Always call it before the process exits.
+   */
+  close(): Promise<void>
+  /**
+   * Merge every shard's segments into segments of at most `maxDocs`
+   * documents, then commit. See `Index.compact()`.
+   */
+  compact(maxDocs?: number | undefined | null): Promise<number>
+  /** Block until no background merge is running or about to start. */
+  waitMergesQuiet(): Promise<number>
+  /** Bytes of every searchable segment of every shard, as cached locally. */
+  indexBytes(): Promise<number>
+  /**
+   * Delete the whole index: `close()`, then every blob the store holds
+   * for it — the `Lucivy_<name>/shard_<i>` namespaces and the root
+   * `<name>` namespace, each listed with `store.list()` and removed with
+   * `store.delete()`. Consumes the handle: every later call throws.
+   */
+  dropIndex(): Promise<void>
+  /** Name of the index inside the store (getter). */
+  get indexName(): string
+  /** Number of shards (getter). */
+  get numShards(): number
+  /** Schema as a list of field definitions (getter). */
+  get schema(): Array<FieldDef>
 }

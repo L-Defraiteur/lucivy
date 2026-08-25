@@ -1,3 +1,3 @@
-const { Index, mergeStats } = require('./lucivy.node');
+const { Index, BlobIndex, mergeStats } = require('./lucivy.node');
 
-module.exports = { Index, mergeStats };
+module.exports = { Index, BlobIndex, mergeStats };

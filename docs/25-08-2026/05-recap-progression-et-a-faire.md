@@ -320,6 +320,25 @@ Attention : tant que `main` n'est pas poussé sur GitHub, la démo indexe
 l'ancien code — les exemples du placeholder (`wait_merges_quiet`,
 `mimaloc`) n'y sont pas encore.
 
+### 5.5 quater ✅ Bindings natifs revus, stockage blob ACID exposé (soir)
+
+Relecture de l'API des trois bindings natifs contre le cœur : ils n'avaient
+reçu que `query_warnings` depuis la 2.0.x. Ajoutés partout : `compact`,
+`wait_merges_quiet`, `index_bytes`, `drop_index`, `open_snapshot(_from)`.
+Puis le **blob store** : l'utilisateur fournit l'objet (`load` / `save` /
+`delete` / `exists` / `list`, plus `blob_len` / `load_range` pour le lazy)
+et lucivy tourne dessus — Python (`create_with_blob_store`, GIL relâché sur
+tout appel, ce qu'aucune méthode ne faisait), Node (`BlobIndex` async),
+C++ (`BlobBackend` abstrait, backend mémoire d'exemple, esquisse Postgres).
+Tests : Python 108 / 4 skip, Node 55 + 40 vérifications, C++ 16.
+
+Trois défauts du cœur trouvés par ce travail, corrigés : un snapshot servi
+acceptait les écritures puis échouait au commit (refus explicite maintenant,
+et `close()` ne commite plus dedans) ; un interblocage en mode lazy quand le
+store ne sait pas répondre `blob_len` (`MutexGuard` gardé pendant un `if
+let`) ; le message d'un `save` refusé pendant une finalisation de fond
+perdu derrière « background finalize failed ».
+
 ### 5.6 Publication crates.io 3.0.0
 
 `cargo publish --dry-run` vert sur les 5 crates. **En attente du feu vert de

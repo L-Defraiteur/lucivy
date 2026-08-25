@@ -530,9 +530,14 @@ pub(crate) fn create_indexer_actor<D: Document>(
                         &self_ref,
                         "indexer_flush_finalize",
                         move |results| {
-                            let success = results.iter().all(|r| r.is_ok());
+                            // Carry the first failure itself, not a bool: a
+                            // blob backend that refuses a segment file
+                            // reported "background finalize failed" and
+                            // nothing else, its message lost on the way.
+                            let first_err: Option<Vec<u8>> =
+                                results.iter().find_map(|r| r.as_ref().err().cloned());
                             let local: Box<dyn std::any::Any + Send> =
-                                Box::new((success, reply));
+                                Box::new((first_err, reply));
                             Envelope {
                                 type_tag: IndexerFinalizeCompleteMsg::type_tag(),
                                 payload: IndexerFinalizeCompleteMsg.encode(),
@@ -551,15 +556,16 @@ pub(crate) fn create_indexer_actor<D: Document>(
     // FinalizeComplete handler: background finalize done, send the flush reply.
     actor.register(TypedHandler::<IndexerFinalizeCompleteMsg, _>::new(
         |_state, _msg, _reply, local, _ctx| {
-            let (success, flush_reply): (bool, Option<crate::actor::envelope::ReplyPort>) =
+            let (first_err, flush_reply): (Option<Vec<u8>>, Option<crate::actor::envelope::ReplyPort>) =
                 *local.unwrap().downcast().unwrap();
             if let Some(reply) = flush_reply {
-                if success {
-                    reply.send(IndexerFlushReply);
-                } else {
-                    reply.send_err(crate::LucivyError::SystemError(
-                        "background finalize failed".into(),
-                    ));
+                match first_err {
+                    None => reply.send(IndexerFlushReply),
+                    Some(bytes) => reply.send_err(
+                        crate::LucivyError::decode(&bytes).unwrap_or_else(|_| {
+                            crate::LucivyError::SystemError("background finalize failed".into())
+                        }),
+                    ),
                 }
             }
             ActorStatus::Continue

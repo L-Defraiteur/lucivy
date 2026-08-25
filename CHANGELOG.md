@@ -126,9 +126,30 @@ LUCE served in place, read-only, without extraction (the core refuses writes
 on it up front, and `close()` no longer tries to commit into it). Filtered
 search (`allowed_ids`) was already in all three. The Python wheel is `abi3`
 (one wheel for every CPython ≥ 3.9, `manylinux_2_28`). PyPI and npm ship
-3.0.0 with this release. ACID blob storage stays a Rust-level API
-(`BlobStore`, `BlobShardStorage`, lazy loading — used by rag3db through
-`lucivy_fts`); the bindings' READMEs say so.
+3.0.0 with this release.
+
+**Bring your own storage (ACID)** in all three: the `BlobStore` contract
+(`load`, `save`, `delete`, `exists`, `list`, optional `blob_len` and
+`load_range` for lazy loading) is implemented by the user's own object and
+lucivy runs on it, blobs being the truth and the mmap cache disposable.
+Python: a duck-typed object, `Index.create_with_blob_store` /
+`open_with_blob_store`, every binding call now releases the GIL (none did —
+a store written in Python would have deadlocked at the first commit); tests
+with a dict store and a `sqlite3` store reopened from a second connection.
+Node.js: a plain object of callbacks, sync or returning Promises, behind a
+new **async** `BlobIndex` class whose core calls run off the JS thread; a
+JSON-file store read back by a second `node` process. C++: an abstract
+`lucivy::BlobBackend` class in `include/lucivy/blob_backend.h`, a mutex-guarded
+in-memory backend as the example, a Postgres sketch in the README. In every
+binding: a store that throws makes `commit()` fail with the store's message;
+`drop_index` empties the store's namespaces; `lazy` opens pull a fraction of
+the bytes and never `load` a large file whole.
+
+Two core defects surfaced by this: a self-deadlock in `BlobDirectory::
+get_file_handle` in lazy mode when a store cannot answer `blob_len` (a
+`MutexGuard` temporary lived through the `if let` body), and the message of
+a segment-write failure lost behind "background finalize failed". Both
+fixed, the first pinned by a core test with a store that has no `blob_len`.
 
 ### WebAssembly (emscripten) and the playground
 
