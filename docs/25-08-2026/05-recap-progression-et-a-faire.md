@@ -18,23 +18,25 @@ index reconstruit des deux côtés, navigateur **sans aucun paramètre d'URL**) 
 
 | | natif | navigateur |
 |---|---|---|
-| index, 10 000 docs | 2 305 Mo (compacté) | 2 492 Mo (fusions plafonnées à 2 000 docs) |
-| indexation | 25,7 s | ~6 min + fusions |
-| requête, **moyenne** | 79 ms | **172 ms** |
-| requête, **médiane** | 49 ms | **97 ms** |
-| `contains strict kmalloc` | 35 ms | 104 ms |
-| `contains relaxed kmalloc` | 44 ms | 106 ms |
-| `fuzzy d1 kmallc` | 69 ms | 184 ms |
-| `fuzzy d2 kmalloc` | 436 ms | 1 041 ms |
-| `parse booléen` | 24-32 ms | 59-66 ms |
+| index, 10 000 docs | 2 305 Mo (compacté) | 2 879 Mo, 48 segments (pas de fusion de fond) |
+| indexation | 25,7 s | **55 s** |
+| requête, **moyenne** | 79 ms | **124-133 ms** (3 passages) |
+| requête, **médiane** | 49 ms | **69-92 ms** |
+| `contains strict kmalloc` | 35 ms | 45 ms |
+| `contains relaxed kmalloc` | 44 ms | 42 ms |
+| `fuzzy d1 kmallc` | 69 ms | 117 ms |
+| `fuzzy d2 kmalloc` | 436 ms | 651 ms |
+| `parse booléen` | 24-32 ms | 26-45 ms |
 
 **Comptes identiques au natif sur les 21 requêtes du panel**, tous modes
 confondus (contains strict/relax, split, startsWith, term, phrase, fuzzy d1/d2,
-regex, parse simple et booléen, filtre, no-hit) — et pas même un ex æquo
-différent.
+regex, parse simple et booléen, filtre, no-hit).
 
-Le ratio navigateur/natif est maintenant **plat, 2-3× sur toutes les
-requêtes** (2,2× en moyenne, 2× en médiane).
+Le ratio navigateur/natif est **de 1,0× à 2,2× selon la requête** (1,6× en
+moyenne). Deux valeurs hors ratio : `path contains ethernet/intel` (2 hits)
+97 ms contre 1, et `no hit` 14 ms contre 0 — un **coût fixe par requête**
+de l'ordre de 15-100 ms, sans doute proportionnel aux 48 segments × champs
+ouverts. C'est le prochain point à décomposer (§5.1).
 
 ### Comment on est passé de 551 à 172 ms — l'allocateur
 
@@ -59,8 +61,30 @@ d'emscripten, prend un verrou global en pthreads**. `-sMALLOC=mimalloc`
 12 threads = 8 threads (172 / 99) : le plateau est à 8, c'est le nouveau
 défaut (`min(cœurs, 8)`). mimalloc est le défaut du build.
 
+### Puis la taille des segments — le chemin critique d'une requête
+
+À 8 threads et 19 segments, le profil montrait `wall ≈ plus gros segment`
+(40,7 ms de wall pour 39,7 ms sur le segment de 2 000 docs) : un thread
+marchait, sept attendaient. Fusions plafonnées à **800** docs en wasm — ce
+qui, avec des segments de ~200 docs, ne laisse rien à fusionner à la
+politique (groupes de 3 < minimum de 8) : **48 segments** au lieu de 19, le
+wall devient CPU/8, et le panel passe de 172 / 97 à **124-133 / 69-92**.
+Sous dlmalloc, le même index à 48 segments faisait 603 / 238 : sans
+l'allocateur, la taille des segments ne changeait rien.
+
+### Et l'indexation : 55 secondes
+
+Le verrou de dlmalloc sérialisait aussi les quatre indexeurs. Mais mimalloc
+garde les pages libérées dans le tas du thread qui les a libérées : quatre
+builds de FST simultanés (un par shard au commit) sont morts trois fois sur
+des allocations de 170 Mo là où dlmalloc les tenait. **Deux builds en vol**
+(`LUCIVY_MAX_PENDING_FINALIZE`, permis coopératifs sur le modèle des
+fusions) + **512 documents maximum en file** entre l'API et les indexeurs :
+10 000 fichiers en **55 s** (dlmalloc : 5,5 min à 4 threads, 7 min 20 à 8).
+
 Historique de la journée sur la même mesure : 893 (matin) → 567 (preload) →
-551 (SFP3 corrigé, fusions plafonnées) → **172** (mimalloc + 8 threads).
+551 (SFP3 corrigé, fusions plafonnées) → 172 (mimalloc + 8 threads) →
+**124-133** (48 segments). Indexation : ~25 min → 6 min → **55 s**.
 
 **Condition de mesure** : ces chiffres navigateur ont été pris avec
 `?rammax=3000`, parce que le défaut de `LUCIVY_RAM_INDEX_MAX` était **2 Go**
@@ -178,28 +202,34 @@ gagne plus rien. La conclusion « le parallélisme ne paie pas » était vraie
 
 Par ordre de valeur, avec ce que chacun demande.
 
-### 5.0 ✅ Indexation navigateur rejouée (soir)
+### 5.0 ✅ Indexation navigateur rejouée (soir), plusieurs fois
 
-Fait : index 10 k reconstruit dans le navigateur avec les formats du soir,
-fusions de fond plafonnées, panel rejoué (§1). Deux échecs en route, tous
-deux dans une fusion de fond, tous deux corrigés (§3). **Non fait** : un
-`?compact=N` explicite après chargement — les fusions plafonnées à 2 000
-donnent déjà ~35 segments ; compacter plus haut est précisément ce qui ne
-tient pas.
+Fait : index 10 k reconstruit dans le navigateur, sans paramètre d'URL, en
+55 s, panel rejoué trois fois (§1). Cinq échecs en route, tous en mémoire,
+tous compris : deux fusions de fond (plafond 800 + `wait_merges_quiet`),
+une attente bloquante dans un handler (interdite par luciole), puis deux
+fois quatre builds simultanés sous mimalloc (permis à 2 + 512 docs en
+file). **Ne pas compacter** en navigateur : les petits segments sont ce qui
+fait la vitesse des requêtes (§1), et une fusion de 10 000 docs ne tient
+pas.
 
 ### 5.1 ✅ L'allocateur (soir) — et ce qui reste : un 2× plat
 
-Fait, voir §1 : mimalloc, 551 → 172 ms. Le facteur restant est **plat, 2-3×
-sur toutes les requêtes**, ce qui est la signature d'un coût uniforme (code
-généré, bounds checks, pas de SIMD) et non d'un chemin pathologique. Les
-prochains essais, dans l'ordre, chacun avec le panel :
+Fait, voir §1 : mimalloc puis segments plus petits, 551 → 124-133 ms. Ce
+qui reste : un ratio de 1,0 à 2,2× par requête, et surtout un **coût fixe par
+requête** (97 ms pour 2 hits sur `path`, 14 ms pour zéro hit) qui n'existe
+pas en natif. Les prochains essais, dans l'ordre, chacun avec le panel :
 
+- **décomposer le coût fixe** : `[search] done` donne search / collect /
+  serialize ; le prescan est 1 nœud par segment × champ — sur 48 segments,
+  regarder ce que coûte l'ouverture d'un segment qui n'a rien (`no hit` :
+  14 ms) et la partie hors prescan (poids, recherche par shard, fusion) ;
 - `-C target-feature=+simd128` côté Rust et `-msimd128` côté emcc ;
-- `-O3` à remesurer **avec mimalloc** (il avait été jugé dans le bruit avec
-  dlmalloc, qui écrasait tout) ;
-- threads d'écriture 1 → 2 à remesurer avec mimalloc (même raison) ;
-- profil Chrome de `contains strict kmalloc` (104 ms contre 35) sur le build
-  `LUCIVY_WASM_DEBUG=1` si les deux premiers ne rendent rien.
+- `-O3` à remesurer **avec mimalloc** (jugé dans le bruit avec dlmalloc, qui
+  écrasait tout) ;
+- threads d'écriture 1 → 2 à remesurer avec mimalloc et 2 builds ;
+- `LUCIVY_MAX_INFLIGHT_DOCS` / builds : 2 est ce qui a passé, pas un
+  optimum mesuré — 3 vaut un essai si l'indexation devient le sujet.
 
 ### 5.2 Exporteur LUCE en flux ⭐ maillon manquant de l'architecture
 
@@ -289,9 +319,13 @@ donc **après** le profil.
   (`headers_len`). Le coût résiduel, s'il existe, est **à remesurer** sur le
   panel natif avant d'écrire quoi que ce soit dessus.
 - **Contre-pression sur la finalisation** : `LUCIVY_MAX_PENDING_FINALIZE`
-  (1 en wasm, 4 natif) borne le nombre de segments en construction. Avant, la
-  file était sans limite et l'indexation 10 k tenait par le timing, pas par
-  construction.
+  (2 en wasm, illimité natif) — des **permis coopératifs** pris par la tâche
+  de build, jamais une attente dans un handler (luciole panique, vérifié).
+  Et `LUCIVY_MAX_INFLIGHT_DOCS` (512 wasm) : l'API attend sur le thread
+  appelant quand trop de documents sont en file, sinon un commit démarre un
+  build par shard quoi qu'il arrive.
+- **Ne jamais remettre les fusions de fond à 2 000 en wasm** sans remesurer
+  les requêtes : 19 segments = un thread qui marche, sept qui attendent.
 - **Export LUCE** : `meta.json` est lu une fois et tout en dérive ; un fichier
   qui disparaît sous l'export (fusion + ramasse-miettes) relance depuis le
   nouveau `meta.json`, trois fois, puis échoue — il n'est plus ignoré.

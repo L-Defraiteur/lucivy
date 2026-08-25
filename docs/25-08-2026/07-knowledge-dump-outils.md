@@ -138,7 +138,8 @@ nécessaires aux SharedArrayBuffer, et expose :
 | `?rammax=N` | `LUCIVY_RAM_INDEX_MAX` en Mo — au-delà, l'index est streamé |
 | `?threads=N` | threads du planificateur luciole |
 | `?wthreads=N` | threads d'écriture (le tas suit automatiquement) |
-| `?maxmerged=N` | `LUCIVY_MAX_MERGED_DOCS` (2 000 par défaut) |
+| `?maxmerged=N` | `LUCIVY_MAX_MERGED_DOCS` (800 par défaut) |
+| `?builds=N` | `LUCIVY_MAX_PENDING_FINALIZE` (2 par défaut) |
 | `?compact=N` | compacte à N docs/segment après ouverture |
 
 Corpus prêts (ignorés par git) : `playground/corpus-kernel-16k.tar.gz`,
@@ -255,8 +256,9 @@ grep -o 'finalize() [0-9]* docs' playground/diag.log | awk '{s+=$2;n++} END {pri
 | `LUCIVY_WRITER_THREADS` | auto / **1 wasm** | threads d'écriture ; le tas par défaut suit |
 | `LUCIVY_SFX_HEAP` | 1 Go / **128 Mo wasm** | ce que les collecteurs SFX tiennent avant de couper un segment — **global, divisé par les threads** |
 | `LUCIVY_MERGE_CONCURRENCY` | ∞ / **1 wasm** | fusions simultanées |
-| `LUCIVY_MAX_PENDING_FINALIZE` | 4 / **1 wasm** | segments en construction en plus de celui qu'on remplit ; au-delà l'indexeur attend |
-| `LUCIVY_MAX_MERGED_DOCS` | 10 000 / **2 000 wasm** | plus gros segment qu'une fusion de fond peut produire ou reprendre |
+| `LUCIVY_MAX_PENDING_FINALIZE` | ∞ / **2 wasm** | builds de segment simultanés (permis coopératifs) ; `?builds=N` |
+| `LUCIVY_MAX_INFLIGHT_DOCS` | 50 000 / **512 wasm** | documents en file entre l'API et les indexeurs ; l'API attend au-delà |
+| `LUCIVY_MAX_MERGED_DOCS` | 10 000 / **800 wasm** | plus gros segment qu'une fusion de fond peut produire ou reprendre ; à 800 le navigateur ne fusionne pas (voulu) |
 | `LUCIVY_SCHEDULER_THREADS` | `available_parallelism()` / **min(cœurs, 8) wasm** | pool luciole (plateau mesuré à 8 avec mimalloc) |
 | `LUCIVY_FILE_CACHE_BYTES` | 4 Go / **768 Mo wasm** | cache de fichiers entiers ; s'il est posé, il **fige** le budget |
 | `LUCIVY_RAM_INDEX_MAX` | ∞ / **3 Go wasm** (2 Go avant le soir du 25) | au-delà, l'index est streamé |
@@ -290,12 +292,17 @@ soir du 25) — 2 305 Mo, indexation 25,7 s, panel 1 664 ms soit
 **79 ms/requête (médiane 49 ms)**. Avant la correction du soir, même
 protocole : 1 943 ms, 93 ms/requête, médiane 59.
 
-**Navigateur, même corpus, session fraîche `?open=user_index`, aucun autre
-paramètre** (soir du 25 : SFP3 `headers_len`, fusions plafonnées à 2 000,
-défaut 3 Go, **mimalloc, 8 threads**) — 2 492 Mo en mémoire, preload 589
-fichiers en 2,7 s, panel **172 ms/requête (médiane 97 ms)**, second passage
-166 / 95, 21 comptes identiques. Build final par défaut (sans aucun
-paramètre d'URL), trois passages : 173 / 108, 162 / 99, 163 / 108. Détail : `contains strict kmalloc` 104 ms
+**Navigateur, même corpus, indexé et servi sans aucun paramètre d'URL**
+(fin de soirée du 25 : mimalloc, 8 threads, 2 builds, fusions à 800) —
+indexation **55 s**, 48 segments, 2 879 Mo en mémoire, preload 1 488
+fichiers en 6 s, panel **124-133 ms/requête (médiane 69-92)** sur trois
+passages, 21 comptes identiques. Par requête : `contains strict kmalloc`
+45 ms (natif 35), `relaxed` 42 (44), `fuzzy d1` ~115 (69), `fuzzy d2` 651
+(436), `parse` booléen 26-45 (24-32) ; coût fixe visible sur `no hit`
+(14 ms) et `path contains` (97 ms pour 2 hits).
+
+Étapes intermédiaires, même page : 19 segments (fusions à 2 000) 172 / 97 ;
+48 segments sous dlmalloc 603 / 238. Détail : `contains strict kmalloc` 104 ms
 (natif 35), `relaxed` 106 (44), `fuzzy d1` ~180 (69), `fuzzy d2` 1 041 (436),
 `parse` booléen 59-66 (24-32). Ratio plat 2-3×.
 

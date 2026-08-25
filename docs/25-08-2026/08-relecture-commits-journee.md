@@ -257,6 +257,12 @@ de 14× sur le même terme, tout en CPU ; `-sMALLOC=mimalloc` (un drapeau) :
 natif plat à 2-3×. La conclusion « le parallélisme ne paie pas » (04 §9-11,
 05 §4) était un artefact du verrou global de `dlmalloc`.
 
+**Puis les segments et l'indexation** : fusions à 800 en wasm (48 segments,
+8 threads pleins) → **124-133 ms/requête, médiane 69-92** ; permis de build
+à 2 et 512 docs en file → **indexation 10 k en 55 s** sous mimalloc. Ma
+propre erreur en route : une attente bloquante dans un handler d'acteur,
+que luciole refuse — corrigée par des permis coopératifs.
+
 Faits ensuite, à la demande de Lucie : `entry_count` est un `u32` de bout
 en bout (le lecteur ne plafonne plus à 65 535 ; V2 lit son `u16` et
 l'élargit), les en-têtes SFP3 se lisent en `read_varint_u32` (une valeur

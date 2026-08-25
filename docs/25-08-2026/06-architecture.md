@@ -205,18 +205,27 @@ fichier sont gardés sur son handle — les en-têtes sont relus sans cesse.
   peuvent tenir avant de couper un segment. **Global, divisé par le nombre de
   threads** — sinon le pic réel se multiplie par le nombre de threads.
 - **Fusions** : `LUCIVY_MERGE_CONCURRENCY`, 1 en wasm.
-- **Taille des fusions** : `LUCIVY_MAX_MERGED_DOCS`, 10 000 natif, **2 000 en
-  wasm** — borne ce qu'une fusion produit *et* ce qu'elle reprend (un segment
-  déjà à la borne n'est plus fusionné). Une fusion dimensionne ses arènes sur
-  ses entrées ; 8 segments / 1,4 M tokens passent dans le navigateur, le
-  niveau suivant (~10 000 docs) meurt sur 603 Mo.
+- **Taille des fusions** : `LUCIVY_MAX_MERGED_DOCS`, 10 000 natif, **800 en
+  wasm** — borne ce qu'une fusion produit *et* ce qu'elle reprend. À 800 et
+  des segments de ~200 docs, la politique ne trouve jamais 8 segments à
+  fusionner : le navigateur garde ~48 segments par 10 000 docs, et c'est
+  voulu — le wall d'une requête est le temps de son plus gros segment
+  (1 nœud de prescan par segment), et 48 petits segments remplissent 8
+  threads là où 19 gros en occupaient un (172 → 124-133 ms/requête). Une
+  fusion de ~10 000 docs meurt de toute façon sur 603 Mo.
+- **Builds en vol** : `LUCIVY_MAX_PENDING_FINALIZE`, **2 en wasm**, illimité
+  natif — permis coopératifs (`merge_permits::acquire_build`), comme les
+  fusions. Quatre builds simultanés meurent sous mimalloc (rétention des
+  pages libérées par thread) là où dlmalloc les tenait.
+- **Documents en file** : `LUCIVY_MAX_INFLIGHT_DOCS`, 512 en wasm — l'API
+  bloque le thread appelant ; jamais un acteur.
 - **Index calme** : `ShardedHandle::wait_merges_quiet()` — un commit
   n'implique pas « rien ne fusionne » (la politique replanifie après). Appelé
   par `preload()` et `drainMerges` avant de réclamer l'espace d'adressage.
-- **Finalisations en vol** : `LUCIVY_MAX_PENDING_FINALIZE`, 1 en wasm, 4
-  natif. Au-delà, l'indexeur attend la plus ancienne avant de continuer :
-  c'est ce qui borne le pic *par construction* et non par le hasard des
-  durées.
+- **Règle luciole apprise à la dure** : un handler d'acteur ne bloque
+  jamais (`wait` dedans → panique `[luciole] FATAL: cooperative wait inside
+  actor handler`). Une attente va soit dans une *tâche* (attente coopérative,
+  qui fait tourner d'autres travaux), soit sur le thread de l'appelant.
 
 **Ce qui borne réellement un segment**, c'est le budget SFX, parce que le pic
 du constructeur de FST est proportionnel aux tokens du segment. Le tas de
