@@ -29,7 +29,6 @@
   "files": [
     "index.js",
     "index.d.ts",
-    "lucivy.node",
     "README.md"
   ],
   "devDependencies": {
@@ -38,5 +37,12 @@
   "scripts": {
     "build": "napi build --release",
     "build:debug": "napi build"
+  },
+  "optionalDependencies": {
+    "lucivy-linux-x64-gnu": "3.0.4",
+    "lucivy-linux-arm64-gnu": "3.0.4",
+    "lucivy-darwin-x64": "3.0.4",
+    "lucivy-darwin-arm64": "3.0.4",
+    "lucivy-win32-x64-msvc": "3.0.4"
   }
 }

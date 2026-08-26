@@ -40,25 +40,58 @@ registry" (seen on 26 August), and `npm login` is the fix, not a new code.
 
 ## Publish, in this order, stopping at the first error
 
+The Python wheels and the Node.js addons for the five platforms (Linux
+x86_64 and aarch64 on glibc ≥ 2.28, macOS x86_64 and arm64, Windows x86_64)
+are built by `.github/workflows/release.yml` on the tag — see below. The
+crates and the WASM package are published by hand, the crates **last**.
+
 ```bash
 git push origin main <release-branch>
+git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z   # builds the wheels and addons, attaches them to the release
+# on the run page: approve the `release` environment → PyPI and npm are published
+(cd bindings/emscripten && npm publish --otp=<code>)
 cargo publish -p luciole
 cargo publish -p lucistore          # cargo waits for the index before returning
 cargo publish -p ld-lucivy
 cargo publish -p lucivy-core
 cargo publish -p sparse-vector
-(cd bindings/python && .venv/bin/maturin upload --skip-existing dist/*)
-(cd bindings/nodejs && npm publish --otp=<code>)
-(cd bindings/emscripten && npm publish --otp=<code>)
-git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z
 ```
 
 Verify each on its registry (`cargo search`, the PyPI JSON API, `npm view`)
 before the next; the CDN can lag a minute. Then record the versions in
 `CLAUDE.md` and the day's recap.
 
-## After
+## The release workflow
 
-Prebuilt binaries are Linux x86_64 only (the wheel, the `.node`, the `.wasm`);
-other platforms build from source. A CI matrix (`maturin-action`, napi's
-per-platform packages) is the next step, not a blocker.
+`release.yml` runs on a `v*` tag (or by hand, `workflow_dispatch`, with
+`publish` unticked to only build). Jobs:
+
+- `python` × 5 — `maturin-action` builds the `abi3` wheel (manylinux_2_28
+  on Linux, in the official image), installs it and runs a create/add/search
+  smoke test on the runner that built it; `sdist` on top.
+- `node` × 5 — `cargo build --release --target` of `bindings/nodejs`, the
+  Linux ones inside `quay.io/pypa/manylinux_2_28_*` so the addon loads on any
+  glibc since 2018; the addon becomes `lucivy.<platform>.node`, smoke-tested
+  through `index.js` where Node is available.
+- `release` — attaches wheels, sdist and addons to the GitHub release of the tag.
+- `publish-pypi`, `publish-npm` — behind **two locks**: the `release`
+  environment (Settings → Environments → `release` → required reviewer:
+  the maintainer; the run waits for the Approve button) and the repository
+  variable `PUBLISH_ENABLED=true` (Settings → Variables). PyPI goes through
+  trusted publishing (pypi.org → the project → Publishing → GitHub:
+  `L-Defraiteur/lucivy`, `release.yml`, environment `release`); npm through
+  the `NPM_TOKEN` secret (a granular token with "bypass 2FA", needed the
+  first time a platform package is published) — with no secret it tries
+  trusted publishing with provenance, which npm allows only for packages
+  that already exist.
+
+npm packaging: `lucivy` no longer carries a binary; it lists
+`lucivy-linux-x64-gnu`, `lucivy-linux-arm64-gnu`, `lucivy-darwin-x64`,
+`lucivy-darwin-arm64`, `lucivy-win32-x64-msvc` as `optionalDependencies`
+(templates in `bindings/nodejs/npm/`, one addon each, `os`/`cpu` filters so
+npm installs one) and `index.js` loads the one present — or a local
+`lucivy.node` from `npm run build`. The platform packages take the version
+of `package.json` at publish time; bumping that one file is enough.
+
+Elsewhere (Alpine/musl, FreeBSD, 32-bit) `npm install` still succeeds and
+`require('lucivy')` says which platforms are prebuilt and how to build.

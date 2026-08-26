@@ -1,0 +1,21 @@
+{
+  "name": "lucivy-darwin-arm64",
+  "version": "3.0.4",
+  "description": "lucivy prebuilt addon for darwin-arm64 \u2014 installed automatically by the lucivy package",
+  "main": "lucivy.darwin-arm64.node",
+  "files": [
+    "lucivy.darwin-arm64.node"
+  ],
+  "license": "MIT",
+  "author": "Luciform Research",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/L-Defraiteur/lucivy"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ]
+}

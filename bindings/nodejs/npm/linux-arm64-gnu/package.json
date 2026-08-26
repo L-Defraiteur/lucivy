@@ -1,0 +1,24 @@
+{
+  "name": "lucivy-linux-arm64-gnu",
+  "version": "3.0.4",
+  "description": "lucivy prebuilt addon for linux-arm64-gnu \u2014 installed automatically by the lucivy package",
+  "main": "lucivy.linux-arm64-gnu.node",
+  "files": [
+    "lucivy.linux-arm64-gnu.node"
+  ],
+  "license": "MIT",
+  "author": "Luciform Research",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/L-Defraiteur/lucivy"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "libc": [
+    "glibc"
+  ]
+}
