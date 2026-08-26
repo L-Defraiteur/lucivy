@@ -405,7 +405,7 @@ window._allLogs = [];
       </div>
       <div class="card">
         <h3>Fuzzy, verified on the text</h3>
-        Two typos in a seven-word phrase still find it. At distance <i>d</i>, enough trigrams of
+        Two typos in a nine-word phrase still find it. At distance <i>d</i>, enough trigrams of
         the query must appear exactly; the candidates come from the FST, then Levenshtein (or
         Jaro-Winkler above a similarity) decides on the real text. No full scan, and the score
         carries the verified edit distance.
@@ -1851,8 +1851,9 @@ const DEMO_SEARCHES = [
     query: { type: 'contains', field: 'content', value: 'every suffix of every token' } },
   { cmd: 'lucivy search "suffixfst"', note: 'separators relaxed: suffix_fst, SuffixFst and "suffix FST" all match', phone: true,
     query: { type: 'contains', field: 'content', value: 'suffixfst' } },
-  { cmd: 'lucivy search --fuzzy 2 "validated on the sourse text by Levenstein"', note: 'two typos in a seven-word phrase, verified on the text', phone: true, fuzzy: true,
-    query: { type: 'contains', field: 'content', value: 'validated on the sourse text by Levenstein', distance: 2 } },
+  // The phrase must live in a file under the clone's 100 KB limit (README.md).
+  { cmd: 'lucivy search --fuzzy 2 "the requird literals of the patern drive the search"', note: 'two typos in a nine-word phrase, verified on the text', phone: true, fuzzy: true,
+    query: { type: 'contains', field: 'content', value: 'the requird literals of the patern drive the search', distance: 2 } },
   { cmd: 'lucivy search "rust🦀lang"', note: 'an emoji is content like any other byte', phone: true,
     query: { type: 'contains', field: 'content', value: 'rust🦀lang' } },
   { cmd: 'lucivy search --regex "Sharded[A-Z]\\w+"', note: 'the literal drives the walk, the regex validates', phone: true,
