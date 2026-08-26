@@ -1,11 +1,13 @@
 //! What one sparse commit costs as the index grows — the measurement the
 //! segment design rests on.
 //!
-//! `sparse.mmap` is rewritten whole at every commit, so **inserting one
-//! vector costs the same as inserting the whole index**: 320 ms at 200 000
-//! vectors on a 24-core machine, growing linearly with the file (26 / 97 /
-//! 178 / 320 ms at 10k / 50k / 100k / 200k). At two million vectors that is
-//! seconds, per single insert.
+//! Before segments, `sparse.mmap` was rewritten whole at every commit, so
+//! **inserting one vector cost what inserting the whole index cost**: 320 ms
+//! at 200 000 vectors on a 24-core machine, growing linearly with the file
+//! (26 / 97 / 178 / 320 ms at 10k / 50k / 100k / 200k).
+//!
+//! A commit now writes one segment holding the delta, so the second column
+//! below is the one that matters: it must stay flat while the first grows.
 //!
 //! Run: `cargo test --release -p sparse-vector --test bench_commit_cost -- --ignored --nocapture`
 use sparse_vector::handle::SparseHandle;
@@ -36,8 +38,11 @@ fn commit_cost_grows_with_the_index() {
         let t = std::time::Instant::now();
         h.commit_inner().unwrap();
         let one = t.elapsed().as_secs_f64() * 1e3;
-        let bytes = std::fs::metadata(dir.join("sparse.mmap")).unwrap().len();
-        eprintln!("{n:>7} vectors — commit after bulk {bulk:>8.0} ms · commit after ONE more {one:>8.0} ms · sparse.mmap {:.1} MB",
+        // Every file of the index, whatever it is made of.
+        let (bytes, files) = std::fs::read_dir(&dir).unwrap().flatten()
+            .filter(|e| e.path().is_file())
+            .fold((0u64, 0usize), |(b, n), e| (b + e.metadata().map(|m| m.len()).unwrap_or(0), n + 1));
+        eprintln!("{n:>7} vectors — commit after bulk {bulk:>8.0} ms · commit after ONE more {one:>8.1} ms · {files} files, {:.1} MB",
             bytes as f64 / 1048576.0);
     }
     let _ = std::fs::remove_dir_all(&dir);

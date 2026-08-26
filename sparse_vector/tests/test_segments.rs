@@ -1,0 +1,227 @@
+//! An index is a list of segments, and it answers like one index.
+//!
+//! What is pinned here:
+//!
+//! - a commit writes **one segment for the delta** and leaves the previous
+//!   ones alone (`tests/bench_commit_cost.rs` measures what that saves);
+//! - searching N segments gives what one index holding everything gives —
+//!   same documents, same scores, same order;
+//! - an update lands the right way round: the copy in an older segment is
+//!   hidden, the new one answers, and the count does not drift;
+//! - a deletion survives a reopen, and so does everything else.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use sparse_vector::handle::SparseHandle;
+use sparse_vector::index::{SparseIndex, SparseVector};
+
+struct TempDir(PathBuf);
+impl TempDir {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("lucivy_segments_{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+    fn str(&self) -> &str { self.0.to_str().unwrap() }
+}
+impl Drop for TempDir {
+    fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+}
+
+fn segment_count(base: &Path) -> usize {
+    std::fs::read_dir(base).unwrap().flatten()
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.starts_with("seg_") && n.ends_with(".mmap")
+        })
+        .count()
+}
+
+/// Vectors whose dimensions are spread out, so a wrong dimension shows.
+fn vector(id: u64, weight: f32) -> SparseVector {
+    let indices: Vec<u32> = (0..6).map(|k| ((id * 7 + k * 1301) % 5_000) as u32).collect();
+    SparseVector { indices, values: vec![weight; 6] }
+}
+
+fn queries() -> Vec<SparseVector> {
+    (0..12u64).map(|i| vector(i * 13, 1.0)).collect()
+}
+
+/// The same documents in one in-RAM index: the reference every assertion
+/// compares against.
+fn reference(docs: &[(u64, SparseVector)]) -> SparseIndex {
+    let mut index = SparseIndex::new();
+    for (id, v) in docs { index.insert(*id, v); }
+    index
+}
+
+#[test]
+fn a_commit_writes_one_segment_and_the_answers_do_not_change() {
+    let dir = TempDir::new("many_commits");
+    let handle = SparseHandle::create(dir.str()).unwrap();
+
+    let mut docs: Vec<(u64, SparseVector)> = Vec::new();
+    for round in 0..5u64 {
+        for i in 0..40u64 {
+            let id = round * 40 + i;
+            let v = vector(id, 1.0 + (id % 4) as f32);
+            handle.insert(id, &v).unwrap();
+            docs.push((id, v));
+        }
+        handle.commit_inner().unwrap();
+        assert_eq!(segment_count(&dir.0), round as usize + 1,
+            "each commit writes one segment, and leaves the earlier ones alone");
+        assert_eq!(handle.len(), docs.len(), "after {} commits", round + 1);
+    }
+
+    // Five segments must answer exactly like one index holding everything.
+    let reference = reference(&docs);
+    for q in queries() {
+        assert_eq!(handle.search(&q, 20), reference.search(&q, 20),
+            "five segments disagree with one index");
+    }
+}
+
+#[test]
+fn an_update_hides_the_older_copy() {
+    let dir = TempDir::new("update");
+    let handle = SparseHandle::create(dir.str()).unwrap();
+
+    for id in 0..30u64 { handle.insert(id, &vector(id, 1.0)).unwrap(); }
+    handle.commit_inner().unwrap();
+
+    // Re-insert a third of them with a different weight, in a new segment.
+    let mut docs: Vec<(u64, SparseVector)> = (0..30u64).map(|id| (id, vector(id, 1.0))).collect();
+    for id in (0..30u64).step_by(3) {
+        let v = vector(id, 9.0);
+        handle.insert(id, &v).unwrap();
+        docs[id as usize] = (id, v);
+    }
+    handle.commit_inner().unwrap();
+
+    assert_eq!(handle.len(), 30, "an update is not a second document");
+    let reference = reference(&docs);
+    for q in queries() {
+        let got = handle.search(&q, 30);
+        assert_eq!(got, reference.search(&q, 30), "the updated weight must be the one that answers");
+        let ids: Vec<u64> = got.iter().map(|(id, _)| *id).collect();
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(ids.len(), unique.len(), "a document answered twice: {ids:?}");
+    }
+}
+
+#[test]
+fn a_deletion_holds_across_a_reopen() {
+    let dir = TempDir::new("delete");
+    let handle = SparseHandle::create(dir.str()).unwrap();
+    for id in 0..50u64 { handle.insert(id, &vector(id, 1.0)).unwrap(); }
+    handle.commit_inner().unwrap();
+
+    let gone: Vec<u64> = (0..50u64).step_by(5).collect();
+    for &id in &gone {
+        assert!(handle.remove(id).unwrap(), "removing a committed document must report it");
+    }
+    assert!(!handle.remove(4242).unwrap(), "removing what is not there reports nothing");
+    handle.commit_inner().unwrap();
+    assert_eq!(handle.len(), 40);
+
+    let kept: Vec<(u64, SparseVector)> = (0..50u64)
+        .filter(|id| !gone.contains(id))
+        .map(|id| (id, vector(id, 1.0)))
+        .collect();
+    let reference = reference(&kept);
+
+    // Before and after a reopen, the deleted documents are gone and the
+    // others are untouched.
+    for handle in [handle, SparseHandle::open(dir.str()).unwrap()] {
+        assert_eq!(handle.len(), 40);
+        for q in queries() {
+            let got = handle.search(&q, 50);
+            assert!(got.iter().all(|(id, _)| !gone.contains(id)), "a deleted document answered");
+            assert_eq!(got, reference.search(&q, 50));
+        }
+    }
+}
+
+#[test]
+fn a_filtered_search_over_segments_is_the_search_intersected() {
+    let dir = TempDir::new("filtered");
+    let handle = SparseHandle::create(dir.str()).unwrap();
+    let mut docs = Vec::new();
+    for round in 0..3u64 {
+        for i in 0..25u64 {
+            let id = round * 25 + i;
+            let v = vector(id, 1.0 + (id % 3) as f32);
+            handle.insert(id, &v).unwrap();
+            docs.push((id, v));
+        }
+        handle.commit_inner().unwrap();
+    }
+    let allowed: Vec<u64> = (0..75u64).step_by(4).collect();
+    for q in queries() {
+        let full: HashMap<u64, f32> = handle.search(&q, 75).into_iter().collect();
+        let filtered = handle.search_filtered(&q, 75, &allowed);
+        let mut expected: Vec<(u64, f32)> = full.into_iter()
+            .filter(|(id, _)| allowed.contains(id))
+            .collect();
+        expected.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0)));
+        assert_eq!(filtered, expected);
+    }
+}
+
+/// An index written before segments opens, answers, and its next commit
+/// converts it — the whole-file write it used to do at every commit.
+#[test]
+fn an_index_from_before_segments_is_converted_by_its_next_commit() {
+    let dir = TempDir::new("convert");
+    let docs: Vec<(u64, SparseVector)> = (0..60u64).map(|id| (id, vector(id, 1.0 + (id % 5) as f32))).collect();
+
+    // Build one, then take it back to the single-file layout by hand: what
+    // 3.0.5 left on disk.
+    {
+        let handle = SparseHandle::create(dir.str()).unwrap();
+        for (id, v) in &docs { handle.insert(*id, v).unwrap(); }
+        handle.commit_inner().unwrap();
+    }
+    let seg: PathBuf = std::fs::read_dir(&dir.0).unwrap().flatten()
+        .map(|e| e.path())
+        .find(|p| p.file_name().unwrap().to_string_lossy().ends_with(".mmap"))
+        .expect("a segment was written");
+    // A single-file index is that segment under its old name, with the
+    // manifest gone. Its dimension table is v3, which reads the same.
+    std::fs::rename(&seg, dir.0.join("sparse.mmap")).unwrap();
+    let _ = std::fs::remove_file(dir.0.join("meta.json"));
+    for e in std::fs::read_dir(&dir.0).unwrap().flatten() {
+        let n = e.file_name().to_string_lossy().into_owned();
+        if n.ends_with(".ids") { let _ = std::fs::remove_file(e.path()); }
+    }
+    // No side files at all: a version 3 file names its own dimensions, and
+    // the ids of the segment it becomes are read from its posting lists.
+
+    let handle = SparseHandle::open(dir.str()).unwrap();
+    assert_eq!(handle.len(), 60, "the old layout still opens");
+    let before = reference(&docs);
+    for q in queries() {
+        assert_eq!(handle.search(&q, 20), before.search(&q, 20), "before conversion");
+    }
+
+    // The next commit converts it, and nothing of the old layout is left.
+    handle.insert(999, &vector(999, 3.0)).unwrap();
+    handle.commit_inner().unwrap();
+    assert!(!dir.0.join("sparse.mmap").exists());
+    assert!(!dir.0.join("sparse_dims.bin").exists());
+    assert!(!dir.0.join("sparse_vectors.bin").exists());
+    assert!(dir.0.join("meta.json").exists());
+    assert_eq!(handle.len(), 61);
+
+    let mut with_extra = docs.clone();
+    with_extra.push((999, vector(999, 3.0)));
+    let after = reference(&with_extra);
+    for q in queries() {
+        assert_eq!(handle.search(&q, 20), after.search(&q, 20), "after conversion");
+    }
+}

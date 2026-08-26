@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use crate::blob_store::BlobStore;
 use crate::index::{SparseIndex, SparseVector};
 use crate::mmap_index::{self, MmapPostingData};
+use crate::segments::{self, IndexMeta, Segment, SegmentMeta};
 use crate::wand::Postings;
 
 const MMAP_FILE: &str = "sparse.mmap";
@@ -27,7 +28,10 @@ const DIMS_FILE: &str = "sparse_dims.bin";
 const LEGACY_FILE: &str = "sparse.bin";
 
 /// Files that make up a sparse index (new format).
-const INDEX_FILES: &[&str] = &[MMAP_FILE, VECTORS_FILE, DIMS_FILE];
+/// What the single-file layout wrote, and what a commit removes once the
+/// index is made of segments. A segmented index's file list is its
+/// manifest's (`IndexMeta::files`), which changes at every commit.
+const STALE_FILES: &[&str] = &[MMAP_FILE, VECTORS_FILE, DIMS_FILE, LEGACY_FILE];
 
 /// BlobStore key prefix — ensures no collision with other index types (FTS, etc.)
 const BLOB_PREFIX: &str = "Sparse_";
@@ -47,15 +51,49 @@ enum StorageBackend {
 }
 
 struct Inner {
+    /// In segmented mode: the vectors inserted since the last commit, and
+    /// nothing else. In legacy mode: the whole index, once loaded.
     index: SparseIndex,
+    /// Legacy single-file index (`sparse.mmap`, versions 1 to 3 written
+    /// before segments). `None` in segmented mode.
     mmap: Option<MmapPostingData>,
     /// True if RAM postings are loaded (always true after create or mutation).
     postings_loaded: bool,
     /// True if vectors HashMap is loaded (always true after create or mutation).
     vectors_loaded: bool,
-    /// Cached doc count (valid even when vectors not loaded).
+    /// Cached doc count (valid even when vectors not loaded): the segments'
+    /// live vectors plus what is in RAM.
     num_vectors: usize,
     dirty: bool,
+    /// The committed segments, oldest first, and the manifest that names
+    /// them. Empty in legacy mode.
+    segments: Vec<Segment>,
+    meta: IndexMeta,
+    /// Segments this handle has written, for the next segment's id.
+    written: u64,
+}
+
+/// An index is segmented when `meta.json` is there. One that is not gets
+/// converted by its next commit — the whole-file write it did anyway.
+impl Inner {
+    fn segmented(&self) -> bool {
+        self.mmap.is_none() || !self.meta.segments.is_empty()
+    }
+}
+
+/// The fields of an index that has nothing yet.
+fn empty_inner() -> Inner {
+    Inner {
+        index: SparseIndex::new(),
+        mmap: None,
+        postings_loaded: true,
+        vectors_loaded: true,
+        num_vectors: 0,
+        dirty: false,
+        segments: Vec::new(),
+        meta: IndexMeta::default(),
+        written: 0,
+    }
 }
 
 pub struct SparseHandle {
@@ -74,14 +112,7 @@ impl SparseHandle {
         std::fs::create_dir_all(Path::new(path))
             .map_err(|e| format!("cannot create directory {path}: {e}"))?;
         let handle = Self {
-            inner: Mutex::new(Inner {
-                index: SparseIndex::new(),
-                mmap: None,
-                postings_loaded: true,
-                vectors_loaded: true,
-                num_vectors: 0,
-                dirty: false,
-            }),
+            inner: Mutex::new(empty_inner()),
             path: PathBuf::from(path),
             backend: StorageBackend::Filesystem,
         };
@@ -92,14 +123,40 @@ impl SparseHandle {
     /// Open an existing sparse index.
     /// Tries new mmap format first, falls back to legacy bincode.
     pub fn open(path: &str) -> Result<Self, String> {
-        let base = Path::new(path);
-        let mmap_path = base.join(MMAP_FILE);
+        Self::open_backed(Path::new(path), StorageBackend::Filesystem)
+    }
 
-        if mmap_path.exists() {
-            Self::open_mmap(base, StorageBackend::Filesystem)
+    /// Open whatever is in `base`: segments (`meta.json`), the single-file
+    /// mmap that came before them, or the bincode that came before that.
+    fn open_backed(base: &Path, backend: StorageBackend) -> Result<Self, String> {
+        if base.join(segments::META_FILE).exists() {
+            Self::open_segmented(base, backend)
+        } else if base.join(MMAP_FILE).exists() {
+            Self::open_mmap(base, backend)
         } else {
             Self::open_legacy(base)
         }
+    }
+
+    /// Open a segmented index: the manifest, then each segment it names.
+    /// Nothing is read into RAM — a search walks the mappings.
+    fn open_segmented(base: &Path, backend: StorageBackend) -> Result<Self, String> {
+        let meta = IndexMeta::read(base)?;
+        let mut segments = Vec::with_capacity(meta.segments.len());
+        for sm in &meta.segments {
+            segments.push(Segment::open(base, sm.clone())?);
+        }
+        let num_vectors = meta.live_vectors();
+        Ok(Self {
+            inner: Mutex::new(Inner {
+                num_vectors,
+                segments,
+                meta,
+                ..empty_inner()
+            }),
+            path: base.to_path_buf(),
+            backend,
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -120,14 +177,7 @@ impl SparseHandle {
         let cache_dir = Self::make_cache_dir(cache_base, &blob_name)?;
 
         let handle = Self {
-            inner: Mutex::new(Inner {
-                index: SparseIndex::new(),
-                mmap: None,
-                postings_loaded: true,
-                vectors_loaded: true,
-                num_vectors: 0,
-                dirty: false,
-            }),
+            inner: Mutex::new(empty_inner()),
             path: cache_dir,
             backend: StorageBackend::Store {
                 store,
@@ -170,19 +220,12 @@ impl SparseHandle {
         };
 
         // Open from cache_dir (same logic as filesystem open)
-        if cache_dir.join(MMAP_FILE).exists() {
-            Self::open_mmap(&cache_dir, backend)
+        if cache_dir.join(segments::META_FILE).exists() || cache_dir.join(MMAP_FILE).exists() {
+            Self::open_backed(&cache_dir, backend)
         } else {
             // Empty index (no files in store yet) — create fresh
             let handle = Self {
-                inner: Mutex::new(Inner {
-                    index: SparseIndex::new(),
-                    mmap: None,
-                    postings_loaded: true,
-                    vectors_loaded: true,
-                    num_vectors: 0,
-                    dirty: false,
-                }),
+                inner: Mutex::new(empty_inner()),
                 path: cache_dir,
                 backend,
             };
@@ -216,12 +259,18 @@ impl SparseHandle {
     fn open_mmap(base: &Path, backend: StorageBackend) -> Result<Self, String> {
         let mmap = MmapPostingData::open(&base.join(MMAP_FILE))?;
 
-        // Deserialize dimension mapping (small file, needed for search routing)
-        let dims_data = std::fs::read(base.join(DIMS_FILE))
-            .map_err(|e| format!("cannot read {DIMS_FILE}: {e}"))?;
-        let (dim_map, dim_reverse): (HashMap<u32, usize>, Vec<u32>) =
+        // A version 3 file names its own dimensions, in order: the side
+        // file is what a dense table needed, and it may not even be there.
+        let (dim_map, dim_reverse): (HashMap<u32, usize>, Vec<u32>) = if mmap.has_global_dims() {
+            let reverse: Vec<u32> = mmap.tokens().map(|(t, _)| t).collect();
+            let map = reverse.iter().enumerate().map(|(i, &t)| (t, i)).collect();
+            (map, reverse)
+        } else {
+            let dims_data = std::fs::read(base.join(DIMS_FILE))
+                .map_err(|e| format!("cannot read {DIMS_FILE}: {e}"))?;
             bincode::deserialize(&dims_data)
-                .map_err(|e| format!("cannot deserialize dims: {e}"))?;
+                .map_err(|e| format!("cannot deserialize dims: {e}"))?
+        };
 
         let num_dims = mmap.num_dims();
         let num_vectors = mmap.num_vectors();
@@ -237,7 +286,7 @@ impl SparseHandle {
                 postings_loaded: false,
                 vectors_loaded: false,
                 num_vectors,
-                dirty: false,
+                ..empty_inner()
             }),
             path: base.to_path_buf(),
             backend,
@@ -253,14 +302,7 @@ impl SparseHandle {
             .map_err(|e| format!("cannot deserialize sparse index: {e}"))?;
         let num_vectors = index.len();
         Ok(Self {
-            inner: Mutex::new(Inner {
-                index,
-                mmap: None,
-                postings_loaded: true,
-                vectors_loaded: true,
-                num_vectors,
-                dirty: false,
-            }),
+            inner: Mutex::new(Inner { index, num_vectors, ..empty_inner() }),
             path: base.to_path_buf(),
             backend: StorageBackend::Filesystem,
         })
@@ -284,7 +326,13 @@ impl SparseHandle {
                 let tokens: Vec<u32> = inner.index.dim_reverse().to_vec();
                 let postings = inner.index.postings_mut();
                 for (i, pl) in postings.iter_mut().enumerate() {
-                    *pl = mmap.load_postings_of_token(tokens[i]);
+                    // A dimension the mapping does not name has no postings
+                    // here rather than someone else's (a dims side file that
+                    // disagrees with the mapping used to index out of bounds).
+                    *pl = match tokens.get(i) {
+                        Some(&token) => mmap.load_postings_of_token(token),
+                        None => Postings::new(),
+                    };
                 }
             } else {
                 let postings = inner.index.postings_mut();
@@ -301,7 +349,24 @@ impl SparseHandle {
         if inner.vectors_loaded {
             return Ok(());
         }
+        // A segmented index keeps no vectors on disk: `index` holds the
+        // delta, which starts empty, and a segment's ids are what tells
+        // whether it holds a document (see `segments::Segment::holds`).
+        if inner.segmented() {
+            inner.vectors_loaded = true;
+            return Ok(());
+        }
         let vectors_path = path.join(VECTORS_FILE);
+        // A single file that names its own dimensions (version 3) does not
+        // need this one: it was kept to know which dimensions a deletion
+        // touches, and the ids of the segment it converts into are read from
+        // its posting lists. A dense file still needs it.
+        if !vectors_path.exists()
+            && inner.mmap.as_ref().is_some_and(|m| m.has_global_dims())
+        {
+            inner.vectors_loaded = true;
+            return Ok(());
+        }
         let data = std::fs::read(&vectors_path)
             .map_err(|e| format!("cannot read {}: {e}", vectors_path.display()))?;
         let vectors: HashMap<u64, SparseVector> = bincode::deserialize(&data)
@@ -319,8 +384,12 @@ impl SparseHandle {
         let mut inner = self.inner.lock().map_err(|_| "lock poisoned".to_string())?;
         Self::ensure_vectors_loaded(&mut inner, &self.path)?;
         Self::ensure_postings_loaded(&mut inner);
+        // An update: the copies already committed are hidden, and the one
+        // going into RAM will be written into a later segment, which no
+        // tombstone covers.
+        Self::tombstone_committed(&mut inner, node_id)?;
         inner.index.insert(node_id, vector);
-        inner.num_vectors = inner.index.len();
+        inner.num_vectors = Self::count(&inner);
         inner.dirty = true;
         Ok(())
     }
@@ -329,16 +398,45 @@ impl SparseHandle {
         let mut inner = self.inner.lock().map_err(|_| "lock poisoned".to_string())?;
         Self::ensure_vectors_loaded(&mut inner, &self.path)?;
         Self::ensure_postings_loaded(&mut inner);
-        let removed = inner.index.remove(node_id);
+        let from_segments = Self::tombstone_committed(&mut inner, node_id)?;
+        let from_ram = inner.index.remove(node_id);
+        let removed = from_segments || from_ram;
         if removed {
-            inner.num_vectors = inner.index.len();
+            inner.num_vectors = Self::count(&inner);
             inner.dirty = true;
         }
         Ok(removed)
     }
 
+    /// Hide `node_id` in every segment that was written with it. Answers
+    /// whether any segment was holding it.
+    fn tombstone_committed(inner: &mut Inner, node_id: u64) -> Result<bool, String> {
+        let mut hit = false;
+        for seg in &mut inner.segments {
+            if seg.holds(node_id)? && seg.tombstone(node_id) {
+                hit = true;
+            }
+        }
+        if hit {
+            // The manifest owns the tombstones; keep it in step with the
+            // open segments so a commit writes them out.
+            for (sm, seg) in inner.meta.segments.iter_mut().zip(inner.segments.iter()) {
+                sm.deleted = seg.meta.deleted.clone();
+            }
+        }
+        Ok(hit)
+    }
+
+    /// Live documents: the segments' minus their tombstones, plus RAM.
+    fn count(inner: &Inner) -> usize {
+        inner.meta.live_vectors() + inner.index.len()
+    }
+
     pub fn search(&self, query: &SparseVector, limit: usize) -> Vec<(u64, f32)> {
         let inner = self.inner.lock().unwrap();
+        if !inner.segments.is_empty() {
+            return Self::search_segments(&inner, query, limit, &|_| true);
+        }
         if !inner.dirty {
             if let Some(ref mmap) = inner.mmap {
                 return mmap_index::search_mmap(
@@ -353,6 +451,37 @@ impl SparseHandle {
         inner.index.search(query, limit)
     }
 
+    /// Search every segment, then what is still in RAM, and keep the best
+    /// `limit`. A live document sits in exactly one of them — a tombstone
+    /// hides the copies a later insert replaced — so the merge has nothing
+    /// to deduplicate: it is a sort and a truncation, the same one the
+    /// sharded handle does across shards.
+    ///
+    /// The WAND pruning happens inside each segment rather than over the
+    /// whole index; that is the price of segments, and what a merge buys
+    /// back.
+    fn search_segments<F: Fn(u64) -> bool>(
+        inner: &Inner,
+        query: &SparseVector,
+        limit: usize,
+        filter: &F,
+    ) -> Vec<(u64, f32)> {
+        let mut all: Vec<(u64, f32)> = Vec::new();
+        for seg in &inner.segments {
+            if seg.data.num_vectors() == 0 {
+                continue;
+            }
+            let keep = |id: u64| seg.is_live(id) && filter(id);
+            all.extend(mmap_index::search_mmap(&seg.data, &HashMap::new(), query, limit, &keep));
+        }
+        if !inner.index.is_empty() {
+            all.extend(inner.index.search(query, limit).into_iter().filter(|(id, _)| filter(*id)));
+        }
+        all.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+        all.truncate(limit);
+        all
+    }
+
     pub fn search_filtered(
         &self,
         query: &SparseVector,
@@ -360,6 +489,10 @@ impl SparseHandle {
         allowed_ids: &[u64],
     ) -> Vec<(u64, f32)> {
         let inner = self.inner.lock().unwrap();
+        if !inner.segments.is_empty() {
+            let allowed: std::collections::HashSet<u64> = allowed_ids.iter().copied().collect();
+            return Self::search_segments(&inner, query, limit, &|id| allowed.contains(&id));
+        }
         if !inner.dirty {
             if let Some(ref mmap) = inner.mmap {
                 return mmap_index::search_mmap_allowed(
@@ -384,39 +517,93 @@ impl SparseHandle {
 
     /// Write index to disk in the new mmap format, then re-mmap.
     /// If store-backed, also persists to BlobStore.
+    /// Write what is in RAM as a **new segment** and point the manifest at
+    /// it. What was already committed is not touched: the cost of a commit
+    /// is the cost of the delta, where it used to be the cost of the whole
+    /// index (`tests/bench_commit_cost.rs`).
+    ///
+    /// An index written before segments is converted here, once: its whole
+    /// content becomes segment zero — the full write it did at every commit
+    /// anyway — and `meta.json` appears next to it.
     pub fn commit_inner(&self) -> Result<(), String> {
         let mut inner = self.inner.lock().map_err(|_| "lock poisoned".to_string())?;
 
-        // If postings not loaded and not dirty, nothing to write (already on disk)
-        // But we still need to write on create (postings_loaded=true, dirty=false, mmap=None)
-        if !inner.postings_loaded && !inner.dirty && inner.mmap.is_some() {
+        let converting = inner.mmap.is_some();
+        if converting {
+            // The old file holds everything; bring it into RAM so the
+            // segment written below is the whole index, then let it go.
+            Self::ensure_postings_loaded(&mut inner);
+            Self::ensure_vectors_loaded(&mut inner, &self.path)?;
+        } else if !inner.dirty && !inner.meta.segments.is_empty() {
+            // Nothing new, and the manifest is already on disk. A tombstone
+            // set `dirty`, so this only skips a genuinely idle commit.
             return Ok(());
         }
 
-        Self::ensure_postings_loaded(&mut inner);
-        Self::ensure_vectors_loaded(&mut inner, &self.path)?;
+        // ── The new segment ────────────────────────────────────────────
+        let mut written: Vec<String> = Vec::new();
+        let has_delta = !inner.index.is_empty()
+            || inner.index.postings().iter().any(|p| !p.is_empty());
+        if has_delta {
+            inner.written += 1;
+            let id = segments::new_segment_id(inner.written);
+            let file = segments::segment_file(&id);
+            mmap_index::write_mmap_file(
+                &self.path.join(&file),
+                inner.index.postings(),
+                inner.index.dim_reverse(),
+                inner.index.len() as u32,
+            )?;
+            // A segment's ids are the ids in its posting lists. In the
+            // normal path the RAM index holds them as keys; when converting
+            // an older index they are only in the postings, which have just
+            // been loaded from its file — the vectors side file may not even
+            // exist any more.
+            let mut ids: Vec<u64> = if converting {
+                let mut set = std::collections::HashSet::new();
+                for p in inner.index.postings() {
+                    for x in p.as_slice() { set.insert(x.id); }
+                }
+                set.into_iter().collect()
+            } else {
+                inner.index.vectors().keys().copied().collect()
+            };
+            ids.sort_unstable();
+            let ids_name = segments::ids_file(&id);
+            mmap_index::write_file_atomic(&self.path.join(&ids_name), &segments::encode_ids(&ids))?;
+            inner.meta.segments.push(SegmentMeta {
+                id,
+                num_vectors: ids.len() as u32,
+                deleted: Vec::new(),
+            });
+            written.push(file);
+            written.push(ids_name);
+        }
 
-        // Write sparse.mmap to local cache
-        mmap_index::write_mmap_file(
-            &self.path.join(MMAP_FILE),
-            inner.index.postings(),
-            inner.index.dim_reverse(),
-            inner.num_vectors as u32,
-        )?;
+        // ── The manifest, last: it is what makes the segment part of the
+        // index, and it is written atomically. A crash before this leaves
+        // an orphan file and an index that is exactly what it was.
+        inner.meta.version = segments::META_VERSION;
+        inner.meta.write(&self.path)?;
+        written.push(segments::META_FILE.to_string());
 
-        // Serialize vectors + dims
-        let vectors_data = bincode::serialize(inner.index.vectors())
-            .map_err(|e| format!("cannot serialize vectors: {e}"))?;
-        mmap_index::write_file_atomic(&self.path.join(VECTORS_FILE), &vectors_data)?;
+        // ── Reopen what was just written, drop the RAM delta ───────────
+        let metas: Vec<SegmentMeta> = inner.meta.segments.clone();
+        let mut opened = Vec::with_capacity(metas.len());
+        for sm in metas {
+            opened.push(Segment::open(&self.path, sm)?);
+        }
+        inner.segments = opened;
+        inner.index = SparseIndex::new();
+        inner.mmap = None;
+        inner.postings_loaded = true;
+        inner.vectors_loaded = true;
+        inner.dirty = false;
+        inner.num_vectors = Self::count(&inner);
 
-        let dims_data =
-            bincode::serialize(&(inner.index.dim_map(), inner.index.dim_reverse()))
-                .map_err(|e| format!("cannot serialize dims: {e}"))?;
-        mmap_index::write_file_atomic(&self.path.join(DIMS_FILE), &dims_data)?;
-
-        // Sync to BlobStore if store-backed
+        // ── Sync to the store, and drop what the old format left ───────
         if let StorageBackend::Store { ref store, ref index_name } = self.backend {
-            for &file in INDEX_FILES {
+            for file in &written {
                 let data = std::fs::read(self.path.join(file))
                     .map_err(|e| format!("cannot read cache {file}: {e}"))?;
                 store
@@ -424,21 +611,18 @@ impl SparseHandle {
                     .map_err(|e| format!("cannot save {index_name}/{file} to store: {e}"))?;
             }
         }
-
-        // Re-mmap and reset to lazy state
-        let mmap = MmapPostingData::open(&self.path.join(MMAP_FILE))?;
-        inner.mmap = Some(mmap);
-        inner.dirty = false;
-        // Note: postings_loaded and vectors_loaded stay true — data is still in RAM.
-        // They'll be reset on next open().
-
-        // Remove legacy file if present
-        let legacy = self.path.join(LEGACY_FILE);
-        if legacy.exists() {
-            let _ = std::fs::remove_file(&legacy);
-            // Also remove from store if store-backed
-            if let StorageBackend::Store { ref store, ref index_name } = self.backend {
-                let _ = store.delete(index_name, LEGACY_FILE);
+        // Whatever the old format left — the single mmap and its two side
+        // files, or the bincode before them — is not part of a segmented
+        // index. Dropped after the manifest names the segments, never before.
+        for &stale in STALE_FILES {
+            {
+                let path = self.path.join(stale);
+                if path.exists() {
+                    let _ = std::fs::remove_file(&path);
+                    if let StorageBackend::Store { ref store, ref index_name } = self.backend {
+                        let _ = store.delete(index_name, stale);
+                    }
+                }
             }
         }
 
@@ -474,20 +658,42 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn create_writes_mmap_format() {
+    fn create_writes_a_manifest_and_a_segment_per_commit() {
         let p = tmp_path("sparse_mmap_create_test");
         cleanup(&p);
         let path = p.to_str().unwrap();
 
-        let _handle = SparseHandle::create(path).unwrap();
-        assert!(p.join(MMAP_FILE).exists());
-        assert!(p.join(VECTORS_FILE).exists());
-        assert!(p.join(DIMS_FILE).exists());
+        // An empty index is its manifest, and nothing else: no segment is
+        // written for no documents.
+        let handle = SparseHandle::create(path).unwrap();
+        assert!(p.join(crate::segments::META_FILE).exists());
+        assert_eq!(segment_files(&p).len(), 0);
+        assert!(!p.join(MMAP_FILE).exists(), "the single-file format is not written any more");
+
+        handle.insert(1, &SparseVector::new(vec![7], vec![1.0])).unwrap();
+        handle.commit_inner().unwrap();
+        assert_eq!(segment_files(&p).len(), 1);
+
+        // A second commit writes a second segment, not a rewrite of the first.
+        handle.insert(2, &SparseVector::new(vec![7], vec![1.0])).unwrap();
+        handle.commit_inner().unwrap();
+        assert_eq!(segment_files(&p).len(), 2);
 
         let handle2 = SparseHandle::open(path).unwrap();
-        assert_eq!(handle2.len(), 0);
+        assert_eq!(handle2.len(), 2);
+        assert_eq!(handle2.search(&SparseVector::new(vec![7], vec![1.0]), 10).len(), 2);
 
         cleanup(&p);
+    }
+
+    /// The `seg_*.mmap` files of an index directory.
+    fn segment_files(base: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(base).unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .filter(|n| n.starts_with("seg_") && n.ends_with(".mmap"))
+            .collect();
+        names.sort();
+        names
     }
 
     #[test]
@@ -604,10 +810,13 @@ mod tests {
         let results = handle.search(&SparseVector::new(vec![1], vec![1.0]), 10);
         assert_eq!(results[0].0, 7);
 
-        // Commit migrates to new format
+        // Commit converts it to segments and drops the old files.
         handle.commit_inner().unwrap();
-        assert!(p.join(MMAP_FILE).exists());
+        assert!(p.join(crate::segments::META_FILE).exists());
+        assert_eq!(segment_files(&p).len(), 1);
         assert!(!p.join(LEGACY_FILE).exists());
+        assert!(!p.join(MMAP_FILE).exists());
+        assert_eq!(handle.search(&SparseVector::new(vec![1], vec![1.0]), 10)[0].0, 7);
 
         cleanup(&p);
     }
@@ -665,11 +874,11 @@ mod tests {
             .unwrap();
         handle.commit_inner().unwrap();
 
-        // Data should be in store
-        assert!(store.exists("Sparse_test_idx", MMAP_FILE).unwrap());
-        assert!(store.exists("Sparse_test_idx", VECTORS_FILE).unwrap());
-        assert!(store.exists("Sparse_test_idx", DIMS_FILE).unwrap());
-        assert_eq!(store.list("Sparse_test_idx").unwrap().len(), 3);
+        // The store holds the manifest and the segment's two files.
+        let names = store.list("Sparse_test_idx").unwrap();
+        assert!(names.iter().any(|n| n == crate::segments::META_FILE), "{names:?}");
+        assert_eq!(names.iter().filter(|n| n.ends_with(".mmap")).count(), 1, "{names:?}");
+        assert_eq!(names.iter().filter(|n| n.ends_with(".ids")).count(), 1, "{names:?}");
 
         // Search should work (mmap from cache)
         let results = handle.search(&SparseVector::new(vec![2], vec![1.0]), 10);

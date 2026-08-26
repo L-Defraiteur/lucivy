@@ -18,5 +18,6 @@ pub mod blob_store;
 pub mod handle;
 pub mod index;
 pub mod mmap_index;
+pub mod segments;
 pub mod sharded;
 pub mod wand;
