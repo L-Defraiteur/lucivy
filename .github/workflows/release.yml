@@ -137,7 +137,10 @@ jobs:
         run: |
           cd bindings/nodejs
           cargo build --release --target ${{ matrix.triple }}
-          cp target/${{ matrix.triple }}/release/${{ matrix.lib }} lucivy.${{ matrix.key }}.node
+          # The crate builds in the workspace's target directory (../../target).
+          lib=$(find ../../target target -path "*/${{ matrix.triple }}/release/${{ matrix.lib }}" 2>/dev/null | head -1)
+          test -n "$lib" || { echo "addon not found"; find ../../target target -name "*lucivy_napi*" -maxdepth 4 2>/dev/null; exit 1; }
+          cp "$lib" lucivy.${{ matrix.key }}.node
           ls -la lucivy.${{ matrix.key }}.node
       - name: Smoke test the addon
         # The manylinux image has no Node; the x86_64 loader is exercised by
