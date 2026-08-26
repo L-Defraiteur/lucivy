@@ -357,6 +357,17 @@ mod ffi {
             limit: u32,
         ) -> Result<Vec<SearchResult>>;
 
+        // The same, restricted to a whitelist of _node_id values: a real
+        // pre-filter under the federation's statistics — the ids decide which
+        // documents are visited, the statistics how they score.
+        fn search_filtered_with_global_stats(
+            self: &LucivyIndex,
+            query_json: &str,
+            global_stats_json: &str,
+            limit: u32,
+            allowed_ids: &[u64],
+        ) -> Result<Vec<SearchResult>>;
+
         // Merge BM25 stats from multiple nodes into global stats (for distributed search).
         // stats_json_list: JSON array of ExportableStats strings, one per node.
         // Returns merged JSON string ready for search_with_global_stats().
@@ -907,6 +918,30 @@ impl LucivyIndex {
             limit as usize,
             &global_stats,
             None,
+        )?;
+
+        collect_results(&handle, &results)
+    }
+
+    fn search_filtered_with_global_stats(
+        &self,
+        query_json: &str,
+        global_stats_json: &str,
+        limit: u32,
+        allowed_ids: &[u64],
+    ) -> Result<Vec<ffi::SearchResult>, String> {
+        let query_config = self.parse_query(query_json)?;
+        let global_stats: lucivy_core::bm25_global::ExportableStats =
+            serde_json::from_str(global_stats_json)
+                .map_err(|e| format!("invalid global_stats JSON: {e}"))?;
+
+        let handle = self.handle()?;
+        let results = handle.search_filtered_with_global_stats(
+            &query_config,
+            limit as usize,
+            &global_stats,
+            None,
+            allowed_ids.iter().copied().collect(),
         )?;
 
         collect_results(&handle, &results)

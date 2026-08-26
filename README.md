@@ -1,4 +1,4 @@
-# lucivy 3.0.4
+# lucivy 3.0.5
 
 [![PyPI](https://img.shields.io/pypi/v/lucivy?label=PyPI&color=blue)](https://pypi.org/project/lucivy/)
 [![npm](https://img.shields.io/npm/v/lucivy?label=npm&color=cb3837)](https://www.npmjs.com/package/lucivy)
@@ -37,7 +37,7 @@ lucivy's own source from GitHub and indexes it in your browser in a few seconds.
   ~1.5× the native time (it was ~25 minutes and 10×): the engine runs on
   mimalloc, and its memory is bounded by construction.
 - One version number for the whole workspace: `ld-lucivy`, `lucivy-core`,
-  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 3.0.4.
+  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 3.0.5.
 
 Full list: [CHANGELOG.md](CHANGELOG.md). Design: [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -180,9 +180,10 @@ back into the index.
 ```python
 index = lucivy.Index.create("/tmp/sharded", fields=[...], shards=4)   # parallel search
 
-# Distributed: correct IDF across machines
+# Distributed: correct IDF across machines, nothing copied or mounted
 merged = lucivy.merge_stats([node_a.export_stats(q), node_b.export_stats(q)])
 hits = node_a.search_with_global_stats(q, merged, limit=10)
+hits = node_a.search_with_global_stats(q, merged, allowed_ids=[3, 7, 11])  # + pre-filter
 
 # Snapshots and deltas
 blob = index.export_snapshot()                    # LUCE: every shard in one blob

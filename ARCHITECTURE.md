@@ -177,7 +177,11 @@ BM25 statistics are aggregated over every shard before scoring
 (`AggregatedBm25StatsOwned`), so scores are identical with 1 or 4 shards; the
 same statistics are serialisable (`ExportableStats`) for a distributed search:
 `export_stats` on each node, `merge_stats` on the coordinator,
-`search_with_global_stats` on each node, top-k merge.
+`search_with_global_stats` on each node, top-k merge. That call takes the
+same DAG as a local search — shards in parallel, top-k bounded per shard,
+batching for an index too large for memory — and accepts `allowed_ids`, so a
+pre-filter and the federation's statistics compose: the ids decide which
+documents are visited, the statistics how they score.
 
 ### Filters
 

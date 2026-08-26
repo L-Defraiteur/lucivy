@@ -593,6 +593,9 @@ impl Index {
     ///   from all nodes (obtained by merging `exportStats()` outputs).
     /// @param limit - Maximum number of results (default 10).
     /// @param highlights - If true, return highlight byte offsets per field.
+    /// @param allowedIds - Restrict the search to those `_node_id` values: a
+    ///   real pre-filter, under the federation's statistics — the ids decide
+    ///   which documents are visited, the statistics how they score.
     /// @returns `Array<SearchResult>` scored with global BM25 statistics.
     #[napi]
     pub fn search_with_global_stats(
@@ -601,6 +604,7 @@ impl Index {
         global_stats_json: String,
         limit: Option<u32>,
         highlights: Option<bool>,
+        allowed_ids: Option<Vec<u32>>,
     ) -> Result<Vec<SearchResult>> {
         let query_config: query::QueryConfig = serde_json::from_str(&query_json)
             .map_err(|e| Error::from_reason(format!("invalid query JSON: {e}")))?;
@@ -617,9 +621,15 @@ impl Index {
             None
         };
 
-        let results = self.h()?.search_with_global_stats(
-            &query_config, limit, &global_stats, highlight_sink.clone(),
-        ).map_err(|e| Error::from_reason(e))?;
+        let results = match allowed_ids {
+            Some(ids) => self.h()?.search_filtered_with_global_stats(
+                &query_config, limit, &global_stats, highlight_sink.clone(),
+                ids.into_iter().map(u64::from).collect(),
+            ),
+            None => self.h()?.search_with_global_stats(
+                &query_config, limit, &global_stats, highlight_sink.clone(),
+            ),
+        }.map_err(|e| Error::from_reason(e))?;
 
         collect_sharded_results(
             self.h()?,

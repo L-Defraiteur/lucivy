@@ -1146,7 +1146,15 @@ impl Index {
     ///     results = node_a.search_with_global_stats(
     ///         "mutex lock", merged_stats_json, limit=5
     ///     )
-    #[pyo3(signature = (query, global_stats_json, limit=10, highlights=false))]
+    ///
+    /// ``allowed_ids`` restricts the search to those ``_node_id`` values —
+    /// a real pre-filter, under the federation's statistics: the ids decide
+    /// which documents are visited, the statistics how they score::
+    ///
+    ///     node_a.search_with_global_stats(
+    ///         "mutex lock", merged_stats_json, allowed_ids=[3, 7, 11]
+    ///     )
+    #[pyo3(signature = (query, global_stats_json, limit=10, highlights=false, allowed_ids=None))]
     fn search_with_global_stats(
         &self,
         py: Python<'_>,
@@ -1154,6 +1162,7 @@ impl Index {
         global_stats_json: &str,
         limit: u32,
         highlights: bool,
+        allowed_ids: Option<Vec<u64>>,
     ) -> PyResult<Vec<SearchResult>> {
         let query_config = self.parse_query(query)?;
         let global_stats: lucivy_core::bm25_global::ExportableStats =
@@ -1168,9 +1177,15 @@ impl Index {
         };
 
         py.allow_threads(|| {
-            let results = handle.search_with_global_stats(
-                &query_config, limit as usize, &global_stats, highlight_sink.clone(),
-            ).map_err(|e| PyValueError::new_err(e))?;
+            let results = match allowed_ids {
+                Some(ids) => handle.search_filtered_with_global_stats(
+                    &query_config, limit as usize, &global_stats, highlight_sink.clone(),
+                    ids.into_iter().collect::<HashSet<u64>>(),
+                ),
+                None => handle.search_with_global_stats(
+                    &query_config, limit as usize, &global_stats, highlight_sink.clone(),
+                ),
+            }.map_err(|e| PyValueError::new_err(e))?;
             collect_sharded_results(handle, &results, highlight_sink.as_deref(), false)
         })
     }

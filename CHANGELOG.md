@@ -23,7 +23,11 @@ a normal search, and a sparse commit can no longer be cut in half.
 - **`search_filtered_with_global_stats`** — the pre-filter of
   `search_filtered` under the federation's statistics: the allowed ids decide
   which documents are visited, the statistics how they score. It came for
-  free once the mode joined the DAG.
+  free once the mode joined the DAG, and it reaches every binding: Python and
+  Node take an `allowed_ids` / `allowedIds` argument on
+  `search_with_global_stats`, C++ gains
+  `search_filtered_with_global_stats`, and the wasm export takes the id array
+  the other filtered search already took.
 - Pinned by `test_federated_search.rs`: the union of what two nodes return is
   what one index holding every document returns, **and a document scores the
   same** on its node as in that single index (never asserted before), for

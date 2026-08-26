@@ -384,9 +384,12 @@ export declare class Index {
    *   from all nodes (obtained by merging `exportStats()` outputs).
    * @param limit - Maximum number of results (default 10).
    * @param highlights - If true, return highlight byte offsets per field.
+   * @param allowedIds - Restrict the search to those `_node_id` values: a
+   *   real pre-filter, under the federation's statistics — the ids decide
+   *   which documents are visited, the statistics how they score.
    * @returns `Array<SearchResult>` scored with global BM25 statistics.
    */
-  searchWithGlobalStats(queryJson: string, globalStatsJson: string, limit?: number | undefined | null, highlights?: boolean | undefined | null): Array<SearchResult>
+  searchWithGlobalStats(queryJson: string, globalStatsJson: string, limit?: number | undefined | null, highlights?: boolean | undefined | null, allowedIds?: Array<number> | undefined | null): Array<SearchResult>
 }
 /**
  * An index whose files live in a storage you provide — a transactional

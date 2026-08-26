@@ -311,6 +311,10 @@ merged = lucivy.merge_stats([stats_a, stats_b])
 results_a = node_a.search_with_global_stats(query, merged, limit=10)
 results_b = node_b.search_with_global_stats(query, merged, limit=10)
 
+# Restricted to a set of _node_id values, under the same statistics:
+# the ids decide which documents are visited, the statistics how they score.
+results_a = node_a.search_with_global_stats(query, merged, allowed_ids=[3, 7, 11])
+
 # 4. Coordinator merges top-K results by score
 all_results = sorted(results_a + results_b, key=lambda r: r.score, reverse=True)[:10]
 ```

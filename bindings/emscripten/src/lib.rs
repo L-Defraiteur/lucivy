@@ -1116,6 +1116,10 @@ pub unsafe extern "C" fn lucivy_export_stats(
 
 /// Search with externally-provided global BM25 stats (distributed mode).
 /// `global_stats_json`: JSON string of merged ExportableStats from all nodes.
+///
+/// `allowed_ids` (may be null, `ids_len` 0) restricts the search to those
+/// `_node_id` values: a real pre-filter under the federation's statistics —
+/// the ids decide which documents are visited, the statistics how they score.
 #[no_mangle]
 pub unsafe extern "C" fn lucivy_search_with_global_stats(
     ctx: *mut LucivyContext,
@@ -1123,6 +1127,8 @@ pub unsafe extern "C" fn lucivy_search_with_global_stats(
     global_stats_json: *const c_char,
     limit: u32,
     highlights: i32,
+    allowed_ids: *const u32,
+    ids_len: usize,
 ) -> *const c_char {
     if ctx.is_null() { return return_error("null context"); }
     let ctx = &*ctx;
@@ -1146,9 +1152,22 @@ pub unsafe extern "C" fn lucivy_search_with_global_stats(
         None
     };
 
-    let results = match ctx.handle.search_with_global_stats(
-        &query_config, limit as usize, &global_stats, highlight_sink.clone(),
-    ) {
+    let allowed: Option<std::collections::HashSet<u64>> =
+        if allowed_ids.is_null() || ids_len == 0 {
+            None
+        } else {
+            Some(std::slice::from_raw_parts(allowed_ids, ids_len)
+                .iter().map(|&id| id as u64).collect())
+        };
+
+    let results = match match allowed {
+        Some(ids) => ctx.handle.search_filtered_with_global_stats(
+            &query_config, limit as usize, &global_stats, highlight_sink.clone(), ids,
+        ),
+        None => ctx.handle.search_with_global_stats(
+            &query_config, limit as usize, &global_stats, highlight_sink.clone(),
+        ),
+    } {
         Ok(r) => r,
         Err(e) => return return_error(&e),
     };
