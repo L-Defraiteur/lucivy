@@ -105,30 +105,35 @@ portable).
   lucivy-core → sparse-vector`, tous 3.0.5.
 - GitHub Release `v3.0.5` : 11 artefacts, auteur `github-actions[bot]`.
 
-## 4. Le proxy CORS, durci (soir)
+## 4. La source de la démo et le proxy CORS (soir)
 
-`playground/lucivy-proxy-worker.js` (Cloudflare Worker, à coller dans le
-tableau de bord — pas de wrangler ici) : n'était pas un proxy ouvert (cible
-limitée à `api.github.com`), mais relayait toute l'API depuis n'importe quel
-site, et la limite anonyme GitHub (60 req/h, partagée via les IP de
-Cloudflare) était à la merci du premier script. Maintenant : `Origin`
-obligatoire dans une liste (`l-defraiteur.github.io`, `localhost`,
-`127.0.0.1` — forgeable hors navigateur, ce qui est documenté), cible
-limitée à `/repos/<owner>/<repo>/tarball[/<ref>]`, `GET` seul, **cache 30
-min des réponses anonymes uniquement** (jamais avec `Authorization` : un
-dépôt privé ne doit pas ressortir chez le visiteur suivant ; sur un
-`workers.dev` nu le Cache API peut être un no-op, ça marche sur un domaine
-custom), `Content-Length` et `X-RateLimit-*` exposés. La page affiche la
-progression du téléchargement (`Downloading … 4.2 MB / 13.5 MB`) et, sur
-quota épuisé, « try again in N min, or add a token ». Le filet que rien ne
-contourne : une règle de rate limiting Cloudflare par IP, à créer dans le
-tableau de bord.
+**La démo n'a plus besoin du proxy.** Le déploiement Pages (`pages.yml`)
+bundle `playground/lucivy-source.tar.gz` — les fichiers texte du commit
+déployé (~8,6 Mo, jamais commité), dossier racine `lucivy-<sha7>` — et la
+page le télécharge **en same-origin** : zéro appel à l'API GitHub, zéro
+quota, servi par le CDN de Pages, exact au commit près, et le terminal
+affiche le SHA (« L-Defraiteur/lucivy@bf86271 downloaded: 1171 text files
+(the source of this commit, bundled by the deploy) »). La démo reste vraie :
+c'est la vraie source, téléchargée et indexée sous les yeux du visiteur.
+Sans le tarball (checkout local sans l'avoir généré) ou avec `?proxy`, la
+démo repasse par le proxy comme avant. Progression de téléchargement
+affichée (`Downloading … 4.2 MB / 8.6 MB`).
 
-**Plan B** : le déploiement Pages (`pages.yml`) bundle
-`playground/lucivy-source.tar.gz` (les fichiers texte du commit, ~8,6 Mo,
-jamais commité) ; si le proxy ou GitHub échoue, la démo le prend et le dit
-(« using the snapshot of the source bundled with this page »). Test :
-`?noproxy`.
+**Le proxy** (`playground/lucivy-proxy-worker.js`, Cloudflare Worker à
+coller dans le tableau de bord — pas de wrangler ici) ne sert plus qu'à
+« clone ton propre dépôt », chemin à faible volume. Il n'était pas un proxy
+ouvert (cible limitée à `api.github.com`) mais relayait toute l'API depuis
+n'importe quel site, et la limite anonyme GitHub (60 req/h, partagée via
+les IP de Cloudflare) était à la merci du premier script. Maintenant :
+`Origin` obligatoire dans une liste (`l-defraiteur.github.io`,
+`localhost`, `127.0.0.1` — forgeable hors navigateur, documenté), cible
+limitée à `/repos/<owner>/<repo>/tarball[/<ref>]`, `GET` seul, corps
+**streamé** (jamais bufferisé : un Worker a 128 Mo), `Content-Length` et
+`X-RateLimit-*` exposés ; sur quota épuisé la page dit « try again in N
+min, or add a token ». Une version avec cache 30 min a été écrite puis
+retirée : sur un `workers.dev` nu le Cache API est un no-op, et le tarball
+bundlé rend le cache inutile. Le filet que rien ne contourne : une règle de
+rate limiting Cloudflare par IP, à créer dans le tableau de bord.
 
 ## 5. À faire
 

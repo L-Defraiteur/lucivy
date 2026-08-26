@@ -1524,8 +1524,8 @@ function ghHeaders() {
 
 const DEMO_REPO = { owner: 'L-Defraiteur', repo: 'lucivy', branch: 'main', path: '/lucivy_source' };
 const PROXY = 'https://lucivy-proxy.luciedefraiteur.workers.dev';
-// Built by the Pages deploy (see .github/workflows/pages.yml): the demo's
-// fallback when the proxy or GitHub's rate limit fails.
+// Built by the Pages deploy (see .github/workflows/pages.yml): what the demo
+// indexes — the source of the deployed commit, served next to the page.
 const DEMO_SNAPSHOT = 'lucivy-source.tar.gz';
 // Above this the page that indexed cannot also serve: the index plus what
 // indexing leaves behind exceeds the 4 GB a browser addresses (measured:
@@ -1540,8 +1540,6 @@ async function downloadRepoTarball(owner, repo, branch, onProgress) {
   const headers = {};
   const token = gitTokenEl.value.trim();
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  // `?noproxy`: exercise the demo's bundled-snapshot fallback.
-  if (new URLSearchParams(location.search).has('noproxy')) throw new Error('proxy disabled by ?noproxy');
   const resp = await fetch(url, { headers });
   if (!resp.ok) {
     // GitHub's anonymous quota (60 an hour, shared by everyone behind the
@@ -1555,7 +1553,23 @@ async function downloadRepoTarball(owner, repo, branch, onProgress) {
     const err = await resp.json().catch(() => ({}));
     throw new Error(err.message || `GitHub API error ${resp.status}`);
   }
-  // Stream the body to show the download (the proxy exposes Content-Length).
+  return tarballToFiles(await extractTarGz(await readWithProgress(resp, onProgress)));
+}
+
+// The source bundled by the Pages deploy (`lucivy-source.tar.gz`, top
+// directory `lucivy-<sha>`), or null when it is not served here.
+async function downloadSnapshot(onProgress) {
+  const resp = await fetch(`./${DEMO_SNAPSHOT}`, { cache: 'no-cache' }).catch(() => null);
+  if (!resp || !resp.ok) return null;
+  const entries = await extractTarGz(await readWithProgress(resp, onProgress));
+  const top = entries[0] ? entries[0].path.split('/')[0] : '';
+  const ref = top.startsWith('lucivy-') ? top.slice('lucivy-'.length) : 'snapshot';
+  return { files: tarballToFiles(entries), ref };
+}
+
+// The body as a Blob, reporting progress (Content-Length when the server
+// gives it: the Pages CDN does, the proxy exposes GitHub's).
+async function readWithProgress(resp, onProgress) {
   const total = parseInt(resp.headers.get('Content-Length') || '0', 10);
   const reader = resp.body.getReader();
   const chunks = [];
@@ -1567,7 +1581,7 @@ async function downloadRepoTarball(owner, repo, branch, onProgress) {
     received += value.length;
     if (onProgress) onProgress(received, total);
   }
-  return tarballToFiles(await extractTarGz(new Blob(chunks)));
+  return new Blob(chunks);
 }
 
 // The entries of a repository tarball as documents: the leading
@@ -1644,29 +1658,32 @@ async function cloneAndIndex(owner, repo, branch, target) {
     statusEl.textContent = `Downloading ${label}${'.'.repeat(dots || 1)}`;
   }, 400);
   let files;
+  let ref = branch;
   const mb = (n) => (n / 1048576).toFixed(1);
   const onProgress = (received, total) => {
     clearInterval(tick);
     statusEl.textContent = `Downloading ${label}... ${mb(received)} MB${total ? ` / ${mb(total)} MB` : ''}`;
   };
   try {
-    files = await downloadRepoTarball(owner, repo, branch, onProgress);
-  } catch (e) {
-    clearInterval(tick);
-    // The demo must not depend on the proxy (a Cloudflare Worker, and the
-    // anonymous GitHub rate limit behind it): the Pages deploy leaves a
-    // tarball of the same source next to the page, taken at deploy time.
-    if (target !== 'demo') throw e;
-    console.warn(`[playground] proxy clone failed (${e.message}); using the bundled snapshot`);
-    statusEl.textContent = `GitHub is unreachable through the proxy (${e.message}) — using the snapshot of the source bundled with this page...`;
-    const resp = await fetch(`./${DEMO_SNAPSHOT}`);
-    if (!resp.ok) throw e;
-    files = tarballToFiles(await extractTarGz(await resp.blob()));
+    // The demo's source is the tarball the Pages deploy built from the same
+    // commit, next to the page: same origin, no GitHub API, no quota, and
+    // its top directory names the commit. The proxy (GitHub's tarball
+    // endpoint through a CORS relay, 60 anonymous requests an hour shared
+    // by everyone) serves "clone your own repository", and the demo only
+    // when the snapshot is not there (a local checkout) or `?proxy` asks.
+    const snapshot = target === 'demo' && !new URLSearchParams(location.search).has('proxy')
+      ? await downloadSnapshot(onProgress) : null;
+    if (snapshot) {
+      files = snapshot.files;
+      ref = snapshot.ref;
+    } else {
+      files = await downloadRepoTarball(owner, repo, branch, onProgress);
+    }
   } finally {
     clearInterval(tick);
   }
   if (files.length === 0) throw new Error('No text files found in repository');
-  statusEl.textContent = `Indexing ${files.length} files from ${label}...`;
+  statusEl.textContent = `Indexing ${files.length} files from ${label}@${ref}...`;
   if (target === 'user') {
     if (userIndex) { await userIndex.close().catch(() => {}); }
     userFiles.clear();
@@ -1856,7 +1873,8 @@ function onStatusMessage(msg) {
     term.set(progressLine, `▸ downloading ${escapeHtml(m[1])} through the proxy${m[2]}${escapeHtml(m[3])}`);
   } else if ((m = msg.match(/^Indexing (\d+) files from (.+)\.\.\.$/))) {
     if (!progressLine) progressLine = term.add('', 'dim');
-    term.set(progressLine, `▸ ${escapeHtml(m[2])} downloaded: ${m[1]} text files`);
+    const viaProxy = new URLSearchParams(location.search).has('proxy') || !/@[0-9a-f]{7,}$/.test(m[2]);
+    term.set(progressLine, `▸ ${escapeHtml(m[2])} downloaded: ${m[1]} text files` + (viaProxy ? ' (through the GitHub proxy)' : ' (the source of this commit, bundled by the deploy)'));
     progressTotal = parseInt(m[1], 10);
     term.cmd(`lucivy index ${DEMO_REPO.path}`, true);
     progressLine = term.add(term.bar(0, progressTotal));
