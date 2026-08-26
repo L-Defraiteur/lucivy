@@ -202,11 +202,341 @@ window._allLogs = [];
   }
   footer a { color: var(--accent); text-decoration: none; }
   footer a:hover { text-decoration: underline; }
+  .home-link { font-size: 13px; color: var(--text-dim); text-decoration: none; display: inline-block; margin-bottom: 10px; }
+  .home-link:hover { color: var(--accent); }
+
+  /* ── Landing view ──────────────────────────────────────────────── */
+  .landing { max-width: 960px; margin: 0 auto; padding: 20px 16px 48px; }
+  .landing nav {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 13px; color: var(--text-dim); margin-bottom: 40px;
+  }
+  .landing nav .brand { font-size: 18px; font-weight: 600; color: var(--text); letter-spacing: 0.02em; }
+  .landing nav .brand span { color: var(--accent); }
+  .landing nav a { color: var(--text-dim); text-decoration: none; margin-left: 16px; }
+  .landing nav a:hover { color: var(--accent); }
+  .hero { text-align: center; margin-bottom: 28px; }
+  .hero h1 { font-size: 40px; font-weight: 650; letter-spacing: -0.02em; line-height: 1.15; margin-bottom: 14px; }
+  .hero h1 em { font-style: normal; color: var(--accent); }
+  .hero .pitch { font-size: 17px; color: var(--text-dim); max-width: 720px; margin: 0 auto 24px; line-height: 1.55; }
+  .hero .pitch code { color: var(--text); font-family: "SF Mono", "Fira Code", monospace; font-size: 15px; }
+  .cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .cta button {
+    padding: 12px 26px; font-size: 15px; font-weight: 600; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text);
+    font-family: inherit; transition: border-color .15s, background .15s, transform .05s;
+  }
+  .cta button:hover:not(:disabled) { border-color: var(--accent); }
+  .cta button:active:not(:disabled) { transform: translateY(1px); }
+  .cta button:disabled { opacity: 0.55; cursor: default; }
+  .cta button.primary { background: var(--accent-dim); border-color: var(--accent); }
+  .cta button.primary:hover:not(:disabled) { background: #2a7ff0; }
+  .hero .measured { font-size: 12.5px; color: var(--text-dim); margin-top: 14px; }
+
+  /* The terminal: every line in it is something the worker did. */
+  .term {
+    position: relative; border: 1px solid var(--border); border-radius: 8px;
+    background: #090c10; overflow: hidden; margin-bottom: 48px;
+    box-shadow: 0 0 0 1px rgba(88,166,255,0.06), 0 20px 60px rgba(0,0,0,0.45);
+  }
+  .term::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: repeating-linear-gradient(0deg, rgba(255,255,255,0.018) 0 1px, transparent 1px 3px);
+  }
+  .term-bar {
+    display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+    background: #0f141a; border-bottom: 1px solid var(--border);
+    font-size: 12px; color: var(--text-dim); font-family: "SF Mono", "Fira Code", monospace;
+  }
+  .term-bar .dot { width: 10px; height: 10px; border-radius: 50%; background: #30363d; display: inline-block; }
+  .term-bar .dot.r { background: #ff5f57; } .term-bar .dot.y { background: #febc2e; } .term-bar .dot.g { background: #28c840; }
+  .term-bar .title { flex: 1; text-align: center; }
+  .term-bar button {
+    font: inherit; font-size: 11px; padding: 2px 9px; border-radius: 4px; cursor: pointer;
+    border: 1px solid var(--border); background: transparent; color: var(--text-dim);
+  }
+  .term-bar button:hover { color: var(--text); border-color: var(--accent); }
+  .term-body {
+    margin: 0; padding: 14px 16px; height: 460px; overflow-y: auto;
+    font-family: "SF Mono", "Fira Code", "JetBrains Mono", Menlo, monospace;
+    font-size: 13px; line-height: 1.5; color: #c9d1d9;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .term-glitch { display: block; color: #3d4a5c; user-select: none; margin-bottom: 8px; }
+  .term-glitch b { color: var(--accent); font-weight: 600; }
+  .term-line { display: block; min-height: 1.5em; }
+  .term-line .prompt { color: var(--green); }
+  .term-line .cmd { color: #fff; }
+  .term-line .flag { color: #d2a8ff; }
+  .term-line .str { color: var(--highlight); }
+  .term-line.dim { color: var(--text-dim); }
+  .term-line.ok { color: var(--green); }
+  .term-line.err { color: var(--red); }
+  .term-line.hit { padding-left: 2ch; }
+  .term-line.hit .path { color: var(--accent); }
+  .term-line.hit .score { color: var(--text-dim); margin-left: 1ch; }
+  .term-line.snip { padding-left: 4ch; color: var(--text-dim); }
+  .term-line.snip mark { background: rgba(255,166,87,0.18); color: var(--highlight); font-weight: 600; border-radius: 2px; padding: 0 1px; }
+  .term-line .bar { color: var(--accent); }
+  .term-line a { color: var(--accent); text-decoration: none; }
+  .term-line a:hover { text-decoration: underline; }
+  .term-cursor { display: inline-block; width: 0.6em; height: 1.1em; background: #c9d1d9; vertical-align: text-bottom; animation: blink 1.1s steps(1) infinite; }
+  .term-cursor[hidden] { display: none; }
+  /* The user's own command line: a real input, so the caret is the browser's. */
+  .term-input {
+    font: inherit; color: #fff; background: transparent; border: none; outline: none;
+    padding: 0; margin: 0; min-width: 2ch; max-width: 100%; caret-color: #c9d1d9;
+  }
+  .term-input:disabled { color: var(--text-dim); }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .landing section { margin-bottom: 44px; }
+  .landing h2 { font-size: 20px; font-weight: 600; margin-bottom: 14px; }
+  .landing h2 small { font-size: 13px; font-weight: 400; color: var(--text-dim); margin-left: 10px; }
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; font-size: 13.5px; line-height: 1.5; color: var(--text-dim); }
+  .card h3 { font-size: 14px; color: var(--text); margin-bottom: 6px; }
+  .card code, .landing p code, .landing li code { font-family: "SF Mono", "Fira Code", monospace; font-size: 12.5px; color: var(--text); background: rgba(110,118,129,0.15); padding: 1px 5px; border-radius: 4px; }
+  .landing table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  .landing th, .landing td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+  .landing th { color: var(--text-dim); font-weight: 500; }
+  .landing td:not(:first-child), .landing th:not(:first-child) { text-align: right; white-space: nowrap; }
+  .landing td code { background: none; padding: 0; }
+  .landing p, .landing li { font-size: 14px; line-height: 1.6; color: var(--text-dim); }
+  .landing ul { padding-left: 20px; }
+  .landing p a, .landing li a, .landing td a { color: var(--accent); text-decoration: none; }
+  .landing p a:hover, .landing li a:hover { text-decoration: underline; }
+  .tabs { display: flex; gap: 0; margin-bottom: 0; }
+  .tabs button {
+    font: inherit; font-size: 13px; padding: 7px 14px; cursor: pointer; color: var(--text-dim);
+    background: var(--surface); border: 1px solid var(--border); border-bottom: none;
+  }
+  .tabs button:first-child { border-radius: 6px 0 0 0; }
+  .tabs button:last-child { border-radius: 0 6px 0 0; }
+  .tabs button:not(:first-child) { border-left: none; }
+  .tabs button.active { color: var(--text); background: #1c2128; }
+  .landing pre.code {
+    margin: 0; padding: 14px 16px; font-size: 12.5px; line-height: 1.55; overflow-x: auto;
+    background: #090c10; border: 1px solid var(--border); border-radius: 0 6px 6px 6px;
+    font-family: "SF Mono", "Fira Code", monospace; color: var(--text);
+  }
+  .landing pre.code .c { color: var(--text-dim); }
+  .landing pre.code .sh { color: var(--green); }
+  .landing pre.code[hidden] { display: none; }
+  .landing pre.picture {
+    margin: 0; padding: 14px 16px; font-size: 12.5px; line-height: 1.5; overflow-x: auto;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    font-family: "SF Mono", "Fira Code", monospace; color: var(--text-dim);
+  }
+  .landing pre.picture b { color: var(--text); font-weight: 500; }
+  .landing footer { margin-top: 24px; }
+
+  @media (max-width: 720px) {
+    .landing { padding: 14px 10px 32px; }
+    .landing nav { margin-bottom: 24px; }
+    .landing nav a { margin-left: 10px; }
+    .hero h1 { font-size: 28px; }
+    .hero .pitch { font-size: 15px; }
+    .cta button { width: 100%; }
+    .term-body { height: 58vh; font-size: 11px; padding: 10px 10px; }
+    .term-line.snip { padding-left: 2ch; }
+    .cards { grid-template-columns: 1fr; }
+    .landing td:not(:first-child), .landing th:not(:first-child) { white-space: normal; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .term-cursor { animation: none; }
+  }
 </style>
 </head>
 <body>
-<div class="container">
+<!-- ── Landing: pitch, two buttons, a terminal that shows what the worker
+     really does (clone, index, searches with their measured times). Nothing
+     in it is scripted output: the lines come from the same status messages
+     the playground shows, and the searches run through the same index. -->
+<div class="landing" id="viewLanding" hidden>
+  <nav>
+    <span class="brand"><span>lucivy</span></span>
+    <span>
+      <a href="https://github.com/L-Defraiteur/lucivy">GitHub</a>
+      <a href="https://www.npmjs.com/package/lucivy">npm</a>
+      <a href="https://pypi.org/project/lucivy/">PyPI</a>
+      <a href="https://crates.io/crates/lucivy-core">crates.io</a>
+    </span>
+  </nav>
+
+  <div class="hero">
+    <h1>Search code the way you <em>grep</em> it.</h1>
+    <p class="pitch">
+      Substrings across tokens, fuzzy (Levenshtein or Jaro-Winkler), regex, boolean syntax,
+      BM25 ranking, exact byte spans &mdash; a Rust engine with Python, Node.js and C++
+      bindings, that also runs in your browser.
+    </p>
+    <div class="cta">
+      <button class="primary" id="btnPlay">&#8635;&nbsp; Replay demo</button>
+      <button id="btnOpenPlayground">Open the playground</button>
+    </div>
+    <p class="measured" id="measuredNote">
+      Everything in the terminal is real: the clone, the indexing, each search and its time &mdash; measured in your tab, right now.
+    </p>
+  </div>
+
+  <div class="term" id="term">
+    <div class="term-bar">
+      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+      <span class="title" id="termTitle">lucivy &mdash; demo</span>
+      <button id="btnSkip" hidden>Skip &rsaquo;</button>
+      <button id="btnReplay" hidden>Replay</button>
+      <button id="btnTryOwn" hidden>Playground &rarr;</button>
+    </div>
+    <pre class="term-body" id="termBody"><span class="term-glitch" id="termGlitch"></span><span id="termLines"></span><span class="term-cursor" id="termCursor"></span></pre>
+  </div>
+
+  <section id="whatYouSaw">
+    <h2>What you just saw <small>and why it is hard</small></h2>
+    <div class="cards">
+      <div class="card">
+        <h3>Substrings across tokens</h3>
+        <code>lock_init</code> is found inside <code>spin_lock_init</code>, <code>suffixfst</code>
+        finds <code>suffix_fst</code> and <code>suffix FST</code>, an emoji is bytes like any other.
+        A tokenizer sees an identifier as one opaque token, or three; lucivy indexes every suffix
+        of every token in a <b>suffix FST</b> and chains tokens through a <b>sibling table</b>, so
+        a fragment or a whole phrase is found wherever it sits &mdash; separators relaxed or strict
+        &mdash; with the exact bytes highlighted.
+      </div>
+      <div class="card">
+        <h3>Fuzzy, verified on the text</h3>
+        Two typos in a seven-word phrase still find it. At distance <i>d</i>, enough trigrams of
+        the query must appear exactly; the candidates come from the FST, then Levenshtein (or
+        Jaro-Winkler above a similarity) decides on the real text. No full scan, and the score
+        carries the verified edit distance.
+      </div>
+      <div class="card">
+        <h3>Regex driven by its literals</h3>
+        <code>Sharded[A-Z]\w+</code> costs the price of <code>Sharded</code>: the required literal
+        drives the walk, <code>regex::Regex</code> decides on the rebuilt windows. A pattern with no
+        usable literal falls back to a scan &mdash; and <code>query_warnings</code> says so before
+        you run it.
+      </div>
+    </div>
+  </section>
+
+  <section id="numbers">
+    <h2>Numbers <small>10&nbsp;000 Linux kernel files, 4 shards, the same 21 queries on both sides, identical hit counts</small></h2>
+    <div style="overflow-x:auto">
+    <table>
+      <tr><th></th><th>native (Rust, mmap)</th><th>browser (WASM)</th></tr>
+      <tr><td>index on disk</td><td>2 307 MB</td><td>2 880 MB, held in memory</td></tr>
+      <tr><td>indexing</td><td>26.7 s</td><td>40 s</td></tr>
+      <tr><td><code>contains kmalloc</code></td><td>34-45 ms</td><td>46-100 ms (first query)</td></tr>
+      <tr><td><code>startsWith netdev</code></td><td>45-55 ms</td><td>53 ms</td></tr>
+      <tr><td><code>phrase return -ENOMEM</code></td><td>53 ms</td><td>47 ms</td></tr>
+      <tr><td><code>fuzzy kmallc</code> (d = 1)</td><td>65-67 ms</td><td>62 ms</td></tr>
+      <tr><td><code>fuzzy kmalloc</code> (d = 2)</td><td>424-436 ms</td><td>270 ms</td></tr>
+      <tr><td><code>regex spin_lock_[a-z]+</code></td><td>147-164 ms</td><td>124 ms</td></tr>
+      <tr><td><code>parse kmalloc AND NOT kfree</code></td><td>26 ms</td><td>19 ms</td></tr>
+      <tr><td><b>panel mean / median</b></td><td><b>75 / 47 ms</b></td><td><b>71-117 / 45-65 ms</b></td></tr>
+    </table>
+    </div>
+    <p style="margin-top:10px">
+      On 50&nbsp;000 kernel files, natively: floor 26 ms, <code>kmalloc</code> 28 ms,
+      <code>include</code> (36&nbsp;824 documents, 214&nbsp;692 spans) 37 ms, fuzzy d&nbsp;=&nbsp;1
+      44-106 ms, regex 200-211 ms &mdash; every count and every span checked against <code>grep</code>.
+      These are substring queries across token boundaries; most full-text engines return nothing for them.
+      How to reproduce: <a href="https://github.com/L-Defraiteur/lucivy/blob/main/docs/BENCHMARKS.md">docs/BENCHMARKS.md</a>.
+    </p>
+  </section>
+
+  <section id="install">
+    <h2>Install</h2>
+    <div class="tabs" id="installTabs">
+      <button class="active" data-tab="py">Python</button>
+      <button data-tab="node">Node.js</button>
+      <button data-tab="web">Browser</button>
+      <button data-tab="rust">Rust</button>
+    </div>
+<pre class="code" data-tab="py"><span class="sh">pip install lucivy</span>
+
+import lucivy
+index = lucivy.Index.create("/tmp/idx", fields=[{"name": "body", "type": "text", "stored": True}])
+index.add(1, body="pthread_mutex_lock acquires a mutex")
+index.commit()
+index.search({"type": "contains", "field": "body", "value": "mutex"}, highlights=True)
+index.search({"type": "contains", "field": "body", "value": "mutx", "distance": 1})     <span class="c"># fuzzy</span>
+index.search({"type": "contains", "field": "body", "value": "lock.*mutex", "regex": True})</pre>
+<pre class="code" data-tab="node" hidden><span class="sh">npm install lucivy</span>
+
+const { Index } = require('lucivy');
+const index = Index.create('/tmp/idx', [{ name: 'body', type: 'text', stored: true }]);
+index.add(1, { body: 'pthread_mutex_lock acquires a mutex' });
+index.commit();
+index.search({ type: 'contains', field: 'body', value: 'mutex' }, { highlights: true });</pre>
+<pre class="code" data-tab="web" hidden><span class="sh">npm install lucivy-wasm</span>
+
+import { Lucivy } from 'lucivy-wasm';
+const lucivy = new Lucivy('./lucivy-worker.js');   <span class="c">// a Web Worker, pthreads, OPFS</span>
+await lucivy.ready;
+const index = await lucivy.create('/idx', { fields: [{ name: 'body', type: 'text' }], shards: 4 });
+await index.add(1, { body: 'pthread_mutex_lock acquires a mutex' });
+await index.commit();
+await index.preload();                             <span class="c">// hold the index in memory, once</span>
+await index.search({ type: 'contains', field: 'body', value: 'mutex' });</pre>
+<pre class="code" data-tab="rust" hidden><span class="sh">cargo add lucivy-core</span>
+
+use lucivy_core::sharded_handle::ShardedHandle;
+use lucivy_core::query::{QueryConfig, SchemaConfig};
+
+let config: SchemaConfig = serde_json::from_value(json!({ "fields": [{ "name": "body", "type": "text" }], "shards": 4 }))?;
+let index = ShardedHandle::create("/tmp/idx", &config)?;
+index.add_document_json(1, &json!({ "body": "pthread_mutex_lock acquires a mutex" }))?;
+index.commit()?;
+let query: QueryConfig = serde_json::from_value(json!({ "type": "contains", "field": "body", "value": "mutex" }))?;
+index.search(&query, 10, None)?;</pre>
+    <p style="margin-top:10px">
+      Prebuilt binaries are Linux x86_64; everything builds from source elsewhere.
+      C++ through a cxx bridge: <a href="https://github.com/L-Defraiteur/lucivy/blob/main/bindings/cpp/README.md">bindings/cpp</a>.
+    </p>
+  </section>
+
+  <section id="how">
+    <h2>How it works</h2>
+<pre class="picture"><b>Document</b> ─ tokenizer ─┬─ inverted index (postings, term frequencies)
+                      ├─ <b>SFX v3: suffix FST</b> + 7 sidecars per field
+                      ├─ fast fields
+                      └─ doc store
+
+<b>Query</b> ─ FST walk (substring / trigrams / literals) ─ <b>sibling chains</b> across tokens
+      ─ validation on the source text (Levenshtein, Jaro-Winkler, regex)
+      ─ BM25 with global statistics ─ <b>byte spans</b></pre>
+    <p style="margin-top:10px">
+      Four crates and four bindings: <code>ld-lucivy</code> (engine), <code>lucivy-core</code>
+      (<code>ShardedHandle</code>, queries, snapshots, storage), <code>luciole</code> (actor runtime and DAGs,
+      WASM-safe), <code>lucistore</code> (blob storage, snapshots, deltas). The whole design is in
+      <a href="https://github.com/L-Defraiteur/lucivy/blob/main/ARCHITECTURE.md">ARCHITECTURE.md</a>.
+    </p>
+  </section>
+
+  <section id="limits">
+    <h2>Honest limits</h2>
+    <ul>
+      <li>Prebuilt binaries are Linux x86_64 (the Python wheel, the npm package); elsewhere you build from source.</li>
+      <li>In the browser a tab addresses 4 GB: about 10&nbsp;000 kernel files are held in memory; past that the index is streamed from storage and a search takes seconds instead of milliseconds.</li>
+      <li>Fuzzy at distance 2 costs 5-10&times; distance 1; a regex with no usable literal is a scan &mdash; <code>query_warnings</code> tells you before you run it.</li>
+      <li>One maintainer. The storage layer (segments, postings, doc store, fast fields) derives from tantivy 0.22; everything above it &mdash; the SFX engine, the query system, sharding, snapshots, the actor runtime, the bindings, the browser build &mdash; is new.</li>
+    </ul>
+  </section>
+
+  <footer>
+    <a href="https://github.com/L-Defraiteur/lucivy">GitHub</a> &middot;
+    <a href="https://pypi.org/project/lucivy/">PyPI</a> &middot;
+    <a href="https://www.npmjs.com/package/lucivy">npm</a> &middot;
+    <a href="https://crates.io/crates/lucivy-core">crates.io</a> &middot;
+    MIT
+  </footer>
+</div>
+
+<div class="container" id="viewPlayground" hidden>
   <header>
+    <a href="#" class="home-link" id="homeLink">&larr; lucivy</a>
     <h1><span>lucivy</span> playground</h1>
     <p>BM25 full-text search &mdash; substring, prefix, exact word, phrase, fuzzy (Levenshtein or Jaro-Winkler), regex, boolean query syntax &mdash; across word boundaries, with separators relaxed or strict, and exact highlights &mdash; running in your browser via WASM</p>
     <p class="wasm-note">
@@ -447,9 +777,60 @@ function getActiveIndex() {
   return activeTab === 'demo' ? demoIndex : userIndex;
 }
 
+// ── Views ─────────────────────────────────────────────────────────
+// One page, two views over the same worker and the same index: the landing
+// (pitch + terminal) and the playground. `#playground`, `?playground`, and
+// the automation parameters (`?corpus`, `?open`, `?nodemo`) open the
+// playground directly, with its old behaviour (the demo index is built at
+// load). The landing starts the demo by itself as soon as the worker is up:
+// the clone, the indexing and the searches run in the terminal; Replay
+// resets it and runs it again.
+const viewLanding = document.getElementById('viewLanding');
+const viewPlayground = document.getElementById('viewPlayground');
+let currentView = 'landing';
+
+function showView(view) {
+  currentView = view;
+  viewLanding.hidden = view !== 'landing';
+  viewPlayground.hidden = view !== 'playground';
+  const url = location.pathname + location.search + (view === 'playground' ? '#playground' : '');
+  history.replaceState(null, '', url);
+  window.scrollTo(0, 0);
+  if (view === 'playground' && !queryEl.disabled) queryEl.focus();
+}
+
+// Whether the URL asks for the playground straight away.
+function wantsPlaygroundDirectly() {
+  const p = new URLSearchParams(location.search);
+  return location.hash === '#playground' || p.has('playground')
+    || p.has('corpus') || p.has('open') || p.has('nodemo');
+}
+
+// Resolves when the worker is up and the OPFS probe is done (index opened
+// or known absent). The demo and the playground button wait on it.
+let startupDone;
+// The demo build in flight, shared so Play and the playground button never
+// clone twice.
+let demoBuild = null;
+// The `showMemoryStatus` (residency + preload) of the last `setReady`.
+let lastMemoryStatus = Promise.resolve();
+
+function ensureDemoBuilt() {
+  if (demoIndex) return Promise.resolve(demoIndex);
+  if (!demoBuild) {
+    demoBuild = cloneAndIndex(DEMO_REPO.owner, DEMO_REPO.repo, DEMO_REPO.branch, 'demo')
+      .finally(() => { demoBuild = null; });
+  }
+  return demoBuild;
+}
+
 // ── Init ──────────────────────────────────────────────────────────
 
 async function startup() {
+  const direct = wantsPlaygroundDirectly();
+  showView(direct ? 'playground' : 'landing');
+  let resolveStartup;
+  startupDone = new Promise(r => { resolveStartup = r; });
   try {
     statusEl.textContent = 'Loading WASM engine (threading)...';
     // `?noopfs`: in-memory filesystem (index lost at reload) — isolates
@@ -506,6 +887,7 @@ async function startup() {
     // only skips the snapshot.
     const params = new URLSearchParams(location.search);
     const corpusUrl = params.get('corpus');
+    if (corpusUrl || params.has('open') || params.has('nodemo')) resolveStartup();
     if (corpusUrl) {
       statusEl.textContent = `Downloading ${corpusUrl}...`;
       const resp = await fetch(corpusUrl);
@@ -561,16 +943,29 @@ async function startup() {
         }
       }
     } catch (_) { opened = false; }
-    if (opened) {
+    if (opened && direct) {
       tabDemoCount.textContent = `(${demoNumDocs})`;
       setReady(`${demoNumDocs} files of lucivy's source, from github.com/${DEMO_REPO.owner}/${DEMO_REPO.repo}@${DEMO_REPO.branch} (indexed here earlier — \u21bb to refresh)`);
+      resolveStartup();
+    } else if (opened) {
+      // The demo is about to clone and index again: the stored index is not
+      // read into memory for nothing.
+      resolveStartup();
+      playDemo();
+    } else if (direct) {
+      resolveStartup();
+      await ensureDemoBuilt();
     } else {
-      await cloneAndIndex(DEMO_REPO.owner, DEMO_REPO.repo, DEMO_REPO.branch, 'demo');
+      // The landing starts the demo by itself: nobody should wait for a click.
+      resolveStartup();
+      playDemo();
     }
   } catch (e) {
     statusEl.className = 'status error';
     statusEl.textContent = `Error: ${e.message}`;
     console.error(e);
+    landingRest(`error: ${e.message}`, 'err');
+    resolveStartup();
   }
 }
 
@@ -579,8 +974,8 @@ function setReady(msg) {
   statusEl.textContent = msg;
   queryEl.disabled = false;
   btnExportSnapshot.disabled = !getActiveIndex();
-  queryEl.focus();
-  showMemoryStatus();
+  if (currentView === 'playground') queryEl.focus();
+  lastMemoryStatus = showMemoryStatus();
 }
 
 // WebAssembly addresses at most 4 GB. Under the residency limit the index is
@@ -825,12 +1220,10 @@ function renderResultBody(result, bodyEl) {
   }
 }
 
-function buildSnippets(text, offsets, contextChars = 120) {
-  const encoder = new TextEncoder();
-  const bytes = encoder.encode(text);
-
-  // Map byte offsets to JS string char offsets (UTF-16 code units).
-  // 4-byte UTF-8 sequences (U+10000+) produce surrogate pairs = 2 JS chars.
+// Byte spans (what the engine returns) to JS string offsets (UTF-16 code
+// units): a 4-byte UTF-8 sequence is a surrogate pair, two JS chars.
+function byteToCharOffsets(text, offsets) {
+  const bytes = new TextEncoder().encode(text);
   const byteToChar = new Int32Array(bytes.length + 1);
   let charIdx = 0, byteIdx = 0;
   while (byteIdx < bytes.length) {
@@ -841,16 +1234,16 @@ function buildSnippets(text, offsets, contextChars = 120) {
       byteToChar[byteIdx + k] = charIdx;
     }
     byteIdx += len;
-    charIdx += (len === 4) ? 2 : 1; // surrogate pair = 2 JS chars
+    charIdx += (len === 4) ? 2 : 1;
   }
   byteToChar[bytes.length] = charIdx;
-
-  const charOffsets = offsets
-    .map(([s, e]) => [
-      byteToChar[Math.min(s, bytes.length)],
-      byteToChar[Math.min(e, bytes.length)]
-    ])
+  return offsets
+    .map(([s, e]) => [byteToChar[Math.min(s, bytes.length)], byteToChar[Math.min(e, bytes.length)]])
     .sort((a, b) => a[0] - b[0]);
+}
+
+function buildSnippets(text, offsets, contextChars = 120) {
+  const charOffsets = byteToCharOffsets(text, offsets);
 
   // Merge nearby offsets into snippet windows
   const windows = [];
@@ -1284,8 +1677,10 @@ async function cloneGitRepo() {
 
 document.getElementById('btnRefreshDemo').addEventListener('click', async (e) => {
   e.stopPropagation();
+  if (demoBuild) return;
   try {
-    await cloneAndIndex(DEMO_REPO.owner, DEMO_REPO.repo, DEMO_REPO.branch, 'demo');
+    if (demoIndex) { await demoIndex.close().catch(() => {}); demoIndex = null; }
+    await ensureDemoBuilt();
   } catch (err) {
     statusEl.className = 'status error';
     statusEl.textContent = `Refresh error: ${err.message}`;
@@ -1299,6 +1694,442 @@ document.getElementById('exampleRepo').addEventListener('click', (e) => {
   gitUrlEl.focus();
 });
 
+// ── Landing: terminal and demo ────────────────────────────────────
+
+const termBody = document.getElementById('termBody');
+const termLines = document.getElementById('termLines');
+const termGlitch = document.getElementById('termGlitch');
+const termCursor = document.getElementById('termCursor');
+const btnPlay = document.getElementById('btnPlay');
+const btnOpenPlayground = document.getElementById('btnOpenPlayground');
+const btnSkip = document.getElementById('btnSkip');
+const btnReplay = document.getElementById('btnReplay');
+const btnTryOwn = document.getElementById('btnTryOwn');
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// The terminal: a list of lines, each added by something that happened.
+const term = {
+  clear() { termLines.replaceChildren(); },
+  // Append a line; `html` is trusted markup built here, text goes through escapeHtml.
+  add(html, cls = '') {
+    const line = document.createElement('span');
+    line.className = 'term-line' + (cls ? ' ' + cls : '');
+    line.innerHTML = html;
+    termLines.appendChild(line);
+    termBody.scrollTop = termBody.scrollHeight;
+    return line;
+  },
+  set(line, html) {
+    line.innerHTML = html;
+    termBody.scrollTop = termBody.scrollHeight;
+  },
+  out(text, cls = '') { return term.add(escapeHtml(text), cls); },
+  // A command, typed. Flags and quoted strings are coloured.
+  async cmd(text, instant = false) {
+    const line = term.add('<span class="prompt">$</span> <span class="cmd"></span>');
+    const span = line.querySelector('.cmd');
+    const render = (s) => escapeHtml(s)
+      .replace(/(--[a-z-]+(?:\s+\d+)?)/g, '<span class="flag">$1</span>')
+      .replace(/(&quot;(?:(?!&quot;).)*&quot;)/g, '<span class="str">$1</span>');
+    if (instant || reducedMotion || demoSkip) { span.innerHTML = render(text); return line; }
+    // Paced by wall time, so a throttled tab (background, low power) catches
+    // up in chunks instead of typing one character a second.
+    const perChar = 24, t0 = performance.now();
+    for (let i = 0; i < text.length && !demoSkip;) {
+      await sleep(perChar);
+      i = Math.min(text.length, Math.max(i + 1, Math.floor((performance.now() - t0) / perChar)));
+      span.innerHTML = render(text.slice(0, i));
+    }
+    span.innerHTML = render(text);
+    termBody.scrollTop = termBody.scrollHeight;
+    return line;
+  },
+  bar(done, total, width = 24) {
+    const ratio = total ? Math.min(1, done / total) : 0;
+    const filled = Math.round(ratio * width);
+    return `<span class="bar">${'█'.repeat(filled)}${'░'.repeat(width - filled)}</span> ${Math.round(ratio * 100).toString().padStart(3)} %  ${done}/${total}`;
+  },
+};
+
+// Glitched header: a few characters of the banner flicker while nothing is
+// happening. Cosmetic, never on real output, off under reduced motion.
+const GLITCH_BASE = [
+  ' ▚▞▚▞  l u c i v y  ▞▚▞▚      substring search · suffix FST · Rust → WASM',
+  ' ░▒▓█  3.0.4  █▓▒░           01101100 01110101 01100011 01101001 01110110 01111001',
+  ' ∿ ⌁ ⟁  bm25 · fuzzy · regex · spans  ⟁ ⌁ ∿',
+];
+const GLITCH_CHARS = '▚▞░▒▓█∿⌁⟁╳◌◍⋮⋯01';
+let glitchTimer = null;
+let glitchRate = 0.025;
+function renderGlitch() {
+  const lines = GLITCH_BASE.map(line => {
+    if (glitchRate === 0) return escapeHtml(line);
+    const chars = [...line];
+    const n = Math.max(1, Math.round(chars.length * glitchRate));
+    for (let k = 0; k < n; k++) {
+      const i = Math.floor(Math.random() * chars.length);
+      if (chars[i] !== ' ') chars[i] = GLITCH_CHARS[Math.floor(Math.random() * GLITCH_CHARS.length)];
+    }
+    return escapeHtml(chars.join(''));
+  });
+  termGlitch.innerHTML = lines.join('\n').replace('l u c i v y', '<b>l u c i v y</b>');
+}
+function glitch(rate) {
+  glitchRate = reducedMotion ? 0 : rate;
+  clearInterval(glitchTimer); glitchTimer = null;
+  renderGlitch();
+  if (glitchRate > 0) glitchTimer = setInterval(renderGlitch, 110);
+}
+glitch(0.025);
+
+// The one line under the banner while the demo has not started (the worker
+// is loading, or it failed).
+let restLine = null;
+function landingRest(text, cls = 'dim') {
+  if (demoRunning) return;
+  if (!restLine) restLine = term.add('', cls);
+  restLine.className = 'term-line ' + cls;
+  restLine.textContent = '▸ ' + text;
+}
+
+// Status messages, mirrored while the demo indexes. Same text the
+// playground shows, in the terminal's shape: the progress line is rewritten
+// in place, the rest is appended.
+let demoRunning = false;
+let demoSkip = false;
+let demoLive = false;     // mirror status messages into the terminal
+let progressLine = null;
+let progressTotal = 0;
+function onStatusMessage(msg) {
+  if (!demoLive || !msg) return;
+  let m;
+  if ((m = msg.match(/^Downloading (.+?)(\.+)$/))) {
+    if (!progressLine) progressLine = term.add('', 'dim');
+    term.set(progressLine, `▸ downloading ${escapeHtml(m[1])} through the proxy${m[2]}`);
+  } else if ((m = msg.match(/^Indexing (\d+) files from (.+)\.\.\.$/))) {
+    if (!progressLine) progressLine = term.add('', 'dim');
+    term.set(progressLine, `▸ ${escapeHtml(m[2])} downloaded: ${m[1]} text files`);
+    progressTotal = parseInt(m[1], 10);
+    term.cmd(`lucivy index ${DEMO_REPO.path}`, true);
+    progressLine = term.add(term.bar(0, progressTotal));
+  } else if ((m = msg.match(/^Indexing .*?(\d+)\/(\d+)( \(committing\.\.\.\))?$/))) {
+    if (!progressLine) progressLine = term.add('');
+    term.set(progressLine, term.bar(parseInt(m[1], 10), parseInt(m[2], 10)) + (m[3] ? '  committing…' : ''));
+  } else if (/^Final commit/.test(msg)) {
+    if (progressLine) term.set(progressLine, term.bar(progressTotal, progressTotal));
+    progressLine = term.add('▸ final commit…', 'dim');
+  } else if (/^Merging segments/.test(msg)) {
+    progressLine = term.add('▸ merging segments…', 'dim');
+  } else if ((m = msg.match(/^(\d+) files from (.+?) indexed here in (\d+)s$/))) {
+    term.add(`▸ ${m[1]} files indexed in ${m[3]} s`, 'ok');
+    progressLine = null;
+  } else if (/^\d+ documents indexed/.test(msg) || /^Opening /.test(msg)) {
+    // transient, the next message says more
+  } else if (/error/i.test(msg)) {
+    term.out('✗ ' + msg, 'err');
+  } else {
+    term.out('▸ ' + msg, 'dim');
+  }
+}
+let memoryLine = null;
+function onMemoryMessage(msg) {
+  if (!demoLive || !msg) return;
+  if (!memoryLine) memoryLine = term.add('', 'dim');
+  term.set(memoryLine, '▸ ' + escapeHtml(msg));
+}
+new MutationObserver(() => onStatusMessage(statusEl.textContent.trim()))
+  .observe(statusEl, { childList: true, characterData: true, subtree: true });
+new MutationObserver(() => onMemoryMessage(memoryEl.textContent.trim()))
+  .observe(memoryEl, { childList: true, characterData: true, subtree: true });
+
+// The searches of the demo, all run for real on the demo index; the three
+// marked `phone` are the sequence on a small device.
+const DEMO_SEARCHES = [
+  { cmd: 'lucivy search "every suffix of every token"', note: 'a whole phrase, matched across five tokens',
+    query: { type: 'contains', field: 'content', value: 'every suffix of every token' } },
+  { cmd: 'lucivy search "suffixfst"', note: 'separators relaxed: suffix_fst, SuffixFst and "suffix FST" all match', phone: true,
+    query: { type: 'contains', field: 'content', value: 'suffixfst' } },
+  { cmd: 'lucivy search --fuzzy 2 "validated on the sourse text by Levenstein"', note: 'two typos in a seven-word phrase, verified on the text', phone: true, fuzzy: true,
+    query: { type: 'contains', field: 'content', value: 'validated on the sourse text by Levenstein', distance: 2 } },
+  { cmd: 'lucivy search "rust🦀lang"', note: 'an emoji is content like any other byte', phone: true,
+    query: { type: 'contains', field: 'content', value: 'rust🦀lang' } },
+  { cmd: 'lucivy search --regex "Sharded[A-Z]\\w+"', note: 'the literal drives the walk, the regex validates', phone: true,
+    query: { type: 'contains', field: 'content', value: 'Sharded[A-Z]\\w+', regex: true } },
+  { cmd: 'lucivy search "suffix AND (fst OR automaton) AND NOT tantivy"', note: 'boolean syntax over content and path, lowered to substring queries',
+    query: { type: 'parse', fields: ['content', 'path'], value: 'suffix AND (fst OR automaton) AND NOT tantivy' } },
+  { cmd: 'lucivy search "lock_init"', note: 'the short one: nine bytes inside spin_lock_init, in every file that has them',
+    query: { type: 'contains', field: 'content', value: 'lock_init' } },
+  { cmd: 'lucivy search --allowed 12 "index"', note: 'restricted to 12 documents: a real pre-filter, not a post-filter', filtered: 12,
+    query: { type: 'contains', field: 'content', value: 'index' } },
+];
+
+// One highlighted window of the content, on one line.
+function snippetLine(content, offsets, ctx = 44) {
+  if (!content || !offsets || offsets.length === 0) return '';
+  const spans = byteToCharOffsets(content, offsets);
+  const [s0, e0] = spans[0];
+  const start = Math.max(0, s0 - ctx), end = Math.min(content.length, e0 + ctx);
+  const flat = (t) => escapeHtml(t).replace(/\s+/g, ' ');
+  let html = start > 0 ? '…' : '', pos = start;
+  for (const [s, e] of spans) {
+    if (s < pos || s >= end) continue;
+    html += flat(content.slice(pos, s)) + '<mark>' + flat(content.slice(s, Math.min(e, end))) + '</mark>';
+    pos = Math.min(e, end);
+  }
+  html += flat(content.slice(pos, end)) + (end < content.length ? '…' : '');
+  return html;
+}
+
+async function runDemoSearch(entry, typeCmd = true) {
+  const idx = demoIndex;
+  const n = demoNumDocs;
+  const opts = { limit: entry.limit || 3, highlights: true, fields: true };
+  let allowed = null;
+  if (entry.filtered) allowed = Array.from({ length: entry.filtered }, (_, i) => Math.floor(i * n / entry.filtered));
+  if (typeCmd) await term.cmd(entry.cmd);
+  // Timed: what a user's query costs (top 3, highlights, stored fields).
+  const t0 = performance.now();
+  const top = allowed ? await idx.searchFiltered(entry.query, allowed, opts) : await idx.search(entry.query, opts);
+  const ms = performance.now() - t0;
+  // Not timed: how many documents answer (capped at 100).
+  const countOpts = { limit: 100, highlights: false, fields: false };
+  const all = allowed ? await idx.searchFiltered(entry.query, allowed, countOpts) : await idx.search(entry.query, countOpts);
+  const count = all.length >= 100 ? '100+' : String(all.length);
+  const where = allowed ? ` of ${allowed.length} allowed documents` : '';
+  term.add(`▸ ${count} hit${all.length === 1 ? '' : 's'}${where} · <b>${ms.toFixed(1)} ms</b> · ${escapeHtml(entry.note)}`, all.length ? 'ok' : 'dim');
+  for (const r of top) {
+    let score;
+    if (entry.fuzzy && r.score < 0) {
+      // tier * 1000 + bm25, the tier being minus the verified edit distance
+      const tier = Math.floor(r.score / 1000);
+      score = `${-tier} edit${tier === -1 ? '' : 's'} · bm25 ${(r.score - tier * 1000).toFixed(2)}`;
+    } else {
+      score = `score ${r.score.toFixed(2)}`;
+    }
+    term.add(`<span class="path">${escapeHtml(r.fields?.path || `doc #${r.docId}`)}</span><span class="score">${score}</span>`, 'hit');
+    const snip = snippetLine(r.fields?.content || '', r.highlights?.content || []);
+    if (snip) term.add(snip, 'snip');
+  }
+  if (typeCmd && !demoSkip) await sleep(reducedMotion ? 200 : 900);
+}
+
+// ── The user's own searches, typed in the terminal ────────────────
+// `lucivy search [flags] "value"`; flags: --fuzzy N, --jw, --regex,
+// --phrase, --prefix, --exact, --strict, --allowed N, --limit N. Boolean
+// syntax (AND / OR / NOT) is detected and goes through the query parser.
+const PROMPT_PREFIX = 'lucivy search ';
+const promptHistory = [];
+let promptInput = null;
+
+function parseSearchCommand(text) {
+  const flags = {};
+  const words = [];
+  const re = /--([a-z]+)(?:[=\s]+(\d+(?:\.\d+)?))?|"([^"]*)"|(\S+)/g;
+  let m;
+  while ((m = re.exec(text))) {
+    if (m[1]) {
+      const takesValue = ['fuzzy', 'allowed', 'limit', 'jw'].includes(m[1]);
+      flags[m[1]] = takesValue && m[2] !== undefined ? parseFloat(m[2]) : true;
+      if (!takesValue && m[2] !== undefined) words.push(m[2]);
+    } else if (m[3] !== undefined) words.push(m[3]);
+    else words.push(m[4]);
+  }
+  const value = words.join(' ').trim();
+  if (flags.help || flags.h || value === 'help' || value === '-h' || value === '?') return { help: true };
+  if (!value) return null;
+  const strict = flags.strict ? true : undefined;
+  let query, note;
+  const boolean = flags.parse || /(^|\s)(AND|OR|NOT)(\s|$)|[()]|(^|\s)[+-]\w/.test(value);
+  if (flags.regex) {
+    query = { type: 'contains', field: 'content', value, regex: true, strict_separators: strict };
+    note = 'regex: its literals drive the walk, the pattern validates';
+  } else if (flags.fuzzy !== undefined || flags.jw !== undefined) {
+    const distance = typeof flags.fuzzy === 'number' ? flags.fuzzy : 1;
+    query = { type: 'contains', field: 'content', value, distance, strict_separators: strict };
+    note = `fuzzy, up to ${distance} edit${distance > 1 ? 's' : ''}, verified on the text`;
+    if (flags.jw !== undefined) {
+      query.fuzzy_metric = 'jaro_winkler';
+      query.min_similarity = typeof flags.jw === 'number' ? flags.jw : 0.9;
+      note = `fuzzy by Jaro-Winkler above ${query.min_similarity}, candidates within ${distance} edit${distance > 1 ? 's' : ''}`;
+    }
+  } else if (flags.phrase) {
+    query = { type: 'phrase', field: 'content', value, strict_separators: strict };
+    note = 'phrase: these words, adjacent, in this order';
+  } else if (flags.prefix) {
+    query = { type: 'startsWith', field: 'content', value, strict_separators: strict };
+    note = 'prefix: at the start of a token';
+  } else if (flags.exact) {
+    query = { type: 'term', field: 'content', value, strict_separators: strict };
+    note = 'exact: whole tokens only';
+  } else if (boolean) {
+    query = { type: 'parse', fields: ['content', 'path'], value, strict_separators: strict };
+    note = 'boolean syntax over content and path';
+  } else {
+    query = { type: 'contains', field: 'content', value, strict_separators: strict };
+    note = `substring across tokens, separators ${strict ? 'strict' : 'relaxed'}`;
+  }
+  if (strict && !note.includes('strict')) note += ', separators strict';
+  const entry = { cmd: PROMPT_PREFIX + text, query, note, fuzzy: query.distance !== undefined };
+  if (typeof flags.allowed === 'number' && flags.allowed > 0) {
+    entry.filtered = Math.min(Math.floor(flags.allowed), demoNumDocs);
+    entry.note += ` · pre-filtered to ${entry.filtered} documents`;
+  }
+  if (typeof flags.limit === 'number') entry.limit = Math.max(1, Math.min(20, Math.floor(flags.limit)));
+  return entry;
+}
+
+// `lucivy search --help`: every option, what it does, an example each.
+function printHelp() {
+  const f = (s) => `<span class="flag">${escapeHtml(s)}</span>`;
+  const q = (s) => `<span class="str">${escapeHtml(s)}</span>`;
+  const rows = [
+    ['usage', `lucivy search [options] ${q('"value"')}  — quotes are optional unless the value has spaces`],
+    ['(none)', `substring anywhere, across tokens, separators relaxed (${q('"suffixfst"')} finds suffix_fst and "suffix FST")`],
+    [f('--fuzzy N'), `up to N edits (Levenshtein), candidates by trigram pigeonhole, verified on the text — ${q('--fuzzy 2 "trigam pigeonhol"')}`],
+    [f('--jw [S]'), `with fuzzy: rank and keep by Jaro-Winkler similarity ≥ S (default 0.9); a typo at the end of a word ranks above one at its start — ${q('--fuzzy 1 --jw "ShardedHandel"')}`],
+    [f('--regex'), `a regular expression; its literals drive the search, the pattern validates — ${q('--regex "Sharded[A-Z]\\w+"')}`],
+    [f('--phrase'), `these words, adjacent, in this order — ${q('--phrase "return -ENOMEM"')}`],
+    [f('--prefix'), `at the start of a token only — ${q('--prefix "Sharded"')}`],
+    [f('--exact'), `whole tokens only (lock does not match unlock) — ${q('--exact "commit"')}`],
+    [f('--strict'), `separators must match exactly (_ - . / and spaces are no longer ignored) — ${q('--strict "spin_lock"')}`],
+    [f('--allowed N'), `real pre-filter: only N documents (spread over the index) are searched — ${q('--allowed 12 "index"')}`],
+    [f('--limit N'), `results shown, 1 to 20 (default 3); the hit count is capped at 100 — ${q('--limit 10 "commit"')}`],
+    ['boolean', `AND, OR, NOT, parentheses, +must -mustnot, "exact phrase" switch to the query parser over content and path — ${q('suffix AND (fst OR automaton) AND NOT tantivy')}`],
+    ['keys', 'Enter runs · ↑ ↓ history · Esc clears · click in the terminal to get the caret back'],
+    ['fields', 'content only, plus path for boolean syntax; every hit shows its best span highlighted in the real text and its measured time'],
+  ];
+  for (const [k, v] of rows) term.add(`  ${k}${' '.repeat(Math.max(1, 14 - k.replace(/<[^>]+>/g, '').length))}${v}`, 'dim');
+}
+
+// A prompt line with a real input after the static `lucivy search `.
+function openPrompt(hint) {
+  if (hint) term.add(`▸ your turn: type a query and press Enter — <span class="flag">--help</span> lists the options (<span class="flag">--fuzzy N</span> <span class="flag">--jw</span> <span class="flag">--regex</span> <span class="flag">--phrase</span> <span class="flag">--prefix</span> <span class="flag">--exact</span> <span class="flag">--strict</span> <span class="flag">--allowed N</span> <span class="flag">--limit N</span>, AND / OR / NOT)`, 'dim');
+  const line = term.add(`<span class="prompt">$</span> <span class="cmd">${escapeHtml(PROMPT_PREFIX)}</span>`);
+  const input = document.createElement('input');
+  input.className = 'term-input';
+  input.type = 'text';
+  input.spellcheck = false;
+  input.autocomplete = 'off';
+  input.setAttribute('aria-label', 'your search');
+  line.appendChild(input);
+  promptInput = input;
+  termCursor.hidden = true;
+  const fit = () => { input.style.width = `${Math.max(2, [...input.value].length + 1)}ch`; };
+  fit();
+  let histPos = promptHistory.length;
+  input.addEventListener('input', fit);
+  input.addEventListener('keydown', async (e) => {
+    if (e.key === 'ArrowUp' && histPos > 0) { histPos--; input.value = promptHistory[histPos]; fit(); e.preventDefault(); }
+    else if (e.key === 'ArrowDown') { histPos = Math.min(promptHistory.length, histPos + 1); input.value = promptHistory[histPos] || ''; fit(); e.preventDefault(); }
+    else if (e.key === 'Escape') { input.value = ''; fit(); }
+    else if (e.key === 'Enter') {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+      if (demoRunning) return;
+      promptHistory.push(text);
+      input.disabled = true;
+      // Freeze the typed line as plain text and answer under it.
+      line.innerHTML = '';
+      line.appendChild(Object.assign(document.createElement('span'), { className: 'prompt', textContent: '$' }));
+      line.appendChild(document.createTextNode(' '));
+      const cmd = document.createElement('span'); cmd.className = 'cmd';
+      cmd.innerHTML = escapeHtml(PROMPT_PREFIX + text)
+        .replace(/(--[a-z]+(?:\s+\d+(?:\.\d+)?)?)/g, '<span class="flag">$1</span>')
+        .replace(/(&quot;(?:(?!&quot;).)*&quot;)/g, '<span class="str">$1</span>');
+      line.appendChild(cmd);
+      promptInput = null;
+      const entry = parseSearchCommand(text);
+      if (entry && entry.help) {
+        printHelp();
+      } else if (!entry) {
+        term.out('▸ nothing to search for — try: "ShardedHandle", --fuzzy 1 "mimaloc", --regex "Sharded[A-Z]\\w+", or --help', 'dim');
+      } else if (!demoIndex) {
+        term.out('✗ no index yet — wait for the demo to finish, or replay it', 'err');
+      } else {
+        try { await runDemoSearch(entry, false); }
+        catch (err) { term.out('✗ ' + err.message, 'err'); }
+      }
+      openPrompt(false);
+    }
+  });
+  termBody.scrollTop = termBody.scrollHeight;
+  if (document.activeElement === document.body || document.activeElement === null) input.focus({ preventScroll: true });
+}
+// A click in the terminal puts the caret back on the prompt.
+termBody.addEventListener('click', () => { if (promptInput && !window.getSelection().toString()) promptInput.focus({ preventScroll: true }); });
+
+async function playDemo() {
+  if (demoRunning) return;
+  demoRunning = true; demoSkip = false;
+  btnPlay.disabled = true;
+  btnReplay.hidden = true; btnTryOwn.hidden = true; btnSkip.hidden = true;
+  restLine = null; progressLine = null; memoryLine = null; promptInput = null;
+  term.clear();
+  termCursor.hidden = false;
+  glitch(0.006);
+  try {
+    await startupDone;
+    // The demo is the indexing: lucivy's source is cloned from GitHub and
+    // indexed here, every time, even when an earlier visit left an index in
+    // storage (the playground keeps using that one until then).
+    await term.cmd(`lucivy clone ${DEMO_REPO.owner}/${DEMO_REPO.repo}@${DEMO_REPO.branch}`);
+    demoLive = true;
+    if (!demoBuild && demoIndex) {
+      await demoIndex.close().catch(() => {});
+      demoIndex = null;
+    }
+    await ensureDemoBuilt();
+    // The residency line (preload) of the last setReady, mirrored above.
+    await lastMemoryStatus;
+    if (!memoryLine && memoryEl.textContent.trim()) onMemoryMessage(memoryEl.textContent.trim());
+    demoLive = false;
+    btnSkip.hidden = false;
+    const smallScreen = window.innerWidth < 720;
+    const searches = smallScreen ? DEMO_SEARCHES.filter(s => s.phone) : DEMO_SEARCHES;
+    for (const entry of searches) await runDemoSearch(entry);
+  } catch (e) {
+    console.error(e);
+    term.out('✗ ' + e.message, 'err');
+  }
+  demoLive = false;
+  demoRunning = false;
+  if (demoIndex) openPrompt(true);
+  btnSkip.hidden = true;
+  btnReplay.hidden = false; btnTryOwn.hidden = false;
+  btnPlay.disabled = false;
+}
+
+async function openPlayground() {
+  showView('playground');
+  try {
+    await startupDone;
+    // Direct users get the demo index as before; an ongoing build is shared.
+    if (!demoIndex) await ensureDemoBuilt();
+  } catch (e) {
+    statusEl.className = 'status error';
+    statusEl.textContent = `Error: ${e.message}`;
+    queryEl.disabled = false;
+  }
+}
+
+btnPlay.addEventListener('click', playDemo);
+btnReplay.addEventListener('click', playDemo);
+btnSkip.addEventListener('click', () => { demoSkip = true; btnSkip.hidden = true; });
+btnOpenPlayground.addEventListener('click', openPlayground);
+btnTryOwn.addEventListener('click', openPlayground);
+document.getElementById('homeLink').addEventListener('click', (e) => { e.preventDefault(); showView('landing'); });
+window.addEventListener('hashchange', () => {
+  if (location.hash === '#playground' && currentView !== 'playground') openPlayground();
+  else if (location.hash !== '#playground' && currentView !== 'landing') showView('landing');
+});
+document.querySelectorAll('#installTabs button').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('#installTabs button').forEach(x => x.classList.toggle('active', x === b));
+  document.querySelectorAll('#install pre.code').forEach(p => { p.hidden = p.dataset.tab !== b.dataset.tab; });
+}));
+
 // Automation hook (tests drive the page through the debug server or devtools).
 window._playground = {
   importFiles,
@@ -1309,6 +2140,9 @@ window._playground = {
   numDocs: () => activeTab === 'demo' ? demoNumDocs : userNumDocs,
   memoryStatus: () => getActiveIndex().memoryStatus(),
   userFile: (docId) => userFiles.get(docId),
+  playDemo,
+  showView,
+  openPlayground,
 };
 
 btnCloneGit.addEventListener('click', cloneGitRepo);

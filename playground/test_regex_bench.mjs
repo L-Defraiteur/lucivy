@@ -52,7 +52,7 @@ server.listen(PORT, async () => {
   page.on('pageerror', err => console.error(`[browser error] ${err.message}`));
 
   try {
-    await page.goto(`http://localhost:${PORT}`, { waitUntil: 'domcontentloaded' });
+    await page.goto(`http://localhost:${PORT}/?playground`, { waitUntil: 'domcontentloaded' });
 
     // Wait for index to be ready
     await page.waitForFunction(

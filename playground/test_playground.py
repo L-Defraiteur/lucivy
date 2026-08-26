@@ -18,7 +18,7 @@ import sys
 from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
 
 PORT = 8787
-URL = f"http://localhost:{PORT}/"
+URL = f"http://localhost:{PORT}/?playground"
 PLAYGROUND_DIR = __file__.rsplit("/", 1)[0]
 
 # Timeout for the commit step (ms). If commit deadlocks, we want to know fast.
