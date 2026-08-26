@@ -105,7 +105,32 @@ portable).
   lucivy-core → sparse-vector`, tous 3.0.5.
 - GitHub Release `v3.0.5` : 11 artefacts, auteur `github-actions[bot]`.
 
-## 4. À faire
+## 4. Le proxy CORS, durci (soir)
+
+`playground/lucivy-proxy-worker.js` (Cloudflare Worker, à coller dans le
+tableau de bord — pas de wrangler ici) : n'était pas un proxy ouvert (cible
+limitée à `api.github.com`), mais relayait toute l'API depuis n'importe quel
+site, et la limite anonyme GitHub (60 req/h, partagée via les IP de
+Cloudflare) était à la merci du premier script. Maintenant : `Origin`
+obligatoire dans une liste (`l-defraiteur.github.io`, `localhost`,
+`127.0.0.1` — forgeable hors navigateur, ce qui est documenté), cible
+limitée à `/repos/<owner>/<repo>/tarball[/<ref>]`, `GET` seul, **cache 30
+min des réponses anonymes uniquement** (jamais avec `Authorization` : un
+dépôt privé ne doit pas ressortir chez le visiteur suivant ; sur un
+`workers.dev` nu le Cache API peut être un no-op, ça marche sur un domaine
+custom), `Content-Length` et `X-RateLimit-*` exposés. La page affiche la
+progression du téléchargement (`Downloading … 4.2 MB / 13.5 MB`) et, sur
+quota épuisé, « try again in N min, or add a token ». Le filet que rien ne
+contourne : une règle de rate limiting Cloudflare par IP, à créer dans le
+tableau de bord.
+
+**Plan B** : le déploiement Pages (`pages.yml`) bundle
+`playground/lucivy-source.tar.gz` (les fichiers texte du commit, ~8,6 Mo,
+jamais commité) ; si le proxy ou GitHub échoue, la démo le prend et le dit
+(« using the snapshot of the source bundled with this page »). Test :
+`?noproxy`.
+
+## 5. À faire
 
 - **Trusted publishing npm** : sur npmjs.com, pour chacun des 6 paquets
   (ils existent maintenant), Settings → Trusted Publisher → GitHub
@@ -113,9 +138,8 @@ portable).
   supprimer le secret `NPM_TOKEN` et le token — le workflow passe seul en
   `--provenance` quand le secret est absent. Restreindre ou révoquer le
   token existant.
-- Comprendre pourquoi un push sur `main` n'a pas déclenché le workflow
-  pendant la panne (les runs sont arrivés après ; probablement juste le
-  retard) — à surveiller au prochain push sur `bindings/`.
+- Cloudflare : coller le Worker durci et le déployer ; créer la règle de
+  rate limiting par IP.
 - Smoke test macOS Intel : absent (cross-compilé) ; acceptable, plateforme
   en fin de vie.
 - Playground : GIF pour le README et les posts ; test sur le téléphone de

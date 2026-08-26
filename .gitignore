@@ -30,3 +30,4 @@ target/.cargo-docker/
 .vault/*
 !.vault/README.md
 !.vault/load.sh
+playground/lucivy-source.tar.gz

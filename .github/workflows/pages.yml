@@ -32,6 +32,16 @@ jobs:
       # the visitor's browser — nothing to build here any more (the old
       # dataset.luce step shipped 67 MB nobody loaded).
 
+      # The demo's fallback when the CORS proxy (or GitHub's anonymous rate
+      # limit behind it) fails: the text files of this very commit, as the
+      # tarball the page would have fetched from GitHub. Never committed.
+      - name: Bundle a snapshot of the source for the demo
+        run: |
+          git ls-files -z \
+            | grep -zEv '\.(wasm|node|tar\.gz|tgz|luce|png|jpg|jpeg|gif|ico|woff2?|pdf)$' \
+            | tar --null -T - --transform 's,^,lucivy-main/,' -czf playground/lucivy-source.tar.gz
+          ls -la playground/lucivy-source.tar.gz
+
       - name: Setup Pages
         uses: actions/configure-pages@v4
 

@@ -1524,6 +1524,9 @@ function ghHeaders() {
 
 const DEMO_REPO = { owner: 'L-Defraiteur', repo: 'lucivy', branch: 'main', path: '/lucivy_source' };
 const PROXY = 'https://lucivy-proxy.luciedefraiteur.workers.dev';
+// Built by the Pages deploy (see .github/workflows/pages.yml): the demo's
+// fallback when the proxy or GitHub's rate limit fails.
+const DEMO_SNAPSHOT = 'lucivy-source.tar.gz';
 // Above this the page that indexed cannot also serve: the index plus what
 // indexing leaves behind exceeds the 4 GB a browser addresses (measured:
 // the first search fails on a 4 MB allocation). The index is persisted in
@@ -1532,22 +1535,49 @@ const RELOAD_TO_SERVE_BYTES = 2 * 1024 * 1024 * 1024;
 
 // The repository as a list of text files, through the CORS proxy (one
 // tarball request), GitHub's "owner-repo-sha/" prefix stripped.
-async function downloadRepoTarball(owner, repo, branch) {
+async function downloadRepoTarball(owner, repo, branch, onProgress) {
   const url = `${PROXY}/https://api.github.com/repos/${owner}/${repo}/tarball/${branch}`;
   const headers = {};
   const token = gitTokenEl.value.trim();
   if (token) headers['Authorization'] = `Bearer ${token}`;
+  // `?noproxy`: exercise the demo's bundled-snapshot fallback.
+  if (new URLSearchParams(location.search).has('noproxy')) throw new Error('proxy disabled by ?noproxy');
   const resp = await fetch(url, { headers });
   if (!resp.ok) {
+    // GitHub's anonymous quota (60 an hour, shared by everyone behind the
+    // proxy) exhausted: say when it resets, and that a token lifts it.
+    const remaining = resp.headers.get('X-RateLimit-Remaining');
+    const reset = parseInt(resp.headers.get('X-RateLimit-Reset') || '0', 10);
+    if (resp.status === 403 && remaining === '0' && reset) {
+      const minutes = Math.max(1, Math.ceil((reset * 1000 - Date.now()) / 60000));
+      throw new Error(`GitHub's anonymous rate limit is exhausted — try again in ${minutes} min, or add a personal access token above`);
+    }
     const err = await resp.json().catch(() => ({}));
     throw new Error(err.message || `GitHub API error ${resp.status}`);
   }
-  const textFiles = await extractTarGz(await resp.blob());
+  // Stream the body to show the download (the proxy exposes Content-Length).
+  const total = parseInt(resp.headers.get('Content-Length') || '0', 10);
+  const reader = resp.body.getReader();
+  const chunks = [];
+  let received = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    if (onProgress) onProgress(received, total);
+  }
+  return tarballToFiles(await extractTarGz(new Blob(chunks)));
+}
+
+// The entries of a repository tarball as documents: the leading
+// "owner-repo-sha/" (or any single top directory) stripped, files above
+// 100 KB skipped — one document is one FST build unit.
+function tarballToFiles(textFiles) {
   for (const f of textFiles) {
     const slash = f.path.indexOf('/');
     if (slash > 0) f.path = f.path.slice(slash + 1);
   }
-  // Files above 100 KB are skipped: one document is one FST build unit.
   const MAX_FILE_SIZE = 100_000;
   const kept = textFiles.filter(f => f.content.length <= MAX_FILE_SIZE);
   if (kept.length < textFiles.length) {
@@ -1614,8 +1644,24 @@ async function cloneAndIndex(owner, repo, branch, target) {
     statusEl.textContent = `Downloading ${label}${'.'.repeat(dots || 1)}`;
   }, 400);
   let files;
+  const mb = (n) => (n / 1048576).toFixed(1);
+  const onProgress = (received, total) => {
+    clearInterval(tick);
+    statusEl.textContent = `Downloading ${label}... ${mb(received)} MB${total ? ` / ${mb(total)} MB` : ''}`;
+  };
   try {
-    files = await downloadRepoTarball(owner, repo, branch);
+    files = await downloadRepoTarball(owner, repo, branch, onProgress);
+  } catch (e) {
+    clearInterval(tick);
+    // The demo must not depend on the proxy (a Cloudflare Worker, and the
+    // anonymous GitHub rate limit behind it): the Pages deploy leaves a
+    // tarball of the same source next to the page, taken at deploy time.
+    if (target !== 'demo') throw e;
+    console.warn(`[playground] proxy clone failed (${e.message}); using the bundled snapshot`);
+    statusEl.textContent = `GitHub is unreachable through the proxy (${e.message}) — using the snapshot of the source bundled with this page...`;
+    const resp = await fetch(`./${DEMO_SNAPSHOT}`);
+    if (!resp.ok) throw e;
+    files = tarballToFiles(await extractTarGz(await resp.blob()));
   } finally {
     clearInterval(tick);
   }
@@ -1805,9 +1851,9 @@ let progressTotal = 0;
 function onStatusMessage(msg) {
   if (!demoLive || !msg) return;
   let m;
-  if ((m = msg.match(/^Downloading (.+?)(\.+)$/))) {
+  if ((m = msg.match(/^Downloading (.+?)(\.{1,3})(.*)$/))) {
     if (!progressLine) progressLine = term.add('', 'dim');
-    term.set(progressLine, `▸ downloading ${escapeHtml(m[1])} through the proxy${m[2]}`);
+    term.set(progressLine, `▸ downloading ${escapeHtml(m[1])} through the proxy${m[2]}${escapeHtml(m[3])}`);
   } else if ((m = msg.match(/^Indexing (\d+) files from (.+)\.\.\.$/))) {
     if (!progressLine) progressLine = term.add('', 'dim');
     term.set(progressLine, `▸ ${escapeHtml(m[2])} downloaded: ${m[1]} text files`);
