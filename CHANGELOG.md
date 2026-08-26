@@ -49,6 +49,32 @@ a normal search, and a sparse commit can no longer be cut in half.
   fields: it had `deny_unknown_fields` and no version, so the day a field was
   added the previous release could no longer read the file. A newer version
   is now refused with a sentence that says so.
+- **A sparse index is a list of segments.** `sparse.mmap` was rewritten
+  whole at every commit, so inserting one vector cost what inserting the
+  whole index cost — 320 ms at 200 000 vectors, and growing. A commit now
+  writes **one segment holding the delta** and names it in `meta.json`:
+  28-33 ms whatever the index holds, flat where it was linear
+  (`bench_commit_cost.rs`). A deletion is a tombstone in the segments that
+  hold the id, which `seg_<id>.ids` answers by binary search — eight bytes a
+  document, read only when something is deleted or updated, and it replaces
+  the far larger `sparse_vectors.bin`. A search walks every segment and what
+  is still in RAM; past eight segments a commit merges them
+  (`LUCIVY_SPARSE_MAX_SEGMENTS`, `0` never), which
+  `bench_segment_search.rs` sets: a search costs the same on 1, 2 or 5
+  segments, ×1.9 on ten, ×5.3 on twenty.
+- **A dimension is its global token id** (`sparse.mmap` format version 3).
+  The dimension header's padding word became the token id and the table is
+  sorted by it — same sixteen bytes — so a dimension is looked up by binary
+  search instead of through `sparse_dims.bin`, which a version 3 file no
+  longer needs at all. What it buys: **merging two segments is a walk over
+  two sorted tables**, with nothing remapped and no dictionary rebuilt — and
+  since a sparse score is a pure dot product, comparable across corpora,
+  merging two *indexes* is the same call. `segments::merge_segments` takes
+  `&[&Segment]` from anywhere.
+  Versions 1 and 2 still open, and the next commit converts them.
+  Pinned by `test_global_dims.rs` and `test_segments.rs` — including the
+  trap this surfaced: RAM postings were reloaded by position, which under a
+  sorted table hands every dimension someone else's list.
 - The default `balance_weight` of an index is 0.2, not the router's 1.0 —
   the two comments diverged and `CLAUDE.md` repeated the wrong one.
 

@@ -11,11 +11,20 @@ Moteur full-text search Rust avec substring matching via Suffix FST. Trois couch
 - **sparse_vector** : index sparse (postings + WAND, `src/wand/`) sur lucistore, shardé via luciole
   (`ShardedSparseHandle`) — crate ami, MIT, code original (design inspiré de Qdrant, aucun code
   dérivé : audit ligne à ligne, voir `docs/24-08-2026/05-wand-comparaison.md`).
-  Commit atomique depuis le 26 août au soir : temporaire + `rename` + `sync`
-  pour les trois fichiers, pied CRC-32 dans `sparse.mmap` (format v2, v1 lu),
-  contrôle de longueur à l'ouverture, `LUCIVY_SPARSE_VERIFY_CRC=1` pour
-  vérifier le CRC ; `_sparse_config.json` versionné et tolérant.
-  Vérité : `test_mmap_durability.rs`
+  Commit atomique depuis le 26 août au soir : temporaire + `rename` + `sync`,
+  pied CRC-32, contrôle de longueur à l'ouverture,
+  `LUCIVY_SPARSE_VERIFY_CRC=1` pour vérifier le CRC ; `_sparse_config.json`
+  versionné et tolérant. **Segmenté depuis le 27 août** : un index est
+  `meta.json` + N `seg_<id>.mmap` (format v3 : la dimension **est** le
+  token id global, table triée) + `seg_<id>.ids` ; un commit n'écrit que le
+  delta (28-33 ms au lieu de 320 à 200 k vecteurs), une suppression est un
+  tombstone, un merge marche les tables triées ensemble sans rien remapper
+  (`segments::merge_segments`, `&[&Segment]` — donc fusionner deux index
+  est le même appel), et un commit compacte au-delà de 8 segments
+  (`LUCIVY_SPARSE_MAX_SEGMENTS`). Les v1/v2 s'ouvrent et se convertissent
+  au commit suivant. Design : `docs/27-08-2026/01-…`. Vérité :
+  `test_global_dims.rs`, `test_segments.rs`, `test_mmap_durability.rs`,
+  benchs `bench_commit_cost.rs` et `bench_segment_search.rs`
 - **Bindings** (5 crates) :
   - CXX bridge rag3db : `lucivy_fts/rust/src/bridge.rs`
   - WASM emscripten : `bindings/emscripten/src/lib.rs` (extern "C" + SharedArrayBuffer + pthreads)

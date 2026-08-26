@@ -84,8 +84,14 @@ mieux localisé en cache que la table de hachage.
 sparse_index/
   meta.json                     ← segments actifs, suppressions
   seg_<id>.mmap                 ← immutable : en-têtes triés par token_id + postings
-  seg_<id>.vectors.bin          ← les vecteurs d'origine du segment
+  seg_<id>.ids                  ← ses ids, triés, 8 octets pièce
 ```
+
+Pas de `vectors.bin` par segment : les vecteurs d'origine n'étaient gardés
+que pour savoir quelles dimensions toucher à une suppression, et une
+suppression est devenue un tombstone. Ce qu'il faut savoir, c'est **quel
+segment porte un id** — c'est `seg_<id>.ids`, lu seulement quand on supprime
+ou met à jour, et il donne au merge sa liste d'ids gratuitement.
 
 `seg_<id>.mmap`, version 3 :
 
@@ -121,7 +127,7 @@ d'un index existant écrit un segment v3 à côté.
 | `insert` | RAM, marque `dirty` | inchangé |
 | `commit` | réécrit tout l'index | écrit **un segment** des seuls vecteurs en RAM, met à jour `meta.json` — O(delta) |
 | `search` | un mmap | un par segment, fusion des top-k (option B du 24 mars) |
-| `remove` | retire des postings RAM | ajoute l'id à `deleted` du segment qui le porte ; le merge l'applique |
+| `remove` | retire des postings RAM | ajoute l'id à `deleted` du segment qui le porte (trouvé dans `seg_<id>.ids`) ; le merge l'applique |
 | `merge` | n'existe pas | merge-join des tables de dimensions, concaténation des postings, suppressions appliquées |
 | fusionner deux index | impossible | monter les segments de l'autre — la même opération que `merge` |
 | delta sync | impossible | les ids de segments qui manquent |
@@ -135,12 +141,11 @@ d'un index existant écrit un segment v3 à côté.
 - **Recherche sur N segments** : N mappings à parcourir par dimension de
   requête. Il faut une politique de merge qui garde N petit (lucivy fait
   ça : `max_merged_docs`).
-- **Suppression d'un id qu'on n'a pas en RAM** : il faut savoir quel segment
-  le porte. Les `vectors.bin` par segment le disent, mais les charger coûte
-  cher ; on parcourt les segments à la suppression, ce qui est rare.
-- **Le backend blob** synchronise une liste de fichiers fixe
-  (`INDEX_FILES`) ; elle devient variable (les segments actifs). C'est le
-  point le plus mécanique, mais il touche `handle.rs`.
+- **Suppression d'un id qu'on n'a pas en RAM** : réglé par `seg_<id>.ids`
+  (recherche binaire, chargé à la demande).
+- **Le backend blob** synchronisait une liste de fichiers fixe
+  (`INDEX_FILES`) ; elle est devenue variable (`IndexMeta::files`), et un
+  commit ne pousse que les fichiers qu'il vient d'écrire.
 
 ## 7. L'ordre
 
