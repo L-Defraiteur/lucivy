@@ -58,10 +58,12 @@ a normal search, and a sparse commit can no longer be cut in half.
   hold the id, which `seg_<id>.ids` answers by binary search — eight bytes a
   document, read only when something is deleted or updated, and it replaces
   the far larger `sparse_vectors.bin`. A search walks every segment and what
-  is still in RAM; past eight segments a commit merges them
-  (`LUCIVY_SPARSE_MAX_SEGMENTS`, `0` never), which
-  `bench_segment_search.rs` sets: a search costs the same on 1, 2 or 5
-  segments, ×1.9 on ten, ×5.3 on twenty.
+  is still in RAM; past sixteen segments a commit merges them
+  (`LUCIVY_SPARSE_MAX_SEGMENTS`, `0` never) — not for search speed, which
+  `bench_segment_search.rs` measures flat from one segment to a hundred on
+  vectors drawn from real text, but for the file count, the write path
+  (2.5 µs an update on one segment, 4.0 on a hundred) and the deleted bytes
+  only a merge reclaims.
 - **A dimension is its global token id** (`sparse.mmap` format version 3).
   The dimension header's padding word became the token id and the table is
   sorted by it — same sixteen bytes — so a dimension is looked up by binary
@@ -75,6 +77,13 @@ a normal search, and a sparse commit can no longer be cut in half.
   Pinned by `test_global_dims.rs` and `test_segments.rs` — including the
   trap this surfaced: RAM postings were reloaded by position, which under a
   sorted table hands every dimension someone else's list.
+- **The sparse benches run on vectors drawn from real text**
+  (`tests/corpus_vectors.rs`: the repository's own files, one word one
+  dimension, `tf · idf` weights) instead of a uniform spread with every
+  weight at 1.0. It matters more than it sounds: WAND's pruning lives on the
+  imbalance between dimensions, and the flat corpus had the segment bench
+  reading ×5.3 where real data reads ×1.0 — it was measuring the corpus, not
+  the index.
 - The default `balance_weight` of an index is 0.2, not the router's 1.0 —
   the two comments diverged and `CLAUDE.md` repeated the wrong one.
 

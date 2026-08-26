@@ -562,18 +562,33 @@ impl SparseHandle {
     /// Segments a commit leaves before merging them, from
     /// `LUCIVY_SPARSE_MAX_SEGMENTS` (`0` never merges on its own).
     ///
-    /// Eight by default. Measured (`tests/bench_segment_search.rs`, 100 000
-    /// vectors): a search costs the same on 1, 2 or 5 segments, ×1.9 on ten,
-    /// ×5.3 on twenty — the WAND pruning works inside a segment, so what is
-    /// pruned in one is still walked in the next. Merging every eight
-    /// commits keeps a search flat and still leaves seven commits out of
-    /// eight paying only for their delta.
+    /// Sixteen by default, and **not for search speed**: measured on vectors
+    /// drawn from real text (`tests/bench_segment_search.rs`, 40 000
+    /// documents, 200 queries), a search costs 0.05 ms on one segment and
+    /// 0.05 ms on a hundred. Splitting the index splits the long posting
+    /// lists with it, and WAND prunes inside each piece just as well — the
+    /// per-segment overhead is a binary search per query dimension, which is
+    /// nothing next to walking those lists. (An earlier ×5.3 came from
+    /// vectors spread uniformly with every weight at 1.0, where WAND cannot
+    /// prune at all. It measured the corpus, not the index.)
+    ///
+    /// What piling up segments does cost:
+    ///
+    /// - **files and mappings** — two files and one mapping each, per shard;
+    /// - **the write path** — an insert or a delete asks every segment
+    ///   whether it holds the id: 2.5 µs on one segment, 4.0 µs on a
+    ///   hundred, and that one is linear;
+    /// - **deleted bytes**, which only a merge reclaims.
+    ///
+    /// A merge costs O(index), so a higher cap is cheaper: sixteen bounds
+    /// the file count while leaving fifteen commits out of sixteen paying
+    /// only for their delta.
     fn max_segments() -> usize {
         static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
         *CAP.get_or_init(|| {
             std::env::var("LUCIVY_SPARSE_MAX_SEGMENTS").ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(8)
+                .unwrap_or(16)
         })
     }
 

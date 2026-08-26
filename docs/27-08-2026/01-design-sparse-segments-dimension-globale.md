@@ -181,26 +181,62 @@ Ce qui reste est constant : trois `fsync` (le segment, ses ids, la méta).
 À deux millions de vecteurs, l'ancien commit prendrait ~3 s ; celui-ci en
 prend toujours 30.
 
-**Le coût d'une recherche par segment** (`bench_segment_search.rs`,
-100 000 vecteurs, 50 requêtes) :
+**Le coût d'une recherche par segment : aucun.** Sur des vecteurs tirés de
+vrai texte (`corpus_vectors.rs` : 40 000 documents, 111 916 dimensions,
+nnz médian 51, listes de 1 à 23 640, 51 220 dimensions vues une seule
+fois), `bench_segment_search.rs` mesure, deux fois de suite :
 
 | segments | recherche | après merge |
 |---|---|---|
-| 1 | 0,03 ms | 0,03 ms |
-| 2 | 0,04 ms | 0,03 ms (×1,1) |
-| 5 | 0,06 ms | 0,03 ms (×1,8) |
-| 10 | 0,06 ms | 0,03 ms (×1,9) |
-| 20 | 0,17 ms | 0,03 ms (×5,3) |
+| 1 | 0,05 ms | 0,05 ms |
+| 5 | 0,07 ms | 0,05 ms |
+| 20 | 0,05 ms | 0,05 ms |
+| 50 | 0,05 ms | 0,05 ms |
+| 100 | 0,05 ms | 0,05 ms |
 
-D'où la politique : un commit merge au-delà de **huit segments**
-(`LUCIVY_SPARSE_MAX_SEGMENTS`, `0` = jamais). Une recherche reste plate, et
-sept commits sur huit ne paient que leur delta.
+**Correction d'une erreur de mesure.** La première version de ce bench
+lisait ×5,3 à vingt segments, et le seuil de compactage de huit en avait été
+tiré. Ce chiffre venait de vecteurs synthétiques : dimensions dispersées
+uniformément, **tous les poids à 1.0**. Avec des poids plats, le WAND n'a
+rien avec quoi élaguer, donc chaque segment recommence un parcours complet —
+on mesurait le corpus, pas l'index. Sur des poids réels (`tf · idf`, donc
+une vraie Zipf), découper l'index découpe aussi les longues listes, et le
+WAND élague dans chaque morceau aussi bien : le surcoût par segment se
+réduit à une recherche binaire par dimension de requête. C'est la raison
+d'être de `corpus_vectors.rs`, et la leçon vaut au-delà du sparse : **une
+mesure sur données uniformes peut inventer un facteur 5**.
+
+**Ce qui croît vraiment avec le nombre de segments, c'est l'écriture.** Une
+insertion ou une suppression demande à chaque segment s'il porte l'id
+(`Segment::holds`, recherche binaire dans son `.ids`) :
+
+| segments | 1 | 5 | 20 | 50 | 100 |
+|---|---|---|---|---|---|
+| mise à jour | 2,5 µs | 2,6 µs | 2,8 µs | 3,2 µs | 4,0 µs |
+
+Linéaire, mais minuscule. **Le seuil de compactage est donc justifié par
+autre chose que la vitesse** : le nombre de fichiers et de mappings (deux
+fichiers et une projection par segment, par shard), les octets des documents
+supprimés que seul un merge récupère, et ce chemin d'écriture. Un merge
+coûtant O(index), un seuil plus haut est moins cher : **seize**
+(`LUCIVY_SPARSE_MAX_SEGMENTS`, `0` = jamais), soit quinze commits sur seize
+qui ne paient que leur delta.
 
 **Ce que le merge prouve.** `segments::merge_segments` marche les tables de
 tokens ensemble et concatène — aucun remappage, aucun dictionnaire
 reconstruit. Il prend `&[&Segment]` : lui passer les segments d'un *autre*
 index est exactement le même appel. C'est là que L4 (fusion sparse) et L1
 côté sparse deviennent une ligne de code, quand on en aura besoin.
+
+**Les vecteurs de test.** Ils étaient synthétiques et uniformes ; ils
+viennent maintenant du texte du dépôt (`corpus_vectors.rs` : un mot une
+dimension, hachée en `u32`, poids `tf · idf`), et les requêtes prennent des
+dimensions sur toute l'étendue des poids et non seulement les plus lourdes —
+une requête de mots rares ne touche presque rien et fait paraître toute
+recherche instantanée. Ce n'est pas SPLADE : la *forme* est réelle, les
+poids ne sont pas ceux d'un modèle. On a demandé à la session rag3weaver un
+dump de vrais vecteurs BGE-M3 (5 000 documents, 200 requêtes) pour caler le
+générateur dessus et vérifier ces chiffres.
 
 **Vérité** : `test_global_dims.rs` (4), `test_segments.rs` (7),
 `test_mmap_durability.rs` (4) — dont la recherche sur N segments comparée à
