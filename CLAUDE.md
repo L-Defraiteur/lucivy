@@ -234,12 +234,13 @@ Les docs sont dans `docs/` organisés par dossier daté. Convention depuis le
 
 | Registre | Package | Publié | Date |
 |----------|---------|---------|---------|
-| PyPI | `lucivy` | **3.0.3** (wheel `cp39-abi3-manylinux_2_28_x86_64` + sdist) | 26 août 2026 (01h) |
-| npm | `lucivy` | **3.0.3** (Linux x64) | 26 août 2026 (01h) |
-| npm | `lucivy-wasm` | **3.0.3** (worker + pkg WASM, `bindings/emscripten`) | 26 août 2026 (01h) |
-| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` | **3.0.3** | 26 août 2026 (01h) |
+| PyPI | `lucivy` | **3.0.4** (wheel `cp39-abi3-manylinux_2_28_x86_64` + sdist) | 26 août 2026 (midi) |
+| npm | `lucivy` | **3.0.4** (Linux x64) | 26 août 2026 (midi) |
+| npm | `lucivy-wasm` | **3.0.4** (worker + pkg WASM, `bindings/emscripten`) | 26 août 2026 (midi) |
+| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` | **3.0.4** | 26 août 2026 (midi) |
 
-3.0.3 la même nuit : palier fuzzy = distance vérifiée, playground mobile, index
+3.0.4 le 26 à midi : recherche filtrée = vrai pré-filtre (regex sur 10 ids
+126 → 4 ms), stack overflow du look-ahead corrigé. 3.0.3 la même nuit : palier fuzzy = distance vérifiée, playground mobile, index
 à moitié écrit reconstruit, montage OPFS. 3.0.2 juste avant : CI verte, bornes
 mémoire côté requête, paliers fuzzy raccordés (voir `CHANGELOG.md`). Avant : 3.0.0 puis 3.0.1 le même soir : les crates 3.0.0 étaient partis avant deux
 correctifs du cœur (interblocage lazy sans `blob_len`, message de

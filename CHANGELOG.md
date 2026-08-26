@@ -1,5 +1,11 @@
-Unreleased
+Lucivy 3.0.4
 ================================
+
+A filtered search (`allowed_ids`) is a real pre-filter now — the allowed set
+reaches the v3 resolvers, and a regex over ten allowed documents answers in
+4 ms instead of 126 — and a stack overflow in the falling walk's look-ahead
+that had been aborting a ground-truth suite unnoticed is gone. Every crate
+and binding ships as **3.0.4**.
 
 - **A filtered search is a pre-filter now.** `allowed_ids` used to reach only
   the collector: the v3 prescan walked the FST, resolved the postings,
