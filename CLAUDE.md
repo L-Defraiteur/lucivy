@@ -213,7 +213,7 @@ cd playground && node serve.mjs
 
 ## Docs
 
-**Dossier courant : `docs/25-08-2026/` — lire d'abord `05-recap-progression-et-a-faire.md`,
+**Dossier courant : `docs/26-08-2026/` — `01-plan-page-presentation.md` (le plan), `02-page-presentation-et-release-3.0.5.md` (ce qui a été fait, ce qui a cassé, à faire). Veille : `docs/25-08-2026/` — lire `05-recap-progression-et-a-faire.md`,
 `06-architecture.md`, `07-knowledge-dump-outils.md`** (autonomes, écrits pour
 remplacer la lecture de l'historique), puis `08-relecture-commits-journee.md`
 (relecture critique de la journée : ce qui a été corrigé le soir et pourquoi). 01-04 sont le détail de la journée :
@@ -239,11 +239,24 @@ Les docs sont dans `docs/` organisés par dossier daté. Convention depuis le
 
 | Registre | Package | Publié | Date |
 |----------|---------|---------|---------|
-| PyPI | `lucivy` | **3.0.4** (wheel `cp39-abi3-manylinux_2_28_x86_64` + sdist) | 26 août 2026 (midi) |
-| npm | `lucivy` | **3.0.4** (Linux x64) | 26 août 2026 (midi) |
-| npm | `lucivy-wasm` | **3.0.4** (worker + pkg WASM, `bindings/emscripten`) | 26 août 2026 (midi) |
-| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` | **3.0.4** | 26 août 2026 (midi) |
+| PyPI | `lucivy` | **3.0.5** (5 wheels `cp39-abi3` : manylinux_2_28 x86_64 + aarch64, macOS x86_64 + arm64, win_amd64 ; + sdist) | 26 août 2026 (soir) |
+| npm | `lucivy` + `lucivy-linux-x64-gnu`, `lucivy-linux-arm64-gnu`, `lucivy-darwin-x64`, `lucivy-darwin-arm64`, `lucivy-windows-x64` | **3.0.5** | 26 août 2026 (soir) |
+| npm | `lucivy-wasm` | **3.0.5** (worker + pkg WASM, `bindings/emscripten`) | 26 août 2026 (soir) |
+| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` | **3.0.5** | 26 août 2026 (soir) |
 
+3.0.5 le 26 au soir : **binaires pour cinq plateformes** par
+`.github/workflows/release.yml` (matrice maturin + cargo, Linux dans
+manylinux_2_28, Intel macOS cross-compilé depuis `macos-14` — `macos-13`
+n'a plus de runner), GitHub Release `v3.0.5` avec les 11 artefacts, PyPI
+par **trusted publishing** (OIDC, plus de token), npm à la main cette fois
+(le token « bypass 2FA » ne contournait rien → `EOTP` ; et npm a refusé le
+nom `lucivy-win32-x64-msvc` pour « spam », d'où `lucivy-windows-x64`).
+Prochaine version : configurer le trusted publisher npm sur les 6 paquets
+(ils existent maintenant) et supprimer `NPM_TOKEN`. Les jobs de
+publication attendent l'approbation de l'environnement `release` **et**
+la variable **de dépôt** `PUBLISH_ENABLED=true` (pas d'environnement : le
+`if:` d'un job ne voit pas celles-là). Page de présentation + troncature
+signalée dans la même version (voir `CHANGELOG.md`, `RELEASE.md`).
 3.0.4 le 26 à midi : recherche filtrée = vrai pré-filtre (regex sur 10 ids
 126 → 4 ms), stack overflow du look-ahead corrigé. 3.0.3 la même nuit : palier fuzzy = distance vérifiée, playground mobile, index
 à moitié écrit reconstruit, montage OPFS. 3.0.2 juste avant : CI verte, bornes
