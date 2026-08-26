@@ -1,5 +1,5 @@
 {
-  "name": "lucivy-win32-x64-msvc",
+  "name": "lucivy-windows-x64",
   "version": "3.0.5",
   "description": "lucivy prebuilt addon for win32-x64-msvc \u2014 installed automatically by the lucivy package",
   "main": "lucivy.win32-x64-msvc.node",

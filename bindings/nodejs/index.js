@@ -13,9 +13,12 @@ function platformKey() {
 
 function load() {
   const key = platformKey();
+  // The Windows package is `lucivy-windows-x64`: npm's spam filter refused
+  // the napi-style `lucivy-win32-x64-msvc` at first publish.
+  const pkg = key === 'win32-x64-msvc' ? 'lucivy-windows-x64' : `lucivy-${key}`;
   const candidates = [
     `./lucivy.${key}.node`,
-    `lucivy-${key}`,
+    pkg,
     `./lucivy.node`,
   ];
   const errors = [];

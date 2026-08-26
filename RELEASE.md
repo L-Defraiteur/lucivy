@@ -89,7 +89,7 @@ before the next; the CDN can lag a minute. Then record the versions in
 
 npm packaging: `lucivy` no longer carries a binary; it lists
 `lucivy-linux-x64-gnu`, `lucivy-linux-arm64-gnu`, `lucivy-darwin-x64`,
-`lucivy-darwin-arm64`, `lucivy-win32-x64-msvc` as `optionalDependencies`
+`lucivy-darwin-arm64`, `lucivy-windows-x64` as `optionalDependencies`
 (templates in `bindings/nodejs/npm/`, one addon each, `os`/`cpu` filters so
 npm installs one) and `index.js` loads the one present — or a local
 `lucivy.node` from `npm run build`. The platform packages take the version

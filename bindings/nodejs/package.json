@@ -43,6 +43,6 @@
     "lucivy-linux-arm64-gnu": "3.0.5",
     "lucivy-darwin-x64": "3.0.5",
     "lucivy-darwin-arm64": "3.0.5",
-    "lucivy-win32-x64-msvc": "3.0.5"
+    "lucivy-windows-x64": "3.0.5"
   }
 }

@@ -15,7 +15,7 @@ truncated. Every crate and binding ships as **3.0.5**.
   publishing) and npm only after the maintainer approves the `release`
   environment. The npm package `lucivy` no longer carries a binary: it
   depends optionally on `lucivy-linux-x64-gnu`, `lucivy-linux-arm64-gnu`,
-  `lucivy-darwin-x64`, `lucivy-darwin-arm64`, `lucivy-win32-x64-msvc`, npm
+  `lucivy-darwin-x64`, `lucivy-darwin-arm64`, `lucivy-windows-x64`, npm
   installs the one for the machine, and `index.js` loads it — or a local
   `npm run build`. Elsewhere `require('lucivy')` says which platforms are
   prebuilt and how to build.
