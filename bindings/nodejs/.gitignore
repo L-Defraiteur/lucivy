@@ -1,3 +1,5 @@
 npm/*/*.node
 npm/*/LICENSE
 prebuilt/
+lucivy.node
+lucivy.*.node

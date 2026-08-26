@@ -18,6 +18,13 @@ name: release
 on:
   push:
     tags: ['v*']
+    # A push that touches the bindings builds the matrix too (no publishing
+    # without a tag): the five platforms stay green between releases.
+    branches: [main]
+    paths:
+      - '.github/workflows/release.yml'
+      - 'bindings/nodejs/**'
+      - 'bindings/python/**'
   workflow_dispatch:
     inputs:
       publish:
