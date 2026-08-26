@@ -1847,8 +1847,8 @@ new MutationObserver(() => onMemoryMessage(memoryEl.textContent.trim()))
 // The searches of the demo, all run for real on the demo index; the three
 // marked `phone` are the sequence on a small device.
 const DEMO_SEARCHES = [
-  { cmd: 'lucivy search "every suffix of every token"', note: 'a whole phrase, matched across five tokens',
-    query: { type: 'contains', field: 'content', value: 'every suffix of every token' } },
+  { cmd: 'lucivy search "very suffix of every token"', note: 'starts inside a token (the "very" of "Every") and runs across five — what a suffix FST is for',
+    query: { type: 'contains', field: 'content', value: 'very suffix of every token' } },
   { cmd: 'lucivy search "suffixfst"', note: 'separators relaxed: suffix_fst, SuffixFst and "suffix FST" all match', phone: true,
     query: { type: 'contains', field: 'content', value: 'suffixfst' } },
   // The phrase must live in a file under the clone's 100 KB limit (README.md).
