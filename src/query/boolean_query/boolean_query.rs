@@ -181,6 +181,10 @@ impl Query for BooleanQuery {
         Ok(())
     }
 
+    fn prescan_truncated(&self) -> bool {
+        self.subqueries.iter().any(|(_, q)| q.prescan_truncated())
+    }
+
     fn prescan_segments_more(&mut self, segments: &[&crate::SegmentReader]) -> crate::Result<()> {
         for (_occur, subquery) in &mut self.subqueries {
             subquery.prescan_segments_more(segments)?;

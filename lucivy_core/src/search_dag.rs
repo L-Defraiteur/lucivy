@@ -435,6 +435,9 @@ impl Node for BuildWeightNode {
             .into();
 
         ctx.metric("compiled", 1.0);
+        if self.query.prescan_truncated() {
+            ctx.metric("truncated", 1.0);
+        }
         ctx.set_output("weight", PortValue::new(weight));
         Ok(())
     }

@@ -1,3 +1,22 @@
+Unreleased
+================================
+
+- **Truncation is reported.** When a segment's resolution hits
+  `LUCIVY_MAX_MATCHES_PER_SEGMENT`, the search now says so instead of
+  answering as if complete: `ShardedHandle::last_search_truncated()`, Python
+  `index.last_search_truncated`, Node `lastSearchTruncated()`, the wasm
+  `memory_status` field `last_search_truncated`, and the playground appends
+  "truncated: too many matches…" to the result header. The flag travels from
+  the resolver (thread-local, one segment per thread) to the query
+  (`Query::prescan_truncated`, `BooleanQuery` propagates) to the search DAG
+  (`build_weight` metric) to the handle. Test: `test_truncation_flag.rs`.
+- `LUCIVY_MAX_MATCHES_PER_SEGMENT=0` and `LUCIVY_HIGHLIGHT_SPAN_CAP=0` (or
+  `unlimited`) disable the caps; the wasm build takes
+  `--max-matches-per-segment=N`, the playground `?maxmatches=N`.
+- CI: a `ground-truth` job compares counts and spans of a strict / relaxed /
+  fuzzy / regex panel with a byte-level grep, on the repository's own source
+  — answers only, no timing on shared runners.
+
 Lucivy 3.0.4
 ================================
 

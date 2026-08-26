@@ -54,10 +54,15 @@ Les anciens types sont routés automatiquement via `build_query()` dans `lucivy_
 - `LUCIVY_HIGHLIGHT_SPAN_CAP` (4 M natif / 1 M wasm) : le sink d'highlights
   s'arrête là ; `ShardedHandle` relance alors la recherche filtrée aux ids du
   top-k pour ne remplir que leurs spans (scores/ordre de la 1ʳᵉ passe).
-- `LUCIVY_MAX_MATCHES_PER_SEGMENT` (4 M natif / 20 k wasm) : plafond de
-  `MatchV3` par segment et par requête ; au-delà la requête est tronquée sur
-  ce segment (`briques::resolve::truncations()`), jamais d'abort. Le panel de
-  21 requêtes ne l'atteint pas ; « t » sur 10k fichiers kernel l'atteint.
+- `LUCIVY_MAX_MATCHES_PER_SEGMENT` (4 M natif / 20 k wasm ; `0` = illimité) :
+  plafond de `MatchV3` par segment et par requête ; au-delà la requête est
+  tronquée sur ce segment, jamais d'abort, et **la recherche le dit** :
+  `ShardedHandle::last_search_truncated()` (Python `last_search_truncated`,
+  Node `lastSearchTruncated()`, wasm `memory_status.last_search_truncated`).
+  Chemin : thread-local dans `resolve.rs` → `Query::prescan_truncated` →
+  métrique `truncated` du nœud `build_weight` → handle. Le panel de 21
+  requêtes ne l'atteint pas ; « t » sur 10k fichiers kernel l'atteint.
+  `LUCIVY_HIGHLIGHT_SPAN_CAP=0` = illimité aussi.
 
 ### Recherche filtrée (`allowed_ids`) — pré-filtre réel depuis le 26 août
 

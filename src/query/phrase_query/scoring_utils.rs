@@ -39,11 +39,12 @@ pub fn highlight_span_cap() -> usize {
     static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CAP.get_or_init(|| {
         let default = if cfg!(target_arch = "wasm32") { 1_000_000 } else { 4_000_000 };
-        std::env::var("LUCIVY_HIGHLIGHT_SPAN_CAP")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(default)
+        // `0` (or `unlimited`) disables the cap.
+        match std::env::var("LUCIVY_HIGHLIGHT_SPAN_CAP").ok().as_deref() {
+            Some("0") | Some("unlimited") => usize::MAX,
+            Some(v) => v.parse::<usize>().ok().filter(|&n| n > 0).unwrap_or(default),
+            None => default,
+        }
     })
 }
 

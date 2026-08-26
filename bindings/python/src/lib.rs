@@ -760,6 +760,15 @@ impl Index {
         Ok(py.allow_threads(|| handle.index_bytes()))
     }
 
+    /// True when the last search hit the per-segment match cap
+    /// (`LUCIVY_MAX_MATCHES_PER_SEGMENT`, `0` disables it) on some segment:
+    /// the hits are real, but some documents were never looked at — a
+    /// one-letter query over a large corpus, typically.
+    #[getter]
+    fn last_search_truncated(&self) -> PyResult<bool> {
+        Ok(self.h()?.last_search_truncated())
+    }
+
     /// Merge every shard's segments into segments of at most ``max_docs``
     /// documents, then commit. Returns the number of merges performed.
     ///

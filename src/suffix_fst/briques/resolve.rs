@@ -25,11 +25,12 @@ pub fn max_matches_per_segment() -> usize {
     static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CAP.get_or_init(|| {
         let default = if cfg!(target_arch = "wasm32") { 20_000 } else { 4_000_000 };
-        std::env::var("LUCIVY_MAX_MATCHES_PER_SEGMENT")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(default)
+        // `0` (or `unlimited`) disables the cap.
+        match std::env::var("LUCIVY_MAX_MATCHES_PER_SEGMENT").ok().as_deref() {
+            Some("0") | Some("unlimited") => usize::MAX,
+            Some(v) => v.parse::<usize>().ok().filter(|&n| n > 0).unwrap_or(default),
+            None => default,
+        }
     })
 }
 
@@ -40,8 +41,22 @@ pub fn truncations() -> u64 {
     TRUNCATIONS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+thread_local! {
+    /// Set when a resolution on this thread hit the cap; a segment's prescan
+    /// runs on one thread, so the prescan reads it back with
+    /// [`take_truncated_here`] and reports the segment as truncated.
+    static TRUNCATED_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether a resolution on the current thread hit the cap since the last
+/// call; clears the flag.
+pub fn take_truncated_here() -> bool {
+    TRUNCATED_HERE.with(|c| c.replace(false))
+}
+
 #[cold]
 fn note_truncated(len: usize) {
+    TRUNCATED_HERE.with(|c| c.set(true));
     TRUNCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if std::env::var("LUCIVY_VERBOSE").is_ok() {
         eprintln!("[v3] match cap reached ({len}); query truncated on this segment");

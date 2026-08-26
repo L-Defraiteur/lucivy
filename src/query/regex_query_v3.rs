@@ -26,6 +26,9 @@ pub struct RegexQueryV3 {
     highlight_field_name: String,
     prescan_cache: HashMap<(String, SegmentId), CachedPrescan>,
     global_doc_freq: u64,
+    /// Set when a segment's prescan hit the match cap (shared by the
+    /// clones the prescan tasks run on).
+    truncated: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RegexQueryV3 {
@@ -39,6 +42,7 @@ impl RegexQueryV3 {
             highlight_field_name: String::new(),
             prescan_cache: HashMap::new(),
             global_doc_freq: 0,
+            truncated: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -161,11 +165,15 @@ impl RegexQueryV3 {
         let sfx_bytes = sfx_data.read_bytes().map_err(|e|
             crate::LucivyError::SystemError(format!("prescan read .sfx: {e}")))?;
         let version = detect_sfx_version(sfx_bytes.as_ref()).unwrap_or(1);
+        let _ = crate::suffix_fst::briques::resolve::take_truncated_here();
         let (doc_tf, highlights) = if version == 3 {
             self.prescan_segment_v3(seg_reader, &sfx_bytes)?
         } else {
             self.prescan_segment_v2(seg_reader, &sfx_bytes)?
         };
+        if crate::suffix_fst::briques::resolve::take_truncated_here() {
+            self.truncated.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         Ok(Some((segment_id, doc_tf, highlights)))
     }
 
@@ -247,6 +255,10 @@ impl Query for RegexQueryV3 {
             }
         }
         self.make_weight(enable_scoring)
+    }
+
+    fn prescan_truncated(&self) -> bool {
+        self.truncated.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn collect_prescan_doc_freqs(&self, out: &mut HashMap<String, u64>) {

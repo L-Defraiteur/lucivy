@@ -64,6 +64,28 @@ jobs:
       - name: Clippy (default features)
         run: cargo clippy --lib -- -D warnings
 
+  # Ground truth on the repository's own source: every count and every span
+  # of a fixed panel (strict, relaxed, fuzzy, regex) compared with a byte-level
+  # grep. No timing is asserted — shared runners cannot measure that — only
+  # the answers.
+  ground-truth:
+    runs-on: ubuntu-latest
+    name: ground-truth
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Substring, fuzzy and regex answers against grep
+        env:
+          V3_CORPUS: .
+          V3_MAX_DOCS: "1500"
+          V3_INDEX_DIR: /tmp/v3idx_ci_repo
+          V3_QUERIES: 'ShardedHandle:strict,wait_merges_quiet:strict,rag3weaver:relax,spin_lock_init:relax,LucivyError:strict,kmaloc:fz1,ShardedHandel:fz1,Sharded[A-Z]\w+:rx,fn [a-z_]+_v3:rx'
+        run: |
+          cargo test --release -p lucivy-core --test test_sfx_v3_ground_truth v3_ground_truth_contains -- --nocapture 2>&1 | tee /tmp/gt.txt
+          grep -qE "test result: ok" /tmp/gt.txt
+          ! grep -qE "MISMATCH|FAIL" /tmp/gt.txt
+
   thread-spawn-audit:
     runs-on: ubuntu-latest
     name: thread-spawn-audit

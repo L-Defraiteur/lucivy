@@ -189,6 +189,12 @@ pub trait Query: QueryClone + Send + Sync + downcast_rs::Downcast + fmt::Debug {
         self.prescan_segments(segments)
     }
 
+    /// Whether a prescan of this query hit the per-segment match cap
+    /// (`LUCIVY_MAX_MATCHES_PER_SEGMENT`) on any segment: the answer is then
+    /// incomplete on that segment. BooleanQuery propagates to sub-queries.
+    /// Default: false.
+    fn prescan_truncated(&self) -> bool { false }
+
     /// Collect contains/substring doc_freqs from prescan results.
     /// Used to build ExportableStats for distributed search.
     /// BooleanQuery propagates to sub-queries.

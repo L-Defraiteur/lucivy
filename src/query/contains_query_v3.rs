@@ -36,6 +36,9 @@ pub struct ContainsQueryV3 {
     highlight_field_name: String,
     prescan_cache: HashMap<(String, SegmentId), CachedPrescan>,
     global_doc_freq: u64,
+    /// Set when a segment's prescan hit the match cap (shared by the
+    /// clones the prescan tasks run on).
+    truncated: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Prescan one segment with the SFX v3 pipeline.
@@ -160,7 +163,11 @@ impl ContainsQueryV3 {
         let _t0 = std::time::Instant::now();
         let now = PRESCAN_INFLIGHT.fetch_add(1, Relaxed) + 1;
         PRESCAN_INFLIGHT_MAX.fetch_max(now, Relaxed);
+        let _ = crate::suffix_fst::briques::resolve::take_truncated_here();
         let r = self.prescan_one_inner(seg_reader);
+        if crate::suffix_fst::briques::resolve::take_truncated_here() {
+            self.truncated.store(true, Relaxed);
+        }
         PRESCAN_INFLIGHT.fetch_sub(1, Relaxed);
         let ns = _t0.elapsed().as_nanos() as u64;
         PRESCAN_ONE_NS.fetch_add(ns, Relaxed);
@@ -216,6 +223,7 @@ impl ContainsQueryV3 {
             highlight_field_name: String::new(),
             prescan_cache: HashMap::new(),
             global_doc_freq: 0,
+            truncated: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -426,6 +434,10 @@ impl Query for ContainsQueryV3 {
             }
         }
         self.make_weight(enable_scoring)
+    }
+
+    fn prescan_truncated(&self) -> bool {
+        self.truncated.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn collect_prescan_doc_freqs(&self, out: &mut HashMap<String, u64>) {

@@ -312,6 +312,12 @@ export declare class Index {
    */
   indexBytes(): number
   /**
+   * True when the last search hit the per-segment match cap
+   * (`LUCIVY_MAX_MATCHES_PER_SEGMENT`, `0` disables it) on some segment:
+   * the hits are real, but some documents were never looked at.
+   */
+  lastSearchTruncated(): boolean
+  /**
    * Delete the whole index: commit and release everything (like `close()`),
    * then remove the index files from disk.
    *

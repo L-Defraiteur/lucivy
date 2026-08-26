@@ -465,6 +465,14 @@ impl Index {
         Ok(self.h()?.index_bytes() as f64)
     }
 
+    /// True when the last search hit the per-segment match cap
+    /// (`LUCIVY_MAX_MATCHES_PER_SEGMENT`, `0` disables it) on some segment:
+    /// the hits are real, but some documents were never looked at.
+    #[napi]
+    pub fn last_search_truncated(&self) -> Result<bool> {
+        Ok(self.h()?.last_search_truncated())
+    }
+
     /// Delete the whole index: commit and release everything (like `close()`),
     /// then remove the index files from disk.
     ///

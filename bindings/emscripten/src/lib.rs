@@ -308,6 +308,15 @@ pub extern "C" fn __main_argc_argv(argc: i32, argv: *const *const c_char) -> i32
                 std::env::set_var("LUCIVY_MAX_PENDING_FINALIZE", n.to_string());
             }
         }
+        // `--max-matches-per-segment=N`: matches one segment resolves for one
+        // query before the answer is truncated there (LUCIVY_MAX_MATCHES_PER_SEGMENT,
+        // 20 000 on wasm32; 0 disables the cap). `memory_status` reports
+        // `last_search_truncated`.
+        if let Some(n) = a.strip_prefix("--max-matches-per-segment=") {
+            if n.parse::<usize>().is_ok() {
+                std::env::set_var("LUCIVY_MAX_MATCHES_PER_SEGMENT", n);
+            }
+        }
         // `--scheduler-threads=N`: size of the luciole pool
         // (LUCIVY_SCHEDULER_THREADS). Left alone it asks
         // `available_parallelism`, which does not answer on every emscripten
@@ -1183,6 +1192,7 @@ pub unsafe extern "C" fn lucivy_memory_status(ctx: *mut LucivyContext) -> *const
         "index_bytes": residency.index_bytes(),
         "in_memory": residency.is_in_memory(),
         "num_docs": ctx.handle.num_docs(),
+        "last_search_truncated": ctx.handle.last_search_truncated(),
         "warnings": ctx.handle.memory_warnings(),
     });
     return_str(status.to_string())

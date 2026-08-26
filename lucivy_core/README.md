@@ -201,7 +201,8 @@ records before it repeats itself for its top-k only, and
 `LUCIVY_MAX_MATCHES_PER_SEGMENT` (4 M native, 20 k wasm) bounds what one
 segment resolves for one query — a one-letter query over a large corpus
 otherwise produces tens of millions of both; past the cap it is truncated on
-that segment rather than killing the process.
+that segment rather than killing the process, and `index.last_search_truncated()`
+says so. `0` disables either cap.
 
 ## How it works
 

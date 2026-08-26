@@ -295,3 +295,16 @@ Publiée après CI verte sur `71f7a3a` : pré-filtre réel (regex sur 10 ids
 **Release GitHub `v3.0.4`** créée comme jalon « 3.0 » (la « Latest » était
 encore v2.0.0 avec 290 commits d'écart) : notes en anglais, points forts,
 chiffres du 26 août, tableau d'installation, wheel + sdist en pièces jointes.
+
+## 10. Après 3.0.4 : troncature signalée, caps désactivables, CI vérité terrain
+
+`last_search_truncated()` sur le handle (Python/Node/wasm/playground) : le
+drapeau part d'un thread-local posé par `note_truncated` (un segment = un
+thread de prescan), remonte par `Query::prescan_truncated` (Boolean propage)
+et la métrique `truncated` du nœud `build_weight`, lue dans `search_once`.
+`0`/`unlimited` désactive `LUCIVY_MAX_MATCHES_PER_SEGMENT` et
+`LUCIVY_HIGHLIGHT_SPAN_CAP` ; wasm `--max-matches-per-segment=N`, playground
+`?maxmatches=N`. Test `test_truncation_flag.rs`. Job CI `ground-truth` :
+`v3_ground_truth_contains` sur le dépôt lui-même (`V3_CORPUS=.`, 47 fichiers
+retenus par le harnais, panel de 9 requêtes strict/relax/fz1/rx), comptes et
+spans contre grep, aucun chrono.

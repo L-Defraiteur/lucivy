@@ -1500,6 +1500,11 @@ pub struct ShardedHandle {
     /// A served snapshot (`open_snapshot`): nothing may be written, and
     /// `close()` has nothing to commit or persist — it only stops the actors.
     read_only: bool,
+    /// Whether the last search hit the per-segment match cap on any segment
+    /// (`LUCIVY_MAX_MATCHES_PER_SEGMENT`): its answer was incomplete there.
+    /// One flag per handle: a concurrent search on the same handle can
+    /// overwrite it. See `last_search_truncated`.
+    last_search_truncated: AtomicBool,
     /// Pipeline: reader pool (typed, round-robin).
     reader_pool: luciole::Pool<ReaderMsg>,
     /// Pipeline: single router actor (typed).
@@ -1635,6 +1640,14 @@ impl ShardedHandle {
         self.read_only
     }
 
+    /// Whether the last search on this handle was truncated on at least one
+    /// segment by `LUCIVY_MAX_MATCHES_PER_SEGMENT` (4 M native, 20 k wasm;
+    /// `0` disables it): a one-letter query over a large corpus, typically.
+    /// The hits returned are real; some documents were never looked at.
+    pub fn last_search_truncated(&self) -> bool {
+        self.last_search_truncated.load(Ordering::Relaxed)
+    }
+
     fn ensure_writable(&self) -> Result<(), String> {
         if self.read_only {
             return Err("this index serves a snapshot and is read-only: create or open a writable \
@@ -1702,6 +1715,7 @@ impl ShardedHandle {
             text_fields,
             shard_bytes_cache: Mutex::new(std::collections::HashMap::new()),
             read_only: false,
+            last_search_truncated: AtomicBool::new(false),
             reader_pool,
             router_ref,
             pipeline,
@@ -1765,6 +1779,7 @@ impl ShardedHandle {
             text_fields,
             shard_bytes_cache: Mutex::new(std::collections::HashMap::new()),
             read_only: false,
+            last_search_truncated: AtomicBool::new(false),
             reader_pool,
             router_ref,
             pipeline,
@@ -2060,6 +2075,16 @@ impl ShardedHandle {
         Ok(results)
     }
 
+    /// Record the `truncated` metric the DAG's build_weight node emits.
+    fn note_truncated(&self, result: &luciole::DagResult) {
+        let hit = result.get("build_weight")
+            .map(|r| r.metrics.iter().any(|(k, v)| k == "truncated" && *v > 0.0))
+            .unwrap_or(false);
+        if hit {
+            self.last_search_truncated.store(true, Ordering::Relaxed);
+        }
+    }
+
     fn search_once(
         &self,
         query_config: &QueryConfig,
@@ -2069,6 +2094,7 @@ impl ShardedHandle {
     ) -> Result<Vec<ShardedSearchResult>, String> {
         use crate::search_dag::ShardFilter;
         self.ensure_open()?;
+        self.last_search_truncated.store(false, Ordering::Relaxed);
         // A pre-filtered search goes only to the shards holding the allowed
         // ids, each with its own share — the router knows where every id
         // was inserted. An id it never saw sends the whole set everywhere.
@@ -2152,6 +2178,7 @@ impl ShardedHandle {
 
             let mut result = luciole::execute_dag(&mut dag, None)
                 .map_err(|e| format!("search DAG: {e}"))?;
+            self.note_truncated(&result);
 
             return result.take_output::<Vec<ShardedSearchResult>>("output", "results")
                 .ok_or_else(|| "search DAG: no results from output node".to_string());
@@ -2229,6 +2256,7 @@ impl ShardedHandle {
             )?;
             let mut result = luciole::execute_dag(&mut dag, None)
                 .map_err(|e| format!("search DAG (batch {b}): {e}"))?;
+            self.note_truncated(&result);
             let partial = result.take_output::<Vec<ShardedSearchResult>>("output", "results")
                 .ok_or_else(|| "search DAG: no results from output node".to_string())?;
             let found = partial.len();

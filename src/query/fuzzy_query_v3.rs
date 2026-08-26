@@ -31,6 +31,9 @@ pub struct FuzzyQueryV3 {
     highlight_field_name: String,
     prescan_cache: HashMap<(String, SegmentId), CachedPrescan>,
     global_doc_freq: u64,
+    /// Set when a segment's prescan hit the match cap (shared by the
+    /// clones the prescan tasks run on).
+    truncated: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FuzzyQueryV3 {
@@ -46,6 +49,7 @@ impl FuzzyQueryV3 {
             highlight_field_name: String::new(),
             prescan_cache: HashMap::new(),
             global_doc_freq: 0,
+            truncated: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -194,6 +198,7 @@ impl FuzzyQueryV3 {
         let t0 = std::time::Instant::now();
         let now = FZ_INFLIGHT.fetch_add(1, Relaxed) + 1;
         FZ_INFLIGHT_MAX.fetch_max(now, Relaxed);
+        let _ = crate::suffix_fst::briques::resolve::take_truncated_here();
         let r = (|| {
             let segment_id = seg_reader.segment_id();
             let Some(sfx_data) = seg_reader.sfx_file(self.field) else { return Ok(None) };
@@ -207,6 +212,9 @@ impl FuzzyQueryV3 {
             };
             Ok(Some((segment_id, doc_tf, highlights, coverage)))
         })();
+        if crate::suffix_fst::briques::resolve::take_truncated_here() {
+            self.truncated.store(true, Relaxed);
+        }
         FZ_INFLIGHT.fetch_sub(1, Relaxed);
         let ns = t0.elapsed().as_nanos() as u64;
         FZ_ONE_NS.fetch_add(ns, Relaxed);
@@ -301,6 +309,10 @@ impl Query for FuzzyQueryV3 {
             }
         }
         self.make_weight(enable_scoring)
+    }
+
+    fn prescan_truncated(&self) -> bool {
+        self.truncated.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn collect_prescan_doc_freqs(&self, out: &mut HashMap<String, u64>) {

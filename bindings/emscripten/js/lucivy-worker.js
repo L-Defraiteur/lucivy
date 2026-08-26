@@ -275,6 +275,7 @@ self.onmessage = async (e) => {
                         ...(args.writerThreads ? [`--writer-threads=${args.writerThreads}`] : []),
                         ...(args.maxMergedDocs ? [`--max-merged-docs=${args.maxMergedDocs}`] : []),
                         ...(args.maxBuilds ? [`--max-builds=${args.maxBuilds}`] : []),
+                        ...(args.maxMatches !== undefined && args.maxMatches !== null ? [`--max-matches-per-segment=${args.maxMatches}`] : []),
                     ],
                 });
 

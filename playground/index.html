@@ -489,7 +489,7 @@ async function startup() {
     // Cache-buster: GitHub Pages caches the worker and the wasm for a while,
     // and a phone kept a whole build behind after a deploy. Bumped at each
     // engine or worker change; the query rides through to the wasm.
-    const BUILD = '3.0.4';
+    const BUILD = '3.0.4-trunc';
     lucivy = new Lucivy(`./js/lucivy-worker.js?v=${BUILD}`, {
       noOpfs: startupParams.has('noopfs'),
       verbose: startupParams.has('verbose'), // engine diagnostics (LUCIVY_VERBOSE, V3_PROFILE)
@@ -507,6 +507,9 @@ async function startup() {
       maxMergedDocs: param('maxmerged', 400),
       // `?builds=N`: segment builds allowed at once (default 4).
       maxBuilds: param('builds', 1),
+      // `?maxmatches=N`: matches a segment resolves for one query before the
+      // answer is truncated there (20 000 by default here; 0 = unlimited).
+      maxMatches: startupParams.has('maxmatches') ? parseInt(startupParams.get('maxmatches'), 10) : null,
     });
     window._lucivy = lucivy;
     // Ring messages (allocation failures, panics, their call stacks) go to the
@@ -779,6 +782,15 @@ async function doSearch() {
   const elapsed = (performance.now() - t0).toFixed(1);
 
   resultsHeaderEl.textContent = `${results.length} result${results.length !== 1 ? 's' : ''} in ${elapsed}ms`;
+  // A short query over a large corpus can hit the per-segment match cap: the
+  // hits shown are real, but some documents were never looked at. Say so.
+  if (idx.memoryStatus) {
+    idx.memoryStatus().then(st => {
+      if (st && st.last_search_truncated && gen === searchGeneration) {
+        resultsHeaderEl.textContent += ' — truncated: too many matches, some documents were not examined (try a longer query)';
+      }
+    }).catch(() => {});
+  }
 
   for (const r of results) {
     const div = document.createElement('div');
