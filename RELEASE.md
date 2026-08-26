@@ -34,6 +34,9 @@ explicit go from the maintainer.
 `source .vault/load.sh` exports them for one shell (`CARGO_REGISTRY_TOKEN`,
 `MATURIN_PYPI_TOKEN`, a generated npmrc). `cargo login` / `npm login` work too.
 npm asks for a one-time code at publish time: `npm publish --otp=<code>`.
+The npm session expires within a day: run `npm whoami` first — an expired
+session makes `npm publish` fail with a misleading **404** "not in this
+registry" (seen on 26 August), and `npm login` is the fix, not a new code.
 
 ## Publish, in this order, stopping at the first error
 
