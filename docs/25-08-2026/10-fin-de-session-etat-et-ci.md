@@ -287,3 +287,11 @@ rag3db. Invisible pour un grep sur `FAILED` : un abort n'imprime pas de
 ligne de test. Rendu itératif (pile explicite, même ordre). **Règle** : après
 une suite, grepper aussi `fatal runtime|panicked at` et vérifier le code de
 sortie de chaque binaire, pas seulement les lignes `FAILED`.
+
+## 9. 3.0.4 (26 août, midi) et page Release GitHub
+
+Publiée après CI verte sur `71f7a3a` : pré-filtre réel (regex sur 10 ids
+126 → 4 ms), stack overflow du look-ahead, tests de vérité filtrée. Page
+**Release GitHub `v3.0.4`** créée comme jalon « 3.0 » (la « Latest » était
+encore v2.0.0 avec 290 commits d'écart) : notes en anglais, points forts,
+chiffres du 26 août, tableau d'installation, wheel + sdist en pièces jointes.
