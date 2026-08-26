@@ -138,8 +138,10 @@ jobs:
           cd bindings/nodejs
           cargo build --release --target ${{ matrix.triple }}
           # The crate builds in the workspace's target directory (../../target).
-          lib=$(find ../../target target -path "*/${{ matrix.triple }}/release/${{ matrix.lib }}" 2>/dev/null | head -1)
-          test -n "$lib" || { echo "addon not found"; find ../../target target -name "*lucivy_napi*" -maxdepth 4 2>/dev/null; exit 1; }
+          # (The shell is `-e -o pipefail`: a find on a missing path would
+          # abort the step before the test.)
+          lib=$(find ../../target -path "*/${{ matrix.triple }}/release/${{ matrix.lib }}" 2>/dev/null | head -1 || true)
+          if [ -z "$lib" ]; then echo "addon not found:"; find ../../target -name "*lucivy_napi*" 2>/dev/null || true; exit 1; fi
           cp "$lib" lucivy.${{ matrix.key }}.node
           ls -la lucivy.${{ matrix.key }}.node
       - name: Smoke test the addon
