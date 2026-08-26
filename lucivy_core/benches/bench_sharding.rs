@@ -16,8 +16,14 @@ use lucivy_core::query::{self, QueryConfig};
 use lucivy_core::sharded_handle::ShardedHandle;
 
 const RAG3DB_CLONE: &str = "/tmp/rag3db_bench";
-const LINUX_CLONE: &str = "/home/luciedefraiteur/linux_bench";
-const BENCH_BASE: &str = "/home/luciedefraiteur/lucivy_bench_sharding";
+// Under `$LUCIVY_BENCH_DIR`, else `$HOME/lucivy_bench`: these were hard-coded
+// to one machine's home and failed with "Permission denied" everywhere else.
+fn bench_root() -> String {
+    std::env::var("LUCIVY_BENCH_DIR")
+        .or_else(|_| std::env::var("HOME").map(|h| format!("{h}/lucivy_bench")))
+        .unwrap_or_else(|_| "/tmp/lucivy_bench".to_string())
+}
+fn bench_base() -> String { format!("{}/lucivy_bench_sharding", bench_root()) }
 const MAX_FILE_SIZE: u64 = 100_000;
 
 // ─── File collection (same as build_dataset.py) ────────────────────────────
@@ -301,7 +307,7 @@ fn t00_repro_starts_with_prefix() {
 
 #[test]
 fn t00_diag_starts_with() {
-    let index_dir = format!("{}/round_robin", BENCH_BASE);
+    let index_dir = format!("{}/round_robin", bench_base());
     if !std::path::Path::new(&index_dir).exists() {
         eprintln!("Skipping: no persisted index at {}", index_dir);
         return;
@@ -483,7 +489,7 @@ fn t01_bench_sharding_comparison() {
 
     let (single, single_time) = if do_single {
         eprintln!("=== Indexing: 1 shard (baseline) ===");
-        let (s, t) = index_single(&files, &format!("{BENCH_BASE}/single"));
+        let (s, t) = index_single(&files, &format!("{}/single", bench_base()));
         eprintln!("  {} docs in {:.2}s\n", s.reader.searcher().num_docs(), t);
         (Some(s), t)
     } else {
@@ -493,7 +499,7 @@ fn t01_bench_sharding_comparison() {
 
     let (sharded_ta, ta_time, ta_counts) = if do_ta {
         eprintln!("=== Indexing: {} shards token-aware (balance_weight=0.2) ===", num_shards);
-        let (h, t) = index_sharded(&files, &format!("{BENCH_BASE}/token_aware"), num_shards, 0.2);
+        let (h, t) = index_sharded(&files, &format!("{}/token_aware", bench_base()), num_shards, 0.2);
         let (counts, _) = h.router_stats().unwrap();
         eprintln!("  {} docs in {:.2}s", h.num_docs(), t);
         eprintln!("  distribution: {:?}\n", counts);
@@ -505,7 +511,7 @@ fn t01_bench_sharding_comparison() {
 
     let (sharded_rr, rr_time, rr_counts) = if do_rr {
         eprintln!("=== Indexing: {} shards round-robin (balance_weight=1.0) ===", num_shards);
-        let (h, t) = index_sharded(&files, &format!("{BENCH_BASE}/round_robin"), num_shards, 1.0);
+        let (h, t) = index_sharded(&files, &format!("{}/round_robin", bench_base()), num_shards, 1.0);
         let (counts, _) = h.router_stats().unwrap();
         eprintln!("  {} docs in {:.2}s", h.num_docs(), t);
         eprintln!("  distribution: {:?}\n", counts);
@@ -817,7 +823,7 @@ fn t01_bench_sharding_comparison() {
     drop(sharded_ta);
     drop(sharded_rr);
 
-    eprintln!("\n=== Index preserved at {} ===", BENCH_BASE);
+    eprintln!("\n=== Index preserved at {} ===", bench_base());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -977,7 +983,7 @@ fn search_count_direct(handle: &ShardedHandle, field_name: &str, term: &str) -> 
 
 #[test]
 fn t02_ground_truth_exhaustive() {
-    let index_dir = format!("{}/round_robin", BENCH_BASE);
+    let index_dir = format!("{}/round_robin", bench_base());
     if !std::path::Path::new(&index_dir).exists() {
         eprintln!("Skipping: no persisted index at {}", index_dir);
         eprintln!("Run the main bench first: MAX_DOCS=90000 cargo test ...");
@@ -1122,7 +1128,7 @@ fn t02_ground_truth_exhaustive() {
 
 #[test]
 fn t03_bench_query_times() {
-    let index_dir = format!("{}/round_robin", BENCH_BASE);
+    let index_dir = format!("{}/round_robin", bench_base());
     if !std::path::Path::new(&index_dir).exists() {
         eprintln!("Skipping: no persisted index at {}", index_dir);
         return;
@@ -1267,154 +1273,16 @@ fn t03_bench_query_times() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Test: sfx:false mode — indexation + term/phrase OK + contains error
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[test]
-fn t04_test_sfx_disabled() {
-    let test_dir = "/tmp/lucivy_test_sfx_disabled";
-    let _ = std::fs::remove_dir_all(test_dir);
-
-    // Index with sfx:false, 4 shards
-    let config: query::SchemaConfig = serde_json::from_value(serde_json::json!({
-        "fields": [
-            {"name": "title", "type": "text", "stored": true},
-            {"name": "body", "type": "text", "stored": true}
-        ],
-        "shards": 4,
-        "balance_weight": 1.0,
-        "sfx": false
-    })).unwrap();
-
-    let handle = ShardedHandle::create(test_dir, &config).unwrap();
-    let title_f = handle.field("title").unwrap();
-    let body_f = handle.field("body").unwrap();
-    let nid_f = handle.field(lucivy_core::handle::NODE_ID_FIELD).unwrap();
-
-    // Add some documents
-    let docs = vec![
-        ("Mutex Design", "The mutex_lock function provides mutual exclusion for shared resources."),
-        ("Scheduler Overview", "The scheduler manages process scheduling and CPU allocation."),
-        ("Device Driver Guide", "Writing device drivers requires understanding struct device patterns."),
-        ("Error Handling", "Return error codes from functions to signal failure conditions."),
-        ("Lock Implementation", "Spinlocks and mutex locks are fundamental synchronization primitives."),
-        ("Memory Management", "The kernel memory allocator handles page allocation and deallocation."),
-    ];
-
-    for (i, (title, body)) in docs.iter().enumerate() {
-        let mut doc = ld_lucivy::LucivyDocument::new();
-        doc.add_u64(nid_f, i as u64);
-        doc.add_text(title_f, title);
-        doc.add_text(body_f, body);
-        handle.add_document(doc, i as u64).unwrap();
-    }
-    handle.commit().unwrap();
-
-    eprintln!("\n=== sfx:false test ({} docs, 4 shards) ===\n", handle.num_docs());
-
-    // Verify no .sfx files were created
-    let sfx_count: usize = (0..4).map(|i| {
-        let shard_dir = format!("{}/shard_{}", test_dir, i);
-        std::fs::read_dir(&shard_dir).map(|entries| {
-            entries.flatten().filter(|e| {
-                let name = e.file_name().to_string_lossy().to_string();
-                name.ends_with(".sfx") || name.ends_with(".sfxpost")
-            }).count()
-        }).unwrap_or(0)
-    }).sum();
-    assert_eq!(sfx_count, 0, "Expected no .sfx/.sfxpost files with sfx:false");
-    eprintln!("  .sfx/.sfxpost files: {} (expected 0) ✓", sfx_count);
-
-    // term query should work
-    let term_results = handle.search(&QueryConfig {
-        query_type: "term".into(), field: Some("body".into()),
-        value: Some("mutex".into()), ..Default::default()
-    }, 20, None).unwrap();
-    assert!(!term_results.is_empty(), "term query should find results");
-    eprintln!("  term 'mutex': {} hits ✓", term_results.len());
-
-    // phrase query should work
-    let phrase_results = handle.search(&QueryConfig {
-        query_type: "phrase".into(), field: Some("body".into()),
-        value: Some("device drivers".into()), ..Default::default()
-    }, 20, None).unwrap();
-    assert!(!phrase_results.is_empty(), "phrase query should find results");
-    eprintln!("  phrase 'device drivers': {} hits ✓", phrase_results.len());
-
-    // fuzzy query should work
-    let fuzzy_results = handle.search(&QueryConfig {
-        query_type: "fuzzy".into(), field: Some("body".into()),
-        value: Some("mutx".into()), distance: Some(1), ..Default::default()
-    }, 20, None).unwrap();
-    assert!(!fuzzy_results.is_empty(), "fuzzy query should find results");
-    eprintln!("  fuzzy 'mutx' d=1: {} hits ✓", fuzzy_results.len());
-
-    // regex query should work
-    let regex_results = handle.search(&QueryConfig {
-        query_type: "regex".into(), field: Some("body".into()),
-        pattern: Some("sched.*".into()), ..Default::default()
-    }, 20, None).unwrap();
-    assert!(!regex_results.is_empty(), "regex query should find results");
-    eprintln!("  regex 'sched.*': {} hits ✓", regex_results.len());
-
-    // parse query should work
-    let parse_results = handle.search(&QueryConfig {
-        query_type: "parse".into(), field: Some("body".into()),
-        value: Some("mutex AND lock".into()), ..Default::default()
-    }, 20, None).unwrap();
-    assert!(!parse_results.is_empty(), "parse query should find results");
-    eprintln!("  parse 'mutex AND lock': {} hits ✓", parse_results.len());
-
-    // phrase_prefix should work
-    let pp_results = handle.search(&QueryConfig {
-        query_type: "phrase_prefix".into(), field: Some("body".into()),
-        value: Some("device driv".into()), ..Default::default()
-    }, 20, None).unwrap();
-    assert!(!pp_results.is_empty(), "phrase_prefix should find results");
-    eprintln!("  phrase_prefix 'device driv': {} hits ✓", pp_results.len());
-
-    // more_like_this should work
-    let mlt_results = handle.search(&QueryConfig {
-        query_type: "more_like_this".into(), field: Some("body".into()),
-        value: Some("mutex lock synchronization primitives".into()),
-        min_doc_frequency: Some(1), min_term_frequency: Some(1),
-        min_word_length: Some(3),
-        ..Default::default()
-    }, 20, None).unwrap();
-    eprintln!("  more_like_this: {} hits ✓", mlt_results.len());
-
-    // contains should ERROR
-    let contains_err = handle.search(&QueryConfig {
-        query_type: "contains".into(), field: Some("body".into()),
-        value: Some("mutex".into()), ..Default::default()
-    }, 20, None);
-    assert!(contains_err.is_err(), "contains should error with sfx:false");
-    eprintln!("  contains 'mutex': error ✓ ({})", contains_err.unwrap_err());
-
-    // startsWith should ERROR
-    let sw_err = handle.search(&QueryConfig {
-        query_type: "startsWith".into(), field: Some("body".into()),
-        value: Some("sched".into()), ..Default::default()
-    }, 20, None);
-    assert!(sw_err.is_err(), "startsWith should error with sfx:false");
-    eprintln!("  startsWith 'sched': error ✓ ({})", sw_err.unwrap_err());
-
-    // Cleanup
-    let _ = std::fs::remove_dir_all(test_dir);
-    eprintln!("\n  All checks passed! ✓");
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // Score consistency: single-shard vs 4-shard top-1 scores must match
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn t05_test_score_consistency_single_vs_sharded() {
-    let single_dir = format!("{}/single", BENCH_BASE);
-    let sharded_dir = format!("{}/round_robin", BENCH_BASE);
+    let single_dir = format!("{}/single", bench_base());
+    let sharded_dir = format!("{}/round_robin", bench_base());
 
     if !std::path::Path::new(&single_dir).exists() || !std::path::Path::new(&sharded_dir).join("_shard_config.json").exists() {
-        eprintln!("Skipping: need both single + round_robin indexes at {}", BENCH_BASE);
+        eprintln!("Skipping: need both single + round_robin indexes at {}", bench_base());
         eprintln!("Run: BENCH_MODE=\"SINGLE|RR\" MAX_DOCS=90000 cargo test ...");
         return;
     }
@@ -1503,7 +1371,7 @@ fn t05_test_score_consistency_single_vs_sharded() {
 
 #[test]
 fn t06_profile_regex_automaton_weight() {
-    let single_dir = format!("{}/single", BENCH_BASE);
+    let single_dir = format!("{}/single", bench_base());
     if !std::path::Path::new(&single_dir).exists() {
         eprintln!("Skipping: need single index at {}", single_dir);
         return;

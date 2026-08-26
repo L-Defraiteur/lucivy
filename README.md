@@ -222,26 +222,29 @@ that rewrites most of a short query, a regex that has to scan.
 
 ## Performance
 
-Measured on 25 August 2026, 10 000 files of the Linux kernel source, 4 shards,
-the same 21-query panel on both sides, identical hit counts (24-core machine;
-the browser is Chrome, 8 threads).
+Measured on 26 August 2026 (3.0.2), 10 000 files of the Linux kernel source,
+4 shards, the same 21-query panel on both sides, identical hit counts (24-core
+machine; the browser is Chrome, 8 threads, the index held in memory).
 
-| | native (Rust) | browser (WASM) |
+| | native (Rust, mmap) | browser (WASM) |
 |---|---|---|
-| index on disk | 2 305 MB | 2 879 MB, held in memory |
-| indexing | 25.7 s | 55 s |
-| `contains kmalloc` | 35 ms | 45 ms |
-| `contains` relaxed `kmalloc` | 44 ms | 42 ms |
-| `startsWith netdev` | 52 ms | 113 ms |
-| `phrase return -ENOMEM` | 53 ms | 92 ms |
-| `fuzzy kmallc` (d = 1) | 69 ms | 117 ms |
-| `fuzzy kmalloc` (d = 2) | 436 ms | 651 ms |
-| `regex spin_lock_[a-z]+` | 162 ms | 201 ms |
-| `parse kmalloc AND NOT kfree` | 24 ms | 26 ms |
-| **panel mean / median** | **79 / 49 ms** | **124-133 / 69-92 ms** |
+| index on disk | 2 307 MB | 2 880 MB, held in memory |
+| indexing | 26.7 s | 40 s |
+| `contains kmalloc` | 34-45 ms | 46-100 ms (first query) |
+| `contains` relaxed `kmalloc` | 44-47 ms | 26-40 ms |
+| `startsWith netdev` | 45-55 ms | 53 ms |
+| `phrase return -ENOMEM` | 53 ms | 47 ms |
+| `fuzzy kmallc` (d = 1) | 65-67 ms | 62 ms |
+| `fuzzy kmalloc` (d = 2) | 424-436 ms | 270 ms |
+| `regex spin_lock_[a-z]+` | 147-164 ms | 124 ms |
+| `parse kmalloc AND NOT kfree` | 26 ms | 19 ms |
+| **panel mean / median** | **75 / 47 ms** | **71-117 / 45-65 ms** |
 
-On 50 000 kernel files, natively: floor 25-27 ms, `include` (36 824 documents,
-214 692 spans) 46 ms, fuzzy d = 1 56-110 ms, d = 2 171 ms, regex ~190 ms.
+On 50 000 kernel files, natively (800 segments, no compaction, indexed in
+52 s, 8.1 GB on disk): floor 26 ms, `kmalloc` / `spin_lock` / `__init` 28-29 ms,
+`include` (36 824 documents, 214 692 spans) 37 ms, fuzzy d = 1 44-106 ms,
+d = 2 189 ms, regex 200-211 ms — every count and every span checked against
+`grep`.
 
 > These are **substring** queries across token boundaries with BM25 scoring and
 > exact spans — most full-text engines return nothing for them. How to run the

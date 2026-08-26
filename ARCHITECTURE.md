@@ -151,7 +151,9 @@ All text queries go through the SFX engine via a compat layer
 
 Scoring is standard BM25. Fuzzy hits are **tiered** (`penalty × 1000 + bm25`): by
 trigram misses for Levenshtein, by similarity for Jaro-Winkler — negative scores
-are intended. `query_warnings(query)` returns, without running anything, what the
+are intended. (Since 3.0.2: the v3 query computed the tiers but did not hand them
+to the scorer, so 3.0.0 and 3.0.1 ordered fuzzy hits by BM25 alone; the counts
+and latencies in this document are unaffected, no score figure is quoted.) `query_warnings(query)` returns, without running anything, what the
 engine will actually do: separators ignored, a distance that rewrites most of a
 short query, a regex that has to scan, legacy segments.
 

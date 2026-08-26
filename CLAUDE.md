@@ -162,8 +162,10 @@ Emscripten manque : export_snapshot, export_sharded_delta, apply_sharded_delta.
 
 - `cargo test --lib` : 1431 passed, 0 failed, 16 ignored (les 3 anciens rouges
   réparés/retirés le 23 août : invariants de l'ancien design)
-- `cargo test -p lucivy-core` : tout vert sauf `bench_sharding` t01 (clone réseau) et
-  t04 (sfx:false n'existe plus) — pré-existants
+- `cargo test -p lucivy-core` : tout vert. `bench_sharding` t01 clone le kernel
+  (réseau, long) sous `$LUCIVY_BENCH_DIR` ou `$HOME/lucivy_bench` (chemins codés en
+  dur sur une autre machine jusqu'au 26 août → « Permission denied ») ; t04
+  (`sfx:false`) supprimé, ce mode n'existe plus
 - Vérité terrain : `docs/BENCHMARKS.md`
 - Bench sharding : `bench_sharding.rs` (90K docs Linux kernel)
 - Bench vs tantivy : `bench_vs_tantivy.rs`

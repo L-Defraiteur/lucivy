@@ -133,18 +133,27 @@ V3_INDEX_DIR=/tmp/v3idx_50k_pol V3_POLICY=1 V3_CORPUS=/tmp/linux-bench V3_MAX_DO
 V3_QUERIES='…' cargo test --release -p lucivy-core --test test_sfx_v3_ground_truth v3_ground_truth_contains -- --nocapture > /tmp/gt_50k_pol.txt 2>&1
 ```
 
-Chiffres de référence (23 août 2026, 24 cœurs, spans exacts partout) :
+Chiffres de référence (24 cœurs, spans exacts partout, 15/15 OK contre grep) —
+23 août 2026 (3.0.0 en préparation) puis **26 août 2026 (3.0.2)**, index
+reconstruit à neuf (`/tmp/v3idx_50k_302`, 800 segments, 52 s, 8,1 Go) :
 
-| kernel 50k naturel | search |
-|---|---|
-| requête vide | 29 ms |
-| `kmalloc` / `spin_lock` / `__init` strict | 28-32 ms |
-| `include` strict (36 824 docs, 214 692 spans) | 55 ms |
-| `uint64_t` / `__init` relax | 40 / 63 ms |
-| `kmallc` / `inclde` / `uint64` fz1 | 71 / 142 / 67 ms |
-| `kmalloc` fz2 | 201 ms |
-| `/\*[^*]*\*/` rx (421 036 spans) | 191 ms |
-| `[0-9]{8}` rx (sans littéral, balayage complet) | 190 ms |
+| kernel 50k naturel | 23 août | **26 août (3.0.2)** |
+|---|---|---|
+| requête vide | 29 ms | 26 ms |
+| `kmalloc` / `spin_lock` / `__init` strict | 28-32 ms | 28-29 ms |
+| `net_device` strict | — | 30 ms |
+| `include` strict (36 824 docs, 214 692 spans) | 55 ms | 37 ms |
+| `kmalloc` relax | — | 27 ms |
+| `uint64_t` / `__init` relax | 40 / 63 ms | 49 / 38 ms |
+| `kmallc` / `inclde` / `uint64` fz1 | 71 / 142 / 67 ms | 44 / 106 / 50 ms |
+| `kmalloc` fz2 (13 613 docs) | 201 ms | 189 ms |
+| `/\*[^*]*\*/` rx (421 036 spans) | 191 ms | 200 ms |
+| `[0-9]{8}` rx (sans littéral, balayage complet) | 190 ms | 211 ms |
+
+Commande du 26 août : celle du « kernel 50k naturel » ci-dessus avec
+`V3_INDEX_DIR=/tmp/v3idx_50k_302` et les quinze requêtes
+(`…,kmallc:fz1,inclde:fz1,uint64:fz1,kmalloc:fz2,/\*[^*]*\*/:rx,[0-9]{8}:rx`) ;
+sortie `/tmp/gt_50k_302.txt`.
 
 Policy 10k : `include` 79 ms, `__init` relax 85 ms.
 
