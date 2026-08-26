@@ -331,6 +331,46 @@ window._allLogs = [];
   .landing pre.picture b { color: var(--text); font-weight: 500; }
   .landing footer { margin-top: 24px; }
 
+  /* ── The documentation part ─────────────────────────────────────── */
+  /* One entry per usage: what it is for, the code, then how it works.
+     The machinery comes after the call, never before it. */
+  .doc-index {
+    display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 28px;
+    font-size: 13px;
+  }
+  .doc-index a {
+    padding: 5px 11px; border: 1px solid var(--border); border-radius: 999px;
+    color: var(--text-dim); text-decoration: none; background: var(--surface);
+  }
+  .doc-index a:hover { color: var(--accent); border-color: var(--accent); }
+  .doc-entry { margin-bottom: 40px; scroll-margin-top: 16px; }
+  .doc-entry h3 {
+    font-size: 17px; font-weight: 600; color: var(--text); margin-bottom: 6px;
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  }
+  .doc-entry h3 .lang {
+    font-size: 11px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--text-dim); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px;
+  }
+  .doc-entry > p { margin-bottom: 12px; }
+  .doc-entry pre.code { border-radius: 6px; }
+  /* The "how it works" of one entry: an aside, quieter than the code. */
+  .how {
+    margin-top: 12px; padding: 12px 14px; font-size: 13.5px; line-height: 1.6;
+    color: var(--text-dim); background: rgba(88,166,255,0.05);
+    border-left: 2px solid var(--accent-dim); border-radius: 0 6px 6px 0;
+  }
+  .how b { color: var(--text); font-weight: 600; }
+  .how .label {
+    display: block; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--accent); margin-bottom: 5px;
+  }
+  .how code { background: rgba(110,118,129,0.18); }
+  @media (max-width: 720px) {
+    .doc-index { gap: 6px; font-size: 12px; }
+    .doc-entry h3 { font-size: 16px; }
+  }
+
   @media (max-width: 720px) {
     .landing { padding: 14px 10px 32px; }
     .landing nav { margin-bottom: 24px; }
@@ -420,6 +460,283 @@ window._allLogs = [];
     </div>
   </section>
 
+
+
+  <section id="how">
+    <h2>How it works</h2>
+<pre class="picture"><b>Document</b> ─ tokenizer ─┬─ inverted index (postings, term frequencies)
+                      ├─ <b>SFX v3: suffix FST</b> + 7 sidecars per field
+                      ├─ fast fields
+                      └─ doc store
+
+<b>Query</b> ─ FST walk (substring / trigrams / literals) ─ <b>sibling chains</b> across tokens
+      ─ validation on the source text (Levenshtein, Jaro-Winkler, regex)
+      ─ BM25 with global statistics ─ <b>byte spans</b></pre>
+    <p style="margin-top:10px">
+      Five crates and four bindings: <code>ld-lucivy</code> (engine), <code>lucivy-core</code>
+      (<code>ShardedHandle</code>, queries, snapshots, storage), <code>luciole</code> (actor runtime and DAGs,
+      WASM-safe), <code>lucistore</code> (blob storage, snapshots, deltas) and
+      <code>sparse-vector</code> (a sparse index with WAND pruning on the same storage). The whole
+      design is in <a href="https://github.com/L-Defraiteur/lucivy/blob/main/ARCHITECTURE.md">ARCHITECTURE.md</a>.
+    </p>
+    <p style="margin-top:10px">
+      That is the whole engine in two pictures. What follows is one entry per way of using it —
+      the call first, and how it works underneath after it.
+    </p>
+  </section>
+
+  <section id="doc">
+    <h2>Using it <small>eight ways, each with its own machinery</small></h2>
+    <div class="doc-index">
+      <a href="#doc-query">Query</a>
+      <a href="#doc-filter">Filter</a>
+      <a href="#doc-shard">Shard</a>
+      <a href="#doc-distribute">Distribute</a>
+      <a href="#doc-storage">Bring your own storage</a>
+      <a href="#doc-sync">Snapshot &amp; sync</a>
+      <a href="#doc-browser">Browser</a>
+      <a href="#doc-sparse">Sparse vectors</a>
+    </div>
+
+    <!-- ── Query ── -->
+    <div class="doc-entry" id="doc-query">
+      <h3>Query it <span class="lang">Python</span></h3>
+      <p>
+        One JSON shape for every kind of search. A query is a dict (or a plain string, which
+        becomes a substring search over every text field), and the answer carries the score and
+        the exact byte spans that matched.
+      </p>
+<pre class="code">index.search({"type": "contains", "field": "body", "value": "mutex"}, highlights=True)
+index.search({"type": "contains", "field": "body", "value": "mutx", "distance": 1})   <span class="c"># fuzzy</span>
+index.search({"type": "fuzzy", "field": "body", "value": "mutx",
+              "fuzzy_metric": "jaro_winkler", "min_similarity": 0.9})
+index.search({"type": "contains", "field": "body", "value": "lock.*mutex", "regex": True})
+index.search({"type": "phrase", "field": "body", "value": "return -ENOMEM"})
+index.search({"type": "startsWith", "field": "body", "value": "pthread"})
+index.search({"type": "term", "field": "body", "value": "lock"})       <span class="c"># whole words only</span>
+index.search({"type": "parse", "fields": ["body", "path"],
+              "value": 'mutex AND NOT guard OR "exact phrase"'})
+
+<span class="c"># What the engine will really do, before it does it</span>
+index.query_warnings({"type": "contains", "field": "body", "value": "__init"})
+<span class="c"># ['separators are ignored (strict_separators=false): "__init" is searched as "init"']</span></pre>
+      <div class="how">
+        <span class="label">How it works</span>
+        Every text query becomes a <b>substring query on the suffix FST</b>. <code>term</code> adds
+        "anchored at a token start" and "covers whole tokens", <code>startsWith</code> adds only the
+        first, <code>phrase</code> asks for adjacency, <code>fuzzy</code> adds an edit distance,
+        <code>regex</code> a pattern — so all of them cross token boundaries, and all of them return
+        byte spans. <code>parse</code> lowers boolean syntax (<code>AND</code>, <code>OR</code>,
+        <code>NOT</code>, quotes, <code>+</code>/<code>-</code>, parentheses) onto the same
+        substring queries. Separators are <b>relaxed</b> by default: <code>_</code>, <code>-</code>,
+        <code>.</code>, <code>/</code> and spaces are ignored on both sides, so
+        <code>rag3weaver</code> finds <code>rag3_weaver</code>; pass
+        <code>strict_separators: true</code> when <code>spin_lock</code> must not match
+        <code>spin-lock</code>.
+      </div>
+    </div>
+
+    <!-- ── Filter ── -->
+    <div class="doc-entry" id="doc-filter">
+      <h3>Filter it <span class="lang">Python</span></h3>
+      <p>
+        Two kinds: restrict to a set of your own ids, or compose non-text conditions with the
+        text query.
+      </p>
+<pre class="code"><span class="c"># A pre-filter by your ids — the engine only visits those documents</span>
+index.search({"type": "contains", "field": "body", "value": "kmalloc"},
+             allowed_ids=[3, 7, 11, 12])
+
+<span class="c"># Non-text conditions, composed with must / should / must_not</span>
+index.search({"type": "boolean",
+              "must": [{"type": "contains", "field": "body", "value": "error"},
+                       {"type": "filter", "op": "gte", "field": "priority", "value": 3}],
+              "must_not": [{"type": "term", "field": "state", "value": "closed"}]})</pre>
+      <div class="how">
+        <span class="label">How it works</span>
+        <code>allowed_ids</code> is a <b>real pre-filter, not a post-filter</b>: the id set is routed
+        to the shards that hold those ids (the others stay idle), and it travels all the way into
+        the v3 resolvers — the FST walk, the postings, the verification and the spans are done for
+        those documents only. A regex over ten allowed documents went from 126 ms to 4 ms when this
+        was wired. The scoring follows: document frequencies are counted on the subset and
+        <code>N</code> is the subset's size, so a filtered search scores <b>as if the index were the
+        subset</b>.
+      </div>
+    </div>
+
+    <!-- ── Shard ── -->
+    <div class="doc-entry" id="doc-shard">
+      <h3>Shard it <span class="lang">Python</span></h3>
+      <p>
+        One number at creation. Indexing and searching then run across shards in parallel, and the
+        scores do not move.
+      </p>
+<pre class="code">index = lucivy.Index.create("/tmp/idx", fields=[...], shards=4)
+index.add(1, body="...")            <span class="c"># the router decides where it lands</span>
+index.commit()
+index.search({"type": "contains", "field": "body", "value": "mutex"})
+index.compact(10_000)               <span class="c"># merge down to segments of at most N documents</span>
+index.wait_merges_quiet()           <span class="c"># let the background merges finish</span></pre>
+      <div class="how">
+        <span class="label">How it works</span>
+        A shard is a <b>complete, autonomous index</b> — its own <code>meta.json</code>, its own
+        segments — behind a router. The router places a document by balance (round robin) or by
+        tokens, so similar documents can share a shard. A search is a DAG: the prescan of every
+        segment of every shard runs as one task each (that is where the parallelism lives), then one
+        weight is compiled from <b>statistics aggregated over all shards</b> and dispatched. That is
+        why 1 shard and 4 shards give identical scores — the measured difference is 0.0000 — and why
+        adding shards costs no accuracy.
+      </div>
+    </div>
+
+    <!-- ── Distribute ── -->
+    <div class="doc-entry" id="doc-distribute">
+      <h3>Distribute it <span class="lang">Python</span></h3>
+      <p>
+        Several machines, each with its own index, searched as if they were one — without copying
+        or mounting anything.
+      </p>
+<pre class="code">q = {"type": "contains", "field": "body", "value": "mutex"}
+
+<span class="c"># On each node, then on the coordinator</span>
+merged = lucivy.merge_stats([node_a.export_stats(q), node_b.export_stats(q)])
+
+<span class="c"># Back on each node: everyone scores on the federation's corpus</span>
+hits_a = node_a.search_with_global_stats(q, merged, limit=10)
+hits_b = node_b.search_with_global_stats(q, merged, limit=10)
+
+<span class="c"># And the pre-filter composes with it</span>
+hits_a = node_a.search_with_global_stats(q, merged, allowed_ids=[3, 7, 11])</pre>
+      <div class="how">
+        <span class="label">How it works</span>
+        BM25 needs to know how rare a term is <b>in the whole corpus</b>; on separate machines
+        nobody knows that alone. <code>export_stats</code> serialises what a node knows (document
+        frequencies, document and token counts), <code>merge_stats</code> sums them, and each node
+        then compiles its weight from the merged statistics instead of its own. Nothing is copied,
+        nothing is mounted, and a document scores the same on its node as it would in one index
+        holding everything. Since 3.0.6 this takes the same DAG as a local search — shards in
+        parallel, top-k bounded, batching for an index too large for memory.
+      </div>
+    </div>
+
+    <!-- ── Storage ── -->
+    <div class="doc-entry" id="doc-storage">
+      <h3>Bring your own storage <span class="lang">Python</span></h3>
+      <p>
+        The index does not have to live on a filesystem. Give it an object with five methods and
+        your database becomes the truth — the local files become a disposable cache.
+      </p>
+<pre class="code">class MyStore:                       <span class="c"># Postgres, S3, anything transactional</span>
+    def load(self, index_name, file_name): ...
+    def save(self, index_name, file_name, data): ...
+    def delete(self, index_name, file_name): ...
+    def exists(self, index_name, file_name): ...
+    def list(self, index_name): ...
+    <span class="c"># optional: blob_len / load_range, which make `lazy=True` worth it</span>
+
+index = lucivy.Index.create_with_blob_store(MyStore(), "products", fields=[...], shards=4)
+index = lucivy.Index.open_with_blob_store(MyStore(), "products", lazy=True)</pre>
+      <div class="how">
+        <span class="label">How it works</span>
+        Segments are immutable files, so they map onto a blob store without a translation layer:
+        writes are whole objects, reads are whole objects or byte ranges. A commit writes the new
+        segments, then the metadata <b>last</b> — the object that makes them part of the index —
+        so a crash leaves the previous state and never half of the new one. With
+        <code>lazy=True</code> and a store that answers <code>blob_len</code>, files are pulled on
+        first read instead of at open. The store's methods run on the scheduler's threads: they must
+        be thread-safe, must not call back into the index, and the calling thread must not hold the
+        GIL or the event loop.
+      </div>
+    </div>
+
+    <!-- ── Snapshot & sync ── -->
+    <div class="doc-entry" id="doc-sync">
+      <h3>Snapshot and sync <span class="lang">Python</span></h3>
+      <p>
+        Move an index as one blob, or ship only what changed.
+      </p>
+<pre class="code">blob = index.export_snapshot()                <span class="c"># LUCE: every shard, one blob</span>
+served = lucivy.Index.open_snapshot(blob)     <span class="c"># read-only, nothing extracted</span>
+
+<span class="c"># Incremental: the client says what it has, the server sends the difference</span>
+delta = server.export_sharded_delta(client.shard_versions())   <span class="c"># LUCIDS</span>
+client.apply_sharded_delta(delta)</pre>
+      <div class="how">
+        <span class="label">How it works</span>
+        <b>LUCE</b> is a container of every shard's files; <code>open_snapshot</code> serves it
+        <b>in place</b> — the blob is mapped and read where it is, nothing is unpacked to disk.
+        <b>LUCIDS</b> is the incremental form: a client sends the version of each of its shards, and
+        the server answers with the files of the shards that moved, and only those. Because segments
+        are immutable and named by content, "what changed" is a set difference over names — no
+        diffing, no merge conflicts.
+      </div>
+    </div>
+
+    <!-- ── Browser ── -->
+    <div class="doc-entry" id="doc-browser">
+      <h3>In the browser <span class="lang">JavaScript</span></h3>
+      <p>
+        The same engine, compiled to WebAssembly, in a Web Worker with real threads. The demo at
+        the top of this page is this code.
+      </p>
+<pre class="code">import { Lucivy } from 'lucivy-wasm';
+
+const lucivy = new Lucivy('./lucivy-worker.js');   <span class="c">// pthreads + OPFS</span>
+await lucivy.ready;
+const index = await lucivy.create('/idx', { fields: [{ name: 'body', type: 'text' }], shards: 4 });
+await index.add(1, { body: 'pthread_mutex_lock acquires a mutex' });
+await index.commit();
+await index.preload();                             <span class="c">// hold it in memory, once</span>
+await index.search({ type: 'contains', field: 'body', value: 'mutex' }, { highlights: true });
+
+const status = await index.memoryStatus();
+<span class="c">// { index_bytes, in_memory, num_docs, warnings, last_search_truncated }</span></pre>
+      <div class="how">
+        <span class="label">How it works</span>
+        A tab addresses <b>4 GB</b>, and that is the only hard bound. Under the residency limit the
+        index is held whole and a search is milliseconds; above it, the shards stream through a
+        memory budget batch by batch — the same hits, read from storage, and seconds instead of
+        milliseconds. <code>memoryStatus</code> says which of the two is happening rather than
+        leaving you to guess. Two more bounds protect the tab from a one-letter query over a large
+        corpus: the highlight sink and the matches resolved per segment are capped, and when a cap
+        is hit the search <b>says so</b> (<code>last_search_truncated</code>) instead of answering as
+        if it were complete. Writes are buffered in RAM and flushed at the end — never inside a
+        handler, because OPFS cannot be written from anywhere.
+      </div>
+    </div>
+
+    <!-- ── Sparse ── -->
+    <div class="doc-entry" id="doc-sparse">
+      <h3>Sparse vectors <span class="lang">Rust</span></h3>
+      <p>
+        The other half of a hybrid search: an inverted index for the sparse vectors a model
+        produces (SPLADE, BGE-M3), with WAND pruning, sharding and the same storage. It indexes
+        vectors — it does not produce them.
+      </p>
+<pre class="code">use sparse_vector::{handle::SparseHandle, index::SparseVector};
+
+let index = SparseHandle::create("/tmp/sparse")?;
+index.insert(1, &SparseVector { indices: vec![7, 42, 1990], values: vec![0.31, 0.12, 0.08] })?;
+index.commit_inner()?;
+
+let hits = index.search(&query_vector, 10);            <span class="c">// (id, score), best first</span>
+let hits = index.search_filtered(&query_vector, 10, &allowed_ids);
+index.compact()?;                                       <span class="c">// merge the segments</span></pre>
+      <div class="how">
+        <span class="label">How it works</span>
+        The score is a plain dot product, so it is <b>local to a shard</b>: merging results is a
+        sort, and two indexes built on different corpora are directly comparable — no global
+        statistics, nothing to recompute. <b>WAND</b> skips the documents that cannot reach the
+        current top-k, using a ceiling stored with each posting. An index is a list of immutable
+        segments: a commit writes one holding what is new, so it costs the delta and not the index
+        (35 ms instead of 320 at 200 000 vectors), deletions are tombstones, and a merge walks the
+        segments' dimension tables together. Those tables are keyed by the <b>global token id</b> and
+        sorted, which is what makes merging two segments — and therefore two indexes — a walk with
+        nothing remapped.
+      </div>
+    </div>
+  </section>
+
   <section id="numbers">
     <h2>Numbers <small>10&nbsp;000 Linux kernel files, 4 shards, the same 21 queries on both sides, identical hit counts</small></h2>
     <div style="overflow-x:auto">
@@ -494,24 +811,6 @@ index.search(&query, 10, None)?;</pre>
     <p style="margin-top:10px">
       Prebuilt for Linux x86_64 and aarch64 (glibc &ge; 2.28), macOS x86_64 and arm64, Windows x86_64; everything builds from source elsewhere.
       C++ through a cxx bridge: <a href="https://github.com/L-Defraiteur/lucivy/blob/main/bindings/cpp/README.md">bindings/cpp</a>.
-    </p>
-  </section>
-
-  <section id="how">
-    <h2>How it works</h2>
-<pre class="picture"><b>Document</b> ─ tokenizer ─┬─ inverted index (postings, term frequencies)
-                      ├─ <b>SFX v3: suffix FST</b> + 7 sidecars per field
-                      ├─ fast fields
-                      └─ doc store
-
-<b>Query</b> ─ FST walk (substring / trigrams / literals) ─ <b>sibling chains</b> across tokens
-      ─ validation on the source text (Levenshtein, Jaro-Winkler, regex)
-      ─ BM25 with global statistics ─ <b>byte spans</b></pre>
-    <p style="margin-top:10px">
-      Four crates and four bindings: <code>ld-lucivy</code> (engine), <code>lucivy-core</code>
-      (<code>ShardedHandle</code>, queries, snapshots, storage), <code>luciole</code> (actor runtime and DAGs,
-      WASM-safe), <code>lucistore</code> (blob storage, snapshots, deltas). The whole design is in
-      <a href="https://github.com/L-Defraiteur/lucivy/blob/main/ARCHITECTURE.md">ARCHITECTURE.md</a>.
     </p>
   </section>
 
