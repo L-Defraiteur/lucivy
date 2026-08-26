@@ -226,3 +226,27 @@ Non reproduit ensuite (l'index reconstruit est complet). Le vrai fond du
 sujet reste ouvert : un commit qui meurt ne devrait pas laisser un
 `meta.json` qui nomme des fichiers absents — l'ouverture devrait vérifier
 la présence des fichiers listés (côté moteur, pas seulement dans la page).
+
+## 7. Matin du 26 — 3.0.3
+
+Publiée le 26 août vers 10h45 (PyPI, npm ×2, crates ×5, tag `v3.0.3`, CI
+verte sur `3066fb7`). Contenu : palier fuzzy = distance d'édition vérifiée
+(l'ancien compte de trigrammes manquants donnait « 16 misses » sur une
+substitution en mode `pieces` — trouvé par Lucie sur le tel avec
+`Test for barious alter`, score -15991 → ≈ -991) ; playground petit appareil
+(2 threads, 1 build, fusions 400, 1 Go), index à moitié écrit reconstruit à
+l'ouverture, panneau Logs, cache-buster `?v=` ; montage OPFS concurrent ;
+message de résidence honnête. Bench 50k refait sur 3.0.2 (README,
+BENCHMARKS). `bench_sharding` : chemins sous `$LUCIVY_BENCH_DIR`/`$HOME`,
+tous les tests dépendant de l'index de t01 en `#[ignore]` (le run de la
+suite complète a tourné 4 h en debug avant que je m'en aperçoive — un bench
+n'est pas un test).
+
+Piège du matin : le **jeton de session npm expire** (401 sur `npm whoami`
+le lendemain) et `npm publish` le rapporte comme un **404** « not in this
+registry ». Avant chaque publication : `npm whoami`, sinon `npm login`.
+
+Idée notée (question de Lucie) : pas de bench chronométré en CI (runners
+partagés, chiffres sans valeur), mais un job de **vérité terrain** sur le
+code du dépôt lui-même (`v3_ground_truth_contains`, comptes et spans contre
+grep, quelques secondes) vaudrait le coup.
