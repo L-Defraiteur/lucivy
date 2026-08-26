@@ -99,8 +99,13 @@ utilisent `Index::create_in_ram_sfx2`.
 ## Sharding
 
 - `ShardedHandle` : N shards, routing configurable
-- `balance_weight=1.0` (default) : round-robin, indexation rapide
-- `balance_weight=0.2` : token-aware, co-localise les documents similaires
+- `balance_weight=1.0` : round-robin, indexation rapide — c'est le défaut du
+  `ShardRouter` (`DEFAULT_BALANCE_WEIGHT`, `shard_router.rs:36`), **pas celui
+  d'un index** : `ShardedHandle` applique `unwrap_or(0.2)` quand la config ne
+  le dit pas (`sharded_handle.rs:1687`, `:1741`). Les deux commentaires
+  divergent ; c'est 0,2 qui s'applique.
+- `balance_weight=0.2` (défaut effectif) : token-aware, co-localise les
+  documents similaires
 - BM25 cross-shard : `ExportableStats` sérialisable, `merge()`, `search_with_global_stats()`
 - Distributed ready : export_stats → merge → search_with_global_stats
 
