@@ -149,11 +149,16 @@ All text queries go through the SFX engine via a compat layer
 | `boolean` · `disjunction_max` | composition |
 | `more_like_this` | TF-IDF on the inverted index, the one query that is not SFX |
 
-Scoring is standard BM25. Fuzzy hits are **tiered** (`penalty × 1000 + bm25`): by
-trigram misses for Levenshtein, by similarity for Jaro-Winkler — negative scores
-are intended. (Since 3.0.2: the v3 query computed the tiers but did not hand them
-to the scorer, so 3.0.0 and 3.0.1 ordered fuzzy hits by BM25 alone; the counts
-and latencies in this document are unaffected, no score figure is quoted.) `query_warnings(query)` returns, without running anything, what the
+Scoring is standard BM25. Fuzzy hits are **tiered** (`tier × 1000 + bm25`): the
+tier is what the verification measured — the edit distance for Levenshtein
+(0 for the exact text, -1 one edit away), `-(1 - similarity) × 10` for
+Jaro-Winkler — so a closer match always ranks above a more frequent one, and
+negative scores are intended. (3.0.0 and 3.0.1 ordered fuzzy hits by BM25
+alone — the v3 query computed the tiers but did not hand them to the scorer —
+and the Levenshtein tier was a trigram miss count inherited from the
+pigeonhole-only pipeline, which read "16 misses" on a one-edit match; both
+fixed after 3.0.2. The counts and latencies in this document are unaffected;
+no score figure is quoted.) `query_warnings(query)` returns, without running anything, what the
 engine will actually do: separators ignored, a distance that rewrites most of a
 short query, a regex that has to scan, legacy segments.
 

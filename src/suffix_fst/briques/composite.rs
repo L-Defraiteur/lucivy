@@ -1193,6 +1193,12 @@ fn verify_candidates(
     // Jaro-Winkler: the best similarity seen per document, which becomes
     // its score tier in place of the trigram miss count.
     let mut best_sim: std::collections::HashMap<DocId, f32> = std::collections::HashMap::new();
+    // Levenshtein: the smallest verified edit distance per document — the
+    // tier. The trigram miss count it replaces was a leftover of the
+    // pigeonhole-only pipeline: under `pieces` mode a chain holds the pieces
+    // that were resolved, not the n-grams, and a one-edit match on a
+    // 17-trigram query came out as "16 misses" (-15991 on the playground).
+    let mut best_dist: std::collections::HashMap<DocId, u32> = std::collections::HashMap::new();
 
     // In relaxed mode the query arrives already separator-stripped, so the window
     // has to be stripped too or the two are not in the same space.
@@ -1243,7 +1249,7 @@ fn verify_candidates(
             }
             continue;
         };
-        let found: Vec<(usize, usize)> = match metric {
+        let found: Vec<(usize, usize, u32)> = match metric {
             FuzzyMetric::Levenshtein => {
                 // Cheap reject first: the full alignment only runs on windows
                 // that hold something.
@@ -1261,7 +1267,6 @@ fn verify_candidates(
                     continue;
                 }
                 super::fuzzy_spans::fuzzy_spans(&needle, window.as_bytes(), distance as usize)
-                    .into_iter().map(|(s, e, _)| (s, e)).collect()
             }
             FuzzyMetric::JaroWinkler { min_similarity } => {
                 // The candidates come from the pigeonhole at distance `d`;
@@ -1275,7 +1280,7 @@ fn verify_candidates(
                     Some((s, e, sim)) if sim >= min_similarity => {
                         let cur = best_sim.entry(chain.doc_id).or_insert(0.0);
                         if sim > *cur { *cur = sim; }
-                        vec![(s, e)]
+                        vec![(s, e, 0)]
                     }
                     _ => {
                         n_rejected += 1;
@@ -1287,13 +1292,17 @@ fn verify_candidates(
         if found.is_empty() { continue; }
         let wlen = window.len();
         let mut any = false;
-        for (s, e) in found {
+        for (s, e, dist) in found {
             // An occurrence touching a cut edge of the window is only partly
             // seen here (`uint6|` at the end of a window was reported as a
             // d=1 match); the margin guarantees the window of its own region
             // sees it whole, and that one reports it.
             if (cut_start && s == 0) || (cut_end && e == wlen) { continue; }
             any = true;
+            if matches!(metric, FuzzyMetric::Levenshtein) {
+                let cur = best_dist.entry(chain.doc_id).or_insert(u32::MAX);
+                if dist < *cur { *cur = dist; }
+            }
             let (from, _) = back[s];
             let (last, len) = back[e - 1];
             spans.insert((chain.doc_id, from, last + len as u32));
@@ -1315,7 +1324,11 @@ kept={} no_window={n_no_window} rejected={n_rejected} spans={}", kept.len(), spa
         .map(|(d, f, t)| (d, f as usize, t as usize)).collect();
     out_hl.sort_unstable();
     let out_cov = match metric {
-        FuzzyMetric::Levenshtein => coverage.into_iter().filter(|(d, _)| kept.contains(d)).collect(),
+        // Tier = the verified edit distance: 0 for the exact word, 1 one edit
+        // away, whatever the number of token boundaries the query crosses.
+        FuzzyMetric::Levenshtein => kept.iter()
+            .map(|&d| (d, -(best_dist.get(&d).copied().unwrap_or(0) as f32)))
+            .collect(),
         // Same scale as the miss count (`penalty * 1000 + bm25` in the
         // scorer): similarity 1.0 is tier 0, 0.9 is one tier down, so a
         // closer match always ranks above a more frequent one.

@@ -11,6 +11,14 @@ Unreleased
   could not be opened yet" instead of the size advice when that is the cause;
   a collapsible **Logs** panel shows the engine's log ring and the console
   where there is no devtools, with a Copy button.
+- **Fuzzy tier = verified edit distance.** The Levenshtein tier was the
+  trigram miss count of the candidate chain, a leftover of the pigeonhole-only
+  pipeline: under `pieces` mode the chain holds the resolved pieces, not the
+  n-grams, and `test for barious alter` (one substitution, four tokens) scored
+  `-15991` — "16 misses". The tier is now the edit distance the verification
+  measured (0 exact, -1 one edit, …), independent of how many token
+  boundaries the query crosses; Jaro-Winkler already used its verified
+  similarity. Test: `lucivy_core/tests/test_fuzzy_tiers.rs`.
 - Playground: a stored demo index whose earlier indexing was interrupted
   (its meta names files that were never written — 24 of 124 on a phone) is
   detected at open and rebuilt instead of served with holes.

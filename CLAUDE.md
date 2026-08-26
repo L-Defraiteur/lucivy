@@ -152,10 +152,13 @@ Emscripten manque : export_snapshot, export_sharded_delta, apply_sharded_delta.
 ## Scoring
 
 - BM25 standard, correct cross-shard (diff=0.0000 single vs 4-shard)
-- Fuzzy : tiers par miss count (`miss_penalty * 1000 + bm25`). Scores négatifs voulus.
-  Jaro-Winkler : tier `-(1 - sim) * 10`. En v3 le tier transite par
-  `CachedPrescan.coverage` → `SfxWeight` → `SfxScorer::with_coverage`
-  (raccordé le 25 août au soir ; avant, jeté par `FuzzyQueryV3`).
+- Fuzzy : tiers (`tier * 1000 + bm25`), scores négatifs voulus. Levenshtein :
+  tier = **distance d'édition vérifiée** (0 exact, -1 une édition…) — plus le
+  compte de trigrammes manquants, résidu du pigeonhole sans vérification qui
+  donnait « 16 misses » sur une substitution (26 août). Jaro-Winkler : tier
+  `-(1 - sim) * 10`. En v3 le tier transite par `CachedPrescan.coverage` →
+  `SfxWeight` → `SfxScorer::with_coverage` (raccordé le 25 août au soir ;
+  avant, jeté par `FuzzyQueryV3`). Test : `test_fuzzy_tiers.rs`.
 - `ExportableStats` : sérialisable (Serialize/Deserialize) pour distributed search
 
 ## Tests
