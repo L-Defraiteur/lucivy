@@ -1,6 +1,36 @@
-Unreleased
+Lucivy 3.0.5
 ================================
 
+Prebuilt for five platforms, a presentation page whose terminal indexes and
+searches lucivy's source live, and a search that says when it was
+truncated. Every crate and binding ships as **3.0.5**.
+
+- **Prebuilt binaries for Linux x86_64 and aarch64 (glibc ≥ 2.28), macOS
+  x86_64 and arm64, Windows x86_64.** A release workflow
+  (`.github/workflows/release.yml`) builds the Python `abi3` wheel with
+  maturin and the Node.js addon with cargo on each platform (Linux inside
+  the manylinux_2_28 image, Intel macOS cross-compiled from the arm64
+  runner), runs a create/add/search smoke test where it built, attaches
+  everything to the GitHub release, and publishes to PyPI (trusted
+  publishing) and npm only after the maintainer approves the `release`
+  environment. The npm package `lucivy` no longer carries a binary: it
+  depends optionally on `lucivy-linux-x64-gnu`, `lucivy-linux-arm64-gnu`,
+  `lucivy-darwin-x64`, `lucivy-darwin-arm64`, `lucivy-win32-x64-msvc`, npm
+  installs the one for the machine, and `index.js` loads it — or a local
+  `npm run build`. Elsewhere `require('lucivy')` says which platforms are
+  prebuilt and how to build.
+- **The playground opens on a presentation page.** A pitch, two buttons,
+  and a terminal that starts by itself: it clones lucivy's source from
+  GitHub, indexes it with its real progress, then runs eight searches with
+  their measured times and the best span highlighted in the real text — a
+  substring starting inside a token and running across five, relaxed
+  separators, two typos in a nine-word phrase, an emoji, a regex, boolean
+  syntax, the short one, a pre-filter. Then the terminal takes your own
+  `lucivy search` (`--fuzzy N`, `--jw`, `--regex`, `--phrase`, `--prefix`,
+  `--exact`, `--strict`, `--allowed N`, `--limit N`, `--help`). The old
+  playground is a second view of the same page (`#playground`), same
+  worker, same index. Below: what you just saw, the numbers, install, how
+  it works, honest limits.
 - **Truncation is reported.** When a segment's resolution hits
   `LUCIVY_MAX_MATCHES_PER_SEGMENT`, the search now says so instead of
   answering as if complete: `ShardedHandle::last_search_truncated()`, Python

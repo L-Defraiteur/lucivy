@@ -492,7 +492,7 @@ index.commit()?;
 let query: QueryConfig = serde_json::from_value(json!({ "type": "contains", "field": "body", "value": "mutex" }))?;
 index.search(&query, 10, None)?;</pre>
     <p style="margin-top:10px">
-      Prebuilt binaries are Linux x86_64; everything builds from source elsewhere.
+      Prebuilt for Linux x86_64 and aarch64 (glibc &ge; 2.28), macOS x86_64 and arm64, Windows x86_64; everything builds from source elsewhere.
       C++ through a cxx bridge: <a href="https://github.com/L-Defraiteur/lucivy/blob/main/bindings/cpp/README.md">bindings/cpp</a>.
     </p>
   </section>
@@ -518,7 +518,7 @@ index.search(&query, 10, None)?;</pre>
   <section id="limits">
     <h2>Honest limits</h2>
     <ul>
-      <li>Prebuilt binaries are Linux x86_64 (the Python wheel, the npm package); elsewhere you build from source.</li>
+      <li>Prebuilt binaries cover Linux x86_64/aarch64, macOS x86_64/arm64 and Windows x86_64 (the Python wheel, the npm package); Alpine (musl), FreeBSD and 32-bit build from source, with a Rust toolchain.</li>
       <li>In the browser a tab addresses 4 GB: about 10&nbsp;000 kernel files are held in memory; past that the index is streamed from storage and a search takes seconds instead of milliseconds.</li>
       <li>Fuzzy at distance 2 costs 5-10&times; distance 1; a regex with no usable literal is a scan &mdash; <code>query_warnings</code> tells you before you run it.</li>
       <li>One maintainer. The storage layer (segments, postings, doc store, fast fields) derives from tantivy 0.22; everything above it &mdash; the SFX engine, the query system, sharding, snapshots, the actor runtime, the bindings, the browser build &mdash; is new.</li>

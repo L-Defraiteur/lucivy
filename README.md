@@ -91,7 +91,9 @@ with BM25 scoring.
 | Rust | `cargo add lucivy-core` | [crates.io](https://crates.io/crates/lucivy-core) |
 | C++ | cxx bridge, build from source — [README](bindings/cpp/README.md) | |
 
-Prebuilt binaries are Linux x86_64; everything builds from source elsewhere.
+Prebuilt for Linux x86_64 and aarch64 (glibc ≥ 2.28), macOS x86_64 and arm64,
+Windows x86_64 — the wheel and the npm package alike; everything builds from
+source elsewhere (Rust toolchain needed).
 
 ## Quick start
 
