@@ -1,5 +1,11 @@
-Unreleased
+Lucivy 3.0.3
 ================================
+
+Found the same night 3.0.2 went out, on a phone and on a four-token fuzzy
+query: the fuzzy tier is now the verified edit distance, the browser build
+copes with small devices and with an index left half-written, and a losing
+OPFS mount no longer lies. Everything below shipped as **3.0.3** on every
+registry.
 
 - Playground on a phone: the 1 100-file demo died at commit, and an index
   opened right after a reload was declared "streamed from storage" at 271 MB

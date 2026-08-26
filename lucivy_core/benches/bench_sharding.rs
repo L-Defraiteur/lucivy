@@ -306,6 +306,7 @@ fn t00_repro_starts_with_prefix() {
 // ─── Diagnostic: startsWith missing docs ───────────────────────────────────
 
 #[test]
+#[ignore] // reads the index t01 builds; run after it, with --test-threads=1
 fn t00_diag_starts_with() {
     let index_dir = format!("{}/round_robin", bench_base());
     if !std::path::Path::new(&index_dir).exists() {
@@ -432,7 +433,12 @@ fn t00_diag_starts_with() {
 
 // ─── Main bench ────────────────────────────────────────────────────────────
 
+/// A bench, not a test: clones the kernel and indexes 90 000 files three
+/// times. `cargo test --release -p lucivy-core --test bench_sharding
+/// t01 -- --ignored --nocapture`; in the plain suite it ran for hours in
+/// debug once its paths were fixed.
 #[test]
+#[ignore]
 fn t01_bench_sharding_comparison() {
     let max_docs: usize = std::env::var("MAX_DOCS")
         .ok()
@@ -982,6 +988,7 @@ fn search_count_direct(handle: &ShardedHandle, field_name: &str, term: &str) -> 
 }
 
 #[test]
+#[ignore] // reads the index t01 builds; run after it, with --test-threads=1
 fn t02_ground_truth_exhaustive() {
     let index_dir = format!("{}/round_robin", bench_base());
     if !std::path::Path::new(&index_dir).exists() {
@@ -1127,6 +1134,7 @@ fn t02_ground_truth_exhaustive() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
+#[ignore] // reads the index t01 builds; run after it, with --test-threads=1
 fn t03_bench_query_times() {
     let index_dir = format!("{}/round_robin", bench_base());
     if !std::path::Path::new(&index_dir).exists() {
@@ -1277,6 +1285,7 @@ fn t03_bench_query_times() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
+#[ignore] // reads the index t01 builds; run after it, with --test-threads=1
 fn t05_test_score_consistency_single_vs_sharded() {
     let single_dir = format!("{}/single", bench_base());
     let sharded_dir = format!("{}/round_robin", bench_base());
@@ -1370,6 +1379,7 @@ fn t05_test_score_consistency_single_vs_sharded() {
 }
 
 #[test]
+#[ignore] // reads the index t01 builds; run after it, with --test-threads=1
 fn t06_profile_regex_automaton_weight() {
     let single_dir = format!("{}/single", bench_base());
     if !std::path::Path::new(&single_dir).exists() {

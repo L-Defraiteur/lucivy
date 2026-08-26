@@ -165,10 +165,11 @@ Emscripten manque : export_snapshot, export_sharded_delta, apply_sharded_delta.
 
 - `cargo test --lib` : 1431 passed, 0 failed, 16 ignored (les 3 anciens rouges
   réparés/retirés le 23 août : invariants de l'ancien design)
-- `cargo test -p lucivy-core` : tout vert. `bench_sharding` t01 clone le kernel
-  (réseau, long) sous `$LUCIVY_BENCH_DIR` ou `$HOME/lucivy_bench` (chemins codés en
-  dur sur une autre machine jusqu'au 26 août → « Permission denied ») ; t04
-  (`sfx:false`) supprimé, ce mode n'existe plus
+- `cargo test -p lucivy-core` : tout vert. `bench_sharding` t01 est `#[ignore]` :
+  c'est un bench (clone du kernel, 90 000 docs × 3, des heures en debug) — le
+  lancer en `--release -- --ignored`, sous `$LUCIVY_BENCH_DIR` ou
+  `$HOME/lucivy_bench` (chemins codés en dur sur une autre machine jusqu'au
+  26 août → « Permission denied ») ; t04 (`sfx:false`) supprimé, ce mode n'existe plus
 - Vérité terrain : `docs/BENCHMARKS.md`
 - Bench sharding : `bench_sharding.rs` (90K docs Linux kernel)
 - Bench vs tantivy : `bench_vs_tantivy.rs`
@@ -218,13 +219,14 @@ Les docs sont dans `docs/` organisés par dossier daté. Convention depuis le
 
 | Registre | Package | Publié | Date |
 |----------|---------|---------|---------|
-| PyPI | `lucivy` | **3.0.2** (wheel `cp39-abi3-manylinux_2_28_x86_64` + sdist) | 26 août 2026 (00h) |
-| npm | `lucivy` | **3.0.2** (Linux x64) | 26 août 2026 (00h) |
-| npm | `lucivy-wasm` | **3.0.2** (worker + pkg WASM, `bindings/emscripten`) | 26 août 2026 (00h) |
-| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` | **3.0.2** | 26 août 2026 (00h) |
+| PyPI | `lucivy` | **3.0.3** (wheel `cp39-abi3-manylinux_2_28_x86_64` + sdist) | 26 août 2026 (01h) |
+| npm | `lucivy` | **3.0.3** (Linux x64) | 26 août 2026 (01h) |
+| npm | `lucivy-wasm` | **3.0.3** (worker + pkg WASM, `bindings/emscripten`) | 26 août 2026 (01h) |
+| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` | **3.0.3** | 26 août 2026 (01h) |
 
-3.0.2 dans la nuit du 25 au 26 : CI verte, bornes mémoire côté requête, paliers fuzzy
-raccordés (voir `CHANGELOG.md`). Avant : 3.0.0 puis 3.0.1 le même soir : les crates 3.0.0 étaient partis avant deux
+3.0.3 la même nuit : palier fuzzy = distance vérifiée, playground mobile, index
+à moitié écrit reconstruit, montage OPFS. 3.0.2 juste avant : CI verte, bornes
+mémoire côté requête, paliers fuzzy raccordés (voir `CHANGELOG.md`). Avant : 3.0.0 puis 3.0.1 le même soir : les crates 3.0.0 étaient partis avant deux
 correctifs du cœur (interblocage lazy sans `blob_len`, message de
 finalisation perdu) et avec leurs README 2.x. Leçon : **publier les crates en
 dernier**, après les bindings et les README, pas en premier.
