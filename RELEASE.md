@@ -67,8 +67,10 @@ before the next; the CDN can lag a minute. Then record the versions in
 `publish` unticked to only build). Jobs:
 
 - `python` × 5 — `maturin-action` builds the `abi3` wheel (manylinux_2_28
-  on Linux, in the official image), installs it and runs a create/add/search
-  smoke test on the runner that built it; `sdist` on top.
+  on Linux, in the official image; Intel macOS cross-compiled from the arm64
+  runner, GitHub having retired `macos-13`), installs it and runs a
+  create/add/search smoke test on the runner that built it (not the
+  cross-compiled one); `sdist` on top.
 - `node` × 5 — `cargo build --release --target` of `bindings/nodejs`, the
   Linux ones inside `quay.io/pypa/manylinux_2_28_*` so the addon loads on any
   glibc since 2018; the addon becomes `lucivy.<platform>.node`, smoke-tested
