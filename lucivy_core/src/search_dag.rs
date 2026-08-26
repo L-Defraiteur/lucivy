@@ -19,7 +19,7 @@ use luciole::Dag;
 use ld_lucivy::query::Weight;
 use ld_lucivy::schema::Schema;
 
-use crate::bm25_global::AggregatedBm25StatsOwned;
+use crate::bm25_global::{AggregatedBm25StatsOwned, ExportableStats};
 use crate::handle::LucivyHandle;
 use crate::query::QueryConfig;
 use crate::sharded_handle::{ShardMsg, ShardedSearchResult, ScoredEntry};
@@ -329,6 +329,10 @@ pub(crate) struct BuildWeightNode {
     /// filtered search used to prescan every segment of every shard — walk,
     /// postings, verification, spans — and drop the rest at the collector.
     active: Vec<(usize, Option<Arc<HashSet<u64>>>)>,
+    /// Federated search: statistics merged across nodes, which replace this
+    /// node's aggregate and override the document frequencies its own
+    /// prescan found (see [`DagOpts::global_stats`]).
+    global_stats: Option<Arc<ExportableStats>>,
 }
 
 impl BuildWeightNode {
@@ -337,7 +341,12 @@ impl BuildWeightNode {
         query: Box<dyn ld_lucivy::query::Query>,
         active: Vec<(usize, Option<Arc<HashSet<u64>>>)>,
     ) -> Self {
-        Self { shards, query, prescanned: false, active }
+        Self { shards, query, prescanned: false, active, global_stats: None }
+    }
+
+    pub fn with_global_stats(mut self, stats: Option<Arc<ExportableStats>>) -> Self {
+        self.global_stats = stats;
+        self
     }
 
     pub fn prescanned(mut self, yes: bool) -> Self {
@@ -421,13 +430,32 @@ impl Node for BuildWeightNode {
             self.query.inject_regex_prescan_cache(regex_cache);
         }
 
-        let mut global_stats = AggregatedBm25StatsOwned::new(searchers);
-        if let Some(n) = subset_docs {
-            global_stats = global_stats.with_subset_docs(n);
-        }
+        // Federated: the coordinator's statistics are the ones every node
+        // scores with, and its document frequencies override what the local
+        // prescan counted. The prescan still had to run — it is what fills
+        // the cache the scorers replay; only the frequencies are global.
+        let stats: Arc<dyn ld_lucivy::query::Bm25StatisticsProvider + Send + Sync> =
+            match &self.global_stats {
+                Some(global) => {
+                    if !global.contains_doc_freqs.is_empty() {
+                        self.query.set_global_contains_doc_freqs(&global.contains_doc_freqs);
+                    }
+                    if !global.regex_doc_freqs.is_empty() {
+                        self.query.set_global_regex_doc_freqs(&global.regex_doc_freqs);
+                    }
+                    Arc::clone(global) as Arc<dyn ld_lucivy::query::Bm25StatisticsProvider + Send + Sync>
+                }
+                None => {
+                    let mut local = AggregatedBm25StatsOwned::new(searchers);
+                    if let Some(n) = subset_docs {
+                        local = local.with_subset_docs(n);
+                    }
+                    Arc::new(local)
+                }
+            };
         let searcher_0 = self.shards[0].reader.searcher();
         let enable_scoring = ld_lucivy::query::EnableScoring::enabled_from_statistics_provider(
-            Arc::new(global_stats), &searcher_0,
+            stats, &searcher_0,
         );
         let weight: Arc<dyn Weight> = self.query
             .weight(enable_scoring)
@@ -592,6 +620,22 @@ impl Node for OutputNode {
 // build_search_dag — factory
 // ---------------------------------------------------------------------------
 
+/// What a search DAG needs beyond its shards, its query and its filter.
+#[derive(Default, Clone)]
+pub(crate) struct DagOpts {
+    /// The query already holds every v3 segment's prescan (a batched search
+    /// did it shard batch by shard batch): the weight is compiled from that
+    /// state and the statistics, without prescanning again.
+    pub prescanned: bool,
+    /// Federated search: statistics merged across nodes
+    /// (`ExportableStats::merge`). They replace the local aggregate, and
+    /// their document frequencies override what the local prescan counted,
+    /// so every node scores on the same corpus without anything being
+    /// copied or mounted.
+    pub global_stats: Option<Arc<ExportableStats>>,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_search_dag(
     shards: &[Arc<LucivyHandle>],
     shard_pool: &luciole::Pool<ShardMsg>,
@@ -601,18 +645,16 @@ pub(crate) fn build_search_dag(
     top_k: usize,
     highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
     filter: ShardFilter,
+    opts: DagOpts,
 ) -> Result<Dag, String> {
     // Build the query once BEFORE the DAG — avoids DFA/regex compilation inside the DAG.
     let query = crate::query::build_query(
         query_config, schema, &shards[0].index, highlight_sink,
     )?;
-    build_search_dag_with_query(shards, shard_pool, pipeline, top_k, filter, query, false)
+    build_search_dag_with_query(shards, shard_pool, pipeline, top_k, filter, query, opts)
 }
 
-/// The search DAG over a query built by the caller. `prescanned` says the
-/// query already holds every v3 segment's prescan (see the batched search
-/// in `ShardedHandle::search_internal`); the weight is then compiled from
-/// that state and the global statistics, without prescanning again.
+/// The search DAG over a query built by the caller.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_search_dag_with_query(
     shards: &[Arc<LucivyHandle>],
@@ -621,8 +663,9 @@ pub(crate) fn build_search_dag_with_query(
     top_k: usize,
     filter: ShardFilter,
     query: Box<dyn ld_lucivy::query::Query>,
-    prescanned: bool,
+    opts: DagOpts,
 ) -> Result<Dag, String> {
+    let prescanned = opts.prescanned;
     let mut dag = Dag::new();
     let num_shards = shards.len();
     // Shards that will run a search node, each with its filter. With a
@@ -697,7 +740,9 @@ pub(crate) fn build_search_dag_with_query(
         dag.connect("needs_prescan", "then", &node_name, "trigger")?;
     }
 
-    dag.add_node("build_weight", BuildWeightNode::new(shards.to_vec(), query, active.clone()).prescanned(prescanned));
+    dag.add_node("build_weight", BuildWeightNode::new(shards.to_vec(), query, active.clone())
+        .prescanned(prescanned)
+        .with_global_stats(opts.global_stats.clone()));
     dag.connect("needs_prescan", "else", "build_weight", "trigger")?;
 
     if num_prescan > 1 {

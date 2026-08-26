@@ -10,7 +10,12 @@ Moteur full-text search Rust avec substring matching via Suffix FST. Trois couch
 - **lucistore** : persistance partagée (BlobStore, ShardStorage, snapshot/delta, sync)
 - **sparse_vector** : index sparse (postings + WAND, `src/wand/`) sur lucistore, shardé via luciole
   (`ShardedSparseHandle`) — crate ami, MIT, code original (design inspiré de Qdrant, aucun code
-  dérivé : audit ligne à ligne, voir `docs/24-08-2026/05-wand-comparaison.md`)
+  dérivé : audit ligne à ligne, voir `docs/24-08-2026/05-wand-comparaison.md`).
+  Commit atomique depuis le 26 août au soir : temporaire + `rename` + `sync`
+  pour les trois fichiers, pied CRC-32 dans `sparse.mmap` (format v2, v1 lu),
+  contrôle de longueur à l'ouverture, `LUCIVY_SPARSE_VERIFY_CRC=1` pour
+  vérifier le CRC ; `_sparse_config.json` versionné et tolérant.
+  Vérité : `test_mmap_durability.rs`
 - **Bindings** (5 crates) :
   - CXX bridge rag3db : `lucivy_fts/rust/src/bridge.rs`
   - WASM emscripten : `bindings/emscripten/src/lib.rs` (extern "C" + SharedArrayBuffer + pthreads)
@@ -108,6 +113,16 @@ utilisent `Index::create_in_ram_sfx2`.
   documents similaires
 - BM25 cross-shard : `ExportableStats` sérialisable, `merge()`, `search_with_global_stats()`
 - Distributed ready : export_stats → merge → search_with_global_stats
+  (+ `search_filtered_with_global_stats` : le même, restreint à des ids).
+  Depuis le 26 août au soir ce mode **passe par le DAG** comme `search()` :
+  shards en parallèle, top-k borné, batching mémoire, réparation des
+  highlights. Les stats fusionnées voyagent via `DagOpts::global_stats`
+  jusqu'à `BuildWeightNode`, où elles remplacent l'agrégat local et écrasent
+  les `doc_freq` du prescan local (le prescan tourne quand même : c'est lui
+  qui remplit le cache rejoué par les scorers). Vérité :
+  `test_federated_search.rs` — union des nœuds = index unique, **et scores
+  égaux**. Avant : boucle séquentielle, tous les hits dans un `Vec` sans
+  plafond.
 
 ## Formats d'échange
 

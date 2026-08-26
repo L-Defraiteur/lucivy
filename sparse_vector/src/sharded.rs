@@ -42,9 +42,19 @@ const BLOB_PREFIX: &str = "Sparse_";
 // ---------------------------------------------------------------------------
 
 /// Persisted as `_sparse_config.json` at the root of the storage.
+///
+/// Versioned and tolerant on purpose: it used to carry
+/// `deny_unknown_fields` and no version, so the day a field was added, the
+/// previous release could no longer read the file — the compatibility was
+/// structurally broken for this one file, while the shard router next to it
+/// does it right (magic `SHRD`, version, a range of readable versions).
+/// A field this build does not know is now ignored, and `version` says what
+/// wrote the file.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ShardedSparseConfig {
+    /// Format of this file. Absent means the versionless original (0).
+    #[serde(default)]
+    pub version: u32,
     /// Number of shards, at least 1.
     pub shards: usize,
     /// Routing balance, 0.0..=1.0: 1.0 is round-robin (the default), lower
@@ -65,9 +75,13 @@ fn default_df_threshold() -> u32 {
     5000
 }
 
+/// What this build writes into `_sparse_config.json`.
+pub const CONFIG_VERSION: u32 = 1;
+
 impl ShardedSparseConfig {
     pub fn new(shards: usize) -> Self {
         Self {
+            version: CONFIG_VERSION,
             shards,
             balance_weight: default_balance_weight(),
             df_threshold: default_df_threshold(),
@@ -75,6 +89,12 @@ impl ShardedSparseConfig {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        if self.version > CONFIG_VERSION {
+            return Err(format!(
+                "_sparse_config.json was written by a newer version ({}, this build writes {CONFIG_VERSION})",
+                self.version,
+            ));
+        }
         if self.shards == 0 {
             return Err("'shards' must be at least 1".into());
         }
@@ -896,7 +916,19 @@ mod tests {
         cfg.balance_weight = 3.0;
         let err = ShardedSparseHandle::create(&base.to_string_lossy(), &cfg).err().unwrap();
         assert!(err.contains("balance_weight"), "{err}");
-        let bad: Result<ShardedSparseConfig, _> = serde_json::from_str(r#"{"shards": 2, "shard": 4}"#);
-        assert!(bad.is_err(), "unknown keys must be refused");
+        // A field this build does not know is ignored, not fatal: the file
+        // used to carry `deny_unknown_fields` and no version, so adding one
+        // field made it unreadable by the previous release.
+        let newer: ShardedSparseConfig =
+            serde_json::from_str(r#"{"shards": 2, "a_field_from_the_future": 4}"#).unwrap();
+        assert_eq!(newer.shards, 2);
+        assert_eq!(newer.version, 0, "a file without a version is the original one");
+        assert!(newer.validate().is_ok());
+        // What this build writes says so, and a newer format is refused —
+        // clearly, rather than by a missing field.
+        assert_eq!(ShardedSparseConfig::new(2).version, CONFIG_VERSION);
+        let future = ShardedSparseConfig { version: CONFIG_VERSION + 1, ..ShardedSparseConfig::new(2) };
+        let err = future.validate().err().unwrap();
+        assert!(err.contains("newer version"), "{err}");
     }
 }

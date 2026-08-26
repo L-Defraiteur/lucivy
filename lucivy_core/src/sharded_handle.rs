@@ -2001,7 +2001,7 @@ impl ShardedHandle {
         top_k: usize,
         highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
     ) -> Result<Vec<ShardedSearchResult>, String> {
-        self.search_internal(query_config, top_k, highlight_sink, None)
+        self.search_internal(query_config, top_k, highlight_sink, None, None)
     }
 
     /// Honest warnings for a query across all shards — see
@@ -2021,7 +2021,7 @@ impl ShardedHandle {
         highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
         allowed_ids: HashSet<u64>,
     ) -> Result<Vec<ShardedSearchResult>, String> {
-        self.search_internal(query_config, top_k, highlight_sink, Some(Arc::new(allowed_ids)))
+        self.search_internal(query_config, top_k, highlight_sink, Some(Arc::new(allowed_ids)), None)
     }
 
     /// One search, plus the highlight repair pass when the sink overflowed.
@@ -2040,8 +2040,9 @@ impl ShardedHandle {
         top_k: usize,
         highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
         filter: Option<Arc<HashSet<u64>>>,
+        global_stats: Option<Arc<crate::bm25_global::ExportableStats>>,
     ) -> Result<Vec<ShardedSearchResult>, String> {
-        let results = self.search_once(query_config, top_k, highlight_sink.clone(), filter.clone())?;
+        let results = self.search_once(query_config, top_k, highlight_sink.clone(), filter.clone(), global_stats.clone())?;
         let Some(sink) = highlight_sink else { return Ok(results) };
         if !sink.overflowed() || results.is_empty() {
             return Ok(results);
@@ -2071,7 +2072,7 @@ impl ShardedHandle {
                 sink.span_count(), ids.len());
         }
         sink.clear();
-        let _ = self.search_once(query_config, top_k, Some(sink), Some(Arc::new(ids)))?;
+        let _ = self.search_once(query_config, top_k, Some(sink), Some(Arc::new(ids)), global_stats)?;
         Ok(results)
     }
 
@@ -2091,8 +2092,9 @@ impl ShardedHandle {
         top_k: usize,
         highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
         filter: Option<Arc<HashSet<u64>>>,
+        global_stats: Option<Arc<crate::bm25_global::ExportableStats>>,
     ) -> Result<Vec<ShardedSearchResult>, String> {
-        use crate::search_dag::ShardFilter;
+        use crate::search_dag::{DagOpts, ShardFilter};
         self.ensure_open()?;
         self.last_search_truncated.store(false, Ordering::Relaxed);
         // A pre-filtered search goes only to the shards holding the allowed
@@ -2174,6 +2176,7 @@ impl ShardedHandle {
                 top_k,
                 highlight_sink,
                 shard_filter,
+                DagOpts { prescanned: false, global_stats },
             )?;
 
             let mut result = luciole::execute_dag(&mut dag, None)
@@ -2252,7 +2255,7 @@ impl ShardedHandle {
                 top_k,
                 batch_filter,
                 query.box_clone(),
-                true,
+                DagOpts { prescanned: true, global_stats: global_stats.clone() },
             )?;
             let mut result = luciole::execute_dag(&mut dag, None)
                 .map_err(|e| format!("search DAG (batch {b}): {e}"))?;
@@ -2568,8 +2571,18 @@ impl ShardedHandle {
         Ok(stats)
     }
 
-    /// Search with externally-provided global BM25 stats (distributed mode).
-    /// The global_stats should be the merged stats from all nodes.
+    /// Search with statistics merged across nodes (federated mode):
+    /// `export_stats()` on each node, `ExportableStats::merge(&[..])` on the
+    /// coordinator, this call on each node again — every node then scores as
+    /// if the corpus were the federation's, without anything being copied or
+    /// mounted.
+    ///
+    /// Same path as [`Self::search`]: the search DAG, so the shards run in
+    /// parallel, the top-k is bounded per shard, an index too large for
+    /// memory streams shard batch by shard batch, and an overflowing
+    /// highlight sink is repaired. Until 3.0.6 this was a sequential loop
+    /// that collected *every* matching document of every shard into one
+    /// `Vec` before sorting — correct, but linear in the number of matches.
     pub fn search_with_global_stats(
         &self,
         query_config: &QueryConfig,
@@ -2577,69 +2590,28 @@ impl ShardedHandle {
         global_stats: &crate::bm25_global::ExportableStats,
         highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
     ) -> Result<Vec<ShardedSearchResult>, String> {
-        self.drain_pipeline();
+        self.search_internal(
+            query_config, top_k, highlight_sink, None,
+            Some(Arc::new(global_stats.clone())),
+        )
+    }
 
-        let mut query = crate::query::build_query(
-            query_config, &self.schema, &self.shards[0].index,
-            highlight_sink.clone(),
-        )?;
-
-        // Prescan local segments (populates cache + local doc_freq)
-        let all_segs: Vec<_> = self.shards.iter()
-            .flat_map(|s| s.reader.searcher().segment_readers().to_vec())
-            .collect();
-        let seg_refs: Vec<&ld_lucivy::SegmentReader> = all_segs.iter().collect();
-        query.prescan_segments(&seg_refs)
-            .map_err(|e| format!("prescan: {e}"))?;
-
-        // Inject global contains doc_freqs from coordinator (overrides local prescan doc_freq)
-        if !global_stats.contains_doc_freqs.is_empty() {
-            query.set_global_contains_doc_freqs(&global_stats.contains_doc_freqs);
-        }
-
-        // Inject global regex doc_freqs from coordinator
-        if !global_stats.regex_doc_freqs.is_empty() {
-            query.set_global_regex_doc_freqs(&global_stats.regex_doc_freqs);
-        }
-
-        // Build weight with global stats (total_docs, total_tokens, term doc_freqs)
-        let searcher_0 = self.shards[0].reader.searcher();
-        let enable = ld_lucivy::query::EnableScoring::enabled_from_statistics_provider(
-            Arc::new(global_stats.clone()), &searcher_0,
-        );
-        let weight: Arc<dyn ld_lucivy::query::Weight> = query
-            .weight(enable)
-            .map_err(|e| format!("weight: {e}"))?
-            .into();
-
-        // Execute weight on each shard locally and collect top-K
-        let mut all_hits: Vec<ShardedSearchResult> = Vec::new();
-        for (shard_id, shard) in self.shards.iter().enumerate() {
-            let searcher = shard.reader.searcher();
-            for (seg_ord, seg_reader) in searcher.segment_readers().iter().enumerate() {
-                let mut scorer = weight.scorer(seg_reader, 1.0)
-                    .map_err(|e| format!("scorer shard {shard_id}: {e}"))?;
-
-                let alive = seg_reader.alive_bitset();
-                loop {
-                    let doc = scorer.doc();
-                    if doc == ld_lucivy::TERMINATED { break; }
-                    if alive.is_none_or(|bs| bs.is_alive(doc)) {
-                        all_hits.push(ShardedSearchResult {
-                            score: scorer.score(),
-                            shard_id,
-                            doc_address: ld_lucivy::DocAddress::new(seg_ord as u32, doc),
-                        });
-                    }
-                    scorer.advance();
-                }
-            }
-        }
-
-        // Sort by score descending and truncate to top_k
-        all_hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-        all_hits.truncate(top_k);
-        Ok(all_hits)
+    /// [`Self::search_with_global_stats`] restricted to `allowed_ids` — the
+    /// pre-filter of [`Self::search_filtered`] under the federation's
+    /// statistics: the ids decide which documents are visited, the
+    /// statistics decide how they score.
+    pub fn search_filtered_with_global_stats(
+        &self,
+        query_config: &QueryConfig,
+        top_k: usize,
+        global_stats: &crate::bm25_global::ExportableStats,
+        highlight_sink: Option<Arc<ld_lucivy::query::HighlightSink>>,
+        allowed_ids: HashSet<u64>,
+    ) -> Result<Vec<ShardedSearchResult>, String> {
+        self.search_internal(
+            query_config, top_k, highlight_sink, Some(Arc::new(allowed_ids)),
+            Some(Arc::new(global_stats.clone())),
+        )
     }
 
     /// The `_node_id` of each result, read from the fast field — no document

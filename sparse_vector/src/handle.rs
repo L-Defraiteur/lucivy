@@ -159,8 +159,9 @@ impl SparseHandle {
             let data = store
                 .load(&blob_name, file_name)
                 .map_err(|e| format!("cannot load {blob_name}/{file_name}: {e}"))?;
-            std::fs::write(cache_dir.join(file_name), data)
-                .map_err(|e| format!("cannot write cache {file_name}: {e}"))?;
+            // The local cache of a blob-backed shard is opened like any
+            // other index: an interrupted download must not leave half a file.
+            mmap_index::write_file_atomic(&cache_dir.join(file_name), &data)?;
         }
 
         let backend = StorageBackend::Store {
@@ -393,14 +394,12 @@ impl SparseHandle {
         // Serialize vectors + dims
         let vectors_data = bincode::serialize(inner.index.vectors())
             .map_err(|e| format!("cannot serialize vectors: {e}"))?;
-        std::fs::write(self.path.join(VECTORS_FILE), &vectors_data)
-            .map_err(|e| format!("cannot write {VECTORS_FILE}: {e}"))?;
+        mmap_index::write_file_atomic(&self.path.join(VECTORS_FILE), &vectors_data)?;
 
         let dims_data =
             bincode::serialize(&(inner.index.dim_map(), inner.index.dim_reverse()))
                 .map_err(|e| format!("cannot serialize dims: {e}"))?;
-        std::fs::write(self.path.join(DIMS_FILE), &dims_data)
-            .map_err(|e| format!("cannot write {DIMS_FILE}: {e}"))?;
+        mmap_index::write_file_atomic(&self.path.join(DIMS_FILE), &dims_data)?;
 
         // Sync to BlobStore if store-backed
         if let StorageBackend::Store { ref store, ref index_name } = self.backend {

@@ -1,3 +1,53 @@
+Unreleased
+================================
+
+Two items of the shared-index specification written by the rag3weaver
+session (`docs/26-08-2026/…`): the federated mode now takes the same path as
+a normal search, and a sparse commit can no longer be cut in half.
+
+- **A federated search goes through the search DAG.**
+  `search_with_global_stats` — the mode where each node exports its
+  statistics, a coordinator merges them, and every node then scores on the
+  federation's corpus without anything being copied or mounted — was a
+  sequential loop over shards and segments that collected **every** matching
+  document into one `Vec` before sorting and truncating: no parallelism, no
+  bounded top-k, no `allowed_ids`, no memory batching, and a footprint
+  proportional to the number of matches. It now calls the same
+  `search_internal` as `search()`: shards in parallel, top-k bounded per
+  shard, an index too large for memory streamed shard batch by shard batch,
+  and the highlight repair pass. The merged statistics travel to
+  `BuildWeightNode` through `DagOpts::global_stats`, where they replace the
+  local aggregate and override the document frequencies the local prescan
+  counted — the prescan still runs, it is what fills the cache the scorers
+  replay.
+- **`search_filtered_with_global_stats`** — the pre-filter of
+  `search_filtered` under the federation's statistics: the allowed ids decide
+  which documents are visited, the statistics how they score. It came for
+  free once the mode joined the DAG.
+- Pinned by `test_federated_search.rs`: the union of what two nodes return is
+  what one index holding every document returns, **and a document scores the
+  same** on its node as in that single index (never asserted before), for
+  substring, cross-token, relaxed-separator, fuzzy, regex and boolean
+  queries; a filtered federated search is the federated one intersected with
+  the allowed ids; the top-k is the k best.
+- **A sparse commit is atomic, and its file carries a checksum.**
+  `sparse.mmap`, `vectors.bin` and `dims.bin` were written straight onto
+  their destination (`File::create`, `fs::write`): an interrupted commit — a
+  crash, a full disk — left a truncated index that opened without
+  complaining and answered from what was left. They are now written to a
+  temporary, flushed, synced and renamed over the destination, with the
+  directory synced too. `sparse.mmap` gains a **CRC-32 footer** (format
+  version 2; version 1 still opens), `open` checks the length its own
+  headers describe, and `MmapPostingData::verify_checksum` (or
+  `LUCIVY_SPARSE_VERIFY_CRC=1` at every open) recomputes the checksum.
+  Pinned by `test_mmap_durability.rs`.
+- `_sparse_config.json` carries a `version` and no longer refuses unknown
+  fields: it had `deny_unknown_fields` and no version, so the day a field was
+  added the previous release could no longer read the file. A newer version
+  is now refused with a sentence that says so.
+- The default `balance_weight` of an index is 0.2, not the router's 1.0 —
+  the two comments diverged and `CLAUDE.md` repeated the wrong one.
+
 Lucivy 3.0.5
 ================================
 

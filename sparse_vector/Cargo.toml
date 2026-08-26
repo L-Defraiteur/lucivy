@@ -17,5 +17,6 @@ serde_json = "1"
 bincode = "1"
 ordered-float = "4"
 memmap2 = "0.9"
+crc32fast = "1"
 lucistore = { version = "3.0.5", path = "../lucistore" }
 luciole = { version = "3.0.5", path = "../luciole" }
