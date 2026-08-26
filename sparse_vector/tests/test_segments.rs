@@ -303,7 +303,7 @@ fn segments_are_merged_once_they_pile_up() {
     // The default the handle applies; the test follows it rather than
     // repeating a number that would drift out of step with it.
     let cap: usize = std::env::var("LUCIVY_SPARSE_MAX_SEGMENTS").ok()
-        .and_then(|v| v.parse().ok()).unwrap_or(16);
+        .and_then(|v| v.parse().ok()).unwrap_or(8);
 
     let mut docs: Vec<(u64, SparseVector)> = Vec::new();
     for round in 0..(cap as u64 + 4) {

@@ -562,33 +562,37 @@ impl SparseHandle {
     /// Segments a commit leaves before merging them, from
     /// `LUCIVY_SPARSE_MAX_SEGMENTS` (`0` never merges on its own).
     ///
-    /// Sixteen by default, and **not for search speed**: measured on vectors
-    /// drawn from real text (`tests/bench_segment_search.rs`, 40 000
-    /// documents, 200 queries), a search costs 0.05 ms on one segment and
-    /// 0.05 ms on a hundred. Splitting the index splits the long posting
-    /// lists with it, and WAND prunes inside each piece just as well — the
-    /// per-segment overhead is a binary search per query dimension, which is
-    /// nothing next to walking those lists. (An earlier ×5.3 came from
-    /// vectors spread uniformly with every weight at 1.0, where WAND cannot
-    /// prune at all. It measured the corpus, not the index.)
+    /// **Eight**, and the number comes from real vectors — it took three
+    /// corpora to get right, which is worth writing down
+    /// (`tests/bench_segment_search.rs`, 40 000 documents, 200 queries):
     ///
-    /// What piling up segments does cost:
+    /// | corpus | search on 20 segments | on 100 |
+    /// |---|---|---|
+    /// | dimensions spread uniformly, every weight 1.0 | ×5.3 | — |
+    /// | words of real text, `tf · idf` | ×1.0 | ×1.0 |
+    /// | **BGE-M3, the real thing** | **×3.1** | **×7.8** |
     ///
-    /// - **files and mappings** — two files and one mapping each, per shard;
-    /// - **the write path** — an insert or a delete asks every segment
-    ///   whether it holds the id: 2.5 µs on one segment, 4.0 µs on a
-    ///   hundred, and that one is linear;
-    /// - **deleted bytes**, which only a merge reclaims.
+    /// The first is flat-weighted, so WAND has nothing to prune with and
+    /// every segment restarts a full walk. The second has a huge vocabulary
+    /// of near-unique words (median posting list: 2 documents), so there is
+    /// nothing to prune *and* nothing to lose. A model's vectors are neither:
+    /// its vocabulary is bounded and shared, so posting lists are long
+    /// (median 52, longest 29 630) and WAND skips far inside them — which is
+    /// exactly what splitting them across segments takes away, since each
+    /// segment fills its own top-k from zero before it can skip anything.
     ///
-    /// A merge costs O(index), so a higher cap is cheaper: sixteen bounds
-    /// the file count while leaving fifteen commits out of sixteen paying
-    /// only for their delta.
+    /// So the segment count does cost, roughly linearly, and eight keeps a
+    /// search under about twice its merged time while leaving seven commits
+    /// out of eight paying only for their delta. It also bounds the file
+    /// count (two files and one mapping per segment, per shard), the write
+    /// path (an insert asks every segment whether it holds the id) and the
+    /// deleted bytes only a merge reclaims.
     fn max_segments() -> usize {
         static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
         *CAP.get_or_init(|| {
             std::env::var("LUCIVY_SPARSE_MAX_SEGMENTS").ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(16)
+                .unwrap_or(8)
         })
     }
 

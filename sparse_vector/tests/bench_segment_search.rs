@@ -1,24 +1,30 @@
 //! What a search pays per segment, and what a merge gives back.
 //!
-//! The answer, on vectors drawn from real text: **nothing measurable**.
-//! 0.05 ms on one segment, 0.05 ms on a hundred, reproducible run to run.
-//! Splitting the index splits the long posting lists with it, and WAND
-//! prunes inside each piece just as well; the per-segment overhead is a
-//! binary search per query dimension.
+//! It took three corpora to answer, and the first two lied in opposite
+//! directions. On 40 000 documents and 200 queries, search time against the
+//! same search after a merge:
 //!
-//! It is worth saying what this bench used to claim: with vectors spread
-//! uniformly and every weight at 1.0, it read ×5.3 on twenty segments. That
-//! number measured the corpus, not the index — flat weights leave WAND
-//! nothing to prune with, so every segment restarts a full walk. It is the
-//! reason `corpus_vectors` exists.
+//! | corpus | 5 segments | 20 | 50 | 100 |
+//! |---|---|---|---|---|
+//! | dimensions spread uniformly, every weight 1.0 | ×1.8 | ×5.3 | — | — |
+//! | words of real text, `tf · idf` | ×1.4 | ×1.1 | ×1.0 | ×1.0 |
+//! | **BGE-M3 (the dump)** | **×1.6** | **×3.1** | **×4.9** | **×7.8** |
 //!
-//! What does grow with the segment count is the **write** path
-//! (`update_cost_per_segment` below): an insert or a delete asks every
-//! segment whether it holds the id.
+//! Flat weights leave WAND nothing to prune with, so every segment restarts
+//! a full walk and the cost looks worse than it is. Real words go the other
+//! way: a vocabulary of 112 000 dimensions whose median posting list is two
+//! documents long — nothing to prune, nothing to lose. A model's vectors are
+//! neither: a bounded, shared vocabulary (6 583 dimensions here, median list
+//! 52, longest 29 630), so WAND skips far inside a long list, and splitting
+//! that list across segments is precisely what takes the skipping away —
+//! each segment fills its own top-k from zero before its bound can prune.
 //!
-//! The vectors come from real text (`corpus_vectors`), not from a uniform
-//! spread: WAND's pruning lives on the imbalance between dimensions, and a
-//! flat corpus measures something else entirely.
+//! The lesson is not about sparse vectors: **a benchmark on synthetic data
+//! measures the generator**. Both wrong answers were reproducible.
+//!
+//! What also grows with the segment count is the write path
+//! (`update_cost_per_segment`): an insert or a delete asks every segment
+//! whether it holds the id.
 //!
 //! Run: `cargo test --release -p sparse-vector --test bench_segment_search -- --ignored --nocapture`
 
@@ -34,10 +40,13 @@ fn search_cost_per_segment() {
     std::fs::create_dir_all(&dir).unwrap();
     let h = SparseHandle::create(dir.to_str().unwrap()).unwrap();
 
-    // Real text, so the posting lists and the weights are as unbalanced as
-    // a model's — which is the only condition WAND can be measured under.
-    let corpus = corpus_vectors::build(40_000, 200);
-    eprintln!("  corpus: {}", corpus_vectors::describe(&corpus));
+    // Real BGE-M3 vectors when the dump is there, text-derived ones
+    // otherwise: WAND can only be measured on an unbalanced corpus.
+    let want: usize = std::env::var("BENCH_DOCS").ok().and_then(|v| v.parse().ok()).unwrap_or(40_000);
+    let corpus = corpus_vectors::from_dump(want)
+        .unwrap_or_else(|| corpus_vectors::build(want, 200));
+    eprintln!("  corpus: {} (x{} replicas)", corpus_vectors::describe(&corpus),
+        corpus_vectors::replicas(&corpus));
     let total = corpus.docs.len() as u64;
     let queries = corpus.queries.clone();
     let time = |h: &SparseHandle| {
@@ -83,7 +92,8 @@ fn search_cost_per_segment() {
 #[test]
 #[ignore]
 fn update_cost_per_segment() {
-    let corpus = corpus_vectors::build(40_000, 4);
+    let corpus = corpus_vectors::from_dump(40_000)
+        .unwrap_or_else(|| corpus_vectors::build(40_000, 4));
     let dir = std::env::temp_dir().join("lucivy_sparse_update_cost");
     for segments in [1usize, 5, 20, 50, 100] {
         let _ = std::fs::remove_dir_all(&dir);

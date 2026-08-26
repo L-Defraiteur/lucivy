@@ -181,46 +181,46 @@ Ce qui reste est constant : trois `fsync` (le segment, ses ids, la méta).
 À deux millions de vecteurs, l'ancien commit prendrait ~3 s ; celui-ci en
 prend toujours 30.
 
-**Le coût d'une recherche par segment : aucun.** Sur des vecteurs tirés de
-vrai texte (`corpus_vectors.rs` : 40 000 documents, 111 916 dimensions,
-nnz médian 51, listes de 1 à 23 640, 51 220 dimensions vues une seule
-fois), `bench_segment_search.rs` mesure, deux fois de suite :
+**Le coût d'une recherche par segment : il a fallu trois corpus pour le
+savoir, et les deux premiers mentaient en sens inverse.** Sur 40 000
+documents et 200 requêtes, temps de recherche rapporté à la même recherche
+après merge (`bench_segment_search.rs`) :
 
-| segments | recherche | après merge |
-|---|---|---|
-| 1 | 0,05 ms | 0,05 ms |
-| 5 | 0,07 ms | 0,05 ms |
-| 20 | 0,05 ms | 0,05 ms |
-| 50 | 0,05 ms | 0,05 ms |
-| 100 | 0,05 ms | 0,05 ms |
+| corpus | 5 segments | 20 | 50 | 100 |
+|---|---|---|---|---|
+| dimensions uniformes, tous poids à 1.0 | ×1,8 | ×5,3 | — | — |
+| mots de vrai texte, `tf · idf` | ×1,4 | ×1,1 | ×1,0 | ×1,0 |
+| **BGE-M3 (le dump du 27 août)** | **×1,6** | **×3,1** | **×4,9** | **×7,8** |
 
-**Correction d'une erreur de mesure.** La première version de ce bench
-lisait ×5,3 à vingt segments, et le seuil de compactage de huit en avait été
-tiré. Ce chiffre venait de vecteurs synthétiques : dimensions dispersées
-uniformément, **tous les poids à 1.0**. Avec des poids plats, le WAND n'a
-rien avec quoi élaguer, donc chaque segment recommence un parcours complet —
-on mesurait le corpus, pas l'index. Sur des poids réels (`tf · idf`, donc
-une vraie Zipf), découper l'index découpe aussi les longues listes, et le
-WAND élague dans chaque morceau aussi bien : le surcoût par segment se
-réduit à une recherche binaire par dimension de requête. C'est la raison
-d'être de `corpus_vectors.rs`, et la leçon vaut au-delà du sparse : **une
-mesure sur données uniformes peut inventer un facteur 5**.
+Pourquoi les deux premiers se trompent :
 
-**Ce qui croît vraiment avec le nombre de segments, c'est l'écriture.** Une
-insertion ou une suppression demande à chaque segment s'il porte l'id
-(`Segment::holds`, recherche binaire dans son `.ids`) :
+- **Poids plats** : le WAND n'a rien avec quoi élaguer, chaque segment
+  recommence un parcours complet — le coût paraît pire qu'il n'est.
+- **Mots de vrai texte** : un vocabulaire de 112 000 dimensions dont la
+  liste médiane fait *deux* documents. Rien à élaguer, donc rien à perdre en
+  découpant.
+- **Vecteurs de modèle** : vocabulaire borné et partagé (6 583 dimensions,
+  liste médiane 52, la plus longue 29 630). Le WAND saute loin dans une
+  longue liste, et c'est exactement ce que le découpage lui retire : chaque
+  segment remplit son propre top-k depuis zéro avant que sa borne puisse
+  élaguer quoi que ce soit.
 
-| segments | 1 | 5 | 20 | 50 | 100 |
-|---|---|---|---|---|---|
-| mise à jour | 2,5 µs | 2,6 µs | 2,8 µs | 3,2 µs | 4,0 µs |
+Ce n'était donc pas la forme de Zipf qui comptait, mais la **taille du
+vocabulaire** — et c'est ce que le texte ne peut pas imiter : les mots sont
+quasi uniques, les dimensions d'un modèle sont partagées.
 
-Linéaire, mais minuscule. **Le seuil de compactage est donc justifié par
-autre chose que la vitesse** : le nombre de fichiers et de mappings (deux
-fichiers et une projection par segment, par shard), les octets des documents
-supprimés que seul un merge récupère, et ce chemin d'écriture. Un merge
-coûtant O(index), un seuil plus haut est moins cher : **seize**
-(`LUCIVY_SPARSE_MAX_SEGMENTS`, `0` = jamais), soit quinze commits sur seize
-qui ne paient que leur delta.
+**La leçon dépasse le sparse : un bench sur données synthétiques mesure le
+générateur.** Les deux mauvaises réponses étaient reproductibles, stables
+d'un run à l'autre, et fausses.
+
+**Ce qui croît aussi, c'est l'écriture** : une insertion demande à chaque
+segment s'il porte l'id (`Segment::holds`) — 3,4 µs sur un segment, 8,5 µs
+sur cent.
+
+**Le seuil de compactage est donc huit** (`LUCIVY_SPARSE_MAX_SEGMENTS`,
+`0` = jamais) : une recherche reste sous le double de son temps compacté,
+sept commits sur huit ne paient que leur delta, et le nombre de fichiers
+reste borné.
 
 **Ce que le merge prouve.** `segments::merge_segments` marche les tables de
 tokens ensemble et concatène — aucun remappage, aucun dictionnaire
@@ -228,15 +228,30 @@ reconstruit. Il prend `&[&Segment]` : lui passer les segments d'un *autre*
 index est exactement le même appel. C'est là que L4 (fusion sparse) et L1
 côté sparse deviennent une ligne de code, quand on en aura besoin.
 
-**Les vecteurs de test.** Ils étaient synthétiques et uniformes ; ils
-viennent maintenant du texte du dépôt (`corpus_vectors.rs` : un mot une
-dimension, hachée en `u32`, poids `tf · idf`), et les requêtes prennent des
-dimensions sur toute l'étendue des poids et non seulement les plus lourdes —
-une requête de mots rares ne touche presque rien et fait paraître toute
-recherche instantanée. Ce n'est pas SPLADE : la *forme* est réelle, les
-poids ne sont pas ceux d'un modèle. On a demandé à la session rag3weaver un
-dump de vrais vecteurs BGE-M3 (5 000 documents, 200 requêtes) pour caler le
-générateur dessus et vérifier ces chiffres.
+**Les vecteurs de test.** La session rag3weaver a produit le dump le 27
+août au matin : **2 924 documents et 200 requêtes BGE-M3** (burn/Vulkan),
+`~/lucivy_bench/sparse/*.jsonl`, plus un extrait de 500 documents commité
+dans `sparse_vector/tests/fixtures/` pour que la CI ait de vrais vecteurs.
+`corpus_vectors::from_dump` les lit et les réplique avec décalage d'id quand
+un bench en veut plus (la réplication multiplie chaque liste par le même
+facteur et laisse nnz, les poids et le déséquilibre intacts — ce n'est pas
+de la donnée nouvelle, et le bench le dit).
+
+Ce que le dump apprend, au-delà des chiffres :
+
+- **les token ids montent à 245 156** : l'espace `u32` est creux, pas dense —
+  ce qui valide directement la table indexée par token global, une table
+  dense aurait été absurde ;
+- **5 dimensions de requête n'apparaissent dans aucun document** : le chemin
+  « dimension inconnue » doit rendre vide, pas paniquer ;
+- **les requêtes n'ont rien à voir avec les documents** (nnz moyen 10,4
+  contre 45,2), donc les demander séparément était juste — et rag3weaver
+  précise que BGE-M3 n'a pas de tête « requête » : c'est la même passe
+  avant, la différence vient du texte.
+
+Le générateur dérivé du texte (`corpus_vectors::build`) reste comme
+solution de repli quand le dump n'est pas là, mais ce n'est plus la
+référence.
 
 **Vérité** : `test_global_dims.rs` (4), `test_segments.rs` (7),
 `test_mmap_durability.rs` (4) — dont la recherche sur N segments comparée à

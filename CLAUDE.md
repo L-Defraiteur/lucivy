@@ -20,12 +20,13 @@ Moteur full-text search Rust avec substring matching via Suffix FST. Trois couch
   delta (28-33 ms au lieu de 320 à 200 k vecteurs), une suppression est un
   tombstone, un merge marche les tables triées ensemble sans rien remapper
   (`segments::merge_segments`, `&[&Segment]` — donc fusionner deux index
-  est le même appel), et un commit compacte au-delà de 16 segments
-  (`LUCIVY_SPARSE_MAX_SEGMENTS`) — pas pour la vitesse de recherche (plate
-  de 1 à 100 segments sur données réelles) mais pour le nombre de fichiers,
-  le chemin d'écriture et les octets supprimés. Les benchs sparse tournent
-  sur des vecteurs tirés du vrai texte (`corpus_vectors.rs`) : sur un corpus
-  uniforme, le même bench inventait un ×5,3. Les v1/v2 s'ouvrent et se convertissent
+  est le même appel), et un commit compacte au-delà de 8 segments
+  (`LUCIVY_SPARSE_MAX_SEGMENTS`) : sur de vrais vecteurs BGE-M3, une
+  recherche coûte ×3,1 à vingt segments et ×7,8 à cent. Les benchs sparse
+  lisent le dump rag3weaver (`~/lucivy_bench/sparse/*.jsonl`, extrait de 500
+  docs commité dans `tests/fixtures/`) — **trois corpus ont été nécessaires**
+  pour ce seul chiffre : uniforme → ×5,3, texte `tf·idf` → ×1,0, modèle →
+  ×3,1. Un bench sur données synthétiques mesure le générateur. Les v1/v2 s'ouvrent et se convertissent
   au commit suivant. Design : `docs/27-08-2026/01-…`. Vérité :
   `test_global_dims.rs`, `test_segments.rs`, `test_mmap_durability.rs`,
   benchs `bench_commit_cost.rs` et `bench_segment_search.rs`

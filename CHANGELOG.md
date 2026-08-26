@@ -58,12 +58,12 @@ a normal search, and a sparse commit can no longer be cut in half.
   hold the id, which `seg_<id>.ids` answers by binary search — eight bytes a
   document, read only when something is deleted or updated, and it replaces
   the far larger `sparse_vectors.bin`. A search walks every segment and what
-  is still in RAM; past sixteen segments a commit merges them
-  (`LUCIVY_SPARSE_MAX_SEGMENTS`, `0` never) — not for search speed, which
-  `bench_segment_search.rs` measures flat from one segment to a hundred on
-  vectors drawn from real text, but for the file count, the write path
-  (2.5 µs an update on one segment, 4.0 on a hundred) and the deleted bytes
-  only a merge reclaims.
+  is still in RAM; past eight segments a commit merges them
+  (`LUCIVY_SPARSE_MAX_SEGMENTS`, `0` never). Eight because a search on real
+  BGE-M3 vectors costs ×3.1 on twenty segments and ×7.8 on a hundred
+  (`bench_segment_search.rs`) — a model's vocabulary is bounded and shared,
+  so posting lists are long, WAND skips far inside them, and splitting them
+  across segments is exactly what takes the skipping away.
 - **A dimension is its global token id** (`sparse.mmap` format version 3).
   The dimension header's padding word became the token id and the table is
   sorted by it — same sixteen bytes — so a dimension is looked up by binary
@@ -77,13 +77,20 @@ a normal search, and a sparse commit can no longer be cut in half.
   Pinned by `test_global_dims.rs` and `test_segments.rs` — including the
   trap this surfaced: RAM postings were reloaded by position, which under a
   sorted table hands every dimension someone else's list.
-- **The sparse benches run on vectors drawn from real text**
-  (`tests/corpus_vectors.rs`: the repository's own files, one word one
-  dimension, `tf · idf` weights) instead of a uniform spread with every
-  weight at 1.0. It matters more than it sounds: WAND's pruning lives on the
-  imbalance between dimensions, and the flat corpus had the segment bench
-  reading ×5.3 where real data reads ×1.0 — it was measuring the corpus, not
-  the index.
+- **The sparse benches run on real BGE-M3 vectors** — 2 924 documents and
+  200 queries produced by the rag3weaver session on burn/Vulkan, read from
+  `~/lucivy_bench/sparse/` (or `$LUCIVY_SPARSE_DUMP`), with a 500-document
+  extract committed under `sparse_vector/tests/fixtures/` so CI has real
+  ones too. It took three corpora to measure one thing, and the two
+  synthetic ones were wrong in opposite directions: dimensions spread
+  uniformly with every weight at 1.0 read ×5.3 on twenty segments, words of
+  real text weighted `tf · idf` read ×1.0, and the model's own vectors read
+  ×3.1. Flat weights leave WAND nothing to prune; real words have a
+  near-unique vocabulary whose median posting list is two documents long, so
+  there is nothing to lose either; a model has a bounded shared vocabulary
+  with lists in the tens of thousands, which is the only case where
+  splitting them costs. **A benchmark on synthetic data measures the
+  generator** — both wrong answers were reproducible.
 - The default `balance_weight` of an index is 0.2, not the router's 1.0 —
   the two comments diverged and `CLAUDE.md` repeated the wrong one.
 

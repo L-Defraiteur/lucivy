@@ -13,8 +13,13 @@
 //! distributed. It is not SPLADE, and the weights are not a model's; the
 //! *shape* is real, which is what the measurement needs.
 //!
-//! The honest fixture is still a dump of real BGE-M3 vectors, asked for from
-//! the rag3weaver session; this generator will be recalibrated on it.
+//! **This generator is the fallback, not the reference.** The dump of real
+//! BGE-M3 vectors ([`from_dump`]) arrived on 27 August and showed what text
+//! gets wrong: words are near-unique, so a text corpus has a huge vocabulary
+//! with median posting lists of two documents, where a model has a bounded
+//! shared vocabulary with lists in the tens of thousands. The Zipf shape was
+//! not the property that mattered — the **vocabulary size** was. Use
+//! [`from_dump`] whenever the dump is there.
 
 #![allow(dead_code)]
 
@@ -29,6 +34,9 @@ pub struct Corpus {
     pub queries: Vec<SparseVector>,
     /// Distinct dimensions across the corpus.
     pub dims: usize,
+    /// How many times a real dump was repeated to reach the wanted size
+    /// (1 when it was not, and for text-derived corpora).
+    pub replicas: u64,
 }
 
 /// FNV-1a: a word to a dimension, stable across runs and machines.
@@ -173,7 +181,7 @@ pub fn build(n: usize, queries: usize) -> Corpus {
     let mut all: Vec<u32> = docs.iter().flat_map(|(_, v)| v.indices.iter().copied()).collect();
     all.sort_unstable();
     all.dedup();
-    Corpus { dims: all.len(), docs, queries }
+    Corpus { dims: all.len(), docs, queries, replicas: 1 }
 }
 
 /// What the corpus looks like, for a bench to print: the imbalance is the
@@ -196,4 +204,106 @@ pub fn describe(corpus: &Corpus) -> String {
         lists[0], median(&lists), lists[lists.len() - 1],
         lists.iter().filter(|&&n| n == 1).count(),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Real vectors
+// ---------------------------------------------------------------------------
+
+/// Sparse vectors as a model writes them, one JSON object a line:
+/// `{"node_id": u64, "token_ids": [u32], "weights": [f32]}`.
+///
+/// The dump this reads was produced by the rag3weaver session with BGE-M3 on
+/// burn/Vulkan (27 August 2026): 2 924 documents and 200 queries, nnz p50
+/// 38 / p90 85 / max 153 for documents against p50 10 for queries, weights
+/// p50 0.112, 215 dimensions of 6 583 carrying half of all occurrences, and
+/// token ids spread up to 245 156 — a sparse `u32` space, which is exactly
+/// what a table keyed by global token id is for.
+///
+/// Where it is looked for, in order: `$LUCIVY_SPARSE_DUMP`,
+/// `$LUCIVY_BENCH_DIR/sparse`, `~/lucivy_bench/sparse`, and failing those the
+/// 500-document fixture committed next to this file.
+pub fn dump_dir() -> Option<PathBuf> {
+    let candidates = [
+        std::env::var("LUCIVY_SPARSE_DUMP").ok().map(PathBuf::from),
+        std::env::var("LUCIVY_BENCH_DIR").ok().map(|d| PathBuf::from(d).join("sparse")),
+        std::env::var("HOME").ok().map(|h| PathBuf::from(h).join("lucivy_bench/sparse")),
+    ];
+    candidates.into_iter().flatten().find(|d| d.join("sparse-docs.jsonl").exists())
+}
+
+fn parse_line(line: &str) -> Option<(u64, SparseVector)> {
+    // Small hand-rolled reader: the crate has no JSON dependency, and the
+    // shape is fixed. `{"node_id":N,"token_ids":[..],"weights":[..]}`.
+    let field = |name: &str| -> Option<&str> {
+        let start = line.find(name)? + name.len();
+        let rest = &line[start..];
+        let open = rest.find(|c| c == '[')?;
+        let close = rest.find(']')?;
+        Some(&rest[open + 1..close])
+    };
+    let id_at = line.find("\"node_id\":")? + "\"node_id\":".len();
+    let id: u64 = line[id_at..].split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()?;
+    let indices: Vec<u32> = field("\"token_ids\":")?
+        .split(',').filter_map(|v| v.trim().parse().ok()).collect();
+    let values: Vec<f32> = field("\"weights\":")?
+        .split(',').filter_map(|v| v.trim().parse().ok()).collect();
+    if indices.len() != values.len() || indices.is_empty() {
+        return None;
+    }
+    // The index wants dimensions sorted; a model does not promise it.
+    let mut pairs: Vec<(u32, f32)> = indices.into_iter().zip(values).collect();
+    pairs.sort_by_key(|(d, _)| *d);
+    Some((id, SparseVector {
+        indices: pairs.iter().map(|(d, _)| *d).collect(),
+        values: pairs.iter().map(|(_, w)| *w).collect(),
+    }))
+}
+
+fn read_jsonl(path: &Path) -> Vec<(u64, SparseVector)> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    text.lines().filter_map(parse_line).collect()
+}
+
+/// The real vectors, replicated with an id offset until there are `want` of
+/// them — the dump holds a few thousand, a segment bench wants tens of
+/// thousands. Replication is honest here: it multiplies every posting list
+/// by the same factor and leaves nnz, the weight distribution and the
+/// imbalance exactly as they are, which is what the measurement depends on.
+/// It is **not** new data, and a bench says so.
+pub fn from_dump(want: usize) -> Option<Corpus> {
+    let (docs_path, queries_path) = match dump_dir() {
+        Some(dir) => (dir.join("sparse-docs.jsonl"), dir.join("sparse-queries.jsonl")),
+        None => {
+            let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+            (fixtures.join("bge_m3_docs_500.jsonl"), fixtures.join("bge_m3_queries_200.jsonl"))
+        }
+    };
+    let real = read_jsonl(&docs_path);
+    if real.is_empty() {
+        return None;
+    }
+    let queries: Vec<SparseVector> = read_jsonl(&queries_path).into_iter().map(|(_, v)| v).collect();
+
+    let mut docs = Vec::with_capacity(want.max(real.len()));
+    let mut copy = 0u64;
+    while docs.len() < want {
+        for (id, v) in &real {
+            if docs.len() >= want {
+                break;
+            }
+            docs.push((id + copy * 1_000_000, v.clone()));
+        }
+        copy += 1;
+    }
+    let mut all: Vec<u32> = docs.iter().flat_map(|(_, v)| v.indices.iter().copied()).collect();
+    all.sort_unstable();
+    all.dedup();
+    Some(Corpus { dims: all.len(), docs, queries, replicas: copy })
+}
+
+/// How many times the real vectors were repeated to reach the wanted size
+/// (1 = none), so a bench can print it.
+pub fn replicas(corpus: &Corpus) -> u64 {
+    corpus.replicas
 }
