@@ -9,6 +9,16 @@
 //! [Footer]                        8 bytes    (version 2)
 //! ```
 //!
+//! **Version 3: a dimension is its global token id.** `DimHeader` used to
+//! carry a padding word and to be addressed by its position — a dense index
+//! local to the file, which only `sparse_dims.bin` could translate back.
+//! The padding word now holds the `token_id`, the table is sorted by it, and
+//! a dimension is looked up by binary search. Same 16 bytes, and three
+//! consequences: merging two files is a merge-join on sorted ids with no
+//! remapping (so merging two *indexes* is the same operation), the dims
+//! side file is not needed to search, and nothing local to a file leaks into
+//! what it means. Versions 1 and 2 keep the dense reading.
+//!
 //! **Version 2 adds the footer** — a CRC-32 of everything before it, then the
 //! magic again — and the file is written to a temporary and renamed over the
 //! destination. Until 3.0.5 the writer opened the destination itself and
@@ -36,8 +46,12 @@ use crate::index::{run_search, SparseVector};
 use crate::wand::{MmapCursor, Postings};
 
 const MAGIC: u32 = 0x53505253; // "SPRS"
-/// Written by this version: a CRC-32 footer, and an atomic rename.
-const FORMAT_VERSION: u32 = 2;
+/// Written by this version: a CRC-32 footer, an atomic rename, and a
+/// dimension table keyed by global token id.
+const FORMAT_VERSION: u32 = 3;
+/// From this version on, `DimHeader::token_id` is meaningful and the table
+/// is sorted by it.
+const GLOBAL_DIMS_VERSION: u32 = 3;
 /// Read too: files written before 3.0.6, footerless.
 const MIN_READABLE_VERSION: u32 = 1;
 /// `[crc32: u32][magic: u32]`.
@@ -55,7 +69,9 @@ struct FileHeader {
 struct DimHeader {
     offset: u64,
     count: u32,
-    _pad: u32,
+    /// The dimension's global token id (version 3 and up); the padding word
+    /// of versions 1 and 2, where the table position was the dimension.
+    token_id: u32,
 }
 
 /// On-disk posting entry.
@@ -180,6 +196,55 @@ impl MmapPostingData {
         self.num_vectors
     }
 
+    /// The file's format version (3 and up: dimensions are global token ids).
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+
+    /// Whether a dimension is addressed by its global token id (version 3)
+    /// or by a dense position this file alone defines (versions 1 and 2).
+    pub fn has_global_dims(&self) -> bool {
+        self.version >= GLOBAL_DIMS_VERSION
+    }
+
+    /// The dimension headers, in file order — sorted by `token_id` from
+    /// version 3 on.
+    fn dim_headers(&self) -> &[DimHeader] {
+        let ptr = unsafe { self.mmap.as_ptr().add(std::mem::size_of::<FileHeader>()) }
+            as *const DimHeader;
+        unsafe { std::slice::from_raw_parts(ptr, self.num_dims) }
+    }
+
+    /// The position of a global token id in this file's table, by binary
+    /// search. `None` on a version 1 or 2 file, whose table is dense and
+    /// says nothing about token ids.
+    pub fn dim_of_token(&self, token_id: u32) -> Option<usize> {
+        if !self.has_global_dims() {
+            return None;
+        }
+        self.dim_headers()
+            .binary_search_by_key(&token_id, |dh| dh.token_id)
+            .ok()
+    }
+
+    /// Every `(token_id, position)` of this file, in sorted order — what a
+    /// merge walks. Empty on a version 1 or 2 file.
+    pub fn tokens(&self) -> impl Iterator<Item = (u32, usize)> + '_ {
+        let global = self.has_global_dims();
+        self.dim_headers().iter().enumerate()
+            .filter(move |_| global)
+            .map(|(i, dh)| (dh.token_id, i))
+    }
+
+    /// The entries of a global token id, empty when this file does not hold
+    /// that dimension.
+    pub fn entries_of_token(&self, token_id: u32) -> &[PostingEntry] {
+        match self.dim_of_token(token_id) {
+            Some(i) => self.entries(i),
+            None => &[],
+        }
+    }
+
     /// The entries of a remapped dimension, sorted by record id; empty for
     /// an empty or unknown dimension.
     pub fn entries(&self, dim_idx: usize) -> &[PostingEntry] {
@@ -208,8 +273,20 @@ impl MmapPostingData {
         MmapCursor::open(self, dim_idx as u32)
     }
 
+    /// Load a global token id's entries into an in-RAM list. Empty when the
+    /// file does not hold that dimension — the lookup a version 3 file
+    /// answers itself, and the only correct one once the table is sorted by
+    /// token rather than laid out by position.
+    pub fn load_postings_of_token(&self, token_id: u32) -> Postings {
+        match self.dim_of_token(token_id) {
+            Some(i) => self.load_postings(i),
+            None => Postings::new(),
+        }
+    }
+
     /// Load a dimension's entries into an in-RAM list, recomputing the
-    /// ceilings from the weights.
+    /// ceilings from the weights. `dim_idx` is a **position in this file**,
+    /// which is the caller's dense dimension only on a version 1 or 2 file.
     pub fn load_postings(&self, dim_idx: usize) -> Postings {
         let pairs: Vec<(u64, f32)> = self
             .entries(dim_idx)
@@ -224,9 +301,28 @@ impl MmapPostingData {
 // Search using mmap data (no RAM postings needed)
 // ---------------------------------------------------------------------------
 
+/// This file's own translation of the query's token ids into its dimension
+/// positions: its header table on a version 3 file, the caller's `dim_map`
+/// on a version 1 or 2 one (where a position means nothing outside the
+/// file). The map is only read for the query's dimensions, never cloned.
+fn dims_for<'a>(
+    mmap: &'a MmapPostingData,
+    dim_map: &'a HashMap<u32, usize>,
+    query: &SparseVector,
+) -> HashMap<u32, usize> {
+    if !mmap.has_global_dims() {
+        return query.indices.iter()
+            .filter_map(|t| dim_map.get(t).map(|&d| (*t, d)))
+            .collect();
+    }
+    query.indices.iter()
+        .filter_map(|&t| mmap.dim_of_token(t).map(|d| (t, d)))
+        .collect()
+}
+
 /// Top-`limit` search straight from the mapping, without loading anything
-/// into RAM. `dim_map` translates the query's token ids into the file's
-/// dimension indices.
+/// into RAM. `dim_map` is only used for a version 1 or 2 file; a version 3
+/// one carries its own dimensions (see [`dims_for`]).
 pub fn search_mmap<F: Fn(u64) -> bool>(
     mmap: &MmapPostingData,
     dim_map: &HashMap<u32, usize>,
@@ -237,7 +333,8 @@ pub fn search_mmap<F: Fn(u64) -> bool>(
     if query.is_empty() || mmap.num_vectors() == 0 {
         return Vec::new();
     }
-    run_search(query, dim_map, limit, filter, |dim| mmap.cursor(dim as usize))
+    let dims = dims_for(mmap, dim_map, query);
+    run_search(query, &dims, limit, filter, |dim| mmap.cursor(dim as usize))
 }
 
 /// [`search_mmap`] restricted to `allowed` ids (see
@@ -252,23 +349,37 @@ pub fn search_mmap_allowed(
     if query.is_empty() || mmap.num_vectors() == 0 {
         return Vec::new();
     }
-    crate::index::run_search_allowed(query, dim_map, limit, allowed, |dim| mmap.cursor(dim as usize))
+    let dims = dims_for(mmap, dim_map, query);
+    crate::index::run_search_allowed(query, &dims, limit, allowed, |dim| mmap.cursor(dim as usize))
 }
 
 // ---------------------------------------------------------------------------
 // Write mmap format
 // ---------------------------------------------------------------------------
 
-/// Write the flat binary mmap format from in-RAM posting lists, one per
-/// remapped dimension.
+/// Write the format from in-RAM posting lists. `postings[i]` is the list of
+/// the dimension whose global token id is `dim_tokens[i]`; the file is
+/// written with its header table **sorted by token id**, which is what makes
+/// two files mergeable without remapping anything.
+///
+/// Empty dimensions are dropped rather than written: a dense table had to
+/// keep them to preserve positions, a keyed one does not.
 pub fn write_mmap_file(
     path: &Path,
     postings: &[Postings],
+    dim_tokens: &[u32],
     num_vectors: u32,
 ) -> Result<(), String> {
     use std::io::Write;
 
-    let num_dims = postings.len() as u32;
+    if dim_tokens.len() != postings.len() {
+        return Err(format!(
+            "{} posting lists for {} dimension ids", postings.len(), dim_tokens.len()));
+    }
+    // Sorted by token id, empties dropped.
+    let mut order: Vec<usize> = (0..postings.len()).filter(|&i| !postings[i].is_empty()).collect();
+    order.sort_by_key(|&i| dim_tokens[i]);
+    let num_dims = order.len() as u32;
     let header_size = std::mem::size_of::<FileHeader>();
     let dim_headers_size = num_dims as usize * std::mem::size_of::<DimHeader>();
     let entries_start = header_size + dim_headers_size;
@@ -286,18 +397,19 @@ pub fn write_mmap_file(
         .map_err(|e| format!("write header: {e}"))?;
 
     let mut current_offset = entries_start;
-    for p in postings {
+    for &i in &order {
         let dh = DimHeader {
             offset: current_offset as u64,
-            count: p.len() as u32,
-            _pad: 0,
+            count: postings[i].len() as u32,
+            token_id: dim_tokens[i],
         };
         out.write_all(as_bytes(&dh))
             .map_err(|e| format!("write dim header: {e}"))?;
-        current_offset += p.len() * std::mem::size_of::<PostingEntry>();
+        current_offset += postings[i].len() * std::mem::size_of::<PostingEntry>();
     }
 
-    for p in postings {
+    for &i in &order {
+        let p = &postings[i];
         for x in p.as_slice() {
             let entry = PostingEntry {
                 record_id: x.id,

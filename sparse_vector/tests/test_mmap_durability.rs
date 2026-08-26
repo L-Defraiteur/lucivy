@@ -38,9 +38,13 @@ fn postings() -> Vec<Postings> {
         .collect()
 }
 
+/// Token ids that are not the dense positions, so a file written here
+/// exercises the sorted table rather than an identity mapping.
+fn tokens() -> Vec<u32> { (0..8u32).map(|d| 1000 - d * 7).collect() }
+
 fn write(dir: &TempDir) -> PathBuf {
     let path = dir.path().join("sparse.mmap");
-    write_mmap_file(&path, &postings(), 400).unwrap();
+    write_mmap_file(&path, &postings(), &tokens(), 400).unwrap();
     path
 }
 
@@ -62,7 +66,7 @@ fn a_complete_file_opens_and_verifies() {
     assert!(leftovers.is_empty(), "a temporary was left behind: {leftovers:?}");
 
     // Writing again over the same path keeps a file that opens.
-    write_mmap_file(&path, &postings(), 400).unwrap();
+    write_mmap_file(&path, &postings(), &tokens(), 400).unwrap();
     MmapPostingData::open(&path).unwrap().verify_checksum(&path).unwrap();
 }
 
@@ -123,6 +127,8 @@ fn a_file_written_before_this_change_still_opens() {
     let opened = MmapPostingData::open(&path).unwrap();
     assert_eq!(opened.num_dims(), 8);
     assert_eq!(opened.entries(3).len(), 50);
+    assert!(!opened.has_global_dims(), "version 1 has no token ids");
+    assert_eq!(opened.dim_of_token(1000), None);
     // No footer to check: verification passes rather than inventing a failure.
     opened.verify_checksum(&path).unwrap();
 

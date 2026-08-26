@@ -276,9 +276,21 @@ impl SparseHandle {
             return;
         }
         if let Some(ref mmap) = inner.mmap {
-            let postings = inner.index.postings_mut();
-            for (i, pl) in postings.iter_mut().enumerate() {
-                *pl = mmap.load_postings(i);
+            // A version 3 file's table is sorted by token id, so a position
+            // in the file is not the RAM index's dimension: each list is
+            // loaded by its token. Reading by position there loaded every
+            // dimension under the wrong one, silently.
+            if mmap.has_global_dims() {
+                let tokens: Vec<u32> = inner.index.dim_reverse().to_vec();
+                let postings = inner.index.postings_mut();
+                for (i, pl) in postings.iter_mut().enumerate() {
+                    *pl = mmap.load_postings_of_token(tokens[i]);
+                }
+            } else {
+                let postings = inner.index.postings_mut();
+                for (i, pl) in postings.iter_mut().enumerate() {
+                    *pl = mmap.load_postings(i);
+                }
             }
         }
         inner.postings_loaded = true;
@@ -388,6 +400,7 @@ impl SparseHandle {
         mmap_index::write_mmap_file(
             &self.path.join(MMAP_FILE),
             inner.index.postings(),
+            inner.index.dim_reverse(),
             inner.num_vectors as u32,
         )?;
 

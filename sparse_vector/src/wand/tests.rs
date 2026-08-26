@@ -822,7 +822,9 @@ impl Drop for TempDir {
 /// Write `postings` in the crate's mmap format through its own writer.
 fn write_mmap(dir: &TempDir, postings: &[Postings], num_vectors: u32) -> std::path::PathBuf {
     let path = dir.0.join("sparse.mmap");
-    crate::mmap_index::write_mmap_file(&path, postings, num_vectors).unwrap();
+    // Dimension i is token id i here: what the dense format meant.
+    let tokens: Vec<u32> = (0..postings.len() as u32).collect();
+    crate::mmap_index::write_mmap_file(&path, postings, &tokens, num_vectors).unwrap();
     path
 }
 

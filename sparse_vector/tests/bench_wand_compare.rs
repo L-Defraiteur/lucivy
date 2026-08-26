@@ -343,7 +343,7 @@ fn bench_wand() {
         .unwrap_or_else(|_| std::env::temp_dir());
     let mmap_path = dir.join(format!("bench_wand_compare_{}.mmap", std::process::id()));
     let t = Instant::now();
-    mmap_index::write_mmap_file(&mmap_path, index.postings(), N_RECORDS as u32).unwrap();
+    mmap_index::write_mmap_file(&mmap_path, index.postings(), index.dim_reverse(), N_RECORDS as u32).unwrap();
     println!("write_mmap_file: {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
     let data = MmapPostingData::open(&mmap_path).unwrap();
     let dim_map: HashMap<u32, usize> = index.dim_map().clone();
