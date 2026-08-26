@@ -47,6 +47,7 @@ pub struct SegmentReader {
 
     store_file: FileSlice,
     alive_bitset_opt: Option<AliveBitSet>,
+    doc_filter_opt: Option<AliveBitSet>,
     schema: Schema,
     sfx_files: FnvHashMap<Field, FileSlice>,
     sfxpost_files: FnvHashMap<Field, FileSlice>,
@@ -330,6 +331,7 @@ impl SegmentReader {
             delete_opstamp: segment.meta().delete_opstamp(),
             store_file,
             alive_bitset_opt,
+            doc_filter_opt: None,
             positions_composite,
             offsets_composite,
             schema: schema.clone(),
@@ -581,6 +583,22 @@ impl SegmentReader {
             Some(existing) => intersect_alive_bitsets(existing, custom),
             None => custom,
         });
+    }
+
+    /// The document filter of a filtered search: the allowed ids' bitset,
+    /// intersected with the deletions. Kept apart from the alive bitset so an
+    /// unfiltered search on a segment with deletions keeps its statistics
+    /// (deleted documents count in `doc_freq`, as in the term dictionary).
+    /// The v3 prescans hand it to the resolvers, which then never decode the
+    /// postings of a document outside it; the collector applies the alive
+    /// bitset as before.
+    pub fn doc_filter(&self) -> Option<&AliveBitSet> {
+        self.doc_filter_opt.as_ref()
+    }
+
+    /// Install the document filter of a filtered search (see `doc_filter`).
+    pub fn set_doc_filter(&mut self, filter: AliveBitSet) {
+        self.doc_filter_opt = Some(filter);
     }
 
     /// Returns true if the `doc` is marked

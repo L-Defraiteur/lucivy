@@ -22,6 +22,35 @@ pub struct PostingEntry {
     pub byte_to: u32,
 }
 
+/// A set of documents a resolution may be restricted to.
+///
+/// Implemented by a `HashSet<u32>` of ids and by a segment's `AliveBitSet`,
+/// so a filtered search hands the resolvers the same bitset the collector
+/// applies — and the postings of documents outside it are never decoded.
+/// `len` and `for_each` let a small set drive the loop (`filtered_indices`).
+pub trait DocFilter: Sync {
+    /// Whether `doc` is in the set.
+    fn contains(&self, doc: u32) -> bool;
+    /// Number of documents in the set.
+    fn len(&self) -> usize;
+    /// Whether the set is empty.
+    fn is_empty(&self) -> bool { self.len() == 0 }
+    /// Visit every document of the set.
+    fn for_each(&self, f: &mut dyn FnMut(u32));
+}
+
+impl DocFilter for HashSet<u32> {
+    fn contains(&self, doc: u32) -> bool { HashSet::contains(self, &doc) }
+    fn len(&self) -> usize { HashSet::len(self) }
+    fn for_each(&self, f: &mut dyn FnMut(u32)) { for &d in self { f(d); } }
+}
+
+impl DocFilter for crate::fastfield::AliveBitSet {
+    fn contains(&self, doc: u32) -> bool { self.is_alive(doc) }
+    fn len(&self) -> usize { self.num_alive_docs() }
+    fn for_each(&self, f: &mut dyn FnMut(u32)) { for d in self.iter_alive() { f(d); } }
+}
+
 /// Resolves ordinals to posting entries.
 pub trait PostingResolver: Send + Sync {
     /// Resolve a term ordinal to all its posting entries.
@@ -29,9 +58,9 @@ pub trait PostingResolver: Send + Sync {
 
     /// Resolve filtered by doc_ids. Only returns entries whose doc_id is in the set.
     /// Default: resolve all then filter. V2 overrides with O(log n) binary search.
-    fn resolve_filtered(&self, ordinal: u64, doc_ids: &HashSet<u32>) -> Vec<PostingEntry> {
+    fn resolve_filtered(&self, ordinal: u64, doc_ids: &dyn DocFilter) -> Vec<PostingEntry> {
         self.resolve(ordinal).into_iter()
-            .filter(|e| doc_ids.contains(&e.doc_id))
+            .filter(|e| doc_ids.contains(e.doc_id))
             .collect()
     }
 
@@ -148,7 +177,7 @@ impl PostingResolver for SfxPostResolverV2 {
         }).collect()
     }
 
-    fn resolve_filtered(&self, ordinal: u64, doc_ids: &HashSet<u32>) -> Vec<PostingEntry> {
+    fn resolve_filtered(&self, ordinal: u64, doc_ids: &dyn DocFilter) -> Vec<PostingEntry> {
         self.reader.entries_filtered(ordinal as u32, Some(doc_ids)).into_iter().map(|e| PostingEntry {
             doc_id: e.doc_id,
             position: e.token_index,

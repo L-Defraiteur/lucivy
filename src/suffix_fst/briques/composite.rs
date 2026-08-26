@@ -574,14 +574,16 @@ pub fn resolve_all_trigrams(
     for &(gram_idx, _) in &selectivity {
         let cands = std::mem::take(&mut all_cands[gram_idx]);
         let gram_len = ngrams[gram_idx].len() as u32;
-        let chunk_matches = resolve::resolve_single_v3(&cands, ctx.resolver, None, gram_len);
+        // The user's doc filter reaches the pivot generator too: without it a
+        // filtered fuzzy search resolved every n-gram of every document.
+        let chunk_matches = resolve::resolve_single_v3(&cands, ctx.resolver, ctx.filter_docs, gram_len);
         // The word partition repeats 96% of the chunk hits at the same
         // (doc, byte) — it only adds the n-grams straddling a chunk boundary
         // inside a word. Keep those; drop the echo before it is hashed,
         // sorted and regrouped downstream (10.5 M of 11 M word hits on
         // `inclde`, 50k docs).
         let mut word_matches = if has_wsp {
-            resolve::resolve_single_word_v3(&cands, ctx.require_word_sfxpost(), None, gram_len)
+            resolve::resolve_single_word_v3(&cands, ctx.require_word_sfxpost(), ctx.filter_docs, gram_len)
         } else { Vec::new() };
         if !word_matches.is_empty() {
             seen.clear();

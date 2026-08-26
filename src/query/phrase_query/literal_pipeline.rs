@@ -10,11 +10,10 @@
 //!
 //! The existing `find_literal` / `suffix_contains_*` functions are NOT modified.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::suffix_fst::file::SfxFileReader;
 use crate::query::posting_resolver::{PostingResolver, PostingEntry};
-use crate::DocId;
 
 use super::literal_resolve::LiteralMatch;
 
@@ -75,7 +74,7 @@ pub fn resolve_candidates(
     candidates: &[FstCandidate],
     literal_len: usize,
     resolver: &dyn PostingResolver,
-    filter_docs: Option<&HashSet<DocId>>,
+    filter_docs: Option<&dyn crate::query::posting_resolver::DocFilter>,
 ) -> Vec<LiteralMatch> {
     let mut matches = Vec::new();
 
@@ -304,7 +303,7 @@ pub fn resolve_chains(
     chains: &[CrossTokenChain],
     literal_len: usize,
     resolver: &dyn PostingResolver,
-    filter_docs: Option<&HashSet<DocId>>,
+    filter_docs: Option<&dyn crate::query::posting_resolver::DocFilter>,
 ) -> Vec<LiteralMatch> {
     if chains.is_empty() {
         return Vec::new();
@@ -415,7 +414,7 @@ pub fn find_literal_pipeline(
     literal: &str,
     resolver: &dyn PostingResolver,
     ord_to_term: &dyn Fn(u64) -> Option<String>,
-    filter_docs: Option<&HashSet<DocId>>,
+    filter_docs: Option<&dyn crate::query::posting_resolver::DocFilter>,
 ) -> Vec<LiteralMatch> {
     let literal_len = literal.to_lowercase().len();
 

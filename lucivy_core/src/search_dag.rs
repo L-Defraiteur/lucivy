@@ -324,14 +324,20 @@ pub(crate) struct BuildWeightNode {
     /// The query already prescanned every v3 segment (a batched search did
     /// it shard batch by shard batch): do not prescan again here.
     prescanned: bool,
+    /// The shards this search visits, each with its allowed-id share. The
+    /// prescan runs on these only, and on readers carrying the filter: a
+    /// filtered search used to prescan every segment of every shard — walk,
+    /// postings, verification, spans — and drop the rest at the collector.
+    active: Vec<(usize, Option<Arc<HashSet<u64>>>)>,
 }
 
 impl BuildWeightNode {
     pub fn new(
         shards: Vec<Arc<LucivyHandle>>,
         query: Box<dyn ld_lucivy::query::Query>,
+        active: Vec<(usize, Option<Arc<HashSet<u64>>>)>,
     ) -> Self {
-        Self { shards, query, prescanned: false }
+        Self { shards, query, prescanned: false, active }
     }
 
     pub fn prescanned(mut self, yes: bool) -> Self {
@@ -353,7 +359,9 @@ impl Node for BuildWeightNode {
     }
     fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
         let searchers: Vec<_> = self.shards.iter().map(|s| s.reader.searcher()).collect();
-        let global_stats = AggregatedBm25StatsOwned::new(searchers);
+        // Documents a filtered search scores against (see `with_subset_docs`);
+        // None when no shard carries a filter.
+        let mut subset_docs: Option<u64> = None;
 
         // Get prescan results from merge_prescan node
         let (sfx_cache, sfx_freqs, regex_cache, regex_freqs) = ctx.take_input("prescan")
@@ -363,15 +371,31 @@ impl Node for BuildWeightNode {
         // v3 segments of every shard, prescanned by the query itself (see
         // PrescanShardNode). Sets each sub-query's cache and its doc_freq
         // summed over all shards of this node.
-        let v3_segments: Vec<ld_lucivy::SegmentReader> = self.shards.iter()
-            .flat_map(|s| s.reader.searcher().segment_readers().to_vec())
-            .filter(|seg| {
-                let Some(field) = seg.sfx_fields().next() else { return false };
-                seg.sfx_file(field)
-                    .and_then(ld_lucivy::suffix_fst::section_file::detect_sfx_version_of)
-                    == Some(3)
-            })
-            .collect();
+        let mut v3_segments: Vec<ld_lucivy::SegmentReader> = Vec::new();
+        let filtered = self.active.iter().any(|(_, f)| f.is_some());
+        let mut allowed_docs = 0u64;
+        for (shard_id, allowed) in &self.active {
+            let Some(shard) = self.shards.get(*shard_id) else { continue };
+            let searcher = shard.reader.searcher();
+            for seg in searcher.segment_readers() {
+                let is_v3 = seg.sfx_fields().next().is_some_and(|field| {
+                    seg.sfx_file(field)
+                        .and_then(ld_lucivy::suffix_fst::section_file::detect_sfx_version_of)
+                        == Some(3)
+                });
+                let reader = match allowed {
+                    Some(ids) => crate::sharded_handle::filtered_segment_reader(seg, ids)?,
+                    None => seg.clone(),
+                };
+                allowed_docs += reader.num_docs() as u64;
+                if is_v3 { v3_segments.push(reader); }
+            }
+        }
+        // A batched search prescanned every batch already and its node sees
+        // one batch's filter: keep the corpus statistics there.
+        if filtered && !self.prescanned {
+            subset_docs = Some(allowed_docs);
+        }
         let mut sfx_freqs = sfx_freqs;
         if !v3_segments.is_empty() {
             let refs: Vec<&ld_lucivy::SegmentReader> = v3_segments.iter().collect();
@@ -397,6 +421,10 @@ impl Node for BuildWeightNode {
             self.query.inject_regex_prescan_cache(regex_cache);
         }
 
+        let mut global_stats = AggregatedBm25StatsOwned::new(searchers);
+        if let Some(n) = subset_docs {
+            global_stats = global_stats.with_subset_docs(n);
+        }
         let searcher_0 = self.shards[0].reader.searcher();
         let enable_scoring = ld_lucivy::query::EnableScoring::enabled_from_statistics_provider(
             Arc::new(global_stats), &searcher_0,
@@ -666,7 +694,7 @@ pub(crate) fn build_search_dag_with_query(
         dag.connect("needs_prescan", "then", &node_name, "trigger")?;
     }
 
-    dag.add_node("build_weight", BuildWeightNode::new(shards.to_vec(), query).prescanned(prescanned));
+    dag.add_node("build_weight", BuildWeightNode::new(shards.to_vec(), query, active.clone()).prescanned(prescanned));
     dag.connect("needs_prescan", "else", "build_weight", "trigger")?;
 
     if num_prescan > 1 {

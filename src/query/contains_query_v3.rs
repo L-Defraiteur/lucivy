@@ -100,7 +100,7 @@ strict_separators: bool,
     let ctx = BriquesContext {
         reader: &reader,
         resolver: &*pr,
-        filter_docs: None,
+        filter_docs: seg_reader.doc_filter().map(|b| b as &dyn crate::query::posting_resolver::DocFilter),
         debug: do_debug,
         trace_id,
         posmap: posmap_bytes.as_ref().and_then(|b| crate::suffix_fst::posmap::PosMapReader::open(b)),

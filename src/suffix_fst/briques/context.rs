@@ -4,9 +4,7 @@
 //! Adding a new index file = one field here + loading it in one place.
 //! Missing required file = panic with clear message (no silent fallback).
 
-use std::collections::HashSet;
 
-use crate::DocId;
 use crate::query::posting_resolver::PostingResolver;
 use crate::suffix_fst::file_v3::SfxFileReaderV3;
 use crate::suffix_fst::posmap::PosMapReader;
@@ -31,7 +29,7 @@ pub struct BriquesContext<'a> {
 
     // ── Query params ─────────────────────────────────────────────
     /// When set, only matches in these documents are kept.
-    pub filter_docs: Option<&'a HashSet<DocId>>,
+    pub filter_docs: Option<&'a dyn crate::query::posting_resolver::DocFilter>,
 
     /// When true, briques dump detailed traces to stderr.
     pub debug: bool,

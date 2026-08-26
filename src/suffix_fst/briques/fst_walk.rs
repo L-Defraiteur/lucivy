@@ -393,6 +393,11 @@ fn walk_partition<D: AsRef<[u8]>, F>(
 
 /// DFS through remaining FST transitions after query exhaustion.
 /// Walks until all reachable final nodes are found.
+///
+/// Iterative, with an explicit stack: the depth is the length of the longest
+/// key beyond the query, and one 3 400-byte separator-free "word" in a corpus
+/// overflowed a 2 MB thread stack recursing once per byte. Children are
+/// pushed in reverse so the visiting order is the recursive one.
 fn overlap_lookahead<D: AsRef<[u8]>, F>(
     fst: &raw::Fst<D>,
     reader: &SfxFileReaderV3,
@@ -404,11 +409,13 @@ fn overlap_lookahead<D: AsRef<[u8]>, F>(
 ) where
     F: Fn(&ParentEntryV3, usize) -> Option<SplitCandidateV3>,
 {
-    for ti in 0..node.len() {
+    let mut stack: Vec<(raw::CompiledAddr, raw::Output)> = Vec::new();
+    for ti in (0..node.len()).rev() {
         let trans = node.transition(ti);
-        let child_output = output.cat(trans.out);
-        let child = fst.node(trans.addr);
-
+        stack.push((trans.addr, output.cat(trans.out)));
+    }
+    while let Some((addr, child_output)) = stack.pop() {
+        let child = fst.node(addr);
         if child.is_final() {
             let val = child_output.cat(child.final_output()).value();
             let parents = reader.decode_parents(val);
@@ -418,9 +425,10 @@ fn overlap_lookahead<D: AsRef<[u8]>, F>(
                 }
             }
         }
-
-        overlap_lookahead(fst, reader, &child, child_output, query_len,
-            check_split, candidates);
+        for ti in (0..child.len()).rev() {
+            let trans = child.transition(ti);
+            stack.push((trans.addr, child_output.cat(trans.out)));
+        }
     }
 }
 

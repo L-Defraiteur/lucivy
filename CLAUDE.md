@@ -59,6 +59,21 @@ Les anciens types sont routés automatiquement via `build_query()` dans `lucivy_
   ce segment (`briques::resolve::truncations()`), jamais d'abort. Le panel de
   21 requêtes ne l'atteint pas ; « t » sur 10k fichiers kernel l'atteint.
 
+### Recherche filtrée (`allowed_ids`) — pré-filtre réel depuis le 26 août
+
+Le jeu d'ids voyage jusqu'au prescan v3 : `filtered_segment_reader`
+(`sharded_handle.rs`) pose sur un clone du lecteur le bitset alive (collecteur,
+comme avant) **et** `set_doc_filter` (canal séparé, lu par les trois prescans
+→ `BriquesContext.filter_docs: Option<&dyn DocFilter>` → `resolve_filtered`).
+`BuildWeightNode` ne prescanne que les shards actifs. Une recherche filtrée
+score **comme si l'index était le sous-ensemble** : `doc_freq` compté par le
+prescan filtré, `N` = taille du sous-ensemble (`AggregatedBm25StatsOwned::
+with_subset_docs`, tokens mis à l'échelle → longueur moyenne du corpus
+conservée) ; ordre d'une requête mono-terme inchangé, scores égaux au non
+filtré seulement si tout est autorisé ; non filtré inchangé (canal séparé du
+bitset de suppression). Vérité : `test_filtered_search_truth.rs` ; bench
+`bench_filtered_search_cost`.
+
 ## SFX Engine
 
 Suffix FST avec partitionnement SI=0/SI>0 pour le substring matching.

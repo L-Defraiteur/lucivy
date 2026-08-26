@@ -334,7 +334,7 @@ fn resolve_cross_with_parts(
     trigram: &str,
     resolver: &dyn PostingResolver,
     ord_to_term: &dyn Fn(u64) -> Option<String>,
-    filter_docs: Option<&HashSet<DocId>>,
+    filter_docs: Option<&dyn crate::query::posting_resolver::DocFilter>,
 ) -> Vec<(LiteralMatch, Vec<String>)> {
     let literal_len = trigram.len();
 
@@ -564,7 +564,7 @@ fn fuzzy_contains_inner(
         }
 
         let literal_len = ngrams[gram_idx].len();
-        let filter_ref = doc_filter.as_ref();
+        let filter_ref = doc_filter.as_ref().map(|s| s as &dyn crate::query::posting_resolver::DocFilter);
 
         let singles = literal_pipeline::resolve_candidates(
             &fst_cands_per[gram_idx], literal_len, resolver, filter_ref,

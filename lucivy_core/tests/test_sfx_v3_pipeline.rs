@@ -1593,7 +1593,15 @@ fn v3_sharded_filter_routes_to_holding_shards() {
         assert_eq!(got_scored.len(), expect.len(), "{label}: {got_scored:?} vs {expect:?}");
         for (g, e) in got_scored.iter().zip(&expect) {
             assert_eq!(g.0, e.0, "{label}: order differs: {got_scored:?} vs {expect:?}");
-            assert!((g.1 - e.1).abs() < 1e-5, "{label}: score differs for {}: {} vs {}", g.0, g.1, e.1);
+        }
+        // A filtered search scores as if the index were the allowed subset
+        // (its prescan only sees it): the order of a single-term query is
+        // preserved, the scores match the unfiltered ones only when the
+        // subset is the whole index.
+        if label == "all" {
+            for (g, e) in got_scored.iter().zip(&expect) {
+                assert!((g.1 - e.1).abs() < 1e-5, "{label}: score differs for {}: {} vs {}", g.0, g.1, e.1);
+            }
         }
     }
     assert!(h.search_filtered(&q, 100, None, HashSet::new()).unwrap().is_empty());

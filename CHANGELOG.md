@@ -1,3 +1,39 @@
+Unreleased
+================================
+
+- **A filtered search is a pre-filter now.** `allowed_ids` used to reach only
+  the collector: the v3 prescan walked the FST, resolved the postings,
+  rebuilt the text, verified and recorded spans for every matching document
+  of every segment, and the collector dropped the rest — one hit out of ten
+  allowed ids cost exactly the unfiltered query. The allowed set now travels
+  to the prescan as a document filter on the segment reader (`doc_filter`,
+  a channel separate from the alive bitset) and down to the resolvers
+  (`DocFilter`, implemented by `HashSet<u32>` and `AliveBitSet`), which
+  never decode the postings of a document outside it; the fuzzy pivot
+  generator and the batched search take it too, and only the shards that
+  hold an allowed id are prescanned. On the 10 000-file kernel index, 10
+  allowed ids: `regex spin_lock_[a-z]+` 126 → 4 ms, `contains_split` 92 → 46,
+  `fuzzy d1` 44 → 27, `phrase` 6 → 3; the highlight repair pass of an
+  overflowed sink shrinks the same way. Answers and spans are unchanged
+  (`test_filtered_search_truth`: filtered = unfiltered ∩ allowed on eleven
+  query types, before and after deletions). One documented change: a
+  *filtered* search now scores as if the index were the allowed subset —
+  its prescan only sees that subset, so `doc_freq` is counted there and N is
+  the subset's size (the token count scaled with it, so the average field
+  length stays the corpus's). The order of a single-term query is unchanged;
+  scores match the unfiltered ones only when every id is allowed. Unfiltered
+  searches, with or without deletions, keep their scores. The batched
+  (streaming) search keeps the corpus statistics for its filtered pass.
+- `bench_filtered_search_cost` (ignored) measures it against
+  `/tmp/lucivy_parity_native`.
+- **Stack overflow in the falling walk's look-ahead.** `overlap_lookahead`
+  (24 August) recursed once per byte of the keys that continue past the
+  query; a 3 400-byte separator-free "word" in a corpus (a blob, a minified
+  line) overflowed a 2 MB thread stack — `baseline_fuzzy_regex` had been
+  aborting with `fatal runtime error: stack overflow` unnoticed, a line no
+  `FAILED` grep catches. The walk uses an explicit stack now, same visiting
+  order.
+
 Lucivy 3.0.3
 ================================
 

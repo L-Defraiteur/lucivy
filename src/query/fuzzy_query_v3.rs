@@ -107,7 +107,7 @@ impl FuzzyQueryV3 {
         let ctx = crate::suffix_fst::briques::context::BriquesContext {
             reader: &reader,
             resolver: &*pr,
-            filter_docs: None,
+            filter_docs: seg_reader.doc_filter().map(|b| b as &dyn crate::query::posting_resolver::DocFilter),
             debug: false,
             trace_id: None,
             posmap: posmap_bytes.as_ref().and_then(|b| crate::suffix_fst::posmap::PosMapReader::open(b)),

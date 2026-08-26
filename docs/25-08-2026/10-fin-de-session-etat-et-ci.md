@@ -250,3 +250,40 @@ Idée notée (question de Lucie) : pas de bench chronométré en CI (runners
 partagés, chiffres sans valeur), mais un job de **vérité terrain** sur le
 code du dépôt lui-même (`v3_ground_truth_contains`, comptes et spans contre
 grep, quelques secondes) vaudrait le coup.
+
+## 8. Recherche filtrée : un vrai pré-filtre (26 août, 11h-12h)
+
+Question de Lucie : « câbler `filter_docs` jusqu'aux resolvers v3, c'est
+primordial non ? » — oui. Audit par agent (lecture seule) avant de toucher :
+le filtre `allowed_ids` n'atteignait **que le collecteur** ; `BuildWeightNode`
+prescannait tous les segments de tous les shards sur des lecteurs nus, et le
+bitset était posé après, dans l'acteur, sur un clone. Mesure avant : 10 ids
+sur `kmalloc` coûtaient le prix des 984 docs (19 vs 20 ms), regex 126 vs 125.
+
+Trois choses trouvées par l'audit que je n'aurais pas devinées :
+`entries_filtered` **itère** le petit ensemble (il faut cardinalité +
+itération, pas seulement `contains`) ; `composite.rs` passait `None` en dur
+au générateur pivot du fuzzy ; et lire `alive_bitset()` dans les prescans
+aurait changé les scores des index **avec suppressions** même sans filtre
+(les docs supprimés comptent dans `doc_freq`, convention tantivy).
+
+Fait : trait `DocFilter` (`contains`/`len`/`for_each`, impl `HashSet<u32>` et
+`AliveBitSet`) ; ~20 signatures ; `SegmentReader::set_doc_filter` — canal
+séparé du bitset alive ; `filtered_segment_reader` pose les deux ;
+`BuildWeightNode` reçoit les shards actifs avec leur part d'ids et
+prescanne ceux-là seulement ; chemin batché idem ; les trois prescans v3
+lisent `seg_reader.doc_filter()`. Après, 10 ids : regex 4 ms (126), split
+46 (92), fuzzy 27 (44), phrase 3 (6) ; `contains kmalloc` 18 (19) — son coût
+est le fixe par requête, pas le travail par doc. Vérité :
+`test_filtered_search_truth.rs` (11 types de requêtes × 4 ensembles,
+docs + highlights identiques, avant et après suppressions, scores non
+filtrés inchangés). Changement documenté : l'IDF d'une recherche filtrée est
+celui du sous-ensemble.
+
+En relançant la suite : `test_sfx_v3_ground_truth` **abortait** (`fatal
+runtime error: stack overflow`) depuis le 24 août — `overlap_lookahead`
+récursif par octet, 3 400 frames sur un mot sans séparateur du corpus
+rag3db. Invisible pour un grep sur `FAILED` : un abort n'imprime pas de
+ligne de test. Rendu itératif (pile explicite, même ordre). **Règle** : après
+une suite, grepper aussi `fatal runtime|panicked at` et vérifier le code de
+sortie de chaque binaire, pas seulement les lignes `FAILED`.

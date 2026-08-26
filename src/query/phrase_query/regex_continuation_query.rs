@@ -782,7 +782,7 @@ pub fn fuzzy_contains_via_trigram(
         if !all_matches[gram_idx].is_empty() { continue; }
 
         let literal_len = ngrams[gram_idx].to_lowercase().len();
-        let filter_ref = doc_filter.as_ref();
+        let filter_ref = doc_filter.as_ref().map(|s| s as &dyn crate::query::posting_resolver::DocFilter);
 
         let mut matches = literal_pipeline::resolve_candidates(
             &fst_cands_per_gram[gram_idx], literal_len, resolver, filter_ref,
@@ -1175,7 +1175,7 @@ where
 
     for &(lit_idx, _) in &lit_selectivity {
         let literal_len = viable[lit_idx].to_lowercase().len();
-        let filter_ref = doc_filter.as_ref();
+        let filter_ref = doc_filter.as_ref().map(|s| s as &dyn crate::query::posting_resolver::DocFilter);
 
         let mut matches = super::literal_pipeline::resolve_candidates(
             &lit_fst_cands[lit_idx], literal_len, resolver, filter_ref,

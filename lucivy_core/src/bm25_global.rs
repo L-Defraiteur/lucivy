@@ -56,12 +56,33 @@ impl<'a> Bm25StatisticsProvider for AggregatedBm25Stats<'a> {
 /// Used by `ShardedHandle` to inject global stats into per-shard searches.
 pub struct AggregatedBm25StatsOwned {
     searchers: Vec<Searcher>,
+    /// A filtered search scores as if the index were the allowed subset: its
+    /// prescan only sees that subset, so `doc_freq` is counted there, and N
+    /// must be the subset's size for the IDF to stay coherent (with N global
+    /// and df on ten documents, one hit went from 0.02 to 2.9). The token
+    /// count is scaled with it, so the average field length stays the
+    /// corpus's — a property of the text, not of the filter.
+    subset_docs: Option<u64>,
 }
 
 impl AggregatedBm25StatsOwned {
     /// Create from owned searchers (one per shard).
     pub fn new(searchers: Vec<Searcher>) -> Self {
-        Self { searchers }
+        Self { searchers, subset_docs: None }
+    }
+
+    /// Score as if the index held `docs` documents (a filtered search).
+    pub fn with_subset_docs(mut self, docs: u64) -> Self {
+        self.subset_docs = Some(docs.max(1));
+        self
+    }
+
+    fn corpus_docs(&self) -> ld_lucivy::Result<u64> {
+        let mut total = 0u64;
+        for searcher in &self.searchers {
+            total += searcher.total_num_docs()?;
+        }
+        Ok(total)
     }
 }
 
@@ -71,15 +92,18 @@ impl Bm25StatisticsProvider for AggregatedBm25StatsOwned {
         for searcher in &self.searchers {
             total += searcher.total_num_tokens(field)?;
         }
+        if let Some(subset) = self.subset_docs {
+            let corpus = self.corpus_docs()?.max(1);
+            total = ((total as u128 * subset as u128) / corpus as u128) as u64;
+        }
         Ok(total)
     }
 
     fn total_num_docs(&self) -> ld_lucivy::Result<u64> {
-        let mut total = 0u64;
-        for searcher in &self.searchers {
-            total += searcher.total_num_docs()?;
+        match self.subset_docs {
+            Some(n) => Ok(n),
+            None => self.corpus_docs(),
         }
-        Ok(total)
     }
 
     fn doc_freq(&self, term: &Term) -> ld_lucivy::Result<u64> {

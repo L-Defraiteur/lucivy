@@ -48,7 +48,6 @@
 //!   - Single doc lookup: binary search → O(log n) + decode one doc's entries
 //!   - Existence check: binary search only → O(log n), zero decode
 
-use std::collections::HashSet;
 
 use super::file::SfxPostingEntry;
 use super::varint::{read_varint_u32, write_varint};
@@ -269,20 +268,19 @@ impl SfxPostReaderV2 {
     /// Whichever side is smaller drives the loop. Indices come back sorted, so
     /// the entries land in the same order the linear scan produced — callers
     /// that stop at the first match still stop at the same one.
-    fn filtered_indices(header: &OrdinalHeader<'_>, filter: &HashSet<u32>) -> Vec<usize> {
+    fn filtered_indices(header: &OrdinalHeader<'_>, filter: &dyn crate::query::posting_resolver::DocFilter) -> Vec<usize> {
         let n = header.num_docs;
         // Rough break-even: a binary search costs ~log2(n) probes.
         let probe_cost = (usize::BITS - n.leading_zeros()) as usize;
         if filter.len().saturating_mul(probe_cost) < n {
-            let mut idx: Vec<usize> = filter.iter()
-                .filter_map(|&d| header.find_doc(d))
-                .collect();
+            let mut idx: Vec<usize> = Vec::new();
+            filter.for_each(&mut |d| if let Some(i) = header.find_doc(d) { idx.push(i); });
             idx.sort_unstable();
             idx
         } else {
             let mut idx = Vec::new();
             header.for_each_doc(|i, doc_id, _, _| {
-                if filter.contains(&doc_id) { idx.push(i); }
+                if filter.contains(doc_id) { idx.push(i); }
                 true
             });
             idx
@@ -313,7 +311,7 @@ impl SfxPostReaderV2 {
     pub fn entries_filtered(
         &self,
         ordinal: u32,
-        filter: Option<&HashSet<u32>>,
+        filter: Option<&dyn crate::query::posting_resolver::DocFilter>,
     ) -> Vec<SfxPostingEntry> {
         if ordinal >= self.num_terms {
             return Vec::new();
@@ -732,6 +730,8 @@ impl super::index_registry::SfxIndexFile for SfxPostIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+    use crate::query::posting_resolver::DocFilter;
 
     #[test]
     fn test_v2_roundtrip_single_ordinal() {
@@ -764,7 +764,7 @@ mod tests {
 
         // Filter to only 3 docs
         let filter: HashSet<u32> = [10, 50, 99].into();
-        let entries = reader.entries_filtered(0, Some(&filter));
+        let entries = reader.entries_filtered(0, Some(&filter as &dyn DocFilter));
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].doc_id, 10);
         assert_eq!(entries[1].doc_id, 50);
@@ -959,7 +959,7 @@ mod tests {
             for take in [1usize, 3, n as usize] {
                 let filter: HashSet<u32> = entries.iter().map(|e| e.0).take(take).collect();
                 assert_eq!(
-                    r3.entries_filtered(1, Some(&filter)), r2.entries_filtered(1, Some(&filter)),
+                    r3.entries_filtered(1, Some(&filter as &dyn DocFilter)), r2.entries_filtered(1, Some(&filter as &dyn DocFilter)),
                     "n={n}: entries_filtered with {} docs", filter.len()
                 );
             }

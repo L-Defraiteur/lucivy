@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use fnv::FnvHashMap;
 
 use crate::DocId;
-use crate::query::posting_resolver::{PostingEntry, PostingResolver};
+use crate::query::posting_resolver::{DocFilter, PostingEntry, PostingResolver};
 
 use super::fst_walk::{FstCandidateV3, TokenChainV3};
 
@@ -110,7 +110,7 @@ pub struct MatchV3 {
 pub fn resolve_single_v3(
     candidates: &[FstCandidateV3],
     resolver: &dyn PostingResolver,
-    filter_docs: Option<&HashSet<DocId>>,
+    filter_docs: Option<&dyn DocFilter>,
     query_len: u32,
 ) -> Vec<MatchV3> {
     let mut results = Vec::new();
@@ -165,7 +165,7 @@ pub fn resolve_single_v3(
 pub fn resolve_single_word_v3(
     candidates: &[FstCandidateV3],
     word_sfxpost: &crate::suffix_fst::word_sfxpost::WordSfxPostReader<'_>,
-    filter_docs: Option<&HashSet<DocId>>,
+    filter_docs: Option<&dyn DocFilter>,
     query_len: u32,
 ) -> Vec<MatchV3> {
     let mut results = Vec::new();
@@ -176,7 +176,7 @@ pub fn resolve_single_word_v3(
         let entries = word_sfxpost.entries(cand.raw_ordinal as u32);
         for e in &entries {
             if let Some(filter) = filter_docs {
-                if !filter.contains(&e.doc_id) { continue; }
+                if !filter.contains(e.doc_id) { continue; }
             }
             // `word_content` is a contiguous run of source bytes, so
             // byte_from + sti is a real source offset. A 0x02 key does not fix
@@ -223,7 +223,7 @@ pub fn resolve_single_word_v3(
 pub fn resolve_chains_v3(
     chains: &[TokenChainV3],
     resolver: &dyn PostingResolver,
-    filter_docs: Option<&HashSet<DocId>>,
+    filter_docs: Option<&dyn DocFilter>,
 ) -> Vec<MatchV3> {
     resolve_chains_impl(chains, resolver, filter_docs, AdjacencyMode::Strict)
 }
@@ -236,7 +236,7 @@ pub fn resolve_chains_v3(
 pub fn resolve_chains_v3_posmap(
     chains: &[TokenChainV3],
     resolver: &dyn PostingResolver,
-    filter_docs: Option<&HashSet<DocId>>,
+    filter_docs: Option<&dyn DocFilter>,
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
 ) -> Vec<MatchV3> {
     resolve_chains_impl(chains, resolver, filter_docs, AdjacencyMode::StrictPosmap { posmap })
@@ -249,7 +249,7 @@ pub fn resolve_chains_v3_posmap(
 pub fn resolve_chains_v3_relaxed(
     chains: &[TokenChainV3],
     resolver: &dyn PostingResolver,
-    filter_docs: Option<&HashSet<DocId>>,
+    filter_docs: Option<&dyn DocFilter>,
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
     bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
 ) -> Vec<MatchV3> {
@@ -272,7 +272,7 @@ pub fn resolve_word_chains_v3(
     chains: &[TokenChainV3],
     word_sfxpost: &crate::suffix_fst::word_sfxpost::WordSfxPostReader<'_>,
     chunk_resolver: &dyn PostingResolver,
-    filter_docs: Option<&HashSet<DocId>>,
+    filter_docs: Option<&dyn DocFilter>,
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
     bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
     _termtexts: Option<&crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>>,
@@ -308,7 +308,7 @@ pub fn resolve_word_chains_v3(
                 };
                 let mut filtered = entries;
                 if let Some(filter) = filter_docs {
-                    filtered.retain(|e| filter.contains(&e.doc_id));
+                    filtered.retain(|e| filter.contains(e.doc_id));
                 }
                 filtered
             })
@@ -482,7 +482,7 @@ pub fn resolve_word_chains_v3_wordmap(
     chains: &[TokenChainV3],
     word_sfxpost: &crate::suffix_fst::word_sfxpost::WordSfxPostReader<'_>,
     chunk_resolver: &dyn PostingResolver,
-    filter_docs: Option<&HashSet<DocId>>,
+    filter_docs: Option<&dyn DocFilter>,
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
     bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
     word_posmap: &crate::suffix_fst::word_pos_map::WordPosMapReader<'_>,
@@ -531,7 +531,7 @@ pub fn resolve_word_chains_v3_wordmap(
                         };
                         let mut filtered = entries;
                         if let Some(filter) = filter_docs {
-                            filtered.retain(|e| filter.contains(&e.doc_id));
+                            filtered.retain(|e| filter.contains(e.doc_id));
                         }
                         filtered
                     })
@@ -695,7 +695,7 @@ pub fn resolve_word_chains_v3_wordmap(
 fn resolve_chains_posmap_grouped(
     chains: &[TokenChainV3],
     resolver: &dyn PostingResolver,
-    filter_docs: Option<&HashSet<DocId>>,
+    filter_docs: Option<&dyn DocFilter>,
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
     first_memo: &mut FnvHashMap<Vec<u64>, std::rc::Rc<Vec<PostingEntry>>>,
 ) -> Vec<MatchV3> {
@@ -872,7 +872,7 @@ pub fn resolve_word_chains_v3_wordmap_grouped(
     chains: &[TokenChainV3],
     word_sfxpost: &crate::suffix_fst::word_sfxpost::WordSfxPostReader<'_>,
     chunk_resolver: &dyn PostingResolver,
-    filter_docs: Option<&HashSet<DocId>>,
+    filter_docs: Option<&dyn DocFilter>,
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
     bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
     word_posmap: &crate::suffix_fst::word_pos_map::WordPosMapReader<'_>,
@@ -941,7 +941,7 @@ pub fn resolve_word_chains_v3_wordmap_grouped(
                         }).collect()
                     };
                     let mut f = entries;
-                    if let Some(filter) = filter_docs { f.retain(|e| filter.contains(&e.doc_id)); }
+                    if let Some(filter) = filter_docs { f.retain(|e| filter.contains(e.doc_id)); }
                     f
                 }).collect();
                 let v = std::rc::Rc::new(v);
@@ -1055,7 +1055,7 @@ enum AdjacencyMode<'a> {
 fn resolve_chains_impl(
     chains: &[TokenChainV3],
     resolver: &dyn PostingResolver,
-    filter_docs: Option<&HashSet<DocId>>,
+    filter_docs: Option<&dyn DocFilter>,
     adjacency: AdjacencyMode<'_>,
 ) -> Vec<MatchV3> {
     let mut results = Vec::new();
@@ -1332,7 +1332,7 @@ fn intermediates_are_pure_sep(
 fn resolve_alternatives(
     resolver: &dyn PostingResolver,
     ordinals: &[u64],
-    filter_docs: Option<&HashSet<DocId>>,
+    filter_docs: Option<&dyn DocFilter>,
 ) -> Vec<PostingEntry> {
     let mut entries = Vec::new();
     for &ord in ordinals {
@@ -1345,7 +1345,7 @@ fn resolve_alternatives(
 fn resolve_ordinal(
     resolver: &dyn PostingResolver,
     ordinal: u64,
-    filter_docs: Option<&HashSet<DocId>>,
+    filter_docs: Option<&dyn DocFilter>,
 ) -> Vec<PostingEntry> {
     if let Some(filter) = filter_docs {
         resolver.resolve_filtered(ordinal, filter)

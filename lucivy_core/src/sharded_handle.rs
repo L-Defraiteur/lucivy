@@ -701,7 +701,7 @@ fn tokenize_for_pipeline(
 // ─── Shard Actor Creation ───────────────────────────────────────────────────
 
 /// Build an AliveBitSet that only marks docs whose _node_id is in allowed_ids.
-fn build_node_filter_bitset(
+pub(crate) fn build_node_filter_bitset(
     seg_reader: &ld_lucivy::SegmentReader,
     allowed_ids: &HashSet<u64>,
 ) -> Result<ld_lucivy::fastfield::AliveBitSet, String> {
@@ -716,6 +716,23 @@ fn build_node_filter_bitset(
         }
     }
     Ok(ld_lucivy::fastfield::AliveBitSet::from_bitset(&bitset))
+}
+
+/// A clone of `seg_reader` restricted to `allowed_ids`: the alive bitset for
+/// the collector (intersected with the deletions, as before) and the same
+/// bitset as the document filter the v3 prescans hand to the resolvers — so
+/// a filtered search resolves and verifies the allowed documents only.
+pub(crate) fn filtered_segment_reader(
+    seg_reader: &ld_lucivy::SegmentReader,
+    allowed_ids: &HashSet<u64>,
+) -> Result<ld_lucivy::SegmentReader, String> {
+    let bitset = build_node_filter_bitset(seg_reader, allowed_ids)?;
+    let mut reader = seg_reader.clone();
+    reader.set_alive_bitset(bitset);
+    if let Some(alive) = reader.alive_bitset().cloned() {
+        reader.set_doc_filter(alive);
+    }
+    Ok(reader)
 }
 
 /// Execute a pre-compiled Weight on a single shard's segments.
@@ -743,9 +760,7 @@ fn execute_weight_on_shard(
     for (seg_ord, seg_reader) in segment_readers.iter().enumerate() {
         if let Some(ref allowed_ids) = filter {
             // Pre-filter: inject alive bitset so scorer skips non-matching docs.
-            let filter_bitset = build_node_filter_bitset(seg_reader, allowed_ids)?;
-            let mut filtered_reader = seg_reader.clone();
-            filtered_reader.set_alive_bitset(filter_bitset);
+            let filtered_reader = filtered_segment_reader(seg_reader, allowed_ids)?;
             let fruit = collector
                 .collect_segment(weight, seg_ord as u32, &filtered_reader)
                 .map_err(|e| format!("collect shard_{shard_id} seg_{seg_ord}: {e}"))?;
@@ -2152,16 +2167,28 @@ impl ShardedHandle {
         )?;
         for (b, batch) in batches.iter().enumerate() {
             let t = std::time::Instant::now();
-            let searchers: Vec<_> = batch.iter().map(|&i| self.shards[i].reader.searcher()).collect();
-            let refs: Vec<&ld_lucivy::SegmentReader> = searchers.iter()
-                .flat_map(|s| s.segment_readers().iter())
-                .filter(|seg| {
-                    let Some(field) = seg.sfx_fields().next() else { return false };
-                    seg.sfx_file(field)
+            // The batch's v3 segments, restricted to the shard's allowed ids
+            // when the search is filtered (same readers pass 2 will search).
+            let mut owned: Vec<ld_lucivy::SegmentReader> = Vec::new();
+            for &i in batch.iter() {
+                let allowed: Option<Arc<HashSet<u64>>> = match &shard_filter {
+                    ShardFilter::All(set) => Some(Arc::clone(set)),
+                    ShardFilter::PerShard(per) => per.get(i).cloned().flatten(),
+                    _ => None,
+                };
+                let searcher = self.shards[i].reader.searcher();
+                for seg in searcher.segment_readers() {
+                    let Some(field) = seg.sfx_fields().next() else { continue };
+                    if seg.sfx_file(field)
                         .and_then(ld_lucivy::suffix_fst::section_file::detect_sfx_version_of)
-                        == Some(3)
-                })
-                .collect();
+                        != Some(3) { continue; }
+                    owned.push(match &allowed {
+                        Some(ids) => crate::sharded_handle::filtered_segment_reader(seg, ids)?,
+                        None => seg.clone(),
+                    });
+                }
+            }
+            let refs: Vec<&ld_lucivy::SegmentReader> = owned.iter().collect();
             query.prescan_segments_more(&refs).map_err(|e| format!("prescan batch {b}: {e}"))?;
             let names: std::collections::HashSet<std::ffi::OsString> = batch.iter()
                 .flat_map(|&i| self.shard_file_names(i))
