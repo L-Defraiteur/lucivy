@@ -175,7 +175,7 @@ impl<S: BlobStore> BlobDirectory<S> {
         }
         if std::env::var("LUCIVY_BLOB_DEBUG").is_ok() {
             eprintln!("[blob lazy] materialize {}/{name}", self.prefixed_name);
-            if std::env::var("LUCIVY_BLOB_TRACE").map_or(false, |v| name.ends_with(&v)) {
+            if std::env::var("LUCIVY_BLOB_TRACE").is_ok_and(|v| name.ends_with(&v)) {
                 eprintln!("{}", std::backtrace::Backtrace::force_capture());
             }
         }
@@ -399,7 +399,9 @@ impl<S: BlobStore> Directory for BlobDirectory<S> {
         // Notify watchers on meta.json write (commit point)
         if is_meta {
             if let Ok(router) = self.watch_router.read() {
-                let _ = router.broadcast();
+                // The callbacks have run; what is dropped is the handle that
+                // says they finished (`RamDirectory` does the same).
+                drop(router.broadcast());
             }
         }
         Ok(())

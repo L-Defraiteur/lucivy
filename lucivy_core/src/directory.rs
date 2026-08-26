@@ -470,7 +470,9 @@ impl Directory for StdFsDirectory {
         if verbose { eprintln!("[fs] atomic_write {}: done ({:.1}ms)", full.display(), t0.elapsed().as_secs_f64() * 1e3); }
         if path == Path::new("meta.json") {
             if let Ok(router) = self.watch_router.read() {
-                let _ = router.broadcast();
+                // The callbacks have run; what is dropped is the handle that
+                // says they finished (`RamDirectory` does the same).
+                drop(router.broadcast());
             }
         }
         Ok(())

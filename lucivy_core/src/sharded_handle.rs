@@ -2471,7 +2471,7 @@ impl ShardedHandle {
                         listed - opened,
                     )];
                 }
-                let docs = self.num_docs().max(1) as u64;
+                let docs = self.num_docs().max(1);
                 // What the same index says a comfortable corpus would be, from
                 // its own measured bytes per document rather than a guess.
                 let fits = ram_index_max() / (index_bytes / docs).max(1);

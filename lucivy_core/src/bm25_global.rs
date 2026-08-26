@@ -168,6 +168,11 @@ impl ExportableStats {
 
         let mut doc_freqs = HashMap::new();
         for term in terms {
+            // The serialized term is the key of `doc_freqs`, which travels
+            // between machines and is part of this type's format: the
+            // deprecation asks for typed calls, which would key on something
+            // else and make a coordinator and a node disagree.
+            #[allow(deprecated)]
             let key = term.serialized_term();
             doc_freqs.entry(key).or_insert_with(|| {
                 let freq: u64 = searchers.iter()
@@ -234,6 +239,8 @@ impl Bm25StatisticsProvider for ExportableStats {
     }
 
     fn doc_freq(&self, term: &Term) -> ld_lucivy::Result<u64> {
+        // Same key as `from_searchers` wrote — see the note there.
+        #[allow(deprecated)]
         let key = term.serialized_term();
         Ok(*self.doc_freqs.get(&key).unwrap_or(&0))
     }

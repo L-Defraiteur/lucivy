@@ -35,6 +35,9 @@ const DEFAULT_DF_THRESHOLD: u32 = 5000;
 /// Default 1.0: fastest indexation, no quality loss thanks to global BM25 stats.
 const DEFAULT_BALANCE_WEIGHT: f64 = 1.0;
 
+/// Walks one shard's terms, calling back with `(term_bytes, doc_freq)`.
+pub type IterTerms<'a> = dyn Fn(&mut dyn FnMut(&[u8], u32)) + 'a;
+
 /// Token-aware shard router.
 ///
 /// Maintains per-shard per-token document frequency counters.
@@ -243,7 +246,7 @@ impl ShardRouter {
     /// `shard_readers` provides (shard_id, text_fields, searcher) for each shard.
     pub fn resync<F>(&mut self, iter_shards: F)
     where
-        F: FnOnce(&mut dyn FnMut(usize, &dyn Fn(&mut dyn FnMut(&[u8], u32)))),
+        F: FnOnce(&mut dyn FnMut(usize, &IterTerms)),
     {
         // Clear all token counters.
         for counts in &mut self.shard_token_counts {
@@ -252,7 +255,7 @@ impl ShardRouter {
         self.global_token_counts.clear();
 
         // Iterate each shard's terms.
-        iter_shards(&mut |shard_id: usize, iter_terms: &dyn Fn(&mut dyn FnMut(&[u8], u32))| {
+        iter_shards(&mut |shard_id: usize, iter_terms: &IterTerms| {
             iter_terms(&mut |term_bytes: &[u8], doc_freq: u32| {
                 if doc_freq == 0 {
                     return;

@@ -135,7 +135,7 @@ pub fn read_manifest(data: &[u8]) -> Result<SnapshotManifest, String> {
     let version = read_u32(data, &mut pos)?;
 
     // One file: name, length, then the bytes, which are skipped.
-    let mut entry = |pos: &mut usize| -> Result<SnapshotEntry, String> {
+    let entry = |pos: &mut usize| -> Result<SnapshotEntry, String> {
         let name = read_string(data, pos)?;
         let len = read_u32(data, pos)? as usize;
         if *pos + len > data.len() {

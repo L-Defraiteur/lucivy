@@ -89,11 +89,13 @@ impl<T: BlobStore + ?Sized> BlobStore for std::sync::Arc<T> {
     }
 }
 
+/// `index_name -> file_name -> data`, shared by every clone of the store.
+type MemFiles = Arc<RwLock<HashMap<String, HashMap<String, Vec<u8>>>>>;
+
 /// In-memory blob store for testing.
 #[derive(Debug, Clone)]
 pub struct MemBlobStore {
-    /// `index_name -> file_name -> data`
-    data: Arc<RwLock<HashMap<String, HashMap<String, Vec<u8>>>>>,
+    data: MemFiles,
 }
 
 impl MemBlobStore {
@@ -131,9 +133,7 @@ impl BlobStore for MemBlobStore {
     }
 
     fn load(&self, index_name: &str, file_name: &str) -> io::Result<Vec<u8>> {
-        let guard = self.data.read().map_err(|_| {
-            io::Error::new(io::ErrorKind::Other, "lock poisoned")
-        })?;
+        let guard = self.data.read().map_err(|_| io::Error::other("lock poisoned"))?;
         guard
             .get(index_name)
             .and_then(|files| files.get(file_name))
@@ -147,9 +147,7 @@ impl BlobStore for MemBlobStore {
     }
 
     fn save(&self, index_name: &str, file_name: &str, data: &[u8]) -> io::Result<()> {
-        let mut guard = self.data.write().map_err(|_| {
-            io::Error::new(io::ErrorKind::Other, "lock poisoned")
-        })?;
+        let mut guard = self.data.write().map_err(|_| io::Error::other("lock poisoned"))?;
         guard
             .entry(index_name.to_string())
             .or_default()
@@ -158,9 +156,7 @@ impl BlobStore for MemBlobStore {
     }
 
     fn delete(&self, index_name: &str, file_name: &str) -> io::Result<()> {
-        let mut guard = self.data.write().map_err(|_| {
-            io::Error::new(io::ErrorKind::Other, "lock poisoned")
-        })?;
+        let mut guard = self.data.write().map_err(|_| io::Error::other("lock poisoned"))?;
         if let Some(files) = guard.get_mut(index_name) {
             files.remove(file_name);
         }
@@ -168,18 +164,14 @@ impl BlobStore for MemBlobStore {
     }
 
     fn exists(&self, index_name: &str, file_name: &str) -> io::Result<bool> {
-        let guard = self.data.read().map_err(|_| {
-            io::Error::new(io::ErrorKind::Other, "lock poisoned")
-        })?;
+        let guard = self.data.read().map_err(|_| io::Error::other("lock poisoned"))?;
         Ok(guard
             .get(index_name)
-            .map_or(false, |files| files.contains_key(file_name)))
+            .is_some_and(|files| files.contains_key(file_name)))
     }
 
     fn list(&self, index_name: &str) -> io::Result<Vec<String>> {
-        let guard = self.data.read().map_err(|_| {
-            io::Error::new(io::ErrorKind::Other, "lock poisoned")
-        })?;
+        let guard = self.data.read().map_err(|_| io::Error::other("lock poisoned"))?;
         Ok(guard
             .get(index_name)
             .map(|files| files.keys().cloned().collect())

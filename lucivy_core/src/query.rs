@@ -1,8 +1,10 @@
 //! Query and schema JSON parsing.
 //!
 //! Query routing with dual-field layout:
-//!   - phrase, parse            → stemmed field (recall: "run" matches "running")
-//!   - term, fuzzy, regex       → raw field (precision: exact word forms, lowercase only)
+//!
+//! - phrase, parse — stemmed field (recall: "run" matches "running")
+//! - term, fuzzy, regex — raw field (precision: exact word forms, lowercase only)
+//!
 //! The user always references the base field name; routing is transparent.
 
 use std::ops::Bound;
@@ -376,7 +378,7 @@ pub fn build_query(
             let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
             clauses.push((Occur::Must, text_query));
             for filter in filters {
-                clauses.push((Occur::Must, build_filter_clause(filter, schema, index)?));
+                clauses.push((Occur::Must, build_filter_clause(filter, schema)?));
             }
             return Ok(Box::new(BooleanQuery::new(clauses)));
         }
@@ -856,10 +858,12 @@ fn json_to_term(field: Field, field_type: &FieldType, value: &serde_json::Value)
     }
 }
 
+/// A filter clause as a query. The schema resolves the field and its type;
+/// nothing here needs the index itself (it used to be threaded through, and
+/// only ever passed to this function's own recursive calls).
 fn build_filter_clause(
     filter: &FilterClause,
     schema: &Schema,
-    index: &Index,
 ) -> Result<Box<dyn Query>, String> {
     // Composite ops (must/should/must_not) — no field required.
     match filter.op.as_str() {
@@ -874,7 +878,7 @@ fn build_filter_clause(
             };
             let clauses: Vec<(Occur, Box<dyn Query>)> = sub_clauses
                 .iter()
-                .map(|c| Ok((occur, build_filter_clause(c, schema, index)?)))
+                .map(|c| Ok((occur, build_filter_clause(c, schema)?)))
                 .collect::<Result<Vec<_>, String>>()?;
             if clauses.is_empty() {
                 return Err(format!("'{}' filter requires at least one clause", filter.op));
@@ -1210,12 +1214,12 @@ mod tests {
 
     fn assert_filter_ok(filter: &FilterClause) {
         let (schema, index) = make_filter_index();
-        assert!(build_filter_clause(filter, &schema, &index).is_ok());
+        assert!(build_filter_clause(filter, &schema).is_ok());
     }
 
     fn assert_filter_err(filter: &FilterClause) {
         let (schema, index) = make_filter_index();
-        assert!(build_filter_clause(filter, &schema, &index).is_err());
+        assert!(build_filter_clause(filter, &schema).is_err());
     }
 
     #[test]
@@ -1292,7 +1296,7 @@ mod tests {
     fn test_filter_clause_starts_with() {
         let (schema, index) = make_filter_index();
         let filter = make_filter("name", "starts_with", json!("hel"));
-        let result = build_filter_clause(&filter, &schema, &index);
+        let result = build_filter_clause(&filter, &schema);
         assert!(result.is_ok(), "starts_with failed: {:?}", result.err());
     }
 
@@ -1311,7 +1315,7 @@ mod tests {
             distance: Some(2),
             clauses: None,
         };
-        assert!(build_filter_clause(&filter, &schema, &index).is_ok());
+        assert!(build_filter_clause(&filter, &schema).is_ok());
     }
 
     // ─── Composite ops ────────────────────────────────────────────────

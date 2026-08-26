@@ -31,11 +31,9 @@ pub fn query_warnings(config: &QueryConfig) -> Vec<String> {
 }
 
 fn collect(config: &QueryConfig, out: &mut Vec<String>) {
-    for list in [&config.must, &config.should, &config.must_not, &config.queries] {
-        if let Some(subs) = list {
-            for sub in subs {
-                collect(sub, out);
-            }
+    for subs in [&config.must, &config.should, &config.must_not, &config.queries].into_iter().flatten() {
+        for sub in subs {
+            collect(sub, out);
         }
     }
 
@@ -69,7 +67,8 @@ fn collect(config: &QueryConfig, out: &mut Vec<String>) {
         "regex" => regex_warnings(value, out),
         "contains" | "sfx_contains" if config.regex == Some(true) => regex_warnings(value, out),
         "fuzzy" => fuzzy_warnings(value, config.distance.unwrap_or(1), out),
-        "contains" | "sfx_contains" | "phrase" | "startsWith" | "term" | "parse"
+        // "parse" is handled by its own arm above, and never reaches here.
+        "contains" | "sfx_contains" | "phrase" | "startsWith" | "term"
         | "phrase_prefix" | "contains_split" | "sfx_contains_split" | "startsWith_split" => {
             let distance = config.distance.unwrap_or(0);
             if distance > 0 {

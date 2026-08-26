@@ -63,6 +63,11 @@ jobs:
           components: clippy
       - name: Clippy (default features)
         run: cargo clippy --lib -- -D warnings
+      # The engine was the only crate linted, so the crates written on top of
+      # it never were. The vendored forks (lucivy-fst, bitpacker, columnar…)
+      # stay out: their lint debt is tantivy's, not ours.
+      - name: Clippy (the crates we write)
+        run: cargo clippy -p lucivy-core -p lucistore -p luciole -p sparse-vector --lib -- -D warnings
 
   # Ground truth on the repository's own source: every count and every span
   # of a fixed panel (strict, relaxed, fuzzy, regex) compared with a byte-level
