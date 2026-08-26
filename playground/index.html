@@ -352,6 +352,20 @@ window._allLogs = [];
     font-size: 11px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase;
     color: var(--text-dim); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px;
   }
+  /* One switch for the whole documentation: every entry follows it. */
+  .lang-switch {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    margin: -12px 0 28px; font-size: 13px; color: var(--text-dim);
+  }
+  .lang-switch button {
+    font: inherit; font-size: 13px; padding: 5px 13px; cursor: pointer;
+    color: var(--text-dim); background: var(--surface);
+    border: 1px solid var(--border); border-radius: 6px;
+  }
+  .lang-switch button:hover { color: var(--text); border-color: var(--accent); }
+  .lang-switch button.active { color: var(--text); background: var(--accent-dim); border-color: var(--accent); }
+  .lang-switch .note { font-size: 12px; opacity: 0.75; margin-left: 4px; }
+  .doc-entry pre.code[hidden], .doc-entry p[hidden] { display: none; }
   .doc-entry > p { margin-bottom: 12px; }
   .doc-entry pre.code { border-radius: 6px; }
   /* The "how it works" of one entry: an aside, quieter than the code. */
@@ -498,15 +512,23 @@ window._allLogs = [];
       <a href="#doc-sparse">Sparse vectors</a>
     </div>
 
+    <div class="lang-switch" id="langSwitch">
+      <span>Show me in</span>
+      <button class="active" data-lang="py">Python</button>
+      <button data-lang="node">Node.js</button>
+      <button data-lang="rust">Rust</button>
+      <span class="note">C++ has the same API through a cxx bridge.</span>
+    </div>
+
     <!-- ── Query ── -->
     <div class="doc-entry" id="doc-query">
-      <h3>Query it <span class="lang">Python</span></h3>
+      <h3>Query it</h3>
       <p>
         One JSON shape for every kind of search. A query is a dict (or a plain string, which
         becomes a substring search over every text field), and the answer carries the score and
         the exact byte spans that matched.
       </p>
-<pre class="code">index.search({"type": "contains", "field": "body", "value": "mutex"}, highlights=True)
+<pre class="code" data-lang="py">index.search({"type": "contains", "field": "body", "value": "mutex"}, highlights=True)
 index.search({"type": "contains", "field": "body", "value": "mutx", "distance": 1})   <span class="c"># fuzzy</span>
 index.search({"type": "fuzzy", "field": "body", "value": "mutx",
               "fuzzy_metric": "jaro_winkler", "min_similarity": 0.9})
@@ -520,6 +542,37 @@ index.search({"type": "parse", "fields": ["body", "path"],
 <span class="c"># What the engine will really do, before it does it</span>
 index.query_warnings({"type": "contains", "field": "body", "value": "__init"})
 <span class="c"># ['separators are ignored (strict_separators=false): "__init" is searched as "init"']</span></pre>
+<pre class="code" data-lang="node" hidden>index.search({ type: 'contains', field: 'body', value: 'mutex' }, { highlights: true });
+index.search({ type: 'contains', field: 'body', value: 'mutx', distance: 1 });   <span class="c">// fuzzy</span>
+index.search({ type: 'fuzzy', field: 'body', value: 'mutx',
+               fuzzyMetric: 'jaro_winkler', minSimilarity: 0.9 });
+index.search({ type: 'contains', field: 'body', value: 'lock.*mutex', regex: true });
+index.search({ type: 'phrase', field: 'body', value: 'return -ENOMEM' });
+index.search({ type: 'startsWith', field: 'body', value: 'pthread' });
+index.search({ type: 'term', field: 'body', value: 'lock' });          <span class="c">// whole words only</span>
+index.search({ type: 'parse', fields: ['body', 'path'],
+               value: 'mutex AND NOT guard OR "exact phrase"' });
+
+<span class="c">// What the engine will really do, before it does it</span>
+index.queryWarnings({ type: 'contains', field: 'body', value: '__init' });</pre>
+<pre class="code" data-lang="rust" hidden>use lucivy_core::query::QueryConfig;
+use serde_json::json;
+
+let q: QueryConfig = serde_json::from_value(json!({
+    "type": "contains", "field": "body", "value": "mutex"
+}))?;
+let sink = std::sync::Arc::new(ld_lucivy::query::HighlightSink::new());
+let hits = index.search(&q, 10, Some(sink.clone()))?;    <span class="c">// spans land in the sink</span>
+
+<span class="c">// Every other kind is the same call with a different config</span>
+json!({"type": "contains", "field": "body", "value": "mutx", "distance": 1});
+json!({"type": "fuzzy", "field": "body", "value": "mutx",
+       "fuzzy_metric": "jaro_winkler", "min_similarity": 0.9});
+json!({"type": "contains", "field": "body", "value": "lock.*mutex", "regex": true});
+json!({"type": "parse", "fields": ["body", "path"], "value": "mutex AND NOT guard"});
+
+<span class="c">// What the engine will really do, before it does it</span>
+index.query_warnings(&q);</pre>
       <div class="how">
         <span class="label">How it works</span>
         Every text query becomes a <b>substring query on the suffix FST</b>. <code>term</code> adds
@@ -538,12 +591,12 @@ index.query_warnings({"type": "contains", "field": "body", "value": "__init"})
 
     <!-- ── Filter ── -->
     <div class="doc-entry" id="doc-filter">
-      <h3>Filter it <span class="lang">Python</span></h3>
+      <h3>Filter it</h3>
       <p>
         Two kinds: restrict to a set of your own ids, or compose non-text conditions with the
         text query.
       </p>
-<pre class="code"><span class="c"># A pre-filter by your ids — the engine only visits those documents</span>
+<pre class="code" data-lang="py"><span class="c"># A pre-filter by your ids — the engine only visits those documents</span>
 index.search({"type": "contains", "field": "body", "value": "kmalloc"},
              allowed_ids=[3, 7, 11, 12])
 
@@ -552,6 +605,26 @@ index.search({"type": "boolean",
               "must": [{"type": "contains", "field": "body", "value": "error"},
                        {"type": "filter", "op": "gte", "field": "priority", "value": 3}],
               "must_not": [{"type": "term", "field": "state", "value": "closed"}]})</pre>
+<pre class="code" data-lang="node" hidden><span class="c">// A pre-filter by your ids — the engine only visits those documents</span>
+index.search({ type: 'contains', field: 'body', value: 'kmalloc' },
+             { allowedIds: [3, 7, 11, 12] });
+
+<span class="c">// Non-text conditions, composed with must / should / must_not</span>
+index.search({ type: 'boolean',
+               must: [{ type: 'contains', field: 'body', value: 'error' },
+                      { type: 'filter', op: 'gte', field: 'priority', value: 3 }],
+               mustNot: [{ type: 'term', field: 'state', value: 'closed' }] });</pre>
+<pre class="code" data-lang="rust" hidden><span class="c">// A pre-filter by your ids — the engine only visits those documents</span>
+let allowed: HashSet&lt;u64&gt; = [3, 7, 11, 12].into_iter().collect();
+index.search_filtered(&amp;q, 10, None, allowed)?;
+
+<span class="c">// Non-text conditions, composed with must / should / must_not</span>
+let q: QueryConfig = serde_json::from_value(json!({
+    "type": "boolean",
+    "must": [{"type": "contains", "field": "body", "value": "error"},
+             {"type": "filter", "op": "gte", "field": "priority", "value": 3}],
+    "must_not": [{"type": "term", "field": "state", "value": "closed"}]
+}))?;</pre>
       <div class="how">
         <span class="label">How it works</span>
         <code>allowed_ids</code> is a <b>real pre-filter, not a post-filter</b>: the id set is routed
@@ -566,17 +639,36 @@ index.search({"type": "boolean",
 
     <!-- ── Shard ── -->
     <div class="doc-entry" id="doc-shard">
-      <h3>Shard it <span class="lang">Python</span></h3>
+      <h3>Shard it</h3>
       <p>
         One number at creation. Indexing and searching then run across shards in parallel, and the
         scores do not move.
       </p>
-<pre class="code">index = lucivy.Index.create("/tmp/idx", fields=[...], shards=4)
+<pre class="code" data-lang="py">index = lucivy.Index.create("/tmp/idx", fields=[...], shards=4)
 index.add(1, body="...")            <span class="c"># the router decides where it lands</span>
 index.commit()
 index.search({"type": "contains", "field": "body", "value": "mutex"})
 index.compact(10_000)               <span class="c"># merge down to segments of at most N documents</span>
 index.wait_merges_quiet()           <span class="c"># let the background merges finish</span></pre>
+<pre class="code" data-lang="node" hidden>const index = Index.create('/tmp/idx', [{ name: 'body', type: 'text' }], 4);
+index.add(1, { body: '...' });      <span class="c">// the router decides where it lands</span>
+index.commit();
+index.search({ type: 'contains', field: 'body', value: 'mutex' });
+index.compact(10000);               <span class="c">// merge down to segments of at most N documents</span>
+index.waitMergesQuiet();            <span class="c">// let the background merges finish</span></pre>
+<pre class="code" data-lang="rust" hidden>use lucivy_core::sharded_handle::ShardedHandle;
+use lucivy_core::query::SchemaConfig;
+
+let config: SchemaConfig = serde_json::from_value(json!({
+    "fields": [{ "name": "body", "type": "text", "stored": true }],
+    "shards": 4,
+}))?;
+let index = ShardedHandle::create("/tmp/idx", &amp;config)?;
+index.add_document_json(1, &amp;json!({ "body": "..." }))?;   <span class="c">// the router places it</span>
+index.commit()?;
+index.search(&amp;q, 10, None)?;
+index.compact(10_000)?;
+index.wait_merges_quiet()?;</pre>
       <div class="how">
         <span class="label">How it works</span>
         A shard is a <b>complete, autonomous index</b> — its own <code>meta.json</code>, its own
@@ -591,12 +683,12 @@ index.wait_merges_quiet()           <span class="c"># let the background merges 
 
     <!-- ── Distribute ── -->
     <div class="doc-entry" id="doc-distribute">
-      <h3>Distribute it <span class="lang">Python</span></h3>
+      <h3>Distribute it</h3>
       <p>
         Several machines, each with its own index, searched as if they were one — without copying
         or mounting anything.
       </p>
-<pre class="code">q = {"type": "contains", "field": "body", "value": "mutex"}
+<pre class="code" data-lang="py">q = {"type": "contains", "field": "body", "value": "mutex"}
 
 <span class="c"># On each node, then on the coordinator</span>
 merged = lucivy.merge_stats([node_a.export_stats(q), node_b.export_stats(q)])
@@ -607,6 +699,28 @@ hits_b = node_b.search_with_global_stats(q, merged, limit=10)
 
 <span class="c"># And the pre-filter composes with it</span>
 hits_a = node_a.search_with_global_stats(q, merged, allowed_ids=[3, 7, 11])</pre>
+<pre class="code" data-lang="node" hidden>const q = JSON.stringify({ type: 'contains', field: 'body', value: 'mutex' });
+
+<span class="c">// On each node, then on the coordinator</span>
+const merged = mergeStats([nodeA.exportStats(q), nodeB.exportStats(q)]);
+
+<span class="c">// Back on each node: everyone scores on the federation's corpus</span>
+const hitsA = nodeA.searchWithGlobalStats(q, merged, 10);
+const hitsB = nodeB.searchWithGlobalStats(q, merged, 10);
+
+<span class="c">// And the pre-filter composes with it</span>
+nodeA.searchWithGlobalStats(q, merged, 10, false, [3, 7, 11]);</pre>
+<pre class="code" data-lang="rust" hidden>use lucivy_core::bm25_global::ExportableStats;
+
+<span class="c">// On each node, then on the coordinator</span>
+let merged = ExportableStats::merge(&amp;[node_a.export_stats(&amp;q)?, node_b.export_stats(&amp;q)?]);
+
+<span class="c">// Back on each node: everyone scores on the federation's corpus</span>
+let hits_a = node_a.search_with_global_stats(&amp;q, 10, &amp;merged, None)?;
+let hits_b = node_b.search_with_global_stats(&amp;q, 10, &amp;merged, None)?;
+
+<span class="c">// And the pre-filter composes with it</span>
+node_a.search_filtered_with_global_stats(&amp;q, 10, &amp;merged, None, allowed)?;</pre>
       <div class="how">
         <span class="label">How it works</span>
         BM25 needs to know how rare a term is <b>in the whole corpus</b>; on separate machines
@@ -621,12 +735,12 @@ hits_a = node_a.search_with_global_stats(q, merged, allowed_ids=[3, 7, 11])</pre
 
     <!-- ── Storage ── -->
     <div class="doc-entry" id="doc-storage">
-      <h3>Bring your own storage <span class="lang">Python</span></h3>
+      <h3>Bring your own storage</h3>
       <p>
         The index does not have to live on a filesystem. Give it an object with five methods and
         your database becomes the truth — the local files become a disposable cache.
       </p>
-<pre class="code">class MyStore:                       <span class="c"># Postgres, S3, anything transactional</span>
+<pre class="code" data-lang="py">class MyStore:                       <span class="c"># Postgres, S3, anything transactional</span>
     def load(self, index_name, file_name): ...
     def save(self, index_name, file_name, data): ...
     def delete(self, index_name, file_name): ...
@@ -636,6 +750,34 @@ hits_a = node_a.search_with_global_stats(q, merged, allowed_ids=[3, 7, 11])</pre
 
 index = lucivy.Index.create_with_blob_store(MyStore(), "products", fields=[...], shards=4)
 index = lucivy.Index.open_with_blob_store(MyStore(), "products", lazy=True)</pre>
+<pre class="code" data-lang="node" hidden>const { BlobIndex } = require('lucivy');
+
+const store = {                      <span class="c">// Postgres, S3, anything transactional</span>
+  load: (indexName, fileName) => buffer,
+  save: (indexName, fileName, data) => {},
+  delete: (indexName, fileName) => {},
+  exists: (indexName, fileName) => true,
+  list: (indexName) => [names],
+  <span class="c">// optional: blobLen / loadRange, which make `lazy` worth it</span>
+};
+
+<span class="c">// The blob-backed index is asynchronous: its calls cross into your callbacks</span>
+const index = await BlobIndex.create(store, 'products',
+                                     [{ name: 'title', type: 'text', stored: true }],
+                                     { shards: 4 });
+const index = await BlobIndex.open(store, 'products', { lazy: true });</pre>
+<pre class="code" data-lang="rust" hidden>use lucivy_core::blob_store::BlobStore;
+use lucivy_core::sharded_handle::{BlobShardStorage, ShardedHandle};
+
+<span class="c">// Your type implements five methods (plus two optional ones for `lazy`)</span>
+impl BlobStore for MyStore { <span class="c">/* load, save, delete, exists, list */</span> }
+
+let storage = BlobShardStorage::new(Arc::new(MyStore), "products", None);
+let index = ShardedHandle::create_with_storage(Box::new(storage), &amp;config)?;
+
+<span class="c">// A filesystem index is the same call with the other storage</span>
+let storage = lucistore::shard_storage::FsShardStorage::new("/tmp/idx")?;
+let index = ShardedHandle::create_with_storage(Box::new(storage), &amp;config)?;</pre>
       <div class="how">
         <span class="label">How it works</span>
         Segments are immutable files, so they map onto a blob store without a translation layer:
@@ -651,16 +793,30 @@ index = lucivy.Index.open_with_blob_store(MyStore(), "products", lazy=True)</pre
 
     <!-- ── Snapshot & sync ── -->
     <div class="doc-entry" id="doc-sync">
-      <h3>Snapshot and sync <span class="lang">Python</span></h3>
+      <h3>Snapshot and sync</h3>
       <p>
         Move an index as one blob, or ship only what changed.
       </p>
-<pre class="code">blob = index.export_snapshot()                <span class="c"># LUCE: every shard, one blob</span>
+<pre class="code" data-lang="py">blob = index.export_snapshot()                <span class="c"># LUCE: every shard, one blob</span>
 served = lucivy.Index.open_snapshot(blob)     <span class="c"># read-only, nothing extracted</span>
 
 <span class="c"># Incremental: the client says what it has, the server sends the difference</span>
 delta = server.export_sharded_delta(client.shard_versions())   <span class="c"># LUCIDS</span>
 client.apply_sharded_delta(delta)</pre>
+<pre class="code" data-lang="node" hidden>const blob = index.exportSnapshot();            <span class="c">// LUCE: every shard, one blob</span>
+const served = Index.openSnapshot(blob);        <span class="c">// read-only, nothing extracted</span>
+
+<span class="c">// Incremental: the client says what it has, the server sends the difference</span>
+const delta = server.exportShardedDelta(client.shardVersions());   <span class="c">// LUCIDS</span>
+client.applyShardedDelta(delta);</pre>
+<pre class="code" data-lang="rust" hidden>use lucivy_core::snapshot::{export_to_snapshot, import_from_snapshot};
+
+let blob = export_to_snapshot(&amp;index, Path::new("/tmp/idx"))?;   <span class="c">// LUCE</span>
+let served = ShardedHandle::open_snapshot(OwnedBytes::new(blob))?;  <span class="c">// served in place</span>
+
+<span class="c">// Incremental: the client says what it has, the server sends the difference</span>
+let delta = server.export_sharded_delta(&amp;client.shard_versions()?)?;   <span class="c">// LUCIDS</span>
+client.apply_sharded_delta("/tmp/client_idx", &amp;delta)?;</pre>
       <div class="how">
         <span class="label">How it works</span>
         <b>LUCE</b> is a container of every shard's files; <code>open_snapshot</code> serves it
@@ -674,10 +830,10 @@ client.apply_sharded_delta(delta)</pre>
 
     <!-- ── Browser ── -->
     <div class="doc-entry" id="doc-browser">
-      <h3>In the browser <span class="lang">JavaScript</span></h3>
+      <h3>In the browser <span class="lang">JavaScript only</span></h3>
       <p>
-        The same engine, compiled to WebAssembly, in a Web Worker with real threads. The demo at
-        the top of this page is this code.
+        The same engine, compiled to WebAssembly, in a Web Worker with real threads — so this one
+        has no Python or Rust form. The demo at the top of this page is this code.
       </p>
 <pre class="code">import { Lucivy } from 'lucivy-wasm';
 
@@ -707,11 +863,12 @@ const status = await index.memoryStatus();
 
     <!-- ── Sparse ── -->
     <div class="doc-entry" id="doc-sparse">
-      <h3>Sparse vectors <span class="lang">Rust</span></h3>
+      <h3>Sparse vectors <span class="lang">Rust only</span></h3>
       <p>
         The other half of a hybrid search: an inverted index for the sparse vectors a model
         produces (SPLADE, BGE-M3), with WAND pruning, sharding and the same storage. It indexes
-        vectors — it does not produce them.
+        vectors — it does not produce them. Not exposed in the bindings yet: it is a Rust crate,
+        <code>sparse-vector</code>.
       </p>
 <pre class="code">use sparse_vector::{handle::SparseHandle, index::SparseVector};
 
@@ -2493,6 +2650,28 @@ document.querySelectorAll('#installTabs button').forEach(b => b.addEventListener
   document.querySelectorAll('#installTabs button').forEach(x => x.classList.toggle('active', x === b));
   document.querySelectorAll('#install pre.code').forEach(p => { p.hidden = p.dataset.tab !== b.dataset.tab; });
 }));
+
+// One switch for the whole documentation: every entry that has the chosen
+// language shows it, and an entry that exists in one language only (the
+// browser, the sparse index) keeps what it has rather than going blank.
+function showLanguage(lang) {
+  document.querySelectorAll('#langSwitch button').forEach(b =>
+    b.classList.toggle('active', b.dataset.lang === lang));
+  for (const entry of document.querySelectorAll('.doc-entry')) {
+    const blocks = entry.querySelectorAll('pre.code[data-lang]');
+    if (!blocks.length) continue;
+    const wanted = entry.querySelector(`pre.code[data-lang="${lang}"]`);
+    for (const b of blocks) b.hidden = wanted ? b !== wanted : b.dataset.lang !== 'py';
+  }
+  try { localStorage.setItem('lucivy_doc_lang', lang); } catch { /* private window */ }
+}
+document.querySelectorAll('#langSwitch button').forEach(b =>
+  b.addEventListener('click', () => showLanguage(b.dataset.lang)));
+// The reader's last choice, when the browser remembers it.
+try {
+  const saved = localStorage.getItem('lucivy_doc_lang');
+  if (saved) showLanguage(saved);
+} catch { /* private window */ }
 
 // Automation hook (tests drive the page through the debug server or devtools).
 window._playground = {
