@@ -507,6 +507,82 @@ impl SparseHandle {
         inner.index.search_filtered(query, limit, allowed_ids)
     }
 
+    /// Merge every segment into one, applying the tombstones — the walk
+    /// over sorted token tables described in [`crate::segments`]. What it
+    /// buys: one mapping to search instead of N, WAND pruning over the whole
+    /// index again, and the deleted documents' bytes back.
+    ///
+    /// Commits are cheap because they append; this is where that is paid,
+    /// once, when the caller decides. Nothing is lost if it is interrupted:
+    /// the manifest is only rewritten once the merged segment is on disk.
+    pub fn compact(&self) -> Result<(), String> {
+        let mut inner = self.inner.lock().map_err(|_| "lock poisoned".to_string())?;
+        if inner.dirty {
+            drop(inner);
+            self.commit_inner()?;
+            inner = self.inner.lock().map_err(|_| "lock poisoned".to_string())?;
+        }
+        if inner.segments.len() < 2 {
+            return Ok(());
+        }
+
+        inner.written += 1;
+        let new_id = segments::new_segment_id(inner.written);
+        let sources: Vec<&Segment> = inner.segments.iter().collect();
+        let merged = segments::merge_segments(&self.path, &sources, &new_id)?;
+        let dropped: Vec<String> = inner.segments.iter()
+            .flat_map(|s| [segments::segment_file(&s.meta.id), segments::ids_file(&s.meta.id)])
+            .collect();
+
+        // The manifest is what makes the merge real; until it is written,
+        // the index is still its old segments.
+        inner.meta.segments = vec![merged.clone()];
+        inner.meta.write(&self.path)?;
+        inner.segments = vec![Segment::open(&self.path, merged)?];
+        inner.num_vectors = Self::count(&inner);
+
+        if let StorageBackend::Store { ref store, ref index_name } = self.backend {
+            for file in [segments::segment_file(&new_id), segments::ids_file(&new_id), segments::META_FILE.to_string()] {
+                let data = std::fs::read(self.path.join(&file))
+                    .map_err(|e| format!("cannot read cache {file}: {e}"))?;
+                store.save(index_name, &file, &data)
+                    .map_err(|e| format!("cannot save {index_name}/{file} to store: {e}"))?;
+            }
+        }
+        // The old segments, now that nothing names them.
+        for file in dropped {
+            let _ = std::fs::remove_file(self.path.join(&file));
+            if let StorageBackend::Store { ref store, ref index_name } = self.backend {
+                let _ = store.delete(index_name, &file);
+            }
+        }
+        Ok(())
+    }
+
+    /// Segments a commit leaves before merging them, from
+    /// `LUCIVY_SPARSE_MAX_SEGMENTS` (`0` never merges on its own).
+    ///
+    /// Eight by default. Measured (`tests/bench_segment_search.rs`, 100 000
+    /// vectors): a search costs the same on 1, 2 or 5 segments, ×1.9 on ten,
+    /// ×5.3 on twenty — the WAND pruning works inside a segment, so what is
+    /// pruned in one is still walked in the next. Merging every eight
+    /// commits keeps a search flat and still leaves seven commits out of
+    /// eight paying only for their delta.
+    fn max_segments() -> usize {
+        static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *CAP.get_or_init(|| {
+            std::env::var("LUCIVY_SPARSE_MAX_SEGMENTS").ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8)
+        })
+    }
+
+    /// How many segments the index is made of — what a compaction policy
+    /// watches, and what a search pays per query dimension.
+    pub fn num_segments(&self) -> usize {
+        self.inner.lock().map(|i| i.segments.len()).unwrap_or(0)
+    }
+
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap().num_vectors
     }
@@ -615,17 +691,23 @@ impl SparseHandle {
         // files, or the bincode before them — is not part of a segmented
         // index. Dropped after the manifest names the segments, never before.
         for &stale in STALE_FILES {
-            {
-                let path = self.path.join(stale);
-                if path.exists() {
-                    let _ = std::fs::remove_file(&path);
-                    if let StorageBackend::Store { ref store, ref index_name } = self.backend {
-                        let _ = store.delete(index_name, stale);
-                    }
+            let path = self.path.join(stale);
+            if path.exists() {
+                let _ = std::fs::remove_file(&path);
+                if let StorageBackend::Store { ref store, ref index_name } = self.backend {
+                    let _ = store.delete(index_name, stale);
                 }
             }
         }
 
+        // Merge when the segments have piled up: cheap commits are paid for
+        // here, once every `max_segments()` of them (see `max_segments`).
+        let cap = Self::max_segments();
+        let pile = inner.segments.len();
+        drop(inner);
+        if cap > 0 && pile > cap {
+            self.compact()?;
+        }
         Ok(())
     }
 }

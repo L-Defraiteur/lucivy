@@ -225,3 +225,99 @@ fn an_index_from_before_segments_is_converted_by_its_next_commit() {
         assert_eq!(handle.search(&q, 20), after.search(&q, 20), "after conversion");
     }
 }
+
+/// A merge is a walk over sorted token tables: nothing is remapped, the
+/// answers do not move, the tombstones are applied and their bytes come
+/// back. It is also the operation that would absorb another index's
+/// segments — the same call, with those segments as input.
+#[test]
+fn a_merge_keeps_the_answers_and_applies_the_tombstones() {
+    let dir = TempDir::new("merge");
+    let handle = SparseHandle::create(dir.str()).unwrap();
+
+    // Four segments, an update spanning two of them, and some deletions.
+    let mut docs: HashMap<u64, SparseVector> = HashMap::new();
+    for round in 0..4u64 {
+        for i in 0..30u64 {
+            let id = round * 30 + i;
+            let v = vector(id, 1.0 + (id % 4) as f32);
+            handle.insert(id, &v).unwrap();
+            docs.insert(id, v);
+        }
+        if round == 2 {
+            for id in (0..30u64).step_by(6) {
+                let v = vector(id, 8.0);
+                handle.insert(id, &v).unwrap();
+                docs.insert(id, v);
+            }
+        }
+        handle.commit_inner().unwrap();
+    }
+    for id in (5..120u64).step_by(11) {
+        handle.remove(id).unwrap();
+        docs.remove(&id);
+    }
+    handle.commit_inner().unwrap();
+
+    assert_eq!(handle.num_segments(), 4);
+    let before: Vec<Vec<(u64, f32)>> = queries().iter().map(|q| handle.search(q, 40)).collect();
+    let live = handle.len();
+    assert_eq!(live, docs.len());
+    let bytes_before: u64 = std::fs::read_dir(&dir.0).unwrap().flatten()
+        .filter_map(|e| e.metadata().ok().map(|m| m.len())).sum();
+
+    handle.compact().unwrap();
+
+    assert_eq!(handle.num_segments(), 1, "a merge leaves one segment");
+    assert_eq!(segment_count(&dir.0), 1, "and removes the files nothing names any more");
+    assert_eq!(handle.len(), live, "a merge does not change what is in the index");
+    let after: Vec<Vec<(u64, f32)>> = queries().iter().map(|q| handle.search(q, 40)).collect();
+    assert_eq!(after, before, "a merge does not move an answer");
+
+    // The deleted documents' bytes are gone, and so are their tombstones.
+    let bytes_after: u64 = std::fs::read_dir(&dir.0).unwrap().flatten()
+        .filter_map(|e| e.metadata().ok().map(|m| m.len())).sum();
+    assert!(bytes_after < bytes_before, "{bytes_after} is not smaller than {bytes_before}");
+
+    // And the same answers again after a reopen, from the merged file alone.
+    let reopened = SparseHandle::open(dir.str()).unwrap();
+    assert_eq!(reopened.len(), live);
+    let reference: Vec<(u64, SparseVector)> = docs.into_iter().collect();
+    let reference = reference_index(&reference);
+    for (q, want) in queries().iter().zip(&before) {
+        assert_eq!(&reopened.search(q, 40), want);
+        assert_eq!(reopened.search(q, 40), reference.search(q, 40));
+    }
+}
+
+/// The reference builder under a name a local binding does not shadow.
+fn reference_index(docs: &[(u64, SparseVector)]) -> SparseIndex {
+    reference(docs)
+}
+
+/// Segments do not pile up on their own: past the cap, a commit merges.
+#[test]
+fn segments_are_merged_once_they_pile_up() {
+    let dir = TempDir::new("policy");
+    let handle = SparseHandle::create(dir.str()).unwrap();
+    let cap: usize = std::env::var("LUCIVY_SPARSE_MAX_SEGMENTS").ok()
+        .and_then(|v| v.parse().ok()).unwrap_or(8);
+
+    let mut docs: Vec<(u64, SparseVector)> = Vec::new();
+    for round in 0..(cap as u64 + 4) {
+        for i in 0..10u64 {
+            let id = round * 10 + i;
+            let v = vector(id, 1.0 + (id % 3) as f32);
+            handle.insert(id, &v).unwrap();
+            docs.push((id, v));
+        }
+        handle.commit_inner().unwrap();
+        assert!(handle.num_segments() <= cap,
+            "commit {round}: {} segments, cap is {cap}", handle.num_segments());
+    }
+    assert_eq!(handle.len(), docs.len());
+    let want = reference(&docs);
+    for q in queries() {
+        assert_eq!(handle.search(&q, 30), want.search(&q, 30), "merging changed an answer");
+    }
+}

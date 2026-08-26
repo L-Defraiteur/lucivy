@@ -212,3 +212,76 @@ impl Segment {
         self.base.join(ids_file(&self.meta.id))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Merge
+// ---------------------------------------------------------------------------
+
+/// Merge segments into one, applying their tombstones.
+///
+/// This is the operation the format was shaped for: every segment's
+/// dimension table is sorted by **global token id**, so the merge walks the
+/// tables together and concatenates the posting lists of the same token —
+/// nothing is remapped, no id is rewritten, and no dictionary is rebuilt.
+/// Merging two *indexes* is the same call with their segments as input,
+/// which is why segments, index fusion and delta sync are one mechanism and
+/// not three.
+///
+/// Within a token, entries stay sorted by record id and the newest segment
+/// wins a tie — a document updated in a later segment already had its older
+/// copy tombstoned, so a tie only happens between a segment and itself.
+pub fn merge_segments(
+    base: &Path,
+    inputs: &[&Segment],
+    new_id: &str,
+) -> Result<SegmentMeta, String> {
+    use crate::wand::Postings;
+
+    // Every token any input holds, once, in order — a k-way walk over
+    // tables that are already sorted.
+    let mut cursors: Vec<std::iter::Peekable<_>> =
+        inputs.iter().map(|s| s.data.tokens().peekable()).collect();
+    let mut tokens: Vec<u32> = Vec::new();
+    loop {
+        let next = cursors.iter_mut()
+            .filter_map(|c| c.peek().map(|(t, _)| *t))
+            .min();
+        let Some(token) = next else { break };
+        for c in cursors.iter_mut() {
+            if c.peek().is_some_and(|(t, _)| *t == token) {
+                c.next();
+            }
+        }
+        tokens.push(token);
+    }
+
+    // The postings of each token, live entries only.
+    let mut postings: Vec<Postings> = Vec::with_capacity(tokens.len());
+    let mut ids: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+    let mut pairs: Vec<(u64, f32)> = Vec::new();
+    for &token in &tokens {
+        pairs.clear();
+        for seg in inputs {
+            for e in seg.data.entries_of_token(token) {
+                if seg.is_live(e.record_id) {
+                    pairs.push((e.record_id, e.weight));
+                    ids.insert(e.record_id);
+                }
+            }
+        }
+        // Inputs are each sorted by id, their union is not.
+        pairs.sort_by_key(|(id, _)| *id);
+        postings.push(Postings::from_sorted_pairs(&pairs));
+    }
+
+    let ids: Vec<u64> = ids.into_iter().collect();
+    crate::mmap_index::write_mmap_file(
+        &base.join(segment_file(new_id)),
+        &postings,
+        &tokens,
+        ids.len() as u32,
+    )?;
+    write_file_atomic(&base.join(ids_file(new_id)), &encode_ids(&ids))?;
+
+    Ok(SegmentMeta { id: new_id.to_string(), num_vectors: ids.len() as u32, deleted: Vec::new() })
+}

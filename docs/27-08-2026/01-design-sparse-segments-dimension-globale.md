@@ -158,6 +158,47 @@ d'un index existant écrit un segment v3 à côté.
 - **D — delta sync et montage d'un index dans un autre.** Tombe tout seul
   une fois C écrit : ce sont des segments qu'on copie et qu'on liste.
 
-A, B et C sont faits dans cette session ; D attend le chiffre qu'on a
-demandé à la session rag3weaver (combien de segments un domaine monte en
-pratique), parce que c'est lui qui décide de la politique de compactage.
+## 8. Ce qui a été fait, et ce que ça donne
+
+A, B et C sont écrits et testés. D attend leur chiffre.
+
+**Le commit ne dépend plus de la taille de l'index** (`bench_commit_cost.rs`,
+release, même machine) :
+
+| index | commit après chargement en masse | commit après **un seul** vecteur |
+|---|---|---|
+| 10 000 | 51 ms | **29 ms** (avant : 26) |
+| 50 000 | 93 ms | **29 ms** (avant : 95) |
+| 100 000 | 108 ms | **28 ms** (avant : 171) |
+| 200 000 | 168 ms | **33 ms** (avant : 320) |
+
+Ce qui reste est constant : trois `fsync` (le segment, ses ids, la méta).
+À deux millions de vecteurs, l'ancien commit prendrait ~3 s ; celui-ci en
+prend toujours 30.
+
+**Le coût d'une recherche par segment** (`bench_segment_search.rs`,
+100 000 vecteurs, 50 requêtes) :
+
+| segments | recherche | après merge |
+|---|---|---|
+| 1 | 0,03 ms | 0,03 ms |
+| 2 | 0,04 ms | 0,03 ms (×1,1) |
+| 5 | 0,06 ms | 0,03 ms (×1,8) |
+| 10 | 0,06 ms | 0,03 ms (×1,9) |
+| 20 | 0,17 ms | 0,03 ms (×5,3) |
+
+D'où la politique : un commit merge au-delà de **huit segments**
+(`LUCIVY_SPARSE_MAX_SEGMENTS`, `0` = jamais). Une recherche reste plate, et
+sept commits sur huit ne paient que leur delta.
+
+**Ce que le merge prouve.** `segments::merge_segments` marche les tables de
+tokens ensemble et concatène — aucun remappage, aucun dictionnaire
+reconstruit. Il prend `&[&Segment]` : lui passer les segments d'un *autre*
+index est exactement le même appel. C'est là que L4 (fusion sparse) et L1
+côté sparse deviennent une ligne de code, quand on en aura besoin.
+
+**Vérité** : `test_global_dims.rs` (4), `test_segments.rs` (7),
+`test_mmap_durability.rs` (4) — dont la recherche sur N segments comparée à
+un index unique qui tient tout, l'update qui masque la copie ancienne, la
+suppression qui survit à une réouverture, le merge qui ne déplace aucune
+réponse, et l'index d'avant les segments qui s'ouvre puis se convertit.
