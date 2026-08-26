@@ -238,7 +238,7 @@ fn parse_line(line: &str) -> Option<(u64, SparseVector)> {
     let field = |name: &str| -> Option<&str> {
         let start = line.find(name)? + name.len();
         let rest = &line[start..];
-        let open = rest.find(|c| c == '[')?;
+        let open = rest.find('[')?;
         let close = rest.find(']')?;
         Some(&rest[open + 1..close])
     };
