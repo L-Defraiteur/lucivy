@@ -1,28 +1,34 @@
 //! What a search pays per segment, and what a merge gives back.
 //!
-//! It took three corpora to answer, and the first two lied in opposite
-//! directions. On 40 000 documents and 200 queries, search time against the
-//! same search after a merge:
+//! **Nothing measurable.** Three runs on an idle machine, 40 000 documents,
+//! 200 real BGE-M3 queries, search time against the same search after a
+//! merge — and the same three runs on the text-derived corpus:
 //!
-//! | corpus | 5 segments | 20 | 50 | 100 |
-//! |---|---|---|---|---|
-//! | dimensions spread uniformly, every weight 1.0 | ×1.8 | ×5.3 | — | — |
-//! | words of real text, `tf · idf` | ×1.4 | ×1.1 | ×1.0 | ×1.0 |
-//! | **BGE-M3 (the dump)** | **×1.6** | **×3.1** | **×4.9** | **×7.8** |
+//! | segments | 1 | 5 | 20 | 50 | 100 |
+//! |---|---|---|---|---|---|
+//! | BGE-M3 | ×1.0 | ×1.5 | ×1.3-1.4 | ×1.0-1.1 | ×1.2 |
+//! | text, `tf · idf` | ×1.0 | ×1.3-1.4 | ×1.1-1.3 | ×1.0 | ×1.0-1.3 |
 //!
-//! Flat weights leave WAND nothing to prune with, so every segment restarts
-//! a full walk and the cost looks worse than it is. Real words go the other
-//! way: a vocabulary of 112 000 dimensions whose median posting list is two
-//! documents long — nothing to prune, nothing to lose. A model's vectors are
-//! neither: a bounded, shared vocabulary (6 583 dimensions here, median list
-//! 52, longest 29 630), so WAND skips far inside a long list, and splitting
-//! that list across segments is precisely what takes the skipping away —
-//! each segment fills its own top-k from zero before its bound can prune.
+//! Splitting the index splits the posting lists with it, and WAND prunes
+//! inside each piece; a segment adds a binary search per query dimension.
 //!
-//! The lesson is not about sparse vectors: **a benchmark on synthetic data
-//! measures the generator**. Both wrong answers were reproducible.
+//! ## Two numbers this bench got wrong, and how
 //!
-//! What also grows with the segment count is the write path
+//! It claimed ×5.3 on twenty segments, then ×7.8 on a hundred. Both were
+//! reproducible when they were taken, and both were artefacts:
+//!
+//! 1. **The corpus.** The first version spread dimensions by hashing and
+//!    gave every weight 1.0. Flat weights leave WAND nothing to prune with,
+//!    so every segment restarts a full walk — it measured the generator.
+//! 2. **The machine.** The second was taken on real vectors while the same
+//!    machine was running the model that produced them. Under load, the
+//!    many-segment cases inflate; on an idle machine the trend disappears
+//!    and does not come back in three runs.
+//!
+//! So: a benchmark on synthetic data measures the generator, and a benchmark
+//! on a busy machine measures the load. Neither announces itself.
+//!
+//! What does grow with the segment count, slightly, is the write path
 //! (`update_cost_per_segment`): an insert or a delete asks every segment
 //! whether it holds the id.
 //!
@@ -43,8 +49,12 @@ fn search_cost_per_segment() {
     // Real BGE-M3 vectors when the dump is there, text-derived ones
     // otherwise: WAND can only be measured on an unbalanced corpus.
     let want: usize = std::env::var("BENCH_DOCS").ok().and_then(|v| v.parse().ok()).unwrap_or(40_000);
-    let corpus = corpus_vectors::from_dump(want)
-        .unwrap_or_else(|| corpus_vectors::build(want, 200));
+    // `BENCH_CORPUS=text` compares against the text-derived generator.
+    let corpus = match std::env::var("BENCH_CORPUS").as_deref() {
+        Ok("text") => corpus_vectors::build(want, 200),
+        _ => corpus_vectors::from_dump(want)
+            .unwrap_or_else(|| corpus_vectors::build(want, 200)),
+    };
     eprintln!("  corpus: {} (x{} replicas)", corpus_vectors::describe(&corpus),
         corpus_vectors::replicas(&corpus));
     let total = corpus.docs.len() as u64;

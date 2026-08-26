@@ -181,46 +181,58 @@ Ce qui reste est constant : trois `fsync` (le segment, ses ids, la méta).
 À deux millions de vecteurs, l'ancien commit prendrait ~3 s ; celui-ci en
 prend toujours 30.
 
-**Le coût d'une recherche par segment : il a fallu trois corpus pour le
-savoir, et les deux premiers mentaient en sens inverse.** Sur 40 000
-documents et 200 requêtes, temps de recherche rapporté à la même recherche
-après merge (`bench_segment_search.rs`) :
+**Le coût d'une recherche par segment : aucun de mesurable — et il a fallu
+se tromper deux fois pour le savoir.** Trois runs sur machine au repos,
+40 000 documents, 200 requêtes BGE-M3 réelles, temps de recherche rapporté à
+la même recherche après merge ; et les mêmes trois runs sur le corpus dérivé
+du texte :
 
-| corpus | 5 segments | 20 | 50 | 100 |
-|---|---|---|---|---|
-| dimensions uniformes, tous poids à 1.0 | ×1,8 | ×5,3 | — | — |
-| mots de vrai texte, `tf · idf` | ×1,4 | ×1,1 | ×1,0 | ×1,0 |
-| **BGE-M3 (le dump du 27 août)** | **×1,6** | **×3,1** | **×4,9** | **×7,8** |
+| segments | 1 | 5 | 20 | 50 | 100 |
+|---|---|---|---|---|---|
+| BGE-M3 | ×1,0 | ×1,5 | ×1,3-1,4 | ×1,0-1,1 | ×1,2 |
+| texte `tf · idf` | ×1,0 | ×1,3-1,4 | ×1,1-1,3 | ×1,0 | ×1,0-1,3 |
 
-Pourquoi les deux premiers se trompent :
+Découper l'index découpe aussi les listes de postings, et le WAND élague
+dans chaque morceau ; ce qu'un segment ajoute, c'est une recherche binaire
+par dimension de requête.
 
-- **Poids plats** : le WAND n'a rien avec quoi élaguer, chaque segment
-  recommence un parcours complet — le coût paraît pire qu'il n'est.
-- **Mots de vrai texte** : un vocabulaire de 112 000 dimensions dont la
-  liste médiane fait *deux* documents. Rien à élaguer, donc rien à perdre en
-  découpant.
-- **Vecteurs de modèle** : vocabulaire borné et partagé (6 583 dimensions,
-  liste médiane 52, la plus longue 29 630). Le WAND saute loin dans une
-  longue liste, et c'est exactement ce que le découpage lui retire : chaque
-  segment remplit son propre top-k depuis zéro avant que sa borne puisse
-  élaguer quoi que ce soit.
+### Les deux chiffres faux, et comment
 
-Ce n'était donc pas la forme de Zipf qui comptait, mais la **taille du
-vocabulaire** — et c'est ce que le texte ne peut pas imiter : les mots sont
-quasi uniques, les dimensions d'un modèle sont partagées.
+Ce bench a annoncé **×5,3 à vingt segments**, puis **×7,8 à cent**. Les deux
+étaient reproductibles au moment où ils ont été pris. Les deux étaient des
+artefacts :
 
-**La leçon dépasse le sparse : un bench sur données synthétiques mesure le
-générateur.** Les deux mauvaises réponses étaient reproductibles, stables
-d'un run à l'autre, et fausses.
+1. **Le corpus.** La première version dispersait les dimensions par hachage
+   avec **tous les poids à 1.0**. Des poids plats ne laissent au WAND rien
+   avec quoi élaguer : chaque segment recommence un parcours complet. On
+   mesurait le générateur.
+2. **La machine.** Le second a été pris sur les vrais vecteurs pendant que
+   la même machine faisait tourner le modèle qui les produisait. Sous
+   charge, les cas à beaucoup de segments enflent ; au repos la tendance
+   disparaît et ne revient pas en trois runs.
 
-**Ce qui croît aussi, c'est l'écriture** : une insertion demande à chaque
-segment s'il porte l'id (`Segment::holds`) — 3,4 µs sur un segment, 8,5 µs
-sur cent.
+Et il faut retirer une explication de plus : entre les deux, on avait
+attribué la différence à la **taille du vocabulaire** (un modèle a des
+dimensions partagées, des mots quasi uniques). L'explication était jolie,
+elle expliquait du bruit : au repos, les deux corpus donnent le même
+résultat. La forme du corpus reste réelle et documentée ci-dessous ; son
+effet sur *ce* chiffre-là ne l'était pas.
+
+**Un bench sur données synthétiques mesure le générateur ; un bench sur
+machine chargée mesure la charge. Aucun des deux ne s'annonce.**
+
+**Ce qui croît un peu, c'est l'écriture** : une insertion demande à chaque
+segment s'il porte l'id (`Segment::holds`) — de l'ordre de 2,5 à 4 µs de un
+à cent segments, en restant dans le bruit lui aussi.
 
 **Le seuil de compactage est donc huit** (`LUCIVY_SPARSE_MAX_SEGMENTS`,
-`0` = jamais) : une recherche reste sous le double de son temps compacté,
-sept commits sur huit ne paient que leur delta, et le nombre de fichiers
-reste borné.
+`0` = jamais), justifié par ce qui se compte et non par ce qui se
+chronomètre : deux fichiers et une projection par segment et par shard, tous
+ouverts ; ce chemin d'écriture ; et les octets des documents supprimés que
+seul un merge récupère. Un merge coûtant O(index), un seuil plus haut est
+moins cher en travail de merge et plus cher en fichiers ; huit borne un
+index à seize fichiers par shard en laissant sept commits sur huit ne payer
+que leur delta.
 
 **Ce que le merge prouve.** `segments::merge_segments` marche les tables de
 tokens ensemble et concatène — aucun remappage, aucun dictionnaire
@@ -237,7 +249,8 @@ un bench en veut plus (la réplication multiplie chaque liste par le même
 facteur et laisse nnz, les poids et le déséquilibre intacts — ce n'est pas
 de la donnée nouvelle, et le bench le dit).
 
-Ce que le dump apprend, au-delà des chiffres :
+Ce que le dump apprend (ce sont des mesures sur la donnée elle-même, pas
+des chronos — celles-là tiennent) :
 
 - **les token ids montent à 245 156** : l'espace `u32` est creux, pas dense —
   ce qui valide directement la table indexée par token global, une table

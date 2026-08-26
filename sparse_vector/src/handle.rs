@@ -562,31 +562,31 @@ impl SparseHandle {
     /// Segments a commit leaves before merging them, from
     /// `LUCIVY_SPARSE_MAX_SEGMENTS` (`0` never merges on its own).
     ///
-    /// **Eight**, and the number comes from real vectors — it took three
-    /// corpora to get right, which is worth writing down
-    /// (`tests/bench_segment_search.rs`, 40 000 documents, 200 queries):
+    /// **Eight, and not for search speed** — the segment count does not
+    /// measurably change it. Three runs of `tests/bench_segment_search.rs`
+    /// on an idle machine, 40 000 documents, 200 real BGE-M3 queries:
+    /// 0.06 ms on one segment, 0.07-0.08 ms on a hundred, with the same
+    /// numbers on a corpus drawn from text. Splitting the index splits the
+    /// posting lists with it, and WAND prunes inside each piece; what a
+    /// segment adds is a binary search per query dimension.
     ///
-    /// | corpus | search on 20 segments | on 100 |
-    /// |---|---|---|
-    /// | dimensions spread uniformly, every weight 1.0 | ×5.3 | — |
-    /// | words of real text, `tf · idf` | ×1.0 | ×1.0 |
-    /// | **BGE-M3, the real thing** | **×3.1** | **×7.8** |
+    /// What the cap is really for:
     ///
-    /// The first is flat-weighted, so WAND has nothing to prune with and
-    /// every segment restarts a full walk. The second has a huge vocabulary
-    /// of near-unique words (median posting list: 2 documents), so there is
-    /// nothing to prune *and* nothing to lose. A model's vectors are neither:
-    /// its vocabulary is bounded and shared, so posting lists are long
-    /// (median 52, longest 29 630) and WAND skips far inside them — which is
-    /// exactly what splitting them across segments takes away, since each
-    /// segment fills its own top-k from zero before it can skip anything.
+    /// - **files and mappings** — two files and one mapping per segment, per
+    ///   shard, all of them open;
+    /// - **the write path** — an insert or a delete asks every segment
+    ///   whether it holds the id (`Segment::holds`);
+    /// - **deleted bytes**, which only a merge reclaims.
     ///
-    /// So the segment count does cost, roughly linearly, and eight keeps a
-    /// search under about twice its merged time while leaving seven commits
-    /// out of eight paying only for their delta. It also bounds the file
-    /// count (two files and one mapping per segment, per shard), the write
-    /// path (an insert asks every segment whether it holds the id) and the
-    /// deleted bytes only a merge reclaims.
+    /// A merge costs O(index), so a higher cap is cheaper in merge work and
+    /// dearer in files; eight bounds an index to sixteen files a shard while
+    /// leaving seven commits out of eight paying only for their delta.
+    ///
+    /// Two numbers were published here before this one and both were wrong:
+    /// ×5.3 on twenty segments, measured on vectors spread uniformly with
+    /// every weight at 1.0 — a corpus where WAND cannot prune at all — and
+    /// ×7.8 on a hundred, measured on the real vectors while the machine was
+    /// busy producing them. See the bench's own notes.
     fn max_segments() -> usize {
         static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
         *CAP.get_or_init(|| {

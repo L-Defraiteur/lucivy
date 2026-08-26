@@ -59,11 +59,10 @@ a normal search, and a sparse commit can no longer be cut in half.
   document, read only when something is deleted or updated, and it replaces
   the far larger `sparse_vectors.bin`. A search walks every segment and what
   is still in RAM; past eight segments a commit merges them
-  (`LUCIVY_SPARSE_MAX_SEGMENTS`, `0` never). Eight because a search on real
-  BGE-M3 vectors costs ×3.1 on twenty segments and ×7.8 on a hundred
-  (`bench_segment_search.rs`) — a model's vocabulary is bounded and shared,
-  so posting lists are long, WAND skips far inside them, and splitting them
-  across segments is exactly what takes the skipping away.
+  (`LUCIVY_SPARSE_MAX_SEGMENTS`, `0` never) — not for search speed, which
+  three runs on an idle machine show unchanged from one segment to a
+  hundred, but for the file count (two files and one mapping per segment,
+  per shard), the write path and the deleted bytes only a merge reclaims.
 - **A dimension is its global token id** (`sparse.mmap` format version 3).
   The dimension header's padding word became the token id and the table is
   sorted by it — same sixteen bytes — so a dimension is looked up by binary
@@ -81,16 +80,14 @@ a normal search, and a sparse commit can no longer be cut in half.
   200 queries produced by the rag3weaver session on burn/Vulkan, read from
   `~/lucivy_bench/sparse/` (or `$LUCIVY_SPARSE_DUMP`), with a 500-document
   extract committed under `sparse_vector/tests/fixtures/` so CI has real
-  ones too. It took three corpora to measure one thing, and the two
-  synthetic ones were wrong in opposite directions: dimensions spread
-  uniformly with every weight at 1.0 read ×5.3 on twenty segments, words of
-  real text weighted `tf · idf` read ×1.0, and the model's own vectors read
-  ×3.1. Flat weights leave WAND nothing to prune; real words have a
-  near-unique vocabulary whose median posting list is two documents long, so
-  there is nothing to lose either; a model has a bounded shared vocabulary
-  with lists in the tens of thousands, which is the only case where
-  splitting them costs. **A benchmark on synthetic data measures the
-  generator** — both wrong answers were reproducible.
+  ones too. Getting one number out of them took three tries, and the first
+  two were artefacts that looked solid: ×5.3 on twenty segments, measured on
+  dimensions spread uniformly with every weight at 1.0 — a corpus where WAND
+  cannot prune at all — and ×7.8 on a hundred, measured on the real vectors
+  while the same machine was running the model that produced them. On an
+  idle machine, three runs, both corpora: the segment count does not change
+  search time. **A benchmark on synthetic data measures the generator, and a
+  benchmark on a busy machine measures the load.**
 - The default `balance_weight` of an index is 0.2, not the router's 1.0 —
   the two comments diverged and `CLAUDE.md` repeated the wrong one.
 
