@@ -287,10 +287,25 @@ Les docs sont dans `docs/` organisés par dossier daté. Convention depuis le
 
 | Registre | Package | Publié | Date |
 |----------|---------|---------|---------|
-| PyPI | `lucivy` | **3.0.5** (5 wheels `cp39-abi3` : manylinux_2_28 x86_64 + aarch64, macOS x86_64 + arm64, win_amd64 ; + sdist) | 26 août 2026 (soir) |
-| npm | `lucivy` + `lucivy-linux-x64-gnu`, `lucivy-linux-arm64-gnu`, `lucivy-darwin-x64`, `lucivy-darwin-arm64`, `lucivy-windows-x64` | **3.0.5** | 26 août 2026 (soir) |
-| npm | `lucivy-wasm` | **3.0.5** (worker + pkg WASM, `bindings/emscripten`) | 26 août 2026 (soir) |
-| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` | **3.0.5** | 26 août 2026 (soir) |
+| PyPI | `lucivy` | **3.0.6** (5 wheels `cp39-abi3` : manylinux_2_28 x86_64 + aarch64, macOS x86_64 + arm64, win_amd64 ; + sdist) | 27 août 2026 (nuit) |
+| npm | `lucivy` + `lucivy-linux-x64-gnu`, `lucivy-linux-arm64-gnu`, `lucivy-darwin-x64`, `lucivy-darwin-arm64`, `lucivy-windows-x64` | **3.0.6** | 27 août 2026 (nuit) |
+| npm | `lucivy-wasm` | **3.0.6** (worker + pkg WASM, `bindings/emscripten`) | 27 août 2026 (nuit) |
+| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` | **3.0.6** | 27 août 2026 (nuit) |
+
+3.0.6 dans la nuit du 27 au 28 : **npm est passé au trusted publishing**
+(OIDC) — les 6 paquets que publie `release.yml` ont un publieur de confiance
+`L-Defraiteur/lucivy` / `release.yml` / environnement `release` /
+permission `publish`, le secret `NPM_TOKEN` a été supprimé, et la CI a tout
+publié **sans un seul OTP**, avec attestation de provenance signée. Vérifier
+la configuration : `npx -y npm@latest trust list <paquet> --otp=<code>` (un
+OTP par appel, et le nom du paquet est obligatoire malgré la doc).
+`lucivy-wasm` reste publié **à la main** : aucun workflow ne construit le
+WASM (`build.sh` demande emsdk + nightly `-Z build-std`), donc son trusted
+publisher ne sert à rien tant qu'un job emscripten n'existe pas — à ajouter,
+`build.sh` marche déjà tel quel avec `mymindstorm/setup-emsdk` puisqu'il
+retombe sur `emcc` dans le `PATH` si `$HOME/emsdk` est absent.
+**Attention compat** : `sparse.mmap` passe en format v3, un binaire 3.0.5 ne
+lira pas un index écrit par 3.0.6.
 
 3.0.5 le 26 au soir : **binaires pour cinq plateformes** par
 `.github/workflows/release.yml` (matrice maturin + cargo, Linux dans

@@ -17,7 +17,7 @@ database. Everything is MIT.
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — it clones
 lucivy's own source from GitHub and indexes it in your browser in a few seconds.
 
-![Lucivy playground — the lucivy source indexed in the browser, searching "ror::lucivyer" across token boundaries](docs/25-08-2026/playground_screenshot.jpg)
+![Left: the presentation page, whose terminal clones lucivy's source and indexes it live. Right: the playground, 1183 files of that source indexed in the browser in 26 s](docs/28-08-2026/playground.png)
 
 ### What's new in 3.0.0
 
