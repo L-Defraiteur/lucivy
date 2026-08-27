@@ -710,7 +710,18 @@ pages = [post(node, "/search", {"query": query, "stats": merged}) for node in NO
 
 <span class="c"># Round 3 is local: merge the top-k lists by score. Nothing else to do —</span>
 <span class="c"># the scores are already comparable, which is the whole point.</span>
-hits = sorted(sum(pages, []), key=lambda h: -h["score"])[:10]</pre>
+hits = sorted(sum(pages, []), key=lambda h: -h["score"])[:10]
+
+<span class="c">#  ── restricted to what this caller may see ────────────────────────</span>
+<span class="c"># The ids come from your permissions, your tenant, your agent's domain —</span>
+<span class="c"># and they are spread over the nodes. Send them along; each node visits</span>
+<span class="c"># only those documents, and still scores under the federation's statistics.</span>
+allowed = acl.visible_ids(user)               <span class="c"># e.g. [17, 44, 802, ...]</span>
+pages = [post(node, "/search", {"query": query, "stats": merged, "allowed": allowed})
+         for node in NODES]
+
+<span class="c"># A document keeps the rank it would have had for anyone else: the filter</span>
+<span class="c"># says what is *visited*, the statistics say how it *scores*.</span></pre>
 <pre class="code" data-lang="node" hidden><span class="c">//  ── on every node (a process, a machine) ─────────────────────────</span>
 app.post('/export_stats', (req, res) =&gt;
   res.send(index.exportStats(JSON.stringify(req.body.query))));   <span class="c">// a JSON string</span>
@@ -728,7 +739,18 @@ const merged = mergeStats(stats);            <span class="c">// one JSON string,
 const pages = await Promise.all(NODES.map(n =&gt; post(n, '/search', { query, stats: merged })));
 
 <span class="c">// Round 3 is local: merge the top-k lists by score, and stop there.</span>
-const hits = pages.flat().sort((a, b) =&gt; b.score - a.score).slice(0, 10);</pre>
+const hits = pages.flat().sort((a, b) =&gt; b.score - a.score).slice(0, 10);
+
+<span class="c">//  ── restricted to what this caller may see ───────────────────────</span>
+<span class="c">// The ids come from your permissions, your tenant, your agent's domain,</span>
+<span class="c">// and they are spread over the nodes. Each node visits only those</span>
+<span class="c">// documents, and still scores under the federation's statistics.</span>
+const allowedIds = acl.visibleIds(user);     <span class="c">// e.g. [17, 44, 802, ...]</span>
+const pages2 = await Promise.all(NODES.map(n =&gt;
+  post(n, '/search', { query, stats: merged, allowedIds })));
+
+<span class="c">// A document keeps the rank it would have had for anyone else: the filter</span>
+<span class="c">// says what is visited, the statistics say how it scores.</span></pre>
 <pre class="code" data-lang="rust" hidden>use lucivy_core::bm25_global::ExportableStats;
 
 <span class="c">//  ── on every node (a process, a machine) ─────────────────────────</span>
@@ -752,7 +774,14 @@ let pages = join_all(nodes.iter().map(|n| n.search(&amp;q, &amp;merged))).await;
 <span class="c">// Round 3 is local: merge the top-k lists by score.</span>
 let mut hits: Vec&lt;_&gt; = pages.into_iter().flatten().collect();
 hits.sort_by(|a, b| b.score.total_cmp(&amp;a.score));
-hits.truncate(10);</pre>
+hits.truncate(10);
+
+<span class="c">//  ── restricted to what this caller may see ───────────────────────</span>
+<span class="c">// On the node: the ids come from your permissions, your tenant, your</span>
+<span class="c">// agent's domain. Only those documents are visited; the scoring is still</span>
+<span class="c">// the federation's.</span>
+let allowed: HashSet&lt;u64&gt; = acl.visible_ids(user);
+index.search_filtered_with_global_stats(&amp;q, 10, &amp;merged, None, allowed)?;</pre>
       <div class="how">
         <span class="label">How it works</span>
         BM25 asks how rare a term is <b>in the whole corpus</b>, and no machine knows that alone —
@@ -766,8 +795,23 @@ hits.truncate(10);</pre>
         <b>Two round trips of JSON, no data movement.</b> Nothing is copied, nothing is mounted, and
         a node never sees another's documents — sharing statistics discloses term frequencies, so it
         belongs inside one trust boundary and not between two. Since 3.0.6 this call takes the same
-        DAG as a local search: shards in parallel, top-k bounded per shard, batching when the index
-        does not fit in memory, and <code>allowed_ids</code> composes with it.
+        DAG as a local search: shards in parallel, top-k bounded per shard, and batching when the
+        index does not fit in memory.
+        <br><br>
+        <b>The filter and the statistics answer two different questions</b>, and lucivy keeps them
+        apart on purpose:
+        <br>
+        &bull; <code>search_with_global_stats(..., allowed_ids)</code> — the ids say what is
+        <b>visited</b>, the federation's statistics say how it <b>scores</b>. A document keeps the
+        rank it would have for anyone else, so a result's position does not depend on who is
+        looking. That is what you want for permissions, tenants, an agent's domain: ranking that
+        does not leak, and does not wobble per viewer.
+        <br>
+        &bull; <code>search_filtered</code> on a single index — scores <b>as if the index were the
+        subset</b>: document frequencies counted on it, <code>N</code> its size. That is what you
+        want when the subset <i>is</i> the corpus for that question, and it is a different answer,
+        not a rounding difference (with a global <code>N</code> and a frequency counted on ten
+        documents, one hit went from 0.02 to 2.9 — which is why the two modes exist).
       </div>
     </div>
 
