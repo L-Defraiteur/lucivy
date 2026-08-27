@@ -257,7 +257,11 @@ cd playground && node serve.mjs
 
 ## Docs
 
-**Dossier courant : `docs/26-08-2026/` — `01-plan-page-presentation.md` (le plan), `02-page-presentation-et-release-3.0.5.md` (ce qui a été fait, ce qui a cassé, à faire). Veille : `docs/25-08-2026/` — lire `05-recap-progression-et-a-faire.md`,
+**Dossier courant : `docs/27-08-2026/` — `02-rapport-outils-tests-et-a-faire.md`
+(autonome : ce qui a été fait depuis 3.0.5, comment lancer chaque test et
+chaque bench, les variables d'environnement, et ce qui reste — publication
+3.0.6 comprise), puis `01-design-sparse-segments-dimension-globale.md`.
+Veille : `docs/26-08-2026/` — `01-plan-page-presentation.md` (le plan), `02-page-presentation-et-release-3.0.5.md` (ce qui a été fait, ce qui a cassé, à faire). Veille : `docs/25-08-2026/` — lire `05-recap-progression-et-a-faire.md`,
 `06-architecture.md`, `07-knowledge-dump-outils.md`** (autonomes, écrits pour
 remplacer la lecture de l'historique), puis `08-relecture-commits-journee.md`
 (relecture critique de la journée : ce qui a été corrigé le soir et pourquoi). 01-04 sont le détail de la journée :
