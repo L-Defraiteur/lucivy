@@ -117,9 +117,23 @@ where
     if lanes.is_empty() {
         return Vec::new();
     }
-    let mut ids: Vec<u64> = allowed.to_vec();
-    ids.sort_unstable();
-    ids.dedup();
+    // The allowed set is copied, sorted and deduplicated here — once per
+    // query. On a work domain of hundreds of thousands of ids that is the
+    // dominant cost, and it is paid again at every search for a set that
+    // does not change. A caller that hands over sorted, unique ids (the
+    // usual shape: they come out of a query, a bitmap or a sorted column)
+    // pays a linear check instead, and no allocation at all.
+    let sorted_unique = allowed.windows(2).all(|w| w[0] < w[1]);
+    let owned: Vec<u64>;
+    let ids: &[u64] = if sorted_unique {
+        allowed
+    } else {
+        let mut v = allowed.to_vec();
+        v.sort_unstable();
+        v.dedup();
+        owned = v;
+        &owned
+    };
     // A seek is a binary search per lane; a window walk touches every
     // posting of every lane once. Compare the two, seek weighed by a
     // conservative constant.
@@ -132,9 +146,21 @@ where
     SCRATCH.with(|cell| {
         let mut scratch = cell.borrow_mut();
         if seek_work < postings {
-            wand::search_ids(&lanes, &ids, cursors, TopKSink::new(limit), &mut scratch)
+            wand::search_ids(&lanes, ids, cursors, TopKSink::new(limit), &mut scratch)
+        } else if sorted_unique {
+            // Sorted ids answer membership by binary search, with nothing
+            // built: a hash set of a large domain is rebuilt at every query
+            // and that build is the cost, not the lookups.
+            wand::search_with(
+                &lanes,
+                |id| ids.binary_search(&id).is_ok(),
+                cursors,
+                TopKSink::new(limit),
+                SearchOptions::default(),
+                &mut scratch,
+            )
         } else {
-            let set: std::collections::HashSet<u64> = ids.into_iter().collect();
+            let set: std::collections::HashSet<u64> = ids.iter().copied().collect();
             wand::search_with(
                 &lanes,
                 |id| set.contains(&id),

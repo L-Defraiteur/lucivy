@@ -323,3 +323,69 @@ fn segments_are_merged_once_they_pile_up() {
         assert_eq!(handle.search(&q, 30), want.search(&q, 30), "merging changed an answer");
     }
 }
+
+/// A filtered search does not depend on how the index happens to be laid
+/// out: the same allowed set gives the same hits, the same scores and the
+/// same order before and after a merge. Asked by the rag3weaver session
+/// (doc 08, §2.1): can the filter be counted on *while* an index lives, and
+/// not only after a compaction.
+#[test]
+fn a_filtered_search_is_the_same_before_and_after_a_merge() {
+    // Six commits, under the cap: nothing merges until this test asks.
+    // (Setting the environment variable here would reach the other tests —
+    // the cap is read once per process.)
+    let dir = TempDir::new("filter_merge");
+    let handle = SparseHandle::create(dir.str()).unwrap();
+
+    let mut docs: Vec<(u64, SparseVector)> = Vec::new();
+    for round in 0..5u64 {
+        for i in 0..24u64 {
+            let id = round * 24 + i;
+            let v = vector(id, 1.0 + (id % 4) as f32);
+            handle.insert(id, &v).unwrap();
+            docs.push((id, v));
+        }
+        handle.commit_inner().unwrap();
+    }
+    // Deletions too: a tombstone must not survive a merge as a missing hit.
+    for id in (3..120u64).step_by(17) {
+        handle.remove(id).unwrap();
+        docs.retain(|(d, _)| *d != id);
+    }
+    handle.commit_inner().unwrap();
+    assert!(handle.num_segments() >= 5, "the point is to search several segments");
+
+    // Allowed sets from very selective to nearly everything.
+    let sets: Vec<Vec<u64>> = vec![
+        (0..120).step_by(37).collect(),        // ~3 ids
+        (0..120).step_by(7).collect(),         // ~17
+        (0..120).step_by(2).collect(),         // 60
+        (0..120).collect(),                    // everything, including deleted ones
+        vec![9_999, 10_000],                   // none of them exist
+    ];
+
+    let before: Vec<Vec<Vec<(u64, f32)>>> = sets.iter()
+        .map(|ids| queries().iter().map(|q| handle.search_filtered(q, 40, ids)).collect())
+        .collect();
+
+    // And the reference: an in-RAM index holding exactly the live documents.
+    let reference = reference(&docs);
+    for (ids, per_query) in sets.iter().zip(&before) {
+        for (q, got) in queries().iter().zip(per_query) {
+            let mut want: Vec<(u64, f32)> = reference.search(q, 200).into_iter()
+                .filter(|(id, _)| ids.contains(id))
+                .collect();
+            want.truncate(40);
+            assert_eq!(got, &want, "a filtered search over segments is the search intersected");
+        }
+    }
+
+    handle.compact().unwrap();
+    assert_eq!(handle.num_segments(), 1);
+    for (ids, per_query) in sets.iter().zip(&before) {
+        for (q, want) in queries().iter().zip(per_query) {
+            assert_eq!(&handle.search_filtered(q, 40, ids), want,
+                "the merge moved a filtered answer");
+        }
+    }
+}

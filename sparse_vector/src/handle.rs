@@ -435,7 +435,7 @@ impl SparseHandle {
     pub fn search(&self, query: &SparseVector, limit: usize) -> Vec<(u64, f32)> {
         let inner = self.inner.lock().unwrap();
         if !inner.segments.is_empty() {
-            return Self::search_segments(&inner, query, limit, &|_| true);
+            return Self::search_segments(&inner, query, limit, None);
         }
         if !inner.dirty {
             if let Some(ref mmap) = inner.mmap {
@@ -457,31 +457,66 @@ impl SparseHandle {
     /// to deduplicate: it is a sort and a truncation, the same one the
     /// sharded handle does across shards.
     ///
+    /// `allowed` is passed **down** rather than applied as a predicate: a
+    /// selective set is answered by a binary search per lane, where a
+    /// predicate walks every posting of every lane
+    /// ([`crate::index::run_search_allowed`] weighs the two). Only a segment
+    /// that actually holds tombstones pays for taking them out of the set
+    /// first; the usual case hands the ids straight through.
+    ///
     /// The WAND pruning happens inside each segment rather than over the
     /// whole index; that is the price of segments, and what a merge buys
     /// back.
-    fn search_segments<F: Fn(u64) -> bool>(
+    fn search_segments(
         inner: &Inner,
         query: &SparseVector,
         limit: usize,
-        filter: &F,
+        allowed: Option<&[u64]>,
     ) -> Vec<(u64, f32)> {
+        let no_dims = HashMap::new();
         let mut all: Vec<(u64, f32)> = Vec::new();
         for seg in &inner.segments {
             if seg.data.num_vectors() == 0 {
                 continue;
             }
-            let keep = |id: u64| seg.is_live(id) && filter(id);
-            all.extend(mmap_index::search_mmap(&seg.data, &HashMap::new(), query, limit, &keep));
+            let hits = match allowed {
+                Some(ids) if seg.meta.deleted.is_empty() => {
+                    mmap_index::search_mmap_allowed(&seg.data, &no_dims, query, limit, ids)
+                }
+                Some(ids) => {
+                    let live: Vec<u64> = ids.iter().copied().filter(|&id| seg.is_live(id)).collect();
+                    mmap_index::search_mmap_allowed(&seg.data, &no_dims, query, limit, &live)
+                }
+                None => mmap_index::search_mmap(
+                    &seg.data, &no_dims, query, limit, &|id| seg.is_live(id)),
+            };
+            all.extend(hits);
         }
         if !inner.index.is_empty() {
-            all.extend(inner.index.search(query, limit).into_iter().filter(|(id, _)| filter(*id)));
+            all.extend(match allowed {
+                Some(ids) => inner.index.search_filtered(query, limit, ids),
+                None => inner.index.search(query, limit),
+            });
         }
         all.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
         all.truncate(limit);
         all
     }
 
+    /// Top-`limit` records among `allowed_ids` only.
+    ///
+    /// A sparse score is a plain dot product with no corpus statistics, so
+    /// this is exactly [`Self::search`] intersected with the set: the same
+    /// documents in the same order, with the same scores (to a few units in
+    /// the last place — the two paths add a document's lanes in a different
+    /// order). Pinned by `tests/test_filter_truth.rs`.
+    ///
+    /// **Hand over sorted, unique ids** when you can: the set is then read
+    /// where it is, and the filter costs between ×0.15 (a very selective
+    /// set, which is faster than searching everything) and ×1.3 of an
+    /// unfiltered search at any size — 540 000 ids answer in 0.22 ms where
+    /// they took 6.0 ms before (`tests/bench_filter_selectivity.rs`). An
+    /// unsorted set is copied, sorted and deduplicated at **every** query.
     pub fn search_filtered(
         &self,
         query: &SparseVector,
@@ -490,8 +525,7 @@ impl SparseHandle {
     ) -> Vec<(u64, f32)> {
         let inner = self.inner.lock().unwrap();
         if !inner.segments.is_empty() {
-            let allowed: std::collections::HashSet<u64> = allowed_ids.iter().copied().collect();
-            return Self::search_segments(&inner, query, limit, &|id| allowed.contains(&id));
+            return Self::search_segments(&inner, query, limit, Some(allowed_ids));
         }
         if !inner.dirty {
             if let Some(ref mmap) = inner.mmap {

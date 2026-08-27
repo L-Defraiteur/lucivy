@@ -76,6 +76,27 @@ a normal search, and a sparse commit can no longer be cut in half.
   Pinned by `test_global_dims.rs` and `test_segments.rs` — including the
   trap this surfaced: RAM postings were reloaded by position, which under a
   sorted table hands every dimension someone else's list.
+- **A filtered sparse search costs almost nothing, at any size** — when the
+  allowed ids are sorted and unique. The set used to be copied, sorted and
+  deduplicated at every query, and the large-set path rebuilt a hash set of
+  it every time too; a sorted set is now read where it is, and membership is
+  a binary search rather than a table that has to be built first. Measured
+  on real BGE-M3 vectors, 40 000 documents
+  (`tests/bench_filter_selectivity.rs`): a domain of 540 000 ids went from
+  6.0 ms a query to **0.22 ms**, and the whole curve flattened — ×0.15 of an
+  unfiltered search on 0.1 % of the corpus (the filter *wins*), ×1.3 at
+  worst from 1 % to 100 %, where it used to reach ×7.7. An unsorted set
+  still pays the copy and the sort, every query.
+- `sparse` search over segments passes the allowed ids **down to each
+  segment** instead of testing a predicate: the choice between a binary
+  search per lane and a walk with a membership test is made per segment
+  again, as it was before segmentation. Found by a question from the
+  rag3weaver session, not by a test.
+- A filtered sparse search is pinned as *the unfiltered one intersected with
+  the set* — same documents, same order, same scores to a few units in the
+  last place, over both code paths and whatever the ids look like (unsorted,
+  duplicated, unknown to the index): `tests/test_filter_truth.rs`. And it is
+  unchanged by segmentation or by a merge (`test_segments.rs`).
 - **The sparse benches run on real BGE-M3 vectors** — 2 924 documents and
   200 queries produced by the rag3weaver session on burn/Vulkan, read from
   `~/lucivy_bench/sparse/` (or `$LUCIVY_SPARSE_DUMP`), with a 500-document
