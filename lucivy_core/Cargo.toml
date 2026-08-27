@@ -1,6 +1,6 @@
 [package]
 name = "lucivy-core"
-version = "3.0.5"
+version = "3.0.6"
 edition = "2021"
 license = "MIT"
 description = "Core library for Lucivy full-text search: schema, query, handle, tokenizer"
@@ -18,12 +18,12 @@ default = ["mmap"]
 mmap = ["ld-lucivy/mmap"]
 
 [dependencies]
-ld-lucivy = { version = "3.0.5", path = "..", default-features = false, features = [
+ld-lucivy = { version = "3.0.6", path = "..", default-features = false, features = [
     "stopwords",
     "lz4-compression",
 ] }
-luciole = { version = "3.0.5", path = "../luciole" }
-lucistore = { version = "3.0.5", path = "../lucistore" }
+luciole = { version = "3.0.6", path = "../luciole" }
+lucistore = { version = "3.0.6", path = "../lucistore" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"

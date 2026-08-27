@@ -1,9 +1,17 @@
-Unreleased
+Lucivy 3.0.6
 ================================
 
 Two items of the shared-index specification written by the rag3weaver
 session (`docs/26-08-2026/…`): the federated mode now takes the same path as
-a normal search, and a sparse commit can no longer be cut in half.
+a normal search, and a sparse commit can no longer be cut in half. Then the
+sparse index became a list of segments, and its filter nearly free. Every
+crate and binding ships as **3.0.6**.
+
+**Compatibility.** `sparse.mmap` moves to format version 3. Versions 1 and 2
+still open and are converted by the next commit, so upgrading is transparent
+— but the reverse is not: a **3.0.5 binary cannot read an index written by
+3.0.6** (`unsupported version: 3`). Nothing else in the release changes a
+format; the full-text index, the snapshots and the deltas are untouched.
 
 - **A federated search goes through the search DAG.**
   `search_with_global_stats` — the mode where each node exports its
