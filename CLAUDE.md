@@ -287,12 +287,26 @@ Les docs sont dans `docs/` organisés par dossier daté. Convention depuis le
 
 | Registre | Package | Publié | Date |
 |----------|---------|---------|---------|
-| PyPI | `lucivy` | **3.0.6** (5 wheels `cp39-abi3` : manylinux_2_28 x86_64 + aarch64, macOS x86_64 + arm64, win_amd64 ; + sdist) | 27 août 2026 (nuit) |
-| npm | `lucivy` + `lucivy-linux-x64-gnu`, `lucivy-linux-arm64-gnu`, `lucivy-darwin-x64`, `lucivy-darwin-arm64`, `lucivy-windows-x64` | **3.0.6** | 27 août 2026 (nuit) |
-| npm | `lucivy-wasm` | **3.0.6** (worker + pkg WASM, `bindings/emscripten`) | 27 août 2026 (nuit) |
-| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` | **3.0.6** | 27 août 2026 (nuit) |
+| PyPI | `lucivy` | **3.0.7** (5 wheels `cp39-abi3` : manylinux_2_28 x86_64 + aarch64, macOS x86_64 + arm64, win_amd64 ; + sdist) | 28 août 2026 (nuit) |
+| npm | `lucivy` + `lucivy-linux-x64-gnu`, `lucivy-linux-arm64-gnu`, `lucivy-darwin-x64`, `lucivy-darwin-arm64`, `lucivy-windows-x64` | **3.0.7** | 28 août 2026 (nuit) |
+| npm | `lucivy-wasm` | **3.0.7** (worker + pkg WASM, `bindings/emscripten`) | 28 août 2026 (nuit) |
+| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` | **3.0.7** | 28 août 2026 (nuit) |
 
-3.0.6 dans la nuit du 27 au 28 : **npm est passé au trusted publishing**
+3.0.7 dans la nuit du 27 au 28, juste après 3.0.6 : **le fuzzy relâché
+perdait des documents** depuis le 23 août (donc 3.0.2 à 3.0.6). `auto`
+choisissait le générateur `pivot`, qui tire ses candidats des postings de
+trigrammes — lesquels n'existent qu'à l'intérieur des chunks d'un token — donc
+une occurrence dont les trigrammes partagés enjambent tous un séparateur n'a
+aucun posting et **son document n'est pas rendu du tout**. Corrigé : séparateurs
+relâchés ⇒ `pivot` exclu, condition connue d'avance. Trouvé par un nouveau
+panel `v3_ground_truth_demo` (93 605 fichiers du kernel, comptes **et** spans
+comparés à une lecture du disque) ; `bench_sharding` ne pouvait pas le voir,
+toutes ses lignes affichent « 20 hits » parce que 20 est le plafond de
+résultats. Détail : `docs/28-08-2026/02-fuzzy-perdait-des-documents.md`.
+**L'environnement `release` n'a aucun réviseur requis** — les publications
+partent seules dès qu'un tag correspond.
+
+3.0.6 juste avant : **npm est passé au trusted publishing**
 (OIDC) — les 6 paquets que publie `release.yml` ont un publieur de confiance
 `L-Defraiteur/lucivy` / `release.yml` / environnement `release` /
 permission `publish`, le secret `NPM_TOKEN` a été supprimé, et la CI a tout

@@ -235,11 +235,16 @@ window._allLogs = [];
   /* The one number worth reading before anything else — and the reference it
      was checked against, because a time alone says nothing about the answer. */
   .hero .headline-number {
-    font-size: 15px; line-height: 1.6; max-width: 720px; margin: 0 auto 24px;
-    padding: 12px 16px; border: 1px solid var(--border); border-radius: 8px;
+    font-size: 15px; line-height: 1.7; max-width: 880px; margin: 0 auto 24px;
+    padding: 14px 22px; border: 1px solid var(--border); border-radius: 8px;
     background: rgba(127, 127, 127, 0.06); color: var(--text-dim);
   }
   .hero .headline-number b { color: var(--text); }
+  /* The engine's time against the reference it was checked against: the point
+     is the pair, so they are coloured as a pair wherever both appear. */
+  .fast { color: var(--green); font-weight: 600; }
+  .slow { color: var(--red); font-weight: 600; }
+  table td.fast, table td.slow { font-variant-numeric: tabular-nums; }
 
   /* The terminal: every line in it is something the worker did. */
   .term {
@@ -435,9 +440,10 @@ window._allLogs = [];
     </p>
     <p class="headline-number">
       <b>93&nbsp;605 Linux kernel files.</b> <code>sched</code> as a substring matches
-      <b>9&nbsp;327</b> of them in <b>78&nbsp;ms</b> &mdash; and all
+      <b>9&nbsp;327</b> of them in <span class="fast">78&nbsp;ms</span> &mdash; and all
       <b>53&nbsp;336</b> highlighted spans were checked against a byte-by-byte scan
-      of the files on disk, which took <b>4&nbsp;022&nbsp;ms</b> to answer the same thing.
+      of the files on disk, which took <span class="slow">4&nbsp;022&nbsp;ms</span> to
+      answer the same thing.
       <a href="#numbers-verified">The whole panel &darr;</a>
     </p>
     <div class="cta">
@@ -1120,16 +1126,16 @@ index.compact()?;                                       <span class="c">// merge
     </p>
     <div style="overflow-x:auto">
     <table>
-      <tr><th>query</th><th>mode</th><th>documents</th><th>spans</th><th>lucivy</th><th>naive scan</th></tr>
-      <tr><td><code>mutex_lock</code></td><td>substring</td><td>5 145</td><td>20 797</td><td><b>137 ms</b></td><td>8 789 ms</td></tr>
-      <tr><td><code>mutex_lock</code></td><td>separators relaxed</td><td>5 825</td><td>22 817</td><td>88 ms</td><td>4 031 ms</td></tr>
-      <tr><td><code>spin_lock</code></td><td>substring</td><td>6 569</td><td>34 667</td><td>112 ms</td><td>3 963 ms</td></tr>
-      <tr><td><code>sched</code></td><td>whole word</td><td>5 311</td><td>27 986</td><td>101 ms</td><td>4 651 ms</td></tr>
-      <tr><td><code>sched</code></td><td>substring</td><td><b>9 327</b></td><td>53 336</td><td>78 ms</td><td>4 022 ms</td></tr>
-      <tr><td><code>printk</code></td><td>start of token</td><td>4 460</td><td>24 719</td><td>78 ms</td><td>4 352 ms</td></tr>
-      <tr><td><code>schdule</code></td><td>fuzzy, 1 edit</td><td>5 206</td><td>18 843</td><td>224 ms</td><td>12 425 ms</td></tr>
-      <tr><td><code>regsiter</code></td><td>fuzzy, 2 edits</td><td>35 146</td><td><b>267 348</b></td><td>879 ms</td><td>13 633 ms</td></tr>
-      <tr><td><code>spin_lock_[a-z]+</code></td><td>regex</td><td>5 510</td><td>24 368</td><td>180 ms</td><td>472 ms</td></tr>
+      <tr><th>query</th><th>mode</th><th>documents</th><th>spans</th><th class="fast">lucivy</th><th class="slow">naive scan</th></tr>
+      <tr><td><code>mutex_lock</code></td><td>substring</td><td>5 145</td><td>20 797</td><td class="fast">137 ms</td><td class="slow">8 789 ms</td></tr>
+      <tr><td><code>mutex_lock</code></td><td>separators relaxed</td><td>5 825</td><td>22 817</td><td class="fast">88 ms</td><td class="slow">4 031 ms</td></tr>
+      <tr><td><code>spin_lock</code></td><td>substring</td><td>6 569</td><td>34 667</td><td class="fast">112 ms</td><td class="slow">3 963 ms</td></tr>
+      <tr><td><code>sched</code></td><td>whole word</td><td>5 311</td><td>27 986</td><td class="fast">101 ms</td><td class="slow">4 651 ms</td></tr>
+      <tr><td><code>sched</code></td><td>substring</td><td><b>9 327</b></td><td>53 336</td><td class="fast">78 ms</td><td class="slow">4 022 ms</td></tr>
+      <tr><td><code>printk</code></td><td>start of token</td><td>4 460</td><td>24 719</td><td class="fast">78 ms</td><td class="slow">4 352 ms</td></tr>
+      <tr><td><code>schdule</code></td><td>fuzzy, 1 edit</td><td>5 206</td><td>18 843</td><td class="fast">224 ms</td><td class="slow">12 425 ms</td></tr>
+      <tr><td><code>regsiter</code></td><td>fuzzy, 2 edits</td><td>35 146</td><td><b>267 348</b></td><td class="fast">879 ms</td><td class="slow">13 633 ms</td></tr>
+      <tr><td><code>spin_lock_[a-z]+</code></td><td>regex</td><td>5 510</td><td>24 368</td><td class="fast">180 ms</td><td class="slow">472 ms</td></tr>
       <tr><td colspan="4"><b>indexing</b></td><td colspan="2"><b>93 605 documents in 122 s</b> (839 docs/s)</td></tr>
     </table>
     </div>
