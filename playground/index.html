@@ -500,13 +500,14 @@ window._allLogs = [];
   </section>
 
   <section id="doc">
-    <h2>Using it <small>eight ways, each with its own machinery</small></h2>
+    <h2>Using it <small>nine ways, each with its own machinery</small></h2>
     <div class="doc-index">
       <a href="#doc-query">Query</a>
       <a href="#doc-filter">Filter</a>
       <a href="#doc-shard">Shard</a>
       <a href="#doc-distribute">Distribute</a>
       <a href="#doc-storage">Bring your own storage</a>
+      <a href="#doc-acid">One transaction</a>
       <a href="#doc-sync">Snapshot &amp; sync</a>
       <a href="#doc-browser">Browser</a>
       <a href="#doc-sparse">Sparse vectors</a>
@@ -685,51 +686,88 @@ index.wait_merges_quiet()?;</pre>
     <div class="doc-entry" id="doc-distribute">
       <h3>Distribute it</h3>
       <p>
-        Several machines, each with its own index, searched as if they were one — without copying
-        or mounting anything.
+        Several <b>machines</b>, each with its own index, searched as one — without copying or
+        mounting anything. Three round trips of small JSON, no data movement: what crosses the
+        network is statistics, never documents.
       </p>
-<pre class="code" data-lang="py">q = {"type": "contains", "field": "body", "value": "mutex"}
+<pre class="code" data-lang="py"><span class="c">#  ── on every node (a process, a machine) ──────────────────────────</span>
+<span class="c"># Each node serves its own index and answers two calls over your transport.</span>
 
-<span class="c"># On each node, then on the coordinator</span>
-merged = lucivy.merge_stats([node_a.export_stats(q), node_b.export_stats(q)])
+def handle_export_stats(query: dict) -&gt; str:
+    return index.export_stats(query)          <span class="c"># a JSON string, a few kB</span>
 
-<span class="c"># Back on each node: everyone scores on the federation's corpus</span>
-hits_a = node_a.search_with_global_stats(q, merged, limit=10)
-hits_b = node_b.search_with_global_stats(q, merged, limit=10)
+def handle_search(query: dict, merged_stats: str, allowed=None) -&gt; list:
+    return index.search_with_global_stats(query, merged_stats, limit=10,
+                                          allowed_ids=allowed)
 
-<span class="c"># And the pre-filter composes with it</span>
-hits_a = node_a.search_with_global_stats(q, merged, allowed_ids=[3, 7, 11])</pre>
-<pre class="code" data-lang="node" hidden>const q = JSON.stringify({ type: 'contains', field: 'body', value: 'mutex' });
+<span class="c">#  ── on the coordinator ────────────────────────────────────────────</span>
+<span class="c"># Round 1: ask every node what it knows about this query.</span>
+stats = [post(node, "/export_stats", query) for node in NODES]   <span class="c"># parallel in practice</span>
+merged = lucivy.merge_stats(stats)            <span class="c"># one JSON string, sent back to all</span>
 
-<span class="c">// On each node, then on the coordinator</span>
-const merged = mergeStats([nodeA.exportStats(q), nodeB.exportStats(q)]);
+<span class="c"># Round 2: everyone searches under the same statistics, and returns its top-k.</span>
+pages = [post(node, "/search", {"query": query, "stats": merged}) for node in NODES]
 
-<span class="c">// Back on each node: everyone scores on the federation's corpus</span>
-const hitsA = nodeA.searchWithGlobalStats(q, merged, 10);
-const hitsB = nodeB.searchWithGlobalStats(q, merged, 10);
+<span class="c"># Round 3 is local: merge the top-k lists by score. Nothing else to do —</span>
+<span class="c"># the scores are already comparable, which is the whole point.</span>
+hits = sorted(sum(pages, []), key=lambda h: -h["score"])[:10]</pre>
+<pre class="code" data-lang="node" hidden><span class="c">//  ── on every node (a process, a machine) ─────────────────────────</span>
+app.post('/export_stats', (req, res) =&gt;
+  res.send(index.exportStats(JSON.stringify(req.body.query))));   <span class="c">// a JSON string</span>
 
-<span class="c">// And the pre-filter composes with it</span>
-nodeA.searchWithGlobalStats(q, merged, 10, false, [3, 7, 11]);</pre>
+app.post('/search', (req, res) =&gt;
+  res.json(index.searchWithGlobalStats(JSON.stringify(req.body.query),
+                                       req.body.stats, 10, false, req.body.allowedIds)));
+
+<span class="c">//  ── on the coordinator ───────────────────────────────────────────</span>
+<span class="c">// Round 1: ask every node what it knows about this query.</span>
+const stats = await Promise.all(NODES.map(n =&gt; post(n, '/export_stats', { query })));
+const merged = mergeStats(stats);            <span class="c">// one JSON string, sent back to all</span>
+
+<span class="c">// Round 2: everyone searches under the same statistics.</span>
+const pages = await Promise.all(NODES.map(n =&gt; post(n, '/search', { query, stats: merged })));
+
+<span class="c">// Round 3 is local: merge the top-k lists by score, and stop there.</span>
+const hits = pages.flat().sort((a, b) =&gt; b.score - a.score).slice(0, 10);</pre>
 <pre class="code" data-lang="rust" hidden>use lucivy_core::bm25_global::ExportableStats;
 
-<span class="c">// On each node, then on the coordinator</span>
-let merged = ExportableStats::merge(&amp;[node_a.export_stats(&amp;q)?, node_b.export_stats(&amp;q)?]);
+<span class="c">//  ── on every node (a process, a machine) ─────────────────────────</span>
+async fn export_stats(index: &amp;ShardedHandle, q: &amp;QueryConfig) -&gt; String {
+    serde_json::to_string(&amp;index.export_stats(q).unwrap()).unwrap()
+}
 
-<span class="c">// Back on each node: everyone scores on the federation's corpus</span>
-let hits_a = node_a.search_with_global_stats(&amp;q, 10, &amp;merged, None)?;
-let hits_b = node_b.search_with_global_stats(&amp;q, 10, &amp;merged, None)?;
+async fn search(index: &amp;ShardedHandle, q: &amp;QueryConfig, stats: &amp;str) -&gt; Vec&lt;ShardedSearchResult&gt; {
+    let merged: ExportableStats = serde_json::from_str(stats).unwrap();
+    index.search_with_global_stats(q, 10, &amp;merged, None).unwrap()
+}
 
-<span class="c">// And the pre-filter composes with it</span>
-node_a.search_filtered_with_global_stats(&amp;q, 10, &amp;merged, None, allowed)?;</pre>
+<span class="c">//  ── on the coordinator ───────────────────────────────────────────</span>
+<span class="c">// Round 1: ask every node, in parallel, what it knows about this query.</span>
+let per_node: Vec&lt;ExportableStats&gt; = join_all(nodes.iter().map(|n| n.export_stats(&amp;q))).await;
+let merged = ExportableStats::merge(&amp;per_node);
+
+<span class="c">// Round 2: everyone searches under the same statistics.</span>
+let pages = join_all(nodes.iter().map(|n| n.search(&amp;q, &amp;merged))).await;
+
+<span class="c">// Round 3 is local: merge the top-k lists by score.</span>
+let mut hits: Vec&lt;_&gt; = pages.into_iter().flatten().collect();
+hits.sort_by(|a, b| b.score.total_cmp(&amp;a.score));
+hits.truncate(10);</pre>
       <div class="how">
         <span class="label">How it works</span>
-        BM25 needs to know how rare a term is <b>in the whole corpus</b>; on separate machines
-        nobody knows that alone. <code>export_stats</code> serialises what a node knows (document
-        frequencies, document and token counts), <code>merge_stats</code> sums them, and each node
-        then compiles its weight from the merged statistics instead of its own. Nothing is copied,
-        nothing is mounted, and a document scores the same on its node as it would in one index
-        holding everything. Since 3.0.6 this takes the same DAG as a local search — shards in
-        parallel, top-k bounded, batching for an index too large for memory.
+        BM25 asks how rare a term is <b>in the whole corpus</b>, and no machine knows that alone —
+        which is why naively merging two nodes' results ranks them wrong.
+        <code>export_stats</code> serialises what one node knows about <i>this query</i> (document
+        frequencies, document and token counts): a few kilobytes, not an index.
+        <code>merge_stats</code> sums them. Each node then compiles its weight from the merged
+        statistics instead of its own, so a document scores exactly what it would score in one index
+        holding everything — and the coordinator's merge is a sort, with nothing to renormalise.
+        <br><br>
+        <b>Two round trips of JSON, no data movement.</b> Nothing is copied, nothing is mounted, and
+        a node never sees another's documents — sharing statistics discloses term frequencies, so it
+        belongs inside one trust boundary and not between two. Since 3.0.6 this call takes the same
+        DAG as a local search: shards in parallel, top-k bounded per shard, batching when the index
+        does not fit in memory, and <code>allowed_ids</code> composes with it.
       </div>
     </div>
 
@@ -788,6 +826,125 @@ let index = ShardedHandle::create_with_storage(Box::new(storage), &amp;config)?;
         first read instead of at open. The store's methods run on the scheduler's threads: they must
         be thread-safe, must not call back into the index, and the calling thread must not hold the
         GIL or the event loop.
+      </div>
+    </div>
+
+    <!-- ── ACID ── -->
+    <div class="doc-entry" id="doc-acid">
+      <h3>One transaction for your data and its index</h3>
+      <p>
+        The reason the storage is pluggable: if your <code>save</code> writes inside <b>your</b>
+        transaction, then committing your rows and committing the index are the same commit — and
+        rolling back takes the index with it. No dual-write, no reindex queue, no drift between a
+        row and its searchable form.
+      </p>
+<pre class="code" data-lang="py">class PgStore:
+    """Every index file is a row. The connection is the caller's, so the
+    writes land in whatever transaction is open on it."""
+    def __init__(self, conn): self.conn = conn
+    def save(self, index_name, file_name, data):
+        self.conn.execute(
+            "INSERT INTO lucivy_files (idx, name, data) VALUES (%s, %s, %s) "
+            "ON CONFLICT (idx, name) DO UPDATE SET data = EXCLUDED.data",
+            (index_name, file_name, data))
+    def load(self, index_name, file_name):
+        return self.conn.execute("SELECT data FROM lucivy_files WHERE idx=%s AND name=%s",
+                                 (index_name, file_name)).fetchone()[0]
+    def delete(self, index_name, file_name): ...
+    def exists(self, index_name, file_name): ...
+    def list(self, index_name): ...
+
+index = lucivy.Index.open_with_blob_store(PgStore(conn), "products")
+
+<span class="c"># ── The pattern ───────────────────────────────────────────────────</span>
+with conn.transaction():                     <span class="c"># BEGIN</span>
+    conn.execute("INSERT INTO products (id, title) VALUES (%s, %s)", (id, title))
+    index.add(id, title=title)               <span class="c"># RAM only, nothing written yet</span>
+    index.commit()                           <span class="c"># the index's files, through PgStore, INSIDE the transaction</span>
+<span class="c"># COMMIT — the row and its searchable form become visible together.</span>
+<span class="c"># An exception here rolls both back: no orphan document, no stale index.</span>
+
+index.close()                                <span class="c"># before the connection goes away — see below</span></pre>
+<pre class="code" data-lang="node" hidden>const { BlobIndex } = require('lucivy');
+
+<span class="c">// Every index file is a row; the client is the caller's, so the writes land</span>
+<span class="c">// in whatever transaction is open on it.</span>
+const store = {
+  save: (idx, name, data) =&gt; client.query(
+    `INSERT INTO lucivy_files (idx, name, data) VALUES ($1, $2, $3)
+     ON CONFLICT (idx, name) DO UPDATE SET data = EXCLUDED.data`, [idx, name, data]),
+  load: (idx, name) =&gt; client.query(
+    'SELECT data FROM lucivy_files WHERE idx=$1 AND name=$2', [idx, name]).rows[0].data,
+  delete: (idx, name) =&gt; { /* ... */ },
+  exists: (idx, name) =&gt; true,
+  list: (idx) =&gt; [],
+};
+
+const index = await BlobIndex.open(store, 'products');
+
+<span class="c">// ── The pattern ──────────────────────────────────────────────────</span>
+await client.query('BEGIN');
+try {
+  await client.query('INSERT INTO products (id, title) VALUES ($1, $2)', [id, title]);
+  await index.add(id, { title });          <span class="c">// RAM only, nothing written yet</span>
+  await index.commit();                    <span class="c">// the index's files, through the store, inside the transaction</span>
+  await client.query('COMMIT');             <span class="c">// row and searchable form become visible together</span>
+} catch (e) {
+  await client.query('ROLLBACK');           <span class="c">// and the index goes back with it</span>
+  throw e;
+}
+await index.close();                        <span class="c">// before the client goes away — see below</span></pre>
+<pre class="code" data-lang="rust" hidden>use lucivy_core::blob_store::BlobStore;
+use lucivy_core::sharded_handle::{BlobShardStorage, ShardedHandle};
+
+<span class="c">// Every index file is a row. The transaction is the caller's: the store</span>
+<span class="c">// holds it, so the writes land wherever it is open.</span>
+struct PgStore { tx: Mutex&lt;postgres::Client&gt; }
+
+impl BlobStore for PgStore {
+    fn save(&amp;self, index_name: &amp;str, file: &amp;str, data: &amp;[u8]) -&gt; io::Result&lt;()&gt; {
+        self.tx.lock().unwrap().execute(
+            "INSERT INTO lucivy_files (idx, name, data) VALUES ($1, $2, $3) \
+             ON CONFLICT (idx, name) DO UPDATE SET data = EXCLUDED.data",
+            &amp;[&amp;index_name, &amp;file, &amp;data])?;
+        Ok(())
+    }
+    <span class="c">// load, delete, exists, list — and optionally blob_len / load_range for `lazy`</span>
+}
+
+let storage = BlobShardStorage::new(Arc::new(PgStore { tx }), "products", None);
+let index = ShardedHandle::create_with_storage(Box::new(storage), &amp;config)?;
+
+<span class="c">// ── The pattern ──────────────────────────────────────────────────</span>
+let mut tx = client.transaction()?;                          <span class="c">// BEGIN</span>
+tx.execute("INSERT INTO products (id, title) VALUES ($1, $2)", &amp;[&amp;id, &amp;title])?;
+index.add_document_json(id, &amp;json!({ "title": title }))?;    <span class="c">// RAM only</span>
+index.commit()?;                                             <span class="c">// files written through PgStore, inside tx</span>
+tx.commit()?;                                                <span class="c">// both become visible together</span>
+
+index.close()?;                                              <span class="c">// before the connection goes away</span></pre>
+      <div class="how">
+        <span class="label">How it works</span>
+        A lucivy index is a set of <b>immutable files plus one metadata object</b>, so it maps onto
+        rows or objects without a translation layer. A commit writes the new segment files first and
+        the metadata <b>last</b> — the object that makes them part of the index — so a half-written
+        commit is never a visible state, whatever the storage. Put those writes in your transaction
+        and the property you already trust for your rows now covers their index.
+        <br><br>
+        <b>What lucivy guarantees, and what is yours.</b> Ours: metadata last, no partial visibility,
+        and <code>close()</code> means <b>no further call to your store, ever</b> — pinned by a test,
+        because a caller freeing a database connection behind an FFI while a background merge still
+        held it is exactly how rag3weaver's teardown used to segfault. Yours: the isolation level and
+        the transaction's lifetime — the store's methods run on the scheduler's threads, so they must
+        be thread-safe, must not call back into the index, and the calling thread must not be holding
+        the GIL or the event loop.
+        <br><br>
+        <code>lazy=True</code> changes only when files are read: on first use rather than at open,
+        which needs <code>blob_len</code> (and ideally <code>load_range</code>) on your store.
+        <code>drop_index()</code> removes every file it owns, shard blobs and root objects alike —
+        also pinned by a test, because "list and delete by prefix" was previously left to callers.
+        Proved on a real Postgres (<code>acid_postgres.rs</code>) and on every CI run against an
+        in-memory store (<code>test_acid_blob_v3.rs</code>).
       </div>
     </div>
 
