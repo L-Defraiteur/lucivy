@@ -31,7 +31,15 @@ Moteur full-text search Rust avec substring matching via Suffix FST. Trois couch
   mesure le générateur ; sur machine chargée, la charge.** Les v1/v2 s'ouvrent et se convertissent
   au commit suivant. Design : `docs/27-08-2026/01-…`. Vérité :
   `test_global_dims.rs`, `test_segments.rs`, `test_mmap_durability.rs`,
-  benchs `bench_commit_cost.rs` et `bench_segment_search.rs`
+  benchs `bench_commit_cost.rs` et `bench_segment_search.rs`.
+  **Filtre (27 août)** : donner des ids **triés et sans doublon** — ils sont
+  lus sur place, l'appartenance est une recherche binaire, et le filtre coûte
+  ×0,15 (il *gagne*) à 0,1 % du corpus et ×1,3 au pire jusqu'à 100 % ;
+  540 000 ids répondent en 0,22 ms (6,0 ms avant). Un ensemble non trié est
+  copié et trié à **chaque** requête. Un filtré = un non filtré intersecté,
+  mêmes documents et même ordre, scores à quelques ULP près (les deux chemins
+  somment les lanes dans un ordre différent). Vérité : `test_filter_truth.rs`,
+  bench `bench_filter_selectivity.rs`
 - **Bindings** (5 crates) :
   - CXX bridge rag3db : `lucivy_fts/rust/src/bridge.rs`
   - WASM emscripten : `bindings/emscripten/src/lib.rs` (extern "C" + SharedArrayBuffer + pthreads)
