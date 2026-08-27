@@ -232,6 +232,14 @@ window._allLogs = [];
   .cta button.primary { background: var(--accent-dim); border-color: var(--accent); }
   .cta button.primary:hover:not(:disabled) { background: #2a7ff0; }
   .hero .measured { font-size: 12.5px; color: var(--text-dim); margin-top: 14px; }
+  /* The one number worth reading before anything else — and the reference it
+     was checked against, because a time alone says nothing about the answer. */
+  .hero .headline-number {
+    font-size: 15px; line-height: 1.6; max-width: 720px; margin: 0 auto 24px;
+    padding: 12px 16px; border: 1px solid var(--border); border-radius: 8px;
+    background: rgba(127, 127, 127, 0.06); color: var(--text-dim);
+  }
+  .hero .headline-number b { color: var(--text); }
 
   /* The terminal: every line in it is something the worker did. */
   .term {
@@ -424,6 +432,13 @@ window._allLogs = [];
       Substrings across tokens, fuzzy (Levenshtein or Jaro-Winkler), regex, boolean syntax,
       BM25 ranking, exact byte spans &mdash; a Rust engine with Python, Node.js and C++
       bindings, that also runs in your browser.
+    </p>
+    <p class="headline-number">
+      <b>93&nbsp;605 Linux kernel files.</b> <code>sched</code> as a substring matches
+      <b>9&nbsp;327</b> of them in <b>78&nbsp;ms</b> &mdash; and all
+      <b>53&nbsp;336</b> highlighted spans were checked against a byte-by-byte scan
+      of the files on disk, which took <b>4&nbsp;022&nbsp;ms</b> to answer the same thing.
+      <a href="#numbers-verified">The whole panel &darr;</a>
     </p>
     <div class="cta">
       <button class="primary" id="btnPlay">&#8635;&nbsp; Replay demo</button>
@@ -1095,8 +1110,54 @@ index.compact()?;                                       <span class="c">// merge
     </div>
   </section>
 
+  <section id="numbers-verified">
+    <h2>Numbers <small>93&nbsp;605 Linux kernel files &mdash; and every answer checked against the files on disk</small></h2>
+    <p style="margin:0 0 14px">
+      A time on its own says nothing: it can be the time to return a wrong answer. So every row below was
+      compared, document by document <b>and byte span by byte span</b>, against a naive scan of the same
+      files &mdash; the <b>scan</b> column is how long that reference took. Nine rows, zero mismatches.
+      The panel fails the build if a single count or a single span disagrees.
+    </p>
+    <div style="overflow-x:auto">
+    <table>
+      <tr><th>query</th><th>mode</th><th>documents</th><th>spans</th><th>lucivy</th><th>naive scan</th></tr>
+      <tr><td><code>mutex_lock</code></td><td>substring</td><td>5 145</td><td>20 797</td><td><b>137 ms</b></td><td>8 789 ms</td></tr>
+      <tr><td><code>mutex_lock</code></td><td>separators relaxed</td><td>5 825</td><td>22 817</td><td>88 ms</td><td>4 031 ms</td></tr>
+      <tr><td><code>spin_lock</code></td><td>substring</td><td>6 569</td><td>34 667</td><td>112 ms</td><td>3 963 ms</td></tr>
+      <tr><td><code>sched</code></td><td>whole word</td><td>5 311</td><td>27 986</td><td>101 ms</td><td>4 651 ms</td></tr>
+      <tr><td><code>sched</code></td><td>substring</td><td><b>9 327</b></td><td>53 336</td><td>78 ms</td><td>4 022 ms</td></tr>
+      <tr><td><code>printk</code></td><td>start of token</td><td>4 460</td><td>24 719</td><td>78 ms</td><td>4 352 ms</td></tr>
+      <tr><td><code>schdule</code></td><td>fuzzy, 1 edit</td><td>5 206</td><td>18 843</td><td>224 ms</td><td>12 425 ms</td></tr>
+      <tr><td><code>regsiter</code></td><td>fuzzy, 2 edits</td><td>35 146</td><td><b>267 348</b></td><td>879 ms</td><td>13 633 ms</td></tr>
+      <tr><td><code>spin_lock_[a-z]+</code></td><td>regex</td><td>5 510</td><td>24 368</td><td>180 ms</td><td>472 ms</td></tr>
+      <tr><td colspan="4"><b>indexing</b></td><td colspan="2"><b>93 605 documents in 122 s</b> (839 docs/s)</td></tr>
+    </table>
+    </div>
+    <p style="margin-top:14px">
+      The two <code>sched</code> rows are the point. <b>5 311</b> files contain it as a word;
+      <b>9 327</b> contain it at all &mdash; the difference is <code>sched_clock</code>,
+      <code>schedule</code>, <code>sched_domain</code>. A whole-token engine finds the first number
+      and cannot reach the second. Both are exact.
+    </p>
+    <p style="margin-top:10px">Run it yourself &mdash; it builds the index, runs the panel and the reference scan, and fails on any disagreement:</p>
+    <pre class="code">git clone --depth=1 https://github.com/torvalds/linux /tmp/linux-bench
+
+V3_CORPUS=/tmp/linux-bench cargo test --release -p lucivy-core \
+    --test test_sfx_v3_ground_truth v3_ground_truth_demo -- --ignored --nocapture</pre>
+    <p class="how" style="margin-top:12px">
+      <b>The machine, so you can judge the numbers.</b> Intel Core Ultra 7 270K Plus (24 cores),
+      93 GB RAM, NVMe SSD, Linux 7.1, 28 August 2026, lucivy 3.0.7, one shard, nothing else running.
+      Times are the search itself; recovering each hit's file for the comparison is the harness's own
+      work and is reported separately. A Jaro-Winkler row runs in the same panel but is
+      <b>timed, not verified</b> &mdash; the engine returns one span per candidate window there, so a
+      naive scan is not comparable, and the panel says so rather than implying it was checked.
+      This panel exists because the previous one did not compare anything: it reported "20 hits"
+      on every row, 20 being the result cap, and it hid a bug that lost documents for five releases.
+    </p>
+  </section>
+
   <section id="numbers">
-    <h2>Numbers <small>10&nbsp;000 Linux kernel files, 4 shards, the same 21 queries on both sides, identical hit counts</small></h2>
+    <h2>Browser against native <small>10&nbsp;000 Linux kernel files, 4 shards, the same 21 queries on both sides, identical hit counts</small></h2>
     <div style="overflow-x:auto">
     <table>
       <tr><th></th><th>native (Rust, mmap)</th><th>browser (WASM)</th></tr>

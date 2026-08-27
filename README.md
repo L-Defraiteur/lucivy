@@ -225,6 +225,50 @@ that rewrites most of a short query, a regex that has to scan.
 
 ## Performance
 
+### 93 605 kernel files, and every answer checked
+
+Each row below was compared, document by document **and byte span by byte
+span**, to a naive scan of the same files on disk — the "scan" column is how
+long that reference took. Nine rows verified, zero mismatches. The queries are
+substring, cross-token, fuzzy and regex: a whole-token engine returns nothing
+for most of them, so there is no faster answer to compare against, only a
+correct one.
+
+| query | mode | documents | spans | lucivy | naive scan |
+|---|---|---|---|---|---|
+| `mutex_lock` | substring | 5 145 | 20 797 | **137 ms** | 8 789 ms |
+| `mutex_lock` | separators relaxed | 5 825 | 22 817 | 88 ms | 4 031 ms |
+| `spin_lock` | substring | 6 569 | 34 667 | 112 ms | 3 963 ms |
+| `sched` | whole word | 5 311 | 27 986 | 101 ms | 4 651 ms |
+| `sched` | substring | **9 327** | 53 336 | 78 ms | 4 022 ms |
+| `printk` | start of token | 4 460 | 24 719 | 78 ms | 4 352 ms |
+| `schdule` | fuzzy, 1 edit | 5 206 | 18 843 | 224 ms | 12 425 ms |
+| `regsiter` | fuzzy, 2 edits | 35 146 | **267 348** | 879 ms | 13 633 ms |
+| `spin_lock_[a-z]+` | regex | 5 510 | 24 368 | 180 ms | 472 ms |
+
+Indexing: **93 605 documents in 122 s** (839 docs/s).
+
+The two `sched` rows are the point: **5 311** documents contain it as a word,
+**9 327** contain it at all — the difference is `sched_clock`, `schedule`,
+`sched_domain`. Both counts are exact.
+
+Reproduce it — the harness builds the index, runs the panel and the reference
+scan, and fails if any count or span disagrees:
+
+```bash
+git clone --depth=1 https://github.com/torvalds/linux /tmp/linux-bench
+V3_CORPUS=/tmp/linux-bench cargo test --release -p lucivy-core \
+    --test test_sfx_v3_ground_truth v3_ground_truth_demo -- --ignored --nocapture
+```
+
+28 August 2026 (3.0.7), one shard, idle machine: Intel Core Ultra 7 270K Plus
+(24 cores), 93 GB RAM, NVMe, Linux 7.1. Timings are the search itself;
+recovering each hit's file for the comparison is the harness's own work and is
+reported separately. A Jaro-Winkler row runs in the same panel but is **timed,
+not verified** — see [CHANGELOG.md](CHANGELOG.md) for why it has no reference.
+
+### Browser against native
+
 Measured on 26 August 2026 (3.0.2), 10 000 files of the Linux kernel source,
 4 shards, the same 21-query panel on both sides, identical hit counts (24-core
 machine; the browser is Chrome, 8 threads, the index held in memory).
