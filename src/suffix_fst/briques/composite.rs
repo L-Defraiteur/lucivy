@@ -1139,10 +1139,38 @@ pub fn resolve_trigrams_v3(
             (resolve_all_trigrams(ctx, &ngrams, strict_separators, Some(pivot_keep)), query_positions.clone())
         }
         "auto" => {
-            let pivot_cost = pivot_cost_estimate(ctx, &ngrams, strict_separators, pivot_keep);
-            match resolve_pieces(ctx, query, distance, strict_separators, Some(pivot_cost)) {
+            // The pivot generator resolves candidates from trigram postings,
+            // and those live *inside* a token's chunks. An occurrence whose
+            // shared trigrams all straddle a separator therefore has no
+            // posting at all, and pivot never proposes it — the document is
+            // not merely under-highlighted, it is **not returned**. Measured:
+            // 21 files, `s = cmd->u.le` (flattened `scmdule`) against
+            // `schdule` at distance 1 — pieces returns 1 of 1, pivot 0 of 1.
+            // Keeping more trigrams does not help: the ones it would keep
+            // straddle too.
+            //
+            // With separators relaxed those occurrences are in scope, so the
+            // cost estimate must not be allowed to pick pivot: a caller who
+            // asks for cross-token fuzzy has not asked to trade recall for
+            // speed, and would have no way to know it happened. When
+            // separators are strict the occurrence lies within a token by
+            // definition, and pivot is sound — the estimate decides as before.
+            //
+            // It costs nothing here anyway. On 93 605 kernel files, idle
+            // machine: `schdule` d=1 took 234.5 ms through pieces against
+            // 238.1 through pivot, and `regsiter` d=2 888.5 against 990.0 —
+            // auto was choosing the incomplete generator and losing on time.
+            let budget = if strict_separators {
+                Some(pivot_cost_estimate(ctx, &ngrams, strict_separators, pivot_keep))
+            } else {
+                None
+            };
+            match resolve_pieces(ctx, query, distance, strict_separators, budget) {
                 Some(r) => { threshold = 1; r }
                 None => {
+                    // No pieces resolution at all (a query too short to split,
+                    // typically). Nothing complete is available, so this keeps
+                    // the old behaviour rather than pretending otherwise.
                     threshold = 1;
                     (resolve_all_trigrams(ctx, &ngrams, strict_separators, Some(pivot_keep)), query_positions.clone())
                 }
@@ -1231,12 +1259,24 @@ fn verify_candidates(
     let mut seen_windows: HashSet<(DocId, u32, u32)> = HashSet::new();
 
     let diag = std::env::var("V3_DIAG_FUZZY").is_ok();
+    // How many rejected candidates to print. Five is enough to see the shape,
+    // never enough to answer "was *this* occurrence a candidate at all?" —
+    // which is the only question worth asking when a span is missing.
+    // `V3_DIAG_FUZZY_MAX=0` prints them all.
+    let diag_max: usize = std::env::var("V3_DIAG_FUZZY_MAX").ok()
+        .and_then(|v| v.parse().ok())
+        .map(|n: usize| if n == 0 { usize::MAX } else { n })
+        .unwrap_or(5);
     let mut n_cand = 0usize;
     let mut n_no_window = 0usize;
     let mut n_rejected = 0usize;
+    let mut n_below_threshold = 0usize;
 
     for chain in chains {
-        if chain.trigram_indices.len() < threshold { continue; }
+        if chain.trigram_indices.len() < threshold {
+            n_below_threshold += 1;
+            continue;
+        }
         if !seen_windows.insert((chain.doc_id, chain.first_pos, chain.last_pos)) { continue; }
         n_cand += 1;
         let t = profile::Timer::start();
@@ -1245,7 +1285,7 @@ fn verify_candidates(
         t.stop(|c| &c.ns_fz_window);
         let Some((cut_start, cut_end)) = built else {
             n_no_window += 1;
-            if diag && n_no_window <= 3 {
+            if diag && n_no_window <= diag_max {
                 eprintln!("[fz] doc={} pos={}..{} NO WINDOW",
                     chain.doc_id, chain.first_pos, chain.last_pos);
             }
@@ -1260,7 +1300,7 @@ fn verify_candidates(
                 t.stop(|c| &c.ns_fz_dp);
                 if !ok {
                     n_rejected += 1;
-                    if diag && n_rejected <= 5 {
+                    if diag && n_rejected <= diag_max {
                         eprintln!("[fz] doc={} pos={}..{} REJECT needle={:?} window={:?}",
                             chain.doc_id, chain.first_pos, chain.last_pos,
                             String::from_utf8_lossy(&needle),
@@ -1316,7 +1356,8 @@ fn verify_candidates(
     profile::bump(|c| &c.n_fz_spans, spans.len() as u64);
     if diag {
         eprintln!("[fz] query={query:?} d={distance} strip={strip} cand={n_cand} \
-kept={} no_window={n_no_window} rejected={n_rejected} spans={}", kept.len(), spans.len());
+kept={} no_window={n_no_window} rejected={n_rejected} below_threshold={n_below_threshold} \
+threshold={threshold} spans={}", kept.len(), spans.len());
     }
 
     let mut out_bitset = BitSet::with_max_value(max_doc);

@@ -1,3 +1,57 @@
+Lucivy 3.0.7
+================================
+
+**A relaxed fuzzy search was losing documents.** One fix, and the harness that
+found it. Every crate and binding ships as **3.0.7**.
+
+- **`auto` could pick a candidate generator that cannot see across token
+  boundaries.** Fuzzy candidate generation has two implementations and a cost
+  estimate chooses between them. The `pivot` one resolves candidates from
+  trigram postings, and those exist only *inside* a token's chunks — so an
+  occurrence whose trigrams shared with the query all straddle a separator has
+  no posting, is never proposed, and **its document is not returned at all**.
+  Not a missing highlight: a missing result, silently. As an index grows the
+  estimate tips towards `pivot`, so the loss only appears at scale — measured
+  on the Linux kernel, `kvaser_usb_leaf.c` answered exactly on its own and lost
+  four of its five occurrences among thirty-one files, and a document whose
+  only near-match crosses a boundary came back as zero hits. `auto` now refuses
+  `pivot` whenever separators are relaxed, which is a property known before the
+  search runs rather than a risk guessed from the data; with strict separators
+  the occurrence lies inside a token by definition and the estimate decides as
+  before. Present since 23 August (`9866bc1`), shipped in **3.0.2 through
+  3.0.6**. It cost nothing to fix: on 93 605 kernel files the correct path was
+  already the faster one — `schdule` at distance 1 went 238.1 ms → 223.8, and
+  `regsiter` at distance 2 990.0 → 878.9.
+  Pinned by `fuzzy_finds_an_occurrence_that_straddles_tokens`, which fails on
+  the old path with the count it lost.
+- **A demo panel that verifies what it measures**
+  (`v3_ground_truth_demo`, ignored). The bug above was invisible to
+  `bench_sharding`, whose every row reports "20 hits" because 20 is the result
+  cap: it timed an answer nobody had checked. The new panel is the ground-truth
+  harness pointed at a whole kernel tree — each row compares the engine's
+  documents *and* its byte spans to a naive scan of the files on disk, and
+  prints how long that scan took, which is the honest baseline for what the
+  index buys. On 93 605 files, idle machine: `mutex_lock` 5 145 documents and
+  20 797 spans exact in 137 ms against 8 678 ms of scanning, `sched` as a
+  substring 9 327 documents and 53 336 spans in 78 ms, `regsiter` at distance 2
+  **267 348 spans exact** in 879 ms, `spin_lock_[a-z]+` 24 368 spans in 180 ms.
+  Nine rows verified, zero failures.
+- **Jaro-Winkler rows are timed, never verified, and say so.** The panel has no
+  reference for that metric: on the Levenshtein path the engine returns every
+  span of a candidate window, so a naive scan is comparable span for span; on
+  the Jaro-Winkler path it returns the single best substring of each window, so
+  what it reports depends on how the index cut the text into windows. A scan
+  answering "every substring above the threshold" would disagree by
+  construction. Those rows print `n/a` and `NOT VERIFIED`, and count as neither
+  pass nor fail.
+- Diagnostics: `V3_DIAG_FUZZY_MAX=n` (`0` for all) uncaps the rejected
+  candidates `V3_DIAG_FUZZY` prints — five is enough to see the shape, never
+  enough to answer "was this occurrence a candidate at all", which is the only
+  question worth asking when a span is missing. The summary line also reports
+  how many chains fell below the pigeonhole threshold. The ground-truth harness
+  now prints the **path** of a missing span, not only its index in the walk:
+  the same `doc=N` is a different file from one run to the next.
+
 Lucivy 3.0.6
 ================================
 

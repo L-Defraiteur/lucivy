@@ -1,6 +1,6 @@
 {
   "name": "lucivy",
-  "version": "3.0.6",
+  "version": "3.0.7",
   "description": "Fast BM25 full-text search with substring matching, fuzzy search, and regex — powered by Rust",
   "main": "index.js",
   "types": "index.d.ts",
@@ -39,10 +39,10 @@
     "build:debug": "napi build"
   },
   "optionalDependencies": {
-    "lucivy-linux-x64-gnu": "3.0.6",
-    "lucivy-linux-arm64-gnu": "3.0.6",
-    "lucivy-darwin-x64": "3.0.6",
-    "lucivy-darwin-arm64": "3.0.6",
-    "lucivy-windows-x64": "3.0.6"
+    "lucivy-linux-x64-gnu": "3.0.7",
+    "lucivy-linux-arm64-gnu": "3.0.7",
+    "lucivy-darwin-x64": "3.0.7",
+    "lucivy-darwin-arm64": "3.0.7",
+    "lucivy-windows-x64": "3.0.7"
   }
 }

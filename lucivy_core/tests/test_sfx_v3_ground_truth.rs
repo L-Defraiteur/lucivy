@@ -609,7 +609,7 @@ fn search_v3_d(
     strict_separators: bool,
     distance: u8,
 ) -> SearchResult {
-    search_v3_q(handle, files, value, strict_separators, distance, false, false)
+    search_v3_q(handle, files, value, strict_separators, distance, false, false, None)
 }
 
 fn search_v3_q(
@@ -620,6 +620,7 @@ fn search_v3_q(
     distance: u8,
     anchor: bool,
     exact: bool,
+    min_sim: Option<f32>,
 ) -> SearchResult {
     let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
     let config = QueryConfig {
@@ -631,6 +632,8 @@ fn search_v3_q(
         regex: if distance == RX { Some(true) } else { None },
         anchor_start: if anchor { Some(true) } else { None },
         exact_match: if exact { Some(true) } else { None },
+        fuzzy_metric: min_sim.map(|_| "jaro_winkler".to_string()),
+        min_similarity: min_sim,
         ..Default::default()
     };
     let query = query::build_query(&config, &handle.schema, &handle.index, Some(Arc::clone(&sink))).unwrap();
@@ -776,16 +779,43 @@ struct GroundTruthQuery {
     anchor: bool,
     /// `term`: the occurrence is whole words (anchor + separator or file end after it).
     exact: bool,
+    /// Jaro-Winkler threshold. `Some` switches the engine to that metric — and
+    /// **switches the ground truth off**: this panel has none for Jaro-Winkler.
+    ///
+    /// Why there is none. On the Levenshtein path the engine returns *every*
+    /// span of a candidate window (`fuzzy_spans` gives a `Vec`), so a naive
+    /// scan of the corpus is comparable span for span. On the Jaro-Winkler
+    /// path it returns *one* — `best_window` keeps the single best substring
+    /// of the window (`composite.rs`, `vec![(s, e, 0)]`) — so what it reports
+    /// depends on how the trigram chains cut the text into windows, which is
+    /// an artefact of the index and not a property of the text. A scan that
+    /// answered "every substring above the threshold" would disagree by
+    /// construction and print FAIL where the engine is right.
+    ///
+    /// A comparable rule exists — cluster the above-threshold substrings by
+    /// overlap and keep the best of each cluster — but it is a second
+    /// definition to defend, not a measurement. Until it is written, these
+    /// rows carry a time and a count, and say so.
+    min_sim: Option<f32>,
 }
 
 impl GroundTruthQuery {
-    fn strict(text: &'static str) -> Self { Self { text, strict_sep: true, distance: 0, anchor: false, exact: false } }
-    fn relaxed(text: &'static str) -> Self { Self { text, strict_sep: false, distance: 0, anchor: false, exact: false } }
-    fn fuzzy(text: &'static str, distance: u8) -> Self { Self { text, strict_sep: false, distance, anchor: false, exact: false } }
+    fn strict(text: &'static str) -> Self { Self { text, strict_sep: true, distance: 0, anchor: false, exact: false, min_sim: None } }
+    fn relaxed(text: &'static str) -> Self { Self { text, strict_sep: false, distance: 0, anchor: false, exact: false, min_sim: None } }
+    fn fuzzy(text: &'static str, distance: u8) -> Self { Self { text, strict_sep: false, distance, anchor: false, exact: false, min_sim: None } }
+    /// Jaro-Winkler. `distance` still sizes the candidate generation and the
+    /// length slack `best_window` is allowed; `min_sim` decides acceptance.
+    fn jaro(text: &'static str, distance: u8, min_sim: f32) -> Self {
+        Self { min_sim: Some(min_sim), ..Self::fuzzy(text, distance) }
+    }
     fn is_regex(&self) -> bool { self.distance == RX }
+    /// True when this row has no reference to compare against — see `min_sim`.
+    fn unverified(&self) -> bool { self.min_sim.is_some() }
     /// Mode suffix of `V3_QUERIES`: `strict`, `relax`, `fz1`-`fz3`, `rx`,
     /// `sw` (startsWith, relaxed), `sws` (startsWith, strict), `term`
-    /// (whole words, relaxed), `terms` (whole words, strict).
+    /// (whole words, relaxed), `terms` (whole words, strict), `jw1`/`jw2`
+    /// (Jaro-Winkler at 0.9, candidates sized by that distance — **timed, not
+    /// verified**).
     fn from_mode(text: &'static str, mode: &str) -> Option<Self> {
         Some(match mode {
             "strict" => Self::strict(text),
@@ -793,6 +823,8 @@ impl GroundTruthQuery {
             "fz1" => Self::fuzzy(text, 1),
             "fz2" => Self::fuzzy(text, 2),
             "fz3" => Self::fuzzy(text, 3),
+            "jw1" => Self::jaro(text, 1, 0.9),
+            "jw2" => Self::jaro(text, 2, 0.9),
             "rx" => Self::fuzzy(text, RX),
             "sw" => Self { anchor: true, ..Self::relaxed(text) },
             "sws" => Self { anchor: true, ..Self::strict(text) },
@@ -803,6 +835,7 @@ impl GroundTruthQuery {
     }
     fn mode_label(&self) -> String {
         if self.is_regex() { "rx".into() }
+        else if self.min_sim.is_some() { format!("jw{}", self.distance) }
         else if self.distance > 0 { format!("fz{}", self.distance) }
         else if self.exact { if self.strict_sep { "terms".into() } else { "term".into() } }
         else if self.anchor { if self.strict_sep { "sws".into() } else { "sw".into() } }
@@ -885,6 +918,125 @@ fn v3_ground_truth_contains() {
     run_panel(&handle, &files, &queries, &mut report);
 }
 
+/// A relaxed fuzzy query must find an occurrence that straddles token
+/// boundaries — whatever the index's size.
+///
+/// The regression this pins (found 28 August on 93 605 kernel files, present
+/// since 23 August, shipped in 3.0.2 through 3.0.6). `auto` chooses between
+/// two candidate generators on a cost estimate. The `pivot` one resolves
+/// candidates from trigram postings, which exist only *inside* a token's
+/// chunks, so an occurrence whose shared trigrams all straddle a separator
+/// has no posting and is never proposed — and the document is not returned
+/// at all. As the index grows the estimate tips towards `pivot`, so the loss
+/// appears only at scale: `kvaser_usb_leaf.c` alone answered exactly, and
+/// lost four of its five spans among thirty-one files.
+///
+/// The corpus here is deliberately large enough for that estimate to matter.
+/// To see the old behaviour, run this with `V3_FUZZY_MODE=pivot`: it fails,
+/// returning zero documents.
+#[test]
+fn fuzzy_finds_an_occurrence_that_straddles_tokens() {
+    // `s = cmd->u.le` flattens to `scmdule`, one substitution from `schdule`.
+    // Every trigram it shares with the query (`dul`, `ule`) crosses a
+    // separator, so nothing but a boundary-crossing resolution can find it.
+    const NEEDLE: &str = "schdule";
+    let mut files: Vec<(String, String)> = vec![
+        ("target.c".into(), "alpha s = cmd->u.le beta\n".into()),
+    ];
+    // Filler with a wide vocabulary: the estimate reacts to the FST's size,
+    // so a thousand copies of one sentence would not exercise it.
+    for i in 0..1500 {
+        files.push((
+            format!("filler_{i}.c"),
+            format!("static int fn_{i}(void) {{ return handle_{i}(ctx_{i}, buf_{i}); }}\n\
+                     /* note {i}: unrelated prose about buffers, locks and queues */\n"),
+        ));
+    }
+
+    let handle = create_v3_index(&files);
+    let result = search_v3_q(&handle, &files, NEEDLE, false, 1, false, false, None);
+
+    assert!(
+        result.doc_indices.contains(&0),
+        "relaxed fuzzy lost the cross-token occurrence: {} documents returned, none of them \
+         target.c. This is the pivot generator being chosen for a separator-relaxed query — \
+         it cannot see occurrences that straddle tokens.",
+        result.doc_indices.len(),
+    );
+}
+
+/// The demo panel: the same harness, on a whole kernel tree, with queries a
+/// token-based engine cannot answer at all.
+///
+/// `v3_ground_truth_contains` is the correctness net — a small corpus, run in
+/// CI, asserted. This one is the **showcase**: it exists to produce numbers
+/// worth publishing, and it can only do that if every number carries its
+/// verification. So it is the same `run_panel`: every row compares the
+/// engine's documents *and* its byte spans to a naive scan of the files on
+/// disk, and prints how long that naive scan took — the honest baseline for
+/// "what does the index buy".
+///
+/// Ignored: it indexes a whole kernel checkout (~93 600 files, ~80 s) before
+/// it measures anything.
+///
+/// ```bash
+/// V3_CORPUS=/tmp/linux-bench cargo test --release -p lucivy-core \
+///     --test test_sfx_v3_ground_truth v3_ground_truth_demo -- --ignored --nocapture
+/// ```
+///
+/// `V3_MAX_DOCS=n` caps the corpus (calibrate on a few thousand first — the
+/// naive scans are what take the time, not the engine), `V3_QUERIES` replaces
+/// the panel, `V3_INDEX_DIR=/path` persists the index so a second run skips
+/// the indexing.
+#[test]
+#[ignore]
+fn v3_ground_truth_demo() {
+    let files = collect_files(usize::MAX);
+    if files.is_empty() { return; }
+    eprintln!("\n=== V3 Demo Panel: {} files ===\n", files.len());
+
+    let t0 = std::time::Instant::now();
+    let handle = create_v3_index(&files);
+    let index_time = t0.elapsed().as_secs_f64();
+    eprintln!("Index time: {:.1}s ({:.0} docs/s)", index_time, files.len() as f64 / index_time);
+
+    let mut report = std::fs::File::create(REPORT_PATH).unwrap();
+    writeln!(report, "V3 Demo Panel — {} files, indexed in {:.1}s\n", files.len(), index_time).ok();
+
+    // One row per thing the engine does that a tokenizer cannot. Every value
+    // occurs in a kernel tree — a query returning zero measures nothing.
+    let default_queries: Vec<GroundTruthQuery> = vec![
+        // The identifier, literally. The baseline everyone can already do.
+        GroundTruthQuery::strict("mutex_lock"),
+        // The same string with separators ignored: also matches `mutex lock`,
+        // `mutex-lock`, `mutexlock`. Same query, wider truth.
+        GroundTruthQuery::relaxed("mutex_lock"),
+        // Substring *inside* compound identifiers — `raw_spin_lock`,
+        // `spin_lock_irqsave`. This is the row a token-based engine answers
+        // with nothing at all.
+        GroundTruthQuery::strict("spin_lock"),
+        // Whole word only, against the substring above: the gap between the
+        // two counts is the point, and both are verified.
+        GroundTruthQuery::from_mode("sched", "term").unwrap(),
+        GroundTruthQuery::strict("sched"),
+        // Start of a token only.
+        GroundTruthQuery::from_mode("printk", "sw").unwrap(),
+        // One typo, then two — found across token boundaries.
+        GroundTruthQuery::fuzzy("schdule", 1),
+        GroundTruthQuery::fuzzy("regsiter", 2),
+        // A regex that runs across token boundaries, resolved by literal
+        // extraction and verified on the candidates.
+        GroundTruthQuery::fuzzy("spin_lock_[a-z]+", RX),
+        // Jaro-Winkler, on the same typo as the fz1 row above. TIMED ONLY —
+        // this panel has no reference for it, and the table says so rather
+        // than implying the count was checked.
+        GroundTruthQuery::jaro("schdule", 1, 0.9),
+    ];
+
+    let queries = query_spec().unwrap_or(default_queries);
+    run_panel(&handle, &files, &queries, &mut report);
+}
+
 /// The coherence panel: the shape of queries a code RAG actually sends —
 /// long literals full of separators, anchored and whole-word forms, typos
 /// in them, and the non-ASCII the corpus really contains (accents, CJK,
@@ -950,6 +1102,7 @@ fn run_panel(
 
     let mut pass = 0u32;
     let mut fail = 0u32;
+    let mut unverified = 0u32;
     let mut fail_entries: Vec<serde_json::Value> = Vec::new();
     let diag_mode = std::env::var("V3_DIAG").is_ok();
 
@@ -961,8 +1114,12 @@ fn run_panel(
         // Time the two independently. They used to share one timer, so every
         // reported latency silently carried a full grep over the corpus — a
         // constant that dilutes any engine-side comparison.
+        // A Jaro-Winkler row has no reference (see `GroundTruthQuery::min_sim`):
+        // it is timed and counted, never compared. Running a grep for it would
+        // print a number the engine was never meant to reproduce.
         let t_grep = std::time::Instant::now();
-        let gt = if q.is_regex() { grep_spans_regex(files, q.text) }
+        let gt = if q.unverified() { GrepSpans { docs: HashSet::new(), spans: HashSet::new() } }
+                 else if q.is_regex() { grep_spans_regex(files, q.text) }
                  else if q.distance > 0 { grep_spans_fuzzy(files, q.text, q.distance) }
                  else { filter_boundaries(grep_spans(files, q.text, q.strict_sep), files, q.anchor, q.exact) };
         let grep_ms = t_grep.elapsed().as_secs_f64() * 1000.0;
@@ -970,7 +1127,7 @@ fn run_panel(
 
         profile::reset();
         let t = std::time::Instant::now();
-        let v3_result = search_v3_q(handle, files, q.text, q.strict_sep, q.distance, q.anchor, q.exact);
+        let v3_result = search_v3_q(handle, files, q.text, q.strict_sep, q.distance, q.anchor, q.exact, q.min_sim);
         let ms = t.elapsed().as_secs_f64() * 1000.0;
 
         let search_ms = LAST_SEARCH_MS.with(|c| c.get());
@@ -987,22 +1144,30 @@ fn run_panel(
         let spans_ok = (missing == 0 && extra == 0)
             || std::env::var("V3_SPANS_REPORT_ONLY").is_ok();
         let docs_ok = v3_result.doc_indices == grep_set;
-        let status = if docs_ok && spans_ok { "OK" } else { "FAIL" };
-        let hl = if missing == 0 && extra == 0 {
+        let status = if q.unverified() { "n/a" }
+                     else if docs_ok && spans_ok { "OK" } else { "FAIL" };
+        let hl = if q.unverified() {
+            format!("NOT VERIFIED — {} spans, no reference for jaro-winkler", v3_spans.len())
+        } else if missing == 0 && extra == 0 {
             format!("spans {} exact", gt.spans.len())
         } else {
             format!("spans gt={} v3={} miss={} extra={}", gt.spans.len(), v3_spans.len(), missing, extra)
         };
-        eprintln!("{:<35} {:>5} {:>8} {:>8} {:>6} ({:.1}ms search, {:.1}ms +fetch, {:.1}ms grep) {hl}",
-            q.text, mode_label, grep_set.len(), v3_result.doc_indices.len(), status,
-            search_ms, ms - search_ms, grep_ms);
-        if missing > 0 || extra > 0 {
+        let grep_col = if q.unverified() { "—".to_string() } else { grep_set.len().to_string() };
+        let grep_time = if q.unverified() { "no grep".to_string() } else { format!("{grep_ms:.1}ms grep") };
+        eprintln!("{:<35} {:>5} {:>8} {:>8} {:>6} ({:.1}ms search, {:.1}ms +fetch, {grep_time}) {hl}",
+            q.text, mode_label, grep_col, v3_result.doc_indices.len(), status,
+            search_ms, ms - search_ms);
+        if !q.unverified() && (missing > 0 || extra > 0) {
             let mut miss: Vec<_> = gt.spans.difference(&v3_spans).copied().collect();
             miss.sort();
             let mut ext: Vec<_> = v3_spans.difference(&gt.spans).copied().collect();
             ext.sort();
+            // The path, not just the index: `doc=N` is a position in this
+            // run's walk, so the same N is a different file in another run —
+            // which turns a two-run comparison into a wrong conclusion.
             for (fi, a, b) in miss.iter().take(3) {
-                eprintln!("    missing  doc={fi} [{a}..{b}] {}", span_context(&files[*fi].1, *a, *b));
+                eprintln!("    missing  doc={fi} [{a}..{b}] {} ({})", span_context(&files[*fi].1, *a, *b), files[*fi].0);
             }
             for (fi, a, b) in ext.iter().take(3) {
                 eprintln!("    extra    doc={fi} [{a}..{b}] {} ({})", span_context(&files[*fi].1, *a, *b), files[*fi].0);
@@ -1014,7 +1179,11 @@ fn run_panel(
 
         write_report(&mut report, q.text, &mode_label, &files, &grep_set, &v3_result);
 
-        if docs_ok && spans_ok {
+        // An unverified row can neither pass nor fail: counting it as a pass
+        // would inflate the panel's score with a claim nobody checked.
+        if q.unverified() {
+            unverified += 1;
+        } else if docs_ok && spans_ok {
             pass += 1;
         } else {
             fail += 1;
@@ -1033,7 +1202,11 @@ fn run_panel(
         }
     }
 
-    eprintln!("\n{pass} pass, {fail} fail");
+    if unverified > 0 {
+        eprintln!("\n{pass} pass, {fail} fail, {unverified} timed but NOT verified (jaro-winkler: no reference)");
+    } else {
+        eprintln!("\n{pass} pass, {fail} fail");
+    }
     eprintln!("Report: {REPORT_PATH}");
 
     // Export failures to JSON for diag pass

@@ -1,6 +1,6 @@
 [package]
 name = "ld-lucivy"
-version = "3.0.6"
+version = "3.0.7"
 authors = ["Luciform Research <luciedefraiteur@luciformresearch.com>"]
 license = "MIT"
 categories = ["database-implementations", "data-structures"]
@@ -58,7 +58,7 @@ fs4 = { version = "0.13.1", optional = true }
 levenshtein_automata = "0.2.1"
 uuid = { version = "1.0.0", features = ["v4", "serde"] }
 flume = "0.11"
-luciole = { version = "3.0.6", path = "luciole" }
+luciole = { version = "3.0.7", path = "luciole" }
 num_cpus = "1.13.1"
 tokio = { version = "1.37", default-features = false, features = ["fs", "io-util"], optional = true }
 futures = "0.3.25"
