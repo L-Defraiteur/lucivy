@@ -112,3 +112,47 @@ c'est pour ça qu'ils restent.
   les deux colonnes côte à côte, donc qu'on a comparé et pas seulement
   chronométré.
 - **Vérifier les cinq liens** : ils doivent tous afficher 3.0.7.
+
+## Version très courte — le lien seul, collé en bas
+
+**1224 caractères.** Aucun lien dans le corps : l'URL du playground se met
+en dernière ligne, seule, pour que LinkedIn en fasse sa carte d'aperçu. Une
+seule URL dans un post, c'est aussi ce qui donne la meilleure vignette : quand
+il y en a plusieurs, LinkedIn en choisit une, pas toujours celle qu'on veut.
+
+Le post est entre les deux séparateurs.
+
+---
+
+Cherchez `mutex` dans un moteur de recherche : vous trouvez le mot `mutex`. Pas `pthread_mutex_lock`, pas `getMutexHandle`, pas `lockmutex`. Ajoutez une faute de frappe, tout disparaît. Pour du code, des messages d'erreur, des clés de config, c'est exactement ce qu'on cherche qu'on ne trouve pas.
+
+Lucivy 3.0.7 les trouve : sous-chaînes, fautes de frappe et regex à travers les frontières de tokens, classées en BM25, avec les octets exacts qui ont matché.
+
+Et c'est vérifié, pas promis. Sur les 93 605 fichiers du noyau Linux, `sched` en sous-chaîne trouve 9 327 fichiers et 53 336 occurrences en 78 ms — le scan naïf qui a validé cette réponse, octet par octet, met 4 022 ms. En mot entier, la même requête n'en trouve que 5 311 : la différence, ce sont les `sched_clock`, `schedule`, `sched_domain`.
+
+`grep` cherche sans classer. Les moteurs full-text classent sans chercher à l'intérieur des tokens. À ma connaissance, aucune bibliothèque ne fait les deux.
+
+Rust, Python, Node.js, C++ et dans le navigateur. Licence MIT.
+
+Le playground clone le code source de Lucivy et l'indexe dans votre onglet — rien à installer, vous tapez vos propres requêtes.
+
+#opensource #search #rust #python #nodejs #wasm #bm25 #fulltext #rag
+
+---
+
+**Ce qu'elle garde, et pourquoi ces trois-là :**
+
+1. **L'échec concret** (`mutex` qui ne trouve pas `pthread_mutex_lock`) — le
+   lecteur reconnaît le problème avant de savoir ce qu'est le produit.
+2. **Un chiffre vérifié**, avec sa référence dans la même phrase : 78 ms contre
+   4 022 ms. Le second nombre est ce qui rend le premier croyable.
+3. **La phrase qui situe** face à `grep` et face aux moteurs full-text — elle
+   dit ce qu'on est sans avoir à se déclarer unique.
+
+Le reste (ACID, fédération, syntaxe booléenne, binaires précompilés) est absent
+volontairement : à cette longueur, une liste de fonctionnalités dilue les trois
+points ci-dessus au lieu de les renforcer.
+
+**Avant de poster** : passer l'URL dans le Post Inspector de LinkedIn pour
+purger son cache d'aperçu, sinon il resservira la version sans image qu'il a
+vue plus tôt.
