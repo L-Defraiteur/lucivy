@@ -36,7 +36,6 @@ entier, la même requête n'en trouve que 5 311 — la différence, ce sont les
 rendent jamais. Avec deux fautes de frappe, `regsiter` sort **267 348 spans
 exacts en 879 ms**.
 
-
 → **Une syntaxe booléenne** : `kmalloc AND NOT kfree`, `"phrase exacte"`,
 `+obligatoire -exclu`, parenthèses — le tout abaissé en requêtes de
 sous-chaînes, avec les highlights.
@@ -60,7 +59,9 @@ exactement ce que rendrait un index unique, **aux mêmes scores**.
 **Essayez-le, il n'y a rien à installer :** le playground clone le code source
 de Lucivy depuis GitHub et l'indexe dans votre onglet, en quelques secondes.
 Puis vous tapez vos propres requêtes.
-https://l-defraiteur.github.io/lucivy/
+
+Essayez ici : L-Defraiteur/lucivy — playground
+[ https://l-defraiteur.github.io/lucivy/ ]
 
 Je l'ai construit parce qu'il me fallait le versant BM25 de la recherche
 vectorielle dans rag3db, un moteur RAG sur lequel je travaille aussi. Le
@@ -69,16 +70,29 @@ l'utilisateur cherche un nom de fonction précis, il faut autre chose.
 
 **Ça s'installe partout :**
 
-- Python : `pip install lucivy` — https://pypi.org/project/lucivy/
-- Node.js : `npm install lucivy` — https://www.npmjs.com/package/lucivy
-- Navigateur : `npm install lucivy-wasm` — https://www.npmjs.com/package/lucivy-wasm
-- Rust : `cargo add lucivy-core` — https://crates.io/crates/lucivy-core
-- C++ : bibliothèque statique via un bridge CXX
+- PyPI : `pip install lucivy`
+[ https://pypi.org/project/lucivy/ ]
+
+- npm : `npm install lucivy`
+[ https://www.npmjs.com/package/lucivy ]
+
+- npm (navigateur) : `npm install lucivy-wasm`
+[ https://www.npmjs.com/package/lucivy-wasm ]
+
+- crates.io : `cargo add lucivy-core`
+[ https://crates.io/crates/lucivy-core ]
+
+- Bibliothèque statique C++ (via CXX bridge)
 
 Binaires précompilés pour Linux (x86_64, aarch64), macOS (Intel, Apple Silicon)
 et Windows x86_64.
 
-Code, issues et PRs : https://github.com/L-Defraiteur/lucivy
+Le code, les issues et les PRs : L-Defraiteur/lucivy
+[ https://github.com/L-Defraiteur/lucivy ]
+
+Essayez ici : L-Defraiteur/lucivy — playground
+[ https://l-defraiteur.github.io/lucivy/ ]
+
 Licence MIT. Fork de tantivy v0.26.0.
 
 Si vous intégrez de la recherche dans un produit, un pipeline RAG ou un outil de
@@ -99,7 +113,12 @@ dev — testez-le et dites-moi ce qui casse.
   GitHub Pages a bien redéployé après le commit de release, sinon la page
   annonce la v3 en servant l'ancien binaire.
 - Ne pas raccourcir les liens soi-même : LinkedIn le fait (`lnkd.in`) et
-  compte le lien raccourci dans la limite de caractères.
+  compte le lien raccourci dans la limite de caractères. C'est pour ça que
+  chaque lien est précédé d'une ligne lisible — une fois raccourcie, l'URL ne
+  dit plus où elle mène, seul le texte au-dessus le dit.
+- LinkedIn n'interprète pas le Markdown : les `**` et les `` ` `` s'affichent
+  tels quels. Si tu ne les veux pas à l'écran, il faut les retirer à la main au
+  moment de coller — ils sont ici parce que le fichier reste lisible avec.
 
 **Le visuel**
 
@@ -164,4 +183,7 @@ mesure la charge**.
 > Python, Node, C++ et dans le navigateur. MIT.
 >
 > Le playground indexe le code source de Lucivy dans votre onglet, sans rien
-> installer : https://l-defraiteur.github.io/lucivy/
+> installer.
+>
+> Essayez ici : L-Defraiteur/lucivy — playground
+> [ https://l-defraiteur.github.io/lucivy/ ]
