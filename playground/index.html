@@ -4,6 +4,26 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Lucivy Playground</title>
+
+<!-- Link previews. Without these, a social card falls back to the <h1> for the
+     title and to whatever text it scrapes first for the description — LinkedIn
+     showed "Show me in Python Node.js Rust C++ has the same API through a cxx
+     bridge", which is the language switcher read as prose. og:image must be
+     absolute: a relative path yields no image at all. -->
+<meta name="description" content="BM25 full-text search with substring, fuzzy and regex matching across token boundaries, and exact byte spans. Rust, Python, Node.js, C++ and the browser. MIT.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="lucivy">
+<meta property="og:url" content="https://l-defraiteur.github.io/lucivy/">
+<meta property="og:title" content="Search code the way you grep it.">
+<meta property="og:description" content="Substrings, fuzzy and regex across token boundaries, BM25-ranked, with exact byte spans. 78 ms to find 9 327 of 93 605 Linux kernel files — every answer checked against a byte-by-byte scan of the same files.">
+<meta property="og:image" content="https://l-defraiteur.github.io/lucivy/og-card.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The lucivy presentation page: substring, fuzzy and regex search across token boundaries, with the verified kernel numbers.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Search code the way you grep it.">
+<meta name="twitter:description" content="Substrings, fuzzy and regex across token boundaries, BM25-ranked, with exact byte spans. Every number checked against a byte-by-byte scan of 93 605 kernel files.">
+<meta name="twitter:image" content="https://l-defraiteur.github.io/lucivy/og-card.png">
 <!-- coi-serviceworker: fallback for servers without COOP/COEP headers.
      Prefer `node serve.mjs` which sets headers natively (no caching issues). -->
 <script src="coi-serviceworker.js"></script>
@@ -1575,7 +1595,7 @@ async function startup() {
     // Cache-buster: GitHub Pages caches the worker and the wasm for a while,
     // and a phone kept a whole build behind after a deploy. Bumped at each
     // engine or worker change; the query rides through to the wasm.
-    const BUILD = '3.0.4-trunc';
+    const BUILD = '3.0.7-fuzzy-recall';
     lucivy = new Lucivy(`./js/lucivy-worker.js?v=${BUILD}`, {
       noOpfs: startupParams.has('noopfs'),
       verbose: startupParams.has('verbose'), // engine diagnostics (LUCIVY_VERBOSE, V3_PROFILE)
@@ -2545,7 +2565,7 @@ const term = {
 // happening. Cosmetic, never on real output, off under reduced motion.
 const GLITCH_BASE = [
   ' ▚▞▚▞  l u c i v y  ▞▚▞▚      substring search · suffix FST · Rust → WASM',
-  ' ░▒▓█  3.0.4  █▓▒░           01101100 01110101 01100011 01101001 01110110 01111001',
+  ' ░▒▓█  3.0.7  █▓▒░           01101100 01110101 01100011 01101001 01110110 01111001',
   ' ∿ ⌁ ⟁  bm25 · fuzzy · regex · spans  ⟁ ⌁ ∿',
 ];
 const GLITCH_CHARS = '▚▞░▒▓█∿⌁⟁╳◌◍⋮⋯01';
