@@ -254,12 +254,12 @@ window._allLogs = [];
   .hero .measured { font-size: 12.5px; color: var(--text-dim); margin-top: 14px; }
   /* The one number worth reading before anything else — and the reference it
      was checked against, because a time alone says nothing about the answer. */
-  .hero .headline-number {
+  .headline-number {
     font-size: 15px; line-height: 1.7; max-width: 880px; margin: 0 auto 24px;
     padding: 14px 22px; border: 1px solid var(--border); border-radius: 8px;
     background: rgba(127, 127, 127, 0.06); color: var(--text-dim);
   }
-  .hero .headline-number b { color: var(--text); }
+  .headline-number b { color: var(--text); }
   /* The engine's time against the reference it was checked against: the point
      is the pair, so they are coloured as a pair wherever both appear. */
   .fast { color: var(--green); font-weight: 600; }
@@ -458,21 +458,12 @@ window._allLogs = [];
       BM25 ranking, exact byte spans &mdash; a Rust engine with Python, Node.js and C++
       bindings, that also runs in your browser.
     </p>
-    <p class="headline-number">
-      <b>93&nbsp;605 Linux kernel files.</b> <code>sched</code> as a substring matches
-      <b>9&nbsp;327</b> of them: <span class="fast">lucivy</span> answers in
-      <span class="fast">78&nbsp;ms</span> &mdash; and all <b>53&nbsp;336</b> highlighted
-      spans were checked against a byte-by-byte <span class="slow">naive scan</span> of
-      the files on disk, which took <span class="slow">4&nbsp;022&nbsp;ms</span> to
-      answer the same thing.
-      <a href="#numbers-verified">The whole panel &darr;</a>
-    </p>
     <div class="cta">
       <button class="primary" id="btnPlay">&#8635;&nbsp; Replay demo</button>
       <button id="btnOpenPlayground">Open the playground</button>
     </div>
     <p class="measured" id="measuredNote">
-      Everything in the terminal is real: the clone, the indexing, each search and its time &mdash; measured in your tab, right now.
+      Everything in the terminal is real: it clones <b>lucivy's own source</b> from GitHub and indexes it in this tab &mdash; every count and every time below is measured here, right now.
     </p>
   </div>
 
@@ -1139,6 +1130,14 @@ index.compact()?;                                       <span class="c">// merge
 
   <section id="numbers-verified">
     <h2>Numbers <small>93&nbsp;605 Linux kernel files &mdash; and every answer checked against the files on disk</small></h2>
+    <p class="headline-number">
+      <b>93&nbsp;605 Linux kernel files.</b> <code>sched</code> as a substring matches
+      <b>9&nbsp;327</b> of them: <span class="fast">lucivy</span> answers in
+      <span class="fast">78&nbsp;ms</span> &mdash; and all <b>53&nbsp;336</b> highlighted
+      spans were checked against a byte-by-byte <span class="slow">naive scan</span> of
+      the files on disk, which took <span class="slow">4&nbsp;022&nbsp;ms</span> to
+      answer the same thing.
+    </p>
     <p style="margin:0 0 14px">
       A time on its own says nothing: it can be the time to return a wrong answer. So every row below was
       compared, document by document <b>and byte span by byte span</b>, against a naive scan of the same
