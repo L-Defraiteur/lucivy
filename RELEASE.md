@@ -40,26 +40,49 @@ registry" (seen on 26 August), and `npm login` is the fix, not a new code.
 
 ## Publish, in this order, stopping at the first error
 
-The Python wheels and the Node.js addons for the five platforms (Linux
+**Since 3.0.9 the tag does everything.** `.github/workflows/release.yml`
+builds the Python wheels and Node.js addons for the five platforms (Linux
 x86_64 and aarch64 on glibc ≥ 2.28, macOS x86_64 and arm64, Windows x86_64)
-are built by `.github/workflows/release.yml` on the tag — see below. The
-crates and the WASM package are published by hand, the crates **last**.
+and the WASM package, attaches them to the release, then publishes to PyPI,
+npm (`lucivy` + the five platform packages + `lucivy-wasm`) and crates.io —
+all through trusted publishing, so no token and no one-time password:
 
 ```bash
 git push origin main <release-branch>
-git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z   # builds the wheels and addons, attaches them to the release
-# on the run page: approve the `release` environment → PyPI and npm are published
+git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z
+```
+
+Then verify on each registry (the PyPI JSON API, `npm view`, the crates.io
+API — it wants a `User-Agent` header) and record the versions in `CLAUDE.md`
+and the day's recap.
+
+**What has to be configured once, per package**, on each registry's website:
+a trusted publisher with `L-Defraiteur` / `lucivy` / `release.yml` /
+environment `release` — the workflow *filename*, not its path. Verify npm's
+with `npx -y npm@latest trust list <package> --otp=<code>` (one OTP per call,
+and the package name is required despite the documentation).
+
+**Beware of what the `release` environment does not do.** It carries a branch
+policy and **no required reviewers**, so publishing starts as soon as a
+matching tag is pushed — there is no approval step, whatever the workflow's
+older comments claimed. `PUBLISH_ENABLED` (a *repository* variable, not an
+environment one: a job's `if:` cannot see environment variables) is the only
+switch. Add a required reviewer to the environment if the gate is wanted.
+
+**The crates go last, and that ordering is not cosmetic.** 3.0.0 published
+them first, before two core fixes and before the READMEs were updated, and
+3.0.1 had to follow the same evening. A crates.io version never comes back.
+
+If publishing by hand is ever needed (`.vault/` holds the tokens):
+
+```bash
 (cd bindings/emscripten && npm publish --otp=<code>)
 cargo publish -p luciole
-cargo publish -p lucistore          # cargo waits for the index before returning
-cargo publish -p ld-lucivy
+cargo publish -p lucistore          # cargo *warns* rather than fails when the
+cargo publish -p ld-lucivy          # index lags — wait before the next one
 cargo publish -p lucivy-core
 cargo publish -p sparse-vector
 ```
-
-Verify each on its registry (`cargo search`, the PyPI JSON API, `npm view`)
-before the next; the CDN can lag a minute. Then record the versions in
-`CLAUDE.md` and the day's recap.
 
 ## The release workflow
 

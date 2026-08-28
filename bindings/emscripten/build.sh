@@ -156,6 +156,26 @@ mkdir -p "$PLAYGROUND_JS"
 cp "$SCRIPT_DIR/js/lucivy.js" "$SCRIPT_DIR/js/lucivy-worker.js" "$PLAYGROUND_JS"/
 echo "Copied the JS layer to $PLAYGROUND_JS"
 
+# ── The page's version, from Cargo.toml ─────────────────────────────────────
+# Two literals in index.html used to be edited by hand: the version in the
+# terminal banner, and BUILD, which is the cache-buster on the worker URL. Both
+# sat at 3.0.4 through three releases — the banner lied to every visitor, and
+# the stale cache-buster meant a returning one kept the worker and the wasm
+# from before the fixes. Writing them here makes Cargo.toml the only place a
+# version is decided, and makes the buster move whenever the engine does.
+VERSION=$(grep -m1 '^version' "$ROOT_DIR/Cargo.toml" | cut -d'"' -f2)
+GITSHA=$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo nogit)
+INDEX="$ROOT_DIR/playground/index.html"
+if [ -f "$INDEX" ]; then
+    # The banner: ░▒▓█  <version>  █▓▒░
+    sed -i -E "s/(░▒▓█  )[0-9]+\.[0-9]+\.[0-9]+(  █▓▒░)/\1${VERSION}\2/" "$INDEX"
+    # The cache-buster: version plus the commit, so two builds of one version
+    # are still distinguishable to a browser.
+    sed -i -E "s/(const BUILD = ')[^']*(')/\1${VERSION}-${GITSHA}\2/" "$INDEX"
+    echo "index.html stamped: version ${VERSION}, build ${VERSION}-${GITSHA}"
+    grep -nE "const BUILD|░▒▓█  [0-9]" "$INDEX" | sed 's/^/  /'
+fi
+
 echo "=== Done ==="
 echo "Output: $OUT_DIR/lucivy.js + $OUT_DIR/lucivy.wasm"
 ls -lh "$OUT_DIR"/lucivy.*
