@@ -6,11 +6,19 @@
 # Then attaches everything to the GitHub release of the tag.
 #
 # Publishing to PyPI and npm is a separate job behind the `release`
-# environment: it waits for the maintainer's approval on the run page, and
-# nothing leaves before that. PyPI uses trusted publishing (OIDC, configured
-# on pypi.org for this repository and workflow); npm uses `NPM_TOKEN` when
-# the secret is set (a granular token with 2FA bypass, the only way to
-# publish a package for the first time), trusted publishing otherwise.
+# environment and the repository variable PUBLISH_ENABLED. Note what that
+# does and does not give you: as configured on 28 August 2026 the environment
+# carries a branch policy and **no required reviewers**, so these jobs run on
+# their own as soon as a matching tag is pushed. The comment here used to
+# claim they waited for approval; they did not, and a tag pushed by mistake
+# would publish. Add a required reviewer to the environment if that gate is
+# wanted.
+#
+# PyPI and npm both authenticate through trusted publishing (OIDC), configured
+# on their side for this repository, this workflow file and this environment —
+# no token, and no one-time password. `NPM_TOKEN` is honoured if the secret
+# still exists, which is only useful to publish a package for the first time.
+#
 # The crates are published by hand, last, as RELEASE.md says.
 
 name: release
@@ -179,10 +187,55 @@ jobs:
           path: bindings/nodejs/lucivy.${{ matrix.key }}.node
           if-no-files-found: error
 
+  # ── WebAssembly ─────────────────────────────────────────────────────
+  # Built here since 3.0.8. Before that it was the one artefact produced on a
+  # maintainer's machine: not reproducible from a tag, and the only package
+  # still needing a one-time password to publish. It needs more than the other
+  # jobs — emsdk, and a nightly with rust-src for `-Z build-std` — which is why
+  # it was skipped, not because anything prevents it.
+  wasm:
+    name: wasm (emscripten)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned: emscripten's output changes between versions, and a release
+      # should not silently switch compiler.
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.8
+          actions-cache-folder: emsdk-cache
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-emscripten
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+      # build.sh sources $EMSDK_DIR/emsdk_env.sh when it exists and otherwise
+      # falls through to whatever `emcc` is on PATH — which is what setup-emsdk
+      # provides — so it runs here unmodified.
+      - name: Build the wasm package
+        run: bash bindings/emscripten/build.sh
+      - name: It has to be a wasm module, not an empty file
+        run: |
+          set -euo pipefail
+          ls -la bindings/emscripten/pkg/
+          test -s bindings/emscripten/pkg/lucivy.wasm
+          test -s bindings/emscripten/pkg/lucivy.js
+          # \0asm — the magic number. A truncated or failed link leaves a file
+          # that exists and weighs something, so size alone proves nothing.
+          head -c 4 bindings/emscripten/pkg/lucivy.wasm | od -An -tx1 | grep -q '00 61 73 6d'
+          echo "wasm ok: $(stat -c%s bindings/emscripten/pkg/lucivy.wasm) bytes"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm-pkg
+          path: bindings/emscripten/pkg/
+          if-no-files-found: error
+
   # ── The release page carries every artefact ─────────────────────────
   release:
     name: attach to the release
-    needs: [python, sdist, node]
+    needs: [python, sdist, node, wasm]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
@@ -197,6 +250,7 @@ jobs:
             artifacts/wheel-*/*.whl
             artifacts/sdist/*.tar.gz
             artifacts/node-*/*.node
+            artifacts/wasm-pkg/lucivy.wasm
           fail_on_unmatched_files: true
           draft: false
           prerelease: false
@@ -290,4 +344,46 @@ jobs:
           for dir in npm/*/; do
             (cd "$dir" && npm publish --access public $auth)
           done
+          npm publish --access public $auth
+
+  # ── lucivy-wasm ─────────────────────────────────────────────────────
+  # Its own job rather than a step of publish-npm: the wasm build is the
+  # slowest of the matrix, and a failure there should not hold back the five
+  # platform packages that are already built and verified.
+  publish-wasm:
+    name: publish lucivy-wasm
+    needs: [wasm]
+    if: (startsWith(github.ref, 'refs/tags/v') || inputs.publish) && vars.PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: release
+      url: https://www.npmjs.com/package/lucivy-wasm
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: npm that knows trusted publishing
+        run: npm install -g npm@latest && npm --version
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm-pkg
+          path: bindings/emscripten/pkg
+      - name: The package must carry the binary the job just built
+        run: |
+          set -euo pipefail
+          cd bindings/emscripten
+          ls -la pkg/
+          test -s pkg/lucivy.wasm && test -s pkg/lucivy.js
+          head -c 4 pkg/lucivy.wasm | od -An -tx1 | grep -q '00 61 73 6d'
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd bindings/emscripten
+          if [ -n "$NODE_AUTH_TOKEN" ]; then auth=""; else auth="--provenance"; fi
           npm publish --access public $auth

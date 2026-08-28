@@ -1,4 +1,4 @@
-# lucivy 3.0.7
+# lucivy 3.0.8
 
 [![PyPI](https://img.shields.io/pypi/v/lucivy?label=PyPI&color=blue)](https://pypi.org/project/lucivy/)
 [![npm](https://img.shields.io/npm/v/lucivy?label=npm&color=cb3837)](https://www.npmjs.com/package/lucivy)
@@ -37,7 +37,7 @@ lucivy's own source from GitHub and indexes it in your browser in a few seconds.
   ~1.5× the native time (it was ~25 minutes and 10×): the engine runs on
   mimalloc, and its memory is bounded by construction.
 - One version number for the whole workspace: `ld-lucivy`, `lucivy-core`,
-  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 3.0.7.
+  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 3.0.8.
 
 Full list: [CHANGELOG.md](CHANGELOG.md). Design: [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -261,7 +261,7 @@ V3_CORPUS=/tmp/linux-bench cargo test --release -p lucivy-core \
     --test test_sfx_v3_ground_truth v3_ground_truth_demo -- --ignored --nocapture
 ```
 
-28 August 2026 (3.0.7), one shard, idle machine: Intel Core Ultra 7 270K Plus
+28 August 2026 (3.0.8), one shard, idle machine: Intel Core Ultra 7 270K Plus
 (24 cores), 93 GB RAM, NVMe, Linux 7.1. Timings are the search itself;
 recovering each hit's file for the comparison is the harness's own work and is
 reported separately. A Jaro-Winkler row runs in the same panel but is **timed,

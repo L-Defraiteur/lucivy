@@ -1,6 +1,6 @@
 {
   "name": "lucivy-linux-x64-gnu",
-  "version": "3.0.7",
+  "version": "3.0.8",
   "description": "lucivy prebuilt addon for linux-x64-gnu \u2014 installed automatically by the lucivy package",
   "main": "lucivy.linux-x64-gnu.node",
   "files": [

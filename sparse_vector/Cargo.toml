@@ -1,6 +1,6 @@
 [package]
 name = "sparse-vector"
-version = "3.0.7"
+version = "3.0.8"
 edition = "2021"
 license = "MIT"
 authors = ["Luciform Research <luciedefraiteur@luciformresearch.com>"]
@@ -18,5 +18,5 @@ bincode = "1"
 ordered-float = "4"
 memmap2 = "0.9"
 crc32fast = "1"
-lucistore = { version = "3.0.7", path = "../lucistore" }
-luciole = { version = "3.0.7", path = "../luciole" }
+lucistore = { version = "3.0.8", path = "../lucistore" }
+luciole = { version = "3.0.8", path = "../luciole" }

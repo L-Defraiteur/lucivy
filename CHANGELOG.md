@@ -1,8 +1,17 @@
-Unreleased
+Lucivy 3.0.8
 ================================
 
-Incremental sync reaches the browser, and the path bug that was quietly
-breaking snapshot export with it.
+Incremental sync reaches the browser, the path bug that was quietly breaking
+snapshot export with it, and the wasm package is finally built by CI. Every
+crate and binding ships as **3.0.8**.
+
+- **`lucivy-wasm` is built and published from CI**, on the same tag as
+  everything else. It was the one artefact produced on a maintainer's machine
+  — not reproducible from a tag, and the only package still needing a one-time
+  password. The job pins emsdk 6.0.8, takes a nightly with `rust-src` for
+  `-Z build-std`, runs `build.sh` unmodified, and refuses to go on unless the
+  output starts with the wasm magic number: a failed link leaves a file that
+  exists and weighs something, so checking for a non-empty file proves nothing.
 
 - **A created index kept the wrong path**, and it broke three entry points.
   `lucivy_create` stored the caller's bare path in its context while the index
