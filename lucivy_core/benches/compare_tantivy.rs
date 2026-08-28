@@ -289,3 +289,26 @@ fn probe_ngram_positions() {
         eprintln!("  pos={p:<3} {txt:?} [{f}..{to}]");
     }
 }
+
+/// Can tantivy tell `spin_lock` from `spin-lock`?
+///
+/// Its default tokenizer decides. If it splits on the separator, the separator
+/// is gone from the index and a phrase over `spin` + `lock` matches every
+/// spelling — relaxed matching, with no way back to strict. If it keeps the
+/// token whole, the opposite. Either way the answer is a property of the
+/// tokenizer, so ask it rather than reason about it.
+#[test]
+#[ignore]
+fn probe_default_tokenizer() {
+    use tantivy::tokenizer::{SimpleTokenizer, TextAnalyzer, TokenStream, Tokenizer};
+    let mut a = TextAnalyzer::builder(SimpleTokenizer::default()).build();
+    for input in ["spin_lock", "spin-lock", "spin lock", "raw_spin_lock_irqsave"] {
+        let mut st = a.token_stream(input);
+        let mut toks = Vec::new();
+        while st.advance() {
+            let t = st.token();
+            toks.push(format!("{}@{}", t.text, t.position));
+        }
+        eprintln!("  {input:<24} -> {}", toks.join(" "));
+    }
+}

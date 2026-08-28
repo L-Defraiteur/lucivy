@@ -176,6 +176,71 @@ documents pour `spin_lock` (vérité : 6 569) et 7 789 pour `spinlock`, soit
 comme un sac de trigrammes. Une comparaison ne vaut que ce que vaut la requête
 qu'on met dans la bouche de l'autre moteur.
 
+## 4 bis. La conclusion, en un tableau
+
+Chacun sait faire un côté ; lucivy fait les deux, et dit lequel on obtient.
+Corpus commun, 93 983 fichiers.
+
+| | séparateurs stricts | séparateurs relâchés | fuzzy à travers les tokens |
+|---|---|---|---|
+| **lucivy** | ✓ 6 577 | ✓ 9 552 | ✓ 10 034 |
+| **Elasticsearch** | ✓ 6 577 (trigrammes) | ✗ inexprimable | ✗ 3 549 |
+| **tantivy** | ✗ le séparateur n'est pas indexé | ✓ phrase par défaut | ✗ |
+
+**Elasticsearch ne peut pas relâcher les séparateurs.** Son index trigramme les
+porte, donc `spinlock` rend 6 577 — exactement le compte *strict*. Les 2 975
+documents que le relâché ajoute lui sont hors d'atteinte, et sa phrase
+`"spin lock"` sur l'index standard n'en rend que 173 (son analyseur garde
+`spin_lock` en un seul token).
+
+**tantivy ne peut pas être strict.** Son tokenizer par défaut rend le même flux
+pour les trois orthographes — vérifié en l'interrogeant :
+
+```
+spin_lock  -> spin@0 lock@1
+spin-lock  -> spin@0 lock@1
+spin lock  -> spin@0 lock@1
+```
+
+Le séparateur n'entre jamais dans l'index. Et l'index n-grammes ne rattrape
+rien, ses positions étant toutes à 0.
+
+**Le fuzzy s'arrête à leurs frontières de tokens.** `spinlokc` en distance 2 :
+lucivy 10 034 documents (57 261 spans exacts), Elasticsearch 3 549. Sa
+`fuzziness` compare des termes entiers, donc elle peut approcher un token
+`spinlock` mais jamais `spin_lock`, déjà coupé en deux.
+
+### Ce qu'ils savent faire et qu'on aurait eu tort de nier
+
+- **Elasticsearch sait faire une phrase floue**, via `span_near` de
+  `span_multi` : `retrun -ENOMEM` rend 14 457 documents en 79 ms, contre
+  14 427 pour la forme exacte. C'est verbeux, mais c'est juste. Ne pas
+  prétendre le contraire.
+- **La sous-chaîne exacte lui est acquise**, quatre requêtes sur quatre, y
+  compris à cheval sur un `/` (`ude/lin` : 889 des deux côtés).
+
+### Le plancher des n-grammes
+
+Un index de trigrammes ne peut pas répondre à une requête de moins de trois
+caractères : il n'y a aucun trigramme à chercher.
+
+| requête | vérité | lucivy | Elasticsearch |
+|---|---|---|---|
+| `ude` (3 car.) | 69 245 | 69 245 | 69 245 |
+| `de` (2 car.) | 93 009 | 93 009 | **0** |
+
+Zéro, silencieusement, en 2 ms. Cela vaut pour tout index n-grammes, tantivy
+compris. On *peut* indexer en `min_gram: 2` ou 1 — le coût en taille n'a pas
+été mesuré, donc ne pas l'avancer.
+
+**Et un défaut de notre harnais, révélé par le même essai** : sur `de`, le
+panel affiche `FAIL` alors que le moteur s'est comporté correctement — il a
+atteint `LUCIVY_HIGHLIGHT_SPAN_CAP` et l'a signalé par
+`last_search_truncated()`. Avec `LUCIVY_HIGHLIGHT_SPAN_CAP=0` il rend ses
+7 695 534 spans, exacts. Le panel doit lire ce drapeau et écrire « tronqué »
+plutôt que « faux » : un panel qui crie au loup sur un comportement voulu perd
+sa valeur d'alerte.
+
 ## 5. Ce qui reste à faire
 
 1. **Réduire la taille d'index.** C'est le préalable ; tout le reste attend.
@@ -185,7 +250,8 @@ qu'on met dans la bouche de l'autre moteur.
    (`lucivy_core/benches/compare_tantivy.rs`), il ne manque que cette étape.
 3. **Élucider les 70 documents que la regex d'Elasticsearch manque** — limite
    de longueur du champ `wildcard`, ou autre chose.
-4. **Puis** la section comparative du README, et la réponse aux issues #12
+4. **Faire lire `last_search_truncated()` au panel** — voir 4 bis.
+5. **Puis** la section comparative du README, et la réponse aux issues #12
    et #15.
 
 ## 6. Comment relancer
