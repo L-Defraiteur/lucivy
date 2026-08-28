@@ -31,3 +31,8 @@ target/.cargo-docker/
 !.vault/README.md
 !.vault/load.sh
 playground/lucivy-source.tar.gz
+
+# Dependencies installed on demand — playwright for playground/test_delta_sync.mjs,
+# the napi CLI for the Node binding. There was no rule at all before, which is
+# how bindings/nodejs/node_modules/@napi-rs/cli ended up tracked.
+node_modules/

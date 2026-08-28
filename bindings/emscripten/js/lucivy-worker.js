@@ -586,6 +586,62 @@ self.onmessage = async (e) => {
                 break;
             }
 
+            // ── Incremental sync (LUCIDS) ───────────────────────────────
+            // The three entry points below were compiled into the wasm and
+            // listed in EXPORTED_FUNCTIONS from the start, but nothing above
+            // them called into them, so a browser client could only ever take
+            // a whole snapshot. Syncing a growing server index to a browser is
+            // the case this exists for, and a full snapshot each time is what
+            // makes it impractical.
+
+            case 'shardVersions': {
+                // What this client already holds, per shard — hand it to the
+                // server so it can send back only what moved.
+                const ctx = getCtx(args.path);
+                const json = await callStr('lucivy_shard_versions', ctx);
+                const parsed = json ? JSON.parse(json) : [];
+                // The C side reports failure as {"error": "..."}, which is a
+                // perfectly valid parse — returning it as data would hand the
+                // caller an object where it expects a list.
+                if (!Array.isArray(parsed)) throw new Error(parsed.error || 'shard_versions failed');
+                result = parsed;
+                break;
+            }
+
+            case 'exportShardedDelta': {
+                const ctx = getCtx(args.path);
+                const versions = JSON.stringify(args.clientVersions || []);
+                const lenPtr = Module._malloc(4);
+                const dataPtr = await Module.ccall('lucivy_export_sharded_delta', 'number',
+                    ['number', 'string', 'number'], [ctx, versions, lenPtr], { async: true });
+                if (!dataPtr) {
+                    Module._free(lenPtr);
+                    throw new Error('export_sharded_delta failed — check the client versions shape');
+                }
+                const len = Module.getValue(lenPtr, 'i32');
+                Module._free(lenPtr);
+                // slice(), not subarray(): the wasm heap moves when it grows,
+                // and a view into it would silently point elsewhere afterwards.
+                result = Module.HEAPU8.slice(dataPtr, dataPtr + len);
+                break;
+            }
+
+            case 'applyShardedDelta': {
+                const ctx = getCtx(args.path);
+                const data = args.data instanceof Uint8Array ? args.data : new Uint8Array(args.data);
+                const ptr = Module._malloc(data.length);
+                Module.HEAPU8.set(data, ptr);
+                let res;
+                try {
+                    res = await callStr('lucivy_apply_sharded_delta', ctx, ptr, data.length);
+                } finally {
+                    Module._free(ptr);
+                }
+                checkResult(res);
+                result = true;
+                break;
+            }
+
             case 'numDocs': {
                 const ctx = getCtx(args.path);
                 result = await Module.ccall('lucivy_num_docs', 'number', ['number'], [ctx], { async: true });

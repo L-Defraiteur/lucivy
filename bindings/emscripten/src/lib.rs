@@ -487,7 +487,15 @@ pub unsafe extern "C" fn lucivy_create(
     Box::into_raw(Box::new(LucivyContext {
         handle,
         text_fields,
-        index_path: path.to_string(),
+        // The path the filesystem knows, not the one the caller passed.
+        // `lucivy_open` already stored the prefixed form; this stored the bare
+        // one, so every entry point that reaches for files through
+        // `ctx.index_path` — snapshot export, delta export, delta apply —
+        // looked under `/name` while the index lived at `/opfs/lucivy/name`.
+        // It only ever showed on an index *created* in the session: one
+        // reopened through `lucivy_open` was fine, which is why the playground
+        // never tripped over it.
+        index_path: index_path.clone(),
     }))
 }
 

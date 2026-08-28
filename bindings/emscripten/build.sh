@@ -146,6 +146,16 @@ mkdir -p "$PLAYGROUND_PKG"
 cp "$OUT_DIR"/lucivy.* "$PLAYGROUND_PKG"/
 echo "Copied to $PLAYGROUND_PKG"
 
+# The JS layer too, not only the wasm. `playground/js/` is a copy of
+# `bindings/emscripten/js/`, and it was kept in sync by hand: on 28 August the
+# two silently diverged for an afternoon, so the playground exercised an older
+# binding than the one about to be published — which is exactly the case the
+# playground exists to catch. Copying it here removes the possibility.
+PLAYGROUND_JS="$ROOT_DIR/playground/js"
+mkdir -p "$PLAYGROUND_JS"
+cp "$SCRIPT_DIR/js/lucivy.js" "$SCRIPT_DIR/js/lucivy-worker.js" "$PLAYGROUND_JS"/
+echo "Copied the JS layer to $PLAYGROUND_JS"
+
 echo "=== Done ==="
 echo "Output: $OUT_DIR/lucivy.js + $OUT_DIR/lucivy.wasm"
 ls -lh "$OUT_DIR"/lucivy.*

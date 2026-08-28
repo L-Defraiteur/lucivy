@@ -1,3 +1,38 @@
+Unreleased
+================================
+
+Incremental sync reaches the browser, and the path bug that was quietly
+breaking snapshot export with it.
+
+- **A created index kept the wrong path**, and it broke three entry points.
+  `lucivy_create` stored the caller's bare path in its context while the index
+  was created at `/opfs/lucivy/<path>`; `lucivy_open` stored the prefixed form.
+  So every wasm entry point that reaches for files through `ctx.index_path` —
+  `lucivy_export_snapshot`, `lucivy_export_sharded_delta`,
+  `lucivy_apply_sharded_delta` — looked under `/name` for an index living at
+  `/opfs/lucivy/name`. **Snapshot export failed on any index created in the
+  session**, reported by the worker as "index may have uncommitted changes",
+  which is the message for a null return and not what actually went wrong. An
+  index reopened through `lucivy_open` was unaffected, which is why the
+  playground never tripped over it.
+- **Incremental sync is reachable from the browser.** `shardVersions()`,
+  `exportShardedDelta(clientVersions)` and `applyShardedDelta(data)` on
+  `LucivyIndex`. The three C entry points had been compiled into the wasm and
+  listed in `EXPORTED_FUNCTIONS` from the start, but nothing above them called
+  in, so a browser client could only ever take a whole snapshot — which is what
+  makes syncing a growing server index to a browser impractical, and the case
+  the delta formats exist for. Pinned end to end by
+  `playground/test_delta_sync.mjs`: a client bootstraps from a snapshot, the
+  server moves ahead, the client asks with its own versions, applies what comes
+  back, and then answers the same query with the same hits. An up-to-date
+  client gets 209 bytes.
+- `build.sh` now copies the JS layer to `playground/js/`, not just the wasm to
+  `playground/pkg/`. The two were kept in sync by hand and diverged for an
+  afternoon, so the playground exercised an older binding than the one about to
+  be published — exactly what the playground is there to catch.
+- `.gitignore` had no `node_modules` rule at all, which is how
+  `bindings/nodejs/node_modules/@napi-rs/cli` came to be tracked.
+
 Lucivy 3.0.7
 ================================
 

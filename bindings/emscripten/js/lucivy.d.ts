@@ -374,6 +374,20 @@ export class LucivyIndex {
   numDocs(): Promise<number>;
   schema(): Promise<IndexConfig>;
   exportSnapshot(): Promise<Uint8Array>;
+  /** What this index holds per shard — hand it to whoever exports the delta. */
+  shardVersions(): Promise<ShardVersion[]>;
+  /** A LUCIDS delta holding only the shards that moved since `clientVersions`. */
+  exportShardedDelta(clientVersions?: ShardVersion[]): Promise<Uint8Array>;
+  /** Apply a LUCIDS delta onto this index, in place. */
+  applyShardedDelta(data: Uint8Array | ArrayBuffer): Promise<boolean>;
   close(): Promise<void>;
   destroy(): Promise<void>;
+}
+
+/** One shard's identity and the version of it a client holds. */
+export interface ShardVersion {
+  shard_id: number;
+  version: string;
+  /** The segments that version is made of — what the exporter diffs against. */
+  segment_ids: string[];
 }

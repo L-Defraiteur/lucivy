@@ -229,6 +229,44 @@ export class LucivyIndex {
         return this._lucivy._call('exportSnapshot', { path: this.path });
     }
 
+    /**
+     * What this index already holds, one entry per shard.
+     *
+     * Send it to whoever exports the delta: it is what lets them return only
+     * the shards that moved instead of the whole index.
+     *
+     * @returns {Promise<Array<{shard: number, version: string}>>}
+     */
+    shardVersions() {
+        return this._lucivy._call('shardVersions', { path: this.path });
+    }
+
+    /**
+     * A LUCIDS delta holding only what changed since `clientVersions`.
+     *
+     * @param {Array} clientVersions what the other side holds, from its own
+     *        `shardVersions()`. An empty array asks for everything.
+     * @returns {Promise<Uint8Array>}
+     */
+    exportShardedDelta(clientVersions = []) {
+        return this._lucivy._call('exportShardedDelta', { path: this.path, clientVersions });
+    }
+
+    /**
+     * Apply a LUCIDS delta onto this index, in place.
+     *
+     * The counterpart of `exportShardedDelta`: after it resolves, this index
+     * holds what the exporting side held when it produced the delta. Applying
+     * a delta built against different versions than this index actually has is
+     * rejected rather than half-applied.
+     *
+     * @param {Uint8Array|ArrayBuffer} data the delta blob
+     * @returns {Promise<boolean>}
+     */
+    applyShardedDelta(data) {
+        return this._lucivy._call('applyShardedDelta', { path: this.path, data });
+    }
+
     close() {
         return this._lucivy._call('close', { path: this.path });
     }
