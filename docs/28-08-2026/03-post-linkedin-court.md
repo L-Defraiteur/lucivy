@@ -1,8 +1,8 @@
 # Post LinkedIn — version courte, sous la limite
 
 Le brouillon du [01](01-post-linkedin-3.0.7.md) faisait **4 172 caractères** ;
-LinkedIn en accepte 3 000. Voici la version taillée, à **2748 caractères**,
-soit 252 de marge — gardée volontairement, un comptage n'étant jamais
+LinkedIn en accepte 3 000. Voici la version taillée, à **2796 caractères**,
+soit 204 de marge — gardée volontairement, un comptage n'étant jamais
 tout à fait le même des deux côtés.
 
 (Numéroté 03 : le 02 est le rapport sur le bug de rappel du fuzzy.)
@@ -24,6 +24,8 @@ Et c'est vérifié, pas promis. Sur les 93 605 fichiers du noyau Linux, chaque r
 • En mot entier, la même requête n'en trouve que 5 311. La différence, ce sont les `sched_clock`, `schedule`, `sched_domain`, que la plupart des moteurs ne rendent jamais.
 • Avec deux fautes de frappe, `regsiter` sort 267 348 spans exacts en 879 ms.
 
+À ma connaissance, aucune autre bibliothèque ne fait les deux. `grep` trouve les sous-chaînes, mais sans index ni classement — c'est la colonne de droite. Les moteurs full-text classent, mais ne cherchent pas à l'intérieur des tokens : ils rendent zéro sur la moitié de ces requêtes.
+
 Aussi dans la v3 :
 
 • Syntaxe booléenne : `kmalloc AND NOT kfree`, `"phrase exacte"`, parenthèses.
@@ -36,8 +38,6 @@ Rien à installer pour essayer : le playground clone le code source de Lucivy et
 
 Essayez ici : L-Defraiteur/lucivy — playground
 [ https://l-defraiteur.github.io/lucivy/ ]
-
-Je l'ai construit comme versant BM25 de la recherche vectorielle dans rag3db, un moteur RAG. Le sémantique est excellent pour « trouve-moi quelque chose à propos de X » ; quand on cherche un nom de fonction précis, il faut autre chose.
 
 - PyPI : `pip install lucivy`
 [ https://pypi.org/project/lucivy/ ]
@@ -81,6 +81,22 @@ Ce sont les seules parties que personne d'autre ne peut écrire.
 | Le détail de la fédération (export des statistiques, coordinateur, test d'égalité des scores) | « aux mêmes scores qu'un index unique » |
 | « Binaires précompilés pour Linux (x86_64, aarch64), macOS (Intel, Apple Silicon) et Windows x86_64 » | « pour Linux, macOS et Windows » |
 | L'appel final (« testez-le et dites-moi ce qui casse ») | supprimé — les hashtags closent |
+| Le paragraphe sur rag3db | **supprimé entièrement** — il reste dans l'ombre |
+
+**Sur « aucune autre bibliothèque ne fait ça »**
+
+La phrase est dans le post, mais formulée pour tenir en commentaire. Un absolu
+(« unique en son genre ») se fait démonter par le premier qui cite **Zoekt** —
+l'index de trigrammes de Google, derrière Sourcegraph, qui fait de la regex
+cross-token sur du code avec un classement. Il ne fait pas la même chose : pas
+de BM25 sur des sous-chaînes, pas de spans exacts sur tous les modes, pas de
+build navigateur. Mais il suffit à faire dérailler le fil.
+
+La version retenue nomme les deux camps que le moteur bat plutôt que de se
+déclarer seul au monde : `grep` cherche sans classer, les moteurs full-text
+classent sans chercher dans les tokens. C'est vérifiable, ça s'appuie sur le
+tableau juste au-dessus, et ça ne peut pas être contredit par un contre-exemple
+partiel.
 
 **Le principe de coupe** : un post LinkedIn n'a pas à être exhaustif, le dépôt
 l'est. Chaque ligne retirée est une ligne que le lecteur intéressé trouvera en
