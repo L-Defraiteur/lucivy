@@ -49,3 +49,8 @@ harness = true
 name = "bench_vs_tantivy"
 path = "benches/bench_vs_tantivy.rs"
 harness = true
+
+[[test]]
+name = "compare_tantivy"
+path = "benches/compare_tantivy.rs"
+harness = true
