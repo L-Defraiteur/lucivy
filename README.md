@@ -17,7 +17,11 @@ database. Everything is MIT.
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — it clones
 lucivy's own source from GitHub and indexes it in your browser in a few seconds.
 
-![Left: the presentation page, whose terminal clones lucivy's source and indexes it live. Right: the playground, 1183 files of that source indexed in the browser in 26 s](docs/28-08-2026/playground.png)
+![The presentation page running: it clones lucivy's own source from GitHub, indexes 1 171 files in the browser in 3 s, then runs substring, relaxed-separator, fuzzy, emoji, regex and boolean searches with their measured times and exact highlights — ending on a query typed live, two typos away from its match](docs/28-08-2026/images/demo.gif)
+
+*Nothing is pre-recorded in that terminal: it is the page doing the work in a
+tab. The last query is typed by hand — `--fuzzy 2 "ShardedHandel"` finds
+`ShardedHandle` in 51 ms.*
 
 ### What's new in 3.0.0
 
