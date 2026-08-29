@@ -257,15 +257,17 @@ cd playground && node serve.mjs
 
 ## Docs
 
-**Dossier courant : `docs/27-08-2026/` — `02-rapport-outils-tests-et-a-faire.md`
-(autonome : ce qui a été fait depuis 3.0.5, comment lancer chaque test et
-chaque bench, les variables d'environnement, et ce qui reste — publication
-3.0.6 comprise), puis `01-design-sparse-segments-dimension-globale.md`.
-Veille : `docs/26-08-2026/` — `01-plan-page-presentation.md` (le plan), `02-page-presentation-et-release-3.0.5.md` (ce qui a été fait, ce qui a cassé, à faire). Veille : `docs/25-08-2026/` — lire `05-recap-progression-et-a-faire.md`,
-`06-architecture.md`, `07-knowledge-dump-outils.md`** (autonomes, écrits pour
-remplacer la lecture de l'historique), puis `08-relecture-commits-journee.md`
-(relecture critique de la journée : ce qui a été corrigé le soir et pourquoi). 01-04 sont le détail de la journée :
-journal, design de la pagination, rapport de régression, rapport de journée.
+**Dossier courant : `docs/28-08-2026/` — lire d'abord
+`07-rapport-progression-et-taille-index.md` (ce qui a été fait, et pourquoi la
+promotion attend une réduction de la taille d'index), `08-architecture.md` et
+`09-knowledge-dump-tests-benchs-publication.md` (autonomes : tous les tests,
+tous les bancs, la publication). Puis `06-comparaison-moteurs-mesures.md`
+(lucivy contre Elasticsearch et tantivy, mesuré), `02-fuzzy-perdait-des-documents.md`
+(le bug de rappel de 3.0.2-3.0.6), `04-strategie-diffusion.md`,
+`05-reponses-issues.md`, et les brouillons de post `01`/`03`.
+Veille : `docs/27-08-2026/02-rapport-outils-tests-et-a-faire.md`, puis
+`01-design-sparse-segments-dimension-globale.md`. Avant : `docs/26-08-2026/`
+et `docs/25-08-2026/` (`05` à `08`).
 
 Les docs sont dans `docs/` organisés par dossier daté. Convention depuis le
 24 août 2026 : `JJ-MM-AAAA` (triable). Dossier courant : `24-08-2026/` —
