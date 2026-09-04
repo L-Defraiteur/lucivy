@@ -99,8 +99,10 @@ fn load_sfx_files(segment: &Segment, _schema: &Schema) -> (
     for field_id in &field_ids {
         let field = Field::from_field_id(*field_id);
         if let Some(dict_field) = dictionary.as_ref().and_then(|d| d.field(*field_id)) {
+            // The first live generation's `.sfx`: enough for the version
+            // sniff; the queries take the shard's readers over every
+            // generation from `sfx_dictionary_field`.
             sfx_files.insert(field, dict_field.sfx.clone());
-            registry_files.insert(("termtexts".to_string(), field), dict_field.termtexts.clone());
         } else if let Ok(file_slice) = segment.open_read_custom(&format!("{field_id}.sfx")) {
             sfx_files.insert(field, file_slice);
         }

@@ -10,16 +10,19 @@
 //! kernel index (`docs/04-09-2026/09`).
 //!
 //! The dictionary is written in **generations**: generation `g` is the
-//! files `dict-<g>.<field>.sfx` and `dict-<g>.<field>.termtexts`, complete
-//! (every id ever minted), immutable. A commit that minted new ids writes
-//! generation `g + 1` next to `g`, then `meta.json` names it; `g`'s files
-//! are garbage once no live `meta.json` names them (`segment_updater::
-//! list_files`). Incremental generations — a file per commit holding only
-//! the new ids — come after this first, whole-rebuild form.
+//! files `dict-<g>.<field>.sfx` and `dict-<g>.<field>.termtexts`, holding
+//! the ids minted by one span of commits (its `.termtexts` names them,
+//! `SECTION_IDS`), immutable. A commit that minted new ids writes the next
+//! generation with those ids only, then `meta.json` names it among the
+//! live ones; past `LUCIVY_DICT_MAX_GENERATIONS` (8) a commit compacts
+//! them into one. A generation's files are garbage once no live
+//! `meta.json` names it (`segment_updater::list_files`). Readers see the
+//! live generations as one (`SfxFileReaderV3::open_parts`,
+//! `TermTextsReaderV3::open_parts`).
 //!
-//! `meta.json` carries [`SfxDictionaryMeta`]: the generation, the next id
-//! to mint, and the fields. The runtime [`SfxDictionary`] is what an
-//! `Index` holds and refreshes when `meta.json` changes.
+//! `meta.json` carries [`SfxDictionaryMeta`]: the live generations, the
+//! next id to mint per field, and the fields. The runtime [`SfxDictionary`]
+//! is what an `Index` holds and refreshes when `meta.json` changes.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -55,27 +58,37 @@ pub fn dictionary_bundle_id(generation: u64) -> String {
     format!("dict-{generation}.")
 }
 
-/// A generation of one field's files, open.
+/// One field's files across the live generations, open.
 pub struct DictionaryField {
-    /// Suffix FST + parents (an `SFX3` container over global ids).
+    /// Suffix FST + parents of the first live generation (an `SFX3`
+    /// container over global ids) — what `SegmentReader` hands out as the
+    /// segment's `.sfx` for the version sniff.
     pub sfx: FileSlice,
-    /// Global id → extended text + meta.
-    pub termtexts: FileSlice,
-    /// The FST, opened once for the indexers' lookups.
+    /// The FST reader over every live generation, opened once, memoizing.
     sfx_reader: SfxFileReaderV3,
-    /// The texts' bytes; a `TermTextsReaderV3` is a header parse away.
-    termtexts_bytes: OwnedBytes,
+    /// The texts' bytes of every live generation, in order.
+    termtexts_bytes: Vec<OwnedBytes>,
 }
 
 impl DictionaryField {
-    /// The texts of this generation.
+    /// The texts of every live generation, as one reader.
     pub fn termtexts_reader(&self) -> Option<TermTextsReaderV3<'_>> {
-        TermTextsReaderV3::open(&self.termtexts_bytes)
+        let parts: Vec<&[u8]> = self.termtexts_bytes.iter().map(|b| b.as_slice()).collect();
+        TermTextsReaderV3::open_parts(&parts)
     }
 
-    /// The FST of this generation.
+    /// The FST(s) of every live generation.
     pub fn sfx_reader(&self) -> &SfxFileReaderV3 {
         &self.sfx_reader
+    }
+
+    /// Every id and text the live generations hold, ascending by id.
+    pub fn all_texts(&self) -> Vec<(u32, String, TermMetaV3)> {
+        let mut v: Vec<(u32, String, TermMetaV3)> = self.termtexts_reader()
+            .map(|r| r.iter().map(|(g, t, m)| (g, t.to_string(), m)).collect())
+            .unwrap_or_default();
+        v.sort_by_key(|e| e.0);
+        v
     }
 
     /// The global id of a token with exactly this text and shape, if the
@@ -102,19 +115,21 @@ impl DictionaryField {
         let mut key = Vec::with_capacity(1 + lower_own.len());
         key.push(partition);
         key.extend_from_slice(lower_own.as_bytes());
-        let value = self.sfx_reader.fst().get(&key)?;
-        let parents = self.sfx_reader.decode_parents_where(value, &key, |ov| ov == want_overlap);
         let texts = self.termtexts_reader()?;
-        for p in parents {
-            if p.sti != 0 { continue; }
-            let shape_ok = if meta.is_word_stripped {
-                p.content_len() == meta.own_len.saturating_sub(meta.sep_len as u16)
-            } else {
-                p.own_len == meta.own_len && p.sep_len == meta.sep_len && p.is_word_start == meta.is_word_start
-            };
-            if !shape_ok { continue; }
-            if texts.text(p.raw_ordinal as u32) == Some(text) {
-                return Some(p.raw_ordinal);
+        for part in self.sfx_reader.part_views() {
+            let Some(value) = part.fst().get(&key) else { continue };
+            let parents = part.decode_parents_where(value, &key, |ov| ov == want_overlap);
+            for p in parents {
+                if p.sti != 0 { continue; }
+                let shape_ok = if meta.is_word_stripped {
+                    p.content_len() == meta.own_len.saturating_sub(meta.sep_len as u16)
+                } else {
+                    p.own_len == meta.own_len && p.sep_len == meta.sep_len && p.is_word_start == meta.is_word_start
+                };
+                if !shape_ok { continue; }
+                if texts.text(p.raw_ordinal as u32) == Some(text) {
+                    return Some(p.raw_ordinal);
+                }
             }
         }
         None
@@ -159,14 +174,21 @@ impl SfxDictionary {
     pub fn open(directory: &dyn Directory, meta: &SfxDictionaryMeta, previous: Option<&SfxDictionary>) -> Self {
         let mut fields = HashMap::new();
         for &field_id in &meta.field_ids {
-            let sfx = directory.open_read(&PathBuf::from(dictionary_file_name(meta.generation, field_id, "sfx")));
-            let termtexts = directory.open_read(&PathBuf::from(dictionary_file_name(meta.generation, field_id, "termtexts")));
-            if let (Ok(sfx), Ok(termtexts)) = (sfx, termtexts) {
-                let (Ok(sfx_bytes), Ok(termtexts_bytes)) = (sfx.read_bytes(), termtexts.read_bytes()) else { continue };
-                let Ok(sfx_reader) = SfxFileReaderV3::open_owned(sfx_bytes) else { continue };
-                let sfx_reader = sfx_reader.with_memo(Arc::new(super::file_v3::FstMemo::new()));
-                fields.insert(field_id, DictionaryField { sfx, termtexts, sfx_reader, termtexts_bytes });
+            let mut first_sfx = None;
+            let mut sfx_parts = Vec::new();
+            let mut termtexts_bytes = Vec::new();
+            for &g in &meta.generations {
+                let sfx = directory.open_read(&PathBuf::from(dictionary_file_name(g, field_id, "sfx")));
+                let termtexts = directory.open_read(&PathBuf::from(dictionary_file_name(g, field_id, "termtexts")));
+                let (Ok(sfx), Ok(termtexts)) = (sfx, termtexts) else { continue };
+                let (Ok(sfx_bytes), Ok(tt_bytes)) = (sfx.read_bytes(), termtexts.read_bytes()) else { continue };
+                if first_sfx.is_none() { first_sfx = Some(sfx); }
+                sfx_parts.push(sfx_bytes);
+                termtexts_bytes.push(tt_bytes);
             }
+            let (Some(sfx), Ok(sfx_reader)) = (first_sfx, SfxFileReaderV3::open_parts(sfx_parts)) else { continue };
+            let sfx_reader = sfx_reader.with_memo(Arc::new(super::file_v3::FstMemo::new()));
+            fields.insert(field_id, DictionaryField { sfx, sfx_reader, termtexts_bytes });
         }
         let shared = match previous {
             Some(prev) => prev.shared.clone(),
@@ -184,7 +206,7 @@ impl SfxDictionary {
     /// no id minted.
     pub fn empty() -> Self {
         Self {
-            meta: SfxDictionaryMeta { generation: 0, next_ids: Default::default(), field_ids: Vec::new() },
+            meta: SfxDictionaryMeta { generations: Vec::new(), next_generation: 1, next_ids: Default::default(), field_ids: Vec::new() },
             fields: HashMap::new(),
             shared: Arc::new(DictionaryShared {
                 state: Mutex::new(SharedState { next_ids: HashMap::new(), pending: HashMap::new() }),
@@ -222,9 +244,9 @@ impl SfxDictionary {
         &self.meta
     }
 
-    /// Generation number.
-    pub fn generation(&self) -> u64 {
-        self.meta.generation
+    /// The live generations, ascending.
+    pub fn generations(&self) -> &[u64] {
+        &self.meta.generations
     }
 
     /// The open files of a field, if this generation has them.
@@ -245,26 +267,20 @@ impl SfxDictionary {
 // by a `TTX3` file whose ordinal `i` is the `i`-th id. The commit folds
 // them into the next generation.
 
-/// Serialize the minted ids with their texts and meta (ids ascending).
+/// Serialize the minted ids with their texts and meta (ids ascending): a
+/// `TTX3` file whose IDS section names the ids — the same shape as a
+/// generation of the dictionary.
 pub fn encode_newtexts(entries: &[(u32, &str, TermMetaV3)]) -> Vec<u8> {
     let ids: Vec<u32> = entries.iter().map(|e| e.0).collect();
-    let mut buf = super::gmap::encode(&ids);
-    let mut w = TermTextsWriterV3::new();
+    let mut w = TermTextsWriterV3::new().with_ids(ids);
     for (i, (_, text, meta)) in entries.iter().enumerate() {
         w.add(i as u32, text, *meta);
     }
-    buf.extend_from_slice(&w.serialize());
-    buf
+    w.serialize()
 }
 
 /// Read a `.newtexts` file back: `(global id, text, meta)`.
 pub fn decode_newtexts(bytes: &[u8]) -> Option<Vec<(u32, String, TermMetaV3)>> {
-    let ids = super::gmap::GmapReader::open(bytes)?;
-    let texts = TermTextsReaderV3::open(&bytes[8 + ids.len() as usize * 4..])?;
-    let mut out = Vec::with_capacity(ids.len() as usize);
-    for i in 0..ids.len() {
-        let (text, meta) = texts.entry(i)?;
-        out.push((ids.global(i), text.to_string(), meta));
-    }
-    Some(out)
+    let texts = TermTextsReaderV3::open(bytes)?;
+    Some(texts.iter().map(|(g, t, m)| (g, t.to_string(), m)).collect())
 }

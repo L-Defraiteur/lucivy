@@ -62,6 +62,8 @@ fn config(sfx_version: u8) -> SchemaConfig {
 }
 
 fn build(files: &[(String, String)], sfx_version: u8, dir: &Path) -> LucivyHandle {
+    // Three live generations at most: eight commits exercise two compactions.
+    std::env::set_var("LUCIVY_DICT_MAX_GENERATIONS", "3");
     std::fs::create_dir_all(dir).unwrap();
     let mmap = ld_lucivy::directory::MmapDirectory::open(dir).unwrap();
     let handle = LucivyHandle::create(mmap, &config(sfx_version)).unwrap();
@@ -189,6 +191,11 @@ fn dictionary_index_answers_like_v3() {
     eprintln!("size: v4 {b4} vs v3 {b3} ({:+.1} %)", 100.0 * (b4 as f64 - b3 as f64) / b3 as f64);
     let meta = std::fs::read_to_string(base.join("v4").join("meta.json")).unwrap();
     assert!(meta.contains("\"sfx_dictionary\""), "meta.json names the dictionary: {meta}");
+    let live: Vec<u64> = h4.index.sfx_dictionary().unwrap().generations().to_vec();
+    assert!(!live.is_empty() && live.len() <= 3, "at most three live generations after compaction: {live:?}");
+    let on_disk: std::collections::BTreeSet<u64> = dict_files.iter()
+        .filter_map(|n| n.trim_start_matches("dict-").split('.').next().and_then(|g| g.parse().ok())).collect();
+    assert_eq!(on_disk, live.iter().copied().collect(), "only the live generations remain on disk");
 
     for q in panel() {
         let (d3, s3) = run(&h3, q);
@@ -226,7 +233,7 @@ fn dictionary_pieces() {
     let h4 = build(&files, 4, &base.join("v4"));
     let content_f = h4.field("content").unwrap();
     let dict = h4.index.sfx_dictionary().expect("dictionary");
-    eprintln!("dictionary generation {} next_ids {:?} fields {:?}", dict.generation(), dict.next_ids(), dict.meta().field_ids);
+    eprintln!("dictionary generations {:?} next_ids {:?} fields {:?}", dict.generations(), dict.next_ids(), dict.meta().field_ids);
     let field = dict.field(content_f.field_id()).expect("content field in dictionary");
     let parents = field.sfx_reader().resolve_suffix("mutex_");
     eprintln!("dict parents of 'mutex_': {:?}", parents.iter().map(|p| (p.raw_ordinal, p.sti, p.own_len, &p.overlap[..2])).collect::<Vec<_>>());

@@ -203,23 +203,25 @@ pub fn fst_candidates_count_v3(
 fn fst_candidates_count_in_partition(reader: &SfxFileReaderV3, query: &str, partition: u8) -> usize {
     let lower = query.to_lowercase();
     let query_bytes = lower.as_bytes();
-    let fst = reader.fst();
     let mut total = 0usize;
-    let (ge_key, lt_key) = range_keys(partition, query_bytes);
-    use lucivy_fst::{IntoStreamer, Streamer};
-    let mut stream = fst.range().ge(&ge_key).lt(&lt_key).into_stream();
-    while let Some((key, val)) = stream.next() {
-        total += reader.count_parents(val, key);
-    }
-    if reader.keys_cut_at_boundary() {
-        let len = query_bytes.len();
-        let shortest = len.saturating_sub(MAX_OVERLAP_BYTES).max(1);
-        for k in shortest..len {
-            let tail = &query_bytes[k..];
-            let mut probe = vec![partition];
-            probe.extend_from_slice(&query_bytes[..k]);
-            let Some(val) = fst.get(&probe) else { continue };
-            total += reader.decode_parents_where(val, &probe, |ov| ov.len() >= tail.len() && ov[..tail.len()] == *tail).len();
+    for part in reader.part_views() {
+        let fst = part.fst();
+        let (ge_key, lt_key) = range_keys(partition, query_bytes);
+        use lucivy_fst::{IntoStreamer, Streamer};
+        let mut stream = fst.range().ge(&ge_key).lt(&lt_key).into_stream();
+        while let Some((key, val)) = stream.next() {
+            total += part.count_parents(val, key);
+        }
+        if part.keys_cut_at_boundary() {
+            let len = query_bytes.len();
+            let shortest = len.saturating_sub(MAX_OVERLAP_BYTES).max(1);
+            for k in shortest..len {
+                let tail = &query_bytes[k..];
+                let mut probe = vec![partition];
+                probe.extend_from_slice(&query_bytes[..k]);
+                let Some(val) = fst.get(&probe) else { continue };
+                total += part.decode_parents_where(val, &probe, |ov| ov.len() >= tail.len() && ov[..tail.len()] == *tail).len();
+            }
         }
     }
     total
@@ -302,27 +304,29 @@ fn candidate_partitions(anchor_start: bool, strict_separators: bool) -> &'static
 fn fst_candidates_in_partition(reader: &SfxFileReaderV3, query: &str, partition: u8) -> Vec<FstCandidateV3> {
     let lower = query.to_lowercase();
     let query_bytes = lower.as_bytes();
-    let fst = reader.fst();
     let mut results = Vec::new();
-    let (ge_key, lt_key) = range_keys(partition, query_bytes);
-    use lucivy_fst::{IntoStreamer, Streamer};
-    let mut stream = fst.range().ge(&ge_key).lt(&lt_key).into_stream();
-    while let Some((key, val)) = stream.next() {
-        for p in reader.decode_parents(val, key) {
-            results.push(FstCandidateV3::from_parent(&p, partition));
-        }
-    }
-    if reader.keys_cut_at_boundary() {
-        let len = query_bytes.len();
-        let shortest = len.saturating_sub(MAX_OVERLAP_BYTES).max(1);
-        for k in shortest..len {
-            let tail = &query_bytes[k..];
-            let mut probe = vec![partition];
-            probe.extend_from_slice(&query_bytes[..k]);
-            let Some(val) = fst.get(&probe) else { continue };
-            let parents = reader.decode_parents_where(val, &probe, |ov| ov.len() >= tail.len() && ov[..tail.len()] == *tail);
-            for p in parents {
+    for part in reader.part_views() {
+        let fst = part.fst();
+        let (ge_key, lt_key) = range_keys(partition, query_bytes);
+        use lucivy_fst::{IntoStreamer, Streamer};
+        let mut stream = fst.range().ge(&ge_key).lt(&lt_key).into_stream();
+        while let Some((key, val)) = stream.next() {
+            for p in part.decode_parents(val, key) {
                 results.push(FstCandidateV3::from_parent(&p, partition));
+            }
+        }
+        if part.keys_cut_at_boundary() {
+            let len = query_bytes.len();
+            let shortest = len.saturating_sub(MAX_OVERLAP_BYTES).max(1);
+            for k in shortest..len {
+                let tail = &query_bytes[k..];
+                let mut probe = vec![partition];
+                probe.extend_from_slice(&query_bytes[..k]);
+                let Some(val) = fst.get(&probe) else { continue };
+                let parents = part.decode_parents_where(val, &probe, |ov| ov.len() >= tail.len() && ov[..tail.len()] == *tail);
+                for p in parents {
+                    results.push(FstCandidateV3::from_parent(&p, partition));
+                }
             }
         }
     }
@@ -335,75 +339,10 @@ fn fst_candidates_v3_uncached(
     anchor_start: bool,
     strict_separators: bool,
 ) -> Vec<FstCandidateV3> {
-    let lower = query.to_lowercase();
-    let query_bytes = lower.as_bytes();
-    let fst = reader.fst();
     let mut results = Vec::new();
-
-    let partitions: &[u8] = if anchor_start && strict_separators {
-        &[SI0_PREFIX]
-    } else if anchor_start && !strict_separators {
-        &[SI0_PREFIX, SI_STRIPPED_PREFIX]
-    } else if strict_separators {
-        &[SI0_PREFIX, SI_REST_PREFIX]
-    } else {
-        &[SI0_PREFIX, SI_REST_PREFIX, SI_STRIPPED_PREFIX]
-    };
-
-    for &partition in partitions {
-        // Build range: ge = [partition, query...], lt = [partition, query with last byte +1]
-        let mut ge_key = vec![partition];
-        ge_key.extend_from_slice(query_bytes);
-
-        let mut lt_key = ge_key.clone();
-        // Increment last byte for exclusive upper bound
-        if let Some(last) = lt_key.last_mut() {
-            if *last < 0xFF {
-                *last += 1;
-            } else {
-                // Edge case: last byte is 0xFF — truncate and increment previous
-                lt_key.pop();
-                while let Some(last) = lt_key.last_mut() {
-                    if *last < 0xFF {
-                        *last += 1;
-                        break;
-                    }
-                    lt_key.pop();
-                }
-            }
-        }
-
-        use lucivy_fst::{IntoStreamer, Streamer};
-        let mut stream = fst.range().ge(&ge_key).lt(&lt_key).into_stream();
-        while let Some((key, val)) = stream.next() {
-            let parents = reader.decode_parents(val, key);
-            for p in parents {
-                results.push(FstCandidateV3::from_parent(&p, partition));
-            }
-        }
-
-        // Keys cut at the token boundary (container version 7): a query whose
-        // tail lies in the next token is not a prefix of any key any more. It
-        // used to be found because the key ran `overlap_len` bytes past the
-        // boundary; those bytes are in the record now, so probe the keys that
-        // are proper prefixes of the query, up to `MAX_OVERLAP_BYTES` shorter,
-        // and keep the parents whose overlap completes it.
-        if reader.keys_cut_at_boundary() {
-            let len = query_bytes.len();
-            let shortest = len.saturating_sub(MAX_OVERLAP_BYTES).max(1);
-            for k in shortest..len {
-                let tail = &query_bytes[k..];
-                let mut probe = vec![partition];
-                probe.extend_from_slice(&query_bytes[..k]);
-                let Some(val) = fst.get(&probe) else { continue };
-                let parents = reader.decode_parents_where(val, &probe, |ov| ov.len() >= tail.len() && ov[..tail.len()] == *tail);
-                for p in parents {
-                    results.push(FstCandidateV3::from_parent(&p, partition));
-                }
-            }
-        }
+    for &partition in candidate_partitions(anchor_start, strict_separators) {
+        results.extend(fst_candidates_in_partition(reader, query, partition));
     }
-
     results
 }
 
@@ -481,14 +420,15 @@ fn falling_walk_chunks_uncached(
 ) -> Vec<SplitCandidateV3> {
     let lower = query.to_lowercase();
     let query_bytes = lower.as_bytes();
-    let map = reader.fst();
-    let fst = map.as_fst();
     let mut candidates = Vec::new();
-    let cut = reader.keys_cut_at_boundary();
 
+    for part in reader.part_views() {
+    let map = part.fst();
+    let fst = map.as_fst();
+    let cut = part.keys_cut_at_boundary();
     for &partition in &[SI0_PREFIX, SI_REST_PREFIX] {
         walk_partition(
-            fst, reader, query_bytes, partition,
+            fst, &part, query_bytes, partition,
             |parent, prefix_len| {
                 if parent.sti >= parent.own_len {
                     return None;
@@ -539,6 +479,7 @@ fn falling_walk_chunks_uncached(
         );
     }
 
+    }
     sort_and_dedup_splits(&mut candidates);
     candidates
 }
@@ -576,13 +517,14 @@ fn falling_walk_words_uncached(
 ) -> Vec<SplitCandidateV3> {
     let lower = query.to_lowercase();
     let query_bytes = lower.as_bytes();
-    let map = reader.fst();
-    let fst = map.as_fst();
     let mut candidates = Vec::new();
 
-    let cut = reader.keys_cut_at_boundary();
+    for part in reader.part_views() {
+    let map = part.fst();
+    let fst = map.as_fst();
+    let cut = part.keys_cut_at_boundary();
     walk_partition(
-        fst, reader, query_bytes, SI_STRIPPED_PREFIX,
+        fst, &part, query_bytes, SI_STRIPPED_PREFIX,
         |parent, prefix_len| {
             if parent.sep_len == 0 {
                 return None;
@@ -613,6 +555,7 @@ fn falling_walk_words_uncached(
         &mut candidates,
     );
 
+    }
     sort_and_dedup_splits(&mut candidates);
     candidates
 }

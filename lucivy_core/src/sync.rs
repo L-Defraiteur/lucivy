@@ -73,7 +73,9 @@ impl<'a> DeltaExporter for LucivyDeltaExporter<'a> {
         // named so that it is a prefix of its files (`apply_delta` removes a
         // retired bundle by prefix).
         if let Some(d) = &meta.sfx_dictionary {
-            ids.insert(ld_lucivy::suffix_fst::dictionary::dictionary_bundle_id(d.generation));
+            for &g in &d.generations {
+                ids.insert(ld_lucivy::suffix_fst::dictionary::dictionary_bundle_id(g));
+            }
         }
         Ok(ids)
     }
@@ -84,9 +86,10 @@ impl<'a> DeltaExporter for LucivyDeltaExporter<'a> {
 
     fn read_bundle_files(&self, bundle_id: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
         let (_, meta) = self.snapshot()?;
-        if bundle_id.starts_with("dict-") {
+        if let Some(g) = bundle_id.strip_prefix("dict-").and_then(|r| r.trim_end_matches('.').parse::<u64>().ok()) {
             let mut files = Vec::new();
-            for rel_path in meta.dictionary_files() {
+            let dict_files = meta.sfx_dictionary.as_ref().map(|d| d.files_of(g)).unwrap_or_default();
+            for rel_path in dict_files {
                 let full_path = self.index_path.join(&rel_path);
                 let data = std::fs::read(&full_path)
                     .map_err(|e| format!("cannot read '{}': {e}", full_path.display()))?;

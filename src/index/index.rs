@@ -447,7 +447,7 @@ impl Index {
     fn refresh_sfx_dictionary(&self, metas: &IndexMeta) {
         let Some(wanted) = metas.sfx_dictionary.as_ref() else { return };
         let held = self.sfx_dictionary();
-        if held.as_ref().is_some_and(|d| d.generation() == wanted.generation) {
+        if held.as_ref().is_some_and(|d| d.generations() == wanted.generations.as_slice()) {
             return;
         }
         self.set_sfx_dictionary(Some(Arc::new(SfxDictionary::open(&self.directory, wanted, held.as_deref()))));

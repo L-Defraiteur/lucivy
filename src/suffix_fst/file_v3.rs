@@ -188,6 +188,10 @@ pub struct SfxFileReaderV3 {
     /// are cut down to the ids this segment has before any posting is
     /// looked up (a segment of 64 documents holds 1 % of the shard's ids).
     segment_gmap: Option<common::OwnedBytes>,
+    /// Further files this reader answers for as one — the generations of a
+    /// shard dictionary. Each is a single-file reader; the walks visit
+    /// `part_views()` and union what they find. Empty for a plain file.
+    more: Vec<SfxFileReaderV3>,
 }
 
 impl SfxFileReaderV3 {
@@ -234,7 +238,40 @@ impl SfxFileReaderV3 {
         }
         let version = version.max(LEGACY_PARENTS_VERSION);
 
-        Ok(Self { fst, parent_list_data, version, memo: None, segment_gmap: None })
+        Ok(Self { fst, parent_list_data, version, memo: None, segment_gmap: None, more: Vec::new() })
+    }
+
+    /// One reader over several files (the generations of a shard
+    /// dictionary): what the walks find in any of them, they find here.
+    pub fn open_parts(parts: Vec<common::OwnedBytes>) -> Result<Self, SfxV3Error> {
+        let mut it = parts.into_iter();
+        let first = it.next().ok_or(SfxV3Error::InvalidFormat)?;
+        let mut reader = Self::open_owned(first)?;
+        for bytes in it {
+            reader.more.push(Self::open_owned(bytes)?);
+        }
+        Ok(reader)
+    }
+
+    /// The single-file readers this one is made of, first file included,
+    /// each without memo or segment view: what a walk iterates.
+    pub fn part_views(&self) -> Vec<SfxFileReaderV3> {
+        let mut v = Vec::with_capacity(1 + self.more.len());
+        v.push(Self {
+            fst: self.fst.clone(),
+            parent_list_data: self.parent_list_data.clone(),
+            version: self.version,
+            memo: None,
+            segment_gmap: None,
+            more: Vec::new(),
+        });
+        v.extend(self.more.iter().cloned());
+        v
+    }
+
+    /// Number of files behind this reader.
+    pub fn num_parts(&self) -> usize {
+        1 + self.more.len()
     }
 
     /// Share the FST briques' results across this reader's users.
@@ -257,6 +294,7 @@ impl SfxFileReaderV3 {
             version: self.version,
             memo: self.memo.clone(),
             segment_gmap: Some(gmap),
+            more: self.more.clone(),
         }
     }
 
@@ -340,19 +378,21 @@ impl SfxFileReaderV3 {
         let lower = suffix.to_lowercase();
         let mut results = Vec::new();
 
-        for &prefix in &[super::builder::SI0_PREFIX, super::builder::SI_REST_PREFIX, super::builder_v3::SI_STRIPPED_PREFIX] {
-            let mut key = vec![prefix];
-            key.extend_from_slice(lower.as_bytes());
-            if let Some(val) = self.fst.get(&key) {
-                results.extend(self.decode_parents(val, &key));
+        for part in self.part_views() {
+            for &prefix in &[super::builder::SI0_PREFIX, super::builder::SI_REST_PREFIX, super::builder_v3::SI_STRIPPED_PREFIX] {
+                let mut key = vec![prefix];
+                key.extend_from_slice(lower.as_bytes());
+                if let Some(val) = part.fst.get(&key) {
+                    results.extend(part.decode_parents(val, &key));
+                }
             }
         }
         results
     }
 
-    /// Number of entries in the FST.
+    /// Number of entries in the FST(s).
     pub fn num_suffix_terms(&self) -> usize {
-        self.fst.len()
+        self.fst.len() + self.more.iter().map(|p| p.fst.len()).sum::<usize>()
     }
 }
 

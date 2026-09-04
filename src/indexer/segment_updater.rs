@@ -131,7 +131,7 @@ impl SegmentUpdaterShared {
         // generation before it rewrites meta.json, and a GC can land in
         // between. Older generations are garbage.
         let live_generation = self.index.load_metas().ok()
-            .and_then(|m| m.sfx_dictionary.map(|d| (d.generation, d.files())));
+            .and_then(|m| m.sfx_dictionary.map(|d| (d.generations.clone(), d.files())));
         if let Some((_, dict_files)) = &live_generation {
             files.extend(dict_files.iter().cloned());
         }
@@ -164,10 +164,12 @@ impl SegmentUpdaterShared {
                 continue;
             }
             if let Some(rest) = name.strip_prefix("dict-") {
-                let newer = rest.split('.').next()
+                // Live, or newer than every live one (being written by a commit).
+                let keep = rest.split('.').next()
                     .and_then(|g| g.parse::<u64>().ok())
-                    .is_some_and(|g| live_generation.as_ref().is_none_or(|(live, _)| g >= *live));
-                if newer {
+                    .is_some_and(|g| live_generation.as_ref().is_none_or(|(live, _)|
+                        live.contains(&g) || live.iter().all(|&l| g > l)));
+                if keep {
                     files.insert(path);
                 }
             }

@@ -1,11 +1,12 @@
-//! The shard dictionary's generation, rebuilt at commit.
+//! The shard dictionary's generations, written at commit.
 //!
 //! A commit on a `sfx_version` 4 index folds the `.newtexts` of the segments
-//! it commits — the texts of the ids they minted — into a new generation:
-//! every text of the live generation plus those, one `.sfx` and one
-//! `.termtexts` per field, written whole (the incremental form comes
-//! later), then made live on the `Index` so that `save_metas` names it.
-//! Nothing new to fold → the generation stays.
+//! it commits — the texts of the ids they minted — into a new generation
+//! holding those texts only (one `.sfx` and one `.termtexts` per field),
+//! then makes it live on the `Index` so that `save_metas` names it. Past
+//! `LUCIVY_DICT_MAX_GENERATIONS` live generations, one holding every text
+//! replaces them (a rebuild, as costly as the dictionary is large — rare).
+//! Nothing new to fold → nothing written.
 //!
 //! Ids are stable and append-only, so a rebuild changes no segment.
 
@@ -66,8 +67,9 @@ pub(crate) fn fold_new_texts(shared: &Arc<SegmentUpdaterShared>) -> crate::Resul
     if new_by_field.is_empty() {
         return Ok(());
     }
+    let folded_ids: HashSet<(u32, u64)> = new_by_field.iter()
+        .flat_map(|(f, v)| v.iter().map(move |(g, _, _)| (*f, *g as u64))).collect();
 
-    let generation = dictionary.generation() + 1;
     let mut field_ids: Vec<u32> = dictionary.meta().field_ids.clone();
     for &f in new_by_field.keys() {
         if !field_ids.contains(&f) {
@@ -76,50 +78,83 @@ pub(crate) fn fold_new_texts(shared: &Arc<SegmentUpdaterShared>) -> crate::Resul
     }
     field_ids.sort_unstable();
 
+    let max_generations: usize = std::env::var("LUCIVY_DICT_MAX_GENERATIONS").ok()
+        .and_then(|v| v.parse().ok()).filter(|&n| n >= 1).unwrap_or(8);
     let directory = index.directory();
+    let mut generations = dictionary.meta().generations.clone();
+    let mut next_generation = dictionary.meta().next_generation.max(1);
+
+    // The new generation: the new texts only, per field, ids ascending.
+    let generation = next_generation;
+    next_generation += 1;
     for &field_id in &field_ids {
-        // Every text of the live generation, then the new ones.
-        let mut texts = TermTextsWriterV3::new();
-        let mut builder = SuffixFstBuilderV3::new();
-        builder.set_max_ordinal(u32::MAX as u64);
-        let feed = |global: u32, text: &str, m: TermMetaV3, texts: &mut TermTextsWriterV3, builder: &mut SuffixFstBuilderV3| {
-            texts.add(global, text, m);
-            if m.is_word_stripped {
-                let content_len = text.len().saturating_sub(m.overlap_len as usize);
-                builder.add_word_stripped(&text[..content_len], &text[content_len..], global as u64,
-                    m.own_len, m.sep_len, m.is_word_start);
-            } else {
-                builder.add_token(text, global as u64, m.own_len, m.sep_len, m.overlap_len, m.is_word_start);
+        let mut entries = new_by_field.remove(&field_id).unwrap_or_default();
+        entries.sort_by_key(|e| e.0);
+        entries.dedup_by_key(|e| e.0);
+        write_generation(directory, generation, field_id, &entries)?;
+    }
+    generations.push(generation);
+
+    // Too many generations to walk: one holding everything replaces them.
+    if generations.len() > max_generations {
+        let compact = next_generation;
+        next_generation += 1;
+        for &field_id in &field_ids {
+            let mut entries: Vec<(u32, String, TermMetaV3)> = dictionary.field(field_id)
+                .map(|f| f.all_texts()).unwrap_or_default();
+            // Plus this commit's, which the open dictionary does not hold yet.
+            let fresh_path = PathBuf::from(dictionary_file_name(generation, field_id, "termtexts"));
+            if let Some(fresh) = directory.open_read(&fresh_path).ok()
+                .and_then(|f| f.read_bytes().ok())
+                .and_then(|bytes| decode_newtexts(&bytes))
+            {
+                entries.extend(fresh);
             }
-        };
-        if let Some(old) = dictionary.field(field_id).and_then(|f| f.termtexts_reader().map(|r| r.iter().map(|(g, t, m)| (g, t.to_string(), m)).collect::<Vec<_>>())) {
-            for (g, t, m) in old {
-                if m.own_len == 0 && t.is_empty() { continue; } // a hole
-                feed(g, &t, m, &mut texts, &mut builder);
-            }
+            entries.sort_by_key(|e| e.0);
+            entries.dedup_by_key(|e| e.0);
+            write_generation(directory, compact, field_id, &entries)?;
         }
-        if let Some(new) = new_by_field.get(&field_id) {
-            for (g, t, m) in new {
-                feed(*g, t, *m, &mut texts, &mut builder);
-            }
-        }
-        let (fst, parents) = builder.build().map_err(|e| crate::LucivyError::SystemError(
-            format!("dictionary generation {generation} field {field_id}: {e}")))?;
-        let sfx = SfxFileWriterV3::new(fst, parents).to_bytes();
-        let termtexts = texts.serialize();
-        for (ext, bytes) in [("sfx", sfx), ("termtexts", termtexts)] {
-            let path = PathBuf::from(dictionary_file_name(generation, field_id, ext));
-            let mut w = directory.open_write(&path)?;
-            w.write_all(&bytes)?;
-            w.terminate()?;
-        }
+        generations = vec![compact];
     }
 
-    let folded: HashSet<(u32, u64)> = new_by_field.iter()
-        .flat_map(|(f, v)| v.iter().map(move |(g, _, _)| (*f, *g as u64))).collect();
-    let meta = SfxDictionaryMeta { generation, next_ids: dictionary.next_ids(), field_ids };
+    let folded: HashSet<(u32, u64)> = folded_ids;
+    let meta = SfxDictionaryMeta { generations, next_generation, next_ids: dictionary.next_ids(), field_ids };
     let next = SfxDictionary::open(directory, &meta, Some(&dictionary));
     next.forget_pending(&folded);
     index.set_sfx_dictionary(Some(Arc::new(next)));
+    Ok(())
+}
+
+/// Write one field's files of a generation: the FST over `entries` (ids
+/// ascending) and the texts with their ids.
+fn write_generation(
+    directory: &dyn Directory,
+    generation: u64,
+    field_id: u32,
+    entries: &[(u32, String, TermMetaV3)],
+) -> crate::Result<()> {
+    let mut builder = SuffixFstBuilderV3::new();
+    builder.set_max_ordinal(u32::MAX as u64);
+    let mut texts = TermTextsWriterV3::new().with_ids(entries.iter().map(|e| e.0).collect());
+    for (i, (global, text, m)) in entries.iter().enumerate() {
+        texts.add(i as u32, text, *m);
+        if m.is_word_stripped {
+            let content_len = text.len().saturating_sub(m.overlap_len as usize);
+            builder.add_word_stripped(&text[..content_len], &text[content_len..], *global as u64,
+                m.own_len, m.sep_len, m.is_word_start);
+        } else {
+            builder.add_token(text, *global as u64, m.own_len, m.sep_len, m.overlap_len, m.is_word_start);
+        }
+    }
+    let (fst, parents) = builder.build().map_err(|e| crate::LucivyError::SystemError(
+        format!("dictionary generation {generation} field {field_id}: {e}")))?;
+    let sfx = SfxFileWriterV3::new(fst, parents).to_bytes();
+    let termtexts = texts.serialize();
+    for (ext, bytes) in [("sfx", sfx), ("termtexts", termtexts)] {
+        let path = PathBuf::from(dictionary_file_name(generation, field_id, ext));
+        let mut w = directory.open_write(&path)?;
+        w.write_all(&bytes)?;
+        w.terminate()?;
+    }
     Ok(())
 }

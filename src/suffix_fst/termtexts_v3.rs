@@ -47,6 +47,11 @@ const SECTION_META: u16 = 0x02;
 const SECTION_STATS: u16 = 0x03;
 const SECTION_ENTRIES: u16 = 0x04;
 const SECTION_ENTRIES3: u16 = 0x05;
+/// The global ids the entries stand for, as runs, when the file is one
+/// generation of a shard dictionary (or a segment's `.newtexts`): entry `i`
+/// is id `run.start + (i - run.first_index)`. Absent = entry `i` is id `i`.
+/// `[u32 runs]` then `[u32 start][u32 len]` per run, ascending.
+const SECTION_IDS: u16 = 0x06;
 /// Bytes per ordinal in the layout-3 meta table.
 const META_SIZE: usize = 4;
 /// Bytes per ordinal in the ENTRIES table.
@@ -90,6 +95,9 @@ pub struct TermMetaV3 {
 pub struct TermTextsWriterV3 {
     texts: Vec<Vec<u8>>,
     metas: Vec<TermMetaV3>,
+    /// The global id of each entry, ascending, when the entries are a
+    /// subset of a shard's ids (`SECTION_IDS`).
+    ids: Option<Vec<u32>>,
 }
 
 impl Default for TermTextsWriterV3 {
@@ -104,7 +112,17 @@ impl TermTextsWriterV3 {
         Self {
             texts: Vec::new(),
             metas: Vec::new(),
+            ids: None,
         }
+    }
+
+    /// Entry `i` stands for global id `ids[i]` (ascending): a generation of
+    /// a shard dictionary, or a segment's minted texts. `add` then takes the
+    /// entry index, not the id.
+    pub fn with_ids(mut self, ids: Vec<u32>) -> Self {
+        debug_assert!(ids.windows(2).all(|w| w[0] < w[1]), "ids must be strictly increasing");
+        self.ids = Some(ids);
+        self
     }
 
     /// A writer holding every token of a collected segment, keyed by final
@@ -160,6 +178,23 @@ impl TermTextsWriterV3 {
         stats.extend_from_slice(&STATS_VERSION.to_le_bytes());
         file.add_section(SECTION_STATS, &stats);
 
+        if let Some(ids) = &self.ids {
+            let mut runs: Vec<(u32, u32)> = Vec::new();
+            for &id in ids {
+                match runs.last_mut() {
+                    Some((start, len)) if *start + *len == id => *len += 1,
+                    _ => runs.push((id, 1)),
+                }
+            }
+            let mut buf = Vec::with_capacity(4 + runs.len() * 8);
+            buf.extend_from_slice(&(runs.len() as u32).to_le_bytes());
+            for (start, len) in runs {
+                buf.extend_from_slice(&start.to_le_bytes());
+                buf.extend_from_slice(&len.to_le_bytes());
+            }
+            file.add_section(SECTION_IDS, &buf);
+        }
+
         file.serialize()
     }
 
@@ -207,6 +242,12 @@ impl TermTextsWriterV3 {
 /// table and the meta in `legacy_meta`, 6 bytes per ordinal.
 pub struct TermTextsReaderV3<'a> {
     num_terms: u32,
+    /// `SECTION_IDS`: `(start, len, first entry index)` per run, ascending;
+    /// an id is mapped to its entry before any read. `None` = id = index.
+    id_runs: Option<Vec<(u32, u32, u32)>>,
+    /// Further files answered for as one (the generations of a shard
+    /// dictionary), each read on its own ids.
+    more: Vec<TermTextsReaderV3<'a>>,
     /// Layout 3: the block-coded text offsets; `entries` is then the meta
     /// table alone, `stride` = [`META_SIZE`].
     text_offsets: Option<BlockOffsets<'a>>,
@@ -277,8 +318,26 @@ impl<'a> TermTextsReaderV3<'a> {
             .filter(|s| s.len() >= 4 && u16::from_le_bytes([s[2], s[3]]) == STATS_VERSION)
             .map(|s| u16::from_le_bytes([s[0], s[1]]));
 
+        let id_runs = file.get_section(SECTION_IDS).and_then(|raw| {
+            if raw.len() < 4 { return None; }
+            let n = u32::from_le_bytes(raw[0..4].try_into().ok()?) as usize;
+            if raw.len() < 4 + n * 8 { return None; }
+            let mut runs = Vec::with_capacity(n);
+            let mut first = 0u32;
+            for i in 0..n {
+                let o = 4 + i * 8;
+                let start = u32::from_le_bytes(raw[o..o + 4].try_into().ok()?);
+                let len = u32::from_le_bytes(raw[o + 4..o + 8].try_into().ok()?);
+                runs.push((start, len, first));
+                first += len;
+            }
+            Some(runs)
+        });
+
         Some(Self {
             num_terms,
+            id_runs,
+            more: Vec::new(),
             text_offsets,
             entries,
             stride,
@@ -286,6 +345,62 @@ impl<'a> TermTextsReaderV3<'a> {
             legacy_meta,
             max_word_content_len,
         })
+    }
+
+    /// One reader over several files (the generations of a shard
+    /// dictionary): an id is looked up in each in turn.
+    pub fn open_parts(parts: &[&'a [u8]]) -> Option<Self> {
+        let mut it = parts.iter();
+        let mut first = Self::open(it.next()?)?;
+        for bytes in it {
+            first.more.push(Self::open(bytes)?);
+        }
+        Some(first)
+    }
+
+    /// True when entry indexes are not the ids (`SECTION_IDS`, or several files).
+    pub fn has_id_map(&self) -> bool {
+        self.id_runs.is_some() || !self.more.is_empty()
+    }
+
+    /// The entry index of a global id in THIS file, ignoring `more`.
+    #[inline]
+    fn local_index(&self, id: u32) -> Option<u32> {
+        match &self.id_runs {
+            None => (id < self.num_terms).then_some(id),
+            Some(runs) => {
+                let i = runs.partition_point(|&(start, _, _)| start <= id);
+                if i == 0 { return None; }
+                let (start, len, first) = runs[i - 1];
+                (id < start + len).then(|| first + (id - start))
+            }
+        }
+    }
+
+    /// The file and entry index holding a global id, across `more`.
+    #[inline]
+    fn locate(&self, id: u32) -> Option<(&TermTextsReaderV3<'a>, u32)> {
+        if let Some(i) = self.local_index(id) {
+            return Some((self, i));
+        }
+        for part in &self.more {
+            if let Some(i) = part.local_index(id) {
+                return Some((part, i));
+            }
+        }
+        None
+    }
+
+    /// The global id of entry `i` of this file (ignoring `more`).
+    fn id_of_entry(&self, i: u32) -> u32 {
+        match &self.id_runs {
+            None => i,
+            Some(runs) => {
+                let k = runs.partition_point(|&(_, _, first)| first <= i);
+                let (start, _, first) = runs[k.max(1) - 1];
+                start + (i - first)
+            }
+        }
     }
 
     /// Layout 2 or 3 when true: the meta is one read per ordinal.
@@ -308,8 +423,15 @@ impl<'a> TermTextsReaderV3<'a> {
         }
     }
 
-    /// Get the extended token text for an ordinal.
+    /// Get the extended token text for an ordinal (a global id when the
+    /// file maps ids).
     pub fn text(&self, ordinal: u32) -> Option<&'a str> {
+        let (part, i) = self.locate(ordinal)?;
+        part.text_at(i)
+    }
+
+    /// Text of entry `i` of this file.
+    fn text_at(&self, ordinal: u32) -> Option<&'a str> {
         if ordinal >= self.num_terms {
             return None;
         }
@@ -321,8 +443,14 @@ impl<'a> TermTextsReaderV3<'a> {
         std::str::from_utf8(&self.text_data[start..end]).ok()
     }
 
-    /// Get the metadata for an ordinal.
+    /// Get the metadata for an ordinal (a global id when the file maps ids).
     pub fn meta(&self, ordinal: u32) -> Option<TermMetaV3> {
+        let (part, i) = self.locate(ordinal)?;
+        part.meta_at(i)
+    }
+
+    /// Meta of entry `i` of this file.
+    fn meta_at(&self, ordinal: u32) -> Option<TermMetaV3> {
         if self.has_inline_meta() {
             let e = self.inline_meta(ordinal)?;
             let flags = e[3];
@@ -366,13 +494,14 @@ impl<'a> TermTextsReaderV3<'a> {
     /// which loses a match rather than inventing one.
     #[inline]
     pub fn has_content(&self, ordinal: u32) -> bool {
-        if self.has_inline_meta() {
-            return match self.inline_meta(ordinal) {
+        let Some((part, i)) = self.locate(ordinal) else { return true };
+        if part.has_inline_meta() {
+            return match part.inline_meta(i) {
                 Some(e) => u16::from_le_bytes([e[0], e[1]]) > e[2] as u16,
                 None => true,
             };
         }
-        self.meta(ordinal).is_none_or(|m| m.own_len > m.sep_len as u16)
+        part.meta_at(i).is_none_or(|m| m.own_len > m.sep_len as u16)
     }
 
     /// Get text + metadata together for an ordinal.
@@ -383,7 +512,11 @@ impl<'a> TermTextsReaderV3<'a> {
     /// Longest word-stripped content in this segment, if the file records it.
     /// `None` on files written before the STATS section.
     pub fn max_word_content_len(&self) -> Option<u16> {
-        self.max_word_content_len
+        let mut m = self.max_word_content_len?;
+        for part in &self.more {
+            m = m.max(part.max_word_content_len?);
+        }
+        Some(m)
     }
 
     /// True unless the file proves that every word fits under
@@ -393,17 +526,19 @@ impl<'a> TermTextsReaderV3<'a> {
         self.max_word_content_len.is_none_or(|m| m > WORD_SUFFIX_CAP)
     }
 
-    /// Number of terms.
+    /// Number of entries, every file counted.
     pub fn num_terms(&self) -> u32 {
-        self.num_terms
+        self.num_terms + self.more.iter().map(|p| p.num_terms).sum::<u32>()
     }
 
-    /// Iterate all entries: (ordinal, text, meta).
+    /// Iterate all entries of every file: (global id, text, meta).
     pub fn iter(&self) -> impl Iterator<Item = (u32, &'a str, TermMetaV3)> + '_ {
-        (0..self.num_terms).filter_map(move |ord| {
-            let text = self.text(ord)?;
-            let meta = self.meta(ord)?;
-            Some((ord, text, meta))
+        std::iter::once(self).chain(self.more.iter()).flat_map(|part| {
+            (0..part.num_terms).filter_map(move |i| {
+                let text = part.text_at(i)?;
+                let meta = part.meta_at(i)?;
+                Some((part.id_of_entry(i), text, meta))
+            })
         })
     }
 

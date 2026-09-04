@@ -362,8 +362,14 @@ impl Order {
 /// id to mint, and the fields that have one. Absent on every other index.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SfxDictionaryMeta {
-    /// Generation number of the live files (`dict-<generation>.<field>.*`).
-    pub generation: u64,
+    /// The live generations, ascending (`dict-<g>.<field>.*`): each holds
+    /// the ids minted by one span of commits, a compaction replaces several
+    /// by one.
+    #[serde(default)]
+    pub generations: Vec<u64>,
+    /// Number the next generation written will bear.
+    #[serde(default)]
+    pub next_generation: u64,
     /// First global id not yet minted, per field: ids are dense per field,
     /// since `.termtexts` is indexed by id and a hole costs its entry.
     #[serde(default)]
@@ -373,12 +379,17 @@ pub struct SfxDictionaryMeta {
 }
 
 impl SfxDictionaryMeta {
-    /// The files of this generation, relative to the index directory.
+    /// The files of every live generation, relative to the index directory.
     pub fn files(&self) -> Vec<PathBuf> {
+        self.generations.iter().flat_map(|&g| self.files_of(g)).collect()
+    }
+
+    /// The files of one generation.
+    pub fn files_of(&self, generation: u64) -> Vec<PathBuf> {
         use crate::suffix_fst::dictionary::dictionary_file_name;
         self.field_ids.iter().flat_map(|&f| {
-            [PathBuf::from(dictionary_file_name(self.generation, f, "sfx")),
-             PathBuf::from(dictionary_file_name(self.generation, f, "termtexts"))]
+            [PathBuf::from(dictionary_file_name(generation, f, "sfx")),
+             PathBuf::from(dictionary_file_name(generation, f, "termtexts"))]
         }).collect()
     }
 }
