@@ -8,7 +8,6 @@
 use crate::query::posting_resolver::PostingResolver;
 use crate::suffix_fst::file_v3::SfxFileReaderV3;
 use crate::suffix_fst::posmap::PosMapReader;
-use crate::suffix_fst::bytemap::ByteBitmapReader;
 use crate::suffix_fst::word_sfxpost::WordSfxPostReader;
 use crate::suffix_fst::sibling_table::SiblingTableReader;
 use crate::suffix_fst::termtexts_v3::TermTextsReaderV3;
@@ -42,8 +41,6 @@ pub struct BriquesContext<'a> {
     // Loaded from segment reader. None = file not present in this segment.
     /// `.posmap`: (doc, position) → token ordinal, the reverse of the posting index.
     pub posmap: Option<PosMapReader<'a>>,
-    /// `.bytemap`: per-ordinal 256-bit bitmap of the byte values present in the token text.
-    pub bytemap: Option<ByteBitmapReader<'a>>,
     /// `.word_sfxpost`: postings of the word-stripped partition (0x02).
     pub word_sfxpost: Option<WordSfxPostReader<'a>>,
     /// `.sibling_v3`: for each token ordinal, the ordinals that follow it in the text.
@@ -64,11 +61,6 @@ impl<'a> BriquesContext<'a> {
         self.posmap.as_ref().expect("posmap required but not loaded — check index config")
     }
 
-    /// The bytemap reader; panics if `.bytemap` was not loaded for this segment.
-    pub fn require_bytemap(&self) -> &ByteBitmapReader<'a> {
-        self.bytemap.as_ref().expect("bytemap required but not loaded — check index config")
-    }
-
     /// The word-stripped postings reader; panics if `.word_sfxpost` was not loaded.
     pub fn require_word_sfxpost(&self) -> &WordSfxPostReader<'a> {
         self.word_sfxpost.as_ref().expect("word_sfxpost required but not loaded — check index config")
@@ -86,14 +78,16 @@ impl<'a> BriquesContext<'a> {
 
     // ── Convenience: check if word pipeline is available ─────────
 
-    /// True if all files needed for the word pipeline (relaxed mode) are loaded.
+    /// True if all files needed for the word pipeline (relaxed mode) are loaded:
+    /// `.posmap`, `.termtexts` (its META answers "does this chunk hold content?",
+    /// which `.bytemap` used to) and a non-empty `.word_sfxpost`.
     ///
     /// Presence is not enough: an empty `.word_sfxpost` (0 ordinals) opens fine and
     /// would make every partition 0x02 resolution silently return nothing. Require
     /// actual content so a degraded index fails visibly instead.
     pub fn has_word_pipeline(&self) -> bool {
         self.posmap.is_some()
-            && self.bytemap.is_some()
+            && self.termtexts.is_some()
             && self.word_sfxpost.as_ref().is_some_and(|w| w.num_ordinals() > 0)
     }
 

@@ -34,7 +34,7 @@ pub struct Counters {
     pub ns_word_walk: AtomicU64,
     /// Word pipeline: sibling-table DFS supplementing the chains.
     pub ns_word_sibling: AtomicU64,
-    /// Word pipeline: resolving chains through WordSfxPost / posmap / bytemap.
+    /// Word pipeline: resolving chains through WordSfxPost / posmap / termtexts META.
     pub ns_word_resolve: AtomicU64,
 
     /// Fuzzy pipeline stages.

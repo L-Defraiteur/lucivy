@@ -29,22 +29,19 @@ const MAX_QUERY_LEN: usize = 2048;
 /// consuming them ends, in the text, inside that next word — after whatever
 /// separators sit between. The resolver cannot know where, so it reports the
 /// excess in `overlap_overflow` and stops `byte_to` at the word's content end.
-/// Here the next content chunk is found through posmap/bytemap and the end is
+/// Here the next content chunk is found through posmap + termtexts META and the end is
 /// placed at its `byte_from + excess`.
 ///
 /// Without posmap the span is left clamped: short, never wrong.
 fn place_overlap_overflow(ctx: &BriquesContext<'_>, matches: &mut [MatchV3]) {
-    const CONTENT_RANGES: &[(u8, u8)] = &[
-        (b'0', b'9'), (b'A', b'Z'), (b'a', b'z'), (0x80, 0xFF),
-    ];
-    let (Some(pm), Some(bm)) = (ctx.posmap.as_ref(), ctx.bytemap.as_ref()) else { return };
+    let (Some(pm), Some(tt)) = (ctx.posmap.as_ref(), ctx.termtexts.as_ref()) else { return };
     for m in matches.iter_mut() {
         if m.overlap_overflow == 0 { continue; }
         let mut p = m.position + m.span;
         // Skip pure-separator chunks; stop at the first with content.
         let next = loop {
             let Some(ord) = pm.ordinal_at(m.doc_id, p) else { break None };
-            if bm.bytes_in_ranges(ord, CONTENT_RANGES) { break Some(ord as u64); }
+            if tt.has_content(ord) { break Some(ord as u64); }
             p += 1;
         };
         let Some(ord) = next else { continue };
@@ -400,7 +397,7 @@ mod tests {
 
     /// Build index and return all bytes needed for a BriquesContext.
     struct TestIndex {
-        sfx: Vec<u8>, sfxpost: Vec<u8>, wsp: Vec<u8>, pm: Vec<u8>, bm: Vec<u8>,
+        sfx: Vec<u8>, sfxpost: Vec<u8>, wsp: Vec<u8>, pm: Vec<u8>, tt: Vec<u8>,
     }
 
     fn build_index(texts: &[&str]) -> TestIndex {
@@ -431,9 +428,9 @@ mod tests {
         let sfxpost = pw.finish();
         let derived = crate::suffix_fst::index_registry::build_derived_indexes_v3(&data.tokens, Some(&sfxpost), Some(&data.own_lens));
         let pm = derived.iter().find(|(e, _)| e == "posmap").map(|(_, d)| d.clone()).unwrap_or_default();
-        let bm = derived.iter().find(|(e, _)| e == "bytemap").map(|(_, d)| d.clone()).unwrap_or_default();
+        let tt = crate::suffix_fst::termtexts_v3::TermTextsWriterV3::from_collector_v3(&data).serialize();
         let writer = SfxFileWriterV3::new(fst_data, parent_data);
-        TestIndex { sfx: writer.to_bytes(), sfxpost, wsp: data.word_sfxpost, pm, bm }
+        TestIndex { sfx: writer.to_bytes(), sfxpost, wsp: data.word_sfxpost, pm, tt }
     }
 
     // ── contains_v3 ──
@@ -447,7 +444,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let matches = contains_v3(&ctx, "mutex", false, false, true);
         assert!(!matches.is_empty());
@@ -463,7 +460,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let matches = contains_v3(&ctx, "mutex_lock", false, false, true);
         assert!(!matches.is_empty());
@@ -475,13 +472,13 @@ mod tests {
         let reader = SfxFileReaderV3::open(&idx.sfx).unwrap();
         let resolver = MockResolver::new(&idx.sfxpost);
         let pm = crate::suffix_fst::posmap::PosMapReader::open(&idx.pm);
-        let bm = crate::suffix_fst::bytemap::ByteBitmapReader::open(&idx.bm);
+        let tt = crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open(&idx.tt);
         let wsp = crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(&idx.wsp);
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: pm, bytemap: bm, word_sfxpost: wsp, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: pm, word_sfxpost: wsp, sibling_v3: None, termtexts: tt, word_posmap: None,
         };
         let matches = contains_v3(&ctx, "mutexlock", false, false, false);
         assert!(!matches.is_empty(), "sep-skip should work");
@@ -496,7 +493,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let matches = contains_v3(&ctx, "mutex lock", false, false, true);
         assert!(matches.is_empty(), "strict should reject different separator");
@@ -511,7 +508,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         assert!(!contains_v3(&ctx, "mutex_lo", true, false, true).is_empty());
         assert!(contains_v3(&ctx, "tex_lo", true, false, true).is_empty());
@@ -526,7 +523,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         assert!(contains_v3(&ctx, "", false, false, true).is_empty());
     }
@@ -542,7 +539,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let (bitset, highlights, _) = fuzzy_v3(&ctx, "mutex_lck", 1, true, 2, Default::default());
         assert!(bitset.contains(0), "doc 0 should match fuzzy");
@@ -558,7 +555,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let (bitset, _, coverage) = fuzzy_v3(&ctx, "mutex_lo", 0, true, 1, Default::default());
         assert!(bitset.contains(0));
@@ -574,7 +571,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let (bitset, _, _) = fuzzy_v3(&ctx, "zzzzzzzzz", 1, true, 1, Default::default());
         assert!(!bitset.contains(0));
@@ -589,7 +586,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let (bitset, _, _) = fuzzy_v3(&ctx, "mutex", 4, true, 1, Default::default());
         assert!(!bitset.contains(0));

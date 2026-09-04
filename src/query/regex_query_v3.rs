@@ -77,7 +77,6 @@ impl RegexQueryV3 {
                 .and_then(|fs| fs.read_bytes().ok())
         };
         let posmap_bytes = load("posmap");
-        let bytemap_bytes = load("bytemap");
         let wsp_bytes = load("word_sfxpost");
         let sib_bytes = load("sibling_v3");
         let tt_bytes = load("termtexts");
@@ -89,7 +88,6 @@ impl RegexQueryV3 {
             debug: false,
             trace_id: None,
             posmap: posmap_bytes.as_ref().and_then(|b| crate::suffix_fst::posmap::PosMapReader::open(b)),
-            bytemap: bytemap_bytes.as_ref().and_then(|b| crate::suffix_fst::bytemap::ByteBitmapReader::open(b)),
             word_sfxpost: wsp_bytes.as_ref().and_then(|b| crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(b)),
             sibling_v3: sib_bytes.as_ref().and_then(|b| crate::suffix_fst::sibling_table::SiblingTableReader::open(b)),
             termtexts: tt_bytes.as_ref().and_then(|b| crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open(b)),

@@ -196,6 +196,13 @@ impl ByteMapIndex {
 impl super::index_registry::SfxIndexFile for ByteMapIndex {
     fn id(&self) -> &'static str { "bytemap" }
     fn extension(&self) -> &'static str { "bytemap" }
+    /// v2 only since 4 September 2026. The v3 walkers asked the bitmap one
+    /// question — "does this chunk hold a content byte?" — which the META
+    /// section of `.termtexts` answers from `own_len > sep_len`
+    /// (`TermTextsReaderV3::has_content`). The file was 11 % of the index.
+    /// A v3 segment written before that date still carries one; the reader
+    /// simply never opens it.
+    fn written_for(&self, sfx_version: u8) -> bool { sfx_version < 3 }
     fn merge_strategy(&self) -> super::index_registry::MergeStrategy { super::index_registry::MergeStrategy::EventDriven }
 
     fn on_token(&mut self, ord: u32, text: &str) {
@@ -236,6 +243,51 @@ mod tests {
         // contains_all_bytes
         assert!(reader.contains_all_bytes(1, b"rag"));
         assert!(!reader.contains_all_bytes(1, b"xyz"));
+    }
+
+    /// The proof behind dropping `.bytemap` from v3 segments: on every
+    /// ordinal the collector produces, the bitmap's "holds a content byte"
+    /// (what the v3 walkers asked) equals `own_len > sep_len` from META.
+    #[test]
+    fn bytemap_and_meta_agree_on_content() {
+        use crate::suffix_fst::collector_v3::SfxCollectorV3;
+        use crate::suffix_fst::termtexts_v3::{TermTextsReaderV3, TermTextsWriterV3};
+        const CONTENT_RANGES: &[(u8, u8)] = &[
+            (b'0', b'9'), (b'A', b'Z'), (b'a', b'z'), (0x80, 0xFF),
+        ];
+        let texts = [
+            "  leading separators then mutex_lock(&a->b);",
+            "café naïve 日本語 emoji😀 — mixed_SCRIPT_42",
+            "trailing separators ... \t\n",
+            "x", "_", "ab__cd    ef", "0x1F 3.14 -7",
+        ];
+        let mut c = SfxCollectorV3::new();
+        for t in texts { c.begin_doc(); c.add_value(t); c.end_doc(); }
+        let data = c.into_data();
+
+        // The bitmap the registry used to write: token[..own_len], original case.
+        let mut w = ByteBitmapWriter::new();
+        w.ensure_capacity(data.tokens.len() as u32);
+        for (ord, tok) in data.tokens.iter().enumerate() {
+            let own = (data.own_lens[ord] as usize).min(tok.len());
+            let mut e = own;
+            while e < tok.len() && !tok.is_char_boundary(e) { e += 1; }
+            w.record_token(ord as u32, tok[..e].as_bytes());
+        }
+        let bm_bytes = w.serialize();
+        let bm = ByteBitmapReader::open(&bm_bytes).unwrap();
+        let tt_bytes = TermTextsWriterV3::from_collector_v3(&data).serialize();
+        let tt = TermTextsReaderV3::open(&tt_bytes).unwrap();
+
+        assert!(data.tokens.len() > 20, "corpus too small to mean anything");
+        let mut pure_sep = 0;
+        for ord in 0..data.tokens.len() as u32 {
+            let from_bitmap = bm.bytes_in_ranges(ord, CONTENT_RANGES);
+            let from_meta = tt.has_content(ord);
+            assert_eq!(from_bitmap, from_meta, "ordinal {ord} text {:?}", data.tokens[ord as usize]);
+            if !from_meta { pure_sep += 1; }
+        }
+        assert!(pure_sep > 0, "the corpus must exercise pure-separator chunks");
     }
 
     #[test]

@@ -77,6 +77,26 @@ impl TermTextsWriterV3 {
     }
 
     /// Add an extended token at the given ordinal with its metadata.
+    /// A writer holding every token of a collected segment, keyed by final
+    /// ordinal — the same loop the assemble node and the test helpers ran
+    /// each on their own.
+    pub fn from_collector_v3(data: &crate::suffix_fst::collector_v3::SfxCollectorDataV3) -> Self {
+        let mut w = Self::new();
+        for &intern_ord in &data.sorted_indices {
+            let meta = &data.token_meta[intern_ord as usize];
+            let text = &data.token_texts[intern_ord as usize];
+            let final_ord = data.intern_to_final[intern_ord as usize];
+            w.add(final_ord, text, TermMetaV3 {
+                own_len: meta.own_len,
+                sep_len: meta.sep_len,
+                overlap_len: meta.overlap_len,
+                is_word_start: meta.is_word_start,
+                is_word_stripped: meta.is_word_stripped,
+            });
+        }
+        w
+    }
+
     pub fn add(&mut self, ordinal: u32, text: &str, meta: TermMetaV3) {
         let ord = ordinal as usize;
         if ord >= self.texts.len() {
@@ -246,6 +266,33 @@ impl<'a> TermTextsReaderV3<'a> {
             is_word_start: data[pos + 4] != 0,
             is_word_stripped: data[pos + 5] != 0,
         })
+    }
+
+    /// True when the token's own bytes (content + trailing separators, no
+    /// overlap) hold at least one content byte — i.e. `own_len > sep_len`.
+    ///
+    /// This is the one question the relaxed-adjacency walkers ask of a chunk,
+    /// and the `.bytemap` sidecar used to answer it with a 256-bit bitmap per
+    /// ordinal (11 % of the index on the 93 605-file kernel corpus). Content
+    /// bytes are exactly the bytes `is_content_char` accepts, so the two
+    /// answers coincide (`bytemap_and_meta_agree_on_content`).
+    ///
+    /// Three bytes read at `6 × ordinal` in the META section. An ordinal past
+    /// the META section (a file written without it) counts as content: the
+    /// walker then refuses to step over it, which loses a match rather than
+    /// inventing one.
+    #[inline]
+    pub fn has_content(&self, ordinal: u32) -> bool {
+        if ordinal >= self.meta_count {
+            return true;
+        }
+        let Some(data) = self.meta_data else { return true };
+        let pos = ordinal as usize * 6;
+        if pos + 3 > data.len() {
+            return true;
+        }
+        let own_len = u16::from_le_bytes([data[pos], data[pos + 1]]);
+        own_len > data[pos + 2] as u16
     }
 
     /// Get text + metadata together for an ordinal.

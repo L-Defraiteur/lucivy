@@ -22,7 +22,7 @@ mod tests {
         sfx_bytes: Vec<u8>,
         sfxpost_bytes: Vec<u8>,
         posmap_bytes: Vec<u8>,
-        bytemap_bytes: Vec<u8>,
+        termtexts_bytes: Vec<u8>,
         word_sfxpost_bytes: Vec<u8>,
     }
 
@@ -79,7 +79,7 @@ mod tests {
         let sfxpost = post_writer.finish();
         let writer = SfxFileWriterV3::new(fst_data, parent_data);
 
-        // Build derived indexes (posmap, bytemap) for relaxed chain verification
+        // Build derived indexes (posmap) for relaxed chain verification
         let derived = crate::suffix_fst::index_registry::build_derived_indexes_v3(
             &data.tokens, Some(&sfxpost), Some(&data.own_lens),
         );
@@ -87,16 +87,13 @@ mod tests {
             .find(|(ext, _)| ext == "posmap")
             .map(|(_, d)| d.clone())
             .unwrap_or_default();
-        let bytemap_bytes = derived.iter()
-            .find(|(ext, _)| ext == "bytemap")
-            .map(|(_, d)| d.clone())
-            .unwrap_or_default();
+        let termtexts_bytes = crate::suffix_fst::termtexts_v3::TermTextsWriterV3::from_collector_v3(&data).serialize();
 
         TestIndex {
             sfx_bytes: writer.to_bytes(),
             sfxpost_bytes: sfxpost,
             posmap_bytes,
-            bytemap_bytes,
+            termtexts_bytes,
             word_sfxpost_bytes: data.word_sfxpost,
         }
     }
@@ -106,13 +103,13 @@ mod tests {
         let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
         let posmap = crate::suffix_fst::posmap::PosMapReader::open(&idx.posmap_bytes);
-        let bytemap = crate::suffix_fst::bytemap::ByteBitmapReader::open(&idx.bytemap_bytes);
+        let termtexts = crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open(&idx.termtexts_bytes);
         let word_sfxpost = crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(&idx.word_sfxpost_bytes);
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap, bytemap, word_sfxpost, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap, word_sfxpost, sibling_v3: None, termtexts, word_posmap: None,
         };
         let matches = orchestrator::contains_v3(&ctx, query, false, false, strict_sep);
         let mut docs: Vec<u32> = matches.iter().map(|m| m.doc_id).collect();
@@ -129,7 +126,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let matches = orchestrator::contains_v3(&ctx, query, true, false, true);
         matches.iter().map(|m| m.doc_id).collect()
@@ -140,13 +137,13 @@ mod tests {
         let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
         let posmap = crate::suffix_fst::posmap::PosMapReader::open(&idx.posmap_bytes);
-        let bytemap = crate::suffix_fst::bytemap::ByteBitmapReader::open(&idx.bytemap_bytes);
+        let termtexts = crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open(&idx.termtexts_bytes);
         let word_sfxpost = crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(&idx.word_sfxpost_bytes);
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap, bytemap, word_sfxpost, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap, word_sfxpost, sibling_v3: None, termtexts, word_posmap: None,
         };
         let matches = orchestrator::contains_v3(&ctx, query, false, false, strict_sep);
         let mut hl: Vec<(u32, u32, u32)> = matches.iter()
@@ -162,13 +159,13 @@ mod tests {
         let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
         let posmap = crate::suffix_fst::posmap::PosMapReader::open(&idx.posmap_bytes);
-        let bytemap = crate::suffix_fst::bytemap::ByteBitmapReader::open(&idx.bytemap_bytes);
+        let termtexts = crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open(&idx.termtexts_bytes);
         let word_sfxpost = crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(&idx.word_sfxpost_bytes);
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap, bytemap, word_sfxpost, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap, word_sfxpost, sibling_v3: None, termtexts, word_posmap: None,
         };
         let (bitset, _, _) = orchestrator::fuzzy_v3(&ctx, query, distance, strict_sep, 100, Default::default());
         (0..100).filter(|&d| bitset.contains(d)).collect()
@@ -437,7 +434,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let matches = orchestrator::contains_v3(&ctx, "lock", false, false, true);
         assert!(matches.len() >= 3, "should find 3 occurrences, got {}", matches.len());
@@ -503,7 +500,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let matches = orchestrator::contains_v3(&ctx, "lock", false, false, true);
         eprintln!("h3 all matches:");
@@ -738,8 +735,8 @@ mod tests {
         // Manual resolve to trace the issue
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
         let posmap = crate::suffix_fst::posmap::PosMapReader::open(&idx.posmap_bytes);
-        let bytemap = crate::suffix_fst::bytemap::ByteBitmapReader::open(&idx.bytemap_bytes);
-        eprintln!("x11b posmap={} bytemap={}", posmap.is_some(), bytemap.is_some());
+        let termtexts = crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open(&idx.termtexts_bytes);
+        eprintln!("x11b posmap={} termtexts={}", posmap.is_some(), termtexts.is_some());
 
         // Resolve with strict to see if chains match positionally
         let strict_matches = resolve::resolve_chains_v3(&chains, &resolver, None);
@@ -777,8 +774,8 @@ mod tests {
             eprintln!("x11b chain[{ci}] sti={} ords={:?}", chain.first_sti, all_ords);
         }
 
-        if let (Some(pm), Some(bm)) = (posmap.as_ref(), bytemap.as_ref()) {
-            let relaxed_matches = resolve::resolve_chains_v3_relaxed(&chains, &resolver, None, pm, bm);
+        if let (Some(pm), Some(tt)) = (posmap.as_ref(), termtexts.as_ref()) {
+            let relaxed_matches = resolve::resolve_chains_v3_relaxed(&chains, &resolver, None, pm, tt);
             eprintln!("x11b relaxed_resolve: {} matches", relaxed_matches.len());
         }
 
@@ -873,7 +870,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
 
         // strict_sep=false (default for contains queries)
@@ -912,7 +909,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
 
         // strict_sep=false: strips "_" from query → "uint64t"
@@ -963,7 +960,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
 
         let matches_relaxed = orchestrator::contains_v3(&ctx, "TableFunction", false, false, false);
@@ -1109,7 +1106,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
 
         // Show tokenization
@@ -1235,7 +1232,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
 
         // Trace tokenization
@@ -1376,7 +1373,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
         let strict_matches = orchestrator::contains_v3(&ctx, "function", false, false, true);
         let relaxed_matches = orchestrator::contains_v3(&ctx, "function", false, false, false);
@@ -1405,7 +1402,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, bytemap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
         };
 
         let cands = fst_walk::fst_candidates_v3(&reader, "struct", false, true);

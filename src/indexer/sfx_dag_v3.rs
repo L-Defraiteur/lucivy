@@ -22,7 +22,7 @@ use luciole::Dag;
 use crate::suffix_fst::builder_v3::SuffixFstBuilderV3;
 use crate::suffix_fst::collector_v3::{SfxCollectorDataV3, TokenMetaV3};
 use crate::suffix_fst::file_v3::SfxFileWriterV3;
-use crate::suffix_fst::termtexts_v3::{TermMetaV3, TermTextsWriterV3};
+use crate::suffix_fst::termtexts_v3::TermTextsWriterV3;
 
 /// Output of a v3 SFX build.
 pub struct SfxBuildOutputV3 {
@@ -192,27 +192,13 @@ impl Node for AssembleV3Node {
         // Build termtexts v3 (extended texts + metadata, keyed by final ordinal).
         // With extended ordinals, each unique extended text has its own ordinal,
         // including word-stripped entries.
-        let mut tt_writer = TermTextsWriterV3::new();
-        for &intern_ord in &data.sorted_indices {
-            let meta = &data.token_meta[intern_ord as usize];
-            let text = &data.token_texts[intern_ord as usize];
-            let final_ord = data.intern_to_final[intern_ord as usize];
-            tt_writer.add(final_ord, text, TermMetaV3 {
-                own_len: meta.own_len,
-                sep_len: meta.sep_len,
-                overlap_len: meta.overlap_len,
-                is_word_start: meta.is_word_start,
-                is_word_stripped: meta.is_word_stripped,
-            });
-        }
-        let termtexts = tt_writer.serialize();
+        let termtexts = TermTextsWriterV3::from_collector_v3(data).serialize();
 
         // Build .sfx v3 file
         let sfx_writer = SfxFileWriterV3::new(fst_data, parent_data);
         let sfx = sfx_writer.to_bytes();
 
-        // EventDriven registry indexes (bytemap, posmap, termtexts-v2-compat)
-        // V3: pass own_len per ordinal so ByteMap excludes overlap bytes.
+        // EventDriven registry indexes (posmap; bytemap is v2-only since 4 September 2026)
         let mut derived = crate::suffix_fst::index_registry::build_derived_indexes_v3(
             &data.tokens,
             sfxpost_data.as_deref(),

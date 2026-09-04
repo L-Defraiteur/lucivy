@@ -617,7 +617,7 @@ pub fn cross_chunk_chain_from_splits(
 }
 
 /// Cross-word chains (partition 0x02).
-/// Word-level splits. Resolved with relaxed adjacency (posmap/bytemap required).
+/// Word-level splits. Resolved with relaxed adjacency (posmap/termtexts required).
 pub fn cross_word_chain_v3(
     reader: &SfxFileReaderV3,
     query: &str,

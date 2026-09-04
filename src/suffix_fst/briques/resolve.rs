@@ -260,23 +260,23 @@ pub fn resolve_chains_v3_posmap(
 /// Resolve cross-token chains with relaxed adjacency for strict_sep=false.
 ///
 /// Allows gaps between chain ordinals (pure-sep tokens in between).
-/// Verifies that intermediate tokens are all non-alphanum via PosMap + ByteMap.
+/// Verifies that intermediate tokens are all non-alphanum via PosMap + termtexts META.
 pub fn resolve_chains_v3_relaxed(
     chains: &[TokenChainV3],
     resolver: &dyn PostingResolver,
     filter_docs: Option<&dyn DocFilter>,
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
-    bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
+    termtexts: &crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>,
 ) -> Vec<MatchV3> {
     resolve_chains_impl(chains, resolver, filter_docs,
-        AdjacencyMode::Relaxed { posmap, bytemap })
+        AdjacencyMode::Relaxed { posmap, termtexts })
 }
 
 /// Resolve cross-word chains using the WordSfxPost (partition 0x02 postings).
 ///
 /// Word postings have `last_position` (for adjacency) and `byte_from` from
 /// the first chunk (for highlights). Relaxed adjacency checks intermediate
-/// tokens via posmap/bytemap.
+/// tokens via posmap + termtexts META.
 /// Resolve cross-word chains using WordSfxPost + chunk PostingResolver.
 ///
 /// Word chains may contain ordinals from both partition 0x02 (word-stripped,
@@ -289,8 +289,7 @@ pub fn resolve_word_chains_v3(
     chunk_resolver: &dyn PostingResolver,
     filter_docs: Option<&dyn DocFilter>,
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
-    bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
-    _termtexts: Option<&crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>>,
+    termtexts: &crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>,
 ) -> Vec<MatchV3> {
     use crate::suffix_fst::word_sfxpost::WordPostingEntry;
 
@@ -438,7 +437,7 @@ pub fn resolve_word_chains_v3(
                     } else {
                         // Check intermediates between prev last chunk and next first chunk
                         intermediates_are_pure_sep(
-                            posmap, bytemap,
+                            posmap, termtexts,
                             doc_id, prev_last_pos + 1, next_first_pos,
                         )
                     };
@@ -499,16 +498,12 @@ pub fn resolve_word_chains_v3_wordmap(
     chunk_resolver: &dyn PostingResolver,
     filter_docs: Option<&dyn DocFilter>,
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
-    bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
+    termtexts: &crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>,
     word_posmap: &crate::suffix_fst::word_pos_map::WordPosMapReader<'_>,
-    _termtexts: Option<&crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>>,
 ) -> Vec<MatchV3> {
     use crate::suffix_fst::word_sfxpost::WordPostingEntry;
     use crate::suffix_fst::word_pos_map::SPAN_OVERFLOW;
 
-    const CONTENT_RANGES: &[(u8, u8)] = &[
-        (b'0', b'9'), (b'A', b'Z'), (b'a', b'z'), (0x80, 0xFF),
-    ];
 
     let mut results = Vec::new();
 
@@ -639,7 +634,7 @@ pub fn resolve_word_chains_v3_wordmap(
                     }
 
                     // Neither. Step over it only if it holds no content at all.
-                    if bytemap.bytes_in_ranges(chunk_ord, CONTENT_RANGES) {
+                    if termtexts.has_content(chunk_ord) {
                         continue 'next_active;
                     }
                     p += 1;
@@ -889,16 +884,12 @@ pub fn resolve_word_chains_v3_wordmap_grouped(
     chunk_resolver: &dyn PostingResolver,
     filter_docs: Option<&dyn DocFilter>,
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
-    bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
+    termtexts: &crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>,
     word_posmap: &crate::suffix_fst::word_pos_map::WordPosMapReader<'_>,
-    termtexts: Option<&crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>>,
 ) -> Vec<MatchV3> {
     use crate::suffix_fst::word_sfxpost::WordPostingEntry;
     use crate::suffix_fst::word_pos_map::SPAN_OVERFLOW;
 
-    const CONTENT_RANGES: &[(u8, u8)] = &[
-        (b'0', b'9'), (b'A', b'Z'), (b'a', b'z'), (0x80, 0xFF),
-    ];
 
     // Single-position chains have no step to share: the per-chain walker
     // handles them exactly. Multi-position chains are grouped.
@@ -907,7 +898,7 @@ pub fn resolve_word_chains_v3_wordmap_grouped(
         .cloned()
         .partition(|c| c.ordinals.len() == 1);
     let mut results = resolve_word_chains_v3_wordmap(
-        &singles, word_sfxpost, chunk_resolver, filter_docs, posmap, bytemap, word_posmap, termtexts);
+        &singles, word_sfxpost, chunk_resolver, filter_docs, posmap, termtexts, word_posmap);
 
     // One forward step from (doc, prev_last): the next content position, the
     // ordinal there (word or chunk), its last position, and whether it is a word.
@@ -922,7 +913,7 @@ pub fn resolve_word_chains_v3_wordmap_grouped(
                 return Some((p, last, word_ord as u64, true));
             }
             let chunk_ord = posmap.ordinal_at(doc_id, p)?;
-            if bytemap.bytes_in_ranges(chunk_ord, CONTENT_RANGES) {
+            if termtexts.has_content(chunk_ord) {
                 // Content chunk that starts no word: only a chunk alternative can
                 // take it. The caller checks membership; report it as a chunk.
                 return Some((p, p, chunk_ord as u64, false));
@@ -1059,11 +1050,11 @@ enum AdjacencyMode<'a> {
     StrictPosmap {
         posmap: &'a crate::suffix_fst::posmap::PosMapReader<'a>,
     },
-    /// pos[i+1] > pos[i], intermediate tokens verified as pure non-alphanum via ByteMap.
-    /// PosMap + ByteMap are REQUIRED — no fallback to unverified byte ordering.
+    /// pos[i+1] > pos[i], intermediate tokens verified as pure non-alphanum via termtexts META.
+    /// PosMap + termtexts are REQUIRED — no fallback to unverified byte ordering.
     Relaxed {
         posmap: &'a crate::suffix_fst::posmap::PosMapReader<'a>,
-        bytemap: &'a crate::suffix_fst::bytemap::ByteBitmapReader<'a>,
+        termtexts: &'a crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'a>,
     },
 }
 
@@ -1240,14 +1231,14 @@ fn resolve_chains_impl(
                         AdjacencyMode::Strict | AdjacencyMode::StrictPosmap { .. } => {
                             e.position == prev_pos + 1
                         }
-                        AdjacencyMode::Relaxed { posmap, bytemap } => {
+                        AdjacencyMode::Relaxed { posmap, termtexts } => {
                             if e.position <= prev_pos {
                                 false
                             } else if e.position == prev_pos + 1 {
                                 true // directly adjacent, always OK
                             } else {
                                 intermediates_are_pure_sep(
-                                    posmap, bytemap,
+                                    posmap, termtexts,
                                     doc_id, prev_pos + 1, e.position,
                                 )
                             }
@@ -1307,24 +1298,17 @@ fn resolve_chains_impl(
 /// Check that all tokens between pos_from (inclusive) and pos_to (exclusive)
 /// are pure non-alphanum (separator-only tokens).
 ///
-/// Uses PosMap (position → ordinal) + ByteMap (ordinal → byte bitmap).
-/// A token is "pure sep" if it contains no content bytes.
-/// Content bytes = ASCII alphanumeric OR non-ASCII (>= 0x80, i.e. emoji, CJK, accented, etc.).
-/// Consistent with `is_content_char()` in the tokenizer.
+/// Uses PosMap (position → ordinal) + termtexts META (`own_len > sep_len`).
+/// A token is "pure sep" if it holds no content byte — `has_content` is
+/// exactly `is_content_char()` of the tokenizer, proven by
+/// `bytemap_and_meta_agree_on_content`.
 fn intermediates_are_pure_sep(
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
-    bytemap: &crate::suffix_fst::bytemap::ByteBitmapReader<'_>,
+    termtexts: &crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>,
     doc_id: DocId,
     pos_from: u32,
     pos_to: u32,
 ) -> bool {
-    // Content byte ranges: ASCII alphanumeric + non-ASCII (UTF-8 lead/continuation bytes)
-    const CONTENT_RANGES: &[(u8, u8)] = &[
-        (b'0', b'9'),
-        (b'A', b'Z'),
-        (b'a', b'z'),
-        (0x80, 0xFF), // non-ASCII bytes → content (emoji, CJK, accented, etc.)
-    ];
 
     super::profile::bump(|c| &c.n_puresep_calls, 1);
 
@@ -1335,8 +1319,8 @@ fn intermediates_are_pure_sep(
         let Some(ord) = posmap.ordinal_at(doc_id, pos) else {
             return false; // Can't verify → reject
         };
-        // Check via ByteMap: if any content byte is present → not pure sep
-        if bytemap.bytes_in_ranges(ord, CONTENT_RANGES) {
+        // Any content byte → not pure sep.
+        if termtexts.has_content(ord) {
             return false;
         }
     }

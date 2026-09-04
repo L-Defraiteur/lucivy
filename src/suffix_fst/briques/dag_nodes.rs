@@ -443,7 +443,7 @@ impl<'a> LocalNode<BriquesContext<'a>> for SiblingWordNode {
 
 // ─── ResolveWordNode ────────────────────────────────────────────────────
 
-/// Resolve word chains (relaxed adjacency via WordSfxPost + posmap + bytemap).
+/// Resolve word chains (relaxed adjacency via WordSfxPost + posmap + termtexts META).
 pub struct ResolveWordNode;
 
 impl<'a> LocalNode<BriquesContext<'a>> for ResolveWordNode {
@@ -469,9 +469,9 @@ impl<'a> LocalNode<BriquesContext<'a>> for ResolveWordNode {
         }
 
         let pm = svc.require_posmap();
-        let bm = svc.require_bytemap();
+        let tt = svc.require_termtexts();
         let wsp = svc.require_word_sfxpost();
-        let matches = resolve::resolve_word_chains_v3(&chains, wsp, svc.resolver, svc.filter_docs, pm, bm, None);
+        let matches = resolve::resolve_word_chains_v3(&chains, wsp, svc.resolver, svc.filter_docs, pm, tt);
         ctx.metric("chains_total", chains.len() as f64);
         ctx.metric("matches", matches.len() as f64);
         if ctx.explain() { ctx.annotate_output("matches", format_matches(&matches)); }

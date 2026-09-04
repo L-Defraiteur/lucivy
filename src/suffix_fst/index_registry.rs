@@ -195,10 +195,11 @@ pub fn build_derived_indexes_v3(
     let sfxpost_reader = sfxpost_data
         .and_then(crate::suffix_fst::sfxpost_v2::SfxPostReaderV2::open_slice);
 
-    // Exclude v2 termtexts and sibling/sepmap — v3 writes its own termtexts (TTX3 format).
+    // Exclude v2 termtexts and sibling/sepmap — v3 writes its own termtexts (TTX3 format) —
+    // and bytemap, whose one v3 question META answers (see `ByteMapIndex::written_for`).
     let mut indexes: Vec<Box<dyn SfxIndexFile>> = all_indexes()
         .into_iter()
-        .filter(|idx| idx.id() != "termtexts" && idx.id() != "sibling" && idx.id() != "sepmap")
+        .filter(|idx| idx.written_for(3) && idx.id() != "termtexts")
         .collect();
 
     for (ord, token) in tokens.iter().enumerate() {
