@@ -260,14 +260,16 @@ cd playground && node serve.mjs
 ## Docs
 
 **Dossier courant : `docs/04-09-2026/` — pour repartir, lire dans l'ordre
-`09-journal-chantier-dictionnaire.md` (le chantier en cours : mesures,
-étapes 2a-2c, 3a, 3b, le dictionnaire partagé v1 §6-8 — ce qui marche, ce
-qui a divergé du plan, ce qui reste), `07-architecture.md` (l'architecture
-avec les formats de la nuit et le mode dictionnaire §2.5) et
+`10-chantier-prescan-dictionnaire-rapport.md` (le prochain chantier : la
+phase FST d'une requête en un nœud par shard, ce qui est su, ce qu'il faut
+mesurer, où regarder), `07-architecture.md` (l'architecture avec les
+formats du 4-5 septembre et le mode dictionnaire §2.5) et
 `08-knowledge-dump-baselines-tests-outils.md` (baselines, les deux A/B,
 tests, corpus, protocole, mode dictionnaire §6 bis, pièges) — tous trois
-autonomes. `06-chantier-dictionnaire-partage-rapport.md` est le plan tel
-qu'écrit avant de coder, avec une note d'état en tête. Puis
+autonomes. Puis `09-journal-chantier-dictionnaire.md` (tout ce qui a été
+fait et mesuré, étape par étape, et ce qui a divergé du plan) ;
+`06-chantier-dictionnaire-partage-rapport.md` est le plan du dictionnaire
+tel qu'écrit avant de coder, avec une note d'état en tête. Puis
 `04-recap-journee-et-a-faire.md` (−36 % d'index en une journée),
 `05-piste-dictionnaire-partage-par-shard.md` (la décision, mesurée ×2,2), `01-recap-findings-et-plan-d-action.md`
 (le plan, avec l'état et le gain mesuré de chaque étape), `03-journal-des-etapes.md`
