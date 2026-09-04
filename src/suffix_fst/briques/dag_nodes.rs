@@ -71,7 +71,7 @@ fn dump_fst_keys(reader: &SfxFileReaderV3, query_bytes: &[u8],
             // key[0] is partition byte, rest is the text
             let text_bytes = &key[1..];
             let text = String::from_utf8_lossy(text_bytes);
-            let parents = reader.decode_parents(val);
+            let parents = reader.decode_parents(val, key);
             let parent_strs: Vec<String> = parents.iter().map(|p| {
                 format!("{{\"ord\":{},\"sti\":{},\"own\":{},\"sep\":{},\"ovl\":{},\"ws\":{}}}",
                     p.raw_ordinal, p.sti, p.own_len, p.sep_len, p.overlap_len, p.is_word_start)

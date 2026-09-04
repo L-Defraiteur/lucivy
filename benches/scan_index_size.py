@@ -27,15 +27,36 @@ def sections(b):
 def scan_sfx(path, deep):
     b = open(path, "rb").read()
     s = sections(b)
-    version = b[4]  # container version: 3 = 11-byte parents, 4 = packed u64, 5 = delta varints (count still first)
+    version = b[4]  # container version: 3 = 11-byte parents, 4 = packed u64, 5/6 = delta varints, 8 = flat/grouped by overlap (7: intermediate, refused)
     fst_off, fst_len = s[1]; par_off, par_len = s[2]
     r = {"file": len(b), "fst": fst_len, "parents": par_len, "version": version}
     if deep:
         pos = par_off; end = par_off + par_len
         nrec = 0; nparents = 0; hist = collections.Counter(); maxc = 0
+        ngrouped = 0
         while pos < end:
             ln, pos = varint(b, pos)
-            if version >= 4:
+            if version >= 7:
+                # v8: flat: header = count (0 → varint); grouped: bit 7 + group count, then per group
+                # [u8 ov_len][ov][varint n][zigzag Δfirst][varint byte_len unless last]
+                head = b[pos]; q = pos + 1
+                if head & 0x80 == 0:
+                    cnt = head & 0x7F
+                    if cnt == 0: cnt, q = varint(b, q)
+                else:
+                    ngrouped += 1
+                    g = head & 0x7F
+                    if g == 0: g, q = varint(b, q)
+                    cnt = 0
+                    for gi in range(g):
+                        ov = b[q]; q += 1 + ov
+                        n, q = varint(b, q); cnt += n
+                        _, q = varint(b, q)
+                        if gi + 1 < g:
+                            bl, q = varint(b, q); q += bl
+                        else:
+                            break
+            elif version >= 4:
                 cnt, _ = varint(b, pos)
             else:
                 cnt = struct.unpack_from("<I", b, pos)[0]
@@ -47,7 +68,7 @@ def scan_sfx(path, deep):
             elif cnt <= 10000: hist["1k-10k"] += 1
             else: hist[">10k"] += 1
             pos += ln
-        r.update(records=nrec, parents=nparents, max_parents=maxc, hist=dict(hist))
+        r.update(records=nrec, parents=nparents, max_parents=maxc, hist=dict(hist), grouped_records=ngrouped)
     return r
 
 def scan_termtexts(path, deep):

@@ -171,8 +171,8 @@ pub fn fst_candidates_v3(
 
         use lucivy_fst::{IntoStreamer, Streamer};
         let mut stream = fst.range().ge(&ge_key).lt(&lt_key).into_stream();
-        while let Some((_key, val)) = stream.next() {
-            let parents = reader.decode_parents(val);
+        while let Some((key, val)) = stream.next() {
+            let parents = reader.decode_parents(val, key);
             for p in parents {
                 results.push(FstCandidateV3::from_parent(&p, partition));
             }
@@ -192,7 +192,7 @@ pub fn fst_candidates_v3(
                 let mut probe = vec![partition];
                 probe.extend_from_slice(&query_bytes[..k]);
                 let Some(val) = fst.get(&probe) else { continue };
-                let parents = reader.decode_parents_where(val, |ov| ov.len() >= tail.len() && ov[..tail.len()] == *tail);
+                let parents = reader.decode_parents_where(val, &probe, |ov| ov.len() >= tail.len() && ov[..tail.len()] == *tail);
                 for p in parents {
                     results.push(FstCandidateV3::from_parent(&p, partition));
                 }
@@ -428,6 +428,11 @@ fn walk_partition<D: AsRef<[u8]>, F>(
     let trans = root.transition(idx);
     let mut output = raw::Output::zero().cat(trans.out);
     let mut node = fst.node(trans.addr);
+    // The key under a final node of depth `d` is the partition byte and the
+    // first `d` query bytes; the record decoder wants it (version 8).
+    let mut query_key = Vec::with_capacity(1 + query_bytes.len());
+    query_key.push(partition);
+    query_key.extend_from_slice(query_bytes);
 
     let mut fully_consumed = false;
     for (i, &byte) in query_bytes.iter().enumerate() {
@@ -443,7 +448,7 @@ fn walk_partition<D: AsRef<[u8]>, F>(
         if node.is_final() {
             let val = output.cat(node.final_output()).value();
             let prefix_len = i + 1;
-            let parents = reader.decode_parents_where(val, |ov| overlap_agrees(ov, prefix_len));
+            let parents = reader.decode_parents_where(val, &query_key[..prefix_len + 1], |ov| overlap_agrees(ov, prefix_len));
 
             for parent in &parents {
                 if let Some(split) = check_split(parent, prefix_len) {
@@ -491,7 +496,9 @@ fn overlap_lookahead<D: AsRef<[u8]>, F>(
         let child = fst.node(addr);
         if child.is_final() {
             let val = child_output.cat(child.final_output()).value();
-            let parents = reader.decode_parents(val);
+            // Files up to version 6 only (the walk skips this for cut keys),
+            // and those ignore the key.
+            let parents = reader.decode_parents(val, &[]);
             for parent in &parents {
                 if let Some(split) = check_split(parent, query_len) {
                     candidates.push(split);

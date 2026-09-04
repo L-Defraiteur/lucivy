@@ -51,7 +51,7 @@ Deux familles d'entrées, dans un seul espace d'ordinaux par segment :
 
 | fichier | contenu | encodage actuel |
 |---|---|---|
-| `.sfx` | FST des suffixes (clés minuscules, préfixe de partition) + table de parents | conteneur `SFX3`, **version 5** : parent unique inline dans la valeur FST (63 bits : ordinal 24, sti 12, own_len 14, sep 8, overlap 4, ws 1) ; record multi-parents = varint count + par parent (Δordinal, sti, own_len en varint, sep_len, flags), ≈ 5 octets. Versions 3 (11 o/parent) et 4 (u64 packé) encore lues |
+| `.sfx` | FST des suffixes (clés minuscules, préfixe de partition, **coupées à la frontière du token**) + table de parents | conteneur `SFX3`, **version 8** (nuit) : la valeur FST est l'offset du record de la clé, un parent comme cent ; record plat jusqu'à 32 parents (par parent : Δordinal, sti en varint, flags = ws + longueur d'overlap + sep_len sur 3 bits, **octets d'overlap** ; `own_len` dérivé de la longueur de la clé, écrit seulement si la minuscule a changé la longueur), groupé par overlap au-delà (saut par groupe, `decode_parents_where`). Le décodage reçoit la clé. Versions 3 (11 o/parent), 4 (u64 packé), 5 (delta-varint, parent unique inline 63 bits) et 6 (tout en table, overlap dans la clé) encore lues, 7 (intermédiaire) refusée ; `keys_cut_at_boundary()` choisit le chemin de marche |
 | `.sfxpost` | postings de chunks : par ordinal, (doc, position, byte_from, byte_to − byte_from) | `SFP3`, varints, checkpoints par 8 docs, table d'offsets u32 |
 | `.word_sfxpost` | postings de mots : (doc, first_pos, last_pos, byte_from, to − from) | `WSP3`, varints, checkpoints par 32 |
 | `.termtexts` | ordinal → texte étendu (casse d'origine) + méta | `TTX3` **layout 2** : une section ENTRIES, 8 octets par ordinal (`u32 offset`, `u16 own_len`, `u8 sep_len`, `u8 flags` = overlap 4 bits + ws + stripped), puis les textes ; STATS (max word). Layout 1 (TEXTS + META à part) encore lu |
@@ -68,12 +68,13 @@ contenu ? » est `own_len > sep_len` dans la méta de `.termtexts`,
 ### 2.3 Ce que le builder enregistre
 
 Pour un chunk étendu : une clé par suffixe commençant **dans les octets
-propres** (si < own_len ; les suffixes commençant dans l'overlap ont été
-retirés le 4 septembre, ils étaient les clés d'un et deux octets aux listes
-géantes), plus une **clé marqueur** tronquée à `own_len − si` pour chaque
-suffixe qui déborde dans l'overlap, qui rend final le nœud de la frontière
-pour que la marche puisse couper là. Environ 6 clés + 6 marqueurs par
-chunk distinct. Pour un mot : une clé par suffixe du contenu (≤ 256).
+propres** (si < own_len), **arrêtée à `own_len`** — les deux octets
+d'overlap sont dans le record du parent, plus dans la clé (soirée du
+4 septembre, conteneur 8 ; jusqu'au conteneur 6 la clé les portait et une
+clé « marqueur » tronquée à la frontière rendait le nœud final). Deux
+chunks au même texte propre et à overlap différent partagent une clé.
+Environ 6 clés par chunk distinct. Pour un mot : une clé par suffixe du
+contenu (≤ 256), l'overlap de contenu dans le record.
 
 Bornes : ordinal < 2²⁴ par segment (refus explicite du builder et de la
 fusion — ~50 000 fichiers de noyau par segment au plus), sti < 4096,

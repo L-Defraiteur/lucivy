@@ -181,3 +181,62 @@ chemin Jaro-Winkler**, invisible parce que non vérifié — le même genre que
 le fuzzy de 3.0.2-3.0.6. À faire : une vérité terrain Jaro-Winkler dans le
 panel, puis revoir la génération de candidats de ce chemin. Le fuzzy
 Levenshtein (fz1, fz2) est exact dans les deux layouts.
+
+---
+
+## 3. Étape 2c — version 8 : le parent ne répète plus ce que la clé dit
+
+**Changement.** Dans un record, un parent portait `own_len` (varint) et
+`sep_len` (octet). Or la clé est `extended[sti..own_len]` depuis 2b : sa
+longueur **est** `own_len − sti` (pour un mot, `content_len − sti`). Le
+record v8 ne stocke donc plus `own_len` — le décodeur le dérive de la clé,
+qu'il reçoit désormais (`decode_parents(value, key)`) — sauf quand la mise
+en minuscules a changé une longueur d'octets (bit « own_len explicite » +
+varint) ; et `sep_len` tient dans trois bits des flags (7 = varint). Un
+parent plat = Δordinal + sti + flags + overlap : 3 à 7 octets contre 5 à 9.
+
+Le conteneur 7 (une heure d'existence, jamais publié) est refusé avec un
+message clair (`IntermediateVersion`) plutôt que lu de travers ; 3 à 6
+restent lus.
+
+Au passage, un `debug_assert` de 2b a fait tomber `test_fuzzy_ground_truth`
+en debug : `to_lowercase` peut changer une longueur d'octets (`İ` → `i̇`),
+donc couper le texte minuscule à `own_len` mettait des octets propres dans
+l'overlap. Les octets propres et l'overlap sont maintenant passés en
+minuscules chacun de leur côté ; `own_len` et `sti` restent ceux que le
+collecteur a mesurés sur l'original (test
+`lowercase_that_changes_length_keeps_key_and_overlap_apart`). En release
+(sans `debug_assert`) le défaut était silencieux et antérieur : la clé
+d'un tel token était fausse d'un ou deux octets depuis toujours.
+
+**Vérification.** Panel 10 000 fichiers : les 9 requêtes vérifiées
+identiques (comptes et spans), en conteneur 8 et en réouverture des
+conteneurs 6 et 5 ; jw1 à 245 comme en 2b (§2.1). Suite `cargo test --lib`
+verte (1 446).
+
+**Taille** :
+
+| index | conteneur 6 | conteneur 8 | `.sfx` | depuis v3 (matin) |
+|---|---|---|---|---|
+| 10 000 fichiers | 756 Mo | **559 Mo** (−26,0 %) | 407 → 210 Mo (−48 %) | 1 152 → 559 Mo : **−51,5 %** |
+| 30 000 fichiers | 2 374 Mo | **1 806 Mo** (−23,9 %) | 1 208 → 640 Mo (−47 %) | 3,4 → 1,8 Go |
+
+Le `.sfx`, 49 % de l'index ce matin, en fait 38 % ce soir.
+
+**Temps** (30 000 fichiers, même binaire, 3 passes, min, ms) :
+
+| requête | conteneur 6 | conteneur 8 | ratio |
+|---|---|---|---|
+| mutex_lock strict | 2,2 | 1,9 | 0,86 |
+| mutex_lock relax | 1,5 | 1,6 | 1,07 |
+| spin_lock strict | 1,8 | 1,7 | 0,94 |
+| sched term | 3,3 | 3,6 | 1,09 |
+| sched strict | 2,2 | 2,2 | 1,00 |
+| printk sw | 2,3 | 2,5 | 1,09 |
+| schdule fz1 | 13,5 | 11,4 | 0,84 |
+| regsiter fz2 | 130,8 | 123,0 | 0,94 |
+| spin_lock_[a-z]+ rx | 11,6 | 9,9 | 0,85 |
+| schdule jw1 | 15,4 | 15,7 | 1,02 |
+
+Les index de référence du scratchpad `idx-v7` et `idx30k-v7` contiennent
+des fichiers **conteneur 8** (le script de protocole a gardé le nom).

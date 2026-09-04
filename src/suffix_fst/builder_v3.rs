@@ -171,7 +171,7 @@ pub fn encode_parent_entries_v3(parents: &[ParentEntryV3]) -> Vec<u8> {
     encode_sorted_parent_entries_v3(sorted.iter())
 }
 
-/// Version-7 record. The key stops at the token boundary in that version,
+/// Version-8 record. The key stops at the token boundary since version 7,
 /// so one key gathers every chunk with that own text whatever follows it
 /// (`_` ends 54 747 chunks on a kernel segment) and the overlap bytes live
 /// here. A large record is **grouped by overlap**, so that a walk standing
@@ -181,24 +181,32 @@ pub fn encode_parent_entries_v3(parents: &[ParentEntryV3]) -> Vec<u8> {
 ///
 /// Header byte: bit 7 = grouped; bits 6..0 = the parent count (flat) or
 /// the group count (grouped), 0 meaning a varint follows.
-/// Flat: per parent `[varint Δordinal][varint sti][varint own_len]
-/// [u8 sep_len][u8 flags][overlap bytes]`, flags = overlap length (bits
-/// 0..2) | `is_word_start` (bit 4), parents in ordinal order.
+/// A parent is `[varint Δordinal][varint sti][u8 flags]`, then `[varint
+/// own_len]` only when flags say so, `[varint sep_len]` only when the
+/// three-bit field is 7, and in a flat record its overlap bytes. Flags:
+/// bit 7 `is_word_start`, bit 6 explicit `own_len`, bits 5..3 overlap
+/// length, bits 2..0 `sep_len` (7 = a varint follows).
+/// `own_len` is otherwise **derived from the key**: the key is the token's
+/// own bytes from `sti`, so `own_len = key body length + sti` for a chunk,
+/// plus `sep_len` for a word entry (partition 0x02, whose key is the
+/// content only). It is written out when lowercasing changed a byte
+/// length and the two disagree. Decoding therefore takes the key.
 /// Grouped: per group, in overlap order, `[u8 overlap_len][overlap bytes]
 /// [varint parents][zigzag Δfirst][varint byte_len unless last group]`,
 /// where Δfirst is the group's first ordinal against the previous group's
-/// first (0 for the first group), then its parents as above without the
-/// overlap, each ordinal a delta against the previous parent of the group
-/// (the first against the group's first ordinal, so 0). A group is skipped
-/// by `byte_len` without being read. The deltas are one byte when the
-/// ordinals of a group sit in one block, which is why the collector numbers
-/// its tokens by overlap first.
+/// first, then its parents as above without the overlap, each ordinal a
+/// delta against the previous parent of the group (the first against the
+/// group's first ordinal, so 0). A group is skipped by `byte_len` unread.
 pub const FLAT_RECORD_MAX_PARENTS: usize = 32;
 
-/// Encode a version-7 record (see the layout above).
-pub fn encode_parent_entries_v7(parents: &[ParentEntryV3]) -> Vec<u8> {
+const FLAG_WORD_START: u8 = 0x80;
+const FLAG_OWN_LEN: u8 = 0x40;
+const SEP_LEN_ESCAPE: u8 = 7;
+
+/// Encode a version-8 record for the parents of `key` (partition byte first).
+pub fn encode_parent_entries_v8(parents: &[ParentEntryV3], key: &[u8]) -> Vec<u8> {
     let mut sorted = parents.to_vec();
-    encode_parent_record_v7(&mut sorted)
+    encode_parent_record_v8(&mut sorted, key)
 }
 
 fn zigzag(delta: i64) -> u64 {
@@ -209,25 +217,34 @@ fn unzigzag(v: u64) -> i64 {
     ((v >> 1) as i64) ^ -((v & 1) as i64)
 }
 
-fn write_parent_fields(buf: &mut Vec<u8>, p: &ParentEntryV3, flags_overlap: bool) {
-    use super::varint::write_varint;
-    write_varint(buf, p.sti as u64);
-    write_varint(buf, p.own_len as u64);
-    buf.push(p.sep_len);
-    let mut flags = if p.is_word_start { 0x10 } else { 0 };
-    if flags_overlap {
-        flags |= (p.overlap_len & 0x07).min(MAX_OVERLAP_BYTES as u8);
-    }
-    buf.push(flags);
+/// `own_len` as the key implies it (see the record layout).
+#[inline(always)]
+fn derived_own_len(key: &[u8], sti: u16, sep_len: u8) -> u16 {
+    let body = key.len().saturating_sub(1) as u16;
+    if key.first() == Some(&SI_STRIPPED_PREFIX) { body + sti + sep_len as u16 } else { body + sti }
 }
 
-/// `encode_parent_entries_v7` over a scratch vector it may reorder.
-pub fn encode_parent_record_v7(parents: &mut [ParentEntryV3]) -> Vec<u8> {
+fn write_parent_fields(buf: &mut Vec<u8>, p: &ParentEntryV3, key: &[u8], with_overlap: bool) {
+    use super::varint::write_varint;
+    write_varint(buf, p.sti as u64);
+    let explicit = derived_own_len(key, p.sti, p.sep_len) != p.own_len;
+    let ov_len = (p.overlap_len as usize).min(MAX_OVERLAP_BYTES) as u8;
+    let mut flags = (ov_len << 3) | if p.sep_len < SEP_LEN_ESCAPE { p.sep_len } else { SEP_LEN_ESCAPE };
+    if p.is_word_start { flags |= FLAG_WORD_START; }
+    if explicit { flags |= FLAG_OWN_LEN; }
+    buf.push(flags);
+    if explicit { write_varint(buf, p.own_len as u64); }
+    if p.sep_len >= SEP_LEN_ESCAPE { write_varint(buf, p.sep_len as u64); }
+    if with_overlap { buf.extend_from_slice(&p.overlap[..ov_len as usize]); }
+}
+
+/// `encode_parent_entries_v8` over a scratch vector it may reorder.
+pub fn encode_parent_record_v8(parents: &mut [ParentEntryV3], key: &[u8]) -> Vec<u8> {
     use super::varint::write_varint;
     fn overlap_of(p: &ParentEntryV3) -> &[u8] {
         &p.overlap[..(p.overlap_len as usize).min(MAX_OVERLAP_BYTES)]
     }
-    let mut buf = Vec::with_capacity(4 + parents.len() * 7);
+    let mut buf = Vec::with_capacity(4 + parents.len() * 6);
     if parents.len() <= FLAT_RECORD_MAX_PARENTS {
         parents.sort_by_key(|p| (p.raw_ordinal, p.sti));
         buf.push(parents.len() as u8);
@@ -235,8 +252,7 @@ pub fn encode_parent_record_v7(parents: &mut [ParentEntryV3]) -> Vec<u8> {
         for p in parents.iter() {
             write_varint(&mut buf, p.raw_ordinal - prev);
             prev = p.raw_ordinal;
-            write_parent_fields(&mut buf, p, true);
-            buf.extend_from_slice(overlap_of(p));
+            write_parent_fields(&mut buf, p, key, true);
         }
         return buf;
     }
@@ -274,7 +290,7 @@ pub fn encode_parent_record_v7(parents: &mut [ParentEntryV3]) -> Vec<u8> {
         for p in &parents[i..j] {
             write_varint(&mut body, p.raw_ordinal - prev);
             prev = p.raw_ordinal;
-            write_parent_fields(&mut body, p, false);
+            write_parent_fields(&mut body, p, key, false);
         }
         if g + 1 < groups.len() {
             write_varint(&mut buf, body.len() as u64);
@@ -318,14 +334,14 @@ pub fn decode_parent_entries_v3(data: &[u8]) -> Vec<ParentEntryV3> {
     entries
 }
 
-/// Decode every parent of a version-7 record (see `encode_parent_entries_v7`).
-pub fn decode_parent_entries_v7(data: &[u8]) -> Vec<ParentEntryV3> {
-    decode_parent_entries_v7_where(data, |_| true)
+/// Decode every parent of a version-8 record under `key` (see `encode_parent_entries_v8`).
+pub fn decode_parent_entries_v8(data: &[u8], key: &[u8]) -> Vec<ParentEntryV3> {
+    decode_parent_entries_v8_where(data, key, |_| true)
 }
 
-/// Decode the parents of a version-7 record whose overlap bytes satisfy
+/// Decode the parents of a version-8 record whose overlap bytes satisfy
 /// `keep`; in a grouped record the other groups are skipped unread.
-pub fn decode_parent_entries_v7_where(data: &[u8], keep: impl Fn(&[u8]) -> bool) -> Vec<ParentEntryV3> {
+pub fn decode_parent_entries_v8_where(data: &[u8], key: &[u8], keep: impl Fn(&[u8]) -> bool) -> Vec<ParentEntryV3> {
     let head = data[0];
     let mut pos = 1usize;
     let count = match head & 0x7F { 0 => read_varint_inline(data, &mut pos) as usize, k => k as usize };
@@ -336,15 +352,15 @@ pub fn decode_parent_entries_v7_where(data: &[u8], keep: impl Fn(&[u8]) -> bool)
         let mut ordinal = 0u64;
         for _ in 0..count {
             ordinal += read_varint_inline(data, &mut pos);
-            let (sti, own_len, sep_len, flags) = read_parent_fields(data, &mut pos);
-            let ov_len = ((flags & 0x07) as usize).min(MAX_OVERLAP_BYTES);
+            let (sti, own_len, sep_len, flags) = read_parent_fields(data, &mut pos, key);
+            let ov_len = ((flags >> 3) & 0x07) as usize;
             let mut overlap = [0u8; MAX_OVERLAP_BYTES];
             overlap[..ov_len].copy_from_slice(&data[pos..pos + ov_len]);
             pos += ov_len;
             if keep(&overlap[..ov_len]) {
                 entries.push(ParentEntryV3 {
                     raw_ordinal: ordinal, sti, own_len, sep_len,
-                    overlap_len: ov_len as u8, overlap, is_word_start: flags & 0x10 != 0,
+                    overlap_len: ov_len as u8, overlap, is_word_start: flags & FLAG_WORD_START != 0,
                 });
             }
         }
@@ -365,10 +381,10 @@ pub fn decode_parent_entries_v7_where(data: &[u8], keep: impl Fn(&[u8]) -> bool)
             let mut ordinal = prev_first as u64;
             for _ in 0..n {
                 ordinal += read_varint_inline(data, &mut pos);
-                let (sti, own_len, sep_len, flags) = read_parent_fields(data, &mut pos);
+                let (sti, own_len, sep_len, flags) = read_parent_fields(data, &mut pos, key);
                 entries.push(ParentEntryV3 {
                     raw_ordinal: ordinal, sti, own_len, sep_len,
-                    overlap_len: ov_len as u8, overlap, is_word_start: flags & 0x10 != 0,
+                    overlap_len: ov_len as u8, overlap, is_word_start: flags & FLAG_WORD_START != 0,
                 });
             }
         } else if g + 1 < count {
@@ -380,13 +396,24 @@ pub fn decode_parent_entries_v7_where(data: &[u8], keep: impl Fn(&[u8]) -> bool)
     entries
 }
 
+/// `(sti, own_len, sep_len, flags)` of one parent; `own_len` derived from
+/// `key` unless the record spells it out.
 #[inline(always)]
-fn read_parent_fields(data: &[u8], pos: &mut usize) -> (u16, u16, u8, u8) {
+fn read_parent_fields(data: &[u8], pos: &mut usize, key: &[u8]) -> (u16, u16, u8, u8) {
     let sti = read_varint_inline(data, pos) as u16;
-    let own_len = read_varint_inline(data, pos) as u16;
-    let sep_len = data[*pos];
-    let flags = data[*pos + 1];
-    *pos += 2;
+    let flags = data[*pos];
+    *pos += 1;
+    let mut own_len = 0u16;
+    if flags & FLAG_OWN_LEN != 0 {
+        own_len = read_varint_inline(data, pos) as u16;
+    }
+    let sep_len = match flags & 0x07 {
+        SEP_LEN_ESCAPE => read_varint_inline(data, pos) as u8,
+        k => k,
+    };
+    if flags & FLAG_OWN_LEN == 0 {
+        own_len = derived_own_len(key, sti, sep_len);
+    }
     (sti, own_len, sep_len, flags)
 }
 
@@ -577,9 +604,19 @@ impl SuffixFstBuilderV3 {
         is_word_start: bool,
         content_overlap: Option<&str>,
     ) {
-        let lower = extended_token.to_lowercase();
+        // The token's own bytes and its overlap are lowercased separately:
+        // lowercasing can change a byte length (`İ` is two bytes as `i̇`),
+        // so cutting the lowercased text at `own_len` would put own bytes
+        // in the overlap or the reverse. `own_len` and `sti` stay what the
+        // collector measured on the original text, as they always did.
+        let mut split = extended_token.len().saturating_sub(overlap_len as usize);
+        while split > 0 && !extended_token.is_char_boundary(split) {
+            split -= 1;
+        }
+        let lower = extended_token[..split].to_lowercase();
+        let lower_overlap = extended_token[split..].to_lowercase();
         let extended_bytes = lower.as_bytes();
-        let extended_len = extended_bytes.len();
+        let own_end = extended_bytes.len();
         // Suffixes start inside the token's own bytes only. A suffix starting
         // in the overlap (`si >= own_len`) is one or two bytes of the NEXT
         // token, which carries them itself under its own ordinal (at sti 0 and
@@ -588,16 +625,21 @@ impl SuffixFstBuilderV3 {
         // them to duplicates of the next token's spans. They were the 1- and
         // 2-byte keys, i.e. the ones with the largest parent lists — up to
         // 317 000 parents under one key on the kernel corpus.
-        let max_si = extended_len.min(MAX_CHUNK_BYTES).min(own_len as usize);
-        let own_end = (own_len as usize).min(extended_len);
+        let max_si = own_end.min(MAX_CHUNK_BYTES);
         // The key stops at the token boundary (container version 7): the
         // overlap bytes go into the parent record instead, right after the
         // key in `key_buf` until `build()` encodes them. Two chunks with the
         // same own text and different overlaps now share a key, and the
         // "marker" key that used to be cut at the boundary for the walk is
-        // the key itself. Keys shrank 63 to 81 % on kernel segments.
-        let overlap_bytes = &extended_bytes[own_end..];
-        debug_assert_eq!(overlap_bytes.len(), overlap_len as usize);
+        // the key itself. Keys shrank 63 to 81 % on kernel segments. The
+        // record holds at most `MAX_OVERLAP_BYTES`; a longer lowercase form
+        // is cut at a character boundary rather than refused.
+        let mut ov_end = lower_overlap.len().min(MAX_OVERLAP_BYTES);
+        while ov_end > 0 && !lower_overlap.is_char_boundary(ov_end) {
+            ov_end -= 1;
+        }
+        let overlap_bytes = &lower_overlap.as_bytes()[..ov_end];
+        let overlap_len = overlap_bytes.len() as u8;
 
         // ── Normal suffixes (partitions 0x00 and 0x01) ──
         for si in 0..max_si {
@@ -654,7 +696,11 @@ impl SuffixFstBuilderV3 {
         let lower_content = word_content.to_lowercase();
         let lower_overlap = content_overlap.to_lowercase();
         let content_bytes = lower_content.as_bytes();
-        let overlap_bytes = lower_overlap.as_bytes();
+        let mut ov_end = lower_overlap.len().min(MAX_OVERLAP_BYTES);
+        while ov_end > 0 && !lower_overlap.is_char_boundary(ov_end) {
+            ov_end -= 1;
+        }
+        let overlap_bytes = &lower_overlap.as_bytes()[..ov_end];
         let content_len = content_bytes.len();
 
         if content_len == 0 {
@@ -852,7 +898,7 @@ impl SuffixFstBuilderV3 {
             }
             scratch.clear();
             scratch.extend(self.entries[i..j].iter().map(|e| e.2.clone()));
-            let record = encode_parent_record_v7(&mut scratch);
+            let record = encode_parent_record_v8(&mut scratch, key);
             let offset = output_table.add(&record);
             fst_builder.insert(key, offset)?;
             self.num_terms += 1;
@@ -976,48 +1022,74 @@ mod tests {
         }
     }
 
-    /// A version-7 record is flat up to `FLAT_RECORD_MAX_PARENTS` parents
+    /// A version-8 record is flat up to `FLAT_RECORD_MAX_PARENTS` parents
     /// and grouped by overlap beyond, the groups a walk does not need being
-    /// skipped unread; both decode to the same parents.
+    /// skipped unread; both decode to the same parents, `own_len` coming
+    /// from the key unless the record spells it out.
     #[test]
-    fn v7_record_flat_then_grouped_by_overlap() {
+    fn v8_record_flat_then_grouped_by_overlap() {
+        // Key `\x01tex_`: body 4 bytes, so a chunk parent at sti 2 has own_len 6.
+        let key = b"\x01tex_";
         let mk = |ord: u64, sti: u16, ov: &[u8]| {
             let mut overlap = [0u8; MAX_OVERLAP_BYTES];
             overlap[..ov.len()].copy_from_slice(ov);
-            ParentEntryV3 { raw_ordinal: ord, sti, own_len: 6, sep_len: 1, overlap_len: ov.len() as u8, overlap, is_word_start: sti == 0 }
+            ParentEntryV3 { raw_ordinal: ord, sti, own_len: 4 + sti, sep_len: 1, overlap_len: ov.len() as u8, overlap, is_word_start: sti == 0 }
         };
         // Small: flat, in ordinal order, each parent with its overlap.
         let parents = vec![mk(5, 0, b"lo"), mk(3, 2, b"co"), mk(9, 0, b""), mk(7, 1, b"lo"), mk(70_000, 0, b"co")];
-        let rec = encode_parent_entries_v7(&parents);
+        let rec = encode_parent_entries_v8(&parents, key);
         assert_eq!(rec[0], 5, "flat header = count");
         let mut by_ord = parents.clone();
         by_ord.sort_by_key(|p| p.raw_ordinal);
-        assert_eq!(decode_parent_entries_v7(&rec), by_ord);
-        let lo = decode_parent_entries_v7_where(&rec, |ov| ov == b"lo");
+        assert_eq!(decode_parent_entries_v8(&rec, key), by_ord);
+        let lo = decode_parent_entries_v8_where(&rec, key, |ov| ov == b"lo");
         assert_eq!(lo.iter().map(|p| p.raw_ordinal).collect::<Vec<_>>(), vec![5, 7]);
-        let one = encode_parent_entries_v7(&[mk(12, 3, b"lo")]);
-        assert_eq!(one.len(), 1 + 1 + 1 + 1 + 1 + 1 + 2, "header, Δord, sti, own_len, sep, flags, overlap");
-        assert_eq!(decode_parent_entries_v7(&one), vec![mk(12, 3, b"lo")]);
+        let one = encode_parent_entries_v8(&[mk(12, 3, b"lo")], key);
+        assert_eq!(one.len(), 1 + 1 + 1 + 1 + 2, "header, Δord, sti, flags, overlap — no own_len, sep_len in the flags");
+        assert_eq!(decode_parent_entries_v8(&one, key), vec![mk(12, 3, b"lo")]);
+
+        // A word entry's own_len adds its sep_len; a long sep_len escapes;
+        // an own_len the key does not imply is spelled out.
+        let wkey = b"\x02mutex";
+        let mut w = mk(4, 0, b"lo"); w.sep_len = 9; w.own_len = 5 + 9;
+        let mut odd = mk(8, 1, b"");  odd.own_len = 40; // not 5 + 1
+        let rec = encode_parent_entries_v8(&[w.clone(), odd.clone()], wkey);
+        assert_eq!(decode_parent_entries_v8(&rec, wkey), vec![w, odd]);
 
         // Large: three groups in overlap order ("", "co", "lo"), skippable.
         let mut many: Vec<ParentEntryV3> = Vec::new();
         for i in 0..40u64 { many.push(mk(1000 + i * 3, 1, b"lo")); }
         for i in 0..20u64 { many.push(mk(50 + i, 2, b"co")); }
         for i in 0..5u64 { many.push(mk(90_000 + i * 7, 0, b"")); }
-        let rec = encode_parent_entries_v7(&many);
+        let rec = encode_parent_entries_v8(&many, key);
         assert_eq!(rec[0], 0x80 | 3, "grouped header = group count");
-        let all = decode_parent_entries_v7(&rec);
+        let all = decode_parent_entries_v8(&rec, key);
         assert_eq!(all.len(), 65);
         let mut expected = many.clone();
         expected.sort_by(|a, b| a.overlap.cmp(&b.overlap).then(a.raw_ordinal.cmp(&b.raw_ordinal)));
         assert_eq!(all, expected, "groups in overlap order, ordinals within");
-        let lo = decode_parent_entries_v7_where(&rec, |ov| ov == b"lo");
+        let lo = decode_parent_entries_v8_where(&rec, key, |ov| ov == b"lo");
         assert_eq!(lo.len(), 40);
         assert_eq!(lo[0].raw_ordinal, 1000);
         assert_eq!(lo[39].raw_ordinal, 1000 + 39 * 3);
-        let none = decode_parent_entries_v7_where(&rec, |ov| ov == b"");
+        let none = decode_parent_entries_v8_where(&rec, key, |ov| ov == b"");
         assert_eq!(none.iter().map(|p| p.raw_ordinal).collect::<Vec<_>>(), (0..5).map(|i| 90_000 + i * 7).collect::<Vec<_>>());
-        assert!(decode_parent_entries_v7_where(&rec, |ov| ov == b"xx").is_empty());
+        assert!(decode_parent_entries_v8_where(&rec, key, |ov| ov == b"xx").is_empty());
+    }
+
+    /// Lowercasing may change a byte length; the own bytes and the overlap
+    /// are lowercased apart so the key and the record stay consistent.
+    #[test]
+    fn lowercase_that_changes_length_keeps_key_and_overlap_apart() {
+        let mut builder = SuffixFstBuilderV3::with_min_suffix_len(1);
+        // "İX" (3 bytes) + overlap "İ" (2 bytes): lowercase "i̇x" is 4 bytes, "i̇" 3.
+        builder.add_token("İXİ", 0, 3, 0, 2, true);
+        let (fst_bytes, table) = builder.build().unwrap();
+        let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
+        let val = fst_get(&fst, SI0_PREFIX, "i̇x".as_bytes()).expect("own bytes, lowercased, are the key");
+        let p = single(&table, val, SI0_PREFIX, "i̇x".as_bytes());
+        assert_eq!(p.own_len, 3, "metadata stays the collector's");
+        assert_eq!(&p.overlap[..p.overlap_len as usize], "i̇".as_bytes());
     }
 
     #[test]
@@ -1145,8 +1217,12 @@ mod tests {
     // ── Builder with overlap ──
 
     /// The one parent behind a version-6 FST value.
-    fn single(table: &[u8], val: u64) -> ParentEntryV3 {
-        let mut v = decode_parent_entries_v7(lucivy_fst::OutputTable::new(table).get(val));
+    /// The one parent behind a key's value; the key is needed since
+    /// version 8 (`own_len` comes from it).
+    fn single(table: &[u8], val: u64, prefix: u8, body: &[u8]) -> ParentEntryV3 {
+        let mut key = vec![prefix];
+        key.extend_from_slice(body);
+        let mut v = decode_parent_entries_v8(lucivy_fst::OutputTable::new(table).get(val), &key);
         assert_eq!(v.len(), 1, "expected single");
         v.pop().unwrap()
     }
@@ -1170,7 +1246,7 @@ mod tests {
         assert!(fst_get(&fst, SI0_PREFIX, b"mutex_lo").is_none(), "no overlap in the key");
         let val = fst_get(&fst, SI0_PREFIX, b"mutex_").expect("mutex_ at SI=0");
         {
-            let p = single(&table, val);
+            let p = single(&table, val, SI0_PREFIX, b"mutex_");
             assert_eq!(&p.overlap[..2], b"lo");
             assert_eq!(p.raw_ordinal, 0);
             assert_eq!(p.sti, 0);
@@ -1184,7 +1260,7 @@ mod tests {
         // SI=4 "x_" — the cross-boundary trigram "x_l" is this key plus its overlap
         let val = fst_get(&fst, SI_REST_PREFIX, b"x_").expect("x_ at SI>0");
         {
-            let p = single(&table, val);
+            let p = single(&table, val, SI_REST_PREFIX, b"x_");
             assert_eq!(p.sti, 4);
             assert_eq!(p.own_len, 6);
             assert_eq!(&p.overlap[..2], b"lo");
@@ -1213,7 +1289,7 @@ mod tests {
         // "login_" in SI=0 partition
         let val = fst_get(&fst, SI0_PREFIX, b"login_").expect("login_ at SI=0");
         {
-            let p = single(&table, val);
+            let p = single(&table, val, SI0_PREFIX, b"login_");
             assert_eq!(p.raw_ordinal, 1);
             assert_eq!(p.sti, 0);
             assert!(p.is_word_start);
@@ -1222,7 +1298,7 @@ mod tests {
         // "ogin_" in SI>0 partition: multi-parent? No — only from "login_"
         let val = fst_get(&fst, SI_REST_PREFIX, b"ogin_").expect("ogin_ in SI>0");
         {
-            let p = single(&table, val);
+            let p = single(&table, val, SI_REST_PREFIX, b"ogin_");
             assert_eq!(p.raw_ordinal, 1);
             assert_eq!(p.sti, 1);
         }
@@ -1239,7 +1315,7 @@ mod tests {
 
         let val = fst_get(&fst, SI0_PREFIX, b"init").expect("init at SI=0");
         {
-            let p = single(&table, val);
+            let p = single(&table, val, SI0_PREFIX, b"init");
             assert_eq!(p.own_len, 4);
             assert_eq!(p.overlap_len, 0);
             assert_eq!(p.sep_len, 0);
@@ -1259,13 +1335,13 @@ mod tests {
 
         let val = fst_get(&fst, SI0_PREFIX, b"geteleme").expect("getEleme lowered");
         {
-            let p = single(&table, val);
+            let p = single(&table, val, SI0_PREFIX, b"geteleme");
             assert!(p.is_word_start);
         }
 
         let val = fst_get(&fst, SI0_PREFIX, b"ntbyid").expect("ntById lowered");
         {
-            let p = single(&table, val);
+            let p = single(&table, val, SI0_PREFIX, b"ntbyid");
             assert!(!p.is_word_start);
         }
     }
@@ -1296,7 +1372,7 @@ mod tests {
         assert!(fst_get(&fst, SI_STRIPPED_PREFIX, b"mutexlo").is_none());
         let val = fst_get(&fst, SI_STRIPPED_PREFIX, b"mutex").expect("mutex in stripped");
         {
-            let p = single(&table, val);
+            let p = single(&table, val, SI_STRIPPED_PREFIX, b"mutex");
             assert_eq!(&p.overlap[..2], b"lo");
             assert_eq!(p.sti, 0);
             assert_eq!(p.raw_ordinal, 0);
@@ -1307,7 +1383,7 @@ mod tests {
         // "ex" at STI=3 — the trigram "exl" is this key plus its overlap
         let val = fst_get(&fst, SI_STRIPPED_PREFIX, b"ex").expect("ex in stripped");
         {
-            let p = single(&table, val);
+            let p = single(&table, val, SI_STRIPPED_PREFIX, b"ex");
             assert_eq!(p.sti, 3);
         }
     }
@@ -1343,7 +1419,7 @@ mod tests {
         assert!(!found, "keys stop at the word's content; the overlap is in the record");
         let key = [SI_STRIPPED_PREFIX, b'e', b'x'];
         let val = fst.get(key).expect("ex in stripped");
-        let p = single(&table, val);
+        let p = single(&table, val, SI_STRIPPED_PREFIX, b"ex");
         assert_eq!((p.sti, &p.overlap[..2]), (3, &b"lo"[..]));
     }
 
@@ -1381,7 +1457,7 @@ mod tests {
         // Stripped partition has "a" (content only; overlap "bc" in the record)
         let val = fst_get(&fst, SI_STRIPPED_PREFIX, b"a").expect("a in stripped");
         {
-            let p = single(&table, val);
+            let p = single(&table, val, SI_STRIPPED_PREFIX, b"a");
             assert_eq!(p.sti, 0);
             assert_eq!(p.own_len, 5); // a(1) + ____(4)
             assert_eq!(p.sep_len, 4);
@@ -1402,7 +1478,7 @@ mod tests {
         let normal = fst_get(&fst, SI0_PREFIX, b"mutex_").unwrap();
         let stripped = fst_get(&fst, SI_STRIPPED_PREFIX, b"mutex").unwrap();
 
-        let (n, s) = (single(&table, normal), single(&table, stripped));
+        let (n, s) = (single(&table, normal, SI0_PREFIX, b"mutex_"), single(&table, stripped, SI_STRIPPED_PREFIX, b"mutex"));
         assert_eq!(n.raw_ordinal, s.raw_ordinal, "same ordinal");
         assert_eq!(n.raw_ordinal, 42);
     }

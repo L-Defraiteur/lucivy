@@ -1153,8 +1153,8 @@ mod tests {
         // "lo" its record carries (keys stop at the token boundary).
         let key = [super::super::builder::SI_REST_PREFIX, b'x', b'_'];
         let val = fst.get(key).expect("x_ at SI>0");
-        let parents = crate::suffix_fst::builder_v3::decode_parent_entries_v7(
-            lucivy_fst::OutputTable::new(&_output_table).get(val));
+        let parents = crate::suffix_fst::builder_v3::decode_parent_entries_v8(
+            lucivy_fst::OutputTable::new(&_output_table).get(val), &key);
         assert!(parents.iter().any(|p| p.overlap[..2] == *b"lo"),
             "cross-boundary trigram 'x_l' should be in the record's overlap");
     }

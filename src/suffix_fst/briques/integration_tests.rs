@@ -1330,7 +1330,7 @@ mod tests {
                 let suffix = &key[1..];
                 let suffix_str = String::from_utf8_lossy(suffix);
                 if suffix_str.contains("func") || suffix_str.contains("unct") || (prefix <= 0x01 && suffix.len() > 6 && suffix[0] == b'f') {
-                    let parents = reader.decode_parents(val);
+                    let parents = reader.decode_parents(val, key);
                     eprintln!("FST key: prefix=0x{:02x} suffix={:?} val={} parents={}",
                         prefix, suffix_str, val, parents.len());
                     for p in &parents {

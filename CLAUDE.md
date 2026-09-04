@@ -271,7 +271,12 @@ tests, corpus, protocole, pièges) — tous trois autonomes. Puis
 `02-audit-taille-index-sfx-v3.md` (l'audit du format v3 : le `.sfx` était aux
 trois quarts une table de parents ; script `benches/scan_index_size.py`).
 **Le travail v4 est sur la branche `v4`, pas sur `main`**, et un binaire 3.0.x
-ne lit pas un index v4 : conteneur `.sfx` version 5 (parents en delta-varint),
+ne lit pas un index v4 : conteneur `.sfx` **version 8** (tous les parents en
+table, valeur FST = offset ; clés coupées à la frontière du token, plus de
+marqueur, overlap dans le record, plat ≤ 32 parents / groupé par overlap
+au-delà, `own_len` dérivé de la clé — journal
+`09-journal-chantier-dictionnaire.md` ; la version 7, intermédiaire, est
+refusée),
 `.posmap` `PMP3` (3 octets), `.sibling_v3` `SIB3` (sans gap), `.termtexts`
 layout 2 (méta dans la table d'offsets), plus de `.bytemap` en v3. Chaque
 lecteur ouvre encore les layouts précédents. Règle du 4 septembre : la taille
