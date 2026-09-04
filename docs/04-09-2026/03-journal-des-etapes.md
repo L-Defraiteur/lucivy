@@ -182,3 +182,55 @@ Moins d'octets à faulter, pas de lecture non alignée qui coûte. Le seul recul
 **Tests.** `cargo test --lib` : 1 441 verts (2 ajoutés : les deux largeurs de
 `.posmap` lues pareil, `SIB3` contre `SIB2`). `cargo test -p lucivy-core` :
 184 verts, 0 rouge.
+
+---
+
+## Checkpoint après les étapes 1 à 4 — le vrai A/B, sur 30 000 fichiers
+
+Le panel de 10 000 fichiers ne discrimine pas la milliseconde, et l'A/B des
+étapes 3 et 4 ne mesurait que le format (même binaire des deux côtés). Ici :
+**le binaire de chaque commit sur l'index qu'il écrit**, ce qu'un utilisateur
+ressent. Corpus `/tmp/lucivy-cmp-90k` plafonné à 30 000 fichiers,
+`V3_COMMIT_EVERY=2000`, 120 segments ; l'ancien binaire compilé depuis
+`1c263f3` dans un worktree ; trois passes alternées par commit, machine sans
+autre charge que les panels (charge 3 à 6, c'est le prescan lui-même).
+
+```bash
+git worktree add /chemin/wt-v3 1c263f3
+cd /chemin/wt-v3 && CARGO_TARGET_DIR=/chemin/wt-target V3_CORPUS=/tmp/lucivy-cmp-90k \
+  V3_MAX_DOCS=30000 V3_COMMIT_EVERY=2000 V3_INDEX_DIR=/chemin/idx30k-v3 \
+  cargo test --release -p lucivy-core --test test_sfx_v3_ground_truth v3_ground_truth_demo -- --ignored --nocapture
+```
+
+**Taille** : 3,4 Go (v3) → 3,1 (ét. 1) → 2,6 (ét. 2) → 2,6 Go (ét. 4), `du`.
+
+**Temps, minimum de trois passes (ms)** :
+
+| requête | docs | v3 | ét. 1 | ét. 2 | ét. 3 | ét. 4 |
+|---|---|---|---|---|---|---|
+| `mutex_lock` strict | 233 | 2,9 | 2,6 | 2,5 | 2,5 | 3,4 |
+| `mutex_lock` relax | 246 | 1,7 | 1,7 | 1,7 | 1,6 | 1,8 |
+| `spin_lock` strict | 588 | 2,4 | 2,1 | 2,3 | 2,2 | 2,6 |
+| `sched` term | 1 406 | 3,4 | 3,1 | 3,2 | 3,7 | 3,9 |
+| `sched` strict | 1 998 | 2,1 | 2,3 | 2,3 | 2,5 | 2,2 |
+| `printk` sw | 1 252 | 2,5 | 2,5 | 2,4 | 2,4 | 2,6 |
+| `schdule` fz1 | 707 | **12,2** | 12,8 | 13,9 | 14,4 | **15,2** |
+| `regsiter` fz2 | 8 623 | 142,0 | 143,5 | 141,6 | 143,3 | 143,8 |
+| `spin_lock_[a-z]+` rx | 439 | 10,1 | 10,8 | 10,5 | 11,2 | 10,4 |
+| `schdule` jw1 | 773 | 16,5 | 17,3 | 15,8 | 17,2 | 16,0 |
+
+**Lecture.** Les requêtes exactes bougent de quelques dixièmes dans les deux
+sens : bruit. Le fuzzy lourd et la regex ne bougent pas. **Une seule ligne
+recule vraiment : le fuzzy relâché, +3 ms sur 12 (+25 %)**, et pas d'un coup
+— par paliers de 0,5 à 1,1 ms à chaque étape, les deux plus gros aux étapes 2
+(`has_content` lit META au lieu du bitmap) et 4 (la DFS lit META au lieu de
+`gap_len`). Le point commun : deux lectures aléatoires de `.termtexts` par
+pas là où il y en avait une, parce que la table d'offsets (pour `text()`) et
+la section META sont dans deux régions du fichier. C'est ce que l'étape 6 peut
+rendre : mettre la méta **dans** la table d'offsets, 8 octets par ordinal,
+et `meta()` devient gratuit après `text()`.
+
+**Décision (règle du 4 septembre, [01](01-recap-findings-et-plan-d-action.md)
+§4)** : rien n'approche ×1,5, l'index a perdu 24 % ; on garde les quatre
+étapes, on écrit la perte, et l'étape 6 est la prochaine parce qu'elle réduit
+et accélère à la fois.
