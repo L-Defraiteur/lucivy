@@ -15,8 +15,9 @@ mesurées une à une ([03](03-journal-des-etapes.md)), sur la branche **`v4`**.
 | 10 000 fichiers du noyau (référence, 160 segments) | 1 152 Mo | **735 Mo** | **−36,2 %** |
 | 30 000 fichiers (120 segments) | 3,4 Go | **2,3 Go** | −33 % |
 
-Sur les 93 983 fichiers de la comparaison du 28 août, ×21 devient environ
-**×13,5**. Loin du ×5 discuté, mais obtenu **sans toucher au modèle de
+Sur les 93 983 fichiers de la comparaison du 28 août, mesuré ce soir :
+**11,06 Go, ×12,3**, contre 18 Go et ×21 (253 segments, panel identique au
+28 août). Loin du ×5 discuté, mais obtenu **sans toucher au modèle de
 recherche** : chaque étape est de l'encodage, et une seule (5a) change ce
 que le builder enregistre, pour des clés qui étaient des doublons.
 
@@ -65,9 +66,9 @@ qu'on vend, le temps acceptable tant qu'on est loin de ×1,5.
 
 ## 3. État du dépôt
 
-- **`v4`** : `wip/publication-3.0.0` + l'audit + 8 commits de format. Pas
-  poussée. `main` = `origin/main`. Les trois commits du 28 août sont sur
-  `wip/publication-3.0.0`, pas poussés non plus.
+- **`v4`** : `wip/publication-3.0.0` + l'audit + 8 commits de format,
+  **poussée sur `origin/v4`** le soir. `main` = `origin/main`. Les trois
+  commits du 28 août sont sur `wip/publication-3.0.0`, pas poussés.
 - Un binaire 3.0.x **ne lira pas** un index v4 (conteneur `.sfx` 5, `PMP3`,
   `SIB3`, `.termtexts` layout 2, pas de `.bytemap`). Le workspace passera à
   4.0.0 à la publication. La question de garder ou non la pile v2
