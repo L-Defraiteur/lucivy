@@ -27,14 +27,18 @@ def sections(b):
 def scan_sfx(path, deep):
     b = open(path, "rb").read()
     s = sections(b)
+    version = b[4]  # container version: 3 = 11-byte parents, 4 = packed u64
     fst_off, fst_len = s[1]; par_off, par_len = s[2]
-    r = {"file": len(b), "fst": fst_len, "parents": par_len}
+    r = {"file": len(b), "fst": fst_len, "parents": par_len, "version": version}
     if deep:
         pos = par_off; end = par_off + par_len
         nrec = 0; nparents = 0; hist = collections.Counter(); maxc = 0
         while pos < end:
             ln, pos = varint(b, pos)
-            cnt = struct.unpack_from("<I", b, pos)[0]
+            if version >= 4:
+                cnt, _ = varint(b, pos)
+            else:
+                cnt = struct.unpack_from("<I", b, pos)[0]
             nrec += 1; nparents += cnt; maxc = max(maxc, cnt)
             if cnt <= 2: hist["2"] += 1
             elif cnt <= 10: hist["3-10"] += 1

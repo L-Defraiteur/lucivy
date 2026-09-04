@@ -4,19 +4,31 @@
 //!
 //! Sections:
 //!   0x01 — FST: suffix FST bytes
-//!   0x02 — PARENTS: OutputTable bytes (v3 encoding)
+//!   0x02 — PARENTS: OutputTable bytes (multi-parent records)
+//!
+//! Container versions (the byte after the magic; the magic stays `SFX3`, so
+//! `detect_sfx_version` keeps answering 3 — the engine did not change):
+//!   3 — a record is `[u32 count]` + 11 bytes per parent
+//!   4 — a record is `[varint count]` + the packed 8-byte parent value
+//!       (`encode_parent_entries_v3`), written since 4 September 2026
+//!
+//! The reader accepts both; the writer only emits 4.
 //!
 //! Removed vs v2: sibling table, gapmap, sepmap (all in separate files or gone).
 
 use lucivy_fst::{Map, OutputTable};
 
 use super::builder_v3::{
-    decode_output_v3, decode_parent_entries_v3, ParentEntryV3, ParentRefV3,
+    decode_output_v3, decode_parent_entries_v3, decode_parent_entries_v3_legacy,
+    ParentEntryV3, ParentRefV3,
 };
 use super::section_file::{SectionFileReader, SectionFileWriter};
 
 const MAGIC: [u8; 4] = *b"SFX3";
-const VERSION: u8 = 3;
+/// Container version written by `SfxFileWriterV3`.
+pub const VERSION: u8 = 4;
+/// Last container version whose parent records use the 11-byte layout.
+const LEGACY_PARENTS_VERSION: u8 = 3;
 
 /// Section IDs for the .sfx v3 file.
 pub const SECTION_FST: u16 = 0x01;
@@ -78,6 +90,8 @@ pub struct SfxFileReaderV3 {
     /// on 800 segments, for a query with no results, before any search began.
     fst: Map<common::OwnedBytes>,
     parent_list_data: common::OwnedBytes,
+    /// Records use the version-3 11-byte layout (see the module doc).
+    legacy_parents: bool,
 }
 
 impl SfxFileReaderV3 {
@@ -112,8 +126,14 @@ impl SfxFileReaderV3 {
 
         let parent_list_data = sub(file.get_section(SECTION_PARENTS)
             .ok_or(SfxV3Error::MissingSection("PARENTS"))?);
+        let legacy_parents = file.version() <= LEGACY_PARENTS_VERSION;
 
-        Ok(Self { fst, parent_list_data })
+        Ok(Self { fst, parent_list_data, legacy_parents })
+    }
+
+    /// Container version this file was written with (3 or 4).
+    pub fn container_version(&self) -> u8 {
+        if self.legacy_parents { LEGACY_PARENTS_VERSION } else { VERSION }
     }
 
     /// Access the FST.
@@ -128,7 +148,11 @@ impl SfxFileReaderV3 {
             ParentRefV3::Multi { offset } => {
                 let table = OutputTable::new(&self.parent_list_data);
                 let record = table.get(offset);
-                decode_parent_entries_v3(record)
+                if self.legacy_parents {
+                    decode_parent_entries_v3_legacy(record)
+                } else {
+                    decode_parent_entries_v3(record)
+                }
             }
         }
     }
@@ -242,6 +266,48 @@ mod tests {
         assert!(!reader.resolve_suffix("mutex_co").is_empty());
         // "hello_wo" from doc 2
         assert!(!reader.resolve_suffix("hello_wo").is_empty());
+    }
+
+    /// An index written before container version 4 must still open and
+    /// decode its parents: same key, same list, from the 11-byte records.
+    #[test]
+    fn version_3_file_still_reads_its_parents() {
+        use crate::suffix_fst::builder_v3::{
+            encode_multi_parent_v3, encode_single_parent_v3, ParentEntryV3,
+        };
+        let a = ParentEntryV3 { raw_ordinal: 7, sti: 0, own_len: 6, sep_len: 1, overlap_len: 2, is_word_start: true };
+        let b = ParentEntryV3 { raw_ordinal: 9, sti: 2, own_len: 8, sep_len: 0, overlap_len: 2, is_word_start: false };
+
+        // Legacy record for key "lo": [u32 count] + 11 bytes per parent.
+        let mut record = 2u32.to_le_bytes().to_vec();
+        for p in [&a, &b] {
+            record.extend_from_slice(&(p.raw_ordinal as u32).to_le_bytes());
+            record.extend_from_slice(&p.sti.to_le_bytes());
+            record.extend_from_slice(&p.own_len.to_le_bytes());
+            record.push(p.sep_len);
+            record.push(p.overlap_len);
+            record.push(if p.is_word_start { 1 } else { 0 });
+        }
+        let mut table = lucivy_fst::OutputTableBuilder::new();
+        let offset = table.add(&record);
+
+        let mut fst = lucivy_fst::MapBuilder::memory();
+        fst.insert(b"\x01lo", encode_multi_parent_v3(offset)).unwrap();
+        fst.insert(b"\x01mu", encode_single_parent_v3(&a)).unwrap();
+
+        let mut file = SectionFileWriter::new(MAGIC, LEGACY_PARENTS_VERSION);
+        file.add_section(SECTION_FST, &fst.into_inner().unwrap());
+        file.add_section(SECTION_PARENTS, &table.into_inner());
+        let bytes = file.serialize();
+
+        let reader = SfxFileReaderV3::open(&bytes).unwrap();
+        assert_eq!(reader.container_version(), 3);
+        assert_eq!(reader.resolve_suffix("lo"), vec![a.clone(), b]);
+        assert_eq!(reader.resolve_suffix("mu"), vec![a]);
+
+        // And a freshly written file says 4.
+        let fresh = SfxFileReaderV3::open(&build_sfx_v3(&["mutex_lock"])).unwrap();
+        assert_eq!(fresh.container_version(), 4);
     }
 
     #[test]

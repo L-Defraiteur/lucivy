@@ -137,30 +137,51 @@ pub fn decode_output_v3(value: u64) -> ParentRefV3 {
     }
 }
 
-/// Encode v3 parent entries into bytes for the OutputTable.
-/// Header: [u32 count]. Per entry: [u32 ordinal][u16 sti][u16 own_len][u8 sep_len][u8 overlap_len][u8 flags] = 11 bytes.
+/// Encode a multi-parent record for the OutputTable (container version 4).
 ///
-/// The count was a u16 until 23 August 2026: a 50k-document kernel index merged
-/// into one segment reached 64 461 parents under one key, and the next merge
-/// would have truncated the list — occurrences lost, no error.
+/// Header: varint count. Per entry: the same packed `u64` as the single-parent
+/// FST value (`encode_single_parent_v3`), little-endian — 8 bytes instead of
+/// the 11 of the version-3 record, and one decoder for both shapes.
+///
+/// The parents table was 73 % of the `.sfx` file on the 93 605-file kernel
+/// index (3.58 GB of 4.92), 325 million entries: three bytes per entry is
+/// 8.7 % of the whole index. Entries are sorted by `sti`, as before.
 pub fn encode_parent_entries_v3(parents: &[ParentEntryV3]) -> Vec<u8> {
     let mut sorted = parents.to_vec();
     sorted.sort_by_key(|p| p.sti);
-    let mut buf = Vec::with_capacity(4 + sorted.len() * 11);
-    buf.extend_from_slice(&(sorted.len() as u32).to_le_bytes());
+    let mut buf = Vec::with_capacity(5 + sorted.len() * 8);
+    super::varint::write_varint(&mut buf, sorted.len() as u64);
     for p in &sorted {
-        buf.extend_from_slice(&(p.raw_ordinal as u32).to_le_bytes());
-        buf.extend_from_slice(&p.sti.to_le_bytes());
-        buf.extend_from_slice(&p.own_len.to_le_bytes());
-        buf.push(p.sep_len);
-        buf.push(p.overlap_len);
-        buf.push(if p.is_word_start { 1 } else { 0 });
+        buf.extend_from_slice(&encode_single_parent_v3(p).to_le_bytes());
     }
     buf
 }
 
-/// Decode v3 parent entries from OutputTable bytes.
+/// Decode a version-4 multi-parent record (see `encode_parent_entries_v3`).
 pub fn decode_parent_entries_v3(data: &[u8]) -> Vec<ParentEntryV3> {
+    let mut cursor = 0usize;
+    let num = super::varint::read_varint(data, &mut cursor)
+        .expect("BUG: truncated parent record header") as usize;
+    let mut entries = Vec::with_capacity(num);
+    for chunk in data[cursor..].chunks_exact(8).take(num) {
+        let value = u64::from_le_bytes(chunk.try_into().expect("8-byte chunk"));
+        match decode_output_v3(value) {
+            ParentRefV3::Single(p) => entries.push(p),
+            ParentRefV3::Multi { .. } => unreachable!("BUG: multi flag inside a parent record"),
+        }
+    }
+    debug_assert_eq!(entries.len(), num, "truncated parent record");
+    entries
+}
+
+/// Decode a version-3 multi-parent record: `[u32 count]` then 11 bytes per
+/// entry — `[u32 ordinal][u16 sti][u16 own_len][u8 sep_len][u8 overlap_len][u8 flags]`.
+///
+/// Kept so that every index written before container version 4 still opens;
+/// nothing writes this shape any more. (The count was a u16 until 23 August
+/// 2026: a 50k-document kernel index merged into one segment reached 64 461
+/// parents under one key, and the next merge would have truncated the list.)
+pub fn decode_parent_entries_v3_legacy(data: &[u8]) -> Vec<ParentEntryV3> {
     let num = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
     let mut cursor = 4;
     let mut entries = Vec::with_capacity(num);
@@ -498,22 +519,23 @@ impl SuffixFstBuilderV3 {
             // a term serving another term's postings, or parents dropped and
             // occurrences lost. Merges are exactly the operation that crosses
             // these thresholds.
-            if num_parents == 1 {
-                let p = &self.entries[i].2;
+            // Every entry, single or in a record, is packed into the same
+            // 63-bit value since container version 4 — so the 24-bit ordinal
+            // bound applies to all of them, not only to single parents.
+            if num_parents > self.max_parents { self.max_parents = num_parents; }
+            for e in &self.entries[i..j] {
+                let p = &e.2;
                 if p.raw_ordinal > ORDINAL_MASK {
                     return Err(std::io::Error::other(format!(
-                        "sfx v3: ordinal {} exceeds the {ORDINAL_BITS}-bit single-parent encoding; \
+                        "sfx v3: ordinal {} exceeds the {ORDINAL_BITS}-bit parent encoding; \
                          the segment holds too many distinct terms (split it instead of merging)",
                         p.raw_ordinal)).into());
                 }
-            } else if num_parents > u32::MAX as usize {
-                return Err(std::io::Error::other(format!(
-                    "sfx v3: key {:?} has {num_parents} parents, above the u32 limit",
-                    String::from_utf8_lossy(&key[1..key.len().min(24)]))).into());
-            }
-            if num_parents > self.max_parents { self.max_parents = num_parents; }
-            for e in &self.entries[i..j] {
-                if e.2.raw_ordinal > max_ordinal { max_ordinal = e.2.raw_ordinal; }
+                if (p.own_len as u64) > OWN_LEN_MASK || (p.sti as u64) > STI_MASK {
+                    return Err(std::io::Error::other(format!(
+                        "sfx v3: own_len {} / sti {} exceed the parent encoding", p.own_len, p.sti)).into());
+                }
+                if p.raw_ordinal > max_ordinal { max_ordinal = p.raw_ordinal; }
             }
 
             let output = if num_parents == 1 {
@@ -659,10 +681,61 @@ mod tests {
             },
         ];
         let bytes = encode_parent_entries_v3(&entries);
+        assert_eq!(bytes.len(), 1 + 2 * 8, "varint count + 8 bytes per parent");
         let decoded = decode_parent_entries_v3(&bytes);
         // Sorted by sti, so order should be [sti=0, sti=3]
-        assert_eq!(decoded[0].raw_ordinal, 5);
-        assert_eq!(decoded[1].raw_ordinal, 12);
+        assert_eq!(decoded, entries);
+    }
+
+    /// The version-3 record shape, as written before container version 4.
+    fn encode_parent_entries_legacy(parents: &[ParentEntryV3]) -> Vec<u8> {
+        let mut buf = (parents.len() as u32).to_le_bytes().to_vec();
+        for p in parents {
+            buf.extend_from_slice(&(p.raw_ordinal as u32).to_le_bytes());
+            buf.extend_from_slice(&p.sti.to_le_bytes());
+            buf.extend_from_slice(&p.own_len.to_le_bytes());
+            buf.push(p.sep_len);
+            buf.push(p.overlap_len);
+            buf.push(if p.is_word_start { 1 } else { 0 });
+        }
+        buf
+    }
+
+    #[test]
+    fn packed_and_legacy_records_decode_to_the_same_parents() {
+        let entries: Vec<ParentEntryV3> = (0..300u64).map(|i| ParentEntryV3 {
+            raw_ordinal: i * 7919 % ORDINAL_MASK,
+            sti: (i % 200) as u16,
+            own_len: (i % 300) as u16 + 1,
+            sep_len: (i % 5) as u8,
+            overlap_len: (i % 3) as u8,
+            is_word_start: i % 2 == 0,
+        }).collect();
+        let mut by_sti = entries.clone();
+        by_sti.sort_by_key(|p| p.sti);
+
+        let packed = decode_parent_entries_v3(&encode_parent_entries_v3(&entries));
+        let legacy = decode_parent_entries_v3_legacy(&encode_parent_entries_legacy(&by_sti));
+        assert_eq!(packed, by_sti);
+        assert_eq!(legacy, by_sti);
+    }
+
+    #[test]
+    fn packed_record_holds_the_largest_values() {
+        let p = ParentEntryV3 {
+            raw_ordinal: ORDINAL_MASK,
+            sti: STI_MASK as u16,
+            own_len: OWN_LEN_MASK as u16,
+            sep_len: SEP_LEN_MASK as u8,
+            overlap_len: OVERLAP_MASK as u8,
+            is_word_start: true,
+        };
+        let big = vec![p.clone(); 70_000]; // count above u16, needs a 3-byte varint
+        let bytes = encode_parent_entries_v3(&big);
+        assert_eq!(bytes.len(), 3 + 70_000 * 8);
+        let decoded = decode_parent_entries_v3(&bytes);
+        assert_eq!(decoded.len(), 70_000);
+        assert_eq!(decoded[69_999], p);
     }
 
     // ── Builder with overlap ──
