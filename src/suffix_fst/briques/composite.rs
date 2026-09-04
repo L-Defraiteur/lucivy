@@ -548,6 +548,12 @@ fn generate_trigrams(query: &str, distance: u8) -> (Vec<String>, Vec<usize>, usi
 
 // ─── Brique 2: resolve_all_trigrams ──────────────────────────────────────
 
+/// A number that differs from one segment's reader view to the next (the
+/// segment's first global id), 0 without a view.
+fn reader_seed(reader: &crate::suffix_fst::file_v3::SfxFileReaderV3) -> usize {
+    reader.segment_gmap().filter(|g| !g.is_empty()).map(|g| g.global(0) as usize).unwrap_or(0)
+}
+
 /// Resolve all trigrams against the index, returning hits.
 /// Uses both chunk (0x00/0x01) and word-stripped (0x02) resolution.
 /// Trigrams are resolved rarest-first (by FST selectivity) for efficiency.
@@ -559,9 +565,17 @@ pub fn resolve_all_trigrams(
 ) -> Vec<TrigramHit> {
     // One FST walk per n-gram: the selectivity pass used to walk, drop the
     // candidates, and walk again (0.5 s of 9 s on `inclde` over 50k docs).
-    let mut all_cands: Vec<Vec<FstCandidateV3>> = ngrams.iter()
-        .map(|gram| fst_walk::fst_candidates_v3(ctx.reader, gram, false, strict_separators))
-        .collect();
+    // On a shared reader (shard dictionary) the walk is memoized and the
+    // first segment to ask computes while the others wait: the segments
+    // start at different n-grams, so that several compute at once instead
+    // of queueing behind the same one.
+    let n = ngrams.len().max(1);
+    let start = reader_seed(ctx.reader) % n;
+    let mut all_cands: Vec<Vec<FstCandidateV3>> = vec![Vec::new(); ngrams.len()];
+    for k in 0..ngrams.len() {
+        let i = (start + k) % n;
+        all_cands[i] = fst_walk::fst_candidates_v3(ctx.reader, &ngrams[i], false, strict_separators);
+    }
     let mut selectivity: Vec<(usize, usize)> = all_cands.iter().enumerate()
         .map(|(i, c)| (i, c.len())).collect();
     selectivity.sort_by_key(|&(_, count)| count);

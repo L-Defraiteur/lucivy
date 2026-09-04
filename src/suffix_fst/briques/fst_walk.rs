@@ -125,7 +125,51 @@ pub struct TokenChainV3 {
 /// - anchor_start=true: 0x00 only
 /// - strict_sep=true: 0x00 + 0x01
 /// - strict_sep=false: 0x00 + 0x01 + 0x02 (includes sep-stripped)
+/// The items of a shard-level list (sorted by global id) that a segment
+/// has: one walk over both sorted sequences, the list and the segment's
+/// `.gmap` — not a binary search per item, which on a fuzzy query's
+/// thousands of candidates times 160 segments was the whole search time.
+fn keep_in_segment<T: Clone>(items: &[T], id_of: impl Fn(&T) -> u32, gmap: &super::super::gmap::GmapReader<'_>) -> Vec<T> {
+    let mut out = Vec::new();
+    let (mut i, mut j, n) = (0usize, 0u32, gmap.len());
+    while i < items.len() && j < n {
+        let a = id_of(&items[i]);
+        let b = gmap.global(j);
+        if a < b {
+            i += 1;
+        } else if a > b {
+            j += 1;
+        } else {
+            out.push(items[i].clone());
+            i += 1;
+        }
+    }
+    out
+}
+
 pub fn fst_candidates_v3(
+    reader: &SfxFileReaderV3,
+    query: &str,
+    anchor_start: bool,
+    strict_separators: bool,
+) -> Vec<FstCandidateV3> {
+    if let Some(memo) = reader.memo() {
+        let flags = (anchor_start as u8) | ((strict_separators as u8) << 1);
+        // Memoized sorted by id, for the segment walk below.
+        let shared = memo.get_or_compute(1, query.as_bytes(), flags, || {
+            let mut v = fst_candidates_v3_uncached(reader, query, anchor_start, strict_separators);
+            v.sort_by_key(|c| (c.raw_ordinal, c.sti));
+            v
+        });
+        return match reader.segment_gmap() {
+            Some(g) => keep_in_segment(&shared, |c| c.raw_ordinal as u32, &g),
+            None => (*shared).clone(),
+        };
+    }
+    fst_candidates_v3_uncached(reader, query, anchor_start, strict_separators)
+}
+
+fn fst_candidates_v3_uncached(
     reader: &SfxFileReaderV3,
     query: &str,
     anchor_start: bool,
@@ -253,6 +297,28 @@ pub fn falling_walk_chunks(
     reader: &SfxFileReaderV3,
     query: &str,
 ) -> Vec<SplitCandidateV3> {
+    if let Some(memo) = reader.memo() {
+        let shared = memo.get_or_compute(2, query.as_bytes(), 0, || {
+            let mut v = falling_walk_chunks_uncached(reader, query);
+            v.sort_by_key(|s| (s.parent.raw_ordinal, s.parent.sti, s.query_consumed));
+            v
+        });
+        return match reader.segment_gmap() {
+            Some(g) => {
+                let mut v = keep_in_segment(&shared, |s| s.parent.raw_ordinal as u32, &g);
+                sort_and_dedup_splits(&mut v);
+                v
+            }
+            None => { let mut v = (*shared).clone(); sort_and_dedup_splits(&mut v); v }
+        };
+    }
+    falling_walk_chunks_uncached(reader, query)
+}
+
+fn falling_walk_chunks_uncached(
+    reader: &SfxFileReaderV3,
+    query: &str,
+) -> Vec<SplitCandidateV3> {
     let lower = query.to_lowercase();
     let query_bytes = lower.as_bytes();
     let map = reader.fst();
@@ -323,6 +389,28 @@ pub fn falling_walk_chunks(
 /// Markers are kept (overlap_consumed >= 0) because word-level keys are longer
 /// and less prone to collision than chunk-level markers.
 pub fn falling_walk_words(
+    reader: &SfxFileReaderV3,
+    query: &str,
+) -> Vec<SplitCandidateV3> {
+    if let Some(memo) = reader.memo() {
+        let shared = memo.get_or_compute(3, query.as_bytes(), 0, || {
+            let mut v = falling_walk_words_uncached(reader, query);
+            v.sort_by_key(|s| (s.parent.raw_ordinal, s.parent.sti, s.query_consumed));
+            v
+        });
+        return match reader.segment_gmap() {
+            Some(g) => {
+                let mut v = keep_in_segment(&shared, |s| s.parent.raw_ordinal as u32, &g);
+                sort_and_dedup_splits(&mut v);
+                v
+            }
+            None => { let mut v = (*shared).clone(); sort_and_dedup_splits(&mut v); v }
+        };
+    }
+    falling_walk_words_uncached(reader, query)
+}
+
+fn falling_walk_words_uncached(
     reader: &SfxFileReaderV3,
     query: &str,
 ) -> Vec<SplitCandidateV3> {
@@ -680,6 +768,10 @@ pub fn cross_chunk_chain_v3(
     reader: &SfxFileReaderV3,
     query: &str,
 ) -> Vec<TokenChainV3> {
+    // On a shared reader the splits below are this segment's already, and
+    // the walks the chain builder makes for each remainder are memoized —
+    // so each segment builds its own (short) chains, in parallel, and the
+    // FST work for a remainder is done once for the shard.
     let splits = falling_walk_chunks(reader, query);
     build_chains_from_splits(reader, &splits, query, falling_walk_chunks, true, true)
 }

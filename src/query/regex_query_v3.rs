@@ -67,8 +67,23 @@ impl RegexQueryV3 {
         use crate::suffix_fst::file_v3::SfxFileReaderV3;
         use crate::suffix_fst::briques::regex_verified;
 
-        let reader = SfxFileReaderV3::open_owned(sfx_bytes.clone()).map_err(|e|
-            crate::LucivyError::SystemError(format!("open SFX3: {e}")))?;
+        // A dictionary segment uses the shard's shared, memoizing reader.
+        let owned_reader;
+        let view;
+        let reader: &SfxFileReaderV3 = match seg_reader.sfx_dictionary_field(self.field) {
+            Some(f) => {
+                view = match seg_reader.sfx_index_file("gmap", self.field).and_then(|g| g.read_bytes().ok()) {
+                    Some(gmap) => f.sfx_reader().for_segment(gmap),
+                    None => f.sfx_reader().for_segment(common::OwnedBytes::empty()),
+                };
+                &view
+            },
+            None => {
+                owned_reader = SfxFileReaderV3::open_owned(sfx_bytes.clone()).map_err(|e|
+                    crate::LucivyError::SystemError(format!("open SFX3: {e}")))?;
+                &owned_reader
+            }
+        };
         let pr = crate::query::posting_resolver::build_resolver(seg_reader, self.field)?;
 
         // Required literals + the real regex on rebuilt windows.
@@ -86,7 +101,7 @@ impl RegexQueryV3 {
         let gmap_bytes = load("gmap");
         let gmap = gmap_bytes.as_ref().and_then(|b| crate::suffix_fst::gmap::GmapReader::open(b));
         let ctx = crate::suffix_fst::briques::context::BriquesContext {
-            reader: &reader,
+            reader,
             resolver: &*pr,
             filter_docs: seg_reader.doc_filter().map(|b| b as &dyn crate::query::posting_resolver::DocFilter),
             debug: false,

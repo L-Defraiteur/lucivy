@@ -61,8 +61,24 @@ strict_separators: bool,
     use crate::suffix_fst::briques::{orchestrator, context::BriquesContext};
 
     let t_open = std::time::Instant::now();
-    let reader = SfxFileReaderV3::open_owned(sfx_bytes.clone()).map_err(|e|
-        crate::LucivyError::SystemError(format!("open SFX3: {e}")))?;
+    // A dictionary segment uses the shard's reader, shared by every segment
+    // and memoizing the FST walks; the others open their own.
+    let owned_reader;
+    let view;
+    let reader: &SfxFileReaderV3 = match seg_reader.sfx_dictionary_field(field) {
+        Some(f) => {
+            view = match seg_reader.sfx_index_file("gmap", field).and_then(|g| g.read_bytes().ok()) {
+                Some(gmap) => f.sfx_reader().for_segment(gmap),
+                None => f.sfx_reader().for_segment(common::OwnedBytes::empty()),
+            };
+            &view
+        },
+        None => {
+            owned_reader = SfxFileReaderV3::open_owned(sfx_bytes.clone()).map_err(|e|
+                crate::LucivyError::SystemError(format!("open SFX3: {e}")))?;
+            &owned_reader
+        }
+    };
     let ns_sfx = t_open.elapsed().as_nanos() as u64;
     let t_open = std::time::Instant::now();
     let pr = crate::query::posting_resolver::build_resolver(seg_reader, field)?;
@@ -104,7 +120,7 @@ strict_separators: bool,
     }
     let t_open = std::time::Instant::now();
     let ctx = BriquesContext {
-        reader: &reader,
+        reader,
         resolver: &*pr,
         filter_docs: seg_reader.doc_filter().map(|b| b as &dyn crate::query::posting_resolver::DocFilter),
         debug: do_debug,

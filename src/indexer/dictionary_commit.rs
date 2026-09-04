@@ -82,7 +82,7 @@ pub(crate) fn fold_new_texts(shared: &Arc<SegmentUpdaterShared>) -> crate::Resul
         let mut texts = TermTextsWriterV3::new();
         let mut builder = SuffixFstBuilderV3::new();
         builder.set_max_ordinal(u32::MAX as u64);
-        let mut feed = |global: u32, text: &str, m: TermMetaV3, texts: &mut TermTextsWriterV3, builder: &mut SuffixFstBuilderV3| {
+        let feed = |global: u32, text: &str, m: TermMetaV3, texts: &mut TermTextsWriterV3, builder: &mut SuffixFstBuilderV3| {
             texts.add(global, text, m);
             if m.is_word_stripped {
                 let content_len = text.len().saturating_sub(m.overlap_len as usize);

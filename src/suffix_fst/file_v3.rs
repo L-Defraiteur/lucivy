@@ -116,6 +116,54 @@ impl std::fmt::Display for SfxV3Error {
 
 impl std::error::Error for SfxV3Error {}
 
+/// Results of the FST-only briques (`fst_candidates_v3`, the falling walks,
+/// the FST chains) keyed by their arguments, for a reader shared by every
+/// segment of a shard: on a dictionary index (`sfx_version` 4) all the
+/// segments walk the same FST for the same query, so the first walk
+/// answers for all — 160 segments used to mean 160 walks of the whole
+/// shard's dictionary. Bounded: the map is emptied past `MEMO_MAX_ENTRIES`.
+///
+/// Concurrent misses on one key compute once: the map hands out a cell
+/// per key, and `OnceLock::get_or_init` makes the other callers wait.
+pub struct FstMemo {
+    entries: std::sync::Mutex<std::collections::HashMap<(u8, Vec<u8>, u8), std::sync::Arc<std::sync::OnceLock<std::sync::Arc<dyn std::any::Any + Send + Sync>>>>>,
+}
+
+const MEMO_MAX_ENTRIES: usize = 4096;
+
+impl Default for FstMemo {
+    fn default() -> Self { Self::new() }
+}
+
+impl FstMemo {
+    /// An empty memo.
+    pub fn new() -> Self {
+        Self { entries: std::sync::Mutex::new(std::collections::HashMap::new()) }
+    }
+
+    /// The value under `(tag, query, flags)`, computed by `f` on the first
+    /// call and shared afterwards.
+    pub fn get_or_compute<T: std::any::Any + Send + Sync + 'static>(
+        &self,
+        tag: u8,
+        query: &[u8],
+        flags: u8,
+        f: impl FnOnce() -> T,
+    ) -> std::sync::Arc<T> {
+        let cell = {
+            let mut map = self.entries.lock().unwrap();
+            if map.len() >= MEMO_MAX_ENTRIES {
+                map.clear();
+            }
+            map.entry((tag, query.to_vec(), flags))
+                .or_insert_with(|| std::sync::Arc::new(std::sync::OnceLock::new()))
+                .clone()
+        };
+        let value = cell.get_or_init(|| std::sync::Arc::new(f()) as std::sync::Arc<dyn std::any::Any + Send + Sync>);
+        value.clone().downcast::<T>().expect("memo entry of another type under this tag")
+    }
+}
+
 /// Reads a .sfx v3 file.
 pub struct SfxFileReaderV3 {
     /// FST over an Arc-backed slice of the file: opening is O(1) and copies
@@ -126,6 +174,14 @@ pub struct SfxFileReaderV3 {
     parent_list_data: common::OwnedBytes,
     /// Container version: 3 to 6, or 8 (see the module doc).
     version: u8,
+    /// Shared results of the FST briques (`FstMemo`); set on a reader that
+    /// serves several segments.
+    memo: Option<std::sync::Arc<FstMemo>>,
+    /// On a dictionary index, the `.gmap` of the segment this reader is
+    /// answering for: the shard-wide candidates and splits the memo holds
+    /// are cut down to the ids this segment has before any posting is
+    /// looked up (a segment of 64 documents holds 1 % of the shard's ids).
+    segment_gmap: Option<common::OwnedBytes>,
 }
 
 impl SfxFileReaderV3 {
@@ -172,7 +228,35 @@ impl SfxFileReaderV3 {
         }
         let version = version.max(LEGACY_PARENTS_VERSION);
 
-        Ok(Self { fst, parent_list_data, version })
+        Ok(Self { fst, parent_list_data, version, memo: None, segment_gmap: None })
+    }
+
+    /// Share the FST briques' results across this reader's users.
+    pub fn with_memo(mut self, memo: std::sync::Arc<FstMemo>) -> Self {
+        self.memo = Some(memo);
+        self
+    }
+
+    /// The memo, when this reader is shared (see `FstMemo`).
+    pub fn memo(&self) -> Option<&FstMemo> {
+        self.memo.as_deref()
+    }
+
+    /// A view of this reader for one segment: the same FST and memo, the
+    /// candidates and splits filtered to the ids in `gmap`.
+    pub fn for_segment(&self, gmap: common::OwnedBytes) -> Self {
+        Self {
+            fst: self.fst.clone(),
+            parent_list_data: self.parent_list_data.clone(),
+            version: self.version,
+            memo: self.memo.clone(),
+            segment_gmap: Some(gmap),
+        }
+    }
+
+    /// The segment's `.gmap` when this is a per-segment view.
+    pub fn segment_gmap(&self) -> Option<super::gmap::GmapReader<'_>> {
+        self.segment_gmap.as_ref().and_then(|b| super::gmap::GmapReader::open(b))
     }
 
     /// Container version this file was written with (3 to 6, or 8).

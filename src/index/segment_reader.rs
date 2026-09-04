@@ -50,6 +50,8 @@ pub struct SegmentReader {
     doc_filter_opt: Option<AliveBitSet>,
     schema: Schema,
     sfx_files: FnvHashMap<Field, FileSlice>,
+    /// The shard dictionary serving this segment (`sfx_version` 4).
+    sfx_dictionary: Option<std::sync::Arc<crate::suffix_fst::dictionary::SfxDictionary>>,
     sfxpost_files: FnvHashMap<Field, FileSlice>,
     posmap_files: FnvHashMap<Field, FileSlice>,
     bytemap_files: FnvHashMap<Field, FileSlice>,
@@ -156,6 +158,12 @@ impl SegmentReader {
     /// Access a pre-loaded .sfx file for the given field, if one exists.
     pub fn sfx_file(&self, field: Field) -> Option<&FileSlice> {
         self.sfx_files.get(&field)
+    }
+
+    /// The shard dictionary's files for `field`, on a dictionary index: the
+    /// FST reader there is shared by every segment (and memoizes its walks).
+    pub fn sfx_dictionary_field(&self, field: Field) -> Option<&crate::suffix_fst::dictionary::DictionaryField> {
+        self.sfx_dictionary.as_ref().and_then(|d| d.field(field.field_id()))
     }
 
     /// Fields of this segment that carry a `.sfx` file.
@@ -333,10 +341,18 @@ impl SegmentReader {
 
         let (sfx_files, sfxpost_files, posmap_files, bytemap_files, registry_files) = load_sfx_files(segment, &schema);
 
+        let sfx_dictionary = if segment.index().settings().sfx_version
+            == crate::suffix_fst::dictionary::DICTIONARY_SFX_VERSION
+        {
+            segment.index().sfx_dictionary()
+        } else {
+            None
+        };
         Ok(SegmentReader {
             inv_idx_reader_cache: Default::default(),
             num_docs,
             max_doc,
+            sfx_dictionary,
             termdict_composite,
             postings_composite,
             fast_fields_readers,

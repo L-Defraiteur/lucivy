@@ -164,6 +164,7 @@ impl SfxDictionary {
             if let (Ok(sfx), Ok(termtexts)) = (sfx, termtexts) {
                 let (Ok(sfx_bytes), Ok(termtexts_bytes)) = (sfx.read_bytes(), termtexts.read_bytes()) else { continue };
                 let Ok(sfx_reader) = SfxFileReaderV3::open_owned(sfx_bytes) else { continue };
+                let sfx_reader = sfx_reader.with_memo(Arc::new(super::file_v3::FstMemo::new()));
                 fields.insert(field_id, DictionaryField { sfx, termtexts, sfx_reader, termtexts_bytes });
             }
         }
