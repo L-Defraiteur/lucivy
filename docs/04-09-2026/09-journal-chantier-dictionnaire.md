@@ -461,12 +461,37 @@ au niveau du shard — la marche est faite une fois, mais sur un seul thread
 (la mémo sérialise ce qu'un segment demande le premier), là où l'index v3
 répartissait le même CPU sur 24 threads. `max` par segment ≈ mur.
 
-**À faire (prochain pas de la requête)** : paralléliser le calcul froid —
-un nœud « prescan du dictionnaire » par shard dans le DAG de recherche,
-avec une tâche par pièce ou n-gramme (le fuzzy en demande dix à trente),
-avant les nœuds par segment ; ou, plus simplement, une pré-passe dans
-`fuzzy_v3` qui soumet les `fst_candidates_v3` des pièces au scheduler.
-Objectif : fz1 sous 10 ms, term sous 4.
+**Le calcul froid, deuxième passe** (commit suivant). Ce qui coûtait : les
+vingt à trente scans de plage que `resolve_pieces` fait pour **tarifer**
+ses pièces (toutes les sous-chaînes d'au moins 2 octets), décodés et triés
+en entier. Fait : (1) `fst_candidates_count_v3` compte sans décoder
+(`count_parent_entries_v8` lit les en-têtes de record, saute les groupes
+par leur longueur) et la tarification ne lit que ça ; (2) les cellules de
+mémo sont **par partition** (tag 1 = candidats triés, tag 6 = compte),
+calculées en ligne par le premier demandeur et **sans jamais attendre** ;
+(3) le parallélisme vient de pré-calculs dans `composite` :
+`prefetch_fuzzy_scans` soumet une tâche par (sous-chaîne, partition) pour
+les comptes, puis `resolve_pieces` une par (pièce retenue, partition)
+pour les listes, et attend en coopératif.
+
+**La leçon d'interblocage** : une première version faisait le calcul par
+partition *dans* la cellule (`OnceLock::get_or_init` soumettant des tâches
+et attendant en coopératif). L'attente coopérative pompe une autre tâche —
+un prescan qui demande la même cellule et attend son calculateur, qui est
+le thread courant, plus bas dans la pile. Dix minutes de suite bloquée.
+Règle : **une cellule de mémo ne doit jamais attendre** ; ce qui doit être
+parallèle est soumis en tâches qui calculent des cellules en ligne.
+
+**Où on en est** (référence 10 000, ms ; index v3 entre parenthèses) :
+fz1 froid 45 / chaud 8,3 (5,6) ; fz2 froid 110 / chaud 60 (42) ; term 6,5
+(3,2) ; sw 7,5 (2,7) ; strict / relax / spin 2,5-3,3 (2,7-3,2). Le froid
+reste : soixante scans moyens sur le dictionnaire entier, là où l'index
+par segment en faisait trois mille petits sur vingt-quatre threads ; le
+chemin critique est le plus long scan (un préfixe de deux octets sur
+2,4 M de textes) plus l'enchaînement comptes → choix → listes → résolution.
+Pour aller plus loin : découper un scan par octet suivant, ou garder les
+comptes des préfixes courts dans le dictionnaire lui-même. Laissé là : la
+taille d'abord, et à chaud on est à ×1,4.
 
 **Ce que ça corrige dans les documents antérieurs** : [06](06-chantier-dictionnaire-partage-rapport.md)
 §2.1 (« une requête : prescan sur chaque génération vivante ») décrivait
