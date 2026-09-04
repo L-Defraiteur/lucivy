@@ -210,6 +210,20 @@ et le thread appelant ne doit pas tenir GIL / boucle d'événements.
 
 Emscripten manque : export_snapshot, export_sharded_delta, apply_sharded_delta.
 
+**Dictionnaire partagé exposé partout** (5 septembre au soir, branche `v4`) :
+`shared_dictionary` dans `SchemaConfig` (alias de `sfx_version` 4,
+`effective_sfx_version()`, contradiction refusée) — Python
+`Index.create(..., shared_dictionary=True)` et `create_with_blob_store`,
+Node `Index.create(path, fields, shards, sharedDictionary)` et
+`BlobIndexOptions.sharedDictionary`, C++ `lucivy_create` accepte un objet
+schéma complet (comme le chemin blob), emscripten `IndexConfig.shared_dictionary`,
+bridge rag3db : le JSON de schéma tel quel. Décrit dans chaque README, le
+CHANGELOG (« Unreleased ») et `lucivy_core/README.md`. **Pas le défaut**
+(décision du 5 septembre). **Prochain chantier** : la compaction du
+dictionnaire (au-delà de 8 générations) est naïve — tous les textes en
+RAM, tout retrié par le builder ; à refaire en fusion de flux de FST
+triées (`11` §8), après l'avoir mesurée sur le noyau.
+
 ## Extension rag3db (lucivy_fts)
 
 - `lucivy_fts/rust/src/bridge.rs` — bridge CXX Rust (dans ce repo)

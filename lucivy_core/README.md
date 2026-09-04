@@ -30,7 +30,12 @@ let config: SchemaConfig = serde_json::from_value(serde_json::json!({
         { "name": "content", "type": "text" },
         { "name": "stars",   "type": "u64", "fast": true }
     ],
-    "shards": 4
+    "shards": 4,
+    // One dictionary per shard instead of one per segment: about 20 % less
+    // disk and RAM, queries slightly slower at cold cache (roughly x1.2 to
+    // x1.6 on exact queries, fuzzy ones faster), same answers. Off by
+    // default; fixed at creation.
+    "shared_dictionary": false
 }))?;
 
 let index = ShardedHandle::create("/tmp/my_index", &config)?;
@@ -112,6 +117,20 @@ short query, a regex with no usable literal that has to scan.
 
 `index.search_filtered(&query, limit, None, allowed_ids)` (a `HashSet<u64>`)
 pre-filters by document id and only wakes the shards that hold those ids.
+
+## A smaller index: the shared dictionary
+
+`"shared_dictionary": true` at creation (`sfx_version` 4) stores each
+distinct token text once per shard instead of once per segment: the suffix
+FST, the texts and the sibling table live in per-shard *generations*
+(`dict-<g>.*`, one per commit, compacted past `LUCIVY_DICT_MAX_GENERATIONS`
+= 8), and a segment keeps only its postings and position maps plus a
+`.gmap` naming its ids. Measured on the Linux kernel: −20 % on 30 000 files
+(1 659 → 1 327 MB), −23 % on 93 983 (7.3 → 5.6 GB); counts, spans and
+scores identical to the default; queries ×0.8 to ×1.6 at cold cache (the
+FST phase of a query is planned once per shard, in parallel, before the
+segments resolve their postings). A commit also writes the shard's new
+texts. Off by default.
 
 ## Sharding and distribution
 

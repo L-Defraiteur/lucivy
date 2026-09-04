@@ -61,6 +61,12 @@ index = lucivy.Index.create("/tmp/my_index", fields=[
 # Create a sharded index (4 shards)
 index = lucivy.Index.create("/tmp/my_index", fields=[...], shards=4)
 
+# Smaller index: one dictionary per shard instead of one per segment.
+# About 20 % less disk and RAM; queries slightly slower at cold cache
+# (roughly x1.2 to x1.6 on exact queries, fuzzy ones faster); same answers.
+# Fixed at creation.
+index = lucivy.Index.create("/tmp/compact", fields=[...], shared_dictionary=True)
+
 # Open an existing index
 index = lucivy.Index.open("/tmp/my_index")
 ```

@@ -367,6 +367,91 @@ ancrées (première position d'une chaîne, donc explicites) coupées par
 segment — `anchored fst` 10 ms de CPU sur `mutex_lock strict` — et la
 fenêtre regex elle-même, identique en v3.
 
+## 7. La décision, l'option, et la vérité terrain sur le noyau (5 septembre, soir)
+
+**Décision de Lucie** : le dictionnaire n'est **pas le défaut**, mais une
+option facile à poser partout, avec une description qui dit ce qu'elle
+fait — *réduit la taille disque et RAM d'environ 20 %, requêtes un peu
+plus lentes à froid (×1,2 à ×1,6 sur les exactes, plus rapides en fuzzy),
+mêmes réponses, fixée à la création*.
+
+**L'option** : `shared_dictionary` dans `SchemaConfig` (alias de
+`sfx_version` 4 : `effective_sfx_version()`, une contradiction entre les
+deux clés est refusée, la clé est connue de `from_stored_json`). Exposée :
+Python `Index.create(path, fields, shards=None, shared_dictionary=False)` et
+`create_with_blob_store(..., shared_dictionary=False)` ; Node
+`Index.create(path, fields, shards?, sharedDictionary?)` et
+`BlobIndexOptions.sharedDictionary` (`index.d.ts` mis à jour à la main,
+comme napi le générerait) ; C++ `lucivy_create` accepte maintenant un
+objet schéma complet comme le chemin blob (`parse_schema_config`), un
+`shards` > 1 prime ; emscripten `IndexConfig.shared_dictionary` (`lucivy.d.ts`,
+JSDoc de `create`, README) ; bridge rag3db : le JSON de schéma tel quel.
+Décrite dans chaque README, `lucivy_core/README.md` (section « A smaller
+index »), le README racine, le CHANGELOG (« Unreleased », avec le format v4
+de la branche), `IndexSettings::sfx_version`. Tests : `TestSharedDictionary`
+(Python, mêmes réponses que l'index par défaut sur deux shards et plusieurs
+commits, réouverture) et `tests/shared_dictionary.mjs` (Node, idem avec
+spans) — pas de `maturin` ni `napi` sur cette machine, ils tournent en CI.
+
+**Vérité terrain, mode dictionnaire** (`V3_SFX_VERSION=4`) :
+`test_fuzzy_ground_truth` et `test_regex_ground_truth` (le dépôt lui-même,
+comptes et spans contre le disque) acceptent la variable maintenant :
+verts. Le noyau entier, index reconstruit au format courant
+(`idx90k-dict2`, GMP2, 5,6 Go) : panel `v3_ground_truth_demo` **9/9**,
+puis **tout `test_sfx_v3_ground_truth.rs`** sur les 93 983 fichiers
+(`--include-ignored`, un thread) : §7.1.
+
+### 7.1 La vérité terrain sur 90 000, dictionnaire
+
+Première tentative : **tout** `test_sfx_v3_ground_truth.rs` avec
+`V3_MAX_DOCS=100000 --include-ignored` — erreur : `V3_MAX_DOCS` vaut pour
+chaque test, et les bancs de forme (`perf_shape_*`, `v3_distributed_*`,
+`v3_sharded_filter_delete_delta`) reconstruisent **chacun** un index de
+94 000 fichiers en RAM ; la machine s'est mise à genoux, l'éditeur de
+Lucie a été tué. Noté dans [08](08-knowledge-dump-baselines-tests-outils.md)
+§6 bis. Relancé proprement, un test à la fois, sur l'index disque
+réutilisé (`idx90k-dict2`, GMP2) :
+
+| test | corpus | résultat |
+|---|---|---|
+| `v3_ground_truth_demo` (panel 10, comptes et spans contre le disque) | 93 983 | 9/9 |
+| `v3_ground_truth_contains` | 93 983 | **15 pass, 0 fail** (66 s) |
+| `v3_ground_truth_coherence` (panel de 21 littéraux longs, strict et relâché) | 93 983 | **31 pass, 0 fail** (217 s) |
+| `v3_distributed_two_nodes` | 3 000 | vert |
+| `v3_distributed_coherence` | 3 000 | vert |
+| `v3_sharded_filter_delete_delta` | 3 000 | vert |
+| `test_fuzzy_ground_truth`, `test_regex_ground_truth` | le dépôt | verts |
+
+Avec les variantes `sfx_version 4` de fédéré, filtré et roundtrip LUCE, et
+`test_dictionary_index`, c'est toute la vérité terrain du dépôt qui tient
+en mode dictionnaire, sur le noyau entier au format courant.
+
+## 8. Prochain chantier : la compaction du dictionnaire en flux
+
+Un commit n'écrit qu'une génération avec ses seuls textes nouveaux
+([09](09-journal-chantier-dictionnaire.md) §9) ; mais au-delà de
+`LUCIVY_DICT_MAX_GENERATIONS` (8) vivantes, la compaction est **naïve** :
+`DictionaryField::all_texts()` charge tous les textes des vivantes dans un
+`Vec` (22,5 M sur le noyau), et `write_generation` repasse chacun dans
+`SuffixFstBuilderV3`, qui regénère tous les suffixes et les **retrie** —
+le coût d'une construction complète, en RAM et en temps, tous les 8
+commits ; jamais chiffré isolément.
+
+Ce qu'il faut : une **fusion en flux**. Les N FST vivantes sont des flux
+de clés triées ; leur union (`OpBuilder::union` de la crate FST, portée
+par `lucivy_fst`) donne la FST compactée sans retrier, en fusionnant les
+records de parents (v8) des clés présentes dans plusieurs générations ;
+les `.termtexts` se concatènent par plages d'identifiants (section IDS).
+Rien en mémoire au-delà des flux — comme `sparse_vector::merge_segments`
+marche ses tables triées, et comme `merge_segments_dict` concatène déjà
+les postings sans réinterner. À mesurer avant : le temps et la RAM
+(`VmHWM` dans `/proc/self/status`, lu depuis le test — pas de
+`/usr/bin/time` sur la machine) d'une compaction sur le noyau, puis la
+même chose en flux. Où regarder : `indexer/dictionary_commit.rs`
+(`fold_new_texts`, `write_generation`), `suffix_fst/dictionary.rs`
+(`all_texts`, `compact`), `builder_v3.rs` (`encode_parent_record_v8`),
+`termtexts_v3.rs` (`with_ids`, `id_runs`).
+
 ## 5. Ce que les docs d'avant disaient de faux
 
 - [10](10-chantier-prescan-dictionnaire-rapport.md) §2 : « un nœud

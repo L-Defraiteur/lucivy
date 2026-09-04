@@ -296,7 +296,7 @@ impl Drop for Index {
 }
 
 /// `SchemaConfig` out of the Python field list, as `Index.create` takes it.
-fn schema_config(fields: &Bound<'_, PyList>, shards: Option<usize>) -> PyResult<query::SchemaConfig> {
+fn schema_config(fields: &Bound<'_, PyList>, shards: Option<usize>, shared_dictionary: bool) -> PyResult<query::SchemaConfig> {
     let mut field_defs = Vec::new();
     for item in fields.iter() {
         let dict: &Bound<'_, PyDict> = item.downcast()?;
@@ -323,6 +323,7 @@ fn schema_config(fields: &Bound<'_, PyList>, shards: Option<usize>) -> PyResult<
         tokenizer: None,
         sfx: None,
         shards,
+        shared_dictionary: shared_dictionary.then_some(true),
         ..Default::default()
     })
 }
@@ -335,6 +336,12 @@ impl Index {
     ///     path: Directory path for the index files.
     ///     fields: List of field definitions.
     ///     shards: Number of shards (default 1). More shards = faster search on large datasets.
+    ///     shared_dictionary: Store each distinct token text once per shard
+    ///         instead of once per segment. The index is about 20 % smaller
+    ///         on disk and in RAM; queries are slightly slower at cold cache
+    ///         (roughly x1.2 to x1.6 on exact queries, fuzzy ones faster) and
+    ///         a commit also writes the shard's new texts. Same answers as the
+    ///         default. Off by default; fixed at creation.
     ///
     /// Field types: ``"text"`` (full-text, tokenized), ``"u64"``, ``"i64"``, ``"f64"``, ``"bool"``, ``"date"``.
     ///
@@ -346,9 +353,9 @@ impl Index {
     ///         {"name": "score", "type": "f64", "fast": True},
     ///     ], shards=4)
     #[staticmethod]
-    #[pyo3(signature = (path, fields, shards=None))]
-    fn create(py: Python<'_>, path: &str, fields: &Bound<'_, PyList>, shards: Option<usize>) -> PyResult<Self> {
-        let config = schema_config(fields, shards)?;
+    #[pyo3(signature = (path, fields, shards=None, shared_dictionary=false))]
+    fn create(py: Python<'_>, path: &str, fields: &Bound<'_, PyList>, shards: Option<usize>, shared_dictionary: bool) -> PyResult<Self> {
+        let config = schema_config(fields, shards, shared_dictionary)?;
         let handle = py.allow_threads(|| ShardedHandle::create(path, &config))
             .map_err(|e| PyValueError::new_err(e))?;
 
@@ -401,6 +408,8 @@ impl Index {
     ///     lazy: Pull files from the store on first read instead of all at
     ///         open. Needs ``blob_len`` on the store to be effective;
     ///         ``load_range`` lets small probes skip the download entirely.
+    ///     shared_dictionary: As for ``create()``: one dictionary per shard,
+    ///         about 20 % smaller, slightly slower queries.
     ///
     /// Example::
     ///
@@ -408,7 +417,7 @@ impl Index {
     ///         {"name": "title", "type": "text", "stored": True},
     ///     ])
     #[staticmethod]
-    #[pyo3(signature = (store, index_name, fields, shards=1, cache_dir=None, lazy=false))]
+    #[pyo3(signature = (store, index_name, fields, shards=1, cache_dir=None, lazy=false, shared_dictionary=false))]
     fn create_with_blob_store(
         py: Python<'_>,
         store: &Bound<'_, PyAny>,
@@ -417,8 +426,9 @@ impl Index {
         shards: usize,
         cache_dir: Option<&str>,
         lazy: bool,
+        shared_dictionary: bool,
     ) -> PyResult<Self> {
-        let config = schema_config(fields, Some(shards))?;
+        let config = schema_config(fields, Some(shards), shared_dictionary)?;
         let storage = blob_storage(store, index_name, cache_dir, lazy)?;
         let handle = py.allow_threads(|| ShardedHandle::create_with_storage(storage, &config))
             .map_err(|e| PyValueError::new_err(e))?;

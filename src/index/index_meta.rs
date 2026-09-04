@@ -298,10 +298,12 @@ pub struct IndexSettings {
     #[serde(default = "return_true")]
     #[serde(skip_serializing_if = "is_true")]
     pub sfx_enabled: bool,
-    /// SFX version: 2 (legacy, sibling table + gapmap) or 3 (overlap +
-    /// word-stripped, the documented engine). New segments are built with this
-    /// version; existing segments keep theirs and the query layer detects the
-    /// version from the file magic.
+    /// SFX version: 2 (legacy, sibling table + gapmap), 3 (overlap +
+    /// word-stripped, the documented engine, a suffix FST per segment) or 4
+    /// (the same engine with one dictionary per shard, `suffix_fst::dictionary`;
+    /// `shared_dictionary` in the schema config). New segments are built with
+    /// this version; existing segments keep theirs and the query layer detects
+    /// the version from the file magic.
     ///
     /// New indexes default to 3 (`Default`). A meta.json WITHOUT the field was
     /// written by a version that omitted it for v2, so the serde default stays

@@ -83,6 +83,11 @@ export interface BlobIndexOptions {
   lazy?: boolean
   /** `create()` only: number of shards (default 1). */
   shards?: number
+  /**
+   * `create()` only: one dictionary per shard instead of one per segment
+   * (about 20 % smaller, slightly slower queries) — see `Index.create()`.
+   */
+  sharedDictionary?: boolean
 }
 export declare class Index {
   /**
@@ -92,8 +97,14 @@ export declare class Index {
    * @param fields - Field definitions: `[{name: "body", type: "text", stored: true}]`.
    *   Types: `"text"` (full-text), `"u64"`, `"i64"`, `"f64"`, `"bool"`, `"date"`.
    * @param shards - Number of shards (default 1). More shards = faster search on large datasets.
+   * @param sharedDictionary - Store each distinct token text once per shard
+   *   instead of once per segment: the index is about 20 % smaller on disk
+   *   and in RAM, queries are slightly slower at cold cache (roughly x1.2
+   *   to x1.6 on exact queries, fuzzy ones faster) and a commit also writes
+   *   the shard's new texts. Same answers as the default. Off by default;
+   *   fixed at creation.
    */
-  static create(path: string, fields: Array<FieldDef>, shards?: number | undefined | null): Index
+  static create(path: string, fields: Array<FieldDef>, shards?: number | undefined | null, sharedDictionary?: boolean | undefined | null): Index
   /**
    * Open an existing index at the given path.
    *
@@ -404,7 +415,7 @@ export declare class BlobIndex {
    * @param store - Object implementing the store protocol (`load`, `save`, `delete`, `exists`, `list`, optional `blobLen` / `loadRange`).
    * @param indexName - Name of the index inside the store.
    * @param fields - Field definitions, as for `Index.create()`.
-   * @param options - `{cacheDir?, lazy?, shards?}`.
+   * @param options - `{cacheDir?, lazy?, shards?, sharedDictionary?}`.
    */
   static create(store: BlobStoreCallbacks, indexName: string, fields: Array<FieldDef>, options?: BlobIndexOptions | undefined | null): Promise<BlobIndex>
   /**

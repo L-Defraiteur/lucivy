@@ -179,6 +179,18 @@ Same contract in Node.js (`BlobIndex`, asynchronous) and C++ (`lucivy::BlobBacke
 The store's methods run on lucivy's own threads: thread-safe, and never calling
 back into the index.
 
+### Smaller on disk: the shared dictionary
+
+```python
+# One dictionary per shard instead of one per segment: about 20 % less disk
+# and RAM, queries slightly slower at cold cache (x1.2 to x1.6 on exact
+# queries, fuzzy ones faster), same answers. Fixed at creation, off by default.
+index = lucivy.Index.create("/tmp/compact", fields=[...], shared_dictionary=True)
+```
+
+Node: `Index.create(path, fields, shards, true)`; browser and C++: `shared_dictionary: true`
+in the config object.
+
 ### Sharded, distributed, synchronised
 
 ```python

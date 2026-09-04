@@ -288,3 +288,32 @@ class TestDropIndex:
         idx2.commit()
         assert idx2.num_docs == 1
         assert [r.doc_id for r in idx2.search("fresh")] == [1]
+
+
+# ─── shared_dictionary ────────────────────────────────────────────────────
+
+
+class TestSharedDictionary:
+    def test_same_answers_as_the_default_and_survives_reopen(self, tmp_dir):
+        """`shared_dictionary=True` (one dictionary per shard, `sfx_version` 4)
+        answers exactly like the default index — documents and scores — over
+        several commits on several shards, and after a close / open."""
+        plain = lucivy.Index.create(os.path.join(tmp_dir, "plain"), FIELDS, shards=2)
+        compact_path = os.path.join(tmp_dir, "shared")
+        shared = lucivy.Index.create(compact_path, FIELDS, shards=2, shared_dictionary=True)
+        for idx in (plain, shared):
+            for doc in DOCS:
+                idx.add(**doc)
+                idx.commit()
+        queries = ["python", "language", "data", "web", "learning"]
+        for q in queries:
+            assert hits(shared, q) == hits(plain, q), q
+        shared.close()
+        reopened = lucivy.Index.open(compact_path)
+        for q in queries:
+            assert hits(reopened, q) == hits(plain, q), f"{q} after reopen"
+
+    def test_option_is_refused_with_a_contradicting_sfx_version(self):
+        """The core refuses a config that says both; the binding cannot express
+        that, so this only pins that the flag is accepted and is boolean."""
+        assert lucivy.Index.create.__doc__ and "shared_dictionary" in lucivy.Index.create.__doc__

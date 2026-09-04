@@ -44,6 +44,13 @@ for (const auto& r : results) {
 // Supported types: "text", "u64", "i64", "f64", "bool", "date"
 auto index = lucivy::lucivy_create(path, fields_json, shards);
 
+// Or a full schema object. "shared_dictionary": one dictionary per shard
+// instead of one per segment — about 20 % less disk and RAM, queries
+// slightly slower at cold cache (roughly x1.2 to x1.6 on exact queries,
+// fuzzy ones faster), same answers. Fixed at creation.
+auto compact = lucivy::lucivy_create(path,
+    R"({"fields":[{"name":"body","type":"text"}],"shards":2,"shared_dictionary":true})", 1);
+
 // Open an existing index
 auto index = lucivy::lucivy_open(path);
 
@@ -286,7 +293,8 @@ public:
 
 ```cpp
 // Create: config_json is either the fields array of lucivy_create(), or a
-// full schema object with the shard count and engine options.
+// full schema object with the shard count and engine options
+// ("shared_dictionary": true for the smaller, per-shard dictionary).
 auto index = lucivy::lucivy_create_with_blob_store(
     std::make_unique<MyBackend>(connection_string),
     "products",                                           // index_name

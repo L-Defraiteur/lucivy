@@ -303,7 +303,17 @@ export interface FieldDef {
 
 export interface IndexConfig {
   fields: FieldDef[];
+  /** Number of shards (default 1). */
   shards?: number;
+  /**
+   * Store each distinct token text once per shard instead of once per
+   * segment: about 20 % smaller on disk and in memory, queries slightly
+   * slower at cold cache (roughly x1.2 to x1.6 on exact queries, fuzzy ones
+   * faster), a commit also writes the shard's new texts. Same answers.
+   * Off by default; fixed at creation.
+   */
+  shared_dictionary?: boolean;
+  /** Engine version: 3 (default), 4 (= `shared_dictionary: true`), 2 (pre-3.0). */
   sfx_version?: number;
   [key: string]: unknown;
 }

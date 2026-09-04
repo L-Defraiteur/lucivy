@@ -92,6 +92,10 @@ const index = await lucivy.create('/my-index', {
         { name: 'body', type: 'text' },
     ],
     shards: 4,
+    // shared_dictionary: true — one dictionary per shard instead of one per
+    // segment: about 20 % less OPFS and memory, queries slightly slower at
+    // cold cache (roughly x1.2 to x1.6 on exact queries, fuzzy ones faster),
+    // same answers. Fixed at creation. Off by default.
 });
 
 // Open an existing index from OPFS

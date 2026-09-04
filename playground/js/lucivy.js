@@ -100,7 +100,12 @@ export class Lucivy {
      * Create a new index.
      * @param {string} path
      * @param {Array|Object} fieldsOrConfig — either a fields array or a full SchemaConfig
-     *   Full config: { fields: [...], sfx: false, tokenizer: "english", ... }
+     *   Full config: { fields: [...], shards: 4, shared_dictionary: false, tokenizer: "english", ... }
+     *   shared_dictionary: store each distinct token text once per shard instead of
+     *   once per segment — about 20 % smaller on disk and in memory, queries
+     *   slightly slower at cold cache (roughly x1.2 to x1.6 on exact queries,
+     *   fuzzy ones faster), a commit also writes the shard's new texts; same
+     *   answers. Off by default, fixed at creation.
      *   Legacy: [{ name: "body", type: "text" }]
      */
     async create(path, fieldsOrConfig) {

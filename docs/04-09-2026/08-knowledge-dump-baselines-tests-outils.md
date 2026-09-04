@@ -232,6 +232,19 @@ Tests ajoutés aujourd'hui, à connaître : `packed_and_legacy_records_decode_to
   `cargo test -p lucivy-core` complète n'a pas été relancée après le
   dictionnaire (la lib et le test de bout en bout, si) ; pas d'A/B 30 000
   en mode dictionnaire.
+- **Piège RAM (5 septembre au soir)** : ne jamais lancer **tout**
+  `test_sfx_v3_ground_truth.rs` avec `V3_MAX_DOCS=100000` — `V3_MAX_DOCS`
+  s'applique à chaque test, et `perf_shape_executor`, `perf_shape_sharded`,
+  `v3_distributed_*`, `v3_sharded_filter_delete_delta` reconstruisent
+  **chacun leur propre index de 94 000 fichiers en RAM** (des bancs de
+  forme, pas des vérités), en plus des index mmappés en cache : la machine
+  s'est mise à genoux et l'éditeur a été tué. Les vérités terrain sont
+  `v3_ground_truth_demo`, `v3_ground_truth_contains`,
+  `v3_ground_truth_coherence` — à lancer **un par un** (`-- --exact`) avec
+  `V3_INDEX_DIR` sur l'index disque réutilisé ; les distribués à leur
+  taille par défaut (3 000). `fuzzy_finds_an_occurrence_that_straddles_tokens`
+  **écrase** `V3_INDEX_DIR` avec son petit index : pas de `V3_INDEX_DIR`
+  pour lui.
 - **Index du scratchpad** : `idx-dict` (référence 10 000 en une
   génération, v1), `idx-dict2` (générations incrémentales, 4 vivantes),
   `idx30k-dict` (1,33 Go), `idx90k-dict` (5,98 Go, le noyau entier),

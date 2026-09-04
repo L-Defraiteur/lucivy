@@ -126,7 +126,14 @@ mod ffi {
         // fields_json: JSON array of field definitions, e.g.
         //   [{"name":"body","type":"text","stored":true}, {"name":"score","type":"f64","fast":true}]
         // Supported types: "text" (full-text tokenized), "u64", "i64", "f64", "bool", "date".
-        // shards: number of shards (1 = single-shard). More shards = faster search on large datasets.
+        // — or a full schema object {"fields":[...],"shards":2,"shared_dictionary":true,...}.
+        // shards: number of shards (1 = single-shard). More shards = faster search on large datasets;
+        //   with a schema object, a value above 1 overrides the object's "shards".
+        // "shared_dictionary": true stores each distinct token text once per shard
+        //   instead of once per segment — about 20 % smaller on disk and in RAM,
+        //   queries slightly slower at cold cache (roughly x1.2 to x1.6 on exact
+        //   queries, fuzzy ones faster), a commit also writes the shard's new
+        //   texts; same answers. Off by default, fixed at creation.
         fn lucivy_create(path: &str, fields_json: &str, shards: u32) -> Result<Box<LucivyIndex>>;
 
         // Open an existing index at `path`. Reads persisted schema and segment metadata.
@@ -152,7 +159,7 @@ mod ffi {
         // only holds a disposable mmap cache of the blobs (empty string: a
         // fresh temporary directory, removed when the index is destroyed).
         // config_json: either the fields array of lucivy_create(), or a full
-        // schema object {"fields":[...],"shards":2,"sfx_version":3,...}.
+        // schema object {"fields":[...],"shards":2,"shared_dictionary":true,...}.
         // lazy: pull each blob on its first read instead of at open (needs
         // blob_len()/load_range() in the backend to pay off).
         // The backend must be thread-safe: its methods run concurrently on
@@ -675,15 +682,12 @@ impl LucivyIndex {
 // ── Lifecycle ──────────────────────────────────────────────────────────────
 
 fn lucivy_create(path: &str, fields_json: &str, shards: u32) -> Result<Box<LucivyIndex>, String> {
-    let fields: Vec<query::FieldDef> = serde_json::from_str(fields_json)
-        .map_err(|e| format!("invalid fields JSON: {e}"))?;
-
-    let config = query::SchemaConfig {
-        fields,
-        tokenizer: None,
-        shards: if shards > 1 { Some(shards as usize) } else { None },
-        ..Default::default()
-    };
+    // A fields array or a full schema object (`parse_schema_config`); the
+    // `shards` argument applies when above 1.
+    let mut config = parse_schema_config(fields_json)?;
+    if shards > 1 {
+        config.shards = Some(shards as usize);
+    }
 
     let handle = ShardedHandle::create(path, &config)?;
     Ok(LucivyIndex::wrap(handle, path, false))

@@ -119,9 +119,15 @@ impl Index {
     /// @param fields - Field definitions: `[{name: "body", type: "text", stored: true}]`.
     ///   Types: `"text"` (full-text), `"u64"`, `"i64"`, `"f64"`, `"bool"`, `"date"`.
     /// @param shards - Number of shards (default 1). More shards = faster search on large datasets.
+    /// @param sharedDictionary - Store each distinct token text once per shard
+    ///   instead of once per segment: the index is about 20 % smaller on disk
+    ///   and in RAM, queries are slightly slower at cold cache (roughly x1.2
+    ///   to x1.6 on exact queries, fuzzy ones faster) and a commit also writes
+    ///   the shard's new texts. Same answers as the default. Off by default;
+    ///   fixed at creation.
     #[napi(factory)]
-    pub fn create(path: String, fields: Vec<FieldDef>, shards: Option<u32>) -> Result<Self> {
-        let config = schema_config(&fields, shards);
+    pub fn create(path: String, fields: Vec<FieldDef>, shards: Option<u32>, shared_dictionary: Option<bool>) -> Result<Self> {
+        let config = schema_config(&fields, shards, shared_dictionary);
 
         let handle = ShardedHandle::create(&path, &config)
             .map_err(|e| Error::from_reason(e))?;
@@ -771,7 +777,7 @@ fn build_contains_split_multi_field(value: &str, text_fields: &[String], distanc
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-fn schema_config(fields: &[FieldDef], shards: Option<u32>) -> query::SchemaConfig {
+fn schema_config(fields: &[FieldDef], shards: Option<u32>, shared_dictionary: Option<bool>) -> query::SchemaConfig {
     let field_defs: Vec<query::FieldDef> = fields
         .iter()
         .map(|f| query::FieldDef {
@@ -787,6 +793,7 @@ fn schema_config(fields: &[FieldDef], shards: Option<u32>) -> query::SchemaConfi
         fields: field_defs,
         tokenizer: None,
         shards: shards.map(|s| s as usize),
+        shared_dictionary: shared_dictionary.filter(|&b| b),
         ..Default::default()
     }
 }
@@ -1061,6 +1068,9 @@ pub struct BlobIndexOptions {
     pub lazy: Option<bool>,
     /// `create()` only: number of shards (default 1).
     pub shards: Option<u32>,
+    /// `create()` only: one dictionary per shard instead of one per segment
+    /// (about 20 % smaller, slightly slower queries) — see `Index.create()`.
+    pub shared_dictionary: Option<bool>,
 }
 
 /// One argument of a store callback, built on the JS thread.
@@ -1466,7 +1476,7 @@ impl BlobIndex {
     /// @param store - Object implementing the store protocol (`load`, `save`, `delete`, `exists`, `list`, optional `blobLen` / `loadRange`).
     /// @param indexName - Name of the index inside the store.
     /// @param fields - Field definitions, as for `Index.create()`.
-    /// @param options - `{cacheDir?, lazy?, shards?}`.
+    /// @param options - `{cacheDir?, lazy?, shards?, sharedDictionary?}`.
     #[napi(ts_return_type = "Promise<BlobIndex>")]
     pub fn create(
         env: Env,
@@ -1477,7 +1487,7 @@ impl BlobIndex {
     ) -> Result<AsyncTask<BlobTask<BlobIndex>>> {
         let store = JsBlobStore::from_object(&env, store)?;
         let options = options.unwrap_or_default();
-        let config = schema_config(&fields, options.shards);
+        let config = schema_config(&fields, options.shards, options.shared_dictionary);
         Ok(blob_task(move || {
             let storage = blob_storage(store, &index_name, &options);
             let handle = ShardedHandle::create_with_storage(Box::new(storage), &config)

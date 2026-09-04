@@ -41,9 +41,19 @@ pub struct SchemaConfig {
     /// backwards compatibility with existing JSON configs.
     #[serde(default)]
     pub sfx: Option<bool>,
-    /// SFX version: 2 (default) or 3 (v3 with overlap tokenizer + word-stripped).
+    /// SFX version: 3 (default: a suffix FST per segment), 4 (a dictionary
+    /// shared by the segments of each shard — see `shared_dictionary`), or
+    /// 2 (the pre-3.0 engine).
     #[serde(default)]
     pub sfx_version: Option<u8>,
+    /// Store each distinct token text once per shard instead of once per
+    /// segment (`sfx_version` 4): the index is about 20 % smaller on disk
+    /// and in RAM, at the price of a slightly slower query (×1.2 to ×1.6 at
+    /// cold cache on 30 000 kernel files, the fuzzy ones faster) and of a
+    /// commit that also writes the shard's new texts. Same answers: counts,
+    /// spans and scores are identical to the default. Off by default.
+    #[serde(default)]
+    pub shared_dictionary: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -99,7 +109,31 @@ impl SchemaConfig {
                 return Err(format!("sfx_version must be 2, 3 or 4 (shared shard dictionary), got {v}"));
             }
         }
+        match (self.shared_dictionary, self.sfx_version) {
+            (Some(true), Some(v)) if v != 4 => {
+                return Err(format!("shared_dictionary: true means sfx_version 4, but sfx_version is {v}"));
+            }
+            (Some(false), Some(4)) => {
+                return Err("shared_dictionary: false contradicts sfx_version 4".into());
+            }
+            _ => {}
+        }
         Ok(())
+    }
+
+    /// The SFX version this config asks for: `sfx_version` when given,
+    /// else 4 under `shared_dictionary: true`, else 3.
+    pub fn effective_sfx_version(&self) -> u8 {
+        match (self.sfx_version, self.shared_dictionary) {
+            (Some(v), _) => v,
+            (None, Some(true)) => 4,
+            (None, _) => 3,
+        }
+    }
+
+    /// True when the index keeps one dictionary per shard (`sfx_version` 4).
+    pub fn uses_shared_dictionary(&self) -> bool {
+        self.effective_sfx_version() == 4
     }
 
     /// Parse a STORED `_config.json`, surviving keys written by other
@@ -111,7 +145,7 @@ impl SchemaConfig {
         let mut v: serde_json::Value = serde_json::from_slice(data)
             .map_err(|e| format!("invalid config JSON: {e}"))?;
         let known = ["fields", "tokenizer", "shards", "df_threshold",
-                     "balance_weight", "sfx", "sfx_version"];
+                     "balance_weight", "sfx", "sfx_version", "shared_dictionary"];
         let known_field = ["name", "type", "stored", "indexed", "fast"];
         if let Some(obj) = v.as_object_mut() {
             obj.retain(|k, _| known.contains(&k.as_str()));

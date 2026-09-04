@@ -55,6 +55,12 @@ const index = Index.create('/tmp/my_index', [
 // Sharded (4 shards)
 const sharded = Index.create('/tmp/sharded', [...], 4);
 
+// Smaller index: one dictionary per shard instead of one per segment.
+// About 20 % less disk and RAM; queries slightly slower at cold cache
+// (roughly x1.2 to x1.6 on exact queries, fuzzy ones faster); same answers.
+// Fixed at creation. (BlobIndex.create: `{ sharedDictionary: true }` in options.)
+const compact = Index.create('/tmp/compact', [...], 1, true);
+
 // Open existing
 const index2 = Index.open('/tmp/my_index');
 ```

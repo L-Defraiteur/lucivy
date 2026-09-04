@@ -1,3 +1,20 @@
+Unreleased (branch v4)
+================================
+
+- **`shared_dictionary: true` at creation** (`sfx_version` 4): each distinct
+  token text is stored once per shard instead of once per segment — about
+  20 % less disk and RAM (Linux kernel: 30 000 files 1 659 → 1 327 MB,
+  93 983 files 7.3 → 5.6 GB), same counts, spans and scores, queries ×0.8 to
+  ×1.6 at cold cache. Exposed in every binding: Python
+  `Index.create(..., shared_dictionary=True)`, Node
+  `Index.create(path, fields, shards, true)` / `BlobIndex` option
+  `sharedDictionary`, C++ and browser `"shared_dictionary": true` in the
+  schema object. Off by default; fixed at creation. A 3.0.x binary does not
+  read such an index.
+- Index format v4 on the branch: `.sfx` container version 8, ordinals on 28
+  bits, block-coded offset tables (`SFP4`, `WSP4`, `SIB4`, `.termtexts`
+  layout 3), `.gmap` layout 2. Every reader still opens the previous layouts.
+
 Lucivy 3.0.8
 ================================
 

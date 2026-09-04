@@ -170,9 +170,7 @@ impl LucivyHandle {
             .map_err(|e| format!("cannot write config: {e}"))?;
 
         let mut settings = IndexSettings::default();
-        if let Some(v) = config.sfx_version {
-            settings.sfx_version = v;
-        }
+        settings.sfx_version = config.effective_sfx_version();
         let index = Index::create(dir, schema.clone(), settings)
             .map_err(|e| format!("cannot create index: {e}"))?;
 
@@ -536,7 +534,7 @@ pub fn build_schema(
                 // BM25 needs the frequencies and nothing needs `.pos` /
                 // `.offsets` — 200 MB of 4.3 GB on 15,440 kernel files, plus
                 // the CPU to encode them at every commit.
-                let record = if config.sfx_version.unwrap_or(3) >= 3 {
+                let record = if config.effective_sfx_version() >= 3 {
                     IndexRecordOption::WithFreqs
                 } else {
                     IndexRecordOption::WithFreqsAndPositionsAndOffsets

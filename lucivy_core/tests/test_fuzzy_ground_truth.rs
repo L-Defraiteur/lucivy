@@ -350,7 +350,8 @@ fn test_fuzzy_ground_truth() {
                 fast: None,
             },
         ],
-        sfx_version: Some(3),
+        // `V3_SFX_VERSION=4`: the same truth on a shard dictionary.
+        sfx_version: Some(std::env::var("V3_SFX_VERSION").ok().and_then(|v| v.parse().ok()).unwrap_or(3)),
         ..Default::default()
     };
     let dir = StdFsDirectory::open(tmp_path).unwrap();
