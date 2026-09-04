@@ -15,7 +15,7 @@ docs + 1 × 3 605), 2 champs SFX, **11,56 Go** (×13,5). Un segment (3 605 docs,
 champ 2) a été scanné entièrement : décodage de la table de parents, des
 postings, des varints de fratrie. Script : `benches/scan_index_size.py`
 (Python, lecture seule), sortie brute dans
-[`01-annexe-scan-single.txt`](01-annexe-scan-single.txt) :
+[`02-annexe-scan-single.txt`](02-annexe-scan-single.txt) :
 
 ```bash
 python3 benches/scan_index_size.py ~/lucivy_bench/lucivy_bench_sharding/single 09fc9407784f44ebba5debeeca7a54cf
