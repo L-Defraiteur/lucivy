@@ -38,6 +38,15 @@
 //! majority of links (contiguous tokens) — `contiguous_siblings`, the hot
 //! reader, keeps exactly those. One bit carries that case, and the delta on
 //! `next_ordinal` shrinks the rest.
+//!
+//! Format `SIB3` (written since 4 September 2026, whenever no link carries a
+//! gap): the same header with magic "SIB3", and one varint per entry —
+//! `next_ordinal - previous`, nothing else. A v3 segment never has gaps to
+//! store: its collector used the field to carry the destination's content
+//! length, which the DFS now reads from `.termtexts` META
+//! (`own_len - sep_len`), so the field was 31 % of the entries for a value
+//! held elsewhere. The writer picks `SIB2` on its own when a gap is present
+//! (the v2 pipeline), so both shapes stay readable and nothing chooses.
 
 use super::varint::{read_varint, write_varint};
 
@@ -46,6 +55,7 @@ use super::varint::{read_varint, write_varint};
 /// begin with this.
 const V2_SENTINEL: u32 = u32::MAX;
 const MAGIC_V2: &[u8; 4] = b"SIB2";
+const MAGIC_V3: &[u8; 4] = b"SIB3";
 /// Bytes of one v1 entry: `next_ordinal` (u32) + `gap_len` (u16).
 const V1_ENTRY_SIZE: usize = 6;
 
@@ -86,6 +96,7 @@ impl SiblingTableWriter {
         // Sort by (ordinal, next_ordinal, gap_len) then dedup
         self.pairs.sort_unstable();
         self.pairs.dedup();
+        let with_gaps = self.pairs.iter().any(|&(_, _, g)| g != 0);
 
         let num = self.num_ordinals;
         let header_size = 12 + (num as usize + 1) * 4;
@@ -102,9 +113,13 @@ impl SiblingTableWriter {
             while cursor < self.pairs.len() && self.pairs[cursor].0 == ord {
                 let (_, next_ord, gap_len) = self.pairs[cursor];
                 let delta = next_ord.wrapping_sub(prev_next) as u64;
-                write_varint(&mut entries_data, (delta << 1) | u64::from(gap_len != 0));
-                if gap_len != 0 {
-                    write_varint(&mut entries_data, gap_len as u64);
+                if with_gaps {
+                    write_varint(&mut entries_data, (delta << 1) | u64::from(gap_len != 0));
+                    if gap_len != 0 {
+                        write_varint(&mut entries_data, gap_len as u64);
+                    }
+                } else {
+                    write_varint(&mut entries_data, delta);
                 }
                 prev_next = next_ord;
                 cursor += 1;
@@ -120,7 +135,7 @@ impl SiblingTableWriter {
 
         let mut buf = Vec::with_capacity(header_size + entries_data.len());
         buf.extend_from_slice(&V2_SENTINEL.to_le_bytes());
-        buf.extend_from_slice(MAGIC_V2);
+        buf.extend_from_slice(if with_gaps { MAGIC_V2 } else { MAGIC_V3 });
         buf.extend_from_slice(&num.to_le_bytes());
         for off in &offsets {
             buf.extend_from_slice(&off.to_le_bytes());
@@ -135,8 +150,10 @@ pub struct SiblingTableReader<'a> {
     num_ordinals: u32,
     offsets: &'a [u8],      // (num_ordinals + 1) × 4 bytes
     entries_data: &'a [u8],
-    /// `SIB2`: varint entries. v1 files keep their fixed 6-byte records.
+    /// `SIB2`/`SIB3`: varint entries. v1 files keep their fixed 6-byte records.
     v2: bool,
+    /// `SIB3`: one delta per entry, no gap bit.
+    no_gaps: bool,
 }
 
 impl<'a> SiblingTableReader<'a> {
@@ -146,9 +163,15 @@ impl<'a> SiblingTableReader<'a> {
             return None;
         }
         let v2 = u32::from_le_bytes(data[0..4].try_into().ok()?) == V2_SENTINEL;
+        let mut no_gaps = false;
         let head = if v2 {
-            if data.len() < 12 || &data[4..8] != MAGIC_V2 {
+            if data.len() < 12 {
                 return None;
+            }
+            match &data[4..8] {
+                m if m == MAGIC_V2 => {}
+                m if m == MAGIC_V3 => no_gaps = true,
+                _ => return None,
             }
             12
         } else {
@@ -161,7 +184,7 @@ impl<'a> SiblingTableReader<'a> {
         }
         let offsets = &data[head..head + offsets_size];
         let entries_data = &data[head + offsets_size..];
-        Some(Self { num_ordinals, offsets, entries_data, v2 })
+        Some(Self { num_ordinals, offsets, entries_data, v2, no_gaps })
     }
 
     /// Get all sibling entries for a given ordinal.
@@ -177,6 +200,16 @@ impl<'a> SiblingTableReader<'a> {
         let slice = &self.entries_data[start..end.min(self.entries_data.len())];
         let mut entries = Vec::new();
         let mut pos = 0;
+        if self.no_gaps {
+            let mut next_ordinal = 0u32;
+            while pos < slice.len() {
+                let Some(delta) = read_varint(slice, &mut pos) else { break };
+                let Ok(delta) = u32::try_from(delta) else { break };
+                next_ordinal = next_ordinal.wrapping_add(delta);
+                entries.push(SiblingEntry { next_ordinal, gap_len: 0 });
+            }
+            return entries;
+        }
         if self.v2 {
             let mut next_ordinal = 0u32;
             while pos < slice.len() {
@@ -216,6 +249,11 @@ impl<'a> SiblingTableReader<'a> {
             .filter(|s| s.gap_len == 0)
             .map(|s| s.next_ordinal)
             .collect()
+    }
+
+    /// True for a `SIB3` file: links carry no gap.
+    pub fn has_no_gaps(&self) -> bool {
+        self.no_gaps
     }
 
     /// Number of ordinals in the table.
@@ -319,6 +357,38 @@ impl super::index_registry::SfxIndexFile for SiblingIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A gap-less table takes the `SIB3` layout and reads back the same
+    /// links; one gap anywhere keeps `SIB2`, gaps included.
+    #[test]
+    fn gapless_tables_take_sib3_and_read_alike() {
+        let links = [(0u32, 5u32), (0, 9), (0, 5), (2, 3), (2, 1_000_000), (4, 4)];
+        let mut w3 = SiblingTableWriter::new(5);
+        for &(a, b) in &links { w3.add(a, b, 0); }
+        let d3 = w3.serialize();
+        assert_eq!(&d3[4..8], b"SIB3");
+        let mut w2 = SiblingTableWriter::new(5);
+        for &(a, b) in &links { w2.add(a, b, 0); }
+        w2.add(4, 2, 7);
+        let d2 = w2.serialize();
+        assert_eq!(&d2[4..8], b"SIB2");
+
+        let r3 = SiblingTableReader::open(&d3).unwrap();
+        let r2 = SiblingTableReader::open(&d2).unwrap();
+        assert!(r3.has_no_gaps() && !r2.has_no_gaps());
+        for ord in 0..5 {
+            let a: Vec<u32> = r3.siblings(ord).iter().map(|s| s.next_ordinal).collect();
+            let b: Vec<u32> = r2.siblings(ord).iter().filter(|s| s.gap_len == 0).map(|s| s.next_ordinal).collect();
+            assert_eq!(a, b, "ordinal {ord}");
+        }
+        assert_eq!(r3.siblings(0).iter().map(|s| s.next_ordinal).collect::<Vec<_>>(), vec![5, 9]);
+        assert_eq!(r3.siblings(2).iter().map(|s| s.next_ordinal).collect::<Vec<_>>(), vec![3, 1_000_000]);
+        assert_eq!(r3.siblings(1), vec![]);
+        assert_eq!(r2.siblings(4), vec![SiblingEntry { next_ordinal: 2, gap_len: 7 }, SiblingEntry { next_ordinal: 4, gap_len: 0 }]);
+        assert!(r3.siblings(0).iter().all(|s| s.gap_len == 0));
+        // 3 links × 1-2 bytes for ordinal 0 and 2 against the SIB2 shape with its gap bits.
+        assert!(d3.len() < d2.len());
+    }
 
     #[test]
     fn test_roundtrip_empty() {

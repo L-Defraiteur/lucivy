@@ -350,7 +350,7 @@ pub fn merge_segments_v3(
 
     let mut chunk_post: Vec<(u32, u32, u32, u32, u32)> = Vec::new();
     let mut word_post: Vec<(u32, crate::suffix_fst::word_sfxpost::WordPostingEntry)> = Vec::new();
-    let mut sibling_pairs: Vec<(u32, u32, u16)> = Vec::new();
+    let mut sibling_pairs: Vec<(u32, u32)> = Vec::new();
     let mut wpm_writer = crate::suffix_fst::word_pos_map::WordPosMapWriter::new();
 
     for (seg_idx, seg) in segments.iter().enumerate() {
@@ -460,11 +460,9 @@ pub fn merge_segments_v3(
                     let from = seg_ord_to_global[ord as usize];
                     for e in sib.siblings(ord) {
                         if (e.next_ordinal as usize) < seg_ord_to_global.len() {
-                            sibling_pairs.push((
-                                from,
-                                seg_ord_to_global[e.next_ordinal as usize],
-                                e.gap_len,
-                            ));
+                            // A pre-SIB3 source carries the destination's content
+                            // length here; META has it, the merged table drops it.
+                            sibling_pairs.push((from, seg_ord_to_global[e.next_ordinal as usize]));
                         }
                     }
                 }
@@ -609,8 +607,8 @@ pub fn merge_segments_v3(
 
     let mut sibling_writer =
         crate::suffix_fst::sibling_table::SiblingTableWriter::new(final_count);
-    for &(a, b, gap) in &sibling_pairs {
-        sibling_writer.add(intern_to_final[a as usize], intern_to_final[b as usize], gap);
+    for &(a, b) in &sibling_pairs {
+        sibling_writer.add(intern_to_final[a as usize], intern_to_final[b as usize], 0);
     }
 
     if prof {

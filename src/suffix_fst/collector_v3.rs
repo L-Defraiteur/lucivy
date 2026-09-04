@@ -70,7 +70,7 @@ pub struct SfxCollectorV3 {
     // content_len_a = content bytes of ordinal A (used by sibling DFS to know how much
     // of the query the first token consumes, excluding overlap).
     // Collected during add_value, remapped to final ordinals in into_data.
-    sibling_pairs: Vec<(u32, u32, u16)>,
+    sibling_pairs: Vec<(u32, u32)>,
 
     // Per-document state
     doc_active: bool,
@@ -141,7 +141,7 @@ impl SfxCollectorV3 {
             token_meta: Vec::new(),
             word_stripped_entries: Vec::new(),
             word_postings: Vec::new(),
-            sibling_pairs: Vec::new(), // (intern_a, intern_b, content_len_a)
+            sibling_pairs: Vec::new(), // (intern_a, intern_b)
             doc_active: false,
             current_doc_id: 0,
             current_value_ti_start: 0,
@@ -285,11 +285,11 @@ impl SfxCollectorV3 {
 
         // Collect chunk sibling pairs: consecutive chunks in the same value
         // content_len = destination chunk's content length (used by DFS)
+        // The destination's content length, once carried here for the DFS,
+        // is read from `.termtexts` META since 4 September 2026.
         for w in chunk_intern_ids.windows(2) {
-            let meta = &self.token_meta[w[1] as usize];
-            let content_len = meta.own_len.saturating_sub(meta.sep_len as u16);
             self.mem_estimate += SIBLING_PAIR_BYTES;
-            self.sibling_pairs.push((w[0], w[1], content_len));
+            self.sibling_pairs.push((w[0], w[1]));
         }
 
         // Build word-level stripped entries from this value's chunks.
@@ -473,7 +473,7 @@ impl SfxCollectorV3 {
             // know how many bytes of the sibling's text are content vs overlap)
             for w in ws_intern_sequence.windows(2) {
                 self.mem_estimate += SIBLING_PAIR_BYTES;
-                self.sibling_pairs.push((w[0].0, w[1].0, w[1].1));
+                self.sibling_pairs.push((w[0].0, w[1].0));
             }
         }
 
@@ -713,10 +713,11 @@ impl SfxCollectorV3 {
         // (used by sibling_chain_dfs to know how many bytes of the query are consumed
         // by each sibling, excluding the overlap portion).
         let mut sibling_writer = crate::suffix_fst::sibling_table::SiblingTableWriter::new(final_ord);
-        for &(a, b, content_len) in &self.sibling_pairs {
+        // No gap on any link → the writer emits the gap-less `SIB3` layout.
+        for &(a, b) in &self.sibling_pairs {
             let fa = intern_to_final[a as usize];
             let fb = intern_to_final[b as usize];
-            sibling_writer.add(fa, fb, content_len);
+            sibling_writer.add(fa, fb, 0);
         }
         let sibling_v3_data = sibling_writer.serialize();
 

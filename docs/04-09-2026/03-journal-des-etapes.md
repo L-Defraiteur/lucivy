@@ -121,3 +121,64 @@ v3), `schdule` fz1 5,5 ms (6,4 / 6,3), `spin_lock_[a-z]+` 4,1 ms (4,3 / 4,8).
 
 **Tests.** `cargo test --lib` : 1 439 verts (1 ajouté, l'équivalence).
 `cargo test -p lucivy-core` : 184 verts, 0 rouge, 31 ignorés.
+
+---
+
+## Étapes 3 et 4 — `.posmap` sur 3 octets, `.sibling_v3` sans `gap_len` (4 septembre)
+
+**Étape 3.** Un slot de `.posmap` était un `u32` par position pour des ordinaux
+que le builder borne à 24 bits (`ORDINAL_MASK`). Layout `PMP3` : 3 octets par
+slot, marqueur vide `0xFFFFFF`, choisi par le writer quand tout ordinal tient
+(toujours en v3 ; un segment v2 retombe sur `PMAP`). Le lecteur lit les deux,
+et 0xFFFFFF reste un ordinal valide : le writer bascule sur 4 octets s'il le
+rencontre.
+
+**Étape 4.** Le `gap_len` de `SIB2` ne contenait plus un écart depuis le v3 :
+le collecteur y mettait la **longueur de contenu de la destination**, lue par
+un seul consommateur, la DFS de fratrie (`sibling_chain_dfs`), qui lisait déjà
+`own_len` dans META pour le mode strict. Elle lit maintenant META dans les
+deux modes (`own_len − sep_len` en relâché), et retombe sur `gap_len` pour un
+fichier sans META. Layout `SIB3` : un varint de delta par lien, rien d'autre,
+émis par le writer dès qu'aucun lien ne porte de gap (le v2 garde `SIB2` tout
+seul). Le collecteur ne calcule ni ne garde plus cette longueur (2 octets par
+paire de RAM de moins), la fusion la jette.
+
+Fichiers : `posmap.rs`, `sibling_table.rs`, `collector_v3.rs`,
+`indexer/sfx_dag_v3.rs`, `briques/fst_walk.rs`, `benches/scan_index_size.py`
+(qui s'arrête maintenant à la fin réelle des données : les fichiers portent un
+pied, d'où un « max_ordinal » absurde dans l'audit).
+
+**Taille.**
+
+| fichier | étape 2 | étapes 3+4 | delta |
+|---|---|---|---|
+| `.posmap` | 32,5 Mo | 24,4 Mo | −25 % |
+| `.sibling_v3` | 47,0 Mo | 37,5 Mo | −20 % |
+| **index** | 875,3 Mo | **857,7 Mo** | −2,0 % |
+
+**−25,6 %** cumulé depuis v3 (1 152,4 → 857,7 Mo).
+
+**Justesse.** Mêmes comptes et mêmes spans sur les neuf requêtes vérifiées.
+L'index v3 de référence rouvre et passe le panel.
+
+**Temps — un vrai A/B.** Le même binaire lit les deux layouts, donc l'index de
+l'étape 2 (`PMAP`/`SIB2`) et celui-ci (`PMP3`/`SIB3`) ont été interrogés en
+alternance, deux passes chacun, dans les mêmes conditions (charge 5, la queue
+de la suite de tests ; le premier essai, pris pendant la suite à charge 14,
+a été jeté). Meilleur des deux :
+
+| requête | étape 2 | étapes 3+4 |
+|---|---|---|
+| `regsiter` fz2 | 53,8 ms | **49,4 ms** |
+| `schdule` fz1 | 6,3 ms | **5,6 ms** |
+| `spin_lock_[a-z]+` rx | 4,2 ms | **3,9 ms** |
+| `schdule` jw1 | 8,4 ms | 8,0 ms |
+| `sched` strict | 2,5 ms | 2,8 ms |
+| les cinq autres | 2,1 à 3,1 ms | identiques à 0,1 ms près |
+
+Moins d'octets à faulter, pas de lecture non alignée qui coûte. Le seul recul
+(0,3 ms sur `sched`) est sous le bruit d'une passe à l'autre.
+
+**Tests.** `cargo test --lib` : 1 441 verts (2 ajoutés : les deux largeurs de
+`.posmap` lues pareil, `SIB3` contre `SIB2`). `cargo test -p lucivy-core` :
+184 verts, 0 rouge.

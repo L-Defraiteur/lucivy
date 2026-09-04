@@ -752,18 +752,21 @@ pub fn sibling_chain_dfs(
 
                 // How much of the next token the query must cover to step onto it.
                 //
-                // `gap_len` is the destination's CONTENT length, separator excluded —
+                // Relaxed: the destination's CONTENT length, separator excluded —
                 // which means the query is allowed to skip over the separator. That
-                // is the relaxed contract, and it used to be applied in strict mode
+                // contract used to be applied in strict mode
                 // too: a strict search for "TableFunction" then matched
                 // "migra|table function| configuration", because the step from
                 // "table" to "function" jumped the space. Under strict separators the
                 // query has to cover content AND separator, i.e. own_len.
-                let step_len = if strict_separators {
-                    termtexts.meta(next_ord).map(|m| m.own_len as usize)
-                        .unwrap_or(sib.gap_len as usize)
-                } else {
-                    sib.gap_len as usize
+                //
+                // Both come from `.termtexts` META. Tables written before `SIB3`
+                // carried the content length in `gap_len`; it is the fallback for a
+                // file without META, and equal to META's value when both exist.
+                let step_len = match termtexts.meta(next_ord) {
+                    Some(m) if strict_separators => m.own_len as usize,
+                    Some(m) => m.own_len.saturating_sub(m.sep_len as u16) as usize,
+                    None => sib.gap_len as usize,
                 };
                 let next_content = if step_len > 0 && step_len < next_lower.len() {
                     let cl = snap_to_char_boundary(&next_lower, step_len);
