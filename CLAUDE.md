@@ -260,7 +260,9 @@ cd playground && node serve.mjs
 
 **Dossier courant : `docs/04-09-2026/` — lire d'abord
 `04-recap-journee-et-a-faire.md` (autonome : −36 % d'index en une journée,
-ce qui a été appris, ce qui reste), puis `01-recap-findings-et-plan-d-action.md`
+ce qui a été appris, ce qui reste), `05-piste-dictionnaire-partage-par-shard.md`
+(le prochain chantier, retenu par Lucie : dictionnaire répété ×2,2 entre
+segments, 71 % de l'index), puis `01-recap-findings-et-plan-d-action.md`
 (le plan, avec l'état et le gain mesuré de chaque étape), `03-journal-des-etapes.md`
 (chaque étape : changement, taille, justesse, A/B de temps, commandes) et
 `02-audit-taille-index-sfx-v3.md` (l'audit du format v3 : le `.sfx` était aux

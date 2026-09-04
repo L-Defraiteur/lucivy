@@ -89,11 +89,21 @@ qu'on vend, le temps acceptable tant qu'on est loin de ×1,5.
    espaces d'ordinaux.
 2. **Tri stable des ex æquo** dans le merge des shards, puis
    `luce_v3_sharded_roundtrip` sous charge.
-3. **Le prochain palier de taille** n'est plus de l'encodage : la FST fait
-   35 % de l'index et 6 clés par chunk dont la moitié de marqueurs ; les
-   postings de chunks 20 %. À concevoir avec des chiffres, pas à coder.
-4. Mesurer l'index complet des 93 983 fichiers en v4 et mettre à jour
-   [28-08/06](../28-08-2026/06-comparaison-moteurs-mesures.md) (×3,6 pour
-   Elasticsearch, ×0,8 pour tantivy — nous, ×13,5 environ).
+3. **Le prochain palier de taille : le dictionnaire partagé par shard**,
+   piste retenue par Lucie le soir même — [05](05-piste-dictionnaire-partage-par-shard.md).
+   Mesuré : le dictionnaire est répété ×2,2 d'un segment à l'autre, et il
+   fait 71 % de l'index ; le partager vaut −35 à −40 % de plus, réduit les
+   marches de FST par requête (une par génération de dictionnaire au lieu
+   d'une par segment) et lève la borne des 24 bits d'ordinal en passant
+   tous les parents en table, ce qui règle aussi l'overlap dans la clé. Les
+   deux autres pistes (overlap dans la valeur, octets des mots à la
+   demande) sont dans le même document, en second rang.
+4. L'index complet des 93 983 fichiers en v4 est mesuré : **11,06 Go,
+   ×12,3** (253 segments, panel identique au 28 août). La compaction vers
+   10 segments par le harnais **échoue** sur la borne des 24 bits
+   (`merge_segments_v3` : 17,9 M de termes sur 4 segments) — l'index de
+   bench du 28 août à 10 segments avait été fusionné par un autre chemin ;
+   à élucider, et [28-08/06](../28-08-2026/06-comparaison-moteurs-mesures.md)
+   reste à mettre à jour (×3,6 Elasticsearch, ×0,8 tantivy, nous ×12,3).
 5. Décider de la pile v2, de la version 4.0.0, et de ce que devient
    `wip/publication-3.0.0` (fusion dans `main` puis `v4` par-dessus).
