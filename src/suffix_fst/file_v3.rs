@@ -310,6 +310,30 @@ mod tests {
         assert_eq!(fresh.container_version(), 4);
     }
 
+    /// Measurement, not a check: parent-list sizes by key length in a real
+    /// `.sfx` (path in `SFX_FILE`). Tells what a lookup that stops at a token
+    /// boundary would have to decode if the overlap left the keys.
+    #[test]
+    #[ignore]
+    fn measure_parents_by_key_length() {
+        use lucivy_fst::{IntoStreamer, Streamer};
+        let Ok(path) = std::env::var("SFX_FILE") else { return };
+        let bytes = std::fs::read(&path).unwrap();
+        let reader = SfxFileReaderV3::open(&bytes).unwrap();
+        // (keys, parents, max parents, parents of the 10 largest) per (partition, key length)
+        let mut stats: std::collections::BTreeMap<(u8, usize), (u64, u64, u64)> = Default::default();
+        let mut stream = reader.fst().stream();
+        while let Some((key, val)) = stream.next() {
+            let n = reader.decode_parents(val).len() as u64;
+            let e = stats.entry((key[0], (key.len() - 1).min(12))).or_insert((0, 0, 0));
+            e.0 += 1; e.1 += n; e.2 = e.2.max(n);
+        }
+        eprintln!("partition  len   keys      parents   avg     max");
+        for ((p, l), (k, n, mx)) in &stats {
+            eprintln!("  0x{p:02x}     {l:>2}{} {k:>8} {n:>12} {:>7.1} {mx:>7}", if *l == 12 { "+" } else { " " }, *n as f64 / *k as f64);
+        }
+    }
+
     #[test]
     fn test_empty_sfx() {
         let writer = SfxFileWriterV3::new(
