@@ -137,28 +137,88 @@ pub fn decode_output_v3(value: u64) -> ParentRefV3 {
     }
 }
 
-/// Encode a multi-parent record for the OutputTable (container version 4).
+/// Encode a multi-parent record for the OutputTable (container version 5).
 ///
-/// Header: varint count. Per entry: the same packed `u64` as the single-parent
-/// FST value (`encode_single_parent_v3`), little-endian — 8 bytes instead of
-/// the 11 of the version-3 record, and one decoder for both shapes.
+/// Header: varint count. Parents sorted by (ordinal, sti); per parent:
+/// `[varint ordinal - previous ordinal][varint sti][varint own_len][u8 sep_len]
+/// [u8 flags]`, flags = `overlap_len` (4 bits) | `is_word_start` (bit 4).
+/// About 5 bytes per parent against the 8 of version 4 and the 11 of
+/// version 3 — and the largest lists compress best: the 54 747 chunks ending
+/// in `_` on a 30 000-file kernel segment are spread over 1.2 million
+/// ordinals, so their deltas fit in one byte.
 ///
-/// The parents table was 73 % of the `.sfx` file on the 93 605-file kernel
-/// index (3.58 GB of 4.92), 325 million entries: three bytes per entry is
-/// 8.7 % of the whole index. Entries are sorted by `sti`, as before.
+/// Parents used to be sorted by `sti`; no reader depended on it
+/// (`sort_and_dedup_splits` sorts what it keeps).
 pub fn encode_parent_entries_v3(parents: &[ParentEntryV3]) -> Vec<u8> {
+    use super::varint::write_varint;
     let mut sorted = parents.to_vec();
-    sorted.sort_by_key(|p| p.sti);
-    let mut buf = Vec::with_capacity(5 + sorted.len() * 8);
-    super::varint::write_varint(&mut buf, sorted.len() as u64);
+    sorted.sort_by_key(|p| (p.raw_ordinal, p.sti));
+    let mut buf = Vec::with_capacity(5 + sorted.len() * 5);
+    write_varint(&mut buf, sorted.len() as u64);
+    let mut prev = 0u64;
     for p in &sorted {
-        buf.extend_from_slice(&encode_single_parent_v3(p).to_le_bytes());
+        debug_assert!((p.overlap_len as u64) <= OVERLAP_MASK);
+        write_varint(&mut buf, p.raw_ordinal - prev);
+        prev = p.raw_ordinal;
+        write_varint(&mut buf, p.sti as u64);
+        write_varint(&mut buf, p.own_len as u64);
+        buf.push(p.sep_len);
+        buf.push((p.overlap_len & OVERLAP_MASK as u8) | if p.is_word_start { 0x10 } else { 0 });
     }
     buf
 }
 
-/// Decode a version-4 multi-parent record (see `encode_parent_entries_v3`).
+/// Decode a version-5 multi-parent record (see `encode_parent_entries_v3`).
+///
+/// Sequential; the varint reads are inlined because this runs once per
+/// final node of every walk, on lists of up to tens of thousands.
 pub fn decode_parent_entries_v3(data: &[u8]) -> Vec<ParentEntryV3> {
+    #[inline(always)]
+    fn varint(data: &[u8], pos: &mut usize) -> u64 {
+        let b = data[*pos];
+        *pos += 1;
+        if b < 0x80 {
+            return b as u64;
+        }
+        let mut v = (b & 0x7f) as u64;
+        let mut shift = 7;
+        loop {
+            let b = data[*pos];
+            *pos += 1;
+            v |= ((b & 0x7f) as u64) << shift;
+            if b < 0x80 {
+                return v;
+            }
+            shift += 7;
+        }
+    }
+    let mut pos = 0usize;
+    let num = varint(data, &mut pos) as usize;
+    let mut entries = Vec::with_capacity(num);
+    let mut ordinal = 0u64;
+    for _ in 0..num {
+        ordinal += varint(data, &mut pos);
+        let sti = varint(data, &mut pos) as u16;
+        let own_len = varint(data, &mut pos) as u16;
+        let sep_len = data[pos];
+        let flags = data[pos + 1];
+        pos += 2;
+        entries.push(ParentEntryV3 {
+            raw_ordinal: ordinal,
+            sti,
+            own_len,
+            sep_len,
+            overlap_len: flags & OVERLAP_MASK as u8,
+            is_word_start: flags & 0x10 != 0,
+        });
+    }
+    entries
+}
+
+/// Decode a version-4 multi-parent record: varint count, then the packed
+/// 8-byte parent value (`encode_single_parent_v3`) per parent. Written
+/// between the morning and the afternoon of 4 September 2026; still read.
+pub fn decode_parent_entries_v4_packed(data: &[u8]) -> Vec<ParentEntryV3> {
     let mut cursor = 0usize;
     let num = super::varint::read_varint(data, &mut cursor)
         .expect("BUG: truncated parent record header") as usize;
@@ -170,7 +230,6 @@ pub fn decode_parent_entries_v3(data: &[u8]) -> Vec<ParentEntryV3> {
             ParentRefV3::Multi { .. } => unreachable!("BUG: multi flag inside a parent record"),
         }
     }
-    debug_assert_eq!(entries.len(), num, "truncated parent record");
     entries
 }
 
@@ -687,9 +746,9 @@ mod tests {
             },
         ];
         let bytes = encode_parent_entries_v3(&entries);
-        assert_eq!(bytes.len(), 1 + 2 * 8, "varint count + 8 bytes per parent");
+        assert_eq!(bytes.len(), 1 + 2 * 5, "varint count + 5 bytes per parent here");
         let decoded = decode_parent_entries_v3(&bytes);
-        // Sorted by sti, so order should be [sti=0, sti=3]
+        // Sorted by (ordinal, sti): [ord 5, ord 12]
         assert_eq!(decoded, entries);
     }
 
@@ -717,13 +776,34 @@ mod tests {
             overlap_len: (i % 3) as u8,
             is_word_start: i % 2 == 0,
         }).collect();
-        let mut by_sti = entries.clone();
-        by_sti.sort_by_key(|p| p.sti);
+        let mut by_ord = entries.clone();
+        by_ord.sort_by_key(|p| (p.raw_ordinal, p.sti));
 
-        let packed = decode_parent_entries_v3(&encode_parent_entries_v3(&entries));
-        let legacy = decode_parent_entries_v3_legacy(&encode_parent_entries_legacy(&by_sti));
-        assert_eq!(packed, by_sti);
-        assert_eq!(legacy, by_sti);
+        let delta = decode_parent_entries_v3(&encode_parent_entries_v3(&entries));
+        let legacy = decode_parent_entries_v3_legacy(&encode_parent_entries_legacy(&by_ord));
+        let packed = decode_parent_entries_v4_packed(&encode_parent_entries_packed(&by_ord));
+        assert_eq!(delta, by_ord);
+        assert_eq!(legacy, by_ord);
+        assert_eq!(packed, by_ord);
+    }
+
+    /// The version-4 record shape: varint count + packed u64 per parent.
+    fn encode_parent_entries_packed(parents: &[ParentEntryV3]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        super::super::varint::write_varint(&mut buf, parents.len() as u64);
+        for p in parents { buf.extend_from_slice(&encode_single_parent_v3(p).to_le_bytes()); }
+        buf
+    }
+
+    /// Dense lists — the frequent keys — cost about two bytes per parent.
+    #[test]
+    fn dense_lists_compress_to_two_bytes_per_parent() {
+        let entries: Vec<ParentEntryV3> = (0..50_000u64).map(|i| ParentEntryV3 {
+            raw_ordinal: i * 22, sti: 5, own_len: 6, sep_len: 1, overlap_len: 2, is_word_start: false,
+        }).collect();
+        let bytes = encode_parent_entries_v3(&entries);
+        assert!(bytes.len() <= 3 + 50_000 * 5, "{}", bytes.len());
+        assert_eq!(decode_parent_entries_v3(&bytes), entries);
     }
 
     #[test]
@@ -738,7 +818,8 @@ mod tests {
         };
         let big = vec![p.clone(); 70_000]; // count above u16, needs a 3-byte varint
         let bytes = encode_parent_entries_v3(&big);
-        assert_eq!(bytes.len(), 3 + 70_000 * 8);
+        // first parent: 4-byte ordinal delta; the rest: delta 0 → 1 byte; sti 4095 and own_len 16383: 2 bytes each
+        assert_eq!(bytes.len(), 3 + 4 + 69_999 + 70_000 * (2 + 2 + 1 + 1));
         let decoded = decode_parent_entries_v3(&bytes);
         assert_eq!(decoded.len(), 70_000);
         assert_eq!(decoded[69_999], p);

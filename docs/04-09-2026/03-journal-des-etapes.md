@@ -348,3 +348,57 @@ attribué plus finement. Sous la règle du 4 septembre : gardé.
 
 **Tests.** `cargo test --lib` : 1 443 verts. `cargo test -p lucivy-core` :
 184 verts.
+
+---
+
+## Étape 8 — parents en delta-varint (4 septembre)
+
+**Changement.** Conteneur `.sfx` version 5 (magic inchangé). Un record
+multi-parents = `[varint count]` puis, parents triés par (ordinal, sti) :
+`[varint Δordinal][varint sti][varint own_len][u8 sep_len][u8 flags]`,
+environ 5 octets contre 8. Le décodeur est séquentiel avec les varints
+inlinés. Les versions 3 (11 octets) et 4 (u64 packé) se lisent toujours,
+prouvé par test sur des fichiers construits à la main **et** en rouvrant
+les index de référence des deux versions sous le panel.
+
+La mesure du matin l'annonçait : les listes les plus grosses sont denses
+dans l'espace des ordinaux (54 747 chunks finissant par `_` répartis sur
+1,2 million d'ordinaux, écart moyen 22), donc leur delta tient sur un
+octet. `dense_lists_compress_to_two_bytes_per_parent` le fixe.
+
+Test de mesure ajouté au passage (`measure_parents_by_key_length`, ignoré,
+`SFX_FILE=…`) : parents par longueur de clé dans un vrai segment. C'est lui
+qui a fait renoncer à la seconde moitié de l'étape 5 (voir 01, §3).
+
+**Taille.**
+
+| | 5a | étape 8 | delta |
+|---|---|---|---|
+| 10 000 fichiers, parents | 216,4 Mo | 153,6 Mo | −29 % |
+| 10 000 fichiers, index | 799,6 Mo | **735,1 Mo** | **−8,1 %** |
+| 30 000 fichiers, parents | 675,7 Mo | 488,5 Mo | −28 % |
+| 30 000 fichiers, index | 2 472,7 Mo | **2 285,8 Mo** | **−7,6 %** |
+
+Cumul depuis v3 : **−36,2 %** sur 10 000 fichiers (1 152 → 735 Mo).
+
+**Justesse.** Mêmes comptes et mêmes spans, les deux corpus ; index v3 et v4
+de référence rouverts.
+
+**Temps — A/B au même binaire**, 30 000 fichiers, cinq passes alternées,
+min / médiane (ms) :
+
+| requête | 5a | étape 8 |
+|---|---|---|
+| `mutex_lock` strict | 1,9 / 2,1 | 2,0 / 2,1 |
+| `sched` term | 3,2 / 3,3 | 3,1 / 3,5 |
+| `schdule` fz1 | 12,2 / 15,0 | 12,8 / 14,4 |
+| `regsiter` fz2 | 130,3 / 136,3 | 127,9 / 129,9 |
+| `spin_lock_[a-z]+` rx | 8,3 / 8,8 | 9,4 / 9,7 |
+| `schdule` jw1 | 15,4 / 16,0 | 15,8 / 16,6 |
+
+Neutre à 0,1 ms près sur les requêtes exactes, le fuzzy lourd un peu plus
+rapide (moins d'octets à faulter), la regex **+1 ms sur 8** — c'est elle qui
+décode le plus de listes par littéral. Sous la règle : gardé.
+
+**Tests.** `cargo test --lib` : 1 444 verts. `cargo test -p lucivy-core` :
+184 verts.

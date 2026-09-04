@@ -27,7 +27,7 @@ def sections(b):
 def scan_sfx(path, deep):
     b = open(path, "rb").read()
     s = sections(b)
-    version = b[4]  # container version: 3 = 11-byte parents, 4 = packed u64
+    version = b[4]  # container version: 3 = 11-byte parents, 4 = packed u64, 5 = delta varints (count still first)
     fst_off, fst_len = s[1]; par_off, par_len = s[2]
     r = {"file": len(b), "fst": fst_len, "parents": par_len, "version": version}
     if deep:
