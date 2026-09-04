@@ -74,18 +74,22 @@ formats, sur des **identifiants globaux au shard**.
 
 | fichier | portée | contenu |
 |---|---|---|
-| `dict-<g>.<champ>.sfx` | shard, génération `g` | FST des suffixes + parents (conteneur 8), ordinaux = identifiants globaux |
-| `dict-<g>.<champ>.termtexts` | shard, génération `g` | identifiant → texte étendu + méta (layout 3, dense par identifiant) |
+| `dict-<g>.<champ>.sfx` | shard, génération `g` | FST des suffixes + parents (conteneur 8) des identifiants frappés par cette génération ; ordinaux = identifiants globaux |
+| `dict-<g>.<champ>.termtexts` | shard, génération `g` | ses entrées → texte étendu + méta (layout 3) ; section **IDS** (`0x06`, plages) : quel identifiant est chaque entrée |
 | `<seg>.<champ>.gmap` | segment | identifiants globaux de ses ordinaux locaux, **triés** (index = ordinal local ; global → local par recherche binaire) |
 | `<seg>.<champ>.newtexts` | segment, **hors registre** | textes et méta des identifiants que le segment a frappés ; consommé et supprimé par le commit suivant |
 | `.sfxpost`, `.word_sfxpost`, `.posmap`, `.word_pos_map`, `.sibling_v3` | segment | **inchangés**, à ordinaux locaux |
 
-`meta.json` porte `sfx_dictionary { generation, next_ids (par champ),
-field_ids }` ; c'est par là que le GC (`segment_updater::list_files`), le
-snapshot LUCE, le delta (bundle `dict-<g>.`, préfixe de ses fichiers) et
-`Index` (qui tient le dictionnaire ouvert et le rafraîchit à chaque
-lecture de `meta.json`) connaissent la génération vivante. Un fichier de
-shard non enregistré là serait supprimé au premier GC.
+`meta.json` porte `sfx_dictionary { generations (vivantes, croissantes),
+next_generation, next_ids (par champ), field_ids }` ; c'est par là que le
+GC (`segment_updater::list_files` : les vivantes, plus toute génération
+plus récente que la plus récente vivante), le snapshot LUCE, le delta (un
+bundle `dict-<g>.` par vivante, préfixe de ses fichiers) et `Index` (qui
+tient le dictionnaire ouvert et le rafraîchit à chaque lecture de
+`meta.json`) connaissent les générations. Un fichier de shard non
+enregistré là serait supprimé au premier GC. Les lecteurs voient les
+générations comme un fichier (`SfxFileReaderV3::open_parts`,
+`TermTextsReaderV3::open_parts`).
 
 **Indexation** : le collecteur (`SfxCollectorV3::with_dictionary`) cherche
 chaque texte nouveau dans la génération courante (clé minuscule sous la
@@ -98,10 +102,10 @@ ordinaux locaux sont attribués dans l'ordre des identifiants. Le segment
 n'écrit ni `.sfx` ni `.termtexts`.
 
 **Commit** (`indexer/dictionary_commit.rs::fold_new_texts`, avant le DAG de
-commit) : les `.newtexts` des segments commis + les textes de la
-génération vivante → génération `g + 1` réécrite **en entier** (v1 :
-simple, lent, juste), rendue vivante, nommée par le `meta.json` du commit.
-Les identifiants ne bougent jamais : aucun segment n'est touché.
+commit) : les `.newtexts` des segments commis → une génération de plus,
+**leurs textes seulement** ; au-delà de `LUCIVY_DICT_MAX_GENERATIONS` (8)
+vivantes, une compaction les réunit en une, réécrite en entier. Les
+identifiants ne bougent jamais : aucun segment n'est touché.
 
 **Fusion** (`merge_segments_dict`) : union triée des `.gmap`, remappage
 des locaux, concaténation des postings, fratrie et cartes rebâties. Pas de
@@ -117,9 +121,10 @@ mémoïsées à ses identifiants par marche fusionnée. Les chaînes se
 construisent par segment. Limite connue : le calcul froid d'une requête est
 fait une fois mais sur un seul thread ([09](09-journal-chantier-dictionnaire.md) §8).
 
-Mesuré sur la référence de 10 000 fichiers : 508 → 387 Mo ; comptes et
-spans identiques ; exactes à ±1 ms, terme/préfixe ×2, fuzzy ×9 à froid, ×2
-à chaud. Vérité : `lucivy_core/tests/test_dictionary_index.rs`.
+Mesuré sur la référence de 10 000 fichiers : 508 → 390 Mo (4 générations
+vivantes ; 387 en une seule), construction 19 s (8 en v3) ; comptes et
+spans identiques ; exactes à ±1 ms, terme/préfixe ×2, fuzzy ×9 à froid,
+×1,3 à chaud. Vérité : `lucivy_core/tests/test_dictionary_index.rs`.
 
 ### 2.3 Ce que le builder enregistre
 

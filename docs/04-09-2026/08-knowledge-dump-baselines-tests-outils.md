@@ -186,10 +186,11 @@ Tests ajoutés aujourd'hui, à connaître : `packed_and_legacy_records_decode_to
   V3_SFX_VERSION=4 V3_CORPUS=/tmp/lucivy-cmp V3_INDEX_DIR=/chemin/idx-dict cargo test --release -p lucivy-core \
     --test test_sfx_v3_ground_truth v3_ground_truth_demo -- --ignored --nocapture > out.txt 2>&1
   ```
-  53 s au lieu de 8 (la génération est réécrite en entier à chacun des 20
-  commits) ; 387 Mo ; panel 9/9. Le scan `benches/scan_index_size.py` lit
-  les `dict-*` comme des sidecars (totaux `sfx`, `termtexts`) et compte les
-  `.gmap`.
+  19 s au lieu de 8 (une génération par commit, une compaction toutes les
+  huit — `LUCIVY_DICT_MAX_GENERATIONS`) ; 390 Mo ; panel 9/9. Le scan
+  `benches/scan_index_size.py` lit les `dict-*` comme des sidecars (totaux
+  `sfx`, `termtexts`) et compte les `.gmap`. Les générations vivantes :
+  `grep -o '"generations":\[[^]]*\]' meta.json`.
 - **La vérité de bout en bout** : `cargo test --release -p lucivy-core
   --test test_dictionary_index` — 300 fichiers du noyau (ou un corpus
   synthétique sans `/tmp/lucivy-cmp`), index v3 et v4 côte à côte, onze
@@ -202,9 +203,8 @@ Tests ajoutés aujourd'hui, à connaître : `packed_and_legacy_records_decode_to
   `V3_PROFILE=1` : la ligne `[prescan]` / `[fz prescan]` donne le mur, la
   somme par segment et le **max par segment** — quand max ≈ mur, un segment
   calcule pendant que les autres attendent la cellule.
-- **Ce qui n'est pas fait / à savoir** : la génération est réécrite en
-  entier à chaque commit ; le calcul froid d'une requête n'est pas
-  parallèle ([09](09-journal-chantier-dictionnaire.md) §8) ;
+- **Ce qui n'est pas fait / à savoir** : le calcul froid d'une requête
+  fuzzy reste ×8 (soixante scans moyens, [09](09-journal-chantier-dictionnaire.md) §8) ;
   `index_bytes`, `preload`, `residency` ignorent les fichiers `dict-*` ;
   l'import WASM (`lucivy_import_file`) les route dans `shard_0/` sans les
   connaître, ce qui se trouve être juste ; un segment abandonné entre deux
@@ -212,8 +212,10 @@ Tests ajoutés aujourd'hui, à connaître : `packed_and_legacy_records_decode_to
   `cargo test -p lucivy-core` complète n'a pas été relancée après le
   dictionnaire (la lib et le test de bout en bout, si) ; pas d'A/B 30 000
   en mode dictionnaire.
-- **Index du scratchpad** : `idx-dict` (référence 10 000 en mode
-  dictionnaire, génération 20), `prof-dict*.txt`, `dict-e2e.txt`.
+- **Index du scratchpad** : `idx-dict` (référence 10 000 en une
+  génération, v1), `idx-dict2` (générations incrémentales, 4 vivantes),
+  `idx30k-dict`, `idx90k-dict` (s'ils ont fini), `prof-dict*.txt`,
+  `dict-e2e.txt`.
 
 ---
 
