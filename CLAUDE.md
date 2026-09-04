@@ -273,20 +273,22 @@ cd playground && node serve.mjs
 
 ## Docs
 
-**Dossier courant : `docs/04-09-2026/` — pour repartir, lire dans l'ordre
-`11-journal-chantier-plan-fst.md` (le chantier du 5 septembre : la phase
-FST d'une requête planifiée par shard, les alternatives par préfixe, la
-coupe en galop, l'A/B 30 000 et ce qui reste), `07-architecture.md`
-(l'architecture avec les formats du 4-5 septembre et le mode dictionnaire
-§2.5, requête en deux phases) et
-`08-knowledge-dump-baselines-tests-outils.md` (baselines, les deux A/B,
-tests, corpus, protocole, mode dictionnaire §6 bis, pièges) — tous trois
-autonomes. Puis `10-chantier-prescan-dictionnaire-rapport.md` (le rapport
-du chantier plan tel qu'écrit avant de coder, note d'état en tête) et
-`09-journal-chantier-dictionnaire.md` (le chantier dictionnaire : tout ce
-qui a été fait et mesuré, étape par étape, et ce qui a divergé du plan) ;
-`06-chantier-dictionnaire-partage-rapport.md` est le plan du dictionnaire
-tel qu'écrit avant de coder, avec une note d'état en tête. Puis
+**Dossier courant : `docs/05-09-2026/` — pour repartir, lire dans l'ordre
+`01-journal-session-5-septembre.md` (la journée du 5 : le plan par shard,
+les alternatives par préfixe, la coupe en galop, le `.gmap` GMP2, les A/B
+30 000 et noyau entier, l'option `shared_dictionary`, la vérité terrain du
+noyau, ce qui reste et le prochain chantier — la compaction du
+dictionnaire en flux), `02-architecture.md` (l'architecture complète avec
+le mode dictionnaire §3 : fichiers, générations, plan puis exécution,
+l'option) et `03-knowledge-dump-baselines-tests-outils.md` (corpus,
+harnais, baselines de taille et de temps, A/B, profil, tests, piège RAM,
+scratchpad, protocole, pièges) — tous trois autonomes. Le détail brut est
+dans `docs/04-09-2026/` : `11-journal-chantier-plan-fst.md` (le journal du
+5, mesures intermédiaires et fausses pistes), `10-…rapport.md` (le rapport
+d'avant le chantier, note d'état en tête), `09-journal-chantier-dictionnaire.md`
+(le chantier dictionnaire de la nuit du 4 au 5), `07` et `08` (état du 5 au
+matin), `06-chantier-dictionnaire-partage-rapport.md` (le plan du
+dictionnaire tel qu'écrit avant de coder). Puis
 `04-recap-journee-et-a-faire.md` (−36 % d'index en une journée),
 `05-piste-dictionnaire-partage-par-shard.md` (la décision, mesurée ×2,2), `01-recap-findings-et-plan-d-action.md`
 (le plan, avec l'état et le gain mesuré de chaque étape), `03-journal-des-etapes.md`
