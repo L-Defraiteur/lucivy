@@ -499,3 +499,55 @@ l'intention ; la réalité v1 est « les segments partagent le lecteur et sa
 mémo, le premier demandeur calcule ». [07](07-architecture.md) §3 (« le
 prescan crée un nœud par segment ... c'est ce qu'un dictionnaire par shard
 réduira ») : le nœud par segment demeure, et c'est bien.
+
+---
+
+## 9. Générations incrémentales et compaction (nuit du 4 au 5, suite)
+
+**Pourquoi.** La v1 réécrivait toute la génération à chaque commit : 53 s
+pour la référence de 10 000 fichiers (8 en v3), et le noyau entier — 25 M
+de textes, 150 M d'entrées de builder, ~8 Go — dix fois de suite : hors
+de portée.
+
+**Quoi** (commit « générations incrémentales et compaction ») :
+- Une génération = les seuls identifiants frappés depuis la précédente ;
+  son `.termtexts` porte une section **IDS** (`0x06`, des plages `(début,
+  longueur)`) qui dit quel identifiant est chaque entrée, son `.sfx` a les
+  identifiants globaux dans ses records comme avant. Le `.newtexts` d'un
+  segment est exactement ce format (`TermTextsWriterV3::with_ids`).
+- Les lecteurs voient N générations comme un fichier :
+  `SfxFileReaderV3::open_parts` (les quatre fonctions de scan et de marche
+  itèrent `part_views()` et unissent ; la mémo et la vue par segment sont
+  au-dessus), `TermTextsReaderV3::open_parts` (`text(id)` cherche l'entrée
+  dans chaque partie par ses plages ; `iter()` rend des identifiants
+  globaux ; `num_terms()` compte tout).
+- `meta.json` : `sfx_dictionary { generations: [..], next_generation,
+  next_ids, field_ids }`. Le commit écrit `dict-<next>.*` avec les nouveaux
+  textes, l'ajoute aux vivantes ; au-delà de `LUCIVY_DICT_MAX_GENERATIONS`
+  (8) il compacte : une génération qui tient tout (les textes des vivantes
+  + les frais), et les vivantes = elle seule. Le GC garde les vivantes et
+  toute génération **plus récente que la plus récente vivante** (en cours
+  d'écriture) ; les compactées tombent. Le delta : un bundle `dict-<g>.`
+  par vivante, les compactées retirées par préfixe chez le client.
+- La recherche d'un texte à l'indexation (`lookup`) interroge chaque
+  partie ; les identifiants restent stables.
+
+**Mesuré** (référence 10 000, `idx-dict2`) : construction + panel **19 s**
+(53 avant, 8 en v3) ; 4 générations vivantes à la fin (19 à 22, deux
+compactions passées) ; **390 Mo** (387 en une génération : +3 Mo, les
+FST séparées partagent moins) ; panel 9/9 identique ; temps de requête
+inchangés (exactes 3-5 ms, terme/préfixe 7-8, fuzzy froid 53 / chaud 7,
+regex 7). `test_dictionary_index` force trois générations au plus et
+passe par deux compactions ; suite lib 1 450.
+
+**Ce que ça corrige** : [06](06-chantier-dictionnaire-partage-rapport.md)
+§2.1 disait « une compaction ne supprime rien, elle réunit » : vrai, et
+les fichiers réunis sont supprimés par le GC dès que `meta.json` ne les
+nomme plus. Le §2.3 prévoyait « d'abord une seule génération rebâtie »
+puis « les générations » : fait dans cet ordre, en une nuit.
+
+**Reste** : le 30 000 en mode dictionnaire (en cours), puis le noyau entier
+(`V3_MAX_DOCS=100000 V3_COMMIT_EVERY=10000`) pour le chiffre final ; l'A/B
+de temps 30 000 ; la suite `cargo test -p lucivy-core` sur ce binaire ;
+`index_bytes` / `preload` ; la version 4.0.0 et la décision sur le mode
+par défaut (4 ?).
