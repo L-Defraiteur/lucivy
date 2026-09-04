@@ -17,11 +17,16 @@
 //!       the FST value is the record's offset — no inline parent, no flag bit.
 //!       Offsets grow with the keys, which the FST shares along its paths, and
 //!       the ordinal is a varint in the record: the 24-bit bound of the inline
-//!       value no longer comes from this file. Written since 4 September 2026, evening.
+//!       value no longer comes from this file. 4 September 2026, evening.
+//!   7 — the key stops at the token boundary (no overlap bytes in it, hence no
+//!       marker key either) and each parent's overlap bytes follow its flags
+//!       in the record (`encode_parent_entries_v7`). Two chunks with the same
+//!       own text and different overlaps share a key. Written since
+//!       4 September 2026, night. `keys_cut_at_boundary()` tells the walk.
 //!
 //! Versions 3 to 5 keep an inline single parent in the FST value (bit 63 set
 //! means "offset of a record" — `decode_output_v3`). The reader accepts all
-//! four versions; the writer only emits 6.
+//! five versions; the writer only emits 7.
 //!
 //! Removed vs v2: sibling table, gapmap, sepmap (all in separate files or gone).
 
@@ -29,15 +34,18 @@ use lucivy_fst::{Map, OutputTable};
 
 use super::builder_v3::{
     decode_output_v3, decode_parent_entries_v3, decode_parent_entries_v3_legacy,
-    decode_parent_entries_v4_packed, ParentEntryV3, ParentRefV3,
+    decode_parent_entries_v4_packed, decode_parent_entries_v7, decode_parent_entries_v7_where,
+    ParentEntryV3, ParentRefV3,
 };
 use super::section_file::{SectionFileReader, SectionFileWriter};
 
 const MAGIC: [u8; 4] = *b"SFX3";
 /// Container version written by `SfxFileWriterV3`.
-pub const VERSION: u8 = 6;
+pub const VERSION: u8 = 7;
 /// Last container version whose FST value may hold a parent inline.
 const INLINE_VALUE_VERSION: u8 = 5;
+/// Last container version whose keys run into the overlap (and have markers).
+const OVERLAP_IN_KEY_VERSION: u8 = 6;
 /// Last container version whose parent records use the 11-byte layout.
 const LEGACY_PARENTS_VERSION: u8 = 3;
 /// The container version whose records are packed 8-byte values.
@@ -107,7 +115,7 @@ pub struct SfxFileReaderV3 {
     /// on 800 segments, for a query with no results, before any search began.
     fst: Map<common::OwnedBytes>,
     parent_list_data: common::OwnedBytes,
-    /// Container version: 3 to 6 (see the module doc).
+    /// Container version: 3 to 7 (see the module doc).
     version: u8,
 }
 
@@ -155,9 +163,18 @@ impl SfxFileReaderV3 {
         Ok(Self { fst, parent_list_data, version })
     }
 
-    /// Container version this file was written with (3 to 6).
+    /// Container version this file was written with (3 to 7).
     pub fn container_version(&self) -> u8 {
         self.version
+    }
+
+    /// True when a key ends at its token's boundary and the parent record
+    /// carries the overlap bytes (container version 7); false when the key
+    /// runs `overlap_len` bytes into the next token and a marker key is cut
+    /// at the boundary (versions 3 to 6). The walk and the range scan differ.
+    #[inline]
+    pub fn keys_cut_at_boundary(&self) -> bool {
+        self.version > OVERLAP_IN_KEY_VERSION
     }
 
     /// Access the FST.
@@ -165,11 +182,27 @@ impl SfxFileReaderV3 {
         &self.fst
     }
 
+    /// The parents behind a FST value whose overlap bytes satisfy `keep` —
+    /// only the matching groups are read (container version 7). In an older
+    /// file the overlap is in the key, not the record: every parent is
+    /// returned and the caller's walk sorts them out.
+    pub fn decode_parents_where(&self, value: u64, keep: impl Fn(&[u8]) -> bool) -> Vec<ParentEntryV3> {
+        if self.version > OVERLAP_IN_KEY_VERSION {
+            let table = OutputTable::new(&self.parent_list_data);
+            return decode_parent_entries_v7_where(table.get(value), keep);
+        }
+        self.decode_parents(value)
+    }
+
     /// Decode parent(s) from a FST output value.
     pub fn decode_parents(&self, value: u64) -> Vec<ParentEntryV3> {
         if self.version > INLINE_VALUE_VERSION {
             let table = OutputTable::new(&self.parent_list_data);
-            return decode_parent_entries_v3(table.get(value));
+            return if self.version > OVERLAP_IN_KEY_VERSION {
+                decode_parent_entries_v7(table.get(value))
+            } else {
+                decode_parent_entries_v3(table.get(value))
+            };
         }
         match decode_output_v3(value) {
             ParentRefV3::Single(entry) => vec![entry],
@@ -211,7 +244,7 @@ impl SfxFileReaderV3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::suffix_fst::builder_v3::SuffixFstBuilderV3;
+    use crate::suffix_fst::builder_v3::{SuffixFstBuilderV3, MAX_OVERLAP_BYTES};
     use crate::suffix_fst::collector_v3::SfxCollectorV3;
 
     /// Build a complete .sfx v3 file from text, return the bytes.
@@ -259,14 +292,14 @@ mod tests {
         let bytes = build_sfx_v3(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&bytes).unwrap();
 
-        // "mutex_lo" should be findable at SI=0
-        let parents = reader.resolve_suffix("mutex_lo");
-        assert!(!parents.is_empty(), "should find mutex_lo");
-        assert!(parents.iter().any(|p| p.sti == 0 && p.is_word_start));
+        // "mutex_" should be findable at SI=0 (the key stops at the boundary)
+        let parents = reader.resolve_suffix("mutex_");
+        assert!(!parents.is_empty(), "should find mutex_");
+        assert!(parents.iter().any(|p| p.sti == 0 && p.is_word_start && &p.overlap[..2] == b"lo"));
 
-        // "x_lo" should be findable (cross-boundary via overlap)
-        let parents = reader.resolve_suffix("x_lo");
-        assert!(!parents.is_empty(), "should find x_lo (overlap trigram)");
+        // "x_" carries the cross-boundary trigram "x_l" through its overlap
+        let parents = reader.resolve_suffix("x_");
+        assert!(parents.iter().any(|p| p.sti == 4 && &p.overlap[..2] == b"lo"), "should find x_ + lo");
     }
 
     #[test]
@@ -274,7 +307,7 @@ mod tests {
         let bytes = build_sfx_v3(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&bytes).unwrap();
 
-        let parents = reader.resolve_suffix("mutex_lo");
+        let parents = reader.resolve_suffix("mutex_");
         let p = parents.iter().find(|p| p.sti == 0).unwrap();
         assert_eq!(p.own_len, 6);
         assert_eq!(p.sep_len, 1);
@@ -288,12 +321,12 @@ mod tests {
         let bytes = build_sfx_v3(&["mutex_lock", "mutex_core", "hello_world"]);
         let reader = SfxFileReaderV3::open(&bytes).unwrap();
 
-        // "mutex_lo" from doc 0
-        assert!(!reader.resolve_suffix("mutex_lo").is_empty());
-        // "mutex_co" from doc 1
-        assert!(!reader.resolve_suffix("mutex_co").is_empty());
-        // "hello_wo" from doc 2
-        assert!(!reader.resolve_suffix("hello_wo").is_empty());
+        // "mutex_" from docs 0 and 1: one key, two parents, overlaps "lo" and "co"
+        let overlaps: Vec<[u8; 2]> = reader.resolve_suffix("mutex_").iter()
+            .map(|p| [p.overlap[0], p.overlap[1]]).collect();
+        assert!(overlaps.contains(b"lo") && overlaps.contains(b"co"), "{overlaps:?}");
+        // "hello_" from doc 2
+        assert!(!reader.resolve_suffix("hello_").is_empty());
     }
 
     /// An index written before container version 4 must still open and
@@ -303,8 +336,8 @@ mod tests {
         use crate::suffix_fst::builder_v3::{
             encode_multi_parent_v3, encode_single_parent_v3, ParentEntryV3,
         };
-        let a = ParentEntryV3 { raw_ordinal: 7, sti: 0, own_len: 6, sep_len: 1, overlap_len: 2, is_word_start: true };
-        let b = ParentEntryV3 { raw_ordinal: 9, sti: 2, own_len: 8, sep_len: 0, overlap_len: 2, is_word_start: false };
+        let a = ParentEntryV3 { raw_ordinal: 7, sti: 0, own_len: 6, sep_len: 1, overlap_len: 2, overlap: [0; MAX_OVERLAP_BYTES], is_word_start: true };
+        let b = ParentEntryV3 { raw_ordinal: 9, sti: 2, own_len: 8, sep_len: 0, overlap_len: 2, overlap: [0; MAX_OVERLAP_BYTES], is_word_start: false };
 
         // Legacy record for key "lo": [u32 count] + 11 bytes per parent.
         let mut record = 2u32.to_le_bytes().to_vec();
@@ -363,10 +396,31 @@ mod tests {
         assert_eq!(reader5.resolve_suffix("lo"), vec![a.clone(), b.clone()]);
         assert_eq!(reader5.resolve_suffix("mu"), vec![a.clone()]);
 
-        // And a freshly written file says 6, with every parent behind an offset.
+        // Version 6: every key behind an offset, keys still carrying the overlap.
+        let mut table6 = lucivy_fst::OutputTableBuilder::new();
+        let off_lo = table6.add(&crate::suffix_fst::builder_v3::encode_parent_entries_v3(&[a.clone(), b.clone()]));
+        let off_mu = table6.add(&crate::suffix_fst::builder_v3::encode_parent_entries_v3(&[a.clone()]));
+        let mut fst6 = lucivy_fst::MapBuilder::memory();
+        fst6.insert(b"\x01lo", off_lo).unwrap();
+        fst6.insert(b"\x01mu", off_mu).unwrap();
+        let mut file6 = SectionFileWriter::new(MAGIC, OVERLAP_IN_KEY_VERSION);
+        file6.add_section(SECTION_FST, &fst6.into_inner().unwrap());
+        file6.add_section(SECTION_PARENTS, &table6.into_inner());
+        let reader6 = SfxFileReaderV3::open(&file6.serialize()).unwrap();
+        assert_eq!(reader6.container_version(), 6);
+        assert!(!reader6.keys_cut_at_boundary());
+        assert_eq!(reader6.resolve_suffix("lo"), vec![a.clone(), b.clone()]);
+        assert_eq!(reader6.resolve_suffix("mu"), vec![a.clone()]);
+
+        // And a freshly written file says 7: keys cut at the boundary, the
+        // overlap in the record. `mutex_` + `lo` is the key `mutex_` now.
         let fresh = SfxFileReaderV3::open(&build_sfx_v3(&["mutex_lock"])).unwrap();
-        assert_eq!(fresh.container_version(), 6);
-        assert!(!fresh.resolve_suffix("mutex_lo").is_empty());
+        assert_eq!(fresh.container_version(), 7);
+        assert!(fresh.keys_cut_at_boundary());
+        assert!(fresh.resolve_suffix("mutex_lo").is_empty());
+        let p = fresh.resolve_suffix("mutex_");
+        assert_eq!(p.len(), 1);
+        assert_eq!((p[0].overlap_len, &p[0].overlap[..2]), (2, &b"lo"[..]));
 
         // A version from the future is refused, not clamped.
         let mut file9 = SectionFileWriter::new(MAGIC, VERSION + 1);
@@ -524,6 +578,54 @@ mod tests {
             f / 1024, t / 1024, (f + t) / 1024,
             100.0 * ((f + t) as f64 - (fst_len + table_len) as f64) / (fst_len + table_len) as f64,
             cut.len(), n_parents_cut);
+
+        // The production version-7 record (flat / grouped by overlap) over the
+        // cut keys, with the file's ordinals, and with ordinals renumbered by
+        // (word-stripped, overlap, text) as the collector does since the
+        // grouped record exists (needs `TERMTEXTS_FILE`, the segment's).
+        {
+            use crate::suffix_fst::builder_v3::encode_parent_entries_v7;
+            let remap: Option<Vec<u64>> = std::env::var("TERMTEXTS_FILE").ok().map(|tp| {
+                let tb = std::fs::read(&tp).unwrap();
+                let tt = crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open(&tb).unwrap();
+                let n = tt.num_terms();
+                let mut keyed: Vec<(bool, Vec<u8>, String, u32)> = (0..n).map(|o| {
+                    let (text, m) = tt.entry(o).unwrap();
+                    let lower = text.to_lowercase();
+                    let ov = lower.as_bytes()[lower.len().saturating_sub(m.overlap_len as usize)..].to_vec();
+                    (m.is_word_stripped, ov, lower, o)
+                }).collect();
+                keyed.sort();
+                let mut map = vec![0u64; n as usize];
+                for (new, (_, _, _, old)) in keyed.iter().enumerate() { map[*old as usize] = new as u64; }
+                map
+            });
+            for (label, map) in [("v7 production", None), ("v7 + ordinals by overlap", remap.as_ref())] {
+                if label.starts_with("v7 +") && map.is_none() { continue; }
+                let mut tb = OutputTableBuilder::new();
+                let mut items: Vec<(Vec<u8>, u64)> = Vec::with_capacity(cut.len());
+                let mut flat = 0usize; let mut grouped = 0usize;
+                for (k, list) in &cut {
+                    let parents: Vec<ParentEntryV3> = list.iter().map(|(p, ov)| {
+                        let mut q = p.clone();
+                        q.overlap = [0; 4];
+                        q.overlap[..ov.len().min(4)].copy_from_slice(&ov[..ov.len().min(4)]);
+                        q.overlap_len = ov.len().min(4) as u8;
+                        if let Some(m) = map { q.raw_ordinal = m[q.raw_ordinal as usize]; }
+                        q
+                    }).collect();
+                    let rec = encode_parent_entries_v7(&parents);
+                    if rec[0] & 0x80 != 0 { grouped += 1 } else { flat += 1 }
+                    let off = tb.add(&rec);
+                    items.push((k.clone(), off));
+                }
+                let t = tb.into_inner().len();
+                let f = fst_size(&items);
+                eprintln!("{label:>26}: fst {} KB, table {} KB, total {} KB ({:+.1}%) | {} flat, {} grouped",
+                    f / 1024, t / 1024, (f + t) / 1024,
+                    100.0 * ((f + t) as f64 - (fst_len + table_len) as f64) / (fst_len + table_len) as f64, flat, grouped);
+            }
+        }
 
         // no-marker + ord-sti + overlap bytes
         let mut tb = OutputTableBuilder::new();

@@ -1132,6 +1132,22 @@ fn run_panel(
 
         let search_ms = LAST_SEARCH_MS.with(|c| c.get());
 
+        // `V3_DUMP_DOCS=<file>`: one JSON line per query with the paths of
+        // the documents found and every span — to diff two index layouts on
+        // a query that has no grep reference (Jaro-Winkler).
+        if let Ok(dump) = std::env::var("V3_DUMP_DOCS") {
+            use std::io::Write;
+            let mut docs: Vec<&str> = v3_result.doc_indices.iter().map(|&i| files[i].0.as_str()).collect();
+            docs.sort();
+            let mut spans: Vec<(&str, usize, usize)> = v3_result.highlights.iter()
+                .map(|&(d, f, t)| (files[d].0.as_str(), f, t)).collect();
+            spans.sort();
+            let line = serde_json::json!({ "query": q.text, "mode": mode_label, "docs": docs, "spans": spans });
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&dump) {
+                writeln!(f, "{line}").ok();
+            }
+        }
+
         // Spans: the engine's highlights against every occurrence on disk.
         // Asserted since 23 August, when the 50k kernel panel went exact on
         // both the natural and the merged index: a missing or extra span is

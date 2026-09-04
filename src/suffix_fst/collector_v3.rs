@@ -1149,18 +1149,13 @@ mod tests {
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
         assert!(fst.len() > 0, "FST should have entries");
 
-        // Verify cross-boundary trigram "x_l" exists in the FST
-        let key = [super::super::builder::SI_REST_PREFIX, b'x', b'_', b'l'];
-        // Should be a prefix of some entry (x_lo, x_lock_in, etc.)
-        use lucivy_fst::{IntoStreamer, Streamer};
-        let mut lt = key.to_vec();
-        *lt.last_mut().unwrap() += 1; // "x_m"
-        let mut stream = fst.range().ge(&key[..]).lt(&lt[..]).into_stream();
-        let mut found = false;
-        while let Some((_k, _v)) = stream.next() {
-            found = true;
-            break;
-        }
-        assert!(found, "cross-boundary trigram 'x_l' should be in FST via overlap");
+        // The cross-boundary trigram "x_l" is the key "x_" plus the overlap
+        // "lo" its record carries (keys stop at the token boundary).
+        let key = [super::super::builder::SI_REST_PREFIX, b'x', b'_'];
+        let val = fst.get(key).expect("x_ at SI>0");
+        let parents = crate::suffix_fst::builder_v3::decode_parent_entries_v7(
+            lucivy_fst::OutputTable::new(&_output_table).get(val));
+        assert!(parents.iter().any(|p| p.overlap[..2] == *b"lo"),
+            "cross-boundary trigram 'x_l' should be in the record's overlap");
     }
 }

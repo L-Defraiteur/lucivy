@@ -22,7 +22,7 @@ pub(crate) fn snap_to_char_boundary(s: &str, pos: usize) -> usize {
     p
 }
 use crate::suffix_fst::builder_v3::{
-    ParentEntryV3, SI_STRIPPED_PREFIX,
+    ParentEntryV3, MAX_OVERLAP_BYTES, SI_STRIPPED_PREFIX,
 };
 use crate::suffix_fst::file_v3::SfxFileReaderV3;
 
@@ -39,8 +39,11 @@ pub struct FstCandidateV3 {
     pub own_len: u16,
     /// Number of trailing separator bytes included in `own_len`.
     pub sep_len: u8,
-    /// Bytes of the next token appended to this key beyond `own_len`.
+    /// Bytes of the next token following `own_len` — in the key up to
+    /// container version 6, in the record (`overlap`) since version 7.
     pub overlap_len: u8,
+    /// Those bytes when the record carries them (see `ParentEntryV3::overlap`).
+    pub overlap: [u8; MAX_OVERLAP_BYTES],
     /// True if this token is the first chunk of its word.
     pub is_word_start: bool,
     /// Which FST partition this candidate was found in.
@@ -66,6 +69,7 @@ impl FstCandidateV3 {
             own_len: p.own_len,
             sep_len: p.sep_len,
             overlap_len: p.overlap_len,
+            overlap: p.overlap,
             is_word_start: p.is_word_start,
             partition,
         }
@@ -173,12 +177,61 @@ pub fn fst_candidates_v3(
                 results.push(FstCandidateV3::from_parent(&p, partition));
             }
         }
+
+        // Keys cut at the token boundary (container version 7): a query whose
+        // tail lies in the next token is not a prefix of any key any more. It
+        // used to be found because the key ran `overlap_len` bytes past the
+        // boundary; those bytes are in the record now, so probe the keys that
+        // are proper prefixes of the query, up to `MAX_OVERLAP_BYTES` shorter,
+        // and keep the parents whose overlap completes it.
+        if reader.keys_cut_at_boundary() {
+            let len = query_bytes.len();
+            let shortest = len.saturating_sub(MAX_OVERLAP_BYTES).max(1);
+            for k in shortest..len {
+                let tail = &query_bytes[k..];
+                let mut probe = vec![partition];
+                probe.extend_from_slice(&query_bytes[..k]);
+                let Some(val) = fst.get(&probe) else { continue };
+                let parents = reader.decode_parents_where(val, |ov| ov.len() >= tail.len() && ov[..tail.len()] == *tail);
+                for p in parents {
+                    results.push(FstCandidateV3::from_parent(&p, partition));
+                }
+            }
+        }
     }
 
     results
 }
 
 // ─── falling_walk_v3 ──────────────────────────────────────────────────────
+
+/// Split at a final node of a key cut at the token boundary (container
+/// version 7). `prefix_len` is the node's depth and must be the boundary
+/// itself; the parent's overlap bytes must match the query past it, and the
+/// query must continue beyond them — the conditions under which the walk over
+/// the older, longer keys reached the full key and accepted the split.
+#[inline]
+fn split_at_boundary(
+    parent: &ParentEntryV3,
+    prefix_len: usize,
+    split_byte: usize,
+    query_bytes: &[u8],
+) -> Option<SplitCandidateV3> {
+    if prefix_len != split_byte {
+        return None;
+    }
+    let need = (parent.overlap_len as usize).min(MAX_OVERLAP_BYTES);
+    let remainder = &query_bytes[split_byte..];
+    if remainder.len() <= need || remainder[..need] != parent.overlap[..need] {
+        return None;
+    }
+    Some(SplitCandidateV3 {
+        query_consumed: split_byte,
+        parent: parent.clone(),
+        remainder_start: split_byte,
+        overlap_validated: need,
+    })
+}
 
 /// Falling walk v3: byte-by-byte FST walk.
 ///
@@ -205,6 +258,7 @@ pub fn falling_walk_chunks(
     let map = reader.fst();
     let fst = map.as_fst();
     let mut candidates = Vec::new();
+    let cut = reader.keys_cut_at_boundary();
 
     for &partition in &[SI0_PREFIX, SI_REST_PREFIX] {
         walk_partition(
@@ -222,6 +276,14 @@ pub fn falling_walk_chunks(
                     return None;
                 }
                 let split_byte = parent.own_len as usize - parent.sti as usize;
+                if cut {
+                    // The key ends at the boundary, so the final node IS the
+                    // boundary; the record says which bytes follow. They must
+                    // agree with the query, and the query must go on past
+                    // them — exactly when the walk over the longer keys used
+                    // to reach the full key (see below).
+                    return split_at_boundary(parent, prefix_len, split_byte, query_bytes);
+                }
                 if prefix_len >= split_byte {
                     let overlap_consumed = prefix_len - split_byte;
                     // The key carries the next token's first bytes. When the
@@ -270,6 +332,7 @@ pub fn falling_walk_words(
     let fst = map.as_fst();
     let mut candidates = Vec::new();
 
+    let cut = reader.keys_cut_at_boundary();
     walk_partition(
         fst, reader, query_bytes, SI_STRIPPED_PREFIX,
         |parent, prefix_len| {
@@ -283,6 +346,9 @@ pub fn falling_walk_words(
             let split_byte = content_len - parent.sti as usize;
             if split_byte == 0 {
                 return None;
+            }
+            if cut {
+                return split_at_boundary(parent, prefix_len, split_byte, query_bytes);
             }
             if prefix_len >= split_byte {
                 let overlap_consumed = prefix_len - split_byte;
@@ -350,6 +416,13 @@ fn walk_partition<D: AsRef<[u8]>, F>(
 ) where
     F: Fn(&ParentEntryV3, usize) -> Option<SplitCandidateV3>,
 {
+    // Keys cut at the boundary (version 7): at a final node of depth `d`
+    // only the parents whose overlap is what the query says next can split
+    // (`split_at_boundary`); the record is grouped by overlap so the other
+    // groups are skipped unread. Older files return every parent here.
+    let overlap_agrees = |ov: &[u8], d: usize| -> bool {
+        query_bytes.len() > d + ov.len() && query_bytes[d..d + ov.len()] == *ov
+    };
     let root = fst.root();
     let Some(idx) = root.find_input(partition) else { return };
     let trans = root.transition(idx);
@@ -370,7 +443,7 @@ fn walk_partition<D: AsRef<[u8]>, F>(
         if node.is_final() {
             let val = output.cat(node.final_output()).value();
             let prefix_len = i + 1;
-            let parents = reader.decode_parents(val);
+            let parents = reader.decode_parents_where(val, |ov| overlap_agrees(ov, prefix_len));
 
             for parent in &parents {
                 if let Some(split) = check_split(parent, prefix_len) {
@@ -385,7 +458,7 @@ fn walk_partition<D: AsRef<[u8]>, F>(
     // final nodes and decode their parent entries.
     // The check_split receives prefix_len = query_len (what the query actually
     // consumed), not the FST depth — the extra bytes are overlap, not query.
-    if fully_consumed && !node.is_final() {
+    if fully_consumed && !node.is_final() && !reader.keys_cut_at_boundary() {
         overlap_lookahead(fst, reader, &node, output, query_bytes.len(),
             &check_split, candidates);
     }
@@ -671,6 +744,7 @@ pub fn splits_from_fst_candidates(
                 own_len: cand.own_len,
                 sep_len: cand.sep_len,
                 overlap_len: cand.overlap_len,
+                overlap: cand.overlap,
                 is_word_start: cand.is_word_start,
             },
             remainder_start: split_byte,

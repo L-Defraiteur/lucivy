@@ -679,9 +679,9 @@ mod tests {
             .expect("should open sfx v3");
         assert!(reader.num_suffix_terms() > 0);
 
-        // Verify cross-boundary trigram "x_l" exists
-        let parents = reader.resolve_suffix("x_lo");
-        assert!(!parents.is_empty(), "x_lo should be in FST via overlap");
+        // Verify cross-boundary trigram "x_l": key `x_`, overlap `lo` in its record
+        let parents = reader.resolve_suffix("x_");
+        assert!(parents.iter().any(|p| &p.overlap[..2] == b"lo"), "x_ + lo should be in the FST");
 
         // Verify termtexts
         let tt = TermTextsReaderV3::open(&output.termtexts)
@@ -731,8 +731,8 @@ mod tests {
 
         let reader = SfxFileReaderV3::open(&output.sfx).unwrap();
         // Both values should be indexed
-        assert!(!reader.resolve_suffix("mutex_lo").is_empty());
-        assert!(!reader.resolve_suffix("hello_wo").is_empty());
+        assert!(!reader.resolve_suffix("mutex_").is_empty());
+        assert!(!reader.resolve_suffix("hello_").is_empty());
     }
 
     #[test]
@@ -753,7 +753,14 @@ mod tests {
         // For each term in termtexts, resolving the suffix should work
         for ord in 0..tt.num_terms() {
             let (text, meta) = tt.entry(ord).unwrap();
-            let parents = reader.resolve_suffix(text);
+            // The key stops at the token boundary: own bytes for a chunk, the
+            // content for a word entry; the overlap is in the record.
+            let key_text = if meta.is_word_stripped {
+                &text[..text.len() - meta.overlap_len as usize]
+            } else {
+                &text[..meta.own_len as usize]
+            };
+            let parents = reader.resolve_suffix(key_text);
             // At least SI=0 should exist for this token
             assert!(
                 parents.iter().any(|p| p.sti == 0),
@@ -822,10 +829,13 @@ mod tests {
         let reader = SfxFileReaderV3::open(&output.sfx).unwrap();
 
         // All tokens from both segments should be present
-        assert!(!reader.resolve_suffix("mutex_lo").is_empty(), "mutex_lo from seg_a");
-        assert!(!reader.resolve_suffix("mutex_co").is_empty(), "mutex_co from seg_b");
-        assert!(!reader.resolve_suffix("hello_wo").is_empty(), "hello_wo from seg_a");
-        assert!(!reader.resolve_suffix("foo_ba").is_empty(), "foo_ba from seg_b");
+        let overlaps = |key: &str| -> Vec<[u8; 2]> {
+            reader.resolve_suffix(key).iter().map(|p| [p.overlap[0], p.overlap[1]]).collect()
+        };
+        assert!(overlaps("mutex_").contains(b"lo"), "mutex_lo from seg_a");
+        assert!(overlaps("mutex_").contains(b"co"), "mutex_co from seg_b");
+        assert!(overlaps("hello_").contains(b"wo"), "hello_wo from seg_a");
+        assert!(overlaps("foo_").contains(b"ba"), "foo_ba from seg_b");
     }
 
     #[test]
@@ -901,8 +911,8 @@ mod tests {
             // they were wrongly fed to add_token and did resolve here. They must
             // not any more.
             if meta.is_word_stripped { continue; }
-            let parents = reader.resolve_suffix(text);
-            let p = parents.iter().find(|p| p.sti == 0)
+            let parents = reader.resolve_suffix(&text[..meta.own_len as usize]);
+            let p = parents.iter().find(|p| p.sti == 0 && p.overlap[..meta.overlap_len as usize] == text.as_bytes()[meta.own_len as usize..])
                 .unwrap_or_else(|| panic!("no sti=0 parent for chunk entry '{text}'"));
             assert_eq!(p.own_len, meta.own_len, "own_len roundtrip for '{text}'");
             assert_eq!(p.sep_len, meta.sep_len, "sep_len roundtrip for '{text}'");
