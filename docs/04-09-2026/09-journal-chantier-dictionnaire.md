@@ -240,3 +240,23 @@ Le `.sfx`, 49 % de l'index ce matin, en fait 38 % ce soir.
 
 Les index de référence du scratchpad `idx-v7` et `idx30k-v7` contiennent
 des fichiers **conteneur 8** (le script de protocole a gardé le nom).
+
+---
+
+## 4. Étape 3a — l'ordinal passe de 24 à 28 bits
+
+Le record `.sfx` n'impose plus rien à l'ordinal depuis 2a (varint), et
+`.posmap` s'élargit seul (`PMP3` → `PMAP` au-delà de 24 bits). Restait
+`.word_pos_map` : slot `ordinal 24 | span 8`, et au-delà **la carte n'était
+pas écrite** (silencieusement — les lecteurs retombaient sur les postings).
+Nouveau `WMP3` : `ordinal 28 | span 4`, un span ≥ 15 rapporté comme
+`SPAN_OVERFLOW` (le lecteur normalise, les consommateurs ne changent pas) ;
+`WMP2` encore lu. `SuffixFstBuilderV3::MAX_ORDINAL` = 2²⁸ − 1, erreur dure
+du builder et de `merge_segments_v3` (message en nombre d'ordinaux).
+
+268 M d'ordinaux par segment : seize fois le noyau entier (25,6 M de
+textes distincts). La fusion du noyau vers 10 segments, que le harnais
+refusait ce soir sur 17,9 M de termes, devient possible — non relancée
+(11 Go, longue) ; la borne effective est désormais la mémoire de la
+fusion (`LUCIVY_MAX_MERGED_DOCS`, commentaire de `handle.rs` mis à jour),
+pas l'encodage. Suite `cargo test --lib` verte (1 447).

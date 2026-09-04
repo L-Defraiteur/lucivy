@@ -118,13 +118,14 @@ fn create_writer(index: &Index) -> Result<IndexWriter, String> {
         }
     };
 
-    // Cap segment size: the SFX v3 encoding addresses 2^24 ordinals per
-    // segment and a chunk token is nearly unique, so ordinals grow with the
-    // text, not the vocabulary — 50k kernel files in one segment use 83% of
-    // them, and query time grows with segment size too (`include`: 55ms on
-    // 800 segments, 718ms on one). Both knobs: a segment above
-    // MAX_DOCS_BEFORE_MERGE is never merged again, and no merge may produce
-    // more than that.
+    // Cap segment size: a v3 segment addresses 2^28 ordinals (2^24 until
+    // 4 September 2026 at night — the `.sfx` record and the word map were
+    // widened together) and a chunk token is nearly unique, so ordinals
+    // grow with the text, not the vocabulary — 50k kernel files in one
+    // segment used 83% of the old bound — and query time grows with segment
+    // size too (`include`: 55ms on 800 segments, 718ms on one). Both knobs:
+    // a segment above MAX_DOCS_BEFORE_MERGE is never merged again, and no
+    // merge may produce more than that.
     //
     // The cap is per target: `LUCIVY_MAX_MERGED_DOCS`, 10 000 natively and
     // 800 on wasm32. A merge sizes its arenas from its inputs — text,

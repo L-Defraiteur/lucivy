@@ -861,17 +861,18 @@ impl SuffixFstBuilderV3 {
             // occurrences lost. Merges are exactly the operation that crosses
             // these thresholds.
             // The record encodes the ordinal as a varint since version 5, so
-            // the 24-bit bound is no longer this file's: it is `.word_pos_map`'s
-            // slot layout (`SLOT_ORDINAL_BITS`) and `.posmap`'s narrow width
-            // that still assume it. It stays a hard error until they are widened.
+            // the bound is no longer this file's: `MAX_ORDINAL` is what
+            // `.word_pos_map`'s slot holds (28 bits), and `.posmap` widens
+            // itself past 24. A hard error, not a debug_assert: past it the
+            // word map would silently vanish.
             if num_parents > self.max_parents { self.max_parents = num_parents; }
             for e in &self.entries[i..j] {
                 let p = &e.2;
-                if p.raw_ordinal > ORDINAL_MASK {
+                if p.raw_ordinal > Self::MAX_ORDINAL {
                     return Err(std::io::Error::other(format!(
-                        "sfx v3: ordinal {} exceeds the {ORDINAL_BITS}-bit parent encoding; \
+                        "sfx v3: ordinal {} exceeds the {} ordinals a segment can address; \
                          the segment holds too many distinct terms (split it instead of merging)",
-                        p.raw_ordinal)).into());
+                        p.raw_ordinal, Self::MAX_ORDINAL + 1)).into());
                 }
                 if (p.overlap_len as usize) > MAX_OVERLAP_BYTES {
                     return Err(std::io::Error::other(format!(
@@ -922,7 +923,7 @@ impl SuffixFstBuilderV3 {
                 _t_rest.elapsed().as_nanos() as f64 / 1e6,
                 fst_bytes.len() / 1024,
                 self.num_terms, self.max_parents,
-                100.0 * max_ordinal as f64 / ORDINAL_MASK as f64);
+                100.0 * max_ordinal as f64 / Self::MAX_ORDINAL as f64);
         }
         Ok((fst_bytes, output_table.into_inner()))
     }
@@ -937,8 +938,11 @@ impl SuffixFstBuilderV3 {
         self.max_parents
     }
 
-    /// Headroom of the single-parent ordinal encoding.
-    pub const MAX_ORDINAL: u64 = ORDINAL_MASK;
+    /// Largest ordinal a v3 segment can address: what a `.word_pos_map`
+    /// slot holds (28 bits since 4 September 2026 at night; the `.sfx`
+    /// record is a varint and `.posmap` widens itself). `build()` and
+    /// `merge_segments_v3` refuse beyond it.
+    pub const MAX_ORDINAL: u64 = (1 << super::word_pos_map::SLOT_ORDINAL_BITS) - 1;
 }
 
 /// Check if position `i` is a UTF-8 char boundary in a byte slice.

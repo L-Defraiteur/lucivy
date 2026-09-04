@@ -11,14 +11,18 @@
 //! time; the merge read it only to write it back. Same shape, new content, new
 //! magic so an old file is rejected rather than misread.
 //!
-//! Slot layout (u32): `ordinal | span << 24`. The ordinal takes 24 bits — the
-//! FST output already caps ordinals there (`builder_v3::ORDINAL_BITS`) — and
-//! `span = last_position - first_position` takes 8. A span of 255 means "255 or
-//! more": the reader then falls back to the posting list for the true end.
-//! Positions where no word starts hold u32::MAX.
+//! Slot layout (u32), `WMP3`: `ordinal | span << 28`. The ordinal takes
+//! 28 bits — the bound of a v3 segment since 4 September 2026 at night
+//! (`SuffixFstBuilderV3::MAX_ORDINAL`); the `.sfx` record no longer caps it
+//! at 24 — and `span = last_position - first_position` takes 4. A span of
+//! 15 means "15 or more": the reader reports it as `SPAN_OVERFLOW` and the
+//! caller falls back to the posting list for the true end. Positions where
+//! no word starts hold u32::MAX.
+//!
+//! `WMP2` (24 bits of ordinal, 8 of span, overflow at 255) is still read.
 //!
 //! ```text
-//! [4 bytes] magic "WMP2"
+//! [4 bytes] magic "WMP3"
 //! [4 bytes] num_docs: u32 LE
 //! [8 bytes × (num_docs + 1)] offset table
 //! Data section (per doc):
@@ -30,16 +34,25 @@ use super::index_registry::{SfxIndexFile, MergeStrategy};
 /// Builds a word-position map during indexation.
 pub struct WordPosMapWriter {
     docs: Vec<Vec<u32>>,
-    /// An ordinal did not fit in 24 bits. The map would then lie by omission,
-    /// so `serialize` emits nothing and readers fall back to the posting path.
+    /// An ordinal did not fit in the slot. The builder refuses such an
+    /// ordinal first (`MAX_ORDINAL`), so this is a second guard: the map
+    /// would lie by omission, so `serialize` emits nothing and readers fall
+    /// back to the posting path.
     overflow: bool,
 }
 
-/// Ordinal bits in a slot; mirrors `builder_v3::ORDINAL_BITS`.
-pub const SLOT_ORDINAL_BITS: u32 = 24;
+/// Ordinal bits in a `WMP3` slot; `SuffixFstBuilderV3::MAX_ORDINAL` is
+/// `(1 << SLOT_ORDINAL_BITS) - 1`.
+pub const SLOT_ORDINAL_BITS: u32 = 28;
 const SLOT_ORDINAL_MASK: u32 = (1 << SLOT_ORDINAL_BITS) - 1;
-/// Span value meaning "255 or more, ask the posting list".
+/// Ordinal bits in a `WMP2` slot (read only).
+const SLOT_ORDINAL_BITS_V2: u32 = 24;
+const SLOT_ORDINAL_MASK_V2: u32 = (1 << SLOT_ORDINAL_BITS_V2) - 1;
+/// Span value the reader reports for "the span did not fit, ask the posting
+/// list": 15 or more in a `WMP3` slot, 255 or more in a `WMP2` one.
 pub const SPAN_OVERFLOW: u32 = 255;
+/// Largest span a `WMP3` slot holds; written for any span at or above it.
+const SLOT_SPAN_MAX: u32 = (1 << (32 - SLOT_ORDINAL_BITS)) - 1;
 
 impl Default for WordPosMapWriter {
     fn default() -> Self {
@@ -60,7 +73,7 @@ impl WordPosMapWriter {
             self.overflow = true;
             return;
         }
-        let span = last.saturating_sub(first).min(SPAN_OVERFLOW);
+        let span = last.saturating_sub(first).min(SLOT_SPAN_MAX);
         let slot = ordinal | (span << SLOT_ORDINAL_BITS);
 
         let d = doc_id as usize;
@@ -106,7 +119,7 @@ impl WordPosMapWriter {
         let data_size: usize = self.docs.iter().map(|d| d.len() * 4).sum();
         let mut buf = Vec::with_capacity(header_size + data_size);
 
-        buf.extend_from_slice(b"WMP2");
+        buf.extend_from_slice(b"WMP3");
         buf.extend_from_slice(&num_docs.to_le_bytes());
 
         // Offset table
@@ -133,14 +146,21 @@ pub struct WordPosMapReader<'a> {
     num_docs: u32,
     offsets: &'a [u8],
     data: &'a [u8],
+    /// Ordinal bits of a slot: 28 (`WMP3`) or 24 (`WMP2`).
+    ordinal_bits: u32,
 }
 
 impl<'a> WordPosMapReader<'a> {
-    /// Open a `WMP2` file over borrowed bytes; `None` on a different magic
-    /// (including the older per-document counter format) or a truncated header.
+    /// Open a `WMP3` or `WMP2` file over borrowed bytes; `None` on a
+    /// different magic (including the older per-document counter format)
+    /// or a truncated header.
     pub fn open(bytes: &'a [u8]) -> Option<Self> {
         if bytes.len() < 8 { return None; }
-        if &bytes[0..4] != b"WMP2" { return None; }
+        let ordinal_bits = match &bytes[0..4] {
+            b"WMP3" => SLOT_ORDINAL_BITS,
+            b"WMP2" => SLOT_ORDINAL_BITS_V2,
+            _ => return None,
+        };
         let num_docs = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
         let offsets_size = (num_docs as usize + 1) * 8;
         if bytes.len() < 8 + offsets_size { return None; }
@@ -148,6 +168,7 @@ impl<'a> WordPosMapReader<'a> {
             num_docs,
             offsets: &bytes[8..8 + offsets_size],
             data: &bytes[8 + offsets_size..],
+            ordinal_bits,
         })
     }
 
@@ -164,9 +185,9 @@ impl<'a> WordPosMapReader<'a> {
         ((end - start) / 4) as u32
     }
 
-    /// Raw slot at (doc_id, position): `ordinal | span << 24`, or `None` when
-    /// out of range or when no word starts there. See `word_start_at` for the
-    /// decoded form.
+    /// Raw slot at (doc_id, position): `ordinal | span << ordinal_bits`, or
+    /// `None` when out of range or when no word starts there. See
+    /// `word_start_at` for the decoded form.
     pub fn word_at(&self, doc_id: u32, position: u32) -> Option<u32> {
         if doc_id >= self.num_docs { return None; }
         let start = self.read_offset(doc_id) as usize;
@@ -184,7 +205,11 @@ impl<'a> WordPosMapReader<'a> {
     /// and must be read from the posting list.
     pub fn word_start_at(&self, doc_id: u32, position: u32) -> Option<(u32, u32)> {
         let slot = self.word_at(doc_id, position)?;
-        Some((slot & SLOT_ORDINAL_MASK, slot >> SLOT_ORDINAL_BITS))
+        if self.ordinal_bits == SLOT_ORDINAL_BITS_V2 {
+            return Some((slot & SLOT_ORDINAL_MASK_V2, slot >> SLOT_ORDINAL_BITS_V2));
+        }
+        let span = slot >> SLOT_ORDINAL_BITS;
+        Some((slot & SLOT_ORDINAL_MASK, if span >= SLOT_SPAN_MAX { SPAN_OVERFLOW } else { span }))
     }
 
     fn read_offset(&self, idx: u32) -> u64 {
@@ -271,10 +296,39 @@ mod tests {
         let r = WordPosMapReader::open(&r_data).unwrap();
         assert_eq!(r.word_start_at(0, 0), Some((3, SPAN_OVERFLOW)));
 
-        // An ordinal that does not fit in 24 bits disables the whole map.
+        // A span of 15 already overflows a WMP3 slot; 14 does not.
         let mut w = WordPosMapWriter::new();
-        w.add_word(0, 0, 0, 1 << 24);
+        w.add_word(0, 0, 15, 3);
+        w.add_word(0, 16, 30, 4);
+        let r_data = w.serialize();
+        let r = WordPosMapReader::open(&r_data).unwrap();
+        assert_eq!(r.word_start_at(0, 0), Some((3, SPAN_OVERFLOW)));
+        assert_eq!(r.word_start_at(0, 16), Some((4, 14)));
+
+        // An ordinal beyond 24 bits fits (28 bits); one beyond 28 disables the map.
+        let mut w = WordPosMapWriter::new();
+        w.add_word(0, 0, 2, 1 << 24);
+        let r_data = w.serialize();
+        assert_eq!(WordPosMapReader::open(&r_data).unwrap().word_start_at(0, 0), Some((1 << 24, 2)));
+        let mut w = WordPosMapWriter::new();
+        w.add_word(0, 0, 0, 1 << 28);
         assert!(w.serialize().is_empty());
         assert!(WordPosMapReader::open(&w.serialize()).is_none());
+    }
+
+    /// A `WMP2` file (24-bit ordinal, 8-bit span) still reads, with 255 as
+    /// its overflow.
+    #[test]
+    fn wmp2_still_reads() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"WMP2");
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&8u64.to_le_bytes());
+        buf.extend_from_slice(&(7u32 | (2 << 24)).to_le_bytes());
+        buf.extend_from_slice(&(9u32 | (255 << 24)).to_le_bytes());
+        let r = WordPosMapReader::open(&buf).unwrap();
+        assert_eq!(r.word_start_at(0, 0), Some((7, 2)));
+        assert_eq!(r.word_start_at(0, 1), Some((9, SPAN_OVERFLOW)));
     }
 }
