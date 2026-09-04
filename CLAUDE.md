@@ -283,9 +283,11 @@ au-delà, `own_len` dérivé de la clé — journal
 refusée), ordinaux sur 28 bits (`.word_pos_map` `WMP3`), tables d'offsets
 par blocs (`block_offsets.rs` : `SFP4`, `WSP4`, `SIB4`, `.termtexts`
 layout 3) ; **`sfx_version` 4 = dictionnaire partagé par shard**
-(`dict-<g>.<champ>.sfx/.termtexts`, `.gmap` par segment, génération
-réécrite au commit ; référence 10 000 : 387 Mo, −66 % depuis le 4 au
-matin ; requêtes exactes à ±1 ms, fuzzy ×9 à mémo froide — voir `09` §8),
+(`dict-<g>.<champ>.sfx/.termtexts`, `.gmap` par segment, une génération
+par commit avec ses seuls nouveaux textes, compaction au-delà de
+`LUCIVY_DICT_MAX_GENERATIONS` = 8 ; référence 10 000 : 390 Mo, −66 %
+depuis le 4 au matin, 30 000 : −20 % de plus ; requêtes exactes à ±1 ms,
+fuzzy ×9 à mémo froide, ×1,3 à chaud — voir `09` §7-9),
 `.posmap` `PMP3` (3 octets), `.sibling_v3` `SIB3` (sans gap), `.termtexts`
 layout 2 (méta dans la table d'offsets), plus de `.bytemap` en v3. Chaque
 lecteur ouvre encore les layouts précédents. Règle du 4 septembre : la taille
