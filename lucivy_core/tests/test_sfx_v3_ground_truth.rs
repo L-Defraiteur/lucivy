@@ -191,9 +191,10 @@ fn index_shape_key(num_files: usize) -> String {
         None => (-1, -1, false),
     };
     format!(
-        "corpus={} files={} commit_every={} merge_target={} merge_group={} progressive={} policy={} v=10",
+        "corpus={} files={} commit_every={} merge_target={} merge_group={} progressive={} policy={} sfx={} v=10",
         repo_path(), num_files, commit_every(500), target, group, progressive,
         std::env::var("V3_POLICY").is_ok(),
+        std::env::var("V3_SFX_VERSION").unwrap_or_else(|_| "3".into()),
     )
 }
 
@@ -236,7 +237,8 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
             {"name": "path", "type": "text", "stored": true},
             {"name": "content", "type": "text", "stored": true}
         ],
-        "sfx_version": 3
+        // `V3_SFX_VERSION=4` builds the index on the shard dictionary.
+        "sfx_version": std::env::var("V3_SFX_VERSION").ok().and_then(|v| v.parse::<u8>().ok()).unwrap_or(3)
     })).unwrap();
 
     if let Some(h) = try_reuse_index(files) {

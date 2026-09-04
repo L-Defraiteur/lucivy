@@ -148,6 +148,8 @@ pub struct WordPosMapReader<'a> {
     data: &'a [u8],
     /// Ordinal bits of a slot: 28 (`WMP3`) or 24 (`WMP2`).
     ordinal_bits: u32,
+    /// Shard dictionary mode: slots hold local ordinals, callers get globals.
+    gmap: Option<super::gmap::GmapReader<'a>>,
 }
 
 impl<'a> WordPosMapReader<'a> {
@@ -169,7 +171,14 @@ impl<'a> WordPosMapReader<'a> {
             offsets: &bytes[8..8 + offsets_size],
             data: &bytes[8 + offsets_size..],
             ordinal_bits,
+            gmap: None,
         })
+    }
+
+    /// Translate every ordinal read to its global id (dictionary segment).
+    pub fn with_gmap(mut self, gmap: super::gmap::GmapReader<'a>) -> Self {
+        self.gmap = Some(gmap);
+        self
     }
 
     /// Number of documents covered.
@@ -205,11 +214,14 @@ impl<'a> WordPosMapReader<'a> {
     /// and must be read from the posting list.
     pub fn word_start_at(&self, doc_id: u32, position: u32) -> Option<(u32, u32)> {
         let slot = self.word_at(doc_id, position)?;
-        if self.ordinal_bits == SLOT_ORDINAL_BITS_V2 {
-            return Some((slot & SLOT_ORDINAL_MASK_V2, slot >> SLOT_ORDINAL_BITS_V2));
-        }
-        let span = slot >> SLOT_ORDINAL_BITS;
-        Some((slot & SLOT_ORDINAL_MASK, if span >= SLOT_SPAN_MAX { SPAN_OVERFLOW } else { span }))
+        let (local, span) = if self.ordinal_bits == SLOT_ORDINAL_BITS_V2 {
+            (slot & SLOT_ORDINAL_MASK_V2, slot >> SLOT_ORDINAL_BITS_V2)
+        } else {
+            let span = slot >> SLOT_ORDINAL_BITS;
+            (slot & SLOT_ORDINAL_MASK, if span >= SLOT_SPAN_MAX { SPAN_OVERFLOW } else { span })
+        };
+        let ordinal = match &self.gmap { Some(g) => g.global(local), None => local };
+        Some((ordinal, span))
     }
 
     fn read_offset(&self, idx: u32) -> u64 {

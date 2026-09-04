@@ -364,8 +364,10 @@ impl Order {
 pub struct SfxDictionaryMeta {
     /// Generation number of the live files (`dict-<generation>.<field>.*`).
     pub generation: u64,
-    /// First global id not yet minted.
-    pub next_id: u64,
+    /// First global id not yet minted, per field: ids are dense per field,
+    /// since `.termtexts` is indexed by id and a hole costs its entry.
+    #[serde(default)]
+    pub next_ids: std::collections::BTreeMap<u32, u64>,
     /// Fields with a dictionary.
     pub field_ids: Vec<u32>,
 }

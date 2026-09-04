@@ -83,6 +83,10 @@ strict_separators: bool,
     let sib_bytes = load("sibling_v3");
     let tt_bytes = load("termtexts");
     let wpm_bytes = load("word_pos_map");
+    // A dictionary segment (`sfx_version` 4): its readers translate
+    // between the shard's global ids and its local ordinals.
+    let gmap_bytes = load("gmap");
+    let gmap = gmap_bytes.as_ref().and_then(|b| crate::suffix_fst::gmap::GmapReader::open(b));
 
     let debug_query = std::env::var("V3_DEBUG_QUERY").ok();
     let do_debug = debug_query.as_deref() == Some(query_text);
@@ -105,11 +109,11 @@ strict_separators: bool,
         filter_docs: seg_reader.doc_filter().map(|b| b as &dyn crate::query::posting_resolver::DocFilter),
         debug: do_debug,
         trace_id,
-        posmap: posmap_bytes.as_ref().and_then(|b| crate::suffix_fst::posmap::PosMapReader::open(b)),
-        word_sfxpost: wsp_bytes.as_ref().and_then(|b| crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(b)),
-        sibling_v3: sib_bytes.as_ref().and_then(|b| crate::suffix_fst::sibling_table::SiblingTableReader::open(b)),
+        posmap: posmap_bytes.as_ref().and_then(|b| crate::suffix_fst::posmap::PosMapReader::open(b).map(|r| match gmap { Some(g) => r.with_gmap(g), None => r })),
+        word_sfxpost: wsp_bytes.as_ref().and_then(|b| crate::suffix_fst::word_sfxpost::WordSfxPostReader::open(b).map(|r| match gmap { Some(g) => r.with_gmap(g), None => r })),
+        sibling_v3: sib_bytes.as_ref().and_then(|b| crate::suffix_fst::sibling_table::SiblingTableReader::open(b).map(|r| match gmap { Some(g) => r.with_gmap(g), None => r })),
         termtexts: tt_bytes.as_ref().and_then(|b| crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open(b)),
-        word_posmap: wpm_bytes.as_ref().and_then(|b| crate::suffix_fst::word_pos_map::WordPosMapReader::open(b)),
+        word_posmap: wpm_bytes.as_ref().and_then(|b| crate::suffix_fst::word_pos_map::WordPosMapReader::open(b).map(|r| match gmap { Some(g) => r.with_gmap(g), None => r })),
     };
 
     if crate::suffix_fst::briques::profile::enabled() {

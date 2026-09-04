@@ -247,6 +247,8 @@ pub struct WordSfxPostReader<'a> {
     /// table), relative to `entries_start` in `WSP4`.
     table: OffsetTable<'a>,
     entries_start: usize,
+    /// Shard dictionary mode: callers ask by global id, the file is by local.
+    gmap: Option<super::gmap::GmapReader<'a>>,
 }
 
 impl<'a> WordSfxPostReader<'a> {
@@ -270,7 +272,19 @@ impl<'a> WordSfxPostReader<'a> {
             if data.len() < min_size { return None; }
             (OffsetTable::Flat(&data[8..min_size]), 0)
         };
-        Some(Self { data, num_ordinals, v3, table, entries_start })
+        Some(Self { data, num_ordinals, v3, table, entries_start, gmap: None })
+    }
+
+    /// Take global ids (dictionary segment): each is mapped to the local
+    /// ordinal the file is keyed by, an unknown id having no entries.
+    pub fn with_gmap(mut self, gmap: super::gmap::GmapReader<'a>) -> Self {
+        self.gmap = Some(gmap);
+        self
+    }
+
+    #[inline]
+    fn local(&self, ordinal: u32) -> Option<u32> {
+        match &self.gmap { Some(g) => g.local(ordinal), None => Some(ordinal) }
     }
 
     /// Number of ordinals the offset table covers (including empty ones).
@@ -336,6 +350,7 @@ impl<'a> WordSfxPostReader<'a> {
     /// binary search over the fixed-size records — no list materialised. Used by
     /// the word_pos_map-driven resolver, once per emitted match.
     pub fn entry_at(&self, ordinal: u32, doc_id: u32, first_position: u32) -> Option<WordPostingEntry> {
+        let ordinal = self.local(ordinal)?;
         let (start, end) = self.block_range(ordinal)?;
         if self.v3 {
             return self.entry_at_v3(start, end, doc_id, first_position);
@@ -407,6 +422,7 @@ impl<'a> WordSfxPostReader<'a> {
 
     /// Visit every entry of an ordinal without allocating (the merge path).
     pub fn for_each_entry(&self, ordinal: u32, mut f: impl FnMut(WordPostingEntry)) {
+        let Some(ordinal) = self.local(ordinal) else { return };
         let Some((start, end)) = self.block_range(ordinal) else { return };
         if self.v3 {
             self.walk_v3(start, end, |e| { f(e); true });
@@ -428,6 +444,7 @@ impl<'a> WordSfxPostReader<'a> {
     /// All entries of an ordinal, decoded into a `Vec`; empty for an unknown
     /// or empty ordinal. Prefer `for_each_entry` when no list is needed.
     pub fn entries(&self, ordinal: u32) -> Vec<WordPostingEntry> {
+        let Some(ordinal) = self.local(ordinal) else { return Vec::new() };
         let Some((start, end)) = self.block_range(ordinal) else { return Vec::new() };
         if self.v3 {
             let n = self.block_header(start).map(|(n, _, _)| n).unwrap_or(0);

@@ -9,6 +9,7 @@ pub(crate) mod delete_queue;
 pub(crate) mod path_to_unordered_id;
 
 pub(crate) mod doc_id_mapping;
+mod dictionary_commit;
 mod doc_opstamp_mapping;
 /// IndexWriter lifecycle events (merge, commit).
 pub mod events;

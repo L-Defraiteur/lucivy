@@ -221,8 +221,12 @@ pub fn build_resolver(reader: &SegmentReader, field: crate::schema::Field) -> Re
         crate::LucivyError::SystemError(format!("read .sfxpost: {e}"))
     })?;
 
-    let v2_reader = SfxPostReaderV2::open_owned(bytes).ok_or_else(|| {
+    let mut v2_reader = SfxPostReaderV2::open_owned(bytes).ok_or_else(|| {
         crate::LucivyError::SystemError("sfxpost: invalid V2 format (missing SFP2 magic)".into())
     })?;
+    // A dictionary segment answers by local ordinal; callers ask by global id.
+    if let Some(gmap) = reader.sfx_index_file("gmap", field).and_then(|f| f.read_bytes().ok()) {
+        v2_reader = v2_reader.with_gmap(gmap);
+    }
     Ok(Box::new(SfxPostResolverV2::new(v2_reader)))
 }

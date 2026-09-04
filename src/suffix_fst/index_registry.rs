@@ -116,10 +116,14 @@ pub fn all_indexes() -> Vec<Box<dyn SfxIndexFile>> {
         Box::new(super::word_sfxpost::WordSfxPostIndex),
         // Sibling table v3 (prebuilt by DAG, chunk + word siblings)
         Box::new(SiblingV3Index),
-        // Shard dictionary (sfx_version 4): local → global ids, and the
-        // texts of the ids a segment minted (consumed by the commit).
+        // Shard dictionary (sfx_version 4): local → global ids. The
+        // `.newtexts` a segment also writes (the texts of the ids it minted)
+        // is deliberately NOT a registry file: the commit consumes it and
+        // deletes it, so it must be listed nowhere — not in the segment's
+        // file set (snapshot, delta, GC) and not opened by readers. It
+        // survives until then because the GC keeps every managed file that
+        // bears a live segment's id.
         Box::new(GmapIndex),
-        Box::new(NewTextsIndex),
     ]
 }
 
@@ -128,19 +132,6 @@ struct GmapIndex;
 impl SfxIndexFile for GmapIndex {
     fn id(&self) -> &'static str { "gmap" }
     fn extension(&self) -> &'static str { "gmap" }
-    fn merge_strategy(&self) -> MergeStrategy { MergeStrategy::ExternalDagNode }
-    fn prebuilt_by_collector(&self) -> bool { true }
-    fn written_for(&self, sfx_version: u8) -> bool { sfx_version == super::dictionary::DICTIONARY_SFX_VERSION }
-    fn serialize(&self) -> Vec<u8> { Vec::new() }
-}
-
-/// `.newtexts`: the texts and meta of the global ids a dictionary segment
-/// minted first (a `.gmap` of those ids followed by a `TTX3` file), what
-/// the commit folds into the next generation.
-struct NewTextsIndex;
-impl SfxIndexFile for NewTextsIndex {
-    fn id(&self) -> &'static str { "newtexts" }
-    fn extension(&self) -> &'static str { "newtexts" }
     fn merge_strategy(&self) -> MergeStrategy { MergeStrategy::ExternalDagNode }
     fn prebuilt_by_collector(&self) -> bool { true }
     fn written_for(&self, sfx_version: u8) -> bool { sfx_version == super::dictionary::DICTIONARY_SFX_VERSION }

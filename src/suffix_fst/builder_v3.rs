@@ -539,6 +539,10 @@ pub struct SuffixFstBuilderV3 {
     min_suffix_len: usize,
     num_terms: usize,
     max_parents: usize,
+    /// Largest ordinal accepted: `MAX_ORDINAL` for a segment (what its
+    /// position maps hold), `u32::MAX` for a shard dictionary whose ids
+    /// only ever go through varints and `.gmap`.
+    max_ordinal: u64,
 }
 
 impl Default for SuffixFstBuilderV3 {
@@ -562,7 +566,13 @@ impl SuffixFstBuilderV3 {
             min_suffix_len: min,
             num_terms: 0,
             max_parents: 0,
+            max_ordinal: Self::MAX_ORDINAL,
         }
+    }
+
+    /// Accept ordinals up to `max` (a shard dictionary: `u32::MAX`).
+    pub fn set_max_ordinal(&mut self, max: u64) {
+        self.max_ordinal = max;
     }
 
     /// Register all suffixes of an extended token (content + sep + overlap).
@@ -868,11 +878,11 @@ impl SuffixFstBuilderV3 {
             if num_parents > self.max_parents { self.max_parents = num_parents; }
             for e in &self.entries[i..j] {
                 let p = &e.2;
-                if p.raw_ordinal > Self::MAX_ORDINAL {
+                if p.raw_ordinal > self.max_ordinal {
                     return Err(std::io::Error::other(format!(
                         "sfx v3: ordinal {} exceeds the {} ordinals a segment can address; \
                          the segment holds too many distinct terms (split it instead of merging)",
-                        p.raw_ordinal, Self::MAX_ORDINAL + 1)).into());
+                        p.raw_ordinal, self.max_ordinal + 1)).into());
                 }
                 if (p.overlap_len as usize) > MAX_OVERLAP_BYTES {
                     return Err(std::io::Error::other(format!(

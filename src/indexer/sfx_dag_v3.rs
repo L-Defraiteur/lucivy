@@ -34,6 +34,10 @@ pub struct SfxBuildOutputV3 {
     pub termtexts: Vec<u8>,
     /// Additional registry files: (extension, bytes).
     pub registry_files: Vec<(String, Vec<u8>)>,
+    /// Shard dictionary mode (`sfx_version` 4): `sfx` and `termtexts` are
+    /// empty and not to be written — the segment's `.gmap` and `.newtexts`
+    /// are in `registry_files` instead.
+    pub dictionary_mode: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +85,11 @@ impl Node for BuildFstV3Node {
             .downcast::<SfxCollectorDataV3>()
             .ok_or("wrong type")?;
 
+        if data.globals.is_some() {
+            // Shard dictionary: the segment has no FST of its own.
+            ctx.set_output("fst", PortValue::new((Vec::<u8>::new(), Vec::<u8>::new())));
+            return Ok(());
+        }
         let mut builder = SuffixFstBuilderV3::with_min_suffix_len(data.min_suffix_len);
         // Chunk-level entries (partitions 0x00/0x01)
         // Extended ordinals: each unique extended text → its own FST ordinal.
@@ -189,14 +198,15 @@ impl Node for AssembleV3Node {
             .downcast::<SfxCollectorDataV3>()
             .ok_or("wrong type")?;
 
+        let dictionary_mode = data.globals.is_some();
         // Build termtexts v3 (extended texts + metadata, keyed by final ordinal).
         // With extended ordinals, each unique extended text has its own ordinal,
-        // including word-stripped entries.
-        let termtexts = TermTextsWriterV3::from_collector_v3(data).serialize();
+        // including word-stripped entries. A dictionary segment has neither
+        // texts nor FST of its own.
+        let termtexts = if dictionary_mode { Vec::new() } else { TermTextsWriterV3::from_collector_v3(data).serialize() };
 
         // Build .sfx v3 file
-        let sfx_writer = SfxFileWriterV3::new(fst_data, parent_data);
-        let sfx = sfx_writer.to_bytes();
+        let sfx = if dictionary_mode { Vec::new() } else { SfxFileWriterV3::new(fst_data, parent_data).to_bytes() };
 
         // EventDriven registry indexes (posmap; bytemap is v2-only since 4 September 2026)
         let mut derived = crate::suffix_fst::index_registry::build_derived_indexes_v3(
@@ -209,12 +219,22 @@ impl Node for AssembleV3Node {
         derived.push(("word_pos_map".to_string(), data.word_pos_map.clone()));
         derived.push(("word_sfxpost".to_string(), data.word_sfxpost.clone()));
         derived.push(("sibling_v3".to_string(), data.sibling_v3.clone()));
+        if let Some(globals) = &data.globals {
+            derived.push(("gmap".to_string(), crate::suffix_fst::gmap::encode(globals)));
+            // Only a freshly collected segment minted ids; a merge did not.
+            if !data.newtexts.is_empty() {
+                let entries: Vec<(u32, &str, crate::suffix_fst::termtexts_v3::TermMetaV3)> =
+                    data.newtexts.iter().map(|(g, t, m)| (*g, t.as_str(), *m)).collect();
+                derived.push(("newtexts".to_string(), crate::suffix_fst::dictionary::encode_newtexts(&entries)));
+            }
+        }
 
         ctx.set_output("output", PortValue::new(SfxBuildOutputV3 {
             sfx,
             sfxpost: sfxpost_data,
             termtexts,
             registry_files: derived,
+            dictionary_mode,
         }));
         Ok(())
     }
@@ -641,6 +661,8 @@ pub fn merge_segments_v3(
         word_sfxpost: wsp_writer.finish(),
         word_pos_map: wpm_writer.serialize(),
         sibling_v3: sibling_writer.serialize(),
+        globals: None,
+        newtexts: Vec::new(),
     })
 }
 
@@ -919,4 +941,106 @@ mod tests {
             assert_eq!(p.overlap_len, meta.overlap_len, "overlap roundtrip for '{text}'");
         }
     }
+}
+
+// ===========================================================================
+// Merge support — shard dictionary segments (`sfx_version` 4)
+// ===========================================================================
+
+/// The persisted files of one dictionary segment, plus its doc_id remap.
+pub struct SegmentSfxDict<'a> {
+    /// Local ordinal → global id (`gmap.rs`).
+    pub gmap: &'a [u8],
+    pub sfxpost: Option<&'a [u8]>,
+    pub word_sfxpost: Option<&'a [u8]>,
+    pub sibling_v3: Option<&'a [u8]>,
+    /// old_doc_id → new_doc_id. Absent key = deleted document.
+    pub doc_remap: &'a std::collections::HashMap<u32, u32>,
+}
+
+/// Merge dictionary segments: the union of their global ids becomes the new
+/// segment's sorted `.gmap`, every local ordinal is remapped through it, and
+/// the postings, word postings and sibling links are concatenated. No text
+/// is re-interned and no FST is built — the shard dictionary already holds
+/// every id (`sparse_vector::merge_segments` does the same with its
+/// dimension tables).
+pub fn merge_segments_dict(segments: &[SegmentSfxDict<'_>]) -> Result<SfxCollectorDataV3, String> {
+    use crate::suffix_fst::gmap::GmapReader;
+    use crate::suffix_fst::word_sfxpost::{WordPostingEntry, WordSfxPostReader, WordSfxPostWriter};
+
+    let gmaps: Vec<GmapReader<'_>> = segments.iter().enumerate()
+        .map(|(i, seg)| GmapReader::open(seg.gmap).ok_or_else(|| format!("segment {i}: invalid .gmap")))
+        .collect::<Result<_, _>>()?;
+    let mut union: Vec<u32> = gmaps.iter().flat_map(|g| g.iter()).collect();
+    union.sort_unstable();
+    union.dedup();
+    let num = union.len();
+    let new_local = |global: u32| -> u32 { union.binary_search(&global).unwrap() as u32 };
+
+    let mut content_postings: Vec<Vec<(u32, u32, u32, u32)>> = vec![Vec::new(); num];
+    let mut word_writer = WordSfxPostWriter::new(num);
+    let mut wpm_writer = crate::suffix_fst::word_pos_map::WordPosMapWriter::new();
+    let mut sibling_writer = crate::suffix_fst::sibling_table::SiblingTableWriter::new(num as u32);
+    let mut num_docs = 0u32;
+
+    for (seg, gmap) in segments.iter().zip(&gmaps) {
+        let remap: Vec<u32> = gmap.iter().map(new_local).collect();
+        let remap_doc = |d: u32| seg.doc_remap.get(&d).copied();
+        if let Some(r) = seg.sfxpost.and_then(SfxPostReaderV2::open_slice) {
+            for old in 0..r.num_terms().min(remap.len() as u32) {
+                let new = remap[old as usize];
+                r.for_each_entry(old, |doc, ti, bf, bt| {
+                    if let Some(d) = remap_doc(doc) {
+                        content_postings[new as usize].push((d, ti, bf, bt));
+                        num_docs = num_docs.max(d + 1);
+                    }
+                });
+            }
+        }
+        if let Some(r) = seg.word_sfxpost.and_then(WordSfxPostReader::open) {
+            for old in 0..r.num_ordinals().min(remap.len() as u32) {
+                let new = remap[old as usize];
+                r.for_each_entry(old, |e| {
+                    if let Some(d) = remap_doc(e.doc_id) {
+                        word_writer.add(new, WordPostingEntry { doc_id: d, ..e });
+                        wpm_writer.add_word(d, e.first_position, e.last_position, new);
+                        num_docs = num_docs.max(d + 1);
+                    }
+                });
+            }
+        }
+        if let Some(sib) = seg.sibling_v3.and_then(crate::suffix_fst::sibling_table::SiblingTableReader::open) {
+            for old in 0..sib.num_ordinals().min(remap.len() as u32) {
+                let from = remap[old as usize];
+                for e in sib.siblings(old) {
+                    if (e.next_ordinal as usize) < remap.len() {
+                        sibling_writer.add(from, remap[e.next_ordinal as usize], 0);
+                    }
+                }
+            }
+        }
+    }
+    for p in &mut content_postings {
+        p.sort_unstable();
+        p.dedup();
+    }
+
+    Ok(SfxCollectorDataV3 {
+        sorted_indices: Vec::new(),
+        intern_to_final: Vec::new(),
+        token_texts: Vec::new(),
+        token_meta: Vec::new(),
+        tokens: vec![String::new(); num],
+        content_postings,
+        own_lens: vec![0; num],
+        num_content_ords: num,
+        num_docs,
+        min_suffix_len: 1,
+        word_stripped: Vec::new(),
+        word_sfxpost: word_writer.finish(),
+        word_pos_map: wpm_writer.serialize(),
+        sibling_v3: sibling_writer.serialize(),
+        globals: Some(union),
+        newtexts: Vec::new(),
+    })
 }

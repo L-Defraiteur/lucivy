@@ -95,8 +95,8 @@ impl SchemaConfig {
             }
         }
         if let Some(v) = self.sfx_version {
-            if v != 2 && v != 3 {
-                return Err(format!("sfx_version must be 2 or 3, got {v}"));
+            if v != 2 && v != 3 && v != 4 {
+                return Err(format!("sfx_version must be 2, 3 or 4 (shared shard dictionary), got {v}"));
             }
         }
         Ok(())

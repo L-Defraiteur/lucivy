@@ -112,6 +112,9 @@ pub struct PosMapReader<'a> {
     width: usize,
     /// The empty marker at this width: all ones.
     empty: u32,
+    /// Shard dictionary mode: the slots hold local ordinals, callers speak
+    /// global ids (`gmap.rs`).
+    gmap: Option<super::gmap::GmapReader<'a>>,
 }
 
 impl<'a> PosMapReader<'a> {
@@ -132,7 +135,18 @@ impl<'a> PosMapReader<'a> {
         }
         let offsets = &bytes[8..8 + offsets_size];
         let data = &bytes[8 + offsets_size..];
-        Some(Self { num_docs, offsets, data, width, empty })
+        Some(Self { num_docs, offsets, data, width, empty, gmap: None })
+    }
+
+    /// Translate every ordinal read to its global id (dictionary segment).
+    pub fn with_gmap(mut self, gmap: super::gmap::GmapReader<'a>) -> Self {
+        self.gmap = Some(gmap);
+        self
+    }
+
+    #[inline]
+    fn out(&self, local: u32) -> u32 {
+        match &self.gmap { Some(g) => g.global(local), None => local }
     }
 
     /// Bytes per slot, 3 or 4.
@@ -170,7 +184,7 @@ impl<'a> PosMapReader<'a> {
         if p >= num_tokens {
             return None;
         }
-        self.slot(doc_data, p * self.width)
+        self.slot(doc_data, p * self.width).map(|o| self.out(o))
     }
 
     /// Get ordinals for a range of positions [pos_from, pos_to) in a doc.
@@ -184,7 +198,7 @@ impl<'a> PosMapReader<'a> {
         let mut result = Vec::new();
         for pos in pos_from..pos_to.min(num_tokens as u32) {
             if let Some(ord) = self.slot(doc_data, pos as usize * self.width) {
-                result.push((pos, ord));
+                result.push((pos, self.out(ord)));
             }
         }
         result

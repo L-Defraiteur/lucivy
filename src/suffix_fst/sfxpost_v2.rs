@@ -223,6 +223,9 @@ pub struct SfxPostReaderV2 {
     /// blocks start)` in `data`, the directory ending where the blocks
     /// start and the blocks at `entry_data_start`.
     block_table: Option<(usize, usize)>,
+    /// Shard dictionary mode: the segment's `.gmap`, so that callers ask
+    /// by global id and the file answers by local ordinal.
+    gmap: Option<common::OwnedBytes>,
 }
 
 impl SfxPostReaderV2 {
@@ -264,6 +267,7 @@ impl SfxPostReaderV2 {
             return Some(Self {
                 data, num_terms, offsets_start: 8, entry_data_start: 8 + used, v3,
                 block_table: Some((dir_start, blocks_start)),
+                gmap: None,
             });
         }
         let offsets_size = (num_terms as usize + 1) * 4;
@@ -272,7 +276,7 @@ impl SfxPostReaderV2 {
         }
         let offsets_start = 8;
         let entry_data_start = 8 + offsets_size;
-        Some(Self { data, num_terms, offsets_start, entry_data_start, v3, block_table: None })
+        Some(Self { data, num_terms, offsets_start, entry_data_start, v3, block_table: None, gmap: None })
     }
 
     /// Open from a byte slice (copies into owned Vec).
@@ -317,6 +321,21 @@ impl SfxPostReaderV2 {
         &self.data[self.entry_data_start..]
     }
 
+    /// Take global ids (dictionary segment).
+    pub fn with_gmap(mut self, gmap: common::OwnedBytes) -> Self {
+        self.gmap = Some(gmap);
+        self
+    }
+
+    /// The local ordinal a caller's id names: itself without a gmap.
+    #[inline]
+    fn local(&self, ordinal: u32) -> Option<u32> {
+        match &self.gmap {
+            Some(bytes) => super::gmap::GmapReader::open(bytes)?.local(ordinal),
+            None => Some(ordinal),
+        }
+    }
+
     /// Number of terms.
     pub fn num_terms(&self) -> u32 {
         self.num_terms
@@ -324,6 +343,7 @@ impl SfxPostReaderV2 {
 
     /// Get all posting entries for a given ordinal.
     pub fn entries(&self, ordinal: u32) -> Vec<SfxPostingEntry> {
+        // `entries_filtered` maps the ordinal itself.
         self.entries_filtered(ordinal, None)
     }
 
@@ -335,6 +355,7 @@ impl SfxPostReaderV2 {
         ordinal: u32,
         filter: Option<&dyn crate::query::posting_resolver::DocFilter>,
     ) -> Vec<SfxPostingEntry> {
+        let Some(ordinal) = self.local(ordinal) else { return Vec::new(); };
         if ordinal >= self.num_terms {
             return Vec::new();
         }
@@ -368,6 +389,7 @@ impl SfxPostReaderV2 {
     /// Check if a specific doc_id has entries for the given ordinal.
     /// O(log n) binary search, zero payload decode.
     pub fn has_doc(&self, ordinal: u32, doc_id: u32) -> bool {
+        let Some(ordinal) = self.local(ordinal) else { return false; };
         if ordinal >= self.num_terms { return false; }
         let Some(header) = self.read_ordinal_header(ordinal) else { return false };
         header.find_doc(doc_id).is_some()
@@ -375,6 +397,7 @@ impl SfxPostReaderV2 {
 
     /// Get entries for a single doc_id. O(log n) search + decode only that doc's payload.
     pub fn entries_for_doc(&self, ordinal: u32, target_doc: u32) -> Vec<SfxPostingEntry> {
+        let Some(ordinal) = self.local(ordinal) else { return Vec::new(); };
         if ordinal >= self.num_terms { return Vec::new(); }
         let Some(header) = self.read_ordinal_header(ordinal) else { return Vec::new() };
         let Some((_, offset, count)) = header.find_doc_full(target_doc) else { return Vec::new() };
@@ -399,6 +422,7 @@ impl SfxPostReaderV2 {
     /// Rebuilding a fuzzy window asked `entries_for_doc` once per position
     /// and kept one entry of ~50: 675 M decoded for 14 M used on `inclde`.
     pub fn entry_at(&self, ordinal: u32, doc_id: u32, position: u32) -> Option<(u32, u32)> {
+        let Some(ordinal) = self.local(ordinal) else { return None; };
         if ordinal >= self.num_terms { return None; }
         let header = self.read_ordinal_header(ordinal)?;
         let (_, offset, count) = header.find_doc_full(doc_id)?;
@@ -413,6 +437,7 @@ impl SfxPostReaderV2 {
 
     /// doc_freq: number of unique docs for an ordinal. O(1) — just read the header.
     pub fn doc_freq(&self, ordinal: u32) -> u32 {
+        let Some(ordinal) = self.local(ordinal) else { return 0; };
         if ordinal >= self.num_terms { return 0; }
         let Some(header) = self.read_ordinal_header(ordinal) else { return 0 };
         header.num_docs as u32
@@ -493,6 +518,7 @@ impl SfxPostReaderV2 {
     /// source segment this way — `entries()` built one `Vec` per ordinal
     /// per segment on that path.
     pub fn for_each_entry(&self, ordinal: u32, mut f: impl FnMut(u32, u32, u32, u32)) {
+        let Some(ordinal) = self.local(ordinal) else { return (); };
         if ordinal >= self.num_terms { return; }
         let Some(header) = self.read_ordinal_header(ordinal) else { return };
         header.for_each_doc(|_, doc_id, offset, count| {

@@ -164,6 +164,8 @@ pub struct SiblingTableReader<'a> {
     v2: bool,
     /// `SIB3`: one delta per entry, no gap bit.
     no_gaps: bool,
+    /// Shard dictionary mode: ordinals in and out are global ids.
+    gmap: Option<super::gmap::GmapReader<'a>>,
 }
 
 impl<'a> SiblingTableReader<'a> {
@@ -203,11 +205,32 @@ impl<'a> SiblingTableReader<'a> {
             }
             (OffsetTable::Flat(&data[head..head + offsets_size]), &data[head + offsets_size..])
         };
-        Some(Self { num_ordinals, offsets, entries_data, v2, no_gaps })
+        Some(Self { num_ordinals, offsets, entries_data, v2, no_gaps, gmap: None })
+    }
+
+    /// Speak global ids (dictionary segment): the ordinal asked for is
+    /// mapped to the local one, and every link read back to its global id.
+    pub fn with_gmap(mut self, gmap: super::gmap::GmapReader<'a>) -> Self {
+        self.gmap = Some(gmap);
+        self
     }
 
     /// Get all sibling entries for a given ordinal.
     pub fn siblings(&self, ordinal: u32) -> Vec<SiblingEntry> {
+        let Some(ordinal) = (match &self.gmap { Some(g) => g.local(ordinal), None => Some(ordinal) }) else {
+            return Vec::new();
+        };
+        let mut out = self.siblings_local(ordinal);
+        if let Some(g) = &self.gmap {
+            for e in &mut out {
+                e.next_ordinal = g.global(e.next_ordinal);
+            }
+        }
+        out
+    }
+
+    /// `siblings` by local ordinal, links as stored.
+    fn siblings_local(&self, ordinal: u32) -> Vec<SiblingEntry> {
         if ordinal >= self.num_ordinals {
             return Vec::new();
         }

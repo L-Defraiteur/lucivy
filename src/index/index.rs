@@ -402,8 +402,14 @@ impl Index {
         inventory: SegmentMetaInventory,
     ) -> Index {
         let schema = metas.schema.clone();
-        let sfx_dictionary = metas.sfx_dictionary.as_ref()
-            .map(|d| Arc::new(SfxDictionary::open(&directory, d)));
+        let sfx_dictionary = match &metas.sfx_dictionary {
+            Some(d) => Some(Arc::new(SfxDictionary::open(&directory, d, None))),
+            // A dictionary index that has committed nothing yet: an empty
+            // dictionary the indexers mint their first ids on.
+            None if metas.index_settings.sfx_version == crate::suffix_fst::dictionary::DICTIONARY_SFX_VERSION =>
+                Some(Arc::new(SfxDictionary::empty())),
+            None => None,
+        };
         Index {
             settings: metas.index_settings.clone(),
             directory,
@@ -426,7 +432,7 @@ impl Index {
     pub fn sfx_dictionary_meta(&self) -> Option<crate::index::SfxDictionaryMeta> {
         self.sfx_dictionary().map(|d| {
             let mut m = d.meta().clone();
-            m.next_id = d.next_id();
+            m.next_ids = d.next_ids();
             m
         })
     }
@@ -444,7 +450,14 @@ impl Index {
         if held.as_ref().is_some_and(|d| d.generation() == wanted.generation) {
             return;
         }
-        self.set_sfx_dictionary(Some(Arc::new(SfxDictionary::open(&self.directory, wanted))));
+        self.set_sfx_dictionary(Some(Arc::new(SfxDictionary::open(&self.directory, wanted, held.as_deref()))));
+    }
+
+    /// The slot the live dictionary sits in, for a collector that must see
+    /// the generation current at each lookup, not the one current when it
+    /// started (a commit swaps generations while segments are being written).
+    pub fn sfx_dictionary_slot(&self) -> Arc<RwLock<Option<Arc<SfxDictionary>>>> {
+        self.sfx_dictionary.clone()
     }
 
     /// Setter for the tokenizer manager.

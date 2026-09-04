@@ -164,6 +164,10 @@ impl SegmentUpdaterState {
         let start = std::time::Instant::now();
         self.shared.event_bus.emit(IndexEvent::CommitStarted { opstamp });
 
+        // A shard dictionary folds the new segments' texts into its next
+        // generation first, so that the meta.json this commit writes names it.
+        super::dictionary_commit::fold_new_texts(&self.shared)?;
+
         // Phase 1: commit without merges (fast — just save_metas).
         let mut dag = super::commit_dag::build_commit_dag(
             self.shared.clone(),

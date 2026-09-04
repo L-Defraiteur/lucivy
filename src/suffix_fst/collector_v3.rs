@@ -7,6 +7,7 @@
 //! - Interns extended token texts (e.g., "mutex_lo" not "mutex_")
 
 use std::collections::HashMap;
+use super::termtexts_v3::TermMetaV3;
 
 use crate::tokenizer::equal_chunk::{is_content_char, segment_and_chunk, DEFAULT_MAX_TOKEN};
 
@@ -91,6 +92,15 @@ pub struct SfxCollectorV3 {
     /// Maintained incrementally: `mem_usage` is called once per document, so
     /// it cannot walk millions of interned texts.
     mem_estimate: usize,
+    /// The shard dictionary this collector interns against (`sfx_version`
+    /// 4), with the field it collects: a text found there keeps its global
+    /// id, a new one is minted on the dictionary's counter.
+    dictionary: Option<(super::dictionary::DictionarySlot, u32)>,
+    /// Global id per intern ordinal (dictionary mode).
+    global_ids: Vec<u64>,
+    /// Whether this collector minted the id (dictionary mode): its text
+    /// goes to `.newtexts`.
+    minted: Vec<bool>,
 
     // Config
     max_token: usize,
@@ -149,7 +159,16 @@ impl SfxCollectorV3 {
             max_token: DEFAULT_MAX_TOKEN,
             overlap: DEFAULT_OVERLAP,
             min_suffix_len: min,
+            dictionary: None,
+            global_ids: Vec::new(),
+            minted: Vec::new(),
         }
+    }
+
+    /// Intern against a shard dictionary: ordinals become global ids.
+    pub fn with_dictionary(mut self, dictionary: super::dictionary::DictionarySlot, field_id: u32) -> Self {
+        self.dictionary = Some((dictionary, field_id));
+        self
     }
 
     /// Collector with explicit chunk size, overlap bytes and minimum suffix length.
@@ -526,6 +545,13 @@ impl SfxCollectorV3 {
         // The text lives twice (the intern key carries the shape) and the
         // per-ordinal Vec, meta and hash slot come with it.
         self.mem_estimate += key.len() + text.len() + INTERNED_TOKEN_OVERHEAD;
+        if let Some((slot, field_id)) = &self.dictionary {
+            let dict = slot.read().unwrap().clone()
+                .expect("a dictionary index always holds a dictionary");
+            let (global, minted) = dict.lookup_or_mint(*field_id, &key, text, &meta);
+            self.global_ids.push(global);
+            self.minted.push(minted);
+        }
         self.token_intern.insert(key, ord);
         self.token_texts.push(text.to_string()); // store actual text, not the prefixed key
         self.token_postings.push(Vec::new());
@@ -646,7 +672,10 @@ impl SfxCollectorV3 {
             deferred_ws.push(ws.first_intern_ord);
         }
 
-        // Assign final ordinals in BTreeMap (alphabetical) order
+        // Assign final ordinals in BTreeMap (alphabetical) order — or, with a
+        // shard dictionary, in increasing global id, which makes the
+        // segment's `.gmap` a sorted list (local → global by index, global →
+        // local by binary search).
         let mut intern_to_final = vec![0u32; num_tokens];
         let mut content_postings: Vec<Vec<(u32, u32, u32, u32)>> = Vec::new();
         // Use a Vec instead of BTreeSet to keep 1:1 correspondence with final ordinals.
@@ -654,8 +683,31 @@ impl SfxCollectorV3 {
         let mut tokens_vec: Vec<String> = Vec::new();
         let mut own_lens: Vec<u16> = Vec::new();
         let mut final_ord = 0u32;
+        let dictionary_mode = self.dictionary.is_some();
+        let mut entries: Vec<OrdEntry> = ord_map.into_values().collect();
+        if dictionary_mode {
+            entries.sort_by_key(|e| self.global_ids[e.intern_ords[0] as usize]);
+        }
+        let mut globals: Vec<u32> = Vec::with_capacity(if dictionary_mode { entries.len() } else { 0 });
+        let mut newtexts: Vec<(u32, String, TermMetaV3)> = Vec::new();
 
-        for entry in ord_map.values() {
+        for entry in &entries {
+            if dictionary_mode {
+                let io = entry.intern_ords[0] as usize;
+                let global = self.global_ids[io];
+                debug_assert!(global <= u32::MAX as u64, "global id beyond u32");
+                globals.push(global as u32);
+                if self.minted[io] {
+                    let m = &self.token_meta[io];
+                    newtexts.push((global as u32, self.token_texts[io].clone(), TermMetaV3 {
+                        own_len: m.own_len,
+                        sep_len: m.sep_len,
+                        overlap_len: m.overlap_len,
+                        is_word_start: m.is_word_start,
+                        is_word_stripped: m.is_word_stripped,
+                    }));
+                }
+            }
             tokens_vec.push(entry.text.clone());
             let mut p = entry.postings.clone();
             let before_dedup = p.len();
@@ -736,6 +788,8 @@ impl SfxCollectorV3 {
             word_sfxpost: word_sfxpost_data,
             word_pos_map: word_pos_map_data,
             sibling_v3: sibling_v3_data,
+            globals: if dictionary_mode { Some(globals) } else { None },
+            newtexts,
         }
     }
 
@@ -819,6 +873,12 @@ pub struct SfxCollectorDataV3 {
     pub word_pos_map: Vec<u8>,
     /// Sibling table v3: ordinal → [next_ordinals] for both chunks and words.
     pub sibling_v3: Vec<u8>,
+    /// Shard dictionary mode: the global id of each final ordinal (sorted —
+    /// the `.gmap`). `None` for a segment with its own dictionary.
+    pub globals: Option<Vec<u32>>,
+    /// Shard dictionary mode: the ids this segment minted, with their text
+    /// and meta (the `.newtexts`), in id order.
+    pub newtexts: Vec<(u32, String, TermMetaV3)>,
 }
 
 /// Build word-level stripped entries from token data.

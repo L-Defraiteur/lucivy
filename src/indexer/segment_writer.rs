@@ -94,6 +94,7 @@ impl SegmentWriter {
         let tokenizer_manager = segment.index().tokenizers().clone();
         let tokenizer_manager_fast_field = segment.index().fast_field_tokenizer().clone();
         let sfx_version = segment.index().settings().sfx_version;
+        let sfx_dictionary_slot = segment.index().sfx_dictionary_slot();
         let table_size = compute_initial_table_size(memory_budget_in_bytes)?;
         let segment_serializer = SegmentSerializer::for_segment(segment)?;
         let per_field_postings_writers = PerFieldPostingsWriter::for_schema(&schema);
@@ -143,7 +144,13 @@ impl SegmentWriter {
                             if tok.contains("ngram") {
                                 continue;
                             }
-                            let slot = if sfx_version >= 3 {
+                            let slot = if sfx_version == crate::suffix_fst::dictionary::DICTIONARY_SFX_VERSION {
+                                if sfx_dictionary_slot.read().unwrap().is_none() {
+                                    return Err(crate::LucivyError::SystemError(
+                                        "sfx_version 4 index without a shard dictionary".to_string()));
+                                }
+                                SfxCollectorSlot::V3(SfxCollectorV3::new().with_dictionary(sfx_dictionary_slot.clone(), field.field_id()))
+                            } else if sfx_version >= 3 {
                                 SfxCollectorSlot::V3(SfxCollectorV3::new())
                             } else {
                                 SfxCollectorSlot::V2(SfxCollector::new())
@@ -218,11 +225,13 @@ impl SegmentWriter {
                     let t_build = t_sfx.elapsed();
                     let t_w = std::time::Instant::now();
                     luciole::scheduler::set_task_label(&format!("finalize:sfx_write f{field_id}"));
-                    self.segment_serializer.write_sfx(field_id, &output.sfx)?;
+                    if !output.dictionary_mode {
+                        self.segment_serializer.write_sfx(field_id, &output.sfx)?;
+                        self.segment_serializer.write_custom_index(field_id, "termtexts", &output.termtexts)?;
+                    }
                     if let Some(ref sfxpost) = output.sfxpost {
                         self.segment_serializer.write_custom_index(field_id, "sfxpost", sfxpost)?;
                     }
-                    self.segment_serializer.write_custom_index(field_id, "termtexts", &output.termtexts)?;
                     let mut bytes = output.sfx.len() + output.termtexts.len();
                     for (ext, data) in &output.registry_files {
                         bytes += data.len();

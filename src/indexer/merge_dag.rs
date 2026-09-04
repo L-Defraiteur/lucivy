@@ -278,6 +278,51 @@ impl SfxNode {
                 "sfx v3 merge DAG: missing output".into()))
     }
 
+    /// Merge dictionary segments (`sfx_version` 4): a remap through the
+    /// union of their `.gmap`s, no text and no FST (`merge_segments_dict`).
+    fn rebuild_sfx_dict(
+        readers: &[SegmentReader],
+        reverse_doc_map: &[std::collections::HashMap<u32, u32>],
+        field: Field,
+    ) -> crate::Result<super::sfx_dag_v3::SfxBuildOutputV3> {
+        use super::sfx_dag_v3::SegmentSfxDict;
+        let read_ext = |r: &SegmentReader, ext: &str| -> Option<common::OwnedBytes> {
+            r.sfx_index_file(ext, field).and_then(|f| f.read_bytes().ok())
+        };
+        let owned: Vec<_> = readers.iter().map(|r| (
+            read_ext(r, "gmap"),
+            read_ext(r, "sfxpost"),
+            read_ext(r, "word_sfxpost"),
+            read_ext(r, "sibling_v3"),
+        )).collect();
+        let mut segs: Vec<SegmentSfxDict<'_>> = Vec::new();
+        for (i, o) in owned.iter().enumerate() {
+            fn sl(b: &Option<common::OwnedBytes>) -> Option<&[u8]> {
+                b.as_ref().map(|x| x.as_slice())
+            }
+            let Some(gmap) = sl(&o.0) else { continue };
+            segs.push(SegmentSfxDict {
+                gmap,
+                sfxpost: sl(&o.1),
+                word_sfxpost: sl(&o.2),
+                sibling_v3: sl(&o.3),
+                doc_remap: &reverse_doc_map[i],
+            });
+        }
+        if segs.is_empty() {
+            return Err(crate::LucivyError::SystemError(
+                "sfx dictionary merge: no segment carries a .gmap".into()));
+        }
+        let data = super::sfx_dag_v3::merge_segments_dict(&segs)
+            .map_err(crate::LucivyError::SystemError)?;
+        let mut dag = super::sfx_dag_v3::build_initial_sfx_dag_v3(data);
+        let mut result = luciole::execute_dag(&mut dag, None)
+            .map_err(|e| crate::LucivyError::SystemError(format!("sfx dictionary merge DAG: {e}")))?;
+        result.take_output::<super::sfx_dag_v3::SfxBuildOutputV3>("assemble", "output")
+            .ok_or_else(|| crate::LucivyError::SystemError(
+                "sfx dictionary merge DAG: missing output".into()))
+    }
+
     /// Write a v3 build output into the merged segment.
     ///
     /// Same file set as the initial build path in segment_writer, so a merged
@@ -297,11 +342,13 @@ impl SfxNode {
             Ok(())
         };
 
-        write_file("sfx", &output.sfx)?;
+        if !output.dictionary_mode {
+            write_file("sfx", &output.sfx)?;
+            write_file("termtexts", &output.termtexts)?;
+        }
         if let Some(ref sfxpost) = output.sfxpost {
             write_file("sfxpost", sfxpost)?;
         }
-        write_file("termtexts", &output.termtexts)?;
         for (ext, data) in &output.registry_files {
             write_file(ext, data)?;
         }
@@ -374,9 +421,6 @@ impl Node for SfxNode {
         // invariants come for free from the collector. But it rebuilds every intern
         // table and posting list in RAM — ~18 GB to fuse 50k kernel documents into
         // one segment — so it does not survive contact with a real corpus.
-        if sfx_version == crate::suffix_fst::dictionary::DICTIONARY_SFX_VERSION {
-            return Err("merging dictionary segments (sfx_version 4) is not implemented yet".to_string());
-        }
         if sfx_version >= 3 {
             let mut segment = segment;
             for &field in &sfx_fields {
@@ -386,7 +430,11 @@ impl Node for SfxNode {
                 // data, keeping just the boolean.
                 if !readers.iter().any(|r| r.sfx_file(field).is_some()) { continue; }
 
-                let output = Self::rebuild_sfx_v3(&readers, &reverse_doc_map, field)
+                let output = (if sfx_version == crate::suffix_fst::dictionary::DICTIONARY_SFX_VERSION {
+                    Self::rebuild_sfx_dict(&readers, &reverse_doc_map, field)
+                } else {
+                    Self::rebuild_sfx_v3(&readers, &reverse_doc_map, field)
+                })
                     .map_err(|e| format!("sfx v3 merge field {}: {e}", field.field_id()))?;
                 Self::write_sfx_v3(&mut segment, field, &output)
                     .map_err(|e| format!("sfx v3 write field {}: {e}", field.field_id()))?;
