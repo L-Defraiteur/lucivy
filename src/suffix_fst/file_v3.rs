@@ -12,9 +12,16 @@
 //!   4 — a record is `[varint count]` + the packed 8-byte parent value
 //!       (`decode_parent_entries_v4_packed`), 4 September 2026, morning
 //!   5 — a record is `[varint count]` + delta-coded parents, about 5 bytes
-//!       each (`encode_parent_entries_v3`), written since 4 September 2026
+//!       each (`encode_parent_entries_v3`), 4 September 2026
+//!   6 — every key's parents are such a record, a single parent included, and
+//!       the FST value is the record's offset — no inline parent, no flag bit.
+//!       Offsets grow with the keys, which the FST shares along its paths, and
+//!       the ordinal is a varint in the record: the 24-bit bound of the inline
+//!       value no longer comes from this file. Written since 4 September 2026, evening.
 //!
-//! The reader accepts all three; the writer only emits 5.
+//! Versions 3 to 5 keep an inline single parent in the FST value (bit 63 set
+//! means "offset of a record" — `decode_output_v3`). The reader accepts all
+//! four versions; the writer only emits 6.
 //!
 //! Removed vs v2: sibling table, gapmap, sepmap (all in separate files or gone).
 
@@ -28,7 +35,9 @@ use super::section_file::{SectionFileReader, SectionFileWriter};
 
 const MAGIC: [u8; 4] = *b"SFX3";
 /// Container version written by `SfxFileWriterV3`.
-pub const VERSION: u8 = 5;
+pub const VERSION: u8 = 6;
+/// Last container version whose FST value may hold a parent inline.
+const INLINE_VALUE_VERSION: u8 = 5;
 /// Last container version whose parent records use the 11-byte layout.
 const LEGACY_PARENTS_VERSION: u8 = 3;
 /// The container version whose records are packed 8-byte values.
@@ -72,6 +81,8 @@ pub enum SfxV3Error {
     MissingSection(&'static str),
     /// The FST section could not be opened; carries the underlying error message.
     FstError(String),
+    /// The container version is newer than this reader; carries the version byte.
+    UnsupportedVersion(u8),
 }
 
 impl std::fmt::Display for SfxV3Error {
@@ -80,6 +91,8 @@ impl std::fmt::Display for SfxV3Error {
             SfxV3Error::InvalidFormat => write!(f, "invalid SFX3 format"),
             SfxV3Error::MissingSection(s) => write!(f, "missing section: {s}"),
             SfxV3Error::FstError(e) => write!(f, "FST error: {e}"),
+            SfxV3Error::UnsupportedVersion(v) => write!(
+                f, "SFX3 container version {v} is newer than this reader (up to {VERSION})"),
         }
     }
 }
@@ -94,7 +107,7 @@ pub struct SfxFileReaderV3 {
     /// on 800 segments, for a query with no results, before any search began.
     fst: Map<common::OwnedBytes>,
     parent_list_data: common::OwnedBytes,
-    /// Container version: 3, 4 or 5 (see the module doc).
+    /// Container version: 3 to 6 (see the module doc).
     version: u8,
 }
 
@@ -130,12 +143,19 @@ impl SfxFileReaderV3 {
 
         let parent_list_data = sub(file.get_section(SECTION_PARENTS)
             .ok_or(SfxV3Error::MissingSection("PARENTS"))?);
-        let version = file.version().clamp(LEGACY_PARENTS_VERSION, VERSION);
+        // A version byte below 3 predates the byte itself: those files are
+        // version 3. A byte above ours is a file we cannot read — it used to
+        // be clamped down, which would have served another layout's bytes.
+        let version = file.version();
+        if version > VERSION {
+            return Err(SfxV3Error::UnsupportedVersion(version));
+        }
+        let version = version.max(LEGACY_PARENTS_VERSION);
 
         Ok(Self { fst, parent_list_data, version })
     }
 
-    /// Container version this file was written with (3, 4 or 5).
+    /// Container version this file was written with (3 to 6).
     pub fn container_version(&self) -> u8 {
         self.version
     }
@@ -147,6 +167,10 @@ impl SfxFileReaderV3 {
 
     /// Decode parent(s) from a FST output value.
     pub fn decode_parents(&self, value: u64) -> Vec<ParentEntryV3> {
+        if self.version > INLINE_VALUE_VERSION {
+            let table = OutputTable::new(&self.parent_list_data);
+            return decode_parent_entries_v3(table.get(value));
+        }
         match decode_output_v3(value) {
             ParentRefV3::Single(entry) => vec![entry],
             ParentRefV3::Multi { offset } => {
@@ -322,11 +346,33 @@ mod tests {
         let bytes4 = file4.serialize();
         let reader4 = SfxFileReaderV3::open(&bytes4).unwrap();
         assert_eq!(reader4.container_version(), 4);
-        assert_eq!(reader4.resolve_suffix("lo"), vec![a, b]);
+        assert_eq!(reader4.resolve_suffix("lo"), vec![a.clone(), b.clone()]);
 
-        // And a freshly written file says 5.
+        // Version 5: delta-coded record behind the flag bit, single parent inline.
+        let mut table5 = lucivy_fst::OutputTableBuilder::new();
+        let offset5 = table5.add(&crate::suffix_fst::builder_v3::encode_parent_entries_v3(&[a.clone(), b.clone()]));
+        let mut fst5 = lucivy_fst::MapBuilder::memory();
+        fst5.insert(b"\x01lo", encode_multi_parent_v3(offset5)).unwrap();
+        fst5.insert(b"\x01mu", encode_single_parent_v3(&a)).unwrap();
+        let mut file5 = SectionFileWriter::new(MAGIC, INLINE_VALUE_VERSION);
+        file5.add_section(SECTION_FST, &fst5.into_inner().unwrap());
+        file5.add_section(SECTION_PARENTS, &table5.into_inner());
+        let bytes5 = file5.serialize();
+        let reader5 = SfxFileReaderV3::open(&bytes5).unwrap();
+        assert_eq!(reader5.container_version(), 5);
+        assert_eq!(reader5.resolve_suffix("lo"), vec![a.clone(), b.clone()]);
+        assert_eq!(reader5.resolve_suffix("mu"), vec![a.clone()]);
+
+        // And a freshly written file says 6, with every parent behind an offset.
         let fresh = SfxFileReaderV3::open(&build_sfx_v3(&["mutex_lock"])).unwrap();
-        assert_eq!(fresh.container_version(), 5);
+        assert_eq!(fresh.container_version(), 6);
+        assert!(!fresh.resolve_suffix("mutex_lo").is_empty());
+
+        // A version from the future is refused, not clamped.
+        let mut file9 = SectionFileWriter::new(MAGIC, VERSION + 1);
+        file9.add_section(SECTION_FST, &[]);
+        file9.add_section(SECTION_PARENTS, &[]);
+        assert!(matches!(SfxFileReaderV3::open(&file9.serialize()), Err(SfxV3Error::UnsupportedVersion(v)) if v == VERSION + 1));
     }
 
     /// Measurement, not a check: parent-list sizes by key length in a real
@@ -335,7 +381,7 @@ mod tests {
     #[test]
     #[ignore]
     fn measure_parents_by_key_length() {
-        use lucivy_fst::{IntoStreamer, Streamer};
+        use lucivy_fst::Streamer;
         let Ok(path) = std::env::var("SFX_FILE") else { return };
         let bytes = std::fs::read(&path).unwrap();
         let reader = SfxFileReaderV3::open(&bytes).unwrap();
@@ -351,6 +397,157 @@ mod tests {
         for ((p, l), (k, n, mx)) in &stats {
             eprintln!("  0x{p:02x}     {l:>2}{} {k:>8} {n:>12} {:>7.1} {mx:>7}", if *l == 12 { "+" } else { " " }, *n as f64 / *k as f64);
         }
+    }
+
+    /// Measurement, not a check: what the `.sfx` of a real segment (`SFX_FILE`)
+    /// would weigh under alternative encodings of the parents. Every layout
+    /// keeps the same information; the point is to choose before rewriting
+    /// the builder. Layouts:
+    ///   base — the file as it is (inline single parent, table for the rest);
+    ///   all-table — every key's parents in the table (v5 record), the FST
+    ///               value is the record offset (monotone, so the FST shares it);
+    ///   ord-sti — same, but a record is only (Δordinal, sti): the four other
+    ///             fields are per-ordinal meta already stored in `.termtexts`;
+    ///   no-marker — keys cut at the token boundary (marker and long key
+    ///               merge), the record carries the overlap bytes per parent;
+    ///   keys-only — FST with a zero value under every key: the cost of the keys.
+    #[test]
+    #[ignore]
+    fn measure_sfx_layouts() {
+        use lucivy_fst::{MapBuilder, OutputTableBuilder, Streamer};
+        use crate::suffix_fst::builder_v3::encode_parent_entries_v3;
+        use crate::suffix_fst::varint::write_varint;
+        let Ok(path) = std::env::var("SFX_FILE") else { return };
+        let bytes = std::fs::read(&path).unwrap();
+        let reader = SfxFileReaderV3::open(&bytes).unwrap();
+        let fst_len = reader.fst().as_fst().as_bytes().len();
+        let table_len = reader.parent_list_data.len();
+
+        // Gather everything once: (key, parents).
+        let mut keys: Vec<(Vec<u8>, Vec<ParentEntryV3>)> = Vec::new();
+        let mut stream = reader.fst().stream();
+        while let Some((key, val)) = stream.next() {
+            keys.push((key.to_vec(), reader.decode_parents(val)));
+        }
+        let n_keys = keys.len();
+        let n_single = keys.iter().filter(|(_, p)| p.len() == 1).count();
+        let n_parents: usize = keys.iter().map(|(_, p)| p.len()).sum();
+        eprintln!("file {} : fst {} KB, parents {} KB | {} keys ({} single-parent), {} parents",
+            path, fst_len / 1024, table_len / 1024, n_keys, n_single, n_parents);
+
+        let fst_size = |items: &[(Vec<u8>, u64)]| -> usize {
+            let mut b = MapBuilder::memory();
+            for (k, v) in items { b.insert(k, *v).unwrap(); }
+            b.into_inner().unwrap().len()
+        };
+
+        // keys-only
+        let zero: Vec<(Vec<u8>, u64)> = keys.iter().map(|(k, _)| (k.clone(), 0u64)).collect();
+        let keys_only = fst_size(&zero);
+        eprintln!("keys-only : fst {} KB", keys_only / 1024);
+
+        // all-table (v5 record for every key)
+        let mut tb = OutputTableBuilder::new();
+        let mut items: Vec<(Vec<u8>, u64)> = Vec::with_capacity(n_keys);
+        for (k, p) in &keys {
+            let off = tb.add(&encode_parent_entries_v3(p));
+            items.push((k.clone(), off));
+        }
+        let t = tb.into_inner().len();
+        let f = fst_size(&items);
+        eprintln!("all-table : fst {} KB, table {} KB, total {} KB ({:+.1}%)",
+            f / 1024, t / 1024, (f + t) / 1024,
+            100.0 * ((f + t) as f64 - (fst_len + table_len) as f64) / (fst_len + table_len) as f64);
+
+        // ord-sti (count, Δordinal varint, sti u8) — meta fetched from termtexts
+        let mut tb = OutputTableBuilder::new();
+        let mut items: Vec<(Vec<u8>, u64)> = Vec::with_capacity(n_keys);
+        let mut max_sti = 0u16;
+        for (k, p) in &keys {
+            let mut sorted = p.clone();
+            sorted.sort_by_key(|x| (x.raw_ordinal, x.sti));
+            let mut rec = Vec::with_capacity(4 + sorted.len() * 4);
+            write_varint(&mut rec, sorted.len() as u64);
+            let mut prev = 0u64;
+            for x in &sorted {
+                write_varint(&mut rec, x.raw_ordinal - prev); prev = x.raw_ordinal;
+                max_sti = max_sti.max(x.sti);
+                rec.push(x.sti as u8);
+            }
+            let off = tb.add(&rec);
+            items.push((k.clone(), off));
+        }
+        let t = tb.into_inner().len();
+        let f = fst_size(&items);
+        eprintln!("ord-sti   : fst {} KB, table {} KB, total {} KB ({:+.1}%) [max sti {}]",
+            f / 1024, t / 1024, (f + t) / 1024,
+            100.0 * ((f + t) as f64 - (fst_len + table_len) as f64) / (fst_len + table_len) as f64, max_sti);
+
+        // no-marker: cut keys at the boundary, overlap bytes into the record
+        let mut cut: std::collections::BTreeMap<Vec<u8>, Vec<(ParentEntryV3, Vec<u8>)>> = Default::default();
+        for (k, p) in &keys {
+            for x in p {
+                let boundary = if k[0] == 0x02 {
+                    (x.own_len as usize).saturating_sub(x.sep_len as usize).saturating_sub(x.sti as usize)
+                } else {
+                    (x.own_len as usize).saturating_sub(x.sti as usize)
+                };
+                let body = &k[1..];
+                let (head, tail) = if body.len() > boundary { body.split_at(boundary) } else { (body, &[][..]) };
+                let mut key = Vec::with_capacity(1 + head.len());
+                key.push(k[0]); key.extend_from_slice(head);
+                let list = cut.entry(key).or_default();
+                if let Some(e) = list.iter_mut().find(|(y, _)| y.raw_ordinal == x.raw_ordinal && y.sti == x.sti) {
+                    if tail.len() > e.1.len() { e.1 = tail.to_vec(); }
+                } else {
+                    list.push((x.clone(), tail.to_vec()));
+                }
+            }
+        }
+        let mut tb = OutputTableBuilder::new();
+        let mut items: Vec<(Vec<u8>, u64)> = Vec::with_capacity(cut.len());
+        let mut n_parents_cut = 0usize;
+        for (k, list) in &cut {
+            let parents: Vec<ParentEntryV3> = list.iter().map(|(p, _)| p.clone()).collect();
+            let mut rec = encode_parent_entries_v3(&parents);
+            // overlap bytes, in the record's parent order
+            let mut sorted: Vec<&(ParentEntryV3, Vec<u8>)> = list.iter().collect();
+            sorted.sort_by_key(|(p, _)| (p.raw_ordinal, p.sti));
+            for (_, ov) in sorted { rec.extend_from_slice(ov); }
+            n_parents_cut += parents.len();
+            let off = tb.add(&rec);
+            items.push((k.clone(), off));
+        }
+        let t = tb.into_inner().len();
+        let f = fst_size(&items);
+        eprintln!("no-marker : fst {} KB, table {} KB, total {} KB ({:+.1}%) | {} keys, {} parents",
+            f / 1024, t / 1024, (f + t) / 1024,
+            100.0 * ((f + t) as f64 - (fst_len + table_len) as f64) / (fst_len + table_len) as f64,
+            cut.len(), n_parents_cut);
+
+        // no-marker + ord-sti + overlap bytes
+        let mut tb = OutputTableBuilder::new();
+        let mut items: Vec<(Vec<u8>, u64)> = Vec::with_capacity(cut.len());
+        for (k, list) in &cut {
+            let mut sorted: Vec<&(ParentEntryV3, Vec<u8>)> = list.iter().collect();
+            sorted.sort_by_key(|(p, _)| (p.raw_ordinal, p.sti));
+            let mut rec = Vec::new();
+            write_varint(&mut rec, sorted.len() as u64);
+            let mut prev = 0u64;
+            for (p, ov) in &sorted {
+                write_varint(&mut rec, p.raw_ordinal - prev); prev = p.raw_ordinal;
+                rec.push(p.sti as u8);
+                rec.push(ov.len() as u8);
+                rec.extend_from_slice(ov);
+            }
+            let off = tb.add(&rec);
+            items.push((k.clone(), off));
+        }
+        let t = tb.into_inner().len();
+        let f = fst_size(&items);
+        eprintln!("no-marker+ord-sti : fst {} KB, table {} KB, total {} KB ({:+.1}%)",
+            f / 1024, t / 1024, (f + t) / 1024,
+            100.0 * ((f + t) as f64 - (fst_len + table_len) as f64) / (fst_len + table_len) as f64);
     }
 
     #[test]

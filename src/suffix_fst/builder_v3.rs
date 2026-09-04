@@ -25,6 +25,12 @@ fn default_min_suffix_len() -> usize {
 
 // ─── V3 encoding layout ───────────────────────────────────────────────────
 //
+// Container version 6 (written since 4 September 2026, evening): the FST value is the
+// offset of the key's parent record in the OutputTable, for one parent as for
+// many (`encode_parent_entries_v3`). The layout below is what versions 3 to 5
+// packed into the value itself; the reader still decodes it, the builder no
+// longer writes it.
+//
 // Single parent (bit 63 = 0):
 //   [63]     multi_flag = 0
 //   [62]     is_word_start
@@ -150,13 +156,20 @@ pub fn decode_output_v3(value: u64) -> ParentRefV3 {
 /// Parents used to be sorted by `sti`; no reader depended on it
 /// (`sort_and_dedup_splits` sorts what it keeps).
 pub fn encode_parent_entries_v3(parents: &[ParentEntryV3]) -> Vec<u8> {
-    use super::varint::write_varint;
     let mut sorted = parents.to_vec();
     sorted.sort_by_key(|p| (p.raw_ordinal, p.sti));
-    let mut buf = Vec::with_capacity(5 + sorted.len() * 5);
-    write_varint(&mut buf, sorted.len() as u64);
+    encode_sorted_parent_entries_v3(sorted.iter())
+}
+
+/// `encode_parent_entries_v3` over parents already sorted by `(ordinal, sti)`;
+/// the builder's groups are, and it encodes millions of them.
+pub fn encode_sorted_parent_entries_v3<'a>(parents: impl ExactSizeIterator<Item = &'a ParentEntryV3>) -> Vec<u8> {
+    use super::varint::write_varint;
+    let mut buf = Vec::with_capacity(5 + parents.len() * 5);
+    write_varint(&mut buf, parents.len() as u64);
     let mut prev = 0u64;
-    for p in &sorted {
+    for p in parents {
+        debug_assert!(p.raw_ordinal >= prev, "parents must be sorted by ordinal");
         debug_assert!((p.overlap_len as u64) <= OVERLAP_MASK);
         write_varint(&mut buf, p.raw_ordinal - prev);
         prev = p.raw_ordinal;
@@ -584,9 +597,10 @@ impl SuffixFstBuilderV3 {
             // a term serving another term's postings, or parents dropped and
             // occurrences lost. Merges are exactly the operation that crosses
             // these thresholds.
-            // Every entry, single or in a record, is packed into the same
-            // 63-bit value since container version 4 — so the 24-bit ordinal
-            // bound applies to all of them, not only to single parents.
+            // The record encodes the ordinal as a varint since version 5, so
+            // the 24-bit bound is no longer this file's: it is `.word_pos_map`'s
+            // slot layout (`SLOT_ORDINAL_BITS`) and `.posmap`'s narrow width
+            // that still assume it. It stays a hard error until they are widened.
             if num_parents > self.max_parents { self.max_parents = num_parents; }
             for e in &self.entries[i..j] {
                 let p = &e.2;
@@ -603,18 +617,13 @@ impl SuffixFstBuilderV3 {
                 if p.raw_ordinal > max_ordinal { max_ordinal = p.raw_ordinal; }
             }
 
-            let output = if num_parents == 1 {
-                encode_single_parent_v3(&self.entries[i].2)
-            } else {
-                let parents: Vec<ParentEntryV3> = self.entries[i..j]
-                    .iter()
-                    .map(|e| e.2.clone())
-                    .collect();
-                let record = encode_parent_entries_v3(&parents);
-                let offset = output_table.add(&record);
-                encode_multi_parent_v3(offset)
-            };
-            fst_builder.insert(key, output)?;
+            // Every key, single parent included, points at a record: the
+            // offsets grow with the keys, so the FST shares them along its
+            // paths instead of carrying an incompressible 8-byte value under
+            // each final node. The group is already sorted by (ordinal, sti).
+            let record = encode_sorted_parent_entries_v3(self.entries[i..j].iter().map(|e| &e.2));
+            let offset = output_table.add(&record);
+            fst_builder.insert(key, offset)?;
             self.num_terms += 1;
 
             i = j;
@@ -855,6 +864,13 @@ mod tests {
 
     // ── Builder with overlap ──
 
+    /// The one parent behind a version-6 FST value.
+    fn single(table: &[u8], val: u64) -> ParentEntryV3 {
+        let mut v = decode_parent_entries_v3(lucivy_fst::OutputTable::new(table).get(val));
+        assert_eq!(v.len(), 1, "expected single");
+        v.pop().unwrap()
+    }
+
     fn fst_get(fst: &lucivy_fst::Map<Vec<u8>>, prefix: u8, key: &[u8]) -> Option<u64> {
         let mut prefixed = vec![prefix];
         prefixed.extend_from_slice(key);
@@ -867,32 +883,28 @@ mod tests {
         // Token "mutex_" (own_len=6, sep=1) + overlap "lo" → extended "mutex_lo"
         builder.add_token("mutex_lo", 0, 6, 1, 2, true);
 
-        let (fst_bytes, _) = builder.build().unwrap();
+        let (fst_bytes, table) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
         // SI=0 "mutex_lo"
         let val = fst_get(&fst, SI0_PREFIX, b"mutex_lo").expect("mutex_lo at SI=0");
-        match decode_output_v3(val) {
-            ParentRefV3::Single(p) => {
-                assert_eq!(p.raw_ordinal, 0);
-                assert_eq!(p.sti, 0);
-                assert_eq!(p.own_len, 6);
-                assert_eq!(p.sep_len, 1);
-                assert_eq!(p.overlap_len, 2);
-                assert!(p.is_word_start);
-                assert_eq!(p.content_len(), 5);
-            }
-            _ => panic!("expected single"),
+        {
+            let p = single(&table, val);
+            assert_eq!(p.raw_ordinal, 0);
+            assert_eq!(p.sti, 0);
+            assert_eq!(p.own_len, 6);
+            assert_eq!(p.sep_len, 1);
+            assert_eq!(p.overlap_len, 2);
+            assert!(p.is_word_start);
+            assert_eq!(p.content_len(), 5);
         }
 
         // SI=4 "x_lo" — the cross-boundary trigram "x_l" is in here
         let val = fst_get(&fst, SI_REST_PREFIX, b"x_lo").expect("x_lo at SI>0");
-        match decode_output_v3(val) {
-            ParentRefV3::Single(p) => {
-                assert_eq!(p.sti, 4);
-                assert_eq!(p.own_len, 6);
-            }
-            _ => panic!("expected single"),
+        {
+            let p = single(&table, val);
+            assert_eq!(p.sti, 4);
+            assert_eq!(p.own_len, 6);
         }
 
         // SI=6 "lo" would start in the overlap zone: not a key since 4 September 2026.
@@ -908,7 +920,7 @@ mod tests {
         // "login_" ord=1: suffix "lo" at SI=0 in SI0 partition
         builder.add_token("login_", 1, 6, 1, 0, true);
 
-        let (fst_bytes, output_table_data) = builder.build().unwrap();
+        let (fst_bytes, table) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
         // "lo" in SI>0 would be mutex_lo's overlap zone (sti 6 >= own_len 6):
@@ -917,23 +929,19 @@ mod tests {
 
         // "login_" in SI=0 partition
         let val = fst_get(&fst, SI0_PREFIX, b"login_").expect("login_ at SI=0");
-        match decode_output_v3(val) {
-            ParentRefV3::Single(p) => {
-                assert_eq!(p.raw_ordinal, 1);
-                assert_eq!(p.sti, 0);
-                assert!(p.is_word_start);
-            }
-            _ => panic!("expected single"),
+        {
+            let p = single(&table, val);
+            assert_eq!(p.raw_ordinal, 1);
+            assert_eq!(p.sti, 0);
+            assert!(p.is_word_start);
         }
 
         // "ogin_" in SI>0 partition: multi-parent? No — only from "login_"
         let val = fst_get(&fst, SI_REST_PREFIX, b"ogin_").expect("ogin_ in SI>0");
-        match decode_output_v3(val) {
-            ParentRefV3::Single(p) => {
-                assert_eq!(p.raw_ordinal, 1);
-                assert_eq!(p.sti, 1);
-            }
-            _ => panic!("expected single"),
+        {
+            let p = single(&table, val);
+            assert_eq!(p.raw_ordinal, 1);
+            assert_eq!(p.sti, 1);
         }
     }
 
@@ -943,17 +951,15 @@ mod tests {
         // Last token: no overlap
         builder.add_token("init", 2, 4, 0, 0, true);
 
-        let (fst_bytes, _) = builder.build().unwrap();
+        let (fst_bytes, table) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
         let val = fst_get(&fst, SI0_PREFIX, b"init").expect("init at SI=0");
-        match decode_output_v3(val) {
-            ParentRefV3::Single(p) => {
-                assert_eq!(p.own_len, 4);
-                assert_eq!(p.overlap_len, 0);
-                assert_eq!(p.sep_len, 0);
-            }
-            _ => panic!("expected single"),
+        {
+            let p = single(&table, val);
+            assert_eq!(p.own_len, 4);
+            assert_eq!(p.overlap_len, 0);
+            assert_eq!(p.sep_len, 0);
         }
     }
 
@@ -965,19 +971,19 @@ mod tests {
         // TI=1 "ntById" — second chunk, is_word_start=false
         builder.add_token("ntById", 1, 6, 0, 0, false);
 
-        let (fst_bytes, _) = builder.build().unwrap();
+        let (fst_bytes, table) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
         let val = fst_get(&fst, SI0_PREFIX, b"geteleme").expect("getEleme lowered");
-        match decode_output_v3(val) {
-            ParentRefV3::Single(p) => assert!(p.is_word_start),
-            _ => panic!("expected single"),
+        {
+            let p = single(&table, val);
+            assert!(p.is_word_start);
         }
 
         let val = fst_get(&fst, SI0_PREFIX, b"ntbyid").expect("ntById lowered");
-        match decode_output_v3(val) {
-            ParentRefV3::Single(p) => assert!(!p.is_word_start),
-            _ => panic!("expected single"),
+        {
+            let p = single(&table, val);
+            assert!(!p.is_word_start);
         }
     }
 
@@ -999,29 +1005,25 @@ mod tests {
         builder.add_token("mutex_lo", 0, 6, 1, 2, true);
         builder.add_word_stripped("mutex", "lo", 0, 6, 1, true);
 
-        let (fst_bytes, _) = builder.build().unwrap();
+        let (fst_bytes, table) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
         // Partition 0x02 should have stripped suffixes (content + overlap, no sep)
         // "mutexlo" at STI=0
         let val = fst_get(&fst, SI_STRIPPED_PREFIX, b"mutexlo").expect("mutexlo in stripped");
-        match decode_output_v3(val) {
-            ParentRefV3::Single(p) => {
-                assert_eq!(p.sti, 0);
-                assert_eq!(p.raw_ordinal, 0);
-                assert_eq!(p.own_len, 6);
-                assert_eq!(p.sep_len, 1);
-            }
-            _ => panic!("expected single"),
+        {
+            let p = single(&table, val);
+            assert_eq!(p.sti, 0);
+            assert_eq!(p.raw_ordinal, 0);
+            assert_eq!(p.own_len, 6);
+            assert_eq!(p.sep_len, 1);
         }
 
         // "exlo" at STI=3 — the trigram "exl" is findable here!
         let val = fst_get(&fst, SI_STRIPPED_PREFIX, b"exlo").expect("exlo in stripped");
-        match decode_output_v3(val) {
-            ParentRefV3::Single(p) => {
-                assert_eq!(p.sti, 3);
-            }
-            _ => panic!("expected single"),
+        {
+            let p = single(&table, val);
+            assert_eq!(p.sti, 3);
         }
     }
 
@@ -1031,7 +1033,7 @@ mod tests {
         builder.add_token("mutex_lo", 0, 6, 1, 2, true);
         builder.add_word_stripped("mutex", "lo", 0, 6, 1, true);
 
-        let (fst_bytes, _) = builder.build().unwrap();
+        let (fst_bytes, table) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
         // "exl" trigram: NOT in partition 0x01 (normal has "ex_lo", not "exlo")
@@ -1060,7 +1062,7 @@ mod tests {
         // Token without sep — no stripped entries should be added
         builder.add_token("lock", 0, 4, 0, 0, true);
 
-        let (fst_bytes, _) = builder.build().unwrap();
+        let (fst_bytes, table) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
         // No entries in partition 0x02
@@ -1079,7 +1081,7 @@ mod tests {
         builder.add_token("a____bc", 0, 5, 4, 2, true);
         builder.add_word_stripped("a", "bc", 0, 5, 4, true);
 
-        let (fst_bytes, _) = builder.build().unwrap();
+        let (fst_bytes, table) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
         // Normal partition has "a____bc" with the underscores
@@ -1087,14 +1089,12 @@ mod tests {
 
         // Stripped partition has "abc" (content "a" + overlap "bc", sep "____" removed)
         let val = fst_get(&fst, SI_STRIPPED_PREFIX, b"abc").expect("abc in stripped");
-        match decode_output_v3(val) {
-            ParentRefV3::Single(p) => {
-                assert_eq!(p.sti, 0);
-                assert_eq!(p.own_len, 5); // a(1) + ____(4)
-                assert_eq!(p.sep_len, 4);
-                assert_eq!(p.overlap_len, 2);
-            }
-            _ => panic!("expected single"),
+        {
+            let p = single(&table, val);
+            assert_eq!(p.sti, 0);
+            assert_eq!(p.own_len, 5); // a(1) + ____(4)
+            assert_eq!(p.sep_len, 4);
+            assert_eq!(p.overlap_len, 2);
         }
     }
 
@@ -1104,19 +1104,15 @@ mod tests {
         builder.add_token("mutex_lo", 42, 6, 1, 2, true);
         builder.add_word_stripped("mutex", "lo", 42, 6, 1, true);
 
-        let (fst_bytes, _) = builder.build().unwrap();
+        let (fst_bytes, table) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
         // Normal and stripped entries should have the same ordinal
         let normal = fst_get(&fst, SI0_PREFIX, b"mutex_lo").unwrap();
         let stripped = fst_get(&fst, SI_STRIPPED_PREFIX, b"mutexlo").unwrap();
 
-        match (decode_output_v3(normal), decode_output_v3(stripped)) {
-            (ParentRefV3::Single(n), ParentRefV3::Single(s)) => {
-                assert_eq!(n.raw_ordinal, s.raw_ordinal, "same ordinal");
-                assert_eq!(n.raw_ordinal, 42);
-            }
-            _ => panic!("expected singles"),
-        }
+        let (n, s) = (single(&table, normal), single(&table, stripped));
+        assert_eq!(n.raw_ordinal, s.raw_ordinal, "same ordinal");
+        assert_eq!(n.raw_ordinal, 42);
     }
 }
