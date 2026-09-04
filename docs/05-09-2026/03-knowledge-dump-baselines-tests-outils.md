@@ -185,9 +185,33 @@ entre shards) ; relancé seul il passe.
   le compte des restes courts (→ présumés). Fausses pistes mesurées :
   découpe en sous-plages (le tri reste), verrou de la mémo, `.termtexts`
   multi-générations.
-- Ce qui reste ([01](01-journal-session-5-septembre.md) §11) : la
-  compaction naïve (prochain chantier), la regex à ×1,6, la DFS de
-  fratrie, `index_bytes` / `preload` / `residency` sans les `dict-*`.
+- **Mesurer une compaction** sans reconstruire l'index : le test ignoré
+  `dictionary_compact::compaction_of_an_index_on_disk` lie en dur les
+  `dict-*` d'un index dans un répertoire de travail et y compacte toutes
+  les générations vivantes, chronométré, avec le pic de RAM anonyme
+  (`RssAnon` échantillonné) et `VmHWM` (qui compte les fichiers mappés).
+
+  ```bash
+  LUCIVY_DICT_BENCH_DIR=/chemin/idx90k-dict2 LUCIVY_DICT_BENCH_OUT=/chemin/compact \
+    LUCIVY_DICT_BENCH_MODE=stream V3_PROFILE=1 \
+    cargo test --release --lib -- compaction_of_an_index_on_disk --ignored --nocapture > out.txt 2>&1
+  # MODE=naive : la reconstruction d'avant (12,8 Go sur le noyau : free -g avant, jamais en parallèle)
+  # MODE=compare : les deux puis les fichiers octet pour octet (pic RAM = le naïf)
+  ```
+
+  Baselines (champ contenu) : 30 000 fichiers, 7 générations — flux 7,2 s
+  contre naïf 13,0 s ; noyau, 2 générations (902 + 21 Mo) — flux **18,9 s,
+  229 Mo anonymes**, naïf **48,0 s, 12,8 Go**. Le profil (`V3_PROFILE=1`)
+  imprime `[dict] compaction gen … : parts -> keys (merged), texts | fst ms
+  | texts ms` à chaque compaction, y compris pendant une construction.
+- **Une construction qui compacte beaucoup**, pour la vérité de bout en
+  bout : `V3_SFX_VERSION=4 V3_COMMIT_EVERY=500 LUCIVY_DICT_MAX_GENERATIONS=3`
+  devant le harnais sur le corpus 10 000, `V3_INDEX_DIR` neuf — six
+  compactions, puis le panel, `contains` et `coherence` sur le même
+  index (9/9, 15/15, 31/31 le 5 septembre, [01](01-journal-session-5-septembre.md) §13 bis).
+- Ce qui reste ([01](01-journal-session-5-septembre.md) §11) : la regex à
+  ×1,6, la DFS de fratrie, `index_bytes` / `preload` / `residency` sans
+  les `dict-*`.
 
 ---
 

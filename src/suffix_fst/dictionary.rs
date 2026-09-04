@@ -14,8 +14,9 @@
 //! the ids minted by one span of commits (its `.termtexts` names them,
 //! `SECTION_IDS`), immutable. A commit that minted new ids writes the next
 //! generation with those ids only, then `meta.json` names it among the
-//! live ones; past `LUCIVY_DICT_MAX_GENERATIONS` (8) a commit compacts
-//! them into one. A generation's files are garbage once no live
+//! live ones; past `LUCIVY_DICT_MAX_GENERATIONS` (8) a commit merges the
+//! smallest ones into one, in streams (`dictionary_compact.rs`). A
+//! generation's files are garbage once no live
 //! `meta.json` names it (`segment_updater::list_files`). Readers see the
 //! live generations as one (`SfxFileReaderV3::open_parts`,
 //! `TermTextsReaderV3::open_parts`).
@@ -80,15 +81,6 @@ impl DictionaryField {
     /// The FST(s) of every live generation.
     pub fn sfx_reader(&self) -> &SfxFileReaderV3 {
         &self.sfx_reader
-    }
-
-    /// Every id and text the live generations hold, ascending by id.
-    pub fn all_texts(&self) -> Vec<(u32, String, TermMetaV3)> {
-        let mut v: Vec<(u32, String, TermMetaV3)> = self.termtexts_reader()
-            .map(|r| r.iter().map(|(g, t, m)| (g, t.to_string(), m)).collect())
-            .unwrap_or_default();
-        v.sort_by_key(|e| e.0);
-        v
     }
 
     /// The global id of a token with exactly this text and shape, if the

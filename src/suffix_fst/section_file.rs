@@ -99,6 +99,26 @@ impl SectionFileWriter {
     }
 }
 
+/// The header of a section file whose payloads are written by the caller,
+/// in this order, right after it: `sections` are `(section_id, length)`.
+/// What `SectionFileWriter::serialize` puts before the data area, for a
+/// file too large to assemble in RAM (a shard dictionary's compaction).
+pub fn section_file_header(magic: [u8; 4], version: u8, sections: &[(u16, u32)]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(FIXED_HEADER + sections.len() * ENTRY_SIZE);
+    buf.extend_from_slice(&magic);
+    buf.push(version);
+    buf.extend_from_slice(&(sections.len() as u16).to_le_bytes());
+    let mut offset = 0u32;
+    for &(id, length) in sections {
+        buf.extend_from_slice(&id.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(&offset.to_le_bytes());
+        buf.extend_from_slice(&length.to_le_bytes());
+        offset += length;
+    }
+    buf
+}
+
 // ─── Reader ────────────────────────────────────────────────────────────────
 
 /// Reads a section-based file. Zero-copy: holds a reference to the source bytes.

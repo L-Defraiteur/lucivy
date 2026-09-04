@@ -14,6 +14,16 @@ Unreleased (branch v4)
 - Index format v4 on the branch: `.sfx` container version 8, ordinals on 28
   bits, block-coded offset tables (`SFP4`, `WSP4`, `SIB4`, `.termtexts`
   layout 3), `.gmap` layout 2. Every reader still opens the previous layouts.
+- **Dictionary compaction as a merge of streams.** Past
+  `LUCIVY_DICT_MAX_GENERATIONS` (8) live generations, a commit used to read
+  every text of the dictionary into RAM and rebuild one FST from all of them
+  (Linux kernel, 22.5 million ids: 48 s and 12.8 GB of RAM, at every eighth
+  commit). It now merges the smallest generations — enough to halve the
+  count — by walking their FSTs together, copying the records of keys held by
+  one file byte for byte and merging the others, the output FST streamed to
+  disk (`suffix_fst/dictionary_compact.rs`): the same kernel merge takes 19 s
+  and 229 MB, and produces byte-identical files. A leftover generation file
+  from a crashed commit no longer blocks the next one.
 
 Lucivy 3.0.8
 ================================

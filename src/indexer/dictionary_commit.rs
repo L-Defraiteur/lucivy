@@ -4,23 +4,23 @@
 //! it commits — the texts of the ids they minted — into a new generation
 //! holding those texts only (one `.sfx` and one `.termtexts` per field),
 //! then makes it live on the `Index` so that `save_metas` names it. Past
-//! `LUCIVY_DICT_MAX_GENERATIONS` live generations, one holding every text
-//! replaces them (a rebuild, as costly as the dictionary is large — rare).
+//! `LUCIVY_DICT_MAX_GENERATIONS` live generations, the smallest ones are
+//! merged into one, in streams (`suffix_fst::dictionary_compact`) —
+//! nothing of the dictionary is ever held in RAM, and the largest
+//! generation only joins once enough others have outgrown it.
 //! Nothing new to fold → nothing written.
 //!
-//! Ids are stable and append-only, so a rebuild changes no segment.
+//! Ids are stable and append-only, so a merge changes no segment.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::directory::{Directory, TerminatingWrite};
+use crate::directory::Directory;
 use crate::index::SfxDictionaryMeta;
-use crate::suffix_fst::builder_v3::SuffixFstBuilderV3;
-use crate::suffix_fst::dictionary::{decode_newtexts, dictionary_file_name, SfxDictionary, DICTIONARY_SFX_VERSION};
-use crate::suffix_fst::file_v3::SfxFileWriterV3;
-use crate::suffix_fst::termtexts_v3::{TermMetaV3, TermTextsWriterV3};
+use crate::suffix_fst::dictionary::{decode_newtexts, DICTIONARY_SFX_VERSION, SfxDictionary};
+use crate::suffix_fst::dictionary_compact::{choose_compaction, compact_generations, generation_bytes, remove_leftovers, write_generation};
+use crate::suffix_fst::termtexts_v3::TermMetaV3;
 
 use super::segment_updater::SegmentUpdaterShared;
 
@@ -87,6 +87,7 @@ pub(crate) fn fold_new_texts(shared: &Arc<SegmentUpdaterShared>) -> crate::Resul
     // The new generation: the new texts only, per field, ids ascending.
     let generation = next_generation;
     next_generation += 1;
+    remove_leftovers(directory, generation, &field_ids)?;
     for &field_id in &field_ids {
         let mut entries = new_by_field.remove(&field_id).unwrap_or_default();
         entries.sort_by_key(|e| e.0);
@@ -95,26 +96,18 @@ pub(crate) fn fold_new_texts(shared: &Arc<SegmentUpdaterShared>) -> crate::Resul
     }
     generations.push(generation);
 
-    // Too many generations to walk: one holding everything replaces them.
-    if generations.len() > max_generations {
+    // Too many generations to walk: the smallest ones merge into one.
+    let sizes: Vec<(u64, u64)> = generations.iter()
+        .map(|&g| (g, generation_bytes(directory, g, &field_ids))).collect();
+    if let Some(merged) = choose_compaction(&sizes, max_generations) {
         let compact = next_generation;
         next_generation += 1;
+        remove_leftovers(directory, compact, &field_ids)?;
         for &field_id in &field_ids {
-            let mut entries: Vec<(u32, String, TermMetaV3)> = dictionary.field(field_id)
-                .map(|f| f.all_texts()).unwrap_or_default();
-            // Plus this commit's, which the open dictionary does not hold yet.
-            let fresh_path = PathBuf::from(dictionary_file_name(generation, field_id, "termtexts"));
-            if let Some(fresh) = directory.open_read(&fresh_path).ok()
-                .and_then(|f| f.read_bytes().ok())
-                .and_then(|bytes| decode_newtexts(&bytes))
-            {
-                entries.extend(fresh);
-            }
-            entries.sort_by_key(|e| e.0);
-            entries.dedup_by_key(|e| e.0);
-            write_generation(directory, compact, field_id, &entries)?;
+            compact_generations(directory, &merged, field_id, compact)?;
         }
-        generations = vec![compact];
+        generations.retain(|g| !merged.contains(g));
+        generations.push(compact);
     }
 
     let folded: HashSet<(u32, u64)> = folded_ids;
@@ -122,39 +115,5 @@ pub(crate) fn fold_new_texts(shared: &Arc<SegmentUpdaterShared>) -> crate::Resul
     let next = SfxDictionary::open(directory, &meta, Some(&dictionary));
     next.forget_pending(&folded);
     index.set_sfx_dictionary(Some(Arc::new(next)));
-    Ok(())
-}
-
-/// Write one field's files of a generation: the FST over `entries` (ids
-/// ascending) and the texts with their ids.
-fn write_generation(
-    directory: &dyn Directory,
-    generation: u64,
-    field_id: u32,
-    entries: &[(u32, String, TermMetaV3)],
-) -> crate::Result<()> {
-    let mut builder = SuffixFstBuilderV3::new();
-    builder.set_max_ordinal(u32::MAX as u64);
-    let mut texts = TermTextsWriterV3::new().with_ids(entries.iter().map(|e| e.0).collect());
-    for (i, (global, text, m)) in entries.iter().enumerate() {
-        texts.add(i as u32, text, *m);
-        if m.is_word_stripped {
-            let content_len = text.len().saturating_sub(m.overlap_len as usize);
-            builder.add_word_stripped(&text[..content_len], &text[content_len..], *global as u64,
-                m.own_len, m.sep_len, m.is_word_start);
-        } else {
-            builder.add_token(text, *global as u64, m.own_len, m.sep_len, m.overlap_len, m.is_word_start);
-        }
-    }
-    let (fst, parents) = builder.build().map_err(|e| crate::LucivyError::SystemError(
-        format!("dictionary generation {generation} field {field_id}: {e}")))?;
-    let sfx = SfxFileWriterV3::new(fst, parents).to_bytes();
-    let termtexts = texts.serialize();
-    for (ext, bytes) in [("sfx", sfx), ("termtexts", termtexts)] {
-        let path = PathBuf::from(dictionary_file_name(generation, field_id, ext));
-        let mut w = directory.open_write(&path)?;
-        w.write_all(&bytes)?;
-        w.terminate()?;
-    }
     Ok(())
 }

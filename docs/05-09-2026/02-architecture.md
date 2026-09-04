@@ -114,11 +114,20 @@ ni `.sfx` ni `.termtexts`.
 
 **Commit** (`indexer/dictionary_commit.rs::fold_new_texts`) : les `.newtexts`
 des segments commis → une génération de plus, **leurs textes seulement**.
-Au-delà de `LUCIVY_DICT_MAX_GENERATIONS` (8) vivantes, **compaction** : une
-génération qui tient tout, réécrite depuis `all_texts()` par le builder —
-**naïve** (tout en RAM, tout retrié), c'est le prochain chantier
-([01](01-journal-session-5-septembre.md) §11). Les identifiants ne bougent
-jamais.
+Au-delà de `LUCIVY_DICT_MAX_GENERATIONS` (8) vivantes, **compaction en
+fusion de flux** (`suffix_fst/dictionary_compact.rs`,
+[01](01-journal-session-5-septembre.md) §13) : les plus petites
+générations — assez pour ramener le compte à la moitié du maximum
+(`choose_compaction`) — fusionnent en une seule : union des FST dans
+l'ordre des clés, record copié tel quel quand une seule génération tient
+la clé, parents fusionnés et ré-encodés sinon, FST et table des parents
+écrites en flux (fichiers temporaires `dict-<g>.<champ>.sfx.*.tmp`, puis
+le conteneur assemblé) ; `.termtexts` par un tas sur les curseurs, trois
+passes, seule la table des offsets en RAM (`termtexts_v3::write_merged`).
+Résultat identique octet pour octet à une reconstruction ; noyau : 19 s
+et 229 Mo au lieu de 48 s et 12,8 Go. Les identifiants ne bougent
+jamais ; `remove_leftovers` efface ce qu'un commit planté a laissé sous
+le numéro réutilisé.
 
 **Fusion** (`merge_segments_dict`) : union triée des `.gmap` (statistique
 « mots longs » = max des entrées), remappage des locaux, concaténation des

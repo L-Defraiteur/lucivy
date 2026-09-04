@@ -173,10 +173,7 @@ impl TermTextsWriterV3 {
             .map(|m| m.own_len.saturating_sub(m.sep_len as u16))
             .max()
             .unwrap_or(0);
-        let mut stats = Vec::with_capacity(4);
-        stats.extend_from_slice(&max_word.to_le_bytes());
-        stats.extend_from_slice(&STATS_VERSION.to_le_bytes());
-        file.add_section(SECTION_STATS, &stats);
+        file.add_section(SECTION_STATS, &stats_section(max_word));
 
         if let Some(ids) = &self.ids {
             let mut runs: Vec<(u32, u32)> = Vec::new();
@@ -186,13 +183,7 @@ impl TermTextsWriterV3 {
                     _ => runs.push((id, 1)),
                 }
             }
-            let mut buf = Vec::with_capacity(4 + runs.len() * 8);
-            buf.extend_from_slice(&(runs.len() as u32).to_le_bytes());
-            for (start, len) in runs {
-                buf.extend_from_slice(&start.to_le_bytes());
-                buf.extend_from_slice(&len.to_le_bytes());
-            }
-            file.add_section(SECTION_IDS, &buf);
+            file.add_section(SECTION_IDS, &ids_section(&runs));
         }
 
         file.serialize()
@@ -219,18 +210,144 @@ impl TermTextsWriterV3 {
         buf.extend_from_slice(&num.to_le_bytes());
         buf.extend_from_slice(&table);
         for m in &self.metas {
-            assert!(m.overlap_len <= OVERLAP_MASK, "overlap_len {} does not fit in 4 bits", m.overlap_len);
-            buf.extend_from_slice(&m.own_len.to_le_bytes());
-            buf.push(m.sep_len);
-            buf.push(m.overlap_len
-                | if m.is_word_start { WORD_START_FLAG } else { 0 }
-                | if m.is_word_stripped { WORD_STRIPPED_FLAG } else { 0 });
+            buf.extend_from_slice(&pack_meta(m));
         }
         for text in &self.texts {
             buf.extend_from_slice(text);
         }
         buf
     }
+}
+
+/// The layout-3 meta record of one entry: `[u16 own_len][u8 sep_len][u8 flags]`.
+fn pack_meta(m: &TermMetaV3) -> [u8; META_SIZE] {
+    assert!(m.overlap_len <= OVERLAP_MASK, "overlap_len {} does not fit in 4 bits", m.overlap_len);
+    let [a, b] = m.own_len.to_le_bytes();
+    [a, b, m.sep_len, m.overlap_len
+        | if m.is_word_start { WORD_START_FLAG } else { 0 }
+        | if m.is_word_stripped { WORD_STRIPPED_FLAG } else { 0 }]
+}
+
+/// The STATS section: the largest word-stripped content length, then the
+/// STATS layout version.
+fn stats_section(max_word: u16) -> [u8; 4] {
+    let [a, b] = max_word.to_le_bytes();
+    let [c, d] = STATS_VERSION.to_le_bytes();
+    [a, b, c, d]
+}
+
+/// The IDS section over ids given ascending: `[u32 runs]` then
+/// `[u32 start][u32 len]` per run.
+fn ids_section(runs: &[(u32, u32)]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(4 + runs.len() * 8);
+    buf.extend_from_slice(&(runs.len() as u32).to_le_bytes());
+    for &(start, len) in runs {
+        buf.extend_from_slice(&start.to_le_bytes());
+        buf.extend_from_slice(&len.to_le_bytes());
+    }
+    buf
+}
+
+// ─── Streaming merge ────────────────────────────────────────────────────────
+
+/// The entries of several files as one sequence ascending by id, an id
+/// held by two files yielded once (the first file's). Each file's own
+/// entries are ascending by id already (a generation of a shard dictionary
+/// is written so); the merge is a heap over the files' cursors.
+pub struct MergedEntries<'r, 'a> {
+    cursors: Vec<std::iter::Peekable<Box<dyn Iterator<Item = (u32, &'a str, TermMetaV3)> + 'r>>>,
+    heap: std::collections::BinaryHeap<std::cmp::Reverse<(u32, usize)>>,
+    last: Option<u32>,
+}
+
+impl<'r, 'a: 'r> MergedEntries<'r, 'a> {
+    /// Over `parts`, each read on its own ids.
+    pub fn new(parts: &'r [TermTextsReaderV3<'a>]) -> Self {
+        let mut cursors: Vec<std::iter::Peekable<Box<dyn Iterator<Item = (u32, &'a str, TermMetaV3)> + 'r>>> =
+            parts.iter().map(|p| (Box::new(p.iter()) as Box<dyn Iterator<Item = _> + 'r>).peekable()).collect();
+        let mut heap = std::collections::BinaryHeap::new();
+        for (i, c) in cursors.iter_mut().enumerate() {
+            if let Some(&(id, _, _)) = c.peek() {
+                heap.push(std::cmp::Reverse((id, i)));
+            }
+        }
+        Self { cursors, heap, last: None }
+    }
+}
+
+impl<'r, 'a: 'r> Iterator for MergedEntries<'r, 'a> {
+    type Item = (u32, &'a str, TermMetaV3);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let std::cmp::Reverse((id, i)) = self.heap.pop()?;
+            let item = self.cursors[i].next()?;
+            debug_assert_eq!(item.0, id);
+            if let Some(&(next_id, _, _)) = self.cursors[i].peek() {
+                debug_assert!(next_id > id, "a part's entries must ascend by id");
+                self.heap.push(std::cmp::Reverse((next_id, i)));
+            }
+            if self.last == Some(id) {
+                continue;
+            }
+            self.last = Some(id);
+            return Some(item);
+        }
+    }
+}
+
+/// Write the union of `parts` to `out` as one layout-3 file with ids
+/// (`SECTION_IDS`), ascending — the bytes `TermTextsWriterV3` would
+/// produce over the same entries, without ever holding them: three passes
+/// over the merge (offsets and ids, then the meta records, then the
+/// texts), and the offset table is the only thing in RAM. Returns the
+/// number of entries.
+pub fn write_merged(parts: &[TermTextsReaderV3<'_>], out: &mut dyn std::io::Write) -> std::io::Result<u32> {
+    use std::io::{Error, ErrorKind};
+    let mut offsets: Vec<u32> = Vec::new();
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    let mut total: u64 = 0;
+    let mut max_word: u16 = 0;
+    for (id, text, m) in MergedEntries::new(parts) {
+        offsets.push(total as u32);
+        total += text.len() as u64;
+        if total > u32::MAX as u64 {
+            return Err(Error::new(ErrorKind::InvalidData, "term texts exceed 4 GB"));
+        }
+        if m.is_word_stripped {
+            max_word = max_word.max(m.own_len.saturating_sub(m.sep_len as u16));
+        }
+        match runs.last_mut() {
+            Some((start, len)) if *start + *len == id => *len += 1,
+            _ => runs.push((id, 1)),
+        }
+    }
+    let num = offsets.len() as u32;
+    offsets.push(total as u32);
+    let table = block_offsets::encode(&offsets);
+    drop(offsets);
+    let ids = ids_section(&runs);
+    let entries_len = 4 + table.len() + num as usize * META_SIZE + total as usize;
+    if entries_len > u32::MAX as usize {
+        return Err(Error::new(ErrorKind::InvalidData, "term texts section exceeds 4 GB"));
+    }
+    let header = super::section_file::section_file_header(MAGIC, VERSION, &[
+        (SECTION_ENTRIES3, entries_len as u32),
+        (SECTION_STATS, 4),
+        (SECTION_IDS, ids.len() as u32),
+    ]);
+    out.write_all(&header)?;
+    out.write_all(&num.to_le_bytes())?;
+    out.write_all(&table)?;
+    for (_, _, m) in MergedEntries::new(parts) {
+        out.write_all(&pack_meta(&m))?;
+    }
+    for (_, text, _) in MergedEntries::new(parts) {
+        out.write_all(text.as_bytes())?;
+    }
+    out.write_all(&stats_section(max_word))?;
+    out.write_all(&ids)?;
+    Ok(num)
 }
 
 // ─── Reader ────────────────────────────────────────────────────────────────

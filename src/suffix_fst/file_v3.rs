@@ -43,7 +43,8 @@ use super::builder_v3::{
 };
 use super::section_file::{SectionFileReader, SectionFileWriter};
 
-const MAGIC: [u8; 4] = *b"SFX3";
+/// The container magic.
+pub const MAGIC: [u8; 4] = *b"SFX3";
 /// Container version written by `SfxFileWriterV3`.
 pub const VERSION: u8 = 8;
 /// Last container version whose FST value may hold a parent inline.
@@ -80,6 +81,18 @@ impl SfxFileWriterV3 {
         file.add_section(SECTION_PARENTS, &self.parent_list_data);
         file.serialize()
     }
+}
+
+/// Write a `.sfx` container (current version) to `out` from FST bytes and
+/// a parents table already on disk — what a dictionary compaction assembles
+/// after streaming both to temporary files, so that no section is ever held
+/// in RAM. Same bytes as `SfxFileWriterV3::to_bytes`.
+pub fn write_container(out: &mut dyn std::io::Write, fst: &[u8], parents: &[u8]) -> std::io::Result<()> {
+    let header = crate::suffix_fst::section_file::section_file_header(
+        MAGIC, VERSION, &[(SECTION_FST, fst.len() as u32), (SECTION_PARENTS, parents.len() as u32)]);
+    out.write_all(&header)?;
+    out.write_all(fst)?;
+    out.write_all(parents)
 }
 
 // ─── Reader ────────────────────────────────────────────────────────────────
@@ -420,6 +433,12 @@ impl SfxFileReaderV3 {
     /// Access the FST.
     pub fn fst(&self) -> &Map<common::OwnedBytes> {
         &self.fst
+    }
+
+    /// The parents table's bytes (`lucivy_fst::OutputTable` layout), a
+    /// slice of the file's bytes — a compaction copies records out of it.
+    pub fn parents_table_bytes(&self) -> &[u8] {
+        self.parent_list_data.as_slice()
     }
 
     /// The parents behind a FST value whose overlap bytes satisfy `keep` —

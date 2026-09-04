@@ -219,10 +219,13 @@ Node `Index.create(path, fields, shards, sharedDictionary)` et
 schéma complet (comme le chemin blob), emscripten `IndexConfig.shared_dictionary`,
 bridge rag3db : le JSON de schéma tel quel. Décrit dans chaque README, le
 CHANGELOG (« Unreleased ») et `lucivy_core/README.md`. **Pas le défaut**
-(décision du 5 septembre). **Prochain chantier** : la compaction du
-dictionnaire (au-delà de 8 générations) est naïve — tous les textes en
-RAM, tout retrié par le builder ; à refaire en fusion de flux de FST
-triées (`11` §8), après l'avoir mesurée sur le noyau.
+(décision du 5 septembre). **Compaction du dictionnaire en fusion de
+flux** (fin de session du 5, `suffix_fst/dictionary_compact.rs`) : au-delà
+de 8 générations, les plus petites fusionnent (le compte revient à 4),
+union des FST en ordre de clés, records copiés tels quels ou parents
+fusionnés, sortie en flux, `.termtexts` par tas en trois passes ; noyau
+19 s et 229 Mo au lieu de 48 s et 12,8 Go, fichiers identiques octet
+pour octet (`01` §13).
 
 ## Extension rag3db (lucivy_fts)
 
@@ -277,8 +280,8 @@ cd playground && node serve.mjs
 `01-journal-session-5-septembre.md` (la journée du 5 : le plan par shard,
 les alternatives par préfixe, la coupe en galop, le `.gmap` GMP2, les A/B
 30 000 et noyau entier, l'option `shared_dictionary`, la vérité terrain du
-noyau, ce qui reste et le prochain chantier — la compaction du
-dictionnaire en flux), `02-architecture.md` (l'architecture complète avec
+noyau, ce qui reste, et §13 la compaction du dictionnaire en fusion
+de flux), `02-architecture.md` (l'architecture complète avec
 le mode dictionnaire §3 : fichiers, générations, plan puis exécution,
 l'option) et `03-knowledge-dump-baselines-tests-outils.md` (corpus,
 harnais, baselines de taille et de temps, A/B, profil, tests, piège RAM,
@@ -307,7 +310,8 @@ layout 3) ; **`sfx_version` 4 = dictionnaire partagé par shard**
 (`dict-<g>.<champ>.sfx/.termtexts`, `.gmap` par segment — `GMP2` depuis le
 5 au soir : têtes de blocs de 64 + statistique « mots longs » du segment,
 `GMAP` encore lu —, une génération
-par commit avec ses seuls nouveaux textes, compaction au-delà de
+par commit avec ses seuls nouveaux textes, compaction **en fusion de
+flux** des plus petites générations au-delà de
 `LUCIVY_DICT_MAX_GENERATIONS` = 8 ; référence 10 000 : 390 Mo, −66 %
 depuis le 4 au matin, 30 000 : −20 %, noyau entier **7,3 → 5,6 Go à
 format égal** (−23 % ; le « 11,06 → 5,98 » d'avant comparait un v3 du

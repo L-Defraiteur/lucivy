@@ -165,18 +165,9 @@ disque, jamais deux constructions 90k à la fois
 
 ## 11. Ce qui reste, et le prochain chantier
 
-- **Compaction du dictionnaire** — le prochain chantier. Un commit n'écrit
-  qu'une génération avec ses seuls textes nouveaux ; mais au-delà de 8
-  vivantes (`LUCIVY_DICT_MAX_GENERATIONS`), la compaction charge **tous les
-  textes** en RAM (`all_texts`, 22,5 M sur le noyau) et les repasse dans le
-  builder, qui regénère et **retrie** tous les suffixes : le coût d'une
-  construction complète, tous les 8 commits, jamais chiffré isolément. À
-  refaire en **fusion de flux** : union des FST triées (`OpBuilder::union`
-  porté par `lucivy_fst`), fusion des records de parents (v8) des clés
-  présentes dans plusieurs générations, `.termtexts` concaténés par plages
-  d'identifiants — rien en mémoire au-delà des flux. Mesurer d'abord temps
-  et RAM (`VmHWM` de `/proc/self/status` depuis le test) d'une compaction
-  sur le noyau.
+- ~~Compaction du dictionnaire~~ — **fait plus tard dans la session**,
+  §13 : fusion de flux, 48 s et 12,8 Go → 19 s et 229 Mo sur le noyau,
+  fichiers identiques octet pour octet.
 - La regex à ×1,6 : les listes des racines ancrées sur le second token
   (première position d'une chaîne, explicites) coupées par segment.
 - La DFS de fratrie : `siblings()` fait une recherche global → local à
@@ -200,3 +191,80 @@ disque, jamais deux constructions 90k à la fois
 - Doc 09 §8 : « le travail FST d'un reste est fait une fois » — vrai,
   mais c'était une liste de 533 000 entrées coupée à chaque segment ;
   c'est un test de texte maintenant.
+
+## 13. La compaction du dictionnaire en fusion de flux
+
+Mesurée d'abord, comme prévu, avec un banc qui compacte les générations
+d'un index sur disque sans le reconstruire (`dictionary_compact::
+compaction_of_an_index_on_disk`, ignoré, `LUCIVY_DICT_BENCH_DIR`) : la
+compaction naïve (`all_texts` puis le builder) sur le dictionnaire du
+noyau entier — 22,5 millions d'identifiants, 9,9 millions de clés, 131
+millions de suffixes à retrier — coûtait **48 s et 12,8 Go de RAM
+anonyme**, à chaque huitième commit. C'est ce que la construction du 90k
+payait cinq fois, et la raison pour laquelle un index du noyau en mode
+dictionnaire ne se construisait pas sur une machine ordinaire.
+
+Le remplacement (`src/suffix_fst/dictionary_compact.rs`) :
+
+- **Le `.sfx`** : les FST des générations sont parcourues ensemble dans
+  l'ordre des clés (`OpBuilder::union` de `lucivy_fst`). Une clé tenue
+  par une seule génération a son record de parents **copié tel quel** ;
+  une clé tenue par plusieurs a ses parents concaténés, triés par
+  (ordinal, sti), dédoublonnés, ré-encodés (`encode_parent_record_v8`) —
+  ce que le builder aurait fait. La FST de sortie est construite dans la
+  même passe **directement sur disque** (`MapBuilder::new(writer)`, mémoire
+  bornée), la table des parents aussi ; les deux vont dans des fichiers
+  temporaires (`dict-<g>.<champ>.sfx.fst.tmp`, `.sfx.parents.tmp`) parce
+  que l'en-tête du conteneur veut leurs longueurs, puis le conteneur est
+  assemblé en copiant depuis leurs mmaps (`file_v3::write_container`).
+- **Le `.termtexts`** : un tas sur les curseurs des générations (chaque
+  génération est croissante par identifiant), écrit en **trois passes**
+  (offsets et plages d'identifiants, puis les métas, puis les textes) pour
+  que seule la table des offsets soit en mémoire
+  (`termtexts_v3::write_merged`, `MergedEntries`).
+- **Quelles générations** (`choose_compaction`) : au-delà du maximum, les
+  **plus petites**, autant qu'il faut pour ramener le compte à la moitié
+  du maximum. La plus grosse génération ne rejoint une fusion que lorsque
+  assez d'autres l'ont dépassée : un commit ne repaie plus jamais tout le
+  dictionnaire, chaque octet est fusionné à peu près autant de fois que
+  le compte double. Avec le maximum à 8 : un compte de 9 fusionne les 6
+  plus petites, il en reste 4.
+- Un fichier de génération laissé par un commit planté entre l'écriture
+  et `meta.json` bloquait le commit suivant (le numéro est réutilisé, le
+  répertoire refuse de créer un fichier existant) : `remove_leftovers`
+  les efface avant d'écrire.
+
+Vérité : `streamed_merge_equals_the_rebuild` (données synthétiques :
+identifiants entrelacés entre trois générations, clés partagées, un
+record de plus de 32 parents, entrées mot et chunk) et le banc en mode
+`compare` — les fichiers fusionnés sont **identiques octet pour octet** à
+ceux d'une reconstruction, sur 30 000 fichiers et sur le noyau ;
+`test_dictionary_index` (trois générations au plus, deux compactions),
+le panel vérifié sur un index 10 000 construit avec un commit tous les
+500 fichiers et trois générations au plus (§13 bis).
+
+| Dictionnaire (champ contenu) | naïf | flux |
+|---|---|---|
+| 30 000 fichiers, 7 générations, 4,1 M clés, 6,5 M textes | 13,0 s, 3,8 Go résidents | **7,2 s, 0,68 Go résidents** (dont les mmaps) |
+| noyau, 2 générations (902 + 21 Mo), 9,9 M clés, 22,5 M textes | 48,0 s, **12,8 Go anonymes** | **18,9 s, 229 Mo anonymes** (1,9 Go résidents avec les fichiers mappés) |
+
+Le temps restant du flux est la construction de la FST elle-même
+(`MapBuilder`, 16 s sur 9,9 M clés) : la reconstruction naïve la payait
+aussi (15,6 s de `build+serialize`), plus 27 s de tri. Et avec la
+politique des plus petites, ce cas — la génération de 902 Mo dans la
+fusion — ne se produit plus qu'une fois sur plusieurs dizaines de
+commits.
+
+### 13 bis. La vérité de bout en bout avec des compactions
+
+Index de référence 10 000 reconstruit en mode dictionnaire avec un commit
+tous les 500 fichiers et **trois générations au plus**
+(`LUCIVY_DICT_MAX_GENERATIONS=3`, `V3_COMMIT_EVERY=500`,
+`V3_INDEX_DIR` neuf) : **six compactions** pendant la construction
+(générations 5, 9, 13, 17, 21, 25 ; 4 parts chacune, 0,7 à 1,4 s sur le
+champ contenu, jusqu'à 1,15 M clés et 2,06 M textes), deux générations
+vivantes à la fin (25 : 85,7 Mo, 26 : 13,5 Mo). Panel `v3_ground_truth_demo`
+**9/9**, `v3_ground_truth_contains` **15/15**, `v3_ground_truth_coherence`
+**31/31** — comptes et spans contre le disque. Lancement des deux
+derniers : `<nom> -- --exact --nocapture`, **sans** `--ignored` (ils ne
+sont pas ignorés : avec, « 0 passed, 12 filtered out »).
