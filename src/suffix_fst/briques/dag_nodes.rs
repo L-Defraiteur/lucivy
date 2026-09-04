@@ -108,12 +108,10 @@ fn format_candidate_postings(candidates: &[FstCandidateV3], resolver: &dyn Posti
 fn format_chains(chains: &[TokenChainV3]) -> String {
     let items: Vec<String> = chains.iter().map(|c| {
         let ords: Vec<String> = c.ordinals.iter()
-            .map(|alts| {
-                if alts.len() == 1 {
-                    format!("{}", alts[0])
-                } else {
-                    format!("[{}]", alts.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(","))
-                }
+            .map(|alts| match alts.as_explicit() {
+                Some(ids) if ids.len() == 1 => format!("{}", ids[0]),
+                Some(ids) => format!("[{}]", ids.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(",")),
+                None => format!("{alts:?}"),
             })
             .collect();
         format!(
@@ -255,7 +253,7 @@ impl<'a> LocalNode<BriquesContext<'a>> for ChunkChainNode {
     }
 
     fn execute(&mut self, svc: &BriquesContext<'a>, ctx: &mut LocalNodeCtx) -> Result<(), String> {
-        let chains = fst_walk::cross_chunk_chain_v3(svc.reader, &self.query);
+        let chains = fst_walk::cross_chunk_chain_v3(svc.reader, &self.query, false);
         let chains: Vec<_> = if self.anchor_start {
             chains.into_iter().filter(|c| c.first_sti == 0).collect()
         } else {
@@ -375,7 +373,7 @@ impl<'a> LocalNode<BriquesContext<'a>> for WordChainNode {
     }
 
     fn execute(&mut self, svc: &BriquesContext<'a>, ctx: &mut LocalNodeCtx) -> Result<(), String> {
-        let chains = fst_walk::cross_word_chain_v3(svc.reader, &self.query);
+        let chains = fst_walk::cross_word_chain_v3(svc.reader, &self.query, false);
         let chains: Vec<_> = if self.anchor_start {
             chains.into_iter().filter(|c| c.first_sti == 0).collect()
         } else {

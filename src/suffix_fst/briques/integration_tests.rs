@@ -770,7 +770,7 @@ mod tests {
             }
         }
         for (ci, chain) in chains.iter().enumerate() {
-            let all_ords: Vec<Vec<u64>> = chain.ordinals.iter().map(|a| a.as_ref().clone()).collect();
+            let all_ords: Vec<Vec<u64>> = chain.ordinals.iter().map(|a| a.explicit().to_vec()).collect();
             eprintln!("x11b chain[{ci}] sti={} ords={:?}", chain.first_sti, all_ords);
         }
 
@@ -1048,7 +1048,7 @@ mod tests {
         let mut all_ords: HashSet<u64> = HashSet::new();
         for c in &chains {
             for alts in &c.ordinals {
-                for &o in alts.iter() {
+                for &o in alts.explicit().iter() {
                     all_ords.insert(o);
                 }
             }

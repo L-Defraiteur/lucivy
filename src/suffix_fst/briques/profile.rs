@@ -137,6 +137,25 @@ pub struct Counters {
     pub n_groups_shared: AtomicU64,
     /// Entries inserted into the dispatch map for those groups.
     pub n_dispatch_inserts: AtomicU64,
+
+    // ── Dictionary mode: where the per-segment overhead goes ──
+    /// `keep_in_segment`: shard-wide items scanned, items kept, time.
+    pub n_cut_items: AtomicU64,
+    pub n_cut_kept: AtomicU64,
+    pub ns_cut: AtomicU64,
+    /// Sibling DFS: steps (pops), siblings visited, time in `siblings()`,
+    /// time in termtexts text + meta.
+    pub n_sib_steps: AtomicU64,
+    pub n_sib_visited: AtomicU64,
+    pub ns_sib_lookup: AtomicU64,
+    pub ns_sib_text: AtomicU64,
+    /// Second-token anchored: FST part (candidates, walk, chains), the
+    /// posmap resolution, the backward check.
+    pub ns_anch_fst: AtomicU64,
+    pub ns_anch_resolve: AtomicU64,
+    pub ns_anch_back: AtomicU64,
+    /// Memo cell lookups.
+    pub n_memo_lookups: AtomicU64,
 }
 
 fn counters() -> &'static Counters {
@@ -184,6 +203,19 @@ impl Timer {
         }
     }
 
+    /// Charge the elapsed time to one stage and restart the timer: for a
+    /// loop that charges each iteration.
+    #[inline]
+    pub fn stop_keep(&mut self, field: fn(&Counters) -> &AtomicU64) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(t0) = self.start {
+            field(counters()).fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            self.start = Some(std::time::Instant::now());
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = field;
+    }
+
     /// Charge the elapsed time to one stage.
     #[inline]
     pub fn stop(self, field: fn(&Counters) -> &AtomicU64) {
@@ -216,6 +248,9 @@ pub fn reset() {
         &c.n_fz_window_postings, &c.n_fz_window_derive_miss, &c.n_fz_spans,
         &c.n_chains_raw, &c.n_chains_distinct, &c.n_matches_emitted,
         &c.n_chains_shared, &c.n_groups_shared, &c.n_dispatch_inserts,
+        &c.n_cut_items, &c.n_cut_kept, &c.ns_cut,
+        &c.n_sib_steps, &c.n_sib_visited, &c.ns_sib_lookup, &c.ns_sib_text,
+        &c.ns_anch_fst, &c.ns_anch_resolve, &c.ns_anch_back, &c.n_memo_lookups,
     ] {
         a.store(0, Ordering::Relaxed);
     }
@@ -290,5 +325,13 @@ pub fn dump() -> String {
         g(&c.n_chains_raw), g(&c.n_chains_distinct), g(&c.n_matches_emitted),
         g(&c.n_chains_shared), g(&c.n_groups_shared), g(&c.n_dispatch_inserts),
     ));
+    if g(&c.n_memo_lookups) > 0 || g(&c.n_cut_items) > 0 {
+        s.push_str(&format!(
+            "  dictionary: memo lookups {} | cut {} items -> {} kept in {:.1}ms | sibling DFS {} steps, {} visited, lookups {:.1}ms, texts {:.1}ms | anchored fst {:.1}ms resolve {:.1}ms back {:.1}ms\n",
+            g(&c.n_memo_lookups), g(&c.n_cut_items), g(&c.n_cut_kept), ms(&c.ns_cut),
+            g(&c.n_sib_steps), g(&c.n_sib_visited), ms(&c.ns_sib_lookup), ms(&c.ns_sib_text),
+            ms(&c.ns_anch_fst), ms(&c.ns_anch_resolve), ms(&c.ns_anch_back),
+        ));
+    }
     s
 }

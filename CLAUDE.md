@@ -260,14 +260,17 @@ cd playground && node serve.mjs
 ## Docs
 
 **Dossier courant : `docs/04-09-2026/` — pour repartir, lire dans l'ordre
-`10-chantier-prescan-dictionnaire-rapport.md` (le prochain chantier : la
-phase FST d'une requête en un nœud par shard, ce qui est su, ce qu'il faut
-mesurer, où regarder), `07-architecture.md` (l'architecture avec les
-formats du 4-5 septembre et le mode dictionnaire §2.5) et
+`11-journal-chantier-plan-fst.md` (le chantier du 5 septembre : la phase
+FST d'une requête planifiée par shard, les alternatives par préfixe, la
+coupe en galop, l'A/B 30 000 et ce qui reste), `07-architecture.md`
+(l'architecture avec les formats du 4-5 septembre et le mode dictionnaire
+§2.5, requête en deux phases) et
 `08-knowledge-dump-baselines-tests-outils.md` (baselines, les deux A/B,
 tests, corpus, protocole, mode dictionnaire §6 bis, pièges) — tous trois
-autonomes. Puis `09-journal-chantier-dictionnaire.md` (tout ce qui a été
-fait et mesuré, étape par étape, et ce qui a divergé du plan) ;
+autonomes. Puis `10-chantier-prescan-dictionnaire-rapport.md` (le rapport
+du chantier plan tel qu'écrit avant de coder, note d'état en tête) et
+`09-journal-chantier-dictionnaire.md` (le chantier dictionnaire : tout ce
+qui a été fait et mesuré, étape par étape, et ce qui a divergé du plan) ;
 `06-chantier-dictionnaire-partage-rapport.md` est le plan du dictionnaire
 tel qu'écrit avant de coder, avec une note d'état en tête. Puis
 `04-recap-journee-et-a-faire.md` (−36 % d'index en une journée),
@@ -289,10 +292,14 @@ layout 3) ; **`sfx_version` 4 = dictionnaire partagé par shard**
 par commit avec ses seuls nouveaux textes, compaction au-delà de
 `LUCIVY_DICT_MAX_GENERATIONS` = 8 ; référence 10 000 : 390 Mo, −66 %
 depuis le 4 au matin, 30 000 : −20 %, noyau entier 11,06 → 5,98 Go,
-×6,7 le texte ; **mais à froid les requêtes sont ×2 à ×22 plus lentes**
-qu'en v3 sur 30 000 fichiers — le travail FST est fait une fois mais sur
-un thread ; mode **optionnel, pas le défaut**, jusqu'au nœud « prescan du
-dictionnaire » par shard décrit dans `09` §11),
+×6,7 le texte ; à la requête, **un plan par shard** (`briques/plan.rs`,
+depuis `prescan_segments_more`) remplit en parallèle les cellules FST de
+la mémo du lecteur partagé avant le scatter par segment, un reste avalé
+est un `Alts::Prefix` testé sur `.termtexts` au lieu d'une liste, et la
+coupe des listes au `.gmap` galope ; à froid sur 30 000 fichiers, ×2-22 le
+5 au matin → **×0,8-1,9** le soir (`11` §4 : exactes 2,5-5,3 ms contre
+1,7-3,3 en v3, fuzzy plus rapide) ; mode **optionnel, pas le défaut**,
+tant que ×1,5 n'est pas tenu partout — cinq requêtes sur dix le tiennent),
 `.posmap` `PMP3` (3 octets), `.sibling_v3` `SIB3` (sans gap), `.termtexts`
 layout 2 (méta dans la table d'offsets), plus de `.bytemap` en v3. Chaque
 lecteur ouvre encore les layouts précédents. Règle du 4 septembre : la taille

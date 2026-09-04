@@ -262,8 +262,8 @@ fn dictionary_pieces() {
         let reader = field.sfx_reader();
         let splits = fst_walk::falling_walk_chunks(reader, "mutex_lock");
         eprintln!("splits: {:?}", splits.iter().map(|s| (s.parent.raw_ordinal, s.parent.sti, s.query_consumed, s.overlap_validated)).collect::<Vec<_>>());
-        let chains = fst_walk::cross_chunk_chain_v3(reader, "mutex_lock");
-        eprintln!("chains: {:?}", chains.iter().map(|c| (c.first_sti, c.total_query_consumed, c.ordinals.iter().map(|a| a.to_vec()).collect::<Vec<_>>())).collect::<Vec<_>>());
+        let chains = fst_walk::cross_chunk_chain_v3(reader, "mutex_lock", false);
+        eprintln!("chains: {:?}", chains.iter().map(|c| (c.first_sti, c.total_query_consumed, c.ordinals.iter().map(|a| a.explicit().to_vec()).collect::<Vec<_>>())).collect::<Vec<_>>());
         let cands = fst_walk::fst_candidates_v3(reader, "lock", true, true);
         eprintln!("cands 'lock' anchored: {:?}", cands.iter().map(|c| (c.raw_ordinal, c.sti, c.own_len)).collect::<Vec<_>>());
         for sr in searcher.segment_readers() {
@@ -273,14 +273,14 @@ fn dictionary_pieces() {
             let pm_bytes = sr.sfx_index_file("posmap", content_f).unwrap().read_bytes().unwrap();
             let pm = ld_lucivy::suffix_fst::posmap::PosMapReader::open(&pm_bytes).unwrap().with_gmap(gmap);
             for c in &chains {
-                for &o in c.ordinals[0].iter() {
+                for &o in c.first_ids().iter() {
                     eprintln!("  head {} postings {:?}", o, pr.resolve(o).iter().map(|e| (e.doc_id, e.position)).collect::<Vec<_>>());
                     for e in pr.resolve(o) {
-                        eprintln!("    posmap({}, {}) = {:?} ; chain next = {:?}", e.doc_id, e.position + 1, pm.ordinal_at(e.doc_id, e.position + 1), c.ordinals.get(1).map(|a| a.to_vec()));
+                        eprintln!("    posmap({}, {}) = {:?} ; chain next = {:?}", e.doc_id, e.position + 1, pm.ordinal_at(e.doc_id, e.position + 1), c.ordinals.get(1).map(|a| a.explicit().to_vec()));
                     }
                 }
             }
-            let matches = resolve::resolve_chains_v3_posmap(&chains, &*pr, None, &pm);
+            let matches = resolve::resolve_chains_v3_posmap(&chains, &*pr, None, &pm, None);
             eprintln!("  resolved matches: {}", matches.len());
         }
     }

@@ -57,6 +57,21 @@ fn place_overlap_overflow(ctx: &BriquesContext<'_>, matches: &mut [MatchV3]) {
 /// Exact substring search (d=0): the entry point for `contains` and its
 /// derived query types (`term`, `startsWith`, `phrase`).
 ///
+/// The text the briques search for `query`: `None` when there is nothing
+/// to search (empty, over 2048 bytes, or nothing but separators in relaxed
+/// mode), otherwise the query with its separators stripped when they are
+/// relaxed. The plan (`briques::plan`) and the segments must agree on it.
+pub fn effective_query(query: &str, strict_separators: bool) -> Option<String> {
+    if query.is_empty() || query.len() > MAX_QUERY_LEN {
+        return None;
+    }
+    if strict_separators {
+        return Some(query.to_string());
+    }
+    let stripped: String = query.chars().filter(|c| is_content_char(*c)).collect();
+    if stripped.is_empty() { None } else { Some(stripped) }
+}
+
 /// Relaxed mode strips separators from the query before the walk. Returns
 /// deduplicated matches sorted by (doc_id, position, byte_from), verified on
 /// the rebuilt text and, when `anchor_start` / `exact_match` are set and the
@@ -69,20 +84,10 @@ pub fn contains_v3(
     exact_match: bool,
     strict_separators: bool,
 ) -> Vec<MatchV3> {
-    if query.is_empty() || query.len() > MAX_QUERY_LEN {
+    let Some(effective_query) = effective_query(query, strict_separators) else {
         return Vec::new();
-    }
-
-    let effective_query;
-    let query_ref = if !strict_separators {
-        effective_query = query.chars().filter(|c| is_content_char(*c)).collect::<String>();
-        if effective_query.is_empty() {
-            return Vec::new();
-        }
-        effective_query.as_str()
-    } else {
-        query
     };
+    let query_ref = effective_query.as_str();
 
     let mut matches = composite::find_literal_v3(ctx, query_ref, anchor_start, strict_separators);
     place_overlap_overflow(ctx, &mut matches);
@@ -336,21 +341,13 @@ pub fn fuzzy_v3(
     metric: super::jaro_winkler::FuzzyMetric,
 ) -> (BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>) {
     // Validate input
-    if query.is_empty() || query.len() > MAX_QUERY_LEN || distance > 3 {
+    if distance > 3 {
         return (BitSet::with_max_value(max_doc), Vec::new(), Vec::new());
     }
-
-    // For strict_sep=false: strip non-alphanum from the query
-    let effective_query;
-    let query_ref = if !strict_separators {
-        effective_query = query.chars().filter(|c| is_content_char(*c)).collect::<String>();
-        if effective_query.is_empty() {
-            return (BitSet::with_max_value(max_doc), Vec::new(), Vec::new());
-        }
-        effective_query.as_str()
-    } else {
-        query
+    let Some(effective_query) = effective_query(query, strict_separators) else {
+        return (BitSet::with_max_value(max_doc), Vec::new(), Vec::new());
     };
+    let query_ref = effective_query.as_str();
 
     // d=0 → route to exact contains (no trigram overhead)
     if distance == 0 {

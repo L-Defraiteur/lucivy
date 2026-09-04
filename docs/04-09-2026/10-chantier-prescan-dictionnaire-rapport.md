@@ -1,5 +1,12 @@
 # Prochain chantier : la phase FST d'une requête en un nœud par shard — rapport
 
+> **État (5 septembre, soir)** : fait, autrement que prévu ici — le plan
+> vit dans `prescan_segments_more` des requêtes, pas dans `search_dag.rs`,
+> et la liste d'un reste court n'est plus matérialisée du tout
+> (`Alts::Prefix`). Ce qui a été fait, mesuré et ce qui diverge :
+> [11](11-journal-chantier-plan-fst.md). Ce document reste le rapport tel
+> qu'écrit avant de coder.
+
 Écrit le 5 septembre 2026 au matin pour la session suivante, qui repart
 sans l'historique. À lire avec [07](07-architecture.md) (§2.5 : le mode
 dictionnaire tel qu'il existe) et [08](08-knowledge-dump-baselines-tests-outils.md)

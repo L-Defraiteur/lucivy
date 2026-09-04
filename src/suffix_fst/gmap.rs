@@ -51,6 +51,41 @@ impl<'a> GmapReader<'a> {
         self.n
     }
 
+    /// The first local ordinal at or after `from` whose global id is at
+    /// least `target` (`len()` when none): galloping from `from`, so that a
+    /// sorted list of ids is intersected with the map in time proportional
+    /// to the list and the logarithm of the gaps, not to the map.
+    pub fn lower_bound_from(&self, from: u32, target: u32) -> u32 {
+        let n = self.n;
+        if from >= n {
+            return n;
+        }
+        let mut lo = from;
+        let mut hi = from;
+        let mut step = 1u32;
+        loop {
+            if hi >= n {
+                hi = n;
+                break;
+            }
+            if self.global(hi) >= target {
+                break;
+            }
+            lo = hi + 1;
+            hi = hi.saturating_add(step);
+            step = step.saturating_mul(2);
+        }
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.global(mid) < target {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
     /// True when the segment has no ordinal.
     pub fn is_empty(&self) -> bool {
         self.n == 0

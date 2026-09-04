@@ -13,7 +13,7 @@ use fnv::FnvHashMap;
 use crate::DocId;
 use crate::query::posting_resolver::{DocFilter, PostingEntry, PostingResolver};
 
-use super::fst_walk::{FstCandidateV3, TokenChainV3};
+use super::fst_walk::{Alts, FstCandidateV3, TokenChainV3};
 
 /// Upper bound on the matches one segment resolves for one query
 /// (`LUCIVY_MAX_MATCHES_PER_SEGMENT`). A one-letter query touches nearly every
@@ -248,13 +248,16 @@ pub fn resolve_chains_v3(
 /// Same results as `resolve_chains_v3`; what changes is the work. On `__init`
 /// over 5 000 kernel files the posting path materialised 10.2 million entries
 /// and ran 25.3 million pair iterations for 15 hits.
+/// `termtexts` answers the prefix alternatives (`Alts::Prefix`); a chain
+/// built without them needs none.
 pub fn resolve_chains_v3_posmap(
     chains: &[TokenChainV3],
     resolver: &dyn PostingResolver,
     filter_docs: Option<&dyn DocFilter>,
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
+    termtexts: Option<&crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>>,
 ) -> Vec<MatchV3> {
-    resolve_chains_impl(chains, resolver, filter_docs, AdjacencyMode::StrictPosmap { posmap })
+    resolve_chains_impl(chains, resolver, filter_docs, AdjacencyMode::StrictPosmap { posmap, termtexts })
 }
 
 /// Resolve cross-token chains with relaxed adjacency for strict_sep=false.
@@ -301,7 +304,7 @@ pub fn resolve_word_chains_v3(
         }
 
         // Resolve first position from word sfxpost, fall back to chunk resolver
-        let first_entries: Vec<WordPostingEntry> = chain.ordinals[0].iter()
+        let first_entries: Vec<WordPostingEntry> = chain.first_ids().iter()
             .flat_map(|&ord| {
                 let word_entries = word_sfxpost.entries(ord as u32);
                 let entries: Vec<WordPostingEntry> = if !word_entries.is_empty() {
@@ -353,8 +356,8 @@ pub fn resolve_word_chains_v3(
                     byte_to: bf + chain.total_query_consumed as u32,
                     token_end: bf + chain.total_query_consumed as u32,
                     sti: chain.first_sti,
-                    ordinal: chain.ordinals[0][0],
-                    last_ordinal: chain.ordinals[0][0],
+                    ordinal: chain.head(),
+                    last_ordinal: chain.head(),
                 });
             }
             continue;
@@ -385,7 +388,7 @@ pub fn resolve_word_chains_v3(
             let active_docs: HashSet<DocId> =
                 active.iter().map(|&(doc_id, ..)| doc_id).collect();
             let mut entries: Vec<(WordPostingEntry, u64)> = Vec::new();
-            for &ord in chain.ordinals[ord_idx].iter() {
+            for &ord in chain.ordinals[ord_idx].explicit().iter() {
                 let word_entries = word_sfxpost.entries(ord as u32);
                 if !word_entries.is_empty() {
                     for e in word_entries {
@@ -469,7 +472,7 @@ pub fn resolve_word_chains_v3(
                 byte_to: (last_bf + chain.last_consumed as u32).max(byte_from).min(token_end),
                 token_end,
                 sti: chain.first_sti,
-                ordinal: chain.ordinals[0][0],
+                ordinal: chain.head(),
                 last_ordinal: last_ord,
             });
         }
@@ -517,10 +520,10 @@ pub fn resolve_word_chains_v3_wordmap(
             continue;
         }
 
-        let first_entries = match first_memo.get(chain.ordinals[0].as_slice()) {
+        let first_entries = match first_memo.get(chain.first_ids()) {
             Some(hit) => hit.clone(),
             None => {
-                let v: Vec<WordPostingEntry> = chain.ordinals[0].iter()
+                let v: Vec<WordPostingEntry> = chain.first_ids().iter()
                     .flat_map(|&ord| {
                         let word_entries = word_sfxpost.entries(ord as u32);
                         let entries: Vec<WordPostingEntry> = if !word_entries.is_empty() {
@@ -547,7 +550,7 @@ pub fn resolve_word_chains_v3_wordmap(
                     })
                     .collect();
                 let v = std::rc::Rc::new(v);
-                first_memo.insert(chain.ordinals[0].as_ref().clone(), v.clone());
+                first_memo.insert(chain.first_ids().to_vec(), v.clone());
                 v
             }
         };
@@ -577,8 +580,8 @@ pub fn resolve_word_chains_v3_wordmap(
                     byte_to: bf + chain.total_query_consumed as u32,
                     token_end: bf + chain.total_query_consumed as u32,
                     sti: chain.first_sti,
-                    ordinal: chain.ordinals[0][0],
-                    last_ordinal: chain.ordinals[0][0],
+                    ordinal: chain.head(),
+                    last_ordinal: chain.head(),
                 });
             }
             continue;
@@ -593,7 +596,7 @@ pub fn resolve_word_chains_v3_wordmap(
 
         for ord_idx in 1..chain.ordinals.len() {
             if active.is_empty() { break; }
-            let wanted: &[u64] = chain.ordinals[ord_idx].as_slice();
+            let wanted = &chain.ordinals[ord_idx];
 
             let mut new_active = Vec::new();
             'next_active: for &(doc_id, _, prev_last, byte_from_first, _, _, first_pos) in &active {
@@ -603,7 +606,7 @@ pub fn resolve_word_chains_v3_wordmap(
 
                     // A word starting here?
                     if let Some((word_ord, span)) = word_posmap.word_start_at(doc_id, p) {
-                        if wanted.binary_search(&(word_ord as u64)).is_ok() {
+                        if wanted.contains(word_ord as u64, Some(termtexts)) {
                             let last = if span >= SPAN_OVERFLOW {
                                 // Span did not fit in 8 bits: read the true end.
                                 match word_sfxpost.entry_at(word_ord, doc_id, p) {
@@ -627,7 +630,7 @@ pub fn resolve_word_chains_v3_wordmap(
                     let Some(chunk_ord) = posmap.ordinal_at(doc_id, p) else {
                         continue 'next_active; // end of document
                     };
-                    if wanted.binary_search(&(chunk_ord as u64)).is_ok() {
+                    if wanted.contains(chunk_ord as u64, Some(termtexts)) {
                         super::profile::bump(|c| &c.n_wordmap_survivors, 1);
                         new_active.push((doc_id, p, p, byte_from_first, chunk_ord as u64, false, first_pos));
                         continue 'next_active;
@@ -678,7 +681,7 @@ pub fn resolve_word_chains_v3_wordmap(
                 byte_to: (last_bf + chain.last_consumed as u32).max(byte_from).min(token_end),
                 token_end,
                 sti: chain.first_sti,
-                ordinal: chain.ordinals[0][0],
+                ordinal: chain.head(),
                 last_ordinal: last_ord,
             });
         }
@@ -707,6 +710,7 @@ fn resolve_chains_posmap_grouped(
     resolver: &dyn PostingResolver,
     filter_docs: Option<&dyn DocFilter>,
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
+    termtexts: Option<&crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>>,
     first_memo: &mut FnvHashMap<Vec<u64>, std::rc::Rc<Vec<PostingEntry>>>,
 ) -> Vec<MatchV3> {
     let mut results = Vec::new();
@@ -715,7 +719,7 @@ fn resolve_chains_posmap_grouped(
     let mut groups: FnvHashMap<Vec<u64>, Vec<usize>> = FnvHashMap::default();
     for (i, chain) in chains.iter().enumerate() {
         if chain.ordinals.is_empty() { continue; }
-        groups.entry(chain.ordinals[0].as_ref().clone()).or_default().push(i);
+        groups.entry(chain.first_ids().to_vec()).or_default().push(i);
     }
 
     // Active survivor: (doc, last_pos, byte_from_first, last_ord, first_pos)
@@ -746,7 +750,7 @@ fn resolve_chains_posmap_grouped(
         // lists are Arc-shared and few; the ordinals in them are many (3 000
         // alternatives for `init…`). Keying a map by ordinal made 55 million
         // inserts on `__init`; keying by list and binary-searching makes none.
-        let mut tails: Vec<(std::sync::Arc<Vec<u64>>, Vec<usize>)> = Vec::new();
+        let mut tails: Vec<(Alts, Vec<usize>)> = Vec::new();
         let mut survivors: FnvHashMap<usize, Vec<Active>> = FnvHashMap::default();
         for &ci in &members {
             let chain = &chains[ci];
@@ -763,29 +767,29 @@ fn resolve_chains_posmap_grouped(
                         byte_to: bf + chain.total_query_consumed as u32,
                         token_end: e.byte_to,
                         sti: chain.first_sti,
-                        ordinal: chain.ordinals[0][0],
-                        last_ordinal: chain.ordinals[0][0],
+                        ordinal: chain.head(),
+                        last_ordinal: chain.head(),
                     });
                 }
             } else if shared_head {
                 let list = &chain.ordinals[1];
-                match tails.iter_mut().find(|(l, _)| std::sync::Arc::ptr_eq(l, list) || **l == **list) {
+                match tails.iter_mut().find(|(l, _)| l == list) {
                     Some((_, cs)) => cs.push(ci),
                     None => {
                         super::profile::bump(|c| &c.n_dispatch_inserts, 1);
-                        tails.push((std::sync::Arc::clone(list), vec![ci]));
+                        tails.push((list.clone(), vec![ci]));
                     }
                 }
             } else {
                 // Lone chain: step 1 with a binary search, no map.
-                let wanted: &[u64] = chain.ordinals[1].as_slice();
+                let wanted = &chain.ordinals[1];
                 let mut found: Vec<Active> = Vec::new();
                 for e in first_entries.iter() {
                     let next_pos = e.position + 1;
                     super::profile::bump(|c| &c.n_posmap_lookups, 1);
                     let Some(ord) = posmap.ordinal_at(e.doc_id, next_pos) else { continue };
                     let ord = ord as u64;
-                    if wanted.binary_search(&ord).is_err() { continue; }
+                    if !wanted.contains(ord, termtexts) { continue; }
                     super::profile::bump(|c| &c.n_posmap_survivors, 1);
                     found.push((e.doc_id, next_pos, e.byte_from + chain.first_sti as u32, ord, e.position));
                 }
@@ -802,7 +806,7 @@ fn resolve_chains_posmap_grouped(
                 let Some(ord) = posmap.ordinal_at(e.doc_id, next_pos) else { continue };
                 let ord = ord as u64;
                 for (list, wanting) in &tails {
-                    if list.binary_search(&ord).is_err() { continue; }
+                    if !list.contains(ord, termtexts) { continue; }
                     super::profile::bump(|c| &c.n_posmap_survivors, wanting.len() as u64);
                     for &ci in wanting {
                         survivors.entry(ci).or_default().push((
@@ -821,14 +825,14 @@ fn resolve_chains_posmap_grouped(
 
             for ord_idx in 2..chain.ordinals.len() {
                 if active.is_empty() { break; }
-                let wanted: &[u64] = chain.ordinals[ord_idx].as_slice();
+                let wanted = &chain.ordinals[ord_idx];
                 let mut next = Vec::new();
                 for &(doc_id, prev_pos, bf_first, _, first_pos) in &active {
                     let next_pos = prev_pos + 1;
                     super::profile::bump(|c| &c.n_posmap_lookups, 1);
                     let Some(ord) = posmap.ordinal_at(doc_id, next_pos) else { continue };
                     let ord = ord as u64;
-                    if wanted.binary_search(&ord).is_err() { continue; }
+                    if !wanted.contains(ord, termtexts) { continue; }
                     super::profile::bump(|c| &c.n_posmap_survivors, 1);
                     next.push((doc_id, next_pos, bf_first, ord, first_pos));
                 }
@@ -854,7 +858,7 @@ fn resolve_chains_posmap_grouped(
                     byte_to: (e.byte_from + chain.last_consumed as u32).max(byte_from),
                     token_end: e.byte_to,
                     sti: chain.first_sti,
-                    ordinal: chain.ordinals[0][0],
+                    ordinal: chain.head(),
                     last_ordinal: last_ord,
                 });
             }
@@ -924,7 +928,7 @@ pub fn resolve_word_chains_v3_wordmap_grouped(
 
     let mut groups: FnvHashMap<(Vec<u64>, u16), Vec<usize>> = FnvHashMap::default();
     for (i, c) in multis.iter().enumerate() {
-        groups.entry((c.ordinals[0].as_ref().clone(), c.first_sti)).or_default().push(i);
+        groups.entry((c.first_ids().to_vec(), c.first_sti)).or_default().push(i);
     }
     let mut first_memo: FnvHashMap<Vec<u64>, std::rc::Rc<Vec<WordPostingEntry>>> = FnvHashMap::default();
 
@@ -957,12 +961,12 @@ pub fn resolve_word_chains_v3_wordmap_grouped(
         };
 
         // Distinct second lists of the group, with the members wanting each.
-        let mut tails: Vec<(std::sync::Arc<Vec<u64>>, Vec<usize>)> = Vec::new();
+        let mut tails: Vec<(Alts, Vec<usize>)> = Vec::new();
         for &ci in &members {
             let list = &multis[ci].ordinals[1];
-            match tails.iter_mut().find(|(l, _)| std::sync::Arc::ptr_eq(l, list) || **l == **list) {
+            match tails.iter_mut().find(|(l, _)| l == list) {
                 Some((_, cs)) => cs.push(ci),
-                None => tails.push((std::sync::Arc::clone(list), vec![ci])),
+                None => tails.push((list.clone(), vec![ci])),
             }
         }
 
@@ -975,7 +979,7 @@ pub fn resolve_word_chains_v3_wordmap_grouped(
             }
             let Some((p, last, ord, is_word)) = step(e.doc_id, e.last_position) else { continue };
             for (list, wanting) in &tails {
-                if list.binary_search(&ord).is_err() { continue; }
+                if !list.contains(ord, Some(termtexts)) { continue; }
                 super::profile::bump(|c| &c.n_wordmap_survivors, wanting.len() as u64);
                 for &ci in wanting {
                     survivors.entry(ci).or_default().push((
@@ -991,11 +995,11 @@ pub fn resolve_word_chains_v3_wordmap_grouped(
             let Some(mut active) = survivors.remove(&ci) else { continue };
             for ord_idx in 2..chain.ordinals.len() {
                 if active.is_empty() { break; }
-                let wanted: &[u64] = chain.ordinals[ord_idx].as_slice();
+                let wanted = &chain.ordinals[ord_idx];
                 let mut next = Vec::new();
                 for &(doc_id, _, prev_last, bf_first, _, _, first_pos) in &active {
                     let Some((p, last, ord, is_word)) = step(doc_id, prev_last) else { continue };
-                    if wanted.binary_search(&ord).is_err() { continue; }
+                    if !wanted.contains(ord, Some(termtexts)) { continue; }
                     super::profile::bump(|c| &c.n_wordmap_survivors, 1);
                     next.push((doc_id, p, last, bf_first, ord, is_word, first_pos));
                 }
@@ -1023,7 +1027,7 @@ pub fn resolve_word_chains_v3_wordmap_grouped(
                     byte_to: (last_bf + chain.last_consumed as u32).max(byte_from).min(token_end),
                     token_end,
                     sti: chain.first_sti,
-                    ordinal: chain.ordinals[0][0],
+                    ordinal: chain.head(),
                     last_ordinal: last_ord,
                 });
             }
@@ -1049,6 +1053,8 @@ enum AdjacencyMode<'a> {
     /// survivor is re-checked against its real posting here.
     StrictPosmap {
         posmap: &'a crate::suffix_fst::posmap::PosMapReader<'a>,
+        /// For the prefix alternatives; `None` when the chains carry none.
+        termtexts: Option<&'a crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'a>>,
     },
     /// pos[i+1] > pos[i], intermediate tokens verified as pure non-alphanum via termtexts META.
     /// PosMap + termtexts are REQUIRED — no fallback to unverified byte ordering.
@@ -1078,16 +1084,16 @@ fn resolve_chains_impl(
     // list is unique gain nothing from grouping and must not pay for it: on
     // `__init` 3.4 million lone chains paid a map and a key clone each, for 2x.
     let mut lone: Vec<&TokenChainV3> = Vec::new();
-    if let AdjacencyMode::StrictPosmap { posmap } = &adjacency {
+    if let AdjacencyMode::StrictPosmap { posmap, termtexts } = &adjacency {
         let mut count: FnvHashMap<&[u64], u32> = FnvHashMap::default();
         for chain in chains {
             if chain.ordinals.is_empty() { continue; }
-            *count.entry(chain.ordinals[0].as_slice()).or_insert(0) += 1;
+            *count.entry(chain.first_ids()).or_insert(0) += 1;
         }
         let mut shared: Vec<TokenChainV3> = Vec::new();
         for chain in chains {
             if chain.ordinals.is_empty() { continue; }
-            if count[chain.ordinals[0].as_slice()] > 1 {
+            if count[chain.first_ids()] > 1 {
                 shared.push(chain.clone());
             } else {
                 lone.push(chain);
@@ -1095,7 +1101,7 @@ fn resolve_chains_impl(
         }
         super::profile::bump(|c| &c.n_chains_shared, shared.len() as u64);
         results.extend(resolve_chains_posmap_grouped(
-            &shared, resolver, filter_docs, posmap, &mut first_memo));
+            &shared, resolver, filter_docs, posmap, *termtexts, &mut first_memo));
     } else {
         lone.extend(chains.iter());
     }
@@ -1106,13 +1112,13 @@ fn resolve_chains_impl(
         }
 
         // Resolve all alternatives at position 0
-        let first_entries = match first_memo.get(chain.ordinals[0].as_slice()) {
+        let first_entries = match first_memo.get(chain.first_ids()) {
             Some(hit) => hit.clone(),
             None => {
                 let v = std::rc::Rc::new(
-                    resolve_alternatives(resolver, &chain.ordinals[0], filter_docs));
+                    resolve_alternatives(resolver, chain.first_ids(), filter_docs));
                 super::profile::bump(|c| &c.n_chain_first, v.len() as u64);
-                first_memo.insert(chain.ordinals[0].as_ref().clone(), v.clone());
+                first_memo.insert(chain.first_ids().to_vec(), v.clone());
                 v
             }
         };
@@ -1131,8 +1137,8 @@ fn resolve_chains_impl(
                     byte_to: bf + chain.total_query_consumed as u32,
                     token_end: e.byte_to,
                     sti: chain.first_sti,
-                    ordinal: chain.ordinals[0][0],
-                    last_ordinal: chain.ordinals[0][0],
+                    ordinal: chain.head(),
+                    last_ordinal: chain.head(),
                 });
             }
             continue;
@@ -1155,13 +1161,13 @@ fn resolve_chains_impl(
                 break;
             }
 
-            if let AdjacencyMode::StrictPosmap { posmap } = &adjacency {
+            if let AdjacencyMode::StrictPosmap { posmap, termtexts } = &adjacency {
                 // Which ordinals may sit at the next position. Chains carry a
                 // handful of alternatives; a sorted Vec beats a set at that size.
                 // The memoised lists come out of build_chains_from_splits already
                 // sorted and deduplicated; sibling-DFS singletons trivially are.
-                let wanted: &[u64] = chain.ordinals[ord_idx].as_slice();
-                debug_assert!(wanted.windows(2).all(|w| w[0] < w[1]));
+                let wanted = &chain.ordinals[ord_idx];
+                debug_assert!(wanted.as_explicit().is_none_or(|w| w.windows(2).all(|w| w[0] < w[1])));
 
                 // Bytes are not fetched here. An intermediate position's span is
                 // never used — only the last token's reaches the emitted match —
@@ -1175,10 +1181,9 @@ fn resolve_chains_impl(
                     super::profile::bump(|c| &c.n_posmap_lookups, 1);
                     let Some(ord) = posmap.ordinal_at(doc_id, next_pos) else { continue };
                     let ord = ord as u64;
-                    if wanted.binary_search(&ord).is_err() { continue; }
+                    if !wanted.contains(ord, *termtexts) { continue; }
                     if std::env::var("V3_DIAG_RESOLVE").is_ok() {
-                        eprintln!("[resolve] doc={doc_id} pos={next_pos} ord={ord} wanted={:?} sorted={}",
-                            wanted, wanted.windows(2).all(|w| w[0] < w[1]));
+                        eprintln!("[resolve] doc={doc_id} pos={next_pos} ord={ord} wanted={wanted:?}");
                     }
                     super::profile::bump(|c| &c.n_posmap_survivors, 1);
                     new_active.push((doc_id, next_pos, byte_from_first, 0, 0, ord, first_pos));
@@ -1198,7 +1203,7 @@ fn resolve_chains_impl(
             let active_docs: HashSet<DocId> =
                 active.iter().map(|&(doc_id, ..)| doc_id).collect();
             let mut entries: Vec<(PostingEntry, u64)> = Vec::new();
-            for &ord in chain.ordinals[ord_idx].iter() {
+            for &ord in chain.ordinals[ord_idx].explicit().iter() {
                 for e in resolver.resolve_filtered(ord, &active_docs) {
                     entries.push((e, ord));
                 }
@@ -1286,7 +1291,7 @@ fn resolve_chains_impl(
                 byte_to: (last_bf + chain.last_consumed as u32).max(byte_from),
                 token_end,
                 sti: chain.first_sti,
-                ordinal: chain.ordinals[0][0],
+                ordinal: chain.head(),
                 last_ordinal: last_ord,
             });
         }

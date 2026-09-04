@@ -111,18 +111,33 @@ identifiants ne bougent jamais : aucun segment n'est touché.
 des locaux, concaténation des postings, fratrie et cartes rebâties. Pas de
 texte, pas de FST.
 
-**Requête** : les briques ne changent pas. Les cinq lecteurs d'un segment
-traduisent entre identifiants globaux et ordinaux locaux quand le segment
-a un `.gmap` (`with_gmap`). Le lecteur FST du dictionnaire est **partagé**
-par tous les segments (`SegmentReader::sfx_dictionary_field`) et **mémoïse**
-ses marches (`FstMemo`, cellule `OnceLock` par (fonction, requête)) ; chaque
-segment en reçoit une **vue** (`for_segment(gmap)`) qui coupe les listes
-mémoïsées à ses identifiants par marche fusionnée. Les chaînes se
-construisent par segment. **Limite qui compte** : le calcul froid d'une
-requête est fait une fois mais sur un seul thread — à froid, ×2 à ×22 plus
-lent que l'index v3 sur 30 000 fichiers ([09](09-journal-chantier-dictionnaire.md) §11) ;
-le mode est optionnel tant que la phase FST n'est pas un nœud par shard du
-DAG de recherche.
+**Requête** : deux phases. **Le plan** (`briques/plan.rs`, appelé au
+début de `prescan_segments_more` des trois requêtes v3, donc sur tous les
+chemins — index simple, shardé, par lots, fédéré) : par dictionnaire,
+toutes les cellules FST que la requête demandera — candidats de la racine
+par partition, marches, et pour chaque suffixe de la requête sa marche et
+son compte ancré ; comptes des n-grammes et des pièces du fuzzy puis le
+générateur choisi (`composite::fuzzy_generator`, la même décision que les
+segments) ; littéraux requis de la regex — calculées **en parallèle** (une
+tâche par cellule, priorité Critical, une vague par littéral, deux à trois
+pour le fuzzy) dans la mémo du lecteur partagé (`FstMemo`, cellules à
+trois états, `peek`). Personne n'attend sous ces tâches. **L'exécution**
+par segment, en parallèle comme en v3 : le lecteur FST du dictionnaire est
+partagé (`SegmentReader::sfx_dictionary_field`), chaque segment en reçoit
+une vue (`for_segment(gmap)`) qui coupe les listes mémoïsées à ses
+identifiants par **intersection en galop** (`GmapReader::lower_bound_from`
+— une marche fusionnée parcourait tout le `.gmap` à chaque coupe, 80 % du
+temps par segment). Un reste avalé par la dernière position d'une chaîne
+n'est **pas** une liste mais un `Alts::Prefix` testé sur le texte de
+`.termtexts` (texte étendu = octets propres + overlap, ce qu'une clé SI=0
+couvre) ; les cinq lecteurs traduisent global ↔ local (`with_gmap`). Une
+cellule non planifiée est calculée en ligne : le plan est une
+optimisation, pas une condition d'exactitude (`V3_PLAN=0` le coupe).
+Mesuré ([11](11-journal-chantier-plan-fst.md) §4) sur 30 000 fichiers à
+froid, même binaire, min de 3 passes : ×0,8 à ×1,9 par rapport à v3
+(exactes 2,5-5,3 ms contre 1,7-3,3 ; fuzzy plus rapide) ; ×2-22 le matin
+même. Le mode reste optionnel tant que ×1,5 n'est pas tenu partout (cinq
+requêtes sur dix le tiennent).
 
 Mesuré : référence 10 000 fichiers 508 → 390 Mo (4 générations vivantes ;
 387 en une seule), construction 19 s (8 en v3) ; 30 000 : 1 659 →
@@ -167,8 +182,8 @@ drain → flush → [prescan par segment …] → merge_prescan → build_weight
 
 **Le prescan crée un nœud par segment** (`lucivy_core/src/search_dag.rs`) :
 c'est tout le parallélisme — et il le reste en mode dictionnaire, où le
-lecteur FST est partagé et mémoïsé mais où chaque segment résout ses
-postings (§2.5). Par segment, `contains_query_v3` / `fuzzy_query_v3` /
+plan (§2.5) a rempli la mémo du lecteur partagé avant le scatter et où
+chaque segment résout ses postings. Par segment, `contains_query_v3` / `fuzzy_query_v3` /
 `regex_query_v3` chargent les sidecars en `OwnedBytes` (zéro copie sur mmap)
 dans un `BriquesContext`, puis `briques/` :
 

@@ -393,6 +393,12 @@ impl Query for ContainsQueryV3 {
             return Ok(());
         }
 
+        // Shard dictionary: the FST phase once per shard, in parallel,
+        // before the segments (see `briques::plan`). Nothing on a v3 index.
+        crate::suffix_fst::briques::plan::plan_contains(
+            segments, self.field, &self.query_text, self.anchor_start, self.strict_separators,
+        );
+
         type SegOutcome = Option<(crate::index::SegmentId, Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)>;
 
         let names: Vec<String> = (0..segments.len()).map(|i| format!("seg_{i}")).collect();

@@ -89,6 +89,80 @@ pub struct SplitCandidateV3 {
     pub overlap_validated: usize,
 }
 
+/// The alternatives at one chain position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Alts {
+    /// Explicit ordinals, sorted and deduplicated. Position 0 is always
+    /// explicit: a chain is resolved from its postings.
+    Ids(std::sync::Arc<Vec<u64>>),
+    /// Every token whose extended text, lowercased, starts with this — the
+    /// remainder a position swallows whole. Tested on `.termtexts` at
+    /// resolution instead of listed: on a shard dictionary the tokens
+    /// starting with `e` are 533 000 ids over 10 000 files, decoded, sorted
+    /// and cut down to each of 160 segments for a membership test the text
+    /// answers directly (the extended text is own bytes plus overlap, which
+    /// is exactly what an SI=0 key covers). Built only when the caller's
+    /// resolver can test it — posmap and termtexts, never a resolver that
+    /// enumerates the alternatives (see `build_chains_from_splits`).
+    Prefix(std::sync::Arc<str>),
+}
+
+impl Alts {
+    /// One explicit ordinal.
+    pub fn single(ord: u64) -> Self {
+        Self::Ids(std::sync::Arc::new(vec![ord]))
+    }
+
+    /// Explicit ordinals, sorted and deduplicated by the caller.
+    pub fn ids(ids: Vec<u64>) -> Self {
+        Self::Ids(std::sync::Arc::new(ids))
+    }
+
+    /// The explicit ordinals. Panics on a prefix alternative: those are only
+    /// built for resolvers that test membership (see `Prefix`).
+    pub fn explicit(&self) -> &[u64] {
+        match self {
+            Self::Ids(v) => v,
+            Self::Prefix(p) => panic!("prefix alternative {p:?} reached a resolver that enumerates its ordinals"),
+        }
+    }
+
+    /// The explicit ordinals, `None` for a prefix alternative.
+    pub fn as_explicit(&self) -> Option<&std::sync::Arc<Vec<u64>>> {
+        match self {
+            Self::Ids(v) => Some(v),
+            Self::Prefix(_) => None,
+        }
+    }
+
+    /// Whether `ord` is one of the alternatives; a prefix alternative reads
+    /// the token's text from `termtexts` (absent → false).
+    pub fn contains(&self, ord: u64, termtexts: Option<&TermTextsReaderV3<'_>>) -> bool {
+        match self {
+            Self::Ids(v) => v.binary_search(&ord).is_ok(),
+            Self::Prefix(p) => termtexts
+                .and_then(|t| t.text(ord as u32))
+                .is_some_and(|text| starts_with_ci(text, p)),
+        }
+    }
+
+    /// True for an explicit list with nothing in it.
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Self::Ids(v) if v.is_empty())
+    }
+}
+
+/// `text` starts with `prefix_lower` (lowercase already), comparing
+/// case-insensitively as the FST keys are lowercased.
+fn starts_with_ci(text: &str, prefix_lower: &str) -> bool {
+    if text.is_ascii() && prefix_lower.is_ascii() {
+        text.len() >= prefix_lower.len()
+            && text.as_bytes()[..prefix_lower.len()].eq_ignore_ascii_case(prefix_lower.as_bytes())
+    } else {
+        text.to_lowercase().starts_with(prefix_lower)
+    }
+}
+
 /// A chain of tokens matching a query across token boundaries.
 ///
 /// Each position stores alternative ordinals: different tokens may match
@@ -104,7 +178,7 @@ pub struct TokenChainV3 {
     /// carries the same alternatives list at that position, and a query such as
     /// `__init` produces 3.4 million chains over 50k documents. Cloning the list
     /// per chain was the bulk of `build_chains_from_splits`.
-    pub ordinals: Vec<std::sync::Arc<Vec<u64>>>,
+    pub ordinals: Vec<Alts>,
     /// Suffix start index of the first token: 0 when the match begins at a token start.
     pub first_sti: u16,
     /// Query bytes consumed by the whole chain.
@@ -115,6 +189,18 @@ pub struct TokenChainV3 {
     /// the end of the containing token. Without it, `byte_to` falls back to the
     /// last token's own end — separator included — which makes the span lie.
     pub last_consumed: usize,
+}
+
+impl TokenChainV3 {
+    /// The explicit ordinals of the first position.
+    pub fn first_ids(&self) -> &[u64] {
+        self.ordinals[0].explicit()
+    }
+
+    /// The first ordinal of the first position: what a match reports as its head.
+    pub fn head(&self) -> u64 {
+        self.first_ids()[0]
+    }
 }
 
 // ─── fst_candidates_v3 ────────────────────────────────────────────────────
@@ -129,22 +215,94 @@ pub struct TokenChainV3 {
 /// has: one walk over both sorted sequences, the list and the segment's
 /// `.gmap` — not a binary search per item, which on a fuzzy query's
 /// thousands of candidates times 160 segments was the whole search time.
+/// The intersection gallops from the smaller side into the larger: a plain
+/// merge walked the whole `.gmap` (25 000 ids) for every list, and a query
+/// makes 1 000 to 6 000 such cuts per segment — 80 % of the dictionary
+/// mode's per-segment time on 30 000 files, for lists of 200 items.
 fn keep_in_segment<T: Clone>(items: &[T], id_of: impl Fn(&T) -> u32, gmap: &super::super::gmap::GmapReader<'_>) -> Vec<T> {
+    let _t = super::profile::Timer::start();
     let mut out = Vec::new();
-    let (mut i, mut j, n) = (0usize, 0u32, gmap.len());
-    while i < items.len() && j < n {
-        let a = id_of(&items[i]);
-        let b = gmap.global(j);
-        if a < b {
-            i += 1;
-        } else if a > b {
-            j += 1;
+    let n = gmap.len();
+    let m = items.len();
+    if m > 0 && n > 0 {
+        if (m as u64) * 8 < n as u64 {
+            // Few items: gallop each into the map.
+            let mut j = 0u32;
+            for it in items {
+                let a = id_of(it);
+                j = gmap.lower_bound_from(j, a);
+                if j >= n {
+                    break;
+                }
+                if gmap.global(j) == a {
+                    out.push(it.clone());
+                }
+            }
+        } else if (n as u64) * 8 < m as u64 {
+            // Few map ids: gallop each into the items.
+            let mut i = 0usize;
+            for j in 0..n {
+                let b = gmap.global(j);
+                i = lower_bound_from(items, i, b, &id_of);
+                if i >= m {
+                    break;
+                }
+                if id_of(&items[i]) == b {
+                    out.push(items[i].clone());
+                }
+            }
         } else {
-            out.push(items[i].clone());
-            i += 1;
+            let (mut i, mut j) = (0usize, 0u32);
+            while i < m && j < n {
+                let a = id_of(&items[i]);
+                let b = gmap.global(j);
+                if a < b {
+                    i += 1;
+                } else if a > b {
+                    j += 1;
+                } else {
+                    out.push(items[i].clone());
+                    i += 1;
+                }
+            }
         }
     }
+    super::profile::bump(|c| &c.n_cut_items, items.len() as u64);
+    super::profile::bump(|c| &c.n_cut_kept, out.len() as u64);
+    _t.stop(|c| &c.ns_cut);
     out
+}
+
+/// First index at or after `from` whose id is at least `target`, galloping.
+fn lower_bound_from<T>(items: &[T], from: usize, target: u32, id_of: &impl Fn(&T) -> u32) -> usize {
+    let n = items.len();
+    if from >= n {
+        return n;
+    }
+    let mut lo = from;
+    let mut hi = from;
+    let mut step = 1usize;
+    loop {
+        if hi >= n {
+            hi = n;
+            break;
+        }
+        if id_of(&items[hi]) >= target {
+            break;
+        }
+        lo = hi + 1;
+        hi = hi.saturating_add(step);
+        step = step.saturating_mul(2);
+    }
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if id_of(&items[mid]) < target {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
 }
 
 pub fn fst_candidates_v3(
@@ -251,19 +409,9 @@ fn range_keys(partition: u8, query_bytes: &[u8]) -> (Vec<u8>, Vec<u8>) {
 
 /// The memo flags of a per-partition cell: `partition << 2` (the anchor and
 /// strictness only choose which partitions are asked).
-fn partition_flags(partition: u8) -> u8 {
+pub fn partition_flags(partition: u8) -> u8 {
     partition << 2
 }
-
-/// Prefixes up to this length have their cells filled by one task per
-/// following byte (`compute_in_tasks`) instead of one inline scan. Measured
-/// at 3 on the 10 000-file dictionary: **slower** — `sched term` cold 7 →
-/// 12 ms, fuzzy 45 → 64 — because the prescans waiting on the cell pump
-/// each other (160 nested waits) faster than the 257 sub-tasks drain, and
-/// the cold cost is not one big scan but a chain of dependent small ones.
-/// Kept at 0 (never) until the FST phase of a query runs as its own DAG
-/// node per shard, where sub-range tasks have no waiter above them.
-const SPLIT_SCAN_MAX_PREFIX: usize = 0;
 
 /// The memoized, id-sorted candidates of one partition (tag 1).
 pub fn memo_candidates_in_partition(
@@ -273,22 +421,15 @@ pub fn memo_candidates_in_partition(
     partition: u8,
 ) -> std::sync::Arc<Vec<FstCandidateV3>> {
     let flags = partition_flags(partition);
-    if query.len() <= SPLIT_SCAN_MAX_PREFIX && !memo.contains(1, query.as_bytes(), flags) {
-        let parts: Vec<Box<dyn FnOnce() -> Vec<FstCandidateV3> + Send>> = (0..=256u16).map(|b| {
-            let reader = reader.clone();
-            let query = query.to_string();
-            Box::new(move || fst_candidates_in_subrange(&reader, &query, partition, if b == 256 { None } else { Some(b as u8) }))
-                as Box<dyn FnOnce() -> Vec<FstCandidateV3> + Send>
-        }).collect();
-        memo.compute_in_tasks(1, query.as_bytes(), flags, parts, |parts: Vec<Vec<FstCandidateV3>>| {
-            let mut v: Vec<FstCandidateV3> = parts.into_iter().flatten().collect();
-            v.sort_by_key(|c| (c.raw_ordinal, c.sti));
-            v
-        });
-    }
-    memo.get_or_compute(1, query.as_bytes(), flags, || {
+    memo.get_or_compute(MEMO_TAG_CANDIDATES, query.as_bytes(), flags, || {
+        let t = std::time::Instant::now();
         let mut v = fst_candidates_in_partition(reader, query, partition);
+        let scan = t.elapsed();
         v.sort_by_key(|c| (c.raw_ordinal, c.sti));
+        if super::profile::enabled() && scan.as_millis() >= 2 {
+            eprintln!("      [cell] cand/{partition:02x} {query:?}: {} entries, scan {:.1}ms, sort {:.1}ms",
+                v.len(), scan.as_secs_f64() * 1e3, (t.elapsed() - scan).as_secs_f64() * 1e3);
+        }
         v
     })
 }
@@ -301,123 +442,9 @@ pub fn memo_count_in_partition(
     partition: u8,
 ) -> usize {
     let flags = partition_flags(partition);
-    if query.len() <= SPLIT_SCAN_MAX_PREFIX && !memo.contains(6, query.as_bytes(), flags) {
-        let parts: Vec<Box<dyn FnOnce() -> usize + Send>> = (0..=256u16).map(|b| {
-            let reader = reader.clone();
-            let query = query.to_string();
-            Box::new(move || fst_candidates_count_in_subrange(&reader, &query, partition, if b == 256 { None } else { Some(b as u8) }))
-                as Box<dyn FnOnce() -> usize + Send>
-        }).collect();
-        memo.compute_in_tasks(6, query.as_bytes(), flags, parts, |parts: Vec<usize>| parts.iter().sum::<usize>());
-    }
-    *memo.get_or_compute(6, query.as_bytes(), flags, || {
+    *memo.get_or_compute(MEMO_TAG_COUNT, query.as_bytes(), flags, || {
         fst_candidates_count_in_partition(reader, query, partition)
     })
-}
-
-/// The keys of one partition under `query` whose next byte is `next`, or
-/// — `None` — the key equal to `query` and the boundary probes.
-fn subrange_keys(partition: u8, query_bytes: &[u8], next: Option<u8>) -> Option<(Vec<u8>, Vec<u8>)> {
-    let mut ge = vec![partition];
-    ge.extend_from_slice(query_bytes);
-    match next {
-        None => None,
-        Some(b) => {
-            ge.push(b);
-            let lt = if b == 0xFF {
-                let (_, lt_all) = range_keys(partition, query_bytes);
-                lt_all
-            } else {
-                let mut lt = ge.clone();
-                *lt.last_mut().unwrap() += 1;
-                lt
-            };
-            Some((ge, lt))
-        }
-    }
-}
-
-/// `fst_candidates_in_partition` over one sub-range (see `subrange_keys`).
-fn fst_candidates_in_subrange(reader: &SfxFileReaderV3, query: &str, partition: u8, next: Option<u8>) -> Vec<FstCandidateV3> {
-    let lower = query.to_lowercase();
-    let query_bytes = lower.as_bytes();
-    let mut results = Vec::new();
-    for part in reader.part_views() {
-        let fst = part.fst();
-        use lucivy_fst::{IntoStreamer, Streamer};
-        match subrange_keys(partition, query_bytes, next) {
-            Some((ge, lt)) => {
-                let mut stream = fst.range().ge(&ge).lt(&lt).into_stream();
-                while let Some((key, val)) = stream.next() {
-                    for p in part.decode_parents(val, key) {
-                        results.push(FstCandidateV3::from_parent(&p, partition));
-                    }
-                }
-            }
-            None => {
-                let mut exact = vec![partition];
-                exact.extend_from_slice(query_bytes);
-                if let Some(val) = fst.get(&exact) {
-                    for p in part.decode_parents(val, &exact) {
-                        results.push(FstCandidateV3::from_parent(&p, partition));
-                    }
-                }
-                if part.keys_cut_at_boundary() {
-                    let len = query_bytes.len();
-                    let shortest = len.saturating_sub(MAX_OVERLAP_BYTES).max(1);
-                    for k in shortest..len {
-                        let tail = &query_bytes[k..];
-                        let mut probe = vec![partition];
-                        probe.extend_from_slice(&query_bytes[..k]);
-                        let Some(val) = fst.get(&probe) else { continue };
-                        let parents = part.decode_parents_where(val, &probe, |ov| ov.len() >= tail.len() && ov[..tail.len()] == *tail);
-                        for p in parents {
-                            results.push(FstCandidateV3::from_parent(&p, partition));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    results
-}
-
-/// `fst_candidates_count_in_partition` over one sub-range.
-fn fst_candidates_count_in_subrange(reader: &SfxFileReaderV3, query: &str, partition: u8, next: Option<u8>) -> usize {
-    let lower = query.to_lowercase();
-    let query_bytes = lower.as_bytes();
-    let mut total = 0usize;
-    for part in reader.part_views() {
-        let fst = part.fst();
-        use lucivy_fst::{IntoStreamer, Streamer};
-        match subrange_keys(partition, query_bytes, next) {
-            Some((ge, lt)) => {
-                let mut stream = fst.range().ge(&ge).lt(&lt).into_stream();
-                while let Some((key, val)) = stream.next() {
-                    total += part.count_parents(val, key);
-                }
-            }
-            None => {
-                let mut exact = vec![partition];
-                exact.extend_from_slice(query_bytes);
-                if let Some(val) = fst.get(&exact) {
-                    total += part.count_parents(val, &exact);
-                }
-                if part.keys_cut_at_boundary() {
-                    let len = query_bytes.len();
-                    let shortest = len.saturating_sub(MAX_OVERLAP_BYTES).max(1);
-                    for k in shortest..len {
-                        let tail = &query_bytes[k..];
-                        let mut probe = vec![partition];
-                        probe.extend_from_slice(&query_bytes[..k]);
-                        let Some(val) = fst.get(&probe) else { continue };
-                        total += part.decode_parents_where(val, &probe, |ov| ov.len() >= tail.len() && ov[..tail.len()] == *tail).len();
-                    }
-                }
-            }
-        }
-    }
-    total
 }
 
 /// Every memo cell a query's candidates need, for a prefetch: one
@@ -427,7 +454,7 @@ pub fn candidate_cells(anchor_start: bool, strict_separators: bool) -> &'static 
 }
 
 /// The partitions a scan visits (module doc of `fst_candidates_v3`).
-fn candidate_partitions(anchor_start: bool, strict_separators: bool) -> &'static [u8] {
+pub fn candidate_partitions(anchor_start: bool, strict_separators: bool) -> &'static [u8] {
     if anchor_start && strict_separators {
         &[SI0_PREFIX]
     } else if anchor_start && !strict_separators {
@@ -526,6 +553,40 @@ fn split_at_boundary(
 /// `prefix_len >= own_len - sti`.
 ///
 /// Returns split candidates sorted by query_consumed descending.
+/// Memo tags of the FST phase: candidates of one partition, chunk splits,
+/// word splits, candidate count of one partition. Shared with the planner
+/// (`briques::plan`), which fills these cells ahead of the segments.
+pub const MEMO_TAG_CANDIDATES: u8 = 1;
+pub const MEMO_TAG_WALK_CHUNKS: u8 = 2;
+pub const MEMO_TAG_WALK_WORDS: u8 = 3;
+pub const MEMO_TAG_COUNT: u8 = 6;
+
+/// The memoized, id-sorted chunk splits of `query` (tag 2), shard-wide.
+pub fn memo_walk_chunks(
+    reader: &SfxFileReaderV3,
+    memo: &crate::suffix_fst::file_v3::FstMemo,
+    query: &str,
+) -> std::sync::Arc<Vec<SplitCandidateV3>> {
+    memo.get_or_compute(MEMO_TAG_WALK_CHUNKS, query.as_bytes(), 0, || {
+        let mut v = falling_walk_chunks_uncached(reader, query);
+        v.sort_by_key(|s| (s.parent.raw_ordinal, s.parent.sti, s.query_consumed));
+        v
+    })
+}
+
+/// The memoized, id-sorted word splits of `query` (tag 3), shard-wide.
+pub fn memo_walk_words(
+    reader: &SfxFileReaderV3,
+    memo: &crate::suffix_fst::file_v3::FstMemo,
+    query: &str,
+) -> std::sync::Arc<Vec<SplitCandidateV3>> {
+    memo.get_or_compute(MEMO_TAG_WALK_WORDS, query.as_bytes(), 0, || {
+        let mut v = falling_walk_words_uncached(reader, query);
+        v.sort_by_key(|s| (s.parent.raw_ordinal, s.parent.sti, s.query_consumed));
+        v
+    })
+}
+
 /// Falling walk on chunk partitions (0x00 + 0x01).
 ///
 /// Chunk-level splits. Markers are included (overlap_consumed >= 0).
@@ -536,11 +597,7 @@ pub fn falling_walk_chunks(
     query: &str,
 ) -> Vec<SplitCandidateV3> {
     if let Some(memo) = reader.memo() {
-        let shared = memo.get_or_compute(2, query.as_bytes(), 0, || {
-            let mut v = falling_walk_chunks_uncached(reader, query);
-            v.sort_by_key(|s| (s.parent.raw_ordinal, s.parent.sti, s.query_consumed));
-            v
-        });
+        let shared = memo_walk_chunks(reader, memo, query);
         return match reader.segment_gmap() {
             Some(g) => {
                 let mut v = keep_in_segment(&shared, |s| s.parent.raw_ordinal as u32, &g);
@@ -633,11 +690,7 @@ pub fn falling_walk_words(
     query: &str,
 ) -> Vec<SplitCandidateV3> {
     if let Some(memo) = reader.memo() {
-        let shared = memo.get_or_compute(3, query.as_bytes(), 0, || {
-            let mut v = falling_walk_words_uncached(reader, query);
-            v.sort_by_key(|s| (s.parent.raw_ordinal, s.parent.sti, s.query_consumed));
-            v
-        });
+        let shared = memo_walk_words(reader, memo, query);
         return match reader.segment_gmap() {
             Some(g) => {
                 let mut v = keep_in_segment(&shared, |s| s.parent.raw_ordinal as u32, &g);
@@ -846,12 +899,22 @@ fn overlap_lookahead<D: AsRef<[u8]>, F>(
 
 const MAX_CHAIN_DEPTH: usize = 8;
 
+/// A swallowed remainder up to this many bytes becomes a prefix alternative
+/// without counting its candidates first (see `build_chains_from_splits`).
+pub const PREFIX_ASSUMED_MAX_BYTES: usize = 2;
+
 /// Build a chain from a list of initial splits using a given falling_walk function.
 ///
 /// `filter_best_consumed`: if true, only keep sub_split ordinals with the same
 /// consumed as the best. Required for chunk pipeline (0x00/0x01) where marker
 /// entries create multi-parent nodes at different positions → different consumed.
 /// Not needed for word pipeline (0x02) where word-stripped entries have unique prefixes.
+/// `prefix_alts`: a position that swallows the whole remainder is an
+/// `Alts::Prefix` (tested on the text at resolution) instead of the list of
+/// the tokens starting with it. Only for a resolver with posmap and
+/// termtexts (and word_pos_map on the word pipeline). Chosen on a shard
+/// dictionary, where that list is the shard's and the one cell of a query's
+/// FST plan that no fan-out makes cheap.
 fn build_chains_from_splits(
     reader: &SfxFileReaderV3,
     splits: &[SplitCandidateV3],
@@ -859,6 +922,7 @@ fn build_chains_from_splits(
     walk_fn: fn(&SfxFileReaderV3, &str) -> Vec<SplitCandidateV3>,
     strict_sep_for_candidates: bool,
     filter_best_consumed: bool,
+    prefix_alts: bool,
 ) -> Vec<TokenChainV3> {
     let mut chains = Vec::new();
     let query_lower = query.to_lowercase();
@@ -873,7 +937,7 @@ fn build_chains_from_splits(
     // over the same handful of suffixes: measured at 15x redundancy on
     // `kmalloc`, 25x on `uint64_t`, 78x on `include`, for a stage that was
     // 78-96% of query time.
-    let mut fst_memo: FnvHashMap<usize, std::sync::Arc<Vec<u64>>> = FnvHashMap::default();
+    let mut fst_memo: FnvHashMap<usize, Option<Alts>> = FnvHashMap::default();
     // Per remainder offset: the next-token alternatives, grouped by how much
     // of the remainder each group consumes (`ordinals`, consumed, where the
     // rest starts). One chain position holds ordinals that all consume the
@@ -882,7 +946,7 @@ fn build_chains_from_splits(
     // consumed"), which is the longest token seen, not the one in the
     // document: `expression>` over `Expressi|on` (8) and `Expres|si` (6),
     // where the file is chunked 6+6, found nothing in 61 rag3db files.
-    type Group = (std::sync::Arc<Vec<u64>>, usize, usize);
+    type Group = (Alts, usize, usize);
     let mut walk_memo: FnvHashMap<usize, std::sync::Arc<Vec<Group>>> = FnvHashMap::default();
 
     super::profile::bump(|c| &c.n_bcfs_splits, splits.len() as u64);
@@ -891,7 +955,7 @@ fn build_chains_from_splits(
         let safe_start = snap_to_char_boundary(&query_lower, split.remainder_start);
         if safe_start >= query_lower.len() {
             chains.push(TokenChainV3 {
-                ordinals: vec![std::sync::Arc::new(vec![split.parent.raw_ordinal])],
+                ordinals: vec![Alts::single(split.parent.raw_ordinal)],
                 first_sti: split.parent.sti,
                 total_query_consumed: split.query_consumed,
                 last_consumed: split.query_consumed,
@@ -901,9 +965,8 @@ fn build_chains_from_splits(
 
         // Depth-first over the branches; `stack` holds (positions so far,
         // remainder offset, depth, consumed by the last position).
-        let head: Vec<std::sync::Arc<Vec<u64>>> =
-            vec![std::sync::Arc::new(vec![split.parent.raw_ordinal])];
-        let mut stack: Vec<(Vec<std::sync::Arc<Vec<u64>>>, usize, usize, usize)> =
+        let head: Vec<Alts> = vec![Alts::single(split.parent.raw_ordinal)];
+        let mut stack: Vec<(Vec<Alts>, usize, usize, usize)> =
             vec![(head, safe_start, 0, split.query_consumed)];
 
         while let Some((positions, rem_off, depth, last_consumed)) = stack.pop() {
@@ -922,15 +985,32 @@ fn build_chains_from_splits(
             super::profile::bump(|c| &c.n_bcfs_fst_reqs, 1);
             if let std::collections::hash_map::Entry::Vacant(slot) = fst_memo.entry(rem_off) {
                 super::profile::bump(|c| &c.n_bcfs_fst_calls, 1);
-                let cands = fst_candidates_v3(reader, rem, true, strict_sep_for_candidates);
-                let mut unique_ords: Vec<u64> =
-                    cands.iter().map(|c| c.raw_ordinal).collect();
-                unique_ords.sort_unstable();
-                unique_ords.dedup();
-                slot.insert(std::sync::Arc::new(unique_ords));
+                let alts = if prefix_alts {
+                    // The count says whether any token starts with the
+                    // remainder; the resolver tests which. A remainder of
+                    // one or two bytes is assumed present: its count is a
+                    // stream over every key under it (`d` on 6.5 M texts:
+                    // 4 ms, the slowest cell of a query's plan), and a
+                    // prefix nobody starts with only costs a few failed
+                    // membership tests.
+                    if rem.len() <= PREFIX_ASSUMED_MAX_BYTES
+                        || fst_candidates_count_v3(reader, rem, true, strict_sep_for_candidates) > 0
+                    {
+                        Some(Alts::Prefix(std::sync::Arc::from(rem)))
+                    } else {
+                        None
+                    }
+                } else {
+                    let cands = fst_candidates_v3(reader, rem, true, strict_sep_for_candidates);
+                    let mut unique_ords: Vec<u64> =
+                        cands.iter().map(|c| c.raw_ordinal).collect();
+                    unique_ords.sort_unstable();
+                    unique_ords.dedup();
+                    if unique_ords.is_empty() { None } else { Some(Alts::ids(unique_ords)) }
+                };
+                slot.insert(alts);
             }
-            let hit = &fst_memo[&rem_off];
-            if !hit.is_empty() {
+            if let Some(hit) = &fst_memo[&rem_off] {
                 // This position swallows the whole remainder — one branch,
                 // not the only one. The same text is chunked differently
                 // from one document to the next, so a key holding all of
@@ -939,7 +1019,7 @@ fn build_chains_from_splits(
                 // Stopping here lost `<binder::Expression` in every document
                 // sharing a segment with doc A (pipeline test, 24 August).
                 let mut swallowed = positions.clone();
-                swallowed.push(std::sync::Arc::clone(hit));
+                swallowed.push(hit.clone());
                 chains.push(TokenChainV3 {
                     ordinals: swallowed,
                     first_sti: split.parent.sti,
@@ -977,7 +1057,7 @@ fn build_chains_from_splits(
                         }
                         ords.sort_unstable();
                         ords.dedup();
-                        groups.push((std::sync::Arc::new(ords), consumed, rem_start));
+                        groups.push((Alts::ids(ords), consumed, rem_start));
                     }
                 } else if let Some(best) = sub_splits.first() {
                     // Word pipeline: word-stripped entries have unique prefixes,
@@ -985,14 +1065,14 @@ fn build_chains_from_splits(
                     let mut ords: Vec<u64> = sub_splits.iter().map(|s| s.parent.raw_ordinal).collect();
                     ords.sort_unstable();
                     ords.dedup();
-                    groups.push((std::sync::Arc::new(ords), best.query_consumed, best.remainder_start));
+                    groups.push((Alts::ids(ords), best.query_consumed, best.remainder_start));
                 }
                 slot.insert(std::sync::Arc::new(groups));
             }
             let groups = std::sync::Arc::clone(&walk_memo[&rem_off]);
             for (ords, consumed, rem_start) in groups.iter() {
                 let mut positions = positions.clone();
-                positions.push(std::sync::Arc::clone(ords));
+                positions.push(ords.clone());
                 let next = rem_off + snap_to_char_boundary(rem, *rem_start);
                 stack.push((positions, next, depth + 1, *consumed));
             }
@@ -1009,13 +1089,14 @@ fn build_chains_from_splits(
 pub fn cross_chunk_chain_v3(
     reader: &SfxFileReaderV3,
     query: &str,
+    prefix_alts: bool,
 ) -> Vec<TokenChainV3> {
     // On a shared reader the splits below are this segment's already, and
     // the walks the chain builder makes for each remainder are memoized —
     // so each segment builds its own (short) chains, in parallel, and the
     // FST work for a remainder is done once for the shard.
     let splits = falling_walk_chunks(reader, query);
-    build_chains_from_splits(reader, &splits, query, falling_walk_chunks, true, true)
+    build_chains_from_splits(reader, &splits, query, falling_walk_chunks, true, true, prefix_alts)
 }
 
 /// Chunk chains from caller-chosen head splits (see `cross_chunk_chain_v3`).
@@ -1026,8 +1107,9 @@ pub fn cross_chunk_chain_from_splits(
     reader: &SfxFileReaderV3,
     splits: &[SplitCandidateV3],
     query: &str,
+    prefix_alts: bool,
 ) -> Vec<TokenChainV3> {
-    build_chains_from_splits(reader, splits, query, falling_walk_chunks, true, true)
+    build_chains_from_splits(reader, splits, query, falling_walk_chunks, true, true, prefix_alts)
 }
 
 /// Cross-word chains (partition 0x02).
@@ -1035,9 +1117,10 @@ pub fn cross_chunk_chain_from_splits(
 pub fn cross_word_chain_v3(
     reader: &SfxFileReaderV3,
     query: &str,
+    prefix_alts: bool,
 ) -> Vec<TokenChainV3> {
     let splits = falling_walk_words(reader, query);
-    build_chains_from_splits(reader, &splits, query, falling_walk_words, false, false)
+    build_chains_from_splits(reader, &splits, query, falling_walk_words, false, false, prefix_alts)
 }
 
 /// Legacy combined API — builds chains from both partitions mixed.
@@ -1046,9 +1129,9 @@ pub fn cross_token_chain_v3(
     query: &str,
     strict_separators: bool,
 ) -> Vec<TokenChainV3> {
-    let mut chains = cross_chunk_chain_v3(reader, query);
+    let mut chains = cross_chunk_chain_v3(reader, query, false);
     if !strict_separators {
-        chains.extend(cross_word_chain_v3(reader, query));
+        chains.extend(cross_word_chain_v3(reader, query, false));
     }
     chains
 }
@@ -1131,7 +1214,7 @@ pub fn sibling_chain_dfs(
 
         if remainder.is_empty() {
             chains.push(TokenChainV3 {
-                ordinals: vec![std::sync::Arc::new(vec![split.parent.raw_ordinal])],
+                ordinals: vec![Alts::single(split.parent.raw_ordinal)],
                 first_sti: split.parent.sti,
                 total_query_consumed: split.query_consumed,
                 last_consumed: split.query_consumed,
@@ -1139,15 +1222,20 @@ pub fn sibling_chain_dfs(
             continue;
         }
 
-        let mut stack: Vec<(u64, &str, Vec<std::sync::Arc<Vec<u64>>>, usize)> = vec![
+        let mut stack: Vec<(u64, &str, Vec<Alts>, usize)> = vec![
             (split.parent.raw_ordinal, remainder,
-             vec![std::sync::Arc::new(vec![split.parent.raw_ordinal])], 0)
+             vec![Alts::single(split.parent.raw_ordinal)], 0)
         ];
 
         while let Some((cur_ord, rem, chain, depth)) = stack.pop() {
             if depth >= MAX_CHAIN_DEPTH { continue; }
 
+            super::profile::bump(|c| &c.n_sib_steps, 1);
+            let _t = super::profile::Timer::start();
             let siblings = sibling_table.siblings(cur_ord as u32);
+            _t.stop(|c| &c.ns_sib_lookup);
+            super::profile::bump(|c| &c.n_sib_visited, siblings.len() as u64);
+            let mut _t = super::profile::Timer::start();
             if let Some(tid) = trace_id {
                 super::trace::trace_event(tid, "dfs_step", &[
                     ("ord", &cur_ord),
@@ -1189,6 +1277,7 @@ pub fn sibling_chain_dfs(
                 } else {
                     &next_lower
                 };
+                _t.stop_keep(|c| &c.ns_sib_text);
 
                 if rem == next_content || next_content.starts_with(rem) {
                     if let Some(tid) = trace_id {
@@ -1199,7 +1288,7 @@ pub fn sibling_chain_dfs(
                         ]);
                     }
                     let mut c = chain.clone();
-                    c.push(std::sync::Arc::new(vec![next_ord as u64]));
+                    c.push(Alts::single(next_ord as u64));
                     chains.push(TokenChainV3 {
                         ordinals: c,
                         first_sti: split.parent.sti,
@@ -1216,7 +1305,7 @@ pub fn sibling_chain_dfs(
                         ]);
                     }
                     let mut c = chain.clone();
-                    c.push(std::sync::Arc::new(vec![next_ord as u64]));
+                    c.push(Alts::single(next_ord as u64));
                     stack.push((next_ord as u64, new_rem, c, depth + 1));
                 }
             }

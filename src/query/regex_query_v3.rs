@@ -230,6 +230,10 @@ impl Query for RegexQueryV3 {
             return Ok(());
         }
 
+        // Shard dictionary: the FST phase once per shard, in parallel,
+        // before the segments (see `briques::plan`). Nothing on a v3 index.
+        crate::suffix_fst::briques::plan::plan_regex(segments, self.field, &self.pattern);
+
         let names: Vec<String> = (0..segments.len()).map(|i| format!("seg_{i}")).collect();
         let mut tasks: Vec<(&str, Box<dyn FnOnce() -> Result<luciole::port::PortValue, String> + Send + 'static>)> =
             Vec::with_capacity(segments.len());

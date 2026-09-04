@@ -523,7 +523,9 @@ impl<'a> TermTextsReaderV3<'a> {
     /// [`WORD_SUFFIX_CAP`] — i.e. that the word pipeline alone reaches every
     /// in-word occurrence. Unknown is treated as "maybe".
     pub fn may_have_long_words(&self) -> bool {
-        self.max_word_content_len.is_none_or(|m| m > WORD_SUFFIX_CAP)
+        // Every file counted: a later dictionary generation may hold the
+        // long word the first one does not.
+        self.max_word_content_len().is_none_or(|m| m > WORD_SUFFIX_CAP)
     }
 
     /// Number of entries, every file counted.

@@ -18,7 +18,9 @@ use crate::query::posting_resolver::PostingResolver;
 use crate::suffix_fst::file_v3::SfxFileReaderV3;
 
 use super::context::BriquesContext;
-use super::fst_walk::{self, FstCandidateV3, TokenChainV3};
+use super::fst_walk::{self, TokenChainV3};
+#[cfg(test)]
+use super::fst_walk::FstCandidateV3;
 use super::resolve::{self, MatchV3};
 use super::profile;
 
@@ -115,14 +117,17 @@ pub fn find_literal_v3(
             profile::bump(|c| &c.n_relaxed_chunk_walked, 1);
         }
     }
+    // A swallowed remainder as a prefix alternative (`Alts::Prefix`): on a
+    // shard dictionary, when the resolvers below can test it on the text.
+    let prefix_alts = ctx.reader.memo().is_some() && ctx.posmap.is_some() && ctx.termtexts.is_some();
     if !skip_chunk_chains {
         let _t = profile::Timer::start();
         let mut chains = if half > 0 {
             let mut splits = fst_walk::falling_walk_chunks(ctx.reader, query);
             splits.retain(|s| s.query_consumed > half);
-            fst_walk::cross_chunk_chain_from_splits(ctx.reader, &splits, query)
+            fst_walk::cross_chunk_chain_from_splits(ctx.reader, &splits, query, prefix_alts)
         } else {
-            fst_walk::cross_chunk_chain_v3(ctx.reader, query)
+            fst_walk::cross_chunk_chain_v3(ctx.reader, query, prefix_alts)
         };
         _t.stop(|c| &c.ns_chunk_walk);
 
@@ -171,7 +176,7 @@ pub fn find_literal_v3(
         if !strict_separators {
             if let Some(tt) = ctx.termtexts.as_ref() {
                 chains.retain(|c| {
-                    let ord = c.ordinals[0][0] as u32;
+                    let ord = c.head() as u32;
                     match tt.meta(ord) {
                         Some(m) => (c.first_sti as u32) < (m.own_len as u32).saturating_sub(m.sep_len as u32),
                         None => true,
@@ -185,7 +190,7 @@ pub fn find_literal_v3(
         let _t = profile::Timer::start();
         let cross = match ctx.posmap.as_ref() {
             Some(pm) => resolve::resolve_chains_v3_posmap(
-                &chains, ctx.resolver, ctx.filter_docs, pm),
+                &chains, ctx.resolver, ctx.filter_docs, pm, ctx.termtexts.as_ref()),
             None => resolve::resolve_chains_v3(&chains, ctx.resolver, ctx.filter_docs),
         };
         _t.stop(|c| &c.ns_chunk_resolve);
@@ -194,9 +199,12 @@ pub fn find_literal_v3(
             eprintln!("[lit]   chunk_chains={} -> matches={}", chains.len(), cross.len());
             for c in chains.iter().take(4) {
                 let texts: Vec<String> = c.ordinals.iter()
-                    .map(|alts| alts.iter().take(2)
-                        .filter_map(|&o| ctx.termtexts.as_ref().and_then(|t| t.text(o as u32)))
-                        .collect::<Vec<_>>().join("|"))
+                    .map(|alts| match alts.as_explicit() {
+                        Some(ids) => ids.iter().take(2)
+                            .filter_map(|&o| ctx.termtexts.as_ref().and_then(|t| t.text(o as u32)))
+                            .collect::<Vec<_>>().join("|"),
+                        None => format!("{alts:?}"),
+                    })
                     .collect();
                 eprintln!("[lit]     chain sti={} consumed={} last={} tokens={:?}",
                     c.first_sti, c.total_query_consumed, c.last_consumed, texts);
@@ -221,7 +229,10 @@ pub fn find_literal_v3(
         let wsp = ctx.require_word_sfxpost();
 
         let _t = profile::Timer::start();
-        let mut chains = fst_walk::cross_word_chain_v3(ctx.reader, query);
+        // The word-map resolver tests prefix alternatives; the posting one
+        // enumerates and must not see any.
+        let word_prefix_alts = prefix_alts && ctx.word_posmap.is_some();
+        let mut chains = fst_walk::cross_word_chain_v3(ctx.reader, query, word_prefix_alts);
         _t.stop(|c| &c.ns_word_walk);
         ctx.trace_msg(&format!("word_falling_walk chains={}", chains.len()));
 
@@ -307,6 +318,7 @@ fn second_token_anchored_v3(
         // The second token, entered at sti 0: either it holds all of `rest`
         // (a single anchored candidate) or `rest` runs past it (a walk split).
         let mut chains: Vec<TokenChainV3> = Vec::new();
+        let _t = profile::Timer::start();
         let cands = fst_walk::fst_candidates_v3(ctx.reader, rest, true, true);
         let mut single_ords: Vec<u64> = cands.iter()
             .filter(|c| c.partition != 0x02 && c.sti == 0)
@@ -316,7 +328,7 @@ fn second_token_anchored_v3(
         let n_single = single_ords.len();
         if !single_ords.is_empty() {
             chains.push(TokenChainV3 {
-                ordinals: vec![std::sync::Arc::new(single_ords)],
+                ordinals: vec![fst_walk::Alts::ids(single_ords)],
                 first_sti: 0,
                 total_query_consumed: rest.len(),
                 last_consumed: rest.len(),
@@ -325,7 +337,8 @@ fn second_token_anchored_v3(
         let mut splits = fst_walk::falling_walk_chunks(ctx.reader, rest);
         let n_splits_all = splits.len();
         splits.retain(|s| s.parent.sti == 0);
-        chains.extend(fst_walk::cross_chunk_chain_from_splits(ctx.reader, &splits, rest));
+        let prefix_alts = ctx.reader.memo().is_some();
+        chains.extend(fst_walk::cross_chunk_chain_from_splits(ctx.reader, &splits, rest, prefix_alts));
         if ctx.debug {
             eprintln!("[anch] h={h} head={head:?} rest={rest:?} cands={} single={} splits={}/{} chains={}",
                 cands.len(), n_single, splits.len(), n_splits_all, chains.len());
@@ -335,16 +348,23 @@ fn second_token_anchored_v3(
                     sp.query_consumed, sp.remainder_start, sp.overlap_validated);
             }
             for c in chains.iter().take(3) {
-                let texts: Vec<String> = c.ordinals.iter().map(|alts| alts.iter().take(3)
-                    .map(|&o| format!("{:?}", tt.text(o as u32).unwrap_or("?"))).collect::<Vec<_>>().join("|")).collect();
+                let texts: Vec<String> = c.ordinals.iter().map(|alts| match alts.as_explicit() {
+                    Some(ids) => ids.iter().take(3)
+                        .map(|&o| format!("{:?}", tt.text(o as u32).unwrap_or("?"))).collect::<Vec<_>>().join("|"),
+                    None => format!("{alts:?}"),
+                }).collect();
                 eprintln!("[anch]   chain sti={} consumed={} last={} len={} toks={:?}", c.first_sti, c.total_query_consumed, c.last_consumed, c.ordinals.len(), texts);
             }
         }
+        _t.stop(|c| &c.ns_anch_fst);
         if chains.is_empty() { continue; }
 
+        let _t = profile::Timer::start();
         let tail_matches = resolve::resolve_chains_v3_posmap(
-            &chains, ctx.resolver, ctx.filter_docs, pm);
+            &chains, ctx.resolver, ctx.filter_docs, pm, Some(tt));
+        _t.stop(|c| &c.ns_anch_resolve);
         if ctx.debug { eprintln!("[anch]   tail_matches={}", tail_matches.len()); }
+        let _t = profile::Timer::start();
 
         for m in tail_matches {
             if ctx.debug {
@@ -382,6 +402,7 @@ fn second_token_anchored_v3(
                 last_ordinal: m.last_ordinal,
             });
         }
+        _t.stop(|c| &c.ns_anch_back);
     }
     out
 }
@@ -526,7 +547,7 @@ pub struct TrigramHit {
 /// n=2 if query is short (len ≤ 3*(distance+1)), n=3 otherwise.
 /// Returns (ngrams, query_positions, n) where query_positions[i] = byte offset
 /// of ngram i within the query. Used for ordered matching.
-fn generate_trigrams(query: &str, distance: u8) -> (Vec<String>, Vec<usize>, usize) {
+pub(crate) fn generate_trigrams(query: &str, distance: u8) -> (Vec<String>, Vec<usize>, usize) {
     let lower = query.to_lowercase();
     let bytes = lower.as_bytes();
     let n = if bytes.len() <= 3 * (distance as usize + 1) { 2 } else { 3 };
@@ -548,73 +569,101 @@ fn generate_trigrams(query: &str, distance: u8) -> (Vec<String>, Vec<usize>, usi
 
 // ─── Brique 2: resolve_all_trigrams ──────────────────────────────────────
 
-/// On a shared, memoizing reader (shard dictionary): compute in parallel,
-/// as scheduler tasks, every FST scan this fuzzy query is about to ask for
-/// — its n-grams and every substring `resolve_pieces` will price — before
-/// the sequential code asks for them one by one. Without this the first
-/// segment computed twenty to thirty range scans over the whole shard's
-/// FST on one thread while the other segments waited on the memo's cells:
-/// 50 ms for `schdule` d=1 on 10 000 files against 6 for the per-segment
-/// index, whose scans were spread over the pool. Only the scans no cell
-/// holds yet are submitted; the wait is cooperative (a scheduler thread
-/// keeps running tasks). Nothing happens without a memo.
-/// Shortest piece `resolve_pieces` considers, in bytes.
-const PIECE_MIN_BYTES: usize = 2;
+/// Shortest piece `choose_pieces` considers, in bytes.
+pub(super) const PIECE_MIN_BYTES: usize = 2;
 
-fn prefetch_fuzzy_scans(ctx: &BriquesContext<'_>, query: &str, distance: u8, ngrams: &[String], strict_separators: bool) {
-    let Some(memo) = ctx.reader.memo() else { return };
-    let lower = query.to_lowercase();
-    let mut wanted: Vec<String> = ngrams.to_vec();
-    // The substrings `resolve_pieces` prices: every (a, b) on char
-    // boundaries at least MIN_PIECE bytes long.
-    let cuts: Vec<usize> = std::iter::once(0)
-        .chain((1..lower.len()).filter(|&i| lower.is_char_boundary(i)))
-        .chain(std::iter::once(lower.len()))
-        .collect();
-    let _ = distance;
-    for (i, &a) in cuts.iter().enumerate() {
-        for &b in &cuts[i + 1..] {
-            if b - a >= PIECE_MIN_BYTES {
-                wanted.push(lower[a..b].to_string());
-            }
-        }
-    }
-    wanted.sort();
-    wanted.dedup();
-    // Counts only (what the pricing reads): a full candidate list of a
-    // 2-byte piece is hundreds of thousands of decoded parents, and only
-    // the two or three pieces the pricing picks will need theirs.
-    // One task per (substring, partition) count cell not yet held; a task
-    // computes its cell inline and never waits (see `fst_candidates_v3`).
-    let partitions = fst_walk::candidate_cells(false, strict_separators);
-    let mut missing: Vec<(String, u8)> = Vec::new();
-    for q in wanted {
-        for &p in partitions {
-            if !memo.contains(6, q.as_bytes(), p << 2) {
-                missing.push((q.clone(), p));
-            }
-        }
-    }
-    if missing.len() < 2 {
-        return;
-    }
-    let scheduler = crate::actor::scheduler::global_scheduler();
-    let mut rxs = Vec::with_capacity(missing.len());
-    for (q, p) in missing {
-        let reader = ctx.reader.clone();
-        rxs.push(scheduler.submit_task(crate::actor::Priority::Critical, move || {
-            let _ = fst_walk::memo_count_in_partition(&reader, reader.memo().unwrap(), &q, p);
-        }));
-    }
-    for rx in rxs {
-        let _ = scheduler.try_wait(rx, "fuzzy prefetch");
-    }
+/// How a fuzzy query finds its candidate regions — decided from the FST
+/// candidate counts alone, so a plan (`briques::plan`) and the segments
+/// make the same choice: see `resolve_trigrams_v3` for the three
+/// generators and `V3_FUZZY_MODE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FuzzyGenerator {
+    /// The query cut into `d + 1` pieces (byte ranges of the lowercased
+    /// query), each an exact contains search.
+    Pieces(Vec<(usize, usize)>),
+    /// The `keep` rarest n-grams, resolved from their postings.
+    Pivot(usize),
+    /// Every n-gram resolved, pigeonhole threshold on the region.
+    AllNgrams,
 }
 
-/// A number that differs from one segment's reader view to the next (the
-/// segment's first global id), 0 without a view.
-fn reader_seed(reader: &crate::suffix_fst::file_v3::SfxFileReaderV3) -> usize {
-    reader.segment_gmap().filter(|g| !g.is_empty()).map(|g| g.global(0) as usize).unwrap_or(0)
+/// The n-grams of a fuzzy query and the generator it will use, from the
+/// FST alone. `threshold` comes out as the region threshold to apply.
+pub(crate) fn fuzzy_generator(
+    reader: &crate::suffix_fst::file_v3::SfxFileReaderV3,
+    query: &str,
+    distance: u8,
+    strict_separators: bool,
+) -> (Vec<String>, Vec<usize>, usize, FuzzyGenerator, usize) {
+    let (ngrams, query_positions, n) = generate_trigrams(query, distance);
+    // Floor of 1, not 2.
+    //
+    // The threshold used to be the only thing standing between the pigeonhole and
+    // the result set, so it had to be defensive — and being defensive on a
+    // necessary-but-insufficient condition buys false negatives, not precision.
+    // Now that verify_candidates re-checks every survivor against the text, the
+    // threshold is purely a recall/cost knob: lowering it can only add candidates,
+    // and every added candidate is exactly checked.
+    let threshold = (ngrams.len() as i32 - n as i32 * distance as i32).max(1) as usize;
+    if ngrams.is_empty() {
+        return (ngrams, query_positions, n, FuzzyGenerator::AllNgrams, threshold);
+    }
+    let mode = std::env::var("V3_FUZZY_MODE").unwrap_or_else(|_| "auto".into());
+    let pivot_keep = ngrams.len() + 1 - threshold;
+    let (generator, threshold) = match mode.as_str() {
+        "pieces" => match choose_pieces(reader, query, distance, strict_separators) {
+            Some((_, pieces)) => (FuzzyGenerator::Pieces(pieces), 1),
+            None => (FuzzyGenerator::AllNgrams, threshold),
+        },
+        "pivot" => (FuzzyGenerator::Pivot(pivot_keep), 1),
+        "auto" => {
+            // The pivot generator resolves candidates from trigram postings,
+            // and those live *inside* a token's chunks. An occurrence whose
+            // shared trigrams all straddle a separator therefore has no
+            // posting at all, and pivot never proposes it — the document is
+            // not merely under-highlighted, it is **not returned**. Measured:
+            // 21 files, `s = cmd->u.le` (flattened `scmdule`) against
+            // `schdule` at distance 1 — pieces returns 1 of 1, pivot 0 of 1.
+            // Keeping more trigrams does not help: the ones it would keep
+            // straddle too.
+            //
+            // With separators relaxed those occurrences are in scope, so the
+            // cost estimate must not be allowed to pick pivot: a caller who
+            // asks for cross-token fuzzy has not asked to trade recall for
+            // speed, and would have no way to know it happened. When
+            // separators are strict the occurrence lies within a token by
+            // definition, and pivot is sound — the estimate decides as before.
+            //
+            // It costs nothing here anyway. On 93 605 kernel files, idle
+            // machine: `schdule` d=1 took 234.5 ms through pieces against
+            // 238.1 through pivot, and `regsiter` d=2 888.5 against 990.0 —
+            // auto was choosing the incomplete generator and losing on time.
+            let budget = if strict_separators {
+                Some(pivot_cost_estimate(reader, &ngrams, strict_separators, pivot_keep))
+            } else {
+                None
+            };
+            match choose_pieces(reader, query, distance, strict_separators) {
+                // A piece goes through the contains pipeline — chains across
+                // separators and chunks — which costs more per candidate than a
+                // plain n-gram posting list. Weigh it accordingly (measured ratio
+                // of resolve CPU per hit on rag3db: roughly 2).
+                Some((cost, _)) if budget.is_some_and(|limit| cost * 2 > limit) => {
+                    if std::env::var("V3_DIAG_FUZZY").is_ok() {
+                        eprintln!("[fz] auto: pivot (pieces cost {cost} x2 > pivot {})", budget.unwrap());
+                    }
+                    (FuzzyGenerator::Pivot(pivot_keep), 1)
+                }
+                Some((_, pieces)) => (FuzzyGenerator::Pieces(pieces), 1),
+                // No pieces resolution at all (a query too short to split,
+                // typically). Nothing complete is available, so this keeps
+                // the old behaviour rather than pretending otherwise.
+                None => (FuzzyGenerator::Pivot(pivot_keep), 1),
+            }
+        }
+        _ => (FuzzyGenerator::AllNgrams, threshold),
+    };
+    (ngrams, query_positions, n, generator, threshold)
 }
 
 /// Resolve all trigrams against the index, returning hits.
@@ -626,21 +675,13 @@ pub fn resolve_all_trigrams(
     strict_separators: bool,
     keep_rarest: Option<usize>,
 ) -> Vec<TrigramHit> {
-    // One FST walk per n-gram: the selectivity pass used to walk, drop the
-    // candidates, and walk again (0.5 s of 9 s on `inclde` over 50k docs).
-    // On a shared reader (shard dictionary) the walk is memoized and the
-    // first segment to ask computes while the others wait: the segments
-    // start at different n-grams, so that several compute at once instead
-    // of queueing behind the same one.
-    let n = ngrams.len().max(1);
-    let start = reader_seed(ctx.reader) % n;
-    let mut all_cands: Vec<Vec<FstCandidateV3>> = vec![Vec::new(); ngrams.len()];
-    for k in 0..ngrams.len() {
-        let i = (start + k) % n;
-        all_cands[i] = fst_walk::fst_candidates_v3(ctx.reader, &ngrams[i], false, strict_separators);
-    }
-    let mut selectivity: Vec<(usize, usize)> = all_cands.iter().enumerate()
-        .map(|(i, c)| (i, c.len())).collect();
+    // Selectivity from the counts (no parent decoded, shard-wide on a
+    // dictionary), then the candidate lists of the kept n-grams only. The
+    // pass used to decode every n-gram's list to count it, and a pivot
+    // query keeps two or three of twenty.
+    let mut selectivity: Vec<(usize, usize)> = ngrams.iter().enumerate()
+        .map(|(i, g)| (i, fst_walk::fst_candidates_count_v3(ctx.reader, g, false, strict_separators)))
+        .collect();
     selectivity.sort_by_key(|&(_, count)| count);
     if let Some(k) = keep_rarest { selectivity.truncate(k.max(1)); }
 
@@ -649,7 +690,7 @@ pub fn resolve_all_trigrams(
     let mut seen: HashSet<(DocId, u32)> = HashSet::new();
 
     for &(gram_idx, _) in &selectivity {
-        let cands = std::mem::take(&mut all_cands[gram_idx]);
+        let cands = fst_walk::fst_candidates_v3(ctx.reader, &ngrams[gram_idx], false, strict_separators);
         let gram_len = ngrams[gram_idx].len() as u32;
         // The user's doc filter reaches the pivot generator too: without it a
         // filtered fuzzy search resolved every n-gram of every document.
@@ -699,27 +740,28 @@ pub fn resolve_all_trigrams(
 /// Sum of FST candidate counts of the `keep` rarest n-grams: what the pivot
 /// generator would resolve. Same unit as the piece partition cost.
 fn pivot_cost_estimate(
-    ctx: &BriquesContext<'_>,
+    reader: &crate::suffix_fst::file_v3::SfxFileReaderV3,
     ngrams: &[String],
     strict_separators: bool,
     keep: usize,
 ) -> usize {
     let mut counts: Vec<usize> = ngrams.iter()
-        .map(|g| fst_walk::fst_candidates_count_v3(ctx.reader, g, false, strict_separators))
+        .map(|g| fst_walk::fst_candidates_count_v3(reader, g, false, strict_separators))
         .collect();
     counts.sort_unstable();
     counts.iter().take(keep.max(1)).sum()
 }
 
-/// `max_cost`: give up (return `None`) when the best partition costs more
-/// than this — the caller then uses the pivot generator instead.
-fn resolve_pieces(
-    ctx: &BriquesContext<'_>,
+/// The cheapest cut of `query` into `distance + 1` pieces of at least
+/// `PIECE_MIN_BYTES` bytes, priced by FST candidate count, with that cost;
+/// `None` when the query is too short to cut. Byte ranges of the lowercased
+/// query.
+pub(crate) fn choose_pieces(
+    reader: &crate::suffix_fst::file_v3::SfxFileReaderV3,
     query: &str,
     distance: u8,
     strict_separators: bool,
-    max_cost: Option<usize>,
-) -> Option<(Vec<TrigramHit>, Vec<usize>)> {
+) -> Option<(usize, Vec<(usize, usize)>)> {
     let lower = query.to_lowercase();
     let k = distance as usize + 1;
     const MIN_PIECE: usize = PIECE_MIN_BYTES;
@@ -731,7 +773,7 @@ fn resolve_pieces(
     let mut cost: std::collections::HashMap<(usize, usize), usize> = std::collections::HashMap::new();
     let mut piece_cost = |a: usize, b: usize| -> usize {
         *cost.entry((a, b)).or_insert_with(|| {
-            fst_walk::fst_candidates_count_v3(ctx.reader, &lower[a..b], false, strict_separators)
+            fst_walk::fst_candidates_count_v3(reader, &lower[a..b], false, strict_separators)
         })
     };
 
@@ -767,40 +809,21 @@ fn resolve_pieces(
     }
     let mut acc = Vec::new();
     rec(&bounds, 0, k, &mut acc, 0, &mut best, &mut piece_cost);
-    let (best_cost, pieces) = best?;
-    // Shared reader: the chosen pieces' lists in parallel, before the loop
-    // below asks for them one after the other (each is a heavy scan the
-    // other segments then wait for).
-    if let Some(memo) = ctx.reader.memo() {
-        let scheduler = crate::actor::scheduler::global_scheduler();
-        let mut rxs = Vec::new();
-        for &(a, b) in &pieces {
-            for &p in fst_walk::candidate_cells(false, strict_separators) {
-                if memo.contains(1, lower[a..b].as_bytes(), p << 2) { continue; }
-                let reader = ctx.reader.clone();
-                let piece = lower[a..b].to_string();
-                rxs.push(scheduler.submit_task(crate::actor::Priority::Critical, move || {
-                    let _ = fst_walk::memo_candidates_in_partition(&reader, reader.memo().unwrap(), &piece, p);
-                }));
-            }
-        }
-        for rx in rxs {
-            let _ = scheduler.try_wait(rx, "pieces prefetch");
-        }
-    }
-    if let Some(limit) = max_cost {
-        // A piece goes through the contains pipeline — chains across
-        // separators and chunks — which costs more per candidate than a
-        // plain n-gram posting list. Weigh it accordingly (measured ratio
-        // of resolve CPU per hit on rag3db: roughly 2).
-        if best_cost * 2 > limit {
-            if std::env::var("V3_DIAG_FUZZY").is_ok() {
-                eprintln!("[fz] auto: pivot (pieces cost {best_cost} x2 > pivot {limit})");
-            }
-            return None;
-        }
-    }
+    best
+}
 
+/// Candidate generation by exact pieces (see `choose_pieces`): each piece is
+/// a contains query (`find_literal_v3`, without its own verification: the
+/// fuzzy alignment verifies anyway). Returns hits in the region format
+/// (piece index as `tri_idx`, piece offset in the query as its position).
+fn resolve_pieces(
+    ctx: &BriquesContext<'_>,
+    query: &str,
+    distance: u8,
+    strict_separators: bool,
+    pieces: &[(usize, usize)],
+) -> (Vec<TrigramHit>, Vec<usize>) {
+    let lower = query.to_lowercase();
     let mut hits = Vec::new();
     let mut positions = Vec::with_capacity(pieces.len());
     for (idx, &(a, b)) in pieces.iter().enumerate() {
@@ -821,7 +844,7 @@ fn resolve_pieces(
         eprintln!("[fz] pieces for {query:?} d={distance}: {:?} -> {} hits",
             pieces.iter().map(|&(a, b)| &lower[a..b]).collect::<Vec<_>>(), hits.len());
     }
-    Some((hits, positions))
+    (hits, positions)
 }
 
 // ─── Brique 3: build_trigram_chains ─────────────────────────────────────
@@ -1187,24 +1210,8 @@ pub fn resolve_trigrams_v3(
     max_doc: DocId,
     metric: super::jaro_winkler::FuzzyMetric,
 ) -> (BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>) {
-    let (ngrams, query_positions, n) = generate_trigrams(query, distance);
-    prefetch_fuzzy_scans(ctx, query, distance, &ngrams, strict_separators);
-    if ngrams.is_empty() {
-        return (BitSet::with_max_value(max_doc), Vec::new(), Vec::new());
-    }
-
-    // Floor of 1, not 2.
-    //
-    // The threshold used to be the only thing standing between the pigeonhole and
-    // the result set, so it had to be defensive — and being defensive on a
-    // necessary-but-insufficient condition buys false negatives, not precision.
-    // Now that verify_candidates re-checks every survivor against the text, the
-    // threshold is purely a recall/cost knob: lowering it can only add candidates,
-    // and every added candidate is exactly checked.
-    let mut threshold = (ngrams.len() as i32 - n as i32 * distance as i32).max(1) as usize;
-
     // Three candidate generators, selectable for benchmarking
-    // (`V3_FUZZY_MODE=ngram|pivot|pieces`, default `pieces`). All three
+    // (`V3_FUZZY_MODE=ngram|pivot|pieces`, default `auto`). All three
     // feed the same regions → windows → alignment, so their results must be
     // identical; only the cost of finding where to look differs.
     //
@@ -1224,57 +1231,19 @@ pub fn resolve_trigrams_v3(
     //   before anything is resolved. Measured over 50k kernel files, neither
     //   generator wins alone: pieces 129 ms vs pivot 198 on `inclde`, but
     //   78 vs 59 on `spinlock` and 575 vs 480 on `__init` (a piece `in`).
-    let mode = std::env::var("V3_FUZZY_MODE").unwrap_or_else(|_| "auto".into());
+    //
+    // The choice is made from the FST alone (`fuzzy_generator`), so a plan
+    // over the shard dictionary makes the same one ahead of the segments.
+    let (ngrams, query_positions, _n, generator, threshold) =
+        fuzzy_generator(ctx.reader, query, distance, strict_separators);
+    if ngrams.is_empty() {
+        return (BitSet::with_max_value(max_doc), Vec::new(), Vec::new());
+    }
     let t = profile::Timer::start();
-    let pivot_keep = ngrams.len() + 1 - threshold;
-    let (hits, positions) = match mode.as_str() {
-        "pieces" => match resolve_pieces(ctx, query, distance, strict_separators, None) {
-            Some(r) => { threshold = 1; r }
-            None => (resolve_all_trigrams(ctx, &ngrams, strict_separators, None), query_positions.clone()),
-        },
-        "pivot" => {
-            threshold = 1;
-            (resolve_all_trigrams(ctx, &ngrams, strict_separators, Some(pivot_keep)), query_positions.clone())
-        }
-        "auto" => {
-            // The pivot generator resolves candidates from trigram postings,
-            // and those live *inside* a token's chunks. An occurrence whose
-            // shared trigrams all straddle a separator therefore has no
-            // posting at all, and pivot never proposes it — the document is
-            // not merely under-highlighted, it is **not returned**. Measured:
-            // 21 files, `s = cmd->u.le` (flattened `scmdule`) against
-            // `schdule` at distance 1 — pieces returns 1 of 1, pivot 0 of 1.
-            // Keeping more trigrams does not help: the ones it would keep
-            // straddle too.
-            //
-            // With separators relaxed those occurrences are in scope, so the
-            // cost estimate must not be allowed to pick pivot: a caller who
-            // asks for cross-token fuzzy has not asked to trade recall for
-            // speed, and would have no way to know it happened. When
-            // separators are strict the occurrence lies within a token by
-            // definition, and pivot is sound — the estimate decides as before.
-            //
-            // It costs nothing here anyway. On 93 605 kernel files, idle
-            // machine: `schdule` d=1 took 234.5 ms through pieces against
-            // 238.1 through pivot, and `regsiter` d=2 888.5 against 990.0 —
-            // auto was choosing the incomplete generator and losing on time.
-            let budget = if strict_separators {
-                Some(pivot_cost_estimate(ctx, &ngrams, strict_separators, pivot_keep))
-            } else {
-                None
-            };
-            match resolve_pieces(ctx, query, distance, strict_separators, budget) {
-                Some(r) => { threshold = 1; r }
-                None => {
-                    // No pieces resolution at all (a query too short to split,
-                    // typically). Nothing complete is available, so this keeps
-                    // the old behaviour rather than pretending otherwise.
-                    threshold = 1;
-                    (resolve_all_trigrams(ctx, &ngrams, strict_separators, Some(pivot_keep)), query_positions.clone())
-                }
-            }
-        }
-        _ => (resolve_all_trigrams(ctx, &ngrams, strict_separators, None), query_positions.clone()),
+    let (hits, positions) = match generator {
+        FuzzyGenerator::Pieces(pieces) => resolve_pieces(ctx, query, distance, strict_separators, &pieces),
+        FuzzyGenerator::Pivot(keep) => (resolve_all_trigrams(ctx, &ngrams, strict_separators, Some(keep)), query_positions),
+        FuzzyGenerator::AllNgrams => (resolve_all_trigrams(ctx, &ngrams, strict_separators, None), query_positions),
     };
     t.stop(|c| &c.ns_fz_resolve);
     profile::bump(|c| &c.n_fz_hits, hits.len() as u64);

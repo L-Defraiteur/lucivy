@@ -200,15 +200,29 @@ Tests ajoutés aujourd'hui, à connaître : `packed_and_legacy_records_decode_to
   c'est ce qui a trouvé le double mappage.
 - **Mémo froide / chaude** : `V3_QUERIES=schdule:fz1,schdule:fz1` relance
   la même requête dans le même processus ; la seconde a la mémo chaude.
-  `V3_PROFILE=1` : la ligne `[prescan]` / `[fz prescan]` donne le mur, la
-  somme par segment et le **max par segment** — quand max ≈ mur, un segment
-  calcule pendant que les autres attendent la cellule.
+  `V3_PROFILE=1` : la ligne `[plan] contains "…": N waves, N cells
+  computed, N held, wall` puis par vague (mur, somme CPU, cellule la plus
+  lente, `kind key`) ; `[prescan]` / `[fz prescan]` donne le mur du
+  scatter, la somme par segment et le **max par segment** — quand max ≈
+  mur, un segment calcule pendant que les autres attendent une cellule
+  (ne doit plus arriver avec le plan) ; la ligne `dictionary: memo lookups
+  … | cut N items -> N kept in Nms | sibling DFS … | anchored …` dit où va
+  le temps par segment propre au mode dictionnaire (la coupe au `.gmap`
+  d'abord). `[cell] cand/02 "e": N entries, scan, sort` sous une cellule
+  de plus de 2 ms. `V3_PLAN=0` : sans plan (les segments calculent les
+  cellules en ligne comme avant le 5 septembre) — l'A/B du plan lui-même.
 - **A/B 30 000 dictionnaire contre v3** : `run-ab-dict.sh` du scratchpad
-  (même binaire, `V3_SFX_VERSION=4` pour l'index dictionnaire, 3 passes) ;
-  résultat du 5 septembre : ×2 à ×22 à froid ([09](09-journal-chantier-dictionnaire.md) §11).
-- **Ce qui n'est pas fait / à savoir** : le calcul froid d'une requête est
-  sur un thread — le mode dictionnaire n'est pas le défaut tant que la
-  phase FST n'est pas un nœud par shard ([09](09-journal-chantier-dictionnaire.md) §11) ;
+  (même binaire, `V3_SFX_VERSION=4` pour l'index dictionnaire, 3 passes ;
+  `run-ab-plan.sh` / `run-suite-and-ab.sh` : les mêmes avec les sorties
+  `abplan-*` / `abplan2-*`) ; résultat du 5 septembre au matin : ×2 à ×22
+  à froid ([09](09-journal-chantier-dictionnaire.md) §11) ; au soir, avec
+  le plan : [11](11-journal-chantier-plan-fst.md) §4.
+- **Ce qui n'est pas fait / à savoir** : le plan
+  ([11](11-journal-chantier-plan-fst.md)) a ramené le 30 000 à froid de
+  ×2-22 à ×0,8-1,9 ([11](11-journal-chantier-plan-fst.md) §4) ; ce qui
+  reste par segment est la coupe des listes au `.gmap` et la DFS de
+  fratrie (recherche binaire dans le `.gmap` par `siblings()`) ; le mode
+  dictionnaire n'est pas le défaut tant que ×1,5 n'est pas tenu partout ;
   `index_bytes`, `preload`, `residency` ignorent les fichiers `dict-*` ;
   l'import WASM (`lucivy_import_file`) les route dans `shard_0/` sans les
   connaître, ce qui se trouve être juste ; un segment abandonné entre deux
