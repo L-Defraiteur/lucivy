@@ -100,8 +100,12 @@ survit.
    comparés au disque) doit rendre exactement les mêmes lignes qu'avant.
    `bench_sharding` ne compte pas : ses « 20 hits » sont le plafond.
 3. **Temps** : le même panel chronométré, deux passes, machine au repos
-   (`uptime` noté dans le rapport). Une étape qui ralentit une requête
-   n'est pas prise, quel que soit son gain.
+   (`uptime` noté dans le rapport). Priorités posées par Lucie le
+   4 septembre : la taille disque et RAM est ce qui rend la lib inviable en
+   prod, l'exactitude est ce qu'on vend, et le temps est acceptable **tant
+   qu'une requête ne s'approche pas de ×1,5**. Une milliseconde perdue
+   contre des pourcents d'index est un bon échange ; on l'écrit, et on
+   l'optimise ensuite si on sait d'où elle vient.
 4. **Tests** : `cargo test --lib` et `cargo test -p lucivy-core`, verts.
 5. **Compatibilité** : le lecteur accepte l'ancien et le nouveau format
    pendant tout le chantier (octet de version du conteneur), de sorte que
