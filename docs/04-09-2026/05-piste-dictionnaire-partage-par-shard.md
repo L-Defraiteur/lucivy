@@ -78,10 +78,24 @@ par identifiant global. Moins de travail, pas plus.
 comme `segments::merge_segments` de `sparse_vector` marche ses tables
 triées ensemble.
 
+**La fédération et le distribué : intacts, vérifié dans le code.** Ce qui
+voyage entre nœuds est `ExportableStats` (`bm25_global.rs`) : `doc_freqs`
+indexé par les octets du terme, `contains_doc_freqs` par le texte de la
+requête, `regex_doc_freqs` par le motif. Aucun ordinal ne quitte un shard.
+Le dictionnaire est **par shard**, pas par nœud : un shard reste l'unité
+autonome qui se déplace, s'exporte et se fédère, et
+`export_stats → merge → search_with_global_stats` ne voit rien.
+
 **Les deltas et la synchronisation** (LUCID, LUCIDS, le navigateur) : un
-delta transporte les générations de dictionnaire nouvelles et les segments
-d'occurrences nouveaux ; les deux sont append-only, ce qui est plus simple
-qu'aujourd'hui, pas moins.
+`ShardVersion` porte aujourd'hui une version et des identifiants de
+segments (`lucistore/src/delta_sharded.rs`). Demain un shard a deux sortes
+d'unités, générations de dictionnaire et segments d'occurrences, toutes deux
+append-only : le delta reste « ce que le client n'a pas », avec une règle en
+plus — les générations avant les segments qui les citent — et une
+compaction de générations est une nouvelle version, comme une fusion de
+segments l'est déjà. Contrainte réelle : un segment d'occurrences n'a de
+sens qu'avec ses générations, donc l'import d'un delta est atomique sur le
+couple (temporaire + `rename` + `sync`, comme le commit de `sparse_vector`).
 
 **Les bornes.** Le noyau entier a de l'ordre de 15 à 20 millions de textes
 distincts : **un dictionnaire de shard dépasse les 24 bits** du mot de
