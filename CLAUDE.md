@@ -288,7 +288,9 @@ au-delà, `own_len` dérivé de la clé — journal
 refusée), ordinaux sur 28 bits (`.word_pos_map` `WMP3`), tables d'offsets
 par blocs (`block_offsets.rs` : `SFP4`, `WSP4`, `SIB4`, `.termtexts`
 layout 3) ; **`sfx_version` 4 = dictionnaire partagé par shard**
-(`dict-<g>.<champ>.sfx/.termtexts`, `.gmap` par segment, une génération
+(`dict-<g>.<champ>.sfx/.termtexts`, `.gmap` par segment — `GMP2` depuis le
+5 au soir : têtes de blocs de 64 + statistique « mots longs » du segment,
+`GMAP` encore lu —, une génération
 par commit avec ses seuls nouveaux textes, compaction au-delà de
 `LUCIVY_DICT_MAX_GENERATIONS` = 8 ; référence 10 000 : 390 Mo, −66 %
 depuis le 4 au matin, 30 000 : −20 %, noyau entier **7,3 → 5,6 Go à
@@ -299,10 +301,11 @@ la mémo du lecteur partagé avant le scatter par segment, un reste avalé
 est un `Alts::Prefix` testé sur `.termtexts` au lieu d'une liste, et la
 coupe des listes au `.gmap` galope ; à froid sur 30 000 fichiers, ×2-22 le
 5 au matin → **×0,8-1,9** le soir (`11` §4 : exactes 2,5-5,3 ms contre
-1,7-3,3 en v3, fuzzy plus rapide ; noyau entier idem, `11` §4 bis) ; les
-tests fédéré, filtré et roundtrip LUCE ont une variante `sfx_version 4` ;
-mode **optionnel, pas le défaut**, tant que ×1,5 n'est pas tenu partout —
-cinq requêtes sur dix le tiennent),
+1,7-3,3 en v3, fuzzy plus rapide ; noyau entier idem, `11` §4 bis ; avec
+le `.gmap` GMP2, `11` §6.1 : **×0,8-1,6, le ×1,5 tenu sur neuf requêtes
+sur dix**, la regex à ×1,6) ; les tests fédéré, filtré et roundtrip LUCE
+ont une variante `sfx_version 4` ; mode **optionnel, pas le défaut** —
+décision à prendre, la règle du ×1,5 n'est manquée que par la regex),
 `.posmap` `PMP3` (3 octets), `.sibling_v3` `SIB3` (sans gap), `.termtexts`
 layout 2 (méta dans la table d'offsets), plus de `.bytemap` en v3. Chaque
 lecteur ouvre encore les layouts précédents. Règle du 4 septembre : la taille

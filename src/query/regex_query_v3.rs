@@ -111,6 +111,8 @@ impl RegexQueryV3 {
             sibling_v3: sib_bytes.as_ref().and_then(|b| crate::suffix_fst::sibling_table::SiblingTableReader::open(b).map(|r| match gmap { Some(g) => r.with_gmap(g), None => r })),
             termtexts: match seg_reader.sfx_dictionary_field(self.field) { Some(f) => f.termtexts_reader(), None => tt_bytes.as_ref().and_then(|b| crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open(b)) },
             word_posmap: wpm_bytes.as_ref().and_then(|b| crate::suffix_fst::word_pos_map::WordPosMapReader::open(b).map(|r| match gmap { Some(g) => r.with_gmap(g), None => r })),
+        segment_long_words: gmap.and_then(|g| g.max_word_content_len())
+            .map(|m| m > crate::suffix_fst::termtexts_v3::WORD_SUFFIX_CAP),
         };
         let Some(plan) = regex_verified::plan(&self.pattern) else {
             return Err(crate::LucivyError::InvalidArgument(format!(

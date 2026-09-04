@@ -130,6 +130,8 @@ strict_separators: bool,
         sibling_v3: sib_bytes.as_ref().and_then(|b| crate::suffix_fst::sibling_table::SiblingTableReader::open(b).map(|r| match gmap { Some(g) => r.with_gmap(g), None => r })),
         termtexts: match seg_reader.sfx_dictionary_field(field) { Some(f) => f.termtexts_reader(), None => tt_bytes.as_ref().and_then(|b| crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open(b)) },
         word_posmap: wpm_bytes.as_ref().and_then(|b| crate::suffix_fst::word_pos_map::WordPosMapReader::open(b).map(|r| match gmap { Some(g) => r.with_gmap(g), None => r })),
+        segment_long_words: gmap.and_then(|g| g.max_word_content_len())
+            .map(|m| m > crate::suffix_fst::termtexts_v3::WORD_SUFFIX_CAP),
     };
 
     if crate::suffix_fst::briques::profile::enabled() {
@@ -382,6 +384,7 @@ impl Query for ContainsQueryV3 {
     }
 
     fn prescan_segments_more(&mut self, segments: &[&SegmentReader]) -> crate::Result<()> {
+        let t_total = std::time::Instant::now();
 
         // One segment, or nothing to do: not worth building a DAG.
         if segments.len() <= 1 {
@@ -441,6 +444,10 @@ impl Query for ContainsQueryV3 {
                 self.record_prescan(segment_id, doc_tf, highlights);
             }
         }
+        if crate::suffix_fst::briques::profile::enabled() {
+            eprintln!("  [prescan] total prescan_segments_more {:.1}ms (plan + scatter + record)",
+                t_total.elapsed().as_secs_f64() * 1e3);
+        }
         Ok(())
     }
 
@@ -449,12 +456,17 @@ impl Query for ContainsQueryV3 {
             eprintln!("[contains_v3] weight: cache {} segments, global_doc_freq {}, key {:?}",
                 self.prescan_cache.len(), self.global_doc_freq, self.cache_key());
         }
+        let t_w = std::time::Instant::now();
         if self.prescan_cache.is_empty() {
             if let Some(searcher) = enable_scoring.searcher() {
                 let mut clone = self.clone();
                 let seg_refs: Vec<&SegmentReader> = searcher.segment_readers().iter().collect();
                 clone.prescan_segments(&seg_refs)?;
-                return clone.make_weight(enable_scoring);
+                let w = clone.make_weight(enable_scoring);
+                if crate::suffix_fst::briques::profile::enabled() {
+                    eprintln!("  [weight] total {:.1}ms", t_w.elapsed().as_secs_f64() * 1e3);
+                }
+                return w;
             }
         }
         self.make_weight(enable_scoring)

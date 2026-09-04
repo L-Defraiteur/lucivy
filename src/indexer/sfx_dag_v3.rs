@@ -220,7 +220,7 @@ impl Node for AssembleV3Node {
         derived.push(("word_sfxpost".to_string(), data.word_sfxpost.clone()));
         derived.push(("sibling_v3".to_string(), data.sibling_v3.clone()));
         if let Some(globals) = &data.globals {
-            derived.push(("gmap".to_string(), crate::suffix_fst::gmap::encode(globals)));
+            derived.push(("gmap".to_string(), crate::suffix_fst::gmap::encode(globals, data.max_word_content_len)));
             // Only a freshly collected segment minted ids; a merge did not.
             if !data.newtexts.is_empty() {
                 let entries: Vec<(u32, &str, crate::suffix_fst::termtexts_v3::TermMetaV3)> =
@@ -662,6 +662,7 @@ pub fn merge_segments_v3(
         word_pos_map: wpm_writer.serialize(),
         sibling_v3: sibling_writer.serialize(),
         globals: None,
+        max_word_content_len: None,
         newtexts: Vec::new(),
     })
 }
@@ -974,6 +975,11 @@ pub fn merge_segments_dict(segments: &[SegmentSfxDict<'_>]) -> Result<SfxCollect
     let mut union: Vec<u32> = gmaps.iter().flat_map(|g| g.iter()).collect();
     union.sort_unstable();
     union.dedup();
+    // The merged segment's longest word: the max of the inputs', unknown
+    // as soon as one input does not say.
+    let max_word_content_len: Option<u16> = gmaps.iter()
+        .map(|g| g.max_word_content_len())
+        .try_fold(0u16, |acc, m| m.map(|m| acc.max(m)));
     let num = union.len();
     let new_local = |global: u32| -> u32 { union.binary_search(&global).unwrap() as u32 };
 
@@ -1042,5 +1048,6 @@ pub fn merge_segments_dict(segments: &[SegmentSfxDict<'_>]) -> Result<SfxCollect
         sibling_v3: sibling_writer.serialize(),
         globals: Some(union),
         newtexts: Vec::new(),
+        max_word_content_len,
     })
 }

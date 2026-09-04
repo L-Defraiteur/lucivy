@@ -51,6 +51,11 @@ pub struct BriquesContext<'a> {
     /// None on segments written before the map carried ordinals; the word
     /// pipeline then resolves through posting lists as before.
     pub word_posmap: Option<WordPosMapReader<'a>>,
+    /// Dictionary segment: whether THIS segment may hold a word over the
+    /// suffix cap, from its `.gmap` (layout 2). The shard's `.termtexts`
+    /// answers for the whole shard, and one long word anywhere made every
+    /// segment walk the chunk chains. `None` = ask `termtexts`.
+    pub segment_long_words: Option<bool>,
 }
 
 impl<'a> BriquesContext<'a> {
@@ -96,7 +101,10 @@ impl<'a> BriquesContext<'a> {
     /// in-word occurrence and the relaxed literal can skip the chunk chains.
     /// Missing file or pre-STATS file → true (pessimistic).
     pub fn may_have_long_words(&self) -> bool {
-        self.termtexts.as_ref().is_none_or(|t| t.may_have_long_words())
+        match self.segment_long_words {
+            Some(v) => v,
+            None => self.termtexts.as_ref().is_none_or(|t| t.may_have_long_words()),
+        }
     }
 
     /// True if sibling-based chain building is available.

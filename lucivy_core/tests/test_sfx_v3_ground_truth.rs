@@ -1349,7 +1349,7 @@ fn run_panel(
                         word_sfxpost: wsp_bytes.as_ref().and_then(|b| ld_lucivy::suffix_fst::word_sfxpost::WordSfxPostReader::open(b)),
                         sibling_v3: sib_bytes.as_ref().and_then(|b| ld_lucivy::suffix_fst::sibling_table::SiblingTableReader::open(b)),
                         termtexts: tt_bytes.as_ref().and_then(|b| ld_lucivy::suffix_fst::termtexts_v3::TermTextsReaderV3::open(b)),
-                        word_posmap: None,
+                        word_posmap: None, segment_long_words: None,
                     };
 
                     let r = find_literal_v3_dag_explained(&ctx, &effective_query, false, strict);

@@ -773,6 +773,15 @@ impl SfxCollectorV3 {
         }
         let sibling_v3_data = sibling_writer.serialize();
 
+        // What `.termtexts` STATS says for a segment with its own texts,
+        // kept in the `.gmap` of a dictionary segment (see `gmap.rs`).
+        let max_word_content_len: u16 = self.token_meta.iter()
+            .filter(|m| m.is_word_stripped)
+            .map(|m| m.own_len.saturating_sub(m.sep_len as u16))
+            .max()
+            .unwrap_or(0);
+        let max_word_content_len = Some(max_word_content_len);
+
         SfxCollectorDataV3 {
             sorted_indices,
             intern_to_final,
@@ -790,6 +799,7 @@ impl SfxCollectorV3 {
             sibling_v3: sibling_v3_data,
             globals: if dictionary_mode { Some(globals) } else { None },
             newtexts,
+            max_word_content_len,
         }
     }
 
@@ -879,6 +889,9 @@ pub struct SfxCollectorDataV3 {
     /// Shard dictionary mode: the ids this segment minted, with their text
     /// and meta (the `.newtexts`), in id order.
     pub newtexts: Vec<(u32, String, TermMetaV3)>,
+    /// Longest word-stripped content of the segment, when known: written
+    /// in the `.gmap` of a dictionary segment (`.termtexts` STATS otherwise).
+    pub max_word_content_len: Option<u16>,
 }
 
 /// Build word-level stripped entries from token data.

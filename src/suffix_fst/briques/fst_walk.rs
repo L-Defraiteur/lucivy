@@ -205,20 +205,14 @@ impl TokenChainV3 {
 
 // ─── fst_candidates_v3 ────────────────────────────────────────────────────
 
-/// Find all suffix entries matching the given literal (exact key match).
-///
-/// Partitions searched:
-/// - anchor_start=true: 0x00 only
-/// - strict_sep=true: 0x00 + 0x01
-/// - strict_sep=false: 0x00 + 0x01 + 0x02 (includes sep-stripped)
 /// The items of a shard-level list (sorted by global id) that a segment
-/// has: one walk over both sorted sequences, the list and the segment's
-/// `.gmap` — not a binary search per item, which on a fuzzy query's
-/// thousands of candidates times 160 segments was the whole search time.
-/// The intersection gallops from the smaller side into the larger: a plain
-/// merge walked the whole `.gmap` (25 000 ids) for every list, and a query
-/// makes 1 000 to 6 000 such cuts per segment — 80 % of the dictionary
-/// mode's per-segment time on 30 000 files, for lists of 200 items.
+/// has. The intersection gallops from the smaller side into the larger
+/// (block heads of a `.gmap` layout 2, exponential search otherwise): a
+/// plain merge walked the whole `.gmap` (25 000 ids) for every list, and a
+/// query makes 1 000 to 6 000 such cuts per segment — 80 % of the
+/// dictionary mode's per-segment time on 30 000 files, for lists of 200
+/// items; and a binary search per item, before that, was the whole search
+/// time of a fuzzy query's thousands of candidates times 160 segments.
 fn keep_in_segment<T: Clone>(items: &[T], id_of: impl Fn(&T) -> u32, gmap: &super::super::gmap::GmapReader<'_>) -> Vec<T> {
     let _t = super::profile::Timer::start();
     let mut out = Vec::new();
@@ -305,6 +299,16 @@ fn lower_bound_from<T>(items: &[T], from: usize, target: u32, id_of: &impl Fn(&T
     lo
 }
 
+/// Find all suffix entries matching the given literal (exact key match).
+///
+/// Partitions searched:
+/// - anchor_start=true: 0x00 only
+/// - strict_sep=true: 0x00 + 0x01
+/// - strict_sep=false: 0x00 + 0x01 + 0x02 (includes sep-stripped)
+///
+/// On a shared reader (shard dictionary) the shard-wide list comes from the
+/// memo — filled by the plan, or computed here by the first asker — and is
+/// cut down to the segment's ids (`keep_in_segment`).
 pub fn fst_candidates_v3(
     reader: &SfxFileReaderV3,
     query: &str,
@@ -553,12 +557,15 @@ fn split_at_boundary(
 /// `prefix_len >= own_len - sti`.
 ///
 /// Returns split candidates sorted by query_consumed descending.
-/// Memo tags of the FST phase: candidates of one partition, chunk splits,
-/// word splits, candidate count of one partition. Shared with the planner
-/// (`briques::plan`), which fills these cells ahead of the segments.
+/// Memo tag: the candidates of one partition (flags = partition << 2).
+/// The tags are shared with the planner (`briques::plan`), which fills
+/// these cells ahead of the segments.
 pub const MEMO_TAG_CANDIDATES: u8 = 1;
+/// Memo tag: the chunk splits of a query (`falling_walk_chunks`).
 pub const MEMO_TAG_WALK_CHUNKS: u8 = 2;
+/// Memo tag: the word splits of a query (`falling_walk_words`).
 pub const MEMO_TAG_WALK_WORDS: u8 = 3;
+/// Memo tag: the candidate count of one partition, no parent decoded.
 pub const MEMO_TAG_COUNT: u8 = 6;
 
 /// The memoized, id-sorted chunk splits of `query` (tag 2), shard-wide.

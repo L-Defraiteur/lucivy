@@ -314,6 +314,59 @@ noyau, cohérent avec le −20 % mesuré sur 30 000 (1 659 → 1 327 Mo). Le
 ×6,7 du texte reste vrai pour le dictionnaire ; le v3 au format courant est
 à ×8,7.
 
+## 6. Le `.gmap` à deux niveaux (5 septembre, soir)
+
+Le premier point de la liste « ce qui reste » (§4) : le `.gmap` passe en
+**layout 2** (`GMP2`, `gmap.rs`) — en-tête avec la **statistique « mots
+longs » du segment** (u16, 0xFFFF = inconnue), les identifiants, puis
+**la tête de chaque bloc de 64**. Le layout 1 (`GMAP`) s'ouvre toujours
+(sans têtes ni statistique : galop et réponse du shard comme avant).
+
+- `lower_bound_from` : la cible est-elle encore dans le bloc du dernier
+  résultat (une comparaison) ? sinon recherche binaire sur les têtes
+  (400 entrées, en cache), puis dans un bloc (256 octets). `local()` :
+  têtes puis bloc, au lieu de quinze pas dans 100 Ko. L'intersection
+  `keep_in_segment` et `siblings()` passent par là.
+- La statistique par segment : `BriquesContext::segment_long_words`,
+  posée depuis le `.gmap` par les trois requêtes ; `may_have_long_words`
+  la préfère à celle du `.termtexts` du shard. Résultat sur 30 000
+  relâché : `relaxed chunk walk: skipped=118 walked=2`, **comme en v3**
+  (les 120 segments marchaient les chaînes chunk pour un seul mot long).
+  Le collecteur la calcule sur ses métas (`SfxCollectorDataV3::
+  max_word_content_len`), la fusion prend le max des entrées (inconnue si
+  une entrée ne dit pas). Le plan planifie les cellules chunk dès qu'un
+  segment du shard les marchera (`plan::dictionaries`, OU sur les `.gmap`).
+
+Profil 30 000 (un passage, index reconstruit `idx30k-dict2`, 1,3 Go
+comme avant) : CPU par segment `mutex_lock strict` 27 → 17 ms, relax 23 →
+18, `sched term` 73 → 57 ; coupe 16,5 → 11,4 ms ; `search` 2,9 / 2,8 /
+5,1 ms (v3 2,0 / 1,7 / 3,4). L'A/B trois passes : §6.1.
+
+### 6.1 A/B 30 000, GMP2
+
+Même binaire, 3 passes, min, `search` en ms, 9/9 partout ; index
+dictionnaire reconstruit en GMP2 (`idx30k-dict2`) :
+
+| requête | v3 | dictionnaire §4 | + GMP2 | ratio |
+|---|---|---|---|---|
+| mutex_lock strict | 2,0 | 3,9 | **2,9** | ×1,4 |
+| mutex_lock relax | 1,7 | 2,9 | **2,3** | ×1,4 |
+| spin_lock strict | 1,7 | 2,5 | **2,1** | ×1,2 |
+| sched term | 3,3 | 5,3 | **5,1** | ×1,5 |
+| sched strict | 2,0 | 2,9 | **2,5** | ×1,2 |
+| printk sw | 2,3 | 3,8 | **3,2** | ×1,4 |
+| schdule fz1 | 11,5 | 9,8 | **9,0** | ×0,8 |
+| regsiter fz2 | 125,8 | 157,2 | **157,2** | ×1,2 |
+| spin_lock_[a-z]+ rx | 9,9 | 17,1 | **15,7** | ×1,6 |
+| schdule jw1 | 14,5 | 11,9 | **12,1** | ×0,8 |
+
+**Le ×1,5 est tenu sur neuf requêtes sur dix** ; la regex reste à ×1,6
+(15,7 contre 9,9 ms : trois littéraux stricts, `spin_lock_` ancré sur le
+second token pour moitié). Ce qui reste pour elle : les listes des racines
+ancrées (première position d'une chaîne, donc explicites) coupées par
+segment — `anchored fst` 10 ms de CPU sur `mutex_lock strict` — et la
+fenêtre regex elle-même, identique en v3.
+
 ## 5. Ce que les docs d'avant disaient de faux
 
 - [10](10-chantier-prescan-dictionnaire-rapport.md) §2 : « un nœud

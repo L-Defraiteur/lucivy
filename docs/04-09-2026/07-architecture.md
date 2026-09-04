@@ -127,17 +127,19 @@ partagé (`SegmentReader::sfx_dictionary_field`), chaque segment en reçoit
 une vue (`for_segment(gmap)`) qui coupe les listes mémoïsées à ses
 identifiants par **intersection en galop** (`GmapReader::lower_bound_from`
 — une marche fusionnée parcourait tout le `.gmap` à chaque coupe, 80 % du
-temps par segment). Un reste avalé par la dernière position d'une chaîne
+temps par segment ; le `.gmap` layout 2 `GMP2` porte les têtes de blocs de
+64 et la statistique « mots longs » du segment, [11](11-journal-chantier-plan-fst.md) §6). Un reste avalé par la dernière position d'une chaîne
 n'est **pas** une liste mais un `Alts::Prefix` testé sur le texte de
 `.termtexts` (texte étendu = octets propres + overlap, ce qu'une clé SI=0
 couvre) ; les cinq lecteurs traduisent global ↔ local (`with_gmap`). Une
 cellule non planifiée est calculée en ligne : le plan est une
 optimisation, pas une condition d'exactitude (`V3_PLAN=0` le coupe).
 Mesuré ([11](11-journal-chantier-plan-fst.md) §4) sur 30 000 fichiers à
-froid, même binaire, min de 3 passes : ×0,8 à ×1,9 par rapport à v3
-(exactes 2,5-5,3 ms contre 1,7-3,3 ; fuzzy plus rapide) ; ×2-22 le matin
-même. Le mode reste optionnel tant que ×1,5 n'est pas tenu partout (cinq
-requêtes sur dix le tiennent).
+froid, même binaire, min de 3 passes : ×0,8 à ×1,6 par rapport à v3 avec
+le `.gmap` GMP2 ([11](11-journal-chantier-plan-fst.md) §6.1 : exactes
+2,1-5,1 ms contre 1,7-3,3 ; fuzzy plus rapide ; la regex seule à ×1,6) ;
+×2-22 le matin même. Le mode reste optionnel : la décision d'en faire le
+défaut est ouverte.
 
 Mesuré : référence 10 000 fichiers 508 → 390 Mo (4 générations vivantes ;
 387 en une seule), construction 19 s (8 en v3) ; 30 000 : 1 659 →

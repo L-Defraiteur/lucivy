@@ -109,7 +109,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap, word_sfxpost, sibling_v3: None, termtexts, word_posmap: None,
+            posmap, word_sfxpost, sibling_v3: None, termtexts, word_posmap: None, segment_long_words: None,
         };
         let matches = orchestrator::contains_v3(&ctx, query, false, false, strict_sep);
         let mut docs: Vec<u32> = matches.iter().map(|m| m.doc_id).collect();
@@ -126,7 +126,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None, segment_long_words: None,
         };
         let matches = orchestrator::contains_v3(&ctx, query, true, false, true);
         matches.iter().map(|m| m.doc_id).collect()
@@ -143,7 +143,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap, word_sfxpost, sibling_v3: None, termtexts, word_posmap: None,
+            posmap, word_sfxpost, sibling_v3: None, termtexts, word_posmap: None, segment_long_words: None,
         };
         let matches = orchestrator::contains_v3(&ctx, query, false, false, strict_sep);
         let mut hl: Vec<(u32, u32, u32)> = matches.iter()
@@ -165,7 +165,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap, word_sfxpost, sibling_v3: None, termtexts, word_posmap: None,
+            posmap, word_sfxpost, sibling_v3: None, termtexts, word_posmap: None, segment_long_words: None,
         };
         let (bitset, _, _) = orchestrator::fuzzy_v3(&ctx, query, distance, strict_sep, 100, Default::default());
         (0..100).filter(|&d| bitset.contains(d)).collect()
@@ -434,7 +434,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None, segment_long_words: None,
         };
         let matches = orchestrator::contains_v3(&ctx, "lock", false, false, true);
         assert!(matches.len() >= 3, "should find 3 occurrences, got {}", matches.len());
@@ -500,7 +500,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None, segment_long_words: None,
         };
         let matches = orchestrator::contains_v3(&ctx, "lock", false, false, true);
         eprintln!("h3 all matches:");
@@ -870,7 +870,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None, segment_long_words: None,
         };
 
         // strict_sep=false (default for contains queries)
@@ -909,7 +909,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None, segment_long_words: None,
         };
 
         // strict_sep=false: strips "_" from query → "uint64t"
@@ -960,7 +960,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None, segment_long_words: None,
         };
 
         let matches_relaxed = orchestrator::contains_v3(&ctx, "TableFunction", false, false, false);
@@ -1106,7 +1106,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None, segment_long_words: None,
         };
 
         // Show tokenization
@@ -1232,7 +1232,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None, segment_long_words: None,
         };
 
         // Trace tokenization
@@ -1373,7 +1373,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None, segment_long_words: None,
         };
         let strict_matches = orchestrator::contains_v3(&ctx, "function", false, false, true);
         let relaxed_matches = orchestrator::contains_v3(&ctx, "function", false, false, false);
@@ -1402,7 +1402,7 @@ mod tests {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None,
+            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None, segment_long_words: None,
         };
 
         let cands = fst_walk::fst_candidates_v3(&reader, "struct", false, true);

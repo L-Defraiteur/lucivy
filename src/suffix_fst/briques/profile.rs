@@ -139,20 +139,25 @@ pub struct Counters {
     pub n_dispatch_inserts: AtomicU64,
 
     // ── Dictionary mode: where the per-segment overhead goes ──
-    /// `keep_in_segment`: shard-wide items scanned, items kept, time.
+    /// `keep_in_segment`: shard-wide items scanned.
     pub n_cut_items: AtomicU64,
+    /// `keep_in_segment`: items kept.
     pub n_cut_kept: AtomicU64,
+    /// `keep_in_segment`: time.
     pub ns_cut: AtomicU64,
-    /// Sibling DFS: steps (pops), siblings visited, time in `siblings()`,
-    /// time in termtexts text + meta.
+    /// Sibling DFS: steps (pops).
     pub n_sib_steps: AtomicU64,
+    /// Sibling DFS: siblings visited.
     pub n_sib_visited: AtomicU64,
+    /// Sibling DFS: time in `siblings()`.
     pub ns_sib_lookup: AtomicU64,
+    /// Sibling DFS: time in termtexts text + meta.
     pub ns_sib_text: AtomicU64,
-    /// Second-token anchored: FST part (candidates, walk, chains), the
-    /// posmap resolution, the backward check.
+    /// Second-token anchored: the FST part (candidates, walk, chains).
     pub ns_anch_fst: AtomicU64,
+    /// Second-token anchored: the posmap resolution.
     pub ns_anch_resolve: AtomicU64,
+    /// Second-token anchored: the backward check.
     pub ns_anch_back: AtomicU64,
     /// Memo cell lookups.
     pub n_memo_lookups: AtomicU64,

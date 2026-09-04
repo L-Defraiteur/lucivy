@@ -292,9 +292,13 @@ impl FuzzyJob {
 /// What a plan did: for the `[plan]` profile line.
 #[derive(Default, Debug)]
 pub struct PlanReport {
+    /// Waves of tasks run.
     pub waves: usize,
+    /// Cells computed by the plan.
     pub cells_computed: usize,
+    /// Cells the memo already held.
     pub cells_held: usize,
+    /// Wall time of the whole plan.
     pub wall: std::time::Duration,
     /// Under `V3_PROFILE`: per wave, (cells computed, wall, CPU sum, the
     /// slowest cell as "kind key" and its time).
@@ -415,11 +419,18 @@ fn dictionaries<'a>(segments: &[&'a SegmentReader], field: Field) -> Vec<(&'a Di
     let mut out: Vec<(&DictionaryField, bool)> = Vec::new();
     for seg in segments {
         let Some(f) = seg.sfx_dictionary_field(field) else { continue };
-        if out.iter().any(|(g, _)| std::ptr::eq(*g, f)) {
-            continue;
+        // The segment's own answer when its `.gmap` carries it (layout 2),
+        // the shard's otherwise: the chunk cells are planned as soon as one
+        // segment will walk the chunk chains.
+        let long = seg.sfx_index_file("gmap", field)
+            .and_then(|g| g.read_bytes().ok())
+            .and_then(|b| crate::suffix_fst::gmap::GmapReader::open(&b).and_then(|g| g.max_word_content_len()))
+            .map(|m| m > crate::suffix_fst::termtexts_v3::WORD_SUFFIX_CAP)
+            .unwrap_or_else(|| f.termtexts_reader().is_none_or(|t| t.may_have_long_words()));
+        match out.iter_mut().find(|(g, _)| std::ptr::eq(*g, f)) {
+            Some((_, l)) => *l |= long,
+            None => out.push((f, long)),
         }
-        let long = f.termtexts_reader().is_none_or(|t| t.may_have_long_words());
-        out.push((f, long));
     }
     out
 }
