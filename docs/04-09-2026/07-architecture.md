@@ -1,9 +1,10 @@
-# Architecture de lucivy — état au 4 septembre 2026 au soir
+# Architecture de lucivy — état au 5 septembre 2026 au matin
 
 Rappel écrit pour être lu seul, mis à jour après la journée de réduction
-d'index (branche `v4`). Il remplace `docs/28-08-2026/08-architecture.md`
-pour tout ce qui concerne les formats ; le reste (crates, DAG, sharding,
-fédération) y est repris tel quel parce qu'il n'a pas bougé.
+d'index et la nuit du dictionnaire partagé (branche `v4`). Il remplace
+`docs/28-08-2026/08-architecture.md` pour tout ce qui concerne les
+formats ; le reste (crates, DAG, sharding, fédération) y est repris tel
+quel parce qu'il n'a pas bougé. Le §2.5 est nouveau : le mode dictionnaire.
 
 ---
 
@@ -65,6 +66,61 @@ Disparu : **`.bytemap`** (la question « ce chunk a-t-il un octet de
 contenu ? » est `own_len > sep_len` dans la méta de `.termtexts`,
 `TermTextsReaderV3::has_content`). `.gapmap`, `.sepmap`, `.sibling` sont v2.
 
+### 2.5 Le mode dictionnaire (`sfx_version` 4, `suffix_fst/dictionary.rs`)
+
+Un index créé avec `"sfx_version": 4` (`SchemaConfig`) a **un dictionnaire
+par shard** au lieu d'un par segment : le moteur v3, les mêmes clés et
+formats, sur des **identifiants globaux au shard**.
+
+| fichier | portée | contenu |
+|---|---|---|
+| `dict-<g>.<champ>.sfx` | shard, génération `g` | FST des suffixes + parents (conteneur 8), ordinaux = identifiants globaux |
+| `dict-<g>.<champ>.termtexts` | shard, génération `g` | identifiant → texte étendu + méta (layout 3, dense par identifiant) |
+| `<seg>.<champ>.gmap` | segment | identifiants globaux de ses ordinaux locaux, **triés** (index = ordinal local ; global → local par recherche binaire) |
+| `<seg>.<champ>.newtexts` | segment, **hors registre** | textes et méta des identifiants que le segment a frappés ; consommé et supprimé par le commit suivant |
+| `.sfxpost`, `.word_sfxpost`, `.posmap`, `.word_pos_map`, `.sibling_v3` | segment | **inchangés**, à ordinaux locaux |
+
+`meta.json` porte `sfx_dictionary { generation, next_ids (par champ),
+field_ids }` ; c'est par là que le GC (`segment_updater::list_files`), le
+snapshot LUCE, le delta (bundle `dict-<g>.`, préfixe de ses fichiers) et
+`Index` (qui tient le dictionnaire ouvert et le rafraîchit à chaque
+lecture de `meta.json`) connaissent la génération vivante. Un fichier de
+shard non enregistré là serait supprimé au premier GC.
+
+**Indexation** : le collecteur (`SfxCollectorV3::with_dictionary`) cherche
+chaque texte nouveau dans la génération courante (clé minuscule sous la
+partition, parent à `sti` 0 de même forme, texte exact confirmé — la clé ne
+voit pas la casse), puis dans les textes en attente du shard, et frappe
+sinon sur le compteur du champ. Compteur et attente sont partagés par les
+générations d'un processus (`DictionaryShared`), le collecteur lit la
+génération **courante** à chaque recherche (le slot de l'`Index`). Les
+ordinaux locaux sont attribués dans l'ordre des identifiants. Le segment
+n'écrit ni `.sfx` ni `.termtexts`.
+
+**Commit** (`indexer/dictionary_commit.rs::fold_new_texts`, avant le DAG de
+commit) : les `.newtexts` des segments commis + les textes de la
+génération vivante → génération `g + 1` réécrite **en entier** (v1 :
+simple, lent, juste), rendue vivante, nommée par le `meta.json` du commit.
+Les identifiants ne bougent jamais : aucun segment n'est touché.
+
+**Fusion** (`merge_segments_dict`) : union triée des `.gmap`, remappage
+des locaux, concaténation des postings, fratrie et cartes rebâties. Pas de
+texte, pas de FST.
+
+**Requête** : les briques ne changent pas. Les cinq lecteurs d'un segment
+traduisent entre identifiants globaux et ordinaux locaux quand le segment
+a un `.gmap` (`with_gmap`). Le lecteur FST du dictionnaire est **partagé**
+par tous les segments (`SegmentReader::sfx_dictionary_field`) et **mémoïse**
+ses marches (`FstMemo`, cellule `OnceLock` par (fonction, requête)) ; chaque
+segment en reçoit une **vue** (`for_segment(gmap)`) qui coupe les listes
+mémoïsées à ses identifiants par marche fusionnée. Les chaînes se
+construisent par segment. Limite connue : le calcul froid d'une requête est
+fait une fois mais sur un seul thread ([09](09-journal-chantier-dictionnaire.md) §8).
+
+Mesuré sur la référence de 10 000 fichiers : 508 → 387 Mo ; comptes et
+spans identiques ; exactes à ±1 ms, terme/préfixe ×2, fuzzy ×9 à froid, ×2
+à chaud. Vérité : `lucivy_core/tests/test_dictionary_index.rs`.
+
 ### 2.3 Ce que le builder enregistre
 
 Pour un chunk étendu : une clé par suffixe commençant **dans les octets
@@ -101,8 +157,9 @@ drain → flush → [prescan par segment …] → merge_prescan → build_weight
 ```
 
 **Le prescan crée un nœud par segment** (`lucivy_core/src/search_dag.rs`) :
-c'est tout le parallélisme, et c'est ce qu'un dictionnaire par shard
-réduira. Par segment, `contains_query_v3` / `fuzzy_query_v3` /
+c'est tout le parallélisme — et il le reste en mode dictionnaire, où le
+lecteur FST est partagé et mémoïsé mais où chaque segment résout ses
+postings (§2.5). Par segment, `contains_query_v3` / `fuzzy_query_v3` /
 `regex_query_v3` chargent les sidecars en `OwnedBytes` (zéro copie sur mmap)
 dans un `BriquesContext`, puis `briques/` :
 
@@ -144,7 +201,10 @@ signalée (`last_search_truncated`).
 - Persistance : `StdFsDirectory` (natif + OPFS, I/O différée au
   `terminate()`), `RamDirectory`, `BlobDirectory` (ACID). Formats LUCE
   (snapshot), LUCID (delta 1 shard), LUCIDS (delta N shards :
-  `ShardVersion { shard_id, version, segment_ids }`).
+  `ShardVersion { shard_id, version, segment_ids }`). En mode dictionnaire
+  la génération voyage comme un bundle `dict-<g>.` (LUCE l'emballe par nom,
+  le delta la joint aux `segment_ids`, `apply_delta` retire l'ancienne par
+  préfixe). Pas encore comptée par `index_bytes` / `preload` / `residency`.
 - Blob store ACID exposé en Python / Node / C++.
 - WASM : jamais de `thread::spawn`, I/O au `terminate()` seulement,
   `LazyFsHandle` charge un fichier entier au-delà de 64 Ko dans un LRU de
@@ -155,10 +215,10 @@ signalée (`last_search_truncated`).
 ## 5. La fusion
 
 `merge_segments_v3` réinterne les textes de `.termtexts`, remappe postings
-et fratrie, reconstruit tout par le DAG de création. Bornée par les 24
-bits d'ordinal : le harnais n'a pas pu compacter le noyau vers 10 segments
-ce soir. L'index de bench du 28 août à 10 segments avait été obtenu par
-`bench_sharding` (autre chemin) — à élucider.
+et fratrie, reconstruit tout par le DAG de création. Bornée par
+`MAX_ORDINAL` = 2²⁸ − 1 depuis la nuit (24 bits avant : le harnais n'avait
+pas pu compacter le noyau vers 10 segments ; non relancé depuis). En mode
+dictionnaire, `merge_segments_dict` ne réinterne rien (§2.5).
 
 ---
 

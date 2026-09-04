@@ -260,11 +260,14 @@ cd playground && node serve.mjs
 ## Docs
 
 **Dossier courant : `docs/04-09-2026/` — pour repartir, lire dans l'ordre
-`06-chantier-dictionnaire-partage-rapport.md` (le prochain chantier : ce qu'on
-propose, ce qui est su du code, ce qu'il faut mesurer, où regarder),
-`07-architecture.md` (l'architecture avec les formats du 4 septembre) et
+`09-journal-chantier-dictionnaire.md` (le chantier en cours : mesures,
+étapes 2a-2c, 3a, 3b, le dictionnaire partagé v1 §6-8 — ce qui marche, ce
+qui a divergé du plan, ce qui reste), `07-architecture.md` (l'architecture
+avec les formats de la nuit et le mode dictionnaire §2.5) et
 `08-knowledge-dump-baselines-tests-outils.md` (baselines, les deux A/B,
-tests, corpus, protocole, pièges) — tous trois autonomes. Puis
+tests, corpus, protocole, mode dictionnaire §6 bis, pièges) — tous trois
+autonomes. `06-chantier-dictionnaire-partage-rapport.md` est le plan tel
+qu'écrit avant de coder, avec une note d'état en tête. Puis
 `04-recap-journee-et-a-faire.md` (−36 % d'index en une journée),
 `05-piste-dictionnaire-partage-par-shard.md` (la décision, mesurée ×2,2), `01-recap-findings-et-plan-d-action.md`
 (le plan, avec l'état et le gain mesuré de chaque étape), `03-journal-des-etapes.md`
@@ -279,7 +282,10 @@ au-delà, `own_len` dérivé de la clé — journal
 `09-journal-chantier-dictionnaire.md` ; la version 7, intermédiaire, est
 refusée), ordinaux sur 28 bits (`.word_pos_map` `WMP3`), tables d'offsets
 par blocs (`block_offsets.rs` : `SFP4`, `WSP4`, `SIB4`, `.termtexts`
-layout 3),
+layout 3) ; **`sfx_version` 4 = dictionnaire partagé par shard**
+(`dict-<g>.<champ>.sfx/.termtexts`, `.gmap` par segment, génération
+réécrite au commit ; référence 10 000 : 387 Mo, −66 % depuis le 4 au
+matin ; requêtes exactes à ±1 ms, fuzzy ×9 à mémo froide — voir `09` §8),
 `.posmap` `PMP3` (3 octets), `.sibling_v3` `SIB3` (sans gap), `.termtexts`
 layout 2 (méta dans la table d'offsets), plus de `.bytemap` en v3. Chaque
 lecteur ouvre encore les layouts précédents. Règle du 4 septembre : la taille

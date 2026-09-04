@@ -177,6 +177,46 @@ Tests ajoutés aujourd'hui, à connaître : `packed_and_legacy_records_decode_to
 
 ---
 
+## 6 bis. Le mode dictionnaire : construire, mesurer, déboguer
+
+- **Construire la référence en mode dictionnaire** : le même harnais avec
+  `V3_SFX_VERSION=4` (la clé de forme `.v3_shape` en tient compte, donc un
+  autre `V3_INDEX_DIR`) :
+  ```bash
+  V3_SFX_VERSION=4 V3_CORPUS=/tmp/lucivy-cmp V3_INDEX_DIR=/chemin/idx-dict cargo test --release -p lucivy-core \
+    --test test_sfx_v3_ground_truth v3_ground_truth_demo -- --ignored --nocapture > out.txt 2>&1
+  ```
+  53 s au lieu de 8 (la génération est réécrite en entier à chacun des 20
+  commits) ; 387 Mo ; panel 9/9. Le scan `benches/scan_index_size.py` lit
+  les `dict-*` comme des sidecars (totaux `sfx`, `termtexts`) et compte les
+  `.gmap`.
+- **La vérité de bout en bout** : `cargo test --release -p lucivy-core
+  --test test_dictionary_index` — 300 fichiers du noyau (ou un corpus
+  synthétique sans `/tmp/lucivy-cmp`), index v3 et v4 côte à côte, onze
+  requêtes comparées documents et spans, réouverture ; et
+  `dictionary_pieces`, qui imprime chaque pièce (parents du dictionnaire,
+  `.gmap`, postings, splits, chaînes, résolution) sur trois documents —
+  c'est ce qui a trouvé le double mappage.
+- **Mémo froide / chaude** : `V3_QUERIES=schdule:fz1,schdule:fz1` relance
+  la même requête dans le même processus ; la seconde a la mémo chaude.
+  `V3_PROFILE=1` : la ligne `[prescan]` / `[fz prescan]` donne le mur, la
+  somme par segment et le **max par segment** — quand max ≈ mur, un segment
+  calcule pendant que les autres attendent la cellule.
+- **Ce qui n'est pas fait / à savoir** : la génération est réécrite en
+  entier à chaque commit ; le calcul froid d'une requête n'est pas
+  parallèle ([09](09-journal-chantier-dictionnaire.md) §8) ;
+  `index_bytes`, `preload`, `residency` ignorent les fichiers `dict-*` ;
+  l'import WASM (`lucivy_import_file`) les route dans `shard_0/` sans les
+  connaître, ce qui se trouve être juste ; un segment abandonné entre deux
+  commits laisse des identifiants sans texte (inoffensif) ; la suite
+  `cargo test -p lucivy-core` complète n'a pas été relancée après le
+  dictionnaire (la lib et le test de bout en bout, si) ; pas d'A/B 30 000
+  en mode dictionnaire.
+- **Index du scratchpad** : `idx-dict` (référence 10 000 en mode
+  dictionnaire, génération 20), `prof-dict*.txt`, `dict-e2e.txt`.
+
+---
+
 ## 7. Le protocole d'une étape, en résumé
 
 1. Écrire le changement avec le lecteur qui ouvre **encore** l'ancien layout.
@@ -200,8 +240,11 @@ Tests ajoutés aujourd'hui, à connaître : `packed_and_legacy_records_decode_to
 (conteneur 4), `idx-v8` (état final 10 k), `idx30k-v3`, `idx30k-v6`,
 `idx30k-v5a`, `idx30k-v8`, `idx90k-v4` (noyau entier, 253 segments),
 `wt-v3` (worktree du commit `1c263f3`, binaire v3 dans `wt-target`), les
-sorties `scan-*.txt`, `ab*.txt`, `demo-*.txt`. Environ 25 Go. Rien
-d'irremplaçable : tout se reconstruit avec §3.
+sorties `scan-*.txt`, `ab*.txt`, `demo-*.txt`. Depuis la nuit : `idx-v6`,
+`idx-v7` et `idx30k-v6`, `idx30k-v7` (conteneurs 6 et **8** malgré le
+nom, tables par blocs), `idx-dict`, `mesures-chantier-dict.txt`,
+`explo-*.md` (les trois cartes du code faites par les agents). Environ
+30 Go. Rien d'irremplaçable : tout se reconstruit avec §3 et §6 bis.
 
 ---
 
@@ -220,3 +263,15 @@ d'irremplaçable : tout se reconstruit avec §3.
   aucun chronométrage n'est valable pendant ce temps.
 - `grep -c` sans résultat rend 1 en code de sortie : un `&&` derrière fait
   croire à un échec.
+- Un `debug_assert` n'est vérifié que dans les suites debug : la
+  différence de longueur du `to_lowercase` (`İ`) n'est apparue que dans
+  `cargo test -p lucivy-core`, jamais dans le panel release.
+- Un lecteur qui traduit global → local ne doit le faire qu'une fois :
+  `entries()` déléguant à `entries_filtered()` traduisait deux fois et
+  cherchait un ordinal local comme un identifiant global — zéro résultat en
+  strict, les bons en relâché.
+- Mémoïser au niveau du shard sérialise ce qu'un segment demande le
+  premier ; filtrer par recherche binaire par candidat coûte ×5 sur un
+  fuzzy : trier les listes mémoïsées et marcher avec le `.gmap`.
+- `cargo build` à la racine du workspace ne compile pas forcément la
+  crate modifiée (« Finished in 0.05 s ») : `-p ld-lucivy -p lucivy-core`.

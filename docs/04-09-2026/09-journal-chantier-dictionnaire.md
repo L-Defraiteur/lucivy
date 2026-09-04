@@ -300,3 +300,177 @@ Répartition de l'index de référence après 3b (508 Mo) : `.sfx` 210 Mo
 47, `.word_pos_map` 32, `.posmap` 24, `.sibling_v3` 23. Le dictionnaire
 (sfx + termtexts + sibling) fait 60 % : c'est ce que le partage par shard
 divise par 2,6.
+
+---
+
+## 6. Le dictionnaire partagé par shard — plan d'implémentation (v1)
+
+Décidé après 3b, avec la carte du code faite par les trois explorations du
+soir (persistance, ordinaux/segments, `.sfx`). Le principe de [06](06-chantier-dictionnaire-partage-rapport.md)
+tient ; ce qui suit est la forme minimale qui le prouve et mesure le gain.
+
+**Les segments gardent leurs ordinaux locaux et tous leurs formats.** Ce
+qui change : un segment ne porte plus `.sfx` ni `.termtexts` ; il porte un
+`.gmap` — la liste **triée** des identifiants globaux de ses ordinaux
+(index = ordinal local, `u32` par ordinal, global → local par recherche
+binaire) — et un `.newtexts` (texte + méta des identifiants qu'il a
+frappés le premier). `.sfxpost`, `.word_sfxpost`, `.posmap`,
+`.word_pos_map`, `.sibling_v3` restent locaux et inchangés.
+
+**Le dictionnaire du shard** : `dict.sfx` (FST + parents, ordinaux =
+identifiants globaux) + `dict.termtexts` (global → texte + méta), enregistré
+dans `meta.json` (`IndexMeta`, un champ `dictionary { generation, files }`)
+pour que `list_files` (GC), le snapshot LUCE, le delta et `index_bytes` le
+voient — la liste des dangers de l'exploration persistance (un fichier de
+shard non enregistré est supprimé au premier GC).
+
+**Frappe des identifiants** (collecteur, `intern_extended`) : chaque
+indexeur cherche le texte dans la génération courante (clé `[0x00] +
+minuscule(texte propre)`, parent à `sti == 0` et même forme, texte exact
+confirmé dans `dict.termtexts` — la casse ne se voit pas dans la clé) ; s'il
+ne l'y trouve pas, il frappe un identifiant sur un compteur atomique du
+shard. Deux indexeurs concurrents peuvent frapper deux identifiants pour
+un même texte nouveau : toléré (le FST porte les deux parents, une seule
+requête les trouve tous les deux), dédoublonné pour l'avenir à la
+génération suivante. Les ordinaux locaux sont attribués **dans l'ordre
+des identifiants globaux**, ce qui trie `.gmap` gratuitement.
+
+**Le commit** rebâtit la génération : fusion des textes de la génération
+précédente et des `.newtexts` des nouveaux segments (identifiants stables,
+append-only), FST + parents + termtexts réécrits en entier — « simple,
+lent, juste » ; les générations incrémentales viennent après, une fois la
+justesse prouvée par le panel. Écriture atomique puis `meta.json`.
+
+**La requête** : une marche de FST par shard (plus une par segment) → des
+candidats à identifiants globaux ; par segment, `gmap.local(global)` puis
+les postings, posmap, fratrie locaux comme aujourd'hui. Les endroits qui
+vont de local à global (posmap → termtexts, fratrie → texte) passent par
+`gmap.global(local)`. `BriquesContext` porte le lecteur du dictionnaire et
+le `.gmap` du segment.
+
+**La fusion de segments** : union triée des `.gmap`, remappage des locaux,
+concaténation des postings — plus de réinternement, plus de FST à rebâtir
+(`sparse_vector::merge_segments`). Elle ne touche pas au dictionnaire.
+
+**Ordre** : D1a l'infrastructure (lecteur du dictionnaire, champ de meta,
+enregistrement des fichiers, chargement dans `Index` / `LucivyHandle` —
+sans dictionnaire, rien ne change) ; D1b la frappe et la génération au
+commit ; D1c la requête ; D1d la fusion ; D1e le protocole (panel, taille,
+temps) ; puis les générations et la compaction.
+
+---
+
+## 7. Le dictionnaire partagé, v1 — ce qui est fait (nuit du 4 au 5 septembre)
+
+Le plan du §6, tel quel, en quatre commits (`c1d5880` l'infrastructure,
+`dc00639` le reste). Ce qui a changé en route :
+
+- **`.newtexts` n'est pas un fichier du registre.** Listé, il aurait été
+  emballé, transporté et gardé par le GC, alors qu'il est mort dès que le
+  commit l'a replié. Il survit jusqu'au commit parce que le GC garde tout
+  fichier géré qui porte l'identifiant d'un segment vivant ; le commit
+  suivant le supprime.
+- **Un compteur d'identifiants par champ**, pas un par shard : les textes
+  du dictionnaire sont indexés par identifiant, et un identifiant frappé
+  pour un autre champ y faisait un trou de cinq octets — le
+  `dict.termtexts` était plus gros que la somme des `.termtexts` qu'il
+  remplaçait.
+- **Compteurs et textes en attente partagés entre générations**, et le
+  collecteur lit la génération *courante* à chaque recherche (le slot de
+  l'`Index`, pas un `Arc` pris à sa création) : un commit remplace la
+  génération pendant que des segments s'écrivent, et un writer parti avant
+  aurait sinon frappé sur l'ancien compteur ou re-frappé les textes que
+  la nouvelle génération venait d'absorber. Deux indexeurs concurrents qui
+  voient le même texte nouveau ne frappent plus deux identifiants (table
+  des textes en attente sous verrou, prise seulement après un échec dans
+  la FST).
+- **Le double mappage** : `SfxPostReaderV2::entries` délègue à
+  `entries_filtered`, qui traduit déjà ; traduire deux fois cherchait un
+  ordinal local comme un identifiant global et ne trouvait rien — le
+  strict rendait zéro document quand le relâché rendait les bons. Trouvé
+  brique par brique (`dictionary_pieces`).
+
+**Vérité** : `lucivy_core/tests/test_dictionary_index.rs` — 300 fichiers
+du noyau, huit commits (chaque commit replie et retrouve), les fusions de la
+politique, une réouverture ; onze requêtes (strict, relâché, terme,
+préfixe, fuzzy 1 et 2, regex, casse mixte) : documents et spans identiques
+à un index v3. Fichiers : aucun `.sfx` ni `.termtexts` par segment, une
+génération par champ (`dict-8.1.*`, `dict-8.2.*`), un `.gmap` par segment.
+Suite lib 1 450 verte.
+
+**Taille sur ces 300 fichiers** (5 segments après fusion) : −1,2 % —
+`dict.sfx` 11,4 Mo pour 12,5 de `.sfx` par segment, `dict.termtexts` 3,7
+pour 4,3, plus 1,2 Mo de `.gmap`. Cinq segments ne se répètent guère.
+
+**Taille sur la référence de 10 000 fichiers** (160 segments, 20
+commits → génération 20, `V3_SFX_VERSION=4`, scratchpad `idx-dict`) :
+**508 → 387 Mo (−23,7 %)** ; `.sfx` 210 → 99,6 Mo (FST 8,3 + parents
+91,3), `.termtexts` 70,6 → 33,0 (2,39 M de textes distincts pour 5,22 M
+d'ordinaux, ×2,19), `.gmap` 20,9 Mo (5,22 M × 4), `.sibling_v3` 23 → 25
+(ordonné par identifiant global, deltas un peu plus grands). **Depuis le
+matin : 1 152 → 387 Mo, −66,4 %.** Panel 9/9 identique (comptes et spans).
+
+**Ce qui reste de v1** : la génération est réécrite en entier à chaque
+commit (« simple, lent, juste ») ; la marche de FST reste faite par
+segment (le `.sfx` du dictionnaire est servi à chaque segment, la
+requête ne gagne rien encore) ; `index_bytes` / `preload` ne comptent pas
+les fichiers du dictionnaire ; l'import WASM les route dans `shard_0/`
+sans les connaître ; un segment abandonné entre deux commits laisse ses
+identifiants sans texte (inoffensif : rien ne les cite).
+
+---
+
+## 8. Le dictionnaire partagé, v1 — la requête (nuit du 4 au 5)
+
+**Le problème, mesuré.** Avec le dictionnaire tel que le §6 l'a décrit, chaque
+segment marchait toute la FST du shard : 160 marches de 2,4 M de textes
+au lieu de 160 marches de 15 000. Sur la référence 10 000 : `sched term`
+202 ms (3), `mutex_lock relax` 37 ms (3), fz1 619 ms (5,6), fz2 788 ms (42).
+Le §6 disait « une marche par shard au lieu d'une par segment » : rien dans
+le code ne le faisait, les briques prenaient le lecteur du segment.
+
+**Ce qui a été fait** (commit `2b6359d`) :
+
+1. `FstMemo` dans `SfxFileReaderV3` : les résultats de `fst_candidates_v3`,
+   `falling_walk_chunks`, `falling_walk_words` par (fonction, requête,
+   drapeaux), une cellule `OnceLock` par clé — le premier segment calcule,
+   les autres attendent. Le lecteur du `DictionaryField` est ouvert avec
+   une mémo et `SegmentReader::sfx_dictionary_field` le tend aux trois
+   chargeurs (contains, fuzzy, regex) au lieu d'un `open_owned` par segment.
+2. Une **vue par segment** (`for_segment(gmap)`) : les listes mémoïsées sont
+   triées par identifiant, et coupées à ce que le segment a par une
+   **marche fusionnée** avec le `.gmap` (`keep_in_segment`, O(C + G)). La
+   première version filtrait par recherche binaire par candidat : sur un
+   fuzzy c'était ×5 de plus (1 616 ms de CPU cumulé sur 160 segments pour
+   les seuls filtres).
+3. Les **chaînes** se construisent par segment, à partir des splits filtrés,
+   les marches par reste étant mémoïsées : une première version mémoïsait
+   les chaînes du shard entier (`cross_word_chain_v3` sur 1 237 splits →
+   24 ms sur un thread, tous les autres attendant) — c'est ce qui rendait
+   `sched term` à 25 ms.
+4. `resolve_all_trigrams` fait partir chaque segment d'un n-gramme
+   différent (graine = premier identifiant du `.gmap`) — sans effet
+   mesurable, gardé parce que sans coût.
+
+**Où on en est** (référence 10 000, ms, index v3 3b entre parenthèses) :
+strict 3,3 (3,2), relax 2,9 (3,1), spin_lock 3,0 (2,7), term 7,0 (3,2),
+sw 8,5 (2,7), strict sched 3,8 (2,6), fz1 50,8 (5,6), fz2 139 (42), rx 5,3
+(4,0), jw1 13,6 (7,7). **La même requête relancée** (mémo chaude) : fz1
+12,0 puis 10,6 ; term 3,7. Donc : le coût résiduel est le calcul **froid**
+au niveau du shard — la marche est faite une fois, mais sur un seul thread
+(la mémo sérialise ce qu'un segment demande le premier), là où l'index v3
+répartissait le même CPU sur 24 threads. `max` par segment ≈ mur.
+
+**À faire (prochain pas de la requête)** : paralléliser le calcul froid —
+un nœud « prescan du dictionnaire » par shard dans le DAG de recherche,
+avec une tâche par pièce ou n-gramme (le fuzzy en demande dix à trente),
+avant les nœuds par segment ; ou, plus simplement, une pré-passe dans
+`fuzzy_v3` qui soumet les `fst_candidates_v3` des pièces au scheduler.
+Objectif : fz1 sous 10 ms, term sous 4.
+
+**Ce que ça corrige dans les documents antérieurs** : [06](06-chantier-dictionnaire-partage-rapport.md)
+§2.1 (« une requête : prescan sur chaque génération vivante ») décrivait
+l'intention ; la réalité v1 est « les segments partagent le lecteur et sa
+mémo, le premier demandeur calcule ». [07](07-architecture.md) §3 (« le
+prescan crée un nœud par segment ... c'est ce qu'un dictionnaire par shard
+réduira ») : le nœud par segment demeure, et c'est bien.

@@ -1,5 +1,14 @@
 # Prochain chantier : le dictionnaire partagé par shard — rapport complet
 
+**État au 5 septembre au matin : fait, en v1.** La refonte du `.sfx` (§2.2)
+est allée plus loin que prévu (conteneurs 6, 7, 8 ; ordinaux 28 bits ;
+tables d'offsets par blocs) et le dictionnaire partagé est implémenté
+comme le §2.3 l'ordonnait — une génération réécrite à chaque commit,
+justesse prouvée. Le journal [09](09-journal-chantier-dictionnaire.md)
+dit ce qui a divergé (`.newtexts` hors registre, compteurs par champ,
+mémo du lecteur partagé) et ce qui reste (générations incrémentales,
+calcul froid parallèle). Le texte ci-dessous est le plan tel qu'écrit.
+
 Écrit le 4 septembre 2026 au soir pour la session suivante, qui repart sans
 l'historique. Il rassemble ce qu'on propose, ce qui est déjà su du code
 concerné, et où regarder pour le reste. Le document court qui a fixé la
