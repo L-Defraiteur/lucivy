@@ -257,7 +257,13 @@ cd playground && node serve.mjs
 
 ## Docs
 
-**Dossier courant : `docs/28-08-2026/` — lire d'abord
+**Dossier courant : `docs/04-09-2026/` — `01-recap-findings-et-plan-d-action.md`
+(le plan : ce qu'on sait, dans quel ordre on réduit), puis
+`02-audit-taille-index-sfx-v3.md` (audit disque/RAM du format v3, mesuré sur
+l'index de bench de 93 605 fichiers : le `.sfx` est aux trois quarts une
+**table de parents**, pas une FST ; script `benches/scan_index_size.py`).
+Le travail v4 est sur la branche `v4`, pas sur `main`.
+Veille : `docs/28-08-2026/` — lire d'abord
 `07-rapport-progression-et-taille-index.md` (ce qui a été fait, et pourquoi la
 promotion attend une réduction de la taille d'index), `08-architecture.md` et
 `09-knowledge-dump-tests-benchs-publication.md` (autonomes : tous les tests,
