@@ -48,6 +48,7 @@
 //! held elsewhere. The writer picks `SIB2` on its own when a gap is present
 //! (the v2 pipeline), so both shapes stay readable and nothing chooses.
 
+use super::block_offsets::{self, BlockOffsets, OffsetTable};
 use super::varint::{read_varint, write_varint};
 
 /// First word of a `SIB2` file. A v1 file starts with `num_ordinals`, and
@@ -56,6 +57,9 @@ use super::varint::{read_varint, write_varint};
 const V2_SENTINEL: u32 = u32::MAX;
 const MAGIC_V2: &[u8; 4] = b"SIB2";
 const MAGIC_V3: &[u8; 4] = b"SIB3";
+/// `SIB3` entries behind a block-coded offset table (`block_offsets`),
+/// written since 4 September 2026 at night.
+const MAGIC_V4: &[u8; 4] = b"SIB4";
 /// Bytes of one v1 entry: `next_ordinal` (u32) + `gap_len` (u16).
 const V1_ENTRY_SIZE: usize = 6;
 
@@ -135,10 +139,16 @@ impl SiblingTableWriter {
 
         let mut buf = Vec::with_capacity(header_size + entries_data.len());
         buf.extend_from_slice(&V2_SENTINEL.to_le_bytes());
-        buf.extend_from_slice(if with_gaps { MAGIC_V2 } else { MAGIC_V3 });
-        buf.extend_from_slice(&num.to_le_bytes());
-        for off in &offsets {
-            buf.extend_from_slice(&off.to_le_bytes());
+        if with_gaps {
+            buf.extend_from_slice(MAGIC_V2);
+            buf.extend_from_slice(&num.to_le_bytes());
+            for off in &offsets {
+                buf.extend_from_slice(&off.to_le_bytes());
+            }
+        } else {
+            buf.extend_from_slice(MAGIC_V4);
+            buf.extend_from_slice(&num.to_le_bytes());
+            buf.extend_from_slice(&block_offsets::encode(&offsets));
         }
         buf.extend_from_slice(&entries_data);
         buf
@@ -148,7 +158,7 @@ impl SiblingTableWriter {
 /// Reader: O(1) lookup of sibling entries by ordinal.
 pub struct SiblingTableReader<'a> {
     num_ordinals: u32,
-    offsets: &'a [u8],      // (num_ordinals + 1) × 4 bytes
+    offsets: OffsetTable<'a>, // num_ordinals + 1 offsets
     entries_data: &'a [u8],
     /// `SIB2`/`SIB3`: varint entries. v1 files keep their fixed 6-byte records.
     v2: bool,
@@ -164,6 +174,7 @@ impl<'a> SiblingTableReader<'a> {
         }
         let v2 = u32::from_le_bytes(data[0..4].try_into().ok()?) == V2_SENTINEL;
         let mut no_gaps = false;
+        let mut block = false;
         let head = if v2 {
             if data.len() < 12 {
                 return None;
@@ -171,6 +182,7 @@ impl<'a> SiblingTableReader<'a> {
             match &data[4..8] {
                 m if m == MAGIC_V2 => {}
                 m if m == MAGIC_V3 => no_gaps = true,
+                m if m == MAGIC_V4 => { no_gaps = true; block = true; }
                 _ => return None,
             }
             12
@@ -178,12 +190,19 @@ impl<'a> SiblingTableReader<'a> {
             4
         };
         let num_ordinals = u32::from_le_bytes(data[head - 4..head].try_into().ok()?);
-        let offsets_size = (num_ordinals as usize + 1) * 4;
-        if data.len() < head + offsets_size {
-            return None;
-        }
-        let offsets = &data[head..head + offsets_size];
-        let entries_data = &data[head + offsets_size..];
+        let (offsets, entries_data) = if block {
+            let (table, used) = BlockOffsets::parse(&data[head..])?;
+            if table.len() != num_ordinals + 1 {
+                return None;
+            }
+            (OffsetTable::Block(table), &data[head + used..])
+        } else {
+            let offsets_size = (num_ordinals as usize + 1) * 4;
+            if data.len() < head + offsets_size {
+                return None;
+            }
+            (OffsetTable::Flat(&data[head..head + offsets_size]), &data[head + offsets_size..])
+        };
         Some(Self { num_ordinals, offsets, entries_data, v2, no_gaps })
     }
 
@@ -262,8 +281,7 @@ impl<'a> SiblingTableReader<'a> {
     }
 
     fn read_offset(&self, idx: u32) -> u32 {
-        let pos = idx as usize * 4;
-        u32::from_le_bytes(self.offsets[pos..pos + 4].try_into().unwrap())
+        self.offsets.get(idx)
     }
 }
 
@@ -366,7 +384,7 @@ mod tests {
         let mut w3 = SiblingTableWriter::new(5);
         for &(a, b) in &links { w3.add(a, b, 0); }
         let d3 = w3.serialize();
-        assert_eq!(&d3[4..8], b"SIB3");
+        assert_eq!(&d3[4..8], b"SIB4");
         let mut w2 = SiblingTableWriter::new(5);
         for &(a, b) in &links { w2.add(a, b, 0); }
         w2.add(4, 2, 7);
@@ -386,8 +404,16 @@ mod tests {
         assert_eq!(r3.siblings(1), vec![]);
         assert_eq!(r2.siblings(4), vec![SiblingEntry { next_ordinal: 2, gap_len: 7 }, SiblingEntry { next_ordinal: 4, gap_len: 0 }]);
         assert!(r3.siblings(0).iter().all(|s| s.gap_len == 0));
-        // 3 links × 1-2 bytes for ordinal 0 and 2 against the SIB2 shape with its gap bits.
-        assert!(d3.len() < d2.len());
+        // On five ordinals the block table's fixed header outweighs the
+        // flat one; on a real table it is 1 to 2 bytes per ordinal against 4.
+        let mut big4 = SiblingTableWriter::new(1000);
+        let mut big2 = SiblingTableWriter::new(1000);
+        for o in 0..1000u32 { big4.add(o, o + 1, 0); big2.add(o, o + 1, 0); }
+        big2.add(999, 3, 7);
+        let (d4, d2) = (big4.serialize(), big2.serialize());
+        assert!(d4.len() * 3 < d2.len() * 2, "{} vs {}", d4.len(), d2.len());
+        let r4 = SiblingTableReader::open(&d4).unwrap();
+        for o in 0..1000u32 { assert_eq!(r4.contiguous_siblings(o), vec![o + 1]); }
     }
 
     #[test]

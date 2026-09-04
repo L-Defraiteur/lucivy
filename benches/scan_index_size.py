@@ -14,6 +14,23 @@ def varint(b, pos):
         if c < 0x80: return val, pos
         shift += 7
 
+def block_table(b, pos):
+    """Block-coded offset table (block_offsets.rs) at `pos`: returns (offsets, end)."""
+    num, nblocks, blocks_bytes = struct.unpack_from("<III", b, pos)
+    dir_start = pos + 12; blocks_start = dir_start + 4 * nblocks
+    offs = []
+    for bi in range(nblocks):
+        p = blocks_start + struct.unpack_from("<I", b, dir_start + 4 * bi)[0]
+        base = struct.unpack_from("<I", b, p)[0]; width = b[p + 4]
+        k = min(64, num - bi * 64)
+        if width == 0:
+            offs.extend([base] * k)
+        else:
+            q = p + 5
+            for i in range(k):
+                offs.append(base + int.from_bytes(b[q + i * width: q + (i + 1) * width], "little"))
+    return offs, blocks_start + blocks_bytes
+
 def sections(b):
     assert b[4:5] and b[0:4] in (b"SFX3", b"TTX3"), b[0:4]
     n = struct.unpack_from("<H", b, 5)[0]
@@ -74,7 +91,16 @@ def scan_sfx(path, deep):
 def scan_termtexts(path, deep):
     b = open(path, "rb").read()
     s = sections(b)
-    if 4 in s:  # layout 2: one ENTRIES section, 8 bytes per ordinal (offset + meta), then texts
+    if 5 in s:  # layout 3: ENTRIES3 = num, block-coded text offsets, 4-byte meta per ordinal, texts
+        toff, tlen = s[5]
+        n = struct.unpack_from("<I", b, toff)[0]
+        offs, meta_start = block_table(b, toff + 4)
+        r = {"file": len(b), "num_terms": n, "text_bytes": offs[n], "offsets_bytes": meta_start - toff - 4, "meta_bytes": 4 * n, "layout": 3}
+        data_start = meta_start + 4 * n
+        def meta(i):
+            own, sep, flags = struct.unpack_from("<HBB", b, meta_start + 4 * i)
+            return own, sep, flags & 0x0F, (flags >> 4) & 1, (flags >> 5) & 1
+    elif 4 in s:  # layout 2: one ENTRIES section, 8 bytes per ordinal (offset + meta), then texts
         toff, tlen = s[4]
         n = struct.unpack_from("<I", b, toff)[0]
         stride = 8
@@ -170,12 +196,15 @@ def scan_posmap(path, deep, magic):
 
 def scan_sibling(path, deep):
     b = open(path, "rb").read()
-    assert struct.unpack_from("<I", b, 0)[0] == 0xFFFFFFFF and b[4:8] in (b"SIB2", b"SIB3"), b[4:8]
-    no_gaps = b[4:8] == b"SIB3"
+    assert struct.unpack_from("<I", b, 0)[0] == 0xFFFFFFFF and b[4:8] in (b"SIB2", b"SIB3", b"SIB4"), b[4:8]
+    no_gaps = b[4:8] in (b"SIB3", b"SIB4")
     n = struct.unpack_from("<I", b, 8)[0]
-    head = 12 + 4 * (n + 1)
-    offs = array("I"); offs.frombytes(b[12: 12 + 4 * (n + 1)])
-    r = {"file": len(b), "num_ordinals": n, "offset_table_bytes": 4 * (n + 1), "entries_bytes": offs[-1], "layout": b[4:8].decode()}
+    if b[4:8] == b"SIB4":
+        offs, head = block_table(b, 12); table_bytes = head - 12
+    else:
+        head = 12 + 4 * (n + 1); table_bytes = 4 * (n + 1)
+        offs = array("I"); offs.frombytes(b[12: 12 + 4 * (n + 1)])
+    r = {"file": len(b), "num_ordinals": n, "offset_table_bytes": table_bytes, "entries_bytes": offs[-1], "layout": b[4:8].decode()}
     if deep:
         pos = head; end = head + offs[-1]; cnt = 0; gap_nonzero = 0; gap_bytes = 0; ord_with_entries = 0
         for o in range(n):
@@ -189,12 +218,15 @@ def scan_sibling(path, deep):
 
 def scan_sfxpost(path, deep):
     b = open(path, "rb").read()
-    assert b[0:4] == b"SFP3"
+    assert b[0:4] in (b"SFP3", b"SFP4"), b[0:4]
     n = struct.unpack_from("<I", b, 4)[0]
-    r = {"file": len(b), "num_terms": n, "offset_table_bytes": 4 * (n + 1), "entry_bytes": len(b) - 8 - 4 * (n + 1)}
-    if deep:
+    if b[0:4] == b"SFP4":
+        offs, base = block_table(b, 8); table_bytes = base - 8
+    else:
+        base = 8 + 4 * (n + 1); table_bytes = 4 * (n + 1)
         offs = array("I"); offs.frombytes(b[8: 8 + 4 * (n + 1)])
-        base = 8 + 4 * (n + 1)
+    r = {"file": len(b), "num_terms": n, "offset_table_bytes": table_bytes, "entry_bytes": len(b) - base}
+    if deep:
         docs = 0; entries = 0; hdr_bytes = 0; ckpt_bytes = 0; payload_bytes = 0; nonempty = 0
         for o in range(n):
             s, e = base + offs[o], base + offs[o + 1]
@@ -216,14 +248,18 @@ def scan_sfxpost(path, deep):
 
 def scan_wsp(path, deep):
     b = open(path, "rb").read()
-    assert b[0:4] == b"WSP3"
+    assert b[0:4] in (b"WSP3", b"WSP4"), b[0:4]
     n = struct.unpack_from("<I", b, 4)[0]
-    r = {"file": len(b), "num_ordinals": n, "offset_table_bytes": 4 * (n + 1), "entry_bytes": len(b) - 8 - 4 * (n + 1)}
-    if deep:
+    if b[0:4] == b"WSP4":
+        offs, entries_start = block_table(b, 8); table_bytes = entries_start - 8
+    else:
+        entries_start = 0; table_bytes = 4 * (n + 1)  # WSP3 offsets are absolute
         offs = array("I"); offs.frombytes(b[8: 8 + 4 * (n + 1)])
+    r = {"file": len(b), "num_ordinals": n, "offset_table_bytes": table_bytes, "entry_bytes": len(b) - 8 - table_bytes}
+    if deep:
         entries = 0; nonempty = 0; ckpt = 0
         for o in range(n):
-            s, e = offs[o], offs[o + 1]
+            s, e = entries_start + offs[o], entries_start + offs[o + 1]
             if e <= s: continue
             nonempty += 1
             ne, _ = varint(b, s); entries += ne

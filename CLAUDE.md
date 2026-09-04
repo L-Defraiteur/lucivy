@@ -119,7 +119,8 @@ Suffix FST avec partitionnement SI=0/SI>0 pour le substring matching.
 - **Regex** : extraction de littéraux, validation regex sur candidats
 
 Fichiers par segment (v3, par champ) : `.sfx`, `.sfxpost`, `.termtexts`, `.posmap`,
-`.word_sfxpost`, `.word_pos_map`, `.sibling_v3`. (`.bytemap` : jusqu'au 4 septembre 2026,
+`.word_sfxpost`, `.word_pos_map`, `.sibling_v3`. Référence 10 000 fichiers
+au soir du 4 septembre : 508 Mo (1 152 le matin), `.sfx` 41 %. (`.bytemap` : jusqu'au 4 septembre 2026,
 ignoré depuis ; `.gapmap`, `.sepmap` : v2.)
 
 **`sfx_version` par défaut = 3** depuis le 23 août 2026. Un `meta.json` sans le champ
@@ -276,7 +277,9 @@ table, valeur FST = offset ; clés coupées à la frontière du token, plus de
 marqueur, overlap dans le record, plat ≤ 32 parents / groupé par overlap
 au-delà, `own_len` dérivé de la clé — journal
 `09-journal-chantier-dictionnaire.md` ; la version 7, intermédiaire, est
-refusée),
+refusée), ordinaux sur 28 bits (`.word_pos_map` `WMP3`), tables d'offsets
+par blocs (`block_offsets.rs` : `SFP4`, `WSP4`, `SIB4`, `.termtexts`
+layout 3),
 `.posmap` `PMP3` (3 octets), `.sibling_v3` `SIB3` (sans gap), `.termtexts`
 layout 2 (méta dans la table d'offsets), plus de `.bytemap` en v3. Chaque
 lecteur ouvre encore les layouts précédents. Règle du 4 septembre : la taille

@@ -305,8 +305,8 @@ pub(crate) fn validate_sfxpost(
     // requiring SFP2 here made every merge of a v2 index reject its own
     // output ("missing SFP2 magic") — the reader below accepts both, so
     // let it be the judge of the layout.
-    if &sfxpost_data[0..4] != b"SFP2" && &sfxpost_data[0..4] != b"SFP3" {
-        return Some("sfxpost: missing SFP2/SFP3 magic".into());
+    if !matches!(&sfxpost_data[0..4], b"SFP2" | b"SFP3" | b"SFP4") {
+        return Some("sfxpost: missing SFP2/SFP3/SFP4 magic".into());
     }
 
     let stored_num_tokens = u32::from_le_bytes(

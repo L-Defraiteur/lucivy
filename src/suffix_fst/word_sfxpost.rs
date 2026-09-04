@@ -56,6 +56,7 @@
 //! the checkpoints on `(doc, first)` narrows to one run of 32 entries, so a
 //! lookup stays logarithmic and the checkpoints cost 1.5 MB on a 177 MB file.
 
+use super::block_offsets::{self, BlockOffsets, OffsetTable};
 use super::varint::{read_varint_u32, write_varint};
 
 /// A single word-level posting entry.
@@ -77,6 +78,10 @@ pub struct WordPostingEntry {
 const ENTRY_SIZE: usize = 20; // 5 × u32
 const MAGIC: &[u8; 4] = b"WSP2";
 const MAGIC_V3: &[u8; 4] = b"WSP3";
+/// `WSP3` blocks behind a block-coded offset table (`block_offsets`), the
+/// offsets relative to the blocks region; written since 4 September 2026
+/// at night.
+const MAGIC_V4: &[u8; 4] = b"WSP4";
 /// Entries between two checkpoints. 32 keeps a lookup at one binary search
 /// over the checkpoints plus at most 32 decodes, for 16 bytes per 32 entries
 /// (0.5 B/entry against the 13.3 B/entry the varints save).
@@ -156,29 +161,27 @@ impl WordSfxPostWriter {
         // 402 MB allocation during its first commit: not the bytes themselves
         // but the churn and the fragmentation they leave in a 4 GB address
         // space. The writer allocates a bounded amount whatever the index.
-        let header_size = 4 + 4 + (num_ords as usize + 1) * 4;
         let mut entries_data: Vec<u8> = Vec::new();
         let mut offsets: Vec<u32> = Vec::with_capacity(num_ords as usize + 1);
         let mut body = Vec::new();
         let mut checkpoints = Vec::new();
         for entries in &self.entries {
-            offsets.push(header_size as u32 + entries_data.len() as u32);
+            offsets.push(entries_data.len() as u32);
             encode_block_into(&mut entries_data, entries, &mut body, &mut checkpoints);
         }
         // u32 offsets: refuse a file past 4 GB rather than write a wrapped table.
         assert!(
-            header_size + entries_data.len() <= u32::MAX as usize,
+            entries_data.len() <= u32::MAX as usize,
             "word_sfxpost: {} bytes exceed the 32-bit offset table",
-            header_size + entries_data.len()
+            entries_data.len()
         );
-        offsets.push(header_size as u32 + entries_data.len() as u32); // sentinel
+        offsets.push(entries_data.len() as u32); // sentinel
 
-        let mut buf = Vec::with_capacity(header_size + entries_data.len());
-        buf.extend_from_slice(MAGIC_V3);
+        let table = block_offsets::encode(&offsets);
+        let mut buf = Vec::with_capacity(8 + table.len() + entries_data.len());
+        buf.extend_from_slice(MAGIC_V4);
         buf.extend_from_slice(&num_ords.to_le_bytes());
-        for &off in &offsets {
-            buf.extend_from_slice(&off.to_le_bytes());
-        }
+        buf.extend_from_slice(&table);
         buf.extend_from_slice(&entries_data);
         buf
     }
@@ -237,9 +240,13 @@ fn encode_block_into(
 pub struct WordSfxPostReader<'a> {
     data: &'a [u8],
     num_ordinals: u32,
-    /// `WSP3`: delta-varint blocks. `WSP2` segments written before 25 August
-    /// 2026 keep their fixed 20-byte records and their own read paths.
+    /// `WSP3`/`WSP4`: delta-varint blocks. `WSP2` segments written before
+    /// 25 August 2026 keep their fixed 20-byte records and their own read paths.
     v3: bool,
+    /// Where an ordinal's bytes are: absolute in `WSP2`/`WSP3` (a flat
+    /// table), relative to `entries_start` in `WSP4`.
+    table: OffsetTable<'a>,
+    entries_start: usize,
 }
 
 impl<'a> WordSfxPostReader<'a> {
@@ -247,15 +254,23 @@ impl<'a> WordSfxPostReader<'a> {
     /// is unknown or the header is truncated.
     pub fn open(data: &'a [u8]) -> Option<Self> {
         if data.len() < 8 { return None; }
-        let v3 = match &data[0..4] {
-            m if m == MAGIC_V3 => true,
-            m if m == MAGIC => false,
+        let (v3, block) = match &data[0..4] {
+            m if m == MAGIC_V4 => (true, true),
+            m if m == MAGIC_V3 => (true, false),
+            m if m == MAGIC => (false, false),
             _ => return None,
         };
         let num_ordinals = u32::from_le_bytes(data[4..8].try_into().ok()?);
-        let min_size = 8 + (num_ordinals as usize + 1) * 4;
-        if data.len() < min_size { return None; }
-        Some(Self { data, num_ordinals, v3 })
+        let (table, entries_start) = if block {
+            let (t, used) = BlockOffsets::parse(&data[8..])?;
+            if t.len() != num_ordinals + 1 { return None; }
+            (OffsetTable::Block(t), 8 + used)
+        } else {
+            let min_size = 8 + (num_ordinals as usize + 1) * 4;
+            if data.len() < min_size { return None; }
+            (OffsetTable::Flat(&data[8..min_size]), 0)
+        };
+        Some(Self { data, num_ordinals, v3, table, entries_start })
     }
 
     /// Number of ordinals the offset table covers (including empty ones).
@@ -268,9 +283,8 @@ impl<'a> WordSfxPostReader<'a> {
         if ordinal >= self.num_ordinals {
             return None;
         }
-        let off_base = 8 + ordinal as usize * 4;
-        let start = u32::from_le_bytes(self.data.get(off_base..off_base + 4)?.try_into().ok()?) as usize;
-        let end = u32::from_le_bytes(self.data.get(off_base + 4..off_base + 8)?.try_into().ok()?) as usize;
+        let start = self.entries_start + self.table.get(ordinal) as usize;
+        let end = self.entries_start + self.table.get(ordinal + 1) as usize;
         if start >= end || end > self.data.len() {
             return None;
         }
@@ -567,7 +581,7 @@ mod tests {
                 w.add(1, e.clone());
             }
             let v3 = w.finish();
-            assert_eq!(&v3[0..4], MAGIC_V3, "the writer must emit WSP3");
+            assert_eq!(&v3[0..4], MAGIC_V4, "the writer must emit WSP4");
             let v2 = write_v2(&[Vec::new(), entries.clone()]);
 
             let r3 = WordSfxPostReader::open(&v3).unwrap();

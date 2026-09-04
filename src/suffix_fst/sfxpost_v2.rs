@@ -49,11 +49,15 @@
 //!   - Existence check: binary search only → O(log n), zero decode
 
 
+use super::block_offsets::{self, BlockOffsets};
 use super::file::SfxPostingEntry;
 use super::varint::{read_varint_u32, write_varint};
 
 const MAGIC_V2: &[u8; 4] = b"SFP2";
 const MAGIC_V3: &[u8; 4] = b"SFP3";
+/// `SFP3` blocks behind a block-coded offset table (`block_offsets`);
+/// written since 4 September 2026 at night.
+const MAGIC_V4: &[u8; 4] = b"SFP4";
 /// Documents between two checkpoints in an `SFP3` block. `find_doc` is a
 /// binary search over fixed records in V2; varints break that, so a checkpoint
 /// every `CHECKPOINT_EVERY` documents restores it — one search over the
@@ -178,12 +182,11 @@ impl SfxPostWriterV2 {
         offset_table.push(entry_data.len() as u32);
 
         // Assemble final binary
-        let mut out = Vec::new();
-        out.extend_from_slice(MAGIC_V3);
+        let table = block_offsets::encode(&offset_table);
+        let mut out = Vec::with_capacity(8 + table.len() + entry_data.len());
+        out.extend_from_slice(MAGIC_V4);
         out.extend_from_slice(&(num_terms as u32).to_le_bytes());
-        for &off in &offset_table {
-            out.extend_from_slice(&off.to_le_bytes());
-        }
+        out.extend_from_slice(&table);
         out.extend_from_slice(&entry_data);
         out
     }
@@ -214,8 +217,12 @@ pub struct SfxPostReaderV2 {
     num_terms: u32,
     offsets_start: usize,
     entry_data_start: usize,
-    /// `SFP3`: varint blocks. `SFP2` files keep their fixed-width arrays.
+    /// `SFP3`/`SFP4`: varint blocks. `SFP2` files keep their fixed-width arrays.
     v3: bool,
+    /// `SFP4`: the offset table is block-coded; `(directory start,
+    /// blocks start)` in `data`, the directory ending where the blocks
+    /// start and the blocks at `entry_data_start`.
+    block_table: Option<(usize, usize)>,
 }
 
 impl SfxPostReaderV2 {
@@ -238,19 +245,34 @@ impl SfxPostReaderV2 {
         if data.len() < 8 {
             return None;
         }
-        let v3 = match &data[0..4] {
-            m if m == MAGIC_V3 => true,
-            m if m == MAGIC_V2 => false,
+        let (v3, block) = match &data[0..4] {
+            m if m == MAGIC_V4 => (true, true),
+            m if m == MAGIC_V3 => (true, false),
+            m if m == MAGIC_V2 => (false, false),
             _ => return None,
         };
         let num_terms = u32::from_le_bytes(data[4..8].try_into().ok()?);
+        if block {
+            let (table, used) = BlockOffsets::parse(&data[8..])?;
+            if table.len() != num_terms + 1 {
+                return None;
+            }
+            // Directory after the 12-byte table header; blocks after the directory.
+            let num_blocks = u32::from_le_bytes(data[12..16].try_into().ok()?) as usize;
+            let dir_start = 8 + 12;
+            let blocks_start = dir_start + num_blocks * 4;
+            return Some(Self {
+                data, num_terms, offsets_start: 8, entry_data_start: 8 + used, v3,
+                block_table: Some((dir_start, blocks_start)),
+            });
+        }
         let offsets_size = (num_terms as usize + 1) * 4;
         if data.len() < 8 + offsets_size {
             return None;
         }
         let offsets_start = 8;
         let entry_data_start = 8 + offsets_size;
-        Some(Self { data, num_terms, offsets_start, entry_data_start, v3 })
+        Some(Self { data, num_terms, offsets_start, entry_data_start, v3, block_table: None })
     }
 
     /// Open from a byte slice (copies into owned Vec).
@@ -399,6 +421,14 @@ impl SfxPostReaderV2 {
     // ── Internal ─────────────────────────────────────────────────────────
 
     fn read_offset(&self, idx: u32) -> u32 {
+        if let Some((dir_start, blocks_start)) = self.block_table {
+            let table = BlockOffsets::from_parts(
+                self.num_terms + 1,
+                &self.data[dir_start..blocks_start],
+                &self.data[blocks_start..self.entry_data_start],
+            );
+            return table.get(idx);
+        }
         let offsets = self.offsets();
         let pos = idx as usize * 4;
         u32::from_le_bytes(offsets[pos..pos + 4].try_into().unwrap())
@@ -928,7 +958,7 @@ mod tests {
                 w.add_entry(1, d, ti, bf, bt);
             }
             let v3 = w.finish();
-            assert_eq!(&v3[0..4], MAGIC_V3, "the writer must emit SFP3");
+            assert_eq!(&v3[0..4], MAGIC_V4, "the writer must emit SFP4");
             let v2 = write_v2(&[Vec::new(), entries.clone()]);
 
             let r3 = SfxPostReaderV2::open(v3.clone()).unwrap();

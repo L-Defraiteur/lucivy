@@ -52,12 +52,12 @@ Deux familles d'entrées, dans un seul espace d'ordinaux par segment :
 | fichier | contenu | encodage actuel |
 |---|---|---|
 | `.sfx` | FST des suffixes (clés minuscules, préfixe de partition, **coupées à la frontière du token**) + table de parents | conteneur `SFX3`, **version 8** (nuit) : la valeur FST est l'offset du record de la clé, un parent comme cent ; record plat jusqu'à 32 parents (par parent : Δordinal, sti en varint, flags = ws + longueur d'overlap + sep_len sur 3 bits, **octets d'overlap** ; `own_len` dérivé de la longueur de la clé, écrit seulement si la minuscule a changé la longueur), groupé par overlap au-delà (saut par groupe, `decode_parents_where`). Le décodage reçoit la clé. Versions 3 (11 o/parent), 4 (u64 packé), 5 (delta-varint, parent unique inline 63 bits) et 6 (tout en table, overlap dans la clé) encore lues, 7 (intermédiaire) refusée ; `keys_cut_at_boundary()` choisit le chemin de marche |
-| `.sfxpost` | postings de chunks : par ordinal, (doc, position, byte_from, byte_to − byte_from) | `SFP3`, varints, checkpoints par 8 docs, table d'offsets u32 |
-| `.word_sfxpost` | postings de mots : (doc, first_pos, last_pos, byte_from, to − from) | `WSP3`, varints, checkpoints par 32 |
-| `.termtexts` | ordinal → texte étendu (casse d'origine) + méta | `TTX3` **layout 2** : une section ENTRIES, 8 octets par ordinal (`u32 offset`, `u16 own_len`, `u8 sep_len`, `u8 flags` = overlap 4 bits + ws + stripped), puis les textes ; STATS (max word). Layout 1 (TEXTS + META à part) encore lu |
+| `.sfxpost` | postings de chunks : par ordinal, (doc, position, byte_from, byte_to − byte_from) | **`SFP4`** (nuit) : blocs `SFP3` (varints, checkpoints par 8 docs) derrière une table d'offsets par blocs (`block_offsets.rs`, 1-2 o/ordinal) ; `SFP3` (table u32) encore lu |
+| `.word_sfxpost` | postings de mots : (doc, first_pos, last_pos, byte_from, to − from) | **`WSP4`** : blocs `WSP3` (varints, checkpoints par 32), table par blocs, offsets relatifs ; `WSP3` encore lu |
+| `.termtexts` | ordinal → texte étendu (casse d'origine) + méta | `TTX3` **layout 3** (nuit, section `0x05`) : offsets de texte par blocs, puis 4 octets de méta par ordinal (`u16 own_len`, `u8 sep_len`, `u8 flags` = overlap 4 bits + ws + stripped), puis les textes ; STATS (max word). Layouts 2 (8 o/ordinal, offset + méta) et 1 (TEXTS + META à part) encore lus |
 | `.posmap` | (doc, position) → ordinal de chunk | **`PMP3`** : 3 octets par position, vide = 0xFFFFFF ; `PMAP` (4 o) encore lu |
-| `.word_pos_map` | (doc, position) → ordinal de mot qui commence là \| span | `WMP2`, 4 octets par position |
-| `.sibling_v3` | ordinal → ordinaux qui le suivent dans le texte | **`SIB3`** : un varint de delta par lien ; `SIB2` (avec gap) encore lu ; v1 aussi |
+| `.word_pos_map` | (doc, position) → ordinal de mot qui commence là \| span | **`WMP3`** : 4 octets par position, ordinal 28 bits \| span 4 bits (15 = « demander aux postings ») ; `WMP2` (24 \| 8) encore lu |
+| `.sibling_v3` | ordinal → ordinaux qui le suivent dans le texte | **`SIB4`** : un varint de delta par lien, table d'offsets par blocs ; `SIB3` (table u32), `SIB2` (avec gap) et v1 encore lus |
 | `.store` | docstore LZ4 (16 Ko) | tantivy |
 | `.term`, `.idx`, `.pos`, `.fast`, `.fieldnorm` | index inversé tantivy (BM25, `more_like_this`) | tantivy |
 
@@ -76,8 +76,10 @@ chunks au même texte propre et à overlap différent partagent une clé.
 Environ 6 clés par chunk distinct. Pour un mot : une clé par suffixe du
 contenu (≤ 256), l'overlap de contenu dans le record.
 
-Bornes : ordinal < 2²⁴ par segment (refus explicite du builder et de la
-fusion — ~50 000 fichiers de noyau par segment au plus), sti < 4096,
+Bornes : ordinal < 2²⁸ par segment depuis la nuit du 4 septembre
+(`SuffixFstBuilderV3::MAX_ORDINAL`, la borne du slot de `.word_pos_map` ;
+refus explicite du builder et de la fusion — le noyau entier, 25,6 M de
+textes, tient seize fois), sti ≤ 255 en pratique (4 095 par l'encodage),
 own_len < 16384.
 
 ### 2.4 Répartition ce soir (noyau, 93 983 fichiers, 253 segments, 10,6 Go SFX)

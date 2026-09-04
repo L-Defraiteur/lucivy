@@ -260,3 +260,43 @@ refusait ce soir sur 17,9 M de termes, devient possible — non relancée
 (11 Go, longue) ; la borne effective est désormais la mémoire de la
 fusion (`LUCIVY_MAX_MERGED_DOCS`, commentaire de `handle.rs` mis à jour),
 pas l'encodage. Suite `cargo test --lib` verte (1 447).
+
+---
+
+## 5. Étape 3b — les tables d'offsets par blocs
+
+**Mesure qui l'a décidée** : le scan de l'index de référence après 2c —
+quatre tables de `u32` par ordinal (`.sfxpost`, `.word_sfxpost`,
+`.sibling_v3`, `.termtexts`), 4 × 20,9 Mo = 84 Mo, **15 % de l'index**, pour
+des offsets qui avancent de quelques octets à la fois.
+
+**Changement.** Module `block_offsets` : la table est découpée en blocs de
+64 offsets ; un bloc stocke une base `u32` et ses offsets comme différence
+à la base, dans la largeur que le bloc demande (0 à 4 octets) ; un petit
+annuaire donne la position de chaque bloc. Une lecture = deux accès (annuaire,
+puis offset). `OffsetTable` lit les deux formes, si bien que chaque lecteur
+garde son `read_offset(i)` et ouvre les deux layouts. Nouveaux magics
+`SFP4`, `WSP4` (offsets relatifs à la région des blocs), `SIB4` ;
+`.termtexts` layout 3 (section `0x05` : offsets de texte par blocs, puis une
+table de méta de 4 octets par ordinal — `meta()` et `has_content()` restent
+une lecture — puis les textes). Tout ce qui précède reste lu ; le
+validateur de fusion v2 accepte `SFP4`.
+
+**Vérification.** Panel identique (9/9, comptes et spans), réouverture des
+conteneurs 5 et 6 identique. Suite lib verte (1 449).
+
+**Taille** (référence 10 000 fichiers) : tables 84 → 31,8 Mo (sfxpost 8,9,
+sibling 6,5, termtexts 11,1, word_sfxpost 5,4) ; index **559 → 508 Mo
+(−9,2 %)** ; 30 000 fichiers 1 806 → 1 659 Mo (−8,1 %). **Depuis le matin
+(v3, 1 152 Mo) : −55,9 %.**
+
+**Temps** (30 000 fichiers, même binaire vs conteneur 6, min, ms) :
+mutex_lock strict 2,1 → 1,8 ; relax 1,5 → 1,7 ; spin_lock 1,8 → 1,7 ;
+sched term 3,1 → 3,1 ; printk sw 2,2 → 2,3 ; fz1 13,5 → 11,2 ; fz2
+140 → 121 ; regex 10,0 → 10,4 ; jw1 16,9 → 13,3. Rien au-delà de ×1,13.
+
+Répartition de l'index de référence après 3b (508 Mo) : `.sfx` 210 Mo
+(41 % — parents 180, FST 30), `.sfxpost` 72, `.termtexts` 71, `.word_sfxpost`
+47, `.word_pos_map` 32, `.posmap` 24, `.sibling_v3` 23. Le dictionnaire
+(sfx + termtexts + sibling) fait 60 % : c'est ce que le partage par shard
+divise par 2,6.
