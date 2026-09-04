@@ -1,3 +1,4 @@
+use std::sync::{Arc, RwLock};
 use std::collections::HashSet;
 use std::fmt;
 #[cfg(feature = "mmap")]
@@ -14,6 +15,7 @@ use crate::directory::error::OpenReadError;
 use crate::directory::MmapDirectory;
 use crate::directory::{Directory, ManagedDirectory, RamDirectory, INDEX_WRITER_LOCK};
 use crate::error::{DataCorruption, LucivyError};
+use crate::suffix_fst::dictionary::SfxDictionary;
 use crate::index::{IndexMeta, SegmentId, SegmentMeta, SegmentMetaInventory};
 use crate::indexer::index_writer::{
     IndexWriterOptions, MAX_NUM_THREAD, MEMORY_BUDGET_NUM_BYTES_MIN,
@@ -71,6 +73,7 @@ fn save_new_metas(
             schema,
             opstamp: 0u64,
             payload: None,
+            sfx_dictionary: None,
         },
         directory,
     )?;
@@ -276,6 +279,9 @@ pub struct Index {
     tokenizers: TokenizerManager,
     fast_field_tokenizers: TokenizerManager,
     inventory: SegmentMetaInventory,
+    /// The shard dictionary (`sfx_version` 4), the generation the last
+    /// `meta.json` read named; shared by every clone of this `Index`.
+    sfx_dictionary: Arc<RwLock<Option<Arc<SfxDictionary>>>>,
 }
 
 impl Index {
@@ -396,6 +402,8 @@ impl Index {
         inventory: SegmentMetaInventory,
     ) -> Index {
         let schema = metas.schema.clone();
+        let sfx_dictionary = metas.sfx_dictionary.as_ref()
+            .map(|d| Arc::new(SfxDictionary::open(&directory, d)));
         Index {
             settings: metas.index_settings.clone(),
             directory,
@@ -404,7 +412,39 @@ impl Index {
             fast_field_tokenizers: TokenizerManager::default(),
             executor: Executor::single_thread(),
             inventory,
+            sfx_dictionary: Arc::new(RwLock::new(sfx_dictionary)),
         }
+    }
+
+    /// The shard dictionary, on an index with `sfx_version` 4.
+    pub fn sfx_dictionary(&self) -> Option<Arc<SfxDictionary>> {
+        self.sfx_dictionary.read().unwrap().clone()
+    }
+
+    /// The dictionary's meta as it should be written to `meta.json`: the
+    /// live generation with the next id as the indexers have advanced it.
+    pub fn sfx_dictionary_meta(&self) -> Option<crate::index::SfxDictionaryMeta> {
+        self.sfx_dictionary().map(|d| {
+            let mut m = d.meta().clone();
+            m.next_id = d.next_id();
+            m
+        })
+    }
+
+    /// Make `dictionary` the live one (a commit that built a generation).
+    pub fn set_sfx_dictionary(&self, dictionary: Option<Arc<SfxDictionary>>) {
+        *self.sfx_dictionary.write().unwrap() = dictionary;
+    }
+
+    /// Open the generation `metas` names if it is not the one held: a reader
+    /// reloading after another process's commit, or after a delta.
+    fn refresh_sfx_dictionary(&self, metas: &IndexMeta) {
+        let Some(wanted) = metas.sfx_dictionary.as_ref() else { return };
+        let held = self.sfx_dictionary();
+        if held.as_ref().is_some_and(|d| d.generation() == wanted.generation) {
+            return;
+        }
+        self.set_sfx_dictionary(Some(Arc::new(SfxDictionary::open(&self.directory, wanted))));
     }
 
     /// Setter for the tokenizer manager.
@@ -531,7 +571,9 @@ impl Index {
 
     /// Reads the index meta file from the directory.
     pub fn load_metas(&self) -> crate::Result<IndexMeta> {
-        load_metas(self.directory(), &self.inventory)
+        let metas = load_metas(self.directory(), &self.inventory)?;
+        self.refresh_sfx_dictionary(&metas);
+        Ok(metas)
     }
 
     /// Parse a `meta.json` payload against this index's segment inventory.

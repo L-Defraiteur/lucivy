@@ -68,7 +68,14 @@ impl<'a> LucivyDeltaExporter<'a> {
 impl<'a> DeltaExporter for LucivyDeltaExporter<'a> {
     fn current_bundle_ids(&self) -> Result<HashSet<String>, String> {
         let (_, meta) = self.snapshot()?;
-        Ok(meta.segments.iter().map(|s| s.id().uuid_string()).collect())
+        let mut ids: HashSet<String> = meta.segments.iter().map(|s| s.id().uuid_string()).collect();
+        // The shard dictionary's generation travels as a bundle of its own,
+        // named so that it is a prefix of its files (`apply_delta` removes a
+        // retired bundle by prefix).
+        if let Some(d) = &meta.sfx_dictionary {
+            ids.insert(ld_lucivy::suffix_fst::dictionary::dictionary_bundle_id(d.generation));
+        }
+        Ok(ids)
     }
 
     fn read_manifest(&self) -> Result<Vec<u8>, String> {
@@ -77,6 +84,16 @@ impl<'a> DeltaExporter for LucivyDeltaExporter<'a> {
 
     fn read_bundle_files(&self, bundle_id: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
         let (_, meta) = self.snapshot()?;
+        if bundle_id.starts_with("dict-") {
+            let mut files = Vec::new();
+            for rel_path in meta.dictionary_files() {
+                let full_path = self.index_path.join(&rel_path);
+                let data = std::fs::read(&full_path)
+                    .map_err(|e| format!("cannot read '{}': {e}", full_path.display()))?;
+                files.push((rel_path.to_string_lossy().to_string(), data));
+            }
+            return Ok(files);
+        }
         let seg_meta = meta.segments.iter()
             .find(|s| s.id().uuid_string() == bundle_id)
             .ok_or_else(|| format!("segment {bundle_id} not found in meta"))?;

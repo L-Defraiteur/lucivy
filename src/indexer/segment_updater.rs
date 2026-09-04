@@ -84,6 +84,7 @@ impl SegmentUpdaterShared {
                 schema: index.schema(),
                 opstamp,
                 payload: commit_message,
+                sfx_dictionary: index.sfx_dictionary_meta(),
             };
             save_metas(&index_meta, directory.box_clone().borrow_mut())?;
             self.store_meta(&index_meta);
@@ -125,6 +126,16 @@ impl SegmentUpdaterShared {
             .collect();
         files.insert(META_FILEPATH.to_path_buf());
 
+        // The shard dictionary (`suffix_fst::dictionary`): the generation the
+        // live meta.json names, and any newer one — a commit writes the next
+        // generation before it rewrites meta.json, and a GC can land in
+        // between. Older generations are garbage.
+        let live_generation = self.index.load_metas().ok()
+            .and_then(|m| m.sfx_dictionary.map(|d| (d.generation, d.files())));
+        if let Some((_, dict_files)) = &live_generation {
+            files.extend(dict_files.iter().cloned());
+        }
+
         // A segment's SFX sidecars are only named by `list_files` once
         // `sfx_field_ids` is on its meta — which happens AFTER the files are
         // written (index_writer::finalize, merge_dag). Since merges run as
@@ -150,6 +161,15 @@ impl SegmentUpdaterShared {
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
             if prefixes.iter().any(|p| name.starts_with(p.as_str())) {
                 files.insert(path);
+                continue;
+            }
+            if let Some(rest) = name.strip_prefix("dict-") {
+                let newer = rest.split('.').next()
+                    .and_then(|g| g.parse::<u64>().ok())
+                    .is_some_and(|g| live_generation.as_ref().is_none_or(|(live, _)| g >= *live));
+                if newer {
+                    files.insert(path);
+                }
             }
         }
         files
@@ -577,6 +597,7 @@ pub fn merge_filtered_segments<T: Into<Box<dyn Directory>>>(
         schema: target_schema,
         opstamp: 0u64,
         payload: Some(stats),
+        sfx_dictionary: None,
     };
 
     save_metas(&index_meta, merged_index.directory_mut())?;

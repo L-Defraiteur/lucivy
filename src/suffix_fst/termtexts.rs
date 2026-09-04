@@ -140,6 +140,9 @@ impl TermTextsIndex {
 impl super::index_registry::SfxIndexFile for TermTextsIndex {
     fn id(&self) -> &'static str { "termtexts" }
     fn extension(&self) -> &'static str { "termtexts" }
+    /// A dictionary segment (`sfx_version` 4) has no texts of its own: they
+    /// are the shard's `dict-<g>.<field>.termtexts`.
+    fn written_for(&self, sfx_version: u8) -> bool { sfx_version != super::dictionary::DICTIONARY_SFX_VERSION }
     fn merge_strategy(&self) -> super::index_registry::MergeStrategy { super::index_registry::MergeStrategy::EventDriven }
 
     fn on_token(&mut self, ord: u32, text: &str) {

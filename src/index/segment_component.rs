@@ -119,7 +119,11 @@ impl SegmentComponent {
     pub fn components_for(sfx_field_ids: &[u32], sfx_version: u8) -> Vec<SegmentComponent> {
         let mut components: Vec<SegmentComponent> = Self::fixed_components().to_vec();
         for &fid in sfx_field_ids {
-            components.push(SegmentComponent::SuffixFst { field_id: fid });
+            // A dictionary segment (`sfx_version` 4) has no `.sfx` of its
+            // own: the shard's `dict-<g>.<field>.sfx` serves every segment.
+            if sfx_version != crate::suffix_fst::dictionary::DICTIONARY_SFX_VERSION {
+                components.push(SegmentComponent::SuffixFst { field_id: fid });
+            }
             // All registry index files (sfxpost, posmap, bytemap, termtexts, ...)
             for index in crate::suffix_fst::index_registry::all_indexes() {
                 if sfx_version != ANY_SFX_VERSION && !index.written_for(sfx_version) {

@@ -85,7 +85,9 @@ fn read_live_files(
         if shard_dir.join(".managed.json").exists() {
             names.push(".managed.json".to_string());
         }
-        for p in meta.segments.iter().flat_map(|m| m.list_files_for(sfx_version)) {
+        for p in meta.segments.iter().flat_map(|m| m.list_files_for(sfx_version))
+            .chain(meta.dictionary_files())
+        {
             if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
                 names.push(name.to_string());
             }

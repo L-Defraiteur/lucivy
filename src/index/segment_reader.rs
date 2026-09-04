@@ -83,9 +83,23 @@ fn load_sfx_files(segment: &Segment, _schema: &Schema) -> (
         sfx_field_ids
     };
 
+    // A dictionary index (`sfx_version` 4): the `.sfx` and `.termtexts` of
+    // every segment are the shard's generation files, over global ids; the
+    // segment's `.gmap` (a registry file) translates.
+    let dictionary = if segment.index().settings().sfx_version
+        == crate::suffix_fst::dictionary::DICTIONARY_SFX_VERSION
+    {
+        segment.index().sfx_dictionary()
+    } else {
+        None
+    };
+
     for field_id in &field_ids {
         let field = Field::from_field_id(*field_id);
-        if let Ok(file_slice) = segment.open_read_custom(&format!("{field_id}.sfx")) {
+        if let Some(dict_field) = dictionary.as_ref().and_then(|d| d.field(*field_id)) {
+            sfx_files.insert(field, dict_field.sfx.clone());
+            registry_files.insert(("termtexts".to_string(), field), dict_field.termtexts.clone());
+        } else if let Ok(file_slice) = segment.open_read_custom(&format!("{field_id}.sfx")) {
             sfx_files.insert(field, file_slice);
         }
         // Load all registry index files

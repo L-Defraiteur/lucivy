@@ -374,6 +374,9 @@ impl Node for SfxNode {
         // invariants come for free from the collector. But it rebuilds every intern
         // table and posting list in RAM — ~18 GB to fuse 50k kernel documents into
         // one segment — so it does not survive contact with a real corpus.
+        if sfx_version == crate::suffix_fst::dictionary::DICTIONARY_SFX_VERSION {
+            return Err("merging dictionary segments (sfx_version 4) is not implemented yet".to_string());
+        }
         if sfx_version >= 3 {
             let mut segment = segment;
             for &field in &sfx_fields {

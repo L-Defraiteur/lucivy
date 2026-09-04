@@ -357,6 +357,30 @@ impl Order {
     }
 }
 
+/// The shard dictionary of an index whose `sfx_version` is 4
+/// (`suffix_fst::dictionary`): which generation is live, the next global
+/// id to mint, and the fields that have one. Absent on every other index.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SfxDictionaryMeta {
+    /// Generation number of the live files (`dict-<generation>.<field>.*`).
+    pub generation: u64,
+    /// First global id not yet minted.
+    pub next_id: u64,
+    /// Fields with a dictionary.
+    pub field_ids: Vec<u32>,
+}
+
+impl SfxDictionaryMeta {
+    /// The files of this generation, relative to the index directory.
+    pub fn files(&self) -> Vec<PathBuf> {
+        use crate::suffix_fst::dictionary::dictionary_file_name;
+        self.field_ids.iter().flat_map(|&f| {
+            [PathBuf::from(dictionary_file_name(self.generation, f, "sfx")),
+             PathBuf::from(dictionary_file_name(self.generation, f, "termtexts"))]
+        }).collect()
+    }
+}
+
 /// Meta information about the `Index`.
 ///
 /// This object is serialized on disk in the `meta.json` file.
@@ -382,6 +406,9 @@ pub struct IndexMeta {
     /// This payload is entirely unused by lucivy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
+    /// The shard dictionary, on an index with `sfx_version` 4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sfx_dictionary: Option<SfxDictionaryMeta>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -393,6 +420,8 @@ struct UntrackedIndexMeta {
     pub opstamp: Opstamp,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
+    #[serde(default)]
+    pub sfx_dictionary: Option<SfxDictionaryMeta>,
 }
 
 impl UntrackedIndexMeta {
@@ -407,11 +436,17 @@ impl UntrackedIndexMeta {
             schema: self.schema,
             opstamp: self.opstamp,
             payload: self.payload,
+            sfx_dictionary: self.sfx_dictionary,
         }
     }
 }
 
 impl IndexMeta {
+    /// Files of the live dictionary generation, none without a dictionary.
+    pub fn dictionary_files(&self) -> Vec<PathBuf> {
+        self.sfx_dictionary.as_ref().map(|d| d.files()).unwrap_or_default()
+    }
+
     /// Create an `IndexMeta` object representing a brand new `Index`
     /// with the given index.
     ///
@@ -424,6 +459,7 @@ impl IndexMeta {
             schema,
             opstamp: 0u64,
             payload: None,
+            sfx_dictionary: None,
         }
     }
 
@@ -474,6 +510,7 @@ mod tests {
             schema,
             opstamp: 0u64,
             payload: None,
+            sfx_dictionary: None,
         };
         let json = serde_json::ser::to_string(&index_metas).expect("serialization failed");
         assert_eq!(
@@ -507,6 +544,7 @@ mod tests {
             schema,
             opstamp: 0u64,
             payload: None,
+            sfx_dictionary: None,
         };
         let json = serde_json::ser::to_string(&index_metas).expect("serialization failed");
         assert_eq!(

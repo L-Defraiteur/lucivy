@@ -49,6 +49,7 @@ impl<D: Document> SingleSegmentIndexWriter<D> {
             schema: index.schema(),
             opstamp: 0,
             payload: None,
+            sfx_dictionary: index.sfx_dictionary_meta(),
         };
         save_metas(&index_meta, index.directory())?;
         index.directory().sync_directory()?;
