@@ -556,3 +556,96 @@ compilait à côté) ; l'A/B propre reste à faire.
 de temps 30 000 ; la suite `cargo test -p lucivy-core` sur ce binaire ;
 `index_bytes` / `preload` ; la version 4.0.0 et la décision sur le mode
 par défaut (4 ?).
+
+---
+
+## 10. Le noyau entier en mode dictionnaire (5 septembre, matin)
+
+`V3_SFX_VERSION=4 V3_MAX_DOCS=100000 V3_COMMIT_EVERY=10000`, 93 983 fichiers,
+253 segments, 10 commits, `idx90k-dict` :
+
+| | 4 sept. matin (v3) | 4 sept. soir (3b) | **dictionnaire** |
+|---|---|---|---|
+| index | 18 Go, ×21 | 11,06 Go, ×12,3 | **5,98 Go, ×6,66** |
+| dictionnaire (`.sfx` + `.termtexts`) | ~13 Go sur 253 segments | 10,6 Go de SFX dont ~7,5 de dictionnaire | **1,29 Go** en 2 générations (10 compactée, 11) |
+| construction + panel | ~65 s | ~65 s | 255 s |
+| panel | 9/9 | 9/9 | **9/9, mêmes comptes** |
+
+22,5 M d'identifiants frappés pour `content` (25,6 M de textes distincts
+mesurés le 4 au soir par texte + forme ; l'internement par forme réunit
+un peu plus), 221 k pour `path`. Depuis le 4 au matin : **18 → 5,98 Go,
+−67 %** ; contre les moteurs de [28-08/06](../28-08-2026/06-comparaison-moteurs-mesures.md) :
+Elasticsearch ×3,6, tantivy trigrammes ×0,8, lucivy ×6,7 — deux fois
+Elasticsearch, avec les spans exacts et le fuzzy cross-token que ni l'un
+ni l'autre n'ont.
+
+Le temps de construction (255 s contre 65) : dix repliements de ~2,3 M de
+textes chacun, et une compaction de 22,5 M de textes au neuvième commit
+(la mémoire du builder pour 150 M d'entrées — non mesurée ce matin, à
+faire avec `/usr/bin/time` qui manque sur cette machine : `command time`
+de zsh, ou `perf stat`). Les temps de requête de cette passe sont ceux
+d'une machine qui construisait juste avant ; à refaire à froid.
+
+---
+
+## 11. La requête sur le dictionnaire : l'état honnête, et ce qu'il faut faire
+
+**A/B 30 000 fichiers, même binaire, 3 passes, min, ms** — index v3
+(conteneur 8, tables par blocs) contre index dictionnaire (2 000 fichiers
+par commit, 120 segments, 6,5 M de textes) :
+
+| requête | v3 | dictionnaire | ratio |
+|---|---|---|---|
+| mutex_lock strict | 1,8 | 10,2 | ×5,7 |
+| mutex_lock relax | 1,6 | 21,3 | ×13 |
+| spin_lock strict | 1,6 | 15,1 | ×9,4 |
+| sched term | 3,2 | 69,6 | ×22 |
+| sched strict | 2,0 | 5,5 | ×2,8 |
+| printk sw | 2,3 | 22,4 | ×9,7 |
+| schdule fz1 | 12,5 | 121 | ×9,7 |
+| regsiter fz2 | 132 | 422 | ×3,2 |
+| spin_lock_[a-z]+ rx | 9,9 | 18,3 | ×1,9 |
+| schdule jw1 | 14,4 | 29,8 | ×2,1 |
+
+Comptes et spans identiques partout. Le panel exécute chaque requête
+**une fois, à froid** : c'est le cas d'usage réel, et la règle du 4
+septembre (rien au-delà de ×1,5) est violée partout. À chaud (même requête
+relancée) on est à ×1,3-1,5.
+
+**Pourquoi** : le travail au niveau du shard (scans de plage, marches,
+chaînes par reste — une chaîne de petits calculs dépendants) est fait une
+fois grâce à la mémo, mais **sur un thread**, tandis que l'index v3 fait
+le même CPU total réparti sur 24 threads (un segment = une tâche). Ce
+qui a été essayé pour paralléliser le froid, et ce que ça a donné :
+
+1. cellules par partition + pré-calcul des comptes et des pièces du fuzzy
+   en tâches (§8) : fuzzy froid 61 → 45 ms sur 10 000 ; sans effet sur
+   les requêtes exactes ;
+2. scans des préfixes courts découpés par octet suivant en 257 tâches
+   (`compute_in_tasks`, mémo à trois états, tâches en priorité Critical) :
+   **plus lent** (`sched term` 7 → 12 ms) — les prescans qui attendent
+   la cellule se pompent les uns les autres en attente coopérative (160
+   attentes imbriquées) ; laissé dans le code à `SPLIT_SCAN_MAX_PREFIX =
+   0`, avec la mesure en commentaire ;
+3. faire partir les segments d'un n-gramme différent : sans effet.
+
+**Ce qu'il faut faire** (le prochain vrai pas, pas une rustine) : sortir la
+phase FST d'une requête des nœuds par segment. Un nœud « prescan du
+dictionnaire » **par shard** dans le DAG de recherche
+(`lucivy_core/src/search_dag.rs`), qui produit le *plan* de la requête —
+candidats, splits, chaînes pour tous les restes, pièces du fuzzy avec leurs
+listes — avec son propre parallélisme interne (les cellules sont
+indépendantes par partition, par reste, par pièce ; un fan-out de tâches
+sans attente sous elles), puis les nœuds par segment qui ne font que
+résoudre (postings, posmap, fratrie, vérification). Ça demande de scinder
+`find_literal_v3` / `fuzzy_v3` / regex en deux phases explicites (plan →
+exécution par segment) au lieu de la mémo qui les intercepte. Tant que ce
+n'est pas fait : **le mode dictionnaire reste optionnel** (`sfx_version:
+4`), pas le défaut ; il vaut pour ce qui prime sur la latence (le disque et
+la RAM : −46 % sur le noyau), et à chaud.
+
+**Ce que ça corrige** : le §8 espérait « fz1 sous 10 ms, term sous 4 » avec
+des pré-calculs ; c'est faux tant que le froid est une chaîne de cellules
+calculées en ligne. Le [06](06-chantier-dictionnaire-partage-rapport.md)
+§2.1 promettait « moins de travail, pas plus » à la requête : le travail
+total est le même, sa *répartition* est pire.

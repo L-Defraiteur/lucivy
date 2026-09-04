@@ -203,8 +203,12 @@ Tests ajoutés aujourd'hui, à connaître : `packed_and_legacy_records_decode_to
   `V3_PROFILE=1` : la ligne `[prescan]` / `[fz prescan]` donne le mur, la
   somme par segment et le **max par segment** — quand max ≈ mur, un segment
   calcule pendant que les autres attendent la cellule.
-- **Ce qui n'est pas fait / à savoir** : le calcul froid d'une requête
-  fuzzy reste ×8 (soixante scans moyens, [09](09-journal-chantier-dictionnaire.md) §8) ;
+- **A/B 30 000 dictionnaire contre v3** : `run-ab-dict.sh` du scratchpad
+  (même binaire, `V3_SFX_VERSION=4` pour l'index dictionnaire, 3 passes) ;
+  résultat du 5 septembre : ×2 à ×22 à froid ([09](09-journal-chantier-dictionnaire.md) §11).
+- **Ce qui n'est pas fait / à savoir** : le calcul froid d'une requête est
+  sur un thread — le mode dictionnaire n'est pas le défaut tant que la
+  phase FST n'est pas un nœud par shard ([09](09-journal-chantier-dictionnaire.md) §11) ;
   `index_bytes`, `preload`, `residency` ignorent les fichiers `dict-*` ;
   l'import WASM (`lucivy_import_file`) les route dans `shard_0/` sans les
   connaître, ce qui se trouve être juste ; un segment abandonné entre deux
@@ -214,8 +218,8 @@ Tests ajoutés aujourd'hui, à connaître : `packed_and_legacy_records_decode_to
   en mode dictionnaire.
 - **Index du scratchpad** : `idx-dict` (référence 10 000 en une
   génération, v1), `idx-dict2` (générations incrémentales, 4 vivantes),
-  `idx30k-dict`, `idx90k-dict` (s'ils ont fini), `prof-dict*.txt`,
-  `dict-e2e.txt`.
+  `idx30k-dict` (1,33 Go), `idx90k-dict` (5,98 Go, le noyau entier),
+  `prof-dict*.txt`, `abdict-*.txt` (l'A/B), `dict-e2e.txt`.
 
 ---
 

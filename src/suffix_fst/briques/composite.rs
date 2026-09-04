@@ -602,7 +602,7 @@ fn prefetch_fuzzy_scans(ctx: &BriquesContext<'_>, query: &str, distance: u8, ngr
     let mut rxs = Vec::with_capacity(missing.len());
     for (q, p) in missing {
         let reader = ctx.reader.clone();
-        rxs.push(scheduler.submit_task(crate::actor::Priority::High, move || {
+        rxs.push(scheduler.submit_task(crate::actor::Priority::Critical, move || {
             let _ = fst_walk::memo_count_in_partition(&reader, reader.memo().unwrap(), &q, p);
         }));
     }
@@ -779,7 +779,7 @@ fn resolve_pieces(
                 if memo.contains(1, lower[a..b].as_bytes(), p << 2) { continue; }
                 let reader = ctx.reader.clone();
                 let piece = lower[a..b].to_string();
-                rxs.push(scheduler.submit_task(crate::actor::Priority::High, move || {
+                rxs.push(scheduler.submit_task(crate::actor::Priority::Critical, move || {
                     let _ = fst_walk::memo_candidates_in_partition(&reader, reader.memo().unwrap(), &piece, p);
                 }));
             }

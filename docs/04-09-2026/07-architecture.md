@@ -118,13 +118,17 @@ par tous les segments (`SegmentReader::sfx_dictionary_field`) et **mémoïse**
 ses marches (`FstMemo`, cellule `OnceLock` par (fonction, requête)) ; chaque
 segment en reçoit une **vue** (`for_segment(gmap)`) qui coupe les listes
 mémoïsées à ses identifiants par marche fusionnée. Les chaînes se
-construisent par segment. Limite connue : le calcul froid d'une requête est
-fait une fois mais sur un seul thread ([09](09-journal-chantier-dictionnaire.md) §8).
+construisent par segment. **Limite qui compte** : le calcul froid d'une
+requête est fait une fois mais sur un seul thread — à froid, ×2 à ×22 plus
+lent que l'index v3 sur 30 000 fichiers ([09](09-journal-chantier-dictionnaire.md) §11) ;
+le mode est optionnel tant que la phase FST n'est pas un nœud par shard du
+DAG de recherche.
 
-Mesuré sur la référence de 10 000 fichiers : 508 → 390 Mo (4 générations
-vivantes ; 387 en une seule), construction 19 s (8 en v3) ; comptes et
-spans identiques ; exactes à ±1 ms, terme/préfixe ×2, fuzzy ×9 à froid,
-×1,3 à chaud. Vérité : `lucivy_core/tests/test_dictionary_index.rs`.
+Mesuré : référence 10 000 fichiers 508 → 390 Mo (4 générations vivantes ;
+387 en une seule), construction 19 s (8 en v3) ; 30 000 : 1 659 →
+1 327 Mo ; noyau entier : 11,06 → 5,98 Go (×6,7 le texte), 255 s, 2
+générations ; comptes et spans identiques partout. Vérité :
+`lucivy_core/tests/test_dictionary_index.rs`.
 
 ### 2.3 Ce que le builder enregistre
 

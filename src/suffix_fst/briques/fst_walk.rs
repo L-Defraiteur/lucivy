@@ -255,6 +255,16 @@ fn partition_flags(partition: u8) -> u8 {
     partition << 2
 }
 
+/// Prefixes up to this length have their cells filled by one task per
+/// following byte (`compute_in_tasks`) instead of one inline scan. Measured
+/// at 3 on the 10 000-file dictionary: **slower** — `sched term` cold 7 →
+/// 12 ms, fuzzy 45 → 64 — because the prescans waiting on the cell pump
+/// each other (160 nested waits) faster than the 257 sub-tasks drain, and
+/// the cold cost is not one big scan but a chain of dependent small ones.
+/// Kept at 0 (never) until the FST phase of a query runs as its own DAG
+/// node per shard, where sub-range tasks have no waiter above them.
+const SPLIT_SCAN_MAX_PREFIX: usize = 0;
+
 /// The memoized, id-sorted candidates of one partition (tag 1).
 pub fn memo_candidates_in_partition(
     reader: &SfxFileReaderV3,
@@ -262,7 +272,21 @@ pub fn memo_candidates_in_partition(
     query: &str,
     partition: u8,
 ) -> std::sync::Arc<Vec<FstCandidateV3>> {
-    memo.get_or_compute(1, query.as_bytes(), partition_flags(partition), || {
+    let flags = partition_flags(partition);
+    if query.len() <= SPLIT_SCAN_MAX_PREFIX && !memo.contains(1, query.as_bytes(), flags) {
+        let parts: Vec<Box<dyn FnOnce() -> Vec<FstCandidateV3> + Send>> = (0..=256u16).map(|b| {
+            let reader = reader.clone();
+            let query = query.to_string();
+            Box::new(move || fst_candidates_in_subrange(&reader, &query, partition, if b == 256 { None } else { Some(b as u8) }))
+                as Box<dyn FnOnce() -> Vec<FstCandidateV3> + Send>
+        }).collect();
+        memo.compute_in_tasks(1, query.as_bytes(), flags, parts, |parts: Vec<Vec<FstCandidateV3>>| {
+            let mut v: Vec<FstCandidateV3> = parts.into_iter().flatten().collect();
+            v.sort_by_key(|c| (c.raw_ordinal, c.sti));
+            v
+        });
+    }
+    memo.get_or_compute(1, query.as_bytes(), flags, || {
         let mut v = fst_candidates_in_partition(reader, query, partition);
         v.sort_by_key(|c| (c.raw_ordinal, c.sti));
         v
@@ -276,9 +300,124 @@ pub fn memo_count_in_partition(
     query: &str,
     partition: u8,
 ) -> usize {
-    *memo.get_or_compute(6, query.as_bytes(), partition_flags(partition), || {
+    let flags = partition_flags(partition);
+    if query.len() <= SPLIT_SCAN_MAX_PREFIX && !memo.contains(6, query.as_bytes(), flags) {
+        let parts: Vec<Box<dyn FnOnce() -> usize + Send>> = (0..=256u16).map(|b| {
+            let reader = reader.clone();
+            let query = query.to_string();
+            Box::new(move || fst_candidates_count_in_subrange(&reader, &query, partition, if b == 256 { None } else { Some(b as u8) }))
+                as Box<dyn FnOnce() -> usize + Send>
+        }).collect();
+        memo.compute_in_tasks(6, query.as_bytes(), flags, parts, |parts: Vec<usize>| parts.iter().sum::<usize>());
+    }
+    *memo.get_or_compute(6, query.as_bytes(), flags, || {
         fst_candidates_count_in_partition(reader, query, partition)
     })
+}
+
+/// The keys of one partition under `query` whose next byte is `next`, or
+/// — `None` — the key equal to `query` and the boundary probes.
+fn subrange_keys(partition: u8, query_bytes: &[u8], next: Option<u8>) -> Option<(Vec<u8>, Vec<u8>)> {
+    let mut ge = vec![partition];
+    ge.extend_from_slice(query_bytes);
+    match next {
+        None => None,
+        Some(b) => {
+            ge.push(b);
+            let lt = if b == 0xFF {
+                let (_, lt_all) = range_keys(partition, query_bytes);
+                lt_all
+            } else {
+                let mut lt = ge.clone();
+                *lt.last_mut().unwrap() += 1;
+                lt
+            };
+            Some((ge, lt))
+        }
+    }
+}
+
+/// `fst_candidates_in_partition` over one sub-range (see `subrange_keys`).
+fn fst_candidates_in_subrange(reader: &SfxFileReaderV3, query: &str, partition: u8, next: Option<u8>) -> Vec<FstCandidateV3> {
+    let lower = query.to_lowercase();
+    let query_bytes = lower.as_bytes();
+    let mut results = Vec::new();
+    for part in reader.part_views() {
+        let fst = part.fst();
+        use lucivy_fst::{IntoStreamer, Streamer};
+        match subrange_keys(partition, query_bytes, next) {
+            Some((ge, lt)) => {
+                let mut stream = fst.range().ge(&ge).lt(&lt).into_stream();
+                while let Some((key, val)) = stream.next() {
+                    for p in part.decode_parents(val, key) {
+                        results.push(FstCandidateV3::from_parent(&p, partition));
+                    }
+                }
+            }
+            None => {
+                let mut exact = vec![partition];
+                exact.extend_from_slice(query_bytes);
+                if let Some(val) = fst.get(&exact) {
+                    for p in part.decode_parents(val, &exact) {
+                        results.push(FstCandidateV3::from_parent(&p, partition));
+                    }
+                }
+                if part.keys_cut_at_boundary() {
+                    let len = query_bytes.len();
+                    let shortest = len.saturating_sub(MAX_OVERLAP_BYTES).max(1);
+                    for k in shortest..len {
+                        let tail = &query_bytes[k..];
+                        let mut probe = vec![partition];
+                        probe.extend_from_slice(&query_bytes[..k]);
+                        let Some(val) = fst.get(&probe) else { continue };
+                        let parents = part.decode_parents_where(val, &probe, |ov| ov.len() >= tail.len() && ov[..tail.len()] == *tail);
+                        for p in parents {
+                            results.push(FstCandidateV3::from_parent(&p, partition));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    results
+}
+
+/// `fst_candidates_count_in_partition` over one sub-range.
+fn fst_candidates_count_in_subrange(reader: &SfxFileReaderV3, query: &str, partition: u8, next: Option<u8>) -> usize {
+    let lower = query.to_lowercase();
+    let query_bytes = lower.as_bytes();
+    let mut total = 0usize;
+    for part in reader.part_views() {
+        let fst = part.fst();
+        use lucivy_fst::{IntoStreamer, Streamer};
+        match subrange_keys(partition, query_bytes, next) {
+            Some((ge, lt)) => {
+                let mut stream = fst.range().ge(&ge).lt(&lt).into_stream();
+                while let Some((key, val)) = stream.next() {
+                    total += part.count_parents(val, key);
+                }
+            }
+            None => {
+                let mut exact = vec![partition];
+                exact.extend_from_slice(query_bytes);
+                if let Some(val) = fst.get(&exact) {
+                    total += part.count_parents(val, &exact);
+                }
+                if part.keys_cut_at_boundary() {
+                    let len = query_bytes.len();
+                    let shortest = len.saturating_sub(MAX_OVERLAP_BYTES).max(1);
+                    for k in shortest..len {
+                        let tail = &query_bytes[k..];
+                        let mut probe = vec![partition];
+                        probe.extend_from_slice(&query_bytes[..k]);
+                        let Some(val) = fst.get(&probe) else { continue };
+                        total += part.decode_parents_where(val, &probe, |ov| ov.len() >= tail.len() && ov[..tail.len()] == *tail).len();
+                    }
+                }
+            }
+        }
+    }
+    total
 }
 
 /// Every memo cell a query's candidates need, for a prefetch: one

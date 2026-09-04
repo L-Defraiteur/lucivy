@@ -286,8 +286,11 @@ layout 3) ; **`sfx_version` 4 = dictionnaire partagé par shard**
 (`dict-<g>.<champ>.sfx/.termtexts`, `.gmap` par segment, une génération
 par commit avec ses seuls nouveaux textes, compaction au-delà de
 `LUCIVY_DICT_MAX_GENERATIONS` = 8 ; référence 10 000 : 390 Mo, −66 %
-depuis le 4 au matin, 30 000 : −20 % de plus ; requêtes exactes à ±1 ms,
-fuzzy ×9 à mémo froide, ×1,3 à chaud — voir `09` §7-9),
+depuis le 4 au matin, 30 000 : −20 %, noyau entier 11,06 → 5,98 Go,
+×6,7 le texte ; **mais à froid les requêtes sont ×2 à ×22 plus lentes**
+qu'en v3 sur 30 000 fichiers — le travail FST est fait une fois mais sur
+un thread ; mode **optionnel, pas le défaut**, jusqu'au nœud « prescan du
+dictionnaire » par shard décrit dans `09` §11),
 `.posmap` `PMP3` (3 octets), `.sibling_v3` `SIB3` (sans gap), `.termtexts`
 layout 2 (méta dans la table d'offsets), plus de `.bytemap` en v3. Chaque
 lecteur ouvre encore les layouts précédents. Règle du 4 septembre : la taille

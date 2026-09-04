@@ -116,17 +116,73 @@ impl std::fmt::Display for SfxV3Error {
 
 impl std::error::Error for SfxV3Error {}
 
-/// Results of the FST-only briques (`fst_candidates_v3`, the falling walks,
-/// the FST chains) keyed by their arguments, for a reader shared by every
-/// segment of a shard: on a dictionary index (`sfx_version` 4) all the
-/// segments walk the same FST for the same query, so the first walk
-/// answers for all — 160 segments used to mean 160 walks of the whole
-/// shard's dictionary. Bounded: the map is emptied past `MEMO_MAX_ENTRIES`.
+/// Results of the FST-only briques (`fst_candidates_v3`, the falling walks)
+/// keyed by their arguments, for a reader shared by every segment of a
+/// shard: on a dictionary index (`sfx_version` 4) all the segments walk the
+/// same FST for the same query, so the first computation answers for all —
+/// 160 segments used to mean 160 walks of the whole shard's dictionary.
+/// Bounded: the map is emptied past `MEMO_MAX_ENTRIES`.
 ///
-/// Concurrent misses on one key compute once: the map hands out a cell
-/// per key, and `OnceLock::get_or_init` makes the other callers wait.
+/// A cell is empty, in flight, or done. `get_or_compute` computes an empty
+/// cell **inline, never waiting on anything**, and waits for an in-flight
+/// one (cooperatively on a scheduler thread). `compute_in_tasks` fills a
+/// cell from several scheduler tasks whose last finisher merges and stores
+/// — the waiting never sits under the computing, so the cooperative waits
+/// cannot deadlock (a first version computed sub-tasks inside the cell and
+/// waited for them: a pumped prescan waited on that very cell, on the same
+/// thread, below it).
 pub struct FstMemo {
-    entries: std::sync::Mutex<std::collections::HashMap<(u8, Vec<u8>, u8), std::sync::Arc<std::sync::OnceLock<std::sync::Arc<dyn std::any::Any + Send + Sync>>>>>,
+    entries: std::sync::Mutex<std::collections::HashMap<(u8, Vec<u8>, u8), std::sync::Arc<MemoCell>>>,
+}
+
+type MemoValue = std::sync::Arc<dyn std::any::Any + Send + Sync>;
+
+enum CellState {
+    Empty,
+    InFlight,
+    Done(MemoValue),
+}
+
+/// One memoized result and its state.
+pub struct MemoCell {
+    state: std::sync::Mutex<CellState>,
+    done: std::sync::Condvar,
+}
+
+impl MemoCell {
+    fn new() -> Self {
+        Self { state: std::sync::Mutex::new(CellState::Empty), done: std::sync::Condvar::new() }
+    }
+
+    /// Store a finished value and wake the waiters.
+    fn store(&self, value: MemoValue) {
+        *self.state.lock().unwrap() = CellState::Done(value);
+        self.done.notify_all();
+    }
+
+    /// Wait for a value another computation is producing: on a scheduler
+    /// thread by running other tasks (the producers among them), elsewhere
+    /// on the condvar.
+    fn wait_done(&self) -> MemoValue {
+        loop {
+            {
+                let guard = self.state.lock().unwrap();
+                if let CellState::Done(v) = &*guard {
+                    return v.clone();
+                }
+                if !crate::actor::scheduler::is_scheduler_thread() {
+                    let (guard, _) = self.done.wait_timeout(guard, std::time::Duration::from_millis(2)).unwrap();
+                    if let CellState::Done(v) = &*guard {
+                        return v.clone();
+                    }
+                    continue;
+                }
+            }
+            if !crate::actor::scheduler::global_scheduler().run_one_step() {
+                std::thread::yield_now();
+            }
+        }
+    }
 }
 
 const MEMO_MAX_ENTRIES: usize = 4096;
@@ -141,13 +197,23 @@ impl FstMemo {
         Self { entries: std::sync::Mutex::new(std::collections::HashMap::new()) }
     }
 
-    /// True when `(tag, query, flags)` has a cell — computed or being computed.
+    fn cell(&self, tag: u8, query: &[u8], flags: u8) -> std::sync::Arc<MemoCell> {
+        let mut map = self.entries.lock().unwrap();
+        if map.len() >= MEMO_MAX_ENTRIES {
+            map.clear();
+        }
+        map.entry((tag, query.to_vec(), flags))
+            .or_insert_with(|| std::sync::Arc::new(MemoCell::new()))
+            .clone()
+    }
+
+    /// True when `(tag, query, flags)` has a cell — done or in flight.
     pub fn contains(&self, tag: u8, query: &[u8], flags: u8) -> bool {
         self.entries.lock().unwrap().contains_key(&(tag, query.to_vec(), flags))
     }
 
-    /// The value under `(tag, query, flags)`, computed by `f` on the first
-    /// call and shared afterwards.
+    /// The value under `(tag, query, flags)`: computed by `f` inline on the
+    /// first call, awaited when another caller is computing it.
     pub fn get_or_compute<T: std::any::Any + Send + Sync + 'static>(
         &self,
         tag: u8,
@@ -155,17 +221,80 @@ impl FstMemo {
         flags: u8,
         f: impl FnOnce() -> T,
     ) -> std::sync::Arc<T> {
-        let cell = {
-            let mut map = self.entries.lock().unwrap();
-            if map.len() >= MEMO_MAX_ENTRIES {
-                map.clear();
+        let cell = self.cell(tag, query, flags);
+        let mine = {
+            let mut st = cell.state.lock().unwrap();
+            match &*st {
+                CellState::Done(v) => return v.clone().downcast::<T>().expect("memo entry of another type under this tag"),
+                CellState::InFlight => false,
+                CellState::Empty => { *st = CellState::InFlight; true }
             }
-            map.entry((tag, query.to_vec(), flags))
-                .or_insert_with(|| std::sync::Arc::new(std::sync::OnceLock::new()))
-                .clone()
         };
-        let value = cell.get_or_init(|| std::sync::Arc::new(f()) as std::sync::Arc<dyn std::any::Any + Send + Sync>);
-        value.clone().downcast::<T>().expect("memo entry of another type under this tag")
+        if mine {
+            let value: MemoValue = std::sync::Arc::new(f());
+            cell.store(value.clone());
+            return value.downcast::<T>().expect("memo entry of another type under this tag");
+        }
+        cell.wait_done().downcast::<T>().expect("memo entry of another type under this tag")
+    }
+
+    /// Fill `(tag, query, flags)` from `parts` run as scheduler tasks, the
+    /// last to finish merging them with `merge` and storing the cell; returns
+    /// at once. Does nothing when the cell exists already. The caller then
+    /// asks `get_or_compute`, which waits.
+    pub fn compute_in_tasks<T, P>(
+        &self,
+        tag: u8,
+        query: &[u8],
+        flags: u8,
+        parts: Vec<Box<dyn FnOnce() -> P + Send>>,
+        merge: impl FnOnce(Vec<P>) -> T + Send + 'static,
+    ) where
+        T: std::any::Any + Send + Sync + 'static,
+        P: Send + 'static,
+    {
+        let cell = self.cell(tag, query, flags);
+        {
+            let mut st = cell.state.lock().unwrap();
+            if !matches!(&*st, CellState::Empty) {
+                return;
+            }
+            *st = CellState::InFlight;
+        }
+        if parts.is_empty() {
+            cell.store(std::sync::Arc::new(merge(Vec::new())));
+            return;
+        }
+        struct Gather<P, T, M> {
+            results: std::sync::Mutex<Vec<Option<P>>>,
+            remaining: std::sync::atomic::AtomicUsize,
+            merge: std::sync::Mutex<Option<M>>,
+            _t: std::marker::PhantomData<fn() -> T>,
+        }
+        let n = parts.len();
+        let gather: std::sync::Arc<Gather<P, T, _>> = std::sync::Arc::new(Gather {
+            results: std::sync::Mutex::new((0..n).map(|_| None).collect()),
+            remaining: std::sync::atomic::AtomicUsize::new(n),
+            merge: std::sync::Mutex::new(Some(merge)),
+            _t: std::marker::PhantomData,
+        });
+        let scheduler = crate::actor::scheduler::global_scheduler();
+        for (i, part) in parts.into_iter().enumerate() {
+            let gather = gather.clone();
+            let cell = cell.clone();
+            // Above the prescans that wait on this cell: a waiter pumping the
+            // queue must find the producers first, not another waiter.
+            let _rx = scheduler.submit_task(crate::actor::Priority::Critical, move || {
+                let r = part();
+                gather.results.lock().unwrap()[i] = Some(r);
+                if gather.remaining.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) == 1 {
+                    let results: Vec<P> = gather.results.lock().unwrap().iter_mut().map(|r| r.take().unwrap()).collect();
+                    let merge = gather.merge.lock().unwrap().take().unwrap();
+                    let value: MemoValue = std::sync::Arc::new(merge(results));
+                    cell.store(value);
+                }
+            });
+        }
     }
 }
 
