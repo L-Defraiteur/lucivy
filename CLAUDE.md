@@ -119,7 +119,8 @@ Suffix FST avec partitionnement SI=0/SI>0 pour le substring matching.
 - **Regex** : extraction de littéraux, validation regex sur candidats
 
 Fichiers par segment (v3, par champ) : `.sfx`, `.sfxpost`, `.termtexts`, `.posmap`,
-`.bytemap`, `.word_sfxpost`, `.word_pos_map`, `.sibling_v3`. (`.gapmap`, `.sepmap` : v2.)
+`.word_sfxpost`, `.word_pos_map`, `.sibling_v3`. (`.bytemap` : jusqu'au 4 septembre 2026,
+ignoré depuis ; `.gapmap`, `.sepmap` : v2.)
 
 **`sfx_version` par défaut = 3** depuis le 23 août 2026. Un `meta.json` sans le champ
 est un index v2 (le champ est maintenant toujours écrit). Les tests du moteur v2
@@ -257,12 +258,24 @@ cd playground && node serve.mjs
 
 ## Docs
 
-**Dossier courant : `docs/04-09-2026/` — `01-recap-findings-et-plan-d-action.md`
-(le plan : ce qu'on sait, dans quel ordre on réduit), puis
-`02-audit-taille-index-sfx-v3.md` (audit disque/RAM du format v3, mesuré sur
-l'index de bench de 93 605 fichiers : le `.sfx` est aux trois quarts une
-**table de parents**, pas une FST ; script `benches/scan_index_size.py`).
-Le travail v4 est sur la branche `v4`, pas sur `main`.
+**Dossier courant : `docs/04-09-2026/` — lire d'abord
+`04-recap-journee-et-a-faire.md` (autonome : −36 % d'index en une journée,
+ce qui a été appris, ce qui reste), puis `01-recap-findings-et-plan-d-action.md`
+(le plan, avec l'état et le gain mesuré de chaque étape), `03-journal-des-etapes.md`
+(chaque étape : changement, taille, justesse, A/B de temps, commandes) et
+`02-audit-taille-index-sfx-v3.md` (l'audit du format v3 : le `.sfx` était aux
+trois quarts une table de parents ; script `benches/scan_index_size.py`).
+**Le travail v4 est sur la branche `v4`, pas sur `main`**, et un binaire 3.0.x
+ne lit pas un index v4 : conteneur `.sfx` version 5 (parents en delta-varint),
+`.posmap` `PMP3` (3 octets), `.sibling_v3` `SIB3` (sans gap), `.termtexts`
+layout 2 (méta dans la table d'offsets), plus de `.bytemap` en v3. Chaque
+lecteur ouvre encore les layouts précédents. Règle du 4 septembre : la taille
+disque/RAM d'abord, l'exactitude est ce qu'on vend, le temps acceptable tant
+qu'aucune requête n'approche ×1,5. Protocole par étape : index de référence
+10 000 fichiers (`/tmp/lucivy-cmp`, `V3_INDEX_DIR`), panel
+`v3_ground_truth_demo` identique (comptes et spans), A/B de temps sur
+30 000 fichiers (`/tmp/lucivy-cmp-90k`, `V3_MAX_DOCS=30000`,
+`V3_COMMIT_EVERY=2000`), réouverture des index de référence antérieurs.
 Veille : `docs/28-08-2026/` — lire d'abord
 `07-rapport-progression-et-taille-index.md` (ce qui a été fait, et pourquoi la
 promotion attend une réduction de la taille d'index), `08-architecture.md` et

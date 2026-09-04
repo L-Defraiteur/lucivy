@@ -65,24 +65,28 @@ la requête** : plus lent par match émis, pour 3 à 6 %.
 Chaque étape est un commit qui passe le protocole du §4 avant le suivant.
 Gains en % de l'index de bench, estimés dans l'audit ; ils se composent.
 
-| # | changement | gain | modèle de recherche |
-|---|---|---|---|
-| **1** | **Table de parents compacte** : le même `u64` que la valeur inline (63 bits utiles) au lieu de 11 octets ; `count` en varint | −9 % | intact — même décodage, moins d'octets |
-| **2** | **Supprimer `.bytemap`** : contenu ⇔ `own_len − sep_len > 0` en META ; le préfiltre DFA regex relit les ≤ 8 octets du chunk | −11 % | intact |
-| **3** | `.posmap` en 3 octets par position (ordinaux ≤ 2²⁴) | −1,4 % | intact |
-| **4** | `.sibling_v3` sans `gap_len` (c'est la longueur de contenu de la destination, en META) | −1 % | une lecture META de plus dans la branche relaxée |
-| **5** | **Clés sans overlap** : la clé s'arrête à `own_len`, l'overlap se vérifie sur `termtexts` ; plus de marqueurs, plus de suffixes en zone d'overlap | −17 % | **touché** : `add_token`, `check_split`, `fst_candidates_v3` — l'étape à prouver le plus durement |
-| 6 | `.termtexts` : META 6 → 4 octets, offsets par bloc | −2 % | intact |
-| 7 | `.sfxpost` sans `bt − bf` (= `own_len`) ; `.word_sfxpost` sans `to − from` si l'hypothèse tient | −2,6 % | une lecture META par ordinal résolu |
-| 8 | Parents en delta-varint (≈ 5,5 o) **si** le décodage séquentiel ne coûte rien sur les listes de 300 k | −7 % de plus | décodage plus branchu — à mesurer |
-| 9 | Deux espaces d'ordinaux (chunks / mots) | −1,7 % | plomberie |
+| # | changement | estimé | **mesuré (10 k)** | état |
+|---|---|---|---|---|
+| 1 | Table de parents : `u64` packé au lieu de 11 octets | −9 % | −9,6 % | **fait** `30ad3da` |
+| 2 | Supprimer `.bytemap` (META répond) | −11 % | −16,0 % | **fait** `d0bb7d3` |
+| 3 | `.posmap` en 3 octets par position | −1,4 % | −0,9 % | **fait** `2b3f5a8` |
+| 4 | `.sibling_v3` sans `gap_len` (META) | −1 % | −1,1 % | **fait** `ff013a4` |
+| 6 | `.termtexts` : méta dans la table d'offsets, 8 o par ordinal | −2 % | −1,1 %, **et rend les 3 ms** du fuzzy relâché | **fait** `84c9c6a`, passé avant la 5 |
+| 5a | Plus de suffixe qui commence dans l'overlap | (partie de −17 %) | −6,8 % | **fait** `3ab5ba6` |
+| 5b | Plus de marqueurs, clés arrêtées à `own_len` | (reste de −17 %) | — | **renoncé** : la clé `_` porte 54 747 parents ; sans marqueur, chaque frontière de ce type coûterait leur décodage plus une lecture de `.termtexts` par parent, ×2 à ×3 sur `mutex_lock`. Reviendrait seulement avec l'overlap dans la valeur du parent, impossible dans les 63 bits actuels |
+| 8 | Parents en delta-varint, conteneur `.sfx` v5 | −7 % | −8,1 % | **fait** `37d6d52` |
+| 7 | `.sfxpost` sans `bt − bf` ; `.word_sfxpost` sans `to − from` si l'hypothèse tient | −2,6 % | — | à faire |
+| 9 | Deux espaces d'ordinaux (chunks / mots) | −1,7 % | — | à faire |
 
-Étapes 1 à 4 : encodage pur, aucun algorithme touché, environ **−22 %**.
-Étape 5 : le vrai changement, et le seul qui baisse aussi la RAM de
-construction (−46 % d'entrées dans le builder) et le cache WASM. Cumul
-1 à 8 : de l'ordre de **−45 à −50 %**. Ce n'est pas ×5 ; c'est ce qui se
-fait sans toucher aux occurrences ni au modèle de recherche, et c'est le
-préalable à toute discussion sur le reste.
+Les deltas mesurés se composent : **−36,2 %** sur 10 000 fichiers
+(1 152 → 735 Mo), −33 % sur 30 000 (3,4 → 2,3 Go). Journal, mesures et
+commandes : [03](03-journal-des-etapes.md).
+
+Ce qui reste (7 et 9) vaut environ −4 %. Au-delà, ce qui pèse encore sur
+les 735 Mo : la FST elle-même (256 Mo, 35 %), les parents (154 Mo, 21 %),
+les deux fichiers de postings (147 Mo, 20 %). Le prochain palier n'est plus
+de l'encodage : c'est le nombre de clés de la FST (6 par chunk après 5a,
+dont la moitié de marqueurs) et les postings de chunks.
 
 `LUCIVY_MIN_SUFFIX_LEN=3` (−6 %, zéro code) reste **hors plan** tant qu'un
 test ne prouve pas qu'une requête d'un ou deux octets en fin de valeur
