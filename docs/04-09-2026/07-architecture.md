@@ -141,9 +141,13 @@ requêtes sur dix le tiennent).
 
 Mesuré : référence 10 000 fichiers 508 → 390 Mo (4 générations vivantes ;
 387 en une seule), construction 19 s (8 en v3) ; 30 000 : 1 659 →
-1 327 Mo ; noyau entier : 11,06 → 5,98 Go (×6,7 le texte), 255 s, 2
+1 327 Mo ; noyau entier : **7,3 → 5,6 Go à format égal** (−23 % ; ×6,7 le
+texte ; le « 11,06 → 5,98 » d'abord publié comparait un v3 du matin en
+conteneur 5, [11](11-journal-chantier-plan-fst.md) §4 bis), 255 s, 2
 générations ; comptes et spans identiques partout. Vérité :
-`lucivy_core/tests/test_dictionary_index.rs`.
+`lucivy_core/tests/test_dictionary_index.rs`, et les variantes
+`sfx_version 4` de `test_federated_search`, `test_filtered_search_truth`,
+`test_luce_v3_roundtrip`.
 
 ### 2.3 Ce que le builder enregistre
 

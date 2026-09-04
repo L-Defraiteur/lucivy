@@ -40,10 +40,13 @@ fn corpus(n: u64) -> Vec<(u64, String)> {
     }).collect()
 }
 
-fn build(docs: &[(u64, String)], shards: usize) -> ShardedHandle {
+/// `sfx_version` 3 (an FST per segment) or 4 (a dictionary per shard: the
+/// FST phase of a query is planned once per shard, and a shard's segments
+/// share it — see `briques/plan.rs`).
+fn build(docs: &[(u64, String)], shards: usize, sfx_version: u8) -> ShardedHandle {
     let config: SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [{ "name": "content", "type": "text", "stored": true }],
-        "sfx_version": 3,
+        "sfx_version": sfx_version,
         "shards": shards,
     })).unwrap();
     let h = ShardedHandle::create_with_storage(
@@ -77,13 +80,25 @@ const QUERIES: [&str; 6] = [
 
 #[test]
 fn federated_equals_one_index_holding_everything() {
+    federated_equals_one_index(3);
+}
+
+/// Dictionary nodes against a v3 index holding everything: the union and
+/// the scores must be the ones of the per-segment engine — the plan and
+/// the prefix alternatives of the dictionary mode change nothing.
+#[test]
+fn federated_dictionary_nodes_equal_one_v3_index() {
+    federated_equals_one_index(4);
+}
+
+fn federated_equals_one_index(node_sfx_version: u8) {
     let docs = corpus(400);
     // Interleaved, so both nodes hold the same vocabulary.
     let left: Vec<_> = docs.iter().step_by(2).cloned().collect();
     let right: Vec<_> = docs.iter().skip(1).step_by(2).cloned().collect();
-    let node_a = build(&left, 2);
-    let node_b = build(&right, 2);
-    let single = build(&docs, 4);
+    let node_a = build(&left, 2, node_sfx_version);
+    let node_b = build(&right, 2, node_sfx_version);
+    let single = build(&docs, 4, 3);
 
     for qj in QUERIES {
         let query = q(qj);
@@ -121,11 +136,20 @@ fn federated_equals_one_index_holding_everything() {
 
 #[test]
 fn the_pre_filter_composes_with_federated_statistics() {
+    pre_filter_composes(3);
+}
+
+#[test]
+fn the_pre_filter_composes_with_federated_statistics_on_dictionary_nodes() {
+    pre_filter_composes(4);
+}
+
+fn pre_filter_composes(sfx_version: u8) {
     let docs = corpus(400);
     let left: Vec<_> = docs.iter().step_by(2).cloned().collect();
     let right: Vec<_> = docs.iter().skip(1).step_by(2).cloned().collect();
-    let node_a = build(&left, 2);
-    let node_b = build(&right, 2);
+    let node_a = build(&left, 2, sfx_version);
+    let node_b = build(&right, 2, sfx_version);
     let allowed: HashSet<u64> = (0..400u64).step_by(7).collect();
 
     for qj in QUERIES {
@@ -152,7 +176,7 @@ fn the_pre_filter_composes_with_federated_statistics() {
 #[test]
 fn federated_top_k_is_bounded_and_is_the_best() {
     let docs = corpus(400);
-    let node = build(&docs, 4);
+    let node = build(&docs, 4, 3);
     let query = q(QUERIES[0]);
     let global = ExportableStats::merge(&[node.export_stats(&query).unwrap()]);
 

@@ -291,15 +291,18 @@ layout 3) ; **`sfx_version` 4 = dictionnaire partagé par shard**
 (`dict-<g>.<champ>.sfx/.termtexts`, `.gmap` par segment, une génération
 par commit avec ses seuls nouveaux textes, compaction au-delà de
 `LUCIVY_DICT_MAX_GENERATIONS` = 8 ; référence 10 000 : 390 Mo, −66 %
-depuis le 4 au matin, 30 000 : −20 %, noyau entier 11,06 → 5,98 Go,
-×6,7 le texte ; à la requête, **un plan par shard** (`briques/plan.rs`,
+depuis le 4 au matin, 30 000 : −20 %, noyau entier **7,3 → 5,6 Go à
+format égal** (−23 % ; le « 11,06 → 5,98 » d'avant comparait un v3 du
+matin en conteneur 5), ×6,7 le texte ; à la requête, **un plan par shard** (`briques/plan.rs`,
 depuis `prescan_segments_more`) remplit en parallèle les cellules FST de
 la mémo du lecteur partagé avant le scatter par segment, un reste avalé
 est un `Alts::Prefix` testé sur `.termtexts` au lieu d'une liste, et la
 coupe des listes au `.gmap` galope ; à froid sur 30 000 fichiers, ×2-22 le
 5 au matin → **×0,8-1,9** le soir (`11` §4 : exactes 2,5-5,3 ms contre
-1,7-3,3 en v3, fuzzy plus rapide) ; mode **optionnel, pas le défaut**,
-tant que ×1,5 n'est pas tenu partout — cinq requêtes sur dix le tiennent),
+1,7-3,3 en v3, fuzzy plus rapide ; noyau entier idem, `11` §4 bis) ; les
+tests fédéré, filtré et roundtrip LUCE ont une variante `sfx_version 4` ;
+mode **optionnel, pas le défaut**, tant que ×1,5 n'est pas tenu partout —
+cinq requêtes sur dix le tiennent),
 `.posmap` `PMP3` (3 octets), `.sibling_v3` `SIB3` (sans gap), `.termtexts`
 layout 2 (méta dans la table d'offsets), plus de `.bytemap` en v3. Chaque
 lecteur ouvre encore les layouts précédents. Règle du 4 septembre : la taille

@@ -65,17 +65,33 @@ fn contains(field: &str, value: &str) -> QueryConfig {
 
 #[test]
 fn luce_v3_sharded_roundtrip() {
+    luce_sharded_roundtrip(3);
+}
+
+/// A shard dictionary (`sfx_version` 4) travels in a snapshot too: its
+/// generations (`dict-<g>.*`) are bundled with the shard, the imported
+/// index is still a dictionary index and answers the same.
+#[test]
+fn luce_dictionary_sharded_roundtrip() {
+    luce_sharded_roundtrip(4);
+}
+
+fn luce_sharded_roundtrip(sfx_version: u8) {
     let config: SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [
             {"name": "path", "type": "text"},
             {"name": "content", "type": "text"},
             {"name": "extension", "type": "text"}
         ],
+        "sfx_version": sfx_version,
         "shards": 4
     }))
     .unwrap();
+    let settings_of = |h: &ShardedHandle| -> Vec<u8> {
+        (0..h.num_shards()).map(|i| h.shard(i).unwrap().index.settings().sfx_version).collect()
+    };
 
-    let dir = std::env::temp_dir().join("lucivy_luce_v3_src");
+    let dir = std::env::temp_dir().join(format!("lucivy_luce_v{sfx_version}_src"));
     let _ = std::fs::remove_dir_all(&dir);
     let h = ShardedHandle::create(dir.to_str().unwrap(), &config).unwrap();
 
@@ -127,11 +143,12 @@ fn luce_v3_sharded_roundtrip() {
     h.commit().unwrap();
 
     let versions = sfx_versions(&h);
-    eprintln!("[luce-v3] {} docs, sfx versions {:?}", h.num_docs(), versions);
+    eprintln!("[luce-v3] {} docs, sfx versions {:?}, settings {:?}", h.num_docs(), versions, settings_of(&h));
     assert!(
         versions.iter().all(|v| *v == 3),
-        "the source index must be v3, got {versions:?}"
+        "the source index must be v3 containers, got {versions:?}"
     );
+    assert!(settings_of(&h).iter().all(|v| *v == sfx_version), "source settings");
 
     let panel: Vec<(&str, QueryConfig)> = vec![
         ("contains kmalloc", contains("content", "kmalloc")),
@@ -176,7 +193,7 @@ fn luce_v3_sharded_roundtrip() {
     h.close().unwrap();
 
     // ── Import into a fresh directory ───────────────────────────────────
-    let dest = std::env::temp_dir().join("lucivy_luce_v3_dst");
+    let dest = std::env::temp_dir().join(format!("lucivy_luce_v{sfx_version}_dst"));
     let _ = std::fs::remove_dir_all(&dest);
     std::fs::create_dir_all(&dest).unwrap();
     let t = std::time::Instant::now();
@@ -189,7 +206,9 @@ fn luce_v3_sharded_roundtrip() {
         t.elapsed().as_secs_f64()
     );
     assert_eq!(h2.num_docs(), docs.len() as u64, "document count after import");
-    assert!(sfx_versions(&h2).iter().all(|v| *v == 3), "imported index must stay v3");
+    assert!(sfx_versions(&h2).iter().all(|v| *v == 3), "imported index must stay v3 containers");
+    assert!(settings_of(&h2).iter().all(|v| *v == sfx_version),
+        "imported index must keep sfx_version {sfx_version}, got {:?}", settings_of(&h2));
 
     // ── Same answers ────────────────────────────────────────────────────
     let after = run_panel(&h2, &panel);

@@ -216,7 +216,9 @@ Tests ajoutés aujourd'hui, à connaître : `packed_and_legacy_records_decode_to
   `run-ab-plan.sh` / `run-suite-and-ab.sh` : les mêmes avec les sorties
   `abplan-*` / `abplan2-*`) ; résultat du 5 septembre au matin : ×2 à ×22
   à froid ([09](09-journal-chantier-dictionnaire.md) §11) ; au soir, avec
-  le plan : [11](11-journal-chantier-plan-fst.md) §4.
+  le plan : [11](11-journal-chantier-plan-fst.md) §4 ; noyau entier
+  (`run-ab-90k.sh`, sorties `ab90k-*`, référence v3 `idx90k-v8` au format
+  courant, 7,3 Go) : [11](11-journal-chantier-plan-fst.md) §4 bis.
 - **Ce qui n'est pas fait / à savoir** : le plan
   ([11](11-journal-chantier-plan-fst.md)) a ramené le 30 000 à froid de
   ×2-22 à ×0,8-1,9 ([11](11-journal-chantier-plan-fst.md) §4) ; ce qui

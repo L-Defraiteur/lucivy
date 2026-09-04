@@ -148,6 +148,13 @@ clair si c'était le cas. `resolve_chains_v3_posmap` prend maintenant
 L'index v3 (par segment, sans mémo) est **inchangé** : `prefix_alts` y est
 faux, listes explicites comme avant — sa référence de temps reste la même.
 
+Une différence théorique, non couverte : la FST minuscule les octets
+propres et l'overlap **séparément**, le test de préfixe minuscule le texte
+entier. Seul cas où ça diverge : le sigma grec en fin de token (`Σ` →
+`ς` final quand il termine les octets propres, `σ` quand l'overlap le
+suit dans le texte entier). Marginal ; à régler en minusculant les deux
+morceaux séparément dans `starts_with_ci` si un corpus grec arrive.
+
 Résultat, référence 10 000 (`idx-dict2`), `search` en ms, 9/9 identiques :
 
 | requête | mémo seule | plan + préfixe |
@@ -265,6 +272,48 @@ Ce qui reste, par ordre de rendement probable ([§3 bis](#3-bis-ce-qui-restait--
    256 octets (v3 : 2 segments sur 120) — un octet dans le `.gmap` par
    segment suffirait ; 3 ms de CPU par requête aujourd'hui.
 
+**Couverture ajoutée** (5 septembre, soir) : variantes `sfx_version 4` de
+`test_federated_search` (deux nœuds dictionnaire contre **un index v3**
+qui tient tout : mêmes documents, **mêmes scores** ; le pré-filtre
+compose), de `test_filtered_search_truth` (filtré = non filtré ∩ autorisés,
+spans compris, onze types de requêtes, suppressions) et de
+`test_luce_v3_roundtrip` (un dictionnaire shardé exporté puis importé
+reste un dictionnaire et répond pareil). Toutes vertes.
+
+## 4 bis. Le noyau entier, et une taille corrigée
+
+Même protocole sur les 93 983 fichiers (`idx90k-dict`, 253 segments, 22,5 M
+de textes, 2 générations) contre une référence v3 **reconstruite au format
+courant** (`idx90k-v8`, conteneur 8, tables par blocs) — 3 passes, min,
+`search` en ms, 9/9 partout :
+
+| requête | v3 | dictionnaire | ratio |
+|---|---|---|---|
+| mutex_lock strict | 6,9 | 12,3 | ×1,8 |
+| mutex_lock relax | 7,1 | 11,5 | ×1,6 |
+| spin_lock strict | 7,1 | 11,4 | ×1,6 |
+| sched term | 15,0 | 19,2 | ×1,3 |
+| sched strict | 7,1 | 9,8 | ×1,4 |
+| printk sw | 8,3 | 13,0 | ×1,6 |
+| schdule fz1 | 50,8 | 44,1 | ×0,9 |
+| regsiter fz2 | 638,7 | 765,4 | ×1,2 |
+| spin_lock_[a-z]+ rx | 116,4 | 192,5 | ×1,7 |
+| schdule jw1 | 78,5 | 68,3 | ×0,9 |
+
+Le même profil qu'à 30 000 : l'approche **tient à l'échelle** — 22,5 M de
+textes ne font pas exploser le plan (les racines courtes et les coupes y
+sont ×3 plus lourdes, le ratio ne bouge pas). Les mêmes cinq requêtes
+manquent le ×1,5 de 0,1 à 0,3.
+
+**Taille, corrigée.** La référence v3 du noyau au format courant fait
+**7,3 Go**, pas 11,06 : le 11,06 de [09](09-journal-chantier-dictionnaire.md)
+§10 et de CLAUDE.md était l'index du matin du 5 (conteneur 5), pas un index
+v3 au format du soir — la comparaison « 11,06 → 5,98 » mélangeait deux
+étapes. À format égal, le dictionnaire vaut **7,3 → 5,6 Go, −23 %** sur le
+noyau, cohérent avec le −20 % mesuré sur 30 000 (1 659 → 1 327 Mo). Le
+×6,7 du texte reste vrai pour le dictionnaire ; le v3 au format courant est
+à ×8,7.
+
 ## 5. Ce que les docs d'avant disaient de faux
 
 - [10](10-chantier-prescan-dictionnaire-rapport.md) §2 : « un nœud
@@ -277,6 +326,9 @@ Ce qui reste, par ordre de rendement probable ([§3 bis](#3-bis-ce-qui-restait--
   par sous-plage a sa place dans le fan-out du nœud » — mesurée, elle ne
   résout rien : le scan se parallélise, le tri de la liste non ; et la
   liste n'a pas lieu d'être (§3).
+- [09](09-journal-chantier-dictionnaire.md) §10 et CLAUDE.md : « noyau
+  entier 11,06 → 5,98 Go » compare un index v3 du matin (conteneur 5) au
+  dictionnaire du soir ; à format égal c'est 7,3 → 5,6 Go (§4 bis).
 - [09](09-journal-chantier-dictionnaire.md) §8 « les chaînes se
   construisent par segment, le travail FST d'un reste est fait une fois »
   — vrai, mais le travail d'un reste court était une liste de 533 000
