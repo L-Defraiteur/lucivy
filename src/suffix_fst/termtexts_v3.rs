@@ -2,14 +2,25 @@
 //!
 //! Uses the section_file format with magic "TTX3".
 //!
-//! Sections:
-//!   0x01 — TEXTS: offset table + concatenated UTF-8 texts (same as v2 TTXT)
-//!   0x02 — META:  per-ordinal metadata array (own_len, sep_len, overlap_len,
-//!                is_word_start, is_word_stripped)
-//!   0x03 — STATS: segment-wide facts derived from META at write time
+//! Sections, layout 2 (container version 2, written since 4 September 2026):
+//!   0x04 — ENTRIES: `[u32 num]`, then `num + 1` entries of 8 bytes —
+//!                `[u32 text_offset][u16 own_len][u8 sep_len][u8 flags]` —
+//!                then the concatenated UTF-8 texts. The meta sits next to
+//!                the offset `text()` reads: `meta()` and `has_content()`
+//!                touch the same cache line, where layout 1 paid a second
+//!                random read into another section for each — measured as
+//!                +3 ms on a relaxed fuzzy query over 30 000 files once the
+//!                walkers read META instead of `.bytemap` and `gap_len`.
+//!                8 bytes per ordinal instead of 4 + 6.
+//!   0x03 — STATS: segment-wide facts derived from the meta at write time
 //!                (max word-stripped content length). Optional: files
 //!                written before it read back as "unknown", which every
 //!                consumer must treat as the pessimistic answer.
+//!
+//! Layout 1 (container version 1), still read:
+//!   0x01 — TEXTS: offset table + concatenated UTF-8 texts (same as v2 TTXT)
+//!   0x02 — META:  per-ordinal 6-byte array (own_len, sep_len, overlap_len,
+//!                is_word_start, is_word_stripped)
 //!
 //! The texts are the EXTENDED tokens (e.g., "mutex_lo" not "mutex_").
 //! The metadata allows the merge process to re-feed tokens to the builder
@@ -18,11 +29,17 @@
 use super::section_file::{SectionFileReader, SectionFileWriter};
 
 const MAGIC: [u8; 4] = *b"TTX3";
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 
 const SECTION_TEXTS: u16 = 0x01;
 const SECTION_META: u16 = 0x02;
 const SECTION_STATS: u16 = 0x03;
+const SECTION_ENTRIES: u16 = 0x04;
+/// Bytes per ordinal in the ENTRIES table.
+const ENTRY_SIZE: usize = 8;
+const OVERLAP_MASK: u8 = 0x0F;
+const WORD_START_FLAG: u8 = 0x10;
+const WORD_STRIPPED_FLAG: u8 = 0x20;
 /// STATS layout version — see `serialize`.
 const STATS_VERSION: u16 = 1;
 
@@ -76,7 +93,6 @@ impl TermTextsWriterV3 {
         }
     }
 
-    /// Add an extended token at the given ordinal with its metadata.
     /// A writer holding every token of a collected segment, keyed by final
     /// ordinal — the same loop the assemble node and the test helpers ran
     /// each on their own.
@@ -97,6 +113,7 @@ impl TermTextsWriterV3 {
         w
     }
 
+    /// Add an extended token at the given ordinal with its metadata.
     pub fn add(&mut self, ordinal: u32, text: &str, meta: TermMetaV3) {
         let ord = ordinal as usize;
         if ord >= self.texts.len() {
@@ -108,15 +125,12 @@ impl TermTextsWriterV3 {
         self.metas[ord] = meta;
     }
 
-    /// Serialize to bytes using the section file format.
+    /// Serialize to bytes using the section file format (layout 2: one
+    /// ENTRIES section, see the module doc).
     pub fn serialize(&self) -> Vec<u8> {
         let mut file = SectionFileWriter::new(MAGIC, VERSION);
 
-        // Section TEXTS: offset table + concatenated texts
-        file.add_section(SECTION_TEXTS, &self.serialize_texts());
-
-        // Section META: packed metadata array
-        file.add_section(SECTION_META, &self.serialize_meta());
+        file.add_section(SECTION_ENTRIES, &self.serialize_entries());
 
         // Section STATS: max word-stripped content length (u16), then the
         // STATS layout version (u16). The version says what the word
@@ -135,43 +149,36 @@ impl TermTextsWriterV3 {
         file.serialize()
     }
 
-    fn serialize_texts(&self) -> Vec<u8> {
+    /// `[u32 num]`, then `num + 1` entries of [`ENTRY_SIZE`] bytes —
+    /// `[u32 text_offset][u16 own_len][u8 sep_len][u8 flags]` — then the
+    /// concatenated texts. The last entry is the sentinel: the texts' total
+    /// length, zero meta. `flags` = `overlap_len` (4 bits) | `is_word_start`
+    /// (bit 4) | `is_word_stripped` (bit 5).
+    fn serialize_entries(&self) -> Vec<u8> {
         let num = self.texts.len() as u32;
         let data_size: usize = self.texts.iter().map(|t| t.len()).sum();
-        let mut buf = Vec::with_capacity(4 + (num as usize + 1) * 4 + data_size);
+        let mut buf = Vec::with_capacity(4 + (num as usize + 1) * ENTRY_SIZE + data_size);
 
         buf.extend_from_slice(&num.to_le_bytes());
 
-        // Offset table
         let mut offset: u32 = 0;
-        for text in &self.texts {
+        for (text, m) in self.texts.iter().zip(&self.metas) {
+            assert!(m.overlap_len <= OVERLAP_MASK, "overlap_len {} does not fit in 4 bits", m.overlap_len);
             buf.extend_from_slice(&offset.to_le_bytes());
+            buf.extend_from_slice(&m.own_len.to_le_bytes());
+            buf.push(m.sep_len);
+            buf.push(m.overlap_len
+                | if m.is_word_start { WORD_START_FLAG } else { 0 }
+                | if m.is_word_stripped { WORD_STRIPPED_FLAG } else { 0 });
             offset += text.len() as u32;
         }
         buf.extend_from_slice(&offset.to_le_bytes()); // sentinel
+        buf.extend_from_slice(&[0u8; ENTRY_SIZE - 4]);
 
-        // Text data
         for text in &self.texts {
             buf.extend_from_slice(text);
         }
 
-        buf
-    }
-
-    fn serialize_meta(&self) -> Vec<u8> {
-        // 6 bytes/entry: own_len(2) sep_len(1) overlap_len(1) is_word_start(1) is_word_stripped(1)
-        let num = self.metas.len() as u32;
-        let mut buf = Vec::with_capacity(4 + self.metas.len() * 6);
-        buf.extend_from_slice(&num.to_le_bytes());
-        for m in &self.metas {
-            buf.extend_from_slice(&m.own_len.to_le_bytes());
-            buf.push(m.sep_len);
-            buf.push(m.overlap_len);
-            buf.push(if m.is_word_start { 1 } else { 0 });
-            // Was `reserved`. Old files carry 0 here, which reads back as
-            // is_word_stripped=false — the same value the merge path hardcoded.
-            buf.push(if m.is_word_stripped { 1 } else { 0 });
-        }
         buf
     }
 }
@@ -179,12 +186,18 @@ impl TermTextsWriterV3 {
 // ─── Reader ────────────────────────────────────────────────────────────────
 
 /// Reads v3 term texts with metadata. Zero-copy over the source bytes.
+///
+/// Two layouts (module doc): layout 2 keeps offset and meta side by side in
+/// `entries`, 8 bytes per ordinal; layout 1 keeps `entries` as a 4-byte offset
+/// table and the meta in `legacy_meta`, 6 bytes per ordinal.
 pub struct TermTextsReaderV3<'a> {
     num_terms: u32,
-    text_offsets: &'a [u8],
+    /// `(num_terms + 1) × stride` bytes; the first 4 of each are the text offset.
+    entries: &'a [u8],
+    stride: usize,
     text_data: &'a [u8],
-    meta_data: Option<&'a [u8]>,
-    meta_count: u32,
+    /// Layout 1 only: the META section body (after its count), and that count.
+    legacy_meta: Option<(&'a [u8], u32)>,
     max_word_content_len: Option<u16>,
 }
 
@@ -193,30 +206,33 @@ impl<'a> TermTextsReaderV3<'a> {
     pub fn open(bytes: &'a [u8]) -> Option<Self> {
         let file = SectionFileReader::open(bytes, &MAGIC)?;
 
-        // Read TEXTS section
-        let texts_raw = file.get_section(SECTION_TEXTS)?;
-        if texts_raw.len() < 4 {
-            return None;
-        }
-        let num_terms = u32::from_le_bytes(texts_raw[0..4].try_into().ok()?);
-        let offsets_size = (num_terms as usize + 1) * 4;
-        if texts_raw.len() < 4 + offsets_size {
-            return None;
-        }
-        let text_offsets = &texts_raw[4..4 + offsets_size];
-        let text_data = &texts_raw[4 + offsets_size..];
-
-        // Read META section (optional for forward compat)
-        let (meta_data, meta_count) = if let Some(meta_raw) = file.get_section(SECTION_META) {
-            if meta_raw.len() >= 4 {
-                let count = u32::from_le_bytes(meta_raw[0..4].try_into().ok()?);
-                (Some(&meta_raw[4..]), count)
+        let (num_terms, entries, stride, text_data, legacy_meta) =
+            if let Some(raw) = file.get_section(SECTION_ENTRIES) {
+                if raw.len() < 4 {
+                    return None;
+                }
+                let num_terms = u32::from_le_bytes(raw[0..4].try_into().ok()?);
+                let table = (num_terms as usize + 1) * ENTRY_SIZE;
+                if raw.len() < 4 + table {
+                    return None;
+                }
+                (num_terms, &raw[4..4 + table], ENTRY_SIZE, &raw[4 + table..], None)
             } else {
-                (None, 0)
-            }
-        } else {
-            (None, 0)
-        };
+                // Layout 1: TEXTS (offsets + texts) and META apart.
+                let texts_raw = file.get_section(SECTION_TEXTS)?;
+                if texts_raw.len() < 4 {
+                    return None;
+                }
+                let num_terms = u32::from_le_bytes(texts_raw[0..4].try_into().ok()?);
+                let offsets_size = (num_terms as usize + 1) * 4;
+                if texts_raw.len() < 4 + offsets_size {
+                    return None;
+                }
+                let legacy_meta = file.get_section(SECTION_META)
+                    .filter(|m| m.len() >= 4)
+                    .and_then(|m| Some((&m[4..], u32::from_le_bytes(m[0..4].try_into().ok()?))));
+                (num_terms, &texts_raw[4..4 + offsets_size], 4, &texts_raw[4 + offsets_size..], legacy_meta)
+            };
 
         // Layout 1 (24 August): the word partition holds every word,
         // including words without a trailing separator. A 2-byte STATS
@@ -228,12 +244,17 @@ impl<'a> TermTextsReaderV3<'a> {
 
         Some(Self {
             num_terms,
-            text_offsets,
+            entries,
+            stride,
             text_data,
-            meta_data,
-            meta_count,
+            legacy_meta,
             max_word_content_len,
         })
+    }
+
+    /// Layout 2 when true: meta lives next to the text offset.
+    pub fn has_inline_meta(&self) -> bool {
+        self.stride == ENTRY_SIZE
     }
 
     /// Get the extended token text for an ordinal.
@@ -243,7 +264,7 @@ impl<'a> TermTextsReaderV3<'a> {
         }
         let start = self.read_text_offset(ordinal) as usize;
         let end = self.read_text_offset(ordinal + 1) as usize;
-        if end > self.text_data.len() {
+        if end > self.text_data.len() || start > end {
             return None;
         }
         std::str::from_utf8(&self.text_data[start..end]).ok()
@@ -251,10 +272,24 @@ impl<'a> TermTextsReaderV3<'a> {
 
     /// Get the metadata for an ordinal.
     pub fn meta(&self, ordinal: u32) -> Option<TermMetaV3> {
-        if ordinal >= self.meta_count {
+        if self.stride == ENTRY_SIZE {
+            if ordinal >= self.num_terms {
+                return None;
+            }
+            let e = &self.entries[ordinal as usize * ENTRY_SIZE..][..ENTRY_SIZE];
+            let flags = e[7];
+            return Some(TermMetaV3 {
+                own_len: u16::from_le_bytes([e[4], e[5]]),
+                sep_len: e[6],
+                overlap_len: flags & OVERLAP_MASK,
+                is_word_start: flags & WORD_START_FLAG != 0,
+                is_word_stripped: flags & WORD_STRIPPED_FLAG != 0,
+            });
+        }
+        let (data, count) = self.legacy_meta?;
+        if ordinal >= count {
             return None;
         }
-        let data = self.meta_data?;
         let pos = ordinal as usize * 6;
         if pos + 6 > data.len() {
             return None;
@@ -277,22 +312,20 @@ impl<'a> TermTextsReaderV3<'a> {
     /// bytes are exactly the bytes `is_content_char` accepts, so the two
     /// answers coincide (`bytemap_and_meta_agree_on_content`).
     ///
-    /// Three bytes read at `6 × ordinal` in the META section. An ordinal past
-    /// the META section (a file written without it) counts as content: the
-    /// walker then refuses to step over it, which loses a match rather than
-    /// inventing one.
+    /// Layout 2: three bytes of the ordinal's 8-byte entry, the same line
+    /// `text()` reads. An ordinal without meta (layout 1 file written without
+    /// META) counts as content: the walker then refuses to step over it,
+    /// which loses a match rather than inventing one.
     #[inline]
     pub fn has_content(&self, ordinal: u32) -> bool {
-        if ordinal >= self.meta_count {
-            return true;
+        if self.stride == ENTRY_SIZE {
+            if ordinal >= self.num_terms {
+                return true;
+            }
+            let e = &self.entries[ordinal as usize * ENTRY_SIZE..][..ENTRY_SIZE];
+            return u16::from_le_bytes([e[4], e[5]]) > e[6] as u16;
         }
-        let Some(data) = self.meta_data else { return true };
-        let pos = ordinal as usize * 6;
-        if pos + 3 > data.len() {
-            return true;
-        }
-        let own_len = u16::from_le_bytes([data[pos], data[pos + 1]]);
-        own_len > data[pos + 2] as u16
+        self.meta(ordinal).is_none_or(|m| m.own_len > m.sep_len as u16)
     }
 
     /// Get text + metadata together for an ordinal.
@@ -327,9 +360,10 @@ impl<'a> TermTextsReaderV3<'a> {
         })
     }
 
+    #[inline]
     fn read_text_offset(&self, idx: u32) -> u32 {
-        let pos = idx as usize * 4;
-        u32::from_le_bytes(self.text_offsets[pos..pos + 4].try_into().unwrap())
+        let pos = idx as usize * self.stride;
+        u32::from_le_bytes(self.entries[pos..pos + 4].try_into().unwrap())
     }
 }
 
@@ -338,6 +372,57 @@ impl<'a> TermTextsReaderV3<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Layout 1 (TEXTS + META apart) as every file before 4 September 2026
+    /// was written; the reader must give the same texts, meta and
+    /// `has_content` as the layout-2 file of the same tokens.
+    fn serialize_layout_1(w: &TermTextsWriterV3) -> Vec<u8> {
+        let mut file = SectionFileWriter::new(MAGIC, 1);
+        let num = w.texts.len() as u32;
+        let mut texts = num.to_le_bytes().to_vec();
+        let mut off = 0u32;
+        for t in &w.texts { texts.extend_from_slice(&off.to_le_bytes()); off += t.len() as u32; }
+        texts.extend_from_slice(&off.to_le_bytes());
+        for t in &w.texts { texts.extend_from_slice(t); }
+        file.add_section(SECTION_TEXTS, &texts);
+        let mut meta = num.to_le_bytes().to_vec();
+        for m in &w.metas {
+            meta.extend_from_slice(&m.own_len.to_le_bytes());
+            meta.push(m.sep_len); meta.push(m.overlap_len);
+            meta.push(m.is_word_start as u8); meta.push(m.is_word_stripped as u8);
+        }
+        file.add_section(SECTION_META, &meta);
+        file.serialize()
+    }
+
+    #[test]
+    fn layout_1_and_layout_2_read_alike() {
+        let mut w = TermTextsWriterV3::new();
+        let metas = [
+            TermMetaV3 { own_len: 6, sep_len: 1, overlap_len: 2, is_word_start: true, is_word_stripped: false },
+            TermMetaV3 { own_len: 3, sep_len: 3, overlap_len: 0, is_word_start: false, is_word_stripped: false },
+            TermMetaV3 { own_len: 300, sep_len: 0, overlap_len: 2, is_word_start: true, is_word_stripped: true },
+            TermMetaV3 { own_len: 0, sep_len: 0, overlap_len: 0, is_word_start: false, is_word_stripped: false },
+        ];
+        for (i, (text, m)) in ["mutex_lo", "___", "internationalization", ""].iter().zip(metas).enumerate() {
+            w.add(i as u32, text, m);
+        }
+        let d2 = w.serialize();
+        let d1 = serialize_layout_1(&w);
+        let (r2, r1) = (TermTextsReaderV3::open(&d2).unwrap(), TermTextsReaderV3::open(&d1).unwrap());
+        assert!(r2.has_inline_meta() && !r1.has_inline_meta());
+        assert_eq!(r2.num_terms(), 4);
+        for ord in 0..5u32 {
+            assert_eq!(r2.text(ord), r1.text(ord), "text {ord}");
+            assert_eq!(r2.meta(ord), r1.meta(ord), "meta {ord}");
+            assert_eq!(r2.has_content(ord), r1.has_content(ord), "has_content {ord}");
+        }
+        assert_eq!(r2.meta(2), Some(metas[2]));
+        assert!(r2.has_content(0) && !r2.has_content(1) && !r2.has_content(3) && r2.has_content(4));
+        assert_eq!(r2.iter().count(), r1.iter().count());
+        // 8 bytes per ordinal against 4 + 6.
+        assert!(d2.len() < d1.len());
+    }
 
     #[test]
     fn test_roundtrip_basic() {

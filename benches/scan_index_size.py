@@ -53,22 +53,34 @@ def scan_sfx(path, deep):
 def scan_termtexts(path, deep):
     b = open(path, "rb").read()
     s = sections(b)
-    toff, tlen = s[1]; moff, mlen = s[2]
-    n = struct.unpack_from("<I", b, toff)[0]
-    offs = array("I"); offs.frombytes(b[toff + 4: toff + 4 + 4 * (n + 1)])
-    text_bytes = offs[n]
-    r = {"file": len(b), "num_terms": n, "text_bytes": text_bytes, "offsets_bytes": 4 * (n + 1), "meta_bytes": mlen}
-    if deep:
+    if 4 in s:  # layout 2: one ENTRIES section, 8 bytes per ordinal (offset + meta), then texts
+        toff, tlen = s[4]
+        n = struct.unpack_from("<I", b, toff)[0]
+        stride = 8
+        offs = [struct.unpack_from("<I", b, toff + 4 + 8 * i)[0] for i in range(n + 1)]
+        r = {"file": len(b), "num_terms": n, "text_bytes": offs[n], "offsets_bytes": 4 * (n + 1), "meta_bytes": 4 * (n + 1), "layout": 2}
+        data_start = toff + 4 + 8 * (n + 1)
+        def meta(i):
+            own, sep, flags = struct.unpack_from("<HBB", b, toff + 4 + 8 * i + 4)
+            return own, sep, flags & 0x0F, (flags >> 4) & 1, (flags >> 5) & 1
+    else:
+        toff, tlen = s[1]; moff, mlen = s[2]
+        n = struct.unpack_from("<I", b, toff)[0]
+        offs = array("I"); offs.frombytes(b[toff + 4: toff + 4 + 4 * (n + 1)])
+        r = {"file": len(b), "num_terms": n, "text_bytes": offs[n], "offsets_bytes": 4 * (n + 1), "meta_bytes": mlen, "layout": 1}
         data_start = toff + 4 + 4 * (n + 1)
         mcount = struct.unpack_from("<I", b, moff)[0]
         mb = b[moff + 4: moff + 4 + 6 * mcount]
+        def meta(i):
+            return struct.unpack_from("<HBBBB", mb, 6 * i)
+    if deep:
         n_ws = 0; ws_text = 0; ch_text = 0; n_ovl = 0; n_sep = 0
         keys_chunk = 0; markers = 0; keys_ws = 0
         lcp_total = 0; prev = b""
         len_hist = collections.Counter()
         own_gt_255 = 0
         for i in range(n):
-            own, sep, ovl, ws_start, is_ws = struct.unpack_from("<HBBBB", mb, 6 * i)
+            own, sep, ovl, ws_start, is_ws = meta(i)
             t = b[data_start + offs[i]: data_start + offs[i + 1]]
             L = len(t)
             # common prefix with previous text (front coding potential)

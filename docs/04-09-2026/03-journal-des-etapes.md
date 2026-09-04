@@ -234,3 +234,56 @@ et `meta()` devient gratuit après `text()`.
 §4)** : rien n'approche ×1,5, l'index a perdu 24 % ; on garde les quatre
 étapes, on écrit la perte, et l'étape 6 est la prochaine parce qu'elle réduit
 et accélère à la fois.
+
+---
+
+## Étape 6 — la méta dans la table d'offsets de `.termtexts` (4 septembre)
+
+Faite avant l'étape 5 à cause du checkpoint : les 3 ms perdus par le fuzzy
+relâché venaient de deux lectures aléatoires de `.termtexts` par pas là où il
+y en avait une, la table d'offsets (pour `text()`) et la section META (pour
+`meta()` et `has_content()`) étant dans deux régions du fichier.
+
+**Changement.** Layout 2 du `.termtexts` (octet de version 2, magic `TTX3`
+inchangé) : une seule section ENTRIES, `num + 1` entrées de **8 octets** —
+`[u32 offset][u16 own_len][u8 sep_len][u8 flags]`, les flags portant
+`overlap_len` (4 bits), `is_word_start`, `is_word_stripped` — puis les
+textes. `meta()` et `has_content()` lisent la même ligne de cache que
+`text()`. 8 octets par ordinal au lieu de 4 + 6. Le lecteur ouvre encore le
+layout 1 (TEXTS + META), prouvé par `layout_1_and_layout_2_read_alike`.
+
+**Taille (30 000 fichiers).** `.termtexts` 261,1 → 231,1 Mo (−11,5 %), la
+méta 89,8 → 59,9 Mo ; index 2 637,7 → 2 607,7 Mo (−1,1 %).
+
+**Temps — A/B à trois binaires**, chacun sur l'index qu'il écrit, trois
+passes alternées, minimum (ms) :
+
+| requête | v3 | étape 4 | **étape 6** |
+|---|---|---|---|
+| `mutex_lock` strict | 3,3 | 3,3 | **2,5** |
+| `spin_lock` strict | 2,7 | 2,5 | **2,1** |
+| `sched` term | 3,4 | 4,3 | 3,9 |
+| `printk` sw | 2,6 | 2,7 | **2,3** |
+| `schdule` fz1 | 14,2 | 14,4 | **12,0** |
+| `regsiter` fz2 | 132,3 | 132,0 | 146,0 |
+| `spin_lock_[a-z]+` rx | 11,3 | 10,5 | **9,9** |
+| `schdule` jw1 | 15,8 | 16,0 | 15,5 |
+
+La ligne `regsiter` fz2 a été reprise à part, cinq passes alternées
+étape 4 / étape 6 : **150,5 / 158,9** (min / médiane) contre
+**146,2 / 147,0**. C'était du bruit de session ; l'étape 6 est plus rapide
+et plus stable là aussi. Sur `schdule` fz1, cinq passes : 12,4 / 13,4 contre
+12,6 / 13,4 — égal.
+
+**Bilan du checkpoint** : les 3 ms du fuzzy relâché sont rendus, et les
+requêtes exactes sont **plus rapides qu'en v3** (2,5 ms contre 3,3 sur
+`mutex_lock` strict). L'index de 30 000 fichiers fait 2,6 Go contre 3,4 :
+−24 %.
+
+**Tests.** `cargo test --lib` : 1 442 verts. `cargo test -p lucivy-core` :
+un rouge, `luce_v3_sharded_roundtrip`, **puis quatre fois vert relancé
+seul**. Le rouge est tombé pendant que trois compilations chargeaient la
+machine (charge 17), sur une assertion d'ordre du top-10 entre dix documents
+**à score strictement égal** — l'ordre entre ex æquo dépend de l'ordre de
+réponse des shards. Ce n'est pas cette étape, c'est une non-déterminisme
+préexistant, à traiter à part : un tri stable par id entre ex æquo.
