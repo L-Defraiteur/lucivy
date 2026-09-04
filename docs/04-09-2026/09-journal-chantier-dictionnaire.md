@@ -546,7 +546,12 @@ les fichiers réunis sont supprimés par le GC dès que `meta.json` ne les
 nomme plus. Le §2.3 prévoyait « d'abord une seule génération rebâtie »
 puis « les générations » : fait dans cet ordre, en une nuit.
 
-**Reste** : le 30 000 en mode dictionnaire (en cours), puis le noyau entier
+**30 000 fichiers** (`idx30k-dict`, 15 commits, 120 segments) : construction
++ panel 50 s ; **1 659 → 1 327 Mo (−20 %)** ; panel 9/9 identique à l'index
+v3 (3b). Les temps de cette passe ne valent rien (la suite lucivy-core
+compilait à côté) ; l'A/B propre reste à faire.
+
+**Reste** : le noyau entier
 (`V3_MAX_DOCS=100000 V3_COMMIT_EVERY=10000`) pour le chiffre final ; l'A/B
 de temps 30 000 ; la suite `cargo test -p lucivy-core` sur ce binaire ;
 `index_bytes` / `preload` ; la version 4.0.0 et la décision sur le mode

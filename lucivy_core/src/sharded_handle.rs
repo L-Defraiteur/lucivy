@@ -2307,8 +2307,10 @@ impl ShardedHandle {
     fn shard_file_names(&self, shard: usize) -> Vec<std::ffi::OsString> {
         let Some(h) = self.shards.get(shard) else { return Vec::new() };
         let sfx_version = h.index.settings().sfx_version;
+        let dict_files = h.index.load_metas().map(|m| m.dictionary_files()).unwrap_or_default();
         h.index.searchable_segment_metas().map(|metas| {
             metas.iter().flat_map(|m| m.list_files_for(sfx_version))
+                .chain(dict_files)
                 .filter_map(|p| p.file_name().map(|n| n.to_os_string())).collect()
         }).unwrap_or_default()
     }
@@ -2329,8 +2331,10 @@ impl ShardedHandle {
         let Ok(metas) = h.index.searchable_segment_metas() else { return (0, 0, 0) };
         let dir = h.index.directory();
         let sfx_version = h.index.settings().sfx_version;
+        // The shard dictionary's generations count with the segments.
+        let dict_files = h.index.load_metas().map(|m| m.dictionary_files()).unwrap_or_default();
         let (mut bytes, mut opened, mut listed) = (0u64, 0usize, 0usize);
-        for p in metas.iter().flat_map(|m| m.list_files_for(sfx_version)) {
+        for p in metas.iter().flat_map(|m| m.list_files_for(sfx_version)).chain(dict_files) {
             listed += 1;
             if let Ok(f) = ld_lucivy::Directory::open_read(dir, &p) {
                 bytes += ld_lucivy::HasLen::len(&f) as u64;
@@ -2430,7 +2434,8 @@ impl ShardedHandle {
             let Ok(metas) = h.index.searchable_segment_metas() else { continue };
             let sfx_version = h.index.settings().sfx_version;
             let dir = h.index.directory();
-            for p in metas.iter().flat_map(|m| m.list_files_for(sfx_version)) {
+            let dict_files = h.index.load_metas().map(|m| m.dictionary_files()).unwrap_or_default();
+            for p in metas.iter().flat_map(|m| m.list_files_for(sfx_version)).chain(dict_files) {
                 let Ok(slice) = ld_lucivy::Directory::open_read(dir, &p) else { continue };
                 // `read_bytes` on a lazy handle is what materialises the file
                 // into the cache; the bytes are dropped here and the cache
