@@ -289,9 +289,15 @@ impl SuffixFstBuilderV3 {
         let lower = extended_token.to_lowercase();
         let extended_bytes = lower.as_bytes();
         let extended_len = extended_bytes.len();
-        let max_si = extended_len.min(MAX_CHUNK_BYTES);
-
-        let _content_len = own_len as usize - sep_len as usize;
+        // Suffixes start inside the token's own bytes only. A suffix starting
+        // in the overlap (`si >= own_len`) is one or two bytes of the NEXT
+        // token, which carries them itself under its own ordinal (at sti 0 and
+        // 1 — the same text position, in the same value); the walk rejected
+        // such parents (`fst_walk::check_split`) and the range scan resolved
+        // them to duplicates of the next token's spans. They were the 1- and
+        // 2-byte keys, i.e. the ones with the largest parent lists — up to
+        // 317 000 parents under one key on the kernel corpus.
+        let max_si = extended_len.min(MAX_CHUNK_BYTES).min(own_len as usize);
 
         // ── Normal suffixes (partitions 0x00 and 0x01) ──
         for si in 0..max_si {
@@ -738,6 +744,34 @@ mod tests {
         assert_eq!(decoded[69_999], p);
     }
 
+    /// No key starts inside the overlap: for `mutex_` + `lo`, the suffixes
+    /// `lo` and `o` pointing at `mutex_` are the next token's business.
+    #[test]
+    fn no_suffix_starts_in_the_overlap() {
+        let mut builder = SuffixFstBuilderV3::with_min_suffix_len(1);
+        builder.add_token("mutex_lo", 0, 6, 1, 2, true);
+        builder.add_token("lock", 1, 4, 0, 0, true);
+        let with_overlap: Vec<(u16, u64)> = builder.entries.iter()
+            .map(|(_, _, p)| (p.sti, p.raw_ordinal)).collect();
+        assert!(with_overlap.iter().all(|&(sti, ord)| sti < if ord == 0 { 6 } else { 4 }),
+            "a suffix starts in the overlap: {with_overlap:?}");
+        // mutex_lo: 6 suffixes + 6 markers (every suffix crosses into the overlap); lock: 4.
+        assert_eq!(builder.entries.len(), 6 + 6 + 4);
+        let (fst_bytes, table) = builder.build().unwrap();
+        let file = crate::suffix_fst::file_v3::SfxFileWriterV3::new(fst_bytes, table).to_bytes();
+        let reader = crate::suffix_fst::file_v3::SfxFileReaderV3::open(&file).unwrap();
+        // The exact keys "lo" and "o" pointing at `mutex_` are gone; the same
+        // text positions are `lock`'s own suffixes at sti 0 and 1.
+        assert!(reader.resolve_suffix("lo").is_empty());
+        assert!(reader.resolve_suffix("o").is_empty());
+        let lock: Vec<(u64, u16)> = reader.resolve_suffix("lock").iter().map(|p| (p.raw_ordinal, p.sti)).collect();
+        assert_eq!(lock, vec![(1, 0)]);
+        let ock: Vec<(u64, u16)> = reader.resolve_suffix("ock").iter().map(|p| (p.raw_ordinal, p.sti)).collect();
+        assert_eq!(ock, vec![(1, 1)]);
+        // The cross-token trigram still resolves through the overlap key.
+        assert!(reader.resolve_suffix("x_lo").iter().any(|p| p.raw_ordinal == 0 && p.sti == 4));
+    }
+
     // ── Builder with overlap ──
 
     fn fst_get(fst: &lucivy_fst::Map<Vec<u8>>, prefix: u8, key: &[u8]) -> Option<u64> {
@@ -780,15 +814,9 @@ mod tests {
             _ => panic!("expected single"),
         }
 
-        // SI=6 "lo" — overlap zone
-        let val = fst_get(&fst, SI_REST_PREFIX, b"lo").expect("lo at SI>0");
-        match decode_output_v3(val) {
-            ParentRefV3::Single(p) => {
-                assert_eq!(p.sti, 6);
-                // sti(6) >= own_len(6) → overlap zone
-            }
-            _ => panic!("expected single"),
-        }
+        // SI=6 "lo" would start in the overlap zone: not a key since 4 September 2026.
+        assert!(fst_get(&fst, SI_REST_PREFIX, b"lo").is_none(), "no suffix starts in the overlap");
+        assert!(fst_get(&fst, SI_REST_PREFIX, b"o").is_none());
     }
 
     #[test]
@@ -802,15 +830,9 @@ mod tests {
         let (fst_bytes, output_table_data) = builder.build().unwrap();
         let fst = lucivy_fst::Map::new(fst_bytes).unwrap();
 
-        // "lo" in SI>0 partition: single parent (mutex_lo, sti=6, overlap zone)
-        let val = fst_get(&fst, SI_REST_PREFIX, b"lo").expect("lo in SI>0");
-        match decode_output_v3(val) {
-            ParentRefV3::Single(p) => {
-                assert_eq!(p.raw_ordinal, 0); // mutex_lo
-                assert_eq!(p.sti, 6);
-            }
-            _ => panic!("expected single"),
-        }
+        // "lo" in SI>0 would be mutex_lo's overlap zone (sti 6 >= own_len 6):
+        // not a key any more; `login_` carries it at SI=0.
+        assert!(fst_get(&fst, SI_REST_PREFIX, b"lo").is_none(), "no suffix starts in the overlap");
 
         // "login_" in SI=0 partition
         let val = fst_get(&fst, SI0_PREFIX, b"login_").expect("login_ at SI=0");

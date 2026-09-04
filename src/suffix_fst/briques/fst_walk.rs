@@ -14,7 +14,7 @@ use crate::suffix_fst::builder::SI_REST_PREFIX;
 /// Snap a byte position to the next valid UTF-8 char boundary.
 /// If `pos` is already a boundary, returns it unchanged.
 /// If `pos` is past the end, returns `len`.
-fn snap_to_char_boundary(s: &str, pos: usize) -> usize {
+pub(crate) fn snap_to_char_boundary(s: &str, pos: usize) -> usize {
     let mut p = pos.min(s.len());
     while p < s.len() && !s.is_char_boundary(p) {
         p += 1;

@@ -287,3 +287,64 @@ machine (charge 17), sur une assertion d'ordre du top-10 entre dix documents
 **à score strictement égal** — l'ordre entre ex æquo dépend de l'ordre de
 réponse des shards. Ce n'est pas cette étape, c'est une non-déterminisme
 préexistant, à traiter à part : un tri stable par id entre ex æquo.
+
+---
+
+## Étape 5, première moitié — plus de suffixe qui commence dans l'overlap (4 septembre)
+
+**Changement.** `add_token` n'enregistre plus les suffixes dont l'index de
+départ est dans l'overlap (`sti ≥ own_len`). Pour `mutex_` + `lo`, les clés
+`lo` et `o` pointant vers `mutex_` disparaissent : ce sont un ou deux octets
+du token **suivant**, qui les porte lui-même sous son propre ordinal, à la
+même position du texte, à sti 0 et 1. La marche les rejetait déjà
+(`check_split`) et le scan de plage les résolvait en doublons des spans du
+token suivant. Et c'étaient les clés d'un et deux octets, celles aux listes
+de parents géantes. Le builder seul change ; aucun format, aucun lecteur.
+
+Test : `no_suffix_starts_in_the_overlap`. Deux tests qui affirmaient
+l'existence de la clé d'overlap (`test_builder_v3_basic`,
+`test_builder_v3_multi_parent_overlap`) affirment maintenant son absence.
+
+Au passage, un plantage préexistant du mode diagnostic `V3_DIAG_FUZZY` :
+la fenêtre rejetée était tronquée à 80 octets au milieu d'un caractère
+multi-octets (`用`), selon l'ordre des threads. Corrigé (coupe sur frontière
+de caractère), prouvé avec `V3_DIAG_FUZZY_MAX=0` : 16 895 rejets affichés,
+0 panique.
+
+**Taille.**
+
+| | étape 6 | 5a | delta |
+|---|---|---|---|
+| 10 000 fichiers, `.sfx` parents | 261,9 Mo | 216,4 Mo | −17 % |
+| 10 000 fichiers, index | 857,7 Mo | **799,6 Mo** | **−6,8 %** |
+| 30 000 fichiers, `.sfx` parents | 809,8 Mo | 675,7 Mo | −17 % |
+| 30 000 fichiers, index | 2 607,7 Mo | **2 472,7 Mo** | **−5,2 %** |
+
+La FST elle-même ne bouge pas (256,9 → 255,8 Mo) : les clés supprimées
+existaient déjà sous le token suivant, seuls leurs parents en trop partent.
+Cumul depuis v3 : **−30,6 %** sur 10 000 fichiers (1 152 → 800 Mo).
+
+**Justesse.** Mêmes comptes et mêmes spans sur les neuf requêtes vérifiées,
+sur les deux corpus. L'index v3 de référence rouvre.
+
+**Temps — A/B au même binaire**, index de l'étape 6 contre celui-ci, 30 000
+fichiers, cinq passes alternées, min / médiane (ms) :
+
+| requête | étape 6 | 5a |
+|---|---|---|
+| `mutex_lock` strict | 1,8 / 1,9 | **1,4 / 1,5** |
+| `spin_lock` strict (3 passes) | 2,0 / 2,0 | **1,7 / 1,9** |
+| `sched` term (3 passes) | 3,8 / 3,9 | **3,1 / 3,1** |
+| `spin_lock_[a-z]+` rx (3 passes) | 9,8 / 10,3 | **8,8 / 8,8** |
+| `schdule` fz1 | 13,7 / 14,4 | 14,3 / 15,9 |
+| `regsiter` fz2 | 131,3 / 140,2 | 134,3 / 147,6 |
+
+Les requêtes exactes et la regex gagnent 10 à 20 % : plus de liste de
+300 000 parents à décoder au premier octet de chaque marche. Le fuzzy
+relâché perd environ **1 ms sur 14** ; le profil (`V3_PROFILE=1`) montre
+le même travail sur les deux index — mêmes pièces, mêmes candidats par
+segment — et « word walk » à 93 contre 96 ms cumulés sur les threads. Pas
+attribué plus finement. Sous la règle du 4 septembre : gardé.
+
+**Tests.** `cargo test --lib` : 1 443 verts. `cargo test -p lucivy-core` :
+184 verts.

@@ -1304,7 +1304,7 @@ fn verify_candidates(
                         eprintln!("[fz] doc={} pos={}..{} REJECT needle={:?} window={:?}",
                             chain.doc_id, chain.first_pos, chain.last_pos,
                             String::from_utf8_lossy(&needle),
-                            &window[..window.len().min(80)]);
+                            &window[..super::fst_walk::snap_to_char_boundary(&window, window.len().min(80))]);
                     }
                     continue;
                 }
