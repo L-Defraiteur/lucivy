@@ -7,12 +7,23 @@
 //!
 //! Format:
 //! ```text
-//! [4 bytes] magic "PMAP"
+//! [4 bytes] magic "PMAP" (4-byte slots) or "PMP3" (3-byte slots)
 //! [4 bytes] num_docs: u32 LE
 //! [8 bytes × (num_docs + 1)] offset table (byte offset into data section)
 //! Data section (per doc):
-//!   [4 bytes × num_tokens] ordinals: u32 LE, one per position
+//!   [slot × num_tokens] ordinals, little-endian, one per position;
+//!   all-ones (u32::MAX or 0xFFFFFF) = no token at this position
 //! ```
+//!
+//! `PMP3` is written since 4 September 2026 whenever every ordinal fits in
+//! 24 bits — always the case for a v3 segment, whose FST refuses larger
+//! ordinals (`builder_v3::ORDINAL_MASK`). One slot per position on the whole
+//! corpus: the 4th byte was 25 % of the file for nothing. A writer that sees
+//! a wider ordinal (a v2 segment) falls back to `PMAP`; the reader takes both.
+
+/// Slot value meaning "no token at this position", in either width.
+const EMPTY: u32 = u32::MAX;
+const MAX_ORDINAL_3: u32 = 0xFF_FFFF;
 
 /// Builds a position-to-ordinal map during indexation.
 pub struct PosMapWriter {
@@ -61,26 +72,30 @@ impl PosMapWriter {
     /// Serialize to binary format.
     pub fn serialize(&self) -> Vec<u8> {
         let num_docs = self.docs.len() as u32;
+        // 3-byte slots unless an ordinal needs the 4th byte (EMPTY is not an ordinal).
+        let narrow = self.docs.iter().flatten()
+            .all(|&o| o == EMPTY || o < MAX_ORDINAL_3);
+        let width = if narrow { 3 } else { 4 };
         let header_size = 4 + 4 + (num_docs as usize + 1) * 8; // magic + num_docs + offsets
-        let data_size: usize = self.docs.iter().map(|d| d.len() * 4).sum();
+        let data_size: usize = self.docs.iter().map(|d| d.len() * width).sum();
         let mut buf = Vec::with_capacity(header_size + data_size);
 
         // Magic
-        buf.extend_from_slice(b"PMAP");
+        buf.extend_from_slice(if narrow { b"PMP3" } else { b"PMAP" });
         buf.extend_from_slice(&num_docs.to_le_bytes());
 
         // Offset table
         let mut offset: u64 = 0;
         for doc in &self.docs {
             buf.extend_from_slice(&offset.to_le_bytes());
-            offset += (doc.len() * 4) as u64;
+            offset += (doc.len() * width) as u64;
         }
         buf.extend_from_slice(&offset.to_le_bytes()); // sentinel
 
         // Data
         for doc in &self.docs {
             for &ord in doc {
-                buf.extend_from_slice(&ord.to_le_bytes());
+                buf.extend_from_slice(&ord.to_le_bytes()[..width]);
             }
         }
 
@@ -93,14 +108,23 @@ pub struct PosMapReader<'a> {
     num_docs: u32,
     offsets: &'a [u8],
     data: &'a [u8],
+    /// Bytes per slot: 3 (`PMP3`) or 4 (`PMAP`).
+    width: usize,
+    /// The empty marker at this width: all ones.
+    empty: u32,
 }
 
 impl<'a> PosMapReader<'a> {
     /// Open from raw bytes. Returns None if data is too small or invalid magic.
     pub fn open(bytes: &'a [u8]) -> Option<Self> {
-        if bytes.len() < 8 || &bytes[0..4] != b"PMAP" {
+        if bytes.len() < 8 {
             return None;
         }
+        let (width, empty) = match &bytes[0..4] {
+            b"PMAP" => (4, EMPTY),
+            b"PMP3" => (3, MAX_ORDINAL_3),
+            _ => return None,
+        };
         let num_docs = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
         let offsets_size = (num_docs as usize + 1) * 8;
         if bytes.len() < 8 + offsets_size {
@@ -108,7 +132,31 @@ impl<'a> PosMapReader<'a> {
         }
         let offsets = &bytes[8..8 + offsets_size];
         let data = &bytes[8 + offsets_size..];
-        Some(Self { num_docs, offsets, data })
+        Some(Self { num_docs, offsets, data, width, empty })
+    }
+
+    /// Bytes per slot, 3 or 4.
+    pub fn slot_width(&self) -> usize {
+        self.width
+    }
+
+    /// The document's slots, `width` bytes each.
+    #[inline]
+    fn doc_data(&self, doc_id: u32) -> &'a [u8] {
+        let start = (self.read_offset(doc_id) as usize).min(self.data.len());
+        let end = (self.read_offset(doc_id + 1) as usize).min(self.data.len());
+        &self.data[start..end.max(start)]
+    }
+
+    /// The slot at byte offset `off`, or None when it is the empty marker.
+    #[inline]
+    fn slot(&self, doc_data: &[u8], off: usize) -> Option<u32> {
+        let ord = if self.width == 4 {
+            u32::from_le_bytes([doc_data[off], doc_data[off + 1], doc_data[off + 2], doc_data[off + 3]])
+        } else {
+            u32::from_le_bytes([doc_data[off], doc_data[off + 1], doc_data[off + 2], 0])
+        };
+        if ord == self.empty { None } else { Some(ord) }
     }
 
     /// Get the ordinal at (doc_id, position). Returns None if out of bounds.
@@ -116,21 +164,13 @@ impl<'a> PosMapReader<'a> {
         if doc_id >= self.num_docs {
             return None;
         }
-        let start = self.read_offset(doc_id) as usize;
-        let end = self.read_offset(doc_id + 1) as usize;
-        let doc_data = &self.data[start..end.min(self.data.len())];
-        let num_tokens = doc_data.len() / 4;
+        let doc_data = self.doc_data(doc_id);
+        let num_tokens = doc_data.len() / self.width;
         let p = position as usize;
         if p >= num_tokens {
             return None;
         }
-        let off = p * 4;
-        let ord = u32::from_le_bytes(doc_data[off..off + 4].try_into().ok()?);
-        if ord == u32::MAX {
-            None // unfilled position
-        } else {
-            Some(ord)
-        }
+        self.slot(doc_data, p * self.width)
     }
 
     /// Get ordinals for a range of positions [pos_from, pos_to) in a doc.
@@ -139,19 +179,12 @@ impl<'a> PosMapReader<'a> {
         if doc_id >= self.num_docs {
             return Vec::new();
         }
-        let start = self.read_offset(doc_id) as usize;
-        let end = self.read_offset(doc_id + 1) as usize;
-        let doc_data = &self.data[start..end.min(self.data.len())];
-        let num_tokens = doc_data.len() / 4;
-
+        let doc_data = self.doc_data(doc_id);
+        let num_tokens = doc_data.len() / self.width;
         let mut result = Vec::new();
         for pos in pos_from..pos_to.min(num_tokens as u32) {
-            let off = pos as usize * 4;
-            if off + 4 <= doc_data.len() {
-                let ord = u32::from_le_bytes(doc_data[off..off + 4].try_into().unwrap());
-                if ord != u32::MAX {
-                    result.push((pos, ord));
-                }
+            if let Some(ord) = self.slot(doc_data, pos as usize * self.width) {
+                result.push((pos, ord));
             }
         }
         result
@@ -162,9 +195,7 @@ impl<'a> PosMapReader<'a> {
         if doc_id >= self.num_docs {
             return 0;
         }
-        let start = self.read_offset(doc_id) as usize;
-        let end = self.read_offset(doc_id + 1) as usize;
-        ((end - start) / 4) as u32
+        (self.doc_data(doc_id).len() / self.width) as u32
     }
 
     fn read_offset(&self, idx: u32) -> u64 {
@@ -233,6 +264,35 @@ mod tests {
 
         let range = reader.ordinals_range(0, 1, 3);
         assert_eq!(range, vec![(1, 20), (2, 30)]);
+    }
+
+    /// Ordinals under 2^24 get 3-byte slots; one wider ordinal keeps the
+    /// 4-byte layout; both read back the same, empty slots included.
+    #[test]
+    fn narrow_and_wide_layouts_read_alike() {
+        let fill = |w: &mut PosMapWriter| {
+            w.add(0, 0, 7);
+            w.add(0, 2, 0xFF_FFFE); // position 1 stays empty
+            w.add_empty_doc();
+            w.add(2, 0, 0);
+        };
+        let mut narrow = PosMapWriter::new(); fill(&mut narrow);
+        let n = narrow.serialize();
+        assert_eq!(&n[0..4], b"PMP3");
+        let mut wide = PosMapWriter::new(); fill(&mut wide); wide.add(2, 1, 0x100_0000);
+        let w = wide.serialize();
+        assert_eq!(&w[0..4], b"PMAP");
+        let (rn, rw) = (PosMapReader::open(&n).unwrap(), PosMapReader::open(&w).unwrap());
+        assert_eq!((rn.slot_width(), rw.slot_width()), (3, 4));
+        for (doc, pos) in [(0, 0), (0, 1), (0, 2), (0, 3), (1, 0), (2, 0), (3, 0)] {
+            assert_eq!(rn.ordinal_at(doc, pos), rw.ordinal_at(doc, pos), "doc {doc} pos {pos}");
+        }
+        assert_eq!(rn.ordinal_at(0, 1), None);
+        assert_eq!(rn.ordinal_at(0, 2), Some(0xFF_FFFE));
+        assert_eq!(rw.ordinal_at(2, 1), Some(0x100_0000));
+        assert_eq!(rn.ordinals_range(0, 0, 3), vec![(0, 7), (2, 0xFF_FFFE)]);
+        assert_eq!(rn.num_tokens(0), 3);
+        assert_eq!(rn.num_tokens(1), 0);
     }
 
     #[test]

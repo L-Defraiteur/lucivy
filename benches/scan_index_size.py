@@ -111,17 +111,23 @@ def scan_bytemap(path, deep):
 def scan_posmap(path, deep, magic):
     b = open(path, "rb").read()
     if len(b) < 8: return {"file": len(b), "empty": True}
-    assert b[0:4] == magic, b[0:4]
+    got = b[0:4]
+    assert got in (magic, b"PMP3"), got
+    width = 3 if got == b"PMP3" else 4
     n = struct.unpack_from("<I", b, 4)[0]
-    data = b[8 + 8 * (n + 1):]
-    slots = len(data) // 4
-    r = {"file": len(b), "num_docs": n, "offset_table_bytes": 8 * (n + 1), "slots": slots}
+    end = struct.unpack_from("<Q", b, 8 + 8 * n)[0]  # last offset: the data's true end (a footer follows)
+    data = b[8 + 8 * (n + 1): 8 + 8 * (n + 1) + end]
+    slots = len(data) // width
+    r = {"file": len(b), "num_docs": n, "offset_table_bytes": 8 * (n + 1), "slots": slots, "slot_width": width}
     if deep:
-        a = array("I"); a.frombytes(data[: slots * 4])
-        empty = a.count(0xFFFFFFFF)
+        if width == 4:
+            a = array("I"); a.frombytes(data[: slots * 4]); sentinel = 0xFFFFFFFF
+        else:
+            a = [int.from_bytes(data[i:i + 3], "little") for i in range(0, slots * 3, 3)]; sentinel = 0xFFFFFF
+        empty = a.count(sentinel)
         r.update(empty_slots=empty)
-        if magic == b"PMAP":
-            r.update(max_ordinal=max(x for x in a if x != 0xFFFFFFFF))
+        if got in (b"PMAP", b"PMP3"):
+            r.update(max_ordinal=max(x for x in a if x != sentinel))
         else:
             spans = collections.Counter()
             for x in a:
@@ -131,18 +137,19 @@ def scan_posmap(path, deep, magic):
 
 def scan_sibling(path, deep):
     b = open(path, "rb").read()
-    assert struct.unpack_from("<I", b, 0)[0] == 0xFFFFFFFF and b[4:8] == b"SIB2"
+    assert struct.unpack_from("<I", b, 0)[0] == 0xFFFFFFFF and b[4:8] in (b"SIB2", b"SIB3"), b[4:8]
+    no_gaps = b[4:8] == b"SIB3"
     n = struct.unpack_from("<I", b, 8)[0]
     head = 12 + 4 * (n + 1)
-    r = {"file": len(b), "num_ordinals": n, "offset_table_bytes": 4 * (n + 1), "entries_bytes": len(b) - head}
+    offs = array("I"); offs.frombytes(b[12: 12 + 4 * (n + 1)])
+    r = {"file": len(b), "num_ordinals": n, "offset_table_bytes": 4 * (n + 1), "entries_bytes": offs[-1], "layout": b[4:8].decode()}
     if deep:
-        pos = head; end = len(b); cnt = 0; gap_nonzero = 0; gap_bytes = 0; ord_with_entries = 0
-        offs = array("I"); offs.frombytes(b[12: 12 + 4 * (n + 1)])
+        pos = head; end = head + offs[-1]; cnt = 0; gap_nonzero = 0; gap_bytes = 0; ord_with_entries = 0
         for o in range(n):
             if offs[o + 1] > offs[o]: ord_with_entries += 1
         while pos < end:
             tok, pos = varint(b, pos); cnt += 1
-            if tok & 1:
+            if not no_gaps and tok & 1:
                 p0 = pos; _, pos = varint(b, pos); gap_nonzero += 1; gap_bytes += pos - p0
         r.update(entries=cnt, gap_nonzero=gap_nonzero, gap_bytes=gap_bytes, ordinals_with_entries=ord_with_entries)
     return r
