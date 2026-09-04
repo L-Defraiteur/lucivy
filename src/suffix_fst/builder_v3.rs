@@ -334,6 +334,31 @@ pub fn decode_parent_entries_v3(data: &[u8]) -> Vec<ParentEntryV3> {
     entries
 }
 
+/// How many parents a version-8 record holds, without decoding them: the
+/// flat count, or the sum of the group counts (each group skipped by its
+/// byte length). What a range scan needs to price a piece.
+pub fn count_parent_entries_v8(data: &[u8]) -> usize {
+    let head = data[0];
+    let mut pos = 1usize;
+    let count = match head & 0x7F { 0 => read_varint_inline(data, &mut pos) as usize, k => k as usize };
+    if head & 0x80 == 0 {
+        return count;
+    }
+    let mut total = 0usize;
+    for g in 0..count {
+        let ov_len = (data[pos] as usize).min(MAX_OVERLAP_BYTES);
+        pos += 1 + ov_len;
+        let n = read_varint_inline(data, &mut pos) as usize;
+        let _first = read_varint_inline(data, &mut pos);
+        total += n;
+        if g + 1 < count {
+            let byte_len = read_varint_inline(data, &mut pos) as usize;
+            pos += byte_len;
+        }
+    }
+    total
+}
+
 /// Decode every parent of a version-8 record under `key` (see `encode_parent_entries_v8`).
 pub fn decode_parent_entries_v8(data: &[u8], key: &[u8]) -> Vec<ParentEntryV3> {
     decode_parent_entries_v8_where(data, key, |_| true)

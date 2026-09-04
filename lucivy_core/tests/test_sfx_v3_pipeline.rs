@@ -1727,8 +1727,8 @@ fn v3_schema_config_errors_speak() {
     assert!(e.contains("duplicate"), "{e}");
     let e = create(&cfg(serde_json::json!({"fields": []}))).unwrap_err();
     assert!(e.contains("no fields"), "{e}");
-    let e = create(&cfg(serde_json::json!({"fields": [{"name": "c", "type": "text"}], "sfx_version": 4}))).unwrap_err();
-    assert!(e.contains("2 or 3"), "{e}");
+    let e = create(&cfg(serde_json::json!({"fields": [{"name": "c", "type": "text"}], "sfx_version": 5}))).unwrap_err();
+    assert!(e.contains("2, 3 or 4"), "{e}");
 
     // Stored config with a key this version does not know: reopen survives.
     let stored = serde_json::json!({

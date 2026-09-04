@@ -548,6 +548,69 @@ fn generate_trigrams(query: &str, distance: u8) -> (Vec<String>, Vec<usize>, usi
 
 // ─── Brique 2: resolve_all_trigrams ──────────────────────────────────────
 
+/// On a shared, memoizing reader (shard dictionary): compute in parallel,
+/// as scheduler tasks, every FST scan this fuzzy query is about to ask for
+/// — its n-grams and every substring `resolve_pieces` will price — before
+/// the sequential code asks for them one by one. Without this the first
+/// segment computed twenty to thirty range scans over the whole shard's
+/// FST on one thread while the other segments waited on the memo's cells:
+/// 50 ms for `schdule` d=1 on 10 000 files against 6 for the per-segment
+/// index, whose scans were spread over the pool. Only the scans no cell
+/// holds yet are submitted; the wait is cooperative (a scheduler thread
+/// keeps running tasks). Nothing happens without a memo.
+/// Shortest piece `resolve_pieces` considers, in bytes.
+const PIECE_MIN_BYTES: usize = 2;
+
+fn prefetch_fuzzy_scans(ctx: &BriquesContext<'_>, query: &str, distance: u8, ngrams: &[String], strict_separators: bool) {
+    let Some(memo) = ctx.reader.memo() else { return };
+    let lower = query.to_lowercase();
+    let mut wanted: Vec<String> = ngrams.to_vec();
+    // The substrings `resolve_pieces` prices: every (a, b) on char
+    // boundaries at least MIN_PIECE bytes long.
+    let cuts: Vec<usize> = std::iter::once(0)
+        .chain((1..lower.len()).filter(|&i| lower.is_char_boundary(i)))
+        .chain(std::iter::once(lower.len()))
+        .collect();
+    let _ = distance;
+    for (i, &a) in cuts.iter().enumerate() {
+        for &b in &cuts[i + 1..] {
+            if b - a >= PIECE_MIN_BYTES {
+                wanted.push(lower[a..b].to_string());
+            }
+        }
+    }
+    wanted.sort();
+    wanted.dedup();
+    // Counts only (what the pricing reads): a full candidate list of a
+    // 2-byte piece is hundreds of thousands of decoded parents, and only
+    // the two or three pieces the pricing picks will need theirs.
+    // One task per (substring, partition) count cell not yet held; a task
+    // computes its cell inline and never waits (see `fst_candidates_v3`).
+    let partitions = fst_walk::candidate_cells(false, strict_separators);
+    let mut missing: Vec<(String, u8)> = Vec::new();
+    for q in wanted {
+        for &p in partitions {
+            if !memo.contains(6, q.as_bytes(), p << 2) {
+                missing.push((q.clone(), p));
+            }
+        }
+    }
+    if missing.len() < 2 {
+        return;
+    }
+    let scheduler = crate::actor::scheduler::global_scheduler();
+    let mut rxs = Vec::with_capacity(missing.len());
+    for (q, p) in missing {
+        let reader = ctx.reader.clone();
+        rxs.push(scheduler.submit_task(crate::actor::Priority::High, move || {
+            let _ = fst_walk::memo_count_in_partition(&reader, reader.memo().unwrap(), &q, p);
+        }));
+    }
+    for rx in rxs {
+        let _ = scheduler.try_wait(rx, "fuzzy prefetch");
+    }
+}
+
 /// A number that differs from one segment's reader view to the next (the
 /// segment's first global id), 0 without a view.
 fn reader_seed(reader: &crate::suffix_fst::file_v3::SfxFileReaderV3) -> usize {
@@ -642,7 +705,7 @@ fn pivot_cost_estimate(
     keep: usize,
 ) -> usize {
     let mut counts: Vec<usize> = ngrams.iter()
-        .map(|g| fst_walk::fst_candidates_v3(ctx.reader, g, false, strict_separators).len())
+        .map(|g| fst_walk::fst_candidates_count_v3(ctx.reader, g, false, strict_separators))
         .collect();
     counts.sort_unstable();
     counts.iter().take(keep.max(1)).sum()
@@ -659,7 +722,7 @@ fn resolve_pieces(
 ) -> Option<(Vec<TrigramHit>, Vec<usize>)> {
     let lower = query.to_lowercase();
     let k = distance as usize + 1;
-    const MIN_PIECE: usize = 2;
+    const MIN_PIECE: usize = PIECE_MIN_BYTES;
     let cuts: Vec<usize> = (1..lower.len()).filter(|&i| lower.is_char_boundary(i)).collect();
     if lower.len() < k * MIN_PIECE || cuts.len() + 1 < k { return None; }
 
@@ -668,7 +731,7 @@ fn resolve_pieces(
     let mut cost: std::collections::HashMap<(usize, usize), usize> = std::collections::HashMap::new();
     let mut piece_cost = |a: usize, b: usize| -> usize {
         *cost.entry((a, b)).or_insert_with(|| {
-            fst_walk::fst_candidates_v3(ctx.reader, &lower[a..b], false, strict_separators).len()
+            fst_walk::fst_candidates_count_v3(ctx.reader, &lower[a..b], false, strict_separators)
         })
     };
 
@@ -705,6 +768,26 @@ fn resolve_pieces(
     let mut acc = Vec::new();
     rec(&bounds, 0, k, &mut acc, 0, &mut best, &mut piece_cost);
     let (best_cost, pieces) = best?;
+    // Shared reader: the chosen pieces' lists in parallel, before the loop
+    // below asks for them one after the other (each is a heavy scan the
+    // other segments then wait for).
+    if let Some(memo) = ctx.reader.memo() {
+        let scheduler = crate::actor::scheduler::global_scheduler();
+        let mut rxs = Vec::new();
+        for &(a, b) in &pieces {
+            for &p in fst_walk::candidate_cells(false, strict_separators) {
+                if memo.contains(1, lower[a..b].as_bytes(), p << 2) { continue; }
+                let reader = ctx.reader.clone();
+                let piece = lower[a..b].to_string();
+                rxs.push(scheduler.submit_task(crate::actor::Priority::High, move || {
+                    let _ = fst_walk::memo_candidates_in_partition(&reader, reader.memo().unwrap(), &piece, p);
+                }));
+            }
+        }
+        for rx in rxs {
+            let _ = scheduler.try_wait(rx, "pieces prefetch");
+        }
+    }
     if let Some(limit) = max_cost {
         // A piece goes through the contains pipeline — chains across
         // separators and chunks — which costs more per candidate than a
@@ -1105,6 +1188,7 @@ pub fn resolve_trigrams_v3(
     metric: super::jaro_winkler::FuzzyMetric,
 ) -> (BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>) {
     let (ngrams, query_positions, n) = generate_trigrams(query, distance);
+    prefetch_fuzzy_scans(ctx, query, distance, &ngrams, strict_separators);
     if ngrams.is_empty() {
         return (BitSet::with_max_value(max_doc), Vec::new(), Vec::new());
     }

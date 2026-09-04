@@ -141,6 +141,11 @@ impl FstMemo {
         Self { entries: std::sync::Mutex::new(std::collections::HashMap::new()) }
     }
 
+    /// True when `(tag, query, flags)` has a cell — computed or being computed.
+    pub fn contains(&self, tag: u8, query: &[u8], flags: u8) -> bool {
+        self.entries.lock().unwrap().contains_key(&(tag, query.to_vec(), flags))
+    }
+
     /// The value under `(tag, query, flags)`, computed by `f` on the first
     /// call and shared afterwards.
     pub fn get_or_compute<T: std::any::Any + Send + Sync + 'static>(
@@ -165,6 +170,7 @@ impl FstMemo {
 }
 
 /// Reads a .sfx v3 file.
+#[derive(Clone)]
 pub struct SfxFileReaderV3 {
     /// FST over an Arc-backed slice of the file: opening is O(1) and copies
     /// nothing. It used to be `Map<Vec<u8>>` built from `to_vec()`, and the
@@ -292,6 +298,16 @@ impl SfxFileReaderV3 {
             return decode_parent_entries_v8_where(table.get(value), key, keep);
         }
         self.decode_parents(value, key)
+    }
+
+    /// How many parents a FST value has, decoding none of them on a
+    /// version-8 file (`count_parent_entries_v8`); older files decode.
+    pub fn count_parents(&self, value: u64, key: &[u8]) -> usize {
+        if self.version > OVERLAP_IN_KEY_VERSION {
+            let table = OutputTable::new(&self.parent_list_data);
+            return crate::suffix_fst::builder_v3::count_parent_entries_v8(table.get(value));
+        }
+        self.decode_parents(value, key).len()
     }
 
     /// Decode parent(s) from a FST output value found under `key` (see

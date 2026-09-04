@@ -154,19 +154,179 @@ pub fn fst_candidates_v3(
     strict_separators: bool,
 ) -> Vec<FstCandidateV3> {
     if let Some(memo) = reader.memo() {
-        let flags = (anchor_start as u8) | ((strict_separators as u8) << 1);
-        // Memoized sorted by id, for the segment walk below.
-        let shared = memo.get_or_compute(1, query.as_bytes(), flags, || {
-            let mut v = fst_candidates_v3_uncached(reader, query, anchor_start, strict_separators);
-            v.sort_by_key(|c| (c.raw_ordinal, c.sti));
-            v
-        });
-        return match reader.segment_gmap() {
-            Some(g) => keep_in_segment(&shared, |c| c.raw_ordinal as u32, &g),
-            None => (*shared).clone(),
-        };
+        // One memo cell per partition, each computed inline by whoever asks
+        // first — a cell's computation never waits on anything, which is
+        // what keeps the cooperative waits elsewhere from deadlocking on it
+        // (a task pumped while waiting for a cell must not be able to wait
+        // on that same cell's computer). Parallelism across partitions and
+        // pieces comes from the prefetches in `composite`, which submit
+        // one task per cell and wait for them.
+        let mut out = Vec::new();
+        let gmap = reader.segment_gmap();
+        for &partition in candidate_partitions(anchor_start, strict_separators) {
+            let shared = memo_candidates_in_partition(reader, memo, query, partition);
+            match &gmap {
+                Some(g) => out.extend(keep_in_segment(&shared, |c| c.raw_ordinal as u32, g)),
+                None => out.extend(shared.iter().cloned()),
+            }
+        }
+        return out;
     }
     fst_candidates_v3_uncached(reader, query, anchor_start, strict_separators)
+}
+
+/// How many candidates `fst_candidates_v3` would return — for pricing a
+/// piece or an n-gram. On a shared reader this is the shard-wide count,
+/// read off the memo without cutting the list down to the segment: a fuzzy
+/// query prices twenty to thirty substrings, and on 160 segments the cut
+/// alone was most of its time. A shard-wide selectivity ranks pieces the
+/// same way for every segment, which is what one wants anyway.
+pub fn fst_candidates_count_v3(
+    reader: &SfxFileReaderV3,
+    query: &str,
+    anchor_start: bool,
+    strict_separators: bool,
+) -> usize {
+    if let Some(memo) = reader.memo() {
+        // The count alone is a stream over the range reading each record's
+        // header: no parent decoded, nothing sorted — a 2-byte piece of a
+        // 10 000-file dictionary has hundreds of thousands of candidates,
+        // and pricing needs only how many.
+        return candidate_partitions(anchor_start, strict_separators).iter()
+            .map(|&p| memo_count_in_partition(reader, memo, query, p))
+            .sum();
+    }
+    fst_candidates_v3_uncached(reader, query, anchor_start, strict_separators).len()
+}
+
+/// `fst_candidates_in_partition(..).len()` without decoding a parent.
+fn fst_candidates_count_in_partition(reader: &SfxFileReaderV3, query: &str, partition: u8) -> usize {
+    let lower = query.to_lowercase();
+    let query_bytes = lower.as_bytes();
+    let fst = reader.fst();
+    let mut total = 0usize;
+    let (ge_key, lt_key) = range_keys(partition, query_bytes);
+    use lucivy_fst::{IntoStreamer, Streamer};
+    let mut stream = fst.range().ge(&ge_key).lt(&lt_key).into_stream();
+    while let Some((key, val)) = stream.next() {
+        total += reader.count_parents(val, key);
+    }
+    if reader.keys_cut_at_boundary() {
+        let len = query_bytes.len();
+        let shortest = len.saturating_sub(MAX_OVERLAP_BYTES).max(1);
+        for k in shortest..len {
+            let tail = &query_bytes[k..];
+            let mut probe = vec![partition];
+            probe.extend_from_slice(&query_bytes[..k]);
+            let Some(val) = fst.get(&probe) else { continue };
+            total += reader.decode_parents_where(val, &probe, |ov| ov.len() >= tail.len() && ov[..tail.len()] == *tail).len();
+        }
+    }
+    total
+}
+
+/// `[partition, query]` and the exclusive upper bound of its prefix range.
+fn range_keys(partition: u8, query_bytes: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let mut ge_key = vec![partition];
+    ge_key.extend_from_slice(query_bytes);
+    let mut lt_key = ge_key.clone();
+    if let Some(last) = lt_key.last_mut() {
+        if *last < 0xFF {
+            *last += 1;
+        } else {
+            lt_key.pop();
+            while let Some(last) = lt_key.last_mut() {
+                if *last < 0xFF {
+                    *last += 1;
+                    break;
+                }
+                lt_key.pop();
+            }
+        }
+    }
+    (ge_key, lt_key)
+}
+
+/// The memo flags of a per-partition cell: `partition << 2` (the anchor and
+/// strictness only choose which partitions are asked).
+fn partition_flags(partition: u8) -> u8 {
+    partition << 2
+}
+
+/// The memoized, id-sorted candidates of one partition (tag 1).
+pub fn memo_candidates_in_partition(
+    reader: &SfxFileReaderV3,
+    memo: &crate::suffix_fst::file_v3::FstMemo,
+    query: &str,
+    partition: u8,
+) -> std::sync::Arc<Vec<FstCandidateV3>> {
+    memo.get_or_compute(1, query.as_bytes(), partition_flags(partition), || {
+        let mut v = fst_candidates_in_partition(reader, query, partition);
+        v.sort_by_key(|c| (c.raw_ordinal, c.sti));
+        v
+    })
+}
+
+/// The memoized candidate count of one partition (tag 6), no parent decoded.
+pub fn memo_count_in_partition(
+    reader: &SfxFileReaderV3,
+    memo: &crate::suffix_fst::file_v3::FstMemo,
+    query: &str,
+    partition: u8,
+) -> usize {
+    *memo.get_or_compute(6, query.as_bytes(), partition_flags(partition), || {
+        fst_candidates_count_in_partition(reader, query, partition)
+    })
+}
+
+/// Every memo cell a query's candidates need, for a prefetch: one
+/// `(partition)` per partition asked.
+pub fn candidate_cells(anchor_start: bool, strict_separators: bool) -> &'static [u8] {
+    candidate_partitions(anchor_start, strict_separators)
+}
+
+/// The partitions a scan visits (module doc of `fst_candidates_v3`).
+fn candidate_partitions(anchor_start: bool, strict_separators: bool) -> &'static [u8] {
+    if anchor_start && strict_separators {
+        &[SI0_PREFIX]
+    } else if anchor_start && !strict_separators {
+        &[SI0_PREFIX, SI_STRIPPED_PREFIX]
+    } else if strict_separators {
+        &[SI0_PREFIX, SI_REST_PREFIX]
+    } else {
+        &[SI0_PREFIX, SI_REST_PREFIX, SI_STRIPPED_PREFIX]
+    }
+}
+
+/// `fst_candidates_v3` restricted to one partition.
+fn fst_candidates_in_partition(reader: &SfxFileReaderV3, query: &str, partition: u8) -> Vec<FstCandidateV3> {
+    let lower = query.to_lowercase();
+    let query_bytes = lower.as_bytes();
+    let fst = reader.fst();
+    let mut results = Vec::new();
+    let (ge_key, lt_key) = range_keys(partition, query_bytes);
+    use lucivy_fst::{IntoStreamer, Streamer};
+    let mut stream = fst.range().ge(&ge_key).lt(&lt_key).into_stream();
+    while let Some((key, val)) = stream.next() {
+        for p in reader.decode_parents(val, key) {
+            results.push(FstCandidateV3::from_parent(&p, partition));
+        }
+    }
+    if reader.keys_cut_at_boundary() {
+        let len = query_bytes.len();
+        let shortest = len.saturating_sub(MAX_OVERLAP_BYTES).max(1);
+        for k in shortest..len {
+            let tail = &query_bytes[k..];
+            let mut probe = vec![partition];
+            probe.extend_from_slice(&query_bytes[..k]);
+            let Some(val) = fst.get(&probe) else { continue };
+            let parents = reader.decode_parents_where(val, &probe, |ov| ov.len() >= tail.len() && ov[..tail.len()] == *tail);
+            for p in parents {
+                results.push(FstCandidateV3::from_parent(&p, partition));
+            }
+        }
+    }
+    results
 }
 
 fn fst_candidates_v3_uncached(
