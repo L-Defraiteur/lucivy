@@ -1065,6 +1065,26 @@ Deux bugs de la page trouvés en mesurant, corrigés :
   comparent maintenant triés par document ; l'ordre des ex æquo dans le
   moteur reste à fixer (adresse de document croissante, par exemple).
 
+## 3 sexies. Relecture extérieure de la page et du README (6 septembre, nuit)
+
+Une relecture reçue par Lucie pointait cinq imprécisions, toutes fondées,
+corrigées dans README, ARCHITECTURE.md et la page : « ranking that does not
+leak » (trop fort et contredit dix lignes plus haut : la garantie exacte est
+« même score pour un document sous les mêmes statistiques fusionnées, le
+filtre choisit ce qu'on visite, pas comment on note ») ; « three round trips »
+d'un côté, « two » de l'autre (c'est deux) ; le tableau navigateur/natif
+annonçait « identical counts and spans » sur 13 806 contre 14 032 fichiers
+(reformulé : natif vérifié contre le balayage de *ses* fichiers, navigateur =
+temps de l'onglet, comptes non comparés) ; la commande de reproduction clone
+l'arbre du jour (ajout : instantané de début septembre, 93 983 fichiers,
+épingler le commit, la promesse qui ne bouge pas est l'accord avec le balayage
+de *vos* fichiers) ; « inexpressible » pour Elasticsearch (→ « not with this
+analyzer », dans le README, ARCHITECTURE, la page, le rapport et le script).
+Et le disclaimer demandé par Lucie après le comparatif, avec l'angle qu'elle
+voulait : un autre analyseur peut se rapprocher au prix de le concevoir, le
+configurer et réindexer ; **chez lucivy toute question du tableau est
+répondue par l'index par défaut, sans rien configurer**, et vérifiée.
+
 ## 3 quinquies. Le dictionnaire devient le défaut (6 septembre au soir)
 
 Question de Lucie pendant la revue : « le dict est optionnel mais par défaut

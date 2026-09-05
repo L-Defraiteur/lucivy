@@ -305,6 +305,13 @@ V3_CORPUS=/tmp/linux-bench V3_SFX_VERSION=4 cargo test --release -p lucivy-core 
     --test test_sfx_v3_ground_truth v3_ground_truth_demo -- --ignored --nocapture
 ```
 
+The kernel tree moves: the numbers above come from a snapshot of early
+September 2026 (93 983 text files after the harness's filter), so counts and
+sizes will drift with the tree you clone — pin the commit you measure
+(`git -C /tmp/linux-bench checkout <sha>`) and the harness will still fail on
+any disagreement between its counts and the scan of *your* files, which is the
+claim that does not move.
+
 5 September 2026 (4.0.0, branch `v4`), four shards, shared dictionary, idle
 machine: Intel Core Ultra 7 270K Plus (24 cores), 93 GB RAM, NVMe, Linux 7.2.
 Timings are the search itself; recovering each hit's file for the comparison
@@ -335,7 +342,7 @@ On the substring itself all three agree to the document (`mutex_lock` 5 145,
 
 | asked | truth | lucivy | Elasticsearch | tantivy |
 |---|---|---|---|---|
-| `spin_lock`, separators relaxed (also `spin lock`, `spin-lock`, `spinlock`) | 9 552 | **9 552**, 23 ms | 6 577 — inexpressible, its trigrams carry the underscore | 6 601 — relaxed is the only mode it has: the separator never enters its index |
+| `spin_lock`, separators relaxed (also `spin lock`, `spin-lock`, `spinlock`) | 9 552 | **9 552**, 23 ms | 6 577 — not with this analyzer: its trigrams carry the underscore | 6 601 — relaxed is the only mode it has: the separator never enters its index |
 | `spinlokc`, two edits, across the token boundary | 10 034 | **10 034**, 148 ms | 3 549 — fuzziness compares whole terms | 6 557 — same |
 | `spin_lock_[a-z]+`, a regex | 5 510 | **5 510**, 219 ms | 5 440 (wildcard field, 70 short), 480 ms | 0 — terms are already cut |
 | `de`, two characters | 93 009 | **93 009**, 7.7 M spans, 561 ms | 0, silently | 0, silently |
@@ -343,6 +350,21 @@ On the substring itself all three agree to the document (`mutex_lock` 5 145,
 | **where it matched**: `mutex_lock`, 5 145 documents | 20 797 spans | **all 20 797, 15 ms** | `highlight` on the top 200: 179 ms | verifying 5 145 stored texts: 96 ms |
 | your index **in your transaction** | — | **yes**: pluggable store, one commit for your rows and the index, rollback included | no: a server next to your database, a synchronisation to write | no: its own directory, its own commit |
 | shards and nodes scoring **as one index**, as a library | — | **yes**, asserted by `test_federated_search` | yes, as a cluster | no: one index, one scale of scores |
+
+
+**What this comparison is, and is not.** Each engine runs the configuration
+its own documentation gives for substring search — Elasticsearch a trigram
+analyzer plus a `wildcard` field, tantivy its `NgramTokenizer` — and every
+count is judged by the same byte-by-byte scan of the files;
+`benches/compare_engines.sh` replays it and
+`docs/compare-engines-2026-09-05.md` is the report. Where a cell says "not
+with this analyzer", a purpose-built analyzer or plugin may well get closer,
+at the price of designing it, configuring it and reindexing — such a
+configuration is welcome in the report. The point of the table is elsewhere:
+**every question in it is answered by lucivy's default index, with nothing to
+configure** — exact, relaxed across separators, fuzzy across token boundaries,
+regex, two characters, the positions of every match — and each answer is
+checked against the files.
 
 The last two rows are observed, not measured: the store contract is five
 methods (`load` / `save` / `delete` / `exists` / `list`) that rag3db implements
@@ -364,9 +386,12 @@ benches/compare_engines.sh /tmp/linux-bench /tmp/lucivy-compare     # writes com
 ### Browser against native
 
 Measured on 5 September 2026 (4.0.0), the whole Linux 2.6.0 kernel, 4 shards,
-shared dictionary, the same queries on both sides, identical counts and spans
-(24-core machine; the browser is Chrome, the index held in memory, indexed by
-the playground's `index linux`).
+shared dictionary, the same engine and the same queries on both sides. The
+native run is the harness, verified against a byte-by-byte scan of the files it
+indexed (it skips a few directories, hence 13 806 against 14 032); the browser
+column is the tab's own timings (Chrome, 24-core machine, the index held in
+memory, indexed by the playground's `index linux`). Same engine, same answers
+per file; the two file sets are not identical, so the counts are not compared.
 
 | | native (Rust, mmap) | browser (WASM) |
 |---|---|---|

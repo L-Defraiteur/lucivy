@@ -346,7 +346,7 @@ every row by the same scan. On the kernel (93 983 files, 857 MB):
 | | Elasticsearch, trigrams + wildcard | tantivy, trigrams | lucivy 4.0 |
 |---|---|---|---|
 | index | 3 082 MB (×3.6) | 680 MB (×0.8) | 4 926 MB (×5.8); 3 335 MB (×3.9) with `derived_in_ram` |
-| `spin_lock`, separators relaxed (truth 9 552) | 6 577 — inexpressible | 6 601 — relaxed is its only mode | **9 552** |
+| `spin_lock`, separators relaxed (truth 9 552) | 6 577 — not with this analyzer | 6 601 — relaxed is its only mode | **9 552** |
 | `spinlokc`, two edits across the boundary (10 034) | 3 549 | 6 557 | **10 034** |
 | `de`, two characters (93 009) | 0, silently | 0, silently | **93 009** |
 | where it matched (`mutex_lock`, 5 145 documents) | `highlight` on 200: 179 ms | 5 145 stored texts re-read: 96 ms | **20 797 spans, all, 15 ms** |
@@ -356,7 +356,11 @@ matches nothing; its honest path is an AND of trigrams then a verification on
 the stored text, timed as such. Where they win, also in the report: Elasticsearch
 answers a plain substring in 3-8 ms to lucivy's 12-15, tantivy indexes the corpus
 in seconds, both run a term-level fuzzy five times faster than lucivy's two-edit
-cross-token one.
+cross-token one. Each engine runs the configuration its documentation gives for
+substring search; a purpose-built analyzer may get closer on a row, at the
+price of designing, configuring and reindexing — every question in the table is
+answered by lucivy's default index, with nothing to configure, and checked
+against the files.
 
 ## Heritage
 
