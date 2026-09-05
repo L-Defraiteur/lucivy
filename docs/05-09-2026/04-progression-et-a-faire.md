@@ -1077,7 +1077,11 @@ la contrainte qui rend le résultat indépendant du découpage en fenêtres) ;
 les candidates chevauchantes forment un groupe, chaque groupe rend la plus
 similaire (ex æquo : la plus courte, puis la plus à gauche). Le harnais a
 `grep_spans_jaro` et la ligne `jw1` est vérifiée : 10 000 fichiers, 228
-documents, 876 spans, exact, **10/10** ; 30 000 en dictionnaire pareil.
+documents, 876 spans, exact, **10/10** ; 30 000 en dictionnaire pareil
+(707, 2 284, 11,4 ms contre 9,4 en `fz1`) ; **noyau entier en dictionnaire
+10/10** : `jw1` 5 196 documents, 18 824 spans exacts (le `fz1` en a 18 825 :
+une occurrence à une édition sous 0,9 de similarité), 72,7 ms de recherche
+(`fz1` 98,1), 66 s de balayage de vérité.
 Tests unitaires : deux occurrences dans une fenêtre, l'exacte préférée dans
 son groupe, la borne en éditions (`spnilock`, transposition : 0,97 de
 similarité mais deux éditions), alignement sur les caractères.

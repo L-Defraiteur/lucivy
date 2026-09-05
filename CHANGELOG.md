@@ -86,7 +86,8 @@ Lucivy 4.0.0 (branch v4 — not published yet)
   `distance` edits** (the recall the candidate generation guarantees);
   overlapping candidates form a group, each group yields its most similar
   substring. The panel's `jw1` row is now compared to a scan of the files
-  like the others: 10 000 kernel files, 228 documents, 876 spans, exact.
+  like the others: 10 000 kernel files, 228 documents, 876 spans, exact; the
+  whole kernel (93 983 files), 5 196 documents, 18 824 spans, exact, 73 ms.
 - **Playground**: twelve corpora at the prompt (`index mdn|linux|go|godot|
   typescript|postgres|cpython|redis|git|curl|sqlite|nginx`, described in
   `playground/corpora.json`, built by `tools/build_corpus.py` and by the
