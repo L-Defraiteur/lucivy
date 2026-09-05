@@ -215,6 +215,20 @@ passage : le commit décodait 950 000 textes pour lire leurs ids. Chrome :
 2.6.0 40 s (41-42), pic 2 023 égal. Le filtre est gardé (rien en mémoire,
 un peu là où les fils manquent), et 30 000 finit à **23,0 s**.
 
+## 10. Le soir du 6 : les bindings pour publier, et Jaro-Winkler vérifié
+
+`dictionary_wait` dans les signatures Python et Node (typings napi
+régénérés), l'objet schéma C++, `IndexConfig` emscripten ; README des
+bindings et du cœur, CHANGELOG 4.0.0 complété (repli différé, filtre, temps,
+vitrine, banc). Bindings verts : Node (`test.mjs` et cinq suites), Python
+112, C++. Deux tests Node comparaient l'ordre exact des résultats : deux
+scores égaux reviennent dans l'ordre des segments, qui dépend du moment où
+les fusions de fond atterrissent (le v3 nu aussi) — comparés triés par
+document maintenant, Python de même. Puis la question de Lucie sur
+Jaro-Winkler « un seul match par fenêtre » : `jaro_spans`, définition
+partagée, ligne `jw1` du panel vérifiée, 10/10 (`04` §3 ter). La liste de
+publication est en `04` §3 bis.
+
 ## 8. Commits de la nuit
 
 `4a5967d` `?ram` mesuré · `39c6d9e` douze corpus, deux bugs · `e41bfce`

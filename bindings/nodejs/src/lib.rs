@@ -131,9 +131,14 @@ impl Index {
     ///   the index is opened or reloaded. Same answers; opening pays the
     ///   rebuild (never a query) and the rebuilt structures stay resident.
     ///   Off by default; fixed at creation.
+    /// @param dictionaryWait - Shared dictionary only. A commit returns before
+    ///   the shard's new texts are merged into the dictionary (a background
+    ///   task does it); a search waits for that merge, so that its cost never
+    ///   depends on when it runs. `false` searches at once over the
+    ///   not-yet-merged parts. On by default; fixed at creation.
     #[napi(factory)]
-    pub fn create(path: String, fields: Vec<FieldDef>, shards: Option<u32>, shared_dictionary: Option<bool>, derived_in_ram: Option<bool>) -> Result<Self> {
-        let config = schema_config(&fields, shards, shared_dictionary, derived_in_ram);
+    pub fn create(path: String, fields: Vec<FieldDef>, shards: Option<u32>, shared_dictionary: Option<bool>, derived_in_ram: Option<bool>, dictionary_wait: Option<bool>) -> Result<Self> {
+        let config = schema_config(&fields, shards, shared_dictionary, derived_in_ram, dictionary_wait);
 
         let handle = ShardedHandle::create(&path, &config)
             .map_err(|e| Error::from_reason(e))?;
@@ -783,7 +788,7 @@ fn build_contains_split_multi_field(value: &str, text_fields: &[String], distanc
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-fn schema_config(fields: &[FieldDef], shards: Option<u32>, shared_dictionary: Option<bool>, derived_in_ram: Option<bool>) -> query::SchemaConfig {
+fn schema_config(fields: &[FieldDef], shards: Option<u32>, shared_dictionary: Option<bool>, derived_in_ram: Option<bool>, dictionary_wait: Option<bool>) -> query::SchemaConfig {
     let field_defs: Vec<query::FieldDef> = fields
         .iter()
         .map(|f| query::FieldDef {
@@ -801,6 +806,7 @@ fn schema_config(fields: &[FieldDef], shards: Option<u32>, shared_dictionary: Op
         shards: shards.map(|s| s as usize),
         shared_dictionary: shared_dictionary.filter(|&b| b),
         derived_in_ram: derived_in_ram.filter(|&b| b),
+        dictionary_wait: dictionary_wait.filter(|&b| !b),
         ..Default::default()
     }
 }
@@ -1081,6 +1087,9 @@ pub struct BlobIndexOptions {
     /// `create()` only: the derived sidecars rebuilt in RAM at open instead
     /// of written (about a third smaller on disk) — see `Index.create()`.
     pub derived_in_ram: Option<bool>,
+    /// `create()` only, shared dictionary: a search waits for the background
+    /// merge of the last commit's texts (default `true`) — see `Index.create()`.
+    pub dictionary_wait: Option<bool>,
 }
 
 /// One argument of a store callback, built on the JS thread.
@@ -1486,7 +1495,7 @@ impl BlobIndex {
     /// @param store - Object implementing the store protocol (`load`, `save`, `delete`, `exists`, `list`, optional `blobLen` / `loadRange`).
     /// @param indexName - Name of the index inside the store.
     /// @param fields - Field definitions, as for `Index.create()`.
-    /// @param options - `{cacheDir?, lazy?, shards?, sharedDictionary?, derivedInRam?}`.
+    /// @param options - `{cacheDir?, lazy?, shards?, sharedDictionary?, derivedInRam?, dictionaryWait?}`.
     #[napi(ts_return_type = "Promise<BlobIndex>")]
     pub fn create(
         env: Env,
@@ -1497,7 +1506,7 @@ impl BlobIndex {
     ) -> Result<AsyncTask<BlobTask<BlobIndex>>> {
         let store = JsBlobStore::from_object(&env, store)?;
         let options = options.unwrap_or_default();
-        let config = schema_config(&fields, options.shards, options.shared_dictionary, options.derived_in_ram);
+        let config = schema_config(&fields, options.shards, options.shared_dictionary, options.derived_in_ram, options.dictionary_wait);
         Ok(blob_task(move || {
             let storage = blob_storage(store, &index_name, &options);
             let handle = ShardedHandle::create_with_storage(Box::new(storage), &config)

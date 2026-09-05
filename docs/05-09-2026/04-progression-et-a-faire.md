@@ -1058,4 +1058,59 @@ Deux bugs de la page trouvés en mesurant, corrigés :
   convertit sans retour ». Leçon de `sparse.mmap` en 3.0.6 : plus de
   changement de format en mineur.
 - Décisions restantes : pile v2 ; fusionner `wip/publication-3.0.0`
-  dans `main` ; tri stable des ex æquo dans le merge des shards.
+  dans `main` ; tri stable des ex æquo dans le merge des shards — **vu le 6
+  au soir** : les tests Node comparaient deux index par l'ordre exact des
+  résultats et deux scores égaux revenaient dans un ordre qui dépend du
+  moment où les fusions de fond atterrissent ; les tests Node et Python
+  comparent maintenant triés par document ; l'ordre des ex æquo dans le
+  moteur reste à fixer (adresse de document croissante, par exemple).
+
+## 3 ter. Jaro-Winkler : toutes les occurrences, et une vérité terrain (6 septembre au soir)
+
+Question de Lucie : « il y avait une limitation à un seul match par fenêtre,
+on sait régler ? ». Oui : `best_window` (une occurrence par fenêtre
+candidate, la meilleure) remplacé par **`jaro_spans`**, la définition
+partagée moteur / vérité terrain sur le modèle de `fuzzy_spans` : sous-chaîne
+à ± `distance` caractères de la longueur de la requête, similarité ≥ seuil,
+**et à ≤ `distance` éditions** (le rappel que le pigeonhole garantit — c'est
+la contrainte qui rend le résultat indépendant du découpage en fenêtres) ;
+les candidates chevauchantes forment un groupe, chaque groupe rend la plus
+similaire (ex æquo : la plus courte, puis la plus à gauche). Le harnais a
+`grep_spans_jaro` et la ligne `jw1` est vérifiée : 10 000 fichiers, 228
+documents, 876 spans, exact, **10/10** ; 30 000 en dictionnaire pareil.
+Tests unitaires : deux occurrences dans une fenêtre, l'exacte préférée dans
+son groupe, la borne en éditions (`spnilock`, transposition : 0,97 de
+similarité mais deux éditions), alignement sur les caractères.
+
+## 3 bis. Publier 4.0.0 — la liste (6 septembre au soir)
+
+Rien ne part sans le feu vert de Lucie à chaque étape marquée **[go]**.
+
+1. [x] Bindings complets pour 4.0.0 : `shared_dictionary`, `derived_in_ram`
+   et `dictionary_wait` dans les signatures Python et Node, l'objet schéma
+   C++ et bridge, `IndexConfig` emscripten (typé) ; README de chaque
+   binding et `lucivy_core/README.md` alignés sur le README principal ;
+   CHANGELOG 4.0.0 complet (repli différé, filtre, temps d'indexation,
+   vitrine, banc). Tests : lib 1 461 verts, `lucivy-core` toutes suites,
+   `lucivy-cpp`, Python `pytest`, Node `test.mjs` + `tests/*.mjs`, WASM
+   rebâti et mesuré dans Chrome.
+2. [ ] Revue UX de la vitrine par Lucie (titre h1 et chiffre en tête, `09`
+   §« ce qui reste »).
+3. [ ] Retirer les mentions « unpublished yet: 3.0.8 is the last release »
+   (README, `bindings/python|nodejs/README.md`, `lucivy_core/README.md`),
+   dater le CHANGELOG (« 4.0.0 — 6 septembre 2026 »), vérifier
+   `RELEASE.md` §Before (versions, `cargo publish --dry-run -p luciole -p
+   lucistore`, `npm pack --dry-run`).
+4. [ ] **[go]** `gh auth switch -u L-Defraiteur` ; vérifier la variable de
+   dépôt `PUBLISH_ENABLED` (le tag publie tout seul : aucun réviseur sur
+   l'environnement `release`).
+5. [ ] **[go]** fusionner `v4` dans `main` (fast-forward ; `pages.yml`
+   déploie la vitrine depuis `main` et bâtit les douze corpus), pousser.
+6. [ ] **[go]** `git tag -a v4.0.0` et pousser le tag : `release.yml` bâtit
+   les cinq plateformes, PyPI, npm (six paquets) et crates.io dans l'ordre
+   `luciole` → `lucistore` → `ld-lucivy` → `lucivy-core` → `sparse-vector`.
+   `lucivy-wasm` se publie **à la main** (`bindings/emscripten`, `npm
+   publish --otp`) tant qu'aucun job emscripten n'existe.
+7. [ ] Vérifier sur chaque registre, noter les versions dans `CLAUDE.md`,
+   répondre aux issues #12 et #15, l'article.
+

@@ -8,6 +8,7 @@ Full-text search for code and technical text, as a library — from Python. Subs
 
 - **The index is 3.7× smaller** — the whole Linux kernel: 18 057 MB in 3.0.8, 4 938 MB in 4.0, 3 344 MB with `derived_in_ram=True`; same answers, same spans, checked against the files ([the comparison with Elasticsearch and tantivy](../../docs/compare-engines-2026-09-05.md))
 - **`Index.create(..., shared_dictionary=True)`** — one dictionary of token texts per shard instead of one per segment: 23 % smaller on the kernel, cold queries ×0.8-1.6, same answers; off by default, fixed at creation (also on `create_with_blob_store`)
+- **`Index.create(..., dictionary_wait=False)`** — shared dictionary only: a commit returns before the shard's new texts are merged into the dictionary (a background task does it) and, by default, a search waits for that merge so that its cost never depends on when it runs; `False` searches at once over the not-yet-merged parts. Indexing with the dictionary costs ×1.5 (the kernel: 107 s against 56)
 - **`Index.create(..., derived_in_ram=True)`** — the three derived sidecars of each segment rebuilt byte for byte when the index opens instead of written: about a third less on disk, the open pays (the kernel: 2 s), never a query; off by default
 - **Compatibility contract** — 4.0 opens a 3.0.x index and returns what 3.0.x returned (checked against a fixture the published 3.0.8 wheel built); 3.0.x does not open a 4.0 index; the first commit converts for good
 

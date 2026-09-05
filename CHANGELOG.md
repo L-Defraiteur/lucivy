@@ -51,6 +51,60 @@ Lucivy 4.0.0 (branch v4 — not published yet)
   `Index.create(path, fields, shards, sharedDictionary, derivedInRam)` /
   `BlobIndexOptions.derivedInRam`, C++ and browser `"derived_in_ram": true`
   in the schema object.
+- **Indexing with the shared dictionary costs ×1.5 instead of ×2** (Linux
+  kernel 131 → 107 s, v3 56 s; 30 000 files 32 → 23 s). Each segment writes
+  the suffix FST of the texts it minted (`.newsfx`) next to their texts; a
+  commit names those pairs as pending parts of the dictionary
+  (`SfxDictionaryMeta::pending_segments`) and returns; a background task
+  merges them into the next generation in streams, compacts, swaps the
+  live dictionary and has `meta.json` rewritten; the pairs are deleted once
+  no `meta.json` names them. **A search waits for that merge by default**
+  (`dictionary_wait`, Python `Index.create(..., dictionary_wait=True)`, Node
+  `dictionaryWait`, `"dictionary_wait"` in the C++ and browser schema
+  object; `LUCIVY_DICT_WAIT=0` to measure the window: 3 → 20 ms on the
+  kernel panel), so that a query's cost never depends on when it runs;
+  closing a writer waits for the merge and its `meta.json`. Snapshots and
+  deltas carry the pending pairs. Past `LUCIVY_DICT_MAX_PENDING` (16) pairs
+  a commit merges synchronously; `LUCIVY_DICT_SYNC_FOLD=1` always does — the
+  default in WebAssembly, where the background merge gains no time and the
+  per-segment FSTs raised the memory high-water mark (2 023 → 2 279 MB on
+  Linux 2.6.0), so the browser keeps the previous commit path. Also: a
+  Bloom filter over the collector keys in front of the FST walks (97.5 % of
+  the walks for texts never seen skipped; rebuilt from `.termtexts` when a
+  writer reopens an index), `.termtexts` readers opened once per field
+  instead of once per token, the pending texts in 16 lock stripes, and
+  `LUCIVY_VERBOSE` counters for the whole path.
+- **Jaro-Winkler reports every occurrence, and is verified.** The
+  `fuzzy_metric: "jaro_winkler"` path kept one occurrence per candidate
+  window — the best substring (`best_window`) — so two occurrences in one
+  window lost one, and what was reported depended on how the index cut its
+  windows: the ground-truth panel showed those rows as "not verified". Now
+  one definition, shared by the engine and its ground truth
+  (`suffix_fst::briques::jaro_winkler::jaro_spans`, as `fuzzy_spans` is for
+  Levenshtein): a candidate is a substring within `distance` chars of the
+  needle's length, at least `min_similarity` similar, **and within
+  `distance` edits** (the recall the candidate generation guarantees);
+  overlapping candidates form a group, each group yields its most similar
+  substring. The panel's `jw1` row is now compared to a scan of the files
+  like the others: 10 000 kernel files, 228 documents, 876 spans, exact.
+- **Playground**: twelve corpora at the prompt (`index mdn|linux|go|godot|
+  typescript|postgres|cpython|redis|git|curl|sqlite|nginx`, described in
+  `playground/corpora.json`, built by `tools/build_corpus.py` and by the
+  Pages workflow); the prompt is `$ lucivy ` with `search`, `index`, `open`,
+  `drop`, `list`, `help`; a commit every 8 MB of text (`?commitmb`) as well
+  as every 2 000 files, which bounds the memory peak by the segment size
+  (Godot 3.3 → 1.8 GB); the tar reader handles long names (ustar prefix,
+  GNU `L`, PAX `x` — 9 736 of TypeScript's 39 044 files were silently
+  lost); `Lucivy.dropIndex(path)` deletes an index through the worker
+  (WASMFS caches what it mounted; a `drop` then `index` of the same corpus
+  failed with `I/O error (os error 29)`). `derived_in_ram` in the browser:
+  −26 % of OPFS on the kernel but +524 MB at the indexing peak, so `?ram`
+  is an option, not the default.
+- **`benches/compare_engines.sh`**: one command against Elasticsearch 8.19
+  (standard, and trigrams + `wildcard`) and tantivy 0.25 (default, and
+  `NgramTokenizer`) — size, indexing, nine queries verified by a scan of
+  the files, the questions the others cannot ask, the price of positions;
+  report in `docs/compare-engines-2026-09-05.md`.
 - **Fixed: the tail entry of a very long word pointed at the wrong
   position.** A word of more than 264 bytes (a line of Chinese, no separator
   inside) gets a second entry for its last bytes; when the word's trailing

@@ -45,8 +45,11 @@ const queries = [
   { type: 'regex', field: 'body', value: 'mutex_[a-z]+' },
   { type: 'parse', field: 'body', value: 'kmalloc AND NOT vfree' },
 ];
+// Ties (equal scores) come back in segment order, which depends on when the
+// background merges landed: compare the answers sorted by document.
 const answer = (idx, q) => JSON.stringify(idx.search(q, { limit: 100, highlights: true })
-  .map(r => [r.docId, Math.round(r.score * 1e4) / 1e4, r.highlights]));
+  .map(r => [r.docId, Math.round(r.score * 1e4) / 1e4, r.highlights])
+  .sort((a, b) => a[0] - b[0]));
 for (const q of queries) {
   check(answer(shared, q) === answer(plain, q), `same answer for ${JSON.stringify(q)}`);
 }
@@ -55,6 +58,21 @@ const reopened = Index.open(sharedPath);
 for (const q of queries) {
   check(answer(reopened, q) === answer(plain, q), `same answer after reopen for ${q.value}`);
 }
+
+// `dictionaryWait: false` (a search does not wait for the background merge
+// of the last commit's texts) is accepted and answers like the default.
+const eager = Index.create(join(dir, 'eager'), fields, 2, true, false, false);
+{
+  let id = 1;
+  for (let round = 0; round < 4; round++) {
+    for (const w of words) { eager.add(id, { body: `round ${round} calls ${w} and returns ${w.length}` }); id++; }
+    eager.commit();
+  }
+}
+for (const q of queries) {
+  check(answer(eager, q) === answer(plain, q), `dictionaryWait false: same answer for ${q.value}`);
+}
+eager.close();
 
 console.log('FAILS', fails);
 process.exit(fails ? 1 : 0);

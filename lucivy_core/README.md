@@ -131,7 +131,12 @@ pre-filters by document id and only wakes the shards that hold those ids.
 ## A smaller index: the shared dictionary
 
 `"shared_dictionary": true` at creation (`sfx_version` 4) stores each
-distinct token text once per shard instead of once per segment: the suffix
+distinct token text once per shard instead of once per segment (indexing
+costs ×1.5 — the kernel: 107 s against 56 —: a commit names its segments'
+new texts, `SfxDictionaryMeta::pending_segments`, and returns; a background
+task merges them into the next generation; a search waits for that merge by
+default, `"dictionary_wait"`, so that its cost never depends on when it
+runs): the suffix
 FST, the texts and the sibling table live in per-shard *generations*
 (`dict-<g>.*`, one per commit, compacted past `LUCIVY_DICT_MAX_GENERATIONS`
 = 8), and a segment keeps only its postings and position maps plus a

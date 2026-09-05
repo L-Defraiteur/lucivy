@@ -1359,23 +1359,22 @@ fn verify_candidates(
             }
             FuzzyMetric::JaroWinkler { min_similarity } => {
                 // The candidates come from the pigeonhole at distance `d`;
-                // Jaro-Winkler decides among them. The best substring of the
-                // window within `d` chars of the needle's length is the
-                // occurrence, and its similarity the document's tier.
+                // Jaro-Winkler decides among them, with the shared
+                // occurrence definition (`jaro_spans`: every group of
+                // similar substrings within `d` edits, one occurrence each);
+                // the best similarity is the document's tier.
                 let t = profile::Timer::start();
-                let best = super::jaro_winkler::best_window(&needle, window.as_bytes(), distance as usize);
+                let occurrences = super::jaro_winkler::jaro_spans(&needle, window.as_bytes(), distance as usize, min_similarity);
                 t.stop(|c| &c.ns_fz_dp);
-                match best {
-                    Some((s, e, sim)) if sim >= min_similarity => {
-                        let cur = best_sim.entry(chain.doc_id).or_insert(0.0);
-                        if sim > *cur { *cur = sim; }
-                        vec![(s, e, 0)]
-                    }
-                    _ => {
-                        n_rejected += 1;
-                        continue;
-                    }
+                if occurrences.is_empty() {
+                    n_rejected += 1;
+                    continue;
                 }
+                let cur = best_sim.entry(chain.doc_id).or_insert(0.0);
+                for &(_, _, sim) in &occurrences {
+                    if sim > *cur { *cur = sim; }
+                }
+                occurrences.into_iter().map(|(s, e, _)| (s, e, 0)).collect()
             }
         };
         if found.is_empty() { continue; }

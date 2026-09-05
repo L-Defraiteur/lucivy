@@ -35,7 +35,11 @@ tab. The last query is typed by hand — `--fuzzy 2 "ShardedHandel"` finds
   per 16 positions), 28-bit ordinals, block offset tables.
 - **`shared_dictionary`**: one dictionary of token texts per **shard** instead
   of one per segment, in generations compacted by a streaming merge — 23 %
-  smaller on the kernel, cold queries ×0.8-1.6. Off by default.
+  smaller on the kernel, cold queries ×0.8-1.6. Off by default. Indexing
+  with it costs ×1.5 (the kernel: 107 s against 56): a commit names its
+  segments' new texts and returns, a background task merges them into the
+  dictionary, and a search waits for that merge by default
+  (`dictionary_wait`) so that its cost never depends on when it runs.
 - **`derived_in_ram`**: the three derived sidecars of a segment are not written
   but rebuilt byte for byte when the index opens (the kernel opens in 2 s
   instead of 43 ms; no query pays). Off by default; not for the browser.

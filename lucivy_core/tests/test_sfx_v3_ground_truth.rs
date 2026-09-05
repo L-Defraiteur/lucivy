@@ -494,6 +494,47 @@ fn grep_spans_fuzzy(files: &[(String, String)], needle: &str, distance: u8) -> G
     GrepSpans { docs, spans }
 }
 
+/// Jaro-Winkler ground truth from disk, with the engine's own definition
+/// (`jaro_spans`, `suffix_fst::briques::jaro_winkler`): in the lowercased,
+/// separator-stripped text, every group of overlapping substrings within
+/// `distance` chars of the needle's length, within `distance` edits, and at
+/// least `min_sim` similar yields one occurrence — the most similar.
+fn grep_spans_jaro(files: &[(String, String)], needle: &str, distance: u8, min_sim: f32) -> GrepSpans {
+    let root = repo_path();
+    let root = std::path::Path::new(&root);
+    let mut docs = HashSet::new();
+    let mut spans = HashSet::new();
+    let needle_l: Vec<u8> = strip_seps(&needle.to_lowercase()).into_bytes();
+    if needle_l.is_empty() { return GrepSpans { docs, spans }; }
+
+    for (i, (rel, _)) in files.iter().enumerate() {
+        let Ok(bytes) = std::fs::read(root.join(rel)) else { continue };
+        let text = String::from_utf8_lossy(&bytes);
+        let mut stripped: Vec<u8> = Vec::with_capacity(bytes.len());
+        let mut back: Vec<usize> = Vec::with_capacity(bytes.len());
+        for (off, ch) in text.char_indices() {
+            if !is_content_char(ch) { continue; }
+            for lc in ch.to_lowercase() {
+                let mut buf = [0u8; 4];
+                for b in lc.encode_utf8(&mut buf).bytes() {
+                    stripped.push(b);
+                    back.push(off);
+                }
+            }
+        }
+        let mut hit = false;
+        for (s, e, _) in ld_lucivy::suffix_fst::briques::jaro_winkler::jaro_spans(&needle_l, &stripped, distance as usize, min_sim) {
+            let from = back[s];
+            let last = back[e - 1];
+            let to = last + text[last..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+            spans.insert((i, from, to));
+            hit = true;
+        }
+        if hit { docs.insert(i); }
+    }
+    GrepSpans { docs, spans }
+}
+
 /// Regex ground truth from disk: every non-overlapping, leftmost-first match
 /// of the pattern (case-insensitive, as the engine), in source bytes.
 fn grep_spans_regex(files: &[(String, String)], pattern: &str) -> GrepSpans {
@@ -809,14 +850,13 @@ impl GroundTruthQuery {
     fn strict(text: &'static str) -> Self { Self { text, strict_sep: true, distance: 0, anchor: false, exact: false, min_sim: None } }
     fn relaxed(text: &'static str) -> Self { Self { text, strict_sep: false, distance: 0, anchor: false, exact: false, min_sim: None } }
     fn fuzzy(text: &'static str, distance: u8) -> Self { Self { text, strict_sep: false, distance, anchor: false, exact: false, min_sim: None } }
-    /// Jaro-Winkler. `distance` still sizes the candidate generation and the
-    /// length slack `best_window` is allowed; `min_sim` decides acceptance.
+    /// Jaro-Winkler. `distance` still sizes the candidate generation and is
+    /// the length slack and edit bound of `jaro_spans`; `min_sim` decides
+    /// acceptance. Verified against `grep_spans_jaro` since 6 September 2026.
     fn jaro(text: &'static str, distance: u8, min_sim: f32) -> Self {
         Self { min_sim: Some(min_sim), ..Self::fuzzy(text, distance) }
     }
     fn is_regex(&self) -> bool { self.distance == RX }
-    /// True when this row has no reference to compare against — see `min_sim`.
-    fn unverified(&self) -> bool { self.min_sim.is_some() }
     /// Mode suffix of `V3_QUERIES`: `strict`, `relax`, `fz1`-`fz3`, `rx`,
     /// `sw` (startsWith, relaxed), `sws` (startsWith, strict), `term`
     /// (whole words, relaxed), `terms` (whole words, strict), `jw1`/`jw2`
@@ -1108,7 +1148,6 @@ fn run_panel(
 
     let mut pass = 0u32;
     let mut fail = 0u32;
-    let mut unverified = 0u32;
     let mut fail_entries: Vec<serde_json::Value> = Vec::new();
     let diag_mode = std::env::var("V3_DIAG").is_ok();
 
@@ -1120,11 +1159,10 @@ fn run_panel(
         // Time the two independently. They used to share one timer, so every
         // reported latency silently carried a full grep over the corpus — a
         // constant that dilutes any engine-side comparison.
-        // A Jaro-Winkler row has no reference (see `GroundTruthQuery::min_sim`):
-        // it is timed and counted, never compared. Running a grep for it would
-        // print a number the engine was never meant to reproduce.
+        // A Jaro-Winkler row is verified with the engine's own occurrence
+        // definition (`grep_spans_jaro`) since 6 September 2026.
         let t_grep = std::time::Instant::now();
-        let gt = if q.unverified() { GrepSpans { docs: HashSet::new(), spans: HashSet::new() } }
+        let gt = if let Some(min_sim) = q.min_sim { grep_spans_jaro(files, q.text, q.distance, min_sim) }
                  else if q.is_regex() { grep_spans_regex(files, q.text) }
                  else if q.distance > 0 { grep_spans_fuzzy(files, q.text, q.distance) }
                  else { filter_boundaries(grep_spans(files, q.text, q.strict_sep), files, q.anchor, q.exact) };
@@ -1166,21 +1204,18 @@ fn run_panel(
         let spans_ok = (missing == 0 && extra == 0)
             || std::env::var("V3_SPANS_REPORT_ONLY").is_ok();
         let docs_ok = v3_result.doc_indices == grep_set;
-        let status = if q.unverified() { "n/a" }
-                     else if docs_ok && spans_ok { "OK" } else { "FAIL" };
-        let hl = if q.unverified() {
-            format!("NOT VERIFIED — {} spans, no reference for jaro-winkler", v3_spans.len())
-        } else if missing == 0 && extra == 0 {
+        let status = if docs_ok && spans_ok { "OK" } else { "FAIL" };
+        let hl = if missing == 0 && extra == 0 {
             format!("spans {} exact", gt.spans.len())
         } else {
             format!("spans gt={} v3={} miss={} extra={}", gt.spans.len(), v3_spans.len(), missing, extra)
         };
-        let grep_col = if q.unverified() { "—".to_string() } else { grep_set.len().to_string() };
-        let grep_time = if q.unverified() { "no grep".to_string() } else { format!("{grep_ms:.1}ms grep") };
+        let grep_col = grep_set.len().to_string();
+        let grep_time = format!("{grep_ms:.1}ms grep");
         eprintln!("{:<35} {:>5} {:>8} {:>8} {:>6} ({:.1}ms search, {:.1}ms +fetch, {grep_time}) {hl}",
             q.text, mode_label, grep_col, v3_result.doc_indices.len(), status,
             search_ms, ms - search_ms);
-        if !q.unverified() && (missing > 0 || extra > 0) {
+        if missing > 0 || extra > 0 {
             let mut miss: Vec<_> = gt.spans.difference(&v3_spans).copied().collect();
             miss.sort();
             let mut ext: Vec<_> = v3_spans.difference(&gt.spans).copied().collect();
@@ -1201,11 +1236,7 @@ fn run_panel(
 
         write_report(&mut report, q.text, &mode_label, &files, &grep_set, &v3_result);
 
-        // An unverified row can neither pass nor fail: counting it as a pass
-        // would inflate the panel's score with a claim nobody checked.
-        if q.unverified() {
-            unverified += 1;
-        } else if docs_ok && spans_ok {
+        if docs_ok && spans_ok {
             pass += 1;
         } else {
             fail += 1;
@@ -1224,11 +1255,7 @@ fn run_panel(
         }
     }
 
-    if unverified > 0 {
-        eprintln!("\n{pass} pass, {fail} fail, {unverified} timed but NOT verified (jaro-winkler: no reference)");
-    } else {
-        eprintln!("\n{pass} pass, {fail} fail");
-    }
+    eprintln!("\n{pass} pass, {fail} fail");
     eprintln!("Report: {REPORT_PATH}");
 
     // Export failures to JSON for diag pass

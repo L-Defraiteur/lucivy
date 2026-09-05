@@ -296,7 +296,7 @@ impl Drop for Index {
 }
 
 /// `SchemaConfig` out of the Python field list, as `Index.create` takes it.
-fn schema_config(fields: &Bound<'_, PyList>, shards: Option<usize>, shared_dictionary: bool, derived_in_ram: bool) -> PyResult<query::SchemaConfig> {
+fn schema_config(fields: &Bound<'_, PyList>, shards: Option<usize>, shared_dictionary: bool, derived_in_ram: bool, dictionary_wait: bool) -> PyResult<query::SchemaConfig> {
     let mut field_defs = Vec::new();
     for item in fields.iter() {
         let dict: &Bound<'_, PyDict> = item.downcast()?;
@@ -325,6 +325,7 @@ fn schema_config(fields: &Bound<'_, PyList>, shards: Option<usize>, shared_dicti
         shards,
         shared_dictionary: shared_dictionary.then_some(true),
         derived_in_ram: derived_in_ram.then_some(true),
+        dictionary_wait: (!dictionary_wait).then_some(false),
         ..Default::default()
     })
 }
@@ -349,6 +350,12 @@ impl Index {
     ///         for byte, when the index is opened or reloaded. Same answers;
     ///         opening pays the rebuild (never a query) and the rebuilt
     ///         structures stay resident. Off by default; fixed at creation.
+    ///     dictionary_wait: Shared dictionary only. A commit returns before
+    ///         the shard's new texts are merged into the dictionary (a
+    ///         background task does it); a search waits for that merge, so
+    ///         that its cost never depends on when it runs. ``False`` searches
+    ///         at once over the not-yet-merged parts. On by default; fixed at
+    ///         creation.
     ///
     /// Field types: ``"text"`` (full-text, tokenized), ``"u64"``, ``"i64"``, ``"f64"``, ``"bool"``, ``"date"``.
     ///
@@ -360,9 +367,9 @@ impl Index {
     ///         {"name": "score", "type": "f64", "fast": True},
     ///     ], shards=4)
     #[staticmethod]
-    #[pyo3(signature = (path, fields, shards=None, shared_dictionary=false, derived_in_ram=false))]
-    fn create(py: Python<'_>, path: &str, fields: &Bound<'_, PyList>, shards: Option<usize>, shared_dictionary: bool, derived_in_ram: bool) -> PyResult<Self> {
-        let config = schema_config(fields, shards, shared_dictionary, derived_in_ram)?;
+    #[pyo3(signature = (path, fields, shards=None, shared_dictionary=false, derived_in_ram=false, dictionary_wait=true))]
+    fn create(py: Python<'_>, path: &str, fields: &Bound<'_, PyList>, shards: Option<usize>, shared_dictionary: bool, derived_in_ram: bool, dictionary_wait: bool) -> PyResult<Self> {
+        let config = schema_config(fields, shards, shared_dictionary, derived_in_ram, dictionary_wait)?;
         let handle = py.allow_threads(|| ShardedHandle::create(path, &config))
             .map_err(|e| PyValueError::new_err(e))?;
 
@@ -419,6 +426,8 @@ impl Index {
     ///         about 20 % smaller, slightly slower queries.
     ///     derived_in_ram: As for ``create()``: the derived sidecars rebuilt
     ///         in RAM at open instead of written, about a third smaller on disk.
+    ///     dictionary_wait: As for ``create()``: a search waits for the
+    ///         background merge of the last commit's texts (default).
     ///
     /// Example::
     ///
@@ -426,7 +435,7 @@ impl Index {
     ///         {"name": "title", "type": "text", "stored": True},
     ///     ])
     #[staticmethod]
-    #[pyo3(signature = (store, index_name, fields, shards=1, cache_dir=None, lazy=false, shared_dictionary=false, derived_in_ram=false))]
+    #[pyo3(signature = (store, index_name, fields, shards=1, cache_dir=None, lazy=false, shared_dictionary=false, derived_in_ram=false, dictionary_wait=true))]
     fn create_with_blob_store(
         py: Python<'_>,
         store: &Bound<'_, PyAny>,
@@ -437,8 +446,9 @@ impl Index {
         lazy: bool,
         shared_dictionary: bool,
         derived_in_ram: bool,
+        dictionary_wait: bool,
     ) -> PyResult<Self> {
-        let config = schema_config(fields, Some(shards), shared_dictionary, derived_in_ram)?;
+        let config = schema_config(fields, Some(shards), shared_dictionary, derived_in_ram, dictionary_wait)?;
         let storage = blob_storage(store, index_name, cache_dir, lazy)?;
         let handle = py.allow_threads(|| ShardedHandle::create_with_storage(storage, &config))
             .map_err(|e| PyValueError::new_err(e))?;

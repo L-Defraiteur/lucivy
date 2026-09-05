@@ -1339,6 +1339,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `"dictionary_wait": false` in the schema object is accepted (the
+    /// search does not wait for the background merge of the last commit's
+    /// texts) and the index answers and reopens.
+    #[test]
+    fn schema_object_with_dictionary_wait_false() {
+        let dir = std::env::temp_dir().join(format!("lucivy-cpp-dictwait-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.to_str().unwrap().to_string();
+        let idx = lucivy_create(&path,
+            r#"{"fields":[{"name":"body","type":"text","stored":true}],"shards":2,"shared_dictionary":true,"dictionary_wait":false}"#,
+            1).unwrap();
+        for id in 1..=10u64 {
+            idx.add(id, &format!(r#"{{"body":"document {id} calls mutex_lock and kmalloc"}}"#)).unwrap();
+            if id % 5 == 0 { idx.commit().unwrap(); }
+        }
+        idx.wait_merges_quiet().unwrap();
+        assert_eq!(idx.num_docs(), 10);
+        idx.close().unwrap();
+        let reopened = lucivy_open(&path).unwrap();
+        assert_eq!(reopened.num_docs(), 10);
+        reopened.close().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn walkdir(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
         let mut out = Vec::new();
         if let Ok(rd) = std::fs::read_dir(dir) {

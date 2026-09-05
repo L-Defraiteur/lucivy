@@ -55,8 +55,10 @@ def index(tmp_dir):
 
 
 def hits(idx, query):
-    """(doc_id, rounded score) pairs — the answer an index gives to a query."""
-    return [(r.doc_id, round(r.score, 4)) for r in idx.search(query, limit=20)]
+    """(doc_id, rounded score) pairs — the answer an index gives to a query,
+    sorted by document: ties come back in segment order, which depends on
+    when the background merges landed."""
+    return sorted((r.doc_id, round(r.score, 4)) for r in idx.search(query, limit=20))
 
 
 # ─── compact / wait_merges_quiet / index_bytes ───────────────────────────────
@@ -334,6 +336,21 @@ class TestSharedDictionary:
         reopened = lucivy.Index.open(lean_path)
         for q in queries:
             assert hits(reopened, q) == hits(plain, q), f"{q} after reopen"
+
+    def test_dictionary_wait_false_answers_like_the_default(self, tmp_dir):
+        """`dictionary_wait=False` (a search does not wait for the background
+        merge of the last commit's texts) is accepted and answers exactly like
+        the default index; the default is `True` and is in the docstring."""
+        assert "dictionary_wait" in lucivy.Index.create.__doc__
+        plain = lucivy.Index.create(os.path.join(tmp_dir, "plain3"), FIELDS, shards=2)
+        eager = lucivy.Index.create(os.path.join(tmp_dir, "eager"), FIELDS, shards=2,
+                                    shared_dictionary=True, dictionary_wait=False)
+        for idx in (plain, eager):
+            for doc in DOCS:
+                idx.add(**doc)
+                idx.commit()
+        for q in ["python", "language", "data", "web", "learning"]:
+            assert hits(eager, q) == hits(plain, q), q
 
     def test_option_is_refused_with_a_contradicting_sfx_version(self):
         """The core refuses a config that says both; the binding cannot express

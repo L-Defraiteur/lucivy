@@ -93,6 +93,11 @@ export interface BlobIndexOptions {
    * of written (about a third smaller on disk) — see `Index.create()`.
    */
   derivedInRam?: boolean
+  /**
+   * `create()` only, shared dictionary: a search waits for the background
+   * merge of the last commit's texts (default `true`) — see `Index.create()`.
+   */
+  dictionaryWait?: boolean
 }
 export declare class Index {
   /**
@@ -108,8 +113,19 @@ export declare class Index {
    *   to x1.6 on exact queries, fuzzy ones faster) and a commit also writes
    *   the shard's new texts. Same answers as the default. Off by default;
    *   fixed at creation.
+   * @param derivedInRam - Do not write the three derived sidecars of each
+   *   segment (`.posmap`, `.word_pos_map`, `.sibling_v3`, about a third
+   *   of the index on disk); they are rebuilt in RAM, byte for byte, when
+   *   the index is opened or reloaded. Same answers; opening pays the
+   *   rebuild (never a query) and the rebuilt structures stay resident.
+   *   Off by default; fixed at creation.
+   * @param dictionaryWait - Shared dictionary only. A commit returns before
+   *   the shard's new texts are merged into the dictionary (a background
+   *   task does it); a search waits for that merge, so that its cost never
+   *   depends on when it runs. `false` searches at once over the
+   *   not-yet-merged parts. On by default; fixed at creation.
    */
-  static create(path: string, fields: Array<FieldDef>, shards?: number | undefined | null, sharedDictionary?: boolean | undefined | null, derivedInRam?: boolean | undefined | null): Index
+  static create(path: string, fields: Array<FieldDef>, shards?: number | undefined | null, sharedDictionary?: boolean | undefined | null, derivedInRam?: boolean | undefined | null, dictionaryWait?: boolean | undefined | null): Index
   /**
    * Open an existing index at the given path.
    *
@@ -420,7 +436,7 @@ export declare class BlobIndex {
    * @param store - Object implementing the store protocol (`load`, `save`, `delete`, `exists`, `list`, optional `blobLen` / `loadRange`).
    * @param indexName - Name of the index inside the store.
    * @param fields - Field definitions, as for `Index.create()`.
-   * @param options - `{cacheDir?, lazy?, shards?, sharedDictionary?}`.
+   * @param options - `{cacheDir?, lazy?, shards?, sharedDictionary?, derivedInRam?, dictionaryWait?}`.
    */
   static create(store: BlobStoreCallbacks, indexName: string, fields: Array<FieldDef>, options?: BlobIndexOptions | undefined | null): Promise<BlobIndex>
   /**

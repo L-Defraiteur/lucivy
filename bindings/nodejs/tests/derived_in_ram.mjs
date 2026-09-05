@@ -58,8 +58,11 @@ const queries = [
   { type: 'regex', field: 'body', value: 'mutex_[a-z]+' },
   { type: 'parse', field: 'body', value: 'kmalloc AND NOT vfree' },
 ];
+// Ties (equal scores) come back in segment order, which depends on when the
+// background merges landed: compare the answers sorted by document.
 const answer = (idx, q) => JSON.stringify(idx.search(q, { limit: 100, highlights: true })
-  .map(r => [r.docId, Math.round(r.score * 1e4) / 1e4, r.highlights]));
+  .map(r => [r.docId, Math.round(r.score * 1e4) / 1e4, r.highlights])
+  .sort((a, b) => a[0] - b[0]));
 for (const q of queries) {
   check(answer(lean, q) === answer(plain, q), `same answer for ${JSON.stringify(q)}`);
 }

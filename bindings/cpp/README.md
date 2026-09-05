@@ -8,6 +8,7 @@ Version 4.0.0 — built on the lucivy 4.0.0 engine (SFX v3 suffix index, shared 
 
 - **The index is 3.7× smaller** — the whole Linux kernel: 18 057 MB in 3.0.8, 4 938 MB in 4.0, 3 344 MB with `"derived_in_ram": true`; same answers, same spans, checked against the files ([the comparison with Elasticsearch and tantivy](../../docs/compare-engines-2026-09-05.md))
 - **`lucivy_create` takes a full schema object** — `"shared_dictionary": true` (one dictionary of token texts per shard instead of one per segment: 23 % smaller on the kernel, cold queries ×0.8-1.6, same answers) and `"derived_in_ram": true` (the three derived sidecars rebuilt byte for byte when the index opens: about a third less on disk, the open pays, never a query); both off by default, fixed at creation, also for `lucivy_create_with_backend`
+- **`"dictionary_wait": false` in the schema object** — shared dictionary only: a commit returns before the shard's new texts are merged into the dictionary (a background task does it) and, by default, a search waits for that merge so that its cost never depends on when it runs. Indexing with the dictionary costs ×1.5 (the kernel: 107 s against 56)
 - **Compatibility contract** — 4.0 opens a 3.0.x index and returns what 3.0.x returned (checked against a fixture the published 3.0.8 wheel built); 3.0.x does not open a 4.0 index; the first commit converts for good
 
 ## Build

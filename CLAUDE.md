@@ -59,7 +59,7 @@ Les anciens types sont routés automatiquement via `build_query()` dans `lucivy_
 | `contains` | natif SFX | `field, value, distance, anchor_start, exact_match, regex, strict_separators` |
 | `contains_split` | natif SFX | split whitespace → boolean should de contains |
 | `term` | → contains + anchor_start + exact_match | cross-token exact match |
-| `fuzzy` | → contains + distance | cross-token fuzzy via trigram pigeonhole ; `fuzzy_metric: "jaro_winkler"` + `min_similarity` (0.9) valide les candidats par Jaro-Winkler au lieu de Levenshtein |
+| `fuzzy` | → contains + distance | cross-token fuzzy via trigram pigeonhole ; `fuzzy_metric: "jaro_winkler"` + `min_similarity` (0.9) valide les candidats par Jaro-Winkler au lieu de Levenshtein — depuis le 6 septembre, **toutes** les occurrences d'une fenêtre (`jaro_spans` : groupes de sous-chaînes chevauchantes ≥ seuil **et** à ≤ `distance` éditions, la meilleure de chaque groupe), définition partagée avec la vérité terrain (`grep_spans_jaro`, ligne `jw1` du panel vérifiée, 10/10) |
 | `regex` | → contains + regex=true | cross-token regex via literal extraction |
 | `phrase` | → contains | multi-token adjacency |
 | `startsWith` | → contains + anchor_start | SI=0 only |
