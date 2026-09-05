@@ -238,15 +238,75 @@ paliers `tier × 1000 + bm25`, correct cross-shard.
   avec des nœuds dictionnaire contre un index v3.
 - Persistance : `StdFsDirectory`, `RamDirectory`, `BlobDirectory` ; LUCE,
   LUCID, LUCIDS. Une génération de dictionnaire voyage comme un bundle
-  `dict-<g>.` ; pas encore comptée par `index_bytes` / `preload` /
-  `residency`.
+  `dict-<g>.` ; comptée par `preload` et `shard_bytes_and_files`
+  (`dictionary_files()`), pas encore par `index_bytes` natif.
 - WASM : jamais de `thread::spawn`, I/O au `terminate()` seulement.
 
 ## 6. La fusion
 
 `merge_segments_v3` réinterne les textes, remappe postings et fratrie,
 reconstruit tout ; bornée par `MAX_ORDINAL` = 2²⁸ − 1. En mode
-dictionnaire, `merge_segments_dict` ne réinterne rien (§3.2).
+dictionnaire, `merge_segments_dict` ne réinterne rien (§3.2). Les fusions
+de fond sont des tâches du scheduler (`segment_updater_actor::start_merges`,
+une tâche par fusion, priorité High) sous un **permis** global
+(`merge_permits.rs`, `LUCIVY_MERGE_CONCURRENCY`) : illimité en natif, 1
+sur wasm32 (une fusion v3 rebâtit la FST en RAM ; quatre à la fois ont tué
+le navigateur le 24 août), **2 pour un index à dictionnaire dans le
+navigateur** (posé par le binding, mesuré le 5 septembre : pic mémoire
+inchangé). L'attente d'un permis fait tourner d'autre travail sur le thread
+(pas un sémaphore bloquant : quatre threads et quatre attentes = interblocage).
+`LUCIVY_VERBOSE` trace chaque fusion (`[merge] N segments: waited … ran …`).
+
+## 6 bis. Ce que les postings portent, et ce qui en dérive
+
+Une entrée de `.sfxpost` est `(doc, position, byte_from, byte_to)`, une
+entrée de `.word_sfxpost` `(doc, first, last, byte_from, byte_to)` (SFP3 /
+WSP3 : deltas + varints, points de contrôle tous les 32). Vérifié entrée
+par entrée sur 167 M chunks et 137 M mots du noyau
+(`postings_measure::byte_spans_are_derivable`) : `byte_from` d'une
+position = somme des `own_len` des ordinaux aux positions précédentes
+(`.posmap` + méta des textes), `byte_to − byte_from` = `own_len` du chunk,
+= `own_len − sep_len` de l'ordinal mot ; pas une position vide, pas un
+document qui ne commence pas à l'octet 0. Les spans pèsent 37 % des
+postings, 15 % de l'index — c'est le chantier suivant
+([04](04-progression-et-a-faire.md) §2). Réserve : l'**entrée de queue**
+d'un mot de plus de 264 octets (ses 8 derniers octets, pour les requêtes
+en fin de mot) part au milieu d'un chunk ; sa `first_position` est le
+chunk qui contient `byte_from` (corrigé le 5 septembre : c'était le dernier
+chunk du mot, faux quand les séparateurs de fin débordent dans un chunk à
+eux), sa `last_position` le dernier chunk du mot, comme pour le mot.
+
+Trois fichiers sont des **dérivés** des postings : `.posmap` (inverse de
+`.sfxpost`), `.word_pos_map` (inverse de `.word_sfxpost`), `.sibling_v3`
+(positions consécutives) — 27 % de l'index du noyau, reconstructibles en
+RAM à l'ouverture, en option seulement (une structure rebâtie est
+résidente, un fichier mappé ne coûte que ce qu'on touche).
+
+## 6 ter. Le navigateur (emscripten)
+
+- **Résidence** : `residency()` tient l'index entier en mémoire sous
+  `LUCIVY_RAM_INDEX_MAX` (3 Go sur wasm32, calibré le 25 août sur des index
+  40 % plus gros qu'aujourd'hui), le streame par lots au-dessus. Le compte
+  d'octets par shard est mémoïsé contre la liste des segments
+  (`shard_bytes_and_files_cached`) ; sans cache il ouvre chaque fichier sur
+  OPFS — une seconde par appel, ce que `memory_status` payait après chaque
+  frappe jusqu'au 5 septembre.
+- **`preload`** attend d'abord les fusions de fond (`wait_merges_quiet`)
+  puis lit tous les fichiers ; le binding rend `merge_wait_ms` à part
+  (70 s d'attente pour 4 s de lecture après seize commits de 1 000).
+- **`memory_status`** : `index_bytes`, `in_memory`, `num_docs`,
+  `last_search_truncated` (plafond `LUCIVY_MAX_MATCHES_PER_SEGMENT`,
+  20 000 sur wasm : une requête tronquée le dit), `warnings`, par shard, et
+  `heap_bytes` = taille de la mémoire linéaire WASM, qui ne fait que
+  croître : le pic. Plancher mesuré en indexation : 1,5 Go avant tout index.
+- Réglages : scheduler `available_parallelism` borné à 2..8, un thread
+  d'indexation, `LUCIVY_MAX_PENDING_FINALIZE` 2, `LUCIVY_MAX_MERGED_DOCS`
+  2 000, fusions 1 (v3) / 2 (dictionnaire). Drapeaux `--…` de
+  `Module.arguments`, options du constructeur `Lucivy` — **la liste de
+  `lucivy.js` filtre** ce qui passe au worker.
+- Bornes : 4 Go d'adresses (wasm32 ; Memory64 existe, 10 à 20 % plus lent,
+  pas essayé) ; un seul répertoire OPFS `user_index` par origine, deux
+  onglets qui indexent s'y télescopent.
 
 ## 7. Ce que je ne peux pas affirmer
 

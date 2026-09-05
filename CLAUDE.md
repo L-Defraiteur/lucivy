@@ -286,15 +286,25 @@ cd playground && node serve.mjs
 ## Docs
 
 **Dossier courant : `docs/05-09-2026/` — pour repartir, lire dans l'ordre
+`05-journal-session-5-septembre-suite.md` (la fin de la session du 5 :
+la compaction du dictionnaire en flux, le playground et le navigateur
+validés — 15 440 fichiers du noyau, fusions à 2 pour le dictionnaire,
+panel de 21 requêtes —, deux corrections trouvées en mesurant, le
+chantier des postings cadré, l'état des tailles), puis
+`04-progression-et-a-faire.md` (l'état et le todo tenus au fil de l'eau :
+c'est là que le prochain chantier est cadré, §2), puis
 `01-journal-session-5-septembre.md` (la journée du 5 : le plan par shard,
 les alternatives par préfixe, la coupe en galop, le `.gmap` GMP2, les A/B
 30 000 et noyau entier, l'option `shared_dictionary`, la vérité terrain du
 noyau, ce qui reste, et §13 la compaction du dictionnaire en fusion
 de flux), `02-architecture.md` (l'architecture complète avec
 le mode dictionnaire §3 : fichiers, générations, plan puis exécution,
-l'option) et `03-knowledge-dump-baselines-tests-outils.md` (corpus,
-harnais, baselines de taille et de temps, A/B, profil, tests, piège RAM,
-scratchpad, protocole, pièges) — tous trois autonomes. Le détail brut est
+l'option, la fusion et le permis, ce que les postings portent, le
+navigateur) et `03-knowledge-dump-baselines-tests-outils.md` (corpus,
+harnais, baselines de taille et de temps, A/B, profil, tests, bancs de
+compaction et de postings, le navigateur — build, playground, rejeu de
+requêtes par le serveur de debug —, scratchpad, protocole, pièges) —
+tous autonomes. Le détail brut est
 dans `docs/04-09-2026/` : `11-journal-chantier-plan-fst.md` (le journal du
 5, mesures intermédiaires et fausses pistes), `10-…rapport.md` (le rapport
 d'avant le chantier, note d'état en tête), `09-journal-chantier-dictionnaire.md`

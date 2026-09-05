@@ -150,7 +150,7 @@ sibling DFS … | anchored …` (où va le temps propre au mode dictionnaire) ;
 ## 6. Les tests
 
 ```bash
-cargo test --lib                                   # ld-lucivy : 1 452 verts, 18 ignorés
+cargo test --lib                                   # ld-lucivy : 1 456 verts, 21 ignorés (dont les bancs dictionnaire et postings)
 cargo test --lib briques                           # les briques v3, 132 tests, 4 s
 cargo test --lib gmap                              # le .gmap (galop, têtes, layout 1)
 cargo test --release -p lucivy-core --no-fail-fast # 38 binaires, tout vert (~4 min, charge la machine)
@@ -243,15 +243,71 @@ entre shards) ; relancé seul il passe.
 
 ---
 
+## 7 bis. Le navigateur : construire, mesurer, rejouer
+
+```bash
+bash bindings/emscripten/build.sh            # ~1 min ; recopie pkg/ et js/ dans playground/, estampille index.html
+cd playground && node serve.mjs 9877         # COOP/COEP, no-store, journal moteur dans playground/diag.log
+```
+
+URL : `http://localhost:9877/?dict` (démo, dictionnaire),
+`?corpus=corpus-kernel-16k.tar.gz&dict&commit=1000` (15 440 fichiers du
+noyau, 16 commits, deux compactions), `&merges=N`, `&threads=N`,
+`&wthreads=N`, `&verbose` (traces `[merge]`, `[preload]`, `[fs]` — inonde
+`diag.log`), `?open=user_index` (rouvre l'index persistant sans réindexer :
+la passe **froide**). **Un seul onglet qui indexe à la fois.** Lignes utiles
+de `diag.log` : `[lucivy-wasm] merge concurrency N`, `[merge] N segments:
+waited … ran …`, `[preload] waited for merges …` puis `[preload] N files …`,
+`[search] done: search Xms …` (le temps du moteur, à comparer à ce que la
+page affiche). La page journalise `[playground] indexed N files in Ns; wasm
+memory high-water mark N MB` dans la console (et le panneau « Logs »).
+
+**Rejouer des requêtes dans la page** par le serveur de debug (JS évalué
+sur le thread principal ; un appel rend en quelques secondes au plus, donc
+on lance une IIFE qui pose son résultat dans `window._x` et on l'interroge) :
+
+```bash
+# le panel de 21 requêtes (playground/parity_panel.json) : compte, top-10, ms
+python3 -c 'import json;print(json.dumps({"js":open("playground/parity_run.js").read()}))' > /tmp/req.json
+curl -s localhost:9877/eval/main -d @/tmp/req.json          # → "started"
+sleep 3; curl -s localhost:9877/eval/main -d '{"js":"window._parityResult"}' > /tmp/parity.json
+# une requête et le drapeau de troncature
+curl -s localhost:9877/eval/main -d '{"js":"window._fz=null;(async()=>{const h=await window._playground.search({type:\"contains\",field:\"content\",value:\"kmalloc\",distance:2},{limit:100000});const st=await window._playground.memoryStatus();window._fz=JSON.stringify({count:h.length,truncated:st.last_search_truncated,heap_mb:st.heap_bytes>>20})})();1"}'
+sleep 3; curl -s localhost:9877/eval/main -d '{"js":"window._fz"}'
+# simuler la frappe (le chemin exact de la page, rendu compris) et lire l'en-tête
+#   q=document.getElementById('query'); q.value='include'; q.dispatchEvent(new Event('input',{bubbles:true}));
+#   … 1 s plus tard : document.getElementById('resultsHeader').textContent
+```
+
+`window._playground` expose `search(query, opts)`, `memoryStatus()`,
+`numDocs()`, `doSearch`, `buildQuery`. Le 5 septembre le panel a servi à
+comparer dictionnaire et v3 sur 15 440 fichiers (mêmes comptes, même ordre
+de temps, [04](04-progression-et-a-faire.md) §1 ter) et à trouver les pics
+dus à `memoryStatus` (§1 quater). Les JSON des passes sont dans le
+scratchpad (`parity-dict-cold.json`, `parity-v3-cold.json`, …), tabulés par
+`parity-table.py` (un script de 15 lignes : charge chaque JSON, imprime
+nom / compte / ms par colonne — à réécrire au besoin).
+
+---
+
 ## 8. Le scratchpad de la session (à recréer sinon)
 
 `/tmp/claude-1000/-home-lucied-git-workspaces-lucivy/de715c8d-…/scratchpad/` :
 `idx-dict2` (10 000, dictionnaire, générations), `idx30k-v7` (v3 au
 format courant, 1,6 Go), `idx30k-dict` (GMAP), `idx30k-dict2` (**GMP2**,
 1,3 Go), `idx90k-v8` (v3 au format courant, 7,3 Go), `idx90k-dict`
-(GMAP), `idx90k-dict2` (**GMP2**, 5,6 Go), les scripts `run-ab-*.sh`,
-`run-suite-and-ab.sh`, les sorties `abplan*-*.txt`, `ab90k-*.txt`,
-`prof30k-*.txt`, `gt90k-*.txt`. Rien d'irremplaçable.
+(GMAP), `idx90k-dict2` (**GMP2**, 5,6 Go, générations 10 et 11 — le
+banc de compaction lie ses `dict-*` en dur), `idx30k-dict3` (30 000,
+dictionnaire, **collecteur corrigé** : la référence pour
+`byte_spans_are_derivable`, 0 désaccord), `idx10k-dict-compact` (5 000
+fichiers, commit tous les 500, six compactions), les scripts `run-ab-*.sh`,
+`run-suite-and-ab.sh`, `run-compact-*.sh`, `run-derivable.sh`,
+`run-parity.sh`, `parity-table.py`, les sorties `abplan*-*.txt`,
+`ab90k-*.txt`, `prof30k-*.txt`, `gt90k-*.txt`, `postings*.txt`,
+`derivable*.txt`, `compact30k-*.txt`, `compact90k-*.txt`, `parity-*.json`.
+Index au format de `main` encore présents : `/tmp/lucivy-idx-90k` (18 Go,
+non compacté) et `~/lucivy_bench/lucivy_bench_sharding/single` (11 Go,
+10 segments). Rien d'irremplaçable.
 
 ---
 
@@ -285,3 +341,19 @@ format courant, 1,6 Go), `idx30k-dict` (GMAP), `idx30k-dict2` (**GMP2**,
   écrit les fichiers d'avant : vérifier avec `grep -c` ce qui est passé.
 - Un test qui persiste son index dans `V3_INDEX_DIR` (le fuzzy à cheval)
   écrase l'index de référence.
+- Le harnais sans `V3_MAX_DOCS` prend **5 000** fichiers, pas 10 000
+  (`.v3_shape` le dit).
+- Deux onglets du playground qui indexent en même temps échouent tous
+  les deux au premier commit (même répertoire OPFS).
+- `lucivy.js` filtre les options d'initialisation : une option ajoutée au
+  worker n'arrive pas au moteur tant qu'elle n'est pas dans sa liste ;
+  chercher la ligne `[lucivy-wasm] …` dans `diag.log` pour prouver qu'un
+  drapeau est passé.
+- Un temps affiché par la page peut être un temps d'attente derrière un
+  autre message du worker (le `memoryStatus` d'après la recherche
+  précédente) : toujours comparer au `[search] done: search Xms` du
+  moteur avant d'accuser une requête.
+- Le JSON rendu par `/eval/main` est une chaîne échappée : `grep '"count"'`
+  ne la trouve pas, `grep count` oui. Et `pkill -f <script>` tue aussi le
+  shell qui porte le nom du script dans sa ligne de commande.
+- `?verbose` inonde `diag.log` de lignes `[fs]` : filtrer par `grep`.
