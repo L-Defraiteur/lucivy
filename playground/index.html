@@ -3298,15 +3298,21 @@ let promptInput = null;
 function parseSearchCommand(text) {
   const flags = {};
   const words = [];
-  const re = /--([a-z]+)(?:[=\s]+(\d+(?:\.\d+)?))?|"([^"]*)"|(\S+)/g;
+  // A known option also reads with one dash (`-jw 0.7`) and its value in
+  // brackets (`--jw [0.7]`, the help's notation for "optional"): typed that
+  // way on 6 September, `-jw` had become a NOT and `[0.7]` a word.
+  const KNOWN = ['fuzzy', 'allowed', 'limit', 'jw', 'regex', 'phrase', 'prefix', 'exact', 'strict', 'parse', 'help', 'h'];
+  const re = /(--?)([a-z]+)(?:[=\s]+\[?(\d+(?:\.\d+)?)\]?)?|"([^"]*)"|(\S+)/g;
   let m;
   while ((m = re.exec(text))) {
-    if (m[1]) {
-      const takesValue = ['fuzzy', 'allowed', 'limit', 'jw'].includes(m[1]);
-      flags[m[1]] = takesValue && m[2] !== undefined ? parseFloat(m[2]) : true;
-      if (!takesValue && m[2] !== undefined) words.push(m[2]);
-    } else if (m[3] !== undefined) words.push(m[3]);
-    else words.push(m[4]);
+    if (m[2] !== undefined && (m[1] === '--' || KNOWN.includes(m[2]))) {
+      const takesValue = ['fuzzy', 'allowed', 'limit', 'jw'].includes(m[2]);
+      flags[m[2]] = takesValue && m[3] !== undefined ? parseFloat(m[3]) : true;
+      if (!takesValue && m[3] !== undefined) words.push(m[3]);
+    } else if (m[2] !== undefined) {
+      words.push(m[0]);
+    } else if (m[4] !== undefined) words.push(m[4]);
+    else words.push(m[5]);
   }
   const value = words.join(' ').trim();
   if (flags.help || flags.h || value === 'help' || value === '-h' || value === '?') return { help: true };
@@ -3363,7 +3369,7 @@ function printHelp() {
     [f('index list'), `what this browser holds; ${f('open <name>')} reopens one in seconds, ${f('drop <name>')} deletes it from storage`],
     ['(none)', `substring anywhere, across tokens, separators relaxed (${q('"suffixfst"')} finds suffix_fst and "suffix FST")`],
     [f('--fuzzy N'), `up to N edits (Levenshtein), candidates by trigram pigeonhole, verified on the text — ${q('--fuzzy 2 "trigam pigeonhol"')}`],
-    [f('--jw [S]'), `with fuzzy: rank and keep by Jaro-Winkler similarity ≥ S (default 0.9); a typo at the end of a word ranks above one at its start — ${q('--fuzzy 1 --jw "ShardedHandel"')}`],
+    [f('--jw S'), `with fuzzy: keep and rank the candidates (within --fuzzy N edits) by Jaro-Winkler similarity ≥ S, S optional (0.9 by default; one edit on a six-letter word is already above 0.9, so widen --fuzzy before lowering S); a typo at the end of a word ranks above one at its start — ${q('--fuzzy 1 --jw "ShardedHandel"')}, ${q('--fuzzy 2 --jw 0.8 "vaccum"')}`],
     [f('--regex'), `a regular expression; its literals drive the search, the pattern validates — ${q('--regex "Sharded[A-Z]\\w+"')}`],
     [f('--phrase'), `these words, adjacent, in this order — ${q('--phrase "return -ENOMEM"')}`],
     [f('--prefix'), `at the start of a token only — ${q('--prefix "Sharded"')}`],
