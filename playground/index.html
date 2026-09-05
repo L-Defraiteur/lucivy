@@ -1594,7 +1594,7 @@ async function startup() {
     // Cache-buster: GitHub Pages caches the worker and the wasm for a while,
     // and a phone kept a whole build behind after a deploy. Bumped at each
     // engine or worker change; the query rides through to the wasm.
-    const BUILD = '3.0.8-657af55';
+    const BUILD = '3.0.8-5a8f6b0';
     lucivy = new Lucivy(`./js/lucivy-worker.js?v=${BUILD}`, {
       noOpfs: startupParams.has('noopfs'),
       verbose: startupParams.has('verbose'), // engine diagnostics (LUCIVY_VERBOSE, V3_PROFILE)
@@ -2350,6 +2350,13 @@ function tarballToFiles(textFiles) {
 // the persisted index when it is too big to be served from here.
 async function indexFiles(files, path, label, keep) {
   const t0 = performance.now();
+  // `?dict` — one dictionary of token texts per shard instead of one per
+  // segment (`shared_dictionary`): smaller on disk, queries a little slower.
+  const params = new URLSearchParams(location.search);
+  const sharedDictionary = params.has('dict');
+  // `?commit=N` — commit every N files instead of 2 000 (more generations
+  // of the dictionary, hence its compaction, on a corpus that fits a tab).
+  const COMMIT_EVERY = Math.max(1, parseInt(params.get('commit') || '2000', 10) || 2000);
   const index = await lucivy.create(path, {
     fields: [
       { name: 'path', type: 'text' },
@@ -2357,8 +2364,10 @@ async function indexFiles(files, path, label, keep) {
       { name: 'extension', type: 'text' },
     ],
     shards: 4,
+    shared_dictionary: sharedDictionary,
   });
-  const COMMIT_EVERY = 2000;
+  if (sharedDictionary) console.log('[playground] shared_dictionary: true');
+  if (COMMIT_EVERY !== 2000) console.log(`[playground] commit every ${COMMIT_EVERY} files`);
   for (let i = 0; i < files.length; i++) {
     const { path: filePath, content } = files[i];
     const ext = filePath.includes('.') ? filePath.split('.').pop() : '';

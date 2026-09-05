@@ -270,7 +270,9 @@ cargo test -p luciole --lib
 # Build WASM emscripten
 bash bindings/emscripten/build.sh
 
-# Playground
+# Playground (port 9877 ; `?dict` = dictionnaire partagé, `?commit=N`,
+# `?corpus=corpus-kernel-16k.tar.gz` ; un seul onglet qui indexe à la fois,
+# deux onglets partagent le même répertoire OPFS et échouent au commit)
 cd playground && node serve.mjs
 ```
 

@@ -211,6 +211,18 @@ entre shards) ; relancé seul il passe.
   `V3_MAX_DOCS=10000` pour la référence), `V3_INDEX_DIR` neuf — six
   compactions, puis le panel, `contains` et `coherence` sur le même
   index (9/9, 15/15, 31/31 le 5 septembre, [01](01-journal-session-5-septembre.md) §13 bis).
+- **Dans le navigateur** (`bash bindings/emscripten/build.sh`, puis
+  `cd playground && node serve.mjs`, port 9877) : `?dict` crée l'index
+  avec `shared_dictionary: true`, `?commit=N` commit tous les N fichiers
+  (2 000 sinon ; à 1 000 sur `?corpus=corpus-kernel-16k.tar.gz` on passe
+  par deux compactions), `?corpus=<archive>` indexe une `.tar.gz` servie
+  à côté de la page, `?nodemo` saute la démo. **Un seul onglet à la
+  fois** : deux onglets qui indexent écrivent le même répertoire OPFS
+  `user_index` et échouent tous les deux au premier commit (`I/O error`,
+  code 29). Les logs : le panneau « Logs » de la page (le ring buffer)
+  et `playground/diag.log` côté serveur. Le 5 septembre : 15 440 fichiers
+  du noyau en mode dictionnaire, 16 commits, deux compactions, mêmes
+  comptes que v3 sur la démo ([04](04-progression-et-a-faire.md) §1).
 - Ce qui reste ([01](01-journal-session-5-septembre.md) §11) : la regex à
   ×1,6, la DFS de fratrie, `index_bytes` / `preload` / `residency` sans
   les `dict-*`.
