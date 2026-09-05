@@ -404,6 +404,14 @@ Les docs sont dans `docs/` organisés par dossier daté. Convention depuis le
 
 ## Packages publiés
 
+**Le workspace est en 4.0.0 depuis le 5 septembre au soir (branche `v4`), non
+publié** : les cinq crates, les quatre bindings, les paquets npm et le
+playground portent le numéro ; la 3.0.8 reste la dernière publiée. Le
+contrat de 4.0 (ouvre 3.0.x, 3.0.x n'ouvre pas 4.0, le premier commit
+convertit) est vérifié par `test_compat_308` et écrit dans le CHANGELOG.
+Publier reste une décision explicite de Lucie.
+
+
 | Registre | Package | Publié | Date |
 |----------|---------|---------|---------|
 | PyPI | `lucivy` | **3.0.7** (5 wheels `cp39-abi3` : manylinux_2_28 x86_64 + aarch64, macOS x86_64 + arm64, win_amd64 ; + sdist) | 28 août 2026 (nuit) |

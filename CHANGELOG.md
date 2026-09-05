@@ -1,4 +1,4 @@
-Unreleased (branch v4)
+Lucivy 4.0.0 (branch v4 — not published yet)
 ================================
 
 - **4.0 opens your 3.0.x indexes; 3.0.x does not open 4.0 indexes; the first

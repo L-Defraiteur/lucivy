@@ -299,7 +299,8 @@ spans que la 3.0.8, puis qu'un commit (premier segment v4), une compaction
 (les segments 3.0.8 fusionnés dans les layouts courants) et une réouverture
 ne perdent rien. Le contrat de 4.0 est écrit dans le CHANGELOG : 4.0 ouvre
 3.0.x, 3.0.x n'ouvre pas 4.0, le premier commit convertit sans retour.
-Détail : [04](04-progression-et-a-faire.md) §3.
+Détail : [04](04-progression-et-a-faire.md) §3. Puis le numéro : **tout le
+workspace en 4.0.0**, sans rien publier.
 
 ## 9. Commits de la suite
 

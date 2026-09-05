@@ -1,4 +1,4 @@
-# lucivy 3.0.8
+# lucivy 4.0.0
 
 [![PyPI](https://img.shields.io/pypi/v/lucivy?label=PyPI&color=blue)](https://pypi.org/project/lucivy/)
 [![npm](https://img.shields.io/npm/v/lucivy?label=npm&color=cb3837)](https://www.npmjs.com/package/lucivy)
@@ -41,7 +41,7 @@ tab. The last query is typed by hand — `--fuzzy 2 "ShardedHandel"` finds
   ~1.5× the native time (it was ~25 minutes and 10×): the engine runs on
   mimalloc, and its memory is bounded by construction.
 - One version number for the whole workspace: `ld-lucivy`, `lucivy-core`,
-  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 3.0.8.
+  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.0.0 (unpublished: 3.0.8 is the last release).
 
 Full list: [CHANGELOG.md](CHANGELOG.md). Design: [ARCHITECTURE.md](ARCHITECTURE.md).
 

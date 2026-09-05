@@ -739,8 +739,11 @@ les fichiers de l'index (segments et dictionnaire), pas les documents.
   3.0.8 dans les layouts courants (le merge lit les anciens, convertit les
   queues, écrit `SFP5`/`WSP5`/`PMP4`) : mêmes réponses ; réouverture : mêmes
   réponses. 7,1 Mo de fixture (le format 3.0.8 pèse ×45 le texte : c'est
-  tout l'objet de v4). La ligne du CHANGELOG est écrite. **Il ne manque plus
-  que le numéro.**
+  tout l'objet de v4). La ligne du CHANGELOG est écrite. **Le numéro est
+  posé** (5 septembre au soir) : tout le workspace est en 4.0.0 — les cinq
+  crates et leurs dépendances internes, les bindings, les sept paquets npm,
+  pyproject, le playground (estampillé par `build.sh` depuis `Cargo.toml`)
+  ; rien n'est publié, la 3.0.8 reste la dernière sur les registres.
 - **Version 4.0.0 — décidé le 5 septembre, avec un prérequis.** Le majeur
   se justifie par le contrat sur le disque : un binaire v4 lit un index
   3.0.x (chaque lecteur ouvre les anciens layouts, tests unitaires par
