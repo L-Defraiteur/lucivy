@@ -515,13 +515,26 @@ vérité du noyau : 9/9.
   `aria-[a-z]+`, `term fetch`, `async function`, fuzzy `kmallc` — spans
   exacts, 7 à 18 ms.
 
-Temps (panel de vérité, 30 000 dictionnaire, même binaire, index
-d'ancien layout rouvert contre index neuf, une passe chacun, machine
-partagée avec les constructions) : les exactes 2,5-5,3 ms contre 2,2-5,0,
-fuzzy d1 11,0 contre 10,5, fuzzy d2 200,5 contre 204,0, regex 17,9 contre
-15,7 — du même ordre, la regex à surveiller sur trois passes au repos. Le
-placement (`place_spans`) coûte 0,6 à 3,3 ms de somme sur 120 segments
-(4 à 15 % des étapes profilées d'une exacte, moins que la vérification).
+Temps — l'A/B du protocole (30 000 dictionnaire, même binaire, index
+d'ancien layout rouvert (`idx30k-dict4`) contre index neuf (`idx30k-dict5`),
+trois passes alternées, min, machine au repos) :
+
+| requête | ancien layout | `SFP5` | ratio |
+|---|---|---|---|
+| mutex_lock strict | 2,9 ms | 2,8 | 0,97 |
+| mutex_lock relax | 2,3 | 2,4 | 1,04 |
+| spin_lock strict | 2,3 | 2,5 | 1,09 |
+| sched term | 4,5 | 4,6 | 1,02 |
+| sched strict | 2,8 | 2,7 | 0,96 |
+| printk sw | 3,6 | 3,7 | 1,03 |
+| schdule fz1 | 8,9 | 9,3 | 1,04 |
+| regsiter fz2 | 155,0 | **141,4** | 0,91 |
+| spin_lock_[a-z]+ rx | 14,7 | 14,8 | 1,01 |
+| schdule jw1 | 12,0 | 12,0 | 1,00 |
+
+De 0,91 à 1,09 : la règle du ×1,5 n'est pas approchée. Le placement
+(`place_spans`) coûte 0,6 à 3,3 ms de somme sur 120 segments (4 à 15 % des
+étapes profilées d'une exacte, moins que la vérification).
 
 **Seuils calibrés sur les gros index d'avant** (remarque du 5 septembre) :
 `LUCIVY_RAM_INDEX_MAX` (3 Go sur wasm32, index tenu entier en dessous) et

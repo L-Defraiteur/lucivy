@@ -771,11 +771,18 @@ The wasm-bindgen (single-threaded) binding has been removed — emscripten is th
 
 ---
 
-Lucivy 0.25
+Tantivy — the history of the engine lucivy forked
+================================
+
+Everything below is the changelog of [tantivy](https://github.com/quickwit-oss/tantivy)
+as vendored when lucivy forked it (0.25 and before). The fork's rename had
+replaced the name in this text too, links included; it is restored here.
+
+Tantivy 0.25
 ================================
 
 ## Bugfixes
-- fix union performance regression in lucivy 0.24 [#2663](https://github.com/quickwit-oss/tantivy/pull/2663)(@PSeitz)
+- fix union performance regression in tantivy 0.24 [#2663](https://github.com/quickwit-oss/tantivy/pull/2663)(@PSeitz)
 - make zstd optional in sstable [#2633](https://github.com/quickwit-oss/tantivy/pull/2633)(@Parth)
 - Fix TopDocs::order_by_string_fast_field for asc order [#2672](https://github.com/quickwit-oss/tantivy/pull/2672)(@stuhood @PSeitz)
 
@@ -787,21 +794,21 @@ Lucivy 0.25
 - Support mixed field types in query parser [#2676](https://github.com/quickwit-oss/tantivy/pull/2676)(@trinity-1686a)
 - Add per-field size details [#2679](https://github.com/quickwit-oss/tantivy/pull/2679)(@fulmicoton)
 
-Lucivy 0.24.2
+Tantivy 0.24.2
 ================================
 - Fix TopNComputer for reverse order. [#2672](https://github.com/quickwit-oss/tantivy/pull/2672)(@stuhood @PSeitz) 
 
-Affected queries are [order_by_fast_field](https://docs.rs/tantivy/latest/lucivy/collector/struct.TopDocs.html#method.order_by_fast_field) and
-[order_by_u64_field](https://docs.rs/tantivy/latest/lucivy/collector/struct.TopDocs.html#method.order_by_u64_field)
+Affected queries are [order_by_fast_field](https://docs.rs/tantivy/latest/tantivy/collector/struct.TopDocs.html#method.order_by_fast_field) and
+[order_by_u64_field](https://docs.rs/tantivy/latest/tantivy/collector/struct.TopDocs.html#method.order_by_u64_field)
 for `Order::Asc`
 
-Lucivy 0.24.1
+Tantivy 0.24.1
 ================================
 - Fix: bump required rust version to 1.81
   
-Lucivy 0.24
+Tantivy 0.24
 ================================
-Lucivy 0.24 will be backwards compatible with indices created with v0.22 and v0.21. The new minimum rust version will be 1.75. Lucivy 0.23 will be skipped.
+Tantivy 0.24 will be backwards compatible with indices created with v0.22 and v0.21. The new minimum rust version will be 1.75. Tantivy 0.23 will be skipped.
 
 #### Bugfixes
 - fix potential endless loop in merge [#2457](https://github.com/quickwit-oss/tantivy/pull/2457)(@PSeitz)
@@ -854,7 +861,7 @@ This will slightly increase space and access time. [#2439](https://github.com/qu
 - **Performance/Memory**
     - lift clauses in LogicalAst for optimized ast during execution [#2449](https://github.com/quickwit-oss/tantivy/pull/2449)(@PSeitz)
     - Use Vec instead of BTreeMap to back OwnedValue object [#2364](https://github.com/quickwit-oss/tantivy/pull/2364)(@fulmicoton)
-    - Replace LucivyDocument with CompactDoc. CompactDoc is much smaller and provides similar performance. [#2402](https://github.com/quickwit-oss/tantivy/pull/2402)(@PSeitz)
+    - Replace TantivyDocument with CompactDoc. CompactDoc is much smaller and provides similar performance. [#2402](https://github.com/quickwit-oss/tantivy/pull/2402)(@PSeitz)
     - Recycling buffer in PrefixPhraseScorer [#2443](https://github.com/quickwit-oss/tantivy/pull/2443)(@fulmicoton)
 
 - **Json Type**
@@ -881,18 +888,18 @@ This will slightly increase space and access time. [#2439](https://github.com/qu
 - Fix trait bound of StoreReader::iter [#2360](https://github.com/quickwit-oss/tantivy/pull/2360)(@adamreichold)
 - remove read_postings_no_deletes [#2526](https://github.com/quickwit-oss/tantivy/pull/2526)(@PSeitz)
 
-Lucivy 0.22.1
+Tantivy 0.22.1
 ================================
 - Fix TopNComputer for reverse order. [#2672](https://github.com/quickwit-oss/tantivy/pull/2672)(@stuhood @PSeitz) 
 
-Affected queries are [order_by_fast_field](https://docs.rs/tantivy/latest/lucivy/collector/struct.TopDocs.html#method.order_by_fast_field) and
-[order_by_u64_field](https://docs.rs/tantivy/latest/lucivy/collector/struct.TopDocs.html#method.order_by_u64_field)
+Affected queries are [order_by_fast_field](https://docs.rs/tantivy/latest/tantivy/collector/struct.TopDocs.html#method.order_by_fast_field) and
+[order_by_u64_field](https://docs.rs/tantivy/latest/tantivy/collector/struct.TopDocs.html#method.order_by_u64_field)
 for `Order::Asc`
 
-Lucivy 0.22
+Tantivy 0.22
 ================================
 
-Lucivy 0.22 will be able to read indices created with Lucivy 0.21.
+Tantivy 0.22 will be able to read indices created with Tantivy 0.21.
 
 #### Bugfixes
 - Fix null byte handling in JSON paths (null bytes in json keys caused panic during indexing) [#2345](https://github.com/quickwit-oss/tantivy/pull/2345)(@PSeitz)
@@ -911,7 +918,7 @@ Lucivy 0.22 will be able to read indices created with Lucivy 0.21.
 - remove deprecated IntOptions and DateTime [#2353](https://github.com/quickwit-oss/tantivy/pull/2353)(@PSeitz)
 
 #### Features/Improvements
-- Lucivy documents as a trait: Index data directly without converting to lucivy types first [#2071](https://github.com/quickwit-oss/tantivy/pull/2071)(@ChillFish8)
+- Tantivy documents as a trait: Index data directly without converting to tantivy types first [#2071](https://github.com/quickwit-oss/tantivy/pull/2071)(@ChillFish8)
 - encode some part of posting list as -1 instead of direct values (smaller inverted indices) [#2185](https://github.com/quickwit-oss/tantivy/pull/2185)(@trinity-1686a)
 - **Aggregation**
   - Support to deserialize f64 from string [#2311](https://github.com/quickwit-oss/tantivy/pull/2311)(@PSeitz)
@@ -949,15 +956,15 @@ Lucivy 0.22 will be able to read indices created with Lucivy 0.21.
 - Forward regex parser errors [#2288](https://github.com/quickwit-oss/tantivy/pull/2288)(@adamreichold)
 - Make FacetCounts defaultable and cloneable. [#2322](https://github.com/quickwit-oss/tantivy/pull/2322)(@adamreichold)
 - Derive Debug for SchemaBuilder [#2254](https://github.com/quickwit-oss/tantivy/pull/2254)(@GodTamIt)
-- add missing inlines to lucivy options [#2245](https://github.com/quickwit-oss/tantivy/pull/2245)(@PSeitz)
+- add missing inlines to tantivy options [#2245](https://github.com/quickwit-oss/tantivy/pull/2245)(@PSeitz)
 
-Lucivy 0.21.1
+Tantivy 0.21.1
 ================================
 #### Bugfixes
 - Range queries on fast fields with less values on that field than documents had an invalid end condition, leading to missing results. [#2226](https://github.com/quickwit-oss/tantivy/issues/2226)(@appaquet @PSeitz)
 - Increase the minimum memory budget from 3MB to 15MB to avoid single doc segments (API fix). [#2176](https://github.com/quickwit-oss/tantivy/issues/2176)(@PSeitz)
 
-Lucivy 0.21
+Tantivy 0.21
 ================================
 #### Bugfixes
 - Fix track fast field memory consumption, which led to higher memory consumption than the budget allowed during indexing [#2148](https://github.com/quickwit-oss/tantivy/issues/2148)[#2147](https://github.com/quickwit-oss/tantivy/issues/2147)(@PSeitz)
@@ -985,16 +992,16 @@ Lucivy 0.21
 - Return an error when tokenizer is not found while indexing [#2093](https://github.com/quickwit-oss/tantivy/issues/2093)(@naveenann)
 - Delayed column opening during merge [#2132](https://github.com/quickwit-oss/tantivy/issues/2132)(@PSeitz)
 
-Lucivy 0.20.2
+Tantivy 0.20.2
 ================================
 - Align numerical type priority order on the search side.  [#2088](https://github.com/quickwit-oss/tantivy/issues/2088) (@fmassot)
 - Fix is_child_of function not considering the root facet. [#2086](https://github.com/quickwit-oss/tantivy/issues/2086) (@adamreichhold)
 
-Lucivy 0.20.1
+Tantivy 0.20.1
 ================================
 - Fix building on windows with mmap [#2070](https://github.com/quickwit-oss/tantivy/issues/2070) (@ChillFish8)
 
-Lucivy 0.20
+Tantivy 0.20
 ================================
 #### Bugfixes
 - Fix phrase queries with slop (slop supports now transpositions, algorithm that carries slop so far for num terms > 2) [#2031](https://github.com/quickwit-oss/tantivy/issues/2031)[#2020](https://github.com/quickwit-oss/tantivy/issues/2020)(@PSeitz)
@@ -1007,9 +1014,9 @@ Lucivy 0.20
 - Add PhrasePrefixQuery [#1842](https://github.com/quickwit-oss/tantivy/issues/1842) (@trinity-1686a)
 - Add `coerce` option for text and numbers types (convert the value instead of returning an error during indexing) [#1904](https://github.com/quickwit-oss/tantivy/issues/1904) (@PSeitz)
 - Add regex tokenizer [#1759](https://github.com/quickwit-oss/tantivy/issues/1759)(@mkleen)
-- Move tokenizer API to separate crate. Having a separate crate with a stable API will allow us to use tokenizers with different lucivy versions. [#1767](https://github.com/quickwit-oss/tantivy/issues/1767) (@PSeitz)
+- Move tokenizer API to separate crate. Having a separate crate with a stable API will allow us to use tokenizers with different tantivy versions. [#1767](https://github.com/quickwit-oss/tantivy/issues/1767) (@PSeitz)
 - **Columnar crate**: New fast field handling (@fulmicoton @PSeitz) [#1806](https://github.com/quickwit-oss/tantivy/issues/1806)[#1809](https://github.com/quickwit-oss/tantivy/issues/1809)
-  - Support for fast fields with optional values. Previously lucivy supported only single-valued and multi-value fast fields. The encoding of optional fast fields is now very compact.
+  - Support for fast fields with optional values. Previously tantivy supported only single-valued and multi-value fast fields. The encoding of optional fast fields is now very compact.
   - Fast field Support for JSON (schemaless fast fields). Support multiple types on the same column. [#1876](https://github.com/quickwit-oss/tantivy/issues/1876) (@fulmicoton)
   - Unified access for fast fields over different cardinalities.
   - Unified storage for typed and untyped fields.
@@ -1029,7 +1036,7 @@ Lucivy 0.20
   - Reduce term aggregation memory consumption [#2013](https://github.com/quickwit-oss/tantivy/issues/2013) (@PSeitz)
   - Reduce agg memory consumption: Replace generic aggregation collector (which has a high memory requirement per instance) in aggregation tree with optimized versions behind a trait.
   - Split term collection count and sub_agg (Faster term agg with less memory consumption for cases without sub-aggs) [#1921](https://github.com/quickwit-oss/tantivy/issues/1921) (@PSeitz)
-  - Schemaless aggregations: In combination with stacker lucivy supports now schemaless aggregations via the JSON type.
+  - Schemaless aggregations: In combination with stacker tantivy supports now schemaless aggregations via the JSON type.
     - Add aggregation support for JSON type [#1888](https://github.com/quickwit-oss/tantivy/issues/1888) (@PSeitz)
     - Mixed types support on JSON fields in aggs [#1971](https://github.com/quickwit-oss/tantivy/issues/1971) (@PSeitz)
   - Perf: Fetch blocks of vals in aggregation for all cardinality [#1950](https://github.com/quickwit-oss/tantivy/issues/1950) (@PSeitz)
@@ -1073,7 +1080,7 @@ Lucivy 0.20
   - Update comments in the faceted search example [#1737](https://github.com/quickwit-oss/tantivy/issues/1737) (@DawChihLiou)
 
 
-Lucivy 0.19
+Tantivy 0.19
 ================================
 #### Bugfixes
 - Fix missing fieldnorms for u64, i64, f64, bool, bytes and date [#1620](https://github.com/quickwit-oss/tantivy/pull/1620) (@PSeitz)
@@ -1095,7 +1102,7 @@ Lucivy 0.19
   - Expose doc store cache size [#1403](https://github.com/quickwit-oss/tantivy/pull/1403) (@PSeitz)
   - Enable compression levels for doc store [#1378](https://github.com/quickwit-oss/tantivy/pull/1378) (@PSeitz)
   - Make block size configurable [#1374](https://github.com/quickwit-oss/tantivy/pull/1374) (@kryesh)
-- Make `lucivy::LucivyError` cloneable [#1402](https://github.com/quickwit-oss/tantivy/pull/1402) (@PSeitz)
+- Make `tantivy::TantivyError` cloneable [#1402](https://github.com/quickwit-oss/tantivy/pull/1402) (@PSeitz)
 - Add support for phrase slop in query language [#1393](https://github.com/quickwit-oss/tantivy/pull/1393) (@saroh)
 - Aggregation
   - Add aggregation support for date type [#1693](https://github.com/quickwit-oss/tantivy/pull/1693)(@PSeitz)
@@ -1108,12 +1115,12 @@ Lucivy 0.19
   - [#1611](https://github.com/quickwit-oss/tantivy/pull/1611) (@PSeitz)
   - Added a pre-configured stop word filter for various language [#1666](https://github.com/quickwit-oss/tantivy/pull/1666) (@adamreichold)
 
-Lucivy 0.18
+Tantivy 0.18
 ================================
 
 - For date values `chrono` has been replaced with `time` (@uklotzde) #1304 :
-  - The `time` crate is re-exported as `lucivy::time` instead of `lucivy::chrono`.
-  - The type alias `lucivy::DateTime` has been removed.
+  - The `time` crate is re-exported as `tantivy::time` instead of `tantivy::chrono`.
+  - The type alias `tantivy::DateTime` has been removed.
   - `Value::Date` wraps `time::PrimitiveDateTime` without time zone information.
   - Internally date/time values are stored as seconds since UNIX epoch in UTC.
   - Converting a `time::OffsetDateTime` to `Value::Date` implicitly converts the value into UTC.
@@ -1124,11 +1131,11 @@ Lucivy 0.18
 - Add terms aggregation (@PSeitz)
 - Add support for zstd compression (@kryesh)
 
-Lucivy 0.18.1
+Tantivy 0.18.1
 ================================
 - Hotfix: positions computation.  #1629 (@fmassot, @fulmicoton, @PSeitz)
 
-Lucivy 0.17
+Tantivy 0.17
 ================================
 
 - LogMergePolicy now triggers merges if the ratio of deleted documents reaches a threshold (@shikhar @fulmicoton) [#115](https://github.com/quickwit-oss/tantivy/issues/115)
@@ -1143,39 +1150,39 @@ Lucivy 0.17
 - Added a JSON schema type @fulmicoton [#1251](https://github.com/quickwit-oss/tantivy/issues/1251)
 - Added support for slop in phrase queries @halvorboe [#1068](https://github.com/quickwit-oss/tantivy/issues/1068)
 
-Lucivy 0.16.2
+Tantivy 0.16.2
 ================================
 
 - Bugfix in FuzzyTermQuery. (transposition_cost_one was not doing anything)
 
-Lucivy 0.16.1
+Tantivy 0.16.1
 ========================
 
 - Major Bugfix on multivalued fastfield.  #1151
 - Demux operation (@PSeitz)
 
-Lucivy 0.16.0
+Tantivy 0.16.0
 =========================
 
 - Bugfix in the filesum check. (@evanxg852000) #1127
 - Bugfix in positions when the index is sorted by a field. (@appaquet) #1125
 
-Lucivy 0.15.3
+Tantivy 0.15.3
 =========================
 
 - Major bugfix. Deleting documents was broken when the index was sorted by a field. (@appaquet, @fulmicoton) #1101
 
-Lucivy 0.15.2
+Tantivy 0.15.2
 ========================
 
 - Major bugfix. DocStore still panics when a deleted doc is at the beginning of a block. (@appaquet) #1088
 
-Lucivy 0.15.1
+Tantivy 0.15.1
 =========================
 
 - Major bugfix. DocStore panics when first block is deleted. (@appaquet) #1077
 
-Lucivy 0.15.0
+Tantivy 0.15.0
 =========================
 
 - API Changes. Using Range instead of (start, end) in the API and internals (`FileSlice`, `OwnedBytes`, `Snippets`, ...)
@@ -1185,11 +1192,11 @@ Lucivy 0.15.0
 - DocAddress is now a struct (@scampi) #987
 - Bugfix consistent tie break handling in facet's topk (@hardikpnsp) #357
 - Date field support for range queries (@rihardsk) #516
-- Added lz4-flex as the default compression scheme in lucivy (@PSeitz) #1009
+- Added lz4-flex as the default compression scheme in tantivy (@PSeitz) #1009
 - Renamed a lot of symbols to avoid all uppercasing on acronyms, as per new clippy recommendation. For instance, RAMDirectory -> RamDirectory. (@fulmicoton)
 - Simplified positions index format (@fulmicoton) #1022
 - Moved bitpacking to bitpacker subcrate and add BlockedBitpacker, which bitpacks blocks of 128 elements (@PSeitz) #1030
-- Added support for more-like-this query in lucivy (@evanxg852000) #1011
+- Added support for more-like-this query in tantivy (@evanxg852000) #1011
 - Added support for sorting an index, e.g presorting documents in an index by a timestamp field. This can heavily improve performance for certain scenarios, by utilizing the sorted data (Top-n optimizations)(@PSeitz). #1026
 - Add iterator over documents in doc store (@PSeitz). #1044
 - Fix log merge policy (@PSeitz). #1043
@@ -1199,13 +1206,13 @@ Lucivy 0.15.0
 - Updated TermMerger implementation to rely on the union feature of the FST (@scampi) #469
 - Add boolean marking whether position is required in the query_terms API call (@fulmicoton). #1070
 
-Lucivy 0.14.0
+Tantivy 0.14.0
 =========================
 
 - Remove dependency to atomicwrites #833 .Implemented by @fulmicoton upon suggestion and research from @asafigan).
-- Migrated lucivy error from the now deprecated `failure` crate to `thiserror` #760. (@hirevo)
+- Migrated tantivy error from the now deprecated `failure` crate to `thiserror` #760. (@hirevo)
 - API Change. Accessing the typed value off a `Schema::Value` now returns an Option instead of panicking if the type does not match.
-- Large API Change in the Directory API. Lucivy used to assume that all files could be somehow memory mapped. After this change, Directory return a `FileSlice` that can be reduced and eventually read into an `OwnedBytes` object. Long and blocking io operation are still required by they do not span over the entire file.
+- Large API Change in the Directory API. Tantivy used to assume that all files could be somehow memory mapped. After this change, Directory return a `FileSlice` that can be reduced and eventually read into an `OwnedBytes` object. Long and blocking io operation are still required by they do not span over the entire file.
 - Added support for Brotli compression in the DocStore. (@ppodolsky)
 - Added helper for building intersections and unions in BooleanQuery (@guilload)
 - Bugfix in `Query::explain`
@@ -1214,26 +1221,26 @@ Lucivy 0.14.0
 - Simplified the encoding of the skip reader struct. BlockWAND max tf is now encoded over a single byte. (@fulmicoton)
 - `FilterCollector` now supports all Fast Field value types (@barrotsteindev)
 - FastField are not all loaded when opening the segment reader. (@fulmicoton)
-- Added an API to merge segments, see `lucivy::merge_segments` #1005. (@evanxg852000)
+- Added an API to merge segments, see `tantivy::merge_segments` #1005. (@evanxg852000)
 
 This version breaks compatibility and requires users to reindex everything.
 
-Lucivy 0.13.2
+Tantivy 0.13.2
 ===================
 
 Bugfix. Acquiring a facet reader on a segment that does not contain any
 doc with this facet returns `None`. (#896)
 
-Lucivy 0.13.1
+Tantivy 0.13.1
 ===================
 
 Made `Query` and `Collector` `Send + Sync`.
 Updated misc dependency versions.
 
-Lucivy 0.13.0
+Tantivy 0.13.0
 ======================
 
-Lucivy 0.13 introduce a change in the index format that will require
+Tantivy 0.13 introduce a change in the index format that will require
 you to reindex your index (BlockWAND information are added in the skiplist).
 The index size increase is minor as this information is only added for
 full blocks.
@@ -1263,14 +1270,14 @@ The change made it possible to greatly simplify a lot of the docset's code.
 - Added Block WAND. Performance on TOP-K on term-unions should be greatly increased. (@fulmicoton, and special thanks
 to the PISA team for answering all my questions!)
 
-Lucivy 0.12.0
+Tantivy 0.12.0
 ======================
 
 - Removing static dispatch in tokenizers for simplicity. (#762)
 - Added backward iteration for `TermDictionary` stream. (@halvorboe)
 - Fixed a performance issue when searching for the posting lists of a missing term (@audunhalland)
 - Added a configurable maximum number of docs (10M by default) for a segment to be considered for merge (@hntd187, landed by @halvorboe #713)
-- Important Bugfix #777, causing lucivy to retain memory mapping. (diagnosed by @poljar)
+- Important Bugfix #777, causing tantivy to retain memory mapping. (diagnosed by @poljar)
 - Added support for field boosting. (#547, @fulmicoton)
 
 ## How to update?
@@ -1279,23 +1286,23 @@ Crates relying on custom tokenizer, or registering tokenizer in the manager will
 minor changes. Check <https://github.com/quickwit-oss/tantivy/blob/main/examples/custom_tokenizer.rs>
 to check for some code sample.
 
-Lucivy 0.11.3
+Tantivy 0.11.3
 =======================
 
 - Fixed DateTime as a fast field (#735)
 
-Lucivy 0.11.2
+Tantivy 0.11.2
 =======================
 
 - The future returned by `IndexWriter::merge` does not borrow `self` mutably anymore (#732)
 - Exposing a constructor for `WatchHandle` (#731)
 
-Lucivy 0.11.1
+Tantivy 0.11.1
 =====================
 
 - Bug fix #729
 
-Lucivy 0.11.0
+Tantivy 0.11.0
 =====================
 
 - Added f64 field. Internally reuse u64 code the same way i64 does (@fdb-hiroshima)
@@ -1306,36 +1313,36 @@ Lucivy 0.11.0
 - API change around `Box<BoxableTokenizer>`. See detail in #629
 - Avoid rebuilding Regex automaton whenever a regex query is reused. #639 (@brainlock)
 - Add footer with some metadata to index files. #605 (@fdb-hiroshima)
-- Add a method to check the compatibility of the footer in the index with the running version of lucivy (@petr-tik)
+- Add a method to check the compatibility of the footer in the index with the running version of tantivy (@petr-tik)
 - TopDocs collector: ensure stable sorting on equal score. #671 (@brainlock)
 - Added handling of pre-tokenized text fields (#642), which will enable users to
-  load tokens created outside lucivy. See usage in examples/pre_tokenized_text. (@kkoziara)
+  load tokens created outside tantivy. See usage in examples/pre_tokenized_text. (@kkoziara)
 - Fix crash when committing multiple times with deleted documents. #681 (@brainlock)
 
 ## How to update?
 
-- The index format is changed. You are required to reindex your data to use lucivy 0.11.
+- The index format is changed. You are required to reindex your data to use tantivy 0.11.
 - `Box<dyn BoxableTokenizer>` has been replaced by a `BoxedTokenizer` struct.
 - Regex are now compiled when the `RegexQuery` instance is built. As a result, it can now return
 an error and handling the `Result` is required.
-- `lucivy::version()` now returns a `Version` object. This object implements `ToString()`
+- `tantivy::version()` now returns a `Version` object. This object implements `ToString()`
 
-Lucivy 0.10.2
+Tantivy 0.10.2
 =====================
 
 - Closes #656. Solving memory leak.
 
-Lucivy 0.10.1
+Tantivy 0.10.1
 =====================
 
 - Closes #544.  A few users experienced problems with the directory watching system.
 Avoid watching the mmap directory until someone effectively creates a reader that uses
 this functionality.
 
-Lucivy 0.10.0
+Tantivy 0.10.0
 =====================
 
-*Lucivy 0.10.0 index format is compatible with the index format in 0.9.0.*
+*Tantivy 0.10.0 index format is compatible with the index format in 0.9.0.*
 
 - Added an API to easily tweak or entirely replace the
  default score. See `TopDocs::tweak_score`and `TopScore::custom_score` (@fulmicoton)
@@ -1376,7 +1383,7 @@ The API changed, you are now required to acquire your fast field reader via the
 - `.u64s()`, `.i64s()` if your field is multi-valued ;
 - `.bytes()` if your field is bytes fast field.
 
-Lucivy 0.9.0
+Tantivy 0.9.0
 =====================
 
 *0.9.0 index format is not compatible with the
@@ -1399,8 +1406,8 @@ previous index format.*
 
 ## How to update ?
 
-lucivy 0.9 brought some API breaking change.
-To update from lucivy 0.8, you will need to go through the following steps.
+tantivy 0.9 brought some API breaking change.
+To update from tantivy 0.8, you will need to go through the following steps.
 
 - `schema::INT_INDEXED` and `schema::INT_STORED`  should be replaced by `schema::INDEXED` and `schema::INT_STORED`.
 - The index now does not hold the pool of searcher anymore. You are required to create an intermediary object called
@@ -1425,14 +1432,14 @@ To update from lucivy 0.8, you will need to go through the following steps.
 
     ```
 
-Lucivy 0.8.2
+Tantivy 0.8.2
 =====================
 
 Fixing build for x86_64 platforms. (#496)
-No need to update from 0.8.1 if lucivy
+No need to update from 0.8.1 if tantivy
 is building on your platform.
 
-Lucivy 0.8.1
+Tantivy 0.8.1
 =====================
 
 Hotfix of #476.
@@ -1440,7 +1447,7 @@ Hotfix of #476.
 Merge was reflecting deletes before commit was passed.
 Thanks @barrotsteindev  for reporting the bug.
 
-Lucivy 0.8.0
+Tantivy 0.8.0
 =====================
 
 *No change in the index format*
@@ -1448,7 +1455,7 @@ Lucivy 0.8.0
 - API Breaking change in the collector API. (@jwolfe, @fulmicoton)
 - Multithreaded search (@jwolfe, @fulmicoton)
 
-Lucivy 0.7.1
+Tantivy 0.7.1
 =====================
 
 *No change in the index format*
@@ -1456,17 +1463,17 @@ Lucivy 0.7.1
 - Bugfix: NGramTokenizer panics on non ascii chars
 - Added a space usage API
 
-Lucivy 0.7
+Tantivy 0.7
 =====================
 
 - Skip data for doc ids and positions (@fulmicoton),
   greatly improving performance
-- Lucivy error now rely on the failure crate (@drusellers)
+- Tantivy error now rely on the failure crate (@drusellers)
 - Added support for `AND`, `OR`, `NOT` syntax in addition to the `+`,`-` syntax
 - Added a snippet generator with highlight (@vigneshsarma, @fulmicoton)
 - Added a `TopFieldCollector` (@pentlander)
 
-Lucivy 0.6.1
+Tantivy 0.6.1
 =========================
 
 - Bugfix #324. GC removing was removing file that were still in useful
@@ -1478,13 +1485,13 @@ Lucivy 0.6.1
     - Mixed `field:[startIncl to endExcl}` and vice versa
     - Unbounded `field:[start to *]`, `field:[* to end]`
 
-Lucivy 0.6
+Tantivy 0.6
 ==========================
 
 Special thanks to @drusellers and @jason-wolfe for their contributions
 to this release!
 
-- Removed C code. Lucivy is now pure Rust. (@fulmicoton)
+- Removed C code. Tantivy is now pure Rust. (@fulmicoton)
 - BM25 (@fulmicoton)
 - Approximate field norms encoded over 1 byte. (@fulmicoton)
 - Compiles on stable rust (@fulmicoton)
@@ -1497,19 +1504,19 @@ to this release!
 - Add a RegexQuery (@drusellers)
 - Various performance improvements (@fulmicoton)_
 
-Lucivy 0.5.2
+Tantivy 0.5.2
 ===========================
 
 - bugfix #274
 - bugfix #280
 - bugfix #289
 
-Lucivy 0.5.1
+Tantivy 0.5.1
 ==========================
 
-- bugfix #254 : lucivy failed if no documents in a segment contained a specific field.
+- bugfix #254 : tantivy failed if no documents in a segment contained a specific field.
 
-Lucivy 0.5
+Tantivy 0.5
 ==========================
 
 - Faceting
@@ -1521,22 +1528,22 @@ Lucivy 0.5
   - 64 bits file address
   - Smarter encoding of the `TermInfo` objects
 
-Lucivy 0.4.3
+Tantivy 0.4.3
 ==========================
 
 - Bugfix race condition when deleting files. (#198)
 
-Lucivy 0.4.2
+Tantivy 0.4.2
 ==========================
 
 - Prevent usage of AVX2 instructions (#201)
 
-Lucivy 0.4.1
+Tantivy 0.4.1
 ==========================
 
 - Bugfix for non-indexed fields. (#199)
 
-Lucivy 0.4.0
+Tantivy 0.4.0
 ==========================
 
 - Raise the limit of number of fields (previously 256 fields) (@fulmicoton)
@@ -1560,28 +1567,28 @@ Lucivy 0.4.0
 - Made the doc! macro public (@fulmicoton)
 - Added an alternative implementation of the streaming dictionary (@fulmicoton)
 
-Lucivy 0.3.1
+Tantivy 0.3.1
 ==========================
 
 - Expose a method to trigger files garbage collection
 
-Lucivy 0.3
+Tantivy 0.3
 ==========================
 
 Special thanks to @Kodraus @lnicola @Ameobea @manuel-woelker @celaus
 for their contribution to this release.
 
-Thanks also to everyone in lucivy gitter chat
+Thanks also to everyone in tantivy gitter chat
 for their advise and company :)
 
-<https://gitter.im/lucivy-search/lucivy>
+<https://gitter.im/tantivy-search/tantivy>
 
 Warning:
 
-Lucivy 0.3 is NOT backward compatible with lucivy 0.2
+Tantivy 0.3 is NOT backward compatible with tantivy 0.2
 code and index format.
 You should not expect backward compatibility before
-lucivy 1.0.
+tantivy 1.0.
 
 New Features
 ------------
@@ -1592,7 +1599,7 @@ New Features
 Various Bugfixes & small improvements
 ----------------------------------------
 
-- Added CI for Windows (<https://ci.appveyor.com/project/fulmicoton/lucivy>)
+- Added CI for Windows (<https://ci.appveyor.com/project/fulmicoton/tantivy>)
 Thanks to @KodrAus ! (#108)
 - Various dependy version update (Thanks to @Ameobea) #76
 - Fixed several race conditions in `Index.wait_merge_threads`
@@ -1601,6 +1608,6 @@ Thanks to @KodrAus ! (#108)
 - Fixed #92. u32 are now encoded using big endian in the fst
   in order to make there enumeration consistent with
   the natural ordering.
-- Building binary targets for lucivy-cli (Thanks to @KodrAus)
+- Building binary targets for tantivy-cli (Thanks to @KodrAus)
 - Misc invisible bug fixes, and code cleanup.
 - Use

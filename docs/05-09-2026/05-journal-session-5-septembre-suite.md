@@ -256,11 +256,12 @@ plus — 463 000 régions, DP 577 ms, **161 ms**.
 Les postings perdent 35 à 38 % (`.sfxpost` 243,5 → 158,0 Mo,
 `.word_sfxpost` 183,2 → 114,9 sur les 30 000), le `.posmap` prend 8 % ;
 `du` tout compris : 30 000 dictionnaire 1 281 → **1 128 Mo**, 10 000 385
-→ **345 Mo**. Temps (panel 30 000 dictionnaire, index neuf contre ancien
-layout rouvert par le même binaire, une passe, machine partagée) : du
-même ordre partout — exactes 2,2-4,9 ms, fuzzy d1 9,7, fuzzy d2 161,5,
-regex 15,9 — et `place_spans` coûte 0,6 à 3,3 ms de somme sur 120
-segments. La règle du ×1,5 n'est pas approchée.
+→ **345 Mo**. Temps (A/B du protocole, 30 000 dictionnaire, index neuf
+contre ancien layout rouvert par le même binaire, trois passes alternées,
+min, machine au repos) : **×0,91 à ×1,09** sur les dix requêtes — exactes
+2,3-4,6 ms, fuzzy d1 9,3, fuzzy d2 141,4 contre 155,0, regex 14,8 contre
+14,7 — et `place_spans` coûte 0,6 à 3,3 ms de somme sur 120 segments. La
+règle du ×1,5 n'est pas approchée ([04](04-progression-et-a-faire.md) §2).
 
 ## 9. Commits de la suite
 
