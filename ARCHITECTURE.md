@@ -1,6 +1,6 @@
 # lucivy — Architecture
 
-*4.0.0, September 2026. Every number in this document was measured; the
+*4.0.1, September 2026. Every number in this document was measured; the
 commands are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md), the engine comparison
 in [docs/compare-engines-2026-09-05.md](docs/compare-engines-2026-09-05.md)
 (`benches/compare_engines.sh` regenerates it), and the working notes in
@@ -8,11 +8,14 @@ in [docs/compare-engines-2026-09-05.md](docs/compare-engines-2026-09-05.md)
 
 ## Overview
 
-lucivy is a BM25 full-text search engine built for **substring matching across
-token boundaries**: find `mutex` inside `pthread_mutex_lock`, `ror::lucivyer` in
-`Error::LucivyError`, `rag3weaver` in `rag3_weaver` — with the exact bytes that
-matched, fuzzily or by regular expression, in Rust, Python, Node.js, C++ and the
-browser. Four properties organise the design:
+lucivy is a BM25 full-text search engine whose **one default index answers every
+question** — exact substrings (`mutex` inside `pthread_mutex_lock`), matches
+across separators (`spinlock`, `spin_lock`, `spin lock` are one thing), typos
+that straddle a token boundary, regular expressions, two-character needles —
+with the exact bytes of every match, and **every answer checked** against the
+files. Nothing is configured per question: no analyzer to pick, no field to
+duplicate, no reindexing to ask something new. In Rust, Python, Node.js, C++ and
+the browser. Four properties organise the design:
 
 - **Every answer is checked.** The ground-truth harness compares each query's
   documents *and* byte spans to a byte-by-byte scan of the files — 93 983

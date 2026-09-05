@@ -1,6 +1,6 @@
 # lucivy-cpp
 
-Full-text search for code and technical text, as a library — from C++. Substrings, fuzzy and regex **across token boundaries**, BM25, exact byte spans, every answer checked against the files. Runs in your process, in your transaction (`lucivy::BlobBackend`), and the same engine runs in the browser. Powered by Rust via a CXX bridge, MIT.
+**One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. From C++. Runs in your process, in your transaction (`lucivy::BlobBackend`), and the same engine runs in the browser. Powered by Rust via a CXX bridge, MIT.
 
 Version 4.0.0 — built on the lucivy 4.0.0 engine (SFX v3 suffix index, shared dictionary optional).
 

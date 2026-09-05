@@ -1,9 +1,12 @@
 # lucivy-core
 
-The Rust API of [lucivy](https://github.com/L-Defraiteur/lucivy) — BM25
-full-text search with **substring matching across token boundaries**, fuzzy
-search (Levenshtein or Jaro-Winkler), regex, boolean query syntax and exact
-byte-offset highlights. This crate is the recommended entry point: it wraps the
+The Rust API of [lucivy](https://github.com/L-Defraiteur/lucivy) — **one
+index that answers every question, every answer checked**: BM25 full-text
+search with substring matching across token boundaries, fuzzy search
+(Levenshtein or Jaro-Winkler) across those boundaries, regex, two-character
+needles, boolean query syntax and exact byte-offset highlights, from one
+default index with nothing to configure per question, and a ground-truth
+harness that compares every answer to a scan of the files. This crate is the recommended entry point: it wraps the
 [`ld-lucivy`](https://crates.io/crates/ld-lucivy) engine with a sharded handle,
 a JSON query builder, snapshots and deltas, and pluggable storage.
 

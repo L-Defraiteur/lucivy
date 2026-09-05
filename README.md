@@ -7,10 +7,15 @@
 [![CI](https://github.com/L-Defraiteur/lucivy/actions/workflows/ci.yml/badge.svg)](https://github.com/L-Defraiteur/lucivy/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**Full-text search for code and technical text, as a library.** Substrings,
-fuzzy and regex **across token boundaries**, BM25, exact byte spans — and every
-answer checked against the files. Runs in your process, in your transaction, in
-your browser. Rust, Python, Node.js, C++, WASM. MIT.
+**One index answers every question, and every answer is checked.** Build the
+default index once: it answers exact substrings, matches across separators
+(`spin_lock`, `spin lock`, `spinlock`), typos that straddle a token boundary,
+regular expressions and two-character needles — with BM25 ranking and the exact
+bytes of every match — and nothing to configure per question. The ground-truth
+harness compares each answer, documents *and* byte spans, to a byte-by-byte scan
+of the files (93 983 Linux kernel files, ten query modes, zero mismatches), and
+judges Elasticsearch and tantivy by the same scan. A library: in your process,
+in your transaction, in your browser. Rust, Python, Node.js, C++, WASM. MIT.
 
 Built for code search, technical documentation, and as the BM25 side of a vector
 database.

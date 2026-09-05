@@ -346,8 +346,16 @@ cd playground && node serve.mjs
 
 ## Docs
 
-**Dossier courant : `docs/05-09-2026/` — pour repartir, lire dans l'ordre
-`10-journal-session-5-septembre-nuit.md` (la nuit du 5 au 6 : `?ram` mesuré,
+**Dossier courant : `docs/06-09-2026/` — pour repartir, lire dans l'ordre
+`03-journal-session-6-septembre.md` (la journée du 6 : le chantier indexation
+×2,1 → ×1,5 et le repli différé, Jaro-Winkler vérifié, la vitrine revue, le
+dictionnaire par défaut, la course trouvée, la compat prouvée avec `main`,
+**4.0.0 puis 4.0.1 publiées**, la relecture extérieure ; **§11 les
+objectifs** : poster les réponses aux issues, l'import tantivy/ES, l'article),
+`01-reponses-issues-4.0.1.md` (brouillons à poster après relecture de Lucie),
+`02-import-tantivy-elasticsearch.md` (la proposition 4.1), `04-architecture.md`
+et `05-knowledge-dump.md` (autonomes). Le dossier précédent, `docs/05-09-2026/`,
+pour le détail : `10-journal-session-5-septembre-nuit.md` (la nuit du 5 au 6 : `?ram` mesuré,
 les douze corpus et deux bugs de la page, l'invite libre, le commit par
 volume, le banc comparatif rejouable, la présentation, et **le coût du
 dictionnaire à l'indexation, mesuré et cadré**), puis `04-progression-et-a-faire.md`
