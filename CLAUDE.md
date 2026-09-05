@@ -272,6 +272,9 @@ pour octet (`01` §13).
 - Compatibilité 3.0.x : `cargo test --release -p lucivy-core --test test_compat_308` —
   la fixture `lucivy_core/tests/fixtures/index-3.0.8/` a été écrite par le wheel PyPI
   3.0.8 ; v4 doit rendre ses réponses, puis convertir sans perte (le contrat de 4.0.0)
+- Temps d'indexation de référence (noyau, 5 septembre au soir, index neufs) : v3 56 s, dictionnaire 131 s,
+  dictionnaire + `derived_in_ram` 134 s ; 30 000 fichiers : 15,4 / 31,3 s. Le dictionnaire coûte ×2 à
+  l'indexation (chemin `lookup_or_mint` par jeton, une FST par génération) : chantier cadré, 04 §2 sexies
 - Bench sharding : `bench_sharding.rs` (90K docs Linux kernel)
 - Banc comparatif rejouable (5 septembre au soir) : `benches/compare_engines.sh <corpus> [dossier]` —
   lucivy (v3, dictionnaire, `derived_in_ram`) contre Elasticsearch 8.19 (trigrammes + `wildcard`,
@@ -307,9 +310,16 @@ cd playground && node serve.mjs
 ## Docs
 
 **Dossier courant : `docs/05-09-2026/` — pour repartir, lire dans l'ordre
-`09-plan-d-action-presentation.md` (sur quoi on se vend et dans quel ordre :
-les six piliers avec leur preuve, le tableau « où ils trébuchent », la page,
-le README, la publication, l'article, les issues), `06-journal-session-5-septembre-soir.md` (la soirée du 5 : les postings
+`10-journal-session-5-septembre-nuit.md` (la nuit du 5 au 6 : `?ram` mesuré,
+les douze corpus et deux bugs de la page, l'invite libre, le commit par
+volume, le banc comparatif rejouable, la présentation, et **le coût du
+dictionnaire à l'indexation, mesuré et cadré**), puis `04-progression-et-a-faire.md`
+(**§2 sexies : le prochain chantier**, chronométrer `lookup_or_mint` et la
+génération, cache de hachage, recouvrement), `09-plan-d-action-presentation.md`
+(sur quoi on se vend : six piliers avec leur preuve, le tableau « où ils
+trébuchent », ce qui reste : le titre de la page, publier), `11-architecture.md`
+et `12-knowledge-dump-baselines-tests-outils.md` (autonomes ; le détail
+d'avant dans 07 et 08) ; puis `06-journal-session-5-septembre-soir.md` (la soirée du 5 : les postings
 sans octets `SFP5`/`WSP5`/`PMP4`, l'option `derived_in_ram`, la fuzzy
 tentée sans gain, la fixture 3.0.8 et `test_compat_308`, le passage en
 4.0.0 non publié), puis `04-progression-et-a-faire.md` (l'état et le todo :

@@ -719,6 +719,46 @@ tout le panel (positions à 0) — le premier passage affichait des zéros là
 où le doc d'août disait « exact » ; le chemin honnête (`verified_substring`)
 est ce qui rend les vrais comptes, et c'est lui qui est chronométré.
 
+## 2 sexies. Le prochain chantier : le dictionnaire à l'indexation (cadré dans la nuit du 5 au 6)
+
+Question de Lucie : « on est plus lent qu'avant en indexation, on peut rien y
+faire ? ». Remesuré à neuf, noyau : v3 **56 s**, dictionnaire **131 s**,
++ `derived_in_ram` **134 s** (3.0.8 : 122 s). Donc le v3 de 4.0 va deux fois
+plus vite que la 3.0.8 et le dictionnaire revient à son niveau : le prix de
+l'option, ×2,0-2,3 à toutes les tailles (10 000 : 8 s / 19 ; 30 000 : 15,4 /
+31,3).
+
+**Où passe le temps** (30 000 fichiers, quatre constructions) : compaction
+2 s (`LUCIVY_DICT_MAX_GENERATIONS=1000` → 29,4 s) ; nombre de générations
+4-5 s (3 commits au lieu de 15 → 26,8 s) ; **~11 s restants** = le chemin par
+jeton et l'écriture de la génération. Lecture du code : `collector_v3.rs:567`
+appelle `lookup_or_mint` pour chaque jeton distinct du segment ;
+`dictionary.rs::lookup` fait une recherche FST **par génération** (≤ 8),
+décode les parents, confirme le texte dans `.termtexts`, alloue les
+minuscules ; les textes en attente passent par un `Mutex` global avec
+`key.to_string()`. Le v3 interne dans une table de hachage locale, et bâtit
+ses FST par segment sur tous les cœurs ; la génération, elle, est par shard
+(quatre en parallèle au plus sur 24 cœurs).
+
+Plan, par ordre :
+
+- [ ] **Chronométrer** : deux compteurs cumulés sous `LUCIVY_VERBOSE` —
+  `lookup_or_mint` par segment (temps, appels, hits par génération / pending
+  / mint) et l'écriture de la génération par commit (FST des nouveaux textes,
+  union, `.gmap`, compaction). Sur 30 000 fichiers, dix minutes.
+- [ ] **Un cache de hachage `(texte, forme) → id` par shard** devant les FST,
+  rempli au fil des lookups (et par la génération à l'ouverture si peu
+  cher) : un jeton déjà vu ne touche plus une FST. Borner sa mémoire
+  (jamais dans le navigateur sans borne) ; mesurer le gain.
+- [ ] **Recouvrir** l'écriture de la génération avec les constructions de
+  segments du même commit, au lieu de l'enchaîner ; ou la découper par
+  blocs de textes bâtis en parallèle avant l'union en flux, comme la
+  compaction.
+- [ ] Cible : le dictionnaire à **×1,3 du v3** au lieu de ×2 ; vérité 9/9 et
+  fichiers identiques octet pour octet à une construction sans cache.
+- Le v3 reste disponible pour qui veut la vitesse d'indexation ; la vitrine
+  est en dictionnaire avec des temps acceptables (2.6.0 en 28 s).
+
 ## 2 quater. La fuzzy d2 : une étape à risque, un checkpoint avant
 
 `regsiter` d2 sur les 30 000 : 161 ms de mur, 2,57 M de hits (pièces de
