@@ -2357,12 +2357,13 @@ function tarballToFiles(textFiles) {
 // line; `keep` (a Map) receives the files for the result view when given.
 // Returns the open index and the seconds it took — or reloads the page on
 // the persisted index when it is too big to be served from here.
-async function indexFiles(files, path, label, keep) {
+async function indexFiles(files, path, label, keep, opts = {}) {
   const t0 = performance.now();
   // `?dict` — one dictionary of token texts per shard instead of one per
   // segment (`shared_dictionary`): smaller on disk, queries a little slower.
+  // The terminal's `index mdn` / `index kernel` force it (`opts`).
   const params = new URLSearchParams(location.search);
-  const sharedDictionary = params.has('dict');
+  const sharedDictionary = opts.sharedDictionary ?? params.has('dict');
   // `?commit=N` — commit every N files instead of 2 000 (more generations
   // of the dictionary, hence its compaction, on a corpus that fits a tab).
   const COMMIT_EVERY = Math.max(1, parseInt(params.get('commit') || '2000', 10) || 2000);
@@ -2745,6 +2746,108 @@ async function runDemoSearch(entry, typeCmd = true) {
   if (typeCmd && !demoSkip) await sleep(reducedMotion ? 200 : 900);
 }
 
+// ── Bigger corpora, typed at the prompt: `index mdn`, `index kernel` ──
+// The archives are built locally (docs/05-09-2026/04 §2 bis: text files of
+// 100 KB at most, like the kernel corpora) and served next to the page;
+// git ignores them. The index goes to its own OPFS directory and is
+// reopened, not rebuilt, on the next visit.
+const MDN_SEARCHES = [
+  { cmd: 'lucivy search "addEventListener"', note: 'the method, in every reference page that mentions it',
+    query: { type: 'contains', field: 'content', value: 'addEventListener' } },
+  { cmd: 'lucivy search --strict "grid-template-columns"', note: 'separators strict: this CSS property, not grid-template-rows',
+    query: { type: 'contains', field: 'content', value: 'grid-template-columns', strict_separators: true } },
+  { cmd: 'lucivy search --fuzzy 1 "querySelctor"', note: 'a typo, one edit away, verified on the text', fuzzy: true,
+    query: { type: 'contains', field: 'content', value: 'querySelctor', distance: 1 } },
+  { cmd: 'lucivy search --regex "aria-[a-z]+"', note: 'every ARIA attribute: the literal drives the walk, the regex validates',
+    query: { type: 'contains', field: 'content', value: 'aria-[a-z]+', regex: true } },
+  { cmd: 'lucivy search "flex AND NOT grid"', note: 'boolean syntax: the flexbox pages that never mention grid',
+    query: { type: 'parse', fields: ['content', 'path'], value: 'flex AND NOT grid' } },
+  { cmd: 'lucivy search --phrase "async function"', note: 'these two words, adjacent, in this order',
+    query: { type: 'phrase', field: 'content', value: 'async function' } },
+];
+const KERNEL_SEARCHES = [
+  { cmd: 'lucivy search --strict "spin_lock_init"', note: 'nine bytes inside spin_lock_init, separators strict',
+    query: { type: 'contains', field: 'content', value: 'spin_lock_init', strict_separators: true } },
+  { cmd: 'lucivy search "mutex_lock"', note: 'separators relaxed: mutex_lock, mutex *lock, mutex-lock',
+    query: { type: 'contains', field: 'content', value: 'mutex_lock' } },
+  { cmd: 'lucivy search --fuzzy 1 "schdule"', note: 'one edit away, verified on the text', fuzzy: true,
+    query: { type: 'contains', field: 'content', value: 'schdule', distance: 1 } },
+  { cmd: 'lucivy search --regex "spin_lock_[a-z]+"', note: 'the literal drives the walk, the regex validates',
+    query: { type: 'contains', field: 'content', value: 'spin_lock_[a-z]+', regex: true } },
+];
+const EXTRA_CORPORA = {
+  mdn: { file: 'corpus-mdn.tar.gz', path: '/mdn_index', title: 'MDN Web Docs', pages: '14 900 pages', download: '14 MB', eta: 'about 15 s',
+    credit: 'MDN Web Docs content by Mozilla Contributors, CC-BY-SA 2.5 — github.com/mdn/content', searches: MDN_SEARCHES },
+  kernel: { file: 'corpus-kernel-16k.tar.gz', path: '/kernel_index', title: 'Linux kernel', pages: '15 440 source files', download: '49 MB', eta: 'about a minute',
+    credit: 'Linux kernel sources, GPL-2.0 — kernel.org', searches: KERNEL_SEARCHES },
+};
+
+async function indexCorpusDemo(key) {
+  const c = EXTRA_CORPORA[key];
+  if (!c) throw new Error(`unknown corpus "${key}" — try: index mdn, index kernel`);
+  if (demoRunning) return;
+  demoRunning = true; demoSkip = false; btnSkip.hidden = false;
+  try {
+    await startupDone;
+    term.out(`▸ ${c.title}: ${c.pages}, ${c.download} to download, ${c.eta} to index — kept in this browser's storage, reopened in seconds next time`, 'dim');
+    let index = null, numDocs = 0;
+    const t0 = performance.now();
+    // Already the open index (typed a second time): reuse it. Opening the
+    // same OPFS path again and closing the "old" handle would close the
+    // worker's context for that path — both handles at once.
+    if (demoIndex && demoIndex.path === c.path) {
+      index = demoIndex;
+      numDocs = demoNumDocs || await index.numDocs().catch(() => 0);
+      term.out(`▸ ${c.title} is already the open index: ${numDocs} documents`, 'ok');
+    }
+    // An earlier visit left it in OPFS: reopen instead of indexing again.
+    const existing = index ? null : await lucivy.openDirect(c.path).catch(() => null);
+    if (existing) {
+      numDocs = await existing.numDocs().catch(() => 0);
+      if (numDocs > 0) {
+        index = existing;
+        term.out(`▸ found the ${c.title} index of an earlier visit: ${numDocs} documents, reopened in ${((performance.now() - t0) / 1000).toFixed(1)} s`, 'ok');
+      } else {
+        await existing.close().catch(() => {});
+      }
+    }
+    if (!index) {
+      const mb = (n) => (n / 1048576).toFixed(1);
+      const line = term.add(`▸ downloading ${escapeHtml(c.file)}…`, 'dim');
+      const resp = await fetch(`./${c.file}`, { cache: 'no-cache' });
+      if (!resp.ok) throw new Error(`${c.file} is not served here (${resp.status}); docs/05-09-2026/04 says how it is built`);
+      const blob = await readWithProgress(resp, (r, t) => term.set(line, `▸ downloading ${escapeHtml(c.file)}… ${mb(r)} MB${t ? ` / ${mb(t)} MB` : ''}`));
+      const files = tarballToFiles(await extractTarGz(blob));
+      if (!files.length) throw new Error('no text files in the archive');
+      term.set(line, `▸ ${escapeHtml(c.file)} downloaded: ${files.length} text files (${mb(blob.size)} MB compressed)`);
+      if (demoIndex) { await demoIndex.close().catch(() => {}); demoIndex = null; }
+      progressTotal = files.length;
+      await term.cmd(`lucivy index ${c.path}`, true);
+      progressLine = term.add(term.bar(0, progressTotal));
+      demoLive = true; memoryLine = null;
+      let built;
+      try { built = await indexFiles(files, c.path, c.title, null, { sharedDictionary: true }); }
+      finally { demoLive = false; }
+      index = built.index;
+      numDocs = await index.numDocs();
+      term.add(`▸ ${numDocs} documents indexed in ${built.seconds} s`, 'ok');
+    }
+    const pre = await index.preload().catch(() => null);
+    const st = await index.memoryStatus().catch(() => null);
+    if (st) {
+      const loaded = pre && !pre.skipped ? ` — its ${pre.files} index files (segments and dictionary, not documents) loaded in ${(pre.ms / 1000).toFixed(1)} s` : '';
+      term.out(`▸ index ${(st.index_bytes / 1048576).toFixed(0)} MB, held in memory${loaded}`, 'dim');
+    }
+    if (c.credit) term.out(`▸ ${c.credit}`, 'dim');
+    if (demoIndex && demoIndex !== index && demoIndex.path !== index.path) await demoIndex.close().catch(() => {});
+    demoIndex = index; demoNumDocs = numDocs;
+    if (tabDemoCount) tabDemoCount.textContent = `(${numDocs})`;
+    for (const entry of c.searches) await runDemoSearch(entry);
+  } finally {
+    demoLive = false; demoRunning = false; btnSkip.hidden = true;
+  }
+}
+
 // ── The user's own searches, typed in the terminal ────────────────
 // `lucivy search [flags] "value"`; flags: --fuzzy N, --jw, --regex,
 // --phrase, --prefix, --exact, --strict, --allowed N, --limit N. Boolean
@@ -2816,6 +2919,7 @@ function printHelp() {
   const q = (s) => `<span class="str">${escapeHtml(s)}</span>`;
   const rows = [
     ['usage', `lucivy search [options] ${q('"value"')}  — quotes are optional unless the value has spaces`],
+    [f('index mdn'), `index all of MDN Web Docs here (14 900 pages, 14 MB, about 15 s) and search it; ${f('index kernel')}: 15 440 Linux kernel files (49 MB, about a minute)`],
     ['(none)', `substring anywhere, across tokens, separators relaxed (${q('"suffixfst"')} finds suffix_fst and "suffix FST")`],
     [f('--fuzzy N'), `up to N edits (Levenshtein), candidates by trigram pigeonhole, verified on the text — ${q('--fuzzy 2 "trigam pigeonhol"')}`],
     [f('--jw [S]'), `with fuzzy: rank and keep by Jaro-Winkler similarity ≥ S (default 0.9); a typo at the end of a word ranks above one at its start — ${q('--fuzzy 1 --jw "ShardedHandel"')}`],
@@ -2835,7 +2939,10 @@ function printHelp() {
 
 // A prompt line with a real input after the static `lucivy search `.
 function openPrompt(hint) {
-  if (hint) term.add(`▸ your turn: type a query and press Enter — <span class="flag">--help</span> lists the options (<span class="flag">--fuzzy N</span> <span class="flag">--jw</span> <span class="flag">--regex</span> <span class="flag">--phrase</span> <span class="flag">--prefix</span> <span class="flag">--exact</span> <span class="flag">--strict</span> <span class="flag">--allowed N</span> <span class="flag">--limit N</span>, AND / OR / NOT)`, 'dim');
+  if (hint) {
+    term.add(`▸ your turn: type a query and press Enter — <span class="flag">--help</span> lists the options (<span class="flag">--fuzzy N</span> <span class="flag">--jw</span> <span class="flag">--regex</span> <span class="flag">--phrase</span> <span class="flag">--prefix</span> <span class="flag">--exact</span> <span class="flag">--strict</span> <span class="flag">--allowed N</span> <span class="flag">--limit N</span>, AND / OR / NOT)`, 'dim');
+    term.add(`▸ or index a bigger corpus right here: <span class="flag">index mdn</span> — all of MDN Web Docs, 14 900 pages, 14 MB, about 15 s — or <span class="flag">index kernel</span> — 15 440 Linux kernel files, 49 MB, about a minute; then search it the same way`, 'dim');
+  }
   const line = term.add(`<span class="prompt">$</span> <span class="cmd">${escapeHtml(PROMPT_PREFIX)}</span>`);
   const input = document.createElement('input');
   input.className = 'term-input';
@@ -2865,14 +2972,19 @@ function openPrompt(hint) {
       line.innerHTML = '';
       line.appendChild(Object.assign(document.createElement('span'), { className: 'prompt', textContent: '$' }));
       line.appendChild(document.createTextNode(' '));
+      const corpus = text.match(/^(?:index\s+)?(mdn|kernel|linux)$/i);
+      const corpusKey = corpus ? (corpus[1].toLowerCase() === 'linux' ? 'kernel' : corpus[1].toLowerCase()) : null;
       const cmd = document.createElement('span'); cmd.className = 'cmd';
-      cmd.innerHTML = escapeHtml(PROMPT_PREFIX + text)
+      cmd.innerHTML = escapeHtml(corpusKey ? `lucivy index ${corpusKey}` : PROMPT_PREFIX + text)
         .replace(/(--[a-z]+(?:\s+\d+(?:\.\d+)?)?)/g, '<span class="flag">$1</span>')
         .replace(/(&quot;(?:(?!&quot;).)*&quot;)/g, '<span class="str">$1</span>');
       line.appendChild(cmd);
       promptInput = null;
-      const entry = parseSearchCommand(text);
-      if (entry && entry.help) {
+      const entry = corpusKey ? null : parseSearchCommand(text);
+      if (corpusKey) {
+        try { await indexCorpusDemo(corpusKey); }
+        catch (err) { term.out('✗ ' + err.message, 'err'); }
+      } else if (entry && entry.help) {
         printHelp();
       } else if (!entry) {
         term.out('▸ nothing to search for — try: "ShardedHandle", --fuzzy 1 "mimaloc", --regex "Sharded[A-Z]\\w+", or --help', 'dim');
