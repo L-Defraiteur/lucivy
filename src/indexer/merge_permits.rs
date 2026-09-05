@@ -6,7 +6,11 @@
 //! without noticing; a 4 GB wasm32 address space does not (the first commit
 //! of the browser playground died on a 192 MB `realloc` in the FST build
 //! with all four running). The limit comes from `LUCIVY_MERGE_CONCURRENCY`,
-//! defaults to 1 on wasm32 and to unlimited elsewhere.
+//! defaults to 1 on wasm32 and to unlimited elsewhere. A dictionary-mode
+//! merge rebuilds no FST (it unions `.gmap`s and remaps postings): the
+//! browser binding sets 2 for such an index when nothing else did —
+//! measured 5 September 2026 on 15 440 kernel files, two or four merges at
+//! once did not move the wasm memory high-water mark.
 //!
 //! Waiting for a permit on a scheduler thread keeps that thread useful: it
 //! runs other ready work (the permit holder's own DAG nodes among it)

@@ -83,6 +83,50 @@ cartes de positions et la fratrie 27 %, le dictionnaire 21 %.
   fusions de fond, soit la RAM de l'onglet approchait la borne — à
   reproduire dans un onglet neuf avant de conclure.
 
+### 1 bis. Les fusions à concurrence 1 en WASM — à remesurer
+
+Pourquoi 1 (`src/indexer/merge_permits.rs`, 24 août) : une fusion v3
+tient en RAM tous les sidecars sources, les tables fusionnées et la table
+de clés du builder de FST (~500 Mo pour 14 segments de 40 fichiers) ;
+quatre à la fois dans les 4 Go du navigateur ont tué le premier commit du
+playground sur un `realloc` de 192 Mo. Ce qui a changé depuis : **une
+fusion en mode dictionnaire ne rebâtit aucune FST** (union des `.gmap`,
+remappage, concaténation des postings), et les index ont fondu de 40 %.
+Outillage ajouté le 5 septembre : `--merge-concurrency=N` (option
+`mergeConcurrency`, `?merges=N` dans le playground), et `memoryStatus`
+rend `heap_bytes`, la taille de la mémoire linéaire WASM — elle ne fait
+que croître, c'est le **pic** de tout ce que le moteur a tenu en même
+temps ; le playground le journalise après l'indexation. Protocole :
+`?corpus=corpus-kernel-16k.tar.gz&dict&commit=1000` sans puis avec
+`&merges=2`, comparer le pic mémoire et l'attente des fusions.
+
+| 15 440 fichiers du noyau, dictionnaire, `commit=1000`, 4 shards | indexation | attente des fusions | lecture | pic mémoire WASM |
+|---|---|---|---|---|
+| fusions à 1 (défaut) | 60 s | 73,6 s | 5,0 s | 2 543 Mo (index 1 775 Mo) |
+| fusions à 2 | 82 s (les fusions chevauchent l'indexation) | 3,8 s | 4,3 s | 2 539 Mo (index 1 772 Mo) |
+| fusions à 4 | 62 s | 15,7 s | 4,4 s | 2 539 Mo (index 1 774 Mo) |
+
+Lecture : à 2, deux fusions tournent ensemble (22 à 28 s chacune, comme
+seules), **le pic mémoire ne bouge pas** (2 539 contre 2 543 Mo : une
+fusion en mode dictionnaire ne pèse pas assez pour se voir à côté de
+l'index et des indexeurs), et l'index est servable **86 s** après le début
+au lieu de 134 s. À 4, les quatre fusions tournent ensemble (24 à 30 s
+chacune), même pic à l'octet près, servable en **82 s**. La raison du
+« 1 » (une fusion v3 rebâtit la FST, quatre à la fois tuaient le
+navigateur) ne s'applique pas au mode dictionnaire, au moins à cette
+taille. Décision du 5 septembre : **2 par défaut dans le navigateur pour
+un index à dictionnaire partagé**, 1 pour un index v3 (non remesuré),
+`mergeConcurrency` / `--merge-concurrency=N` pour forcer.
+
+Trace par fusion (`[merge] N segments: waited … for a slot, ran …`,
+`LUCIVY_VERBOSE`, ajoutée le 5 septembre) à concurrence 1 : **quatre
+fusions, une par shard, de 8 à 9 segments, 24 à 27 s chacune, strictement
+en file** (attente du créneau 0, 20, 46, 71 s) — les 73 s sont 4 × 25 s
+sérialisées par le permis, pas une fusion géante. Le premier essai à
+« 2 » n'avait rien changé parce que la couche JS (`lucivy.js`) filtre
+les options d'initialisation et ne transmettait pas `mergeConcurrency` :
+corrigé.
+
 ## 2. Réfléchir : perdre encore du poids, ou reconstruire en RAM à l'ouverture
 
 Ce que les formats disent (lu le 5 septembre, à mesurer avant de choisir) :

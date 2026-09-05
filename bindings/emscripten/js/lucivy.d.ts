@@ -291,6 +291,12 @@ export interface LucivyOptions {
   maxMergedDocs?: number;
   /** Segment builds allowed at once (default 2). */
   maxBuilds?: number;
+  /**
+   * Background merges allowed at once (`--merge-concurrency=N`; 1 in the
+   * browser by default, where a v3 merge rebuilding a segment's FST is a
+   * few hundred MB — a dictionary-mode merge rebuilds none).
+   */
+  mergeConcurrency?: number;
 }
 
 export interface FieldDef {
@@ -340,6 +346,11 @@ export interface MemoryStatus {
   /** Empty when the index is held in memory; a sentence for the user otherwise. */
   warnings: string[];
   shards: { shard: number; bytes: number; opened: number; listed: number }[];
+  /**
+   * Size of the wasm linear memory, which only grows: the high-water mark of
+   * everything the engine held at once since the worker started.
+   */
+  heap_bytes: number;
 }
 
 export interface PreloadResult {

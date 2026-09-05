@@ -225,7 +225,11 @@ entre shards) ; relancé seul il passe.
   `cd playground && node serve.mjs`, port 9877) : `?dict` crée l'index
   avec `shared_dictionary: true`, `?commit=N` commit tous les N fichiers
   (2 000 sinon ; à 1 000 sur `?corpus=corpus-kernel-16k.tar.gz` on passe
-  par deux compactions), `?corpus=<archive>` indexe une `.tar.gz` servie
+  par deux compactions), `?merges=N` fusions de fond à la fois (2 par
+  défaut pour un index à dictionnaire, 1 en v3), `?verbose` pour les
+  traces du moteur dans `diag.log` (`[merge] N segments: waited … ran …`,
+  `[preload] waited for merges`), la page journalise le pic de mémoire
+  WASM après l'indexation (`memoryStatus().heap_bytes`), `?corpus=<archive>` indexe une `.tar.gz` servie
   à côté de la page, `?nodemo` saute la démo. **Un seul onglet à la
   fois** : deux onglets qui indexent écrivent le même répertoire OPFS
   `user_index` et échouent tous les deux au premier commit (`I/O error`,

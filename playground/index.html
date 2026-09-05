@@ -1594,7 +1594,7 @@ async function startup() {
     // Cache-buster: GitHub Pages caches the worker and the wasm for a while,
     // and a phone kept a whole build behind after a deploy. Bumped at each
     // engine or worker change; the query rides through to the wasm.
-    const BUILD = '3.0.8-68e0737';
+    const BUILD = '3.0.8-4aa6782';
     lucivy = new Lucivy(`./js/lucivy-worker.js?v=${BUILD}`, {
       noOpfs: startupParams.has('noopfs'),
       verbose: startupParams.has('verbose'), // engine diagnostics (LUCIVY_VERBOSE, V3_PROFILE)
@@ -1610,6 +1610,10 @@ async function startup() {
       // `?maxmerged=N`: largest segment a background merge may produce
       // (default 2 000 in the browser; 10 000 dies on a 600 MB allocation).
       maxMergedDocs: param('maxmerged', 400),
+      // `?merges=N`: background merges at once (default 1 in the browser: a
+      // v3 merge rebuilds a segment's FST in RAM; a dictionary-mode merge
+      // does not, which `?dict&merges=2` is there to measure).
+      mergeConcurrency: param('merges', 0),
       // `?builds=N`: segment builds allowed at once (default 4).
       maxBuilds: param('builds', 1),
       // `?maxmatches=N`: matches a segment resolves for one query before the
@@ -2392,6 +2396,9 @@ async function indexFiles(files, path, label, keep) {
   await index.drainMerges();
   const seconds = Math.round((performance.now() - t0) / 1000);
   const st = await index.memoryStatus().catch(() => null);
+  if (st && st.heap_bytes) {
+    console.log(`[playground] indexed ${files.length} files in ${seconds}s; wasm memory high-water mark ${(st.heap_bytes / (1 << 20)).toFixed(0)} MB, index ${(st.index_bytes / (1 << 20)).toFixed(0)} MB`);
+  }
   if (st && st.index_bytes > RELOAD_TO_SERVE_BYTES) {
     statusEl.textContent = `${files.length} files indexed in ${seconds}s (${(st.index_bytes / (1 << 20)).toFixed(0)} MB) — reloading the page to serve it...`;
     await index.close().catch(() => {});

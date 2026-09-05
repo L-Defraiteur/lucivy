@@ -306,8 +306,19 @@ impl SegmentUpdaterState {
             let slot = results.clone();
             rxs.push(scheduler.submit_task(crate::actor::Priority::High, move || {
                 // One slot per merge (see merge_permits): waiting runs other work.
+                let verbose = std::env::var("LUCIVY_VERBOSE").is_ok();
+                let sources = entries.len();
+                let t_wait = std::time::Instant::now();
                 let _permit = super::merge_permits::acquire();
-                match super::commit_dag::run_merge(&shared, op, entries) {
+                let waited = t_wait.elapsed();
+                let t_run = std::time::Instant::now();
+                let result = super::commit_dag::run_merge(&shared, op, entries);
+                if verbose {
+                    eprintln!("[merge] {sources} segments: waited {:.0} ms for a slot, ran {:.0} ms ({} merges active)",
+                        waited.as_secs_f64() * 1e3, t_run.elapsed().as_secs_f64() * 1e3,
+                        super::merge_permits::active());
+                }
+                match result {
                     Ok(r) => {
                         slot.lock().unwrap()[i] = Some(r);
                         Ok(())

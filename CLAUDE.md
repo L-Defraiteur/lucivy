@@ -175,6 +175,12 @@ Jamais d'I/O dans un actor handler.
 - GC thread skip en WASM
 - `WRITER_HEAP_SIZE = 15MB` en WASM (50MB natif)
 - `MAXIMUM_MEMORY = 4GB` (limit 32-bit WASM)
+- Fusions de fond : `LUCIVY_MERGE_CONCURRENCY` = 1 sur wasm (une fusion v3
+  rebâtit la FST en RAM), **2 pour un index à dictionnaire partagé** (posé
+  par le binding, mesuré le 5 septembre : pic mémoire inchangé, attente
+  avant service 74 → 4 s) ; `--merge-concurrency=N` / option
+  `mergeConcurrency` pour forcer ; `memoryStatus().heap_bytes` = pic de la
+  mémoire linéaire.
 
 ## luciole — framework Actor/DAG
 
@@ -271,6 +277,7 @@ cargo test -p luciole --lib
 bash bindings/emscripten/build.sh
 
 # Playground (port 9877 ; `?dict` = dictionnaire partagé, `?commit=N`,
+# `?merges=N`, `?verbose` (traces `[merge]`, `[preload]` dans diag.log),
 # `?corpus=corpus-kernel-16k.tar.gz` ; un seul onglet qui indexe à la fois,
 # deux onglets partagent le même répertoire OPFS et échouent au commit)
 cd playground && node serve.mjs

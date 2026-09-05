@@ -52,6 +52,7 @@ export class Lucivy {
             writerThreads: options.writerThreads || 0,
             maxMergedDocs: options.maxMergedDocs || 0,
             maxBuilds: options.maxBuilds || 0,
+            mergeConcurrency: options.mergeConcurrency || 0,
         });
     }
 

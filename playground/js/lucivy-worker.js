@@ -275,6 +275,7 @@ self.onmessage = async (e) => {
                         ...(args.writerThreads ? [`--writer-threads=${args.writerThreads}`] : []),
                         ...(args.maxMergedDocs ? [`--max-merged-docs=${args.maxMergedDocs}`] : []),
                         ...(args.maxBuilds ? [`--max-builds=${args.maxBuilds}`] : []),
+                        ...(args.mergeConcurrency ? [`--merge-concurrency=${args.mergeConcurrency}`] : []),
                         ...(args.maxMatches !== undefined && args.maxMatches !== null ? [`--max-matches-per-segment=${args.maxMatches}`] : []),
                     ],
                 });
@@ -508,6 +509,10 @@ self.onmessage = async (e) => {
                 const ctx = getCtx(args.path);
                 result = JSON.parse(await callStr('lucivy_memory_status', ctx));
                 if (result.error) throw new Error(result.error);
+                // The wasm linear memory only grows: its size is the high-water
+                // mark of everything the engine ever held at once — the number
+                // that says how close a build or a merge came to the 4 GB.
+                result.heap_bytes = Module.HEAPU8.buffer.byteLength;
                 break;
             }
 

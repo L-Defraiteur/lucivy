@@ -331,6 +331,19 @@ pub extern "C" fn __main_argc_argv(argc: i32, argv: *const *const c_char) -> i32
                 std::env::set_var("LUCIVY_RAM_INDEX_MAX", (mb << 20).to_string());
             }
         }
+        // `--merge-concurrency=N`: background merges allowed at once
+        // (LUCIVY_MERGE_CONCURRENCY, 1 on wasm32 since 24 August 2026: a v3
+        // merge rebuilds the segment's FST in RAM, and four at once died in
+        // the 4 GB address space). A dictionary-mode merge rebuilds no FST;
+        // this flag is how that case gets measured.
+        if let Some(n) = a.strip_prefix("--merge-concurrency=") {
+            if let Ok(n) = n.parse::<usize>() {
+                if n > 0 {
+                    std::env::set_var("LUCIVY_MERGE_CONCURRENCY", n.to_string());
+                    rlog!("[lucivy-wasm] merge concurrency {n}");
+                }
+            }
+        }
     }
     // `--verbose`: the engine's diagnostic prints (LUCIVY_VERBOSE, V3_PROFILE),
     // routed to the page through printErr.
@@ -483,6 +496,7 @@ pub unsafe extern "C" fn lucivy_create(
             return std::ptr::null_mut();
         }
     };
+    default_merge_concurrency(&handle);
 
     Box::into_raw(Box::new(LucivyContext {
         handle,
@@ -501,6 +515,21 @@ pub unsafe extern "C" fn lucivy_create(
 
 /// Open an existing index from OPFS.
 /// The index must have been previously created with lucivy_create.
+/// Two background merges at once for an index with a shared dictionary,
+/// unless `--merge-concurrency` said otherwise. The browser default of one
+/// (`merge_permits`) protects the 4 GB address space from v3 merges, which
+/// rebuild a segment's FST in RAM; a dictionary-mode merge rebuilds none,
+/// and measured on 15 440 kernel files in 4 shards (5 September 2026) two
+/// or four at once left the wasm memory high-water mark where it was
+/// (2 539 MB) while the wait before serving fell from 74 s to 4 s. The
+/// limit is read once, at the first merge: this must run before it.
+fn default_merge_concurrency(handle: &ShardedHandle) {
+    if std::env::var("LUCIVY_MERGE_CONCURRENCY").is_err() && handle.config.uses_shared_dictionary() {
+        std::env::set_var("LUCIVY_MERGE_CONCURRENCY", "2");
+        rlog!("[lucivy-wasm] merge concurrency 2 (shared dictionary)");
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn lucivy_open(path: *const c_char) -> *mut LucivyContext {
     ensure_panic_hook();
@@ -515,6 +544,7 @@ pub unsafe extern "C" fn lucivy_open(path: *const c_char) -> *mut LucivyContext 
             return std::ptr::null_mut();
         }
     };
+    default_merge_concurrency(&handle);
 
     let text_fields = extract_text_fields(&handle.config);
 

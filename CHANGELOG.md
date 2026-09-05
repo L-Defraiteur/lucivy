@@ -27,6 +27,15 @@ Unreleased (branch v4)
   spent waiting for background merges before reading (70 s after sixteen
   commits of 1 000 kernel files, against 4 s of reading), and the playground
   says so instead of "loading into memory".
+- **Browser: two background merges at once for a shared-dictionary index.**
+  The browser ran one merge at a time since a v3 merge rebuilds a segment's
+  FST in RAM and four at once exhausted the 4 GB address space. A
+  dictionary-mode merge rebuilds no FST: measured on 15 440 kernel files in
+  4 shards, two or four merges at once left the wasm memory high-water mark
+  unchanged (2 539 MB) and cut the wait before the index could be served
+  from 74 s to 4 s. `mergeConcurrency` (`--merge-concurrency=N`) forces a
+  value for either kind of index; `memoryStatus()` now reports `heap_bytes`,
+  the wasm memory high-water mark.
 - **Dictionary compaction as a merge of streams.** Past
   `LUCIVY_DICT_MAX_GENERATIONS` (8) live generations, a commit used to read
   every text of the dictionary into RAM and rebuild one FST from all of them
