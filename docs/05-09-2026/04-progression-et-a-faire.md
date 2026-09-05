@@ -455,16 +455,20 @@ les fichiers de l'index (segments et dictionnaire), pas les documents.
 
 À faire :
 
-- [ ] **Un bouton « second acte »** sur la page : **« Indexez toute la
-  documentation MDN dans votre navigateur »** (14 900 pages, 14 Mo à
-  télécharger, 15 s, attribution CC-BY-SA), barre honnête (téléchargement,
-  indexation, fusions — la page sait déjà distinguer les trois), temps
-  annoncé. Le noyau (15 000 fichiers, 49 Mo, une minute, 1,8 Go) en
-  troisième acte pour qui veut la démonstration de charge. La page sait
-  déjà faire les deux (`?corpus=`).
-- [ ] **Rouvrir l'index persistant à la visite suivante** : il est en OPFS,
-  `?open=user_index` le rend en 4 s — proposer « reprendre le noyau
-  indexé » quand il existe, au lieu de réindexer.
+- [x] **Le second acte, dans le terminal** (décision de Lucie : pas un
+  bouton, une commande, on enchaîne) : après la démo, le prompt propose
+  `index mdn` — téléchargement, indexation sous les yeux (dictionnaire,
+  barre, fusions), attribution CC-BY-SA, un panel de six requêtes MDN
+  rejoué, puis la main. `index kernel` pour la démonstration de charge.
+  **L'index ouvert vit en RAM, les autres en OPFS** : `index mdn` une
+  deuxième fois rouvre en 0,9 s ; `open <nom>`, `index list` (avec la
+  taille en stockage), `drop <nom>`. Et `index github owner/repo[@branch]`
+  ou une URL github.com, par le proxy, avec un refus honnête au-delà de
+  ~220 Mo de texte (curl/curl : 2 225 fichiers, 3 s). Vérifié le 5
+  septembre de bout en bout par le pilote du serveur de debug
+  ([03](03-knowledge-dump-baselines-tests-outils.md) §7 bis). Reste : les
+  tarballs `golang` / `godot` / `linux-2.6.0` si on les veut sur la page,
+  et le texte de vitrine.
 - [ ] **Mesurer 2k et 10k** dans le navigateur (temps, mémoire) pour avoir
   un palier intermédiaire à 30-40 s.
 - [ ] **Le chiffre de vitrine** : « 15 440 fichiers du noyau indexés dans
@@ -485,5 +489,19 @@ les fichiers de l'index (segments et dictionnaire), pas les documents.
 - La DFS de fratrie (recherche global → local à chaque pas).
 - `index_bytes`, `preload`, `residency` ignorent les `dict-*`.
 - Le sigma grec final dans `starts_with_ci`.
-- Décisions : version 4.0.0 ; pile v2 ; fusionner `wip/publication-3.0.0`
+- **Version 4.0.0 — décidé le 5 septembre, avec un prérequis.** Le majeur
+  se justifie par le contrat sur le disque : un binaire v4 lit un index
+  3.0.x (chaque lecteur ouvre les anciens layouts, tests unitaires par
+  layout), mais un binaire 3.0.x **ne lit pas** un index v4 (conteneur 8,
+  ordinaux 28 bits, tables par blocs, PMP3, SIB3, layout 3), et le premier
+  commit ou la première fusion en v4 dans un index 3.0.x le convertit sans
+  retour. Prérequis avant le numéro : un **test de compatibilité de bout
+  en bout** — un petit index construit par la 3.0.8 publiée (le wheel
+  PyPI), gardé en fixture, ouvert par le binaire v4 : mêmes comptes et
+  spans sur un panel, puis un commit dessus et la vérité toujours juste
+  après conversion. Et la ligne du CHANGELOG : « 4.0 ouvre vos index
+  3.0.x ; 3.0.x n'ouvre pas les index 4.0 ; le premier commit en 4.0
+  convertit sans retour ». Leçon de `sparse.mmap` en 3.0.6 : plus de
+  changement de format en mineur.
+- Décisions restantes : pile v2 ; fusionner `wip/publication-3.0.0`
   dans `main` ; tri stable des ex æquo dans le merge des shards.

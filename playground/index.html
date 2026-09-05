@@ -2776,20 +2776,130 @@ const KERNEL_SEARCHES = [
     query: { type: 'contains', field: 'content', value: 'spin_lock_[a-z]+', regex: true } },
 ];
 const EXTRA_CORPORA = {
-  mdn: { file: 'corpus-mdn.tar.gz', path: '/mdn_index', title: 'MDN Web Docs', pages: '14 900 pages', download: '14 MB', eta: 'about 15 s',
+  mdn: { key: 'mdn', file: 'corpus-mdn.tar.gz', path: '/mdn_index', title: 'MDN Web Docs', pages: '14 900 pages', download: '14 MB', eta: 'about 15 s',
     credit: 'MDN Web Docs content by Mozilla Contributors, CC-BY-SA 2.5 — github.com/mdn/content', searches: MDN_SEARCHES },
-  kernel: { file: 'corpus-kernel-16k.tar.gz', path: '/kernel_index', title: 'Linux kernel', pages: '15 440 source files', download: '49 MB', eta: 'about a minute',
+  kernel: { key: 'kernel', file: 'corpus-kernel-16k.tar.gz', path: '/kernel_index', title: 'Linux kernel', pages: '15 440 source files', download: '49 MB', eta: 'about a minute',
     credit: 'Linux kernel sources, GPL-2.0 — kernel.org', searches: KERNEL_SEARCHES },
 };
+// A bundled corpus: one archive served next to the page.
+for (const c of Object.values(EXTRA_CORPORA)) {
+  c.fetchFiles = async (onProgress) => {
+    const resp = await fetch(`./${c.file}`, { cache: 'no-cache' });
+    if (!resp.ok) throw new Error(`${c.file} is not served here (${resp.status}); docs/05-09-2026/04 says how it is built`);
+    const blob = await readWithProgress(resp, onProgress);
+    return { files: tarballToFiles(await extractTarGz(blob)), bytes: blob.size, what: c.file };
+  };
+}
+// Above this much text a tab is not going to hold the index: 15 440 kernel
+// files are 217 MB of text and 1.8 GB in memory, in a 4 GB address space
+// of which indexing itself takes 1.5 GB.
+const MAX_CORPUS_TEXT_BYTES = 220 * 1024 * 1024;
 
-async function indexCorpusDemo(key) {
-  const c = EXTRA_CORPORA[key];
-  if (!c) throw new Error(`unknown corpus "${key}" — try: index mdn, index kernel`);
+// `index github owner/repo[@branch]`, or a github.com URL: the repository
+// through the CORS proxy (the playground's "clone your own repository"),
+// indexed under its own OPFS directory like the bundled corpora.
+function githubCorpus(spec) {
+  let m = spec.match(/^https?:\/\/github\.com\/([^\/\s]+)\/([^\/\s#?]+)(?:\/tree\/([^\/\s#?]+))?/i)
+       || spec.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?(?:@([\w.\/-]+))?$/);
+  if (!m) throw new Error(`cannot read "${spec}" — try: index github owner/repo, owner/repo@branch, or a github.com URL`);
+  const owner = m[1], repo = m[2], branch = m[3] || 'main';
+  const key = `gh:${owner}/${repo}`;
+  const path = `/gh_${owner}_${repo}`.replace(/[^A-Za-z0-9_\/-]/g, '_');
+  return {
+    key, path, title: `${owner}/${repo}@${branch}`, pages: 'its text files of 100 KB at most', download: 'the repository tarball', eta: 'a few seconds per thousand files',
+    credit: `github.com/${owner}/${repo} — the repository's own licence applies`, searches: [],
+    fetchFiles: async (onProgress) => {
+      const files = await downloadRepoTarball(owner, repo, branch, onProgress);
+      return { files, bytes: 0, what: `${owner}/${repo}@${branch}` };
+    },
+  };
+}
+
+// What this browser holds (localStorage, keyed like the commands): the
+// OPFS directories themselves are the truth, this is the friendly view.
+function corpusRegistry() {
+  try { return JSON.parse(localStorage.getItem('lucivy_corpora') || '{}'); } catch { return {}; }
+}
+function rememberCorpus(c, docs) {
+  const reg = corpusRegistry();
+  reg[c.key] = { path: c.path, title: c.title, docs, when: new Date().toISOString().slice(0, 10), credit: c.credit || '' };
+  try { localStorage.setItem('lucivy_corpora', JSON.stringify(reg)); } catch { /* private window */ }
+}
+function forgetCorpus(key) {
+  const reg = corpusRegistry(); delete reg[key];
+  try { localStorage.setItem('lucivy_corpora', JSON.stringify(reg)); } catch { /* private window */ }
+}
+// The OPFS directory of an index path (`/mdn_index` → `lucivy/mdn_index`).
+async function opfsIndexDir(path, create = false) {
+  const root = await navigator.storage.getDirectory();
+  const base = await root.getDirectoryHandle('lucivy', { create });
+  return base.getDirectoryHandle(path.replace(/^\/+/, ''), { create });
+}
+async function opfsDirBytes(dir) {
+  let total = 0;
+  for await (const [, h] of dir.entries()) {
+    if (h.kind === 'file') total += (await h.getFile()).size;
+    else total += await opfsDirBytes(h);
+  }
+  return total;
+}
+async function opfsIndexBytes(path) {
+  try { return await opfsDirBytes(await opfsIndexDir(path)); } catch { return null; }
+}
+async function opfsRemoveIndex(path) {
+  const root = await navigator.storage.getDirectory();
+  const base = await root.getDirectoryHandle('lucivy');
+  await base.removeEntry(path.replace(/^\/+/, ''), { recursive: true });
+}
+
+// `index list`: the corpora this browser holds, the open one marked.
+async function listCorpora() {
+  const reg = corpusRegistry();
+  if (demoIndex && demoIndex.path === DEMO_REPO.path && !reg.lucivy) {
+    reg.lucivy = { path: DEMO_REPO.path, title: `${DEMO_REPO.owner}/${DEMO_REPO.repo} (the demo)`, docs: demoNumDocs, when: '' };
+  }
+  const keys = Object.keys(reg);
+  if (!keys.length) { term.out('▸ nothing indexed in this browser yet — try: index mdn', 'dim'); return; }
+  const mb = (n) => `${(n / 1048576).toFixed(0)} MB`;
+  for (const key of keys) {
+    const e = reg[key];
+    const bytes = await opfsIndexBytes(e.path);
+    const open = demoIndex && demoIndex.path === e.path ? '  <b>← open, in memory</b>' : '';
+    term.add(`▸ <span class="flag">${escapeHtml(key)}</span>  ${escapeHtml(e.title)} — ${e.docs} documents, ${bytes === null ? 'not in storage any more' : mb(bytes) + ' in this browser\'s storage'}${e.when ? ', indexed ' + e.when : ''}${open}`, bytes === null ? 'dim' : '');
+  }
+  term.out('▸ open <name> reopens one (seconds), drop <name> deletes it from storage, index github owner/repo adds a repository', 'dim');
+}
+
+// `drop <name>`: close it if it is the open one, delete its OPFS directory.
+async function dropCorpus(key) {
+  const reg = corpusRegistry();
+  const e = reg[key] || (EXTRA_CORPORA[key] ? { path: EXTRA_CORPORA[key].path, title: EXTRA_CORPORA[key].title } : null);
+  if (!e) throw new Error(`nothing called "${key}" here — index list shows what there is`);
+  if (demoIndex && demoIndex.path === e.path) {
+    await demoIndex.close().catch(() => {});
+    demoIndex = null; demoNumDocs = 0;
+  }
+  const bytes = await opfsIndexBytes(e.path);
+  await opfsRemoveIndex(e.path).catch(() => {});
+  forgetCorpus(key);
+  term.out(`▸ ${e.title} dropped${bytes ? ` — ${(bytes / 1048576).toFixed(0)} MB freed` : ''}${demoIndex ? '' : '; nothing is open now — index mdn, or Replay the demo'}`, 'ok');
+}
+
+async function indexCorpusDemo(c, { openOnly = false } = {}) {
+  if (typeof c === 'string') {
+    const key = c;
+    c = EXTRA_CORPORA[key];
+    if (!c) {
+      const e = corpusRegistry()[key];
+      if (!e) throw new Error(`unknown corpus "${key}" — index list shows what is here; index mdn, index kernel, index github owner/repo add one`);
+      c = { key, path: e.path, title: e.title, pages: `${e.docs} documents`, download: '', eta: '', credit: e.credit, searches: [], fetchFiles: null };
+    }
+  }
   if (demoRunning) return;
   demoRunning = true; demoSkip = false; btnSkip.hidden = false;
   try {
     await startupDone;
-    term.out(`▸ ${c.title}: ${c.pages}, ${c.download} to download, ${c.eta} to index — kept in this browser's storage, reopened in seconds next time`, 'dim');
+    if (!openOnly) term.out(`▸ ${c.title}: ${c.pages}${c.download ? `, ${c.download} to download` : ''}${c.eta ? `, ${c.eta} to index` : ''} — kept in this browser's storage, reopened in seconds next time`, 'dim');
     let index = null, numDocs = 0;
     const t0 = performance.now();
     // Already the open index (typed a second time): reuse it. Opening the
@@ -2811,15 +2921,22 @@ async function indexCorpusDemo(key) {
         await existing.close().catch(() => {});
       }
     }
+    if (!index && (openOnly || !c.fetchFiles)) {
+      throw new Error(`${c.title} is not in this browser's storage any more — index it again`);
+    }
     if (!index) {
       const mb = (n) => (n / 1048576).toFixed(1);
-      const line = term.add(`▸ downloading ${escapeHtml(c.file)}…`, 'dim');
-      const resp = await fetch(`./${c.file}`, { cache: 'no-cache' });
-      if (!resp.ok) throw new Error(`${c.file} is not served here (${resp.status}); docs/05-09-2026/04 says how it is built`);
-      const blob = await readWithProgress(resp, (r, t) => term.set(line, `▸ downloading ${escapeHtml(c.file)}… ${mb(r)} MB${t ? ` / ${mb(t)} MB` : ''}`));
-      const files = tarballToFiles(await extractTarGz(blob));
+      const what = c.file || c.title;
+      const line = term.add(`▸ downloading ${escapeHtml(what)}…`, 'dim');
+      const got = await c.fetchFiles((r, t) => term.set(line, `▸ downloading ${escapeHtml(what)}… ${mb(r)} MB${t ? ` / ${mb(t)} MB` : ''}`));
+      const files = got.files;
       if (!files.length) throw new Error('no text files in the archive');
-      term.set(line, `▸ ${escapeHtml(c.file)} downloaded: ${files.length} text files (${mb(blob.size)} MB compressed)`);
+      const textBytes = files.reduce((n, f) => n + f.content.length, 0);
+      term.set(line, `▸ ${escapeHtml(got.what)} downloaded: ${files.length} text files, ${mb(textBytes)} MB of text${got.bytes ? ` (${mb(got.bytes)} MB compressed)` : ''}`);
+      // Honest refusal rather than a tab that dies at 4 GB.
+      if (textBytes > MAX_CORPUS_TEXT_BYTES) {
+        throw new Error(`${mb(textBytes)} MB of text is more than this tab can hold (about ${mb(MAX_CORPUS_TEXT_BYTES)} MB, some 1.8 GB of index in a 4 GB address space) — pick a smaller repository or branch`);
+      }
       if (demoIndex) { await demoIndex.close().catch(() => {}); demoIndex = null; }
       progressTotal = files.length;
       await term.cmd(`lucivy index ${c.path}`, true);
@@ -2841,8 +2958,10 @@ async function indexCorpusDemo(key) {
     if (c.credit) term.out(`▸ ${c.credit}`, 'dim');
     if (demoIndex && demoIndex !== index && demoIndex.path !== index.path) await demoIndex.close().catch(() => {});
     demoIndex = index; demoNumDocs = numDocs;
+    rememberCorpus(c, numDocs);
     if (tabDemoCount) tabDemoCount.textContent = `(${numDocs})`;
     for (const entry of c.searches) await runDemoSearch(entry);
+    if (!c.searches.length) term.out(`▸ ${c.title} is the open index: search it — a substring, --fuzzy 1 "…", --regex "…", --help`, 'dim');
   } finally {
     demoLive = false; demoRunning = false; btnSkip.hidden = true;
   }
@@ -2920,6 +3039,8 @@ function printHelp() {
   const rows = [
     ['usage', `lucivy search [options] ${q('"value"')}  — quotes are optional unless the value has spaces`],
     [f('index mdn'), `index all of MDN Web Docs here (14 900 pages, 14 MB, about 15 s) and search it; ${f('index kernel')}: 15 440 Linux kernel files (49 MB, about a minute)`],
+    [f('index github owner/repo'), `index a repository (${q('owner/repo@branch')} or a github.com URL) through the proxy — up to about 200 MB of text, what a tab holds`],
+    [f('index list'), `what this browser holds; ${f('open <name>')} reopens one in seconds, ${f('drop <name>')} deletes it from storage`],
     ['(none)', `substring anywhere, across tokens, separators relaxed (${q('"suffixfst"')} finds suffix_fst and "suffix FST")`],
     [f('--fuzzy N'), `up to N edits (Levenshtein), candidates by trigram pigeonhole, verified on the text — ${q('--fuzzy 2 "trigam pigeonhol"')}`],
     [f('--jw [S]'), `with fuzzy: rank and keep by Jaro-Winkler similarity ≥ S (default 0.9); a typo at the end of a word ranks above one at its start — ${q('--fuzzy 1 --jw "ShardedHandel"')}`],
@@ -2941,7 +3062,7 @@ function printHelp() {
 function openPrompt(hint) {
   if (hint) {
     term.add(`▸ your turn: type a query and press Enter — <span class="flag">--help</span> lists the options (<span class="flag">--fuzzy N</span> <span class="flag">--jw</span> <span class="flag">--regex</span> <span class="flag">--phrase</span> <span class="flag">--prefix</span> <span class="flag">--exact</span> <span class="flag">--strict</span> <span class="flag">--allowed N</span> <span class="flag">--limit N</span>, AND / OR / NOT)`, 'dim');
-    term.add(`▸ or index a bigger corpus right here: <span class="flag">index mdn</span> — all of MDN Web Docs, 14 900 pages, 14 MB, about 15 s — or <span class="flag">index kernel</span> — 15 440 Linux kernel files, 49 MB, about a minute; then search it the same way`, 'dim');
+    term.add(`▸ or index a bigger corpus right here: <span class="flag">index mdn</span> — all of MDN Web Docs, 14 900 pages, 14 MB, about 15 s — <span class="flag">index kernel</span> — 15 440 Linux kernel files, 49 MB, about a minute — or <span class="flag">index github owner/repo</span>; what you index stays in this browser (<span class="flag">index list</span>, <span class="flag">open</span>, <span class="flag">drop</span>)`, 'dim');
   }
   const line = term.add(`<span class="prompt">$</span> <span class="cmd">${escapeHtml(PROMPT_PREFIX)}</span>`);
   const input = document.createElement('input');
@@ -2972,18 +3093,34 @@ function openPrompt(hint) {
       line.innerHTML = '';
       line.appendChild(Object.assign(document.createElement('span'), { className: 'prompt', textContent: '$' }));
       line.appendChild(document.createTextNode(' '));
-      const corpus = text.match(/^(?:index\s+)?(mdn|kernel|linux)$/i);
-      const corpusKey = corpus ? (corpus[1].toLowerCase() === 'linux' ? 'kernel' : corpus[1].toLowerCase()) : null;
+      // Corpus commands typed at the search prompt: `index <name>`, `index
+      // github owner/repo`, `index list`, `open <name>`, `drop <name>`.
+      let command = null;
+      let cm;
+      if ((cm = text.match(/^(?:lucivy\s+)?(index|open|drop)\s+(.+)$/i))) {
+        command = { verb: cm[1].toLowerCase(), arg: cm[2].trim() };
+      } else if ((cm = text.match(/^(mdn|kernel|linux)$/i))) {
+        command = { verb: 'index', arg: cm[1].toLowerCase() };
+      }
+      if (command && command.arg.toLowerCase() === 'linux') command.arg = 'kernel';
+      const shown = command ? `lucivy ${command.verb} ${command.arg}` : PROMPT_PREFIX + text;
       const cmd = document.createElement('span'); cmd.className = 'cmd';
-      cmd.innerHTML = escapeHtml(corpusKey ? `lucivy index ${corpusKey}` : PROMPT_PREFIX + text)
+      cmd.innerHTML = escapeHtml(shown)
         .replace(/(--[a-z]+(?:\s+\d+(?:\.\d+)?)?)/g, '<span class="flag">$1</span>')
         .replace(/(&quot;(?:(?!&quot;).)*&quot;)/g, '<span class="str">$1</span>');
       line.appendChild(cmd);
       promptInput = null;
-      const entry = corpusKey ? null : parseSearchCommand(text);
-      if (corpusKey) {
-        try { await indexCorpusDemo(corpusKey); }
-        catch (err) { term.out('✗ ' + err.message, 'err'); }
+      const entry = command ? null : parseSearchCommand(text);
+      if (command) {
+        try {
+          const a = command.arg;
+          if (command.verb === 'drop') await dropCorpus(a);
+          else if (command.verb === 'open') await indexCorpusDemo(a, { openOnly: true });
+          else if (/^list$/i.test(a)) await listCorpora();
+          else if (/^(github|gh)\s+/i.test(a)) await indexCorpusDemo(githubCorpus(a.replace(/^(github|gh)\s+/i, '')));
+          else if (/github\.com\//i.test(a)) await indexCorpusDemo(githubCorpus(a));
+          else await indexCorpusDemo(a);
+        } catch (err) { term.out('✗ ' + err.message, 'err'); }
       } else if (entry && entry.help) {
         printHelp();
       } else if (!entry) {

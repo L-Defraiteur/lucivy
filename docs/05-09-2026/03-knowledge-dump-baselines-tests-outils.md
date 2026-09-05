@@ -279,6 +279,24 @@ sleep 3; curl -s localhost:9877/eval/main -d '{"js":"window._fz"}'
 #   … 1 s plus tard : document.getElementById('resultsHeader').textContent
 ```
 
+**Les règles de `/eval/main`, apprises à la dure le 5 septembre** : (1) le
+résultat revient **toujours en chaîne** (`{"result":"true"}`, `"2"`,
+`"[…]"`) — comparer à `'true'`, `json.loads` pour un objet ; une attente
+qui compare à un booléen boucle sans fin ; (2) chaque appel coûte ~1 s (la
+page interroge le serveur toutes les secondes) et est coupé à 30 s (`error:
+"timeout"`) — tout travail plus long part dans une IIFE `async` qui pose
+son résultat dans `window._x`, qu'on interroge ensuite ; (3) le corps est
+du JSON `{"js": …}` : construire avec `json.dumps` (Python, `urllib`) plutôt
+qu'à la main dans le shell, où les guillemets se perdent ; (4) piloter le
+terminal de la démo = poser `.term-input.value` et dispatcher un
+`KeyboardEvent('keydown', {key: 'Enter', bubbles: true})`, puis relire
+`[...document.querySelectorAll('.term-line')].map(l => l.textContent)`. Le
+pilote du jour, `term-drive.py` (scratchpad) : `python3 -u term-drive.py
+"index list" "sleep 5" "open mdn" "sleep 15" 'lines $ lucivy index list'`
+— chaque argument est une commande du terminal, `sleep N`, ou `lines <préfixe>`
+qui imprime le terminal depuis cette ligne ; il attend le prompt avant
+chaque envoi (`!!document.querySelector('.term-input')` → `'true'`).
+
 `window._playground` expose `search(query, opts)`, `memoryStatus()`,
 `numDocs()`, `doSearch`, `buildQuery`. Le 5 septembre le panel a servi à
 comparer dictionnaire et v3 sur 15 440 fichiers (mêmes comptes, même ordre
@@ -357,3 +375,12 @@ non compacté) et `~/lucivy_bench/lucivy_bench_sharding/single` (11 Go,
   ne la trouve pas, `grep count` oui. Et `pkill -f <script>` tue aussi le
   shell qui porte le nom du script dans sa ligne de commande.
 - `?verbose` inonde `diag.log` de lignes `[fs]` : filtrer par `grep`.
+- `for p in $(pgrep -f motif); do kill $p; done` tue aussi le shell qui
+  porte `motif` dans sa ligne de commande (deux fois le 5 septembre, code
+  144) : filtrer sur le nom du programme, ou ne pas tuer.
+- Le terminal de la démo accepte au prompt `index mdn` / `index kernel`
+  (corpus servis à côté de la page, `playground/corpus-*.tar.gz`, ignorés
+  par git), `index github owner/repo[@branch]` (par le proxy, refusé
+  au-delà de ~220 Mo de texte), `index list`, `open <nom>`, `drop <nom>` ;
+  l'index ouvert vit en RAM, les autres en OPFS (`lucivy/<chemin>`),
+  registre `localStorage.lucivy_corpora`.
