@@ -184,8 +184,14 @@ Inchangé depuis [02](02-architecture.md) §6 ter (résidence, `preload` qui
 attend les fusions, `memory_status` et `heap_bytes`, plancher de 1,5 Go en
 indexation, 4 Go d'adresses). `derived_in_ram` y est accepté par
 `IndexConfig` (typé dans `lucivy.d.ts`) ; le playground le prend par `?ram`.
-Non mesuré sur les 15 440 fichiers du noyau : temps d'ouverture depuis
-l'OPFS et pic mémoire avec l'option.
+Mesuré sur le noyau (15 429 fichiers) et MDN ([04](04-progression-et-a-faire.md)
+§2 ter) : −26 % / −23 % d'OPFS, réouverture + `preload` égaux (le rebâti
+coûte 1 s, le `preload` en rend 1,4), requêtes égales, mais **pic mémoire
++524 Mo à l'indexation du noyau (3 859 Mo) et +252 au repos** — les
+temporaires du rebâti (postings décodés par segment, en parallèle) dans
+une mémoire linéaire qui ne redescend jamais. Option du playground, pas
+la vitrine ; pour la rendre viable dans un onglet il faudrait borner le
+rebâti (un segment à la fois par shard, ou en flux).
 
 ## 9. Ce que je ne peux pas affirmer
 

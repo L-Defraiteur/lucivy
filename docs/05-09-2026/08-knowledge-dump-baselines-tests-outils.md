@@ -128,6 +128,31 @@ premier caractère non ASCII. Attendre `numDocs() > 0` en boucle avant de
 chercher. Les règles du serveur de debug (`/eval/main`) sont dans
 [03](03-knowledge-dump-baselines-tests-outils.md) §7 bis.
 
+Piloter le terminal du playground depuis `javascript_tool` : le script de
+la page est un module, ses fonctions ne sont pas atteignables ; attendre
+`document.querySelector('.term-input')` (le prompt n'existe qu'après la
+démo, ~17 s ; pas avec `?nodemo`), poser `value` (`index kernel`, `open
+kernel`, `drop kernel`, `index mdn`…) et envoyer un `KeyboardEvent`
+`keydown` `Enter`. Lire les réponses dans
+`document.querySelector('.prompt').closest('[id]').innerText` (« reopened
+in X s », « its N index files … loaded in X s », « N hits … X ms ») —
+**filtrer et assainir la sortie** (garder `[A-Za-z0-9 .,:;()_-]`) : l'outil
+bloque toute réponse qui ressemble à une query string ou à un cookie, et
+le `innerText` de la page en contient. Un `await` de plus de 45 s dans
+l'outil échoue (« timed out ») : attendre par tranches de 30 s. Pic
+mémoire : `_playground.memoryStatus().heap_bytes` (taille de la mémoire
+linéaire, ne redescend jamais) avant et après. Taille OPFS : parcourir
+`navigator.storage.getDirectory()` → `lucivy/<path>/shard_*`.
+
+Baselines navigateur (dictionnaire, 4 shards, `index kernel` 15 429
+fichiers / `index mdn` 14 629 pages, [04](04-progression-et-a-faire.md)
+§2 ter) : noyau 41 s, OPFS 1 571 Mo, pic 3 335 Mo, réouverture 1,7 s +
+`preload` 3,9 s, mémoire 2 803 Mo ouvert ; avec `?ram` 40 s, 1 159 Mo,
+**pic 3 859**, 2,7 + 2,5 s, 3 055 Mo. MDN 14 s, 478 Mo, pic 1 646,
+0,8 + 2,2 s ; avec `?ram` 14 s, 369 Mo, pic 1 906, 1,3 + 1,5 s. Panel
+noyau après ouverture : strict 71-80 ms, relâché 20-23, fuzzy 1 43, regex
+164-172.
+
 ---
 
 ## 8. La fixture 3.0.8

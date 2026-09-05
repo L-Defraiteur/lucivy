@@ -350,7 +350,11 @@ anciens layouts lus, leurs spans encore servis), **option `derived_in_ram`**
 octet depuis les postings **à l'ouverture** des lecteurs de segments, en
 parallèle, cache par segment sur l'`Index` — `suffix_fst/derived.rs` ;
 noyau **3 344 Mo, ×3,9 le texte**, l'ouverture paie, jamais une requête ;
-structures résidentes ; jamais le défaut) ;
+structures résidentes ; jamais le défaut ; **dans le navigateur, mesuré
+tard le 5** : OPFS −26 % sur le noyau et −23 % sur MDN, temps avant service
+et requêtes égaux, mais pic mémoire +524 Mo à l'indexation du noyau
+(3 859 Mo sur 4 096) et +252 au repos — option du playground `?ram`, pas la
+vitrine ; `docs/05-09-2026/04` §2 ter) ;
 **`sfx_version` 4 = dictionnaire partagé par shard**
 (`dict-<g>.<champ>.sfx/.termtexts`, `.gmap` par segment — `GMP2` depuis le
 5 au soir : têtes de blocs de 64 + statistique « mots longs » du segment,

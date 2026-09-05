@@ -154,10 +154,14 @@ titre qui dit ce que c'est (`f26c1d7`).
 - **La vitrine** ([04](04-progression-et-a-faire.md) §2 bis) : texte de la
   page pour le second acte (MDN), tarballs `golang`/`godot`/`linux-2.6.0` si
   voulus, déploiement des corpus ignorés par git.
-- **Le navigateur** : sur les 15 440 fichiers du noyau, temps d'ouverture
-  depuis l'OPFS et pic mémoire avec `?ram` ; le plancher de 1,5 Go de
-  l'indexation ; les seuils (`LUCIVY_RAM_INDEX_MAX`, rechargement à 2 Go)
-  calibrés sur des index 40 % plus gros.
+- **Le navigateur** : `?ram` **mesuré** (plus tard le 5, [04](04-progression-et-a-faire.md)
+  §2 ter) sur le noyau (15 429 fichiers) et MDN : OPFS −26 % / −23 %,
+  temps avant service égal, requêtes égales, **mais pic mémoire +524 Mo
+  à l'indexation du noyau (3 859 Mo sur 4 096) et +252 au repos** — les
+  temporaires du rebâti dans une mémoire qui ne redescend pas. Reste
+  option du playground, pas la vitrine. Restent : le plancher de 1,5 Go
+  de l'indexation ; les seuils (`LUCIVY_RAM_INDEX_MAX`, rechargement à
+  2 Go) calibrés sur des index 40 % plus gros.
 - La regex à ×1,6 en dictionnaire ; `index_bytes` / `preload` / `residency`
   et les `dict-*` ; la DFS de fratrie ; le sigma grec final.
 - Décisions : pile v2, `wip/publication-3.0.0` dans `main`, tri stable des

@@ -591,9 +591,47 @@ playground (`?ram`). Vérifié dans Chrome (`?dict&ram`, démo de 1 171
 fichiers) : spans exacts sur strict, relâché, fuzzy et regex ; 12 segments
 `.sfxpost` sans aucun `.posmap` / `.word_pos_map` / `.sibling_v3` à côté
 dans l'OPFS ; `index_bytes` 94 Mo (les dérivés rebâtis vivent en mémoire,
-pas dans ce compte) ; pic WASM 1 650 Mo, le plancher habituel. Reste à
-mesurer sur les 15 440 fichiers du noyau : le temps d'ouverture depuis
-l'OPFS et le pic avec l'option.
+pas dans ce compte) ; pic WASM 1 650 Mo, le plancher habituel.
+
+**Mesuré dans Chrome sur le noyau et sur MDN** (tard le 5 septembre, même
+build WASM, dictionnaire, 4 shards, commandes `index kernel` / `index mdn`
+du terminal, page rechargée entre l'indexation et chaque réouverture,
+`heap_bytes` = taille de la mémoire linéaire, qui ne redescend jamais) :
+
+| noyau, 15 429 fichiers | fichiers écrits | `?ram` |
+|---|---|---|
+| indexation | 41 s | 40 s |
+| pic mémoire pendant l'indexation | 3 335 Mo (départ 1 518) | **3 859 Mo** (départ 1 646) |
+| index dans l'OPFS | 1 571 Mo, 2 056 fichiers (666 dérivés, 411 Mo) | **1 159 Mo**, 1 406 fichiers (−26 %) |
+| réouverture (`openDirect`) | 1,6-1,7 s | 2,6-2,7 s |
+| `preload` | 3,8-4,0 s (2 042 fichiers) | 2,5-2,6 s (1 392 fichiers) |
+| avant service, total | 5,4-5,7 s | 5,1-5,3 s |
+| mémoire après ouverture + preload | 2 803 Mo | **3 055 Mo** |
+| panel strict / relâché / fuzzy 1 / regex | 71-80 / 20-23 / 43 / 164-172 ms | 54-59 / 24-28 / 42-44 / 170-174 ms |
+
+| MDN, 14 629 pages | fichiers écrits | `?ram` |
+|---|---|---|
+| indexation | 14 s | 14 s |
+| pic mémoire pendant l'indexation | 1 646 Mo | **1 906 Mo** |
+| index dans l'OPFS | 478 Mo (288 dérivés, 109 Mo) | **369 Mo** (−23 %) |
+| réouverture + `preload` | 0,8 + 2,2 s | 1,3 + 1,5 s |
+| mémoire après ouverture | 1 522 Mo (dans le plancher) | 1 518 Mo (idem) |
+
+Ce que ça dit : l'option tient sa promesse sur le stockage (−23 à −26 %
+d'OPFS, le tiers des fichiers en moins), le temps avant service ne bouge
+pas (le rebâti à l'ouverture coûte 1 s, le `preload` en rend 1,4 parce
+qu'il a moins à lire), les requêtes sont les mêmes — mais **le pic mémoire
+monte** : +524 Mo pendant l'indexation du noyau (3 859 Mo dans un onglet
+qui en a 4 096, trop près), +252 Mo au repos une fois le noyau ouvert,
++260 Mo pendant l'indexation de MDN. Ce ne sont pas les dérivés eux-mêmes
+(411 Mo pour le noyau, 109 pour MDN, et sans l'option le `preload` les
+charge aussi) : ce sont les **temporaires du rebâti** — les postings de
+chaque segment décodés en vecteurs, plusieurs segments à la fois, à
+chaque rechargement des lecteurs pendant l'indexation — dans une mémoire
+linéaire qui ne redescend jamais. **Décision** : `?ram` reste une option
+du playground, pas la vitrine ; pour le noyau dans un onglet, les fichiers
+écrits. Si on la veut un jour dans le navigateur : borner le rebâti (un
+segment à la fois par shard, ou en flux) et remesurer le pic.
 
 ## 2 quater. La fuzzy d2 : une étape à risque, un checkpoint avant
 
