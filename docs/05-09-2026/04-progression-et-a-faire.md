@@ -1076,9 +1076,10 @@ d'un côté, « two » de l'autre (c'est deux) ; le tableau navigateur/natif
 annonçait « identical counts and spans » sur 13 806 contre 14 032 fichiers
 (reformulé : natif vérifié contre le balayage de *ses* fichiers, navigateur =
 temps de l'onglet, comptes non comparés) ; la commande de reproduction clone
-l'arbre du jour (ajout : instantané de début septembre, 93 983 fichiers,
-épingler le commit, la promesse qui ne bouge pas est l'accord avec le balayage
-de *vos* fichiers) ; « inexpressible » pour Elasticsearch (→ « not with this
+l'arbre du jour (corrigé : l'instantané est **Linux 7.2** — `Makefile`
+7.2.0 « Baby Opossum Posse », copié le 28 août, Lucie a rappelé qu'il datait
+d'avant septembre — la commande clone `--branch v7.2`, et la promesse qui ne
+bouge pas est l'accord avec le balayage de *vos* fichiers) ; « inexpressible » pour Elasticsearch (→ « not with this
 analyzer », dans le README, ARCHITECTURE, la page, le rapport et le script).
 Et le disclaimer demandé par Lucie après le comparatif, avec l'angle qu'elle
 voulait : un autre analyseur peut se rapprocher au prix de le concevoir, le

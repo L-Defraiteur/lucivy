@@ -300,17 +300,16 @@ Reproduce it — the harness builds the index, runs the panel and the reference
 scan, and fails if any count or span disagrees:
 
 ```bash
-git clone --depth=1 https://github.com/torvalds/linux /tmp/linux-bench
+git clone --depth=1 --branch v7.2 https://github.com/torvalds/linux /tmp/linux-bench
 V3_CORPUS=/tmp/linux-bench V3_SFX_VERSION=4 cargo test --release -p lucivy-core \
     --test test_sfx_v3_ground_truth v3_ground_truth_demo -- --ignored --nocapture
 ```
 
-The kernel tree moves: the numbers above come from a snapshot of early
-September 2026 (93 983 text files after the harness's filter), so counts and
-sizes will drift with the tree you clone — pin the commit you measure
-(`git -C /tmp/linux-bench checkout <sha>`) and the harness will still fail on
-any disagreement between its counts and the scan of *your* files, which is the
-claim that does not move.
+The numbers above come from a tree at **Linux 7.2** (`Makefile`: 7.2.0,
+"Baby Opossum Posse"; copied on 28 August 2026, so at the release tag or a few
+commits after it): 93 983 text files after the harness's filter. Another tree
+gives other counts; what does not move is the claim itself — the harness fails
+on any disagreement between its counts and spans and the scan of *your* files.
 
 5 September 2026 (4.0.0, branch `v4`), four shards, shared dictionary, idle
 machine: Intel Core Ultra 7 270K Plus (24 cores), 93 GB RAM, NVMe, Linux 7.2.
