@@ -1,4 +1,4 @@
-# lucivy 4.0.0
+# lucivy 4.0.1
 
 Full-text search for code and technical text, as a library — from Python. Substrings, fuzzy and regex **across token boundaries**, BM25, exact byte spans, every answer checked against the files. Runs in your process, in your transaction (bring your own storage), and the same engine runs in the browser. Powered by Rust, MIT.
 
@@ -32,7 +32,7 @@ Full-text search for code and technical text, as a library — from Python. Subs
 ## Install
 
 ```bash
-pip install lucivy  # 4.0.0
+pip install lucivy  # 4.0.1
 ```
 
 ## Quick start

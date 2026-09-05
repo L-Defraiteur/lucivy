@@ -1,3 +1,17 @@
+Lucivy 4.0.1 — 6 September 2026
+================================
+
+The 4.0.0 engine, republished honestly. The `v4.0.0` tag was pushed while
+the CI of the same commit was red: `clippy -D warnings` (doc comments
+missing on the new indexing counters, a needless `mut`, two `let … else`
+that `?` writes better, an `IndexSettings` filled after `default()`) and
+the lib tests compiled without the default features (a compaction bench
+opened a `MmapDirectory` without the `mmap` feature guard). Nothing of that
+touched what 4.0.0 does; all of it is fixed here, and `release.yml` now has
+a `checks` job — clippy, the lib tests with and without default features,
+`lucivy-core`, `lucivy-cpp` — that every publish job depends on: a red CI
+no longer publishes.
+
 Lucivy 4.0.0 — 6 September 2026
 ================================
 

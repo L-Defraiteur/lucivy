@@ -1,6 +1,6 @@
 {
   "name": "lucivy-darwin-arm64",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "description": "lucivy prebuilt addon for darwin-arm64 \u2014 installed automatically by the lucivy package",
   "main": "lucivy.darwin-arm64.node",
   "files": [

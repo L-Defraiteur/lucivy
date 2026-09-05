@@ -1,4 +1,4 @@
-# lucivy-wasm 4.0.0
+# lucivy-wasm 4.0.1
 
 Full-text search for code and technical text, in the browser. Substrings, fuzzy and regex **across token boundaries**, BM25, exact byte spans, every answer checked against the files — the same engine as the native bindings, built with emscripten: **threads** (pthreads over SharedArrayBuffer), OPFS persistence, snapshot import. Runs in a Web Worker. MIT.
 
