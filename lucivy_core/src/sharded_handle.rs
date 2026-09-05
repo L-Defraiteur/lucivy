@@ -1496,7 +1496,7 @@ pub struct ShardedHandle {
     /// Text field IDs (for tokenization at add_document).
     text_fields: Vec<Field>,
     /// On-disk bytes per shard, keyed by its segment list (see `shard_bytes`).
-    shard_bytes_cache: Mutex<std::collections::HashMap<usize, (Vec<(String, u32)>, u64)>>,
+    shard_bytes_cache: Mutex<std::collections::HashMap<usize, (Vec<(String, u32)>, u64, usize, usize)>>,
     /// A served snapshot (`open_snapshot`): nothing may be written, and
     /// `close()` has nothing to commit or persist — it only stops the actors.
     read_only: bool,
@@ -2498,40 +2498,51 @@ impl ShardedHandle {
     /// the shard's segment list, so a commit or a merge invalidates it.
     /// Bytes of a shard, and whether every file its metas name could be read.
     fn shard_bytes_checked(&self, shard: usize) -> (u64, bool) {
-        let Some(h) = self.shards.get(shard) else { return (0, true) };
-        let Ok(metas) = h.index.searchable_segment_metas() else { return (0, false) };
+        let (bytes, opened, listed) = self.shard_bytes_and_files_cached(shard);
+        (bytes, opened == listed)
+    }
+
+    /// `shard_bytes_and_files`, memoized against the shard's segment list:
+    /// the count only changes when a commit or a merge changes a segment.
+    /// Uncached it opens every file of the shard — on OPFS that is a second
+    /// per call, and `memory_status` paid it after every keystroke of the
+    /// playground, queuing the next search behind it (5 September 2026).
+    ///
+    /// Cache only a complete count. Right after a reload the OPFS mount can
+    /// still be settling and every open fails; memoizing that answer against
+    /// a segment list that will not change again pinned a fourfold
+    /// undercount — and an undercount is what makes an index that cannot fit
+    /// in memory look like one that can (5.7 GB reported as 1.4 GB, declared
+    /// resident). Now that a segment's meta only names the files its
+    /// pipeline actually wrote, a failed open means the file is unreachable,
+    /// not absent by design.
+    pub fn shard_bytes_and_files_cached(&self, shard: usize) -> (u64, usize, usize) {
+        let Some(h) = self.shards.get(shard) else { return (0, 0, 0) };
+        let Ok(metas) = h.index.searchable_segment_metas() else { return (0, 0, 0) };
         let key: Vec<(String, u32)> = metas.iter()
             .map(|m| (m.id().uuid_string(), m.max_doc()))
             .collect();
         {
             let cache = self.shard_bytes_cache.lock().unwrap();
-            if let Some((cached_key, bytes)) = cache.get(&shard) {
+            if let Some((cached_key, bytes, opened, listed)) = cache.get(&shard) {
                 if *cached_key == key {
                     if std::env::var("LUCIVY_VERBOSE").is_ok() {
                         eprintln!("[bytes] shard {shard}: cached {} MB, {} segments", bytes >> 20, key.len());
                     }
-                    return (*bytes, true);
+                    return (*bytes, *opened, *listed);
                 }
             }
         }
         let (bytes, opened, listed) = self.shard_bytes_and_files(shard);
-        // Cache only a complete count, and say so. Right after a reload the
-        // OPFS mount can still be settling and every open fails; memoizing that
-        // answer against a segment list that will not change again pinned a
-        // fourfold undercount — and an undercount is what makes an index that
-        // cannot fit in memory look like one that can (5.7 GB reported as
-        // 1.4 GB, declared resident). Now that a segment's meta only names the
-        // files its pipeline actually wrote, a failed open means the file is
-        // unreachable, not absent by design.
         let complete = opened == listed;
         if std::env::var("LUCIVY_VERBOSE").is_ok() {
             eprintln!("[bytes] shard {shard}: computed {} MB, {opened}/{listed} files, {} segments, complete={complete}",
                 bytes >> 20, key.len());
         }
         if complete {
-            self.shard_bytes_cache.lock().unwrap().insert(shard, (key, bytes));
+            self.shard_bytes_cache.lock().unwrap().insert(shard, (key, bytes, opened, listed));
         }
-        (bytes, complete)
+        (bytes, opened, listed)
     }
 
     // ── Distributed search support ──────────────────────────────────────

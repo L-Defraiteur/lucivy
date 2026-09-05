@@ -212,6 +212,28 @@ exact du panel de vérité. Côté dictionnaire le drapeau est **vrai aussi**
 sont tronqués sur cette requête et le disent, et l'écart de 3 ou 4
 documents est l'endroit où le plafond tombe selon la forme des segments.
 
+### 1 quater. Les « explosions » de temps dans le playground : `memoryStatus`
+
+Observé par Lucie : la même requête tapée deux fois passe de 60 à 400 ms
+une fois sur deux. Le moteur, lui, est stable — son journal donne 16 à
+44 ms sur toutes ces requêtes, et douze rejeux enchaînés par le serveur
+de debug font 18 à 30 ms de bout en bout. En simulant la frappe dans la
+page (événement `input`, rendu, lecture de l'en-tête), la page affiche
+27 à 40 ms… et 75 à 81 ms une fois sur trois alors que le moteur dit
+18 à 21 ms. Cause trouvée : après chaque recherche la page appelle
+`memoryStatus()` pour afficher le drapeau de troncature, et cet appel
+prenait **0,8 à 1,3 s** — `lucivy_memory_status` recomptait les octets de
+chaque shard en **ouvrant chacun des 1 700 fichiers sur OPFS**, à chaque
+appel, sans passer par le cache que `residency()` utilise. Le worker
+traite les messages en file : la recherche de la frappe suivante attendait
+derrière ce comptage, d'où les pics, aléatoires selon l'instant de la
+frappe. Corrigé le 5 septembre : `shard_bytes_and_files_cached` (mémo par
+liste de segments, comme `residency`), `memory_status` l'utilise. **Vérifié** après reconstruction du WASM :
+`memoryStatus()` passe de 800-1 300 ms à **6-9 ms**, et douze frappes
+simulées affichent 27 à 36 ms pour 25 à 35 ms côté moteur — la page et le
+moteur disent la même chose, à la milliseconde. La suite `lucivy-core`
+verte.
+
 ## 2. Réfléchir : perdre encore du poids, ou reconstruire en RAM à l'ouverture
 
 Ce que les formats disent (lu le 5 septembre, à mesurer avant de choisir) :

@@ -27,6 +27,14 @@ Unreleased (branch v4)
   spent waiting for background merges before reading (70 s after sixteen
   commits of 1 000 kernel files, against 4 s of reading), and the playground
   says so instead of "loading into memory".
+- **Fixed: `memory_status()` took a second in the browser.** It re-counted
+  the index's bytes by opening every file of every shard on OPFS at each
+  call (1 700 files, 0.8 to 1.3 s) instead of using the per-shard count
+  `residency()` already memoizes against the segment list. The playground
+  calls it after every search to show the truncation flag, and the worker
+  serves messages in order, so the next keystroke's search waited behind it:
+  the same query showed 60 ms once and 400 ms the next time. Now 6 to 9 ms,
+  and the page's time matches the engine's to the millisecond.
 - **Browser: two background merges at once for a shared-dictionary index.**
   The browser ran one merge at a time since a v3 merge rebuilds a segment's
   FST in RAM and four at once exhausted the 4 GB address space. A

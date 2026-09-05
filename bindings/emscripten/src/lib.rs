@@ -1240,7 +1240,7 @@ pub unsafe extern "C" fn lucivy_memory_status(ctx: *mut LucivyContext) -> *const
     let residency = ctx.handle.residency();
     let per_shard: Vec<serde_json::Value> = (0..ctx.handle.num_shards())
         .map(|i| {
-            let (bytes, opened, listed) = ctx.handle.shard_bytes_and_files(i);
+            let (bytes, opened, listed) = ctx.handle.shard_bytes_and_files_cached(i);
             serde_json::json!({"shard": i, "bytes": bytes, "opened": opened, "listed": listed})
         })
         .collect();
