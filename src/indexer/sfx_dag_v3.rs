@@ -223,10 +223,18 @@ impl Node for AssembleV3Node {
         if let Some(globals) = &data.globals {
             derived.push(("gmap".to_string(), crate::suffix_fst::gmap::encode(globals, data.max_word_content_len)));
             // Only a freshly collected segment minted ids; a merge did not.
+            // `.newsfx` is the generation's FST over those same texts, built
+            // here — on the segment's build thread, in parallel with the
+            // other segments — so that the commit only stream-merges the
+            // segments' pairs into the generation (`dictionary_commit`)
+            // instead of building one FST over every new text, serially.
             if !data.newtexts.is_empty() {
                 let entries: Vec<(u32, &str, crate::suffix_fst::termtexts_v3::TermMetaV3)> =
                     data.newtexts.iter().map(|(g, t, m)| (*g, t.as_str(), *m)).collect();
                 derived.push(("newtexts".to_string(), crate::suffix_fst::dictionary::encode_newtexts(&entries)));
+                let sfx = crate::suffix_fst::dictionary_compact::generation_sfx_bytes(&data.newtexts)
+                    .map_err(|e| format!("segment dictionary FST: {e}"))?;
+                derived.push(("newsfx".to_string(), sfx));
             }
         }
 

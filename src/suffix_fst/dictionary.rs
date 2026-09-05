@@ -43,6 +43,63 @@ use super::termtexts_v3::{TermMetaV3, TermTextsReaderV3, TermTextsWriterV3};
 /// engine, keys and files, over global ids.
 pub const DICTIONARY_SFX_VERSION: u8 = 4;
 
+/// Cumulative cost of the per-token path (`lookup_or_mint`) since the last
+/// `take`, counted only under `LUCIVY_VERBOSE`: the commit prints it next to
+/// the generation's write, so that the indexing time of a dictionary index
+/// splits into what the collectors pay and what the commit pays.
+pub mod stats {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    pub static CALLS: AtomicU64 = AtomicU64::new(0);
+    pub static HITS: AtomicU64 = AtomicU64::new(0);
+    /// Answered by the pending texts.
+    pub static PENDING_HITS: AtomicU64 = AtomicU64::new(0);
+    pub static MINTS: AtomicU64 = AtomicU64::new(0);
+    /// Whole `lookup_or_mint`, nanoseconds.
+    pub static TOTAL_NS: AtomicU64 = AtomicU64::new(0);
+    /// Of which: opening the `.termtexts` readers of the generations.
+    pub static OPEN_NS: AtomicU64 = AtomicU64::new(0);
+    /// Of which: the FST gets and parent decodes.
+    pub static FST_NS: AtomicU64 = AtomicU64::new(0);
+    /// Of which: under the shared lock (pending map and counter).
+    pub static LOCK_NS: AtomicU64 = AtomicU64::new(0);
+
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct Snapshot {
+        pub calls: u64,
+        pub hits: u64,
+        pub pending_hits: u64,
+        pub mints: u64,
+        pub total_ns: u64,
+        pub open_ns: u64,
+        pub fst_ns: u64,
+        pub lock_ns: u64,
+    }
+
+    /// Read and reset every counter.
+    pub fn take() -> Snapshot {
+        Snapshot {
+            calls: CALLS.swap(0, Relaxed),
+            hits: HITS.swap(0, Relaxed),
+            pending_hits: PENDING_HITS.swap(0, Relaxed),
+            mints: MINTS.swap(0, Relaxed),
+            total_ns: TOTAL_NS.swap(0, Relaxed),
+            open_ns: OPEN_NS.swap(0, Relaxed),
+            fst_ns: FST_NS.swap(0, Relaxed),
+            lock_ns: LOCK_NS.swap(0, Relaxed),
+        }
+    }
+
+    impl std::fmt::Display for Snapshot {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let ms = |ns: u64| ns as f64 / 1e6;
+            write!(f, "{} lookups ({} in a generation, {} pending, {} minted): {:.0} ms, of which termtexts open {:.0}, fst {:.0}, lock {:.0}",
+                self.calls, self.hits, self.pending_hits, self.mints,
+                ms(self.total_ns), ms(self.open_ns), ms(self.fst_ns), ms(self.lock_ns))
+        }
+    }
+}
+
 /// The slot an `Index` keeps its live dictionary in; a collector reads it at
 /// each lookup so that a commit's swap reaches writers already running.
 pub type DictionarySlot = Arc<std::sync::RwLock<Option<Arc<SfxDictionary>>>>;
@@ -67,15 +124,39 @@ pub struct DictionaryField {
     pub sfx: FileSlice,
     /// The FST reader over every live generation, opened once, memoizing.
     sfx_reader: SfxFileReaderV3,
+    /// The texts of every live generation as one reader, opened once: it
+    /// borrows `termtexts_bytes` below, which outlives it (declared after,
+    /// never replaced, and `OwnedBytes` never moves its heap). Opening one
+    /// parses every generation's id runs, so it must not happen per token
+    /// — that was 8 % of `lookup_or_mint` on the kernel.
+    termtexts: Option<TermTextsReaderV3<'static>>,
     /// The texts' bytes of every live generation, in order.
     termtexts_bytes: Vec<OwnedBytes>,
 }
 
 impl DictionaryField {
+    fn new(sfx: FileSlice, sfx_reader: SfxFileReaderV3, termtexts_bytes: Vec<OwnedBytes>) -> Self {
+        // SAFETY: `OwnedBytes` is an `Arc`-backed slice whose heap never
+        // moves; `termtexts_bytes` lives in this struct as long as the
+        // reader does and is never reassigned; the reader's drop touches
+        // no byte. The `'static` is thus a lifetime the borrow checker
+        // cannot see, not a claim about the process.
+        let parts: Vec<&'static [u8]> = termtexts_bytes.iter()
+            .map(|b| unsafe { std::slice::from_raw_parts(b.as_ptr(), b.len()) })
+            .collect();
+        let termtexts = TermTextsReaderV3::open_parts(&parts);
+        Self { sfx, sfx_reader, termtexts, termtexts_bytes }
+    }
+
     /// The texts of every live generation, as one reader.
     pub fn termtexts_reader(&self) -> Option<TermTextsReaderV3<'_>> {
         let parts: Vec<&[u8]> = self.termtexts_bytes.iter().map(|b| b.as_slice()).collect();
         TermTextsReaderV3::open_parts(&parts)
+    }
+
+    /// The same reader, opened once for the field's life.
+    pub fn termtexts(&self) -> Option<&TermTextsReaderV3<'_>> {
+        self.termtexts.as_ref()
     }
 
     /// The FST(s) of every live generation.
@@ -97,8 +178,8 @@ impl DictionaryField {
             let own_end = (meta.own_len as usize).min(text.len());
             (SI0_PREFIX, &text[..own_end], &text[own_end..])
         };
-        let lower_own = own.to_lowercase();
-        let lower_overlap = overlap.to_lowercase();
+        let lower_own = lowercase_cow(own);
+        let lower_overlap = lowercase_cow(overlap);
         let mut ov_end = lower_overlap.len().min(MAX_OVERLAP_BYTES);
         while ov_end > 0 && !lower_overlap.is_char_boundary(ov_end) {
             ov_end -= 1;
@@ -107,8 +188,11 @@ impl DictionaryField {
         let mut key = Vec::with_capacity(1 + lower_own.len());
         key.push(partition);
         key.extend_from_slice(lower_own.as_bytes());
-        let texts = self.termtexts_reader()?;
-        for part in self.sfx_reader.part_views() {
+        let timed = crate::diag::is_verbose();
+        let texts = self.termtexts.as_ref()?;
+        let t_fst = timed.then(std::time::Instant::now);
+        let _fst_guard = t_fst.map(|t| TimeInto(t, &stats::FST_NS));
+        for part in self.sfx_reader.parts() {
             let Some(value) = part.fst().get(&key) else { continue };
             let parents = part.decode_parents_where(value, &key, |ov| ov == want_overlap);
             for p in parents {
@@ -128,6 +212,25 @@ impl DictionaryField {
     }
 }
 
+/// `s.to_lowercase()` without the allocation when `s` is already lowercase
+/// ASCII — most tokens of a source tree.
+fn lowercase_cow(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.bytes().all(|b| b.is_ascii() && !b.is_ascii_uppercase()) {
+        std::borrow::Cow::Borrowed(s)
+    } else {
+        std::borrow::Cow::Owned(s.to_lowercase())
+    }
+}
+
+/// Adds the time since `.0` to `.1` when dropped (verbose accounting).
+struct TimeInto<'a>(std::time::Instant, &'a std::sync::atomic::AtomicU64);
+
+impl Drop for TimeInto<'_> {
+    fn drop(&mut self) {
+        self.1.fetch_add(self.0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// What every generation of one shard shares while the process lives: the
 /// id counter, and the texts minted but not yet folded into a generation.
 ///
@@ -136,16 +239,38 @@ impl DictionaryField {
 /// the swap keeps collecting after it, so the counter must be one for all
 /// generations (or two writers would mint the same id), and a text minted
 /// by one writer must be found by another before any generation has it —
-/// that is `pending`, keyed by field and the collector's intern key.
+/// that is `pending`, keyed by field and the collector's intern key, in
+/// stripes so that collector threads rarely meet on a lock (one lock was
+/// 4 s of waiting on the first commit of 30 000 kernel files).
+///
+/// Measured and refused (6 September): caching the keys *found* in a
+/// generation too. It took 5.7 M of 8.3 M FST walks but cost as much in
+/// lock time as it saved, for up to 32 MB per shard — and the walks run on
+/// the collector threads, off the commit path that bounds the indexing time.
 pub struct DictionaryShared {
-    /// Next id per field, and the pending texts, under one lock: minting
-    /// is a miss on the FST first, so the lock is taken once per new text.
-    state: Mutex<SharedState>,
+    /// Next id per field.
+    next_ids: Mutex<HashMap<u32, u64>>,
+    /// The pending texts: field → collector intern key → id.
+    stripes: Vec<Mutex<HashMap<u32, HashMap<String, u64>>>>,
 }
 
-struct SharedState {
-    next_ids: HashMap<u32, u64>,
-    pending: HashMap<(u32, String), u64>,
+const STRIPES: usize = 16;
+
+impl DictionaryShared {
+    fn new(next_ids: HashMap<u32, u64>) -> Self {
+        Self {
+            next_ids: Mutex::new(next_ids),
+            stripes: (0..STRIPES).map(|_| Mutex::new(HashMap::new())).collect(),
+        }
+    }
+
+    fn stripe(&self, field_id: u32, key: &str) -> &Mutex<HashMap<u32, HashMap<String, u64>>> {
+        use std::hash::{Hash, Hasher};
+        let mut h = rustc_hash::FxHasher::default();
+        field_id.hash(&mut h);
+        key.hash(&mut h);
+        &self.stripes[(h.finish() as usize) % STRIPES]
+    }
 }
 
 /// The shard dictionary an `Index` holds: its meta and its open files.
@@ -180,16 +305,11 @@ impl SfxDictionary {
             }
             let (Some(sfx), Ok(sfx_reader)) = (first_sfx, SfxFileReaderV3::open_parts(sfx_parts)) else { continue };
             let sfx_reader = sfx_reader.with_memo(Arc::new(super::file_v3::FstMemo::new()));
-            fields.insert(field_id, DictionaryField { sfx, sfx_reader, termtexts_bytes });
+            fields.insert(field_id, DictionaryField::new(sfx, sfx_reader, termtexts_bytes));
         }
         let shared = match previous {
             Some(prev) => prev.shared.clone(),
-            None => Arc::new(DictionaryShared {
-                state: Mutex::new(SharedState {
-                    next_ids: meta.next_ids.iter().map(|(&f, &n)| (f, n)).collect(),
-                    pending: HashMap::new(),
-                }),
-            }),
+            None => Arc::new(DictionaryShared::new(meta.next_ids.iter().map(|(&f, &n)| (f, n)).collect())),
         };
         Self { meta: meta.clone(), fields, shared }
     }
@@ -200,9 +320,7 @@ impl SfxDictionary {
         Self {
             meta: SfxDictionaryMeta { generations: Vec::new(), next_generation: 1, next_ids: Default::default(), field_ids: Vec::new() },
             fields: HashMap::new(),
-            shared: Arc::new(DictionaryShared {
-                state: Mutex::new(SharedState { next_ids: HashMap::new(), pending: HashMap::new() }),
-            }),
+            shared: Arc::new(DictionaryShared::new(HashMap::new())),
         }
     }
 
@@ -212,23 +330,41 @@ impl SfxDictionary {
     /// by another writer since the last commit comes back with `false` — its
     /// minter writes it to `.newtexts`.
     pub fn lookup_or_mint(&self, field_id: u32, key: &str, text: &str, meta: &TokenMetaV3) -> (u64, bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let timed = crate::diag::is_verbose();
+        let t_all = timed.then(std::time::Instant::now);
+        let _all_guard = t_all.map(|t| TimeInto(t, &stats::TOTAL_NS));
+        if timed { stats::CALLS.fetch_add(1, Relaxed); }
         if let Some(id) = self.field(field_id).and_then(|f| f.lookup(text, meta)) {
+            if timed { stats::HITS.fetch_add(1, Relaxed); }
             return (id, false);
         }
-        let mut state = self.shared.state.lock().unwrap();
-        if let Some(&id) = state.pending.get(&(field_id, key.to_string())) {
+        let t_lock = timed.then(std::time::Instant::now);
+        let _lock_guard = t_lock.map(|t| TimeInto(t, &stats::LOCK_NS));
+        let mut stripe = self.shared.stripe(field_id, key).lock().unwrap();
+        if let Some(&id) = stripe.get(&field_id).and_then(|m| m.get(key)) {
+            if timed { stats::PENDING_HITS.fetch_add(1, Relaxed); }
             return (id, false);
         }
-        let next = state.next_ids.entry(field_id).or_insert(0);
-        let id = *next;
-        *next += 1;
-        state.pending.insert((field_id, key.to_string()), id);
+        let id = {
+            let mut next_ids = self.shared.next_ids.lock().unwrap();
+            let next = next_ids.entry(field_id).or_insert(0);
+            let id = *next;
+            *next += 1;
+            id
+        };
+        stripe.entry(field_id).or_default().insert(key.to_string(), id);
+        if timed { stats::MINTS.fetch_add(1, Relaxed); }
         (id, true)
     }
 
     /// Forget the pending texts whose ids a generation now holds.
     pub fn forget_pending(&self, folded: &std::collections::HashSet<(u32, u64)>) {
-        self.shared.state.lock().unwrap().pending.retain(|(f, _), id| !folded.contains(&(*f, *id)));
+        for stripe in &self.shared.stripes {
+            for (f, m) in stripe.lock().unwrap().iter_mut() {
+                m.retain(|_, id| !folded.contains(&(*f, *id)));
+            }
+        }
     }
 
     /// The meta this dictionary was opened from.
@@ -248,7 +384,7 @@ impl SfxDictionary {
 
     /// The next id that would be minted, per field, as `meta.json` records it.
     pub fn next_ids(&self) -> std::collections::BTreeMap<u32, u64> {
-        self.shared.state.lock().unwrap().next_ids.iter().map(|(&f, &n)| (f, n)).collect()
+        self.shared.next_ids.lock().unwrap().iter().map(|(&f, &n)| (f, n)).collect()
     }
 }
 

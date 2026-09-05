@@ -81,6 +81,26 @@ pub fn generation_bytes(directory: &dyn Directory, generation: u64, field_ids: &
         .sum()
 }
 
+/// The `.sfx` of a generation holding exactly `entries` (ids ascending):
+/// the suffix FST over their texts, values the global ids. What a segment
+/// builds for the texts it minted, on its own build thread, so that the
+/// commit only merges (`compact_parts`) instead of building.
+pub fn generation_sfx_bytes(entries: &[(u32, String, TermMetaV3)]) -> Result<Vec<u8>, String> {
+    let mut builder = SuffixFstBuilderV3::new();
+    builder.set_max_ordinal(u32::MAX as u64);
+    for (global, text, m) in entries {
+        if m.is_word_stripped {
+            let content_len = text.len().saturating_sub(m.overlap_len as usize);
+            builder.add_word_stripped(&text[..content_len], &text[content_len..], *global as u64,
+                m.own_len, m.sep_len, m.is_word_start);
+        } else {
+            builder.add_token(text, *global as u64, m.own_len, m.sep_len, m.overlap_len, m.is_word_start);
+        }
+    }
+    let (fst, parents) = builder.build().map_err(|e| e.to_string())?;
+    Ok(SfxFileWriterV3::new(fst, parents).to_bytes())
+}
+
 /// Write one field's files of a generation from entries held in RAM: the
 /// FST over `entries` (ids ascending) and the texts with their ids. What a
 /// commit writes for the texts it minted — small — and the reference a
@@ -91,22 +111,12 @@ pub fn write_generation(
     field_id: u32,
     entries: &[(u32, String, TermMetaV3)],
 ) -> crate::Result<()> {
-    let mut builder = SuffixFstBuilderV3::new();
-    builder.set_max_ordinal(u32::MAX as u64);
-    let mut texts = TermTextsWriterV3::new().with_ids(entries.iter().map(|e| e.0).collect());
-    for (i, (global, text, m)) in entries.iter().enumerate() {
-        texts.add(i as u32, text, *m);
-        if m.is_word_stripped {
-            let content_len = text.len().saturating_sub(m.overlap_len as usize);
-            builder.add_word_stripped(&text[..content_len], &text[content_len..], *global as u64,
-                m.own_len, m.sep_len, m.is_word_start);
-        } else {
-            builder.add_token(text, *global as u64, m.own_len, m.sep_len, m.overlap_len, m.is_word_start);
-        }
-    }
-    let (fst, parents) = builder.build().map_err(|e| crate::LucivyError::SystemError(
+    let sfx = generation_sfx_bytes(entries).map_err(|e| crate::LucivyError::SystemError(
         format!("dictionary generation {generation} field {field_id}: {e}")))?;
-    let sfx = SfxFileWriterV3::new(fst, parents).to_bytes();
+    let mut texts = TermTextsWriterV3::new().with_ids(entries.iter().map(|e| e.0).collect());
+    for (i, (_, text, m)) in entries.iter().enumerate() {
+        texts.add(i as u32, text, *m);
+    }
     let termtexts = texts.serialize();
     for (ext, bytes) in [("sfx", sfx), ("termtexts", termtexts)] {
         let path = PathBuf::from(dictionary_file_name(generation, field_id, ext));
@@ -148,7 +158,6 @@ pub fn compact_generations(
     field_id: u32,
     out: u64,
 ) -> crate::Result<CompactReport> {
-    let mut report = CompactReport::default();
     let mut sfx_parts: Vec<OwnedBytes> = Vec::new();
     let mut termtexts_parts: Vec<OwnedBytes> = Vec::new();
     for &g in generations {
@@ -158,21 +167,63 @@ pub fn compact_generations(
         sfx_parts.push(sfx.read_bytes()?);
         termtexts_parts.push(termtexts.read_bytes()?);
     }
+    compact_parts(directory, sfx_parts, termtexts_parts, field_id, out)
+}
+
+/// Merge generation-shaped parts (`.sfx` and `.termtexts` bytes, paired by
+/// index, ids disjoint) into generation `out`, in streams: what
+/// `compact_generations` does with live generations, and what a commit
+/// does with the per-segment `.newsfx` / `.newtexts` of the segments it
+/// folds. No part → nothing written, `parts` 0.
+pub fn compact_parts(
+    directory: &dyn Directory,
+    sfx_parts: Vec<OwnedBytes>,
+    termtexts_parts: Vec<OwnedBytes>,
+    field_id: u32,
+    out: u64,
+) -> crate::Result<CompactReport> {
+    let mut report = CompactReport::default();
     report.parts = sfx_parts.len();
     if sfx_parts.is_empty() {
         return Ok(report);
     }
 
-    // ── `.sfx`: FST and parents streamed to two temporary files, then the
-    // container assembled from them (the header needs their lengths).
+    // The two passes read different files and write different files: on a
+    // native build they run side by side (the texts pass is a quarter of the
+    // FST pass, and the fold is on the commit path). On wasm nothing is
+    // spawned outside the scheduler: one after the other.
+    let (sfx_report, texts_report) = merge_both(directory, &sfx_parts, &termtexts_parts, field_id, out)?;
+    report.keys = sfx_report.keys;
+    report.keys_merged = sfx_report.keys_merged;
+    report.sfx_bytes = sfx_report.sfx_bytes;
+    report.fst_wall = sfx_report.fst_wall;
+    report.texts = texts_report.texts;
+    report.termtexts_bytes = texts_report.termtexts_bytes;
+    report.texts_wall = texts_report.texts_wall;
+
+    if super::briques::profile::enabled() {
+        eprintln!("  [dict] compaction gen {out} field {field_id}: {} parts -> {} keys ({} merged), {} texts | fst {:.0} ms | texts {:.0} ms | .sfx {:.1} MB, .termtexts {:.1} MB",
+            report.parts, report.keys, report.keys_merged, report.texts,
+            report.fst_wall.as_secs_f64() * 1e3, report.texts_wall.as_secs_f64() * 1e3,
+            report.sfx_bytes as f64 / 1048576.0, report.termtexts_bytes as f64 / 1048576.0);
+    }
+    Ok(report)
+}
+
+
+/// The `.sfx` pass of `compact_parts`: FST and parents streamed to two
+/// temporary files, then the container assembled from them (the header
+/// needs their lengths).
+fn merge_sfx(directory: &dyn Directory, sfx_parts: &[OwnedBytes], field_id: u32, out: u64) -> crate::Result<CompactReport> {
     let t = Instant::now();
+    let mut report = CompactReport::default();
     let fst_tmp = PathBuf::from(dictionary_file_name(out, field_id, "sfx.fst.tmp"));
     let parents_tmp = PathBuf::from(dictionary_file_name(out, field_id, "sfx.parents.tmp"));
     {
         let readers: Vec<SfxFileReaderV3> = sfx_parts.iter()
             .map(|b| SfxFileReaderV3::open_owned(b.clone()).map_err(|e| system_error("dictionary generation", e)))
             .collect::<crate::Result<_>>()?;
-        let tables: Vec<Option<OutputTable<'_>>> = readers.iter().zip(&sfx_parts).map(|(r, bytes)| {
+        let tables: Vec<Option<OutputTable<'_>>> = readers.iter().zip(sfx_parts).map(|(r, bytes)| {
             // A verbatim copy is only right when the record layout is ours.
             (r.container_version() == file_v3::VERSION).then(|| {
                 let table = r.parents_table_bytes();
@@ -242,9 +293,14 @@ pub fn compact_generations(
         directory.delete(tmp).map_err(|e| system_error("dictionary temporary file", e))?;
     }
     report.fst_wall = t.elapsed();
+    Ok(report)
 
-    // ── `.termtexts`: the heap merge, three passes.
+}
+
+/// The `.termtexts` pass of `compact_parts`: the heap merge, three passes.
+fn merge_termtexts(directory: &dyn Directory, termtexts_parts: &[OwnedBytes], field_id: u32, out: u64) -> crate::Result<CompactReport> {
     let t = Instant::now();
+    let mut report = CompactReport::default();
     {
         let parts: Vec<TermTextsReaderV3<'_>> = termtexts_parts.iter()
             .map(|b| TermTextsReaderV3::open(b.as_slice()).ok_or_else(|| crate::LucivyError::SystemError(
@@ -258,14 +314,27 @@ pub fn compact_generations(
         w.terminate()?;
     }
     report.texts_wall = t.elapsed();
-
-    if super::briques::profile::enabled() {
-        eprintln!("  [dict] compaction gen {out} field {field_id}: {} parts -> {} keys ({} merged), {} texts | fst {:.0} ms | texts {:.0} ms | .sfx {:.1} MB, .termtexts {:.1} MB",
-            report.parts, report.keys, report.keys_merged, report.texts,
-            report.fst_wall.as_secs_f64() * 1e3, report.texts_wall.as_secs_f64() * 1e3,
-            report.sfx_bytes as f64 / 1048576.0, report.termtexts_bytes as f64 / 1048576.0);
-    }
     Ok(report)
+
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn merge_both(directory: &dyn Directory, sfx_parts: &[OwnedBytes], termtexts_parts: &[OwnedBytes], field_id: u32, out: u64)
+    -> crate::Result<(CompactReport, CompactReport)>
+{
+    std::thread::scope(|scope| {
+        let texts = scope.spawn(|| merge_termtexts(directory, termtexts_parts, field_id, out));
+        let sfx = merge_sfx(directory, sfx_parts, field_id, out);
+        let texts = texts.join().map_err(|_| system_error("dictionary texts pass", "thread panicked"))?;
+        Ok((sfx?, texts?))
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn merge_both(directory: &dyn Directory, sfx_parts: &[OwnedBytes], termtexts_parts: &[OwnedBytes], field_id: u32, out: u64)
+    -> crate::Result<(CompactReport, CompactReport)>
+{
+    Ok((merge_sfx(directory, sfx_parts, field_id, out)?, merge_termtexts(directory, termtexts_parts, field_id, out)?))
 }
 
 struct CountingWrite<'w> {

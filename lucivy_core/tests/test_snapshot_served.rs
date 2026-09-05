@@ -168,7 +168,7 @@ fn snapshot_served_answers_like_the_index_it_came_from() {
             let Some(sh) = served.shard(i) else { continue };
             let v = sh.index.settings().sfx_version;
             if let Ok(metas) = sh.index.searchable_segment_metas() {
-                for p in metas.iter().flat_map(|m| m.list_files_for(v)) {
+                for p in metas.iter().flat_map(|m| m.list_files_for(v, false)) {
                     live.insert(p.to_string_lossy().into_owned());
                 }
             }

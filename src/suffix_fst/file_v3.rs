@@ -382,6 +382,13 @@ impl SfxFileReaderV3 {
         v
     }
 
+    /// The same parts, borrowed: `self` stands for the first file (its
+    /// `fst()` and parents are the first file's), then `more`. Nothing is
+    /// cloned — what a per-token lookup iterates.
+    pub fn parts(&self) -> impl Iterator<Item = &SfxFileReaderV3> {
+        std::iter::once(self).chain(self.more.iter())
+    }
+
     /// Number of files behind this reader.
     pub fn num_parts(&self) -> usize {
         1 + self.more.len()
