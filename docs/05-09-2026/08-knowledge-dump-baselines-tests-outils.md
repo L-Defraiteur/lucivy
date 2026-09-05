@@ -119,7 +119,9 @@ compact::compaction_of_an_index_on_disk` (`LUCIVY_DICT_BENCH_*`).
 `bash bindings/emscripten/build.sh` (~1 min, estampille `index.html` depuis
 `Cargo.toml`), `cd playground && node serve.mjs 9877`. URL : `?dict`,
 `?dict&ram`, `?corpus=corpus-kernel-16k.tar.gz&dict&commit=1000`,
-`&merges=N`, `&verbose`, `?open=user_index` ; un seul onglet qui indexe.
+`&merges=N`, `&verbose`, `?open=user_index`, `?commitmb=M` (commit tous
+les M Mo de texte, 8 par défaut, en plus des 2 000 fichiers) ; un seul
+onglet qui indexe.
 **Les corpus du terminal** (`index mdn`, `index linux`, `index go`,
 `godot`, `typescript`, `postgres`, `cpython`, `redis`, `git`, `curl`,
 `sqlite`, `nginx`) : `playground/corpora.json` les décrit, `python3
@@ -169,7 +171,9 @@ noyau après ouverture : strict 71-80 ms, relâché 20-23, fuzzy 1 43, regex
 Godot 19 / 809 / 3 323 ; TypeScript 33 / 462 / 1 522 ; PostgreSQL 10 /
 483 / 2 943 ; CPython 10 / 466 / 2 811 ; Git 5 / 242 ; curl 3 / 110 ;
 Redis 2 / 115 ; SQLite 2 / 97 ; nginx 1 / 32 ([04](04-progression-et-a-faire.md)
-§2 bis, panels dans `browser-ram.md` du scratchpad).
+§2 bis, panels dans `browser-ram.md` du scratchpad). Avec les commits de
+8 Mo (le défaut depuis) : Godot 30 s / 816 / 1 778, Linux 2.6.0 41 s /
+1 089 / 2 023.
 
 ---
 

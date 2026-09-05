@@ -2393,6 +2393,12 @@ async function indexFiles(files, path, label, keep, opts = {}) {
   // `?commit=N` — commit every N files instead of 2 000 (more generations
   // of the dictionary, hence its compaction, on a corpus that fits a tab).
   const COMMIT_EVERY = Math.max(1, parseInt(params.get('commit') || '2000', 10) || 2000);
+  // …or every `?commitmb=M` megabytes of text (8 by default), whichever comes
+  // first. A segment's size, not its document count, is what a merge pays for
+  // in a tab: 2 000 Godot files (10 KB each) made segments three times MDN's
+  // and the wasm memory peaked at 3.3 GB against 1.6 for MDN. Eight megabytes
+  // is what 2 000 MDN pages weigh, so MDN keeps its cadence.
+  const COMMIT_BYTES = Math.max(1, parseFloat(params.get('commitmb') || '8') || 8) * 1048576;
   const index = await lucivy.create(path, {
     fields: [
       { name: 'path', type: 'text' },
@@ -2405,7 +2411,8 @@ async function indexFiles(files, path, label, keep, opts = {}) {
   });
   if (sharedDictionary) console.log('[playground] shared_dictionary: true');
   if (derivedInRam) console.log('[playground] derived_in_ram: true');
-  if (COMMIT_EVERY !== 2000) console.log(`[playground] commit every ${COMMIT_EVERY} files`);
+  if (COMMIT_EVERY !== 2000 || COMMIT_BYTES !== 8 * 1048576) console.log(`[playground] commit every ${COMMIT_EVERY} files or ${(COMMIT_BYTES / 1048576).toFixed(0)} MB of text`);
+  let sinceCommitFiles = 0, sinceCommitBytes = 0, commits = 0;
   for (let i = 0; i < files.length; i++) {
     const { path: filePath, content } = files[i];
     const ext = filePath.includes('.') ? filePath.split('.').pop() : '';
@@ -2414,11 +2421,14 @@ async function indexFiles(files, path, label, keep, opts = {}) {
     if ((i + 1) % 100 === 0) {
       statusEl.textContent = `Indexing ${label}... ${i + 1}/${files.length}`;
     }
-    if ((i + 1) % COMMIT_EVERY === 0) {
+    sinceCommitFiles++; sinceCommitBytes += content.length;
+    if (sinceCommitFiles >= COMMIT_EVERY || sinceCommitBytes >= COMMIT_BYTES) {
       statusEl.textContent = `Indexing ${label}... ${i + 1}/${files.length} (committing...)`;
       await index.commit({ sync: false });
+      sinceCommitFiles = 0; sinceCommitBytes = 0; commits++;
     }
   }
+  console.log(`[playground] ${commits + 1} commits for ${files.length} files`);
   statusEl.textContent = 'Final commit...';
   await index.commit();
   statusEl.textContent = 'Merging segments...';
@@ -2790,12 +2800,12 @@ const corporaReady = (async () => {
     for (const [key, m] of Object.entries(manifest.corpora || {})) {
       const st = m.stats || {};
       const files = st.files || 0;
-      // Fitted on the measured corpora (5 September 2026, dictionary, 4 shards):
-      // MDN 14 629 files / 57 MB in 14 s, kernel 15 429 / 214 MB in 40 s,
-      // Linux 2.6.0 14 032 / 126 MB in 28 s — about 0.3 ms a file plus 0.16 s
-      // a megabyte of text.
+      // Fitted on the measured corpora (5 September 2026, dictionary, 4 shards,
+      // a commit every 8 MB of text): MDN 14 611 files / 57 MB in 14 s, Go
+      // 14 166 / 71 MB in 19 s, Godot 11 015 / 111 MB in 30 s, Linux 2.6.0
+      // 14 032 / 126 MB in 41 s — about 0.3 ms a file plus 0.27 s a megabyte.
       const textMb = (st.text_bytes || 0) / 1048576;
-      const seconds = files ? Math.max(2, Math.round(files * 0.0003 + textMb * 0.164)) : 0;
+      const seconds = files ? Math.max(2, Math.round(files * 0.0003 + textMb * 0.27)) : 0;
       const eta = !files ? '' : seconds < 50 ? `about ${seconds} s` : seconds < 90 ? 'about a minute' : `about ${Math.round(seconds / 60)} minutes`;
       const c = {
         key, file: m.file, path: m.path, title: m.title, credit: m.credit || '', what: m.what || '',
@@ -3102,7 +3112,11 @@ function printHelp() {
 }
 
 // A prompt line with a real input after the static `lucivy `.
-function openPrompt(hint) {
+// `prefill` is put in the input, selected-free, caret at the end: the prompt
+// reads `$ lucivy search ` like before, but `search ` is the visitor's to
+// erase (Backspace, or Esc) and replace with index, list, help… It is offered
+// at the end of the demo and after every search; not after a corpus command.
+function openPrompt(hint, prefill = '') {
   if (hint) {
     term.add(`▸ your turn: type a query (or <span class="flag">search</span> <span class="str">"…"</span>) and press Enter — <span class="flag">--help</span> lists the options (<span class="flag">--fuzzy N</span> <span class="flag">--jw</span> <span class="flag">--regex</span> <span class="flag">--phrase</span> <span class="flag">--prefix</span> <span class="flag">--exact</span> <span class="flag">--strict</span> <span class="flag">--allowed N</span> <span class="flag">--limit N</span>, AND / OR / NOT)`, 'dim');
     term.add(`▸ or index a bigger corpus right here: ${corporaSummary((x) => `<span class="flag">${escapeHtml(x)}</span>`) || '<span class="flag">index mdn</span>'} — or <span class="flag">index github owner/repo</span>; what you index stays in this browser (<span class="flag">index list</span>, <span class="flag">open</span>, <span class="flag">drop</span>)`, 'dim');
@@ -3118,6 +3132,7 @@ function openPrompt(hint) {
   promptInput = input;
   termCursor.hidden = true;
   const fit = () => { input.style.width = `${Math.max(2, [...input.value].length + 1)}ch`; };
+  if (prefill) { input.value = prefill; input.setSelectionRange(prefill.length, prefill.length); }
   fit();
   let histPos = promptHistory.length;
   input.addEventListener('input', fit);
@@ -3188,7 +3203,7 @@ function openPrompt(hint) {
         try { await runDemoSearch(entry, false); }
         catch (err) { term.out('✗ ' + err.message, 'err'); }
       }
-      openPrompt(false);
+      openPrompt(false, command ? '' : 'search ');
     }
   });
   termBody.scrollTop = termBody.scrollHeight;
@@ -3232,7 +3247,7 @@ async function playDemo() {
   }
   demoLive = false;
   demoRunning = false;
-  if (demoIndex) openPrompt(true);
+  if (demoIndex) openPrompt(true, 'search ');
   btnSkip.hidden = true;
   btnReplay.hidden = false; btnTryOwn.hidden = false;
   btnPlay.disabled = false;

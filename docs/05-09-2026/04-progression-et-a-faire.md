@@ -760,10 +760,10 @@ gros corpus ; pic = mémoire linéaire, depuis ~1 520 Mo au repos) :
 
 | `index <nom>` | fichiers | texte | archive | indexation | index | pic mémoire |
 |---|---|---|---|---|---|---|
-| `linux` (2.6.0 entier) | 14 032 | 126 Mo | 32 Mo | **28 s** | 1 087 Mo | 3 391 Mo |
+| `linux` (2.6.0 entier) | 14 032 | 126 Mo | 32 Mo | **28 s** (41 avec les commits de 8 Mo) | 1 087 Mo | 3 391 Mo (**2 023** avec les commits de 8 Mo) |
 | `mdn` | 14 611 | 57 Mo | 13 Mo | 14 s | 475 Mo | 1 650 Mo |
 | `go` | 14 166 | 71 Mo | 16 Mo | 19 s | 686 Mo | 2 291 Mo |
-| `godot` | 11 021 | 111 Mo | 20 Mo | 19 s | 809 Mo | 3 323 Mo |
+| `godot` | 11 015 | 111 Mo | 20 Mo | 19 s (30 avec les commits de 8 Mo) | 816 Mo | 3 323 Mo (**1 778** avec les commits de 8 Mo) |
 | `typescript` | **39 044** | 67 Mo | 9 Mo | 33 s | 462 Mo | 1 522 Mo (inchangé) |
 | `postgres` | 5 199 | 56 Mo | 13 Mo | 10 s | 483 Mo | 2 943 Mo |
 | `cpython` | 5 344 | 57 Mo | 13 Mo | 10 s | 466 Mo | 2 811 Mo |
@@ -780,10 +780,24 @@ rendent tous des résultats (les comptes sont dans le scratchpad,
 `browser-ram.md`). Le pic dépend de la **taille des fichiers**, pas du
 nombre : Godot (111 Mo, gros fichiers C++) monte à 3 323 Mo là où Go
 (71 Mo) reste à 2 291 et TypeScript à 1 522 — ce sont les fusions de
-segments de 2 000 documents plus gros. L'estimation affichée avant
-l'indexation est ajustée sur ces mesures : 0,3 ms par fichier + 0,16 s par
-Mo de texte (MDN 14 s, noyau moderne 40 s, 2.6.0 28 s retrouvés). Total
-des archives : 122 Mo, servies à côté de la page.
+segments de 2 000 documents plus gros. **Donc le playground commite aussi
+par volume** : tous les 2 000 fichiers **ou tous les 8 Mo de texte**
+(`?commitmb=M` pour changer ; 8 Mo = le poids de 2 000 pages MDN, dont la
+cadence ne bouge pas). Mesuré, même page, même machine (pic = croissance
+de la mémoire linéaire depuis l'ouverture) :
+
+| commit | Godot | Linux 2.6.0 |
+|---|---|---|
+| 2 000 fichiers (avant) | 19 s, pic +1 800 Mo (3 323) | 28 s, +1 741 Mo (3 391) |
+| 8 Mo de texte (**défaut**) | **30 s, +512 Mo (1 778)** | **41 s, +641 Mo (2 023)** |
+| 16 Mo de texte | — | 37 s, +1 285 Mo (2 923) |
+
+Le pic tombe de 1,5 Go pour 10 à 13 s d'indexation de plus : c'est ce qui
+rend la vitrine sûre sur une machine moins large que celle-ci (16 Mo ne
+rend que 4 s pour 650 Mo de plus, refusé). Les requêtes ne changent pas.
+L'estimation affichée avant l'indexation est ajustée : 0,3 ms par fichier
++ 0,27 s par Mo de texte (MDN 14 s, Go 19, Godot 30, 2.6.0 41 retrouvés à
+quelques secondes). Total des archives : 122 Mo, servies à côté de la page.
 
 **L'invite est libre** (remarque de Lucie : on était forcé d'écrire
 derrière `lucivy search`) : elle affiche `$ lucivy ` et prend la suite —

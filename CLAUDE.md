@@ -288,7 +288,8 @@ cargo test -p luciole --lib
 # Build WASM emscripten
 bash bindings/emscripten/build.sh
 
-# Playground (port 9877 ; `?dict` = dictionnaire partagé, `?ram` = derived_in_ram, `?commit=N`,
+# Playground (port 9877 ; `?dict` = dictionnaire partagé, `?ram` = derived_in_ram, `?commit=N` fichiers,
+# `?commitmb=M` Mo de texte (8 par défaut : le pic mémoire suit la taille des segments, Godot 3,3 → 1,8 Go),
 # `?merges=N`, `?verbose` (traces `[merge]`, `[preload]` dans diag.log),
 # `?corpus=corpus-kernel-16k.tar.gz` ; un seul onglet qui indexe à la fois,
 # corpus du terminal (`index mdn|linux|go|godot|typescript|postgres|cpython|redis|git|curl|sqlite|nginx`)
