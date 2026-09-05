@@ -289,6 +289,18 @@ construction — et vérifiée telle —, mais **sans gain** (143 ms contre 141)
 la carte d'octets n'était pas le coût, la marche des textes l'est. Code
 revenu au tag, résultat noté, la fuzzy d2 reste où elle est.
 
+## 8 quater. La fixture 3.0.8 : le prérequis de 4.0.0
+
+Le wheel PyPI 3.0.8, installé dans un venv `uv`, construit deux petits index
+(un shard, deux shards) et répond à un panel de 14 requêtes ; le tout est
+commité dans `lucivy_core/tests/fixtures/index-3.0.8/`. `test_compat_308`
+vérifie que v4 ouvre ces index et rend les mêmes documents et les mêmes
+spans que la 3.0.8, puis qu'un commit (premier segment v4), une compaction
+(les segments 3.0.8 fusionnés dans les layouts courants) et une réouverture
+ne perdent rien. Le contrat de 4.0 est écrit dans le CHANGELOG : 4.0 ouvre
+3.0.x, 3.0.x n'ouvre pas 4.0, le premier commit convertit sans retour.
+Détail : [04](04-progression-et-a-faire.md) §3.
+
 ## 9. Commits de la suite
 
 `634f0e6` compaction en flux · `5a8f6b0` docs (5 000 fichiers, pas

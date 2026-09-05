@@ -234,6 +234,13 @@ entre shards) ; relancé seul il passe.
   un index avec l'option sous `V3_DERIVED_IN_RAM=1` (entre dans
   `.v3_shape`) ; `LUCIVY_VERBOSE=1` trace chaque rebâti (`[derived] segment …
   rebuilt … in N ms`).
+- **La compatibilité 3.0.8** : `cargo test --release -p lucivy-core --test
+  test_compat_308` sur la fixture `lucivy_core/tests/fixtures/index-3.0.8/`
+  (construite par le wheel PyPI : `build.py`, venv `uv venv v && uv pip
+  install --python v/bin/python lucivy==3.0.8`, `pip` n'est pas installé
+  sur la machine). Ne pas la rebâtir sans raison : `panel-3.0.8.json` est
+  la référence, et une fixture 3.0.8 pèse ×45 le texte (18 documents →
+  7 Mo).
 - **Les vérités `contains` et `coherence`** ne sont **pas** ignorées :
   `cargo test --release -p lucivy-core --test test_sfx_v3_ground_truth
   v3_ground_truth_contains -- --exact --nocapture` (sans `--ignored`, qui

@@ -1,0 +1,1 @@
+{"fields":[{"name":"path","type":"text","stored":true,"indexed":null,"fast":null},{"name":"content","type":"text","stored":true,"indexed":null,"fast":null}],"tokenizer":null,"shards":2,"df_threshold":null,"balance_weight":null,"sfx":null,"sfx_version":null}

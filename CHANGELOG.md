@@ -1,6 +1,18 @@
 Unreleased (branch v4)
 ================================
 
+- **4.0 opens your 3.0.x indexes; 3.0.x does not open 4.0 indexes; the first
+  commit in 4.0 converts an index for good.** Every reader still opens the
+  3.0.x layouts (postings with byte spans, `PMP3`, containers 3 to 6), and
+  a segment written by 3.0.8 answers exactly what 3.0.8 answered: checked
+  by `lucivy_core/tests/test_compat_308.rs` on a fixture the published
+  3.0.8 wheel built (one shard and two shards, 18 documents, a panel of 14
+  query kinds with the wheel's own answers) — same documents and spans,
+  then new documents, a commit, a compaction merging the 3.0.8 segments
+  into current-layout ones, a reopen: nothing lost, every span in place.
+  A 3.0.x binary refuses the new layouts (`SFP5`, `WSP5`, `PMP4`, `.sfx`
+  container 8), so an index touched by 4.0 cannot go back.
+
 - **`shared_dictionary: true` at creation** (`sfx_version` 4): each distinct
   token text is stored once per shard instead of once per segment — about
   20 % less disk and RAM (Linux kernel: 30 000 files 1 659 → 1 327 MB,

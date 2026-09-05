@@ -265,6 +265,9 @@ pour octet (`01` §13).
   `$HOME/lucivy_bench` (chemins codés en dur sur une autre machine jusqu'au
   26 août → « Permission denied ») ; t04 (`sfx:false`) supprimé, ce mode n'existe plus
 - Vérité terrain : `docs/BENCHMARKS.md`
+- Compatibilité 3.0.x : `cargo test --release -p lucivy-core --test test_compat_308` —
+  la fixture `lucivy_core/tests/fixtures/index-3.0.8/` a été écrite par le wheel PyPI
+  3.0.8 ; v4 doit rendre ses réponses, puis convertir sans perte (le contrat de 4.0.0)
 - Bench sharding : `bench_sharding.rs` (90K docs Linux kernel)
 - Bench vs tantivy : `bench_vs_tantivy.rs`
 - IMPORTANT : toujours `> /tmp/fichier.txt 2>&1`, JAMAIS `| tail`

@@ -1,0 +1,75 @@
+{
+  "index_settings": {
+    "docstore_compression": "lz4",
+    "docstore_blocksize": 16384,
+    "sfx_version": 3
+  },
+  "segments": [
+    {
+      "segment_id": "f8dd509f-890e-4ab8-8046-4b5b05e83cdc",
+      "max_doc": 6,
+      "deletes": null,
+      "sfx_field_ids": [
+        1,
+        2
+      ]
+    },
+    {
+      "segment_id": "9d316389-a3a5-4e29-9d21-44ad6df79874",
+      "max_doc": 6,
+      "deletes": null,
+      "sfx_field_ids": [
+        1,
+        2
+      ]
+    },
+    {
+      "segment_id": "e5c403df-41d5-4981-a626-b73bd708153d",
+      "max_doc": 6,
+      "deletes": null,
+      "sfx_field_ids": [
+        1,
+        2
+      ]
+    }
+  ],
+  "schema": [
+    {
+      "name": "_node_id",
+      "type": "u64",
+      "options": {
+        "indexed": true,
+        "fieldnorms": true,
+        "fast": true,
+        "stored": true
+      }
+    },
+    {
+      "name": "path",
+      "type": "text",
+      "options": {
+        "indexing": {
+          "record": "freq",
+          "fieldnorms": true,
+          "tokenizer": "raw_code"
+        },
+        "stored": true,
+        "fast": false
+      }
+    },
+    {
+      "name": "content",
+      "type": "text",
+      "options": {
+        "indexing": {
+          "record": "freq",
+          "fieldnorms": true,
+          "tokenizer": "raw_code"
+        },
+        "stored": true,
+        "fast": false
+      }
+    }
+  ],
+  "opstamp": 22
+}
