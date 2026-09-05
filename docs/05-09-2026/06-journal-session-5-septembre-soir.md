@@ -146,6 +146,80 @@ avant), le renommage du fork y avait remplacé le nom partout, liens compris
 (le lien appveyor pointait sur `fulmicoton/lucivy`). Nom restitué sous un
 titre qui dit ce que c'est (`f26c1d7`).
 
+## 6 bis. Plus tard dans la soirée : la vitrine, le banc, la présentation
+
+Repris après la compaction du contexte, à partir du trio 06 → 04 → 07 → 08.
+
+**`derived_in_ram` dans Chrome** (`4a5967d`, [04](04-progression-et-a-faire.md)
+§2 ter) : OPFS −26 % sur le noyau et −23 % sur MDN, réouverture et requêtes
+égales, mais pic mémoire +524 Mo à l'indexation du noyau (3 859 Mo sur
+4 096) et +252 au repos — les temporaires du rebâti dans une mémoire linéaire
+qui ne redescend jamais. Décision : option du playground (`?ram`), pas la
+vitrine.
+
+**Douze corpus au prompt** (`39c6d9e`, [04](04-progression-et-a-faire.md)
+§2 bis) : Lucie a choisi MDN, Go, Godot, **Linux 2.6.0 entier** (un dépôt
+autocontenu, pas une tranche de l'actuel), TypeScript à l'essai, et tous les
+légers (PostgreSQL, CPython, Redis, Git, curl, SQLite, nginx). Manifeste
+`playground/corpora.json`, `tools/build_corpus.py` (même filtre que la
+page), étape dans `pages.yml` — les archives n'étaient pas déployées, le
+site publié aurait répondu 404 à `index mdn`. Mesurés dans Chrome : 2.6.0
+en 28 s et 1,1 Go, TypeScript 39 044 fichiers en 33 s sans faire monter la
+mémoire. Deux bugs de la page trouvés en mesurant : `drop` puis `index` du
+même corpus échouait (WASMFS gardait le répertoire en cache → export
+`lucivy_drop_index`, `Lucivy.dropIndex`), et le lecteur tar ne lisait que
+100 octets de nom (un quart de TypeScript perdu en silence → préfixe ustar,
+GNU `L`, PAX `x`). Licences : redistribuer les sources avec leur notice est
+permis par toutes (Redis compris, RSALv2 / SSPLv1 / AGPLv3), et rien ne
+déteint sur le MIT de lucivy — les corpus sont des données à côté, jamais
+dans le dépôt.
+
+**L'invite libre** (`e41bfce`, `c70d176`) : `$ lucivy ` puis `search "…"`,
+`index <nom>`, `list`, `help`, ou une valeur nue ; `search ` proposé,
+effaçable, en fin de démo et après chaque recherche ; `--help` seul marche
+et s'affiche `lucivy --help`.
+
+**Le pic mémoire suit la taille des segments** (`2c21021`) : commit tous les
+8 Mo de texte en plus des 2 000 fichiers — Godot 3 323 → 1 778 Mo, la 2.6.0
+3 391 → 2 023, pour 10 à 13 s d'indexation de plus ; 16 Mo mesuré et refusé.
+
+**Les chiffres 4.0 sur la page et dans le README** (`fe422d3`) : le panel du
+noyau rejoué sur l'index dictionnaire (`sched` 9 289 documents en 11 ms,
+53 211 spans, index 4 938 Mo au lieu de 18 057), navigateur contre natif sur
+la 2.6.0 (natif 23 s / 905 Mo, onglet 41 s / 1 089 Mo).
+
+**Le banc comparatif rejouable** (`262d786`, [04](04-progression-et-a-faire.md)
+§2 quinquies, rapport `docs/compare-engines-2026-09-05.md`) : demande de
+Lucie, « pas seulement la taille, les faire trébucher là où ils trébuchent ».
+`benches/compare_engines.sh` — lucivy ×3, Elasticsearch 8.19 (trigrammes +
+`wildcard`), tantivy 0.25 (défaut, `NgramTokenizer`), jugés par le même scan.
+Trouvé en route : **la phrase de trigrammes de tantivy rend 0 sur tout**
+(positions toutes à 0 dans son tokenizer ; le doc d'août disait « exact »
+sur cette base) → chemin honnête, ET de trigrammes puis vérification sur le
+texte stocké, chronométré ; et la phrase floue `retrun` rendait 0 des deux
+côtés (transposition = deux éditions en Levenshtein) → `retur`. Face à
+l'Elasticsearch qui fait le même travail (3 082 Mo) : ×1,6 sur disque, ×1,08
+avec `derived_in_ram` (×5,9 le 28 août).
+
+**La présentation** (`b80565d`, `ee8d609`, `81ab215`,
+[09](09-plan-d-action-presentation.md)) : la phrase (« répond à la question
+que les autres ne peuvent pas poser, et prouve chaque réponse »), six
+piliers avec preuve et phrase interdite — Lucie a ajouté la transaction
+(store branchable, même commit, rollback) et la fédération (mêmes scores
+qu'un index unique, en bibliothèque ; Elasticsearch est un cluster, tantivy
+est mono-index, ce qu'il a fallu réécrire en mars). Puis les docs relus :
+**`ARCHITECTURE.md`** (la page que Google montre en premier) en 4.0.0 avec
+les quatre propriétés, la table des fichiers au format 4.0 et ses poids
+mesurés, le dictionnaire, la 2.6.0, « one corpus, one truth » ; le README
+(trois lignes d'accroche, « What's new in 4.0.0 », les deux lignes
+constatées) ; les README Python, Node, C++, WASM et `lucivy_core` alignés
+sur le principal ; la page d'arrivée (sous-titre, trois cartes, section
+comparative, machine en 4.0.0). Reste le titre.
+
+**Temps d'indexation remesurés** (index neufs, machine au repos) : noyau en
+dictionnaire **131 s**, avec `derived_in_ram` **134 s**, v3 56 s ; la
+référence « ~255 s » datait d'avant la compaction du dictionnaire en flux.
+
 ## 7. Ce qui reste (le todo vit dans [04](04-progression-et-a-faire.md))
 
 - **Publier 4.0.0** : décision de Lucie ; vérifier `PUBLISH_ENABLED`
@@ -174,6 +248,13 @@ titre qui dit ce que c'est (`f26c1d7`).
 
 ## 8. Commits de la soirée
 
+Plus tard : `4a5967d` `?ram` mesuré · `39c6d9e` douze corpus, deux bugs ·
+`e41bfce` `c70d176` invite libre · `2c21021` commit par volume · `fe422d3`
+chiffres 4.0 · `5c83a57` face à Elasticsearch · `262d786` banc comparatif ·
+`b80565d` plan de présentation · `ee8d609` docs de présentation · `81ab215`
+page d'arrivée.
+
+Avant la compaction : 
 `556262a` PMP4 et `byte_at` · `cbea452` postings sans octets · `f26c1d7`
 CHANGELOG tantivy, A/B trois passes · `f087689` `derived_in_ram` ·
 `137b03b` WASM · `7c84871` tag et note · `f0b5c6e` fuzzy deux passes

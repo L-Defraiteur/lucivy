@@ -1234,7 +1234,7 @@ V3_CORPUS=/tmp/linux-bench V3_SFX_VERSION=4 cargo test --release -p lucivy-core 
     <p style="margin-top:12px">
       What the other two do better, in the same report: Elasticsearch answers a plain substring in
       3-8 ms to lucivy's 12-15 and is a distributed system; tantivy indexes the corpus in seconds
-      (lucivy: 56 s per-segment, about four minutes with the shared dictionary); both run a
+      (lucivy: 56 s per-segment, 131 s with the shared dictionary); both run a
       term-level fuzzy in a fifth of lucivy's time at two edits &mdash; on a different question, and
       every such row says so. tantivy's n-gram tokenizer emits every position as 0, so a trigram
       phrase there matches nothing: its rows use the honest path, an AND of trigrams then a

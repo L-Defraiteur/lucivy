@@ -321,8 +321,8 @@ byte-by-byte scan of the files; a lucivy count is `OK` only when its documents
 | Elasticsearch, trigrams + `wildcard` | trigram phrases, regex on the wildcard field | 3 082 MB | ×3.6 | 123 s |
 | tantivy, default tokenizer | it does not (whole words) | 612 MB | ×0.7 | 1 s |
 | tantivy, `NgramTokenizer` | trigram AND, then the stored text re-read to verify (its n-gram positions are all 0) | 680 MB | ×0.8 | 5 s |
-| **lucivy 4.0, shared dictionary** | suffix FST, exact spans | **4 926 MB** | **×5.8** | 255 s |
-| **lucivy 4.0, shared dictionary + `derived_in_ram`** | suffix FST, exact spans | **3 335 MB** | **×3.9** | 255 s |
+| **lucivy 4.0, shared dictionary** | suffix FST, exact spans | **4 926 MB** | **×5.8** | 131 s |
+| **lucivy 4.0, shared dictionary + `derived_in_ram`** | suffix FST, exact spans | **3 335 MB** | **×3.9** | 134 s |
 
 On the substring itself all three agree to the document (`mutex_lock` 5 145,
 `spin_lock` 6 569, `sched` 9 289 — bold in the report). Where they part:

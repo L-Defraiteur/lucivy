@@ -49,7 +49,7 @@ changé (corpus, nombre de fichiers, `V3_COMMIT_EVERY`, `V3_SFX_VERSION`,
 T="cargo test --release -p lucivy-core --test test_sfx_v3_ground_truth v3_ground_truth_demo -- --ignored --nocapture"
 V3_CORPUS=/tmp/lucivy-cmp V3_MAX_DOCS=10000 V3_INDEX_DIR=/chemin/idx $T          # référence 10 000 (~8 s v3, ~19 s dict)
 V3_CORPUS=/tmp/lucivy-cmp-90k V3_MAX_DOCS=30000 V3_COMMIT_EVERY=2000 V3_INDEX_DIR=/chemin/idx30k $T   # A/B de temps
-V3_CORPUS=/tmp/lucivy-cmp-90k V3_MAX_DOCS=100000 V3_COMMIT_EVERY=10000 V3_INDEX_DIR=/chemin/idx90k $T # noyau (~65 s v3, ~255 s dict)
+V3_CORPUS=/tmp/lucivy-cmp-90k V3_MAX_DOCS=100000 V3_COMMIT_EVERY=10000 V3_INDEX_DIR=/chemin/idx90k $T # noyau (56 s v3, 131 s dict, 134 s dict+derived_in_ram — remesurés le 5 au soir)
 # V3_SFX_VERSION=4 : dictionnaire ; V3_DERIVED_IN_RAM=1 : sans les trois dérivés ; V3_PROFILE=1 : le profil ; LUCIVY_VERBOSE=1 : [derived], [reader], [merge]
 grep -o '[0-9]* pass, [0-9]* fail' out.txt                              # 9 pass, 0 fail
 grep -E "^[a-z_]+.*(strict|relax|term|sw|fz1|fz2|rx|jw1) +[0-9—]+ +[0-9]+ +(OK|n/a)" out.txt | sed -E 's/ +/ /g' | awk '{print $1,$2,$6}'
