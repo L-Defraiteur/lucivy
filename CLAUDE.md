@@ -294,7 +294,13 @@ cd playground && node serve.mjs
 ## Docs
 
 **Dossier courant : `docs/05-09-2026/` — pour repartir, lire dans l'ordre
-`05-journal-session-5-septembre-suite.md` (la fin de la session du 5 :
+`06-journal-session-5-septembre-soir.md` (la soirée du 5 : les postings
+sans octets `SFP5`/`WSP5`/`PMP4`, l'option `derived_in_ram`, la fuzzy
+tentée sans gain, la fixture 3.0.8 et `test_compat_308`, le passage en
+4.0.0 non publié), puis `04-progression-et-a-faire.md` (l'état et le todo :
+§2 postings, §2 ter dérivés, §2 quater fuzzy, §2 bis vitrine, §3 4.0.0),
+puis `07-architecture.md` et `08-knowledge-dump-baselines-tests-outils.md`
+(autonomes, à jour) ; le détail d'avant : `05-journal-session-5-septembre-suite.md` (la fin de la session du 5 :
 la compaction du dictionnaire en flux, le playground et le navigateur
 validés — 15 440 fichiers du noyau, fusions à 2 pour le dictionnaire,
 panel de 21 requêtes —, deux corrections trouvées en mesurant, le
