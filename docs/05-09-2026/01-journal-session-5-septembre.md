@@ -257,13 +257,15 @@ commits.
 
 ### 13 bis. La vérité de bout en bout avec des compactions
 
-Index de référence 10 000 reconstruit en mode dictionnaire avec un commit
-tous les 500 fichiers et **trois générations au plus**
+Index de **5 000 fichiers** du corpus de référence (le harnais sans
+`V3_MAX_DOCS` en prend 5 000, pas 10 000 — la forme `.v3_shape` le dit :
+`files=5000`), reconstruit en mode dictionnaire avec un commit tous les
+500 fichiers et **trois générations au plus**
 (`LUCIVY_DICT_MAX_GENERATIONS=3`, `V3_COMMIT_EVERY=500`,
 `V3_INDEX_DIR` neuf) : **six compactions** pendant la construction
 (générations 5, 9, 13, 17, 21, 25 ; 4 parts chacune, 0,7 à 1,4 s sur le
 champ contenu, jusqu'à 1,15 M clés et 2,06 M textes), deux générations
-vivantes à la fin (25 : 85,7 Mo, 26 : 13,5 Mo). Panel `v3_ground_truth_demo`
+vivantes à la fin (25 : 85,7 Mo, 26 : 13,5 Mo ; index 176 Mo). Panel `v3_ground_truth_demo`
 **9/9**, `v3_ground_truth_contains` **15/15**, `v3_ground_truth_coherence`
 **31/31** — comptes et spans contre le disque. Lancement des deux
 derniers : `<nom> -- --exact --nocapture`, **sans** `--ignored` (ils ne

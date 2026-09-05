@@ -206,7 +206,9 @@ entre shards) ; relancé seul il passe.
   | texts ms` à chaque compaction, y compris pendant une construction.
 - **Une construction qui compacte beaucoup**, pour la vérité de bout en
   bout : `V3_SFX_VERSION=4 V3_COMMIT_EVERY=500 LUCIVY_DICT_MAX_GENERATIONS=3`
-  devant le harnais sur le corpus 10 000, `V3_INDEX_DIR` neuf — six
+  devant le harnais sur le corpus de référence (5 000 fichiers sans
+  `V3_MAX_DOCS` : le harnais n'en prend pas 10 000 par défaut, mettre
+  `V3_MAX_DOCS=10000` pour la référence), `V3_INDEX_DIR` neuf — six
   compactions, puis le panel, `contains` et `coherence` sur le même
   index (9/9, 15/15, 31/31 le 5 septembre, [01](01-journal-session-5-septembre.md) §13 bis).
 - Ce qui reste ([01](01-journal-session-5-septembre.md) §11) : la regex à
