@@ -61,6 +61,12 @@ const sharded = Index.create('/tmp/sharded', [...], 4);
 // Fixed at creation. (BlobIndex.create: `{ sharedDictionary: true }` in options.)
 const compact = Index.create('/tmp/compact', [...], 1, true);
 
+// Smaller still on disk: the three derived sidecars of each segment (about
+// a third of the index) are rebuilt in RAM, byte for byte, when the index is
+// opened, instead of being written. Same answers; opening pays the rebuild,
+// never a query. (BlobIndex.create: `{ derivedInRam: true }`.)
+const lean = Index.create('/tmp/lean', [...], 1, true, true);
+
 // Open existing
 const index2 = Index.open('/tmp/my_index');
 ```

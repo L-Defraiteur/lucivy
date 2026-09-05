@@ -28,6 +28,17 @@ Unreleased (branch v4)
   written with spans is still read, and its spans still used. Query
   resolution works in positions end to end; the spans of the matches that
   are kept are placed once, from the posmap.
+- **`derived_in_ram: true` at creation**: the three derived sidecars of a
+  segment (`.posmap`, `.word_pos_map`, `.sibling_v3` — a third of the index
+  on disk) are not written; they are rebuilt in RAM, byte for byte, when
+  the index is opened or reloaded (segments in parallel, only the new ones
+  — never at query time). Same answers. Linux kernel: 4.9 → 3.3 GB on disk
+  (3.9× the text); opening pays the rebuild (1.8 s for the 253 segments of the kernel, 43 ms with the files; 286 ms against 21 on 30 000 files), queries run as
+  before; the rebuilt structures are resident in RAM where a mapped file
+  costs only what a query touches. Off by default. Python `Index.create(..., derived_in_ram=True)`, Node
+  `Index.create(path, fields, shards, sharedDictionary, derivedInRam)` /
+  `BlobIndexOptions.derivedInRam`, C++ and browser `"derived_in_ram": true`
+  in the schema object.
 - **Fixed: the tail entry of a very long word pointed at the wrong
   position.** A word of more than 264 bytes (a line of Chinese, no separator
   inside) gets a second entry for its last bytes; when the word's trailing

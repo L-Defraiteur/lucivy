@@ -54,6 +54,15 @@ pub struct SchemaConfig {
     /// spans and scores are identical to the default. Off by default.
     #[serde(default)]
     pub shared_dictionary: Option<bool>,
+    /// Do not write the three derived sidecars of each segment (`.posmap`,
+    /// `.word_pos_map`, `.sibling_v3` — about a third of the index on disk)
+    /// and rebuild them in RAM, byte for byte, when the index is opened or
+    /// reloaded (segments in parallel, only the new ones). Same answers. The
+    /// price: opening reads every segment's postings, and the rebuilt
+    /// structures are resident in RAM where a mapped file costs only what a
+    /// query touches. Off by default; fixed at creation.
+    #[serde(default)]
+    pub derived_in_ram: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -145,7 +154,7 @@ impl SchemaConfig {
         let mut v: serde_json::Value = serde_json::from_slice(data)
             .map_err(|e| format!("invalid config JSON: {e}"))?;
         let known = ["fields", "tokenizer", "shards", "df_threshold",
-                     "balance_weight", "sfx", "sfx_version", "shared_dictionary"];
+                     "balance_weight", "sfx", "sfx_version", "shared_dictionary", "derived_in_ram"];
         let known_field = ["name", "type", "stored", "indexed", "fast"];
         if let Some(obj) = v.as_object_mut() {
             obj.retain(|k, _| known.contains(&k.as_str()));

@@ -186,10 +186,16 @@ back into the index.
 # and RAM, queries slightly slower at cold cache (x1.2 to x1.6 on exact
 # queries, fuzzy ones faster), same answers. Fixed at creation, off by default.
 index = lucivy.Index.create("/tmp/compact", fields=[...], shared_dictionary=True)
+
+# Smaller still on disk: the three derived sidecars of each segment (about a
+# third of the index) are not written but rebuilt in RAM, byte for byte, when
+# the index is opened. Same answers; opening pays the rebuild (never a
+# query), the rebuilt structures stay resident. Fixed at creation.
+index = lucivy.Index.create("/tmp/compact", fields=[...], shared_dictionary=True, derived_in_ram=True)
 ```
 
-Node: `Index.create(path, fields, shards, true)`; browser and C++: `shared_dictionary: true`
-in the config object.
+Node: `Index.create(path, fields, shards, true, true)`; browser and C++:
+`shared_dictionary: true` and `derived_in_ram: true` in the config object.
 
 ### Sharded, distributed, synchronised
 

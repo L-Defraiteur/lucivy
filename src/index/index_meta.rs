@@ -310,10 +310,23 @@ pub struct IndexSettings {
     /// 2; the field is now always written so the two never get confused.
     #[serde(default = "sfx_version_when_absent")]
     pub sfx_version: u8,
+    /// Do not write the three derived sidecars of a v3 segment — `.posmap`,
+    /// `.word_pos_map`, `.sibling_v3`, a third of a kernel index — and
+    /// rebuild them in RAM, byte for byte, when a segment reader opens
+    /// (`suffix_fst::derived`; the readers open in parallel, and a reload
+    /// reuses what it already built). Smaller on disk; in RAM the rebuilt
+    /// structures are resident where a mapped file costs only what a query
+    /// touches, and opening the index pays the rebuild — never a query. Off
+    /// by default; fixed at creation (`derived_in_ram` in the schema config).
+    #[serde(default)]
+    #[serde(skip_serializing_if = "is_false")]
+    pub derived_in_ram: bool,
 }
 
 /// Version of an index whose meta.json predates the field: those were v2.
 fn sfx_version_when_absent() -> u8 { 2 }
+
+fn is_false(val: &bool) -> bool { !*val }
 
 /// Must be a function to be compatible with serde defaults
 fn default_docstore_blocksize() -> usize {
@@ -335,6 +348,7 @@ impl Default for IndexSettings {
             docstore_compress_dedicated_thread: true,
             sfx_enabled: true,
             sfx_version: 3,
+            derived_in_ram: false,
         }
     }
 }
@@ -623,6 +637,7 @@ mod tests {
                 docstore_blocksize: 16_384,
                 sfx_enabled: true,
                 sfx_version: 3,
+                derived_in_ram: false,
             }
         );
         {

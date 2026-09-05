@@ -27,6 +27,7 @@ pub mod block_offsets;
 pub mod gmap;
 pub mod dictionary;
 pub mod dictionary_compact;
+pub mod derived;
 #[cfg(test)]
 mod postings_measure;
 pub mod word_sfxpost;

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::collections::HashSet;
 use std::fmt;
@@ -282,6 +283,11 @@ pub struct Index {
     /// The shard dictionary (`sfx_version` 4), the generation the last
     /// `meta.json` read named; shared by every clone of this `Index`.
     sfx_dictionary: Arc<RwLock<Option<Arc<SfxDictionary>>>>,
+    /// `derived_in_ram`: the rebuilt sidecars by (segment, field), shared by
+    /// every clone, so that a reload only rebuilds the segments it did not
+    /// have (`SegmentReader::open`; pruned to the live segments by the
+    /// reader, `retain_derived`).
+    derived_cache: Arc<std::sync::Mutex<HashMap<(SegmentId, u32), Arc<crate::suffix_fst::derived::DerivedSlices>>>>,
 }
 
 impl Index {
@@ -419,7 +425,25 @@ impl Index {
             executor: Executor::single_thread(),
             inventory,
             sfx_dictionary: Arc::new(RwLock::new(sfx_dictionary)),
+            derived_cache: Default::default(),
         }
+    }
+
+    /// `derived_in_ram`: the rebuilt sidecars of (`segment`, `field`), if a
+    /// reader of this index already built them.
+    pub fn derived_cached(&self, segment: SegmentId, field: u32) -> Option<Arc<crate::suffix_fst::derived::DerivedSlices>> {
+        self.derived_cache.lock().unwrap().get(&(segment, field)).cloned()
+    }
+
+    /// `derived_in_ram`: remember the rebuilt sidecars of (`segment`, `field`).
+    pub fn cache_derived(&self, segment: SegmentId, field: u32, slices: Arc<crate::suffix_fst::derived::DerivedSlices>) {
+        self.derived_cache.lock().unwrap().insert((segment, field), slices);
+    }
+
+    /// `derived_in_ram`: forget the sidecars of every segment not in `live`
+    /// (merged away, or deleted) — called by the reader after each reload.
+    pub fn retain_derived(&self, live: &[SegmentId]) {
+        self.derived_cache.lock().unwrap().retain(|(seg, _), _| live.contains(seg));
     }
 
     /// The shard dictionary, on an index with `sfx_version` 4.

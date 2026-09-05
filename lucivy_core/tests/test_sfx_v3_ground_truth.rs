@@ -191,10 +191,11 @@ fn index_shape_key(num_files: usize) -> String {
         None => (-1, -1, false),
     };
     format!(
-        "corpus={} files={} commit_every={} merge_target={} merge_group={} progressive={} policy={} sfx={} v=10",
+        "corpus={} files={} commit_every={} merge_target={} merge_group={} progressive={} policy={} sfx={}{} v=10",
         repo_path(), num_files, commit_every(500), target, group, progressive,
         std::env::var("V3_POLICY").is_ok(),
         std::env::var("V3_SFX_VERSION").unwrap_or_else(|_| "3".into()),
+        if std::env::var("V3_DERIVED_IN_RAM").is_ok() { " derived_in_ram" } else { "" },
     )
 }
 
@@ -238,7 +239,10 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
             {"name": "content", "type": "text", "stored": true}
         ],
         // `V3_SFX_VERSION=4` builds the index on the shard dictionary.
-        "sfx_version": std::env::var("V3_SFX_VERSION").ok().and_then(|v| v.parse::<u8>().ok()).unwrap_or(3)
+        "sfx_version": std::env::var("V3_SFX_VERSION").ok().and_then(|v| v.parse::<u8>().ok()).unwrap_or(3),
+        // `V3_DERIVED_IN_RAM=1`: no `.posmap` / `.word_pos_map` / `.sibling_v3` on
+        // disk, rebuilt in RAM on first use.
+        "derived_in_ram": std::env::var("V3_DERIVED_IN_RAM").is_ok()
     })).unwrap();
 
     if let Some(h) = try_reuse_index(files) {

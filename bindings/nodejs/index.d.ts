@@ -88,6 +88,11 @@ export interface BlobIndexOptions {
    * (about 20 % smaller, slightly slower queries) — see `Index.create()`.
    */
   sharedDictionary?: boolean
+  /**
+   * `create()` only: the derived sidecars rebuilt in RAM at open instead
+   * of written (about a third smaller on disk) — see `Index.create()`.
+   */
+  derivedInRam?: boolean
 }
 export declare class Index {
   /**
@@ -104,7 +109,7 @@ export declare class Index {
    *   the shard's new texts. Same answers as the default. Off by default;
    *   fixed at creation.
    */
-  static create(path: string, fields: Array<FieldDef>, shards?: number | undefined | null, sharedDictionary?: boolean | undefined | null): Index
+  static create(path: string, fields: Array<FieldDef>, shards?: number | undefined | null, sharedDictionary?: boolean | undefined | null, derivedInRam?: boolean | undefined | null): Index
   /**
    * Open an existing index at the given path.
    *

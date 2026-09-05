@@ -263,6 +263,23 @@ min, machine au repos) : **×0,91 à ×1,09** sur les dix requêtes — exactes
 14,7 — et `place_spans` coûte 0,6 à 3,3 ms de somme sur 120 segments. La
 règle du ×1,5 n'est pas approchée ([04](04-progression-et-a-faire.md) §2).
 
+## 8 bis. Les fichiers dérivés reconstruits en RAM, sur option
+
+« Ça va presque gagner un Go quand même, oui pour les fichiers dérivés mais
+sur option » (Lucie). Fait : `derived_in_ram: true` à la création, et
+l'index n'écrit plus `.posmap`, `.word_pos_map`, `.sibling_v3` — le
+lecteur de segment les rebâtit depuis les postings **à l'ouverture**
+(`suffix_fst/derived.rs` ; d'abord fait à la première requête, refusé par
+Lucie : « ça trompe les gens et casse mes showcases » — donc à l'ouverture,
+en parallèle par segment, avec un cache par segment pour les
+rechargements), **identiques octet pour octet** aux fichiers (vérifié sur
+560 segments réels et un corpus synthétique). Noyau 4 938 → **3 344 Mo**
+(×3,9 le texte, 5,4 fois moins que `main`), 30 000 : 1 128 → 829. Le prix :
+l'ouverture (noyau 43 ms → 1,8 s, 30 000 21 → 286 ms), et 1,6 Go résidents ; les requêtes, elles, ne
+changent pas.
+Détail, chiffres et vérité : [04](04-progression-et-a-faire.md) §2 ter.
+Exposé dans les bindings comme `shared_dictionary`.
+
 ## 9. Commits de la suite
 
 `634f0e6` compaction en flux · `5a8f6b0` docs (5 000 fichiers, pas

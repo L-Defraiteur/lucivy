@@ -35,7 +35,11 @@ let config: SchemaConfig = serde_json::from_value(serde_json::json!({
     // disk and RAM, queries slightly slower at cold cache (roughly x1.2 to
     // x1.6 on exact queries, fuzzy ones faster), same answers. Off by
     // default; fixed at creation.
-    "shared_dictionary": false
+    "shared_dictionary": false,
+    // The three derived sidecars of each segment rebuilt in RAM when the
+    // index opens instead of written: about a third less on disk, opening
+    // pays the rebuild (never a query). Off by default; fixed at creation.
+    "derived_in_ram": false
 }))?;
 
 let index = ShardedHandle::create("/tmp/my_index", &config)?;

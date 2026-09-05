@@ -171,6 +171,7 @@ impl LucivyHandle {
 
         let mut settings = IndexSettings::default();
         settings.sfx_version = config.effective_sfx_version();
+        settings.derived_in_ram = config.derived_in_ram.unwrap_or(false);
         let index = Index::create(dir, schema.clone(), settings)
             .map_err(|e| format!("cannot create index: {e}"))?;
 

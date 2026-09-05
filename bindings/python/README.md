@@ -67,6 +67,12 @@ index = lucivy.Index.create("/tmp/my_index", fields=[...], shards=4)
 # Fixed at creation.
 index = lucivy.Index.create("/tmp/compact", fields=[...], shared_dictionary=True)
 
+# Smaller still on disk: the three derived sidecars of each segment (about
+# a third of the index) are rebuilt in RAM, byte for byte, when the index
+# is opened, instead of being written. Same answers; opening pays the
+# rebuild (never a query), the rebuilt structures stay resident.
+index = lucivy.Index.create("/tmp/compact", fields=[...], shared_dictionary=True, derived_in_ram=True)
+
 # Open an existing index
 index = lucivy.Index.open("/tmp/my_index")
 ```

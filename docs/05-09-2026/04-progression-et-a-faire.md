@@ -16,6 +16,7 @@ Noyau entier, 93 605 fichiers, 857 Mo de texte :
 | v4, un `.sfx` par segment (`idx90k-v8`) | 253 | 7 422 Mo | ×8,7 |
 | v4, dictionnaire par shard (`idx90k-dict2`) | 253 | 5 706 Mo | ×6,7 |
 | v4, dictionnaire, postings sans octets (`idx90k-dict-sfp5`, 5 septembre au soir) | 253 | **4 938 Mo** | **×5,8** |
+| … et `derived_in_ram` (`idx90k-dict-ram`, option) | 253 | **3 344 Mo** | **×3,9** |
 
 Répartition des 5,7 Go : `.sfxpost` 22 %, `.word_sfxpost` 18 %, `dict.sfx`
 16 %, `.word_pos_map` 11 %, `.posmap` 8 %, `.sibling_v3` 8 %, `.store`
@@ -535,6 +536,51 @@ trois passes alternées, min, machine au repos) :
 De 0,91 à 1,09 : la règle du ×1,5 n'est pas approchée. Le placement
 (`place_spans`) coûte 0,6 à 3,3 ms de somme sur 120 segments (4 à 15 % des
 étapes profilées d'une exacte, moins que la vérification).
+
+## 2 ter. Les fichiers dérivés reconstruits en RAM — fait, **sur option** (5 septembre au soir)
+
+Décision de Lucie : oui aux dérivés reconstruits, jamais par défaut.
+`derived_in_ram: true` dans le schéma à la création (`SchemaConfig`,
+`IndexSettings.derived_in_ram`, `meta.json` ; Python
+`derived_in_ram=True`, Node `Index.create(path, fields, shards,
+sharedDictionary, derivedInRam)` / `BlobIndexOptions.derivedInRam`, C++,
+navigateur et rag3db : la clé du schéma). L'index n'écrit plus `.posmap`,
+`.word_pos_map`, `.sibling_v3` ; le lecteur de segment les **rebâtit
+depuis les postings à l'ouverture** (`suffix_fst/derived.rs`,
+`SegmentReader::open` ; les lecteurs s'ouvrent en parallèle par le DAG du
+rechargement ; `Index::derived_cache` garde le résultat par segment pour
+que les rechargements ne refassent que les segments nouveaux, élagué aux
+segments vivants) — d'abord codé à la première requête, refusé par Lucie :
+« tant pis si temps de chargement, je veux pas de lazy, ça trompe les gens
+et casse mes showcases » — le posmap depuis les positions
+de `.sfxpost` et les `own_len` (`PMP4`), la carte des mots depuis
+`.word_sfxpost`, la fratrie depuis les positions consécutives et les mots
+consécutifs d'une valeur (entrées de queue exclues : de deux entrées finissant
+à la même position, le mot est celle qui commence en premier).
+
+**Identiques octet pour octet** aux fichiers écrits : test unitaire sur un
+corpus synthétique (valeurs multiples, document vide, ligne chinoise avec
+queue), et `derived_files_match_the_index` sur les vrais index — 320/320
+segments des 10 000, 240/240 des 30 000, les trois fichiers (le fichier sur
+disque moins le pied du répertoire). `test_derived_in_ram` : mêmes
+documents et spans que l'index à fichiers sur le panel de onze requêtes,
+en v3 et avec le dictionnaire, après réouverture ; les trois fichiers
+absents du disque ; le réglage dans `meta.json`.
+
+| dictionnaire (`du`, tout compris) | fichiers écrits | `derived_in_ram` |
+|---|---|---|
+| 30 000 fichiers | 1 128 Mo | **829 Mo** (−26,5 %) |
+| noyau entier | 4 938 Mo | **3 344 Mo** (−32 %, ×3,9 le texte ; `main` : 18 057) |
+
+Le prix, mesuré : **l'ouverture** paie le rebâti de tous les segments
+(`[reader] opened N segment readers`, `LUCIVY_VERBOSE`) : **30 000 : 21 → 286 ms ; noyau : 43 ms → 1 791 ms** pour 253 segments rebâtis en parallèle (43 s de CPU, 449 ms pour le plus gros) — et la première requête retombe à 3,0 ms sur les 30 000, 11,5 sur le noyau, comme les autres ; les requêtes ont les temps de l'index à fichiers (noyau :
+11,5 / 11,6 / 19,9 / 11,3 ms contre 11,0 / 11,9 / 21,5 / 11,4 ; fuzzy d2
+809 contre 816 ; regex 234 contre 238 — mesuré quand le rebâti était encore
+à la première requête, celle-là exclue). Et les structures rebâties sont
+résidentes en RAM (1,6 Go sur le noyau) là où un fichier mappé ne coûte que
+ce qu'une requête touche. Panels 9/9 partout. Pas mesuré : le navigateur
+avec l'option (tout y est en mémoire de toute façon : là le gain est l'OPFS
+et le téléchargement d'un snapshot) ; à mesurer, le pic mémoire.
 
 **Seuils calibrés sur les gros index d'avant** (remarque du 5 septembre) :
 `LUCIVY_RAM_INDEX_MAX` (3 Go sur wasm32, index tenu entier en dessous) et

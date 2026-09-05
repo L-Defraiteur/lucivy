@@ -193,6 +193,13 @@ impl InnerIndexReader {
         // Prevents segment files from getting deleted while we are in the process of opening them
         let _meta_lock = index.directory().acquire_lock(&META_LOCK)?;
         let searchable_segments = index.searchable_segments()?;
+        let t0 = std::time::Instant::now();
+        // `derived_in_ram`: forget the rebuilt sidecars of the segments that
+        // are gone; the readers below rebuild the new ones, in parallel.
+        if index.settings().derived_in_ram {
+            let live: Vec<_> = searchable_segments.iter().map(|s| s.id()).collect();
+            index.retain_derived(&live);
+        }
 
         if searchable_segments.len() <= 1 {
             // Single segment — no parallelism needed
@@ -237,6 +244,9 @@ impl InnerIndexReader {
                     format!("missing reader '{name}'"),
                 ))?;
             segment_readers.push(reader);
+        }
+        if crate::diag::is_verbose() {
+            eprintln!("[reader] opened {} segment readers in {:.0}ms", segment_readers.len(), t0.elapsed().as_secs_f64() * 1e3);
         }
         Ok(segment_readers)
     }

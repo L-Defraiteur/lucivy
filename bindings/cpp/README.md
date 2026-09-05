@@ -50,6 +50,10 @@ auto index = lucivy::lucivy_create(path, fields_json, shards);
 // fuzzy ones faster), same answers. Fixed at creation.
 auto compact = lucivy::lucivy_create(path,
     R"({"fields":[{"name":"body","type":"text"}],"shards":2,"shared_dictionary":true})", 1);
+// "derived_in_ram": the three derived sidecars of each segment (about a
+// third of the index) rebuilt in RAM at open instead of written.
+auto lean = lucivy::lucivy_create(path,
+    R"({"fields":[{"name":"body","type":"text"}],"shared_dictionary":true,"derived_in_ram":true})", 1);
 
 // Open an existing index
 auto index = lucivy::lucivy_open(path);
@@ -294,7 +298,8 @@ public:
 ```cpp
 // Create: config_json is either the fields array of lucivy_create(), or a
 // full schema object with the shard count and engine options
-// ("shared_dictionary": true for the smaller, per-shard dictionary).
+// ("shared_dictionary": true for the smaller, per-shard dictionary,
+// "derived_in_ram": true for the sidecars rebuilt in RAM instead of written).
 auto index = lucivy::lucivy_create_with_blob_store(
     std::make_unique<MyBackend>(connection_string),
     "products",                                           // index_name

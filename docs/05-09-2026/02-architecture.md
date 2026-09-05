@@ -311,12 +311,22 @@ Ce que ça pèse : 30 000 fichiers, dictionnaire, 1 131,7 → 977,9 Mo de
 fichiers SFX (−13,6 %), postings −35 à −38 %, posmap +8 % ; v3 −9,6 % ;
 noyau entier, dictionnaire, 5 717 → **4 938 Mo** sur disque (×5,8 le texte).
 
-Trois fichiers restent des **dérivés** des postings : `.posmap` (inverse de
+Trois fichiers sont des **dérivés** des postings : `.posmap` (inverse de
 `.sfxpost`, plus les points de contrôle), `.word_pos_map` (inverse de
-`.word_sfxpost`), `.sibling_v3` (positions consécutives) — ~27 % de l'index
-du noyau, reconstructibles en RAM à l'ouverture, en option seulement (une
-structure rebâtie est résidente, un fichier mappé ne coûte que ce qu'on
-touche).
+`.word_sfxpost`), `.sibling_v3` (positions consécutives d'une valeur et
+mots consécutifs d'une valeur) — 32 % de l'index du noyau après les
+postings sans octets. **Option `derived_in_ram`** (5 septembre au soir,
+`IndexSettings`, fixée à la création, jamais le défaut) : l'index ne les
+écrit pas, et `SegmentReader::open` les rebâtit depuis les postings et la
+méta **à l'ouverture** (`suffix_fst::derived::rebuild` ; les lecteurs
+s'ouvrent en parallèle par le DAG de rechargement ; un cache par segment
+sur l'`Index`, `derived_cache`, épargne aux rechargements les segments
+qu'ils avaient déjà, élagué aux segments vivants), **octet pour octet** les
+fichiers qu'il aurait écrits : les lecteurs ne font pas la différence, et
+aucune requête ne paie quoi que ce soit — décision de Lucie, une première
+requête plus lente tromperait sur la vitesse du moteur. Noyau 4 938 →
+3 344 Mo ; l'ouverture paie le rebâti (noyau : 1 791 ms pour 253 segments contre 43 ms avec les fichiers ; 30 000 : 286 contre 21) ; structures résidentes
+(1,6 Go) là où un fichier mappé ne coûte que ce qu'on touche.
 
 ## 6 ter. Le navigateur (emscripten)
 

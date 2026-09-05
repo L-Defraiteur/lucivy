@@ -336,7 +336,12 @@ entrées de queue ; `.posmap` `PMP4` avec un offset d'octet par 16
 positions, `byte_at` sur le contexte des briques, `place_spans` sur les
 matches gardés ; −35 à −38 % sur les postings, −12 à −14 % sur l'index
 dictionnaire, **noyau entier 5 717 → 4 938 Mo, ×5,8 le texte** ; les
-anciens layouts lus, leurs spans encore servis) ;
+anciens layouts lus, leurs spans encore servis), **option `derived_in_ram`**
+(`.posmap`, `.word_pos_map`, `.sibling_v3` non écrits, rebâtis octet pour
+octet depuis les postings **à l'ouverture** des lecteurs de segments, en
+parallèle, cache par segment sur l'`Index` — `suffix_fst/derived.rs` ;
+noyau **3 344 Mo, ×3,9 le texte**, l'ouverture paie, jamais une requête ;
+structures résidentes ; jamais le défaut) ;
 **`sfx_version` 4 = dictionnaire partagé par shard**
 (`dict-<g>.<champ>.sfx/.termtexts`, `.gmap` par segment — `GMP2` depuis le
 5 au soir : têtes de blocs de 64 + statistique « mots longs » du segment,

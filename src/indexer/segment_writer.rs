@@ -233,7 +233,13 @@ impl SegmentWriter {
                         self.segment_serializer.write_custom_index(field_id, "sfxpost", sfxpost)?;
                     }
                     let mut bytes = output.sfx.len() + output.termtexts.len();
+                    // `derived_in_ram`: the three derived sidecars are not
+                    // written; the segment reader rebuilds them on demand.
+                    let derived_in_ram = self.segment_serializer.segment().index().settings().derived_in_ram;
                     for (ext, data) in &output.registry_files {
+                        if derived_in_ram && crate::suffix_fst::derived::DERIVED_EXTENSIONS.contains(&ext.as_str()) {
+                            continue;
+                        }
                         bytes += data.len();
                         self.segment_serializer.write_custom_index(field_id, ext, data)?;
                     }

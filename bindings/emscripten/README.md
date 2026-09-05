@@ -96,6 +96,9 @@ const index = await lucivy.create('/my-index', {
     // segment: about 20 % less OPFS and memory, queries slightly slower at
     // cold cache (roughly x1.2 to x1.6 on exact queries, fuzzy ones faster),
     // same answers. Fixed at creation. Off by default.
+    // derived_in_ram: true — the three derived sidecars of each segment
+    // (about a third of the index) are rebuilt in memory when the index
+    // opens instead of written to OPFS. Same answers. Off by default.
 });
 
 // Open an existing index from OPFS

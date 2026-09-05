@@ -223,6 +223,17 @@ entre shards) ; relancé seul il passe.
   (c'est ce test qui a trouvé les trois queues de mots chinois décalées,
   [04](04-progression-et-a-faire.md) §2). 0 partout attendu.
   Lancer : `cargo test --release --lib <nom> -- --ignored --nocapture`.
+- **Les fichiers dérivés** (`src/suffix_fst/derived.rs`) :
+  `rebuild_matches_the_collector` (unitaire, corpus synthétique) et le test
+  ignoré `derived_files_match_the_index` — `LUCIVY_DERIVED_DIR=<index d'un
+  shard> cargo test --release --lib derived_files_match_the_index --
+  --ignored --nocapture` : chaque segment rebâti et comparé octet pour
+  octet aux trois fichiers (le fichier sur disque moins le pied du
+  répertoire, `Footer::extract_footer`). `lucivy_core/tests/
+  test_derived_in_ram.rs` : l'option de bout en bout. Le harnais construit
+  un index avec l'option sous `V3_DERIVED_IN_RAM=1` (entre dans
+  `.v3_shape`) ; `LUCIVY_VERBOSE=1` trace chaque rebâti (`[derived] segment …
+  rebuilt … in N ms`).
 - **Les vérités `contains` et `coherence`** ne sont **pas** ignorées :
   `cargo test --release -p lucivy-core --test test_sfx_v3_ground_truth
   v3_ground_truth_contains -- --exact --nocapture` (sans `--ignored`, qui
@@ -334,6 +345,8 @@ l'étape 1), `idx10k-v3-sfp5` / `idx10k-dict-sfp5` (**la référence 10 000
 du format courant** : `SFP5`, `WSP5`, `PMP4`), `idx30k-dict4` (PMP4 +
 SFP4), `idx30k-dict5` et `idx30k-v3-sfp5` (**30 000 au format courant**,
 les A/B de temps), `idx90k-dict-sfp5` (noyau au format courant),
+`idx30k-dict-ram` et `idx90k-dict-ram` (les mêmes avec `derived_in_ram` :
+sans `.posmap` / `.word_pos_map` / `.sibling_v3`),
 `idx30k-dict3` (30 000,
 dictionnaire, **collecteur corrigé** : la référence pour
 `byte_spans_are_derivable`, 0 désaccord), `idx10k-dict-compact` (5 000

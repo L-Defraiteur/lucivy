@@ -11,6 +11,7 @@ use crate::error::DataCorruption;
 use crate::fastfield::{intersect_alive_bitsets, AliveBitSet, FacetReader, FastFieldReaders};
 use crate::fieldnorm::{FieldNormReader, FieldNormReaders};
 use crate::index::{InvertedIndexReader, Segment, SegmentComponent, SegmentId};
+use crate::suffix_fst::derived::DerivedSlices;
 use crate::json_utils::json_path_sep_to_dot;
 use crate::schema::{Field, IndexRecordOption, Schema, Type};
 use crate::space_usage::SegmentSpaceUsage;
@@ -50,6 +51,10 @@ pub struct SegmentReader {
     doc_filter_opt: Option<AliveBitSet>,
     schema: Schema,
     sfx_files: FnvHashMap<Field, FileSlice>,
+    /// `derived_in_ram`: per SFX field, the three derived sidecars rebuilt
+    /// from the postings when the reader opened (`suffix_fst::derived`),
+    /// shared with the index's cache.
+    derived: FnvHashMap<Field, Arc<DerivedSlices>>,
     /// The shard dictionary serving this segment (`sfx_version` 4).
     sfx_dictionary: Option<std::sync::Arc<crate::suffix_fst::dictionary::SfxDictionary>>,
     sfxpost_files: FnvHashMap<Field, FileSlice>,
@@ -59,6 +64,47 @@ pub struct SegmentReader {
     registry_files: std::collections::HashMap<(String, Field), FileSlice>,
 }
 
+
+/// `derived_in_ram`: rebuild the derived sidecars of `field` from the
+/// segment's postings and the texts' META (the shard dictionary's, through
+/// the `.gmap`, on a dictionary segment). Empty slices when the postings
+/// are missing. `LUCIVY_VERBOSE` traces each rebuild.
+fn rebuild_derived_for(
+    segment: &Segment,
+    field: Field,
+    registry_files: &HashMap<(String, Field), FileSlice>,
+    dictionary: Option<&crate::suffix_fst::dictionary::SfxDictionary>,
+) -> DerivedSlices {
+    use crate::suffix_fst::derived::rebuild;
+    use crate::suffix_fst::sfxpost_v2::SfxPostReaderV2;
+    use crate::suffix_fst::word_sfxpost::WordSfxPostReader;
+    use crate::suffix_fst::termtexts_v3::TermTextsReaderV3;
+    use crate::suffix_fst::gmap::GmapReader;
+    let t0 = std::time::Instant::now();
+    let read = |id: &str| registry_files.get(&(id.to_string(), field)).and_then(|f| f.read_bytes().ok());
+    let Some(sp) = read("sfxpost").and_then(SfxPostReaderV2::open_owned) else {
+        return DerivedSlices::default();
+    };
+    let wsp_bytes = read("word_sfxpost");
+    let wsp = wsp_bytes.as_deref().and_then(WordSfxPostReader::open);
+    let gmap_bytes = read("gmap");
+    let gmap = gmap_bytes.as_deref().and_then(GmapReader::open);
+    let dict_texts = dictionary.and_then(|d| d.field(field.field_id())).and_then(|f| f.termtexts_reader());
+    let seg_bytes = if dict_texts.is_none() { read("termtexts") } else { None };
+    let seg_texts = seg_bytes.as_deref().and_then(TermTextsReaderV3::open);
+    let texts = dict_texts.as_ref().or(seg_texts.as_ref());
+    let own_len = |local: u32| -> Option<u16> {
+        let g = gmap.as_ref().map(|g| g.global(local)).unwrap_or(local);
+        texts.and_then(|t| t.meta(g)).map(|m| m.own_len)
+    };
+    let files = rebuild(&sp, wsp.as_ref(), &own_len);
+    if crate::diag::is_verbose() {
+        eprintln!("[derived] segment {:?} field {}: rebuilt posmap {} B, word_pos_map {} B, sibling_v3 {} B in {:.0}ms",
+            segment.id(), field.field_id(), files.posmap.len(), files.word_pos_map.len(), files.sibling_v3.len(),
+            t0.elapsed().as_secs_f64() * 1e3);
+    }
+    DerivedSlices::from(files)
+}
 
 /// Load per-field .sfx/.sfxpost files using sfx_field_ids from the SegmentMeta.
 /// Falls back to reading the old .sfx manifest if sfx_field_ids is empty
@@ -189,8 +235,23 @@ impl SegmentReader {
     }
 
     /// Generic accessor for registry index files by id (e.g. "termtexts").
+    ///
+    /// On an index created with `derived_in_ram`, the three derived sidecars
+    /// (`posmap`, `word_pos_map`, `sibling_v3`) are not on disk: they were
+    /// rebuilt from the segment's postings when this reader opened, and are
+    /// served from memory.
     pub fn sfx_index_file(&self, id: &str, field: Field) -> Option<&FileSlice> {
-        self.registry_files.get(&(id.to_string(), field))
+        if let Some(f) = self.registry_files.get(&(id.to_string(), field)) {
+            return Some(f);
+        }
+        let d = self.derived.get(&field)?;
+        let slice = match id {
+            "posmap" => &d.posmap,
+            "word_pos_map" => &d.word_pos_map,
+            "sibling_v3" => &d.sibling_v3,
+            _ => return None,
+        };
+        if slice.is_empty() { None } else { Some(slice) }
     }
 
     /// Returns the highest document id ever attributed in
@@ -342,6 +403,26 @@ impl SegmentReader {
             .unwrap_or(max_doc);
 
         let (sfx_files, sfxpost_files, posmap_files, bytemap_files, registry_files) = load_sfx_files(segment, &schema);
+        // `derived_in_ram`: the derived sidecars, rebuilt now — before any
+        // query — unless a previous reader of this segment left them in the
+        // index's cache.
+        let mut derived = FnvHashMap::default();
+        if segment.index().settings().derived_in_ram {
+            let dict = if segment.index().settings().sfx_version == crate::suffix_fst::dictionary::DICTIONARY_SFX_VERSION {
+                segment.index().sfx_dictionary()
+            } else { None };
+            for &field in sfx_files.keys() {
+                let slices = match segment.index().derived_cached(segment.id(), field.field_id()) {
+                    Some(s) => s,
+                    None => {
+                        let s = Arc::new(rebuild_derived_for(segment, field, &registry_files, dict.as_deref()));
+                        segment.index().cache_derived(segment.id(), field.field_id(), s.clone());
+                        s
+                    }
+                };
+                derived.insert(field, slices);
+            }
+        }
 
         let sfx_dictionary = if segment.index().settings().sfx_version
             == crate::suffix_fst::dictionary::DICTIONARY_SFX_VERSION
@@ -368,6 +449,7 @@ impl SegmentReader {
             offsets_composite,
             schema: schema.clone(),
             sfx_files,
+            derived,
             sfxpost_files,
             posmap_files,
             bytemap_files,

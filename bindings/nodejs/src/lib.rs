@@ -125,9 +125,15 @@ impl Index {
     ///   to x1.6 on exact queries, fuzzy ones faster) and a commit also writes
     ///   the shard's new texts. Same answers as the default. Off by default;
     ///   fixed at creation.
+    /// @param derivedInRam - Do not write the three derived sidecars of each
+    ///   segment (`.posmap`, `.word_pos_map`, `.sibling_v3`, about a third
+    ///   of the index on disk); they are rebuilt in RAM, byte for byte, when
+    ///   the index is opened or reloaded. Same answers; opening pays the
+    ///   rebuild (never a query) and the rebuilt structures stay resident.
+    ///   Off by default; fixed at creation.
     #[napi(factory)]
-    pub fn create(path: String, fields: Vec<FieldDef>, shards: Option<u32>, shared_dictionary: Option<bool>) -> Result<Self> {
-        let config = schema_config(&fields, shards, shared_dictionary);
+    pub fn create(path: String, fields: Vec<FieldDef>, shards: Option<u32>, shared_dictionary: Option<bool>, derived_in_ram: Option<bool>) -> Result<Self> {
+        let config = schema_config(&fields, shards, shared_dictionary, derived_in_ram);
 
         let handle = ShardedHandle::create(&path, &config)
             .map_err(|e| Error::from_reason(e))?;
@@ -777,7 +783,7 @@ fn build_contains_split_multi_field(value: &str, text_fields: &[String], distanc
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-fn schema_config(fields: &[FieldDef], shards: Option<u32>, shared_dictionary: Option<bool>) -> query::SchemaConfig {
+fn schema_config(fields: &[FieldDef], shards: Option<u32>, shared_dictionary: Option<bool>, derived_in_ram: Option<bool>) -> query::SchemaConfig {
     let field_defs: Vec<query::FieldDef> = fields
         .iter()
         .map(|f| query::FieldDef {
@@ -794,6 +800,7 @@ fn schema_config(fields: &[FieldDef], shards: Option<u32>, shared_dictionary: Op
         tokenizer: None,
         shards: shards.map(|s| s as usize),
         shared_dictionary: shared_dictionary.filter(|&b| b),
+        derived_in_ram: derived_in_ram.filter(|&b| b),
         ..Default::default()
     }
 }
@@ -1071,6 +1078,9 @@ pub struct BlobIndexOptions {
     /// `create()` only: one dictionary per shard instead of one per segment
     /// (about 20 % smaller, slightly slower queries) — see `Index.create()`.
     pub shared_dictionary: Option<bool>,
+    /// `create()` only: the derived sidecars rebuilt in RAM at open instead
+    /// of written (about a third smaller on disk) — see `Index.create()`.
+    pub derived_in_ram: Option<bool>,
 }
 
 /// One argument of a store callback, built on the JS thread.
@@ -1476,7 +1486,7 @@ impl BlobIndex {
     /// @param store - Object implementing the store protocol (`load`, `save`, `delete`, `exists`, `list`, optional `blobLen` / `loadRange`).
     /// @param indexName - Name of the index inside the store.
     /// @param fields - Field definitions, as for `Index.create()`.
-    /// @param options - `{cacheDir?, lazy?, shards?, sharedDictionary?}`.
+    /// @param options - `{cacheDir?, lazy?, shards?, sharedDictionary?, derivedInRam?}`.
     #[napi(ts_return_type = "Promise<BlobIndex>")]
     pub fn create(
         env: Env,
@@ -1487,7 +1497,7 @@ impl BlobIndex {
     ) -> Result<AsyncTask<BlobTask<BlobIndex>>> {
         let store = JsBlobStore::from_object(&env, store)?;
         let options = options.unwrap_or_default();
-        let config = schema_config(&fields, options.shards, options.shared_dictionary);
+        let config = schema_config(&fields, options.shards, options.shared_dictionary, options.derived_in_ram);
         Ok(blob_task(move || {
             let storage = blob_storage(store, &index_name, &options);
             let handle = ShardedHandle::create_with_storage(Box::new(storage), &config)
