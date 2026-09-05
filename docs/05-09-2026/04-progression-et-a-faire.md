@@ -1177,13 +1177,21 @@ Rien ne part sans le feu vert de Lucie à chaque étape marquée **[go]**.
    dater le CHANGELOG (« 4.0.0 — 6 septembre 2026 »), vérifier
    `RELEASE.md` §Before (versions, `cargo publish --dry-run -p luciole -p
    lucistore`, `npm pack --dry-run`).
-4. [ ] **[go]** `gh auth switch -u L-Defraiteur` ; vérifier la variable de
-   dépôt `PUBLISH_ENABLED` (le tag publie tout seul : aucun réviseur sur
-   l'environnement `release`).
-5. [ ] **[go]** fusionner `v4` dans `main` (fast-forward ; `pages.yml`
-   déploie la vitrine depuis `main` et bâtit les douze corpus), pousser.
-6. [ ] **[go]** `git tag -a v4.0.0` et pousser le tag : `release.yml` bâtit
-   les cinq plateformes, PyPI, npm (six paquets) et crates.io dans l'ordre
+4. [x] **[go]** `gh auth switch -u L-Defraiteur` ; `PUBLISH_ENABLED = true`,
+   environnement `release` sans réviseur, politique de déploiement « tags
+   `v*` ».
+5. [x] **[go]** `main` ← `v4` (`8301b55` → `1153050`, 94 commits), la page
+   déployée avec les douze corpus.
+6. [x] **[go]** `v4.0.0` poussé vers minuit : les douze builds, la release
+   GitHub, PyPI, npm (six paquets), crates.io — tout vert, vérifié sur les
+   trois registres. **Mais la CI de `main` sur ce commit était rouge**
+   (clippy : docs manquantes des compteurs, un `mut`, un `if` imbriqué, deux
+   `let…else`, une init ; build minimal : le banc de compaction ouvre un
+   `MmapDirectory` sans la feature `mmap`). Corrigé (`fe301b3`), CI verte,
+   `release.yml` gagne un job `checks` dont dépendent les publications, et
+   **4.0.1** (`7f18415`, tag `v4.0.1`) republie le même moteur honnêtement —
+   décision de Lucie : « pas honnête sinon ».
+   L'étape prévue : `release.yml` bâtit les cinq plateformes, PyPI, npm (six paquets) et crates.io dans l'ordre
    `luciole` → `lucistore` → `ld-lucivy` → `lucivy-core` → `sparse-vector`,
    **et `lucivy-wasm`** (job `wasm` + `publish-wasm` de `release.yml`, emsdk
    épinglé, depuis la 3.0.8 elle-même : la note « à la main » de CLAUDE.md

@@ -476,20 +476,26 @@ Les docs sont dans `docs/` organisés par dossier daté. Convention depuis le
 
 ## Packages publiés
 
-**Le workspace est en 4.0.0 depuis le 5 septembre au soir (branche `v4`), non
-publié** : les cinq crates, les quatre bindings, les paquets npm et le
-playground portent le numéro ; la 3.0.8 reste la dernière publiée. Le
-contrat de 4.0 (ouvre 3.0.x, 3.0.x n'ouvre pas 4.0, le premier commit
-convertit) est vérifié par `test_compat_308` et écrit dans le CHANGELOG.
+**4.0.0 publiée le 6 septembre 2026 vers minuit** (tag `v4.0.0`, `main` = `1153050`), puis
+**4.0.1 dans l'heure** (tag `v4.0.1`, `main` = `7f18415`) : le tag 4.0.0 était parti sur
+une CI rouge (clippy, build sans features par défaut — rien du moteur) ; 4.0.1 est le même
+moteur, republié après correction, et `release.yml` a désormais un job `checks` (clippy,
+lib avec et sans features, `lucivy-core`, `lucivy-cpp`) dont dépendent toutes les
+publications. **Règle : ne jamais pousser un tag `v*` avant que la CI du commit soit
+verte** — la barrière du workflow le garantit maintenant, mais on regarde quand même.
+Le contrat de 4.0 (ouvre 3.0.x, 3.0.x n'ouvre pas 4.0, le premier commit convertit) est
+vérifié par `test_compat_308` et, le 6 au soir, par un index de 10 000 fichiers bâti par
+`main` (3.0.8) et rouvert par v4 : 10/10. Le dictionnaire partagé est le défaut depuis 4.0.0.
 Publier reste une décision explicite de Lucie.
 
 
 | Registre | Package | Publié | Date |
 |----------|---------|---------|---------|
-| PyPI | `lucivy` | **3.0.7** (5 wheels `cp39-abi3` : manylinux_2_28 x86_64 + aarch64, macOS x86_64 + arm64, win_amd64 ; + sdist) | 28 août 2026 (nuit) |
-| npm | `lucivy` + `lucivy-linux-x64-gnu`, `lucivy-linux-arm64-gnu`, `lucivy-darwin-x64`, `lucivy-darwin-arm64`, `lucivy-windows-x64` | **3.0.7** | 28 août 2026 (nuit) |
-| npm | `lucivy-wasm` | **3.0.7** (worker + pkg WASM, `bindings/emscripten`) | 28 août 2026 (nuit) |
-| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` | **3.0.7** | 28 août 2026 (nuit) |
+| PyPI | `lucivy` | **4.0.0** puis **4.0.1** (5 wheels `cp39-abi3` : manylinux_2_28 x86_64 + aarch64, macOS x86_64 + arm64, win_amd64 ; + sdist) — par le tag | 6 septembre 2026 (nuit) |
+| npm | `lucivy` + `lucivy-linux-x64-gnu`, `lucivy-linux-arm64-gnu`, `lucivy-darwin-x64`, `lucivy-darwin-arm64`, `lucivy-windows-x64` | **4.0.0** puis **4.0.1** — par le tag | 6 septembre 2026 (nuit) |
+| npm | `lucivy-wasm` | **4.0.0** puis **4.0.1** (job `wasm` + `publish-wasm`) | 6 septembre 2026 (nuit) |
+| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` | **4.0.0** puis **4.0.1** — par le tag, en dernier | 6 septembre 2026 (nuit) |
+| (avant) | tout | 3.0.7 le 28 août (nuit), 3.0.8 le 28 août à 15 h | |
 
 3.0.7 dans la nuit du 27 au 28, juste après 3.0.6 : **le fuzzy relâché
 perdait des documents** depuis le 23 août (donc 3.0.2 à 3.0.6). `auto`
