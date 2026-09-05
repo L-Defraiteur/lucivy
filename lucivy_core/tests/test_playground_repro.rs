@@ -208,6 +208,9 @@ fn test_playground_repro() {
         let t = std::time::Instant::now();
         let results = handle.search(&qconfig, 20, Some(sink.clone())).unwrap();
         let query_ms = t.elapsed().as_millis();
+        // The addresses belong to the reader as it stands after the search
+        // (a search may reload it once the dictionary's background fold lands).
+        let searcher = handle.reader.searcher();
 
         eprintln!("{} results in {}ms", results.len(), query_ms);
 

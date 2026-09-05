@@ -48,7 +48,7 @@ fn touched_bytes_per_query() {
             let Ok(metas) = sh.index.searchable_segment_metas() else { continue };
             let dir = sh.index.directory();
             let sfx_version = sh.index.settings().sfx_version;
-            for p in metas.iter().flat_map(|m| m.list_files_for(sfx_version)) {
+            for p in metas.iter().flat_map(|m| m.list_files_for(sfx_version, false)) {
                 let name = p.to_string_lossy();
                 let ext = name.splitn(2, '.').nth(1).unwrap_or("").to_string();
                 if ld_lucivy::Directory::open_read(dir, &p).is_ok() {

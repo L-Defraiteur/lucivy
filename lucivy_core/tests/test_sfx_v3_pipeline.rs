@@ -1298,13 +1298,19 @@ fn v3_migration_from_v2_index() {
     let _ = std::fs::remove_dir_all(&dir_path);
     std::fs::create_dir_all(&dir_path).unwrap();
 
-    // 1. Fresh index, no sfx_version in the config → v3.
+    // 1. Fresh index, no sfx_version in the config → the shard dictionary
+    // (sfx_version 4, the default since 4.0.0); `shared_dictionary: false` → 3.
     let plain_config: SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [{"name": "content", "type": "text", "stored": true}]
     })).unwrap();
     {
         let h = LucivyHandle::create(ld_lucivy::directory::RamDirectory::default(), &plain_config).unwrap();
-        assert_eq!(h.index.settings().sfx_version, 3, "new indexes must default to v3");
+        assert_eq!(h.index.settings().sfx_version, 4, "new indexes default to the shared dictionary");
+        let per_segment: SchemaConfig = serde_json::from_value(serde_json::json!({
+            "fields": [{"name": "content", "type": "text", "stored": true}], "shared_dictionary": false
+        })).unwrap();
+        let h3 = LucivyHandle::create(ld_lucivy::directory::RamDirectory::default(), &per_segment).unwrap();
+        assert_eq!(h3.index.settings().sfx_version, 3, "shared_dictionary: false keeps a suffix FST per segment");
     }
 
     // 2. A v2 index on disk...

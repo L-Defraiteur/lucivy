@@ -80,7 +80,10 @@ scores égaux — c'est la preuve du pilier 5), `test_filtered_search_truth`,
 la ligne `jw1` (Jaro-Winkler) est vérifiée par `grep_spans_jaro` avec la
 définition partagée `jaro_spans` (10 000 : 228 documents, 876 spans ;
 30 000 dictionnaire : 707, 2 284 ; noyau 94 000 dictionnaire : 5 196, 18 824, 72,7 ms) ; sa vérité coûte 3,4 s / 12 s / 66 s de balayage.
-Bindings : Node `test.mjs` + `tests/*.mjs` (`smoke_warnings.mjs` prend le
+**Compat 3.0.8 avec un index de `main`** : `run-main-compat.sh` (worktree
+`wt-main`, `CARGO_TARGET_DIR=target-main`, index `idx10k-from-main`, puis
+ajouter ` sfx=3` avant ` v=10` dans `.v3_shape` pour que le harnais v4 rouvre
+au lieu de rebâtir) : 10/10 le 6 au soir. Bindings : Node `test.mjs` + `tests/*.mjs` (`smoke_warnings.mjs` prend le
 chemin du module en argument : `node tests/smoke_warnings.mjs ../index.js`),
 Python `pytest tests` (10 min, 112 verts), `cargo test -p lucivy-cpp`.
 

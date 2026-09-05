@@ -237,8 +237,14 @@ Node `Index.create(path, fields, shards, sharedDictionary)` et
 `BlobIndexOptions.sharedDictionary`, C++ `lucivy_create` accepte un objet
 schéma complet (comme le chemin blob), emscripten `IndexConfig.shared_dictionary`,
 bridge rag3db : le JSON de schéma tel quel. Décrit dans chaque README, le
-CHANGELOG (« Unreleased ») et `lucivy_core/README.md`. **Pas le défaut**
-(décision du 5 septembre). **Compaction du dictionnaire en fusion de
+CHANGELOG (« Unreleased ») et `lucivy_core/README.md`. **Le défaut depuis le 6
+septembre au soir** (décision de Lucie : « 240 ms pour une regex, ça va ») —
+`SchemaConfig::effective_sfx_version()` rend 4 sauf `shared_dictionary: false` ou
+`sfx_version` explicite ; `IndexSettings::default()` du crate bas niveau reste 3 ;
+un index existant garde la version de son `meta.json` ; le harnais garde ses deux
+modes (`V3_SFX_VERSION`, 3 par défaut). **Ouverture paresseuse d'un blob store** : les
+fichiers `dict-*` sont lus entiers à l'ouverture (les tests `lazy` de Python et C++ créent
+leur index avec `shared_dictionary: false` pour mesurer le contrat par segment). **Compaction du dictionnaire en fusion de
 flux** (fin de session du 5, `suffix_fst/dictionary_compact.rs`) : au-delà
 de 8 générations, les plus petites fusionnent (le compte revient à 4),
 union des FST en ordre de clés, records copiés tels quels ou parents
@@ -318,7 +324,8 @@ cargo test -p luciole --lib
 # Build WASM emscripten
 bash bindings/emscripten/build.sh
 
-# Playground (port 9877 ; `?dict` = dictionnaire partagé, `?ram` = derived_in_ram, `?commit=N` fichiers,
+# Playground (port 9877 ; dictionnaire partagé par défaut depuis le 6 septembre, `?nodict` = une FST par
+# segment, `?dict` accepté sans effet ; `?ram` = derived_in_ram, `?commit=N` fichiers,
 # `?commitmb=M` Mo de texte (8 par défaut : le pic mémoire suit la taille des segments, Godot 3,3 → 1,8 Go),
 # `?merges=N`, `?verbose` (traces `[merge]`, `[preload]` dans diag.log),
 # `?corpus=corpus-kernel-16k.tar.gz` ; un seul onglet qui indexe à la fois,
@@ -428,7 +435,7 @@ coupe des listes au `.gmap` galope ; à froid sur 30 000 fichiers, ×2-22 le
 1,7-3,3 en v3, fuzzy plus rapide ; noyau entier idem, `11` §4 bis ; avec
 le `.gmap` GMP2, `11` §6.1 : **×0,8-1,6, le ×1,5 tenu sur neuf requêtes
 sur dix**, la regex à ×1,6) ; les tests fédéré, filtré et roundtrip LUCE
-ont une variante `sfx_version 4` ; mode **optionnel, pas le défaut** —
+ont une variante `sfx_version 4` ; **le défaut depuis le 6 septembre** (voir plus haut) —
 décision à prendre, la règle du ×1,5 n'est manquée que par la regex),
 `.posmap` `PMP3` (3 octets), `.sibling_v3` `SIB3` (sans gap), `.termtexts`
 layout 2 (méta dans la table d'offsets), plus de `.bytemap` en v3. Chaque

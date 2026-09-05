@@ -300,7 +300,7 @@ class TestSharedDictionary:
         """`shared_dictionary=True` (one dictionary per shard, `sfx_version` 4)
         answers exactly like the default index — documents and scores — over
         several commits on several shards, and after a close / open."""
-        plain = lucivy.Index.create(os.path.join(tmp_dir, "plain"), FIELDS, shards=2)
+        plain = lucivy.Index.create(os.path.join(tmp_dir, "plain"), FIELDS, shards=2, shared_dictionary=False)
         compact_path = os.path.join(tmp_dir, "shared")
         shared = lucivy.Index.create(compact_path, FIELDS, shards=2, shared_dictionary=True)
         for idx in (plain, shared):
@@ -319,7 +319,7 @@ class TestSharedDictionary:
         """`derived_in_ram=True` writes no `.posmap` / `.word_pos_map` /
         `.sibling_v3`, rebuilds them when the index opens, and answers exactly
         like the default index — before and after a close / open."""
-        plain = lucivy.Index.create(os.path.join(tmp_dir, "plain2"), FIELDS, shards=2)
+        plain = lucivy.Index.create(os.path.join(tmp_dir, "plain2"), FIELDS, shards=2, shared_dictionary=False)
         lean_path = os.path.join(tmp_dir, "lean")
         lean = lucivy.Index.create(lean_path, FIELDS, shards=2, shared_dictionary=True, derived_in_ram=True)
         for idx in (plain, lean):
@@ -342,7 +342,7 @@ class TestSharedDictionary:
         merge of the last commit's texts) is accepted and answers exactly like
         the default index; the default is `True` and is in the docstring."""
         assert "dictionary_wait" in lucivy.Index.create.__doc__
-        plain = lucivy.Index.create(os.path.join(tmp_dir, "plain3"), FIELDS, shards=2)
+        plain = lucivy.Index.create(os.path.join(tmp_dir, "plain3"), FIELDS, shards=2, shared_dictionary=False)
         eager = lucivy.Index.create(os.path.join(tmp_dir, "eager"), FIELDS, shards=2,
                                     shared_dictionary=True, dictionary_wait=False)
         for idx in (plain, eager):

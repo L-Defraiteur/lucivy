@@ -387,8 +387,12 @@ class TestLazy:
         (the suffix FSTs) are only ever probed through load_range, never
         downloaded whole with load, not even by a query that uses them."""
         store = LazyDictBlobStore()
+        # The per-segment layout: the contract above is stated for it. A shard
+        # dictionary's files (`dict-*.sfx`, `.termtexts`) are read whole when
+        # the index opens, so a lazy open of a dictionary index pulls them at
+        # open and stays lazy on the segments only.
         idx = lucivy.Index.create_with_blob_store(
-            store, "lazy", FIELDS, cache_dir=os.path.join(tmp_dir, "cache_e"))
+            store, "lazy", FIELDS, cache_dir=os.path.join(tmp_dir, "cache_e"), shared_dictionary=False)
         idx.add_many(DOCS)
         idx.commit()
         expected = hits(idx, QUERIES[1])

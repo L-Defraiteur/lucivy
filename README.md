@@ -35,7 +35,9 @@ tab. The last query is typed by hand — `--fuzzy 2 "ShardedHandel"` finds
   per 16 positions), 28-bit ordinals, block offset tables.
 - **`shared_dictionary`**: one dictionary of token texts per **shard** instead
   of one per segment, in generations compacted by a streaming merge — 23 %
-  smaller on the kernel, cold queries ×0.8-1.6. Off by default. Indexing
+  smaller on the kernel, cold queries ×0.8-1.6. **The default since 4.0.0**
+  (`shared_dictionary: false` keeps a suffix FST per segment: indexing ×1.5
+  faster, an index 23 % bigger). Indexing
   with it costs ×1.5 (the kernel: 107 s against 56): a commit names its
   segments' new texts and returns, a background task merges them into the
   dictionary, and a search waits for that merge by default
@@ -56,8 +58,7 @@ tab. The last query is typed by hand — `--fuzzy 2 "ShardedHandel"` finds
   3.0.x does not open a 4.0 index; the first commit in 4.0 converts without
   return.
 - One version number for the whole workspace: `ld-lucivy`, `lucivy-core`,
-  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.0.0
-  (unpublished yet: 3.0.8 is the last release).
+  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.0.0.
 
 3.0.x brought SFX v3 (exact byte spans on every query mode), boolean syntax,
 Jaro-Winkler, query warnings, bring-your-own-storage in every binding, snapshots
@@ -203,7 +204,8 @@ back into the index.
 ```python
 # One dictionary per shard instead of one per segment: about 20 % less disk
 # and RAM, queries slightly slower at cold cache (x1.2 to x1.6 on exact
-# queries, fuzzy ones faster), same answers. Fixed at creation, off by default.
+# queries, fuzzy ones faster), same answers. Fixed at creation; the default
+# since 4.0.0 — shared_dictionary=False keeps a suffix FST per segment.
 index = lucivy.Index.create("/tmp/compact", fields=[...], shared_dictionary=True)
 
 # Smaller still on disk: the three derived sidecars of each segment (about a

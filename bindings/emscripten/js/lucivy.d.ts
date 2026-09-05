@@ -316,7 +316,8 @@ export interface IndexConfig {
    * segment: about 20 % smaller on disk and in memory, queries slightly
    * slower at cold cache (roughly x1.2 to x1.6 on exact queries, fuzzy ones
    * faster), a commit also writes the shard's new texts. Same answers.
-   * Off by default; fixed at creation.
+   * On by default since 4.0.0; `false` keeps a suffix FST per segment
+   * (indexing ×1.5 faster, an index 23 % bigger). Fixed at creation.
    */
   shared_dictionary?: boolean;
   /**
@@ -334,7 +335,7 @@ export interface IndexConfig {
    * On by default; fixed at creation.
    */
   dictionary_wait?: boolean;
-  /** Engine version: 3 (default), 4 (= `shared_dictionary: true`), 2 (pre-3.0). */
+  /** Engine version: 4 (default, = `shared_dictionary: true`), 3 (a suffix FST per segment), 2 (pre-3.0). */
   sfx_version?: number;
   [key: string]: unknown;
 }

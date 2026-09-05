@@ -31,7 +31,7 @@ function walk(dir) {
 
 const dir = mkdtempSync(join(tmpdir(), 'lucivy-derived-'));
 const fields = [{ name: 'body', type: 'text', stored: true }];
-const plain = Index.create(join(dir, 'plain'), fields, 2);
+const plain = Index.create(join(dir, 'plain'), fields, 2, false); // a suffix FST per segment: the reference
 const leanPath = join(dir, 'lean');
 const lean = Index.create(leanPath, fields, 2, true, true);
 

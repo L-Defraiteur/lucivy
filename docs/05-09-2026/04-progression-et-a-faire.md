@@ -1065,6 +1065,24 @@ Deux bugs de la page trouvés en mesurant, corrigés :
   comparent maintenant triés par document ; l'ordre des ex æquo dans le
   moteur reste à fixer (adresse de document croissante, par exemple).
 
+## 3 quinquies. Le dictionnaire devient le défaut (6 septembre au soir)
+
+Question de Lucie pendant la revue : « le dict est optionnel mais par défaut
+dict ou pas ? il le faudrait non ? ». Les chiffres posés côte à côte (30 000
+et noyau, v3 contre dictionnaire) : requêtes exactes 2,2-4,1 → 2,6-4,6 ms,
+fuzzy plus rapide, regex 12,6 → 20,2 ms sur 30 000 et 112 → 242 ms sur le
+noyau. Décision : « ça va pour une regex, personne les fait aussi bien, 240 ms
+on s'en fout » — priorité à la taille face à la concurrence. Donc
+`SchemaConfig::effective_sfx_version()` rend 4 sauf `shared_dictionary:
+false` ou `sfx_version` explicite ; Python `shared_dictionary=True` par
+défaut (et `False` passé explicitement), Node `sharedDictionary` transmis
+tel quel, C++ et WASM par l'objet schéma ; la page indexe en dictionnaire
+sans `?dict`, `?nodict` pour le v3 ; `IndexSettings::default()` du crate bas
+niveau reste 3 ; un index existant garde la version de son `meta.json` ; le
+harnais garde `V3_SFX_VERSION` (3 par défaut) pour continuer à comparer. Les
+tests des bindings créent leur index de référence avec `false`. README,
+CHANGELOG, README des bindings, typings et CLAUDE.md alignés.
+
 ## 3 quater. La vitrine ne se laisse plus planter (6 septembre au soir, revue UX de Lucie)
 
 Constat lu dans le code : deux emplacements d'index (`demoIndex`, que le
@@ -1144,8 +1162,16 @@ Rien ne part sans le feu vert de Lucie à chaque étape marquée **[go]**.
    vitrine, banc). Tests : lib 1 461 verts, `lucivy-core` toutes suites,
    `lucivy-cpp`, Python `pytest`, Node `test.mjs` + `tests/*.mjs`, WASM
    rebâti et mesuré dans Chrome.
-2. [ ] Revue UX de la vitrine par Lucie (titre h1 et chiffre en tête, `09`
-   §« ce qui reste »).
+2. [x] Revue UX de la vitrine par Lucie (6 au soir : un seul index en
+   mémoire, onglets dynamiques, OPFS chaud borné, `-jw` à un tiret,
+   dictionnaire par défaut — §3 quater et quinquies). Le titre h1 reste
+   comme il est.
+2 bis. [x] **Compat 3.0.8 revérifiée avec un index bâti par `main`** : worktree
+   de `main` (`8301b55`), son harnais compilé dans un dossier de cibles à
+   part, 10 000 fichiers du noyau indexés par lui (160 segments, layout
+   `.bytemap`, 1 133 Mo, son panel 9/9), puis le harnais v4 rouvre cet index
+   sans le rebâtir (clé de forme complétée de `sfx=3`) : **10/10**, spans
+   exacts, Jaro-Winkler compris. Le worktree est `scratchpad/wt-main`.
 3. [ ] Retirer les mentions « unpublished yet: 3.0.8 is the last release »
    (README, `bindings/python|nodejs/README.md`, `lucivy_core/README.md`),
    dater le CHANGELOG (« 4.0.0 — 6 septembre 2026 »), vérifier

@@ -133,7 +133,8 @@ mod ffi {
         //   instead of once per segment — about 20 % smaller on disk and in RAM,
         //   queries slightly slower at cold cache (roughly x1.2 to x1.6 on exact
         //   queries, fuzzy ones faster), a commit also writes the shard's new
-        //   texts; same answers. Off by default, fixed at creation.
+        //   texts; same answers. On by default since 4.0.0 ("shared_dictionary":
+        //   false keeps a suffix FST per segment), fixed at creation.
         // "derived_in_ram": true does not write the three derived sidecars of
         //   each segment (about a third of the index on disk); they are rebuilt
         //   in RAM, byte for byte, when the index is opened. Same answers;
@@ -1614,6 +1615,11 @@ mod tests {
     use crate::test_bridge::ffi as probe_ffi;
 
     const BLOB_CONFIG: &str = r#"{"fields":[{"name":"title","type":"text"},{"name":"body","type":"text"}],"shards":2}"#;
+    /// The per-segment layout: what the lazy-open contract is stated for. A
+    /// shard dictionary's files (`dict-*.sfx`, `.termtexts`) are read whole
+    /// when the index opens, so a lazy open of a dictionary index pulls them
+    /// at open and stays lazy on the segments only.
+    const BLOB_CONFIG_PER_SEGMENT: &str = r#"{"fields":[{"name":"title","type":"text"},{"name":"body","type":"text"}],"shards":2,"shared_dictionary":false}"#;
 
     /// (doc_id, score bits), sorted: the documents of these tests all score
     /// the same, and the order of tied hits follows segment order, which a
@@ -1805,7 +1811,7 @@ mod tests {
         let expected;
         {
             let idx = lucivy_create_with_blob_store(
-                probe_ffi::new_probed_backend(map.clone(), probe.clone()), "lazy", BLOB_CONFIG, "", false,
+                probe_ffi::new_probed_backend(map.clone(), probe.clone()), "lazy", BLOB_CONFIG_PER_SEGMENT, "", false,
             ).unwrap();
             for i in 0..300u64 {
                 let filler: String = (0..40).map(|k| format!("word{}_{} ", i, (k * 7919) % 1000)).collect();

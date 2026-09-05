@@ -139,15 +139,21 @@ by nothing on a v3 index.
 
 ### The shared dictionary (`shared_dictionary`, `sfx_version` 4)
 
-Optional at creation. Instead of one suffix FST per segment, each **shard**
-keeps one dictionary, in generations: a commit writes a generation holding only
-the texts it has not seen, segments carry a `.gmap` from their local ordinals
-to the shard's, and beyond eight generations the smallest ones are compacted
-by a streaming merge of their FSTs (the kernel: 19 s and 229 MB of RAM, files
-identical byte for byte to a from-scratch build). A query plans once per shard
-(the FST walks over the shared dictionary, in parallel), then scatters per
-segment. Cold queries pay ×0.8-1.6 against the per-segment layout (the regex
-×1.6); the kernel index is 23 % smaller, 15 440 browser files 25 %.
+The default since 4.0.0 (`shared_dictionary: false` keeps a suffix FST per
+segment). Instead of one suffix FST per segment, each **shard** keeps one
+dictionary, in generations: a commit names the texts its segments minted
+(each segment writes its own FST of them, on its build thread) and returns,
+a background task merges them into a generation, and beyond eight
+generations the smallest ones are compacted by a streaming merge of their
+FSTs (the kernel: 19 s and 229 MB of RAM, files identical byte for byte to a
+from-scratch build); segments carry a `.gmap` from their local ordinals to
+the shard's. A search waits for the background merge by default
+(`dictionary_wait`), so its cost never depends on when it runs. A query plans
+once per shard (the FST walks over the shared dictionary, in parallel), then
+scatters per segment. Cold queries pay ×0.8-1.6 against the per-segment
+layout (the regex ×1.6: 242 ms on the whole kernel against 112); indexing
+×1.5 (the kernel: 107 s against 56); the kernel index is 23 % smaller, 15 440
+browser files 25 %.
 
 ### Indexing: bounded by construction
 

@@ -21,7 +21,7 @@ function check(cond, label) {
 
 const dir = mkdtempSync(join(tmpdir(), 'lucivy-shared-dict-'));
 const fields = [{ name: 'body', type: 'text', stored: true }];
-const plain = Index.create(join(dir, 'plain'), fields, 2);
+const plain = Index.create(join(dir, 'plain'), fields, 2, false); // a suffix FST per segment: the reference
 const sharedPath = join(dir, 'shared');
 const shared = Index.create(sharedPath, fields, 2, true);
 

@@ -77,7 +77,11 @@ impl SegmentUpdaterShared {
             let index = &self.index;
             let directory = index.directory();
             let mut committed_segment_metas = self.segment_manager.committed_segment_metas();
-            committed_segment_metas.sort_by_key(|segment_meta| -(segment_meta.max_doc() as i32));
+            // Largest first, then by id: two segments of equal size used to
+            // come out in the segment manager's (hash) order, so a rewrite of
+            // meta.json after a background merge or dictionary fold could
+            // reorder them — and a searcher's document addresses with them.
+            committed_segment_metas.sort_by_key(|segment_meta| (-(segment_meta.max_doc() as i32), segment_meta.id().uuid_string()));
             let index_meta = IndexMeta {
                 index_settings: index.settings().clone(),
                 segments: committed_segment_metas,

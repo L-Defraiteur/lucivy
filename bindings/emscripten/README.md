@@ -104,7 +104,8 @@ const index = await lucivy.create('/my-index', {
     // shared_dictionary: true — one dictionary per shard instead of one per
     // segment: about 20 % less OPFS and memory, queries slightly slower at
     // cold cache (roughly x1.2 to x1.6 on exact queries, fuzzy ones faster),
-    // same answers. Fixed at creation. Off by default.
+    // same answers. Fixed at creation. The default since 4.0.0 (false keeps
+    // a suffix FST per segment).
     // derived_in_ram: true — the three derived sidecars of each segment
     // (about a third of the index) are rebuilt in memory when the index
     // opens instead of written to OPFS. Same answers. Off by default.

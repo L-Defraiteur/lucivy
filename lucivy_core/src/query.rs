@@ -41,9 +41,9 @@ pub struct SchemaConfig {
     /// backwards compatibility with existing JSON configs.
     #[serde(default)]
     pub sfx: Option<bool>,
-    /// SFX version: 3 (default: a suffix FST per segment), 4 (a dictionary
-    /// shared by the segments of each shard — see `shared_dictionary`), or
-    /// 2 (the pre-3.0 engine).
+    /// SFX version: 4 (default since 4.0.0: a dictionary shared by the
+    /// segments of each shard — see `shared_dictionary`), 3 (a suffix FST
+    /// per segment), or 2 (the pre-3.0 engine).
     #[serde(default)]
     pub sfx_version: Option<u8>,
     /// Store each distinct token text once per shard instead of once per
@@ -51,7 +51,9 @@ pub struct SchemaConfig {
     /// and in RAM, at the price of a slightly slower query (×1.2 to ×1.6 at
     /// cold cache on 30 000 kernel files, the fuzzy ones faster) and of a
     /// commit that also writes the shard's new texts. Same answers: counts,
-    /// spans and scores are identical to the default. Off by default.
+    /// spans and scores are identical either way. **On by default since
+    /// 4.0.0**; `false` keeps a suffix FST per segment (indexing ×1.5
+    /// faster, an index 23 % bigger).
     #[serde(default)]
     pub shared_dictionary: Option<bool>,
     /// Do not write the three derived sidecars of each segment (`.posmap`,
@@ -137,12 +139,16 @@ impl SchemaConfig {
     }
 
     /// The SFX version this config asks for: `sfx_version` when given,
-    /// else 4 under `shared_dictionary: true`, else 3.
+    /// else 3 under `shared_dictionary: false`, else 4 — the shard
+    /// dictionary is the default since 4.0.0 (6 September 2026: −23 % of
+    /// index on the kernel, indexing ×1.5, queries ×0.8-1.6, the regex at
+    /// 240 ms on the whole kernel judged acceptable). An existing index
+    /// keeps the version its `meta.json` says.
     pub fn effective_sfx_version(&self) -> u8 {
         match (self.sfx_version, self.shared_dictionary) {
             (Some(v), _) => v,
-            (None, Some(true)) => 4,
-            (None, _) => 3,
+            (None, Some(false)) => 3,
+            (None, _) => 4,
         }
     }
 

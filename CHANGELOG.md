@@ -1,4 +1,4 @@
-Lucivy 4.0.0 (branch v4 — not published yet)
+Lucivy 4.0.0 — 6 September 2026
 ================================
 
 - **4.0 opens your 3.0.x indexes; 3.0.x does not open 4.0 indexes; the first
@@ -10,7 +10,11 @@ Lucivy 4.0.0 (branch v4 — not published yet)
   query kinds with the wheel's own answers) — same documents and spans,
   then new documents, a commit, a compaction merging the 3.0.8 segments
   into current-layout ones, a reopen: nothing lost, every span in place.
-  A 3.0.x binary refuses the new layouts (`SFP5`, `WSP5`, `PMP4`, `.sfx`
+  Checked once more before release with a 10 000-file kernel index built
+  by the `main` branch's 3.0.8 code (160 segments, `.bytemap` layout,
+  1 133 MB): 4.0.0 reopened it without rebuilding and answered the whole
+  ground-truth panel exactly, Jaro-Winkler included (10/10, spans against a
+  scan of the files). A 3.0.x binary refuses the new layouts (`SFP5`, `WSP5`, `PMP4`, `.sfx`
   container 8), so an index touched by 4.0 cannot go back.
 
 - **`shared_dictionary: true` at creation** (`sfx_version` 4): each distinct
@@ -21,8 +25,16 @@ Lucivy 4.0.0 (branch v4 — not published yet)
   `Index.create(..., shared_dictionary=True)`, Node
   `Index.create(path, fields, shards, true)` / `BlobIndex` option
   `sharedDictionary`, C++ and browser `"shared_dictionary": true` in the
-  schema object. Off by default; fixed at creation. A 3.0.x binary does not
-  read such an index.
+  schema object. **The default since 4.0.0** — decided on 6 September once
+  indexing came down to ×1.5 and the regex on the whole kernel measured
+  240 ms: `shared_dictionary: false` (Python `shared_dictionary=False`,
+  Node `sharedDictionary: false`) keeps a suffix FST per segment (indexing
+  ×1.5 faster, an index 23 % bigger). Fixed at creation; an existing index
+  keeps the version its `meta.json` says. A 3.0.x binary does not read a
+  dictionary index. One thing the per-segment layout still does better: a
+  **lazy blob-store open** stays lazy on every file, whereas a dictionary
+  index reads its `dict-*` files (the shard's FST and texts, most of the
+  index) whole at open — the segments' postings stay lazy.
 - Index format v4 on the branch: `.sfx` container version 8, ordinals on 28
   bits, block-coded offset tables (`SFP4`, `WSP4`, `SIB4`, `.termtexts`
   layout 3), `.gmap` layout 2. Every reader still opens the previous layouts.

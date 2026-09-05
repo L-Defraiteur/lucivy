@@ -477,6 +477,15 @@ impl Index {
         if held.as_ref().is_some_and(|d| d.same_parts(wanted)) {
             return;
         }
+        // The held dictionary is ahead of the disk: a background fold swapped
+        // it (its `next_generation` moved on) and the updater has not
+        // rewritten `meta.json` yet. Reopening from that older meta would
+        // look for the pairs the fold consumed — deleted a moment later —
+        // and serve a dictionary with no texts (measured: one search in
+        // three on a RAM shard store answered nothing). Keep what we hold.
+        if held.as_ref().is_some_and(|d| d.meta().next_generation > wanted.next_generation) {
+            return;
+        }
         self.set_sfx_dictionary(Some(Arc::new(SfxDictionary::open(&self.directory, wanted, held.as_deref()))));
     }
 

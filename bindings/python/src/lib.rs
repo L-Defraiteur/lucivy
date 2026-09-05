@@ -323,7 +323,7 @@ fn schema_config(fields: &Bound<'_, PyList>, shards: Option<usize>, shared_dicti
         tokenizer: None,
         sfx: None,
         shards,
-        shared_dictionary: shared_dictionary.then_some(true),
+        shared_dictionary: Some(shared_dictionary),
         derived_in_ram: derived_in_ram.then_some(true),
         dictionary_wait: (!dictionary_wait).then_some(false),
         ..Default::default()
@@ -342,8 +342,10 @@ impl Index {
     ///         instead of once per segment. The index is about 20 % smaller
     ///         on disk and in RAM; queries are slightly slower at cold cache
     ///         (roughly x1.2 to x1.6 on exact queries, fuzzy ones faster) and
-    ///         a commit also writes the shard's new texts. Same answers as the
-    ///         default. Off by default; fixed at creation.
+    ///         a commit also writes the shard's new texts. Same answers
+    ///         either way. **On by default since 4.0.0**; ``False`` keeps a
+    ///         suffix FST per segment (indexing ×1.5 faster, an index 23 %
+    ///         bigger). Fixed at creation.
     ///     derived_in_ram: Do not write the three derived sidecars of each
     ///         segment (``.posmap``, ``.word_pos_map``, ``.sibling_v3``, about
     ///         a third of the index on disk); they are rebuilt in RAM, byte
@@ -367,7 +369,7 @@ impl Index {
     ///         {"name": "score", "type": "f64", "fast": True},
     ///     ], shards=4)
     #[staticmethod]
-    #[pyo3(signature = (path, fields, shards=None, shared_dictionary=false, derived_in_ram=false, dictionary_wait=true))]
+    #[pyo3(signature = (path, fields, shards=None, shared_dictionary=true, derived_in_ram=false, dictionary_wait=true))]
     fn create(py: Python<'_>, path: &str, fields: &Bound<'_, PyList>, shards: Option<usize>, shared_dictionary: bool, derived_in_ram: bool, dictionary_wait: bool) -> PyResult<Self> {
         let config = schema_config(fields, shards, shared_dictionary, derived_in_ram, dictionary_wait)?;
         let handle = py.allow_threads(|| ShardedHandle::create(path, &config))
@@ -435,7 +437,7 @@ impl Index {
     ///         {"name": "title", "type": "text", "stored": True},
     ///     ])
     #[staticmethod]
-    #[pyo3(signature = (store, index_name, fields, shards=1, cache_dir=None, lazy=false, shared_dictionary=false, derived_in_ram=false, dictionary_wait=true))]
+    #[pyo3(signature = (store, index_name, fields, shards=1, cache_dir=None, lazy=false, shared_dictionary=true, derived_in_ram=false, dictionary_wait=true))]
     fn create_with_blob_store(
         py: Python<'_>,
         store: &Bound<'_, PyAny>,

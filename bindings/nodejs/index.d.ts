@@ -111,8 +111,9 @@ export declare class Index {
    *   instead of once per segment: the index is about 20 % smaller on disk
    *   and in RAM, queries are slightly slower at cold cache (roughly x1.2
    *   to x1.6 on exact queries, fuzzy ones faster) and a commit also writes
-   *   the shard's new texts. Same answers as the default. Off by default;
-   *   fixed at creation.
+   *   the shard's new texts. Same answers either way. On by default since
+   *   4.0.0; `false` keeps a suffix FST per segment (indexing ×1.5 faster,
+   *   an index 23 % bigger). Fixed at creation.
    * @param derivedInRam - Do not write the three derived sidecars of each
    *   segment (`.posmap`, `.word_pos_map`, `.sibling_v3`, about a third
    *   of the index on disk); they are rebuilt in RAM, byte for byte, when

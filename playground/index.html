@@ -1857,7 +1857,7 @@ async function startup() {
     // Cache-buster: GitHub Pages caches the worker and the wasm for a while,
     // and a phone kept a whole build behind after a deploy. Bumped at each
     // engine or worker change; the query rides through to the wasm.
-    const BUILD = '4.0.0-1f65b2a';
+    const BUILD = '4.0.0-3b7aa24';
     lucivy = new Lucivy(`./js/lucivy-worker.js?v=${BUILD}`, {
       noOpfs: startupParams.has('noopfs'),
       verbose: startupParams.has('verbose'), // engine diagnostics (LUCIVY_VERBOSE, V3_PROFILE)
@@ -2639,11 +2639,13 @@ function tarballToFiles(textFiles) {
 // the persisted index when it is too big to be served from here.
 async function indexFiles(files, path, label, keep, opts = {}) {
   const t0 = performance.now();
-  // `?dict` — one dictionary of token texts per shard instead of one per
-  // segment (`shared_dictionary`): smaller on disk, queries a little slower.
-  // The terminal's `index mdn` / `index kernel` force it (`opts`).
+  // The shard dictionary (`shared_dictionary`, one dictionary of token
+  // texts per shard instead of one per segment: smaller on disk, queries a
+  // little slower) is the default since 4.0.0; `?nodict` builds a suffix FST
+  // per segment instead (`?dict` is accepted and changes nothing). The
+  // terminal's corpora force the dictionary (`opts`).
   const params = new URLSearchParams(location.search);
-  const sharedDictionary = opts.sharedDictionary ?? params.has('dict');
+  const sharedDictionary = opts.sharedDictionary ?? !params.has('nodict');
   // `?ram`: the three derived sidecars are not written to OPFS but rebuilt in
   // memory when the index opens (about a third less OPFS; the open pays).
   const derivedInRam = opts.derivedInRam ?? params.has('ram');

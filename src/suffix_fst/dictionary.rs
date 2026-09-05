@@ -336,8 +336,18 @@ impl SfxDictionary {
             for (sfx_path, termtexts_path) in generation_paths.chain(pair_paths) {
                 let sfx = directory.open_read(&sfx_path);
                 let termtexts = directory.open_read(&termtexts_path);
-                let (Ok(sfx), Ok(termtexts)) = (sfx, termtexts) else { continue };
-                let (Ok(sfx_bytes), Ok(tt_bytes)) = (sfx.read_bytes(), termtexts.read_bytes()) else { continue };
+                let (Ok(sfx), Ok(termtexts)) = (sfx, termtexts) else {
+                    if crate::diag::is_verbose() {
+                        eprintln!("[dictionary] open: cannot open {} / {} (skipped)", sfx_path.display(), termtexts_path.display());
+                    }
+                    continue;
+                };
+                let (Ok(sfx_bytes), Ok(tt_bytes)) = (sfx.read_bytes(), termtexts.read_bytes()) else {
+                    if crate::diag::is_verbose() {
+                        eprintln!("[dictionary] open: cannot read {} / {} (skipped)", sfx_path.display(), termtexts_path.display());
+                    }
+                    continue;
+                };
                 if first_sfx.is_none() { first_sfx = Some(sfx); }
                 sfx_parts.push(sfx_bytes);
                 termtexts_bytes.push(tt_bytes);

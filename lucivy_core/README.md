@@ -20,7 +20,7 @@ schema, and 4.0 opens 3.0.x indexes (the first commit converts them for good).
 
 ```toml
 [dependencies]
-lucivy-core = "4.0"   # unpublished yet: 3.0.8 is the last release on crates.io
+lucivy-core = "4.0"
 ```
 
 ## Quick start
@@ -145,7 +145,10 @@ FST, the texts and the sibling table live in per-shard *generations*
 scores identical to the default; queries ×0.8 to ×1.6 at cold cache (the
 FST phase of a query is planned once per shard, in parallel, before the
 segments resolve their postings). A commit also writes the shard's new
-texts. Off by default.
+texts. **The default since 4.0.0**: `"shared_dictionary": false` keeps a
+suffix FST per segment (indexing ×1.5 faster, an index 23 % bigger — and the
+layout a lazy blob-store open stays fully lazy on: a dictionary index reads
+its `dict-*` files whole at open).
 
 ## Sharding and distribution
 
