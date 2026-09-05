@@ -155,7 +155,33 @@ Noyau entier, 857 Mo de texte : `main` non compacté 18 057 Mo (×21),
 Répartition : postings 40 %, cartes de positions et fratrie 27 %
 (dérivées des postings), dictionnaire 21 %, store 6 %.
 
+## 6 bis. La vitrine : MDN comme second acte, dans le terminal
+
+Décision : un dépôt entier plutôt qu'un sixième de Linux, et d'abord un
+corpus utile à qui l'essaie. Dépôts mesurés (fichiers texte ≤ 100 Ko) :
+go 15 542 / 75 Mo, linux-2.6.0 entier 14 843 / 134 Mo, godot 13 782 /
+117 Mo, **mdn/content 14 917 / 59 Mo** ; TypeScript et Rust tiennent en
+texte mais pas en nombre de fichiers (62-66 000). MDN indexé pour de vrai
+dans le navigateur : **14 629 pages en 14 s, 528 Mo en mémoire**, requêtes
+de 6 à 16 ms, premier résultat = la page de référence attendue. Mis en
+place au prompt du terminal, pas un bouton : `index mdn` (téléchargement,
+indexation sous les yeux, attribution CC-BY-SA, panel de six requêtes, la
+main), `index kernel`, `index github owner/repo[@branch]` (proxy, refus
+au-delà de ~220 Mo de texte), `index list` / `open` / `drop` — **l'index
+ouvert en RAM, les autres en OPFS**, rouverts en une seconde. La ligne de
+préchargement dit désormais « its N index files (segments and
+dictionary, not documents) ». Les corpus `.tar.gz` sont ignorés par git,
+recette dans [04](04-progression-et-a-faire.md) §2 bis. Deux pièges de
+pilotage notés dans [03](03-knowledge-dump-baselines-tests-outils.md)
+§7 bis (le serveur de debug rend des chaînes ; `pkill -f` se tue lui-même).
+
 ## 7. Ce qui reste (le todo vit dans [04](04-progression-et-a-faire.md) §3)
+
+Pour la vitrine : les tarballs `golang` / `godot` / `linux-2.6.0` si on les
+veut sur la page, le texte de la page qui annonce le second acte, le
+déploiement des corpus (ignorés par git : à fabriquer côté déploiement).
+Pour 4.0.0 : la fixture 3.0.8 et le test de compatibilité de bout en bout
+(04 §3). Puis :
 
 Le chantier des postings (§5) ; les trois fichiers dérivés reconstruits en
 RAM en option (jamais le défaut natif : une structure rebâtie est
@@ -173,4 +199,8 @@ dans `main`, tri stable des ex æquo.
 collecteur (queues de mots), mesures postings, preload wasm ·
 `bb97ec8` fusions à 2 pour le dictionnaire, `--merge-concurrency`,
 `heap_bytes`, trace `[merge]` · `f0608bb` docs WASM fait, panel 21
-requêtes · `ce819e8` `memory_status` par le cache.
+requêtes · `ce819e8` `memory_status` par le cache · `af6420a` ce journal
+et les docs complétés · `8147b38` docs vitrine · `7a0854f` corpus MDN,
+formulation du préchargement · `aae6065` `index mdn` / `index kernel` au
+prompt · `e83a475` `index github`, `index list`, `open`, `drop`, règles du
+serveur de debug.
