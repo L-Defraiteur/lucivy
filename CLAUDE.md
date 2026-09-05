@@ -307,7 +307,9 @@ cd playground && node serve.mjs
 ## Docs
 
 **Dossier courant : `docs/05-09-2026/` — pour repartir, lire dans l'ordre
-`06-journal-session-5-septembre-soir.md` (la soirée du 5 : les postings
+`09-plan-d-action-presentation.md` (sur quoi on se vend et dans quel ordre :
+les six piliers avec leur preuve, le tableau « où ils trébuchent », la page,
+le README, la publication, l'article, les issues), `06-journal-session-5-septembre-soir.md` (la soirée du 5 : les postings
 sans octets `SFP5`/`WSP5`/`PMP4`, l'option `derived_in_ram`, la fuzzy
 tentée sans gain, la fixture 3.0.8 et `test_compat_308`, le passage en
 4.0.0 non publié), puis `04-progression-et-a-faire.md` (l'état et le todo :
