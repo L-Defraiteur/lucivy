@@ -389,6 +389,51 @@ avant de lire — 54 s en onglet neuf avec `commit=1000` (1 844 fichiers,
 binding journalise maintenant l'attente à part (`[preload] waited for
 merges`) ; WASM rebâti, à relancer dans le navigateur pour le chiffrer.
 
+## 2 bis. La vitrine : un second acte (décidé le 5 septembre)
+
+La démo actuelle — la source de lucivy, 1 171 fichiers, 8,6 Mo, indexée
+en 3 s, 126 Mo en mémoire — **reste le premier acte** : une vraie requête
+en moins de 10 s après l'ouverture, c'est ce qui retient un visiteur. On
+n'y touche pas.
+
+Ce que le navigateur tient aujourd'hui (mesuré, dictionnaire, 4 shards) :
+
+| corpus bundlé dans `playground/` | téléchargement | indexation + fusions | en mémoire |
+|---|---|---|---|
+| lucivy, 1 171 fichiers | 8,6 Mo | 3 s | 126 Mo |
+| `corpus-kernel-2k.tar.gz` | 7,4 Mo | à mesurer (~10 s) | ~250 Mo |
+| `corpus-kernel-10k.tar.gz` | 31,5 Mo | à mesurer (~40 s) | ~1,2 Go |
+| `corpus-kernel-16k.tar.gz`, 15 440 fichiers | 48,7 Mo | 60 s + 4 s | 1,8 Go |
+
+Le plafond est là : 15 000 fichiers du noyau font 1,8 Go dans un onglet de
+4 Go dont l'indexation occupe déjà 1,5 Go de plancher ; 30 000 ne passent
+pas, un téléphone s'arrête vers 2 000. « Indexer un plus gros git au
+chargement » a donc une borne dure autour de 15 000 fichiers de code et
+un coût d'attente d'une minute — pas au chargement, en opt-in.
+
+À faire :
+
+- [ ] **Un bouton « second acte »** sur la page : « Indexez 15 000 fichiers
+  du noyau Linux dans votre navigateur », barre honnête (téléchargement
+  49 Mo, indexation, fusions — la page sait déjà distinguer les trois),
+  temps estimé annoncé. La page sait déjà le faire (`?corpus=`).
+- [ ] **Rouvrir l'index persistant à la visite suivante** : il est en OPFS,
+  `?open=user_index` le rend en 4 s — proposer « reprendre le noyau
+  indexé » quand il existe, au lieu de réindexer.
+- [ ] **Mesurer 2k et 10k** dans le navigateur (temps, mémoire) pour avoir
+  un palier intermédiaire à 30-40 s.
+- [ ] **Le chiffre de vitrine** : « 15 440 fichiers du noyau indexés dans
+  votre onglet en une minute, chaque requête en 30 ms, exacte » à côté du
+  « 93 605 fichiers en natif, comptes et spans vérifiés contre le disque ».
+- [ ] **Le plancher de 1,5 Go de l'indexation WASM** (§1 bis) : c'est lui
+  qui décide combien de fichiers un onglet tient, plus que la taille de
+  l'index. Mesurer par paliers de `heap_bytes` pendant la démo `?verbose`
+  qui tient les 1,5 Go (tas de l'écrivain, arènes de construction, cache
+  de fichiers, budget du collecteur), puis réduire ce qui peut l'être.
+- Le clonage `owner/repo@branch` à la demande existe déjà (proxy, limite
+  anonyme GitHub de 60 requêtes par heure partagée, taille inconnue) : une
+  fonction, pas une promesse de la page.
+
 ## 3. À faire, en vrac (repris de [01](01-journal-session-5-septembre.md) §11)
 
 - La regex à ×1,6 en mode dictionnaire.
