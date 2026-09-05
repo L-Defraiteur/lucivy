@@ -582,6 +582,26 @@ ce qu'une requête touche. Panels 9/9 partout. Pas mesuré : le navigateur
 avec l'option (tout y est en mémoire de toute façon : là le gain est l'OPFS
 et le téléchargement d'un snapshot) ; à mesurer, le pic mémoire.
 
+## 2 quater. La fuzzy d2 : une étape à risque, un checkpoint avant
+
+`regsiter` d2 sur les 30 000 : 161 ms de mur, 2,57 M de hits (pièces de
+deux ou trois lettres, le pigeonhole à deux éditions ne garantit pas
+mieux), 463 000 régions dont 91 % rejetées par l'alignement — après que
+leur fenêtre a été reconstruite **avec sa carte arrière** (1,5 s de somme
+sur les 1,5 + 0,6 s de vérification). Tentative : la fenêtre en deux
+passes, texte seul pour l'alignement, carte arrière seulement pour les
+régions acceptées (ce que `verify_literal` fait déjà). Exact par
+construction ; gain attendu 10 à 20 % sur la fuzzy d2, rien ailleurs ;
+gardé seulement si l'A/B du protocole le montre et qu'aucun span ne bouge.
+Ce qui serait tenter le diable et qu'on ne fait pas : exiger deux pièces
+par région, raccourcir les fenêtres, élaguer par fréquence, approximer la
+vérification (le bug de rappel de 3.0.2 à 3.0.6).
+
+**Le dernier checkpoint stable avant cette étape est le tag
+`stable-avant-fuzzy-fenetres` (= `137b03b`, poussé)** : lib 1 461 verts,
+panels 9/9 partout, postings sans octets, option `derived_in_ram`. Si la
+fuzzy perd un span, on y revient.
+
 **Seuils calibrés sur les gros index d'avant** (remarque du 5 septembre) :
 `LUCIVY_RAM_INDEX_MAX` (3 Go sur wasm32, index tenu entier en dessous) et
 le « recharge la page pour servir » du playground (2 Go) datent du 25 août,

@@ -280,6 +280,13 @@ changent pas.
 Détail, chiffres et vérité : [04](04-progression-et-a-faire.md) §2 ter.
 Exposé dans les bindings comme `shared_dictionary`.
 
+## 8 ter. Checkpoint avant la fuzzy
+
+Tag `stable-avant-fuzzy-fenetres` sur `137b03b` : tout est vérifié là.
+L'étape suivante touche la vérification de la fuzzy (fenêtres en deux
+passes, [04](04-progression-et-a-faire.md) §2 quater) ; exacte par
+construction, mais c'est le chemin où le rappel s'est déjà perdu une fois.
+
 ## 9. Commits de la suite
 
 `634f0e6` compaction en flux · `5a8f6b0` docs (5 000 fichiers, pas
