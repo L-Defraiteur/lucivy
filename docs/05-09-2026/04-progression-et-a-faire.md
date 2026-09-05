@@ -17,6 +17,16 @@ Noyau entier, 93 605 fichiers, 857 Mo de texte :
 | v4, dictionnaire par shard (`idx90k-dict2`) | 253 | 5 706 Mo | ×6,7 |
 | v4, dictionnaire, postings sans octets (`idx90k-dict-sfp5`, 5 septembre au soir) | 253 | **4 938 Mo** | **×5,8** |
 | … et `derived_in_ram` (`idx90k-dict-ram`, option) | 253 | **3 344 Mo** | **×3,9** |
+| *Elasticsearch 8.19, trigrammes + `wildcard` (la config qui répond à une sous-chaîne ; `28-08-2026/06` §3)* | | *3 084 Mo* | *×3,6* |
+| *Elasticsearch standard (pas de sous-chaîne)* | | *759 Mo* | *×0,9* |
+
+**Où on en est face à Elasticsearch** (question de Lucie, tard le 5) : la
+config d'Elasticsearch qui fait le même travail pèse 3 084 Mo ; lucivy 4.0
+est à **×1,6** avec les fichiers écrits et **×1,08** avec `derived_in_ram`
+(×5,9 le 28 août). À ce prix, la comparaison du 28 août rappelle ce qu'il ne
+rend pas : les séparateurs relâchés (3 549 documents contre 10 034 exacts),
+la regex à 70 documents près, la phrase floue partielle. Jamais mesurés côte
+à côte : le temps de requête et la RAM au repos d'Elasticsearch (la JVM).
 
 Répartition des 5,7 Go : `.sfxpost` 22 %, `.word_sfxpost` 18 %, `dict.sfx`
 16 %, `.word_pos_map` 11 %, `.posmap` 8 %, `.sibling_v3` 8 %, `.store`
