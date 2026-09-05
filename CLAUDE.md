@@ -327,10 +327,13 @@ bash bindings/emscripten/build.sh
 # `python3 playground/tools/build_corpus.py all` (même filtre que la page ; pages.yml les bâtit au
 # déploiement ; git les ignore). **Un seul index en mémoire à la fois dans la page** (6 septembre au soir :
 # `closeAllOpen()` avant toute indexation ou ouverture, quelle que soit la porte — terminal, clone GitHub,
-# fichiers déposés, snapshot, ↻), les onglets du playground portent le vrai nom de ce qu'ils tiennent en
-# OPFS (`demoSlot`/`userSlot`) et un clic rouvre depuis l'OPFS avec un témoin (`.tab-spin`) ; **un seul
-# corpus de vitrine stocké à la fois** (`index <nom>` supprime les autres de l'OPFS, sauf la source lucivy
-# et l'index utilisateur) ; deux onglets partagent le même répertoire OPFS et échouent au commit)
+# fichiers déposés, snapshot, ↻) ; **la barre d'onglets est dynamique** (`renderTabs`, un onglet par entrée
+# du registre `lucivy_corpora` = un index en OPFS : source lucivy, corpus, dépôts `gh:`, `user`, `snapshot`),
+# un clic rouvre depuis l'OPFS avec un témoin (`activateSlot`), une croix supprime (`dropSlot`) ;
+# **OPFS chaud borné** : budget = min(8 Gio, moitié du quota `navigator.storage.estimate()`), avant une
+# indexation `ensureRoom(texte × 9)` évince le corpus le moins récemment ouvert (jamais la source lucivy ni
+# les index utilisateur), `storageFullError` traduit le quota atteint ; deux onglets partagent le même
+# répertoire OPFS et échouent au commit)
 cd playground && node serve.mjs
 ```
 

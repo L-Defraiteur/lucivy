@@ -1074,7 +1074,24 @@ montrait un onglet « lucivy source » qui cherchait dans Godot ; cloner un
 dépôt avec Godot ouvert laissait Godot en RAM à côté du clone (deux index
 dans 4 Go : le plantage) ; l'OPFS empilait les corpus jusqu'au quota.
 
-Règle unique, demandée par Lucie : **un seul index chargé à la fois**, quelle
+Deuxième passe le même soir, sur la remarque de Lucie (« garder un OPFS
+chaud plutôt que tout virer, et autant d'onglets que d'index ») : la barre
+d'onglets est **dynamique** — un onglet par index présent en OPFS (registre
+`lucivy_corpora` : source lucivy, corpus, dépôts `gh:`, `user`, `snapshot`),
+l'ouvert marqué, un témoin sur celui qui s'ouvre, une croix pour supprimer
+(↻ sur la source lucivy) ; et le stockage est **borné par un budget** au lieu
+d'être vidé : min(8 Gio, moitié du quota annoncé par
+`navigator.storage.estimate()`) — vérifié en ligne : Chrome accorde 60 % du
+disque par origine, Firefox 10 Gio par site, Safari 60 % et efface après 7
+jours sans visite ; les 4 Go sont la mémoire de wasm32, pas l'OPFS. Avant
+une indexation, `ensureRoom(octets de texte × 9)` évince le corpus **le
+moins récemment ouvert** jusqu'à tenir, jamais la source lucivy ni les index
+utilisateur ; `index list` affiche l'usage et le budget ; un quota atteint
+au milieu devient un message clair (`storageFullError`). Vérifié dans
+Chrome : quatre onglets, clic sur le dépôt cloné (témoin, 1 203 documents),
+croix sur nginx, aucune erreur console.
+
+Première passe, règle demandée par Lucie : **un seul index chargé à la fois**, quelle
 que soit la porte d'entrée (`closeAllOpen()` avant toute indexation ou
 ouverture : terminal, clone GitHub, fichiers déposés, snapshot, ↻, `open`) ;
 les onglets du playground portent le vrai nom de ce qu'ils tiennent en OPFS
