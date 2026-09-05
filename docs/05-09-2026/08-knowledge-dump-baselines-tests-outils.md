@@ -143,8 +143,9 @@ chercher. Les règles du serveur de debug (`/eval/main`) sont dans
 Piloter le terminal du playground depuis `javascript_tool` : le script de
 la page est un module, ses fonctions ne sont pas atteignables ; attendre
 `document.querySelector('.term-input')` (le prompt n'existe qu'après la
-démo, ~17 s ; pas avec `?nodemo`), poser `value` (`index linux`, `open
-linux`, `drop linux`, `index mdn`…) et envoyer un `KeyboardEvent`
+démo, ~17 s ; pas avec `?nodemo` ; l'invite affiche `$ lucivy `), poser
+`value` (`index linux`, `open linux`, `drop linux`, `list`, `search "…"`,
+ou une valeur nue…) et envoyer un `KeyboardEvent`
 `keydown` `Enter`. Lire les réponses dans
 `document.querySelector('.prompt').closest('[id]').innerText` (« reopened
 in X s », « its N index files … loaded in X s », « N hits … X ms ») —

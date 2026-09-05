@@ -785,6 +785,15 @@ l'indexation est ajustée sur ces mesures : 0,3 ms par fichier + 0,16 s par
 Mo de texte (MDN 14 s, noyau moderne 40 s, 2.6.0 28 s retrouvés). Total
 des archives : 122 Mo, servies à côté de la page.
 
+**L'invite est libre** (remarque de Lucie : on était forcé d'écrire
+derrière `lucivy search`) : elle affiche `$ lucivy ` et prend la suite —
+`search "…" --fuzzy 1`, `index mdn`, `open mdn`, `drop mdn`, `list`,
+`help`, ou une valeur nue qui est une recherche ; un `lucivy ` tapé en
+trop est avalé. La ligne figée montre la commande normalisée
+(`lucivy search "…"`, `lucivy index mdn`). Vérifié dans Chrome : les quatre
+formes (`ShardedHandle`, `search "wait_merges_quiet" --strict`,
+`lucivy search --fuzzy 1 mimaloc`, `list`, `help`) répondent.
+
 Deux bugs de la page trouvés en mesurant, corrigés :
 
 - **`drop <nom>` puis `index <nom>` dans la même page échouait**

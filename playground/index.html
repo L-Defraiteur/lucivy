@@ -3009,7 +3009,12 @@ async function indexCorpusDemo(c, { openOnly = false } = {}) {
 // `lucivy search [flags] "value"`; flags: --fuzzy N, --jw, --regex,
 // --phrase, --prefix, --exact, --strict, --allowed N, --limit N. Boolean
 // syntax (AND / OR / NOT) is detected and goes through the query parser.
-const PROMPT_PREFIX = 'lucivy search ';
+// The prompt shows `$ lucivy ` and takes the rest: `search "…" --fuzzy 1`,
+// `index mdn`, `open mdn`, `drop mdn`, `list`, `help` — or just a value,
+// which is a search (typing `ShardedHandle` alone still works). A leading
+// `lucivy ` typed by the visitor is accepted and not repeated.
+const PROMPT_PREFIX = 'lucivy ';
+const SEARCH_PREFIX = 'lucivy search ';
 const promptHistory = [];
 let promptInput = null;
 
@@ -3061,7 +3066,7 @@ function parseSearchCommand(text) {
     note = `substring across tokens, separators ${strict ? 'strict' : 'relaxed'}`;
   }
   if (strict && !note.includes('strict')) note += ', separators strict';
-  const entry = { cmd: PROMPT_PREFIX + text, query, note, fuzzy: query.distance !== undefined };
+  const entry = { cmd: SEARCH_PREFIX + text, query, note, fuzzy: query.distance !== undefined };
   if (typeof flags.allowed === 'number' && flags.allowed > 0) {
     entry.filtered = Math.min(Math.floor(flags.allowed), demoNumDocs);
     entry.note += ` · pre-filtered to ${entry.filtered} documents`;
@@ -3075,7 +3080,7 @@ function printHelp() {
   const f = (s) => `<span class="flag">${escapeHtml(s)}</span>`;
   const q = (s) => `<span class="str">${escapeHtml(s)}</span>`;
   const rows = [
-    ['usage', `lucivy search [options] ${q('"value"')}  — quotes are optional unless the value has spaces`],
+    ['usage', `lucivy search [options] ${q('"value"')}  — quotes are optional unless the value has spaces; the word ${f('search')} is optional too: a bare value is a search`],
     ['index <name>', `index a whole corpus here and search it — ${corporaSummary(f) || 'none served next to this page'}; what you index stays in this browser`],
     [f('index github owner/repo'), `index a repository (${q('owner/repo@branch')} or a github.com URL) through the proxy — up to about 200 MB of text, what a tab holds`],
     [f('index list'), `what this browser holds; ${f('open <name>')} reopens one in seconds, ${f('drop <name>')} deletes it from storage`],
@@ -3096,10 +3101,10 @@ function printHelp() {
   for (const [k, v] of rows) term.add(`  ${k}${' '.repeat(Math.max(1, 14 - k.replace(/<[^>]+>/g, '').length))}${v}`, 'dim');
 }
 
-// A prompt line with a real input after the static `lucivy search `.
+// A prompt line with a real input after the static `lucivy `.
 function openPrompt(hint) {
   if (hint) {
-    term.add(`▸ your turn: type a query and press Enter — <span class="flag">--help</span> lists the options (<span class="flag">--fuzzy N</span> <span class="flag">--jw</span> <span class="flag">--regex</span> <span class="flag">--phrase</span> <span class="flag">--prefix</span> <span class="flag">--exact</span> <span class="flag">--strict</span> <span class="flag">--allowed N</span> <span class="flag">--limit N</span>, AND / OR / NOT)`, 'dim');
+    term.add(`▸ your turn: type a query (or <span class="flag">search</span> <span class="str">"…"</span>) and press Enter — <span class="flag">--help</span> lists the options (<span class="flag">--fuzzy N</span> <span class="flag">--jw</span> <span class="flag">--regex</span> <span class="flag">--phrase</span> <span class="flag">--prefix</span> <span class="flag">--exact</span> <span class="flag">--strict</span> <span class="flag">--allowed N</span> <span class="flag">--limit N</span>, AND / OR / NOT)`, 'dim');
     term.add(`▸ or index a bigger corpus right here: ${corporaSummary((x) => `<span class="flag">${escapeHtml(x)}</span>`) || '<span class="flag">index mdn</span>'} — or <span class="flag">index github owner/repo</span>; what you index stays in this browser (<span class="flag">index list</span>, <span class="flag">open</span>, <span class="flag">drop</span>)`, 'dim');
   }
   const line = term.add(`<span class="prompt">$</span> <span class="cmd">${escapeHtml(PROMPT_PREFIX)}</span>`);
@@ -3131,27 +3136,36 @@ function openPrompt(hint) {
       line.innerHTML = '';
       line.appendChild(Object.assign(document.createElement('span'), { className: 'prompt', textContent: '$' }));
       line.appendChild(document.createTextNode(' '));
-      // Corpus commands typed at the search prompt: `index <name>`, `index
-      // github owner/repo`, `index list`, `open <name>`, `drop <name>`.
+      // What was typed after `$ lucivy `: a verb (`search`, `index`, `open`,
+      // `drop`, `list`, `help`) or a bare value, which is a search. A leading
+      // `lucivy ` is dropped so `lucivy search x` and `search x` are the same.
+      const typed = text.replace(/^lucivy\s+/i, '');
       let command = null;
       let cm;
-      if ((cm = text.match(/^(?:lucivy\s+)?(index|open|drop)\s+(.+)$/i))) {
+      let searchText = typed;
+      if ((cm = typed.match(/^(index|open|drop)\s+(.+)$/i))) {
         command = { verb: cm[1].toLowerCase(), arg: cm[2].trim() };
-      } else if (EXTRA_CORPORA[text.toLowerCase()]) {
-        command = { verb: 'index', arg: text.toLowerCase() };
+      } else if (/^(index\s+)?list$/i.test(typed)) {
+        command = { verb: 'index', arg: 'list' };
+      } else if (EXTRA_CORPORA[typed.toLowerCase()]) {
+        command = { verb: 'index', arg: typed.toLowerCase() };
+      } else if ((cm = typed.match(/^search(?:\s+(.*))?$/i))) {
+        searchText = (cm[1] || '').trim();
+      } else if (/^(help|--help|-h|\?)$/i.test(typed)) {
+        searchText = '--help';
       }
       // `kernel` was the name of the 15 440-file slice of a modern kernel; the
       // corpus is now Linux 2.6.0 whole, `linux`. An index of the old name that
       // this browser still holds keeps answering to it (list, open, drop).
       if (command && command.arg.toLowerCase() === 'kernel' && !corpusRegistry().kernel) command.arg = 'linux';
-      const shown = command ? `lucivy ${command.verb} ${command.arg}` : PROMPT_PREFIX + text;
+      const shown = command ? `lucivy ${command.verb} ${command.arg}` : SEARCH_PREFIX + searchText;
       const cmd = document.createElement('span'); cmd.className = 'cmd';
       cmd.innerHTML = escapeHtml(shown)
         .replace(/(--[a-z]+(?:\s+\d+(?:\.\d+)?)?)/g, '<span class="flag">$1</span>')
         .replace(/(&quot;(?:(?!&quot;).)*&quot;)/g, '<span class="str">$1</span>');
       line.appendChild(cmd);
       promptInput = null;
-      const entry = command ? null : parseSearchCommand(text);
+      const entry = command ? null : parseSearchCommand(searchText);
       if (command) {
         try {
           const a = command.arg;
@@ -3165,7 +3179,7 @@ function openPrompt(hint) {
       } else if (entry && entry.help) {
         printHelp();
       } else if (!entry) {
-        term.out('▸ nothing to search for — try: "ShardedHandle", --fuzzy 1 "mimaloc", --regex "Sharded[A-Z]\\w+", or --help', 'dim');
+        term.out('▸ nothing to search for — try: search "ShardedHandle", --fuzzy 1 "mimaloc", --regex "Sharded[A-Z]\\w+", index mdn, list, or help', 'dim');
       } else if (!demoIndex) {
         term.out('✗ no index yet — wait for the demo to finish, or replay it', 'err');
       } else {
