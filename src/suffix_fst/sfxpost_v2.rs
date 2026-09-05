@@ -477,7 +477,7 @@ impl SfxPostReaderV2 {
     /// Rebuilding a fuzzy window asked `entries_for_doc` once per position
     /// and kept one entry of ~50: 675 M decoded for 14 M used on `inclde`.
     pub fn entry_at(&self, ordinal: u32, doc_id: u32, position: u32) -> Option<(u32, u32)> {
-        let Some(ordinal) = self.local(ordinal) else { return None; };
+        let ordinal = self.local(ordinal)?;
         if ordinal >= self.num_terms { return None; }
         let header = self.read_ordinal_header(ordinal)?;
         let (_, offset, count) = header.find_doc_full(doc_id)?;
@@ -656,7 +656,7 @@ impl SfxPostReaderV2 {
     /// source segment this way — `entries()` built one `Vec` per ordinal
     /// per segment on that path.
     pub fn for_each_entry(&self, ordinal: u32, mut f: impl FnMut(u32, u32, u32, u32)) {
-        let Some(ordinal) = self.local(ordinal) else { return (); };
+        let Some(ordinal) = self.local(ordinal) else { return };
         if ordinal >= self.num_terms { return; }
         let Some(header) = self.read_ordinal_header(ordinal) else { return };
         header.for_each_doc(|_, doc_id, offset, count| {

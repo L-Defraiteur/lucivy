@@ -169,10 +169,12 @@ impl LucivyHandle {
         dir.atomic_write(Path::new(CONFIG_FILE), config_json.as_bytes())
             .map_err(|e| format!("cannot write config: {e}"))?;
 
-        let mut settings = IndexSettings::default();
-        settings.sfx_version = config.effective_sfx_version();
-        settings.derived_in_ram = config.derived_in_ram.unwrap_or(false);
-        settings.dictionary_wait = config.dictionary_wait.unwrap_or(true);
+        let settings = IndexSettings {
+            sfx_version: config.effective_sfx_version(),
+            derived_in_ram: config.derived_in_ram.unwrap_or(false),
+            dictionary_wait: config.dictionary_wait.unwrap_or(true),
+            ..IndexSettings::default()
+        };
         let index = Index::create(dir, schema.clone(), settings)
             .map_err(|e| format!("cannot create index: {e}"))?;
 

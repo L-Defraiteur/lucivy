@@ -47,11 +47,13 @@ pub struct CompactReport {
     pub keys_merged: u64,
     /// Entries in the merged `.termtexts`.
     pub texts: u32,
-    /// Bytes of the merged `.sfx` and `.termtexts`.
+    /// Bytes of the merged `.sfx`.
     pub sfx_bytes: u64,
+    /// Bytes of the merged `.termtexts`.
     pub termtexts_bytes: u64,
-    /// Wall time of the FST pass and of the texts pass.
+    /// Wall time of the FST pass.
     pub fst_wall: std::time::Duration,
+    /// Wall time of the texts pass.
     pub texts_wall: std::time::Duration,
 }
 
@@ -182,8 +184,7 @@ pub fn compact_parts(
     field_id: u32,
     out: u64,
 ) -> crate::Result<CompactReport> {
-    let mut report = CompactReport::default();
-    report.parts = sfx_parts.len();
+    let mut report = CompactReport { parts: sfx_parts.len(), ..CompactReport::default() };
     if sfx_parts.is_empty() {
         return Ok(report);
     }
@@ -239,7 +240,7 @@ fn merge_sfx(directory: &dyn Directory, sfx_parts: &[OwnedBytes], field_id: u32,
         let mut parents_offset: u64 = 0;
         let mut len_prefix: Vec<u8> = Vec::with_capacity(10);
         let mut scratch: Vec<ParentEntryV3> = Vec::new();
-        let mut encoded: Vec<u8> = Vec::new();
+        let mut encoded: Vec<u8>;
 
         let mut op = lucivy_fst::map::OpBuilder::new();
         for r in &readers {
@@ -473,6 +474,7 @@ mod tests {
     /// peak is the process's.
     #[test]
     #[ignore]
+    #[cfg(feature = "mmap")]
     fn compaction_of_an_index_on_disk() {
         let Ok(src) = std::env::var("LUCIVY_DICT_BENCH_DIR") else { return };
         let out = std::env::var("LUCIVY_DICT_BENCH_OUT").unwrap_or_else(|_| format!("{src}-compact"));

@@ -150,12 +150,10 @@ pub(crate) fn fold_new_texts(
         let t = std::time::Instant::now();
         fold.wait();
         meta = live_dictionary(index)?.meta().clone();
-        if sync_fold() || meta.pending_segments.len() > max_pending() {
-            if fold.begin() {
-                let r = fold_once(index, verbose);
-                fold.finish();
-                r?;
-            }
+        if (sync_fold() || meta.pending_segments.len() > max_pending()) && fold.begin() {
+            let r = fold_once(index, verbose);
+            fold.finish();
+            r?;
         }
         sync_ms = t.elapsed().as_secs_f64() * 1e3;
     } else if fold.begin() {

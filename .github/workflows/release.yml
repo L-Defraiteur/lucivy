@@ -54,6 +54,35 @@ env:
   CARGO_NET_RETRY: 5
 
 jobs:
+  # ── The gate: nothing is published unless what CI checks is green ────
+  # Added after 4.0.0 (6 September 2026), whose tag published while the CI
+  # of the same commit was red (a lint, a test compiled without the default
+  # features). The builds below still run in parallel; the publish jobs
+  # wait for this one.
+  checks:
+    name: checks (clippy, lib, minimal, core, cpp)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: checks
+      - name: clippy (deny warnings)
+        run: |
+          cargo clippy --lib -- -D warnings
+          cargo clippy -p lucivy-core -p lucistore -p luciole -p sparse-vector --lib -- -D warnings
+      - name: lib tests, default and minimal features
+        run: |
+          cargo test --lib
+          cargo test --lib --no-default-features
+      - name: lucivy-core and lucivy-cpp
+        run: |
+          cargo test -p lucivy-core --no-fail-fast
+          cargo test -p lucivy-cpp
+
   # ── Python: one abi3 wheel per platform ─────────────────────────────
   python:
     name: python ${{ matrix.name }}
@@ -260,7 +289,7 @@ jobs:
   # ── Publishing waits for the maintainer's approval ──────────────────
   publish-pypi:
     name: publish to PyPI
-    needs: [python, sdist]
+    needs: [checks, python, sdist]
     # Two locks: the `release` environment (manual approval) and the
     # repository variable PUBLISH_ENABLED=true, so a tag pushed before the
     # environment is protected publishes nothing.
@@ -286,7 +315,7 @@ jobs:
 
   publish-npm:
     name: publish to npm
-    needs: [node]
+    needs: [checks, node]
     # Two locks: the `release` environment (manual approval) and the
     # repository variable PUBLISH_ENABLED=true, so a tag pushed before the
     # environment is protected publishes nothing.
@@ -354,7 +383,7 @@ jobs:
   # platform packages that are already built and verified.
   publish-wasm:
     name: publish lucivy-wasm
-    needs: [wasm]
+    needs: [checks, wasm]
     if: (startsWith(github.ref, 'refs/tags/v') || inputs.publish) && vars.PUBLISH_ENABLED == 'true'
     runs-on: ubuntu-latest
     environment:

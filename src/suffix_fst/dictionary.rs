@@ -52,12 +52,15 @@ pub const DICTIONARY_SFX_VERSION: u8 = 4;
 pub mod stats {
     use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
+    /// `lookup_or_mint` calls.
     pub static CALLS: AtomicU64 = AtomicU64::new(0);
+    /// Answered by a live generation's FST.
     pub static HITS: AtomicU64 = AtomicU64::new(0);
     /// Answered by the pending texts.
     pub static PENDING_HITS: AtomicU64 = AtomicU64::new(0);
     /// Skipped the FST walk: the Bloom filter said the key was never minted.
     pub static FILTERED: AtomicU64 = AtomicU64::new(0);
+    /// New ids minted (text found nowhere).
     pub static MINTS: AtomicU64 = AtomicU64::new(0);
     /// Whole `lookup_or_mint`, nanoseconds.
     pub static TOTAL_NS: AtomicU64 = AtomicU64::new(0);
@@ -68,16 +71,26 @@ pub mod stats {
     /// Of which: under the shared lock (pending map and counter).
     pub static LOCK_NS: AtomicU64 = AtomicU64::new(0);
 
+    /// The counters as read (and reset) by [`take`].
     #[derive(Debug, Clone, Copy, Default)]
     pub struct Snapshot {
+        /// `lookup_or_mint` calls.
         pub calls: u64,
+        /// Answered by a live generation's FST.
         pub hits: u64,
+        /// Answered by the pending texts.
         pub pending_hits: u64,
+        /// New ids minted.
         pub mints: u64,
+        /// FST walks skipped by the Bloom filter.
         pub filtered: u64,
+        /// Whole `lookup_or_mint`, nanoseconds.
         pub total_ns: u64,
+        /// Of which: opening the `.termtexts` readers, nanoseconds.
         pub open_ns: u64,
+        /// Of which: FST gets and parent decodes, nanoseconds.
         pub fst_ns: u64,
+        /// Of which: under the shared lock, nanoseconds.
         pub lock_ns: u64,
     }
 

@@ -661,6 +661,7 @@ impl<'a> TermTextsReaderV3<'a> {
         })
     }
 
+    /// Every entry across the parts: `(id, text, meta)`.
     pub fn iter(&self) -> impl Iterator<Item = (u32, &'a str, TermMetaV3)> + '_ {
         std::iter::once(self).chain(self.more.iter()).flat_map(|part| {
             (0..part.num_terms).filter_map(move |i| {

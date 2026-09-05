@@ -22,6 +22,8 @@ struct Inner {
     persist_pending: bool,
 }
 
+/// The fold state of one index: the single fold slot, the "changed" flag
+/// searches consume, the pending `meta.json` write, and the meta lock.
 #[derive(Default)]
 pub struct DictionaryFold {
     inner: Mutex<Inner>,

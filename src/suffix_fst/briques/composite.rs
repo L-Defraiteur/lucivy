@@ -911,7 +911,7 @@ pub fn build_trigram_chains(
             // A word-partition hit carries its word's FIRST chunk position,
             // and its last chunk as `last_position`: the region's end is the
             // max of the last positions seen, not the last hit's.
-            let mut first_pos = first.position;
+            let first_pos = first.position;
             let mut last_pos = first.last_position;
             let mut j = i + 1;
             while j < sorted.len() {
