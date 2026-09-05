@@ -1,10 +1,18 @@
 # lucivy-wasm 4.0.0
 
-Fast BM25 full-text search for browsers — WASM build with **threading** (emscripten pthreads), OPFS persistence, and snapshot/delta sync support. Runs in a Web Worker.
+Full-text search for code and technical text, in the browser. Substrings, fuzzy and regex **across token boundaries**, BM25, exact byte spans, every answer checked against the files — the same engine as the native bindings, built with emscripten: **threads** (pthreads over SharedArrayBuffer), OPFS persistence, snapshot import. Runs in a Web Worker. MIT.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — it clones lucivy's own source from GitHub and indexes it in your browser.
 
-### What's new in 3.0.0
+### What's new in 4.0.0
+
+- **The index is 3.7× smaller**, and a tab holds a whole repository: the playground's prompt indexes MDN Web Docs (14 611 pages, 14 s), the **entire Linux 2.6.0 kernel** (14 032 files, 28 s, 1.1 GB held in memory), Go, Godot, **TypeScript (39 044 files, 33 s)**, PostgreSQL, CPython, Redis, Git, curl, SQLite, nginx — `index <name>`, kept in OPFS, reopened in seconds. The ceiling of a tab is about 200 MB of text. Browser against native on the 2.6.0 kernel: same counts and spans, 41 s to index against 23, substrings 10-18 ms against 2 ([README](../../README.md#browser-against-native)).
+- **`shared_dictionary` and `derived_in_ram` in `IndexConfig`** (typed in `lucivy.d.ts`): the shard dictionary is the playground's default for big corpora (23-25 % smaller); `derived_in_ram` stays an option here — it saves a quarter of OPFS but raises the tab's memory peak.
+- **`Lucivy.dropIndex(path)`** — delete an index directory through the worker: WASMFS caches what it mounted, so a directory removed from the main thread still exists for it and the next `create` at that path fails.
+- **A commit every 8 MB of text** in the playground's indexing loop (`?commitmb=M`), not only every 2 000 files: a segment's size, not its document count, sets the memory peak (Godot: 3.3 GB → 1.8 GB).
+- **Compatibility contract** — 4.0 opens a 3.0.x index and returns what 3.0.x returned; 3.0.x does not open a 4.0 index; the first commit converts for good.
+
+### What 3.0.0 brought
 
 Measured on 10 000 Linux kernel files, in the browser, 8 threads:
 
@@ -24,7 +32,7 @@ Measured on 10 000 Linux kernel files, in the browser, 8 threads:
   merges capped at 800 documents (48 small segments fill eight threads where
   19 large ones fed one), at most 512 documents queued.
 
-### What's new in v2
+### From 2.x
 
 - **SFX-only engine** — all queries route through the Suffix FST, no legacy code paths
 - **Distributed search** — `merge_stats` for multi-node BM25

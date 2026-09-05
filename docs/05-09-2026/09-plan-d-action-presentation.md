@@ -106,15 +106,26 @@ la valeur en soi, et seulement après les communautés.
 - [ ] Le second acte est là (`index mdn`, `index linux`…) ; le chiffre en
   tête de page reste à poser (04 §2 bis).
 
-### 5.2 Le README (une heure)
+### 5.2 Le README (une heure) — **fait, tard le 5**
 
-- [ ] Les **trois lignes** en haut : à qui, quoi, pourquoi (28 août §3,
-  toujours pas faites). Proposition : « Full-text search for code and
-  technical text, as a library. Substrings, fuzzy and regex across token
-  boundaries, BM25, exact byte spans — every answer checked against the
-  files. Runs in your process, in your transaction, in your browser. »
-- [ ] La section comparative (faite ce soir) reçoit les deux lignes
-  constatées du §4 et le renvoi au pilier 4 et 5.
+- [x] Les **trois lignes** en haut (« Full-text search for code and technical
+  text, as a library. Substrings, fuzzy and regex across token boundaries,
+  BM25, exact byte spans — and every answer checked against the files. Runs
+  in your process, in your transaction, in your browser. »), « What's new in
+  4.0.0 » (taille ÷3,7, `shared_dictionary`, `derived_in_ram`, le banc, les
+  corpus, le contrat), le 3.0.x renvoyé au CHANGELOG.
+- [x] La section comparative reçoit les deux lignes constatées (transaction,
+  fédération) avec ce qui les fonde.
+- [x] **Les README des bindings reflètent le principal** : même accroche
+  adaptée (Python, Node, C++, WASM), « What's new in 4.0.0 » avec les noms
+  d'options propres à chacun, l'ancien « What's new » devenu « What 3.0.x
+  brought », versions d'installation avec la mention « non publié, 3.0.8
+  dernière » ; `lucivy_core/README.md` idem.
+- [x] **`ARCHITECTURE.md`** (la page que Google montre en premier) : en-tête
+  4.0.0, les quatre propriétés en tête, la table des fichiers au format 4.0
+  avec les poids mesurés sur le noyau, le dictionnaire partagé, le tableau
+  navigateur contre natif sur la 2.6.0, la table des bindings, une section
+  « One corpus, one truth » avec le tableau des trébuchements.
 - [ ] L'ordre des sections : Performance avant Query reference ? Le lecteur
   qui survole cherche « pourquoi », pas « comment ».
 

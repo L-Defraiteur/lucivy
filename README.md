@@ -7,12 +7,13 @@
 [![CI](https://github.com/L-Defraiteur/lucivy/actions/workflows/ci.yml/badge.svg)](https://github.com/L-Defraiteur/lucivy/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-BM25 full-text search engine with substring matching, fuzzy search and regex — all
-across token boundaries, with exact highlights — in Rust, Python, Node.js, C++ and
-the browser.
+**Full-text search for code and technical text, as a library.** Substrings,
+fuzzy and regex **across token boundaries**, BM25, exact byte spans — and every
+answer checked against the files. Runs in your process, in your transaction, in
+your browser. Rust, Python, Node.js, C++, WASM. MIT.
 
 Built for code search, technical documentation, and as the BM25 side of a vector
-database. Everything is MIT.
+database.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — it clones
 lucivy's own source from GitHub and indexes it in your browser in a few seconds.
@@ -23,27 +24,41 @@ lucivy's own source from GitHub and indexes it in your browser in a few seconds.
 tab. The last query is typed by hand — `--fuzzy 2 "ShardedHandel"` finds
 `ShardedHandle` in 51 ms.*
 
-### What's new in 3.0.0
+### What's new in 4.0.0
 
-- **SFX v3** — a new index format: chunked tokens with overlap, a word partition,
-  a sibling table, and **exact byte spans** on every query mode, verified one by
-  one against `grep` on 50 000 kernel files.
-- **Boolean query syntax** (`parse`): `kmalloc AND NOT kfree`, `"exact phrase"`,
-  `+must -mustnot`, parentheses — lowered to substring queries with highlights.
-- **Fuzzy by Levenshtein or Jaro-Winkler** (`fuzzy_metric`, `min_similarity`):
-  a typo at the end of a word now ranks above one at its start.
-- **Query warnings**: what the engine will really search, before running it.
-- **Bring your own storage (ACID)** in every binding: your object implements
-  `load` / `save` / `delete` / `exists` / `list`, lucivy runs on it — a
-  transactional database becomes the truth, the mmap cache is disposable.
-- **Snapshots served in place**: open a LUCE blob without extracting it.
-- **The browser build indexes 10 000 kernel files in 55 s** and answers in
-  ~1.5× the native time (it was ~25 minutes and 10×): the engine runs on
-  mimalloc, and its memory is bounded by construction.
+- **The index is 3.7× smaller.** The whole Linux kernel (93 983 files, 857 MB
+  of text): 18 057 MB in 3.0.8, **4 938 MB** in 4.0 (×5.8 the text), **3 344 MB**
+  with `derived_in_ram` (×3.9) — the Elasticsearch that does the same work
+  writes 3 082 MB. Same answers, same spans, checked against the files. How:
+  keys cut at token boundaries, a table of parents instead of FST outputs,
+  postings without byte spans (a match's bytes are derived from one checkpoint
+  per 16 positions), 28-bit ordinals, block offset tables.
+- **`shared_dictionary`**: one dictionary of token texts per **shard** instead
+  of one per segment, in generations compacted by a streaming merge — 23 %
+  smaller on the kernel, cold queries ×0.8-1.6. Off by default.
+- **`derived_in_ram`**: the three derived sidecars of a segment are not written
+  but rebuilt byte for byte when the index opens (the kernel opens in 2 s
+  instead of 43 ms; no query pays). Off by default; not for the browser.
+- **One corpus, one truth**: `benches/compare_engines.sh` builds lucivy,
+  Elasticsearch and tantivy on the same files and judges every row by the
+  same scan — [the report](docs/compare-engines-2026-09-05.md), and the
+  section below.
+- **The playground indexes whole repositories** at its prompt: `index mdn`,
+  `index linux` (the entire 2.6.0 kernel, 14 032 files, 28 s), `index go`,
+  `index typescript` (39 044 files, 33 s), PostgreSQL, CPython, Redis, Git…
+  kept in the browser, reopened in seconds.
+- **Compatibility contract**: 4.0 opens a 3.0.x index and returns what 3.0.x
+  returned (`test_compat_308`, a fixture written by the published 3.0.8 wheel);
+  3.0.x does not open a 4.0 index; the first commit in 4.0 converts without
+  return.
 - One version number for the whole workspace: `ld-lucivy`, `lucivy-core`,
-  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.0.0 (unpublished: 3.0.8 is the last release).
+  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.0.0
+  (unpublished yet: 3.0.8 is the last release).
 
-Full list: [CHANGELOG.md](CHANGELOG.md). Design: [ARCHITECTURE.md](ARCHITECTURE.md).
+3.0.x brought SFX v3 (exact byte spans on every query mode), boolean syntax,
+Jaro-Winkler, query warnings, bring-your-own-storage in every binding, snapshots
+served in place and the browser build on mimalloc: [CHANGELOG.md](CHANGELOG.md).
+Design: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## What makes lucivy different
 
@@ -320,9 +335,15 @@ On the substring itself all three agree to the document (`mutex_lock` 5 145,
 | `de`, two characters | 93 009 | **93 009**, 7.7 M spans, 561 ms | 0, silently | 0, silently |
 | `retur -ENOMEM`, a fuzzy phrase | 14 449 | **14 449**, 30 ms | 14 446 (`span_near`), 24 ms — it does this well | — |
 | **where it matched**: `mutex_lock`, 5 145 documents | 20 797 spans | **all 20 797, 15 ms** | `highlight` on the top 200: 179 ms | verifying 5 145 stored texts: 96 ms |
+| your index **in your transaction** | — | **yes**: pluggable store, one commit for your rows and the index, rollback included | no: a server next to your database, a synchronisation to write | no: its own directory, its own commit |
+| shards and nodes scoring **as one index**, as a library | — | **yes**, asserted by `test_federated_search` | yes, as a cluster | no: one index, one scale of scores |
 
-What the other two do better: Elasticsearch answers a plain substring in 3-8 ms
-to lucivy's 12-15, tantivy indexes the corpus in seconds, and both run a
+The last two rows are observed, not measured: the store contract is five
+methods (`load` / `save` / `delete` / `exists` / `list`) that rag3db implements
+over Postgres, and the federation test asserts that a document scores the same
+on its node under merged statistics as in one index holding everything. What
+the other two do better: Elasticsearch answers a plain substring in 3-8 ms to
+lucivy's 12-15, tantivy indexes the corpus in seconds, and both run a
 term-level fuzzy in a fifth of lucivy's time at two edits (34 451 documents to
 their 21 321 and 29 291 — a different question, and the report says so on every
 such row). Reproduce it, Elasticsearch optional:

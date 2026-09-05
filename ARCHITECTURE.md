@@ -1,8 +1,10 @@
 # lucivy — Architecture
 
-*3.0.0, August 2026. Every number in this document was measured; the commands
-are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md) and
-[docs/25-08-2026/07-knowledge-dump-outils.md](docs/25-08-2026/07-knowledge-dump-outils.md).*
+*4.0.0, September 2026. Every number in this document was measured; the
+commands are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md), the engine comparison
+in [docs/compare-engines-2026-09-05.md](docs/compare-engines-2026-09-05.md)
+(`benches/compare_engines.sh` regenerates it), and the working notes in
+`docs/05-09-2026/`.*
 
 ## Overview
 
@@ -10,7 +12,26 @@ lucivy is a BM25 full-text search engine built for **substring matching across
 token boundaries**: find `mutex` inside `pthread_mutex_lock`, `ror::lucivyer` in
 `Error::LucivyError`, `rag3weaver` in `rag3_weaver` — with the exact bytes that
 matched, fuzzily or by regular expression, in Rust, Python, Node.js, C++ and the
-browser.
+browser. Four properties organise the design:
+
+- **Every answer is checked.** The ground-truth harness compares each query's
+  documents *and* byte spans to a byte-by-byte scan of the files — 93 983
+  Linux kernel files, nine query modes, zero mismatches — and the same scan
+  judges Elasticsearch and tantivy on the same corpus (§ *One corpus, one
+  truth* below).
+- **The question the others cannot pose**: `spinlock`, `spin_lock` and
+  `spin lock` are the same thing (separators relaxed), a typo may straddle a
+  separator (`spinlokc` finds `spin_lock`), and a two-character needle still
+  answers. Trigram indexes cannot express the first two and answer zero to the
+  third.
+- **The index lives in your transaction.** Immutable files plus one metadata
+  object written last: it maps onto a database table or an object store, the
+  commit of your rows and the commit of the index are the same commit, and
+  a rollback takes the index with it.
+- **A library that shards and federates with the right BM25.** Statistics are
+  aggregated before scoring, so N shards give the scores of one index, and two
+  independent nodes exchange their statistics to score as one corpus — as a
+  library, in-process, in the browser too.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -85,30 +106,48 @@ makes the byte spans exact rather than approximate:
   `regex::Regex` decides on windows rebuilt around them. A pattern with no
   usable literal scans, and `query_warnings` says so.
 
-Ground truth: on 50 000 kernel files and on rag3db's 4 600, every span of every
-query mode is compared to a `grep` of the source files, on the fresh index and
-on the merged one (`test_sfx_v3_ground_truth`).
+Ground truth: on 93 983 kernel files and on rag3db's 4 600, every span of every
+query mode is compared to a byte-by-byte scan of the source files, on the fresh
+index and on the merged one (`test_sfx_v3_ground_truth`). The harness fails on a
+single disagreeing count or span.
 
 ### Files of a segment, per text field
 
-| file | content | weight | touched by one `contains` |
-|---|---|---|---|
-| `.sfx` | the suffix FST | 44 % | 18-20 % |
-| `.bytemap` | 256-bit bitmap of the bytes present per ordinal | 12 % | — |
-| `.sfxpost` | chunk-level postings (SFP3) | 9 % | 23 % |
-| `.word_sfxpost` | word-level postings (WSP3) | 9 % | 72 % |
-| `.termtexts` | the tokens' text | 6 % | 1.5 % |
-| `.sibling_v3` | the sibling table (SIB2) | 5 % | 56 % |
-| `.posmap` | position → ordinal | 5 % | 47 % |
-| `.word_pos_map` | inverse of `.word_sfxpost` | 5 % | 37 % |
+| file | content | weight (kernel, 4.0) |
+|---|---|---|
+| `.sfx` | the suffix FST (keys cut at token boundaries, a table of parents, `own_len` derived from the key) — **one per shard** with the shared dictionary (`dict-<g>.<field>.sfx`), one per segment otherwise | 23 % |
+| `.sfxpost` | chunk-level postings: `(document, position)` — **no byte span** since 4.0 (`SFP5`) | 18 % |
+| `.word_sfxpost` | word-level postings: `(document, first, last)` and the in-chunk offset of tail entries only (`WSP5`) | 15 % |
+| `.word_pos_map` | position → word starting there, span (`WMP3`, 28-bit ordinals) | 15 % |
+| `.posmap` | position → ordinal, plus **one byte offset per 16 positions** (`PMP4`): a match's bytes are *derived* from a checkpoint and the tokens' lengths, not stored per posting | 12 % |
+| `.sibling_v3` | the sibling table (`SIB4`) | 10 % |
+| `.termtexts` | the tokens' text and metadata (`own_len`, separator length, flags) — per shard with the dictionary | 7 % |
+| `.gmap` | segment → shard-dictionary ordinal map, with the shard dictionary only (`GMP2`) | — |
 
-Weights from a 15 440-file kernel index (3 392 MB, **220 KB per document**);
-"touched" from `mmap` + `mincore` on a `kmalloc` query. The three postings /
-sibling files are **delta + varint** encoded with checkpoints where random access
-needs them (every 8 documents in `.sfxpost`, 32 in `.word_sfxpost`, none in the
-sibling table, which is read sequentially) — 22 % smaller than fixed-width, and
-the reader accepts both layouts. The inverted index keeps term frequencies only:
-positions and offsets were read by nothing on a v3 index.
+Weights over the SFX files of the whole modern kernel (93 983 files, 857 MB of
+text: 4 259 MB of SFX files, 4 938 MB with the doc store and the inverted
+index — **×5.8 the text**, 52 KB per document; 3.0.8 wrote 18 057 MB, ×21).
+`.posmap`, `.word_pos_map` and `.sibling_v3` are **derived**: they hold nothing
+the postings and the token metadata do not, and the `derived_in_ram` option
+does not write them — the segment reader rebuilds them, byte for byte, when
+the index opens (3 344 MB, ×3.9, the open pays ~2 s for the kernel, never a
+query). Every reader still opens the previous layouts (`SFP2`-`SFP4`,
+`WSP2`-`WSP4`, `PMP3`, `SIB2`-`SIB3`, `.bytemap` ignored), so a 3.0.x index
+opens and answers as before; its first commit or merge in 4.0 converts it.
+The inverted index keeps term frequencies only: positions and offsets were read
+by nothing on a v3 index.
+
+### The shared dictionary (`shared_dictionary`, `sfx_version` 4)
+
+Optional at creation. Instead of one suffix FST per segment, each **shard**
+keeps one dictionary, in generations: a commit writes a generation holding only
+the texts it has not seen, segments carry a `.gmap` from their local ordinals
+to the shard's, and beyond eight generations the smallest ones are compacted
+by a streaming merge of their FSTs (the kernel: 19 s and 229 MB of RAM, files
+identical byte for byte to a from-scratch build). A query plans once per shard
+(the FST walks over the shared dictionary, in parallel), then scatters per
+segment. Cold queries pay ×0.8-1.6 against the per-segment layout (the regex
+×1.6); the kernel index is 23 % smaller, 15 440 browser files 25 %.
 
 ### Indexing: bounded by construction
 
@@ -246,11 +285,20 @@ WebAssembly addresses **4 GB**, and everything below follows from it.
   fed one — merges are capped at 800 documents in the browser (172 → 124-133 ms
   per query on the same index).
 
-| 10 000 kernel files | native | browser |
+| the whole Linux 2.6.0 kernel, 4 shards, shared dictionary | native | browser (`index linux` in the playground) |
 |---|---|---|
-| indexing | 25.7 s | 55 s |
-| query, mean / median | 79 / 49 ms | 124-133 / 69-92 ms |
-| index | 2 305 MB (compacted) | 2 879 MB, held in memory |
+| files | 13 806 (the harness skips a few directories) | 14 032, 126 MB of text |
+| indexing | 23 s | 41 s (a commit every 8 MB of text: segment size, not document count, sets the memory peak) |
+| index | 905 MB on disk | 1 089 MB, held in memory |
+| `mutex_lock`, separators relaxed | 2 ms | 10-18 ms |
+| fuzzy, one edit / regex | 10 ms / 52 ms | 29-33 ms / 113-127 ms |
+
+Same counts and same byte spans on both sides. 10 000 files of a modern kernel:
+3.0.8 wrote 2 307 MB, 4.0 writes 455 MB (per-segment) or 345 MB (shared
+dictionary). The playground's terminal indexes twelve whole repositories on
+demand (`index mdn`, `index linux`, `index typescript` — 39 044 files in 33 s…),
+kept in OPFS and reopened in seconds; the ceiling of a tab is about 200 MB of
+text.
 
 ## luciole — the actor runtime
 
@@ -271,16 +319,38 @@ pthreads, and **nothing in lucivy calls `thread::spawn`**.
 
 ## Bindings
 
-| binding | bridge | 3.0.0 |
+| binding | bridge | 4.0.0 |
 |---|---|---|
-| Python | PyO3, one `abi3` wheel for CPython ≥ 3.9 | `query_warnings`, `compact`, `wait_merges_quiet`, `index_bytes`, `drop_index`, `open_snapshot`, `create_with_blob_store`; the GIL is released around every call |
-| Node.js | napi-rs | the same, plus the asynchronous `BlobIndex` for user-provided stores |
-| C++ | cxx, generated header + static lib | the same, plus `lucivy::BlobBackend` |
-| browser | emscripten, `extern "C"`, pthreads over SharedArrayBuffer, OPFS | `memoryStatus`, `preload`, startup options (threads, merges, builds, residency) |
+| Python | PyO3, one `abi3` wheel for CPython ≥ 3.9 | `query_warnings`, `compact`, `wait_merges_quiet`, `index_bytes`, `drop_index`, `open_snapshot`, `create_with_blob_store`, `shared_dictionary=` and `derived_in_ram=` at creation; the GIL is released around every call |
+| Node.js | napi-rs | the same, plus the asynchronous `BlobIndex` for user-provided stores (`sharedDictionary`, `derivedInRam` in its options) |
+| C++ | cxx, generated header + static lib | the same, plus `lucivy::BlobBackend`; `lucivy_create` takes a full schema object |
+| browser | emscripten, `extern "C"`, pthreads over SharedArrayBuffer, OPFS | `memoryStatus`, `preload`, `dropIndex` (through the worker: WASMFS caches what it mounted), startup options (threads, merges, builds, residency), `shared_dictionary` / `derived_in_ram` in `IndexConfig` |
 | Rust | `lucivy-core` | everything |
 
 Every binding takes the same JSON `QueryConfig` and returns hits with byte-offset
 highlights per field.
+
+## One corpus, one truth: against Elasticsearch and tantivy
+
+`benches/compare_engines.sh <corpus>` builds lucivy's three layouts, Elasticsearch
+8.19 configured at its best for substrings (trigram analyzer, `wildcard` field)
+and tantivy 0.25 (default and `NgramTokenizer`) on the same files, and judges
+every row by the same scan. On the kernel (93 983 files, 857 MB):
+
+| | Elasticsearch, trigrams + wildcard | tantivy, trigrams | lucivy 4.0 |
+|---|---|---|---|
+| index | 3 082 MB (×3.6) | 680 MB (×0.8) | 4 926 MB (×5.8); 3 335 MB (×3.9) with `derived_in_ram` |
+| `spin_lock`, separators relaxed (truth 9 552) | 6 577 — inexpressible | 6 601 — relaxed is its only mode | **9 552** |
+| `spinlokc`, two edits across the boundary (10 034) | 3 549 | 6 557 | **10 034** |
+| `de`, two characters (93 009) | 0, silently | 0, silently | **93 009** |
+| where it matched (`mutex_lock`, 5 145 documents) | `highlight` on 200: 179 ms | 5 145 stored texts re-read: 96 ms | **20 797 spans, all, 15 ms** |
+
+tantivy's n-gram tokenizer emits every position as 0, so a trigram phrase there
+matches nothing; its honest path is an AND of trigrams then a verification on
+the stored text, timed as such. Where they win, also in the report: Elasticsearch
+answers a plain substring in 3-8 ms to lucivy's 12-15, tantivy indexes the corpus
+in seconds, both run a term-level fuzzy five times faster than lucivy's two-edit
+cross-token one.
 
 ## Heritage
 

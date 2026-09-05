@@ -1,10 +1,17 @@
-# lucivy v3
+# lucivy 4.0.0
 
-Fast BM25 full-text search for Python — with substring matching, fuzzy search, regex, and highlights. Powered by Rust.
+Full-text search for code and technical text, as a library — from Python. Substrings, fuzzy and regex **across token boundaries**, BM25, exact byte spans, every answer checked against the files. Runs in your process, in your transaction (bring your own storage), and the same engine runs in the browser. Powered by Rust, MIT.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
 
-### What's new in v3
+### What's new in 4.0.0
+
+- **The index is 3.7× smaller** — the whole Linux kernel: 18 057 MB in 3.0.8, 4 938 MB in 4.0, 3 344 MB with `derived_in_ram=True`; same answers, same spans, checked against the files ([the comparison with Elasticsearch and tantivy](../../docs/compare-engines-2026-09-05.md))
+- **`Index.create(..., shared_dictionary=True)`** — one dictionary of token texts per shard instead of one per segment: 23 % smaller on the kernel, cold queries ×0.8-1.6, same answers; off by default, fixed at creation (also on `create_with_blob_store`)
+- **`Index.create(..., derived_in_ram=True)`** — the three derived sidecars of each segment rebuilt byte for byte when the index opens instead of written: about a third less on disk, the open pays (the kernel: 2 s), never a query; off by default
+- **Compatibility contract** — 4.0 opens a 3.0.x index and returns what 3.0.x returned (checked against a fixture the published 3.0.8 wheel built); 3.0.x does not open a 4.0 index; the first commit converts for good
+
+### What 3.0.x brought
 
 - **SFX v3 engine** — per-field suffix FST, the default for every new index; v2 indexes still open
 - **Snapshots served from memory** — `Index.open_snapshot(blob)` searches a LUCE snapshot without extracting it
@@ -24,7 +31,7 @@ Fast BM25 full-text search for Python — with substring matching, fuzzy search,
 ## Install
 
 ```bash
-pip install lucivy  # 3.0.0
+pip install lucivy  # 4.0.0 (unpublished yet: 3.0.8 is the last release on PyPI)
 ```
 
 ## Quick start

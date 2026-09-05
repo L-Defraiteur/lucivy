@@ -1,8 +1,14 @@
 # lucivy-cpp
 
-Fast BM25 full-text search for C++ — with substring matching, fuzzy search, regex, and highlights. Powered by Rust via CXX bridge.
+Full-text search for code and technical text, as a library — from C++. Substrings, fuzzy and regex **across token boundaries**, BM25, exact byte spans, every answer checked against the files. Runs in your process, in your transaction (`lucivy::BlobBackend`), and the same engine runs in the browser. Powered by Rust via a CXX bridge, MIT.
 
-Version 3.0.4 — built on the Lucivy 3.0.4 engine (SFX v3 suffix index).
+Version 4.0.0 — built on the lucivy 4.0.0 engine (SFX v3 suffix index, shared dictionary optional).
+
+### What's new in 4.0.0
+
+- **The index is 3.7× smaller** — the whole Linux kernel: 18 057 MB in 3.0.8, 4 938 MB in 4.0, 3 344 MB with `"derived_in_ram": true`; same answers, same spans, checked against the files ([the comparison with Elasticsearch and tantivy](../../docs/compare-engines-2026-09-05.md))
+- **`lucivy_create` takes a full schema object** — `"shared_dictionary": true` (one dictionary of token texts per shard instead of one per segment: 23 % smaller on the kernel, cold queries ×0.8-1.6, same answers) and `"derived_in_ram": true` (the three derived sidecars rebuilt byte for byte when the index opens: about a third less on disk, the open pays, never a query); both off by default, fixed at creation, also for `lucivy_create_with_backend`
+- **Compatibility contract** — 4.0 opens a 3.0.x index and returns what 3.0.x returned (checked against a fixture the published 3.0.8 wheel built); 3.0.x does not open a 4.0 index; the first commit converts for good
 
 ## Build
 
