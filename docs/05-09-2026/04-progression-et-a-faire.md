@@ -578,9 +578,22 @@ Le prix, mesuré : **l'ouverture** paie le rebâti de tous les segments
 809 contre 816 ; regex 234 contre 238 — mesuré quand le rebâti était encore
 à la première requête, celle-là exclue). Et les structures rebâties sont
 résidentes en RAM (1,6 Go sur le noyau) là où un fichier mappé ne coûte que
-ce qu'une requête touche. Panels 9/9 partout. Pas mesuré : le navigateur
-avec l'option (tout y est en mémoire de toute façon : là le gain est l'OPFS
-et le téléchargement d'un snapshot) ; à mesurer, le pic mémoire.
+ce qu'une requête touche. Panels 9/9 partout. Le listage des fichiers d'un
+segment (`list_files_for(sfx_version, derived_in_ram)`) ne nomme plus les
+trois dérivés sous l'option : `index_bytes`, `preload`, `residency`, le
+snapshot LUCE, le delta et le GC ne cherchent pas des fichiers qui
+n'existent pas (un compte incomplet est un plancher, pas une mesure).
+Exposée dans tous les bindings avec un test chacun (Python
+`TestSharedDictionary::test_derived_in_ram_…`, Node
+`tests/derived_in_ram.mjs`, C++ `schema_object_with_shared_dictionary_and_
+derived_in_ram`, navigateur `derived_in_ram` dans `IndexConfig`) et dans le
+playground (`?ram`). Vérifié dans Chrome (`?dict&ram`, démo de 1 171
+fichiers) : spans exacts sur strict, relâché, fuzzy et regex ; 12 segments
+`.sfxpost` sans aucun `.posmap` / `.word_pos_map` / `.sibling_v3` à côté
+dans l'OPFS ; `index_bytes` 94 Mo (les dérivés rebâtis vivent en mémoire,
+pas dans ce compte) ; pic WASM 1 650 Mo, le plancher habituel. Reste à
+mesurer sur les 15 440 fichiers du noyau : le temps d'ouverture depuis
+l'OPFS et le pic avec l'option.
 
 ## 2 quater. La fuzzy d2 : une étape à risque, un checkpoint avant
 

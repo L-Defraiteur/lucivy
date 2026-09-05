@@ -130,7 +130,7 @@ impl SegmentMeta {
     /// is by removing all files that have been created by lucivy
     /// and are not used by any segment anymore.
     pub fn list_files(&self) -> HashSet<PathBuf> {
-        self.list_files_for(crate::index::segment_component::ANY_SFX_VERSION)
+        self.list_files_for(crate::index::segment_component::ANY_SFX_VERSION, false)
     }
 
     /// The files of this segment, as written by the `sfx_version` pipeline.
@@ -142,8 +142,10 @@ impl SegmentMeta {
     /// garbage collection pass and every walk of an index's size.
     ///
     /// A segment with no deletes has no `.del` file either: naming
-    /// `<segment>.0.del` was the same kind of phantom.
-    pub fn list_files_for(&self, sfx_version: u8) -> HashSet<PathBuf> {
+    /// `<segment>.0.del` was the same kind of phantom. `derived_in_ram`
+    /// leaves out the three derived sidecars, which such an index never
+    /// writes (`IndexSettings::derived_in_ram`).
+    pub fn list_files_for(&self, sfx_version: u8, derived_in_ram: bool) -> HashSet<PathBuf> {
         let include_temp = self
             .tracked
             .include_temp_doc_store
@@ -151,7 +153,7 @@ impl SegmentMeta {
         let has_deletes = self.delete_opstamp().is_some();
 
         let sfx_fields = &self.tracked.sfx_field_ids;
-        SegmentComponent::components_for(sfx_fields, sfx_version)
+        SegmentComponent::components_for(sfx_fields, sfx_version, derived_in_ram)
             .into_iter()
             .filter(|comp| include_temp || *comp != SegmentComponent::TempStore)
             .filter(|comp| has_deletes || *comp != SegmentComponent::Delete)

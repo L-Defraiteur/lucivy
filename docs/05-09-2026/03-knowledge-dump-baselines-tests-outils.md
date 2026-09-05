@@ -281,7 +281,9 @@ bash bindings/emscripten/build.sh            # ~1 min ; recopie pkg/ et js/ dans
 cd playground && node serve.mjs 9877         # COOP/COEP, no-store, journal moteur dans playground/diag.log
 ```
 
-URL : `http://localhost:9877/?dict` (démo, dictionnaire),
+URL : `http://localhost:9877/?dict` (démo, dictionnaire), `?dict&ram`
+(plus `derived_in_ram` : pas de `.posmap` / `.word_pos_map` / `.sibling_v3`
+dans l'OPFS, rebâtis à l'ouverture),
 `?corpus=corpus-kernel-16k.tar.gz&dict&commit=1000` (15 440 fichiers du
 noyau, 16 commits, deux compactions), `&merges=N`, `&threads=N`,
 `&wthreads=N`, `&verbose` (traces `[merge]`, `[preload]`, `[fs]` — inonde

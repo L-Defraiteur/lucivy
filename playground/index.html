@@ -1594,7 +1594,7 @@ async function startup() {
     // Cache-buster: GitHub Pages caches the worker and the wasm for a while,
     // and a phone kept a whole build behind after a deploy. Bumped at each
     // engine or worker change; the query rides through to the wasm.
-    const BUILD = '4.0.0-d576f53';
+    const BUILD = '4.0.0-9869471';
     lucivy = new Lucivy(`./js/lucivy-worker.js?v=${BUILD}`, {
       noOpfs: startupParams.has('noopfs'),
       verbose: startupParams.has('verbose'), // engine diagnostics (LUCIVY_VERBOSE, V3_PROFILE)
@@ -2364,6 +2364,9 @@ async function indexFiles(files, path, label, keep, opts = {}) {
   // The terminal's `index mdn` / `index kernel` force it (`opts`).
   const params = new URLSearchParams(location.search);
   const sharedDictionary = opts.sharedDictionary ?? params.has('dict');
+  // `?ram`: the three derived sidecars are not written to OPFS but rebuilt in
+  // memory when the index opens (about a third less OPFS; the open pays).
+  const derivedInRam = opts.derivedInRam ?? params.has('ram');
   // `?commit=N` — commit every N files instead of 2 000 (more generations
   // of the dictionary, hence its compaction, on a corpus that fits a tab).
   const COMMIT_EVERY = Math.max(1, parseInt(params.get('commit') || '2000', 10) || 2000);
@@ -2375,8 +2378,10 @@ async function indexFiles(files, path, label, keep, opts = {}) {
     ],
     shards: 4,
     shared_dictionary: sharedDictionary,
+    derived_in_ram: derivedInRam,
   });
   if (sharedDictionary) console.log('[playground] shared_dictionary: true');
+  if (derivedInRam) console.log('[playground] derived_in_ram: true');
   if (COMMIT_EVERY !== 2000) console.log(`[playground] commit every ${COMMIT_EVERY} files`);
   for (let i = 0; i < files.length; i++) {
     const { path: filePath, content } = files[i];

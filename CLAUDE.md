@@ -284,7 +284,7 @@ cargo test -p luciole --lib
 # Build WASM emscripten
 bash bindings/emscripten/build.sh
 
-# Playground (port 9877 ; `?dict` = dictionnaire partagé, `?commit=N`,
+# Playground (port 9877 ; `?dict` = dictionnaire partagé, `?ram` = derived_in_ram, `?commit=N`,
 # `?merges=N`, `?verbose` (traces `[merge]`, `[preload]` dans diag.log),
 # `?corpus=corpus-kernel-16k.tar.gz` ; un seul onglet qui indexe à la fois,
 # deux onglets partagent le même répertoire OPFS et échouent au commit)

@@ -105,7 +105,7 @@ impl SegmentComponent {
     /// List ALL components for a segment, including per-field SFX.
     /// Uses the SFX index registry so new index types are automatically protected from GC.
     pub fn all_components(sfx_field_ids: &[u32]) -> Vec<SegmentComponent> {
-        Self::components_for(sfx_field_ids, ANY_SFX_VERSION)
+        Self::components_for(sfx_field_ids, ANY_SFX_VERSION, false)
     }
 
     /// Components a segment written by the `sfx_version` pipeline carries.
@@ -116,7 +116,11 @@ impl SegmentComponent {
     /// v2 only (`gapmap`, `sepmap`, `sibling`) and three are v3 only
     /// (`word_sfxpost`, `word_pos_map`, `sibling_v3`), so a v3 segment used to
     /// name nine files per segment that could never be found.
-    pub fn components_for(sfx_field_ids: &[u32], sfx_version: u8) -> Vec<SegmentComponent> {
+    /// `derived_in_ram`: the three derived sidecars are not written and must
+    /// not be named — naming a file that is never there costs an open that
+    /// always fails, on every size measurement and every checksum walk, and
+    /// makes the byte count incomplete.
+    pub fn components_for(sfx_field_ids: &[u32], sfx_version: u8, derived_in_ram: bool) -> Vec<SegmentComponent> {
         let mut components: Vec<SegmentComponent> = Self::fixed_components().to_vec();
         for &fid in sfx_field_ids {
             // A dictionary segment (`sfx_version` 4) has no `.sfx` of its
@@ -127,6 +131,9 @@ impl SegmentComponent {
             // All registry index files (sfxpost, posmap, bytemap, termtexts, ...)
             for index in crate::suffix_fst::index_registry::all_indexes() {
                 if sfx_version != ANY_SFX_VERSION && !index.written_for(sfx_version) {
+                    continue;
+                }
+                if derived_in_ram && crate::suffix_fst::derived::DERIVED_EXTENSIONS.contains(&index.extension()) {
                     continue;
                 }
                 components.push(SegmentComponent::CustomSfxIndex {

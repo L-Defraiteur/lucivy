@@ -134,6 +134,11 @@ mod ffi {
         //   queries slightly slower at cold cache (roughly x1.2 to x1.6 on exact
         //   queries, fuzzy ones faster), a commit also writes the shard's new
         //   texts; same answers. Off by default, fixed at creation.
+        // "derived_in_ram": true does not write the three derived sidecars of
+        //   each segment (about a third of the index on disk); they are rebuilt
+        //   in RAM, byte for byte, when the index is opened. Same answers;
+        //   opening pays the rebuild, never a query. Off by default, fixed at
+        //   creation.
         fn lucivy_create(path: &str, fields_json: &str, shards: u32) -> Result<Box<LucivyIndex>>;
 
         // Open an existing index at `path`. Reads persisted schema and segment metadata.
@@ -159,7 +164,8 @@ mod ffi {
         // only holds a disposable mmap cache of the blobs (empty string: a
         // fresh temporary directory, removed when the index is destroyed).
         // config_json: either the fields array of lucivy_create(), or a full
-        // schema object {"fields":[...],"shards":2,"shared_dictionary":true,...}.
+        // schema object {"fields":[...],"shards":2,"shared_dictionary":true,
+        // "derived_in_ram":true,...}.
         // lazy: pull each blob on its first read instead of at open (needs
         // blob_len()/load_range() in the backend to pay off).
         // The backend must be thread-safe: its methods run concurrently on
@@ -1295,6 +1301,54 @@ mod tests {
 
     fn fields_one() -> Vec<String> { vec!["content".into()] }
     fn fields_two() -> Vec<String> { vec!["title".into(), "body".into()] }
+
+    /// A full schema object with the two v4 options: the index writes no
+    /// derived sidecar, answers, and reopens.
+    #[test]
+    fn schema_object_with_shared_dictionary_and_derived_in_ram() {
+        let dir = std::env::temp_dir().join(format!("lucivy-cpp-options-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.to_str().unwrap().to_string();
+        let idx = lucivy_create(&path,
+            r#"{"fields":[{"name":"body","type":"text","stored":true}],"shards":2,"shared_dictionary":true,"derived_in_ram":true}"#,
+            1).unwrap();
+        let words = ["kmalloc", "spin_lock_init", "vfree", "mutex_lock", "schedule"];
+        let mut id = 1u64;
+        for round in 0..3 {
+            for w in words {
+                idx.add(id, &format!(r#"{{"body":"round {round} calls {w} and returns {}"}}"#, w.len())).unwrap();
+                id += 1;
+            }
+            idx.commit().unwrap();
+        }
+        idx.wait_merges_quiet().unwrap();
+        assert_eq!(idx.num_docs(), 15);
+        // No derived sidecar on disk, in any shard.
+        let mut derived = 0; let mut sfxpost = 0;
+        for e in walkdir(&dir) {
+            let n = e.to_string_lossy().to_string();
+            if n.ends_with(".posmap") || n.ends_with(".word_pos_map") || n.ends_with(".sibling_v3") { derived += 1; }
+            if n.ends_with(".sfxpost") { sfxpost += 1; }
+        }
+        assert!(sfxpost > 0, "segments were written");
+        assert_eq!(derived, 0, "derived_in_ram writes no derived sidecar");
+        idx.close().unwrap();
+        let reopened = lucivy_open(&path).unwrap();
+        assert_eq!(reopened.num_docs(), 15);
+        reopened.close().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn walkdir(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() { out.extend(walkdir(&p)); } else { out.push(p); }
+            }
+        }
+        out
+    }
 
     #[test]
     fn build_contains_split_propagates_distance_single_field() {

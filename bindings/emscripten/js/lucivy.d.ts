@@ -319,6 +319,13 @@ export interface IndexConfig {
    * Off by default; fixed at creation.
    */
   shared_dictionary?: boolean;
+  /**
+   * Do not write the three derived sidecars of each segment (about a third
+   * of the index in OPFS); they are rebuilt in memory, byte for byte, when
+   * the index opens. Same answers; opening pays the rebuild, never a query.
+   * Off by default; fixed at creation.
+   */
+  derived_in_ram?: boolean;
   /** Engine version: 3 (default), 4 (= `shared_dictionary: true`), 2 (pre-3.0). */
   sfx_version?: number;
   [key: string]: unknown;

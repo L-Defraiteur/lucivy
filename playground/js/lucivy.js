@@ -107,6 +107,9 @@ export class Lucivy {
      *   slightly slower at cold cache (roughly x1.2 to x1.6 on exact queries,
      *   fuzzy ones faster), a commit also writes the shard's new texts; same
      *   answers. Off by default, fixed at creation.
+     *   derived_in_ram: the three derived sidecars of each segment (about a
+     *   third of the index in OPFS) rebuilt in memory when the index opens
+     *   instead of written; same answers. Off by default, fixed at creation.
      *   Legacy: [{ name: "body", type: "text" }]
      */
     async create(path, fieldsOrConfig) {

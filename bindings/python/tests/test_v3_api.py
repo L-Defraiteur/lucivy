@@ -313,6 +313,28 @@ class TestSharedDictionary:
         for q in queries:
             assert hits(reopened, q) == hits(plain, q), f"{q} after reopen"
 
+    def test_derived_in_ram_answers_like_the_default_and_writes_no_sidecar(self, tmp_dir):
+        """`derived_in_ram=True` writes no `.posmap` / `.word_pos_map` /
+        `.sibling_v3`, rebuilds them when the index opens, and answers exactly
+        like the default index — before and after a close / open."""
+        plain = lucivy.Index.create(os.path.join(tmp_dir, "plain2"), FIELDS, shards=2)
+        lean_path = os.path.join(tmp_dir, "lean")
+        lean = lucivy.Index.create(lean_path, FIELDS, shards=2, shared_dictionary=True, derived_in_ram=True)
+        for idx in (plain, lean):
+            for doc in DOCS:
+                idx.add(**doc)
+                idx.commit()
+        names = [n for _, _, files in os.walk(lean_path) for n in files]
+        assert any(n.endswith(".sfxpost") for n in names)
+        assert not any(n.endswith((".posmap", ".word_pos_map", ".sibling_v3")) for n in names), names
+        queries = ["python", "language", "data", "web", "learning"]
+        for q in queries:
+            assert hits(lean, q) == hits(plain, q), q
+        lean.close()
+        reopened = lucivy.Index.open(lean_path)
+        for q in queries:
+            assert hits(reopened, q) == hits(plain, q), f"{q} after reopen"
+
     def test_option_is_refused_with_a_contradicting_sfx_version(self):
         """The core refuses a config that says both; the binding cannot express
         that, so this only pins that the flag is accepted and is boolean."""
