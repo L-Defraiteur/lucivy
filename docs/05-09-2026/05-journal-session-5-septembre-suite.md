@@ -283,9 +283,11 @@ Exposé dans les bindings comme `shared_dictionary`.
 ## 8 ter. Checkpoint avant la fuzzy
 
 Tag `stable-avant-fuzzy-fenetres` sur `137b03b` : tout est vérifié là.
-L'étape suivante touche la vérification de la fuzzy (fenêtres en deux
+L'étape suivante touchait la vérification de la fuzzy (fenêtres en deux
 passes, [04](04-progression-et-a-faire.md) §2 quater) ; exacte par
-construction, mais c'est le chemin où le rappel s'est déjà perdu une fois.
+construction — et vérifiée telle —, mais **sans gain** (143 ms contre 141) :
+la carte d'octets n'était pas le coût, la marche des textes l'est. Code
+revenu au tag, résultat noté, la fuzzy d2 reste où elle est.
 
 ## 9. Commits de la suite
 

@@ -602,6 +602,18 @@ vérification (le bug de rappel de 3.0.2 à 3.0.6).
 panels 9/9 partout, postings sans octets, option `derived_in_ram`. Si la
 fuzzy perd un span, on y revient.
 
+**Tenté, mesuré, pas gardé.** Les deux passes (texte seul, carte arrière
+pour les 6 % de régions acceptées) sont exactes — 9/9 trois fois sur les
+30 000, 9/9 sur le noyau, 42 582 spans identiques, vérités fuzzy, regex,
+pipeline et dictionnaire vertes — mais ne rendent rien : `regsiter` d2
+**143,1 ms contre 141,4** (min de 3, même index, machine au repos),
+fenêtres 1 525 → 1 416 ms de somme, `byte_at` 1,43 M → 28 000 appels pour
+rien de visible. Le coût d'une fenêtre est la **marche des positions et des
+textes** (posmap, méta, texte de chaque token, minuscule), pas sa carte
+d'octets. Le code est revenu à celui du tag ; la fuzzy à deux éditions
+reste où elle est, et la piste qui resterait est du côté des candidats
+(2,57 M de hits pour 42 582 spans), pas de la vérification.
+
 **Seuils calibrés sur les gros index d'avant** (remarque du 5 septembre) :
 `LUCIVY_RAM_INDEX_MAX` (3 Go sur wasm32, index tenu entier en dessous) et
 le « recharge la page pour servir » du playground (2 Go) datent du 25 août,
