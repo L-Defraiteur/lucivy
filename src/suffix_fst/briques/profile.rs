@@ -56,8 +56,6 @@ pub struct Counters {
     pub n_fz_rejected: AtomicU64,
     /// Postings decoded by resolve_doc while rebuilding windows.
     pub n_fz_window_postings: AtomicU64,
-    /// Windows whose derived offsets disagreed with the posting (value boundary).
-    pub n_fz_window_derive_miss: AtomicU64,
     /// Distinct (doc, byte range) fuzzy occurrences reported after verification.
     pub n_fz_spans: AtomicU64,
 
@@ -250,7 +248,7 @@ pub fn reset() {
         &c.n_wordmap_lookups, &c.n_wordmap_survivors, &c.n_wordmap_mismatch,
         &c.ns_fz_resolve, &c.ns_fz_chains, &c.ns_fz_window, &c.ns_fz_dp,
         &c.n_fz_hits, &c.n_fz_regions, &c.n_fz_windows, &c.n_fz_rejected,
-        &c.n_fz_window_postings, &c.n_fz_window_derive_miss, &c.n_fz_spans,
+        &c.n_fz_window_postings, &c.n_fz_spans,
         &c.n_chains_raw, &c.n_chains_distinct, &c.n_matches_emitted,
         &c.n_chains_shared, &c.n_groups_shared, &c.n_dispatch_inserts,
         &c.n_cut_items, &c.n_cut_kept, &c.ns_cut,
@@ -289,10 +287,10 @@ pub fn dump() -> String {
     }
     if g(&c.n_fz_windows) > 0 || g(&c.n_fz_hits) > 0 {
         s.push_str(&format!(
-            "  fuzzy: resolve {:.1}ms chains {:.1}ms window {:.1}ms dp {:.1}ms | hits={} regions={} windows={} rejected={} window_postings={} derive_miss={} spans={}\n",
+            "  fuzzy: resolve {:.1}ms chains {:.1}ms window {:.1}ms dp {:.1}ms | hits={} regions={} windows={} rejected={} window_postings={} spans={}\n",
             ms(&c.ns_fz_resolve), ms(&c.ns_fz_chains), ms(&c.ns_fz_window), ms(&c.ns_fz_dp),
             g(&c.n_fz_hits), g(&c.n_fz_regions), g(&c.n_fz_windows), g(&c.n_fz_rejected),
-            g(&c.n_fz_window_postings), g(&c.n_fz_window_derive_miss), g(&c.n_fz_spans)));
+            g(&c.n_fz_window_postings), g(&c.n_fz_spans)));
     }
     s.push_str(&format!(
         "  chains: chunk={} word={}  word_entries={}  word_pairs={}  relaxed chunk walk: skipped={} walked={}\n",

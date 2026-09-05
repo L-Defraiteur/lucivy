@@ -44,11 +44,9 @@ fn place_overlap_overflow(ctx: &BriquesContext<'_>, matches: &mut [MatchV3]) {
             if tt.has_content(ord) { break Some(ord as u64); }
             p += 1;
         };
-        let Some(ord) = next else { continue };
-        if let Some(e) = ctx.resolver.resolve_doc(ord, m.doc_id)
-            .into_iter().find(|e| e.position == p)
-        {
-            m.byte_to = e.byte_from + m.overlap_overflow as u32;
+        if next.is_none() { continue }
+        if let Some(bf) = ctx.byte_at(m.doc_id, p) {
+            m.byte_to = bf + m.overlap_overflow as u32;
             m.overlap_overflow = 0;
         }
     }

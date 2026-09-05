@@ -1039,11 +1039,10 @@ pub(super) fn rebuild_window_src(
 ///
 /// Source offsets are derived, not looked up: within a value, chunk p+1
 /// starts at `byte_from(p) + own_len(p)` (collector_v3: `offset += chunk_len`).
-/// One posting lookup anchors the first position and one checks the last;
-/// a disagreement (a value boundary, where offsets restart) falls back to a
-/// lookup per position and is counted in `n_fz_window_derive_miss`. The
-/// per-position lookup decoded a document's whole payload for one entry —
-/// 675 M postings for 14 M used on `inclde` over 50k files.
+/// One `byte_at` anchors the first position (the posmap's byte checkpoint,
+/// or the posting on an older segment). A lookup per position decoded a
+/// document's whole payload for one entry — 675 M postings for 14 M used
+/// on `inclde` over 50k files.
 pub(super) fn rebuild_window_mapped(
     ctx: &BriquesContext<'_>,
     doc_id: DocId,
@@ -1122,27 +1121,19 @@ pub(super) fn rebuild_window_opts(
     }
     let cut_end = pm.ordinal_at(doc_id, to + 1).is_some();
 
-    // Anchor, derive, check.
-    let first_ord = pm.ordinal_at(doc_id, from)?;
-    let base = ctx.resolver.resolve_doc_at(first_ord as u64, doc_id, from)?.byte_from;
-    profile::bump(|c| &c.n_fz_window_postings, 2);
+    // Anchor, then derive: the window never crosses a value boundary (the
+    // walks above stop at an empty slot), so `byte_from(p) + own_len(p)`
+    // holds from the first position to the last. The anchor used to be a
+    // posting lookup, checked by a second one at the last position — never
+    // once in disagreement over the panels — and is now `byte_at`, which
+    // reads the posmap's checkpoint or, on an older segment, the posting.
+    let base = ctx.byte_at(doc_id, from)?;
+    profile::bump(|c| &c.n_fz_window_postings, 1);
     let mut offsets: Vec<u32> = Vec::with_capacity(toks.len());
     let mut acc = base;
     for (_, t) in &toks {
         offsets.push(acc);
         acc += t.own as u32;
-    }
-    let last_ord = pm.ordinal_at(doc_id, to)?;
-    let derived_last = *offsets.last().unwrap();
-    let actual_last = ctx.resolver.resolve_doc_at(last_ord as u64, doc_id, to)?.byte_from;
-    if derived_last != actual_last {
-        profile::bump(|c| &c.n_fz_window_derive_miss, 1);
-        offsets.clear();
-        for (pos, _) in &toks {
-            let ord = pm.ordinal_at(doc_id, *pos)?;
-            profile::bump(|c| &c.n_fz_window_postings, 1);
-            offsets.push(ctx.resolver.resolve_doc_at(ord as u64, doc_id, *pos)?.byte_from);
-        }
     }
 
     for ((_, t), &bf) in toks.iter().zip(offsets.iter()) {

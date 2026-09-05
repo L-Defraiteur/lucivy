@@ -965,7 +965,14 @@ pub struct SegmentSfxDict<'a> {
 /// is re-interned and no FST is built — the shard dictionary already holds
 /// every id (`sparse_vector::merge_segments` does the same with its
 /// dimension tables).
-pub fn merge_segments_dict(segments: &[SegmentSfxDict<'_>]) -> Result<SfxCollectorDataV3, String> {
+///
+/// `own_len_of` answers for a global id (the shard dictionary's META): it
+/// is what the merged segment's `.posmap` needs to write its byte
+/// checkpoints — the merge carries no text of its own.
+pub fn merge_segments_dict(
+    segments: &[SegmentSfxDict<'_>],
+    own_len_of: &dyn Fn(u32) -> Option<u16>,
+) -> Result<SfxCollectorDataV3, String> {
     use crate::suffix_fst::gmap::GmapReader;
     use crate::suffix_fst::word_sfxpost::{WordPostingEntry, WordSfxPostReader, WordSfxPostWriter};
 
@@ -1038,7 +1045,7 @@ pub fn merge_segments_dict(segments: &[SegmentSfxDict<'_>]) -> Result<SfxCollect
         token_meta: Vec::new(),
         tokens: vec![String::new(); num],
         content_postings,
-        own_lens: vec![0; num],
+        own_lens: union.iter().map(|&g| own_len_of(g).unwrap_or(0)).collect(),
         num_content_ords: num,
         num_docs,
         min_suffix_len: 1,

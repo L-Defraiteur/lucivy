@@ -313,7 +313,12 @@ impl SfxNode {
             return Err(crate::LucivyError::SystemError(
                 "sfx dictionary merge: no segment carries a .gmap".into()));
         }
-        let data = super::sfx_dag_v3::merge_segments_dict(&segs)
+        // The shard dictionary's META gives every id its `own_len`, for the
+        // merged `.posmap`'s byte checkpoints.
+        let dict = readers.iter().find_map(|r| r.sfx_dictionary_field(field));
+        let dict_texts = dict.as_ref().and_then(|d| d.termtexts_reader());
+        let own_len_of = |g: u32| dict_texts.as_ref().and_then(|t| t.meta(g)).map(|m| m.own_len);
+        let data = super::sfx_dag_v3::merge_segments_dict(&segs, &own_len_of)
             .map_err(crate::LucivyError::SystemError)?;
         let mut dag = super::sfx_dag_v3::build_initial_sfx_dag_v3(data);
         let mut result = luciole::execute_dag(&mut dag, None)

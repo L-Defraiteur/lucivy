@@ -377,6 +377,85 @@ le `from` tombe *dans* un chunk (pas à son début) : il faudrait leur
 garder un décalage, ou le recalculer depuis la longueur du mot (le mot
 principal, lui, part au début de son premier chunk).
 
+**Qui lit les spans, mesuré** (5 septembre après-midi, panel de vérité sur les
+30 000 fichiers en dictionnaire, `V3_PROFILE=1`, sommes sur les 120
+segments) : ce que les résolveurs matérialisent contre ce qui sort.
+
+| requête | ms | spans matérialisés (matches émis / hits) | highlights rendus | lookups de postings pour les fenêtres |
+|---|---|---|---|---|
+| mutex_lock strict | 2,9 | 1 506 | 753 | — |
+| spin_lock strict | 2,5 | 4 551 | 2 278 | — |
+| sched term | 5,2 | 15 189 | 4 273 | — |
+| sched strict | 2,9 | 8 264 | 8 264 | — |
+| printk sw | 3,6 | 11 285 | 5 470 | — |
+| schdule fz1 | 9,6 | 44 246 hits | 2 284 | 37 678 (2 par fenêtre, 18 839 fenêtres) |
+| regsiter fz2 | 160,3 | **2 571 045 hits** | 42 582 | **1 427 958** (713 979 fenêtres) |
+| spin_lock_[a-z]+ rx | 18,1 | 1 486 | 1 486 | 878 |
+
+Lecture du code (`resolve.rs`, `composite.rs`, `regex_verified.rs`,
+`orchestrator.rs`) : sur le chemin v3 **aucune décision d'adjacence ne lit
+un octet** — les chaînes se vérifient par positions (`.posmap`,
+`.word_pos_map`). Les octets servent à : la clé de dédoublonnage
+`(doc, position, byte_from)` (équivalente à `(doc, position, sti)`) ; le
+filtre `exact_match` de secours sans posmap (`token_end`) ; le
+regroupement des hits fuzzy en régions (tri et écart **en octets**) et
+des hits regex (écart `2n + 2` octets) ; l'ancrage des fenêtres
+reconstruites (`rebuild_window_opts` : **deux** `resolve_doc_at` par
+fenêtre, la base et un contrôle, puis les offsets sont déjà **dérivés**
+par `own_len` de position en position — le code fait aujourd'hui, à
+l'échelle d'une fenêtre, exactement ce que le chantier généralise) ; le
+placement du débordement d'overlap ; et les highlights, un triplet par
+match, jusqu'au plafond puis réparés sur le top-k. Le fuzzy à 2 éditions
+est le cas dimensionnant : 2,57 M de hits dont 1,7 % finissent en
+highlight, et 1,43 M lectures de postings dont la moitié ne sert qu'à
+contrôler la dérivation (`derive_miss=0` partout).
+
+**Plan de réalisation (décidé le 5 septembre, après-midi)** :
+
+1. **`.posmap` layout 4 (`PMP4`)** : après les cases PMP3 de chaque
+   document, un point de contrôle `u32` = offset d'octet **toutes les 16
+   positions** (0,25 o/position ; 7,75 Mo sur les 31,0 M positions des
+   30 000, contre 151 Mo retirés). `byte_at(doc, p)` = le point de
+   contrôle ≤ p, plus les `own_len` (méta) des positions intermédiaires ;
+   une **case vide remet l'offset à 0** (frontière de valeur : le
+   collecteur repart à l'octet 0 à chaque valeur, une position de
+   séparation entre deux). Le collecteur et les fusions écrivent PMP4
+   (ils connaissent `own_len`) ; PMP3 et PMAP toujours lus.
+2. **Un service d'offsets sur le contexte** (`BriquesContext::offsets`) :
+   `byte_at(doc, p) -> Option<u32>`, deux dos — PMP4 par dérivation ;
+   ancien index (PMP3 + postings avec octets) par `posmap.ordinal_at` puis
+   `resolve_doc_at(...).byte_from`. **Plus aucune brique ne lit
+   `e.byte_from`** : `rebuild_window_opts` (une dérivation au lieu de deux
+   lookups), `place_overlap_overflow`, les émissions de `resolve.rs`.
+   Étape mesurable seule, format compatible (A/B sur `regsiter` fz2, poste
+   « window »).
+3. **Postings sans octets** : `SFP5` (une entrée = `d_position`, l'en-tête
+   par document inchangé) et `WSP5` (`d_doc`, `d_first`,
+   `(last − first) << 1 | a_un_décalage`, `[décalage]` — le décalage dans
+   le chunk, présent seulement pour les **entrées de queue** des mots de
+   plus de 264 octets, qui partent au milieu d'un chunk ; 0 octet pour
+   les autres). Longueurs par la méta : chunk `own_len`, mot
+   `own_len − sep_len` (0 désaccord sur 137 M). `PostingResolver` rend des
+   positions ; `MatchV3` garde `(doc, position, span, sti, ordinaux,
+   consommé)` et ses octets sont **placés** en une passe triée par
+   document juste avant `verify_literal` et les highlights ; les hits
+   fuzzy et regex se regroupent **par positions** (une position ≥ 1
+   octet, pas de position vide : le même seuil numérique regroupe un
+   sur-ensemble, la vérification sur fenêtre reste ce qui décide). Les
+   lecteurs SFP2-4 / WSP2-4 restent lus ; le pipeline v2 (`sfx_version`
+   2) continue d'écrire SFP4 avec ses octets, ses requêtes ne changent
+   pas.
+4. **Fusions** : `merge_segments_v3`, `merge_segments_dict`, `sfx_merge`
+   (v2) — plus d'octets à remapper, le `.posmap` rebâti avec `own_len`.
+5. **Vérité** : référence 10 000 (`9 pass`), réouverture des index
+   d'avant (`idx30k-dict3`, `idx30k-v7` : les anciens layouts par le
+   second dos du service), 30 000 A/B de temps (la fuzzy et la regex
+   surtout), noyau entier ; `byte_spans_are_derivable` devient le test du
+   service ; scan des tailles ; puis les docs.
+
+Ce que ça retire, attendu : 842 Mo sur le noyau (15 %), 151 Mo sur les
+30 000 (12 %), moins les points de contrôle (~1,8 % de ce qu'on retire).
+
 **Seuils calibrés sur les gros index d'avant** (remarque du 5 septembre) :
 `LUCIVY_RAM_INDEX_MAX` (3 Go sur wasm32, index tenu entier en dessous) et
 le « recharge la page pour servir » du playground (2 Go) datent du 25 août,

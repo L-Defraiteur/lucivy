@@ -6,6 +6,7 @@
 
 
 use crate::query::posting_resolver::PostingResolver;
+use crate::DocId;
 use crate::suffix_fst::file_v3::SfxFileReaderV3;
 use crate::suffix_fst::posmap::PosMapReader;
 use crate::suffix_fst::word_sfxpost::WordSfxPostReader;
@@ -79,6 +80,28 @@ impl<'a> BriquesContext<'a> {
     /// The term texts reader; panics if `.termtexts` was not loaded.
     pub fn require_termtexts(&self) -> &TermTextsReaderV3<'a> {
         self.termtexts.as_ref().expect("termtexts required but not loaded — check index config")
+    }
+
+    // ── Byte offsets ─────────────────────────────────────────────
+
+    /// Source byte offset of `position` in `doc_id`.
+    ///
+    /// Two backends, by what the segment carries: a `.posmap` with byte
+    /// checkpoints (`PMP4`) derives it from the checkpoint before the
+    /// position and the `own_len` (termtexts META) of the positions in
+    /// between; an older segment reads it from the chunk posting at that
+    /// position, which still carries its span. No brique reads a posting's
+    /// `byte_from` directly any more: this is the one place that knows
+    /// where the offsets live. `None` past the document, on an empty slot,
+    /// or without `.posmap`.
+    pub fn byte_at(&self, doc_id: DocId, position: u32) -> Option<u32> {
+        let pm = self.posmap.as_ref()?;
+        if pm.has_byte_checkpoints() {
+            let tt = self.termtexts.as_ref()?;
+            return pm.byte_at(doc_id, position, |ord| tt.meta(ord).map(|m| m.own_len));
+        }
+        let ord = pm.ordinal_at(doc_id, position)?;
+        self.resolver.resolve_doc_at(ord as u64, doc_id, position).map(|e| e.byte_from)
     }
 
     // ── Convenience: check if word pipeline is available ─────────

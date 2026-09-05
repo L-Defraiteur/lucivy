@@ -66,6 +66,11 @@ pub trait SfxIndexFile: Send {
     /// Called once per token in ordinal order.
     fn on_token(&mut self, _ord: u32, _text: &str) {}
 
+    /// Called once per token in ordinal order, when the build knows its
+    /// `own_len` (content + separator bytes, overlap excluded) — what the
+    /// posmap needs to write its byte checkpoints (`PMP4`).
+    fn on_own_len(&mut self, _ord: u32, _own_len: u16) {}
+
     /// Called for each sfxpost entry.
     fn on_posting(&mut self, _ord: u32, _doc_id: u32, _position: u32,
                   _byte_from: u32, _byte_to: u32) {}
@@ -240,6 +245,9 @@ pub fn build_derived_indexes_v3(
         for idx in indexes.iter_mut() {
             if matches!(idx.merge_strategy(), MergeStrategy::EventDriven) {
                 idx.on_token(ord_u32, effective_text);
+                if let Some(len) = token_own_lens.and_then(|l| l.get(ord)) {
+                    idx.on_own_len(ord_u32, *len);
+                }
             }
         }
         if let Some(ref reader) = sfxpost_reader {
