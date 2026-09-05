@@ -89,22 +89,29 @@ La ligne « ce qu'ils font mieux » (§3) juste en dessous, en une phrase.
 Le principe du 28 août tient : d'abord la page d'arrivée, puis ce qui a de
 la valeur en soi, et seulement après les communautés.
 
-### 5.1 La page d'arrivée (une demi-journée)
+### 5.1 La page d'arrivée (une demi-journée) — **fait sauf le titre, tard le 5**
 
 - [ ] **Le titre.** « Search code the way you grep it » dit le geste, pas la
-  différence. Proposition : *« Substring search across tokens — every answer
-  checked against the files »*, ou en deux temps : le titre actuel, et un
-  sous-titre qui porte le pilier 1.
-- [ ] **Le tableau du §4** dans la page, sous « Numbers », avec la colonne
-  vérité et le lien vers le rapport généré. Cinq lignes mesurées, deux
-  constatées, une phrase pour ce qu'ils font mieux.
-- [ ] **« Bring your own storage » remonté** d'une fonctionnalité parmi
-  d'autres à un argument : « votre index dans votre transaction », avec le
-  schéma en trois lignes (fichiers immuables, méta en dernier, rollback).
-- [ ] **La fédération dite** : une phrase et le test qui l'affirme (« deux
-  nœuds, statistiques fusionnées, scores égaux à l'index unique »).
-- [ ] Le second acte est là (`index mdn`, `index linux`…) ; le chiffre en
-  tête de page reste à poser (04 §2 bis).
+  différence. Le sous-titre (`.pitch`) porte maintenant le pilier 1 (« …and
+  every answer checked against the files… in your process, in your
+  transaction, and in your browser ») ; le h1 est à décider : le garder, ou
+  *« Substring search across tokens — every answer checked against the
+  files »*.
+- [x] **Le tableau du §4** dans la page : section « One corpus, one truth »
+  entre « Numbers » et « Browser against native », neuf lignes (cinq
+  mesurées, la taille, les deux constatées, les positions), la colonne
+  vérité, ce qu'ils font mieux, le lien vers le rapport et la commande.
+- [x] **Le stockage remonté en argument** : une seconde rangée de trois
+  cartes sous « What you just saw » — « Every answer checked », « In your
+  transaction » (fichiers immuables, méta en dernier, même commit, rollback,
+  liens vers le stockage et la transaction), « Sharded and federated, same
+  scores ».
+- [x] **La fédération dite** : la troisième carte, avec le test qui
+  l'affirme.
+- [x] Le paragraphe « The machine » est en 4.0.0 (5 septembre, quatre
+  shards, dictionnaire), la commande porte `V3_SFX_VERSION=4`.
+- [ ] Le chiffre en tête de page reste à poser (04 §2 bis) ; il dépend du
+  titre.
 
 ### 5.2 Le README (une heure) — **fait, tard le 5**
 

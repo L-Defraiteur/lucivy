@@ -454,9 +454,9 @@ window._allLogs = [];
   <div class="hero">
     <h1>Search code the way you <em>grep</em> it.</h1>
     <p class="pitch">
-      Substrings across tokens, fuzzy (Levenshtein or Jaro-Winkler), regex, boolean syntax,
-      BM25 ranking, exact byte spans &mdash; a Rust engine with Python, Node.js and C++
-      bindings, that also runs in your browser.
+      Substrings, fuzzy and regex <b>across token boundaries</b>, BM25, exact byte spans &mdash;
+      and <b>every answer checked against the files</b>. A Rust library with Python, Node.js and
+      C++ bindings, that runs in your process, in your transaction, and in your browser.
     </p>
     <div class="cta">
       <button class="primary" id="btnPlay">&#8635;&nbsp; Replay demo</button>
@@ -504,6 +504,29 @@ window._allLogs = [];
         drives the walk, <code>regex::Regex</code> decides on the rebuilt windows. A pattern with no
         usable literal falls back to a scan &mdash; and <code>query_warnings</code> says so before
         you run it.
+      </div>
+    </div>
+    <div class="cards" style="margin-top:12px">
+      <div class="card">
+        <h3>Every answer checked</h3>
+        The ground-truth harness compares each query's documents <b>and byte spans</b> to a
+        byte-by-byte scan of the files: 93&nbsp;983 kernel files, nine query modes, zero mismatches,
+        and the build fails on one. The same scan judges Elasticsearch and tantivy on the same
+        corpus (<a href="#compare">below</a>): where they answer zero in silence, the row says so.
+      </div>
+      <div class="card">
+        <h3>In your transaction</h3>
+        An index is immutable files plus one metadata object written last, so it maps onto a
+        database table or an object store: the commit of your rows and the commit of the index
+        are <b>the same commit</b>, and a rollback takes the index with it. Five store methods to
+        implement (<a href="#doc-storage">bring your own storage</a>, <a href="#doc-acid">one transaction</a>); rag3db does it over Postgres.
+      </div>
+      <div class="card">
+        <h3>Sharded and federated, same scores</h3>
+        BM25 statistics are aggregated before scoring, so N shards give the scores of one index;
+        two independent nodes exchange their statistics and score as one corpus
+        (<a href="#doc-distribute">distributed search</a>) &mdash; as a library, in-process, in
+        the browser too. Asserted by a test: union equal, scores equal.
       </div>
     </div>
   </section>
@@ -1170,11 +1193,12 @@ index.compact()?;                                       <span class="c">// merge
     <p style="margin-top:10px">Run it yourself &mdash; it builds the index, runs the panel and the reference scan, and fails on any disagreement:</p>
     <pre class="code">git clone --depth=1 https://github.com/torvalds/linux /tmp/linux-bench
 
-V3_CORPUS=/tmp/linux-bench cargo test --release -p lucivy-core \
+V3_CORPUS=/tmp/linux-bench V3_SFX_VERSION=4 cargo test --release -p lucivy-core \
     --test test_sfx_v3_ground_truth v3_ground_truth_demo -- --ignored --nocapture</pre>
     <p class="how" style="margin-top:12px">
       <b>The machine, so you can judge the numbers.</b> Intel Core Ultra 7 270K Plus (24 cores),
-      93 GB RAM, NVMe SSD, Linux 7.1, 28 August 2026, lucivy 3.0.7, one shard, nothing else running.
+      93 GB RAM, NVMe SSD, Linux 7.2, 5 September 2026, lucivy 4.0.0, four shards, shared
+      dictionary, nothing else running.
       Times are the search itself; recovering each hit's file for the comparison is the harness's own
       work and is reported separately. A Jaro-Winkler row runs in the same panel but is
       <b>timed, not verified</b> &mdash; the engine returns one span per candidate window there, so a
@@ -1182,6 +1206,42 @@ V3_CORPUS=/tmp/linux-bench cargo test --release -p lucivy-core \
       This panel exists because the previous one did not compare anything: it reported "20 hits"
       on every row, 20 being the result cap, and it hid a bug that lost documents for five releases.
     </p>
+  </section>
+
+  <section id="compare">
+    <h2>One corpus, one truth <small>lucivy, Elasticsearch 8.19 and tantivy 0.25 on the same 93&nbsp;983 files, judged by the same scan</small></h2>
+    <p style="margin:0 0 12px">
+      Each engine is configured at its best for substrings, not at its default: Elasticsearch with a
+      trigram analyzer and a <code>wildcard</code> field, tantivy (upstream, not the fork) with its
+      <code>NgramTokenizer</code>. On a plain substring all three agree to the document
+      (<code>mutex_lock</code> 5&nbsp;145, <code>spin_lock</code> 6&nbsp;569, <code>sched</code> 9&nbsp;289).
+      Where they part &mdash; bold equals the truth:
+    </p>
+    <div style="overflow-x:auto">
+    <table>
+      <tr><th>asked</th><th>truth (scan)</th><th class="fast">lucivy</th><th>Elasticsearch</th><th>tantivy</th></tr>
+      <tr><td><code>spin_lock</code>, separators relaxed &mdash; also <code>spin lock</code>, <code>spin-lock</code>, <code>spinlock</code></td><td>9 552</td><td class="fast"><b>9 552</b>, 23 ms</td><td>6 577 &mdash; inexpressible, its trigrams carry the underscore</td><td>6 601 &mdash; relaxed is its only mode, the separator never enters its index</td></tr>
+      <tr><td><code>spinlokc</code>, two edits, across the token boundary</td><td>10 034</td><td class="fast"><b>10 034</b>, 148 ms</td><td>3 549 &mdash; fuzziness compares whole terms</td><td>6 557 &mdash; same</td></tr>
+      <tr><td><code>spin_lock_[a-z]+</code>, a regex</td><td>5 510</td><td class="fast"><b>5 510</b>, 219 ms</td><td>5 440 (wildcard field, 70 short), 480 ms</td><td>0 &mdash; the terms are already cut</td></tr>
+      <tr><td><code>de</code>, two characters</td><td>93 009</td><td class="fast"><b>93 009</b>, 7.7 M spans, 561 ms</td><td>0, silently</td><td>0, silently</td></tr>
+      <tr><td><code>retur -ENOMEM</code>, a fuzzy phrase</td><td>14 449</td><td class="fast"><b>14 449</b>, 30 ms</td><td>14 446 (<code>span_near</code>), 24 ms &mdash; it does this well</td><td>&mdash;</td></tr>
+      <tr><td><b>where it matched</b>: <code>mutex_lock</code>, 5 145 documents</td><td>20 797 spans</td><td class="fast"><b>all 20 797, 15 ms</b></td><td><code>highlight</code> on the top 200: 179 ms</td><td>5 145 stored texts re-read: 96 ms</td></tr>
+      <tr><td>index, 857 MB of text</td><td>&mdash;</td><td class="fast">4 926 MB (&times;5.8); 3 335 MB (&times;3.9) with <code>derived_in_ram</code></td><td>3 082 MB (&times;3.6)</td><td>680 MB (&times;0.8)</td></tr>
+      <tr><td>your index <b>in your transaction</b></td><td>&mdash;</td><td class="fast"><b>yes</b>: pluggable store, one commit, rollback included</td><td>no: a server next to your database</td><td>no: its own directory, its own commit</td></tr>
+      <tr><td>shards and nodes scoring <b>as one index</b>, as a library</td><td>&mdash;</td><td class="fast"><b>yes</b>, asserted by a test</td><td>yes, as a cluster</td><td>no: one index, one scale of scores</td></tr>
+    </table>
+    </div>
+    <p style="margin-top:12px">
+      What the other two do better, in the same report: Elasticsearch answers a plain substring in
+      3-8 ms to lucivy's 12-15 and is a distributed system; tantivy indexes the corpus in seconds
+      (lucivy: 56 s per-segment, about four minutes with the shared dictionary); both run a
+      term-level fuzzy in a fifth of lucivy's time at two edits &mdash; on a different question, and
+      every such row says so. tantivy's n-gram tokenizer emits every position as 0, so a trigram
+      phrase there matches nothing: its rows use the honest path, an AND of trigrams then a
+      verification on the stored text, timed as such. Full report, generated by one command:
+      <a href="https://github.com/L-Defraiteur/lucivy/blob/main/docs/compare-engines-2026-09-05.md">docs/compare-engines-2026-09-05.md</a>.
+    </p>
+    <pre class="code">benches/compare_engines.sh /tmp/linux-bench /tmp/lucivy-compare    <span class="c"># Elasticsearch optional, see the header</span></pre>
   </section>
 
   <section id="numbers">
