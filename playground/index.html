@@ -1594,7 +1594,7 @@ async function startup() {
     // Cache-buster: GitHub Pages caches the worker and the wasm for a while,
     // and a phone kept a whole build behind after a deploy. Bumped at each
     // engine or worker change; the query rides through to the wasm.
-    const BUILD = '3.0.8-5a8f6b0';
+    const BUILD = '3.0.8-68e0737';
     lucivy = new Lucivy(`./js/lucivy-worker.js?v=${BUILD}`, {
       noOpfs: startupParams.has('noopfs'),
       verbose: startupParams.has('verbose'), // engine diagnostics (LUCIVY_VERBOSE, V3_PROFILE)
@@ -1751,11 +1751,16 @@ async function showMemoryStatus() {
     // the first query: a single substring search opens nearly every file of
     // every segment, so lazy reading does not save the work, it only hides it
     // in the first search. Paid here it is paid once, and it can be shown.
-    memoryEl.textContent = `index ${mb} MB — loading into memory…`;
+    // `preload` first waits for the background merges (a merge builds its
+    // FST in this same address space); after many small commits that wait
+    // is the long part, not the reads — say so rather than let it look like
+    // slow loading.
+    memoryEl.textContent = `index ${mb} MB — finishing background merges, then loading into memory…`;
     const pre = await index.preload();
+    const merges = pre.merge_wait_ms > 1000 ? ` (after ${(pre.merge_wait_ms / 1000).toFixed(0)}s of background merges)` : '';
     memoryEl.textContent = pre.skipped
       ? `index ${mb} MB, held in memory`
-      : `index ${mb} MB in memory — ${pre.files} files read in ${(pre.ms / 1000).toFixed(1)}s`;
+      : `index ${mb} MB in memory — ${pre.files} files read in ${(pre.ms / 1000).toFixed(1)}s${merges}`;
   } catch (e) {
     memoryEl.textContent = '';
   }

@@ -14,6 +14,19 @@ Unreleased (branch v4)
 - Index format v4 on the branch: `.sfx` container version 8, ordinals on 28
   bits, block-coded offset tables (`SFP4`, `WSP4`, `SIB4`, `.termtexts`
   layout 3), `.gmap` layout 2. Every reader still opens the previous layouts.
+- **Fixed: the tail entry of a very long word pointed at the wrong
+  position.** A word of more than 264 bytes (a line of Chinese, no separator
+  inside) gets a second entry for its last bytes; when the word's trailing
+  separators spilled into a chunk of their own, that entry's `first_position`
+  was the separator-only chunk while its `byte_from` was the chunk before.
+  Three occurrences in the 137 million word postings of the Linux kernel
+  (its Chinese translations), found by a new consistency check
+  (`postings_measure::byte_spans_are_derivable`) — the byte spans, hence the
+  highlights, were right; the position, hence `.word_pos_map`, was off by one
+  chunk. `preload()` in the browser now reports `merge_wait_ms`, the time
+  spent waiting for background merges before reading (70 s after sixteen
+  commits of 1 000 kernel files, against 4 s of reading), and the playground
+  says so instead of "loading into memory".
 - **Dictionary compaction as a merge of streams.** Past
   `LUCIVY_DICT_MAX_GENERATIONS` (8) live generations, a commit used to read
   every text of the dictionary into RAM and rebuild one FST from all of them

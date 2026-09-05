@@ -348,6 +348,11 @@ export interface PreloadResult {
   ms: number;
   /** True when the index is streamed and nothing was loaded. */
   skipped: boolean;
+  /**
+   * Milliseconds spent waiting for the background merges before reading:
+   * after many small commits this is the long part, not the reads.
+   */
+  merge_wait_ms: number;
 }
 
 export class Lucivy {

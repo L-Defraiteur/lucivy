@@ -204,6 +204,11 @@ impl<'a> PosMapReader<'a> {
         result
     }
 
+    /// Number of documents in the map.
+    pub fn num_docs(&self) -> u32 {
+        self.num_docs
+    }
+
     /// Number of tokens in a document.
     pub fn num_tokens(&self, doc_id: u32) -> u32 {
         if doc_id >= self.num_docs {

@@ -455,32 +455,41 @@ impl SfxCollectorV3 {
                     });
                     // NO chunk-level posting. Tail word posting captured below.
 
+                    // The tail's bytes are the last `max_token` content bytes
+                    // of the word, contiguous from the first chunk start. The
+                    // chunk they start in is the word's last chunk — unless
+                    // the word's trailing separators spilled into a chunk of
+                    // their own (`解。\n\n` fills a chunk, `.. ` starts the
+                    // next): then it is the chunk before. `first_position`
+                    // used to be the last chunk's regardless, so three words
+                    // of the kernel pointed at a separator-only chunk while
+                    // `byte_from` said the chunk before (5 September 2026).
+                    let tail_from = first_posting.2 + ts as u32;
+                    let tail_first_ci = chunk_idxs.iter().copied()
+                        .find(|&ci| { let p = &chunk_posting_info[ci]; p.2 <= tail_from && tail_from < p.3 })
+                        .unwrap_or(last_ci);
+
                     self.mem_estimate += WORD_STRIPPED_OVERHEAD;
-                self.word_stripped_entries.push(WordStrippedEntry {
+                    self.word_stripped_entries.push(WordStrippedEntry {
                         word_content: tail_content,
                         content_overlap,
                         first_intern_ord: tail_intern,
-                        first_chunk_intern_ord: chunk_intern_ids[last_ci],
+                        first_chunk_intern_ord: chunk_intern_ids[tail_first_ci],
                         last_chunk_intern_ord: chunk_intern_ids[last_ci],
                         first_own_len: tail_own_len,
                         last_sep_len: chunks[last_ci].1.sep_len as u8,
                         is_word_start: false,
-                        num_chunks: 1, // tail entry = single chunk
+                        num_chunks: (last_ci - tail_first_ci + 1) as u32,
                     });
 
-                    // Tail posting: the tail's bytes are the last `max_token`
-                    // content bytes of the word, contiguous from the first
-                    // chunk start — not necessarily aligned on the last chunk.
-                    let tail_posting = &chunk_posting_info[last_ci];
-                    let tail_from = first_posting.2 + ts as u32;
                     while self.word_postings.len() <= tail_intern as usize {
                         self.word_postings.push(Vec::new());
                     }
                     self.mem_estimate += WORD_POSTING_BYTES;
                     self.word_postings[tail_intern as usize].push((
                         self.current_doc_id,
-                        tail_posting.1, // first_ti = last_ti for tail
-                        tail_posting.1, // same position
+                        chunk_posting_info[tail_first_ci].1, // the chunk holding `tail_from`
+                        chunk_posting_info[last_ci].1,       // the word's last chunk, as for the word itself
                         tail_from,
                         tail_from + tail_len, // content end
                     ));
@@ -1062,6 +1071,42 @@ mod tests {
         assert_eq!(meta.overlap_len, 0);
         assert!(meta.is_word_start);
         assert_eq!(meta.word_id, 1);
+    }
+
+    /// A very long word (a Chinese line, no separator inside, over 264
+    /// bytes, so it gets a tail entry) whose trailing separators spill into
+    /// a chunk of their own (`解。\n\n` fills the chunk, `.. ` starts the
+    /// next): the three word postings of the kernel whose `first_position`
+    /// disagreed with their `byte_from`
+    /// (`postings_measure::byte_spans_are_derivable`, 5 September 2026).
+    /// Every word posting's `first_position` must be the chunk holding its
+    /// `byte_from`.
+    #[test]
+    fn word_position_when_separators_spill_into_the_next_chunk() {
+        let text = format!("{}解。\n\n.. toctree::\n", "可以理".repeat(30));
+        let text = text.as_str();
+        let chunks = segment_and_chunk(text, crate::tokenizer::equal_chunk::DEFAULT_MAX_TOKEN);
+        for (i, (t, m)) in chunks.iter().enumerate() {
+            eprintln!("chunk {i}: {t:?} content {} sep {} word_id {} word_start {}", m.content_len, m.sep_len, m.word_id, m.is_word_start);
+        }
+        let mut c = SfxCollectorV3::new();
+        c.begin_doc();
+        c.add_value(text);
+        c.end_doc();
+        let mut offsets = Vec::new();
+        let mut off = 0u32;
+        for (t, _) in &chunks { offsets.push(off); off += t.len() as u32; }
+        for (ord, posts) in c.word_postings.iter().enumerate() {
+            for &(doc, first, last, from, to) in posts {
+                let meta = &c.token_meta[ord];
+                eprintln!("word ord {ord} {:?} own {} sep {}: doc {doc} first {first} last {last} from {from} to {to}; chunk at first starts at byte {:?}",
+                    c.token_texts.get(ord).map(|s| s.as_str()).unwrap_or("?"), meta.own_len, meta.sep_len, offsets.get(first as usize));
+                let start = offsets[first as usize];
+                let end = offsets.get(first as usize + 1).copied().unwrap_or(text.len() as u32);
+                assert!(start <= from && from < end,
+                    "the word's first position must be the chunk its bytes start in: from {from}, chunk {first} is {start}..{end}");
+            }
+        }
     }
 
     #[test]

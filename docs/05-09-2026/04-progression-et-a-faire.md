@@ -64,7 +64,17 @@ cartes de positions et la fratrie 27 %, le dictionnaire 21 %.
   octets de résultats et de highlights des deux côtés). En mémoire :
   v3 1 996 Mo, dictionnaire 1 775 Mo (−11 % sur 15 440 fichiers, 4
   shards).
-- Observation à creuser : le `preload` de cet index a pris **81,5 s**
+- **Tranché** (onglet neuf, WASM avec le journal séparé) : `[preload]
+  waited for merges: 0 rounds, 70201ms` puis `1719 files, 1768 MB in
+  4114ms`. Le « loading into memory… » lent, c'est **l'attente des fusions
+  de fond** que `preload` impose avant de lire (une fusion bâtit sa FST
+  dans le même espace d'adresses), pas la lecture OPFS (4,1 s) ni le
+  choix RAM / flux (1,8 Go < 3 Go, l'index est tenu entier). Avec
+  `commit=1000` il y a deux fois plus de petits segments à fusionner
+  après le dernier commit, et la fusion en WASM est à concurrence 1 : 70 s.
+  Le message du playground devrait le dire (« merging… » plutôt que
+  « loading into memory… »), à faire.
+- Observation d'origine : le `preload` de cet index avait pris **81,5 s**
   (1 694 fichiers, 1 769 Mo) contre 3,8 s pour l'index de la même taille
   bâti avec un commit tous les 2 000 (2 117 fichiers) ; et **95,8 s en
   v3** avec `commit=1000` (1 680 fichiers, 1 957 Mo). Donc lié au
@@ -119,6 +129,114 @@ script sur les entrées décodées, sans rien changer au moteur) ; (2) si
 c'est ≥ 10 % de l'index, le faire ; (3) ensuite seulement la
 reconstruction optionnelle des trois dérivés, en commençant par
 `.sibling_v3`, le plus simple et le plus lu.
+
+**(1) mesuré le 5 septembre** (`suffix_fst/postings_measure.rs`, test
+ignoré `postings_without_byte_spans`, `LUCIVY_POSTINGS_DIR=<index>`) :
+chaque fichier est décodé puis ré-encodé par l'écrivain d'aujourd'hui
+(même taille au Mo près : la mesure est exacte au format), puis ré-encodé
+avec `byte_from`/`byte_to` à zéro, moins l'octet que chaque zéro coûte
+encore.
+
+| 30 000 fichiers, dictionnaire (1 266 Mo) | entrées | aujourd'hui | sans spans | gain |
+|---|---|---|---|---|
+| `.sfxpost` (240 fichiers) | 31,0 M | 243,5 Mo, 8,23 o/entrée | 158,5 Mo, 5,36 o/entrée | −34,9 % |
+| `.word_sfxpost` (240 fichiers) | 23,9 M | 183,1 Mo, 8,03 o/entrée | 117,2 Mo, 5,14 o/entrée | −36,0 % |
+
+| noyau entier, dictionnaire (5 706 Mo) | entrées | aujourd'hui | sans spans | gain |
+|---|---|---|---|---|
+| `.sfxpost` (506 fichiers) | 167,0 M | 1 236,9 Mo, 7,77 o/entrée | 773,3 Mo, 4,86 o/entrée | −37,5 % |
+| `.word_sfxpost` (506 fichiers) | 136,7 M | 1 017,9 Mo, 7,80 o/entrée | 639,2 Mo, 4,90 o/entrée | −37,2 % |
+
+**Les spans d'octets pèsent 150,9 Mo sur 30 000 (35 % des postings, 12 %
+de l'index) et 842 Mo sur le noyau (37 % des postings, 15 % de
+l'index : 5,7 → 4,9 Go).** Au-dessus du seuil des 10 %, donc le chantier vaut le coup —
+à condition de savoir les redériver au prix d'une requête qui reste sous
+×1,5. Ce qu'il faudrait pour ça :
+
+- `byte_from` d'une position `p` d'un document = la somme des `own_len`
+  des ordinaux aux positions `0..p` : `.posmap` donne l'ordinal à chaque
+  position, `.termtexts` (le dictionnaire) donne `own_len`. Un préfixe
+  cumulé par document, c'est O(p) — trop cher à la requête. Avec un
+  **point de contrôle tous les K positions** (l'offset d'octet, 4 octets
+  toutes les 16 positions = 0,25 o/position contre les ~2,9 o/entrée
+  qu'on retire), une résolution coûte au plus K lectures de `.posmap` +
+  K métas.
+- `byte_to` d'un chunk = `byte_from` + la longueur de contenu de l'ordinal
+  (méta). Pour un mot, le posting porte la longueur du mot parce qu'« une
+  clé 0x02 ne fixe pas la longueur de son mot » (doc de `word_sfxpost`) :
+  à vérifier si `own_len − sep_len` de l'ordinal mot la donne quand même,
+  sinon garder `to − from` (un varint, ~1 o) et ne retirer que `from`.
+- Qui lit les spans, et quand : les highlights (à la fin, sur le top-k
+  seulement — bon marché), la validation regex (fenêtres reconstruites
+  sur les octets : sur le chemin chaud, c'est là que le ×1,5 se joue), la
+  fuzzy (vérification sur le texte). À profiler avant de coder.
+- Le collecteur dit déjà la moitié : pour un chunk, `byte_to = byte_from
+  + content_len + sep_len` = `byte_from + own_len` de l'ordinal
+  (`collector_v3.rs`, `add_value`) — dérivable de la méta. Pour un mot,
+  `byte_to` est la fin du **contenu** du mot, et le commentaire du
+  collecteur dit qu'« `init` est `in`+`it` dans un document et le mot
+  `init` dans un autre sous un même ordinal » : la méta de l'entrée FST
+  ne suffit pas, mais `.termtexts` porte le texte original de l'ordinal
+  mot, donc sa longueur de contenu — à **vérifier sur le noyau** entrée
+  par entrée avant de coder (le même test ignoré, augmenté : `to − from`
+  contre la méta, et `byte_from` contre la somme cumulée des `own_len`
+  par `.posmap`).
+
+**Dérivabilité vérifiée sur les 30 000** (`byte_spans_are_derivable`,
+240 segments, 60 000 documents, 31,0 M positions) : `byte_from` d'un chunk
+= somme cumulée des `own_len` par `.posmap`, **0 désaccord sur 31,0 M** ;
+`byte_to − byte_from` d'un chunk = `own_len`, **0 sur 31,0 M** ; pas une
+position vide, pas un document dont le premier chunk ne part pas de
+l'octet 0 ; pour les mots, `byte_to − byte_from` = `own_len − sep_len` de
+l'ordinal mot, **0 sur 23,9 M** ; `byte_from` d'un mot = somme cumulée à
+`first_position`, **3 désaccords sur 23,9 M** — et **les mêmes 3 sur les
+136,7 M du noyau** (0 désaccord partout ailleurs, sur 167 M chunks et
+137 M mots). Les trois sont des documents chinois de la documentation du
+noyau, et le même motif : un mot dont le contenu est `解。` ou `免。`
+(idéogramme + point pleine chasse, 6 octets) suivi d'une **suite de
+séparateurs plus longue que ce que son chunk peut tenir** (`解。\n\n` fait
+8 octets, les `..` ou `\t\t` suivants débordent dans le chunk d'après,
+`.. to`, `\n\t\tTh`). Le posting du mot dit `from 716, to 722` — les
+octets de `解。`, justes — mais `first_position = last_position = 102`,
+le chunk du débordement, alors que `解。` est le chunk 101 (octet 716).
+**Le mot est à la bonne place en octets et à la mauvaise en position.**
+Diagnostic (reproduit dans `collector_v3.rs`,
+`word_position_when_separators_spill_into_the_next_chunk`) : ces « mots »
+sont des **lignes chinoises entières** — pas un séparateur dans une ligne
+d'idéogrammes, donc un mot de plusieurs centaines d'octets — et au-delà de
+264 octets le collecteur écrit une **entrée de queue** (les 8 derniers
+octets du mot, pour que les requêtes près de la fin du mot le trouvent).
+La position de cette queue était **le dernier chunk du mot**, ce qui est
+juste tant que ce chunk contient les derniers octets ; quand les
+séparateurs de fin débordent dans un chunk à eux, le dernier chunk n'a
+que des séparateurs et la queue pointait à côté. Corrigé le 5 septembre :
+`first_position` = le chunk qui contient `byte_from`, `last_position` = le
+dernier chunk du mot (comme pour le mot lui-même, pour l'adjacence).
+Trois occurrences sur 137 millions ; la vérité terrain ne l'avait jamais
+vu parce qu'aucune requête du panel ne touche ces documents, et le
+`word_pos_map` disait « un mot commence en 102 » sur un chunk de
+séparateurs. **Vérifié** : index 30 000 reconstruit avec le correctif
+(`idx30k-dict3`, panel 9/9), `byte_spans_are_derivable` dessus : **0
+désaccord partout** — 31,0 M chunks (`from` et `to`), 23,9 M mots (`from`
+et `to`). La suite lib (1 456) verte. Conclusion pour le chantier : **les
+spans d'octets des postings sont entièrement dérivables** de la position
+(somme cumulée des `own_len` par `.posmap`) et de la méta de l'ordinal ;
+seule réserve, les entrées de queue des mots de plus de 264 octets, dont
+le `from` tombe *dans* un chunk (pas à son début) : il faudrait leur
+garder un décalage, ou le recalculer depuis la longueur du mot (le mot
+principal, lui, part au début de son premier chunk).
+
+**Seuils calibrés sur les gros index d'avant** (remarque du 5 septembre) :
+`LUCIVY_RAM_INDEX_MAX` (3 Go sur wasm32, index tenu entier en dessous) et
+le « recharge la page pour servir » du playground (2 Go) datent du 25 août,
+quand 10 000 fichiers du noyau pesaient 2,9 Go ; aujourd'hui 15 440 en font
+1,8. À remesurer : combien de fichiers un onglet tient maintenant. Ce
+n'est pas la cause du « loading into memory » lent : celui-là est
+`preload`, qui **attend d'abord les fusions de fond** (`wait_merges_quiet`)
+avant de lire — 54 s en onglet neuf avec `commit=1000` (1 844 fichiers,
+1 770 Mo), contre 3,8 s de lecture pure mesurés avec `commit=2000`. Le
+binding journalise maintenant l'attente à part (`[preload] waited for
+merges`) ; WASM rebâti, à relancer dans le navigateur pour le chiffrer.
 
 ## 3. À faire, en vrac (repris de [01](01-journal-session-5-septembre.md) §11)
 

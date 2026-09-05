@@ -204,6 +204,16 @@ entre shards) ; relancé seul il passe.
   229 Mo anonymes**, naïf **48,0 s, 12,8 Go**. Le profil (`V3_PROFILE=1`)
   imprime `[dict] compaction gen … : parts -> keys (merged), texts | fst ms
   | texts ms` à chaque compaction, y compris pendant une construction.
+- **Deux mesures sur les postings** (`src/suffix_fst/postings_measure.rs`,
+  tests ignorés, `LUCIVY_POSTINGS_DIR=<index d'un shard>`,
+  `LUCIVY_POSTINGS_MAX_FILES=N` pour un échantillon) :
+  `postings_without_byte_spans` ré-encode chaque `.sfxpost` /
+  `.word_sfxpost` avec et sans `byte_from`/`byte_to` (noyau : 842 Mo,
+  37 % des postings, 15 % de l'index) ; `byte_spans_are_derivable`
+  compare entrée par entrée les spans stockés à ce que donnent `.posmap`
+  + la méta des textes (0 désaccord attendu ; c'est ce test qui a trouvé
+  les trois queues de mots chinois décalées, [04](04-progression-et-a-faire.md) §2).
+  Lancer : `cargo test --release --lib <nom> -- --ignored --nocapture`.
 - **Une construction qui compacte beaucoup**, pour la vérité de bout en
   bout : `V3_SFX_VERSION=4 V3_COMMIT_EVERY=500 LUCIVY_DICT_MAX_GENERATIONS=3`
   devant le harnais sur le corpus de référence (5 000 fichiers sans

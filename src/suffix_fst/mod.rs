@@ -27,6 +27,8 @@ pub mod block_offsets;
 pub mod gmap;
 pub mod dictionary;
 pub mod dictionary_compact;
+#[cfg(test)]
+mod postings_measure;
 pub mod word_sfxpost;
 /// Position-to-ordinal map: (doc_id, position) → ordinal reverse index.
 pub mod posmap;

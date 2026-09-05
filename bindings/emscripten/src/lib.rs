@@ -1226,7 +1226,10 @@ pub unsafe extern "C" fn lucivy_memory_status(ctx: *mut LucivyContext) -> *const
 }
 
 /// Read the whole index into memory, so the first query does not pay for it.
-/// JSON: `{"bytes": N, "files": N, "ms": N, "skipped": bool}`.
+/// JSON: `{"bytes": N, "files": N, "ms": N, "skipped": bool, "merge_wait_ms": N}`
+/// — `merge_wait_ms` is the time spent first waiting for the background
+/// merges to finish (measured: 70 s after 16 commits of 1 000 kernel files,
+/// against 4 s of reading), so a caller can show which of the two it is.
 ///
 /// `skipped` when the index is streamed rather than held: there, loading
 /// everything is exactly what does not fit. A caller should show progress
@@ -1237,10 +1240,20 @@ pub unsafe extern "C" fn lucivy_preload(ctx: *mut LucivyContext) -> *const c_cha
     if ctx.is_null() { return return_error("null context"); }
     let ctx = &*ctx;
     let in_memory = ctx.handle.residency().is_in_memory();
+    // `preload` waits for the background merges first (a merge builds its
+    // FST in this same address space); say how long that took on its own,
+    // so a slow preload is not mistaken for slow reads.
+    let t_wait = std::time::Instant::now();
+    let rounds = ctx.handle.wait_merges_quiet().unwrap_or(0);
+    let wait_ms = t_wait.elapsed().as_secs_f64() * 1e3;
+    if rounds > 0 || wait_ms >= 100.0 {
+        rlog!("[preload] waited for merges: {rounds} rounds, {wait_ms:.0}ms");
+    }
     let (bytes, files, ms) = ctx.handle.preload();
     rlog!("[preload] {files} files, {} MB in {ms:.0}ms", bytes >> 20);
     return_str(serde_json::json!({
         "bytes": bytes, "files": files, "ms": ms, "skipped": !in_memory,
+        "merge_wait_ms": wait_ms,
     }).to_string())
 }
 
