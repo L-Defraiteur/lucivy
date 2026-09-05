@@ -291,6 +291,49 @@ is the harness's own work and is reported separately. A Jaro-Winkler row runs
 in the same panel but is **timed, not verified** — see
 [CHANGELOG.md](CHANGELOG.md) for why it has no reference.
 
+### Against Elasticsearch and tantivy — one corpus, one truth, one command
+
+Same 93 983 kernel files, 857 MB of text. Each engine is configured at its
+best for substring search, not at its default: Elasticsearch 8.19 with a
+trigram analyzer plus a `wildcard` field for regexes, tantivy 0.25 (upstream,
+not the fork) with its `NgramTokenizer`. The truth of every row is the same
+byte-by-byte scan of the files; a lucivy count is `OK` only when its documents
+**and** its byte spans match it. Full report, generated: [docs/compare-engines-2026-09-05.md](docs/compare-engines-2026-09-05.md).
+
+| engine | how it answers a substring | index | × text | indexing |
+|---|---|---|---|---|
+| Elasticsearch, standard analyzer | it does not (whole words) | 781 MB | ×0.9 | 28 s |
+| Elasticsearch, trigrams + `wildcard` | trigram phrases, regex on the wildcard field | 3 082 MB | ×3.6 | 123 s |
+| tantivy, default tokenizer | it does not (whole words) | 612 MB | ×0.7 | 1 s |
+| tantivy, `NgramTokenizer` | trigram AND, then the stored text re-read to verify (its n-gram positions are all 0) | 680 MB | ×0.8 | 5 s |
+| **lucivy 4.0, shared dictionary** | suffix FST, exact spans | **4 926 MB** | **×5.8** | 255 s |
+| **lucivy 4.0, shared dictionary + `derived_in_ram`** | suffix FST, exact spans | **3 335 MB** | **×3.9** | 255 s |
+
+On the substring itself all three agree to the document (`mutex_lock` 5 145,
+`spin_lock` 6 569, `sched` 9 289 — bold in the report). Where they part:
+
+| asked | truth | lucivy | Elasticsearch | tantivy |
+|---|---|---|---|---|
+| `spin_lock`, separators relaxed (also `spin lock`, `spin-lock`, `spinlock`) | 9 552 | **9 552**, 23 ms | 6 577 — inexpressible, its trigrams carry the underscore | 6 601 — relaxed is the only mode it has: the separator never enters its index |
+| `spinlokc`, two edits, across the token boundary | 10 034 | **10 034**, 148 ms | 3 549 — fuzziness compares whole terms | 6 557 — same |
+| `spin_lock_[a-z]+`, a regex | 5 510 | **5 510**, 219 ms | 5 440 (wildcard field, 70 short), 480 ms | 0 — terms are already cut |
+| `de`, two characters | 93 009 | **93 009**, 7.7 M spans, 561 ms | 0, silently | 0, silently |
+| `retur -ENOMEM`, a fuzzy phrase | 14 449 | **14 449**, 30 ms | 14 446 (`span_near`), 24 ms — it does this well | — |
+| **where it matched**: `mutex_lock`, 5 145 documents | 20 797 spans | **all 20 797, 15 ms** | `highlight` on the top 200: 179 ms | verifying 5 145 stored texts: 96 ms |
+
+What the other two do better: Elasticsearch answers a plain substring in 3-8 ms
+to lucivy's 12-15, tantivy indexes the corpus in seconds, and both run a
+term-level fuzzy in a fifth of lucivy's time at two edits (34 451 documents to
+their 21 321 and 29 291 — a different question, and the report says so on every
+such row). Reproduce it, Elasticsearch optional:
+
+```bash
+docker run -d --name lucivy-es -p 9200:9200 -e discovery.type=single-node \
+  -e xpack.security.enabled=false -e ES_JAVA_OPTS="-Xms8g -Xmx8g" \
+  docker.elastic.co/elasticsearch/elasticsearch:8.19.0
+benches/compare_engines.sh /tmp/linux-bench /tmp/lucivy-compare     # writes compare_engines.md
+```
+
 ### Browser against native
 
 Measured on 5 September 2026 (4.0.0), the whole Linux 2.6.0 kernel, 4 shards,

@@ -643,6 +643,80 @@ du playground, pas la vitrine ; pour le noyau dans un onglet, les fichiers
 écrits. Si on la veut un jour dans le navigateur : borner le rebâti (un
 segment à la fois par shard, ou en flux) et remesurer le pic.
 
+## 2 quinquies. Le banc comparatif rejouable : lucivy, Elasticsearch, tantivy (tard le 5 septembre)
+
+Demande de Lucie : pas seulement la taille, « les faire trébucher là où ils
+trébuchent », en une commande. `benches/compare_engines.sh <corpus>
+[dossier]` produit `compare_engines.md` en quatre parties, toutes jugées par
+le même scan des fichiers (le harnais de vérité) :
+
+1. **taille et temps d'indexation** — Elasticsearch standard et trigrammes +
+   `wildcard`, tantivy défaut et `NgramTokenizer`, lucivy v3, dictionnaire,
+   dictionnaire + `derived_in_ram` ;
+2. **les neuf requêtes vérifiées** (panel `v3_ground_truth_demo`) : vérité,
+   lucivy (documents, spans, ms), Elasticsearch (`took`), tantivy ;
+3. **où les questions diffèrent** : `spin_lock` strict et relâché, `spinlokc`
+   à deux éditions à travers la frontière, la regex, `ude` / `de` (trois et
+   deux caractères), `retur -ENOMEM` en phrase floue — vérité par
+   `V3_QUERIES` sur l'index dictionnaire avec `LUCIVY_HIGHLIGHT_SPAN_CAP=0`
+   (`de` seul fait 7,7 M de spans), et pour chaque moteur la meilleure
+   formulation qu'il a, avec la note qui dit pourquoi elle ne pose pas la
+   même question ;
+4. **le prix des positions** : lucivy rend tous les spans de tous les
+   documents dans son temps de recherche ; Elasticsearch (`highlight`,
+   fragment entier, balises `\u0001`/`\u0002`, temps de reparsing compté)
+   et tantivy (`SnippetGenerator`) sur les 200 premiers documents.
+
+Pièces : `benches/compare_elasticsearch.py` (étendu : panel « où les
+questions diffèrent », `highlight_cost`, clé `truth` par ligne en syntaxe
+`V3_QUERIES`, tout dans `/tmp/es_compare.json`),
+`lucivy_core/benches/compare_tantivy.rs` (étendu : lignes de trébuchement,
+`printk*`, JSON par `CMP_OUT`, un trigramme unique devient un `TermQuery` —
+la `PhraseQuery` d'un terme fait paniquer tantivy), `benches/
+compare_engines_report.py` (assemble le Markdown depuis les journaux du
+harnais et les deux JSON ; un compte en gras = la vérité). Un index lucivy
+déjà dans le dossier de travail à la même forme est réutilisé.
+
+Deux pièges du banc : la phrase floue `retrun -ENOMEM` en `fz1` rend 0
+(vérité 0 aussi) — une transposition vaut **deux** éditions en Levenshtein
+pur, une seule pour la `fuzziness` d'Elasticsearch (Damerau) : la ligne est
+devenue `retur -ENOMEM`, une lettre en moins, une édition des deux côtés ;
+et le tokenizer de la 2.6.0 du navigateur n'a rien à voir ici, le corpus du
+banc est le noyau moderne (`/tmp/lucivy-cmp-90k`).
+
+**Résultats** (noyau moderne, 93 983 fichiers, 857 Mo ; rapport complet
+généré dans `docs/compare-engines-2026-09-05.md`, section README « Against
+Elasticsearch and tantivy ») :
+
+- **Taille** : Elasticsearch standard 781 Mo (×0,9), trigrammes + `wildcard`
+  3 082 Mo (×3,6), tantivy 612 / 680 Mo (×0,7 / ×0,8), lucivy v3 6 617 Mo
+  (×7,7), dictionnaire **4 926 Mo (×5,8)**, + `derived_in_ram` **3 335 Mo
+  (×3,9)**. Indexation : ES 28 / 123 s, tantivy 1,3 / 4,9 s (!), lucivy 56 s
+  (v3) et ~255 s (dictionnaire).
+- **Les neuf requêtes** : lucivy 9/9 exact sur documents et spans (les
+  trois layouts). Sur la sous-chaîne pure les trois moteurs rendent le même
+  compte au document près — tantivy seulement par le chemin honnête (ET de
+  trigrammes puis vérification sur le texte stocké, 107-151 ms ; la phrase
+  de trigrammes rend **0** : positions toutes à 0). Elasticsearch est plus
+  rapide sur la sous-chaîne (3-8 ms contre 12-15). Mot entier et préfixe :
+  comptes proches mais pas égaux (définition du mot par tokenizer).
+- **Où les questions diffèrent** : relâché 9 552 contre 6 577 (ES,
+  inexprimable) et 6 601 (tantivy, qui ne sait qu'être relâché) ; `spinlokc`
+  d2 10 034 contre 3 549 / 6 557 ; regex 5 510 contre 5 440 (ES, 70 de
+  moins, 480 ms) et 0 (tantivy) ; `de` 93 009 contre **0 et 0** ; phrase
+  floue 14 449 contre 14 446 (ES `span_near`, qu'il fait bien).
+- **Positions** : lucivy 20 797 spans dans 5 145 documents en 15 ms ; ES
+  `highlight` sur 200 documents 179 ms ; tantivy, vérification de 5 145
+  textes stockés, 96 ms.
+- **Ce qu'ils font mieux, écrit tel quel** : la sous-chaîne pure d'ES en
+  3-8 ms, l'indexation de tantivy en secondes, leur fuzzy par terme cinq fois
+  plus vite que notre d2 (autre question).
+
+Piège corrigé pendant le banc : la `PhraseQuery` de trigrammes rend 0 sur
+tout le panel (positions à 0) — le premier passage affichait des zéros là
+où le doc d'août disait « exact » ; le chemin honnête (`verified_substring`)
+est ce qui rend les vrais comptes, et c'est lui qui est chronométré.
+
 ## 2 quater. La fuzzy d2 : une étape à risque, un checkpoint avant
 
 `regsiter` d2 sur les 30 000 : 161 ms de mur, 2,57 M de hits (pièces de

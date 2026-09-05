@@ -25,11 +25,13 @@ use std::path::Path;
 use std::time::Instant;
 
 use tantivy::collector::{Count, TopDocs};
-use tantivy::query::{FuzzyTermQuery, PhraseQuery, Query, QueryParser, RegexQuery};
+use tantivy::query::{BooleanQuery, FuzzyTermQuery, PhraseQuery, Query, QueryParser, RegexQuery, TermQuery};
+use tantivy::collector::DocSetCollector;
 use tantivy::schema::{
     IndexRecordOption, Schema as TvSchema, TextFieldIndexing, TextOptions, STORED, TEXT,
 };
 use tantivy::tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer};
+use tantivy::schema::Value;
 use tantivy::{doc, Index as TvIndex, TantivyDocument, Term};
 
 const MAX_FILE_SIZE: u64 = 100_000;
@@ -150,7 +152,7 @@ fn build(files: &[(String, String)], dir: &str, ngram: bool) -> Built {
 /// as good as the query it puts in the other engine's mouth. Positions are
 /// what makes trigrams mean "this substring", so the phrase is assembled
 /// explicitly here.
-fn trigram_phrase(field: tantivy::schema::Field, needle: &str) -> PhraseQuery {
+fn trigram_phrase(field: tantivy::schema::Field, needle: &str) -> Box<dyn Query> {
     let lower = needle.to_lowercase();
     let chars: Vec<char> = lower.chars().collect();
     let terms: Vec<(usize, Term)> = chars
@@ -158,7 +160,57 @@ fn trigram_phrase(field: tantivy::schema::Field, needle: &str) -> PhraseQuery {
         .enumerate()
         .map(|(i, w)| (i, Term::from_field_text(field, &w.iter().collect::<String>())))
         .collect();
-    PhraseQuery::new_with_offset(terms)
+    // Three characters make one trigram: a phrase of one term is refused by
+    // tantivy, a term query asks the same thing.
+    if terms.len() == 1 {
+        return Box::new(TermQuery::new(terms[0].1.clone(), IndexRecordOption::WithFreqsAndPositions));
+    }
+    Box::new(PhraseQuery::new_with_offset(terms))
+}
+
+/// The honest path for a substring on tantivy's trigram index. Its
+/// `NgramTokenizer` emits every position as 0 (their source says so: "With
+/// this tokenizer, the `position` is always 0"), so a phrase over trigrams
+/// matches nothing — and `trigram_phrase` above returns 0 on every needle. What
+/// an application can do is what lucivy does inside: take the documents that
+/// hold **all** the trigrams (an AND, over-broad), then read each candidate's
+/// stored text and check the substring is really there. Both counts and the
+/// whole time, verification included, are what this returns.
+fn trigram_candidates(field: tantivy::schema::Field, needle: &str) -> Box<dyn Query> {
+    let lower = needle.to_lowercase();
+    let chars: Vec<char> = lower.chars().collect();
+    let terms: Vec<Box<dyn Query>> = chars
+        .windows(3)
+        .map(|w| Box::new(TermQuery::new(Term::from_field_text(field, &w.iter().collect::<String>()),
+                                         IndexRecordOption::Basic)) as Box<dyn Query>)
+        .collect();
+    Box::new(BooleanQuery::intersection(terms))
+}
+
+/// (candidates, verified documents, occurrences in the first `span_limit`
+/// verified documents, ms for all of it).
+fn verified_substring(built: &Built, needle: &str, span_limit: usize) -> (usize, usize, usize, f64) {
+    let reader = built.index.reader().unwrap();
+    let searcher = reader.searcher();
+    let lower = needle.to_lowercase();
+    let t = Instant::now();
+    let q = trigram_candidates(built.content, needle);
+    let addrs = searcher.search(&*q, &DocSetCollector).unwrap();
+    let candidates = addrs.len();
+    let mut verified = 0;
+    let mut spans = 0;
+    for addr in addrs {
+        let doc: TantivyDocument = searcher.doc(addr).unwrap();
+        let text = doc.get_first(built.content).and_then(|v| v.as_value().as_str()).unwrap_or("");
+        let hay = text.to_lowercase();
+        if hay.contains(&lower) {
+            verified += 1;
+            if verified <= span_limit {
+                spans += hay.matches(&lower).count();
+            }
+        }
+    }
+    (candidates, verified, spans, t.elapsed().as_secs_f64() * 1000.0)
 }
 
 fn count_and_time(built: &Built, query: &dyn Query) -> (usize, f64) {
@@ -218,22 +270,35 @@ fn compare_tantivy() {
     eprintln!("{:<40} {:>9} {:>10} {:>12}", "query", "hits", "time", "index");
     eprintln!("{}", "-".repeat(76));
 
-    let mut row = |label: &str, hits: usize, ms: f64, which: &str| {
+    // Every row also goes to `CMP_OUT` as JSON (with the lucivy query it is
+    // judged against, `V3_QUERIES` syntax), for the report that puts the
+    // engines side by side (`benches/compare_engines.sh`).
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    let mut row = |label: &str, truth: &str, hits: usize, ms: f64, which: &str, note: &str| {
         eprintln!("{label:<40} {hits:>9} {ms:>8.1}ms {which:>12}");
+        if !note.is_empty() { eprintln!("{:<40} {note}", ""); }
+        rows.push(serde_json::json!({"query": label, "truth": truth, "hits": hits, "ms": ms, "index": which, "note": note}));
     };
 
     // Substring, which needs the trigram index — and an explicit phrase, see
     // `trigram_phrase`.
-    for needle in ["spin_lock", "sched", "mutex_lock"] {
+    for needle in ["mutex_lock", "spin_lock", "sched"] {
         let q = trigram_phrase(tri.content, needle);
-        let (n, ms) = count_and_time(&tri, &q);
-        row(&format!("{needle} (substring)"), n, ms, "trigram");
+        let (n0, ms0) = count_and_time(&tri, &*q);
+        let (cand, n, _spans, ms) = verified_substring(&tri, needle, 0);
+        row(&format!("{needle} (substring)"), &format!("{needle}:strict"), n, ms, "trigram",
+            &format!("trigram phrase: {n0} in {ms0:.1} ms (positions are all 0); AND of trigrams: {cand} candidates, {n} verified on the stored text"));
     }
 
     // Whole words, the default index.
     let q = parser_plain.parse_query("sched").unwrap();
     let (n, ms) = count_and_time(&plain, &*q);
-    row("sched (whole word)", n, ms, "default");
+    row("sched (whole word)", "sched:term", n, ms, "default", "");
+
+    // Start of a token: a prefix over the default index's terms.
+    let q = parser_plain.parse_query("printk*").unwrap();
+    let (n, ms) = count_and_time(&plain, &*q);
+    row("printk (start of token)", "printk:sw", n, ms, "default", "a prefix query over analysed terms");
 
     // Fuzzy: a Levenshtein automaton over *terms*. Nothing here can span a
     // separator, which is the point the panel is meant to establish.
@@ -241,7 +306,8 @@ fn compare_tantivy() {
         let term = Term::from_field_text(plain.content, needle);
         let q = FuzzyTermQuery::new(term, d, true);
         let (n, ms) = count_and_time(&plain, &q);
-        row(&format!("{needle} (fuzzy, {d} edit)"), n, ms, "default");
+        row(&format!("{needle} (fuzzy, {d} edit)"), &format!("{needle}:fz{d}"), n, ms, "default",
+            "Levenshtein over whole terms, not across a separator");
     }
 
     // Regex, also over terms: `spin_lock_[a-z]+` cannot match, because the
@@ -249,27 +315,65 @@ fn compare_tantivy() {
     match RegexQuery::from_pattern("spin_lock_[a-z]+", plain.content) {
         Ok(q) => {
             let (n, ms) = count_and_time(&plain, &q);
-            row("spin_lock_[a-z]+ (regex, terms)", n, ms, "default");
+            row("spin_lock_[a-z]+ (regex, terms)", "spin_lock_[a-z]+:rx", n, ms, "default",
+                "the default tokenizer cut spin, lock and irqsave apart: nothing to match");
         }
         Err(e) => eprintln!("regex on the default index: {e}"),
     }
 
-    // Separators relaxed: `spinlock` should find `spin_lock`. There is no
-    // formulation for it — the trigrams of `spin_lock` carry the underscore.
-    let q = trigram_phrase(tri.content, "spinlock");
-    let (n, ms) = count_and_time(&tri, &q);
-    row("spinlock (must find spin_lock)", n, ms, "trigram");
+    // ── Where the questions differ ──
+    // Separators relaxed: `spin_lock` should also match `spin lock`, `spin-lock`,
+    // `spinlock`. The trigram index cannot (its trigrams carry the underscore);
+    // the default index can only be relaxed: the separator never enters it.
+    let (cand, n, _s, ms) = verified_substring(&tri, "spinlock", 0);
+    row("spinlock (trigrams, verified; must find spin_lock too)", "spin_lock:relax", n, ms, "trigram",
+        &format!("inexpressible on trigrams, the underscore is in them: {cand} candidates, {n} verified hold the literal spinlock"));
+    let q = parser_plain.parse_query("\"spin lock\"").unwrap();
+    let (n, ms) = count_and_time(&plain, &*q);
+    row("\"spin lock\" (phrase, default tokenizer)", "spin_lock:relax", n, ms, "default",
+        "spin_lock, spin-lock and spin lock tokenise alike: relaxed is the only mode it has");
+    let (cand, n, _s, ms) = verified_substring(&tri, "spin_lock", 0);
+    row("spin_lock (trigrams, verified, strict)", "spin_lock:strict", n, ms, "trigram",
+        &format!("{cand} candidates, {n} verified"));
+    // Fuzzy across the boundary: `spinlokc` at two edits should reach `spin_lock`.
+    let term = Term::from_field_text(plain.content, "spinlokc");
+    let q = FuzzyTermQuery::new(term, 2, true);
+    let (n, ms) = count_and_time(&plain, &q);
+    row("spinlokc (fuzzy, 2 edits, across the boundary)", "spinlokc:fz2", n, ms, "default",
+        "reaches the token spinlock, never spin_lock, already cut in two");
+    // Short needles: below three characters there is no trigram to look up.
+    let q = trigram_phrase(tri.content, "ude");
+    let (n, ms) = count_and_time(&tri, &*q);
+    row("ude (three characters)", "ude:strict", n, ms, "trigram", "");
+    row("de (two characters)", "de:strict", 0, 0.0, "trigram",
+        "no trigram exists for two characters: an n-gram index answers zero");
 
     // The same query, this time asked where it matched.
     eprintln!("\n{:<40} {:>9} {:>9} {:>12}", "documents AND spans", "docs", "spans", "time");
     eprintln!("{}", "-".repeat(76));
-    let q = trigram_phrase(tri.content, "spin_lock");
-    let (n, spans, ms) = count_with_spans(&tri, &q, 200);
-    eprintln!("{:<40} {n:>9} {spans:>9} {ms:>10.1}ms", "spin_lock, top 200 highlighted");
+    // `SnippetGenerator` over a trigram phrase highlights nothing (the phrase
+    // matches nothing); the application's path is the verification above, which
+    // has the text in hand: count the occurrences in the first 200 verified docs.
+    let (_cand, n, spans, ms) = verified_substring(&tri, "mutex_lock", 200);
+    eprintln!("{:<40} {n:>9} {spans:>9} {ms:>10.1}ms", "mutex_lock, first 200 verified, occurrences");
 
     eprintln!("\nindexing: default {:.1}s / {:.0} MB — trigram {:.1}s / {:.0} MB",
               plain.seconds, plain.bytes as f64 / 1_048_576.0,
               tri.seconds, tri.bytes as f64 / 1_048_576.0);
+
+    if let Ok(out) = std::env::var("CMP_OUT") {
+        let report = serde_json::json!({
+            "corpus": {"root": root, "files": files.len(), "bytes": bytes},
+            "indexing": {
+                "default": {"seconds": plain.seconds, "bytes": plain.bytes},
+                "trigram": {"seconds": tri.seconds, "bytes": tri.bytes},
+            },
+            "queries": rows,
+            "highlight": {"truth": "mutex_lock:strict", "docs": n, "highlighted": 200.min(n), "spans": spans, "ms": ms, "how": "AND of trigrams, then the stored text of every candidate read and searched; occurrences counted in the first 200 verified documents"},
+        });
+        std::fs::write(&out, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+        eprintln!("written to {out}");
+    }
 }
 #[test]
 #[ignore]

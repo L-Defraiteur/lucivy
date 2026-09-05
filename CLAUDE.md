@@ -273,6 +273,11 @@ pour octet (`01` §13).
   la fixture `lucivy_core/tests/fixtures/index-3.0.8/` a été écrite par le wheel PyPI
   3.0.8 ; v4 doit rendre ses réponses, puis convertir sans perte (le contrat de 4.0.0)
 - Bench sharding : `bench_sharding.rs` (90K docs Linux kernel)
+- Banc comparatif rejouable (5 septembre au soir) : `benches/compare_engines.sh <corpus> [dossier]` —
+  lucivy (v3, dictionnaire, `derived_in_ram`) contre Elasticsearch 8.19 (trigrammes + `wildcard`,
+  conteneur, optionnel) et tantivy 0.25 (défaut, `NgramTokenizer`), taille, neuf requêtes vérifiées
+  par le scan des fichiers, les cas où les questions diffèrent (séparateurs, fuzzy à travers la
+  frontière, regex, deux caractères, phrase floue), prix des positions ; rapport `compare_engines.md`
 - Bench vs tantivy : `bench_vs_tantivy.rs`
 - IMPORTANT : toujours `> /tmp/fichier.txt 2>&1`, JAMAIS `| tail`
 

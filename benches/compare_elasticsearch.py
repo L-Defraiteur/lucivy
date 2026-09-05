@@ -200,9 +200,57 @@ def count(index, query):
     return res["hits"]["total"]["value"], res["took"], wall
 
 
+def highlight_cost(index, query, field, limit):
+    """Documents *and where they match*: the result lucivy is built to give.
+
+    Elasticsearch gives it through `highlight`, which re-reads each hit's
+    stored text and re-analyses it — so it is priced here as the engine's
+    `took` plus the time to parse the marked-up text back into offsets, for
+    the top `limit` documents (whole value, one fragment). The spans are
+    counted from the markers; the bytes are what came back over the wire.
+    """
+    body = {"query": query, "size": limit, "track_total_hits": True, "_source": False,
+            "highlight": {"fields": {field: {"number_of_fragments": 0,
+                                             "pre_tags": ["\u0001"], "post_tags": ["\u0002"]}}}}
+    t0 = time.time()
+    res = req("POST", f"/{index}/_search", body)
+    wall = (time.time() - t0) * 1000
+    t1 = time.time()
+    spans, nbytes = 0, 0
+    for hit in res["hits"]["hits"]:
+        for frag in hit.get("highlight", {}).get(field, []):
+            nbytes += len(frag)
+            pos = 0
+            while True:
+                a = frag.find("\u0001", pos)
+                if a < 0:
+                    break
+                b = frag.find("\u0002", a)
+                spans += 1
+                pos = b + 1 if b >= 0 else len(frag)
+    parse = (time.time() - t1) * 1000
+    return {"docs": res["hits"]["total"]["value"], "highlighted": len(res["hits"]["hits"]),
+            "spans": spans, "took_ms": res["took"], "parse_ms": round(parse, 1),
+            "wall_ms": round(wall, 1), "bytes": nbytes}
+
+
 # ── The panel ───────────────────────────────────────────────────────────────
 # The same queries as lucivy's demo panel, each expressed the best way
 # Elasticsearch can express it. Where it has no way at all, that is the result.
+
+# The lucivy query (`V3_QUERIES` syntax) each panel row is judged against.
+PANEL_TRUTH = {
+    "mutex_lock (whole words)": None,           # no lucivy row: a whole-word phrase is not one of its modes here
+    "mutex_lock (substring)": "mutex_lock:strict",
+    "spin_lock (substring)": "spin_lock:strict",
+    "sched (whole word)": "sched:term",
+    "sched (substring)": "sched:strict",
+    "printk (start of token)": "printk:sw",
+    "schdule (fuzzy, 1 edit)": "schdule:fz1",
+    "regsiter (fuzzy, 2 edits)": "regsiter:fz2",
+    "spin_lock_[a-z]+ (regex)": "spin_lock_[a-z]+:rx",
+}
+
 
 def panel():
     return [
@@ -244,6 +292,44 @@ def panel():
     ]
 
 
+# ── Where the questions differ ──────────────────────────────────────────────
+# Each row names the lucivy query it is measured against (`V3_QUERIES` syntax,
+# the ground-truth harness computes the truth by scanning the files) and the
+# best formulation Elasticsearch has for it. Where the formulation cannot ask
+# the same thing, the row says so: that is the finding, not a miscount.
+
+def stumble():
+    return [
+        ("spin_lock:strict", "spin_lock, separators strict", NGRAM,
+         {"match_phrase": {"body": "spin_lock"}},
+         "trigrams carry the underscore: exactly the strict count"),
+        ("spin_lock:relax", "spin_lock, separators relaxed (spin_lock, spin lock, spin-lock, spinlock)", NGRAM,
+         {"match_phrase": {"body": "spinlock"}},
+         "inexpressible: `spinlock` trigrams only match `spinlock`; shown for the record"),
+        ("spin_lock:relax", "\"spin lock\" as a phrase, standard analyzer", STANDARD,
+         {"match_phrase": {"body": "spin lock"}},
+         "the standard analyzer keeps `spin_lock` whole, so the phrase finds the spaced form only"),
+        ("spinlokc:fz2", "spinlokc, two edits, across the token boundary", STANDARD,
+         {"match": {"body": {"query": "spinlokc", "fuzziness": 2}}},
+         "fuzziness compares whole terms: it can reach `spinlock`, never `spin_lock`"),
+        ("spin_lock_[a-z]+:rx", "spin_lock_[a-z]+ (regex, wildcard field)", NGRAM,
+         {"regexp": {"raw": {"value": ".*spin_lock_[a-z]+.*", "flags": "ALL", "case_insensitive": True}}},
+         "the only field type that runs a regex over a whole value"),
+        ("ude:strict", "ude (three characters)", NGRAM,
+         {"match_phrase": {"body": "ude"}}, "one trigram: fine"),
+        ("de:strict", "de (two characters)", NGRAM,
+         {"match_phrase": {"body": "de"}},
+         "no trigram to look up: an n-gram index answers zero, silently"),
+        ("retur\\s-ENOMEM:fz1", "retur -ENOMEM (fuzzy phrase: span_near of a fuzzy span and a term)", STANDARD,
+         {"span_near": {"clauses": [
+             {"span_multi": {"match": {"fuzzy": {"body": {"value": "retur", "fuzziness": 1}}}}},
+             {"span_term": {"body": "enomem"}}], "slop": 0, "in_order": True}},
+         "expressible, verbosely; lucivy asks it with separators relaxed, so the truths differ a little"),
+    ]
+
+HIGHLIGHT_LIMIT = 200
+
+
 def main():
     root = sys.argv[1] if len(sys.argv) > 1 else "/tmp/lucivy-cmp"
     print(f"=== corpus: {root} ===")
@@ -267,7 +353,23 @@ def main():
         if note:
             print(f"{'':<34} {note}")
         rows.append({"query": label, "index": index, "hits": hits,
-                     "took_ms": took, "wall_ms": round(wall, 1)})
+                     "took_ms": took, "wall_ms": round(wall, 1), "truth": PANEL_TRUTH.get(label)})
+
+    print(f"\n{'where the questions differ':<74} {'hits':>7} {'took':>8}")
+    print("-" * 92)
+    stumble_rows = []
+    for truth_key, label, index, query, note in stumble():
+        hits, took, wall = count(index, query)
+        print(f"{label:<74} {hits:>7} {took:>6}ms")
+        print(f"{'':<4} lucivy: {truth_key} — {note}")
+        stumble_rows.append({"truth": truth_key, "query": label, "index": index, "hits": hits,
+                             "took_ms": took, "wall_ms": round(wall, 1), "note": note})
+
+    print(f"\n=== documents AND spans: mutex_lock (strict), top {HIGHLIGHT_LIMIT} highlighted ===")
+    hl = highlight_cost(NGRAM, {"match_phrase": {"body": "mutex_lock"}}, "body", HIGHLIGHT_LIMIT)
+    hl["truth"] = "mutex_lock:strict"
+    print(f"    {hl['docs']} documents, {hl['spans']} spans in {hl['highlighted']} of them: "
+          f"took {hl['took_ms']} ms + {hl['parse_ms']} ms to parse {hl['bytes']/2**20:.1f} MB of markup")
 
     out = {
         "corpus": {"root": root, "files": len(files), "bytes": total},
@@ -276,6 +378,8 @@ def main():
             "ngram": {"seconds": round(t_ng, 1), "bytes": s_ng},
         },
         "queries": rows,
+        "stumble": stumble_rows,
+        "highlight": hl,
     }
     dest = pathlib.Path("/tmp/es_compare.json")
     dest.write_text(json.dumps(out, indent=2))

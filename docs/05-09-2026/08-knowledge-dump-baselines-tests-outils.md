@@ -114,6 +114,30 @@ compact::compaction_of_an_index_on_disk` (`LUCIVY_DICT_BENCH_*`).
 
 ---
 
+## 6 bis. Le banc comparatif (Elasticsearch, tantivy)
+
+```bash
+docker run -d --name lucivy-es -p 9200:9200 -e discovery.type=single-node \
+  -e xpack.security.enabled=false -e ES_JAVA_OPTS="-Xms8g -Xmx8g" \
+  docker.elastic.co/elasticsearch/elasticsearch:8.19.0          # optionnel : sans lui, colonnes vides
+benches/compare_engines.sh /tmp/lucivy-cmp-90k /chemin/travail   # ~10 min noyau entier si les index lucivy existent
+```
+
+Écrit `compare_engines.md` (quatre parties, [04](04-progression-et-a-faire.md)
+§2 quinquies), `lucivy-{dict,dict-ram,v3}.log`, `lucivy-stumble.log`,
+`tantivy.json`, `elasticsearch.json`. Réutilise un index lucivy du dossier à
+la même forme (`.v3_shape`) : des liens symboliques vers les index du
+scratchpad évitent de rebâtir le noyau. Le conteneur reste : `docker rm -f
+lucivy-es`. Pièges : `pkill -f motif` tue le shell qui porte le motif
+(`pgrep -f 'moti[f]'`) ; une `PhraseQuery` tantivy d'un seul terme panique ;
+la `fuzziness` d'Elasticsearch compte une transposition pour une édition,
+Levenshtein pour deux. Baselines du 5 septembre (noyau) : ES 781 / 3 082 Mo,
+28 / 123 s ; tantivy 612 / 680 Mo, 1,3 / 4,9 s ; lucivy 6 617 / 4 926 /
+3 335 Mo ; sous-chaîne ES 3-8 ms, lucivy 12-15, tantivy vérifié 107-151 ;
+relâché 9 552 vs 6 577 / 6 601 ; `spinlokc` d2 10 034 vs 3 549 / 6 557 ;
+regex 5 510 vs 5 440 / 0 ; `de` 93 009 vs 0 / 0 ; positions 15 ms (tout)
+vs 179 (ES, 200 docs) vs 96 (tantivy). Rapport : `docs/compare-engines-2026-09-05.md`.
+
 ## 7. Le navigateur
 
 `bash bindings/emscripten/build.sh` (~1 min, estampille `index.html` depuis
