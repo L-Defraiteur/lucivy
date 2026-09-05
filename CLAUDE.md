@@ -220,6 +220,10 @@ les threads du scheduler ; thread-safe, jamais de réentrance dans l'index,
 et le thread appelant ne doit pas tenir GIL / boucle d'événements.
 
 Emscripten manque : export_snapshot, export_sharded_delta, apply_sharded_delta.
+Emscripten a `Lucivy.dropIndex(path)` (5 septembre, tard) : supprimer un
+répertoire d'index **par le worker** — WASMFS garde en cache ce qu'il a monté,
+un répertoire supprimé depuis le fil principal existe encore pour lui et la
+création suivante au même chemin échoue (`I/O error (os error 29)`).
 
 **Dictionnaire partagé exposé partout** (5 septembre au soir, branche `v4`) :
 `shared_dictionary` dans `SchemaConfig` (alias de `sfx_version` 4,
@@ -287,6 +291,9 @@ bash bindings/emscripten/build.sh
 # Playground (port 9877 ; `?dict` = dictionnaire partagé, `?ram` = derived_in_ram, `?commit=N`,
 # `?merges=N`, `?verbose` (traces `[merge]`, `[preload]` dans diag.log),
 # `?corpus=corpus-kernel-16k.tar.gz` ; un seul onglet qui indexe à la fois,
+# corpus du terminal (`index mdn|linux|go|godot|typescript|postgres|cpython|redis|git|curl|sqlite|nginx`)
+# décrits dans playground/corpora.json, bâtis par `python3 playground/tools/build_corpus.py all`
+# (même filtre que la page ; pages.yml les bâtit au déploiement ; git les ignore),
 # deux onglets partagent le même répertoire OPFS et échouent au commit)
 cd playground && node serve.mjs
 ```

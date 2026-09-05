@@ -43,6 +43,15 @@ jobs:
             | tar --null -T - --transform "s,^,lucivy-${GITHUB_SHA::7}/," -czf playground/lucivy-source.tar.gz
           ls -la playground/lucivy-source.tar.gz
 
+      # The corpora the terminal indexes on demand (`index mdn`, `index linux`,
+      # …): named in playground/corpora.json, built here from their sources
+      # with the page's own filter (text files of 100 KB at most), never
+      # committed. A visitor downloads only the one they type.
+      - name: Build the corpora
+        run: |
+          python3 playground/tools/build_corpus.py all
+          ls -la playground/corpus-*.tar.gz
+
       - name: Setup Pages
         uses: actions/configure-pages@v4
 

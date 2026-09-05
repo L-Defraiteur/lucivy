@@ -381,6 +381,12 @@ export class Lucivy {
   open(path: string): Promise<LucivyIndex>;
   /** Open an index persisted in OPFS in place (no copy). */
   openDirect(path: string): Promise<LucivyIndex>;
+  /**
+   * Delete an index directory from OPFS, through the worker (removing it
+   * from the main thread leaves the worker's filesystem view stale and the
+   * next `create` at that path fails). Close the index first if it is open.
+   */
+  dropIndex(path: string): Promise<void>;
   importSnapshot(data: Uint8Array, path: string): Promise<LucivyIndex>;
   /** Terminate the worker and free every byte of WASM memory. */
   terminate(): void;

@@ -120,6 +120,18 @@ compact::compaction_of_an_index_on_disk` (`LUCIVY_DICT_BENCH_*`).
 `Cargo.toml`), `cd playground && node serve.mjs 9877`. URL : `?dict`,
 `?dict&ram`, `?corpus=corpus-kernel-16k.tar.gz&dict&commit=1000`,
 `&merges=N`, `&verbose`, `?open=user_index` ; un seul onglet qui indexe.
+**Les corpus du terminal** (`index mdn`, `index linux`, `index go`,
+`godot`, `typescript`, `postgres`, `cpython`, `redis`, `git`, `curl`,
+`sqlite`, `nginx`) : `playground/corpora.json` les décrit, `python3
+playground/tools/build_corpus.py all` (ou des noms ; `--dry-run` compte
+seulement ; cache `~/.cache/lucivy-corpora`) fabrique les
+`corpus-<nom>.tar.gz` à côté de la page et écrit `stats` dans le manifeste ;
+`pages.yml` fait pareil au déploiement ; git les ignore. Le filtre est
+celui de la page (`TEXT_EXTENSIONS`, ≤ 100 000 octets, pas de NUL dans les
+512 premiers) — **les deux listes d'extensions doivent rester identiques**
+(`index.html` et `build_corpus.py`). Le nombre de documents indexés doit
+égaler `stats.files` : s'il est plus petit, le lecteur tar de la page perd
+des entrées (noms longs : ustar `prefix`, GNU `L`, PAX `x`).
 Depuis Chrome (outils `claude-in-chrome`, onglet du playground) : le plus
 fiable est `javascript_tool` avec `window._playground.search(q, {limit,
 highlights: true, fields: true})` puis **découper le texte en octets UTF-8**
@@ -131,8 +143,8 @@ chercher. Les règles du serveur de debug (`/eval/main`) sont dans
 Piloter le terminal du playground depuis `javascript_tool` : le script de
 la page est un module, ses fonctions ne sont pas atteignables ; attendre
 `document.querySelector('.term-input')` (le prompt n'existe qu'après la
-démo, ~17 s ; pas avec `?nodemo`), poser `value` (`index kernel`, `open
-kernel`, `drop kernel`, `index mdn`…) et envoyer un `KeyboardEvent`
+démo, ~17 s ; pas avec `?nodemo`), poser `value` (`index linux`, `open
+linux`, `drop linux`, `index mdn`…) et envoyer un `KeyboardEvent`
 `keydown` `Enter`. Lire les réponses dans
 `document.querySelector('.prompt').closest('[id]').innerText` (« reopened
 in X s », « its N index files … loaded in X s », « N hits … X ms ») —
@@ -151,7 +163,12 @@ fichiers / `index mdn` 14 629 pages, [04](04-progression-et-a-faire.md)
 **pic 3 859**, 2,7 + 2,5 s, 3 055 Mo. MDN 14 s, 478 Mo, pic 1 646,
 0,8 + 2,2 s ; avec `?ram` 14 s, 369 Mo, pic 1 906, 1,3 + 1,5 s. Panel
 noyau après ouverture : strict 71-80 ms, relâché 20-23, fuzzy 1 43, regex
-164-172.
+164-172. Corpus de la vitrine (indexation / index / pic) : Linux 2.6.0
+28 s / 1 087 Mo / 3 391 ; MDN 14 / 475 / 1 650 ; Go 19 / 686 / 2 291 ;
+Godot 19 / 809 / 3 323 ; TypeScript 33 / 462 / 1 522 ; PostgreSQL 10 /
+483 / 2 943 ; CPython 10 / 466 / 2 811 ; Git 5 / 242 ; curl 3 / 110 ;
+Redis 2 / 115 ; SQLite 2 / 97 ; nginx 1 / 32 ([04](04-progression-et-a-faire.md)
+§2 bis, panels dans `browser-ram.md` du scratchpad).
 
 ---
 

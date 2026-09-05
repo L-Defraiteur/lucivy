@@ -734,6 +734,25 @@ pub unsafe extern "C" fn lucivy_add_many(
     return_str("ok".into())
 }
 
+/// Delete an index directory from OPFS, through the filesystem this worker
+/// sees. The page cannot do it from the main thread: WASMFS caches the
+/// directory it mounted, so a directory removed by `removeEntry` outside the
+/// worker still "exists" here, and the next `lucivy_create` at that path fails
+/// with `I/O error (os error 29)` on its first file (seen in the playground:
+/// `drop mdn` then `index mdn` in the same page). Idempotent: a path that is
+/// not there is "ok". The caller closes the index first if it holds it open.
+#[no_mangle]
+pub unsafe extern "C" fn lucivy_drop_index(path: *const c_char) -> *const c_char {
+    ensure_opfs_mounted(8);
+    let path = str_from_ptr(path);
+    let dir = format!("{OPFS_BASE}/{path}");
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => return_str("ok".into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return_str("ok".into()),
+        Err(e) => return_error(&format!("cannot remove {dir}: {e}")),
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn lucivy_remove(ctx: *mut LucivyContext, doc_id: u32) -> *const c_char {
     let ctx = &*ctx;

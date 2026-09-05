@@ -83,6 +83,7 @@ emcc "$STATIC_LIB" \
         "_lucivy_add",
         "_lucivy_add_many",
         "_lucivy_remove",
+        "_lucivy_drop_index",
         "_lucivy_update",
         "_lucivy_commit",
         "_lucivy_commit_async",

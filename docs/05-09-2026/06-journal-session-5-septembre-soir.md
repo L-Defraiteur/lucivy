@@ -151,9 +151,14 @@ titre qui dit ce que c'est (`f26c1d7`).
 - **Publier 4.0.0** : décision de Lucie ; vérifier `PUBLISH_ENABLED`
   (`gh`, avec son accord), suivre `RELEASE.md`, publier les crates en
   dernier.
-- **La vitrine** ([04](04-progression-et-a-faire.md) §2 bis) : texte de la
-  page pour le second acte (MDN), tarballs `golang`/`godot`/`linux-2.6.0` si
-  voulus, déploiement des corpus ignorés par git.
+- **La vitrine** ([04](04-progression-et-a-faire.md) §2 bis) : **douze
+  corpus** choisis par Lucie (MDN, Linux 2.6.0 entier, Go, Godot,
+  TypeScript, PostgreSQL, CPython, Redis, Git, curl, SQLite, nginx),
+  décrits dans `playground/corpora.json`, fabriqués par
+  `tools/build_corpus.py` et par `pages.yml`, mesurés dans Chrome (2.6.0 :
+  28 s, 1,1 Go ; TypeScript 39 044 fichiers en 33 s) ; deux bugs de la page
+  corrigés au passage (`drop` puis `index` dans la même page, noms longs du
+  tar). Reste le chiffre en tête de page.
 - **Le navigateur** : `?ram` **mesuré** (plus tard le 5, [04](04-progression-et-a-faire.md)
   §2 ter) sur le noyau (15 429 fichiers) et MDN : OPFS −26 % / −23 %,
   temps avant service égal, requêtes égales, **mais pic mémoire +524 Mo

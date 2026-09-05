@@ -1,0 +1,710 @@
+{
+  "_comment": "Corpora the playground terminal indexes on demand (`index <name>`). Built by tools/build_corpus.py, which fills `stats`; the archives (corpus-<name>.tar.gz) are ignored by git and produced by the Pages workflow. Queries use the playground's query JSON.",
+  "corpora": {
+    "mdn": {
+      "title": "MDN Web Docs",
+      "source": "github:mdn/content@main",
+      "file": "corpus-mdn.tar.gz",
+      "path": "/mdn_index",
+      "what": "the reference pages of MDN Web Docs",
+      "credit": "MDN Web Docs content by Mozilla Contributors, CC-BY-SA 2.5 — github.com/mdn/content",
+      "searches": [
+        {
+          "cmd": "lucivy search \"addEventListener\"",
+          "note": "the method, in every reference page that mentions it",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "addEventListener"
+          }
+        },
+        {
+          "cmd": "lucivy search --strict \"grid-template-columns\"",
+          "note": "separators strict: this CSS property, not grid-template-rows",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "grid-template-columns",
+            "strict_separators": true
+          }
+        },
+        {
+          "cmd": "lucivy search --fuzzy 1 \"querySelctor\"",
+          "note": "a typo, one edit away, verified on the text",
+          "fuzzy": true,
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "querySelctor",
+            "distance": 1
+          }
+        },
+        {
+          "cmd": "lucivy search --regex \"aria-[a-z]+\"",
+          "note": "every ARIA attribute: the literal drives the walk, the regex validates",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "aria-[a-z]+",
+            "regex": true
+          }
+        },
+        {
+          "cmd": "lucivy search \"flex AND NOT grid\"",
+          "note": "boolean syntax: the flexbox pages that never mention grid",
+          "query": {
+            "type": "parse",
+            "fields": [
+              "content",
+              "path"
+            ],
+            "value": "flex AND NOT grid"
+          }
+        },
+        {
+          "cmd": "lucivy search --phrase \"async function\"",
+          "note": "these two words, adjacent, in this order",
+          "query": {
+            "type": "phrase",
+            "field": "content",
+            "value": "async function"
+          }
+        }
+      ],
+      "stats": {
+        "files": 14740,
+        "text_bytes": 60119328,
+        "archive_bytes": 13505593,
+        "skipped_over_100k": 6,
+        "skipped_binary": 0
+      }
+    },
+    "linux": {
+      "title": "Linux 2.6.0",
+      "source": "https://mirrors.edge.kernel.org/pub/linux/kernel/v2.6/linux-2.6.0.tar.gz",
+      "file": "corpus-linux-2.6.0.tar.gz",
+      "path": "/linux_index",
+      "what": "the whole Linux 2.6.0 kernel (December 2003), every source file",
+      "credit": "Linux 2.6.0 kernel sources, GPL-2.0 — kernel.org",
+      "searches": [
+        {
+          "cmd": "lucivy search --strict \"spin_lock_init\"",
+          "note": "nine bytes inside spin_lock_init, separators strict",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "spin_lock_init",
+            "strict_separators": true
+          }
+        },
+        {
+          "cmd": "lucivy search \"mutex_lock\"",
+          "note": "separators relaxed: mutex_lock, mutex *lock, mutex-lock",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "mutex_lock"
+          }
+        },
+        {
+          "cmd": "lucivy search --fuzzy 1 \"schdule\"",
+          "note": "one edit away, verified on the text",
+          "fuzzy": true,
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "schdule",
+            "distance": 1
+          }
+        },
+        {
+          "cmd": "lucivy search --regex \"spin_lock_[a-z]+\"",
+          "note": "the literal drives the walk, the regex validates",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "spin_lock_[a-z]+",
+            "regex": true
+          }
+        }
+      ],
+      "stats": {
+        "files": 14032,
+        "text_bytes": 132562013,
+        "archive_bytes": 33103928,
+        "skipped_over_100k": 157,
+        "skipped_binary": 0
+      }
+    },
+    "go": {
+      "title": "Go",
+      "source": "github:golang/go@master",
+      "file": "corpus-go.tar.gz",
+      "path": "/go_index",
+      "what": "the Go compiler, runtime and standard library",
+      "credit": "The Go programming language, BSD-3-Clause — github.com/golang/go",
+      "searches": [
+        {
+          "cmd": "lucivy search --strict \"goroutine\"",
+          "note": "the word, separators strict",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "goroutine",
+            "strict_separators": true
+          }
+        },
+        {
+          "cmd": "lucivy search \"context.WithCancel\"",
+          "note": "a dotted call, across the separator",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "context.WithCancel"
+          }
+        },
+        {
+          "cmd": "lucivy search --fuzzy 1 \"gorutine\"",
+          "note": "one letter missing, verified on the text",
+          "fuzzy": true,
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "gorutine",
+            "distance": 1
+          }
+        },
+        {
+          "cmd": "lucivy search --regex \"func \\(.*\\) Marshal[A-Z][a-z]+\"",
+          "note": "methods named Marshal-something, the literal drives the walk",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "func \\(.*\\) Marshal[A-Z][a-z]+",
+            "regex": true
+          }
+        }
+      ],
+      "stats": {
+        "files": 14173,
+        "text_bytes": 74014722,
+        "archive_bytes": 17218928,
+        "skipped_over_100k": 134,
+        "skipped_binary": 0
+      }
+    },
+    "godot": {
+      "title": "Godot Engine",
+      "source": "github:godotengine/godot@master",
+      "file": "corpus-godot.tar.gz",
+      "path": "/godot_index",
+      "what": "the Godot game engine, C++ and its documentation",
+      "credit": "Godot Engine, MIT — github.com/godotengine/godot",
+      "searches": [
+        {
+          "cmd": "lucivy search --strict \"_notification\"",
+          "note": "the callback every node implements, separators strict",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "_notification",
+            "strict_separators": true
+          }
+        },
+        {
+          "cmd": "lucivy search \"Vector3\"",
+          "note": "a type, everywhere it appears",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "Vector3"
+          }
+        },
+        {
+          "cmd": "lucivy search --fuzzy 1 \"RigidBdy\"",
+          "note": "a typo in a class name, one edit away",
+          "fuzzy": true,
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "RigidBdy",
+            "distance": 1
+          }
+        },
+        {
+          "cmd": "lucivy search --regex \"ClassDB::bind_method\\(D_METHOD\\(\\\"get_[a-z_]+\"",
+          "note": "every bound getter, the literal drives the walk",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "ClassDB::bind_method\\(D_METHOD\\(\"get_[a-z_]+",
+            "regex": true
+          }
+        }
+      ],
+      "stats": {
+        "files": 11021,
+        "text_bytes": 116812921,
+        "archive_bytes": 20980832,
+        "skipped_over_100k": 356,
+        "skipped_binary": 0
+      }
+    },
+    "typescript": {
+      "title": "TypeScript",
+      "source": "github:microsoft/TypeScript@main",
+      "file": "corpus-typescript.tar.gz",
+      "path": "/typescript_index",
+      "what": "the TypeScript compiler and its tens of thousands of test files",
+      "credit": "TypeScript, Apache-2.0 — github.com/microsoft/TypeScript",
+      "searches": [
+        {
+          "cmd": "lucivy search --strict \"checkExpression\"",
+          "note": "the checker's entry point, separators strict",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "checkExpression",
+            "strict_separators": true
+          }
+        },
+        {
+          "cmd": "lucivy search \"Type 'string' is not assignable\"",
+          "note": "an error message, across the quotes",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "Type 'string' is not assignable"
+          }
+        },
+        {
+          "cmd": "lucivy search --fuzzy 1 \"asignable\"",
+          "note": "one letter missing, verified on the text",
+          "fuzzy": true,
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "asignable",
+            "distance": 1
+          }
+        },
+        {
+          "cmd": "lucivy search --regex \"interface [A-Z][a-zA-Z]+Node \"",
+          "note": "the AST node interfaces, the literal drives the walk",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "interface [A-Z][a-zA-Z]+Node ",
+            "regex": true
+          }
+        }
+      ],
+      "stats": {
+        "files": 39044,
+        "text_bytes": 70555093,
+        "archive_bytes": 9627754,
+        "skipped_over_100k": 118,
+        "skipped_binary": 12
+      }
+    },
+    "postgres": {
+      "title": "PostgreSQL",
+      "source": "github:postgres/postgres@master",
+      "file": "corpus-postgres.tar.gz",
+      "path": "/postgres_index",
+      "what": "the PostgreSQL server, its regression tests and documentation",
+      "credit": "PostgreSQL, PostgreSQL Licence — github.com/postgres/postgres",
+      "searches": [
+        {
+          "cmd": "lucivy search --strict \"heap_insert\"",
+          "note": "the function, separators strict",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "heap_insert",
+            "strict_separators": true
+          }
+        },
+        {
+          "cmd": "lucivy search \"CREATE INDEX CONCURRENTLY\"",
+          "note": "three words across their spaces",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "CREATE INDEX CONCURRENTLY"
+          }
+        },
+        {
+          "cmd": "lucivy search --fuzzy 1 \"vaccum\"",
+          "note": "a classic typo, one edit away",
+          "fuzzy": true,
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "vaccum",
+            "distance": 1
+          }
+        },
+        {
+          "cmd": "lucivy search --regex \"ExecInit[A-Z][a-zA-Z]+\\(\"",
+          "note": "every executor node initialiser",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "ExecInit[A-Z][a-zA-Z]+\\(",
+            "regex": true
+          }
+        }
+      ],
+      "stats": {
+        "files": 5200,
+        "text_bytes": 59669094,
+        "archive_bytes": 13664742,
+        "skipped_over_100k": 206,
+        "skipped_binary": 0
+      }
+    },
+    "cpython": {
+      "title": "CPython",
+      "source": "github:python/cpython@main",
+      "file": "corpus-cpython.tar.gz",
+      "path": "/cpython_index",
+      "what": "the CPython interpreter, its standard library and documentation",
+      "credit": "CPython, PSF-2.0 — github.com/python/cpython",
+      "searches": [
+        {
+          "cmd": "lucivy search --strict \"PyObject_GetAttr\"",
+          "note": "the C API call, separators strict",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "PyObject_GetAttr",
+            "strict_separators": true
+          }
+        },
+        {
+          "cmd": "lucivy search \"asyncio.gather\"",
+          "note": "a dotted name, across the separator",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "asyncio.gather"
+          }
+        },
+        {
+          "cmd": "lucivy search --fuzzy 1 \"itertols\"",
+          "note": "one letter missing, verified on the text",
+          "fuzzy": true,
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "itertols",
+            "distance": 1
+          }
+        },
+        {
+          "cmd": "lucivy search --regex \"def test_[a-z_]+unicode\"",
+          "note": "every unicode test, the literal drives the walk",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "def test_[a-z_]+unicode",
+            "regex": true
+          }
+        }
+      ],
+      "stats": {
+        "files": 5381,
+        "text_bytes": 59606122,
+        "archive_bytes": 13365258,
+        "skipped_over_100k": 198,
+        "skipped_binary": 1
+      }
+    },
+    "redis": {
+      "title": "Redis",
+      "source": "github:redis/redis@unstable",
+      "file": "corpus-redis.tar.gz",
+      "path": "/redis_index",
+      "what": "the Redis server and its test suite",
+      "credit": "Redis, RSALv2 / SSPLv1 / AGPLv3 — github.com/redis/redis",
+      "searches": [
+        {
+          "cmd": "lucivy search --strict \"dictFind\"",
+          "note": "the hash table lookup, separators strict",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "dictFind",
+            "strict_separators": true
+          }
+        },
+        {
+          "cmd": "lucivy search \"ZRANGEBYSCORE\"",
+          "note": "a command name, everywhere",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "ZRANGEBYSCORE"
+          }
+        },
+        {
+          "cmd": "lucivy search --fuzzy 1 \"replicaton\"",
+          "note": "one letter missing, verified on the text",
+          "fuzzy": true,
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "replicaton",
+            "distance": 1
+          }
+        },
+        {
+          "cmd": "lucivy search --regex \"void [a-z]+Command\\(client \\*c\\)\"",
+          "note": "every command handler",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "void [a-z]+Command\\(client \\*c\\)",
+            "regex": true
+          }
+        }
+      ],
+      "stats": {
+        "files": 1731,
+        "text_bytes": 12502532,
+        "archive_bytes": 2736497,
+        "skipped_over_100k": 39,
+        "skipped_binary": 0
+      }
+    },
+    "git": {
+      "title": "Git",
+      "source": "github:git/git@master",
+      "file": "corpus-git.tar.gz",
+      "path": "/git_index",
+      "what": "the Git source, its tests and documentation",
+      "credit": "Git, GPL-2.0 — github.com/git/git",
+      "searches": [
+        {
+          "cmd": "lucivy search --strict \"read_object_file\"",
+          "note": "the function, separators strict",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "read_object_file",
+            "strict_separators": true
+          }
+        },
+        {
+          "cmd": "lucivy search \"git rebase --interactive\"",
+          "note": "a command line, across the spaces and dashes",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "git rebase --interactive"
+          }
+        },
+        {
+          "cmd": "lucivy search --fuzzy 1 \"comitt\"",
+          "note": "a typo, one edit away",
+          "fuzzy": true,
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "comitt",
+            "distance": 1
+          }
+        },
+        {
+          "cmd": "lucivy search --regex \"static int cmd_[a-z_]+\\(\"",
+          "note": "every builtin command entry point",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "static int cmd_[a-z_]+\\(",
+            "regex": true
+          }
+        }
+      ],
+      "stats": {
+        "files": 3491,
+        "text_bytes": 27414918,
+        "archive_bytes": 6815913,
+        "skipped_over_100k": 39,
+        "skipped_binary": 1
+      }
+    },
+    "curl": {
+      "title": "curl",
+      "source": "github:curl/curl@master",
+      "file": "corpus-curl.tar.gz",
+      "path": "/curl_index",
+      "what": "curl and libcurl, tests and documentation",
+      "credit": "curl, curl licence (MIT-like) — github.com/curl/curl",
+      "searches": [
+        {
+          "cmd": "lucivy search --strict \"CURLOPT_URL\"",
+          "note": "the option, separators strict",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "CURLOPT_URL",
+            "strict_separators": true
+          }
+        },
+        {
+          "cmd": "lucivy search \"Content-Type: application/json\"",
+          "note": "a header line, across the punctuation",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "Content-Type: application/json"
+          }
+        },
+        {
+          "cmd": "lucivy search --fuzzy 1 \"certficate\"",
+          "note": "one letter missing, verified on the text",
+          "fuzzy": true,
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "certficate",
+            "distance": 1
+          }
+        },
+        {
+          "cmd": "lucivy search --regex \"CURLE_[A-Z_]+_FAILED\"",
+          "note": "every failure code",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "CURLE_[A-Z_]+_FAILED",
+            "regex": true
+          }
+        }
+      ],
+      "stats": {
+        "files": 2227,
+        "text_bytes": 12769240,
+        "archive_bytes": 2706080,
+        "skipped_over_100k": 10,
+        "skipped_binary": 0
+      }
+    },
+    "sqlite": {
+      "title": "SQLite",
+      "source": "github:sqlite/sqlite@master",
+      "file": "corpus-sqlite.tar.gz",
+      "path": "/sqlite_index",
+      "what": "the SQLite library and its test suite",
+      "credit": "SQLite, public domain — github.com/sqlite/sqlite (mirror of sqlite.org)",
+      "searches": [
+        {
+          "cmd": "lucivy search --strict \"sqlite3_prepare_v2\"",
+          "note": "the API call, separators strict",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "sqlite3_prepare_v2",
+            "strict_separators": true
+          }
+        },
+        {
+          "cmd": "lucivy search \"PRAGMA journal_mode\"",
+          "note": "two words across the space",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "PRAGMA journal_mode"
+          }
+        },
+        {
+          "cmd": "lucivy search --fuzzy 1 \"btreee\"",
+          "note": "one letter too many, verified on the text",
+          "fuzzy": true,
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "btreee",
+            "distance": 1
+          }
+        },
+        {
+          "cmd": "lucivy search --regex \"OP_[A-Z][A-Za-z]+:\"",
+          "note": "every opcode of the VDBE switch",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "OP_[A-Z][A-Za-z]+:",
+            "regex": true
+          }
+        }
+      ],
+      "stats": {
+        "files": 627,
+        "text_bytes": 9382090,
+        "archive_bytes": 2413912,
+        "skipped_over_100k": 41,
+        "skipped_binary": 0
+      }
+    },
+    "nginx": {
+      "title": "nginx",
+      "source": "github:nginx/nginx@master",
+      "file": "corpus-nginx.tar.gz",
+      "path": "/nginx_index",
+      "what": "the nginx web server",
+      "credit": "nginx, BSD-2-Clause — github.com/nginx/nginx",
+      "searches": [
+        {
+          "cmd": "lucivy search --strict \"ngx_http_request_t\"",
+          "note": "the request type, separators strict",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "ngx_http_request_t",
+            "strict_separators": true
+          }
+        },
+        {
+          "cmd": "lucivy search \"proxy_pass\"",
+          "note": "the directive, everywhere",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "proxy_pass"
+          }
+        },
+        {
+          "cmd": "lucivy search --fuzzy 1 \"upstrem\"",
+          "note": "one letter missing, verified on the text",
+          "fuzzy": true,
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "upstrem",
+            "distance": 1
+          }
+        },
+        {
+          "cmd": "lucivy search --regex \"ngx_http_[a-z_]+_module\"",
+          "note": "every HTTP module, the literal drives the walk",
+          "query": {
+            "type": "contains",
+            "field": "content",
+            "value": "ngx_http_[a-z_]+_module",
+            "regex": true
+          }
+        }
+      ],
+      "stats": {
+        "files": 439,
+        "text_bytes": 5155563,
+        "archive_bytes": 846489,
+        "skipped_over_100k": 14,
+        "skipped_binary": 0
+      }
+    }
+  }
+}

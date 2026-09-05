@@ -741,6 +741,69 @@ Formulation corrigée au passage : « 992 files read » se lisait « ils
 n'ont chargé que 992 fichiers » ; la ligne dit maintenant que ce sont
 les fichiers de l'index (segments et dictionnaire), pas les documents.
 
+**Les corpus de la vitrine — fabriqués et mesurés (tard le 5 septembre).**
+Décision de Lucie : MDN, Go, Godot, Linux (**la 2.6.0 entière, un dépôt
+autocontenu, pas une tranche de l'actuel**), TypeScript à l'essai, et tous
+les plus légers qui tiennent (PostgreSQL, CPython, Redis, Git, curl, SQLite,
+nginx) — chaque visiteur ne télécharge que celui qu'il tape. Mise en place :
+`playground/corpora.json` (source `github:owner/repo@ref` ou URL d'un
+tarball, ligne de licence, panel de requêtes ; rempli par le script avec les
+comptes mesurés) lu par la page au chargement — la table `EXTRA_CORPORA`,
+l'aide et l'invite en découlent —, `playground/tools/build_corpus.py`
+(bibliothèque standard seule : télécharge, garde les fichiers texte de
+≤ 100 Ko avec **le même filtre d'extensions que la page**, élargi aux
+`.rst`, `.gd`, `.tscn`, `.cs`, `.s`, `.mjs`… des deux côtés, réemballe sous
+un seul dossier), et l'étape « Build the corpora » de `pages.yml` : les
+archives ne sont plus fabriquées à la main ni ignorées par le déploiement.
+Mesuré dans Chrome (dictionnaire, 4 shards, page rechargée avant chaque
+gros corpus ; pic = mémoire linéaire, depuis ~1 520 Mo au repos) :
+
+| `index <nom>` | fichiers | texte | archive | indexation | index | pic mémoire |
+|---|---|---|---|---|---|---|
+| `linux` (2.6.0 entier) | 14 032 | 126 Mo | 32 Mo | **28 s** | 1 087 Mo | 3 391 Mo |
+| `mdn` | 14 611 | 57 Mo | 13 Mo | 14 s | 475 Mo | 1 650 Mo |
+| `go` | 14 166 | 71 Mo | 16 Mo | 19 s | 686 Mo | 2 291 Mo |
+| `godot` | 11 021 | 111 Mo | 20 Mo | 19 s | 809 Mo | 3 323 Mo |
+| `typescript` | **39 044** | 67 Mo | 9 Mo | 33 s | 462 Mo | 1 522 Mo (inchangé) |
+| `postgres` | 5 199 | 56 Mo | 13 Mo | 10 s | 483 Mo | 2 943 Mo |
+| `cpython` | 5 344 | 57 Mo | 13 Mo | 10 s | 466 Mo | 2 811 Mo |
+| `git` | 3 491 | 26 Mo | 7 Mo | 5 s | 242 Mo | — |
+| `curl` | 2 227 | 12 Mo | 3 Mo | 3 s | 110 Mo | — |
+| `redis` | 1 731 | 12 Mo | 3 Mo | 2 s | 115 Mo | — |
+| `sqlite` | 627 | 9 Mo | 2 Mo | 2 s | 97 Mo | — |
+| `nginx` | 439 | 5 Mo | 1 Mo | 1 s | 32 Mo | — |
+
+TypeScript **passe** : 39 044 fichiers en 33 s, 462 Mo, et le pic ne bouge
+pas (des fichiers minuscules) ; seule sa requête stricte longue
+(`checkExpression`, 2 120 fichiers d'index) coûte 336 ms. Les panels
+rendent tous des résultats (les comptes sont dans le scratchpad,
+`browser-ram.md`). Le pic dépend de la **taille des fichiers**, pas du
+nombre : Godot (111 Mo, gros fichiers C++) monte à 3 323 Mo là où Go
+(71 Mo) reste à 2 291 et TypeScript à 1 522 — ce sont les fusions de
+segments de 2 000 documents plus gros. L'estimation affichée avant
+l'indexation est ajustée sur ces mesures : 0,3 ms par fichier + 0,16 s par
+Mo de texte (MDN 14 s, noyau moderne 40 s, 2.6.0 28 s retrouvés). Total
+des archives : 122 Mo, servies à côté de la page.
+
+Deux bugs de la page trouvés en mesurant, corrigés :
+
+- **`drop <nom>` puis `index <nom>` dans la même page échouait**
+  (« lucivy_create returned null », `[create] error: cannot write
+  _shard_config.json: I/O error (os error 29)`) : WASMFS garde en cache les
+  répertoires qu'il a montés, un répertoire supprimé par le fil principal
+  (`removeEntry`) existe encore pour le worker et la création échoue à son
+  premier fichier. Correctif : export `lucivy_drop_index(path)`
+  (`remove_dir_all` côté worker, idempotent), opération `dropIndex` du
+  worker, `Lucivy.dropIndex(path)` (typé dans `lucivy.d.ts`) ; `drop`
+  l'appelle avant `removeEntry`. WASM rebâti.
+- **Le lecteur tar de la page ne lisait que les 100 octets du champ nom** :
+  les noms longs (préfixe ustar, entrée GNU `L`, en-tête PAX `x` avec
+  `path=`) étaient perdus en silence — **9 736 fichiers de TypeScript sur
+  39 044** (29 312 documents indexés au premier essai), 266 de Godot, et
+  tout dépôt GitHub cloné par le proxy aux chemins longs. Corrigé dans
+  `extractTarGz` ; vérifié : 39 044 documents, et l'archive de la démo
+  (GNU tar) lue comme avant.
+
 À faire :
 
 - [x] **Le second acte, dans le terminal** (décision de Lucie : pas un
@@ -754,14 +817,21 @@ les fichiers de l'index (segments et dictionnaire), pas les documents.
   ou une URL github.com, par le proxy, avec un refus honnête au-delà de
   ~220 Mo de texte (curl/curl : 2 225 fichiers, 3 s). Vérifié le 5
   septembre de bout en bout par le pilote du serveur de debug
-  ([03](03-knowledge-dump-baselines-tests-outils.md) §7 bis). Reste : les
-  tarballs `golang` / `godot` / `linux-2.6.0` si on les veut sur la page,
-  et le texte de vitrine.
+  ([03](03-knowledge-dump-baselines-tests-outils.md) §7 bis). **Les
+  corpus sont choisis, fabriqués, mesurés et déployés par `pages.yml`**
+  (ci-dessus) ; `kernel` (la tranche du noyau moderne) laisse la place à
+  `linux` (2.6.0 entier), un index de l'ancien nom encore dans un
+  navigateur répond toujours à `kernel`. Le texte de la page annonce le
+  second acte (note sous le terminal) et la limite honnête dit 200 Mo de
+  texte, 2.6.0 en 28 s et 1,1 Go, la tranche moderne en une minute et
+  1,6 Go.
 - [ ] **Mesurer 2k et 10k** dans le navigateur (temps, mémoire) pour avoir
   un palier intermédiaire à 30-40 s.
-- [ ] **Le chiffre de vitrine** : « 15 440 fichiers du noyau indexés dans
-  votre onglet en une minute, chaque requête en 30 ms, exacte » à côté du
-  « 93 605 fichiers en natif, comptes et spans vérifiés contre le disque ».
+- [ ] **Le chiffre de vitrine** en tête de page : « le noyau Linux 2.6.0
+  entier indexé dans votre onglet en 28 s, chaque requête en 20 à 50 ms,
+  exacte » à côté du « 93 605 fichiers en natif, comptes et spans vérifiés
+  contre le disque ». La note sous le terminal le dit déjà en une phrase ;
+  le titre et la section « Numbers » ne l'ont pas encore.
 - [ ] **Le plancher de 1,5 Go de l'indexation WASM** (§1 bis) : c'est lui
   qui décide combien de fichiers un onglet tient, plus que la taille de
   l'index. Mesurer par paliers de `heap_bytes` pendant la démo `?verbose`

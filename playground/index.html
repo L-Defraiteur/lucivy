@@ -464,6 +464,7 @@ window._allLogs = [];
     </div>
     <p class="measured" id="measuredNote">
       Everything in the terminal is real: it clones <b>lucivy's own source</b> from GitHub and indexes it in this tab &mdash; every count and every time below is measured here, right now.
+      Then type <code>index mdn</code>, <code>index linux</code>, <code>index go</code>&hellip; at the prompt: a whole repository &mdash; all of MDN Web Docs, the entire Linux 2.6.0 kernel, Go, Godot, TypeScript, PostgreSQL, CPython &mdash; indexed in this tab in 15 to 35 seconds, kept in this browser, reopened in seconds next time.
     </p>
   </div>
 
@@ -1263,7 +1264,7 @@ index.search(&query, 10, None)?;</pre>
     <h2>Honest limits</h2>
     <ul>
       <li>Prebuilt binaries cover Linux x86_64/aarch64, macOS x86_64/arm64 and Windows x86_64 (the Python wheel, the npm package); Alpine (musl), FreeBSD and 32-bit build from source, with a Rust toolchain.</li>
-      <li>In the browser a tab addresses 4 GB: about 10&nbsp;000 kernel files are held in memory; past that the index is streamed from storage and a search takes seconds instead of milliseconds.</li>
+      <li>In the browser a tab addresses 4 GB, and indexing itself takes 1.5 GB of it: about 200 MB of text is the ceiling &mdash; the whole Linux 2.6.0 kernel (14&nbsp;032 files, 126 MB) indexes in 28 s and holds 1.1 GB; 15&nbsp;000 files of a modern kernel (214 MB) take a minute and 1.6 GB; the terminal refuses a repository beyond that rather than let the tab die.</li>
       <li>Fuzzy at distance 2 costs 5-10&times; distance 1; a regex with no usable literal is a scan &mdash; <code>query_warnings</code> tells you before you run it.</li>
       <li>One maintainer. The storage layer (segments, postings, doc store, fast fields) derives from tantivy 0.22; everything above it &mdash; the SFX engine, the query system, sharding, snapshots, the actor runtime, the bindings, the browser build &mdash; is new.</li>
     </ul>
@@ -1594,7 +1595,7 @@ async function startup() {
     // Cache-buster: GitHub Pages caches the worker and the wasm for a while,
     // and a phone kept a whole build behind after a deploy. Bumped at each
     // engine or worker change; the query rides through to the wasm.
-    const BUILD = '4.0.0-9869471';
+    const BUILD = '4.0.0-4a5967d';
     lucivy = new Lucivy(`./js/lucivy-worker.js?v=${BUILD}`, {
       noOpfs: startupParams.has('noopfs'),
       verbose: startupParams.has('verbose'), // engine diagnostics (LUCIVY_VERBOSE, V3_PROFILE)
@@ -2200,22 +2201,41 @@ async function extractTarGz(file) {
   let pos = 0;
   for (const c of chunks) { tar.set(c, pos); pos += c.length; }
 
+  // Names longer than the 100-byte field come three ways, and every real
+  // archive uses one of them: the ustar `prefix` field (bytes 345-500, GitHub
+  // and Python), a GNU `L` entry whose data is the name (GNU tar, kernel.org),
+  // or a PAX `x` entry with a `path=` record (Python beyond 255 bytes). Before
+  // this was read, a quarter of TypeScript's test files were silently dropped.
+  const dec = new TextDecoder();
+  const field = (h, from, to) => dec.decode(h.slice(from, to)).replace(/\0.*/, '');
   const entries = [];
   let offset = 0;
+  let pendingName = null;   // from a preceding `L` or `x` entry
   while (offset < tar.length - 512) {
     const header = tar.slice(offset, offset + 512);
     if (header.every(b => b === 0)) break;
 
-    const name = new TextDecoder().decode(header.slice(0, 100)).replace(/\0.*/, '');
-    const sizeOctal = new TextDecoder().decode(header.slice(124, 136)).replace(/\0.*/, '').trim();
-    const size = parseInt(sizeOctal, 8) || 0;
+    let name = field(header, 0, 100);
+    const size = parseInt(field(header, 124, 136).trim(), 8) || 0;
     const typeFlag = header[156];
+    const ustar = field(header, 257, 262) === 'ustar';
+    const prefix = ustar ? field(header, 345, 500) : '';
+    if (prefix) name = `${prefix}/${name}`;
+    if (pendingName !== null) { name = pendingName; pendingName = null; }
 
     offset += 512;
+    const data = () => tar.slice(offset, offset + size);
 
-    if (size > 0 && (typeFlag === 0 || typeFlag === 48) && isTextFilename(name)) {
+    if (typeFlag === 76) {                       // 'L': GNU long name
+      pendingName = dec.decode(data()).replace(/\0.*$/, '');
+    } else if (typeFlag === 120) {               // 'x': PAX extended header
+      for (const line of dec.decode(data()).split('\n')) {
+        const m = line.match(/^\d+ path=(.*)$/);
+        if (m) pendingName = m[1];
+      }
+    } else if (size > 0 && (typeFlag === 0 || typeFlag === 48) && isTextFilename(name)) {
       try {
-        const content = new TextDecoder('utf-8', { fatal: false }).decode(tar.slice(offset, offset + size));
+        const content = new TextDecoder('utf-8', { fatal: false }).decode(data());
         if (!isBinaryContent(content)) entries.push({ path: name, content });
       } catch(e) {}
     }
@@ -2234,6 +2254,9 @@ const TEXT_EXTENSIONS = new Set([
   '.clj', '.lisp', '.php', '.pl', '.pm', '.tcl', '.awk', '.sed',
   '.makefile', '.cmake', '.dockerfile', '.gitignore', '.env',
   '.cfg', '.ini', '.conf', '.properties', '.lock',
+  '.rst', '.adoc', '.tex', '.gd', '.tscn', '.tres', '.cs', '.m', '.mm', '.zig',
+  '.dart', '.proto', '.vue', '.svelte', '.mjs', '.cjs', '.mts', '.cts', '.sgml',
+  '.po', '.groovy', '.gradle', '.bat', '.ps1', '.def', '.s', '.S', '.asm',
 ]);
 
 function isTextFilename(name) {
@@ -2751,50 +2774,54 @@ async function runDemoSearch(entry, typeCmd = true) {
   if (typeCmd && !demoSkip) await sleep(reducedMotion ? 200 : 900);
 }
 
-// ── Bigger corpora, typed at the prompt: `index mdn`, `index kernel` ──
-// The archives are built locally (docs/05-09-2026/04 §2 bis: text files of
-// 100 KB at most, like the kernel corpora) and served next to the page;
-// git ignores them. The index goes to its own OPFS directory and is
-// reopened, not rebuilt, on the next visit.
-const MDN_SEARCHES = [
-  { cmd: 'lucivy search "addEventListener"', note: 'the method, in every reference page that mentions it',
-    query: { type: 'contains', field: 'content', value: 'addEventListener' } },
-  { cmd: 'lucivy search --strict "grid-template-columns"', note: 'separators strict: this CSS property, not grid-template-rows',
-    query: { type: 'contains', field: 'content', value: 'grid-template-columns', strict_separators: true } },
-  { cmd: 'lucivy search --fuzzy 1 "querySelctor"', note: 'a typo, one edit away, verified on the text', fuzzy: true,
-    query: { type: 'contains', field: 'content', value: 'querySelctor', distance: 1 } },
-  { cmd: 'lucivy search --regex "aria-[a-z]+"', note: 'every ARIA attribute: the literal drives the walk, the regex validates',
-    query: { type: 'contains', field: 'content', value: 'aria-[a-z]+', regex: true } },
-  { cmd: 'lucivy search "flex AND NOT grid"', note: 'boolean syntax: the flexbox pages that never mention grid',
-    query: { type: 'parse', fields: ['content', 'path'], value: 'flex AND NOT grid' } },
-  { cmd: 'lucivy search --phrase "async function"', note: 'these two words, adjacent, in this order',
-    query: { type: 'phrase', field: 'content', value: 'async function' } },
-];
-const KERNEL_SEARCHES = [
-  { cmd: 'lucivy search --strict "spin_lock_init"', note: 'nine bytes inside spin_lock_init, separators strict',
-    query: { type: 'contains', field: 'content', value: 'spin_lock_init', strict_separators: true } },
-  { cmd: 'lucivy search "mutex_lock"', note: 'separators relaxed: mutex_lock, mutex *lock, mutex-lock',
-    query: { type: 'contains', field: 'content', value: 'mutex_lock' } },
-  { cmd: 'lucivy search --fuzzy 1 "schdule"', note: 'one edit away, verified on the text', fuzzy: true,
-    query: { type: 'contains', field: 'content', value: 'schdule', distance: 1 } },
-  { cmd: 'lucivy search --regex "spin_lock_[a-z]+"', note: 'the literal drives the walk, the regex validates',
-    query: { type: 'contains', field: 'content', value: 'spin_lock_[a-z]+', regex: true } },
-];
-const EXTRA_CORPORA = {
-  mdn: { key: 'mdn', file: 'corpus-mdn.tar.gz', path: '/mdn_index', title: 'MDN Web Docs', pages: '14 900 pages', download: '14 MB', eta: 'about 15 s',
-    credit: 'MDN Web Docs content by Mozilla Contributors, CC-BY-SA 2.5 — github.com/mdn/content', searches: MDN_SEARCHES },
-  kernel: { key: 'kernel', file: 'corpus-kernel-16k.tar.gz', path: '/kernel_index', title: 'Linux kernel', pages: '15 440 source files', download: '49 MB', eta: 'about a minute',
-    credit: 'Linux kernel sources, GPL-2.0 — kernel.org', searches: KERNEL_SEARCHES },
-};
-// A bundled corpus: one archive served next to the page.
-for (const c of Object.values(EXTRA_CORPORA)) {
-  c.fetchFiles = async (onProgress) => {
-    const resp = await fetch(`./${c.file}`, { cache: 'no-cache' });
-    if (!resp.ok) throw new Error(`${c.file} is not served here (${resp.status}); docs/05-09-2026/04 says how it is built`);
-    const blob = await readWithProgress(resp, onProgress);
-    return { files: tarballToFiles(await extractTarGz(blob)), bytes: blob.size, what: c.file };
-  };
+// ── Bigger corpora, typed at the prompt: `index mdn`, `index linux`, … ──
+// `corpora.json` names them (source, licence line, the queries the terminal
+// replays); `tools/build_corpus.py` builds each archive from its source with
+// the page's own filter (text files of 100 KB at most) and writes the counts
+// into the manifest. The archives are served next to the page and ignored by
+// git (the Pages workflow builds them). Each index goes to its own OPFS
+// directory and is reopened, not rebuilt, on the next visit.
+const EXTRA_CORPORA = {};
+const corporaReady = (async () => {
+  try {
+    const resp = await fetch('./corpora.json', { cache: 'no-cache' });
+    if (!resp.ok) throw new Error(`corpora.json: ${resp.status}`);
+    const manifest = await resp.json();
+    for (const [key, m] of Object.entries(manifest.corpora || {})) {
+      const st = m.stats || {};
+      const files = st.files || 0;
+      // Fitted on the measured corpora (5 September 2026, dictionary, 4 shards):
+      // MDN 14 629 files / 57 MB in 14 s, kernel 15 429 / 214 MB in 40 s,
+      // Linux 2.6.0 14 032 / 126 MB in 28 s — about 0.3 ms a file plus 0.16 s
+      // a megabyte of text.
+      const textMb = (st.text_bytes || 0) / 1048576;
+      const seconds = files ? Math.max(2, Math.round(files * 0.0003 + textMb * 0.164)) : 0;
+      const eta = !files ? '' : seconds < 50 ? `about ${seconds} s` : seconds < 90 ? 'about a minute' : `about ${Math.round(seconds / 60)} minutes`;
+      const c = {
+        key, file: m.file, path: m.path, title: m.title, credit: m.credit || '', what: m.what || '',
+        pages: files ? `${files.toLocaleString('en-US').replace(/,/g, '\u202f')} files` : 'its text files',
+        download: st.archive_bytes ? `${(st.archive_bytes / 1048576).toFixed(0)} MB` : '',
+        eta, textBytes: st.text_bytes || 0, searches: m.searches || [],
+      };
+      c.fetchFiles = async (onProgress) => {
+        const r = await fetch(`./${c.file}`, { cache: 'no-cache' });
+        if (!r.ok) throw new Error(`${c.file} is not served here (${r.status}) — playground/tools/build_corpus.py ${key} builds it`);
+        const blob = await readWithProgress(r, onProgress);
+        return { files: tarballToFiles(await extractTarGz(blob)), bytes: blob.size, what: c.file };
+      };
+      EXTRA_CORPORA[key] = c;
+    }
+  } catch (err) {
+    console.warn('[playground] corpora.json not loaded:', err.message);
+  }
+})();
+// The corpora line of the help and of the prompt hint, from the manifest.
+function corporaSummary(f) {
+  const keys = Object.keys(EXTRA_CORPORA);
+  if (!keys.length) return '';
+  return keys.map(k => { const c = EXTRA_CORPORA[k]; return `${f('index ' + k)} (${c.title}${c.pages ? ', ' + c.pages : ''}${c.download ? ', ' + c.download : ''}${c.eta ? ', ' + c.eta : ''})`; }).join(', ');
 }
+
 // Above this much text a tab is not going to hold the index: 15 440 kernel
 // files are 217 MB of text and 1.8 GB in memory, in a 4 GB address space
 // of which indexing itself takes 1.5 GB.
@@ -2864,7 +2891,7 @@ async function listCorpora() {
     reg.lucivy = { path: DEMO_REPO.path, title: `${DEMO_REPO.owner}/${DEMO_REPO.repo} (the demo)`, docs: demoNumDocs, when: '' };
   }
   const keys = Object.keys(reg);
-  if (!keys.length) { term.out('▸ nothing indexed in this browser yet — try: index mdn', 'dim'); return; }
+  if (!keys.length) { term.out(`▸ nothing indexed in this browser yet — try: index ${Object.keys(EXTRA_CORPORA)[0] || 'mdn'}`, 'dim'); return; }
   const mb = (n) => `${(n / 1048576).toFixed(0)} MB`;
   for (const key of keys) {
     const e = reg[key];
@@ -2877,6 +2904,7 @@ async function listCorpora() {
 
 // `drop <name>`: close it if it is the open one, delete its OPFS directory.
 async function dropCorpus(key) {
+  await corporaReady;
   const reg = corpusRegistry();
   const e = reg[key] || (EXTRA_CORPORA[key] ? { path: EXTRA_CORPORA[key].path, title: EXTRA_CORPORA[key].title } : null);
   if (!e) throw new Error(`nothing called "${key}" here — index list shows what there is`);
@@ -2885,18 +2913,23 @@ async function dropCorpus(key) {
     demoIndex = null; demoNumDocs = 0;
   }
   const bytes = await opfsIndexBytes(e.path);
+  // Through the worker first: WASMFS caches the directories it mounted, so a
+  // directory removed from here alone still exists for the worker and the
+  // next `index <name>` at that path fails on its first file (I/O error 29).
+  if (lucivy.dropIndex) await lucivy.dropIndex(e.path).catch(() => {});
   await opfsRemoveIndex(e.path).catch(() => {});
   forgetCorpus(key);
   term.out(`▸ ${e.title} dropped${bytes ? ` — ${(bytes / 1048576).toFixed(0)} MB freed` : ''}${demoIndex ? '' : '; nothing is open now — index mdn, or Replay the demo'}`, 'ok');
 }
 
 async function indexCorpusDemo(c, { openOnly = false } = {}) {
+  await corporaReady;
   if (typeof c === 'string') {
     const key = c;
     c = EXTRA_CORPORA[key];
     if (!c) {
       const e = corpusRegistry()[key];
-      if (!e) throw new Error(`unknown corpus "${key}" — index list shows what is here; index mdn, index kernel, index github owner/repo add one`);
+      if (!e) throw new Error(`unknown corpus "${key}" — index list shows what is here; index ${Object.keys(EXTRA_CORPORA).join(' / index ') || 'mdn'}, index github owner/repo add one`);
       c = { key, path: e.path, title: e.title, pages: `${e.docs} documents`, download: '', eta: '', credit: e.credit, searches: [], fetchFiles: null };
     }
   }
@@ -2904,7 +2937,7 @@ async function indexCorpusDemo(c, { openOnly = false } = {}) {
   demoRunning = true; demoSkip = false; btnSkip.hidden = false;
   try {
     await startupDone;
-    if (!openOnly) term.out(`▸ ${c.title}: ${c.pages}${c.download ? `, ${c.download} to download` : ''}${c.eta ? `, ${c.eta} to index` : ''} — kept in this browser's storage, reopened in seconds next time`, 'dim');
+    if (!openOnly) term.out(`▸ ${c.title}${c.what ? ` — ${c.what}` : ''}: ${c.pages}${c.download ? `, ${c.download} to download` : ''}${c.eta ? `, ${c.eta} to index` : ''} — kept in this browser's storage, reopened in seconds next time`, 'dim');
     let index = null, numDocs = 0;
     const t0 = performance.now();
     // Already the open index (typed a second time): reuse it. Opening the
@@ -3043,7 +3076,7 @@ function printHelp() {
   const q = (s) => `<span class="str">${escapeHtml(s)}</span>`;
   const rows = [
     ['usage', `lucivy search [options] ${q('"value"')}  — quotes are optional unless the value has spaces`],
-    [f('index mdn'), `index all of MDN Web Docs here (14 900 pages, 14 MB, about 15 s) and search it; ${f('index kernel')}: 15 440 Linux kernel files (49 MB, about a minute)`],
+    ['index <name>', `index a whole corpus here and search it — ${corporaSummary(f) || 'none served next to this page'}; what you index stays in this browser`],
     [f('index github owner/repo'), `index a repository (${q('owner/repo@branch')} or a github.com URL) through the proxy — up to about 200 MB of text, what a tab holds`],
     [f('index list'), `what this browser holds; ${f('open <name>')} reopens one in seconds, ${f('drop <name>')} deletes it from storage`],
     ['(none)', `substring anywhere, across tokens, separators relaxed (${q('"suffixfst"')} finds suffix_fst and "suffix FST")`],
@@ -3067,7 +3100,7 @@ function printHelp() {
 function openPrompt(hint) {
   if (hint) {
     term.add(`▸ your turn: type a query and press Enter — <span class="flag">--help</span> lists the options (<span class="flag">--fuzzy N</span> <span class="flag">--jw</span> <span class="flag">--regex</span> <span class="flag">--phrase</span> <span class="flag">--prefix</span> <span class="flag">--exact</span> <span class="flag">--strict</span> <span class="flag">--allowed N</span> <span class="flag">--limit N</span>, AND / OR / NOT)`, 'dim');
-    term.add(`▸ or index a bigger corpus right here: <span class="flag">index mdn</span> — all of MDN Web Docs, 14 900 pages, 14 MB, about 15 s — <span class="flag">index kernel</span> — 15 440 Linux kernel files, 49 MB, about a minute — or <span class="flag">index github owner/repo</span>; what you index stays in this browser (<span class="flag">index list</span>, <span class="flag">open</span>, <span class="flag">drop</span>)`, 'dim');
+    term.add(`▸ or index a bigger corpus right here: ${corporaSummary((x) => `<span class="flag">${escapeHtml(x)}</span>`) || '<span class="flag">index mdn</span>'} — or <span class="flag">index github owner/repo</span>; what you index stays in this browser (<span class="flag">index list</span>, <span class="flag">open</span>, <span class="flag">drop</span>)`, 'dim');
   }
   const line = term.add(`<span class="prompt">$</span> <span class="cmd">${escapeHtml(PROMPT_PREFIX)}</span>`);
   const input = document.createElement('input');
@@ -3104,10 +3137,13 @@ function openPrompt(hint) {
       let cm;
       if ((cm = text.match(/^(?:lucivy\s+)?(index|open|drop)\s+(.+)$/i))) {
         command = { verb: cm[1].toLowerCase(), arg: cm[2].trim() };
-      } else if ((cm = text.match(/^(mdn|kernel|linux)$/i))) {
-        command = { verb: 'index', arg: cm[1].toLowerCase() };
+      } else if (EXTRA_CORPORA[text.toLowerCase()]) {
+        command = { verb: 'index', arg: text.toLowerCase() };
       }
-      if (command && command.arg.toLowerCase() === 'linux') command.arg = 'kernel';
+      // `kernel` was the name of the 15 440-file slice of a modern kernel; the
+      // corpus is now Linux 2.6.0 whole, `linux`. An index of the old name that
+      // this browser still holds keeps answering to it (list, open, drop).
+      if (command && command.arg.toLowerCase() === 'kernel' && !corpusRegistry().kernel) command.arg = 'linux';
       const shown = command ? `lucivy ${command.verb} ${command.arg}` : PROMPT_PREFIX + text;
       const cmd = document.createElement('span'); cmd.className = 'cmd';
       cmd.innerHTML = escapeHtml(shown)

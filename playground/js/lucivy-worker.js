@@ -555,6 +555,16 @@ self.onmessage = async (e) => {
                 break;
             }
 
+            case 'dropIndex': {
+                // Delete an index directory from OPFS through WASMFS, the view
+                // this worker has: removing it from the main thread leaves a
+                // stale directory here and the next create at that path fails.
+                indexes.delete(args.path);
+                checkResult(await callStr('lucivy_drop_index', args.path));
+                result = true;
+                break;
+            }
+
             case 'destroy': {
                 indexes.delete(args.path);
                 removeAllFiles(args.path).catch(() => {});

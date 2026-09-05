@@ -134,6 +134,16 @@ export class Lucivy {
         return new LucivyIndex(this, path);
     }
 
+    /**
+     * Delete an index directory from OPFS (`drop <name>` in the playground).
+     * Goes through the worker: WASMFS caches what it mounted, so a directory
+     * removed from the main thread would still exist for it and the next
+     * `create` at that path would fail. Close the index first if it is open.
+     */
+    async dropIndex(path) {
+        await this._call('dropIndex', { path });
+    }
+
     async importSnapshot(data, path) {
         const res = await this._call('importSnapshot', { data, path });
         return new LucivyIndex(this, path);
