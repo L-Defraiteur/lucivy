@@ -257,7 +257,11 @@ fenêtre : 3 → 20 ms sur le panel), la fermeture de l'écrivain aussi ;
 `LUCIVY_DICT_MAX_PENDING` (16) et `LUCIVY_DICT_SYNC_FOLD=1` ; test
 `deferred_fold_settles`. Le chemin par jeton a aussi été allégé (lecteurs
 `.termtexts` et vues FST ouverts une fois par champ, textes en attente en
-16 tranches) ; un cache des clés trouvées a été mesuré et refusé.
+16 tranches) ; un cache des clés trouvées a été mesuré et refusé. **Filtre de Bloom**
+(`suffix_fst/dictionary_bloom.rs`) sur la clé d'internement devant les marches FST : 97,5 % des
+marches pour rien sautées, mur natif égal (les collecteurs ne sont pas le chemin critique), Chrome
+2.6.0 40 s pour 41-42, pic égal ; reconstruit à la première écriture d'un index rouvert
+(`SfxDictionary::filter`), test `reopened_writer_mints_no_duplicate_ids`.
 
 ## Extension rag3db (lucivy_fts)
 
@@ -291,8 +295,8 @@ fenêtre : 3 → 20 ms sur le panel), la fermeture de l'écrivain aussi ;
   3.0.8 ; v4 doit rendre ses réponses, puis convertir sans perte (le contrat de 4.0.0)
 - Temps d'indexation de référence (noyau, index neufs) : v3 56 s, dictionnaire 131 s le 5 au soir →
   **106,8 s le 6 au matin** (repli différé), dictionnaire + `derived_in_ram` 134 → **110,9 s** ; 30 000 fichiers :
-  15,2-15,4 / 23,2-23,6 s (31,3 la veille). Le dictionnaire coûte ×1,5 à l'indexation ; ce qui reste est le
-  chemin `lookup_or_mint` par jeton (un `get` par génération pour chaque texte nouveau) : 04 §2 sexies
+  15,2-15,4 / **23,0** s (31,3 la veille). Le dictionnaire coûte ×1,5 à l'indexation ; ce qui reste
+  (attente finale 2,6 s, ~5 s non attribuées) : 04 §2 sexies
 - Bench sharding : `bench_sharding.rs` (90K docs Linux kernel)
 - Banc comparatif rejouable (5 septembre au soir) : `benches/compare_engines.sh <corpus> [dossier]` —
   lucivy (v3, dictionnaire, `derived_in_ram`) contre Elasticsearch 8.19 (trigrammes + `wildcard`,

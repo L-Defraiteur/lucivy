@@ -43,6 +43,7 @@ Voir `04` §2 sexies pour le récit et `11` §2 pour le mécanisme.
 | commit, cumul sur 15 commits | écriture des générations 8,8 s → **0** (paires nommées en 40-300 ms) ; compaction 3,4 → en fond ; réouverture 1,4 → en fond |
 | fusion en flux d'un span | 1,2 µs la clé FST, passe textes = un quart ; 950 000 textes en 0,75-0,9 s |
 | requêtes du panel après repli | inchangées (2,6-4,9 ms exactes, fz2 155, rx 19,6) ; **avec les paires visibles : 19-36 ms** — la fenêtre que la recherche n'expose jamais par défaut |
+| filtre de Bloom (clé d'internement) | 6,46 M des 6,6 M marches sautées, FST 28,4 → 20,6 s cumulées, mur natif égal ; ids sans décoder les textes : 30 000 → **23,0 s** ; Chrome 2.6.0 **40 s / 2 023 Mo**, Godot 30 s / 1 766 |
 | navigateur, build du matin, pages fraîches, commits 8 Mo | 2.6.0 : FST par segment + fond **2 279 Mo** / 42 s ; + repli synchrone 2 279 / 44 ; **sans FST par segment (chemin d'avant) 2 023 / 42** = la veille ; Godot 1 894 / 36 avec, **1 766 / 31 sans**, référence 1 778 / 30 ; noyau 15 440 : 75 s, 1 902 Mo |
 
 Compteurs : `LUCIVY_VERBOSE=1` imprime `[dictionary] commit: …` (textes
@@ -137,6 +138,12 @@ puis le noyau puis le build WASM ; `ab-fold-*.txt`, `index-time-dict-fold.txt`,
   ont coûté +256 Mo sur la 2.6.0 pour 0 s gagnée. Tout ce qui recouvre les
   constructions de segments doit être mesuré dans Chrome avant d'être gardé
   sur wasm32, et `cfg!(target_arch = "wasm32")` est le bon garde-fou.
+- **Un gain en cumul de fils n'est un gain que si ces fils font le mur.**
+  Le filtre a rendu 8 s de FST cumulées et 0 s de mur natif. Avant
+  d'optimiser un chemin parallèle, vérifier qu'il borne quelque chose.
+- Un filtre de Bloom se clé sur ce qui rend l'entrée unique (ici texte +
+  forme), pas sur la clé de la structure qu'il protège quand celle-ci est
+  partagée (la clé FST : 1,6 M sautées contre 6,46 M).
 - Une hypothèse de pic mémoire se teste une variable à la fois : le repli
   synchrone seul n'a rien rendu (2 279), c'est la seconde variable (les FST
   par segment) qui portait tout.

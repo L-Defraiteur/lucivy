@@ -651,6 +651,16 @@ impl<'a> TermTextsReaderV3<'a> {
     }
 
     /// Iterate all entries of every file: (global id, text, meta).
+    /// The ids of every entry, across the parts, without reading a text —
+    /// what a commit needs from a segment's `.newtexts` (decoding 950 000
+    /// texts for their ids alone was 2 s of commit path on 30 000 files).
+    pub fn ids(&self) -> impl Iterator<Item = u32> + '_ {
+        std::iter::once(self).chain(self.more.iter()).flat_map(|part| match &part.id_runs {
+            None => Box::new(0..part.num_terms) as Box<dyn Iterator<Item = u32> + '_>,
+            Some(runs) => Box::new(runs.iter().flat_map(|&(start, len, _)| start..start + len)),
+        })
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (u32, &'a str, TermMetaV3)> + '_ {
         std::iter::once(self).chain(self.more.iter()).flat_map(|part| {
             (0..part.num_terms).filter_map(move |i| {

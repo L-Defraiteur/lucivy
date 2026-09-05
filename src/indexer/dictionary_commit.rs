@@ -99,7 +99,7 @@ pub(crate) fn fold_new_texts(
             let texts = slice.read_bytes()?;
             let Some(reader) = TermTextsReaderV3::open(&texts) else { continue };
             let before = folded_ids.len();
-            folded_ids.extend(reader.iter().map(|(g, _, _)| (field_id, g as u64)));
+            folded_ids.extend(reader.ids().map(|g| (field_id, g as u64)));
             if folded_ids.len() == before { continue; }
             new_texts += folded_ids.len() - before;
             has_pair = true;

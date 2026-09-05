@@ -529,6 +529,21 @@ impl SfxCollectorV3 {
         self.current_doc_id += 1;
     }
 
+    }
+
+/// The collector's intern key of an entry: its text (case kept) and its
+/// shape — what makes two dictionary ids distinct. Also the key the shard
+/// dictionary's Bloom filter hashes, so a `.termtexts` entry must rebuild
+/// exactly this (`SfxDictionary::filter`).
+pub fn intern_key(text: &str, is_word_stripped: bool, own_len: u16, sep_len: u8, is_word_start: bool) -> String {
+    if is_word_stripped {
+        format!("\x00ws:{text}\x00{}", own_len - sep_len as u16)
+    } else {
+        format!("{text}\x00{}:{}:{}", own_len, sep_len, is_word_start as u8)
+    }
+}
+
+impl SfxCollectorV3 {
     /// Intern an extended token, returning its ordinal.
     ///
     /// Chunk entries and word-stripped entries use separate namespaces even
@@ -549,11 +564,7 @@ impl SfxCollectorV3 {
         // "ck" (own_len 6) in another. Anything that rebuilds text from
         // termtexts — the literal verification, the window for relaxed
         // matches — reads own_len, so each shape needs its own ordinal.
-        let key = if meta.is_word_stripped {
-            format!("\x00ws:{text}\x00{}", meta.own_len - meta.sep_len as u16)
-        } else {
-            format!("{text}\x00{}:{}:{}", meta.own_len, meta.sep_len, meta.is_word_start as u8)
-        };
+        let key = intern_key(text, meta.is_word_stripped, meta.own_len, meta.sep_len, meta.is_word_start);
         if let Some(&ord) = self.token_intern.get(&key) {
             return ord;
         }

@@ -26,6 +26,7 @@ pub mod varint;
 pub mod block_offsets;
 pub mod gmap;
 pub mod dictionary;
+pub mod dictionary_bloom;
 pub mod dictionary_compact;
 pub mod dictionary_fold;
 pub mod derived;

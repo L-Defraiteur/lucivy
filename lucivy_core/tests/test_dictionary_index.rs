@@ -357,3 +357,61 @@ fn deferred_fold_settles() {
     }
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// The Bloom filter in front of the FST walks (6 September) is seeded from
+/// the live parts when a writer reopens an index: indexing the same texts
+/// again must mint nothing new — a false "never seen" would give a text a
+/// second id — and the reopened index must answer like the v3 one.
+#[test]
+fn reopened_writer_mints_no_duplicate_ids() {
+    let files = corpus(300);
+    let base: PathBuf = std::env::temp_dir().join(format!("lucivy-dict-reopen-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("v4");
+    let h4 = build(&files, 4, &dir);
+    let before = h4.index.sfx_dictionary().unwrap().next_ids();
+    assert!(before.values().sum::<u64>() > 0);
+    {
+        let mut guard = h4.writer.lock().unwrap();
+        guard.take().unwrap().wait_merging_threads().unwrap();
+    }
+    drop(h4);
+
+    // Reopen as a writer and index every file a second time.
+    let reopened = LucivyHandle::open(ld_lucivy::directory::MmapDirectory::open(&dir).unwrap()).unwrap();
+    let path_f = reopened.field("path").unwrap();
+    let content_f = reopened.field("content").unwrap();
+    let nid_f = reopened.field(NODE_ID_FIELD).unwrap();
+    {
+        let mut guard = reopened.writer.lock().unwrap();
+        let w = guard.as_mut().unwrap();
+        for (i, (path, content)) in files.iter().enumerate() {
+            let mut doc = ld_lucivy::LucivyDocument::new();
+            doc.add_u64(nid_f, 100_000 + i as u64);
+            doc.add_text(path_f, path);
+            doc.add_text(content_f, content);
+            w.add_document(doc).unwrap();
+            if (i + 1) % 40 == 0 { w.commit().unwrap(); }
+        }
+        w.commit().unwrap();
+        guard.take().unwrap().wait_merging_threads().unwrap();
+    }
+    reopened.reader.reload().unwrap();
+    let after = reopened.index.sfx_dictionary().unwrap().next_ids();
+    assert_eq!(before, after, "reindexing the same texts minted new ids: {before:?} → {after:?}");
+
+    // Every document twice, spans included, against a v3 index of the same doubling.
+    let mut doubled = files.clone();
+    doubled.extend(files.iter().cloned());
+    let h3 = build(&doubled, 3, &base.join("v3"));
+    for q in panel() {
+        let (d3, s3) = run(&h3, q);
+        let (d4, s4) = run(&reopened, q);
+        let fold = |d: u64| if d >= 100_000 { d - 100_000 + files.len() as u64 } else { d };
+        let d4: HashSet<u64> = d4.into_iter().map(fold).collect();
+        let s4: HashSet<(u64, usize, usize)> = s4.into_iter().map(|(d, a, b)| (fold(d), a, b)).collect();
+        assert_eq!(d3, d4, "{} [{}] documents", q.text, q.label);
+        assert_eq!(s3, s4, "{} [{}] spans", q.text, q.label);
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}

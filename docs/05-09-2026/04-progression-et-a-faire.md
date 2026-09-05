@@ -755,12 +755,25 @@ mécanisme : [11](11-architecture.md) §2.
   **110,9 s** (134 hier), 3 334 Mo, 9/9 ; pic RSS du harnais 6 255 → 6 402 Mo
   (±3 %, dans le bruit) ; index 1 125 Mo (1 128) ; panel 9/9, temps de
   requête égaux (2,6-4,9 ms).
-- [ ] Cible ×1,3 : ce qui reste est le chemin par jeton lui-même (35 s
-  cumulées sur les fils, dont 28 de FST — un jeton **nouveau** paie un
-  `get` par génération vivante pour ne rien trouver : 6,6 M des 15 M
-  appels). Piste sérieuse : un filtre de Bloom par shard sur les clés
-  repliées (10 bits par clé, ~25 Mo par shard sur le noyau — à peser pour
-  WASM), rebâti à l'ouverture ou écrit avec la génération. Pas commencé.
+- [x] **Filtre de Bloom** devant les marches FST (`dictionary_bloom.rs`,
+  chaîne de filtres à bits atomiques, 10 bits par clé, alimenté au mintage,
+  reconstruit à la première écriture d'un index rouvert en balayant les
+  `.termtexts` ; test `reopened_writer_mints_no_duplicate_ids`). Deux
+  leçons : sur la **clé FST** il ne sautait que 1,6 M des 6,6 M marches
+  (toutes les casses et formes d'un texte partagent la clé) ; sur la **clé
+  d'internement** (texte + forme) il en saute 6,46 M (97,5 %), FST cumulé
+  28,4 → 20,6 s — **et le mur natif ne bouge pas** (23,0-25,4 s) : les
+  collecteurs ont du jeu, ce sont les **frappés** qui coûtent maintenant
+  (7 M × 2,9 µs). Dans Chrome : 2.6.0 **40 s (41-42), pic 2 023 égal**, Godot 30 s / 1 766 (31 / 1 766).
+  Gardé : pas de mémoire mesurable, petit gain là où les fils manquent.
+- [x] Le commit lisait les ids des `.newtexts` en décodant tous les textes
+  (2 s en série sur 15 commits) : `TermTextsReaderV3::ids()`. 30 000 :
+  **23,0 s**.
+- [ ] Ce qui reste des ~7,5 s d'écart avec le v3 : 2,6 s d'attente finale
+  (dernier repli + compaction — gardée : un lecteur ne doit pas hériter de
+  9 générations), ~5 s non attribuées (à chronométrer côté mur : le
+  commit hors dictionnaire, le drain des segments, les constructions
+  `.newsfx`).
 - [ ] Exposer `dictionary_wait` dans les signatures Python et Node (la
   config JSON, le C++, le bridge et l'emscripten le portent déjà) ; les
   README quand ce sera fait.

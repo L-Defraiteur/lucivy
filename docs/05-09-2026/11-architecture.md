@@ -23,7 +23,8 @@ commit convertit. Les formats : [07](07-architecture.md) §2.
 document ─ tokenizer ─ SfxCollectorV3::with_dictionary(slot, field)
    pour chaque jeton distinct du segment :
      dict.lookup_or_mint(field, key, text, meta)
-        ├─ field.lookup(text, meta) : pour chaque partie vivante (générations, puis paires en attente)
+        ├─ filtre de Bloom (clé d'internement) : « jamais minté » → mint direct, sans FST
+        ├─ sinon field.lookup(text, meta) : pour chaque partie vivante (générations, puis paires en attente)
         │     FST get(partition + minuscules(own)) → parents où l'overlap concorde
         │     → forme égale → texte confirmé dans .termtexts (lecteur ouvert une fois par champ)
         └─ sinon : tranche (16, par hachage) des textes en attente → id, ou mint (next_id++)
@@ -75,6 +76,16 @@ recharge ; `dictionary_wait: false` (config du schéma, `LUCIVY_DICT_WAIT=0`)
 cherche tout de suite sur plus de parties. Les snapshots LUCE et les deltas
 transportent les paires nommées (bundle `<uuid>.<champ>.new`, préfixe de ses
 deux fichiers) ; l'export attend d'abord l'état posé (`wait_merges_quiet`).
+
+**Le filtre de Bloom** (`dictionary_bloom.rs`) : par shard et par champ,
+sur la clé d'internement (texte avec casse + forme, ce qui fait un id),
+alimenté au mintage — un « non » passe encore par la table des textes en
+attente sous son verrou, donc jamais deux ids pour un texte —, reconstruit
+à la première écriture d'un index rouvert en balayant les `.termtexts`
+(les lecteurs ne le bâtissent jamais), chaîne de filtres à bits atomiques
+qui double de taille quand le dernier est plein. Il saute 97,5 % des
+marches pour rien ; le mur natif ne le voit pas (les collecteurs ne sont
+pas sur le chemin critique), Chrome un peu (2.6.0 40 s pour 41-42).
 
 **Refusé, mesuré.** Le cache des clés *trouvées* dans une génération (5,7 M
 de marches FST évitées, autant de verrou en plus, 32 Mo par shard) ; moins

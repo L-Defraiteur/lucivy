@@ -27,7 +27,9 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
+
+use super::dictionary_bloom::ScalableBloom;
 
 use common::OwnedBytes;
 
@@ -54,6 +56,8 @@ pub mod stats {
     pub static HITS: AtomicU64 = AtomicU64::new(0);
     /// Answered by the pending texts.
     pub static PENDING_HITS: AtomicU64 = AtomicU64::new(0);
+    /// Skipped the FST walk: the Bloom filter said the key was never minted.
+    pub static FILTERED: AtomicU64 = AtomicU64::new(0);
     pub static MINTS: AtomicU64 = AtomicU64::new(0);
     /// Whole `lookup_or_mint`, nanoseconds.
     pub static TOTAL_NS: AtomicU64 = AtomicU64::new(0);
@@ -70,6 +74,7 @@ pub mod stats {
         pub hits: u64,
         pub pending_hits: u64,
         pub mints: u64,
+        pub filtered: u64,
         pub total_ns: u64,
         pub open_ns: u64,
         pub fst_ns: u64,
@@ -83,6 +88,7 @@ pub mod stats {
             hits: HITS.swap(0, Relaxed),
             pending_hits: PENDING_HITS.swap(0, Relaxed),
             mints: MINTS.swap(0, Relaxed),
+            filtered: FILTERED.swap(0, Relaxed),
             total_ns: TOTAL_NS.swap(0, Relaxed),
             open_ns: OPEN_NS.swap(0, Relaxed),
             fst_ns: FST_NS.swap(0, Relaxed),
@@ -93,8 +99,8 @@ pub mod stats {
     impl std::fmt::Display for Snapshot {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             let ms = |ns: u64| ns as f64 / 1e6;
-            write!(f, "{} lookups ({} in a generation, {} pending, {} minted): {:.0} ms, of which termtexts open {:.0}, fst {:.0}, lock {:.0}",
-                self.calls, self.hits, self.pending_hits, self.mints,
+            write!(f, "{} lookups ({} in a generation, {} pending, {} minted, {} FST walks skipped by the filter): {:.0} ms, of which termtexts open {:.0}, fst {:.0}, lock {:.0}",
+                self.calls, self.hits, self.pending_hits, self.mints, self.filtered,
                 ms(self.total_ns), ms(self.open_ns), ms(self.fst_ns), ms(self.lock_ns))
         }
     }
@@ -171,30 +177,31 @@ impl DictionaryField {
     /// case included, is confirmed in the texts — the key does not see
     /// case, so `Mutex_` and `mutex_` are two ids under one key.
     pub fn lookup(&self, text: &str, meta: &TokenMetaV3) -> Option<u64> {
-        let (partition, own, overlap) = if meta.is_word_stripped {
-            let content_len = text.len().saturating_sub(meta.overlap_len as usize);
-            (SI_STRIPPED_PREFIX, &text[..content_len], &text[content_len..])
+        let key = fst_key(text, meta.is_word_stripped, meta.own_len, meta.overlap_len);
+        self.lookup_with_key(text, meta, &key)
+    }
+
+    /// `lookup` with the FST key already computed (`fst_key`) — the caller
+    /// asked the Bloom filter with it first.
+    pub fn lookup_with_key(&self, text: &str, meta: &TokenMetaV3, key: &[u8]) -> Option<u64> {
+        let overlap = if meta.is_word_stripped {
+            &text[text.len().saturating_sub(meta.overlap_len as usize)..]
         } else {
-            let own_end = (meta.own_len as usize).min(text.len());
-            (SI0_PREFIX, &text[..own_end], &text[own_end..])
+            &text[(meta.own_len as usize).min(text.len())..]
         };
-        let lower_own = lowercase_cow(own);
         let lower_overlap = lowercase_cow(overlap);
         let mut ov_end = lower_overlap.len().min(MAX_OVERLAP_BYTES);
         while ov_end > 0 && !lower_overlap.is_char_boundary(ov_end) {
             ov_end -= 1;
         }
         let want_overlap = &lower_overlap.as_bytes()[..ov_end];
-        let mut key = Vec::with_capacity(1 + lower_own.len());
-        key.push(partition);
-        key.extend_from_slice(lower_own.as_bytes());
         let timed = crate::diag::is_verbose();
         let texts = self.termtexts.as_ref()?;
         let t_fst = timed.then(std::time::Instant::now);
         let _fst_guard = t_fst.map(|t| TimeInto(t, &stats::FST_NS));
         for part in self.sfx_reader.parts() {
-            let Some(value) = part.fst().get(&key) else { continue };
-            let parents = part.decode_parents_where(value, &key, |ov| ov == want_overlap);
+            let Some(value) = part.fst().get(key) else { continue };
+            let parents = part.decode_parents_where(value, key, |ov| ov == want_overlap);
             for p in parents {
                 if p.sti != 0 { continue; }
                 let shape_ok = if meta.is_word_stripped {
@@ -210,6 +217,23 @@ impl DictionaryField {
         }
         None
     }
+}
+
+/// The key a text's own bytes sit under in the dictionary FST: the partition
+/// byte, then the lowercased own text (content for a word entry) — what
+/// `lookup` gets and what the Bloom filter hashes. `own_len` and
+/// `overlap_len` are the entry's, as the collector or `.termtexts` carry them.
+pub fn fst_key(text: &str, is_word_stripped: bool, own_len: u16, overlap_len: u8) -> Vec<u8> {
+    let (partition, own) = if is_word_stripped {
+        (SI_STRIPPED_PREFIX, &text[..text.len().saturating_sub(overlap_len as usize)])
+    } else {
+        (SI0_PREFIX, &text[..(own_len as usize).min(text.len())])
+    };
+    let lower_own = lowercase_cow(own);
+    let mut key = Vec::with_capacity(1 + lower_own.len());
+    key.push(partition);
+    key.extend_from_slice(lower_own.as_bytes());
+    key
 }
 
 /// `s.to_lowercase()` without the allocation when `s` is already lowercase
@@ -252,6 +276,11 @@ pub struct DictionaryShared {
     next_ids: Mutex<HashMap<u32, u64>>,
     /// The pending texts: field → collector intern key → id.
     stripes: Vec<Mutex<HashMap<u32, HashMap<String, u64>>>>,
+    /// Per field, the Bloom filter over every FST key minted or folded
+    /// (`dictionary_bloom`); built on first use from the live parts.
+    filters: RwLock<HashMap<u32, Arc<ScalableBloom>>>,
+    /// Serializes the seeding of a field's filter.
+    filter_build: Mutex<()>,
 }
 
 const STRIPES: usize = 16;
@@ -261,6 +290,8 @@ impl DictionaryShared {
         Self {
             next_ids: Mutex::new(next_ids),
             stripes: (0..STRIPES).map(|_| Mutex::new(HashMap::new())).collect(),
+            filters: RwLock::new(HashMap::new()),
+            filter_build: Mutex::new(()),
         }
     }
 
@@ -343,9 +374,15 @@ impl SfxDictionary {
         let t_all = timed.then(std::time::Instant::now);
         let _all_guard = t_all.map(|t| TimeInto(t, &stats::TOTAL_NS));
         if timed { stats::CALLS.fetch_add(1, Relaxed); }
-        if let Some(id) = self.field(field_id).and_then(|f| f.lookup(text, meta)) {
-            if timed { stats::HITS.fetch_add(1, Relaxed); }
-            return (id, false);
+        let filter = self.filter(field_id);
+        if filter.maybe_contains(key.as_bytes()) {
+            let fst_key = fst_key(text, meta.is_word_stripped, meta.own_len, meta.overlap_len);
+            if let Some(id) = self.field(field_id).and_then(|f| f.lookup_with_key(text, meta, &fst_key)) {
+                if timed { stats::HITS.fetch_add(1, Relaxed); }
+                return (id, false);
+            }
+        } else if timed {
+            stats::FILTERED.fetch_add(1, Relaxed);
         }
         let t_lock = timed.then(std::time::Instant::now);
         let _lock_guard = t_lock.map(|t| TimeInto(t, &stats::LOCK_NS));
@@ -362,8 +399,42 @@ impl SfxDictionary {
             id
         };
         stripe.entry(field_id).or_default().insert(key.to_string(), id);
+        filter.insert(key.as_bytes());
         if timed { stats::MINTS.fetch_add(1, Relaxed); }
         (id, true)
+    }
+
+    /// The field's Bloom filter over the collector intern keys (text with
+    /// case + shape: exactly what makes an id distinct — the FST key alone
+    /// is shared by every case and shape of one lowercase text, and skipped
+    /// only 1.6 M of 6.6 M walks), seeded on first use from every text the
+    /// live parts hold (a writer reopening an index); a fresh index starts
+    /// empty. Readers never call this.
+    pub fn filter(&self, field_id: u32) -> Arc<ScalableBloom> {
+        if let Some(f) = self.shared.filters.read().unwrap().get(&field_id) {
+            return f.clone();
+        }
+        let _build = self.shared.filter_build.lock().unwrap();
+        if let Some(f) = self.shared.filters.read().unwrap().get(&field_id) {
+            return f.clone();
+        }
+        let minted = self.shared.next_ids.lock().unwrap().get(&field_id).copied().unwrap_or(0);
+        let filter = Arc::new(ScalableBloom::with_capacity(minted * 2));
+        if let Some(texts) = self.field(field_id).and_then(|f| f.termtexts()) {
+            let t = std::time::Instant::now();
+            let mut n = 0u64;
+            for (_, text, m) in texts.iter() {
+                filter.insert(super::collector_v3::intern_key(text, m.is_word_stripped, m.own_len, m.sep_len, m.is_word_start).as_bytes());
+                n += 1;
+            }
+            if crate::diag::is_verbose() {
+                let (_, bytes) = filter.stats();
+                eprintln!("[dictionary] field {field_id}: Bloom filter seeded with {n} texts in {:.0} ms ({} KB)",
+                    t.elapsed().as_secs_f64() * 1e3, bytes >> 10);
+            }
+        }
+        self.shared.filters.write().unwrap().insert(field_id, filter.clone());
+        filter
     }
 
     /// Forget the pending texts whose ids a generation now holds.

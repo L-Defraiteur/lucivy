@@ -204,6 +204,17 @@ commit, une à la fois, comme la veille) : 2.6.0 **2 023 Mo, 42 s**, Godot
 **1 766 Mo, 31 s**. Décision de
 Lucie : wasm32 garde le chemin d'avant, le différé est natif.
 
+**Le filtre de Bloom (fin de matinée).** Lucie : « et le gain estimé ? » —
+estimé 23 → 19-20 s (les 6,6 M marches pour rien). Fait : sur la clé FST
+d'abord, 1,6 M marches sautées seulement (la clé est partagée par toutes
+les casses et formes d'un texte) ; sur la clé d'internement, 6,46 M sautées,
+FST cumulé 28,4 → 20,6 s, **et le mur natif inchangé** — l'estimation
+supposait les collecteurs sur le chemin critique, ils ne le sont pas, et
+les 7 M frappés coûtent 2,9 µs chacun. Ce qui a rendu 1,5-2 s, trouvé au
+passage : le commit décodait 950 000 textes pour lire leurs ids. Chrome :
+2.6.0 40 s (41-42), pic 2 023 égal. Le filtre est gardé (rien en mémoire,
+un peu là où les fils manquent), et 30 000 finit à **23,0 s**.
+
 ## 8. Commits de la nuit
 
 `4a5967d` `?ram` mesuré · `39c6d9e` douze corpus, deux bugs · `e41bfce`
