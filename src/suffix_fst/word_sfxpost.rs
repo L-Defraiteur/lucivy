@@ -49,6 +49,20 @@
 //! `wrapping_sub` and applied with `wrapping_add`, so a field that is not
 //! monotone round-trips exactly — it only costs a wider varint.
 //!
+//! `WSP5` (written since 5 September 2026) drops the byte spans: an entry
+//! is `d_doc`, `d_first`, `(last - first) << 1 | has_tail_off`, and the
+//! `tail_off` varint when the flag is set. The word starts where its first
+//! chunk starts (`PosMapReader::byte_at`) and its content is `own_len -
+//! sep_len` of its ordinal (termtexts META) — checked entry by entry over
+//! 137 M word postings of the kernel, no disagreement. The one exception
+//! is the **tail entry** of a word over 264 bytes (`collector_v3`: its
+//! last eight content bytes, interned on their own so that a query near
+//! the end of the word finds it), which starts in the middle of a chunk:
+//! `tail_off` is that offset, present for those entries only. The
+//! checkpoints of a `WSP5` block are `(doc, first, offset)`, 12 bytes. A
+//! reader over `WSP5` answers `has_byte_spans() == false` and returns
+//! `byte_from = byte_to = 0`.
+//!
 //! `entry_at` is a binary search on fixed-size records in WSP2, which varints
 //! would break. Checkpoint `k` (every `CHECKPOINT_EVERY` entries) stores the
 //! decoder state after entry `k * 32 - 1` — `(doc, first, from)` — and the
@@ -72,7 +86,15 @@ pub struct WordPostingEntry {
     pub byte_from: u32,
     /// End byte offset of the word's content in the original text. Content
     /// is contiguous from `byte_from`; separators come after.
+    ///
+    /// `byte_from` and `byte_to` are stored by `WSP2`-`WSP4` and read back
+    /// as 0 from `WSP5` (`WordSfxPostReader::has_byte_spans`).
     pub byte_to: u32,
+    /// Bytes from the start of the chunk at `first_position` to the start
+    /// of this entry's text: 0 for a word, which starts its first chunk,
+    /// the offset within the chunk for a tail entry (see the module
+    /// header). Stored by `WSP5`; 0 when read from an older layout.
+    pub tail_off: u16,
 }
 
 const ENTRY_SIZE: usize = 20; // 5 × u32
@@ -82,11 +104,15 @@ const MAGIC_V3: &[u8; 4] = b"WSP3";
 /// offsets relative to the blocks region; written since 4 September 2026
 /// at night.
 const MAGIC_V4: &[u8; 4] = b"WSP4";
+/// `WSP4` without the byte spans, with the tail offsets (module header).
+const MAGIC_V5: &[u8; 4] = b"WSP5";
 /// Entries between two checkpoints. 32 keeps a lookup at one binary search
 /// over the checkpoints plus at most 32 decodes, for 16 bytes per 32 entries
 /// (0.5 B/entry against the 13.3 B/entry the varints save).
 const CHECKPOINT_EVERY: usize = 32;
 const CHECKPOINT_SIZE: usize = 16; // doc, first, from, offset
+/// A `WSP5` checkpoint: doc, first, offset — no `from` to carry.
+const CHECKPOINT_SIZE_V5: usize = 12;
 
 /// Number of checkpoints an ordinal of `n` entries carries.
 fn checkpoints_for(n: usize) -> usize {
@@ -102,15 +128,30 @@ struct DeltaState {
 }
 
 /// Decodes one entry at `*pos` and advances both the position and the state.
-fn decode_entry(data: &[u8], pos: &mut usize, st: &mut DeltaState) -> Option<WordPostingEntry> {
+/// `spans`: the `WSP3`/`WSP4` shape (five varints) or the `WSP5` one.
+fn decode_entry(data: &[u8], pos: &mut usize, st: &mut DeltaState, spans: bool) -> Option<WordPostingEntry> {
     let d_doc = read_varint_u32(data, pos)?;
     let d_first = read_varint_u32(data, pos)?;
-    let d_last = read_varint_u32(data, pos)?;
-    let d_from = read_varint_u32(data, pos)?;
-    let len = read_varint_u32(data, pos)?;
     let doc = st.doc.wrapping_add(d_doc);
     let same_doc = d_doc == 0;
     let first = if same_doc { st.first.wrapping_add(d_first) } else { d_first };
+    if !spans {
+        let last_flag = read_varint_u32(data, pos)?;
+        let tail_off = if last_flag & 1 != 0 { read_varint_u32(data, pos)? } else { 0 };
+        st.doc = doc;
+        st.first = first;
+        return Some(WordPostingEntry {
+            doc_id: doc,
+            first_position: first,
+            last_position: first.wrapping_add(last_flag >> 1),
+            byte_from: 0,
+            byte_to: 0,
+            tail_off: tail_off.min(u16::MAX as u32) as u16,
+        });
+    }
+    let d_last = read_varint_u32(data, pos)?;
+    let d_from = read_varint_u32(data, pos)?;
+    let len = read_varint_u32(data, pos)?;
     let byte_from = if same_doc { st.from.wrapping_add(d_from) } else { d_from };
     st.doc = doc;
     st.first = first;
@@ -121,21 +162,35 @@ fn decode_entry(data: &[u8], pos: &mut usize, st: &mut DeltaState) -> Option<Wor
         last_position: first.wrapping_add(d_last),
         byte_from,
         byte_to: byte_from.wrapping_add(len),
+        tail_off: 0,
     })
 }
 
 // ─── Writer ──────────────────────────────────────────────────────────────
 
-/// Accumulates word postings per ordinal and serializes them in `WSP3` layout.
+/// Accumulates word postings per ordinal and serializes them in `WSP5`
+/// layout (or `WSP4`, spans included, for `with_byte_spans`).
 pub struct WordSfxPostWriter {
     entries: Vec<Vec<WordPostingEntry>>,
+    spans: bool,
 }
 
 impl WordSfxPostWriter {
-    /// Writer with one (initially empty) posting list per ordinal.
+    /// Writer of `WSP5` with one (initially empty) posting list per
+    /// ordinal: positions and tail offsets, the spans of the entries ignored.
     pub fn new(num_ordinals: usize) -> Self {
         Self {
             entries: vec![Vec::new(); num_ordinals],
+            spans: false,
+        }
+    }
+
+    /// Writer of `WSP4`: the entries' byte spans are stored. What the
+    /// readers of older segments are tested against.
+    pub fn with_byte_spans(num_ordinals: usize) -> Self {
+        Self {
+            entries: vec![Vec::new(); num_ordinals],
+            spans: true,
         }
     }
 
@@ -167,7 +222,7 @@ impl WordSfxPostWriter {
         let mut checkpoints = Vec::new();
         for entries in &self.entries {
             offsets.push(entries_data.len() as u32);
-            encode_block_into(&mut entries_data, entries, &mut body, &mut checkpoints);
+            encode_block_into(&mut entries_data, entries, &mut body, &mut checkpoints, self.spans);
         }
         // u32 offsets: refuse a file past 4 GB rather than write a wrapped table.
         assert!(
@@ -179,7 +234,7 @@ impl WordSfxPostWriter {
 
         let table = block_offsets::encode(&offsets);
         let mut buf = Vec::with_capacity(8 + table.len() + entries_data.len());
-        buf.extend_from_slice(MAGIC_V4);
+        buf.extend_from_slice(if self.spans { MAGIC_V4 } else { MAGIC_V5 });
         buf.extend_from_slice(&num_ords.to_le_bytes());
         buf.extend_from_slice(&table);
         buf.extend_from_slice(&entries_data);
@@ -195,6 +250,7 @@ fn encode_block_into(
     entries: &[WordPostingEntry],
     body: &mut Vec<u8>,
     checkpoints: &mut Vec<(DeltaState, u32)>,
+    spans: bool,
 ) {
     if entries.is_empty() {
         return;
@@ -217,9 +273,17 @@ fn encode_block_into(
         let same_doc = e.doc_id == st.doc;
         write_varint(body, (e.doc_id.wrapping_sub(st.doc)) as u64);
         write_varint(body, (if same_doc { e.first_position.wrapping_sub(st.first) } else { e.first_position }) as u64);
-        write_varint(body, (e.last_position.wrapping_sub(e.first_position)) as u64);
-        write_varint(body, (if same_doc { e.byte_from.wrapping_sub(st.from) } else { e.byte_from }) as u64);
-        write_varint(body, (e.byte_to.wrapping_sub(e.byte_from)) as u64);
+        let d_last = e.last_position.wrapping_sub(e.first_position);
+        if spans {
+            write_varint(body, d_last as u64);
+            write_varint(body, (if same_doc { e.byte_from.wrapping_sub(st.from) } else { e.byte_from }) as u64);
+            write_varint(body, (e.byte_to.wrapping_sub(e.byte_from)) as u64);
+        } else {
+            write_varint(body, ((d_last as u64) << 1) | u64::from(e.tail_off != 0));
+            if e.tail_off != 0 {
+                write_varint(body, e.tail_off as u64);
+            }
+        }
         st = DeltaState { doc: e.doc_id, first: e.first_position, from: e.byte_from };
     }
 
@@ -228,7 +292,9 @@ fn encode_block_into(
     for (st, off) in checkpoints.iter() {
         out.extend_from_slice(&st.doc.to_le_bytes());
         out.extend_from_slice(&st.first.to_le_bytes());
-        out.extend_from_slice(&st.from.to_le_bytes());
+        if spans {
+            out.extend_from_slice(&st.from.to_le_bytes());
+        }
         out.extend_from_slice(&off.to_le_bytes());
     }
     out.extend_from_slice(body);
@@ -240,9 +306,13 @@ fn encode_block_into(
 pub struct WordSfxPostReader<'a> {
     data: &'a [u8],
     num_ordinals: u32,
-    /// `WSP3`/`WSP4`: delta-varint blocks. `WSP2` segments written before
-    /// 25 August 2026 keep their fixed 20-byte records and their own read paths.
+    /// `WSP3`/`WSP4`/`WSP5`: delta-varint blocks. `WSP2` segments written
+    /// before 25 August 2026 keep their fixed 20-byte records and their own
+    /// read paths.
     v3: bool,
+    /// Whether the entries carry byte spans (`WSP2`-`WSP4`) or positions and
+    /// tail offsets (`WSP5`).
+    spans: bool,
     /// Where an ordinal's bytes are: absolute in `WSP2`/`WSP3` (a flat
     /// table), relative to `entries_start` in `WSP4`.
     table: OffsetTable<'a>,
@@ -256,10 +326,11 @@ impl<'a> WordSfxPostReader<'a> {
     /// is unknown or the header is truncated.
     pub fn open(data: &'a [u8]) -> Option<Self> {
         if data.len() < 8 { return None; }
-        let (v3, block) = match &data[0..4] {
-            m if m == MAGIC_V4 => (true, true),
-            m if m == MAGIC_V3 => (true, false),
-            m if m == MAGIC => (false, false),
+        let (v3, block, spans) = match &data[0..4] {
+            m if m == MAGIC_V5 => (true, true, false),
+            m if m == MAGIC_V4 => (true, true, true),
+            m if m == MAGIC_V3 => (true, false, true),
+            m if m == MAGIC => (false, false, true),
             _ => return None,
         };
         let num_ordinals = u32::from_le_bytes(data[4..8].try_into().ok()?);
@@ -272,7 +343,20 @@ impl<'a> WordSfxPostReader<'a> {
             if data.len() < min_size { return None; }
             (OffsetTable::Flat(&data[8..min_size]), 0)
         };
-        Some(Self { data, num_ordinals, v3, table, entries_start, gmap: None })
+        Some(Self { data, num_ordinals, v3, spans, table, entries_start, gmap: None })
+    }
+
+    /// Whether the entries carry byte spans. `false` on a `WSP5` file: the
+    /// entries then come back with `byte_from = byte_to = 0` and a
+    /// `tail_off`, and the word's offset derives from `.posmap`.
+    pub fn has_byte_spans(&self) -> bool {
+        self.spans
+    }
+
+    /// Bytes of one checkpoint in this layout.
+    #[inline]
+    fn checkpoint_size(&self) -> usize {
+        if self.spans { CHECKPOINT_SIZE } else { CHECKPOINT_SIZE_V5 }
     }
 
     /// Take global ids (dictionary segment): each is mapped to the local
@@ -311,7 +395,7 @@ impl<'a> WordSfxPostReader<'a> {
         let mut pos = start;
         let n = read_varint_u32(self.data, &mut pos)? as usize;
         let checkpoints = pos;
-        let entries = checkpoints + checkpoints_for(n) * CHECKPOINT_SIZE;
+        let entries = checkpoints + checkpoints_for(n) * self.checkpoint_size();
         if entries > self.data.len() {
             return None;
         }
@@ -321,11 +405,15 @@ impl<'a> WordSfxPostReader<'a> {
     /// Checkpoint `k` (1-based): the decoder state after entry `k * 32 - 1`
     /// and the offset of entry `k * 32` from the entries region.
     fn checkpoint(&self, checkpoints: usize, k: usize) -> Option<(DeltaState, usize)> {
-        let o = checkpoints + (k - 1) * CHECKPOINT_SIZE;
+        let o = checkpoints + (k - 1) * self.checkpoint_size();
         let g = |j: usize| -> Option<u32> {
             Some(u32::from_le_bytes(self.data.get(o + j * 4..o + j * 4 + 4)?.try_into().ok()?))
         };
-        Some((DeltaState { doc: g(0)?, first: g(1)?, from: g(2)? }, g(3)? as usize))
+        if self.spans {
+            Some((DeltaState { doc: g(0)?, first: g(1)?, from: g(2)? }, g(3)? as usize))
+        } else {
+            Some((DeltaState { doc: g(0)?, first: g(1)?, from: 0 }, g(2)? as usize))
+        }
     }
 
     /// Walk a WSP3 block, stopping when `f` returns `false`.
@@ -337,7 +425,7 @@ impl<'a> WordSfxPostReader<'a> {
             if pos >= end {
                 break;
             }
-            let Some(e) = decode_entry(self.data, &mut pos, &mut st) else { break };
+            let Some(e) = decode_entry(self.data, &mut pos, &mut st, self.spans) else { break };
             if !f(e) {
                 break;
             }
@@ -376,6 +464,7 @@ impl<'a> WordSfxPostReader<'a> {
             last_position: u32::from_le_bytes(b[8..12].try_into().ok()?),
             byte_from: u32::from_le_bytes(b[12..16].try_into().ok()?),
             byte_to: u32::from_le_bytes(b[16..20].try_into().ok()?),
+            tail_off: 0,
         })
     }
 
@@ -410,7 +499,7 @@ impl<'a> WordSfxPostReader<'a> {
             if pos >= end {
                 break;
             }
-            let e = decode_entry(self.data, &mut pos, &mut st)?;
+            let e = decode_entry(self.data, &mut pos, &mut st, self.spans)?;
             match (e.doc_id, e.first_position).cmp(&key) {
                 std::cmp::Ordering::Less => continue,
                 std::cmp::Ordering::Equal => return Some(e),
@@ -437,6 +526,7 @@ impl<'a> WordSfxPostReader<'a> {
                 last_position: u32::from_le_bytes(b[8..12].try_into().unwrap()),
                 byte_from: u32::from_le_bytes(b[12..16].try_into().unwrap()),
                 byte_to: u32::from_le_bytes(b[16..20].try_into().unwrap()),
+                tail_off: 0,
             });
         }
     }
@@ -465,10 +555,29 @@ impl<'a> WordSfxPostReader<'a> {
                 last_position: u32::from_le_bytes(b[8..12].try_into().unwrap()),
                 byte_from: u32::from_le_bytes(b[12..16].try_into().unwrap()),
                 byte_to: u32::from_le_bytes(b[16..20].try_into().unwrap()),
+                tail_off: 0,
             });
         }
         result
     }
+}
+
+/// The `tail_off` of an entry read from a spanned layout (`WSP2`-`WSP4`):
+/// its `byte_from` less the start of the chunk at `first_position`, read
+/// from the segment's `.posmap` and its spanned `.sfxpost` (both by local
+/// ordinal). What a merge of a pre-`WSP5` segment writes for the entry.
+/// 0 when the entry carries no span, or when either file is missing —
+/// right for every word, which starts its first chunk.
+pub fn tail_off_from_spans(
+    e: &WordPostingEntry,
+    posmap: Option<&super::posmap::PosMapReader<'_>>,
+    sfxpost: Option<&super::sfxpost_v2::SfxPostReaderV2>,
+) -> u16 {
+    let (Some(pm), Some(sp)) = (posmap, sfxpost) else { return 0 };
+    if !sp.has_byte_spans() { return 0; }
+    let Some(ord) = pm.ordinal_at(e.doc_id, e.first_position) else { return 0 };
+    let Some((chunk_from, _)) = sp.entry_at(ord, e.doc_id, e.first_position) else { return 0 };
+    e.byte_from.saturating_sub(chunk_from).min(u16::MAX as u32) as u16
 }
 
 // ─── Index registry entry ────────────────────────────────────────────────
@@ -499,12 +608,16 @@ mod tests {
 
     #[test]
     fn test_roundtrip() {
-        let mut writer = WordSfxPostWriter::new(3);
+        // The spanned layout (`WSP4`) roundtrips its bytes; `WSP5` is
+        // covered by `positions_only_layout_keeps_positions_and_tail_offsets`.
+        let mut writer = WordSfxPostWriter::with_byte_spans(3);
         writer.add(0, WordPostingEntry {
             doc_id: 0, first_position: 0, last_position: 2, byte_from: 0, byte_to: 21,
+            tail_off: 0,
         });
         writer.add(1, WordPostingEntry {
             doc_id: 0, first_position: 4, last_position: 5, byte_from: 29, byte_to: 43,
+            tail_off: 0,
         });
         // ordinal 2: no entries
 
@@ -582,6 +695,7 @@ mod tests {
                 last_position: pos + (i % 3) as u32,
                 byte_from: from,
                 byte_to: from + 4 + (i % 5) as u32,
+                tail_off: 0,
             });
         }
         v.sort();
@@ -593,12 +707,12 @@ mod tests {
     fn v3_roundtrip_matches_v2_exactly() {
         for n in [1usize, 2, 31, 32, 33, 64, 65, 200, 1000] {
             let entries = sample(n);
-            let mut w = WordSfxPostWriter::new(2);
+            let mut w = WordSfxPostWriter::with_byte_spans(2);
             for e in &entries {
                 w.add(1, e.clone());
             }
             let v3 = w.finish();
-            assert_eq!(&v3[0..4], MAGIC_V4, "the writer must emit WSP4");
+            assert_eq!(&v3[0..4], MAGIC_V4, "the spanned writer must emit WSP4");
             let v2 = write_v2(&[Vec::new(), entries.clone()]);
 
             let r3 = WordSfxPostReader::open(&v3).unwrap();
@@ -626,6 +740,40 @@ mod tests {
             if n > CHECKPOINT_EVERY {
                 assert!(v3.len() < v2.len(), "n={n}: WSP3 {} B is not smaller than WSP2 {} B", v3.len(), v2.len());
             }
+        }
+    }
+
+    /// `WSP5` keeps positions and tail offsets, drops the spans, reads and
+    /// looks up like `WSP4`, and is smaller.
+    #[test]
+    fn positions_only_layout_keeps_positions_and_tail_offsets() {
+        for n in [1usize, 2, 33, 200, 1000] {
+            let mut entries = sample(n);
+            for (i, e) in entries.iter_mut().enumerate() {
+                if i % 11 == 3 { e.tail_off = 3 + (i % 5) as u16; }
+            }
+            let mut w5 = WordSfxPostWriter::new(2);
+            let mut w4 = WordSfxPostWriter::with_byte_spans(2);
+            for e in &entries {
+                w5.add(1, e.clone());
+                w4.add(1, e.clone());
+            }
+            let (b5, b4) = (w5.finish(), w4.finish());
+            assert_eq!(&b5[0..4], MAGIC_V5);
+            assert!(b5.len() < b4.len(), "n={n}: WSP5 {} B is not smaller than WSP4 {} B", b5.len(), b4.len());
+            let r5 = WordSfxPostReader::open(&b5).unwrap();
+            assert!(!r5.has_byte_spans());
+            let expect: Vec<WordPostingEntry> = entries.iter()
+                .map(|e| WordPostingEntry { byte_from: 0, byte_to: 0, ..e.clone() }).collect();
+            assert_eq!(r5.entries(1), expect, "n={n}: entries");
+            let mut walked = Vec::new();
+            r5.for_each_entry(1, |e| walked.push(e));
+            assert_eq!(walked, expect, "n={n}: for_each_entry");
+            for e in &expect {
+                assert_eq!(r5.entry_at(1, e.doc_id, e.first_position).as_ref(), Some(e), "n={n}: entry_at");
+            }
+            assert_eq!(r5.entry_at(1, 9999, 0), None);
+            assert!(r5.entries(0).is_empty());
         }
     }
 
@@ -662,9 +810,11 @@ mod tests {
         let mut writer = WordSfxPostWriter::new(1);
         writer.add(0, WordPostingEntry {
             doc_id: 0, first_position: 0, last_position: 2, byte_from: 0, byte_to: 20,
+            tail_off: 0,
         });
         writer.add(0, WordPostingEntry {
             doc_id: 1, first_position: 0, last_position: 3, byte_from: 0, byte_to: 25,
+            tail_off: 0,
         });
         let data = writer.finish();
         let reader = WordSfxPostReader::open(&data).unwrap();

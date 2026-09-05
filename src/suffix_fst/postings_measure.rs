@@ -1,8 +1,10 @@
-//! Measurements on the posting files of an index on disk — what they would
-//! weigh without the fields a reader could derive. Nothing here is used by
-//! the engine; it answers the sizing questions of
-//! `docs/05-09-2026/04-progression-et-a-faire.md` §2 before anything is
-//! changed.
+//! Measurements and consistency checks on the posting files of an index on
+//! disk. Nothing here is used by the engine; it answered the sizing
+//! questions of `docs/05-09-2026/04-progression-et-a-faire.md` §2 before the
+//! spans were dropped from the postings (`SFP5`, `WSP5`), and it checks,
+//! after, that what replaces them agrees with the files: the posmap's byte
+//! checkpoints against a full prefix sum, and every word posting against
+//! the chunks under it.
 
 use std::path::Path;
 
@@ -21,39 +23,46 @@ struct Tally {
     /// Bytes of the same entries re-encoded by today's writer (the
     /// reference: checks the writer reproduces the file's size).
     reencoded: u64,
-    /// Bytes with `byte_from` and `byte_to` zeroed, minus the one-byte
-    /// varints those zeros still cost: the file without the byte spans.
+    /// Bytes of the same entries in the positions-only layout (`SFP5`,
+    /// `WSP5`): the file without the byte spans.
     without_spans: u64,
+    /// Files whose layout carries the spans (`SFP2`-`SFP4`, `WSP2`-`WSP4`).
+    spanned_files: usize,
 }
 
 fn mb(b: u64) -> f64 { b as f64 / 1048576.0 }
 
-/// `.sfxpost`: every entry is `(doc, token_index, byte_from, byte_to)`.
+/// `.sfxpost`: every entry is `(doc, token_index[, byte_from, byte_to])`.
+/// A spanned file is re-encoded in both layouts; an `SFP5` file in its own
+/// (the re-encoded size checks the writer reproduces the file).
 fn measure_sfxpost(bytes: &[u8], t: &mut Tally) {
     let Some(reader) = SfxPostReaderV2::open_slice(bytes) else { return };
     let n = reader.num_terms() as usize;
-    let mut full = SfxPostWriterV2::new(n);
-    let mut bare = SfxPostWriterV2::new(n);
+    let spanned = reader.has_byte_spans();
+    let mut full = if spanned { SfxPostWriterV2::new(n) } else { SfxPostWriterV2::positions_only(n) };
+    let mut bare = SfxPostWriterV2::positions_only(n);
     let mut entries = 0u64;
     for ordinal in 0..n as u32 {
         reader.for_each_entry(ordinal, |doc, ti, bf, bt| {
             full.add_entry(ordinal, doc, ti, bf, bt);
-            bare.add_entry(ordinal, doc, ti, 0, 0);
+            bare.add_position(ordinal, doc, ti);
             entries += 1;
         });
     }
     t.files += 1;
+    t.spanned_files += spanned as usize;
     t.entries += entries;
     t.on_disk += bytes.len() as u64;
     t.reencoded += full.finish().len() as u64;
-    t.without_spans += (bare.finish().len() as u64).saturating_sub(2 * entries);
+    t.without_spans += bare.finish().len() as u64;
 }
 
-/// `.word_sfxpost`: `(doc, first, last, byte_from, byte_to)`.
+/// `.word_sfxpost`: `(doc, first, last[, byte_from, byte_to] | tail_off)`.
 fn measure_word_sfxpost(bytes: &[u8], t: &mut Tally) {
     let Some(reader) = WordSfxPostReader::open(bytes) else { return };
     let n = reader.num_ordinals() as usize;
-    let mut full = WordSfxPostWriter::new(n);
+    let spanned = reader.has_byte_spans();
+    let mut full = if spanned { WordSfxPostWriter::with_byte_spans(n) } else { WordSfxPostWriter::new(n) };
     let mut bare = WordSfxPostWriter::new(n);
     let mut entries = 0u64;
     for ordinal in 0..n as u32 {
@@ -64,24 +73,28 @@ fn measure_word_sfxpost(bytes: &[u8], t: &mut Tally) {
         });
     }
     t.files += 1;
+    t.spanned_files += spanned as usize;
     t.entries += entries;
     t.on_disk += bytes.len() as u64;
     t.reencoded += full.finish().len() as u64;
-    t.without_spans += (bare.finish().len() as u64).saturating_sub(2 * entries);
+    t.without_spans += bare.finish().len() as u64;
 }
 
 fn report(name: &str, t: &Tally) {
-    eprintln!("{name}: {} files, {} entries, {:.1} MB on disk, re-encoded {:.1} MB ({:.2} B/entry), without byte spans {:.1} MB ({:.2} B/entry, -{:.1} %)",
-        t.files, t.entries, mb(t.on_disk), mb(t.reencoded),
+    eprintln!("{name}: {} files ({} with byte spans), {} entries, {:.1} MB on disk, re-encoded {:.1} MB ({:.2} B/entry), positions only {:.1} MB ({:.2} B/entry, -{:.1} %)",
+        t.files, t.spanned_files, t.entries, mb(t.on_disk), mb(t.reencoded),
         t.reencoded as f64 / t.entries.max(1) as f64,
         mb(t.without_spans), t.without_spans as f64 / t.entries.max(1) as f64,
         100.0 * (1.0 - t.without_spans as f64 / t.reencoded.max(1) as f64));
 }
 
 /// `LUCIVY_POSTINGS_DIR` names an index directory (one shard): every
-/// `.sfxpost` and `.word_sfxpost` is decoded and re-encoded with and
-/// without its byte spans. `LUCIVY_POSTINGS_MAX_FILES` caps the files
-/// visited per kind (a sample), default all.
+/// `.sfxpost` and `.word_sfxpost` is decoded and re-encoded in its own
+/// layout and in the positions-only one. On an index written with byte
+/// spans the difference is what dropping them saves; on an index written
+/// without, both sizes agree and the writer is shown to reproduce the file.
+/// `LUCIVY_POSTINGS_MAX_FILES` caps the files visited per kind (a sample),
+/// default all.
 #[test]
 #[ignore]
 fn postings_without_byte_spans() {
@@ -128,13 +141,25 @@ fn postings_without_byte_spans() {
         100.0 * saved as f64 / total.max(1) as f64, mb(total));
 }
 
-/// Would the byte spans be derivable? For every segment of the index in
-/// `LUCIVY_POSTINGS_DIR`: `byte_from` of a chunk at position `p` against
-/// the sum of the `own_len` of the ordinals at positions `0..p` (`.posmap`
-/// + the texts' meta), `byte_to − byte_from` against the ordinal's
-/// `own_len` (chunk) or `own_len − sep_len` (word), a word's `byte_from`
-/// against the sum at its first position. Counts the disagreements and
-/// prints the first few. `LUCIVY_POSTINGS_MAX_FILES` caps the segments.
+/// Do the files agree on where every token is? For every segment of the
+/// index in `LUCIVY_POSTINGS_DIR`, with the byte offset of every position
+/// recomputed as a full prefix sum of the `own_len` of the ordinals at the
+/// positions before it (`.posmap` + the texts' META, an empty slot
+/// restarting a value at 0):
+///
+/// - a `PMP4` posmap: `byte_at` (checkpoint + walk) against the prefix sum
+///   at every position — the derivation the queries use, checked against
+///   an independent computation (`posmap_bad`);
+/// - every word posting, whatever the layout: the text of its ordinal
+///   (word or tail, `own_len - sep_len` content bytes) against the bytes of
+///   the chunks at its positions, read from `tail_off` on — the check that
+///   places a tail entry where its chunk really holds it (`word_text_bad`);
+/// - a segment whose postings still carry spans (`SFP2`-`SFP4`,
+///   `WSP2`-`WSP4`): those spans against the prefix sum and the META, as
+///   before the spans were dropped (`chunk_*_bad`, `word_*_bad`).
+///
+/// Counts the disagreements and prints the first few.
+/// `LUCIVY_POSTINGS_MAX_FILES` caps the segments.
 #[test]
 #[ignore]
 fn byte_spans_are_derivable() {
@@ -160,9 +185,10 @@ fn byte_spans_are_derivable() {
     }
     #[derive(Default, Debug)]
     struct Counts {
-        segments: usize, docs: u64, positions: u64, empty_slots: u64,
+        segments: usize, spanned_segments: usize, docs: u64, positions: u64, empty_slots: u64,
+        posmap_checked: u64, posmap_bad: u64,
         chunk_entries: u64, chunk_from_bad: u64, chunk_to_bad: u64,
-        word_entries: u64, word_from_bad: u64, word_to_bad: u64,
+        word_entries: u64, word_tails: u64, word_text_bad: u64, word_from_bad: u64, word_to_bad: u64,
         leading_offset_docs: u64,
     }
     let mut c = Counts::default();
@@ -188,8 +214,11 @@ fn byte_spans_are_derivable() {
         let (Some(sfx), Some(wsp), Some(pm)) = (SfxPostReaderV2::open_slice(&sfx), WordSfxPostReader::open(&wsp), PosMapReader::open(&pm)) else { continue };
         let to_global = |local: u32| gmap.as_ref().map(|g| g.global(local)).unwrap_or(local);
         let meta = |local: u32| texts.meta(to_global(local));
+        let spanned = sfx.has_byte_spans() && wsp.has_byte_spans();
         c.segments += 1;
-        // Byte offset of every position of every document, by prefix sum.
+        c.spanned_segments += spanned as usize;
+        // Byte offset of every position of every document, by prefix sum;
+        // an empty slot is a value boundary, the next value starts at 0.
         let mut prefix_sums: Vec<Vec<u32>> = Vec::with_capacity(pm.num_docs() as usize);
         for doc in 0..pm.num_docs() {
             let n_pos = pm.num_tokens(doc);
@@ -199,7 +228,7 @@ fn byte_spans_are_derivable() {
                 sums.push(off);
                 match pm.ordinal_at(doc, p).and_then(&meta) {
                     Some(m) => off += m.own_len as u32,
-                    None => c.empty_slots += 1,
+                    None => { c.empty_slots += 1; off = 0; }
                 }
             }
             sums.push(off);
@@ -207,6 +236,51 @@ fn byte_spans_are_derivable() {
             prefix_sums.push(sums);
         }
         c.docs += pm.num_docs() as u64;
+        // The posmap's own derivation, at every position.
+        if pm.has_byte_checkpoints() {
+            for doc in 0..pm.num_docs() {
+                for p in 0..pm.num_tokens(doc) {
+                    // The posmap here is opened without the `.gmap`, so it hands
+                    // back local ordinals (the engine opens it with the gmap and
+                    // gets global ids): translate before asking the texts.
+                    let derived = pm.byte_at(doc, p, |local| meta(local).map(|m| m.own_len));
+                    let expected = if pm.ordinal_at(doc, p).is_some() { prefix_sums[doc as usize].get(p as usize).copied() } else { None };
+                    c.posmap_checked += 1;
+                    if derived != expected {
+                        c.posmap_bad += 1;
+                        if examples.len() < 12 { examples.push(format!("{prefix}: byte_at doc {doc} p {p}: {derived:?}, prefix sum {expected:?}")); }
+                    }
+                }
+            }
+        }
+        // Every word posting against the chunks under it: the entry's text
+        // (word or tail) must be what the chunks hold from `tail_off` on.
+        for w in 0..wsp.num_ordinals() {
+            let Some(word_text) = texts.text(to_global(w)) else { continue };
+            let Some(m) = meta(w) else { continue };
+            let content = m.own_len.saturating_sub(m.sep_len as u16) as usize;
+            let word_content = &word_text.as_bytes()[..content.min(word_text.len())];
+            wsp.for_each_entry(w, |e| {
+                c.word_entries += 1;
+                if e.tail_off != 0 { c.word_tails += 1; }
+                let mut under: Vec<u8> = Vec::new();
+                for p in e.first_position..=e.last_position {
+                    let Some(o) = pm.ordinal_at(e.doc_id, p) else { break };
+                    let (Some(t), Some(cm)) = (texts.text(to_global(o)), meta(o)) else { break };
+                    under.extend_from_slice(&t.as_bytes()[..(cm.own_len as usize).min(t.len())]);
+                }
+                let start = e.tail_off as usize;
+                let ok = under.len() >= start + word_content.len() && &under[start..start + word_content.len()] == word_content;
+                if !ok {
+                    c.word_text_bad += 1;
+                    if examples.len() < 12 {
+                        examples.push(format!("{prefix}: word ord {w} {word_text:?} doc {} first {} last {} tail_off {}: chunks hold {:?}",
+                            e.doc_id, e.first_position, e.last_position, e.tail_off, String::from_utf8_lossy(&under)));
+                    }
+                }
+            });
+        }
+        if !spanned { continue; }
         // Documents whose first chunk does not start at byte 0 (leading
         // separators): the prefix sum alone cannot know that offset.
         let mut leading: std::collections::HashSet<u32> = Default::default();
@@ -229,7 +303,6 @@ fn byte_spans_are_derivable() {
         c.leading_offset_docs += leading.len() as u64;
         for w in 0..wsp.num_ordinals() {
             wsp.for_each_entry(w, |e| {
-                c.word_entries += 1;
                 let expected_from = prefix_sums.get(e.doc_id as usize).and_then(|s| s.get(e.first_position as usize)).copied();
                 if expected_from != Some(e.byte_from) {
                     c.word_from_bad += 1;

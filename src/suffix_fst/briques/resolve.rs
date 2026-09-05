@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use fnv::FnvHashMap;
 
 use crate::DocId;
-use crate::query::posting_resolver::{DocFilter, PostingEntry, PostingResolver};
+use crate::query::posting_resolver::{DocFilter, PositionEntry, PostingResolver};
 
 use super::fst_walk::{Alts, FstCandidateV3, TokenChainV3};
 
@@ -66,6 +66,14 @@ fn note_truncated(len: usize) {
 // ─── Types ─────────────────────────────────────────────────────────────────
 
 /// Unified match result from posting resolution.
+///
+/// A resolver produces a match **in positions**: where it starts and ends
+/// in tokens, and where within those tokens (`first_off`, `last_off`,
+/// `last_consumed`). The byte fields are zero until
+/// `orchestrator::place_spans` derives them — once, from the posmap's byte
+/// checkpoints and the tokens' `own_len` (`BriquesContext::byte_at`) — for
+/// the matches that are kept. The postings carry no byte span any more
+/// (`SFP5`, `WSP5`), so nothing here may read one.
 #[derive(Debug, Clone)]
 pub struct MatchV3 {
     /// Document containing the match.
@@ -78,6 +86,32 @@ pub struct MatchV3 {
     /// path and the chain-position count (i.e. words) on another, which made any
     /// consumer walking `position..position+span` walk the wrong range.
     pub span: u32,
+    /// STI in the first token.
+    pub sti: u16,
+    /// Ordinal of the first token.
+    pub ordinal: u64,
+    /// Ordinal of the last token (for chain verification). Same as ordinal when span=1.
+    pub last_ordinal: u64,
+
+    // ── Placement inputs (positions → bytes) ─────────────────────
+    /// Bytes from the start of the chunk at `position` to the start of the
+    /// match: `sti`, plus the offset of a tail entry within its chunk.
+    pub first_off: u16,
+    /// Position of the chunk where the last token's text starts: the last
+    /// position for a chunk, the word's FIRST chunk for a word-stripped
+    /// token (whose `last_position`, the end of the span, is its last
+    /// chunk — the adjacency end, not where its bytes begin).
+    pub last_start_pos: u32,
+    /// Bytes from the start of the chunk at `last_start_pos` to the start
+    /// of the last token's text: the offset of a tail entry, 0 otherwise.
+    pub last_off: u16,
+    /// Bytes from the last token's text start to the end of the match, as
+    /// the key consumed them: `sti + query length` for a single token, the
+    /// chain's `last_consumed` otherwise. Unclamped; `place_spans` clamps a
+    /// word-stripped token at its content end.
+    pub last_consumed: u32,
+
+    // ── Placed by `place_spans` (0 until then) ───────────────────
     /// Start byte offset of the MATCH in the original text.
     pub byte_from: u32,
     /// Bytes of the match that lie in the NEXT content token, when the match was
@@ -104,12 +138,48 @@ pub struct MatchV3 {
     /// field means a change to `byte_to` can no longer silently turn `term` into
     /// `contains`.
     pub token_end: u32,
-    /// STI in the first token.
-    pub sti: u16,
-    /// Ordinal of the first token.
-    pub ordinal: u64,
-    /// Ordinal of the last token (for chain verification). Same as ordinal when span=1.
-    pub last_ordinal: u64,
+}
+
+impl MatchV3 {
+    /// A match in positions, its bytes not yet placed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn unplaced(
+        doc_id: DocId, position: u32, span: u32, sti: u16, ordinal: u64, last_ordinal: u64,
+        first_off: u16, last_start_pos: u32, last_off: u16, last_consumed: u32,
+    ) -> Self {
+        MatchV3 {
+            doc_id, position, span, sti, ordinal, last_ordinal,
+            first_off, last_start_pos, last_off, last_consumed,
+            byte_from: 0, overlap_overflow: 0, byte_to: 0, token_end: 0,
+        }
+    }
+}
+
+/// Content bytes of an ordinal — `own_len - sep_len` of its META — for the
+/// head check of a word-stripped resolution: the match must start inside
+/// the token's own content, not in the overlap it carries. `None` without
+/// texts.
+fn content_len(termtexts: Option<&crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>>, ordinal: u64) -> Option<u32> {
+    termtexts?.meta(ordinal as u32).map(|m| m.own_len.saturating_sub(m.sep_len as u16) as u32)
+}
+
+/// The offset of a word posting's text within the chunk at its first
+/// position: read from the entry on `WSP5`; on an older, spanned layout,
+/// its stored `byte_from` less the chunk's start (a posting lookup — the
+/// compatibility path, one per head entry).
+fn word_tail_off(
+    e: &crate::suffix_fst::word_sfxpost::WordPostingEntry,
+    word_sfxpost: &crate::suffix_fst::word_sfxpost::WordSfxPostReader<'_>,
+    posmap: Option<&crate::suffix_fst::posmap::PosMapReader<'_>>,
+    chunk_resolver: &dyn PostingResolver,
+) -> u16 {
+    if !word_sfxpost.has_byte_spans() {
+        return e.tail_off;
+    }
+    let Some(pm) = posmap else { return 0 };
+    let Some(ord) = pm.ordinal_at(e.doc_id, e.first_position) else { return 0 };
+    let Some(chunk) = chunk_resolver.resolve_doc_at(ord as u64, e.doc_id, e.first_position) else { return 0 };
+    e.byte_from.saturating_sub(chunk.byte_from).min(u16::MAX as u32) as u16
 }
 
 // ─── resolve_single_v3 ────────────────────────────────────────────────────
@@ -137,30 +207,19 @@ pub fn resolve_single_v3(
         if cand.is_word_stripped() { continue; }
 
         let entries = if let Some(filter) = filter_docs {
-            resolver.resolve_filtered(cand.raw_ordinal, filter)
+            resolver.positions_filtered(cand.raw_ordinal, filter)
         } else {
-            resolver.resolve(cand.raw_ordinal)
+            resolver.positions(cand.raw_ordinal)
         };
 
-        // Content end of the chunk: keys in 0x00/0x01 are contiguous raw text
-        // (content + sep + overlap), so this is a real offset in the source.
-        let content_end = |bf: u32| bf + cand.own_len as u32 - cand.sep_len as u32;
-
+        // Keys in 0x00/0x01 are contiguous raw text (content + sep +
+        // overlap): the match runs `query_len` bytes from `sti`, unclamped.
         for e in &entries {
-            let byte_from = e.byte_from + cand.sti as u32;
             if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
-            results.push(MatchV3 {
-                doc_id: e.doc_id,
-                position: e.position,
-                span: 1,
-                byte_from,
-                overlap_overflow: 0,
-                byte_to: byte_from + query_len,
-                token_end: content_end(e.byte_from),
-                sti: cand.sti,
-                ordinal: cand.raw_ordinal,
-                last_ordinal: cand.raw_ordinal,
-            });
+            results.push(MatchV3::unplaced(
+                e.doc_id, e.token_index, 1, cand.sti, cand.raw_ordinal, cand.raw_ordinal,
+                cand.sti, e.token_index, 0, cand.sti as u32 + query_len,
+            ));
         }
     }
 
@@ -182,47 +241,40 @@ pub fn resolve_single_word_v3(
     word_sfxpost: &crate::suffix_fst::word_sfxpost::WordSfxPostReader<'_>,
     filter_docs: Option<&dyn DocFilter>,
     query_len: u32,
+    posmap: Option<&crate::suffix_fst::posmap::PosMapReader<'_>>,
+    termtexts: Option<&crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>>,
+    chunk_resolver: &dyn PostingResolver,
 ) -> Vec<MatchV3> {
     let mut results = Vec::new();
 
     for cand in candidates {
         if !cand.is_word_stripped() { continue; }
 
+        // A match starting at or past the word's content end lives in the
+        // content overlap — the next word's bytes — and the next word reports
+        // it itself at sti 0. The content length is the ordinal's META
+        // (`own_len - sep_len`): tokens are interned by shape, so "0"+"ui"
+        // and "0u"+"i" are two ordinals, and the META is this word's —
+        // checked against 137 M stored spans of the kernel, no disagreement.
+        let content = content_len(termtexts, cand.raw_ordinal)
+            .unwrap_or(cand.own_len.saturating_sub(cand.sep_len as u16) as u32);
+        if cand.sti as u32 >= content { continue; }
+
         let entries = word_sfxpost.entries(cand.raw_ordinal as u32);
         for e in &entries {
             if let Some(filter) = filter_docs {
                 if !filter.contains(e.doc_id) { continue; }
             }
-            // `word_content` is a contiguous run of source bytes, so
-            // byte_from + sti is a real source offset. A 0x02 key does not fix
-            // where its word ends: "0ui" is "0"+"ui" in one document and
-            // "0u"+"i" in another, under one ordinal — and the FST entry's
-            // metadata belongs to whichever occurrence was interned first, which
-            // a merge reorders. Only the posting knows this word's content end
-            // (WSP2). A match starting at or past it lives in the content
-            // overlap — the next word's bytes — and the next word reports it
-            // itself at sti 0.
-            let content_end = e.byte_to;
-            if cand.sti as u32 >= (e.byte_to - e.byte_from) { continue; }
-            let byte_from = e.byte_from + cand.sti as u32;
+            let tail_off = word_tail_off(e, word_sfxpost, posmap, chunk_resolver);
             if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
-            results.push(MatchV3 {
-                doc_id: e.doc_id,
-                position: e.first_position,
-                span: if e.last_position > e.first_position {
-                    e.last_position - e.first_position + 1
-                } else { 1 },
-                byte_from,
-                // Clamped: past the word's content the match would cross a
-                // separator whose source offset this entry does not know. The
-                // excess is reported and placed by the orchestrator.
-                overlap_overflow: (byte_from + query_len).saturating_sub(content_end) as u8,
-                byte_to: (byte_from + query_len).min(content_end),
-                token_end: content_end,
-                sti: cand.sti,
-                ordinal: cand.raw_ordinal,
-                last_ordinal: cand.raw_ordinal,
-            });
+            // The end is clamped at the content end by `place_spans` (the
+            // excess crosses a separator, placed by the orchestrator).
+            results.push(MatchV3::unplaced(
+                e.doc_id, e.first_position,
+                if e.last_position > e.first_position { e.last_position - e.first_position + 1 } else { 1 },
+                cand.sti, cand.raw_ordinal, cand.raw_ordinal,
+                tail_off + cand.sti, e.first_position, tail_off, cand.sti as u32 + query_len,
+            ));
         }
     }
 
@@ -311,16 +363,17 @@ pub fn resolve_word_chains_v3(
                     word_entries
                 } else {
                     let chunk = if let Some(filter) = filter_docs {
-                        chunk_resolver.resolve_filtered(ord, filter)
+                        chunk_resolver.positions_filtered(ord, filter)
                     } else {
-                        chunk_resolver.resolve(ord)
+                        chunk_resolver.positions(ord)
                     };
                     chunk.into_iter().map(|e| WordPostingEntry {
                         doc_id: e.doc_id,
-                        first_position: e.position,
-                        last_position: e.position,
-                        byte_from: e.byte_from,
-                        byte_to: e.byte_to,
+                        first_position: e.token_index,
+                        last_position: e.token_index,
+                        byte_from: 0,
+                        byte_to: 0,
+                        tail_off: 0,
                     }).collect()
                 };
                 let mut filtered = entries;
@@ -331,52 +384,37 @@ pub fn resolve_word_chains_v3(
             })
             .collect();
 
-        // The head must start inside this posting's own word. A 0x02 key does
-        // not fix where its word ends ("0ui" is "0"+"ui" or "0u"+"i" under one
-        // ordinal); the posting's byte_to is the content end (WSP2).
-        // Checked here, not inside the memoised resolution: the memo is keyed
-        // by ordinal list alone and is shared across chains with different
-        // first_sti.
-        let head_ok = |e: &WordPostingEntry| {
-            (e.byte_from + chain.first_sti as u32) < e.byte_to
-        };
+        // The head must start inside its own token's content (META of the
+        // head ordinal; see `resolve_single_word_v3`). Checked here, not
+        // inside the memoised resolution: the memo is keyed by ordinal list
+        // alone and is shared across chains with different first_sti.
+        let head_ok = content_len(Some(termtexts), chain.head())
+            .is_none_or(|c| (chain.first_sti as u32) < c);
+        if !head_ok { continue; }
+        let tail_off = |e: &WordPostingEntry| word_tail_off(e, word_sfxpost, Some(posmap), chunk_resolver);
 
         if chain.ordinals.len() == 1 {
-            for e in first_entries.iter().filter(|e| head_ok(e)) {
-                let bf = e.byte_from + chain.first_sti as u32;
+            for e in first_entries.iter() {
                 if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
-                results.push(MatchV3 {
-                    doc_id: e.doc_id,
-                    position: e.first_position,
-                    span: if e.last_position > e.first_position {
-                        e.last_position - e.first_position + 1
-                    } else { 1 },
-                    byte_from: bf,
-                    overlap_overflow: 0,
-                    byte_to: bf + chain.total_query_consumed as u32,
-                    token_end: bf + chain.total_query_consumed as u32,
-                    sti: chain.first_sti,
-                    ordinal: chain.head(),
-                    last_ordinal: chain.head(),
-                });
+                let off = tail_off(e);
+                results.push(MatchV3::unplaced(
+                    e.doc_id, e.first_position,
+                    if e.last_position > e.first_position { e.last_position - e.first_position + 1 } else { 1 },
+                    chain.first_sti, chain.head(), chain.head(),
+                    off + chain.first_sti, e.first_position, off, chain.first_sti as u32 + chain.total_query_consumed as u32,
+                ));
             }
             continue;
         }
 
         // Multi-position chain
-        // Active: (doc_id, prev_last_position, byte_from_first, token_end_last,
-        //          byte_from_last, last_ord)
-        // byte_from_last is what lets the emitted byte_to measure the match instead
-        // of running to the end of the tail token.
-        // Tuple: (doc, prev_last_pos, byte_from_first, token_end, byte_from_last, last_ord, first_pos)
+        // Active: (doc, prev_last_pos, first_off, last_first, last_off, last_ord, first_pos)
         // first_pos is the position of THIS match's first word. It used to be
         // recovered at emit time as the first entry of the doc — the same value
         // for every match in the doc, which the (doc, position) dedup then
         // collapsed to one occurrence per document.
-        let mut active: Vec<(DocId, u32, u32, u32, u32, u64, u32)> = first_entries.iter()
-            .filter(|e| head_ok(e))
-            .map(|e| (e.doc_id, e.last_position, e.byte_from + chain.first_sti as u32,
-                      e.byte_to, e.byte_from, 0u64, e.first_position))
+        let mut active: Vec<(DocId, u32, u16, u32, u16, u64, u32)> = first_entries.iter()
+            .map(|e| (e.doc_id, e.last_position, tail_off(e) + chain.first_sti, e.first_position, 0u16, 0u64, e.first_position))
             .collect();
 
         for ord_idx in 1..chain.ordinals.len() {
@@ -396,15 +434,16 @@ pub fn resolve_word_chains_v3(
                         entries.push((e, ord));
                     }
                 } else {
-                    // Chunk ordinal — convert PostingEntry to WordPostingEntry
-                    let chunk_entries = chunk_resolver.resolve_filtered(ord, &active_docs);
+                    // Chunk ordinal — a position, as a word entry of one chunk
+                    let chunk_entries = chunk_resolver.positions_filtered(ord, &active_docs);
                     for e in chunk_entries {
                         entries.push((WordPostingEntry {
                             doc_id: e.doc_id,
-                            first_position: e.position,
-                            last_position: e.position, // chunk = single position
-                            byte_from: e.byte_from,
-                            byte_to: e.byte_to,
+                            first_position: e.token_index,
+                            last_position: e.token_index, // chunk = single position
+                            byte_from: 0,
+                            byte_to: 0,
+                            tail_off: 0,
                         }, ord));
                     }
                 }
@@ -420,9 +459,9 @@ pub fn resolve_word_chains_v3(
                 by_doc.entry(e.doc_id).or_default().push(i as u32);
             }
 
-            let mut new_active: Vec<(DocId, u32, u32, u32, u32, u64, u32)> = Vec::new();
+            let mut new_active: Vec<(DocId, u32, u16, u32, u16, u64, u32)> = Vec::new();
 
-            for &(doc_id, prev_last_pos, byte_from_first, _, _, _, first_pos) in &active {
+            for &(doc_id, prev_last_pos, first_off, _, _, _, first_pos) in &active {
                 let Some(idxs) = by_doc.get(&doc_id) else { continue };
                 for &i in idxs {
                     let (e, ord) = &entries[i as usize];
@@ -446,8 +485,7 @@ pub fn resolve_word_chains_v3(
                     };
 
                     if valid {
-                        new_active.push((doc_id, e.last_position, byte_from_first,
-                                         e.byte_to, e.byte_from, *ord, first_pos));
+                        new_active.push((doc_id, e.last_position, first_off, e.first_position, tail_off(e), *ord, first_pos));
                         break;
                     }
                 }
@@ -456,25 +494,17 @@ pub fn resolve_word_chains_v3(
             active = new_active;
         }
 
-        // Emit matches
-        for &(doc_id, last_pos, byte_from, token_end, last_bf, last_ord, position) in &active {
+        // Emit matches. The key's consumed bytes may run past the word's
+        // content end into the next word's first bytes (its content overlap):
+        // `place_spans` clamps and reports the excess, the orchestrator
+        // places it after the separators.
+        for &(doc_id, last_pos, first_off, last_first, last_off, last_ord, position) in &active {
             if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
-            results.push(MatchV3 {
-                doc_id,
-                position,
-                span: last_pos.saturating_sub(position) + 1,
-                byte_from,
-                // The key's consumed bytes may run past the word's content end
-                // into the next word's first bytes (its content overlap). Those
-                // are real text but not contiguous: report the excess and let the
-                // orchestrator place it after the separators.
-                overlap_overflow: (last_bf + chain.last_consumed as u32).saturating_sub(token_end) as u8,
-                byte_to: (last_bf + chain.last_consumed as u32).max(byte_from).min(token_end),
-                token_end,
-                sti: chain.first_sti,
-                ordinal: chain.head(),
-                last_ordinal: last_ord,
-            });
+            results.push(MatchV3::unplaced(
+                doc_id, position, last_pos.saturating_sub(position) + 1,
+                chain.first_sti, chain.head(), last_ord,
+                first_off, last_first, last_off, chain.last_consumed as u32,
+            ));
         }
     }
 
@@ -530,16 +560,17 @@ pub fn resolve_word_chains_v3_wordmap(
                             word_entries
                         } else {
                             let chunk = if let Some(filter) = filter_docs {
-                                chunk_resolver.resolve_filtered(ord, filter)
+                                chunk_resolver.positions_filtered(ord, filter)
                             } else {
-                                chunk_resolver.resolve(ord)
+                                chunk_resolver.positions(ord)
                             };
                             chunk.into_iter().map(|e| WordPostingEntry {
                                 doc_id: e.doc_id,
-                                first_position: e.position,
-                                last_position: e.position,
-                                byte_from: e.byte_from,
-                                byte_to: e.byte_to,
+                                first_position: e.token_index,
+                                last_position: e.token_index,
+                                byte_from: 0,
+                                byte_to: 0,
+                                tail_off: 0,
                             }).collect()
                         };
                         let mut filtered = entries;
@@ -555,43 +586,33 @@ pub fn resolve_word_chains_v3_wordmap(
             }
         };
 
-        // The head must start inside this posting's own word. A 0x02 key does
-        // not fix where its word ends ("0ui" is "0"+"ui" or "0u"+"i" under one
-        // ordinal); the posting's byte_to is the content end (WSP2).
-        // Checked here, not inside the memoised resolution: the memo is keyed
-        // by ordinal list alone and is shared across chains with different
-        // first_sti.
-        let head_ok = |e: &WordPostingEntry| {
-            (e.byte_from + chain.first_sti as u32) < e.byte_to
-        };
+        // The head must start inside its own token's content (META of the
+        // head ordinal; see `resolve_single_word_v3`). Checked here, not
+        // inside the memoised resolution: the memo is keyed by ordinal list
+        // alone and is shared across chains with different first_sti.
+        let head_ok = content_len(Some(termtexts), chain.head())
+            .is_none_or(|c| (chain.first_sti as u32) < c);
+        if !head_ok { continue; }
+        let tail_off = |e: &WordPostingEntry| word_tail_off(e, word_sfxpost, Some(posmap), chunk_resolver);
 
         if chain.ordinals.len() == 1 {
-            for e in first_entries.iter().filter(|e| head_ok(e)) {
-                let bf = e.byte_from + chain.first_sti as u32;
+            for e in first_entries.iter() {
                 if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
-                results.push(MatchV3 {
-                    doc_id: e.doc_id,
-                    position: e.first_position,
-                    span: if e.last_position > e.first_position {
-                        e.last_position - e.first_position + 1
-                    } else { 1 },
-                    byte_from: bf,
-                    overlap_overflow: 0,
-                    byte_to: bf + chain.total_query_consumed as u32,
-                    token_end: bf + chain.total_query_consumed as u32,
-                    sti: chain.first_sti,
-                    ordinal: chain.head(),
-                    last_ordinal: chain.head(),
-                });
+                let off = tail_off(e);
+                results.push(MatchV3::unplaced(
+                    e.doc_id, e.first_position,
+                    if e.last_position > e.first_position { e.last_position - e.first_position + 1 } else { 1 },
+                    chain.first_sti, chain.head(), chain.head(),
+                    off + chain.first_sti, e.first_position, off, chain.first_sti as u32 + chain.total_query_consumed as u32,
+                ));
             }
             continue;
         }
 
-        // Active: (doc, last_word_first_pos, last_pos, byte_from_first, last_ord, last_is_word, first_pos)
-        let mut active: Vec<(DocId, u32, u32, u32, u64, bool, u32)> = first_entries.iter()
-            .filter(|e| head_ok(e))
+        // Active: (doc, last_word_first_pos, last_pos, first_off, last_ord, last_is_word, first_pos)
+        let mut active: Vec<(DocId, u32, u32, u16, u64, bool, u32)> = first_entries.iter()
             .map(|e| (e.doc_id, e.first_position, e.last_position,
-                      e.byte_from + chain.first_sti as u32, 0u64, false, e.first_position))
+                      tail_off(e) + chain.first_sti, 0u64, false, e.first_position))
             .collect();
 
         for ord_idx in 1..chain.ordinals.len() {
@@ -599,7 +620,7 @@ pub fn resolve_word_chains_v3_wordmap(
             let wanted = &chain.ordinals[ord_idx];
 
             let mut new_active = Vec::new();
-            'next_active: for &(doc_id, _, prev_last, byte_from_first, _, _, first_pos) in &active {
+            'next_active: for &(doc_id, _, prev_last, first_off, _, _, first_pos) in &active {
                 let mut p = prev_last + 1;
                 loop {
                     super::profile::bump(|c| &c.n_wordmap_lookups, 1);
@@ -620,7 +641,7 @@ pub fn resolve_word_chains_v3_wordmap(
                                 p + span
                             };
                             super::profile::bump(|c| &c.n_wordmap_survivors, 1);
-                            new_active.push((doc_id, p, last, byte_from_first,
+                            new_active.push((doc_id, p, last, first_off,
                                              word_ord as u64, true, first_pos));
                             continue 'next_active;
                         }
@@ -632,7 +653,7 @@ pub fn resolve_word_chains_v3_wordmap(
                     };
                     if wanted.contains(chunk_ord as u64, Some(termtexts)) {
                         super::profile::bump(|c| &c.n_wordmap_survivors, 1);
-                        new_active.push((doc_id, p, p, byte_from_first, chunk_ord as u64, false, first_pos));
+                        new_active.push((doc_id, p, p, first_off, chunk_ord as u64, false, first_pos));
                         continue 'next_active;
                     }
 
@@ -646,44 +667,32 @@ pub fn resolve_word_chains_v3_wordmap(
             active = new_active;
         }
 
-        // Emit, reading each survivor's last posting for its byte span.
-        for &(doc_id, last_first, last_pos, byte_from, last_ord, last_is_word, position) in &active {
-            let (token_end, last_bf) = if last_is_word {
+        // Emit, reading each survivor's last posting: it confirms what the
+        // word map claimed and, for a word, says where its text starts in
+        // its chunk (a tail entry). `place_spans` clamps a word's end at its
+        // content and reports the excess.
+        for &(doc_id, last_first, last_pos, first_off, last_ord, last_is_word, position) in &active {
+            let last_off = if last_is_word {
                 match word_sfxpost.entry_at(last_ord as u32, doc_id, last_first) {
-                    Some(e) => (e.byte_to, e.byte_from),
+                    Some(e) => tail_off(&e),
                     None => {
                         super::profile::bump(|c| &c.n_wordmap_mismatch, 1);
                         continue;
                     }
                 }
             } else {
-                match chunk_resolver.resolve_doc(last_ord, doc_id)
-                    .into_iter().find(|e| e.position == last_pos)
-                {
-                    Some(e) => (e.byte_to, e.byte_from),
-                    None => {
-                        super::profile::bump(|c| &c.n_wordmap_mismatch, 1);
-                        continue;
-                    }
+                if !chunk_resolver.has_position(last_ord, doc_id, last_pos) {
+                    super::profile::bump(|c| &c.n_wordmap_mismatch, 1);
+                    continue;
                 }
+                0
             };
             if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
-            results.push(MatchV3 {
-                doc_id,
-                position,
-                span: last_pos.saturating_sub(position) + 1,
-                byte_from,
-                // The key's consumed bytes may run past the word's content end
-                // into the next word's first bytes (its content overlap). Those
-                // are real text but not contiguous: report the excess and let the
-                // orchestrator place it after the separators.
-                overlap_overflow: (last_bf + chain.last_consumed as u32).saturating_sub(token_end) as u8,
-                byte_to: (last_bf + chain.last_consumed as u32).max(byte_from).min(token_end),
-                token_end,
-                sti: chain.first_sti,
-                ordinal: chain.head(),
-                last_ordinal: last_ord,
-            });
+            results.push(MatchV3::unplaced(
+                doc_id, position, last_pos.saturating_sub(position) + 1,
+                chain.first_sti, chain.head(), last_ord,
+                first_off, last_first, last_off, chain.last_consumed as u32,
+            ));
         }
     }
 
@@ -711,7 +720,7 @@ fn resolve_chains_posmap_grouped(
     filter_docs: Option<&dyn DocFilter>,
     posmap: &crate::suffix_fst::posmap::PosMapReader<'_>,
     termtexts: Option<&crate::suffix_fst::termtexts_v3::TermTextsReaderV3<'_>>,
-    first_memo: &mut FnvHashMap<Vec<u64>, std::rc::Rc<Vec<PostingEntry>>>,
+    first_memo: &mut FnvHashMap<Vec<u64>, std::rc::Rc<Vec<PositionEntry>>>,
 ) -> Vec<MatchV3> {
     let mut results = Vec::new();
 
@@ -722,8 +731,8 @@ fn resolve_chains_posmap_grouped(
         groups.entry(chain.first_ids().to_vec()).or_default().push(i);
     }
 
-    // Active survivor: (doc, last_pos, byte_from_first, last_ord, first_pos)
-    type Active = (DocId, u32, u32, u64, u32);
+    // Active survivor: (doc, last_pos, last_ord, first_pos)
+    type Active = (DocId, u32, u64, u32);
 
     super::profile::bump(|c| &c.n_groups_shared, groups.len() as u64);
     for (first_key, members) in groups {
@@ -756,20 +765,11 @@ fn resolve_chains_posmap_grouped(
             let chain = &chains[ci];
             if chain.ordinals.len() == 1 {
                 for e in first_entries.iter() {
-                    let bf = e.byte_from + chain.first_sti as u32;
                     if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
-                    results.push(MatchV3 {
-                        doc_id: e.doc_id,
-                        position: e.position,
-                        span: 1,
-                        byte_from: bf,
-                        overlap_overflow: 0,
-                        byte_to: bf + chain.total_query_consumed as u32,
-                        token_end: e.byte_to,
-                        sti: chain.first_sti,
-                        ordinal: chain.head(),
-                        last_ordinal: chain.head(),
-                    });
+                    results.push(MatchV3::unplaced(
+                        e.doc_id, e.token_index, 1, chain.first_sti, chain.head(), chain.head(),
+                        chain.first_sti, e.token_index, 0, chain.first_sti as u32 + chain.total_query_consumed as u32,
+                    ));
                 }
             } else if shared_head {
                 let list = &chain.ordinals[1];
@@ -785,13 +785,13 @@ fn resolve_chains_posmap_grouped(
                 let wanted = &chain.ordinals[1];
                 let mut found: Vec<Active> = Vec::new();
                 for e in first_entries.iter() {
-                    let next_pos = e.position + 1;
+                    let next_pos = e.token_index + 1;
                     super::profile::bump(|c| &c.n_posmap_lookups, 1);
                     let Some(ord) = posmap.ordinal_at(e.doc_id, next_pos) else { continue };
                     let ord = ord as u64;
                     if !wanted.contains(ord, termtexts) { continue; }
                     super::profile::bump(|c| &c.n_posmap_survivors, 1);
-                    found.push((e.doc_id, next_pos, e.byte_from + chain.first_sti as u32, ord, e.position));
+                    found.push((e.doc_id, next_pos, ord, e.token_index));
                 }
                 if !found.is_empty() { survivors.insert(ci, found); }
             }
@@ -801,7 +801,7 @@ fn resolve_chains_posmap_grouped(
         // search per distinct tail list.
         if !tails.is_empty() {
             for e in first_entries.iter() {
-                let next_pos = e.position + 1;
+                let next_pos = e.token_index + 1;
                 super::profile::bump(|c| &c.n_posmap_lookups, 1);
                 let Some(ord) = posmap.ordinal_at(e.doc_id, next_pos) else { continue };
                 let ord = ord as u64;
@@ -809,9 +809,7 @@ fn resolve_chains_posmap_grouped(
                     if !list.contains(ord, termtexts) { continue; }
                     super::profile::bump(|c| &c.n_posmap_survivors, wanting.len() as u64);
                     for &ci in wanting {
-                        survivors.entry(ci).or_default().push((
-                            e.doc_id, next_pos, e.byte_from + chains[ci].first_sti as u32, ord, e.position,
-                        ));
+                        survivors.entry(ci).or_default().push((e.doc_id, next_pos, ord, e.token_index));
                     }
                 }
             }
@@ -827,40 +825,31 @@ fn resolve_chains_posmap_grouped(
                 if active.is_empty() { break; }
                 let wanted = &chain.ordinals[ord_idx];
                 let mut next = Vec::new();
-                for &(doc_id, prev_pos, bf_first, _, first_pos) in &active {
+                for &(doc_id, prev_pos, _, first_pos) in &active {
                     let next_pos = prev_pos + 1;
                     super::profile::bump(|c| &c.n_posmap_lookups, 1);
                     let Some(ord) = posmap.ordinal_at(doc_id, next_pos) else { continue };
                     let ord = ord as u64;
                     if !wanted.contains(ord, termtexts) { continue; }
                     super::profile::bump(|c| &c.n_posmap_survivors, 1);
-                    next.push((doc_id, next_pos, bf_first, ord, first_pos));
+                    next.push((doc_id, next_pos, ord, first_pos));
                 }
                 active = next;
             }
 
-            // Emit: fetch the last token's posting once per match, and let it
-            // confirm the position posmap claimed.
-            for &(doc_id, last_pos, byte_from, last_ord, position) in &active {
-                let Some(e) = resolver.resolve_doc(last_ord, doc_id)
-                    .into_iter().find(|e| e.position == last_pos)
-                else {
+            // Emit: one posting lookup per match, to let the last token's
+            // posting confirm the position posmap claimed.
+            for &(doc_id, last_pos, last_ord, position) in &active {
+                if !resolver.has_position(last_ord, doc_id, last_pos) {
                     super::profile::bump(|c| &c.n_posmap_mismatch, 1);
                     continue;
-                };
+                }
                 if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
-                results.push(MatchV3 {
-                    doc_id,
-                    position,
-                    span: last_pos.saturating_sub(position) + 1,
-                    byte_from,
-                    overlap_overflow: 0,
-                    byte_to: (e.byte_from + chain.last_consumed as u32).max(byte_from),
-                    token_end: e.byte_to,
-                    sti: chain.first_sti,
-                    ordinal: chain.head(),
-                    last_ordinal: last_ord,
-                });
+                results.push(MatchV3::unplaced(
+                    doc_id, position, last_pos.saturating_sub(position) + 1,
+                    chain.first_sti, chain.head(), last_ord,
+                    chain.first_sti, last_pos, 0, chain.last_consumed as u32,
+                ));
             }
         }
     }
@@ -932,10 +921,15 @@ pub fn resolve_word_chains_v3_wordmap_grouped(
     }
     let mut first_memo: FnvHashMap<Vec<u64>, std::rc::Rc<Vec<WordPostingEntry>>> = FnvHashMap::default();
 
-    // Active: (doc, last_word_first_pos, last_pos, byte_from_first, last_ord, last_is_word, first_pos)
-    type Active = (DocId, u32, u32, u32, u64, bool, u32);
+    // Active: (doc, last_word_first_pos, last_pos, first_off, last_ord, last_is_word, first_pos)
+    type Active = (DocId, u32, u32, u16, u64, bool, u32);
+    let tail_off = |e: &WordPostingEntry| word_tail_off(e, word_sfxpost, Some(posmap), chunk_resolver);
 
     for ((head_key, first_sti), members) in groups {
+        // The head must start inside its own token's content (META of the
+        // head ordinal), like the per-chain walker.
+        let head = multis[members[0]].head();
+        if !content_len(Some(termtexts), head).is_none_or(|c| (first_sti as u32) < c) { continue; }
         let first_entries = match first_memo.get(head_key.as_slice()) {
             Some(hit) => hit.clone(),
             None => {
@@ -943,11 +937,11 @@ pub fn resolve_word_chains_v3_wordmap_grouped(
                     let we = word_sfxpost.entries(ord as u32);
                     let entries: Vec<WordPostingEntry> = if !we.is_empty() { we } else {
                         let chunk = if let Some(f) = filter_docs {
-                            chunk_resolver.resolve_filtered(ord, f)
-                        } else { chunk_resolver.resolve(ord) };
+                            chunk_resolver.positions_filtered(ord, f)
+                        } else { chunk_resolver.positions(ord) };
                         chunk.into_iter().map(|e| WordPostingEntry {
-                            doc_id: e.doc_id, first_position: e.position, last_position: e.position,
-                            byte_from: e.byte_from, byte_to: e.byte_to,
+                            doc_id: e.doc_id, first_position: e.token_index, last_position: e.token_index,
+                            byte_from: 0, byte_to: 0, tail_off: 0,
                         }).collect()
                     };
                     let mut f = entries;
@@ -973,17 +967,15 @@ pub fn resolve_word_chains_v3_wordmap_grouped(
         // Step 1, once per head posting.
         let mut survivors: FnvHashMap<usize, Vec<Active>> = FnvHashMap::default();
         for e in first_entries.iter() {
-            if first_sti > 0 {
-                let content_end = e.byte_to;
-                if e.byte_from + first_sti as u32 >= content_end { continue; }
-            }
             let Some((p, last, ord, is_word)) = step(e.doc_id, e.last_position) else { continue };
+            let mut first_off: Option<u16> = None;
             for (list, wanting) in &tails {
                 if !list.contains(ord, Some(termtexts)) { continue; }
                 super::profile::bump(|c| &c.n_wordmap_survivors, wanting.len() as u64);
+                let off = *first_off.get_or_insert_with(|| tail_off(e) + first_sti);
                 for &ci in wanting {
                     survivors.entry(ci).or_default().push((
-                        e.doc_id, p, last, e.byte_from + first_sti as u32, ord, is_word, e.first_position,
+                        e.doc_id, p, last, off, ord, is_word, e.first_position,
                     ));
                 }
             }
@@ -997,39 +989,33 @@ pub fn resolve_word_chains_v3_wordmap_grouped(
                 if active.is_empty() { break; }
                 let wanted = &chain.ordinals[ord_idx];
                 let mut next = Vec::new();
-                for &(doc_id, _, prev_last, bf_first, _, _, first_pos) in &active {
+                for &(doc_id, _, prev_last, first_off, _, _, first_pos) in &active {
                     let Some((p, last, ord, is_word)) = step(doc_id, prev_last) else { continue };
                     if !wanted.contains(ord, Some(termtexts)) { continue; }
                     super::profile::bump(|c| &c.n_wordmap_survivors, 1);
-                    next.push((doc_id, p, last, bf_first, ord, is_word, first_pos));
+                    next.push((doc_id, p, last, first_off, ord, is_word, first_pos));
                 }
                 active = next;
             }
-            for &(doc_id, last_first, last_pos, byte_from, last_ord, last_is_word, position) in &active {
-                let (token_end, last_bf) = if last_is_word {
+            for &(doc_id, last_first, last_pos, first_off, last_ord, last_is_word, position) in &active {
+                let last_off = if last_is_word {
                     match word_sfxpost.entry_at(last_ord as u32, doc_id, last_first) {
-                        Some(e) => (e.byte_to, e.byte_from),
+                        Some(e) => tail_off(&e),
                         None => { super::profile::bump(|c| &c.n_wordmap_mismatch, 1); continue; }
                     }
                 } else {
-                    match chunk_resolver.resolve_doc(last_ord, doc_id).into_iter().find(|e| e.position == last_pos) {
-                        Some(e) => (e.byte_to, e.byte_from),
-                        None => { super::profile::bump(|c| &c.n_wordmap_mismatch, 1); continue; }
+                    if !chunk_resolver.has_position(last_ord, doc_id, last_pos) {
+                        super::profile::bump(|c| &c.n_wordmap_mismatch, 1);
+                        continue;
                     }
+                    0
                 };
                 if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
-                results.push(MatchV3 {
-                    doc_id,
-                    position,
-                    span: last_pos.saturating_sub(position) + 1,
-                    byte_from,
-                    overlap_overflow: (last_bf + chain.last_consumed as u32).saturating_sub(token_end) as u8,
-                    byte_to: (last_bf + chain.last_consumed as u32).max(byte_from).min(token_end),
-                    token_end,
-                    sti: chain.first_sti,
-                    ordinal: chain.head(),
-                    last_ordinal: last_ord,
-                });
+                results.push(MatchV3::unplaced(
+                    doc_id, position, last_pos.saturating_sub(position) + 1,
+                    chain.first_sti, chain.head(), last_ord,
+                    first_off, last_first, last_off, chain.last_consumed as u32,
+                ));
             }
         }
     }
@@ -1076,7 +1062,7 @@ fn resolve_chains_impl(
     // in full — and chains overwhelmingly share their starting ordinals. Caching
     // by that ordinal list turned 39 million first-position postings into the
     // handful of distinct lists actually involved, on `include`.
-    let mut first_memo: FnvHashMap<Vec<u64>, std::rc::Rc<Vec<PostingEntry>>> =
+    let mut first_memo: FnvHashMap<Vec<u64>, std::rc::Rc<Vec<PositionEntry>>> =
         FnvHashMap::default();
 
     // Chains that share their first list are resolved as a group (one pass over
@@ -1122,38 +1108,24 @@ fn resolve_chains_impl(
                 v
             }
         };
-        let first_entries: &[PostingEntry] = &first_entries;
+        let first_entries: &[PositionEntry] = &first_entries;
 
         if chain.ordinals.len() == 1 {
             for e in first_entries {
-                let bf = e.byte_from + chain.first_sti as u32;
                 if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
-                results.push(MatchV3 {
-                    doc_id: e.doc_id,
-                    position: e.position,
-                    span: 1,
-                    byte_from: bf,
-                    overlap_overflow: 0,
-                    byte_to: bf + chain.total_query_consumed as u32,
-                    token_end: e.byte_to,
-                    sti: chain.first_sti,
-                    ordinal: chain.head(),
-                    last_ordinal: chain.head(),
-                });
+                results.push(MatchV3::unplaced(
+                    e.doc_id, e.token_index, 1, chain.first_sti, chain.head(), chain.head(),
+                    chain.first_sti, e.token_index, 0, chain.first_sti as u32 + chain.total_query_consumed as u32,
+                ));
             }
             continue;
         }
 
         // Multi-position chain
-        // Active set: (doc_id, prev_position, byte_from_first, token_end_last,
-        //              byte_from_last, last_ord_matched)
-        // byte_from_last is what lets the emitted byte_to measure the match instead
-        // of running to the end of the tail token.
-        // (doc, prev_pos, byte_from_first, token_end_last, byte_from_last, last_ord, first_pos)
-        let mut active: Vec<(DocId, u32, u32, u32, u32, u64, u32)> = first_entries
+        // Active set: (doc, prev_pos, last_ord_matched, first_pos)
+        let mut active: Vec<(DocId, u32, u64, u32)> = first_entries
             .iter()
-            .map(|e| (e.doc_id, e.position, e.byte_from + chain.first_sti as u32,
-                      e.byte_to, e.byte_from, 0u64, e.position))
+            .map(|e| (e.doc_id, e.token_index, 0u64, e.token_index))
             .collect();
 
         for ord_idx in 1..chain.ordinals.len() {
@@ -1169,14 +1141,11 @@ fn resolve_chains_impl(
                 let wanted = &chain.ordinals[ord_idx];
                 debug_assert!(wanted.as_explicit().is_none_or(|w| w.windows(2).all(|w| w[0] < w[1])));
 
-                // Bytes are not fetched here. An intermediate position's span is
-                // never used — only the last token's reaches the emitted match —
-                // and most survivors of one position die at the next (52 702
-                // survivors for 287 matches on `__init`). The tuple keeps
-                // placeholders; the emit loop below fetches the real posting for
-                // whatever is still active, and validates posmap's claim there.
-                let mut new_active: Vec<(DocId, u32, u32, u32, u32, u64, u32)> = Vec::new();
-                for &(doc_id, prev_pos, byte_from_first, _, _, _, first_pos) in &active {
+                // Most survivors of one position die at the next (52 702
+                // survivors for 287 matches on `__init`); the emit loop below
+                // validates posmap's claim on whatever is still active.
+                let mut new_active: Vec<(DocId, u32, u64, u32)> = Vec::new();
+                for &(doc_id, prev_pos, _, first_pos) in &active {
                     let next_pos = prev_pos + 1;
                     super::profile::bump(|c| &c.n_posmap_lookups, 1);
                     let Some(ord) = posmap.ordinal_at(doc_id, next_pos) else { continue };
@@ -1186,7 +1155,7 @@ fn resolve_chains_impl(
                         eprintln!("[resolve] doc={doc_id} pos={next_pos} ord={ord} wanted={wanted:?}");
                     }
                     super::profile::bump(|c| &c.n_posmap_survivors, 1);
-                    new_active.push((doc_id, next_pos, byte_from_first, 0, 0, ord, first_pos));
+                    new_active.push((doc_id, next_pos, ord, first_pos));
                 }
                 active = new_active;
                 continue;
@@ -1202,9 +1171,9 @@ fn resolve_chains_impl(
             // 1.8 million that were actually paired.
             let active_docs: HashSet<DocId> =
                 active.iter().map(|&(doc_id, ..)| doc_id).collect();
-            let mut entries: Vec<(PostingEntry, u64)> = Vec::new();
+            let mut entries: Vec<(PositionEntry, u64)> = Vec::new();
             for &ord in chain.ordinals[ord_idx].explicit().iter() {
-                for e in resolver.resolve_filtered(ord, &active_docs) {
+                for e in resolver.positions_filtered(ord, &active_docs) {
                     entries.push((e, ord));
                 }
             }
@@ -1224,9 +1193,9 @@ fn resolve_chains_impl(
                 by_doc.entry(e.doc_id).or_default().push(i as u32);
             }
 
-            let mut new_active: Vec<(DocId, u32, u32, u32, u32, u64, u32)> = Vec::new();
+            let mut new_active: Vec<(DocId, u32, u64, u32)> = Vec::new();
 
-            for &(doc_id, prev_pos, byte_from_first, _byte_to_prev, _, _, first_pos) in &active {
+            for &(doc_id, prev_pos, _, first_pos) in &active {
                 let Some(idxs) = by_doc.get(&doc_id) else { continue };
                 for &i in idxs {
                     super::profile::bump(|c| &c.n_chain_pairs, 1);
@@ -1234,25 +1203,24 @@ fn resolve_chains_impl(
 
                     let valid = match &adjacency {
                         AdjacencyMode::Strict | AdjacencyMode::StrictPosmap { .. } => {
-                            e.position == prev_pos + 1
+                            e.token_index == prev_pos + 1
                         }
                         AdjacencyMode::Relaxed { posmap, termtexts } => {
-                            if e.position <= prev_pos {
+                            if e.token_index <= prev_pos {
                                 false
-                            } else if e.position == prev_pos + 1 {
+                            } else if e.token_index == prev_pos + 1 {
                                 true // directly adjacent, always OK
                             } else {
                                 intermediates_are_pure_sep(
                                     posmap, termtexts,
-                                    doc_id, prev_pos + 1, e.position,
+                                    doc_id, prev_pos + 1, e.token_index,
                                 )
                             }
                         }
                     };
 
                     if valid {
-                        new_active.push((doc_id, e.position, byte_from_first,
-                                         e.byte_to, e.byte_from, *ord, first_pos));
+                        new_active.push((doc_id, e.token_index, *ord, first_pos));
                         break;
                     }
                 }
@@ -1262,38 +1230,22 @@ fn resolve_chains_impl(
         }
 
         // Emit matches
-        for &(doc_id, last_pos, byte_from, token_end, last_bf, last_ord, position) in &active {
-            // Under posmap resolution the last token's bytes are still unknown
-            // (see above). Fetch its posting now — once per emitted match — and
-            // let it confirm the position posmap claimed.
-            let (token_end, last_bf) = if matches!(adjacency, AdjacencyMode::StrictPosmap { .. })
+        for &(doc_id, last_pos, last_ord, position) in &active {
+            // Under posmap resolution the last position is posmap's claim: let
+            // the last token's posting confirm it — once per emitted match.
+            if matches!(adjacency, AdjacencyMode::StrictPosmap { .. })
                 && chain.ordinals.len() > 1
+                && !resolver.has_position(last_ord, doc_id, last_pos)
             {
-                match resolver.resolve_doc(last_ord, doc_id)
-                    .into_iter().find(|e| e.position == last_pos)
-                {
-                    Some(e) => (e.byte_to, e.byte_from),
-                    None => {
-                        super::profile::bump(|c| &c.n_posmap_mismatch, 1);
-                        continue;
-                    }
-                }
-            } else {
-                (token_end, last_bf)
-            };
+                super::profile::bump(|c| &c.n_posmap_mismatch, 1);
+                continue;
+            }
             if results.len() >= max_matches_per_segment() { note_truncated(results.len()); return results; }
-            results.push(MatchV3 {
-                doc_id,
-                position,
-                span: last_pos.saturating_sub(position) + 1,
-                byte_from,
-                overlap_overflow: 0,
-                byte_to: (last_bf + chain.last_consumed as u32).max(byte_from),
-                token_end,
-                sti: chain.first_sti,
-                ordinal: chain.head(),
-                last_ordinal: last_ord,
-            });
+            results.push(MatchV3::unplaced(
+                doc_id, position, last_pos.saturating_sub(position) + 1,
+                chain.first_sti, chain.head(), last_ord,
+                chain.first_sti, last_pos, 0, chain.last_consumed as u32,
+            ));
         }
     }
 
@@ -1337,7 +1289,7 @@ fn resolve_alternatives(
     resolver: &dyn PostingResolver,
     ordinals: &[u64],
     filter_docs: Option<&dyn DocFilter>,
-) -> Vec<PostingEntry> {
+) -> Vec<PositionEntry> {
     let mut entries = Vec::new();
     for &ord in ordinals {
         entries.extend(resolve_ordinal(resolver, ord, filter_docs));
@@ -1350,11 +1302,11 @@ fn resolve_ordinal(
     resolver: &dyn PostingResolver,
     ordinal: u64,
     filter_docs: Option<&dyn DocFilter>,
-) -> Vec<PostingEntry> {
+) -> Vec<PositionEntry> {
     if let Some(filter) = filter_docs {
-        resolver.resolve_filtered(ordinal, filter)
+        resolver.positions_filtered(ordinal, filter)
     } else {
-        resolver.resolve(ordinal)
+        resolver.positions(ordinal)
     }
 }
 
@@ -1401,7 +1353,10 @@ mod tests {
         }
     }
 
+    use crate::query::posting_resolver::PostingEntry;
+
     impl PostingResolver for MockResolver {
+        fn has_byte_spans(&self) -> bool { self.data.has_byte_spans() }
         fn resolve(&self, ordinal: u64) -> Vec<PostingEntry> {
             let entries = self.data.entries(ordinal as u32);
             entries.into_iter().map(|e| PostingEntry {
@@ -1444,10 +1399,10 @@ mod tests {
 
         // Build sfxpost
         let num_terms = data.num_content_ords;
-        let mut post_writer = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::new(num_terms);
+        let mut post_writer = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::positions_only(num_terms);
         for (content_ord, postings) in data.content_postings.iter().enumerate() {
-            for &(doc_id, ti, bf, bt) in postings {
-                post_writer.add_entry(content_ord as u32, doc_id, ti, bf, bt);
+            for &(doc_id, ti) in postings {
+                post_writer.add_position(content_ord as u32, doc_id, ti);
             }
         }
         let sfxpost_data = post_writer.finish();

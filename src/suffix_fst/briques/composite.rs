@@ -76,6 +76,7 @@ pub fn find_literal_v3(
     if ctx.has_word_pipeline() {
         let single_word = resolve::resolve_single_word_v3(
             &candidates, ctx.require_word_sfxpost(), ctx.filter_docs, query_len,
+            ctx.posmap.as_ref(), ctx.termtexts.as_ref(), ctx.resolver,
         );
         ctx.trace_msg(&format!("single_word matches={}", single_word.len()));
         results.extend(single_word);
@@ -372,8 +373,8 @@ fn second_token_anchored_v3(
                     pm.ordinal_at(m.doc_id, m.position - 1)
                         .map(|o| format!("{:?} own={:?}", tt.text(o), tt.meta(o).map(|mm| mm.own_len)))
                 } else { None };
-                eprintln!("[anch]   tail doc={} pos={} span={} byte=[{}..{}] prev={:?}",
-                    m.doc_id, m.position, m.span, m.byte_from, m.byte_to, prev);
+                eprintln!("[anch]   tail doc={} pos={} span={} first_off={} last_consumed={} prev={:?}",
+                    m.doc_id, m.position, m.span, m.first_off, m.last_consumed, prev);
             }
             if m.position == 0 { continue; }
             let prev_pos = m.position - 1;
@@ -386,21 +387,11 @@ fn second_token_anchored_v3(
             let own_text = text[..own].to_lowercase();
             if own_text.len() < h || !own_text.ends_with(head) { continue; }
             let sti = own - h;
-            let Some(p) = ctx.resolver.resolve_doc(ord as u64, m.doc_id)
-                .into_iter().find(|p| p.position == prev_pos)
-            else { continue };
-            out.push(MatchV3 {
-                doc_id: m.doc_id,
-                position: prev_pos,
-                span: m.span + 1,
-                byte_from: p.byte_from + sti as u32,
-                overlap_overflow: 0,
-                byte_to: m.byte_to,
-                token_end: m.token_end,
-                sti: sti as u16,
-                ordinal: ord as u64,
-                last_ordinal: m.last_ordinal,
-            });
+            if !ctx.resolver.has_position(ord as u64, m.doc_id, prev_pos) { continue; }
+            out.push(MatchV3::unplaced(
+                m.doc_id, prev_pos, m.span + 1, sti as u16, ord as u64, m.last_ordinal,
+                sti as u16, m.last_start_pos, m.last_off, m.last_consumed,
+            ));
         }
         _t.stop(|c| &c.ns_anch_back);
     }
@@ -455,7 +446,7 @@ pub fn find_multi_token_v3(
 
         // Check backward: tokens before pivot must be at consecutive positions
         let mut valid = true;
-        let mut byte_from = pivot_match.byte_from;
+        let mut first: &MatchV3 = pivot_match;
 
         for step in (0..pivot_idx).rev() {
             let expected_pos = pivot_pos - (pivot_idx - step) as u32;
@@ -470,7 +461,7 @@ pub fn find_multi_token_v3(
                 .iter()
                 .find(|m| m.doc_id == doc_id && m.position == expected_pos)
             {
-                byte_from = m.byte_from;
+                first = m;
             }
         }
 
@@ -479,8 +470,7 @@ pub fn find_multi_token_v3(
         }
 
         // Check forward: tokens after pivot must be at consecutive positions
-        let mut byte_to = pivot_match.byte_to;
-        let mut token_end = pivot_match.token_end;
+        let mut last: &MatchV3 = pivot_match;
 
         for step in (pivot_idx + 1)..query_tokens.len() {
             let expected_pos = pivot_pos + (step - pivot_idx) as u32;
@@ -495,24 +485,16 @@ pub fn find_multi_token_v3(
                 .iter()
                 .find(|m| m.doc_id == doc_id && m.position == expected_pos)
             {
-                byte_to = m.byte_to;
-                token_end = m.token_end;
+                last = m;
             }
         }
 
         if valid {
-            results.push(MatchV3 {
-                doc_id,
-                position: pivot_pos - pivot_idx as u32,
-                span: query_tokens.len() as u32,
-                byte_from,
-                overlap_overflow: 0,
-                byte_to,
-                token_end,
-                sti: 0,
-                ordinal: pivot_match.ordinal,
-                last_ordinal: pivot_match.ordinal,
-            });
+            results.push(MatchV3::unplaced(
+                doc_id, pivot_pos - pivot_idx as u32, query_tokens.len() as u32,
+                first.sti, first.ordinal, last.last_ordinal,
+                first.first_off, last.last_start_pos, last.last_off, last.last_consumed,
+            ));
         }
     }
 
@@ -537,10 +519,10 @@ pub struct TrigramHit {
     /// Last chunk position: equal to `position` for a chunk hit, the word's
     /// last chunk for a hit in the word-stripped partition.
     pub last_position: u32,
-    /// Start byte offset of the hit in the original text.
-    pub byte_from: u32,
-    /// End byte offset (exclusive) of the hit in the original text.
-    pub byte_to: u32,
+    /// Bytes from the start of the chunk at `position` to the hit
+    /// (`MatchV3::first_off`): with the position, what tells two hits of
+    /// one occurrence apart from the same occurrence seen twice.
+    pub first_off: u16,
 }
 
 /// Generate n-grams from query text with their position in the query.
@@ -687,7 +669,7 @@ pub fn resolve_all_trigrams(
 
     let has_wsp = ctx.has_word_pipeline();
     let mut all_hits = Vec::new();
-    let mut seen: HashSet<(DocId, u32)> = HashSet::new();
+    let mut seen: HashSet<(DocId, u32, u16)> = HashSet::new();
 
     for &(gram_idx, _) in &selectivity {
         let cands = fst_walk::fst_candidates_v3(ctx.reader, &ngrams[gram_idx], false, strict_separators);
@@ -700,26 +682,32 @@ pub fn resolve_all_trigrams(
         // inside a word. Keep those; drop the echo before it is hashed,
         // sorted and regrouped downstream (10.5 M of 11 M word hits on
         // `inclde`, 50k docs).
+        // The word partition repeats most chunk hits: a word of one chunk
+        // reports the same (doc, position, offset) as its chunk. Keep the
+        // rest — the n-grams straddling a chunk boundary inside a longer
+        // word, whose word position differs from the chunk's — and let the
+        // regions absorb what is left.
         let mut word_matches = if has_wsp {
-            resolve::resolve_single_word_v3(&cands, ctx.require_word_sfxpost(), ctx.filter_docs, gram_len)
+            resolve::resolve_single_word_v3(&cands, ctx.require_word_sfxpost(), ctx.filter_docs, gram_len,
+                                            ctx.posmap.as_ref(), ctx.termtexts.as_ref(), ctx.resolver)
         } else { Vec::new() };
         if !word_matches.is_empty() {
             seen.clear();
-            seen.extend(chunk_matches.iter().map(|m| (m.doc_id, m.byte_from)));
-            word_matches.retain(|m| !seen.contains(&(m.doc_id, m.byte_from)));
+            seen.extend(chunk_matches.iter().map(|m| (m.doc_id, m.position, m.first_off)));
+            word_matches.retain(|m| !seen.contains(&(m.doc_id, m.position, m.first_off)));
         }
 
         if std::env::var("V3_DIAG_FUZZY").is_ok() {
             eprintln!("[fz] gram {:?}: {} chunk hits, {} word hits: {:?}", ngrams[gram_idx],
                 chunk_matches.len(), word_matches.len(),
                 chunk_matches.iter().chain(word_matches.iter()).take(8)
-                    .map(|m| (m.doc_id, m.position, m.byte_from)).collect::<Vec<_>>());
+                    .map(|m| (m.doc_id, m.position, m.first_off)).collect::<Vec<_>>());
         }
         for m in chunk_matches.iter().chain(word_matches.iter()) {
             all_hits.push(TrigramHit {
                 tri_idx: gram_idx, doc_id: m.doc_id, position: m.position,
                 last_position: m.position + m.span.saturating_sub(1),
-                byte_from: m.byte_from, byte_to: m.byte_to,
+                first_off: m.first_off,
             });
         }
     }
@@ -835,8 +823,7 @@ fn resolve_pieces(
                 doc_id: m.doc_id,
                 position: m.position,
                 last_position: m.position + m.span.saturating_sub(1),
-                byte_from: m.byte_from,
-                byte_to: m.byte_to,
+                first_off: m.first_off,
             });
         }
     }
@@ -856,23 +843,23 @@ pub struct TrigramChain {
     pub doc_id: DocId,
     /// Trigram indices in chain order (matching query order).
     pub trigram_indices: Vec<usize>,
-    /// Byte range of the chain.
-    pub byte_from: u32,
-    /// End byte offset (exclusive) of the chain.
-    pub byte_to: u32,
-    /// Token positions of the chain ends. Byte offsets alone are not enough to
-    /// rebuild the source text: posmap is keyed by position, not by byte.
+    /// Token positions of the chain ends: where the window is rebuilt.
     pub first_pos: u32,
     /// Token position of the last hit in the chain.
     pub last_pos: u32,
 }
 
-/// How many raw bytes of separators a chain step may span beyond the query gap.
+/// How many positions of separators a chain step may span beyond the query gap.
 ///
 /// Only meaningful because the query is compared in stripped space while hits are
 /// in raw space. Loose retrieval is safe here: `verify_candidates` re-checks every
-/// surviving document against the real text.
-const MAX_SEPARATOR_SLACK: i32 = 32;
+/// surviving document against the real text. The slack used to be 32 **bytes**;
+/// separators fill the word's last chunk then spill into chunks of eight, so 32
+/// bytes of them never span more than five positions — the same allowance, in
+/// the unit the hits now carry. Kept at 32 positions, the regions merged four
+/// times as much text and the alignment paid for it (fuzzy d=2 on 30 000
+/// files: 714 000 regions → 182 000, DP 515 → 903 ms).
+const MAX_SEPARATOR_SLACK: i32 = 5;
 
 /// Group each document's n-gram hits into regions — one chain per region.
 ///
@@ -886,14 +873,20 @@ const MAX_SEPARATOR_SLACK: i32 = 32;
 ///
 /// `trigram_indices` holds the DISTINCT query n-grams seen in the region, in
 /// query order, so the pigeonhole threshold keeps its meaning. Very long
-/// regions (repetitive text) are cut at `MAX_REGION_BYTES`; the verification
-/// window's margin covers the cut.
+/// regions (repetitive text) are cut at `MAX_REGION_POSITIONS`; the
+/// verification window's margin covers the cut.
+///
+/// Distances are in **positions**, the postings carrying no byte span. A
+/// position holds at least one byte, so two hits within `g` bytes are
+/// within `g` positions: the same numeric bounds group a superset of what
+/// they grouped in bytes, and the verification on the rebuilt window is
+/// what decides anyway.
 pub fn build_trigram_chains(
     hits: &[TrigramHit],
     query_positions: &[usize],
     distance: u8,
 ) -> Vec<TrigramChain> {
-    const MAX_REGION_BYTES: u32 = 4096;
+    const MAX_REGION_POSITIONS: u32 = 4096;
     let query_len = query_positions.iter().copied().max().unwrap_or(0) as i64 + 3;
     // Two hits of one occurrence are at most a query length apart, plus the
     // edits and the separators relaxed mode skips.
@@ -908,27 +901,24 @@ pub fn build_trigram_chains(
     let mut chains = Vec::new();
     for (&doc_id, doc_hits) in &hits_by_doc {
         let mut sorted: Vec<&TrigramHit> = doc_hits.to_vec();
-        sorted.sort_by_key(|h| (h.byte_from, h.tri_idx));
+        sorted.sort_by_key(|h| (h.position, h.first_off, h.tri_idx));
 
         let mut i = 0;
         while i < sorted.len() {
             let first = sorted[i];
             let mut last = first;
             let mut idx: Vec<usize> = vec![first.tri_idx];
-            // Positions are tracked as min/max, not "first/last hit by byte":
-            // a word-partition hit carries its word's FIRST chunk position, so
-            // the last hit by byte can sit at an earlier position than a
-            // chunk hit before it — and the window then stopped short of the
-            // occurrence (`rePrun|ing` for `retrun`).
+            // A word-partition hit carries its word's FIRST chunk position,
+            // and its last chunk as `last_position`: the region's end is the
+            // max of the last positions seen, not the last hit's.
             let mut first_pos = first.position;
             let mut last_pos = first.last_position;
             let mut j = i + 1;
             while j < sorted.len() {
                 let h = sorted[j];
-                if h.byte_from as i64 - last.byte_from as i64 > max_gap { break; }
-                if h.byte_from - first.byte_from > MAX_REGION_BYTES { break; }
+                if h.position as i64 - last.position as i64 > max_gap { break; }
+                if h.position - first.position > MAX_REGION_POSITIONS { break; }
                 idx.push(h.tri_idx);
-                first_pos = first_pos.min(h.position);
                 last_pos = last_pos.max(h.last_position);
                 last = h;
                 j += 1;
@@ -938,8 +928,6 @@ pub fn build_trigram_chains(
             chains.push(TrigramChain {
                 doc_id,
                 trigram_indices: idx,
-                byte_from: first.byte_from,
-                byte_to: last.byte_to.max(first.byte_from),
                 first_pos,
                 last_pos: last_pos.max(first_pos),
             });
@@ -1159,7 +1147,10 @@ pub(super) fn rebuild_window_opts(
 // ─── Brique 4: filter_by_chain_threshold ────────────────────────────────
 
 /// Filter chains by minimum length (pigeonhole threshold).
-/// Returns accepted doc_ids with their highlight spans and coverage scores.
+/// Returns accepted doc_ids and their coverage scores. The highlights come
+/// out empty: a region says where to look, `verify_candidates` maps every
+/// occurrence it finds back to source bytes — and without posmap and
+/// termtexts there is nothing to derive a span from.
 pub fn filter_by_chain_threshold(
     chains: &[TrigramChain],
     threshold: usize,
@@ -1167,19 +1158,17 @@ pub fn filter_by_chain_threshold(
     max_doc: DocId,
 ) -> (BitSet, Vec<(DocId, usize, usize)>, Vec<(DocId, f32)>) {
     let mut bitset = BitSet::with_max_value(max_doc);
-    let mut highlights = Vec::new();
     let mut coverage = Vec::new();
 
     for chain in chains {
         if chain.trigram_indices.len() >= threshold {
             bitset.insert(chain.doc_id);
-            highlights.push((chain.doc_id, chain.byte_from as usize, chain.byte_to as usize));
             let miss_count = total_trigrams - chain.trigram_indices.len();
             coverage.push((chain.doc_id, -(miss_count as f32)));
         }
     }
 
-    (bitset, highlights, coverage)
+    (bitset, Vec::new(), coverage)
 }
 
 // ─── resolve_trigrams_v3 (composed from briques) ────────────────────────
@@ -1508,10 +1497,10 @@ mod tests {
         let (fst_data, parent_data) = builder.build().unwrap();
 
         let num_terms = data.num_content_ords;
-        let mut post_writer = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::new(num_terms);
+        let mut post_writer = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::positions_only(num_terms);
         for (content_ord, postings) in data.content_postings.iter().enumerate() {
-            for &(doc_id, ti, bf, bt) in postings {
-                post_writer.add_entry(content_ord as u32, doc_id, ti, bf, bt);
+            for &(doc_id, ti) in postings {
+                post_writer.add_position(content_ord as u32, doc_id, ti);
             }
         }
         let sfxpost = post_writer.finish();

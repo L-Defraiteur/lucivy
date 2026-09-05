@@ -227,7 +227,8 @@ impl<'a> LocalNode<BriquesContext<'a>> for ResolveSingleWordNode {
         let candidates = ctx.input::<Vec<FstCandidateV3>>("candidates")
             .ok_or("missing candidates input")?;
         let wsp = svc.require_word_sfxpost();
-        let matches = resolve::resolve_single_word_v3(candidates, wsp, svc.filter_docs, self.query_len);
+        let matches = resolve::resolve_single_word_v3(candidates, wsp, svc.filter_docs, self.query_len,
+                                                      svc.posmap.as_ref(), svc.termtexts.as_ref(), svc.resolver);
         ctx.metric("matches", matches.len() as f64);
         if ctx.explain() { ctx.annotate_output("matches", format_matches(&matches)); }
         ctx.set_output("matches", matches);

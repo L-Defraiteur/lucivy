@@ -208,12 +208,25 @@ entre shards) ; relancé seul il passe.
   tests ignorés, `LUCIVY_POSTINGS_DIR=<index d'un shard>`,
   `LUCIVY_POSTINGS_MAX_FILES=N` pour un échantillon) :
   `postings_without_byte_spans` ré-encode chaque `.sfxpost` /
-  `.word_sfxpost` avec et sans `byte_from`/`byte_to` (noyau : 842 Mo,
-  37 % des postings, 15 % de l'index) ; `byte_spans_are_derivable`
-  compare entrée par entrée les spans stockés à ce que donnent `.posmap`
-  + la méta des textes (0 désaccord attendu ; c'est ce test qui a trouvé
-  les trois queues de mots chinois décalées, [04](04-progression-et-a-faire.md) §2).
+  `.word_sfxpost` dans son layout et dans le layout à positions seules
+  (`SFP5` / `WSP5`) — sur un index d'avant le 5 septembre au soir, la
+  différence est ce que les spans pesaient (noyau : 842 Mo, 37 % des
+  postings, 15 % de l'index) ; sur un index d'après, les deux tailles se
+  confondent et l'écrivain est montré reproduire le fichier.
+  `byte_spans_are_derivable` recalcule l'offset de chaque position par
+  somme cumulée indépendante et vérifie : le `byte_at` du `PMP4` à chaque
+  position (`posmap_bad`), **chaque posting de mot contre les chunks sous
+  lui** — le texte de son ordinal, mot ou queue, doit être ce que les
+  chunks tiennent à partir de `tail_off` (`word_text_bad`, c'est ce qui
+  contrôle les entrées de queue sans span stocké) — et, sur un segment
+  encore à spans, les spans stockés contre la somme et la méta comme avant
+  (c'est ce test qui a trouvé les trois queues de mots chinois décalées,
+  [04](04-progression-et-a-faire.md) §2). 0 partout attendu.
   Lancer : `cargo test --release --lib <nom> -- --ignored --nocapture`.
+- **Les vérités `contains` et `coherence`** ne sont **pas** ignorées :
+  `cargo test --release -p lucivy-core --test test_sfx_v3_ground_truth
+  v3_ground_truth_contains -- --exact --nocapture` (sans `--ignored`, qui
+  les filtre : « running 0 tests », vu le 5 septembre au soir).
 - **Une construction qui compacte beaucoup**, pour la vérité de bout en
   bout : `V3_SFX_VERSION=4 V3_COMMIT_EVERY=500 LUCIVY_DICT_MAX_GENERATIONS=3`
   devant le harnais sur le corpus de référence (5 000 fichiers sans
@@ -315,7 +328,13 @@ nom / compte / ms par colonne — à réécrire au besoin).
 format courant, 1,6 Go), `idx30k-dict` (GMAP), `idx30k-dict2` (**GMP2**,
 1,3 Go), `idx90k-v8` (v3 au format courant, 7,3 Go), `idx90k-dict`
 (GMAP), `idx90k-dict2` (**GMP2**, 5,6 Go, générations 10 et 11 — le
-banc de compaction lie ses `dict-*` en dur), `idx30k-dict3` (30 000,
+banc de compaction lie ses `dict-*` en dur), `idx10k-v3-pmp4` /
+`idx10k-dict-pmp4` (10 000, posmap `PMP4`, postings encore à spans —
+l'étape 1), `idx10k-v3-sfp5` / `idx10k-dict-sfp5` (**la référence 10 000
+du format courant** : `SFP5`, `WSP5`, `PMP4`), `idx30k-dict4` (PMP4 +
+SFP4), `idx30k-dict5` et `idx30k-v3-sfp5` (**30 000 au format courant**,
+les A/B de temps), `idx90k-dict-sfp5` (noyau au format courant),
+`idx30k-dict3` (30 000,
 dictionnaire, **collecteur corrigé** : la référence pour
 `byte_spans_are_derivable`, 0 désaccord), `idx10k-dict-compact` (5 000
 fichiers, commit tous les 500, six compactions), les scripts `run-ab-*.sh`,
@@ -378,6 +397,18 @@ non compacté) et `~/lucivy_bench/lucivy_bench_sharding/single` (11 Go,
 - `for p in $(pgrep -f motif); do kill $p; done` tue aussi le shell qui
   porte `motif` dans sa ligne de commande (deux fois le 5 septembre, code
   144) : filtrer sur le nom du programme, ou ne pas tuer.
+- Pour un dernier jeton qui est un **mot**, son texte commence à son
+  **premier** chunk : `last_position` (fin du span, l'adjacence) n'est pas
+  le début de ses octets. Le placement des spans l'a appris par la vérité
+  (`mutex lock` relâché : `[5441..5456]` pour `[5441..5451]`), pas par les
+  1 460 tests unitaires — la vérité terrain sur corpus reste le juge.
+- Un seuil converti d'octets en positions garde la même valeur pour rester
+  un sur-ensemble (une position ≥ 1 octet), mais un **jeu** de séparateurs
+  en octets ne se convertit pas ainsi : 32 octets de séparateurs tiennent
+  dans 5 positions, et 32 positions regroupaient quatre fois trop de texte
+  (fuzzy d2 : DP 515 → 903 ms).
+- `--ignored` filtre les tests non ignorés : `v3_ground_truth_contains` et
+  `_coherence` se lancent sans.
 - Le terminal de la démo accepte au prompt `index mdn` / `index kernel`
   (corpus servis à côté de la page, `playground/corpus-*.tar.gz`, ignorés
   par git), `index github owner/repo[@branch]` (par le proxy, refusé

@@ -157,10 +157,11 @@ impl Node for BuildSfxPostV3Node {
             .ok_or("wrong type")?;
 
         let num_terms = data.num_content_ords;
-        let mut writer = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::new(num_terms);
+        // `SFP5`: positions only, the spans derive from `.posmap`.
+        let mut writer = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::positions_only(num_terms);
         for (content_ord, postings) in data.content_postings.iter().enumerate() {
-            for &(doc_id, ti, bf, bt) in postings {
-                writer.add_entry(content_ord as u32, doc_id, ti, bf, bt);
+            for &(doc_id, ti) in postings {
+                writer.add_position(content_ord as u32, doc_id, ti);
             }
         }
         let sfxpost_data = writer.finish();
@@ -285,6 +286,9 @@ pub struct SegmentSfxV3<'a> {
     pub sfxpost: Option<&'a [u8]>,
     pub word_sfxpost: Option<&'a [u8]>,
     pub sibling_v3: Option<&'a [u8]>,
+    /// The segment's `.posmap`: read only to convert the word postings of a
+    /// segment written with byte spans (pre-`WSP5`) to tail offsets.
+    pub posmap: Option<&'a [u8]>,
     /// old_doc_id → new_doc_id. Absent key = deleted document.
     pub doc_remap: &'a std::collections::HashMap<u32, u32>,
 }
@@ -368,7 +372,7 @@ pub fn merge_segments_v3(
         h.finish()
     }
 
-    let mut chunk_post: Vec<(u32, u32, u32, u32, u32)> = Vec::new();
+    let mut chunk_post: Vec<(u32, u32, u32)> = Vec::new();
     let mut word_post: Vec<(u32, crate::suffix_fst::word_sfxpost::WordPostingEntry)> = Vec::new();
     let mut sibling_pairs: Vec<(u32, u32)> = Vec::new();
     let mut wpm_writer = crate::suffix_fst::word_pos_map::WordPosMapWriter::new();
@@ -379,6 +383,12 @@ pub fn merge_segments_v3(
         let sfxpost = seg.sfxpost.and_then(SfxPostReaderV2::open_slice);
         let wsp = seg.word_sfxpost
             .and_then(crate::suffix_fst::word_sfxpost::WordSfxPostReader::open);
+        // A source written with byte spans: its tail entries need their
+        // offset within the chunk, read once per entry from its own files.
+        let spanned_posmap = match &wsp {
+            Some(w) if w.has_byte_spans() => seg.posmap.and_then(crate::suffix_fst::posmap::PosMapReader::open),
+            _ => None,
+        };
 
         let mut seg_ord_to_global: Vec<u32> = Vec::with_capacity(tt.num_terms() as usize);
         // The doc remap is consulted once per posting (millions per
@@ -450,11 +460,11 @@ pub fn merge_segments_v3(
             };
             seg_ord_to_global.push(global_ord);
 
-            // Chunk postings (.sfxpost) — chunk-level coordinates.
+            // Chunk postings (.sfxpost) — positions; no span to carry.
             if let Some(r) = &sfxpost {
-                r.for_each_entry(old_ord, |doc_id, ti, bf, bt| {
+                r.for_each_position(old_ord, |doc_id, ti| {
                     if let Some(doc) = remap_doc(doc_id) {
-                        chunk_post.push((global_ord, doc, ti, bf, bt));
+                        chunk_post.push((global_ord, doc, ti));
                     }
                 });
             }
@@ -462,8 +472,11 @@ pub fn merge_segments_v3(
             if let Some(r) = &wsp {
                 r.for_each_entry(old_ord, |e| {
                     if let Some(doc) = remap_doc(e.doc_id) {
+                        let tail_off = if spanned_posmap.is_some() {
+                            crate::suffix_fst::word_sfxpost::tail_off_from_spans(&e, spanned_posmap.as_ref(), sfxpost.as_ref())
+                        } else { e.tail_off };
                         word_post.push((global_ord, crate::suffix_fst::word_sfxpost::WordPostingEntry {
-                            doc_id: doc, ..e
+                            doc_id: doc, tail_off, ..e
                         }));
                     }
                 });
@@ -545,8 +558,8 @@ pub fn merge_segments_v3(
         (out, starts)
     }
     let (chunk_post, chunk_starts) = {
-        let tagged: Vec<(u32, (u32, u32, u32, u32))> = chunk_post.into_iter()
-            .map(|(o, d, t, f, b)| (o, (d, t, f, b))).collect();
+        let tagged: Vec<(u32, (u32, u32))> = chunk_post.into_iter()
+            .map(|(o, d, t)| (o, (d, t))).collect();
         bucket_by_ordinal(tagged, num_tokens)
     };
     let (word_post, word_starts) = bucket_by_ordinal(word_post, num_tokens);
@@ -580,7 +593,7 @@ pub fn merge_segments_v3(
     }
     let mut tokens: Vec<String> = Vec::with_capacity(num_tokens);
     let mut own_lens: Vec<u16> = Vec::with_capacity(num_tokens);
-    let mut content_postings: Vec<Vec<(u32, u32, u32, u32)>> = Vec::with_capacity(num_tokens);
+    let mut content_postings: Vec<Vec<(u32, u32)>> = Vec::with_capacity(num_tokens);
     let mut wsp_writer = crate::suffix_fst::word_sfxpost::WordSfxPostWriter::new(num_tokens);
     let mut word_stripped: Vec<WordStrippedEntry> = Vec::new();
 
@@ -591,7 +604,7 @@ pub fn merge_segments_v3(
         own_lens.push(token_meta[i].own_len);
 
         let (cs, ce) = (chunk_starts[i] as usize, chunk_starts[i + 1] as usize);
-        let mut p: Vec<(u32, u32, u32, u32)> = chunk_post[cs..ce].iter().map(|&(_, e)| e).collect();
+        let mut p: Vec<(u32, u32)> = chunk_post[cs..ce].iter().map(|&(_, e)| e).collect();
         p.dedup();
         content_postings.push(p);
 
@@ -826,6 +839,7 @@ mod tests {
             sfxpost: out.sfxpost.as_deref(),
             word_sfxpost: f("word_sfxpost"),
             sibling_v3: f("sibling_v3"),
+            posmap: f("posmap"),
             doc_remap: remap,
         }
     }
@@ -955,6 +969,9 @@ pub struct SegmentSfxDict<'a> {
     pub sfxpost: Option<&'a [u8]>,
     pub word_sfxpost: Option<&'a [u8]>,
     pub sibling_v3: Option<&'a [u8]>,
+    /// The segment's `.posmap`, for the tail offsets of a source written
+    /// with byte spans (see `SegmentSfxV3`).
+    pub posmap: Option<&'a [u8]>,
     /// old_doc_id → new_doc_id. Absent key = deleted document.
     pub doc_remap: &'a std::collections::HashMap<u32, u32>,
 }
@@ -990,7 +1007,7 @@ pub fn merge_segments_dict(
     let num = union.len();
     let new_local = |global: u32| -> u32 { union.binary_search(&global).unwrap() as u32 };
 
-    let mut content_postings: Vec<Vec<(u32, u32, u32, u32)>> = vec![Vec::new(); num];
+    let mut content_postings: Vec<Vec<(u32, u32)>> = vec![Vec::new(); num];
     let mut word_writer = WordSfxPostWriter::new(num);
     let mut wpm_writer = crate::suffix_fst::word_pos_map::WordPosMapWriter::new();
     let mut sibling_writer = crate::suffix_fst::sibling_table::SiblingTableWriter::new(num as u32);
@@ -999,23 +1016,30 @@ pub fn merge_segments_dict(
     for (seg, gmap) in segments.iter().zip(&gmaps) {
         let remap: Vec<u32> = gmap.iter().map(new_local).collect();
         let remap_doc = |d: u32| seg.doc_remap.get(&d).copied();
-        if let Some(r) = seg.sfxpost.and_then(SfxPostReaderV2::open_slice) {
+        let sfxpost = seg.sfxpost.and_then(SfxPostReaderV2::open_slice);
+        if let Some(r) = &sfxpost {
             for old in 0..r.num_terms().min(remap.len() as u32) {
                 let new = remap[old as usize];
-                r.for_each_entry(old, |doc, ti, bf, bt| {
+                r.for_each_position(old, |doc, ti| {
                     if let Some(d) = remap_doc(doc) {
-                        content_postings[new as usize].push((d, ti, bf, bt));
+                        content_postings[new as usize].push((d, ti));
                         num_docs = num_docs.max(d + 1);
                     }
                 });
             }
         }
         if let Some(r) = seg.word_sfxpost.and_then(WordSfxPostReader::open) {
+            let spanned_posmap = if r.has_byte_spans() {
+                seg.posmap.and_then(crate::suffix_fst::posmap::PosMapReader::open)
+            } else { None };
             for old in 0..r.num_ordinals().min(remap.len() as u32) {
                 let new = remap[old as usize];
                 r.for_each_entry(old, |e| {
                     if let Some(d) = remap_doc(e.doc_id) {
-                        word_writer.add(new, WordPostingEntry { doc_id: d, ..e });
+                        let tail_off = if spanned_posmap.is_some() {
+                            crate::suffix_fst::word_sfxpost::tail_off_from_spans(&e, spanned_posmap.as_ref(), sfxpost.as_ref())
+                        } else { e.tail_off };
+                        word_writer.add(new, WordPostingEntry { doc_id: d, tail_off, ..e });
                         wpm_writer.add_word(d, e.first_position, e.last_position, new);
                         num_docs = num_docs.max(d + 1);
                     }

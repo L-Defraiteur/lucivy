@@ -22,6 +22,8 @@ pub struct Counters {
     pub ns_single: AtomicU64,
     /// `verify_literal`: window rebuild + contains check per match.
     pub ns_verify: AtomicU64,
+    /// Placing the matches' byte spans (`orchestrator::place_spans`).
+    pub ns_place: AtomicU64,
     /// Chunk pipeline: falling walk building cross-chunk chains.
     pub ns_chunk_walk: AtomicU64,
     /// Chunk pipeline: sibling-table DFS supplementing the chains.
@@ -235,7 +237,7 @@ impl Timer {
 pub fn reset() {
     let c = counters();
     for a in [
-        &c.ns_single, &c.ns_verify, &c.ns_chunk_walk, &c.ns_chunk_sibling, &c.ns_chunk_resolve, &c.ns_chunk_anchored,
+        &c.ns_single, &c.ns_verify, &c.ns_place, &c.ns_chunk_walk, &c.ns_chunk_sibling, &c.ns_chunk_resolve, &c.ns_chunk_anchored,
         &c.ns_word_walk, &c.ns_word_sibling, &c.ns_word_resolve,
         &c.n_relaxed_chunk_skipped, &c.n_relaxed_chunk_walked,
         &c.n_chunk_chains, &c.n_word_chains, &c.n_word_entries, &c.n_word_pairs,
@@ -265,7 +267,7 @@ pub fn dump() -> String {
     let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
     let ms = |a: &AtomicU64| g(a) as f64 / 1e6;
 
-    let total = ms(&c.ns_single) + ms(&c.ns_verify) + ms(&c.ns_chunk_walk) + ms(&c.ns_chunk_sibling)
+    let total = ms(&c.ns_single) + ms(&c.ns_verify) + ms(&c.ns_place) + ms(&c.ns_chunk_walk) + ms(&c.ns_chunk_sibling)
         + ms(&c.ns_chunk_resolve) + ms(&c.ns_chunk_anchored) + ms(&c.ns_word_walk) + ms(&c.ns_word_sibling)
         + ms(&c.ns_word_resolve);
     let pct = |v: f64| if total > 0.0 { v / total * 100.0 } else { 0.0 };
@@ -275,6 +277,7 @@ pub fn dump() -> String {
     for (name, v) in [
         ("single (candidates+resolve)", ms(&c.ns_single)),
         ("verify_literal (window+contains)", ms(&c.ns_verify)),
+        ("place_spans (posmap+meta)", ms(&c.ns_place)),
         ("chunk walk", ms(&c.ns_chunk_walk)),
         ("chunk sibling DFS", ms(&c.ns_chunk_sibling)),
         ("chunk resolve", ms(&c.ns_chunk_resolve)),

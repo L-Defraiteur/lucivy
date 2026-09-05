@@ -120,8 +120,13 @@ Suffix FST avec partitionnement SI=0/SI>0 pour le substring matching.
 
 Fichiers par segment (v3, par champ) : `.sfx`, `.sfxpost`, `.termtexts`, `.posmap`,
 `.word_sfxpost`, `.word_pos_map`, `.sibling_v3`. Référence 10 000 fichiers
-au soir du 4 septembre : 508 Mo (1 152 le matin), `.sfx` 41 %. (`.bytemap` : jusqu'au 4 septembre 2026,
-ignoré depuis ; `.gapmap`, `.sepmap` : v2.)
+au soir du 4 septembre : 508 Mo (1 152 le matin), `.sfx` 41 % ; **au soir
+du 5 septembre (branche `v4`) : 455 Mo en v3, 345 en dictionnaire** — les
+postings ne portent plus de span d'octets (`SFP5`, `WSP5`), l'offset d'une
+position se dérive du `.posmap` (`PMP4`, un point de contrôle par 16
+positions) et des `own_len` ; `docs/05-09-2026/02-architecture.md` §6 bis.
+(`.bytemap` : jusqu'au 4 septembre 2026, ignoré depuis ; `.gapmap`,
+`.sepmap` : v2.)
 
 **`sfx_version` par défaut = 3** depuis le 23 août 2026. Un `meta.json` sans le champ
 est un index v2 (le champ est maintenant toujours écrit). Les tests du moteur v2
@@ -325,7 +330,14 @@ au-delà, `own_len` dérivé de la clé — journal
 `09-journal-chantier-dictionnaire.md` ; la version 7, intermédiaire, est
 refusée), ordinaux sur 28 bits (`.word_pos_map` `WMP3`), tables d'offsets
 par blocs (`block_offsets.rs` : `SFP4`, `WSP4`, `SIB4`, `.termtexts`
-layout 3) ; **`sfx_version` 4 = dictionnaire partagé par shard**
+layout 3), **postings sans span d'octets depuis le 5 au soir** (`SFP5` :
+une position par entrée ; `WSP5` : positions + décalage des seules
+entrées de queue ; `.posmap` `PMP4` avec un offset d'octet par 16
+positions, `byte_at` sur le contexte des briques, `place_spans` sur les
+matches gardés ; −35 à −38 % sur les postings, −12 à −14 % sur l'index
+dictionnaire, **noyau entier 5 717 → 4 938 Mo, ×5,8 le texte** ; les
+anciens layouts lus, leurs spans encore servis) ;
+**`sfx_version` 4 = dictionnaire partagé par shard**
 (`dict-<g>.<champ>.sfx/.termtexts`, `.gmap` par segment — `GMP2` depuis le
 5 au soir : têtes de blocs de 64 + statistique « mots longs » du segment,
 `GMAP` encore lu —, une génération

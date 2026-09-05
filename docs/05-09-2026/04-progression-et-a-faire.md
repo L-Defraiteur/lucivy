@@ -14,7 +14,8 @@ Noyau entier, 93 605 fichiers, 857 Mo de texte :
 | `main` 3.0.x non compacté (`/tmp/lucivy-idx-90k`) | 1 504 | 18 057 Mo | ×21 |
 | `main` 3.0.x compacté (`lucivy_bench_sharding/single`) | 10 | 11 025 Mo | ×12,9 |
 | v4, un `.sfx` par segment (`idx90k-v8`) | 253 | 7 422 Mo | ×8,7 |
-| v4, dictionnaire par shard (`idx90k-dict2`) | 253 | **5 706 Mo** | ×6,7 |
+| v4, dictionnaire par shard (`idx90k-dict2`) | 253 | 5 706 Mo | ×6,7 |
+| v4, dictionnaire, postings sans octets (`idx90k-dict-sfp5`, 5 septembre au soir) | 253 | **4 938 Mo** | **×5,8** |
 
 Répartition des 5,7 Go : `.sfxpost` 22 %, `.word_sfxpost` 18 %, `dict.sfx`
 16 %, `.word_pos_map` 11 %, `.posmap` 8 %, `.sibling_v3` 8 %, `.store`
@@ -455,6 +456,72 @@ contrôler la dérivation (`derive_miss=0` partout).
 
 Ce que ça retire, attendu : 842 Mo sur le noyau (15 %), 151 Mo sur les
 30 000 (12 %), moins les points de contrôle (~1,8 % de ce qu'on retire).
+
+**Réalisé le 5 septembre, après-midi** (commits `556262a` puis la suite) :
+
+- [x] Étape 1, `PMP4` + `byte_at` : validée seule (référence 10 000 v3 et
+  dictionnaire 9/9, index d'hier rouvert 9/9, 30 000 neuf 9/9) ; fenêtres
+  du fuzzy à 2 éditions 1 738 → 1 560 ms de somme sur les segments, posmap
+  +8 Mo sur les 30 000.
+- [x] Étapes 2 à 4, `SFP5` / `WSP5`, résolveurs en positions, `place_spans`,
+  fusions (v3 et dictionnaire, conversion des queues d'un segment ancien par
+  son `.posmap` et ses postings à spans), pipeline v2 inchangé (`SFP4`).
+  **Un bug trouvé par la vérité, pas par les tests unitaires** : pour un
+  dernier jeton qui est un mot, son texte commence à son **premier** chunk,
+  pas à la dernière position du span (celle de l'adjacence) — `mutex lock`
+  relâché rendait `[5441..5456]` pour `[5441..5451]`. `MatchV3` porte
+  depuis `last_start_pos`. Et le jeu des séparateurs du regroupement fuzzy
+  (`MAX_SEPARATOR_SLACK`) était en octets : 32 positions regroupaient
+  quatre fois plus de texte (714 000 → 182 000 régions, DP 515 → 903 ms) ;
+  ramené à 5 positions, ce que 32 octets de séparateurs peuvent occuper.
+- [x] Vérité : suite lib 1 460 verts ; `test_sfx_v3_pipeline` 40/40,
+  dictionnaire, fédéré, filtré, LUCE, fuzzy et regex de vérité verts ;
+  référence 10 000 v3 **et** dictionnaire 9/9 ; **les anciens index
+  rouverts 9/9** — `idx30k-dict3` (PMP3 + SFP4), `idx30k-dict4` (PMP4 +
+  SFP4), `idx30k-v7` (v3) — par le second dos de `byte_at` et
+  `word_tail_off` ; 30 000 dictionnaire et v3 neufs 9/9 ; noyau entier
+  9/9 ; `byte_spans_are_derivable` (le `byte_at` du `PMP4` contre une
+  somme cumulée indépendante, chaque posting de mot contre les chunks
+  sous lui) : **0 désaccord** sur les 8,1 M positions des 10 000, les
+  31,0 M des 30 000 (v3 et dictionnaire) et les 167,0 M positions /
+  136,7 M mots du noyau.
+
+| index (fichiers SFX, `scan_index_size.py`, tantivy exclu) | avant | après | postings avant → après |
+|---|---|---|---|
+| 10 000, v3 | 460,2 Mo | **420,9 Mo** (−8,5 %) | `.sfxpost` 68,6 → 46,2 ; `.word_sfxpost` 45,3 → 28,4 |
+| 10 000, dictionnaire | 331,3 Mo | **290,8 Mo** (−12,2 %) | 70,1 → 47,4 ; 48,6 → 30,6 |
+| 30 000, v3 | 1 496,1 Mo | **1 352,7 Mo** (−9,6 %) | 239,2 → 154,3 ; 173,1 → 106,7 |
+| 30 000, dictionnaire | 1 131,7 Mo | **977,9 Mo** (−13,6 %) | 243,5 → 158,0 ; 183,2 → 114,9 |
+| noyau entier, dictionnaire | 5 077 Mo (`idx90k-dict2`) | **4 259,1 Mo** | 1 236,9 → 771,6 ; 1 017,9 → 626,8 |
+
+Sur disque tout compris (`du`, store tantivy inclus) : **noyau entier
+5 717 → 4 938 Mo (−13,6 %, ×5,8 le texte ; `main` en faisait 18 057)**,
+30 000 dictionnaire 1 281 → **1 128 Mo**, 10 000 dictionnaire 385 →
+**345 Mo**. Les postings perdent 35 à 38 % (noyau : 2 255 → 1 398 Mo), le
+`.posmap` prend 8 % (7,7 Mo sur les 30 000, 40 sur le noyau). Le panel de
+vérité du noyau : 9/9.
+
+- [x] **WASM rebâti** (`bash bindings/emscripten/build.sh`, `pkg/` et
+  `playground/pkg/` recopiés) et le playground revérifié dans Chrome : la
+  démo (`?dict`, 1 171 fichiers, 116 Mo en mémoire) rend des spans exacts
+  en octets — `spin_lock_init` strict, `mutex lock` relâché
+  (`mutex_lock`, `mutex", "lock`, `mutexlock`), fuzzy `compation` d1
+  (`Compaction`), regex `SfxFileReaderV[0-9]`, `term lucivy` — lus en
+  découpant le texte UTF-8 aux offsets rendus (`TextEncoder`, pas
+  `slice` sur la chaîne JS : les offsets sont des octets). Et **un index
+  OPFS d'ancien layout** (`?open=user_index`, MDN, 14 629 pages, 529 Mo,
+  écrit par le WASM d'avant) rouvert par le nouveau : `addEventListener`,
+  `grid template columns` relâché (`grid-template-columns`), regex
+  `aria-[a-z]+`, `term fetch`, `async function`, fuzzy `kmallc` — spans
+  exacts, 7 à 18 ms.
+
+Temps (panel de vérité, 30 000 dictionnaire, même binaire, index
+d'ancien layout rouvert contre index neuf, une passe chacun, machine
+partagée avec les constructions) : les exactes 2,5-5,3 ms contre 2,2-5,0,
+fuzzy d1 11,0 contre 10,5, fuzzy d2 200,5 contre 204,0, regex 17,9 contre
+15,7 — du même ordre, la regex à surveiller sur trois passes au repos. Le
+placement (`place_spans`) coûte 0,6 à 3,3 ms de somme sur 120 segments
+(4 à 15 % des étapes profilées d'une exacte, moins que la vérification).
 
 **Seuils calibrés sur les gros index d'avant** (remarque du 5 septembre) :
 `LUCIVY_RAM_INDEX_MAX` (3 Go sur wasm32, index tenu entier en dessous) et

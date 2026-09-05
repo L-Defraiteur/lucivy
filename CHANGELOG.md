@@ -14,6 +14,20 @@ Unreleased (branch v4)
 - Index format v4 on the branch: `.sfx` container version 8, ordinals on 28
   bits, block-coded offset tables (`SFP4`, `WSP4`, `SIB4`, `.termtexts`
   layout 3), `.gmap` layout 2. Every reader still opens the previous layouts.
+- **The postings no longer store byte spans** (`SFP5`, `WSP5`): a chunk
+  posting is a position, a word posting its first and last positions (plus,
+  for the tail entry of a word over 264 bytes, its offset within its chunk).
+  The byte offset of a position derives from the `.posmap`, which now
+  carries one byte checkpoint per sixteen positions (`PMP4`), and the
+  tokens' lengths (`own_len`, termtexts META); a token's span is its
+  content length. Checked entry by entry against the stored spans of the
+  whole Linux kernel before the change (167 M chunk and 137 M word postings,
+  no disagreement), then by the ground-truth panels (counts and spans
+  against a grep of the disk) after. Spans were 37 % of the postings and
+  15 % of an index; the checkpoints cost 0.25 B per position. A segment
+  written with spans is still read, and its spans still used. Query
+  resolution works in positions end to end; the spans of the matches that
+  are kept are placed once, from the posmap.
 - **Fixed: the tail entry of a very long word pointed at the wrong
   position.** A word of more than 264 bytes (a line of Chinese, no separator
   inside) gets a second entry for its last bytes; when the word's trailing

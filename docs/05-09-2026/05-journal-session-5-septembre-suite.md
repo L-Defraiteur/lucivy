@@ -130,7 +130,7 @@ chaque fois. La page appelle `memoryStatus()` après chaque recherche
 suivante attendait derrière. Corrigé : `shard_bytes_and_files_cached`
 (mémo par liste de segments), 6 à 9 ms, page et moteur à la milliseconde.
 
-## 5. Le chantier des postings, cadré
+## 5. Le chantier des postings, cadré (puis fait : §8)
 
 Mesuré (`postings_without_byte_spans`) : les `byte_from`/`byte_to` des
 postings pèsent **842 Mo sur le noyau, 37 % des postings, 15 % de
@@ -151,9 +151,12 @@ les fenêtres regex et la vérification fuzzy). Détail et ordre proposé :
 
 Noyau entier, 857 Mo de texte : `main` non compacté 18 057 Mo (×21),
 `main` compacté à 10 segments 11 025 Mo, v4 un `.sfx` par segment
-7 422 Mo, **v4 dictionnaire 5 706 Mo (×6,7, −68 % depuis `main`)**.
-Répartition : postings 40 %, cartes de positions et fratrie 27 %
-(dérivées des postings), dictionnaire 21 %, store 6 %.
+7 422 Mo, v4 dictionnaire 5 706 Mo (×6,7), **v4 dictionnaire et postings
+sans octets 4 938 Mo (×5,8, −73 % depuis `main`)** — §8. Répartition
+avant les postings sans octets : postings 40 %, cartes de positions et
+fratrie 27 % (dérivées des postings), dictionnaire 21 %, store 6 % ;
+après : postings 1 398 Mo (28 %), cartes et fratrie 1 591 Mo (32 %),
+dictionnaire 1 270 Mo (26 %).
 
 ## 6 bis. La vitrine : MDN comme second acte, dans le terminal
 
@@ -183,7 +186,7 @@ déploiement des corpus (ignorés par git : à fabriquer côté déploiement).
 Pour 4.0.0 : la fixture 3.0.8 et le test de compatibilité de bout en bout
 (04 §3). Puis :
 
-Le chantier des postings (§5) ; les trois fichiers dérivés reconstruits en
+~~Le chantier des postings (§5)~~ — fait, §8 ; les trois fichiers dérivés reconstruits en
 RAM en option (jamais le défaut natif : une structure rebâtie est
 résidente là où un fichier mappé ne coûte que ce qu'on touche) ; le
 plancher de 1,5 Go du navigateur et les seuils calibrés sur les gros index
@@ -192,7 +195,74 @@ d'avant (`LUCIVY_RAM_INDEX_MAX` 3 Go, rechargement à 2 Go) ; la regex à
 `dict-*` ; décisions : version 4.0.0, pile v2, `wip/publication-3.0.0`
 dans `main`, tri stable des ex æquo.
 
-## 8. Commits de la suite
+## 8. Les postings sans octets (l'après-midi, après la compaction)
+
+Le chantier cadré au §5, fait. Mesuré d'abord (`V3_PROFILE=1` sur le panel
+30 000) : les résolveurs matérialisaient un span par occurrence candidate
+— 2,57 M pour la fuzzy à 2 éditions, 42 582 rendus — et les fenêtres
+payaient deux lookups de postings chacune ; mais **aucune décision
+d'adjacence ne lit un octet** sur le chemin v3 (tout passe par les
+positions), et `rebuild_window_opts` dérivait déjà ses offsets de position
+en position par `own_len`. Donc, en quatre étapes ([04](04-progression-et-a-faire.md) §2) :
+
+1. **`PMP4`** : le `.posmap` garde l'offset d'octet d'une position sur 16
+   par document (0,25 o/position ; une case vide remet à zéro, frontière de
+   valeur) ; `BriquesContext::byte_at(doc, p)` = point de contrôle + somme
+   des `own_len` (méta) — ou, sur un segment ancien, le posting du chunk.
+   Validée seule : 9/9 partout, fenêtres fuzzy d2 1 738 → 1 560 ms.
+2. **`SFP5` / `WSP5`** : une entrée de chunk = un delta de position ; une
+   entrée de mot = `d_doc`, `d_first`, `(last − first) << 1 | drapeau`, et
+   le décalage dans le chunk pour les seules entrées de queue (mots de plus
+   de 264 octets). `PostingResolver` rend des positions ; `MatchV3` sort
+   des résolveurs **non placé** et `orchestrator::place_spans` dérive les
+   octets des matches gardés (un `byte_at` par position distincte, la méta
+   du dernier ordinal pour le contenu, borne au contenu pour un mot avec
+   l'excès dans `overlap_overflow`) ; les hits fuzzy et regex se regroupent
+   par positions ; le pipeline v2 (`sfx_version` 2) garde `SFP4`.
+3. **Fusions** : plus d'octets à remapper ; un segment ancien fusionné
+   convertit ses entrées de queue par son `.posmap` et ses postings à
+   spans (`tail_off_from_spans`) ; le dictionnaire reçoit les `own_len`
+   par la méta du shard.
+4. **Vérité** : suite lib 1 460 verts ; `test_sfx_v3_pipeline` 40/40,
+   dictionnaire, fédéré, filtré, LUCE, fuzzy et regex de vérité ;
+   référence 10 000 v3 et dictionnaire 9/9, `contains` 15/15, `coherence`
+   31/31 ; **les anciens index rouverts 9/9** (PMP3 + SFP4, PMP4 + SFP4, v3) ;
+   30 000 dictionnaire et v3 neufs 9/9 ; `byte_spans_are_derivable`
+   étendu : le `byte_at` du `PMP4` contre une somme cumulée indépendante à
+   chaque position, et **chaque posting de mot contre les chunks sous
+   lui** (le texte de l'ordinal doit être ce que les chunks tiennent à
+   partir de `tail_off`) — 0 désaccord sur 31,0 M positions et 23,9 M
+   mots des 30 000, **0 sur les 167,0 M positions et 136,7 M mots du
+   noyau** (506 segments, 35 s) ; le noyau entier au format courant, 9/9.
+
+**Deux choses apprises par la vérité, pas par les 1 460 tests.** Pour un
+dernier jeton qui est un mot, son texte commence à son **premier** chunk :
+`last_position` est la fin du span (l'adjacence), pas le début de ses
+octets — `mutex lock` relâché rendait `[5441..5456]` pour `[5441..5451]` ;
+`MatchV3` porte depuis `last_start_pos`. Et le jeu de séparateurs du
+regroupement fuzzy était en **octets** : 32 positions regroupaient quatre
+fois plus de texte (714 000 → 182 000 régions, DP 515 → 903 ms, fuzzy d2
+200 ms) ; à 5 positions — ce que 32 octets de séparateurs occupent au
+plus — 463 000 régions, DP 577 ms, **161 ms**.
+
+| fichiers SFX (`scan_index_size.py`, tantivy exclu) | avant | après |
+|---|---|---|
+| 10 000, v3 | 460,2 Mo | **420,9 Mo** (−8,5 %) |
+| 10 000, dictionnaire | 331,3 Mo | **290,8 Mo** (−12,2 %) |
+| 30 000, v3 | 1 496,1 Mo | **1 352,7 Mo** (−9,6 %) |
+| 30 000, dictionnaire | 1 131,7 Mo | **977,9 Mo** (−13,6 %) |
+| noyau entier, dictionnaire (`du`, tout compris) | 5 717 Mo | **4 938 Mo** (−13,6 %, ×5,8 le texte) |
+
+Les postings perdent 35 à 38 % (`.sfxpost` 243,5 → 158,0 Mo,
+`.word_sfxpost` 183,2 → 114,9 sur les 30 000), le `.posmap` prend 8 % ;
+`du` tout compris : 30 000 dictionnaire 1 281 → **1 128 Mo**, 10 000 385
+→ **345 Mo**. Temps (panel 30 000 dictionnaire, index neuf contre ancien
+layout rouvert par le même binaire, une passe, machine partagée) : du
+même ordre partout — exactes 2,2-4,9 ms, fuzzy d1 9,7, fuzzy d2 161,5,
+regex 15,9 — et `place_spans` coûte 0,6 à 3,3 ms de somme sur 120
+segments. La règle du ×1,5 n'est pas approchée.
+
+## 9. Commits de la suite
 
 `634f0e6` compaction en flux · `5a8f6b0` docs (5 000 fichiers, pas
 10 000) · `68e0737` playground `?dict` `?commit`, validé · `4aa6782`
@@ -203,4 +273,7 @@ requêtes · `ce819e8` `memory_status` par le cache · `af6420a` ce journal
 et les docs complétés · `8147b38` docs vitrine · `7a0854f` corpus MDN,
 formulation du préchargement · `aae6065` `index mdn` / `index kernel` au
 prompt · `e83a475` `index github`, `index list`, `open`, `drop`, règles du
-serveur de debug.
+serveur de debug · `c86c968` docs 05 · `556262a` posmap `PMP4` et
+`byte_at` (étape 1) · puis, en un commit, les postings sans octets
+(`SFP5`, `WSP5`, résolveurs en positions, `place_spans`, fusions,
+tests de cohérence, WASM rebâti, docs).

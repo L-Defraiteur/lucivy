@@ -89,8 +89,10 @@ pub fn plan(pattern: &str) -> Option<RegexPlan> {
 ///
 /// Two regimes, both exact by construction:
 /// - bounded pattern (`max_len = Some(n)`): every match is at most `n` bytes
-///   and contains a literal hit; hits closer than `2n + 2` bytes share a
-///   region; the window is the region plus `n + 1` raw bytes on each side.
+///   and contains a literal hit; hits closer than `2n + 2` positions share a
+///   region (a position is at least a byte: at least the hits closer than
+///   `2n + 2` bytes); the window is the region plus `n + 1` raw bytes on
+///   each side.
 ///   A match of the file that crosses a window edge would have to contain
 ///   a hit of ANOTHER region within `n` bytes of this one — excluded by the
 ///   merge — so `find_iter` on the window sees exactly what it sees on the
@@ -117,10 +119,10 @@ pub fn regex_verified(
     // Literal hits: exact contains, strict separators (the regex sees the
     // raw text). No verify_literal: the regex is the verification.
     let t = profile::Timer::start();
-    let mut hits: Vec<(DocId, u32, u32, u32, u32)> = Vec::new(); // (doc, first_pos, last_pos, byte_from, byte_to)
+    let mut hits: Vec<(DocId, u32, u32)> = Vec::new(); // (doc, first_pos, last_pos)
     for lit in &plan.literals {
         for m in composite::find_literal_v3(ctx, lit, false, true) {
-            hits.push((m.doc_id, m.position, m.position + m.span.saturating_sub(1), m.byte_from, m.byte_to));
+            hits.push((m.doc_id, m.position, m.position + m.span.saturating_sub(1)));
         }
     }
     t.stop(|c| &c.ns_fz_resolve);
@@ -173,18 +175,20 @@ pub fn regex_verified(
         }
         (false, Some(n)) => {
             let n = n as u32;
-            let mut regions: Vec<(DocId, u32, u32, u32)> = Vec::with_capacity(hits.len()); // (doc, first_pos, last_pos, byte_to)
-            for &(doc, first_pos, last_pos, byte_from, byte_to) in &hits {
+            // Regions in positions: a position holds at least one byte, so
+            // hits within `2n + 2` bytes are within `2n + 2` positions — the
+            // same bound merges a superset, the windows only grow.
+            let mut regions: Vec<(DocId, u32, u32)> = Vec::with_capacity(hits.len()); // (doc, first_pos, last_pos)
+            for &(doc, first_pos, last_pos) in &hits {
                 match regions.last_mut() {
-                    Some((d, _, lp, bt)) if *d == doc && byte_from <= *bt + 2 * n + 2 => {
+                    Some((d, _, lp)) if *d == doc && first_pos <= *lp + 2 * n + 2 => {
                         if last_pos > *lp { *lp = last_pos; }
-                        if byte_to > *bt { *bt = byte_to; }
                     }
-                    _ => regions.push((doc, first_pos, last_pos, byte_to)),
+                    _ => regions.push((doc, first_pos, last_pos)),
                 }
             }
             profile::bump(|c| &c.n_fz_regions, regions.len() as u64);
-            for &(doc, first_pos, last_pos, _) in &regions {
+            for &(doc, first_pos, last_pos) in &regions {
                 let t = profile::Timer::start();
                 let built = composite::rebuild_window_opts(
                     ctx, doc, first_pos, last_pos, n + 1, false, false, u32::MAX, &mut window, &mut back);

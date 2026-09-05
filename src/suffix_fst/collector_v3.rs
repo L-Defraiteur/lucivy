@@ -65,7 +65,10 @@ pub struct SfxCollectorV3 {
     // Direct word postings: (doc_id, first_ti, last_ti, byte_from, byte_to)
     // indexed by ws intern_ord. Captured directly in add_value() where we know
     // the exact word identity — eliminates the lossy content_key join.
-    word_postings: Vec<Vec<(u32, u32, u32, u32, u32)>>,
+    /// Per word-stripped intern ordinal: `(doc, first_ti, last_ti, byte_from,
+    /// content end, tail_off)` — the bytes for the collector's own checks, the
+    /// tail offset for the posting (`word_sfxpost`: `WSP5`).
+    word_postings: Vec<Vec<(u32, u32, u32, u32, u32, u16)>>,
 
     // Sibling pairs: (intern_ord_a, intern_ord_b, content_len_a) for consecutive chunks and words.
     // content_len_a = content bytes of ordinal A (used by sibling DFS to know how much
@@ -415,6 +418,7 @@ impl SfxCollectorV3 {
                     last_posting.1,  // last_ti (position of last chunk)
                     first_posting.2, // byte_from (start of first chunk)
                     first_posting.2 + word_content.len() as u32, // content end
+                    0,               // a word starts its first chunk
                 ));
 
                 ws_intern_sequence.push((ws_intern, word_content.len() as u16));
@@ -492,6 +496,9 @@ impl SfxCollectorV3 {
                         chunk_posting_info[last_ci].1,       // the word's last chunk, as for the word itself
                         tail_from,
                         tail_from + tail_len, // content end
+                        // Where the tail starts within that chunk: the one
+                        // thing a posting without byte spans has to say.
+                        (tail_from - chunk_posting_info[tail_first_ci].2) as u16,
                     ));
                 }
             }
@@ -615,7 +622,7 @@ impl SfxCollectorV3 {
         // from "functionality" vs word-stripped "functional").
         struct OrdEntry {
             text: String, // actual text (no prefix)
-            postings: Vec<(u32, u32, u32, u32)>,
+            postings: Vec<(u32, u32)>,
             own_len: u16,
             intern_ords: Vec<u32>,
             is_word_stripped: bool,
@@ -639,7 +646,7 @@ impl SfxCollectorV3 {
                 intern_ords: Vec::new(),
                 is_word_stripped: false,
             });
-            entry.postings.extend_from_slice(&self.token_postings[io as usize]);
+            entry.postings.extend(self.token_postings[io as usize].iter().map(|&(d, ti, _, _)| (d, ti)));
             entry.intern_ords.push(io);
 
             if let Some(ref target) = diag_target {
@@ -686,7 +693,7 @@ impl SfxCollectorV3 {
         // segment's `.gmap` a sorted list (local → global by index, global →
         // local by binary search).
         let mut intern_to_final = vec![0u32; num_tokens];
-        let mut content_postings: Vec<Vec<(u32, u32, u32, u32)>> = Vec::new();
+        let mut content_postings: Vec<Vec<(u32, u32)>> = Vec::new();
         // Use a Vec instead of BTreeSet to keep 1:1 correspondence with final ordinals.
         // When chunk and word-stripped have the same text, they get separate entries.
         let mut tokens_vec: Vec<String> = Vec::new();
@@ -753,13 +760,14 @@ impl SfxCollectorV3 {
             let ws_final_ord = intern_to_final[intern_ord as usize];
             let io = intern_ord as usize;
             if io < self.word_postings.len() {
-                for &(doc_id, first_ti, last_ti, bf, bt) in &self.word_postings[io] {
+                for &(doc_id, first_ti, last_ti, bf, bt, tail_off) in &self.word_postings[io] {
                     word_sfxpost_writer.add(ws_final_ord, WordPostingEntry {
                         doc_id,
                         first_position: first_ti,
                         last_position: last_ti,
                         byte_from: bf,
                         byte_to: bt,
+                        tail_off,
                     });
                     word_pos_map.add_word(doc_id, first_ti, last_ti, ws_final_ord);
                 }
@@ -870,8 +878,10 @@ pub struct SfxCollectorDataV3 {
     /// Used by derived index builders (bytemap, posmap).
     /// Ordered token texts, 1:1 with content_postings and own_lens by final ordinal.
     pub tokens: Vec<String>,
-    /// Postings per final ordinal. Index = final ordinal.
-    pub content_postings: Vec<Vec<(u32, u32, u32, u32)>>,
+    /// Postings per final ordinal, `(doc, position)`. Index = final ordinal.
+    /// No byte span: `.sfxpost` is written as `SFP5`, the offsets derive
+    /// from `.posmap` (`PMP4`) and the texts' `own_len`.
+    pub content_postings: Vec<Vec<(u32, u32)>>,
     /// own_len per final ordinal (content+sep bytes, excludes overlap).
     /// Used by derived index builders to truncate extended texts.
     pub own_lens: Vec<u16>,
@@ -1097,7 +1107,7 @@ mod tests {
         let mut off = 0u32;
         for (t, _) in &chunks { offsets.push(off); off += t.len() as u32; }
         for (ord, posts) in c.word_postings.iter().enumerate() {
-            for &(doc, first, last, from, to) in posts {
+            for &(doc, first, last, from, to, _) in posts {
                 let meta = &c.token_meta[ord];
                 eprintln!("word ord {ord} {:?} own {} sep {}: doc {doc} first {first} last {last} from {from} to {to}; chunk at first starts at byte {:?}",
                     c.token_texts.get(ord).map(|s| s.as_str()).unwrap_or("?"), meta.own_len, meta.sep_len, offsets.get(first as usize));

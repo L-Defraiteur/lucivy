@@ -246,6 +246,7 @@ impl SfxNode {
             read_ext(r, "sfxpost"),
             read_ext(r, "word_sfxpost"),
             read_ext(r, "sibling_v3"),
+            read_ext(r, "posmap"),
         )).collect();
 
         let mut segs: Vec<SegmentSfxV3<'_>> = Vec::new();
@@ -259,6 +260,7 @@ impl SfxNode {
                 sfxpost: sl(&o.1),
                 word_sfxpost: sl(&o.2),
                 sibling_v3: sl(&o.3),
+                posmap: sl(&o.4),
                 doc_remap: &reverse_doc_map[i],
             });
         }
@@ -294,6 +296,7 @@ impl SfxNode {
             read_ext(r, "sfxpost"),
             read_ext(r, "word_sfxpost"),
             read_ext(r, "sibling_v3"),
+            read_ext(r, "posmap"),
         )).collect();
         let mut segs: Vec<SegmentSfxDict<'_>> = Vec::new();
         for (i, o) in owned.iter().enumerate() {
@@ -306,6 +309,7 @@ impl SfxNode {
                 sfxpost: sl(&o.1),
                 word_sfxpost: sl(&o.2),
                 sibling_v3: sl(&o.3),
+                posmap: sl(&o.4),
                 doc_remap: &reverse_doc_map[i],
             });
         }

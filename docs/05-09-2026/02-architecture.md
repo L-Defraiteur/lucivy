@@ -53,10 +53,10 @@ Deux familles d'entrées, dans un seul espace d'ordinaux :
 | fichier | contenu | encodage |
 |---|---|---|
 | `.sfx` | FST des suffixes (clés minuscules, préfixe de partition, coupées à la frontière du token) + table de parents | conteneur `SFX3` **version 8** : valeur FST = offset du record ; record plat ≤ 32 parents (Δordinal, sti varint, flags = ws + overlap + sep_len, octets d'overlap ; `own_len` dérivé de la clé), groupé par overlap au-delà (`decode_parents_where` saute les groupes). Versions 3-6 encore lues, 7 refusée |
-| `.sfxpost` | postings de chunks (doc, position, byte_from, longueur) | `SFP4` : blocs varints derrière une table d'offsets par blocs (`block_offsets.rs`) ; `SFP3` lu |
-| `.word_sfxpost` | postings de mots (doc, first_pos, last_pos, byte_from, longueur) | `WSP4` ; `WSP3` lu |
+| `.sfxpost` | postings de chunks (doc, position) — **plus de span d'octets** | `SFP5` (5 septembre au soir) : un varint par entrée derrière l'en-tête par document de `SFP3`, table d'offsets par blocs (`block_offsets.rs`) ; `SFP2`-`SFP4` lus, leurs spans encore servis |
+| `.word_sfxpost` | postings de mots (doc, first_pos, last_pos, décalage de queue) | `WSP5` : `d_doc`, `d_first`, `(last − first) << 1 \| a_un_décalage`, `[décalage]` (les seules entrées de queue des mots > 264 octets) ; `WSP2`-`WSP4` lus |
 | `.termtexts` | ordinal → texte étendu (casse d'origine) + méta | `TTX3` layout 3 : offsets par blocs, 4 octets de méta par ordinal, textes ; STATS (max word) ; section IDS pour les générations ; layouts 1-2 lus |
-| `.posmap` | (doc, position) → ordinal de chunk | `PMP3` (3 octets) ; `PMAP` lu |
+| `.posmap` | (doc, position) → ordinal de chunk, **et l'offset d'octet d'une position sur 16** | `PMP4` : par document `u32 n`, `⌈n/16⌉` points de contrôle `u32`, puis les cases de 3 octets ; `PMP3`, `PMAP` lus (sans points de contrôle : les spans viennent alors des postings) |
 | `.word_pos_map` | (doc, position) → ordinal de mot qui commence là \| span | `WMP3` : 28 \| 4 bits ; `WMP2` lu |
 | `.sibling_v3` | ordinal → ordinaux qui le suivent | `SIB4` (varints, table par blocs) ; `SIB3`, `SIB2`, v1 lus |
 | `.store`, `.term`, `.idx`, `.pos`, `.fast`, `.fieldnorm` | docstore, index inversé tantivy | tantivy |
@@ -257,30 +257,66 @@ inchangé). L'attente d'un permis fait tourner d'autre travail sur le thread
 (pas un sémaphore bloquant : quatre threads et quatre attentes = interblocage).
 `LUCIVY_VERBOSE` trace chaque fusion (`[merge] N segments: waited … ran …`).
 
-## 6 bis. Ce que les postings portent, et ce qui en dérive
+## 6 bis. Ce que les postings portent, et d'où viennent les octets
 
-Une entrée de `.sfxpost` est `(doc, position, byte_from, byte_to)`, une
-entrée de `.word_sfxpost` `(doc, first, last, byte_from, byte_to)` (SFP3 /
-WSP3 : deltas + varints, points de contrôle tous les 32). Vérifié entrée
-par entrée sur 167 M chunks et 137 M mots du noyau
-(`postings_measure::byte_spans_are_derivable`) : `byte_from` d'une
-position = somme des `own_len` des ordinaux aux positions précédentes
-(`.posmap` + méta des textes), `byte_to − byte_from` = `own_len` du chunk,
-= `own_len − sep_len` de l'ordinal mot ; pas une position vide, pas un
-document qui ne commence pas à l'octet 0. Les spans pèsent 37 % des
-postings, 15 % de l'index — c'est le chantier suivant
-([04](04-progression-et-a-faire.md) §2). Réserve : l'**entrée de queue**
-d'un mot de plus de 264 octets (ses 8 derniers octets, pour les requêtes
-en fin de mot) part au milieu d'un chunk ; sa `first_position` est le
-chunk qui contient `byte_from` (corrigé le 5 septembre : c'était le dernier
-chunk du mot, faux quand les séparateurs de fin débordent dans un chunk à
-eux), sa `last_position` le dernier chunk du mot, comme pour le mot.
+Depuis le 5 septembre au soir les postings ne portent **plus de span
+d'octets** : une entrée de `.sfxpost` est `(doc, position)`, une entrée de
+`.word_sfxpost` `(doc, first, last[, tail_off])`. L'offset d'octet d'une
+position se **dérive** : le `.posmap` (`PMP4`) garde l'offset d'une
+position sur seize par document ; `byte_at(doc, p)` lit le point de
+contrôle qui précède et additionne les `own_len` (méta des textes) des
+positions intermédiaires — une case vide remet à zéro (frontière de
+valeur : le collecteur repart à l'octet 0 à chaque valeur, une position de
+séparation entre deux). La longueur d'un chunk est son `own_len`, celle
+d'un mot `own_len − sep_len` de son ordinal. Vérifié entrée par entrée sur
+167 M chunks et 137 M mots du noyau avant de retirer les spans
+(`postings_measure::byte_spans_are_derivable`, 0 désaccord). L'exception :
+l'**entrée de queue** d'un mot de plus de 264 octets (ses 8 derniers
+octets, pour les requêtes en fin de mot) part au milieu d'un chunk ; elle
+seule porte son décalage (`tail_off`, un varint, un drapeau dans
+`last − first`).
 
-Trois fichiers sont des **dérivés** des postings : `.posmap` (inverse de
-`.sfxpost`), `.word_pos_map` (inverse de `.word_sfxpost`), `.sibling_v3`
-(positions consécutives) — 27 % de l'index du noyau, reconstructibles en
-RAM à l'ouverture, en option seulement (une structure rebâtie est
-résidente, un fichier mappé ne coûte que ce qu'on touche).
+**Le service** : `BriquesContext::byte_at(doc, position)`, deux dos —
+`PMP4` par dérivation ; un segment ancien (`PMP3` + postings à spans) par
+`posmap.ordinal_at` puis `resolve_doc_at(...).byte_from`. Aucune brique ne
+lit `e.byte_from` d'un posting ; `PostingResolver` rend des positions
+(`positions`, `positions_filtered`, `positions_for_doc`, `has_position`)
+et dit `has_byte_spans()`.
+
+**La requête travaille en positions de bout en bout.** `MatchV3` sort des
+résolveurs *non placé* : `(doc, position, span, sti, ordinaux)` et ses
+entrées de placement — `first_off` (sti + décalage de queue du premier
+jeton), `last_start_pos` (la position où **commence le texte du dernier
+jeton** : la dernière position pour un chunk, le **premier chunk** du mot
+pour un mot, dont `last_position` est la fin du span et non le début de
+ses octets — l'oubli de cette distinction a donné `[5441..5456]` pour
+`mutex lock` le temps d'une passe de vérité), `last_off`, `last_consumed`
+(octets consommés depuis le début du texte du dernier jeton, non bornés).
+`orchestrator::place_spans` place les matches gardés, triés par document
+: `byte_from = byte_at(position) + first_off`, `token_end = byte_at(
+last_start_pos) + last_off + contenu(last_ordinal)`, `byte_to = début du
+dernier jeton + last_consumed`, borné au contenu pour un mot (l'excès dans
+`overlap_overflow`, placé après les séparateurs par l'orchestrateur). Le
+dédoublonnage `(doc, position, byte_from)` se fait après placement ; la
+vérification (`verify_literal`) lit des spans placés. Les hits fuzzy et
+regex se regroupent **par positions** (une position ≥ 1 octet : le même
+seuil numérique regroupe un sur-ensemble ; le jeu de séparateurs du fuzzy
+est passé de 32 octets à 5 positions, ce que 32 octets de séparateurs
+occupent au plus) ; les fenêtres reconstruites (`rebuild_window_opts`)
+s'ancrent par un `byte_at` au lieu de deux lookups de postings, puis
+dérivent de position en position comme avant ; les spans finaux viennent
+de la carte arrière de la fenêtre.
+
+Ce que ça pèse : 30 000 fichiers, dictionnaire, 1 131,7 → 977,9 Mo de
+fichiers SFX (−13,6 %), postings −35 à −38 %, posmap +8 % ; v3 −9,6 % ;
+noyau entier, dictionnaire, 5 717 → **4 938 Mo** sur disque (×5,8 le texte).
+
+Trois fichiers restent des **dérivés** des postings : `.posmap` (inverse de
+`.sfxpost`, plus les points de contrôle), `.word_pos_map` (inverse de
+`.word_sfxpost`), `.sibling_v3` (positions consécutives) — ~27 % de l'index
+du noyau, reconstructibles en RAM à l'ouverture, en option seulement (une
+structure rebâtie est résidente, un fichier mappé ne coûte que ce qu'on
+touche).
 
 ## 6 ter. Le navigateur (emscripten)
 

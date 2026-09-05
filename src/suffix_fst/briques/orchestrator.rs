@@ -52,6 +52,67 @@ fn place_overlap_overflow(ctx: &BriquesContext<'_>, matches: &mut [MatchV3]) {
     }
 }
 
+/// Give every match its byte span.
+///
+/// The resolvers work in positions (the postings carry none of the bytes
+/// since `SFP5` / `WSP5`); this is the one place bytes are derived, from the
+/// posmap's checkpoints and the tokens' `own_len` (`BriquesContext::byte_at`,
+/// which reads the posting instead on an older segment):
+///
+/// - `byte_from` = start of the chunk at `position` + `first_off`;
+/// - the last token's text starts at the chunk at `last_start_pos` (its
+///   first chunk, for a word) + `last_off`, and its content is `own_len -
+///   sep_len` of `last_ordinal` (META) — that content end is `token_end`;
+/// - `byte_to` = last token start + `last_consumed`; a word-stripped last
+///   token clamps it at its content end and reports the excess in
+///   `overlap_overflow` (the orchestrator places it after the separators).
+///
+/// Matches are placed in (doc, position) order so a document's checkpoint
+/// walk is shared between neighbours. A match that cannot be placed (no
+/// posmap, a position past the document) keeps zero spans: short, never
+/// wrong, and never a lost document.
+pub fn place_spans(ctx: &BriquesContext<'_>, matches: &mut [MatchV3]) {
+    let Some(tt) = ctx.termtexts.as_ref() else { return };
+    if ctx.posmap.is_none() { return; }
+    matches.sort_by_key(|m| (m.doc_id, m.position));
+    let _t = profile::Timer::start();
+    // (doc, position) → byte offset of the chunk there, for the run of
+    // matches sharing a position.
+    let mut last: Option<(DocId, u32, u32)> = None;
+    let mut at = |doc: DocId, pos: u32| -> Option<u32> {
+        if let Some((d, p, b)) = last {
+            if d == doc && p == pos { return Some(b); }
+        }
+        let b = ctx.byte_at(doc, pos)?;
+        last = Some((doc, pos, b));
+        Some(b)
+    };
+    for m in matches.iter_mut() {
+        let Some(first) = at(m.doc_id, m.position) else { continue };
+        let last_chunk = if m.last_start_pos == m.position { first } else {
+            match at(m.doc_id, m.last_start_pos) { Some(b) => b, None => continue }
+        };
+        let Some(meta) = tt.meta(m.last_ordinal as u32) else { continue };
+        let content = meta.own_len.saturating_sub(meta.sep_len as u16) as u32;
+        let byte_from = first + m.first_off as u32;
+        let last_start = last_chunk + m.last_off as u32;
+        let token_end = last_start + content;
+        let end = last_start + m.last_consumed;
+        m.byte_from = byte_from;
+        m.token_end = token_end;
+        if meta.is_word_stripped {
+            // Past the word's content the key's bytes are the next word's
+            // (its content overlap), across a separator: clamp, report.
+            m.byte_to = end.min(token_end).max(byte_from);
+            m.overlap_overflow = end.saturating_sub(token_end).min(u8::MAX as u32) as u8;
+        } else {
+            m.byte_to = end.max(byte_from);
+            m.overlap_overflow = 0;
+        }
+    }
+    _t.stop(|c| &c.ns_place);
+}
+
 /// Exact substring search (d=0): the entry point for `contains` and its
 /// derived query types (`term`, `startsWith`, `phrase`).
 ///
@@ -88,6 +149,7 @@ pub fn contains_v3(
     let query_ref = effective_query.as_str();
 
     let mut matches = composite::find_literal_v3(ctx, query_ref, anchor_start, strict_separators);
+    place_spans(ctx, &mut matches);
     place_overlap_overflow(ctx, &mut matches);
 
     // Content length of the query, in BYTES — it is compared against byte spans
@@ -416,9 +478,9 @@ mod tests {
             builder.add_word_stripped(&ws.word_content, &ws.content_overlap, fo as u64, ws.first_own_len, ws.last_sep_len, ws.is_word_start);
         }
         let (fst_data, parent_data) = builder.build().unwrap();
-        let mut pw = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::new(data.num_content_ords);
+        let mut pw = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::positions_only(data.num_content_ords);
         for (co, postings) in data.content_postings.iter().enumerate() {
-            for &(d, t, bf, bt) in postings { pw.add_entry(co as u32, d, t, bf, bt); }
+            for &(d, t) in postings { pw.add_position(co as u32, d, t); }
         }
         let sfxpost = pw.finish();
         let derived = crate::suffix_fst::index_registry::build_derived_indexes_v3(&data.tokens, Some(&sfxpost), Some(&data.own_lens));
@@ -530,15 +592,19 @@ mod tests {
         let idx = build_index(&["mutex_lock", "hello_world"]);
         let reader = SfxFileReaderV3::open(&idx.sfx).unwrap();
         let resolver = MockResolver::new(&idx.sfxpost);
+        // Spans come out of the verification on the rebuilt window, which
+        // needs posmap and termtexts; without them a fuzzy search returns
+        // its documents and no highlight.
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None, segment_long_words: None,
+            posmap: crate::suffix_fst::posmap::PosMapReader::open(&idx.pm), word_sfxpost: None, sibling_v3: None,
+            termtexts: crate::suffix_fst::termtexts_v3::TermTextsReaderV3::open(&idx.tt), word_posmap: None, segment_long_words: None,
         };
         let (bitset, highlights, _) = fuzzy_v3(&ctx, "mutex_lck", 1, true, 2, Default::default());
         assert!(bitset.contains(0), "doc 0 should match fuzzy");
-        assert!(!highlights.is_empty());
+        assert_eq!(highlights, vec![(0, 0, 10)], "mutex_lock at bytes 0..10");
     }
 
     #[test]

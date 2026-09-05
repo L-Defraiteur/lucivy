@@ -10,6 +10,8 @@ mod tests {
     use crate::suffix_fst::collector_v3::SfxCollectorV3;
     use crate::suffix_fst::file_v3::{SfxFileReaderV3, SfxFileWriterV3};
     use crate::suffix_fst::sfxpost_v2::SfxPostReaderV2;
+    use crate::suffix_fst::posmap::PosMapReader;
+    use crate::suffix_fst::termtexts_v3::TermTextsReaderV3;
     use crate::suffix_fst::briques::orchestrator;
     use crate::suffix_fst::briques::fst_walk;
     use crate::suffix_fst::briques::resolve;
@@ -70,10 +72,10 @@ mod tests {
         let (fst_data, parent_data) = builder.build().unwrap();
 
         let num_terms = data.num_content_ords;
-        let mut post_writer = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::new(num_terms);
+        let mut post_writer = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::positions_only(num_terms);
         for (content_ord, postings) in data.content_postings.iter().enumerate() {
-            for &(doc_id, ti, bf, bt) in postings {
-                post_writer.add_entry(content_ord as u32, doc_id, ti, bf, bt);
+            for &(doc_id, ti) in postings {
+                post_writer.add_position(content_ord as u32, doc_id, ti);
             }
         }
         let sfxpost = post_writer.finish();
@@ -496,11 +498,14 @@ mod tests {
         let idx = build(&["mutex_lock"]);
         let reader = SfxFileReaderV3::open(&idx.sfx_bytes).unwrap();
         let resolver = TestResolver(SfxPostReaderV2::open_slice(&idx.sfxpost_bytes).unwrap());
+        // The postings carry no byte span: the spans derive from posmap and
+        // termtexts, which a context must hold to place them.
         let ctx = BriquesContext {
             reader: &reader, resolver: &resolver, filter_docs: None,
             debug: false,
             trace_id: None,
-            posmap: None, word_sfxpost: None, sibling_v3: None, termtexts: None, word_posmap: None, segment_long_words: None,
+            posmap: PosMapReader::open(&idx.posmap_bytes), word_sfxpost: None, sibling_v3: None,
+            termtexts: TermTextsReaderV3::open(&idx.termtexts_bytes), word_posmap: None, segment_long_words: None,
         };
         let matches = orchestrator::contains_v3(&ctx, "lock", false, false, true);
         eprintln!("h3 all matches:");

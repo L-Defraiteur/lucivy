@@ -20,6 +20,16 @@
 //!   [payloads] per document: (d_token_index, d_byte_from, byte_to - byte_from)
 //! ```
 //!
+//! `SFP5` (written since 5 September 2026 by the v3 pipeline) drops the
+//! byte spans: an entry is `d_token_index` alone. The offset of a position
+//! derives from the `.posmap`'s byte checkpoints and the tokens' `own_len`
+//! (`PosMapReader::byte_at`), the span of a chunk is its `own_len`. The
+//! spans were 37 % of the postings and 15 % of a kernel index. A reader
+//! over an `SFP5` file answers `has_byte_spans() == false`, and the
+//! span-carrying accessors (`entries*`, `entry_at`) hand back zero spans:
+//! the v3 briques only ask for positions (`positions*`, `has_position`).
+//! The v2 pipeline (`sfx_version` 2) keeps writing `SFP4` with its spans.
+//!
 //! `headers_len` was missing from the first `SFP3` (25 August, afternoon):
 //! the reader found the payloads by decoding all `num_docs` headers on every
 //! lookup, which made `has_doc` / `entry_at` linear in the ordinal's document
@@ -58,6 +68,19 @@ const MAGIC_V3: &[u8; 4] = b"SFP3";
 /// `SFP3` blocks behind a block-coded offset table (`block_offsets`);
 /// written since 4 September 2026 at night.
 const MAGIC_V4: &[u8; 4] = b"SFP4";
+/// `SFP4` without the byte spans: one varint per entry. Written since
+/// 5 September 2026 by the v3 pipeline (see the module header).
+const MAGIC_V5: &[u8; 4] = b"SFP5";
+
+/// One occurrence, by position only — what `SFP5` stores and what the v3
+/// briques ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PositionEntry {
+    /// Document containing this occurrence.
+    pub doc_id: u32,
+    /// Token position within the document.
+    pub token_index: u32,
+}
 /// Documents between two checkpoints in an `SFP3` block. `find_doc` is a
 /// binary search over fixed records in V2; varints break that, so a checkpoint
 /// every `CHECKPOINT_EVERY` documents restores it — one search over the
@@ -82,21 +105,39 @@ fn checkpoints_for(n: usize) -> usize {
 pub struct SfxPostWriterV2 {
     /// Per ordinal: list of (doc_id, token_index, byte_from, byte_to).
     ordinals: Vec<Vec<(u32, u32, u32, u32)>>,
+    /// Whether the entries carry byte spans (`SFP4`) or positions only (`SFP5`).
+    spans: bool,
 }
 
 impl SfxPostWriterV2 {
-    /// Creates a new SFX posting writer for the specified number of terms.
+    /// A writer of `SFP4`: entries with their byte spans (the v2 pipeline).
     pub fn new(num_terms: usize) -> Self {
         Self {
             ordinals: vec![Vec::new(); num_terms],
+            spans: true,
+        }
+    }
+
+    /// A writer of `SFP5`: positions only, the spans derive from `.posmap`
+    /// (the v3 pipeline). `add_entry` ignores the spans it is given.
+    pub fn positions_only(num_terms: usize) -> Self {
+        Self {
+            ordinals: vec![Vec::new(); num_terms],
+            spans: false,
         }
     }
 
     /// Add a posting entry for the given ordinal.
     pub fn add_entry(&mut self, ordinal: u32, doc_id: u32, token_index: u32, byte_from: u32, byte_to: u32) {
         if (ordinal as usize) < self.ordinals.len() {
-            self.ordinals[ordinal as usize].push((doc_id, token_index, byte_from, byte_to));
+            let (bf, bt) = if self.spans { (byte_from, byte_to) } else { (0, 0) };
+            self.ordinals[ordinal as usize].push((doc_id, token_index, bf, bt));
         }
+    }
+
+    /// Add an occurrence by position (a `positions_only` writer).
+    pub fn add_position(&mut self, ordinal: u32, doc_id: u32, token_index: u32) {
+        self.add_entry(ordinal, doc_id, token_index, 0, 0);
     }
 
     /// Build the V2 binary data.
@@ -133,8 +174,10 @@ impl SfxPostWriterV2 {
                 while i < entries.len() && entries[i].0 == doc_id {
                     let (_, ti, bf, bt) = entries[i];
                     write_varint(&mut payload_data, ti.wrapping_sub(prev_ti) as u64);
-                    write_varint(&mut payload_data, bf.wrapping_sub(prev_bf) as u64);
-                    write_varint(&mut payload_data, bt.wrapping_sub(bf) as u64);
+                    if self.spans {
+                        write_varint(&mut payload_data, bf.wrapping_sub(prev_bf) as u64);
+                        write_varint(&mut payload_data, bt.wrapping_sub(bf) as u64);
+                    }
                     prev_ti = ti;
                     prev_bf = bf;
                     count += 1;
@@ -184,7 +227,7 @@ impl SfxPostWriterV2 {
         // Assemble final binary
         let table = block_offsets::encode(&offset_table);
         let mut out = Vec::with_capacity(8 + table.len() + entry_data.len());
-        out.extend_from_slice(MAGIC_V4);
+        out.extend_from_slice(if self.spans { MAGIC_V4 } else { MAGIC_V5 });
         out.extend_from_slice(&(num_terms as u32).to_le_bytes());
         out.extend_from_slice(&table);
         out.extend_from_slice(&entry_data);
@@ -223,6 +266,9 @@ pub struct SfxPostReaderV2 {
     /// blocks start)` in `data`, the directory ending where the blocks
     /// start and the blocks at `entry_data_start`.
     block_table: Option<(usize, usize)>,
+    /// Whether the entries carry byte spans (`SFP2`-`SFP4`) or positions
+    /// only (`SFP5`).
+    spans: bool,
     /// Shard dictionary mode: the segment's `.gmap`, so that callers ask
     /// by global id and the file answers by local ordinal.
     gmap: Option<common::OwnedBytes>,
@@ -248,10 +294,11 @@ impl SfxPostReaderV2 {
         if data.len() < 8 {
             return None;
         }
-        let (v3, block) = match &data[0..4] {
-            m if m == MAGIC_V4 => (true, true),
-            m if m == MAGIC_V3 => (true, false),
-            m if m == MAGIC_V2 => (false, false),
+        let (v3, block, spans) = match &data[0..4] {
+            m if m == MAGIC_V5 => (true, true, false),
+            m if m == MAGIC_V4 => (true, true, true),
+            m if m == MAGIC_V3 => (true, false, true),
+            m if m == MAGIC_V2 => (false, false, true),
             _ => return None,
         };
         let num_terms = u32::from_le_bytes(data[4..8].try_into().ok()?);
@@ -267,6 +314,7 @@ impl SfxPostReaderV2 {
             return Some(Self {
                 data, num_terms, offsets_start: 8, entry_data_start: 8 + used, v3,
                 block_table: Some((dir_start, blocks_start)),
+                spans,
                 gmap: None,
             });
         }
@@ -276,7 +324,14 @@ impl SfxPostReaderV2 {
         }
         let offsets_start = 8;
         let entry_data_start = 8 + offsets_size;
-        Some(Self { data, num_terms, offsets_start, entry_data_start, v3, block_table: None, gmap: None })
+        Some(Self { data, num_terms, offsets_start, entry_data_start, v3, block_table: None, spans, gmap: None })
+    }
+
+    /// Whether the entries carry byte spans. `false` on an `SFP5` file: the
+    /// span-carrying accessors then return zero spans, and the offset of a
+    /// position comes from `.posmap` (`PosMapReader::byte_at`).
+    pub fn has_byte_spans(&self) -> bool {
+        self.spans
     }
 
     /// Open from a byte slice (copies into owned Vec).
@@ -435,6 +490,87 @@ impl SfxPostReaderV2 {
         found
     }
 
+    /// The occurrences of `ordinal` by position, optionally restricted to
+    /// the documents of `filter` — the v3 briques' resolution. Works on
+    /// every layout; on `SFP5` it is the whole of what the file holds.
+    pub fn positions_filtered(
+        &self,
+        ordinal: u32,
+        filter: Option<&dyn crate::query::posting_resolver::DocFilter>,
+    ) -> Vec<PositionEntry> {
+        let Some(ordinal) = self.local(ordinal) else { return Vec::new(); };
+        if ordinal >= self.num_terms {
+            return Vec::new();
+        }
+        let Some(header) = self.read_ordinal_header(ordinal) else {
+            return Vec::new();
+        };
+        let mut result = Vec::new();
+        let Some(filter) = filter else {
+            header.for_each_doc(|_, doc_id, offset, count| {
+                header.walk_payload(offset as usize, count as usize, |ti, _, _| {
+                    result.push(PositionEntry { doc_id, token_index: ti });
+                    true
+                });
+                true
+            });
+            return result;
+        };
+        for i in Self::filtered_indices(&header, filter) {
+            let (doc_id, offset, count) = header.doc_at(i);
+            header.walk_payload(offset as usize, count as usize, |ti, _, _| {
+                result.push(PositionEntry { doc_id, token_index: ti });
+                true
+            });
+        }
+        result
+    }
+
+    /// The positions of `ordinal` in one document, in order; empty when
+    /// the document has none.
+    pub fn positions_for_doc(&self, ordinal: u32, target_doc: u32) -> Vec<u32> {
+        let Some(ordinal) = self.local(ordinal) else { return Vec::new(); };
+        if ordinal >= self.num_terms { return Vec::new(); }
+        let Some(header) = self.read_ordinal_header(ordinal) else { return Vec::new() };
+        let Some((_, offset, count)) = header.find_doc_full(target_doc) else { return Vec::new() };
+        let mut out = Vec::with_capacity(count as usize);
+        header.walk_payload(offset as usize, count as usize, |ti, _, _| {
+            out.push(ti);
+            true
+        });
+        out
+    }
+
+    /// Whether `ordinal` occurs at `position` in `doc_id`: one document
+    /// lookup and a scan that stops at the first position past the target.
+    pub fn has_position(&self, ordinal: u32, doc_id: u32, position: u32) -> bool {
+        let Some(ordinal) = self.local(ordinal) else { return false; };
+        if ordinal >= self.num_terms { return false; }
+        let Some(header) = self.read_ordinal_header(ordinal) else { return false };
+        let Some((_, offset, count)) = header.find_doc_full(doc_id) else { return false };
+        let mut found = false;
+        header.walk_payload(offset as usize, count as usize, |ti, _, _| {
+            if ti == position { found = true; return false; }
+            ti < position
+        });
+        found
+    }
+
+    /// Visit every occurrence of an ordinal as `(doc_id, token_index)`
+    /// without allocating (the merge path).
+    pub fn for_each_position(&self, ordinal: u32, mut f: impl FnMut(u32, u32)) {
+        let Some(ordinal) = self.local(ordinal) else { return; };
+        if ordinal >= self.num_terms { return; }
+        let Some(header) = self.read_ordinal_header(ordinal) else { return };
+        header.for_each_doc(|_, doc_id, offset, count| {
+            header.walk_payload(offset as usize, count as usize, |ti, _, _| {
+                f(doc_id, ti);
+                true
+            });
+            true
+        });
+    }
+
     /// doc_freq: number of unique docs for an ordinal. O(1) — just read the header.
     pub fn doc_freq(&self, ordinal: u32) -> u32 {
         let Some(ordinal) = self.local(ordinal) else { return 0; };
@@ -490,6 +626,7 @@ impl SfxPostReaderV2 {
                     headers: &data[headers_start..payload_start],
                 },
                 payload_data: &data[payload_start..],
+                spans: self.spans,
             });
         }
 
@@ -510,6 +647,7 @@ impl SfxPostReaderV2 {
                 entry_counts: &data[c0..payload_start],
             },
             payload_data: &data[payload_start..],
+            spans: true,
         })
     }
 
@@ -543,6 +681,8 @@ struct OrdinalHeader<'a> {
     /// V2: three fixed-width arrays. V3: checkpoints and varint headers.
     layout: HeaderLayout<'a>,
     payload_data: &'a [u8],
+    /// Whether an entry is three varints (spans) or one (`SFP5`).
+    spans: bool,
 }
 
 enum HeaderLayout<'a> {
@@ -653,6 +793,18 @@ impl<'a> OrdinalHeader<'a> {
         // `decode_vint` stops after five bytes, so a corrupt run of
         // continuation bits cannot shift past 32 bits.
         let (mut prev_ti, mut prev_bf) = (0u32, 0u32);
+        if !self.spans {
+            // `SFP5`: one delta per entry, no span to hand back.
+            for _ in 0..count {
+                if pos >= data.len() { return }
+                let (a, n) = decode_vint(&data[pos..]); pos += n;
+                prev_ti = prev_ti.wrapping_add(a);
+                if !f(prev_ti, 0, 0) {
+                    return;
+                }
+            }
+            return;
+        }
         for _ in 0..count {
             if pos >= data.len() { return }
             let (a, n) = decode_vint(&data[pos..]); pos += n;
@@ -807,6 +959,59 @@ mod tests {
         assert_eq!(entries[1].doc_id, 10);
         assert_eq!(entries[1].token_index, 1);
         assert_eq!(entries[2].doc_id, 20);
+    }
+
+    /// `SFP5` keeps every position of `SFP4` and answers the position
+    /// accessors alike; it holds no span, says so, and is smaller.
+    #[test]
+    fn positions_only_layout_reads_like_the_spanned_one() {
+        let mut full = SfxPostWriterV2::new(3);
+        let mut bare = SfxPostWriterV2::positions_only(3);
+        let mut expect: Vec<Vec<(u32, u32)>> = vec![Vec::new(); 3];
+        for doc in 0..50u32 {
+            for k in 0..(doc % 4) {
+                let ti = doc * 3 + k * 7;
+                let bf = ti * 5;
+                let ord = (doc + k) % 3;
+                full.add_entry(ord, doc, ti, bf, bf + 4);
+                bare.add_entry(ord, doc, ti, bf, bf + 4);
+                expect[ord as usize].push((doc, ti));
+            }
+        }
+        let (a, b) = (full.finish(), bare.finish());
+        assert_eq!(&a[0..4], MAGIC_V4);
+        assert_eq!(&b[0..4], MAGIC_V5);
+        assert!(b.len() < a.len(), "SFP5 {} B is not smaller than SFP4 {} B", b.len(), a.len());
+        let (ra, rb) = (SfxPostReaderV2::open(a).unwrap(), SfxPostReaderV2::open(b).unwrap());
+        assert!(ra.has_byte_spans());
+        assert!(!rb.has_byte_spans());
+        for ord in 0..3u32 {
+            expect[ord as usize].sort_unstable();
+            let pos = |r: &SfxPostReaderV2| r.positions_filtered(ord, None).iter()
+                .map(|e| (e.doc_id, e.token_index)).collect::<Vec<_>>();
+            assert_eq!(pos(&ra), expect[ord as usize], "ord {ord}: SFP4 positions");
+            assert_eq!(pos(&rb), expect[ord as usize], "ord {ord}: SFP5 positions");
+            assert_eq!(ra.doc_freq(ord), rb.doc_freq(ord));
+            let filter: HashSet<u32> = [3, 17, 46].into();
+            assert_eq!(
+                rb.positions_filtered(ord, Some(&filter as &dyn DocFilter)),
+                ra.positions_filtered(ord, Some(&filter as &dyn DocFilter)),
+            );
+            for doc in [0u32, 7, 17, 49, 50] {
+                assert_eq!(rb.positions_for_doc(ord, doc), ra.positions_for_doc(ord, doc), "ord {ord} doc {doc}");
+                assert_eq!(rb.has_doc(ord, doc), ra.has_doc(ord, doc));
+                for ti in [0u32, 21, 28, 35, 1000] {
+                    assert_eq!(rb.has_position(ord, doc, ti), ra.has_position(ord, doc, ti), "ord {ord} doc {doc} ti {ti}");
+                    assert_eq!(rb.entry_at(ord, doc, ti).is_some(), ra.entry_at(ord, doc, ti).is_some());
+                }
+            }
+            let mut walked = Vec::new();
+            rb.for_each_position(ord, |d, ti| walked.push((d, ti)));
+            assert_eq!(walked, expect[ord as usize]);
+            // The span-carrying accessors hand back zero spans, not garbage.
+            assert!(rb.entries(ord).iter().all(|e| e.byte_from == 0 && e.byte_to == 0));
+            assert_eq!(rb.entries(ord).len(), expect[ord as usize].len());
+        }
     }
 
     #[test]

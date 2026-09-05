@@ -7,18 +7,26 @@ use std::collections::HashSet;
 
 use crate::suffix_fst::file::SfxPostingsReader;
 use crate::suffix_fst::sfxpost_v2::SfxPostReaderV2;
+pub use crate::suffix_fst::sfxpost_v2::PositionEntry;
 use crate::{DocId, SegmentReader};
 
 /// A resolved posting entry: one occurrence of a term in a document.
+///
+/// The byte span is what the v2 pipeline (`sfx_version` 2, `SFP4`) stores
+/// and reads. A v3 segment's postings (`SFP5`) carry positions only and
+/// hand back zero spans here: the v3 briques ask `positions*` instead and
+/// place their spans through `BriquesContext::byte_at`.
 #[derive(Debug, Clone)]
 pub struct PostingEntry {
     /// Document containing this occurrence.
     pub doc_id: DocId,
     /// Token position within the document.
     pub position: u32,
-    /// Start byte offset of the term in the original text.
+    /// Start byte offset of the term in the original text (0 when the
+    /// postings carry no spans: `PostingResolver::has_byte_spans`).
     pub byte_from: u32,
-    /// End byte offset (exclusive) of the term in the original text.
+    /// End byte offset (exclusive) of the term in the original text (0
+    /// when the postings carry no spans).
     pub byte_to: u32,
 }
 
@@ -88,6 +96,34 @@ pub trait PostingResolver: Send + Sync {
     /// V2 overrides with O(log n) binary search, zero payload decode.
     fn has_doc(&self, ordinal: u64, doc_id: u32) -> bool {
         self.resolve(ordinal).iter().any(|e| e.doc_id == doc_id)
+    }
+
+    /// Whether the entries carry byte spans (`SFP2`-`SFP4`). A v3 segment's
+    /// `SFP5` answers `false`: its spans derive from `.posmap`.
+    fn has_byte_spans(&self) -> bool { true }
+
+    /// Every occurrence of an ordinal, by position — the v3 resolution.
+    fn positions(&self, ordinal: u64) -> Vec<PositionEntry> {
+        self.resolve(ordinal).into_iter()
+            .map(|e| PositionEntry { doc_id: e.doc_id, token_index: e.position })
+            .collect()
+    }
+
+    /// `positions` restricted to the documents of `doc_ids`.
+    fn positions_filtered(&self, ordinal: u64, doc_ids: &dyn DocFilter) -> Vec<PositionEntry> {
+        self.resolve_filtered(ordinal, doc_ids).into_iter()
+            .map(|e| PositionEntry { doc_id: e.doc_id, token_index: e.position })
+            .collect()
+    }
+
+    /// The positions of an ordinal in one document, in order.
+    fn positions_for_doc(&self, ordinal: u64, doc_id: u32) -> Vec<u32> {
+        self.resolve_doc(ordinal, doc_id).into_iter().map(|e| e.position).collect()
+    }
+
+    /// Whether the ordinal occurs at `position` in `doc_id`.
+    fn has_position(&self, ordinal: u64, doc_id: u32, position: u32) -> bool {
+        self.resolve_doc_at(ordinal, doc_id, position).is_some()
     }
 
     /// doc_freq = number of unique docs for this ordinal.
@@ -203,6 +239,26 @@ impl PostingResolver for SfxPostResolverV2 {
 
     fn has_doc(&self, ordinal: u64, doc_id: u32) -> bool {
         self.reader.has_doc(ordinal as u32, doc_id)
+    }
+
+    fn has_byte_spans(&self) -> bool {
+        self.reader.has_byte_spans()
+    }
+
+    fn positions(&self, ordinal: u64) -> Vec<PositionEntry> {
+        self.reader.positions_filtered(ordinal as u32, None)
+    }
+
+    fn positions_filtered(&self, ordinal: u64, doc_ids: &dyn DocFilter) -> Vec<PositionEntry> {
+        self.reader.positions_filtered(ordinal as u32, Some(doc_ids))
+    }
+
+    fn positions_for_doc(&self, ordinal: u64, doc_id: u32) -> Vec<u32> {
+        self.reader.positions_for_doc(ordinal as u32, doc_id)
+    }
+
+    fn has_position(&self, ordinal: u64, doc_id: u32, position: u32) -> bool {
+        self.reader.has_position(ordinal as u32, doc_id, position)
     }
 
     fn doc_freq(&self, ordinal: u64) -> u32 {

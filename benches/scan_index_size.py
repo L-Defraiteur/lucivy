@@ -171,13 +171,28 @@ def scan_posmap(path, deep, magic):
     b = open(path, "rb").read()
     if len(b) < 8: return {"file": len(b), "empty": True}
     got = b[0:4]
-    assert got in (magic, b"PMP3"), got
-    width = 3 if got == b"PMP3" else 4
+    assert got in (magic, b"PMP3", b"PMP4", b"WMP3"), got
+    width = 3 if got in (b"PMP3", b"PMP4") else 4
     n = struct.unpack_from("<I", b, 4)[0]
     end = struct.unpack_from("<Q", b, 8 + 8 * n)[0]  # last offset: the data's true end (a footer follows)
     data = b[8 + 8 * (n + 1): 8 + 8 * (n + 1) + end]
-    slots = len(data) // width
-    r = {"file": len(b), "num_docs": n, "offset_table_bytes": 8 * (n + 1), "slots": slots, "slot_width": width}
+    if got == b"PMP4":
+        # Per document: u32 token count, one u32 byte checkpoint per 16
+        # positions, then the 3-byte slots. Count the checkpoints apart.
+        offs = struct.unpack_from("<%dQ" % (n + 1), b, 8)
+        ck_bytes = 0; slots = 0; slot_data = bytearray()
+        for d in range(n):
+            s, e = offs[d], offs[d + 1]
+            if e - s < 4: continue
+            nt = struct.unpack_from("<I", data, s)[0]
+            hdr = 4 + 4 * ((nt + 15) // 16)
+            ck_bytes += hdr; slots += nt
+            if deep: slot_data += data[s + hdr: e]
+        r = {"file": len(b), "num_docs": n, "offset_table_bytes": 8 * (n + 1), "slots": slots, "slot_width": width, "checkpoint_bytes": ck_bytes}
+        data = bytes(slot_data)
+    else:
+        slots = len(data) // width
+        r = {"file": len(b), "num_docs": n, "offset_table_bytes": 8 * (n + 1), "slots": slots, "slot_width": width}
     if deep:
         if width == 4:
             a = array("I"); a.frombytes(data[: slots * 4]); sentinel = 0xFFFFFFFF
@@ -185,7 +200,7 @@ def scan_posmap(path, deep, magic):
             a = [int.from_bytes(data[i:i + 3], "little") for i in range(0, slots * 3, 3)]; sentinel = 0xFFFFFF
         empty = a.count(sentinel)
         r.update(empty_slots=empty)
-        if got in (b"PMAP", b"PMP3"):
+        if got in (b"PMAP", b"PMP3", b"PMP4"):
             r.update(max_ordinal=max(x for x in a if x != sentinel))
         else:
             spans = collections.Counter()
@@ -218,9 +233,9 @@ def scan_sibling(path, deep):
 
 def scan_sfxpost(path, deep):
     b = open(path, "rb").read()
-    assert b[0:4] in (b"SFP3", b"SFP4"), b[0:4]
+    assert b[0:4] in (b"SFP3", b"SFP4", b"SFP5"), b[0:4]
     n = struct.unpack_from("<I", b, 4)[0]
-    if b[0:4] == b"SFP4":
+    if b[0:4] in (b"SFP4", b"SFP5"):
         offs, base = block_table(b, 8); table_bytes = base - 8
     else:
         base = 8 + 4 * (n + 1); table_bytes = 4 * (n + 1)
@@ -248,9 +263,10 @@ def scan_sfxpost(path, deep):
 
 def scan_wsp(path, deep):
     b = open(path, "rb").read()
-    assert b[0:4] in (b"WSP3", b"WSP4"), b[0:4]
+    assert b[0:4] in (b"WSP3", b"WSP4", b"WSP5"), b[0:4]
     n = struct.unpack_from("<I", b, 4)[0]
-    if b[0:4] == b"WSP4":
+    ck_size = 12 if b[0:4] == b"WSP5" else 16
+    if b[0:4] in (b"WSP4", b"WSP5"):
         offs, entries_start = block_table(b, 8); table_bytes = entries_start - 8
     else:
         entries_start = 0; table_bytes = 4 * (n + 1)  # WSP3 offsets are absolute
@@ -263,7 +279,7 @@ def scan_wsp(path, deep):
             if e <= s: continue
             nonempty += 1
             ne, _ = varint(b, s); entries += ne
-            ckpt += 16 * (0 if ne == 0 else (ne - 1) // 32)
+            ckpt += ck_size * (0 if ne == 0 else (ne - 1) // 32)
         r.update(entries=entries, nonempty_ordinals=nonempty, checkpoint_bytes=ckpt)
     return r
 
