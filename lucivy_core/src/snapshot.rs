@@ -103,6 +103,11 @@ fn read_live_files(
             let path = shard_dir.join(&name);
             match std::fs::read(&path) {
                 Ok(data) => files.push((name, data)),
+                // A pending segment's dictionary pair exists only for the
+                // fields it minted texts in; `dictionary_files` names it
+                // for every field (`SfxDictionaryMeta::pair_files`).
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound
+                    && (name.ends_with(".newsfx") || name.ends_with(".newtexts")) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     last_missing = path.display().to_string();
                     restart = true;

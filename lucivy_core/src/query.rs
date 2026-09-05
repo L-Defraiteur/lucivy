@@ -63,6 +63,12 @@ pub struct SchemaConfig {
     /// query touches. Off by default; fixed at creation.
     #[serde(default)]
     pub derived_in_ram: Option<bool>,
+    /// Shard dictionary: a search waits for the background fold of the
+    /// last commit's texts (default), so that its cost never depends on
+    /// when it runs; `false` searches at once over the pending parts.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dictionary_wait: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

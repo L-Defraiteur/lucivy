@@ -76,6 +76,13 @@ impl<'a> DeltaExporter for LucivyDeltaExporter<'a> {
             for &g in &d.generations {
                 ids.insert(ld_lucivy::suffix_fst::dictionary::dictionary_bundle_id(g));
             }
+            // A pending pair travels as its own bundle too: `<uuid>.<field>.new`
+            // is a prefix of its two files and of nothing else of the segment.
+            for u in &d.pending_segments {
+                for &f in &d.field_ids {
+                    ids.insert(format!("{u}.{f}.new"));
+                }
+            }
         }
         Ok(ids)
     }
@@ -86,6 +93,19 @@ impl<'a> DeltaExporter for LucivyDeltaExporter<'a> {
 
     fn read_bundle_files(&self, bundle_id: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
         let (_, meta) = self.snapshot()?;
+        if bundle_id.ends_with(".new") && bundle_id.matches('.').count() == 2 {
+            let mut files = Vec::new();
+            for ext in ["sfx", "termtexts"] {
+                let rel = format!("{bundle_id}{ext}");
+                let full_path = self.index_path.join(&rel);
+                if full_path.exists() {
+                    let data = std::fs::read(&full_path)
+                        .map_err(|e| format!("cannot read '{}': {e}", full_path.display()))?;
+                    files.push((rel, data));
+                }
+            }
+            return Ok(files);
+        }
         if let Some(g) = bundle_id.strip_prefix("dict-").and_then(|r| r.trim_end_matches('.').parse::<u64>().ok()) {
             let mut files = Vec::new();
             let dict_files = meta.sfx_dictionary.as_ref().map(|d| d.files_of(g)).unwrap_or_default();

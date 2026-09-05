@@ -288,6 +288,8 @@ pub struct Index {
     /// have (`SegmentReader::open`; pruned to the live segments by the
     /// reader, `retain_derived`).
     derived_cache: Arc<std::sync::Mutex<HashMap<(SegmentId, u32), Arc<crate::suffix_fst::derived::DerivedSlices>>>>,
+    /// The background fold of a shard dictionary, if one runs (`dictionary_fold.rs`).
+    dictionary_fold: Arc<crate::suffix_fst::dictionary_fold::DictionaryFold>,
 }
 
 impl Index {
@@ -426,6 +428,7 @@ impl Index {
             inventory,
             sfx_dictionary: Arc::new(RwLock::new(sfx_dictionary)),
             derived_cache: Default::default(),
+            dictionary_fold: Default::default(),
         }
     }
 
@@ -471,10 +474,22 @@ impl Index {
     fn refresh_sfx_dictionary(&self, metas: &IndexMeta) {
         let Some(wanted) = metas.sfx_dictionary.as_ref() else { return };
         let held = self.sfx_dictionary();
-        if held.as_ref().is_some_and(|d| d.generations() == wanted.generations.as_slice()) {
+        if held.as_ref().is_some_and(|d| d.same_parts(wanted)) {
             return;
         }
         self.set_sfx_dictionary(Some(Arc::new(SfxDictionary::open(&self.directory, wanted, held.as_deref()))));
+    }
+
+    /// The state of the shard dictionary's background fold.
+    pub fn dictionary_fold(&self) -> &Arc<crate::suffix_fst::dictionary_fold::DictionaryFold> {
+        &self.dictionary_fold
+    }
+
+    /// Wait for a running dictionary fold, if any. Returns true when the
+    /// live dictionary changed since the last call — the caller's readers
+    /// should reload to see the folded parts instead of the pairs.
+    pub fn wait_dictionary_fold(&self) -> bool {
+        self.dictionary_fold.wait()
     }
 
     /// The slot the live dictionary sits in, for a collector that must see

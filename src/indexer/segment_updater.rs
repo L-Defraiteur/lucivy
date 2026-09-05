@@ -475,6 +475,9 @@ impl SegmentUpdater {
         while self.shared.pending_merge_tasks.load(Ordering::Acquire) {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+        // A shard dictionary's background fold, and the meta.json it asks
+        // for: a reopen after this sees the generation, not the pairs.
+        self.shared.index.dictionary_fold().wait_settled();
         Ok(())
     }
 }

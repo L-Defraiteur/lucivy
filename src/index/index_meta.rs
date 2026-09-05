@@ -323,6 +323,15 @@ pub struct IndexSettings {
     #[serde(default)]
     #[serde(skip_serializing_if = "is_false")]
     pub derived_in_ram: bool,
+    /// On a shard-dictionary index, a search waits for the background fold
+    /// of the last commit's texts before it runs (`Index::wait_dictionary_fold`),
+    /// so that it never walks the pending pairs on top of the generations —
+    /// a query always costs what the settled dictionary costs. `false` lets
+    /// a search run at once over more parts (`dictionary_wait` in the schema
+    /// config; `LUCIVY_DICT_WAIT=0` overrides for a measurement).
+    #[serde(default = "return_true")]
+    #[serde(skip_serializing_if = "is_true")]
+    pub dictionary_wait: bool,
 }
 
 /// Version of an index whose meta.json predates the field: those were v2.
@@ -351,6 +360,7 @@ impl Default for IndexSettings {
             sfx_enabled: true,
             sfx_version: 3,
             derived_in_ram: false,
+            dictionary_wait: true,
         }
     }
 }
@@ -394,12 +404,34 @@ pub struct SfxDictionaryMeta {
     pub next_ids: std::collections::BTreeMap<u32, u64>,
     /// Fields with a dictionary.
     pub field_ids: Vec<u32>,
+    /// Segments whose own dictionary pair (`<uuid>.<field>.newsfx` and
+    /// `.newtexts`: the FST and texts of the ids they minted, built on their
+    /// build thread) is a live part of the dictionary, not yet folded into a
+    /// generation. A commit names its new segments here and returns; a
+    /// background fold merges them into the next generation and the next
+    /// commit names that instead (`indexer::dictionary_commit`). Empty on an
+    /// index whose folds are all done — and on every meta written before
+    /// 6 September 2026.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pending_segments: Vec<String>,
 }
 
 impl SfxDictionaryMeta {
-    /// The files of every live generation, relative to the index directory.
+    /// The files of every live generation and pending pair, relative to the
+    /// index directory.
     pub fn files(&self) -> Vec<PathBuf> {
-        self.generations.iter().flat_map(|&g| self.files_of(g)).collect()
+        self.generations.iter().flat_map(|&g| self.files_of(g))
+            .chain(self.pending_segments.iter().flat_map(|u| self.pair_files(u)))
+            .collect()
+    }
+
+    /// The dictionary pair of one pending segment, per field.
+    pub fn pair_files(&self, segment_uuid: &str) -> Vec<PathBuf> {
+        self.field_ids.iter().flat_map(|&f| {
+            [PathBuf::from(format!("{segment_uuid}.{f}.newsfx")),
+             PathBuf::from(format!("{segment_uuid}.{f}.newtexts"))]
+        }).collect()
     }
 
     /// The files of one generation.
@@ -640,6 +672,7 @@ mod tests {
                 sfx_enabled: true,
                 sfx_version: 3,
                 derived_in_ram: false,
+                dictionary_wait: true,
             }
         );
         {

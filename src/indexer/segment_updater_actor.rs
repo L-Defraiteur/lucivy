@@ -101,6 +101,16 @@ impl Message for SuMergesDoneMsg {
     fn decode(_: &[u8]) -> Result<Self, String> { Ok(Self) }
 }
 
+/// Internal: the background fold of the shard dictionary swapped the live
+/// dictionary; `meta.json` is to be rewritten so that the disk names the
+/// generation instead of the segments' pairs (`dictionary_commit`).
+pub(crate) struct SuDictionaryFoldedMsg;
+impl Message for SuDictionaryFoldedMsg {
+    fn type_tag() -> u64 { type_tag_hash(b"SuDictionaryFoldedMsg") }
+    fn encode(&self) -> Vec<u8> { vec![] }
+    fn decode(_: &[u8]) -> Result<Self, String> { Ok(Self) }
+}
+
 /// What a finished batch of merge tasks hands back to the actor.
 pub(crate) struct MergesDone {
     /// One slot per operation, filled by its task. `None` = the task failed.
@@ -166,7 +176,7 @@ impl SegmentUpdaterState {
 
         // A shard dictionary folds the new segments' texts into its next
         // generation first, so that the meta.json this commit writes names it.
-        super::dictionary_commit::fold_new_texts(&self.shared)?;
+        super::dictionary_commit::fold_new_texts(&self.shared, self_ref.clone())?;
 
         // Phase 1: commit without merges (fast — just save_metas).
         let mut dag = super::commit_dag::build_commit_dag(
@@ -182,6 +192,10 @@ impl SegmentUpdaterState {
         if crate::diag::is_verbose() {
             eprintln!("{}", dag_result.display_summary());
         }
+
+        // The meta.json is written: the dictionary pairs it no longer names
+        // are consumed.
+        super::dictionary_commit::delete_consumed_pairs(&self.shared)?;
 
         self.shared.event_bus.emit(IndexEvent::CommitCompleted {
             opstamp,
@@ -599,6 +613,21 @@ pub(crate) fn create_segment_updater_actor(
                 Ok(()) => { if let Some(r) = reply { r.send(SuOkReply); } }
                 Err(e) => { if let Some(r) = reply { r.send_err(e); } }
             }
+            ActorStatus::Continue
+        },
+    ));
+
+    actor.register(TypedHandler::<SuDictionaryFoldedMsg, _>::new(
+        |state, _msg, _reply, _local, _ctx| {
+            let su = state.get_mut::<SegmentUpdaterState>().unwrap();
+            let meta = su.shared.load_meta();
+            let r = su.shared.save_metas(meta.opstamp, meta.payload.clone())
+                .and_then(|()| super::dictionary_commit::delete_consumed_pairs(&su.shared))
+                .and_then(|()| garbage_collect_files(&su.shared).map(|_| ()));
+            if let Err(e) = r {
+                eprintln!("[segment_updater] persisting the folded dictionary failed: {e}");
+            }
+            su.shared.index.dictionary_fold().persisted();
             ActorStatus::Continue
         },
     ));

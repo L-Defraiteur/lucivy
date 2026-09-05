@@ -2004,6 +2004,17 @@ impl ShardedHandle {
         self.search_internal(query_config, top_k, highlight_sink, None, None)
     }
 
+    /// Shard dictionary: wait for the background fold of the last commit's
+    /// texts on every shard, and reload the readers whose dictionary it
+    /// swapped, so that a search walks the settled generations and never the
+    /// pending pairs — its cost never depends on when it runs. Off with
+    /// `dictionary_wait: false` in the schema config or `LUCIVY_DICT_WAIT=0`.
+    pub fn wait_dictionary_folds(&self) {
+        for shard in &self.shards {
+            shard.wait_dictionary_fold();
+        }
+    }
+
     /// Honest warnings for a query across all shards — see
     /// `LucivyHandle::query_warnings`. Pure, runs nothing.
     pub fn query_warnings(&self, query_config: &QueryConfig) -> Vec<String> {
@@ -2042,6 +2053,7 @@ impl ShardedHandle {
         filter: Option<Arc<HashSet<u64>>>,
         global_stats: Option<Arc<crate::bm25_global::ExportableStats>>,
     ) -> Result<Vec<ShardedSearchResult>, String> {
+        self.wait_dictionary_folds();
         let results = self.search_once(query_config, top_k, highlight_sink.clone(), filter.clone(), global_stats.clone())?;
         let Some(sink) = highlight_sink else { return Ok(results) };
         if !sink.overflowed() || results.is_empty() {
@@ -2732,6 +2744,9 @@ impl ShardedHandle {
                 before = now;
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
+            // And the shard dictionary's background fold, meta.json included:
+            // what follows (a snapshot, a preload) reads the settled files.
+            shard.index.dictionary_fold().wait_settled();
         }
         Ok(active_rounds)
     }

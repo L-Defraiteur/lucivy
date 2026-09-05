@@ -294,9 +294,17 @@ impl SfxDictionary {
             let mut first_sfx = None;
             let mut sfx_parts = Vec::new();
             let mut termtexts_bytes = Vec::new();
-            for &g in &meta.generations {
-                let sfx = directory.open_read(&PathBuf::from(dictionary_file_name(g, field_id, "sfx")));
-                let termtexts = directory.open_read(&PathBuf::from(dictionary_file_name(g, field_id, "termtexts")));
+            // The generations, then the pending segments' pairs: one part
+            // each, the same shape (`SFX3` over global ids, `TTX3` with ids).
+            let generation_paths = meta.generations.iter().map(|&g| (
+                PathBuf::from(dictionary_file_name(g, field_id, "sfx")),
+                PathBuf::from(dictionary_file_name(g, field_id, "termtexts"))));
+            let pair_paths = meta.pending_segments.iter().map(|u| (
+                PathBuf::from(format!("{u}.{field_id}.newsfx")),
+                PathBuf::from(format!("{u}.{field_id}.newtexts"))));
+            for (sfx_path, termtexts_path) in generation_paths.chain(pair_paths) {
+                let sfx = directory.open_read(&sfx_path);
+                let termtexts = directory.open_read(&termtexts_path);
                 let (Ok(sfx), Ok(termtexts)) = (sfx, termtexts) else { continue };
                 let (Ok(sfx_bytes), Ok(tt_bytes)) = (sfx.read_bytes(), termtexts.read_bytes()) else { continue };
                 if first_sfx.is_none() { first_sfx = Some(sfx); }
@@ -318,7 +326,7 @@ impl SfxDictionary {
     /// no id minted.
     pub fn empty() -> Self {
         Self {
-            meta: SfxDictionaryMeta { generations: Vec::new(), next_generation: 1, next_ids: Default::default(), field_ids: Vec::new() },
+            meta: SfxDictionaryMeta { generations: Vec::new(), next_generation: 1, next_ids: Default::default(), field_ids: Vec::new(), pending_segments: Vec::new() },
             fields: HashMap::new(),
             shared: Arc::new(DictionaryShared::new(HashMap::new())),
         }
@@ -375,6 +383,12 @@ impl SfxDictionary {
     /// The live generations, ascending.
     pub fn generations(&self) -> &[u64] {
         &self.meta.generations
+    }
+
+    /// True when this dictionary is made of exactly the parts `meta` names
+    /// (generations and pending pairs).
+    pub fn same_parts(&self, meta: &SfxDictionaryMeta) -> bool {
+        self.meta.generations == meta.generations && self.meta.pending_segments == meta.pending_segments
     }
 
     /// The open files of a field, if this generation has them.

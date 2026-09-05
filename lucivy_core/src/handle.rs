@@ -172,6 +172,7 @@ impl LucivyHandle {
         let mut settings = IndexSettings::default();
         settings.sfx_version = config.effective_sfx_version();
         settings.derived_in_ram = config.derived_in_ram.unwrap_or(false);
+        settings.dictionary_wait = config.dictionary_wait.unwrap_or(true);
         let index = Index::create(dir, schema.clone(), settings)
             .map_err(|e| format!("cannot create index: {e}"))?;
 
@@ -462,6 +463,24 @@ impl LucivyHandle {
         w
     }
 
+    /// Shard dictionary: wait for the background fold of the last commit's
+    /// texts and reload the reader if it swapped the dictionary, so that a
+    /// search walks the settled generations and never the pending pairs —
+    /// its cost never depends on when it runs. Off with `dictionary_wait:
+    /// false` in the schema config, or `LUCIVY_DICT_WAIT=0`.
+    pub fn wait_dictionary_fold(&self) {
+        let settings = self.index.settings();
+        if settings.sfx_version != ld_lucivy::suffix_fst::dictionary::DICTIONARY_SFX_VERSION
+            || !settings.dictionary_wait
+            || std::env::var("LUCIVY_DICT_WAIT").is_ok_and(|v| v == "0")
+        {
+            return;
+        }
+        if self.index.wait_dictionary_fold() {
+            let _ = self.reader.reload();
+        }
+    }
+
     /// Search with prescan + global IDF.
     pub fn search(
         &self,
@@ -469,6 +488,7 @@ impl LucivyHandle {
         top_k: usize,
         highlight_sink: Option<Arc<HighlightSink>>,
     ) -> Result<Vec<(f32, DocAddress)>, String> {
+        self.wait_dictionary_fold();
         let (searcher, weight) = self.build_search_weight(query_config, highlight_sink)?;
         Self::collect_top_docs(&searcher, weight.as_ref(), top_k)
     }

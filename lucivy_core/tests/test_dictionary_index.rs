@@ -291,3 +291,69 @@ fn dictionary_pieces() {
     h4.close().unwrap();
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// The deferred fold (6 September 2026): a commit names its segments' pairs
+/// and returns; a search right after it finds the new texts (it waits for
+/// the background fold by default); once the writer has waited for its
+/// background work, `meta.json` names generations only and no pair is left
+/// on disk; and a reopen answers the same.
+#[test]
+fn deferred_fold_settles() {
+    let files = corpus(400);
+    let base: PathBuf = std::env::temp_dir().join(format!("lucivy-dict-fold-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("v4");
+    let h4 = build(&files, 4, &dir);
+
+    // A search right after a commit, through the handle (which waits).
+    {
+        let mut guard = h4.writer.lock().unwrap();
+        let w = guard.as_mut().unwrap();
+        let mut doc = ld_lucivy::LucivyDocument::new();
+        doc.add_u64(h4.field(NODE_ID_FIELD).unwrap(), 999_999);
+        doc.add_text(h4.field("path").unwrap(), "zz/fresh.c");
+        doc.add_text(h4.field("content").unwrap(), "int zzqq_fresh_token_after_commit(void);");
+        w.add_document(doc).unwrap();
+        w.commit().unwrap();
+        drop(guard);
+        h4.reader.reload().unwrap();
+        let cfg = QueryConfig {
+            query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some("zzqq_fresh_token".into()),
+            strict_separators: Some(true),
+            ..Default::default()
+        };
+        let hits = h4.search(&cfg, 10, None).unwrap();
+        assert_eq!(hits.len(), 1, "the text minted by the last commit must be found right away");
+    }
+
+    // The writer closed after its background work: the disk names
+    // generations only.
+    {
+        let mut guard = h4.writer.lock().unwrap();
+        guard.take().unwrap().wait_merging_threads().unwrap();
+    }
+    let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("meta.json")).unwrap()).unwrap();
+    let dict = &meta["sfx_dictionary"];
+    assert!(dict["pending_segments"].as_array().is_none_or(|p| p.is_empty()),
+        "meta.json still names pending pairs: {}", dict["pending_segments"]);
+    assert!(!dict["generations"].as_array().unwrap().is_empty());
+    let (_, names) = dir_bytes(&dir);
+    let pairs: Vec<&String> = names.iter().filter(|n| n.ends_with(".newsfx") || n.ends_with(".newtexts")).collect();
+    assert!(pairs.is_empty(), "pairs left on disk after the fold: {pairs:?}");
+
+    // A reopen from disk answers the panel like the live handle.
+    let h3 = build(&files, 3, &base.join("v3"));
+    let reopened = LucivyHandle::open(ld_lucivy::directory::MmapDirectory::open(&dir).unwrap()).unwrap();
+    for q in panel() {
+        let (d3, s3) = run(&h3, q);
+        let (d4, s4) = run(&reopened, q);
+        // The fresh document exists only in the v4 index.
+        let d4: HashSet<u64> = d4.into_iter().filter(|&d| d != 999_999).collect();
+        let s4: HashSet<(u64, usize, usize)> = s4.into_iter().filter(|(d, _, _)| *d != 999_999).collect();
+        assert_eq!(d3, d4, "{} [{}] documents", q.text, q.label);
+        assert_eq!(s3, s4, "{} [{}] spans", q.text, q.label);
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
