@@ -118,6 +118,12 @@ window._allLogs = [];
   .index-tab .tab-count {
     font-size: 11px; opacity: 0.7; margin-left: 4px;
   }
+  .tab-spin {
+    display: inline-block; width: 10px; height: 10px; margin-left: 6px; vertical-align: middle;
+    border: 2px solid var(--text-dim); border-top-color: transparent; border-radius: 50%;
+    animation: tabspin 0.8s linear infinite;
+  }
+  @keyframes tabspin { to { transform: rotate(360deg); } }
   .index-tab.disabled {
     opacity: 0.4; cursor: default;
   }
@@ -1424,11 +1430,11 @@ index.search(&query, 10, None)?;</pre>
 
   <div class="index-tabs">
     <div class="index-tab active" id="tabDemo" data-index="demo">
-      lucivy source (from GitHub) <span class="tab-count" id="tabDemoCount"></span>
+      <span id="tabDemoLabel">lucivy source (from GitHub)</span> <span class="tab-count" id="tabDemoCount"></span><span class="tab-spin" id="tabDemoSpin" hidden></span>
       <span id="btnRefreshDemo" title="Clone github.com/L-Defraiteur/lucivy again and re-index it here" style="cursor:pointer; opacity:0.7; margin-left:6px;">&#x21bb;</span>
     </div>
     <div class="index-tab disabled" id="tabUser" data-index="user">
-      Your files <span class="tab-count" id="tabUserCount"></span>
+      <span id="tabUserLabel">Your files</span> <span class="tab-count" id="tabUserCount"></span><span class="tab-spin" id="tabUserSpin" hidden></span>
     </div>
   </div>
 
@@ -1552,6 +1558,35 @@ let userIndex = null;
 let activeTab = 'demo'; // 'demo' | 'user'
 let demoNumDocs = 0;
 let userNumDocs = 0;
+// One index in memory at a time (6 September 2026): two of them in a 4 GB
+// address space — a kernel next to a cloned repository — is how a tab dies.
+// Each tab remembers what it holds in OPFS, so that a click reopens it
+// (seconds, shown by a spinner) after the other was closed.
+let demoSlot = null; // { path, title } — set once DEMO_REPO exists (startup)
+let userSlot = null; // { path, title } — `/user_index` or `/user_snapshot`
+let tabSwitching = false;
+async function closeAllOpen() {
+  if (demoIndex) { await demoIndex.close().catch(() => {}); demoIndex = null; }
+  if (userIndex) { await userIndex.close().catch(() => {}); userIndex = null; }
+}
+function setDemoSlot(path, title) {
+  demoSlot = { path, title };
+  demoLabelText = title;
+  const label = document.getElementById('tabDemoLabel');
+  if (label) label.textContent = title;
+  const refresh = document.getElementById('btnRefreshDemo');
+  if (refresh) refresh.hidden = path !== DEMO_REPO.path;
+}
+function setUserSlot(path, title) {
+  userSlot = { path, title };
+  const label = document.getElementById('tabUserLabel');
+  if (label) label.textContent = title;
+  tabUser.classList.remove('disabled');
+}
+function tabSpin(tab, on) {
+  const el = document.getElementById(tab === 'demo' ? 'tabDemoSpin' : 'tabUserSpin');
+  if (el) el.hidden = !on;
+}
 
 // For user-imported files: store content so we can render highlights
 const userFiles = new Map(); // doc_id -> { path, content }
@@ -1715,7 +1750,7 @@ async function startup() {
       statusEl.textContent = `Opening /${openPath} from OPFS...`;
       userIndex = await lucivy.openDirect('/' + openPath);
       userNumDocs = await userIndex.numDocs();
-      tabUser.classList.remove('disabled');
+      setUserSlot('/' + openPath, `/${openPath}`);
       tabUserCount.textContent = `(${userNumDocs})`;
       switchTab('user');
       return;
@@ -1728,6 +1763,11 @@ async function startup() {
     // The demo index is lucivy's own source, cloned from GitHub and indexed
     // right here; it persists in OPFS, so a later visit opens it directly
     // (the tab's refresh icon clones again).
+    setDemoSlot(DEMO_REPO.path, 'lucivy source code');
+    // A user index of an earlier visit: its tab reopens it on click.
+    for (const [p, title] of [['/user_index', 'your files (earlier visit)'], ['/user_snapshot', 'your snapshot (earlier visit)']]) {
+      if (!userSlot && await opfsIndexBytes(p)) setUserSlot(p, title);
+    }
     let opened = false;
     try {
       statusEl.textContent = 'Opening the lucivy source index...';
@@ -1837,15 +1877,39 @@ async function showMemoryStatus() {
 
 let demoLabelText = 'lucivy source code';
 
-function switchTab(tab) {
-  if (tab === 'user' && !userIndex) return;
+async function switchTab(tab) {
+  if (tab === 'user' && !userIndex && !userSlot) return;
+  if (tabSwitching) return;
+  tabSwitching = true;
   activeTab = tab;
   tabDemo.classList.toggle('active', tab === 'demo');
   tabUser.classList.toggle('active', tab === 'user');
-
-  const count = tab === 'demo' ? demoNumDocs : userNumDocs;
-  const label = tab === 'demo' ? demoLabelText : 'your files';
-  setReady(`${count} documents indexed (${label})`);
+  const slot = tab === 'demo' ? demoSlot : userSlot;
+  try {
+    // Not in memory: close the other one and reopen this one from OPFS.
+    if (!(tab === 'demo' ? demoIndex : userIndex) && slot) {
+      tabSpin(tab, true);
+      statusEl.className = 'status loading';
+      statusEl.textContent = `Opening ${slot.title} into memory…`;
+      queryEl.disabled = true;
+      await closeAllOpen();
+      const idx = await lucivy.openDirect(slot.path);
+      const n = await idx.numDocs();
+      if (idx.preload) await idx.preload().catch(() => null);
+      if (tab === 'demo') { demoIndex = idx; demoNumDocs = n; tabDemoCount.textContent = `(${n})`; }
+      else { userIndex = idx; userNumDocs = n; tabUserCount.textContent = `(${n})`; }
+    }
+    const count = tab === 'demo' ? demoNumDocs : userNumDocs;
+    const label = tab === 'demo' ? demoLabelText : (userSlot ? userSlot.title : 'your files');
+    setReady(`${count} documents indexed (${label})`);
+  } catch (e) {
+    statusEl.className = 'status error';
+    statusEl.textContent = `Cannot open ${slot ? slot.title : tab} from this browser's storage: ${e.message}`;
+    queryEl.disabled = false;
+  } finally {
+    tabSpin(tab, false);
+    tabSwitching = false;
+  }
 
   resultsEl.innerHTML = '';
   resultsHeaderEl.textContent = '';
@@ -2141,7 +2205,7 @@ async function importFiles(fileList) {
 
     statusEl.textContent = `Indexing ${textFiles.length} file(s)...`;
 
-    if (userIndex) { await userIndex.close().catch(() => {}); }
+    await closeAllOpen();
     userFiles.clear();
 
     // Same path as the git clone: above RELOAD_TO_SERVE_BYTES the page that
@@ -2159,7 +2223,7 @@ async function importFiles(fileList) {
     }
     userNumDocs = await userIndex.numDocs();
 
-    tabUser.classList.remove('disabled');
+    setUserSlot('/user_index', `your files (${textFiles.length})`);
     tabUserCount.textContent = `(${userNumDocs})`;
     switchTab('user');
   } catch (e) {
@@ -2550,24 +2614,20 @@ async function cloneAndIndex(owner, repo, branch, target) {
   }
   if (files.length === 0) throw new Error('No text files found in repository');
   statusEl.textContent = `Indexing ${files.length} files from ${label}@${ref}...`;
-  if (target === 'user') {
-    if (userIndex) { await userIndex.close().catch(() => {}); }
-    userFiles.clear();
-  } else if (demoIndex) {
-    await demoIndex.close().catch(() => {});
-    demoIndex = null;
-  }
+  await closeAllOpen();
+  if (target === 'user') userFiles.clear();
   const { index, seconds } = await indexFiles(files, path, label, target === 'user' ? userFiles : null);
   const n = await index.numDocs();
   if (target === 'user') {
     userIndex = index;
     userNumDocs = n;
-    tabUser.classList.remove('disabled');
+    setUserSlot(path, `${label}@${ref}`);
     tabUserCount.textContent = `(${n})`;
     switchTab('user');
   } else {
     demoIndex = index;
     demoNumDocs = n;
+    setDemoSlot(DEMO_REPO.path, 'lucivy source code');
     tabDemoCount.textContent = `(${n})`;
     switchTab('demo');
   }
@@ -2608,7 +2668,7 @@ document.getElementById('btnRefreshDemo').addEventListener('click', async (e) =>
   e.stopPropagation();
   if (demoBuild) return;
   try {
-    if (demoIndex) { await demoIndex.close().catch(() => {}); demoIndex = null; }
+    await closeAllOpen();
     await ensureDemoBuilt();
   } catch (err) {
     statusEl.className = 'status error';
@@ -3000,7 +3060,7 @@ async function indexCorpusDemo(c, { openOnly = false } = {}) {
     const key = c;
     c = EXTRA_CORPORA[key];
     if (!c) {
-      const e = corpusRegistry()[key];
+      const e = corpusRegistry()[key] || corpusRegistry()[`gh:${key}`];
       if (!e) throw new Error(`unknown corpus "${key}" — index list shows what is here; index ${Object.keys(EXTRA_CORPORA).join(' / index ') || 'mdn'}, index github owner/repo add one`);
       c = { key, path: e.path, title: e.title, pages: `${e.docs} documents`, download: '', eta: '', credit: e.credit, searches: [], fetchFiles: null };
     }
@@ -3021,6 +3081,7 @@ async function indexCorpusDemo(c, { openOnly = false } = {}) {
       term.out(`▸ ${c.title} is already the open index: ${numDocs} documents`, 'ok');
     }
     // An earlier visit left it in OPFS: reopen instead of indexing again.
+    if (!index) await closeAllOpen();
     const existing = index ? null : await lucivy.openDirect(c.path).catch(() => null);
     if (existing) {
       numDocs = await existing.numDocs().catch(() => 0);
@@ -3047,7 +3108,7 @@ async function indexCorpusDemo(c, { openOnly = false } = {}) {
       if (textBytes > MAX_CORPUS_TEXT_BYTES) {
         throw new Error(`${mb(textBytes)} MB of text is more than this tab can hold (about ${mb(MAX_CORPUS_TEXT_BYTES)} MB, some 1.8 GB of index in a 4 GB address space) — pick a smaller repository or branch`);
       }
-      if (demoIndex) { await demoIndex.close().catch(() => {}); demoIndex = null; }
+      await closeAllOpen();
       progressTotal = files.length;
       await term.cmd(`lucivy index ${c.path}`, true);
       progressLine = term.add(term.bar(0, progressTotal));
@@ -3069,6 +3130,18 @@ async function indexCorpusDemo(c, { openOnly = false } = {}) {
     if (demoIndex && demoIndex !== index && demoIndex.path !== index.path) await demoIndex.close().catch(() => {});
     demoIndex = index; demoNumDocs = numDocs;
     rememberCorpus(c, numDocs);
+    setDemoSlot(c.path, c.title);
+    // One corpus in this browser's storage at a time (the demo's own source
+    // aside): the others go, so that no visitor ever meets the OPFS quota
+    // half-way through an indexing.
+    for (const [key, e] of Object.entries(corpusRegistry())) {
+      if (key === c.key || e.path === c.path || e.path === DEMO_REPO.path || key === 'lucivy') continue;
+      const bytes = await opfsIndexBytes(e.path);
+      if (lucivy.dropIndex) await lucivy.dropIndex(e.path).catch(() => {});
+      await opfsRemoveIndex(e.path).catch(() => {});
+      forgetCorpus(key);
+      term.out(`▸ ${e.title} dropped from storage${bytes ? ` — ${(bytes / 1048576).toFixed(0)} MB freed` : ''}: one corpus at a time in this tab (index it again to come back)`, 'dim');
+    }
     if (tabDemoCount) tabDemoCount.textContent = `(${numDocs})`;
     for (const entry of c.searches) await runDemoSearch(entry);
     if (!c.searches.length) term.out(`▸ ${c.title} is the open index: search it — a substring, --fuzzy 1 "…", --regex "…", --help`, 'dim');
@@ -3152,7 +3225,7 @@ function printHelp() {
   const f = (s) => `<span class="flag">${escapeHtml(s)}</span>`;
   const q = (s) => `<span class="str">${escapeHtml(s)}</span>`;
   const rows = [
-    ['usage', `lucivy ${f('search')} [options] ${q('"value"')} · lucivy ${f('index')} &lt;name&gt; · ${f('open')} / ${f('drop')} &lt;name&gt; · ${f('list')} · ${f('help')} — the word ${f('lucivy')} is already typed for you, ${f('search')} is optional (a bare value is a search), quotes only when the value has spaces`],
+    ['usage', `lucivy ${f('search')} [options] ${q('"value"')} · lucivy ${f('index')} &lt;name | owner/repo | github.com URL&gt; · ${f('open')} / ${f('drop')} &lt;name&gt; · ${f('list')} · ${f('help')} — the word ${f('lucivy')} is already typed for you, ${f('search')} is optional (a bare value is a search), quotes only when the value has spaces`],
     ['index <name>', `index a whole corpus here and search it — ${corporaSummary(f) || 'none served next to this page'}; what you index stays in this browser`],
     [f('index github owner/repo'), `index a repository (${q('owner/repo@branch')} or a github.com URL) through the proxy — up to about 200 MB of text, what a tab holds`],
     [f('index list'), `what this browser holds; ${f('open <name>')} reopens one in seconds, ${f('drop <name>')} deletes it from storage`],
@@ -3253,6 +3326,7 @@ function openPrompt(hint, prefill = '') {
           else if (/^list$/i.test(a)) await listCorpora();
           else if (/^(github|gh)\s+/i.test(a)) await indexCorpusDemo(githubCorpus(a.replace(/^(github|gh)\s+/i, '')));
           else if (/github\.com\//i.test(a)) await indexCorpusDemo(githubCorpus(a));
+          else if (command.verb === 'index' && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(@[\w.\/-]+)?$/.test(a) && !EXTRA_CORPORA[a.toLowerCase()]) await indexCorpusDemo(githubCorpus(a));
           else await indexCorpusDemo(a);
         } catch (err) { term.out('✗ ' + err.message, 'err'); }
       } else if (entry && entry.help) {
@@ -3290,10 +3364,7 @@ async function playDemo() {
     // storage (the playground keeps using that one until then).
     await term.cmd(`lucivy clone ${DEMO_REPO.owner}/${DEMO_REPO.repo}@${DEMO_REPO.branch}`);
     demoLive = true;
-    if (!demoBuild && demoIndex) {
-      await demoIndex.close().catch(() => {});
-      demoIndex = null;
-    }
+    if (!demoBuild) await closeAllOpen();
     await ensureDemoBuilt();
     // The residency line (preload) of the last setReady, mirrored above.
     await lastMemoryStatus;
@@ -3475,13 +3546,13 @@ snapshotFileInput.addEventListener('change', async (e) => {
     const buf = await file.arrayBuffer();
     const data = new Uint8Array(buf);
 
-    if (userIndex) { await userIndex.close().catch(() => {}); }
+    await closeAllOpen();
     userFiles.clear();
 
     userIndex = await lucivy.importSnapshot(data, '/user_snapshot');
     userNumDocs = await userIndex.numDocs();
 
-    tabUser.classList.remove('disabled');
+    setUserSlot('/user_snapshot', `snapshot ${file.name}`);
     tabUserCount.textContent = `(${userNumDocs})`;
     switchTab('user');
   } catch (e) {

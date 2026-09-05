@@ -322,10 +322,15 @@ bash bindings/emscripten/build.sh
 # `?commitmb=M` Mo de texte (8 par défaut : le pic mémoire suit la taille des segments, Godot 3,3 → 1,8 Go),
 # `?merges=N`, `?verbose` (traces `[merge]`, `[preload]` dans diag.log),
 # `?corpus=corpus-kernel-16k.tar.gz` ; un seul onglet qui indexe à la fois,
-# corpus du terminal (`index mdn|linux|go|godot|typescript|postgres|cpython|redis|git|curl|sqlite|nginx`)
-# décrits dans playground/corpora.json, bâtis par `python3 playground/tools/build_corpus.py all`
-# (même filtre que la page ; pages.yml les bâtit au déploiement ; git les ignore),
-# deux onglets partagent le même répertoire OPFS et échouent au commit)
+# corpus du terminal (`index mdn|linux|go|godot|typescript|postgres|cpython|redis|git|curl|sqlite|nginx`,
+# `index owner/repo[@branche]` ou une URL github.com) décrits dans playground/corpora.json, bâtis par
+# `python3 playground/tools/build_corpus.py all` (même filtre que la page ; pages.yml les bâtit au
+# déploiement ; git les ignore). **Un seul index en mémoire à la fois dans la page** (6 septembre au soir :
+# `closeAllOpen()` avant toute indexation ou ouverture, quelle que soit la porte — terminal, clone GitHub,
+# fichiers déposés, snapshot, ↻), les onglets du playground portent le vrai nom de ce qu'ils tiennent en
+# OPFS (`demoSlot`/`userSlot`) et un clic rouvre depuis l'OPFS avec un témoin (`.tab-spin`) ; **un seul
+# corpus de vitrine stocké à la fois** (`index <nom>` supprime les autres de l'OPFS, sauf la source lucivy
+# et l'index utilisateur) ; deux onglets partagent le même répertoire OPFS et échouent au commit)
 cd playground && node serve.mjs
 ```
 

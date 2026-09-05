@@ -1065,6 +1065,35 @@ Deux bugs de la page trouvés en mesurant, corrigés :
   comparent maintenant triés par document ; l'ordre des ex æquo dans le
   moteur reste à fixer (adresse de document croissante, par exemple).
 
+## 3 quater. La vitrine ne se laisse plus planter (6 septembre au soir, revue UX de Lucie)
+
+Constat lu dans le code : deux emplacements d'index (`demoIndex`, que le
+terminal réutilise pour ses corpus, et `userIndex` pour les fichiers, le
+clone GitHub et les snapshots) ; passer au playground avec Godot ouvert
+montrait un onglet « lucivy source » qui cherchait dans Godot ; cloner un
+dépôt avec Godot ouvert laissait Godot en RAM à côté du clone (deux index
+dans 4 Go : le plantage) ; l'OPFS empilait les corpus jusqu'au quota.
+
+Règle unique, demandée par Lucie : **un seul index chargé à la fois**, quelle
+que soit la porte d'entrée (`closeAllOpen()` avant toute indexation ou
+ouverture : terminal, clone GitHub, fichiers déposés, snapshot, ↻, `open`) ;
+les onglets du playground portent le vrai nom de ce qu'ils tiennent en OPFS
+(`setDemoSlot`, `setUserSlot` ; le ↻ n'apparaît que si l'onglet est la
+source lucivy) ; **un clic sur un onglet dont l'index n'est pas chargé le
+rouvre depuis l'OPFS**, avec un témoin qui tourne et le statut « Opening …
+into memory » (2 à 8 s selon la taille), en fermant l'autre ; un index
+utilisateur d'une visite précédente (`/user_index`, `/user_snapshot`) donne
+son onglet dès le chargement ; **un seul corpus de vitrine stocké à la
+fois** : `index <nom>` supprime les autres de l'OPFS (sauf la source lucivy
+et l'index utilisateur) avec une ligne « X dropped from storage — N MB
+freed: one corpus at a time in this tab » ; et le terminal accepte
+`index owner/repo`, `owner/repo@branche` ou une URL github.com (en plus de
+`index github owner/repo` qui existait), `open owner/repo` retrouvant
+l'entrée `gh:` du registre. Vérifié dans Chrome : nginx → sqlite (nginx
+supprimé, étiquette « SQLite »), clic « your files (earlier visit) » (le
+noyau 15 440 d'une visite passée : témoin, 6 s, 15 440 documents), clic
+« SQLite » (témoin, réouverture, 627), aucune erreur console.
+
 ## 3 ter. Jaro-Winkler : toutes les occurrences, et une vérité terrain (6 septembre au soir)
 
 Question de Lucie : « il y avait une limitation à un seul match par fenêtre,
