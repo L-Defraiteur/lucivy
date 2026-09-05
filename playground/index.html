@@ -3080,7 +3080,7 @@ function printHelp() {
   const f = (s) => `<span class="flag">${escapeHtml(s)}</span>`;
   const q = (s) => `<span class="str">${escapeHtml(s)}</span>`;
   const rows = [
-    ['usage', `lucivy search [options] ${q('"value"')}  — quotes are optional unless the value has spaces; the word ${f('search')} is optional too: a bare value is a search`],
+    ['usage', `lucivy ${f('search')} [options] ${q('"value"')} · lucivy ${f('index')} &lt;name&gt; · ${f('open')} / ${f('drop')} &lt;name&gt; · ${f('list')} · ${f('help')} — the word ${f('lucivy')} is already typed for you, ${f('search')} is optional (a bare value is a search), quotes only when the value has spaces`],
     ['index <name>', `index a whole corpus here and search it — ${corporaSummary(f) || 'none served next to this page'}; what you index stays in this browser`],
     [f('index github owner/repo'), `index a repository (${q('owner/repo@branch')} or a github.com URL) through the proxy — up to about 200 MB of text, what a tab holds`],
     [f('index list'), `what this browser holds; ${f('open <name>')} reopens one in seconds, ${f('drop <name>')} deletes it from storage`],
@@ -3151,14 +3151,15 @@ function openPrompt(hint) {
         command = { verb: 'index', arg: typed.toLowerCase() };
       } else if ((cm = typed.match(/^search(?:\s+(.*))?$/i))) {
         searchText = (cm[1] || '').trim();
-      } else if (/^(help|--help|-h|\?)$/i.test(typed)) {
-        searchText = '--help';
       }
+      // `help`, `--help`, `-h`, `?`, alone or after `search`: the one help
+      // page, shown as `lucivy --help` (it covers every command, not search).
+      if (!command && /^(help|--help|-h|\?)$/i.test(searchText)) command = { verb: 'help', arg: '' };
       // `kernel` was the name of the 15 440-file slice of a modern kernel; the
       // corpus is now Linux 2.6.0 whole, `linux`. An index of the old name that
       // this browser still holds keeps answering to it (list, open, drop).
       if (command && command.arg.toLowerCase() === 'kernel' && !corpusRegistry().kernel) command.arg = 'linux';
-      const shown = command ? `lucivy ${command.verb} ${command.arg}` : SEARCH_PREFIX + searchText;
+      const shown = command ? (command.verb === 'help' ? 'lucivy --help' : `lucivy ${command.verb} ${command.arg}`) : SEARCH_PREFIX + searchText;
       const cmd = document.createElement('span'); cmd.className = 'cmd';
       cmd.innerHTML = escapeHtml(shown)
         .replace(/(--[a-z]+(?:\s+\d+(?:\.\d+)?)?)/g, '<span class="flag">$1</span>')
@@ -3169,7 +3170,8 @@ function openPrompt(hint) {
       if (command) {
         try {
           const a = command.arg;
-          if (command.verb === 'drop') await dropCorpus(a);
+          if (command.verb === 'help') printHelp();
+          else if (command.verb === 'drop') await dropCorpus(a);
           else if (command.verb === 'open') await indexCorpusDemo(a, { openOnly: true });
           else if (/^list$/i.test(a)) await listCorpora();
           else if (/^(github|gh)\s+/i.test(a)) await indexCorpusDemo(githubCorpus(a.replace(/^(github|gh)\s+/i, '')));
