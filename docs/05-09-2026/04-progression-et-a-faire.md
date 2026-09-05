@@ -1112,9 +1112,16 @@ Rien ne part sans le feu vert de Lucie à chaque étape marquée **[go]**.
    déploie la vitrine depuis `main` et bâtit les douze corpus), pousser.
 6. [ ] **[go]** `git tag -a v4.0.0` et pousser le tag : `release.yml` bâtit
    les cinq plateformes, PyPI, npm (six paquets) et crates.io dans l'ordre
-   `luciole` → `lucistore` → `ld-lucivy` → `lucivy-core` → `sparse-vector`.
-   `lucivy-wasm` se publie **à la main** (`bindings/emscripten`, `npm
-   publish --otp`) tant qu'aucun job emscripten n'existe.
+   `luciole` → `lucistore` → `ld-lucivy` → `lucivy-core` → `sparse-vector`,
+   **et `lucivy-wasm`** (job `wasm` + `publish-wasm` de `release.yml`, emsdk
+   épinglé — la note « à la main » de CLAUDE.md datait de 3.0.6). Avant le
+   tag : rebâtir le WASM local (`bash bindings/emscripten/build.sh`) pour
+   que `playground/pkg` et le paquet portent le dernier commit.
+   Étape 3 faite le 6 au soir : versions 4.0.0 partout (`Cargo.toml:120`
+   est une dépendance de test), `cargo publish --dry-run` de `luciole` et
+   `lucistore` verts, `npm pack --dry-run` des deux paquets verts (wasm
+   2,0 Mo / 5,8 Mo, node 15 Ko), `main` est un ancêtre de `v4` (87 commits,
+   avance rapide possible).
 7. [ ] Vérifier sur chaque registre, noter les versions dans `CLAUDE.md`,
    répondre aux issues #12 et #15, l'article.
 
