@@ -305,7 +305,7 @@ def stumble():
          "trigrams carry the underscore: exactly the strict count"),
         ("spin_lock:relax", "spin_lock, separators relaxed (spin_lock, spin lock, spin-lock, spinlock)", NGRAM,
          {"match_phrase": {"body": "spinlock"}},
-         "inexpressible: `spinlock` trigrams only match `spinlock`; shown for the record"),
+         "not with this analyzer: `spinlock` trigrams only match `spinlock`; shown for the record"),
         ("spin_lock:relax", "\"spin lock\" as a phrase, standard analyzer", STANDARD,
          {"match_phrase": {"body": "spin lock"}},
          "the standard analyzer keeps `spin_lock` whole, so the phrase finds the spaced form only"),
