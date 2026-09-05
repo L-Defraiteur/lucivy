@@ -1764,7 +1764,7 @@ async function showMemoryStatus() {
     const merges = pre.merge_wait_ms > 1000 ? ` (after ${(pre.merge_wait_ms / 1000).toFixed(0)}s of background merges)` : '';
     memoryEl.textContent = pre.skipped
       ? `index ${mb} MB, held in memory`
-      : `index ${mb} MB in memory — ${pre.files} files read in ${(pre.ms / 1000).toFixed(1)}s${merges}`;
+      : `index ${mb} MB in memory — its ${pre.files} index files (segments and dictionary, not documents) loaded in ${(pre.ms / 1000).toFixed(1)}s${merges}`;
   } catch (e) {
     memoryEl.textContent = '';
   }

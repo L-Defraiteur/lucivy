@@ -411,12 +411,57 @@ pas, un téléphone s'arrête vers 2 000. « Indexer un plus gros git au
 chargement » a donc une borne dure autour de 15 000 fichiers de code et
 un coût d'attente d'une minute — pas au chargement, en opt-in.
 
+**Un dépôt entier plutôt qu'un sixième de Linux** (remarque de Lucie) :
+mesuré sur les tarballs GitHub (fichiers texte ≤ 100 Ko, le filtre de la
+page) — golang/go 15 542 fichiers / 75 Mo, **linux-2.6.0 entier** 14 843 /
+134 Mo, godot 13 782 / 117 Mo, **mdn/content 14 917 / 59 Mo**, postgres
+7 392 / 70, cpython 5 861 / 62, zig 20 203 / 99 ; trop gros ou trop de
+fichiers : TypeScript 66 356 / 126 Mo, rust 62 396 / 136 Mo (des dizaines
+de milliers de fichiers de tests : le texte tient, mais ~260 fichiers par
+seconde en WASM font des minutes), kubernetes 30 887 / 163, node 50 289 /
+303, linux-2.6.32 30 170 / 291. Xubuntu embarque le noyau complet (une
+configuration, pas un sous-ensemble) : pas de « mini Linux » de ce côté.
+
+**MDN indexé pour de vrai** (`playground/corpus-mdn.tar.gz`, 13,9 Mo,
+14 916 fichiers texte de `mdn/content` `main` ; la page en garde 14 629) :
+**15 s d'indexation, 529 Mo en mémoire, pic WASM 1 510 Mo**, rechargement
+2,1 s. Requêtes qui servent à un développeur web, à froid :
+
+| requête | docs | ms |
+|---|---|---|
+| addEventListener | 1 917 | 14 |
+| grid-template-columns (strict) | 134 | 7 |
+| querySelectorAll | 225 | 9 |
+| preventDefault | 183 | 9 |
+| IntersectionObserver | 50 | 7 |
+| Content-Security-Policy | 222 | 6 |
+| fuzzy querySelctor (1 édition) | 1 618 | 59 |
+| fuzzy acessibility (1 édition) | 782 | 24 |
+| regex `aria-[a-z]+` | 372 | 16 |
+| regex `on[a-z]+change` | 207, **tronquée** | 185 |
+| phrase « async function » | 446 | 7 |
+| flex AND NOT grid | 569 | 16 |
+| term fetch | 943 | 11 |
+
+Le premier résultat est presque toujours la page de référence attendue
+(`web/api/event/preventdefault`, `web/css/reference/properties/grid-template-columns`…).
+La regex `on[a-z]+change` atteint le plafond de 20 000 occurrences par
+segment et la page le dit. **C'est le candidat pour le second acte** :
+utile à qui le teste, 15 s, un demi-giga. Licence : le contenu MDN est
+CC-BY-SA 2.5 (les exemples de code CC0) — la page devra l'attribuer.
+Formulation corrigée au passage : « 992 files read » se lisait « ils
+n'ont chargé que 992 fichiers » ; la ligne dit maintenant que ce sont
+les fichiers de l'index (segments et dictionnaire), pas les documents.
+
 À faire :
 
-- [ ] **Un bouton « second acte »** sur la page : « Indexez 15 000 fichiers
-  du noyau Linux dans votre navigateur », barre honnête (téléchargement
-  49 Mo, indexation, fusions — la page sait déjà distinguer les trois),
-  temps estimé annoncé. La page sait déjà le faire (`?corpus=`).
+- [ ] **Un bouton « second acte »** sur la page : **« Indexez toute la
+  documentation MDN dans votre navigateur »** (14 900 pages, 14 Mo à
+  télécharger, 15 s, attribution CC-BY-SA), barre honnête (téléchargement,
+  indexation, fusions — la page sait déjà distinguer les trois), temps
+  annoncé. Le noyau (15 000 fichiers, 49 Mo, une minute, 1,8 Go) en
+  troisième acte pour qui veut la démonstration de charge. La page sait
+  déjà faire les deux (`?corpus=`).
 - [ ] **Rouvrir l'index persistant à la visite suivante** : il est en OPFS,
   `?open=user_index` le rend en 4 s — proposer « reprendre le noyau
   indexé » quand il existe, au lieu de réindexer.
