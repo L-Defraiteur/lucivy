@@ -247,7 +247,7 @@ that rewrites most of a short query, a regex that has to scan.
 
 ## Performance
 
-### 93 605 kernel files, and every answer checked
+### 93 983 kernel files, and every answer checked
 
 Each row below was compared, document by document **and byte span by byte
 span**, to a naive scan of the same files on disk — the "scan" column is how
@@ -258,20 +258,21 @@ correct one.
 
 | query | mode | documents | spans | lucivy | naive scan |
 |---|---|---|---|---|---|
-| `mutex_lock` | substring | 5 145 | 20 797 | **137 ms** | 8 789 ms |
-| `mutex_lock` | separators relaxed | 5 825 | 22 817 | 88 ms | 4 031 ms |
-| `spin_lock` | substring | 6 569 | 34 667 | 112 ms | 3 963 ms |
-| `sched` | whole word | 5 311 | 27 986 | 101 ms | 4 651 ms |
-| `sched` | substring | **9 327** | 53 336 | 78 ms | 4 022 ms |
-| `printk` | start of token | 4 460 | 24 719 | 78 ms | 4 352 ms |
-| `schdule` | fuzzy, 1 edit | 5 206 | 18 843 | 224 ms | 12 425 ms |
-| `regsiter` | fuzzy, 2 edits | 35 146 | **267 348** | 879 ms | 13 633 ms |
-| `spin_lock_[a-z]+` | regex | 5 510 | 24 368 | 180 ms | 472 ms |
+| `mutex_lock` | substring | 5 145 | 20 797 | **18 ms** | 3 597 ms |
+| `mutex_lock` | separators relaxed | 5 825 | 22 817 | 11 ms | 3 829 ms |
+| `spin_lock` | substring | 6 569 | 34 667 | 11 ms | 3 796 ms |
+| `sched` | whole word | 5 284 | 27 881 | 20 ms | 4 413 ms |
+| `sched` | substring | **9 289** | 53 211 | 11 ms | 3 766 ms |
+| `printk` | start of token | 4 460 | 24 719 | 13 ms | 4 062 ms |
+| `schdule` | fuzzy, 1 edit | 5 196 | 18 825 | 44 ms | 11 777 ms |
+| `regsiter` | fuzzy, 2 edits | 34 451 | **265 797** | 778 ms | 12 933 ms |
+| `spin_lock_[a-z]+` | regex | 5 510 | 24 368 | 233 ms | 435 ms |
 
-Indexing: **93 605 documents in 122 s** (839 docs/s).
+Index: **93 983 documents, 4 938 MB** with the shared dictionary — 5.8× the
+857 MB of text; 3.0.8 wrote 18 057 MB for the same files.
 
-The two `sched` rows are the point: **5 311** documents contain it as a word,
-**9 327** contain it at all — the difference is `sched_clock`, `schedule`,
+The two `sched` rows are the point: **5 284** documents contain it as a word,
+**9 289** contain it at all — the difference is `sched_clock`, `schedule`,
 `sched_domain`. Both counts are exact.
 
 Reproduce it — the harness builds the index, runs the panel and the reference
@@ -279,41 +280,39 @@ scan, and fails if any count or span disagrees:
 
 ```bash
 git clone --depth=1 https://github.com/torvalds/linux /tmp/linux-bench
-V3_CORPUS=/tmp/linux-bench cargo test --release -p lucivy-core \
+V3_CORPUS=/tmp/linux-bench V3_SFX_VERSION=4 cargo test --release -p lucivy-core \
     --test test_sfx_v3_ground_truth v3_ground_truth_demo -- --ignored --nocapture
 ```
 
-28 August 2026 (3.0.8), one shard, idle machine: Intel Core Ultra 7 270K Plus
-(24 cores), 93 GB RAM, NVMe, Linux 7.1. Timings are the search itself;
-recovering each hit's file for the comparison is the harness's own work and is
-reported separately. A Jaro-Winkler row runs in the same panel but is **timed,
-not verified** — see [CHANGELOG.md](CHANGELOG.md) for why it has no reference.
+5 September 2026 (4.0.0, branch `v4`), four shards, shared dictionary, idle
+machine: Intel Core Ultra 7 270K Plus (24 cores), 93 GB RAM, NVMe, Linux 7.2.
+Timings are the search itself; recovering each hit's file for the comparison
+is the harness's own work and is reported separately. A Jaro-Winkler row runs
+in the same panel but is **timed, not verified** — see
+[CHANGELOG.md](CHANGELOG.md) for why it has no reference.
 
 ### Browser against native
 
-Measured on 26 August 2026 (3.0.2), 10 000 files of the Linux kernel source,
-4 shards, the same 21-query panel on both sides, identical hit counts (24-core
-machine; the browser is Chrome, 8 threads, the index held in memory).
+Measured on 5 September 2026 (4.0.0), the whole Linux 2.6.0 kernel, 4 shards,
+shared dictionary, the same queries on both sides, identical counts and spans
+(24-core machine; the browser is Chrome, the index held in memory, indexed by
+the playground's `index linux`).
 
 | | native (Rust, mmap) | browser (WASM) |
 |---|---|---|
-| index on disk | 2 307 MB | 2 880 MB, held in memory |
-| indexing | 26.7 s | 40 s |
-| `contains kmalloc` | 34-45 ms | 46-100 ms (first query) |
-| `contains` relaxed `kmalloc` | 44-47 ms | 26-40 ms |
-| `startsWith netdev` | 45-55 ms | 53 ms |
-| `phrase return -ENOMEM` | 53 ms | 47 ms |
-| `fuzzy kmallc` (d = 1) | 65-67 ms | 62 ms |
-| `fuzzy kmalloc` (d = 2) | 424-436 ms | 270 ms |
-| `regex spin_lock_[a-z]+` | 147-164 ms | 124 ms |
-| `parse kmalloc AND NOT kfree` | 26 ms | 19 ms |
-| **panel mean / median** | **75 / 47 ms** | **71-117 / 45-65 ms** |
+| files | 13 806 (the harness skips a few directories) | 14 032, 126 MB of text |
+| index | 905 MB on disk | 1 089 MB, held in memory |
+| indexing | 23 s | 41 s (a commit every 8 MB of text) |
+| `mutex_lock`, separators relaxed | 2 ms | 10-18 ms |
+| `spin_lock` / `spin_lock_init`, strict | 3 ms | 11-48 ms |
+| `fuzzy schdule` (d = 1) | 10 ms | 29-33 ms |
+| `fuzzy regsiter` (d = 2) | 128 ms | — |
+| `regex spin_lock_[a-z]+` | 52 ms | 113-127 ms |
 
-On 50 000 kernel files, natively (800 segments, no compaction, indexed in
-52 s, 8.1 GB on disk): floor 26 ms, `kmalloc` / `spin_lock` / `__init` 28-29 ms,
-`include` (36 824 documents, 214 692 spans) 37 ms, fuzzy d = 1 44-106 ms,
-d = 2 189 ms, regex 200-211 ms — every count and every span checked against
-`grep`.
+10 000 files of a modern kernel, index on disk: 3.0.8 wrote 2 307 MB; 4.0
+writes 455 MB per segment, 345 MB with the shared dictionary. The browser pays
+two to five times the native engine on the same index; both give the same
+counts and the same byte spans, checked against a naive scan of the files.
 
 > These are **substring** queries across token boundaries with BM25 scoring and
 > exact spans — most full-text engines return nothing for them. How to run the
