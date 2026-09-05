@@ -232,9 +232,16 @@ impl Node for AssembleV3Node {
                 let entries: Vec<(u32, &str, crate::suffix_fst::termtexts_v3::TermMetaV3)> =
                     data.newtexts.iter().map(|(g, t, m)| (*g, t.as_str(), *m)).collect();
                 derived.push(("newtexts".to_string(), crate::suffix_fst::dictionary::encode_newtexts(&entries)));
-                let sfx = crate::suffix_fst::dictionary_compact::generation_sfx_bytes(&data.newtexts)
-                    .map_err(|e| format!("segment dictionary FST: {e}"))?;
-                derived.push(("newsfx".to_string(), sfx));
+                // Not on wasm32: there the fold is synchronous at the commit
+                // (`dictionary_commit::sync_fold`) and builds the missing
+                // `.newsfx` then, one at a time — several segments building
+                // theirs at once raised the browser's memory high-water mark
+                // (2 023 → 2 279 MB on Linux 2.6.0) for no time gained.
+                if !cfg!(target_arch = "wasm32") {
+                    let sfx = crate::suffix_fst::dictionary_compact::generation_sfx_bytes(&data.newtexts)
+                        .map_err(|e| format!("segment dictionary FST: {e}"))?;
+                    derived.push(("newsfx".to_string(), sfx));
+                }
             }
         }
 

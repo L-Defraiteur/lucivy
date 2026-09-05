@@ -55,7 +55,7 @@ C'est ce qui rend le reste crédible. Le README l'a déjà ; ne pas le retirer.
   15. Sa phrase floue par `span_near` est juste (14 446 contre 14 449). Il est
   distribué, répliqué, opéré par des milliers d'équipes.
 - **tantivy** indexe 857 Mo en 1,3 s (défaut) et 4,9 s (trigrammes), lucivy en
-  56 s (v3) et 131 s (dictionnaire). Son fuzzy par terme fait 16 ms là où
+  56 s (v3) et 107 s (dictionnaire, repli différé du 6). Son fuzzy par terme fait 16 ms là où
   notre d2 en fait 793 (sur une autre question). Il est la base de Quickwit.
 - **Les deux** ont une communauté, des utilisateurs nommés, des années. Nous
   n'avons aucune preuve d'usage hors rag3db. C'est le trou numéro un du 28
@@ -191,8 +191,8 @@ banc sont en ligne sur `main`. Bloquer une demi-journée pour répondre.
 - Les temps d'Elasticsearch en §3 du rapport peuvent être des hits de cache
   (la même requête a tourné en §2) ; le rapport le dit, le dire aussi.
 - Les temps d'indexation lucivy sont remesurés à neuf (v3 56 s, dictionnaire
-  131 s, `derived_in_ram` 134 s, noyau, 5 septembre) ; la référence « 255 s »
-  d'avant la compaction en flux ne vaut plus.
+  131 s le 5 puis **107 s** le 6 avec le repli différé, `derived_in_ram` 134 → 111 s, noyau) ; la référence
+  « 255 s » d'avant la compaction en flux ne vaut plus.
 - Mot entier et préfixe : les comptes des trois moteurs sont proches mais pas
   égaux parce que chaque tokenizer définit le mot autrement. Ne pas les
   mettre en gras comme des écarts de rappel.

@@ -694,7 +694,8 @@ Elasticsearch and tantivy ») :
   (×3,9)**. Indexation : ES 28 / 123 s, tantivy 1,3 / 4,9 s (!), lucivy 56 s
   (v3) et **131 s** (dictionnaire ; 134 s avec `derived_in_ram`) — remesurés
   à neuf tard le 5 : la référence « ~255 s » du 08 datait d'avant la
-  compaction du dictionnaire en flux.
+  compaction du dictionnaire en flux ; **107 s** le 6 au matin avec le repli
+  différé (§2 sexies).
 - **Les neuf requêtes** : lucivy 9/9 exact sur documents et spans (les
   trois layouts). Sur la sous-chaîne pure les trois moteurs rendent le même
   compte au document près — tantivy seulement par le chemin honnête (ET de
@@ -719,45 +720,60 @@ tout le panel (positions à 0) — le premier passage affichait des zéros là
 où le doc d'août disait « exact » ; le chemin honnête (`verified_substring`)
 est ce qui rend les vrais comptes, et c'est lui qui est chronométré.
 
-## 2 sexies. Le prochain chantier : le dictionnaire à l'indexation (cadré dans la nuit du 5 au 6)
+## 2 sexies. Le dictionnaire à l'indexation : cadré dans la nuit du 5 au 6, fait le 6 au matin (×2,0 → ×1,5)
 
 Question de Lucie : « on est plus lent qu'avant en indexation, on peut rien y
-faire ? ». Remesuré à neuf, noyau : v3 **56 s**, dictionnaire **131 s**,
-+ `derived_in_ram` **134 s** (3.0.8 : 122 s). Donc le v3 de 4.0 va deux fois
-plus vite que la 3.0.8 et le dictionnaire revient à son niveau : le prix de
-l'option, ×2,0-2,3 à toutes les tailles (10 000 : 8 s / 19 ; 30 000 : 15,4 /
-31,3).
+faire ? ». Le cadrage de la nuit (chemin par jeton, cache de hachage,
+recouvrement) est resté juste sur un point — chronométrer d'abord — et
+faux sur le coupable : les compteurs (`LUCIVY_VERBOSE`) ont montré que le
+chemin par jeton tourne sur les fils des collecteurs, en parallèle du
+flux, et que **le mur était le commit** (écriture de la génération 8,8 s,
+compaction 3,4, réouverture 1,4, en série sur un seul shard). Récit et
+tableau des étapes : [10](10-journal-session-5-septembre-nuit.md) §9 ;
+mécanisme : [11](11-architecture.md) §2.
 
-**Où passe le temps** (30 000 fichiers, quatre constructions) : compaction
-2 s (`LUCIVY_DICT_MAX_GENERATIONS=1000` → 29,4 s) ; nombre de générations
-4-5 s (3 commits au lieu de 15 → 26,8 s) ; **~11 s restants** = le chemin par
-jeton et l'écriture de la génération. Lecture du code : `collector_v3.rs:567`
-appelle `lookup_or_mint` pour chaque jeton distinct du segment ;
-`dictionary.rs::lookup` fait une recherche FST **par génération** (≤ 8),
-décode les parents, confirme le texte dans `.termtexts`, alloue les
-minuscules ; les textes en attente passent par un `Mutex` global avec
-`key.to_string()`. Le v3 interne dans une table de hachage locale, et bâtit
-ses FST par segment sur tous les cœurs ; la génération, elle, est par shard
-(quatre en parallèle au plus sur 24 cœurs).
-
-Plan, par ordre :
-
-- [ ] **Chronométrer** : deux compteurs cumulés sous `LUCIVY_VERBOSE` —
-  `lookup_or_mint` par segment (temps, appels, hits par génération / pending
-  / mint) et l'écriture de la génération par commit (FST des nouveaux textes,
-  union, `.gmap`, compaction). Sur 30 000 fichiers, dix minutes.
-- [ ] **Un cache de hachage `(texte, forme) → id` par shard** devant les FST,
-  rempli au fil des lookups (et par la génération à l'ouverture si peu
-  cher) : un jeton déjà vu ne touche plus une FST. Borner sa mémoire
-  (jamais dans le navigateur sans borne) ; mesurer le gain.
-- [ ] **Recouvrir** l'écriture de la génération avec les constructions de
-  segments du même commit, au lieu de l'enchaîner ; ou la découper par
-  blocs de textes bâtis en parallèle avant l'union en flux, comme la
-  compaction.
-- [ ] Cible : le dictionnaire à **×1,3 du v3** au lieu de ×2 ; vérité 9/9 et
-  fichiers identiques octet pour octet à une construction sans cache.
-- Le v3 reste disponible pour qui veut la vitesse d'indexation ; la vitrine
-  est en dictionnaire avec des temps acceptables (2.6.0 en 28 s).
+- [x] **Chronométrer** : compteurs cumulés sous `LUCIVY_VERBOSE`
+  (`[dictionary] commit: …`, `[dictionary] fold: …`), `V3_PROFILE` pour les
+  passes de la fusion.
+- [x] **Le chemin par jeton allégé sans mémoire** : lecteurs `.termtexts` et
+  vues FST ouverts une fois par champ (8 % du chemin), minuscules et verrou
+  sans allocation, textes en attente en 16 tranches (verrou 6,7 → 4,9 s).
+- [x] **Le cache de hachage des clés trouvées : mesuré, refusé** (5,7 M de
+  marches évitées, autant de verrou en plus, 32 Mo par shard).
+- [x] **Recouvrir** : la FST des textes neufs est bâtie par chaque segment
+  sur son fil (`.newsfx`), et le commit ne bâtit plus rien — **repli
+  différé** : paires nommées dans `meta.json` (`pending_segments`), tâche de
+  fond qui fusionne, compacte, permute et fait réécrire `meta.json` ;
+  recherche qui attend par défaut (`dictionary_wait`), fermeture qui attend
+  l'état posé, garde-fous `LUCIVY_DICT_MAX_PENDING` (16) et
+  `LUCIVY_DICT_SYNC_FOLD`.
+- [x] Résultat 30 000 fichiers : **23,2-23,6 s contre 15,2-15,4 en v3
+  (×1,53)**, 32,2 la veille (×2,1) ; noyau entier à neuf (commit tous les
+  10 000) : **106,8 s** contre 131 hier (v3 56 : ×1,9 au lieu de ×2,3 ; les
+  spans de 10 000 font des replis plus gros, et le temps compte l'attente du
+  dernier repli à la fermeture), 4 928 Mo, 9/9 ; avec `derived_in_ram` :
+  **110,9 s** (134 hier), 3 334 Mo, 9/9 ; pic RSS du harnais 6 255 → 6 402 Mo
+  (±3 %, dans le bruit) ; index 1 125 Mo (1 128) ; panel 9/9, temps de
+  requête égaux (2,6-4,9 ms).
+- [ ] Cible ×1,3 : ce qui reste est le chemin par jeton lui-même (35 s
+  cumulées sur les fils, dont 28 de FST — un jeton **nouveau** paie un
+  `get` par génération vivante pour ne rien trouver : 6,6 M des 15 M
+  appels). Piste sérieuse : un filtre de Bloom par shard sur les clés
+  repliées (10 bits par clé, ~25 Mo par shard sur le noyau — à peser pour
+  WASM), rebâti à l'ouverture ou écrit avec la génération. Pas commencé.
+- [ ] Exposer `dictionary_wait` dans les signatures Python et Node (la
+  config JSON, le C++, le bridge et l'emscripten le portent déjà) ; les
+  README quand ce sera fait.
+- [x] **WASM : le pic mesuré** (`heap_bytes`, pages fraîches, commits 8 Mo)
+  avec le repli de fond : 2.6.0 **2 279 Mo (2 023 la veille)** en 42 s (41),
+  Godot **1 894 (1 778)** en 36 s (30, machine occupée), noyau 15 440 en
+  75 s et 1 902 Mo (pas de référence à 8 Mo). Le fond ne gagne rien en
+  WASM ; le repli synchrone seul laisse 2 279 ; **c'étaient les FST par
+  segment bâties en parallèle** : sans elles sur wasm32 (bâties au commit,
+  une à la fois, comme avant), 2.6.0 **2 023 Mo en 42 s**, Godot **1 766 Mo en
+  31 s** — les pics d'hier.
+  Décision : wasm32 garde le chemin d'avant, le différé est natif.
+- Le v3 reste disponible pour qui veut la vitesse d'indexation.
 
 ## 2 quater. La fuzzy d2 : une étape à risque, un checkpoint avant
 

@@ -326,6 +326,14 @@ export interface IndexConfig {
    * Off by default; fixed at creation.
    */
   derived_in_ram?: boolean;
+  /**
+   * Shared dictionary only. A commit returns before the shard's new texts
+   * are merged into the dictionary (a background task does it); a search
+   * waits for that merge by default, so that its cost never depends on when
+   * it runs. `false` searches at once over the not-yet-merged parts.
+   * On by default; fixed at creation.
+   */
+  dictionary_wait?: boolean;
   /** Engine version: 3 (default), 4 (= `shared_dictionary: true`), 2 (pre-3.0). */
   sfx_version?: number;
   [key: string]: unknown;

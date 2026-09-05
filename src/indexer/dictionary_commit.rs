@@ -24,7 +24,8 @@
 //! Bounds: one fold at a time per index; past `LUCIVY_DICT_MAX_PENDING`
 //! (16) pending segments a commit waits for the running fold and folds the
 //! rest itself, synchronously; `LUCIVY_DICT_SYNC_FOLD=1` folds every commit
-//! synchronously (the behaviour before 6 September 2026).
+//! synchronously — the default on wasm32, where the background fold gains
+//! no time and costs memory (see `sync_fold`).
 //!
 //! Ids are stable and append-only, so a fold changes no segment.
 
@@ -49,8 +50,18 @@ fn max_generations() -> usize {
     std::env::var("LUCIVY_DICT_MAX_GENERATIONS").ok().and_then(|v| v.parse().ok()).filter(|&n| n >= 1).unwrap_or(8)
 }
 
+/// Fold at the commit, synchronously, instead of in the background. The
+/// default on wasm32: measured on Linux 2.6.0 in the browser (6 September),
+/// the background fold gained nothing (41 → 42 s, few threads) and raised
+/// the memory high-water mark 2 023 → 2 279 MB, the fold's buffers and the
+/// compaction's reads landing on top of the segment builds; at the commit
+/// the same work runs when nothing else does. `LUCIVY_DICT_SYNC_FOLD=1`
+/// natively, `=0` on wasm to try the background fold.
 fn sync_fold() -> bool {
-    std::env::var("LUCIVY_DICT_SYNC_FOLD").is_ok_and(|v| v != "0")
+    match std::env::var("LUCIVY_DICT_SYNC_FOLD") {
+        Ok(v) => v != "0",
+        Err(_) => cfg!(target_arch = "wasm32"),
+    }
 }
 
 /// Name the not-yet-committed segments' pairs as pending parts of the live

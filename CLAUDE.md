@@ -180,6 +180,10 @@ Jamais d'I/O dans un actor handler.
 - GC thread skip en WASM
 - `WRITER_HEAP_SIZE = 15MB` en WASM (50MB natif)
 - `MAXIMUM_MEMORY = 4GB` (limit 32-bit WASM)
+- Repli du dictionnaire (`sfx_version` 4) : **sur wasm32 le chemin d'avant le 6 septembre** — pas de
+  `.newsfx` par segment (`sfx_dag_v3.rs`), repli synchrone au commit (`sync_fold()`,
+  `dictionary_commit.rs`). Mesuré dans Chrome : le fond n'y gagne rien en temps, et les FST par
+  segment bâties en parallèle montaient le pic de 2 023 à 2 279 Mo (2.6.0) ; différé en natif.
 - Fusions de fond : `LUCIVY_MERGE_CONCURRENCY` = 1 sur wasm (une fusion v3
   rebâtit la FST en RAM), **2 pour un index à dictionnaire partagé** (posé
   par le binding, mesuré le 5 septembre : pic mémoire inchangé, attente
@@ -240,7 +244,20 @@ de 8 générations, les plus petites fusionnent (le compte revient à 4),
 union des FST en ordre de clés, records copiés tels quels ou parents
 fusionnés, sortie en flux, `.termtexts` par tas en trois passes ; noyau
 19 s et 229 Mo au lieu de 48 s et 12,8 Go, fichiers identiques octet
-pour octet (`01` §13).
+pour octet (`01` §13). **Repli différé (6 septembre au matin,
+`indexer/dictionary_commit.rs`, `suffix_fst/dictionary_fold.rs`)** : chaque
+segment écrit la FST de ses textes neufs (`.newsfx`) à côté de `.newtexts`,
+le commit ne bâtit plus rien — il nomme ses segments dans
+`SfxDictionaryMeta.pending_segments` (leurs paires sont des parties du
+dictionnaire, lues comme des générations) et une tâche de fond les fusionne
+en génération, compacte, permute le dictionnaire vivant et fait réécrire
+`meta.json` par l'acteur (`SuDictionaryFoldedMsg`) ; **la recherche attend le
+repli par défaut** (`dictionary_wait`, `LUCIVY_DICT_WAIT=0` pour mesurer la
+fenêtre : 3 → 20 ms sur le panel), la fermeture de l'écrivain aussi ;
+`LUCIVY_DICT_MAX_PENDING` (16) et `LUCIVY_DICT_SYNC_FOLD=1` ; test
+`deferred_fold_settles`. Le chemin par jeton a aussi été allégé (lecteurs
+`.termtexts` et vues FST ouverts une fois par champ, textes en attente en
+16 tranches) ; un cache des clés trouvées a été mesuré et refusé.
 
 ## Extension rag3db (lucivy_fts)
 
@@ -272,9 +289,10 @@ pour octet (`01` §13).
 - Compatibilité 3.0.x : `cargo test --release -p lucivy-core --test test_compat_308` —
   la fixture `lucivy_core/tests/fixtures/index-3.0.8/` a été écrite par le wheel PyPI
   3.0.8 ; v4 doit rendre ses réponses, puis convertir sans perte (le contrat de 4.0.0)
-- Temps d'indexation de référence (noyau, 5 septembre au soir, index neufs) : v3 56 s, dictionnaire 131 s,
-  dictionnaire + `derived_in_ram` 134 s ; 30 000 fichiers : 15,4 / 31,3 s. Le dictionnaire coûte ×2 à
-  l'indexation (chemin `lookup_or_mint` par jeton, une FST par génération) : chantier cadré, 04 §2 sexies
+- Temps d'indexation de référence (noyau, index neufs) : v3 56 s, dictionnaire 131 s le 5 au soir →
+  **106,8 s le 6 au matin** (repli différé), dictionnaire + `derived_in_ram` 134 → **110,9 s** ; 30 000 fichiers :
+  15,2-15,4 / 23,2-23,6 s (31,3 la veille). Le dictionnaire coûte ×1,5 à l'indexation ; ce qui reste est le
+  chemin `lookup_or_mint` par jeton (un `get` par génération pour chaque texte nouveau) : 04 §2 sexies
 - Bench sharding : `bench_sharding.rs` (90K docs Linux kernel)
 - Banc comparatif rejouable (5 septembre au soir) : `benches/compare_engines.sh <corpus> [dossier]` —
   lucivy (v3, dictionnaire, `derived_in_ram`) contre Elasticsearch 8.19 (trigrammes + `wildcard`,

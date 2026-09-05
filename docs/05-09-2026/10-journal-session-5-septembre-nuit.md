@@ -1,10 +1,10 @@
-# Journal — 5 septembre 2026, nuit : la vitrine, le banc, la présentation, et le coût du dictionnaire à l'indexation
+# Journal — 5 septembre 2026, nuit, et 6 au matin : la vitrine, le banc, la présentation, et le dictionnaire à l'indexation (mesuré, puis le repli différé)
 
 Suite de [06](06-journal-session-5-septembre-soir.md) (les postings sans
 octets, `derived_in_ram`, la fixture 3.0.8, 4.0.0). Pour repartir : ce
-fichier, puis [04](04-progression-et-a-faire.md) (l'état et le todo — §2 ter
+fichier (**§9 : le matin du 6, le repli différé**), puis [04](04-progression-et-a-faire.md) (l'état et le todo — §2 ter
 `?ram`, §2 bis les corpus, §2 quinquies le banc, **§2 sexies le chantier
-suivant**), [09](09-plan-d-action-presentation.md) (sur quoi on se vend), puis
+indexation, fait**), [09](09-plan-d-action-presentation.md) (sur quoi on se vend), puis
 [11](11-architecture.md) et [12](12-knowledge-dump-baselines-tests-outils.md),
 autonomes. Branche `v4`, jamais `main` ; `origin/v4` au niveau du dernier
 commit. **4.0.0 numéroté, rien n'est publié.**
@@ -143,6 +143,66 @@ compteurs : `lookup_or_mint` cumulé par segment, écriture de la génération
 par commit), puis un cache de hachage `(texte, forme) → id` par shard devant
 les FST, puis recouvrir l'écriture de la génération avec les constructions de
 segments du même commit. Cible : le dictionnaire à ×1,3 du v3 au lieu de ×2.
+
+## 9. Le matin du 6 : le repli différé, ×2,0 → ×1,5
+
+Lucie : « on reprend les pistes pour réduire le temps d'indexation ? », avec
+la consigne de **surveiller le pic mémoire après chaque correctif** (WASM).
+
+**Chronométré d'abord** (`LUCIVY_VERBOSE`, compteurs dans `lookup_or_mint`
+et au commit). Le cadrage de la nuit se renverse : le chemin par jeton
+cumule 46 s sur les fils (14,97 M appels, FST 32, verrou 6,7) mais tourne
+**en parallèle** du flux ; le mur, c'est le **commit** — le harnais bâtit un
+seul shard, et l'écriture de la génération (8,8 s), la compaction (3,4) et la
+réouverture (1,4) s'enchaînent en série : ~14 des 15 s d'écart avec le v3.
+
+**Étapes, chacune mesurée (temps, pic RSS, panel), sur 30 000 :**
+
+| étape | 30 000 | note |
+|---|---|---|
+| référence | 32,2 s (v3 15,3), RSS 6 255 Mo | |
+| lecteurs `.termtexts` et vues FST ouverts une fois par champ, minuscules et verrou sans allocation | **29,7 s** | zéro mémoire |
+| cache des clés trouvées, éviction au budget | 110 s | quadratique : chaque insertion au-dessus du budget rebalayait la tranche |
+| idem, éviction en bloc | 31,0 s | prend 5,7 M de marches FST, rend autant en verrou : **refusé** (32 Mo/shard) |
+| moins de générations vivantes (4 / 2) | 36,5 / 55,1 s | la compaction coûte plus que les `get` économisés : refusé |
+| FST des textes neufs bâtie par le segment (`.newsfx`), le commit fusionne en flux | 31,6 s | la fusion coûte 1,2 µs la clé, comme bâtir : pas un gain seul |
+| passes FST et textes de la fusion en parallèle (natif) | **30,1 s** | commité `5170bcd` |
+| **repli différé** : paires nommées, tâche de fond, `meta.json` réécrit après | **23,2-23,6 s** (v3 15,2-15,4), RSS 6 402 | commité `7358112` |
+| noyau entier à neuf, commits de 10 000 | **106,8 s** (131 la veille, v3 56), 4 928 Mo, 9/9 ; avec `derived_in_ram` **110,9 s** (134), 3 334 Mo | le temps compte l'attente du dernier repli |
+
+Le repli différé, en une phrase : le commit ne bâtit plus rien, il nomme les
+paires de ses segments comme parties provisoires du dictionnaire et une
+tâche de fond les fond en génération pendant que les documents suivants
+arrivent. Détail et invariants : [11](11-architecture.md) §2.
+
+**La fenêtre, et la règle de Lucie.** Juste après un commit, le dictionnaire
+est en 12 à 16 morceaux au lieu de 4 à 8 le temps du repli ; une requête y
+rend la même réponse mais marche plus de FST : **3 → 20 ms** sur le panel,
+vu une fois quand le harnais a cherché sur des lecteurs rechargés avant le
+repli. Lucie : « je veux pas que les gens voient de faux temps de requête ».
+Donc, par défaut, **la recherche attend le repli** (une seconde au plus en
+natif), la fermeture de l'écrivain et `wait_merges_quiet` attendent l'état
+posé, et à la fin d'un repli l'acteur réécrit `meta.json` pour qu'une
+réouverture ne voie que des générations ; `dictionary_wait: false` pour qui
+préfère la latence. Panel après : 2,6-4,9 ms, inchangé.
+
+**Vérifié** : 9/9 sur chaque construction ; lib 1 461 verts ; dictionnaire,
+fédéré, LUCE (le snapshot devait tolérer une paire absente pour un champ),
+compat 3.0.8, snapshot servi, dérivés ; nouveau test `deferred_fold_settles`
+(recherche juste après un commit, `meta.json` sans paire après fermeture,
+aucune paire sur disque, réouverture égale au v3). `test_snapshot_served`
+réparé au passage (`list_files_for` à deux arguments).
+
+**WASM, la règle de Lucie : surveiller le pic après chaque correctif.** Build
+rebâti, playground, pages fraîches, commits 8 Mo : 2.6.0 42 s mais **2 279 Mo
+contre 2 023** la veille ; Godot 36 s, 1 894 contre 1 778 ; noyau 15 440 en
+75 s et 1 902 Mo (pas de référence à 8 Mo). Première hypothèse, le repli de
+fond qui recouvre les constructions : repli synchrone sur wasm32 → toujours
+2 279. Seconde, juste : **les FST par segment bâties en parallèle** dans une
+mémoire linéaire qui ne redescend pas. Sans elles sur wasm32 (bâties au
+commit, une à la fois, comme la veille) : 2.6.0 **2 023 Mo, 42 s**, Godot
+**1 766 Mo, 31 s**. Décision de
+Lucie : wasm32 garde le chemin d'avant, le différé est natif.
 
 ## 8. Commits de la nuit
 

@@ -1,4 +1,4 @@
-# Knowledge dump — baselines, tests, outils, pour la session suivante (nuit du 5 au 6 septembre)
+# Knowledge dump — baselines, tests, outils, pour la session suivante (nuit du 5 au 6 septembre, complété le 6 au matin)
 
 Complète [08](08-knowledge-dump-baselines-tests-outils.md) (harnais,
 tailles, A/B, tests, fixture 3.0.8, scratchpad, pièges), toujours valable ;
@@ -19,7 +19,7 @@ encore : `docker rm -f lucivy-es`. Pas de `gh` sans son accord.
 
 | quoi | valeur |
 |---|---|
-| indexation natif, index neufs, machine au repos | v3 **56 s** (6 629 Mo) · dictionnaire **131 s** (4 937) · + `derived_in_ram` **134 s** (3 344) · 3.0.8 : 122 s |
+| indexation natif, index neufs, machine au repos | v3 **56 s** (6 629 Mo) · dictionnaire **131 s** (4 937) le 5, **106,8 s** (4 928) le 6 avec le repli différé · + `derived_in_ram` **134 s** (3 344) le 5, **110,9 s** (3 334) le 6 · 3.0.8 : 122 s |
 | 30 000 fichiers | v3 15,4 s · dict 31,3 · dict sans compaction 29,4 · dict 3 commits 26,8 |
 | Elasticsearch 8.19 | standard 781 Mo / 28 s · trigrammes + `wildcard` 3 082 Mo / 123 s |
 | tantivy 0.25 | défaut 612 Mo / 1,3 s · trigrammes 680 Mo / 4,9 s |
@@ -30,6 +30,28 @@ encore : `docker rm -f lucivy-es`. Pas de `gh` sans son accord.
 | navigateur, 2.6.0 (14 032 fichiers) | 28 s / 1 087 Mo (commits 2 000) · 41 s / 2 023 Mo de pic (commits 8 Mo) · natif 23 s / 905 Mo |
 | navigateur, les douze corpus | [04](04-progression-et-a-faire.md) §2 bis (TypeScript 39 044 en 33 s, MDN 14 s, Go 19, Godot 19→30, PostgreSQL 10, CPython 10, Git 5, curl 3, Redis 2, SQLite 2, nginx 1) |
 | `?ram` navigateur | noyau : OPFS 1 571 → 1 159 Mo, pic indexation 3 335 → **3 859**, repos 2 803 → 3 055 ; MDN 478 → 369, pic 1 646 → 1 906 |
+
+## 2 bis. Le chantier indexation du 6 au matin (repli différé) — baselines
+
+Voir `04` §2 sexies pour le récit et `11` §2 pour le mécanisme.
+
+| quoi | valeur |
+|---|---|
+| 30 000 fichiers, dictionnaire, index neuf | 32,2 s la veille → **23-24 s** (v3 15,2-15,3 ; trois A/B alternés, `ab-fold-*.txt`) |
+| pic RSS du harnais sur ces constructions | v3 6 006 Mo ; dictionnaire 6 044-6 419 selon l'étape (bruit ±3 %, jamais une marche) |
+| chemin par jeton (`LUCIVY_VERBOSE`, cumul sur les fils) | 14,97 M `lookup_or_mint` : 46 s → 35 s ; FST 32 → 28 ; verrou 6,7 → 4,9 (16 tranches) |
+| commit, cumul sur 15 commits | écriture des générations 8,8 s → **0** (paires nommées en 40-300 ms) ; compaction 3,4 → en fond ; réouverture 1,4 → en fond |
+| fusion en flux d'un span | 1,2 µs la clé FST, passe textes = un quart ; 950 000 textes en 0,75-0,9 s |
+| requêtes du panel après repli | inchangées (2,6-4,9 ms exactes, fz2 155, rx 19,6) ; **avec les paires visibles : 19-36 ms** — la fenêtre que la recherche n'expose jamais par défaut |
+| navigateur, build du matin, pages fraîches, commits 8 Mo | 2.6.0 : FST par segment + fond **2 279 Mo** / 42 s ; + repli synchrone 2 279 / 44 ; **sans FST par segment (chemin d'avant) 2 023 / 42** = la veille ; Godot 1 894 / 36 avec, **1 766 / 31 sans**, référence 1 778 / 30 ; noyau 15 440 : 75 s, 1 902 Mo |
+
+Compteurs : `LUCIVY_VERBOSE=1` imprime `[dictionary] commit: …` (textes
+neufs, paires nommées, temps, et depuis le dernier commit : appels, frappés
+en génération, en attente, mintés, FST, ouverture, verrou) et
+`[dictionary] fold: …` (génération, paires, textes, temps, compaction,
+paires encore en attente) ; `V3_PROFILE=1` imprime `[dict] compaction …`
+avec la passe FST et la passe textes. `sum-dict.py <log>` du scratchpad
+additionne les lignes de commit.
 
 ## 3. Outils ajoutés
 
@@ -65,6 +87,15 @@ scores égaux — c'est la preuve du pilier 5), `test_filtered_search_truth`,
 Rien d'irremplaçable ; `compare_engines.md` est copié dans
 `docs/compare-engines-2026-09-05.md`.
 
+## 5 bis. Le scratchpad du matin
+
+`run-rss.sh <tag> <dict|v3>` : une construction 30 000 à neuf, non
+verbeuse, avec le pic RSS relevé par `VmHWM` (pas de `/usr/bin/time` sur la
+machine) ; `rss-<tag>-<mode>.txt`. `instr-30k-dict-{1..8}.txt` : les
+constructions verbeuses de chaque étape. `run-fold-measure.sh` : trois A/B
+puis le noyau puis le build WASM ; `ab-fold-*.txt`, `index-time-dict-fold.txt`,
+`idx90k-dict-fold/` (index noyau à neuf, réutilisable par le banc).
+
 ## 6. Pièges de la nuit
 
 - **`pkill -f motif` tue le shell qui porte le motif** (exit 144) : `for p in
@@ -84,6 +115,34 @@ Rien d'irremplaçable ; `compare_engines.md` est copié dans
   une espace fine insécable, voulue.
 - Les temps d'indexation de référence vieillissent : « ~255 s » du 08 était
   d'avant la compaction en flux ; remesurer à neuf avant de publier un temps.
+- **Le cumul sur les fils n'est pas le mur.** Les compteurs du chemin par
+  jeton faisaient 46 s cumulées pour 30 s de mur : ce sont les fils des
+  collecteurs, en parallèle du flux. Le mur était le commit (une seule
+  génération par shard, en série). Toujours distinguer les deux avant
+  d'optimiser.
+- Un cache avec éviction « au budget » qui rebalaye toute la table à chaque
+  insertion au-dessus du budget est quadratique : 110 s au lieu de 30
+  (278 s de verrou). Évincer en bloc, amorti, ou pas du tout.
+- Le harnais `v3_ground_truth_demo` prend `handle.reader.searcher()` en
+  direct : il ne passe **pas** par `ShardedHandle::search`, donc pas par
+  l'attente du repli. Il mesure ce que le lecteur voit ; ce qui lui donne le
+  bon état, c'est `wait_merging_threads` (qui attend le repli et son
+  `meta.json`) puis `reload`.
+- `SfxDictionaryMeta::pair_files` nomme la paire pour **chaque** champ ;
+  un segment n'écrit une paire que pour les champs où il a minté. Une
+  lecture qui traite un fichier manquant comme une perte (le snapshot LUCE)
+  doit tolérer `.newsfx`/`.newtexts` absents.
+- **Dans WASM, un travail parallèle de plus se paie en pic, pas en temps** :
+  huit constructeurs de FST vivants en même temps (un par segment en cours)
+  ont coûté +256 Mo sur la 2.6.0 pour 0 s gagnée. Tout ce qui recouvre les
+  constructions de segments doit être mesuré dans Chrome avant d'être gardé
+  sur wasm32, et `cfg!(target_arch = "wasm32")` est le bon garde-fou.
+- Une hypothèse de pic mémoire se teste une variable à la fois : le repli
+  synchrone seul n'a rien rendu (2 279), c'est la seconde variable (les FST
+  par segment) qui portait tout.
+- Rouvrir un index dont l'écrivain vit encore → `LockBusy` : fermer par
+  `writer.take().wait_merging_threads()` d'abord (le test
+  `deferred_fold_settles`).
 - Une accroche ou un chiffre changé dans le README principal doit être
   reporté le même jour dans les cinq autres README (bindings, core) et sur la
   page : c'est la règle posée cette nuit.
