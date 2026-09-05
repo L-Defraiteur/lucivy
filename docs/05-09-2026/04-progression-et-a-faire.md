@@ -24,7 +24,16 @@ cartes de positions et la fratrie 27 %, le dictionnaire 21 %.
 10 000 fichiers : 1 152 Mo (`main`, 320 segments) → 372 Mo ; 30 000 :
 3 400 → 1 266 Mo.
 
-## 1. Le playground marche encore avec tout ça — validé le 5 septembre
+## 1. Le playground marche encore avec tout ça — validé le 5 septembre, **WASM : fait**
+
+Bilan : build sans changement du binding, mêmes comptes que v3 (démo,
+15 440 fichiers du noyau, panel de 21 requêtes), deux compactions en flux
+passées dans WASM, réglage retenu 8 threads de scheduler / 1 thread
+d'indexation / 2 fusions pour un index à dictionnaire, requêtes du même
+ordre ou plus rapides qu'en v3 (§1 ter). Ce qui reste pour le navigateur
+est noté, pas bloquant : le plancher de 1,5 Go de l'indexation, les seuils
+calibrés sur les gros index d'avant, Memory64 un jour.
+
 
 - [x] Build WASM (`bash bindings/emscripten/build.sh`, emsdk 6.0.8, nightly
   `-Z build-std`) : passe sans changement du binding ; `pkg/` et
@@ -105,6 +114,8 @@ temps ; le playground le journalise après l'indexation. Protocole :
 | fusions à 1 (défaut) | 60 s | 73,6 s | 5,0 s | 2 543 Mo (index 1 775 Mo) |
 | fusions à 2 | 82 s (les fusions chevauchent l'indexation) | 3,8 s | 4,3 s | 2 539 Mo (index 1 772 Mo) |
 | fusions à 4 | 62 s | 15,7 s | 4,4 s | 2 539 Mo (index 1 774 Mo) |
+| fusions à 4, scheduler 12 threads (8 par défaut) | 65 s | 8,7 s | 4,8 s | 2 539 Mo |
+| fusions à 4, 4 threads d'indexation (1 par défaut) | **140 s** | 10,0 s | 9,2 s (3 844 fichiers) | 2 283 Mo |
 
 Lecture : à 2, deux fusions tournent ensemble (22 à 28 s chacune, comme
 seules), **le pic mémoire ne bouge pas** (2 539 contre 2 543 Mo : une
@@ -118,6 +129,24 @@ taille. Décision du 5 septembre : **2 par défaut dans le navigateur pour
 un index à dictionnaire partagé**, 1 pour un index v3 (non remesuré),
 `mergeConcurrency` / `--merge-concurrency=N` pour forcer.
 
+Plus de threads de scheduler (12 au lieu des 8 par défaut sur cette
+machine, `available_parallelism` borné à 2..8) : **rien** — chaque fusion
+est même plus lente (30 à 41 s contre 24 à 30), le total est le même. Le
+navigateur est borné par la mémoire et l'allocateur, pas par le nombre de
+threads ; c'était déjà la conclusion du 25 août pour les requêtes. Note :
+le pic de mémoire WASM est de **1 650 Mo pour la démo de 1 171 fichiers**
+(index de 126 Mo) — le plancher du moteur en indexation (tas de l'écrivain,
+arènes, pool) est déjà de 1,5 Go avant tout index.
+
+Quatre threads d'indexation : **deux fois plus lent** (140 s). Chaque
+thread écrit ses propres segments, donc quatre fois plus de segments
+(3 844 fichiers au lieu de 1 719), 26 fusions de 8 à 14 segments au lieu
+de 4, des attentes de créneau jusqu'à 112 s. Le « 1 » des threads
+d'indexation en WASM reste le bon réglage. **Optimum fonctionnel retenu
+et marqué fait** : scheduler 8 (défaut), 1 thread d'indexation, 2
+fusions pour un index à dictionnaire ; 4 fusions n'apporte que quelques
+secondes de plus et n'a pas été retenu par prudence.
+
 Trace par fusion (`[merge] N segments: waited … for a slot, ran …`,
 `LUCIVY_VERBOSE`, ajoutée le 5 septembre) à concurrence 1 : **quatre
 fusions, une par shard, de 8 à 9 segments, 24 à 27 s chacune, strictement
@@ -126,6 +155,62 @@ sérialisées par le permis, pas une fusion géante. Le premier essai à
 « 2 » n'avait rien changé parce que la couche JS (`lucivy.js`) filtre
 les options d'initialisation et ne transmettait pas `mergeConcurrency` :
 corrigé.
+
+### 1 ter. Les requêtes dans le navigateur ne s'envolent pas
+
+Le panel de parité du playground (`parity_panel.json`, 21 requêtes, lancé
+par `parity_run.js` via le serveur de debug, `limit` 100 000, highlights)
+sur l'index dictionnaire des 15 440 fichiers (4 shards, `commit=1000`) :
+passe froide (index rouvert par `?open=user_index`) puis chaude.
+
+Puis la même chose sur un index **v3** du même corpus, même forme (1 958 Mo
+en mémoire contre 1 768). Temps en ms, comptes identiques sauf la ligne
+marquée.
+
+| requête | docs | dict froid | v3 froid | dict chaud | v3 chaud |
+|---|---|---|---|---|---|
+| contains strict kmalloc | 1 216 | 85 | 111 | 34 | 43 |
+| contains relaxed kmalloc | 1 217 | 29 | 32 | 26 | 35 |
+| contains strict spin_lock_init | 1 112 | 49 | 45 | 27 | 41 |
+| contains relaxed spin_lock_init | 1 120 | 34 | 44 | 26 | 38 |
+| contains strict ->next | 859 | 39 | 37 | 33 | 30 |
+| contains strict return -ENOMEM; | 4 268 | 104 | 109 | 77 | 84 |
+| split spin lock init | 11 901 | 366 | 375 | 305 | 316 |
+| startsWith netdev | 2 769 | 100 | 112 | 97 | 89 |
+| term kfree | 3 833 | 78 | 75 | 79 | 78 |
+| phrase return -ENOMEM | 4 272 | 81 | 83 | 87 | 80 |
+| fuzzy d1 kmallc | 1 340 | 53 | 72 | 55 | 70 |
+| fuzzy d1 spin_lock_ini | 1 214 | 60 | 67 | 46 | 77 |
+| fuzzy d2 kmalloc (**tronquée**, voir ci-dessous) | 7 320 / 7 317 | 387 | 367 | 384 | 387 |
+| regex spin_lock_[a-z]+ | 1 875 | 206 | 185 | 207 | 186 |
+| regex ETH_P_[0-9A-Z]+ | 580 | 73 | 71 | 72 | 71 |
+| parse mutex unlock | 4 964 | 121 | 117 | 114 | 109 |
+| parse kmalloc AND NOT kfree | 72 | 33 | 24 | 21 | 26 |
+| parse "spin_lock_init" -kfree | 267 | 22 | 28 | 24 | 29 |
+| ext filter netdev .h | 636 | 60 | 67 | 38 | 42 |
+| path contains ethernet/intel | 382 | 95 | 65 | 96 | 55 |
+| no hit | 0 | 37 | 10 | 7 | 9 |
+
+**Verdict** : dans le navigateur le dictionnaire est **du même ordre ou
+plus rapide** que v3 sur 19 requêtes sur 21 (les `contains` et les fuzzy
+d1 gagnent 10 à 30 %), plus lent sur deux : la regex `spin_lock_[a-z]+`
+(×1,1) et `path contains ethernet/intel` (×1,5 — le champ `path`, un
+dictionnaire minuscule : les 4 shards ont chacun le leur, et le plan par
+shard ne rattrape pas grand-chose sur 2 700 clés). Rien ne s'envole ; la
+règle du ×1,5 tient à la limite sur `path`.
+
+**`fuzzy d2 kmalloc` : 7 320 en dictionnaire, 7 317 en v3, et 7 321 sur
+une passe faite juste après l'indexation.** Ce n'est pas un rappel
+différent : `memoryStatus().last_search_truncated` est **vrai** sur cette
+requête en v3 — le plafond `LUCIVY_MAX_MATCHES_PER_SEGMENT` (20 000 sur
+wasm) est atteint, la recherche le dit, et le nombre de documents perdus
+dépend de la taille des segments, donc de la forme de l'index (v3 et
+dictionnaire ne fusionnent pas dans le même ordre, et les fusions de fond
+changent la forme après coup). En natif, les deux modes rendent le compte
+exact du panel de vérité. Côté dictionnaire le drapeau est **vrai aussi**
+(7 321 juste après la construction, index de 1 857 Mo) : les deux modes
+sont tronqués sur cette requête et le disent, et l'écart de 3 ou 4
+documents est l'endroit où le plafond tombe selon la forme des segments.
 
 ## 2. Réfléchir : perdre encore du poids, ou reconstruire en RAM à l'ouverture
 
