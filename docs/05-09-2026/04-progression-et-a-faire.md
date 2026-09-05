@@ -1114,7 +1114,9 @@ Rien ne part sans le feu vert de Lucie à chaque étape marquée **[go]**.
    les cinq plateformes, PyPI, npm (six paquets) et crates.io dans l'ordre
    `luciole` → `lucistore` → `ld-lucivy` → `lucivy-core` → `sparse-vector`,
    **et `lucivy-wasm`** (job `wasm` + `publish-wasm` de `release.yml`, emsdk
-   épinglé — la note « à la main » de CLAUDE.md datait de 3.0.6). Avant le
+   épinglé, depuis la 3.0.8 elle-même : la note « à la main » de CLAUDE.md
+   datait de 3.0.6, et le « depuis 3.0.9 » de RELEASE.md était une erreur,
+   il n'y a jamais eu de 3.0.9). Avant le
    tag : rebâtir le WASM local (`bash bindings/emscripten/build.sh`) pour
    que `playground/pkg` et le paquet portent le dernier commit.
    Étape 3 faite le 6 au soir : versions 4.0.0 partout (`Cargo.toml:120`

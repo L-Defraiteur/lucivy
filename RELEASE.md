@@ -40,7 +40,7 @@ registry" (seen on 26 August), and `npm login` is the fix, not a new code.
 
 ## Publish, in this order, stopping at the first error
 
-**Since 3.0.9 the tag does everything.** `.github/workflows/release.yml`
+**Since 3.0.8 the tag does everything.** `.github/workflows/release.yml`
 builds the Python wheels and Node.js addons for the five platforms (Linux
 x86_64 and aarch64 on glibc ≥ 2.28, macOS x86_64 and arm64, Windows x86_64)
 and the WASM package, attaches them to the release, then publishes to PyPI,

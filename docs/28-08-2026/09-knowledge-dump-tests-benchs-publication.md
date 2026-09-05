@@ -187,7 +187,7 @@ cinq versions. Ne pas en tirer de chiffre publiable.
 
 ## 4. Publier une version
 
-**Depuis 3.0.9, un tag suffit.** `release.yml` construit les cinq plateformes
+**Depuis 3.0.8, un tag suffit** (écrit « 3.0.9 » à l'époque : il n'y a jamais eu de 3.0.9). `release.yml` construit les cinq plateformes
 de wheels et d'addons, le wasm, attache tout à la release, puis publie sur
 PyPI, npm et crates.io — **trusted publishing partout, aucun jeton, aucun
 OTP**.

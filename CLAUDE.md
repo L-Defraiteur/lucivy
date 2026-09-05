@@ -497,8 +497,8 @@ permission `publish`, le secret `NPM_TOKEN` a été supprimé, et la CI a tout
 publié **sans un seul OTP**, avec attestation de provenance signée. Vérifier
 la configuration : `npx -y npm@latest trust list <paquet> --otp=<code>` (un
 OTP par appel, et le nom du paquet est obligatoire malgré la doc).
-`lucivy-wasm` est publié par le job `wasm` + `publish-wasm` de `release.yml` depuis 3.0.9
-(la note qui suit datait de 3.0.6) : aucun workflow ne construisait alors le
+`lucivy-wasm` est publié par le job `wasm` + `publish-wasm` de `release.yml` depuis **3.0.8**
+(commit `657af55` ; il n'y a jamais eu de 3.0.9 — la note qui suit datait de 3.0.6) : aucun workflow ne construisait alors le
 WASM (`build.sh` demande emsdk + nightly `-Z build-std`), donc son trusted
 publisher ne sert à rien tant qu'un job emscripten n'existe pas — à ajouter,
 `build.sh` marche déjà tel quel avec `mymindstorm/setup-emsdk` puisqu'il
