@@ -1,11 +1,11 @@
-# Réponses aux six issues ouvertes après 4.0.1 — brouillons à relire avant de poster
+# Réponses aux six issues ouvertes après 4.0.1 — postées le 6 septembre 2026 au soir
 
 Contexte : les brouillons du 28 août (`docs/28-08-2026/05-reponses-issues.md`)
 ont été postés pour #11, #13 et #14 ; #12 et #15 n'ont **jamais reçu de
 réponse** (leurs brouillons promettaient un bench et un test qui n'existaient
 pas). Depuis : 4.0.0 et 4.0.1 publiées le 6 septembre, l'index ×3,7 plus petit,
-le banc comparatif rejouable, la CI qui barre la publication. Rien de ce qui
-suit n'est posté ; `gh` attend le mot de Lucie.
+le banc comparatif rejouable, la CI qui barre la publication. Tout ce qui suit a été
+posté le 6 septembre au soir (compte L-Defraiteur), tel quel ; #13 reste ouverte.
 
 Sur le ton, inchangé : dire ce qui est fait, ce qui ne l'est pas, ne rien
 promettre qu'on ne tiendra pas. Trois choses ont changé de fond depuis août
@@ -78,25 +78,25 @@ part plus sur une CI rouge — c'est arrivé une fois, la 4.0.1 le dit).
 > schema, documents, term and boolean queries; `lucivy-core` is the layer above
 > (`ShardedHandle`, the JSON query builder, snapshots, the store contract) and is
 > where the substring, fuzzy and regex queries live. For a codebase on the
-> standard APIs the engine-level changes are small — but I keep the August
-> position: I would rather port a real one than write a guide from memory.
-> If you still have that ~500-line project, I will port it and publish the diff
-> as the guide, every surprise becoming a line of a compatibility table. If
-> not, I will write it from a synthetic project and say so at the top.
+> standard APIs the engine-level changes are small. There is no written guide
+> and I am not promising one; the README of each binding and `lucivy_core`'s
+> document the API as it is.
 >
 > **Incremental adoption** is the easy part and the one I recommend: keep your
 > BM25 queries as they are, add `contains` / fuzzy / regex where they help; the
 > two do not interfere, and the index format contract of 4.0 (it opens 3.0.x
 > indexes, 3.0.x does not open 4.0 ones, the first commit converts) is tested
-> against a fixture the published 3.0.8 wheel built.
+> against a fixture the published 3.0.8 wheel built. On size, since it was the
+> concern behind your other issues: 4.0 is 4.9 GB for the kernel's 857 MB of
+> text, 3.3 GB with `derived_in_ram` (three sidecars per segment rebuilt at
+> open instead of stored: the open pays about 2 s, never a query).
 >
-> **One more thing, planned rather than promised.** Since re-indexing is the
-> path, the next thing on my list after 4.0.1 is an import tool that reads the
-> documents stored in a tantivy index (its stored fields, in the order of its
-> segments) and feeds them to lucivy with a schema derived from tantivy's — so
-> that the migration is one command and no code, for the indexes whose fields
-> are stored. tantivy first; Elasticsearch, through `_source`, after. I will
-> post here when it exists, not before.
+> **The only migration help planned**, and planned rather than promised: an
+> import layer that reads the documents stored in a third-party index (a
+> tantivy index's stored fields first; Elasticsearch through `_source` after)
+> and re-indexes them into lucivy with a schema derived from the source, so
+> that a migration is one command for the indexes whose fields are stored. I
+> will post here when it exists, not before.
 
 ---
 
@@ -156,7 +156,7 @@ part plus sur une CI rouge — c'est arrivé une fois, la 4.0.1 le dit).
 - #15 annonce l'outil d'import comme « planned rather than promised » (`02-import-tantivy-elasticsearch.md`) : poster sur l'issue quand il existe, pas avant.
 - Une seule promesse nouvelle : le panel BM25 term/boolean contre tantivy
   **si** le demandeur nomme un corpus (#12). Ne poster que si on compte la tenir.
-- #15 engage à porter son projet s'il le fournit, ou à écrire le guide depuis
-  un projet synthétique en le disant. À tenir aussi.
+- #15 ne promet plus rien d'autre que la couche d'import, un jour (décision de
+  Lucie : pas de portage de projet tiers, pas de guide).
 - Les liens : le rapport `docs/compare-engines-2026-09-05.md` sur `main`, la
   page `l-defraiteur.github.io/lucivy` pour la démo.
