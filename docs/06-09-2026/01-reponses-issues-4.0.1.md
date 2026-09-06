@@ -1,4 +1,4 @@
-# Réponses aux cinq issues ouvertes après 4.0.1 — brouillons à relire avant de poster
+# Réponses aux six issues ouvertes après 4.0.1 — brouillons à relire avant de poster
 
 Contexte : les brouillons du 28 août (`docs/28-08-2026/05-reponses-issues.md`)
 ont été postés pour #11, #13 et #14 ; #12 et #15 n'ont **jamais reçu de
@@ -89,6 +89,14 @@ part plus sur une CI rouge — c'est arrivé une fois, la 4.0.1 le dit).
 > two do not interfere, and the index format contract of 4.0 (it opens 3.0.x
 > indexes, 3.0.x does not open 4.0 ones, the first commit converts) is tested
 > against a fixture the published 3.0.8 wheel built.
+>
+> **One more thing, planned rather than promised.** Since re-indexing is the
+> path, the next thing on my list after 4.0.1 is an import tool that reads the
+> documents stored in a tantivy index (its stored fields, in the order of its
+> segments) and feeds them to lucivy with a schema derived from tantivy's — so
+> that the migration is one command and no code, for the indexes whose fields
+> are stored. tantivy first; Elasticsearch, through `_source`, after. I will
+> post here when it exists, not before.
 
 ---
 
@@ -117,6 +125,21 @@ part plus sur une CI rouge — c'est arrivé une fois, la 4.0.1 le dit).
 
 ---
 
+## #10 — triple-field layout / index size → **suivi court**
+
+> Following up on the part of this issue I did not answer in August, which was
+> the actual blocker: the size. The layout was gone in 3.0, but the index was
+> still large — 18 GB for the Linux kernel's 857 MB of text in 3.0.8. In 4.0
+> (published 6 September, 4.0.1 on the registries) it is **4.9 GB**, 3.3 GB with
+> `derived_in_ram`, same answers and same spans, checked against the files. For
+> a 10 GB volume that is the difference between "no" and "measure your corpus":
+> count on ×4 to ×6 the text, ×3.5 to ×4 with `derived_in_ram` (the open pays
+> about 2 s on the kernel, never a query). The comparison with tantivy and
+> Elasticsearch, sizes included, is in
+> [`docs/compare-engines-2026-09-05.md`](https://github.com/L-Defraiteur/lucivy/blob/main/docs/compare-engines-2026-09-05.md).
+
+---
+
 ## #14 — delta sync → **suivi court**
 
 > Published: the browser-side incremental sync described above shipped in
@@ -130,6 +153,7 @@ part plus sur une CI rouge — c'est arrivé une fois, la 4.0.1 le dit).
 
 ## Après avoir posté
 
+- #15 annonce l'outil d'import comme « planned rather than promised » (`02-import-tantivy-elasticsearch.md`) : poster sur l'issue quand il existe, pas avant.
 - Une seule promesse nouvelle : le panel BM25 term/boolean contre tantivy
   **si** le demandeur nomme un corpus (#12). Ne poster que si on compte la tenir.
 - #15 engage à porter son projet s'il le fournit, ou à écrire le guide depuis
