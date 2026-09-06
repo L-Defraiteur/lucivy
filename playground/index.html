@@ -1875,7 +1875,7 @@ async function startup() {
     // Cache-buster: GitHub Pages caches the worker and the wasm for a while,
     // and a phone kept a whole build behind after a deploy. Bumped at each
     // engine or worker change; the query rides through to the wasm.
-    const BUILD = '4.0.1-fe301b3';
+    const BUILD = '4.0.2-a13f17f';
     lucivy = new Lucivy(`./js/lucivy-worker.js?v=${BUILD}`, {
       noOpfs: startupParams.has('noopfs'),
       verbose: startupParams.has('verbose'), // engine diagnostics (LUCIVY_VERBOSE, V3_PROFILE)
@@ -2900,7 +2900,7 @@ const term = {
 // happening. Cosmetic, never on real output, off under reduced motion.
 const GLITCH_BASE = [
   ' ▚▞▚▞  l u c i v y  ▞▚▞▚      substring search · suffix FST · Rust → WASM',
-  ' ░▒▓█  4.0.1  █▓▒░           01101100 01110101 01100011 01101001 01110110 01111001',
+  ' ░▒▓█  4.0.2  █▓▒░           01101100 01110101 01100011 01101001 01110110 01111001',
   ' ∿ ⌁ ⟁  bm25 · fuzzy · regex · spans  ⟁ ⌁ ∿',
 ];
 const GLITCH_CHARS = '▚▞░▒▓█∿⌁⟁╳◌◍⋮⋯01';

@@ -1,4 +1,4 @@
-# lucivy-wasm 4.0.1
+# lucivy-wasm 4.0.2
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. In the browser — the same engine as the native bindings, built with emscripten: **threads** (pthreads over SharedArrayBuffer), OPFS persistence, snapshot import. Runs in a Web Worker. MIT.
 

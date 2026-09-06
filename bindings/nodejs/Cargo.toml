@@ -1,6 +1,6 @@
 [package]
 name = "lucivy-napi"
-version = "4.0.1"
+version = "4.0.2"
 edition = "2024"
 license = "MIT"
 description = "Fast BM25 full-text search index for Node.js, powered by Lucivy"

@@ -1,5 +1,8 @@
-Unreleased
-==========
+Lucivy 4.0.2 — 6 September 2026
+================================
+
+The 4.0.1 engine plus one fix in the blob store directory, found by the
+release workflow's own `checks` job on a README push.
 
 - **Blob store: a store outage no longer leaves a stale lock file.** The
   blob directory wrote every file to its local cache before saving it to

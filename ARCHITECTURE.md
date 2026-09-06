@@ -1,6 +1,6 @@
 # lucivy — Architecture
 
-*4.0.1, September 2026. Every number in this document was measured; the
+*4.0.2, September 2026. Every number in this document was measured; the
 commands are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md), the engine comparison
 in [docs/compare-engines-2026-09-05.md](docs/compare-engines-2026-09-05.md)
 (`benches/compare_engines.sh` regenerates it), and the working notes in
