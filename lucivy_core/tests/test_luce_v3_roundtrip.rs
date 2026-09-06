@@ -5,7 +5,7 @@
 //! carrying `.sibling_v3`, `.word_sfxpost`, `.word_pos_map`, `.bytemap`,
 //! `.termtexts`, `.posmap`. This builds one, snapshots it, imports it into a
 //! fresh directory and requires every query of the panel to answer
-//! identically — count, scores to the bit, span counts and top ids.
+//! identically — count, scores to the bit, span counts and every id.
 //!
 //!   cargo test --release -p lucivy-core --test test_luce_v3_roundtrip -- --nocapture
 //!
@@ -19,7 +19,7 @@ use lucivy_core::sharded_handle::ShardedHandle;
 use lucivy_core::snapshot;
 use std::path::Path;
 
-/// (count, top-10 (node_id, score, span count)) for one query.
+/// (count, every hit as (node_id, score, span count), by score then id) for one query.
 type Answer = (usize, Vec<(u64, f32, usize)>);
 
 fn run_panel(h: &ShardedHandle, panel: &[(&str, QueryConfig)]) -> Vec<(String, Answer)> {
@@ -28,9 +28,14 @@ fn run_panel(h: &ShardedHandle, panel: &[(&str, QueryConfig)]) -> Vec<(String, A
         .iter()
         .map(|(name, q)| {
             let hits = h.search_with_docs(q, 10_000).unwrap_or_else(|e| panic!("{name}: {e}"));
-            let top = hits
+            // Every hit, ordered by (score, id): the engine defines no order
+            // between equal scores across segments, and the source and the
+            // imported index do not have the same segments (the export waits
+            // for the merges, the source's panel may run in the middle of
+            // them). A top-10 of a full tie compared merge timing, not the
+            // snapshot — it failed one CI run in several on 6 September 2026.
+            let mut top: Vec<(u64, f32, usize)> = hits
                 .iter()
-                .take(10)
                 .map(|hit| {
                     let id = {
                         use ld_lucivy::schema::Value;
@@ -40,6 +45,7 @@ fn run_panel(h: &ShardedHandle, panel: &[(&str, QueryConfig)]) -> Vec<(String, A
                     (id, hit.score, spans)
                 })
                 .collect();
+            top.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
             (name.to_string(), (hits.len(), top))
         })
         .collect()
@@ -216,9 +222,9 @@ fn luce_sharded_roundtrip(sfx_version: u8) {
         assert_eq!(c1, c2, "{name}: {c1} hits before, {c2} after the round-trip");
         assert_eq!(
             top1, top2,
-            "{name}: top-10 differs after the round-trip\n  before {top1:?}\n  after  {top2:?}"
+            "{name}: hits differ after the round-trip\n  before {top1:?}\n  after  {top2:?}"
         );
-        eprintln!("[luce-v3] OK {name:28} {c1:6} hits, top-10 identical");
+        eprintln!("[luce-v3] OK {name:28} {c1:6} hits, all identical");
     }
     h2.close().unwrap();
 }
