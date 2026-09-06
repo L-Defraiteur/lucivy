@@ -142,6 +142,21 @@ jamais au store (le chargement et `atomic_write` les ignoraient déjà), et un
 fichier dont le `save` a échoué est retiré du cache. Test unitaire
 déterministe dans `blob_directory.rs`, qui échoue sans le correctif.
 
+## 9 ter. 4.0.2 (après-midi)
+
+Lucie : « profitons pour tag 4.0.2 ». Workspace en 4.0.2 (`489937e`, WASM rebâti
+sur `a13f17f`), CI verte, mais le job `checks` du release a rougi **une seconde
+fois**, sur un autre test : `luce_v3_sharded_roundtrip` comparait le top-10 d'une
+requête où les 1 500 documents ont le même score, donc l'ordre des segments,
+différent entre la source (33 segments, fusions en cours) et l'import (12). Il
+compare maintenant tous les hits triés par score puis id (`5937c3a`). CI verte
+sur ce commit, tag `v4.0.2` posé par Lucie (le garde-fou de la session refuse
+un push de tag), `checks` rejoué vert sur le tag, puis PyPI (6 fichiers), npm
+(7 paquets), crates.io (5). Deux leçons : un test qui compare un ordre entre
+ex æquo compare le hasard des fusions ; et le job `checks` qui tourne sur les
+pushes de `main` touchant les bindings a trouvé deux intermittences en une
+après-midi que la CI seule laissait passer.
+
 ## 10. Commits
 
 `5170bcd` compteurs et gains sans mémoire · `7358112` repli différé ·

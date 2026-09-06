@@ -350,9 +350,9 @@ cd playground && node serve.mjs
 `03-journal-session-6-septembre.md` (la journée du 6 : le chantier indexation
 ×2,1 → ×1,5 et le repli différé, Jaro-Winkler vérifié, la vitrine revue, le
 dictionnaire par défaut, la course trouvée, la compat prouvée avec `main`,
-**4.0.0 puis 4.0.1 publiées**, la relecture extérieure ; **§11 les
+**4.0.0, 4.0.1 puis 4.0.2 publiées**, la relecture extérieure ; **§11 les
 objectifs** : poster les réponses aux issues, l'import tantivy/ES, l'article),
-`01-reponses-issues-4.0.1.md` (brouillons à poster après relecture de Lucie),
+`01-reponses-issues-4.0.1.md` (postées le 6 au soir),
 `02-import-tantivy-elasticsearch.md` (la proposition 4.1), `04-architecture.md`
 et `05-knowledge-dump.md` (autonomes). Le dossier précédent, `docs/05-09-2026/`,
 pour le détail : `10-journal-session-5-septembre-nuit.md` (la nuit du 5 au 6 : `?ram` mesuré,
@@ -491,6 +491,15 @@ moteur, republié après correction, et `release.yml` a désormais un job `check
 lib avec et sans features, `lucivy-core`, `lucivy-cpp`) dont dépendent toutes les
 publications. **Règle : ne jamais pousser un tag `v*` avant que la CI du commit soit
 verte** — la barrière du workflow le garantit maintenant, mais on regarde quand même.
+**4.0.2 le 6 septembre vers 14 h 30** (tag `v4.0.2`, `main` = `5937c3a`) : le job `checks`
+a rougi deux fois de suite sur des pushes de `main` sans tag, et les deux fois c'était un
+test et pas le moteur — `blob_store_save_failure_surfaces_in_commit_without_hanging`
+(une panne du store laissait un `.lucivy-meta.lock` dans le cache sans gardien : tout
+verrou suivant attendait 10 s puis `LockBusy` ; corrigé dans `BlobWriter::flush`, les
+verrous ne vont jamais au store, test `store_outage_leaves_no_lock_file_and_no_half_written_file`)
+puis `luce_v3_sharded_roundtrip` (top-10 d'un ex æquo complet = ordre des segments ;
+compare maintenant tous les hits triés par score puis id). Le tag n'est parti qu'après
+la CI verte du commit exact, et `checks` a rejoué vert sur le tag avant les publications.
 Le contrat de 4.0 (ouvre 3.0.x, 3.0.x n'ouvre pas 4.0, le premier commit convertit) est
 vérifié par `test_compat_308` et, le 6 au soir, par un index de 10 000 fichiers bâti par
 `main` (3.0.8) et rouvert par v4 : 10/10. Le dictionnaire partagé est le défaut depuis 4.0.0.
@@ -499,10 +508,10 @@ Publier reste une décision explicite de Lucie.
 
 | Registre | Package | Publié | Date |
 |----------|---------|---------|---------|
-| PyPI | `lucivy` | **4.0.0** puis **4.0.1** (5 wheels `cp39-abi3` : manylinux_2_28 x86_64 + aarch64, macOS x86_64 + arm64, win_amd64 ; + sdist) — par le tag | 6 septembre 2026 (nuit) |
-| npm | `lucivy` + `lucivy-linux-x64-gnu`, `lucivy-linux-arm64-gnu`, `lucivy-darwin-x64`, `lucivy-darwin-arm64`, `lucivy-windows-x64` | **4.0.0** puis **4.0.1** — par le tag | 6 septembre 2026 (nuit) |
-| npm | `lucivy-wasm` | **4.0.0** puis **4.0.1** (job `wasm` + `publish-wasm`) | 6 septembre 2026 (nuit) |
-| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` | **4.0.0** puis **4.0.1** — par le tag, en dernier | 6 septembre 2026 (nuit) |
+| PyPI | `lucivy` | **4.0.0**, **4.0.1**, **4.0.2** (5 wheels `cp39-abi3` : manylinux_2_28 x86_64 + aarch64, macOS x86_64 + arm64, win_amd64 ; + sdist) — par le tag | 6 septembre 2026 (nuit, puis 14 h 30) |
+| npm | `lucivy` + `lucivy-linux-x64-gnu`, `lucivy-linux-arm64-gnu`, `lucivy-darwin-x64`, `lucivy-darwin-arm64`, `lucivy-windows-x64` | **4.0.0**, **4.0.1**, **4.0.2** — par le tag | 6 septembre 2026 (nuit, puis 14 h 30) |
+| npm | `lucivy-wasm` | **4.0.0**, **4.0.1**, **4.0.2** (job `wasm` + `publish-wasm`) | 6 septembre 2026 (nuit, puis 14 h 30) |
+| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` | **4.0.0**, **4.0.1**, **4.0.2** — par le tag, en dernier | 6 septembre 2026 (nuit, puis 14 h 30) |
 | (avant) | tout | 3.0.7 le 28 août (nuit), 3.0.8 le 28 août à 15 h | |
 
 3.0.7 dans la nuit du 27 au 28, juste après 3.0.6 : **le fuzzy relâché
