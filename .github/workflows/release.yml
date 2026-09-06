@@ -19,7 +19,7 @@
 # no token, and no one-time password. `NPM_TOKEN` is honoured if the secret
 # still exists, which is only useful to publish a package for the first time.
 #
-# The crates go the same way since 3.0.9, in their dependency order and last:
+# The crates go the same way since 3.0.8, in their dependency order and last:
 # a crates.io version never comes back, so it is the one registry that should
 # only ever see a release the others have already accepted.
 

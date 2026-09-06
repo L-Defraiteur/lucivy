@@ -235,9 +235,23 @@ impl<S: BlobStore> Write for BlobWriter<S> {
     fn flush(&mut self) -> io::Result<()> {
         // Write to local cache (for mmap reads)
         std::fs::write(&self.cache_path, &self.buffer)?;
-        // Sync to blob store (for durability)
-        self.store
-            .save(&self.prefixed_name, &self.file_name, &self.buffer)?;
+        // Lock files are process-local: never sent to the store (the load
+        // skips them, `atomic_write` skips them), so a store outage cannot
+        // touch a lock. Before this, a failed `save` of `.lucivy-meta.lock`
+        // left the cache file behind with no guard to delete it, and every
+        // later acquire waited its 10 s of retries and failed with LockBusy.
+        if self.file_name.ends_with(".lock") {
+            self.is_flushed = true;
+            return Ok(());
+        }
+        // Sync to blob store (for durability). A file whose save failed is
+        // not durable: drop it from the cache too, so that it neither reads
+        // as existing (WORM would refuse the name for good) nor outlives the
+        // error the caller gets.
+        if let Err(e) = self.store.save(&self.prefixed_name, &self.file_name, &self.buffer) {
+            let _ = std::fs::remove_file(&self.cache_path);
+            return Err(e);
+        }
         self.is_flushed = true;
         Ok(())
     }
@@ -467,6 +481,62 @@ mod tests {
             w.add_document(doc).unwrap();
         }
         w.commit().unwrap();
+    }
+
+    /// A store that refuses every `save` while `fail` is set.
+    struct FlakyStore {
+        inner: MemBlobStore,
+        fail: std::sync::atomic::AtomicBool,
+    }
+
+    impl BlobStore for FlakyStore {
+        fn load(&self, i: &str, f: &str) -> io::Result<Vec<u8>> { self.inner.load(i, f) }
+        fn save(&self, i: &str, f: &str, d: &[u8]) -> io::Result<()> {
+            if self.fail.load(Ordering::Relaxed) {
+                return Err(io::Error::other("injected save failure"));
+            }
+            self.inner.save(i, f, d)
+        }
+        fn delete(&self, i: &str, f: &str) -> io::Result<()> { self.inner.delete(i, f) }
+        fn exists(&self, i: &str, f: &str) -> io::Result<bool> { self.inner.exists(i, f) }
+        fn list(&self, i: &str) -> io::Result<Vec<String>> { self.inner.list(i) }
+    }
+
+    /// A lock taken while the store is down must not leave a lock file in
+    /// the cache: the next acquire would wait 10 s and fail with `LockBusy`
+    /// (seen as a flaky `lucivy-cpp` test on 6 September 2026). Locks are
+    /// process-local, so a store outage must not touch them at all; and a
+    /// regular file whose save failed must not read as existing either.
+    #[test]
+    fn store_outage_leaves_no_lock_file_and_no_half_written_file() {
+        use ld_lucivy::directory::{Directory, META_LOCK, TerminatingWrite};
+        let store = Arc::new(FlakyStore {
+            inner: MemBlobStore::new(),
+            fail: std::sync::atomic::AtomicBool::new(true),
+        });
+        let dir = BlobDirectory::new(store.clone(), "outage_idx", &cache_base()).unwrap();
+
+        // The lock is taken and released normally with the store down.
+        let guard = dir.acquire_lock(&META_LOCK).expect("a lock never goes to the store");
+        drop(guard);
+        let t0 = std::time::Instant::now();
+        let guard = dir.acquire_lock(&META_LOCK).expect("no stale lock file");
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "no retry loop");
+        drop(guard);
+        assert!(store.inner.list("Lucivy_outage_idx").unwrap().is_empty(), "nothing saved");
+
+        // A regular file whose save fails is gone from the cache too.
+        let mut w = dir.open_write(Path::new("seg.data")).unwrap();
+        w.write_all(b"payload").unwrap();
+        assert!(w.terminate().is_err(), "the outage surfaces");
+        assert!(!dir.exists(Path::new("seg.data")).unwrap(), "no half-written file");
+        // ... so that the same name can be written once the store is back.
+        store.fail.store(false, Ordering::Relaxed);
+        let mut w = dir.open_write(Path::new("seg.data")).unwrap();
+        w.write_all(b"payload").unwrap();
+        w.terminate().unwrap();
+        assert!(dir.exists(Path::new("seg.data")).unwrap());
+        assert!(store.inner.exists("Lucivy_outage_idx", "seg.data").unwrap());
     }
 
     #[test]

@@ -1,3 +1,18 @@
+Unreleased
+==========
+
+- **Blob store: a store outage no longer leaves a stale lock file.** The
+  blob directory wrote every file to its local cache before saving it to
+  the store; when the save of `.lucivy-meta.lock` failed (the store down
+  during a commit), the cache file stayed behind with no guard to delete
+  it, and every later lock acquire waited its 10 s of retries and failed
+  with `LockBusy` — the next commit after the outage failed on its `gc`
+  node. Seen as a flaky `lucivy-cpp` test (about one run in two, natively
+  and in CI). Lock files are process-local and now never go to the store,
+  and a regular file whose save failed is removed from the cache too, so
+  that it neither reads as existing nor blocks its own name. Test
+  `store_outage_leaves_no_lock_file_and_no_half_written_file`.
+
 Lucivy 4.0.1 — 6 September 2026
 ================================
 

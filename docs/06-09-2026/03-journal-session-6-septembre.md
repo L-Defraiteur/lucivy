@@ -121,6 +121,27 @@ l'index par défaut, sans rien configurer.
 ses limites et la taille réglée, #15 pas de guide et lucivy n'ouvre pas un
 index tantivy, suivis #11 #13 #14. Rien de posté.
 
+## 9 bis. Réponses postées, et une course dans le répertoire blob (soir, après la 4.0.1)
+
+Les six réponses (#10 à #15) sont postées telles que relues par Lucie :
+#15 sans portage ni guide, l'import comme seule aide prévue ; #13 laissée
+ouverte. Les README des bindings portent maintenant le tableau « one corpus,
+one truth » en liens absolus (npm et PyPI ne résolvent pas `../../docs`).
+
+Le job `checks` du workflow `release` (déclenché par le push des README, sans
+tag, rien de publié) a rougi sur
+`blob_store_save_failure_surfaces_in_commit_without_hanging` : le commit de
+reprise après la panne du store échouait sur son nœud `gc`, `LockBusy` après
+10 s. Cause, reproduite en local (2 échecs sur 4) : `BlobWriter::flush` écrit
+le fichier dans le cache **avant** le `save` ; quand celui-ci échoue sur
+`.lucivy-meta.lock`, le fichier de cache reste sans gardien, et tout verrou
+suivant voit « existe déjà », réessaie 100 × 100 ms et abandonne. Que ça
+arrive ou non dépend de si une prise du verrou (nœud `gc`, rechargement du
+lecteur) tombe pendant la panne. Correctif : les fichiers de verrou ne vont
+jamais au store (le chargement et `atomic_write` les ignoraient déjà), et un
+fichier dont le `save` a échoué est retiré du cache. Test unitaire
+déterministe dans `blob_directory.rs`, qui échoue sans le correctif.
+
 ## 10. Commits
 
 `5170bcd` compteurs et gains sans mémoire · `7358112` repli différé ·
