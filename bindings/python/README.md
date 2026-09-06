@@ -6,11 +6,28 @@
 
 ### What's new in 4.0.0
 
-- **The index is 3.7× smaller** — the whole Linux kernel: 18 057 MB in 3.0.8, 4 938 MB in 4.0, 3 344 MB with `derived_in_ram=True`; same answers, same spans, checked against the files ([the comparison with Elasticsearch and tantivy](../../docs/compare-engines-2026-09-05.md))
+- **The index is 3.7× smaller** — the whole Linux kernel: 18 057 MB in 3.0.8, 4 938 MB in 4.0, 3 344 MB with `derived_in_ram=True`; same answers, same spans, checked against the files ([the comparison with Elasticsearch and tantivy](https://github.com/L-Defraiteur/lucivy/blob/main/docs/compare-engines-2026-09-05.md))
 - **The shared dictionary is the default** (`shared_dictionary=False` keeps a suffix FST per segment: indexing ×1.5 faster, an index 23 % bigger) — one dictionary of token texts per shard instead of one per segment: 23 % smaller on the kernel, cold queries ×0.8-1.6, same answers; off by default, fixed at creation (also on `create_with_blob_store`)
 - **`Index.create(..., dictionary_wait=False)`** — shared dictionary only: a commit returns before the shard's new texts are merged into the dictionary (a background task does it) and, by default, a search waits for that merge so that its cost never depends on when it runs; `False` searches at once over the not-yet-merged parts. Indexing with the dictionary costs ×1.5 (the kernel: 107 s against 56)
 - **`Index.create(..., derived_in_ram=True)`** — the three derived sidecars of each segment rebuilt byte for byte when the index opens instead of written: about a third less on disk, the open pays (the kernel: 2 s), never a query; off by default
 - **Compatibility contract** — 4.0 opens a 3.0.x index and returns what 3.0.x returned (checked against a fixture the published 3.0.8 wheel built); 3.0.x does not open a 4.0 index; the first commit converts for good
+
+### Against Elasticsearch and tantivy — one corpus, one truth
+
+Same 93 983 Linux kernel files, 857 MB of text. Each engine is configured at its best for substring search, not at its default: Elasticsearch 8.19 with a trigram analyzer plus a `wildcard` field for regexes, tantivy 0.25 with its `NgramTokenizer`. The truth of every row is the same byte-by-byte scan of the files; a lucivy count is right only when its documents **and** its byte spans match it. On the substring itself all three agree to the document; where they part:
+
+| asked | truth | lucivy | Elasticsearch | tantivy |
+|---|---|---|---|---|
+| `spin_lock`, separators relaxed (also `spin lock`, `spin-lock`, `spinlock`) | 9 552 | **9 552**, 23 ms | 6 577 — not with this analyzer: its trigrams carry the underscore | 6 601 — relaxed is the only mode it has: the separator never enters its index |
+| `spinlokc`, two edits, across the token boundary | 10 034 | **10 034**, 148 ms | 3 549 — fuzziness compares whole terms | 6 557 — same |
+| `spin_lock_[a-z]+`, a regex | 5 510 | **5 510**, 219 ms | 5 440 (wildcard field, 70 short), 480 ms | 0 — terms are already cut |
+| `de`, two characters | 93 009 | **93 009**, 7.7 M spans, 561 ms | 0, silently | 0, silently |
+| `retur -ENOMEM`, a fuzzy phrase | 14 449 | **14 449**, 30 ms | 14 446 (`span_near`), 24 ms — it does this well | — |
+| **where it matched**: `mutex_lock`, 5 145 documents | 20 797 spans | **all 20 797, 15 ms** | `highlight` on the top 200: 179 ms | verifying 5 145 stored texts: 96 ms |
+| your index **in your transaction** | — | **yes**: pluggable store, one commit for your rows and the index, rollback included | no: a server next to your database, a synchronisation to write | no: its own directory, its own commit |
+| shards and nodes scoring **as one index**, as a library | — | **yes**, asserted by `test_federated_search` | yes, as a cluster | no: one index, one scale of scores |
+
+Where a cell says "not with this analyzer", a purpose-built analyzer or plugin may get closer, at the price of designing it, configuring it and reindexing. Every question in the table is answered by lucivy's default index with nothing to configure, and each answer is checked. Sizes, indexing times and the full generated report: [docs/compare-engines-2026-09-05.md](https://github.com/L-Defraiteur/lucivy/blob/main/docs/compare-engines-2026-09-05.md); `benches/compare_engines.sh` replays it.
 
 ### What 3.0.x brought
 

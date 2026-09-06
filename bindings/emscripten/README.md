@@ -6,12 +6,29 @@
 
 ### What's new in 4.0.0
 
-- **The index is 3.7× smaller**, and a tab holds a whole repository: the playground's prompt indexes MDN Web Docs (14 611 pages, 14 s), the **entire Linux 2.6.0 kernel** (14 032 files, 28 s, 1.1 GB held in memory), Go, Godot, **TypeScript (39 044 files, 33 s)**, PostgreSQL, CPython, Redis, Git, curl, SQLite, nginx — `index <name>`, kept in OPFS, reopened in seconds. The ceiling of a tab is about 200 MB of text. Browser against native on the 2.6.0 kernel: same counts and spans, 41 s to index against 23, substrings 10-18 ms against 2 ([README](../../README.md#browser-against-native)).
+- **The index is 3.7× smaller**, and a tab holds a whole repository: the playground's prompt indexes MDN Web Docs (14 611 pages, 14 s), the **entire Linux 2.6.0 kernel** (14 032 files, 28 s, 1.1 GB held in memory), Go, Godot, **TypeScript (39 044 files, 33 s)**, PostgreSQL, CPython, Redis, Git, curl, SQLite, nginx — `index <name>`, kept in OPFS, reopened in seconds. The ceiling of a tab is about 200 MB of text. Browser against native on the 2.6.0 kernel: same counts and spans, 41 s to index against 23, substrings 10-18 ms against 2 ([README](https://github.com/L-Defraiteur/lucivy/blob/main/README.md#browser-against-native)).
 - **`shared_dictionary` and `derived_in_ram` in `IndexConfig`** (typed in `lucivy.d.ts`): the shard dictionary is the playground's default for big corpora (23-25 % smaller); `derived_in_ram` stays an option here — it saves a quarter of OPFS but raises the tab's memory peak.
 - **`dictionary_wait` in `IndexConfig`** (typed): shared dictionary only — natively a commit returns before the shard's new texts are merged and a search waits for that merge by default; in the browser the merge stays inside the commit (few threads, and building the segments' dictionary pieces in parallel raised the memory high-water mark for no time gained), so the option changes nothing there yet
 - **`Lucivy.dropIndex(path)`** — delete an index directory through the worker: WASMFS caches what it mounted, so a directory removed from the main thread still exists for it and the next `create` at that path fails.
 - **A commit every 8 MB of text** in the playground's indexing loop (`?commitmb=M`), not only every 2 000 files: a segment's size, not its document count, sets the memory peak (Godot: 3.3 GB → 1.8 GB).
 - **Compatibility contract** — 4.0 opens a 3.0.x index and returns what 3.0.x returned; 3.0.x does not open a 4.0 index; the first commit converts for good.
+
+### Against Elasticsearch and tantivy — one corpus, one truth
+
+Same 93 983 Linux kernel files, 857 MB of text. Each engine is configured at its best for substring search, not at its default: Elasticsearch 8.19 with a trigram analyzer plus a `wildcard` field for regexes, tantivy 0.25 with its `NgramTokenizer`. The truth of every row is the same byte-by-byte scan of the files; a lucivy count is right only when its documents **and** its byte spans match it. On the substring itself all three agree to the document; where they part:
+
+| asked | truth | lucivy | Elasticsearch | tantivy |
+|---|---|---|---|---|
+| `spin_lock`, separators relaxed (also `spin lock`, `spin-lock`, `spinlock`) | 9 552 | **9 552**, 23 ms | 6 577 — not with this analyzer: its trigrams carry the underscore | 6 601 — relaxed is the only mode it has: the separator never enters its index |
+| `spinlokc`, two edits, across the token boundary | 10 034 | **10 034**, 148 ms | 3 549 — fuzziness compares whole terms | 6 557 — same |
+| `spin_lock_[a-z]+`, a regex | 5 510 | **5 510**, 219 ms | 5 440 (wildcard field, 70 short), 480 ms | 0 — terms are already cut |
+| `de`, two characters | 93 009 | **93 009**, 7.7 M spans, 561 ms | 0, silently | 0, silently |
+| `retur -ENOMEM`, a fuzzy phrase | 14 449 | **14 449**, 30 ms | 14 446 (`span_near`), 24 ms — it does this well | — |
+| **where it matched**: `mutex_lock`, 5 145 documents | 20 797 spans | **all 20 797, 15 ms** | `highlight` on the top 200: 179 ms | verifying 5 145 stored texts: 96 ms |
+| your index **in your transaction** | — | **yes**: pluggable store, one commit for your rows and the index, rollback included | no: a server next to your database, a synchronisation to write | no: its own directory, its own commit |
+| shards and nodes scoring **as one index**, as a library | — | **yes**, asserted by `test_federated_search` | yes, as a cluster | no: one index, one scale of scores |
+
+Where a cell says "not with this analyzer", a purpose-built analyzer or plugin may get closer, at the price of designing it, configuring it and reindexing. Every question in the table is answered by lucivy's default index with nothing to configure, and each answer is checked. Sizes, indexing times and the full generated report: [docs/compare-engines-2026-09-05.md](https://github.com/L-Defraiteur/lucivy/blob/main/docs/compare-engines-2026-09-05.md); `benches/compare_engines.sh` replays it.
 
 ### What 3.0.0 brought
 
