@@ -12,7 +12,7 @@
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const { Index } = require('../index.js');
-import { mkdtempSync, readdirSync, statSync } from 'fs';
+import { mkdtempSync, readdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -21,11 +21,13 @@ function check(cond, label) {
   console.log((cond ? 'ok   ' : 'FAIL ') + label);
   if (!cond) fails++;
 }
+// The directory's entries, recursively, without a stat per entry: the
+// background dictionary fold creates and renames temporary files while this
+// runs, and a stat on a file listed then gone threw ENOENT (one CI run in four).
 function walk(dir) {
   const out = [];
-  for (const n of readdirSync(dir)) {
-    const p = join(dir, n);
-    if (statSync(p).isDirectory()) out.push(...walk(p)); else out.push(n);
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (e.isDirectory()) out.push(...walk(join(dir, e.name))); else out.push(e.name);
   }
   return out;
 }

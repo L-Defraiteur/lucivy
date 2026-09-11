@@ -105,8 +105,11 @@ fn files_of(dir: &Path) -> (u64, Vec<String>) {
     let mut names = Vec::new();
     let mut total = 0;
     for e in std::fs::read_dir(dir).unwrap().flatten() {
+        // A temporary file of the background dictionary fold can be listed
+        // and gone the next instant: it is not part of the index, skip it.
+        let Ok(meta) = e.metadata() else { continue };
         names.push(e.file_name().to_string_lossy().to_string());
-        total += e.metadata().unwrap().len();
+        total += meta.len();
     }
     names.sort();
     (total, names)
