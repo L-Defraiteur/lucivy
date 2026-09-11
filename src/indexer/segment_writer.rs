@@ -94,6 +94,10 @@ impl SegmentWriter {
         let tokenizer_manager = segment.index().tokenizers().clone();
         let tokenizer_manager_fast_field = segment.index().fast_field_tokenizer().clone();
         let sfx_version = segment.index().settings().sfx_version;
+        // Without positions the collectors build nothing positional
+        // (`SfxCollectorV3::without_positions`).
+        let positions = segment.index().settings().positions;
+        let collector_v3 = || if positions { SfxCollectorV3::new() } else { SfxCollectorV3::new().without_positions() };
         let sfx_dictionary_slot = segment.index().sfx_dictionary_slot();
         let table_size = compute_initial_table_size(memory_budget_in_bytes)?;
         let segment_serializer = SegmentSerializer::for_segment(segment)?;
@@ -149,9 +153,9 @@ impl SegmentWriter {
                                     return Err(crate::LucivyError::SystemError(
                                         "sfx_version 4 index without a shard dictionary".to_string()));
                                 }
-                                SfxCollectorSlot::V3(SfxCollectorV3::new().with_dictionary(sfx_dictionary_slot.clone(), field.field_id()))
+                                SfxCollectorSlot::V3(collector_v3().with_dictionary(sfx_dictionary_slot.clone(), field.field_id()))
                             } else if sfx_version >= 3 {
-                                SfxCollectorSlot::V3(SfxCollectorV3::new())
+                                SfxCollectorSlot::V3(collector_v3())
                             } else {
                                 SfxCollectorSlot::V2(SfxCollector::new())
                             };
@@ -212,8 +216,7 @@ impl SegmentWriter {
                 SfxCollectorSlot::V3(collector) => {
                     let t_sfx = std::time::Instant::now();
                     luciole::scheduler::set_task_label(&format!("finalize:sfx_collect f{field_id}"));
-                    let mut data = collector.into_data();
-                    data.positions = self.segment_serializer.segment().index().settings().positions;
+                    let data = collector.into_data();
                     let mut dag = super::sfx_dag_v3::build_initial_sfx_dag_v3(data);
                     luciole::scheduler::set_task_label(&format!("finalize:sfx_dag f{field_id}"));
                     let mut dag_result = luciole::execute_dag(&mut dag, None)

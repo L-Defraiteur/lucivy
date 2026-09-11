@@ -285,6 +285,13 @@ impl SfxPostWriterV2 {
     }
 }
 
+/// Whether `bytes` is an `SFP6` file (documents and frequencies, no
+/// position) — read off the magic, without opening or copying the file:
+/// what a merge asks of its sources before it creates its writers.
+pub fn is_docs_only(bytes: &[u8]) -> bool {
+    bytes.len() >= 4 && &bytes[0..4] == MAGIC_V6
+}
+
 /// Build sfxpost V2 data from pre-sorted entries per ordinal.
 /// Convenience for the collector which already has entries grouped by ordinal.
 pub fn build_sfxpost_v2(
