@@ -112,7 +112,10 @@ makes the byte spans exact rather than approximate:
 Ground truth: on 93 983 kernel files and on rag3db's 4 600, every span of every
 query mode is compared to a byte-by-byte scan of the source files, on the fresh
 index and on the merged one (`test_sfx_v3_ground_truth`). The harness fails on a
-single disagreeing count or span.
+single disagreeing count or span, or a span returned twice — counted since 4.1:
+comparing sets had hidden a duplicate the default index returned in relaxed mode
+for a needle ending a word cut into chunks (`lock` in `superblock`), fixed in the
+same release.
 
 ### Files of a segment, per text field
 
@@ -157,6 +160,30 @@ scatters per segment. Cold queries pay ×0.8-1.6 against the per-segment
 layout (the regex ×1.6: 242 ms on the whole kernel against 112); indexing
 ×1.5 (the kernel: 107 s against 56); the kernel index is 23 % smaller, 15 440
 browser files 25 %.
+
+### The index without positions (`positions: false`, 4.1)
+
+An option of creation. The postings keep each token's documents and term
+frequencies instead of its positions (`SFP6`, `WSP6`), and `.posmap`,
+`.word_pos_map` and `.sibling_v3` are neither written nor computed: the
+collector knows the option from its creation (`SfxCollectorV3::without_positions`),
+and a merge reads its sources' layout (`sfxpost_v2::is_docs_only`) and carries
+the frequencies. A query takes its candidate documents from the index — the FST
+phase (single tokens, chains across tokens from every head) reads no position —
+and verifies each candidate on the stored text with the ground truth's own
+predicates (`briques::stored`: Unicode fold, separators stripped in relaxed
+mode, overlapping occurrences, word boundaries, Levenshtein by the bit-parallel
+last row and a linear-memory traceback, Jaro-Winkler on windows, `find_iter`
+for a regex). Same documents, spans and scores as the default index
+(`test_positions_off`; the ground-truth panel 10/10 on 10 000 files, 30 000 and
+the kernel; the playground's parity panel in the browser). The whole kernel
+(Linux 7.2, 101 141 files, 941 MB): 5 289 → 2 598 MB, ×5.6 → ×2.8 the text;
+indexing 109 → 101 s; queries, file cache warm: literal substrings 11-19 →
+27-56 ms (the documents found are re-read), a one-edit fuzzy 50 → 200 ms, a
+regex 237 → 22 ms, the two-character `de` 630-700 → 330 ms. In the browser,
+10 000 kernel files take 637 MB of OPFS instead of 1 051. Every text field must
+be stored (the default); refused with `derived_in_ram` and with `sfx_version`
+2; an index created with it does not open in 4.0.x.
 
 ### Indexing: bounded by construction
 
@@ -330,10 +357,10 @@ pthreads, and **nothing in lucivy calls `thread::spawn`**.
 
 | binding | bridge | 4.0.0 |
 |---|---|---|
-| Python | PyO3, one `abi3` wheel for CPython ≥ 3.9 | `query_warnings`, `compact`, `wait_merges_quiet`, `index_bytes`, `drop_index`, `open_snapshot`, `create_with_blob_store`, `shared_dictionary=` and `derived_in_ram=` at creation; the GIL is released around every call |
-| Node.js | napi-rs | the same, plus the asynchronous `BlobIndex` for user-provided stores (`sharedDictionary`, `derivedInRam` in its options) |
-| C++ | cxx, generated header + static lib | the same, plus `lucivy::BlobBackend`; `lucivy_create` takes a full schema object |
-| browser | emscripten, `extern "C"`, pthreads over SharedArrayBuffer, OPFS | `memoryStatus`, `preload`, `dropIndex` (through the worker: WASMFS caches what it mounted), startup options (threads, merges, builds, residency), `shared_dictionary` / `derived_in_ram` in `IndexConfig` |
+| Python | PyO3, one `abi3` wheel for CPython ≥ 3.9 | `query_warnings`, `compact`, `wait_merges_quiet`, `index_bytes`, `drop_index`, `open_snapshot`, `create_with_blob_store`, `shared_dictionary=` and `derived_in_ram=` at creation, `positions=False` (4.1); the GIL is released around every call |
+| Node.js | napi-rs | the same, plus the asynchronous `BlobIndex` for user-provided stores (`sharedDictionary`, `derivedInRam`, `positions` in its options); 4.1: `Index.create(path, fields, { positions: false, … })` |
+| C++ | cxx, generated header + static lib | the same, plus `lucivy::BlobBackend`; `lucivy_create` takes a full schema object (`"positions": false`, 4.1) |
+| browser | emscripten, `extern "C"`, pthreads over SharedArrayBuffer, OPFS | `memoryStatus`, `preload`, `dropIndex` (through the worker: WASMFS caches what it mounted), startup options (threads, merges, builds, residency), `shared_dictionary` / `derived_in_ram` / `positions` (4.1) in `IndexConfig` |
 | Rust | `lucivy-core` | everything |
 
 Every binding takes the same JSON `QueryConfig` and returns hits with byte-offset
