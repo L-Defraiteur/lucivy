@@ -356,7 +356,10 @@ vérité terrain 10/10 ; 10 000 fichiers 352 → 221 Mo (−37 %) ; `fuzzy_spans
 `within_distance`) ; les quatre bindings ; trace `V3_DIAG_STORED`. **Noyau entier** (Linux 7.2 recloné,
 101 141 fichiers, 941 Mo — liens symboliques suivis par le harnais) : 5 289 → **2 603 Mo, ×2,77 le texte, −51 %**,
 panel 10/10 ; littérales ×2-3 (relecture des documents trouvés), `de` deux fois plus rapide sans positions,
-regex ×0,09. Reste : tests Python et Node, CHANGELOG, la décision de publier. Les corpus vivent dans `~/lucivy_bench/linux-7.2` (`/tmp` est vidé à
+regex ×0,09 ; indexation 109 → 101 s, pic de mémoire 15,4 → 13,6 Go ; plus rien de positionnel n'est calculé
+(`without_positions`, `is_docs_only`). Tests des bindings (Python 113, Node, C++ 19) et suites complètes verts,
+CHANGELOG « Unreleased ». Reste : la décision de publier (et, en option, le raccourci des sous-chaînes d'un seul
+jeton, restreint à l'ASCII). Les corpus vivent dans `~/lucivy_bench/linux-7.2` (`/tmp` est vidé à
 10 jours, mémo `tmp-nettoye-apres-10-jours`).
 **Le 7 septembre** : `docs/07-09-2026/01-post-reddit.md` (le cadrage, la recette du GIF et du MP4 de
 `images/`), `02` à `04` les posts prêts à coller par subreddit, `06-article-every-engine-lies-a-little.md` (l'article,

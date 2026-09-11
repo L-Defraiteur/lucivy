@@ -339,7 +339,23 @@ encore collectées pendant l'indexation, parce que les écrivains
 fusion réémet la fréquence d'une source `SFP6` comme autant de positions
 fictives, recomptées à l'écriture. Vérifié : `test_positions_off` (total des
 occurrences à travers les fusions égal à l'index avec positions, réponses
-identiques), les tests du layout par défaut.
+identiques), les tests du layout par défaut ; puis les suites complètes (lib
+1 471 et 1 437 sans les features par défaut, `lucivy-core`, C++ 19), clippy.
+
+Le noyau reconstruit avec ce code (binaire de test lancé directement, pic de
+mémoire relevé par `VmHWM` toutes les 200 ms ; le harnais bâtit l'index en RAM
+avant de le copier sur disque, le pic inclut donc l'index entier) :
+
+| | index par défaut | `positions: false` |
+|---|---|---|
+| indexation | 109,0 s | 101,0 s (−7 %) |
+| pic de mémoire | 15 351 Mo | 13 621 Mo (−1,7 Go) |
+| taille | 5 289 Mo | 2 598 Mo |
+
+L'effet propre de « ne plus calculer » ne se sépare pas ici : l'indexation
+sans positions faisait 99,6 s avant ce changement, sur un seul passage, et son
+pic de mémoire n'avait pas été relevé. Ce qui est mesuré, c'est l'option
+entière contre le défaut.
 
 ### Piste suivante pour le fuzzy : vérifier la pièce sur son jeton
 
