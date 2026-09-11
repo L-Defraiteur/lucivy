@@ -87,6 +87,10 @@ anticipée), `stored::windowed_jaro…`, `stored::the_predicate_is_the_ground_tr
   emscripten par l'objet schéma (`js/lucivy.d.ts`).
 
 ## Pièges
+- **Un span en double ne se voit pas dans un ensemble.** Jusqu'au 11 au soir le harnais comparait les
+  spans en `HashSet` : 542 doublons de `lock` sur 10 000 fichiers passaient « exact ». Il compte
+  maintenant `highlights.len() − ensemble` comme spans en trop (panel et comparaison des formes). Le
+  panel de parité du playground compte les spans (longueur des listes) : c'est lui qui l'a montré.
 
 - Un test ou une mesure qui ne trouve pas son corpus retombe en silence sur
   du synthétique : lire la sortie.
@@ -103,7 +107,11 @@ anticipée), `stored::windowed_jaro…`, `stored::the_predicate_is_the_ground_tr
   `[playground] positions: false`, puis `indexed N files in Xs; wasm memory high-water mark …, index … MB`).
 - Panel de parité : dans la page, `eval(await (await fetch('parity_run.js')).text())`, puis
   `window._parityResult` (21 requêtes, `parity_panel.json`). Le récupérer **avant** de recharger :
-  `curl -s localhost:9877/eval/main -d '{"js":"window._parityResult"}' > rapport.json`. Comparer deux
+  `curl -s localhost:9877/eval/main -d '{"js":"window._parityResult"}' > rapport.json` — **mais**
+  `eval/main` est servi par n'importe quelle page du playground ouverte (un autre onglet a rendu
+  `"undefined"`) : plus sûr, la page envoie elle-même son rapport,
+  `fetch('/log', {method: 'POST', body: 'MARQUEUR ' + window._parityResult + '\n'})`, puis on reprend la
+  ligne `MARQUEUR` de `playground/diag.log`. Comparer deux
   rapports : `python3 playground/parity_diff.py a.json b.json` (comptes, top-10, scores à 1e-4, nombre de
   spans ; « TIE » = ex æquo ordonnés autrement).
 - Vérité relâchée d'un document en JS : `window._playground.userFile(docId).content`, garder

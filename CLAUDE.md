@@ -346,7 +346,7 @@ cd playground && node serve.mjs
 
 ## Docs
 
-**Pour repartir : `docs/11-09-2026/01-recap-session-index-sans-positions.md` puis `02-knowledge-dump.md` et `03-architecture.md`.** **Défaut du moteur publié trouvé le 11 au soir** (4.0.2 comprise) : `04-doublons-de-spans-en-relache.md` — en relâché, un span en double quand l'aiguille termine un mot découpé en morceaux (`lock` dans `superblock`), tf et score gonflés ; la vérité terrain compare les spans en ensemble et ne le voit pas ; correctif proposé, pas appliqué. **Chantier en cours (branche `v4.1`, depuis le 8 septembre)** : `docs/08-09-2026/01-chantier-positions-optionnelles.md`
+**Pour repartir : `docs/11-09-2026/01-recap-session-index-sans-positions.md` puis `02-knowledge-dump.md` et `03-architecture.md`.** **Défaut du moteur publié trouvé et corrigé le 11 au soir** (4.0.2 comprise) : `04-doublons-de-spans-en-relache.md` — en relâché, un span en double quand l'aiguille termine un mot découpé en morceaux (`lock` dans `superblock`), tf et score gonflés ; déduplication par octets (`orchestrator::dedup_occurrences`), le harnais compte maintenant les doublons (il comparait des ensembles), test `test_relaxed_duplicate_spans`. **Chantier en cours (branche `v4.1`, depuis le 8 septembre)** : `docs/08-09-2026/01-chantier-positions-optionnelles.md`
 — l'index sans positions (`positions: false` : postings `SFP6`/`WSP6` documents + fréquences, ni
 `.posmap` ni `.word_pos_map` ni `.sibling_v3` ; candidats par la FST et les listes de documents, chaque
 match vérifié sur le texte stocké avec les prédicats mêmes de la vérité terrain — `briques::stored`).

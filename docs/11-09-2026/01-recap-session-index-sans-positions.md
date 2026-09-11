@@ -93,7 +93,9 @@ fois » ; l'option reste optionnelle, le défaut ne change pas.
   problème** ; panel de parité (21 requêtes) identique entre les deux index sauf ex æquo et doublons.
 - **Défaut du moteur publié trouvé** (4.0.2 comprise) : en relâché, un span en double quand l'aiguille
   termine un mot découpé en morceaux (`lock` dans `superblock`) — tf et score gonflés ; l'index sans
-  positions est exact. `04-doublons-de-spans-en-relache.md` ; correctif proposé, pas appliqué.
+  positions est exact. `04-doublons-de-spans-en-relache.md`. **Corrigé sur v4.1** (décision de Lucie) :
+  déduplication par octets, harnais qui compte les doublons (rouge `extra=542` sur `lock`, puis exact),
+  test `test_relaxed_duplicate_spans`, `de` +4 % ; panel 10/10 sur 10 000 dans les trois layouts, doublons comptés.
 - Tests : `test_positions_off` 4/4, Node `positions.mjs` et `v3_api.mjs`, Python 113, C++ 19.
 
 ## 4. La suite (objectifs)

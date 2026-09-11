@@ -32,7 +32,21 @@ Unreleased — branch `v4.1`
   1 052 → 638 MB (indexed in 37 s instead of 43, memory peak unchanged, the
   merges past 2 000 documents fine); the 21-query parity panel returns the same
   counts, top 10, scores and spans on both indexes, except equal scores ordered
-  otherwise and spans the default index returned twice.
+  otherwise and spans the default index returned twice (the fix below).
+- **Fix: one occurrence, one span (default index, relaxed mode).** A needle
+  that ends a word cut into chunks — `lock` in `superblock`, chunks `super` +
+  `block` — was found twice by the literal phase, through the word's entry and
+  through its last chunk, with the same bytes; the deduplication was keyed by
+  position, so both stayed: the span came back twice and counted twice in the
+  term frequency (so in the BM25 score and the order). 542 duplicated spans for
+  `lock` and 68 for `init` over 10 000 kernel files; present since the v3
+  engine, 4.0.2 included. Found by comparing the default index with the index
+  without positions, which verifies on the stored text and never had it. Now
+  one entry per occurrence, keyed by its bytes. The ground-truth harness
+  compared spans as sets and could not see a duplicate: it counts them as
+  extra spans now — the full panel is 10/10 on 10 000 files in the three
+  layouts (dictionary, without positions, v3). Test `test_relaxed_duplicate_spans`;
+  `de` +4 % (27 ms against 26).
 - **`fuzzy_spans_long`**, the bit-parallel last row (Myers) and a windowed
   Jaro-Winkler: the same occurrences as the full matrix, in memory linear in
   the text — a stored value can be megabytes long.

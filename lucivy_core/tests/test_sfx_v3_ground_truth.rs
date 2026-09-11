@@ -1208,7 +1208,10 @@ fn run_panel(
         let v3_spans: HashSet<(usize, usize, usize)> =
             v3_result.highlights.iter().copied().collect();
         let missing = gt.spans.difference(&v3_spans).count();
-        let extra = v3_spans.difference(&gt.spans).count();
+        // A span returned twice is one occurrence counted twice (tf, score):
+        // the set would hide it, so the duplicates count as extra spans.
+        let duplicates = v3_result.highlights.len() - v3_spans.len();
+        let extra = v3_spans.difference(&gt.spans).count() + duplicates;
         let spans_ok = (missing == 0 && extra == 0)
             || std::env::var("V3_SPANS_REPORT_ONLY").is_ok();
         let docs_ok = v3_result.doc_indices == grep_set;
@@ -2530,7 +2533,8 @@ fn v3_distributed_coherence() {
         for (label, r) in [("1 shard", &r1), ("4 shards", &r4), ("2 nodes", &rd)] {
             let spans: HashSet<(usize, usize, usize)> = r.highlights.iter().copied().collect();
             let miss = gt.spans.difference(&spans).count();
-            let extra = spans.difference(&gt.spans).count();
+            // Duplicated spans count as extra, as in the demo panel.
+            let extra = spans.difference(&gt.spans).count() + (r.highlights.len() - spans.len());
             let docs_ok = r.doc_indices == gt.docs;
             if miss > 0 || extra > 0 || !docs_ok { ok = false; }
             line.push_str(&format!(" | {label}: docs={} spans={} miss={miss} extra={extra}", r.doc_indices.len(), spans.len()));
