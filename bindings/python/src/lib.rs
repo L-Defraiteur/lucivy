@@ -296,7 +296,7 @@ impl Drop for Index {
 }
 
 /// `SchemaConfig` out of the Python field list, as `Index.create` takes it.
-fn schema_config(fields: &Bound<'_, PyList>, shards: Option<usize>, shared_dictionary: bool, derived_in_ram: bool, dictionary_wait: bool) -> PyResult<query::SchemaConfig> {
+fn schema_config(fields: &Bound<'_, PyList>, shards: Option<usize>, shared_dictionary: bool, derived_in_ram: bool, dictionary_wait: bool, positions: bool) -> PyResult<query::SchemaConfig> {
     let mut field_defs = Vec::new();
     for item in fields.iter() {
         let dict: &Bound<'_, PyDict> = item.downcast()?;
@@ -326,6 +326,7 @@ fn schema_config(fields: &Bound<'_, PyList>, shards: Option<usize>, shared_dicti
         shared_dictionary: Some(shared_dictionary),
         derived_in_ram: derived_in_ram.then_some(true),
         dictionary_wait: (!dictionary_wait).then_some(false),
+        positions: (!positions).then_some(false),
         ..Default::default()
     })
 }
@@ -358,6 +359,14 @@ impl Index {
     ///         that its cost never depends on when it runs. ``False`` searches
     ///         at once over the not-yet-merged parts. On by default; fixed at
     ///         creation.
+    ///     positions: ``False`` keeps each token's documents and frequencies
+    ///         instead of its positions, and writes no position sidecar
+    ///         (``.posmap``, ``.word_pos_map``, ``.sibling_v3``): 37 % smaller
+    ///         on 10 000 kernel files. Every match is then verified on the
+    ///         stored text — same documents, spans and scores; literal
+    ///         queries cost about the same, some fuzzy ones read many
+    ///         candidates. Every text field must be stored; excludes
+    ///         ``derived_in_ram``. On by default; fixed at creation.
     ///
     /// Field types: ``"text"`` (full-text, tokenized), ``"u64"``, ``"i64"``, ``"f64"``, ``"bool"``, ``"date"``.
     ///
@@ -369,9 +378,10 @@ impl Index {
     ///         {"name": "score", "type": "f64", "fast": True},
     ///     ], shards=4)
     #[staticmethod]
-    #[pyo3(signature = (path, fields, shards=None, shared_dictionary=true, derived_in_ram=false, dictionary_wait=true))]
-    fn create(py: Python<'_>, path: &str, fields: &Bound<'_, PyList>, shards: Option<usize>, shared_dictionary: bool, derived_in_ram: bool, dictionary_wait: bool) -> PyResult<Self> {
-        let config = schema_config(fields, shards, shared_dictionary, derived_in_ram, dictionary_wait)?;
+    #[pyo3(signature = (path, fields, shards=None, shared_dictionary=true, derived_in_ram=false, dictionary_wait=true, positions=true))]
+    #[allow(clippy::too_many_arguments)]
+    fn create(py: Python<'_>, path: &str, fields: &Bound<'_, PyList>, shards: Option<usize>, shared_dictionary: bool, derived_in_ram: bool, dictionary_wait: bool, positions: bool) -> PyResult<Self> {
+        let config = schema_config(fields, shards, shared_dictionary, derived_in_ram, dictionary_wait, positions)?;
         let handle = py.allow_threads(|| ShardedHandle::create(path, &config))
             .map_err(|e| PyValueError::new_err(e))?;
 
@@ -430,6 +440,8 @@ impl Index {
     ///         in RAM at open instead of written, about a third smaller on disk.
     ///     dictionary_wait: As for ``create()``: a search waits for the
     ///         background merge of the last commit's texts (default).
+    ///     positions: As for ``create()``: ``False`` keeps documents and
+    ///         frequencies only, every match verified on the stored text.
     ///
     /// Example::
     ///
@@ -437,7 +449,7 @@ impl Index {
     ///         {"name": "title", "type": "text", "stored": True},
     ///     ])
     #[staticmethod]
-    #[pyo3(signature = (store, index_name, fields, shards=1, cache_dir=None, lazy=false, shared_dictionary=true, derived_in_ram=false, dictionary_wait=true))]
+    #[pyo3(signature = (store, index_name, fields, shards=1, cache_dir=None, lazy=false, shared_dictionary=true, derived_in_ram=false, dictionary_wait=true, positions=true))]
     fn create_with_blob_store(
         py: Python<'_>,
         store: &Bound<'_, PyAny>,
@@ -449,8 +461,9 @@ impl Index {
         shared_dictionary: bool,
         derived_in_ram: bool,
         dictionary_wait: bool,
+        positions: bool,
     ) -> PyResult<Self> {
-        let config = schema_config(fields, Some(shards), shared_dictionary, derived_in_ram, dictionary_wait)?;
+        let config = schema_config(fields, Some(shards), shared_dictionary, derived_in_ram, dictionary_wait, positions)?;
         let storage = blob_storage(store, index_name, cache_dir, lazy)?;
         let handle = py.allow_threads(|| ShardedHandle::create_with_storage(storage, &config))
             .map_err(|e| PyValueError::new_err(e))?;

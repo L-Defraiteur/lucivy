@@ -140,6 +140,11 @@ mod ffi {
         //   in RAM, byte for byte, when the index is opened. Same answers;
         //   opening pays the rebuild, never a query. Off by default, fixed at
         //   creation.
+        // "positions": false keeps each token's documents and frequencies, not
+        //   its positions, and writes no position sidecar (37 % smaller on
+        //   10 000 kernel files); every match is verified on the stored text,
+        //   so every text field must be stored. Same answers. Excludes
+        //   "derived_in_ram"; on by default, fixed at creation.
         fn lucivy_create(path: &str, fields_json: &str, shards: u32) -> Result<Box<LucivyIndex>>;
 
         // Open an existing index at `path`. Reads persisted schema and segment metadata.
@@ -1362,6 +1367,51 @@ mod tests {
         assert_eq!(reopened.num_docs(), 10);
         reopened.close().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `"positions": false` in the schema object: no position sidecar on
+    /// disk, and the same answers as an index with positions — a literal,
+    /// a fuzzy query across a token boundary, a regex.
+    #[test]
+    fn schema_object_with_positions_false() {
+        let base = std::env::temp_dir().join(format!("lucivy-cpp-positions-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let make = |name: &str, positions: bool| {
+            let path = base.join(name).to_str().unwrap().to_string();
+            let idx = lucivy_create(&path, &format!(
+                r#"{{"fields":[{{"name":"body","type":"text","stored":true}}],"shards":2,"positions":{positions}}}"#), 1).unwrap();
+            let words = ["kmalloc", "spin_lock_init", "vfree", "mutex_lock", "schedule"];
+            let mut id = 1u64;
+            for round in 0..3 {
+                for w in words {
+                    idx.add(id, &format!(r#"{{"body":"round {round} calls {w} and returns {}"}}"#, w.len())).unwrap();
+                    id += 1;
+                }
+                idx.commit().unwrap();
+            }
+            idx.wait_merges_quiet().unwrap();
+            idx
+        };
+        let with = make("with", true);
+        let without = make("without", false);
+        let derived = walkdir(&base.join("without")).iter()
+            .filter(|p| { let n = p.to_string_lossy(); n.ends_with(".posmap") || n.ends_with(".word_pos_map") || n.ends_with(".sibling_v3") })
+            .count();
+        assert_eq!(derived, 0, "positions: false writes no position sidecar");
+        for q in [
+            r#"{"type":"contains","field":"body","value":"mutex_lock"}"#,
+            r#"{"type":"contains","field":"body","value":"spin lock","strict_separators":false}"#,
+            r#"{"type":"contains","field":"body","value":"mutx_lock","distance":1}"#,
+            r#"{"type":"contains","field":"body","value":"spin_lock_[a-z]+","regex":true}"#,
+        ] {
+            let a = with.search(q, 100).unwrap().len();
+            let b = without.search(q, 100).unwrap().len();
+            assert!(a > 0, "{q}: the index with positions finds it");
+            assert_eq!(a, b, "{q}: same number of hits without positions");
+        }
+        with.close().unwrap();
+        without.close().unwrap();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn walkdir(dir: &std::path::Path) -> Vec<std::path::PathBuf> {

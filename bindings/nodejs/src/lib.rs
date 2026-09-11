@@ -137,9 +137,16 @@ impl Index {
     ///   task does it); a search waits for that merge, so that its cost never
     ///   depends on when it runs. `false` searches at once over the
     ///   not-yet-merged parts. On by default; fixed at creation.
+    /// @param positions - `false` keeps each token's documents and frequencies
+    ///   instead of its positions, and writes no position sidecar (`.posmap`,
+    ///   `.word_pos_map`, `.sibling_v3`): 37 % smaller on 10 000 kernel files.
+    ///   Every match is then verified on the stored text — same documents,
+    ///   spans and scores; literal queries cost about the same, some fuzzy
+    ///   ones read many candidates. Every text field must be stored; excludes
+    ///   `derivedInRam`. On by default; fixed at creation.
     #[napi(factory)]
-    pub fn create(path: String, fields: Vec<FieldDef>, shards: Option<u32>, shared_dictionary: Option<bool>, derived_in_ram: Option<bool>, dictionary_wait: Option<bool>) -> Result<Self> {
-        let config = schema_config(&fields, shards, shared_dictionary, derived_in_ram, dictionary_wait);
+    pub fn create(path: String, fields: Vec<FieldDef>, shards: Option<u32>, shared_dictionary: Option<bool>, derived_in_ram: Option<bool>, dictionary_wait: Option<bool>, positions: Option<bool>) -> Result<Self> {
+        let config = schema_config(&fields, shards, shared_dictionary, derived_in_ram, dictionary_wait, positions);
 
         let handle = ShardedHandle::create(&path, &config)
             .map_err(|e| Error::from_reason(e))?;
@@ -789,7 +796,7 @@ fn build_contains_split_multi_field(value: &str, text_fields: &[String], distanc
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-fn schema_config(fields: &[FieldDef], shards: Option<u32>, shared_dictionary: Option<bool>, derived_in_ram: Option<bool>, dictionary_wait: Option<bool>) -> query::SchemaConfig {
+fn schema_config(fields: &[FieldDef], shards: Option<u32>, shared_dictionary: Option<bool>, derived_in_ram: Option<bool>, dictionary_wait: Option<bool>, positions: Option<bool>) -> query::SchemaConfig {
     let field_defs: Vec<query::FieldDef> = fields
         .iter()
         .map(|f| query::FieldDef {
@@ -808,6 +815,7 @@ fn schema_config(fields: &[FieldDef], shards: Option<u32>, shared_dictionary: Op
         shared_dictionary,
         derived_in_ram: derived_in_ram.filter(|&b| b),
         dictionary_wait: dictionary_wait.filter(|&b| !b),
+        positions: positions.filter(|&b| !b),
         ..Default::default()
     }
 }
@@ -1091,6 +1099,9 @@ pub struct BlobIndexOptions {
     /// `create()` only, shared dictionary: a search waits for the background
     /// merge of the last commit's texts (default `true`) — see `Index.create()`.
     pub dictionary_wait: Option<bool>,
+    /// `create()` only: `false` keeps documents and frequencies instead of
+    /// positions, every match verified on the stored text — see `Index.create()`.
+    pub positions: Option<bool>,
 }
 
 /// One argument of a store callback, built on the JS thread.
@@ -1496,7 +1507,7 @@ impl BlobIndex {
     /// @param store - Object implementing the store protocol (`load`, `save`, `delete`, `exists`, `list`, optional `blobLen` / `loadRange`).
     /// @param indexName - Name of the index inside the store.
     /// @param fields - Field definitions, as for `Index.create()`.
-    /// @param options - `{cacheDir?, lazy?, shards?, sharedDictionary?, derivedInRam?, dictionaryWait?}`.
+    /// @param options - `{cacheDir?, lazy?, shards?, sharedDictionary?, derivedInRam?, dictionaryWait?, positions?}`.
     #[napi(ts_return_type = "Promise<BlobIndex>")]
     pub fn create(
         env: Env,
@@ -1507,7 +1518,7 @@ impl BlobIndex {
     ) -> Result<AsyncTask<BlobTask<BlobIndex>>> {
         let store = JsBlobStore::from_object(&env, store)?;
         let options = options.unwrap_or_default();
-        let config = schema_config(&fields, options.shards, options.shared_dictionary, options.derived_in_ram, options.dictionary_wait);
+        let config = schema_config(&fields, options.shards, options.shared_dictionary, options.derived_in_ram, options.dictionary_wait, options.positions);
         Ok(blob_task(move || {
             let storage = blob_storage(store, &index_name, &options);
             let handle = ShardedHandle::create_with_storage(Box::new(storage), &config)

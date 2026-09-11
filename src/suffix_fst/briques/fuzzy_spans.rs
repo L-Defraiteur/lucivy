@@ -133,6 +133,51 @@ pub fn last_row(needle: &[u8], hay: &[u8]) -> Vec<u32> {
     last
 }
 
+/// Whether `fuzzy_spans(needle, hay, d)` finds anything: some offset `j >= 1`
+/// with `dp[m][j] <= d`. The row is not kept and the scan stops at the first
+/// offset that proves it — the cheap test a verifier runs before it pays
+/// for the spans.
+pub fn within_distance(needle: &[u8], hay: &[u8], d: usize) -> bool {
+    let m = needle.len();
+    if m == 0 || hay.is_empty() {
+        return false;
+    }
+    // `dp[m][j] <= m` for every `j` (drop the whole needle).
+    if m <= d {
+        return true;
+    }
+    if m <= 64 {
+        let mut peq = [0u64; 256];
+        for (i, &b) in needle.iter().enumerate() {
+            peq[b as usize] |= 1u64 << i;
+        }
+        let top = 1u64 << (m - 1);
+        let (mut pv, mut mv) = (!0u64, 0u64);
+        let mut score = m;
+        for &c in hay {
+            let eq = peq[c as usize];
+            let xv = eq | mv;
+            let xh = ((eq & pv).wrapping_add(pv) ^ pv) | eq;
+            let mut ph = mv | !(xh | pv);
+            let mut mh = pv & xh;
+            if ph & top != 0 {
+                score += 1;
+            } else if mh & top != 0 {
+                score -= 1;
+                if score <= d {
+                    return true;
+                }
+            }
+            ph <<= 1;
+            mh <<= 1;
+            pv = mh | !(xv | ph);
+            mv = ph & xv;
+        }
+        return false;
+    }
+    last_row(needle, hay)[1..].iter().any(|&v| v as usize <= d)
+}
+
 /// `fuzzy_spans` for a haystack of any length: the same occurrences, in
 /// memory proportional to the needle for the scan instead of needle × hay.
 /// A stored value can be megabytes long (`briques::stored`, the index
@@ -236,7 +281,7 @@ mod tests {
     }
     #[test]
     fn the_long_path_finds_what_the_full_matrix_finds() {
-        use super::{fuzzy_spans_long, fuzzy_spans_long_above, last_row};
+        use super::{fuzzy_spans_long, fuzzy_spans_long_above, last_row, within_distance};
         // A small alphabet makes runs, ties and overlaps frequent.
         let mut seed = 0x9e37_79b9_7f4a_7c15u64;
         let mut next = || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed };
@@ -276,6 +321,20 @@ mod tests {
                 (0..=n).map(|j| dp[m * w + j]).collect::<Vec<u32>>()
             };
             assert_eq!(last_row(&needle, &hay), full, "m={m} n={n}");
+        }
+        // The early-exit test agrees with the row, on both sides of 64 bytes
+        // and when the needle is no longer than the distance.
+        for _ in 0..3000 {
+            let m = 1 + (next() % 70) as usize;
+            let n = (next() % 150) as usize;
+            let needle: Vec<u8> = (0..m).map(|_| b'a' + (next() % 3) as u8).collect();
+            let hay: Vec<u8> = (0..n).map(|_| b'a' + (next() % 3) as u8).collect();
+            for d in 0..=3usize {
+                let row = last_row(&needle, &hay);
+                let expect = n > 0 && row[1..].iter().any(|&v| v as usize <= d);
+                assert_eq!(within_distance(&needle, &hay, d), expect, "m={m} n={n} d={d}");
+                assert_eq!(within_distance(&needle, &hay, d), !fuzzy_spans(&needle, &hay, d).is_empty(), "m={m} n={n} d={d}");
+            }
         }
         // And on text, with the default threshold crossed.
         let hay = "schedule sched_clock scheduler schdule shcedule ".repeat(20_000);

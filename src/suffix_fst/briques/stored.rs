@@ -87,6 +87,7 @@ pub fn contains_prescan(
     if needle.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
+    let since = std::time::Instant::now();
     let words = WordPostings::load(seg_reader, field);
     let words = words.reader();
     let mut bits = DocBits::new(seg_reader.max_doc());
@@ -94,8 +95,15 @@ pub fn contains_prescan(
     let candidates = bits.into_sorted();
 
     let bounded = anchor_start || exact_match;
-    let (mut hay, mut back) = (Vec::new(), Vec::new());
-    let found = verify_stored(seg_reader, field, &candidates, |text, out| {
+    let (mut quick, mut hay, mut back) = (Vec::new(), Vec::new(), Vec::new());
+    let label = || format!("contains {query:?} strict={strict_separators} anchor={anchor_start} exact={exact_match}");
+    let found = verify_stored(seg_reader, field, &candidates, &label, since, |text, out| {
+        // The spans need the map back to the source; most candidates of a
+        // chain hold no occurrence and never need it.
+        fold_bytes(text, strip, &mut quick);
+        if !contains_bytes(&quick, &needle) {
+            return;
+        }
         fold_into(text, strip, &mut hay, &mut back);
         for_each_occurrence(&hay, &needle, |s| {
             let (from, to) = source_span(&back, s, s + needle.len());
@@ -138,6 +146,7 @@ pub fn fuzzy_prescan(
     // The positional pipeline's own candidate generator, decided from the
     // FST alone; a query it cannot cut into n-grams finds nothing there,
     // and finds nothing here.
+    let since = std::time::Instant::now();
     let (ngrams, _, _, generator, _) = composite::fuzzy_generator(reader, &q, distance, strict_separators);
     if ngrams.is_empty() {
         return empty();
@@ -171,8 +180,16 @@ pub fn fuzzy_prescan(
     let (mut needle, mut scratch) = (Vec::new(), Vec::new());
     fold_into(&q, strip, &mut needle, &mut scratch);
     let d = distance as usize;
-    let (mut hay, mut back) = (Vec::new(), Vec::new());
-    let found = verify_stored(seg_reader, field, &candidates, |text, out| {
+    let (mut quick, mut hay, mut back) = (Vec::new(), Vec::new(), Vec::new());
+    let label = || format!("fuzzy {q:?} d={distance} {metric:?} pieces={literals:?}");
+    let found = verify_stored(seg_reader, field, &candidates, &label, since, |text, out| {
+        // Every occurrence (Levenshtein or Jaro-Winkler) is within `d`
+        // edits: a value where nothing is — most candidates of a common
+        // piece — is dropped after one bit-parallel pass over its bytes.
+        fold_bytes(text, strip, &mut quick);
+        if !fuzzy_spans::within_distance(&needle, &quick, d) {
+            return;
+        }
         fold_into(text, strip, &mut hay, &mut back);
         match metric {
             FuzzyMetric::Levenshtein => {
@@ -218,6 +235,7 @@ pub fn regex_prescan(
     plan: &RegexPlan,
     re: &regex::Regex,
 ) -> crate::Result<PrescanOutput> {
+    let since = std::time::Instant::now();
     let max_doc = seg_reader.max_doc();
     let candidates: Vec<u32> = if plan.literals.is_empty() {
         (0..max_doc).collect()
@@ -231,7 +249,8 @@ pub fn regex_prescan(
         }
         bits.into_sorted()
     };
-    let found = verify_stored(seg_reader, field, &candidates, |text, out| {
+    let label = || format!("regex {:?} literals={:?}", re.as_str(), plan.literals);
+    let found = verify_stored(seg_reader, field, &candidates, &label, since, |text, out| {
         for m in re.find_iter(text) {
             if m.start() == m.end() {
                 continue;
@@ -455,6 +474,56 @@ pub(crate) fn fold_into(text: &str, strip: bool, out: &mut Vec<u8>, back: &mut V
     }
 }
 
+/// `fold_into` without the map back to the source: the folded bytes alone,
+/// one pass, the ASCII case without decoding characters.
+pub(crate) fn fold_bytes(text: &str, strip: bool, out: &mut Vec<u8>) {
+    out.clear();
+    if text.is_ascii() {
+        if strip {
+            out.extend(text.bytes().filter(u8::is_ascii_alphanumeric).map(|b| b.to_ascii_lowercase()));
+        } else {
+            out.extend(text.bytes().map(|b| b.to_ascii_lowercase()));
+        }
+        return;
+    }
+    for ch in text.chars() {
+        if strip && !is_content_char(ch) {
+            continue;
+        }
+        if ch.is_ascii() {
+            out.push(ch.to_ascii_lowercase() as u8);
+            continue;
+        }
+        for lc in ch.to_lowercase() {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(lc.encode_utf8(&mut buf).as_bytes());
+        }
+    }
+}
+
+/// Whether `needle` occurs in `hay`.
+fn contains_bytes(hay: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return false;
+    }
+    let first = needle[0];
+    let last_start = hay.len() - needle.len();
+    let mut i = 0;
+    while i <= last_start {
+        match hay[i..=last_start].iter().position(|&b| b == first) {
+            None => return false,
+            Some(p) => {
+                let s = i + p;
+                if &hay[s..s + needle.len()] == needle {
+                    return true;
+                }
+                i = s + 1;
+            }
+        }
+    }
+    false
+}
+
 /// The source span of the folded bytes `[s, e)`: from the start of the
 /// character of `s` to the end of the character of `e - 1`.
 #[inline]
@@ -555,8 +624,13 @@ fn verify_stored(
     seg_reader: &SegmentReader,
     field: Field,
     candidates: &[u32],
+    label: &dyn Fn() -> String,
+    candidates_since: std::time::Instant,
     mut matcher: impl FnMut(&str, &mut Found),
 ) -> crate::Result<Vec<(DocId, Found)>> {
+    let candidates_ns = candidates_since.elapsed().as_nanos();
+    let t_verify = std::time::Instant::now();
+    let mut bytes_read = 0usize;
     let filter = seg_reader.doc_filter();
     let store = seg_reader.get_store_reader(4)
         .map_err(|e| crate::LucivyError::SystemError(format!("positions: false: open the document store: {e}")))?;
@@ -580,6 +654,7 @@ fn verify_stored(
             use crate::schema::document::Value;
             let Some(text) = v.as_value().as_str() else { continue };
             has_value = true;
+            bytes_read += text.len();
             found.clear();
             matcher(text, &mut found);
             // Two folded starts can fall in one source character: one span.
@@ -600,7 +675,19 @@ fn verify_stored(
             }
         }
     }
+    if diag_enabled() {
+        eprintln!("[stored] {}: {} candidates of {} documents ({:.2} ms), {} matched, {:.2} MB of stored text searched ({:.2} ms)",
+            label(), candidates.len(), seg_reader.max_doc(), candidates_ns as f64 / 1e6,
+            out.len(), bytes_read as f64 / 1e6, t_verify.elapsed().as_secs_f64() * 1e3);
+    }
     Ok(out)
+}
+
+/// `V3_DIAG_STORED=1`: one line per segment and query on stderr —
+/// candidates, matches, stored text read, the time of each phase.
+fn diag_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("V3_DIAG_STORED").is_ok())
 }
 
 /// `(doc, tf)` sorted by document and the highlights, from per-document
@@ -683,6 +770,19 @@ mod tests {
         let mut back = Vec::new();
         fold_into(&text, true, &mut hay, &mut back);
         assert_eq!(jaro_spans_windowed(b"schdule", &hay, 1, 0.9), jaro_winkler::jaro_spans(b"schdule", &hay, 1, 0.9));
+    }
+
+    #[test]
+    fn the_quick_fold_is_the_folded_text() {
+        for text in ["Spin_Lock spinlock", "DÉJÀ vu, İstanbul ß ǅ", "可以理解。mutex_lock", "", "__--"] {
+            for strip in [false, true] {
+                let (mut a, mut back, mut b) = (Vec::new(), Vec::new(), Vec::new());
+                fold_into(text, strip, &mut a, &mut back);
+                fold_bytes(text, strip, &mut b);
+                assert_eq!(a, b, "{text:?} strip={strip}");
+            }
+        }
+        assert!(contains_bytes(b"abcabd", b"abd") && !contains_bytes(b"abcab", b"abd") && !contains_bytes(b"ab", b"abc"));
     }
 
     #[test]

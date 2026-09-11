@@ -98,6 +98,11 @@ export interface BlobIndexOptions {
    * merge of the last commit's texts (default `true`) — see `Index.create()`.
    */
   dictionaryWait?: boolean
+  /**
+   * `create()` only: `false` keeps documents and frequencies instead of
+   * positions, every match verified on the stored text — see `Index.create()`.
+   */
+  positions?: boolean
 }
 export declare class Index {
   /**
@@ -125,8 +130,15 @@ export declare class Index {
    *   task does it); a search waits for that merge, so that its cost never
    *   depends on when it runs. `false` searches at once over the
    *   not-yet-merged parts. On by default; fixed at creation.
+   * @param positions - `false` keeps each token's documents and frequencies
+   *   instead of its positions, and writes no position sidecar (`.posmap`,
+   *   `.word_pos_map`, `.sibling_v3`): 37 % smaller on 10 000 kernel files.
+   *   Every match is then verified on the stored text — same documents,
+   *   spans and scores; literal queries cost about the same, some fuzzy
+   *   ones read many candidates. Every text field must be stored; excludes
+   *   `derivedInRam`. On by default; fixed at creation.
    */
-  static create(path: string, fields: Array<FieldDef>, shards?: number | undefined | null, sharedDictionary?: boolean | undefined | null, derivedInRam?: boolean | undefined | null, dictionaryWait?: boolean | undefined | null): Index
+  static create(path: string, fields: Array<FieldDef>, shards?: number | undefined | null, sharedDictionary?: boolean | undefined | null, derivedInRam?: boolean | undefined | null, dictionaryWait?: boolean | undefined | null, positions?: boolean | undefined | null): Index
   /**
    * Open an existing index at the given path.
    *
@@ -437,7 +449,7 @@ export declare class BlobIndex {
    * @param store - Object implementing the store protocol (`load`, `save`, `delete`, `exists`, `list`, optional `blobLen` / `loadRange`).
    * @param indexName - Name of the index inside the store.
    * @param fields - Field definitions, as for `Index.create()`.
-   * @param options - `{cacheDir?, lazy?, shards?, sharedDictionary?, derivedInRam?, dictionaryWait?}`.
+   * @param options - `{cacheDir?, lazy?, shards?, sharedDictionary?, derivedInRam?, dictionaryWait?, positions?}`.
    */
   static create(store: BlobStoreCallbacks, indexName: string, fields: Array<FieldDef>, options?: BlobIndexOptions | undefined | null): Promise<BlobIndex>
   /**
