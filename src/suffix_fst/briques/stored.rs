@@ -95,15 +95,12 @@ pub fn contains_prescan(
     let candidates = bits.into_sorted();
 
     let bounded = anchor_start || exact_match;
-    let (mut quick, mut hay, mut back) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut hay, mut back) = (Vec::new(), Vec::new());
     let label = || format!("contains {query:?} strict={strict_separators} anchor={anchor_start} exact={exact_match}");
+    // No quick test first, unlike the fuzzy path: nearly every candidate of
+    // a literal holds it, and a second fold of each cost 9 to 28 % on the
+    // literal rows of the 10 000-file panel (11 September 2026).
     let found = verify_stored(seg_reader, field, &candidates, &label, since, |text, out| {
-        // The spans need the map back to the source; most candidates of a
-        // chain hold no occurrence and never need it.
-        fold_bytes(text, strip, &mut quick);
-        if !contains_bytes(&quick, &needle) {
-            return;
-        }
         fold_into(text, strip, &mut hay, &mut back);
         for_each_occurrence(&hay, &needle, |s| {
             let (from, to) = source_span(&back, s, s + needle.len());
@@ -501,29 +498,6 @@ pub(crate) fn fold_bytes(text: &str, strip: bool, out: &mut Vec<u8>) {
     }
 }
 
-/// Whether `needle` occurs in `hay`.
-fn contains_bytes(hay: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() || hay.len() < needle.len() {
-        return false;
-    }
-    let first = needle[0];
-    let last_start = hay.len() - needle.len();
-    let mut i = 0;
-    while i <= last_start {
-        match hay[i..=last_start].iter().position(|&b| b == first) {
-            None => return false,
-            Some(p) => {
-                let s = i + p;
-                if &hay[s..s + needle.len()] == needle {
-                    return true;
-                }
-                i = s + 1;
-            }
-        }
-    }
-    false
-}
-
 /// The source span of the folded bytes `[s, e)`: from the start of the
 /// character of `s` to the end of the character of `e - 1`.
 #[inline]
@@ -782,7 +756,6 @@ mod tests {
                 assert_eq!(a, b, "{text:?} strip={strip}");
             }
         }
-        assert!(contains_bytes(b"abcabd", b"abd") && !contains_bytes(b"abcab", b"abd") && !contains_bytes(b"ab", b"abc"));
     }
 
     #[test]
