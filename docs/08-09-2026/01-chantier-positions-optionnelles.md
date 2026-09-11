@@ -254,6 +254,68 @@ courtes, qui a encore ôté ~10 % au fuzzy sur une passe de trace) :
 | `spin_lock_[a-z]+` | 5,4 | 2,4 | ×0,44 |
 | `schdule` Jaro-Winkler | 6,6 | 12,4 | ×1,88 |
 
+### Le noyau entier et 30 000 fichiers (11 septembre au soir)
+
+**Corpus.** Linux 7.2, commit de publication `8d3ae59` recloné le 11 septembre
+dans `~/lucivy_bench/linux-7.2`. Le parcours du harnais suit les liens
+symboliques de répertoires (`is_dir()` en Rust), il y en a 12 : leurs
+sous-arbres sont indexés deux fois, d'où **101 141 fichiers, 940,8 Mo de
+texte** — l'arbre copié le 28 août en donnait 93 983 (857 Mo) et ses comptes
+diffèrent (`sched` 9 214 ici, 9 289 là). Les A/B ci-dessous comparent les
+deux layouts sur le même corpus ; ils ne se comparent pas au README chiffre
+pour chiffre.
+
+| | avec positions | sans positions |
+|---|---|---|
+| **noyau, index** | 5 289 Mo, ×5,62 le texte | **2 603 Mo, ×2,77 — −51 %** |
+| noyau, indexation | 106,7 s | 99,6 s |
+| 30 000 fichiers, index | 1 184 Mo | 700 Mo (−41 %) |
+| 10 000 fichiers, index | 352 Mo | 221 Mo (−37 %) |
+
+Le gain grandit avec le corpus : les positions croissent avec le texte, le
+dictionnaire moins vite. Sans positions, le noyau passe sous l'index à
+trigrammes d'Elasticsearch (3 082 Mo sur l'ancien arbre, ×3,6). Composition du
+noyau sans positions : `dict-*.sfx` 1 008 Mo (39 %), `store` 355, `.termtexts`
+316, `.sfxpost` 316 (838 avec positions), `.gmap` 280, `.word_sfxpost` 250
+(682).
+
+**Panel de vérité terrain : 10/10 dans les deux layouts, à 30 000 fichiers
+(trois passes) et sur le noyau.** Temps (30 000 : médianes de trois passes ;
+noyau : un passage, `de` et `sched` deux passes, plafond de spans levé) :
+
+| requête | 30 000 avec / sans | noyau avec / sans |
+|---|---|---|
+| `mutex_lock` strict | 4,2 / 4,4 ms | 12,7 / 27,1 |
+| `mutex_lock` relâché | 2,8 / 4,6 | 11,9 / 38,4 |
+| `spin_lock` strict | 2,5 / 5,1 | 12,1 / 31,8 |
+| `sched` mot entier | 5,5 / 10,4 | 19,4 / 55,7 |
+| `sched` sous-chaîne | 3,0 / 8,0 | 12,5-27,5 / 33,9-38,5 |
+| `printk` début de mot | 4,1 / 8,7 | 14,5 / 36,5 |
+| `schdule` fz1 | 9,5 / 31,1 | 50,5 / 203,1 |
+| `regsiter` fz2 | 150,5 / 77,1 | 856,4 / 388,1 |
+| `spin_lock_[a-z]+` | 18,5 / 3,3 | 237,4 / 21,7 |
+| `schdule` Jaro-Winkler | 12,9 / 32,8 | 78,1 / 198,4 |
+| **`de`, 100 166 documents, 7,9 M de spans** | — | **628-706 / 327-329** |
+
+Lecture : les littérales montent avec le corpus (×1,05-2,7 à 30 000, ×2,1-3,4
+sur le noyau) — chaque document trouvé est relu pour ses positions, le coût
+suit le nombre de documents trouvés. Le fuzzy dont une pièce est commune
+suit le même chemin (×4 sur le noyau). En revanche **`de` est deux fois plus
+rapide sans positions** : relire 941 Mo en parallèle sur 272 segments coûte
+moins que placer 7,9 millions de positions depuis les postings ; la regex
+(×0,09) et le fuzzy à deux éditions (×0,45) aussi. Lucie, le 11 au soir : les
+littérales à quelques dizaines de millisecondes restent acceptables pour une
+option qui divise l'index par deux.
+
+**Correction possible, pas faite** : pour une sous-chaîne à l'intérieur d'un
+seul jeton (candidats FST d'un seul jeton, séparateurs stricts, sans
+`anchor` ni `exact`), l'index connaît la réponse exacte sans relire — les
+documents par les listes, la fréquence BM25 par le `tf` de `SFP6` ; seules les
+positions demandent le texte, et seulement pour les documents affichés, ce
+que `ShardedHandle` sait déjà faire (relance restreinte au top-k quand les
+spans dépassent `LUCIVY_HIGHLIGHT_SPAN_CAP`). Les littérales d'un seul jeton
+reviendraient au niveau de l'index par défaut à toute échelle.
+
 ### Piste suivante pour le fuzzy : vérifier la pièce sur son jeton
 
 Ce qui reste cher est le nombre de candidats d'une pièce commune (`ule` :
