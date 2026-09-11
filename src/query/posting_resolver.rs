@@ -270,7 +270,7 @@ impl PostingResolver for SfxPostResolverV2 {
     }
 
     fn for_each_doc(&self, ordinal: u64, f: &mut dyn FnMut(u32, u32)) {
-        self.reader.for_each_doc(ordinal as u32, |d, n| f(d, n));
+        self.reader.for_each_doc(ordinal as u32, f);
     }
 
     fn positions(&self, ordinal: u64) -> Vec<PositionEntry> {

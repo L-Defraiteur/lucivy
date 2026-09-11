@@ -71,6 +71,68 @@ pub fn fuzzy_spans(needle: &[u8], hay: &[u8], d: usize) -> Vec<(usize, usize, u3
     out
 }
 
+/// `dp[m][j]` for every `j` of `hay` (`[0] = m`): the best edit distance of
+/// `needle` against a substring of `hay` ending at `j` — the last row of the
+/// `fuzzy_spans` matrix, whose runs of values `<= d` are its occurrences.
+///
+/// Bit-parallel for needles of up to 64 bytes (Myers 1999, in Hyyrö's
+/// formulation, search mode: the matrix's row 0 is all zeros), about ten
+/// word operations per byte of `hay` whatever the needle; column by column
+/// otherwise. Memory: the row itself.
+pub fn last_row(needle: &[u8], hay: &[u8]) -> Vec<u32> {
+    let m = needle.len();
+    let n = hay.len();
+    let mut last = vec![0u32; n + 1];
+    last[0] = m as u32;
+    if m == 0 {
+        return last;
+    }
+    if m <= 64 {
+        let mut peq = [0u64; 256];
+        for (i, &b) in needle.iter().enumerate() {
+            peq[b as usize] |= 1u64 << i;
+        }
+        let top = 1u64 << (m - 1);
+        // Vertical deltas of the current column, +1 / -1 (column 0: +1 all).
+        let (mut pv, mut mv) = (!0u64, 0u64);
+        let mut score = m as u32;
+        for (j, &c) in hay.iter().enumerate() {
+            let eq = peq[c as usize];
+            let xv = eq | mv;
+            let xh = ((eq & pv).wrapping_add(pv) ^ pv) | eq;
+            let mut ph = mv | !(xh | pv);
+            let mut mh = pv & xh;
+            if ph & top != 0 {
+                score += 1;
+            } else if mh & top != 0 {
+                score -= 1;
+            }
+            // Search mode: row 0 costs nothing, no delta shifted in.
+            ph <<= 1;
+            mh <<= 1;
+            pv = mh | !(xv | ph);
+            mv = ph & xv;
+            last[j + 1] = score;
+        }
+        return last;
+    }
+    // `col[i] = dp[i][j]`, one column at a time.
+    let mut col: Vec<u32> = (0..=m as u32).collect();
+    for j in 1..=n {
+        let hb = hay[j - 1];
+        let mut diag = 0u32; // dp[0][j - 1]
+        for i in 1..=m {
+            let left = col[i]; // dp[i][j - 1]
+            let cost = u32::from(needle[i - 1] != hb);
+            let v = (col[i - 1] + 1).min(left + 1).min(diag + cost);
+            diag = left;
+            col[i] = v;
+        }
+        last[j] = col[m];
+    }
+    last
+}
+
 /// `fuzzy_spans` for a haystack of any length: the same occurrences, in
 /// memory proportional to the needle for the scan instead of needle × hay.
 /// A stored value can be megabytes long (`briques::stored`, the index
@@ -101,23 +163,8 @@ fn fuzzy_spans_long_above(needle: &[u8], hay: &[u8], d: usize, full_cells: usize
     if (m + 1).saturating_mul(n + 1) <= full_cells {
         return fuzzy_spans(needle, hay, d);
     }
-    // Pass 1: `last[j] = dp[m][j]`, the matrix kept one column at a time
-    // (`col[i] = dp[i][j]`; `dp[0][j] = 0`, `dp[i][0] = i`).
-    let mut col: Vec<u32> = (0..=m as u32).collect();
-    let mut last = vec![0u32; n + 1];
-    last[0] = m as u32;
-    for j in 1..=n {
-        let hb = hay[j - 1];
-        let mut diag = 0u32; // dp[0][j - 1]
-        for i in 1..=m {
-            let left = col[i]; // dp[i][j - 1]
-            let cost = u32::from(needle[i - 1] != hb);
-            let v = (col[i - 1] + 1).min(left + 1).min(diag + cost);
-            diag = left;
-            col[i] = v;
-        }
-        last[j] = col[m];
-    }
+    // Pass 1: `last[j] = dp[m][j]` (bit-parallel for short needles).
+    let last = last_row(needle, hay);
 
     let mut out = Vec::new();
     let mut local: Vec<u32> = Vec::new();
@@ -189,7 +236,7 @@ mod tests {
     }
     #[test]
     fn the_long_path_finds_what_the_full_matrix_finds() {
-        use super::{fuzzy_spans_long, fuzzy_spans_long_above};
+        use super::{fuzzy_spans_long, fuzzy_spans_long_above, last_row};
         // A small alphabet makes runs, ties and overlaps frequent.
         let mut seed = 0x9e37_79b9_7f4a_7c15u64;
         let mut next = || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed };
@@ -207,6 +254,28 @@ mod tests {
                     String::from_utf8_lossy(&needle), String::from_utf8_lossy(&hay),
                 );
             }
+        }
+        // The bit-parallel row and the column loop agree, on both sides of
+        // the 64-byte switch.
+        for case in 0..2000 {
+            let m = 1 + (next() % 80) as usize;
+            let n = (next() % 200) as usize;
+            let alpha = 2 + (case % 3) as u64;
+            let needle: Vec<u8> = (0..m).map(|_| b'a' + (next() % alpha) as u8).collect();
+            let hay: Vec<u8> = (0..n).map(|_| b'a' + (next() % alpha) as u8).collect();
+            let full = {
+                let w = n + 1;
+                let mut dp = vec![0u32; (m + 1) * w];
+                for i in 1..=m { dp[i * w] = i as u32; }
+                for i in 1..=m {
+                    for j in 1..=n {
+                        let cost = u32::from(needle[i - 1] != hay[j - 1]);
+                        dp[i * w + j] = (dp[(i - 1) * w + j] + 1).min(dp[i * w + j - 1] + 1).min(dp[(i - 1) * w + j - 1] + cost);
+                    }
+                }
+                (0..=n).map(|j| dp[m * w + j]).collect::<Vec<u32>>()
+            };
+            assert_eq!(last_row(&needle, &hay), full, "m={m} n={n}");
         }
         // And on text, with the default threshold crossed.
         let hay = "schedule sched_clock scheduler schdule shcedule ".repeat(20_000);

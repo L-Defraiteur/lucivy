@@ -182,7 +182,7 @@ pub fn fuzzy_prescan(
                 }
             }
             FuzzyMetric::JaroWinkler { min_similarity } => {
-                for (s, e, sim) in jaro_winkler::jaro_spans(&needle, &hay, d, min_similarity) {
+                for (s, e, sim) in jaro_spans_windowed(&needle, &hay, d, min_similarity) {
                     let (from, to) = source_span(&back, s, e);
                     out.push((from, to, sim));
                 }
@@ -500,6 +500,53 @@ fn boundaries_ok(text: &str, from: usize, to: usize, exact: bool) -> bool {
     before_ok && after_ok
 }
 
+/// `jaro_winkler::jaro_spans` on a whole value, run only where an
+/// occurrence can be. Every occurrence is within `slack` edits of the
+/// needle, so it ends at an offset `e` where the best edit distance of the
+/// needle against a substring ending there (`fuzzy_spans::last_row`) is at
+/// most `slack`, and it is at most `needle chars + slack` characters (four
+/// bytes each, at most) long. The windows `[e - reach, e]` around those
+/// offsets, merged when they meet, hold every occurrence; two occurrences in
+/// different windows cannot overlap, so the groups `jaro_spans` forms — and
+/// the one occurrence it keeps per group — are the same as on the whole
+/// value. The bit-parallel row costs about ten operations per byte; the
+/// similarity is computed on a few short windows instead of everywhere.
+pub(crate) fn jaro_spans_windowed(needle: &[u8], hay: &[u8], slack: usize, min_similarity: f32) -> Vec<(usize, usize, f32)> {
+    let n = hay.len();
+    if needle.is_empty() || n == 0 {
+        return Vec::new();
+    }
+    let last = fuzzy_spans::last_row(needle, hay);
+    let needle_chars = std::str::from_utf8(needle).map_or(needle.len(), |s| s.chars().count());
+    let reach = (needle_chars + slack) * 4;
+    let is_boundary = |i: usize| i == 0 || i >= n || (hay[i] & 0xC0) != 0x80;
+    let mut out = Vec::new();
+    let flush = |a: usize, b: usize, out: &mut Vec<(usize, usize, f32)>| {
+        for (s, t, sim) in jaro_winkler::jaro_spans(needle, &hay[a..b], slack, min_similarity) {
+            out.push((a + s, a + t, sim));
+        }
+    };
+    let mut window: Option<(usize, usize)> = None;
+    for (e, &dist) in last.iter().enumerate().skip(1) {
+        if dist as usize > slack {
+            continue;
+        }
+        let mut start = e.saturating_sub(reach);
+        while !is_boundary(start) { start -= 1; }
+        let mut end = e;
+        while !is_boundary(end) { end += 1; }
+        window = match window {
+            Some((a, b)) if start <= b => Some((a, b.max(end))),
+            Some((a, b)) => { flush(a, b, &mut out); Some((start, end)) }
+            None => Some((start, end)),
+        };
+    }
+    if let Some((a, b)) = window {
+        flush(a, b, &mut out);
+    }
+    out
+}
+
 /// Hand every candidate's stored values to `matcher`; return, per document
 /// with at least one occurrence, its occurrences (duplicates dropped, in
 /// order). Stops at the match cap (`resolve::max_matches_per_segment`) as
@@ -608,6 +655,34 @@ mod tests {
         let (mut n, mut nb) = (Vec::new(), Vec::new());
         fold_into("_ -", true, &mut n, &mut nb);
         assert!(n.is_empty());
+    }
+
+    #[test]
+    fn windowed_jaro_finds_what_the_whole_value_finds() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed };
+        for case in 0..1500 {
+            let alpha = 2 + (case % 4) as u64;
+            let m = 2 + (next() % 8) as usize;
+            let n = (next() % 150) as usize;
+            let needle: Vec<u8> = (0..m).map(|_| b'a' + (next() % alpha) as u8).collect();
+            let hay: Vec<u8> = (0..n).map(|_| b'a' + (next() % alpha) as u8).collect();
+            for slack in 1..=2usize {
+                for min_sim in [0.7f32, 0.85, 0.9] {
+                    assert_eq!(
+                        jaro_spans_windowed(&needle, &hay, slack, min_sim),
+                        jaro_winkler::jaro_spans(&needle, &hay, slack, min_sim),
+                        "needle {:?} hay {:?} slack={slack} min_sim={min_sim}",
+                        String::from_utf8_lossy(&needle), String::from_utf8_lossy(&hay));
+                }
+            }
+        }
+        // Multi-byte text: the windows stay on character boundaries.
+        let text = "schédule déjà schdule ŝchedule sched_clock ".repeat(50);
+        let mut hay = Vec::new();
+        let mut back = Vec::new();
+        fold_into(&text, true, &mut hay, &mut back);
+        assert_eq!(jaro_spans_windowed(b"schdule", &hay, 1, 0.9), jaro_winkler::jaro_spans(b"schdule", &hay, 1, 0.9));
     }
 
     #[test]

@@ -104,3 +104,117 @@ Une requête sans highlights ne relit rien en régime 1.
 
 Règle du chantier : jamais un chiffre sans le panel vert à côté ; le layout par
 défaut ne bouge pas d'un octet (les tests existants le prouvent).
+
+
+---
+
+## 5. État au 11 septembre — étapes 1 à 3 faites (branche `v4.1`, `2f5c6b0`, `c481cf0`)
+
+### Ce qui a changé dans le design en le codant
+
+- **La table des voisins (`.sibling_v3`) n'est pas écrite non plus.** La
+  cartographie la classait « sans position », mais elle n'est qu'un
+  *complément* de la marche FST (`if ctx.has_sibling_chains()`). Sans elle,
+  les chaînes sont bâties par la FST seule depuis **toutes** les têtes (celles
+  de la marche descendante et celles des candidats FST), en avant — ce que le
+  pipeline à positions fait déjà quand il ne peut pas vérifier une tête en
+  arrière. C'est un sur-ensemble ; la vérification tranche.
+- **Les trois fichiers non écrits sont exactement les trois dérivés.**
+  `IndexSettings::skips_derived_files()` = `derived_in_ram || !positions` sert
+  à toutes les listes de fichiers (snapshot, sync, GC, tailles) et aux deux
+  écrivains ; la reconstruction à l'ouverture ne se déclenche que sur
+  `derived_in_ram`.
+- **La vérification est la vérité terrain, pas une imitation.** Les
+  prédicats du harnais (`grep_spans`, `filter_boundaries`, `fuzzy_spans`,
+  `jaro_spans`, `find_iter`) tournent sur les valeurs stockées : mêmes
+  replis Unicode, mêmes occurrences chevauchantes, mêmes bornes, mêmes
+  spans. Un index sans positions répond donc par construction ce que la
+  vérité terrain dit.
+- **Le fuzzy garde le générateur du pipeline à positions**
+  (`composite::fuzzy_generator` : pièces du pigeonhole, ou les n-grammes les
+  plus rares) ; ses littéraux passent par la même génération de candidats.
+  Une requête que le générateur ne sait pas découper ne trouve rien, comme
+  avec positions.
+- **`fuzzy_spans_long`** : `fuzzy_spans` bâtit une matrice aiguille × texte ;
+  sur une valeur de 1 Mo et une aiguille de 10 octets, 44 Mo par fil — trop
+  pour le navigateur. La version longue rend les mêmes occurrences avec la
+  dernière ligne calculée colonne par colonne, puis le même retour arrière
+  sur une matrice locale (une cellule `(i, j)` ne dépend d'aucun octet avant
+  `j − 2i`, et un retour arrière recule sans monter au plus `d` fois).
+  Égalité vérifiée sur 3 000 cas aléatoires et sur un long texte.
+- **Fusions.** Une source `SFP6` / `WSP6` est recopiée en réémettant chaque
+  occurrence à une position fictive `0..tf`, que l'écrivain « documents
+  seulement » recompte en `tf`. Le total des occurrences d'un corpus (qui ne
+  dépend d'aucune segmentation) est vérifié égal à celui d'un index avec
+  positions, en v3 et en dictionnaire.
+
+### Mesuré
+
+Index de référence, 10 000 fichiers du noyau (Linux 7.2), dictionnaire
+partagé, 160 segments (commits tous les 500, huit fils d'indexation) :
+
+| | avec positions | sans positions |
+|---|---|---|
+| total | 352,3 Mo | **220,9 Mo (−37 %)** |
+| `dict-*.sfx` | 104,8 | 104,8 (47 % de l'index) |
+| `.sfxpost` | 49,7 | 19,0 |
+| `.word_sfxpost` | 32,1 | 15,7 |
+| `.posmap`, `.word_pos_map`, `.sibling_v3` | 26,5 + 32,4 + 25,3 | 0 |
+| `dict-*.termtexts`, `.gmap`, `store` | 33,0 + 21,3 + 18,7 | idem |
+| indexation | 8,4 s | 8,0 s |
+
+À 10 000 fichiers la FST du dictionnaire pèse presque la moitié de l'index
+sans positions : le gain est plus grand sur le noyau, où les positions
+pèsent plus (estimé ×2,7 le texte, à mesurer).
+
+**Panel de vérité terrain** (`v3_ground_truth_demo`, 10 requêtes, comptes
+et spans comparés au balayage des fichiers) : **10/10 dans les deux
+layouts**. Temps d'un seul passage à froid, à confirmer par des passes
+répétées :
+
+| requête | avec positions | sans |
+|---|---|---|
+| `mutex_lock` strict / relâché | 15,5 / 10,5 ms | 2,6 / 2,5 ms |
+| `spin_lock` strict | 6,0 | 2,3 |
+| `sched` mot entier / sous-chaîne | 3,2 / 2,6 | 4,7 / 3,4 |
+| `printk` début de mot | 2,6 | 2,8 |
+| `schdule` fz1 | 5,4 | **24,6** |
+| `regsiter` fz2 | 40,7 | 42,1 |
+| `spin_lock_[a-z]+` | 5,4 | 2,8 |
+| `schdule` Jaro-Winkler | 7,6 | **163,4** |
+
+Les littérales ne perdent rien : relire quelques dizaines de documents
+coûte moins que résoudre les chaînes par `.posmap`. Le fuzzy et surtout le
+Jaro-Winkler perdent, parce que la vérification balaie la valeur entière de
+chaque candidat (programmation dynamique sur tout le texte).
+
+### Vérifié
+
+- Tests unitaires : `SFP6`, `WSP6` (et `to_docs_only` octet pour octet),
+  prédicat de la vérité terrain, `fuzzy_spans_long`.
+- `lucivy_core/tests/test_positions_off.rs` (300 fichiers du noyau, v3 et
+  dictionnaire, commits tous les 40 et fusions de la politique) : fichiers et
+  `meta.json` ; fréquences à travers les fusions ; refus de configuration ;
+  **13 requêtes littérales** (strict, relâché, mot entier, début de mot,
+  séparateurs dans l'aiguille, casse, `de`, `pin_loc`) et **8 fuzzy / regex**
+  (fz1, fz2, à travers les jetons, Jaro-Winkler, regex avec littéral, non
+  bornée, sans littéral) : mêmes documents, mêmes spans, **mêmes scores**
+  que l'index avec positions.
+- Les suites complètes (lib avec et sans features par défaut, `lucivy-core`)
+  sont vertes après l'étape 1 : le layout par défaut n'a pas bougé.
+
+### Incident
+
+`/tmp` est vidé de ce qui a plus de 10 jours (`/etc/tmpfiles.d/tmp.conf`) :
+le noyau du 28 août et les index de bench y avaient disparu, et le premier
+test d'intégration a tourné sur le corpus synthétique de repli sans le dire.
+Le noyau vit maintenant dans `~/lucivy_bench/linux-7.2`, `/tmp/lucivy-cmp` et
+`/tmp/lucivy-cmp-90k` sont des liens vers lui ; les index de mesure vont dans
+`~/lucivy_bench/`.
+
+### Reste
+
+Le panel de vérité terrain sur 10 000 fichiers et ses temps (en cours),
+l'A/B de temps sur 30 000, la taille du noyau entier, puis les bindings
+(`positions` dans les quatre), le playground (`?nopos`), les README et le
+CHANGELOG.
