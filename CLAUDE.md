@@ -346,9 +346,16 @@ cd playground && node serve.mjs
 
 ## Docs
 
-**Chantier en cours (8 septembre, branche `v4.1`)** : `docs/08-09-2026/01-chantier-positions-optionnelles.md`
-— l'index sans positions (`positions: false`, spans par relecture du texte stocké), le design en trois
-régimes et les six étapes ; mesuré : postings 1 398 → 296 Mo, dérivés 1 667 → 0, noyau ≈ ×2,6 le texte.
+**Chantier en cours (branche `v4.1`, depuis le 8 septembre)** : `docs/08-09-2026/01-chantier-positions-optionnelles.md`
+— l'index sans positions (`positions: false` : postings `SFP6`/`WSP6` documents + fréquences, ni
+`.posmap` ni `.word_pos_map` ni `.sibling_v3` ; candidats par la FST et les listes de documents, chaque
+match vérifié sur le texte stocké avec les prédicats mêmes de la vérité terrain — `briques::stored`).
+**Étapes 1 à 3 faites le 11 septembre** : littérales, fuzzy (Levenshtein, Jaro-Winkler), regex ;
+`test_positions_off` (mêmes documents, spans et scores qu'avec positions, v3 et dictionnaire), panel de
+vérité terrain 10/10 ; 10 000 fichiers 352 → 221 Mo (−37 %) ; `fuzzy_spans_long` et Myers (`last_row`,
+`within_distance`) ; les quatre bindings ; trace `V3_DIAG_STORED`. Reste : A/B 30 000, noyau entier,
+tests Python et Node, CHANGELOG. Les corpus vivent dans `~/lucivy_bench/linux-7.2` (`/tmp` est vidé à
+10 jours, mémo `tmp-nettoye-apres-10-jours`).
 **Le 7 septembre** : `docs/07-09-2026/01-post-reddit.md` (le cadrage, la recette du GIF et du MP4 de
 `images/`), `02` à `04` les posts prêts à coller par subreddit, `06-article-every-engine-lies-a-little.md` (l'article,
 publié sur `playground/blog/` — la page canonique, lien « blog » dans l'en-tête de la vitrine),

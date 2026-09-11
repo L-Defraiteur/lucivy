@@ -220,10 +220,21 @@ index = lucivy.Index.create("/tmp/compact", fields=[...], shared_dictionary=True
 # the index is opened. Same answers; opening pays the rebuild (never a
 # query), the rebuilt structures stay resident. Fixed at creation.
 index = lucivy.Index.create("/tmp/compact", fields=[...], shared_dictionary=True, derived_in_ram=True)
+
+# Smaller than that, with nothing rebuilt at open (4.1, branch v4.1):
+# positions=False keeps each token's documents and frequencies, not its
+# positions, and writes no position sidecar — 37 % less on 10 000 kernel
+# files. Every match is then verified on the stored text: same documents,
+# spans and scores; literal queries about as fast, a fuzzy query whose
+# pigeonhole piece is common reads many candidates. Every text field must be
+# stored; excludes derived_in_ram. Fixed at creation.
+index = lucivy.Index.create("/tmp/compact", fields=[...], positions=False)
 ```
 
-Node: `Index.create(path, fields, shards, true, true)`; browser and C++:
-`shared_dictionary: true` and `derived_in_ram: true` in the config object.
+Node: `Index.create(path, fields, shards, true, true)` for `derived_in_ram`,
+`Index.create(path, fields, shards, true, false, true, false)` for
+`positions: false`; browser and C++: `shared_dictionary`, `derived_in_ram`,
+`positions` in the config object.
 
 ### Sharded, distributed, synchronised
 

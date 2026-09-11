@@ -205,7 +205,13 @@ fn fuzzy_spans_long_above(needle: &[u8], hay: &[u8], d: usize, full_cells: usize
     let m = needle.len();
     let n = hay.len();
     if m == 0 || n == 0 { return Vec::new(); }
-    if (m + 1).saturating_mul(n + 1) <= full_cells {
+    // A needle of up to 64 bytes always takes the bit-parallel row: the full
+    // matrix is only the smaller code for a long needle on a short text.
+    // Before 11 September the threshold alone decided, and every stored
+    // value under four million cells (nearly all of them for a short
+    // needle) paid a scalar matrix: `schdule` d=1 cost 26.5 ms on 10 000
+    // kernel files without positions, 16.7 with a prefilter hiding it.
+    if m > 64 && (m + 1).saturating_mul(n + 1) <= full_cells {
         return fuzzy_spans(needle, hay, d);
     }
     // Pass 1: `last[j] = dp[m][j]` (bit-parallel for short needles).

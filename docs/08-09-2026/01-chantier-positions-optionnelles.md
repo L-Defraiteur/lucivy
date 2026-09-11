@@ -203,6 +203,41 @@ chaque candidat (programmation dynamique sur tout le texte).
 - Les suites complètes (lib avec et sans features par défaut, `lucivy-core`)
   sont vertes après l'étape 1 : le layout par défaut n'a pas bougé.
 
+### Accélérations exactes (11 septembre, après le premier panel)
+
+Le premier panel (un passage à froid, puis trois passes : `schdule` fz1 ×4,65,
+Jaro-Winkler ×1,44 à ×21 selon la passe) venait de la vérification : chaque
+candidat voyait sa valeur entière repliée avec sa table de retour vers la
+source (neuf octets écrits par octet lu) puis passée à la programmation
+dynamique complète. Trois changements, **chacun à sortie égale et testé
+comme tel** :
+
+- **Myers** (`fuzzy_spans::last_row`) : la dernière ligne de la matrice en
+  bit-parallèle (mode recherche : la ligne 0 ne coûte rien), une dizaine
+  d'opérations par octet pour une aiguille de 64 octets au plus ; égale à la
+  matrice complète sur 2 000 cas aléatoires, de part et d'autre des 64 octets.
+  `fuzzy_spans_long` l'utilise pour sa première passe.
+- **Jaro-Winkler fenêtré** (`stored::jaro_spans_windowed`) : une occurrence
+  est à `d` éditions au plus, donc finit là où `last_row` vaut `d` au plus, et
+  fait au plus `aiguille + d` caractères ; `jaro_spans` ne tourne que sur ces
+  fenêtres, fusionnées quand elles se touchent — les groupes qu'il forme ne
+  franchissent pas l'espace entre deux fenêtres. Égal à la valeur entière sur
+  9 000 combinaisons aléatoires et un texte multi-octets.
+- **Préfiltre du fuzzy** : repli sans table de retour (`fold_bytes`), puis
+  `within_distance` — Myers qui s'arrête au premier octet prouvant une
+  occurrence. Les spans ne sont calculés que pour les valeurs qui passent.
+  La trace `V3_DIAG_STORED=1` a montré pourquoi c'est là que ça se joue :
+  `schdule` à une édition se découpe en `schd` + `ule`, et `ule` (dans chaque
+  `module`) fait 3 488 candidats sur 10 000 documents pour 230 trouvés —
+  26 Mo de texte relus. fz1 : 26,5 → 17,3 ms (contre 5,4 avec positions).
+  **Essayé puis retiré sur les littérales** : presque tous leurs candidats
+  contiennent l'aiguille, le repli en plus coûtait 9 à 28 % sur les six
+  lignes littérales.
+
+Ce qui reste coûteux est structurel : un fuzzy dont une pièce du pigeonhole
+est commune relit le texte de tous les documents qui la contiennent, là où le
+pipeline à positions ne rebâtit que des fenêtres autour des positions.
+
 ### Incident
 
 `/tmp` est vidé de ce qui a plus de 10 jours (`/etc/tmpfiles.d/tmp.conf`) :
