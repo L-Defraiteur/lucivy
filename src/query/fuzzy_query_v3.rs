@@ -110,6 +110,13 @@ impl FuzzyQueryV3 {
             }
         };
         let pr = crate::query::posting_resolver::build_resolver(seg_reader, self.field)?;
+        // An index without positions (`positions: false`): candidate
+        // documents from the index, occurrences found on the stored text.
+        if !pr.has_positions() {
+            return crate::suffix_fst::briques::stored::fuzzy_prescan(
+                seg_reader, reader, &*pr, self.field, &self.query_text,
+                self.distance, self.strict_separators, self.metric);
+        }
 
         // No copy: see the note in contains_query_v3::run_sfx_v3_prescan.
         let load = |ext: &str| -> Option<common::OwnedBytes> {

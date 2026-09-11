@@ -211,25 +211,25 @@ fn positions_off_is_refused_where_it_cannot_answer() {
 const RX: u8 = 255;
 
 #[derive(Clone, Copy)]
-struct Q { text: &'static str, strict: bool, distance: u8, anchor: bool, exact: bool, label: &'static str }
+struct Q { text: &'static str, strict: bool, distance: u8, anchor: bool, exact: bool, label: &'static str, jw: Option<f32> }
 
 /// The literal kinds (step 2): strict, relaxed, word start, whole word,
 /// separators inside the needle, case, two characters.
 fn literal_panel() -> Vec<Q> {
     vec![
-        Q { text: "mutex_lock", strict: true, distance: 0, anchor: false, exact: false, label: "strict" },
-        Q { text: "mutex lock", strict: false, distance: 0, anchor: false, exact: false, label: "relax" },
-        Q { text: "spin_lock", strict: true, distance: 0, anchor: false, exact: false, label: "strict" },
-        Q { text: "spinlock", strict: false, distance: 0, anchor: false, exact: false, label: "relax" },
-        Q { text: "sched", strict: true, distance: 0, anchor: true, exact: true, label: "term" },
-        Q { text: "printk", strict: true, distance: 0, anchor: true, exact: false, label: "sw" },
-        Q { text: "return", strict: false, distance: 0, anchor: false, exact: false, label: "relax" },
-        Q { text: "return -ENOMEM;", strict: true, distance: 0, anchor: false, exact: false, label: "strict" },
-        Q { text: "if (", strict: true, distance: 0, anchor: false, exact: false, label: "strict" },
-        Q { text: "->next", strict: true, distance: 0, anchor: false, exact: false, label: "strict" },
-        Q { text: "Mutex", strict: false, distance: 0, anchor: false, exact: false, label: "relax-case" },
-        Q { text: "de", strict: true, distance: 0, anchor: false, exact: false, label: "two chars" },
-        Q { text: "pin_loc", strict: true, distance: 0, anchor: false, exact: false, label: "mid-token" },
+        Q { text: "mutex_lock", strict: true, distance: 0, anchor: false, exact: false, label: "strict", jw: None },
+        Q { text: "mutex lock", strict: false, distance: 0, anchor: false, exact: false, label: "relax", jw: None },
+        Q { text: "spin_lock", strict: true, distance: 0, anchor: false, exact: false, label: "strict", jw: None },
+        Q { text: "spinlock", strict: false, distance: 0, anchor: false, exact: false, label: "relax", jw: None },
+        Q { text: "sched", strict: true, distance: 0, anchor: true, exact: true, label: "term", jw: None },
+        Q { text: "printk", strict: true, distance: 0, anchor: true, exact: false, label: "sw", jw: None },
+        Q { text: "return", strict: false, distance: 0, anchor: false, exact: false, label: "relax", jw: None },
+        Q { text: "return -ENOMEM;", strict: true, distance: 0, anchor: false, exact: false, label: "strict", jw: None },
+        Q { text: "if (", strict: true, distance: 0, anchor: false, exact: false, label: "strict", jw: None },
+        Q { text: "->next", strict: true, distance: 0, anchor: false, exact: false, label: "strict", jw: None },
+        Q { text: "Mutex", strict: false, distance: 0, anchor: false, exact: false, label: "relax-case", jw: None },
+        Q { text: "de", strict: true, distance: 0, anchor: false, exact: false, label: "two chars", jw: None },
+        Q { text: "pin_loc", strict: true, distance: 0, anchor: false, exact: false, label: "mid-token", jw: None },
     ]
 }
 
@@ -244,6 +244,8 @@ fn run(handle: &LucivyHandle, q: Q) -> (HashSet<u64>, HashSet<(u64, usize, usize
         regex: if q.distance == RX { Some(true) } else { None },
         anchor_start: if q.anchor { Some(true) } else { None },
         exact_match: if q.exact { Some(true) } else { None },
+        fuzzy_metric: q.jw.map(|_| "jaro_winkler".to_string()),
+        min_similarity: q.jw,
         ..Default::default()
     };
     let query = query::build_query(&cfg, &handle.schema, &handle.index, Some(Arc::clone(&sink))).unwrap();
@@ -290,6 +292,68 @@ fn positions_off_answers_literals_like_positions() {
         let with = build(&files, sfx_version, true, &base.join(format!("v{sfx_version}")));
         let without = build(&files, sfx_version, false, &base.join(format!("v{sfx_version}-nopos")));
         compare(&with, &without, &literal_panel(), &format!("v{sfx_version} no positions"));
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Fuzzy (Levenshtein at one and two edits, across token boundaries,
+/// Jaro-Winkler) and regex (with a literal, bounded or not, and without).
+fn fuzzy_regex_panel() -> Vec<Q> {
+    let q = |text, distance, label| Q { text, strict: false, distance, anchor: false, exact: false, label, jw: None };
+    vec![
+        q("schdule", 1, "fz1"),
+        q("regsiter", 2, "fz2"),
+        q("spinlokc", 2, "fz2 across"),
+        q("mutx_lock", 1, "fz1 across"),
+        Q { jw: Some(0.9), ..q("schdule", 1, "jw1") },
+        Q { strict: true, ..q("spin_lock_[a-z]+", RX, "rx") },
+        Q { strict: true, ..q("/\\*[^*]*\\*/", RX, "rx unbounded") },
+        Q { strict: true, ..q("[0-9]{4}", RX, "rx no literal") },
+    ]
+}
+
+/// The tier a fuzzy search gives each document, through the score's order:
+/// the documents grouped by score, in order.
+fn ranked(handle: &LucivyHandle, q: Q) -> Vec<(u64, i64)> {
+    let cfg = QueryConfig {
+        query_type: "contains".into(),
+        field: Some("content".into()),
+        value: Some(q.text.into()),
+        strict_separators: Some(q.strict),
+        distance: if q.distance > 0 && q.distance != RX { Some(q.distance) } else { None },
+        regex: if q.distance == RX { Some(true) } else { None },
+        fuzzy_metric: q.jw.map(|_| "jaro_winkler".to_string()),
+        min_similarity: q.jw,
+        ..Default::default()
+    };
+    let query = query::build_query(&cfg, &handle.schema, &handle.index, None).unwrap();
+    let searcher = handle.reader.searcher();
+    let results = searcher.search(&*query, &ld_lucivy::collector::TopDocs::with_limit(100_000).order_by_score()).unwrap();
+    let nid_f = handle.field(NODE_ID_FIELD).unwrap();
+    let mut out: Vec<(u64, i64)> = results.iter().map(|(score, addr)| {
+        let doc = searcher.doc::<ld_lucivy::LucivyDocument>(*addr).unwrap();
+        use ld_lucivy::schema::document::Value;
+        let nid = doc.field_values().find(|(f, _)| *f == nid_f).and_then(|(_, v)| v.as_value().as_u64()).unwrap();
+        (nid, (*score * 1000.0).round() as i64)
+    }).collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn positions_off_answers_fuzzy_and_regex_like_positions() {
+    let files = corpus(300);
+    eprintln!("corpus: {} files", files.len());
+    let base: PathBuf = std::env::temp_dir().join(format!("lucivy-positions-off-fuzzy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    for sfx_version in [3u8, 4] {
+        let with = build(&files, sfx_version, true, &base.join(format!("v{sfx_version}")));
+        let without = build(&files, sfx_version, false, &base.join(format!("v{sfx_version}-nopos")));
+        compare(&with, &without, &fuzzy_regex_panel(), &format!("v{sfx_version} no positions"));
+        // Same scores, tiers included: a fuzzy document ranks where it did.
+        for q in fuzzy_regex_panel().into_iter().filter(|q| q.distance != RX) {
+            assert_eq!(ranked(&with, q), ranked(&without, q), "v{sfx_version} {} {}: scores differ", q.text, q.label);
+        }
     }
     let _ = std::fs::remove_dir_all(&base);
 }
