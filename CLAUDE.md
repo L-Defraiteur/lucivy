@@ -510,7 +510,7 @@ Les docs sont dans `docs/` organisés par dossier daté. Convention depuis le
 **4.0.0 publiée le 6 septembre 2026 vers minuit** (tag `v4.0.0`, `main` = `1153050`), puis
 **4.0.1 dans l'heure** (tag `v4.0.1`, `main` = `7f18415`) : le tag 4.0.0 était parti sur
 une CI rouge (clippy, build sans features par défaut — rien du moteur) ; 4.0.1 est le même
-moteur, republié après correction, et `release.yml` a désormais un job `checks` (clippy,
+moteur, republié après correction, et `release.yml` reçut alors un job `checks` (clippy,
 lib avec et sans features, `lucivy-core`, `lucivy-cpp`) dont dépendent toutes les
 publications. **Règle : ne jamais pousser un tag `v*` avant que la CI du commit soit
 verte** — la barrière du workflow le garantit maintenant, mais on regarde quand même.
@@ -527,6 +527,14 @@ Le contrat de 4.0 (ouvre 3.0.x, 3.0.x n'ouvre pas 4.0, le premier commit convert
 vérifié par `test_compat_308` et, le 6 au soir, par un index de 10 000 fichiers bâti par
 `main` (3.0.8) et rouvert par v4 : 10/10. Le dictionnaire partagé est le défaut depuis 4.0.0.
 Publier reste une décision explicite de Lucie.
+**CI depuis le 11 septembre au soir (branche `v4.1`)** : trois fichiers, un rôle chacun. `ci.yml` — le code est
+juste : lib ×3 jeux de features, clippy, **toute la suite `lucivy-core` et `lucivy-cpp`**, vérité terrain du dépôt,
+**pytest** et **toutes les suites Node**, C++ — à chaque push sur `main` et sur une branche `v…`, à chaque PR vers
+`main` ; `build.yml` — 5 plateformes Python/Node, sdist, WASM — sur les PR vers `main`, les pushes de `main` qui
+touchent aux bindings, à la main ; `release.yml` (tag `v*`) **appelle** les deux avant de publier : le job `checks`,
+une copie de la CI, n'existe plus. Chemin vers `main` : une PR depuis la branche de travail, fusion quand tout est
+vert, puis le tag. Les jobs de publication restent dans `release.yml` (trusted publishing lié à ce nom de fichier
+et à l'environnement `release`).
 
 
 | Registre | Package | Publié | Date |

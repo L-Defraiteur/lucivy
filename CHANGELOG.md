@@ -50,6 +50,12 @@ Unreleased — branch `v4.1`
 - **`fuzzy_spans_long`**, the bit-parallel last row (Myers) and a windowed
   Jaro-Winkler: the same occurrences as the full matrix, in memory linear in
   the text — a stored value can be megabytes long.
+- **CI: one definition of green.** `ci.yml` runs on every push to `main` and to
+  a release branch and on every pull request to `main`, and now runs the whole
+  `lucivy-core` suite, `lucivy-cpp`, the Python test suite and every Node test
+  file (before: smoke scripts, and the core suite only at the tag); `build.yml`
+  builds the five platforms and the wasm package on pull requests; `release.yml`
+  calls both before publishing instead of carrying its own copy (`checks`).
 - The ground-truth harness: `V3_POSITIONS=0`; `V3_DIAG_STORED=1` traces, per
   segment, the candidates and the stored text read.
 

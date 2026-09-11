@@ -120,3 +120,13 @@ anticipée), `stored::windowed_jaro…`, `stored::the_predicate_is_the_ground_tr
   `.mjs` hors dépôt (`~/lucivy_bench/scratch-positions/`) ; `V3_DIAG_LITERAL=<aiguille>` imprime chaque
   match de la phase littérale (position, octets, entrée mot ou morceau). Le paquet publié se teste de même
   (`npm install lucivy@4.0.2` dans un dossier jetable).
+
+## CI (depuis le 11 au soir)
+
+- `ci.yml` : push sur `main` et `v…`, PR vers `main`, appelé par `release.yml`. `build.yml` : PR vers `main`, push
+  de `main` touchant aux bindings, à la main, appelé par `release.yml`. `release.yml` : tag `v*` (ou à la main,
+  `publish` décoché = bâtir sans publier).
+- Lire l'état sans toucher au compte `gh` : `curl -s "https://api.github.com/repos/L-Defraiteur/lucivy/actions/runs?branch=v4.1&per_page=10"`.
+  Ouvrir une PR ou relancer : `gh auth switch -u L-Defraiteur` d'abord (le compte actif par défaut est le pro).
+- Avant d'ajouter une suite à la CI, la lancer en local et vérifier qu'elle sort en erreur quand elle échoue
+  (`tests/smoke_warnings.mjs` attend le chemin absolu du `.node` en argument).

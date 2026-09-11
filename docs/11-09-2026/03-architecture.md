@@ -86,4 +86,5 @@ Vérité terrain : panel comparé à un balayage des fichiers (comptes et spans)
 10/10 sur le noyau dans les deux layouts. Contrat de format : 4.0 ouvre 3.0.x
 (`test_compat_308`), un index `positions: false` n'est pas cherchable en 4.0.x (il s'ouvre, puis chaque recherche échoue : `sfxpost: invalid V2 format`).
 Banc comparatif rejouable : `benches/compare_engines.sh`. Publication par tag
-`v*` sur CI verte uniquement (job `checks` bloquant).
+`v*` sur CI verte uniquement — depuis le 11 au soir, `release.yml` appelle `ci.yml` et `build.yml`, la même CI
+que chaque push et chaque PR (le job `checks`, une copie, n'existe plus).
