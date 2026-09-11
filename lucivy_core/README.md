@@ -14,7 +14,7 @@ Also available as [Python](https://pypi.org/project/lucivy/),
 [Node.js](https://www.npmjs.com/package/lucivy),
 [browser (WASM)](https://www.npmjs.com/package/lucivy-wasm) and C++ packages,
 all on this crate. Everything is MIT. Every answer is checked against the
-files by the ground-truth harness (93 983 kernel files, nine query modes, zero
+files by the ground-truth harness (93 983 kernel files, ten query modes, zero
 mismatches), and the index lives where you put it: a directory, a blob store
 inside your transaction, a snapshot served in place, the browser's OPFS. 4.0:
 the index is 3.7× smaller than 3.0.8 (the kernel: 18 057 → 4 938 MB, 3 344 with

@@ -1,6 +1,7 @@
 # lucivy — Architecture
 
-*4.0.2, September 2026. Every number in this document was measured; the
+*4.0.2, September 2026 — with 4.1 (branch `v4.1`): the index without positions
+and a span fix, marked (4.1) below. Every number in this document was measured; the
 commands are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md), the engine comparison
 in [docs/compare-engines-2026-09-05.md](docs/compare-engines-2026-09-05.md)
 (`benches/compare_engines.sh` regenerates it), and the working notes in
@@ -19,7 +20,7 @@ the browser. Four properties organise the design:
 
 - **Every answer is checked.** The ground-truth harness compares each query's
   documents *and* byte spans to a byte-by-byte scan of the files — 93 983
-  Linux kernel files, nine query modes, zero mismatches — and the same scan
+  Linux kernel files, ten query modes, zero mismatches — and the same scan
   judges Elasticsearch and tantivy on the same corpus (§ *One corpus, one
   truth* below).
 - **The question the others cannot pose**: `spinlock`, `spin_lock` and
@@ -35,6 +36,13 @@ the browser. Four properties organise the design:
   aggregated before scoring, so N shards give the scores of one index, and two
   independent nodes exchange their statistics to score as one corpus — as a
   library, in-process, in the browser too.
+
+The size of the index is a choice made at creation, never the answers: the
+whole Linux kernel is **×5.8 its text** with the default layout, **×3.9** with
+`derived_in_ram` (three sidecars rebuilt in RAM when the index opens) and
+**×2.8** with `positions: false` (4.1: every match verified on the stored
+text) — the same documents, spans and scores in the three, checked by the same
+ground truth.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -269,8 +277,8 @@ shards holding those ids work, each on its own share, and ties are deterministic
 ## Sharding, storage, formats
 
 `ShardedHandle` runs N shards over a `ShardStorage`; documents are routed by a
-`ShardRouter` (`balance_weight = 1.0`: round-robin, fastest indexing; `0.2`:
-token-aware, co-locates similar documents). Each shard is a `LucivyHandle` over
+`ShardRouter` (`balance_weight = 1.0`: round-robin, fastest indexing; `0.2`,
+the default of an index: token-aware, co-locates similar documents). Each shard is a `LucivyHandle` over
 a `Directory`:
 
 | storage | what it is | when |
@@ -355,7 +363,7 @@ pthreads, and **nothing in lucivy calls `thread::spawn`**.
 
 ## Bindings
 
-| binding | bridge | 4.0.0 |
+| binding | bridge | what it exposes (4.0; 4.1 marked) |
 |---|---|---|
 | Python | PyO3, one `abi3` wheel for CPython ≥ 3.9 | `query_warnings`, `compact`, `wait_merges_quiet`, `index_bytes`, `drop_index`, `open_snapshot`, `create_with_blob_store`, `shared_dictionary=` and `derived_in_ram=` at creation, `positions=False` (4.1); the GIL is released around every call |
 | Node.js | napi-rs | the same, plus the asynchronous `BlobIndex` for user-provided stores (`sharedDictionary`, `derivedInRam`, `positions` in its options); 4.1: `Index.create(path, fields, { positions: false, … })` |

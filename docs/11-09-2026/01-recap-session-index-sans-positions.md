@@ -107,5 +107,10 @@ fois » ; l'option reste optionnelle, le défaut ne change pas.
    `positions=False`, Node 7ᵉ argument / option `positions`, C++ et navigateur
    `"positions": false` dans l'objet schéma.
 2. Mesurer à froid (caches vidés) avant d'annoncer des temps.
-3. Publier 4.1 sur décision de Lucie (CI verte d'abord, tag par elle).
+3. Publier 4.1 sur décision de Lucie (CI verte d'abord, tag par elle). **Au passage en 4.1**, changer
+   le numéro partout où il est écrit : titres des README (`# lucivy 4.0.2`, `# lucivy-wasm 4.0.2`),
+   `pip install lucivy  # 4.0.2`, `npm install lucivy   # 4.0.2`, en-tête C++ (`Version 4.0.2`),
+   `lucivy-core = "4.0"`, « all 4.0.2 » du README principal, en-tête d'`ARCHITECTURE.md`, `Cargo.toml` /
+   `pyproject.toml` / `package.json`. **Le README de PyPI est `bindings/python/README.md`** depuis le 11 au
+   soir (`pyproject.toml`) : 4.0.0 à 4.0.2 publiaient `README-pypi.md`, resté à « lucivy v3 », supprimé.
 4. Plus tard : soumettre l'article à HN ; captures agrégées ; casse.

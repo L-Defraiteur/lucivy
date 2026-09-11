@@ -31,6 +31,23 @@ tab. The second half is typed by hand — `index postgres`, then `--strict
 "heap_insert"`, `"CREATE INDEX CONCURRENTLY"` (27 hits, 11 ms), `--fuzzy 1
 "vaccum"` (17 ms) and `--regex "ExecInit[A-Z][a-zA-Z]+\("` (20 ms).*
 
+### What's new in 4.1
+
+- **`positions: false` — an index half the size, the same answers.** An option
+  of creation: the postings keep each token's documents and frequencies, not its
+  positions, and no position sidecar is written; every match is verified on the
+  stored text with the ground truth's own definitions. The whole kernel (Linux
+  7.2, 101 141 files, 941 MB): **5 289 → 2 598 MB, ×2.8 the text**; literal
+  queries pay a re-read of the documents found (27-56 ms), a regex gets faster
+  (22 ms). In the browser, 10 000 kernel files take 637 MB of OPFS instead of
+  1 051. Python `positions=False`, Node `Index.create(path, fields, { positions:
+  false })`, C++ and the browser `"positions": false`.
+- **Fix: one occurrence, one span.** In relaxed mode a needle that ends a word
+  cut into chunks (`lock` in `superblock`) came back twice and counted twice in
+  the score — 542 duplicated spans for `lock` over 10 000 kernel files, 4.0.2
+  included. The ground-truth harness compared spans as sets and could not see
+  it; it counts duplicates now.
+
 ### What's new in 4.0.0
 
 - **The index is 3.7× smaller.** The whole Linux kernel (93 983 files, 857 MB
