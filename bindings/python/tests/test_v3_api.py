@@ -381,7 +381,12 @@ class TestSharedDictionary:
         with pytest.raises(Exception, match="derived_in_ram"):
             lucivy.Index.create(os.path.join(tmp_dir, "both"), stored, positions=False, derived_in_ram=True)
         with pytest.raises(Exception, match="must be stored"):
-            lucivy.Index.create(os.path.join(tmp_dir, "unstored"), FIELDS, positions=False)
+            lucivy.Index.create(os.path.join(tmp_dir, "unstored"),
+                                [{"name": "body", "type": "text", "stored": False}], positions=False)
+        # `stored` left out means stored (the default): accepted.
+        implicit = lucivy.Index.create(os.path.join(tmp_dir, "implicit"),
+                                       [{"name": "body", "type": "text"}], positions=False)
+        assert implicit.num_docs == 0
 
     def test_option_is_refused_with_a_contradicting_sfx_version(self):
         """The core refuses a config that says both; the binding cannot express

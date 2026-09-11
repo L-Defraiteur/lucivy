@@ -221,18 +221,18 @@ index = lucivy.Index.create("/tmp/compact", fields=[...], shared_dictionary=True
 # query), the rebuilt structures stay resident. Fixed at creation.
 index = lucivy.Index.create("/tmp/compact", fields=[...], shared_dictionary=True, derived_in_ram=True)
 
-# Smaller than that, with nothing rebuilt at open (4.1, branch v4.1):
-# positions=False keeps each token's documents and frequencies, not its
-# positions, and writes no position sidecar — 37 % less on 10 000 kernel
-# files. Every match is then verified on the stored text: same documents,
-# spans and scores; literal queries about as fast, a fuzzy query whose
-# pigeonhole piece is common reads many candidates. Every text field must be
-# stored; excludes derived_in_ram. Fixed at creation.
-index = lucivy.Index.create("/tmp/compact", fields=[...], positions=False)
+# Half the size, with nothing rebuilt at open (4.1): positions=False keeps
+# each token's documents and frequencies, not its positions, and writes no
+# position sidecar — the whole kernel 5 289 → 2 598 MB. Every match is then
+# verified on the stored text: same documents, spans and scores; literal
+# queries pay a re-read of the documents found (11-19 → 27-56 ms on the
+# kernel), a regex gets faster (237 → 22 ms). Every text field must be
+# stored (the default); excludes derived_in_ram. Fixed at creation.
+index = lucivy.Index.create("/tmp/half", fields=[...], positions=False)
 ```
 
 Node: `Index.create(path, fields, shards, true, true)` for `derived_in_ram`,
-`Index.create(path, fields, shards, true, false, true, false)` for
+`Index.create(path, fields, { positions: false })` for
 `positions: false`; browser and C++: `shared_dictionary`, `derived_in_ram`,
 `positions` in the config object.
 

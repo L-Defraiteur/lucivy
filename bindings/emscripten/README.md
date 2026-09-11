@@ -4,6 +4,10 @@
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — it clones lucivy's own source from GitHub and indexes it in your browser.
 
+### What's new in 4.1
+
+- **`positions: false` in `IndexConfig` — about 40 % less OPFS** (typed in `lucivy.d.ts`). The postings keep each token's documents and frequencies instead of its positions, and no position sidecar is written; every match is verified on the stored text — same documents, spans and scores. Measured in Chrome on Linux kernel files: 2 000 files 268 → 174 MB, **10 000 files 1 052 → 638 MB**, indexed in 37 s instead of 43, the tab's memory peak unchanged (1.5 GB); the playground's 21-query parity panel returns the same counts, top 10, scores and spans on both indexes (the differences: equal scores ordered otherwise, and spans the default index returned twice). Natively the whole kernel goes 5 289 → 2 598 MB. Every text field must be stored (the default); excludes `derived_in_ram`; fixed at creation. The playground builds its index this way with `?nopos`.
+
 ### What's new in 4.0.0
 
 - **The index is 3.7× smaller**, and a tab holds a whole repository: the playground's prompt indexes MDN Web Docs (14 611 pages, 14 s), the **entire Linux 2.6.0 kernel** (14 032 files, 28 s, 1.1 GB held in memory), Go, Godot, **TypeScript (39 044 files, 33 s)**, PostgreSQL, CPython, Redis, Git, curl, SQLite, nginx — `index <name>`, kept in OPFS, reopened in seconds. The ceiling of a tab is about 200 MB of text. Browser against native on the 2.6.0 kernel: same counts and spans, 41 s to index against 23, substrings 10-18 ms against 2 ([README](https://github.com/L-Defraiteur/lucivy/blob/main/README.md#browser-against-native)).
@@ -126,6 +130,10 @@ const index = await lucivy.create('/my-index', {
     // derived_in_ram: true — the three derived sidecars of each segment
     // (about a third of the index) are rebuilt in memory when the index
     // opens instead of written to OPFS. Same answers. Off by default.
+    // positions: false (4.1) — documents and frequencies instead of
+    // positions, no position sidecar: about 40 % less OPFS; every match is
+    // verified on the stored text, same answers. Text fields must be stored
+    // (the default); excludes derived_in_ram. On by default.
 });
 
 // Open an existing index from OPFS

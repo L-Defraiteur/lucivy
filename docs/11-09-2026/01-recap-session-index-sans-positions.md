@@ -81,6 +81,21 @@ fois » ; l'option reste optionnelle, le défaut ne change pas.
   répertoire pendant le repli du dictionnaire : tests verts, non vérifié si
   4.0.2 les affiche aussi.
 
+## 3 bis. Soirée du 11 : l'option utilisable, testée dans le navigateur
+
+- **Validation corrigée** : `positions: false` refusait un champ texte sans `"stored": true` explicite,
+  alors que le handle stocke par défaut (`stored.unwrap_or(true)`) — seul `"stored": false` est refusé.
+- **Node** : `Index.create(path, fields, { positions: false, shards, … })` (`IndexOptions`, typé ; le
+  mélange objet + arguments est refusé). README des quatre bindings (« What's new in 4.1 »), README
+  principal et `lucivy_core/README.md`, docstrings (les littérales paient la relecture), CHANGELOG.
+- **Playground `?nopos`** et WASM rebâti. Chrome, 2 000 fichiers du noyau : 268 → 174 Mo (−35 %), 7 s ;
+  **10 000 : 1 052 → 638 Mo (−39 %), 43 → 37 s, pic 1,5 Go les deux, fusions au-delà de 2 000 sans
+  problème** ; panel de parité (21 requêtes) identique entre les deux index sauf ex æquo et doublons.
+- **Défaut du moteur publié trouvé** (4.0.2 comprise) : en relâché, un span en double quand l'aiguille
+  termine un mot découpé en morceaux (`lock` dans `superblock`) — tf et score gonflés ; l'index sans
+  positions est exact. `04-doublons-de-spans-en-relache.md` ; correctif proposé, pas appliqué.
+- Tests : `test_positions_off` 4/4, Node `positions.mjs` et `v3_api.mjs`, Python 113, C++ 19.
+
 ## 4. La suite (objectifs)
 
 1. **Rendre l'option facile à utiliser, documentée, interfacée** : README

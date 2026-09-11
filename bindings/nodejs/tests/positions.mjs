@@ -3,7 +3,8 @@
 // on the stored text — answers exactly like the default index: same
 // documents, same scores, same highlights, over several commits on two
 // shards, and after a close / open; no `.posmap` / `.word_pos_map` /
-// `.sibling_v3` is on disk; and the options it cannot live with are refused.
+// `.sibling_v3` is on disk; the options object (`{ shards, positions }`)
+// builds the same index; and the options it cannot live with are refused.
 //
 // Build and run:
 //     cd bindings/nodejs && npm run build
@@ -77,13 +78,36 @@ for (const q of queries) {
   check(answer(reopened, q) === answer(plain, q), `same answer after reopen for ${q.value}`);
 }
 
-// Refused: with derivedInRam (nothing to rebuild), and on an unstored text field.
+// The options as one object: the same index as the positional arguments.
+const objPath = join(dir, 'object');
+const viaObject = Index.create(objPath, fields, { shards: 2, positions: false });
+let oid = 1;
+for (let round = 0; round < 4; round++) {
+  for (const w of words) {
+    viaObject.add(oid, { body: `round ${round} calls ${w} and returns ${w.length}; déjà ${w.toUpperCase()}` });
+    oid++;
+  }
+  viaObject.commit();
+}
+check(!walk(objPath).some(n => /\.(posmap|word_pos_map|sibling_v3)$/.test(n)), 'options object: no position sidecar on disk');
+for (const q of queries) {
+  check(answer(viaObject, q) === answer(plain, q), `options object: same answer for ${q.value}`);
+}
+// `stored` left out means stored: accepted.
+const implicit = Index.create(join(dir, 'implicit'), [{ name: 'body', type: 'text' }], { positions: false });
+check(implicit.numDocs === 0, 'a text field without `stored` is stored: accepted');
+
+// Refused: with derivedInRam (nothing to rebuild), on a text field marked
+// `stored: false`, and options given both as an object and as arguments.
 let refused = '';
 try { Index.create(join(dir, 'both'), fields, 1, true, true, true, false); } catch (e) { refused = String(e); }
 check(refused.includes('derived_in_ram'), `refused with derivedInRam: ${refused}`);
 refused = '';
-try { Index.create(join(dir, 'unstored'), [{ name: 'body', type: 'text' }], 1, true, false, true, false); } catch (e) { refused = String(e); }
+try { Index.create(join(dir, 'unstored'), [{ name: 'body', type: 'text', stored: false }], { positions: false }); } catch (e) { refused = String(e); }
 check(refused.includes('must be stored'), `refused on an unstored field: ${refused}`);
+refused = '';
+try { Index.create(join(dir, 'mixed'), fields, { positions: false }, true); } catch (e) { refused = String(e); }
+check(refused.includes('not both'), `refused: object and arguments together: ${refused}`);
 
 console.log('FAILS', fails);
 process.exit(fails ? 1 : 0);

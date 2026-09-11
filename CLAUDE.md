@@ -325,7 +325,7 @@ cargo test -p luciole --lib
 bash bindings/emscripten/build.sh
 
 # Playground (port 9877 ; dictionnaire partagé par défaut depuis le 6 septembre, `?nodict` = une FST par
-# segment, `?dict` accepté sans effet ; `?ram` = derived_in_ram, `?commit=N` fichiers,
+# segment, `?dict` accepté sans effet ; `?ram` = derived_in_ram, `?nopos` = positions: false, `?commit=N` fichiers,
 # `?commitmb=M` Mo de texte (8 par défaut : le pic mémoire suit la taille des segments, Godot 3,3 → 1,8 Go),
 # `?merges=N`, `?verbose` (traces `[merge]`, `[preload]` dans diag.log),
 # `?corpus=corpus-kernel-16k.tar.gz` ; un seul onglet qui indexe à la fois,
@@ -346,7 +346,7 @@ cd playground && node serve.mjs
 
 ## Docs
 
-**Pour repartir : `docs/11-09-2026/01-recap-session-index-sans-positions.md` puis `02-knowledge-dump.md` et `03-architecture.md`.** **Chantier en cours (branche `v4.1`, depuis le 8 septembre)** : `docs/08-09-2026/01-chantier-positions-optionnelles.md`
+**Pour repartir : `docs/11-09-2026/01-recap-session-index-sans-positions.md` puis `02-knowledge-dump.md` et `03-architecture.md`.** **Défaut du moteur publié trouvé le 11 au soir** (4.0.2 comprise) : `04-doublons-de-spans-en-relache.md` — en relâché, un span en double quand l'aiguille termine un mot découpé en morceaux (`lock` dans `superblock`), tf et score gonflés ; la vérité terrain compare les spans en ensemble et ne le voit pas ; correctif proposé, pas appliqué. **Chantier en cours (branche `v4.1`, depuis le 8 septembre)** : `docs/08-09-2026/01-chantier-positions-optionnelles.md`
 — l'index sans positions (`positions: false` : postings `SFP6`/`WSP6` documents + fréquences, ni
 `.posmap` ni `.word_pos_map` ni `.sibling_v3` ; candidats par la FST et les listes de documents, chaque
 match vérifié sur le texte stocké avec les prédicats mêmes de la vérité terrain — `briques::stored`).

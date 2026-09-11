@@ -4,8 +4,7 @@ Unreleased — branch `v4.1`
 - **`positions: false`: an index without positions, half the size.** An
   option of creation, in every binding — Python `Index.create(...,
   positions=False)` and `create_with_blob_store`, Node `Index.create(path,
-  fields, shards, sharedDictionary, derivedInRam, dictionaryWait, positions)`
-  and the `BlobIndex` option `positions`, C++ and the browser in the schema
+  fields, { positions: false })` and the `BlobIndex` option `positions`, C++ and the browser in the schema
   object. The postings keep each token's documents and term frequencies
   (`SFP6`, `WSP6`) instead of its positions, and `.posmap`, `.word_pos_map`
   and `.sibling_v3` are not written. The whole Linux kernel (Linux 7.2,
@@ -20,8 +19,20 @@ Unreleased — branch `v4.1`
   positions: ×2-3 on the kernel, 27-56 ms — and so does a fuzzy query whose
   pigeonhole piece is common (×4); a regex (×0.09), a fuzzy query at two edits
   (×0.45) and the two-character `de` (100 166 documents, 7.9 M spans, ×0.5)
-  are faster. Every text field must be stored; excludes `derived_in_ram`.
+  are faster. Every text field must be stored (the default); excludes `derived_in_ram`.
   Fixed at creation; an index created with it does not open in 4.0.x.
+- **Node: `Index.create(path, fields, { positions: false, shards: 4, … })`** — the
+  options as one object (`IndexOptions`, typed) in place of the positional
+  arguments after `fields`; giving both is refused. The positional form stays.
+- **`stored` left out means stored** for `positions: false`: the check refused a
+  text field without an explicit `"stored": true`, while the index stores such a
+  field by default; only `"stored": false` is refused now.
+- **Playground `?nopos`**: the page's index built without positions. Checked in
+  Chrome with the WASM build: 2 000 kernel files 268 → 174 MB, 10 000 files
+  1 052 → 638 MB (indexed in 37 s instead of 43, memory peak unchanged, the
+  merges past 2 000 documents fine); the 21-query parity panel returns the same
+  counts, top 10, scores and spans on both indexes, except equal scores ordered
+  otherwise and spans the default index returned twice.
 - **`fuzzy_spans_long`**, the bit-parallel last row (Myers) and a windowed
   Jaro-Winkler: the same occurrences as the full matrix, in memory linear in
   the text — a stored value can be megabytes long.

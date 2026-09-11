@@ -93,3 +93,22 @@ anticipée), `stored::windowed_jaro…`, `stored::the_predicate_is_the_ground_tr
 - Deux builds du noyau jamais en parallèle ; `free -g` avant.
 - Ne jamais rendre les sous-chaînes d'un seul jeton sans relecture ni filtrer
   les pièces par jeton sans preuve et accord de Lucie (exactitude d'abord).
+
+## Tester dans le navigateur (ajouté le 11 au soir)
+
+- Build : `bash bindings/emscripten/build.sh` (source `~/emsdk`, nightly ; ~1 min en incrémental), copie
+  dans `playground/pkg/`. Serveur : `cd playground && node serve.mjs` (port 9877).
+- Un corpus bâti par `?corpus=corpus-kernel-2k.tar.gz` (ou `-10k`, `-16k`) → `/user_index`, recréé à
+  chaque chargement (`lucivy_create` efface le répertoire) ; `&nopos` = sans positions (la console dit
+  `[playground] positions: false`, puis `indexed N files in Xs; wasm memory high-water mark …, index … MB`).
+- Panel de parité : dans la page, `eval(await (await fetch('parity_run.js')).text())`, puis
+  `window._parityResult` (21 requêtes, `parity_panel.json`). Le récupérer **avant** de recharger :
+  `curl -s localhost:9877/eval/main -d '{"js":"window._parityResult"}' > rapport.json`. Comparer deux
+  rapports : `python3 playground/parity_diff.py a.json b.json` (comptes, top-10, scores à 1e-4, nombre de
+  spans ; « TIE » = ex æquo ordonnés autrement).
+- Vérité relâchée d'un document en JS : `window._playground.userFile(docId).content`, garder
+  `[0-9A-Za-z]` en minuscules avec l'offset source de chaque caractère, occurrences chevauchantes.
+- Reproduire en natif sans Rust : le binding Node construit (`bindings/nodejs/index.js`), un script
+  `.mjs` hors dépôt (`~/lucivy_bench/scratch-positions/`) ; `V3_DIAG_LITERAL=<aiguille>` imprime chaque
+  match de la phase littérale (position, octets, entrée mot ou morceau). Le paquet publié se teste de même
+  (`npm install lucivy@4.0.2` dans un dossier jetable).

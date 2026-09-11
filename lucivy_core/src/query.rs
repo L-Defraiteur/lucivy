@@ -152,7 +152,7 @@ impl SchemaConfig {
             if self.effective_sfx_version() < 3 {
                 return Err("positions: false needs sfx_version 3 or 4".into());
             }
-            if let Some(f) = self.fields.iter().find(|f| f.field_type == "text" && f.stored != Some(true)) {
+            if let Some(f) = self.fields.iter().find(|f| f.field_type == "text" && f.stored == Some(false)) {
                 return Err(format!(
                     "positions: false verifies every match on the stored text: text field {:?} must be stored",
                     f.name));

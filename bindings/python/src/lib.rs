@@ -364,8 +364,9 @@ impl Index {
     ///         (``.posmap``, ``.word_pos_map``, ``.sibling_v3``): 37 % smaller
     ///         on 10 000 kernel files. Every match is then verified on the
     ///         stored text — same documents, spans and scores; literal
-    ///         queries cost about the same, some fuzzy ones read many
-    ///         candidates. Every text field must be stored; excludes
+    ///         queries pay a re-read of the documents found (tens of
+    ///         milliseconds on the whole kernel), regexes get faster. Every
+    ///         text field must be stored (the default); excludes
     ///         ``derived_in_ram``. On by default; fixed at creation.
     ///
     /// Field types: ``"text"`` (full-text, tokenized), ``"u64"``, ``"i64"``, ``"f64"``, ``"bool"``, ``"date"``.

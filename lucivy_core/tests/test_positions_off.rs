@@ -8,8 +8,8 @@
 //! - the merges: they carry the frequencies — the total number of token
 //!   occurrences, which no segmentation changes, is the same as in an
 //!   index built with positions from the same documents;
-//! - the configuration: refused with `derived_in_ram`, with an unstored
-//!   text field, with the v2 engine;
+//! - the configuration: refused with `derived_in_ram`, with a text field
+//!   marked `stored: false`, with the v2 engine; `stored` left out is stored;
 //! - the answers: the same documents and the same byte spans as the index
 //!   with positions, query kind by query kind as the regimes land.
 
@@ -192,11 +192,11 @@ fn positions_off_is_refused_where_it_cannot_answer() {
         "positions": false
     })).unwrap_err();
     assert!(err.contains("must be stored"), "{err}");
-    let err = create(serde_json::json!({
+    // `stored` left out means stored (the handle's default): accepted.
+    create(serde_json::json!({
         "fields": [{"name": "content", "type": "text"}],
         "positions": false
-    })).unwrap_err();
-    assert!(err.contains("must be stored"), "unset means not stored: {err}");
+    })).expect("an unset stored flag means stored");
     let err = create(serde_json::json!({
         "fields": [{"name": "content", "type": "text", "stored": true}],
         "positions": false, "sfx_version": 2

@@ -119,6 +119,8 @@ impl Index {
     /// @param fields - Field definitions: `[{name: "body", type: "text", stored: true}]`.
     ///   Types: `"text"` (full-text), `"u64"`, `"i64"`, `"f64"`, `"bool"`, `"date"`.
     /// @param shards - Number of shards (default 1). More shards = faster search on large datasets.
+    ///   Or an options object in place of this argument and all that follow:
+    ///   `Index.create(path, fields, { shards: 4, positions: false })`.
     /// @param sharedDictionary - Store each distinct token text once per shard
     ///   instead of once per segment: the index is about 20 % smaller on disk
     ///   and in RAM, queries are slightly slower at cold cache (roughly x1.2
@@ -141,12 +143,23 @@ impl Index {
     ///   instead of its positions, and writes no position sidecar (`.posmap`,
     ///   `.word_pos_map`, `.sibling_v3`): 37 % smaller on 10 000 kernel files.
     ///   Every match is then verified on the stored text — same documents,
-    ///   spans and scores; literal queries cost about the same, some fuzzy
-    ///   ones read many candidates. Every text field must be stored; excludes
+    ///   spans and scores; literal queries pay a re-read of the documents
+    ///   found (tens of milliseconds on the whole kernel), regexes get
+    ///   faster. Every text field must be stored (the default); excludes
     ///   `derivedInRam`. On by default; fixed at creation.
     #[napi(factory)]
-    pub fn create(path: String, fields: Vec<FieldDef>, shards: Option<u32>, shared_dictionary: Option<bool>, derived_in_ram: Option<bool>, dictionary_wait: Option<bool>, positions: Option<bool>) -> Result<Self> {
-        let config = schema_config(&fields, shards, shared_dictionary, derived_in_ram, dictionary_wait, positions);
+    pub fn create(path: String, fields: Vec<FieldDef>, shards: Option<Either<u32, IndexOptions>>, shared_dictionary: Option<bool>, derived_in_ram: Option<bool>, dictionary_wait: Option<bool>, positions: Option<bool>) -> Result<Self> {
+        let config = match shards {
+            Some(Either::B(o)) => {
+                if shared_dictionary.is_some() || derived_in_ram.is_some() || dictionary_wait.is_some() || positions.is_some() {
+                    return Err(Error::from_reason(
+                        "Index.create: give the options as one object or as arguments, not both"));
+                }
+                schema_config(&fields, o.shards, o.shared_dictionary, o.derived_in_ram, o.dictionary_wait, o.positions)
+            }
+            Some(Either::A(n)) => schema_config(&fields, Some(n), shared_dictionary, derived_in_ram, dictionary_wait, positions),
+            None => schema_config(&fields, None, shared_dictionary, derived_in_ram, dictionary_wait, positions),
+        };
 
         let handle = ShardedHandle::create(&path, &config)
             .map_err(|e| Error::from_reason(e))?;
@@ -792,6 +805,24 @@ fn build_contains_split_multi_field(value: &str, text_fields: &[String], distanc
             ..Default::default()
         }
     }
+}
+
+/// The options of `Index.create()` as one object, in place of its arguments
+/// after `fields`: `Index.create(path, fields, { positions: false })`.
+#[napi(object)]
+pub struct IndexOptions {
+    /// Number of shards (default 1).
+    pub shards: Option<u32>,
+    /// One dictionary per shard instead of one per segment (default `true`).
+    pub shared_dictionary: Option<bool>,
+    /// The derived sidecars rebuilt in RAM at open instead of written.
+    pub derived_in_ram: Option<bool>,
+    /// Shared dictionary: a search waits for the background merge of the
+    /// last commit's texts (default `true`).
+    pub dictionary_wait: Option<bool>,
+    /// `false`: documents and frequencies instead of positions, about half
+    /// the index; every match verified on the stored text.
+    pub positions: Option<bool>,
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────

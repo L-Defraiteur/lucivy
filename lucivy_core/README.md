@@ -48,7 +48,11 @@ let config: SchemaConfig = serde_json::from_value(serde_json::json!({
     // The three derived sidecars of each segment rebuilt in RAM when the
     // index opens instead of written: about a third less on disk, opening
     // pays the rebuild (never a query). Off by default; fixed at creation.
-    "derived_in_ram": false
+    "derived_in_ram": false,
+    // false (4.1): documents and frequencies instead of positions, about
+    // half the index; every match verified on the stored text, same
+    // answers. On by default; fixed at creation.
+    "positions": true
 }))?;
 
 let index = ShardedHandle::create("/tmp/my_index", &config)?;
@@ -152,6 +156,25 @@ texts. **The default since 4.0.0**: `"shared_dictionary": false` keeps a
 suffix FST per segment (indexing ×1.5 faster, an index 23 % bigger — and the
 layout a lazy blob-store open stays fully lazy on: a dictionary index reads
 its `dict-*` files whole at open).
+
+## Half the size: `"positions": false` (4.1)
+
+`"positions": false` at creation keeps each token's documents and term
+frequencies instead of its positions (postings `SFP6`, `WSP6`) and writes
+neither `.posmap`, `.word_pos_map` nor `.sibling_v3` — nothing positional is
+computed at indexing or in merges either. The Linux kernel (Linux 7.2,
+101 141 files, 941 MB of text): 5 289 → 2 598 MB, ×5.6 → ×2.8 the text;
+10 000 files −37 %, 30 000 −41 %; indexing 109 → 101 s. A query takes its
+candidate documents from the index — the FST phase reads no position — and
+verifies each one on the stored text with the ground truth's own
+definitions (`suffix_fst::briques::stored`): same documents, same spans,
+same scores (`tests/test_positions_off.rs`; the ground-truth panel 10/10 on
+10 000 files, 30 000 and the kernel). Some queries pay for the re-read
+(whole kernel, file cache warm: literal substrings 11-19 → 27-56 ms, a
+one-edit fuzzy 50 → 200 ms), others get faster (a regex 237 → 22 ms, a
+two-character needle 630-700 → 330 ms). Every text field must be stored
+(the default); refused with `derived_in_ram` and with `sfx_version` 2;
+fixed at creation; an index created with it does not open in 4.0.x.
 
 ## Sharding and distribution
 

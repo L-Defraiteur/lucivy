@@ -4,6 +4,10 @@
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
 
+### What's new in 4.1
+
+- **`Index.create(..., positions=False)` — an index half the size.** The postings keep each token's documents and frequencies instead of its positions, and no position sidecar is written: the whole Linux kernel (101 141 files, 941 MB of text) 5 289 → 2 598 MB, ×2.8 its text instead of ×5.6; 10 000 files −37 %. Nothing is rebuilt when the index opens, and indexing is a little faster (109 → 101 s). Every match is found as candidate documents and verified on the stored text with the ground truth's own definitions: same documents, same spans, same scores, the ground-truth panel 10/10. Some queries pay for it (whole kernel, file cache warm): literal substrings 11-19 → 27-56 ms (the documents found are re-read), a one-edit fuzzy 50 → 200 ms; others get faster — a regex 237 → 22 ms, a two-character needle 630-700 → 330 ms. Every text field must be stored (the default); excludes `derived_in_ram`; fixed at creation, also on `create_with_blob_store`. An index created this way does not open in 4.0.x
+
 ### What's new in 4.0.0
 
 - **The index is 3.7× smaller** — the whole Linux kernel: 18 057 MB in 3.0.8, 4 938 MB in 4.0, 3 344 MB with `derived_in_ram=True`; same answers, same spans, checked against the files ([the comparison with Elasticsearch and tantivy](https://github.com/L-Defraiteur/lucivy/blob/main/docs/compare-engines-2026-09-05.md))
@@ -97,6 +101,14 @@ index = lucivy.Index.create("/tmp/compact", fields=[...], shared_dictionary=True
 # is opened, instead of being written. Same answers; opening pays the
 # rebuild (never a query), the rebuilt structures stay resident.
 index = lucivy.Index.create("/tmp/compact", fields=[...], shared_dictionary=True, derived_in_ram=True)
+
+# Half the size (4.1): the postings keep documents and frequencies, not
+# positions, and no position sidecar is written. Every match is verified on
+# the stored text: same documents, spans and scores; literal queries pay a
+# re-read of the documents found (tens of milliseconds on the whole
+# kernel), regexes get faster. Text fields must be stored (the default);
+# excludes derived_in_ram. Fixed at creation.
+index = lucivy.Index.create("/tmp/half", fields=[...], positions=False)
 
 # Open an existing index
 index = lucivy.Index.open("/tmp/my_index")
