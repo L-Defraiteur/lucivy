@@ -1,3 +1,33 @@
+Unreleased — branch `v4.1`
+==========================
+
+- **`positions: false`: an index without positions, half the size.** An
+  option of creation, in every binding — Python `Index.create(...,
+  positions=False)` and `create_with_blob_store`, Node `Index.create(path,
+  fields, shards, sharedDictionary, derivedInRam, dictionaryWait, positions)`
+  and the `BlobIndex` option `positions`, C++ and the browser in the schema
+  object. The postings keep each token's documents and term frequencies
+  (`SFP6`, `WSP6`) instead of its positions, and `.posmap`, `.word_pos_map`
+  and `.sibling_v3` are not written. The whole Linux kernel (Linux 7.2,
+  101 141 files, 941 MB of text): **5 289 MB → 2 603 MB, ×2.77 the text**
+  (−37 % on 10 000 files, −41 % on 30 000: the gain grows with the corpus).
+  A query takes its candidate documents from the index — the FST phase reads
+  no position — and verifies every one on the stored text with the ground
+  truth's own definitions: same documents, same spans, same scores (the
+  ground-truth panel 10/10 on 10 000 files, 30 000 and the kernel;
+  `test_positions_off`; the Python, Node and C++ binding tests). Literal
+  queries cost more as they find more documents — each is read again for its
+  positions: ×2-3 on the kernel, 27-56 ms — and so does a fuzzy query whose
+  pigeonhole piece is common (×4); a regex (×0.09), a fuzzy query at two edits
+  (×0.45) and the two-character `de` (100 166 documents, 7.9 M spans, ×0.5)
+  are faster. Every text field must be stored; excludes `derived_in_ram`.
+  Fixed at creation; an index created with it does not open in 4.0.x.
+- **`fuzzy_spans_long`**, the bit-parallel last row (Myers) and a windowed
+  Jaro-Winkler: the same occurrences as the full matrix, in memory linear in
+  the text — a stored value can be megabytes long.
+- The ground-truth harness: `V3_POSITIONS=0`; `V3_DIAG_STORED=1` traces, per
+  segment, the candidates and the stored text read.
+
 Lucivy 4.0.2 — 6 September 2026
 ================================
 
