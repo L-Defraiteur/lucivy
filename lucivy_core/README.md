@@ -174,7 +174,7 @@ same scores (`tests/test_positions_off.rs`; the ground-truth panel 10/10 on
 one-edit fuzzy 50 → 200 ms), others get faster (a regex 237 → 22 ms, a
 two-character needle 630-700 → 330 ms). Every text field must be stored
 (the default); refused with `derived_in_ram` and with `sfx_version` 2;
-fixed at creation; an index created with it does not open in 4.0.x.
+fixed at creation; an index created with it cannot be searched by 4.0.x (it opens, and every search fails: `sfxpost: invalid V2 format`).
 
 ## Sharding and distribution
 

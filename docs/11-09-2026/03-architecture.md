@@ -84,6 +84,6 @@ SharedArrayBuffer, OPFS, un seul index en mémoire dans la page.
 
 Vérité terrain : panel comparé à un balayage des fichiers (comptes et spans),
 10/10 sur le noyau dans les deux layouts. Contrat de format : 4.0 ouvre 3.0.x
-(`test_compat_308`), un index `positions: false` ne s'ouvre pas en 4.0.x.
+(`test_compat_308`), un index `positions: false` n'est pas cherchable en 4.0.x (il s'ouvre, puis chaque recherche échoue : `sfxpost: invalid V2 format`).
 Banc comparatif rejouable : `benches/compare_engines.sh`. Publication par tag
 `v*` sur CI verte uniquement (job `checks` bloquant).

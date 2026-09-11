@@ -191,7 +191,7 @@ indexing 109 → 101 s; queries, file cache warm: literal substrings 11-19 →
 regex 237 → 22 ms, the two-character `de` 630-700 → 330 ms. In the browser,
 10 000 kernel files take 637 MB of OPFS instead of 1 051. Every text field must
 be stored (the default); refused with `derived_in_ram` and with `sfx_version`
-2; an index created with it does not open in 4.0.x.
+2; an index created with it cannot be searched by 4.0.x (it opens, and every search fails: `sfxpost: invalid V2 format`).
 
 ### Indexing: bounded by construction
 

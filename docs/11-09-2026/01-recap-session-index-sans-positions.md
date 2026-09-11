@@ -35,7 +35,7 @@ dans l'index (la phase FST ne lit aucune position ; chaînes bâties depuis
 toutes les têtes, sans table des voisins) et vérifie chaque candidat sur le
 texte stocké avec les définitions mêmes de la vérité terrain
 (`src/suffix_fst/briques/stored.rs`). Champs texte stockés obligatoires ;
-refusé avec `derived_in_ram` ; un index créé ainsi ne s'ouvre pas en 4.0.x.
+refusé avec `derived_in_ram` ; un index créé ainsi n'est pas cherchable en 4.0.x (il s'ouvre, puis chaque recherche échoue : `sfxpost: invalid V2 format`).
 
 **Résultats (noyau Linux 7.2 recloné : 101 141 fichiers, 941 Mo — le harnais
 suit 12 liens symboliques de répertoires ; pas comparable chiffre pour chiffre

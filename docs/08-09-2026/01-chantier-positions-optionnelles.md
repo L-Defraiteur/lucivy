@@ -2,7 +2,7 @@
 
 Branche `v4.1` depuis `main` (8 septembre 2026). Une option de création, jamais
 le défaut ; le format reste 4.x (un index existant s'ouvre tel quel, un index
-bâti avec l'option ne s'ouvre pas en 4.0.x — le contrat de `derived_in_ram`).
+bâti avec l'option n'est pas cherchable en 4.0.x (il s'ouvre, puis chaque recherche échoue : `sfxpost: invalid V2 format`) — le contrat de `derived_in_ram`).
 
 ## 1. Ce qu'on vise, mesuré
 

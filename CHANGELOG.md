@@ -20,7 +20,7 @@ Unreleased — branch `v4.1`
   pigeonhole piece is common (×4); a regex (×0.09), a fuzzy query at two edits
   (×0.45) and the two-character `de` (100 166 documents, 7.9 M spans, ×0.5)
   are faster. Every text field must be stored (the default); excludes `derived_in_ram`.
-  Fixed at creation; an index created with it does not open in 4.0.x.
+  Fixed at creation; an index created with it cannot be searched by 4.0.x (it opens, and every search fails: `sfxpost: invalid V2 format`).
 - **Node: `Index.create(path, fields, { positions: false, shards: 4, … })`** — the
   options as one object (`IndexOptions`, typed) in place of the positional
   arguments after `fields`; giving both is refused. The positional form stays.
