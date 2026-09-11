@@ -212,7 +212,8 @@ impl SegmentWriter {
                 SfxCollectorSlot::V3(collector) => {
                     let t_sfx = std::time::Instant::now();
                     luciole::scheduler::set_task_label(&format!("finalize:sfx_collect f{field_id}"));
-                    let data = collector.into_data();
+                    let mut data = collector.into_data();
+                    data.positions = self.segment_serializer.segment().index().settings().positions;
                     let mut dag = super::sfx_dag_v3::build_initial_sfx_dag_v3(data);
                     luciole::scheduler::set_task_label(&format!("finalize:sfx_dag f{field_id}"));
                     let mut dag_result = luciole::execute_dag(&mut dag, None)
@@ -234,10 +235,11 @@ impl SegmentWriter {
                     }
                     let mut bytes = output.sfx.len() + output.termtexts.len();
                     // `derived_in_ram`: the three derived sidecars are not
-                    // written; the segment reader rebuilds them on demand.
-                    let derived_in_ram = self.segment_serializer.segment().index().settings().derived_in_ram;
+                    // written, the segment reader rebuilds them on demand;
+                    // `positions: false`: they have no use.
+                    let skip_derived = self.segment_serializer.segment().index().settings().skips_derived_files();
                     for (ext, data) in &output.registry_files {
-                        if derived_in_ram && crate::suffix_fst::derived::DERIVED_EXTENSIONS.contains(&ext.as_str()) {
+                        if skip_derived && crate::suffix_fst::derived::DERIVED_EXTENSIONS.contains(&ext.as_str()) {
                             continue;
                         }
                         bytes += data.len();

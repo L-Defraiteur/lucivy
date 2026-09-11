@@ -17,5 +17,6 @@ pub mod fuzzy_spans;
 pub mod jaro_winkler;
 pub mod regex_verified;
 pub mod plan;
+pub mod stored;
 #[cfg(test)]
 mod integration_tests;

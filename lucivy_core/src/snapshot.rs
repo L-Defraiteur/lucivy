@@ -78,7 +78,7 @@ fn read_live_files(
         let meta = shard.index.parse_metas(meta_json)
             .map_err(|e| format!("'{}': {e}", meta_path.display()))?;
         let sfx_version = meta.index_settings.sfx_version;
-        let derived_in_ram = meta.index_settings.derived_in_ram;
+        let skip_derived = meta.index_settings.skips_derived_files();
 
         // .managed.json is the file registry a writable copy of this index
         // will need; meta.json is already in hand.
@@ -86,7 +86,7 @@ fn read_live_files(
         if shard_dir.join(".managed.json").exists() {
             names.push(".managed.json".to_string());
         }
-        for p in meta.segments.iter().flat_map(|m| m.list_files_for(sfx_version, derived_in_ram))
+        for p in meta.segments.iter().flat_map(|m| m.list_files_for(sfx_version, skip_derived))
             .chain(meta.dictionary_files())
         {
             if let Some(name) = p.file_name().and_then(|n| n.to_str()) {

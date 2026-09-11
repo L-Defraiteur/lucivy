@@ -65,6 +65,16 @@ pub struct SchemaConfig {
     /// query touches. Off by default; fixed at creation.
     #[serde(default)]
     pub derived_in_ram: Option<bool>,
+    /// `false`: the postings keep each token's documents and frequencies,
+    /// not its positions, and the position sidecars are not written — the
+    /// kernel index about ×2.6 its text instead of ×6. Every match is then
+    /// found as candidate documents and verified on the stored text, so
+    /// every text field must be stored. Same answers; spans and matches
+    /// across tokens cost a read of the candidates. Default `true`; fixed
+    /// at creation; excludes `derived_in_ram` (4.1).
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub positions: Option<bool>,
     /// Shard dictionary: a search waits for the background fold of the
     /// last commit's texts (default), so that its cost never depends on
     /// when it runs; `false` searches at once over the pending parts.
@@ -135,6 +145,19 @@ impl SchemaConfig {
             }
             _ => {}
         }
+        if self.positions == Some(false) {
+            if self.derived_in_ram == Some(true) {
+                return Err("positions: false leaves nothing for derived_in_ram to rebuild: choose one".into());
+            }
+            if self.effective_sfx_version() < 3 {
+                return Err("positions: false needs sfx_version 3 or 4".into());
+            }
+            if let Some(f) = self.fields.iter().find(|f| f.field_type == "text" && f.stored != Some(true)) {
+                return Err(format!(
+                    "positions: false verifies every match on the stored text: text field {:?} must be stored",
+                    f.name));
+            }
+        }
         Ok(())
     }
 
@@ -166,7 +189,8 @@ impl SchemaConfig {
         let mut v: serde_json::Value = serde_json::from_slice(data)
             .map_err(|e| format!("invalid config JSON: {e}"))?;
         let known = ["fields", "tokenizer", "shards", "df_threshold",
-                     "balance_weight", "sfx", "sfx_version", "shared_dictionary", "derived_in_ram"];
+                     "balance_weight", "sfx", "sfx_version", "shared_dictionary", "derived_in_ram",
+                     "positions"];
         let known_field = ["name", "type", "stored", "indexed", "fast"];
         if let Some(obj) = v.as_object_mut() {
             obj.retain(|k, _| known.contains(&k.as_str()));

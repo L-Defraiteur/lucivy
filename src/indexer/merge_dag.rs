@@ -343,7 +343,7 @@ impl SfxNode {
     ) -> crate::Result<()> {
         use common::TerminatingWrite;
         let field_id = field.field_id();
-        let derived_in_ram = segment.index().settings().derived_in_ram;
+        let skip_derived = segment.index().settings().skips_derived_files();
 
         let mut write_file = |ext: &str, data: &[u8]| -> crate::Result<()> {
             let mut w = segment.open_write_custom(&format!("{field_id}.{ext}"))?;
@@ -360,7 +360,7 @@ impl SfxNode {
             write_file("sfxpost", sfxpost)?;
         }
         for (ext, data) in &output.registry_files {
-            if derived_in_ram && crate::suffix_fst::derived::DERIVED_EXTENSIONS.contains(&ext.as_str()) {
+            if skip_derived && crate::suffix_fst::derived::DERIVED_EXTENSIONS.contains(&ext.as_str()) {
                 continue;
             }
             write_file(ext, data)?;

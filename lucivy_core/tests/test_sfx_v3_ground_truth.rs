@@ -185,6 +185,11 @@ fn merge_round(
 ///
 /// Two runs with the same key build byte-identical indexes, so the second can
 /// open the first instead of rebuilding it.
+/// `V3_POSITIONS=0`: the index is built without positions (`positions: false`).
+fn no_positions() -> bool {
+    std::env::var("V3_POSITIONS").is_ok_and(|v| v == "0")
+}
+
 fn index_shape_key(num_files: usize) -> String {
     let (target, group, progressive) = match merge_params() {
         Some((t, g, p)) => (t as i64, g as i64, p),
@@ -196,7 +201,7 @@ fn index_shape_key(num_files: usize) -> String {
         std::env::var("V3_POLICY").is_ok(),
         std::env::var("V3_SFX_VERSION").unwrap_or_else(|_| "3".into()),
         if std::env::var("V3_DERIVED_IN_RAM").is_ok() { " derived_in_ram" } else { "" },
-    )
+    ) + if no_positions() { " no_positions" } else { "" }
 }
 
 /// Reuse a persisted index when one matching the current knobs is on disk.
@@ -242,7 +247,10 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
         "sfx_version": std::env::var("V3_SFX_VERSION").ok().and_then(|v| v.parse::<u8>().ok()).unwrap_or(3),
         // `V3_DERIVED_IN_RAM=1`: no `.posmap` / `.word_pos_map` / `.sibling_v3` on
         // disk, rebuilt in RAM on first use.
-        "derived_in_ram": std::env::var("V3_DERIVED_IN_RAM").is_ok()
+        "derived_in_ram": std::env::var("V3_DERIVED_IN_RAM").is_ok(),
+        // `V3_POSITIONS=0`: postings without positions, matches verified on
+        // the stored text (4.1).
+        "positions": !no_positions()
     })).unwrap();
 
     if let Some(h) = try_reuse_index(files) {

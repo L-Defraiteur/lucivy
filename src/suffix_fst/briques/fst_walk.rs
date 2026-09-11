@@ -1130,6 +1130,20 @@ pub fn cross_word_chain_v3(
     build_chains_from_splits(reader, &splits, query, falling_walk_words, false, false, prefix_alts)
 }
 
+/// Word chains from caller-chosen head splits (see
+/// `cross_chunk_chain_from_splits`). The index without positions
+/// (`briques::stored`) walks every head it can find — the falling walk's
+/// and the FST candidates' — since it has no sibling table to supplement
+/// them, and verifies what the chains let through on the stored text.
+pub fn cross_word_chain_from_splits(
+    reader: &SfxFileReaderV3,
+    splits: &[SplitCandidateV3],
+    query: &str,
+    prefix_alts: bool,
+) -> Vec<TokenChainV3> {
+    build_chains_from_splits(reader, splits, query, falling_walk_words, false, false, prefix_alts)
+}
+
 /// Legacy combined API — builds chains from both partitions mixed.
 pub fn cross_token_chain_v3(
     reader: &SfxFileReaderV3,

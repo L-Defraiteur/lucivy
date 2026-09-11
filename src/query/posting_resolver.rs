@@ -126,6 +126,26 @@ pub trait PostingResolver: Send + Sync {
         self.resolve_doc_at(ordinal, doc_id, position).is_some()
     }
 
+    /// Whether the postings hold positions. `false` on an index created with
+    /// `positions: false` (`SFP6`): documents and term frequencies only, and
+    /// every match is verified on the stored text.
+    fn has_positions(&self) -> bool { true }
+
+    /// Visit every document of an ordinal as `(doc, term frequency)`.
+    /// Default: from the positions, grouped by document.
+    fn for_each_doc(&self, ordinal: u64, f: &mut dyn FnMut(u32, u32)) {
+        let (mut cur, mut tf) = (None::<u32>, 0u32);
+        for e in self.positions(ordinal) {
+            if cur != Some(e.doc_id) {
+                if let Some(d) = cur { f(d, tf); }
+                cur = Some(e.doc_id);
+                tf = 0;
+            }
+            tf += 1;
+        }
+        if let Some(d) = cur { f(d, tf); }
+    }
+
     /// doc_freq = number of unique docs for this ordinal.
     fn doc_freq(&self, ordinal: u64) -> u32 {
         let entries = self.resolve(ordinal);
@@ -243,6 +263,14 @@ impl PostingResolver for SfxPostResolverV2 {
 
     fn has_byte_spans(&self) -> bool {
         self.reader.has_byte_spans()
+    }
+
+    fn has_positions(&self) -> bool {
+        self.reader.has_positions()
+    }
+
+    fn for_each_doc(&self, ordinal: u64, f: &mut dyn FnMut(u32, u32)) {
+        self.reader.for_each_doc(ordinal as u32, |d, n| f(d, n));
     }
 
     fn positions(&self, ordinal: u64) -> Vec<PositionEntry> {

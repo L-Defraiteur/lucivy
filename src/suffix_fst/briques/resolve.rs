@@ -55,7 +55,7 @@ pub fn take_truncated_here() -> bool {
 }
 
 #[cold]
-fn note_truncated(len: usize) {
+pub(crate) fn note_truncated(len: usize) {
     TRUNCATED_HERE.with(|c| c.set(true));
     TRUNCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if std::env::var("LUCIVY_VERBOSE").is_ok() {

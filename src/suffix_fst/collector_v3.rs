@@ -828,6 +828,7 @@ impl SfxCollectorV3 {
             globals: if dictionary_mode { Some(globals) } else { None },
             newtexts,
             max_word_content_len,
+            positions: true,
         }
     }
 
@@ -922,6 +923,11 @@ pub struct SfxCollectorDataV3 {
     /// Longest word-stripped content of the segment, when known: written
     /// in the `.gmap` of a dictionary segment (`.termtexts` STATS otherwise).
     pub max_word_content_len: Option<u16>,
+    /// Whether the postings are written with their positions (`SFP5`,
+    /// `WSP5`) or as documents and term frequencies (`SFP6`, `WSP6`,
+    /// `IndexSettings::positions`). Set by the segment writer from the
+    /// index settings; a merge keeps its sources' layout.
+    pub positions: bool,
 }
 
 /// Build word-level stripped entries from token data.
