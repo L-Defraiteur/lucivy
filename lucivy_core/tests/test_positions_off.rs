@@ -47,7 +47,11 @@ fn corpus(max: usize) -> Vec<(String, String)> {
     if files.len() < 50 {
         let vocab = ["mutex_lock", "mutex_unlock", "spin_lock_irqsave", "sched_setscheduler", "printk", "schedule",
                      "register_device", "kmalloc(sizeof(*p), GFP_KERNEL)", "return -EINVAL;", "if (!ptr)", "struct file *f",
-                     "可以理可以理可以理解。", "déjà vu"];
+                     "可以理可以理可以理解。", "déjà vu",
+                     // Every query of the panels has to find something here too
+                     // (CI has no kernel checkout): these four are the ones the
+                     // twelve above did not hold.
+                     "return -ENOMEM;", "p = p->next;", "/* free the buffer */", "udelay(1000);"];
         files.clear();
         for i in 0..max {
             let mut t = String::new();
