@@ -316,6 +316,31 @@ que `ShardedHandle` sait déjà faire (relance restreinte au top-k quand les
 spans dépassent `LUCIVY_HIGHLIGHT_SPAN_CAP`). Les littérales d'un seul jeton
 reviendraient au niveau de l'index par défaut à toute échelle.
 
+### Plus rien de positionnel n'est calculé (11 septembre, tard, `39f676b`)
+
+Jusque-là, l'option n'**écrivait** pas `.posmap`, `.word_pos_map` ni
+`.sibling_v3`, mais l'indexation les **calculait** encore, puis les jetait
+(remarque de Lucie : « faudrait que word pos map dans cette option se
+calcule pas, enfin pour toutes tes nuances du même type »). Maintenant :
+
+- le collecteur connaît l'option dès sa création
+  (`SfxCollectorV3::without_positions`, posé par l'écrivain de segment) : il ne
+  collecte plus les paires de voisins, ne bâtit ni `.word_pos_map` ni la table
+  des voisins, et écrit ses postings de mots directement en `WSP6` ;
+- l'assemblage du segment n'appelle plus `build_derived_indexes_v3`, qui ne
+  bâtit que `.posmap` pour v3 ;
+- les deux fusions lisent le format de leurs sources avant de créer leurs
+  écrivains (`sfxpost_v2::is_docs_only`, sur la signature, sans copier le
+  fichier) et sautent `.word_pos_map` et les voisins.
+
+Ce qui reste volontairement : les positions des jetons et des mots sont
+encore collectées pendant l'indexation, parce que les écrivains
+« documents seulement » en tirent la fréquence de chaque document ; et une
+fusion réémet la fréquence d'une source `SFP6` comme autant de positions
+fictives, recomptées à l'écriture. Vérifié : `test_positions_off` (total des
+occurrences à travers les fusions égal à l'index avec positions, réponses
+identiques), les tests du layout par défaut.
+
 ### Piste suivante pour le fuzzy : vérifier la pièce sur son jeton
 
 Ce qui reste cher est le nombre de candidats d'une pièce commune (`ule` :
