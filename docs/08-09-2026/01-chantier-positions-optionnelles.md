@@ -238,6 +238,42 @@ Ce qui reste coûteux est structurel : un fuzzy dont une pièce du pigeonhole
 est commune relit le texte de tous les documents qui la contiennent, là où le
 pipeline à positions ne rebâtit que des fenêtres autour des positions.
 
+**Temps retenus à 10 000 fichiers** (médianes de trois passes alternées,
+panel 10/10 à chaque passe, préfiltre gardé pour le fuzzy seul ; avant le
+passage de `fuzzy_spans_long` à la ligne bit-parallèle pour les aiguilles
+courtes, qui a encore ôté ~10 % au fuzzy sur une passe de trace) :
+
+| requête | avec positions | sans | rapport |
+|---|---|---|---|
+| `mutex_lock` strict / relâché | 3,0 / 2,4 ms | 2,8 / 2,3 | ×0,93 / 0,96 |
+| `spin_lock` strict | 2,4 | 2,5 | ×1,04 |
+| `sched` mot entier / sous-chaîne | 3,6 / 2,7 | 4,6 / 3,3 | ×1,28 / 1,22 |
+| `printk` début de mot | 2,5 | 2,9 | ×1,16 |
+| `schdule` fz1 | 5,6 | 16,7 | ×2,98 |
+| `regsiter` fz2 | 43,2 | 39,3 | ×0,91 |
+| `spin_lock_[a-z]+` | 5,4 | 2,4 | ×0,44 |
+| `schdule` Jaro-Winkler | 6,6 | 12,4 | ×1,88 |
+
+### Piste suivante pour le fuzzy : vérifier la pièce sur son jeton
+
+Ce qui reste cher est le nombre de candidats d'une pièce commune (`ule` :
+3 488 documents pour 230 occurrences). Le pipeline à positions l'évite en ne
+rebâtissant qu'une fenêtre autour de chaque position ; sans positions, on
+peut filtrer **au niveau du jeton**, avant de retenir un document : une
+pièce `p` trouvée dans le jeton `T` à l'offset `sti` ne peut porter une
+occurrence que si le reste de l'aiguille s'aligne autour d'elle en `d`
+éditions. À gauche, avec `L` la partie de l'aiguille avant la pièce, le coût
+minimal est `min( min_a edit(L, T[a..sti]),  min_j edit(L[j..], T[..sti]) )` —
+soit `L` tient entière dans `T`, soit `T[..sti]` en entier s'aligne sur une fin
+de `L` et le début de `L` vient des jetons précédents (inconnus : coût supposé
+nul). Idem à droite ; un jeton dont la somme dépasse `d` ne porte pas
+d'occurrence par cette pièce à cet endroit, et ses documents ne sont pas
+retenus pour elle. `module` porte `ule` à l'offset 3 après `mod`, loin de
+`schd` : exclu. Exact si les coûts sont des minorants — à écrire avec la
+preuve, le repli Unicode des textes de `.termtexts`, les séparateurs du mode
+relâché et les jetons de mots (partition `0x02`) ; les pièces à cheval sur
+des jetons (chaînes) restent retenues telles quelles.
+
 ### Incident
 
 `/tmp` est vidé de ce qui a plus de 10 jours (`/etc/tmpfiles.d/tmp.conf`) :
