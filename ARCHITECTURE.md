@@ -1,7 +1,7 @@
 # lucivy — Architecture
 
-*4.0.2, September 2026 — with 4.1 (branch `v4.1`): the index without positions
-and a span fix, marked (4.1) below. Every number in this document was measured; the
+*4.1.0, September 2026 — what 4.1 added (the index without positions, a span
+fix) is marked (4.1) below. Every number in this document was measured; the
 commands are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md), the engine comparison
 in [docs/compare-engines-2026-09-05.md](docs/compare-engines-2026-09-05.md)
 (`benches/compare_engines.sh` regenerates it), and the working notes in

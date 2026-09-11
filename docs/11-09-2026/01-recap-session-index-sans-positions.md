@@ -113,4 +113,6 @@ fois » ; l'option reste optionnelle, le défaut ne change pas.
    `lucivy-core = "4.0"`, « all 4.0.2 » du README principal, en-tête d'`ARCHITECTURE.md`, `Cargo.toml` /
    `pyproject.toml` / `package.json`. **Le README de PyPI est `bindings/python/README.md`** depuis le 11 au
    soir (`pyproject.toml`) : 4.0.0 à 4.0.2 publiaient `README-pypi.md`, resté à « lucivy v3 », supprimé.
+   **Fait le 11 au soir**, commité après la CI verte de `ebf80c9` (push et PR #16, `ci` et `build`) : manifestes, README, en-têtes,
+   WASM rebâti ; **reste à dater l'en-tête du CHANGELOG** (« Lucivy 4.1.0 — to be dated at the tag ») juste avant le tag.
 4. Plus tard : soumettre l'article à HN ; captures agrégées ; casse.

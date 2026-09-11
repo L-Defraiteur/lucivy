@@ -1,5 +1,5 @@
-Unreleased — branch `v4.1`
-==========================
+Lucivy 4.1.0 — to be dated at the tag
+=====================================
 
 - **`positions: false`: an index without positions, half the size.** An
   option of creation, in every binding — Python `Index.create(...,

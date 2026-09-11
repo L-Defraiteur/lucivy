@@ -23,7 +23,7 @@ schema, and 4.0 opens 3.0.x indexes (the first commit converts them for good).
 
 ```toml
 [dependencies]
-lucivy-core = "4.0"
+lucivy-core = "4.1"
 ```
 
 ## Quick start
