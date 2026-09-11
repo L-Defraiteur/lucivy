@@ -346,7 +346,7 @@ cd playground && node serve.mjs
 
 ## Docs
 
-**Chantier en cours (branche `v4.1`, depuis le 8 septembre)** : `docs/08-09-2026/01-chantier-positions-optionnelles.md`
+**Pour repartir : `docs/11-09-2026/01-recap-session-index-sans-positions.md` puis `02-knowledge-dump.md`.** **Chantier en cours (branche `v4.1`, depuis le 8 septembre)** : `docs/08-09-2026/01-chantier-positions-optionnelles.md`
 — l'index sans positions (`positions: false` : postings `SFP6`/`WSP6` documents + fréquences, ni
 `.posmap` ni `.word_pos_map` ni `.sibling_v3` ; candidats par la FST et les listes de documents, chaque
 match vérifié sur le texte stocké avec les prédicats mêmes de la vérité terrain — `briques::stored`).
