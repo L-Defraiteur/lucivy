@@ -25,7 +25,7 @@ Same 93 983 Linux kernel files, 857 MB of text. Each engine is configured at its
 |---|---|---|---|---|
 | `spin_lock`, separators relaxed (also `spin lock`, `spin-lock`, `spinlock`) | 9 552 | **9 552**, 23 ms | 6 577 — not with this analyzer: its trigrams carry the underscore | 6 601 — relaxed is the only mode it has: the separator never enters its index |
 | `spinlokc`, two edits, across the token boundary | 10 034 | **10 034**, 148 ms | 3 549 — fuzziness compares whole terms | 6 557 — same |
-| `spin_lock_[a-z]+`, a regex | 5 510 | **5 510**, 219 ms | 5 440 (wildcard field, 70 short), 480 ms | 0 — terms are already cut |
+| `spin_lock_[a-z]+`, a regex, case folded | 5 510 | **5 510**, 219 ms | 5 510 on the wildcard field, 1 ms warm — as `[a-zA-Z]+`: Lucene's `case_insensitive` folds a pattern's literals, not its character classes | 0 — terms are already cut |
 | `de`, two characters | 93 009 | **93 009**, 7.7 M spans, 561 ms | 0, silently | 0, silently |
 | `retur -ENOMEM`, a fuzzy phrase | 14 449 | **14 449**, 30 ms | 14 446 (`span_near`), 24 ms — it does this well | — |
 | **where it matched**: `mutex_lock`, 5 145 documents | 20 797 spans | **all 20 797, 15 ms** | `highlight` on the top 200: 179 ms | verifying 5 145 stored texts: 96 ms |

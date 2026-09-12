@@ -156,7 +156,7 @@
 <tr><td><code>spin_lock</code>, separators strict</td><td class="n">6 569</td><td class="n ok">✔ 6 569 <small>12 ms</small></td><td class="n ok">✔ 6 569 <small>10 ms</small></td><td class="n ok">✔ 6 569 <small>116 ms</small></td></tr>
 <tr><td><code>spin_lock</code>, separators relaxed</td><td class="n">9 552</td><td class="n ok">✔ 9 552 <small>23 ms</small></td><td class="n part">▲ 6 577</td><td class="n part">▲ 6 601</td></tr>
 <tr><td><code>spinlokc</code>, two edits, across the boundary</td><td class="n">10 034</td><td class="n ok">✔ 10 034 <small>148 ms</small></td><td class="n part">▲ 3 549</td><td class="n part">▲ 6 557</td></tr>
-<tr><td><code>spin_lock_[a-z]+</code>, a regex</td><td class="n">5 510</td><td class="n ok">✔ 5 510 <small>219 ms</small></td><td class="n part">▲ 5 440 <small>480 ms</small></td><td class="n zero">✘ 0</td></tr>
+<tr><td><code>spin_lock_[a-z]+</code>, a regex, case folded</td><td class="n">5 510</td><td class="n ok">✔ 5 510 <small>219 ms</small></td><td class="n ok">✔ 5 510 <small>1 ms, written <code>[a-zA-Z]+</code></small></td><td class="n zero">✘ 0</td></tr>
 <tr><td><code>"de"</code>, two characters</td><td class="n">93 009</td><td class="n ok">✔ 93 009 <small>561 ms, 7.7 M spans</small></td><td class="n zero">✘ 0</td><td class="n zero">✘ 0</td></tr>
 <tr><td><code>"©"</code>, one character, in 1 878 files</td><td class="n">1 878</td><td class="n ok">✔ 1 878 <small>6 ms</small></td><td class="n zero">✘ 0</td><td class="n zero">✘ 0</td></tr>
 <tr><td><code>retur -ENOMEM</code>, a fuzzy phrase</td><td class="n">14 449</td><td class="n ok">✔ 14 449 <small>30 ms</small></td><td class="n ok">✔ 14 446 <small>24 ms</small></td><td class="n">—</td></tr>
