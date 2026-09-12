@@ -323,6 +323,17 @@ pub struct IndexSettings {
     #[serde(default)]
     #[serde(skip_serializing_if = "is_false")]
     pub derived_in_ram: bool,
+    /// Postings without positions (`positions: false` in the schema config,
+    /// 4.1): `.sfxpost` and `.word_sfxpost` keep each ordinal's documents
+    /// and term frequencies only (`SFP6`, `WSP6`), and `.posmap`,
+    /// `.word_pos_map`, `.sibling_v3` are not written. A query takes its
+    /// candidate documents from the index and verifies them on the stored
+    /// text (`docs/08-09-2026/01-chantier-positions-optionnelles.md`).
+    /// Fixed at creation; excludes `derived_in_ram`, which would have
+    /// nothing to rebuild from.
+    #[serde(default = "return_true")]
+    #[serde(skip_serializing_if = "is_true")]
+    pub positions: bool,
     /// On a shard-dictionary index, a search waits for the background fold
     /// of the last commit's texts before it runs (`Index::wait_dictionary_fold`),
     /// so that it never walks the pending pairs on top of the generations —
@@ -338,6 +349,17 @@ pub struct IndexSettings {
 fn sfx_version_when_absent() -> u8 { 2 }
 
 fn is_false(val: &bool) -> bool { !*val }
+
+impl IndexSettings {
+    /// Whether this index's segments leave out the three derived sidecars
+    /// (`.posmap`, `.word_pos_map`, `.sibling_v3`): rebuilt in RAM at open
+    /// (`derived_in_ram`), or with no use at all (`positions: false`). What
+    /// every file list and every writer asks — a file never written must
+    /// never be named.
+    pub fn skips_derived_files(&self) -> bool {
+        self.derived_in_ram || !self.positions
+    }
+}
 
 /// Must be a function to be compatible with serde defaults
 fn default_docstore_blocksize() -> usize {
@@ -360,6 +382,7 @@ impl Default for IndexSettings {
             sfx_enabled: true,
             sfx_version: 3,
             derived_in_ram: false,
+            positions: true,
             dictionary_wait: true,
         }
     }
@@ -672,6 +695,7 @@ mod tests {
                 sfx_enabled: true,
                 sfx_version: 3,
                 derived_in_ram: false,
+                positions: true,
                 dictionary_wait: true,
             }
         );

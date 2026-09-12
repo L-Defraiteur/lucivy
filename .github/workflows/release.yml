@@ -1,9 +1,10 @@
-# Prebuilt bindings for every platform, on a version tag.
+# Publishing, on a version tag.
 #
-# Builds, on GitHub's own runners: the Python abi3 wheel and the Node.js
-# addon for Linux x86_64 and aarch64 (manylinux_2_28, glibc 2.28), macOS
-# x86_64 and arm64, Windows x86_64 — each one smoke-tested where it was built.
-# Then attaches everything to the GitHub release of the tag.
+# The gate is the everyday CI, called — ci.yml — and the artefacts are those of
+# build.yml, called too: nothing here repeats what they check. Until 4.1 this
+# file carried its own `checks` job, a copy of the CI; 4.0.0 went out on a tag
+# whose CI was red, and a copy is exactly what drifts. The release page and
+# the registries wait for both.
 #
 # Publishing to PyPI and npm is a separate job behind the `release`
 # environment and the repository variable PUBLISH_ENABLED. Note what that
@@ -28,13 +29,6 @@ name: release
 on:
   push:
     tags: ['v*']
-    # A push that touches the bindings builds the matrix too (no publishing
-    # without a tag): the five platforms stay green between releases.
-    branches: [main]
-    paths:
-      - '.github/workflows/release.yml'
-      - 'bindings/nodejs/**'
-      - 'bindings/python/**'
   workflow_dispatch:
     inputs:
       publish:
@@ -54,219 +48,24 @@ env:
   CARGO_NET_RETRY: 5
 
 jobs:
-  # ── The gate: nothing is published unless what CI checks is green ────
-  # Added after 4.0.0 (6 September 2026), whose tag published while the CI
-  # of the same commit was red (a lint, a test compiled without the default
-  # features). The builds below still run in parallel; the publish jobs
-  # wait for this one.
-  checks:
-    name: checks (clippy, lib, minimal, core, cpp)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: checks
-      - name: clippy (deny warnings)
-        run: |
-          cargo clippy --lib -- -D warnings
-          cargo clippy -p lucivy-core -p lucistore -p luciole -p sparse-vector --lib -- -D warnings
-      - name: lib tests, default and minimal features
-        run: |
-          cargo test --lib
-          cargo test --lib --no-default-features
-      - name: lucivy-core and lucivy-cpp
-        run: |
-          cargo test -p lucivy-core --no-fail-fast
-          cargo test -p lucivy-cpp
+  # ── The gate: the CI of every push, not a copy of it ─────────────────
+  ci:
+    name: ci
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
 
-  # ── Python: one abi3 wheel per platform ─────────────────────────────
-  python:
-    name: python ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { name: linux-x86_64,  runner: ubuntu-latest,     target: x86_64,  manylinux: '2_28' }
-          - { name: linux-aarch64, runner: ubuntu-24.04-arm,  target: aarch64, manylinux: '2_28' }
-          # Intel macOS is cross-compiled from the arm64 runner (GitHub no
-          # longer serves macos-13); its wheel is not smoke-tested here.
-          - { name: macos-x86_64,  runner: macos-14,          target: x86_64-apple-darwin, cross: true }
-          - { name: macos-arm64,   runner: macos-14,          target: aarch64-apple-darwin }
-          - { name: windows-x86_64, runner: windows-latest,   target: x64 }
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Build the wheel
-        uses: PyO3/maturin-action@v1
-        with:
-          working-directory: bindings/python
-          target: ${{ matrix.target }}
-          manylinux: ${{ matrix.manylinux || 'auto' }}
-          args: --release --out dist
-      - name: Smoke test the wheel
-        if: '!matrix.cross'
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install --no-index --find-links bindings/python/dist lucivy
-          python - <<'EOF'
-          import lucivy, tempfile, os
-          d = tempfile.mkdtemp()
-          index = lucivy.Index.create(os.path.join(d, "idx"), fields=[{"name": "body", "type": "text", "stored": True}])
-          index.add(1, body="The pthread_mutex_lock function acquires a mutex")
-          index.add(2, body="Use std::lock_guard for RAII mutex management")
-          index.commit()
-          hits = index.search({"type": "contains", "field": "body", "value": "mutex"}, highlights=True)
-          assert len(hits) == 2, hits
-          fuzzy = index.search({"type": "contains", "field": "body", "value": "mutx", "distance": 1})
-          assert len(fuzzy) == 2, fuzzy
-          print("ok:", lucivy.__name__, len(hits), "hits")
-          EOF
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheel-${{ matrix.name }}
-          path: bindings/python/dist/*.whl
-          if-no-files-found: error
-
-  sdist:
-    name: python sdist
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: PyO3/maturin-action@v1
-        with:
-          working-directory: bindings/python
-          command: sdist
-          args: --out dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sdist
-          path: bindings/python/dist/*.tar.gz
-          if-no-files-found: error
-
-  # ── Node.js: one addon per platform package ─────────────────────────
-  node:
-    name: node ${{ matrix.key }}
-    runs-on: ${{ matrix.runner }}
-    # Linux addons are built in the manylinux_2_28 image so they load on any
-    # glibc >= 2.28 (2018), not only on the runner's Ubuntu.
-    container: ${{ matrix.container }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { key: linux-x64-gnu,   runner: ubuntu-latest,    container: 'quay.io/pypa/manylinux_2_28_x86_64',  triple: x86_64-unknown-linux-gnu,  lib: liblucivy_napi.so }
-          - { key: linux-arm64-gnu, runner: ubuntu-24.04-arm, container: 'quay.io/pypa/manylinux_2_28_aarch64', triple: aarch64-unknown-linux-gnu, lib: liblucivy_napi.so }
-          - { key: darwin-x64,      runner: macos-14,         triple: x86_64-apple-darwin,       lib: liblucivy_napi.dylib, cross: true }
-          - { key: darwin-arm64,    runner: macos-14,         triple: aarch64-apple-darwin,      lib: liblucivy_napi.dylib }
-          - { key: win32-x64-msvc,  runner: windows-latest,   triple: x86_64-pc-windows-msvc,    lib: lucivy_napi.dll }
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust (container)
-        if: matrix.container
-        run: |
-          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Install Rust
-        if: '!matrix.container'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.triple }}
-      - uses: actions/setup-node@v4
-        if: '!matrix.container'
-        with:
-          node-version: 22
-      - name: Build the addon
-        run: |
-          cd bindings/nodejs
-          cargo build --release --target ${{ matrix.triple }}
-          # The crate builds in the workspace's target directory (../../target).
-          # (The shell is `-e -o pipefail`: a find on a missing path would
-          # abort the step before the test.)
-          lib=$(find ../../target -path "*/${{ matrix.triple }}/release/${{ matrix.lib }}" 2>/dev/null | head -1 || true)
-          if [ -z "$lib" ]; then echo "addon not found:"; find ../../target -name "*lucivy_napi*" 2>/dev/null || true; exit 1; fi
-          cp "$lib" lucivy.${{ matrix.key }}.node
-          ls -la lucivy.${{ matrix.key }}.node
-      - name: Smoke test the addon
-        # The manylinux image has no Node (the x86_64 loader is exercised by
-        # the publish job on the runner instead); a cross-compiled addon
-        # cannot load on the runner that built it.
-        if: '!matrix.container && !matrix.cross'
-        run: |
-          cd bindings/nodejs
-          node -e "
-            const { Index } = require('./index.js');
-            const fs = require('fs'), os = require('os'), path = require('path');
-            const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lucivy-'));
-            const idx = Index.create(dir, [{ name: 'body', type: 'text', stored: true }]);
-            idx.add(1, { body: 'The pthread_mutex_lock function acquires a mutex' });
-            idx.add(2, { body: 'Use std::lock_guard for RAII mutex management' });
-            idx.commit();
-            const hits = idx.search({ type: 'contains', field: 'body', value: 'mutex' }, { highlights: true });
-            if (hits.length !== 2) throw new Error('expected 2 hits, got ' + JSON.stringify(hits));
-            console.log('ok:', hits.length, 'hits on', process.platform, process.arch);
-          "
-      - uses: actions/upload-artifact@v4
-        with:
-          name: node-${{ matrix.key }}
-          path: bindings/nodejs/lucivy.${{ matrix.key }}.node
-          if-no-files-found: error
-
-  # ── WebAssembly ─────────────────────────────────────────────────────
-  # Built here since 3.0.8. Before that it was the one artefact produced on a
-  # maintainer's machine: not reproducible from a tag, and the only package
-  # still needing a one-time password to publish. It needs more than the other
-  # jobs — emsdk, and a nightly with rust-src for `-Z build-std` — which is why
-  # it was skipped, not because anything prevents it.
-  wasm:
-    name: wasm (emscripten)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      # Pinned: emscripten's output changes between versions, and a release
-      # should not silently switch compiler.
-      - uses: mymindstorm/setup-emsdk@v14
-        with:
-          version: 6.0.8
-          actions-cache-folder: emsdk-cache
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          targets: wasm32-unknown-emscripten
-          components: rust-src
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: wasm
-      # build.sh sources $EMSDK_DIR/emsdk_env.sh when it exists and otherwise
-      # falls through to whatever `emcc` is on PATH — which is what setup-emsdk
-      # provides — so it runs here unmodified.
-      - name: Build the wasm package
-        run: bash bindings/emscripten/build.sh
-      - name: It has to be a wasm module, not an empty file
-        run: |
-          set -euo pipefail
-          ls -la bindings/emscripten/pkg/
-          test -s bindings/emscripten/pkg/lucivy.wasm
-          test -s bindings/emscripten/pkg/lucivy.js
-          # \0asm — the magic number. A truncated or failed link leaves a file
-          # that exists and weighs something, so size alone proves nothing.
-          head -c 4 bindings/emscripten/pkg/lucivy.wasm | od -An -tx1 | grep -q '00 61 73 6d'
-          echo "wasm ok: $(stat -c%s bindings/emscripten/pkg/lucivy.wasm) bytes"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wasm-pkg
-          path: bindings/emscripten/pkg/
-          if-no-files-found: error
+  # ── The artefacts: wheels, sdist, addons, wasm ──────────────────────
+  build:
+    name: build
+    uses: ./.github/workflows/build.yml
+    permissions:
+      contents: read
 
   # ── The release page carries every artefact ─────────────────────────
   release:
     name: attach to the release
-    needs: [python, sdist, node, wasm]
+    needs: [ci, build]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
@@ -289,7 +88,7 @@ jobs:
   # ── Publishing waits for the maintainer's approval ──────────────────
   publish-pypi:
     name: publish to PyPI
-    needs: [checks, python, sdist]
+    needs: [ci, build]
     # Two locks: the `release` environment (manual approval) and the
     # repository variable PUBLISH_ENABLED=true, so a tag pushed before the
     # environment is protected publishes nothing.
@@ -315,7 +114,7 @@ jobs:
 
   publish-npm:
     name: publish to npm
-    needs: [checks, node]
+    needs: [ci, build]
     # Two locks: the `release` environment (manual approval) and the
     # repository variable PUBLISH_ENABLED=true, so a tag pushed before the
     # environment is protected publishes nothing.
@@ -383,7 +182,7 @@ jobs:
   # platform packages that are already built and verified.
   publish-wasm:
     name: publish lucivy-wasm
-    needs: [checks, wasm]
+    needs: [ci, build]
     if: (startsWith(github.ref, 'refs/tags/v') || inputs.publish) && vars.PUBLISH_ENABLED == 'true'
     runs-on: ubuntu-latest
     environment:

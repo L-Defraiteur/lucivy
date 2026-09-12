@@ -157,8 +157,13 @@ impl Node for BuildSfxPostV3Node {
             .ok_or("wrong type")?;
 
         let num_terms = data.num_content_ords;
-        // `SFP5`: positions only, the spans derive from `.posmap`.
-        let mut writer = crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::positions_only(num_terms);
+        // `SFP5`: positions only, the spans derive from `.posmap`. `SFP6`
+        // on an index without positions: documents and term frequencies.
+        let mut writer = if data.positions {
+            crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::positions_only(num_terms)
+        } else {
+            crate::suffix_fst::sfxpost_v2::SfxPostWriterV2::docs_only(num_terms)
+        };
         for (content_ord, postings) in data.content_postings.iter().enumerate() {
             for &(doc_id, ti) in postings {
                 writer.add_position(content_ord as u32, doc_id, ti);
@@ -210,16 +215,34 @@ impl Node for AssembleV3Node {
         let sfx = if dictionary_mode { Vec::new() } else { SfxFileWriterV3::new(fst_data, parent_data).to_bytes() };
 
         // EventDriven registry indexes (posmap; bytemap is v2-only since 4 September 2026)
-        let mut derived = crate::suffix_fst::index_registry::build_derived_indexes_v3(
-            &data.tokens,
-            sfxpost_data.as_deref(),
-            Some(&data.own_lens),
-        );
+        // `.posmap` is the only one for v3; an index without positions has
+        // no use for it, nor for `.word_pos_map` and `.sibling_v3` below.
+        let mut derived = if data.positions {
+            crate::suffix_fst::index_registry::build_derived_indexes_v3(
+                &data.tokens,
+                sfxpost_data.as_deref(),
+                Some(&data.own_lens),
+            )
+        } else {
+            Vec::new()
+        };
 
         // Add word-level indexes to registry files
-        derived.push(("word_pos_map".to_string(), data.word_pos_map.clone()));
-        derived.push(("word_sfxpost".to_string(), data.word_sfxpost.clone()));
-        derived.push(("sibling_v3".to_string(), data.sibling_v3.clone()));
+        if data.positions {
+            derived.push(("word_pos_map".to_string(), data.word_pos_map.clone()));
+        }
+        // The collector and the merges write the positional `WSP5`; an index
+        // without positions keeps its documents and frequencies (`WSP6`).
+        let word_sfxpost = if data.positions {
+            data.word_sfxpost.clone()
+        } else {
+            crate::suffix_fst::word_sfxpost::to_docs_only(&data.word_sfxpost)
+                .unwrap_or_else(|| data.word_sfxpost.clone())
+        };
+        derived.push(("word_sfxpost".to_string(), word_sfxpost));
+        if data.positions {
+            derived.push(("sibling_v3".to_string(), data.sibling_v3.clone()));
+        }
         if let Some(globals) = &data.globals {
             derived.push(("gmap".to_string(), crate::suffix_fst::gmap::encode(globals, data.max_word_content_len)));
             // Only a freshly collected segment minted ids; a merge did not.
@@ -388,6 +411,11 @@ pub fn merge_segments_v3(
     }
 
     let mut chunk_post: Vec<(u32, u32, u32)> = Vec::new();
+    // A merge keeps its sources' layout: positions unless one source is
+    // written without (`SFP6`; an index has one layout, fixed at creation).
+    // Without positions, nothing positional is built: no `.word_pos_map`,
+    // no sibling table, and the word postings go to a `WSP6` writer.
+    let positions = !segments.iter().any(|s| s.sfxpost.is_some_and(crate::suffix_fst::sfxpost_v2::is_docs_only));
     let mut word_post: Vec<(u32, crate::suffix_fst::word_sfxpost::WordPostingEntry)> = Vec::new();
     let mut sibling_pairs: Vec<(u32, u32)> = Vec::new();
     let mut wpm_writer = crate::suffix_fst::word_pos_map::WordPosMapWriter::new();
@@ -477,13 +505,37 @@ pub fn merge_segments_v3(
 
             // Chunk postings (.sfxpost) — positions; no span to carry.
             if let Some(r) = &sfxpost {
-                r.for_each_position(old_ord, |doc_id, ti| {
+                if r.has_positions() {
+                    r.for_each_position(old_ord, |doc_id, ti| {
+                        if let Some(doc) = remap_doc(doc_id) {
+                            chunk_post.push((global_ord, doc, ti));
+                        }
+                    });
+                } else {
+                    // `SFP6`: no position to carry, only how often the
+                    // ordinal occurs in the document. The occurrences go on
+                    // at distinct dummy positions `0..tf`, which the
+                    // documents-only writer counts back into `tf`.
+                    r.for_each_doc(old_ord, |doc_id, tf| {
+                        if let Some(doc) = remap_doc(doc_id) {
+                            for k in 0..tf { chunk_post.push((global_ord, doc, k)); }
+                        }
+                    });
+                }
+            }
+            // Word postings (.word_sfxpost) — word-level coordinates, own file.
+            if let Some(r) = wsp.as_ref().filter(|r| !r.has_positions()) {
+                // `WSP6`: the same dummy positions, counted back by `to_docs_only`.
+                r.for_each_doc(old_ord, |doc_id, tf| {
                     if let Some(doc) = remap_doc(doc_id) {
-                        chunk_post.push((global_ord, doc, ti));
+                        for k in 0..tf {
+                            word_post.push((global_ord, crate::suffix_fst::word_sfxpost::WordPostingEntry {
+                                doc_id: doc, first_position: k, last_position: k, byte_from: 0, byte_to: 0, tail_off: 0,
+                            }));
+                        }
                     }
                 });
             }
-            // Word postings (.word_sfxpost) — word-level coordinates, own file.
             if let Some(r) = &wsp {
                 r.for_each_entry(old_ord, |e| {
                     if let Some(doc) = remap_doc(e.doc_id) {
@@ -609,7 +661,11 @@ pub fn merge_segments_v3(
     let mut tokens: Vec<String> = Vec::with_capacity(num_tokens);
     let mut own_lens: Vec<u16> = Vec::with_capacity(num_tokens);
     let mut content_postings: Vec<Vec<(u32, u32)>> = Vec::with_capacity(num_tokens);
-    let mut wsp_writer = crate::suffix_fst::word_sfxpost::WordSfxPostWriter::new(num_tokens);
+    let mut wsp_writer = if positions {
+        crate::suffix_fst::word_sfxpost::WordSfxPostWriter::new(num_tokens)
+    } else {
+        crate::suffix_fst::word_sfxpost::WordSfxPostWriter::docs_only(num_tokens)
+    };
     let mut word_stripped: Vec<WordStrippedEntry> = Vec::new();
 
     for &io in &sorted_indices {
@@ -628,7 +684,9 @@ pub fn merge_segments_v3(
         for (_, e) in &word_post[ws..we] {
             if prev == Some(e) { continue; }
             prev = Some(e);
-            wpm_writer.add_word(e.doc_id, e.first_position, e.last_position, fo);
+            if positions {
+                wpm_writer.add_word(e.doc_id, e.first_position, e.last_position, fo);
+            }
             wsp_writer.add(fo, e.clone());
         }
 
@@ -687,11 +745,12 @@ pub fn merge_segments_v3(
         min_suffix_len: 1,
         word_stripped,
         word_sfxpost: wsp_writer.finish(),
-        word_pos_map: wpm_writer.serialize(),
-        sibling_v3: sibling_writer.serialize(),
+        word_pos_map: if positions { wpm_writer.serialize() } else { Vec::new() },
+        sibling_v3: if positions { sibling_writer.serialize() } else { Vec::new() },
         globals: None,
         max_word_content_len: None,
         newtexts: Vec::new(),
+        positions,
     })
 }
 
@@ -1023,7 +1082,10 @@ pub fn merge_segments_dict(
     let new_local = |global: u32| -> u32 { union.binary_search(&global).unwrap() as u32 };
 
     let mut content_postings: Vec<Vec<(u32, u32)>> = vec![Vec::new(); num];
-    let mut word_writer = WordSfxPostWriter::new(num);
+    // The sources' layout, as in `merge_segments_v3`; without positions,
+    // no `.word_pos_map` and no sibling table are built.
+    let positions = !segments.iter().any(|s| s.sfxpost.is_some_and(crate::suffix_fst::sfxpost_v2::is_docs_only));
+    let mut word_writer = if positions { WordSfxPostWriter::new(num) } else { WordSfxPostWriter::docs_only(num) };
     let mut wpm_writer = crate::suffix_fst::word_pos_map::WordPosMapWriter::new();
     let mut sibling_writer = crate::suffix_fst::sibling_table::SiblingTableWriter::new(num as u32);
     let mut num_docs = 0u32;
@@ -1035,9 +1097,34 @@ pub fn merge_segments_dict(
         if let Some(r) = &sfxpost {
             for old in 0..r.num_terms().min(remap.len() as u32) {
                 let new = remap[old as usize];
-                r.for_each_position(old, |doc, ti| {
+                if r.has_positions() {
+                    r.for_each_position(old, |doc, ti| {
+                        if let Some(d) = remap_doc(doc) {
+                            content_postings[new as usize].push((d, ti));
+                            num_docs = num_docs.max(d + 1);
+                        }
+                    });
+                } else {
+                    // `SFP6`: dummy positions `0..tf` (see `merge_segments_v3`).
+                    r.for_each_doc(old, |doc, tf| {
+                        if let Some(d) = remap_doc(doc) {
+                            for k in 0..tf { content_postings[new as usize].push((d, k)); }
+                            num_docs = num_docs.max(d + 1);
+                        }
+                    });
+                }
+            }
+        }
+        if let Some(r) = seg.word_sfxpost.and_then(WordSfxPostReader::open).filter(|r| !r.has_positions()) {
+            for old in 0..r.num_ordinals().min(remap.len() as u32) {
+                let new = remap[old as usize];
+                r.for_each_doc(old, |doc, tf| {
                     if let Some(d) = remap_doc(doc) {
-                        content_postings[new as usize].push((d, ti));
+                        for k in 0..tf {
+                            word_writer.add(new, WordPostingEntry {
+                                doc_id: d, first_position: k, last_position: k, byte_from: 0, byte_to: 0, tail_off: 0,
+                            });
+                        }
                         num_docs = num_docs.max(d + 1);
                     }
                 });
@@ -1055,13 +1142,15 @@ pub fn merge_segments_dict(
                             crate::suffix_fst::word_sfxpost::tail_off_from_spans(&e, spanned_posmap.as_ref(), sfxpost.as_ref())
                         } else { e.tail_off };
                         word_writer.add(new, WordPostingEntry { doc_id: d, tail_off, ..e });
-                        wpm_writer.add_word(d, e.first_position, e.last_position, new);
+                        if positions {
+                            wpm_writer.add_word(d, e.first_position, e.last_position, new);
+                        }
                         num_docs = num_docs.max(d + 1);
                     }
                 });
             }
         }
-        if let Some(sib) = seg.sibling_v3.and_then(crate::suffix_fst::sibling_table::SiblingTableReader::open) {
+        if let Some(sib) = seg.sibling_v3.and_then(crate::suffix_fst::sibling_table::SiblingTableReader::open).filter(|_| positions) {
             for old in 0..sib.num_ordinals().min(remap.len() as u32) {
                 let from = remap[old as usize];
                 for e in sib.siblings(old) {
@@ -1090,10 +1179,11 @@ pub fn merge_segments_dict(
         min_suffix_len: 1,
         word_stripped: Vec::new(),
         word_sfxpost: word_writer.finish(),
-        word_pos_map: wpm_writer.serialize(),
-        sibling_v3: sibling_writer.serialize(),
+        word_pos_map: if positions { wpm_writer.serialize() } else { Vec::new() },
+        sibling_v3: if positions { sibling_writer.serialize() } else { Vec::new() },
         globals: Some(union),
         newtexts: Vec::new(),
         max_word_content_len,
+        positions,
     })
 }

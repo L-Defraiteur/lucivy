@@ -816,11 +816,11 @@ impl Index {
     pub fn validate_checksum(&self) -> crate::Result<HashSet<PathBuf>> {
         let managed_files = self.directory.list_managed_files();
         let sfx_version = self.settings.sfx_version;
-        let derived_in_ram = self.settings.derived_in_ram;
+        let skip_derived = self.settings.skips_derived_files();
         let active_segments_files: HashSet<PathBuf> = self
             .searchable_segment_metas()?
             .iter()
-            .flat_map(|segment_meta| segment_meta.list_files_for(sfx_version, derived_in_ram))
+            .flat_map(|segment_meta| segment_meta.list_files_for(sfx_version, skip_derived))
             .collect();
         let active_existing_files: HashSet<&PathBuf> =
             active_segments_files.intersection(&managed_files).collect();

@@ -352,6 +352,42 @@ class TestSharedDictionary:
         for q in ["python", "language", "data", "web", "learning"]:
             assert hits(eager, q) == hits(plain, q), q
 
+    def test_positions_false_answers_like_the_default_and_writes_no_sidecar(self, tmp_dir):
+        """`positions=False` keeps each token's documents and frequencies
+        instead of its positions, writes no `.posmap` / `.word_pos_map` /
+        `.sibling_v3`, verifies every match on the stored text — and answers
+        exactly like the default index, before and after a close / open. It
+        needs stored text fields and refuses `derived_in_ram`."""
+        assert "positions" in lucivy.Index.create.__doc__
+        stored = [dict(f, stored=True) for f in FIELDS]
+        plain = lucivy.Index.create(os.path.join(tmp_dir, "plain4"), stored, shards=2)
+        lean_path = os.path.join(tmp_dir, "nopos")
+        lean = lucivy.Index.create(lean_path, stored, shards=2, positions=False)
+        for idx in (plain, lean):
+            for doc in DOCS:
+                idx.add(**doc)
+                idx.commit()
+        names = [n for _, _, files in os.walk(lean_path) for n in files]
+        assert any(n.endswith(".sfxpost") for n in names)
+        assert not any(n.endswith((".posmap", ".word_pos_map", ".sibling_v3")) for n in names), names
+        queries = ["python", "language", "data", "web", "learning", "garbage collection", "Neo4j"]
+        for q in queries:
+            assert hits(plain, q), q
+            assert hits(lean, q) == hits(plain, q), q
+        lean.close()
+        reopened = lucivy.Index.open(lean_path)
+        for q in queries:
+            assert hits(reopened, q) == hits(plain, q), f"{q} after reopen"
+        with pytest.raises(Exception, match="derived_in_ram"):
+            lucivy.Index.create(os.path.join(tmp_dir, "both"), stored, positions=False, derived_in_ram=True)
+        with pytest.raises(Exception, match="must be stored"):
+            lucivy.Index.create(os.path.join(tmp_dir, "unstored"),
+                                [{"name": "body", "type": "text", "stored": False}], positions=False)
+        # `stored` left out means stored (the default): accepted.
+        implicit = lucivy.Index.create(os.path.join(tmp_dir, "implicit"),
+                                       [{"name": "body", "type": "text"}], positions=False)
+        assert implicit.num_docs == 0
+
     def test_option_is_refused_with_a_contradicting_sfx_version(self):
         """The core refuses a config that says both; the binding cannot express
         that, so this only pins that the flag is accepted and is boolean."""

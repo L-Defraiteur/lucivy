@@ -30,6 +30,15 @@
 //! the v3 briques only ask for positions (`positions*`, `has_position`).
 //! The v2 pipeline (`sfx_version` 2) keeps writing `SFP4` with its spans.
 //!
+//! `SFP6` (4.1, `positions: false`) keeps no position at all: per
+//! ordinal, `[varint num_docs]` then `num_docs` pairs `(varint d_doc,
+//! varint tf)` — the documents and how many times the ordinal occurs in
+//! each, 2.3 bytes a document on the kernel against 4.8 an occurrence.
+//! An empty ordinal has no block. The position accessors hand back
+//! nothing on such a file (`has_positions() == false`); `for_each_doc` is
+//! what it answers. The queries verify their candidates on the stored
+//! text instead (`docs/08-09-2026/01-chantier-positions-optionnelles.md`).
+//!
 //! `headers_len` was missing from the first `SFP3` (25 August, afternoon):
 //! the reader found the payloads by decoding all `num_docs` headers on every
 //! lookup, which made `has_doc` / `entry_at` linear in the ordinal's document
@@ -71,6 +80,9 @@ const MAGIC_V4: &[u8; 4] = b"SFP4";
 /// `SFP4` without the byte spans: one varint per entry. Written since
 /// 5 September 2026 by the v3 pipeline (see the module header).
 const MAGIC_V5: &[u8; 4] = b"SFP5";
+/// Documents and term frequencies only, no position (`positions: false`,
+/// see the module header).
+const MAGIC_V6: &[u8; 4] = b"SFP6";
 
 /// One occurrence, by position only — what `SFP5` stores and what the v3
 /// briques ask for.
@@ -107,6 +119,8 @@ pub struct SfxPostWriterV2 {
     ordinals: Vec<Vec<(u32, u32, u32, u32)>>,
     /// Whether the entries carry byte spans (`SFP4`) or positions only (`SFP5`).
     spans: bool,
+    /// `SFP6`: documents and term frequencies only.
+    docs_only: bool,
 }
 
 impl SfxPostWriterV2 {
@@ -115,6 +129,7 @@ impl SfxPostWriterV2 {
         Self {
             ordinals: vec![Vec::new(); num_terms],
             spans: true,
+            docs_only: false,
         }
     }
 
@@ -124,6 +139,18 @@ impl SfxPostWriterV2 {
         Self {
             ordinals: vec![Vec::new(); num_terms],
             spans: false,
+            docs_only: false,
+        }
+    }
+
+    /// A writer of `SFP6`: documents and term frequencies, no position
+    /// (`positions: false`). Every entry added counts one occurrence of
+    /// its ordinal in its document; the positions given are ignored.
+    pub fn docs_only(num_terms: usize) -> Self {
+        Self {
+            ordinals: vec![Vec::new(); num_terms],
+            spans: false,
+            docs_only: true,
         }
     }
 
@@ -161,6 +188,29 @@ impl SfxPostWriterV2 {
 
             // Sort by (doc_id, token_index): a document is then one run.
             entries.sort_unstable();
+
+            if self.docs_only {
+                // `SFP6`: `(d_doc, tf)` per document, no block for an empty
+                // ordinal (its offset repeats: `read_ordinal_header` → None).
+                if entries.is_empty() { continue; }
+                headers.clear();
+                let (mut n_docs, mut prev_doc, mut i) = (0u64, 0u32, 0usize);
+                while i < entries.len() {
+                    let doc_id = entries[i].0;
+                    let mut tf = 0u32;
+                    while i < entries.len() && entries[i].0 == doc_id {
+                        tf += 1;
+                        i += 1;
+                    }
+                    write_varint(&mut headers, doc_id.wrapping_sub(prev_doc) as u64);
+                    write_varint(&mut headers, tf as u64);
+                    prev_doc = doc_id;
+                    n_docs += 1;
+                }
+                write_varint(&mut entry_data, n_docs);
+                entry_data.extend_from_slice(&headers);
+                continue;
+            }
 
             // Payloads first, all in one buffer: their lengths are the
             // header's, and a document's three fields only grow inside it.
@@ -227,12 +277,19 @@ impl SfxPostWriterV2 {
         // Assemble final binary
         let table = block_offsets::encode(&offset_table);
         let mut out = Vec::with_capacity(8 + table.len() + entry_data.len());
-        out.extend_from_slice(if self.spans { MAGIC_V4 } else { MAGIC_V5 });
+        out.extend_from_slice(if self.docs_only { MAGIC_V6 } else if self.spans { MAGIC_V4 } else { MAGIC_V5 });
         out.extend_from_slice(&(num_terms as u32).to_le_bytes());
         out.extend_from_slice(&table);
         out.extend_from_slice(&entry_data);
         out
     }
+}
+
+/// Whether `bytes` is an `SFP6` file (documents and frequencies, no
+/// position) — read off the magic, without opening or copying the file:
+/// what a merge asks of its sources before it creates its writers.
+pub fn is_docs_only(bytes: &[u8]) -> bool {
+    bytes.len() >= 4 && &bytes[0..4] == MAGIC_V6
 }
 
 /// Build sfxpost V2 data from pre-sorted entries per ordinal.
@@ -269,6 +326,8 @@ pub struct SfxPostReaderV2 {
     /// Whether the entries carry byte spans (`SFP2`-`SFP4`) or positions
     /// only (`SFP5`).
     spans: bool,
+    /// `SFP6`: documents and term frequencies, no position.
+    docs_only: bool,
     /// Shard dictionary mode: the segment's `.gmap`, so that callers ask
     /// by global id and the file answers by local ordinal.
     gmap: Option<common::OwnedBytes>,
@@ -294,7 +353,9 @@ impl SfxPostReaderV2 {
         if data.len() < 8 {
             return None;
         }
+        let docs_only = &data[0..4] == MAGIC_V6;
         let (v3, block, spans) = match &data[0..4] {
+            m if m == MAGIC_V6 => (true, true, false),
             m if m == MAGIC_V5 => (true, true, false),
             m if m == MAGIC_V4 => (true, true, true),
             m if m == MAGIC_V3 => (true, false, true),
@@ -315,6 +376,7 @@ impl SfxPostReaderV2 {
                 data, num_terms, offsets_start: 8, entry_data_start: 8 + used, v3,
                 block_table: Some((dir_start, blocks_start)),
                 spans,
+                docs_only,
                 gmap: None,
             });
         }
@@ -324,7 +386,7 @@ impl SfxPostReaderV2 {
         }
         let offsets_start = 8;
         let entry_data_start = 8 + offsets_size;
-        Some(Self { data, num_terms, offsets_start, entry_data_start, v3, block_table: None, spans, gmap: None })
+        Some(Self { data, num_terms, offsets_start, entry_data_start, v3, block_table: None, spans, docs_only, gmap: None })
     }
 
     /// Whether the entries carry byte spans. `false` on an `SFP5` file: the
@@ -332,6 +394,23 @@ impl SfxPostReaderV2 {
     /// position comes from `.posmap` (`PosMapReader::byte_at`).
     pub fn has_byte_spans(&self) -> bool {
         self.spans
+    }
+
+    /// Whether the file holds positions. `false` on `SFP6`
+    /// (`positions: false`): the position accessors return nothing, and
+    /// `for_each_doc` is the whole of what the file answers.
+    pub fn has_positions(&self) -> bool {
+        !self.docs_only
+    }
+
+    /// Visit every document of an ordinal as `(doc_id, term frequency)` —
+    /// how many times the ordinal occurs in the document. Every layout
+    /// answers; on `SFP6` it is all there is.
+    pub fn for_each_doc(&self, ordinal: u32, mut f: impl FnMut(u32, u32)) {
+        let Some(ordinal) = self.local(ordinal) else { return };
+        if ordinal >= self.num_terms { return; }
+        let Some(header) = self.read_ordinal_header(ordinal) else { return };
+        header.for_each_doc(|_, doc_id, _, count| { f(doc_id, count); true });
     }
 
     /// Open from a byte slice (copies into owned Vec).
@@ -351,9 +430,11 @@ impl SfxPostReaderV2 {
     /// that stop at the first match still stop at the same one.
     fn filtered_indices(header: &OrdinalHeader<'_>, filter: &dyn crate::query::posting_resolver::DocFilter) -> Vec<usize> {
         let n = header.num_docs;
-        // Rough break-even: a binary search costs ~log2(n) probes.
+        // Rough break-even: a binary search costs ~log2(n) probes. An
+        // `SFP6` block has no checkpoint to search: it is always scanned.
         let probe_cost = (usize::BITS - n.leading_zeros()) as usize;
-        if filter.len().saturating_mul(probe_cost) < n {
+        let searchable = !matches!(header.layout, HeaderLayout::Docs { .. });
+        if searchable && filter.len().saturating_mul(probe_cost) < n {
             let mut idx: Vec<usize> = Vec::new();
             filter.for_each(&mut |d| if let Some(i) = header.find_doc(d) { idx.push(i); });
             idx.sort_unstable();
@@ -603,6 +684,20 @@ impl SfxPostReaderV2 {
             return None;
         }
         let data = &entry_data[off_start..off_end.min(entry_data.len())];
+        if self.docs_only {
+            // `SFP6`: a block can be three bytes long, below the minimum
+            // the positional layouts check for.
+            let mut pos = 0usize;
+            let num_docs = read_varint_u32(data, &mut pos)? as usize;
+            // A document costs at least two bytes.
+            if num_docs > data.len() { return None; }
+            return Some(OrdinalHeader {
+                num_docs,
+                layout: HeaderLayout::Docs { pairs: &data[pos..] },
+                payload_data: &[],
+                spans: false,
+            });
+        }
         if data.len() < 4 { return None; }
 
         if self.v3 {
@@ -695,6 +790,16 @@ enum HeaderLayout<'a> {
         checkpoints: &'a [u8],
         headers: &'a [u8],
     },
+    /// `SFP6`: `(d_doc, tf)` varint pairs, nothing else.
+    Docs {
+        pairs: &'a [u8],
+    },
+}
+
+/// Decode the next `(d_doc, tf)` pair of an `SFP6` block.
+#[inline]
+fn next_doc_pair(pairs: &[u8], pos: &mut usize) -> Option<(u32, u32)> {
+    Some((read_varint_u32(pairs, pos)?, read_varint_u32(pairs, pos)?))
 }
 
 impl<'a> OrdinalHeader<'a> {
@@ -739,6 +844,15 @@ impl<'a> OrdinalHeader<'a> {
                 }
                 (doc, offset, count)
             }
+            HeaderLayout::Docs { pairs } => {
+                let (mut doc, mut tf, mut pos) = (0u32, 0u32, 0usize);
+                for _ in 0..=i {
+                    let Some((d, n)) = next_doc_pair(pairs, &mut pos) else { break };
+                    doc = doc.wrapping_add(d);
+                    tf = n;
+                }
+                (doc, 0, tf)
+            }
         }
     }
 
@@ -769,6 +883,14 @@ impl<'a> OrdinalHeader<'a> {
                     doc = doc.wrapping_add(d_doc);
                     if !f(i, doc, offset, n) { return; }
                     offset = offset.wrapping_add(len);
+                }
+            }
+            HeaderLayout::Docs { pairs } => {
+                let (mut doc, mut pos) = (0u32, 0usize);
+                for i in 0..self.num_docs {
+                    let Some((d, n)) = next_doc_pair(pairs, &mut pos) else { return };
+                    doc = doc.wrapping_add(d);
+                    if !f(i, doc, 0, n) { return; }
                 }
             }
         }
@@ -894,6 +1016,19 @@ impl<'a> OrdinalHeader<'a> {
                             continue;
                         }
                         std::cmp::Ordering::Equal => return Some((i, offset, n)),
+                        std::cmp::Ordering::Greater => return None,
+                    }
+                }
+                None
+            }
+            HeaderLayout::Docs { pairs } => {
+                let (mut doc, mut pos) = (0u32, 0usize);
+                for i in 0..self.num_docs {
+                    let (d, n) = next_doc_pair(pairs, &mut pos)?;
+                    doc = doc.wrapping_add(d);
+                    match doc.cmp(&doc_id) {
+                        std::cmp::Ordering::Less => continue,
+                        std::cmp::Ordering::Equal => return Some((i, 0, n)),
                         std::cmp::Ordering::Greater => return None,
                     }
                 }
@@ -1301,4 +1436,53 @@ mod tests {
         let v1_data = vec![0u8; 100];
         assert!(SfxPostReaderV2::open(v1_data).is_none());
     }
+    #[test]
+    fn docs_only_layout_keeps_documents_and_frequencies() {
+        // Ordinal 0: doc 1 twice, doc 3 once, doc 700 once (added out of
+        // order); ordinal 1: nothing; ordinal 2: doc 0 once; ordinal 3: a
+        // thousand documents, one to three occurrences each.
+        let mut w = SfxPostWriterV2::docs_only(4);
+        w.add_position(0, 3, 2);
+        w.add_position(0, 1, 5);
+        w.add_position(0, 1, 0);
+        w.add_position(0, 700, 9);
+        w.add_position(2, 0, 1);
+        let mut long = Vec::new();
+        for d in 0..1000u32 {
+            for k in 0..(d % 3 + 1) { w.add_position(3, d * 7, k); }
+            long.push((d * 7, d % 3 + 1));
+        }
+        let bytes = w.finish();
+        assert_eq!(&bytes[0..4], MAGIC_V6);
+        let r = SfxPostReaderV2::open(bytes).unwrap();
+        assert!(!r.has_positions());
+        assert!(!r.has_byte_spans());
+        let docs = |o: u32| { let mut v = Vec::new(); r.for_each_doc(o, |d, n| v.push((d, n))); v };
+        assert_eq!(docs(0), vec![(1, 2), (3, 1), (700, 1)]);
+        assert_eq!(docs(1), Vec::<(u32, u32)>::new());
+        assert_eq!(docs(2), vec![(0, 1)]);
+        assert_eq!(docs(3), long);
+        assert_eq!(docs(4), Vec::<(u32, u32)>::new(), "out of range");
+        assert_eq!((r.doc_freq(0), r.doc_freq(1), r.doc_freq(3)), (3, 0, 1000));
+        assert!(r.has_doc(0, 3) && r.has_doc(0, 700) && !r.has_doc(0, 2));
+        assert!(r.has_doc(3, 6993) && !r.has_doc(3, 6994));
+        // The position accessors find nothing: there is nothing to find.
+        assert!(r.positions_filtered(0, None).is_empty());
+        assert!(r.positions_for_doc(0, 1).is_empty());
+        assert!(!r.has_position(0, 1, 0));
+        assert!(r.entries(0).is_empty());
+        let filter: std::collections::HashSet<u32> = [3u32, 700].into_iter().collect();
+        assert!(r.entries_filtered(0, Some(&filter)).is_empty());
+        // A positional layout answers `for_each_doc` too.
+        let mut w5 = SfxPostWriterV2::positions_only(1);
+        w5.add_position(0, 1, 0);
+        w5.add_position(0, 1, 5);
+        w5.add_position(0, 3, 2);
+        let r5 = SfxPostReaderV2::open(w5.finish()).unwrap();
+        assert!(r5.has_positions());
+        let mut v = Vec::new();
+        r5.for_each_doc(0, |d, n| v.push((d, n)));
+        assert_eq!(v, vec![(1, 2), (3, 1)]);
+    }
+
 }

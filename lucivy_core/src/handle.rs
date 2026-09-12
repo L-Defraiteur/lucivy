@@ -172,6 +172,7 @@ impl LucivyHandle {
         let settings = IndexSettings {
             sfx_version: config.effective_sfx_version(),
             derived_in_ram: config.derived_in_ram.unwrap_or(false),
+            positions: config.positions.unwrap_or(true),
             dictionary_wait: config.dictionary_wait.unwrap_or(true),
             ..IndexSettings::default()
         };

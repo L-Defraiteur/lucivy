@@ -1,8 +1,14 @@
-# lucivy 4.0.2
+# lucivy 4.1.0
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. From Node.js. Runs in your process, in your transaction (bring your own storage), and the same engine runs in the browser. Powered by Rust via napi-rs, MIT.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
+
+### What's new in 4.1
+
+- **`Index.create(path, fields, { positions: false })` — an index half the size.** The postings keep each token's documents and frequencies instead of its positions, and no position sidecar is written: the whole Linux kernel (101 141 files, 941 MB of text) 5 289 → 2 598 MB, ×2.8 its text instead of ×5.6; 10 000 files −37 %. Nothing is rebuilt when the index opens, and indexing is a little faster (109 → 101 s). Every match is found as candidate documents and verified on the stored text with the ground truth's own definitions: same documents, same spans, same scores, the ground-truth panel 10/10. Some queries pay for it (whole kernel, file cache warm): literal substrings 11-19 → 27-56 ms (the documents found are re-read), a one-edit fuzzy 50 → 200 ms; others get faster — a regex 237 → 22 ms, a two-character needle 630-700 → 330 ms. Every text field must be stored (the default); excludes `derivedInRam`; fixed at creation, also as the `BlobIndex` option `positions`. An index created this way cannot be searched by 4.0.x (it opens, and every search fails: `sfxpost: invalid V2 format`)
+- **The options of `Index.create()` as one object** — `{ shards, sharedDictionary, derivedInRam, dictionaryWait, positions }` (`IndexOptions`, typed) in place of the arguments after `fields`; the positional form still works, giving both is refused
+- **Fix: one occurrence, one span.** In relaxed mode a needle that ends a word cut into chunks — `lock` in `superblock` — came back twice, and counted twice in the score (542 duplicated spans for `lock` over 10 000 kernel files, since the v3 engine, 4.0.2 included); the ground-truth harness now counts duplicates too
 
 ### What's new in 4.0.0
 
@@ -20,7 +26,7 @@ Same 93 983 Linux kernel files, 857 MB of text. Each engine is configured at its
 |---|---|---|---|---|
 | `spin_lock`, separators relaxed (also `spin lock`, `spin-lock`, `spinlock`) | 9 552 | **9 552**, 23 ms | 6 577 — not with this analyzer: its trigrams carry the underscore | 6 601 — relaxed is the only mode it has: the separator never enters its index |
 | `spinlokc`, two edits, across the token boundary | 10 034 | **10 034**, 148 ms | 3 549 — fuzziness compares whole terms | 6 557 — same |
-| `spin_lock_[a-z]+`, a regex | 5 510 | **5 510**, 219 ms | 5 440 (wildcard field, 70 short), 480 ms | 0 — terms are already cut |
+| `spin_lock_[a-z]+`, a regex, case folded | 5 510 | **5 510**, 219 ms | 5 510 on the wildcard field, 1 ms warm — as `[a-zA-Z]+`: Lucene's `case_insensitive` folds a pattern's literals, not its character classes | 0 — terms are already cut |
 | `de`, two characters | 93 009 | **93 009**, 7.7 M spans, 561 ms | 0, silently | 0, silently |
 | `retur -ENOMEM`, a fuzzy phrase | 14 449 | **14 449**, 30 ms | 14 446 (`span_near`), 24 ms — it does this well | — |
 | **where it matched**: `mutex_lock`, 5 145 documents | 20 797 spans | **all 20 797, 15 ms** | `highlight` on the top 200: 179 ms | verifying 5 145 stored texts: 96 ms |
@@ -43,7 +49,7 @@ Still there from 2.x: SFX-only engine, distributed search (`exportStats` / `merg
 ## Install
 
 ```bash
-npm install lucivy   # 4.0.2
+npm install lucivy   # 4.1.0
 ```
 
 ## Quick start
@@ -91,6 +97,18 @@ const compact = Index.create('/tmp/compact', [...], 1, true);
 // opened, instead of being written. Same answers; opening pays the rebuild,
 // never a query. (BlobIndex.create: `{ derivedInRam: true }`.)
 const lean = Index.create('/tmp/lean', [...], 1, true, true);
+
+// Half the size (4.1): the postings keep documents and frequencies, not
+// positions, and no position sidecar is written. Every match is verified on
+// the stored text: same documents, spans and scores; literal queries pay a
+// re-read of the documents found (tens of milliseconds on the whole
+// kernel), regexes get faster. Text fields must be stored (the default);
+// excludes derivedInRam. Fixed at creation. (BlobIndex: `{ positions: false }`.)
+const half = Index.create('/tmp/half', [...], { positions: false });
+
+// Every option can be given this way, in place of the positional arguments:
+// { shards, sharedDictionary, derivedInRam, dictionaryWait, positions }
+const wide = Index.create('/tmp/wide', [...], { shards: 4, positions: false });
 
 // Open existing
 const index2 = Index.open('/tmp/my_index');

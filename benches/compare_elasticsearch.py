@@ -248,7 +248,7 @@ PANEL_TRUTH = {
     "printk (start of token)": "printk:sw",
     "schdule (fuzzy, 1 edit)": "schdule:fz1",
     "regsiter (fuzzy, 2 edits)": "regsiter:fz2",
-    "spin_lock_[a-z]+ (regex)": "spin_lock_[a-z]+:rx",
+    "spin_lock_[a-z]+ (regex, case folded)": "spin_lock_[a-z]+:rx",
 }
 
 
@@ -285,8 +285,14 @@ def panel():
         ("regsiter (fuzzy, 2 edits)", STANDARD,
          {"match": {"body": {"query": "regsiter", "fuzziness": 2}}}, ""),
 
-        ("spin_lock_[a-z]+ (regex)", NGRAM,
-         {"regexp": {"raw": {"value": ".*spin_lock_[a-z]+.*",
+        # `[a-zA-Z]+`, not `[a-z]+`: this row's truth is case-insensitive (the harness
+        # folds case, as lucivy's engine does), and Lucene's `case_insensitive: true`
+        # folds a pattern's literals but not its character classes — `spin_lock_`
+        # matched `SPIN_LOCK_` while `[a-z]+` refused `UNLOCKED`. Asked the old way the
+        # row read 5 440 against a truth of 5 510 and we published Elasticsearch as "70
+        # short": it was our pattern (docs/12-09-2026/01-elasticsearch-regex-casse.md).
+        ("spin_lock_[a-z]+ (regex, case folded)", NGRAM,
+         {"regexp": {"raw": {"value": ".*spin_lock_[a-zA-Z]+.*",
                              "flags": "ALL", "case_insensitive": True}}},
          "on the wildcard field, the only one that can run a regex over a whole value"),
     ]
@@ -312,8 +318,8 @@ def stumble():
         ("spinlokc:fz2", "spinlokc, two edits, across the token boundary", STANDARD,
          {"match": {"body": {"query": "spinlokc", "fuzziness": 2}}},
          "fuzziness compares whole terms: it can reach `spinlock`, never `spin_lock`"),
-        ("spin_lock_[a-z]+:rx", "spin_lock_[a-z]+ (regex, wildcard field)", NGRAM,
-         {"regexp": {"raw": {"value": ".*spin_lock_[a-z]+.*", "flags": "ALL", "case_insensitive": True}}},
+        ("spin_lock_[a-z]+:rx", "spin_lock_[a-z]+ (regex, wildcard field, case folded)", NGRAM,
+         {"regexp": {"raw": {"value": ".*spin_lock_[a-zA-Z]+.*", "flags": "ALL", "case_insensitive": True}}},
          "the only field type that runs a regex over a whole value"),
         ("ude:strict", "ude (three characters)", NGRAM,
          {"match_phrase": {"body": "ude"}}, "one trigram: fine"),

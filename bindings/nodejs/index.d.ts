@@ -40,6 +40,28 @@ export interface SearchOptions {
  */
 export declare function mergeStats(statsList: Array<string>): string
 /**
+ * The options of `Index.create()` as one object, in place of its arguments
+ * after `fields`: `Index.create(path, fields, { positions: false })`.
+ */
+export interface IndexOptions {
+  /** Number of shards (default 1). */
+  shards?: number
+  /** One dictionary per shard instead of one per segment (default `true`). */
+  sharedDictionary?: boolean
+  /** The derived sidecars rebuilt in RAM at open instead of written. */
+  derivedInRam?: boolean
+  /**
+   * Shared dictionary: a search waits for the background merge of the
+   * last commit's texts (default `true`).
+   */
+  dictionaryWait?: boolean
+  /**
+   * `false`: documents and frequencies instead of positions, about half
+   * the index; every match verified on the stored text.
+   */
+  positions?: boolean
+}
+/**
  * The object a JavaScript program hands to `BlobIndex.create()` /
  * `BlobIndex.open()`. Methods are called with the object as `this`. Each may
  * return its value directly or a Promise of it.
@@ -98,6 +120,11 @@ export interface BlobIndexOptions {
    * merge of the last commit's texts (default `true`) — see `Index.create()`.
    */
   dictionaryWait?: boolean
+  /**
+   * `create()` only: `false` keeps documents and frequencies instead of
+   * positions, every match verified on the stored text — see `Index.create()`.
+   */
+  positions?: boolean
 }
 export declare class Index {
   /**
@@ -107,6 +134,8 @@ export declare class Index {
    * @param fields - Field definitions: `[{name: "body", type: "text", stored: true}]`.
    *   Types: `"text"` (full-text), `"u64"`, `"i64"`, `"f64"`, `"bool"`, `"date"`.
    * @param shards - Number of shards (default 1). More shards = faster search on large datasets.
+   *   Or an options object in place of this argument and all that follow:
+   *   `Index.create(path, fields, { shards: 4, positions: false })`.
    * @param sharedDictionary - Store each distinct token text once per shard
    *   instead of once per segment: the index is about 20 % smaller on disk
    *   and in RAM, queries are slightly slower at cold cache (roughly x1.2
@@ -125,8 +154,16 @@ export declare class Index {
    *   task does it); a search waits for that merge, so that its cost never
    *   depends on when it runs. `false` searches at once over the
    *   not-yet-merged parts. On by default; fixed at creation.
+   * @param positions - `false` keeps each token's documents and frequencies
+   *   instead of its positions, and writes no position sidecar (`.posmap`,
+   *   `.word_pos_map`, `.sibling_v3`): 37 % smaller on 10 000 kernel files.
+   *   Every match is then verified on the stored text — same documents,
+   *   spans and scores; literal queries pay a re-read of the documents
+   *   found (tens of milliseconds on the whole kernel), regexes get
+   *   faster. Every text field must be stored (the default); excludes
+   *   `derivedInRam`. On by default; fixed at creation.
    */
-  static create(path: string, fields: Array<FieldDef>, shards?: number | undefined | null, sharedDictionary?: boolean | undefined | null, derivedInRam?: boolean | undefined | null, dictionaryWait?: boolean | undefined | null): Index
+  static create(path: string, fields: Array<FieldDef>, shards?: number | IndexOptions | undefined | null, sharedDictionary?: boolean | undefined | null, derivedInRam?: boolean | undefined | null, dictionaryWait?: boolean | undefined | null, positions?: boolean | undefined | null): Index
   /**
    * Open an existing index at the given path.
    *
@@ -437,7 +474,7 @@ export declare class BlobIndex {
    * @param store - Object implementing the store protocol (`load`, `save`, `delete`, `exists`, `list`, optional `blobLen` / `loadRange`).
    * @param indexName - Name of the index inside the store.
    * @param fields - Field definitions, as for `Index.create()`.
-   * @param options - `{cacheDir?, lazy?, shards?, sharedDictionary?, derivedInRam?, dictionaryWait?}`.
+   * @param options - `{cacheDir?, lazy?, shards?, sharedDictionary?, derivedInRam?, dictionaryWait?, positions?}`.
    */
   static create(store: BlobStoreCallbacks, indexName: string, fields: Array<FieldDef>, options?: BlobIndexOptions | undefined | null): Promise<BlobIndex>
   /**

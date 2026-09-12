@@ -328,6 +328,14 @@ export interface IndexConfig {
    */
   derived_in_ram?: boolean;
   /**
+   * `false` keeps each token's documents and frequencies instead of its
+   * positions and writes no position sidecar (37 % smaller on 10 000 kernel
+   * files); every match is verified on the stored text, so every text field
+   * must be stored. Same documents, spans and scores. Excludes
+   * `derived_in_ram`. On by default; fixed at creation.
+   */
+  positions?: boolean;
+  /**
    * Shared dictionary only. A commit returns before the shard's new texts
    * are merged into the dictionary (a background task does it); a search
    * waits for that merge by default, so that its cost never depends on when

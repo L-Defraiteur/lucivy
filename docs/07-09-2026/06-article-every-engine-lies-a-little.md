@@ -45,7 +45,7 @@ First, the boring sanity check: ordinary substrings work everywhere. `mutex_lock
 | `spin_lock`, separators strict | 6 569 | ✔ 6 569 (12 ms) | ✔ 6 569 (10 ms) | ✔ 6 569 (116 ms) |
 | `spin_lock`, separators relaxed | 9 552 | ✔ 9 552  (23 ms) | ▲ 6 577 | ▲ 6 601 |
 | `spinlokc`, two edits, across the boundary | 10 034 | ✔ 10 034  (148 ms) | ▲ 3 549 | ▲ 6 557 |
-| `spin_lock_[a-z]+`, a regex | 5 510 | ✔ 5 510  (219 ms) | ▲ 5 440  (480 ms) | ✘ 0 |
+| `spin_lock_[a-z]+`, a regex, case folded | 5 510 | ✔ 5 510  (219 ms) | ✔ 5 510  (1 ms, written `[a-zA-Z]+`) | ✘ 0 |
 | `"de"`, two characters | 93 009 | ✔ 93 009  (561 ms, 7.7 M spans) | ✘ 0 | ✘ 0 |
 | `"©"`, one character, in 1 878 files | 1 878 | ✔ 1 878 (6 ms) | ✘ 0 | ✘ 0 |
 | `retur -ENOMEM`, a fuzzy phrase | 14 449 | ✔ 14 449  (30 ms) | ✔ 14 446  (24 ms) | — |

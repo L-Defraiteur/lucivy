@@ -106,6 +106,10 @@ const MAGIC_V3: &[u8; 4] = b"WSP3";
 const MAGIC_V4: &[u8; 4] = b"WSP4";
 /// `WSP4` without the byte spans, with the tail offsets (module header).
 const MAGIC_V5: &[u8; 4] = b"WSP5";
+/// Documents and term frequencies only (`positions: false`): per ordinal
+/// `[varint n_docs]` then `(varint d_doc, varint tf)` pairs, the number of
+/// word occurrences in each document; no block for an empty ordinal.
+const MAGIC_V6: &[u8; 4] = b"WSP6";
 /// Entries between two checkpoints. 32 keeps a lookup at one binary search
 /// over the checkpoints plus at most 32 decodes, for 16 bytes per 32 entries
 /// (0.5 B/entry against the 13.3 B/entry the varints save).
@@ -173,6 +177,8 @@ fn decode_entry(data: &[u8], pos: &mut usize, st: &mut DeltaState, spans: bool) 
 pub struct WordSfxPostWriter {
     entries: Vec<Vec<WordPostingEntry>>,
     spans: bool,
+    /// `WSP6`: documents and term frequencies only.
+    docs_only: bool,
 }
 
 impl WordSfxPostWriter {
@@ -182,6 +188,18 @@ impl WordSfxPostWriter {
         Self {
             entries: vec![Vec::new(); num_ordinals],
             spans: false,
+            docs_only: false,
+        }
+    }
+
+    /// Writer of `WSP6`: documents and term frequencies (`positions:
+    /// false`). Every distinct entry added counts one occurrence of the
+    /// word in its document.
+    pub fn docs_only(num_ordinals: usize) -> Self {
+        Self {
+            entries: vec![Vec::new(); num_ordinals],
+            spans: false,
+            docs_only: true,
         }
     }
 
@@ -191,6 +209,7 @@ impl WordSfxPostWriter {
         Self {
             entries: vec![Vec::new(); num_ordinals],
             spans: true,
+            docs_only: false,
         }
     }
 
@@ -222,7 +241,11 @@ impl WordSfxPostWriter {
         let mut checkpoints = Vec::new();
         for entries in &self.entries {
             offsets.push(entries_data.len() as u32);
-            encode_block_into(&mut entries_data, entries, &mut body, &mut checkpoints, self.spans);
+            if self.docs_only {
+                encode_docs_block_into(&mut entries_data, entries, &mut body);
+            } else {
+                encode_block_into(&mut entries_data, entries, &mut body, &mut checkpoints, self.spans);
+            }
         }
         // u32 offsets: refuse a file past 4 GB rather than write a wrapped table.
         assert!(
@@ -234,12 +257,77 @@ impl WordSfxPostWriter {
 
         let table = block_offsets::encode(&offsets);
         let mut buf = Vec::with_capacity(8 + table.len() + entries_data.len());
-        buf.extend_from_slice(if self.spans { MAGIC_V4 } else { MAGIC_V5 });
+        buf.extend_from_slice(if self.docs_only { MAGIC_V6 } else if self.spans { MAGIC_V4 } else { MAGIC_V5 });
         buf.extend_from_slice(&num_ords.to_le_bytes());
         buf.extend_from_slice(&table);
         buf.extend_from_slice(&entries_data);
         buf
     }
+}
+
+/// Append one ordinal's `WSP6` block to `out`: the number of documents,
+/// then `(d_doc, tf)` per document. `entries` is sorted by document.
+fn encode_docs_block_into(out: &mut Vec<u8>, entries: &[WordPostingEntry], body: &mut Vec<u8>) {
+    if entries.is_empty() {
+        return;
+    }
+    body.clear();
+    let (mut n_docs, mut prev_doc, mut i) = (0u64, 0u32, 0usize);
+    while i < entries.len() {
+        let doc = entries[i].doc_id;
+        let mut tf = 0u32;
+        while i < entries.len() && entries[i].doc_id == doc {
+            tf += 1;
+            i += 1;
+        }
+        write_varint(body, doc.wrapping_sub(prev_doc) as u64);
+        write_varint(body, tf as u64);
+        prev_doc = doc;
+        n_docs += 1;
+    }
+    write_varint(out, n_docs);
+    out.extend_from_slice(body);
+}
+
+/// A `WSP5` (or older) file rewritten as `WSP6`: the same ordinals, each
+/// with its documents and the number of its entries in each. What the
+/// segment build writes for an index without positions — the collector
+/// and the merges produce the positional file first. `None` if `bytes` is
+/// not a word postings file.
+pub fn to_docs_only(bytes: &[u8]) -> Option<Vec<u8>> {
+    let reader = WordSfxPostReader::open(bytes)?;
+    if !reader.has_positions() {
+        return Some(bytes.to_vec());
+    }
+    let n = reader.num_ordinals() as usize;
+    let mut offsets: Vec<u32> = Vec::with_capacity(n + 1);
+    let mut entries_data: Vec<u8> = Vec::new();
+    let mut body: Vec<u8> = Vec::new();
+    for ordinal in 0..n as u32 {
+        offsets.push(entries_data.len() as u32);
+        body.clear();
+        let mut n_docs = 0u64;
+        let mut prev_doc = 0u32;
+        reader.for_each_doc(ordinal, |doc, tf| {
+            write_varint(&mut body, doc.wrapping_sub(prev_doc) as u64);
+            write_varint(&mut body, tf as u64);
+            prev_doc = doc;
+            n_docs += 1;
+        });
+        if n_docs > 0 {
+            write_varint(&mut entries_data, n_docs);
+            entries_data.extend_from_slice(&body);
+        }
+    }
+    assert!(entries_data.len() <= u32::MAX as usize, "word_sfxpost: {} bytes exceed the 32-bit offset table", entries_data.len());
+    offsets.push(entries_data.len() as u32);
+    let table = block_offsets::encode(&offsets);
+    let mut buf = Vec::with_capacity(8 + table.len() + entries_data.len());
+    buf.extend_from_slice(MAGIC_V6);
+    buf.extend_from_slice(&(n as u32).to_le_bytes());
+    buf.extend_from_slice(&table);
+    buf.extend_from_slice(&entries_data);
+    Some(buf)
 }
 
 /// Append one ordinal's block to `out`: `n`, its checkpoints, then the
@@ -313,6 +401,8 @@ pub struct WordSfxPostReader<'a> {
     /// Whether the entries carry byte spans (`WSP2`-`WSP4`) or positions and
     /// tail offsets (`WSP5`).
     spans: bool,
+    /// `WSP6`: documents and term frequencies, no entry.
+    docs_only: bool,
     /// Where an ordinal's bytes are: absolute in `WSP2`/`WSP3` (a flat
     /// table), relative to `entries_start` in `WSP4`.
     table: OffsetTable<'a>,
@@ -326,7 +416,9 @@ impl<'a> WordSfxPostReader<'a> {
     /// is unknown or the header is truncated.
     pub fn open(data: &'a [u8]) -> Option<Self> {
         if data.len() < 8 { return None; }
+        let docs_only = &data[0..4] == MAGIC_V6;
         let (v3, block, spans) = match &data[0..4] {
+            m if m == MAGIC_V6 => (true, true, false),
             m if m == MAGIC_V5 => (true, true, false),
             m if m == MAGIC_V4 => (true, true, true),
             m if m == MAGIC_V3 => (true, false, true),
@@ -343,7 +435,7 @@ impl<'a> WordSfxPostReader<'a> {
             if data.len() < min_size { return None; }
             (OffsetTable::Flat(&data[8..min_size]), 0)
         };
-        Some(Self { data, num_ordinals, v3, spans, table, entries_start, gmap: None })
+        Some(Self { data, num_ordinals, v3, spans, docs_only, table, entries_start, gmap: None })
     }
 
     /// Whether the entries carry byte spans. `false` on a `WSP5` file: the
@@ -351,6 +443,43 @@ impl<'a> WordSfxPostReader<'a> {
     /// `tail_off`, and the word's offset derives from `.posmap`.
     pub fn has_byte_spans(&self) -> bool {
         self.spans
+    }
+
+    /// Whether the file holds entries with positions. `false` on `WSP6`
+    /// (`positions: false`): `for_each_entry`, `entries` and `entry_at`
+    /// then find nothing, and `for_each_doc` is what the file answers.
+    pub fn has_positions(&self) -> bool {
+        !self.docs_only
+    }
+
+    /// Visit every document of an ordinal as `(doc_id, term frequency)`:
+    /// the number of the word's entries in the document. Every layout
+    /// answers; on `WSP6` it is all there is.
+    pub fn for_each_doc(&self, ordinal: u32, mut f: impl FnMut(u32, u32)) {
+        if self.docs_only {
+            let Some(ordinal) = self.local(ordinal) else { return };
+            let Some((start, end)) = self.block_range(ordinal) else { return };
+            let data = &self.data[..end];
+            let mut pos = start;
+            let Some(n) = read_varint_u32(data, &mut pos) else { return };
+            let mut doc = 0u32;
+            for _ in 0..n {
+                let (Some(d), Some(tf)) = (read_varint_u32(data, &mut pos), read_varint_u32(data, &mut pos)) else { return };
+                doc = doc.wrapping_add(d);
+                f(doc, tf);
+            }
+            return;
+        }
+        let (mut cur, mut tf) = (None::<u32>, 0u32);
+        self.for_each_entry(ordinal, |e| {
+            if cur != Some(e.doc_id) {
+                if let Some(d) = cur { f(d, tf); }
+                cur = Some(e.doc_id);
+                tf = 0;
+            }
+            tf += 1;
+        });
+        if let Some(d) = cur { f(d, tf); }
     }
 
     /// Bytes of one checkpoint in this layout.
@@ -438,6 +567,7 @@ impl<'a> WordSfxPostReader<'a> {
     /// binary search over the fixed-size records — no list materialised. Used by
     /// the word_pos_map-driven resolver, once per emitted match.
     pub fn entry_at(&self, ordinal: u32, doc_id: u32, first_position: u32) -> Option<WordPostingEntry> {
+        if self.docs_only { return None; }
         let ordinal = self.local(ordinal)?;
         let (start, end) = self.block_range(ordinal)?;
         if self.v3 {
@@ -511,6 +641,7 @@ impl<'a> WordSfxPostReader<'a> {
 
     /// Visit every entry of an ordinal without allocating (the merge path).
     pub fn for_each_entry(&self, ordinal: u32, mut f: impl FnMut(WordPostingEntry)) {
+        if self.docs_only { return; }
         let Some(ordinal) = self.local(ordinal) else { return };
         let Some((start, end)) = self.block_range(ordinal) else { return };
         if self.v3 {
@@ -534,6 +665,7 @@ impl<'a> WordSfxPostReader<'a> {
     /// All entries of an ordinal, decoded into a `Vec`; empty for an unknown
     /// or empty ordinal. Prefer `for_each_entry` when no list is needed.
     pub fn entries(&self, ordinal: u32) -> Vec<WordPostingEntry> {
+        if self.docs_only { return Vec::new(); }
         let Some(ordinal) = self.local(ordinal) else { return Vec::new() };
         let Some((start, end)) = self.block_range(ordinal) else { return Vec::new() };
         if self.v3 {
@@ -821,4 +953,48 @@ mod tests {
         let entries = reader.entries(0);
         assert_eq!(entries.len(), 2);
     }
+    #[test]
+    fn docs_only_layout_counts_the_entries_per_document() {
+        for n in [1usize, 2, 33, 200, 1000] {
+            let entries = sample(n);
+            let mut w5 = WordSfxPostWriter::new(3);
+            let mut w6 = WordSfxPostWriter::docs_only(3);
+            for e in &entries {
+                w5.add(1, e.clone());
+                w6.add(1, e.clone());
+            }
+            let (b5, b6) = (w5.finish(), w6.finish());
+            assert_eq!(&b6[0..4], MAGIC_V6);
+            assert!(b6.len() < b5.len(), "n={n}: WSP6 {} B is not smaller than WSP5 {} B", b6.len(), b5.len());
+            let mut expect: Vec<(u32, u32)> = Vec::new();
+            for e in &entries {
+                match expect.last_mut() {
+                    Some((d, c)) if *d == e.doc_id => *c += 1,
+                    _ => expect.push((e.doc_id, 1)),
+                }
+            }
+            let r6 = WordSfxPostReader::open(&b6).unwrap();
+            assert!(!r6.has_positions());
+            let mut got = Vec::new();
+            r6.for_each_doc(1, |d, tf| got.push((d, tf)));
+            assert_eq!(got, expect, "n={n}: WSP6 documents");
+            let r5 = WordSfxPostReader::open(&b5).unwrap();
+            assert!(r5.has_positions());
+            let mut got5 = Vec::new();
+            r5.for_each_doc(1, |d, tf| got5.push((d, tf)));
+            assert_eq!(got5, expect, "n={n}: WSP5 for_each_doc");
+            assert!(r6.entries(1).is_empty());
+            assert_eq!(r6.entry_at(1, expect[0].0, 0), None);
+            let mut walked = 0;
+            r6.for_each_entry(1, |_| walked += 1);
+            assert_eq!(walked, 0, "n={n}: no entry to walk");
+            let mut none = 0;
+            r6.for_each_doc(0, |_, _| none += 1);
+            assert_eq!(none, 0);
+            // The file the build writes from the positional one: identical.
+            assert_eq!(to_docs_only(&b5).unwrap(), b6, "n={n}: to_docs_only");
+            assert_eq!(to_docs_only(&b6).unwrap(), b6, "n={n}: WSP6 stays itself");
+        }
+    }
+
 }

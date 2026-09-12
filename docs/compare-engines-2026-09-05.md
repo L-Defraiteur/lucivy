@@ -26,9 +26,21 @@ Corpus: 93 983 files, 857 MB of text (text files of 100 KB at most, no binarie
 | `printk` | start of token | 4 460 | **4 460** OK | 24 719 | 66 ms | 3 167 · 16 ms | 4 407 · 0 ms |
 | `schdule` | fuzzy, 1 edit | 5 196 | **5 196** OK | 18 825 | 49 ms | 1 544 · 10 ms | 3 746 · 5 ms |
 | `regsiter` | fuzzy, 2 edits | 34 451 | **34 451** OK | 265 797 | 793 ms | 21 321 · 26 ms | 29 291 · 16 ms |
-| `spin_lock_[a-z]+` | regex | 5 510 | **5 510** OK | 24 368 | 219 ms | 5 440 · 480 ms | 0 · 0 ms |
+| `spin_lock_[a-z]+` | regex, case folded | 5 510 | **5 510** OK | 24 368 | 219 ms | **5 510** · 1 ms (corrected 12 September, note below) | 0 · 0 ms |
 
 lucivy's time is the search alone (documents and every span); Elasticsearch's is its own `took`, first run of each query; tantivy's is the count, or for substrings the whole verified path (see §3). Whole-word and prefix counts depend on each engine's definition of a word: lucivy's harness counts `sched` bounded by separators on both sides; the standard analyzer keeps `sched_clock` as one term and splits on `/`, so its whole-word and prefix rows are close but not equal. Elasticsearch runs the substring rows on its trigram index and the whole-word, prefix and fuzzy rows on its standard one; tantivy likewise. A fuzzy row that is not bold is not a miscount: their fuzziness compares whole terms, lucivy's a substring that may cross a separator — the questions differ, and the row shows by how much.
+
+**Correction, 12 September 2026.** This report first read `5 440 · 480 ms` for Elasticsearch on the
+regex row, and the READMEs said it fell `70 short`. That was our pattern, not a defect of the
+`wildcard` field. The truth of the row is case-insensitive (the harness folds case, as lucivy's
+engine does), and Lucene's `case_insensitive: true` folds a pattern's **literals** but not its
+**character classes**: `spin_lock_` matched `SPIN_LOCK_` while `[a-z]+` refused `UNLOCKED`, so the
+70 documents whose only match is uppercase were correctly left out. Written `[a-zA-Z]+`, or with no
+class at all, Elasticsearch returns 5 510 — every document, in 1 ms on a warm index (the 480 ms we
+published was a first, cold execution). Checked against the bytes Elasticsearch itself holds: its
+93 983 stored values scanned, 5 440 case-sensitive, 5 510 case-insensitive, zero missed, zero extra.
+It reproduces on a `keyword` field too, so it is not the field type. Four-line repro and the whole
+verification: `docs/12-09-2026/01-elasticsearch-regex-casse.md`.
 
 ## 3. Where the questions differ
 
@@ -37,7 +49,7 @@ lucivy's time is the search alone (documents and every span); Elasticsearch's is
 | `spin_lock`, separators strict | 6 569 | **6 569** OK, 34 667 spans, 12 ms | **6 569** (spin_lock, separators strict, 10 ms) | **6 569** (spin_lock (substring), 117 ms)<br>**6 569** (spin_lock (trigrams, verified, strict), 116 ms) |
 | `spin_lock`, separators relaxed — also `spin lock`, `spin-lock`, `spinlock` | 9 552 | **9 552** OK, 55 263 spans, 23 ms | 6 577 (spin_lock, separators relaxed (spin_lock, spin lock, spin-lock, spinlock), 5 ms)<br>173 ("spin lock" as a phrase, standard analyzer, 1 ms) | 6 577 (spinlock (trigrams, verified; must find spin_lock too), 115 ms)<br>6 601 ("spin lock" (phrase, default tokenizer), 1 ms) |
 | `spinlokc`, two edits, across the token boundary | 10 034 | **10 034** OK, 57 261 spans, 148 ms | 3 549 (spinlokc, two edits, across the token boundary, 25 ms) | 6 557 (spinlokc (fuzzy, 2 edits, across the boundary), 16 ms) |
-| `spin_lock_[a-z]+`, a regex | 5 510 | **5 510** OK, 24 368 spans, 219 ms | 5 440 (spin_lock_[a-z]+ (regex, wildcard field), 1 ms) | 0 (spin_lock_[a-z]+ (regex, terms), 0 ms) |
+| `spin_lock_[a-z]+`, a regex, case folded | 5 510 | **5 510** OK, 24 368 spans, 219 ms | **5 510** (regex on the wildcard field, written `[a-zA-Z]+`, 1 ms) | 0 (spin_lock_[a-z]+ (regex, terms), 0 ms) |
 | `ude`, three characters | 69 245 | **69 245** OK, 466 094 spans, 93 ms | **69 245** (ude (three characters), 0 ms) | **69 245** (ude (three characters), 0 ms) |
 | `de`, two characters | 93 009 | **93 009** OK, 7 695 534 spans, 561 ms | 0 (de (two characters), 1 ms) | 0 (de (two characters), 0 ms) |
 | `retur -ENOMEM`, a fuzzy phrase (one edit: a letter missing) | 14 449 | **14 449** OK, 32 119 spans, 30 ms | 14 446 (retur -ENOMEM (fuzzy phrase: span_near of a fuzzy span and a term), 24 ms) | — |

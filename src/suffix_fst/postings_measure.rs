@@ -28,6 +28,44 @@ struct Tally {
     without_spans: u64,
     /// Files whose layout carries the spans (`SFP2`-`SFP4`, `WSP2`-`WSP4`).
     spanned_files: usize,
+    /// Distinct `(term, doc)` pairs: what a documents-only layout would hold.
+    doc_pairs: u64,
+    /// Bytes of those pairs as `varint(doc delta) + varint(tf)`, per term —
+    /// the estimate of a documents-only layout before any block packing.
+    doc_only: u64,
+}
+
+fn varint_len(mut v: u64) -> u64 {
+    let mut n = 1;
+    while v >= 0x80 { v >>= 7; n += 1; }
+    n
+}
+
+/// Fold one `(term ordinal, doc)` occurrence into the documents-only tally:
+/// a new pair costs its doc delta, every occurrence a tf increment (priced
+/// when the pair closes).
+struct DocOnly { prev_doc: Option<u32>, tf: u64, pairs: u64, bytes: u64 }
+impl DocOnly {
+    fn new() -> Self { DocOnly { prev_doc: None, tf: 0, pairs: 0, bytes: 0 } }
+    fn see(&mut self, doc: u32) {
+        match self.prev_doc {
+            Some(d) if d == doc => { self.tf += 1; }
+            prev => {
+                if prev.is_some() { self.bytes += varint_len(self.tf); }
+                let delta = prev.map(|d| doc.abs_diff(d) as u64).unwrap_or(doc as u64);
+                self.bytes += varint_len(delta);
+                self.pairs += 1;
+                self.prev_doc = Some(doc);
+                self.tf = 1;
+            }
+        }
+    }
+    fn close(&mut self, t: &mut Tally) {
+        if self.prev_doc.is_some() { self.bytes += varint_len(self.tf); }
+        t.doc_pairs += self.pairs;
+        t.doc_only += self.bytes;
+        *self = DocOnly::new();
+    }
 }
 
 fn mb(b: u64) -> f64 { b as f64 / 1048576.0 }
@@ -42,12 +80,15 @@ fn measure_sfxpost(bytes: &[u8], t: &mut Tally) {
     let mut full = if spanned { SfxPostWriterV2::new(n) } else { SfxPostWriterV2::positions_only(n) };
     let mut bare = SfxPostWriterV2::positions_only(n);
     let mut entries = 0u64;
+    let mut docs = DocOnly::new();
     for ordinal in 0..n as u32 {
         reader.for_each_entry(ordinal, |doc, ti, bf, bt| {
             full.add_entry(ordinal, doc, ti, bf, bt);
             bare.add_position(ordinal, doc, ti);
+            docs.see(doc);
             entries += 1;
         });
+        docs.close(t);
     }
     t.files += 1;
     t.spanned_files += spanned as usize;
@@ -65,12 +106,15 @@ fn measure_word_sfxpost(bytes: &[u8], t: &mut Tally) {
     let mut full = if spanned { WordSfxPostWriter::with_byte_spans(n) } else { WordSfxPostWriter::new(n) };
     let mut bare = WordSfxPostWriter::new(n);
     let mut entries = 0u64;
+    let mut docs = DocOnly::new();
     for ordinal in 0..n as u32 {
         reader.for_each_entry(ordinal, |e| {
+            docs.see(e.doc_id);
             full.add(ordinal, e.clone());
             bare.add(ordinal, WordPostingEntry { byte_from: 0, byte_to: 0, ..e });
             entries += 1;
         });
+        docs.close(t);
     }
     t.files += 1;
     t.spanned_files += spanned as usize;
@@ -86,6 +130,10 @@ fn report(name: &str, t: &Tally) {
         t.reencoded as f64 / t.entries.max(1) as f64,
         mb(t.without_spans), t.without_spans as f64 / t.entries.max(1) as f64,
         100.0 * (1.0 - t.without_spans as f64 / t.reencoded.max(1) as f64));
+    eprintln!("{name}: documents only — {} (term, doc) pairs ({:.2} positions per pair), {:.1} MB as varint deltas + tf ({:.2} B/pair, -{:.1} % against positions only)",
+        t.doc_pairs, t.entries as f64 / t.doc_pairs.max(1) as f64, mb(t.doc_only),
+        t.doc_only as f64 / t.doc_pairs.max(1) as f64,
+        100.0 * (1.0 - t.doc_only as f64 / t.without_spans.max(1) as f64));
 }
 
 /// `LUCIVY_POSTINGS_DIR` names an index directory (one shard): every

@@ -1240,7 +1240,7 @@ V3_CORPUS=/tmp/linux-bench V3_SFX_VERSION=4 cargo test --release -p lucivy-core 
       <tr><th>asked</th><th>truth (scan)</th><th class="fast">lucivy</th><th>Elasticsearch</th><th>tantivy</th></tr>
       <tr><td><code>spin_lock</code>, separators relaxed &mdash; also <code>spin lock</code>, <code>spin-lock</code>, <code>spinlock</code></td><td>9 552</td><td class="fast"><b>9 552</b>, 23 ms</td><td>6 577 &mdash; not with this analyzer: its trigrams carry the underscore</td><td>6 601 &mdash; relaxed is its only mode, the separator never enters its index</td></tr>
       <tr><td><code>spinlokc</code>, two edits, across the token boundary</td><td>10 034</td><td class="fast"><b>10 034</b>, 148 ms</td><td>3 549 &mdash; fuzziness compares whole terms</td><td>6 557 &mdash; same</td></tr>
-      <tr><td><code>spin_lock_[a-z]+</code>, a regex</td><td>5 510</td><td class="fast"><b>5 510</b>, 219 ms</td><td>5 440 (wildcard field, 70 short), 480 ms</td><td>0 &mdash; the terms are already cut</td></tr>
+      <tr><td><code>spin_lock_[a-z]+</code>, a regex, case folded</td><td>5 510</td><td class="fast"><b>5 510</b>, 219 ms</td><td>5 510 on the wildcard field, 1 ms warm &mdash; written <code>[a-zA-Z]+</code>: Lucene's <code>case_insensitive</code> folds a pattern's literals, not its character classes</td><td>0 &mdash; the terms are already cut</td></tr>
       <tr><td><code>de</code>, two characters</td><td>93 009</td><td class="fast"><b>93 009</b>, 7.7 M spans, 561 ms</td><td>0, silently</td><td>0, silently</td></tr>
       <tr><td><code>retur -ENOMEM</code>, a fuzzy phrase</td><td>14 449</td><td class="fast"><b>14 449</b>, 30 ms</td><td>14 446 (<code>span_near</code>), 24 ms &mdash; it does this well</td><td>&mdash;</td></tr>
       <tr><td><b>where it matched</b>: <code>mutex_lock</code>, 5 145 documents</td><td>20 797 spans</td><td class="fast"><b>all 20 797, 15 ms</b></td><td><code>highlight</code> on the top 200: 179 ms</td><td>5 145 stored texts re-read: 96 ms</td></tr>
@@ -1876,7 +1876,7 @@ async function startup() {
     // Cache-buster: GitHub Pages caches the worker and the wasm for a while,
     // and a phone kept a whole build behind after a deploy. Bumped at each
     // engine or worker change; the query rides through to the wasm.
-    const BUILD = '4.0.2-a13f17f';
+    const BUILD = '4.1.0-ebf80c9';
     lucivy = new Lucivy(`./js/lucivy-worker.js?v=${BUILD}`, {
       noOpfs: startupParams.has('noopfs'),
       verbose: startupParams.has('verbose'), // engine diagnostics (LUCIVY_VERBOSE, V3_PROFILE)
@@ -2668,6 +2668,10 @@ async function indexFiles(files, path, label, keep, opts = {}) {
   // `?ram`: the three derived sidecars are not written to OPFS but rebuilt in
   // memory when the index opens (about a third less OPFS; the open pays).
   const derivedInRam = opts.derivedInRam ?? params.has('ram');
+  // `?nopos`: the postings keep each token's documents and frequencies, not
+  // its positions, and no position sidecar is written (about half the OPFS on
+  // the kernel); every match is verified on the stored text. Excludes `?ram`.
+  const positions = opts.positions ?? !params.has('nopos');
   // `?commit=N` — commit every N files instead of 2 000 (more generations
   // of the dictionary, hence its compaction, on a corpus that fits a tab).
   const COMMIT_EVERY = Math.max(1, parseInt(params.get('commit') || '2000', 10) || 2000);
@@ -2686,9 +2690,11 @@ async function indexFiles(files, path, label, keep, opts = {}) {
     shards: 4,
     shared_dictionary: sharedDictionary,
     derived_in_ram: derivedInRam,
+    positions,
   });
   if (sharedDictionary) console.log('[playground] shared_dictionary: true');
   if (derivedInRam) console.log('[playground] derived_in_ram: true');
+  if (!positions) console.log('[playground] positions: false');
   if (COMMIT_EVERY !== 2000 || COMMIT_BYTES !== 8 * 1048576) console.log(`[playground] commit every ${COMMIT_EVERY} files or ${(COMMIT_BYTES / 1048576).toFixed(0)} MB of text`);
   let sinceCommitFiles = 0, sinceCommitBytes = 0, commits = 0;
   for (let i = 0; i < files.length; i++) {
@@ -2901,7 +2907,7 @@ const term = {
 // happening. Cosmetic, never on real output, off under reduced motion.
 const GLITCH_BASE = [
   ' ▚▞▚▞  l u c i v y  ▞▚▞▚      substring search · suffix FST · Rust → WASM',
-  ' ░▒▓█  4.0.2  █▓▒░           01101100 01110101 01100011 01101001 01110110 01111001',
+  ' ░▒▓█  4.1.0  █▓▒░           01101100 01110101 01100011 01101001 01110110 01111001',
   ' ∿ ⌁ ⟁  bm25 · fuzzy · regex · spans  ⟁ ⌁ ∿',
 ];
 const GLITCH_CHARS = '▚▞░▒▓█∿⌁⟁╳◌◍⋮⋯01';

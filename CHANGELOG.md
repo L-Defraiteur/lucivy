@@ -1,3 +1,64 @@
+Lucivy 4.1.0 — to be dated at the tag
+=====================================
+
+- **`positions: false`: an index without positions, half the size.** An
+  option of creation, in every binding — Python `Index.create(...,
+  positions=False)` and `create_with_blob_store`, Node `Index.create(path,
+  fields, { positions: false })` and the `BlobIndex` option `positions`, C++ and the browser in the schema
+  object. The postings keep each token's documents and term frequencies
+  (`SFP6`, `WSP6`) instead of its positions, and `.posmap`, `.word_pos_map`
+  and `.sibling_v3` are not written. The whole Linux kernel (Linux 7.2,
+  101 141 files, 941 MB of text): **5 289 MB → 2 603 MB, ×2.77 the text**
+  (−37 % on 10 000 files, −41 % on 30 000: the gain grows with the corpus).
+  A query takes its candidate documents from the index — the FST phase reads
+  no position — and verifies every one on the stored text with the ground
+  truth's own definitions: same documents, same spans, same scores (the
+  ground-truth panel 10/10 on 10 000 files, 30 000 and the kernel;
+  `test_positions_off`; the Python, Node and C++ binding tests). Literal
+  queries cost more as they find more documents — each is read again for its
+  positions: ×2-3 on the kernel, 27-56 ms — and so does a fuzzy query whose
+  pigeonhole piece is common (×4); a regex (×0.09), a fuzzy query at two edits
+  (×0.45) and the two-character `de` (100 166 documents, 7.9 M spans, ×0.5)
+  are faster. Every text field must be stored (the default); excludes `derived_in_ram`.
+  Fixed at creation; an index created with it cannot be searched by 4.0.x (it opens, and every search fails: `sfxpost: invalid V2 format`).
+- **Node: `Index.create(path, fields, { positions: false, shards: 4, … })`** — the
+  options as one object (`IndexOptions`, typed) in place of the positional
+  arguments after `fields`; giving both is refused. The positional form stays.
+- **`stored` left out means stored** for `positions: false`: the check refused a
+  text field without an explicit `"stored": true`, while the index stores such a
+  field by default; only `"stored": false` is refused now.
+- **Playground `?nopos`**: the page's index built without positions. Checked in
+  Chrome with the WASM build: 2 000 kernel files 268 → 174 MB, 10 000 files
+  1 052 → 638 MB (indexed in 37 s instead of 43, memory peak unchanged, the
+  merges past 2 000 documents fine); the 21-query parity panel returns the same
+  counts, top 10, scores and spans on both indexes, except equal scores ordered
+  otherwise and spans the default index returned twice (the fix below).
+- **Fix: one occurrence, one span (default index, relaxed mode).** A needle
+  that ends a word cut into chunks — `lock` in `superblock`, chunks `super` +
+  `block` — was found twice by the literal phase, through the word's entry and
+  through its last chunk, with the same bytes; the deduplication was keyed by
+  position, so both stayed: the span came back twice and counted twice in the
+  term frequency (so in the BM25 score and the order). 542 duplicated spans for
+  `lock` and 68 for `init` over 10 000 kernel files; present since the v3
+  engine, 4.0.2 included. Found by comparing the default index with the index
+  without positions, which verifies on the stored text and never had it. Now
+  one entry per occurrence, keyed by its bytes. The ground-truth harness
+  compared spans as sets and could not see a duplicate: it counts them as
+  extra spans now — the full panel is 10/10 on 10 000 files in the three
+  layouts (dictionary, without positions, v3). Test `test_relaxed_duplicate_spans`;
+  `de` +4 % (27 ms against 26).
+- **`fuzzy_spans_long`**, the bit-parallel last row (Myers) and a windowed
+  Jaro-Winkler: the same occurrences as the full matrix, in memory linear in
+  the text — a stored value can be megabytes long.
+- **CI: one definition of green.** `ci.yml` runs on every push to `main` and to
+  a release branch and on every pull request to `main`, and now runs the whole
+  `lucivy-core` suite, `lucivy-cpp`, the Python test suite and every Node test
+  file (before: smoke scripts, and the core suite only at the tag); `build.yml`
+  builds the five platforms and the wasm package on pull requests; `release.yml`
+  calls both before publishing instead of carrying its own copy (`checks`).
+- The ground-truth harness: `V3_POSITIONS=0`; `V3_DIAG_STORED=1` traces, per
+  segment, the candidates and the stored text read.
+
 Lucivy 4.0.2 — 6 September 2026
 ================================
 

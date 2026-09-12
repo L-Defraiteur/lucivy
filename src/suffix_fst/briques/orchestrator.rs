@@ -182,11 +182,7 @@ pub fn contains_v3(
         }
     }
 
-    // Dedup exact duplicates. Two occurrences can share a position — the
-    // query twice inside one word, `INIT2INIT` for `init` — and differ only
-    // by their byte offset; both are real.
-    matches.sort_by_key(|m| (m.doc_id, m.position, m.byte_from));
-    matches.dedup_by_key(|m| (m.doc_id, m.position, m.byte_from));
+    dedup_occurrences(&mut matches);
 
     // exact_match reads `token_end`, never the match span: `term` means "the query
     // covers the whole token", which is a statement about the container, not about
@@ -371,9 +367,29 @@ fn verify_literal(
     });
     _t.stop(|c| &c.ns_verify);
     if refolded {
-        matches.sort_by_key(|m| (m.doc_id, m.position, m.byte_from));
-        matches.dedup_by_key(|m| (m.doc_id, m.position, m.byte_from));
+        dedup_occurrences(matches);
     }
+}
+
+/// One entry per occurrence. Two occurrences can share a position — the
+/// query twice inside one word, `INIT2INIT` for `init` — and differ by their
+/// bytes: both stay. One occurrence can also come out twice at different
+/// positions: in relaxed mode a needle that ends a word cut into chunks
+/// (`lock` in `superblock`, chunks `super` + `block`) is found through the
+/// word's entry, at the position of its first chunk, and through the last
+/// chunk — the same bytes, one occurrence. Keyed by position, as up to
+/// 4.0.2, both survived and the span counted twice, in the highlights and
+/// in the term frequency. A match `place_spans` could not place (no bytes)
+/// keeps its position as its identity. Leaves the matches in (doc_id,
+/// position, byte_from) order.
+fn dedup_occurrences(matches: &mut Vec<MatchV3>) {
+    let key = |m: &MatchV3| {
+        let unplaced = if m.byte_to > m.byte_from { 0 } else { m.position as u64 + 1 };
+        (m.doc_id, m.byte_from, m.byte_to, unplaced)
+    };
+    matches.sort_by_key(|m| (key(m), m.position));
+    matches.dedup_by_key(|m| key(m));
+    matches.sort_by_key(|m| (m.doc_id, m.position, m.byte_from));
 }
 
 // ─── fuzzy_v3 ─────────────────────────────────────────────────────────────

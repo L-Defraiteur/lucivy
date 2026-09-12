@@ -32,10 +32,18 @@ relisant le texte stocké des candidats — la méthode de tantivy, mais avec un
 ensemble de candidats **exact** venu de la FST au lieu d'un AND de trigrammes
 trop large (40 741 candidats sur 93 983 pour `#include <linux/` chez lui).
 
-**Ce qui tombe.** La plus grande partie des deux postings (positions →
-docs + tf) et les trois dérivés, qui ne servent qu'à transformer une position
-en octets : de l'ordre de 2 500 à 3 000 Mo sur le noyau, soit un index vers
-×2 à ×2,5 le texte. À mesurer.
+**Ce qui tombe — mesuré le 8 septembre** (`postings_measure.rs`, tally
+« documents only » : paires (terme, doc) distinctes, encodées en varint de
+delta + tf, sur l'index du noyau) :
+
+| postings | positions (aujourd'hui) | documents seulement | gain |
+|---|---|---|---|
+| `.sfxpost` | 771 Mo, 167,0 M d'entrées | 168 Mo, 76,0 M de paires (2,20 positions par paire, 2,32 o/paire) | −78 % |
+| `.word_sfxpost` | 626 Mo, 136,7 M d'entrées | 128 Mo, 58,3 M de paires (2,35 par paire, 2,29 o/paire) | −80 % |
+
+1 100 Mo de postings en moins, plus les trois dérivés (1 667 Mo) qui n'ont
+plus d'objet : **5 156 → ≈ 2 400 Mo, ×2,8 le texte au lieu de ×6**, avant
+tout compactage par blocs des ids.
 
 **Ce que ça coûte.** Les comptes restent exacts et rapides (ensembles de
 documents). Les spans passent de 15 ms à l'ordre de 100 ms sur `mutex_lock`

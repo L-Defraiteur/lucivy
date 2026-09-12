@@ -122,7 +122,7 @@ impl<'a> DeltaExporter for LucivyDeltaExporter<'a> {
             .ok_or_else(|| format!("segment {bundle_id} not found in meta"))?;
 
         let mut files = Vec::new();
-        for rel_path in seg_meta.list_files_for(meta.index_settings.sfx_version, meta.index_settings.derived_in_ram) {
+        for rel_path in seg_meta.list_files_for(meta.index_settings.sfx_version, meta.index_settings.skips_derived_files()) {
             let full_path = self.index_path.join(&rel_path);
             if full_path.exists() {
                 let name = rel_path.to_string_lossy().to_string();

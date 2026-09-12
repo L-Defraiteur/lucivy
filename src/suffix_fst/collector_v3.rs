@@ -75,6 +75,11 @@ pub struct SfxCollectorV3 {
     // of the query the first token consumes, excluding overlap).
     // Collected during add_value, remapped to final ordinals in into_data.
     sibling_pairs: Vec<(u32, u32)>,
+    /// `false` on an index without positions (`IndexSettings::positions`):
+    /// no sibling pair is collected and neither `.word_pos_map` nor
+    /// `.sibling_v3` is built — nothing reads them — and the word postings
+    /// are written as documents and frequencies (`WSP6`) directly.
+    positions: bool,
 
     // Per-document state
     doc_active: bool,
@@ -155,6 +160,7 @@ impl SfxCollectorV3 {
             word_stripped_entries: Vec::new(),
             word_postings: Vec::new(),
             sibling_pairs: Vec::new(), // (intern_a, intern_b)
+            positions: true,
             doc_active: false,
             current_doc_id: 0,
             current_value_ti_start: 0,
@@ -166,6 +172,13 @@ impl SfxCollectorV3 {
             global_ids: Vec::new(),
             minted: Vec::new(),
         }
+    }
+
+    /// Collect for an index without positions (`positions: false`): see
+    /// the `positions` field.
+    pub fn without_positions(mut self) -> Self {
+        self.positions = false;
+        self
     }
 
     /// Intern against a shard dictionary: ordinals become global ids.
@@ -309,9 +322,11 @@ impl SfxCollectorV3 {
         // content_len = destination chunk's content length (used by DFS)
         // The destination's content length, once carried here for the DFS,
         // is read from `.termtexts` META since 4 September 2026.
-        for w in chunk_intern_ids.windows(2) {
-            self.mem_estimate += SIBLING_PAIR_BYTES;
-            self.sibling_pairs.push((w[0], w[1]));
+        if self.positions {
+            for w in chunk_intern_ids.windows(2) {
+                self.mem_estimate += SIBLING_PAIR_BYTES;
+                self.sibling_pairs.push((w[0], w[1]));
+            }
         }
 
         // Build word-level stripped entries from this value's chunks.
@@ -506,9 +521,11 @@ impl SfxCollectorV3 {
             // Collect word sibling pairs: consecutive words in the same value
             // content_len = destination word's content length (used by DFS to
             // know how many bytes of the sibling's text are content vs overlap)
-            for w in ws_intern_sequence.windows(2) {
-                self.mem_estimate += SIBLING_PAIR_BYTES;
-                self.sibling_pairs.push((w[0].0, w[1].0));
+            if self.positions {
+                for w in ws_intern_sequence.windows(2) {
+                    self.mem_estimate += SIBLING_PAIR_BYTES;
+                    self.sibling_pairs.push((w[0].0, w[1].0));
+                }
             }
         }
 
@@ -761,9 +778,11 @@ impl SfxCollectorV3 {
         // Build word postings (WordSfxPost) — now that ordinals are assigned.
         // Word postings were captured directly in add_value() where we know the
         // exact word identity. No content_key join needed — zero cross-word leaks.
-        let mut word_sfxpost_writer = crate::suffix_fst::word_sfxpost::WordSfxPostWriter::new(
-            final_ord as usize,
-        );
+        let mut word_sfxpost_writer = if self.positions {
+            crate::suffix_fst::word_sfxpost::WordSfxPostWriter::new(final_ord as usize)
+        } else {
+            crate::suffix_fst::word_sfxpost::WordSfxPostWriter::docs_only(final_ord as usize)
+        };
         // word_pos_map is fed from the same loop, so it is the exact inverse of
         // word_sfxpost by construction.
         let mut word_pos_map = crate::suffix_fst::word_pos_map::WordPosMapWriter::new();
@@ -780,13 +799,15 @@ impl SfxCollectorV3 {
                         byte_to: bt,
                         tail_off,
                     });
-                    word_pos_map.add_word(doc_id, first_ti, last_ti, ws_final_ord);
+                    if self.positions {
+                        word_pos_map.add_word(doc_id, first_ti, last_ti, ws_final_ord);
+                    }
                 }
             }
         }
         let word_sfxpost_data = word_sfxpost_writer.finish();
 
-        let word_pos_map_data = word_pos_map.serialize();
+        let word_pos_map_data = if self.positions { word_pos_map.serialize() } else { Vec::new() };
 
         // Build sibling table v3: remap intern ordinals to final ordinals
         // Sibling table v3: gap_len field stores content_len of the source ordinal
@@ -799,7 +820,7 @@ impl SfxCollectorV3 {
             let fb = intern_to_final[b as usize];
             sibling_writer.add(fa, fb, 0);
         }
-        let sibling_v3_data = sibling_writer.serialize();
+        let sibling_v3_data = if self.positions { sibling_writer.serialize() } else { Vec::new() };
 
         // What `.termtexts` STATS says for a segment with its own texts,
         // kept in the `.gmap` of a dictionary segment (see `gmap.rs`).
@@ -828,6 +849,7 @@ impl SfxCollectorV3 {
             globals: if dictionary_mode { Some(globals) } else { None },
             newtexts,
             max_word_content_len,
+            positions: self.positions,
         }
     }
 
@@ -922,6 +944,11 @@ pub struct SfxCollectorDataV3 {
     /// Longest word-stripped content of the segment, when known: written
     /// in the `.gmap` of a dictionary segment (`.termtexts` STATS otherwise).
     pub max_word_content_len: Option<u16>,
+    /// Whether the postings are written with their positions (`SFP5`,
+    /// `WSP5`) or as documents and term frequencies (`SFP6`, `WSP6`,
+    /// `IndexSettings::positions`). Set by the segment writer from the
+    /// index settings; a merge keeps its sources' layout.
+    pub positions: bool,
 }
 
 /// Build word-level stripped entries from token data.

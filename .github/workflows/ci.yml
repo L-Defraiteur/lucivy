@@ -1,16 +1,20 @@
 name: CI
 
+# Is the code right: every push on main and on a release branch (`v4.1`…),
+# every pull request to main, and called by release.yml before it publishes —
+# the gate of a release is this file itself, not a copy of it.
 on:
   push:
-    branches: [main, v2-alpha]
+    branches: [main, 'v*']
   pull_request:
-    branches: [main, v2-alpha]
+    branches: [main]
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -69,6 +73,24 @@ jobs:
       - name: Clippy (the crates we write)
         run: cargo clippy -p lucivy-core -p lucistore -p luciole -p sparse-vector --lib -- -D warnings
 
+  # The core's own suite: the option matrix (v3, shared dictionary,
+  # derived_in_ram, positions: false), the 3.0.8 fixture, filtered and
+  # federated search, the blob store… — and the C++ binding's Rust tests.
+  # Until 4.1 only the release ran it, at the tag.
+  core:
+    runs-on: ubuntu-latest
+    name: lucivy-core and lucivy-cpp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: core
+      - name: lucivy-core
+        run: cargo test -p lucivy-core --no-fail-fast
+      - name: lucivy-cpp
+        run: cargo test -p lucivy-cpp
+
   # Ground truth on the repository's own source: every count and every span
   # of a fixed panel (strict, relaxed, fuzzy, regex) compared with a byte-level
   # grep. No timing is asserted — shared runners cannot measure that — only
@@ -118,6 +140,7 @@ jobs:
             echo "Use #[cfg(not(target_arch = \"wasm32\"))] if native-only."
           fi
 
+  # The binding's own test suite (pytest), on the wheel built in place.
   lucivy-python:
     runs-on: ubuntu-latest
     name: lucivy-python
@@ -135,11 +158,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install maturin + create venv
+      - name: Install maturin and pytest
         run: |
           python3 -m venv .venv
           . .venv/bin/activate
-          pip install maturin
+          pip install maturin pytest
 
       - name: Build lucivy
         run: |
@@ -149,136 +172,9 @@ jobs:
       - name: Test lucivy
         run: |
           . .venv/bin/activate
-          python3 -c "
-          import lucivy
+          cd bindings/python && python -m pytest tests -q
 
-          # Create index
-          idx = lucivy.Index.create('/tmp/ci_test', fields=[
-              {'name': 'title', 'type': 'text'},
-              {'name': 'body', 'type': 'text'},
-              {'name': 'price', 'type': 'f64'},
-          ])
-
-          # Add docs
-          idx.add(1, title='Rust programming guide', body='Learn systems programming with Rust', price=29.99)
-          idx.add(2, title='Python for data science', body='Data analysis with pandas and numpy', price=19.99)
-          idx.add(3, title='C++ template metaprogramming', body='Advanced C++ techniques', price=39.99)
-          idx.commit()
-          assert idx.num_docs == 3, f'Expected 3 docs, got {idx.num_docs}'
-
-          # contains_split (default string query)
-          results = idx.search('rust program', limit=10)
-          assert len(results) >= 1, 'contains_split should find results'
-          assert results[0].doc_id == 1, 'doc 1 should be top result'
-
-          # highlights
-          results = idx.search('rust', limit=10, highlights=True)
-          assert len(results) >= 1
-          assert results[0].highlights is not None
-          assert 'title' in results[0].highlights
-
-          # fuzzy (typo)
-          results = idx.search({'type': 'contains', 'field': 'body', 'value': 'programing', 'distance': 1}, limit=10)
-          assert len(results) >= 1, 'fuzzy should catch typo'
-
-          # regex
-          results = idx.search({'type': 'contains', 'field': 'title', 'value': 'program[a-z]+', 'regex': True}, limit=10)
-          assert len(results) >= 1, 'regex should match'
-
-          # allowed_ids
-          results = idx.search('programming', limit=10, allowed_ids=[1, 3])
-          assert all(r.doc_id in (1, 3) for r in results), 'should only return filtered IDs'
-
-          # fields — retrieve stored field values
-          results = idx.search('rust', limit=10, fields=True)
-          assert len(results) >= 1
-          assert results[0].fields is not None
-          assert 'title' in results[0].fields, f'expected title in fields, got {results[0].fields}'
-          assert 'Rust' in results[0].fields['title'], f'expected Rust in title, got {results[0].fields[\"title\"]}'
-
-          # fields + highlights together
-          results = idx.search('rust', limit=10, highlights=True, fields=True)
-          assert len(results) >= 1
-          assert results[0].highlights is not None
-          assert results[0].fields is not None
-
-          # v2 compat: term (cross-token exact match via SFX)
-          results = idx.search({'type': 'term', 'field': 'title', 'value': 'programming'}, limit=10)
-          assert len(results) >= 1, 'term compat should find results'
-
-          # v2 compat: fuzzy via query type
-          results = idx.search({'type': 'fuzzy', 'field': 'body', 'value': 'programing'}, limit=10)
-          assert len(results) >= 1, 'fuzzy compat should catch typo'
-
-          # v2 compat: phrase
-          results = idx.search({'type': 'phrase', 'field': 'body', 'value': 'systems programming'}, limit=10)
-          assert len(results) >= 1, 'phrase compat should find sequence'
-
-          # v2: anchor_start (startsWith behavior)
-          results = idx.search({'type': 'contains', 'field': 'title', 'value': 'rust', 'anchor_start': True}, limit=10)
-          assert len(results) >= 1, 'anchor_start should find Rust'
-
-          # v2: startsWith compat
-          results = idx.search({'type': 'startsWith', 'field': 'title', 'value': 'rust'}, limit=10)
-          assert len(results) >= 1, 'startsWith compat should work'
-
-          # snapshot round-trip
-          snapshot = idx.export_snapshot()
-          assert len(snapshot) > 0, 'snapshot should not be empty'
-          idx2 = lucivy.Index.import_snapshot(snapshot, '/tmp/ci_test_snap')
-          assert idx2.num_docs == idx.num_docs, 'snapshot should preserve docs'
-          results2 = idx2.search('rust', limit=10)
-          assert len(results2) >= 1, 'snapshot index should be searchable'
-
-          # delete + update
-          idx.delete(2)
-          idx.update(3, title='Modern C++', body='C++ best practices')
-          idx.commit()
-          assert idx.num_docs == 2
-
-          # ── Sharded index ──
-          sidx = lucivy.Index.create('/tmp/ci_sharded', fields=[
-              {'name': 'title', 'type': 'text'},
-              {'name': 'body', 'type': 'text'},
-          ], shards=2)
-          for i in range(20):
-              sidx.add(i, title=f'Doc {i}', body=f'Content for document number {i} about programming')
-          sidx.commit()
-          assert sidx.num_docs == 20, f'Expected 20 sharded docs, got {sidx.num_docs}'
-
-          results = sidx.search('programming', limit=10)
-          assert len(results) >= 1, 'sharded search should find results'
-
-          results = sidx.search({'type': 'contains', 'field': 'body', 'value': 'document', 'distance': 1}, limit=10)
-          assert len(results) >= 1, 'sharded fuzzy should work'
-
-          # sharded snapshot round-trip
-          snap = sidx.export_snapshot()
-          sidx2 = lucivy.Index.import_snapshot(snap, '/tmp/ci_sharded_snap')
-          assert sidx2.num_docs == 20, f'sharded snapshot: expected 20, got {sidx2.num_docs}'
-          results = sidx2.search('programming', limit=10)
-          assert len(results) >= 1, 'sharded snapshot should be searchable'
-
-          # sharded delta sync
-          versions = sidx.shard_versions
-          assert len(versions) == 2, f'expected 2 shard versions, got {len(versions)}'
-
-          # ── Playground .luce import ──
-          import os
-          luce_path = os.path.join(os.getcwd(), 'playground', 'dataset.luce')
-          if os.path.exists(luce_path):
-              pidx = lucivy.Index.import_snapshot_from(luce_path, dest_path='/tmp/ci_playground')
-              assert pidx.num_docs > 0, f'playground snapshot should have docs, got {pidx.num_docs}'
-              results = pidx.search('function', limit=10)
-              assert len(results) >= 1, f'playground search should find results, got {len(results)}'
-              results = pidx.search({'type': 'contains', 'field': 'content', 'value': 'pub.*fn', 'regex': True}, limit=10)
-              print(f'Playground: {pidx.num_docs} docs, regex search returned {len(results)} results')
-          else:
-              print(f'SKIP: playground dataset.luce not found at {luce_path}')
-
-          print('All lucivy Python tests passed')
-          "
-
+  # Every Node test file, on the addon built in place.
   lucivy-nodejs:
     runs-on: ubuntu-latest
     name: lucivy-nodejs
@@ -304,7 +200,15 @@ jobs:
           cp target/release/liblucivy_napi.so bindings/nodejs/lucivy.node
 
       - name: Test lucivy-nodejs
-        run: node bindings/nodejs/test.mjs
+        run: |
+          cd bindings/nodejs
+          node test.mjs
+          for t in tests/v3_api.mjs tests/positions.mjs tests/shared_dictionary.mjs \
+                   tests/derived_in_ram.mjs tests/blob_store.mjs; do
+            echo "── $t"
+            node "$t"
+          done
+          node tests/smoke_warnings.mjs "$PWD/lucivy.node"
 
   lucivy-cpp:
     runs-on: ubuntu-latest

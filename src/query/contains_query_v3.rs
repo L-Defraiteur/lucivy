@@ -82,6 +82,12 @@ strict_separators: bool,
     let ns_sfx = t_open.elapsed().as_nanos() as u64;
     let t_open = std::time::Instant::now();
     let pr = crate::query::posting_resolver::build_resolver(seg_reader, field)?;
+    // An index without positions (`positions: false`): candidate documents
+    // from the index, every match verified on the stored text.
+    if !pr.has_positions() {
+        return crate::suffix_fst::briques::stored::contains_prescan(
+            seg_reader, reader, &*pr, field, query_text, anchor_start, exact_match, strict_separators);
+    }
     let ns_resolver = t_open.elapsed().as_nanos() as u64;
     let t_open = std::time::Instant::now();
 

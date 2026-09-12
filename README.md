@@ -1,4 +1,4 @@
-# lucivy 4.0.2
+# lucivy 4.1.0
 
 [![PyPI](https://img.shields.io/pypi/v/lucivy?label=PyPI&color=blue)](https://pypi.org/project/lucivy/)
 [![npm](https://img.shields.io/npm/v/lucivy?label=npm&color=cb3837)](https://www.npmjs.com/package/lucivy)
@@ -30,6 +30,23 @@ lucivy's own source from GitHub and indexes it in your browser in a few seconds.
 tab. The second half is typed by hand — `index postgres`, then `--strict
 "heap_insert"`, `"CREATE INDEX CONCURRENTLY"` (27 hits, 11 ms), `--fuzzy 1
 "vaccum"` (17 ms) and `--regex "ExecInit[A-Z][a-zA-Z]+\("` (20 ms).*
+
+### What's new in 4.1
+
+- **`positions: false` — an index half the size, the same answers.** An option
+  of creation: the postings keep each token's documents and frequencies, not its
+  positions, and no position sidecar is written; every match is verified on the
+  stored text with the ground truth's own definitions. The whole kernel (Linux
+  7.2, 101 141 files, 941 MB): **5 289 → 2 598 MB, ×2.8 the text**; literal
+  queries pay a re-read of the documents found (27-56 ms), a regex gets faster
+  (22 ms). In the browser, 10 000 kernel files take 637 MB of OPFS instead of
+  1 051. Python `positions=False`, Node `Index.create(path, fields, { positions:
+  false })`, C++ and the browser `"positions": false`.
+- **Fix: one occurrence, one span.** In relaxed mode a needle that ends a word
+  cut into chunks (`lock` in `superblock`) came back twice and counted twice in
+  the score — 542 duplicated spans for `lock` over 10 000 kernel files, 4.0.2
+  included. The ground-truth harness compared spans as sets and could not see
+  it; it counts duplicates now.
 
 ### What's new in 4.0.0
 
@@ -65,7 +82,7 @@ tab. The second half is typed by hand — `index postgres`, then `--strict
   3.0.x does not open a 4.0 index; the first commit in 4.0 converts without
   return.
 - One version number for the whole workspace: `ld-lucivy`, `lucivy-core`,
-  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.0.2.
+  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.1.0.
 
 3.0.x brought SFX v3 (exact byte spans on every query mode), boolean syntax,
 Jaro-Winkler, query warnings, bring-your-own-storage in every binding, snapshots
@@ -220,10 +237,21 @@ index = lucivy.Index.create("/tmp/compact", fields=[...], shared_dictionary=True
 # the index is opened. Same answers; opening pays the rebuild (never a
 # query), the rebuilt structures stay resident. Fixed at creation.
 index = lucivy.Index.create("/tmp/compact", fields=[...], shared_dictionary=True, derived_in_ram=True)
+
+# Half the size, with nothing rebuilt at open (4.1): positions=False keeps
+# each token's documents and frequencies, not its positions, and writes no
+# position sidecar — the whole kernel 5 289 → 2 598 MB. Every match is then
+# verified on the stored text: same documents, spans and scores; literal
+# queries pay a re-read of the documents found (11-19 → 27-56 ms on the
+# kernel), a regex gets faster (237 → 22 ms). Every text field must be
+# stored (the default); excludes derived_in_ram. Fixed at creation.
+index = lucivy.Index.create("/tmp/half", fields=[...], positions=False)
 ```
 
-Node: `Index.create(path, fields, shards, true, true)`; browser and C++:
-`shared_dictionary: true` and `derived_in_ram: true` in the config object.
+Node: `Index.create(path, fields, shards, true, true)` for `derived_in_ram`,
+`Index.create(path, fields, { positions: false })` for
+`positions: false`; browser and C++: `shared_dictionary`, `derived_in_ram`,
+`positions` in the config object.
 
 ### Sharded, distributed, synchronised
 
@@ -350,7 +378,7 @@ On the substring itself all three agree to the document (`mutex_lock` 5 145,
 |---|---|---|---|---|
 | `spin_lock`, separators relaxed (also `spin lock`, `spin-lock`, `spinlock`) | 9 552 | **9 552**, 23 ms | 6 577 — not with this analyzer: its trigrams carry the underscore | 6 601 — relaxed is the only mode it has: the separator never enters its index |
 | `spinlokc`, two edits, across the token boundary | 10 034 | **10 034**, 148 ms | 3 549 — fuzziness compares whole terms | 6 557 — same |
-| `spin_lock_[a-z]+`, a regex | 5 510 | **5 510**, 219 ms | 5 440 (wildcard field, 70 short), 480 ms | 0 — terms are already cut |
+| `spin_lock_[a-z]+`, a regex, case folded | 5 510 | **5 510**, 219 ms | 5 510 on the wildcard field, 1 ms warm — as `[a-zA-Z]+`: Lucene's `case_insensitive` folds a pattern's literals, not its character classes | 0 — terms are already cut |
 | `de`, two characters | 93 009 | **93 009**, 7.7 M spans, 561 ms | 0, silently | 0, silently |
 | `retur -ENOMEM`, a fuzzy phrase | 14 449 | **14 449**, 30 ms | 14 446 (`span_near`), 24 ms — it does this well | — |
 | **where it matched**: `mutex_lock`, 5 145 documents | 20 797 spans | **all 20 797, 15 ms** | `highlight` on the top 200: 179 ms | verifying 5 145 stored texts: 96 ms |

@@ -1,8 +1,13 @@
-# lucivy-wasm 4.0.2
+# lucivy-wasm 4.1.0
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. In the browser — the same engine as the native bindings, built with emscripten: **threads** (pthreads over SharedArrayBuffer), OPFS persistence, snapshot import. Runs in a Web Worker. MIT.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — it clones lucivy's own source from GitHub and indexes it in your browser.
+
+### What's new in 4.1
+
+- **`positions: false` in `IndexConfig` — about 40 % less OPFS** (typed in `lucivy.d.ts`). The postings keep each token's documents and frequencies instead of its positions, and no position sidecar is written; every match is verified on the stored text — same documents, spans and scores. Measured in Chrome on Linux kernel files: 2 000 files 268 → 174 MB, **10 000 files 1 052 → 638 MB**, indexed in 37 s instead of 43, the tab's memory peak unchanged (1.5 GB); the playground's 21-query parity panel returns the same counts, top 10, scores and spans on both indexes (the differences: equal scores ordered otherwise, and spans the default index of 4.0.2 returned twice — fixed in 4.1). Natively the whole kernel goes 5 289 → 2 598 MB. Every text field must be stored (the default); excludes `derived_in_ram`; fixed at creation. The playground builds its index this way with `?nopos`.
+- **Fix: one occurrence, one span.** In relaxed mode a needle that ends a word cut into chunks — `lock` in `superblock` — came back twice, and counted twice in the score (542 duplicated spans for `lock` over 10 000 kernel files, since the v3 engine, 4.0.2 included); the ground-truth harness now counts duplicates too
 
 ### What's new in 4.0.0
 
@@ -21,7 +26,7 @@ Same 93 983 Linux kernel files, 857 MB of text. Each engine is configured at its
 |---|---|---|---|---|
 | `spin_lock`, separators relaxed (also `spin lock`, `spin-lock`, `spinlock`) | 9 552 | **9 552**, 23 ms | 6 577 — not with this analyzer: its trigrams carry the underscore | 6 601 — relaxed is the only mode it has: the separator never enters its index |
 | `spinlokc`, two edits, across the token boundary | 10 034 | **10 034**, 148 ms | 3 549 — fuzziness compares whole terms | 6 557 — same |
-| `spin_lock_[a-z]+`, a regex | 5 510 | **5 510**, 219 ms | 5 440 (wildcard field, 70 short), 480 ms | 0 — terms are already cut |
+| `spin_lock_[a-z]+`, a regex, case folded | 5 510 | **5 510**, 219 ms | 5 510 on the wildcard field, 1 ms warm — as `[a-zA-Z]+`: Lucene's `case_insensitive` folds a pattern's literals, not its character classes | 0 — terms are already cut |
 | `de`, two characters | 93 009 | **93 009**, 7.7 M spans, 561 ms | 0, silently | 0, silently |
 | `retur -ENOMEM`, a fuzzy phrase | 14 449 | **14 449**, 30 ms | 14 446 (`span_near`), 24 ms — it does this well | — |
 | **where it matched**: `mutex_lock`, 5 145 documents | 20 797 spans | **all 20 797, 15 ms** | `highlight` on the top 200: 179 ms | verifying 5 145 stored texts: 96 ms |
@@ -126,6 +131,10 @@ const index = await lucivy.create('/my-index', {
     // derived_in_ram: true — the three derived sidecars of each segment
     // (about a third of the index) are rebuilt in memory when the index
     // opens instead of written to OPFS. Same answers. Off by default.
+    // positions: false (4.1) — documents and frequencies instead of
+    // positions, no position sidecar: about 40 % less OPFS; every match is
+    // verified on the stored text, same answers. Text fields must be stored
+    // (the default); excludes derived_in_ram. On by default.
 });
 
 // Open an existing index from OPFS

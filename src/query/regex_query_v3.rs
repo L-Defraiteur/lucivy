@@ -120,6 +120,12 @@ impl RegexQueryV3 {
         };
         let re = regex::RegexBuilder::new(&self.pattern).case_insensitive(true).build()
             .map_err(|e| crate::LucivyError::InvalidArgument(format!("regex: {e}")))?;
+        // An index without positions (`positions: false`): the literals'
+        // documents, the regex run on their stored values.
+        if !pr.has_positions() {
+            return crate::suffix_fst::briques::stored::regex_prescan(
+                seg_reader, reader, &*pr, self.field, &plan, &re);
+        }
         let highlights = regex_verified::regex_verified(&ctx, &self.pattern, &plan, &re, seg_reader.max_doc());
         // O(n) count over the highlights; the result is a DocSet source
         // and must come out sorted by doc (see fuzzy_query_v3).

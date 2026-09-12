@@ -325,7 +325,7 @@ cargo test -p luciole --lib
 bash bindings/emscripten/build.sh
 
 # Playground (port 9877 ; dictionnaire partagé par défaut depuis le 6 septembre, `?nodict` = une FST par
-# segment, `?dict` accepté sans effet ; `?ram` = derived_in_ram, `?commit=N` fichiers,
+# segment, `?dict` accepté sans effet ; `?ram` = derived_in_ram, `?nopos` = positions: false, `?commit=N` fichiers,
 # `?commitmb=M` Mo de texte (8 par défaut : le pic mémoire suit la taille des segments, Godot 3,3 → 1,8 Go),
 # `?merges=N`, `?verbose` (traces `[merge]`, `[preload]` dans diag.log),
 # `?corpus=corpus-kernel-16k.tar.gz` ; un seul onglet qui indexe à la fois,
@@ -346,6 +346,21 @@ cd playground && node serve.mjs
 
 ## Docs
 
+**Pour repartir : `docs/11-09-2026/01-recap-session-index-sans-positions.md` puis `02-knowledge-dump.md` et `03-architecture.md`.** **Correction publiée le 12 septembre** : `docs/12-09-2026/01-elasticsearch-regex-casse.md` — les « 70 documents manquants » d'Elasticsearch sur la ligne regex du banc venaient de notre motif, pas du champ `wildcard` (`case_insensitive` de Lucene replie les littéraux, pas les classes) ; vérifié sur les octets stockés par Elasticsearch lui-même, corrigé dans les README, la page, l'article, le rapport et le script du banc. **Défaut du moteur publié trouvé et corrigé le 11 au soir** (4.0.2 comprise) : `04-doublons-de-spans-en-relache.md` — en relâché, un span en double quand l'aiguille termine un mot découpé en morceaux (`lock` dans `superblock`), tf et score gonflés ; déduplication par octets (`orchestrator::dedup_occurrences`), le harnais compte maintenant les doublons (il comparait des ensembles), test `test_relaxed_duplicate_spans`. **Chantier en cours (branche `v4.1`, depuis le 8 septembre)** : `docs/08-09-2026/01-chantier-positions-optionnelles.md`
+— l'index sans positions (`positions: false` : postings `SFP6`/`WSP6` documents + fréquences, ni
+`.posmap` ni `.word_pos_map` ni `.sibling_v3` ; candidats par la FST et les listes de documents, chaque
+match vérifié sur le texte stocké avec les prédicats mêmes de la vérité terrain — `briques::stored`).
+**Étapes 1 à 3 faites le 11 septembre** : littérales, fuzzy (Levenshtein, Jaro-Winkler), regex ;
+`test_positions_off` (mêmes documents, spans et scores qu'avec positions, v3 et dictionnaire), panel de
+vérité terrain 10/10 ; 10 000 fichiers 352 → 221 Mo (−37 %) ; `fuzzy_spans_long` et Myers (`last_row`,
+`within_distance`) ; les quatre bindings ; trace `V3_DIAG_STORED`. **Noyau entier** (Linux 7.2 recloné,
+101 141 fichiers, 941 Mo — liens symboliques suivis par le harnais) : 5 289 → **2 603 Mo, ×2,77 le texte, −51 %**,
+panel 10/10 ; littérales ×2-3 (relecture des documents trouvés), `de` deux fois plus rapide sans positions,
+regex ×0,09 ; indexation 109 → 101 s, pic de mémoire 15,4 → 13,6 Go ; plus rien de positionnel n'est calculé
+(`without_positions`, `is_docs_only`). Tests des bindings (Python 113, Node, C++ 19) et suites complètes verts,
+CHANGELOG « Unreleased ». Reste : la décision de publier (et, en option, le raccourci des sous-chaînes d'un seul
+jeton, restreint à l'ASCII). Les corpus vivent dans `~/lucivy_bench/linux-7.2` (`/tmp` est vidé à
+10 jours, mémo `tmp-nettoye-apres-10-jours`).
 **Le 7 septembre** : `docs/07-09-2026/01-post-reddit.md` (le cadrage, la recette du GIF et du MP4 de
 `images/`), `02` à `04` les posts prêts à coller par subreddit, `06-article-every-engine-lies-a-little.md` (l'article,
 publié sur `playground/blog/` — la page canonique, lien « blog » dans l'en-tête de la vitrine),
@@ -495,7 +510,7 @@ Les docs sont dans `docs/` organisés par dossier daté. Convention depuis le
 **4.0.0 publiée le 6 septembre 2026 vers minuit** (tag `v4.0.0`, `main` = `1153050`), puis
 **4.0.1 dans l'heure** (tag `v4.0.1`, `main` = `7f18415`) : le tag 4.0.0 était parti sur
 une CI rouge (clippy, build sans features par défaut — rien du moteur) ; 4.0.1 est le même
-moteur, republié après correction, et `release.yml` a désormais un job `checks` (clippy,
+moteur, republié après correction, et `release.yml` reçut alors un job `checks` (clippy,
 lib avec et sans features, `lucivy-core`, `lucivy-cpp`) dont dépendent toutes les
 publications. **Règle : ne jamais pousser un tag `v*` avant que la CI du commit soit
 verte** — la barrière du workflow le garantit maintenant, mais on regarde quand même.
@@ -512,6 +527,14 @@ Le contrat de 4.0 (ouvre 3.0.x, 3.0.x n'ouvre pas 4.0, le premier commit convert
 vérifié par `test_compat_308` et, le 6 au soir, par un index de 10 000 fichiers bâti par
 `main` (3.0.8) et rouvert par v4 : 10/10. Le dictionnaire partagé est le défaut depuis 4.0.0.
 Publier reste une décision explicite de Lucie.
+**CI depuis le 11 septembre au soir (branche `v4.1`)** : trois fichiers, un rôle chacun. `ci.yml` — le code est
+juste : lib ×3 jeux de features, clippy, **toute la suite `lucivy-core` et `lucivy-cpp`**, vérité terrain du dépôt,
+**pytest** et **toutes les suites Node**, C++ — à chaque push sur `main` et sur une branche `v…`, à chaque PR vers
+`main` ; `build.yml` — 5 plateformes Python/Node, sdist, WASM — sur les PR vers `main`, les pushes de `main` qui
+touchent aux bindings, à la main ; `release.yml` (tag `v*`) **appelle** les deux avant de publier : le job `checks`,
+une copie de la CI, n'existe plus. Chemin vers `main` : une PR depuis la branche de travail, fusion quand tout est
+vert, puis le tag. Les jobs de publication restent dans `release.yml` (trusted publishing lié à ce nom de fichier
+et à l'environnement `release`).
 
 
 | Registre | Package | Publié | Date |
