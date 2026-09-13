@@ -1,3 +1,18 @@
+Unreleased
+==========
+
+- **The byte spans are only built when someone asks for them.** The prescan
+  always materialised one `(document, from, to)` triple per match and cached it,
+  whether or not a highlight sink was attached — `de` on the kernel built 7.9
+  million of them for a caller that wanted documents. It now builds them only
+  when a sink is there (`highlights: false`, already the default of every
+  binding, is what asks for documents alone). Measured on the pinned kernel
+  (101 373 files): `de` 574 → 442 ms with the shared dictionary and **337 → 190
+  ms without positions**, `ude` 87 → 77 ms, `mutex_lock` 13 → 12 ms — the same
+  documents and the same counts, since the term frequency counts the matches,
+  not the spans. Nothing new in the API: what was already the default is now
+  honest. `V3_SPANS=0` forces them off, for measuring.
+
 Lucivy 4.1.0 — 13 September 2026
 ================================
 

@@ -56,6 +56,7 @@ query_text: &str,
 anchor_start: bool,
 exact_match: bool,
 strict_separators: bool,
+want_spans: bool,
 ) -> crate::Result<(Vec<(DocId, u32)>, Vec<(DocId, usize, usize)>)> {
     use crate::suffix_fst::file_v3::SfxFileReaderV3;
     use crate::suffix_fst::briques::{orchestrator, context::BriquesContext};
@@ -86,7 +87,8 @@ strict_separators: bool,
     // from the index, every match verified on the stored text.
     if !pr.has_positions() {
         return crate::suffix_fst::briques::stored::contains_prescan(
-            seg_reader, reader, &*pr, field, query_text, anchor_start, exact_match, strict_separators);
+            seg_reader, reader, &*pr, field, query_text, anchor_start, exact_match, strict_separators,
+            want_spans);
     }
     let ns_resolver = t_open.elapsed().as_nanos() as u64;
     let t_open = std::time::Instant::now();
@@ -159,9 +161,17 @@ strict_separators: bool,
     // one. Removed rather than left in place; if inter-word verification is
     // wanted, it has to be written, not resurrected.
 
-    let highlights: Vec<(DocId, usize, usize)> = matches.iter()
-        .map(|m| (m.doc_id, m.byte_from as usize, m.byte_to as usize))
-        .collect();
+    // The spans only when someone asked for them. The term frequency below
+    // counts the matches themselves, so a documents-only search skips this
+    // vector entirely — `de` on the kernel builds 7.9 million triples that
+    // nobody reads when no sink is attached.
+    let highlights: Vec<(DocId, usize, usize)> = if want_spans {
+        matches.iter()
+            .map(|m| (m.doc_id, m.byte_from as usize, m.byte_to as usize))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut doc_ids: Vec<DocId> = matches.iter().map(|m| m.doc_id).collect();
     doc_ids.sort_unstable();
     Ok((count_tf_sorted(&doc_ids), highlights))
@@ -261,6 +271,15 @@ impl ContainsQueryV3 {
     pub fn with_continuation(self, _enabled: bool) -> Self { self } // v3 always does cross-token
     /// Sets whether separators between tokens must match those of the query text.
     pub fn with_strict_separators(mut self, enabled: bool) -> Self { self.strict_separators = enabled; self }
+    /// Whether this query's spans are worth computing: only when a sink is
+    /// there to receive them. `V3_SPANS=0` forces them off even then — the
+    /// lever that measures what they cost (the sink then receives nothing).
+    fn want_spans(&self) -> bool {
+        static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let off = *OFF.get_or_init(|| std::env::var("V3_SPANS").ok().as_deref() == Some("0"));
+        self.highlight_sink.is_some() && !off
+    }
+
     /// Attaches a sink receiving match byte offsets, grouped under `field_name`.
     pub fn with_highlight_sink(mut self, sink: Arc<HighlightSink>, field_name: String) -> Self {
         self.highlight_sink = Some(sink);
@@ -290,6 +309,7 @@ impl ContainsQueryV3 {
         run_sfx_v3_prescan(
             seg_reader, sfx_bytes, self.field, &self.query_text,
             self.anchor_start, self.exact_match, self.strict_separators,
+            self.want_spans(),
         )
     }
 

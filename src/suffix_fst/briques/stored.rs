@@ -77,6 +77,7 @@ pub fn contains_prescan(
     anchor_start: bool,
     exact_match: bool,
     strict_separators: bool,
+    want_spans: bool,
 ) -> crate::Result<PrescanOutput> {
     let Some(q) = orchestrator::effective_query(query, strict_separators) else {
         return Ok((Vec::new(), Vec::new()));
@@ -109,7 +110,7 @@ pub fn contains_prescan(
             }
         });
     })?;
-    Ok(flatten(&found))
+    Ok(flatten(&found, want_spans))
 }
 
 /// The prescan of a fuzzy query (Levenshtein or Jaro-Winkler) on one
@@ -134,8 +135,9 @@ pub fn fuzzy_prescan(
         return empty();
     };
     if distance == 0 {
+        // The tiers of a fuzzy query are read off its spans: it keeps them.
         let (doc_tf, highlights) = contains_prescan(
-            seg_reader, reader, resolver, field, &q, false, false, strict_separators)?;
+            seg_reader, reader, resolver, field, &q, false, false, strict_separators, true)?;
         let coverage = highlights.iter().map(|&(d, _, _)| (d, 0.0)).collect();
         return Ok((doc_tf, highlights, coverage));
     }
@@ -216,7 +218,7 @@ pub fn fuzzy_prescan(
         };
         (*doc, tier)
     }).collect();
-    let (doc_tf, highlights) = flatten(&found);
+    let (doc_tf, highlights) = flatten(&found, true);
     Ok((doc_tf, highlights, coverage))
 }
 
@@ -255,7 +257,7 @@ pub fn regex_prescan(
             out.push((m.start(), m.end(), 0.0));
         }
     })?;
-    Ok(flatten(&found))
+    Ok(flatten(&found, true))
 }
 
 // ─── Candidates ─────────────────────────────────────────────────────────────
@@ -666,11 +668,14 @@ fn diag_enabled() -> bool {
 
 /// `(doc, tf)` sorted by document and the highlights, from per-document
 /// occurrences.
-fn flatten(found: &[(DocId, Found)]) -> PrescanOutput {
+fn flatten(found: &[(DocId, Found)], want_spans: bool) -> PrescanOutput {
     let mut doc_tf = Vec::with_capacity(found.len());
     let mut highlights = Vec::new();
     for (doc, occ) in found {
         doc_tf.push((*doc, occ.len() as u32));
+        if !want_spans {
+            continue;
+        }
         for &(from, to, _) in occ {
             highlights.push((*doc, from, to));
         }
