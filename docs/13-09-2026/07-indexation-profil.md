@@ -200,6 +200,24 @@ les cœurs ; WASM inchangé (un fil, 15 Mo, 128 Mo). Noyau avec les défauts : *
 que par les collecteurs (verrous de mintage, un seul fil qui alimente dans le harnais,
 arrêt du monde au commit).
 
+## 5 quater. Où en sont les recherches à 16 fils, et la suite
+
+Compteur ajouté (`LUCIVY_VERBOSE`, `parents decoding`) : sur le noyau à 16 fils,
+203 s de CPU de recherches dans le dictionnaire, dont marches FST 98 s, **dont
+balayage linéaire des groupes de parents 52,7 s** — ~3,3 s de mur, 6 % du total —,
+et travail sous le verrou de mintage 42 s (26 à 8 fils ; 37 avec 64 stripes au lieu
+de 16 : c'est le travail sous le verrou qui compte, pas l'attente).
+
+**Prochaine pièce, à faire par défaut et sans changer le format 8** : un fichier
+dérivé `dict-<g>.<champ>.pidx` — pour chaque record groupé au-delà d'un seuil, une
+table à largeur fixe (recouvrement sur 2 octets, offset du groupe, premier ordinal)
+qui rend la recherche du groupe binaire au lieu de linéaire. Écrit par les replis et
+compactions (l'étape d'encodage voit chaque record), ignoré par un ancien lecteur,
+reconstruit en RAM par un nouveau lecteur quand il manque (un index existant marche
+tel quel et se convertit au fil de ses compactions). Gain attendu : ~3 s sur 48.
+Après lui : le mintage sans `String` par clé, puis le coût par document des
+collecteurs eux-mêmes, jamais profilé au-delà de `add_value`.
+
 ## 6. Vérification
 
 - `cargo test --release --lib` : 1 471 verts (22 ignorés) ; sans features par

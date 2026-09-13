@@ -67,6 +67,9 @@ pub mod stats {
     pub static MINTS: AtomicU64 = AtomicU64::new(0);
     /// Whole `lookup_or_mint`, nanoseconds.
     pub static TOTAL_NS: AtomicU64 = AtomicU64::new(0);
+    /// Of the FST walks, the decoding of the parents records (the scan of
+    /// a grouped record's group headers), nanoseconds.
+    pub static DECODE_NS: AtomicU64 = AtomicU64::new(0);
     /// Of which: opening the `.termtexts` readers of the generations.
     pub static OPEN_NS: AtomicU64 = AtomicU64::new(0);
     /// Of which: the FST gets and parent decodes.
@@ -91,6 +94,8 @@ pub mod stats {
         pub filtered: u64,
         /// Whole `lookup_or_mint`, nanoseconds.
         pub total_ns: u64,
+        /// Parents decoding within the FST walks, nanoseconds.
+        pub decode_ns: u64,
         /// Of which: opening the `.termtexts` readers, nanoseconds.
         pub open_ns: u64,
         /// Of which: FST gets and parent decodes, nanoseconds.
@@ -109,6 +114,7 @@ pub mod stats {
             mints: MINTS.swap(0, Relaxed),
             filtered: FILTERED.swap(0, Relaxed),
             total_ns: TOTAL_NS.swap(0, Relaxed),
+            decode_ns: DECODE_NS.swap(0, Relaxed),
             open_ns: OPEN_NS.swap(0, Relaxed),
             fst_ns: FST_NS.swap(0, Relaxed),
             lock_ns: LOCK_NS.swap(0, Relaxed),
@@ -118,9 +124,9 @@ pub mod stats {
     impl std::fmt::Display for Snapshot {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             let ms = |ns: u64| ns as f64 / 1e6;
-            write!(f, "{} lookups ({} from the cache, {} in a generation, {} pending, {} minted, {} FST walks skipped by the filter): {:.0} ms, of which termtexts open {:.0}, fst {:.0}, lock {:.0}",
+            write!(f, "{} lookups ({} from the cache, {} in a generation, {} pending, {} minted, {} FST walks skipped by the filter): {:.0} ms, of which termtexts open {:.0}, fst {:.0} (parents decoding {:.0}), lock {:.0}",
                 self.calls, self.cache_hits, self.hits, self.pending_hits, self.mints, self.filtered,
-                ms(self.total_ns), ms(self.open_ns), ms(self.fst_ns), ms(self.lock_ns))
+                ms(self.total_ns), ms(self.open_ns), ms(self.fst_ns), ms(self.decode_ns), ms(self.lock_ns))
         }
     }
 }
@@ -311,7 +317,11 @@ impl DictionaryField {
         let _fst_guard = t_fst.map(|t| TimeInto(t, &stats::FST_NS));
         for part in self.sfx_reader.parts() {
             let Some(value) = part.fst().get(key) else { continue };
+            let t_decode = timed.then(std::time::Instant::now);
             let parents = part.decode_parents_where(value, key, |ov| ov == want_overlap);
+            if let Some(t) = t_decode {
+                stats::DECODE_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
             for p in parents {
                 if p.sti != 0 { continue; }
                 let shape_ok = if meta.is_word_stripped {
@@ -398,7 +408,11 @@ pub struct DictionaryShared {
     lookup_cache: LookupCache,
 }
 
-const STRIPES: usize = 16;
+/// 64 since 13 September 2026: with 16 collector threads (up from 8) the
+/// time under the stripes' locks went from 26 to 42 s of CPU on the whole
+/// kernel; 64 stripes brought it to 37 — most of it is the work under the
+/// lock (the pending map, the key's `String`, the Bloom insert), not waiting.
+const STRIPES: usize = 64;
 
 impl DictionaryShared {
     fn new(next_ids: HashMap<u32, u64>) -> Self {
