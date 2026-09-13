@@ -120,6 +120,13 @@ impl<W: io::Write> Builder<W> {
     /// The same as `new`, except it sets the type of the fst to the type
     /// given.
     pub fn new_type(wtr: W, ty: FstType) -> Result<Builder<W>> {
+        Builder::new_type_with_registry(wtr, ty, 10_000, 2)
+    }
+
+    /// `new_type` with the size of the node registry (rows × MRU columns):
+    /// the table of compiled nodes a new node is matched against, so that
+    /// equal suffixes share their bytes. 10 000 × 2 by default.
+    pub fn new_type_with_registry(wtr: W, ty: FstType, table_size: usize, mru_size: usize) -> Result<Builder<W>> {
         let mut wtr = CountingWriter::new(wtr);
         // Don't allow any nodes to have address 0-7. We use these to encode
         // the API version. We also use addresses `0` and `1` as special
@@ -130,7 +137,7 @@ impl<W: io::Write> Builder<W> {
         Ok(Builder {
             wtr,
             unfinished: UnfinishedNodes::new(),
-            registry: Registry::new(10_000, 2),
+            registry: Registry::new(table_size, mru_size),
             last: None,
             last_addr: NONE_ADDRESS,
             len: 0,

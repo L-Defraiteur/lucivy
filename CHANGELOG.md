@@ -1,6 +1,18 @@
 Unreleased
 ==========
 
+- **Compacting the shard dictionary: 8.4 → 2.6 s on four kernel generations,
+  the same bytes out.** The merge sorted and deduplicated the parents of a
+  key held by several generations before the encoder sorted them again —
+  nothing can repeat across generations, their ids are disjoint — and that
+  was 40 % of the pass. The rest is now a pipeline: the union of the input
+  FSTs, two encoders, and the writer (FST insertion, serial by nature),
+  batches over bounded channels, one allocation per batch instead of one
+  per key (with one per key the threads spent a quarter of the time on the
+  allocator's lock). The browser build runs the same stages in sequence.
+  `LUCIVY_FST_REGISTRY` sizes the FST builder's node registry for
+  experiments (a larger one shrinks the FST and slows the build).
+
 - **Indexing the whole kernel: 97 → 66 s, same index.** Profiled for the
   first time since the deferred fold (13 September, a gdb-based sampler,
   `benches/gdb_sample.sh`): from the third commit on, every commit of 10 000

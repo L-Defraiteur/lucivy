@@ -212,6 +212,62 @@ pub fn compact_parts(
 }
 
 
+/// A batch of keys leaving the union stage of `merge_sfx`: the key bytes
+/// concatenated, one end offset per key, and where each record comes from
+/// — one part (`One`, copied verbatim when its layout is ours) or several
+/// (`Many`: a run of `held`, parents merged and re-encoded). One allocation
+/// per field instead of one per key: with a `Vec` per key, the threads met
+/// on the allocator's lock for a quarter of the pass (13 September).
+struct InBatch {
+    keys: Vec<u8>,
+    key_end: Vec<u32>,
+    src: Vec<SrcRef>,
+    held: Vec<(usize, u64)>,
+}
+
+#[derive(Clone, Copy)]
+enum SrcRef {
+    One(usize, u64),
+    Many(u32, u32),
+}
+
+/// The same batch with its records ready: a part's bytes as they are, or a
+/// run of `owned` (re-encoded).
+struct OutBatch<'a> {
+    keys: Vec<u8>,
+    key_end: Vec<u32>,
+    rec: Vec<RecRef<'a>>,
+    owned: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+enum RecRef<'a> {
+    Verbatim(&'a [u8]),
+    Owned(u32, u32),
+}
+
+impl InBatch {
+    fn with_capacity(keys: usize) -> Self {
+        Self { keys: Vec::with_capacity(keys * 16), key_end: Vec::with_capacity(keys), src: Vec::with_capacity(keys), held: Vec::new() }
+    }
+    fn len(&self) -> usize {
+        self.key_end.len()
+    }
+    fn key(&self, i: usize) -> &[u8] {
+        let start = if i == 0 { 0 } else { self.key_end[i - 1] as usize };
+        &self.keys[start..self.key_end[i] as usize]
+    }
+}
+
+/// Encoder threads of `merge_sfx`; batches go to them round-robin and
+/// come back in the same order, so the FST still sees its keys sorted.
+const ENCODERS: usize = 2;
+
+/// Keys per batch between the stages of `merge_sfx`, and batches in flight
+/// per channel.
+const BATCH_KEYS: usize = 1024;
+const PIPELINE_DEPTH: usize = 64;
+
 /// The `.sfx` pass of `compact_parts`: FST and parents streamed to two
 /// temporary files, then the container assembled from them (the header
 /// needs their lengths).
@@ -234,49 +290,201 @@ fn merge_sfx(directory: &dyn Directory, sfx_parts: &[OwnedBytes], field_id: u32,
             })
         }).collect();
 
-        let mut fst_writer = MapBuilder::new(directory.open_write(&fst_tmp)?)
+        let registry: usize = std::env::var("LUCIVY_FST_REGISTRY").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000);
+        let mut fst_writer = MapBuilder::with_registry(directory.open_write(&fst_tmp)?, registry, 2)
             .map_err(|e| system_error("dictionary FST", e))?;
         let mut parents_writer = directory.open_write(&parents_tmp)?;
+
+        // Three stages, on a native build: the union of the input FSTs (a
+        // heap over their streams), the re-encoding of the keys several
+        // parts hold (two threads, batches dealt round-robin and collected
+        // in the same order), and the output — FST insertion and parents
+        // table, serial by nature. Batches over bounded channels keep the
+        // memory flat. Measured on four kernel generations (5.8 M keys):
+        // 8.4 s before, 5.3 s once the merge stopped sorting twice, 4.6 s
+        // pipelined; the writer's FST insertion is the floor.
+        let keys_merged = std::sync::atomic::AtomicU64::new(0);
+        let write = |batch: OutBatch<'_>, fst_writer: &mut MapBuilder<_>, parents_writer: &mut dyn Write,
+                     parents_offset: &mut u64, len_prefix: &mut Vec<u8>, keys: &mut u64| -> crate::Result<()> {
+            let mut start = 0usize;
+            for (i, &end) in batch.key_end.iter().enumerate() {
+                let key = &batch.keys[start..end as usize];
+                start = end as usize;
+                let record: &[u8] = match batch.rec[i] {
+                    RecRef::Verbatim(bytes) => bytes,
+                    RecRef::Owned(a, b) => &batch.owned[a as usize..b as usize],
+                };
+                // The table's layout (`lucivy_fst::OutputTable`): a varint
+                // length before each record, the FST value its offset.
+                len_prefix.clear();
+                write_varint(len_prefix, record.len() as u64);
+                parents_writer.write_all(len_prefix)?;
+                parents_writer.write_all(record)?;
+                fst_writer.insert(key, *parents_offset).map_err(|e| system_error("dictionary FST", e))?;
+                *parents_offset += (len_prefix.len() + record.len()) as u64;
+                *keys += 1;
+            }
+            Ok(())
+        };
+        let encode = |batch: InBatch, scratch: &mut Vec<ParentEntryV3>| -> OutBatch<'_> {
+            let mut rec: Vec<RecRef<'_>> = Vec::with_capacity(batch.len());
+            let mut owned: Vec<u8> = Vec::new();
+            let encode_into = |owned: &mut Vec<u8>, scratch: &mut Vec<ParentEntryV3>, key: &[u8]| -> RecRef<'static> {
+                let a = owned.len();
+                owned.extend_from_slice(&encode_parent_record_v8(scratch, key));
+                RecRef::Owned(a as u32, owned.len() as u32)
+            };
+            for i in 0..batch.len() {
+                let key = batch.key(i);
+                let r = match batch.src[i] {
+                    // The random read into the part's table happens here,
+                    // off the writer's thread.
+                    SrcRef::One(part, value) if tables[part].is_some() => RecRef::Verbatim(tables[part].as_ref().unwrap().get(value)),
+                    SrcRef::One(part, value) => {
+                        scratch.clear();
+                        scratch.extend(readers[part].decode_parents(value, key));
+                        encode_into(&mut owned, scratch, key)
+                    }
+                    SrcRef::Many(a, n) => {
+                        scratch.clear();
+                        for &(part, value) in &batch.held[a as usize..(a + n) as usize] {
+                            match &tables[part] {
+                                Some(table) => scratch.extend(decode_parent_entries_v8(table.get(value), key)),
+                                None => scratch.extend(readers[part].decode_parents(value, key)),
+                            }
+                        }
+                        // The parts hold disjoint ids (generations, or the
+                        // pairs of distinct segments) and each part's builder
+                        // already kept one parent per (ordinal, suffix), so
+                        // nothing repeats across them; the encoder orders what
+                        // it is given. A sort and a dedup here, before the
+                        // encoder's own sort, were 40 % of the pass on the
+                        // kernel (13 September): a frequent text has tens of
+                        // thousands of parents.
+                        debug_assert!({
+                            let mut seen: Vec<(u64, u16)> = scratch.iter().map(|p| (p.raw_ordinal, p.sti)).collect();
+                            seen.sort_unstable();
+                            seen.windows(2).all(|w| w[0] != w[1])
+                        }, "a (ordinal, suffix) pair held by two parts");
+                        keys_merged.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        encode_into(&mut owned, scratch, key)
+                    }
+                };
+                rec.push(r);
+            }
+            OutBatch { keys: batch.keys, key_end: batch.key_end, rec, owned }
+        };
+        let produce = |emit: &mut dyn FnMut(InBatch) -> crate::Result<()>| -> crate::Result<()> {
+            let mut op = lucivy_fst::map::OpBuilder::new();
+            for r in &readers {
+                op.push(r.fst());
+            }
+            let mut union = op.union();
+            let mut batch = InBatch::with_capacity(BATCH_KEYS);
+            while let Some((key, held)) = union.next() {
+                batch.keys.extend_from_slice(key);
+                batch.key_end.push(batch.keys.len() as u32);
+                if held.len() == 1 {
+                    batch.src.push(SrcRef::One(held[0].index, held[0].value));
+                } else {
+                    let a = batch.held.len() as u32;
+                    batch.held.extend(held.iter().map(|iv| (iv.index, iv.value)));
+                    batch.src.push(SrcRef::Many(a, held.len() as u32));
+                }
+                if batch.len() == BATCH_KEYS {
+                    emit(std::mem::replace(&mut batch, InBatch::with_capacity(BATCH_KEYS)))?;
+                }
+            }
+            if batch.len() > 0 {
+                emit(batch)?;
+            }
+            Ok(())
+        };
+
         let mut parents_offset: u64 = 0;
         let mut len_prefix: Vec<u8> = Vec::with_capacity(10);
-        let mut scratch: Vec<ParentEntryV3> = Vec::new();
-        let mut encoded: Vec<u8>;
-
-        let mut op = lucivy_fst::map::OpBuilder::new();
-        for r in &readers {
-            op.push(r.fst());
-        }
-        let mut union = op.union();
-        while let Some((key, held)) = union.next() {
-            let record: &[u8] = if held.len() == 1 && tables[held[0].index].is_some() {
-                tables[held[0].index].as_ref().unwrap().get(held[0].value)
-            } else {
-                scratch.clear();
-                for iv in held {
-                    match &tables[iv.index] {
-                        Some(table) => scratch.extend(decode_parent_entries_v8(table.get(iv.value), key)),
-                        None => scratch.extend(readers[iv.index].decode_parents(iv.value, key)),
-                    }
+        let mut keys = 0u64;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use std::sync::mpsc::sync_channel;
+            let encode = &encode;
+            let write = &write;
+            let fst_writer = &mut fst_writer;
+            let parents_writer = &mut parents_writer;
+            std::thread::scope(|scope| -> crate::Result<()> {
+                let prof = super::briques::profile::enabled();
+                // One channel in and one out per encoder; the producer deals
+                // batches round-robin, the writer collects them the same way,
+                // so the first closed channel it meets means no batch is left.
+                let mut ins = Vec::with_capacity(ENCODERS);
+                let mut outs = Vec::with_capacity(ENCODERS);
+                let mut encoders = Vec::with_capacity(ENCODERS);
+                for _ in 0..ENCODERS {
+                    let (tx1, rx1) = sync_channel::<InBatch>(PIPELINE_DEPTH);
+                    let (tx2, rx2) = sync_channel::<OutBatch<'_>>(PIPELINE_DEPTH);
+                    ins.push(tx1);
+                    outs.push(rx2);
+                    encoders.push(scope.spawn(move || {
+                        let mut scratch: Vec<ParentEntryV3> = Vec::new();
+                        let mut busy = std::time::Duration::ZERO;
+                        for batch in rx1 {
+                            let t = Instant::now();
+                            let out = encode(batch, &mut scratch);
+                            busy += t.elapsed();
+                            if tx2.send(out).is_err() {
+                                break;
+                            }
+                        }
+                        busy
+                    }));
                 }
-                // What the builder does with the suffixes of every text:
-                // one parent per (ordinal, suffix), the first one kept.
-                scratch.sort_by_key(|p| (p.raw_ordinal, p.sti));
-                scratch.dedup_by_key(|p| (p.raw_ordinal, p.sti));
-                report.keys_merged += 1;
-                encoded = encode_parent_record_v8(&mut scratch, key);
-                &encoded
-            };
-            // The table's layout (`lucivy_fst::OutputTable`): a varint
-            // length before each record, the FST value its offset.
-            len_prefix.clear();
-            write_varint(&mut len_prefix, record.len() as u64);
-            parents_writer.write_all(&len_prefix)?;
-            parents_writer.write_all(record)?;
-            fst_writer.insert(key, parents_offset).map_err(|e| system_error("dictionary FST", e))?;
-            parents_offset += (len_prefix.len() + record.len()) as u64;
-            report.keys += 1;
+                let writer = scope.spawn(move || -> crate::Result<(u64, u64, std::time::Duration)> {
+                    let mut busy = std::time::Duration::ZERO;
+                    'outer: loop {
+                        for rx in &outs {
+                            let Ok(batch) = rx.recv() else { break 'outer };
+                            let t = Instant::now();
+                            write(batch, fst_writer, parents_writer, &mut parents_offset, &mut len_prefix, &mut keys)?;
+                            busy += t.elapsed();
+                        }
+                    }
+                    Ok((keys, parents_offset, busy))
+                });
+                let t_produce = Instant::now();
+                let mut waiting = std::time::Duration::ZERO;
+                let mut next = 0usize;
+                let produced = produce(&mut |batch| {
+                    let t = Instant::now();
+                    let r = ins[next].send(batch).map_err(|_| system_error("dictionary compaction", "encoder thread gone"));
+                    next = (next + 1) % ENCODERS;
+                    waiting += t.elapsed();
+                    r
+                });
+                let produce_wall = t_produce.elapsed();
+                drop(ins);
+                let mut encode_busy = std::time::Duration::ZERO;
+                for e in encoders {
+                    encode_busy += e.join().map_err(|_| system_error("dictionary compaction", "encoder thread panicked"))?;
+                }
+                let (k, _, write_busy) = writer.join().map_err(|_| system_error("dictionary compaction", "writer thread panicked"))??;
+                produced?;
+                keys = k;
+                if prof {
+                    eprintln!("  [dict] merge_sfx stages: union {:.2} s (of which blocked on the channel {:.2}), encode busy {:.2} s over {ENCODERS} threads, write busy {:.2} s",
+                        (produce_wall - waiting).as_secs_f64(), waiting.as_secs_f64(), encode_busy.as_secs_f64(), write_busy.as_secs_f64());
+                }
+                Ok(())
+            })?;
         }
-        drop(union);
+        #[cfg(target_arch = "wasm32")]
+        {
+            let mut scratch: Vec<ParentEntryV3> = Vec::new();
+            produce(&mut |batch| {
+                write(encode(batch, &mut scratch), &mut fst_writer, &mut parents_writer, &mut parents_offset, &mut len_prefix, &mut keys)
+            })?;
+        }
+        report.keys = keys;
+        report.keys_merged = keys_merged.load(std::sync::atomic::Ordering::Relaxed);
         let fst_out = fst_writer.into_inner().map_err(|e| system_error("dictionary FST", e))?;
         fst_out.terminate()?;
         parents_writer.terminate()?;
@@ -284,6 +492,9 @@ fn merge_sfx(directory: &dyn Directory, sfx_parts: &[OwnedBytes], field_id: u32,
     {
         let fst_bytes = directory.open_read(&fst_tmp)?.read_bytes()?;
         let parents_bytes = directory.open_read(&parents_tmp)?.read_bytes()?;
+        if super::briques::profile::enabled() {
+            eprintln!("  [dict] merge_sfx output: FST {:.1} MB, parents {:.1} MB", fst_bytes.len() as f64 / 1048576.0, parents_bytes.len() as f64 / 1048576.0);
+        }
         let path = PathBuf::from(dictionary_file_name(out, field_id, "sfx"));
         let mut w = directory.open_write(&path)?;
         file_v3::write_container(&mut w, fst_bytes.as_slice(), parents_bytes.as_slice())?;
