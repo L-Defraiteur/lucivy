@@ -22,7 +22,7 @@
 //! query never walks the pairs and its cost never depends on when it runs.
 //!
 //! Bounds: one fold at a time per index; past `LUCIVY_DICT_MAX_PENDING`
-//! (16) pending segments a commit waits for the running fold and folds the
+//! (64) pending segments a commit waits for the running fold and folds the
 //! rest itself, synchronously; `LUCIVY_DICT_SYNC_FOLD=1` folds every commit
 //! synchronously — the default on wasm32, where the background fold gains
 //! no time and costs memory (see `sync_fold`).
@@ -42,8 +42,13 @@ use common::OwnedBytes;
 
 use super::segment_updater::SegmentUpdaterShared;
 
+/// Pending pairs a commit tolerates before folding synchronously. 64: a
+/// commit of 10 000 kernel files names 18 to 41 pairs, and at 16 every
+/// commit from the third folded on the caller's thread — 1.8 to 2.9 s
+/// each, 10 s for the one that compacted, 25 s of the 97 s the whole
+/// kernel took (13 September; 76 s at 64, the lookups no slower).
 fn max_pending() -> usize {
-    std::env::var("LUCIVY_DICT_MAX_PENDING").ok().and_then(|v| v.parse().ok()).filter(|&n| n >= 1).unwrap_or(16)
+    std::env::var("LUCIVY_DICT_MAX_PENDING").ok().and_then(|v| v.parse().ok()).filter(|&n| n >= 1).unwrap_or(64)
 }
 
 fn max_generations() -> usize {

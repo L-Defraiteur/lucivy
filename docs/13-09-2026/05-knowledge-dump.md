@@ -51,6 +51,16 @@ BENCH_QUERY=mutex_lock cargo test --release -p lucivy-core --test bench_docstore
 un lien symbolique vers un index mono-shard suffit) mesure `ShardedHandle::fetch_docs`.
 Lecture : `docs/13-09-2026/06-document-store.md`.
 
+**Profiler l'indexation sans root** (`perf_event_paranoid` = 2 bloque samply) :
+`benches/gdb_sample.sh samples.txt 0.25 400 -- <binaire> <args>` (gdb + `SIGALRM`
+externe, piles de tous les fils toutes les 250 ms) puis `python3 benches/gdb_top.py
+samples.txt [--inclusive] [--threads] [--from S --to S]`. Bâtir le binaire avec des
+tables de lignes dans un `CARGO_TARGET_DIR` à part (`CARGO_PROFILE_RELEASE_DEBUG=
+line-tables-only`). Les compteurs `LUCIVY_VERBOSE=1` horodatés donnent la chronologie
+des commits, replis et finalisations. **Mesurer avant/après dans le même état de
+machine, ancien binaire rebâti** (`git stash` sans `Cargo.lock`, qui n'est pas suivi).
+Lecture : `docs/13-09-2026/07-indexation-profil.md`.
+
 ## 2. Vérité terrain (le harnais)
 
 `lucivy_core/tests/test_sfx_v3_ground_truth.rs`, test `v3_ground_truth_demo`.

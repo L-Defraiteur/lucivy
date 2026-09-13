@@ -6,7 +6,11 @@
 //! - Tracks word_id and is_word_start per token via ChunkMeta
 //! - Interns extended token texts (e.g., "mutex_lo" not "mutex_")
 
-use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+
+use hashbrown::HashTable;
+use rustc_hash::FxHasher;
+
 use super::termtexts_v3::TermMetaV3;
 
 use crate::tokenizer::equal_chunk::{is_content_char, segment_and_chunk, DEFAULT_MAX_TOKEN};
@@ -53,9 +57,16 @@ const WORD_STRIPPED_OVERHEAD: usize = 24 + 24 + 32;
 /// let data = collector.into_data();
 /// ```
 pub struct SfxCollectorV3 {
-    // Interned extended tokens: each unique extended text stored once.
-    token_intern: HashMap<String, u32>,
+    /// Interned extended tokens: one ordinal per `(shape, text)`. The table
+    /// holds ordinals only; the hash is computed from the text and its
+    /// shape, equality reads `token_texts` / `token_meta` back — no key is
+    /// allocated to look a token up, and none is stored (measured 13
+    /// September: the formatted key was 7 % of the indexing CPU and its
+    /// `String`s a good part of the 12 % spent freeing the collector).
+    token_intern: HashTable<u32>,
     token_texts: Vec<String>,
+    /// Scratch for the dictionary's intern key, reused across tokens.
+    key_scratch: String,
     // Posting entries indexed by interned ordinal: (doc_id, ti, byte_from, byte_to).
     token_postings: Vec<Vec<(u32, u32, u32, u32)>>,
     // Metadata per interned ordinal (from first occurrence).
@@ -153,8 +164,9 @@ impl SfxCollectorV3 {
             .and_then(|v| v.parse().ok())
             .unwrap_or(1);
         Self {
-            token_intern: HashMap::new(),
+            token_intern: HashTable::new(),
             token_texts: Vec::new(),
+            key_scratch: String::new(),
             token_postings: Vec::new(),
             token_meta: Vec::new(),
             word_stripped_entries: Vec::new(),
@@ -298,8 +310,8 @@ impl SfxCollectorV3 {
             ));
 
             // ── DIAG: trace collector for target word ──
-            if let Ok(target) = std::env::var("V3_DIAG_COLLECTOR") {
-                if extended.to_lowercase().contains(&target) {
+            if let Some(target) = diag_collector_target() {
+                if extended.to_lowercase().contains(target) {
                     eprintln!("[COLLECTOR] add_value doc={} ti={} chunk[{}] text={:?} extended={:?} intern_id={} own_len={} sep={} ovl={} ws={} byte=[{}..{}] postings_count={}",
                         self.current_doc_id, ti, i, chunk_text, extended,
                         intern_id, own_len, meta.sep_len, overlap_len,
@@ -553,11 +565,49 @@ impl SfxCollectorV3 {
 /// dictionary's Bloom filter hashes, so a `.termtexts` entry must rebuild
 /// exactly this (`SfxDictionary::filter`).
 pub fn intern_key(text: &str, is_word_stripped: bool, own_len: u16, sep_len: u8, is_word_start: bool) -> String {
+    let mut key = String::with_capacity(text.len() + 16);
+    write_intern_key(&mut key, text, is_word_stripped, own_len, sep_len, is_word_start);
+    key
+}
+
+/// `intern_key` into a caller's buffer (cleared first): the same bytes, no
+/// allocation once the buffer has grown.
+pub fn write_intern_key(key: &mut String, text: &str, is_word_stripped: bool, own_len: u16, sep_len: u8, is_word_start: bool) {
+    use std::fmt::Write;
+    key.clear();
     if is_word_stripped {
-        format!("\x00ws:{text}\x00{}", own_len - sep_len as u16)
+        let _ = write!(key, "\x00ws:{text}\x00{}", own_len - sep_len as u16);
     } else {
-        format!("{text}\x00{}:{}:{}", own_len, sep_len, is_word_start as u8)
+        let _ = write!(key, "{text}\x00{}:{}:{}", own_len, sep_len, is_word_start as u8);
     }
+}
+
+/// What makes two interned tokens the same entry, beyond their text: the
+/// fields `intern_key` writes. A word-stripped entry is keyed by its content
+/// length alone (`own_len - sep_len`), a chunk by its full shape.
+#[inline]
+fn intern_shape(meta: &TokenMetaV3) -> (bool, u16, u8, bool) {
+    if meta.is_word_stripped {
+        (true, meta.own_len - meta.sep_len as u16, 0, false)
+    } else {
+        (false, meta.own_len, meta.sep_len, meta.is_word_start)
+    }
+}
+
+#[inline]
+fn intern_hash(shape: (bool, u16, u8, bool), text: &str) -> u64 {
+    let mut h = FxHasher::default();
+    shape.hash(&mut h);
+    text.as_bytes().hash(&mut h);
+    h.finish()
+}
+
+/// `V3_DIAG_COLLECTOR=<needle>`: trace the collector's work on every token
+/// containing the needle. Read once — this used to be an environment lookup
+/// per chunk.
+fn diag_collector_target() -> Option<&'static str> {
+    static TARGET: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    TARGET.get_or_init(|| std::env::var("V3_DIAG_COLLECTOR").ok()).as_deref()
 }
 
 impl SfxCollectorV3 {
@@ -581,23 +631,36 @@ impl SfxCollectorV3 {
         // "ck" (own_len 6) in another. Anything that rebuilds text from
         // termtexts — the literal verification, the window for relaxed
         // matches — reads own_len, so each shape needs its own ordinal.
-        let key = intern_key(text, meta.is_word_stripped, meta.own_len, meta.sep_len, meta.is_word_start);
-        if let Some(&ord) = self.token_intern.get(&key) {
+        let shape = intern_shape(&meta);
+        let hash = intern_hash(shape, text);
+        let texts = &self.token_texts;
+        let metas = &self.token_meta;
+        if let Some(&ord) = self.token_intern.find(hash, |&o| {
+            intern_shape(&metas[o as usize]) == shape && texts[o as usize] == text
+        }) {
             return ord;
         }
         let ord = self.token_texts.len() as u32;
-        // The text lives twice (the intern key carries the shape) and the
-        // per-ordinal Vec, meta and hash slot come with it.
-        self.mem_estimate += key.len() + text.len() + INTERNED_TOKEN_OVERHEAD;
+        // The text, its per-ordinal Vec, meta and hash slot.
+        self.mem_estimate += text.len() + INTERNED_TOKEN_OVERHEAD;
         if let Some((slot, field_id)) = &self.dictionary {
             let dict = slot.read().unwrap().clone()
                 .expect("a dictionary index always holds a dictionary");
-            let (global, minted) = dict.lookup_or_mint(*field_id, &key, text, &meta);
+            let key = &mut self.key_scratch;
+            write_intern_key(key, text, meta.is_word_stripped, meta.own_len, meta.sep_len, meta.is_word_start);
+            // The collector's hash of (shape, text) also keys the dictionary's
+            // shared cache of found ids, mixed with the field.
+            let key_hash = hash ^ (*field_id as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let (global, minted) = dict.lookup_or_mint_hashed(*field_id, key, key_hash, text, &meta);
             self.global_ids.push(global);
             self.minted.push(minted);
         }
-        self.token_intern.insert(key, ord);
-        self.token_texts.push(text.to_string()); // store actual text, not the prefixed key
+        let texts = &self.token_texts;
+        let metas = &self.token_meta;
+        self.token_intern.insert_unique(hash, ord, |&o| {
+            intern_hash(intern_shape(&metas[o as usize]), &texts[o as usize])
+        });
+        self.token_texts.push(text.to_string());
         self.token_postings.push(Vec::new());
         self.token_meta.push(meta);
         ord
@@ -616,11 +679,8 @@ impl SfxCollectorV3 {
     /// whatever its shape (intern keys carry the shape after a NUL).
     #[cfg(test)]
     fn chunk_ord(&self, text: &str) -> Option<u32> {
-        let prefix = format!("{text}\x00");
-        self.token_intern.iter()
-            .filter(|(k, _)| k.starts_with(&prefix))
-            .map(|(_, &v)| v)
-            .min()
+        (0..self.token_texts.len() as u32)
+            .find(|&o| !self.token_meta[o as usize].is_word_stripped && self.token_texts[o as usize] == text)
     }
 
     /// Extract data for DAG-based build.
@@ -638,111 +698,58 @@ impl SfxCollectorV3 {
             self.token_texts[a as usize].cmp(&self.token_texts[b as usize])
         });
 
-        // --- Extended ordinals: each unique extended text → own ordinal + own postings ---
-        // No grouping by text[..own_len]. Overlap variants are kept separate in
-        // partitions 0x00/0x01, preventing FP from overlap mixing.
-        // Word-stripped entries (partition 0x02) get their own ordinal with
-        // aggregated postings from all overlap variants of their first chunk.
-
-        // Collect all ordinal entries into a BTreeMap for deterministic alphabetical order.
-        // Chunk and word-stripped entries use SEPARATE keys (prefixed) to prevent
-        // collision when their text is identical (e.g., "functional" as chunk
-        // from "functionality" vs word-stripped "functional").
-        struct OrdEntry {
-            text: String, // actual text (no prefix)
-            postings: Vec<(u32, u32)>,
-            own_len: u16,
-            intern_ords: Vec<u32>,
-            is_word_stripped: bool,
-        }
-        let mut ord_map: std::collections::BTreeMap<String, OrdEntry> =
-            std::collections::BTreeMap::new();
-
-        // Add chunk entries (non-word-stripped): each gets its own ordinal
-        let diag_target = std::env::var("V3_DIAG_COLLECTOR").ok();
-        for &io in &sorted_indices {
-            if self.token_meta[io as usize].is_word_stripped { continue; }
-            let text = &self.token_texts[io as usize];
-            // "C:" = chunk namespace, keyed by shape like intern_extended.
-            let cm = &self.token_meta[io as usize];
-            let map_key = format!("C:{text}\x00{}:{}:{}", cm.own_len, cm.sep_len, cm.is_word_start as u8);
-            let postings_before = self.token_postings[io as usize].len();
-            let entry = ord_map.entry(map_key).or_insert_with(|| OrdEntry {
-                text: text.clone(),
-                postings: Vec::new(),
-                own_len: self.token_meta[io as usize].own_len,
-                intern_ords: Vec::new(),
-                is_word_stripped: false,
-            });
-            entry.postings.extend(self.token_postings[io as usize].iter().map(|&(d, ti, _, _)| (d, ti)));
-            entry.intern_ords.push(io);
-
-            if let Some(ref target) = diag_target {
-                if text.to_lowercase().contains(target) {
-                    eprintln!("[COLLECTOR into_data] intern_ord={} text={:?} postings_count={} ord_map_postings_after={} is_ws=false",
-                        io, text, postings_before, entry.postings.len());
-                }
+        // --- Final ordinals ---
+        // The intern table already gives one ordinal per `(shape, text)`, so
+        // a final ordinal is an intern ordinal in a chosen order: chunk
+        // entries first, then word-stripped entries, each group by text and
+        // shape — or, with a shard dictionary, by increasing global id, which
+        // makes the segment's `.gmap` a sorted list (local → global by index,
+        // global → local by binary search). Word-stripped entries only count
+        // when a word entry names them (`word_stripped_entries`), as before.
+        let diag_target = diag_collector_target();
+        let dictionary_mode = self.dictionary.is_some();
+        let mut is_ws_entry = vec![false; num_tokens];
+        for ws in &self.word_stripped_entries {
+            let io = ws.first_intern_ord as usize;
+            if self.token_meta[io].is_word_stripped {
+                is_ws_entry[io] = true;
             }
         }
+        let mut order: Vec<u32> = (0..num_tokens as u32)
+            .filter(|&io| {
+                let m = &self.token_meta[io as usize];
+                if m.is_word_stripped { is_ws_entry[io as usize] } else { true }
+            })
+            .collect();
+        if dictionary_mode {
+            order.sort_by_key(|&io| self.global_ids[io as usize]);
+        } else {
+            order.sort_by(|&a, &b| {
+                let (ma, mb) = (&self.token_meta[a as usize], &self.token_meta[b as usize]);
+                (ma.is_word_stripped, self.token_texts[a as usize].as_bytes(), intern_shape(ma))
+                    .cmp(&(mb.is_word_stripped, self.token_texts[b as usize].as_bytes(), intern_shape(mb)))
+            });
+        }
 
-        // Add word-stripped entries: own ordinal but NO chunk-level postings.
-        // Their postings go into a separate word_postings (WordSfxPost format)
-        // with position = last chunk (for cross-word adjacency).
-        // They still need an entry in ord_map for ordinal assignment and FST building,
-        // but with empty postings (the word sfxpost is separate).
-        use crate::suffix_fst::word_sfxpost::WordPostingEntry;
-
-        let mut ws_processed: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        // Deferred: word postings collected after ordinal assignment (need final_ord)
+        let mut intern_to_final = vec![0u32; num_tokens];
+        let mut content_postings: Vec<Vec<(u32, u32)>> = Vec::with_capacity(order.len());
+        let mut tokens_vec: Vec<String> = Vec::with_capacity(order.len());
+        let mut own_lens: Vec<u16> = Vec::with_capacity(order.len());
+        let mut globals: Vec<u32> = Vec::with_capacity(if dictionary_mode { order.len() } else { 0 });
+        let mut newtexts: Vec<(u32, String, TermMetaV3)> = Vec::new();
+        let mut token_postings = self.token_postings;
+        // Word-stripped entries whose word postings are written once ordinals exist.
         let mut deferred_ws: Vec<u32> = Vec::new();
 
-        for ws in &self.word_stripped_entries {
-            if !ws_processed.insert(ws.first_intern_ord) { continue; }
-            if !self.token_meta[ws.first_intern_ord as usize].is_word_stripped { continue; }
-
-            let ws_text = &self.token_texts[ws.first_intern_ord as usize];
-            // "W:" = word-stripped namespace, keyed by shape like intern_extended.
-            let map_key = format!("W:{ws_text}\x00{}", ws.first_own_len - ws.last_sep_len as u16);
-
-            // Add to ord_map with EMPTY postings — word postings go to WordSfxPost
-            ord_map.entry(map_key).or_insert_with(|| OrdEntry {
-                text: ws_text.clone(),
-                postings: Vec::new(), // empty! word postings are separate
-                own_len: ws.first_own_len,
-                intern_ords: vec![ws.first_intern_ord],
-                is_word_stripped: true,
-            });
-
-            deferred_ws.push(ws.first_intern_ord);
-        }
-
-        // Assign final ordinals in BTreeMap (alphabetical) order — or, with a
-        // shard dictionary, in increasing global id, which makes the
-        // segment's `.gmap` a sorted list (local → global by index, global →
-        // local by binary search).
-        let mut intern_to_final = vec![0u32; num_tokens];
-        let mut content_postings: Vec<Vec<(u32, u32)>> = Vec::new();
-        // Use a Vec instead of BTreeSet to keep 1:1 correspondence with final ordinals.
-        // When chunk and word-stripped have the same text, they get separate entries.
-        let mut tokens_vec: Vec<String> = Vec::new();
-        let mut own_lens: Vec<u16> = Vec::new();
-        let mut final_ord = 0u32;
-        let dictionary_mode = self.dictionary.is_some();
-        let mut entries: Vec<OrdEntry> = ord_map.into_values().collect();
-        if dictionary_mode {
-            entries.sort_by_key(|e| self.global_ids[e.intern_ords[0] as usize]);
-        }
-        let mut globals: Vec<u32> = Vec::with_capacity(if dictionary_mode { entries.len() } else { 0 });
-        let mut newtexts: Vec<(u32, String, TermMetaV3)> = Vec::new();
-
-        for entry in &entries {
+        for (final_ord, &io) in order.iter().enumerate() {
+            let final_ord = final_ord as u32;
+            let io = io as usize;
+            let m = &self.token_meta[io];
             if dictionary_mode {
-                let io = entry.intern_ords[0] as usize;
                 let global = self.global_ids[io];
                 debug_assert!(global <= u32::MAX as u64, "global id beyond u32");
                 globals.push(global as u32);
                 if self.minted[io] {
-                    let m = &self.token_meta[io];
                     newtexts.push((global as u32, self.token_texts[io].clone(), TermMetaV3 {
                         own_len: m.own_len,
                         sep_len: m.sep_len,
@@ -752,28 +759,34 @@ impl SfxCollectorV3 {
                     }));
                 }
             }
-            tokens_vec.push(entry.text.clone());
-            let mut p = entry.postings.clone();
+            tokens_vec.push(self.token_texts[io].clone());
+            // A word-stripped entry has no chunk postings: its word postings
+            // go to `.word_sfxpost`.
+            let mut p: Vec<(u32, u32)> = if m.is_word_stripped {
+                deferred_ws.push(io as u32);
+                Vec::new()
+            } else {
+                std::mem::take(&mut token_postings[io]).into_iter().map(|(d, ti, _, _)| (d, ti)).collect()
+            };
             let before_dedup = p.len();
-            p.sort();
+            p.sort_unstable();
             p.dedup();
-            content_postings.push(p.clone());
-            own_lens.push(entry.own_len);
-            for &io in &entry.intern_ords {
-                intern_to_final[io as usize] = final_ord;
-            }
-
-            if let Some(ref target) = diag_target {
-                if entry.text.to_lowercase().contains(target) {
-                    eprintln!("[COLLECTOR final_ord] text={:?} final_ord={} intern_ords={:?} ws={} postings_before_dedup={} postings_after_dedup={} doc_ids={:?}",
-                        entry.text, final_ord, entry.intern_ords, entry.is_word_stripped,
+            if let Some(target) = diag_target {
+                if self.token_texts[io].to_lowercase().contains(target) {
+                    eprintln!("[COLLECTOR final_ord] text={:?} final_ord={} intern_ord={} ws={} postings_before_dedup={} postings_after_dedup={} doc_ids={:?}",
+                        self.token_texts[io], final_ord, io, m.is_word_stripped,
                         before_dedup, p.len(),
                         p.iter().map(|x| x.0).collect::<Vec<_>>());
                 }
             }
-
-            final_ord += 1;
+            content_postings.push(p);
+            own_lens.push(m.own_len);
+            intern_to_final[io] = final_ord;
         }
+        let final_ord = order.len() as u32;
+        drop(token_postings);
+
+        use crate::suffix_fst::word_sfxpost::WordPostingEntry;
 
         // Build word postings (WordSfxPost) — now that ordinals are assigned.
         // Word postings were captured directly in add_value() where we know the

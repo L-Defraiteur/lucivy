@@ -69,6 +69,7 @@ bitpacking = { version = "0.9.3", default-features = false, features = [
 ] }
 census = "0.4.2"
 rustc-hash = "2.0.0"
+hashbrown = "0.15"
 thiserror = "2.0.1"
 htmlescape = "0.3.1"
 fail = { version = "0.5.0", optional = true }
