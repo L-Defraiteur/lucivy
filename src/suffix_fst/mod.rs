@@ -29,6 +29,7 @@ pub mod dictionary;
 pub mod dictionary_bloom;
 pub mod dictionary_compact;
 pub mod dictionary_fold;
+pub mod dictionary_pidx;
 pub mod derived;
 #[cfg(test)]
 mod postings_measure;

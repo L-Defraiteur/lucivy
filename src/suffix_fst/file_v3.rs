@@ -38,8 +38,8 @@ use lucivy_fst::{Map, OutputTable};
 
 use super::builder_v3::{
     decode_output_v3, decode_parent_entries_v3, decode_parent_entries_v3_legacy,
-    decode_parent_entries_v4_packed, decode_parent_entries_v8, decode_parent_entries_v8_where,
-    ParentEntryV3, ParentRefV3,
+    decode_parent_entries_v4_packed, decode_parent_entries_v8, decode_parent_entries_v8_overlap,
+    decode_parent_entries_v8_where, ParentEntryV3, ParentRefV3,
 };
 use super::section_file::{SectionFileReader, SectionFileWriter};
 
@@ -305,6 +305,10 @@ pub struct SfxFileReaderV3 {
     /// shard dictionary. Each is a single-file reader; the walks visit
     /// `part_views()` and union what they find. Empty for a plain file.
     more: Vec<SfxFileReaderV3>,
+    /// The derived group index of this file's parents table
+    /// (`dictionary_pidx`), on a dictionary part: read from `.pidx` or
+    /// built in RAM. `None` on a segment file — its lookups go by the walks.
+    group_index: Option<super::dictionary_pidx::GroupIndex>,
 }
 
 impl SfxFileReaderV3 {
@@ -351,7 +355,7 @@ impl SfxFileReaderV3 {
         }
         let version = version.max(LEGACY_PARENTS_VERSION);
 
-        Ok(Self { fst, parent_list_data, version, memo: None, segment_gmap: None, more: Vec::new() })
+        Ok(Self { fst, parent_list_data, version, memo: None, segment_gmap: None, more: Vec::new(), group_index: None })
     }
 
     /// One reader over several files (the generations of a shard
@@ -366,6 +370,58 @@ impl SfxFileReaderV3 {
         Ok(reader)
     }
 
+    /// `open_parts` over parts that may each bring their group index
+    /// (`dictionary_pidx`, the `.pidx` next to a generation); a part
+    /// without one, or whose bytes do not open, gets it built in RAM from
+    /// its parents table — a version-8 part only.
+    pub fn open_parts_indexed(parts: Vec<(common::OwnedBytes, Option<common::OwnedBytes>)>) -> Result<Self, SfxV3Error> {
+        let mut it = parts.into_iter();
+        let (first, first_index) = it.next().ok_or(SfxV3Error::InvalidFormat)?;
+        let mut reader = Self::open_owned(first)?.with_group_index(first_index);
+        for (bytes, index) in it {
+            reader.more.push(Self::open_owned(bytes)?.with_group_index(index));
+        }
+        Ok(reader)
+    }
+
+    /// Attach the group index of this file's table: the given bytes when
+    /// they open, else one built in RAM (version 8 only; older layouts
+    /// have no grouped record).
+    pub fn with_group_index(mut self, bytes: Option<common::OwnedBytes>) -> Self {
+        use super::dictionary_pidx::GroupIndex;
+        if self.version <= OVERLAP_IN_KEY_VERSION {
+            return self;
+        }
+        self.group_index = bytes.and_then(GroupIndex::open)
+            .or_else(|| Some(GroupIndex::build(self.parent_list_data.as_slice())));
+        self
+    }
+
+    /// The group index attached to this file, if any.
+    pub fn group_index(&self) -> Option<&super::dictionary_pidx::GroupIndex> {
+        self.group_index.as_ref()
+    }
+
+    /// The parents behind a FST value whose overlap bytes are exactly
+    /// `want` (a dictionary lookup): through the group index when the
+    /// file has one and the record is indexed, else a scan of the record
+    /// that stops at the first overlap past `want`. An older file has the
+    /// overlap in the key, not the record: every parent is returned, as
+    /// `decode_parents_where` does.
+    pub fn parents_with_overlap(&self, value: u64, key: &[u8], want: &[u8]) -> Vec<ParentEntryV3> {
+        if self.version <= OVERLAP_IN_KEY_VERSION {
+            return self.decode_parents(value, key);
+        }
+        let table = OutputTable::new(&self.parent_list_data);
+        let record = table.get(value);
+        if let Some(index) = &self.group_index {
+            if let Some(found) = index.parents_with_overlap(value, record, key, want) {
+                return found;
+            }
+        }
+        decode_parent_entries_v8_overlap(record, key, want)
+    }
+
     /// The single-file readers this one is made of, first file included,
     /// each without memo or segment view: what a walk iterates.
     pub fn part_views(&self) -> Vec<SfxFileReaderV3> {
@@ -377,6 +433,7 @@ impl SfxFileReaderV3 {
             memo: None,
             segment_gmap: None,
             more: Vec::new(),
+            group_index: self.group_index.clone(),
         });
         v.extend(self.more.iter().cloned());
         v
@@ -415,6 +472,7 @@ impl SfxFileReaderV3 {
             memo: self.memo.clone(),
             segment_gmap: Some(gmap),
             more: self.more.clone(),
+            group_index: self.group_index.clone(),
         }
     }
 
@@ -719,6 +777,49 @@ mod tests {
     }
 
     /// Measurement, not a check: parent-list sizes by key length in a real
+    /// Shape of the parents table of a version-8 `.sfx` (path in
+    /// `SFX_FILE`): flat against grouped records, groups and parents per
+    /// grouped record, and the parents at `sti` 0 — what a dictionary lookup
+    /// wants — that sit in grouped records. Sizes the derived group index.
+    #[test]
+    #[ignore]
+    fn measure_grouped_records() {
+        use crate::suffix_fst::builder_v3::{for_each_table_record, scan_parent_record_v8};
+        let Ok(path) = std::env::var("SFX_FILE") else { eprintln!("SFX_FILE unset"); return };
+        let bytes = std::fs::read(&path).unwrap();
+        let t = std::time::Instant::now();
+        let reader = SfxFileReaderV3::open(&bytes).unwrap();
+        assert!(reader.keys_cut_at_boundary());
+        let table = reader.parents_table_bytes();
+        let mut records = 0u64; let mut flat = 0u64; let mut grouped = 0u64;
+        let mut flat_parents = 0u64; let mut grouped_parents = 0u64; let mut groups = 0u64;
+        let mut sti0_flat = 0u64; let mut sti0_grouped = 0u64; let mut sti0_grouped_records = 0u64;
+        let mut max_ordinal = 0u64;
+        // group-count buckets: 2-3, 4-7, 8-15, 16-63, 64-255, 256+
+        let mut buckets = [0u64; 6]; let mut bucket_sti0 = [0u64; 6]; let mut bucket_parents = [0u64; 6];
+        let mut big_flat = 0u64; let mut big_flat_sti0 = 0u64;
+        for_each_table_record(table, |_off, rec| {
+            records += 1;
+            let mut sti0 = 0u64;
+            let shape = scan_parent_record_v8(rec, &mut |p| { if p.sti == 0 { sti0 += 1; } max_ordinal = max_ordinal.max(p.ordinal); });
+            if shape.flat {
+                flat += 1; flat_parents += shape.parents as u64; sti0_flat += sti0;
+                if shape.parents > 8 { big_flat += 1; big_flat_sti0 += sti0; }
+            } else {
+                grouped += 1; grouped_parents += shape.parents as u64; groups += shape.groups as u64;
+                sti0_grouped += sti0; if sti0 > 0 { sti0_grouped_records += 1; }
+                let b = match shape.groups { 0..=3 => 0, 4..=7 => 1, 8..=15 => 2, 16..=63 => 3, 64..=255 => 4, _ => 5 };
+                buckets[b] += 1; bucket_sti0[b] += sti0; bucket_parents[b] += shape.parents as u64;
+            }
+        });
+        eprintln!("{path}: table {} MB scanned in {:.2} s", table.len() / 1048576, t.elapsed().as_secs_f64());
+        eprintln!("records {records}: flat {flat} ({flat_parents} parents, {sti0_flat} at sti 0; {big_flat} with > 8 parents holding {big_flat_sti0} at sti 0)");
+        eprintln!("grouped {grouped}: {groups} groups, {grouped_parents} parents, {sti0_grouped} at sti 0 in {sti0_grouped_records} records; max ordinal {max_ordinal}");
+        for (i, name) in ["2-3", "4-7", "8-15", "16-63", "64-255", "256+"].iter().enumerate() {
+            eprintln!("  groups {name:>7}: {} records, {} parents, {} at sti 0", buckets[i], bucket_parents[i], bucket_sti0[i]);
+        }
+    }
+
     /// `.sfx` (path in `SFX_FILE`). Tells what a lookup that stops at a token
     /// boundary would have to decode if the overlap left the keys.
     #[test]

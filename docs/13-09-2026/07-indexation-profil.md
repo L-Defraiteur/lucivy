@@ -234,6 +234,96 @@ collecteurs eux-mêmes, jamais profilé au-delà de `add_value`.
   les cinq README (le README racine est celui de PyPI), architecture (indexation
   4.2, résultats 4.2). Le tag et la PR vers `main` attendent le feu vert.
 
+## 5 sexies. Le `.pidx`, fait (13 septembre, nuit)
+
+La pièce du § 5 quater, mesurée avant d'être dessinée. Sur la plus grosse génération
+du noyau (`dict-10.2.sfx`, 527 Mo, table des parents 467 Mo — balayée en 0,43 s par
+`measure_grouped_records`, test ignoré de `file_v3.rs`, `SFX_FILE=…`) :
+
+| | records | groupes | parents | dont à sti 0 |
+|---|---|---|---|---|
+| plats (≤ 32 parents) | 5 614 219 | — | 15,1 M | 6,2 M |
+| groupés | **167 556 (2,9 %)** | **15,05 M** | **58,1 M (79 %)** | 6,3 M |
+| dont 16-63 groupes | 94 123 | | 5,3 M | 1,5 M |
+| dont 64-255 groupes | 57 857 | | 11,6 M | 3,0 M |
+| dont 256 groupes et plus | 10 306 | | 40,7 M | 1,9 M |
+
+Un groupe fait 3,9 parents en moyenne : ce n'est pas le décodage du groupe voulu qui
+coûte, c'est la lecture des en-têtes de tous ceux d'avant (un record de 1 460 groupes
+en moyenne dans la dernière ligne, et ce sont les textes les plus fréquents). La
+table « un point par groupe » du § 5 quater aurait fait 15 M × 13 octets = 195 Mo
+par génération : refusée. **Le `.pidx` est un index à points de contrôle** : pour
+chaque record de plus de 16 groupes, un point tous les 16 groupes (recouvrement,
+position de l'en-tête dans le record, premier ordinal du groupe précédent — l'en-tête
+porte un delta), 13 octets ; les records indexés par offset de table, triés. Une
+recherche : dichotomie sur les records, dichotomie sur les points, puis au plus 16
+en-têtes, et **arrêt au premier recouvrement dépassé** (les groupes sont triés — le
+chemin sans fichier s'arrête aussi maintenant, `decode_parent_entries_v8_overlap`).
+11,5 Mo pour cette génération (2,5 % du `.sfx`), 26 Mo sur les 5 078 de l'index du
+noyau (+0,5 %).
+
+Où il vit : `suffix_fst/dictionary_pidx.rs`. Écrit par `merge_sfx` dans l'étape
+écrivain (elle voit chaque record et son offset ; seuls les records groupés de plus de
+16 groupes lui coûtent une marche de leurs en-têtes : compaction 2,3-2,6 s, inchangée)
+et par `write_generation` ; jamais pour les paires `.newsfx` (petites, éphémères).
+Lu par `SfxDictionary::open` (`open_parts_indexed`) ; une partie sans fichier — une
+génération d'avant, une paire — le **reconstruit en RAM** depuis sa table
+(`GroupIndexBuilder::build_from_table`, sans marche FST). Le lookup
+(`lookup_with_key`) passe par `SfxFileReaderV3::parents_with_overlap`. Un ancien
+lecteur ignore le fichier : le format 8 ne bouge pas, un index 4.3 s'ouvre en 4.2.
+
+**Le cycle de vie du fichier**, la remarque de Lucie : un fichier de plus dans une
+génération se déclare partout où la génération est énumérée. Source unique
+désormais : `dictionary::GENERATION_EXTENSIONS` = `sfx`, `termtexts`, `pidx` —
+`SfxDictionaryMeta::files_of` (donc l'inventaire du GC, `list_files`, et
+`dictionary_files` des snapshots), `remove_leftovers`, `generation_bytes` (le choix
+des compactions), le banc. Le GC gardait déjà tout `dict-` d'une génération vivante ;
+les fichiers d'une génération retirée sont des fichiers gérés hors inventaire, il les
+efface, `.pidx` compris. `sync.rs` et `snapshot.rs` tolèrent son absence (une
+génération d'avant 4.3).
+
+**Mesuré, même état de machine, binaire 4.2.0 rebâti dans un arbre à part
+(`~/lucivy_bench/wt-4.2`, `CARGO_TARGET_DIR=~/lucivy_bench/target-ab`)** :
+
+| | 30 000 fichiers (×2 chacun) | noyau entier |
+|---|---|---|
+| mur | 12,0-12,1 → 11,8-12,2 s | **48,2 → 47,4 s** |
+| CPU de recherches (16 fils) | 32,7-31,5 → 30,0-30,4 s | 196 → 173 s |
+| dont marches FST | 9,3 → 7,4 s | 96 → 69 s |
+| dont décodage des parents | 3,8 → 2,2 s | **52 → 23 s** |
+| segments | 240 | 308 |
+| `de` strict / `lock` relâché | | 534 / 77 → 554 / 78 ms, mêmes comptes et spans |
+
+Sortie de compaction identique à l'octet à la 4.2.0 (sha256 des `.sfx` et
+`.termtexts` sur les quatre générations du banc). Ce qui reste dans les 23 s : le
+chronométrage lui-même (deux `Instant::now` par lookup, 70 M de lookups), les records
+plats et ceux de 16 groupes ou moins, le décodage du groupe voulu. Le mur ne gagne
+que 0,8 s : les recherches tournent sur les 16 fils, et ce qui borne le mur reste
+l'arrêt du monde au commit et la finalisation en ligne (§ 5).
+
+**Navigateur** (la règle : tout changement du chemin d'indexation se rejoue sur 10 000
+fichiers dans Chrome ; ici le chemin séquentiel wasm de `merge_sfx` écrit le fichier, et
+`SfxDictionary::open` le lit ou le reconstruit) : `?corpus=corpus-kernel-10k.tar.gz&commitmb=2`
+(commits rapprochés, 276 replis, compactions) — 10 000 fichiers indexés, 1 051 Mo en
+mémoire, pic 2 125 Mo, **12 `.pidx` pour 12 générations dans chacun des 4 shards** de
+l'OPFS, `mutex_lock` 968 documents (le compte de l'après-midi), 1 955 spans lus à l'octet
+(1 759 `mutex_lock` exacts, le reste des séparateurs relâchés : `mutex *lock`, `mutex
+lock`) ; le premier `mutex_lock` a attendu 26 s de fusions de fond, comme noté le soir.
+Puis l'index **Linux 2.6.0 écrit par la 4.2.0** (18 générations par shard, aucun `.pidx`)
+rouvert par l'onglet : 14 032 documents, `mutex_lock` 88 documents, 145/145 spans, et
+un `grep -rliaE 'mutex[^a-z0-9]*lock'` natif sur les mêmes 14 032 fichiers en trouve 87 —
+le 88ᵉ (`net/ipv4/ipvs/ip_vs_ctl.c`) est `mutex);\n\n/* lock`, une occurrence à cheval
+sur deux lignes que `grep` ne peut pas voir : 88 est le bon compte. Enfin le 10 000 par
+défaut (`commitmb` 8) : indexé et rouvert en ~45 s depuis le chargement de la page (37-43 s
+d'indexation seule l'après-midi), 1 063 Mo, pic 1 654 Mo, 968 documents.
+
+Vérité : `dictionary_pidx` (index = balayage sur sept formes de records, construction
+incrémentale = construction depuis la table, octets étrangers refusés),
+`streamed_merge_equals_the_rebuild` (le `.pidx` des deux chemins, égal à une
+construction depuis la table), `reopened_without_group_index_rebuilds_it`
+(`test_dictionary_index` : `.pidx` supprimés, réouverture, réindexation sans minter,
+le repli suivant écrit le sien), `bench_dict_compaction` (`DICT_KEEP=1`, sha256).
+
 ## 6. Vérification
 
 - `cargo test --release --lib` : 1 471 verts (22 ignorés) ; sans features par

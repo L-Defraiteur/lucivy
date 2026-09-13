@@ -41,6 +41,7 @@ use super::builder_v3::{MAX_OVERLAP_BYTES, SI_STRIPPED_PREFIX};
 use super::collector_v3::TokenMetaV3;
 use super::file_v3::SfxFileReaderV3;
 use super::termtexts_v3::{TermMetaV3, TermTextsReaderV3, TermTextsWriterV3};
+use super::dictionary_pidx::GROUP_INDEX_EXT;
 
 /// `IndexSettings::sfx_version` of an index with a shard dictionary: the v3
 /// engine, keys and files, over global ids.
@@ -226,6 +227,13 @@ impl LookupCache {
     }
 }
 
+/// The files of one generation of one field, by extension: the suffix FST
+/// with its parents, the texts, and the derived group index of the parents
+/// table (`dictionary_pidx`, written since 4.3; a generation without it
+/// is read as before). One list, for the meta's file inventory, the
+/// leftover removal and the size accounting alike.
+pub const GENERATION_EXTENSIONS: [&str; 3] = ["sfx", "termtexts", GROUP_INDEX_EXT];
+
 /// File name of one generation's file for one field.
 pub fn dictionary_file_name(generation: u64, field_id: u32, ext: &str) -> String {
     format!("dict-{generation}.{field_id}.{ext}")
@@ -318,7 +326,10 @@ impl DictionaryField {
         for part in self.sfx_reader.parts() {
             let Some(value) = part.fst().get(key) else { continue };
             let t_decode = timed.then(std::time::Instant::now);
-            let parents = part.decode_parents_where(value, key, |ov| ov == want_overlap);
+            // Through the group index when the record has one: the wanted
+            // group is reached by a binary search instead of a scan of
+            // every group header before it (`dictionary_pidx`).
+            let parents = part.parents_with_overlap(value, key, want_overlap);
             if let Some(t) = t_decode {
                 stats::DECODE_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
             }
@@ -463,7 +474,14 @@ impl SfxDictionary {
             let pair_paths = meta.pending_segments.iter().map(|u| (
                 PathBuf::from(format!("{u}.{field_id}.newsfx")),
                 PathBuf::from(format!("{u}.{field_id}.newtexts"))));
-            for (sfx_path, termtexts_path) in generation_paths.chain(pair_paths) {
+            // A generation's group index (`dictionary_pidx`), when the file
+            // is there: a generation written before it, or a pending pair
+            // (never written for those: small, and gone at the next fold),
+            // gets its index built in RAM by `open_parts_indexed`.
+            let index_paths = meta.generations.iter().map(|&g| Some(PathBuf::from(dictionary_file_name(g, field_id, GROUP_INDEX_EXT))))
+                .chain(meta.pending_segments.iter().map(|_| None));
+            let mut index_parts: Vec<Option<OwnedBytes>> = Vec::new();
+            for ((sfx_path, termtexts_path), index_path) in generation_paths.chain(pair_paths).zip(index_paths) {
                 let sfx = directory.open_read(&sfx_path);
                 let termtexts = directory.open_read(&termtexts_path);
                 let (Ok(sfx), Ok(termtexts)) = (sfx, termtexts) else {
@@ -481,8 +499,10 @@ impl SfxDictionary {
                 if first_sfx.is_none() { first_sfx = Some(sfx); }
                 sfx_parts.push(sfx_bytes);
                 termtexts_bytes.push(tt_bytes);
+                index_parts.push(index_path.and_then(|p| directory.open_read(&p).ok()).and_then(|f| f.read_bytes().ok()));
             }
-            let (Some(sfx), Ok(sfx_reader)) = (first_sfx, SfxFileReaderV3::open_parts(sfx_parts)) else { continue };
+            let parts: Vec<(OwnedBytes, Option<OwnedBytes>)> = sfx_parts.into_iter().zip(index_parts).collect();
+            let (Some(sfx), Ok(sfx_reader)) = (first_sfx, SfxFileReaderV3::open_parts_indexed(parts)) else { continue };
             let sfx_reader = sfx_reader.with_memo(Arc::new(super::file_v3::FstMemo::new()));
             fields.insert(field_id, DictionaryField::new(sfx, sfx_reader, termtexts_bytes));
         }

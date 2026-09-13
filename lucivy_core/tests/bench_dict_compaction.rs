@@ -25,14 +25,14 @@ fn bench_dict_compaction() {
     let directory = MmapDirectory::open(&dir).unwrap();
     let mut input = 0u64;
     for &g in &gens {
-        for ext in ["sfx", "termtexts"] {
+        for ext in ld_lucivy::suffix_fst::dictionary::GENERATION_EXTENSIONS {
             let p = std::path::Path::new(&dir).join(dictionary_file_name(g, field, ext));
             input += std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
         }
     }
     eprintln!("compacting generations {gens:?} of field {field}: {:.0} MB of input", input as f64 / 1e6);
     for round in 0..rounds {
-        for ext in ["sfx", "termtexts"] {
+        for ext in ld_lucivy::suffix_fst::dictionary::GENERATION_EXTENSIONS {
             let _ = std::fs::remove_file(std::path::Path::new(&dir).join(dictionary_file_name(out, field, ext)));
         }
         let t = Instant::now();
@@ -43,7 +43,7 @@ fn bench_dict_compaction() {
     }
     // `DICT_KEEP=1` leaves the output in place (to compare two builds).
     if std::env::var("DICT_KEEP").is_err() {
-        for ext in ["sfx", "termtexts"] {
+        for ext in ld_lucivy::suffix_fst::dictionary::GENERATION_EXTENSIONS {
             let _ = std::fs::remove_file(std::path::Path::new(&dir).join(dictionary_file_name(out, field, ext)));
         }
     }

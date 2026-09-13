@@ -283,6 +283,15 @@ def scan_wsp(path, deep):
         r.update(entries=entries, nonempty_ordinals=nonempty, checkpoint_bytes=ckpt)
     return r
 
+def scan_pidx(path, deep):
+    """Derived group index of a dictionary generation (`dictionary_pidx`):
+    one checkpoint per 16 groups of every record over 16 groups."""
+    b = open(path, "rb").read()
+    if b[:4] != b"PIDX": return {"file": len(b)}
+    n = struct.unpack_from("<I", b, 8)[0]
+    m = struct.unpack_from("<I", b, 12 + 12 * n)[0]
+    return {"file": len(b), "records": n, "checkpoints": m, "stride": b[5]}
+
 totals = collections.defaultdict(lambda: collections.Counter())
 deep_results = {}
 t0 = time.time()
@@ -295,6 +304,7 @@ for path in sorted(glob.glob(os.path.join(D, "*"))):
     try:
         if ext == "sfx": r = scan_sfx(path, deep)
         elif ext == "termtexts": r = scan_termtexts(path, deep)
+        elif ext == "pidx": r = scan_pidx(path, deep)
         elif ext == "bytemap": r = scan_bytemap(path, deep)
         elif ext == "posmap": r = scan_posmap(path, deep, b"PMAP")
         elif ext == "word_pos_map": r = scan_posmap(path, deep, b"WMP2")
