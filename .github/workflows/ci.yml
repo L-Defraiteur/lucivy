@@ -5,7 +5,7 @@ name: CI
 # the gate of a release is this file itself, not a copy of it.
 on:
   push:
-    branches: [main, 'v*']
+    branches: [main, 'v*', '[0-9]*']
   pull_request:
     branches: [main]
   workflow_call:
