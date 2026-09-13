@@ -146,10 +146,10 @@ if es:
 if tv:
     P(f"| tantivy 0.25, default tokenizer | it does not (whole words) | {mb(tv['indexing']['default']['bytes'])} | {ratio(tv['indexing']['default']['bytes'])} | {tv['indexing']['default']['seconds']:.0f} s |")
     P(f"| tantivy 0.25, `NgramTokenizer` (trigrams) | trigram phrases (positions all 0: candidates only) | {mb(tv['indexing']['trigram']['bytes'])} | {ratio(tv['indexing']['trigram']['bytes'])} | {tv['indexing']['trigram']['seconds']:.0f} s |")
-labels = {"v3": "lucivy 4.2, a dictionary per segment (`sfx_version` 3)",
-          "dict": "lucivy 4.2, shared dictionary per shard",
-          "dict-ram": "lucivy 4.2, shared dictionary + `derived_in_ram`",
-          "dict-nopos": "lucivy 4.2, shared dictionary + `positions: false`"}
+labels = {"v3": "lucivy 4.3, a dictionary per segment (`sfx_version` 3)",
+          "dict": "lucivy 4.3, shared dictionary per shard",
+          "dict-ram": "lucivy 4.3, shared dictionary + `derived_in_ram`",
+          "dict-nopos": "lucivy 4.3, shared dictionary + `positions: false`"}
 for name in ("v3", "dict", "dict-ram", "dict-nopos"):
     if name in sizes and name in lucivy:
         meta = lucivy[name][1]

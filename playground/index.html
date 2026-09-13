@@ -1252,7 +1252,7 @@ V3_CORPUS=/tmp/linux-bench V3_SFX_VERSION=4 cargo test --release -p lucivy-core 
     <p style="margin-top:12px">
       What the other two do better, in the same report: Elasticsearch answers a plain substring in
       3-8 ms to lucivy's 12-15 and is a distributed system; tantivy indexes the corpus in seconds
-      (lucivy: 47 s in 4.2, on 16 threads &mdash; 107 s when this was first measured); both run a
+      (lucivy: 35 s in 4.3, on 16 threads &mdash; 107 s when this was first measured); both run a
       term-level fuzzy in a fifth of lucivy's time at two edits &mdash; on a different question, and
       every such row says so. tantivy's n-gram tokenizer emits every position as 0, so a trigram
       phrase there matches nothing: its rows use the honest path, an AND of trigrams then a
@@ -1876,7 +1876,7 @@ async function startup() {
     // Cache-buster: GitHub Pages caches the worker and the wasm for a while,
     // and a phone kept a whole build behind after a deploy. Bumped at each
     // engine or worker change; the query rides through to the wasm.
-    const BUILD = '4.2.0-7d803a7';
+    const BUILD = '4.3.0-e28676a';
     lucivy = new Lucivy(`./js/lucivy-worker.js?v=${BUILD}`, {
       noOpfs: startupParams.has('noopfs'),
       verbose: startupParams.has('verbose'), // engine diagnostics (LUCIVY_VERBOSE, V3_PROFILE)
@@ -2907,7 +2907,7 @@ const term = {
 // happening. Cosmetic, never on real output, off under reduced motion.
 const GLITCH_BASE = [
   ' ▚▞▚▞  l u c i v y  ▞▚▞▚      substring search · suffix FST · Rust → WASM',
-  ' ░▒▓█  4.2.0  █▓▒░           01101100 01110101 01100011 01101001 01110110 01111001',
+  ' ░▒▓█  4.3.0  █▓▒░           01101100 01110101 01100011 01101001 01110110 01111001',
   ' ∿ ⌁ ⟁  bm25 · fuzzy · regex · spans  ⟁ ⌁ ∿',
 ];
 const GLITCH_CHARS = '▚▞░▒▓█∿⌁⟁╳◌◍⋮⋯01';

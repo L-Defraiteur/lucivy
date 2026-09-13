@@ -1,5 +1,5 @@
-Unreleased — branch `v4.3`
-==========================
+Lucivy 4.3.0 — 14 September 2026
+================================
 
 - **A segment's dictionary pair is named for what it is.** With the shared
   dictionary, a segment writes next to itself the texts it minted first and

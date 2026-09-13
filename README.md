@@ -1,4 +1,4 @@
-# lucivy 4.2.0
+# lucivy 4.3.0
 
 [![PyPI](https://img.shields.io/pypi/v/lucivy?label=PyPI&color=blue)](https://pypi.org/project/lucivy/)
 [![npm](https://img.shields.io/npm/v/lucivy?label=npm&color=cb3837)](https://www.npmjs.com/package/lucivy)
@@ -30,6 +30,40 @@ lucivy's own source from GitHub and indexes it in your browser in a few seconds.
 tab. The second half is typed by hand — `index postgres`, then `--strict
 "heap_insert"`, `"CREATE INDEX CONCURRENTLY"` (27 hits, 11 ms), `--fuzzy 1
 "vaccum"` (17 ms) and `--regex "ExecInit[A-Z][a-zA-Z]+\("` (20 ms).*
+
+### What's new in 4.3
+
+- **Indexing 48 → 35 s on the same index.** The whole kernel (Linux 7.2,
+  101 141 files, 941 MB) on a 24-core machine, the same 308 segments, the
+  same ids minted, the same answers. Four pieces, none of them an option: a
+  derived group index next to every dictionary generation (`.pidx`, 2.5 % of
+  the `.sfx`, rebuilt in RAM when an older index lacks it) that reaches the
+  right parent group by binary search instead of reading every header
+  before it; the commit no longer stops the world to forget its pending
+  texts (they live by commit epoch and are dropped whole — 6.7 s of serial
+  path gone); the suffix collector allocates per token instead of per
+  occurrence; and a text minted since the last fold is found in the pending
+  table before every FST part is walked (FST walks 68 → 38 s of CPU).
+- **Two exactness fixes, present since 4.0.0.** A segment holding few of a
+  candidate list's ids kept one item per id and lost the repeated
+  occurrences of a needle inside one token (`0xdedede00` for `de`) — whether
+  a segment took that path depended on its size, so the same corpus was
+  exact at 16 writer threads and lost 3 spans of 7.9 M at 24. And relaxed
+  separators could report a match ending inside a multi-byte character
+  (`D\n,,“underscan`): a word's content overlap was taken from the word
+  after the next when the next one began with a three-byte character, and
+  an anchored word candidate was accepted at any suffix. Both fixed on the
+  query side (an existing index answers exactly with the new reader), the
+  second at indexing too; tests red on the old code.
+- **The segment's dictionary pair is named for what it is:**
+  `<uuid>.<field>.minted.termtexts` and `.minted.sfx` (the texts a segment
+  minted first and the FST over them, folded into the next generation),
+  instead of `.newtexts` / `.newsfx`. Every reader still opens the old names.
+- **Compatibility**: 4.2 opens a 4.3 index and 4.3 opens 3.0.x to 4.2 indexes
+  as before; the only thing 4.2 cannot do is fold the pairs a 4.3 writer left
+  pending after a crash (a cleanly closed index has none). Every binding
+  already had `update` (delete by `_node_id` and add) — editing one file
+  costs that file, not a rebuild.
 
 ### What's new in 4.2
 
@@ -111,7 +145,7 @@ tab. The second half is typed by hand — `index postgres`, then `--strict
   3.0.x does not open a 4.0 index; the first commit in 4.0 converts without
   return.
 - One version number for the whole workspace: `ld-lucivy`, `lucivy-core`,
-  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.2.0.
+  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.3.0.
 
 3.0.x brought SFX v3 (exact byte spans on every query mode), boolean syntax,
 Jaro-Winkler, query warnings, bring-your-own-storage in every binding, snapshots
@@ -390,7 +424,7 @@ best for substring search, not at its default: Elasticsearch 8.19 with a
 trigram analyzer plus a `wildcard` field for regexes, tantivy 0.25 (upstream,
 not the fork) with its `NgramTokenizer`. The truth of every row is the same
 byte-by-byte scan of the files; a lucivy count is `OK` only when its documents
-**and** its byte spans match it. Full report, generated: [docs/compare-engines-2026-09-13.md](docs/compare-engines-2026-09-13.md).
+**and** its byte spans match it. Full report, generated: [docs/compare-engines-2026-09-14.md](docs/compare-engines-2026-09-14.md).
 
 | engine | how it answers a substring | index | × text | indexing |
 |---|---|---|---|---|
@@ -398,16 +432,16 @@ byte-by-byte scan of the files; a lucivy count is `OK` only when its documents
 | Elasticsearch, trigrams + `wildcard` | trigram phrases, regex on the wildcard field | 3 050 MB | ×3.4 | 118 s |
 | tantivy, default tokenizer | it does not (whole words) | 657 MB | ×0.7 | 1 s |
 | tantivy, `NgramTokenizer` | trigram AND, then the stored text re-read to verify (its n-gram positions are all 0) | 735 MB | ×0.8 | 5 s |
-| **lucivy 4.2, shared dictionary + `positions: false`** | suffix FST, exact spans, every match verified on the stored text | **2 491 MB** | **×2.8** | 47 s |
-| **lucivy 4.2, shared dictionary + `derived_in_ram`** | suffix FST, exact spans | **3 408 MB** | **×3.8** | 46 s |
-| **lucivy 4.2, shared dictionary** | suffix FST, exact spans | **5 064 MB** | **×5.6** | 47 s |
+| **lucivy 4.3, shared dictionary + `positions: false`** | suffix FST, exact spans, every match verified on the stored text | **2 517 MB** | **×2.8** | 29 s |
+| **lucivy 4.3, shared dictionary + `derived_in_ram`** | suffix FST, exact spans | **3 434 MB** | **×3.8** | 35 s |
+| **lucivy 4.3, shared dictionary** | suffix FST, exact spans | **5 090 MB** | **×5.7** | 35 s |
 
 Read the first lucivy row against the second Elasticsearch one: **the index that
 answers every question exactly is smaller than the one that answers some of them
-silently wrong** — 2 491 MB against 3 050, and 47 s to build against 118 (the
-lucivy rows are 4.2's indexing, twice as fast as 4.1's on the same machine; the
-Elasticsearch indexes were built once and reused, their times are the first
-run's).
+silently wrong** — 2 517 MB against 3 050, and 29 s to build against 118 (the
+lucivy rows are 4.3's indexing, a quarter faster than 4.2's on the same machine
+and the same index; the Elasticsearch indexes were built once and reused, their
+times are the first run's).
 
 On the substring itself all three agree to the document (`mutex_lock` 5 202,
 `spin_lock` 6 527, `sched` 9 214 — bold in the report). Where they part:
@@ -463,7 +497,7 @@ benches/compare_engines.sh /tmp/linux-bench /tmp/lucivy-compare     # writes com
 
 ### Browser against native
 
-Measured on 13 September 2026 (4.2.0), the whole Linux 2.6.0 kernel, 4 shards,
+Measured on 14 September 2026 (4.3.0), the whole Linux 2.6.0 kernel, 4 shards,
 shared dictionary, the same engine and the same queries on both sides. The
 native run is the harness, verified against a byte-by-byte scan of the files it
 indexed (it skips a few directories, hence 13 806 against 14 032); the browser
@@ -474,13 +508,13 @@ per file; the two file sets are not identical, so the counts are not compared.
 | | native (Rust, mmap) | browser (WASM) |
 |---|---|---|
 | files | 13 806 (the harness skips a few directories) | 14 032, 126 MB of text |
-| index | 896 MB on disk | 1 089 MB, held in memory |
-| indexing | 9 s (23 s in 4.0) | 35 s (41 s in 4.0; a commit every 8 MB of text, one thread) |
-| `mutex_lock`, separators relaxed | 3 ms | 5-21 ms |
-| `spin_lock` / `spin_lock_init`, strict | 4 ms / 3 ms | 8-9 ms / 6 ms |
-| `fuzzy schdule` (d = 1) | 11 ms | 20-21 ms |
-| `fuzzy regsiter` (d = 2) | 121 ms | 257-263 ms |
-| `regex spin_lock_[a-z]+` | 54 ms | 103-107 ms |
+| index | 903 MB on disk | 1 101 MB, held in memory |
+| indexing | 6.7 s (9 s in 4.2, 23 s in 4.0) | 34 s (37 s for 4.2, measured again the same night by the same method — first to last commit; 41 s in 4.0; a commit every 8 MB of text, one thread) |
+| `mutex_lock`, separators relaxed | 3 ms | 4-5 ms |
+| `spin_lock` / `spin_lock_init`, strict | 4 ms / 3 ms | 7-8 ms / 5 ms |
+| `fuzzy schdule` (d = 1) | 11 ms | 21-23 ms |
+| `fuzzy regsiter` (d = 2) | 124 ms | 258-261 ms |
+| `regex spin_lock_[a-z]+` | 50 ms | 105-108 ms |
 
 10 000 files of a modern kernel, index on disk: 3.0.8 wrote 2 307 MB; 4.0
 writes 455 MB per segment, 345 MB with the shared dictionary. The browser pays
