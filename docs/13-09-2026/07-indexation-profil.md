@@ -455,9 +455,30 @@ la forme. Depuis la coupe au `.gmap` (5 septembre), donc dans 4.0.0 à 4.2.0. Co
 sur les trois branches (rouge sur l'ancienne), et sur l'index à 24 fils : `de` strict
 exact, `de` relâché **miss 33 → 0**, `e` strict 60,5 M de spans exacts.
 
-Reste sur ce même index, **sans rapport avec la forme** : `de` relâché rend **6 spans en
-trop**, tous un `d` suivi de séparateurs puis d'un caractère non ASCII
-(`D\n,,“`, ``d`` 文``, `d\n\n取`) — à reproduire en isolation, chantier suivant.
+Restait sur ce même index, **sans rapport avec la forme** : `de` relâché rendait **6
+spans en trop**, tous un `d` suivi de séparateurs puis d'un caractère non ASCII
+(`D\n,,“`, ``d`` 文``, `d\n\n取`), finissant **dans** le caractère. Reproduit en isolation
+(`test_relaxed_multibyte`, les trois formes du noyau et leurs jumelles ASCII, quatre
+dispositions) et tracé avec `V3_DIAG_LITERAL=de` : la chaîne `D` → `“underscan”` avec le
+`e` pris à l'intérieur du mot suivant. Deux causes :
+
+1. **Le recouvrement de contenu d'un mot** (`content_overlap`, les deux premiers octets
+   du mot suivant, ce qui permet à une requête relâchée de franchir la frontière) était
+   pris sur le mot **d'après** quand le premier caractère du mot suivant ne tenait pas
+   en deux octets (`“` fait trois) — l'entrée `den` affirmait une adjacence `D`/`EN` que
+   le texte n'a pas. C'est la règle que j'avais rétablie au § 5 octies pour rester
+   identique à l'octet : elle était fausse. Le recouvrement est désormais vide dans ce
+   cas, comme pour le dernier mot d'une valeur (`add_value` et le chemin de fusion).
+2. **Les candidats ancrés de la partition mot-dépouillé** (`fst_candidates_v3` avec
+   `anchor_start`) rendaient tous les parents des clés sous la requête, or ces clés
+   tiennent chaque suffixe du contenu d'un mot : un parent à `sti` > 0 dit que la
+   requête est *dans* le mot, pas à son début. Une chaîne dont la position précédente
+   n'avait pas de recouvrement pour vérifier le reste (le cas 1, mais aussi tout mot en
+   fin de valeur) continuait donc dans n'importe quel mot **contenant** le reste
+   (`underscan` contient `e`). Filtrés à `sti` 0 (`anchor_stripped`).
+
+Le correctif 2 suffit côté requête sur un index existant ; le 1 corrige ce qui est écrit.
+Vérité : `test_relaxed_multibyte`, panels 10/10, `de` relâché exact sur le noyau à 24 fils.
 
 ## 6. Vérification
 

@@ -1,6 +1,24 @@
 Unreleased — branch `v4.3`
 ==========================
 
+- **Fixed: relaxed matches that ended inside a multi-byte character.** `de`
+  with relaxed separators reported `D\n,,“` on the kernel (six spans over 8.2 M,
+  every one a letter, separators, then a non-ASCII character), none of them
+  an occurrence. Two causes, both fixed at indexing and at query time. A
+  word's content overlap — the first two bytes of the next word, which lets
+  a relaxed query cross the boundary — came from the word *after* the next
+  one when the next word's first character did not fit in two bytes
+  (`“underscan`, `文件`), so the entry `den` claimed an adjacency the text
+  does not have; the overlap is now empty in that case, as for the last
+  word of a value. And a chain whose previous position had no overlap to
+  check the remainder against continued into any word *containing* the
+  remainder: the anchored candidates of the word partition are now the words
+  that start with it. Test `test_relaxed_multibyte` (the kernel's three
+  shapes, their ASCII twins, every layout); the whole kernel's `de` relaxed
+  is exact. Indexes written before carry the wrong overlap in those words
+  until they are rewritten: the query-side fix alone removes the false
+  spans on them.
+
 - **Fixed: a segment small against a candidate list lost the repeated
   occurrences of a needle inside one token.** The `.gmap` cut of a shard-wide
   candidate list (dictionary indexes, since 4.0) has three strategies; the
