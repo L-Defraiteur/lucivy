@@ -39,7 +39,8 @@ use crate::index::SfxDictionaryMeta;
 use super::builder::SI0_PREFIX;
 use super::builder_v3::{MAX_OVERLAP_BYTES, SI_STRIPPED_PREFIX};
 use super::collector_v3::TokenMetaV3;
-use super::file_v3::SfxFileReaderV3;
+use super::file_v3::{GroupIndexSource, SfxFileReaderV3};
+use super::dictionary_pidx::GroupIndex;
 use super::termtexts_v3::{TermMetaV3, TermTextsReaderV3, TermTextsWriterV3};
 use super::dictionary_pidx::GROUP_INDEX_EXT;
 
@@ -408,8 +409,23 @@ pub struct DictionaryShared {
     /// thread was 1.7 s of waiting on the first commit of 2 000 kernel
     /// files (13 September). The map only grows (a field seen once stays).
     next_ids: RwLock<HashMap<u32, AtomicU64>>,
-    /// The pending texts: field → collector intern key → id.
-    stripes: Vec<Mutex<HashMap<u32, HashMap<String, u64>>>>,
+    /// The pending texts (`PendingStripe`): keys in arenas, per commit
+    /// epoch, so that a commit forgets them by dropping whole epochs.
+    stripes: Vec<Mutex<PendingStripe>>,
+    /// The commit epoch: bumped by `begin_commit_epoch` when a commit
+    /// starts flushing the writers, before any of them finalizes. A text
+    /// minted before the bump belongs to a segment this commit publishes;
+    /// once the commit has named the pairs, every epoch below the current
+    /// one is forgotten. A text minted after the bump — by a segment cut
+    /// after the flush, or by a writer finishing its documents while another
+    /// already flushed — stays until the next commit: forgotten late, never
+    /// early.
+    epoch: AtomicU64,
+    /// The group indexes built in RAM for generations without a `.pidx`
+    /// (an index written before 4.3), by (field, generation): built once per
+    /// process, not at every reopen of the dictionary (each commit reopens
+    /// it with the new pairs).
+    built_group_indexes: Mutex<HashMap<(u32, u64), GroupIndex>>,
     /// Per field, the Bloom filter over every FST key minted or folded
     /// (`dictionary_bloom`); built on first use from the live parts.
     filters: RwLock<HashMap<u32, Arc<ScalableBloom>>>,
@@ -429,19 +445,107 @@ impl DictionaryShared {
     fn new(next_ids: HashMap<u32, u64>) -> Self {
         Self {
             next_ids: RwLock::new(next_ids.into_iter().map(|(f, n)| (f, AtomicU64::new(n))).collect()),
-            stripes: (0..STRIPES).map(|_| Mutex::new(HashMap::new())).collect(),
+            stripes: (0..STRIPES).map(|_| Mutex::new(PendingStripe::default())).collect(),
+            epoch: AtomicU64::new(1),
+            built_group_indexes: Mutex::new(HashMap::new()),
             filters: RwLock::new(HashMap::new()),
             filter_build: Mutex::new(()),
             lookup_cache: LookupCache::new(),
         }
     }
 
-    fn stripe(&self, field_id: u32, key: &str) -> &Mutex<HashMap<u32, HashMap<String, u64>>> {
-        use std::hash::{Hash, Hasher};
-        let mut h = rustc_hash::FxHasher::default();
-        field_id.hash(&mut h);
-        key.hash(&mut h);
-        &self.stripes[(h.finish() as usize) % STRIPES]
+    /// The stripe of a (field, key) and the hash the stripe's table uses.
+    fn stripe(&self, field_id: u32, key: &str) -> (&Mutex<PendingStripe>, u64) {
+        let hash = pending_hash(field_id, key.as_bytes());
+        (&self.stripes[(hash as usize) % STRIPES], hash)
+    }
+}
+
+/// The one hash of a pending (field, key): the stripe's choice, the table's
+/// probe and the table's rehash must all agree — a first version hashed the
+/// key as `str` on insert and as `[u8]` on rehash (a different framing), and
+/// every entry moved by a table growth was lost: 2.5 M texts minted twice on
+/// the kernel, caught by the `minted` counter (13 September 2026).
+#[inline]
+fn pending_hash(field_id: u32, key: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    field_id.hash(&mut h);
+    key.hash(&mut h);
+    h.finish()
+}
+
+/// One entry of the pending texts: the key's bytes in the epoch's arena.
+#[derive(Clone, Copy)]
+struct PendingEntry {
+    field_id: u32,
+    key_start: u32,
+    key_len: u32,
+    id: u64,
+}
+
+/// The pending texts minted during one commit epoch: keys appended to one
+/// arena, entries in a hash table over (field, key). Dropped whole when the
+/// commit that publishes their segments has named the pairs — no `String`
+/// per text, no `retain` over millions of entries (the old map's `retain`
+/// and its `String` drops were ~0.5 s of the serial path of every kernel
+/// commit, 13 September 2026).
+struct PendingEpoch {
+    epoch: u64,
+    arena: Vec<u8>,
+    table: hashbrown::HashTable<PendingEntry>,
+}
+
+impl PendingEpoch {
+    fn new(epoch: u64) -> Self {
+        Self { epoch, arena: Vec::new(), table: hashbrown::HashTable::new() }
+    }
+
+    fn get(&self, field_id: u32, key: &[u8], hash: u64) -> Option<u64> {
+        let arena = &self.arena;
+        self.table.find(hash, |e| {
+            e.field_id == field_id && &arena[e.key_start as usize..(e.key_start + e.key_len) as usize] == key
+        }).map(|e| e.id)
+    }
+
+    fn insert(&mut self, field_id: u32, key: &[u8], hash: u64, id: u64) {
+        let key_start = self.arena.len() as u32;
+        self.arena.extend_from_slice(key);
+        let arena = &self.arena;
+        debug_assert_eq!(hash, pending_hash(field_id, key));
+        self.table.insert_unique(hash, PendingEntry { field_id, key_start, key_len: key.len() as u32, id }, |e| {
+            pending_hash(e.field_id, &arena[e.key_start as usize..(e.key_start + e.key_len) as usize])
+        });
+    }
+}
+
+/// The pending texts of one stripe: their epochs, ascending; the last one
+/// is the epoch being minted into.
+#[derive(Default)]
+struct PendingStripe {
+    epochs: Vec<PendingEpoch>,
+}
+
+impl PendingStripe {
+    fn get(&self, field_id: u32, key: &[u8], hash: u64) -> Option<u64> {
+        self.epochs.iter().rev().find_map(|e| e.get(field_id, key, hash))
+    }
+
+    fn insert(&mut self, epoch: u64, field_id: u32, key: &[u8], hash: u64, id: u64) {
+        if self.epochs.last().is_none_or(|e| e.epoch != epoch) {
+            self.epochs.push(PendingEpoch::new(epoch));
+        }
+        self.epochs.last_mut().unwrap().insert(field_id, key, hash, id);
+    }
+
+    /// Drop every epoch below `epoch`.
+    fn forget_before(&mut self, epoch: u64) {
+        self.epochs.retain(|e| e.epoch >= epoch);
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.epochs.iter().map(|e| e.table.len()).sum()
     }
 }
 
@@ -461,6 +565,10 @@ impl SfxDictionary {
     /// its counter and pending texts carry over. `None` opens fresh (a
     /// reader, or the first open).
     pub fn open(directory: &dyn Directory, meta: &SfxDictionaryMeta, previous: Option<&SfxDictionary>) -> Self {
+        let shared = match previous {
+            Some(prev) => prev.shared.clone(),
+            None => Arc::new(DictionaryShared::new(meta.next_ids.iter().map(|(&f, &n)| (f, n)).collect())),
+        };
         let mut fields = HashMap::new();
         for &field_id in &meta.field_ids {
             let mut first_sfx = None;
@@ -474,14 +582,15 @@ impl SfxDictionary {
             let pair_paths = meta.pending_segments.iter().map(|u| (
                 PathBuf::from(format!("{u}.{field_id}.newsfx")),
                 PathBuf::from(format!("{u}.{field_id}.newtexts"))));
-            // A generation's group index (`dictionary_pidx`), when the file
-            // is there: a generation written before it, or a pending pair
-            // (never written for those: small, and gone at the next fold),
-            // gets its index built in RAM by `open_parts_indexed`.
-            let index_paths = meta.generations.iter().map(|&g| Some(PathBuf::from(dictionary_file_name(g, field_id, GROUP_INDEX_EXT))))
+            // A generation's group index (`dictionary_pidx`): its `.pidx`
+            // when the file is there; a generation written before the file
+            // gets one built in RAM, once per process (`built_group_indexes`,
+            // the dictionary reopens at every commit); a pending pair gets
+            // none (small, gone at the next fold, scanned instead).
+            let index_sources = meta.generations.iter().map(|&g| Some(g))
                 .chain(meta.pending_segments.iter().map(|_| None));
-            let mut index_parts: Vec<Option<OwnedBytes>> = Vec::new();
-            for ((sfx_path, termtexts_path), index_path) in generation_paths.chain(pair_paths).zip(index_paths) {
+            let mut index_parts: Vec<GroupIndexSource> = Vec::new();
+            for ((sfx_path, termtexts_path), generation) in generation_paths.chain(pair_paths).zip(index_sources) {
                 let sfx = directory.open_read(&sfx_path);
                 let termtexts = directory.open_read(&termtexts_path);
                 let (Ok(sfx), Ok(termtexts)) = (sfx, termtexts) else {
@@ -497,19 +606,35 @@ impl SfxDictionary {
                     continue;
                 };
                 if first_sfx.is_none() { first_sfx = Some(sfx); }
-                sfx_parts.push(sfx_bytes);
                 termtexts_bytes.push(tt_bytes);
-                index_parts.push(index_path.and_then(|p| directory.open_read(&p).ok()).and_then(|f| f.read_bytes().ok()));
+                index_parts.push(match generation {
+                    None => GroupIndexSource::None,
+                    Some(g) => {
+                        let path = PathBuf::from(dictionary_file_name(g, field_id, GROUP_INDEX_EXT));
+                        match directory.open_read(&path).ok().and_then(|f| f.read_bytes().ok()).and_then(GroupIndex::open) {
+                            Some(index) => GroupIndexSource::Ready(index),
+                            None => {
+                                let mut built = shared.built_group_indexes.lock().unwrap();
+                                match built.get(&(field_id, g)) {
+                                    Some(index) => GroupIndexSource::Ready(index.clone()),
+                                    None => {
+                                        let Ok(reader) = SfxFileReaderV3::open_owned(sfx_bytes.clone()) else { continue };
+                                        let index = GroupIndex::build(reader.parents_table_bytes());
+                                        built.insert((field_id, g), index.clone());
+                                        GroupIndexSource::Ready(index)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+                sfx_parts.push(sfx_bytes);
             }
-            let parts: Vec<(OwnedBytes, Option<OwnedBytes>)> = sfx_parts.into_iter().zip(index_parts).collect();
+            let parts: Vec<(OwnedBytes, GroupIndexSource)> = sfx_parts.into_iter().zip(index_parts).collect();
             let (Some(sfx), Ok(sfx_reader)) = (first_sfx, SfxFileReaderV3::open_parts_indexed(parts)) else { continue };
             let sfx_reader = sfx_reader.with_memo(Arc::new(super::file_v3::FstMemo::new()));
             fields.insert(field_id, DictionaryField::new(sfx, sfx_reader, termtexts_bytes));
         }
-        let shared = match previous {
-            Some(prev) => prev.shared.clone(),
-            None => Arc::new(DictionaryShared::new(meta.next_ids.iter().map(|(&f, &n)| (f, n)).collect())),
-        };
         Self { meta: meta.clone(), fields, shared }
     }
 
@@ -565,8 +690,9 @@ impl SfxDictionary {
         }
         let t_lock = timed.then(std::time::Instant::now);
         let _lock_guard = t_lock.map(|t| TimeInto(t, &stats::LOCK_NS));
-        let mut stripe = self.shared.stripe(field_id, key).lock().unwrap();
-        if let Some(&id) = stripe.get(&field_id).and_then(|m| m.get(key)) {
+        let (stripe, stripe_hash) = self.shared.stripe(field_id, key);
+        let mut stripe = stripe.lock().unwrap();
+        if let Some(id) = stripe.get(field_id, key.as_bytes(), stripe_hash) {
             if timed { stats::PENDING_HITS.fetch_add(1, Relaxed); }
             cache.insert(key_hash, id);
             return (id, false);
@@ -583,7 +709,7 @@ impl SfxDictionary {
                 }
             }
         };
-        stripe.entry(field_id).or_default().insert(key.to_string(), id);
+        stripe.insert(self.shared.epoch.load(Relaxed), field_id, key.as_bytes(), stripe_hash, id);
         filter.insert(key.as_bytes());
         cache.insert(key_hash, id);
         if timed { stats::MINTS.fetch_add(1, Relaxed); }
@@ -623,13 +749,27 @@ impl SfxDictionary {
         filter
     }
 
-    /// Forget the pending texts whose ids a generation now holds.
-    pub fn forget_pending(&self, folded: &std::collections::HashSet<(u32, u64)>) {
+    /// A commit starts: the writers are about to flush. Every text minted
+    /// before this call belongs to a segment the commit publishes; once it
+    /// has named the pairs, `forget_committed_pending` drops them. Returns
+    /// the epoch that begins.
+    pub fn begin_commit_epoch(&self) -> u64 {
+        self.shared.epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1
+    }
+
+    /// The commit has named its pairs as live parts: forget the pending
+    /// texts of every epoch before the current one (see `epoch`).
+    pub fn forget_committed_pending(&self) {
+        let current = self.shared.epoch.load(std::sync::atomic::Ordering::Acquire);
         for stripe in &self.shared.stripes {
-            for (f, m) in stripe.lock().unwrap().iter_mut() {
-                m.retain(|_, id| !folded.contains(&(*f, *id)));
-            }
+            stripe.lock().unwrap().forget_before(current);
         }
+    }
+
+    /// Pending texts held, every epoch and stripe together (tests).
+    #[cfg(test)]
+    pub fn pending_len(&self) -> usize {
+        self.shared.stripes.iter().map(|s| s.lock().unwrap().len()).sum()
     }
 
     /// The meta this dictionary was opened from.
@@ -702,4 +842,72 @@ pub fn encode_newtexts(entries: &[(u32, &str, TermMetaV3)]) -> Vec<u8> {
 pub fn decode_newtexts(bytes: &[u8]) -> Option<Vec<(u32, String, TermMetaV3)>> {
     let texts = TermTextsReaderV3::open(bytes)?;
     Some(texts.iter().map(|(g, t, m)| (g, t.to_string(), m)).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(own_len: u16) -> TokenMetaV3 {
+        TokenMetaV3 { own_len, sep_len: 0, overlap_len: 0, is_word_start: true, word_id: 0, content_overlap: None, is_word_stripped: false }
+    }
+
+    /// The pending texts live by commit epoch: a commit that starts turns
+    /// the epoch, and once it has named its pairs everything minted before
+    /// the turn is dropped — whole epochs, never entry by entry — while
+    /// what was minted after stays.
+    #[test]
+    fn pending_texts_are_forgotten_by_commit_epoch() {
+        let dict = SfxDictionary::empty();
+        let key = |t: &str| super::super::collector_v3::intern_key(t, false, t.len() as u16, 0, true);
+        let (a, minted_a) = dict.lookup_or_mint(7, &key("alpha"), "alpha", &meta(5));
+        let (b, minted_b) = dict.lookup_or_mint(7, &key("beta"), "beta", &meta(4));
+        assert!(minted_a && minted_b && a != b);
+        assert_eq!(dict.pending_len(), 2);
+        // Found while pending, from any epoch.
+        assert_eq!(dict.lookup_or_mint(7, &key("alpha"), "alpha", &meta(5)), (a, false));
+
+        let epoch = dict.begin_commit_epoch();
+        assert_eq!(epoch, 2);
+        let (c, minted_c) = dict.lookup_or_mint(7, &key("gamma"), "gamma", &meta(5));
+        assert!(minted_c);
+        assert_eq!(dict.pending_len(), 3);
+        // Still found across the turn, before the commit names its pairs.
+        assert_eq!(dict.lookup_or_mint(7, &key("beta"), "beta", &meta(4)), (b, false));
+
+        dict.forget_committed_pending();
+        assert_eq!(dict.pending_len(), 1, "the epoch before the turn is gone, the current one stays");
+        assert_eq!(dict.lookup_or_mint(7, &key("gamma"), "gamma", &meta(5)), (c, false));
+        // A second commit with nothing minted in between forgets the rest.
+        dict.begin_commit_epoch();
+        dict.forget_committed_pending();
+        assert_eq!(dict.pending_len(), 0);
+        // Ids never go backwards.
+        let (d, _) = dict.lookup_or_mint(7, &key("delta"), "delta", &meta(5));
+        assert!(d > c);
+    }
+
+    /// Enough texts to grow every stripe's table many times over: each one
+    /// is still found afterwards, minted once. (The first version lost the
+    /// entries a growth moved, see `pending_hash`.)
+    #[test]
+    fn pending_texts_survive_table_growth() {
+        let dict = SfxDictionary::empty();
+        let n = 200_000u32;
+        let mut ids = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            let text = format!("t{i}_");
+            let key = super::super::collector_v3::intern_key(&text, false, text.len() as u16, 1, i % 2 == 0);
+            let (id, minted) = dict.lookup_or_mint(3, &key, &text, &meta(text.len() as u16));
+            assert!(minted, "{text} minted twice");
+            ids.push(id);
+        }
+        assert_eq!(dict.pending_len(), n as usize);
+        for i in 0..n {
+            let text = format!("t{i}_");
+            let key = super::super::collector_v3::intern_key(&text, false, text.len() as u16, 1, i % 2 == 0);
+            assert_eq!(dict.lookup_or_mint(3, &key, &text, &meta(text.len() as u16)), (ids[i as usize], false), "{text} lost");
+        }
+        assert_eq!(dict.pending_len(), n as usize);
+    }
 }

@@ -324,6 +324,69 @@ construction depuis la table), `reopened_without_group_index_rebuilds_it`
 (`test_dictionary_index` : `.pidx` supprimés, réouverture, réindexation sans minter,
 le repli suivant écrit le sien), `bench_dict_compaction` (`DICT_KEEP=1`, sha256).
 
+## 5 septies. Le chemin sériel du commit (13 septembre, nuit) — 48,2 → 39,9 s
+
+**Le profil, autrement.** 400 échantillons gdb du noyau entier (16 fils d'écriture,
+24 fils de pool), lus non plus par fonction mais **par fil et par instant**
+(`benches/gdb_timeline.py`) : le pool oscille entre des plateaux à 16-24 fils occupés
+(collecte + finalisation) et, à chaque commit, une vallée de 2 à 2,5 s à **un seul fil
+occupé**, 45 échantillons sur 191 ; moyenne 12,4 fils occupés sur 24. Le fil du harnais
+attend dans `commit` tout du long. Ce que fait le fil seul dans les vallées :
+`forget_pending` (le `retain` de la table des textes en attente, à clés `String`, et
+la libération de ses millions de `String`) sous `fold_new_texts > handle_commit`, puis
+des `drop` de grosses structures. Le compteur `named in` le confirmait : **6,7 s cumulés
+par run**, sur le chemin où le monde est arrêté — le `.pidx` n'y avait rien changé
+(6,55 s).
+
+**Ce qui a été fait** (`suffix_fst/dictionary.rs`, `indexer/dictionary_commit.rs`,
+`indexer/index_writer.rs`) :
+
+- **La table des textes en attente par époque de commit.** `DictionaryShared.epoch`,
+  tourné par `SfxDictionary::begin_commit_epoch` dans `prepare_commit`, **avant** que
+  les écrivains ne vident leurs segments. Chaque stripe tient ses époques (`PendingEpoch`
+  : une arène d'octets pour les clés, une `hashbrown::HashTable` d'entrées de 20 octets)
+  ; une recherche parcourt les époques de la plus récente à la plus ancienne ; un
+  mintage écrit dans l'époque courante. Quand le commit a nommé ses paires
+  (`forget_committed_pending`), **toute époque inférieure à la courante est lâchée
+  entière** : deux libérations par stripe, plus de `retain`, plus une `String` par
+  texte. Un texte minté avant le tour appartient à un segment que ce commit publie ;
+  un texte minté après (un écrivain qui finit ses documents pendant qu'un autre a
+  déjà vidé le sien) reste jusqu'au commit suivant — oublié tard, jamais tôt.
+- **Plus de `HashSet` des ids repliés** : `fold_new_texts` lisait les `.newtexts` de
+  chaque nouveau segment pour en tirer 2,4 M de paires (champ, id) par commit, qui ne
+  servaient qu'au `retain`. Il ne lit plus que `num_terms`.
+- **Index des groupes des générations sans `.pidx` mis en cache** dans le partagé
+  (`built_group_indexes`) : construit une fois par processus, pas à chaque réouverture
+  du dictionnaire — et le dictionnaire se rouvre à chaque commit. Les paires n'en ont
+  pas (petites, éphémères, balayées).
+
+**Le bug que le compteur a attrapé.** Premier run : 41,6 s, mais `minted` 25,0 M au
+lieu de 22,5 M — 2,5 M de textes mintés deux fois. Le hachage de l'insertion (clé
+`str` : octets puis 0xFF) et celui du rehash (clé `[u8]` : longueur puis octets)
+différaient ; chaque entrée déplacée par un agrandissement de table était perdue.
+Une seule fonction `pending_hash` désormais, un `debug_assert` à l'insertion, et le
+test `pending_texts_survive_table_growth` (200 000 textes, tous retrouvés). Règle :
+**un A/B d'indexation compare aussi `minted` et `pending`, pas seulement le temps.**
+
+**Mesuré, noyau entier, même machine, contre la 4.2.0 (308 segments des deux côtés)** :
+
+| | 4.2.0 | `.pidx` | + époques |
+|---|---|---|---|
+| mur | 48,2 s | 47,4 s | **39,9 s** |
+| `named in` (sériel, cumulé) | 6 731 ms | 6 549 ms | **63 ms** |
+| minted / pending | 22 539 376 / 6 570 578 | idem | **idem** |
+| marches FST / décodage (CPU) | 96 / 52 s | 69 / 23 s | 69 / 24 s |
+| `de` strict / `lock` relâché | 534 / 77 ms | 554 / 78 | 605 / 83, mêmes comptes et spans |
+
+**Ce que le profil dit encore** (à faire ensuite, même branche) : dans les vallées et
+sur les plateaux, la libération des sorties du DAG de construction
+(`drop_in_place<dyn Any>`, 101 échantillons — des millions de petits `Vec` par jeton)
+; dans `add_value`, un `BTreeMap` et un `Vec<usize>` par mot et par valeur (36
+échantillons), une entrée `WordStrippedEntry` à deux `String` **par occurrence** de mot
+(le constructeur dédoublonne ensuite), une `String` par chunk (`extended`,
+`content_overlap` — ce dernier champ de `TokenMetaV3` n'est lu nulle part). Le
+`lookup_or_mint` reste 25 % du CPU occupé.
+
 ## 6. Vérification
 
 - `cargo test --release --lib` : 1 471 verts (22 ignorés) ; sans features par

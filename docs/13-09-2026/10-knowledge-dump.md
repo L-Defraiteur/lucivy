@@ -53,14 +53,22 @@ Corpus : `~/lucivy_bench/linux-7.2` (épinglé, `benches/compare_engines.sh` le 
   de périmé) : `CARGO_TARGET_DIR=~/lucivy_bench/target-prof
   CARGO_PROFILE_RELEASE_DEBUG=line-tables-only cargo test --release -p lucivy-core
   --test test_sfx_v3_ground_truth --no-run`.
+- **Le pool dans le temps** : `python3 benches/gdb_timeline.py samples.txt [--to S]
+  [--valley N] [--main NOM]` — fils occupés par échantillon, histogramme par fenêtre avec
+  l'état du fil appelant, et **ce que font les fils seuls dans les vallées** : c'est ce
+  qui a montré le chemin sériel du commit (13 septembre, nuit) là où le profil par
+  fonction ne voyait qu'un `retain` à 1 %.
 - **Compteurs** : `LUCIVY_VERBOSE=1` (par commit : lookups du dictionnaire — cache,
   génération, attente, mintés, filtrés, `fst`, `parents decoding`, `lock` — replis,
   compactions, finalisations), `V3_PROFILE=1` (étapes du pipeline de compaction,
   tailles FST / parents, `[fst]` par segment). Horodater : `2>&1 | python3 -c 'import
   sys,time; t=time.time(); [sys.stdout.write("%7.2f %s" % (time.time()-t, l)) for l in sys.stdin]'`.
 - **A/B honnête** : ancien binaire rebâti (`git stash push -- <fichiers suivis>` —
-  `Cargo.lock` n'est pas suivi, le nommer fait échouer la remise), même état de
-  machine, deux runs chacun. Une compilation de fond a inventé un gain de 21 %.
+  `Cargo.lock` n'est pas suivi, le nommer fait échouer la remise —, ou mieux un
+  `git worktree` avec son `CARGO_TARGET_DIR`), même état de machine, deux runs chacun.
+  Une compilation de fond a inventé un gain de 21 %. **Comparer aussi les compteurs**
+  (`minted`, `pending`, segments, comptes du panel) : une table de textes en attente
+  qui perdait des entrées faisait un run plus rapide et 2,5 M d'ids en double.
 - Fils : `LUCIVY_WRITER_THREADS`, `LUCIVY_WRITER_HEAP` (total), `LUCIVY_SFX_HEAP`
   (total) ; les défauts sont par fil (25 Mo, 128 Mo) sur `min(cœurs, 16)`. Relever le
   nombre de segments et rejouer le panel sur tout changement de forme.
@@ -88,7 +96,7 @@ SFX_FILE=~/lucivy_bench/compare-4.1/dict/dict-10.2.sfx cargo test --release --li
 binaires tournent alternés sur des `V3_INDEX_DIR` neufs (scripts `ab30k.sh`, `abkernel.sh` de la
 session du 13 au soir : « Index time », sommes des compteurs `LUCIVY_VERBOSE` par commit).
 
-Références : noyau 48,2 s (16 fils) → **47,4 s avec le `.pidx`** (13 au soir, tard), 30 000 fichiers
+Références : noyau 48,2 s (16 fils) → 47,4 s avec le `.pidx` → **39,9 s avec la table par époques** (13 au soir, tard ; `minted` 22 539 376, `pending` 6 570 578, 308 segments), 30 000 fichiers
 12,0-12,2 s ce soir-là (14,2-14,8 l'après-midi : même binaire, autre état de machine — comparer
 dans le même run), 10 000 4,8 s ; compaction 4 générations 2,3-2,6 s ; fetch 5 202 hits 15 ms.
 

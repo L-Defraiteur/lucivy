@@ -619,6 +619,11 @@ impl<D: Document> IndexWriter<D> {
     pub fn prepare_commit(&mut self) -> crate::Result<PreparedCommit<'_, D>> {
         info!("Preparing commit");
 
+        // The dictionary's commit epoch turns before any writer flushes:
+        // what they minted so far is this commit's (`begin_commit_epoch`).
+        if let Some(dictionary) = self.index.sfx_dictionary() {
+            dictionary.begin_commit_epoch();
+        }
         // Flush all workers — each flushes its current segment.
         let scheduler = crate::actor::scheduler::global_scheduler();
         let mut receivers = Vec::new();
