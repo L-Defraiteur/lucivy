@@ -375,13 +375,17 @@ impl SfxCollectorV3 {
                     continue;
                 }
 
-                // Content overlap: first bytes of the next word's first content
-                // chunk. A next word whose first character does not fit in
-                // `overlap` bytes gives nothing, and the word after it is
-                // tried — as the format has always done (the keys on disk
-                // depend on it).
+                // Content overlap: first bytes of the NEXT word with content —
+                // and that word only. Its first character may not fit in
+                // `overlap` bytes (`“underscan`, `文件`): the overlap is then
+                // empty, as for a word that ends the value. Until 13
+                // September 2026 the search went on to the word after (`D
+                // \n,,“underscan”,ENUM` gave `D` the overlap `EN`), and the
+                // entry `den` then claimed an adjacency the text does not
+                // have: relaxed `de` rendered `D\n,,“` as a match, six times
+                // on the kernel, ending inside the multi-byte character.
                 content_overlap.clear();
-                for &(_, next_first, next_end) in &word_ranges[wi + 1..] {
+                'next_word: for &(_, next_first, next_end) in &word_ranges[wi + 1..] {
                     for ci in next_first..next_end {
                         let (ref ct, ref cm) = chunks[ci];
                         if cm.content_len > 0 {
@@ -391,10 +395,9 @@ impl SfxCollectorV3 {
                                 end -= 1;
                             }
                             content_overlap.push_str(&ct[..end]);
-                            break;
+                            break 'next_word;
                         }
                     }
-                    if !content_overlap.is_empty() { break; }
                 }
 
                 // Intern the word-stripped entry as its OWN token (not reusing the
@@ -1047,9 +1050,11 @@ fn build_word_stripped(
             continue; // Pure-sep word, no content
         }
 
-        // Find content_overlap: first `overlap_size` bytes of the next word's content
+        // Find content_overlap: first `overlap_size` bytes of the next word's
+        // content — that word only, empty when its first character does not
+        // fit (see `add_value`: the word after it is never the overlap).
         let mut content_overlap = String::new();
-        for next_wi in (wi + 1)..word_ids.len() {
+        'next_word: for next_wi in (wi + 1)..word_ids.len() {
             let next_word_id = word_ids[next_wi];
             let next_chunks = &words[&next_word_id];
             for &idx in next_chunks {
@@ -1063,11 +1068,8 @@ fn build_word_stripped(
                         end -= 1;
                     }
                     content_overlap = text[..end].to_string();
-                    break;
+                    break 'next_word;
                 }
-            }
-            if !content_overlap.is_empty() {
-                break;
             }
         }
 

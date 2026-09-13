@@ -341,9 +341,24 @@ pub fn fst_candidates_v3(
                 None => out.extend(shared.iter().cloned()),
             }
         }
+        if anchor_start {
+            anchor_stripped(&mut out);
+        }
         return out;
     }
     fst_candidates_v3_uncached(reader, query, anchor_start, strict_separators)
+}
+
+/// Anchored candidates of the word-stripped partition are the words that
+/// START with the query: its keys hold every suffix of a word's content, so
+/// a parent at `sti` > 0 says the query is inside the word, not at its
+/// start. Without this, a relaxed chain whose previous position had no
+/// content overlap to check the remainder against (`D\n,,“underscan`: the
+/// next word's first character does not fit in the overlap) continued into
+/// any word containing the remainder — `de` reported `D\n,,“` on the kernel,
+/// six times, ending inside the multi-byte character (13 September 2026).
+fn anchor_stripped(cands: &mut Vec<FstCandidateV3>) {
+    cands.retain(|c| c.partition != SI_STRIPPED_PREFIX || c.sti == 0);
 }
 
 /// How many candidates `fst_candidates_v3` would return — for pricing a
@@ -521,6 +536,9 @@ fn fst_candidates_v3_uncached(
     let mut results = Vec::new();
     for &partition in candidate_partitions(anchor_start, strict_separators) {
         results.extend(fst_candidates_in_partition(reader, query, partition));
+    }
+    if anchor_start {
+        anchor_stripped(&mut results);
     }
     results
 }
