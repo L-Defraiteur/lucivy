@@ -23,7 +23,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 use cxx::{CxxVector, UniquePtr};
 
 use ld_lucivy::query::HighlightSink;
-use ld_lucivy::schema::{FieldType, Value as LucivyValue};
+use ld_lucivy::schema::FieldType;
 use ld_lucivy::LucivyDocument;
 
 use lucistore::blob_store::BlobStore;
@@ -1222,25 +1222,9 @@ fn collect_results(
     handle: &ShardedHandle,
     results: &[ShardedSearchResult],
 ) -> Result<Vec<ffi::SearchResult>, String> {
-    let nid_field = handle.schema
-        .get_field(NODE_ID_FIELD)
-        .map_err(|_| "no _node_id field in schema")?;
-
-    let mut out = Vec::with_capacity(results.len());
-    for r in results {
-        let shard = handle.shard(r.shard_id)
-            .ok_or_else(|| format!("shard {} not found", r.shard_id))?;
-        let searcher = shard.reader.searcher();
-        let doc: LucivyDocument = searcher.doc(r.doc_address)
-            .map_err(|e| e.to_string())?;
-
-        let doc_id = doc
-            .get_first(nid_field)
-            .and_then(|v| v.as_value().as_u64())
-            .unwrap_or(0);
-        out.push(ffi::SearchResult { doc_id, score: r.score });
-    }
-    Ok(out)
+    // `_node_id` comes from the fast field: no document is read.
+    let ids = handle.node_ids_of(results)?;
+    Ok(results.iter().zip(ids).map(|(r, doc_id)| ffi::SearchResult { doc_id, score: r.score }).collect())
 }
 
 fn collect_results_with_highlights(
@@ -1248,22 +1232,14 @@ fn collect_results_with_highlights(
     results: &[ShardedSearchResult],
     highlight_sink: Option<&HighlightSink>,
 ) -> Result<Vec<ffi::SearchResultWithHighlights>, String> {
-    let nid_field = handle.schema
-        .get_field(NODE_ID_FIELD)
-        .map_err(|_| "no _node_id field in schema")?;
+    // `_node_id` comes from the fast field: no document is read.
+    let ids = handle.node_ids_of(results)?;
 
     let mut out = Vec::with_capacity(results.len());
-    for r in results {
+    for (r, doc_id) in results.iter().zip(ids) {
         let shard = handle.shard(r.shard_id)
             .ok_or_else(|| format!("shard {} not found", r.shard_id))?;
         let searcher = shard.reader.searcher();
-        let doc: LucivyDocument = searcher.doc(r.doc_address)
-            .map_err(|e| e.to_string())?;
-
-        let doc_id = doc
-            .get_first(nid_field)
-            .and_then(|v| v.as_value().as_u64())
-            .unwrap_or(0);
 
         let highlights = highlight_sink
             .and_then(|sink| {

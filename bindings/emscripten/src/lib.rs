@@ -1564,20 +1564,22 @@ fn collect_sharded_results(
     highlight_sink: Option<&HighlightSink>,
     include_fields: bool,
 ) -> Result<Vec<SearchResultJson>, String> {
+    // `_node_id` comes from the fast field: no document is read unless the
+    // caller asked for the fields (then all of them, through the scheduler
+    // past a threshold — `ShardedHandle::fetch_docs`).
+    let ids = handle.node_ids_of(results)?;
+    let docs: Option<Vec<LucivyDocument>> = if include_fields {
+        Some(handle.fetch_docs(results)?)
+    } else {
+        None
+    };
     let mut json_results = Vec::with_capacity(results.len());
 
-    for r in results {
+    for (i, r) in results.iter().enumerate() {
         let shard = handle.shard(r.shard_id)
             .ok_or_else(|| format!("shard {} not found", r.shard_id))?;
         let searcher = shard.reader.searcher();
-        let doc: LucivyDocument = searcher.doc(r.doc_address)
-            .map_err(|e| e.to_string())?;
-
-        let nid_field = handle.schema.get_field(NODE_ID_FIELD)
-            .map_err(|_| "no _node_id field")?;
-        let doc_id = doc.get_first(nid_field)
-            .and_then(|v| v.as_value().as_u64())
-            .unwrap_or(0);
+        let doc_id = ids[i];
 
         let highlights = highlight_sink.and_then(|sink| {
             let seg_id = searcher.segment_reader(r.doc_address.segment_ord).segment_id();
@@ -1593,7 +1595,7 @@ fn collect_sharded_results(
             if map.is_empty() { None } else { Some(map) }
         });
 
-        let fields = if include_fields {
+        let fields = if let Some(doc) = docs.as_ref().map(|d| &d[i]) {
             let mut map = HashMap::new();
             for (field, value) in doc.field_values() {
                 let name = handle.schema.get_field_name(field);

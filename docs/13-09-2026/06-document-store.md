@@ -98,3 +98,43 @@ Par ordre de rendement :
 5. **Dans le harnais et le banc comparatif**, le temps de fetch reste hors du temps
    annoncé (c'est déjà le cas) ; le passer au fast field le ramènerait de 123 à 2 ms
    sans rien changer aux vérités.
+
+## 5. Fait le 13 septembre (suite) : (1) et (2)
+
+- **`_node_id` par fast field** dans les cinq sites (Python, Node, C++ ×2,
+  emscripten) et dans le harnais ; le document n'est relu que si les champs sont
+  demandés.
+- **`ShardedHandle::fetch_docs`** (`PARALLEL_FETCH_MIN_HITS` = 64) : en dessous,
+  boucle séquentielle ; au-dessus, une tâche par (shard, segment) sur le scatter DAG
+  luciole — jamais de threads bruts, donc le build WASM garde son unique pool et
+  `execute_dag` exécute en ligne quand il est déjà sur un fil du scheduler. Les
+  lecteurs de store du `Searcher` sont réutilisés (leur LRU est celui de tout le
+  monde). `search_with_docs` passe par là.
+- **Mesuré** (`bench_sharded_fetch_docs`, index du noyau sans positions monté en
+  `shard_0` par lien symbolique, `mutex_lock`, 5 202 hits, 147 Mo) :
+
+| | avant (séquentiel, document entier) | après (`fetch_docs`) |
+|---|---|---|
+| 5 202 hits, processus neuf | 114 ms | **15 ms** |
+| 5 202 hits, à chaud | 14 ms | **7,5 ms** |
+| top-200 avec champs | — | 0,6 ms |
+| top-10 avec champs | — | 0,06 ms |
+| 5 202 hits **sans** champs | 114 ms (document relu quand même) | **2 ms** (fast field) |
+
+- **Vérité** : `test_fetch_docs` — listes courtes et longues, 3 shards, plusieurs
+  segments, suppressions puis fusions : mêmes documents, même ordre, mêmes champs
+  qu'un `searcher.doc` par hit, et le champ `path` concorde avec le fast field.
+- **Navigateur** (règle : toute parallélisation se vérifie sur 10 000 fichiers dans
+  Chrome) : playground `?nopos&corpus=corpus-kernel-10k.tar.gz`, 10 000 fichiers
+  indexés (638 Mo en mémoire, 1 344 fichiers d'index), recherche par l'interface
+  20 résultats en 52 ms avec surlignages ; par le handle de la page, `mutex_lock`
+  avec `fields: true` sur 500 puis 968 hits (le chemin parallèle) : tous les ids
+  distincts, 500/500 spans qui lisent `mutex_lock` sur le contenu rendu (contrôle à
+  l'octet, `TextEncoder`), 515 ms à froid puis 131 ms ; 500 hits sans champs 31 ms.
+- **Suites** : lucivy-core 46 lots verts, C++ 19, Python 113 (4 skip documentés),
+  Node 6 suites, clippy propre sur les fichiers touchés (les erreurs restantes de
+  `cargo clippy --tests` sont dans `test_lock_investigation.rs` et les tests de
+  `query.rs`, antérieures). Deux messages de fond sans conséquence dans les tests
+  des bindings, antérieurs eux aussi : `[dictionary] background fold failed` (Python)
+  et `[segment_updater] persisting the folded dictionary failed` (Node) — un repli
+  qui trouve son répertoire temporaire déjà supprimé à la fin d'un test.

@@ -702,17 +702,15 @@ fn search_v3_q(
     // silently inside the reported latency: 36 824 fetches on `include`.
     LAST_SEARCH_MS.with(|c| c.set(search_ms));
 
-    let nid_f = handle.field(NODE_ID_FIELD).unwrap();
     let mut doc_indices = HashSet::new();
     let mut highlights = Vec::new();
 
     for (_, addr) in &results {
-        let doc = searcher.doc::<ld_lucivy::LucivyDocument>(*addr).unwrap();
-        use ld_lucivy::schema::document::Value;
-        let file_idx = doc.field_values()
-            .find(|(f, _)| *f == nid_f)
-            .and_then(|(_, v)| v.as_value().as_u64())
-            .unwrap_or(0) as usize;
+        // The file index is the `_node_id` fast field: no document is read
+        // (5 202 full documents were 114 ms on `mutex_lock`, 13 September).
+        let file_idx = searcher.segment_reader(addr.segment_ord)
+            .fast_fields().u64(NODE_ID_FIELD).unwrap()
+            .first(addr.doc_id).unwrap_or(0) as usize;
         doc_indices.insert(file_idx);
 
         let seg_id = searcher.segment_reader(addr.segment_ord).segment_id();

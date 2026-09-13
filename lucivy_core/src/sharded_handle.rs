@@ -1409,6 +1409,10 @@ impl Residency {
 
 // ─── Search Result ──────────────────────────────────────────────────────────
 
+/// Hit lists at least this long have their documents read in parallel by
+/// `ShardedHandle::fetch_docs`; a top-10 stays a sequential loop.
+pub const PARALLEL_FETCH_MIN_HITS: usize = 64;
+
 /// A search result from a sharded search: score, shard index, document address.
 #[derive(Debug, Clone)]
 pub struct ShardedSearchResult {
@@ -2668,6 +2672,80 @@ impl ShardedHandle {
             .collect()
     }
 
+    /// The stored document of every result, in the results' order.
+    ///
+    /// Reading a document decompresses its block (LZ4, 16 KB or the document
+    /// when it is larger), so a long hit list of big documents is a volume of
+    /// text to decompress — 147 MB for the 5 202 hits of `mutex_lock` on the
+    /// kernel, 114 ms one after the other, 11 ms on eight threads (measured 13
+    /// September, `bench_docstore_fetch`). Below `PARALLEL_FETCH_MIN_HITS` the
+    /// loop is sequential; above, one scheduler task per (shard, segment)
+    /// group through the scatter DAG — luciole, never raw threads, so the WASM
+    /// build keeps working, and `execute_dag` runs the tasks inline when it is
+    /// already on a scheduler thread. The `Searcher`'s own store readers are
+    /// used, so their block cache is the one every later fetch sees.
+    pub fn fetch_docs(
+        &self,
+        results: &[ShardedSearchResult],
+    ) -> Result<Vec<ld_lucivy::LucivyDocument>, String> {
+        let searchers: Vec<_> = self.shards.iter().map(|s| s.reader.searcher()).collect();
+        let fetch_one = |r: &ShardedSearchResult| -> Result<ld_lucivy::LucivyDocument, String> {
+            let searcher = searchers
+                .get(r.shard_id)
+                .ok_or_else(|| format!("shard {} not found", r.shard_id))?;
+            searcher.doc(r.doc_address).map_err(|e| format!("get doc: {e}"))
+        };
+        if results.len() < PARALLEL_FETCH_MIN_HITS {
+            return results.iter().map(fetch_one).collect();
+        }
+
+        // Group the positions by (shard, segment): one task each, one store
+        // reader each, documents read in address order inside a group.
+        let mut groups: std::collections::BTreeMap<(usize, u32), Vec<usize>> = Default::default();
+        for (i, r) in results.iter().enumerate() {
+            groups.entry((r.shard_id, r.doc_address.segment_ord)).or_default().push(i);
+        }
+        type Fetched = Vec<(usize, ld_lucivy::LucivyDocument)>;
+        let names: Vec<String> = groups.keys().map(|(s, g)| format!("fetch_{s}_{g}")).collect();
+        let mut tasks: Vec<(&str, Box<dyn FnOnce() -> Result<luciole::port::PortValue, String> + Send + 'static>)> =
+            Vec::with_capacity(groups.len());
+        for (name, ((shard_id, _), idx)) in names.iter().zip(groups) {
+            let searcher = searchers
+                .get(shard_id)
+                .ok_or_else(|| format!("shard {shard_id} not found"))?
+                .clone();
+            let mut jobs: Vec<(usize, DocAddress)> = idx.iter().map(|&i| (i, results[i].doc_address)).collect();
+            jobs.sort_by_key(|(_, a)| a.doc_id);
+            tasks.push((name.as_str(), Box::new(move || {
+                let mut out: Fetched = Vec::with_capacity(jobs.len());
+                for (i, addr) in jobs {
+                    let doc: ld_lucivy::LucivyDocument = searcher.doc(addr).map_err(|e| format!("get doc: {e}"))?;
+                    out.push((i, doc));
+                }
+                Ok(luciole::port::PortValue::new(out))
+            })));
+        }
+        let mut dag = luciole::scatter::build_scatter_dag(tasks);
+        let mut result = luciole::execute_dag(&mut dag, None).map_err(|e| format!("fetch DAG: {e}"))?;
+        let map = result
+            .take_output::<std::collections::HashMap<String, luciole::port::PortValue>>("collect", "results")
+            .ok_or_else(|| "fetch DAG: no results".to_string())?;
+        let mut scatter = luciole::ScatterResults::from(map);
+        let mut docs: Vec<Option<ld_lucivy::LucivyDocument>> = (0..results.len()).map(|_| None).collect();
+        for name in &names {
+            let fetched: Fetched = scatter
+                .take::<Fetched>(name)
+                .ok_or_else(|| format!("fetch DAG: no output for {name}"))?;
+            for (i, doc) in fetched {
+                docs[i] = Some(doc);
+            }
+        }
+        docs.into_iter()
+            .enumerate()
+            .map(|(i, d)| d.ok_or_else(|| format!("fetch DAG: document {i} missing")))
+            .collect()
+    }
+
     /// Search and return results with resolved documents and highlights.
     pub fn search_with_docs(
         &self,
@@ -2677,13 +2755,12 @@ impl ShardedHandle {
         let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
         let results = self.search(query_config, top_k, Some(sink.clone()))?;
 
-        results.iter().map(|r| {
+        let docs = self.fetch_docs(&results)?;
+        results.iter().zip(docs).map(|(r, doc)| {
             let shard = self.shard(r.shard_id)
                 .ok_or_else(|| format!("shard {} not found", r.shard_id))?;
             let searcher = shard.reader.searcher();
             let seg_reader = searcher.segment_reader(r.doc_address.segment_ord);
-            let doc: ld_lucivy::LucivyDocument = searcher.doc(r.doc_address)
-                .map_err(|e| format!("get doc: {e}"))?;
             let highlights = sink.get(seg_reader.segment_id(), r.doc_address.doc_id)
                 .unwrap_or_default();
 
