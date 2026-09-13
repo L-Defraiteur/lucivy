@@ -1,8 +1,14 @@
-# lucivy-wasm 4.1.0
+# lucivy-wasm 4.2.0
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. In the browser — the same engine as the native bindings, built with emscripten: **threads** (pthreads over SharedArrayBuffer), OPFS persistence, snapshot import. Runs in a Web Worker. MIT.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — it clones lucivy's own source from GitHub and indexes it in your browser.
+
+### What's new in 4.2
+
+- **`search(query, { fields: false })` no longer reads any document**: the id comes from the fast field; with `fields: true` the documents are read through the scheduler (verified on 10 000 kernel files in Chrome: 968 hits with their content in 260 ms, 500 without in 12 ms).
+- **Spans only when `highlights: true`** — they were built for every search.
+- **Indexing**: the dictionary's compaction is three times faster natively and runs the same stages in sequence here; the single indexing thread and its 15 MB heap are unchanged, and so is the index on disk — 4.1 opens a 4.2 index.
 
 ### What's new in 4.1
 

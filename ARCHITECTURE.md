@@ -1,7 +1,8 @@
 # lucivy — Architecture
 
-*4.1.0, September 2026 — what 4.1 added (the index without positions, a span
-fix) is marked (4.1) below. Every number in this document was measured; the
+*4.2.0, September 2026 — what 4.1 added (the index without positions, a span
+fix) is marked (4.1) below, what 4.2 added (indexing twice as fast, results
+read only when asked) is marked (4.2). Every number in this document was measured; the
 commands are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md), the engine comparison
 in [docs/compare-engines-2026-09-05.md](docs/compare-engines-2026-09-05.md)
 (`benches/compare_engines.sh` regenerates it), and the working notes in
@@ -166,7 +167,8 @@ the shard's. A search waits for the background merge by default
 once per shard (the FST walks over the shared dictionary, in parallel), then
 scatters per segment. Cold queries pay ×0.8-1.6 against the per-segment
 layout (the regex ×1.6: 242 ms on the whole kernel against 112); indexing
-×1.5 (the kernel: 107 s against 56); the kernel index is 23 % smaller, 15 440
+×1.5 in 4.0 (the kernel: 107 s against 56), no slower in 4.2 (47 s against
+51); the kernel index is 23 % smaller, 15 440
 browser files 25 %.
 
 ### The index without positions (`positions: false`, 4.1)
@@ -186,7 +188,7 @@ for a regex). Same documents, spans and scores as the default index
 (`test_positions_off`; the ground-truth panel 10/10 on 10 000 files, 30 000 and
 the kernel; the playground's parity panel in the browser). The whole kernel
 (Linux 7.2, 101 141 files, 941 MB): 5 289 → 2 598 MB, ×5.6 → ×2.8 the text;
-indexing 109 → 101 s; queries, file cache warm: literal substrings 11-19 →
+indexing 109 → 101 s (47 s in 4.2, on 16 threads); queries, file cache warm: literal substrings 11-19 →
 27-56 ms (the documents found are re-read), a one-edit fuzzy 50 → 200 ms, a
 regex 237 → 22 ms, the two-character `de` 630-700 → 330 ms. In the browser,
 10 000 kernel files take 637 MB of OPFS instead of 1 051. Every text field must
@@ -216,6 +218,30 @@ waiting on the caller's own thread. Merges are capped per target
 (`LUCIVY_MERGE_CONCURRENCY`); `wait_merges_quiet()` is what "nothing is merging"
 means — a commit returning never meant that, the policy plans the next round
 from what it just published.
+
+**Indexing in 4.2 — the same index in half the time.** Profiled on the whole
+kernel (a gdb-based sampler, `benches/gdb_sample.sh`, when `perf` is not
+allowed; the working notes in `docs/13-09-2026/07-indexation-profil.md`), the
+94 s of 4.1 had three avoidable parts. From the third commit on, every commit
+folded the shard dictionary on the caller's thread because it named more pairs
+than the fold's cap (16): the cap is 64 now and the folds stay in the
+background. The collector threads spent 190 s of CPU walking every live part's
+FST for texts that existed: a **shared, lock-free cache of found ids** (a fixed
+table of atomic pairs, two slots per hash, `LookupCache`) sits in front of the
+walk, and every hit is verified against `.termtexts` before use — torn or
+stale entries can only cost a walk, never hand out another text's id (71 % of
+the walks gone). The compaction of the dictionary, a merge of streams on one
+thread, sorted and deduplicated parents that the encoder sorted again and that
+could not repeat (generations hold disjoint ids): removed, and the pass became a
+pipeline — the union of the input FSTs, two encoders, the writer (FST
+insertion, serial by nature) — over bounded channels with one allocation per
+batch (with one per key the threads spent a quarter of the time on the
+allocator's lock): 8.4 → 2.6 s on four kernel generations, the same bytes out.
+Finally the writer's threads follow the cores up to 16 (8 before), with the
+postings heap and the SFX budget **per thread** (25 MB, 128 MB) so segments keep
+their size — 308 segments instead of 263, equal query times on the comparison
+panel, the same peak memory. Together: **97 → 48 s** on a 24-core machine, files
+identical byte for byte; the browser's single thread is unchanged.
 
 ## Queries
 
@@ -265,6 +291,20 @@ same DAG as a local search — shards in parallel, top-k bounded per shard,
 batching for an index too large for memory — and accepts `allowed_ids`, so a
 pre-filter and the federation's statistics compose: the ids decide which
 documents are visited, the statistics how they score.
+
+**Results (4.2).** A search returns ids and scores; the id is the `_node_id`
+fast field, read without touching the document store. The stored documents are
+fetched only when the caller asks for the fields (`ShardedHandle::fetch_docs`):
+sequentially under 64 hits, else one scheduler task per shard and segment
+(luciole, never raw threads, so the browser build keeps its single pool), the
+`Searcher`'s own store readers reused. Every binding read the whole document of
+every hit before, fields asked or not: 5 202 hits of `mutex_lock`, 147 MB of
+text, 114 ms — 15 ms now, and 1.6 ms without the fields. The byte spans of the
+matches are built only when a highlight sink is attached (`highlights: true`);
+the term frequency counts matches, not spans, so counts and scores are the same
+either way. The document store itself is untouched: LZ4 blocks of 16 KB, a
+document larger than its block being its block, so a fetch costs the text it
+decompresses and nothing else (`docs/13-09-2026/06-document-store.md`).
 
 ### Filters
 
@@ -332,10 +372,10 @@ WebAssembly addresses **4 GB**, and everything below follows from it.
 | the whole Linux 2.6.0 kernel, 4 shards, shared dictionary | native | browser (`index linux` in the playground) |
 |---|---|---|
 | files | 13 806 (the harness skips a few directories) | 14 032, 126 MB of text |
-| indexing | 23 s | 41 s (a commit every 8 MB of text: segment size, not document count, sets the memory peak) |
-| index | 905 MB on disk | 1 089 MB, held in memory |
-| `mutex_lock`, separators relaxed | 2 ms | 10-18 ms |
-| fuzzy, one edit / regex | 10 ms / 52 ms | 29-33 ms / 113-127 ms |
+| indexing (4.2) | 9 s (23 s in 4.0) | 35 s (41 s in 4.0; a commit every 8 MB of text: segment size, not document count, sets the memory peak; one thread) |
+| index | 896 MB on disk | 1 089 MB, held in memory |
+| `mutex_lock`, separators relaxed | 3 ms | 5-21 ms |
+| fuzzy, one edit / regex | 11 ms / 54 ms | 20-21 ms / 103-107 ms |
 
 Same counts and same byte spans on both sides. 10 000 files of a modern kernel:
 3.0.8 wrote 2 307 MB, 4.0 writes 455 MB (per-segment) or 345 MB (shared

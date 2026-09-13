@@ -1,8 +1,15 @@
-# lucivy 4.1.0
+# lucivy 4.2.0
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. From Node.js. Runs in your process, in your transaction (bring your own storage), and the same engine runs in the browser. Powered by Rust via napi-rs, MIT.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
+
+### What's new in 4.2
+
+- **Indexing twice as fast, the same index** — the whole Linux kernel on a 24-core machine: 97 → 48 s, same files, same answers, same query times. The writer's threads follow the cores up to 16 with unchanged per-thread budgets (8 cores or fewer: no change; `LUCIVY_WRITER_THREADS`, `LUCIVY_WRITER_HEAP`, `LUCIVY_SFX_HEAP` still override), a lock-free cache of the dictionary ids already found (every hit verified on the stored texts), background folds kept in the background, and a three-times-faster dictionary compaction.
+- **`search(query, { fields: false })` no longer reads any document**: the id comes from the fast field; with `fields: true` the documents are read in parallel past 64 hits (5 202 documents in 15 ms instead of 114, a top-200 in 0.6 ms).
+- **Spans only when `highlights: true`** — they were built for every search; `de` on the kernel 574 → 442 ms, 337 → 190 ms without positions.
+- **Compatibility**: nothing changes on disk; 4.1 opens a 4.2 index.
 
 ### What's new in 4.1
 
@@ -49,7 +56,7 @@ Still there from 2.x: SFX-only engine, distributed search (`exportStats` / `merg
 ## Install
 
 ```bash
-npm install lucivy   # 4.1.0
+npm install lucivy   # 4.2.0
 ```
 
 ## Quick start
