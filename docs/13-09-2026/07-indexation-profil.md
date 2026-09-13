@@ -188,5 +188,10 @@ sous l'angle taille.
   première recherche après cette indexation a mis 26,9 s (fusions de fond des ~240
   petits segments encore en cours), les suivantes 260 ms ; sans rapport avec la
   compaction, qui est synchrone au commit en WASM et finie avant « indexed ».
+- **Les temps de requête ne bougent pas** (question de Lucie) : même binaire, panel
+  du comparatif (huit requêtes) sur l'index du noyau bâti le matin et sur celui du
+  soir — mêmes comptes, mêmes 12 fichiers de dictionnaire, 5 056 contre 5 053 Mo,
+  temps dans le bruit (`mutex_lock` 16,9 → 13,3-13,7 ms, `de` 603 → 577-611,
+  regex 225 → 216-218, fuzzy 29,6 → 29,6).
 - Le cache ne change aucun octet des fichiers : il ne fait que raccourcir le chemin
   vers un id que la marche aurait trouvé, et un hit non vérifié reprend ce chemin.
