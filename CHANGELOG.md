@@ -1,6 +1,11 @@
 Lucivy 4.2.0 — 13 September 2026
 ================================
 
+- `lucivy-fst` 0.1.1 (the FST fork): `MapBuilder::with_registry`, the node
+  registry's size, which `ld-lucivy` 4.2.0 needs. The release workflow
+  publishes it first, and a re-run skips every version already on PyPI, npm
+  or crates.io.
+
 - **Up to 16 indexing threads.** The writer used at most 8; it now follows
   the cores up to 16, with the postings heap and the suffix collector's
   budget expressed **per thread** (25 MB and 128 MB natively, as before per

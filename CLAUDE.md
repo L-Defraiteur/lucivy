@@ -532,6 +532,17 @@ Publier reste une décision explicite de Lucie.
 Chemin suivi : branche de travail → PR vers `main` → fusion en avance rapide → tag sur `main`. Deux aléas en route :
 un `startup_failure` de GitHub (relancé, sans rapport avec nos fichiers) et un test qui comparait un top-10 d'ex æquo
 (`test_snapshot_served`, corrigé comme le roundtrip LUCE l'avait été).
+**4.2.0 publiée le 13 septembre 2026 au soir** (tag `v4.2.0`, `main` = `bf33ddd`, PR #17 depuis la branche
+renommée `v4.2` ; GitHub a rebasé les commits à la fusion, donc le tag a attendu la CI verte du **nouveau** SHA de
+`main`) : indexation ×2 à index égal, résultats lus à la demande, comparatif régénéré. **Aléa** : PyPI, les six
+paquets npm et `lucivy-wasm` sont sortis, `luciole` et `lucistore` aussi, mais **`ld-lucivy` a échoué sur
+crates.io** — il compilait contre le `lucivy-fst` 0.1.0 publié, qui n'a pas `MapBuilder::with_registry` (ajouté le
+jour même sans bump), donc `lucivy-core` et `sparse-vector` 4.2.0 n'ont pas suivi. Correction (branche `v4.3`) :
+`lucivy-fst` 0.1.1 publié **en premier** par le workflow (version lue par `cargo metadata`, chaque crate la
+sienne), trusted publisher ajouté sur crates.io pour `lucivy-fst` par Lucie, et tous les jobs de publication
+**sautent une version déjà présente** (PyPI `skip-existing`, npm `npm view` avant `npm publish`, crates.io
+déjà) — le rattrapage se fait par `workflow_dispatch` de `release.yml` sur `main` avec `publish=true`, qui ne
+republie que ce qui manque. Leçon : **un crate modifié doit changer de numéro avant le tag**, même la fourche FST.
 **CI depuis le 11 septembre au soir (branche `v4.1`)** : trois fichiers, un rôle chacun. `ci.yml` — le code est
 juste : lib ×3 jeux de features, clippy, **toute la suite `lucivy-core` et `lucivy-cpp`**, vérité terrain du dépôt,
 **pytest** et **toutes les suites Node**, C++ — à chaque push sur `main` et sur une branche `v…`, à chaque PR vers
@@ -544,10 +555,10 @@ et à l'environnement `release`).
 
 | Registre | Package | Publié | Date |
 |----------|---------|---------|---------|
-| PyPI | `lucivy` | **4.1.0** (13 septembre 2026), **4.0.0**, **4.0.1**, **4.0.2** (5 wheels `cp39-abi3` : manylinux_2_28 x86_64 + aarch64, macOS x86_64 + arm64, win_amd64 ; + sdist) — par le tag | 6 septembre 2026 (nuit, puis 14 h 30) |
-| npm | `lucivy` + `lucivy-linux-x64-gnu`, `lucivy-linux-arm64-gnu`, `lucivy-darwin-x64`, `lucivy-darwin-arm64`, `lucivy-windows-x64` | **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** — par le tag | 6 septembre 2026 (nuit, puis 14 h 30) |
-| npm | `lucivy-wasm` | **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** (job `wasm` + `publish-wasm`) | 6 septembre 2026 (nuit, puis 14 h 30) |
-| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` | **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** — par le tag, en dernier | 6 septembre 2026 (nuit, puis 14 h 30) |
+| PyPI | `lucivy` | **4.2.0** (13 septembre 2026 au soir), **4.1.0** (13 septembre 2026), **4.0.0**, **4.0.1**, **4.0.2** (5 wheels `cp39-abi3` : manylinux_2_28 x86_64 + aarch64, macOS x86_64 + arm64, win_amd64 ; + sdist) — par le tag | 6 septembre 2026 (nuit, puis 14 h 30) |
+| npm | `lucivy` + `lucivy-linux-x64-gnu`, `lucivy-linux-arm64-gnu`, `lucivy-darwin-x64`, `lucivy-darwin-arm64`, `lucivy-windows-x64` | **4.2.0**, **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** — par le tag | 6 septembre 2026 (nuit, puis 14 h 30) |
+| npm | `lucivy-wasm` | **4.2.0**, **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** (job `wasm` + `publish-wasm`) | 6 septembre 2026 (nuit, puis 14 h 30) |
+| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` (+ `lucivy-fst` 0.1.x) | **4.2.0 : `luciole` et `lucistore` seulement, les trois autres attendent le rattrapage** ; **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** — par le tag, en dernier | 6 septembre 2026 (nuit, puis 14 h 30) |
 | (avant) | tout | 3.0.7 le 28 août (nuit), 3.0.8 le 28 août à 15 h | |
 
 3.0.7 dans la nuit du 27 au 28, juste après 3.0.6 : **le fuzzy relâché
