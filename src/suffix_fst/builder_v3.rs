@@ -359,6 +359,228 @@ pub fn count_parent_entries_v8(data: &[u8]) -> usize {
     total
 }
 
+/// A parent as a version-8 record spells it, the key not applied: the
+/// `own_len` is `None` when the key implies it (`derived_own_len`). What a
+/// scan of the parents table sees without the FST — the derived group
+/// index (`dictionary_pidx`) copies these and lets the lookup, which has
+/// the key, finish the derivation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RawParentV8 {
+    /// The global (dictionary) or segment ordinal.
+    pub ordinal: u64,
+    /// Suffix index of the key in the token.
+    pub sti: u16,
+    /// The record's flags byte (`FLAG_WORD_START`, `FLAG_OWN_LEN`, overlap
+    /// length in bits 3-5, `sep_len` or the escape in bits 0-2).
+    pub flags: u8,
+    /// Spelled `own_len`, or `None` when the key implies it.
+    pub own_len: Option<u16>,
+    /// Separator length (escape resolved).
+    pub sep_len: u8,
+    /// Overlap bytes and their length.
+    pub overlap_len: u8,
+    /// Overlap bytes (`overlap_len` of them meaningful).
+    pub overlap: [u8; MAX_OVERLAP_BYTES],
+}
+
+impl RawParentV8 {
+    /// True when the parent starts a word.
+    #[inline]
+    pub fn is_word_start(&self) -> bool {
+        self.flags & FLAG_WORD_START != 0
+    }
+
+    /// The parent as the decoders return it, once the key is known.
+    pub fn resolve(&self, key: &[u8]) -> ParentEntryV3 {
+        ParentEntryV3 {
+            raw_ordinal: self.ordinal,
+            sti: self.sti,
+            own_len: self.own_len.unwrap_or_else(|| derived_own_len(key, self.sti, self.sep_len)),
+            sep_len: self.sep_len,
+            overlap_len: self.overlap_len,
+            overlap: self.overlap,
+            is_word_start: self.is_word_start(),
+        }
+    }
+}
+
+/// Shape of a version-8 record as a scan reports it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RecordShapeV8 {
+    /// True for a flat record (≤ `FLAT_RECORD_MAX_PARENTS` parents).
+    pub flat: bool,
+    /// Number of overlap groups (1 for a flat record).
+    pub groups: usize,
+    /// Number of parents.
+    pub parents: usize,
+}
+
+/// Read one parent's fields without a key: `(sti, own_len if spelled,
+/// sep_len, flags)`.
+#[inline(always)]
+fn read_raw_parent_fields(data: &[u8], pos: &mut usize) -> (u16, Option<u16>, u8, u8) {
+    let sti = read_varint_inline(data, pos) as u16;
+    let flags = data[*pos];
+    *pos += 1;
+    let own_len = (flags & FLAG_OWN_LEN != 0).then(|| read_varint_inline(data, pos) as u16);
+    let sep_len = match flags & 0x07 {
+        SEP_LEN_ESCAPE => read_varint_inline(data, pos) as u8,
+        k => k,
+    };
+    (sti, own_len, sep_len, flags)
+}
+
+/// Walk every parent of a version-8 record, in record order, without the
+/// key; returns the record's shape. The derived group index is built from
+/// this, table scan by table scan, with no FST walk.
+pub fn scan_parent_record_v8(data: &[u8], f: &mut impl FnMut(&RawParentV8)) -> RecordShapeV8 {
+    let head = data[0];
+    let mut pos = 1usize;
+    let count = match head & 0x7F { 0 => read_varint_inline(data, &mut pos) as usize, k => k as usize };
+    if head & 0x80 == 0 {
+        let mut ordinal = 0u64;
+        for _ in 0..count {
+            ordinal += read_varint_inline(data, &mut pos);
+            let (sti, own_len, sep_len, flags) = read_raw_parent_fields(data, &mut pos);
+            let ov_len = ((flags >> 3) & 0x07) as usize;
+            let mut overlap = [0u8; MAX_OVERLAP_BYTES];
+            overlap[..ov_len].copy_from_slice(&data[pos..pos + ov_len]);
+            pos += ov_len;
+            f(&RawParentV8 { ordinal, sti, flags, own_len, sep_len, overlap_len: ov_len as u8, overlap });
+        }
+        return RecordShapeV8 { flat: true, groups: 1, parents: count };
+    }
+    let mut parents = 0usize;
+    let mut prev_first = 0i64;
+    for g in 0..count {
+        let ov_len = (data[pos] as usize).min(MAX_OVERLAP_BYTES);
+        pos += 1;
+        let mut overlap = [0u8; MAX_OVERLAP_BYTES];
+        overlap[..ov_len].copy_from_slice(&data[pos..pos + ov_len]);
+        pos += ov_len;
+        let n = read_varint_inline(data, &mut pos) as usize;
+        prev_first += unzigzag(read_varint_inline(data, &mut pos));
+        if g + 1 < count {
+            let _byte_len = read_varint_inline(data, &mut pos);
+        }
+        let mut ordinal = prev_first as u64;
+        for _ in 0..n {
+            ordinal += read_varint_inline(data, &mut pos);
+            let (sti, own_len, sep_len, flags) = read_raw_parent_fields(data, &mut pos);
+            f(&RawParentV8 { ordinal, sti, flags, own_len, sep_len, overlap_len: ov_len as u8, overlap });
+        }
+        parents += n;
+    }
+    RecordShapeV8 { flat: false, groups: count, parents }
+}
+
+/// The head of a version-8 record: `(grouped, count, pos)` — `count` is
+/// the parents of a flat record or the groups of a grouped one, `pos` the
+/// first byte after the head.
+#[inline(always)]
+pub fn read_record_head_v8(data: &[u8]) -> (bool, usize, usize) {
+    let head = data[0];
+    let mut pos = 1usize;
+    let count = match head & 0x7F { 0 => read_varint_inline(data, &mut pos) as usize, k => k as usize };
+    (head & 0x80 != 0, count, pos)
+}
+
+/// Visit the group headers of a grouped version-8 record in order, bodies
+/// skipped: `f(group, header_pos, prev_first, overlap)` where `prev_first`
+/// is the first ordinal of the previous group (0 before the first) — what
+/// a scan resuming at `header_pos` needs. Returns the group count; 0 for a
+/// flat record (nothing visited).
+pub fn for_each_group_header_v8(data: &[u8], mut f: impl FnMut(usize, usize, u64, &[u8])) -> usize {
+    let (grouped, count, mut pos) = read_record_head_v8(data);
+    if !grouped {
+        return 0;
+    }
+    let mut prev_first = 0i64;
+    for g in 0..count {
+        let header_pos = pos;
+        let ov_len = (data[pos] as usize).min(MAX_OVERLAP_BYTES);
+        pos += 1;
+        let ov = &data[pos..pos + ov_len];
+        pos += ov_len;
+        f(g, header_pos, prev_first as u64, ov);
+        let _n = read_varint_inline(data, &mut pos);
+        prev_first += unzigzag(read_varint_inline(data, &mut pos));
+        if g + 1 < count {
+            let byte_len = read_varint_inline(data, &mut pos) as usize;
+            pos += byte_len;
+        }
+    }
+    count
+}
+
+/// The parents of the group whose overlap is exactly `want`, scanning a
+/// grouped version-8 record from group `g` at `pos` (its header) with
+/// `prev_first` the previous group's first ordinal, `count` the record's
+/// groups. Groups are sorted by overlap: the scan stops at the first
+/// overlap past `want`. `key` derives `own_len` as in the decoders.
+pub fn decode_group_v8_from(
+    data: &[u8], mut pos: usize, mut prev_first: u64, mut g: usize, count: usize, want: &[u8], key: &[u8],
+) -> Vec<ParentEntryV3> {
+    let mut entries = Vec::new();
+    while g < count {
+        let ov_len = (data[pos] as usize).min(MAX_OVERLAP_BYTES);
+        pos += 1;
+        let mut overlap = [0u8; MAX_OVERLAP_BYTES];
+        overlap[..ov_len].copy_from_slice(&data[pos..pos + ov_len]);
+        pos += ov_len;
+        let ov = &overlap[..ov_len];
+        let n = read_varint_inline(data, &mut pos) as usize;
+        let first = (prev_first as i64 + unzigzag(read_varint_inline(data, &mut pos))) as u64;
+        prev_first = first;
+        let byte_len = if g + 1 < count { read_varint_inline(data, &mut pos) as usize } else { 0 };
+        match ov.cmp(want) {
+            std::cmp::Ordering::Less => {
+                pos += byte_len;
+                g += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                entries.reserve(n);
+                let mut ordinal = first;
+                for _ in 0..n {
+                    ordinal += read_varint_inline(data, &mut pos);
+                    let (sti, own_len, sep_len, flags) = read_parent_fields(data, &mut pos, key);
+                    entries.push(ParentEntryV3 {
+                        raw_ordinal: ordinal, sti, own_len, sep_len,
+                        overlap_len: ov_len as u8, overlap, is_word_start: flags & FLAG_WORD_START != 0,
+                    });
+                }
+                return entries;
+            }
+            std::cmp::Ordering::Greater => return entries,
+        }
+    }
+    entries
+}
+
+/// The parents of a version-8 record whose overlap is exactly `want`: a
+/// flat record is filtered, a grouped one scanned from its first group
+/// with the early stop of `decode_group_v8_from`. What a dictionary
+/// lookup asks when the record has no group index.
+pub fn decode_parent_entries_v8_overlap(data: &[u8], key: &[u8], want: &[u8]) -> Vec<ParentEntryV3> {
+    let (grouped, count, pos) = read_record_head_v8(data);
+    if !grouped {
+        return decode_parent_entries_v8_where(data, key, |ov| ov == want);
+    }
+    decode_group_v8_from(data, pos, 0, 0, count, want, key)
+}
+
+/// Every record of a parents table (`lucivy_fst::OutputTable` layout:
+/// varint length, bytes), with the offset the FST holds for it.
+pub fn for_each_table_record(table: &[u8], mut f: impl FnMut(u64, &[u8])) {
+    let mut pos = 0usize;
+    while pos < table.len() {
+        let offset = pos as u64;
+        let len = read_varint_inline(table, &mut pos) as usize;
+        f(offset, &table[pos..pos + len]);
+        pos += len;
+    }
+}
+
 /// Decode every parent of a version-8 record under `key` (see `encode_parent_entries_v8`).
 pub fn decode_parent_entries_v8(data: &[u8], key: &[u8]) -> Vec<ParentEntryV3> {
     decode_parent_entries_v8_where(data, key, |_| true)

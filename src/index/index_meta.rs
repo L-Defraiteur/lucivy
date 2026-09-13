@@ -459,10 +459,9 @@ impl SfxDictionaryMeta {
 
     /// The files of one generation.
     pub fn files_of(&self, generation: u64) -> Vec<PathBuf> {
-        use crate::suffix_fst::dictionary::dictionary_file_name;
+        use crate::suffix_fst::dictionary::{dictionary_file_name, GENERATION_EXTENSIONS};
         self.field_ids.iter().flat_map(|&f| {
-            [PathBuf::from(dictionary_file_name(generation, f, "sfx")),
-             PathBuf::from(dictionary_file_name(generation, f, "termtexts"))]
+            GENERATION_EXTENSIONS.into_iter().map(move |ext| PathBuf::from(dictionary_file_name(generation, f, ext)))
         }).collect()
     }
 }

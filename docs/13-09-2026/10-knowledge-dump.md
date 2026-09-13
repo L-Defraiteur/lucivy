@@ -25,7 +25,8 @@ bash bindings/emscripten/build.sh                       # WASM, ~1 min incrémen
 
 Nouveaux tests du jour : `test_fetch_docs` (fetch parallèle : ordre, champs,
 suppressions puis fusions), `bench_docstore_fetch` (ignoré), `bench_dict_compaction`
-(ignoré). Un message de fond sans conséquence dans Python et Node : un repli qui
+(ignoré) ; le soir, `dictionary_pidx` (unitaires) et
+`reopened_without_group_index_rebuilds_it` (`test_dictionary_index`). Un message de fond sans conséquence dans Python et Node : un repli qui
 trouve son répertoire temporaire déjà supprimé en fin de test.
 
 ## 2. Vérité terrain
@@ -77,10 +78,19 @@ SHARDED_DIR=~/lucivy_bench/scratch-positions/sharded-nopos cargo test --release 
 DICT_DIR=~/lucivy_bench/scratch-positions/compact-bench DICT_GENS=2,4,6,11 DICT_FIELD=2 V3_PROFILE=1 \
   cargo test --release -p lucivy-core --test bench_dict_compaction -- --ignored --nocapture
 # à froid : benches/cold_cache.py (fadvise DONTNEED, sans root)
+# forme des records d'une génération (plats / groupés, groupes, parents à sti 0) — dimensionne le .pidx
+SFX_FILE=~/lucivy_bench/compare-4.1/dict/dict-10.2.sfx cargo test --release --lib measure_grouped_records -- --ignored --nocapture
 ```
 
-Références : noyau 48,2 s (16 fils), 30 000 fichiers 14,2-14,8 s, 10 000 4,8 s ;
-compaction 4 générations 2,6 s ; fetch 5 202 hits 15 ms.
+**A/B contre un binaire d'avant, sans toucher à l'arbre** : `git worktree add --detach
+~/lucivy_bench/wt-4.2 <commit>` puis `CARGO_TARGET_DIR=~/lucivy_bench/target-ab cargo test
+--release -p lucivy-core --test test_sfx_v3_ground_truth --no-run` dans l'arbre ; les deux
+binaires tournent alternés sur des `V3_INDEX_DIR` neufs (scripts `ab30k.sh`, `abkernel.sh` de la
+session du 13 au soir : « Index time », sommes des compteurs `LUCIVY_VERBOSE` par commit).
+
+Références : noyau 48,2 s (16 fils) → **47,4 s avec le `.pidx`** (13 au soir, tard), 30 000 fichiers
+12,0-12,2 s ce soir-là (14,2-14,8 l'après-midi : même binaire, autre état de machine — comparer
+dans le même run), 10 000 4,8 s ; compaction 4 générations 2,3-2,6 s ; fetch 5 202 hits 15 ms.
 
 ## 5. Comparatif
 

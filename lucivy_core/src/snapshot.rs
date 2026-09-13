@@ -107,7 +107,7 @@ fn read_live_files(
                 // fields it minted texts in; `dictionary_files` names it
                 // for every field (`SfxDictionaryMeta::pair_files`).
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound
-                    && (name.ends_with(".newsfx") || name.ends_with(".newtexts")) => {}
+                    && (name.ends_with(".newsfx") || name.ends_with(".newtexts") || name.ends_with(".pidx")) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     last_missing = path.display().to_string();
                     restart = true;

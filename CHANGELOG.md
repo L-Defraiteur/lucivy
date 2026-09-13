@@ -1,3 +1,24 @@
+Unreleased — branch `v4.3`
+==========================
+
+- **A derived group index next to every dictionary generation
+  (`dict-<g>.<field>.pidx`).** A parents record of many overlap groups was
+  read group header by group header until the wanted one: on the kernel's
+  largest generation 10 306 records hold 256 groups or more (40 M of its
+  73 M parents), and the most frequent texts are exactly those. The new file
+  keeps one checkpoint per 16 groups of every record over 16 groups (13 bytes
+  each: overlap, header position, previous first ordinal); a lookup binary
+  searches the record and the checkpoints, then reads at most 16 headers and
+  stops at the first overlap past the one it wants. Written by the compactions
+  and folds as they write the table (compaction time unchanged, output
+  byte-identical), 2.5 % of the `.sfx`, +0.5 % on the kernel index. A
+  generation without it — an index written before 4.3 — is read as before,
+  the index rebuilt in RAM, and gains the file at its next compaction; a
+  4.2 reader ignores it (the container format does not change). Whole kernel,
+  same machine state, 4.2.0 rebuilt beside: parents decoding 52 → 23 s of
+  CPU, FST walks 96 → 69 s, wall 48.2 → 47.4 s, same segments, same query
+  times. Not an option. `docs/13-09-2026/07-indexation-profil.md` § 5 sexies.
+
 Lucivy 4.2.0 — 13 September 2026
 ================================
 

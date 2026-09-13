@@ -33,7 +33,10 @@ dictionnaire ne coûte plus rien à l'indexation (il coûtait ×1,5 en 4.0).
 ## 3. Les fichiers d'un segment, par champ texte
 
 `.sfx` / `dict-<g>.sfx` (la FST des suffixes, partitions `0x00` début de jeton,
-`0x01` suffixe interne, `0x02` mot sans séparateurs), `.termtexts`, `.gmap`,
+`0x01` suffixe interne, `0x02` mot sans séparateurs ; **depuis le 13 au soir, un
+`dict-<g>.<champ>.pidx` dérivé à côté de chaque génération** — un point de contrôle
+par 16 groupes de parents des records de plus de 16 groupes, reconstruit en RAM
+s'il manque, ignoré par un ancien lecteur, `dictionary_pidx.rs`), `.termtexts`, `.gmap`,
 `.sfxpost` (`SFP5` positions / `SFP6` documents + fréquences), `.word_sfxpost`,
 les dérivés `.posmap`, `.word_pos_map`, `.sibling_v3`, et le `store` (document
 store, LZ4 par blocs de 16 384 octets ; un document plus grand que le bloc **est**
@@ -91,7 +94,12 @@ document ─ tokenizer ─┬─ index inversé (postings, fréquences)
   deux slots par hash, sans verrou ; chaque hit vérifié sur `.termtexts` avant usage —
   le cache propose, le fichier décide), puis la marche des parties FST, puis la table
   des textes en attente (64 stripes) et le mintage (compteur atomique par champ). Sur
-  le noyau : 71 % des marches évitées.
+  le noyau : 71 % des marches évitées. Dans une marche, le groupe de parents voulu
+  est atteint par le `.pidx` (dichotomie, au plus 16 en-têtes, arrêt au premier
+  recouvrement dépassé) : décodage 52 → 23 s de CPU sur le noyau, mur 48,2 → 47,4.
+  Un fichier de plus dans une génération se déclare dans
+  `dictionary::GENERATION_EXTENSIONS`, la source unique de l'inventaire (GC,
+  snapshots, restes, tailles).
 - **Compaction et replis** (`dictionary_compact::merge_sfx`) : fusion en flux des
   FST d'entrée (union), records copiés verbatim quand une seule partie les tient,
   parents fusionnés et ré-encodés sinon (les parties ont des ids disjoints : pas de
@@ -116,7 +124,7 @@ document ─ tokenizer ─┬─ index inversé (postings, fréquences)
 
 ## 8. Ce qui reste ouvert
 
-Le `.pidx` (index des groupes de parents, dérivé, par défaut), le mintage sans
-`String`, le coût par document des collecteurs, la finalisation d'un segment en deux
-tâches, l'arrêt du monde au commit ; la vérification sans positions avec le harnais
+Le mintage sans `String` (le `.pidx` est fait, `07` § 5 sexies), le coût par
+document des collecteurs, la finalisation d'un segment en deux tâches, l'arrêt du
+monde au commit ; la vérification sans positions avec le harnais
 des traversées ; l'index à la carte (`01-index-a-la-carte.md`).

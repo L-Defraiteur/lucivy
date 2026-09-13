@@ -111,8 +111,14 @@ impl<'a> DeltaExporter for LucivyDeltaExporter<'a> {
             let dict_files = meta.sfx_dictionary.as_ref().map(|d| d.files_of(g)).unwrap_or_default();
             for rel_path in dict_files {
                 let full_path = self.index_path.join(&rel_path);
-                let data = std::fs::read(&full_path)
-                    .map_err(|e| format!("cannot read '{}': {e}", full_path.display()))?;
+                let data = match std::fs::read(&full_path) {
+                    Ok(data) => data,
+                    // The derived group index is absent from a generation
+                    // written before it; the reader rebuilds it.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound
+                        && rel_path.extension().is_some_and(|x| x == ld_lucivy::suffix_fst::dictionary_pidx::GROUP_INDEX_EXT) => continue,
+                    Err(e) => return Err(format!("cannot read '{}': {e}", full_path.display())),
+                };
                 files.push((rel_path.to_string_lossy().to_string(), data));
             }
             return Ok(files);

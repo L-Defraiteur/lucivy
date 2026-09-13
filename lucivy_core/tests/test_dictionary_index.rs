@@ -358,6 +358,79 @@ fn deferred_fold_settles() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// The derived group index (`dict-<g>.<field>.pidx`, 13 September) is
+/// written with every generation; a generation without it — an index
+/// written before the file — is read as before, the index rebuilt in RAM,
+/// and the lookups answer the same: reindexing the same texts mints
+/// nothing. The next fold writes the file for its generation.
+#[test]
+fn reopened_without_group_index_rebuilds_it() {
+    let files = corpus(300);
+    let base: PathBuf = std::env::temp_dir().join(format!("lucivy-dict-pidx-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("v4");
+    let h4 = build(&files, 4, &dir);
+    let before = h4.index.sfx_dictionary().unwrap().next_ids();
+    assert!(before.values().sum::<u64>() > 0);
+    {
+        let mut guard = h4.writer.lock().unwrap();
+        guard.take().unwrap().wait_merging_threads().unwrap();
+    }
+    drop(h4);
+    let pidx_files = |dir: &PathBuf| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir).unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("dict-") && n.ends_with(".pidx"))
+            .collect();
+        v.sort();
+        v
+    };
+    let written = pidx_files(&dir);
+    assert!(!written.is_empty(), "no group index written with the generations");
+    for name in &written {
+        std::fs::remove_file(dir.join(name)).unwrap();
+    }
+    assert!(pidx_files(&dir).is_empty());
+
+    let reopened = LucivyHandle::open(ld_lucivy::directory::MmapDirectory::open(&dir).unwrap()).unwrap();
+    let path_f = reopened.field("path").unwrap();
+    let content_f = reopened.field("content").unwrap();
+    let nid_f = reopened.field(NODE_ID_FIELD).unwrap();
+    {
+        let mut guard = reopened.writer.lock().unwrap();
+        let w = guard.as_mut().unwrap();
+        for (i, (path, content)) in files.iter().enumerate() {
+            let mut doc = ld_lucivy::LucivyDocument::new();
+            doc.add_u64(nid_f, 100_000 + i as u64);
+            doc.add_text(path_f, path);
+            doc.add_text(content_f, content);
+            w.add_document(doc).unwrap();
+        }
+        w.commit().unwrap();
+    }
+    reopened.reader.reload().unwrap();
+    let after = reopened.index.sfx_dictionary().unwrap().next_ids();
+    assert_eq!(before, after, "reindexing the same texts without the group index minted new ids: {before:?} → {after:?}");
+    // Nothing minted, nothing folded. A text never seen mints, and the
+    // fold of that commit writes its generation's index; the older
+    // generations get theirs back at their next compaction.
+    {
+        let mut guard = reopened.writer.lock().unwrap();
+        let w = guard.as_mut().unwrap();
+        let mut doc = ld_lucivy::LucivyDocument::new();
+        doc.add_u64(nid_f, 200_000);
+        doc.add_text(path_f, "pidx/unseen.txt");
+        doc.add_text(content_f, "zqxv_unseen_pidx_token zqxv_unseen_pidx_token_two");
+        w.add_document(doc).unwrap();
+        w.commit().unwrap();
+        guard.take().unwrap().wait_merging_threads().unwrap();
+    }
+    let now = pidx_files(&dir);
+    assert!(now.iter().any(|n| !written.contains(n)), "no new generation wrote its group index: {now:?} (before: {written:?})");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// The Bloom filter in front of the FST walks (6 September) is seeded from
 /// the live parts when a writer reopens an index: indexing the same texts
 /// again must mint nothing new — a false "never seen" would give a text a

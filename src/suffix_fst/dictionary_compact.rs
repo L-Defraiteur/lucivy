@@ -31,7 +31,8 @@ use lucivy_fst::{MapBuilder, OutputTable, Streamer};
 
 use crate::directory::{Directory, TerminatingWrite};
 use super::builder_v3::{decode_parent_entries_v8, encode_parent_record_v8, ParentEntryV3, SuffixFstBuilderV3};
-use super::dictionary::dictionary_file_name;
+use super::dictionary::{dictionary_file_name, GENERATION_EXTENSIONS};
+use super::dictionary_pidx::{GroupIndexBuilder, GROUP_INDEX_EXT};
 use super::file_v3::{self, SfxFileReaderV3, SfxFileWriterV3};
 use super::termtexts_v3::{self, TermMetaV3, TermTextsReaderV3, TermTextsWriterV3};
 use super::varint::write_varint;
@@ -55,6 +56,8 @@ pub struct CompactReport {
     pub fst_wall: std::time::Duration,
     /// Wall time of the texts pass.
     pub texts_wall: std::time::Duration,
+    /// Bytes of the derived group index written (`dictionary_pidx`).
+    pub group_index_bytes: u64,
 }
 
 /// The generations to merge when `live` (`(generation, bytes)`) exceeds
@@ -77,7 +80,7 @@ pub fn choose_compaction(live: &[(u64, u64)], max_generations: usize) -> Option<
 /// Bytes of a generation's files for `field_ids`, as they stand in
 /// `directory` (a missing file counts zero).
 pub fn generation_bytes(directory: &dyn Directory, generation: u64, field_ids: &[u32]) -> u64 {
-    field_ids.iter().flat_map(|&f| ["sfx", "termtexts"].into_iter().map(move |ext| (f, ext)))
+    field_ids.iter().flat_map(|&f| GENERATION_EXTENSIONS.into_iter().map(move |ext| (f, ext)))
         .filter_map(|(f, ext)| directory.open_read(&PathBuf::from(dictionary_file_name(generation, f, ext))).ok())
         .map(|slice| slice.num_bytes().get_bytes())
         .sum()
@@ -120,7 +123,11 @@ pub fn write_generation(
         texts.add(i as u32, text, *m);
     }
     let termtexts = texts.serialize();
-    for (ext, bytes) in [("sfx", sfx), ("termtexts", termtexts)] {
+    let index = {
+        let reader = SfxFileReaderV3::open(&sfx).map_err(|e| system_error("dictionary generation", e))?;
+        GroupIndexBuilder::build_from_table(reader.parents_table_bytes())
+    };
+    for (ext, bytes) in [("sfx", sfx), ("termtexts", termtexts), (GROUP_INDEX_EXT, index)] {
         let path = PathBuf::from(dictionary_file_name(generation, field_id, ext));
         let mut w = directory.open_write(&path)?;
         w.write_all(&bytes)?;
@@ -135,7 +142,7 @@ pub fn write_generation(
 /// the number, and a directory refuses to create a file that exists.
 pub fn remove_leftovers(directory: &dyn Directory, generation: u64, field_ids: &[u32]) -> crate::Result<()> {
     for &f in field_ids {
-        for ext in ["sfx", "termtexts", "sfx.fst.tmp", "sfx.parents.tmp"] {
+        for ext in GENERATION_EXTENSIONS.into_iter().chain(["sfx.fst.tmp", "sfx.parents.tmp"]) {
             let path = PathBuf::from(dictionary_file_name(generation, f, ext));
             match directory.delete(&path) {
                 Ok(()) | Err(crate::directory::error::DeleteError::FileDoesNotExist(_)) => {}
@@ -197,6 +204,7 @@ pub fn compact_parts(
     report.keys = sfx_report.keys;
     report.keys_merged = sfx_report.keys_merged;
     report.sfx_bytes = sfx_report.sfx_bytes;
+    report.group_index_bytes = sfx_report.group_index_bytes;
     report.fst_wall = sfx_report.fst_wall;
     report.texts = texts_report.texts;
     report.termtexts_bytes = texts_report.termtexts_bytes;
@@ -304,8 +312,14 @@ fn merge_sfx(directory: &dyn Directory, sfx_parts: &[OwnedBytes], field_id: u32,
         // 8.4 s before, 5.3 s once the merge stopped sorting twice, 4.6 s
         // pipelined; the writer's FST insertion is the floor.
         let keys_merged = std::sync::atomic::AtomicU64::new(0);
+        // The derived group index (`dictionary_pidx`) is built here, record
+        // by record, as the writer sees each record's bytes and offset —
+        // only the grouped records of more than `STRIDE` groups cost it a
+        // walk of their headers.
+        let group_index = std::sync::Mutex::new(GroupIndexBuilder::new());
         let write = |batch: OutBatch<'_>, fst_writer: &mut MapBuilder<_>, parents_writer: &mut dyn Write,
                      parents_offset: &mut u64, len_prefix: &mut Vec<u8>, keys: &mut u64| -> crate::Result<()> {
+            let mut group_index = group_index.lock().unwrap();
             let mut start = 0usize;
             for (i, &end) in batch.key_end.iter().enumerate() {
                 let key = &batch.keys[start..end as usize];
@@ -320,6 +334,7 @@ fn merge_sfx(directory: &dyn Directory, sfx_parts: &[OwnedBytes], field_id: u32,
                 write_varint(len_prefix, record.len() as u64);
                 parents_writer.write_all(len_prefix)?;
                 parents_writer.write_all(record)?;
+                group_index.add(*parents_offset, record);
                 fst_writer.insert(key, *parents_offset).map_err(|e| system_error("dictionary FST", e))?;
                 *parents_offset += (len_prefix.len() + record.len()) as u64;
                 *keys += 1;
@@ -488,6 +503,12 @@ fn merge_sfx(directory: &dyn Directory, sfx_parts: &[OwnedBytes], field_id: u32,
         let fst_out = fst_writer.into_inner().map_err(|e| system_error("dictionary FST", e))?;
         fst_out.terminate()?;
         parents_writer.terminate()?;
+        let index = group_index.into_inner().unwrap().finish();
+        let path = PathBuf::from(dictionary_file_name(out, field_id, GROUP_INDEX_EXT));
+        let mut w = directory.open_write(&path)?;
+        w.write_all(&index)?;
+        w.terminate()?;
+        report.group_index_bytes = index.len() as u64;
     }
     {
         let fst_bytes = directory.open_read(&fst_tmp)?.read_bytes()?;
@@ -637,6 +658,14 @@ mod tests {
         assert!(report.keys_merged > 0, "the synthetic data shares keys across generations");
         assert_eq!(report.sfx_bytes as usize, read(&dir, 10, 7, "sfx").len());
         assert_eq!(report.termtexts_bytes as usize, read(&dir, 10, 7, "termtexts").len());
+        // The derived group index: written by both paths, the streamed one
+        // record by record, the same bytes as a build from the table.
+        let index = read(&dir, 10, 7, GROUP_INDEX_EXT);
+        assert_eq!(index, read(&dir, 11, 7, GROUP_INDEX_EXT), ".pidx differ");
+        assert_eq!(report.group_index_bytes as usize, index.len());
+        let table = SfxFileReaderV3::open(&read(&dir, 10, 7, "sfx")).unwrap();
+        assert_eq!(index, GroupIndexBuilder::build_from_table(table.parents_table_bytes()));
+        assert!(super::super::dictionary_pidx::GroupIndex::open(OwnedBytes::new(index)).is_some());
         for ext in ["sfx.fst.tmp", "sfx.parents.tmp"] {
             assert!(!dir.exists(&PathBuf::from(dictionary_file_name(10, 7, ext))).unwrap(), "{ext} left behind");
         }
@@ -755,7 +784,7 @@ mod tests {
                 eprintln!("naive field {field}: {} entries, read {t_read:.1} s, total {:.1} s, {}", entries.len(), t.elapsed().as_secs_f64(), hwm());
             }
             if mode == "compare" {
-                for ext in ["sfx", "termtexts"] {
+                for ext in GENERATION_EXTENSIONS {
                     let a = dir.open_read(&PathBuf::from(dictionary_file_name(next, field, ext))).unwrap().read_bytes().unwrap();
                     let b = dir.open_read(&PathBuf::from(dictionary_file_name(next + 1, field, ext))).unwrap().read_bytes().unwrap();
                     eprintln!("field {field} .{ext}: stream {} bytes, naive {} bytes, {}", a.len(), b.len(),
