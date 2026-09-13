@@ -238,19 +238,25 @@ for key, what in CASES:
             hits = x["hits"]
             ms = x.get("took_ms", x.get("ms"))
             label = x["query"]
-            parts.append(f"{mark(hits, key)} ({label}{f', {ms:.0f} ms' if isinstance(ms, (int, float)) else ''})")
+            # The documents, then what knowing *where* costs on top: lucivy's
+            # cell in this row is documents and every span.
+            hl = x.get("highlight_ms")
+            extra = f" +{hl:.0f} ms with highlights on {n(x['highlight_docs'])}" if hl is not None else ""
+            parts.append(f"{mark(hits, key)} ({label}{f', {ms:.0f} ms' if isinstance(ms, (int, float)) else ''}{extra})")
         return "<br>".join(parts)
     trunc = " (truncated: span cap)" if r["truncated"] else ""
     lucol = f"**{n(r['docs'])}** {r['status']}{trunc}, {n(r['spans']) if r['spans'] else '—'} spans, {r['search_ms']:.0f} ms"
     P(f"| {what} | {n(int(r['truth'])) if r['truth'].isdigit() else r['truth']} | {lucol} | {cell(es_st.get(key))} | {cell(tv_st.get(key))} |")
 P("")
-P("Read across a row: the same question, what each engine can make of it (an Elasticsearch time here may be a cache hit: "
-  "the same query already ran in §2). "
-  "(its trigrams carry them); tantivy's default tokenizer cannot keep them (the separator never enters the index), "
-  "and its n-gram tokenizer emits every position as 0, so its substring rows are an AND of trigrams verified by "
-  "reading each candidate's stored text — the application's work, timed here as such. "
-  "Both engines' fuzziness stops at their token boundary. An n-gram index has nothing to look up below three characters. "
-  "The fuzzy phrase is the case Elasticsearch handles well, with `span_near`.")
+P("Read across a row: the same question, and what each engine can make of it. lucivy's time is the documents **and** "
+  "every span; Elasticsearch's first number is its `took` for the documents alone, the second what `highlight` adds to "
+  "mark the spans of the top 200 — without it the two columns would not be answering the same question (an "
+  "Elasticsearch time here may also be a cache hit: the same query already ran in §2). "
+  "Elasticsearch keeps separators in its trigram field, so its strict rows land exactly; tantivy's default tokenizer "
+  "cannot keep them (the separator never enters the index), and its n-gram tokenizer emits every position as 0, so its "
+  "substring rows are an AND of trigrams verified by reading each candidate's stored text — the application's work, "
+  "timed here as such. Both engines' fuzziness stops at their token boundary. An n-gram index has nothing to look up "
+  "below three characters. The fuzzy phrase is the case Elasticsearch handles well, with `span_near`.")
 P("")
 
 # ── 4. spans ──

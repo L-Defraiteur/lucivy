@@ -408,10 +408,22 @@ def main():
     stumble_rows = []
     for truth_key, label, index, query, note in stumble():
         hits, took, wall = count(index, query)
-        print(f"{label:<74} {hits:>7} {took:>6}ms")
+        # Same reason as the panel above: lucivy's time on these rows is the
+        # documents *and* every span, so the row carries what `highlight` adds.
+        field = "raw" if '"raw"' in json.dumps(query) else "body"
+        try:
+            hl = highlight_cost(index, query, field, HIGHLIGHT_LIMIT)
+        except SystemExit:
+            hl = None
+        hl_ms = round(hl["took_ms"] + hl["parse_ms"], 1) if hl else None
+        print(f"{label:<74} {hits:>7} {took:>6}ms" +
+              (f" (+{hl_ms} ms with highlights on the top {HIGHLIGHT_LIMIT})" if hl_ms is not None else ""))
         print(f"{'':<4} lucivy: {truth_key} — {note}")
         stumble_rows.append({"truth": truth_key, "query": label, "index": index, "hits": hits,
-                             "took_ms": took, "wall_ms": round(wall, 1), "note": note})
+                             "took_ms": took, "wall_ms": round(wall, 1), "note": note,
+                             "highlight_ms": hl_ms,
+                             "highlight_spans": hl["spans"] if hl else None,
+                             "highlight_docs": hl["highlighted"] if hl else None})
 
     print(f"\n=== documents AND spans: mutex_lock (strict), top {HIGHLIGHT_LIMIT} highlighted ===")
     hl = highlight_cost(NGRAM, {"match_phrase": {"body": "mutex_lock"}}, "body", HIGHLIGHT_LIMIT)
