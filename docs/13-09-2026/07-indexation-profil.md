@@ -491,7 +491,9 @@ dispositions) et tracé avec `V3_DIAG_LITERAL=de` : la chaîne `D` → `“under
    (`underscan` contient `e`). Filtrés à `sti` 0 (`anchor_stripped`).
 
 Le correctif 2 suffit côté requête sur un index existant ; le 1 corrige ce qui est écrit.
-Vérité : `test_relaxed_multibyte`, panels 10/10, `de` relâché exact sur le noyau à 24 fils.
+Vérité : `test_relaxed_multibyte`, panels 10/10, `de` relâché exact sur le noyau à 24 fils
+et à 16 (`e` relâché, `ude` relâché aussi), **Chrome 10 000 fichiers : panel de parité
+21/21 identiques dans les deux dispositions** (rapports `parity_10k_{pos,nopos}_relaxedfix.json`).
 
 ## 6. Vérification
 

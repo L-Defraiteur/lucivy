@@ -96,7 +96,7 @@ SFX_FILE=~/lucivy_bench/compare-4.1/dict/dict-10.2.sfx cargo test --release --li
 binaires tournent alternés sur des `V3_INDEX_DIR` neufs (scripts `ab30k.sh`, `abkernel.sh` de la
 session du 13 au soir : « Index time », sommes des compteurs `LUCIVY_VERBOSE` par commit).
 
-Références : noyau 48,2 s (16 fils) → 47,4 s avec le `.pidx` → **39,9 s avec la table par époques** (13 au soir, tard ; `minted` 22 539 376, `pending` 6 570 578, 308 segments), 30 000 fichiers
+Références : noyau 48,2 s (16 fils) → 47,4 s avec le `.pidx` → 39,9 s avec la table par époques → **35 s avec le collecteur sans allocation par occurrence et la sonde des textes en attente avant les parties** (13 au soir, tard ; `minted` 22 535 540 depuis le correctif du recouvrement de contenu — 22 539 376 avant —, `pending` 7 963 972 depuis la sonde avant les parties — 6 570 578 avant —, 308 segments, à comparer à chaque A/B ; **alterner base et nouveau deux fois** : une mesure isolée a dit 45 s pour un binaire qui fait 35), 30 000 fichiers
 12,0-12,2 s ce soir-là (14,2-14,8 l'après-midi : même binaire, autre état de machine — comparer
 dans le même run), 10 000 4,8 s ; compaction 4 générations 2,3-2,6 s ; fetch 5 202 hits 15 ms.
 
