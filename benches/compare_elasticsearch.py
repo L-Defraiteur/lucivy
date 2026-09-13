@@ -72,6 +72,10 @@ def req(method, path, body=None, timeout=600):
 EXCLUDE = {"target", "node_modules", ".git", "build", "__pycache__", "playground"}
 MAX_FILE = 100_000
 
+# The corpus this run measures, pinned by commit in compare_engines.sh. It is
+# stamped into each index and read back to decide whether to rebuild.
+CORPUS_ID = os.environ.get("ES_CORPUS_ID", "")
+
 
 def collect(root):
     """The corpus, selected exactly as `collect_files` in the Rust harness does."""
@@ -108,7 +112,7 @@ def standard_index():
     """What everyone starts with: the standard analyzer, BM25, whole words."""
     return {
         "settings": {"number_of_shards": 1, "number_of_replicas": 0},
-        "mappings": {"properties": {
+        "mappings": {"_meta": {"corpus": CORPUS_ID}, "properties": {
             "path": {"type": "keyword"},
             "body": {"type": "text", "analyzer": "standard"},
         }},
@@ -144,7 +148,7 @@ def ngram_index():
                 }},
             },
         },
-        "mappings": {"properties": {
+        "mappings": {"_meta": {"corpus": CORPUS_ID}, "properties": {
             "path": {"type": "keyword"},
             "body": {"type": "text", "analyzer": "trigram"},
             "raw": {"type": "wildcard"},
@@ -152,7 +156,32 @@ def ngram_index():
     }
 
 
+def index_meta_corpus(name):
+    """The corpus id stamped in the index's mapping, empty when there is none."""
+    try:
+        return req("GET", f"/{name}/_mapping")[name]["mappings"].get("_meta", {}).get("corpus", "")
+    except SystemExit:
+        return ""
+
+
+def index_doc_count(name):
+    try:
+        return req("GET", f"/{name}/_count")["count"]
+    except SystemExit:
+        return -1
+
+
 def build(name, mapping, files):
+    # An index built for this very corpus is reused: the bench pins its corpus
+    # by commit (`ES_CORPUS_ID`, set by compare_engines.sh) and rebuilding 3 GB
+    # of trigrams over the same bytes measures nothing. Any drift — another
+    # commit, another file count, no stamp at all — rebuilds.
+    if CORPUS_ID and index_exists(name) and index_meta_corpus(name) == CORPUS_ID \
+            and index_doc_count(name) == len(files):
+        size = req("GET", f"/{name}/_stats/store")["indices"][name]["total"]["store"]["size_in_bytes"]
+        print(f"    reused: {len(files)} docs already indexed for corpus {CORPUS_ID[:12]}, "
+              f"{size/2**20:.0f} MB on disk")
+        return 0.0, size, True
     req("DELETE", f"/{name}", None) if index_exists(name) else None
     req("PUT", f"/{name}", mapping)
     t0 = time.time()
@@ -175,7 +204,7 @@ def build(name, mapping, files):
     stats = req("GET", f"/{name}/_stats/store")
     size = stats["indices"][name]["total"]["store"]["size_in_bytes"]
     print(f"    {len(files)} docs in {elapsed:.1f}s, {size/2**20:.0f} MB on disk")
-    return elapsed, size
+    return elapsed, size, False
 
 
 def index_exists(name):
@@ -346,9 +375,9 @@ def main():
         raise SystemExit("empty corpus")
 
     print(f"=== indexing {STANDARD} (standard analyzer) ===")
-    t_std, s_std = build(STANDARD, standard_index(), files)
+    t_std, s_std, r_std = build(STANDARD, standard_index(), files)
     print(f"\n=== indexing {NGRAM} (trigrams + wildcard field) ===")
-    t_ng, s_ng = build(NGRAM, ngram_index(), files)
+    t_ng, s_ng, r_ng = build(NGRAM, ngram_index(), files)
 
     print(f"\n{'query':<34} {'index':<10} {'hits':>7} {'took':>8} {'wall':>9}")
     print("-" * 74)
@@ -380,8 +409,8 @@ def main():
     out = {
         "corpus": {"root": root, "files": len(files), "bytes": total},
         "indexing": {
-            "standard": {"seconds": round(t_std, 1), "bytes": s_std},
-            "ngram": {"seconds": round(t_ng, 1), "bytes": s_ng},
+            "standard": {"seconds": round(t_std, 1), "bytes": s_std, "reused": r_std},
+            "ngram": {"seconds": round(t_ng, 1), "bytes": s_ng, "reused": r_ng},
         },
         "queries": rows,
         "stumble": stumble_rows,
@@ -389,8 +418,9 @@ def main():
     }
     dest = pathlib.Path("/tmp/es_compare.json")
     dest.write_text(json.dumps(out, indent=2))
-    print(f"\nindexing: standard {t_std:.1f}s / {s_std/2**20:.0f} MB — "
-          f"trigram+wildcard {t_ng:.1f}s / {s_ng/2**20:.0f} MB "
+    fmt = lambda reused, sec: "reused" if reused else f"{sec:.1f}s"
+    print(f"\nindexing: standard {fmt(r_std, t_std)} / {s_std/2**20:.0f} MB — "
+          f"trigram+wildcard {fmt(r_ng, t_ng)} / {s_ng/2**20:.0f} MB "
           f"({s_ng/max(s_std,1):.1f}x the standard index)")
     print(f"written to {dest}")
 

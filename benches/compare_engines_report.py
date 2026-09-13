@@ -66,7 +66,9 @@ def n(x):
     return f"{x:,}".replace(",", " ")
 
 
-lucivy = {name: parse_log(WORK / f"lucivy-{name}.log") for name in ("dict", "dict-ram", "v3")}
+# `dict-nopos` (4.1, `positions: false`) only when the run produced it.
+names = [n for n in ("dict", "dict-ram", "v3", "dict-nopos") if (WORK / f"lucivy-{n}.log").exists()]
+lucivy = {name: parse_log(WORK / f"lucivy-{name}.log") for name in names}
 sizes = {}
 for name in lucivy:
     p = WORK / f"lucivy-{name}.bytes"
@@ -79,7 +81,8 @@ es = load_json("elasticsearch.json")
 # The truth (and lucivy's own row) for a `value:mode` key: the dictionary panel
 # first, then the stumble run, then any other layout.
 def lrow(key):
-    for src in (lucivy["dict"][0], stumble, lucivy["v3"][0], lucivy["dict-ram"][0]):
+    sources = [lucivy[n][0] for n in ("dict", "v3", "dict-ram", "dict-nopos") if n in lucivy]
+    for src in [sources[0] if sources else {}, stumble, *sources[1:]]:
         if key in src:
             return src[key]
     return None
@@ -118,6 +121,9 @@ P("")
 corpus_line = f"{n(files)} files" if files else "corpus"
 if text_mb:
     corpus_line += f", {n(round(text_mb))} MB of text"
+pin = load_json("corpus.json")
+if pin and pin.get("sha"):
+    corpus_line += f", {pin.get('url', '').rsplit('/', 1)[-1]} {pin.get('ref', '')} at commit {pin['sha'][:12]}"
 P(f"Corpus: {corpus_line} (text files of 100 KB at most, no binaries, the same selection for every engine). "
   "The truth of every row is a byte-by-byte scan of the files by lucivy's ground-truth harness; "
   "a lucivy count is only reported `OK` when its documents **and** its byte spans match that scan. "
@@ -131,17 +137,21 @@ P("| engine | how it answers a substring | index | × text | indexing |")
 P("|---|---|---|---|---|")
 def ratio(b):
     return f"×{b / text_bytes:.1f}" if text_bytes else "—"
+def es_time(kind):
+    e = es["indexing"][kind]
+    return "reused" if e.get("reused") else f"{e['seconds']:.0f} s"
 if es:
-    P(f"| Elasticsearch 8.19, standard analyzer | it does not (whole words) | {mb(es['indexing']['standard']['bytes'])} | {ratio(es['indexing']['standard']['bytes'])} | {es['indexing']['standard']['seconds']:.0f} s |")
-    P(f"| Elasticsearch 8.19, trigram analyzer + `wildcard` field | trigram phrases; regex on the wildcard field | {mb(es['indexing']['ngram']['bytes'])} | {ratio(es['indexing']['ngram']['bytes'])} | {es['indexing']['ngram']['seconds']:.0f} s |")
+    P(f"| Elasticsearch 8.19, standard analyzer | it does not (whole words) | {mb(es['indexing']['standard']['bytes'])} | {ratio(es['indexing']['standard']['bytes'])} | {es_time('standard')} |")
+    P(f"| Elasticsearch 8.19, trigram analyzer + `wildcard` field | trigram phrases; regex on the wildcard field | {mb(es['indexing']['ngram']['bytes'])} | {ratio(es['indexing']['ngram']['bytes'])} | {es_time('ngram')} |")
 if tv:
     P(f"| tantivy 0.25, default tokenizer | it does not (whole words) | {mb(tv['indexing']['default']['bytes'])} | {ratio(tv['indexing']['default']['bytes'])} | {tv['indexing']['default']['seconds']:.0f} s |")
     P(f"| tantivy 0.25, `NgramTokenizer` (trigrams) | trigram phrases (positions all 0: candidates only) | {mb(tv['indexing']['trigram']['bytes'])} | {ratio(tv['indexing']['trigram']['bytes'])} | {tv['indexing']['trigram']['seconds']:.0f} s |")
 labels = {"v3": "lucivy 4.0, a dictionary per segment (`sfx_version` 3)",
           "dict": "lucivy 4.0, shared dictionary per shard",
-          "dict-ram": "lucivy 4.0, shared dictionary + `derived_in_ram`"}
-for name in ("v3", "dict", "dict-ram"):
-    if name in sizes:
+          "dict-ram": "lucivy 4.0, shared dictionary + `derived_in_ram`",
+          "dict-nopos": "lucivy 4.1, shared dictionary + `positions: false`"}
+for name in ("v3", "dict", "dict-ram", "dict-nopos"):
+    if name in sizes and name in lucivy:
         meta = lucivy[name][1]
         t = "reused" if meta.get("reused") else (f"{meta['index_s']:.0f} s" if "index_s" in meta else "—")
         P(f"| {labels[name]} | suffix FST, exact spans | {mb(sizes[name])} | {ratio(sizes[name])} | {t} |")
