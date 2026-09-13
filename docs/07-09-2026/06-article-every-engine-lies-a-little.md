@@ -89,12 +89,12 @@ This is not a hit piece. Same corpus, same machine, idle:
 | tantivy, default tokenizer | 1 s |
 | tantivy, n-grams | 5 s |
 | Elasticsearch, standard | 28 s |
-| **lucivy, positions: false** | **47 s** |
-| lucivy, derived_in_ram | 46 s |
-| lucivy, default | 47 s |
+| **lucivy, positions: false** | **29 s** |
+| lucivy, derived_in_ram | 35 s |
+| lucivy, default | 35 s |
 | Elasticsearch, trigrams + wildcard | 118 s |
 
-tantivy indexes this corpus in one to five seconds. Mine takes fifty (it took ninety when this was first published; the profile of that gap is in the repository's notes, and half of it was avoidable). Its index is three to seven times smaller, depending on what I ask mine to answer. On a whole-word query it answers in 0 ms where mine takes 27. Elasticsearch does the fuzzy phrase as well as I do. If your queries are whole words, use them and be happy.
+tantivy indexes this corpus in one to five seconds. Mine takes thirty-five (it took ninety when this was first published; the profile of that gap is in the repository's notes, and half of it was avoidable). Its index is three to seven times smaller, depending on what I ask mine to answer. On a whole-word query it answers in 0 ms where mine takes 27. Elasticsearch does the fuzzy phrase as well as I do. If your queries are whole words, use them and be happy.
 
 And note the difference of kind: Elasticsearch is a service you run next to your application; mine is a library that goes inside it. The index lives in your process, in your transaction if you plug your own storage, on your machine — nothing to deploy beside your service, nothing that leaves it, and the same engine runs in the browser with the data staying in the tab.
 

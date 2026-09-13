@@ -133,7 +133,14 @@ la ligne `MARQUEUR` de `playground/diag.log` → un json, et
 `parity_10k_nopos_fix.json` (sans positions), écrits le 11 septembre après le correctif
 des doublons (comptes, top-10, scores à 1e-4, nombre de spans). Un écart hors ex æquo à la
 coupure est un défaut. Observé : la toute première recherche après une indexation à commits
-très rapprochés attend les fusions de fond (27 s puis 260 ms).
+très rapprochés attend les fusions de fond (27 s puis 260 ms). **Observé le 14 au matin** : un
+index **rouvert depuis l'OPFS** par l'onglet (pas celui qu'on vient d'indexer) répond en ~4 s
+par requête, à chaque requête, avec `[preload] 0 files` dans le journal — les fichiers ne
+sont pas remontés en mémoire ; le tableau « navigateur contre natif » se mesure donc sur
+l'index **tout juste indexé** (fichiers en mémoire), comme le 13 ; à regarder (préchargement
+à la réouverture). **Méthode du temps d'indexation navigateur** : `?corpus=…&verbose`, puis
+dans `diag.log` le premier `[dictionary] commit` au dernier (34 s en 4.3, 37 s en 4.2
+rebâtie et servie dans la même page).
 
 ## 7. Publication
 

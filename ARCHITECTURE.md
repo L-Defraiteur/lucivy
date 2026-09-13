@@ -1,8 +1,9 @@
 # lucivy — Architecture
 
-*4.2.0, September 2026 — what 4.1 added (the index without positions, a span
+*4.3.0, September 2026 — what 4.1 added (the index without positions, a span
 fix) is marked (4.1) below, what 4.2 added (indexing twice as fast, results
-read only when asked) is marked (4.2). Every number in this document was measured; the
+read only when asked) is marked (4.2), what 4.3 added (indexing 48 → 35 s on
+the same index, two exactness fixes, the segment's minted pair named) is marked (4.3). Every number in this document was measured; the
 commands are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md), the engine comparison
 in [docs/compare-engines-2026-09-05.md](docs/compare-engines-2026-09-05.md)
 (`benches/compare_engines.sh` regenerates it), and the working notes in
@@ -130,7 +131,7 @@ same release.
 
 | file | content | weight (kernel, 4.0) |
 |---|---|---|
-| `.sfx` | the suffix FST (keys cut at token boundaries, a table of parents, `own_len` derived from the key) — **one per shard** with the shared dictionary (`dict-<g>.<field>.sfx`), one per segment otherwise | 23 % |
+| `.sfx` | the suffix FST (keys cut at token boundaries, a table of parents, `own_len` derived from the key) — **one per shard** with the shared dictionary (`dict-<g>.<field>.sfx`, with its derived group index `dict-<g>.<field>.pidx` since 4.3, and each segment's **minted pair** `<uuid>.<field>.minted.termtexts` / `.minted.sfx` — `.newtexts` / `.newsfx` before 4.3 — until the next fold merges it into a generation), one per segment otherwise | 23 % |
 | `.sfxpost` | chunk-level postings: `(document, position)` — **no byte span** since 4.0 (`SFP5`) | 18 % |
 | `.word_sfxpost` | word-level postings: `(document, first, last)` and the in-chunk offset of tail entries only (`WSP5`) | 15 % |
 | `.word_pos_map` | position → word starting there, span (`WMP3`, 28-bit ordinals) | 15 % |
@@ -242,6 +243,45 @@ postings heap and the SFX budget **per thread** (25 MB, 128 MB) so segments keep
 their size — 308 segments instead of 263, equal query times on the comparison
 panel, the same peak memory. Together: **97 → 48 s** on a 24-core machine, files
 identical byte for byte; the browser's single thread is unchanged.
+
+**Indexing in 4.3 — 48 → 35 s, still the same index.** The same profile, read
+by thread and by instant this time (`benches/gdb_timeline.py`): the pool
+alternated between plateaus of 16-24 busy threads and, at every commit, a
+valley of one busy thread for two seconds — the serial path of the commit,
+where the pending texts (the table a writer consults for a text another
+writer minted since the last fold) were forgotten by a `retain` over a map
+keyed by `String`, after a set of every folded id had been read back from the
+segments. The table lives by **commit epoch** now (keys in an arena, one hash
+table per epoch and stripe): `prepare_commit` turns the epoch before any
+writer flushes, and once the commit has named its pairs every earlier epoch is
+dropped whole — 6.7 s of the run, gone (47.4 → 39.9 s). On the plateau the
+**suffix collector** allocated per occurrence — a word entry with two
+`String`s for every word of every value, a map with a `Vec` per word, a
+`String` per chunk — and does so per token now (39.9 → 35 s; single-threaded,
+3 000 files 2.6 → 1.8 s). In the dictionary's lookups, a **derived group index**
+(`dict-<g>.<field>.pidx`, one checkpoint per 16 groups of the records over 16
+groups, 2.5 % of the `.sfx`) reaches the parent group a lookup wants by binary
+search instead of reading every group header before it — written by the
+compactions, rebuilt in RAM for a generation that predates it, ignored by an
+older reader, the container format unchanged — and a text minted since the
+last fold is found in the pending table **before** the FST parts are walked
+(FST walks 68 → 38 s of CPU). The same 308 segments, the same 22.5 M ids
+minted, the same answers; the working notes in
+`docs/13-09-2026/07-indexation-profil.md`, § 5 sexies to undecies.
+
+**Exactness (4.3).** Two defects present since 4.0.0, found by replaying the
+query panel on a new segment shape (24 writer threads, 362 segments), both
+fixed on the query side so that an existing index answers exactly with the
+new reader: the `.gmap` cut of a candidate list (dictionary indexes) kept one
+item per id on a segment holding few of the list's ids, and a list holds one
+item per (ordinal, suffix) — the repeated occurrences of a needle inside one
+token were lost, 3 spans of 7.9 M for `de` at 24 threads, none at 16; and
+relaxed separators could report a match ending inside a multi-byte
+character, because a word's content overlap came from the word *after* the
+next one when the next began with a three-byte character (`“`, `文`) and an
+anchored candidate of the word partition was accepted at any suffix, not
+only at the word's start. Tests `keep_in_segment_keeps_every_item_of_a_repeated_id`
+and `test_relaxed_multibyte`, red on the old code.
 
 ## Queries
 
@@ -372,10 +412,10 @@ WebAssembly addresses **4 GB**, and everything below follows from it.
 | the whole Linux 2.6.0 kernel, 4 shards, shared dictionary | native | browser (`index linux` in the playground) |
 |---|---|---|
 | files | 13 806 (the harness skips a few directories) | 14 032, 126 MB of text |
-| indexing (4.2) | 9 s (23 s in 4.0) | 35 s (41 s in 4.0; a commit every 8 MB of text: segment size, not document count, sets the memory peak; one thread) |
-| index | 896 MB on disk | 1 089 MB, held in memory |
-| `mutex_lock`, separators relaxed | 3 ms | 5-21 ms |
-| fuzzy, one edit / regex | 11 ms / 54 ms | 20-21 ms / 103-107 ms |
+| indexing (4.3) | 6.7 s (9 s in 4.2, 23 s in 4.0) | 34 s (37 s for 4.2 measured again the same night by the same method — first to last commit; 41 s in 4.0; a commit every 8 MB of text: segment size, not document count, sets the memory peak; one thread) |
+| index | 903 MB on disk | 1 101 MB, held in memory |
+| `mutex_lock`, separators relaxed | 3 ms | 4-5 ms |
+| fuzzy, one edit / regex | 11 ms / 50 ms | 21-23 ms / 105-108 ms |
 
 Same counts and same byte spans on both sides. 10 000 files of a modern kernel:
 3.0.8 wrote 2 307 MB, 4.0 writes 455 MB (per-segment) or 345 MB (shared

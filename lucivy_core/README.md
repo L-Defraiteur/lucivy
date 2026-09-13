@@ -164,7 +164,7 @@ frequencies instead of its positions (postings `SFP6`, `WSP6`) and writes
 neither `.posmap`, `.word_pos_map` nor `.sibling_v3` — nothing positional is
 computed at indexing or in merges either. The Linux kernel (Linux 7.2,
 101 141 files, 941 MB of text): 5 289 → 2 598 MB, ×5.6 → ×2.8 the text;
-10 000 files −37 %, 30 000 −41 %; indexing 109 → 101 s in 4.1, 47 s in 4.2. A query takes its
+10 000 files −37 %, 30 000 −41 %; indexing 109 → 101 s in 4.1, 47 s in 4.2, 35 s in 4.3. A query takes its
 candidate documents from the index — the FST phase reads no position — and
 verifies each one on the stored text with the ground truth's own
 definitions (`suffix_fst::briques::stored`): same documents, same spans,

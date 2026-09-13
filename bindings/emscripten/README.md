@@ -1,8 +1,42 @@
-# lucivy-wasm 4.2.0
+# lucivy-wasm 4.3.0
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. In the browser — the same engine as the native bindings, built with emscripten: **threads** (pthreads over SharedArrayBuffer), OPFS persistence, snapshot import. Runs in a Web Worker. MIT.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — it clones lucivy's own source from GitHub and indexes it in your browser.
+
+### What's new in 4.3
+
+- **Indexing 48 → 35 s on the same index.** The whole kernel (Linux 7.2,
+  101 141 files, 941 MB) on a 24-core machine, the same 308 segments, the
+  same ids minted, the same answers. Four pieces, none of them an option: a
+  derived group index next to every dictionary generation (`.pidx`, 2.5 % of
+  the `.sfx`, rebuilt in RAM when an older index lacks it) that reaches the
+  right parent group by binary search instead of reading every header
+  before it; the commit no longer stops the world to forget its pending
+  texts (they live by commit epoch and are dropped whole — 6.7 s of serial
+  path gone); the suffix collector allocates per token instead of per
+  occurrence; and a text minted since the last fold is found in the pending
+  table before every FST part is walked (FST walks 68 → 38 s of CPU).
+- **Two exactness fixes, present since 4.0.0.** A segment holding few of a
+  candidate list's ids kept one item per id and lost the repeated
+  occurrences of a needle inside one token (`0xdedede00` for `de`) — whether
+  a segment took that path depended on its size, so the same corpus was
+  exact at 16 writer threads and lost 3 spans of 7.9 M at 24. And relaxed
+  separators could report a match ending inside a multi-byte character
+  (`D\n,,“underscan`): a word's content overlap was taken from the word
+  after the next when the next one began with a three-byte character, and
+  an anchored word candidate was accepted at any suffix. Both fixed on the
+  query side (an existing index answers exactly with the new reader), the
+  second at indexing too; tests red on the old code.
+- **The segment's dictionary pair is named for what it is:**
+  `<uuid>.<field>.minted.termtexts` and `.minted.sfx` (the texts a segment
+  minted first and the FST over them, folded into the next generation),
+  instead of `.newtexts` / `.newsfx`. Every reader still opens the old names.
+- **Compatibility**: 4.2 opens a 4.3 index and 4.3 opens 3.0.x to 4.2 indexes
+  as before; the only thing 4.2 cannot do is fold the pairs a 4.3 writer left
+  pending after a crash (a cleanly closed index has none). Every binding
+  already had `update` (delete by `_node_id` and add) — editing one file
+  costs that file, not a rebuild.
 
 ### What's new in 4.2
 
