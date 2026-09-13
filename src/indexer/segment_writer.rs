@@ -25,9 +25,13 @@ use crate::tokenizer::{FacetTokenizer, PreTokenizedStream, PreTokenizedString, T
 use crate::{DocId, Opstamp, LucivyError};
 
 /// Wrapper for v2/v3 SFX collectors.
+/// Both boxed: the collectors are hundreds of bytes (the v3 one carries
+/// its reusable scratch buffers since 13 September 2026), one slot per
+/// field lives in the writer, and clippy's `large_enum_variant` wants the
+/// variants of a size.
 enum SfxCollectorSlot {
-    V2(SfxCollector),
-    V3(SfxCollectorV3),
+    V2(Box<SfxCollector>),
+    V3(Box<SfxCollectorV3>),
 }
 
 /// Computes the initial size of the hash table.
@@ -153,11 +157,11 @@ impl SegmentWriter {
                                     return Err(crate::LucivyError::SystemError(
                                         "sfx_version 4 index without a shard dictionary".to_string()));
                                 }
-                                SfxCollectorSlot::V3(collector_v3().with_dictionary(sfx_dictionary_slot.clone(), field.field_id()))
+                                SfxCollectorSlot::V3(Box::new(collector_v3().with_dictionary(sfx_dictionary_slot.clone(), field.field_id())))
                             } else if sfx_version >= 3 {
-                                SfxCollectorSlot::V3(collector_v3())
+                                SfxCollectorSlot::V3(Box::new(collector_v3()))
                             } else {
-                                SfxCollectorSlot::V2(SfxCollector::new())
+                                SfxCollectorSlot::V2(Box::new(SfxCollector::new()))
                             };
                             collectors.insert(field.field_id(), slot);
                         }
