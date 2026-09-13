@@ -83,7 +83,8 @@ Au noyau entier (commit tous les 10 000), les traces horodatées :
 | avant | 19,5-20,0 s | 97,4 s |
 | plafond de paires en attente 16 → **64** (`LUCIVY_DICT_MAX_PENDING`) | — | 75,9 s |
 | + cache partagé des ids trouvés, vérifié | **14,2-14,8 s** | 65,6 s |
-| + compaction et replis en pipeline sans allocation par clé (§5 bis) | — | **57,2 s** |
+| + compaction et replis en pipeline sans allocation par clé (§5 bis) | — | 57,2 s |
+| + 16 fils d'indexation à budgets par fil constants (§5 ter) | — | **48,2 s** |
 
 Les temps du noyau comptent 3,4 s de persistance du harnais (copie RAM → disque).
 
@@ -167,6 +168,37 @@ constructeur de FST (`LUCIVY_FST_REGISTRY`, 10 000 par défaut) — à 4 M, la F
 cette génération passe de 75 à 43 Mo (−7 % du `.sfx`) mais la passe de 5,0 à 8,0 s ;
 la FST n'est qu'un sixième du `.sfx` (les parents en font 364 Mo). À reconsidérer
 sous l'angle taille.
+
+## 5 ter. Les fils d'indexation (13 septembre, soir)
+
+Le flux tournait sur 8 fils pour 24 cœurs (`MAX_NUM_THREAD` = 8). Cinq runs du noyau,
+pic RSS relevé par `VmHWM`, nombre de segments relevé parce que **la forme des
+segments décide du parallélisme à la requête** (remarque de Lucie : moins de segments,
+moins de fils au prescan) :
+
+| fils | budgets | temps | segments | pic RSS |
+|---|---|---|---|---|
+| 8 | 25 Mo + 128 Mo SFX par fil | 58,8 s | 263 | 14,3 Go |
+| 12 | SFX total fixe (1 Go) | 52,5 s | 402 | 12,6 Go |
+| 16 | SFX total fixe (1 Go) | 52,6 s | 541 | 12,2 Go |
+| 12 | par fil constants | 52,7 s | 296 | 14,1 Go |
+| **16** | **par fil constants** | **48,5 s** | **308** | **14,2 Go** |
+
+À budget total fixe, plus de fils = segments plus petits : −11 % de temps pour ×2
+de segments, un changement de forme, pas un gain. À budgets par fil constants,
+16 fils font **−17,5 %** pour +17 % de segments et le même pic. Le panel de
+requêtes rejoué sur l'index à 308 segments contre celui à 263 : mêmes comptes,
+temps dans le bruit (`mutex_lock` 14,1-14,4 contre 15,3 ms, `de` 598-603 contre
+585, regex 222-258 contre 222), +25 Mo (0,5 %).
+
+**Défauts changés** : `MAX_NUM_THREAD` 8 → 16 (le nombre de fils reste
+`min(cœurs, 16)`, donc inchangé sur une machine à 8 cœurs ou moins) ; le tas
+d'écriture et le budget SFX sont désormais **par fil** (`WRITER_HEAP_PER_THREAD`
+25 Mo, 128 Mo de SFX), ce qui garde la forme des segments quand les fils suivent
+les cœurs ; WASM inchangé (un fil, 15 Mo, 128 Mo). Noyau avec les défauts : **48,2 s**,
+308 segments, aucun repli synchrone. Pourquoi pas linéaire : le flux n'est pas borné
+que par les collecteurs (verrous de mintage, un seul fil qui alimente dans le harnais,
+arrêt du monde au commit).
 
 ## 6. Vérification
 

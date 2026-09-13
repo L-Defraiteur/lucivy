@@ -33,10 +33,9 @@ use crate::indexer::index_writer::{finalize_segment, MARGIN_IN_BYTES};
 fn sfx_budget() -> usize {
     static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *BUDGET.get_or_init(|| {
-        let total = std::env::var("LUCIVY_SFX_HEAP")
+        let explicit_total: Option<usize> = std::env::var("LUCIVY_SFX_HEAP")
             .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(if cfg!(target_arch = "wasm32") { 128 << 20 } else { 1 << 30 });
+            .and_then(|v| v.parse().ok());
         // Divided among the writer threads, the way the postings budget already
         // is: each indexer holds its own collectors and its own segment, so a
         // per-thread budget would multiply the real peak by the thread count —
@@ -59,6 +58,10 @@ fn sfx_budget() -> usize {
                 }
             })
             .max(1);
+        // 128 MB per thread natively (1 GB over the 8 threads of before 13
+        // September 2026; the per-thread share is what shapes a segment, so
+        // it stays as the thread count grows), 128 MB in all in the browser.
+        let total = explicit_total.unwrap_or(if cfg!(target_arch = "wasm32") { 128 << 20 } else { (128 << 20) * threads });
         (total / threads).max(8 << 20)
     })
 }

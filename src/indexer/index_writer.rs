@@ -32,8 +32,13 @@ pub const MARGIN_IN_BYTES: usize = 1_000_000;
 pub const MEMORY_BUDGET_NUM_BYTES_MIN: usize = ((MARGIN_IN_BYTES as u32) * 15u32) as usize;
 pub const MEMORY_BUDGET_NUM_BYTES_MAX: usize = u32::MAX as usize - MARGIN_IN_BYTES;
 
-// We impose the number of index writer threads to be at most this.
-pub const MAX_NUM_THREAD: usize = 8;
+/// The most index writer threads a writer takes. 16 since 13 September
+/// 2026: on a 24-core machine the whole kernel indexed in 48.5 s on 16
+/// threads against 58.8 on 8, with the per-thread budgets unchanged
+/// (`lucivy_core::handle::WRITER_HEAP_PER_THREAD`, the SFX budget of
+/// `indexer_actor::sfx_budget`), the same peak memory, 308 segments
+/// instead of 263 and query times equal on the comparison panel.
+pub const MAX_NUM_THREAD: usize = 16;
 
 // Add document will block if the number of docs waiting in the queue to be indexed
 // reaches `PIPELINE_MAX_SIZE_IN_DOCS`

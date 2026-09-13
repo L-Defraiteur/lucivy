@@ -47,13 +47,29 @@ pub struct LucivyHandle {
 }
 
 /// Default writer heap size.
-/// 200MB on native, 15MB on WASM to reduce memory pressure — browser memory
-/// is limited and segment files are loaded into RAM on reader reload.
-/// Larger heap = fewer segments = fewer merges = faster indexation.
+/// The writer's postings heap, per indexing thread: 25 MB natively (200 MB
+/// over the 8 threads of before 13 September 2026 — the share is what stays
+/// as the thread count follows the cores, up to `MAX_NUM_THREAD`), 15 MB on
+/// WASM, where the single thread's heap is all there is and browser memory
+/// is limited (segment files are loaded into RAM on reader reload).
 #[cfg(not(target_arch = "wasm32"))]
-const WRITER_HEAP_SIZE: usize = 200_000_000;
+pub const WRITER_HEAP_PER_THREAD: usize = 25_000_000;
 #[cfg(target_arch = "wasm32")]
-const WRITER_HEAP_SIZE: usize = 15_000_000;
+pub const WRITER_HEAP_PER_THREAD: usize = 15_000_000;
+
+/// The writer threads `create_writer` asks for when nothing says otherwise:
+/// one on WASM, the engine's `min(available_parallelism, MAX_NUM_THREAD)`
+/// elsewhere (`indexer_actor::sfx_budget` mirrors this).
+fn default_writer_threads() -> usize {
+    if cfg!(target_arch = "wasm32") {
+        1
+    } else {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .clamp(1, ld_lucivy::indexer::MAX_NUM_THREAD)
+    }
+}
 
 /// Config file stored alongside the index for reopening.
 const CONFIG_FILE: &str = "_config.json";
@@ -93,13 +109,13 @@ fn create_writer(index: &Index) -> Result<IndexWriter, String> {
     // has a floor the engine enforces. Asking for more threads without also
     // raising the heap therefore produces an invalid writer — "the memory arena
     // in bytes per thread needs to be at least 15000000" — which is a trap for
-    // anyone turning the thread knob alone. Scale the default with the thread
-    // count; an explicit LUCIVY_WRITER_HEAP is still honoured as written, since
-    // someone setting both means it.
+    // anyone turning the thread knob alone. The default is per thread, so the
+    // total follows the thread count; an explicit LUCIVY_WRITER_HEAP is
+    // honoured as written, since someone setting both means it.
     let heap = match (heap_set, threads) {
         (Some(h), _) => h,
-        (None, Some(n)) => WRITER_HEAP_SIZE * n.max(1),
-        (None, None) => WRITER_HEAP_SIZE,
+        (None, Some(n)) => WRITER_HEAP_PER_THREAD * n.max(1),
+        (None, None) => WRITER_HEAP_PER_THREAD * default_writer_threads(),
     };
     let writer = {
         #[cfg(target_arch = "wasm32")]
