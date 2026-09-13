@@ -130,3 +130,16 @@ anticipée), `stored::windowed_jaro…`, `stored::the_predicate_is_the_ground_tr
   Ouvrir une PR ou relancer : `gh auth switch -u L-Defraiteur` d'abord (le compte actif par défaut est le pro).
 - Avant d'ajouter une suite à la CI, la lancer en local et vérifier qu'elle sort en erreur quand elle échoue
   (`tests/smoke_warnings.mjs` attend le chemin absolu du `.node` en argument).
+
+## Mesurer à froid, sans root (13 septembre)
+
+`posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)` sur chaque fichier d'un index vide ses pages du cache
+sans aucun droit particulier — c'est ce que fait `cold.py` (scratchpad) avant de rejouer le panel. Deux
+pièges vus en l'écrivant :
+
+- **filtrer la sortie sur un motif, pas sur le premier mot** d'une ligne, et capturer `stderr` aussi :
+  un filtre trop étroit rend un fichier vide qu'on prend pour un échec du moteur ;
+- l'éviction se fait **entre les runs**, donc seule la première requête d'un run est vraiment à froid.
+  Le dire dans le tableau, sinon le chiffre passe pour « chaque requête à froid ».
+
+Elasticsearch ne se refroidit pas ainsi (conteneur, JVM) : ne pas prétendre à une symétrie.
