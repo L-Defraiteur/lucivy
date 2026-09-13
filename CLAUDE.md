@@ -181,7 +181,7 @@ Jamais d'I/O dans un actor handler.
 - `WRITER_HEAP_PER_THREAD = 15MB` en WASM (25 Mo par fil en natif, jusqu'à 16 fils depuis le 13 septembre ; budget SFX 128 Mo par fil, 128 Mo en tout sur WASM)
 - `MAXIMUM_MEMORY = 4GB` (limit 32-bit WASM)
 - Repli du dictionnaire (`sfx_version` 4) : **sur wasm32 le chemin d'avant le 6 septembre** — pas de
-  `.newsfx` par segment (`sfx_dag_v3.rs`), repli synchrone au commit (`sync_fold()`,
+  `.minted.sfx` par segment (`sfx_dag_v3.rs`), repli synchrone au commit (`sync_fold()`,
   `dictionary_commit.rs`). Mesuré dans Chrome : le fond n'y gagne rien en temps, et les FST par
   segment bâties en parallèle montaient le pic de 2 023 à 2 279 Mo (2.6.0) ; différé en natif.
 - Fusions de fond : `LUCIVY_MERGE_CONCURRENCY` = 1 sur wasm (une fusion v3
@@ -252,7 +252,7 @@ fusionnés, sortie en flux, `.termtexts` par tas en trois passes ; noyau
 19 s et 229 Mo au lieu de 48 s et 12,8 Go, fichiers identiques octet
 pour octet (`01` §13). **Repli différé (6 septembre au matin,
 `indexer/dictionary_commit.rs`, `suffix_fst/dictionary_fold.rs`)** : chaque
-segment écrit la FST de ses textes neufs (`.newsfx`) à côté de `.newtexts`,
+segment écrit la FST de ses textes neufs (`.minted.sfx`) à côté de `.minted.termtexts` (**la paire mintée** ; `.newsfx` / `.newtexts` avant 4.3, encore lus partout — `dictionary::pair_file_names`, `find_pair`),
 le commit ne bâtit plus rien — il nomme ses segments dans
 `SfxDictionaryMeta.pending_segments` (leurs paires sont des parties du
 dictionnaire, lues comme des générations) et une tâche de fond les fusionne

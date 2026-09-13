@@ -35,7 +35,7 @@ pub struct SfxBuildOutputV3 {
     /// Additional registry files: (extension, bytes).
     pub registry_files: Vec<(String, Vec<u8>)>,
     /// Shard dictionary mode (`sfx_version` 4): `sfx` and `termtexts` are
-    /// empty and not to be written — the segment's `.gmap` and `.newtexts`
+    /// empty and not to be written — the segment's `.gmap` and `.minted.termtexts`
     /// are in `registry_files` instead.
     pub dictionary_mode: bool,
 }
@@ -246,24 +246,25 @@ impl Node for AssembleV3Node {
         if let Some(globals) = &data.globals {
             derived.push(("gmap".to_string(), crate::suffix_fst::gmap::encode(globals, data.max_word_content_len)));
             // Only a freshly collected segment minted ids; a merge did not.
-            // `.newsfx` is the generation's FST over those same texts, built
-            // here — on the segment's build thread, in parallel with the
-            // other segments — so that the commit only stream-merges the
+            // The pair (`dictionary::MINTED_TEXTS_EXT`, `MINTED_SFX_EXT`):
+            // its FST is the generation's over those same texts, built here
+            // — on the segment's build thread, in parallel with the other
+            // segments — so that the commit only stream-merges the
             // segments' pairs into the generation (`dictionary_commit`)
             // instead of building one FST over every new text, serially.
-            if !data.newtexts.is_empty() {
+            if !data.minted_texts.is_empty() {
                 let entries: Vec<(u32, &str, crate::suffix_fst::termtexts_v3::TermMetaV3)> =
-                    data.newtexts.iter().map(|(g, t, m)| (*g, t.as_str(), *m)).collect();
-                derived.push(("newtexts".to_string(), crate::suffix_fst::dictionary::encode_newtexts(&entries)));
+                    data.minted_texts.iter().map(|(g, t, m)| (*g, t.as_str(), *m)).collect();
+                derived.push((crate::suffix_fst::dictionary::MINTED_TEXTS_EXT.to_string(), crate::suffix_fst::dictionary::encode_minted_texts(&entries)));
                 // Not on wasm32: there the fold is synchronous at the commit
                 // (`dictionary_commit::sync_fold`) and builds the missing
-                // `.newsfx` then, one at a time — several segments building
+                // minted FST then, one at a time — several segments building
                 // theirs at once raised the browser's memory high-water mark
                 // (2 023 → 2 279 MB on Linux 2.6.0) for no time gained.
                 if !cfg!(target_arch = "wasm32") {
-                    let sfx = crate::suffix_fst::dictionary_compact::generation_sfx_bytes(&data.newtexts)
+                    let sfx = crate::suffix_fst::dictionary_compact::generation_sfx_bytes(&data.minted_texts)
                         .map_err(|e| format!("segment dictionary FST: {e}"))?;
-                    derived.push(("newsfx".to_string(), sfx));
+                    derived.push((crate::suffix_fst::dictionary::MINTED_SFX_EXT.to_string(), sfx));
                 }
             }
         }
@@ -748,7 +749,7 @@ pub fn merge_segments_v3(
         sibling_v3: if positions { sibling_writer.serialize() } else { Vec::new() },
         globals: None,
         max_word_content_len: None,
-        newtexts: Vec::new(),
+        minted_texts: Vec::new(),
         positions,
     })
 }
@@ -1181,7 +1182,7 @@ pub fn merge_segments_dict(
         word_pos_map: if positions { wpm_writer.serialize() } else { Vec::new() },
         sibling_v3: if positions { sibling_writer.serialize() } else { Vec::new() },
         globals: Some(union),
-        newtexts: Vec::new(),
+        minted_texts: Vec::new(),
         max_word_content_len,
         positions,
     })

@@ -91,7 +91,7 @@ document ─ tokenizer ─┬─ index inversé (postings, fréquences)
   308 segments à 16 fils, 263 à 8, requêtes égales). Moins de segments = moins de
   fils au prescan : toute forme nouvelle se rejoue côté requête.
 - **Dictionnaire partagé à l'écriture** : chaque segment écrit ses textes neufs
-  (`.newsfx` / `.newtexts`) ; le commit nomme ses paires en attente (jusqu'à
+  (`.minted.sfx` / `.minted.termtexts` — `.newsfx` / `.newtexts` avant 4.3, encore lus) ; le commit nomme ses paires en attente (jusqu'à
   `LUCIVY_DICT_MAX_PENDING` = 64, 16 avant — au-delà, repli synchrone sur le fil
   appelant, ce qui coûtait 25 s des 97 du noyau) et une tâche de fond les replie en
   génération. Le chemin par jeton : filtre de Bloom sur la clé d'internement, puis

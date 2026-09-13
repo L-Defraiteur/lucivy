@@ -579,9 +579,11 @@ impl SfxDictionary {
             let generation_paths = meta.generations.iter().map(|&g| (
                 PathBuf::from(dictionary_file_name(g, field_id, "sfx")),
                 PathBuf::from(dictionary_file_name(g, field_id, "termtexts"))));
-            let pair_paths = meta.pending_segments.iter().map(|u| (
-                PathBuf::from(format!("{u}.{field_id}.newsfx")),
-                PathBuf::from(format!("{u}.{field_id}.newtexts"))));
+            // A pending pair under its current names or the ones before
+            // 4.3 (`find_pair`); a segment that minted nothing in this
+            // field has none.
+            let pair_paths = meta.pending_segments.iter()
+                .filter_map(|u| find_pair(directory, u, field_id));
             // A generation's group index (`dictionary_pidx`): its `.pidx`
             // when the file is there; a generation written before the file
             // gets one built in RAM, once per process (`built_group_indexes`,
@@ -652,7 +654,7 @@ impl SfxDictionary {
     /// the generation nor the pending texts have it. `key` is the collector's
     /// intern key (text + shape). Returns `(id, minted here)`; a text minted
     /// by another writer since the last commit comes back with `false` — its
-    /// minter writes it to `.newtexts`.
+    /// minter writes it to `.minted.termtexts`.
     pub fn lookup_or_mint(&self, field_id: u32, key: &str, text: &str, meta: &TokenMetaV3) -> (u64, bool) {
         use std::hash::{Hash, Hasher};
         let mut h = rustc_hash::FxHasher::default();
@@ -836,17 +838,50 @@ impl SfxDictionary {
     }
 }
 
-// ─── `.newtexts` ─────────────────────────────────────────────────────────
+// ─── The minted pair: `.minted.termtexts` / `.minted.sfx` ───────────────
 //
-// The texts and meta of the ids a segment minted first: a `.gmap` of those
-// ids (sorted, since the segment numbers its locals by global id) followed
-// by a `TTX3` file whose ordinal `i` is the `i`-th id. The commit folds
-// them into the next generation.
+// A segment's contribution to the shard dictionary, written next to the
+// segment and folded into the next generation by the commit's background
+// fold: the texts and meta of the ids it minted first (`.minted.termtexts`,
+// a `TTX3` file whose ordinal `i` is the `i`-th id, ids ascending — the
+// same shape as a generation) and the suffix FST over them with the global
+// ids as values (`.minted.sfx`, built on the segment's own build thread so
+// that the commit only stream-merges). Named `.newtexts` / `.newsfx` until
+// 14 September 2026 (4.3): every reader still opens those names, the
+// writer only writes the new ones.
+
+/// Extension of a segment's minted texts (after `<uuid>.<field>.`).
+pub const MINTED_TEXTS_EXT: &str = "minted.termtexts";
+/// Extension of a segment's minted FST.
+pub const MINTED_SFX_EXT: &str = "minted.sfx";
+/// The names before 4.3 (read, never written).
+pub const LEGACY_MINTED_TEXTS_EXT: &str = "newtexts";
+/// The names before 4.3 (read, never written).
+pub const LEGACY_MINTED_SFX_EXT: &str = "newsfx";
+
+/// The two files of a segment's pair for one field, `(sfx, texts)`: the
+/// current names first, then the ones written before 4.3.
+pub fn pair_file_names(segment_uuid: &str, field_id: u32) -> [(PathBuf, PathBuf); 2] {
+    [
+        (PathBuf::from(format!("{segment_uuid}.{field_id}.{MINTED_SFX_EXT}")),
+         PathBuf::from(format!("{segment_uuid}.{field_id}.{MINTED_TEXTS_EXT}"))),
+        (PathBuf::from(format!("{segment_uuid}.{field_id}.{LEGACY_MINTED_SFX_EXT}")),
+         PathBuf::from(format!("{segment_uuid}.{field_id}.{LEGACY_MINTED_TEXTS_EXT}"))),
+    ]
+}
+
+/// The pair of a pending segment as it exists in `directory`, `(sfx,
+/// texts)` — under the current names or the ones before 4.3; `None` when
+/// the segment minted nothing in this field.
+pub fn find_pair(directory: &dyn Directory, segment_uuid: &str, field_id: u32) -> Option<(PathBuf, PathBuf)> {
+    pair_file_names(segment_uuid, field_id).into_iter()
+        .find(|(_, texts)| directory.exists(texts).unwrap_or(false))
+}
 
 /// Serialize the minted ids with their texts and meta (ids ascending): a
 /// `TTX3` file whose IDS section names the ids — the same shape as a
 /// generation of the dictionary.
-pub fn encode_newtexts(entries: &[(u32, &str, TermMetaV3)]) -> Vec<u8> {
+pub fn encode_minted_texts(entries: &[(u32, &str, TermMetaV3)]) -> Vec<u8> {
     let ids: Vec<u32> = entries.iter().map(|e| e.0).collect();
     let mut w = TermTextsWriterV3::new().with_ids(ids);
     for (i, (_, text, meta)) in entries.iter().enumerate() {
@@ -855,8 +890,8 @@ pub fn encode_newtexts(entries: &[(u32, &str, TermMetaV3)]) -> Vec<u8> {
     w.serialize()
 }
 
-/// Read a `.newtexts` file back: `(global id, text, meta)`.
-pub fn decode_newtexts(bytes: &[u8]) -> Option<Vec<(u32, String, TermMetaV3)>> {
+/// Read a `.minted.termtexts` file back: `(global id, text, meta)`.
+pub fn decode_minted_texts(bytes: &[u8]) -> Option<Vec<(u32, String, TermMetaV3)>> {
     let texts = TermTextsReaderV3::open(bytes)?;
     Some(texts.iter().map(|(g, t, m)| (g, t.to_string(), m)).collect())
 }
@@ -902,6 +937,47 @@ mod tests {
         // Ids never go backwards.
         let (d, _) = dict.lookup_or_mint(7, &key("delta"), "delta", &meta(5));
         assert!(d > c);
+    }
+
+    /// A pending pair opens under its current names and under the ones a
+    /// writer before 4.3 gave it (`.newsfx` / `.newtexts`): the segment's
+    /// minted texts are found either way, with their ids.
+    #[test]
+    fn pending_pair_opens_under_both_names() {
+        use crate::directory::RamDirectory;
+        use crate::directory::Directory;
+        use std::io::Write;
+        use common::TerminatingWrite;
+        let entries: Vec<(u32, String, TermMetaV3)> = vec![
+            (40, "mutex_".to_string(), TermMetaV3 { own_len: 6, sep_len: 1, overlap_len: 0, is_word_start: true, is_word_stripped: false }),
+            (41, "spinlock".to_string(), TermMetaV3 { own_len: 8, sep_len: 0, overlap_len: 0, is_word_start: true, is_word_stripped: false }),
+        ];
+        let refs: Vec<(u32, &str, TermMetaV3)> = entries.iter().map(|(g, t, m)| (*g, t.as_str(), *m)).collect();
+        let sfx = super::super::dictionary_compact::generation_sfx_bytes(&entries).unwrap();
+        let texts = encode_minted_texts(&refs);
+        for (label, names) in [("current", 0usize), ("before 4.3", 1)] {
+            let dir = RamDirectory::create();
+            let (sfx_path, texts_path) = pair_file_names("seg1", 7)[names].clone();
+            for (path, bytes) in [(&sfx_path, &sfx), (&texts_path, &texts)] {
+                let mut w = dir.open_write(path).unwrap();
+                w.write_all(bytes).unwrap();
+                w.terminate().unwrap();
+            }
+            assert_eq!(find_pair(&dir, "seg1", 7), Some((sfx_path.clone(), texts_path.clone())), "{label}");
+            assert_eq!(find_pair(&dir, "seg1", 8), None, "{label}: no pair in another field");
+            let meta = SfxDictionaryMeta {
+                generations: Vec::new(), next_generation: 1,
+                next_ids: [(7u32, 42u64)].into_iter().collect(),
+                field_ids: vec![7], pending_segments: vec!["seg1".to_string()],
+            };
+            let dict = SfxDictionary::open(&dir, &meta, None);
+            let key = |t: &str, own: u16, sep: u8| super::super::collector_v3::intern_key(t, false, own, sep, true);
+            let m = |own: u16, sep: u8| TokenMetaV3 { own_len: own, sep_len: sep, overlap_len: 0, is_word_start: true, word_id: 0, is_word_stripped: false };
+            assert_eq!(dict.lookup_or_mint(7, &key("mutex_", 6, 1), "mutex_", &m(6, 1)), (40, false), "{label}");
+            assert_eq!(dict.lookup_or_mint(7, &key("spinlock", 8, 0), "spinlock", &m(8, 0)), (41, false), "{label}");
+            let (fresh, minted) = dict.lookup_or_mint(7, &key("other", 5, 0), "other", &m(5, 0));
+            assert!(minted && fresh == 42, "{label}: a new text takes the meta's next id");
+        }
     }
 
     /// Enough texts to grow every stripe's table many times over: each one

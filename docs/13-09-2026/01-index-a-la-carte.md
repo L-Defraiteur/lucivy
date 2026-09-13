@@ -147,3 +147,13 @@ s'importe pas, et il faut le dire franchement plutôt que de rendre un index dé
   `docs/08-09-2026/01-chantier-positions-optionnelles.md`.
 - L'import d'index tierce, qui rejoint la famille « ressembler à un autre moteur » :
   `docs/06-09-2026/02-import-tantivy-elasticsearch.md`.
+
+## Note du 14 septembre — les spans exacts comme base d'un « remplacer »
+
+Idée de Lucie : ce que le moteur rend et que les autres ne rendent pas — **tous** les
+spans, exacts à l'octet, sur tout le corpus, en une requête — est la matière d'un
+`replace` par regex sur un corpus indexé : la regex trouve ses occurrences avec leurs
+captures (voir `docs/07-09-2026/05-captures-agregees-et-casse.md`), les spans disent
+quels octets réécrire, l'index dit quels documents relire, et le reste du corpus n'est
+pas touché. Un `sed` avec un index devant. À cadrer après la 4.3.0, dans le catalogue des
+questions ci-dessus (une question de plus : « où et quoi réécrire »).

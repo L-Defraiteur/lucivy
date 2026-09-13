@@ -182,7 +182,7 @@ pub fn compact_generations(
 /// Merge generation-shaped parts (`.sfx` and `.termtexts` bytes, paired by
 /// index, ids disjoint) into generation `out`, in streams: what
 /// `compact_generations` does with live generations, and what a commit
-/// does with the per-segment `.newsfx` / `.newtexts` of the segments it
+/// does with the per-segment `.minted.sfx` / `.minted.termtexts` of the segments it
 /// folds. No part → nothing written, `parts` 0.
 pub fn compact_parts(
     directory: &dyn Directory,
@@ -590,7 +590,7 @@ impl Write for CountingWrite<'_> {
 mod tests {
     use super::*;
     use crate::directory::RamDirectory;
-    use crate::suffix_fst::dictionary::decode_newtexts;
+    use crate::suffix_fst::dictionary::decode_minted_texts;
 
     fn meta(own_len: u16, sep_len: u8, overlap_len: u8, is_word_start: bool, is_word_stripped: bool) -> TermMetaV3 {
         TermMetaV3 { own_len, sep_len, overlap_len, is_word_start, is_word_stripped }
@@ -671,7 +671,7 @@ mod tests {
         }
         // Reading back: every id, text and meta.
         let bytes = read(&dir, 10, 7, "termtexts");
-        let decoded = decode_newtexts(&bytes).unwrap();
+        let decoded = decode_minted_texts(&bytes).unwrap();
         assert_eq!(decoded, all);
     }
 
@@ -775,7 +775,7 @@ mod tests {
                 let mut entries: Vec<(u32, String, TermMetaV3)> = Vec::new();
                 for &g in &gens {
                     let Ok(slice) = dir.open_read(&PathBuf::from(dictionary_file_name(g, field, "termtexts"))) else { continue };
-                    entries.extend(decode_newtexts(&slice.read_bytes().unwrap()).unwrap());
+                    entries.extend(decode_minted_texts(&slice.read_bytes().unwrap()).unwrap());
                 }
                 entries.sort_by_key(|e| e.0);
                 entries.dedup_by_key(|e| e.0);
