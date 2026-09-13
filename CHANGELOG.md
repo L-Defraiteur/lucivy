@@ -1,6 +1,19 @@
 Unreleased — branch `v4.3`
 ==========================
 
+- **Fixed: a segment small against a candidate list lost the repeated
+  occurrences of a needle inside one token.** The `.gmap` cut of a shard-wide
+  candidate list (dictionary indexes, since 4.0) has three strategies; the
+  one for a segment holding few of the list's ids kept one item per id, and a
+  list holds one item per (ordinal, suffix) — `0xdedede00` for `de` is three
+  items of one id. Whether a segment took that branch depended on its size
+  against the list, so the same corpus answered exactly at 16 writer threads
+  and lost 3 spans of `de` over 7.9 M at 24 (and 33 in relaxed mode). Every
+  item of a repeated id is kept now; unit test on the three branches; the
+  whole kernel at 24 threads answers exactly. Found on 13 September at night
+  while measuring writer threads — one more reason every shape change
+  replays the query panel.
+
 - **The suffix collector allocates per token, not per occurrence.** Every
   word of every value pushed a word entry with two `String`s (the FST builder
   deduplicated them afterwards), grouped its chunks through a `BTreeMap` with a
