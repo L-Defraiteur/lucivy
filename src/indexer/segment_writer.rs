@@ -161,7 +161,7 @@ impl SegmentWriter {
                             } else if sfx_version >= 3 {
                                 SfxCollectorSlot::V3(Box::new(collector_v3()))
                             } else {
-                                SfxCollectorSlot::V2(Box::new(SfxCollector::new()))
+                                SfxCollectorSlot::V2(Box::default())
                             };
                             collectors.insert(field.field_id(), slot);
                         }
